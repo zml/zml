@@ -689,7 +689,10 @@ pub const DiTLayer = struct {
         const delta_self = self.self_attn.forward(x_norm, attn_mask);
         
         // gated residual connection: x = x + attn_output * gate
-        const x1 = self.betweenAttn(x, delta_self, time_emb);
+        const layer_mod = self.scale_shift_table.convert(hz_type).squeeze(.n1).add(time_emb.rename(.{ .d_emb = .d }));
+        const gate_msa = layer_mod.choose1d(.n2, 2);
+        // gated residual connection: x = x + attn_output * gate
+        const x1 = x.add(delta_self.mul(gate_msa.broad(delta_self.shape())));
 
         // step 2: cross-attention (always full)
         const x1_norm = self.cross_attn_norm.forward(x1);
@@ -697,7 +700,7 @@ pub const DiTLayer = struct {
         const x2 = x1.add(delta_cross);
 
         // step 3: mlp with adaptive layer norm
-        return self.mlpF(x2, time_emb);
+        return self.mlpAln(x2, time_emb);
     }
     
     pub fn scaleShift(self: DiTLayer, x: zml.Tensor, time_emb: zml.Tensor) zml.Tensor {
@@ -714,15 +717,8 @@ pub const DiTLayer = struct {
         
         return x_norm;
     }
-    
-    pub fn betweenAttn(self: DiTLayer, x: zml.Tensor, delta: zml.Tensor, time_emb: zml.Tensor) zml.Tensor {
-        const layer_mod = self.scale_shift_table.convert(hz_type).squeeze(.n1).add(time_emb.rename(.{ .d_emb = .d }));
-        const gate_msa = layer_mod.choose1d(.n2, 2);
-        // gated residual connection: x = x + attn_output * gate
-        return x.add(delta.mul(gate_msa.broad(delta.shape())));
-    }
-    
-    pub fn mlpF(self: DiTLayer, x: zml.Tensor, time_emb: zml.Tensor) zml.Tensor {
+  
+    pub fn mlpAln(self: DiTLayer, x: zml.Tensor, time_emb: zml.Tensor) zml.Tensor {
         const layer_mod = self.scale_shift_table.convert(hz_type).squeeze(.n1).add(time_emb.rename(.{ .d_emb = .d }));
         const c_gate_msa = layer_mod.choose1d(.n2, 5);
         const c_scale_msa = layer_mod.choose1d(.n2, 4);

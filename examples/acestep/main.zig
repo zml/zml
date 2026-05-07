@@ -195,10 +195,10 @@ const Args = struct {
     ;
 };
 
-// TODO: check remaining function split for debug
-// TODO: compiler prefill/compiler decode/load model all in parallel
-// TODO: check les autres gathers
 // TODO: état des lieux de la perf
+// TODO: compiler prefill/compiler decode/load model all in parallel
+// TODO: comprendre et remettre du sharding là où il faut comme il faut
+// TODO: test and choose best attention backend for performance
 
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
