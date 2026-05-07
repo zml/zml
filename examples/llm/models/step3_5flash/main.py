@@ -2,16 +2,25 @@ import torch
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from safetensors.torch import save_file
+from accelerate import Accelerator
 import zml_utils
+import os
 
 def main():
+    # Accelerator for GPUs
+    accelerator = Accelerator()
+    device = accelerator.device
+
     MODEL_PATH = "stepfun-ai/Step-3.5-Flash"
 
-    # 0. pipeline. used for zml_utils
+    # Pipeline. used for zml_utils
     pipeline = transformers.pipeline(
         "text-generation",
         model=MODEL_PATH,
-        model_kwargs={"torch_dtype": torch.float16},
+        model_kwargs={
+            "torch_dtype": torch.float16,
+            "device_map": "auto",
+        },
     )
 
     # Setup model and tokenizer
@@ -27,12 +36,14 @@ def main():
 
     # Guard against empty output (early stopping)
     if output:
-        print(output)
+        if accelerator.is_main_process:
+            print(output)
 
     # Save activations to a file
-    filename = model_path.split("/")[-1] + ".activations.safetensors"
-    save_file(activations, filename)
-    print(f"Saved {len(activations)} activations to {filename}")
+    if accelerator.is_main_process:
+        filename = model_path.split("/")[-1] + ".activations.safetensors"
+        save_file(activations, filename)
+        print(f"Saved {len(activations)} activations to {filename}")
 
 if __name__ == "__main__":
     main()
