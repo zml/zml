@@ -809,7 +809,7 @@ pub fn decodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVa
     std.log.info("VAE call decode with input size : {d}x{d}", .{ audio_dim, t_25hz });
     
     // the result latents we return
-    const audio_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = 2, .t = t_48khz }, .bf16));
+    const audio_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = 2, .t = t_48khz }, .f32));
     var audio_buffer: zml.Buffer = try .fromSlice(io, platform, audio_slice, sharding);
     defer audio_buffer.deinit();
     

@@ -205,7 +205,7 @@ pub const AceVae = struct {
     }
 
     pub fn decode(self: AceVae, latents: zml.Tensor) zml.Tensor {
-        return self.decoder.forward(latents);
+        return self.decoder.forward(latents).convert(.f32);
     }
 };
 
