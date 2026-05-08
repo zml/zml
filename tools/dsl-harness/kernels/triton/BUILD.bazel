@@ -1,0 +1,16 @@
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//tools/dsl-harness:kernels.bzl", "declare_triton_kernels")
+
+# Shared @triton.jit kernel definitions imported by per-registration wrappers
+# in `py/`. The 2d / 3d / reduce_segments registrations all import their
+# @triton.jit functions from this single source of truth.
+py_library(
+    name = "unified_attention_kernels",
+    srcs = ["py/unified_attention.py"],
+    imports = ["py"],
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+    deps = ["@triton_py_deps//triton:pkg"],
+)
+
+declare_triton_kernels()

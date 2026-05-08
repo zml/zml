@@ -94,7 +94,10 @@ uv.configure(version = "0.9.30")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(python_version = "3.12")
-use_repo(python, "python_3_12", "python_versions")
+# 3.13 is required by the local Triton wheel pinned in
+# `tools/dsl-harness/py/requirements.in` (cp313).
+python.toolchain(python_version = "3.13")
+use_repo(python, "python_3_12", "python_3_13", "python_versions")
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 
@@ -134,6 +137,34 @@ pip.parse(
     requirements_lock = "//tools/xprof:requirements.lock.txt",
 )
 use_repo(pip, "xprof_nightly")
+
+# For `tools/dsl-harness` Triton-side reference IR generation. Pinned to a
+# local Triton wheel matching XLA's pinned commit (see
+# `tools/dsl-harness/py/requirements.in`). Bumped together with XLA via
+# `bazel run //tools/dsl-harness/py:requirements`.
+pip.parse(
+    hub_name = "triton_py_deps",
+    python_version = "3.13",
+    requirements_lock = "//tools/dsl-harness/py:requirements.lock.txt",
+    target_platforms = [
+        "linux_x86_64",
+    ],
+)
+use_repo(pip, "triton_py_deps")
+
+# JAX/Pallas dependency for the mosaic_tpu compare path. Used by per-kernel
+# `mosaic_tpu_kernel(...)` py_binary runners to lower `pallas_call(...).lower(...)`
+# from a CPU host (no real TPU needed — abstract-mesh + the
+# `pallas_call_tpu_lowering_rule` shim handles it).
+pip.parse(
+    hub_name = "jax_py_deps",
+    python_version = "3.12",
+    requirements_lock = "//tools/dsl-harness/py:jax_requirements.lock.txt",
+    target_platforms = [
+        "linux_x86_64",
+    ],
+)
+use_repo(pip, "jax_py_deps")
 
 cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")

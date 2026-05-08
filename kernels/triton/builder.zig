@@ -380,24 +380,34 @@ pub const ReturnIfScope = struct {
     kernel: *Builder,
     ret_block: *mlir.Block,
     cont_block: *mlir.Block,
+    inline_return: bool = false,
 
     pub fn yieldReturn(self: *ReturnIfScope, values: anytype) void {
         const k = self.kernel;
         const fields = @typeInfo(@TypeOf(values)).@"struct".fields;
 
-        if (k.exit_block == null) {
-            k.exit_block = mlir.Block.init(&.{}, &.{});
-
+        if (self.inline_return) {
             var ret_operands: [fields.len]*const mlir.Value = undefined;
             inline for (fields, 0..) |f, i| {
                 if (f.type != Value)
                     @compileError("ReturnIfScope.yieldReturn: every value must be a Value");
                 ret_operands[i] = @field(values, f.name).inner;
             }
-            _ = ttir.return_(k.ctx, &ret_operands, k.loc()).appendTo(k.exit_block.?);
-        }
+            _ = ttir.return_(k.ctx, &ret_operands, k.loc()).appendTo(self.ret_block);
+        } else {
+            if (k.exit_block == null) {
+                k.exit_block = mlir.Block.init(&.{}, &.{});
 
-        _ = cf.br(k.ctx, k.exit_block.?, &.{}, k.loc()).appendTo(self.ret_block);
+                var ret_operands: [fields.len]*const mlir.Value = undefined;
+                inline for (fields, 0..) |f, i| {
+                    if (f.type != Value)
+                        @compileError("ReturnIfScope.yieldReturn: every value must be a Value");
+                    ret_operands[i] = @field(values, f.name).inner;
+                }
+                _ = ttir.return_(k.ctx, &ret_operands, k.loc()).appendTo(k.exit_block.?);
+            }
+            _ = cf.br(k.ctx, k.exit_block.?, &.{}, k.loc()).appendTo(self.ret_block);
+        }
         k.popBlock();
 
         if (k.block_stack.items.len == 0) {
@@ -726,6 +736,18 @@ pub const Builder = struct {
 
     pub fn numPrograms(self: *Builder, dim: ttir.ProgramIDDim) Value {
         return self.emit(ttir.get_num_programs(self.ctx, dim, self.loc()));
+    }
+
+    pub fn assume(self: *Builder, cond: Value) void {
+        const op = mlir.Operation.make(self.ctx, "llvm.intr.assume", .{
+            .operands = .{ .flat = &.{cond.inner} },
+            .attributes = &.{
+                .named(self.ctx, "op_bundle_sizes", mlir.denseArrayAttribute(self.ctx, .i32, &.{})),
+                .named(self.ctx, "op_bundle_tags", mlir.arrayAttribute(self.ctx, &.{})),
+            },
+            .location = self.loc(),
+        });
+        _ = op.appendTo(self.currentBlock());
     }
 
     // ==================== constants ====================
@@ -1318,7 +1340,10 @@ pub const Builder = struct {
         }
         const cur_bw = dtypeBitwidth(cur_dtype);
         const tgt_bw = dtypeBitwidth(dtype);
-        if (tgt_bw > cur_bw) return self.extsi(src, dtype);
+        if (tgt_bw > cur_bw) {
+            if (cur_dtype == .i1) return self.extui(src, dtype);
+            return self.extsi(src, dtype);
+        }
         if (tgt_bw < cur_bw) return self.trunci(src, dtype);
         return self.arithBitcast(src, dtype);
     }

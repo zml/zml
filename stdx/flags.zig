@@ -93,7 +93,7 @@ pub fn parseProcessArgs(init_: std.process.Init.Minimal, comptime CliArgs: type)
 }
 
 fn parse_commands(args: *std.process.Args.Iterator, comptime Commands: type) Commands {
-    comptime assert(@typeInfo(Commands) == .Union);
+    comptime assert(@typeInfo(Commands) == .@"union");
     comptime assert(std.meta.fields(Commands).len >= 2);
 
     const first_arg = args.next() orelse fatal(

@@ -12,6 +12,7 @@ cc_library(
         "@llvm-project//mlir:CAPIArith",
         "@llvm-project//mlir:CAPICF",
         "@llvm-project//mlir:CAPIIR",
+        "@llvm-project//mlir:CAPILLVM",
         "@llvm-project//mlir:CAPIMath",
         "@llvm-project//mlir:CAPIMemRef",
         "@llvm-project//mlir:CAPISCF",
