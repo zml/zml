@@ -1,0 +1,60 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
+load(":kernel.bzl", "aggregator_gen")
+load("//tools/dsl-harness:kernels.bzl", "mosaic_tpu_kernel_labels", "triton_kernel_labels")
+
+zig_library(
+    name = "harness",
+    main = "harness.zig",
+    srcs = [
+        "diff.zig",
+        "normalize.zig",
+        "py_runner.zig",
+        "report.zig",
+    ],
+    import_name = "harness",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//zml",
+        "@rules_zig//zig/runfiles",
+    ],
+)
+
+aggregator_gen(
+    name = "aggregator_src",
+    triton_kernels = triton_kernel_labels(),
+    mosaic_tpu_kernels = mosaic_tpu_kernel_labels(),
+)
+
+zig_library(
+    name = "aggregator",
+    main = ":aggregator_src",
+    import_name = "aggregator",
+    deps = [":harness"] +
+           triton_kernel_labels("_entry") +
+           mosaic_tpu_kernel_labels("_entry"),
+)
+
+zig_binary(
+    name = "dsl-harness",
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    data = triton_kernel_labels("_py") +
+           mosaic_tpu_kernel_labels("_py"),
+    deps = [
+        ":aggregator",
+        ":harness",
+        "//tools/dsl-harness/mosaic_tpu:harness_mosaic_tpu",
+        "//tools/dsl-harness/triton:harness_triton",
+        "//mlir",
+        "//stdx",
+        "//zml",
+        "@rules_zig//zig/runfiles",
+    ],
+)
+
+zig_test(
+    name = "test",
+    testonly = False,
+    deps = [":harness"],
+)

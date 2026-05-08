@@ -1,0 +1,52 @@
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
+
+# Stub Triton compiler+driver — lets `JITFunction.warmup` lower without CUDA.
+py_library(
+    name = "fake_plugin",
+    srcs = [
+        "fake_plugin/__init__.py",
+        "fake_plugin/compiler.py",
+        "fake_plugin/driver.py",
+    ],
+    imports = ["."],
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+    deps = ["@triton_py_deps//triton:pkg"],
+)
+
+# JSON RPC loop + post-XLA diff helper, shared by both runner.py files.
+py_library(
+    name = "runtime",
+    srcs = ["runtime.py"],
+    imports = ["."],
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+)
+
+# `FakeTensor` + dtype mapping, pulled in by every triton_kernel macro.
+py_library(
+    name = "triton_helpers",
+    srcs = ["triton_helpers.py"],
+    imports = ["."],
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+)
+
+uv_lock(
+    name = "requirements",
+    srcs = ["requirements.in"],
+    out = "requirements.lock.txt",
+    args = ["--upgrade"],
+    python_version = "3.13",
+    tags = ["manual"],
+)
+
+uv_lock(
+    name = "jax_requirements",
+    srcs = ["jax_requirements.in"],
+    out = "jax_requirements.lock.txt",
+    args = ["--upgrade"],
+    python_version = "3.12",
+    tags = ["manual"],
+)

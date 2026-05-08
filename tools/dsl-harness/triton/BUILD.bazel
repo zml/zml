@@ -1,0 +1,24 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "harness_triton",
+    main = "harness_triton.zig",
+    srcs = [
+        "extract.zig",
+        "pipeline.zig",
+    ],
+    import_name = "harness/triton",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/dsl-harness:harness",
+        "//mlir",
+        "//zml",
+        "@rules_zig//zig/runfiles",
+    ],
+)
+
+# Consumed verbatim by `//tools/dsl-harness:kernel.bzl%triton_kernel`'s `py_runner` arg.
+exports_files(
+    ["runner.py"],
+    visibility = ["//visibility:public"],
+)

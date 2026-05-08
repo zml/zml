@@ -1,0 +1,3 @@
+load("//tools/dsl-harness:kernels.bzl", "declare_mosaic_tpu_kernels")
+
+declare_mosaic_tpu_kernels()
