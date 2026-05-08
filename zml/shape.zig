@@ -500,12 +500,12 @@ pub const Shape = struct {
 
     /// Total size in bytes needed to represent this shape.
     pub fn byteSize(self: Shape) usize {
-        return self.dtype().sizeOf() * self.count();
+        return self._dtype.sizeOf() * self.count();
     }
 
     /// Compares the two shapes described, ignoring tagging.
     pub fn eql(self: Shape, other: Shape) bool {
-        return std.mem.eql(i64, self.dims(), other.dims()) and self.dtype() == other.dtype();
+        return std.mem.eql(i64, self.dims(), other.dims()) and self._dtype == other._dtype;
     }
 
     /// Compares the two shapes described, ignoring tagging and dtype.
@@ -515,7 +515,7 @@ pub const Shape = struct {
 
     /// Compares the two shapes described including tags.
     pub fn eqlWithTags(self: Shape, other: Shape) bool {
-        return self.eql(other) and std.mem.eql(Tag, self.tags(), other.tags()) and self.dtype() == other.dtype();
+        return self.eql(other) and std.mem.eql(Tag, self.tags(), other.tags()) and self._dtype == other._dtype;
     }
 
     /// Format the shape.
@@ -542,7 +542,7 @@ pub const Shape = struct {
             need_comma = true;
         }
         if (need_comma) try writer.writeByte(',');
-        _ = try writer.write(@tagName(self.dtype()));
+        _ = try writer.write(@tagName(self._dtype));
         _ = try writer.writeByte('}');
     }
 
@@ -570,7 +570,7 @@ pub const Shape = struct {
     }
 
     pub fn reshape(self: Shape, new_shape_: anytype) Shape {
-        var new_shape: Shape = .{ ._dtype = self.dtype() };
+        var new_shape: Shape = .{ ._dtype = self._dtype };
         new_shape._dims, new_shape._tags = parseDimensions(new_shape_);
         new_shape._partitioning.appendNTimes(.unknown, new_shape._dims.len) catch @panic("Rank too large");
         new_shape.inferMissingAxis(self.count());
@@ -1211,7 +1211,7 @@ pub const Shape = struct {
     /// For a shape {d0, d1, d2} of type T, the strides would be
     /// {(d1*d2)*sizeof(T), d2*sizeof(T), 1*sizeof(T)}.
     pub fn computeByteStrides(self: Shape) stdx.BoundedArray(i64, constants.MAX_RANK) {
-        return self.computeStrides(self.dtype().sizeOf());
+        return self.computeStrides(self._dtype.sizeOf());
     }
 
     test computeByteStrides {
