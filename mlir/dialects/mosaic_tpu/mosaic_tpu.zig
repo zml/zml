@@ -646,15 +646,18 @@ pub fn concatenate(
 pub fn transpose(
     ctx: *mlir.Context,
     src: *const mlir.Value,
-    permutation: []const i32,
+    permutation: []const i64,
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
+    // `tpu.transpose`'s `permutation` is `DenseI64ArrayAttr` per
+    // `jaxlib/mosaic/dialect/tpu/tpu_ops.td:1677` — passing an i32 array
+    // attribute silently fails the inherent-attribute setter.
     return mlir.Operation.make(ctx, "tpu.transpose", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "permutation", mlir.denseArrayAttribute(ctx, .i32, permutation)),
+            .named(ctx, "permutation", mlir.denseArrayAttribute(ctx, .i64, permutation)),
         },
         .location = location,
     });

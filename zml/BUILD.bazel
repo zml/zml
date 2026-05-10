@@ -33,6 +33,8 @@ zig_library(
         "attention.zig",
         "attention/attention.zig",
         "attention/flashattn.zig",
+        "attention/mosaic_tpu_kernels/gdn_decode.zig",
+        "attention/mosaic_tpu_kernels/gdn_prefill_varlen.zig",
         "attention/mosaic_tpu_kernels/ragged_attention.zig",
         "attention/paged_attention.zig",
         "attention/tpu_attention.zig",

@@ -295,11 +295,21 @@ pub const ArgSpec = struct {
     /// program-ids, scalar-prefetch loads, or constants. We only encode
     /// the most common forms; drop to a custom transform body for anything
     /// fancier.
+    pub const ProgramIdDiv = struct { pid: usize, divisor: i64 };
+    pub const ScalarLoadAtPid = struct { prefetch_idx: usize, at_pid: usize };
     pub const TransformReturn = union(enum) {
         /// Return `arith.constant 0 : i32`.
         zero,
         /// Return the Nth program-id (`%argN`).
         program_id: usize,
+        /// Return `program_id_<pid> / divisor` — used by per-block index maps
+        /// that route a smaller q/k block across `divisor` consecutive
+        /// v-rows (in-kernel grouped value-attention).
+        program_id_div: ProgramIdDiv,
+        /// Return `prefetch_ref[program_id_<at_pid>]` — used by per-seq state
+        /// routing in varlen kernels (e.g. `s_in_ref[seq_id_smem[c]]`).
+        /// `prefetch_idx` is the index into the scalar_prefetch list (0-based).
+        scalar_load_at_pid: ScalarLoadAtPid,
     };
 
     pub const ElementWindowSpec = struct {
@@ -675,11 +685,20 @@ pub const Builder = struct {
                         (w.block_shape orelse r.shape)
                     else
                         r.shape;
+                    // Dupe the transform_returns slice into arena-owned storage —
+                    // the caller's `&.{...}` literal lives in the run() stack
+                    // frame and gets deallocated before finish/appendTransformStubs.
+                    const tr_owned: ?[]const ArgSpec.TransformReturn = if (r.window) |w| blk: {
+                        if (w.transform_returns) |tr| {
+                            break :blk try arena_alloc.dupe(ArgSpec.TransformReturn, tr);
+                        }
+                        break :blk null;
+                    } else null;
                     try ref_args_buf.append(arena_alloc, .{
                         .block_rank = @intCast(block_shape.len),
                         .skipped = isSkippedWindowSpace(r.memory_space),
                         .role = r.role,
-                        .transform_returns = if (r.window) |w| w.transform_returns else null,
+                        .transform_returns = tr_owned,
                     });
                 } else if (r.role == .scalar_prefetch) {
                     try prefetch_types_buf.append(arena_alloc, arg_types[i]);
@@ -1645,7 +1664,7 @@ pub const Builder = struct {
         return self.emit(tpu.concatenate(self.ctx, self.innerSlice(sources), dimension, ty, self.loc()));
     }
 
-    pub fn transpose(self: *Builder, src: Value, permutation: []const i32) Value {
+    pub fn transpose(self: *Builder, src: Value, permutation: []const i64) Value {
         const in_shape = src.shape();
         std.debug.assert(permutation.len == in_shape.len);
         var out: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
@@ -2144,6 +2163,59 @@ pub const Builder = struct {
                         v.* = switch (r_list[i]) {
                             .zero => c0.result(0),
                             .program_id => |pid| block.argument(pid),
+                            .program_id_div => |pd| blk: {
+                                // Pallas Python's `pid // divisor` lowers to a floor-divide,
+                                // not the simple `arith.divsi` (which truncates). For the
+                                // common positive-divisor case JAX folds out the rhs sign
+                                // check, so the emitted sequence is:
+                                //   q = divsi(pid, divisor)
+                                //   sign(pid) = (pid > 0) - (pid < 0)            // -1, 0, 1
+                                //   cond = (sign != 1) AND (pid % divisor != 0)
+                                //   result = cond ? q - 1 : q
+                                // Pallas Python emits these in `1, 0, divisor` order
+                                // (the `1` gets hoisted by canonicalize as `%K0`).
+                                const c_one = arith.constant_int(ctx, 1, i32_ty, unknown_loc);
+                                _ = c_one.appendTo(block);
+                                const c_zero = arith.constant_int(ctx, 0, i32_ty, unknown_loc);
+                                _ = c_zero.appendTo(block);
+                                const c_div = arith.constant_int(ctx, pd.divisor, i32_ty, unknown_loc);
+                                _ = c_div.appendTo(block);
+                                const pid_arg = block.argument(pd.pid);
+                                const q_op = arith.divsi(ctx, pid_arg, c_div.result(0), unknown_loc);
+                                _ = q_op.appendTo(block);
+                                const sgt = arith.cmpi(ctx, .sgt, pid_arg, c_zero.result(0), unknown_loc);
+                                _ = sgt.appendTo(block);
+                                const pos_op = arith.extui(ctx, sgt.result(0), i32_ty, unknown_loc);
+                                _ = pos_op.appendTo(block);
+                                const slt = arith.cmpi(ctx, .slt, pid_arg, c_zero.result(0), unknown_loc);
+                                _ = slt.appendTo(block);
+                                const neg_op = arith.extui(ctx, slt.result(0), i32_ty, unknown_loc);
+                                _ = neg_op.appendTo(block);
+                                const sign_op = arith.subi(ctx, pos_op.result(0), neg_op.result(0), unknown_loc);
+                                _ = sign_op.appendTo(block);
+                                const not_pos = arith.cmpi(ctx, .ne, sign_op.result(0), c_one.result(0), unknown_loc);
+                                _ = not_pos.appendTo(block);
+                                const rem_op = arith.remsi(ctx, pid_arg, c_div.result(0), unknown_loc);
+                                _ = rem_op.appendTo(block);
+                                const rem_nz = arith.cmpi(ctx, .ne, rem_op.result(0), c_zero.result(0), unknown_loc);
+                                _ = rem_nz.appendTo(block);
+                                const cond_op = arith.andi(ctx, not_pos.result(0), rem_nz.result(0), unknown_loc);
+                                _ = cond_op.appendTo(block);
+                                const q_m1 = arith.subi(ctx, q_op.result(0), c_one.result(0), unknown_loc);
+                                _ = q_m1.appendTo(block);
+                                const sel_op = arith.select(ctx, cond_op.result(0), q_m1.result(0), q_op.result(0), unknown_loc);
+                                _ = sel_op.appendTo(block);
+                                break :blk sel_op.result(0);
+                            },
+                            .scalar_load_at_pid => |sl| blk: {
+                                const idx_ty = mlir.indexType(ctx);
+                                const idx_cast = arith.index_cast(ctx, block.argument(sl.at_pid), idx_ty, unknown_loc);
+                                _ = idx_cast.appendTo(block);
+                                const prefetch_arg = block.argument(self.grid_dim_count + sl.prefetch_idx);
+                                const load_op = memref.load(ctx, prefetch_arg, &.{idx_cast.result(0)}, .{}, unknown_loc);
+                                _ = load_op.appendTo(block);
+                                break :blk load_op.result(0);
+                            },
                         };
                         continue;
                     }

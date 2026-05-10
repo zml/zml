@@ -92,6 +92,20 @@ MOSAIC_TPU_KERNELS = [
         "py_src": "py/ragged_paged.py",
         "py_kernel": "ragged_paged_attention",
     },
+    {
+        "name": "gdn_decode",
+        "src": "zig/gdn_decode.zig",
+        "py_src": "py/gdn_decode.py",
+        "py_kernel": "gdn_decode",
+        "extra_zig_deps": ["//kernels/mosaic_tpu:mosaic_tpu_builder"],
+    },
+    {
+        "name": "gdn_prefill_varlen",
+        "src": "zig/gdn_prefill_varlen.zig",
+        "py_src": "py/gdn_prefill_varlen.py",
+        "py_kernel": "gdn_prefill_varlen",
+        "extra_zig_deps": ["//kernels/mosaic_tpu:mosaic_tpu_builder"],
+    },
 ]
 
 def _kernel_labels(kind, kernels, suffix):

@@ -4,3 +4,8 @@ pub const flashattn = @import("attention/flashattn.zig");
 pub const tpu = @import("attention/tpu_attention.zig");
 pub const triton = @import("attention/triton_attention.zig");
 pub const triton_kernels = @import("attention/triton_kernels/unified_attention.zig");
+
+pub const mosaic_tpu_kernels = struct {
+    pub const gdn_decode = @import("attention/mosaic_tpu_kernels/gdn_decode.zig");
+    pub const gdn_prefill_varlen = @import("attention/mosaic_tpu_kernels/gdn_prefill_varlen.zig");
+};

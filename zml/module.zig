@@ -33,7 +33,13 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
         mlir.registerPasses("Transforms");
 
         const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
-        inline for (.{ "func", "stablehlo", "sdy", "arith", "scf", "math", "tt", "affine", "memref", "vector", "tpu", "cf", "llvm" }) |d| {
+        // NOTE: "llvm" dialect intentionally OMITTED — registering it without
+        // also registering its DialectInlinerInterface impl trips libpjrt_tpu's
+        // Mosaic compile pipeline with `Wrong number of window_params` and
+        // `DialectInlinerInterface ... promised but never implemented` aborts.
+        // Triton's `assume` op needs llvm dialect — re-add behind a feature
+        // gate when wiring Triton on TPU (we use Triton on CUDA only today).
+        inline for (.{ "func", "stablehlo", "sdy", "arith", "scf", "math", "tt", "affine", "memref", "vector", "tpu", "cf" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
         }
         mlir.registerFuncExtensions(mlir_registry);

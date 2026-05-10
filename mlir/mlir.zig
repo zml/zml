@@ -1116,6 +1116,16 @@ pub const Operation = opaque {
         c.mlirOperationSetAttributeByName(self.ptr(), stringRef(name_), attribute.ptr());
     }
 
+    /// Sets an *inherent* (property-storage) attribute by name. Modern MLIR
+    /// ops define required attributes as properties stored in an op-specific
+    /// struct rather than the discardable attribute dict; the discardable
+    /// API (`setAttributeByName`) doesn't reach those, so the verifier
+    /// reports them as missing. Use this for op-defined attributes like
+    /// `tpu.transpose`'s `permutation`.
+    pub fn setInherentAttributeByName(self: *Operation, name_: []const u8, attribute: *const Attribute) void {
+        c.mlirOperationSetInherentAttributeByName(self.ptr(), stringRef(name_), attribute.ptr());
+    }
+
     pub const PrintFlags = struct {
         elide_large_elements_attrs: ?usize = null,
         debug_info: bool = false,
