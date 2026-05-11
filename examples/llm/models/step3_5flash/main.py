@@ -136,7 +136,7 @@ model = zml_utils.ActivationCollector(model, max_layers=1000, stop_after_first_s
 inputs = tokenizer(message, return_tensors="pt").to(device)
 
 # perform forward pass to collect activations
-outputs, activations = model(inputs)
+outputs, activations = model(**inputs)
 
 output_text = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
 
