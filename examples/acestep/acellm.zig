@@ -583,7 +583,7 @@ pub const AceLlm = struct {
         const phase_logits = logits.slice1d(.voc, if (cfg_phase) self.phase.phase2_voc else self.phase.phase1_voc);
         var next_token, const new_rng = sampleNucleus(phase_logits, rng);
         // in cfg, next token is a position relative to the audiocodes sub voc slice, translate it back to the full voc slice
-        //if (cfg_phase) next_token = next_token.addConstant(self.phase.text_voc_size);
+        if (cfg_phase) next_token = next_token.addConstant(self.phase.text_voc_size);
         return .{ next_token.convert(.u32), new_rng };
     }
 
