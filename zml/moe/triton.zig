@@ -579,15 +579,12 @@ fn applyJsonTokenConfig(opts: Options, num_tokens: i64) !Options {
 
     const compilation_context = zml.module.CompilationContext.current();
     const io = compilation_context.io;
-    const allocator = compilation_context.arena.allocator();
+    const allocator = compilation_context.allocator;
 
     const config_path = try getLaunchConfigJsonPath(allocator);
-    const cwd = std.Io.Dir.cwd();
-    var file = try cwd.openFile(io, config_path, .{ .mode = .read_only });
-    defer file.close(io);
-    var reader = file.reader(io, &.{});
-    const config_json = try reader.interface.readAlloc(allocator, try file.length(io));
-
+    defer allocator.free(config_path);
+    const config_json = try std.Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .unlimited);
+    defer allocator.free(config_json);
     const parsed = try std.json.parseFromSlice(
         std.json.ArrayHashMap(JsonConfigFields),
         allocator,
