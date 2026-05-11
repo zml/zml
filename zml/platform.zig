@@ -9,7 +9,7 @@ const stdx = @import("stdx");
 const attention = @import("attention.zig");
 const Exe = @import("exe.zig").Exe;
 const pjrtx = @import("pjrtx.zig");
-const profiler_ = @import("profiler.zig");
+const profiler_ = @import("profiling/profiler.zig");
 const Sharding = @import("Sharding.zig");
 const zml = @import("zml.zig");
 
