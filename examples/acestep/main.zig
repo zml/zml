@@ -255,6 +255,8 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     
     var acellm = try acellm_.AceLlm_handler.init(zml_handler);
     defer acellm.deinit(zml_handler.allocator);
+
+    std.log.info("handler init", .{});
     
     const inspi_tokens = try inference.tokenizeInspirationPrompt(zml_handler, acellm.tokenizer);
     defer zml_handler.allocator.free(inspi_tokens);

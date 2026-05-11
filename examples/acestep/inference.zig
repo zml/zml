@@ -398,9 +398,7 @@ pub fn tokenizeInputLyrics(allocator: std.mem.Allocator, tokenizer: zml.tokenize
 }
 
 
-pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.AceLlm_handler, prompt_tok: []const u32) ![]u8 {
-    std.log.info("A", .{});
-    
+pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.AceLlm_handler, prompt_tok: []const u32) ![]u8 {    
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = acellm.params.shardings.replicated;
@@ -416,8 +414,6 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     defer zero_buffer.deinit();
     var prompt_buffer: zml.Buffer = try .scalar(io, platform, prompt_tok.len - 1, .u32, sharding);
     defer prompt_buffer.deinit();
-
-std.log.info("A1", .{});
     
     var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer token_slice.free(allocator);
@@ -428,8 +424,6 @@ std.log.info("A1", .{});
     var logits_buffer: zml.Buffer = undefined;
     defer logits_buffer.deinit();    
 
-    std.log.info("A2", .{});
-
     const prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ acellm.options.seq_len }, .u32));
     defer prefill_tokens_slice.free(allocator);
     @memcpy(prefill_tokens_slice.items(u32)[0..prompt_tok.len], prompt_tok);
@@ -437,8 +431,6 @@ std.log.info("A1", .{});
     defer prefill_tokens_buffer.deinit();
     var prefill_embed_buffer: zml.Buffer = undefined;
     defer prefill_embed_buffer.deinit();
-
-    std.log.info("A3", .{});
 
     const layer_index_slices = try allocator.alloc(zml.Slice, acellm.config.num_hidden_layers);
     defer {
@@ -457,8 +449,6 @@ std.log.info("A1", .{});
     for (0..acellm.config.num_hidden_layers) |i| {
         layer_index_buffers[i] = try zml.Buffer.fromSlice(io, platform, layer_index_slices[i], sharding);
     }
-
-    std.log.info("A4", .{});
 
     std.log.info("5Hz run prefill with seq_len/prompt_len of {d}/{d} tokens", .{ acellm.options.seq_len, prompt_tok.len });
     zml_handler.tic(&zml_handler.timers.llm.prefill);

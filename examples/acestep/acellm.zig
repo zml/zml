@@ -59,7 +59,7 @@ pub const AceLlm_handler = struct {
             .decode_embeds = .init(.{ .s = 1, .d = config.hidden_size }, .bf16),
             .logits = .init(.{ .voc = config.vocab_size, .s = 1 }, .bf16),
             .kv_cache = .init(zml.Shape.init(.{
-                .layer = model.layers.len,
+                .layer = config.num_hidden_layers,
                 .k = acellm_options.seq_len,
                 .h = config.num_key_value_heads,
                 .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
@@ -83,6 +83,10 @@ pub const AceLlm_handler = struct {
 
         zml_handler.toc(&zml_handler.timers.llm.load);
 
+        std.log.info("B", .{});
+        const kv_cache_buffers = try params.kv_cache.initBuffer(zml_handler.io, zml_handler.platform, params.shardings.replicated);
+        std.log.info("Bok", .{});
+        
         return .{
             .model = model,
             .params = params,
@@ -92,7 +96,7 @@ pub const AceLlm_handler = struct {
             .tokenizer = tokenizer,
             .exes = exes,
             .model_buffers = model_buffers,
-            .kv_cache_buffers = try params.kv_cache.initBuffer(zml_handler.io, zml_handler.platform, params.shardings.replicated),
+            .kv_cache_buffers = kv_cache_buffers,
         };
     }
 
