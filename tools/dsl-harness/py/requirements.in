@@ -1,1 +1,1 @@
-triton @ file:///home/rigole/Documents/Git-Repos/triton/dist/triton-3.7.0+git6a0b5461-cp313-cp313-linux_x86_64.whl
+triton @ https://aiinfra.pkgs.visualstudio.com/2692857e-05ef-43b4-ba9c-ccf1c22c437c/_packaging/07c94329-d4c3-4ad4-9e6b-f904a60032ec/pypi/download/triton/3.7+git4da2e268/triton-3.7.0+git4da2e268-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
