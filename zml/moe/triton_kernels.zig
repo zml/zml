@@ -291,7 +291,9 @@ pub const FusedMoe = struct {
         const pid_m_block = pid_m.mul(block_size_m);
         const num_tokens_post_padded = num_tokens_post_padded_i32.to(.i64);
         const out_of_range = pid_m_block.ge(num_tokens_post_padded);
-        b.returnIf(out_of_range, .{});
+	
+        b.returnIfOpts(out_of_range, .{}, .{ .inline_return = true });
+	
         const offs_token = if (cfg.naive_block_assignment)
             b.select(
                 offs.eq(0),
@@ -312,6 +314,7 @@ pub const FusedMoe = struct {
 
         // Python: if off_experts == -1: write_zeros_to_output(...); return
         var dead_ret = b.openReturnIf(is_dead);
+        dead_ret.inline_return = true;
         {
             writeZerosToOutput(
                 b,
@@ -487,6 +490,7 @@ pub const MoeAlignBlockSize = struct {
 
         // if pid == 1: fill sorted_token_ids with NUMEL; return
         var fill_branch = b.openReturnIf(pid.eq(1));
+        fill_branch.inline_return = true;
         {
             var fill_loop = b.openFor(0, max_num_tokens_padded, hist_block, .{});
             {
