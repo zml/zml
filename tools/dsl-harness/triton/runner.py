@@ -1,8 +1,8 @@
 """Triton-side reference-IR generator. Loaded as a long-lived subprocess
 by `harness/py_runner.zig`. The user's `--kernel-module` must expose a
 `@triton.jit` function named `--kernel-fn` plus `build_args(cfg) ->
-(positional, kwargs)`. The `fake_plugin` backend lets `warmup` lower
-without a real GPU."""
+(positional, kwargs)`. The `fake_plugin` driver lets `warmup` lower
+without launching a Python-side kernel."""
 
 from __future__ import annotations
 
@@ -18,17 +18,10 @@ def _setup() -> None:
     # diff in noise.
     os.environ.setdefault("TRITON_DISABLE_LINE_INFO", "1")
 
-    import triton.backends as triton_backends
-    from triton.backends import Backend as BackendRegistration
     from triton.runtime.driver import driver as runtime_driver
 
-    from fake_plugin.compiler import Backend as FakeCompilerBackend
     from fake_plugin.driver import Driver as FakeDriver
 
-    triton_backends.backends["mybackend_runtime"] = BackendRegistration(
-        compiler=FakeCompilerBackend,
-        driver=FakeDriver,
-    )
     runtime_driver.set_active(FakeDriver())
 
 

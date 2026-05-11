@@ -32,7 +32,7 @@ class Driver(DriverBase):
         return _TYPE_MAP[ty]
 
     def get_current_target(self):
-        return GPUTarget("cpu", "generic", 32)
+        return GPUTarget("cuda", 90, 32)
 
     def get_current_device(self):
         return "cpu"
@@ -42,7 +42,7 @@ class Driver(DriverBase):
         return None
 
     def get_active_torch_device(self):
-        return "cpu"
+        return "cuda"
 
     def get_benchmarker(self) -> Benchmarker:
         def _benchmarker(kernel_call, *, quantiles, **kwargs):
