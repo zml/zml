@@ -57,7 +57,7 @@ pub const AceLlm_handler = struct {
             .pred_index = .init(.{}, .u32),
             .prefill_embeds = .init(.{ .s = acellm_options.seq_len, .d = config.hidden_size }, .bf16),
             .decode_embeds = .init(.{ .s = 1, .d = config.hidden_size }, .bf16),
-            .logits = .init(.{ .voc = config.vocab_size, .s = 1 }, .bf16),
+            .logits = .init(.{ .voc = config.vocab_size, .s = 1 }, .f32),
             .kv_cache = .init(zml.Shape.init(.{
                 .layer = config.num_hidden_layers,
                 .k = acellm_options.seq_len,
@@ -280,8 +280,8 @@ pub const AceCfg_handler = struct {
             .token_index = .init(.{}, .u32),
             .pred_index = .init(.{}, .u32),
             .layer_index = .init(.{}, .u32),
-            .cond_logits = .init(.{ .voc = acellm.config.vocab_size, .s = 1 }, .bf16),
-            .uncond_logits = .init(.{ .voc = acellm.config.vocab_size, .s = 1 }, .bf16),
+            .cond_logits = .init(.{ .voc = acellm.config.vocab_size, .s = 1 }, .f32),
+            .uncond_logits = .init(.{ .voc = acellm.config.vocab_size, .s = 1 }, .f32),
             .kv_cache = .init(zml.Shape.init(.{
                 .layer = acellm.config.num_hidden_layers,
                 .k = acellm.options.seq_len,
@@ -571,7 +571,7 @@ pub const AceLlm = struct {
     pub fn computeLogits(self: AceLlm, embed: zml.Tensor) zml.Tensor {
         const output = self.norm.forward(embed);
         // TODO: we could improve the perf by only computing the logits for the relevant voc slice
-        return self.embed_tokens.weight.withTags(.{ .voc, .d }).dot(output, .d);
+        return self.embed_tokens.weight.withTags(.{ .voc, .d }).dot(output, .d).convert(.f32);
     }
     
     pub fn cfg(self: AceLlm, cond_logits: zml.Tensor, uncond_logits: zml.Tensor) zml.Tensor {
@@ -581,7 +581,7 @@ pub const AceLlm = struct {
     
     pub fn sampleTokens(self: AceLlm, logits: zml.Tensor, rng: zml.Tensor.Rng, cfg_phase: bool) struct { zml.Tensor, zml.Tensor.Rng } {
         const phase_logits = logits.slice1d(.voc, if (cfg_phase) self.phase.phase2_voc else self.phase.phase1_voc);
-        var next_token, const new_rng = sampleNucleus(phase_logits.convert(.f32), rng);
+        var next_token, const new_rng = sampleNucleus(phase_logits, rng);
         // in cfg, next token is a position relative to the audiocodes sub voc slice, translate it back to the full voc slice
         if (cfg_phase) next_token = next_token.addConstant(self.phase.text_voc_size);
         return .{ next_token.convert(.u32), new_rng };
