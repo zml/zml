@@ -9,6 +9,8 @@ MODEL_PATH = "stepfun-ai/Step-3.5-Flash"
 
 config = AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
+config.layer_types = config.layer_types[:config.num_hidden_layers]
+
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True, device_map="auto")
 
 if isinstance(tokenizer.eos_token_id, list):
