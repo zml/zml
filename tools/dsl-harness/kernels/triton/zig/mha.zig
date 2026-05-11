@@ -85,8 +85,6 @@ pub fn forward(
     descale_q: Tensor,
     descale_k: Tensor,
     descale_v: Tensor,
-    // out_ptr is an output — placeholder in Python position
-    _: Tensor,
     alibi_slopes: Tensor,
     s_dmask: Tensor,
     dropout_mask: Tensor,
@@ -174,7 +172,6 @@ pub fn args() std.meta.ArgsTuple(@TypeOf(forward)) {
         t.buf(.f32, MAX_BATCH), // descale_q_ptr
         t.buf(.f32, MAX_BATCH), // descale_k_ptr
         t.buf(.f32, MAX_BATCH), // descale_v_ptr
-        t.buf(.bf16, MAX_Q_BUF), // out_ptr (output placeholder)
         t.buf(.f32, MAX_NUM_Q_HEADS), // alibi_slopes_ptr
         t.buf(.f32, MAX_Q_BUF), // s_dmask_ptr
         t.buf(.f32, MAX_Q_BUF), // dropout_mask_ptr

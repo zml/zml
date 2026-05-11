@@ -306,7 +306,7 @@ def _attn_fwd_inner(
     return acc, l_i, m_i
 
 
-@triton.jit
+@triton.jit(do_not_specialize=list(range(47)) + [61, 62])
 def _attn_fwd(
     q_ptr,
     k_ptr,
@@ -314,7 +314,6 @@ def _attn_fwd(
     descale_q_ptr,
     descale_k_ptr,
     descale_v_ptr,
-    out_ptr,
     alibi_slopes_ptr,
     s_dmask_ptr,
     dropout_mask_ptr,
@@ -371,6 +370,7 @@ def _attn_fwd(
     FP8_MAX: tl.constexpr,
     VARLEN: tl.constexpr,
     BATCH,
+    out_ptr,
     NUM_XCD: tl.constexpr,
     USE_INT64_STRIDES: tl.constexpr,
     ENABLE_SINK: tl.constexpr,
@@ -964,7 +964,6 @@ def build_args(cfg: Dict[str, Any]) -> Tuple[list, Dict[str, Any]]:
         descale_q,                  # descale_q_ptr
         descale_k,                  # descale_k_ptr
         descale_v,                  # descale_v_ptr
-        out,                        # out_ptr
         alibi_slopes,               # alibi_slopes_ptr
         s_dmask,                    # s_dmask_ptr
         dropout_mask,               # dropout_mask_ptr
@@ -1025,6 +1024,7 @@ def build_args(cfg: Dict[str, Any]) -> Tuple[list, Dict[str, Any]]:
         "FP8_MAX": float(cfg.get("FP8_MAX", 0.0)),
         "VARLEN": bool(cfg.get("VARLEN", False)),
         "BATCH": BATCH,
+        "out_ptr": out,
         "NUM_XCD": int(cfg.get("NUM_XCD", 8)),
         "USE_INT64_STRIDES": bool(cfg.get("USE_INT64_STRIDES", True)),
         "ENABLE_SINK": bool(cfg.get("ENABLE_SINK", False)),

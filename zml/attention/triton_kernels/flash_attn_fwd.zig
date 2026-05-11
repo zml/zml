@@ -125,7 +125,6 @@ pub const FlashAttnFwd = struct {
             .descale_q_ptr = .{ .ptr = .f32 },
             .descale_k_ptr = .{ .ptr = .f32 },
             .descale_v_ptr = .{ .ptr = .f32 },
-            .out_ptr = .{ .ptr = cfg.o_dtype },
             .alibi_slopes_ptr = .{ .ptr = .f32 },
             .s_dmask_ptr = .{ .ptr = .f32 },
             .dropout_mask_ptr = .{ .ptr = .f32 },
@@ -168,6 +167,7 @@ pub const FlashAttnFwd = struct {
             .SEQLEN_Q = .{ .scalar = .i32 },
             .SEQLEN_K = .{ .scalar = .i32 },
             .BATCH = .{ .scalar = .i32 },
+            .out_ptr = .{ .ptr = cfg.o_dtype },
         });
 
         const SEQLEN_Q = a.SEQLEN_Q;
