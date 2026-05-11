@@ -1,3 +1,10 @@
+//! Triton MoE kernel declarations — direct ports of the `@triton.jit`
+//! functions in `triton_kernels/moe.py`. Each kernel here is a
+//! `tri.Kernel(...)` declaration with its own inline config struct (no
+//! defaults — every field is required at call time). Production callers
+//! invoke these via `K.call(inputs, outputs, opts)`; offline tooling reaches the TTIR
+//! string via `K.emit(allocator, ctx, cfg)`.
+
 const std = @import("std");
 
 const zml = @import("../../zml.zig");
@@ -8,10 +15,18 @@ const DType = tri.DType;
 
 const log = std.log.scoped(.moe_triton);
 
+/// Floor to a multiple of 16 — matches the Python `(v // 16) * 16` guards
+/// that keep dynamic strides aligned for tt.load/store.
 fn blockFloor16(v: Value) Value {
     return v.div(16).mul(16);
 }
 
+// =============================================================================
+// per_token_group_quant_fp8
+// =============================================================================
+
+/// Direct port of Python `per_token_group_quant_fp8` — per-token-group
+/// float8 quantization.
 pub const PerTokenGroupQuantFp8 = struct {
     pub const Cfg = struct {
         input_dtype: DType,
@@ -103,6 +118,14 @@ pub const PerTokenGroupQuantFp8 = struct {
     }
 };
 
+// =============================================================================
+// write_zeros_to_output — helper called by FusedMoe
+// =============================================================================
+
+/// Direct port of Python `write_zeros_to_output`. Stores a masked zero-tile
+/// for blocks whose expert is `-1` (no expert assigned). `stride_cn` is
+/// hardcoded to 1 (contiguous last dim), so the N-axis offset is just
+/// `offs_cn` itself.
 fn writeZerosToOutput(
     b: *Builder,
     c_ptr: Value,
@@ -138,6 +161,12 @@ fn writeZerosToOutput(
     b.storeOpts(c_ptrs, accumulator, .{ .mask = token_mask_full.bitAnd(offs_cn_lt_full) });
 }
 
+// =============================================================================
+// fused_moe_kernel
+// =============================================================================
+
+/// Direct port of Python `fused_moe_kernel`. Bf16 / no-quant / no-bias path
+/// only — errors out for the feature flags that aren't implemented yet.
 pub const FusedMoe = struct {
     pub const Cfg = struct {
         a_dtype: DType,
@@ -261,9 +290,9 @@ pub const FusedMoe = struct {
         const pid_m_block = pid_m.mul(block_size_m);
         const num_tokens_post_padded = num_tokens_post_padded_i32.to(.i64);
         const out_of_range = pid_m_block.ge(num_tokens_post_padded);
-	
+
         b.returnIfOpts(out_of_range, .{}, .{ .inline_return = true });
-	
+
         const offs_token = if (cfg.naive_block_assignment)
             b.select(
                 offs.eq(0),
@@ -411,6 +440,13 @@ pub const FusedMoe = struct {
     }
 };
 
+// =============================================================================
+// moe_align_block_size_kernel
+// =============================================================================
+
+/// Direct port of Python `moe_align_block_size_kernel`. pid==0 runs the
+/// histogram + cumsum + block-to-expert assignment pass; pid==1 fills
+/// sorted_token_ids with NUMEL.
 pub const MoeAlignBlockSize = struct {
     pub const Cfg = struct {
         numel: usize,
@@ -533,6 +569,13 @@ pub const MoeAlignBlockSize = struct {
     }
 };
 
+// =============================================================================
+// count_and_sort_expert_tokens_kernel
+// =============================================================================
+
+/// Direct port of Python `count_and_sort_expert_tokens_kernel`. Each program
+/// atomically bumps `cumsum[expert]`, writing its block's token offsets into
+/// `sorted_token_ids` at the returned rank.
 pub const CountAndSortExpertTokens = struct {
     pub const Cfg = struct {
         numel: usize,
