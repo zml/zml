@@ -44,7 +44,7 @@ fn remapXcd(b: *Builder, pid: Value, GRID_MN: Value, NUM_XCDS: Value) Value {
     //     pid = xcd * pids_per_xcd + local_pid
     // else:
     //     pid = tall_xcds * pids_per_xcd + (xcd - tall_xcds) * (pids_per_xcd - 1) + local_pid
-    var ie = b.openIfElse(xcd.lt(tall_xcds), .{ b.scalarTy(.i32) });
+    var ie = b.openIfElse(xcd.lt(tall_xcds), .{b.scalarTy(.i32)});
     {
         // then: tall xcd
         const new_pid = xcd.mul(pids_per_xcd).add(local_pid);
@@ -128,7 +128,9 @@ fn attnFwdInner(
     v_ptrs_in: Value,
     stride_kn: Value,
     stride_vk: Value,
+    start_m: Value,
     seqlen_k: Value,
+    seqlen_q: Value,
     block_min: Value,
     block_max: Value,
     n_extra_tokens: Value,
@@ -141,6 +143,9 @@ fn attnFwdInner(
     MASK_STEPS: bool,
     PADDED_HEAD: bool,
 ) struct { Value, Value, Value } {
+    // start_m, seqlen_q: used in IS_CAUSAL path (not yet ported).
+    _ = start_m;
+    _ = seqlen_q;
     const RCP_LN2_: f32 = 1.4426950408889634;
     const qk_scale: f32 = SM_SCALE * RCP_LN2_;
     const BM: i64 = BLOCK_M;
@@ -285,6 +290,16 @@ pub const MhaFwd = struct {
         NUM_XCD: i32 = 8,
         /// Whether to preload V alongside K.
         PRELOAD_V: bool = true,
+        // --- Pinned boolean/int flags (kept for future un-pinning) ---
+        IS_CAUSAL: bool = false,
+        VARLEN: bool = false,
+        IS_FP8: bool = false,
+        ENABLE_DROPOUT: bool = false,
+        ENABLE_SINK: bool = false,
+        SLIDING_WINDOW: i32 = 0,
+        HAS_PE: bool = false,
+        USE_INT64_STRIDES: bool = false,
+        RETURN_SCORES: bool = false,
     };
 
     pub const Kernel = tri.Kernel(Config, .{
@@ -350,10 +365,19 @@ pub const MhaFwd = struct {
     });
 
     fn run(b: *Builder, cfg: Config) tri.FinishError!void {
-        // Pinned config: IS_CAUSAL=false, VARLEN=false, IS_FP8=false,
-        // ENABLE_DROPOUT=false, ENABLE_SINK=false, SLIDING_WINDOW=0,
-        // HAS_PE=false, USE_INT64_STRIDES=false, RETURN_SCORES=false,
-        // PRELOAD_V=true.
+        // This port is pinned to a specific config combination. Other combos
+        // change the inner-loop structure and masking; they're a separate
+        // exercise. Asserts run at TTIR-emit time, before any IR is built.
+        std.debug.assert(!cfg.IS_CAUSAL);
+        std.debug.assert(!cfg.VARLEN);
+        std.debug.assert(!cfg.IS_FP8);
+        std.debug.assert(!cfg.ENABLE_DROPOUT);
+        std.debug.assert(!cfg.ENABLE_SINK);
+        std.debug.assert(cfg.SLIDING_WINDOW == 0);
+        std.debug.assert(!cfg.HAS_PE);
+        std.debug.assert(!cfg.USE_INT64_STRIDES);
+        std.debug.assert(!cfg.RETURN_SCORES);
+        std.debug.assert(cfg.PRELOAD_V);
 
         const BLOCK_M: i32 = cfg.BLOCK_M;
         const BLOCK_N: i32 = cfg.BLOCK_N;
@@ -610,13 +634,25 @@ pub const MhaFwd = struct {
         if (masked_blocks_val == 0) {
             // All blocks are full, no masked pass needed
             const result = attnFwdInner(
-                b, acc, l_i, m_i, q,
-                k_ptrs, v_ptrs,
-                stride_kn, stride_vn,
+                b,
+                acc,
+                l_i,
+                m_i,
+                q,
+                k_ptrs,
+                v_ptrs,
+                stride_kn,
+                stride_vn,
+                start_m,
                 seqlen_k,
-                block_min, block_max,
+                seqlen_q,
+                block_min,
+                block_max,
                 n_extra_tokens,
-                BLOCK_M, BLOCK_N, BLOCK_DMODEL, BLOCK_DMODEL_POW2,
+                BLOCK_M,
+                BLOCK_N,
+                BLOCK_DMODEL,
+                BLOCK_DMODEL_POW2,
                 cfg.sm_scale,
                 cfg.dtype,
                 false, // MASK_STEPS
@@ -655,13 +691,25 @@ pub const MhaFwd = struct {
 
             // Full blocks pass
             const result_full = attnFwdInner(
-                b, acc, l_i, m_i, q,
-                k_ptrs, v_ptrs,
-                stride_kn, stride_vn,
+                b,
+                acc,
+                l_i,
+                m_i,
+                q,
+                k_ptrs,
+                v_ptrs,
+                stride_kn,
+                stride_vn,
+                start_m,
                 seqlen_k,
-                block_min, full_block_max,
+                seqlen_q,
+                block_min,
+                full_block_max,
                 n_extra_tokens,
-                BLOCK_M, BLOCK_N, BLOCK_DMODEL, BLOCK_DMODEL_POW2,
+                BLOCK_M,
+                BLOCK_N,
+                BLOCK_DMODEL,
+                BLOCK_DMODEL_POW2,
                 cfg.sm_scale,
                 cfg.dtype,
                 false, // MASK_STEPS
@@ -678,13 +726,25 @@ pub const MhaFwd = struct {
             // Masked blocks pass
             block_max = n_blocks.mul(BLOCK_N);
             const result_masked = attnFwdInner(
-                b, result_full[0], result_full[1], result_full[2], q,
-                k_ptrs_masked, v_ptrs_masked,
-                stride_kn, stride_vn,
+                b,
+                result_full[0],
+                result_full[1],
+                result_full[2],
+                q,
+                k_ptrs_masked,
+                v_ptrs_masked,
+                stride_kn,
+                stride_vn,
+                start_m,
                 seqlen_k,
-                full_block_max, block_max,
+                seqlen_q,
+                full_block_max,
+                block_max,
                 n_extra_tokens,
-                BLOCK_M, BLOCK_N, BLOCK_DMODEL, BLOCK_DMODEL_POW2,
+                BLOCK_M,
+                BLOCK_N,
+                BLOCK_DMODEL,
+                BLOCK_DMODEL_POW2,
                 cfg.sm_scale,
                 cfg.dtype,
                 true, // MASK_STEPS
