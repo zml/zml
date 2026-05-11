@@ -116,6 +116,18 @@ if isinstance(tokenizer.eos_token_id, list):
 else:
     config.pad_token_id = tokenizer.eos_token_id
 
+# distribute memory evenly
+cluster_memory = {
+    0: "120GiB",
+    1: "120GiB",
+    2: "180GiB",
+    3: "180GiB",
+    4: "180GiB",
+    5: "180GiB",
+    6: "180GiB",
+    7: "180GiB",
+}
+
 # 3. Stream the heavy weights from the Hub
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_PATH,
@@ -123,6 +135,7 @@ model = AutoModelForCausalLM.from_pretrained(
     trust_remote_code=True,
     torch_dtype=torch.bfloat16,
     device_map="auto",
+    max_memory=cluster_memory,
 )
 
 message = "Explain the significance of the number 42."
