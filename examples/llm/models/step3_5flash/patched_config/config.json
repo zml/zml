@@ -14,10 +14,12 @@
     "low_freq_factor": 1.0,
     "high_freq_factor": 32.0
   },
-  "yarn_only_types": ["full_attention"],
+  "yarn_only_types": [
+    "full_attention"
+  ],
   "hidden_size": 4096,
   "intermediate_size": 11264,
-  "num_hidden_layers": 45,
+  "num_hidden_layers": 48,
   "max_seq_len": 262144,
   "vocab_size": 128896,
   "torch_dtype": "bfloat16",
@@ -138,7 +140,10 @@
     "sliding_attention",
     "sliding_attention",
     "sliding_attention",
-    "full_attention"
+    "full_attention",
+    "sliding_attention",
+    "sliding_attention",
+    "sliding_attention"
   ],
   "use_rope_layers": [],
   "num_nextn_predict_layers": 3,
