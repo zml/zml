@@ -34,7 +34,7 @@ pub const AceLlm_handler = struct {
         defer parsed_config.deinit();
         const config = try parsed_config.value.dupe(zml_handler.allocator);
         const acellm_options: Options = .{
-            .seq_len = 256,
+            .seq_len = 1024,
         };
         std.log.info("5Hz parsed", .{});
 
@@ -82,10 +82,6 @@ pub const AceLlm_handler = struct {
         std.log.info("5Hz model loaded", .{});
 
         zml_handler.toc(&zml_handler.timers.llm.load);
-
-        std.log.info("B", .{});
-        const kv_cache_buffers = try params.kv_cache.initBuffer(zml_handler.io, zml_handler.platform, params.shardings.replicated);
-        std.log.info("Bok", .{});
         
         return .{
             .model = model,
@@ -96,7 +92,7 @@ pub const AceLlm_handler = struct {
             .tokenizer = tokenizer,
             .exes = exes,
             .model_buffers = model_buffers,
-            .kv_cache_buffers = kv_cache_buffers,
+            .kv_cache_buffers = try params.kv_cache.initBuffer(zml_handler.io, zml_handler.platform, params.shardings.replicated),
         };
     }
 
@@ -287,6 +283,7 @@ pub const AceCfg_handler = struct {
             .cond_logits = .init(.{ .voc = acellm.config.vocab_size, .s = 1 }, .bf16),
             .uncond_logits = .init(.{ .voc = acellm.config.vocab_size, .s = 1 }, .bf16),
             .kv_cache = .init(zml.Shape.init(.{
+                .layer = acellm.config.num_hidden_layers,
                 .k = acellm.options.seq_len,
                 .h = acellm.config.num_key_value_heads,
                 .hd = acellm.config.head_dim orelse @divExact(acellm.config.hidden_size, acellm.config.num_attention_heads),
