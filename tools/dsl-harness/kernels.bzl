@@ -44,13 +44,6 @@ TRITON_KERNELS = [
         "extra_zig_deps": ["//mlir/dialects"],
     },
     {
-        "name": "sum_scalar",
-        "src": "zig/sum_scalar.zig",
-        "py_src": "py/sum_scalar.py",
-        "py_kernel": "triton_sum_kernel_scalar_result",
-        "extra_zig_deps": ["//mlir/dialects/ttir"],
-    },
-    {
         "name": "softmax",
         "src": "zig/softmax.zig",
         "py_src": "py/softmax.py",
@@ -110,6 +103,12 @@ TRITON_KERNELS = [
         "py_src": "py/reduce_segments.py",
         "py_kernel": "reduce_segments_ptr",
         "extra_py_deps": [":unified_attention_kernels"],
+    },
+    {
+        "name": "mha",
+        "src": "zig/mha.zig",
+        "py_src": "py/mha.py",
+        "py_kernel": "_attn_fwd",
     },
 ]
 

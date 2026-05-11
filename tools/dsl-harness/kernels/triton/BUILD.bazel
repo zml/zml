@@ -1,4 +1,5 @@
 load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 load("//tools/dsl-harness:kernels.bzl", "declare_triton_kernels")
 
 # Shared @triton.jit kernel definitions imported by per-registration wrappers
