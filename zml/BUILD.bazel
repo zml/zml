@@ -64,6 +64,9 @@ cc_library(
 zig_library(
     name = "zml",
     tags = ["manual"],
+    data = [
+        "moe/triton_kernels/config.json",
+    ],
     srcs = [
         "attention.zig",
         "attention/attention.zig",
@@ -74,6 +77,9 @@ zig_library(
         "attention/tpu_attention.zig",
         "attention/triton_attention.zig",
         "attention/triton_kernels/unified_attention.zig",
+        "moe/moe.zig",
+        "moe/triton.zig",
+        "moe/triton_kernels/triton_kernels.zig",
         "kernel.zig",
         "buffer.zig",
         "constants.zig",

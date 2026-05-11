@@ -9,6 +9,7 @@ pub const parseConfig = common.parseConfig;
 pub const lfm2 = @import("models/lfm2.zig");
 pub const llama = @import("models/llama.zig");
 pub const qwen3_5 = @import("models/qwen3_5.zig");
+pub const qwen3_5_moe = @import("models/qwen3_5_moe.zig");
 
 const log = std.log.scoped(.llm);
 
@@ -16,6 +17,7 @@ pub const ModelType = enum {
     lfm2,
     llama,
     qwen3_5,
+    qwen3_5_moe,
 };
 
 const RawConfig = struct {
@@ -26,6 +28,7 @@ pub const LoadedModel = union(ModelType) {
     lfm2: lfm2.LoadedModel,
     llama: llama.LoadedModel,
     qwen3_5: qwen3_5.LoadedModel,
+    qwen3_5_moe: qwen3_5_moe.LoadedModel,
 
     pub fn load(
         allocator: std.mem.Allocator,
@@ -41,6 +44,7 @@ pub const LoadedModel = union(ModelType) {
             .lfm2 => .{ .lfm2 = try lfm2.LoadedModel.init(allocator, io, repo, store, generation) },
             .llama => .{ .llama = try llama.LoadedModel.init(allocator, io, repo, store, generation) },
             .qwen3_5 => .{ .qwen3_5 = try qwen3_5.LoadedModel.init(allocator, io, repo, store, generation) },
+            .qwen3_5_moe => .{ .qwen3_5_moe = try qwen3_5_moe.LoadedModel.init(allocator, io, repo, store, generation) },
         };
     }
 
@@ -55,6 +59,7 @@ pub const LoadedModel = union(ModelType) {
             .lfm2 => |*m| .{ .lfm2 = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
             .llama => |*m| .{ .llama = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
             .qwen3_5 => |*m| .{ .qwen3_5 = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
+            .qwen3_5_moe => |*m| .{ .qwen3_5_moe = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
         };
     }
 
@@ -70,6 +75,10 @@ pub const LoadedModel = union(ModelType) {
             },
             .qwen3_5 => |*loaded_model| switch (buffers.*) {
                 .qwen3_5 => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
+                else => unreachable,
+            },
+            .qwen3_5_moe => |*loaded_model| switch (buffers.*) {
+                .qwen3_5_moe => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
                 else => unreachable,
             },
         }
@@ -113,6 +122,15 @@ pub const LoadedModel = union(ModelType) {
                 seqlen,
                 progress,
             ) },
+            .qwen3_5_moe => |*m| .{ .qwen3_5_moe = try m.compile(
+                allocator,
+                io,
+                platform,
+                backend,
+                shardings,
+                seqlen,
+                progress,
+            ) },
         };
         return .{
             .inner = inner,
@@ -126,6 +144,7 @@ pub const CompiledModel = struct {
         lfm2: lfm2.inference.CompiledModel,
         llama: llama.inference.CompiledModel,
         qwen3_5: qwen3_5.inference.CompiledModel,
+        qwen3_5_moe: qwen3_5_moe.inference.CompiledModel,
     };
 
     inner: Inner,
@@ -136,6 +155,7 @@ pub const CompiledModel = struct {
             .lfm2 => |*b| b.deinit(),
             .llama => |*b| b.deinit(),
             .qwen3_5 => |*b| b.deinit(),
+            .qwen3_5_moe => |*b| b.deinit(),
         }
     }
 
@@ -181,6 +201,17 @@ pub const CompiledModel = struct {
                 ) },
                 .seqlen = self.seqlen,
             },
+            .qwen3_5_moe => |*compiled| .{
+                .inner = .{ .qwen3_5_moe = try qwen3_5_moe.Session.init(
+                    allocator,
+                    io,
+                    platform,
+                    tokenizer,
+                    compiled,
+                    &model_buffers.qwen3_5_moe,
+                ) },
+                .seqlen = self.seqlen,
+            },
         };
     }
 };
@@ -189,6 +220,7 @@ pub const Buffers = union(ModelType) {
     lfm2: lfm2.Buffers,
     llama: llama.Buffers,
     qwen3_5: qwen3_5.Buffers,
+    qwen3_5_moe: qwen3_5_moe.Buffers,
 };
 
 pub const Session = struct {
@@ -196,6 +228,7 @@ pub const Session = struct {
         lfm2: lfm2.Session,
         llama: llama.Session,
         qwen3_5: qwen3_5.Session,
+        qwen3_5_moe: qwen3_5_moe.Session,
     };
 
     inner: Inner,
