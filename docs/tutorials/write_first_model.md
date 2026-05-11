@@ -213,7 +213,7 @@ To create the _Args_ and _Results_, the _Executable_ exposes two conveniences.
 ```zig
 // create the input buffer
 const input_slice: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[3]f16{ 5.0, 5.0, 5.0 }));
-var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice, sharding);
+var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice, .replicated);
 defer input_buffer.deinit();
 
 // create the Args and Results structs
@@ -347,7 +347,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
     var platform: *zml.Platform = try .auto(allocator, io, .{});
-    defer platform.deinit(allocator);
+    defer platform.deinit(allocator, io);
 
     const layer: Layer = .{
         .weight = zml.Tensor.init(.{3}, .f16),
