@@ -1,8 +1,9 @@
+jusimport os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,2,3,4,5,6,7"
 import torch
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 import zml_utils
-import os
 import inspect
 import copy
 import json
@@ -118,8 +119,7 @@ else:
 
 # distribute memory evenly
 cluster_memory = {
-    0: "120GiB",
-    1: "120GiB",
+    0: "180GiB",
     2: "180GiB",
     3: "180GiB",
     4: "180GiB",
