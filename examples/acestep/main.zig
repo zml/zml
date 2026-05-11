@@ -193,7 +193,6 @@ const Args = struct {
     ;
 };
 
-// 
 // 4090 (104s audio)
 // bazel run --config=release acestep --//platforms:cuda=true -- --prompt='a chill piano melody' --llm-size=1 --instru --local-files
 // info: Module    init  compile     load  prefill   decode    total
@@ -206,9 +205,10 @@ const Args = struct {
 // info:   wav                                                 1.87s
 // info: total                                                92.44s
 
+// TODO: activer et bencher la compilation parallèle
 // TODO: découper modèles en sous modèles pour compiler en parallèle plus vite
-// TODO: compiler prefill/compiler decode/load model all in parallel
-// TODO: improve CFG decode
+// TODO: VAE compilation is an issue, worse than with f32 ??
+// TODO : split 4 blocks ? disable autotuning ? tiled decode ?
 
 // TODO: several outputs (either tiled or batched)
 // TODO: reference audio

@@ -83,7 +83,7 @@ pub const AudioMetadata = struct {
             .lyric = try extractFieldBlock(allocator, trimmed, "lyric:"),
         };
     }
-    
+
     pub fn setDuration(self: *AudioMetadata, allocator: std.mem.Allocator, duration: i64) !void {
         const max_len = 20;
         var buf: [max_len]u8 = undefined;
@@ -95,7 +95,7 @@ pub const AudioMetadata = struct {
     pub fn duration_s(self: *AudioMetadata) !u32 {
         return try std.fmt.parseUnsigned(u32, self.duration, 10);
     }
-    
+
     pub fn deinit(self: AudioMetadata, allocator: std.mem.Allocator) void {
         allocator.free(self.bpm);
         allocator.free(self.caption);
@@ -111,18 +111,18 @@ pub const AudioMetadata = struct {
 pub const AudioCodes = struct {
     token_id: []u32,
     string: []u8,
-    
+
     pub fn empty(allocator: std.mem.Allocator) !AudioCodes {
         return .{
             .token_id = try allocator.alloc(u32, 0),
             .string = try allocator.alloc(u8, 0),
         };
     }
-    
+
     pub fn len(self: AudioCodes) u32 {
         return @intCast(self.token_id.len);
     }
-    
+
     pub fn getIntCodes(self: AudioCodes, allocator: std.mem.Allocator) ![]u32 {
         const prefix = "<|audio_code_";
         const suffix = "|>";
@@ -148,7 +148,7 @@ pub const AudioCodes = struct {
         }
         return result.toOwnedSlice(allocator);
     }
-    
+
     pub fn deinit(self: AudioCodes, allocator: std.mem.Allocator) void {
         allocator.free(self.token_id);
         allocator.free(self.string);
@@ -158,29 +158,29 @@ pub const AudioCodes = struct {
 pub const TextEmbedding = struct {
     caption_embedding: zml.Slice,
     lyric_embedding: zml.Slice,
-    
+
     pub fn textLen(self: TextEmbedding) u32 {
         return @intCast(self.caption_embedding.shape.dim(.s));
     }
-    
+
     pub fn lyricLen(self: TextEmbedding) u32 {
         return @intCast(self.lyric_embedding.shape.dim(.s));
     }
-    
+
     pub fn print(self: TextEmbedding, io: std.Io) !void {
         var stdout = std.Io.File.stdout().writer(io, &.{});
         const writer: *std.Io.Writer = &stdout.interface;
         const options: std.fmt.Number = .{};
-        
+
         std.log.info("Caption embedding shape", .{});
         try self.caption_embedding.shape.format(writer);
         try self.caption_embedding.prettyPrint(writer, options);
-        
+
         std.log.info("Lyric embedding shape", .{});
         try self.lyric_embedding.shape.format(writer);
         try self.lyric_embedding.prettyPrint(writer, options);
     }
-    
+
     pub fn deinit(self: TextEmbedding, allocator: std.mem.Allocator) void {
         self.caption_embedding.free(allocator);
         self.lyric_embedding.free(allocator);
@@ -191,12 +191,12 @@ pub const InitialLatents = struct {
     x: zml.Slice,
     context_latents: zml.Slice,
     encoder_conditions: zml.Slice,
-    
+
     pub fn print(self: InitialLatents, io: std.Io) !void {
         var stdout = std.Io.File.stdout().writer(io, &.{});
         const writer: *std.Io.Writer = &stdout.interface;
         const options: std.fmt.Number = .{};
-        
+
         std.log.info("Initial latents shapes", .{});
         try self.x.shape.format(writer);
         try self.context_latents.shape.format(writer);
@@ -205,7 +205,7 @@ pub const InitialLatents = struct {
         try self.context_latents.prettyPrint(writer, options);
         try self.encoder_conditions.prettyPrint(writer, options);
     }
-    
+
     pub fn deinit(self: InitialLatents, allocator: std.mem.Allocator) void {
         self.x.free(allocator);
         self.context_latents.free(allocator);
@@ -215,17 +215,17 @@ pub const InitialLatents = struct {
 
 pub const DiffusedLatents = struct {
     x: zml.Slice,
-    
+
     pub fn print(self: DiffusedLatents, io: std.Io) !void {
         var stdout = std.Io.File.stdout().writer(io, &.{});
         const writer: *std.Io.Writer = &stdout.interface;
         const options: std.fmt.Number = .{};
-        
+
         std.log.info("Encoded text shape", .{});
         try self.x.shape.format(writer);
         try self.x.prettyPrint(writer, options);
     }
-    
+
     pub fn deinit(self: DiffusedLatents, allocator: std.mem.Allocator) void {
         self.x.free(allocator);
     }
@@ -233,16 +233,16 @@ pub const DiffusedLatents = struct {
 
 pub const DecodedAudio = struct {
     audio: zml.Slice,
-    
+
     pub fn deinit(self: DecodedAudio, allocator: std.mem.Allocator) void {
         self.audio.free(allocator);
     }
-    
+
     pub fn print(self: DecodedAudio, io: std.Io) !void {
         var stdout = std.Io.File.stdout().writer(io, &.{});
         const writer: *std.Io.Writer = &stdout.interface;
         const options: std.fmt.Number = .{};
-        
+
         std.log.info("Encoded text shape", .{});
         try self.audio.shape.format(writer);
         try self.audio.prettyPrint(writer, options);
@@ -270,7 +270,7 @@ pub fn tokenizeInspirationPrompt(zml_handler: *main.Zml_handler, tokenizer: zml.
     try formatted_prompt.appendSlice(allocator, "<|im_end|>\n");
 
     try formatted_prompt.appendSlice(allocator, "<|im_start|>assistant\n\n");
-    
+
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 10);
     try tokens.appendSlice(allocator, try encoder.encode(formatted_prompt.items));
 
@@ -318,13 +318,13 @@ pub fn tokenizeGenerationPrompt(allocator: std.mem.Allocator, tokenizer: zml.tok
     try assistant_cond_prompt.appendSlice(allocator, "\ntimesignature: ");
     try assistant_cond_prompt.appendSlice(allocator, metadata.timesignature);
     try assistant_cond_prompt.appendSlice(allocator, "\n</think>\n\n");
-    
+
     var assistant_uncond_prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
     defer assistant_uncond_prompt.deinit(allocator);
     try assistant_uncond_prompt.appendSlice(allocator, "<|im_start|>assistant\n");
     try assistant_uncond_prompt.appendSlice(allocator, "<think>\n\n");
     try assistant_uncond_prompt.appendSlice(allocator, "</think>\n\n");
-    
+
     var cond_prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
     defer cond_prompt.deinit(allocator);
     try cond_prompt.appendSlice(allocator, system_prompt.items);
@@ -336,10 +336,10 @@ pub fn tokenizeGenerationPrompt(allocator: std.mem.Allocator, tokenizer: zml.tok
     try uncond_prompt.appendSlice(allocator, system_prompt.items);
     try uncond_prompt.appendSlice(allocator, user_uncond_prompt.items);
     try uncond_prompt.appendSlice(allocator, assistant_uncond_prompt.items);
-    
+
     var cond_tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
     var uncond_tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
-    
+
     try cond_tokens.appendSlice(allocator, try encoder.encode(cond_prompt.items));
     try uncond_tokens.appendSlice(allocator, try encoder.encode(uncond_prompt.items));
 
@@ -349,10 +349,10 @@ pub fn tokenizeGenerationPrompt(allocator: std.mem.Allocator, tokenizer: zml.tok
 pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, metadata: AudioMetadata) ![]u32 {
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
-    
+
     var formatted_prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
     defer formatted_prompt.deinit(allocator);
-    
+
     try formatted_prompt.appendSlice(allocator, "# Instruction\n");
     // TODO
     //try formatted_prompt.appendSlice(allocator, "Fill the audio semantic mask based on the given conditions:\n\n");
@@ -371,7 +371,7 @@ pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: zml.tokeniz
     try formatted_prompt.appendSlice(allocator, "\n<|endoftext|>\n");
 
     std.log.info("text input\n{s}", .{formatted_prompt.items});
-    
+
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
     try tokens.appendSlice(allocator, try encoder.encode(formatted_prompt.items));
     return tokens.toOwnedSlice(allocator);
@@ -380,10 +380,10 @@ pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: zml.tokeniz
 pub fn tokenizeInputLyrics(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, metadata: AudioMetadata) ![]u32 {
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
-    
+
     var formatted_prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
     defer formatted_prompt.deinit(allocator);
-    
+
     try formatted_prompt.appendSlice(allocator, "# Languages\n");
     try formatted_prompt.appendSlice(allocator, metadata.language);
     try formatted_prompt.appendSlice(allocator, "\n\n# Lyric\n");
@@ -391,7 +391,7 @@ pub fn tokenizeInputLyrics(allocator: std.mem.Allocator, tokenizer: zml.tokenize
     try formatted_prompt.appendSlice(allocator, "<|endoftext|>");
 
     std.log.info("lyric input\n{s}", .{formatted_prompt.items});
-    
+
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
     try tokens.appendSlice(allocator, try encoder.encode(formatted_prompt.items));
     return tokens.toOwnedSlice(allocator);
@@ -403,22 +403,13 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     const allocator = zml_handler.allocator;
     const sharding = acellm.params.shardings.replicated;
     const platform = zml_handler.platform;
-    
+
     var tokenizer_decoder = try acellm.tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
-
-    var prefill_args = try acellm.prefill_exe.args(allocator);
-    defer prefill_args.deinit(allocator);
-    var prefill_results = try acellm.prefill_exe.results(allocator);
-    defer prefill_results.deinit(allocator);
-    var decode_args = try acellm.decode_exe.args(allocator);
-    defer decode_args.deinit(allocator);
-    var decode_results = try acellm.decode_exe.results(allocator);
-    defer decode_results.deinit(allocator);
-
+    
     var zero_buffer: zml.Buffer = try .scalar(io, platform, 0, .u32, sharding);
     defer zero_buffer.deinit();
     var prompt_buffer: zml.Buffer = try .scalar(io, platform, prompt_tok.len - 1, .u32, sharding);
@@ -428,28 +419,59 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     defer token_slice.free(allocator);
     var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
     defer token_buffer.deinit();
+    var token_embed_buffer: zml.Buffer = undefined;
+    defer token_embed_buffer.deinit();
 
     const prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ acellm.options.seq_len }, .u32));
     defer prefill_tokens_slice.free(allocator);
     @memcpy(prefill_tokens_slice.items(u32)[0..prompt_tok.len], prompt_tok);
     var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, sharding);
     defer prefill_tokens_buffer.deinit();
+    var prefill_embed_buffer: zml.Buffer = undefined;
+    defer prefill_embed_buffer.deinit();
+
+    const layer_index_slices = try allocator.alloc(zml.Slice, acellm.config.num_hidden_layers);
+    defer {
+        for (layer_index_slices) |*s| s.free(allocator);
+        allocator.free(layer_index_slices);
+    }
+    for (0..acellm.config.num_hidden_layers) |i| {
+        layer_index_slices[i] = try zml.Slice.alloc(allocator, .init(.{}, .u32));
+        layer_index_slices[i].items(u32)[0] = @intCast(i);
+    }
+    const layer_index_buffers = try allocator.alloc(zml.Buffer, acellm.config.num_hidden_layers);
+    defer {
+        for (layer_index_buffers) |*s| s.deinit();
+        allocator.free(layer_index_buffers);
+    }
+    for (0..acellm.config.num_hidden_layers) |i| {
+        layer_index_buffers[i] = try zml.Buffer.fromSlice(io, platform, layer_index_slices[i], sharding);
+    }
 
     std.log.info("5Hz run prefill with seq_len/prompt_len of {d}/{d} tokens", .{ acellm.options.seq_len, prompt_tok.len });
     zml_handler.tic(&zml_handler.timers.llm.prefill);
-    prefill_args.set(.{ acellm.model_buffers, prefill_tokens_buffer, zero_buffer, prompt_buffer, acellm.kv_cache_buffers, rng_buffers });
-    acellm.prefill_exe.callOpts(io, prefill_args, &prefill_results, .{ .wait = true });
-    prefill_results.fill(.{ &token_buffer, &acellm.kv_cache_buffers, &rng_buffers });
 
+    acellm.exes.prefill_embed_args.set(.{ acellm.model_buffers, prefill_tokens_buffer });
+    acellm.exes.prefill_embed_exe.callOpts(io, acellm.exes.prefill_embed_args, &acellm.exes.prefill_embed_results, .{ .wait = true });
+    acellm.exes.prefill_embed_results.fill(.{ &prefill_embed_buffer });
+    for (0..acellm.config.num_hidden_layers) |i| {
+        acellm.exes.prefill_layer_args.set(.{ acellm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, acellm.kv_cache_buffers, layer_index_buffers[i] });
+        acellm.exes.prefill_layer_exe.callOpts(io, acellm.exes.prefill_layer_args, &acellm.exes.prefill_layer_results, .{ .wait = true });
+        acellm.exes.prefill_layer_results.fill(.{ &prefill_embed_buffer, &acellm.kv_cache_buffers });
+    }
+    acellm.exes.prefill_sample_args.set(.{ acellm.model_buffers, prefill_embed_buffer, prompt_buffer, rng_buffers });
+    acellm.exes.prefill_sample_exe.callOpts(io, acellm.exes.prefill_sample_args, &acellm.exes.prefill_sample_results, .{ .wait = true });
+    acellm.exes.prefill_sample_results.fill(.{ &token_buffer, &rng_buffers });
+    
     try token_buffer.toSlice(io, token_slice);
-    zml_handler.toc(&zml_handler.timers.llm.prefill);    
+    zml_handler.toc(&zml_handler.timers.llm.prefill);
 
     std.log.info("5Hz run decode", .{});
-    zml_handler.tic(&zml_handler.timers.llm.decode);    
+    zml_handler.tic(&zml_handler.timers.llm.decode);
+    
     const output_tokens_len = acellm.options.seq_len - prompt_tok.len - 1;
     var num_tokens_generated: usize = 0;
     var result: std.ArrayList(u8) = try .initCapacity(allocator, 0);
-
     var stdout = std.Io.File.stdout().writer(io, &.{});
     var writer: *std.Io.Writer = &stdout.interface;
     generation: for (0..output_tokens_len + 1) |i| {
@@ -471,22 +493,31 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
                 }
             },
         }
-        
+
         // we need a new 1 token buffer to pass the token_index
         var pos_buffer: zml.Buffer = try .scalar(io, platform, prompt_tok.len + i, .u32, sharding);
         defer pos_buffer.deinit();
 
         // call to generate the next token
-        decode_args.set(.{ acellm.model_buffers, token_buffer, pos_buffer, zero_buffer, acellm.kv_cache_buffers, rng_buffers });
-        acellm.decode_exe.callOpts(io, decode_args, &decode_results, .{ .wait = true });
-        decode_results.fill(.{ &token_buffer, &acellm.kv_cache_buffers, &rng_buffers });
+        acellm.exes.decode_embed_args.set(.{ acellm.model_buffers, token_buffer });
+        acellm.exes.decode_embed_exe.callOpts(io, acellm.exes.decode_embed_args, &acellm.exes.decode_embed_results, .{ .wait = true });
+        acellm.exes.decode_embed_results.fill(.{ &token_embed_buffer });
+        for (0..acellm.config.num_hidden_layers) |ii| {
+            acellm.exes.decode_layer_args.set(.{ acellm.model_buffers.layers[ii], token_embed_buffer, pos_buffer, acellm.kv_cache_buffers, layer_index_buffers[ii] });
+            acellm.exes.decode_layer_exe.callOpts(io, acellm.exes.decode_layer_args, &acellm.exes.decode_layer_results, .{ .wait = true });
+            acellm.exes.decode_layer_results.fill(.{ &token_embed_buffer, &acellm.kv_cache_buffers });
+        }
+        acellm.exes.decode_sample_args.set(.{ acellm.model_buffers, token_embed_buffer, zero_buffer, rng_buffers });
+        acellm.exes.decode_sample_exe.callOpts(io, acellm.exes.decode_sample_args, &acellm.exes.decode_sample_results, .{ .wait = true });
+        acellm.exes.decode_sample_results.fill(.{ &token_buffer, &rng_buffers });
+        
         // extract the generated token from the buffer
         try token_buffer.toSlice(io, token_slice);
     }
     try writer.writeAll("\n");
     try writer.flush();
     std.log.info("5Hz done, generated {d} tokens", .{ num_tokens_generated });
-    zml_handler.toc(&zml_handler.timers.llm.decode);    
+    zml_handler.toc(&zml_handler.timers.llm.decode);
     return result.toOwnedSlice(allocator);
 }
 
@@ -495,7 +526,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     const allocator = zml_handler.allocator;
     const sharding = acecfg.params.shardings.replicated;
     const platform = zml_handler.platform;
-    
+
     var tokenizer_decoder = try acecfg.llm.tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
@@ -524,7 +555,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     defer cond_prompt_buffer.deinit();
     var uncond_prompt_buffer: zml.Buffer = try .scalar(io, platform, uncond_tok.len - 1, .u32, sharding);
     defer uncond_prompt_buffer.deinit();
-    
+
     var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer token_slice.free(allocator);
     var cond_token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
@@ -558,7 +589,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
 
     try cond_token_buffer.toSlice(io, token_slice);
     zml_handler.toc(&zml_handler.timers.cfg.prefill);
-    
+
     std.log.info("5Hz run decode CFG, need {d} audio codes", .{ nb_audio_codes });
     zml_handler.tic(&zml_handler.timers.cfg.decode);
     var stdout = std.Io.File.stdout().writer(io, &.{});
@@ -576,7 +607,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
         var uncond_pos_buffer: zml.Buffer = try .scalar(io, platform, uncond_tok.len + i, .u32, sharding);
         defer cond_pos_buffer.deinit();
         defer uncond_pos_buffer.deinit();
-        
+
         decode_args.set(.{
             acecfg.llm.model_buffers,
             cond_token_buffer, uncond_token_buffer,
@@ -587,14 +618,14 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
         });
         acecfg.decode_exe.callOpts(io, decode_args, &decode_results, .{ .wait = true });
         decode_results.fill(.{ &cond_token_buffer, &uncond_token_buffer, &acecfg.cond_kv_cache_buffers, &acecfg.uncond_kv_cache_buffers, &rng_buffers });
-        
+
         try cond_token_buffer.toSlice(io, token_slice);
     }
     try writer.writeAll("\n");
     try writer.flush();
     std.log.info("5Hz CFG done, generated {d} tokens", .{ result_tok.items.len });
     zml_handler.toc(&zml_handler.timers.cfg.decode);
-    return .{ 
+    return .{
         .token_id = try result_tok.toOwnedSlice(allocator),
         .string = try result_str.toOwnedSlice(allocator),
     };
@@ -611,13 +642,13 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
     const allocator = zml_handler.allocator;
     const sharding = aceemb.params.shardings.replicated;
     const platform = zml_handler.platform;
-    
+
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
-    
+
     const seq_len = tokens.len;
     const emb_dim = aceemb.config.hidden_size;
-    
+
     // the result embeddings we return
     const embedding_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = seq_len, .d = emb_dim }, .bf16));
     var embedding_buffer: zml.Buffer = try .fromSlice(io, platform, embedding_slice, sharding);
@@ -636,9 +667,9 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
     defer embed_results.deinit(allocator);
     embed_args.set(.{ aceemb.model_buffers, tokens_buffer });
     exe.call(embed_args, &embed_results);
-    
+
     embed_results.fill(.{ &embedding_buffer });
-    std.log.info("EMB done embedding", .{});    
+    std.log.info("EMB done embedding", .{});
 
     try embedding_buffer.toSlice(io, embedding_slice);
 
@@ -647,7 +678,7 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
     } else {
         zml_handler.toc(&zml_handler.timers.emb.prefill);
     }
-    
+
     return embedding_slice;
 }
 
@@ -664,28 +695,28 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     const t_timbre = aceenc.config.timbre_fix_frame;
     const t_25hz: i64 = 25 * target_duration;
     const s_enc = caption_len + lyric_len + 1;
-    
+
     std.log.info("ENC generate timbre reference of length {d} and {d} from silence latent", .{ t_timbre, t_25hz });
-    
+
     const timbre_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_timbre }, .bf16));
     defer timbre_slice.free(allocator);
     var timbre_buffer: zml.Buffer = try .fromSlice(io, platform, timbre_slice, sharding);
     defer timbre_buffer.deinit();
-    
+
     const src_audio_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_25hz }, .bf16));
     defer src_audio_slice.free(allocator);
     var src_audio_buffer: zml.Buffer = try .fromSlice(io, platform, src_audio_slice, sharding);
     defer src_audio_buffer.deinit();
-    
+
     var silence_args = try aceenc.silence_exe.args(allocator);
     defer silence_args.deinit(allocator);
     var silence_results = try aceenc.silence_exe.results(allocator);
     defer silence_results.deinit(allocator);
-    
+
     silence_args.set(.{ aceenc.silence_buffers });
     aceenc.silence_exe.call(silence_args, &silence_results);
     silence_results.fill(.{ &timbre_buffer, &src_audio_buffer });
-    
+
     std.log.info("ENC call encoder cap={d}x{d} lyr={d}x{d} tim={d}x{d} audioc={d} src={d}x{d}", .{
         caption_len, emb_dim,
         lyric_len, emb_dim,
@@ -693,7 +724,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
         audio_codes.len,
         audio_dim, t_25hz,
     });
-    
+
     // the result latents we return
     const x_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = audio_dim }, .bf16));
     const context_latents_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = 2 * audio_dim }, .bf16));
@@ -704,12 +735,12 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     defer x_buffer.deinit();
     defer context_latents_buffer.deinit();
     defer encoded_conditions_buffer.deinit();
-    
+
     var text_emb_buffer: zml.Buffer = try .fromSlice(io, platform, text_emb.caption_embedding, sharding);
     var lyric_emb_buffer: zml.Buffer = try .fromSlice(io, platform, text_emb.lyric_embedding, sharding);
     defer text_emb_buffer.deinit();
     defer lyric_emb_buffer.deinit();
-    
+
     const audio_codes_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = audio_codes.len }, .u32));
     defer audio_codes_slice.free(allocator);
     @memcpy(audio_codes_slice.items(u32)[0..audio_codes.len], audio_codes);
@@ -717,7 +748,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     defer audio_codes_buffer.deinit();
 
     zml_handler.tic(&zml_handler.timers.enc.prefill);
-    
+
     var encode_args = try aceenc.encode_exe.args(allocator);
     defer encode_args.deinit(allocator);
     var encode_results = try aceenc.encode_exe.results(allocator);
@@ -732,7 +763,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     try encoded_conditions_buffer.toSlice(io, encoded_conditions_slice);
 
     zml_handler.toc(&zml_handler.timers.enc.prefill);
-    
+
     return .{
         .x = x_slice,
         .context_latents = context_latents_slice,
@@ -750,12 +781,12 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     const t_25hz = latents.context_latents.shape.dim(0);
 
     std.log.info("DiT call with input size : {d}x{d} {d}x{d}", .{ t_25hz, audio_dim, latents.encoder_conditions.shape.dim(0), latents.encoder_conditions.shape.dim(1) });
-    
+
     var diffuse_args = try acedit.diffuse_exe.args(allocator);
     defer diffuse_args.deinit(allocator);
     var diffuse_results = try acedit.diffuse_exe.results(allocator);
     defer diffuse_results.deinit(allocator);
-    
+
     // prepare arguments buffers
     var x_buffer: zml.Buffer = try .fromSlice(io, platform, latents.x, sharding);
     var context_latents_buffer: zml.Buffer = try .fromSlice(io, platform, latents.context_latents, sharding);
@@ -763,11 +794,11 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     defer x_buffer.deinit();
     defer context_latents_buffer.deinit();
     defer encoded_conditions_buffer.deinit();
-    
+
     const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_25hz }, .bf16));
     var result_buffer: zml.Buffer = try .fromSlice(io, platform, result_slice, sharding);
     defer result_buffer.deinit();
-    
+
     // the full forward pass on the dit model is one iteration of the denoising
     const timestamps: [9]f32 = .{ 1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3, 0.0 };
     const steps = timestamps.len - 1;
@@ -788,9 +819,9 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     }
     zml_handler.timers.dit.prefill.nanoseconds = dit_time.nanoseconds;
     zml_handler.toc(&zml_handler.timers.dit.decode);
-    
+
     try result_buffer.toSlice(io, result_slice);
-    return .{ .x = result_slice };    
+    return .{ .x = result_slice };
 }
 
 pub fn decodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVae_handler, latents: DiffusedLatents) !DecodedAudio {
@@ -798,40 +829,40 @@ pub fn decodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVa
     const allocator = zml_handler.allocator;
     const sharding = acevae.shardings.replicated;
     const platform = zml_handler.platform;
-        
+
     const t_25hz = latents.x.shape.dim(1);
     var t_48khz = t_25hz;
     for (acevae.config.downsampling_ratios) |ratio| {
         t_48khz *= ratio;
     }
     const audio_dim = latents.x.shape.dim(0);
-    
+
     std.log.info("VAE call decode with input size : {d}x{d}", .{ audio_dim, t_25hz });
-    
+
     // the result latents we return
     const audio_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = 2, .t = t_48khz }, .f32));
     var audio_buffer: zml.Buffer = try .fromSlice(io, platform, audio_slice, sharding);
     defer audio_buffer.deinit();
-    
+
     var latent_buffer: zml.Buffer = try .fromSlice(io, platform, latents.x, sharding);
     defer latent_buffer.deinit();
-    
+
     var decode_args = try acevae.decode_exe.args(allocator);
     defer decode_args.deinit(allocator);
     var decode_results = try acevae.decode_exe.results(allocator);
     defer decode_results.deinit(allocator);
 
     zml_handler.tic(&zml_handler.timers.vae.prefill);
-    
+
     decode_args.set(.{ acevae.model_buffers, latent_buffer });
     acevae.decode_exe.callOpts(io, decode_args, &decode_results, .{ .wait = true });
     decode_results.fill(.{ &audio_buffer });
     std.log.info("VAE done decoding, output shape : {d}x{d}", .{ 2, t_48khz });
-    
+
     try audio_buffer.toSlice(io, audio_slice);
 
     zml_handler.toc(&zml_handler.timers.vae.prefill);
-    
+
     return .{ .audio = audio_slice };
 }
 
