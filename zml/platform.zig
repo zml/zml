@@ -203,7 +203,7 @@ pub const Platform = struct {
     memories: []const Memory,
     physical_mesh: zml.Sharding.PhysicalMesh,
     replicated_sharding: zml.Sharding,
-    shardings: std.StringArrayHashMapUnmanaged(zml.Sharding.Data),
+    shardings: std.StringArrayHashMapUnmanaged(zml.Sharding),
 
     pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
 
@@ -532,9 +532,14 @@ pub const Platform = struct {
             std.debug.panic("Another sharding already exists with this name: {s}", .{name});
         }
 
-        entry.key_ptr.* = try arena.dupe(u8, name);
-        entry.value_ptr.* = try .init(name, platform.physical_mesh, logical, strategy);
-        return .{ .data = entry.value_ptr };
+        const owned_name = try arena.dupe(u8, name);
+        const owned_data = try arena.create(Sharding.Data);
+        owned_data.* = try .init(owned_name, platform.physical_mesh, logical, strategy);
+        const sharding: Sharding = .{ .data = owned_data };
+        entry.key_ptr.* = owned_name;
+        entry.value_ptr.* = sharding;
+
+        return sharding;
     }
 };
 
