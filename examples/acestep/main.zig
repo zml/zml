@@ -205,7 +205,7 @@ const Args = struct {
 // info:   wav                                                 1.87s
 // info: total                                                92.44s
 
-// TODO: terminer compilation par bloc parallèle
+// TODO: terminer compilation par bloc parallèle (emb, enc, dit)
 // TODO: VAE compilation is an issue, worse than with f32 ??
 // TODO : split 4 blocks ? disable autotuning ? tiled decode ?
 
