@@ -561,10 +561,8 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
 
     var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer token_slice.free(allocator);
-    var cond_token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
-    var uncond_token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
-    defer cond_token_buffer.deinit();
-    defer uncond_token_buffer.deinit();
+    var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
+    defer token_buffer.deinit();
     var cond_embed_buffer: zml.Buffer = undefined;
     defer cond_embed_buffer.deinit();
     var uncond_embed_buffer: zml.Buffer = undefined;
@@ -651,9 +649,9 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     // sample next token
     acecfg.llm.exes.sample_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, rng_buffers });
     acecfg.llm.exes.sample_exe.callOpts(io, acecfg.llm.exes.sample_args, &acecfg.llm.exes.sample_results, .{ .wait = true });
-    acecfg.llm.exes.sample_results.fill(.{ &cond_token_buffer, &rng_buffers });
+    acecfg.llm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
 
-    try cond_token_buffer.toSlice(io, token_slice);
+    try token_buffer.toSlice(io, token_slice);
     zml_handler.toc(&zml_handler.timers.cfg.prefill);
 
     std.log.info("5Hz run decode CFG, need {d} audio codes", .{ nb_audio_codes });
@@ -675,11 +673,11 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
         defer uncond_pos_buffer.deinit();
 
         // embed cond tokens
-        acecfg.llm.exes.decode_embed_args.set(.{ acecfg.llm.model_buffers, cond_token_buffer });
+        acecfg.llm.exes.decode_embed_args.set(.{ acecfg.llm.model_buffers, token_buffer });
         acecfg.llm.exes.decode_embed_exe.callOpts(io, acecfg.llm.exes.decode_embed_args, &acecfg.llm.exes.decode_embed_results, .{ .wait = true });
         acecfg.llm.exes.decode_embed_results.fill(.{ &cond_embed_buffer });
         // embed uncond tokens
-        acecfg.llm.exes.decode_embed_args.set(.{ acecfg.llm.model_buffers, uncond_token_buffer });
+        acecfg.llm.exes.decode_embed_args.set(.{ acecfg.llm.model_buffers, token_buffer });
         acecfg.llm.exes.decode_embed_exe.callOpts(io, acecfg.llm.exes.decode_embed_args, &acecfg.llm.exes.decode_embed_results, .{ .wait = true });
         acecfg.llm.exes.decode_embed_results.fill(.{ &uncond_embed_buffer });
         for (0..acecfg.llm.config.num_hidden_layers) |ii| {
@@ -707,8 +705,8 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
         // sample next token
         acecfg.llm.exes.sample_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, rng_buffers });
         acecfg.llm.exes.sample_exe.callOpts(io, acecfg.llm.exes.sample_args, &acecfg.llm.exes.sample_results, .{ .wait = true });
-        acecfg.llm.exes.sample_results.fill(.{ &cond_token_buffer, &rng_buffers });
-        try cond_token_buffer.toSlice(io, token_slice);
+        acecfg.llm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
+        try token_buffer.toSlice(io, token_slice);
     }
     try writer.writeAll("\n");
     try writer.flush();
