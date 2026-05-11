@@ -112,7 +112,7 @@ pub const Partitioning = struct {
         return sharding.data.numPartitionsForLogicalAxis(logical_axis);
     }
 
-    pub fn sdyPerValueShardingAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, shapes: []const Shape) !*const dialects.shardy.TensorShardingPerValueAttribute {
+    pub fn sdyPerValueShardingAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, shapes: []const Shape) !*const mlir.Attribute {
         stdx.debug.assert(self.partitioner == .shardy, "sdyPerValueShardingAttr requires shardy partitioner", .{});
 
         const shardings = try allocator.alloc(*const dialects.shardy.TensorShardingAttribute, shapes.len);
@@ -120,10 +120,10 @@ pub const Partitioning = struct {
             const sharding = try self.selectSharding(shape);
             shardings[i] = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
         }
-        return .init(ctx, shardings);
+        return dialects.shardy.TensorShardingPerValueAttribute.init(ctx, shardings).asAttr();
     }
 
-    pub fn sdyManualAxesAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, in_shapes: []const Shape, out_shapes: []const Shape) !*const dialects.shardy.ManualAxesAttribute {
+    pub fn sdyManualAxesAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, in_shapes: []const Shape, out_shapes: []const Shape) !*const mlir.Attribute {
         stdx.debug.assert(self.partitioner == .shardy, "sdyManualAxesAttr requires shardy partitioner", .{});
 
         var axis_names = std.ArrayList([]const u8).empty;
@@ -170,7 +170,7 @@ pub const Partitioning = struct {
             axes[i] = mlir.StringAttribute.init(ctx, axis_name);
         }
 
-        return dialects.shardy.ManualAxesAttribute.init(ctx, axes);
+        return dialects.shardy.ManualAxesAttribute.init(ctx, axes).asAttr();
     }
 
     pub fn selectSharding(self: Partitioning, shape: Shape) !Sharding {
@@ -1334,7 +1334,11 @@ pub const Data = struct {
         return .init(ctx, .{ .mesh = data.name, .dimensions = dimensions, .replicated_axes = replicated_axes });
     }
 
-    pub fn gspmdShardingAttrForShape(self: *const Data, allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
+    pub fn gspmdShardingAttrForShape(self: *const Data, parent_allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
+        var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
         var has_sharding = false;
         for (0..shape.rank()) |ax| {
             if (shape.partition(ax) == .axis) {

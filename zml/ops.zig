@@ -1305,9 +1305,9 @@ fn manualComputationInternal(
                 .results = .{ .flat = global_result_types },
                 .blocks = &.{manual_block},
                 .attributes = &.{
-                    .named(ctx.mlir_ctx, "in_shardings", in_shardings_attr.asAttr()),
-                    .named(ctx.mlir_ctx, "out_shardings", out_shardings_attr.asAttr()),
-                    .named(ctx.mlir_ctx, "manual_axes", manual_axes_attr.asAttr()),
+                    .named(ctx.mlir_ctx, "in_shardings", in_shardings_attr),
+                    .named(ctx.mlir_ctx, "out_shardings", out_shardings_attr),
+                    .named(ctx.mlir_ctx, "manual_axes", manual_axes_attr),
                 },
                 .verify = true,
                 .location = .unknown(ctx.mlir_ctx),
