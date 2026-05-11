@@ -370,6 +370,10 @@ pub const DeviceAssertOpts = struct {
     mask: ?Value = null,
 };
 
+pub const ReturnIfOpts = struct {
+    inline_return: bool = false,
+};
+
 const tupleArity = dsl.tupleArity;
 
 pub fn ForScope(comptime N: usize) type {
@@ -2049,33 +2053,41 @@ pub const Builder = struct {
     }
 
     pub fn returnIf(self: *Builder, cond: Value, values: anytype) void {
+        self.returnIfOpts(cond, values, .{});
+    }
+
+    pub fn returnIfOpts(self: *Builder, cond: Value, values: anytype, opts: ReturnIfOpts) void {
         const current = self.currentBlock();
         const region = current.parentRegion();
-
-        const fields = @typeInfo(@TypeOf(values)).@"struct".fields;
         const cont_block = mlir.Block.init(&.{}, &.{});
 
-        // Use a shared exit block for all returns. This ensures that every
-        // return path (early or natural) goes through a pure tt.return block,
-        // allowing MLIR's Canonicalizer/BlockMerging to create a single join
-        // point.
-        if (self.exit_block == null) {
-            self.exit_block = mlir.Block.init(&.{}, &.{});
-
-            var ret_operands: [fields.len]*const mlir.Value = undefined;
-            inline for (fields, 0..) |f, i| {
-                if (f.type != Value)
-                    @compileError("returnIf: every value must be a Value");
-                ret_operands[i] = @field(values, f.name).inner;
-            }
-            _ = ttir.return_(self.ctx, &ret_operands, self.loc()).appendTo(self.exit_block.?);
+        const fields = @typeInfo(@TypeOf(values)).@"struct".fields;
+        var ret_operands: [fields.len]*const mlir.Value = undefined;
+        inline for (fields, 0..) |f, i| {
+            if (f.type != Value)
+                @compileError("returnIfOpts: every value must be a Value");
+            ret_operands[i] = @field(values, f.name).inner;
         }
+
+        const ret_target: *mlir.Block = if (opts.inline_return) blk: {
+            const rb = mlir.Block.init(&.{}, &.{});
+            _ = ttir.return_(self.ctx, &ret_operands, self.loc()).appendTo(rb);
+            region.appendOwnedBlock(rb);
+            break :blk rb;
+        } else blk: {
+            if (self.exit_block == null) {
+                self.exit_block = mlir.Block.init(&.{}, &.{});
+                _ = ttir.return_(self.ctx, &ret_operands, self.loc()).appendTo(self.exit_block.?);
+            }
+            break :blk self.exit_block.?;
+        };
+
         region.appendOwnedBlock(cont_block);
 
         _ = cf.cond_br(
             self.ctx,
             cond.inner,
-            self.exit_block.?,
+            ret_target,
             &.{},
             cont_block,
             &.{},
