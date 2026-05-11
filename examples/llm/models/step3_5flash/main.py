@@ -125,9 +125,13 @@ model = AutoModelForCausalLM.from_pretrained(
 
 message = "Explain the significance of the number 42."
 
+# device is from raw model before wrapping with zml_utils
+# This is because we lose attribute lookups in ActivationCollector (TODO?)
+device = model.device
+
 # replace model with zml_utils tracked model
 model = zml_utils.ActivationCollector(model, max_layers=1000, stop_after_first_step=True)
-inputs = tokenizer(message, return_tensors="pt").to(model.device)
+inputs = tokenizer(message, return_tensors="pt").to(device)
 
 # perform forward pass to collect activations
 outputs, activations = model(inputs)
@@ -136,3 +140,6 @@ output_text = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_spec
 
 print(f"collected {len(activations)} activations from forward pass!")
 print(activations.keys())
+
+save_file(activations, "step3_5flash.activations.safetensors")
+print("Saved to step3_5flash.activations.safetensors")
