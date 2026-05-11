@@ -1,4 +1,4 @@
-jusimport os
+import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,2,3,4,5,6,7"
 import torch
 import transformers
@@ -120,12 +120,12 @@ else:
 # distribute memory evenly
 cluster_memory = {
     0: "180GiB",
+    1: "180GiB",
     2: "180GiB",
     3: "180GiB",
     4: "180GiB",
     5: "180GiB",
     6: "180GiB",
-    7: "180GiB",
 }
 
 # 3. Stream the heavy weights from the Hub
