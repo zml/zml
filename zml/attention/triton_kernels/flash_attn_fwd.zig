@@ -78,9 +78,16 @@ pub const FlashAttnFwd = struct {
         const xcd = pid.rem(num_xcds);
         const local_pid = pid.div(num_xcds);
         const cond = xcd.lt(tall_xcds);
-        const pid_tall = xcd.mul(pids_per_xcd).add(local_pid);
-        const pid_short = tall_xcds.mul(pids_per_xcd).add(xcd.sub(tall_xcds).mul(pids_per_xcd.sub(1))).add(local_pid);
-        return b.select(cond, pid_tall, pid_short);
+        var scope = b.openIfElse(cond, .{b.scalarTy(.i32)});
+        {
+            const pid_tall = xcd.mul(pids_per_xcd).add(local_pid);
+            scope.yieldThen(.{pid_tall});
+        }
+        {
+            const pid_short = tall_xcds.mul(pids_per_xcd).add(xcd.sub(tall_xcds).mul(pids_per_xcd.sub(1))).add(local_pid);
+            scope.yieldElse(.{pid_short});
+        }
+        return scope.results[0];
     }
 
     // -----------------------------------------------------------------------
@@ -162,7 +169,7 @@ pub const FlashAttnFwd = struct {
             .cu_seqlens_q = .{ .ptr = .i32 },
             .cu_seqlens_k = .{ .ptr = .i32 },
             .dropout_p = .{ .scalar = .f32 },
-            .philox_seed = .{ .scalar = .i64 },
+            .philox_seed = .{ .scalar = .i32 },
             .philox_offset_base_in = .{ .scalar = .i32 },
             .SEQLEN_Q = .{ .scalar = .i32 },
             .SEQLEN_K = .{ .scalar = .i32 },
@@ -173,12 +180,13 @@ pub const FlashAttnFwd = struct {
         const SEQLEN_Q = a.SEQLEN_Q;
         const SEQLEN_K = a.SEQLEN_K;
 
+        const NUM_BLOCKS = SEQLEN_Q.add(BLOCK_M - 1).div(BLOCK_M);
+
         const wid = b.programId(.x);
 
         const off_q_head_raw = wid.rem(NUM_Q_HEADS);
         const off_q_head = remapXcd(b, off_q_head_raw, NUM_Q_HEADS, NUM_XCD);
 
-        const NUM_BLOCKS = SEQLEN_Q.add(BLOCK_M - 1).div(BLOCK_M);
         const start_m = wid.div(NUM_Q_HEADS).rem(NUM_BLOCKS);
 
         const off_z = wid.div(NUM_BLOCKS.mul(NUM_Q_HEADS)).rem(a.BATCH);
@@ -203,16 +211,10 @@ pub const FlashAttnFwd = struct {
         const stride_oh = a.stride_oh_in.to(.i64);
         const stride_om = a.stride_om_in.to(.i64);
         const stride_on = a.stride_on_in.to(.i64);
-        const philox_offset_base = a.philox_offset_base_in.to(.i64);
-        _ = philox_offset_base;
-        const stride_sd_z = a.stride_sd_z_in.to(.i64);
-        _ = stride_sd_z;
-        const stride_sd_h = a.stride_sd_h_in.to(.i64);
-        _ = stride_sd_h;
-        const stride_sd_m = a.stride_sd_m_in.to(.i64);
-        _ = stride_sd_m;
-        const stride_sd_n = a.stride_sd_n_in.to(.i64);
-        _ = stride_sd_n;
+        const stride_alibi_z = a.stride_alibi_z_in.to(.i64);
+        _ = stride_alibi_z;
+        const stride_alibi_h = a.stride_alibi_h_in.to(.i64);
+        _ = stride_alibi_h;
         const stride_lse_z = a.stride_lse_z_in.to(.i64);
         const stride_lse_h = a.stride_lse_h_in.to(.i64);
         const stride_lse_m = a.stride_lse_m_in.to(.i64);
@@ -319,14 +321,22 @@ pub const FlashAttnFwd = struct {
         });
 
         const sk_lt_bn = seqlen_k.lt(BLOCK_N);
-        const n_extra_if_lt = BLOCK_N_val.sub(seqlen_k);
-        const sk_mod_bn = seqlen_k.rem(BLOCK_N_val);
-        const n_extra_else = b.select(sk_mod_bn.ne(0), sk_mod_bn, b.liftAs(@as(i32, 0), .i32));
-        const n_extra_tokens = b.select(sk_lt_bn, n_extra_if_lt, n_extra_else);
+        var nex_scope = b.openIfElse(sk_lt_bn, .{seqlen_k.type_()});
+        {
+            const n_extra_if_lt = BLOCK_N_val.sub(seqlen_k);
+            nex_scope.yieldThen(.{n_extra_if_lt});
+        }
+        {
+            const sk_mod_bn = seqlen_k.rem(BLOCK_N_val);
+            nex_scope.yieldElse(.{sk_mod_bn});
+        }
+        const n_extra_tokens = nex_scope.results[0];
 
-        const padded_block_k = n_extra_tokens.ne(0);
         const BLOCK_M_val = b.liftAs(@as(i32, BLOCK_M), .i32);
-        const is_modulo_mn_not = padded_block_k.bitOr(seqlen_q.rem(BLOCK_M_val).ne(0));
+        const not_padded = n_extra_tokens.eq(0);
+        const sq_mod_eq_0 = seqlen_q.rem(BLOCK_M_val).eq(0);
+        const is_modulo_mn = not_padded.bitAnd(sq_mod_eq_0);
+        const is_modulo_mn_not = b.xori(is_modulo_mn, b.liftAs(@as(u1, 1), .i1));
         const base_masked: i32 = @divTrunc(BLOCK_M, BLOCK_N);
         const masked_blocks_raw = b.select(is_modulo_mn_not, b.liftAs(@as(i32, base_masked + 1), .i32), b.liftAs(@as(i32, base_masked), .i32));
 
@@ -339,13 +349,10 @@ pub const FlashAttnFwd = struct {
         {
             const has_full = n_full_blocks.gt(0);
             var i_scope = b.openIfElse(has_full, .{
-                acc.type_(),
-                l_i.type_(),
                 m_i.type_(),
-                k_ptrs.type_(),
-                v_ptrs.type_(),
+                l_i.type_(),
+                acc.type_(),
                 block_min.type_(),
-                block_max.type_(),
             });
             {
                 const full_block_max = block_min.add(n_full_blocks.mul(BLOCK_N_val));
@@ -374,30 +381,30 @@ pub const FlashAttnFwd = struct {
                     false,
                     false,
                 );
-                const new_block_min = full_block_max;
-                const new_block_max = n_blocks.mul(BLOCK_N_val);
-                const new_k_ptrs = k_ptrs.addPtr(n_full_blocks.to(.i64).mul(@as(i64, BLOCK_N)).mul(stride_kn));
-                const new_v_ptrs = v_ptrs.addPtr(n_full_blocks.to(.i64).mul(@as(i64, BLOCK_N)).mul(stride_vn));
-                i_scope.yieldThen(.{ full_result.acc, full_result.l_i, full_result.m_i, new_k_ptrs, new_v_ptrs, new_block_min, new_block_max });
+                i_scope.yieldThen(.{ full_result.m_i, full_result.l_i, full_result.acc, full_block_max });
             }
             {
-                i_scope.yieldElse(.{ acc, l_i, m_i, k_ptrs, v_ptrs, block_min, block_max });
+                i_scope.yieldElse(.{ m_i, l_i, acc, block_min });
             }
-            acc = i_scope.results[0];
+            m_i = i_scope.results[0];
             l_i = i_scope.results[1];
-            m_i = i_scope.results[2];
-            k_ptrs = i_scope.results[3];
-            v_ptrs = i_scope.results[4];
-            block_min = i_scope.results[5];
-            block_max = i_scope.results[6];
+            acc = i_scope.results[2];
+            block_min = i_scope.results[3];
+            block_max = n_blocks.mul(BLOCK_N_val);
         }
 
         // Masked blocks
         {
             const has_masked = masked_blocks.gt(0);
-            var i_scope = b.openIfElse(has_masked, .{ acc.type_(), l_i.type_(), m_i.type_() });
+            var i_scope = b.openIfElse(has_masked, .{ m_i.type_(), l_i.type_(), acc.type_() });
             {
                 const offs_n_causal = offs_n.add(seqlen_q.sub(seqlen_k));
+                // Recompute k_ptrs and v_ptrs from originals + n_full_blocks offset
+                const n_full_i64 = n_full_blocks.to(.i64);
+                const k_offset = n_full_i64.mul(@as(i64, BLOCK_N)).mul(stride_kn);
+                const new_k_ptrs = k_ptrs.addPtr(k_offset);
+                const v_offset = n_full_i64.mul(@as(i64, BLOCK_N)).mul(stride_vn);
+                const new_v_ptrs = v_ptrs.addPtr(v_offset);
                 const masked_result = attnFwdInner(
                     b,
                     cfg,
@@ -405,8 +412,8 @@ pub const FlashAttnFwd = struct {
                     l_i,
                     m_i,
                     q,
-                    k_ptrs,
-                    v_ptrs,
+                    new_k_ptrs,
+                    new_v_ptrs,
                     stride_kn,
                     stride_vn,
                     start_m,
@@ -423,14 +430,14 @@ pub const FlashAttnFwd = struct {
                     true,
                     true,
                 );
-                i_scope.yieldThen(.{ masked_result.acc, masked_result.l_i, masked_result.m_i });
+                i_scope.yieldThen(.{ masked_result.m_i, masked_result.l_i, masked_result.acc });
             }
             {
-                i_scope.yieldElse(.{ acc, l_i, m_i });
+                i_scope.yieldElse(.{ m_i, l_i, acc });
             }
-            acc = i_scope.results[0];
+            m_i = i_scope.results[0];
             l_i = i_scope.results[1];
-            m_i = i_scope.results[2];
+            acc = i_scope.results[2];
         }
 
         // Epilogue

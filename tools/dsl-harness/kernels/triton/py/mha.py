@@ -375,6 +375,7 @@ def _attn_fwd(
     USE_INT64_STRIDES: tl.constexpr,
     ENABLE_SINK: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
+    USE_ALIBI: tl.constexpr,
 ):
     NUM_BLOCKS = (SEQLEN_Q + BLOCK_M - 1) // BLOCK_M
     # calculate offsets
@@ -430,11 +431,18 @@ def _attn_fwd(
         stride_alibi_h = tl.cast(stride_alibi_h_in, tl.int64)
 
         # NOTE: philox offset is need in dropout pointer calculations
-        philox_offset_base = tl.cast(philox_offset_base_in, tl.int64)
-        stride_sd_z = tl.cast(stride_sd_z_in, tl.int64)
-        stride_sd_h = tl.cast(stride_sd_h_in, tl.int64)
-        stride_sd_m = tl.cast(stride_sd_m_in, tl.int64)
-        stride_sd_n = tl.cast(stride_sd_n_in, tl.int64)
+        if ENABLE_DROPOUT:
+            philox_offset_base = tl.cast(philox_offset_base_in, tl.int64)
+            stride_sd_z = tl.cast(stride_sd_z_in, tl.int64)
+            stride_sd_h = tl.cast(stride_sd_h_in, tl.int64)
+            stride_sd_m = tl.cast(stride_sd_m_in, tl.int64)
+            stride_sd_n = tl.cast(stride_sd_n_in, tl.int64)
+        else:
+            philox_offset_base = philox_offset_base_in
+            stride_sd_z = stride_sd_z_in
+            stride_sd_h = stride_sd_h_in
+            stride_sd_m = stride_sd_m_in
+            stride_sd_n = stride_sd_n_in
         stride_lse_z = tl.cast(stride_lse_z_in, tl.int64)
         stride_lse_h = tl.cast(stride_lse_h_in, tl.int64)
         stride_lse_m = tl.cast(stride_lse_m_in, tl.int64)
@@ -627,14 +635,14 @@ def _attn_fwd(
     v_ptrs = v_ptr + v_offs
 
     # alibi slopes
-    if alibi_slopes_ptr is not None:
+    if USE_ALIBI:
         alibi_offs = off_z * stride_alibi_z + off_q_head * stride_alibi_h
         alibi_slope = tl.load(alibi_slopes_ptr + alibi_offs)
     else:
         alibi_slope = None
 
     # s_dmask (return_scores)
-    if s_dmask_ptr is not None:
+    if RETURN_SCORES:
         s_dmask_offs = (
             off_z * stride_sd_z
             + off_q_head * stride_sd_h
@@ -646,7 +654,7 @@ def _attn_fwd(
         s_dmask_ptrs = None
 
     # dropout
-    if dropout_mask_ptr is not None:
+    if ENABLE_DROPOUT:
         dropout_mask_offs = (
             off_z * stride_sd_z
             + off_q_head * stride_sd_h
@@ -1029,6 +1037,7 @@ def build_args(cfg: Dict[str, Any]) -> Tuple[list, Dict[str, Any]]:
         "USE_INT64_STRIDES": bool(cfg.get("USE_INT64_STRIDES", True)),
         "ENABLE_SINK": bool(cfg.get("ENABLE_SINK", False)),
         "SLIDING_WINDOW": int(cfg.get("SLIDING_WINDOW", 0)),
+        "USE_ALIBI": bool(cfg.get("USE_ALIBI", False)),
         "num_warps": 4,
         "num_stages": 1,
     }

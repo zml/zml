@@ -191,7 +191,7 @@ pub fn args() std.meta.ArgsTuple(@TypeOf(forward)) {
         t.buf(.i32, 2), // cu_seqlens_q
         t.buf(.i32, 2), // cu_seqlens_k
         t.scalar(.f32), // dropout_p
-        t.scalar(.i64), // philox_seed
+        t.scalar(.i32), // philox_seed
         t.scalar(.i32), // philox_offset_base
         t.scalar(.i32), // SEQLEN_Q
         t.scalar(.i32), // SEQLEN_K
