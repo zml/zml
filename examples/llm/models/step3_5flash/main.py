@@ -7,13 +7,12 @@ import inspect
 import copy
 import json
 from huggingface_hub import hf_hub_download
+import transformers.modeling_rope_utils
 
 MODEL_PATH = "stepfun-ai/Step-3.5-Flash"
 PATCHED_DIR = "./patched_config"
 
-# --- AUTO-RESTORE AND FIX THE CONFIG FILE ---
-# Grabs the pristine config.json from cache to undo our previous 45-layer truncation,
-# fixes the actual typo (num_hidden_layers: 48), and saves it locally.
+# fix typo (num_hidden_layers: 48 != 45), save locally
 os.makedirs(PATCHED_DIR, exist_ok=True)
 clean_config_path = hf_hub_download(repo_id=MODEL_PATH, filename="config.json")
 with open(clean_config_path, "r") as f:
@@ -25,8 +24,6 @@ if "layer_types" in cfg:
 with open(os.path.join(PATCHED_DIR, "config.json"), "w") as f:
     json.dump(cfg, f, indent=2)
 
-# --- THE "CLEAN ROOM" CONFIG PATCH ---
-import transformers.modeling_rope_utils
 original_compute = transformers.modeling_rope_utils._compute_llama3_parameters
 
 def patched_compute_llama3(config, device=None, seq_len=None, **rope_kwargs):
@@ -96,18 +93,15 @@ if hasattr(transformers.modeling_rope_utils, "ROPE_INIT_FUNCTIONS"):
     transformers.modeling_rope_utils.ROPE_INIT_FUNCTIONS["llama3"] = patched_compute_llama3
     transformers.modeling_rope_utils.ROPE_INIT_FUNCTIONS["default"] = patched_compute_llama3
 
-# ---> NEW FIX: Inject the missing API method during Hugging Face's initialization sweep <---
 original_init_weights = transformers.modeling_utils.PreTrainedModel._init_weights
 
 def patched_init_weights(self, module):
-    # If HF encounters StepFun's custom RoPE, we dynamically attach the missing method
     if module.__class__.__name__ == 'Step3p5RotaryEmbedding':
         if not hasattr(module, 'compute_default_rope_parameters'):
             module.compute_default_rope_parameters = lambda *args, **kwargs: (module.inv_freq, getattr(module, "attention_scaling", 1.0))
     return original_init_weights(self, module)
 
 transformers.modeling_utils.PreTrainedModel._init_weights = patched_init_weights
-# ------------------------------------------------
 
 # 1. Load the patched config
 config = AutoConfig.from_pretrained(PATCHED_DIR, trust_remote_code=True)
@@ -129,22 +123,16 @@ model = AutoModelForCausalLM.from_pretrained(
     device_map="auto",
 )
 
-messages = [{"role": "user", "content": "Explain the significance of the number 42."}]
+message = "Explain the significance of the number 42."
 
 # replace model with zml_utils tracked model
 model = zml_utils.ActivationCollector(model, max_layers=1000, stop_after_first_step=True)
-inputs = tokenizer.apply_chat_template(
-    messages,
-    tokenize=True,
-    add_generation_prompt=True,
-    return_dict=True,
-    return_tensors="pt",
-).to(model.device)
+inputs = tokenizer(message, return_tensors="pt").to(model.device)
 
 # perform forward pass to collect activations
 outputs, activations = model(inputs)
 
 output_text = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
 
-print(output_text)
+print(f"collected {len(activations)} activations from forward pass!")
 print(activations.keys())
