@@ -111,6 +111,12 @@ TRITON_KERNELS = [
         "py_kernel": "reduce_segments_ptr",
         "extra_py_deps": [":unified_attention_kernels"],
     },
+    {
+        "name": "mha",
+        "src": "zig/mha.zig",
+        "py_src": "py/mha.py",
+        "py_kernel": "_attn_fwd",
+    },
 ]
 
 MOSAIC_TPU_KERNELS = [
