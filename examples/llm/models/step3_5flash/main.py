@@ -9,7 +9,7 @@ MODEL_PATH = "stepfun-ai/Step-3.5-Flash"
 
 config = AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True)
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True, device_map="auto")
 
 if isinstance(tokenizer.eos_token_id, list):
     config.pad_token_id = tokenizer.eos_token_id[0]
