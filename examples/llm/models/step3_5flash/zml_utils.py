@@ -109,7 +109,7 @@ class ActivationCollector:
 
         if name is None:
             print("err: unknown module", module.__class__)
-            breakpoint()
+            # breakpoint()
             return
 
         assert out is not None
