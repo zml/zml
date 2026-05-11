@@ -25,6 +25,9 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 
 messages = [{"role": "user", "content": "Explain the significance of the number 42."}]
+
+# replace model with zml_utils tracked model
+model = zml_utils.ActivationCollector(model, max_layers=1000, stop_after_first_step=True)
 inputs = tokenizer.apply_chat_template(
     messages,
     tokenize=True,
@@ -33,8 +36,10 @@ inputs = tokenizer.apply_chat_template(
     return_tensors="pt",
 ).to(model.device)
 
-# Generate
-generated_ids = model.generate(**inputs, max_new_tokens=128, do_sample=False)
-output_text = tokenizer.decode(generated_ids[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+# perform forward pass to collect activations
+outputs, activations = model(inputs)
+
+output_text = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
 
 print(output_text)
+print(activations.keys())
