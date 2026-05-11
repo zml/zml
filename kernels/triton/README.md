@@ -666,6 +666,10 @@ Pairs in place today: `load` / `loadOpts`, `store` / `storeOpts`,
 `sum` / `sumOpts`, `max` / `maxOpts`, `min` / `minOpts`,
 `cumsum` / `cumsumOpts`, `cumprod` / `cumprodOpts`.
 
+DSL-only pair (no Python kwarg counterpart — `.inline_return` is about IR
+block layout, see the `returnIf` / `returnIfOpts` section under Control flow):
+`returnIf` / `returnIfOpts`.
+
 Ops with no kwargs in Python (pure positional): `gather(src, indices, axis)`,
 `trans(src, order)`, `permute(src, order)`, `cat(lhs, rhs)` (dim=0 default),
 `split(src)`, `join(lhs, rhs)`, `item(src)`, `broadcast(a, b)` (symmetric),
@@ -814,7 +818,7 @@ const r = w.results[0];
 - `yieldBefore(cond, forwarded)` — `forwarded` arity must match `after_types`.
 - `yieldAfter(values)` — arity must match `inits`.
 
-### `returnIf` — early `tt.return` via cf.cond_br
+### `returnIf` / `returnIfOpts` — early `tt.return` via cf.cond_br
 
 ```zig
 // Python: if pid_m * BLOCK >= num_tokens_post_padded: return
@@ -846,14 +850,32 @@ cf.cond_br %out_of_range, ^ret, ^cont
   `scf.if` for structured loops and value-carrying branches; our DSL does
   the same.
 
+**`returnIfOpts(cond, values, .{ .inline_return = true })` — match Python's
+per-`return` block layout.** By default `returnIf` routes every return path
+(every early `returnIf` / `openReturnIf` plus the natural fall-through from
+`b.finish`) through one **shared exit block** holding the single `tt.return`.
+Python's frontend does the opposite: each `if cond: return` (and the natural
+exit) gets its **own** `tt.return`-only block, and LLVM's SimplifyCFG later
+merges them into a single `common.ret`. The two are semantically identical
+but differ in the function-exit block's label and position — which renumbers
+every `$L__BB` label downstream and blows up the PTX diff. When the Python source contains *any* literal `return` statement (it then
+has ≥2 `ret` blocks in LLVM — the explicit one(s) plus the implicit
+function-end one — which SimplifyCFG merges into `common.ret`), pass
+`.{ .inline_return = true }` on *every* return site, and set
+`scope.inline_return = true` on each `openReturnIf` (see below). Each one
+then emits `tt.return` inline and SimplifyCFG reproduces Python's
+`common.ret`. The default shared exit block emits exactly one `tt.return`,
+so the merge never fires and the function-exit block lands somewhere else.
+
 ### `openReturnIf` — early `tt.return` with side-effects in the taken branch
 
 ```zig
 // Python: if off_experts == -1: write_zeros_to_output(...); return
 var scope = b.openReturnIf(is_dead);
+scope.inline_return = true;              // optional — see `returnIfOpts` above
 {
     writeZerosToOutput(k, c_ptr, ...);   // ops here emit into ^ret
-    scope.yieldReturn(.{});              // closes ^ret with tt.return
+    scope.yieldReturn(.{});              // closes ^ret with tt.return (or cf.br ^exit)
 }
 // ... ops here emit into ^cont (fall-through) ...
 ```
@@ -864,6 +886,12 @@ the `tt.return`. Use this instead of the
 `openIf(cond){body}yieldThen; returnIf(cond, values)` pair — that pattern
 duplicates the predicate (emits both `scf.if` and `cf.cond_br` on the same
 boolean) and drifts from Triton's reference IR.
+
+`scope.inline_return` is the per-scope twin of `returnIfOpts`'s
+`.inline_return` (default `false`): set it before `yieldReturn` to make
+`^ret` close with `tt.return` directly instead of `cf.br ^exit`. Flip it on
+every `returnIf` / `openReturnIf` of a kernel when matching a Python source
+that has literal `return` statements.
 
 Same restrictions as `returnIf`: top-level `tt.func` body only.
 
@@ -1041,8 +1069,8 @@ Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
 | `while cond: ...`                             | `var w = b.openWhile(.{inits}, .{after_types}); { ...; w.yieldBefore(cond, .{...}); }; { ...; w.yieldAfter(.{...}); }` |
 | `if cond: ...` (side-effects, no else)        | `var i = b.openIf(cond); { ...; i.yieldThen(.{}); }`                                         |
 | `if cond: ... else: ...`                      | `var i = b.openIfElse(cond, .{result_types}); { ...; i.yieldThen(.{...}); }; { ...; i.yieldElse(.{...}); }` |
-| `if cond: return` (early exit)                | `b.returnIf(cond, .{});` — emits `cf.cond_br` + `tt.return`, continues in fall-through block  |
-| `if cond: <stores>; return` (early exit, with side-effects) | `var s = b.openReturnIf(cond); { ...; s.yieldReturn(.{}); }` — single `cf.cond_br`; body emits into `^ret` before the `tt.return` |
+| `if cond: return` (early exit)                | `b.returnIf(cond, .{});` — emits `cf.cond_br` + `tt.return`, continues in fall-through block (add `b.returnIfOpts(cond, .{}, .{ .inline_return = true })` when matching a Python source that has literal `return`s) |
+| `if cond: <stores>; return` (early exit, with side-effects) | `var s = b.openReturnIf(cond); { ...; s.yieldReturn(.{}); }` — single `cf.cond_br`; body emits into `^ret` before the `tt.return` (set `s.inline_return = true` to match, alongside `returnIfOpts`) |
 
 ---
 
