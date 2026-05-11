@@ -564,6 +564,15 @@ fn getLaunchConfigJsonPath(allocator: std.mem.Allocator) ![]const u8 {
     return try allocator.dupe(u8, config_json);
 }
 
+const JsonConfigFields = struct {
+    BLOCK_SIZE_M: i64,
+    BLOCK_SIZE_N: i64,
+    BLOCK_SIZE_K: i64,
+    GROUP_SIZE_M: i64,
+    num_warps: i64,
+    num_stages: i64,
+};
+
 fn applyJsonTokenConfig(opts: Options, num_tokens: i64) !Options {
     var out = opts;
     if (!opts.dynamic_launch_by_num_tokens) return out;
@@ -578,47 +587,38 @@ fn applyJsonTokenConfig(opts: Options, num_tokens: i64) !Options {
     defer file.close(io);
     var reader = file.reader(io, &.{});
     const config_json = try reader.interface.readAlloc(allocator, try file.length(io));
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, config_json, .{});
 
-    if (parsed.value != .object) return error.InvalidLaunchConfigShape;
+    const parsed = try std.json.parseFromSlice(
+        std.json.ArrayHashMap(JsonConfigFields),
+        allocator,
+        config_json,
+        .{},
+    );
+    defer parsed.deinit();
 
-    var it = parsed.value.object.iterator();
-    var best_m: ?i64 = null;
     var best_diff: u64 = std.math.maxInt(u64);
-    var best_config: ?std.json.Value = null;
+    var best_m: ?i64 = null;
+    var best_config: ?JsonConfigFields = null;
 
+    var it = parsed.value.map.iterator();
     while (it.next()) |entry| {
-        const m = std.fmt.parseInt(i64, entry.key_ptr.*, 10) catch continue;
-        if (entry.value_ptr.* != .object) continue;
+        const m = try std.fmt.parseInt(i64, entry.key_ptr.*, 10);
 
-        const diff: u64 = if (m >= num_tokens)
-            @intCast(m - num_tokens)
-        else
-            @intCast(num_tokens - m);
-
+        const diff: u64 = @intCast(@abs(m - num_tokens));
         if (best_m == null or diff < best_diff or (diff == best_diff and m < best_m.?)) {
             best_m = m;
-            best_diff = diff;
             best_config = entry.value_ptr.*;
+            best_diff = diff;
         }
     }
 
-    if (best_config == null) return error.NoMatchingLaunchConfig;
-
-    const cfg = best_config.?.object;
-    const block_size_m = cfg.get("BLOCK_SIZE_M") orelse return error.MissingLaunchConfigField;
-    const block_size_n = cfg.get("BLOCK_SIZE_N") orelse return error.MissingLaunchConfigField;
-    const block_size_k = cfg.get("BLOCK_SIZE_K") orelse return error.MissingLaunchConfigField;
-    const group_size_m = cfg.get("GROUP_SIZE_M") orelse return error.MissingLaunchConfigField;
-    const num_warps = cfg.get("num_warps") orelse return error.MissingLaunchConfigField;
-    const num_stages = cfg.get("num_stages") orelse return error.MissingLaunchConfigField;
-
-    out.block_size_m = block_size_m.integer;
-    out.block_size_n = block_size_n.integer;
-    out.block_size_k = block_size_k.integer;
-    out.group_size_m = group_size_m.integer;
-    out.num_warps = num_warps.integer;
-    out.num_stages = num_stages.integer;
+    const cfg = best_config orelse return error.NoMatchingLaunchConfig;
+    out.block_size_m = cfg.BLOCK_SIZE_M;
+    out.block_size_n = cfg.BLOCK_SIZE_N;
+    out.block_size_k = cfg.BLOCK_SIZE_K;
+    out.group_size_m = cfg.GROUP_SIZE_M;
+    out.num_warps = cfg.num_warps;
+    out.num_stages = cfg.num_stages;
 
     return out;
 }
