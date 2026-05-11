@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,2,3,4,5,6,7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 import torch
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
@@ -123,9 +123,6 @@ cluster_memory = {
     1: "180GiB",
     2: "180GiB",
     3: "180GiB",
-    4: "180GiB",
-    5: "180GiB",
-    6: "180GiB",
 }
 
 # 3. Stream the heavy weights from the Hub
@@ -138,18 +135,18 @@ model = AutoModelForCausalLM.from_pretrained(
     max_memory=cluster_memory,
 )
 
-message = "Explain the significance of the number 42."
+message = "Hello"
 
 # device is from raw model before wrapping with zml_utils
 # This is because we lose attribute lookups in ActivationCollector (TODO?)
 device = model.device
 
 # replace model with zml_utils tracked model
-model.model.layers[0] = zml_utils.ActivationCollector(model.model.layers[0], max_layers=30, stop_after_first_step=True)
+# model.model.layers[0] = zml_utils.ActivationCollector(model.model.layers[0], max_layers=30, stop_after_first_step=True)
 inputs = tokenizer(message, return_tensors="pt").to(device)
 
 # perform forward pass to collect activations
-outputs, activations = model(**inputs)
+outputs = model(**inputs, max_new_tokens=1)
 
 next_token_logits = outputs.logits[:, -1, :]
 next_token_id = torch.argmax(next_token_logits, dim=-1)
@@ -159,11 +156,11 @@ output_text = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_spec
 
 print(f"first token: '{text_output}'")
 
-if output:
-    print(output)
+if outputs:
+    print(outputs)
 
 print(f"collected {len(activations)} activations from forward pass!")
-print(activations.keys())
+# print(activations.keys())
 
-save_file(activations, "step3_5flash.activations.safetensors")
-print("Saved to step3_5flash.activations.safetensors")
+# save_file(activations, "step3_5flash.activations.safetensors")
+# print("Saved to step3_5flash.activations.safetensors")
