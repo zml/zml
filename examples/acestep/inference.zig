@@ -647,9 +647,9 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     acecfg.exes.cfg_exe.callOpts(io, acecfg.exes.cfg_args, &acecfg.exes.cfg_results, .{ .wait = true });
     acecfg.exes.cfg_results.fill(.{ &cond_logits_buffer });
     // sample next token
-    acecfg.llm.exes.sample_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, rng_buffers });
-    acecfg.llm.exes.sample_exe.callOpts(io, acecfg.llm.exes.sample_args, &acecfg.llm.exes.sample_results, .{ .wait = true });
-    acecfg.llm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
+    acecfg.exes.sample_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, rng_buffers });
+    acecfg.exes.sample_exe.callOpts(io, acecfg.exes.sample_args, &acecfg.exes.sample_results, .{ .wait = true });
+    acecfg.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
 
     try token_buffer.toSlice(io, token_slice);
     zml_handler.toc(&zml_handler.timers.cfg.prefill);
@@ -703,8 +703,8 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
         acecfg.exes.cfg_exe.callOpts(io, acecfg.exes.cfg_args, &acecfg.exes.cfg_results, .{ .wait = true });
         acecfg.exes.cfg_results.fill(.{ &cond_logits_buffer });
         // sample next token
-        acecfg.exes.sample_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, rng_buffers });
-        acecfg.exes.sample_exe.callOpts(io, acecfg.llm.exes.sample_args, &acecfg.llm.exes.sample_results, .{ .wait = true });
+        acecfg.exes.sample_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, rng_buffers, true });
+        acecfg.exes.sample_exe.callOpts(io, acecfg.exes.sample_args, &acecfg.exes.sample_results, .{ .wait = true });
         acecfg.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
         try token_buffer.toSlice(io, token_slice);
     }
