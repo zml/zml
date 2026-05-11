@@ -151,7 +151,16 @@ inputs = tokenizer(message, return_tensors="pt").to(device)
 # perform forward pass to collect activations
 outputs, activations = model(**inputs)
 
+next_token_logits = outputs.logits[:, -1, :]
+next_token_id = torch.argmax(next_token_logits, dim=-1)
+text_output = tokenizer.decode(next_token_id)
+
 output_text = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+
+print(f"first token: '{text_output}'")
+
+if output:
+    print(output)
 
 print(f"collected {len(activations)} activations from forward pass!")
 print(activations.keys())
