@@ -106,6 +106,8 @@ transformers.modeling_utils.PreTrainedModel._init_weights = patched_init_weights
 # 1. Load the patched config
 config = AutoConfig.from_pretrained(PATCHED_DIR, trust_remote_code=True)
 
+config.use_cache = False
+
 # 2. Point the tokenizer to the PATCHED directory
 tokenizer = AutoTokenizer.from_pretrained(PATCHED_DIR, trust_remote_code=True, device_map="auto")
 
