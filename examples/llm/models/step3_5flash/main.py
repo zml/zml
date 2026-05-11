@@ -145,7 +145,7 @@ message = "Explain the significance of the number 42."
 device = model.device
 
 # replace model with zml_utils tracked model
-model = zml_utils.ActivationCollector(model, max_layers=1000, stop_after_first_step=True)
+model.model.layers[0] = zml_utils.ActivationCollector(model.model.layers[0], max_layers=30, stop_after_first_step=True)
 inputs = tokenizer(message, return_tensors="pt").to(device)
 
 # perform forward pass to collect activations
