@@ -7,8 +7,6 @@ const stdx = zml.stdx;
 const main = @import("main.zig");
 const inference = @import("inference.zig");
 
-const cfg: f32 = 2.0;
-
 const dialects = @import("mlir/dialects");
 
 
@@ -59,6 +57,7 @@ pub const AceLlm_handler = struct {
             .pred_index = .init(.{}, .u32),
             .prefill_embeds = .init(.{ .s = acellm_options.seq_len, .d = config.hidden_size }, .bf16),
             .decode_embeds = .init(.{ .s = 1, .d = config.hidden_size }, .bf16),
+            .logits = .init(.{ .voc = config.vocab_size, .s = 1 }, .bf16),
             .kv_cache = .init(zml.Shape.init(.{
                 .layer = model.layers.len,
                 .k = acellm_options.seq_len,
@@ -129,14 +128,14 @@ pub const AceLlm_handler = struct {
         var prefill_layer_future_awaited = false;
         errdefer if (!prefill_layer_future_awaited) if (prefill_layer_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
-        var prefill_sample_future = try zml_handler.io.concurrent(struct {
+        var prefill_select_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: AceLlm, params_: LlmParams, opts_: zml.module.CompilationOptions) !zml.Exe {
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .sampleTokens, .{
-                        params_.prefill_embeds, params_.pred_index, params_.rng }, opts_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .selectEmbed,
+                    .{ params_.prefill_embeds, params_.pred_index }, opts_);
             }
         }.call, .{ zml_handler, model, params, opts });
-        var prefill_sample_future_awaited = false;
-        errdefer if (!prefill_sample_future_awaited) if (prefill_sample_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+        var prefill_select_future_awaited = false;
+        errdefer if (!prefill_select_future_awaited) if (prefill_select_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
         var decode_embed_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: AceLlm, params_: LlmParams, opts_: zml.module.CompilationOptions) !zml.Exe {
@@ -156,14 +155,23 @@ pub const AceLlm_handler = struct {
         var decode_layer_future_awaited = false;
         errdefer if (!decode_layer_future_awaited) if (decode_layer_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
-        var decode_sample_future = try zml_handler.io.concurrent(struct {
+        var logit_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: AceLlm, params_: LlmParams, opts_: zml.module.CompilationOptions) !zml.Exe {
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .sampleTokens, .{
-                        params_.decode_embeds, params_.pred_index, params_.rng }, opts_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .computeLogits, .{
+                        params_.decode_embeds }, opts_);
             }
         }.call, .{ zml_handler, model, params, opts });
-        var decode_sample_future_awaited = false;
-        errdefer if (!decode_sample_future_awaited) if (decode_sample_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+        var logit_future_awaited = false;
+        errdefer if (!logit_future_awaited) if (logit_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+        
+        var sample_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceLlm, params_: LlmParams, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .sampleTokens, .{
+                        params_.logits, params_.rng, false }, opts_);
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var sample_future_awaited = false;
+        errdefer if (!sample_future_awaited) if (sample_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
         const prefill_embed_exe = try prefill_embed_future.await(zml_handler.io);
         prefill_embed_future_awaited = true;
@@ -171,17 +179,20 @@ pub const AceLlm_handler = struct {
         const prefill_layer_exe = try prefill_layer_future.await(zml_handler.io);
         prefill_layer_future_awaited = true;
 
-        const prefill_sample_exe = try prefill_sample_future.await(zml_handler.io);
-        prefill_sample_future_awaited = true;
+        const prefill_select_exe = try prefill_select_future.await(zml_handler.io);
+        prefill_select_future_awaited = true;
 
         const decode_embed_exe = try decode_embed_future.await(zml_handler.io);
         decode_embed_future_awaited = true;
 
         const decode_layer_exe = try decode_layer_future.await(zml_handler.io);
         decode_layer_future_awaited = true;
+
+        const logits_exe = try logit_future.await(zml_handler.io);
+        logit_future_awaited = true;
         
-        const decode_sample_exe = try decode_sample_future.await(zml_handler.io);
-        decode_sample_future_awaited = true;
+        const sample_exe = try sample_future.await(zml_handler.io);
+        sample_future_awaited = true;
 
         return .{
             .prefill_embed_exe = prefill_embed_exe,
@@ -190,18 +201,21 @@ pub const AceLlm_handler = struct {
             .prefill_layer_exe = prefill_layer_exe,
             .prefill_layer_args = try prefill_layer_exe.args(zml_handler.allocator),
             .prefill_layer_results = try prefill_layer_exe.results(zml_handler.allocator),
-            .prefill_sample_exe = prefill_sample_exe,
-            .prefill_sample_args = try prefill_sample_exe.args(zml_handler.allocator),
-            .prefill_sample_results = try prefill_sample_exe.results(zml_handler.allocator),
+            .prefill_select_exe = prefill_select_exe,
+            .prefill_select_args = try prefill_select_exe.args(zml_handler.allocator),
+            .prefill_select_results = try prefill_select_exe.results(zml_handler.allocator),
             .decode_embed_exe = decode_embed_exe,
             .decode_embed_args = try decode_embed_exe.args(zml_handler.allocator),
             .decode_embed_results = try decode_embed_exe.results(zml_handler.allocator),
             .decode_layer_exe = decode_layer_exe,
             .decode_layer_args = try decode_layer_exe.args(zml_handler.allocator),
             .decode_layer_results = try decode_layer_exe.results(zml_handler.allocator),
-            .decode_sample_exe = decode_sample_exe,
-            .decode_sample_args = try decode_sample_exe.args(zml_handler.allocator),
-            .decode_sample_results = try decode_sample_exe.results(zml_handler.allocator),
+            .logits_exe = logits_exe,
+            .logits_args = try logits_exe.args(zml_handler.allocator),
+            .logits_results = try logits_exe.results(zml_handler.allocator),
+            .sample_exe = sample_exe,
+            .sample_args = try sample_exe.args(zml_handler.allocator),
+            .sample_results = try sample_exe.results(zml_handler.allocator),
         };
     }
 
@@ -253,34 +267,23 @@ pub const AceLlm_handler = struct {
 pub const AceCfg_handler = struct {
     llm: *AceLlm_handler,
     params: CfgParams,
-    prefill_exe: zml.Exe,
-    decode_exe: zml.Exe,
+    exes: CfgExes,
     cond_kv_cache_buffers: zml.Bufferized(KvCache),
     uncond_kv_cache_buffers: zml.Bufferized(KvCache),
 
-    pub fn initFromLlm(zml_handler: *main.Zml_handler, acellm: *AceLlm_handler, cont_tok: u32, uncond_tok: u32, audiocodes: u32) !AceCfg_handler {
+    pub fn initFromLlm(zml_handler: *main.Zml_handler, acellm: *AceLlm_handler) !AceCfg_handler {
         zml_handler.tic(&zml_handler.timers.cfg.init);
         const dtype = acellm.model.embed_tokens.weight.dtype();
-        const cond_seq_len = cont_tok + audiocodes;
-        const uncond_seq_len = uncond_tok + audiocodes;
         const params: CfgParams = .{
-            .prefill_cond_tokens = .init(.{ .s = cond_seq_len }, .u32),
-            .prefill_uncond_tokens = .init(.{ .s = uncond_seq_len }, .u32),
-            .decode_cond_token = .init(.{ .s = 1 }, .u32),
-            .decode_uncond_token = .init(.{ .s = 1 }, .u32),
-            .cond_token_index = .init(.{}, .u32),
-            .uncond_token_index = .init(.{}, .u32),
-            .cond_next_token_index = .init(.{}, .u32),
-            .uncond_next_token_index = .init(.{}, .u32),
-            .cond_kv_cache = .init(zml.Shape.init(.{
-                .layer = acellm.model.layers.len,
-                .k = cond_seq_len,
-                .h = acellm.config.num_key_value_heads,
-                .hd = acellm.config.head_dim orelse @divExact(acellm.config.hidden_size, acellm.config.num_attention_heads),
-            }, dtype), zml_handler.io),
-            .uncond_kv_cache = .init(zml.Shape.init(.{
-                .layer = acellm.model.layers.len,
-                .k = uncond_seq_len,
+            .prefill_tokens = .init(.{ .s = acellm.options.seq_len }, .u32),
+            .decode_token = .init(.{ .s = 1 }, .u32),
+            .token_index = .init(.{}, .u32),
+            .pred_index = .init(.{}, .u32),
+            .layer_index = .init(.{}, .u32),
+            .cond_logits = .init(.{ .voc = acellm.config.vocab_size, .s = 1 }, .bf16),
+            .uncond_logits = .init(.{ .voc = acellm.config.vocab_size, .s = 1 }, .bf16),
+            .kv_cache = .init(zml.Shape.init(.{
+                .k = acellm.options.seq_len,
                 .h = acellm.config.num_key_value_heads,
                 .hd = acellm.config.head_dim orelse @divExact(acellm.config.hidden_size, acellm.config.num_attention_heads),
             }, dtype), zml_handler.io),
@@ -291,114 +294,56 @@ pub const AceCfg_handler = struct {
         zml_handler.toc(&zml_handler.timers.cfg.init);
         zml_handler.tic(&zml_handler.timers.cfg.compile);
 
-        const prefill_exe, const decode_exe = try compileCfgModel(zml_handler, acellm.model, params);
+        const exes = try compileModel(zml_handler, acellm.model, params);
 
         zml_handler.toc(&zml_handler.timers.cfg.compile);
 
         return .{
             .llm = acellm,
             .params = params,
-            .prefill_exe = prefill_exe,
-            .decode_exe = decode_exe,
-            .cond_kv_cache_buffers = try params.cond_kv_cache.initBuffer(zml_handler.io, zml_handler.platform, params.shardings.replicated),
-            .uncond_kv_cache_buffers = try params.uncond_kv_cache.initBuffer(zml_handler.io, zml_handler.platform, params.shardings.replicated),
+            .exes = exes,
+            .cond_kv_cache_buffers = try params.kv_cache.initBuffer(zml_handler.io, zml_handler.platform, params.shardings.replicated),
+            .uncond_kv_cache_buffers = try params.kv_cache.initBuffer(zml_handler.io, zml_handler.platform, params.shardings.replicated),
         };
     }
 
-    pub fn compileCfgModel(zml_handler: *main.Zml_handler, model: AceLlm, params: CfgParams) !struct { zml.Exe, zml.Exe } {
-        const shardings_arr = params.shardings.all();
-        const opts: zml.module.CompilationOptions = .{
-            .shardings = &shardings_arr,
-        };
-        // Compile the model twice, one for prefill, one for generation.
-        std.log.info("5Hz compile cfg prefill", .{});
-        const prefill_exe = try zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .forwardCfg,
-            .{
-                params.prefill_cond_tokens, params.prefill_uncond_tokens,
-                params.cond_token_index, params.uncond_token_index,
-                params.cond_next_token_index, params.uncond_next_token_index,
-                params.cond_kv_cache, params.uncond_kv_cache,
-                params.rng,
-            },
-            opts,
-        );
-        std.log.info("5Hz compile cfg decode", .{});
-        const decode_exe = try zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .forwardCfg,
-            .{
-                params.decode_cond_token, params.decode_uncond_token,
-                params.cond_token_index, params.uncond_token_index,
-                params.cond_next_token_index, params.uncond_next_token_index,
-                params.cond_kv_cache, params.uncond_kv_cache,
-                params.rng,
-            },
-            opts,
-        );
-        std.log.info("5Hz compiled models", .{});
-        return .{ prefill_exe, decode_exe };
-    }
-
-    pub fn compileCfgModelParallel(zml_handler: *main.Zml_handler, model: AceLlm, params: CfgParams) !struct { zml.Exe, zml.Exe } {
+    pub fn compileModel(zml_handler: *main.Zml_handler, model: AceLlm, params: CfgParams) !CfgExes {
         const shardings_arr = params.shardings.all();
         const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
-        std.log.info("5Hz compile CFG prefill/decode", .{});
+        std.log.info("5Hz compile CFG", .{});
 
-        var prefill_future = try zml_handler.io.concurrent(struct {
+        var sample_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: AceLlm, params_: CfgParams, opts_: zml.module.CompilationOptions) !zml.Exe {
-                return zml_handler_.platform.compile(
-                    zml_handler_.allocator,
-                    zml_handler_.io,
-                    model_,
-                    .forwardCfg,
-                    .{
-                        params_.prefill_cond_tokens, params_.prefill_uncond_tokens,
-                        params_.cond_token_index, params_.uncond_token_index,
-                        params_.cond_next_token_index, params_.uncond_next_token_index,
-                        params_.cond_kv_cache, params_.uncond_kv_cache,
-                        params_.rng,
-                    },
-                    opts_,
-                );
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .sampleTokens, .{
+                        params_.cond_logits, params_.rng, true }, opts_);
             }
         }.call, .{ zml_handler, model, params, opts });
-        var prefill_future_awaited = false;
-        errdefer if (!prefill_future_awaited) if (prefill_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+        var sample_future_awaited = false;
+        errdefer if (!sample_future_awaited) if (sample_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
-        var decode_future = try zml_handler.io.concurrent(struct {
+        var cfg_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: AceLlm, params_: CfgParams, opts_: zml.module.CompilationOptions) !zml.Exe {
-                return zml_handler_.platform.compile(
-                    zml_handler_.allocator,
-                    zml_handler_.io,
-                    model_,
-                    .forwardCfg,
-                    .{
-                        params_.decode_cond_tokens, params_.decode_uncond_tokens,
-                        params_.cond_token_index, params_.uncond_token_index,
-                        params_.cond_next_token_index, params_.uncond_next_token_index,
-                        params_.cond_kv_cache, params_.uncond_kv_cache,
-                        params_.rng,
-                    },
-                    opts_,
-                );
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .cfg, .{
+                        params_.cond_logits, params_.uncond_logits }, opts_);
             }
         }.call, .{ zml_handler, model, params, opts });
-        var decode_future_awaited = false;
-        errdefer if (!decode_future_awaited) if (decode_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+        var cfg_future_awaited = false;
+        errdefer if (!cfg_future_awaited) if (cfg_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
-        const prefill_exe = try prefill_future.await(zml_handler.io);
-        prefill_future_awaited = true;
+        const sample_exe = try sample_future.await(zml_handler.io);
+        sample_future_awaited = true;
 
-        const decode_exe = try decode_future.await(zml_handler.io);
-        decode_future_awaited = true;
-
-        return .{ prefill_exe, decode_exe };
+        const cfg_exe = try cfg_future.await(zml_handler.io);
+        cfg_future_awaited = true;
+        
+        return .{ 
+            .sample_exe = sample_exe,
+            .sample_args = try sample_exe.args(zml_handler.allocator),
+            .sample_results = try sample_exe.results(zml_handler.allocator),
+            .cfg_exe = cfg_exe,
+            .cfg_args = try cfg_exe.args(zml_handler.allocator),
+            .cfg_results = try cfg_exe.results(zml_handler.allocator),
+        };
     }
 
     pub fn unloadBuffers(self: *AceCfg_handler) void {
@@ -406,9 +351,8 @@ pub const AceCfg_handler = struct {
         KvCache.deinitBuffer(&self.uncond_kv_cache_buffers);
     }
 
-    pub fn deinit(self: *AceCfg_handler) void {
-        self.prefill_exe.deinit();
-        self.decode_exe.deinit();
+    pub fn deinit(self: *AceCfg_handler, allocator: std.mem.Allocator) void {
+        self.exes.deinit(allocator);
     }
 
 };
@@ -421,6 +365,7 @@ pub const LlmParams = struct {
     pred_index: zml.Tensor,
     prefill_embeds: zml.Tensor,
     decode_embeds: zml.Tensor,
+    logits: zml.Tensor,
     kv_cache: KvCache,
     layer_index: zml.Tensor,
     rng: zml.Tensor.Rng,
@@ -428,16 +373,14 @@ pub const LlmParams = struct {
 };
 
 pub const CfgParams = struct {
-    prefill_cond_tokens: zml.Tensor,
-    prefill_uncond_tokens: zml.Tensor,
-    decode_cond_token: zml.Tensor,
-    decode_uncond_token: zml.Tensor,
-    cond_token_index: zml.Tensor,
-    uncond_token_index: zml.Tensor,
-    cond_next_token_index: zml.Tensor,
-    uncond_next_token_index: zml.Tensor,
-    cond_kv_cache: KvCache,
-    uncond_kv_cache: KvCache,
+    prefill_tokens: zml.Tensor,
+    decode_token: zml.Tensor,
+    token_index: zml.Tensor,
+    pred_index: zml.Tensor,
+    layer_index: zml.Tensor,
+    cond_logits: zml.Tensor,
+    uncond_logits: zml.Tensor,
+    kv_cache: KvCache,
     rng: zml.Tensor.Rng,
     shardings: main.Shardings,
 };
@@ -490,7 +433,7 @@ pub const Config = struct {
 };
 
 pub const Options = struct {
-    seq_len: u32 = 256,
+    seq_len: u32 = 1024,
 };
 
 pub const Phase = struct {
@@ -507,18 +450,23 @@ pub const LlmExes = struct {
     prefill_layer_exe: zml.Exe,
     prefill_layer_args: zml.Exe.Arguments,
     prefill_layer_results: zml.Exe.Results,
-    prefill_sample_exe: zml.Exe,
-    prefill_sample_args: zml.Exe.Arguments,
-    prefill_sample_results: zml.Exe.Results,
+    prefill_select_exe: zml.Exe,
+    prefill_select_args: zml.Exe.Arguments,
+    prefill_select_results: zml.Exe.Results,
     decode_embed_exe: zml.Exe,
     decode_embed_args: zml.Exe.Arguments,
     decode_embed_results: zml.Exe.Results,
     decode_layer_exe: zml.Exe,
     decode_layer_args: zml.Exe.Arguments,
     decode_layer_results: zml.Exe.Results,
-    decode_sample_exe: zml.Exe,
-    decode_sample_args: zml.Exe.Arguments,
-    decode_sample_results: zml.Exe.Results,
+
+    logits_exe: zml.Exe,
+    logits_args: zml.Exe.Arguments,
+    logits_results: zml.Exe.Results,
+    
+    sample_exe: zml.Exe,
+    sample_args: zml.Exe.Arguments,
+    sample_results: zml.Exe.Results,
 
     pub fn deinit(self: LlmExes, allocator: std.mem.Allocator) void {
         self.prefill_embed_exe.deinit();
@@ -527,18 +475,39 @@ pub const LlmExes = struct {
         self.prefill_layer_exe.deinit();
         self.prefill_layer_args.deinit(allocator);
         self.prefill_layer_results.deinit(allocator);
-        self.prefill_sample_exe.deinit();
-        self.prefill_sample_args.deinit(allocator);
-        self.prefill_sample_results.deinit(allocator);
+        self.prefill_select_exe.deinit();
+        self.prefill_select_args.deinit(allocator);
+        self.prefill_select_results.deinit(allocator);
         self.decode_embed_exe.deinit();
         self.decode_embed_args.deinit(allocator);
         self.decode_embed_results.deinit(allocator);
         self.decode_layer_exe.deinit();
         self.decode_layer_args.deinit(allocator);
         self.decode_layer_results.deinit(allocator);
-        self.decode_sample_exe.deinit();
-        self.decode_sample_args.deinit(allocator);
-        self.decode_sample_results.deinit(allocator);
+        self.logits_exe.deinit();
+        self.logits_args.deinit(allocator);
+        self.logits_results.deinit(allocator);
+        self.sample_exe.deinit();
+        self.sample_args.deinit(allocator);
+        self.sample_results.deinit(allocator);
+    }
+};
+
+pub const CfgExes = struct {
+    sample_exe: zml.Exe,
+    sample_args: zml.Exe.Arguments,
+    sample_results: zml.Exe.Results,
+    cfg_exe: zml.Exe,
+    cfg_args: zml.Exe.Arguments,
+    cfg_results: zml.Exe.Results,
+
+    pub fn deinit(self: *CfgExes, allocator: std.mem.Allocator) void {
+        self.sample_exe.deinit();
+        self.sample_args.deinit(allocator);
+        self.sample_results.deinit(allocator);
+        self.cfg_exe.deinit();
+        self.cfg_args.deinit(allocator);
+        self.cfg_results.deinit(allocator);
     }
 };
 
@@ -588,56 +557,33 @@ pub const AceLlm = struct {
         RmsNorm.unloadBuffers(&self.norm);
     }
 
-    pub fn forward(self: AceLlm, tokens: zml.Tensor, token_index: zml.Tensor, pred_index: zml.Tensor, kv_cache: KvCache, rng: zml.Tensor.Rng) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
-        const logits, const updated_kv_cache = self.computeLogits(tokens, token_index, kv_cache);
-        const next_logits = logits.dynamicSlice1d(logits.axis(.s), .{ .start = pred_index, .len = 1 });
-        const text_logits = next_logits.slice1d(.voc, self.phase.phase1_voc);
-        const next_token, const new_rng = sampleNucleus(text_logits, rng);
-        return .{ next_token.convert(tokens.dtype()), updated_kv_cache.reuseBuffer(kv_cache), new_rng };
+
+    pub fn embedTokens(self: AceLlm, tokens: zml.Tensor) zml.Tensor {
+        return self.embed_tokens.forward(tokens.withPartialTags(.{ .s })).withPartialTags(.{ .d });
     }
 
-    pub fn forwardCfg(self: AceLlm,
-        tokens_cond: zml.Tensor, tokens_uncond: zml.Tensor,
-        // this is the position in the generated sequence : 0 at prefill, prompt_length + i after i tokens generated
-        token_index_cond: zml.Tensor, token_index_uncond: zml.Tensor,
-        // this is the position of the next generated token in the sequence : prompt_length - 1 at prefill, 0 at decode
-        pred_index_cond: zml.Tensor, pred_index_uncond: zml.Tensor,
-        kv_cache_cond: KvCache, kv_cache_uncond: KvCache,
-        rng: zml.Tensor.Rng,
-    ) struct { zml.Tensor, zml.Tensor, KvCache, KvCache, zml.Tensor.Rng } {
-        const logits_cond, const updated_kv_cache_cond = self.computeLogits(tokens_cond, token_index_cond, kv_cache_cond);
-        const logits_uncond, const updated_kv_cache_uncond = self.computeLogits(tokens_uncond, token_index_uncond, kv_cache_uncond);
-        const next_logits_cond = logits_cond.dynamicSlice1d(logits_cond.axis(.s), .{ .start = pred_index_cond, .len = 1 });
-        const next_logits_uncond = logits_uncond.dynamicSlice1d(logits_uncond.axis(.s), .{ .start = pred_index_uncond, .len = 1 });
-        const codes_logits_cond = next_logits_cond.slice1d(.voc, self.phase.phase2_voc);
-        const codes_logits_uncond = next_logits_uncond.slice1d(.voc, self.phase.phase2_voc);
-        const next_logits = codes_logits_uncond.add((codes_logits_cond.sub(codes_logits_uncond)).scale(cfg));
-        var next_token, const new_rng = sampleNucleus(next_logits, rng);
-        // next token is a position relative to the phase 2 voc slice, translate it back to the full voc slice
-        next_token = next_token.convert(tokens_cond.dtype()).addConstant(self.phase.text_voc_size);
-        return .{
-            next_token,
-            next_token,
-            updated_kv_cache_cond.reuseBuffer(kv_cache_cond),
-            updated_kv_cache_uncond.reuseBuffer(kv_cache_uncond),
-            new_rng
-        };
+    pub fn selectEmbed(self: AceLlm, embeddings: zml.Tensor, pred_index: zml.Tensor) zml.Tensor {
+        _ = self;
+        return embeddings.dynamicSlice1d(embeddings.axis(.s), .{ .start = pred_index, .len = 1 });
     }
 
-    pub fn computeLogits(self: AceLlm, tokens: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache) struct { zml.Tensor, KvCache } {
-        var updated_kv_cache = kv_cache;
-        // embbed input tokens
-        var output = self.embed_tokens.forward(tokens.withPartialTags(.{ .s })).withPartialTags(.{ .d });
-        // forward pass on the neural network layers
-        for (self.layers, 0..) |layer, i| {
-            const layer_index = zml.Tensor.scalar(i, .u32);
-            output, updated_kv_cache = layer.forward(output, token_index, updated_kv_cache, layer_index);
-        }
-        output = self.norm.forward(output);
-        // compute logits for the output tokens
+    pub fn computeLogits(self: AceLlm, embed: zml.Tensor) zml.Tensor {
+        const output = self.norm.forward(embed);
         // TODO: we could improve the perf by only computing the logits for the relevant voc slice
-        const logits = self.embed_tokens.weight.withTags(.{ .voc, .d }).dot(output, .d);
-        return .{ logits.convert(.f32), updated_kv_cache.reuseBuffer(kv_cache) };
+        return self.embed_tokens.weight.withTags(.{ .voc, .d }).dot(output, .d);
+    }
+    
+    pub fn cfg(self: AceLlm, cond_logits: zml.Tensor, uncond_logits: zml.Tensor) zml.Tensor {
+        _ = self;
+        return uncond_logits.add((cond_logits.sub(uncond_logits)).scale(2.0)).reuseBuffer(cond_logits);
+    }
+    
+    pub fn sampleTokens(self: AceLlm, logits: zml.Tensor, rng: zml.Tensor.Rng, cfg_phase: bool) struct { zml.Tensor, zml.Tensor.Rng } {
+        const phase_logits = logits.slice1d(.voc, if (cfg_phase) self.phase.phase2_voc else self.phase.phase1_voc);
+        var next_token, const new_rng = sampleNucleus(phase_logits.convert(.f32), rng);
+        // in cfg, next token is a position relative to the audiocodes sub voc slice, translate it back to the full voc slice
+        if (cfg_phase) next_token = next_token.addConstant(self.phase.text_voc_size);
+        return .{ next_token.convert(.u32), new_rng };
     }
 
     pub fn sampleNucleus(logits: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
@@ -675,22 +621,6 @@ pub const AceLlm = struct {
         const sampled_token = normalized_cdf.cmp(.GE, sample_threshold).argMax(.voc).indices;
         const next_token = sorted.indices.gather(.{ .voc = sampled_token.squeeze(.voc) }, .{});
         return .{ next_token, next_rng };
-    }
-
-
-    pub fn embedTokens(self: AceLlm, tokens: zml.Tensor) zml.Tensor {
-        return self.embed_tokens.forward(tokens.withPartialTags(.{ .s })).withPartialTags(.{ .d });
-    }
-
-    pub fn sampleTokens(self: AceLlm, embeds: zml.Tensor, pred_index: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
-        const output = self.norm.forward(embeds);
-        // compute logits for the output tokens
-        // TODO: we could improve the perf by only computing the logits for the relevant voc slice
-        const logits = self.embed_tokens.weight.withTags(.{ .voc, .d }).dot(output, .d);
-        const next_logits = logits.convert(.f32).dynamicSlice1d(logits.axis(.s), .{ .start = pred_index, .len = 1 });
-        const text_logits = next_logits.slice1d(.voc, self.phase.phase1_voc);
-        const next_token, const new_rng = sampleNucleus(text_logits, rng);
-        return .{ next_token.convert(pred_index.dtype()), new_rng };
     }
     
 };

@@ -421,6 +421,8 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     defer token_buffer.deinit();
     var token_embed_buffer: zml.Buffer = undefined;
     defer token_embed_buffer.deinit();
+    var logits_buffer: zml.Buffer = undefined;
+    defer logits_buffer.deinit();    
 
     const prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ acellm.options.seq_len }, .u32));
     defer prefill_tokens_slice.free(allocator);
@@ -454,14 +456,23 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     acellm.exes.prefill_embed_args.set(.{ acellm.model_buffers, prefill_tokens_buffer });
     acellm.exes.prefill_embed_exe.callOpts(io, acellm.exes.prefill_embed_args, &acellm.exes.prefill_embed_results, .{ .wait = true });
     acellm.exes.prefill_embed_results.fill(.{ &prefill_embed_buffer });
+    
     for (0..acellm.config.num_hidden_layers) |i| {
         acellm.exes.prefill_layer_args.set(.{ acellm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, acellm.kv_cache_buffers, layer_index_buffers[i] });
         acellm.exes.prefill_layer_exe.callOpts(io, acellm.exes.prefill_layer_args, &acellm.exes.prefill_layer_results, .{ .wait = true });
         acellm.exes.prefill_layer_results.fill(.{ &prefill_embed_buffer, &acellm.kv_cache_buffers });
     }
-    acellm.exes.prefill_sample_args.set(.{ acellm.model_buffers, prefill_embed_buffer, prompt_buffer, rng_buffers });
-    acellm.exes.prefill_sample_exe.callOpts(io, acellm.exes.prefill_sample_args, &acellm.exes.prefill_sample_results, .{ .wait = true });
-    acellm.exes.prefill_sample_results.fill(.{ &token_buffer, &rng_buffers });
+    acellm.exes.prefill_select_args.set(.{ acellm.model_buffers, prefill_embed_buffer, prompt_buffer });
+    acellm.exes.prefill_select_exe.callOpts(io, acellm.exes.prefill_select_args, &acellm.exes.prefill_select_results, .{ .wait = true });
+    acellm.exes.prefill_select_results.fill(.{ &token_embed_buffer });
+    
+    acellm.exes.logits_args.set(.{ acellm.model_buffers, token_embed_buffer });
+    acellm.exes.logits_exe.callOpts(io, acellm.exes.logits_args, &acellm.exes.logits_results, .{ .wait = true });
+    acellm.exes.logits_results.fill(.{ &logits_buffer });
+    
+    acellm.exes.sample_args.set(.{ acellm.model_buffers, logits_buffer, rng_buffers });
+    acellm.exes.sample_exe.callOpts(io, acellm.exes.sample_args, &acellm.exes.sample_results, .{ .wait = true });
+    acellm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
     
     try token_buffer.toSlice(io, token_slice);
     zml_handler.toc(&zml_handler.timers.llm.prefill);
@@ -507,9 +518,12 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
             acellm.exes.decode_layer_exe.callOpts(io, acellm.exes.decode_layer_args, &acellm.exes.decode_layer_results, .{ .wait = true });
             acellm.exes.decode_layer_results.fill(.{ &token_embed_buffer, &acellm.kv_cache_buffers });
         }
-        acellm.exes.decode_sample_args.set(.{ acellm.model_buffers, token_embed_buffer, zero_buffer, rng_buffers });
-        acellm.exes.decode_sample_exe.callOpts(io, acellm.exes.decode_sample_args, &acellm.exes.decode_sample_results, .{ .wait = true });
-        acellm.exes.decode_sample_results.fill(.{ &token_buffer, &rng_buffers });
+        acellm.exes.logits_args.set(.{ acellm.model_buffers, token_embed_buffer });
+        acellm.exes.logits_exe.callOpts(io, acellm.exes.logits_args, &acellm.exes.logits_results, .{ .wait = true });
+        acellm.exes.logits_results.fill(.{ &logits_buffer });
+        acellm.exes.sample_args.set(.{ acellm.model_buffers, logits_buffer, rng_buffers });
+        acellm.exes.sample_exe.callOpts(io, acellm.exes.sample_args, &acellm.exes.sample_results, .{ .wait = true });
+        acellm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
         
         // extract the generated token from the buffer
         try token_buffer.toSlice(io, token_slice);
@@ -531,23 +545,12 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     defer tokenizer_decoder.deinit();
 
     const nb_audio_codes = 5 * try std.fmt.parseInt(u32, metadata.duration, 10);
-    const cond_tot = cond_tok.len + nb_audio_codes;
-    const uncond_tot = uncond_tok.len + nb_audio_codes;
 
     var result_tok: std.ArrayList(u32) = try .initCapacity(allocator, nb_audio_codes);
     var result_str: std.ArrayList(u8) = try .initCapacity(allocator, nb_audio_codes * 15);
 
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
-
-    var prefill_args = try acecfg.prefill_exe.args(allocator);
-    defer prefill_args.deinit(allocator);
-    var prefill_results = try acecfg.prefill_exe.results(allocator);
-    defer prefill_results.deinit(allocator);
-    var decode_args = try acecfg.decode_exe.args(allocator);
-    defer decode_args.deinit(allocator);
-    var decode_results = try acecfg.decode_exe.results(allocator);
-    defer decode_results.deinit(allocator);
 
     var zero_buffer: zml.Buffer = try .scalar(io, platform, 0, .u32, sharding);
     defer zero_buffer.deinit();
@@ -562,9 +565,17 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     var uncond_token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
     defer cond_token_buffer.deinit();
     defer uncond_token_buffer.deinit();
+    var cond_embed_buffer: zml.Buffer = undefined;
+    defer cond_embed_buffer.deinit();
+    var uncond_embed_buffer: zml.Buffer = undefined;
+    defer uncond_embed_buffer.deinit();
+    var cond_logits_buffer: zml.Buffer = undefined;
+    defer cond_logits_buffer.deinit();
+    var uncond_logits_buffer: zml.Buffer = undefined;
+    defer uncond_logits_buffer.deinit();
 
-    const cond_prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ cond_tot }, .u32));
-    const uncond_prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ uncond_tot }, .u32));
+    const cond_prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ acecfg.llm.options.seq_len }, .u32));
+    const uncond_prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ acecfg.llm.options.seq_len }, .u32));
     defer cond_prefill_tokens_slice.free(allocator);
     defer uncond_prefill_tokens_slice.free(allocator);
     @memcpy(cond_prefill_tokens_slice.items(u32)[0..cond_tok.len], cond_tok);
@@ -573,19 +584,74 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     var uncond_prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, uncond_prefill_tokens_slice, sharding);
     defer cond_prefill_tokens_buffer.deinit();
     defer uncond_prefill_tokens_buffer.deinit();
+    var cond_prefill_embed_buffer: zml.Buffer = undefined;
+    defer cond_prefill_embed_buffer.deinit();
+    var uncond_prefill_embed_buffer: zml.Buffer = undefined;
+    defer uncond_prefill_embed_buffer.deinit();
+    
+    const layer_index_slices = try allocator.alloc(zml.Slice, acecfg.llm.config.num_hidden_layers);
+    defer {
+        for (layer_index_slices) |*s| s.free(allocator);
+        allocator.free(layer_index_slices);
+    }
+    for (0..acecfg.llm.config.num_hidden_layers) |i| {
+        layer_index_slices[i] = try zml.Slice.alloc(allocator, .init(.{}, .u32));
+        layer_index_slices[i].items(u32)[0] = @intCast(i);
+    }
+    const layer_index_buffers = try allocator.alloc(zml.Buffer, acecfg.llm.config.num_hidden_layers);
+    defer {
+        for (layer_index_buffers) |*s| s.deinit();
+        allocator.free(layer_index_buffers);
+    }
+    for (0..acecfg.llm.config.num_hidden_layers) |i| {
+        layer_index_buffers[i] = try zml.Buffer.fromSlice(io, platform, layer_index_slices[i], sharding);
+    }
 
-    std.log.info("5Hz run CFG prefill with sequence of {d}/{d} tokens", .{ cond_tot, uncond_tot });
+    std.log.info("5Hz run CFG prefill", .{});
     zml_handler.tic(&zml_handler.timers.cfg.prefill);
-    prefill_args.set(.{
-        acecfg.llm.model_buffers,
-        cond_prefill_tokens_buffer, uncond_prefill_tokens_buffer,
-        zero_buffer, zero_buffer,
-        cond_prompt_buffer, uncond_prompt_buffer,
-        acecfg.cond_kv_cache_buffers, acecfg.uncond_kv_cache_buffers,
-        rng_buffers,
-    });
-    acecfg.prefill_exe.callOpts(io, prefill_args, &prefill_results, .{ .wait = true });
-    prefill_results.fill(.{ &cond_token_buffer, &uncond_token_buffer, &acecfg.cond_kv_cache_buffers, &acecfg.uncond_kv_cache_buffers, &rng_buffers });
+
+    // embed cond tokens
+    acecfg.llm.exes.prefill_embed_args.set(.{ acecfg.llm.model_buffers, cond_prefill_tokens_buffer });
+    acecfg.llm.exes.prefill_embed_exe.callOpts(io, acecfg.llm.exes.prefill_embed_args, &acecfg.llm.exes.prefill_embed_results, .{ .wait = true });
+    acecfg.llm.exes.prefill_embed_results.fill(.{ &cond_prefill_embed_buffer });
+    // embed uncond tokens
+    acecfg.llm.exes.prefill_embed_args.set(.{ acecfg.llm.model_buffers, uncond_prefill_tokens_buffer });
+    acecfg.llm.exes.prefill_embed_exe.callOpts(io, acecfg.llm.exes.prefill_embed_args, &acecfg.llm.exes.prefill_embed_results, .{ .wait = true });
+    acecfg.llm.exes.prefill_embed_results.fill(.{ &uncond_prefill_embed_buffer });
+    for (0..acecfg.llm.config.num_hidden_layers) |i| {
+        // layer i the cond embeds
+        acecfg.llm.exes.prefill_layer_args.set(.{ acecfg.llm.model_buffers.layers[i], cond_prefill_embed_buffer, zero_buffer, acecfg.cond_kv_cache_buffers, layer_index_buffers[i] });
+        acecfg.llm.exes.prefill_layer_exe.callOpts(io, acecfg.llm.exes.prefill_layer_args, &acecfg.llm.exes.prefill_layer_results, .{ .wait = true });
+        acecfg.llm.exes.prefill_layer_results.fill(.{ &cond_prefill_embed_buffer, &acecfg.cond_kv_cache_buffers });
+        // layer i the uncond embeds
+        acecfg.llm.exes.prefill_layer_args.set(.{ acecfg.llm.model_buffers.layers[i], uncond_prefill_embed_buffer, zero_buffer, acecfg.uncond_kv_cache_buffers, layer_index_buffers[i] });
+        acecfg.llm.exes.prefill_layer_exe.callOpts(io, acecfg.llm.exes.prefill_layer_args, &acecfg.llm.exes.prefill_layer_results, .{ .wait = true });
+        acecfg.llm.exes.prefill_layer_results.fill(.{ &uncond_prefill_embed_buffer, &acecfg.uncond_kv_cache_buffers });
+    }
+    // select cond embed
+    acecfg.llm.exes.prefill_select_args.set(.{ acecfg.llm.model_buffers, cond_prefill_embed_buffer, cond_prompt_buffer });
+    acecfg.llm.exes.prefill_select_exe.callOpts(io, acecfg.llm.exes.prefill_select_args, &acecfg.llm.exes.prefill_select_results, .{ .wait = true });
+    acecfg.llm.exes.prefill_select_results.fill(.{ &cond_embed_buffer });
+    // select uncond embed
+    acecfg.llm.exes.prefill_select_args.set(.{ acecfg.llm.model_buffers, uncond_prefill_embed_buffer, uncond_prompt_buffer });
+    acecfg.llm.exes.prefill_select_exe.callOpts(io, acecfg.llm.exes.prefill_select_args, &acecfg.llm.exes.prefill_select_results, .{ .wait = true });
+    acecfg.llm.exes.prefill_select_results.fill(.{ &uncond_embed_buffer });
+    // compute cond logits
+    acecfg.llm.exes.logits_args.set(.{ acecfg.llm.model_buffers, cond_embed_buffer });
+    acecfg.llm.exes.logits_exe.callOpts(io, acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results, .{ .wait = true });
+    acecfg.llm.exes.logits_results.fill(.{ &cond_logits_buffer });
+    // compute uncond logits
+    acecfg.llm.exes.logits_args.set(.{ acecfg.llm.model_buffers, uncond_embed_buffer });
+    acecfg.llm.exes.logits_exe.callOpts(io, acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results, .{ .wait = true });
+    acecfg.llm.exes.logits_results.fill(.{ &uncond_logits_buffer });
+    // combine them with cfg
+    acecfg.exes.cfg_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, uncond_logits_buffer });
+    acecfg.exes.cfg_exe.callOpts(io, acecfg.exes.cfg_args, &acecfg.exes.cfg_results, .{ .wait = true });
+    acecfg.exes.cfg_results.fill(.{ &cond_logits_buffer });
+    // sample next token
+    acecfg.llm.exes.sample_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, rng_buffers });
+    acecfg.llm.exes.sample_exe.callOpts(io, acecfg.llm.exes.sample_args, &acecfg.llm.exes.sample_results, .{ .wait = true });
+    acecfg.llm.exes.sample_results.fill(.{ &cond_token_buffer, &rng_buffers });
 
     try cond_token_buffer.toSlice(io, token_slice);
     zml_handler.toc(&zml_handler.timers.cfg.prefill);
@@ -608,17 +674,40 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
         defer cond_pos_buffer.deinit();
         defer uncond_pos_buffer.deinit();
 
-        decode_args.set(.{
-            acecfg.llm.model_buffers,
-            cond_token_buffer, uncond_token_buffer,
-            cond_pos_buffer, uncond_pos_buffer,
-            zero_buffer, zero_buffer,
-            acecfg.cond_kv_cache_buffers, acecfg.uncond_kv_cache_buffers,
-            rng_buffers,
-        });
-        acecfg.decode_exe.callOpts(io, decode_args, &decode_results, .{ .wait = true });
-        decode_results.fill(.{ &cond_token_buffer, &uncond_token_buffer, &acecfg.cond_kv_cache_buffers, &acecfg.uncond_kv_cache_buffers, &rng_buffers });
-
+        // embed cond tokens
+        acecfg.llm.exes.decode_embed_args.set(.{ acecfg.llm.model_buffers, cond_token_buffer });
+        acecfg.llm.exes.decode_embed_exe.callOpts(io, acecfg.llm.exes.decode_embed_args, &acecfg.llm.exes.decode_embed_results, .{ .wait = true });
+        acecfg.llm.exes.decode_embed_results.fill(.{ &cond_embed_buffer });
+        // embed uncond tokens
+        acecfg.llm.exes.decode_embed_args.set(.{ acecfg.llm.model_buffers, uncond_token_buffer });
+        acecfg.llm.exes.decode_embed_exe.callOpts(io, acecfg.llm.exes.decode_embed_args, &acecfg.llm.exes.decode_embed_results, .{ .wait = true });
+        acecfg.llm.exes.decode_embed_results.fill(.{ &uncond_embed_buffer });
+        for (0..acecfg.llm.config.num_hidden_layers) |ii| {
+            // layer ii the cond embeds
+            acecfg.llm.exes.decode_layer_args.set(.{ acecfg.llm.model_buffers.layers[ii], cond_embed_buffer, cond_pos_buffer, acecfg.cond_kv_cache_buffers, layer_index_buffers[ii] });
+            acecfg.llm.exes.decode_layer_exe.callOpts(io, acecfg.llm.exes.decode_layer_args, &acecfg.llm.exes.decode_layer_results, .{ .wait = true });
+            acecfg.llm.exes.decode_layer_results.fill(.{ &cond_embed_buffer, &acecfg.cond_kv_cache_buffers });
+            // layer ii the uncond embeds
+            acecfg.llm.exes.decode_layer_args.set(.{ acecfg.llm.model_buffers.layers[ii], uncond_embed_buffer, uncond_pos_buffer, acecfg.uncond_kv_cache_buffers, layer_index_buffers[ii] });
+            acecfg.llm.exes.decode_layer_exe.callOpts(io, acecfg.llm.exes.decode_layer_args, &acecfg.llm.exes.decode_layer_results, .{ .wait = true });
+            acecfg.llm.exes.decode_layer_results.fill(.{ &uncond_embed_buffer, &acecfg.uncond_kv_cache_buffers });
+        }
+        // compute cond logits
+        acecfg.llm.exes.logits_args.set(.{ acecfg.llm.model_buffers, cond_embed_buffer });
+        acecfg.llm.exes.logits_exe.callOpts(io, acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results, .{ .wait = true });
+        acecfg.llm.exes.logits_results.fill(.{ &cond_logits_buffer });
+        // compute uncond logits
+        acecfg.llm.exes.logits_args.set(.{ acecfg.llm.model_buffers, uncond_embed_buffer });
+        acecfg.llm.exes.logits_exe.callOpts(io, acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results, .{ .wait = true });
+        acecfg.llm.exes.logits_results.fill(.{ &uncond_logits_buffer });
+        // combine them with cfg
+        acecfg.exes.cfg_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, uncond_logits_buffer });
+        acecfg.exes.cfg_exe.callOpts(io, acecfg.exes.cfg_args, &acecfg.exes.cfg_results, .{ .wait = true });
+        acecfg.exes.cfg_results.fill(.{ &cond_logits_buffer });
+        // sample next token
+        acecfg.llm.exes.sample_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, rng_buffers });
+        acecfg.llm.exes.sample_exe.callOpts(io, acecfg.llm.exes.sample_args, &acecfg.llm.exes.sample_results, .{ .wait = true });
+        acecfg.llm.exes.sample_results.fill(.{ &cond_token_buffer, &rng_buffers });
         try cond_token_buffer.toSlice(io, token_slice);
     }
     try writer.writeAll("\n");

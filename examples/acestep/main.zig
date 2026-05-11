@@ -205,8 +205,7 @@ const Args = struct {
 // info:   wav                                                 1.87s
 // info: total                                                92.44s
 
-// TODO: activer et bencher la compilation parallèle
-// TODO: découper modèles en sous modèles pour compiler en parallèle plus vite
+// TODO: terminer compilation par bloc parallèle
 // TODO: VAE compilation is an issue, worse than with f32 ??
 // TODO : split 4 blocks ? disable autotuning ? tiled decode ?
 
@@ -250,6 +249,8 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     // Thinking/Inspiration phase : 5Hz LLM model
     // ------------------------------------------------
 
+    // TODO: set seq_len higher than default 1024 if target duration is very long
+    
     zml_handler.tic(&zml_handler.timers.llm.total);
     
     var acellm = try acellm_.AceLlm_handler.init(zml_handler);
@@ -278,8 +279,8 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
         defer zml_handler.allocator.free(cond_tok);
         defer zml_handler.allocator.free(uncond_tok);
         
-        var acecfg = try acellm_.AceCfg_handler.initFromLlm(zml_handler, &acellm, @intCast(cond_tok.len), @intCast(uncond_tok.len), 5 * duration);
-        defer acecfg.deinit();
+        var acecfg = try acellm_.AceCfg_handler.initFromLlm(zml_handler, &acellm);
+        defer acecfg.deinit(zml_handler.allocator);
         defer acecfg.unloadBuffers();
         
         audio_codes.deinit(zml_handler.allocator);
