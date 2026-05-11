@@ -1251,12 +1251,9 @@ fn manualComputationInternal(
                 local_output_shapes[i] = ctx.partitioning.localShapeForShape(output_shape) catch unreachable;
             }
 
-            const in_shardings_str = ctx.partitioning.sdyPerValueShardingAttr(allocator, input_shapes) catch unreachable;
-            const out_shardings_str = ctx.partitioning.sdyPerValueShardingAttr(allocator, outputs) catch unreachable;
-            const manual_axes_str = ctx.partitioning.sdyManualAxesAttr(allocator, input_shapes, outputs) catch unreachable;
-            const in_shardings_attr = mlir.Attribute.parse(ctx.mlir_ctx, in_shardings_str) catch unreachable;
-            const out_shardings_attr = mlir.Attribute.parse(ctx.mlir_ctx, out_shardings_str) catch unreachable;
-            const manual_axes_attr = mlir.Attribute.parse(ctx.mlir_ctx, manual_axes_str) catch unreachable;
+            const in_shardings_attr = ctx.partitioning.sdyPerValueShardingAttr(allocator, ctx.mlir_ctx, input_shapes) catch unreachable;
+            const out_shardings_attr = ctx.partitioning.sdyPerValueShardingAttr(allocator, ctx.mlir_ctx, outputs) catch unreachable;
+            const manual_axes_attr = ctx.partitioning.sdyManualAxesAttr(allocator, ctx.mlir_ctx, input_shapes, outputs) catch unreachable;
 
             const block_types = allocator.alloc(*const mlir.Type, inputs.len) catch unreachable;
             const block_locs = allocator.alloc(*const mlir.Location, inputs.len) catch unreachable;
@@ -1308,9 +1305,9 @@ fn manualComputationInternal(
                 .results = .{ .flat = global_result_types },
                 .blocks = &.{manual_block},
                 .attributes = &.{
-                    .named(ctx.mlir_ctx, "in_shardings", in_shardings_attr),
-                    .named(ctx.mlir_ctx, "out_shardings", out_shardings_attr),
-                    .named(ctx.mlir_ctx, "manual_axes", manual_axes_attr),
+                    .named(ctx.mlir_ctx, "in_shardings", in_shardings_attr.asAttr()),
+                    .named(ctx.mlir_ctx, "out_shardings", out_shardings_attr.asAttr()),
+                    .named(ctx.mlir_ctx, "manual_axes", manual_axes_attr.asAttr()),
                 },
                 .verify = true,
                 .location = .unknown(ctx.mlir_ctx),
@@ -1324,7 +1321,7 @@ fn manualComputationInternal(
         },
         .gspmd => blk: {
             const manual_sharding = "{manual}";
-            const output_shardings = allocator.alloc([]const u8, outputs.len) catch unreachable;
+            const output_shardings = allocator.alloc(*const mlir.Attribute, outputs.len) catch unreachable;
             const local_input_shapes = allocator.alloc(Shape, inputs.len) catch unreachable;
             const local_output_shapes = allocator.alloc(Shape, outputs.len) catch unreachable;
 
@@ -1333,7 +1330,7 @@ fn manualComputationInternal(
             }
             for (outputs, 0..) |output_shape, i| {
                 local_output_shapes[i] = ctx.partitioning.localShapeForShape(output_shape) catch unreachable;
-                output_shardings[i] = ctx.partitioning.tensorShardingAttr(allocator, output_shape, null) catch unreachable;
+                output_shardings[i] = ctx.partitioning.tensorShardingAttr(allocator, ctx.mlir_ctx, output_shape, null) catch unreachable;
             }
 
             const local_input_values = allocator.alloc(*const mlir.Value, inputs.len) catch unreachable;
@@ -1389,7 +1386,7 @@ fn manualComputationInternal(
                         .has_side_effect = false,
                         .backend_config = .{ .original = "" },
                         .additional_attributes = &.{
-                            .named(ctx.mlir_ctx, "mhlo.sharding", mlir.stringAttribute(ctx.mlir_ctx, output_shardings[i])),
+                            .named(ctx.mlir_ctx, "mhlo.sharding", output_shardings[i]),
                         },
                     },
                     .unknown(ctx.mlir_ctx),

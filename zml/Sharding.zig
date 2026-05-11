@@ -1,6 +1,8 @@
 //! Explain how to split a buffer across different devices.
 const std = @import("std");
 
+const dialects = @import("mlir/dialects");
+const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
@@ -91,11 +93,11 @@ pub const Partitioning = struct {
         };
     }
 
-    pub fn tensorShardingAttr(self: Partitioning, allocator: std.mem.Allocator, shape: Shape, sharding: ?Sharding) ![]const u8 {
+    pub fn tensorShardingAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, shape: Shape, sharding: ?Sharding) !*const mlir.Attribute {
         const selected_sharding = sharding orelse try self.selectSharding(shape);
         return switch (self.partitioner) {
-            .shardy => try selected_sharding.data.sdyShardingAttrForShape(allocator, shape),
-            .gspmd => try selected_sharding.data.gspmdShardingAttrForShape(allocator, shape),
+            .shardy => (try selected_sharding.data.sdyShardingAttrForShape(allocator, ctx, shape)).asAttr(),
+            .gspmd => mlir.stringAttribute(ctx, try selected_sharding.data.gspmdShardingAttrForShape(allocator, shape)),
         };
     }
 
@@ -110,21 +112,18 @@ pub const Partitioning = struct {
         return sharding.data.numPartitionsForLogicalAxis(logical_axis);
     }
 
-    pub fn sdyPerValueShardingAttr(self: Partitioning, allocator: std.mem.Allocator, shapes: []const Shape) ![]const u8 {
+    pub fn sdyPerValueShardingAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, shapes: []const Shape) !*const dialects.shardy.TensorShardingPerValueAttribute {
         stdx.debug.assert(self.partitioner == .shardy, "sdyPerValueShardingAttr requires shardy partitioner", .{});
 
-        var out: std.Io.Writer.Allocating = .init(allocator);
-        out.writer.writeAll("#sdy.sharding_per_value<[") catch unreachable;
+        const shardings = try allocator.alloc(*const dialects.shardy.TensorShardingAttribute, shapes.len);
         for (shapes, 0..) |shape, i| {
-            const attr_str = try self.tensorShardingAttr(allocator, shape, null);
-            if (i > 0) out.writer.writeAll(", ") catch unreachable;
-            out.writer.writeAll(attr_str["#sdy.sharding".len..]) catch unreachable;
+            const sharding = try self.selectSharding(shape);
+            shardings[i] = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
         }
-        out.writer.writeAll("]>") catch unreachable;
-        return out.toOwnedSlice() catch unreachable;
+        return .init(ctx, shardings);
     }
 
-    pub fn sdyManualAxesAttr(self: Partitioning, allocator: std.mem.Allocator, in_shapes: []const Shape, out_shapes: []const Shape) ![]const u8 {
+    pub fn sdyManualAxesAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, in_shapes: []const Shape, out_shapes: []const Shape) !*const dialects.shardy.ManualAxesAttribute {
         stdx.debug.assert(self.partitioner == .shardy, "sdyManualAxesAttr requires shardy partitioner", .{});
 
         var axis_names = std.ArrayList([]const u8).empty;
@@ -137,36 +136,41 @@ pub const Partitioning = struct {
                 }
                 list.append(allocator_, axis_name) catch unreachable;
             }
-
-            fn scan(list: *std.ArrayList([]const u8), allocator_: std.mem.Allocator, sharding: []const u8) void {
-                var i: usize = 0;
-                while (i < sharding.len) : (i += 1) {
-                    if (sharding[i] != '"') continue;
-                    const start = i + 1;
-                    i = start;
-                    while (i < sharding.len and sharding[i] != '"') : (i += 1) {}
-                    if (i > start) appendUnique(list, allocator_, sharding[start..i]);
-                }
-            }
         };
 
         for (in_shapes) |shape| {
-            const attr_str = try self.tensorShardingAttr(allocator, shape, null);
-            Collect.scan(&axis_names, allocator, attr_str);
+            const sharding = try self.selectSharding(shape);
+            const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
+            for (0..attr.numReplicatedAxes()) |i| {
+                Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
+            }
+            for (0..attr.numDimensions()) |i| {
+                const dim = attr.dimension(i);
+                for (0..dim.numAxes()) |j| {
+                    Collect.appendUnique(&axis_names, allocator, dim.axis(j).name());
+                }
+            }
         }
         for (out_shapes) |shape| {
-            const attr_str = try self.tensorShardingAttr(allocator, shape, null);
-            Collect.scan(&axis_names, allocator, attr_str);
+            const sharding = try self.selectSharding(shape);
+            const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
+            for (0..attr.numReplicatedAxes()) |i| {
+                Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
+            }
+            for (0..attr.numDimensions()) |i| {
+                const dim = attr.dimension(i);
+                for (0..dim.numAxes()) |j| {
+                    Collect.appendUnique(&axis_names, allocator, dim.axis(j).name());
+                }
+            }
         }
 
-        var out: std.Io.Writer.Allocating = .init(allocator);
-        out.writer.writeAll("#sdy<manual_axes{") catch unreachable;
+        const axes = try allocator.alloc(*const mlir.StringAttribute, axis_names.items.len);
         for (axis_names.items, 0..) |axis_name, i| {
-            if (i > 0) out.writer.writeAll(", ") catch unreachable;
-            out.writer.print("\"{s}\"", .{axis_name}) catch unreachable;
+            axes[i] = mlir.StringAttribute.init(ctx, axis_name);
         }
-        out.writer.writeAll("}>") catch unreachable;
-        return out.toOwnedSlice() catch unreachable;
+
+        return dialects.shardy.ManualAxesAttribute.init(ctx, axes);
     }
 
     pub fn selectSharding(self: Partitioning, shape: Shape) !Sharding {
@@ -1277,8 +1281,15 @@ pub const Data = struct {
         };
     }
 
-    // TODO: consider binding shardy dialect instead of generating strings then parsing later.
-    pub fn sdyShardingAttrForShape(self: *const Data, allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
+    pub fn sdyShardingAttrForShape(
+        data: *const Data,
+        parent_allocator: std.mem.Allocator,
+        ctx: *mlir.Context,
+        shape: Shape,
+    ) !*const dialects.shardy.TensorShardingAttribute {
+        var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
+        defer arena.deinit();
+        const allocator = arena.allocator();
         var any_explicit = false;
         for (0..shape.rank()) |ax| {
             if (shape.partition(ax) != .unknown) {
@@ -1288,55 +1299,39 @@ pub const Data = struct {
         }
         const all_replicated = !any_explicit;
 
-        const mapping = self.getDimMapping(shape);
-        var out: std.Io.Writer.Allocating = .init(allocator);
-        errdefer out.deinit();
+        const mapping = data.getDimMapping(shape);
+        const dimensions = try allocator.alloc(*const dialects.shardy.DimensionShardingAttribute, shape.rank());
 
-        try out.writer.print("#sdy.sharding<@{s}, [", .{self.name});
-        for (0..shape.rank()) |ax| {
-            if (ax > 0) try out.writer.writeAll(", ");
+        for (0.., dimensions) |ax, *d| {
             const spec = shape.partition(ax);
-
-            switch (spec) {
-                .axis => |logical_tag| {
-                    if (self.binding(logical_tag)) |_| {
+            d.* = switch (spec) {
+                .axis => |logical_tag| d: {
+                    if (data.binding(logical_tag)) |_| {
                         const dim_phys_indices = mapping.axes_per_dim.get(ax);
                         if (dim_phys_indices.len == 0) {
-                            try out.writer.writeAll("{}");
+                            break :d .replicated(ctx);
                         } else {
-                            try out.writer.writeAll("{");
+                            const axes = try allocator.alloc(*const dialects.shardy.AxisRefAttribute, dim_phys_indices.len);
                             for (dim_phys_indices.constSlice(), 0..) |p_idx, i| {
-                                if (i > 0) try out.writer.writeAll(", ");
-                                try out.writer.print("\"{s}\"", .{@tagName(mapping.view.axes.get(p_idx).tag)});
+                                axes[i] = .named(ctx, @tagName(mapping.view.axes.get(p_idx).tag));
                             }
-                            try out.writer.writeAll("}");
+                            break :d .closed(ctx, axes);
                         }
                     } else {
-                        try out.writer.writeAll("{?}");
+                        break :d .open(ctx, &.{});
                     }
                 },
-                .replicated => try out.writer.writeAll("{}"),
-                .open, .unknown => {
-                    if (all_replicated) {
-                        try out.writer.writeAll("{}");
-                    } else {
-                        try out.writer.writeAll("{?}");
-                    }
-                },
-            }
+                .replicated => .replicated(ctx),
+                .open, .unknown => if (all_replicated) .replicated(ctx) else .open(ctx, &.{}),
+            };
         }
-        try out.writer.writeAll("]");
 
-        if (mapping.replicated_axes.len > 0) {
-            try out.writer.writeAll(", replicated={");
-            for (mapping.replicated_axes.constSlice(), 0..) |p_idx, i| {
-                if (i > 0) try out.writer.writeAll(", ");
-                try out.writer.print("\"{s}\"", .{@tagName(mapping.view.axes.get(p_idx).tag)});
-            }
-            try out.writer.writeAll("}");
+        const replicated_axes = try allocator.alloc(*const dialects.shardy.AxisRefAttribute, mapping.replicated_axes.len);
+        for (replicated_axes, mapping.replicated_axes.constSlice()) |*r, p_idx| {
+            r.* = .named(ctx, @tagName(mapping.view.axes.get(p_idx).tag));
         }
-        try out.writer.writeAll(">");
-        return try out.toOwnedSlice();
+
+        return .init(ctx, .{ .mesh = data.name, .dimensions = dimensions, .replicated_axes = replicated_axes });
     }
 
     pub fn gspmdShardingAttrForShape(self: *const Data, allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
@@ -1895,9 +1890,20 @@ const ShardingTest = struct {
 
         // Verify MLIR String
         if (s.expected_sdy) |expected_attr| {
-            const actual_attr = try sharding.sdyShardingAttrForShape(self.allocator, s.shape);
-            defer self.allocator.free(actual_attr);
-            try std.testing.expectEqualStrings(expected_attr, actual_attr);
+            const registry: *mlir.DialectRegistry = try .init();
+            defer registry.deinit();
+            registry.registerDialect("sdy");
+            mlir.registerFuncExtensions(registry);
+
+            var ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
+            defer ctx.deinit();
+            ctx.loadAllAvailableDialects();
+
+            const actual_attr = try sharding.sdyShardingAttrForShape(self.allocator, ctx, s.shape);
+            var writer: std.Io.Writer.Allocating = .init(self.allocator);
+            defer writer.deinit();
+            try actual_attr.asAttr().format(&writer.writer);
+            try std.testing.expectEqualStrings(expected_attr, writer.written());
         }
 
         // Verify Placement logic / Error
@@ -2112,7 +2118,7 @@ test "sharding: full 3D cluster sharding" {
         .sharding = try .init("3d_mesh", physical, logical, strategy),
         .shape = Shape.init(.{ .batch = 4, .model = 4, .context = 4 }, .f32)
             .withPartitioning(.{ .batch = .batch, .model = .model, .context = .context }),
-        .expected_sdy = "#sdy.sharding<@3d_mesh, [{\"link_x\"}, {\"link_y\"}, {\"link_z\"}]>",
+        .expected_sdy = "#sdy.sharding<@\"3d_mesh\", [{\"link_x\"}, {\"link_y\"}, {\"link_z\"}]>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{ .{ 0, 2 }, .{ 0, 2 }, .{ 0, 2 } } },
             .{ .device_id = 1, .slices = &.{ .{ 0, 2 }, .{ 0, 2 }, .{ 2, 2 } } },

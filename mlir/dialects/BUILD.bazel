@@ -10,6 +10,7 @@ zig_library(
         "func.zig",
         "math.zig",
         "memref.zig",
+        "shardy.zig",
         "scf.zig",
         "vector.zig",
     ],
@@ -18,6 +19,7 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//mlir",
+        "//mlir:c",
         "//mlir/dialects/mosaic_tpu",
         "//mlir/dialects/stablehlo",
         "//mlir/dialects/ttir",
