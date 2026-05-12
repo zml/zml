@@ -14,7 +14,7 @@ const log = std.log.scoped(.dflash);
 
 const block_size = 16;
 const prompt =
-    "The quick brown fox writes a short note about machine learning.";
+    "The quick brown fox writes a short note about machine learning, systems, and useful tests.";
 
 const Args = struct {
     model: []const u8,
