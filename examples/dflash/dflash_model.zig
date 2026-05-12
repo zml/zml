@@ -205,8 +205,8 @@ pub const DFlashAttention = struct {
         }, .s).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
 
         var v = zml.Tensor.concatenate(&.{
-            self.v_proj.forward(target_hidden),
-            self.v_proj.forward(hidden_states),
+            linearForwardF32(self.v_proj, target_hidden),
+            linearForwardF32(self.v_proj, hidden_states),
         }, .s).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
 
         q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
@@ -224,10 +224,11 @@ pub const DFlashAttention = struct {
         k = zml.nn.rope(k, position_ids, self.rope_opts).rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
 
-        const attn = zml.nn.sdpa(q, k, v, .{}) // no attention mask => full non-causal attention
+        const attn = zml.nn.sdpa(q.convert(.f32), k.convert(.f32), v.convert(.f32), .{}) // no attention mask => full non-causal attention
             .withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated })
             .merge(.{ .d = .{ .h, .hd } })
-            .rename(.{ .q = .s });
+            .rename(.{ .q = .s })
+            .convert(self.o_proj.weight.dtype());
 
         return self.o_proj.forward(attn)
             .rename(.{ .dout = .d })
@@ -303,4 +304,9 @@ fn linear(
 fn unloadLinear(linear_: anytype) void {
     if (linear_.bias) |*bias| bias.deinit();
     linear_.weight.deinit();
+}
+
+fn linearForwardF32(linear_: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
+    var y = x.convert(.f32).dot(linear_.weight.convert(.f32), linear_.tag);
+    return if (linear_.bias) |bias| y.add(bias.convert(.f32).broad(y.shape())) else y;
 }
