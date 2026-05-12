@@ -8,6 +8,7 @@ pub const ForOpts = struct {
     /// the `unsignedCmp` UnitAttr so the induction variable advances with
     /// unsigned comparison instead.
     unsigned_cmp: bool = false,
+    num_stages: ?i32 = null,
 };
 
 /// scf.for — operands are (lower, upper, step, init_args...) as a flat list.
@@ -32,9 +33,12 @@ pub fn for_(
     var result_types: stdx.BoundedArray(*const mlir.Type, 64) = .empty;
     for (init_args) |v| result_types.appendAssumeCapacity(v.type_());
 
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
     if (opts.unsigned_cmp) {
         attrs.appendAssumeCapacity(.named(ctx, "unsignedCmp", mlir.unitAttribute(ctx)));
+    }
+    if (opts.num_stages) |n| {
+        attrs.appendAssumeCapacity(.named(ctx, "tt.num_stages", mlir.integerAttribute(ctx, .i32, n)));
     }
 
     return mlir.Operation.make(ctx, "scf.for", .{

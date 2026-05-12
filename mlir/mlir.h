@@ -5,6 +5,7 @@
 #include <mlir-c/Dialect/Arith.h>
 #include <mlir-c/Dialect/ControlFlow.h>
 #include <mlir-c/Dialect/Func.h>
+#include <mlir-c/Dialect/LLVM.h>
 #include <mlir-c/Dialect/Math.h>
 #include <mlir-c/Dialect/MemRef.h>
 #include <mlir-c/Dialect/SCF.h>

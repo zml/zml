@@ -49,6 +49,7 @@ pub fn ForScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usiz
         iv: ValueT,
         carried: [N]ValueT,
         results: [N]ValueT = undefined,
+        opts: scf.ForOpts = .{},
 
         const Self = @This();
 
@@ -63,7 +64,7 @@ pub fn ForScope(comptime BuilderT: type, comptime ValueT: type, comptime N: usiz
                 self.step_inner,
                 &self.inits_inner,
                 self.body,
-                .{},
+                self.opts,
                 k.loc(),
             );
             _ = for_op.appendTo(k.currentBlock());

@@ -21,11 +21,33 @@ fn StructOf(comptime names: []const [:0]const u8, comptime FieldT: type) type {
     return @Struct(.auto, null, &name_slices, &@splat(FieldT), &@splat(.{}));
 }
 
+fn makeKernelContext(comptime dialects_needed: []const []const u8) std.mem.Allocator.Error!*mlir.Context {
+    mlir.registerPasses("Transforms");
+
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+
+    inline for (dialects_needed) |d| {
+        mlir.DialectHandle.fromString(d).insertDialect(registry);
+    }
+
+    mlir.registerFuncExtensions(registry);
+
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    ctx.loadAllAvailableDialects();
+
+    return ctx;
+}
+
 pub const triton = struct {
     pub const Builder = triton_builder.Builder;
     pub const Value = triton_builder.Value;
     pub const DType = triton_builder.DType;
     pub const FinishError = triton_builder.FinishError;
+
+    pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
+        return makeKernelContext(&triton_builder.dialects_needed);
+    }
 
     pub fn from(dt: DataType) DType {
         return switch (dt) {
@@ -73,21 +95,22 @@ pub const triton = struct {
                 debug: bool = false,
             };
 
-            pub fn emit(
-                allocator: std.mem.Allocator,
-                ctx: *mlir.Context,
-                cfg: ConfigT,
-            ) ![:0]const u8 {
+            pub fn emit(allocator: std.mem.Allocator, cfg: ConfigT) ![:0]const u8 {
+                const ctx = try newContext();
+                defer ctx.deinit();
+
                 var b = try triton_builder.Builder.open(allocator, ctx, name);
                 defer b.deinit();
+
                 try spec.run(&b, cfg);
+
                 return b.finish(&.{});
             }
 
             pub fn call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {
                 const cur = CompilationContext.current();
 
-                const ttir = emit(cur.allocator, cur.mlir_ctx, opts.cfg) catch |err|
+                const ttir = emit(cur.allocator, opts.cfg) catch |err|
                     std.debug.panic("zml.kernel.triton.Kernel({s}).call: emit failed: {}", .{ name, err });
                 defer cur.allocator.free(ttir);
 
@@ -119,6 +142,10 @@ pub const mosaic_tpu = struct {
     const Builder = mosaic_tpu_builder.Builder;
     const DType = mosaic_tpu_builder.DType;
     const FinishError = mosaic_tpu_builder.FinishError;
+
+    pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
+        return makeKernelContext(&mosaic_tpu_builder.dialects_needed);
+    }
 
     pub fn from(dt: DataType) DType {
         return switch (dt) {
@@ -162,25 +189,26 @@ pub const mosaic_tpu = struct {
                 extras: CallExtras = .{},
             };
 
-            pub fn emit(
-                allocator: std.mem.Allocator,
-                ctx: *mlir.Context,
-                cfg: ConfigT,
-            ) ![:0]const u8 {
+            pub fn emit(allocator: std.mem.Allocator, cfg: ConfigT) ![:0]const u8 {
+                const ctx = try newContext();
+                defer ctx.deinit();
+
                 var b = try mosaic_tpu_builder.Builder.open(allocator, ctx, name);
                 defer b.deinit();
+
                 try spec.run(&b, cfg);
+
                 return b.finishOpts(&.{}, .{ .canonicalize = true });
             }
 
             pub fn call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results {
                 const cur = CompilationContext.current();
 
-                const ir = emit(cur.allocator, cur.mlir_ctx, opts.cfg) catch |err|
+                const ir = emit(cur.allocator, opts.cfg) catch |err|
                     std.debug.panic("zml.kernel.mosaic_tpu.Kernel({s}).call: emit failed: {}", .{ name, err });
                 defer cur.allocator.free(ir);
 
-                const backend_config = buildBackendConfig(cur.allocator, cur.mlir_ctx, ir, opts.extras) catch |err|
+                const backend_config = buildBackendConfig(cur.allocator, ir, opts.extras) catch |err|
                     std.debug.panic("zml.kernel.mosaic_tpu.Kernel({s}).call: backend_config build failed: {}", .{ name, err });
                 defer cur.allocator.free(backend_config);
 
@@ -237,10 +265,12 @@ pub const mosaic_tpu = struct {
 
     fn buildBackendConfig(
         allocator: std.mem.Allocator,
-        ctx: *mlir.Context,
         ir: [:0]const u8,
         extras: CallExtras,
     ) ![]u8 {
+        const ctx = try newContext();
+        defer ctx.deinit();
+
         const module = try mlir.Module.parse(ctx, ir);
         defer module.deinit();
 

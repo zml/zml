@@ -6,24 +6,28 @@ to read like `pallas.tpu` Python while staying in pure Zig. Used by
 op-for-op against what `pallas_call` produces.
 
 The DSL talks to the `tpu` dialect through `mlir.Operation.make(ctx, "tpu.<op>", …)`.
-The dialect must be registered into the MLIR context — see
-`mlir/dialects/mosaic_tpu`. Until the JAX repo is wired into `MODULE.bazel`, the
-whole stack is `manual`-tagged in Bazel.
+A Mosaic kernel is a pure IR generator: it builds its MLIR in a throwaway
+context, canonicalizes it, serializes it to a string, and hands that to a
+`stablehlo.custom_call` targeting `tpu_custom_call` — it never touches ZML's
+compilation context (which carries only `func`/`stablehlo`/`sdy`). Until the
+JAX repo is wired into `MODULE.bazel`, the whole stack is `manual`-tagged in Bazel.
 
 Two layers define the surface:
 
 - **Low layer** — `kernels/mosaic_tpu/builder.zig`: the IR builder primitives.
   `Builder.open(allocator, ctx, name)` → `b.declareArgsOpts(spec, results, opts)`
   → body via `b.*` helpers → `b.finishOpts(results, .{ .canonicalize = true })`
-  for the final IR string. (`Builder.buildOpts(...)` is a convenience that
-  bundles `open + declareArgs` into one call and returns a heap-allocated
-  `*Built(Spec)`; reach for it in escape-hatch code that drives the
-  lifecycle manually.)
+  for the final IR string. Pass `Builder.open` / `Builder.init` a
+  `zml.kernel.mosaic_tpu.newContext()` (a throwaway context with the dialects
+  the DSL emits), `defer ctx.deinit()` once you have the string — not a
+  `CompilationContext`'s `mlir_ctx`. (`Builder.buildOpts(...)` is a convenience
+  that bundles `open + declareArgs` into one call and returns a heap-allocated
+  `*Built(Spec)`; reach for it in escape-hatch code that drives the lifecycle manually.)
 - **High layer** — `zml.kernel.mosaic_tpu.Kernel(Config, spec)`: the
   declarative kernel form, mirroring the Triton DSL. Bundles a config
   type, a typed spec literal (name + named `inputs` / `outputs` + a typed
   `run` function pointer), and produces a kernel type. Exposes
-  `.emit(allocator, ctx, cfg)` (IR string) and
+  `.emit(allocator, cfg)` (IR string; manages its own context) and
   `.call(inputs, outputs, opts)` (IR string + `stablehlo.custom_call`
   targeting `tpu_custom_call` in one shot — the preferred form for
   production model code).
@@ -133,10 +137,11 @@ windows) can be runtime values from a config.
 
 ### Two ways to use a kernel
 
-**Offline / tooling** — get the MLIR string and print or diff it:
+**Offline / tooling** — get the MLIR string and print or diff it (no MLIR
+context needed; `emit` spins up and tears down its own):
 
 ```zig
-const ir = try MyKernel.Kernel.emit(allocator, ctx, .{ /* cfg */ });
+const ir = try MyKernel.Kernel.emit(allocator, .{ /* cfg */ });
 defer allocator.free(ir);
 try stdout.print("{s}\n", .{ir});
 ```

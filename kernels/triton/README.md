@@ -10,14 +10,19 @@ Two layers define the surface:
 - **Low layer** — `kernels/triton/builder.zig`: the IR builder primitives.
   `Builder`, `Value`, `DType`, `ArgSpec`. Use these directly when you need
   full control (custom op insertion, dynamic-arity arg lists, escape hatches).
+  `Builder.open` / `Builder.init` take an `*mlir.Context` — pass them a
+  `zml.kernel.triton.newContext()` (a throwaway context with the dialects the
+  DSL emits), `defer ctx.deinit()` once you have the IR string. Not a
+  `CompilationContext`'s `mlir_ctx`: that one carries only `func`/`stablehlo`/`sdy`
+  (a registered `llvm` dialect makes XLA:TPU choke).
 - **High layer** — `zml.kernel.triton.Kernel(Config, spec)`: the declarative
   kernel form. Bundles a config type, a typed spec literal (name + named
   `inputs` / `outputs` + a typed `run` function pointer), and produces a
-  kernel type. Exposes `.emit(allocator, ctx, cfg)` (TTIR string) and
-  `.call(inputs, outputs, opts)` (TTIR string + `stablehlo.custom_call` in
-  one shot — the preferred form for production model code). Inputs and
-  outputs are by-name structs generated from the spec, so missing / typo'd
-  / extra arguments are compile errors at the callsite.
+  kernel type. Exposes `.emit(allocator, cfg)` (TTIR string; manages its own
+  throwaway context) and `.call(inputs, outputs, opts)` (TTIR string +
+  `stablehlo.custom_call` in one shot — the preferred form for production
+  model code). Inputs and outputs are by-name structs generated from the
+  spec, so missing / typo'd / extra arguments are compile errors at the callsite.
 
 ## Table of contents
 
@@ -111,10 +116,11 @@ models where dtypes/sizes come from `Tensor.dim()` / `Options`).
 
 ### Two ways to use a kernel
 
-**Offline / tooling** — get the TTIR string:
+**Offline / tooling** — get the TTIR string (no MLIR context needed; `emit`
+spins up and tears down its own):
 
 ```zig
-const ttir = try MyKernel.Kernel.emit(allocator, ctx, .{ .BLOCK = 1024 });
+const ttir = try MyKernel.Kernel.emit(allocator, .{ .BLOCK = 1024 });
 defer allocator.free(ttir);
 ```
 
@@ -190,9 +196,10 @@ pub fn forward(self: Model, x: zml.Tensor, y: zml.Tensor) zml.Tensor {
 
 `call` is a thin wrapper over `Kernel.emit(...)` + `zml.ops.triton(...)`.
 It must be called from inside a `CompilationContext` (i.e., during
-`zml.module.compile(...)`). For offline tools without a CompilationContext
-(e.g., dump-to-disk diff harnesses), use `Kernel.emit(allocator, ctx, cfg)`
-directly to get the TTIR string.
+`zml.module.compile(...)`) — `emit` builds the TTIR string in its own
+throwaway context; `zml.ops.triton(...)` drops the `stablehlo.custom_call`
+into the model's context. For offline tools, `Kernel.emit(allocator, cfg)`
+gives you just the TTIR string.
 
 Signature: `Kernel.call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results`.
 
@@ -666,6 +673,10 @@ Pairs in place today: `load` / `loadOpts`, `store` / `storeOpts`,
 `sum` / `sumOpts`, `max` / `maxOpts`, `min` / `minOpts`,
 `cumsum` / `cumsumOpts`, `cumprod` / `cumprodOpts`.
 
+DSL-only pair (no Python kwarg counterpart — `.inline_return` is about IR
+block layout, see the `returnIf` / `returnIfOpts` section under Control flow):
+`returnIf` / `returnIfOpts`.
+
 Ops with no kwargs in Python (pure positional): `gather(src, indices, axis)`,
 `trans(src, order)`, `permute(src, order)`, `cat(lhs, rhs)` (dim=0 default),
 `split(src)`, `join(lhs, rhs)`, `item(src)`, `broadcast(a, b)` (symmetric),
@@ -814,7 +825,7 @@ const r = w.results[0];
 - `yieldBefore(cond, forwarded)` — `forwarded` arity must match `after_types`.
 - `yieldAfter(values)` — arity must match `inits`.
 
-### `returnIf` — early `tt.return` via cf.cond_br
+### `returnIf` / `returnIfOpts` — early `tt.return` via cf.cond_br
 
 ```zig
 // Python: if pid_m * BLOCK >= num_tokens_post_padded: return
@@ -846,14 +857,32 @@ cf.cond_br %out_of_range, ^ret, ^cont
   `scf.if` for structured loops and value-carrying branches; our DSL does
   the same.
 
+**`returnIfOpts(cond, values, .{ .inline_return = true })` — match Python's
+per-`return` block layout.** By default `returnIf` routes every return path
+(every early `returnIf` / `openReturnIf` plus the natural fall-through from
+`b.finish`) through one **shared exit block** holding the single `tt.return`.
+Python's frontend does the opposite: each `if cond: return` (and the natural
+exit) gets its **own** `tt.return`-only block, and LLVM's SimplifyCFG later
+merges them into a single `common.ret`. The two are semantically identical
+but differ in the function-exit block's label and position — which renumbers
+every `$L__BB` label downstream and blows up the PTX diff. When the Python source contains *any* literal `return` statement (it then
+has ≥2 `ret` blocks in LLVM — the explicit one(s) plus the implicit
+function-end one — which SimplifyCFG merges into `common.ret`), pass
+`.{ .inline_return = true }` on *every* return site, and set
+`scope.inline_return = true` on each `openReturnIf` (see below). Each one
+then emits `tt.return` inline and SimplifyCFG reproduces Python's
+`common.ret`. The default shared exit block emits exactly one `tt.return`,
+so the merge never fires and the function-exit block lands somewhere else.
+
 ### `openReturnIf` — early `tt.return` with side-effects in the taken branch
 
 ```zig
 // Python: if off_experts == -1: write_zeros_to_output(...); return
 var scope = b.openReturnIf(is_dead);
+scope.inline_return = true;              // optional — see `returnIfOpts` above
 {
     writeZerosToOutput(k, c_ptr, ...);   // ops here emit into ^ret
-    scope.yieldReturn(.{});              // closes ^ret with tt.return
+    scope.yieldReturn(.{});              // closes ^ret with tt.return (or cf.br ^exit)
 }
 // ... ops here emit into ^cont (fall-through) ...
 ```
@@ -864,6 +893,12 @@ the `tt.return`. Use this instead of the
 `openIf(cond){body}yieldThen; returnIf(cond, values)` pair — that pattern
 duplicates the predicate (emits both `scf.if` and `cf.cond_br` on the same
 boolean) and drifts from Triton's reference IR.
+
+`scope.inline_return` is the per-scope twin of `returnIfOpts`'s
+`.inline_return` (default `false`): set it before `yieldReturn` to make
+`^ret` close with `tt.return` directly instead of `cf.br ^exit`. Flip it on
+every `returnIf` / `openReturnIf` of a kernel when matching a Python source
+that has literal `return` statements.
 
 Same restrictions as `returnIf`: top-level `tt.func` body only.
 
@@ -974,6 +1009,10 @@ You can also use `Builder.open(allocator, ctx, name)` to create an empty
 builder and call `b.declareArgs(spec)` mid-stream — that's exactly what
 `zml.kernel.triton.Kernel(...)` does internally.
 
+Pass these constructors a `zml.kernel.triton.newContext()`, not a
+`CompilationContext`'s `mlir_ctx`; `defer ctx.deinit()` once you have the IR
+string. `Kernel.emit` does this for you, which is why it takes no context.
+
 Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
 
 ---
@@ -1041,8 +1080,8 @@ Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
 | `while cond: ...`                             | `var w = b.openWhile(.{inits}, .{after_types}); { ...; w.yieldBefore(cond, .{...}); }; { ...; w.yieldAfter(.{...}); }` |
 | `if cond: ...` (side-effects, no else)        | `var i = b.openIf(cond); { ...; i.yieldThen(.{}); }`                                         |
 | `if cond: ... else: ...`                      | `var i = b.openIfElse(cond, .{result_types}); { ...; i.yieldThen(.{...}); }; { ...; i.yieldElse(.{...}); }` |
-| `if cond: return` (early exit)                | `b.returnIf(cond, .{});` — emits `cf.cond_br` + `tt.return`, continues in fall-through block  |
-| `if cond: <stores>; return` (early exit, with side-effects) | `var s = b.openReturnIf(cond); { ...; s.yieldReturn(.{}); }` — single `cf.cond_br`; body emits into `^ret` before the `tt.return` |
+| `if cond: return` (early exit)                | `b.returnIf(cond, .{});` — emits `cf.cond_br` + `tt.return`, continues in fall-through block (add `b.returnIfOpts(cond, .{}, .{ .inline_return = true })` when matching a Python source that has literal `return`s) |
+| `if cond: <stores>; return` (early exit, with side-effects) | `var s = b.openReturnIf(cond); { ...; s.yieldReturn(.{}); }` — single `cf.cond_br`; body emits into `^ret` before the `tt.return` (set `s.inline_return = true` to match, alongside `returnIfOpts`) |
 
 ---
 
