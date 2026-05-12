@@ -286,7 +286,7 @@ pub fn dim(
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "memref.dim", .{
         .operands = .{ .flat = &.{ memref, index } },
-        .results = .{ .flat = &.{mlir.indexType(ctx)} },
+        .results = .{ .flat = &.{.index(ctx)} },
         .location = location,
     });
 }
@@ -299,7 +299,7 @@ pub fn rank(
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "memref.rank", .{
         .operands = .{ .flat = &.{memref} },
-        .results = .{ .flat = &.{mlir.indexType(ctx)} },
+        .results = .{ .flat = &.{.index(ctx)} },
         .location = location,
     });
 }
@@ -313,7 +313,7 @@ pub fn extract_aligned_pointer_as_index(
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "memref.extract_aligned_pointer_as_index", .{
         .operands = .{ .flat = &.{src} },
-        .results = .{ .flat = &.{mlir.indexType(ctx)} },
+        .results = .{ .flat = &.{.index(ctx)} },
         .location = location,
     });
 }
@@ -471,14 +471,13 @@ pub const ReassociationArgs = struct {
 
 fn buildReassociationAttr(ctx: *mlir.Context, reassociation: []const []const i64) *const mlir.Attribute {
     var outer: stdx.BoundedArray(*const mlir.Attribute, 32) = .empty;
-    var inner_buf: stdx.BoundedArray(*const mlir.Attribute, 64) = .empty;
+    var inner_buf: stdx.BoundedArray(*const mlir.Attribute, 32) = .empty;
     for (reassociation) |group| {
-        const start = inner_buf.len;
+        inner_buf = .empty;
         for (group) |idx| {
             inner_buf.appendAssumeCapacity(.int(ctx, .i64, idx));
         }
-        const inner_attr = .array(ctx, inner_buf.constSlice()[start..]);
-        outer.appendAssumeCapacity(inner_attr);
+        outer.appendAssumeCapacity(.array(ctx, inner_buf.constSlice()));
     }
     return .array(ctx, outer.constSlice());
 }

@@ -344,7 +344,7 @@ pub fn step(
 /// vector.vscale — runtime scalable-vector size factor (index-typed).
 pub fn vscale(ctx: *mlir.Context, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "vector.vscale", .{
-        .results = .{ .flat = &.{mlir.indexType(ctx)} },
+        .results = .{ .flat = &.{.index(ctx)} },
         .location = location,
     });
 }
@@ -643,7 +643,7 @@ pub fn compress_store(
 
 pub const TransferReadArgs = struct {
     /// `affine_map<(d0,...) -> (...)>` attribute. Build with
-    /// `mlir.parseAffineMapAttribute` or `mlir.affineMapAttribute(...)`.
+    /// `mlir.parseAffineMapAttribute` or `mlir.Attribute.affineMap(...)`.
     permutation_map: *const mlir.Attribute,
     /// One bool per result-vector dim. Length must equal vector rank.
     in_bounds: []const bool,

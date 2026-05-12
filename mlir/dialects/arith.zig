@@ -53,10 +53,9 @@ pub fn constant_int(
     int_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    const attr: *const mlir.Attribute = @ptrCast(c.mlirIntegerAttrGet(int_type.ptr(), value).ptr);
     return mlir.Operation.make(ctx, "arith.constant", .{
         .results = .{ .flat = &.{int_type} },
-        .attributes = &.{.named(ctx, "value", attr)},
+        .attributes = &.{.named(ctx, "value", .intFromType(@ptrCast(int_type), value))},
         .location = location,
     });
 }
@@ -77,7 +76,7 @@ pub fn constant_float(
 
 /// arith.constant for an `index`-typed integer.
 pub fn constant_index(ctx: *mlir.Context, value: i64, location: *const mlir.Location) *mlir.Operation {
-    const idx_ty = mlir.indexType(ctx);
+    const idx_ty = mlir.Type.index(ctx);
     const attr: *const mlir.Attribute = @ptrCast(c.mlirIntegerAttrGet(idx_ty.ptr(), value).ptr);
     return mlir.Operation.make(ctx, "arith.constant", .{
         .results = .{ .flat = &.{idx_ty} },

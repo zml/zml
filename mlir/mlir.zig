@@ -581,6 +581,10 @@ pub const Attribute = opaque {
         return @ptrCast(IntegerAttribute.init(ctx, it, value_));
     }
 
+    pub fn intFromType(it: *const IntegerType, value_: i64) *const Attribute {
+        return @ptrCast(IntegerAttribute.fromType(it, value_));
+    }
+
     pub fn float(ctx: *Context, comptime ft: FloatTypes, value_: anytype) *const Attribute {
         return @ptrCast(FloatAttribute.init(ctx, ft, value_));
     }
@@ -650,10 +654,11 @@ pub const IntegerAttribute = opaque {
     pub const format = M.format(c.mlirAttributePrint);
 
     pub fn init(ctx: *Context, it: IntegerTypes, value_: anytype) *const IntegerAttribute {
-        return @ptrCast(c.mlirIntegerAttrGet(
-            IntegerType.get(ctx, it).ptr(),
-            @intCast(value_),
-        ).ptr);
+        return .fromType(.get(ctx, it), @intCast(value_));
+    }
+
+    pub fn fromType(it: *const IntegerType, value_: i64) *const IntegerAttribute {
+        return @ptrCast(c.mlirIntegerAttrGet(it.ptr(), value_).ptr);
     }
 
     pub fn value(self: *const IntegerAttribute, comptime T: type) T {

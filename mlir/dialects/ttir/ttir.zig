@@ -1235,12 +1235,10 @@ test "tt.func round-trip" {
     const module: *mlir.Module = .init(loc);
     defer module.deinit();
 
-    const f32_ty = .float(ctx, .f32);
+    const f32_ty = mlir.Type.float(ctx, .f32);
     const ptr_ty = pointerType(f32_ty, 1);
-    const arg_types: []const *const mlir.Type = &.{ ptr_ty, ptr_ty };
-    const arg_locs: []const *const mlir.Location = &.{ loc, loc };
 
-    const entry = mlir.Block.init(arg_types, arg_locs);
+    const entry = mlir.Block.init(&.{ ptr_ty, ptr_ty }, &.{ loc, loc });
 
     const arg0 = entry.argument(0);
     const arg1 = entry.argument(1);

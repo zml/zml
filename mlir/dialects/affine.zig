@@ -18,9 +18,9 @@ pub fn apply(
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "affine.apply", .{
         .operands = .{ .flat = map_operands },
-        .results = .{ .flat = &.{mlir.indexType(ctx)} },
+        .results = .{ .flat = &.{.index(ctx)} },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -35,9 +35,9 @@ pub fn min(
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "affine.min", .{
         .operands = .{ .flat = map_operands },
-        .results = .{ .flat = &.{mlir.indexType(ctx)} },
+        .results = .{ .flat = &.{.index(ctx)} },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -52,9 +52,9 @@ pub fn max(
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "affine.max", .{
         .operands = .{ .flat = map_operands },
-        .results = .{ .flat = &.{mlir.indexType(ctx)} },
+        .results = .{ .flat = &.{.index(ctx)} },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -121,8 +121,8 @@ pub fn for_(
         .blocks = &.{body},
         .attributes = &.{
             .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
-            .named(ctx, "lowerBoundMap", mlir.affineMapAttribute(lb_map)),
-            .named(ctx, "upperBoundMap", mlir.affineMapAttribute(ub_map)),
+            .named(ctx, "lowerBoundMap", .affineMap(lb_map)),
+            .named(ctx, "upperBoundMap", .affineMap(ub_map)),
             .named(ctx, "step", .int(ctx, .i64, args.step)),
         },
         // The for body may reference outer SSA values that only become
@@ -162,7 +162,7 @@ pub fn if_(
     state.addOperands(operands);
     state.addResults(result_types);
     state.addAttributes(&.{
-        .named(ctx, "condition", mlir.integerSetAttribute(condition)),
+        .named(ctx, "condition", .integerSet(condition)),
     });
 
     const then_region = mlir.Region.init();
@@ -195,7 +195,7 @@ pub fn load(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -216,7 +216,7 @@ pub fn store(
     return mlir.Operation.make(ctx, "affine.store", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -238,7 +238,7 @@ pub fn vector_load(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -259,7 +259,7 @@ pub fn vector_store(
     return mlir.Operation.make(ctx, "affine.vector_store", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -329,10 +329,10 @@ pub fn parallel(
         .blocks = &.{body_block},
         .attributes = &.{
             .named(ctx, "reductions", .array(ctx, reductions_attrs.constSlice())),
-            .named(ctx, "lowerBoundsMap", mlir.affineMapAttribute(args.lower_bounds_map)),
-            .named(ctx, "lowerBoundsGroups", mlir.denseElementsAttribute(lb_groups_ty, args.lower_bounds_groups)),
-            .named(ctx, "upperBoundsMap", mlir.affineMapAttribute(args.upper_bounds_map)),
-            .named(ctx, "upperBoundsGroups", mlir.denseElementsAttribute(ub_groups_ty, args.upper_bounds_groups)),
+            .named(ctx, "lowerBoundsMap", .affineMap(args.lower_bounds_map)),
+            .named(ctx, "lowerBoundsGroups", .denseElements(lb_groups_ty, args.lower_bounds_groups)),
+            .named(ctx, "upperBoundsMap", .affineMap(args.upper_bounds_map)),
+            .named(ctx, "upperBoundsGroups", .denseElements(ub_groups_ty, args.upper_bounds_groups)),
             .named(ctx, "steps", .array(ctx, steps_attrs.constSlice())),
         },
         .verify = false,

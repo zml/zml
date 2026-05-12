@@ -1,9 +1,8 @@
 const std = @import("std");
 
 const mlir = @import("mlir");
-const stdx = @import("stdx");
-
 const ragged_paged = @import("platforms/tpu/ragged_paged");
+const stdx = @import("stdx");
 
 const CompilationContext = @import("../module.zig").CompilationContext;
 const zml = @import("../zml.zig");
@@ -11,6 +10,11 @@ const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
 const ragged_attention = @import("mosaic_tpu_kernels/ragged_attention.zig");
 
 const log = std.log.scoped(.tpu_attention);
+
+test {
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(ragged_attention);
+}
 
 pub const mosaic_tpu = struct {
     const PreparedInputs = struct {
@@ -126,7 +130,7 @@ pub const mosaic_tpu = struct {
         const end = query_start_len.slice1d(.b, .{ .start = 1 });
         const query_lens = end.sub(start);
         return query_lens
-            .cmp(.GT, .constant(query_lens.dtype().zero()).broad(query_lens.shape()))
+            .cmp(.GT, .zeroes(query_lens.shape()))
             .convert(.i32)
             .sum(.b)
             .reshape(.{1});

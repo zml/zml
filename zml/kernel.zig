@@ -215,9 +215,8 @@ pub const mosaic_tpu = struct {
                 inline for (spec.inputs, 0..) |fname, i| values[i] = @field(inputs, fname).value();
 
                 var res_types: [spec.outputs.len]*const mlir.Type = undefined;
-                inline for (spec.outputs, 0..) |fname, i| {
-                    const out = @field(outputs, fname);
-                    res_types[i] = mlirx.Type.rankedTensorType(cur.mlir_ctx, out);
+                inline for (&res_types, spec.outputs) |*r, fname| {
+                    r.* = mlirx.Type.rankedTensor(cur.mlir_ctx, @field(outputs, fname));
                 }
 
                 const op = callTpuCustomCall(&values, &res_types, backend_config, opts.extras);

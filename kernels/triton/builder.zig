@@ -1907,7 +1907,7 @@ pub const Builder = struct {
         std.debug.assert(inits.len == reduction_result_types.len);
 
         const scratch = self.arena.allocator();
-        const idx_ty = mlir.indexType(self.ctx);
+        const idx_ty = .index(self.ctx);
         const iv_types = scratch.alloc(*const mlir.Type, lbs.len) catch @panic("Builder.parallel OOM");
         const iv_locs = scratch.alloc(*const mlir.Location, lbs.len) catch @panic("Builder.parallel OOM");
         for (iv_types, iv_locs) |*t, *l| {

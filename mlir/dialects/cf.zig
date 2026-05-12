@@ -154,7 +154,7 @@ pub fn switch_(
 
     state.addAttributes(&.{
         .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &top_seg_sizes)),
-        .named(ctx, "case_values", mlir.denseElementsAttribute(shaped, case_values)),
+        .named(ctx, "case_values", .denseElements(shaped, case_values)),
         .named(ctx, "case_operand_segments", .denseArray(ctx, .i32, case_seg_sizes.constSlice())),
     });
 

@@ -859,7 +859,7 @@ pub const Builder = struct {
         const out_elem = out_dtype.toMlir(self.ctx);
         if (src.isVector()) return .vector(src.shape().constSlice(), out_elem);
         if (src.isMemRef()) {
-            const mr = src.type_().isA(.MemRef).?;
+            const mr = src.type_().isA(mlir.MemRefType).?;
             return .memRef(out_elem, src.shape().constSlice(), null, mr.memorySpace());
         }
         return out_elem;
@@ -969,7 +969,7 @@ pub const Builder = struct {
     /// (`arith.constant dense<v>`); a `Value` falls back to `vector.broadcast`.
     pub fn splat(self: *Builder, value: anytype, shape: []const i64, dtype: DType) Value {
         const T = @TypeOf(value);
-        const ty = .vector(shape, dtype.toMlir(self.ctx));
+        const ty = mlir.Type.vector(shape, dtype.toMlir(self.ctx));
         if (T == Value) return self.emit(vector.broadcast(self.ctx, value.inner, ty, self.loc()));
         if (isFloatDtype(dtype)) {
             const v_f64: f64 = switch (@typeInfo(T)) {
@@ -1465,7 +1465,7 @@ pub const Builder = struct {
             const dim = mr.dimension(i);
             s.appendAssumeCapacity(@divTrunc(dim + stride - 1, stride));
         }
-        const result_ty = .vector(s.constSlice(), mr.elementType());
+        const result_ty = mlir.Type.vector(s.constSlice(), mr.elementType());
         return self.emit(tpu.strided_load(self.ctx, ref.inner, self.innerSlice(indices), strides, result_ty, self.loc()));
     }
 
@@ -1474,7 +1474,7 @@ pub const Builder = struct {
     /// inner-dim crop).
     pub fn stridedLoadShape(self: *Builder, ref: Value, indices: []const Value, strides: []const i32, result_shape: []const i64) Value {
         const mr = ref.type_().isA(mlir.MemRefType) orelse @panic("stridedLoadShape: not a memref");
-        const result_ty = mlir.vectorType(result_shape, mr.elementType());
+        const result_ty = mlir.Type.vector(result_shape, mr.elementType());
         return self.emit(tpu.strided_load(self.ctx, ref.inner, self.innerSlice(indices), strides, result_ty, self.loc()));
     }
 
@@ -1511,7 +1511,7 @@ pub const Builder = struct {
     /// `tpu.iota` over the given shape / dimensions. Pass `null` for
     /// `dimensions` to use the default.
     pub fn iota(self: *Builder, shape: []const i64, dtype: DType, dimensions: ?[]const i32) Value {
-        const ty = .vector(shape, dtype.toMlir(self.ctx));
+        const ty = mlir.Type.vector(shape, dtype.toMlir(self.ctx));
         return self.emit(tpu.iota(self.ctx, dimensions, ty, self.loc()));
     }
 
@@ -1543,13 +1543,13 @@ pub const Builder = struct {
 
     /// `vector.broadcast` to `shape`. For Zig scalar literals prefer `splat` (dense-splat fast path).
     pub fn broadcastTo(self: *Builder, src: Value, shape: []const i64) Value {
-        const ty = .vector(shape, src.elemType());
+        const ty = mlir.Type.vector(shape, src.elemType());
         return self.emit(vector.broadcast(self.ctx, src.inner, ty, self.loc()));
     }
 
     /// `vector.shape_cast` — reshape preserving total lanes. `reshape` emits `tpu.reshape` instead.
     pub fn shapeCast(self: *Builder, src: Value, new_shape: []const i64) Value {
-        const ty = .vector(new_shape, src.elemType());
+        const ty = mlir.Type.vector(new_shape, src.elemType());
         return self.emit(vector.shape_cast(self.ctx, src.inner, ty, self.loc()));
     }
 
@@ -1610,14 +1610,14 @@ pub const Builder = struct {
     /// `vector.load` with an explicit result shape — for `ref[i, j, :, k:k+BLOCK]`-style sliced loads.
     pub fn vectorLoadShape(self: *Builder, ref: Value, indices: []const Value, shape: []const i64) Value {
         const idx_inner = self.indicesOrZero(ref, indices);
-        const ty = .vector(shape, ref.elemType());
+        const ty = mlir.Type.vector(shape, ref.elemType());
         return self.emit(vector.load(self.ctx, ref.inner, idx_inner, ty, .{}, self.loc()));
     }
 
     // ==================== TPU shape ====================
 
     pub fn reshape(self: *Builder, src: Value, new_shape: []const i64) Value {
-        const ty = .vector(new_shape, src.elemType());
+        const ty = mlir.Type.vector(new_shape, src.elemType());
         return self.emit(tpu.reshape(self.ctx, src.inner, ty, self.loc()));
     }
 
@@ -1628,7 +1628,7 @@ pub const Builder = struct {
             const d = in_shape.get(i);
             out.appendAssumeCapacity(if (i == @as(usize, @intCast(dimension))) d * times else d);
         }
-        const ty = .vector(out.constSlice(), src.elemType());
+        const ty = mlir.Type.vector(out.constSlice(), src.elemType());
         return self.emit(tpu.repeat(self.ctx, src.inner, dimension, times, ty, self.loc()));
     }
 
@@ -1640,7 +1640,7 @@ pub const Builder = struct {
         const head = sources[0].shape();
         var out: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
         for (0..head.len) |i| out.appendAssumeCapacity(if (i == ax) sum else head.get(i));
-        const ty = .vector(out.constSlice(), sources[0].elemType());
+        const ty = mlir.Type.vector(out.constSlice(), sources[0].elemType());
         return self.emit(tpu.concatenate(self.ctx, self.innerSlice(sources), dimension, ty, self.loc()));
     }
 
@@ -1649,7 +1649,7 @@ pub const Builder = struct {
         std.debug.assert(permutation.len == in_shape.len);
         var out: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
         for (permutation) |p| out.appendAssumeCapacity(in_shape.get(@intCast(p)));
-        const ty = .vector(out.constSlice(), src.elemType());
+        const ty = mlir.Type.vector(out.constSlice(), src.elemType());
         return self.emit(tpu.transpose(self.ctx, src.inner, permutation, ty, self.loc()));
     }
 
@@ -1674,7 +1674,7 @@ pub const Builder = struct {
         const in_shape = input.shape();
         var out: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
         for (0..in_shape.len) |i| out.appendAssumeCapacity(if (i == @as(usize, @intCast(dim))) 1 else in_shape.get(i));
-        const ty = .vector(out.constSlice(), input.elemType());
+        const ty = mlir.Type.vector(out.constSlice(), input.elemType());
         return self.emit(tpu.all_reduce(self.ctx, input.inner, dim, kind, ty, self.loc()));
     }
 
@@ -1686,7 +1686,7 @@ pub const Builder = struct {
         for (in_shape.constSlice(), 0..) |d, i| {
             if (@as(i32, @intCast(i)) != axis) out.appendAssumeCapacity(d);
         }
-        const ty = .vector(out.constSlice(), .integer(self.ctx, .i32));
+        const ty = mlir.Type.vector(out.constSlice(), .integer(self.ctx, .i32));
         return self.emit(tpu.reduce_index(self.ctx, input.inner, axis, kind, ty, self.loc()));
     }
 
@@ -1732,7 +1732,7 @@ pub const Builder = struct {
         dynamic_sizes: []const Value,
     ) Value {
         const mr = mem_ref.type_().isA(mlir.MemRefType) orelse @panic("memRefSlice: not a memref");
-        const result_ty = mlir.memRefType(mr.elementType(), result_shape, null, mr.memorySpace());
+        const result_ty = mlir.Type.memRef(mr.elementType(), result_shape, null, mr.memorySpace());
         return self.emit(tpu.memref_slice(self.ctx, mem_ref.inner, .{
             .base_idx = self.innerSlice(base_idx),
             .dynamic_sizes = self.innerSlice(dynamic_sizes),
@@ -1741,13 +1741,13 @@ pub const Builder = struct {
 
     pub fn memRefSqueeze(self: *Builder, mem_ref: Value, result_shape: []const i64) Value {
         const mr = mem_ref.type_().isA(mlir.MemRefType) orelse @panic("memRefSqueeze: not a memref");
-        const result_ty = mlir.memRefType(mr.elementType(), result_shape, null, mr.memorySpace());
+        const result_ty = mlir.Type.memRef(mr.elementType(), result_shape, null, mr.memorySpace());
         return self.emit(tpu.memref_squeeze(self.ctx, mem_ref.inner, result_ty, self.loc()));
     }
 
     pub fn memRefReshape(self: *Builder, mem_ref: Value, result_shape: []const i64) Value {
         const mr = mem_ref.type_().isA(mlir.MemRefType) orelse @panic("memRefReshape: not a memref");
-        const result_ty = mlir.memRefType(mr.elementType(), result_shape, null, mr.memorySpace());
+        const result_ty = mlir.Type.memRef(mr.elementType(), result_shape, null, mr.memorySpace());
         return self.emit(tpu.memref_reshape(self.ctx, mem_ref.inner, result_ty, self.loc()));
     }
 
@@ -1764,13 +1764,13 @@ pub const Builder = struct {
     /// `strided_load_kv` path (`<64x128xbf16>` → `<32x128xi32>`).
     pub fn memRefBitcastShape(self: *Builder, mem_ref: Value, result_shape: []const i64, dt: DType) Value {
         const mr = mem_ref.type_().isA(mlir.MemRefType) orelse @panic("memRefBitcastShape: not a memref");
-        const result_ty = mlir.memRefType(dt.toMlir(self.ctx), result_shape, null, mr.memorySpace());
+        const result_ty = mlir.Type.memRef(dt.toMlir(self.ctx), result_shape, null, mr.memorySpace());
         return self.emit(tpu.memref_bitcast(self.ctx, mem_ref.inner, result_ty, self.loc()));
     }
 
     pub fn reinterpretCast(self: *Builder, mem_ref: Value, result_shape: []const i64, dt: DType) Value {
         const mr = mem_ref.type_().isA(mlir.MemRefType) orelse @panic("reinterpretCast: not a memref");
-        const result_ty = mlir.memRefType(dt.toMlir(self.ctx), result_shape, null, mr.memorySpace());
+        const result_ty = mlir.Type.memRef(dt.toMlir(self.ctx), result_shape, null, mr.memorySpace());
         return self.emit(tpu.reinterpret_cast(self.ctx, mem_ref.inner, result_ty, self.loc()));
     }
 
@@ -1791,7 +1791,7 @@ pub const Builder = struct {
 
     /// `tpu.create_mask` — 2-sided mask `[low, high)` per dim.
     pub fn createMask(self: *Builder, low_bounds: []const Value, high_bounds: []const Value, shape: []const i64) Value {
-        const ty = .vector(shape, .integer(self.ctx, .i1));
+        const ty = mlir.Type.vector(shape, .integer(self.ctx, .i1));
         return self.emit(tpu.create_mask(self.ctx, self.innerSlice(low_bounds), self.innerSlice(high_bounds), ty, self.loc()));
     }
 
@@ -2108,7 +2108,7 @@ pub const Builder = struct {
     fn appendTransformStubs(self: *Builder) void {
         const ctx = self.ctx;
         const unknown_loc: *const mlir.Location = .unknown(ctx);
-        const i32_ty = .integer(ctx, .i32);
+        const i32_ty: *const mlir.Type = .int(ctx, .i32);
 
         const arena_alloc = self.arena.allocator();
         const total_args = self.grid_dim_count + self.prefetch_args.len;
