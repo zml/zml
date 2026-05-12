@@ -21,6 +21,9 @@ import torch
 from safetensors.torch import save_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
 
 DEFAULT_PROMPT = (
     "Paris is the city of lights, fun, and love where everyone can enjoy the "
@@ -91,6 +94,18 @@ def save_heads(tensors: OrderedDict[str, torch.Tensor], key: str, value: torch.T
     save_tensor(tensors, key, value, keep_batch)
 
 
+def with_tf32(allow_tf32: bool, fn):
+    old_matmul = torch.backends.cuda.matmul.allow_tf32
+    old_cudnn = torch.backends.cudnn.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+    torch.backends.cudnn.allow_tf32 = allow_tf32
+    try:
+        return fn()
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = old_matmul
+        torch.backends.cudnn.allow_tf32 = old_cudnn
+
+
 def layer_debug_forward(module, layer, hidden, target_hidden, position_embeddings, position_ids):
     prefix_values = OrderedDict()
 
@@ -142,6 +157,24 @@ def layer_debug_forward(module, layer, hidden, target_hidden, position_embedding
     sdpa_weights_grouped_f32 = torch.softmax(sdpa_logits_grouped, dim=-1, dtype=torch.float32)
     sdpa_grouped_f32 = torch.einsum("bshgt,bthd->bshgd", sdpa_weights_grouped_f32, v_by_seq.float())
     sdpa_grouped_f32_merged = sdpa_grouped_f32.reshape(bsz, q_len, num_query_heads, head_dim)
+    sdpa_grouped_replay_bf16 = torch.einsum(
+        "bshgt,bthd->bshgd",
+        sdpa_weights_grouped.to(torch.bfloat16),
+        v_by_seq.to(torch.bfloat16),
+    )
+    sdpa_grouped_replay_f32 = torch.einsum(
+        "bshgt,bthd->bshgd",
+        sdpa_weights_grouped_f32.float(),
+        v_by_seq.float(),
+    )
+    sdpa_grouped_replay_f32_tf32 = with_tf32(
+        True,
+        lambda: torch.einsum(
+            "bshgt,bthd->bshgd",
+            sdpa_weights_grouped_f32.float(),
+            v_by_seq.float(),
+        ),
+    )
 
     prefix_values["self_attn.sdpa.q_grouped"] = q_grouped
     prefix_values["self_attn.sdpa.k_scaled"] = k_scaled
@@ -153,6 +186,9 @@ def layer_debug_forward(module, layer, hidden, target_hidden, position_embedding
     prefix_values["self_attn.sdpa.weights_grouped_f32"] = sdpa_weights_grouped_f32
     prefix_values["self_attn.sdpa.grouped_out_f32"] = sdpa_grouped_f32
     prefix_values["self_attn.sdpa.grouped_merged_out_f32"] = sdpa_grouped_f32_merged
+    prefix_values["self_attn.sdpa.grouped_out_replay_bf16"] = sdpa_grouped_replay_bf16
+    prefix_values["self_attn.sdpa.grouped_out_replay_f32"] = sdpa_grouped_replay_f32
+    prefix_values["self_attn.sdpa.grouped_out_replay_f32_tf32"] = sdpa_grouped_replay_f32_tf32
 
     attn_pre_o, _ = module.eager_attention_forward(
         attn,

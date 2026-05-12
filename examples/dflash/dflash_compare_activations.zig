@@ -151,6 +151,8 @@ const LayerDebugTensors = struct {
     sdpa_weights_grouped_f32: zml.Tensor,
     sdpa_grouped_out_f32: zml.Tensor,
     sdpa_grouped_merged_out_f32: zml.Tensor,
+    sdpa_grouped_out_replay_bf16: zml.Tensor,
+    sdpa_grouped_out_replay_f32: zml.Tensor,
     sdpa_zml_pre_transpose: zml.Tensor,
     sdpa_zml_transposed: zml.Tensor,
     sdpa_zml_merged_out: zml.Tensor,
@@ -164,6 +166,13 @@ const LayerDebugTensors = struct {
 };
 
 const LayerDebugBuffers = zml.Bufferized(LayerDebugTensors);
+
+const SdpaFixtureReplayTensors = struct {
+    grouped_out_bf16: zml.Tensor,
+    grouped_out_f32: zml.Tensor,
+};
+
+const SdpaFixtureReplayBuffers = zml.Bufferized(SdpaFixtureReplayTensors);
 
 fn deinitLayerDebugBuffers(buffers: *LayerDebugBuffers) void {
     buffers.input_layernorm_out.deinit();
@@ -185,6 +194,8 @@ fn deinitLayerDebugBuffers(buffers: *LayerDebugBuffers) void {
     buffers.sdpa_weights_grouped_f32.deinit();
     buffers.sdpa_grouped_out_f32.deinit();
     buffers.sdpa_grouped_merged_out_f32.deinit();
+    buffers.sdpa_grouped_out_replay_bf16.deinit();
+    buffers.sdpa_grouped_out_replay_f32.deinit();
     buffers.sdpa_zml_pre_transpose.deinit();
     buffers.sdpa_zml_transposed.deinit();
     buffers.sdpa_zml_merged_out.deinit();
@@ -195,6 +206,25 @@ fn deinitLayerDebugBuffers(buffers: *LayerDebugBuffers) void {
     buffers.post_attention_layernorm_out.deinit();
     buffers.mlp_out.deinit();
     buffers.out.deinit();
+}
+
+fn deinitSdpaFixtureReplayBuffers(buffers: *SdpaFixtureReplayBuffers) void {
+    buffers.grouped_out_bf16.deinit();
+    buffers.grouped_out_f32.deinit();
+}
+
+fn runSdpaFixtureReplay(
+    weights_: zml.Tensor,
+    weights_f32_: zml.Tensor,
+    v_: zml.Tensor,
+) SdpaFixtureReplayTensors {
+    const weights = weights_.withPartialTags(.{ .s, .h, .hq, .k });
+    const weights_f32 = weights_f32_.withPartialTags(.{ .s, .h, .hq, .k });
+    const v = v_.withPartialTags(.{ .k, .h, .hd });
+    return .{
+        .grouped_out_bf16 = weights.convert(.bf16).dot(v.convert(.bf16), .k).transpose(.{ .s, .h, .hq, .hd }).convert(.f32),
+        .grouped_out_f32 = weights_f32.convert(.f32).dot(v.convert(.f32), .k).transpose(.{ .s, .h, .hq, .hd }),
+    };
 }
 
 fn runLayerDebugF32(
@@ -260,6 +290,11 @@ fn runLayerDebugF32(
         .transpose(sdpa_q_grouped.shape())
         .merge(.{ .h = .{ .h, .hq } })
         .rename(.{ .q = .s });
+    const sdpa_grouped_out_replay_bf16 = sdpa_weights_grouped
+        .convert(.bf16)
+        .dot(sdpa_v_grouped.convert(.bf16), .k);
+    const sdpa_grouped_out_replay_f32 = sdpa_weights_grouped_f32
+        .dot(sdpa_v_grouped.convert(.f32), .k);
     const sdpa_zml_pre_transpose = sdpa_grouped_out;
     const sdpa_zml_transposed = sdpa_zml_pre_transpose.transpose(sdpa_q_grouped.shape());
     const sdpa_zml_merged_out = sdpa_zml_transposed
@@ -301,6 +336,8 @@ fn runLayerDebugF32(
         .sdpa_weights_grouped_f32 = sdpa_weights_grouped_f32.transpose(.{ .q, .h, .hq, .k }).rename(.{ .q = .s }),
         .sdpa_grouped_out_f32 = sdpa_grouped_out_f32.transpose(.{ .q, .h, .hq, .hd }).rename(.{ .q = .s }),
         .sdpa_grouped_merged_out_f32 = sdpa_grouped_merged_out_f32,
+        .sdpa_grouped_out_replay_bf16 = sdpa_grouped_out_replay_bf16.transpose(.{ .q, .h, .hq, .hd }).rename(.{ .q = .s }).convert(.f32),
+        .sdpa_grouped_out_replay_f32 = sdpa_grouped_out_replay_f32.transpose(.{ .q, .h, .hq, .hd }).rename(.{ .q = .s }),
         .sdpa_zml_pre_transpose = sdpa_zml_pre_transpose.transpose(.{ .q, .h, .hq, .hd }).rename(.{ .q = .s }).convert(.f32),
         .sdpa_zml_transposed = sdpa_zml_transposed.rename(.{ .q = .s }).convert(.f32),
         .sdpa_zml_merged_out = sdpa_zml_merged_out.convert(.f32),
@@ -348,7 +385,7 @@ const TestContext = struct {
             self.io,
             runFullModelF32,
             .{ self.model, target_hidden, noise_embedding, position_ids },
-            .{ .shardings = &.{ self.model_sharding } },
+            .{ .shardings = &.{self.model_sharding} },
         );
         defer exe.deinit();
 
@@ -394,7 +431,7 @@ const TestContext = struct {
             self.io,
             runLayerDebugF32,
             .{ layer, hidden, target_hidden, position_ids },
-            .{ .shardings = &.{ self.model_sharding } },
+            .{ .shardings = &.{self.model_sharding} },
         );
         defer exe.deinit();
 
@@ -411,7 +448,85 @@ const TestContext = struct {
 
         var failures: usize = 0;
         try self.compareLayerDebug(layer_index, &actual, &failures);
+        try self.testLayerSdpaFixtureReplay(layer_index, &failures);
         if (failures != 0) return error.TestUnexpectedResult;
+    }
+
+    fn testLayerSdpaFixtureReplay(self: *TestContext, layer_index: usize, failures: *usize) !void {
+        comptime {
+            @setEvalBranchQuota(10_000);
+        }
+        const weights_key = try std.fmt.allocPrint(self.allocator, "layers.{d}.self_attn.sdpa.weights_grouped", .{layer_index});
+        defer self.allocator.free(weights_key);
+        const weights_f32_key = try std.fmt.allocPrint(self.allocator, "layers.{d}.self_attn.sdpa.weights_grouped_f32", .{layer_index});
+        defer self.allocator.free(weights_f32_key);
+        const v_key = try std.fmt.allocPrint(self.allocator, "layers.{d}.self_attn.sdpa.v_grouped", .{layer_index});
+        defer self.allocator.free(v_key);
+
+        var weights_buffer = try self.load(weights_key, self.sharding);
+        defer weights_buffer.deinit();
+        var weights_f32_buffer = try self.load(weights_f32_key, self.sharding);
+        defer weights_f32_buffer.deinit();
+        var v_buffer = try self.load(v_key, self.sharding);
+        defer v_buffer.deinit();
+
+        const weights = zml.Tensor.fromShape(weights_buffer.shape()).withTags(.{ .s, .h, .hq, .k });
+        const weights_f32 = zml.Tensor.fromShape(weights_f32_buffer.shape()).withTags(.{ .s, .h, .hq, .k });
+        const v = zml.Tensor.fromShape(v_buffer.shape()).withTags(.{ .k, .h, .hd });
+
+        var exe = try self.platform.compileFn(
+            self.allocator,
+            self.io,
+            runSdpaFixtureReplay,
+            .{ weights, weights_f32, v },
+            .{},
+        );
+        defer exe.deinit();
+
+        var exe_args = try exe.args(self.allocator);
+        defer exe_args.deinit(self.allocator);
+        exe_args.set(.{ weights_buffer, weights_f32_buffer, v_buffer });
+
+        var results = try exe.results(self.allocator);
+        defer results.deinit(self.allocator);
+        exe.call(exe_args, &results);
+
+        var replay = results.get(SdpaFixtureReplayBuffers);
+        defer deinitSdpaFixtureReplayBuffers(&replay);
+
+        const bf16_expected_key = try std.fmt.allocPrint(self.allocator, "layers.{d}.self_attn.sdpa.grouped_out_replay_bf16", .{layer_index});
+        defer self.allocator.free(bf16_expected_key);
+        const f32_expected_key = try std.fmt.allocPrint(self.allocator, "layers.{d}.self_attn.sdpa.grouped_out_replay_f32", .{layer_index});
+        defer self.allocator.free(f32_expected_key);
+        const f32_tf32_expected_key = try std.fmt.allocPrint(self.allocator, "layers.{d}.self_attn.sdpa.grouped_out_replay_f32_tf32", .{layer_index});
+        defer self.allocator.free(f32_tf32_expected_key);
+
+        var bf16_expected = try self.load(bf16_expected_key, self.sharding);
+        defer bf16_expected.deinit();
+        var f32_expected = try self.load(f32_expected_key, self.sharding);
+        defer f32_expected.deinit();
+        var f32_tf32_expected = try self.load(f32_tf32_expected_key, self.sharding);
+        defer f32_tf32_expected.deinit();
+
+        const bf16_name = try std.fmt.allocPrint(self.allocator, "layers.{d}.fixture_replay.bf16_weights_bf16_v", .{layer_index});
+        defer self.allocator.free(bf16_name);
+        const f32_name = try std.fmt.allocPrint(self.allocator, "layers.{d}.fixture_replay.f32_weights_f32_v", .{layer_index});
+        defer self.allocator.free(f32_name);
+        const f32_tf32_name = try std.fmt.allocPrint(self.allocator, "layers.{d}.fixture_replay.f32_weights_f32_v_vs_python_tf32", .{layer_index});
+        defer self.allocator.free(f32_tf32_name);
+
+        self.expectClose(bf16_name, replay.grouped_out_bf16, bf16_expected) catch |err| {
+            failures.* += 1;
+            std.log.err("{s} failed: {}", .{ bf16_name, err });
+        };
+        self.expectClose(f32_name, replay.grouped_out_f32, f32_expected) catch |err| {
+            failures.* += 1;
+            std.log.err("{s} failed: {}", .{ f32_name, err });
+        };
+        self.expectClose(f32_tf32_name, replay.grouped_out_f32, f32_tf32_expected) catch |err| {
+            failures.* += 1;
+            std.log.err("{s} failed: {}", .{ f32_tf32_name, err });
+        };
     }
 
     fn compareLayerDebug(self: *TestContext, layer_index: usize, actual: *LayerDebugBuffers, failures: *usize) !void {
@@ -434,6 +549,8 @@ const TestContext = struct {
         try self.compareLayerValue(layer_index, "self_attn.sdpa.weights_grouped_f32", actual.sdpa_weights_grouped_f32, failures);
         try self.compareLayerValue(layer_index, "self_attn.sdpa.grouped_out_f32", actual.sdpa_grouped_out_f32, failures);
         try self.compareLayerValue(layer_index, "self_attn.sdpa.grouped_merged_out_f32", actual.sdpa_grouped_merged_out_f32, failures);
+        try self.compareLayerValue(layer_index, "self_attn.sdpa.grouped_out_replay_bf16", actual.sdpa_grouped_out_replay_bf16, failures);
+        try self.compareLayerValue(layer_index, "self_attn.sdpa.grouped_out_replay_f32", actual.sdpa_grouped_out_replay_f32, failures);
         try self.compareBuffers("sdpa bf16 grouped_out vs f32 grouped_out", actual.sdpa_grouped_out, actual.sdpa_grouped_out_f32, failures);
         try self.compareBuffers("sdpa explicit grouped_out vs zml pre_transpose", actual.sdpa_grouped_out, actual.sdpa_zml_pre_transpose, failures);
         try self.compareBuffers("sdpa explicit merged_out vs zml merged_out", actual.sdpa_grouped_merged_out, actual.sdpa_zml_merged_out, failures);
