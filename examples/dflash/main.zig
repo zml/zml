@@ -12,9 +12,8 @@ pub const std_options: std.Options = .{
 
 const log = std.log.scoped(.dflash);
 
-const block_size = 16;
 const prompt =
-    "The quick brown fox writes a short note about machine learning, systems, and useful tests.";
+    "Paris is the city of lights, fun, and love where everyone can enjoy the amazing culture, food, and art.";
 
 const Args = struct {
     model: []const u8,
@@ -89,13 +88,14 @@ pub fn main(init: std.process.Init) !void {
 
     const target_model = try llama.Model.init(allocator, target_store.view(), parsed_target_config.value, .{
         .sampling_strategy = .{},
-        .max_seq_len = block_size,
+        .max_seq_len = parsed_config.value.block_size,
     });
     defer target_model.deinit(allocator);
 
     const shardings: Shardings = try .init(platform);
     const all_shardings = shardings.all();
 
+    const block_size = parsed_config.value.block_size;
     const input_tokens_tensor: zml.Tensor = .init(.{ .s = block_size }, .u32);
     const token_index_tensor: zml.Tensor = .init(.{}, .u32);
     const target_kv_cache = llama.KvCache.init(.init(.{
@@ -147,7 +147,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer llama.Model.unloadBuffers(&target_buffers, allocator);
 
-    const token_ids = try promptTokens(allocator, &tokenizer, parsed_target_config.value);
+    const token_ids = try promptTokens(allocator, &tokenizer, parsed_target_config.value, block_size);
     defer allocator.free(token_ids);
 
     var input_tokens_buffer: zml.Buffer = try .fromSlice(
@@ -189,14 +189,14 @@ pub fn main(init: std.process.Init) !void {
     });
     exe.call(exe_args, &results);
 
-    var target_token_buffer, var noise_token_buffer, var draft_token_buffer = results.get(struct {
+    var target_token_buffer, var noise_token_buffer, var speculative_token_buffer = results.get(struct {
         zml.Buffer,
         zml.Buffer,
         zml.Buffer,
     });
     defer target_token_buffer.deinit();
     defer noise_token_buffer.deinit();
-    defer draft_token_buffer.deinit();
+    defer speculative_token_buffer.deinit();
 
     var target_token_slice = try target_token_buffer.toSliceAlloc(allocator, io);
     defer target_token_slice.free(allocator);
@@ -204,17 +204,17 @@ pub fn main(init: std.process.Init) !void {
     var noise_token_slice = try noise_token_buffer.toSliceAlloc(allocator, io);
     defer noise_token_slice.free(allocator);
 
-    var draft_token_slice = try draft_token_buffer.toSliceAlloc(allocator, io);
-    defer draft_token_slice.free(allocator);
+    var speculative_token_slice = try speculative_token_buffer.toSliceAlloc(allocator, io);
+    defer speculative_token_slice.free(allocator);
 
     var stdout = std.Io.File.stdout().writerStreaming(io, &.{});
     try printTokens(allocator, &tokenizer, &stdout.interface, "prompt", token_ids);
     try printTokens(allocator, &tokenizer, &stdout.interface, "target_next", target_token_slice.constItems(u32));
     try printTokens(allocator, &tokenizer, &stdout.interface, "noise", noise_token_slice.constItems(u32));
-    try stdout.interface.print("dflash_tokens shape: {f}\n", .{draft_token_slice.shape});
+    try stdout.interface.print("speculative_tokens shape: {f}\n", .{speculative_token_slice.shape});
 
-    const draft_tokens = draft_token_slice.constItems(u32);
-    try printTokens(allocator, &tokenizer, &stdout.interface, "dflash", draft_tokens);
+    const speculative_tokens = speculative_token_slice.constItems(u32);
+    try printTokens(allocator, &tokenizer, &stdout.interface, "speculative", speculative_tokens);
     try stdout.interface.flush();
 }
 
@@ -236,10 +236,14 @@ fn runDFlash(
         draft_model.target_layer_ids,
         draft_model.mask_token_id.?,
     );
-    const position_ids = zml.Tensor.arange(.{ .end = block_size * 2 }, .u32).withTags(.{.s});
+    const position_ids = zml.Tensor.arange(.{ .end = draft_model.block_size * 2 }, .u32).withTags(.{.s});
     const hidden = draft_model.forward(target_hidden, noise_embedding, position_ids);
     const draft_tokens = target_model.greedyTokensFromHidden(hidden);
-    return .{ target_token, noise_tokens, draft_tokens };
+    const speculative_tokens = zml.Tensor.concatenate(&.{
+        target_token,
+        draft_tokens.slice1d(.s, .{ .start = 1, .end = draft_tokens.dim(.s) }),
+    }, .s);
+    return .{ target_token, noise_tokens, speculative_tokens };
 }
 
 fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
@@ -253,7 +257,7 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml
     return try .fromBytes(allocator, bytes);
 }
 
-fn promptTokens(allocator: std.mem.Allocator, tokenizer: *zml.tokenizer.Tokenizer, config: llama.Config) ![]u32 {
+fn promptTokens(allocator: std.mem.Allocator, tokenizer: *zml.tokenizer.Tokenizer, config: llama.Config, block_size: u32) ![]u32 {
     var token_ids = try allocator.alloc(u32, block_size);
     errdefer allocator.free(token_ids);
     @memset(token_ids, firstEosToken(config));
