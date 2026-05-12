@@ -16,6 +16,9 @@ py_library(
 )
 
 # JSON RPC loop + post-XLA diff helper, shared by both runner.py files.
+# NOTE: not gated to linux — the mosaic_tpu compare path only needs jax[cpu],
+# which works on macOS too. The triton compare path is still linux-gated via
+# its own deps (`triton_py_deps`, `fake_plugin`, `triton_helpers`).
 py_library(
     name = "runtime",
     srcs = ["runtime.py"],

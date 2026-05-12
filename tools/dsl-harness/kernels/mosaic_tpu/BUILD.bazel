@@ -1,3 +1,17 @@
+load("@rules_python//python:py_library.bzl", "py_library")
 load("//tools/dsl-harness:kernels.bzl", "declare_mosaic_tpu_kernels")
+
+# `gdn_fast.py` is the verbatim tpu-inference GDN bundle (P4 `fused_decoding_gdn`
+# + P5 `recurrent_scan` + their deps). `gdn_prefill_scan.py` imports
+# `recurrent_scan` from it; expose it as a py_library so it lands in that
+# kernel's runner runfiles. `imports = ["py"]` puts this dir's `py/` on
+# PYTHONPATH (same as the per-kernel `*_py_src_lib`), so the bare module name
+# `gdn_fast` resolves.
+py_library(
+    name = "gdn_fast_lib",
+    srcs = ["py/gdn_fast.py"],
+    imports = ["py"],
+    visibility = ["//visibility:public"],
+)
 
 declare_mosaic_tpu_kernels()

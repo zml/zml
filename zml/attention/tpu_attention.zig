@@ -57,6 +57,7 @@ pub const mosaic_tpu = struct {
         block_table: zml.Tensor,
         seq_lens: zml.Tensor,
         query_start_len: zml.Tensor,
+        mamba_slot_ids: zml.Tensor,
 
         pub fn init(opts: Options) Parameters {
             return .{
@@ -64,6 +65,7 @@ pub const mosaic_tpu = struct {
                 .block_table = zml.Tensor.init(.{ .b = opts.batch_size, .p = opts.max_num_pages }, .i32),
                 .seq_lens = zml.Tensor.init(.{ .b = opts.batch_size }, .i32),
                 .query_start_len = zml.Tensor.init(.{ .b = opts.batch_size + 1 }, .i32),
+                .mamba_slot_ids = zml.Tensor.init(.{ .b = opts.batch_size }, .i32),
             };
         }
 
@@ -76,6 +78,7 @@ pub const mosaic_tpu = struct {
             allocation_size += self.block_table.byteSize();
             allocation_size += self.seq_lens.byteSize();
             allocation_size += self.query_start_len.byteSize();
+            allocation_size += self.mamba_slot_ids.byteSize();
             return allocation_size;
         }
     };

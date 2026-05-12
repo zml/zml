@@ -120,6 +120,26 @@ MOSAIC_TPU_KERNELS = [
         "py_src": "py/ragged_paged.py",
         "py_kernel": "ragged_paged_attention",
     },
+    {
+        # GDN fused decode kernel ("P4") — Zig DSL vs the verbatim tpu-inference
+        # `fused_decoding_gdn`. See py/gdn_decode_fast.py and zig/gdn_decode_fast.zig.
+        "name": "gdn_decode_fast",
+        "src": "zig/gdn_decode_fast.zig",
+        "py_src": "py/gdn_decode_fast.py",
+        "py_kernel": "gdn_decode_fwd",
+        "extra_zig_deps": ["//kernels/mosaic_tpu:mosaic_tpu_builder"],
+    },
+    {
+        # GDN chunked-prefill+decode kernel ("P5") — Zig DSL vs `recurrent_scan`
+        # (imported verbatim from py/gdn_fast.py via py/gdn_prefill_scan.py, which
+        # only adds debug=True/name= to the pallas_call). See zig/gdn_prefill_scan.zig.
+        "name": "gdn_prefill_scan",
+        "src": "zig/gdn_prefill_scan.zig",
+        "py_src": "py/gdn_prefill_scan.py",
+        "py_kernel": "recurrent_scan",
+        "extra_py_deps": [":gdn_fast_lib"],
+        "extra_zig_deps": ["//kernels/mosaic_tpu:mosaic_tpu_builder", "//mlir/dialects", "//mlir/dialects/mosaic_tpu"],
+    },
 ]
 
 def _kernel_labels(kind, kernels, suffix):
