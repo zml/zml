@@ -12,17 +12,23 @@ pub const std_options: std.Options = .{
 
 const log = std.log.scoped(.dflash);
 
-const prompt =
+const default_prompt =
     "Paris is the city of lights, fun, and love where everyone can enjoy the amazing culture, food, and art.";
 
 const Args = struct {
     model: []const u8,
     target_model: []const u8,
+    prompt: []const u8 = default_prompt,
 
     pub const help =
-        \\Use dflash --model=<path> --target-model=<path>
+        \\Use dflash --model=<path> --target-model=<path> [--prompt=<text>]
         \\
         \\Compile the DFlash draft model, apply the target lm_head, and print greedy tokens.
+        \\
+        \\Options:
+        \\  --model=<path>          Path to the DFlash model repository
+        \\  --target-model=<path>   Path to the target LLaMA model repository
+        \\  --prompt=<text>         Prompt to tokenize; defaults to the built-in smoke-test prompt
         \\
     ;
 };
@@ -147,7 +153,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer llama.Model.unloadBuffers(&target_buffers, allocator);
 
-    const token_ids = try promptTokens(allocator, &tokenizer, parsed_target_config.value, block_size);
+    const token_ids = try promptTokens(allocator, &tokenizer, parsed_target_config.value, block_size, args.prompt);
     defer allocator.free(token_ids);
 
     var input_tokens_buffer: zml.Buffer = try .fromSlice(
@@ -257,7 +263,13 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml
     return try .fromBytes(allocator, bytes);
 }
 
-fn promptTokens(allocator: std.mem.Allocator, tokenizer: *zml.tokenizer.Tokenizer, config: llama.Config, block_size: u32) ![]u32 {
+fn promptTokens(
+    allocator: std.mem.Allocator,
+    tokenizer: *zml.tokenizer.Tokenizer,
+    config: llama.Config,
+    block_size: u32,
+    prompt: []const u8,
+) ![]u32 {
     var token_ids = try allocator.alloc(u32, block_size);
     errdefer allocator.free(token_ids);
     @memset(token_ids, firstEosToken(config));
