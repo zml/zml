@@ -1009,8 +1009,7 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
             // this is first chunk, put all overlap to the right
             win_start = 0;
             win_end = core_end + 2 * overlap;
-        }
-        if (core_end + overlap >= latent_frames) {
+        } else if (core_end + overlap >= latent_frames) {
             // this is the last chunk
             last_chunk = true;
             // put all overlap to the left
@@ -1018,8 +1017,11 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
             core_end = latent_frames;
             core_start = core_end - stride;
             win_start = core_start - 2 * overlap;
+        } else {
+            // this is a middle chunk, put overlap on both sides
+            win_start = core_start - overlap;
+            win_end = core_end + overlap;
         }
-
         std.log.info("core = [{d}..{d}] win = [{d}..{d}]", .{ core_start, core_end, win_start, win_end });
         // move the chunk data from latents.x to encoded_chunk_slice, assume tensors are stored in row major
         for (0..audio_dim) |i| {
