@@ -968,7 +968,7 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
     // we use that to simplify the tiling logic
     const overlap = 25;
     const stride = decode_t * 25;
-    const chunk_size = stride + 2 * overlap;
+    const chunk_frames = stride + 2 * overlap;
 
     // [f1, f2] in latent space has coord [F1, F2] in audio space with Fi = fi * upsampling_ratio
     var upsampling_ratio: u32 = 1;
@@ -978,7 +978,7 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
 
     const latent_frames: u32 = @intCast(latents.x.shape.dim(1));
     const audio_frames: u32 = @intCast(latent_frames * upsampling_ratio);
-    const decoded_chunk_frames: u32 = chunk_size * upsampling_ratio;
+    const decoded_chunk_frames: u32 = chunk_frames * upsampling_ratio;
 
     const audio_dim: u32 = @intCast(latents.x.shape.dim(0));
     const audio_channels: u32 = 2;
@@ -989,7 +989,7 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
     const audio_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_channels, .t = audio_frames }, .f32));
 
     // chunk slice/buffer to decode
-    const encoded_chunk_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = chunk_size }, .bf16));
+    const encoded_chunk_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = chunk_frames }, .bf16));
     defer encoded_chunk_slice.free(allocator);
     const decoded_chunk_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_channels, .t = decoded_chunk_frames }, .f32));
     defer decoded_chunk_slice.free(allocator);
@@ -1010,9 +1010,8 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
             win_start = 0;
             win_end = core_end + 2 * overlap;
         } else if (core_end + overlap >= latent_frames) {
-            // this is the last chunk
+            // this is the last chunk, put all overlap to the left
             last_chunk = true;
-            // put all overlap to the left
             win_end = latent_frames;
             core_end = latent_frames;
             core_start = core_end - stride;
@@ -1026,7 +1025,8 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
         // move the chunk data from latents.x to encoded_chunk_slice, assume tensors are stored in row major
         for (0..audio_dim) |i| {
             for (win_start..win_end) |j| {
-                encoded_chunk_slice.items(zml.floats.BFloat16)[i * chunk_size + j] = latents.x.items(zml.floats.BFloat16)[i * latent_frames + j];
+                const j_chunk = j - win_start;
+                encoded_chunk_slice.items(zml.floats.BFloat16)[i * chunk_frames + j_chunk] = latents.x.items(zml.floats.BFloat16)[i * latent_frames + j];
             }
         }
         // send the slice to the GPU
