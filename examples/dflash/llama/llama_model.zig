@@ -4,7 +4,7 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 
 const common = @import("../common.zig");
-const inference = @import("inference.zig");
+const inference = @import("llama_inference.zig");
 
 pub const Config = struct {
     bos_token_id: u32,
@@ -236,6 +236,52 @@ pub const Model = struct {
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
         return .{ next_tokens, new_rng };
     }
+
+    pub fn greedyTokensFromHidden(self: Model, out_: zml.Tensor) zml.Tensor {
+        const out = out_.withPartialTags(.{ .s, .d });
+
+        var logits = blk: {
+            if (self.lm_head) |lm_head| {
+                break :blk lm_head.forward(out).rename(.{ .dout = .voc });
+            } else {
+                break :blk self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .d);
+            }
+        };
+
+        if (logits.shape().hasTag(.voc) == null)
+            logits = logits.rename(.{ .d = .voc });
+
+        return logits.argMax(.voc).indices.squeeze(.voc).convert(.u32);
+    }
+
+    pub fn dflashInputs(
+        self: Model,
+        tokens_: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: KvCache,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
+        target_layer_ids: []const u32,
+        mask_token_id: u32,
+    ) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+        const target_hidden, const out = self.model.forwardSelected(
+            tokens_.withPartialTags(.{.s}),
+            token_index,
+            kv_cache,
+            attention_metadata,
+            attention_parameters,
+            target_layer_ids,
+        );
+
+        const sampled_tokens = self.greedyTokensFromHidden(out);
+        const sampled_last = sampled_tokens.slice1d(.s, .single(sampled_tokens.dim(.s) - 1)).reshape(.{ .s = 1 });
+        const noise_tokens = zml.Tensor.scalar(mask_token_id, .u32)
+            .broad(tokens_.shape())
+            .dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(0, .u32) }, sampled_last);
+        const noise_embedding = embed_tokensForward(self.model.embed_tokens, noise_tokens);
+
+        return .{ target_hidden, noise_embedding, sampled_last, noise_tokens };
+    }
 };
 
 pub const Llama = struct {
@@ -303,6 +349,44 @@ pub const Llama = struct {
         }
 
         return .{ self.norm.forward(hidden), updated_kv_cache.reuseBuffer(kv_cache) };
+    }
+
+    pub fn forwardSelected(
+        self: Llama,
+        tokens: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: KvCache,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
+        target_layer_ids: []const u32,
+    ) struct { zml.Tensor, zml.Tensor } {
+        const embeds = embed_tokensForward(self.embed_tokens, tokens);
+        var hidden = embeds;
+        var updated_kv_cache = kv_cache;
+
+        var selected: [32]zml.Tensor = undefined;
+        var selected_len: usize = 0;
+        for (self.layers, 0..) |layer, i| {
+            hidden, updated_kv_cache = layer.forward(
+                hidden,
+                token_index,
+                updated_kv_cache.atLayer(i),
+                attention_metadata,
+                attention_parameters,
+            );
+
+            for (target_layer_ids) |target_layer_id| {
+                if (target_layer_id == i) {
+                    selected[selected_len] = hidden;
+                    selected_len += 1;
+                    break;
+                }
+            }
+        }
+
+        stdx.debug.assert(selected_len > 0, "DFlash requires at least one target layer id", .{});
+        _ = updated_kv_cache.reuseBuffer(kv_cache);
+        return .{ zml.Tensor.concatenate(selected[0..selected_len], .d), self.norm.forward(hidden) };
     }
 };
 

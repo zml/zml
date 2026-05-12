@@ -4,7 +4,7 @@ const zml = @import("zml");
 const attention = zml.attention.attention;
 
 const common = @import("../common.zig");
-const model = @import("model.zig");
+const model = @import("llama_model.zig");
 
 const log = std.log.scoped(.llama);
 

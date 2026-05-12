@@ -4,6 +4,7 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 
 const dflash = @import("dflash_model.zig");
+const llama = @import("llama/llama_model.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -12,8 +13,8 @@ pub const std_options: std.Options = .{
 const log = std.log.scoped(.dflash);
 
 const block_size = 16;
-const first_token: u32 = 362;
-const placeholder_token: u32 = 151_643;
+const prompt =
+    "The quick brown fox writes a short note about machine learning.";
 
 const Args = struct {
     model: []const u8,
@@ -65,6 +66,8 @@ pub fn main(init: std.process.Init) !void {
 
     const parsed_config = try parseConfig(dflash.Config, allocator, io, repo);
     defer parsed_config.deinit();
+    const parsed_target_config = try parseConfig(llama.Config, allocator, io, target_repo);
+    defer parsed_target_config.deinit();
 
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
@@ -84,21 +87,45 @@ pub fn main(init: std.process.Init) !void {
     const draft_model = try dflash.Model.init(allocator, store.view(), parsed_config.value);
     defer draft_model.deinit(allocator);
 
-    const target_model: TargetModel = .init(target_store.view());
+    const target_model = try llama.Model.init(allocator, target_store.view(), parsed_target_config.value, .{
+        .sampling_strategy = .{},
+        .max_seq_len = block_size,
+    });
+    defer target_model.deinit(allocator);
 
     const shardings: Shardings = try .init(platform);
     const all_shardings = shardings.all();
 
-    const target_hidden_tensor: zml.Tensor = .init(.{ .s = block_size, .d = draft_model.fc.weight.dim(.d) }, .f32);
-    const noise_embedding_tensor: zml.Tensor = .init(.{ .s = block_size, .d = draft_model.fc.weight.dim(.dout) }, .f32);
-    const position_ids_tensor: zml.Tensor = .init(.{ .s = block_size * 2 }, .u32);
+    const input_tokens_tensor: zml.Tensor = .init(.{ .s = block_size }, .u32);
+    const token_index_tensor: zml.Tensor = .init(.{}, .u32);
+    const target_kv_cache = llama.KvCache.init(.init(.{
+        .layer = parsed_target_config.value.num_hidden_layers,
+        .k = block_size,
+        .h = parsed_target_config.value.num_key_value_heads,
+        .hd = parsed_target_config.value.head_dim orelse parsed_target_config.value.hidden_size / parsed_target_config.value.num_attention_heads,
+    }, target_model.model.embed_tokens.weight.dtype()));
+    const attention_backend: zml.attention.attention.Backend = .vanilla;
+    const attention_metadata = zml.attention.attention.Metadata.init(.fromBackend(
+        attention_backend,
+        block_size,
+        parsed_target_config.value.num_attention_heads,
+    ));
+    const attention_parameters = zml.attention.attention.Parameters.init(.fromBackend(attention_backend));
 
     log.info("Compiling model...", .{});
     var exe = try platform.compileFn(
         allocator,
         io,
-        forwardTokens,
-        .{ draft_model, target_model, target_hidden_tensor, noise_embedding_tensor, position_ids_tensor },
+        runDFlash,
+        .{
+            draft_model,
+            target_model,
+            input_tokens_tensor,
+            token_index_tensor,
+            target_kv_cache,
+            attention_metadata,
+            attention_parameters,
+        },
         .{ .shardings = &all_shardings },
     );
     defer exe.deinit();
@@ -112,41 +139,39 @@ pub fn main(init: std.process.Init) !void {
     });
     defer dflash.Model.unloadBuffers(&model_buffers, allocator);
 
-    var target_buffers = try zml.io.load(TargetModel, &target_model, allocator, io, platform, &target_store, .{
-        .parallelism = 1,
+    var target_buffers = try zml.io.load(llama.Model, &target_model, allocator, io, platform, &target_store, .{
+        .parallelism = 16,
         .shardings = &all_shardings,
-        .dma_chunks = 4,
+        .dma_chunks = 32,
         .dma_chunk_size = 128 * zml.MiB,
     });
-    defer TargetModel.unloadBuffers(&target_buffers);
+    defer llama.Model.unloadBuffers(&target_buffers, allocator);
 
-    var token_ids: [block_size]u32 = @splat(placeholder_token);
-    token_ids[0] = first_token;
+    const token_ids = try promptTokens(allocator, &tokenizer, parsed_target_config.value);
+    defer allocator.free(token_ids);
 
-    var target_hidden = try zml.Slice.alloc(allocator, target_hidden_tensor.shape());
-    defer target_hidden.free(allocator);
-    @memset(target_hidden.items(f32), 0);
-
-    var noise_embedding = try zml.Slice.alloc(allocator, noise_embedding_tensor.shape());
-    defer noise_embedding.free(allocator);
-    fillNoiseEmbedding(noise_embedding.items(f32), &token_ids, noise_embedding_tensor.dim(.d));
-
-    var position_ids: [block_size * 2]u32 = undefined;
-    for (&position_ids, 0..) |*pos, i| pos.* = @intCast(i);
-
-    var target_hidden_buffer: zml.Buffer = try .fromSlice(io, platform, target_hidden, .replicated);
-    defer target_hidden_buffer.deinit();
-
-    var noise_embedding_buffer: zml.Buffer = try .fromSlice(io, platform, noise_embedding, .replicated);
-    defer noise_embedding_buffer.deinit();
-
-    var position_ids_buffer: zml.Buffer = try .fromSlice(
+    var input_tokens_buffer: zml.Buffer = try .fromSlice(
         io,
         platform,
-        zml.Slice.init(position_ids_tensor.shape(), std.mem.asBytes(&position_ids)),
+        zml.Slice.init(input_tokens_tensor.shape(), std.mem.sliceAsBytes(token_ids)),
         .replicated,
     );
-    defer position_ids_buffer.deinit();
+    defer input_tokens_buffer.deinit();
+
+    var token_index: u32 = 0;
+    var token_index_buffer: zml.Buffer = try .fromSlice(
+        io,
+        platform,
+        zml.Slice.init(token_index_tensor.shape(), std.mem.asBytes(&token_index)),
+        .replicated,
+    );
+    defer token_index_buffer.deinit();
+
+    var target_kv_cache_buffers = try llama.KvCache.initBuffer(target_kv_cache, io, platform, shardings.model);
+    defer llama.KvCache.deinitBuffer(&target_kv_cache_buffers);
+
+    var attention_metadata_buffers = try attention_metadata.initBuffer(io, platform, shardings.model);
+    defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
     var exe_args = try exe.args(allocator);
     defer exe_args.deinit(allocator);
@@ -154,65 +179,67 @@ pub fn main(init: std.process.Init) !void {
     var results = try exe.results(allocator);
     defer results.deinit(allocator);
 
-    exe_args.set(.{ model_buffers, target_buffers, target_hidden_buffer, noise_embedding_buffer, position_ids_buffer });
+    exe_args.set(.{
+        model_buffers,
+        target_buffers,
+        input_tokens_buffer,
+        token_index_buffer,
+        target_kv_cache_buffers,
+        attention_metadata_buffers,
+    });
     exe.call(exe_args, &results);
 
-    var tokens: zml.Buffer = results.get(zml.Buffer);
-    defer tokens.deinit();
+    var target_token_buffer, var noise_token_buffer, var draft_token_buffer = results.get(struct {
+        zml.Buffer,
+        zml.Buffer,
+        zml.Buffer,
+    });
+    defer target_token_buffer.deinit();
+    defer noise_token_buffer.deinit();
+    defer draft_token_buffer.deinit();
 
-    var tokens_slice = try tokens.toSliceAlloc(allocator, io);
-    defer tokens_slice.free(allocator);
+    var target_token_slice = try target_token_buffer.toSliceAlloc(allocator, io);
+    defer target_token_slice.free(allocator);
+
+    var noise_token_slice = try noise_token_buffer.toSliceAlloc(allocator, io);
+    defer noise_token_slice.free(allocator);
+
+    var draft_token_slice = try draft_token_buffer.toSliceAlloc(allocator, io);
+    defer draft_token_slice.free(allocator);
 
     var stdout = std.Io.File.stdout().writerStreaming(io, &.{});
-    try printTokens(allocator, &tokenizer, &stdout.interface, "input", &token_ids);
-    try stdout.interface.print("sampled_tokens shape: {f}\n", .{tokens_slice.shape});
+    try printTokens(allocator, &tokenizer, &stdout.interface, "prompt", token_ids);
+    try printTokens(allocator, &tokenizer, &stdout.interface, "target_next", target_token_slice.constItems(u32));
+    try printTokens(allocator, &tokenizer, &stdout.interface, "noise", noise_token_slice.constItems(u32));
+    try stdout.interface.print("dflash_tokens shape: {f}\n", .{draft_token_slice.shape});
 
-    const sampled_tokens = tokens_slice.constItems(u32);
-    try printTokens(allocator, &tokenizer, &stdout.interface, "sampled", sampled_tokens);
+    const draft_tokens = draft_token_slice.constItems(u32);
+    try printTokens(allocator, &tokenizer, &stdout.interface, "dflash", draft_tokens);
     try stdout.interface.flush();
 }
 
-fn forwardTokens(
+fn runDFlash(
     draft_model: dflash.Model,
-    target_model: TargetModel,
-    target_hidden: zml.Tensor,
-    noise_embedding: zml.Tensor,
-    position_ids: zml.Tensor,
-) zml.Tensor {
+    target_model: llama.Model,
+    tokens: zml.Tensor,
+    token_index: zml.Tensor,
+    target_kv_cache: llama.KvCache,
+    attention_metadata: zml.attention.attention.Metadata,
+    attention_parameters: zml.attention.attention.Parameters,
+) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
+    const target_hidden, const noise_embedding, const target_token, const noise_tokens = target_model.dflashInputs(
+        tokens,
+        token_index,
+        target_kv_cache,
+        attention_metadata,
+        attention_parameters,
+        draft_model.target_layer_ids,
+        draft_model.mask_token_id.?,
+    );
+    const position_ids = zml.Tensor.arange(.{ .end = block_size * 2 }, .u32).withTags(.{.s});
     const hidden = draft_model.forward(target_hidden, noise_embedding, position_ids);
-    const logits = target_model.lm_head.forward(hidden)
-        .rename(.{ .dout = .voc });
-    return logits.argMax(.voc).indices.squeeze(.voc).convert(.u32);
-}
-
-const TargetModel = struct {
-    lm_head: zml.nn.Linear,
-
-    pub fn init(store: zml.io.TensorStore.View) TargetModel {
-        return .{
-            .lm_head = .init(
-                store.withPrefix("lm_head").createTensor("weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
-                null,
-                .d,
-            ),
-        };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(TargetModel)) void {
-        self.lm_head.weight.deinit();
-        if (self.lm_head.bias) |*bias| bias.deinit();
-    }
-};
-
-fn fillNoiseEmbedding(out: []f32, token_ids: *const [block_size]u32, hidden_size: i64) void {
-    const hidden: usize = @intCast(hidden_size);
-    for (token_ids, 0..) |token_id, token_index| {
-        const base = token_index * hidden;
-        const token_value = @as(f32, @floatFromInt(token_id % 1024)) / 1024.0;
-        for (out[base .. base + hidden], 0..) |*value, dim| {
-            value.* = token_value + (@as(f32, @floatFromInt(dim % 17)) * 0.0001);
-        }
-    }
+    const draft_tokens = target_model.greedyTokensFromHidden(hidden);
+    return .{ target_token, noise_tokens, draft_tokens };
 }
 
 fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
@@ -224,6 +251,28 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml
     defer allocator.free(bytes);
 
     return try .fromBytes(allocator, bytes);
+}
+
+fn promptTokens(allocator: std.mem.Allocator, tokenizer: *zml.tokenizer.Tokenizer, config: llama.Config) ![]u32 {
+    var token_ids = try allocator.alloc(u32, block_size);
+    errdefer allocator.free(token_ids);
+    @memset(token_ids, firstEosToken(config));
+
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+    const encoded = try encoder.encodeAlloc(allocator, prompt);
+    defer allocator.free(encoded);
+
+    const len = @min(token_ids.len, encoded.len);
+    @memcpy(token_ids[0..len], encoded[0..len]);
+    return token_ids;
+}
+
+fn firstEosToken(config: llama.Config) u32 {
+    return switch (config.eos_token_id.value) {
+        .int => |eos| eos,
+        .ints => |eos_list| eos_list[0],
+    };
 }
 
 fn printTokens(

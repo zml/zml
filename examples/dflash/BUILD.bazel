@@ -10,7 +10,10 @@ zig_library(
 zig_binary(
     name = "dflash",
     srcs = [
+        "common.zig",
         "dflash_model.zig",
+        "llama/llama_inference.zig",
+        "llama/llama_model.zig",
         "main.zig",
     ],
     main = "main.zig",
