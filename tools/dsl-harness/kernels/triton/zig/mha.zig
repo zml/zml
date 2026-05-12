@@ -126,15 +126,14 @@ pub fn forward(
         .{
             q,            k,            v,
             descale_q,    descale_k,    descale_v,
-            alibi_slopes, 
-            softmax_lse,  sink,         stride_qz,
-            stride_qh,    stride_qm,    stride_qk,
-            stride_kz,    stride_kh,    stride_kn,
-            stride_kk,    stride_vz,    stride_vh,
-            stride_vn,    stride_vk,    stride_dqz,
-            stride_dkz,   stride_dvz,   stride_oz,
-            stride_oh,    stride_om,    stride_on,
-            stride_az,    stride_ah,    
+            alibi_slopes, softmax_lse,  sink,
+            stride_qz,    stride_qh,    stride_qm,
+            stride_qk,    stride_kz,    stride_kh,
+            stride_kn,    stride_kk,    stride_vz,
+            stride_vh,    stride_vn,    stride_vk,
+            stride_dqz,   stride_dkz,   stride_dvz,
+            stride_oz,    stride_oh,    stride_om,
+            stride_on,    stride_az,    stride_ah,
             stride_lz,    stride_lh,    stride_lm,
             sm_scale,     cu_seqlens_q, cu_seqlens_k,
         },
@@ -162,33 +161,31 @@ pub fn args() std.meta.ArgsTuple(@TypeOf(forward)) {
     }.t;
     return .{
         // q, k, v
-        ten1d(.bf16, Q_BUF),                 ten1d(.bf16, K_BUF),    ten1d(.bf16, V_BUF),
+        ten1d(.bf16, Q_BUF),      ten1d(.bf16, K_BUF),                 ten1d(.bf16, V_BUF),
         // descale_q, descale_k, descale_v
-        ten1d(.f32, 1),                      ten1d(.f32, 1),         ten1d(.f32, 1),
+        ten1d(.f32, 1),           ten1d(.f32, 1),                      ten1d(.f32, 1),
         // alibi_slopes, softmax_lse, sink
-        ten1d(.f32, NUM_Q_HEADS),            
-        ten1d(.f32, SEQLEN_Q * NUM_Q_HEADS), ten1d(.f32, 1),
+        ten1d(.f32, NUM_Q_HEADS), ten1d(.f32, SEQLEN_Q * NUM_Q_HEADS), ten1d(.f32, 1),
         // strides — q (4)
-                s(),
-        s(),                                 s(),                    s(),
-        // strides — k (4)
-        s(),                                 s(),                    s(),
+        s(),                      s(),                                 s(),
         s(),
+        // strides — k (4)
+                             s(),                                 s(),
+        s(),                      s(),
         // strides — v (4)
-                                        s(),                    s(),
-        s(),                                 s(),
+                                        s(),
+        s(),                      s(),                                 s(),
         // strides — descale (3)
-                           s(),
-        s(),                                 s(),
+        s(),                      s(),                                 s(),
         // strides — output (4)
-                           s(),
-        s(),                                 s(),                    s(),
+        s(),                      s(),                                 s(),
+        s(),
         // strides — alibi (2)
-        s(),                                 s(),
+                             s(),                                 s(),
         // strides — lse (3)
-        s(),                                 s(),                    s(),
+        s(),                      s(),                                 s(),
         // sm_scale, cu_seqlens_q, cu_seqlens_k
-        Tensor.init(.{}, .f32),              ten1d(.i32, BATCH + 1), ten1d(.i32, BATCH + 1),
+        Tensor.init(.{}, .f32),   ten1d(.i32, BATCH + 1),              ten1d(.i32, BATCH + 1),
         // output placeholder
         ten1d(.bf16, O_BUF),
     };
