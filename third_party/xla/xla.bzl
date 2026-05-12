@@ -111,10 +111,13 @@ filegroup(
 )
 """,
         "crosstool/BUILD.bazel": "",
-        "sycl/build_defs.bzl": _BZL_HELPERS + """\
+        "sycl/build_defs.bzl": """\
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+""" + _BZL_HELPERS + """\
 if_sycl = always_if_false
 if_sycl_is_configured = always_if_false
-sycl_library = native.cc_library
+sycl_library = cc_library
 """,
     })
     simple_files(name = "local_config_remote_execution", files = {
