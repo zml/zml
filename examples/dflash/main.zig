@@ -17,11 +17,12 @@ const placeholder_token: u32 = 151_643;
 
 const Args = struct {
     model: []const u8,
+    target_model: []const u8,
 
     pub const help =
-        \\Use dflash --model=<path>
+        \\Use dflash --model=<path> --target-model=<path>
         \\
-        \\Compile the DFlash draft model, run one hardcoded block, and print the output.
+        \\Compile the DFlash draft model, apply the target lm_head, and print greedy tokens.
         \\
     ;
 };
@@ -60,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
     log.info("\n{f}", .{platform.fmtVerbose()});
 
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
+    const target_repo = try zml.safetensors.resolveModelRepo(io, args.target_model);
 
     const parsed_config = try parseConfig(dflash.Config, allocator, io, repo);
     defer parsed_config.deinit();
@@ -67,11 +69,19 @@ pub fn main(init: std.process.Init) !void {
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
 
+    var target_registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, target_repo);
+    defer target_registry.deinit();
+
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
+    var target_store: zml.io.TensorStore = .fromRegistry(allocator, &target_registry);
+    defer target_store.deinit();
+
     const draft_model = try dflash.Model.init(allocator, store.view(), parsed_config.value);
     defer draft_model.deinit(allocator);
+
+    const target_model: TargetModel = .init(target_store.view());
 
     const shardings: Shardings = try .init(platform);
     const all_shardings = shardings.all();
@@ -81,12 +91,11 @@ pub fn main(init: std.process.Init) !void {
     const position_ids_tensor: zml.Tensor = .init(.{ .s = block_size * 2 }, .u32);
 
     log.info("Compiling model...", .{});
-    var exe = try platform.compile(
+    var exe = try platform.compileFn(
         allocator,
         io,
-        draft_model,
-        .forwardF32,
-        .{ target_hidden_tensor, noise_embedding_tensor, position_ids_tensor },
+        forwardTokens,
+        .{ draft_model, target_model, target_hidden_tensor, noise_embedding_tensor, position_ids_tensor },
         .{ .shardings = &all_shardings },
     );
     defer exe.deinit();
@@ -99,6 +108,14 @@ pub fn main(init: std.process.Init) !void {
         .dma_chunk_size = 128 * zml.MiB,
     });
     defer dflash.Model.unloadBuffers(&model_buffers, allocator);
+
+    var target_buffers = try zml.io.load(TargetModel, &target_model, allocator, io, platform, &target_store, .{
+        .parallelism = 1,
+        .shardings = &all_shardings,
+        .dma_chunks = 4,
+        .dma_chunk_size = 128 * zml.MiB,
+    });
+    defer TargetModel.unloadBuffers(&target_buffers);
 
     var token_ids: [block_size]u32 = @splat(placeholder_token);
     token_ids[0] = first_token;
@@ -134,29 +151,60 @@ pub fn main(init: std.process.Init) !void {
     var results = try exe.results(allocator);
     defer results.deinit(allocator);
 
-    exe_args.set(.{ model_buffers, target_hidden_buffer, noise_embedding_buffer, position_ids_buffer });
+    exe_args.set(.{ model_buffers, target_buffers, target_hidden_buffer, noise_embedding_buffer, position_ids_buffer });
     exe.call(exe_args, &results);
 
-    var output: zml.Buffer = results.get(zml.Buffer);
-    defer output.deinit();
+    var tokens: zml.Buffer = results.get(zml.Buffer);
+    defer tokens.deinit();
 
-    var output_slice = try output.toSliceAlloc(allocator, io);
-    defer output_slice.free(allocator);
+    var tokens_slice = try tokens.toSliceAlloc(allocator, io);
+    defer tokens_slice.free(allocator);
 
     var stdout = std.Io.File.stdout().writerStreaming(io, &.{});
     try stdout.interface.print("input_ids: {any}\n", .{token_ids});
-    try stdout.interface.print("output shape: {f}\n", .{output_slice.shape});
-    try stdout.interface.print("output first row, first 16 values:\n", .{});
+    try stdout.interface.print("sampled_tokens shape: {f}\n", .{tokens_slice.shape});
+    try stdout.interface.print("sampled_tokens: ", .{});
 
-    const values = output_slice.constItems(f32);
-    const n = @min(@as(usize, 16), values.len);
-    for (values[0..n], 0..) |value, i| {
+    const sampled_tokens = tokens_slice.constItems(u32);
+    for (sampled_tokens, 0..) |token, i| {
         if (i != 0) try stdout.interface.writeAll(", ");
-        try stdout.interface.print("{d:.6}", .{value});
+        try stdout.interface.print("{}", .{token});
     }
     try stdout.interface.writeAll("\n");
     try stdout.interface.flush();
 }
+
+fn forwardTokens(
+    draft_model: dflash.Model,
+    target_model: TargetModel,
+    target_hidden: zml.Tensor,
+    noise_embedding: zml.Tensor,
+    position_ids: zml.Tensor,
+) zml.Tensor {
+    const hidden = draft_model.forward(target_hidden, noise_embedding, position_ids);
+    const logits = target_model.lm_head.forward(hidden)
+        .rename(.{ .dout = .voc });
+    return logits.argMax(.voc).indices.squeeze(.voc).convert(.u32);
+}
+
+const TargetModel = struct {
+    lm_head: zml.nn.Linear,
+
+    pub fn init(store: zml.io.TensorStore.View) TargetModel {
+        return .{
+            .lm_head = .init(
+                store.withPrefix("lm_head").createTensor("weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
+                null,
+                .d,
+            ),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(TargetModel)) void {
+        self.lm_head.weight.deinit();
+        if (self.lm_head.bias) |*bias| bias.deinit();
+    }
+};
 
 fn fillNoiseEmbedding(out: []f32, token_ids: *const [block_size]u32, hidden_size: i64) void {
     const hidden: usize = @intCast(hidden_size);
