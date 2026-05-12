@@ -497,7 +497,9 @@ pub const MhaFwd = struct {
 
         // offsets
         // offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
-        const offs_m = start_m.mul(BLOCK_M).add(b.arange(0, BLOCK_M, .i32));
+        const start_m_times_block = start_m.mul(BLOCK_M);
+        const arange_m = b.arange(0, BLOCK_M, .i32);
+        const offs_m = start_m_times_block.add(arange_m);
         // offs_n = tl.arange(0, BLOCK_N)
         const offs_n = b.arange(0, BLOCK_N, .i32);
         // offs_d = tl.arange(0, BLOCK_DMODEL_POW2)
@@ -701,7 +703,7 @@ pub const MhaFwd = struct {
                     // (SEQLEN_Q + BLOCK_M) - end_m  since  end_m = (start_m+1)*BLOCK_M.
                     // We match that form to produce the same constant.
                     const boundary = b.liftAs(SEQLEN_Q + BLOCK_M, .i32).sub(end_m);
-                    const lse_mask = offs_m.lt(boundary);
+                    const lse_mask = arange_m.lt(boundary);
                     const lse_ptrs_then = a.softmax_lse_ptr.addPtr(lse_offs_val);
                     b.storeOpts(lse_ptrs_then, lse_val, .{ .mask = lse_mask });
                     ie.yieldThen(.{});
