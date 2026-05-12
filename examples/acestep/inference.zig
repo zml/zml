@@ -899,7 +899,7 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     var timestep_proj_buffer: zml.Buffer = undefined;
     defer timestep_proj_buffer.deinit();
     
-    const mask_slice = try createBidirectionalWindowMask(allocator, @divExact(t_25hz + 1, 2), acedit.config.sliding_window);
+    const mask_slice = try createBidirectionalWindowMask(allocator, @divFloor(t_25hz + 1, 2), acedit.config.sliding_window);
     defer mask_slice.free(allocator);
     var mask_buffer: zml.Buffer = try .fromSlice(io, platform, mask_slice, sharding);
     defer mask_buffer.deinit();
