@@ -5,13 +5,12 @@ const stdx = @import("stdx");
 
 const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
+const mem = @import("mem.zig");
 const Memory = @import("platform.zig").Memory;
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const sharding_ = @import("sharding.zig");
-const Sharding = sharding_.Sharding;
-const Placement = sharding_.Placement;
+const Sharding = @import("Sharding.zig");
 const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
 const testing = @import("testing.zig");
@@ -100,8 +99,8 @@ pub const Buffer = struct {
         var res: Buffer = .{
             ._platform = platform,
             ._shape = sh,
-            ._sharding = sharding,
-            ._shards = .{},
+            ._sharding = sharding.resolve(platform),
+            ._shards = .empty,
         };
 
         const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
@@ -167,9 +166,9 @@ pub const Buffer = struct {
     }
 
     /// Creates a Buffer with a single element.
-    pub fn scalar(io: std.Io, platform: *const Platform, val: anytype, dtype_: DataType, sharding: Sharding) !Buffer {
+    pub fn scalar(io: std.Io, platform: *const Platform, val: anytype, dtype_: DataType) !Buffer {
         const x = dtype_.constant(val);
-        return fromBytes(io, platform, Shape.init(.{}, dtype_), sharding, x.asBytes());
+        return fromBytes(io, platform, .scalar(dtype_), .replicated, x.asBytes());
     }
 
     pub fn await(self: Buffer, io: std.Io) !void {
@@ -183,17 +182,29 @@ pub const Buffer = struct {
     pub const UnitializedOptions = struct { memory: Memory.Kind = .default };
 
     pub fn uninitialized(
-        _: std.Io,
+        io: std.Io,
         platform: *const Platform,
         sh: Shape,
         sharding: Sharding,
         opts: UnitializedOptions,
     ) !Buffer {
+        switch (platform.target) {
+            .neuron => {
+                const allocator = std.heap.smp_allocator;
+
+                const host = try allocator.alloc(u8, sh.byteSize());
+                defer allocator.free(host);
+
+                return try Buffer.from(io, platform, sh, sharding, host, .{ .wait = true, .memory = opts.memory });
+            },
+            .cpu, .cuda, .rocm, .tpu => {},
+        }
+
         var res: Buffer = .{
             ._platform = platform,
             ._shape = sh,
-            ._sharding = sharding,
-            ._shards = .{},
+            ._sharding = sharding.resolve(platform),
+            ._shards = .empty,
         };
         errdefer for (res._shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);
@@ -310,7 +321,7 @@ pub const Buffer = struct {
         return byte_size;
     }
 
-    pub fn placement(self: Buffer) Placement {
-        return Placement.init(self._sharding, self._shape) catch unreachable;
+    pub fn placement(self: Buffer) Sharding.Placement {
+        return Sharding.Placement.init(self._sharding, self._shape) catch unreachable;
     }
 };

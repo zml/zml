@@ -58,12 +58,22 @@ const CliArgs = struct {
     //  \\ --remotes           Add devices from remote hosts (comma-separated URLs)
 };
 
-const device_backends = if (builtin.os.tag != .macos) .{
-    .{ .cuda, @import("zml-smi/platforms/nvml") },
-    .{ .rocm, @import("zml-smi/platforms/amdsmi") },
-    .{ .neuron, @import("zml-smi/platforms/neuron") },
-    .{ .tpu, @import("zml-smi/platforms/tpu") },
-} else .{};
+const device_backends = switch (builtin.os.tag) {
+    .macos => .{},
+    .linux => switch (builtin.cpu.arch) {
+        .x86_64 => .{
+            .{ .cuda, @import("zml-smi/platforms/nvml") },
+            .{ .rocm, @import("zml-smi/platforms/amdsmi") },
+            .{ .neuron, @import("zml-smi/platforms/neuron") },
+            .{ .tpu, @import("zml-smi/platforms/tpu") },
+        },
+        .aarch64 => .{
+            .{ .cuda, @import("zml-smi/platforms/nvml") },
+        },
+        else => unreachable,
+    },
+    else => unreachable,
+};
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -163,20 +173,37 @@ fn detect(io: std.Io) smi_info.Targets {
     }
 
     var targets: smi_info.Targets = .{};
-    if (hasDevice(io, "/dev/nvidiactl")) {
-        targets.insert(.cuda);
-    }
 
-    if (hasDevice(io, "/dev/kfd")) {
-        targets.insert(.rocm);
-    }
+    switch (builtin.os.tag) {
+        .macos => {},
+        .linux => {
+            switch (builtin.cpu.arch) {
+                .x86_64 => {
+                    if (hasDevice(io, "/dev/nvidiactl")) {
+                        targets.insert(.cuda);
+                    }
 
-    if (hasDevice(io, c.NEURON_DEVICE_PREFIX ++ "0")) {
-        targets.insert(.neuron);
-    }
+                    if (hasDevice(io, "/dev/kfd")) {
+                        targets.insert(.rocm);
+                    }
 
-    if (hasDevice(io, "/dev/accel0") or hasDevice(io, "/dev/vfio/0")) {
-        targets.insert(.tpu);
+                    if (hasDevice(io, c.NEURON_DEVICE_PREFIX ++ "0")) {
+                        targets.insert(.neuron);
+                    }
+
+                    if (hasDevice(io, "/dev/accel0") or hasDevice(io, "/dev/vfio/0")) {
+                        targets.insert(.tpu);
+                    }
+                },
+                .aarch64 => {
+                    if (hasDevice(io, "/dev/nvidiactl")) {
+                        targets.insert(.cuda);
+                    }
+                },
+                else => unreachable,
+            }
+        },
+        else => unreachable,
     }
 
     return targets;

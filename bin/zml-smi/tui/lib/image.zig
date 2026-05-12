@@ -38,7 +38,9 @@ pub fn draw(self: *const Image, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surf
         .image = .{
             .img_id = self.image.id,
             .options = .{
-                .size = .{ .rows = target_rows },
+                // Emit both rows and cols so that target bounds are unambiguous.
+                // Rows alone lets some terminals fall back to native pixel size.
+                .size = .{ .rows = target_rows, .cols = cols },
             },
         },
     });
@@ -71,6 +73,10 @@ test Image {
     const cell = surface.buffer[0];
     try std.testing.expect(cell.image != null);
     try std.testing.expectEqual(@as(u32, 1), cell.image.?.img_id);
+    // Both rows and cols must be emitted so terminals don't fall back to native pixel size.
+    const size = cell.image.?.options.size.?;
+    try std.testing.expectEqual(@as(?u16, 5), size.rows);
+    try std.testing.expectEqual(@as(?u16, 20), size.cols);
 }
 
 test "refAllDecls" {

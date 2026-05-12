@@ -19,7 +19,7 @@
     $1 = absl::string_view((char *)$input.ptr, $input.len);
 }
 
-%typemap(out, optimal="1") const std::string& %{
+%typemap(out) const std::string& %{
     $result.ptr = (void *)($1->data());
     $result.len = (size_t)($1->length());
 %}

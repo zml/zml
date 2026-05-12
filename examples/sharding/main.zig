@@ -17,7 +17,7 @@ const CliMesh = enum {
 };
 
 const CliArgs = struct {
-    partitioner: zml.sharding.Partitioning.Partitioner = .shardy,
+    partitioner: ?zml.Sharding.Partitioner = null,
     mesh: CliMesh = .auto,
 };
 
@@ -112,9 +112,9 @@ fn buildMockMesh(
     allocator: std.mem.Allocator,
     target: zml.Target,
     devices: []const zml.platform.Device,
-) !zml.sharding.PhysicalMesh {
+) !zml.Sharding.PhysicalMesh {
     if (devices.len < 8) return error.NotEnoughDevicesForMockMesh;
-    const topology: zml.sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+    const topology: zml.Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
         .axis(.link_y, .{ .mesh = .torus }, &.{
             .axis(.link_z, .{ .mesh = .torus }, &.{
                 .device(devices[3]), .device(devices[1]),
@@ -132,7 +132,7 @@ fn buildMockMesh(
             }),
         }),
     });
-    return zml.sharding.PhysicalMesh.fromTree(allocator, target, topology);
+    return zml.Sharding.PhysicalMesh.fromTree(allocator, target, topology);
 }
 
 fn createSequenceBuffer(
@@ -140,7 +140,7 @@ fn createSequenceBuffer(
     io: std.Io,
     platform: *const zml.Platform,
     shape: zml.Shape,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     start: f32,
 ) !zml.Buffer {
     const slice = try zml.Slice.alloc(allocator, shape);
@@ -156,7 +156,7 @@ fn createSequenceBuffer(
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
-    const args = try parseArgs(init);
+    var args = try parseArgs(init);
 
     const create_options: zml.platform.CreateOptions = switch (args.mesh) {
         .auto => .{},
@@ -180,23 +180,23 @@ pub fn main(init: std.process.Init) !void {
 
     try profiler.start();
     defer {
-        if ((profiler.stop() catch unreachable)) |profile| {
-            log.info("Profile dumped: {s} and {s}", .{ profile.protobuf_path, profile.perfetto_path });
-        }
+        _ = profiler.stop() catch unreachable;
     }
 
-    log.info("Partitioner: {s}", .{@tagName(args.partitioner)});
+    if (args.partitioner) |partitioner| {
+        log.info("Partitioner: {s}", .{@tagName(partitioner)});
+    } else {
+        args.partitioner = .fromTarget(platform.target);
+        log.info("Partitioner: {s} (default)", .{@tagName(args.partitioner.?)});
+    }
     log.info("{f}", .{platform.physical_mesh});
 
-    const physical_mesh = platform.physical_mesh;
-    const mesh: zml.sharding.LogicalMesh = try .init("demo_mesh", .{
-        .data = .low_bandwidth,
-        .model = .high_bandwidth,
-    });
-    const strategy: zml.sharding.Strategy = try .suggest(mesh, physical_mesh);
-    const sharding: zml.sharding.Sharding = try .initFromStrategy(platform, mesh, strategy);
+    const sharding: zml.Sharding = try platform.registerSharding(
+        "demo_mesh",
+        .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
+    );
 
-    log.info("{f}", .{mesh});
+    log.info("{f}", .{sharding.data.logical});
     log.info("{f}", .{sharding});
 
     const input_shape = zml.Shape.init(.{ .batch = 16, .feature = 32 }, .f32)
@@ -244,7 +244,6 @@ pub fn main(init: std.process.Init) !void {
     exe.call(exe_args, &exe_results);
     var out = exe_results.get(zml.Buffer);
     defer out.deinit();
-    _ = try out.await(io);
 
     const out_slice = try out.toSliceAlloc(allocator, io);
     defer out_slice.free(allocator);

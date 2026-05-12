@@ -18,15 +18,18 @@ single_version_override(
     version = "33.6",  # important, until grpc-cpp is fixed
 )
 
-bazel_dep(name = "pybind11_bazel", version = "2.13.6")
+bazel_dep(name = "pybind11_bazel", version = "3.0.1")
 bazel_dep(name = "re2", version = "2025-11-05", repo_name = "com_googlesource_code_re2")
+<<<<<<< HEAD
 bazel_dep(name = "rules_cc", version = "0.2.17")
+=======
+bazel_dep(name = "rules_cc", version = "0.2.18")
+>>>>>>> origin/master
 bazel_dep(name = "rules_distroless", version = "0.6.2")
 bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.7")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.9.0")
-bazel_dep(name = "rules_rs", version = "0.0.44")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 git_override(
@@ -39,6 +42,7 @@ git_override(
 
 bazel_dep(name = "tar.bzl", version = "0.9.0")
 bazel_dep(name = "llvm", version = "0.7.3")
+<<<<<<< HEAD
 bazel_dep(name = "jsoncpp", version = "1.9.6", repo_name = "jsoncpp_git")
 single_version_override(
     module_name = "jsoncpp",
@@ -47,8 +51,17 @@ single_version_override(
     version = "1.9.6",
 )
 
+=======
+>>>>>>> origin/master
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 bazel_dep(name = "grpc", version = "1.74.0")
+# Added to support bazel 9+ since an old version is pulled by GRPC
+# TODO: remove when GRPC is updated to v1.80+
+bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
+# Same as rules_foreign_cc
+bazel_dep(name = "rules_go", version = "0.60.0")
+# Same as rules_foreign_cc
+bazel_dep(name = "jsoncpp", version = "1.9.6.bcr.2", repo_name = "jsoncpp_git")
 
 single_version_override(
     module_name = "rules_foreign_cc",
@@ -154,51 +167,20 @@ pip.parse(
 )
 use_repo(pip, "xprof_nightly")
 
-# For Triton generation
-pip.parse(
-    download_only = True,
-    extra_pip_args = [
-        "--abi=cp312",
-        "--implementation=cp",
-        "--python-version=312",
-        "--platform=linux_x86_64",
-        "--platform=manylinux2014_x86_64",
-        "--platform=manylinux_2_27_x86_64",
-        "--platform=manylinux_2_28_x86_64",
-        "--platform=manylinux_2_29_x86_64",
-        "--platform=manylinux_2_37_x86_64",
-    ],
-    hub_name = "triton_py_deps",
-    python_version = "3.12",
-    requirements_lock = "//zml/attention/triton:requirements.lock.txt",
-    target_platforms = ["linux_x86_64"],
-)
-use_repo(pip, "triton_py_deps")
-
-# For TPU IR generation
-pip.parse(
-    download_only = False,
-    hub_name = "tpu_py_deps",
-    python_version = "3.12",
-    requirements_lock = "//platforms/tpu:requirements.lock.txt",
-    target_platforms = ["linux_x86_64"],
-)
-use_repo(pip, "tpu_py_deps")
-
 cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 
 cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
-use_repo(cuda, "cuda_nvml_dev", "libpjrt_cuda")
+use_repo(cuda, "libpjrt_cuda_linux_amd64", "libpjrt_cuda_linux_arm64", "cuda_nvml_dev_linux_x86_64", "cuda_nvml_dev_linux_sbsa", "zlib1g_linux_arm64", "zlib1g_linux_amd64", "cuda_nvtx_linux_x86_64", "cuda_nvtx_linux_sbsa")
 
 rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
-use_repo(rocm, "amd-smi-lib", "hipblaslt", "libdrm-amdgpu-amdgpu1", "libdrm2-amdgpu", "libpjrt_rocm", "rocblas")
+use_repo(rocm, "amd-smi-lib", "hipblaslt", "libdrm-amdgpu-amdgpu1", "libdrm2-amdgpu", "libpjrt_rocm", "rocblas", "rocprofiler-sdk", "rocprofiler-sdk-roctx")
 
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
 
 neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
-use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron", "zlib1g")
+use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron")
 
 zls = use_extension("//third_party/zls:zls_toolchain.bzl", "zls_toolchains")
 use_repo(zls, "zls_toolchains")
@@ -206,7 +188,7 @@ use_repo(zls, "zls_toolchains")
 register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn", "iree", "libvaxis", "linenoise", "mnist", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg")
+use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg", "mosaic_tpu")
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(
@@ -230,35 +212,14 @@ use_repo(
     "sycl_configure_ext",
     "triton",
     "tsl",
+    "highwayhash",
+    "snappy",
+    "hwloc",
 )
 
 llvm = use_extension("//third_party/xla:llvm.bzl", "llvm")
 llvm.configure()
 use_repo(llvm, "llvm-project")
-
-rs_toolchains = use_extension("@rules_rs//rs/experimental/toolchains:module_extension.bzl", "toolchains")
-rs_toolchains.toolchain(
-    edition = "2024",
-    version = "1.94.0",
-)
-use_repo(rs_toolchains, "default_rust_toolchains")
-
-register_toolchains("@default_rust_toolchains//:all")
-
-crate = use_extension("@rules_rs//rs:extensions.bzl", "crate")
-crate.from_cargo(
-    name = "crates",
-    cargo_lock = "//zml/tokenizer/hftokenizers:Cargo.lock",
-    cargo_toml = "//zml/tokenizer/hftokenizers:Cargo.toml",
-    platform_triples = [
-        "aarch64-apple-darwin",
-        "x86_64-apple-darwin",
-        "aarch64-unknown-linux-gnu",
-        "x86_64-unknown-linux-gnu",
-    ],
-    use_experimental_platforms = True,
-)
-use_repo(crate, "crates")
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 apt.install(

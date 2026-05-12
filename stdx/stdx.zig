@@ -29,6 +29,15 @@ pub inline fn stackSlice(comptime max_len: usize, T: type, len: usize) []T {
 
 pub const noalloc: std.mem.Allocator = if (builtin.mode == .ReleaseFast) undefined else std.testing.failing_allocator;
 
+pub fn arenaWithCapacity(parent: std.mem.Allocator, initial_capacity: usize) std.mem.Allocator.Error!std.heap.ArenaAllocator {
+    var a: std.heap.ArenaAllocator = .init(parent);
+
+    _ = try a.allocator().alloc(u8, initial_capacity);
+    std.debug.assert(a.state.used_list.?.end_index == initial_capacity);
+    a.state.used_list.?.end_index = 0;
+    return a;
+}
+
 pub fn pinToCore(core_id: usize) void {
     if (builtin.os.tag == .linux) {
         const CPUSet = std.bit_set.ArrayBitSet(usize, std.os.linux.CPU_SETSIZE * @sizeOf(usize));

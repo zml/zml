@@ -23,6 +23,7 @@ pub const exe = @import("exe.zig");
 pub const Exe = exe.Exe;
 pub const floats = @import("floats.zig");
 pub const io = @import("io.zig");
+pub const kernel = @import("kernel.zig");
 pub const mem = @import("mem.zig");
 pub const Bufferized = mem.Bufferized;
 pub const meta = @import("meta.zig");
@@ -36,16 +37,16 @@ pub const platform = @import("platform.zig");
 pub const Memory = platform.Memory;
 pub const Platform = platform.Platform;
 pub const Target = platform.Target;
+pub const tracer = @import("profiling/tracer.zig");
 pub const safetensors = @import("safetensors.zig");
 pub const shape = @import("shape.zig");
 pub const Shape = shape.Shape;
-pub const sharding = @import("sharding.zig");
+pub const Sharding = @import("Sharding.zig");
 pub const slice = @import("slice.zig");
 pub const Slice = slice.Slice;
 pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
-pub const tracer = @import("tracer.zig");
 
 test "zml" {
     std.testing.refAllDecls(@This());

@@ -11,6 +11,12 @@ _ZLS_PLATFORMS = {
             "@platforms//cpu:x86_64",
         ],
     ),
+    "aarch64-linux": struct(
+        compatible_with = [
+            "@platforms//os:linux",
+            "@platforms//cpu:aarch64",
+        ],
+    ),
     "x86_64-macos": struct(
         compatible_with = [
             "@platforms//os:macos",
@@ -27,6 +33,7 @@ _ZLS_PLATFORMS = {
 
 _ZLS_VERSIONS = {
     "x86_64-linux": "ded6d562a0b86ee878b1ddf70ffab2797ce3cdca3b02d6077548f9d56dff96b6",
+    "aarch64-linux": "430cd293d201eb70ae2519dbc96c854bf8791b8df7fc9392e8d2dc9680a2bed7",
     "x86_64-macos": "49f716ea96c1aadaecaa5d9c0a50874cbcf443dc42b825f1e7ee35499ad3eb96",
     "aarch64-macos": "b93ec549f8558a7e85984a840e9276d274f1059b54ade4254296ef4982958359",
 }

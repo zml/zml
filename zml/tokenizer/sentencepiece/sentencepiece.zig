@@ -89,7 +89,7 @@ pub const Decoder = struct {
     inner: *SentencePieceProcessor,
     vec: *c.std_vector_int,
     str: *c.std_string,
-    last_string: StringBuffer = .{ .len = 0 },
+    last_string: StringBuffer = .empty,
 
     fn init(inner: *SentencePieceProcessor) !Decoder {
         const vec = try (c.std_vector_int_new() orelse std.mem.Allocator.Error.OutOfMemory);

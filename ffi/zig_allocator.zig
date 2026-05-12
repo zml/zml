@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const c = @import("c");
 
 pub const ZigAllocator = struct {
@@ -12,7 +13,7 @@ pub const ZigAllocator = struct {
 
     pub fn alloc(ctx: ?*const anyopaque, elem: usize, nelems: usize, alignment: usize) callconv(.c) ?*anyopaque {
         const self: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));
-        const ret = self.rawAlloc(elem * nelems, std.math.log2_int(usize, alignment), @returnAddress()) orelse return null;
+        const ret = self.rawAlloc(elem * nelems, .fromByteUnits(alignment), @returnAddress()) orelse return null;
         return @ptrCast(ret);
     }
 
@@ -20,6 +21,6 @@ pub const ZigAllocator = struct {
         const self: *const std.mem.Allocator = @ptrCast(@alignCast(ctx));
         const memory: [*c]u8 = @ptrCast(ptr);
         const size = elem * nelems;
-        self.rawFree(memory[0..size], std.math.log2_int(usize, alignment), @returnAddress());
+        self.rawFree(memory[0..size], .fromByteUnits(alignment), @returnAddress());
     }
 };

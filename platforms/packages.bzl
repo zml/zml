@@ -45,10 +45,8 @@ def _read(mctx, labels):
     ret = {}
     for label in labels:
         data = json.decode(mctx.read(Label(label)))
-        ret.update({
-            pkg["name"]: pkg
-            for pkg in data["packages"]
-        })
+        for pkg in data["packages"]:
+            ret.setdefault(pkg["name"], {})[pkg["arch"]] = pkg
     return ret
 
 packages = struct(

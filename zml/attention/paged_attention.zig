@@ -5,7 +5,7 @@ const stdx = @import("stdx");
 const zml = @import("../zml.zig");
 const flashattn = @import("flashattn.zig");
 const tpu = @import("tpu_attention.zig");
-const triton = @import("triton.zig");
+const triton = @import("triton_attention.zig");
 
 const PagedAttention = @This();
 
@@ -17,17 +17,7 @@ pub const Backend = enum {
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
-            .cuda => b: {
-                const first_device = platform.devices[0].pjrt_device;
-
-                if (zml.platform.cuda.tryGetComputeCapabilities(platform, first_device)) |cc| {
-                    if (std.mem.eql(u8, cc, "9.0")) {
-                        break :b .cuda_fa3;
-                    }
-                }
-
-                break :b .cuda_fa2;
-            },
+            .cuda => .triton,
             .rocm => .triton,
             .tpu => .mosaic_tpu,
             else => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
@@ -199,12 +189,31 @@ pub const AttentionOptions = struct {
     scale: ?f32 = null,
 };
 
-pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+pub const KvCache = union(enum) {
+    split: struct {
+        k: zml.Tensor,
+        v: zml.Tensor,
+    },
+    dense: zml.Tensor,
+};
+
+pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
+    _ = k;
+    _ = v;
     return switch (parameters) {
-        .cuda_fa2 => |cuda_fa2_parameters| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, context.cuda_fa2, q, k_cache, v_cache, opts),
-        .cuda_fa3 => |cuda_fa3_parameters| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, context.cuda_fa3, q, k_cache, v_cache, opts),
-        .triton => |triton_parameters| triton.paged.pagedAttention(triton_parameters, context.triton, q, k_cache, v_cache, opts),
-        .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, context.mosaic_tpu, q, k, v, k_cache, v_cache, opts),
+        .cuda_fa2 => |cuda_fa2_parameters| switch (kv_cache) {
+            .split => |split| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, context.cuda_fa2, q, split.k, split.v, opts),
+            .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+        },
+        .cuda_fa3 => |cuda_fa3_parameters| switch (kv_cache) {
+            .split => |split| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, context.cuda_fa3, q, split.k, split.v, opts),
+            .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+        },
+        .triton => |triton_parameters| switch (kv_cache) {
+            .split => |split| triton.paged.pagedAttention(triton_parameters, context.triton, q, split.k, split.v, opts),
+            .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+        },
+        .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, context.mosaic_tpu, q, kv_cache.dense, opts),
     };
 }
 
@@ -246,6 +255,7 @@ test "Backend.auto selects mosaic_tpu on TPU" {
         .devices = &[_]zml.platform.Device{},
         .memories = &[_]zml.platform.Memory{},
         .physical_mesh = undefined,
+        .replicated_sharding = undefined,
         .triton_runtime = null,
         .tpu_ir_runtime = null,
     };

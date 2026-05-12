@@ -6,8 +6,9 @@ const stdx = @import("stdx");
 const Buffer = @import("buffer.zig").Buffer;
 const meta = @import("meta.zig");
 const Platform = @import("platform.zig").Platform;
+const tracer = @import("profiling/tracer.zig");
 const Shape = @import("shape.zig").Shape;
-const Sharding = @import("sharding.zig").Sharding;
+const Sharding = @import("Sharding.zig");
 
 pub const Exe = struct {
     platform: *const Platform,
@@ -43,6 +44,7 @@ pub const Exe = struct {
         const input_shapes_copy = try arena.allocator().dupe(Shape, input_shapes);
         const output_shapes_copy = try arena.allocator().dupe(Shape, output_shapes);
 
+        // Re-home sharding pointers into arena-owned values so exe doesn't depend on caller lifetimes.
         const input_shardings_copy = try arena.allocator().dupe(Sharding, input_shardings);
         const output_shardings_copy = try arena.allocator().dupe(Sharding, output_shardings);
 
@@ -224,7 +226,7 @@ pub const Exe = struct {
             var context: LocalContext = .{ .self = self, .current_index = 0 };
             meta.visit(struct {
                 fn cb(context_: *LocalContext, buffer: *Buffer) void {
-                    var shards: Buffer.Shards = .{};
+                    var shards: Buffer.Shards = .empty;
                     for (0..context_.self.flat_buffers.num_devices) |device_index| {
                         shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
                     }
@@ -237,19 +239,19 @@ pub const Exe = struct {
 
         pub fn fill(self: *Results, v: anytype) void {
             const LocalContext = struct {
-                self: *Results,
+                results: *Results,
                 current_index: usize = 0,
             };
-            var context: LocalContext = .{ .self = self, .current_index = 0 };
+            var context: LocalContext = .{ .results = self, .current_index = 0 };
             meta.visit(struct {
-                fn cb(context_: *LocalContext, buffer: *Buffer) void {
-                    //stdx.debug.assert(context_.self.expected_shapes[context_.current_index].eql(buffer.shape()), "Expected result {} to have shape {f}, got {f}", .{ context_.current_index, context_.self.expected_shapes[context_.current_index], buffer.shape() });
-                    var shards: Buffer.Shards = .{};
-                    for (0..context_.self.flat_buffers.num_devices) |device_index| {
-                        shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
+                fn cb(ctx: *LocalContext, buffer: *Buffer) void {
+                    //stdx.debug.assert(ctx.results.expected_shapes[ctx.current_index].eql(buffer.shape()), "Expected result {} to have shape {f}, got {f}", .{ ctx.current_index, ctx.results.expected_shapes[ctx.current_index], buffer.shape() });
+                    var shards: Buffer.Shards = .empty;
+                    for (0..ctx.results.flat_buffers.num_devices) |device_index| {
+                        shards.appendAssumeCapacity(ctx.results.flat_buffers.buffers[device_index][ctx.current_index]);
                     }
-                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], context_.self.shardings[context_.current_index], shards.constSlice());
-                    context_.current_index += 1;
+                    buffer.* = Buffer.fromPjrtBuffers(ctx.results.platform, ctx.results.expected_shapes[ctx.current_index], ctx.results.shardings[ctx.current_index], shards.constSlice());
+                    ctx.current_index += 1;
                 }
             }.cb, &context, &v);
         }
@@ -259,7 +261,11 @@ pub const Exe = struct {
         stdx.debug.assert(opts.wait == false or io != null, "io should not be null when waiting for execution completion", .{});
         var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
 
-        const events_slice: ?[]?*pjrt.Event = if (opts.wait) events[0..@intCast(self.num_partitions)] else null;
+        const partition_events = events[0..@intCast(self.num_partitions)];
+        const events_slice: ?[]?*pjrt.Event = switch (self.platform.target) {
+            .neuron => partition_events,
+            .cpu, .cuda, .rocm, .tpu => if (opts.wait) partition_events else null,
+        };
 
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = arguments.flat_buffers.buffers,
@@ -275,12 +281,21 @@ pub const Exe = struct {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
 
-        if (opts.wait) {
-            for (events_slice.?) |e| {
-                if (e) |ev| {
-                    ev.await(self.platform.pjrt_api, io.?) catch unreachable;
+        switch (self.platform.target) {
+            .neuron => {
+                for (events_slice.?) |e| {
+                    if (e) |ev| {
+                        ev.deinit(self.platform.pjrt_api);
+                    }
                 }
-            }
+            },
+            .cpu, .cuda, .rocm, .tpu => if (opts.wait) {
+                for (events_slice.?) |e| {
+                    if (e) |ev| {
+                        ev.await(self.platform.pjrt_api, io.?) catch unreachable;
+                    }
+                }
+            },
         }
     }
 
@@ -289,10 +304,22 @@ pub const Exe = struct {
     };
 
     pub fn callOpts(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
+        var trace = tracer.scope("zml.exe.call", .{
+            .wait = opts.wait,
+            .arg_count = arguments.expected_shapes.len,
+            .result_count = results_.expected_shapes.len,
+        }) catch unreachable;
+        defer trace.end();
         return self.internalCall(io, arguments, results_, opts);
     }
 
     pub fn call(self: *const Exe, arguments: Arguments, results_: *Results) void {
+        var trace = tracer.scope("zml.exe.call", .{
+            .wait = false,
+            .arg_count = arguments.expected_shapes.len,
+            .result_count = results_.expected_shapes.len,
+        }) catch unreachable;
+        defer trace.end();
         return self.internalCall(null, arguments, results_, .{});
     }
 };

@@ -1,10 +1,12 @@
 load("@xla//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls", "tf_vendored")
-load("@xla//third_party/farmhash:workspace.bzl", farmhash = "repo")
 load("@xla//third_party/eigen3:workspace.bzl", eigen3 = "repo")
+load("@xla//third_party/farmhash:workspace.bzl", farmhash = "repo")
+load("@xla//third_party/highwayhash:workspace.bzl", highwayhash = "repo")
+load("@xla//third_party/hwloc:workspace.bzl", hwloc = "repo")
 load("@xla//third_party/llvm:workspace.bzl", llvm = "repo")
 load("@xla//third_party/py/ml_dtypes:workspace.bzl", ml_dtypes = "repo")
-load("@xla//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
 load("@xla//third_party/shardy:workspace.bzl", shardy = "repo")
+load("@xla//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
 load("@xla//third_party/triton:workspace.bzl", triton = "repo")
 
 _BZL_HELPERS = """\
@@ -109,9 +111,13 @@ filegroup(
 )
 """,
         "crosstool/BUILD.bazel": "",
-        "sycl/build_defs.bzl": _BZL_HELPERS + """\
+        "sycl/build_defs.bzl": """\
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+""" + _BZL_HELPERS + """\
 if_sycl = always_if_false
 if_sycl_is_configured = always_if_false
+sycl_library = cc_library
 """,
     })
     simple_files(name = "local_config_remote_execution", files = {
@@ -134,6 +140,51 @@ filegroup(
         "py_version.bzl": """USE_PYWRAP_RULES = False""",
     })
     simple_files(name = "rules_ml_toolchain", files = {
+        "py/rules_pywrap/BUILD.bazel": """\
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "pywrap.default.bzl",
+    "pywrap.impl.bzl",
+])
+
+filegroup(
+    name = "pywrap_bzl",
+    srcs = [
+        "pywrap.default.bzl",
+        "pywrap.impl.bzl",
+    ],
+)
+""",
+        "py/rules_pywrap/pywrap.default.bzl": """\
+def use_pywrap_rules():
+    return False
+
+def _unsupported(*args, **kwargs):
+    fail("rules_ml_toolchain pywrap rules are not available in this workspace")
+
+pybind_extension = _unsupported
+pywrap_aware_cc_import = _unsupported
+pywrap_aware_filegroup = _unsupported
+pywrap_aware_genrule = _unsupported
+pywrap_binaries = _unsupported
+pywrap_common_library = _unsupported
+pywrap_library = _unsupported
+stripped_cc_info = _unsupported
+""",
+        "py/rules_pywrap/pywrap.impl.bzl": """\
+def _unsupported(*args, **kwargs):
+    fail("rules_ml_toolchain pywrap rules are not available in this workspace")
+
+collected_pywrap_infos = _unsupported
+generated_common_win_def_file = _unsupported
+pybind_extension = _unsupported
+python_extension = _unsupported
+pywrap_binaries = _unsupported
+pywrap_common_library = _unsupported
+pywrap_library = _unsupported
+stripped_cc_info = _unsupported
+""",
         "third_party/gpus/BUILD.bazel": "",
         "third_party/gpus/nvidia_common_rules.bzl": """cuda_rpath_flags = lambda *args, **kwargs: []""",
         "third_party/extensions/sycl_configure.bzl": "",
@@ -147,20 +198,30 @@ def _xla_impl(mctx):
     shardy()
     triton()
     farmhash()
+    highwayhash()
+    hwloc()
     eigen3()
     ml_dtypes()
 
     tf_http_archive(
         name = "com_github_grpc_grpc",
-        sha256 = "dd6a2fa311ba8441bbefd2764c55b99136ff10f7ea42954be96006a2723d33fc",
-        strip_prefix = "grpc-1.74.0",
+        sha256 = "e2ace790a5f2d0f83259d1390a816a33b013ea34df2e86084d927e58daa4c5d9",
+        strip_prefix = "grpc-1.78.0",
         patch_file = [
             "//third_party/grpc:grpc.patch",
             "//third_party/grpc:bazel9_native_cc.patch",
         ],
-        urls = tf_mirror_urls("https://github.com/grpc/grpc/archive/refs/tags/v1.74.0.tar.gz"),
+        urls = tf_mirror_urls("https://github.com/grpc/grpc/archive/refs/tags/v1.78.0.tar.gz"),
     )
     tf_vendored(name = "tsl", path = "third_party/tsl")
+
+    tf_http_archive(
+        name = "snappy",
+        build_file = "//third_party:snappy.BUILD",
+        sha256 = "736aeb64d86566d2236ddffa2865ee5d7a82d26c9016b36218fcc27ea4f09f86",
+        strip_prefix = "snappy-1.2.1",
+        urls = tf_mirror_urls("https://github.com/google/snappy/archive/refs/tags/1.2.1.tar.gz"),
+    )
 
     _dummy_repos(mctx)
 

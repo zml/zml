@@ -2,6 +2,7 @@ const std = @import("std");
 
 const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
+const builtin = @import("builtin");
 const c = @import("c");
 pub const FA2MhaFwdParams = c.FA2MhaFwdParams;
 pub const FA2MhaVarlenFwdParams = c.FA2MhaVarlenFwdParams;
@@ -93,6 +94,18 @@ pub var fa2_mha_fwd: Fa2MhaFwdFunc = undefined;
 pub var fa2_mha_varlen_fwd: Fa2MhaVarlenFwdFunc = undefined;
 pub var fa3_mha_fwd: Fa3MhaFwdFunc = undefined;
 
+fn findFlashattnLibrary(
+    r: anytype,
+    buffer: *[std.Io.Dir.max_path_bytes]u8,
+) !?[]const u8 {
+    const candidate = switch (builtin.cpu.arch) {
+        .aarch64 => "flashattn_linux_arm64/lib/libflashattn.so",
+        .x86_64 => "flashattn_linux_amd64/lib/libflashattn.so",
+        else => return null,
+    };
+    return try r.rlocation(candidate, buffer);
+}
+
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
     _ = io;
     _ = allocator;
@@ -100,7 +113,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
     const r = try bazel.runfiles(bazel_builtin.current_repository);
 
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const library = (try r.rlocation("flashattn/flashattn/lib/libflashattn.so", &buffer)) orelse return error.NotFound;
+    const library = (try findFlashattnLibrary(r, &buffer)) orelse return error.NotFound;
     var lib = std.DynLib.open(library) catch |err| {
         std.log.err("Failed to open libflashattn.so: {any}", .{err});
         return err;
