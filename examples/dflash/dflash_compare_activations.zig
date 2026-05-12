@@ -174,6 +174,14 @@ const SdpaFixtureReplayTensors = struct {
 
 const SdpaFixtureReplayBuffers = zml.Bufferized(SdpaFixtureReplayTensors);
 
+const ProjectionFixtureReplayTensors = struct {
+    q_proj_out: zml.Tensor,
+    k_proj_out: zml.Tensor,
+    v_proj_out: zml.Tensor,
+};
+
+const ProjectionFixtureReplayBuffers = zml.Bufferized(ProjectionFixtureReplayTensors);
+
 fn deinitLayerDebugBuffers(buffers: *LayerDebugBuffers) void {
     buffers.input_layernorm_out.deinit();
     buffers.q_proj_out.deinit();
@@ -211,6 +219,45 @@ fn deinitLayerDebugBuffers(buffers: *LayerDebugBuffers) void {
 fn deinitSdpaFixtureReplayBuffers(buffers: *SdpaFixtureReplayBuffers) void {
     buffers.grouped_out_bf16.deinit();
     buffers.grouped_out_f32.deinit();
+}
+
+fn deinitProjectionFixtureReplayBuffers(buffers: *ProjectionFixtureReplayBuffers) void {
+    buffers.q_proj_out.deinit();
+    buffers.k_proj_out.deinit();
+    buffers.v_proj_out.deinit();
+}
+
+fn runProjectionFixtureReplay(
+    layer: dflash.DecoderLayer,
+    input_norm_: zml.Tensor,
+    target_hidden_: zml.Tensor,
+) ProjectionFixtureReplayTensors {
+    const input_norm = input_norm_
+        .withPartialTags(.{ .s, .d })
+        .convert(layer.self_attn.q_proj.weight.dtype())
+        .withPartitioning(.{ .d = .replicated });
+    const target_hidden = target_hidden_
+        .withPartialTags(.{ .s, .d })
+        .convert(layer.self_attn.k_proj.weight.dtype())
+        .withPartitioning(.{ .d = .replicated });
+    const attn = layer.self_attn;
+
+    const q_proj_out = attn.q_proj.forward(input_norm)
+        .splitAxis(-1, .{ .h = attn.num_heads, .hd = .auto });
+    const k_proj_out = zml.Tensor.concatenate(&.{
+        attn.k_proj.forward(target_hidden),
+        attn.k_proj.forward(input_norm),
+    }, .s).splitAxis(-1, .{ .h = attn.num_kv_heads, .hd = .auto });
+    const v_proj_out = zml.Tensor.concatenate(&.{
+        attn.v_proj.forward(target_hidden),
+        attn.v_proj.forward(input_norm),
+    }, .s).splitAxis(-1, .{ .h = attn.num_kv_heads, .hd = .auto });
+
+    return .{
+        .q_proj_out = q_proj_out.convert(.f32),
+        .k_proj_out = k_proj_out.convert(.f32),
+        .v_proj_out = v_proj_out.convert(.f32),
+    };
 }
 
 fn runSdpaFixtureReplay(
@@ -448,8 +495,62 @@ const TestContext = struct {
 
         var failures: usize = 0;
         try self.compareLayerDebug(layer_index, &actual, &failures);
+        try self.testLayerProjectionFixtureReplay(layer_index, layer, layer_buffers, &failures);
         try self.testLayerSdpaFixtureReplay(layer_index, &failures);
         if (failures != 0) return error.TestUnexpectedResult;
+    }
+
+    fn testLayerProjectionFixtureReplay(
+        self: *TestContext,
+        layer_index: usize,
+        layer: dflash.DecoderLayer,
+        layer_buffers: zml.Bufferized(dflash.DecoderLayer),
+        failures: *usize,
+    ) !void {
+        comptime {
+            @setEvalBranchQuota(10_000);
+        }
+        const input_norm_key = try std.fmt.allocPrint(self.allocator, "layers.{d}.input_layernorm.out", .{layer_index});
+        defer self.allocator.free(input_norm_key);
+
+        var input_norm_buffer = try self.load(input_norm_key, self.sharding);
+        defer input_norm_buffer.deinit();
+        var target_hidden_buffer = try self.load("target_hidden_projected", self.sharding);
+        defer target_hidden_buffer.deinit();
+
+        const input_norm = zml.Tensor.fromShape(input_norm_buffer.shape()).withTags(.{ .s, .d });
+        const target_hidden = zml.Tensor.fromShape(target_hidden_buffer.shape()).withTags(.{ .s, .d });
+
+        var exe = try self.platform.compileFn(
+            self.allocator,
+            self.io,
+            runProjectionFixtureReplay,
+            .{ layer, input_norm, target_hidden },
+            .{ .shardings = &.{self.model_sharding} },
+        );
+        defer exe.deinit();
+
+        var exe_args = try exe.args(self.allocator);
+        defer exe_args.deinit(self.allocator);
+        exe_args.set(.{ layer_buffers, input_norm_buffer, target_hidden_buffer });
+
+        var results = try exe.results(self.allocator);
+        defer results.deinit(self.allocator);
+        exe.call(exe_args, &results);
+
+        var replay = results.get(ProjectionFixtureReplayBuffers);
+        defer deinitProjectionFixtureReplayBuffers(&replay);
+
+        const q_name = try std.fmt.allocPrint(self.allocator, "layers.{d}.fixture_replay.q_proj", .{layer_index});
+        defer self.allocator.free(q_name);
+        const k_name = try std.fmt.allocPrint(self.allocator, "layers.{d}.fixture_replay.k_proj", .{layer_index});
+        defer self.allocator.free(k_name);
+        const v_name = try std.fmt.allocPrint(self.allocator, "layers.{d}.fixture_replay.v_proj", .{layer_index});
+        defer self.allocator.free(v_name);
+
+        try self.compareLayerValueWithName(layer_index, "self_attn.q_proj.out", q_name, replay.q_proj_out, failures);
+        try self.compareLayerValueWithName(layer_index, "self_attn.k_proj.out", k_name, replay.k_proj_out, failures);
+        try self.compareLayerValueWithName(layer_index, "self_attn.v_proj.out", v_name, replay.v_proj_out, failures);
     }
 
     fn testLayerSdpaFixtureReplay(self: *TestContext, layer_index: usize, failures: *usize) !void {
@@ -565,13 +666,25 @@ const TestContext = struct {
     }
 
     fn compareLayerValue(self: *TestContext, layer_index: usize, suffix: []const u8, actual: zml.Buffer, failures: *usize) !void {
+        try self.compareLayerValueWithName(layer_index, suffix, null, actual, failures);
+    }
+
+    fn compareLayerValueWithName(
+        self: *TestContext,
+        layer_index: usize,
+        suffix: []const u8,
+        name_override: ?[]const u8,
+        actual: zml.Buffer,
+        failures: *usize,
+    ) !void {
         const key = try std.fmt.allocPrint(self.allocator, "layers.{d}.{s}", .{ layer_index, suffix });
         defer self.allocator.free(key);
         var expected = try self.load(key, self.sharding);
         defer expected.deinit();
-        self.expectClose(key, actual, expected) catch |err| {
+        const name = name_override orelse key;
+        self.expectClose(name, actual, expected) catch |err| {
             failures.* += 1;
-            std.log.err("{s} failed: {}", .{ key, err });
+            std.log.err("{s} failed: {}", .{ name, err });
         };
     }
 
