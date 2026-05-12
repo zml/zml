@@ -154,7 +154,7 @@ pub fn dotAlgorithmAttribute(ctx: *mlir.Context, dot_algorithm: DotAlgorithm, el
         ctx.ptr(),
         element_type.ptr(),
         element_type.ptr(),
-        mlir.floatType(ctx, dot_algorithm.accumulation).ptr(),
+        mlir.Type.float(ctx, dot_algorithm.accumulation).ptr(),
         dot_algorithm.component_count,
         dot_algorithm.component_count,
         dot_algorithm.num_primitive_operations,
@@ -215,9 +215,9 @@ pub fn constant(
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.constant", .{
         .operands = .{ .flat = &.{} },
-        .results = .{ .flat = &.{mlir.rankedTensorType(dims, elem_type)} },
+        .results = .{ .flat = &.{.rankedTensor(dims, elem_type)} },
         .attributes = &.{
-            .named(ctx, "value", .denseElements(.rankedTensor(dims, elem_type, null), raw_bytes)),
+            .named(ctx, "value", .denseElements(.rankedTensor(dims, elem_type), raw_bytes)),
         },
         .location = location,
     });
@@ -695,7 +695,7 @@ pub fn convolution(
         .results = .{ .flat = &.{res_type} },
         .attributes = &.{
             .named(ctx, "window_strides", .denseArray(ctx, .i64, opts.window_strides)),
-            .named(ctx, "padding", .denseElements(mlir.RankedTensorType.get(opts.pad_shape, mlir.integerType(ctx, .i64), null).shaped(), opts.pad_value)),
+            .named(ctx, "padding", .denseElements(.rankedTensor(opts.pad_shape, .int(ctx, .i64)), opts.pad_value)),
             .named(ctx, "lhs_dilation", .denseArray(ctx, .i64, opts.lhs_dilation)),
             .named(ctx, "rhs_dilation", .denseArray(ctx, .i64, opts.rhs_dilation)),
             .named(ctx, "window_reversal", .denseArray(ctx, .bool, window_reversal[0..opts.window_reversal.len])),
@@ -804,11 +804,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
         for (layouts) |ol| {
             layouts_buffer.appendAssumeCapacity(
                 .denseElements(
-                    mlir.RankedTensorType.get(
-                        &.{@intCast(ol.len)},
-                        mlir.indexType(ctx),
-                        null,
-                    ).shaped(),
+                    .rankedTensor(&.{@intCast(ol.len)}, .index(ctx)),
                     ol,
                 ),
             );
@@ -819,11 +815,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
             const ol = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - shaped_type.rank() ..];
             layouts_buffer.appendAssumeCapacity(
                 .denseElements(
-                    mlir.RankedTensorType.get(
-                        &.{@intCast(ol.len)},
-                        mlir.indexType(ctx),
-                        null,
-                    ).shaped(),
+                    .rankedTensor(&.{@intCast(ol.len)}, .index(ctx)),
                     ol,
                 ),
             );
@@ -838,11 +830,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
         for (layouts) |rl| {
             layouts_buffer.appendAssumeCapacity(
                 .denseElements(
-                    mlir.RankedTensorType.get(
-                        &.{@intCast(rl.len)},
-                        mlir.indexType(ctx),
-                        null,
-                    ).shaped(),
+                    .rankedTensor(&.{@intCast(rl.len)}, .index(ctx)),
                     rl,
                 ),
             );
@@ -853,11 +841,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
             const rl = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - shaped_type.rank() ..];
             layouts_buffer.appendAssumeCapacity(
                 .denseElements(
-                    mlir.RankedTensorType.get(
-                        &.{@intCast(rl.len)},
-                        mlir.indexType(ctx),
-                        null,
-                    ).shaped(),
+                    .rankedTensor(&.{@intCast(rl.len)}, .index(ctx)),
                     rl,
                 ),
             );

@@ -32,7 +32,7 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
         attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "sym_visibility", .string(ctx, @tagName(v))));
     }
     attr_tuples_buffer.appendSliceAssumeCapacity(&.{
-        .named(ctx, "function_type", .typeAttr(mlir.functionType(
+        .named(ctx, "function_type", .typeAttr(.function(
             ctx,
             args.args orelse args: {
                 for (0..args.block.numArguments()) |i| {

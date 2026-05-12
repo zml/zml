@@ -444,7 +444,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     };
     meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
-            const mlir_type = mlir.rankedTensorType(
+            const mlir_type: *const mlir.Type = .rankedTensor(
                 tensor.dims(),
                 mlirx.Type.fromDType(ctx_.compilation_context.mlir_ctx, tensor.dtype()),
             );

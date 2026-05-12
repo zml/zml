@@ -341,6 +341,52 @@ pub const Type = opaque {
     pub fn parse(ctx: *Context, str: []const u8) Error!*const Type {
         return @ptrCast(c.mlirTypeParseGet(ctx.ptr(), stringRef(str)).ptr orelse return Error.InvalidMlir);
     }
+
+    pub fn index(ctx: *Context) *const Type {
+        return @ptrCast(IndexType.get(ctx));
+    }
+
+    pub fn int(ctx: *Context, it: IntegerTypes) *const Type {
+        return @ptrCast(IntegerType.get(ctx, it));
+    }
+
+    pub fn float(ctx: *Context, ft: FloatTypes) *const Type {
+        return switch (ft) {
+            inline else => |v| @ptrCast(FloatType(v).get(ctx)),
+        };
+    }
+
+    pub fn complex(ctx: *Context, complex_type: ComplexTypes) *const Type {
+        return @ptrCast(ComplexType.get(ctx, complex_type));
+    }
+
+    pub fn rankedTensor(dimensions: []const i64, elem_type: *const Type) *const Type {
+        return @ptrCast(RankedTensorType.get(dimensions, elem_type, null));
+    }
+
+    pub fn rankedTensorWithEncoding(dimensions: []const i64, elem_type: *const Type, encoding: *Attribute) *const Type {
+        return @ptrCast(RankedTensorType.get(dimensions, elem_type, encoding));
+    }
+
+    pub fn function(ctx: *Context, args: []const *const Type, results: []const *const Type) *const Type {
+        return @ptrCast(FunctionType.init(ctx, args, results));
+    }
+
+    pub fn memRef(element_type: *const Type, shape: []const i64, layout: ?*const Attribute, memory_space: ?*const Attribute) *const Type {
+        return @ptrCast(MemRefType.init(element_type, shape, layout, memory_space));
+    }
+
+    pub fn element(self: *const VectorType) *const Type {
+        return @ptrCast(c.mlirShapedTypeGetElementType(self.ptr()).ptr);
+    }
+
+    pub fn vector(shape: []const i64, element_type: *const Type) *const Type {
+        return @ptrCast(VectorType.init(shape, element_type));
+    }
+
+    pub fn unrankedMemRef(element_type: *const Type, memory_space: ?*const Attribute) *const Type {
+        return @ptrCast(UnrankedMemRefType.init(element_type, memory_space));
+    }
 };
 
 pub const IndexType = opaque {
@@ -355,10 +401,6 @@ pub const IndexType = opaque {
         return @ptrCast(c.mlirIndexTypeGet(ctx.ptr()).ptr);
     }
 };
-
-pub fn indexType(ctx: *Context) *const Type {
-    return @ptrCast(IndexType.get(ctx));
-}
 
 pub const IntegerTypes = enum {
     i1,
@@ -434,10 +476,6 @@ pub const IntegerType = opaque {
     }
 };
 
-pub fn integerType(ctx: *Context, it: IntegerTypes) *const Type {
-    return @ptrCast(IntegerType.get(ctx, it));
-}
-
 pub const FloatTypes = enum {
     f4e2m1fn,
     f6e2m3fn,
@@ -494,12 +532,6 @@ pub fn FloatType(comptime ft: FloatTypes) type {
     };
 }
 
-pub fn floatType(ctx: *Context, ft: FloatTypes) *const Type {
-    return switch (ft) {
-        inline else => |v| @ptrCast(FloatType(v).get(ctx)),
-    };
-}
-
 pub const ComplexTypes = enum {
     c64,
     c128,
@@ -515,15 +547,11 @@ pub const ComplexType = opaque {
 
     pub fn get(ctx: *Context, complex_type: ComplexTypes) *const ComplexType {
         return @ptrCast(c.mlirComplexTypeGet(switch (complex_type) {
-            .c64 => floatType(ctx, .f32).ptr(),
-            .c128 => floatType(ctx, .f64).ptr(),
+            .c64 => Type.float(ctx, .f32).ptr(),
+            .c128 => Type.float(ctx, .f64).ptr(),
         }).ptr);
     }
 };
-
-pub fn complexType(ctx: *Context, complex_type: ComplexTypes) *const Type {
-    return @ptrCast(ComplexType.get(ctx, complex_type));
-}
 
 pub const Attribute = opaque {
     const M = Methods(Attribute, c.MlirAttribute);
@@ -1235,7 +1263,7 @@ pub const Operation = opaque {
                     sizes.appendAssumeCapacity(@intCast(segment_operands.len));
                 }
                 state.addAttributes(&.{
-                    .named(ctx, "operandSegmentSizes", .denseElements(RankedTensorType.get(&.{@intCast(sizes.len)}, integerType(ctx, .i32), null).shaped(), sizes.constSlice())),
+                    .named(ctx, "operandSegmentSizes", .denseElements(RankedTensorType.get(&.{@intCast(sizes.len)}, .int(ctx, .i32), null).shaped(), sizes.constSlice())),
                 });
             },
         };
@@ -1248,7 +1276,7 @@ pub const Operation = opaque {
                     sizes.appendAssumeCapacity(@intCast(segment_results.len));
                 }
                 state.addAttributes(&.{
-                    .named(ctx, "resultSegmentSizes", .denseElements(RankedTensorType.get(&.{@intCast(sizes.len)}, integerType(ctx, .i32), null).shaped(), sizes.constSlice())),
+                    .named(ctx, "resultSegmentSizes", .denseElements(RankedTensorType.get(&.{@intCast(sizes.len)}, .int(ctx, .i32), null).shaped(), sizes.constSlice())),
                 });
             },
         };
@@ -1434,8 +1462,12 @@ pub const ShapedType = opaque {
         return c.mlirShapedTypeGetDimSize(self.ptr(), @intCast(dim));
     }
 
-    pub fn rankedTensor(dimensions: []const i64, elem_type: *const Type, encoding: ?*Attribute) *const ShapedType {
-        return RankedTensorType.get(dimensions, elem_type, encoding).shaped();
+    pub fn rankedTensor(dimensions: []const i64, elem_type: *const Type) *const ShapedType {
+        return @ptrCast(RankedTensorType.get(dimensions, elem_type, null));
+    }
+
+    pub fn rankedTensorWithEncoding(dimensions: []const i64, elem_type: *const Type, encoding: *Attribute) *const ShapedType {
+        return @ptrCast(RankedTensorType.get(dimensions, elem_type, encoding));
     }
 };
 
@@ -1484,14 +1516,6 @@ pub const RankedTensorType = opaque {
         return @ptrCast(self);
     }
 };
-
-pub fn rankedTensorType(dimensions: []const i64, elem_type: *const Type) *const Type {
-    return @ptrCast(RankedTensorType.get(dimensions, elem_type, null));
-}
-
-pub fn rankedTensorTypeWithEncoding(dimensions: []const i64, elem_type: *const Type, encoding: *Attribute) *const Type {
-    return @ptrCast(RankedTensorType.get(dimensions, elem_type, encoding));
-}
 
 pub const DenseElementsAttribute = opaque {
     const M = Methods(DenseElementsAttribute, c.MlirAttribute);
@@ -1610,10 +1634,6 @@ pub const FunctionType = opaque {
     }
 };
 
-pub fn functionType(ctx: *Context, args: []const *const Type, results: []const *const Type) *const Type {
-    return @ptrCast(FunctionType.init(ctx, args, results));
-}
-
 pub const FlatSymbolRefAttribute = opaque {
     const M = Methods(FlatSymbolRefAttribute, c.MlirAttribute);
 
@@ -1702,10 +1722,6 @@ pub const MemRefType = opaque {
     }
 };
 
-pub fn memRefType(element_type: *const Type, shape: []const i64, layout: ?*const Attribute, memory_space: ?*const Attribute) *const Type {
-    return @ptrCast(MemRefType.init(element_type, shape, layout, memory_space));
-}
-
 pub const VectorType = opaque {
     const M = Methods(VectorType, c.MlirType);
 
@@ -1740,10 +1756,6 @@ pub const VectorType = opaque {
         ).ptr);
     }
 
-    pub fn elementType(self: *const VectorType) *const Type {
-        return @ptrCast(c.mlirShapedTypeGetElementType(self.ptr()).ptr);
-    }
-
     pub fn rank(self: *const VectorType) usize {
         return @intCast(c.mlirShapedTypeGetRank(self.ptr()));
     }
@@ -1756,10 +1768,6 @@ pub const VectorType = opaque {
         return @ptrCast(self);
     }
 };
-
-pub fn vectorType(shape: []const i64, element_type: *const Type) *const Type {
-    return @ptrCast(VectorType.init(shape, element_type));
-}
 
 pub const UnrankedMemRefType = opaque {
     const M = Methods(UnrankedMemRefType, c.MlirType);
@@ -1777,10 +1785,6 @@ pub const UnrankedMemRefType = opaque {
         ).ptr);
     }
 };
-
-pub fn unrankedMemRefType(element_type: *const Type, memory_space: ?*const Attribute) *const Type {
-    return @ptrCast(UnrankedMemRefType.init(element_type, memory_space));
-}
 
 pub const AffineExpr = opaque {
     const M = Methods(AffineExpr, c.MlirAffineExpr);

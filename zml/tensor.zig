@@ -311,7 +311,7 @@ pub const Tensor = struct {
         const op = dialects.stablehlo.bitcast_convert(
             mlirCtx(),
             self.value(),
-            mlir.rankedTensorType(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
+            .rankedTensor(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
 
@@ -557,8 +557,8 @@ pub const Tensor = struct {
                 mlirCtx(),
                 self.algorithm,
                 self._state.value(),
-                mlir.rankedTensorType(self._state.dims(), mlirx.Type.fromDType(mlirCtx(), self._state.dtype())),
-                mlir.rankedTensorType(sh.dims(), mlirx.Type.fromDType(mlirCtx(), sh.dtype())),
+                .rankedTensor(self._state.dims(), mlirx.Type.fromDType(mlirCtx(), self._state.dtype())),
+                .rankedTensor(sh.dims(), mlirx.Type.fromDType(mlirCtx(), sh.dtype())),
                 .unknown(mlirCtx()),
             ).appendTo(currentBlock());
             return .{ self.update(op.result(0)), _result(sh, op.result(1)) };
@@ -880,7 +880,7 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             other.value(),
-            mlir.rankedTensorType(new_shape.dims(), mlirx.Type.fromDType(mlirCtx(), new_shape.dtype())),
+            .rankedTensor(new_shape.dims(), mlirx.Type.fromDType(mlirCtx(), new_shape.dtype())),
             used_opts,
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
@@ -1062,7 +1062,7 @@ pub const Tensor = struct {
             return self;
         }
 
-        const res_type = mlir.rankedTensorType(self.shape().dims(), mlirx.Type.fromDType(mlirCtx(), to));
+        const res_type = mlir.Type.rankedTensor(self.shape().dims(), mlirx.Type.fromDType(mlirCtx(), to));
         const op = dialects.stablehlo.convert(mlirCtx(), self.value(), res_type, .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape.withDtype(to), op.result(0));
     }
@@ -1277,7 +1277,7 @@ pub const Tensor = struct {
             mlirCtx(),
             lhs.value(),
             rhs.value(),
-            mlir.rankedTensorType(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
+            .rankedTensor(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
             .{
                 .lhs_batching_dimensions = lhs_batching_axes.constSlice(),
                 .rhs_batching_dimensions = rhs_batching_axes.constSlice(),
@@ -1528,7 +1528,7 @@ pub const Tensor = struct {
         const op = dialects.stablehlo.transpose(
             mlirCtx(),
             self.value(),
-            mlir.rankedTensorType(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
+            .rankedTensor(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
             .{ .permutation = toI64(permutation).constSlice() },
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
@@ -1560,7 +1560,7 @@ pub const Tensor = struct {
         const reshaped_val = dialects.stablehlo.reshape(
             mlirCtx(),
             self.value(),
-            mlir.rankedTensorType(new_shape.dims(), mlirx.Type.fromDType(mlirCtx(), new_shape.dtype())),
+            .rankedTensor(new_shape.dims(), mlirx.Type.fromDType(mlirCtx(), new_shape.dtype())),
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
         return _result(new_shape, reshaped_val.result(0));
@@ -1576,7 +1576,7 @@ pub const Tensor = struct {
         const reshaped_val = dialects.stablehlo.reshape(
             mlirCtx(),
             self.value(),
-            mlir.rankedTensorType(new_shape.dims(), mlirx.Type.fromDType(mlirCtx(), new_shape.dtype())),
+            .rankedTensor(new_shape.dims(), mlirx.Type.fromDType(mlirCtx(), new_shape.dtype())),
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
         return _result(new_shape, reshaped_val.result(0));
@@ -1665,7 +1665,7 @@ pub const Tensor = struct {
             res_shape = res_shape.setDim(a, std.math.divCeil(i64, args.end - args.start, args.step) catch unreachable);
         }
 
-        const result_type = mlir.rankedTensorType(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype()));
+        const result_type = mlir.Type.rankedTensor(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype()));
         const slice_op = dialects.stablehlo.slice(
             mlirCtx(),
             self.value(),
@@ -1993,7 +1993,7 @@ pub const Tensor = struct {
         var op = dialects.stablehlo.iota(
             mlirCtx(),
             0,
-            mlir.rankedTensorType(sh.dims(), mlirx.Type.fromDType(mlirCtx(), sh.dtype())),
+            .rankedTensor(sh.dims(), mlirx.Type.fromDType(mlirCtx(), sh.dtype())),
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
         var res = _result(sh, op.result(0));
@@ -2022,7 +2022,7 @@ pub const Tensor = struct {
         var op = dialects.stablehlo.iota(
             mlirCtx(),
             a,
-            mlir.rankedTensorType(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
+            .rankedTensor(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
         return _result(res_shape, op.result(0));
@@ -2044,7 +2044,7 @@ pub const Tensor = struct {
         var iota_op = dialects.stablehlo.iota(
             mlirCtx(),
             0,
-            mlir.rankedTensorType(sh.dims(), mlirx.Type.fromDType(mlirCtx(), sh.dtype())),
+            .rankedTensor(sh.dims(), mlirx.Type.fromDType(mlirCtx(), sh.dtype())),
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
         var res = _result(sh, iota_op.result(0));
@@ -2157,7 +2157,7 @@ pub const Tensor = struct {
             // but we propagate output_shape tags.
             return _result(res_shape, self.value());
         }
-        const result_type = mlir.rankedTensorType(
+        const result_type = mlir.Type.rankedTensor(
             res_shape.dims(),
             mlirx.Type.fromDType(mlirCtx(), res_shape.dtype()),
         );
@@ -2215,7 +2215,7 @@ pub const Tensor = struct {
     /// Reshapes the input Tensor with the given shape.
     pub fn reshape(self: Tensor, output_shape_: anytype) Tensor {
         const output_shape = self._shape.reshape(output_shape_);
-        const tensor_type = mlir.rankedTensorType(output_shape.dims(), mlirx.Type.fromDType(mlirCtx(), output_shape.dtype()));
+        const tensor_type = mlir.Type.rankedTensor(output_shape.dims(), mlirx.Type.fromDType(mlirCtx(), output_shape.dtype()));
         const reshape_value = dialects.stablehlo.reshape(mlirCtx(), self.value(), tensor_type, .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(output_shape, reshape_value.result(0));
     }
