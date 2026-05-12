@@ -718,13 +718,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     };
 }
 
-pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.AceEmb_handler, tokenizer: zml.tokenizer.Tokenizer, tokens: []const u32, token_embedding: bool) !zml.Slice {
-    if (token_embedding) {
-        zml_handler.tic(&zml_handler.timers.emb.decode);
-    } else {
-        zml_handler.tic(&zml_handler.timers.emb.prefill);
-    }
-
+pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.AceEmb_handler, tokenizer: zml.tokenizer.Tokenizer, text_tokens: []const u32, lyric_tokens: []const u32) !TextEmbedding {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = aceemb.params.shardings.replicated;
@@ -733,40 +727,56 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
-    const seq_len = tokens.len;
-    const emb_dim = aceemb.config.hidden_size;
+    zml_handler.tic(&zml_handler.timers.emb.prefill);
 
-    // the result embeddings we return
-    const embedding_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = seq_len, .d = emb_dim }, .bf16));
-    var embedding_buffer: zml.Buffer = try .fromSlice(io, platform, embedding_slice, sharding);
-    defer embedding_buffer.deinit();
+    const lyric_embedding_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = lyric_tokens.len, .d = aceemb.config.hidden_size }, .bf16));
+    var lyric_embedding_buffer: zml.Buffer = try .fromSlice(io, platform, lyric_embedding_slice, sharding);
+    defer lyric_embedding_buffer.deinit();
 
-    const tokens_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = seq_len }, .u32));
-    defer tokens_slice.free(allocator);
-    @memcpy(tokens_slice.items(u32)[0..tokens.len], tokens);
-    var tokens_buffer: zml.Buffer = try .fromSlice(io, platform, tokens_slice, sharding);
-    defer tokens_buffer.deinit();
+    const lyric_tokens_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = lyric_tokens.len }, .u32));
+    defer lyric_tokens_slice.free(allocator);
+    @memcpy(lyric_tokens_slice.items(u32)[0..lyric_tokens.len], lyric_tokens);
+    var lyric_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, lyric_tokens_slice, sharding);
+    defer lyric_tokens_buffer.deinit();
 
-    const exe = if (token_embedding) aceemb.partial_embed_exe else aceemb.full_embed_exe;
-    var embed_args = try exe.args(allocator);
-    defer embed_args.deinit(allocator);
-    var embed_results = try exe.results(allocator);
-    defer embed_results.deinit(allocator);
-    embed_args.set(.{ aceemb.model_buffers, tokens_buffer });
-    exe.call(embed_args, &embed_results);
+    aceemb.exes.lyric_embed_args.set(.{ aceemb.model_buffers, lyric_tokens_buffer });
+    aceemb.exes.lyric_embed_exe.call(aceemb.exes.lyric_embed_args, &aceemb.exes.lyric_embed_results);
+    aceemb.exes.lyric_embed_results.fill(.{ &lyric_embedding_buffer });
+    
+    try lyric_embedding_buffer.toSlice(io, lyric_embedding_slice);
 
-    embed_results.fill(.{ &embedding_buffer });
-    std.log.info("EMB done embedding", .{});
+    zml_handler.toc(&zml_handler.timers.emb.prefill);
+    zml_handler.tic(&zml_handler.timers.emb.decode);
+    
+    const text_embedding_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = text_tokens.len, .d = aceemb.config.hidden_size }, .bf16));
+    var text_embedding_buffer: zml.Buffer = try .fromSlice(io, platform, text_embedding_slice, sharding);
+    defer text_embedding_buffer.deinit();
 
-    try embedding_buffer.toSlice(io, embedding_slice);
+    const text_tokens_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = text_tokens.len }, .u32));
+    defer text_tokens_slice.free(allocator);
+    @memcpy(text_tokens_slice.items(u32)[0..text_tokens.len], text_tokens);
+    var text_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, text_tokens_slice, sharding);
+    defer text_tokens_buffer.deinit();
 
-    if (token_embedding) {
-        zml_handler.toc(&zml_handler.timers.emb.decode);
-    } else {
-        zml_handler.toc(&zml_handler.timers.emb.prefill);
+    aceemb.exes.text_embed_args.set(.{ aceemb.model_buffers, text_tokens_buffer });
+    aceemb.exes.text_embed_exe.call(aceemb.exes.text_embed_args, &aceemb.exes.text_embed_results);
+    aceemb.exes.text_embed_results.fill(.{ &text_embedding_buffer });
+    for (0..aceemb.config.num_hidden_layers) |i| {
+        aceemb.exes.layer_args.set(.{ aceemb.model_buffers.layers[i], text_embedding_buffer });
+        aceemb.exes.layer_exe.call(aceemb.exes.layer_args, &aceemb.exes.layer_results);
+        aceemb.exes.layer_results.fill(.{ &text_embedding_buffer });
     }
+    aceemb.exes.norm_args.set(.{ aceemb.model_buffers, text_embedding_buffer });
+    aceemb.exes.norm_exe.call(aceemb.exes.norm_args, &aceemb.exes.norm_results);
+    aceemb.exes.norm_results.fill(.{ &text_embedding_buffer });
+    
+    try text_embedding_buffer.toSlice(io, text_embedding_slice);
 
-    return embedding_slice;
+    std.log.info("EMB done embedding", .{});
+    return .{
+        .caption_embedding = text_embedding_slice,
+        .lyric_embedding = lyric_embedding_slice,
+    };
 }
 
 pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_handler, text_emb: TextEmbedding, audio_codes: []u32, target_duration: u32) !InitialLatents {
@@ -889,23 +899,18 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     // the full forward pass on the dit model is one iteration of the denoising
     const timestamps: [9]f32 = .{ 1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3, 0.0 };
     const steps = timestamps.len - 1;
-    zml_handler.tic(&zml_handler.timers.dit.decode);
-    var dit_time: std.Io.Duration = .{ .nanoseconds = 0 };
+    zml_handler.tic(&zml_handler.timers.dit.prefill);
     for (0..steps) |i| {
         std.log.info("DiT ************* step {d}/{d}", .{ i+1, steps });
         var t_curr: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i], .f32, sharding);
         var t_next: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i + 1], .f32, sharding);
         defer t_curr.deinit();
         defer t_next.deinit();
-        zml_handler.tic(&zml_handler.timers.dit.prefill);
         diffuse_args.set(.{ acedit.model_buffers, t_curr, t_next, x_buffer, context_latents_buffer, encoded_conditions_buffer });
         acedit.diffuse_exe.callOpts(io, diffuse_args, &diffuse_results, .{ .wait = true });
         diffuse_results.fill(.{ &x_buffer, &result_buffer });
-        zml_handler.toc(&zml_handler.timers.dit.prefill);
-        dit_time.nanoseconds += zml_handler.timers.dit.prefill.nanoseconds;
     }
-    zml_handler.timers.dit.prefill.nanoseconds = dit_time.nanoseconds;
-    zml_handler.toc(&zml_handler.timers.dit.decode);
+    zml_handler.toc(&zml_handler.timers.dit.prefill);
 
     try result_buffer.toSlice(io, result_slice);
     return .{ .x = result_slice };
@@ -1005,7 +1010,7 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
     
     while (true) {
         var last_chunk = false;
-        if (core_start < overlap) {
+        if (core_start == 0) {
             // this is first chunk, put all overlap to the right
             win_start = 0;
             win_end = core_end + 2 * overlap;

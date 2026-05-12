@@ -12,11 +12,10 @@ pub const AceEmb_handler = struct {
     model: AceEmb,
     params: Params,
     config: Config,
-    partial_embed_exe: zml.Exe,
-    full_embed_exe: zml.Exe,
+    exes: Exes,
     model_buffers: zml.Bufferized(AceEmb),
 
-    pub fn init(zml_handler: *main.Zml_handler, full_seq_len: u32, embed_seq_len: u32) !AceEmb_handler {
+    pub fn init(zml_handler: *main.Zml_handler, text_len: u32, lyric_len: u32) !AceEmb_handler {
         zml_handler.tic(&zml_handler.timers.emb.init);
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.aceemb);
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
@@ -35,19 +34,16 @@ pub const AceEmb_handler = struct {
         std.log.info("EMB initialized", .{});
         
         const params: Params = .{
-            .full_embed_tokens = .init(.{ .s = full_seq_len }, .u32),
-            .partial_embed_tokens = .init(.{ .s = embed_seq_len }, .u32),
+            .lyric_tokens = .init(.{ .s = lyric_len }, .u32),
+            .text_tokens = .init(.{ .s = text_len }, .u32),
+            .text_embeds = .init(.{ .s = text_len, .b = config.hidden_size }, .bf16),
             .shardings = try .init(zml_handler.platform),
         };
 
         zml_handler.toc(&zml_handler.timers.emb.init);
         zml_handler.tic(&zml_handler.timers.emb.compile);
         
-        std.log.info("EMB compile models", .{});
-        const full_embed_exe = try compileFullModel(zml_handler, model, params);
-        std.log.info("EMB compiled full model", .{});
-        const partial_embed_exe = try compilePartialModel(zml_handler, model, params);
-        std.log.info("EMB compiled partial model", .{});
+        const exes = try compileModel(zml_handler, model, params);
 
         zml_handler.toc(&zml_handler.timers.emb.compile);
         zml_handler.tic(&zml_handler.timers.emb.load);
@@ -62,8 +58,7 @@ pub const AceEmb_handler = struct {
             .model = model,
             .params = params,
             .config = config,
-            .full_embed_exe = full_embed_exe,
-            .partial_embed_exe = partial_embed_exe,
+            .exes = exes,
             .model_buffers = model_buffers,
         };
     }
@@ -78,36 +73,76 @@ pub const AceEmb_handler = struct {
         defer zml_handler.allocator.free(bytes);
         return try .fromBytes(zml_handler.allocator, zml_handler.io, bytes);
     }
-    
-    pub fn compileFullModel(zml_handler: *main.Zml_handler, model: AceEmb, parameters: Params) !zml.Exe {
-        const shardings_arr = parameters.shardings.all();
-        const opts: zml.module.CompilationOptions = .{
-            .shardings = &shardings_arr,
-        };
-        return zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .forward,
-            .{ parameters.full_embed_tokens },
-            opts,
-        );
-    }
-    
-    pub fn compilePartialModel(zml_handler: *main.Zml_handler, model: AceEmb, parameters: Params) !zml.Exe {
-        const opts: zml.module.CompilationOptions = .{
-            .shardings = &parameters.shardings.all(),
-        };
-        return zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .embed,
-            .{ parameters.partial_embed_tokens },
-            opts,
-        );
-    }
 
+    pub fn compileModel(zml_handler: *main.Zml_handler, model: AceEmb, params: Params) !Exes {
+        const shardings_arr = params.shardings.all();
+        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
+        std.log.info("EMB compile models", .{});
+
+        var lyric_embed_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceEmb, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .embedTokens, .{
+                        params_.lyric_tokens }, opts_);
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var lyric_embed_future_awaited = false;
+        errdefer if (!lyric_embed_future_awaited) if (lyric_embed_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        var text_embed_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceEmb, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .embedTokens, .{
+                        params_.text_tokens }, opts_);
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var text_embed_future_awaited = false;
+        errdefer if (!text_embed_future_awaited) if (text_embed_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        var layer_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward,
+                    .{ params_.text_embeds }, opts_);
+            }
+        }.call, .{ zml_handler, model.layers[0], params, opts });
+        var layer_future_awaited = false;
+        errdefer if (!layer_future_awaited) if (layer_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        var norm_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceEmb, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .normEmbed,
+                    .{ params_.text_embeds }, opts_);
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var norm_future_awaited = false;
+        errdefer if (!norm_future_awaited) if (norm_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        const lyric_embed_exe = try lyric_embed_future.await(zml_handler.io);
+        lyric_embed_future_awaited = true;
+
+        const text_embed_exe = try text_embed_future.await(zml_handler.io);
+        text_embed_future_awaited = true;
+
+        const layer_exe = try layer_future.await(zml_handler.io);
+        layer_future_awaited = true;
+
+        const norm_exe = try norm_future.await(zml_handler.io);
+        norm_future_awaited = true;
+
+        return .{
+            .lyric_embed_exe = lyric_embed_exe,
+            .lyric_embed_args = try lyric_embed_exe.args(zml_handler.allocator),
+            .lyric_embed_results = try lyric_embed_exe.results(zml_handler.allocator),
+            .text_embed_exe = text_embed_exe,
+            .text_embed_args = try text_embed_exe.args(zml_handler.allocator),
+            .text_embed_results = try text_embed_exe.results(zml_handler.allocator),
+            .layer_exe = layer_exe,
+            .layer_args = try layer_exe.args(zml_handler.allocator),
+            .layer_results = try layer_exe.results(zml_handler.allocator),
+            .norm_exe = norm_exe,
+            .norm_args = try norm_exe.args(zml_handler.allocator),
+            .norm_results = try norm_exe.results(zml_handler.allocator),
+        };
+    }
+    
     pub fn unloadBuffers(self: *AceEmb_handler, allocator: std.mem.Allocator) void {
         AceEmb.unloadBuffers(&self.model_buffers, allocator);
     }
@@ -115,15 +150,15 @@ pub const AceEmb_handler = struct {
     pub fn deinit(self: *AceEmb_handler, allocator: std.mem.Allocator) void {
         self.model.deinit(allocator);
         self.config.deinit(allocator);
-        self.full_embed_exe.deinit();
-        self.partial_embed_exe.deinit();
+        self.exes.deinit(allocator);
     }
 };
 
 
 pub const Params = struct {
-    full_embed_tokens: zml.Tensor,
-    partial_embed_tokens: zml.Tensor,
+    lyric_tokens: zml.Tensor,
+    text_tokens: zml.Tensor,
+    text_embeds: zml.Tensor,
     shardings: main.Shardings,
 };
 
@@ -163,6 +198,39 @@ pub const Config = struct {
 
     pub fn deinit(self: Config, _: std.mem.Allocator) void {
         _ = self;
+    }
+};
+
+pub const Exes = struct {
+    lyric_embed_exe: zml.Exe,
+    lyric_embed_args: zml.Exe.Arguments,
+    lyric_embed_results: zml.Exe.Results,
+
+    text_embed_exe: zml.Exe,
+    text_embed_args: zml.Exe.Arguments,
+    text_embed_results: zml.Exe.Results,
+
+    layer_exe: zml.Exe,
+    layer_args: zml.Exe.Arguments,
+    layer_results: zml.Exe.Results,
+    
+    norm_exe: zml.Exe,
+    norm_args: zml.Exe.Arguments,
+    norm_results: zml.Exe.Results,
+
+    pub fn deinit(self: Exes, allocator: std.mem.Allocator) void {
+        self.lyric_embed_exe.deinit();
+        self.lyric_embed_args.deinit(allocator);
+        self.lyric_embed_results.deinit(allocator);
+        self.text_embed_exe.deinit();
+        self.text_embed_args.deinit(allocator);
+        self.text_embed_results.deinit(allocator);
+        self.layer_exe.deinit();
+        self.layer_args.deinit(allocator);
+        self.layer_results.deinit(allocator);
+        self.norm_exe.deinit();
+        self.norm_args.deinit(allocator);
+        self.norm_results.deinit(allocator);
     }
 };
 
@@ -219,9 +287,12 @@ pub const AceEmb = struct {
         return output;
     }
     
-    pub fn embed(self: AceEmb, tokens: zml.Tensor) zml.Tensor {
-        const output = self.embed_tokens.forward(tokens).withPartialTags(.{ .d });
-        return output;
+    pub fn embedTokens(self: AceEmb, tokens: zml.Tensor) zml.Tensor {
+        return self.embed_tokens.forward(tokens).withPartialTags(.{ .d });
+    }
+
+    pub fn normEmbed(self: AceEmb, embed: zml.Tensor) zml.Tensor {
+        return self.norm.forward(embed).reuseBuffer(embed);
     }
 };
 
@@ -351,7 +422,7 @@ const MlpLayer = struct {
         const gate_projection = input.dot(self.gate_proj, .d);
         const activation = gate_projection.silu().mul(up_projection);
         const output = activation.dot(self.down_proj, .d_out);
-        return output;
+        return output.reuseBuffer(input);
     }
 };
 

@@ -196,19 +196,16 @@ const Args = struct {
 // 4090 (70s audio)
 // bazel run --config=release acestep --//platforms:cuda=true -- --prompt='a chill piano melody' --llm-size=1 --instru --local-files
 // info: Module    init  compile     load  prefill   decode    total
-// info:   llm    0.28s    9.73s    0.69s    0.06s    0.89s   11.64s
-// info:   cfg    0.00s    0.86s    0.00s    0.05s    4.35s    5.27s
-// info:   emb    0.01s    2.76s    0.59s    0.01s    0.00s    3.55s
-// info:   enc    0.02s    4.72s    0.63s    0.01s    0.00s    5.38s
-// info:   dit    0.02s    5.33s    0.66s    0.21s    0.21s    6.22s
-// info:   vae    0.01s   15.66s    0.61s    0.19s    0.00s   16.49s
-// info:   wav                                                 1.49s
-// info: total                                                50.08s
+// info:   llm    0.29s   10.11s    0.72s    0.05s    0.97s   12.15s
+// info:   cfg    0.00s    0.82s    0.00s    0.06s    4.34s    5.22s
+// info:   emb    0.01s    2.75s    0.59s    0.01s    0.00s    3.57s
+// info:   enc    0.01s    4.80s    0.60s    0.01s    0.00s    5.41s
+// info:   dit    0.00s    5.29s    0.64s    0.21s    0.00s    6.14s
+// info:   vae    0.01s    1.53s    0.54s    0.51s    0.00s    2.61s
+// info:   wav                                                 1.28s
+// info: total                                                36.41s
 
 // TODO: terminer compilation par bloc parallèle (emb, enc, dit)
-// TODO: VAE compilation is an issue, worse than with f32 ??
-// TODO : split 4 blocks ? disable autotuning ? tiled decode ?
-
 // TODO: several outputs (either tiled or batched)
 // TODO: reference audio
 // TODO: reference timbre
@@ -310,10 +307,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     var aceemb = try aceemb_.AceEmb_handler.init(zml_handler, @intCast(caption_tok.len), @intCast(lyric_tok.len));
     defer aceemb.deinit(zml_handler.allocator);
 
-    const text_emb: inference.TextEmbedding = .{
-        .caption_embedding = try inference.generateTextEmbedding(zml_handler, &aceemb, tokenizer, caption_tok, false),
-        .lyric_embedding = try inference.generateTextEmbedding(zml_handler, &aceemb, tokenizer, lyric_tok, true),
-    };
+    const text_emb = try inference.generateTextEmbedding(zml_handler, &aceemb, tokenizer, caption_tok, lyric_tok);
     defer text_emb.deinit(zml_handler.allocator);
 
     aceemb.unloadBuffers(zml_handler.allocator);
