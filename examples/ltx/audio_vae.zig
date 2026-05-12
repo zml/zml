@@ -73,8 +73,8 @@ pub const AudioPerChannelStats = struct {
 fn initAudioConv2d(store: zml.io.TensorStore.View) Conv2dWeight {
     const c = store.withPrefix("conv");
     return .{
-        .weight = c.createTensor("weight", null, null),
-        .bias = c.createTensor("bias", null, null),
+        .weight = c.createTensor("weight", null, .replicated),
+        .bias = c.createTensor("bias", null, .replicated),
     };
 }
 
@@ -127,8 +127,8 @@ pub fn initAudioVaeDecoderParams(store: zml.io.TensorStore.View) AudioVaeDecoder
 pub fn initAudioPerChannelStats(store: zml.io.TensorStore.View) AudioPerChannelStats {
     const pcs = store.withPrefix("audio_vae").withPrefix("per_channel_statistics");
     return .{
-        .mean_of_means = pcs.createTensor("mean-of-means", null, null),
-        .std_of_means = pcs.createTensor("std-of-means", null, null),
+        .mean_of_means = pcs.createTensor("mean-of-means", null, .replicated),
+        .std_of_means = pcs.createTensor("std-of-means", null, .replicated),
     };
 }
 

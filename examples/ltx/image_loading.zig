@@ -18,7 +18,7 @@ pub fn loadAndPreprocess(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     path: []const u8,
     target_h: u32,
     target_w: u32,

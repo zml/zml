@@ -2,6 +2,7 @@ const std = @import("std");
 
 const zml = @import("../zml.zig");
 const flashattn = @import("flashattn.zig");
+const rocm_flash_attn = @import("rocm_flash_attn.zig");
 
 const Attention = @This();
 
@@ -9,21 +10,13 @@ pub const Backend = enum {
     vanilla,
     cuda_fa2,
     cuda_fa3,
+    rocm_triton_fa,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
-            .cuda => b: {
-                const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
-
-                if (zml.platform.cuda.tryGetComputeCapabilities(platform, first_device)) |cc| {
-                    break :b if (std.mem.eql(u8, cc, "9.0"))
-                        .cuda_fa3
-                    else
-                        .cuda_fa2;
-                }
-
-                break :b .vanilla;
-            },
+            // HACK: temporarily force rocm_triton_fa on CUDA for H100 testing.
+            .cuda => .rocm_triton_fa,
+            .rocm => .rocm_triton_fa,
             else => .vanilla,
         };
     }
@@ -33,17 +26,20 @@ pub const Parameters = union(Backend) {
     vanilla: void,
     cuda_fa2: flashattn.fa2.Parameters,
     cuda_fa3: flashattn.fa3.Parameters,
+    rocm_triton_fa: rocm_flash_attn.Parameters,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
         cuda_fa2: flashattn.fa2.Parameters.InitOptions,
         cuda_fa3: flashattn.fa3.Parameters.InitOptions,
+        rocm_triton_fa: rocm_flash_attn.Parameters.InitOptions,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
                 .cuda_fa2 => .{ .cuda_fa2 = .{} },
                 .cuda_fa3 => .{ .cuda_fa3 = .{} },
+                .rocm_triton_fa => .{ .rocm_triton_fa = .{} },
             };
         }
     };
@@ -53,6 +49,7 @@ pub const Parameters = union(Backend) {
             .vanilla => .{ .vanilla = {} },
             .cuda_fa2 => |v| .{ .cuda_fa2 = .init(v) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = .init(v) },
+            .rocm_triton_fa => |v| .{ .rocm_triton_fa = .init(v) },
         };
     }
 };
@@ -61,11 +58,13 @@ pub const Metadata = union(Backend) {
     vanilla: void,
     cuda_fa2: flashattn.fa2.Metadata,
     cuda_fa3: flashattn.fa3.Metadata,
+    rocm_triton_fa: void,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
         cuda_fa2: flashattn.fa2.Metadata.InitOptions,
         cuda_fa3: flashattn.fa3.Metadata.InitOptions,
+        rocm_triton_fa: void,
 
         pub fn fromBackend(backend: Backend, seqlen: i64, num_heads: i64) InitOptions {
             return fromBackendWithHeadDim(backend, seqlen, num_heads, 128);
@@ -76,6 +75,7 @@ pub const Metadata = union(Backend) {
                 .vanilla => .{ .vanilla = {} },
                 .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
                 .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads, .head_dim = head_dim } },
+                .rocm_triton_fa => .{ .rocm_triton_fa = {} },
             };
         }
 
@@ -84,6 +84,7 @@ pub const Metadata = union(Backend) {
                 .vanilla => .{ .vanilla = {} },
                 .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
                 .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads, .head_dim = head_dim, .head_partitioning = head_partitioning } },
+                .rocm_triton_fa => .{ .rocm_triton_fa = {} },
             };
         }
     };
@@ -93,6 +94,7 @@ pub const Metadata = union(Backend) {
             .vanilla => .{ .vanilla = {} },
             .cuda_fa2 => |o| .{ .cuda_fa2 = flashattn.fa2.Metadata.init(o) },
             .cuda_fa3 => |o| .{ .cuda_fa3 = flashattn.fa3.Metadata.init(o) },
+            .rocm_triton_fa => .{ .rocm_triton_fa = {} },
         };
     }
 
@@ -101,6 +103,7 @@ pub const Metadata = union(Backend) {
             .vanilla => .{ .vanilla = {} },
             .cuda_fa2 => |v| .{ .cuda_fa2 = try v.initBuffer(io, platform, sharding) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = try v.initBuffer(io, platform, sharding) },
+            .rocm_triton_fa => .{ .rocm_triton_fa = {} },
         };
     }
 
@@ -109,6 +112,7 @@ pub const Metadata = union(Backend) {
             .vanilla => {},
             .cuda_fa2 => |*v| flashattn.fa2.Metadata.deinitBuffer(v),
             .cuda_fa3 => |*v| flashattn.fa3.Metadata.deinitBuffer(v),
+            .rocm_triton_fa => {},
         }
     }
 };
@@ -129,6 +133,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         },
         .cuda_fa2 => |params| flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, params),
         .cuda_fa3 => |params| flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, params),
+        .rocm_triton_fa => @panic("rocm_triton_fa does not support causal attention with KV-cache"),
     };
 }
 
@@ -140,5 +145,6 @@ pub fn fullSequenceAttention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, metada
         .vanilla => zml.nn.sdpa(q, k, v, .{ .allow_cudnn = true }),
         .cuda_fa2 => @panic("fullSequenceAttention not yet supported for FA2"),
         .cuda_fa3 => |params| flashattn.fa3.fullSequenceAttention(q, k, v, metadata.cuda_fa3, params),
+        .rocm_triton_fa => |params| rocm_flash_attn.fullSequenceAttention(q, k, v, params),
     };
 }

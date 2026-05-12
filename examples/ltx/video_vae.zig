@@ -88,12 +88,12 @@ fn initVaeResBlock(store: zml.io.TensorStore.View) VaeResBlock {
     const c2 = store.withPrefix("conv2").withPrefix("conv");
     return .{
         .conv1 = .{
-            .weight = c1.createTensor("weight", null, null),
-            .bias = c1.createTensor("bias", null, null),
+            .weight = c1.createTensor("weight", null, .replicated),
+            .bias = c1.createTensor("bias", null, .replicated),
         },
         .conv2 = .{
-            .weight = c2.createTensor("weight", null, null),
-            .bias = c2.createTensor("bias", null, null),
+            .weight = c2.createTensor("weight", null, .replicated),
+            .bias = c2.createTensor("bias", null, .replicated),
         },
     };
 }
@@ -101,8 +101,8 @@ fn initVaeResBlock(store: zml.io.TensorStore.View) VaeResBlock {
 fn initVaeConv3d(store: zml.io.TensorStore.View) Conv3dWeight {
     const c = store.withPrefix("conv");
     return .{
-        .weight = c.createTensor("weight", null, null),
-        .bias = c.createTensor("bias", null, null),
+        .weight = c.createTensor("weight", null, .replicated),
+        .bias = c.createTensor("bias", null, .replicated),
     };
 }
 

@@ -41,8 +41,8 @@ pub const PerChannelStats = struct {
 pub fn initPerChannelStats(store: zml.io.TensorStore.View) PerChannelStats {
     const pcs = store.withPrefix("vae").withPrefix("per_channel_statistics");
     return .{
-        .mean_of_means = pcs.createTensor("mean-of-means", null, null),
-        .std_of_means = pcs.createTensor("std-of-means", null, null),
+        .mean_of_means = pcs.createTensor("mean-of-means", null, .replicated),
+        .std_of_means = pcs.createTensor("std-of-means", null, .replicated),
     };
 }
 

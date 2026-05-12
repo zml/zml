@@ -108,36 +108,36 @@ pub const VocoderWithBWEParams = struct {
 
 fn initConv1dWeight(store: zml.io.TensorStore.View) Conv1dWeight {
     return .{
-        .weight = store.createTensor("weight", null, null),
-        .bias = store.createTensor("bias", null, null),
+        .weight = store.createTensor("weight", null, .replicated),
+        .bias = store.createTensor("bias", null, .replicated),
     };
 }
 
 fn initConv1dWeightNoBias(store: zml.io.TensorStore.View) Conv1dWeightNoBias {
     return .{
-        .weight = store.createTensor("weight", null, null),
+        .weight = store.createTensor("weight", null, .replicated),
     };
 }
 
 fn initConvTranspose1dWeight(store: zml.io.TensorStore.View) ConvTranspose1dWeight {
     return .{
-        .weight = store.createTensor("weight", null, null),
-        .bias = store.createTensor("bias", null, null),
+        .weight = store.createTensor("weight", null, .replicated),
+        .bias = store.createTensor("bias", null, .replicated),
     };
 }
 
 fn initSnakeBetaParams(store: zml.io.TensorStore.View) SnakeBetaParams {
     return .{
-        .alpha = store.createTensor("alpha", null, null),
-        .beta = store.createTensor("beta", null, null),
+        .alpha = store.createTensor("alpha", null, .replicated),
+        .beta = store.createTensor("beta", null, .replicated),
     };
 }
 
 fn initActivation1dParams(store: zml.io.TensorStore.View) Activation1dParams {
     return .{
         .act = initSnakeBetaParams(store.withPrefix("act")),
-        .upsample_filter = store.withPrefix("upsample").createTensor("filter", null, null),
-        .downsample_filter = store.withPrefix("downsample").withPrefix("lowpass").createTensor("filter", null, null),
+        .upsample_filter = store.withPrefix("upsample").createTensor("filter", null, .replicated),
+        .downsample_filter = store.withPrefix("downsample").withPrefix("lowpass").createTensor("filter", null, .replicated),
     };
 }
 
@@ -176,9 +176,9 @@ fn initBWEVocoderParams(result: *BWEVocoderParams, store: zml.io.TensorStore.Vie
 
 fn initMelSTFTParams(store: zml.io.TensorStore.View) MelSTFTParams {
     return .{
-        .mel_basis = store.createTensor("mel_basis", null, null),
+        .mel_basis = store.createTensor("mel_basis", null, .replicated),
         .stft_fn = .{
-            .forward_basis = store.withPrefix("stft_fn").createTensor("forward_basis", null, null),
+            .forward_basis = store.withPrefix("stft_fn").createTensor("forward_basis", null, .replicated),
         },
     };
 }

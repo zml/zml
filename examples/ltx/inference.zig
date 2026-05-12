@@ -545,7 +545,7 @@ fn encodeImageToTokens(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     ckpt_path: []const u8,
     image_buf: zml.Buffer,
 ) !zml.Buffer {
@@ -620,7 +620,7 @@ fn applyConditioning(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     v_latent: zml.Buffer,
     v_clean: zml.Buffer,
     v_mask: zml.Buffer,
@@ -717,7 +717,7 @@ pub fn main(init: std.process.Init) !void {
     // ---- Platform init ----
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
-    const sharding = try zml.sharding.replicatedSharding(platform);
+    const sharding = platform.replicated_sharding;
 
     // ---- Phase timers ----
     var timer_s1 = PhaseTimer.init("Stage 1", io);
@@ -987,7 +987,7 @@ fn runStage1(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     ckpt_path: []const u8,
     use_bf16_attn: bool,
     image_path: ?[]const u8,
@@ -1211,7 +1211,7 @@ fn runStage1(
     // Stage 1 noise_scale = 1.0 (pure noise for unconditioned, mask-weighted for image-conditioned)
     const noise_scale: f32 = 1.0;
     std.log.info("Running Stage 1 noise init (noise_scale={d:.6})...", .{noise_scale});
-    var noise_scale_buf = try zml.Buffer.scalar(io, platform, noise_scale, .f32, sharding);
+    var noise_scale_buf = try zml.Buffer.scalar(io, platform, noise_scale, .f32);
     defer noise_scale_buf.deinit();
 
     timer_noise_init.start();
@@ -1421,9 +1421,9 @@ fn runStage1(
     const block_compile_args = block_compile_args_base ++ .{block_params_shape.blocks[0]};
     const compile_opts: zml.module.CompilationOptions = .{ .shardings = &.{sharding} };
 
-    // FA3 is only available on CUDA (Flash Attention 3 uses NVIDIA-specific custom kernels).
-    // On other platforms (ROCm, CPU), bf16 attention falls back to sdpaNoF32Upcast.
-    const use_fa3 = platform.target == .cuda;
+    // HACK: temporarily force rocm_triton_fa on CUDA for H100 testing.
+    const use_fa3 = false;
+    const use_rocm_fa = platform.target == .cuda or platform.target == .rocm;
 
     // FA3 metadata shapes (sized by Q seqlen for each attention group).
     const video_seqlen: i64 = init_pre_out.vx.shape().dim(.t);
@@ -1447,18 +1447,22 @@ fn runStage1(
         block_params_shape.blocks[0],
     };
 
-    std.log.info("Compiling block exe (normal, bf16_attn={}, fa3={})...", .{ use_bf16_attn, use_fa3 });
+    std.log.info("Compiling block exe (normal, bf16_attn={}, fa3={}, rocm_fa={})...", .{ use_bf16_attn, use_fa3, use_rocm_fa });
     var block_normal_exe = if (use_bf16_attn and use_fa3)
         try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16Attn, block_compile_args_bf16, compile_opts)
+    else if (use_bf16_attn and use_rocm_fa)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16AttnRocm, block_compile_args, compile_opts)
     else if (use_bf16_attn)
         try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16AttnNoFA3, block_compile_args, compile_opts)
     else
         try platform.compileFn(allocator, io, model.forwardBlock0Native, block_compile_args, compile_opts);
     defer block_normal_exe.deinit();
 
-    std.log.info("Compiling block exe (STG, bf16_attn={}, fa3={})...", .{ use_bf16_attn, use_fa3 });
+    std.log.info("Compiling block exe (STG, bf16_attn={}, fa3={}, rocm_fa={})...", .{ use_bf16_attn, use_fa3, use_rocm_fa });
     var block_stg_exe = if (use_bf16_attn and use_fa3)
         try platform.compileFn(allocator, io, model.forwardBlock0NativeSTGBf16Attn, block_compile_args_bf16, compile_opts)
+    else if (use_bf16_attn and use_rocm_fa)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeSTGBf16AttnRocm, block_compile_args, compile_opts)
     else if (use_bf16_attn)
         try platform.compileFn(allocator, io, model.forwardBlock0NativeSTGBf16AttnNoFA3, block_compile_args, compile_opts)
     else
@@ -1515,6 +1519,8 @@ fn runStage1(
     };
     var block_iso_exe = if (use_bf16_attn and use_fa3)
         try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasksBf16Attn, iso_compile_args_bf16, compile_opts)
+    else if (use_bf16_attn and use_rocm_fa)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasksBf16AttnRocm, iso_compile_args, compile_opts)
     else if (use_bf16_attn)
         try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasksBf16AttnNoFA3, iso_compile_args, compile_opts)
     else
@@ -1711,23 +1717,23 @@ fn runStage1(
     timer.addLoad();
 
     // ---- Guidance scalars ----
-    var zero_mask_buf = try zml.Buffer.scalar(io, platform, @as(f32, 0.0), .bf16, sharding);
+    var zero_mask_buf = try zml.Buffer.scalar(io, platform, @as(f32, 0.0), .bf16);
     defer zero_mask_buf.deinit();
-    var cfg_v_buf = try zml.Buffer.scalar(io, platform, cfg_v, .f32, sharding);
+    var cfg_v_buf = try zml.Buffer.scalar(io, platform, cfg_v, .f32);
     defer cfg_v_buf.deinit();
-    var stg_v_buf = try zml.Buffer.scalar(io, platform, stg_v, .f32, sharding);
+    var stg_v_buf = try zml.Buffer.scalar(io, platform, stg_v, .f32);
     defer stg_v_buf.deinit();
-    var mod_v_buf = try zml.Buffer.scalar(io, platform, mod_v, .f32, sharding);
+    var mod_v_buf = try zml.Buffer.scalar(io, platform, mod_v, .f32);
     defer mod_v_buf.deinit();
-    var rescale_v_buf = try zml.Buffer.scalar(io, platform, rescale_v, .f32, sharding);
+    var rescale_v_buf = try zml.Buffer.scalar(io, platform, rescale_v, .f32);
     defer rescale_v_buf.deinit();
-    var cfg_a_buf = try zml.Buffer.scalar(io, platform, cfg_a, .f32, sharding);
+    var cfg_a_buf = try zml.Buffer.scalar(io, platform, cfg_a, .f32);
     defer cfg_a_buf.deinit();
-    var stg_a_buf = try zml.Buffer.scalar(io, platform, stg_a, .f32, sharding);
+    var stg_a_buf = try zml.Buffer.scalar(io, platform, stg_a, .f32);
     defer stg_a_buf.deinit();
-    var mod_a_buf = try zml.Buffer.scalar(io, platform, mod_a, .f32, sharding);
+    var mod_a_buf = try zml.Buffer.scalar(io, platform, mod_a, .f32);
     defer mod_a_buf.deinit();
-    var rescale_a_buf = try zml.Buffer.scalar(io, platform, rescale_a, .f32, sharding);
+    var rescale_a_buf = try zml.Buffer.scalar(io, platform, rescale_a, .f32);
     defer rescale_a_buf.deinit();
 
     // ---- FA3 scratch buffers (allocated once, reused every step — CUDA only) ----
@@ -1774,9 +1780,9 @@ fn runStage1(
 
         var sigma_1d = try sigma1dBuffer(io, platform, sigma, sharding);
         defer sigma_1d.deinit();
-        var sigma_buf = try zml.Buffer.scalar(io, platform, sigma, .f32, sharding);
+        var sigma_buf = try zml.Buffer.scalar(io, platform, sigma, .f32);
         defer sigma_buf.deinit();
-        var sigma_next_buf = try zml.Buffer.scalar(io, platform, sigma_next, .f32, sharding);
+        var sigma_next_buf = try zml.Buffer.scalar(io, platform, sigma_next, .f32);
         defer sigma_next_buf.deinit();
 
         // ---- Preprocessing (once per step, with positive context) ----
@@ -2287,7 +2293,7 @@ fn runBridge(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     s1_video: zml.Buffer,
     s1_audio: zml.Buffer,
     v_context: zml.Buffer,
@@ -2611,7 +2617,7 @@ fn runBridge(
     defer noise_init_a_exe.deinit();
 
     std.log.info("Running noise init (sigma_0={d:.6})...", .{sigma_0});
-    var sigma0_buf = try zml.Buffer.scalar(io, platform, sigma_0, .f32, sharding);
+    var sigma0_buf = try zml.Buffer.scalar(io, platform, sigma_0, .f32);
     defer sigma0_buf.deinit();
 
     // Video noise init
@@ -2705,7 +2711,7 @@ fn runStage2(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     ckpt_path: []const u8,
     bridge: *BridgeResult,
     use_bf16_attn: bool,
@@ -2714,7 +2720,9 @@ fn runStage2(
     profile: bool,
 ) !Stage2Result {
     timer.start();
-    const use_fa3 = platform.target == .cuda;
+    // HACK: temporarily force rocm_triton_fa on CUDA for H100 testing.
+    const use_fa3 = false;
+    const use_rocm_fa = platform.target == .cuda or platform.target == .rocm;
 
     // ---- Open checkpoint store ----
     var ckpt_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path) catch |err| {
@@ -2857,6 +2865,8 @@ fn runStage2(
 
     var block_exe = if (use_bf16_attn and use_fa3)
         try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16Attn, block_compile_args_bf16, compile_opts)
+    else if (use_bf16_attn and use_rocm_fa)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16AttnRocm, block_compile_args, compile_opts)
     else if (use_bf16_attn)
         try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16AttnNoFA3, block_compile_args, compile_opts)
     else
@@ -3036,9 +3046,9 @@ fn runStage2(
 
         var sigma_1d = try sigma1dBuffer(io, platform, sigma, sharding);
         defer sigma_1d.deinit();
-        var sigma_buf = try zml.Buffer.scalar(io, platform, sigma, .f32, sharding);
+        var sigma_buf = try zml.Buffer.scalar(io, platform, sigma, .f32);
         defer sigma_buf.deinit();
-        var sigma_next_buf = try zml.Buffer.scalar(io, platform, sigma_next, .f32, sharding);
+        var sigma_next_buf = try zml.Buffer.scalar(io, platform, sigma_next, .f32);
         defer sigma_next_buf.deinit();
 
         // ---- 1. Preprocessing ----
@@ -3299,7 +3309,7 @@ fn runGemmaEncoding(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     gemma_ckpt: []const u8,
     prompt: []const u8,
     negative_prompt: []const u8,
@@ -3438,7 +3448,7 @@ fn computeTextEmbeddings(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     ckpt_store: *zml.io.TensorStore,
     pos_hs_buf: *const zml.Buffer,
     pos_mask_buf: *const zml.Buffer,
@@ -3571,7 +3581,7 @@ fn loadBuf(
     platform: *zml.Platform,
     store: *zml.io.TensorStore,
     name: []const u8,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
 ) !zml.Buffer {
     const shape = store.view().getShape(name) orelse {
         std.log.err("Tensor not found in store: {s}", .{name});
@@ -3590,7 +3600,7 @@ fn sigma1dBuffer(
     io: std.Io,
     platform: *zml.Platform,
     sigma: f32,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
 ) !zml.Buffer {
     const shape = zml.Shape.init(.{ .b = 1 }, .f32);
     return zml.Buffer.fromBytes(io, platform, shape, sharding, std.mem.asBytes(&sigma));
@@ -3617,7 +3627,7 @@ fn runVideoVaeDecode(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     ckpt_path: []const u8,
     v_latent_patchified: zml.Buffer,
     pipe_meta: PipelineMeta,
@@ -3841,7 +3851,7 @@ fn runVideoVaeDecodeTiled(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     latent_host: zml.Slice,
     vae_params: video_vae.VideoVaeDecoderParams,
     vae_bufs: zml.Bufferized(video_vae.VideoVaeDecoderParams),
@@ -4167,7 +4177,7 @@ fn runAudioVaeDecode(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     ckpt_path: []const u8,
     a_latent_patchified: zml.Buffer,
     pipe_meta: PipelineMeta,
@@ -4335,7 +4345,7 @@ fn runVocoderWithBWE(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     ckpt_path: []const u8,
     audio_mel: zml.Buffer,
     timer: *PhaseTimer,

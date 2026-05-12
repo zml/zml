@@ -77,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
     log.info("Initializing platform...", .{});
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
-    const sharding = try zml.sharding.replicatedSharding(platform);
+    const sharding = platform.replicated_sharding;
 
     // ---- 6. Compile ----
     log.info("Compiling encoder forward pass...", .{});

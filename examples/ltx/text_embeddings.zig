@@ -71,13 +71,13 @@ pub const FeatureExtractorV2 = struct {
 
         return .{
             .video_linear = .init(
-                v_store.createTensor("weight", .{ .d, .d_flat }, null),
-                v_store.createTensor("bias", .{.d}, null),
+                v_store.createTensor("weight", .{ .d, .d_flat }, .replicated),
+                v_store.createTensor("bias", .{.d}, .replicated),
                 .d_flat,
             ),
             .audio_linear = .init(
-                a_store.createTensor("weight", .{ .d_a, .d_flat }, null),
-                a_store.createTensor("bias", .{.d_a}, null),
+                a_store.createTensor("weight", .{ .d_a, .d_flat }, .replicated),
+                a_store.createTensor("bias", .{.d_a}, .replicated),
                 .d_flat,
             ),
         };
@@ -172,8 +172,8 @@ pub const ConnectorAttention = struct {
     pub fn initParams(store: zml.io.TensorStore.View) struct { attn: ConnectorAttention, params: Params } {
         const to_out_store = store.withPrefix("to_out").withLayer(0);
 
-        const q_weight = store.withPrefix("to_q").createTensor("weight", .{ .d_q, .d }, null);
-        const gate_weight = store.withPrefix("to_gate_logits").createTensor("weight", .{ .h, .d }, null);
+        const q_weight = store.withPrefix("to_q").createTensor("weight", .{ .d_q, .d }, .replicated);
+        const gate_weight = store.withPrefix("to_gate_logits").createTensor("weight", .{ .h, .d }, .replicated);
 
         // Infer num_heads from gate weight (exact heads count).
         // Python: gate = nn.Linear(query_dim, heads) → gate weight[0] = num_heads exactly.
@@ -182,31 +182,31 @@ pub const ConnectorAttention = struct {
         return .{
             .attn = .{ .num_heads = num_heads },
             .params = .{
-                .q_norm_weight = store.withPrefix("q_norm").createTensor("weight", .{.d_q}, null),
-                .k_norm_weight = store.withPrefix("k_norm").createTensor("weight", .{.d_k}, null),
+                .q_norm_weight = store.withPrefix("q_norm").createTensor("weight", .{.d_q}, .replicated),
+                .k_norm_weight = store.withPrefix("k_norm").createTensor("weight", .{.d_k}, .replicated),
                 .to_q = .init(
                     q_weight,
-                    store.withPrefix("to_q").createTensor("bias", .{.d_q}, null),
+                    store.withPrefix("to_q").createTensor("bias", .{.d_q}, .replicated),
                     .d,
                 ),
                 .to_k = .init(
-                    store.withPrefix("to_k").createTensor("weight", .{ .d_k, .d }, null),
-                    store.withPrefix("to_k").createTensor("bias", .{.d_k}, null),
+                    store.withPrefix("to_k").createTensor("weight", .{ .d_k, .d }, .replicated),
+                    store.withPrefix("to_k").createTensor("bias", .{.d_k}, .replicated),
                     .d,
                 ),
                 .to_v = .init(
-                    store.withPrefix("to_v").createTensor("weight", .{ .d_v, .d }, null),
-                    store.withPrefix("to_v").createTensor("bias", .{.d_v}, null),
+                    store.withPrefix("to_v").createTensor("weight", .{ .d_v, .d }, .replicated),
+                    store.withPrefix("to_v").createTensor("bias", .{.d_v}, .replicated),
                     .d,
                 ),
                 .to_gate_logits = .init(
                     gate_weight,
-                    store.withPrefix("to_gate_logits").createTensor("bias", .{.h}, null),
+                    store.withPrefix("to_gate_logits").createTensor("bias", .{.h}, .replicated),
                     .d,
                 ),
                 .to_out = .init(
-                    to_out_store.createTensor("weight", .{ .d, .d_v }, null),
-                    to_out_store.createTensor("bias", .{.d}, null),
+                    to_out_store.createTensor("weight", .{ .d, .d_v }, .replicated),
+                    to_out_store.createTensor("bias", .{.d}, .replicated),
                     .d_v,
                 ),
             },
@@ -402,7 +402,7 @@ pub const Embeddings1DConnector = struct {
             .blocks = undefined,
         };
         var params: Params = .{
-            .learnable_registers = store.createTensor("learnable_registers", .{ .n_reg, .d }, null),
+            .learnable_registers = store.createTensor("learnable_registers", .{ .n_reg, .d }, .replicated),
             .block_params = undefined,
         };
         for (0..NUM_CONNECTOR_BLOCKS) |i| {

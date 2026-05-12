@@ -47,13 +47,13 @@ pub const FeedForward = struct {
 
         return .{
             .proj = .init(
-                proj_store.createTensor("weight", .{ .d_ff, .d }, null),
-                proj_store.createTensor("bias", .{.d_ff}, null),
+                proj_store.createTensor("weight", .{ .d_ff, .d }, .replicated),
+                proj_store.createTensor("bias", .{.d_ff}, .replicated),
                 .d,
             ),
             .out = .init(
-                out_store.createTensor("weight", .{ .d, .d_ff }, null),
-                out_store.createTensor("bias", .{.d}, null),
+                out_store.createTensor("weight", .{ .d, .d_ff }, .replicated),
+                out_store.createTensor("bias", .{.d}, .replicated),
                 .d_ff,
             ),
         };
@@ -102,8 +102,8 @@ pub const Patchify = struct {
     pub fn initParams(store: zml.io.TensorStore.View) Params {
         const proj_store = store.withPrefix("patchify_proj");
         return .init(
-            proj_store.createTensor("weight", .{ .d, .patch }, null),
-            proj_store.createTensor("bias", .{.d}, null),
+            proj_store.createTensor("weight", .{ .d, .patch }, .replicated),
+            proj_store.createTensor("bias", .{.d}, .replicated),
             .patch,
         );
     }
@@ -190,20 +190,20 @@ pub const AdaLayerNormSingle = struct {
         return .{
             // linear_1: [D, 256] weight — contracts over .d_sin, produces .d
             .linear_1 = .init(
-                l1_store.createTensor("weight", .{ .d, .d_sin }, null),
-                l1_store.createTensor("bias", .{.d}, null),
+                l1_store.createTensor("weight", .{ .d, .d_sin }, .replicated),
+                l1_store.createTensor("bias", .{.d}, .replicated),
                 .d_sin,
             ),
             // linear_2: [D, D] weight — contracts over .d, produces .d_emb
             .linear_2 = .init(
-                l2_store.createTensor("weight", .{ .d_emb, .d }, null),
-                l2_store.createTensor("bias", .{.d_emb}, null),
+                l2_store.createTensor("weight", .{ .d_emb, .d }, .replicated),
+                l2_store.createTensor("bias", .{.d_emb}, .replicated),
                 .d,
             ),
             // linear_out: [N*D, D] weight — contracts over .d_emb, produces .d_ada
             .linear_out = .init(
-                lo_store.createTensor("weight", .{ .d_ada, .d_emb }, null),
-                lo_store.createTensor("bias", .{.d_ada}, null),
+                lo_store.createTensor("weight", .{ .d_ada, .d_emb }, .replicated),
+                lo_store.createTensor("bias", .{.d_ada}, .replicated),
                 .d_emb,
             ),
         };
@@ -453,31 +453,31 @@ pub const Attention = struct {
         const to_out_store = attn_store.withPrefix("to_out").withLayer(0);
 
         return .{
-            .q_norm_weight = attn_store.withPrefix("q_norm").createTensor("weight", .{.d_q}, null),
-            .k_norm_weight = attn_store.withPrefix("k_norm").createTensor("weight", .{.d_k}, null),
+            .q_norm_weight = attn_store.withPrefix("q_norm").createTensor("weight", .{.d_q}, .replicated),
+            .k_norm_weight = attn_store.withPrefix("k_norm").createTensor("weight", .{.d_k}, .replicated),
             .to_q = .init(
-                attn_store.withPrefix("to_q").createTensor("weight", .{ .d_q, .d }, null),
-                attn_store.withPrefix("to_q").createTensor("bias", .{.d_q}, null),
+                attn_store.withPrefix("to_q").createTensor("weight", .{ .d_q, .d }, .replicated),
+                attn_store.withPrefix("to_q").createTensor("bias", .{.d_q}, .replicated),
                 .d,
             ),
             .to_k = .init(
-                attn_store.withPrefix("to_k").createTensor("weight", .{ .d_k, .d }, null),
-                attn_store.withPrefix("to_k").createTensor("bias", .{.d_k}, null),
+                attn_store.withPrefix("to_k").createTensor("weight", .{ .d_k, .d }, .replicated),
+                attn_store.withPrefix("to_k").createTensor("bias", .{.d_k}, .replicated),
                 .d,
             ),
             .to_v = .init(
-                attn_store.withPrefix("to_v").createTensor("weight", .{ .d_v, .d }, null),
-                attn_store.withPrefix("to_v").createTensor("bias", .{.d_v}, null),
+                attn_store.withPrefix("to_v").createTensor("weight", .{ .d_v, .d }, .replicated),
+                attn_store.withPrefix("to_v").createTensor("bias", .{.d_v}, .replicated),
                 .d,
             ),
             .to_gate_logits = .init(
-                attn_store.withPrefix("to_gate_logits").createTensor("weight", .{ .h, .d }, null),
-                attn_store.withPrefix("to_gate_logits").createTensor("bias", .{.h}, null),
+                attn_store.withPrefix("to_gate_logits").createTensor("weight", .{ .h, .d }, .replicated),
+                attn_store.withPrefix("to_gate_logits").createTensor("bias", .{.h}, .replicated),
                 .d,
             ),
             .to_out = .init(
-                to_out_store.createTensor("weight", .{ .d, .d_v }, null),
-                to_out_store.createTensor("bias", .{.d}, null),
+                to_out_store.createTensor("weight", .{ .d, .d_v }, .replicated),
+                to_out_store.createTensor("bias", .{.d}, .replicated),
                 .d_v,
             ),
         };
@@ -844,12 +844,12 @@ pub const BasicAVTransformerBlock = struct {
             .audio_ff = FeedForward.initParams(store.withPrefix("audio_ff")),
             .audio_to_video_attn = Attention.initParams(store, .audio_to_video_attn),
             .video_to_audio_attn = Attention.initParams(store, .video_to_audio_attn),
-            .scale_shift_table = store.createTensor("scale_shift_table", .{ .n_ada, .d }, null),
-            .audio_scale_shift_table = store.createTensor("audio_scale_shift_table", .{ .n_ada, .d }, null),
-            .scale_shift_table_a2v_ca_video = store.createTensor("scale_shift_table_a2v_ca_video", .{ .n_ada, .d }, null),
-            .scale_shift_table_a2v_ca_audio = store.createTensor("scale_shift_table_a2v_ca_audio", .{ .n_ada, .d }, null),
-            .prompt_scale_shift_table = store.createTensor("prompt_scale_shift_table", .{ .n_ada, .d }, null),
-            .audio_prompt_scale_shift_table = store.createTensor("audio_prompt_scale_shift_table", .{ .n_ada, .d }, null),
+            .scale_shift_table = store.createTensor("scale_shift_table", .{ .n_ada, .d }, .replicated),
+            .audio_scale_shift_table = store.createTensor("audio_scale_shift_table", .{ .n_ada, .d }, .replicated),
+            .scale_shift_table_a2v_ca_video = store.createTensor("scale_shift_table_a2v_ca_video", .{ .n_ada, .d }, .replicated),
+            .scale_shift_table_a2v_ca_audio = store.createTensor("scale_shift_table_a2v_ca_audio", .{ .n_ada, .d }, .replicated),
+            .prompt_scale_shift_table = store.createTensor("prompt_scale_shift_table", .{ .n_ada, .d }, .replicated),
+            .audio_prompt_scale_shift_table = store.createTensor("audio_prompt_scale_shift_table", .{ .n_ada, .d }, .replicated),
         };
     }
 
@@ -1270,18 +1270,18 @@ pub const LTXModel = struct {
             .av_ca_a2v_gate_adaln_single = AdaLayerNormSingle.initParams(store.withPrefix("av_ca_a2v_gate_adaln_single")),
             .av_ca_v2a_gate_adaln_single = AdaLayerNormSingle.initParams(store.withPrefix("av_ca_v2a_gate_adaln_single")),
             .norm_proj_out = .{
-                .scale_shift_table = store.createTensor("scale_shift_table", .{ .n_ssv, .d }, null),
+                .scale_shift_table = store.createTensor("scale_shift_table", .{ .n_ssv, .d }, .replicated),
                 .proj_out = .init(
-                    store.withPrefix("proj_out").createTensor("weight", .{ .d_out, .d }, null),
-                    store.withPrefix("proj_out").createTensor("bias", .{.d_out}, null),
+                    store.withPrefix("proj_out").createTensor("weight", .{ .d_out, .d }, .replicated),
+                    store.withPrefix("proj_out").createTensor("bias", .{.d_out}, .replicated),
                     .d,
                 ),
             },
             .audio_norm_proj_out = .{
-                .scale_shift_table = store.createTensor("audio_scale_shift_table", .{ .n_ssv, .d }, null),
+                .scale_shift_table = store.createTensor("audio_scale_shift_table", .{ .n_ssv, .d }, .replicated),
                 .proj_out = .init(
-                    store.withPrefix("audio_proj_out").createTensor("weight", .{ .d_out, .d }, null),
-                    store.withPrefix("audio_proj_out").createTensor("bias", .{.d_out}, null),
+                    store.withPrefix("audio_proj_out").createTensor("weight", .{ .d_out, .d }, .replicated),
+                    store.withPrefix("audio_proj_out").createTensor("bias", .{.d_out}, .replicated),
                     .d,
                 ),
             },
@@ -1981,6 +1981,73 @@ pub fn forwardBlock0NativeBf16AttnNoFA3(
     }, params);
 }
 
+/// Same as forwardBlock0NativeBf16AttnNoFA3 but uses ROCm Triton flash attention kernel
+/// instead of sdpaNoF32Upcast. No scratch buffers needed (same function signature as NoFA3).
+pub fn forwardBlock0NativeBf16AttnRocm(
+    vx_in: Tensor,
+    ax_in: Tensor,
+    video_timesteps: Tensor,
+    audio_timesteps: Tensor,
+    video_timesteps_zero: Tensor,
+    audio_timesteps_zero: Tensor,
+    v_denoise_mask: Tensor,
+    a_denoise_mask: Tensor,
+    v_prompt_timestep: Tensor,
+    a_prompt_timestep: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor,
+    v_cross_gate_ts: Tensor,
+    a_cross_ss_ts: Tensor,
+    a_cross_gate_ts: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    params: Block0FullParams,
+) BasicAVTransformerBlock.FullOutputs {
+    const block = BasicAVTransformerBlock.init();
+    return block.forwardNativeBf16Attn(vx_in, ax_in, .{
+        .video_timesteps = video_timesteps,
+        .audio_timesteps = audio_timesteps,
+        .video_timesteps_zero = video_timesteps_zero,
+        .audio_timesteps_zero = audio_timesteps_zero,
+        .v_denoise_mask = v_denoise_mask,
+        .a_denoise_mask = a_denoise_mask,
+        .v_prompt_timestep = v_prompt_timestep,
+        .a_prompt_timestep = a_prompt_timestep,
+        .v_pe_cos = v_pe_cos,
+        .v_pe_sin = v_pe_sin,
+        .a_pe_cos = a_pe_cos,
+        .a_pe_sin = a_pe_sin,
+        .v_text_ctx = v_text_ctx,
+        .a_text_ctx = a_text_ctx,
+        .v_cross_ss_ts = v_cross_ss_ts,
+        .v_cross_gate_ts = v_cross_gate_ts,
+        .a_cross_ss_ts = a_cross_ss_ts,
+        .a_cross_gate_ts = a_cross_gate_ts,
+        .a2v_pe_cos = a2v_pe_cos,
+        .a2v_pe_sin = a2v_pe_sin,
+        .a2v_k_pe_cos = a2v_k_pe_cos,
+        .a2v_k_pe_sin = a2v_k_pe_sin,
+        .v2a_pe_cos = v2a_pe_cos,
+        .v2a_pe_sin = v2a_pe_sin,
+        .v2a_k_pe_cos = v2a_k_pe_cos,
+        .v2a_k_pe_sin = v2a_k_pe_sin,
+        .video_attn_meta = .{ .rocm_triton_fa = {} },
+        .audio_attn_meta = .{ .rocm_triton_fa = {} },
+        .attn_params = .{ .rocm_triton_fa = .{} },
+    }, params);
+}
+
 /// STG block variant: identical interface to forwardBlock0Native, but both video and audio
 /// self-attention use V-passthrough (to_out(to_v(x))). Used for block 28 (0-indexed) during
 /// Pass 3 (STG perturbation) in Stage 1 denoising.
@@ -2194,6 +2261,72 @@ pub fn forwardBlock0NativeSTGBf16AttnNoFA3(
         .v2a_pe_sin = v2a_pe_sin,
         .v2a_k_pe_cos = v2a_k_pe_cos,
         .v2a_k_pe_sin = v2a_k_pe_sin,
+    }, params);
+}
+
+/// Same as forwardBlock0NativeSTGBf16AttnNoFA3 but uses ROCm Triton flash attention kernel.
+pub fn forwardBlock0NativeSTGBf16AttnRocm(
+    vx_in: Tensor,
+    ax_in: Tensor,
+    video_timesteps: Tensor,
+    audio_timesteps: Tensor,
+    video_timesteps_zero: Tensor,
+    audio_timesteps_zero: Tensor,
+    v_denoise_mask: Tensor,
+    a_denoise_mask: Tensor,
+    v_prompt_timestep: Tensor,
+    a_prompt_timestep: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor,
+    v_cross_gate_ts: Tensor,
+    a_cross_ss_ts: Tensor,
+    a_cross_gate_ts: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    params: Block0FullParams,
+) BasicAVTransformerBlock.FullOutputs {
+    const block = BasicAVTransformerBlock.init();
+    return block.forwardNativeSTGBf16Attn(vx_in, ax_in, .{
+        .video_timesteps = video_timesteps,
+        .audio_timesteps = audio_timesteps,
+        .video_timesteps_zero = video_timesteps_zero,
+        .audio_timesteps_zero = audio_timesteps_zero,
+        .v_denoise_mask = v_denoise_mask,
+        .a_denoise_mask = a_denoise_mask,
+        .v_prompt_timestep = v_prompt_timestep,
+        .a_prompt_timestep = a_prompt_timestep,
+        .v_pe_cos = v_pe_cos,
+        .v_pe_sin = v_pe_sin,
+        .a_pe_cos = a_pe_cos,
+        .a_pe_sin = a_pe_sin,
+        .v_text_ctx = v_text_ctx,
+        .a_text_ctx = a_text_ctx,
+        .v_cross_ss_ts = v_cross_ss_ts,
+        .v_cross_gate_ts = v_cross_gate_ts,
+        .a_cross_ss_ts = a_cross_ss_ts,
+        .a_cross_gate_ts = a_cross_gate_ts,
+        .a2v_pe_cos = a2v_pe_cos,
+        .a2v_pe_sin = a2v_pe_sin,
+        .a2v_k_pe_cos = a2v_k_pe_cos,
+        .a2v_k_pe_sin = a2v_k_pe_sin,
+        .v2a_pe_cos = v2a_pe_cos,
+        .v2a_pe_sin = v2a_pe_sin,
+        .v2a_k_pe_cos = v2a_k_pe_cos,
+        .v2a_k_pe_sin = v2a_k_pe_sin,
+        .video_attn_meta = .{ .rocm_triton_fa = {} },
+        .audio_attn_meta = .{ .rocm_triton_fa = {} },
+        .attn_params = .{ .rocm_triton_fa = .{} },
     }, params);
 }
 
@@ -2423,6 +2556,76 @@ pub fn forwardBlock0NativeWithAVMasksBf16AttnNoFA3(
         .v2a_k_pe_cos = v2a_k_pe_cos,
         .v2a_k_pe_sin = v2a_k_pe_sin,
         .v2a_mask = v2a_mask,
+    }, params);
+}
+
+/// Same as forwardBlock0NativeWithAVMasksBf16AttnNoFA3 but uses ROCm Triton flash attention kernel.
+pub fn forwardBlock0NativeWithAVMasksBf16AttnRocm(
+    vx_in: Tensor,
+    ax_in: Tensor,
+    video_timesteps: Tensor,
+    audio_timesteps: Tensor,
+    video_timesteps_zero: Tensor,
+    audio_timesteps_zero: Tensor,
+    v_denoise_mask: Tensor,
+    a_denoise_mask: Tensor,
+    v_prompt_timestep: Tensor,
+    a_prompt_timestep: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor,
+    v_cross_gate_ts: Tensor,
+    a_cross_ss_ts: Tensor,
+    a_cross_gate_ts: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    a2v_mask: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    v2a_mask: Tensor,
+    params: Block0FullParams,
+) BasicAVTransformerBlock.FullOutputs {
+    const block = BasicAVTransformerBlock.init();
+    return block.forwardNativeBf16Attn(vx_in, ax_in, .{
+        .video_timesteps = video_timesteps,
+        .audio_timesteps = audio_timesteps,
+        .video_timesteps_zero = video_timesteps_zero,
+        .audio_timesteps_zero = audio_timesteps_zero,
+        .v_denoise_mask = v_denoise_mask,
+        .a_denoise_mask = a_denoise_mask,
+        .v_prompt_timestep = v_prompt_timestep,
+        .a_prompt_timestep = a_prompt_timestep,
+        .v_pe_cos = v_pe_cos,
+        .v_pe_sin = v_pe_sin,
+        .a_pe_cos = a_pe_cos,
+        .a_pe_sin = a_pe_sin,
+        .v_text_ctx = v_text_ctx,
+        .a_text_ctx = a_text_ctx,
+        .v_cross_ss_ts = v_cross_ss_ts,
+        .v_cross_gate_ts = v_cross_gate_ts,
+        .a_cross_ss_ts = a_cross_ss_ts,
+        .a_cross_gate_ts = a_cross_gate_ts,
+        .a2v_pe_cos = a2v_pe_cos,
+        .a2v_pe_sin = a2v_pe_sin,
+        .a2v_k_pe_cos = a2v_k_pe_cos,
+        .a2v_k_pe_sin = a2v_k_pe_sin,
+        .a2v_mask = a2v_mask,
+        .v2a_pe_cos = v2a_pe_cos,
+        .v2a_pe_sin = v2a_pe_sin,
+        .v2a_k_pe_cos = v2a_k_pe_cos,
+        .v2a_k_pe_sin = v2a_k_pe_sin,
+        .v2a_mask = v2a_mask,
+        .video_attn_meta = .{ .rocm_triton_fa = {} },
+        .audio_attn_meta = .{ .rocm_triton_fa = {} },
+        .attn_params = .{ .rocm_triton_fa = .{} },
     }, params);
 }
 
@@ -2661,18 +2864,18 @@ pub fn initFullStepParams(store: zml.io.TensorStore.View) FullStepParams {
         out.blocks[i] = BasicAVTransformerBlock.initParams(blocks_store.withLayer(i));
     }
     out.norm_proj_out = .{
-        .scale_shift_table = root.createTensor("scale_shift_table", .{ .n_ssv, .d }, null),
+        .scale_shift_table = root.createTensor("scale_shift_table", .{ .n_ssv, .d }, .replicated),
         .proj_out = .init(
-            root.withPrefix("proj_out").createTensor("weight", .{ .d_out, .d }, null),
-            root.withPrefix("proj_out").createTensor("bias", .{.d_out}, null),
+            root.withPrefix("proj_out").createTensor("weight", .{ .d_out, .d }, .replicated),
+            root.withPrefix("proj_out").createTensor("bias", .{.d_out}, .replicated),
             .d,
         ),
     };
     out.audio_norm_proj_out = .{
-        .scale_shift_table = root.createTensor("audio_scale_shift_table", .{ .n_ssv, .d }, null),
+        .scale_shift_table = root.createTensor("audio_scale_shift_table", .{ .n_ssv, .d }, .replicated),
         .proj_out = .init(
-            root.withPrefix("audio_proj_out").createTensor("weight", .{ .d_out, .d }, null),
-            root.withPrefix("audio_proj_out").createTensor("bias", .{.d_out}, null),
+            root.withPrefix("audio_proj_out").createTensor("weight", .{ .d_out, .d }, .replicated),
+            root.withPrefix("audio_proj_out").createTensor("bias", .{.d_out}, .replicated),
             .d,
         ),
     };
@@ -2720,8 +2923,8 @@ pub fn initPreprocessParams(store: zml.io.TensorStore.View) PreprocessParams {
     return .{
         .video_patchify = Patchify.initParams(root),
         .audio_patchify = .init(
-            root.withPrefix("audio_patchify_proj").createTensor("weight", .{ .d, .patch }, null),
-            root.withPrefix("audio_patchify_proj").createTensor("bias", .{.d}, null),
+            root.withPrefix("audio_patchify_proj").createTensor("weight", .{ .d, .patch }, .replicated),
+            root.withPrefix("audio_patchify_proj").createTensor("bias", .{.d}, .replicated),
             .patch,
         ),
         .adaln_single = AdaLayerNormSingle.initParams(root.withPrefix("adaln_single")),

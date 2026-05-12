@@ -55,28 +55,28 @@ pub fn initUpsamplerParams(store: zml.io.TensorStore.View) UpsamplerParams {
 
     return .{
         .initial_conv = .{
-            .weight = ic.createTensor("weight", null, null),
-            .bias = ic.createTensor("bias", null, null),
+            .weight = ic.createTensor("weight", null, .replicated),
+            .bias = ic.createTensor("bias", null, .replicated),
         },
         .initial_norm = .{
-            .weight = in_.createTensor("weight", null, null),
-            .bias = in_.createTensor("bias", null, null),
+            .weight = in_.createTensor("weight", null, .replicated),
+            .bias = in_.createTensor("bias", null, .replicated),
         },
         .res_block_0 = initResBlockParams(store.withPrefix("res_blocks").withLayer(0)),
         .res_block_1 = initResBlockParams(store.withPrefix("res_blocks").withLayer(1)),
         .res_block_2 = initResBlockParams(store.withPrefix("res_blocks").withLayer(2)),
         .res_block_3 = initResBlockParams(store.withPrefix("res_blocks").withLayer(3)),
         .upsampler_conv = .{
-            .weight = us.createTensor("weight", null, null),
-            .bias = us.createTensor("bias", null, null),
+            .weight = us.createTensor("weight", null, .replicated),
+            .bias = us.createTensor("bias", null, .replicated),
         },
         .post_res_block_0 = initResBlockParams(store.withPrefix("post_upsample_res_blocks").withLayer(0)),
         .post_res_block_1 = initResBlockParams(store.withPrefix("post_upsample_res_blocks").withLayer(1)),
         .post_res_block_2 = initResBlockParams(store.withPrefix("post_upsample_res_blocks").withLayer(2)),
         .post_res_block_3 = initResBlockParams(store.withPrefix("post_upsample_res_blocks").withLayer(3)),
         .final_conv = .{
-            .weight = fc.createTensor("weight", null, null),
-            .bias = fc.createTensor("bias", null, null),
+            .weight = fc.createTensor("weight", null, .replicated),
+            .bias = fc.createTensor("bias", null, .replicated),
         },
     };
 }
@@ -88,20 +88,20 @@ fn initResBlockParams(store: zml.io.TensorStore.View) UpsamplerResBlock {
     const n2 = store.withPrefix("norm2");
     return .{
         .conv1 = .{
-            .weight = c1.createTensor("weight", null, null),
-            .bias = c1.createTensor("bias", null, null),
+            .weight = c1.createTensor("weight", null, .replicated),
+            .bias = c1.createTensor("bias", null, .replicated),
         },
         .norm1 = .{
-            .weight = n1.createTensor("weight", null, null),
-            .bias = n1.createTensor("bias", null, null),
+            .weight = n1.createTensor("weight", null, .replicated),
+            .bias = n1.createTensor("bias", null, .replicated),
         },
         .conv2 = .{
-            .weight = c2.createTensor("weight", null, null),
-            .bias = c2.createTensor("bias", null, null),
+            .weight = c2.createTensor("weight", null, .replicated),
+            .bias = c2.createTensor("bias", null, .replicated),
         },
         .norm2 = .{
-            .weight = n2.createTensor("weight", null, null),
-            .bias = n2.createTensor("bias", null, null),
+            .weight = n2.createTensor("weight", null, .replicated),
+            .bias = n2.createTensor("bias", null, .replicated),
         },
     };
 }
