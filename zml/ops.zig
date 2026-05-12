@@ -39,8 +39,8 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             args[i].left = .fromShape(inits[i].shape());
             args[i].right = .fromShape(inits[i].shape());
 
-            block_types[i] = .rankedTensor(args[i].left.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].left.dtype()));
-            block_types[i + inits.len] = .rankedTensor(args[i].right.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].right.dtype()));
+            block_types[i] = mlirx.Type.rankedTensor(mlir_ctx, args[i].left.shape());
+            block_types[i + inits.len] = mlirx.Type.rankedTensor(mlir_ctx, args[i].right.shape());
         }
 
         const block_locs: [2 * inits.len]*const mlir.Location = @splat(mlir.Location.unknown(mlir_ctx));
@@ -103,12 +103,11 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             reduced_shape = reduced_shape.setDim(a, 1);
         }
 
-        const tensor_type: *const mlir.Type = .rankedTensor(reduced_shape.dims(), mlirx.Type.fromDType(mlir_ctx, reduced_shape.dtype()));
         const broad_op = dialects.stablehlo.broadcast_in_dim(
             mlir_ctx,
             reduce_op.result(i),
             broadcasting_axes.slice()[0 .. reduced_shape.rank() - axes_.len],
-            tensor_type,
+            mlirx.Type.rankedTensor(mlir_ctx, reduced_shape),
             .unknown(mlir_ctx),
         ).appendTo(CompilationContext.current().currentScope().block);
 
@@ -142,8 +141,8 @@ pub fn reduceWindow(inputs: anytype, inits: anytype, opts: ReduceWindowOpts, com
             args[i].left = .fromShape(inits[i].shape());
             args[i].right = .fromShape(inits[i].shape());
 
-            block_types[i] = .rankedTensor(args[i].left.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].left.dtype()));
-            block_types[i + inits.len] = .rankedTensor(args[i].right.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].right.dtype()));
+            block_types[i] = mlirx.Type.rankedTensor(mlir_ctx, args[i].left.shape());
+            block_types[i + inits.len] = mlirx.Type.rankedTensor(mlir_ctx, args[i].right.shape());
         }
 
         const block_locs: [2 * inits.len]*const mlir.Location = @splat(mlir.Location.unknown(mlir_ctx));
@@ -188,7 +187,7 @@ pub fn reduceWindow(inputs: anytype, inits: anytype, opts: ReduceWindowOpts, com
             .named(mlir_ctx, "window_dilations", .denseArray(mlir_ctx, .i64, opts.window_dilations)),
             // Cast the [][2]i64 to []i64 (safe)
             .named(mlir_ctx, "padding", .denseElements(
-                .rankedTensor(&.{ @intCast(opts.padding.len), 2 }, .int(mlir_ctx, .i64), null),
+                .rankedTensor(&.{ @intCast(opts.padding.len), 2 }, .int(mlir_ctx, .i64)),
                 @as([]const i64, @ptrCast(opts.padding)),
             )),
         },
@@ -223,8 +222,8 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
             args[i].left = Tensor.init(.{}, inputs[i].shape().dtype());
             args[i].right = Tensor.init(.{}, inputs[i].shape().dtype());
 
-            block_types[2 * i] = .rankedTensor(args[i].left.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].left.dtype()));
-            block_types[2 * i + 1] = .rankedTensor(args[i].right.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].right.dtype()));
+            block_types[2 * i] = mlirx.Type.rankedTensor(mlir_ctx, args[i].left.shape());
+            block_types[2 * i + 1] = mlirx.Type.rankedTensor(mlir_ctx, args[i].right.shape());
         }
 
         const block_locs: [2 * inputs.len]*const mlir.Location = @splat(mlir.Location.unknown(mlir_ctx));
@@ -295,7 +294,7 @@ pub fn @"while"(operands: anytype, comptime cond: anytype, comptime body: anytyp
 
     inline for (0..operands.len) |i| {
         operand_shapes[i] = operands[i].shape();
-        block_types[i] = .rankedTensor(operand_shapes[i].dims(), mlirx.Type.fromDType(mlir_ctx, operand_shapes[i].dtype()));
+        block_types[i] = mlirx.Type.rankedTensor(mlir_ctx, operand_shapes[i]);
         operand_values[i] = operands[i].value();
     }
 
@@ -471,7 +470,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
 
     var res_types: [outputs.len]*const mlir.Type = undefined;
     inline for (outputs, 0..) |output, i| {
-        res_types[i] = .rankedTensor(output.dims(), mlirx.Type.fromDType(mlir_ctx, output.dtype()));
+        res_types[i] = mlirx.Type.rankedTensor(mlir_ctx, output);
     }
 
     const backend_config: *const mlir.Attribute = .dict(mlir_ctx, &.{
@@ -614,8 +613,8 @@ pub fn scatter(
             args[i].input = Tensor.init(.{}, inputs[i].dtype());
             args[i].update = Tensor.init(.{}, inputs[i].dtype());
 
-            block_types[i] = .rankedTensor(args[i].input.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].input.dtype()));
-            block_types[i + inputs.len] = .rankedTensor(args[i].update.dims(), mlirx.Type.fromDType(mlir_ctx, args[i].update.dtype()));
+            block_types[i] = mlirx.Type.rankedTensor(mlir_ctx, args[i].input.shape());
+            block_types[i + inputs.len] = mlirx.Type.rankedTensor(mlir_ctx, args[i].update.shape());
         }
 
         const block_locs: [2 * inputs.len]*const mlir.Location = @splat(mlir.Location.unknown(mlir_ctx));
@@ -1282,7 +1281,7 @@ fn manualComputationInternal(
             const block_types = allocator.alloc(*const mlir.Type, inputs.len) catch unreachable;
             const block_locs = allocator.alloc(*const mlir.Location, inputs.len) catch unreachable;
             for (local_input_shapes, 0..) |input_shape, i| {
-                block_types[i] = .rankedTensor(input_shape.dims(), mlirx.Type.fromDType(ctx.mlir_ctx, input_shape.dtype()));
+                block_types[i] = mlirx.Type.rankedTensor(ctx.mlir_ctx, input_shape);
                 block_locs[i] = mlir.Location.unknown(ctx.mlir_ctx);
             }
 
@@ -1321,7 +1320,7 @@ fn manualComputationInternal(
 
             const global_result_types = allocator.alloc(*const mlir.Type, outputs.len) catch unreachable;
             for (outputs, 0..) |output_shape, i| {
-                global_result_types[i] = .rankedTensor(output_shape.dims(), mlirx.Type.fromDType(ctx.mlir_ctx, output_shape.dtype()));
+                global_result_types[i] = mlirx.Type.rankedTensor(ctx.mlir_ctx, output_shape);
             }
 
             const op = mlir.Operation.make(ctx.mlir_ctx, "sdy.manual_computation", .{
@@ -1359,7 +1358,7 @@ fn manualComputationInternal(
 
             const local_input_values = allocator.alloc(*const mlir.Value, inputs.len) catch unreachable;
             for (0..inputs.len) |i| {
-                const local_type = .rankedTensor(local_input_shapes[i].dims(), mlirx.Type.fromDType(ctx.mlir_ctx, local_input_shapes[i].dtype()));
+                const local_type = mlirx.Type.rankedTensor(ctx.mlir_ctx, local_input_shapes[i]);
                 const full_to_shard = dialects.stablehlo.custom_call(
                     ctx.mlir_ctx,
                     &.{input_values[i]},
@@ -1400,7 +1399,7 @@ fn manualComputationInternal(
             const global_values = allocator.alloc(*const mlir.Value, outputs.len) catch unreachable;
             const global_types = allocator.alloc(*const mlir.Type, outputs.len) catch unreachable;
             for (outputs, 0..) |output_shape, i| {
-                global_types[i] = .rankedTensor(output_shape.dims(), mlirx.Type.fromDType(ctx.mlir_ctx, output_shape.dtype()));
+                global_types[i] = mlirx.Type.rankedTensor(ctx.mlir_ctx, output_shape);
                 const shard_to_full = dialects.stablehlo.custom_call(
                     ctx.mlir_ctx,
                     &.{local_outputs[i].value()},
@@ -1540,9 +1539,9 @@ fn metadataIntegerFieldToMlirAttribute(mlir_ctx: *mlir.Context, int_field: std.b
 
 fn metadataFloatFieldToMlirAttribute(mlir_ctx: *mlir.Context, float_field: std.builtin.Type.Float, value: anytype) *const mlir.Attribute {
     return switch (float_field.bits) {
-        16 => mlir.floatAttribute(mlir_ctx, .f16, @as(f64, value)),
-        32 => mlir.floatAttribute(mlir_ctx, .f32, @as(f64, value)),
-        64 => mlir.floatAttribute(mlir_ctx, .f64, @as(f64, value)),
+        16 => .float(mlir_ctx, .f16, @as(f64, value)),
+        32 => .float(mlir_ctx, .f32, @as(f64, value)),
+        64 => .float(mlir_ctx, .f64, @as(f64, value)),
         else => @panic("Unsupported DataType"),
     };
 }

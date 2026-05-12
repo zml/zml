@@ -444,10 +444,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     };
     meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
-            const mlir_type: *const mlir.Type = .rankedTensor(
-                tensor.dims(),
-                mlirx.Type.fromDType(ctx_.compilation_context.mlir_ctx, tensor.dtype()),
-            );
+            const mlir_type = mlirx.Type.rankedTensor(ctx_.compilation_context.mlir_ctx, tensor.shape());
             _ = ctx_.compilation_context.currentScope().block.addArgument(mlir_type, .unknown(ctx_.compilation_context.mlir_ctx));
             ctx_.compilation_context.currentScope().id_to_argument.put(ctx_.compilation_context.currentScope().arena.allocator(), tensor.id, ctx_.current_argument_id) catch unreachable;
             ctx_.current_argument_id += 1;
