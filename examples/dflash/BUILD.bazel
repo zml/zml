@@ -1,0 +1,8 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "dflash_model",
+    main = "dflash_model.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)

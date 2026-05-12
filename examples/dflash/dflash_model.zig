@@ -1,0 +1,299 @@
+const std = @import("std");
+
+const zml = @import("zml");
+
+pub const Config = struct {
+    hidden_size: u32,
+    intermediate_size: u32,
+    num_hidden_layers: u32,
+    num_target_layers: u32,
+    num_attention_heads: u32,
+    num_key_value_heads: u32,
+    head_dim: ?u32 = null,
+    attention_bias: bool = false,
+    rms_norm_eps: f32,
+    rope_theta: f32,
+    rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
+    block_size: u32,
+    dflash_config: DFlashConfig = .{},
+};
+
+pub const DFlashConfig = struct {
+    target_layer_ids: []const u32,
+    mask_token_id: ?u32 = null,
+};
+
+pub const Buffers = zml.Bufferized(Model);
+
+pub const Model = struct {
+    layers: []DecoderLayer,
+    norm: RmsNorm,
+    fc: zml.nn.Linear,
+    hidden_norm: RmsNorm,
+    target_layer_ids: []u32,
+    block_size: u32,
+    mask_token_id: ?u32,
+
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Model {
+        const layers = try allocator.alloc(DecoderLayer, config.num_hidden_layers);
+        errdefer allocator.free(layers);
+
+        for (layers, 0..) |*layer, i| {
+            layer.* = try .init(store.withPrefix("layers").withLayer(i), config);
+        }
+
+        const target_layer_ids = try allocator.alloc(u32, config.dflash_config.target_layer_ids.len);
+        @memcpy(target_layer_ids, config.dflash_config.target_layer_ids);
+        errdefer allocator.free(target_layer_ids);
+
+        return .{
+            .layers = layers,
+            .norm = .init(store.withPrefix("norm"), config.rms_norm_eps),
+            .fc = .init(
+                store.createTensor("fc.weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
+                null,
+                .d,
+            ),
+            .hidden_norm = .init(store.withPrefix("hidden_norm"), config.rms_norm_eps),
+            .target_layer_ids = target_layer_ids,
+            .block_size = config.block_size,
+            .mask_token_id = config.dflash_config.mask_token_id,
+        };
+    }
+
+    pub fn deinit(self: Model, allocator: std.mem.Allocator) void {
+        allocator.free(self.layers);
+        allocator.free(self.target_layer_ids);
+    }
+
+    pub fn unloadBuffers(self: *Buffers, allocator: std.mem.Allocator) void {
+        for (self.layers) |*layer| DecoderLayer.unloadBuffers(layer);
+        allocator.free(self.layers);
+        RmsNorm.unloadBuffers(&self.norm);
+        self.fc.weight.deinit();
+        if (self.fc.bias) |*bias| bias.deinit();
+        RmsNorm.unloadBuffers(&self.hidden_norm);
+        allocator.free(self.target_layer_ids);
+    }
+
+    /// Forward pass for DFlashDraftModel.
+    /// `target_hidden` is the concatenated target feature from the selected target layers.
+    /// `noise_embedding` is the target model embedding of the current noisy block.
+    pub fn forward(
+        self: Model,
+        target_hidden_: zml.Tensor,
+        noise_embedding_: zml.Tensor,
+        position_ids_: zml.Tensor,
+    ) zml.Tensor {
+        var hidden = noise_embedding_.withPartialTags(.{ .s, .d });
+        const target_hidden = self.hidden_norm.forward(
+            self.fc.forward(target_hidden_.withPartialTags(.{ .s, .d }))
+                .rename(.{ .dout = .d }),
+        );
+        const position_ids = position_ids_.withPartialTags(.{.s});
+
+        for (self.layers) |layer| {
+            hidden = layer.forward(hidden, target_hidden, position_ids);
+        }
+
+        return self.norm.forward(hidden);
+    }
+};
+
+pub const DecoderLayer = struct {
+    input_layernorm: RmsNorm,
+    self_attn: DFlashAttention,
+    post_attention_layernorm: RmsNorm,
+    mlp: Mlp,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Config) !DecoderLayer {
+        return .{
+            .input_layernorm = .init(store.withPrefix("input_layernorm"), config.rms_norm_eps),
+            .self_attn = try .init(store.withPrefix("self_attn"), config),
+            .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), config.rms_norm_eps),
+            .mlp = .init(store.withPrefix("mlp")),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(DecoderLayer)) void {
+        RmsNorm.unloadBuffers(&self.input_layernorm);
+        DFlashAttention.unloadBuffers(&self.self_attn);
+        RmsNorm.unloadBuffers(&self.post_attention_layernorm);
+        Mlp.unloadBuffers(&self.mlp);
+    }
+
+    pub fn forward(self: DecoderLayer, hidden_states: zml.Tensor, target_hidden: zml.Tensor, position_ids: zml.Tensor) zml.Tensor {
+        const residual = hidden_states.withPartitioning(.{ .d = .replicated });
+        const attn_out = self.self_attn.forward(
+            self.input_layernorm.forward(residual),
+            target_hidden,
+            position_ids,
+        );
+
+        const post_attn = residual.add(attn_out).withPartitioning(.{ .d = .replicated });
+        const mlp_out = self.mlp.forward(self.post_attention_layernorm.forward(post_attn))
+            .rename(.{ .dout = .d })
+            .withPartitioning(.{ .d = .replicated });
+
+        return post_attn.add(mlp_out).withPartitioning(.{ .d = .replicated });
+    }
+};
+
+pub const DFlashAttention = struct {
+    q_proj: zml.nn.Linear,
+    k_proj: zml.nn.Linear,
+    v_proj: zml.nn.Linear,
+    o_proj: zml.nn.Linear,
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
+    num_heads: i64,
+    num_kv_heads: i64,
+    rope_opts: zml.nn.RopeOpts,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Config) !DFlashAttention {
+        var rope_scaling = config.rope_scaling;
+        rope_scaling.setRopeTheta(config.rope_theta);
+
+        return .{
+            .q_proj = linear(store, "q_proj", config.attention_bias, .{ .dout = .model, .d = .replicated }),
+            .k_proj = linear(store, "k_proj", config.attention_bias, .{ .dout = .model, .d = .replicated }),
+            .v_proj = linear(store, "v_proj", config.attention_bias, .{ .dout = .model, .d = .replicated }),
+            .o_proj = linear(store, "o_proj", config.attention_bias, .{ .d = .model }),
+            .q_norm = .init(store.withPrefix("q_norm"), config.rms_norm_eps),
+            .k_norm = .init(store.withPrefix("k_norm"), config.rms_norm_eps),
+            .num_heads = @intCast(config.num_attention_heads),
+            .num_kv_heads = @intCast(config.num_key_value_heads),
+            .rope_opts = .{
+                .layout = .sequential,
+                .scaling = rope_scaling,
+            },
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(DFlashAttention)) void {
+        unloadLinear(&self.q_proj);
+        unloadLinear(&self.k_proj);
+        unloadLinear(&self.v_proj);
+        unloadLinear(&self.o_proj);
+        RmsNorm.unloadBuffers(&self.q_norm);
+        RmsNorm.unloadBuffers(&self.k_norm);
+    }
+
+    pub fn forward(
+        self: DFlashAttention,
+        hidden_states_: zml.Tensor,
+        target_hidden_: zml.Tensor,
+        position_ids_: zml.Tensor,
+    ) zml.Tensor {
+        const hidden_states = hidden_states_.withPartialTags(.{ .s, .d }).withPartitioning(.{ .d = .replicated });
+        const target_hidden = target_hidden_.withPartialTags(.{ .s, .d }).withPartitioning(.{ .d = .replicated });
+        const position_ids = position_ids_.withPartialTags(.{.s});
+
+        var q = self.q_proj.forward(hidden_states)
+            .splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
+
+        var k = zml.Tensor.concatenate(&.{
+            self.k_proj.forward(target_hidden),
+            self.k_proj.forward(hidden_states),
+        }, .s).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
+
+        var v = zml.Tensor.concatenate(&.{
+            self.v_proj.forward(target_hidden),
+            self.v_proj.forward(hidden_states),
+        }, .s).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
+
+        q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
+        k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
+
+        const q_pos = if (position_ids.dim(.s) == hidden_states.dim(.s))
+            position_ids
+        else
+            position_ids.slice1d(.s, .{
+                .start = position_ids.dim(.s) - hidden_states.dim(.s),
+                .end = position_ids.dim(.s),
+            });
+
+        q = zml.nn.rope(q, q_pos, self.rope_opts).rename(.{ .s = .q });
+        k = zml.nn.rope(k, position_ids, self.rope_opts).rename(.{ .s = .k });
+        v = v.rename(.{ .s = .k });
+
+        const attn = zml.nn.sdpa(q, k, v, .{})
+            .withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated })
+            .merge(.{ .d = .{ .h, .hd } })
+            .rename(.{ .q = .s });
+
+        return self.o_proj.forward(attn)
+            .rename(.{ .dout = .d })
+            .withPartitioning(.{ .d = .replicated });
+    }
+};
+
+pub const RmsNorm = struct {
+    weight: zml.Tensor,
+    eps: f32,
+
+    pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNorm {
+        return .{
+            .weight = store.createTensor("weight", .{.d}, .{ .d = .replicated }),
+            .eps = eps,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
+        self.weight.deinit();
+    }
+
+    pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
+        const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
+        return zml.nn.rmsNorm(x, .d, self.eps)
+            .mul(self.weight.convert(x.dtype()).withTags(.{.d}).broad(x.shape()));
+    }
+};
+
+pub const Mlp = struct {
+    gate_proj: zml.nn.Linear,
+    up_proj: zml.nn.Linear,
+    down_proj: zml.nn.Linear,
+
+    pub fn init(store: zml.io.TensorStore.View) Mlp {
+        return .{
+            .gate_proj = .init(store.createTensor("gate_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .up_proj = .init(store.createTensor("up_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .down_proj = .init(store.createTensor("down_proj.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
+        unloadLinear(&self.gate_proj);
+        unloadLinear(&self.up_proj);
+        unloadLinear(&self.down_proj);
+    }
+
+    pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
+        return self.down_proj.forward(
+            self.gate_proj.forward(x)
+                .silu()
+                .mul(self.up_proj.forward(x))
+                .rename(.{ .dout = .d }),
+        );
+    }
+};
+
+fn linear(
+    store: zml.io.TensorStore.View,
+    comptime prefix: []const u8,
+    with_bias: bool,
+    partitioning: anytype,
+) zml.nn.Linear {
+    const prefixed = store.withPrefix(prefix);
+    return .init(
+        prefixed.createTensor("weight", .{ .dout, .d }, partitioning),
+        if (with_bias) prefixed.createTensor("bias", .{.dout}, .{ .dout = .replicated }) else null,
+        .d,
+    );
+}
+
+fn unloadLinear(linear_: *zml.nn.Linear) void {
+    if (linear_.bias) |*bias| bias.deinit();
+    linear_.weight.deinit();
+}
