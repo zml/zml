@@ -1021,7 +1021,6 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
             win_start = core_start - overlap;
             win_end = core_end + overlap;
         }
-        std.log.info("core = [{d}..{d}] win = [{d}..{d}]", .{ core_start, core_end, win_start, win_end });
         // move the chunk data from latents.x to encoded_chunk_slice, assume tensors are stored in row major
         for (0..audio_dim) |i| {
             for (win_start..win_end) |j| {
@@ -1039,13 +1038,12 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
         // send the decoded chunk back to the CPU
         try decoded_chunk_buffer.toSlice(io, decoded_chunk_slice);
         // write the decoded chunk to the right place in audio_frames
-        // we decoded [core_start, core_end] to upsampling_ratio * [core_start, core_end]
-        // decoded_chunk is [O|O|core]
-        const decoded_core_start = 2 * overlap * upsampling_ratio;
-        const decoded_core_end = decoded_chunk_frames;
+        const decoded_core_start = core_start * upsampling_ratio;
+        const decoded_core_end = core_end * upsampling_ratio;
         for (0..audio_channels) |i| {
             for (decoded_core_start..decoded_core_end) |j| {
-                audio_slice.items(f32)[i * audio_frames + j] = decoded_chunk_slice.items(f32)[i * decoded_chunk_frames + j];
+                const j_chunk = j - decoded_core_start;
+                audio_slice.items(f32)[i * audio_frames + j] = decoded_chunk_slice.items(f32)[i * decoded_chunk_frames + j_chunk];
             }
         }
         if (last_chunk) break;
