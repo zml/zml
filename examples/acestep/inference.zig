@@ -1040,9 +1040,10 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
         // write the decoded chunk to the right place in audio_frames
         const decoded_core_start = core_start * upsampling_ratio;
         const decoded_core_end = core_end * upsampling_ratio;
+        const chunk_core_start = (core_start - win_start) * upsampling_ratio;
         for (0..audio_channels) |i| {
             for (decoded_core_start..decoded_core_end) |j| {
-                const j_chunk = j - decoded_core_start;
+                const j_chunk = j - decoded_core_start + chunk_core_start;
                 audio_slice.items(f32)[i * audio_frames + j] = decoded_chunk_slice.items(f32)[i * decoded_chunk_frames + j_chunk];
             }
         }
