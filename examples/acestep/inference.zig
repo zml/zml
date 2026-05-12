@@ -922,15 +922,9 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
         acedit.exes.preprocess_exe.callOpts(io, acedit.exes.preprocess_args, &acedit.exes.preprocess_results, .{ .wait = true });
         acedit.exes.preprocess_results.fill(.{ &y_proj_buffer, &hidden_states_buffer, &temb_buffer, &timestep_proj_buffer });
         for (0..acedit.config.num_hidden_layers) |ii| {
-            if (ii % 2 == 0) {
-                acedit.exes.layer_sliding_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer });
-                acedit.exes.layer_sliding_exe.callOpts(io, acedit.exes.layer_sliding_args, &acedit.exes.layer_sliding_results, .{ .wait = true });
-                acedit.exes.layer_sliding_results.fill(.{ &hidden_states_buffer });
-            } else {
-                acedit.exes.layer_full_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer });
-                acedit.exes.layer_full_exe.callOpts(io, acedit.exes.layer_full_args, &acedit.exes.layer_full_results, .{ .wait = true });
-                acedit.exes.layer_full_results.fill(.{ &hidden_states_buffer });
-            }
+            acedit.exes.layer_sliding_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer });
+            acedit.exes.layer_sliding_exe.callOpts(io, acedit.exes.layer_sliding_args, &acedit.exes.layer_sliding_results, .{ .wait = true });
+            acedit.exes.layer_sliding_results.fill(.{ &hidden_states_buffer });
         }
         acedit.exes.postprocess_args.set(.{ acedit.model_buffers, t_curr, t_next, x_buffer, hidden_states_buffer, temb_buffer });
         acedit.exes.postprocess_exe.callOpts(io, acedit.exes.postprocess_args, &acedit.exes.postprocess_results, .{ .wait = true });

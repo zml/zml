@@ -98,14 +98,7 @@ pub const AceDit_handler = struct {
         var layer_sliding_future_awaited = false;
         errdefer if (!layer_sliding_future_awaited) if (layer_sliding_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
-        var layer_full_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: DiTLayer, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward,
-                    .{ params_.hidden_states, params_.y_proj, params_.timestep_proj, null }, opts_);
-            }
-        }.call, .{ zml_handler, model.layers[0], params, opts });
-        var layer_full_future_awaited = false;
-        errdefer if (!layer_full_future_awaited) if (layer_full_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
 
         var post_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: AceDit, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
@@ -122,8 +115,6 @@ pub const AceDit_handler = struct {
         const layer_sliding_future_exe = try layer_sliding_future.await(zml_handler.io);
         layer_sliding_future_awaited = true;
 
-        const layer_full_future_exe = try layer_full_future.await(zml_handler.io);
-        layer_full_future_awaited = true;
 
         const post_future_exe = try post_future.await(zml_handler.io);
         post_future_awaited = true;
@@ -135,9 +126,7 @@ pub const AceDit_handler = struct {
             .layer_sliding_exe = layer_sliding_future_exe,
             .layer_sliding_args = try layer_sliding_future_exe.args(zml_handler.allocator),
             .layer_sliding_results = try layer_sliding_future_exe.results(zml_handler.allocator),
-            .layer_full_exe = layer_full_future_exe,
-            .layer_full_args = try layer_full_future_exe.args(zml_handler.allocator),
-            .layer_full_results = try layer_full_future_exe.results(zml_handler.allocator),
+
             .postprocess_exe = post_future_exe,
             .postprocess_args = try post_future_exe.args(zml_handler.allocator),
             .postprocess_results = try post_future_exe.results(zml_handler.allocator),
@@ -281,10 +270,7 @@ pub const Exes = struct {
     layer_sliding_args: zml.Exe.Arguments,
     layer_sliding_results: zml.Exe.Results,
     
-    layer_full_exe: zml.Exe,
-    layer_full_args: zml.Exe.Arguments,
-    layer_full_results: zml.Exe.Results,
-    
+
     postprocess_exe: zml.Exe,
     postprocess_args: zml.Exe.Arguments,
     postprocess_results: zml.Exe.Results,
@@ -296,9 +282,7 @@ pub const Exes = struct {
         self.layer_sliding_exe.deinit();
         self.layer_sliding_args.deinit(allocator);
         self.layer_sliding_results.deinit(allocator);
-        self.layer_full_exe.deinit();
-        self.layer_full_args.deinit(allocator);
-        self.layer_full_results.deinit(allocator);
+
         self.postprocess_exe.deinit();
         self.postprocess_args.deinit(allocator);
         self.postprocess_results.deinit(allocator);
