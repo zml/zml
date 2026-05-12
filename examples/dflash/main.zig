@@ -78,6 +78,9 @@ pub fn main(init: std.process.Init) !void {
     var target_store: zml.io.TensorStore = .fromRegistry(allocator, &target_registry);
     defer target_store.deinit();
 
+    var tokenizer = try loadTokenizer(allocator, io, target_repo);
+    defer tokenizer.deinit();
+
     const draft_model = try dflash.Model.init(allocator, store.view(), parsed_config.value);
     defer draft_model.deinit(allocator);
 
@@ -161,16 +164,11 @@ pub fn main(init: std.process.Init) !void {
     defer tokens_slice.free(allocator);
 
     var stdout = std.Io.File.stdout().writerStreaming(io, &.{});
-    try stdout.interface.print("input_ids: {any}\n", .{token_ids});
+    try printTokens(allocator, &tokenizer, &stdout.interface, "input", &token_ids);
     try stdout.interface.print("sampled_tokens shape: {f}\n", .{tokens_slice.shape});
-    try stdout.interface.print("sampled_tokens: ", .{});
 
     const sampled_tokens = tokens_slice.constItems(u32);
-    for (sampled_tokens, 0..) |token, i| {
-        if (i != 0) try stdout.interface.writeAll(", ");
-        try stdout.interface.print("{}", .{token});
-    }
-    try stdout.interface.writeAll("\n");
+    try printTokens(allocator, &tokenizer, &stdout.interface, "sampled", sampled_tokens);
     try stdout.interface.flush();
 }
 
@@ -215,6 +213,45 @@ fn fillNoiseEmbedding(out: []f32, token_ids: *const [block_size]u32, hidden_size
             value.* = token_value + (@as(f32, @floatFromInt(dim % 17)) * 0.0001);
         }
     }
+}
+
+fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
+    const file = try dir.openFile(io, "tokenizer.json", .{});
+    defer file.close(io);
+
+    var reader = file.reader(io, &.{});
+    const bytes = try reader.interface.readAlloc(allocator, try file.length(io));
+    defer allocator.free(bytes);
+
+    return try .fromBytes(allocator, bytes);
+}
+
+fn printTokens(
+    allocator: std.mem.Allocator,
+    tokenizer: *const zml.tokenizer.Tokenizer,
+    stdout: *std.Io.Writer,
+    comptime name: []const u8,
+    token_ids: []const u32,
+) !void {
+    try stdout.print("{s}_ids: {any}\n", .{ name, token_ids });
+
+    var decoder = try tokenizer.decoder();
+    defer decoder.deinit();
+    var text = try decoder.decodeAlloc(allocator, token_ids);
+    defer text.deinit(allocator);
+    try stdout.print("{s}_text: {s}\n", .{ name, text.items });
+
+    try stdout.print("{s}_tokens: [", .{name});
+    for (token_ids, 0..) |token_id, i| {
+        if (i != 0) try stdout.writeAll(", ");
+        const one = [1]u32{token_id};
+        var piece_decoder = try tokenizer.decoder();
+        defer piece_decoder.deinit();
+        var piece = try piece_decoder.decodeAlloc(allocator, &one);
+        defer piece.deinit(allocator);
+        try stdout.print("{}=\"{s}\"", .{ token_id, piece.items });
+    }
+    try stdout.writeAll("]\n");
 }
 
 const Shardings = struct {
