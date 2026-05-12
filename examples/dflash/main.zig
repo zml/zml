@@ -12,7 +12,7 @@ pub const std_options: std.Options = .{
 const log = std.log.scoped(.dflash);
 
 const block_size = 16;
-const first_token: u32 = 151_644;
+const first_token: u32 = 362;
 const placeholder_token: u32 = 151_643;
 
 const Args = struct {
