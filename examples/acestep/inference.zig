@@ -998,21 +998,29 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
 
     zml_handler.tic(&zml_handler.timers.vae.prefill);
 
-    var win_start: usize = 0;
     var core_start: usize = 0;
-    var core_end: usize = 0;
-    var win_end: usize = 0;
-
+    var core_end: usize = core_start + stride;
+    var win_start: usize = undefined;
+    var win_end: usize = undefined;
+    
     while (true) {
         var last_chunk = false;
-        if (win_end >= latent_frames) {
+        if (core_start < overlap) {
+            // this is first chunk, put all overlap to the right
+            win_start = 0;
+            win_end = core_end + 2 * overlap;
+        }
+        if (core_end + overlap >= latent_frames) {
+            // this is the last chunk
             last_chunk = true;
-            // if this is the last chunk to decode, put all overlap to the left and define the chunk from the right
+            // put all overlap to the left
             win_end = latent_frames;
             core_end = latent_frames;
             core_start = core_end - stride;
             win_start = core_start - 2 * overlap;
         }
+
+        std.log.info("core = [{d}..{d}] win = [{d}..{d}]", .{ core_start, core_end, win_start, win_end });
         // move the chunk data from latents.x to encoded_chunk_slice, assume tensors are stored in row major
         for (0..audio_dim) |i| {
             for (win_start..win_end) |j| {
@@ -1040,10 +1048,8 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
         }
         if (last_chunk) break;
         // slide the chunk by stride
-        win_start += stride;
         core_start += stride;
         core_end += stride;
-        win_end += stride;
     }
 
     std.log.info("VAE done decoding, output shape : {d}x{d}", .{ 2, audio_frames });

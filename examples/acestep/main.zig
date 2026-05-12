@@ -365,7 +365,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
 
     const decode_t: u32 = 1;
     //var acevae = try acevae_.AceVae_handler.init(zml_handler, duration);
-    var acevae = try acevae_.AceVae_handler.init(zml_handler, decode_t);
+    var acevae = try acevae_.AceVae_handler.init(zml_handler, decode_t + 2);
     defer acevae.deinit(zml_handler.allocator);
 
     //const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents);
