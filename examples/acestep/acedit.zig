@@ -89,16 +89,14 @@ pub const AceDit_handler = struct {
         var pre_future_awaited = false;
         errdefer if (!pre_future_awaited) if (pre_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
-        var layer_sliding_future = try zml_handler.io.concurrent(struct {
+        var layer_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: DiTLayer, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
                         params_.hidden_states, params_.y_proj, params_.timestep_proj, params_.mask }, opts_);
             }
         }.call, .{ zml_handler, model.layers[0], params, opts });
-        var layer_sliding_future_awaited = false;
-        errdefer if (!layer_sliding_future_awaited) if (layer_sliding_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
-
-
+        var layer_future_awaited = false;
+        errdefer if (!layer_future_awaited) if (layer_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
         var post_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: AceDit, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
@@ -112,9 +110,8 @@ pub const AceDit_handler = struct {
         const pre_future_exe = try pre_future.await(zml_handler.io);
         pre_future_awaited = true;
 
-        const layer_sliding_future_exe = try layer_sliding_future.await(zml_handler.io);
-        layer_sliding_future_awaited = true;
-
+        const layer_future_exe = try layer_future.await(zml_handler.io);
+        layer_future_awaited = true;
 
         const post_future_exe = try post_future.await(zml_handler.io);
         post_future_awaited = true;
@@ -123,10 +120,9 @@ pub const AceDit_handler = struct {
             .preprocess_exe = pre_future_exe,
             .preprocess_args = try pre_future_exe.args(zml_handler.allocator),
             .preprocess_results = try pre_future_exe.results(zml_handler.allocator),
-            .layer_sliding_exe = layer_sliding_future_exe,
-            .layer_sliding_args = try layer_sliding_future_exe.args(zml_handler.allocator),
-            .layer_sliding_results = try layer_sliding_future_exe.results(zml_handler.allocator),
-
+            .layer_exe = layer_future_exe,
+            .layer_args = try layer_future_exe.args(zml_handler.allocator),
+            .layer_results = try layer_future_exe.results(zml_handler.allocator),
             .postprocess_exe = post_future_exe,
             .postprocess_args = try post_future_exe.args(zml_handler.allocator),
             .postprocess_results = try post_future_exe.results(zml_handler.allocator),
@@ -266,11 +262,10 @@ pub const Exes = struct {
     preprocess_args: zml.Exe.Arguments,
     preprocess_results: zml.Exe.Results,
     
-    layer_sliding_exe: zml.Exe,
-    layer_sliding_args: zml.Exe.Arguments,
-    layer_sliding_results: zml.Exe.Results,
+    layer_exe: zml.Exe,
+    layer_args: zml.Exe.Arguments,
+    layer_results: zml.Exe.Results,
     
-
     postprocess_exe: zml.Exe,
     postprocess_args: zml.Exe.Arguments,
     postprocess_results: zml.Exe.Results,
@@ -279,10 +274,9 @@ pub const Exes = struct {
         self.preprocess_exe.deinit();
         self.preprocess_args.deinit(allocator);
         self.preprocess_results.deinit(allocator);
-        self.layer_sliding_exe.deinit();
-        self.layer_sliding_args.deinit(allocator);
-        self.layer_sliding_results.deinit(allocator);
-
+        self.layer_exe.deinit();
+        self.layer_args.deinit(allocator);
+        self.layer_results.deinit(allocator);
         self.postprocess_exe.deinit();
         self.postprocess_args.deinit(allocator);
         self.postprocess_results.deinit(allocator);
@@ -801,7 +795,7 @@ pub const DiTLayer = struct {
         self.scale_shift_table.deinit();
     }
     
-    pub fn forward(self: DiTLayer, x_: zml.Tensor, y: zml.Tensor, time_emb: zml.Tensor, attn_mask: ?zml.Tensor) zml.Tensor {
+    pub fn forward(self: DiTLayer, x_: zml.Tensor, y: zml.Tensor, time_emb: zml.Tensor, attn_mask: zml.Tensor) zml.Tensor {
         const x = x_.rename(.{ .t = .s });
         const x_norm = self.scaleShift(x, time_emb);
         
@@ -890,7 +884,7 @@ pub const SelfAttention = struct {
     }
 
     // full bidirectional self attention, no kv caching
-    pub fn forward(self: SelfAttention, x: zml.Tensor, attn_mask: ?zml.Tensor) zml.Tensor {
+    pub fn forward(self: SelfAttention, x: zml.Tensor, attn_mask: zml.Tensor) zml.Tensor {
         var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
         var k = self.k_proj.forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
         var v = self.v_proj.forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });

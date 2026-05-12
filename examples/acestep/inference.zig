@@ -898,11 +898,15 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     defer temb_buffer.deinit();
     var timestep_proj_buffer: zml.Buffer = undefined;
     defer timestep_proj_buffer.deinit();
-    
-    const mask_slice = try createBidirectionalWindowMask(allocator, @divFloor(t_25hz + 1, 2), acedit.config.sliding_window);
-    defer mask_slice.free(allocator);
-    var mask_buffer: zml.Buffer = try .fromSlice(io, platform, mask_slice, sharding);
-    defer mask_buffer.deinit();
+
+    const full_mask_slice = try createBidirectionalFullMask(allocator, @divFloor(t_25hz + 1, 2));
+    defer full_mask_slice.free(allocator);
+    var full_mask_buffer: zml.Buffer = try .fromSlice(io, platform, full_mask_slice, sharding);
+    defer full_mask_buffer.deinit();
+    const sliding_mask_slice = try createBidirectionalWindowMask(allocator, @divFloor(t_25hz + 1, 2), acedit.config.sliding_window);
+    defer sliding_mask_slice.free(allocator);
+    var sliding_mask_buffer: zml.Buffer = try .fromSlice(io, platform, sliding_mask_slice, sharding);
+    defer sliding_mask_buffer.deinit();
 
     const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_25hz }, .bf16));
     var result_buffer: zml.Buffer = try .fromSlice(io, platform, result_slice, sharding);
@@ -922,9 +926,10 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
         acedit.exes.preprocess_exe.callOpts(io, acedit.exes.preprocess_args, &acedit.exes.preprocess_results, .{ .wait = true });
         acedit.exes.preprocess_results.fill(.{ &y_proj_buffer, &hidden_states_buffer, &temb_buffer, &timestep_proj_buffer });
         for (0..acedit.config.num_hidden_layers) |ii| {
-            acedit.exes.layer_sliding_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer });
-            acedit.exes.layer_sliding_exe.callOpts(io, acedit.exes.layer_sliding_args, &acedit.exes.layer_sliding_results, .{ .wait = true });
-            acedit.exes.layer_sliding_results.fill(.{ &hidden_states_buffer });
+            const mask_buffer = if (acedit.config.layer_types[ii] == .sliding_attention) sliding_mask_buffer else full_mask_buffer;
+            acedit.exes.layer_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer });
+            acedit.exes.layer_exe.callOpts(io, acedit.exes.layer_args, &acedit.exes.layer_results, .{ .wait = true });
+            acedit.exes.layer_results.fill(.{ &hidden_states_buffer });
         }
         acedit.exes.postprocess_args.set(.{ acedit.model_buffers, t_curr, t_next, x_buffer, hidden_states_buffer, temb_buffer });
         acedit.exes.postprocess_exe.callOpts(io, acedit.exes.postprocess_args, &acedit.exes.postprocess_results, .{ .wait = true });
@@ -1085,13 +1090,25 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
 }
 
 
+pub fn createBidirectionalFullMask(allocator: std.mem.Allocator, seq_len: i64) !zml.Slice {
+    var mask: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .q = seq_len, .k = seq_len }, .bf16));
+    const mask_items = mask.items(zml.floats.BFloat16);
+    const zero = zml.floats.BFloat16.fromF32(0.0);
+    const seq_len_u: usize = @intCast(seq_len);
+    for (0..seq_len_u) |q| {
+        for (0..seq_len_u) |k| {
+            const idx = q * seq_len_u + k;
+            mask_items[idx] = zero;
+        }
+    }
+    return mask;
+}
+
 pub fn createBidirectionalWindowMask(allocator: std.mem.Allocator, seq_len: i64, window_len: u32) !zml.Slice {
     var mask: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .q = seq_len, .k = seq_len }, .bf16));
-
     const zeros = zml.floats.BFloat16.fromF32(0.0);
     const minus_inf = zml.floats.BFloat16.fromF32(zml.floats.Float32.toF32(zml.floats.Float32.minus_inf));
     const mask_items = mask.items(zml.floats.BFloat16);
-
     const seq_len_u: usize = @intCast(seq_len);
     const window_len_i64: i64 = @intCast(window_len);
     for (0..seq_len_u) |q| {
@@ -1102,7 +1119,6 @@ pub fn createBidirectionalWindowMask(allocator: std.mem.Allocator, seq_len: i64,
             mask_items[idx] = if (@abs(q_i64 - k_i64) <= window_len_i64) zeros else minus_inf;
         }
     }
-
     return mask;
 }
 
