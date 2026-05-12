@@ -918,7 +918,7 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
         var t_next: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i + 1], .f32, sharding);
         defer t_curr.deinit();
         defer t_next.deinit();
-        acedit.exes.preprocess_args.set(.{ acedit.model_buffers, t_curr, t_next, x_buffer, context_latents_buffer, encoded_conditions_buffer });
+        acedit.exes.preprocess_args.set(.{ acedit.model_buffers, t_curr, x_buffer, context_latents_buffer, encoded_conditions_buffer });
         acedit.exes.preprocess_exe.callOpts(io, acedit.exes.preprocess_args, &acedit.exes.preprocess_results, .{ .wait = true });
         acedit.exes.preprocess_results.fill(.{ &y_proj_buffer, &hidden_states_buffer, &temb_buffer, &timestep_proj_buffer });
         for (0..acedit.config.num_hidden_layers) |ii| {
