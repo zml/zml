@@ -772,6 +772,8 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
     
     try text_embedding_buffer.toSlice(io, text_embedding_slice);
 
+    zml_handler.toc(&zml_handler.timers.emb.decode);
+
     std.log.info("EMB done embedding", .{});
     return .{
         .caption_embedding = text_embedding_slice,
