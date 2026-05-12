@@ -196,14 +196,14 @@ const Args = struct {
 // 4090 (70s audio)
 // bazel run --config=release acestep --//platforms:cuda=true -- --prompt='a chill piano melody' --llm-size=1 --instru --local-files
 // info: Module    init  compile     load  prefill   decode    total
-// info:   llm    0.29s   10.11s    0.72s    0.05s    0.97s   12.15s
-// info:   cfg    0.00s    0.82s    0.00s    0.06s    4.34s    5.22s
-// info:   emb    0.01s    2.75s    0.59s    0.01s    0.00s    3.57s
-// info:   enc    0.01s    4.80s    0.60s    0.01s    0.00s    5.41s
-// info:   dit    0.00s    5.29s    0.64s    0.21s    0.00s    6.14s
-// info:   vae    0.01s    1.53s    0.54s    0.51s    0.00s    2.61s
-// info:   wav                                                 1.28s
-// info: total                                                36.41s
+// info:   llm    0.28s    7.89s    0.72s    0.05s    1.01s    9.95s
+// info:   cfg    0.00s    0.85s    0.00s    0.05s    4.51s    5.42s
+// info:   emb    0.00s    1.29s    0.58s    0.00s    0.00s    2.10s
+// info:   enc    0.00s    4.80s    0.69s    0.01s    0.00s    5.51s
+// info:   dit    0.00s    5.50s    0.84s    0.33s    0.00s    6.68s
+// info:   vae    0.00s    2.44s    0.55s    0.53s    0.00s    3.52s
+// info:   wav                                                 1.34s
+// info: total                                                34.56s
 
 // TODO: terminer compilation par bloc parallèle (emb, enc, dit)
 // TODO: several outputs (either tiled or batched)

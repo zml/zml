@@ -593,6 +593,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
             if (opts.xla_dump_fusion_visualization) {
                 try setXlaOverrideFlag(overrides_map, "xla_dump_fusion_visualization", true, upb_arena);
             }
+            try setXlaOverrideFlag(overrides_map, "xla_gpu_autotune_level", 0, upb_arena);
             if (opts.xla_dump_hlo_pass_re) |re| {
                 try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_pass_re", re, upb_arena);
             }
