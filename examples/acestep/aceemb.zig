@@ -36,7 +36,7 @@ pub const AceEmb_handler = struct {
         const params: Params = .{
             .lyric_tokens = .init(.{ .s = lyric_len }, .u32),
             .text_tokens = .init(.{ .s = text_len }, .u32),
-            .text_embeds = .init(.{ .s = text_len, .b = config.hidden_size }, .bf16),
+            .text_embeds = .init(.{ .s = text_len, .d = config.hidden_size }, .bf16),
             .shardings = try .init(zml_handler.platform),
         };
 
