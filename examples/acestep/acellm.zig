@@ -108,7 +108,7 @@ pub const AceLlm_handler = struct {
     pub fn compileModel(zml_handler: *main.Zml_handler, model: AceLlm, params: LlmParams) !LlmExes {
         const shardings_arr = params.shardings.all();
         const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
-        std.log.info("5Hz compile prefill/decode", .{});
+        std.log.info("5Hz compile models", .{});
 
         var prefill_embed_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: AceLlm, params_: LlmParams, opts_: zml.module.CompilationOptions) !zml.Exe {

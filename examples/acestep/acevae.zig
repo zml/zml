@@ -12,11 +12,11 @@ pub const AceVae_handler = struct {
     params: Params,
     config: Config,
     decode_exe: zml.Exe,
-    //encode_exe: zml.Exe,
+    encode_exe: zml.Exe,
     model_buffers: zml.Bufferized(AceVae),
     shardings: main.Shardings,
 
-    pub fn init(zml_handler: *main.Zml_handler, target_duration: u32) !AceVae_handler {
+    pub fn init(zml_handler: *main.Zml_handler, decode_t: u32) !AceVae_handler {
         zml_handler.tic(&zml_handler.timers.vae.init);        
         std.log.info("VAE init", .{});
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acevae);
@@ -36,7 +36,7 @@ pub const AceVae_handler = struct {
         const model: AceVae = try .init(zml_handler.allocator, store.view(), config);
         std.log.info("VAE initialized", .{});
 
-        const t_25hz = target_duration * 25;
+        const t_25hz = decode_t * 25;
         var t_48khz = t_25hz;
         for (config.downsampling_ratios) |ratio| {
             t_48khz *= ratio;
@@ -51,8 +51,7 @@ pub const AceVae_handler = struct {
         zml_handler.toc(&zml_handler.timers.vae.init);
         zml_handler.tic(&zml_handler.timers.vae.compile);
 
-        const decode_exe = try compileDecodeModel(zml_handler, model, params, shardings);
-        //const encode_exe, const decode_exe = try compileModels(zml_handler, model, params, shardings);
+        const encode_exe, const decode_exe = try compileModels(zml_handler, model, params, shardings);
         
         zml_handler.toc(&zml_handler.timers.vae.compile);
         zml_handler.tic(&zml_handler.timers.vae.load);
@@ -68,27 +67,27 @@ pub const AceVae_handler = struct {
             .params = params,
             .config = config,
             .decode_exe = decode_exe,
-            //.encode_exe = encode_exe,
+            .encode_exe = encode_exe,
             .model_buffers = model_buffers,
             .shardings = shardings,
         };
     }
 
     pub fn compileModels(zml_handler: *main.Zml_handler, model: AceVae, params: Params, shardings: main.Shardings) !struct { zml.Exe, zml.Exe } {
-        std.log.info("VAE compile encoder", .{});
         const encode_exe = try compileEncodeModel(zml_handler, model, params, shardings);
-        std.log.info("VAE compile decoder", .{});
         const decode_exe = try compileDecodeModel(zml_handler, model, params, shardings);
         std.log.info("VAE compiled models", .{});
         return .{ encode_exe, decode_exe };
     }
 
     pub fn compileEncodeModel(zml_handler: *main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
+        std.log.info("VAE compile encoder", .{});
         const opts: zml.module.CompilationOptions = .{ .shardings = &shardings.all() };
         return zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .encode, .{ parameters.audio }, opts);
     }
     
     pub fn compileDecodeModel(zml_handler: *main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
+        std.log.info("VAE compile decoder", .{});
         const opts: zml.module.CompilationOptions = .{ .shardings = &shardings.all() };
         return zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .decode, .{ parameters.latents }, opts);
     }
@@ -130,7 +129,7 @@ pub const AceVae_handler = struct {
         self.model.deinit(allocator);
         self.config.deinit(allocator);
         self.decode_exe.deinit();
-        //self.encode_exe.deinit();
+        self.encode_exe.deinit();
     }
 };
 

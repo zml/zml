@@ -193,17 +193,17 @@ const Args = struct {
     ;
 };
 
-// 4090 (104s audio)
+// 4090 (70s audio)
 // bazel run --config=release acestep --//platforms:cuda=true -- --prompt='a chill piano melody' --llm-size=1 --instru --local-files
 // info: Module    init  compile     load  prefill   decode    total
-// info:   llm    0.27s   12.15s    1.26s    0.07s    1.46s   15.22s
-// info:   cfg    0.00s   27.17s    0.00s    0.09s   11.49s   38.76s
-// info:   emb    0.00s    2.39s    1.12s    0.01s    0.00s    3.72s
-// info:   enc    0.01s    5.08s    1.25s    0.18s    0.00s    6.52s
-// info:   dit    0.00s    5.21s    1.31s    0.63s    0.63s    7.16s
-// info:   vae    0.01s   17.65s    1.10s    0.36s    0.00s   19.15s
-// info:   wav                                                 1.87s
-// info: total                                                92.44s
+// info:   llm    0.28s    9.73s    0.69s    0.06s    0.89s   11.64s
+// info:   cfg    0.00s    0.86s    0.00s    0.05s    4.35s    5.27s
+// info:   emb    0.01s    2.76s    0.59s    0.01s    0.00s    3.55s
+// info:   enc    0.02s    4.72s    0.63s    0.01s    0.00s    5.38s
+// info:   dit    0.02s    5.33s    0.66s    0.21s    0.21s    6.22s
+// info:   vae    0.01s   15.66s    0.61s    0.19s    0.00s   16.49s
+// info:   wav                                                 1.49s
+// info: total                                                50.08s
 
 // TODO: terminer compilation par bloc parallèle (emb, enc, dit)
 // TODO: VAE compilation is an issue, worse than with f32 ??
@@ -363,10 +363,13 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
 
     zml_handler.tic(&zml_handler.timers.vae.total);
 
-    var acevae = try acevae_.AceVae_handler.init(zml_handler, duration);
+    const decode_t: u32 = 1;
+    //var acevae = try acevae_.AceVae_handler.init(zml_handler, duration);
+    var acevae = try acevae_.AceVae_handler.init(zml_handler, decode_t);
     defer acevae.deinit(zml_handler.allocator);
 
-    const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents);
+    //const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents);
+    const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatentsTiled(zml_handler, &acevae, diffused_latents, decode_t);
     defer decoded_audio.deinit(zml_handler.allocator);
 
     acevae.unloadBuffers(zml_handler.allocator);
