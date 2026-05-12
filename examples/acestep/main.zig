@@ -358,14 +358,13 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     
         zml_handler.tic(&zml_handler.timers.dit.total);
     
-        const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, diffuse_args);
+        const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, diffuse_args, i);
         defer diffused_latents.deinit(zml_handler.allocator);
     
         zml_handler.toc(&zml_handler.timers.dit.total);
         
         // ------------------------------------------------
-        // Output latents of the DiT model are decoded
-        // with the VAE model
+        // Decode diffused latents with the VAE model
         // ------------------------------------------------
     
         zml_handler.tic(&zml_handler.timers.vae.total);

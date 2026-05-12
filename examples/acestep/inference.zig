@@ -742,12 +742,12 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
     aceemb.exes.lyric_embed_args.set(.{ aceemb.model_buffers, lyric_tokens_buffer });
     aceemb.exes.lyric_embed_exe.call(aceemb.exes.lyric_embed_args, &aceemb.exes.lyric_embed_results);
     aceemb.exes.lyric_embed_results.fill(.{ &lyric_embedding_buffer });
-    
+
     try lyric_embedding_buffer.toSlice(io, lyric_embedding_slice);
 
     zml_handler.toc(&zml_handler.timers.emb.prefill);
     zml_handler.tic(&zml_handler.timers.emb.decode);
-    
+
     const text_embedding_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = text_tokens.len, .d = aceemb.config.hidden_size }, .bf16));
     var text_embedding_buffer: zml.Buffer = try .fromSlice(io, platform, text_embedding_slice, sharding);
     defer text_embedding_buffer.deinit();
@@ -769,7 +769,7 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
     aceemb.exes.norm_args.set(.{ aceemb.model_buffers, text_embedding_buffer });
     aceemb.exes.norm_exe.call(aceemb.exes.norm_args, &aceemb.exes.norm_results);
     aceemb.exes.norm_results.fill(.{ &text_embedding_buffer });
-    
+
     try text_embedding_buffer.toSlice(io, text_embedding_slice);
 
     zml_handler.toc(&zml_handler.timers.emb.decode);
@@ -852,6 +852,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     defer encode_args.deinit(allocator);
     var encode_results = try aceenc.encode_exe.results(allocator);
     defer encode_results.deinit(allocator);
+
     encode_args.set(.{ aceenc.model_buffers, text_emb_buffer, lyric_emb_buffer, timbre_buffer, audio_codes_buffer, src_audio_buffer });
     aceenc.encode_exe.call(encode_args, &encode_results);
     encode_results.fill(.{ &x_buffer, &context_latents_buffer, &encoded_conditions_buffer });
@@ -870,7 +871,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     };
 }
 
-pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_handler, latents: InitialLatents) !DiffusedLatents {
+pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_handler, latents: InitialLatents, id: usize) !DiffusedLatents {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = acedit.shardings.replicated;
@@ -880,6 +881,18 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     const t_25hz = latents.context_latents.shape.dim(0);
 
     std.log.info("DiT call with input size : {d}x{d} {d}x{d}", .{ t_25hz, audio_dim, latents.encoder_conditions.shape.dim(0), latents.encoder_conditions.shape.dim(1) });
+
+    const seed: u64 = @intCast(id);
+    var prng = std.Random.DefaultPrng.init(seed);
+    const random = prng.random();
+    const I: usize = @intCast(latents.x.shape.dim(0));
+    const J: usize = @intCast(latents.x.shape.dim(1));
+    for (0..I) |i| {
+        for (0..J) |j| {
+            const rand: f32 = random.floatNorm(f32);
+            latents.x.items(zml.floats.BFloat16)[i * J + j] = zml.floats.BFloat16.fromF32(rand);
+        }
+    }
 
     // prepare arguments buffers
     var x_buffer: zml.Buffer = try .fromSlice(io, platform, latents.x, sharding);
@@ -1032,7 +1045,7 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
     var core_end: usize = core_start + stride;
     var win_start: usize = undefined;
     var win_end: usize = undefined;
-    
+
     while (true) {
         var last_chunk = false;
         if (core_start == 0) {
