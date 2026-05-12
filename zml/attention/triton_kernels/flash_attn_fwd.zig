@@ -677,24 +677,6 @@ pub const MhaFwd = struct {
             // acc = acc * l_recip
             const acc_out = final_acc.mul(l_recip);
 
-            // write back O
-            const offs_out = off_z.mul(stride_oz)
-                .add(off_q_head.mul(stride_oh))
-                .add(cu_seqlens_q_start.mul(stride_om))
-                .add(offs_m.expandDims(1).mul(stride_om))
-                .add(offs_d.expandDims(0).mul(stride_on));
-
-            // out_mask
-            var out_mask = b.full(&.{ BLOCK_M, 1 }, 1, .i1);
-            // Always mask by seqlen_q (overflow rows beyond seqlen_q)
-            out_mask = out_mask.bitAnd(offs_m.expandDims(1).lt(seqlen_q));
-            if (PADDED_HEAD) {
-                out_mask = out_mask.bitAnd(offs_d.expandDims(0).lt(@as(i32, BLOCK_DMODEL)));
-            }
-
-            // op = acc.to(out_ptr.dtype.element_ty)
-            const op = acc_out.to(cfg.dtype);
-
             // n_extra_tokens_check = (start_m + 1) * BLOCK_M - SEQLEN_Q
             const start_m_plus_1 = start_m.add(1);
             const end_m = start_m_plus_1.mul(BLOCK_M);
@@ -703,10 +685,9 @@ pub const MhaFwd = struct {
             // softmax_lse = (m_i + log2(l_i)) * ln(2)
             const log2_l_i = b.log2(final_l_i);
             const lse_val = final_m_i.add(log2_l_i).mul(@as(f32, 0.6931471805599453));
-            // lse_offs = off_q_head * stride_lse_h + offs_m * stride_lse_m
+            // lse_offs = off_z * stride_lse_z + off_q_head * stride_lse_h + offs_m * stride_lse_m
             const lse_offs_val = off_q_head.mul(a.stride_lse_h_in)
                 .add(offs_m.mul(a.stride_lse_m_in));
-            const lse_ptrs = a.softmax_lse_ptr.addPtr(lse_offs_val);
 
             // padded_block_k condition: n_extra_check > 0
             const padded_cond = n_extra_check.gt(0);
@@ -715,22 +696,40 @@ pub const MhaFwd = struct {
                 var ie = b.openIfElse(padded_cond, .{});
                 {
                     // then: masked store (n_extra_tokens > 0)
-                    const boundary = seqlen_q.sub(start_m.mul(BLOCK_M));
+                    // boundary = seqlen_q - start_m * BLOCK_M
+                    // Python's Triton compiler rewrites this algebraically as
+                    // (SEQLEN_Q + BLOCK_M) - end_m  since  end_m = (start_m+1)*BLOCK_M.
+                    // We match that form to produce the same constant.
+                    const boundary = b.liftAs(SEQLEN_Q + BLOCK_M, .i32).sub(end_m);
                     const lse_mask = offs_m.lt(boundary);
-                    b.storeOpts(lse_ptrs, lse_val, .{ .mask = lse_mask });
+                    const lse_ptrs_then = a.softmax_lse_ptr.addPtr(lse_offs_val);
+                    b.storeOpts(lse_ptrs_then, lse_val, .{ .mask = lse_mask });
                     ie.yieldThen(.{});
                 }
                 {
                     // else: unmasked store
-                    b.store(lse_ptrs, lse_val);
+                    const lse_ptrs_else = a.softmax_lse_ptr.addPtr(lse_offs_val);
+                    b.store(lse_ptrs_else, lse_val);
                     ie.yieldElse(.{});
                 }
             }
 
-            // Store output with mask based on padded_cond
+            // write back O (after scf.if, matching Python's op ordering)
+            const offs_out = off_z.mul(stride_oz)
+                .add(off_q_head.mul(stride_oh))
+                .add(cu_seqlens_q_start.mul(stride_om))
+                .add(offs_m.expandDims(1).mul(stride_om))
+                .add(offs_d.expandDims(0).mul(stride_on));
+
+            // out_mask: select between q_mask and all-true based on padded_cond
+            const out_q_mask = offs_m.expandDims(1).lt(seqlen_q);
             const all_true = b.full(&.{ BLOCK_M, 1 }, 1, .i1);
-            const final_out_mask = b.select(padded_cond, out_mask, all_true);
-            b.storeOpts(a.out_ptr.addPtr(offs_out), op, .{ .mask = final_out_mask });
+            const out_mask = b.select(padded_cond, out_q_mask, all_true);
+
+            // op = acc.to(out_ptr.dtype.element_ty)
+            const op = acc_out.to(cfg.dtype);
+
+            b.storeOpts(a.out_ptr.addPtr(offs_out), op, .{ .mask = out_mask });
         } else {
             // There are full blocks followed by one masked block
             const full_block_max = n_blocks.sub(masked_blocks_val).mul(BLOCK_N);
