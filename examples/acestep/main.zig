@@ -381,7 +381,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     
          zml_handler.tic(&zml_handler.timers.wav);
          
-         try exportDecodedAudioAsWav(zml_handler, decoded_audio, "decoded_audio_x.wav", i);
+         try exportDecodedAudioAsWav(zml_handler, decoded_audio, i);
     
          zml_handler.toc(&zml_handler.timers.wav);
     }
@@ -391,16 +391,11 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     
 }
 
-pub fn exportDecodedAudioAsWav(zml_handler: *Zml_handler, decoded_audio: inference.DecodedAudio, output_path: []const u8, index: usize) !void {
+pub fn exportDecodedAudioAsWav(zml_handler: *Zml_handler, decoded_audio: inference.DecodedAudio, index: usize) !void {
     const io = zml_handler.local_io;
-    
-    const flag: u8 = @intCast(index);
-    const path_copy = try zml_handler.allocator.dupe(u8, output_path);
-    defer zml_handler.allocator.free(path_copy);
-    path_copy[output_path.len - 5] = flag;
+    const indexed_output_path = try std.fmt.allocPrint(zml_handler.allocator, "decoded_audio_{d}.wav", .{index});
+    defer zml_handler.allocator.free(indexed_output_path);
 
-    std.log.info("Trying to export {s}, {d}, {d}", .{path_copy, index, flag});
-    
     const audio = decoded_audio.audio;
     const shape = audio.shape;
 
@@ -429,7 +424,7 @@ pub fn exportDecodedAudioAsWav(zml_handler: *Zml_handler, decoded_audio: inferen
     const riff_chunk_size_u64: u64 = 36 + 12 + data_chunk_size;
     const riff_chunk_size: u32 = std.math.cast(u32, riff_chunk_size_u64) orelse return error.AudioTooLarge;
 
-    var file = try std.Io.Dir.createFile(.cwd(), io, path_copy, .{ .truncate = true });
+    var file = try std.Io.Dir.createFile(.cwd(), io, indexed_output_path, .{ .truncate = true });
     defer file.close(io);
 
     var file_writer = file.writer(io, &.{});
@@ -463,7 +458,7 @@ pub fn exportDecodedAudioAsWav(zml_handler: *Zml_handler, decoded_audio: inferen
     }
 
     try writer.flush();
-    log.info("Exported decoded audio to {s}", .{ output_path });
+    log.info("Exported decoded audio to {s}", .{ indexed_output_path });
 }
 
 
