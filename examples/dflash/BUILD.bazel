@@ -20,3 +20,15 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//zml"],
 )
+
+zig_binary(
+    name = "dflash_compare_activations",
+    srcs = [
+        "common.zig",
+        "dflash_compare_activations.zig",
+        "dflash_model.zig",
+    ],
+    main = "dflash_compare_activations.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
