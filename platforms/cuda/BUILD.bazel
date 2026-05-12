@@ -33,6 +33,15 @@ cc_library(
 )
 
 cc_library(
+    name = "cuda_nvtx_headers",
+    visibility = ["//visibility:public"],
+    deps = select({
+        "@llvm//platforms/config:linux_x86_64": ["@cuda_nvtx_linux_x86_64//:headers"],
+        "@llvm//platforms/config:linux_aarch64": ["@cuda_nvtx_linux_sbsa//:headers"],
+    }),
+)
+
+cc_library(
     name = "libpjrt_cuda",
     tags = ["manual"],
     hdrs = ["libpjrt_cuda.h"],

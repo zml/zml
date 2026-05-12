@@ -1,4 +1,5 @@
 load("@bazel_tools//tools/build_defs/cc:cc_import.bzl", _cc_import = "cc_import")
+load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
 load(":patchelf.bzl", "patchelf")
 
 def _cc_import_runfiles_impl(ctx):

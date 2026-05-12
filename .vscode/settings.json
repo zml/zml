@@ -9,15 +9,13 @@
         "**/bazel-*": true
     },
     "files.watcherExclude": {
-        "**/bazel-*": true,
+        "**/bazel-*": true
     },
     // "files.trimTrailingWhitespace": true,
     "files.insertFinalNewline": true,
     "bazel.buildifierFixOnFormat": true,
     "bazel.queriesShareServer": true,
-    "bazel.pathsToIgnore": [
-        "."
-    ],
+    "bazel.pathsToIgnore": ["."],
     "bazel.buildifierExecutable": "@buildifier_prebuilt//:buildifier",
     "C_Cpp.formatting": "clangFormat",
     "C_Cpp.clang_format_style": "Microsoft",
@@ -28,10 +26,7 @@
         "editor.suggest.insertMode": "replace",
         "editor.stickyScroll.defaultModel": "foldingProviderModel",
         "editor.codeActionsOnSave": {
-            "source.fixAll": "explicit",
+            "source.fixAll": "explicit"
         }
-    },
-    "rust-analyzer.linkedProjects": [
-        "${workspaceFolder}/zml/tokenizer/hftokenizers/Cargo.toml"
-    ]
+    }
 }

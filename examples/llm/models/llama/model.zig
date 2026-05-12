@@ -81,12 +81,11 @@ pub const LoadedModel = struct {
             std.log.scoped(.llama).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         }
 
-        const all_shardings = shardings.all();
         return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
             .progress = progress,
-            .shardings = &all_shardings,
+            .shardings = &shardings.all(),
             .parallelism = 16,
             .total_bytes = &total_bytes,
         });
@@ -157,7 +156,7 @@ pub const Model = struct {
         io: std.Io,
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
-        shardings: []const zml.sharding.Sharding,
+        shardings: []const zml.Sharding,
         progress: *std.Progress.Node,
     ) !zml.Bufferized(Model) {
         progress.increaseEstimatedTotalItems(store.view().count());
@@ -552,7 +551,7 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !Buffer {
+    pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
         return .{
             .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), sharding, .{}),
             .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), sharding, .{}),

@@ -5,7 +5,7 @@ const stdx = @import("stdx");
 const zml = @import("../zml.zig");
 const flashattn = @import("flashattn.zig");
 const tpu = @import("tpu_attention.zig");
-const triton = @import("triton.zig");
+const triton = @import("triton_attention.zig");
 
 const PagedAttention = @This();
 
@@ -17,17 +17,7 @@ pub const Backend = enum {
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
-            .cuda => b: {
-                const first_device = platform.devices[0].pjrt_device;
-
-                if (zml.platform.cuda.tryGetComputeCapabilities(platform, first_device)) |cc| {
-                    if (std.mem.eql(u8, cc, "9.0")) {
-                        break :b .cuda_fa3;
-                    }
-                }
-
-                break :b .cuda_fa2;
-            },
+            .cuda => .triton,
             .rocm => .triton,
             .tpu => .mosaic_tpu,
             else => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
@@ -265,6 +255,7 @@ test "Backend.auto selects mosaic_tpu on TPU" {
         .devices = &[_]zml.platform.Device{},
         .memories = &[_]zml.platform.Memory{},
         .physical_mesh = undefined,
+        .replicated_sharding = undefined,
         .triton_runtime = null,
         .tpu_ir_runtime = null,
     };

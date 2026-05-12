@@ -248,7 +248,7 @@ pub const fa2 = struct {
             };
         }
 
-        pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(Metadata) {
+        pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(Metadata) {
             return .{
                 .softmax_lse = try zml.Buffer.uninitialized(io, platform, self.softmax_lse.shape(), sharding, .{}),
                 .softmax_lse_accum = try zml.Buffer.uninitialized(io, platform, self.softmax_lse_accum.shape(), sharding, .{}),
@@ -473,7 +473,7 @@ pub const fa3 = struct {
             return res;
         }
 
-        pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(Metadata) {
+        pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(Metadata) {
             return .{
                 .softmax_lse = try zml.Buffer.uninitialized(io, platform, self.softmax_lse.shape(), sharding, .{}),
                 .softmax_lse_accum = try zml.Buffer.uninitialized(io, platform, self.softmax_lse_accum.shape(), sharding, .{}),
@@ -667,7 +667,7 @@ pub const paged_fa2 = struct {
             };
         }
 
-        pub fn initBuffers(self: *const DecodeMetadata, io: std.Io, platform: zml.Platform, out_accum_sharding: zml.sharding.Sharding) !zml.Bufferized(DecodeMetadata) {
+        pub fn initBuffers(self: *const DecodeMetadata, io: std.Io, platform: zml.Platform, out_accum_sharding: zml.Sharding) !zml.Bufferized(DecodeMetadata) {
             return .{
                 .out_accum = try zml.Buffer.uninitialized(io, &platform, self.out_accum.shape(), out_accum_sharding, .{}),
             };
@@ -756,7 +756,7 @@ pub const paged_fa2 = struct {
             };
         }
 
-        pub fn initBuffers(self: *const MixedMetadata, io: std.Io, platform: zml.Platform, out_accum_sharding: zml.sharding.Sharding) !zml.Bufferized(MixedMetadata) {
+        pub fn initBuffers(self: *const MixedMetadata, io: std.Io, platform: zml.Platform, out_accum_sharding: zml.Sharding) !zml.Bufferized(MixedMetadata) {
             return .{
                 .out_accum = try zml.Buffer.uninitialized(io, &platform, self.out_accum.shape(), out_accum_sharding, .{}),
                 .host_metadata = undefined,
@@ -1277,7 +1277,7 @@ pub const paged_fa3 = struct {
             };
         }
 
-        pub fn initBuffers(self: *const DecodeMetadata, io: std.Io, platform: zml.Platform, out_accum_sharding: zml.sharding.Sharding) !zml.Bufferized(DecodeMetadata) {
+        pub fn initBuffers(self: *const DecodeMetadata, io: std.Io, platform: zml.Platform, out_accum_sharding: zml.Sharding) !zml.Bufferized(DecodeMetadata) {
             return .{
                 .out_accum = try zml.Buffer.uninitialized(io, &platform, self.out_accum.shape(), out_accum_sharding, .{}),
             };
@@ -1363,7 +1363,7 @@ pub const paged_fa3 = struct {
             };
         }
 
-        pub fn initBuffers(self: *const MixedMetadata, io: std.Io, platform: zml.Platform, out_accum_sharding: zml.sharding.Sharding) !zml.Bufferized(MixedMetadata) {
+        pub fn initBuffers(self: *const MixedMetadata, io: std.Io, platform: zml.Platform, out_accum_sharding: zml.Sharding) !zml.Bufferized(MixedMetadata) {
             return .{
                 .out_accum = try zml.Buffer.uninitialized(io, &platform, self.out_accum.shape(), out_accum_sharding, .{}),
                 .host_metadata = undefined,

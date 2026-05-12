@@ -1,8 +1,5 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_python//python:py_binary.bzl", "py_binary")
-load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
-load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
+load("@rules_zig//zig:defs.bzl", "zig_library")
 
 cc_library(
     name = "empty",
@@ -23,10 +20,6 @@ zig_library(
     import_name = "platforms/tpu",
     main = "tpu.zig",
     visibility = ["//visibility:public"],
-    data = select({
-        "//platforms:tpu.enabled": [":gen_ir_files"],
-        "//conditions:default": [],
-    }),
     deps = [
         "//bazel",
         "//pjrt",
@@ -39,69 +32,14 @@ zig_library(
     }),
 )
 
-# bazel run //platforms/tpu:requirements.update
-uv_lock(
-    name = "requirements",
-    srcs = ["requirements.in"],
-    out = "requirements.lock.txt",
-    args = [
-        "--emit-index-url",
-        "--emit-find-links",
-        "--index-strategy=unsafe-best-match",
-        "--upgrade",
-        "--universal",
-        "--prerelease=allow",
-    ],
-    python_version = "3.12",
+zig_library(
+    name = "ragged_paged",
     tags = ["manual"],
-)
-
-py_binary(
-    name = "gen_ir",
-    srcs = ["gen_ir.py", "kernel.py"],
-    main = "gen_ir.py",
-    python_version = "3.12",
-    tags = ["manual"],
-    target_compatible_with = ["@platforms//os:linux"],
-    deps = [
-        "@tpu_py_deps//jax",
-        "@tpu_py_deps//absl_py",
-        # "@tpu_py_deps//tpu_inference",
-    ],
-)
-
-runfiles_to_default(
-    name = "gen_ir_files",
-    target_compatible_with = ["@platforms//os:linux"],
+    import_name = "platforms/tpu/ragged_paged",
+    main = "ragged_paged.zig",
     visibility = ["//visibility:public"],
     deps = [
-        ":gen_ir",
-        ":gen_ir_zig",
-    ],
-)
-
-zig_binary(
-    name = "gen_ir_zig",
-    data = [":gen_ir"],
-    linkopts = select({
-        "@platforms//os:macos": ["-Wl,-rpath,@executable_path/../lib"],
-        "//conditions:default": ["-Wl,-rpath,$$ORIGIN/../lib"],
-    }),
-    main = "gen_ir.zig",
-    tags = ["manual"],
-    target_compatible_with = ["@platforms//os:linux"],
-    deps = [
-        ":libpython",
-        "//bazel",
-        "@rules_zig//zig/runfiles",
-    ],
-)
-
-cc_library(
-    name = "libpython",
-    hdrs = ["libpython.h"],
-    deps = [
-        "@rules_python//python/cc:current_py_cc_headers",
-        "@rules_python//python/cc:current_py_cc_libs",
+        "//kernels/mosaic_tpu:mosaic_tpu_builder",
+        "//mlir",
     ],
 )

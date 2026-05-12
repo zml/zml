@@ -11,7 +11,6 @@ copy_to_directory(
     name = "sandbox",
     srcs = [
         "lib/libpjrt_tpu.so",
-        "@zml//platforms/tpu:gen_ir_files",
     ],
     add_directory_to_runfiles = False,
     allow_overwrites = True,
@@ -22,17 +21,9 @@ copy_to_directory(
     hardlink = "auto",
     include_external_repositories = ["**"],
     include_srcs_patterns = [
-        "platforms/tpu/gen_ir.py",
-        "platforms/tpu/kernel.py",
-        "platforms/tpu/gen_ir_zig",
         "**/lib**",
-        "lib/python*/**",
-        "site-packages/**",
     ],
     replace_prefixes = {
-        "platforms/tpu/gen_ir.py": "site-packages/gen_ir.py",
-        "platforms/tpu/kernel.py": "site-packages/kernel.py",
-        "platforms/tpu/gen_ir_zig": "bin/gen_ir_zig",
         "lib/x86_64-linux-gnu": "lib",
     },
 )

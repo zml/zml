@@ -85,9 +85,28 @@ _ROCM_PACKAGES = {
             ":rocprofiler-sdk_so",
             ":rocprofiler-sdk-attach",
         ]),
+        """filegroup(
+            name = "rocprofv3_tool",
+            srcs = glob([
+                "bin/**",
+                "lib/**",
+                "libexec/rocprofiler-sdk/**",
+                "share/rocprofiler-sdk/**",
+            ]),
+        )""",
     ]),
     "rocprofiler-sdk-rocpd": packages.filegroup(name = "rocprofiler-sdk-rocpd", srcs = ["lib/librocprofiler-sdk-rocpd.so.1"]),
-    "rocprofiler-sdk-roctx": packages.filegroup(name = "rocprofiler-sdk-roctx", srcs = ["lib/librocprofiler-sdk-roctx.so.1"]),
+    "rocprofiler-sdk-roctx": "\n".join([
+        packages.cc_library_hdrs_glob(
+            name = "headers",
+            hdrs_glob = ["include/rocprofiler-sdk-roctx/**/*.h"],
+            includes = ["include"],
+        ),
+        packages.filegroup(
+            name = "rocprofiler-sdk-roctx",
+            srcs = ["lib/librocprofiler-sdk-roctx.so.1"],
+        ),
+    ]),
     "hsa-rocr": _rocm_dlopen_patchelf(
         name = "hsa-runtime",
         src = "lib/libhsa-runtime64.so.1",
@@ -254,13 +273,13 @@ def _rocm_impl(mctx):
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/nightly-2026-04-17/pjrt-rocm_linux-amd64.tar.gz",
-        sha256 = "b19db71d3d9aa43bda961a22e81b6a2f48ba2c633a18010c07a66b4ca48ec4d2",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-04-30T17-13-00Z/pjrt-rocm_linux-amd64.tar.gz",
+        sha256 = "e543e48f902656598234b5ffc05196dde84a87106be21ada126c7323572f792b",
     )
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = ["amd-smi-lib", "libpjrt_rocm", "libdrm2-amdgpu", "libdrm-amdgpu-amdgpu1", "hipblaslt", "rocblas"],
+        root_module_direct_deps = ["amd-smi-lib", "libpjrt_rocm", "libdrm2-amdgpu", "libdrm-amdgpu-amdgpu1", "hipblaslt", "rocblas", "rocprofiler-sdk", "rocprofiler-sdk-roctx"],
         root_module_direct_dev_deps = [],
     )
 

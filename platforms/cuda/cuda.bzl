@@ -63,6 +63,11 @@ CUDA_PACKAGES = {
         ),
     ],
     "cuda_nvtx": [
+        packages.cc_library_hdrs_glob(
+            name = "headers",
+            hdrs_glob = ["include/nvtx3/**"],
+            includes = ["include"],
+        ),
         packages.filegroup(
             name = "cuda_nvtx",
             srcs = ["lib/libnvtx3interop.so"],
@@ -200,15 +205,15 @@ _UBUNTU_PACKAGES = {
     ],
 }
 
-PJRT_CUDA_RELEASE = "manual-2026-04-21T10-00-00Z"
+PJRT_CUDA_RELEASE = "manual-2026-04-30T17-13-00Z"
 
 _PJRT_CUDA_ASSETS = {
     "amd64": {
-        "sha256": "8e34f4ead657b697e1c670cb35acb562bee9f5ff31948411d1b8ad11416df417",
+        "sha256": "bab2fe379d8cfdd54f12cb537f44f72f8f023665cfe23524a06930f8d7d12010",
         "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-amd64.tar.gz",
     },
     "arm64": {
-        "sha256": "54da63a8342f848e42fb26ea1f854db5211b55f9abc753e93ad06ae2964bcb44",
+        "sha256": "cce6524a263fcbfa4f40bd39419d26517629f7f0c288707b3af81fe84ad93c45",
         "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-arm64.tar.gz",
     },
 }
@@ -354,6 +359,8 @@ def _cuda_impl(mctx):
             "cuda_nvml_dev_linux_sbsa",
             "zlib1g_linux_arm64",
             "zlib1g_linux_amd64",
+            "cuda_nvtx_linux_x86_64",
+            "cuda_nvtx_linux_sbsa",
         ],
         root_module_direct_dev_deps = [],
     )

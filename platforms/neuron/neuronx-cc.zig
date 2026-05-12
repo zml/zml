@@ -101,5 +101,9 @@ pub fn main(init: std.process.Init) !void {
     defer c.Py_DecRef(neuronxcc_main);
 
     const result = c.PyObject_CallNoArgs(neuronxcc_main);
+    if (result == null) {
+        c.PyErr_Print();
+        std.process.exit(1);
+    }
     defer c.Py_DecRef(result);
 }

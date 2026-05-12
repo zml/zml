@@ -71,6 +71,7 @@ platform(
     ],
     flags = [
         "--force_pic=true",  # required for protobuf upb on Linux
+        "--cpu=aarch64",
     ],
     visibility = ["//visibility:public"],
 )
