@@ -127,6 +127,11 @@ zig_library(
         "@rules_zig//zig/runfiles",
         ":profiling_traceme_lib",
     ] + select({
+        "//platforms:neuron.enabled": [
+            "//platforms/neuron/topology",
+        ],
+        "//conditions:default": [],
+    }) + select({
         "//platforms:cuda.enabled": [
             "//platforms/cuda/flashattn",
         ],

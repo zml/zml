@@ -17,7 +17,7 @@ const CliMesh = enum {
 };
 
 const CliArgs = struct {
-    partitioner: zml.Sharding.Partitioner = .shardy,
+    partitioner: ?zml.Sharding.Partitioner = null,
     mesh: CliMesh = .auto,
 };
 
@@ -156,7 +156,7 @@ fn createSequenceBuffer(
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
-    const args = try parseArgs(init);
+    var args = try parseArgs(init);
 
     const create_options: zml.platform.CreateOptions = switch (args.mesh) {
         .auto => .{},
@@ -183,7 +183,12 @@ pub fn main(init: std.process.Init) !void {
         _ = profiler.stop() catch unreachable;
     }
 
-    log.info("Partitioner: {s}", .{@tagName(args.partitioner)});
+    if (args.partitioner) |partitioner| {
+        log.info("Partitioner: {s}", .{@tagName(partitioner)});
+    } else {
+        args.partitioner = .fromTarget(platform.target);
+        log.info("Partitioner: {s} (default)", .{@tagName(args.partitioner.?)});
+    }
     log.info("{f}", .{platform.physical_mesh});
 
     const sharding: zml.Sharding = try platform.registerSharding(
@@ -239,7 +244,6 @@ pub fn main(init: std.process.Init) !void {
     exe.call(exe_args, &exe_results);
     var out = exe_results.get(zml.Buffer);
     defer out.deinit();
-    _ = try out.await(io);
 
     const out_slice = try out.toSliceAlloc(allocator, io);
     defer out_slice.free(allocator);

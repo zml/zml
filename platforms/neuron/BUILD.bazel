@@ -54,19 +54,24 @@ cc_library(
     name = "empty",
     tags = ["manual"],
     defines = ["ZML_RUNTIME_NEURON_DISABLED"],
+    visibility = ["//platforms/neuron/topology:__pkg__"],
 )
 
 cc_library(
     name = "zmlxneuron",
     tags = ["manual"],
     defines = ["ZML_RUNTIME_NEURON"],
+    visibility = ["//platforms/neuron/topology:__pkg__"],
 )
 
 cc_library(
     name = "libnrt_headers",
     tags = ["manual"],
     hdrs = ["nrt.h"],
-    visibility = ["//bin/zml-smi:__subpackages__"],
+    visibility = [
+        "//bin/zml-smi:__subpackages__",
+        "//platforms/neuron/topology:__pkg__",
+    ],
     deps = ["@libpjrt_neuron//:libnrt_headers"],
 )
 
