@@ -34,7 +34,7 @@ fn remapXcd(b: *Builder, pid: Value, GRID_MN: Value, NUM_XCDS: Value) Value {
     // tall_xcds = GRID_MN % NUM_XCDS
     const tall_xcds_raw = GRID_MN.rem(NUM_XCDS);
     // tall_xcds = NUM_XCDS if tall_xcds == 0 else tall_xcds
-    const tall_xcds = b.where(tall_xcds_raw.eq(0), NUM_XCDS, tall_xcds_raw);
+    const tall_xcds = b.select(tall_xcds_raw.eq(0), NUM_XCDS, tall_xcds_raw);
     // xcd = pid % NUM_XCDS
     const xcd = pid.rem(NUM_XCDS);
     // local_pid = pid // NUM_XCDS
@@ -134,11 +134,13 @@ fn attnFwdInner(
     block_min: Value,
     block_max: Value,
     n_extra_tokens: Value,
+    alibi_slope: Value,
+    offs_m: Value,
     BLOCK_M: i32,
     BLOCK_N: i32,
     BLOCK_DMODEL: i32,
     BLOCK_DMODEL_POW2: i32,
-    SM_SCALE: f32,
+    sm_scale: Value,
     DTYPE: DType,
     MASK_STEPS: bool,
     PADDED_HEAD: bool,
@@ -147,7 +149,7 @@ fn attnFwdInner(
     _ = start_m;
     _ = seqlen_q;
     const RCP_LN2_: f32 = 1.4426950408889634;
-    const qk_scale: f32 = SM_SCALE * RCP_LN2_;
+    const qk_scale = sm_scale.mul(RCP_LN2_);
     const BM: i64 = BLOCK_M;
     const BN: i64 = BLOCK_N;
 
@@ -220,7 +222,18 @@ fn attnFwdInner(
         // qk = tl.where(mask, qk, float("-inf"))
         qk = b.where(mask, qk, b.full(&.{ BM, BN }, -std.math.inf(f32), .f32));
 
-        // alibi_slope is None for our pinned config (alibi_slopes_ptr is not used in the outer)
+        // alibi_slope is not None:
+        // global_m_positions = start_m * BLOCK_M + tl.arange(0, BLOCK_M) = offs_m
+        // global_n_positions = start_n + tl.arange(0, BLOCK_N)
+        const global_n_positions = start_n.add(b.arange(0, @as(i32, @intCast(BLOCK_N)), .i32));
+        // relative_pos = offs_m[:, None] + seqlen_k - seqlen_q - global_n_positions[None, :]
+        // Since SEQLEN_Q == SEQLEN_K, this simplifies to offs_m[:, None] - global_n_positions[None, :]
+        const relative_pos = offs_m.expandDims(1).sub(global_n_positions.expandDims(0));
+        // alibi_block = -1 * alibi_slope * abs(relative_pos)
+        const neg_alibi_slope = alibi_slope.mul(@as(f32, -1.0));
+        const alibi_block = neg_alibi_slope.mul(b.sitofp(b.absi(relative_pos), .f32));
+        // qk += alibi_block * RCP_LN2
+        qk = qk.add(alibi_block.mul(RCP_LN2));
 
         // get max scores so far
         // m_ij = tl.maximum(m_i, tl.max(qk, 1))
@@ -400,56 +413,55 @@ pub const MhaFwd = struct {
             .descale_q_ptr = .{ .ptr = .f32 },
             .descale_k_ptr = .{ .ptr = .f32 },
             .descale_v_ptr = .{ .ptr = .f32 },
+            .out_ptr = .{ .ptr = cfg.dtype },
             .alibi_slopes_ptr = .{ .ptr = .f32 },
             .s_dmask_ptr = .{ .ptr = .f32 },
             .dropout_mask_ptr = .{ .ptr = .f32 },
             .softmax_lse_ptr = .{ .ptr = .f32 },
             .sink_ptr = .{ .ptr = .f32 },
             // strides — q
-            .stride_qz_in = .{ .scalar = .i32 },
-            .stride_qh_in = .{ .scalar = .i32 },
-            .stride_qm_in = .{ .scalar = .i32 },
+            .stride_qz_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
+            .stride_qh_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
+            .stride_qm_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
             .stride_qk_in = .{ .scalar = .i32 },
             // strides — k
-            .stride_kz_in = .{ .scalar = .i32 },
-            .stride_kh_in = .{ .scalar = .i32 },
-            .stride_kn_in = .{ .scalar = .i32 },
+            .stride_kz_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
+            .stride_kh_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
+            .stride_kn_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
             .stride_kk_in = .{ .scalar = .i32 },
             // strides — v
-            .stride_vz_in = .{ .scalar = .i32 },
-            .stride_vh_in = .{ .scalar = .i32 },
-            .stride_vn_in = .{ .scalar = .i32 },
+            .stride_vz_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
+            .stride_vh_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
+            .stride_vn_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
             .stride_vk_in = .{ .scalar = .i32 },
             // strides — descale
             .stride_descale_q_z_in = .{ .scalar = .i32 },
             .stride_descale_k_z_in = .{ .scalar = .i32 },
             .stride_descale_v_z_in = .{ .scalar = .i32 },
             // strides — output
-            .stride_oz_in = .{ .scalar = .i32 },
-            .stride_oh_in = .{ .scalar = .i32 },
-            .stride_om_in = .{ .scalar = .i32 },
+            .stride_oz_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
+            .stride_oh_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
+            .stride_om_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
             .stride_on_in = .{ .scalar = .i32 },
             // strides — alibi
-            .stride_alibi_z_in = .{ .scalar = .i32 },
+            .stride_alibi_z_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
             .stride_alibi_h_in = .{ .scalar = .i32 },
             // strides — sd_mask / dropout
-            .stride_sd_z_in = .{ .scalar = .i32 },
-            .stride_sd_h_in = .{ .scalar = .i32 },
-            .stride_sd_m_in = .{ .scalar = .i32 },
+            .stride_sd_z_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
+            .stride_sd_h_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
+            .stride_sd_m_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
             .stride_sd_n_in = .{ .scalar = .i32 },
             // strides — lse
-            .stride_lse_z_in = .{ .scalar = .i32 },
-            .stride_lse_h_in = .{ .scalar = .i32 },
+            .stride_lse_z_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
+            .stride_lse_h_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
             .stride_lse_m_in = .{ .scalar = .i32 },
             // runtime scalars
             .sm_scale = .{ .scalar = .f32 },
             .cu_seqlens_q = .{ .ptr = .i32 },
             .cu_seqlens_k = .{ .ptr = .i32 },
             .dropout_p = .{ .scalar = .f32 },
-            .philox_seed = .{ .scalar = .i64 },
-            .philox_offset_base_in = .{ .scalar = .i32 },
-            // output
-            .out_ptr = .{ .ptr = cfg.dtype },
+            .philox_seed = .{ .scalar_opts = .{ .dtype = .i64, .divisibility = 16 } },
+            .philox_offset_base_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
         });
 
         // USE_INT64_STRIDES=false: strides used as-is (i32)
@@ -469,34 +481,6 @@ pub const MhaFwd = struct {
         const stride_oh = a.stride_oh_in;
         const stride_om = a.stride_om_in;
         const stride_on = a.stride_on_in;
-
-        // tl.assume on all stride inputs
-        b.assume(a.stride_qz_in.ge(0));
-        b.assume(a.stride_qh_in.ge(0));
-        b.assume(a.stride_qm_in.ge(0));
-        b.assume(a.stride_qk_in.ge(0));
-        b.assume(a.stride_kz_in.ge(0));
-        b.assume(a.stride_kh_in.ge(0));
-        b.assume(a.stride_kn_in.ge(0));
-        b.assume(a.stride_kk_in.ge(0));
-        b.assume(a.stride_vz_in.ge(0));
-        b.assume(a.stride_vh_in.ge(0));
-        b.assume(a.stride_vn_in.ge(0));
-        b.assume(a.stride_vk_in.ge(0));
-        b.assume(a.stride_oz_in.ge(0));
-        b.assume(a.stride_oh_in.ge(0));
-        b.assume(a.stride_om_in.ge(0));
-        b.assume(a.stride_on_in.ge(0));
-        b.assume(a.stride_alibi_z_in.ge(0));
-        b.assume(a.stride_alibi_h_in.ge(0));
-        b.assume(a.philox_offset_base_in.ge(0));
-        b.assume(a.stride_sd_z_in.ge(0));
-        b.assume(a.stride_sd_h_in.ge(0));
-        b.assume(a.stride_sd_m_in.ge(0));
-        b.assume(a.stride_sd_n_in.ge(0));
-        b.assume(a.stride_lse_z_in.ge(0));
-        b.assume(a.stride_lse_h_in.ge(0));
-        b.assume(a.stride_lse_m_in.ge(0));
 
         // calculate offsets
         // wid = tl.program_id(0)
@@ -519,13 +503,35 @@ pub const MhaFwd = struct {
         // offs_d = tl.arange(0, BLOCK_DMODEL_POW2)
         const offs_d = b.arange(0, BLOCK_DMODEL_POW2, .i32);
 
+        // tl.assume on all stride inputs (matching Python's IS_FP8=false path)
+        b.assume(a.stride_qz_in.ge(0));
+        b.assume(a.stride_qh_in.ge(0));
+        b.assume(a.stride_qm_in.ge(0));
+        b.assume(a.stride_qk_in.ge(0));
+        b.assume(a.stride_kz_in.ge(0));
+        b.assume(a.stride_kh_in.ge(0));
+        b.assume(a.stride_kn_in.ge(0));
+        b.assume(a.stride_kk_in.ge(0));
+        b.assume(a.stride_vz_in.ge(0));
+        b.assume(a.stride_vh_in.ge(0));
+        b.assume(a.stride_vn_in.ge(0));
+        b.assume(a.stride_vk_in.ge(0));
+        b.assume(a.philox_offset_base_in.ge(0));
+        b.assume(a.stride_sd_z_in.ge(0));
+        b.assume(a.stride_sd_h_in.ge(0));
+        b.assume(a.stride_sd_m_in.ge(0));
+        b.assume(a.stride_sd_n_in.ge(0));
+        b.assume(a.stride_lse_z_in.ge(0));
+        b.assume(a.stride_lse_h_in.ge(0));
+        b.assume(a.stride_lse_m_in.ge(0));
+
         // HAS_PE=false: skip pe offsets
 
         // VARLEN=false:
         const cu_seqlens_q_start = b.liftAs(0, .i32);
         const cu_seqlens_k_start = b.liftAs(0, .i32);
-        const seqlen_q = b.liftAs(SEQLEN_Q, .i32);
         const seqlen_k = b.liftAs(SEQLEN_K, .i32);
+        const seqlen_q = if (SEQLEN_Q == SEQLEN_K) seqlen_k else b.liftAs(SEQLEN_Q, .i32);
 
         // n_blocks = _cdiv_fn(seqlen_k, BLOCK_N)
         var n_blocks = seqlen_k.add(BLOCK_N - 1).div(BLOCK_N);
@@ -570,9 +576,10 @@ pub const MhaFwd = struct {
         // v_ptrs = v_ptr + v_offs
         const v_ptrs = a.v_ptr.addPtr(v_offs);
 
-        // alibi slopes — alibi_slopes_ptr is not None but alibi_slope is not used by _attn_fwd_inner
-        // when IS_CAUSAL=false and no alibi block is computed. For the pinned config, alibi_slope = None
-        // (alibi_slopes_ptr is in the signature but we do not use it).
+        // alibi slopes: load alibi_slope = tl.load(alibi_slopes_ptr + alibi_offs)
+        // alibi_offs = off_z * stride_alibi_z + off_q_head * stride_alibi_h
+        const alibi_offs = off_z.mul(a.stride_alibi_z_in).add(off_q_head.mul(a.stride_alibi_h_in));
+        const alibi_slope = b.load(a.alibi_slopes_ptr.addPtr(alibi_offs));
 
         // ENABLE_SINK=false
         // m_i_value = float("-inf")
@@ -649,17 +656,20 @@ pub const MhaFwd = struct {
                 block_min,
                 block_max,
                 n_extra_tokens,
+                alibi_slope,
+                offs_m,
                 BLOCK_M,
                 BLOCK_N,
                 BLOCK_DMODEL,
                 BLOCK_DMODEL_POW2,
-                cfg.sm_scale,
+                a.sm_scale,
                 cfg.dtype,
                 false, // MASK_STEPS
                 PADDED_HEAD,
             );
             const final_acc = result[0];
             const final_l_i = result[1];
+            const final_m_i = result[2];
 
             // epilogue
             // l_recip = 1 / l_i[:, None]
@@ -684,7 +694,43 @@ pub const MhaFwd = struct {
 
             // op = acc.to(out_ptr.dtype.element_ty)
             const op = acc_out.to(cfg.dtype);
-            b.storeOpts(a.out_ptr.addPtr(offs_out), op, .{ .mask = out_mask });
+
+            // n_extra_tokens_check = (start_m + 1) * BLOCK_M - SEQLEN_Q
+            const start_m_plus_1 = start_m.add(1);
+            const end_m = start_m_plus_1.mul(BLOCK_M);
+            const n_extra_check = end_m.sub(seqlen_q);
+
+            // softmax_lse = (m_i + log2(l_i)) * ln(2)
+            const log2_l_i = b.log2(final_l_i);
+            const lse_val = final_m_i.add(log2_l_i).mul(@as(f32, 0.6931471805599453));
+            // lse_offs = off_q_head * stride_lse_h + offs_m * stride_lse_m
+            const lse_offs_val = off_q_head.mul(a.stride_lse_h_in)
+                .add(offs_m.mul(a.stride_lse_m_in));
+            const lse_ptrs = a.softmax_lse_ptr.addPtr(lse_offs_val);
+
+            // padded_block_k condition: n_extra_check > 0
+            const padded_cond = n_extra_check.gt(0);
+            // scf.if(padded_cond) { masked lse store } else { unmasked lse store }
+            {
+                var ie = b.openIfElse(padded_cond, .{});
+                {
+                    // then: masked store (n_extra_tokens > 0)
+                    const boundary = seqlen_q.sub(start_m.mul(BLOCK_M));
+                    const lse_mask = offs_m.lt(boundary);
+                    b.storeOpts(lse_ptrs, lse_val, .{ .mask = lse_mask });
+                    ie.yieldThen(.{});
+                }
+                {
+                    // else: unmasked store
+                    b.store(lse_ptrs, lse_val);
+                    ie.yieldElse(.{});
+                }
+            }
+
+            // Store output with mask based on padded_cond
+            const all_true = b.full(&.{ BLOCK_M, 1 }, 1, .i1);
+            const final_out_mask = b.select(padded_cond, out_mask, all_true);
+            b.storeOpts(a.out_ptr.addPtr(offs_out), op, .{ .mask = final_out_mask });
         } else {
             // There are full blocks followed by one masked block
             const full_block_max = n_blocks.sub(masked_blocks_val).mul(BLOCK_N);
@@ -706,11 +752,13 @@ pub const MhaFwd = struct {
                 block_min,
                 full_block_max,
                 n_extra_tokens,
+                alibi_slope,
+                offs_m,
                 BLOCK_M,
                 BLOCK_N,
                 BLOCK_DMODEL,
                 BLOCK_DMODEL_POW2,
-                cfg.sm_scale,
+                a.sm_scale,
                 cfg.dtype,
                 false, // MASK_STEPS
                 PADDED_HEAD,
@@ -741,11 +789,13 @@ pub const MhaFwd = struct {
                 full_block_max,
                 block_max,
                 n_extra_tokens,
+                alibi_slope,
+                offs_m,
                 BLOCK_M,
                 BLOCK_N,
                 BLOCK_DMODEL,
                 BLOCK_DMODEL_POW2,
-                cfg.sm_scale,
+                a.sm_scale,
                 cfg.dtype,
                 true, // MASK_STEPS
                 PADDED_HEAD,

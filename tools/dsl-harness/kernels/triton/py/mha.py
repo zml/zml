@@ -1,9 +1,17 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
-import torch
+from __future__ import annotations
+
+import types as _types
+# Minimal torch stub — only torch.Tensor is used (as a type annotation).
+torch = _types.SimpleNamespace(Tensor=object)
+
 import triton
 import triton.language as tl
+
+from typing import Any, Dict, Tuple
+from triton_helpers import FakeTensor
 
 
 @triton.jit
@@ -351,8 +359,8 @@ def _attn_fwd(
     dropout_p,
     philox_seed,
     philox_offset_base_in,
-    SEQLEN_Q,
-    SEQLEN_K,
+    SEQLEN_Q: tl.constexpr,
+    SEQLEN_K: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     NUM_Q_HEADS: tl.constexpr,
     NUM_K_HEADS: tl.constexpr,
@@ -367,7 +375,7 @@ def _attn_fwd(
     IS_FP8: tl.constexpr,
     FP8_MAX: tl.constexpr,
     VARLEN: tl.constexpr,
-    BATCH,
+    BATCH: tl.constexpr,
     NUM_XCD: tl.constexpr,
     USE_INT64_STRIDES: tl.constexpr,
     ENABLE_SINK: tl.constexpr,
@@ -924,4 +932,151 @@ def _attn_fwd(
         out_mask = out_mask & (offs_d[None, :] < BLOCK_DMODEL)
     op = acc.to(out_ptr.dtype.element_ty)
     tl.store(out_ptr + offs_out, op, mask=out_mask)
+
+
+# ---------------------------------------------------------------------------
+# Harness adapter
+# ---------------------------------------------------------------------------
+
+_DTYPE_MAP = {"bf16": "bf16", "f16": "fp16", "f32": "fp32"}
+
+
+def build_args(cfg: Dict[str, Any]) -> Tuple[list, Dict[str, Any]]:
+    """Build positional args for `_attn_fwd.warmup(...)`.
+
+    Maps the Zig Config fields to the Python kernel's runtime + constexpr
+    parameters in the exact positional order of the `_attn_fwd` signature.
+    """
+    dtype = _DTYPE_MAP.get(str(cfg.get("dtype", "bf16")), "bf16")
+    BATCH = int(cfg.get("BATCH", 1))
+    NUM_Q_HEADS = int(cfg.get("NUM_Q_HEADS", 32))
+    NUM_K_HEADS = int(cfg.get("NUM_K_HEADS", 8))
+    SEQLEN_Q = int(cfg.get("SEQLEN_Q", 1024))
+    SEQLEN_K = int(cfg.get("SEQLEN_K", 1024))
+    BLOCK_M = int(cfg.get("BLOCK_M", 128))
+    BLOCK_N = int(cfg.get("BLOCK_N", 64))
+    BLOCK_DMODEL = int(cfg.get("BLOCK_DMODEL", 128))
+    BLOCK_DMODEL_POW2 = int(cfg.get("BLOCK_DMODEL_POW2", 128))
+    NUM_XCD = int(cfg.get("NUM_XCD", 8))
+    sm_scale = float(cfg.get("sm_scale", 1.0 / (BLOCK_DMODEL ** 0.5)))
+
+    IS_CAUSAL = bool(cfg.get("IS_CAUSAL", False))
+    VARLEN = bool(cfg.get("VARLEN", False))
+    IS_FP8 = bool(cfg.get("IS_FP8", False))
+    ENABLE_DROPOUT = bool(cfg.get("ENABLE_DROPOUT", False))
+    ENABLE_SINK = bool(cfg.get("ENABLE_SINK", False))
+    SLIDING_WINDOW = int(cfg.get("SLIDING_WINDOW", 0))
+    HAS_PE = bool(cfg.get("HAS_PE", False))
+    USE_INT64_STRIDES = bool(cfg.get("USE_INT64_STRIDES", False))
+    RETURN_SCORES = bool(cfg.get("RETURN_SCORES", False))
+    PRELOAD_V = bool(cfg.get("PRELOAD_V", True))
+    BLOCK_DMODEL_PE = int(cfg.get("BLOCK_DMODEL_PE", 0))
+    FP8_MAX = float(cfg.get("FP8_MAX", 448.0))
+
+    # Shapes — synthetic, just need correct ranks/dtypes for lowering.
+    q_shape = (BATCH, NUM_Q_HEADS, SEQLEN_Q, BLOCK_DMODEL)
+    k_shape = (BATCH, NUM_K_HEADS, SEQLEN_K, BLOCK_DMODEL)
+    v_shape = (BATCH, NUM_K_HEADS, SEQLEN_K, BLOCK_DMODEL)
+    o_shape = q_shape
+    descale_shape = (BATCH,)
+    alibi_shape = (BATCH, NUM_Q_HEADS)
+    sd_shape = (BATCH, NUM_Q_HEADS, SEQLEN_Q, SEQLEN_K)
+    lse_shape = (BATCH, NUM_Q_HEADS, SEQLEN_Q)
+    sink_shape = (BATCH,)
+    cu_seqlens_shape = (BATCH + 1,)
+
+    # Strides — use non-trivial values (>1, non-power-of-2) to prevent
+    # Triton from auto-specializing them into compile-time constants.
+    # The actual values don't affect TTIR structure, only whether Triton
+    # keeps them as function arguments.
+    stride_qz = NUM_Q_HEADS * SEQLEN_Q * BLOCK_DMODEL
+    stride_qh = SEQLEN_Q * BLOCK_DMODEL
+    stride_qm = BLOCK_DMODEL
+    stride_qk = 3  # not 1 → prevents specialization
+    # Strides for K
+    stride_kz = NUM_K_HEADS * SEQLEN_K * BLOCK_DMODEL
+    stride_kh = SEQLEN_K * BLOCK_DMODEL
+    stride_kn = BLOCK_DMODEL
+    stride_kk = 3
+    # Strides for V
+    stride_vz = stride_kz
+    stride_vh = stride_kh
+    stride_vn = BLOCK_DMODEL
+    stride_vk = 3
+    # Descale strides
+    stride_descale_q_z = 3
+    stride_descale_k_z = 3
+    stride_descale_v_z = 3
+    # Output strides
+    stride_oz = stride_qz
+    stride_oh = stride_qh
+    stride_om = stride_qm
+    stride_on = 3
+    # Alibi strides
+    stride_alibi_z = NUM_Q_HEADS
+    stride_alibi_h = 3
+    # SD mask / dropout strides
+    stride_sd_z = NUM_Q_HEADS * SEQLEN_Q * SEQLEN_K
+    stride_sd_h = SEQLEN_Q * SEQLEN_K
+    stride_sd_m = SEQLEN_K
+    stride_sd_n = 3
+    # LSE strides
+    stride_lse_z = NUM_Q_HEADS * SEQLEN_Q
+    stride_lse_h = SEQLEN_Q
+    stride_lse_m = 3
+
+    args = [
+        # Pointer args (runtime)
+        FakeTensor(dtype, q_shape),             # q_ptr
+        FakeTensor(dtype, k_shape),             # k_ptr
+        FakeTensor(dtype, v_shape),             # v_ptr
+        FakeTensor("fp32", descale_shape),      # descale_q_ptr
+        FakeTensor("fp32", descale_shape),      # descale_k_ptr
+        FakeTensor("fp32", descale_shape),      # descale_v_ptr
+        FakeTensor(dtype, o_shape),             # out_ptr
+        FakeTensor("fp32", alibi_shape),        # alibi_slopes_ptr
+        FakeTensor("fp32", sd_shape),           # s_dmask_ptr
+        FakeTensor("fp32", sd_shape),           # dropout_mask_ptr
+        FakeTensor("fp32", lse_shape),          # softmax_lse_ptr
+        FakeTensor("fp32", sink_shape),         # sink_ptr
+        # Strides (runtime scalars)
+        stride_qz, stride_qh, stride_qm, stride_qk,
+        stride_kz, stride_kh, stride_kn, stride_kk,
+        stride_vz, stride_vh, stride_vn, stride_vk,
+        stride_descale_q_z, stride_descale_k_z, stride_descale_v_z,
+        stride_oz, stride_oh, stride_om, stride_on,
+        stride_alibi_z, stride_alibi_h,
+        stride_sd_z, stride_sd_h, stride_sd_m, stride_sd_n,
+        stride_lse_z, stride_lse_h, stride_lse_m,
+        # Runtime scalars
+        sm_scale,                               # sm_scale
+        FakeTensor("i32", cu_seqlens_shape),    # cu_seqlens_q
+        FakeTensor("i32", cu_seqlens_shape),    # cu_seqlens_k
+        0.0,                                    # dropout_p
+        2**33,                                  # philox_seed (force i64)
+        0,                                      # philox_offset_base_in
+        # tl.constexpr params
+        SEQLEN_Q,
+        SEQLEN_K,
+        IS_CAUSAL,
+        NUM_Q_HEADS,
+        NUM_K_HEADS,
+        PRELOAD_V,
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_DMODEL,
+        BLOCK_DMODEL_POW2,
+        BLOCK_DMODEL_PE,
+        RETURN_SCORES,
+        ENABLE_DROPOUT,
+        IS_FP8,
+        FP8_MAX,
+        VARLEN,
+        BATCH,
+        NUM_XCD,
+        USE_INT64_STRIDES,
+        ENABLE_SINK,
+        SLIDING_WINDOW,
+    ]
+    return args, {"grid": (1,)}
 
