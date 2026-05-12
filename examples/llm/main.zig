@@ -19,6 +19,7 @@ const Args = struct {
     seqlen: u32 = 2048,
     topk: u32 = 4,
     backend: ?zml.attention.attention.Backend = null,
+    attnd_ip: ?[]const u8 = null,
     single: bool = false,
     profile: bool = false,
 
@@ -32,7 +33,8 @@ const Args = struct {
         \\   --prompt=<string>   Prompt to use for generation (default: none)
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
-        \\   --backend=<text>    Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
+        \\   --backend=<text>    Attention backend to use ([vanilla, attnd, cuda_fa2, cuda_fa3], default: auto-selection)
+        \\   --attnd-ip=<addr>   Register and prefer the `attnd` backend at the provided `IP:PORT`
         \\   --single            Create a single kernel encompassing all the layers when supported
         \\                       (only used by LFM2 which uses multiple kernels by default)
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
@@ -85,11 +87,15 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    const backend = args.backend orelse b: {
-        const selected = zml.attention.attention.Backend.auto(platform);
-        log.info("Selected backend: {}", .{selected});
-        break :b selected;
-    };
+    const backend = args.backend orelse if (args.attnd_ip) |attnd_ip| b: {
+        try zml.attention.attnd.register(allocator, io, platform, .{
+            .destination = try .parseLiteral(attnd_ip),
+            .mtu = 9000,
+        });
+        break :b zml.attention.attention.Backend.attnd;
+    } else zml.attention.attention.Backend.auto(platform);
+    defer if (args.attnd_ip) |_| zml.attention.attnd.deinit();
+    log.info("Selected backend: {}", .{backend});
 
     //
     // Model initialization
