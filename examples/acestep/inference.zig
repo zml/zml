@@ -882,15 +882,16 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
 
     std.log.info("DiT call with input size : {d}x{d} {d}x{d}", .{ t_25hz, audio_dim, latents.encoder_conditions.shape.dim(0), latents.encoder_conditions.shape.dim(1) });
 
+    // populate x with gaussian noise seeded with id
     const seed: u64 = @intCast(id);
     var prng = std.Random.DefaultPrng.init(seed);
     const random = prng.random();
-    const I: usize = @intCast(latents.x.shape.dim(0));
-    const J: usize = @intCast(latents.x.shape.dim(1));
-    for (0..I) |i| {
-        for (0..J) |j| {
+    const dimI: usize = @intCast(latents.x.shape.dim(0));
+    const dimJ: usize = @intCast(latents.x.shape.dim(1));
+    for (0..dimI) |i| {
+        for (0..dimJ) |j| {
             const rand: f32 = random.floatNorm(f32);
-            latents.x.items(zml.floats.BFloat16)[i * J + j] = zml.floats.BFloat16.fromF32(rand);
+            latents.x.items(zml.floats.BFloat16)[i * dimJ + j] = zml.floats.BFloat16.fromF32(rand);
         }
     }
 

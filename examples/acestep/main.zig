@@ -99,7 +99,7 @@ pub const Uri_handler = struct {
                                                      else "file://acestep//models//acestep-5Hz-lm-4B",
             .aceemb = "file://acestep//models//Qwen3-Embedding-0.6B",
             .acedit = if (args.dit_size == 0) "file://acestep//models//acestep-v15-turbo"
-                                                     else "file://acestep//models//acestep-v15-turbo-xl",
+                                                     else "file://acestep//models//acestep-v15-xl-turbo",
             .acevae = "file://acestep//models//Oobleck-vae",
         };
     }
@@ -207,6 +207,7 @@ const Args = struct {
 // info:   wav                                                 1.27s
 // info: total                                                23.42s
 
+// TODO: instrumental est hardcodé qq part
 // TODO: réparer tic toc après tiled generation
 // TODO: terminer compilation par bloc parallèle (enc)
 // TODO: reference audio
