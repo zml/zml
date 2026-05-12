@@ -175,6 +175,7 @@ const Args = struct {
     dit_size: u8 = 0,
     skip_cfg: bool = false,
     duration: i64 = -1,
+    n: u8 = 1,
 
     pub const help =
         \\ Use acestep --prompt=<...> [options]
@@ -189,6 +190,7 @@ const Args = struct {
         \\   --dit_size=<int>      Size of the DiT model (0/1 for turbo/turbo-xl, default: 0)
         \\   --skip-cfg            Optional, disable CFG phase
         \\   --duration=<number>   Constrains the duration in seconds (required if CFG is disabled, default: -1)
+        \\   --n=<int>             Number of audio files to generate with different seeds for the diffusion (default: 1)
         \\
     ;
 };
@@ -196,16 +198,16 @@ const Args = struct {
 // 4090 (70s audio)
 // bazel run --config=release acestep --//platforms:cuda=true -- --prompt='a chill piano melody' --llm-size=1 --instru --local-files
 // info: Module    init  compile     load  prefill   decode    total
-// info:   llm    0.31s    1.91s    0.88s    0.05s    1.40s    4.56s
-// info:   cfg    0.00s    0.87s    0.00s    0.05s    4.59s    5.52s
-// info:   emb    0.00s    1.24s    0.59s    0.00s    0.00s    2.03s
-// info:   enc    0.00s    4.72s    0.59s    0.01s    0.00s    5.32s
-// info:   dit    0.00s    2.51s    0.64s    0.20s    0.00s    3.35s
-// info:   vae    0.00s    1.50s    0.54s    0.52s    0.00s    2.55s
-// info:   wav                                                 1.25s
-// info: total                                                24.62s
+// info:   llm    0.26s    1.82s    0.73s    0.05s    0.94s    3.81s
+// info:   cfg    0.00s    0.85s    0.00s    0.05s    4.30s    5.20s
+// info:   emb    0.00s    1.40s    0.60s    0.00s    0.00s    2.21s
+// info:   enc    0.00s    4.69s    0.58s    0.01s    0.00s    5.29s
+// info:   dit    0.00s    2.24s    0.60s    0.20s    0.00s    3.05s
+// info:   vae    0.00s    1.45s    0.57s    0.52s    0.00s    2.55s
+// info:   wav                                                 1.27s
+// info: total                                                23.42s
 
-// TODO: terminer compilation par bloc parallèle (enc, dit)
+// TODO: terminer compilation par bloc parallèle (enc)
 // TODO: several outputs (either tiled or batched)
 // TODO: reference audio
 // TODO: reference timbre
@@ -338,53 +340,65 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     zml_handler.toc(&zml_handler.timers.enc.total);
 
     // ------------------------------------------------
-    // Generation phase : diffusion with DiT model
+    // Tiled generation : compile DiT and VAE models
     // ------------------------------------------------
 
-    zml_handler.tic(&zml_handler.timers.dit.total);
-    
     var acedit = try acedit_.AceDit_handler.init(zml_handler, duration, diffuse_args.encoder_conditions.shape.dim(.s_enc));
     defer acedit.deinit(zml_handler.allocator);
 
-    const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, diffuse_args);
-    defer diffused_latents.deinit(zml_handler.allocator);
-
-    acedit.unloadBuffers(zml_handler.allocator);
-
-    zml_handler.toc(&zml_handler.timers.dit.total);
-    
-    // ------------------------------------------------
-    // Output latents of the DiT model are decoded
-    // with the VAE model
-    // ------------------------------------------------
-
-    zml_handler.tic(&zml_handler.timers.vae.total);
-
     const decode_t: u32 = 1;
-    //var acevae = try acevae_.AceVae_handler.init(zml_handler, duration);
     var acevae = try acevae_.AceVae_handler.init(zml_handler, decode_t + 2);
     defer acevae.deinit(zml_handler.allocator);
+    
+    for (0..zml_handler.args.n) |i| {
+        
+        // ------------------------------------------------
+        // Generation phase : diffusion with DiT model
+        // ------------------------------------------------
+    
+        zml_handler.tic(&zml_handler.timers.dit.total);
+    
+        const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, diffuse_args);
+        defer diffused_latents.deinit(zml_handler.allocator);
+    
+        zml_handler.toc(&zml_handler.timers.dit.total);
+        
+        // ------------------------------------------------
+        // Output latents of the DiT model are decoded
+        // with the VAE model
+        // ------------------------------------------------
+    
+        zml_handler.tic(&zml_handler.timers.vae.total);
+    
+        const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatentsTiled(zml_handler, &acevae, diffused_latents, decode_t);
+        defer decoded_audio.deinit(zml_handler.allocator);
+    
+        zml_handler.toc(&zml_handler.timers.vae.total);
+    
+        // ------------------------------------------------
+        // Export decoded audio as WAV
+        // ------------------------------------------------
+    
+         zml_handler.tic(&zml_handler.timers.wav);
+         
+         try exportDecodedAudioAsWav(zml_handler, decoded_audio, "decoded_audio_x.wav", i);
+    
+         zml_handler.toc(&zml_handler.timers.wav);
+    }
 
-    //const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents);
-    const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatentsTiled(zml_handler, &acevae, diffused_latents, decode_t);
-    defer decoded_audio.deinit(zml_handler.allocator);
-
+    acedit.unloadBuffers(zml_handler.allocator);
     acevae.unloadBuffers(zml_handler.allocator);
-
-    zml_handler.toc(&zml_handler.timers.vae.total);
-
-    // ------------------------------------------------
-    // Export decoded audio as WAV
-    // ------------------------------------------------
-
-     zml_handler.tic(&zml_handler.timers.wav);
-     
-     try exportDecodedAudioAsWav(zml_handler.local_io, decoded_audio, "decoded_audio.wav");
-
-     zml_handler.toc(&zml_handler.timers.wav);
+    
 }
 
-pub fn exportDecodedAudioAsWav(io: std.Io, decoded_audio: inference.DecodedAudio, output_path: []const u8) !void {
+pub fn exportDecodedAudioAsWav(zml_handler: *Zml_handler, decoded_audio: inference.DecodedAudio, output_path: []const u8, index: usize) !void {
+    const io = zml_handler.local_io;
+    
+    const flag: u8 = @intCast(index);
+    const path_copy = try zml_handler.allocator.dupe(u8, output_path);
+    defer zml_handler.allocator.free(path_copy);
+    path_copy[output_path.len - 5] = flag;
+    
     const audio = decoded_audio.audio;
     const shape = audio.shape;
 
@@ -413,7 +427,7 @@ pub fn exportDecodedAudioAsWav(io: std.Io, decoded_audio: inference.DecodedAudio
     const riff_chunk_size_u64: u64 = 36 + 12 + data_chunk_size;
     const riff_chunk_size: u32 = std.math.cast(u32, riff_chunk_size_u64) orelse return error.AudioTooLarge;
 
-    var file = try std.Io.Dir.createFile(.cwd(), io, output_path, .{ .truncate = true });
+    var file = try std.Io.Dir.createFile(.cwd(), io, path_copy, .{ .truncate = true });
     defer file.close(io);
 
     var file_writer = file.writer(io, &.{});
