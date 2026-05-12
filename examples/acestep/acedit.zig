@@ -13,7 +13,7 @@ pub const AceDit_handler = struct {
     model: AceDit,
     params: Params,
     config: Config,
-    diffuse_exe: zml.Exe,
+    exes: Exes,
     model_buffers: zml.Bufferized(AceDit),
     shardings: main.Shardings,
     
@@ -41,6 +41,11 @@ pub const AceDit_handler = struct {
             .x = .init(.{ .t = 25 * target_duration, .a = config.timbre_hidden_dim }, .bf16),
             .context_latents = .init(.{ .t = 25 * target_duration, .a = 2 * config.timbre_hidden_dim }, .bf16),
             .y = .init(.{ .s = conditions_len, .d = config.hidden_size }, .bf16),
+            .y_proj = .init(.{ .s = conditions_len, .d = config.hidden_size }, .bf16),
+            .mask = .init(.{ .q = @divFloor(25 * target_duration + 1, 2), .k = @divFloor(25 * target_duration + 1, 2) }, .bf16),
+            .hidden_states = .init(.{ .t = @divFloor(25 * target_duration + 1, 2), .d = config.hidden_size }, .bf16),
+            .temb = .init(.{ .d_emb = config.hidden_size }, .bf16),
+            .timestep_proj = .init(.{ .n2 = config.fsq_input_levels.len, .d_emb = config.hidden_size }, .bf16),
         };
         
         const shardings: main.Shardings = try .init(zml_handler.platform);
@@ -49,7 +54,7 @@ pub const AceDit_handler = struct {
         zml_handler.tic(&zml_handler.timers.dit.compile);
         
         std.log.info("DiT compile model", .{});
-        const diffuse_exe = try compileModel(zml_handler, model, params, shardings);
+        const exes = try compileModel(zml_handler, model, params, shardings);
         std.log.info("DiT compiled", .{});
 
         zml_handler.toc(&zml_handler.timers.dit.compile);
@@ -65,25 +70,78 @@ pub const AceDit_handler = struct {
             .model = model,
             .params = params,
             .config = config,
-            .diffuse_exe = diffuse_exe,
+            .exes = exes,
             .model_buffers = model_buffers,
             .shardings = shardings,
         };
     }
 
-    pub fn compileModel(zml_handler: *main.Zml_handler, model: AceDit, params: Params, shardings: main.Shardings) !zml.Exe {
+    pub fn compileModel(zml_handler: *main.Zml_handler, model: AceDit, params: Params, shardings: main.Shardings) !Exes {
         const shardings_arr = shardings.all();
-        const opts: zml.module.CompilationOptions = .{
-            .shardings = &shardings_arr,
+        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
+
+        var pre_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceDit, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .preprocess, .{
+                        params_.t_curr, params_.x, params_.context_latents, params_.y }, opts_);
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var pre_future_awaited = false;
+        errdefer if (!pre_future_awaited) if (pre_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        var layer_sliding_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: DiTLayer, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
+                        params_.hidden_states, params_.y_proj, params_.timestep_proj, params_.mask }, opts_);
+            }
+        }.call, .{ zml_handler, model.layers[0], params, opts });
+        var layer_sliding_future_awaited = false;
+        errdefer if (!layer_sliding_future_awaited) if (layer_sliding_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        var layer_full_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: DiTLayer, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward,
+                    .{ params_.hidden_states, params_.y_proj, params_.timestep_proj, null }, opts_);
+            }
+        }.call, .{ zml_handler, model.layers[0], params, opts });
+        var layer_full_future_awaited = false;
+        errdefer if (!layer_full_future_awaited) if (layer_full_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        var post_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceDit, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .postprocess,
+                    .{ params_.t_curr, params_.t_next, params_.x, params_.hidden_states, params_.temb }, opts_);
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var post_future_awaited = false;
+        errdefer if (!post_future_awaited) if (post_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        const pre_future_exe = try pre_future.await(zml_handler.io);
+        pre_future_awaited = true;
+
+        const layer_sliding_future_exe = try layer_sliding_future.await(zml_handler.io);
+        layer_sliding_future_awaited = true;
+
+        const layer_full_future_exe = try layer_full_future.await(zml_handler.io);
+        layer_full_future_awaited = true;
+
+        const post_future_exe = try post_future.await(zml_handler.io);
+        post_future_awaited = true;
+
+        return .{
+            .preprocess_exe = pre_future_exe,
+            .preprocess_args = try pre_future_exe.args(zml_handler.allocator),
+            .preprocess_results = try pre_future_exe.results(zml_handler.allocator),
+            .layer_sliding_exe = layer_sliding_future_exe,
+            .layer_sliding_args = try layer_sliding_future_exe.args(zml_handler.allocator),
+            .layer_sliding_results = try layer_sliding_future_exe.results(zml_handler.allocator),
+            .layer_full_exe = layer_full_future_exe,
+            .layer_full_args = try layer_full_future_exe.args(zml_handler.allocator),
+            .layer_full_results = try layer_full_future_exe.results(zml_handler.allocator),
+            .postprocess_exe = post_future_exe,
+            .postprocess_args = try post_future_exe.args(zml_handler.allocator),
+            .postprocess_results = try post_future_exe.results(zml_handler.allocator),
         };
-        return zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .forward,
-            .{ params.t_curr, params.t_next, params.x, params.context_latents, params.y },
-            opts,
-        );
     }
     
     pub fn unloadBuffers(self: *AceDit_handler, allocator: std.mem.Allocator) void {
@@ -93,7 +151,7 @@ pub const AceDit_handler = struct {
     pub fn deinit(self: *AceDit_handler, allocator: std.mem.Allocator) void {
         self.model.deinit(allocator);
         self.config.deinit(allocator);
-        self.diffuse_exe.deinit();
+        self.exes.deinit(allocator);
     }
     
 };
@@ -111,6 +169,13 @@ pub const Params = struct {
     // encoder conditions : information about text, lyric and reference timbre
     // lives in another space, is attended by the cross attention. dim = [s, d_enc]
     y: zml.Tensor,
+
+    // intermediate arguments
+    y_proj: zml.Tensor,
+    mask: zml.Tensor,
+    hidden_states: zml.Tensor,
+    temb: zml.Tensor,
+    timestep_proj: zml.Tensor,
 };
 
 pub const Config = struct {
@@ -205,6 +270,39 @@ pub const Config = struct {
 pub const DecoderLayerType = enum {
     full_attention,
     sliding_attention,
+};
+
+pub const Exes = struct {
+    preprocess_exe: zml.Exe,
+    preprocess_args: zml.Exe.Arguments,
+    preprocess_results: zml.Exe.Results,
+    
+    layer_sliding_exe: zml.Exe,
+    layer_sliding_args: zml.Exe.Arguments,
+    layer_sliding_results: zml.Exe.Results,
+    
+    layer_full_exe: zml.Exe,
+    layer_full_args: zml.Exe.Arguments,
+    layer_full_results: zml.Exe.Results,
+    
+    postprocess_exe: zml.Exe,
+    postprocess_args: zml.Exe.Arguments,
+    postprocess_results: zml.Exe.Results,
+
+    pub fn deinit(self: Exes, allocator: std.mem.Allocator) void {
+        self.preprocess_exe.deinit();
+        self.preprocess_args.deinit(allocator);
+        self.preprocess_results.deinit(allocator);
+        self.layer_sliding_exe.deinit();
+        self.layer_sliding_args.deinit(allocator);
+        self.layer_sliding_results.deinit(allocator);
+        self.layer_full_exe.deinit();
+        self.layer_full_args.deinit(allocator);
+        self.layer_full_results.deinit(allocator);
+        self.postprocess_exe.deinit();
+        self.postprocess_args.deinit(allocator);
+        self.postprocess_results.deinit(allocator);
+    }
 };
 
 
@@ -322,7 +420,46 @@ pub const AceDit = struct {
      
         return .{ x_next, x_next.withTags(.{ .t, .a }).transpose(.{ .a, .t }) };
     }
-    
+
+    pub fn preprocess(self: AceDit, t_curr: zml.Tensor, x: zml.Tensor, context_latents: zml.Tensor, y_enc: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+        var y = self.condition_embedder.forward(y_enc.withTags(.{ .s, .d }));
+        y = y.rename(.{ .d_out = .d });
+        
+        // embed timesteps
+        const temb_t, const timestep_proj_t = self.time_embed.forward(t_curr);
+        const temb_r, const timestep_proj_r = self.time_embed_r.forward(t_curr.sub(t_curr));
+        const temb = temb_t.add(temb_r);
+        const timestep_proj = timestep_proj_t.add(timestep_proj_r);
+        
+        var hidden_states = self.mergeAndPadLatents(x, context_latents);
+
+        // embed latents into decoder hidden dim
+        // proj_in projects three concatenated audio channels into the embedding space
+        // time is patched with size 2 so patchIn does [t, 3 * a] -> [t / 2, d_emb]
+        hidden_states = self.proj_in.forward(hidden_states);
+
+        return .{ y, hidden_states, temb, timestep_proj };
+    }
+
+    pub fn postprocess(self: AceDit, t_curr: zml.Tensor, t_next: zml.Tensor, x: zml.Tensor, hidden_states_: zml.Tensor, temb: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        // adaptive layer norm based on scale shift
+        var hidden_states = self.scale_shift(hidden_states_, temb);
+        
+        // project back latent embeddings into original latent space
+        // proj_out projects from the embedding space onto a single audio channel
+        // also depatches the time : [t / 2, d_emb] -> [t, a]
+        hidden_states = self.proj_out.forward(hidden_states);
+           
+        // remove padding from output : this is now the predicted flow velocity v
+        const v = hidden_states.slice1d(.t, .{ .start = 0, .end = x.dim(.t) });
+        
+        // update noised latent x with one step of flow matching
+        const dt = t_next.sub(t_curr).broad(x.shape()).convert(.bf16);
+        const x_next = x.add(v.mul(dt));
+     
+        return .{ x_next, x_next.withTags(.{ .t, .a }).transpose(.{ .a, .t }) };
+    }
+
     pub fn forwardNoIter(self: AceDit, t_curr: zml.Tensor, t_next: zml.Tensor, x: zml.Tensor, context_latents: zml.Tensor, y_enc: zml.Tensor) zml.Tensor {
         var y = self.condition_embedder.forward(y_enc.withTags(.{ .s, .d }));
         y = y.rename(.{ .d_out = .d });
@@ -680,7 +817,8 @@ pub const DiTLayer = struct {
         self.scale_shift_table.deinit();
     }
     
-    pub fn forward(self: DiTLayer, x: zml.Tensor, y: zml.Tensor, time_emb: zml.Tensor, attn_mask: ?zml.Tensor) zml.Tensor {
+    pub fn forward(self: DiTLayer, x_: zml.Tensor, y: zml.Tensor, time_emb: zml.Tensor, attn_mask: ?zml.Tensor) zml.Tensor {
+        const x = x_.rename(.{ .t = .s });
         const x_norm = self.scaleShift(x, time_emb);
         
         const delta_self = self.self_attn.forward(x_norm, attn_mask);
@@ -697,7 +835,7 @@ pub const DiTLayer = struct {
         const x2 = x1.add(delta_cross);
 
         // step 3: mlp with adaptive layer norm
-        return self.mlpAln(x2, time_emb);
+        return self.mlpAln(x2, time_emb).rename(.{ .s = .t });
     }
     
     pub fn scaleShift(self: DiTLayer, x: zml.Tensor, time_emb: zml.Tensor) zml.Tensor {
@@ -982,6 +1120,7 @@ pub const RmsNorm = struct {
 };
 
 
+
 pub fn createBidirectionalWindowMask(seq_len: i64, window_len: u32) zml.Tensor {
      const attn_shape = zml.Shape.init(.{ .q = seq_len, .k = seq_len }, .bf16);
      const window = zml.DataType.constant(.i32, window_len);
@@ -996,7 +1135,7 @@ pub fn createBidirectionalWindowMask(seq_len: i64, window_len: u32) zml.Tensor {
     const zeros = zml.Tensor.zeroes(attn_shape);
     const minf = zml.floats.Float32.toF32(zml.floats.Float32.minus_inf);
     const minus_inf = zml.Tensor.constant(zml.DataType.constant(.bf16, minf)).broad(attn_shape);
-        
+     
     return zml.Tensor.select(is_in_window, zeros, minus_inf);
 }
 

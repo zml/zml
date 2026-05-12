@@ -196,19 +196,22 @@ const Args = struct {
 // 4090 (70s audio)
 // bazel run --config=release acestep --//platforms:cuda=true -- --prompt='a chill piano melody' --llm-size=1 --instru --local-files
 // info: Module    init  compile     load  prefill   decode    total
-// info:   llm    0.28s    7.89s    0.72s    0.05s    1.01s    9.95s
-// info:   cfg    0.00s    0.85s    0.00s    0.05s    4.51s    5.42s
-// info:   emb    0.00s    1.29s    0.58s    0.00s    0.00s    2.10s
-// info:   enc    0.00s    4.80s    0.69s    0.01s    0.00s    5.51s
-// info:   dit    0.00s    5.50s    0.84s    0.33s    0.00s    6.68s
-// info:   vae    0.00s    2.44s    0.55s    0.53s    0.00s    3.52s
-// info:   wav                                                 1.34s
-// info: total                                                34.56s
+// info:   llm    0.26s    1.80s    0.66s    0.05s    0.88s    3.65s
+// info:   cfg    0.00s    0.80s    0.00s    0.06s    4.32s    5.18s
+// info:   emb    0.00s    1.32s    0.53s    0.00s    0.00s    2.04s
+// info:   enc    0.00s    4.69s    0.57s    0.01s    0.00s    5.27s
+// info:   dit    0.00s    5.29s    0.60s    0.21s    0.00s    6.11s
+// info:   vae    0.00s    1.34s    0.52s    0.52s    0.00s    2.38s
+// info:   wav                                                 1.25s
+// info: total                                                25.92s
 
-// TODO: terminer compilation par bloc parallèle (emb, enc, dit)
+// TODO: terminer compilation par bloc parallèle (enc, dit)
 // TODO: several outputs (either tiled or batched)
 // TODO: reference audio
 // TODO: reference timbre
+
+// TODO: remove test/debug code
+// TODO: move model related code from inference to Exes struct inside models
 
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
