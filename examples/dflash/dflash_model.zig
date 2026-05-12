@@ -6,7 +6,6 @@ pub const Config = struct {
     hidden_size: u32,
     intermediate_size: u32,
     num_hidden_layers: u32,
-    num_target_layers: u32,
     num_attention_heads: u32,
     num_key_value_heads: u32,
     head_dim: ?u32 = null,
@@ -15,7 +14,7 @@ pub const Config = struct {
     rope_theta: f32,
     rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
     block_size: u32,
-    dflash_config: DFlashConfig = .{},
+    dflash_config: DFlashConfig,
 };
 
 pub const DFlashConfig = struct {
@@ -73,7 +72,6 @@ pub const Model = struct {
         self.fc.weight.deinit();
         if (self.fc.bias) |*bias| bias.deinit();
         RmsNorm.unloadBuffers(&self.hidden_norm);
-        allocator.free(self.target_layer_ids);
     }
 
     /// Forward pass for DFlashDraftModel.
@@ -85,9 +83,9 @@ pub const Model = struct {
         noise_embedding_: zml.Tensor,
         position_ids_: zml.Tensor,
     ) zml.Tensor {
-        var hidden = noise_embedding_.withPartialTags(.{ .s, .d });
+        var hidden = noise_embedding_.withPartialTags(.{ .s, .d }).convert(self.norm.weight.dtype());
         const target_hidden = self.hidden_norm.forward(
-            self.fc.forward(target_hidden_.withPartialTags(.{ .s, .d }))
+            self.fc.forward(target_hidden_.withPartialTags(.{ .s, .d }).convert(self.fc.weight.dtype()))
                 .rename(.{ .dout = .d }),
         );
         const position_ids = position_ids_.withPartialTags(.{.s});
@@ -97,6 +95,15 @@ pub const Model = struct {
         }
 
         return self.norm.forward(hidden);
+    }
+
+    pub fn forwardF32(
+        self: Model,
+        target_hidden: zml.Tensor,
+        noise_embedding: zml.Tensor,
+        position_ids: zml.Tensor,
+    ) zml.Tensor {
+        return self.forward(target_hidden, noise_embedding, position_ids).convert(.f32);
     }
 };
 
@@ -217,7 +224,7 @@ pub const DFlashAttention = struct {
         k = zml.nn.rope(k, position_ids, self.rope_opts).rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
 
-        const attn = zml.nn.sdpa(q, k, v, .{})
+        const attn = zml.nn.sdpa(q, k, v, .{}) // no attention mask => full non-causal attention
             .withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated })
             .merge(.{ .d = .{ .h, .hd } })
             .rename(.{ .q = .s });
@@ -293,7 +300,7 @@ fn linear(
     );
 }
 
-fn unloadLinear(linear_: *zml.nn.Linear) void {
+fn unloadLinear(linear_: anytype) void {
     if (linear_.bias) |*bias| bias.deinit();
     linear_.weight.deinit();
 }
