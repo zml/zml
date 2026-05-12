@@ -63,6 +63,7 @@ pub const CompilationContext = struct {
         id_to_argument: std.AutoArrayHashMapUnmanaged(usize, usize),
         id_to_donation: std.AutoArrayHashMapUnmanaged(usize, usize),
         id_to_output_memory_kind: std.AutoArrayHashMapUnmanaged(usize, Memory.Kind),
+        id_to_input_memory_kind: std.AutoArrayHashMapUnmanaged(usize, Memory.Kind),
         arena: std.heap.ArenaAllocator,
 
         pub fn initFromBlock(allocator: std.mem.Allocator, block: *mlir.Block) Scope {
@@ -72,6 +73,7 @@ pub const CompilationContext = struct {
                 .id_to_argument = .empty,
                 .id_to_donation = .empty,
                 .id_to_output_memory_kind = .empty,
+                .id_to_input_memory_kind = .empty,
                 .arena = arena,
             };
         }
@@ -358,10 +360,12 @@ fn collectOutputInfo(allocator: std.mem.Allocator, partitioning: Sharding.Partit
 pub const InputInfo = struct {
     shapes: []Shape,
     shardings: []Sharding,
+    memory_kinds: []?Memory.Kind,
 
     pub fn deinit(self: InputInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.shapes);
         allocator.free(self.shardings);
+        allocator.free(self.memory_kinds);
     }
 };
 
@@ -369,6 +373,7 @@ fn collectInputInfo(allocator: std.mem.Allocator, partitioning: Sharding.Partiti
     const LocalContext = struct {
         shape_list: *std.array_list.Managed(Shape),
         sharding_list: *std.array_list.Managed(Sharding),
+        memory_kind_list: *std.array_list.Managed(?Memory.Kind),
         partitioning: Sharding.Partitioning,
     };
 
@@ -378,9 +383,13 @@ fn collectInputInfo(allocator: std.mem.Allocator, partitioning: Sharding.Partiti
     var sharding_list = std.array_list.Managed(Sharding).init(allocator);
     errdefer sharding_list.deinit();
 
+    var memory_kind_list = std.array_list.Managed(?Memory.Kind).init(allocator);
+    errdefer memory_kind_list.deinit();
+
     var context: LocalContext = .{
         .shape_list = &shape_list,
         .sharding_list = &sharding_list,
+        .memory_kind_list = &memory_kind_list,
         .partitioning = partitioning,
     };
 
@@ -388,12 +397,14 @@ fn collectInputInfo(allocator: std.mem.Allocator, partitioning: Sharding.Partiti
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
             try ctx_.shape_list.append(tensor.shape());
             try ctx_.sharding_list.append(try ctx_.partitioning.selectSharding(tensor.shape()));
+            try ctx_.memory_kind_list.append(tensor.inputMemoryKind());
         }
     }.cb, &context, v);
 
     return .{
         .shapes = try shape_list.toOwnedSlice(),
         .shardings = try sharding_list.toOwnedSlice(),
+        .memory_kinds = try memory_kind_list.toOwnedSlice(),
     };
 }
 
@@ -443,24 +454,25 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
         }
     }.cb, &context, &args);
 
-    const input_info = try collectInputInfo(compilation_context.allocator, compilation_context.partitioning, &args);
-    errdefer input_info.deinit(compilation_context.allocator);
-
-    const input_attributes = try arena.allocator().alloc(AttributeList, input_info.shapes.len);
-    @memset(input_attributes, .empty);
-
-    const output_info = b: {
+    const output_info, const input_info = b: {
         compilation_context.activate();
         defer compilation_context.deactivate();
 
         const result = @call(.auto, func, args);
 
+        const input_info = try collectInputInfo(compilation_context.allocator, compilation_context.partitioning, &args);
+        errdefer input_info.deinit(compilation_context.allocator);
+
         const output_info = try collectOutputInfo(compilation_context.allocator, compilation_context.partitioning, &result);
         errdefer output_info.deinit(compilation_context.allocator);
 
-        break :b output_info;
+        break :b .{ output_info, input_info };
     };
+    errdefer input_info.deinit(compilation_context.allocator);
     errdefer output_info.deinit(compilation_context.allocator);
+
+    const input_attributes = try arena.allocator().alloc(AttributeList, input_info.shapes.len);
+    @memset(input_attributes, .empty);
 
     const output_attributes = try arena.allocator().alloc(AttributeList, output_info.shapes.len);
     @memset(output_attributes, .empty);
@@ -481,7 +493,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     }
     _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
 
-    for (input_info.shapes, input_info.shardings, 0..) |shape, sharding, i| {
+    for (input_info.shapes, input_info.shardings, input_info.memory_kinds, 0..) |shape, sharding, maybe_memory_kind, i| {
         const attr = try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), compilation_context.mlir_ctx, shape, sharding);
         const name = switch (compilation_context.partitioning.partitioner) {
             .gspmd => "mhlo.sharding",
@@ -489,6 +501,18 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
         };
 
         input_attributes[i].appendAssumeCapacity(.named(compilation_context.mlir_ctx, name, attr));
+
+        if (maybe_memory_kind) |memory_kind| {
+            if (memory_kind == .device) continue;
+            input_attributes[i].appendAssumeCapacity(.named(
+                compilation_context.mlir_ctx,
+                "mhlo.memory_kind",
+                mlir.stringAttribute(
+                    compilation_context.mlir_ctx,
+                    compilation_context.platform.memoryKind(memory_kind),
+                ),
+            ));
+        }
     }
 
     for (output_info.shapes, output_info.shardings, 0..) |shape, sharding, i| {
