@@ -399,7 +399,7 @@ pub fn exportDecodedAudioAsWav(zml_handler: *Zml_handler, decoded_audio: inferen
     defer zml_handler.allocator.free(path_copy);
     path_copy[output_path.len - 5] = flag;
 
-    std.log.info("Trying to export {s}", .{path_copy});
+    std.log.info("Trying to export {s}, {d}, {d}", .{path_copy, index, flag});
     
     const audio = decoded_audio.audio;
     const shape = audio.shape;
