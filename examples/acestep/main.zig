@@ -207,8 +207,8 @@ const Args = struct {
 // info:   wav                                                 1.27s
 // info: total                                                23.42s
 
+// TODO: réparer tic toc après tiled generation
 // TODO: terminer compilation par bloc parallèle (enc)
-// TODO: several outputs (either tiled or batched)
 // TODO: reference audio
 // TODO: reference timbre
 
@@ -398,6 +398,8 @@ pub fn exportDecodedAudioAsWav(zml_handler: *Zml_handler, decoded_audio: inferen
     const path_copy = try zml_handler.allocator.dupe(u8, output_path);
     defer zml_handler.allocator.free(path_copy);
     path_copy[output_path.len - 5] = flag;
+
+    std.log.info("Trying to export {s}", .{path_copy});
     
     const audio = decoded_audio.audio;
     const shape = audio.shape;
