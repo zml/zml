@@ -123,12 +123,64 @@ def layer_debug_forward(module, layer, hidden, target_hidden, position_embedding
     k_noise = attn.k_proj(input_norm)
     v_ctx = attn.v_proj(target_hidden)
     v_noise = attn.v_proj(input_norm)
+    v_ctx_replay_bf16 = torch.nn.functional.linear(
+        target_hidden.to(torch.bfloat16),
+        attn.v_proj.weight.to(torch.bfloat16),
+        attn.v_proj.bias.to(torch.bfloat16) if attn.v_proj.bias is not None else None,
+    )
+    v_noise_replay_bf16 = torch.nn.functional.linear(
+        input_norm.to(torch.bfloat16),
+        attn.v_proj.weight.to(torch.bfloat16),
+        attn.v_proj.bias.to(torch.bfloat16) if attn.v_proj.bias is not None else None,
+    )
+    v_ctx_replay_f32 = torch.nn.functional.linear(
+        target_hidden.float(),
+        attn.v_proj.weight.float(),
+        attn.v_proj.bias.float() if attn.v_proj.bias is not None else None,
+    )
+    v_noise_replay_f32 = torch.nn.functional.linear(
+        input_norm.float(),
+        attn.v_proj.weight.float(),
+        attn.v_proj.bias.float() if attn.v_proj.bias is not None else None,
+    )
+    v_ctx_replay_f32_tf32 = with_tf32(
+        True,
+        lambda: torch.nn.functional.linear(
+            target_hidden.float(),
+            attn.v_proj.weight.float(),
+            attn.v_proj.bias.float() if attn.v_proj.bias is not None else None,
+        ),
+    )
+    v_noise_replay_f32_tf32 = with_tf32(
+        True,
+        lambda: torch.nn.functional.linear(
+            input_norm.float(),
+            attn.v_proj.weight.float(),
+            attn.v_proj.bias.float() if attn.v_proj.bias is not None else None,
+        ),
+    )
     k_proj = torch.cat([k_ctx, k_noise], dim=1).view(bsz, ctx_len + q_len, -1, head_dim)
     v_proj = torch.cat([v_ctx, v_noise], dim=1).view(bsz, ctx_len + q_len, -1, head_dim)
+    v_ctx = v_ctx.view(bsz, ctx_len, -1, head_dim)
+    v_noise = v_noise.view(bsz, q_len, -1, head_dim)
+    v_ctx_replay_bf16 = v_ctx_replay_bf16.view(bsz, ctx_len, -1, head_dim)
+    v_noise_replay_bf16 = v_noise_replay_bf16.view(bsz, q_len, -1, head_dim)
+    v_ctx_replay_f32 = v_ctx_replay_f32.view(bsz, ctx_len, -1, head_dim)
+    v_noise_replay_f32 = v_noise_replay_f32.view(bsz, q_len, -1, head_dim)
+    v_ctx_replay_f32_tf32 = v_ctx_replay_f32_tf32.view(bsz, ctx_len, -1, head_dim)
+    v_noise_replay_f32_tf32 = v_noise_replay_f32_tf32.view(bsz, q_len, -1, head_dim)
 
     prefix_values["self_attn.q_proj.out"] = q_proj
     prefix_values["self_attn.k_proj.out"] = k_proj
     prefix_values["self_attn.v_proj.out"] = v_proj
+    prefix_values["self_attn.v_proj.ctx"] = v_ctx
+    prefix_values["self_attn.v_proj.noise"] = v_noise
+    prefix_values["self_attn.v_proj.ctx_replay_bf16"] = v_ctx_replay_bf16
+    prefix_values["self_attn.v_proj.noise_replay_bf16"] = v_noise_replay_bf16
+    prefix_values["self_attn.v_proj.ctx_replay_f32"] = v_ctx_replay_f32
+    prefix_values["self_attn.v_proj.noise_replay_f32"] = v_noise_replay_f32
+    prefix_values["self_attn.v_proj.ctx_replay_f32_tf32"] = v_ctx_replay_f32_tf32
+    prefix_values["self_attn.v_proj.noise_replay_f32_tf32"] = v_noise_replay_f32_tf32
 
     q_norm = attn.q_norm(q_proj)
     k_norm = attn.k_norm(k_proj)

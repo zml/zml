@@ -178,6 +178,10 @@ const ProjectionFixtureReplayTensors = struct {
     q_proj_out: zml.Tensor,
     k_proj_out: zml.Tensor,
     v_proj_out: zml.Tensor,
+    v_proj_ctx: zml.Tensor,
+    v_proj_noise: zml.Tensor,
+    v_proj_ctx_f32: zml.Tensor,
+    v_proj_noise_f32: zml.Tensor,
 };
 
 const ProjectionFixtureReplayBuffers = zml.Bufferized(ProjectionFixtureReplayTensors);
@@ -225,6 +229,15 @@ fn deinitProjectionFixtureReplayBuffers(buffers: *ProjectionFixtureReplayBuffers
     buffers.q_proj_out.deinit();
     buffers.k_proj_out.deinit();
     buffers.v_proj_out.deinit();
+    buffers.v_proj_ctx.deinit();
+    buffers.v_proj_noise.deinit();
+    buffers.v_proj_ctx_f32.deinit();
+    buffers.v_proj_noise_f32.deinit();
+}
+
+fn linearForwardF32(linear: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
+    var y = x.convert(.f32).dot(linear.weight.convert(.f32), linear.tag);
+    return if (linear.bias) |bias| y.add(bias.convert(.f32).broad(y.shape())) else y;
 }
 
 fn runProjectionFixtureReplay(
@@ -252,11 +265,23 @@ fn runProjectionFixtureReplay(
         attn.v_proj.forward(target_hidden),
         attn.v_proj.forward(input_norm),
     }, .s).splitAxis(-1, .{ .h = attn.num_kv_heads, .hd = .auto });
+    const v_proj_ctx = attn.v_proj.forward(target_hidden)
+        .splitAxis(-1, .{ .h = attn.num_kv_heads, .hd = .auto });
+    const v_proj_noise = attn.v_proj.forward(input_norm)
+        .splitAxis(-1, .{ .h = attn.num_kv_heads, .hd = .auto });
+    const v_proj_ctx_f32 = linearForwardF32(attn.v_proj, target_hidden)
+        .splitAxis(-1, .{ .h = attn.num_kv_heads, .hd = .auto });
+    const v_proj_noise_f32 = linearForwardF32(attn.v_proj, input_norm)
+        .splitAxis(-1, .{ .h = attn.num_kv_heads, .hd = .auto });
 
     return .{
         .q_proj_out = q_proj_out.convert(.f32),
         .k_proj_out = k_proj_out.convert(.f32),
         .v_proj_out = v_proj_out.convert(.f32),
+        .v_proj_ctx = v_proj_ctx.convert(.f32),
+        .v_proj_noise = v_proj_noise.convert(.f32),
+        .v_proj_ctx_f32 = v_proj_ctx_f32,
+        .v_proj_noise_f32 = v_proj_noise_f32,
     };
 }
 
@@ -547,10 +572,28 @@ const TestContext = struct {
         defer self.allocator.free(k_name);
         const v_name = try std.fmt.allocPrint(self.allocator, "layers.{d}.fixture_replay.v_proj", .{layer_index});
         defer self.allocator.free(v_name);
+        const v_ctx_name = try std.fmt.allocPrint(self.allocator, "layers.{d}.fixture_replay.v_proj.ctx", .{layer_index});
+        defer self.allocator.free(v_ctx_name);
+        const v_noise_name = try std.fmt.allocPrint(self.allocator, "layers.{d}.fixture_replay.v_proj.noise", .{layer_index});
+        defer self.allocator.free(v_noise_name);
+        const v_ctx_f32_name = try std.fmt.allocPrint(self.allocator, "layers.{d}.fixture_replay.v_proj.ctx_f32", .{layer_index});
+        defer self.allocator.free(v_ctx_f32_name);
+        const v_noise_f32_name = try std.fmt.allocPrint(self.allocator, "layers.{d}.fixture_replay.v_proj.noise_f32", .{layer_index});
+        defer self.allocator.free(v_noise_f32_name);
+        const v_ctx_f32_tf32_name = try std.fmt.allocPrint(self.allocator, "layers.{d}.fixture_replay.v_proj.ctx_f32_vs_python_tf32", .{layer_index});
+        defer self.allocator.free(v_ctx_f32_tf32_name);
+        const v_noise_f32_tf32_name = try std.fmt.allocPrint(self.allocator, "layers.{d}.fixture_replay.v_proj.noise_f32_vs_python_tf32", .{layer_index});
+        defer self.allocator.free(v_noise_f32_tf32_name);
 
         try self.compareLayerValueWithName(layer_index, "self_attn.q_proj.out", q_name, replay.q_proj_out, failures);
         try self.compareLayerValueWithName(layer_index, "self_attn.k_proj.out", k_name, replay.k_proj_out, failures);
         try self.compareLayerValueWithName(layer_index, "self_attn.v_proj.out", v_name, replay.v_proj_out, failures);
+        try self.compareLayerValueWithName(layer_index, "self_attn.v_proj.ctx", v_ctx_name, replay.v_proj_ctx, failures);
+        try self.compareLayerValueWithName(layer_index, "self_attn.v_proj.noise", v_noise_name, replay.v_proj_noise, failures);
+        try self.compareLayerValueWithName(layer_index, "self_attn.v_proj.ctx_replay_f32", v_ctx_f32_name, replay.v_proj_ctx_f32, failures);
+        try self.compareLayerValueWithName(layer_index, "self_attn.v_proj.noise_replay_f32", v_noise_f32_name, replay.v_proj_noise_f32, failures);
+        try self.compareLayerValueWithName(layer_index, "self_attn.v_proj.ctx_replay_f32_tf32", v_ctx_f32_tf32_name, replay.v_proj_ctx_f32, failures);
+        try self.compareLayerValueWithName(layer_index, "self_attn.v_proj.noise_replay_f32_tf32", v_noise_f32_tf32_name, replay.v_proj_noise_f32, failures);
     }
 
     fn testLayerSdpaFixtureReplay(self: *TestContext, layer_index: usize, failures: *usize) !void {
