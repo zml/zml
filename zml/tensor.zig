@@ -2103,6 +2103,21 @@ pub const Tensor = struct {
         return Tensor.constant(sh.dtype().zero()).broad(sh);
     }
 
+    pub fn uninitialized(sh: Shape) Tensor {
+        const ctx = CompilationContext.current();
+        const buffer_type = mlir.memRefType(
+            mlirx.Type.fromDType(ctx.mlir_ctx, sh.dtype()),
+            sh.dims(),
+            null,
+            null,
+        );
+        const buffer = dialects.stablehlo.createBuffer(ctx.mlir_ctx, buffer_type, .unknown(ctx.mlir_ctx))
+            .appendTo(currentBlock());
+        const tensor = dialects.stablehlo.unpin(ctx.mlir_ctx, buffer.result(0), .unknown(ctx.mlir_ctx))
+            .appendTo(currentBlock());
+        return _result(sh, tensor.result(0));
+    }
+
     /// Embeds a buffer with concrete values into an Mlir program.
     pub fn constantTensor(sh: Shape, bytes_: []const u8) Tensor {
         const elem_type = mlirx.Type.fromDType(mlirCtx(), sh.dtype());

@@ -883,17 +883,29 @@ pub fn createBuffer(ctx: *mlir.Context, value: *const mlir.Type, location: *cons
 }
 
 pub fn pin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
-    return custom_call(ctx, &.{}, &.{@ptrCast(mlir.MemRefType.fromShaped(value.type_().isA(mlir.ShapedType).?))}, .{
-        .call_target_name = "Pin",
-        .api_version = .typed_ffi,
-    }, location);
+    return custom_call(
+        ctx,
+        &.{value},
+        &.{@ptrCast(mlir.MemRefType.fromShaped(value.type_().isA(mlir.ShapedType).?))},
+        .{
+            .call_target_name = "Pin",
+            .api_version = .typed_ffi,
+        },
+        location,
+    );
 }
 
 pub fn unpin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
-    return custom_call(ctx, &.{}, &.{@ptrCast(mlir.RankedTensorType.fromShaped(value.type_().isA(mlir.ShapedType).?))}, .{
-        .call_target_name = "Unpin",
-        .api_version = .typed_ffi,
-    }, location);
+    return custom_call(
+        ctx,
+        &.{value},
+        &.{@ptrCast(mlir.RankedTensorType.fromShaped(value.type_().isA(mlir.ShapedType).?))},
+        .{
+            .call_target_name = "Unpin",
+            .api_version = .typed_ffi,
+        },
+        location,
+    );
 }
 
 pub fn partition_id(ctx: *mlir.Context, location: *const mlir.Location) *mlir.Operation {
