@@ -207,10 +207,7 @@ def _xla_impl(mctx):
         name = "com_github_grpc_grpc",
         sha256 = "e2ace790a5f2d0f83259d1390a816a33b013ea34df2e86084d927e58daa4c5d9",
         strip_prefix = "grpc-1.78.0",
-        patch_file = [
-            "//third_party/grpc:grpc.patch",
-            # "//third_party/grpc:bazel9_native_cc.patch",
-        ],
+        patch_file = ["//third_party/grpc:grpc.patch"],
         urls = tf_mirror_urls("https://github.com/grpc/grpc/archive/refs/tags/v1.78.0.tar.gz"),
     )
     tf_vendored(name = "tsl", path = "third_party/tsl")

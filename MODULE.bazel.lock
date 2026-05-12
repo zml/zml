@@ -29,8 +29,8 @@
     "https://bcr.bazel.build/modules/apple_support/2.2.0/source.json": "368bf1de5dace2a411e792e6df2ea5384eb8db3899680ed51b37eb48b88fd8ac",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/2.14.0/MODULE.bazel": "2b31ffcc9bdc8295b2167e07a757dbbc9ac8906e7028e5170a3708cecaac119f",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/2.19.3/MODULE.bazel": "253d739ba126f62a5767d832765b12b59e9f8d2bc88cc1572f4a73e46eb298ca",
-    "https://bcr.bazel.build/modules/aspect_bazel_lib/2.21.2/MODULE.bazel": "276347663a25b0d5bd6cad869252bea3e160c4d980e764b15f3bae7f80b30624",
-    "https://bcr.bazel.build/modules/aspect_bazel_lib/2.21.2/source.json": "f42051fa42629f0e59b7ac2adf0a55749144b11f1efcd8c697f0ee247181e526",
+    "https://bcr.bazel.build/modules/aspect_bazel_lib/2.22.5/MODULE.bazel": "004ba890363d05372a97248c37205ae64b6fa31047629cd2c0895a9d0c7779e8",
+    "https://bcr.bazel.build/modules/aspect_bazel_lib/2.22.5/source.json": "ac2c3213df8f985785f1d0aeb7f0f73d5324e6e67d593d9b9470fb74a25d4a9b",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/2.7.2/MODULE.bazel": "780d1a6522b28f5edb7ea09630748720721dfe27690d65a2d33aa7509de77e07",
     "https://bcr.bazel.build/modules/aspect_bazel_lib/2.8.1/MODULE.bazel": "812d2dd42f65dca362152101fbec418029cc8fd34cbad1a2fde905383d705838",
     "https://bcr.bazel.build/modules/aspect_rules_py/1.8.4/MODULE.bazel": "4ab4a78e9d65cf15e755807f7ae504655e1771cefd7c3343ad34dbbb625b9564",
@@ -507,7 +507,7 @@
     },
     "@@rules_oci+//oci:extensions.bzl%oci": {
       "general": {
-        "bzlTransitiveDigest": "iDFry2lAMudSvBh/GvwmMxfNi86C22VYL4DkQPQpaPg=",
+        "bzlTransitiveDigest": "lRG1JBXWgJgDfEfl/34ZHgTFACz2I0bpfZWFtcoM+hc=",
         "usagesDigest": "JLbamplho20rviuebatMGqnQnaoj32ewCzLuRVusGoU=",
         "recordedInputs": [
           "REPO_MAPPING:aspect_bazel_lib+,bazel_tools bazel_tools",
@@ -865,13 +865,14 @@
     },
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
-        "bzlTransitiveDigest": "z9e6TYObIkfcuVUmEi6TkfpspaOd2ml2+wdfLzQe9pc=",
-        "usagesDigest": "x9FrKXAAe3IN/kdtZklp2F2hJVSkwOmlUlhrmeCOumg=",
+        "bzlTransitiveDigest": "uNDg4T34+GWUY+faQySKWqtazCQUHQModCJz7r++GhE=",
+        "usagesDigest": "G9ZTf74sjasxWzfJjUltTAD4l2adFkzh3DtamekbpP4=",
         "recordedInputs": [
+          "REPO_MAPPING:,translate-c +non_module_deps+translate-c",
           "REPO_MAPPING:rules_zig+,bazel_skylib bazel_skylib+",
           "REPO_MAPPING:rules_zig+,bazel_tools bazel_tools",
           "FILE:@@//bazel/zig_index.json 2e3b4b83f1add5d3ca12fd05797c04c38af21d86c7fc7c1a9b356560141a4797",
-          "FILE:@@rules_zig+//zig/private/versions.json 6eb85ebaee72c4e6fbc82d8ad73f69e0899d839b70a7e19caa792ab6a5fa0c36"
+          "FILE:@@rules_zig+//zig/private/versions.json 3e4e370dee9c3f3fdc8bfc7a600e76743278fde40815eead5d0bcda3aec3e2bd"
         ],
         "generatedRepoSpecs": {
           "zig_0.16.0_aarch64-linux": {
@@ -892,11 +893,25 @@
                 "https://zig.karearl.com/zig",
                 "https://pkg.earth/zig",
                 "https://fs.liujiacai.net/zigbuilds",
-                "https://ziglang.org/builds/"
+                "https://ziglang.org/builds/",
+                "https://pkg.machengine.org/zig",
+                "https://zigmirror.hryx.net/zig",
+                "https://zig.linus.dev/zig",
+                "https://zig.squirl.dev",
+                "https://zig.florent.dev",
+                "https://zig.mirror.mschae23.de/zig",
+                "https://zigmirror.meox.dev",
+                "https://ziglang.freetls.fastly.net",
+                "https://zig.tilok.dev",
+                "https://zig-mirror.tsimnet.eu/zig",
+                "https://zig.karearl.com/zig",
+                "https://pkg.earth/zig",
+                "https://fs.liujiacai.net/zigbuilds"
               ],
               "sha256": "ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17",
               "zig_version": "0.16.0",
-              "platform": "aarch64-linux"
+              "platform": "aarch64-linux",
+              "translate_c": "@@+non_module_deps+translate-c//:translate-c"
             }
           },
           "zig_0.16.0_aarch64-macos": {
@@ -917,11 +932,25 @@
                 "https://zig.karearl.com/zig",
                 "https://pkg.earth/zig",
                 "https://fs.liujiacai.net/zigbuilds",
-                "https://ziglang.org/builds/"
+                "https://ziglang.org/builds/",
+                "https://pkg.machengine.org/zig",
+                "https://zigmirror.hryx.net/zig",
+                "https://zig.linus.dev/zig",
+                "https://zig.squirl.dev",
+                "https://zig.florent.dev",
+                "https://zig.mirror.mschae23.de/zig",
+                "https://zigmirror.meox.dev",
+                "https://ziglang.freetls.fastly.net",
+                "https://zig.tilok.dev",
+                "https://zig-mirror.tsimnet.eu/zig",
+                "https://zig.karearl.com/zig",
+                "https://pkg.earth/zig",
+                "https://fs.liujiacai.net/zigbuilds"
               ],
               "sha256": "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489",
               "zig_version": "0.16.0",
-              "platform": "aarch64-macos"
+              "platform": "aarch64-macos",
+              "translate_c": "@@+non_module_deps+translate-c//:translate-c"
             }
           },
           "zig_0.16.0_aarch64-windows": {
@@ -942,11 +971,25 @@
                 "https://zig.karearl.com/zig",
                 "https://pkg.earth/zig",
                 "https://fs.liujiacai.net/zigbuilds",
-                "https://ziglang.org/builds/"
+                "https://ziglang.org/builds/",
+                "https://pkg.machengine.org/zig",
+                "https://zigmirror.hryx.net/zig",
+                "https://zig.linus.dev/zig",
+                "https://zig.squirl.dev",
+                "https://zig.florent.dev",
+                "https://zig.mirror.mschae23.de/zig",
+                "https://zigmirror.meox.dev",
+                "https://ziglang.freetls.fastly.net",
+                "https://zig.tilok.dev",
+                "https://zig-mirror.tsimnet.eu/zig",
+                "https://zig.karearl.com/zig",
+                "https://pkg.earth/zig",
+                "https://fs.liujiacai.net/zigbuilds"
               ],
               "sha256": "aee38316ee4111717900f45dd3130145c39289e105541d737eb8c5ed653c78ef",
               "zig_version": "0.16.0",
-              "platform": "aarch64-windows"
+              "platform": "aarch64-windows",
+              "translate_c": "@@+non_module_deps+translate-c//:translate-c"
             }
           },
           "zig_0.16.0_x86_64-linux": {
@@ -967,11 +1010,25 @@
                 "https://zig.karearl.com/zig",
                 "https://pkg.earth/zig",
                 "https://fs.liujiacai.net/zigbuilds",
-                "https://ziglang.org/builds/"
+                "https://ziglang.org/builds/",
+                "https://pkg.machengine.org/zig",
+                "https://zigmirror.hryx.net/zig",
+                "https://zig.linus.dev/zig",
+                "https://zig.squirl.dev",
+                "https://zig.florent.dev",
+                "https://zig.mirror.mschae23.de/zig",
+                "https://zigmirror.meox.dev",
+                "https://ziglang.freetls.fastly.net",
+                "https://zig.tilok.dev",
+                "https://zig-mirror.tsimnet.eu/zig",
+                "https://zig.karearl.com/zig",
+                "https://pkg.earth/zig",
+                "https://fs.liujiacai.net/zigbuilds"
               ],
               "sha256": "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00",
               "zig_version": "0.16.0",
-              "platform": "x86_64-linux"
+              "platform": "x86_64-linux",
+              "translate_c": "@@+non_module_deps+translate-c//:translate-c"
             }
           },
           "zig_0.16.0_x86_64-macos": {
@@ -992,11 +1049,25 @@
                 "https://zig.karearl.com/zig",
                 "https://pkg.earth/zig",
                 "https://fs.liujiacai.net/zigbuilds",
-                "https://ziglang.org/builds/"
+                "https://ziglang.org/builds/",
+                "https://pkg.machengine.org/zig",
+                "https://zigmirror.hryx.net/zig",
+                "https://zig.linus.dev/zig",
+                "https://zig.squirl.dev",
+                "https://zig.florent.dev",
+                "https://zig.mirror.mschae23.de/zig",
+                "https://zigmirror.meox.dev",
+                "https://ziglang.freetls.fastly.net",
+                "https://zig.tilok.dev",
+                "https://zig-mirror.tsimnet.eu/zig",
+                "https://zig.karearl.com/zig",
+                "https://pkg.earth/zig",
+                "https://fs.liujiacai.net/zigbuilds"
               ],
               "sha256": "0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7",
               "zig_version": "0.16.0",
-              "platform": "x86_64-macos"
+              "platform": "x86_64-macos",
+              "translate_c": "@@+non_module_deps+translate-c//:translate-c"
             }
           },
           "zig_0.16.0_x86_64-windows": {
@@ -1017,11 +1088,25 @@
                 "https://zig.karearl.com/zig",
                 "https://pkg.earth/zig",
                 "https://fs.liujiacai.net/zigbuilds",
-                "https://ziglang.org/builds/"
+                "https://ziglang.org/builds/",
+                "https://pkg.machengine.org/zig",
+                "https://zigmirror.hryx.net/zig",
+                "https://zig.linus.dev/zig",
+                "https://zig.squirl.dev",
+                "https://zig.florent.dev",
+                "https://zig.mirror.mschae23.de/zig",
+                "https://zigmirror.meox.dev",
+                "https://ziglang.freetls.fastly.net",
+                "https://zig.tilok.dev",
+                "https://zig-mirror.tsimnet.eu/zig",
+                "https://zig.karearl.com/zig",
+                "https://pkg.earth/zig",
+                "https://fs.liujiacai.net/zigbuilds"
               ],
               "sha256": "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e",
               "zig_version": "0.16.0",
-              "platform": "x86_64-windows"
+              "platform": "x86_64-windows",
+              "translate_c": "@@+non_module_deps+translate-c//:translate-c"
             }
           },
           "zig_toolchains": {

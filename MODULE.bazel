@@ -30,9 +30,7 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 git_override(
     module_name = "rules_zig",
-    commit = "b65a2bb460b9dbcbcc3231ba648c3c1a266c4eb5",
-    patch_strip = 1,
-    patches = ["//:rules_zig_bazel9.patch"],
+    commit = "f4f9965ade0ea70a1b317706383f13fee9b587bc",  # upstreamable-20260507.1
     remote = "https://github.com/zml/rules_zig.git",
 )
 
@@ -78,6 +76,7 @@ zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(
     zig_version = "0.16.0",
+    translate_c = "@translate-c",
 )
 zig.mirrors(urls = [
     "https://pkg.machengine.org/zig",
