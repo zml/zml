@@ -74,7 +74,7 @@ common          --incompatible_disallow_empty_glob=false
 common          --features=-layering_check
 
 # Use the C linker to link Zig code
-common          --@rules_zig//zig/settings:use_cc_common_link=false
+common          --@rules_zig//zig/settings:use_cc_common_link=true
 # Zig self hosted backend is too fragile for now
 common          --@rules_zig//zig/settings:zigopt=-fllvm
 

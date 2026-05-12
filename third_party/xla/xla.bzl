@@ -209,7 +209,7 @@ def _xla_impl(mctx):
         strip_prefix = "grpc-1.78.0",
         patch_file = [
             "//third_party/grpc:grpc.patch",
-            "//third_party/grpc:bazel9_native_cc.patch",
+            # "//third_party/grpc:bazel9_native_cc.patch",
         ],
         urls = tf_mirror_urls("https://github.com/grpc/grpc/archive/refs/tags/v1.78.0.tar.gz"),
     )

@@ -9,10 +9,10 @@ def repo():
         patches = [
             "//third_party/xla:eigen_bazel9_loads.patch",
             "//third_party/xla:farmhash_bazel9_loads.patch",
-            "//third_party/xla:grpc_bazel9_native_cc.patch",
+            # "//third_party/xla:grpc_bazel9_native_cc.patch",
             "//third_party/xla:ml_dtypes_bazel9_loads.patch",
             "//third_party/xla:tsl_bazel9_loads.patch",
-            "//third_party/xla:xspace_to_perfetto.patch",
+            # "//third_party/xla:xspace_to_perfetto.patch",
             "//third_party/xla:shardy_bazel9_loads.patch",
         ],
     )
