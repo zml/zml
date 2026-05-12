@@ -27,12 +27,12 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
     var results_buffer: stdx.BoundedArray(*const mlir.Type, 32) = .empty;
 
     var attr_tuples_buffer: stdx.BoundedArray(mlir.NamedAttribute, 16) = .empty;
-    attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "sym_name", mlir.stringAttribute(ctx, args.name)));
+    attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "sym_name", .string(ctx, args.name)));
     if (args.visibility) |v| {
-        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "sym_visibility", mlir.stringAttribute(ctx, @tagName(v))));
+        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "sym_visibility", .string(ctx, @tagName(v))));
     }
     attr_tuples_buffer.appendSliceAssumeCapacity(&.{
-        .named(ctx, "function_type", mlir.typeAttribute(mlir.functionType(
+        .named(ctx, "function_type", .typeAttr(mlir.functionType(
             ctx,
             args.args orelse args: {
                 for (0..args.block.numArguments()) |i| {
@@ -53,13 +53,13 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
     });
 
     if (args.args_attributes) |args_attributes| {
-        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "arg_attrs", mlir.arrayAttribute(ctx, args_attributes)));
+        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "arg_attrs", .array(ctx, args_attributes)));
     }
     if (args.results_attributes) |results_attributes| {
-        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "res_attrs", mlir.arrayAttribute(ctx, results_attributes)));
+        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "res_attrs", .array(ctx, results_attributes)));
     }
     if (args.no_inline) {
-        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "no_inline", mlir.unitAttribute(ctx)));
+        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "no_inline", .unit(ctx)));
     }
     for (args.extra_attributes) |a| {
         attr_tuples_buffer.appendAssumeCapacity(a);

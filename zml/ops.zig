@@ -79,7 +79,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
         .result_type_inference = true,
         .blocks = &.{reduce_block},
         .attributes = &.{
-            .named(mlir_ctx, "dimensions", mlir.denseArrayAttribute(mlir_ctx, .i64, axes_)),
+            .named(mlir_ctx, "dimensions", .denseArray(mlir_ctx, .i64, axes_)),
         },
         .verify = true,
         .location = .unknown(mlir_ctx),
@@ -182,12 +182,15 @@ pub fn reduceWindow(inputs: anytype, inits: anytype, opts: ReduceWindowOpts, com
         .result_type_inference = true,
         .blocks = &.{reduce_block},
         .attributes = &.{
-            .named(mlir_ctx, "window_dimensions", mlir.denseArrayAttribute(mlir_ctx, .i64, opts.window_dimensions)),
-            .named(mlir_ctx, "window_strides", mlir.denseArrayAttribute(mlir_ctx, .i64, opts.window_strides)),
-            .named(mlir_ctx, "base_dilations", mlir.denseArrayAttribute(mlir_ctx, .i64, opts.base_dilations)),
-            .named(mlir_ctx, "window_dilations", mlir.denseArrayAttribute(mlir_ctx, .i64, opts.window_dilations)),
+            .named(mlir_ctx, "window_dimensions", .denseArray(mlir_ctx, .i64, opts.window_dimensions)),
+            .named(mlir_ctx, "window_strides", .denseArray(mlir_ctx, .i64, opts.window_strides)),
+            .named(mlir_ctx, "base_dilations", .denseArray(mlir_ctx, .i64, opts.base_dilations)),
+            .named(mlir_ctx, "window_dilations", .denseArray(mlir_ctx, .i64, opts.window_dilations)),
             // Cast the [][2]i64 to []i64 (safe)
-            .named(mlir_ctx, "padding", mlir.denseElementsAttribute(mlir.RankedTensorType.get(&.{ @intCast(opts.padding.len), 2 }, mlir.integerType(mlir_ctx, .i64), null).shaped(), @as([]const i64, @ptrCast(opts.padding)))),
+            .named(mlir_ctx, "padding", .denseElements(
+                .rankedTensor(&.{ @intCast(opts.padding.len), 2 }, mlir.integerType(mlir_ctx, .i64), null),
+                @as([]const i64, @ptrCast(opts.padding)),
+            )),
         },
         .verify = true,
         .location = .unknown(mlir_ctx),
@@ -253,8 +256,8 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
         .result_type_inference = true,
         .blocks = &.{sort_block},
         .attributes = &.{
-            .named(mlir_ctx, "dimension", mlir.integerAttribute(mlir_ctx, .i64, axis_)),
-            .named(mlir_ctx, "is_stable", mlir.boolAttribute(mlir_ctx, is_stable)),
+            .named(mlir_ctx, "dimension", .int(mlir_ctx, .i64, axis_)),
+            .named(mlir_ctx, "is_stable", .boolean(mlir_ctx, is_stable)),
         },
         .verify = true,
         .location = .unknown(mlir_ctx),
@@ -471,14 +474,14 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
         res_types[i] = mlir.rankedTensorType(output.dims(), mlirx.Type.fromDType(mlir_ctx, output.dtype()));
     }
 
-    const backend_config = mlir.dictionaryAttribute(mlir_ctx, &.{
-        mlir.NamedAttribute.named(mlir_ctx, "name", mlir.stringAttribute(mlir_ctx, opts.name)),
-        mlir.NamedAttribute.named(mlir_ctx, "ir", mlir.stringAttribute(mlir_ctx, opts.ir)),
-        mlir.NamedAttribute.named(mlir_ctx, "grid_x", mlir.integerAttribute(mlir_ctx, .i32, opts.grid[0])),
-        mlir.NamedAttribute.named(mlir_ctx, "grid_y", mlir.integerAttribute(mlir_ctx, .i32, opts.grid[1])),
-        mlir.NamedAttribute.named(mlir_ctx, "grid_z", mlir.integerAttribute(mlir_ctx, .i32, opts.grid[2])),
-        mlir.NamedAttribute.named(mlir_ctx, "num_stages", mlir.integerAttribute(mlir_ctx, .i32, opts.num_stages)),
-        mlir.NamedAttribute.named(mlir_ctx, "num_warps", mlir.integerAttribute(mlir_ctx, .i32, opts.num_warps)),
+    const backend_config: *const mlir.Attribute = .dict(mlir_ctx, &.{
+        .named(mlir_ctx, "name", .string(mlir_ctx, opts.name)),
+        .named(mlir_ctx, "ir", .string(mlir_ctx, opts.ir)),
+        .named(mlir_ctx, "grid_x", .int(mlir_ctx, .i32, opts.grid[0])),
+        .named(mlir_ctx, "grid_y", .int(mlir_ctx, .i32, opts.grid[1])),
+        .named(mlir_ctx, "grid_z", .int(mlir_ctx, .i32, opts.grid[2])),
+        .named(mlir_ctx, "num_stages", .int(mlir_ctx, .i32, opts.num_stages)),
+        .named(mlir_ctx, "num_warps", .int(mlir_ctx, .i32, opts.num_warps)),
     });
 
     var operands_layouts: [inputs.len][]const usize = undefined;
@@ -1060,8 +1063,8 @@ pub const CustomCallOptions = struct {
 fn customCallAdditionalAttributes(ctx: *CompilationContext, opts: CustomCallOptions) []const mlir.NamedAttribute {
     if (!opts.compute_on_host or ctx.platform.target == .cpu) return &.{};
 
-    const frontend_attributes = mlir.dictionaryAttribute(ctx.mlir_ctx, &.{
-        .named(ctx.mlir_ctx, "_xla_compute_type", mlir.stringAttribute(ctx.mlir_ctx, "host")),
+    const frontend_attributes = mlir.Attribute.dict(ctx.mlir_ctx, &.{
+        .named(ctx.mlir_ctx, "_xla_compute_type", .string(ctx.mlir_ctx, "host")),
     });
 
     const additional_attributes = ctx.arena.allocator().alloc(mlir.NamedAttribute, 1) catch unreachable;
@@ -1366,7 +1369,7 @@ fn manualComputationInternal(
                         .has_side_effect = false,
                         .backend_config = .{ .original = "" },
                         .additional_attributes = &.{
-                            .named(ctx.mlir_ctx, "mhlo.sharding", mlir.stringAttribute(ctx.mlir_ctx, manual_sharding)),
+                            .named(ctx.mlir_ctx, "mhlo.sharding", .string(ctx.mlir_ctx, manual_sharding)),
                         },
                     },
                     .unknown(ctx.mlir_ctx),
@@ -1519,17 +1522,17 @@ fn manualComputationSliceToReturn(comptime ReturnT: type, outputs: []Tensor) Ret
 fn metadataIntegerFieldToMlirAttribute(mlir_ctx: *mlir.Context, int_field: std.builtin.Type.Int, value: anytype) *const mlir.Attribute {
     return switch (int_field.signedness) {
         .signed => switch (int_field.bits) {
-            8 => mlir.integerAttribute(mlir_ctx, .i8, value),
-            16 => mlir.integerAttribute(mlir_ctx, .i16, value),
-            32 => mlir.integerAttribute(mlir_ctx, .i32, value),
-            64 => mlir.integerAttribute(mlir_ctx, .i64, value),
+            8 => .int(mlir_ctx, .i8, value),
+            16 => .int(mlir_ctx, .i16, value),
+            32 => .int(mlir_ctx, .i32, value),
+            64 => .int(mlir_ctx, .i64, value),
             else => @panic("Unsupported DataType"),
         },
         .unsigned => switch (int_field.bits) {
-            8 => mlir.integerAttribute(mlir_ctx, .u8, value),
-            16 => mlir.integerAttribute(mlir_ctx, .u16, value),
-            32 => mlir.integerAttribute(mlir_ctx, .u32, value),
-            64 => mlir.integerAttribute(mlir_ctx, .u64, value),
+            8 => .int(mlir_ctx, .u8, value),
+            16 => .int(mlir_ctx, .u16, value),
+            32 => .int(mlir_ctx, .u32, value),
+            64 => .int(mlir_ctx, .u64, value),
             else => @panic("Unsupported DataType"),
         },
     };
@@ -1547,17 +1550,17 @@ fn metadataFloatFieldToMlirAttribute(mlir_ctx: *mlir.Context, float_field: std.b
 fn metadataFieldToMlirAttribute(mlir_ctx: *mlir.Context, comptime T: type, value: anytype) ?*const mlir.Attribute {
     const type_info = @typeInfo(T);
     return switch (type_info) {
-        .comptime_int => mlir.integerAttribute(mlir_ctx, .u64, @as(u64, value)),
+        .comptime_int => .int(mlir_ctx, .u64, @as(u64, value)),
         .@"enum" => |enum_field| switch (@typeInfo(enum_field.tag_type)) {
             .int => |int_tag| metadataIntegerFieldToMlirAttribute(mlir_ctx, int_tag, @intFromEnum(value)),
             else => @compileError("Unsupported tag type for enum metadata: " ++ @typeName(enum_field.tag_type)),
         },
         .int => |int_field| metadataIntegerFieldToMlirAttribute(mlir_ctx, int_field, value),
         .float => |float_field| metadataFloatFieldToMlirAttribute(mlir_ctx, float_field, value),
-        .bool => mlir.boolAttribute(mlir_ctx, value),
+        .bool => .boolean(mlir_ctx, value),
         .pointer => |pointer_info| switch (pointer_info.size) {
             .slice => if (pointer_info.child == u8)
-                mlir.stringAttribute(mlir_ctx, value)
+                .string(mlir_ctx, value)
             else
                 @panic("Unsupported pointer type in metadata"),
             else => @panic("Unsupported pointer type in metadata"),
@@ -1565,7 +1568,7 @@ fn metadataFieldToMlirAttribute(mlir_ctx: *mlir.Context, comptime T: type, value
         .optional => |optional_info| if (value) |wrapped_value| switch (@typeInfo(optional_info.child)) {
             .int => |int_field| metadataIntegerFieldToMlirAttribute(mlir_ctx, int_field, wrapped_value),
             .float => |float_field| metadataFloatFieldToMlirAttribute(mlir_ctx, float_field, wrapped_value),
-            .bool => mlir.boolAttribute(mlir_ctx, wrapped_value),
+            .bool => .boolean(mlir_ctx, wrapped_value),
             else => @panic("Unsupported optional child type in metadata"),
         } else null,
         else => @compileError("Unsupported metadata type: " ++ @typeName(T)),
@@ -1773,8 +1776,8 @@ pub fn typedCustomCall(
         }
     }
     metadata_attribute_list.appendSliceAssumeCapacity(&[_]mlir.NamedAttribute{
-        .named(ctx.mlir_ctx, "pjrt_api", mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@intFromPtr(ctx.platform.pjrt_api))))),
-        .named(ctx.mlir_ctx, "pjrt_client", mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@intFromPtr(ctx.platform.pjrt_client))))),
+        .named(ctx.mlir_ctx, "pjrt_api", .int(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@intFromPtr(ctx.platform.pjrt_api))))),
+        .named(ctx.mlir_ctx, "pjrt_client", .int(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@intFromPtr(ctx.platform.pjrt_client))))),
     });
 
     const values = allocator.alloc(*const mlir.Value, input_tensors.len) catch unreachable;
@@ -1789,7 +1792,7 @@ pub fn typedCustomCall(
         result_types[i] = mlir.rankedTensorType(shape.dims(), mlirx.Type.fromDType(ctx.mlir_ctx, shape.dtype()));
     }
 
-    const backend_config = mlir.dictionaryAttribute(ctx.mlir_ctx, metadata_attribute_list.items);
+    const backend_config: *const mlir.Attribute = .dict(ctx.mlir_ctx, metadata_attribute_list.items);
 
     const operand_layouts = allocator.alloc([]const usize, input_shapes.len) catch unreachable;
     for (input_shapes, 0..) |shape, i| {
@@ -1818,7 +1821,7 @@ pub fn typedCustomCall(
     ).appendTo(ctx.currentScope().block);
 
     if (ctx.manual_computation_depth > 0 and ctx.partitioning.partitioner == .gspmd) {
-        op.setAttributeByName("mhlo.sharding", mlir.stringAttribute(ctx.mlir_ctx, "{manual}"));
+        op.setAttributeByName("mhlo.sharding", .string(ctx.mlir_ctx, "{manual}"));
     }
 
     switch (@typeInfo(Output)) {

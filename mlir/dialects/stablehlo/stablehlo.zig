@@ -93,7 +93,7 @@ pub fn cholesky(ctx: *mlir.Context, value: *const mlir.Value, lower: bool, locat
         .operands = .{ .flat = &.{value} },
         .result_type_inference = true,
         .attributes = &.{
-            .named(ctx, "lower", mlir.integerAttribute(ctx, .i1, @intFromBool(lower))),
+            .named(ctx, "lower", .int(ctx, .i1, @intFromBool(lower))),
         },
         .location = location,
     });
@@ -190,7 +190,7 @@ pub fn dot_general(
                 .rhs_contracting_dimensions = opts.rhs_contracting_dimensions,
             }),
         ),
-        .named(ctx, "precision_config", mlir.arrayAttribute(ctx, &precisions)),
+        .named(ctx, "precision_config", .array(ctx, &precisions)),
         // keep algorithm as the last attribute so we can omit it when it's not set.
         .named(ctx, "algorithm", switch (opts.dot_precision) {
             .algorithm => |v| dotAlgorithmAttribute(ctx, v, lhs.type_()),
@@ -217,7 +217,7 @@ pub fn constant(
         .operands = .{ .flat = &.{} },
         .results = .{ .flat = &.{mlir.rankedTensorType(dims, elem_type)} },
         .attributes = &.{
-            .named(ctx, "value", mlir.denseElementsAttribute(mlir.RankedTensorType.get(dims, elem_type, null).shaped(), raw_bytes)),
+            .named(ctx, "value", .denseElements(.rankedTensor(dims, elem_type, null), raw_bytes)),
         },
         .location = location,
     });
@@ -234,7 +234,7 @@ pub fn broadcast_in_dim(
         .operands = .{ .flat = &.{operand} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "broadcast_dimensions", mlir.denseArrayAttribute(ctx, .i64, dims)),
+            .named(ctx, "broadcast_dimensions", .denseArray(ctx, .i64, dims)),
         },
         .location = location,
     });
@@ -251,7 +251,7 @@ pub fn transpose(
         .operands = .{ .flat = &.{value} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "permutation", mlir.denseArrayAttribute(ctx, .i64, opts.permutation)),
+            .named(ctx, "permutation", .denseArray(ctx, .i64, opts.permutation)),
         },
         .location = location,
     });
@@ -270,9 +270,9 @@ pub fn slice(
         .operands = .{ .flat = &.{operand} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "start_indices", mlir.denseArrayAttribute(ctx, .i64, start_indices)),
-            .named(ctx, "limit_indices", mlir.denseArrayAttribute(ctx, .i64, limit_indices)),
-            .named(ctx, "strides", mlir.denseArrayAttribute(ctx, .i64, strides)),
+            .named(ctx, "start_indices", .denseArray(ctx, .i64, start_indices)),
+            .named(ctx, "limit_indices", .denseArray(ctx, .i64, limit_indices)),
+            .named(ctx, "strides", .denseArray(ctx, .i64, strides)),
         },
         .location = location,
     });
@@ -283,7 +283,7 @@ pub fn concatenate(ctx: *mlir.Context, inputs: []const *const mlir.Value, dimens
         .operands = .{ .flat = inputs },
         .result_type_inference = true,
         .attributes = &.{
-            .named(ctx, "dimension", mlir.integerAttribute(ctx, .i64, dimension)),
+            .named(ctx, "dimension", .int(ctx, .i64, dimension)),
         },
         .location = location,
     });
@@ -335,8 +335,8 @@ pub fn gather(
                     args.start_index_map,
                     args.index_vector_dim,
                 )),
-                .named(ctx, "slice_sizes", mlir.denseArrayAttribute(ctx, .i64, slice_sizes)),
-                .named(ctx, "indices_are_sorted", mlir.boolAttribute(ctx, args.indices_are_sorted)),
+                .named(ctx, "slice_sizes", .denseArray(ctx, .i64, slice_sizes)),
+                .named(ctx, "indices_are_sorted", .boolean(ctx, args.indices_are_sorted)),
             },
             .location = location,
         },
@@ -388,8 +388,8 @@ pub fn scatter(
             .blocks = &.{update_block},
             .attributes = &.{
                 .named(ctx, "scatter_dimension_numbers", args.getScatterDimensionNumbers(ctx)),
-                .named(ctx, "indices_are_sorted", mlir.boolAttribute(ctx, args.indices_are_sorted)),
-                .named(ctx, "unique_indices", mlir.boolAttribute(ctx, args.unique_indices)),
+                .named(ctx, "indices_are_sorted", .boolean(ctx, args.indices_are_sorted)),
+                .named(ctx, "unique_indices", .boolean(ctx, args.unique_indices)),
             },
             .result_type_inference = true,
             .location = location,
@@ -402,7 +402,7 @@ pub fn iota(ctx: *mlir.Context, dimension: i64, result_type: *const mlir.Type, l
         .operands = .{ .flat = &.{} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "iota_dimension", mlir.integerAttribute(ctx, .i64, dimension)),
+            .named(ctx, "iota_dimension", .int(ctx, .i64, dimension)),
         },
         .location = location,
     });
@@ -413,7 +413,7 @@ pub fn reverse(ctx: *mlir.Context, operand: *const mlir.Value, dimensions: []con
         .operands = .{ .flat = &.{operand} },
         .results = .{ .flat = &.{operand.type_()} },
         .attributes = &.{
-            .named(ctx, "dimensions", mlir.denseArrayAttribute(ctx, .i64, dimensions)),
+            .named(ctx, "dimensions", .denseArray(ctx, .i64, dimensions)),
         },
         .location = location,
     });
@@ -449,7 +449,7 @@ pub fn dynamic_slice(
         .operands = .{ .variadic = &.{ &.{operand}, start_indices } },
         .result_type_inference = true,
         .attributes = &.{
-            .named(ctx, "slice_sizes", mlir.denseArrayAttribute(ctx, .i64, new_dims)),
+            .named(ctx, "slice_sizes", .denseArray(ctx, .i64, new_dims)),
         },
         .location = location,
     });
@@ -466,9 +466,9 @@ pub fn pad(ctx: *mlir.Context, value: *const mlir.Value, padding_value: *const m
         .operands = .{ .flat = &.{ value, padding_value } },
         .result_type_inference = true,
         .attributes = &.{
-            .named(ctx, "edge_padding_low", mlir.denseArrayAttribute(ctx, .i64, opts.low)),
-            .named(ctx, "edge_padding_high", mlir.denseArrayAttribute(ctx, .i64, opts.high)),
-            .named(ctx, "interior_padding", mlir.denseArrayAttribute(ctx, .i64, opts.interior)),
+            .named(ctx, "edge_padding_low", .denseArray(ctx, .i64, opts.low)),
+            .named(ctx, "edge_padding_high", .denseArray(ctx, .i64, opts.high)),
+            .named(ctx, "interior_padding", .denseArray(ctx, .i64, opts.interior)),
         },
         .location = location,
     });
@@ -486,9 +486,9 @@ pub fn triangular_solve(ctx: *mlir.Context, value: *const mlir.Value, other: *co
         .operands = .{ .flat = &.{ value, other } },
         .result_type_inference = true,
         .attributes = &.{
-            .named(ctx, "left_side", mlir.integerAttribute(ctx, .i1, @intFromBool(opts.left_side))),
-            .named(ctx, "lower", mlir.integerAttribute(ctx, .i1, @intFromBool(opts.lower))),
-            .named(ctx, "unit_diagonal", mlir.integerAttribute(ctx, .i1, @intFromBool(opts.unit_diagonal))),
+            .named(ctx, "left_side", .int(ctx, .i1, @intFromBool(opts.left_side))),
+            .named(ctx, "lower", .int(ctx, .i1, @intFromBool(opts.lower))),
+            .named(ctx, "unit_diagonal", .int(ctx, .i1, @intFromBool(opts.unit_diagonal))),
             .named(ctx, "transpose_a", transposeAttribute(ctx, opts.transpose_a)),
         },
         .location = location,
@@ -506,7 +506,7 @@ pub fn fft(ctx: *mlir.Context, value: *const mlir.Value, opts: FftOpts, location
         .result_type_inference = true,
         .attributes = &.{
             .named(ctx, "fft_type", fftType(ctx, opts.kind)),
-            .named(ctx, "fft_length", mlir.denseArrayAttribute(ctx, .i64, opts.length)),
+            .named(ctx, "fft_length", .denseArray(ctx, .i64, opts.length)),
         },
         .location = location,
     });
@@ -605,8 +605,8 @@ pub fn reduce_precision(ctx: *mlir.Context, value: *const mlir.Value, exponent_b
         .operands = .{ .flat = &.{value} },
         .result_type_inference = true,
         .attributes = &.{
-            .named(ctx, "exponent_bits", mlir.integerAttribute(ctx, .i32, exponent_bits)),
-            .named(ctx, "mantissa_bits", mlir.integerAttribute(ctx, .i32, mantissa_bits)),
+            .named(ctx, "exponent_bits", .int(ctx, .i32, exponent_bits)),
+            .named(ctx, "mantissa_bits", .int(ctx, .i32, mantissa_bits)),
         },
         .location = location,
     });
@@ -647,7 +647,7 @@ pub fn get_tuple_element(ctx: *mlir.Context, tuple_value: *const mlir.Value, ind
         .operands = .{ .flat = &.{tuple_value} },
         .result_type_inference = true,
         .attributes = &.{
-            .named(ctx, "index", mlir.integerAttribute(ctx, .i32, index)),
+            .named(ctx, "index", .int(ctx, .i32, index)),
         },
         .location = location,
     });
@@ -694,11 +694,11 @@ pub fn convolution(
         .operands = .{ .flat = &.{ lhs, rhs } },
         .results = .{ .flat = &.{res_type} },
         .attributes = &.{
-            .named(ctx, "window_strides", mlir.denseArrayAttribute(ctx, .i64, opts.window_strides)),
-            .named(ctx, "padding", mlir.denseElementsAttribute(mlir.RankedTensorType.get(opts.pad_shape, mlir.integerType(ctx, .i64), null).shaped(), opts.pad_value)),
-            .named(ctx, "lhs_dilation", mlir.denseArrayAttribute(ctx, .i64, opts.lhs_dilation)),
-            .named(ctx, "rhs_dilation", mlir.denseArrayAttribute(ctx, .i64, opts.rhs_dilation)),
-            .named(ctx, "window_reversal", mlir.denseArrayAttribute(ctx, .bool, window_reversal[0..opts.window_reversal.len])),
+            .named(ctx, "window_strides", .denseArray(ctx, .i64, opts.window_strides)),
+            .named(ctx, "padding", .denseElements(mlir.RankedTensorType.get(opts.pad_shape, mlir.integerType(ctx, .i64), null).shaped(), opts.pad_value)),
+            .named(ctx, "lhs_dilation", .denseArray(ctx, .i64, opts.lhs_dilation)),
+            .named(ctx, "rhs_dilation", .denseArray(ctx, .i64, opts.rhs_dilation)),
+            .named(ctx, "window_reversal", .denseArray(ctx, .bool, window_reversal[0..opts.window_reversal.len])),
             .named(ctx, "dimension_numbers", convDimensionNumbersAttribute(ctx, .{
                 .input_batch_dimension = opts.input_batch_dimension,
                 .input_feature_dimension = opts.input_feature_dimension,
@@ -710,9 +710,9 @@ pub fn convolution(
                 .output_feature_dimension = opts.output_feature_dimension,
                 .output_spatial_dimensions = opts.output_spatial_dimensions,
             })),
-            .named(ctx, "feature_group_count", mlir.integerAttribute(ctx, .i64, opts.feature_group_count)),
-            .named(ctx, "batch_group_count", mlir.integerAttribute(ctx, .i64, opts.batch_group_count)),
-            .named(ctx, "precision_config", mlir.arrayAttribute(ctx, &max_precisions)),
+            .named(ctx, "feature_group_count", .int(ctx, .i64, opts.feature_group_count)),
+            .named(ctx, "batch_group_count", .int(ctx, .i64, opts.batch_group_count)),
+            .named(ctx, "precision_config", .array(ctx, &max_precisions)),
         },
         .location = location,
     });
@@ -761,27 +761,27 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
 
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 32) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
-        .named(ctx, "call_target_name", mlir.stringAttribute(ctx, opts.call_target_name)),
+        .named(ctx, "call_target_name", .string(ctx, opts.call_target_name)),
     });
     attrs.appendSliceAssumeCapacity(opts.additional_attributes);
 
     if (opts.has_side_effect) |has_side_effects| {
         attrs.appendAssumeCapacity(
-            .named(ctx, "has_side_effect", mlir.boolAttribute(ctx, has_side_effects)),
+            .named(ctx, "has_side_effect", .boolean(ctx, has_side_effects)),
         );
     }
 
     const backend_config_api_version: ?CustomCallOpts.ApiVersion = if (opts.backend_config) |bc| bc else null;
     if (opts.api_version orelse backend_config_api_version) |v| {
         attrs.appendAssumeCapacity(
-            .named(ctx, "api_version", mlir.integerAttribute(ctx, .i32, @intFromEnum(v))),
+            .named(ctx, "api_version", .int(ctx, .i32, @intFromEnum(v))),
         );
     }
     if (opts.backend_config) |backend_config| {
         attrs.appendAssumeCapacity(
             .named(ctx, "backend_config", switch (backend_config) {
                 .typed_ffi => |v| @ptrCast(v),
-                inline else => |v| mlir.stringAttribute(ctx, v),
+                inline else => |v| .string(ctx, v),
             }),
         );
     }
@@ -795,7 +795,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
             );
         }
         attrs.appendAssumeCapacity(
-            .named(ctx, "output_operand_aliases", mlir.arrayAttribute(ctx, buffer.constSlice())),
+            .named(ctx, "output_operand_aliases", .array(ctx, buffer.constSlice())),
         );
     }
 
@@ -803,7 +803,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
     if (opts.operand_layouts) |layouts| {
         for (layouts) |ol| {
             layouts_buffer.appendAssumeCapacity(
-                mlir.denseElementsAttribute(
+                .denseElements(
                     mlir.RankedTensorType.get(
                         &.{@intCast(ol.len)},
                         mlir.indexType(ctx),
@@ -818,7 +818,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
             const shaped_type = input.type_().isA(mlir.ShapedType).?;
             const ol = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - shaped_type.rank() ..];
             layouts_buffer.appendAssumeCapacity(
-                mlir.denseElementsAttribute(
+                .denseElements(
                     mlir.RankedTensorType.get(
                         &.{@intCast(ol.len)},
                         mlir.indexType(ctx),
@@ -830,14 +830,14 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
         }
     }
     attrs.appendAssumeCapacity(
-        .named(ctx, "operand_layouts", mlir.arrayAttribute(ctx, layouts_buffer.constSlice())),
+        .named(ctx, "operand_layouts", .array(ctx, layouts_buffer.constSlice())),
     );
 
     layouts_buffer.clear();
     if (opts.result_layouts) |layouts| {
         for (layouts) |rl| {
             layouts_buffer.appendAssumeCapacity(
-                mlir.denseElementsAttribute(
+                .denseElements(
                     mlir.RankedTensorType.get(
                         &.{@intCast(rl.len)},
                         mlir.indexType(ctx),
@@ -852,7 +852,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
             const shaped_type = result_type.isA(mlir.ShapedType).?;
             const rl = MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - shaped_type.rank() ..];
             layouts_buffer.appendAssumeCapacity(
-                mlir.denseElementsAttribute(
+                .denseElements(
                     mlir.RankedTensorType.get(
                         &.{@intCast(rl.len)},
                         mlir.indexType(ctx),
@@ -864,7 +864,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
         }
     }
     attrs.appendAssumeCapacity(
-        .named(ctx, "result_layouts", mlir.arrayAttribute(ctx, layouts_buffer.constSlice())),
+        .named(ctx, "result_layouts", .array(ctx, layouts_buffer.constSlice())),
     );
 
     return mlir.Operation.make(ctx, "stablehlo.custom_call", .{
