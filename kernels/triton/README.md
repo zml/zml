@@ -10,14 +10,19 @@ Two layers define the surface:
 - **Low layer** — `kernels/triton/builder.zig`: the IR builder primitives.
   `Builder`, `Value`, `DType`, `ArgSpec`. Use these directly when you need
   full control (custom op insertion, dynamic-arity arg lists, escape hatches).
+  `Builder.open` / `Builder.init` take an `*mlir.Context` — pass them a
+  `zml.kernel.triton.newContext()` (a throwaway context with the dialects the
+  DSL emits), `defer ctx.deinit()` once you have the IR string. Not a
+  `CompilationContext`'s `mlir_ctx`: that one carries only `func`/`stablehlo`/`sdy`
+  (a registered `llvm` dialect makes XLA:TPU choke).
 - **High layer** — `zml.kernel.triton.Kernel(Config, spec)`: the declarative
   kernel form. Bundles a config type, a typed spec literal (name + named
   `inputs` / `outputs` + a typed `run` function pointer), and produces a
-  kernel type. Exposes `.emit(allocator, ctx, cfg)` (TTIR string) and
-  `.call(inputs, outputs, opts)` (TTIR string + `stablehlo.custom_call` in
-  one shot — the preferred form for production model code). Inputs and
-  outputs are by-name structs generated from the spec, so missing / typo'd
-  / extra arguments are compile errors at the callsite.
+  kernel type. Exposes `.emit(allocator, cfg)` (TTIR string; manages its own
+  throwaway context) and `.call(inputs, outputs, opts)` (TTIR string +
+  `stablehlo.custom_call` in one shot — the preferred form for production
+  model code). Inputs and outputs are by-name structs generated from the
+  spec, so missing / typo'd / extra arguments are compile errors at the callsite.
 
 ## Table of contents
 
@@ -111,10 +116,11 @@ models where dtypes/sizes come from `Tensor.dim()` / `Options`).
 
 ### Two ways to use a kernel
 
-**Offline / tooling** — get the TTIR string:
+**Offline / tooling** — get the TTIR string (no MLIR context needed; `emit`
+spins up and tears down its own):
 
 ```zig
-const ttir = try MyKernel.Kernel.emit(allocator, ctx, .{ .BLOCK = 1024 });
+const ttir = try MyKernel.Kernel.emit(allocator, .{ .BLOCK = 1024 });
 defer allocator.free(ttir);
 ```
 
@@ -190,9 +196,10 @@ pub fn forward(self: Model, x: zml.Tensor, y: zml.Tensor) zml.Tensor {
 
 `call` is a thin wrapper over `Kernel.emit(...)` + `zml.ops.triton(...)`.
 It must be called from inside a `CompilationContext` (i.e., during
-`zml.module.compile(...)`). For offline tools without a CompilationContext
-(e.g., dump-to-disk diff harnesses), use `Kernel.emit(allocator, ctx, cfg)`
-directly to get the TTIR string.
+`zml.module.compile(...)`) — `emit` builds the TTIR string in its own
+throwaway context; `zml.ops.triton(...)` drops the `stablehlo.custom_call`
+into the model's context. For offline tools, `Kernel.emit(allocator, cfg)`
+gives you just the TTIR string.
 
 Signature: `Kernel.call(inputs: Inputs, outputs: Outputs, opts: CallOpts) Results`.
 
@@ -1001,6 +1008,10 @@ instead of a comptime struct literal; you grab block args with `b.arg(i)`.
 You can also use `Builder.open(allocator, ctx, name)` to create an empty
 builder and call `b.declareArgs(spec)` mid-stream — that's exactly what
 `zml.kernel.triton.Kernel(...)` does internally.
+
+Pass these constructors a `zml.kernel.triton.newContext()`, not a
+`CompilationContext`'s `mlir_ctx`; `defer ctx.deinit()` once you have the IR
+string. `Kernel.emit` does this for you, which is why it takes no context.
 
 Prefer `zml.kernel.triton.Kernel(Config, spec)` for the common case.
 

@@ -402,6 +402,8 @@ pub const MinMaxOpts = struct {
 // Builder — the main DSL builder.
 // =============================================================================
 
+pub const dialects_needed = [_][]const u8{ "func", "tpu", "arith", "scf", "math", "cf", "memref", "vector", "affine" };
+
 /// The main DSL builder. Create with `init`, populate the body with helpers,
 /// then call `finish` to get the IR string.
 pub const Builder = struct {

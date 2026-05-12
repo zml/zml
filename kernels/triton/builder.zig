@@ -453,6 +453,8 @@ pub fn ScanArgs(comptime CtxT: type) type {
     };
 }
 
+pub const dialects_needed = [_][]const u8{ "func", "tt", "arith", "scf", "math", "cf", "llvm" };
+
 pub const Builder = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
