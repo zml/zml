@@ -123,15 +123,9 @@ def _attn_fwd_inner(
     v_ptrs,
     stride_kn,
     stride_vk,
-    stride_sn,
     start_m,
     seqlen_k,
     seqlen_q,
-    dropout_p,
-    sd_mask_ptrs,
-    dropout_mask_ptrs,
-    philox_seed,
-    philox_ptrs,
     block_min,
     block_max,
     offs_n_causal,
@@ -152,8 +146,6 @@ def _attn_fwd_inner(
     SM_SCALE: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
     MASK_STEPS: tl.constexpr,
-    ENABLE_DROPOUT: tl.constexpr,
-    RETURN_SCORES: tl.constexpr,
     PADDED_HEAD: tl.constexpr,
     IS_FP8: tl.constexpr,
     FP8_MAX: tl.constexpr,
@@ -209,10 +201,6 @@ def _attn_fwd_inner(
             mask_partial = size_n < seqlen_k
             mask = tl.where(bound_cond, mask_partial, mask)
 
-        # compute masks
-        q_mask = OFFS_M[:, None] < seqlen_q
-        k_mask = (start_n + tl.arange(0, BLOCK_N))[None, :] < seqlen_k
-        p_mask = q_mask & k_mask
         qk_scale = SM_SCALE * RCP_LN2
         # -- compute qk ----
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
@@ -255,24 +243,7 @@ def _attn_fwd_inner(
             # exp2(-inf - (-inf)) = NaN. Sanitize by zeroing masked elements.
             p = tl.where(mask, p, 0.0)
 
-        # CAVEAT: Must update l_ij before applying dropout
         l_ij = tl.sum(p, 1)
-        if ENABLE_DROPOUT:
-            rng_output = tl.rand(
-                philox_seed, philox_ptrs
-            )  # TODO: use tl.randint for better performance
-            dropout_mask = rng_output > dropout_p
-            tl.store(dropout_mask_ptrs, dropout_mask, mask=p_mask)
-
-            # return scores with negative values for dropped vals
-            sd_mask = tl.where(dropout_mask, p, -p)
-            tl.store(sd_mask_ptrs, sd_mask, mask=p_mask)
-
-            # apply dropout mask in place
-            p = tl.where(dropout_mask, p, 0.0)
-        elif RETURN_SCORES:
-            # NOTE: the returned score is not the same as the reference because we need to adjust as we find new maxes per block. We are not doing that
-            tl.store(sd_mask_ptrs, p, mask=p_mask)
 
         # -- update output accumulator --
         # alpha is an adjustment factor for acc and li as we loop and find new maxes
@@ -301,12 +272,6 @@ def _attn_fwd_inner(
         if HAS_PE:
             k_pe_ptrs += BLOCK_N * stride_kn
         v_ptrs += BLOCK_N * stride_vk
-        if RETURN_SCORES:
-            sd_mask_ptrs += BLOCK_N * stride_sn
-
-        if ENABLE_DROPOUT:
-            dropout_mask_ptrs += BLOCK_N * stride_sn
-            philox_ptrs += BLOCK_N * stride_sn
 
     return acc, l_i, m_i
 
@@ -321,8 +286,6 @@ def _attn_fwd(
     descale_v_ptr: torch.Tensor,
     out_ptr: torch.Tensor,
     alibi_slopes_ptr: torch.Tensor,
-    s_dmask_ptr: torch.Tensor,
-    dropout_mask_ptr: torch.Tensor,
     softmax_lse_ptr: torch.Tensor,
     sink_ptr: torch.Tensor,
     stride_qz_in,
@@ -346,19 +309,12 @@ def _attn_fwd(
     stride_on_in,
     stride_alibi_z_in,
     stride_alibi_h_in,
-    stride_sd_z_in,
-    stride_sd_h_in,
-    stride_sd_m_in,
-    stride_sd_n_in,
     stride_lse_z_in,
     stride_lse_h_in,
     stride_lse_m_in,
     sm_scale,
     cu_seqlens_q,
     cu_seqlens_k,
-    dropout_p,
-    philox_seed,
-    philox_offset_base_in,
     SEQLEN_Q: tl.constexpr,
     SEQLEN_K: tl.constexpr,
     IS_CAUSAL: tl.constexpr,
@@ -370,8 +326,6 @@ def _attn_fwd(
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_DMODEL_POW2: tl.constexpr,
     BLOCK_DMODEL_PE: tl.constexpr,  # it's zero or a power of 2
-    RETURN_SCORES: tl.constexpr,
-    ENABLE_DROPOUT: tl.constexpr,
     IS_FP8: tl.constexpr,
     FP8_MAX: tl.constexpr,
     VARLEN: tl.constexpr,
@@ -434,12 +388,6 @@ def _attn_fwd(
         stride_alibi_z = tl.cast(stride_alibi_z_in, tl.int64)
         stride_alibi_h = tl.cast(stride_alibi_h_in, tl.int64)
 
-        # NOTE: philox offset is need in dropout pointer calculations
-        philox_offset_base = tl.cast(philox_offset_base_in, tl.int64)
-        stride_sd_z = tl.cast(stride_sd_z_in, tl.int64)
-        stride_sd_h = tl.cast(stride_sd_h_in, tl.int64)
-        stride_sd_m = tl.cast(stride_sd_m_in, tl.int64)
-        stride_sd_n = tl.cast(stride_sd_n_in, tl.int64)
         stride_lse_z = tl.cast(stride_lse_z_in, tl.int64)
         stride_lse_h = tl.cast(stride_lse_h_in, tl.int64)
         stride_lse_m = tl.cast(stride_lse_m_in, tl.int64)
@@ -465,11 +413,6 @@ def _attn_fwd(
         stride_on = stride_on_in
         stride_alibi_z = stride_alibi_z_in
         stride_alibi_h = stride_alibi_h_in
-        philox_offset_base = philox_offset_base_in
-        stride_sd_z = stride_sd_z_in
-        stride_sd_h = stride_sd_h_in
-        stride_sd_m = stride_sd_m_in
-        stride_sd_n = stride_sd_n_in
         stride_lse_z = stride_lse_z_in
         stride_lse_h = stride_lse_h_in
         stride_lse_m = stride_lse_m_in
@@ -496,12 +439,6 @@ def _attn_fwd(
         tl.assume(stride_on_in >= 0)
         tl.assume(stride_alibi_z_in >= 0)
         tl.assume(stride_alibi_h_in >= 0)
-    # NOTE: philox offset is need in dropout pointer calculations
-    tl.assume(philox_offset_base_in >= 0)
-    tl.assume(stride_sd_z_in >= 0)
-    tl.assume(stride_sd_h_in >= 0)
-    tl.assume(stride_sd_m_in >= 0)
-    tl.assume(stride_sd_n_in >= 0)
     tl.assume(stride_lse_z_in >= 0)
     tl.assume(stride_lse_h_in >= 0)
     tl.assume(stride_lse_m_in >= 0)
@@ -571,7 +508,6 @@ def _attn_fwd(
                 lse_mask = offs_m < SEQLEN_Q
                 lse = tl.full([BLOCK_M], value=0.0, dtype=tl.float32)
                 tl.store(softmax_lse_ptr + offs_lse, lse, mask=lse_mask)
-                # TODO: Should dropout and return encoded softmax be handled here too?
 
             return
 
@@ -637,38 +573,6 @@ def _attn_fwd(
         alibi_slope = tl.load(alibi_slopes_ptr + alibi_offs)
     else:
         alibi_slope = None
-
-    # s_dmask (return_scores)
-    if s_dmask_ptr is not None:
-        s_dmask_offs = (
-            off_z * stride_sd_z
-            + off_q_head * stride_sd_h
-            + offs_m[:, None] * stride_sd_m
-            + offs_n[None, :] * stride_sd_n
-        )
-        s_dmask_ptrs = s_dmask_ptr + s_dmask_offs
-    else:
-        s_dmask_ptrs = None
-
-    # dropout
-    if dropout_mask_ptr is not None:
-        dropout_mask_offs = (
-            off_z * stride_sd_z
-            + off_q_head * stride_sd_h
-            + offs_m[:, None] * stride_sd_m
-            + offs_n[None, :] * stride_sd_n
-        )
-        dropout_mask_ptrs = dropout_mask_ptr + dropout_mask_offs
-        philox_ptrs = (
-            philox_offset_base
-            + off_z * stride_sd_z
-            + off_q_head * stride_sd_h
-            + offs_m[:, None] * stride_sd_m
-            + offs_n[None, :] * stride_sd_n
-        )
-    else:
-        dropout_mask_ptrs = None
-        philox_ptrs = None
 
     if ENABLE_SINK:
         RCP_LN2: tl.constexpr = 1.4426950408889634
@@ -738,11 +642,6 @@ def _attn_fwd(
         if HAS_PE:
             k_pe_ptrs += skipped_blocks * BLOCK_N * stride_kn
         v_ptrs += skipped_blocks * BLOCK_N * stride_vn
-        if RETURN_SCORES:
-            s_dmask_ptrs += skipped_blocks * BLOCK_N * stride_sd_n
-        if ENABLE_DROPOUT:
-            dropout_mask_ptrs += skipped_blocks * BLOCK_N * stride_sd_n
-            philox_ptrs += skipped_blocks * BLOCK_N * stride_sd_n
     # Compute for full blocks. Here we set causal to false regardless of its actual
     # value because there is no masking. Similarly we do not need padding.
     if n_full_blocks > 0:
@@ -758,15 +657,9 @@ def _attn_fwd(
             v_ptrs,
             stride_kn,
             stride_vn,
-            stride_sd_n,
             start_m,
             seqlen_k,
             seqlen_q,
-            dropout_p,
-            s_dmask_ptrs,
-            dropout_mask_ptrs,
-            philox_seed,
-            philox_ptrs,
             block_min,
             block_max,
             0,
@@ -787,8 +680,6 @@ def _attn_fwd(
             sm_scale,
             False,
             MASK_STEPS=False,
-            ENABLE_DROPOUT=ENABLE_DROPOUT,
-            RETURN_SCORES=RETURN_SCORES,
             PADDED_HEAD=BLOCK_DMODEL != BLOCK_DMODEL_POW2,
             IS_FP8=IS_FP8,
             FP8_MAX=FP8_MAX,
@@ -808,10 +699,6 @@ def _attn_fwd(
         if HAS_PE:
             k_pe_ptrs += n_full_blocks * BLOCK_N * stride_kn
         v_ptrs += n_full_blocks * BLOCK_N * stride_vn
-        if RETURN_SCORES:
-            s_dmask_ptrs += n_full_blocks * BLOCK_N * stride_sd_n
-        if ENABLE_DROPOUT:
-            dropout_mask_ptrs += n_full_blocks * BLOCK_N * stride_sd_n
         acc, l_i, m_i = _attn_fwd_inner(
             acc,
             l_i,
@@ -823,15 +710,9 @@ def _attn_fwd(
             v_ptrs,
             stride_kn,
             stride_vn,
-            stride_sd_n,
             start_m,
             seqlen_k,
             seqlen_q,
-            dropout_p,
-            s_dmask_ptrs,
-            dropout_mask_ptrs,
-            philox_seed,
-            philox_ptrs,
             block_min,
             block_max,
             offs_n_causal,
@@ -852,8 +733,6 @@ def _attn_fwd(
             sm_scale,
             IS_CAUSAL,
             MASK_STEPS=True,
-            ENABLE_DROPOUT=ENABLE_DROPOUT,
-            RETURN_SCORES=RETURN_SCORES,
             PADDED_HEAD=BLOCK_DMODEL != BLOCK_DMODEL_POW2,
             IS_FP8=IS_FP8,
             FP8_MAX=FP8_MAX,
@@ -864,9 +743,6 @@ def _attn_fwd(
     # This helps the compiler do Newton Raphson on l_i vs on acc which is much larger.
     l_recip = 1 / l_i[:, None]
     acc = acc * l_recip
-    if ENABLE_DROPOUT:
-        dropout_scale = 1 / (1 - dropout_p)
-        acc = acc * dropout_scale
     # If seqlen_q > seqlen_k but the delta is not a multiple of BLOCK_M,
     # then we have one block with a row of all NaNs which come from computing
     # softmax over a row of all -infs (-inf - inf = NaN). We check for that here
@@ -963,12 +839,10 @@ def build_args(cfg: Dict[str, Any]) -> Tuple[list, Dict[str, Any]]:
     IS_CAUSAL = bool(cfg.get("IS_CAUSAL", False))
     VARLEN = bool(cfg.get("VARLEN", False))
     IS_FP8 = bool(cfg.get("IS_FP8", False))
-    ENABLE_DROPOUT = bool(cfg.get("ENABLE_DROPOUT", False))
     ENABLE_SINK = bool(cfg.get("ENABLE_SINK", False))
     SLIDING_WINDOW = int(cfg.get("SLIDING_WINDOW", 0))
     HAS_PE = bool(cfg.get("HAS_PE", False))
     USE_INT64_STRIDES = bool(cfg.get("USE_INT64_STRIDES", False))
-    RETURN_SCORES = bool(cfg.get("RETURN_SCORES", False))
     PRELOAD_V = bool(cfg.get("PRELOAD_V", True))
     BLOCK_DMODEL_PE = int(cfg.get("BLOCK_DMODEL_PE", 0))
     FP8_MAX = float(cfg.get("FP8_MAX", 448.0))
@@ -980,7 +854,6 @@ def build_args(cfg: Dict[str, Any]) -> Tuple[list, Dict[str, Any]]:
     o_shape = q_shape
     descale_shape = (BATCH,)
     alibi_shape = (BATCH, NUM_Q_HEADS)
-    sd_shape = (BATCH, NUM_Q_HEADS, SEQLEN_Q, SEQLEN_K)
     lse_shape = (BATCH, NUM_Q_HEADS, SEQLEN_Q)
     sink_shape = (BATCH,)
     cu_seqlens_shape = (BATCH + 1,)
@@ -1015,11 +888,6 @@ def build_args(cfg: Dict[str, Any]) -> Tuple[list, Dict[str, Any]]:
     # Alibi strides
     stride_alibi_z = NUM_Q_HEADS
     stride_alibi_h = 3
-    # SD mask / dropout strides
-    stride_sd_z = NUM_Q_HEADS * SEQLEN_Q * SEQLEN_K
-    stride_sd_h = SEQLEN_Q * SEQLEN_K
-    stride_sd_m = SEQLEN_K
-    stride_sd_n = 3
     # LSE strides
     stride_lse_z = NUM_Q_HEADS * SEQLEN_Q
     stride_lse_h = SEQLEN_Q
@@ -1035,8 +903,6 @@ def build_args(cfg: Dict[str, Any]) -> Tuple[list, Dict[str, Any]]:
         FakeTensor("fp32", descale_shape),      # descale_v_ptr
         FakeTensor(dtype, o_shape),             # out_ptr
         FakeTensor("fp32", alibi_shape),        # alibi_slopes_ptr
-        FakeTensor("fp32", sd_shape),           # s_dmask_ptr
-        FakeTensor("fp32", sd_shape),           # dropout_mask_ptr
         FakeTensor("fp32", lse_shape),          # softmax_lse_ptr
         FakeTensor("fp32", sink_shape),         # sink_ptr
         # Strides (runtime scalars)
@@ -1046,15 +912,11 @@ def build_args(cfg: Dict[str, Any]) -> Tuple[list, Dict[str, Any]]:
         stride_descale_q_z, stride_descale_k_z, stride_descale_v_z,
         stride_oz, stride_oh, stride_om, stride_on,
         stride_alibi_z, stride_alibi_h,
-        stride_sd_z, stride_sd_h, stride_sd_m, stride_sd_n,
         stride_lse_z, stride_lse_h, stride_lse_m,
         # Runtime scalars
         sm_scale,                               # sm_scale
         FakeTensor("i32", cu_seqlens_shape),    # cu_seqlens_q
         FakeTensor("i32", cu_seqlens_shape),    # cu_seqlens_k
-        0.0,                                    # dropout_p
-        2**33,                                  # philox_seed (force i64)
-        0,                                      # philox_offset_base_in
         # tl.constexpr params
         SEQLEN_Q,
         SEQLEN_K,
@@ -1067,8 +929,6 @@ def build_args(cfg: Dict[str, Any]) -> Tuple[list, Dict[str, Any]]:
         BLOCK_DMODEL,
         BLOCK_DMODEL_POW2,
         BLOCK_DMODEL_PE,
-        RETURN_SCORES,
-        ENABLE_DROPOUT,
         IS_FP8,
         FP8_MAX,
         VARLEN,
@@ -1079,4 +939,3 @@ def build_args(cfg: Dict[str, Any]) -> Tuple[list, Dict[str, Any]]:
         SLIDING_WINDOW,
     ]
     return args, {"grid": (1,)}
-

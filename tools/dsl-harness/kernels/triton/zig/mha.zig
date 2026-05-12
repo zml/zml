@@ -40,12 +40,10 @@ pub const SWEEPS: []const harness.Sweep(Kernel.Config) = &.{
             .IS_CAUSAL = false,
             .VARLEN = false,
             .IS_FP8 = false,
-            .ENABLE_DROPOUT = false,
             .ENABLE_SINK = false,
             .SLIDING_WINDOW = 0,
             .HAS_PE = false,
             .USE_INT64_STRIDES = false,
-            .RETURN_SCORES = false,
         },
     },
 };
@@ -84,8 +82,6 @@ pub fn forward(
     descale_k: Tensor,
     descale_v: Tensor,
     alibi_slopes: Tensor,
-    s_dmask: Tensor,
-    dropout_mask: Tensor,
     softmax_lse: Tensor,
     sink: Tensor,
     // Strides — q
@@ -115,11 +111,6 @@ pub fn forward(
     // Strides — alibi
     stride_az: Tensor,
     stride_ah: Tensor,
-    // Strides — sd_mask/dropout
-    stride_sdz: Tensor,
-    stride_sdh: Tensor,
-    stride_sdm: Tensor,
-    stride_sdn: Tensor,
     // Strides — lse
     stride_lz: Tensor,
     stride_lh: Tensor,
@@ -128,9 +119,6 @@ pub fn forward(
     sm_scale: Tensor,
     cu_seqlens_q: Tensor,
     cu_seqlens_k: Tensor,
-    dropout_p: Tensor,
-    philox_seed: Tensor,
-    philox_offset: Tensor,
     // Output placeholder
     _: Tensor,
 ) Tensor {
@@ -138,7 +126,7 @@ pub fn forward(
         .{
             q,            k,            v,
             descale_q,    descale_k,    descale_v,
-            alibi_slopes, s_dmask,      dropout_mask,
+            alibi_slopes, 
             softmax_lse,  sink,         stride_qz,
             stride_qh,    stride_qm,    stride_qk,
             stride_kz,    stride_kh,    stride_kn,
@@ -146,11 +134,9 @@ pub fn forward(
             stride_vn,    stride_vk,    stride_dqz,
             stride_dkz,   stride_dvz,   stride_oz,
             stride_oh,    stride_om,    stride_on,
-            stride_az,    stride_ah,    stride_sdz,
-            stride_sdh,   stride_sdm,   stride_sdn,
+            stride_az,    stride_ah,    
             stride_lz,    stride_lh,    stride_lm,
             sm_scale,     cu_seqlens_q, cu_seqlens_k,
-            dropout_p,    philox_seed,  philox_offset,
         },
         .{Shape.init(.{O_BUF}, .bf16)},
         .{
@@ -179,8 +165,8 @@ pub fn args() std.meta.ArgsTuple(@TypeOf(forward)) {
         ten1d(.bf16, Q_BUF),                 ten1d(.bf16, K_BUF),    ten1d(.bf16, V_BUF),
         // descale_q, descale_k, descale_v
         ten1d(.f32, 1),                      ten1d(.f32, 1),         ten1d(.f32, 1),
-        // alibi_slopes, s_dmask, dropout_mask, softmax_lse, sink
-        ten1d(.f32, NUM_Q_HEADS),            ten1d(.f32, 1),         ten1d(.f32, 1),
+        // alibi_slopes, softmax_lse, sink
+        ten1d(.f32, NUM_Q_HEADS),            
         ten1d(.f32, SEQLEN_Q * NUM_Q_HEADS), ten1d(.f32, 1),
         // strides — q (4)
                 s(),
@@ -199,14 +185,10 @@ pub fn args() std.meta.ArgsTuple(@TypeOf(forward)) {
         s(),                                 s(),                    s(),
         // strides — alibi (2)
         s(),                                 s(),
-        // strides — sd_mask/dropout (4)
-                           s(),
-        s(),                                 s(),                    s(),
         // strides — lse (3)
         s(),                                 s(),                    s(),
-        // sm_scale, cu_seqlens_q, cu_seqlens_k, dropout_p, philox_seed, philox_offset
+        // sm_scale, cu_seqlens_q, cu_seqlens_k
         Tensor.init(.{}, .f32),              ten1d(.i32, BATCH + 1), ten1d(.i32, BATCH + 1),
-        Tensor.init(.{}, .f32),              Tensor.init(.{}, .i64), s(),
         // output placeholder
         ten1d(.bf16, O_BUF),
     };

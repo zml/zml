@@ -4,9 +4,9 @@
 // Zig port of `tools/dsl-harness/kernels/triton/py/mha.py:_attn_fwd`.
 //
 // Pinned config:
-//   IS_CAUSAL=false, VARLEN=false, IS_FP8=false, ENABLE_DROPOUT=false,
+//   IS_CAUSAL=false, VARLEN=false, IS_FP8=false,
 //   ENABLE_SINK=false, SLIDING_WINDOW=0, HAS_PE=false (BLOCK_DMODEL_PE=0),
-//   USE_INT64_STRIDES=false, RETURN_SCORES=false, PRELOAD_V=true, NUM_XCD=8.
+//   USE_INT64_STRIDES=false, PRELOAD_V=true, NUM_XCD=8.
 
 const std = @import("std");
 
@@ -307,12 +307,10 @@ pub const MhaFwd = struct {
         IS_CAUSAL: bool = false,
         VARLEN: bool = false,
         IS_FP8: bool = false,
-        ENABLE_DROPOUT: bool = false,
         ENABLE_SINK: bool = false,
         SLIDING_WINDOW: i32 = 0,
         HAS_PE: bool = false,
         USE_INT64_STRIDES: bool = false,
-        RETURN_SCORES: bool = false,
     };
 
     pub const Kernel = tri.Kernel(Config, .{
@@ -325,8 +323,6 @@ pub const MhaFwd = struct {
             "descale_k_ptr",
             "descale_v_ptr",
             "alibi_slopes_ptr",
-            "s_dmask_ptr",
-            "dropout_mask_ptr",
             "softmax_lse_ptr",
             "sink_ptr",
             // strides — q
@@ -356,11 +352,6 @@ pub const MhaFwd = struct {
             // strides — alibi
             "stride_alibi_z_in",
             "stride_alibi_h_in",
-            // strides — sd_mask / dropout
-            "stride_sd_z_in",
-            "stride_sd_h_in",
-            "stride_sd_m_in",
-            "stride_sd_n_in",
             // strides — lse
             "stride_lse_z_in",
             "stride_lse_h_in",
@@ -369,9 +360,6 @@ pub const MhaFwd = struct {
             "sm_scale",
             "cu_seqlens_q",
             "cu_seqlens_k",
-            "dropout_p",
-            "philox_seed",
-            "philox_offset_base_in",
         },
         .outputs = &.{"out"},
         .run = run,
@@ -384,12 +372,10 @@ pub const MhaFwd = struct {
         std.debug.assert(!cfg.IS_CAUSAL);
         std.debug.assert(!cfg.VARLEN);
         std.debug.assert(!cfg.IS_FP8);
-        std.debug.assert(!cfg.ENABLE_DROPOUT);
         std.debug.assert(!cfg.ENABLE_SINK);
         std.debug.assert(cfg.SLIDING_WINDOW == 0);
         std.debug.assert(!cfg.HAS_PE);
         std.debug.assert(!cfg.USE_INT64_STRIDES);
-        std.debug.assert(!cfg.RETURN_SCORES);
         std.debug.assert(cfg.PRELOAD_V);
 
         const BLOCK_M: i32 = cfg.BLOCK_M;
@@ -415,8 +401,6 @@ pub const MhaFwd = struct {
             .descale_v_ptr = .{ .ptr = .f32 },
             .out_ptr = .{ .ptr = cfg.dtype },
             .alibi_slopes_ptr = .{ .ptr = .f32 },
-            .s_dmask_ptr = .{ .ptr = .f32 },
-            .dropout_mask_ptr = .{ .ptr = .f32 },
             .softmax_lse_ptr = .{ .ptr = .f32 },
             .sink_ptr = .{ .ptr = .f32 },
             // strides — q
@@ -446,11 +430,6 @@ pub const MhaFwd = struct {
             // strides — alibi
             .stride_alibi_z_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
             .stride_alibi_h_in = .{ .scalar = .i32 },
-            // strides — sd_mask / dropout
-            .stride_sd_z_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_sd_h_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_sd_m_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_sd_n_in = .{ .scalar = .i32 },
             // strides — lse
             .stride_lse_z_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
             .stride_lse_h_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
@@ -459,9 +438,6 @@ pub const MhaFwd = struct {
             .sm_scale = .{ .scalar = .f32 },
             .cu_seqlens_q = .{ .ptr = .i32 },
             .cu_seqlens_k = .{ .ptr = .i32 },
-            .dropout_p = .{ .scalar = .f32 },
-            .philox_seed = .{ .scalar_opts = .{ .dtype = .i64, .divisibility = 16 } },
-            .philox_offset_base_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
         });
 
         // USE_INT64_STRIDES=false: strides used as-is (i32)
@@ -518,11 +494,6 @@ pub const MhaFwd = struct {
         b.assume(a.stride_vh_in.ge(0));
         b.assume(a.stride_vn_in.ge(0));
         b.assume(a.stride_vk_in.ge(0));
-        b.assume(a.philox_offset_base_in.ge(0));
-        b.assume(a.stride_sd_z_in.ge(0));
-        b.assume(a.stride_sd_h_in.ge(0));
-        b.assume(a.stride_sd_m_in.ge(0));
-        b.assume(a.stride_sd_n_in.ge(0));
         b.assume(a.stride_lse_z_in.ge(0));
         b.assume(a.stride_lse_h_in.ge(0));
         b.assume(a.stride_lse_m_in.ge(0));
