@@ -69,8 +69,8 @@ pub fn constant_float(
     location: *const mlir.Location,
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "arith.constant", .{
-        .results = .{ .flat = &.{mlir.floatType(ctx, ft)} },
-        .attributes = &.{.named(ctx, "value", mlir.floatAttribute(ctx, ft, value))},
+        .results = .{ .flat = &.{.float(ctx, ft)} },
+        .attributes = &.{.named(ctx, "value", .float(ctx, ft, value))},
         .location = location,
     });
 }
@@ -315,7 +315,7 @@ pub fn convertf(
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.rounding) |rm| {
-        attrs.appendAssumeCapacity(.named(ctx, "roundingmode", mlir.integerAttribute(ctx, .i32, @intFromEnum(rm))));
+        attrs.appendAssumeCapacity(.named(ctx, "roundingmode", .int(ctx, .i32, @intFromEnum(rm))));
     }
     return mlir.Operation.make(ctx, "arith.convertf", .{
         .operands = .{ .flat = &.{src} },
@@ -336,7 +336,7 @@ pub fn scaling_truncf(
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.rounding) |rm| {
-        attrs.appendAssumeCapacity(.named(ctx, "roundingmode", mlir.integerAttribute(ctx, .i32, @intFromEnum(rm))));
+        attrs.appendAssumeCapacity(.named(ctx, "roundingmode", .int(ctx, .i32, @intFromEnum(rm))));
     }
     return mlir.Operation.make(ctx, "arith.scaling_truncf", .{
         .operands = .{ .flat = &.{ src, scale } },
@@ -361,7 +361,7 @@ pub fn cmpi(
         .operands = .{ .flat = &.{ lhs, rhs } },
         .result_type_inference = true,
         .attributes = &.{
-            .named(ctx, "predicate", mlir.integerAttribute(ctx, .i64, @intFromEnum(predicate))),
+            .named(ctx, "predicate", .int(ctx, .i64, @intFromEnum(predicate))),
         },
         .location = location,
     });
@@ -378,7 +378,7 @@ pub fn cmpf(
         .operands = .{ .flat = &.{ lhs, rhs } },
         .result_type_inference = true,
         .attributes = &.{
-            .named(ctx, "predicate", mlir.integerAttribute(ctx, .i64, @intFromEnum(predicate))),
+            .named(ctx, "predicate", .int(ctx, .i64, @intFromEnum(predicate))),
         },
         .location = location,
     });

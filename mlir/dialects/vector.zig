@@ -72,7 +72,7 @@ pub fn extract(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "static_position", mlir.denseArrayAttribute(ctx, .i64, static_position)),
+            .named(ctx, "static_position", .denseArray(ctx, .i64, static_position)),
         },
         .location = location,
     });
@@ -96,7 +96,7 @@ pub fn insert(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{dest.type_()} },
         .attributes = &.{
-            .named(ctx, "static_position", mlir.denseArrayAttribute(ctx, .i64, static_position)),
+            .named(ctx, "static_position", .denseArray(ctx, .i64, static_position)),
         },
         .location = location,
     });
@@ -151,9 +151,9 @@ pub fn extract_strided_slice(
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "offsets", mlir.denseArrayAttribute(ctx, .i64, args.offsets)),
-            .named(ctx, "sizes", mlir.denseArrayAttribute(ctx, .i64, args.sizes)),
-            .named(ctx, "strides", mlir.denseArrayAttribute(ctx, .i64, args.strides)),
+            .named(ctx, "offsets", .denseArray(ctx, .i64, args.offsets)),
+            .named(ctx, "sizes", .denseArray(ctx, .i64, args.sizes)),
+            .named(ctx, "strides", .denseArray(ctx, .i64, args.strides)),
         },
         .location = location,
     });
@@ -171,8 +171,8 @@ pub fn insert_strided_slice(
         .operands = .{ .flat = &.{ src, dest } },
         .results = .{ .flat = &.{dest.type_()} },
         .attributes = &.{
-            .named(ctx, "offsets", mlir.denseArrayAttribute(ctx, .i64, offsets)),
-            .named(ctx, "strides", mlir.denseArrayAttribute(ctx, .i64, strides)),
+            .named(ctx, "offsets", .denseArray(ctx, .i64, offsets)),
+            .named(ctx, "strides", .denseArray(ctx, .i64, strides)),
         },
         .location = location,
     });
@@ -251,7 +251,7 @@ pub fn transpose(
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "permutation", mlir.denseArrayAttribute(ctx, .i64, permutation)),
+            .named(ctx, "permutation", .denseArray(ctx, .i64, permutation)),
         },
         .location = location,
     });
@@ -275,7 +275,7 @@ pub fn shuffle(
         .operands = .{ .flat = &.{ lhs, rhs } },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "mask", mlir.denseArrayAttribute(ctx, .i64, mask)),
+            .named(ctx, "mask", .denseArray(ctx, .i64, mask)),
         },
         .location = location,
     });
@@ -406,7 +406,7 @@ pub fn multi_reduction(
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
             .named(ctx, "kind", kind.attribute(ctx)),
-            .named(ctx, "reduction_dims", mlir.denseArrayAttribute(ctx, .i64, reduction_dims)),
+            .named(ctx, "reduction_dims", .denseArray(ctx, .i64, reduction_dims)),
         },
         .location = location,
     });
@@ -437,8 +437,8 @@ pub fn contract(
         .operands = .{ .flat = &.{ lhs, rhs, acc } },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "indexing_maps", mlir.arrayAttribute(ctx, indexing_maps)),
-            .named(ctx, "iterator_types", mlir.arrayAttribute(ctx, iter_attrs.constSlice())),
+            .named(ctx, "indexing_maps", .array(ctx, indexing_maps)),
+            .named(ctx, "iterator_types", .array(ctx, iter_attrs.constSlice())),
             .named(ctx, "kind", opts.kind.attribute(ctx)),
         },
         .location = location,
@@ -456,10 +456,10 @@ pub const LoadStoreOpts = struct {
 
 fn loadStoreAttrs(ctx: *mlir.Context, opts: LoadStoreOpts, dst: *stdx.BoundedArray(mlir.NamedAttribute, 2)) void {
     if (opts.nontemporal) {
-        dst.appendAssumeCapacity(.named(ctx, "nontemporal", mlir.boolAttribute(ctx, true)));
+        dst.appendAssumeCapacity(.named(ctx, "nontemporal", .boolean(ctx, true)));
     }
     if (opts.alignment) |a| {
-        dst.appendAssumeCapacity(.named(ctx, "alignment", mlir.integerAttribute(ctx, .i64, a)));
+        dst.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, a)));
     }
 }
 
@@ -674,15 +674,15 @@ pub fn transfer_read(
     const seg_sizes = [4]i32{ 1, @intCast(indices.len), 1, mask_len };
 
     var in_bounds_attrs: stdx.BoundedArray(*const mlir.Attribute, 16) = .empty;
-    for (args.in_bounds) |b| in_bounds_attrs.appendAssumeCapacity(mlir.boolAttribute(ctx, b));
+    for (args.in_bounds) |b| in_bounds_attrs.appendAssumeCapacity(.boolean(ctx, b));
 
     return mlir.Operation.make(ctx, "vector.transfer_read", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
             .named(ctx, "permutation_map", args.permutation_map),
-            .named(ctx, "in_bounds", mlir.arrayAttribute(ctx, in_bounds_attrs.constSlice())),
+            .named(ctx, "in_bounds", .array(ctx, in_bounds_attrs.constSlice())),
         },
         .location = location,
     });
@@ -718,7 +718,7 @@ pub fn transfer_write(
     const seg_sizes = [4]i32{ 1, 1, @intCast(indices.len), mask_len };
 
     var in_bounds_attrs: stdx.BoundedArray(*const mlir.Attribute, 16) = .empty;
-    for (args.in_bounds) |b| in_bounds_attrs.appendAssumeCapacity(mlir.boolAttribute(ctx, b));
+    for (args.in_bounds) |b| in_bounds_attrs.appendAssumeCapacity(.boolean(ctx, b));
 
     var result_types: stdx.BoundedArray(*const mlir.Type, 1) = .empty;
     if (args.result_type) |rt| result_types.appendAssumeCapacity(rt);
@@ -727,9 +727,9 @@ pub fn transfer_write(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = result_types.constSlice() },
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
             .named(ctx, "permutation_map", args.permutation_map),
-            .named(ctx, "in_bounds", mlir.arrayAttribute(ctx, in_bounds_attrs.constSlice())),
+            .named(ctx, "in_bounds", .array(ctx, in_bounds_attrs.constSlice())),
         },
         .location = location,
     });
@@ -750,7 +750,7 @@ pub fn constant_mask(
     return mlir.Operation.make(ctx, "vector.constant_mask", .{
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "mask_dim_sizes", mlir.denseArrayAttribute(ctx, .i64, mask_dim_sizes)),
+            .named(ctx, "mask_dim_sizes", .denseArray(ctx, .i64, mask_dim_sizes)),
         },
         .location = location,
     });

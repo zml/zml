@@ -33,9 +33,9 @@ pub fn alloc(
 
     const seg_sizes = [2]i32{ @intCast(dynamic_sizes.len), @intCast(symbol_operands.len) };
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
-    attrs.appendAssumeCapacity(.named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)));
+    attrs.appendAssumeCapacity(.named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)));
     if (opts.alignment) |a| {
-        attrs.appendAssumeCapacity(.named(ctx, "alignment", mlir.integerAttribute(ctx, .i64, a)));
+        attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, a)));
     }
 
     return mlir.Operation.make(ctx, "memref.alloc", .{
@@ -61,9 +61,9 @@ pub fn alloca(
 
     const seg_sizes = [2]i32{ @intCast(dynamic_sizes.len), @intCast(symbol_operands.len) };
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
-    attrs.appendAssumeCapacity(.named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)));
+    attrs.appendAssumeCapacity(.named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)));
     if (opts.alignment) |a| {
-        attrs.appendAssumeCapacity(.named(ctx, "alignment", mlir.integerAttribute(ctx, .i64, a)));
+        attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, a)));
     }
 
     return mlir.Operation.make(ctx, "memref.alloca", .{
@@ -101,7 +101,7 @@ pub fn realloc(
 
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.alignment) |a| {
-        attrs.appendAssumeCapacity(.named(ctx, "alignment", mlir.integerAttribute(ctx, .i64, a)));
+        attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, a)));
     }
 
     return mlir.Operation.make(ctx, "memref.realloc", .{
@@ -135,7 +135,7 @@ pub fn load(
 
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.nontemporal) {
-        attrs.appendAssumeCapacity(.named(ctx, "nontemporal", mlir.boolAttribute(ctx, true)));
+        attrs.appendAssumeCapacity(.named(ctx, "nontemporal", .boolean(ctx, true)));
     }
 
     return mlir.Operation.make(ctx, "memref.load", .{
@@ -165,7 +165,7 @@ pub fn store(
 
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.nontemporal) {
-        attrs.appendAssumeCapacity(.named(ctx, "nontemporal", mlir.boolAttribute(ctx, true)));
+        attrs.appendAssumeCapacity(.named(ctx, "nontemporal", .boolean(ctx, true)));
     }
 
     return mlir.Operation.make(ctx, "memref.store", .{
@@ -216,7 +216,7 @@ pub fn atomic_rmw(
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{value.type_()} },
         .attributes = &.{
-            .named(ctx, "kind", mlir.integerAttribute(ctx, .i64, @intFromEnum(kind))),
+            .named(ctx, "kind", .int(ctx, .i64, @intFromEnum(kind))),
         },
         .location = location,
     });
@@ -267,7 +267,7 @@ pub fn assume_alignment(
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{src.type_()} },
         .attributes = &.{
-            .named(ctx, "alignment", mlir.integerAttribute(ctx, .i32, alignment)),
+            .named(ctx, "alignment", .int(ctx, .i32, alignment)),
         },
         .location = location,
     });
@@ -382,10 +382,10 @@ pub fn subview(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
-            .named(ctx, "static_offsets", mlir.denseArrayAttribute(ctx, .i64, args.static_offsets)),
-            .named(ctx, "static_sizes", mlir.denseArrayAttribute(ctx, .i64, args.static_sizes)),
-            .named(ctx, "static_strides", mlir.denseArrayAttribute(ctx, .i64, args.static_strides)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
+            .named(ctx, "static_offsets", .denseArray(ctx, .i64, args.static_offsets)),
+            .named(ctx, "static_sizes", .denseArray(ctx, .i64, args.static_sizes)),
+            .named(ctx, "static_strides", .denseArray(ctx, .i64, args.static_strides)),
         },
         .location = location,
     });
@@ -426,10 +426,10 @@ pub fn reinterpret_cast(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
-            .named(ctx, "static_offsets", mlir.denseArrayAttribute(ctx, .i64, args.static_offsets)),
-            .named(ctx, "static_sizes", mlir.denseArrayAttribute(ctx, .i64, args.static_sizes)),
-            .named(ctx, "static_strides", mlir.denseArrayAttribute(ctx, .i64, args.static_strides)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
+            .named(ctx, "static_offsets", .denseArray(ctx, .i64, args.static_offsets)),
+            .named(ctx, "static_sizes", .denseArray(ctx, .i64, args.static_sizes)),
+            .named(ctx, "static_strides", .denseArray(ctx, .i64, args.static_strides)),
         },
         .location = location,
     });
@@ -475,12 +475,12 @@ fn buildReassociationAttr(ctx: *mlir.Context, reassociation: []const []const i64
     for (reassociation) |group| {
         const start = inner_buf.len;
         for (group) |idx| {
-            inner_buf.appendAssumeCapacity(mlir.integerAttribute(ctx, .i64, idx));
+            inner_buf.appendAssumeCapacity(.int(ctx, .i64, idx));
         }
-        const inner_attr = mlir.arrayAttribute(ctx, inner_buf.constSlice()[start..]);
+        const inner_attr = .array(ctx, inner_buf.constSlice()[start..]);
         outer.appendAssumeCapacity(inner_attr);
     }
-    return mlir.arrayAttribute(ctx, outer.constSlice());
+    return .array(ctx, outer.constSlice());
 }
 
 /// memref.expand_shape — split source dimensions into multiple result
@@ -502,7 +502,7 @@ pub fn expand_shape(
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
             .named(ctx, "reassociation", buildReassociationAttr(ctx, args.reassociation)),
-            .named(ctx, "static_output_shape", mlir.denseArrayAttribute(ctx, .i64, args.static_output_shape)),
+            .named(ctx, "static_output_shape", .denseArray(ctx, .i64, args.static_output_shape)),
         },
         .location = location,
     });
@@ -594,9 +594,9 @@ pub fn prefetch(
     return mlir.Operation.make(ctx, "memref.prefetch", .{
         .operands = .{ .flat = buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "isWrite", mlir.boolAttribute(ctx, opts.is_write)),
-            .named(ctx, "localityHint", mlir.integerAttribute(ctx, .i32, opts.locality_hint)),
-            .named(ctx, "isDataCache", mlir.boolAttribute(ctx, opts.is_data_cache)),
+            .named(ctx, "isWrite", .boolean(ctx, opts.is_write)),
+            .named(ctx, "localityHint", .int(ctx, .i32, opts.locality_hint)),
+            .named(ctx, "isDataCache", .boolean(ctx, opts.is_data_cache)),
         },
         .location = location,
     });
@@ -623,18 +623,18 @@ pub const GlobalArgs = struct {
 pub fn global(ctx: *mlir.Context, args: GlobalArgs, location: *const mlir.Location) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 6) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
-        .named(ctx, "sym_name", mlir.stringAttribute(ctx, args.name)),
-        .named(ctx, "sym_visibility", mlir.stringAttribute(ctx, @tagName(args.visibility))),
-        .named(ctx, "type", mlir.typeAttribute(args.type_)),
+        .named(ctx, "sym_name", .string(ctx, args.name)),
+        .named(ctx, "sym_visibility", .string(ctx, @tagName(args.visibility))),
+        .named(ctx, "type", .typeAttr(args.type_)),
     });
     if (args.initial_value) |iv| {
         attrs.appendAssumeCapacity(.named(ctx, "initial_value", iv));
     }
     if (args.constant) {
-        attrs.appendAssumeCapacity(.named(ctx, "constant", mlir.unitAttribute(ctx)));
+        attrs.appendAssumeCapacity(.named(ctx, "constant", .unit(ctx)));
     }
     if (args.alignment) |a| {
-        attrs.appendAssumeCapacity(.named(ctx, "alignment", mlir.integerAttribute(ctx, .i64, a)));
+        attrs.appendAssumeCapacity(.named(ctx, "alignment", .int(ctx, .i64, a)));
     }
 
     return mlir.Operation.make(ctx, "memref.global", .{
@@ -654,7 +654,7 @@ pub fn get_global(
     return mlir.Operation.make(ctx, "memref.get_global", .{
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "name", mlir.flatSymbolRefAttribute(ctx, name)),
+            .named(ctx, "name", .flatSymbolRef(ctx, name)),
         },
         .location = location,
     });

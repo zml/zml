@@ -78,7 +78,7 @@ pub fn call(ctx: *mlir.Context, name: []const u8, values: []const *const mlir.Va
         .operands = .{ .variadic = &.{values} },
         .results = .{ .flat = results },
         .attributes = &.{
-            .named(ctx, "callee", mlir.flatSymbolRefAttribute(ctx, name)),
+            .named(ctx, "callee", .flatSymbolRef(ctx, name)),
         },
         .location = location,
     });

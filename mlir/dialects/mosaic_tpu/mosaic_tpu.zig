@@ -219,7 +219,7 @@ pub fn all_reduce(
         .operands = .{ .flat = &.{input} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "dim", mlir.integerAttribute(ctx, .i64, dim)),
+            .named(ctx, "dim", .int(ctx, .i64, dim)),
             .named(ctx, "kind", kind.attribute(ctx)),
         },
         .location = location,
@@ -238,7 +238,7 @@ pub fn reduce_index(
         .operands = .{ .flat = &.{input} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "axis", mlir.integerAttribute(ctx, .i32, axis)),
+            .named(ctx, "axis", .int(ctx, .i32, axis)),
             .named(ctx, "kind", kind.attribute(ctx)),
         },
         .location = location,
@@ -290,7 +290,7 @@ pub fn sort(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{ output_mask_type, sorted_keys_type, sorted_values_type } },
         .attributes = &.{
-            .named(ctx, "descending", mlir.boolAttribute(ctx, opts.descending)),
+            .named(ctx, "descending", .boolean(ctx, opts.descending)),
         },
         .location = location,
     });
@@ -323,7 +323,7 @@ pub fn load(
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
             .named(ctx, "sublane_mask", denseBoolArrayAttribute(ctx, opts.sublane_mask)),
-            .named(ctx, "sublane_stride", mlir.integerAttribute(ctx, .i32, opts.sublane_stride)),
+            .named(ctx, "sublane_stride", .int(ctx, .i32, opts.sublane_stride)),
         },
         .location = location,
     });
@@ -357,10 +357,10 @@ pub fn store(
     return mlir.Operation.make(ctx, "tpu.store", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
             .named(ctx, "sublane_mask", denseBoolArrayAttribute(ctx, opts.sublane_mask)),
-            .named(ctx, "sublane_stride", mlir.integerAttribute(ctx, .i32, opts.sublane_stride)),
-            .named(ctx, "add", mlir.boolAttribute(ctx, opts.add)),
+            .named(ctx, "sublane_stride", .int(ctx, .i32, opts.sublane_stride)),
+            .named(ctx, "add", .boolean(ctx, opts.add)),
         },
         .location = location,
     });
@@ -394,8 +394,8 @@ pub fn vector_load(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
-            .named(ctx, "strides", mlir.denseArrayAttribute(ctx, .i32, opts.strides)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
+            .named(ctx, "strides", .denseArray(ctx, .i32, opts.strides)),
         },
         .location = location,
     });
@@ -427,9 +427,9 @@ pub fn vector_store(
     return mlir.Operation.make(ctx, "tpu.vector_store", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
-            .named(ctx, "strides", mlir.denseArrayAttribute(ctx, .i32, opts.strides)),
-            .named(ctx, "add", mlir.boolAttribute(ctx, opts.add)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
+            .named(ctx, "strides", .denseArray(ctx, .i32, opts.strides)),
+            .named(ctx, "add", .boolean(ctx, opts.add)),
         },
         .location = location,
     });
@@ -451,7 +451,7 @@ pub fn strided_load(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "strides", mlir.denseArrayAttribute(ctx, .i32, strides)),
+            .named(ctx, "strides", .denseArray(ctx, .i32, strides)),
         },
         .location = location,
     });
@@ -472,7 +472,7 @@ pub fn strided_store(
     return mlir.Operation.make(ctx, "tpu.strided_store", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "strides", mlir.denseArrayAttribute(ctx, .i32, strides)),
+            .named(ctx, "strides", .denseArray(ctx, .i32, strides)),
         },
         .location = location,
     });
@@ -504,8 +504,8 @@ pub fn matmul(
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 4) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
-        .named(ctx, "transpose_lhs", mlir.boolAttribute(ctx, opts.transpose_lhs)),
-        .named(ctx, "transpose_rhs", mlir.boolAttribute(ctx, opts.transpose_rhs)),
+        .named(ctx, "transpose_lhs", .boolean(ctx, opts.transpose_lhs)),
+        .named(ctx, "transpose_rhs", .boolean(ctx, opts.transpose_rhs)),
     });
     if (opts.precision) |p| {
         attrs.appendAssumeCapacity(.named(ctx, "precision", p.attribute(ctx)));
@@ -530,7 +530,7 @@ pub fn iota(
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (dimensions) |d| {
-        attrs.appendAssumeCapacity(.named(ctx, "dimensions", mlir.denseArrayAttribute(ctx, .i32, d)));
+        attrs.appendAssumeCapacity(.named(ctx, "dimensions", .denseArray(ctx, .i32, d)));
     }
     return mlir.Operation.make(ctx, "tpu.iota", .{
         .results = .{ .flat = &.{result_type} },
@@ -554,8 +554,8 @@ pub fn reciprocal(
         .operands = .{ .flat = &.{input} },
         .results = .{ .flat = &.{input.type_()} },
         .attributes = &.{
-            .named(ctx, "approx", mlir.boolAttribute(ctx, opts.approx)),
-            .named(ctx, "full_range", mlir.boolAttribute(ctx, opts.full_range)),
+            .named(ctx, "approx", .boolean(ctx, opts.approx)),
+            .named(ctx, "full_range", .boolean(ctx, opts.full_range)),
         },
         .location = location,
     });
@@ -619,8 +619,8 @@ pub fn repeat(
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "dimension", mlir.integerAttribute(ctx, .i32, dimension)),
-            .named(ctx, "times", mlir.integerAttribute(ctx, .i32, times)),
+            .named(ctx, "dimension", .int(ctx, .i32, dimension)),
+            .named(ctx, "times", .int(ctx, .i32, times)),
         },
         .location = location,
     });
@@ -637,7 +637,7 @@ pub fn concatenate(
         .operands = .{ .flat = sources },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "dimension", mlir.integerAttribute(ctx, .i32, dimension)),
+            .named(ctx, "dimension", .int(ctx, .i32, dimension)),
         },
         .location = location,
     });
@@ -654,7 +654,7 @@ pub fn transpose(
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "permutation", mlir.denseArrayAttribute(ctx, .i32, permutation)),
+            .named(ctx, "permutation", .denseArray(ctx, .i32, permutation)),
         },
         .location = location,
     });
@@ -671,7 +671,7 @@ pub fn broadcast_in_sublanes(
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "lane", mlir.integerAttribute(ctx, .i32, lane)),
+            .named(ctx, "lane", .int(ctx, .i32, lane)),
         },
         .location = location,
     });
@@ -692,11 +692,11 @@ pub fn rotate(
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 4) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
-        .named(ctx, "amount", mlir.integerAttribute(ctx, .i32, opts.amount)),
-        .named(ctx, "dimension", mlir.integerAttribute(ctx, .i32, opts.dimension)),
+        .named(ctx, "amount", .int(ctx, .i32, opts.amount)),
+        .named(ctx, "dimension", .int(ctx, .i32, opts.dimension)),
     });
-    if (opts.stride) |s| attrs.appendAssumeCapacity(.named(ctx, "stride", mlir.integerAttribute(ctx, .i32, s)));
-    if (opts.stride_dimension) |sd| attrs.appendAssumeCapacity(.named(ctx, "stride_dimension", mlir.integerAttribute(ctx, .i32, sd)));
+    if (opts.stride) |s| attrs.appendAssumeCapacity(.named(ctx, "stride", .int(ctx, .i32, s)));
+    if (opts.stride_dimension) |sd| attrs.appendAssumeCapacity(.named(ctx, "stride_dimension", .int(ctx, .i32, sd)));
 
     return mlir.Operation.make(ctx, "tpu.rotate", .{
         .operands = .{ .flat = &.{value} },
@@ -734,7 +734,7 @@ pub fn memref_slice(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
         },
         .location = location,
     });
@@ -875,7 +875,7 @@ pub fn sem_read(
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "tpu.sem_read", .{
         .operands = .{ .flat = &.{semaphore} },
-        .results = .{ .flat = &.{mlir.integerType(ctx, .i32)} },
+        .results = .{ .flat = &.{.int(ctx, .i32)} },
         .location = location,
     });
 }
@@ -919,7 +919,7 @@ pub fn sem_signal(
     return mlir.Operation.make(ctx, "tpu.sem_signal", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
         },
         .location = location,
     });
@@ -974,9 +974,9 @@ pub fn enqueue_dma(
     return mlir.Operation.make(ctx, "tpu.enqueue_dma", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
-            .named(ctx, "priority", mlir.integerAttribute(ctx, .i32, opts.priority)),
-            .named(ctx, "strict_ordering", mlir.boolAttribute(ctx, opts.strict_ordering)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
+            .named(ctx, "priority", .int(ctx, .i32, opts.priority)),
+            .named(ctx, "strict_ordering", .boolean(ctx, opts.strict_ordering)),
         },
         .location = location,
     });
@@ -1011,8 +1011,8 @@ pub fn wait_dma2(
     return mlir.Operation.make(ctx, "tpu.wait_dma2", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
-            .named(ctx, "strict_ordering", mlir.boolAttribute(ctx, opts.strict_ordering)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
+            .named(ctx, "strict_ordering", .boolean(ctx, opts.strict_ordering)),
         },
         .location = location,
     });
@@ -1071,8 +1071,8 @@ pub fn trace_start(
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "tpu.trace_start", .{
         .attributes = &.{
-            .named(ctx, "level", mlir.integerAttribute(ctx, .i32, level)),
-            .named(ctx, "message", mlir.stringAttribute(ctx, message)),
+            .named(ctx, "level", .int(ctx, .i32, level)),
+            .named(ctx, "message", .string(ctx, message)),
         },
         .verify = false,
         .location = location,
@@ -1130,7 +1130,7 @@ pub fn dotDimensionNumbers(
 
 pub fn device_id(ctx: *mlir.Context, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "tpu.device_id", .{
-        .results = .{ .flat = &.{mlir.integerType(ctx, .i32)} },
+        .results = .{ .flat = &.{.int(ctx, .i32)} },
         .location = location,
     });
 }
@@ -1156,7 +1156,7 @@ pub fn assume_multiple(
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{src.type_()} },
         .attributes = &.{
-            .named(ctx, "multiple", mlir.integerAttribute(ctx, .i64, multiple)),
+            .named(ctx, "multiple", .int(ctx, .i64, multiple)),
         },
         .location = location,
     });
@@ -1170,7 +1170,7 @@ pub fn assume_multiple(
 fn denseBoolArrayAttribute(ctx: *mlir.Context, values: []const bool) *const mlir.Attribute {
     var bytes: stdx.BoundedArray(i32, 64) = .empty;
     for (values) |b| bytes.appendAssumeCapacity(@intFromBool(b));
-    return mlir.denseArrayAttribute(ctx, .bool, bytes.constSlice());
+    return .denseArray(ctx, .bool, bytes.constSlice());
 }
 
 test {

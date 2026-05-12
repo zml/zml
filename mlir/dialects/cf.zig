@@ -18,7 +18,7 @@ pub fn assert(
     return mlir.Operation.make(ctx, "cf.assert", .{
         .operands = .{ .flat = &.{cond} },
         .attributes = &.{
-            .named(ctx, "msg", mlir.stringAttribute(ctx, msg)),
+            .named(ctx, "msg", .string(ctx, msg)),
         },
         .location = location,
     });
@@ -80,10 +80,10 @@ pub fn cond_br(
     state.addSuccessors(&successors);
 
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
-    attrs.appendAssumeCapacity(.named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)));
+    attrs.appendAssumeCapacity(.named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)));
     if (branch_weights) |w| {
         std.debug.assert(w.len == 2);
-        attrs.appendAssumeCapacity(.named(ctx, "branch_weights", mlir.denseArrayAttribute(ctx, .i32, w)));
+        attrs.appendAssumeCapacity(.named(ctx, "branch_weights", .denseArray(ctx, .i32, w)));
     }
     state.addAttributes(attrs.constSlice());
 
@@ -148,14 +148,14 @@ pub fn switch_(
     // Python Triton's flag type for pid compares).
     const shaped = mlir.RankedTensorType.get(
         &.{@intCast(case_values.len)},
-        mlir.integerType(ctx, .i32),
+        .int(ctx, .i32),
         null,
     ).shaped();
 
     state.addAttributes(&.{
-        .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &top_seg_sizes)),
+        .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &top_seg_sizes)),
         .named(ctx, "case_values", mlir.denseElementsAttribute(shaped, case_values)),
-        .named(ctx, "case_operand_segments", mlir.denseArrayAttribute(ctx, .i32, case_seg_sizes.constSlice())),
+        .named(ctx, "case_operand_segments", .denseArray(ctx, .i32, case_seg_sizes.constSlice())),
     });
 
     return mlir.Operation.init(&state) catch @panic("Failed to create cf.switch");

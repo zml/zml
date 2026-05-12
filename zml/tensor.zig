@@ -17,6 +17,11 @@ const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
 
+test {
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(Tensor);
+}
+
 pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
 
@@ -185,11 +190,12 @@ pub const Tensor = struct {
         const ctx = CompilationContext.current();
         if (ctx.platform.target == .cpu) return self;
 
-        const frontend_attributes = mlir.dictionaryAttribute(ctx.mlir_ctx, &.{
-            .named(ctx.mlir_ctx, "_xla_buffer_placement", mlir.stringAttribute(
+        const frontend_attributes: *const mlir.Attribute = .dict(ctx.mlir_ctx, &.{
+            .named(
                 ctx.mlir_ctx,
-                ctx.platform.memoryKind(kind),
-            )),
+                "_xla_buffer_placement",
+                .string(ctx.mlir_ctx, ctx.platform.memoryKind(kind)),
+            ),
         });
 
         const op = dialects.stablehlo.custom_call(

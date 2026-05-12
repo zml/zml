@@ -16,17 +16,17 @@ pub const DType = enum {
 
     pub fn toMlir(self: DType, ctx: *mlir.Context) *const mlir.Type {
         return switch (self) {
-            .i1 => mlir.integerType(ctx, .i1),
-            .i8 => mlir.integerType(ctx, .i8),
-            .i16 => mlir.integerType(ctx, .i16),
-            .i32 => mlir.integerType(ctx, .i32),
-            .i64 => mlir.integerType(ctx, .i64),
-            .f16 => mlir.floatType(ctx, .f16),
-            .bf16 => mlir.floatType(ctx, .bf16),
-            .f32 => mlir.floatType(ctx, .f32),
-            .f64 => mlir.floatType(ctx, .f64),
-            .f8e4m3fn => mlir.floatType(ctx, .f8e4m3fn),
-            .f8e5m2 => mlir.floatType(ctx, .f8e5m2),
+            .i1 => .int(ctx, .i1),
+            .i8 => .int(ctx, .i8),
+            .i16 => .int(ctx, .i16),
+            .i32 => .int(ctx, .i32),
+            .i64 => .int(ctx, .i64),
+            .f16 => .float(ctx, .f16),
+            .bf16 => .float(ctx, .bf16),
+            .f32 => .float(ctx, .f32),
+            .f64 => .float(ctx, .f64),
+            .f8e4m3fn => .float(ctx, .f8e4m3fn),
+            .f8e5m2 => .float(ctx, .f8e5m2),
         };
     }
 };

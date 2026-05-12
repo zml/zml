@@ -77,8 +77,8 @@ pub const mosaic_tpu = struct {
     };
 
     fn kernelFrontendAttrs(comp_ctx: *CompilationContext) *const mlir.Attribute {
-        return mlir.dictionaryAttribute(comp_ctx.mlir_ctx, &.{
-            mlir.NamedAttribute.named(comp_ctx.mlir_ctx, "kernel_metadata", mlir.stringAttribute(comp_ctx.mlir_ctx, "{}")),
+        return .dict(comp_ctx.mlir_ctx, &.{
+            mlir.NamedAttribute.named(comp_ctx.mlir_ctx, "kernel_metadata", .string(comp_ctx.mlir_ctx, "{}")),
         });
     }
 
@@ -95,8 +95,8 @@ pub const mosaic_tpu = struct {
         const comp_ctx = CompilationContext.current();
 
         const additional_attrs = [_]mlir.NamedAttribute{
-            mlir.NamedAttribute.named(comp_ctx.mlir_ctx, "kernel_name", mlir.stringAttribute(comp_ctx.mlir_ctx, "ragged_paged_attention_kernel")),
-            mlir.NamedAttribute.named(comp_ctx.mlir_ctx, "mhlo.frontend_attributes", kernelFrontendAttrs(comp_ctx)),
+            .named(comp_ctx.mlir_ctx, "kernel_name", .string(comp_ctx.mlir_ctx, "ragged_paged_attention_kernel")),
+            .named(comp_ctx.mlir_ctx, "mhlo.frontend_attributes", kernelFrontendAttrs(comp_ctx)),
         };
 
         const out = ragged_attention.Kernel.call(
@@ -126,10 +126,10 @@ pub const mosaic_tpu = struct {
         const end = query_start_len.slice1d(.b, .{ .start = 1 });
         const query_lens = end.sub(start);
         return query_lens
-            .cmp(.GT, zml.Tensor.constant(query_lens.dtype().zero()).broad(query_lens.shape()))
+            .cmp(.GT, .constant(query_lens.dtype().zero()).broad(query_lens.shape()))
             .convert(.i32)
             .sum(.b)
-            .reshape(zml.Shape.init(.{1}, .i32));
+            .reshape(.{1});
     }
 
     fn cfgDtype(dtype: zml.DataType) @FieldType(ragged_paged.Cfg, "q_dtype") {

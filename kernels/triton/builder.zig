@@ -1,18 +1,27 @@
 const std = @import("std");
 
-const mlir = @import("mlir");
 const dialects = @import("mlir/dialects");
-const dsl = @import("kernels/common");
-const dtypes = @import("dtype.zig");
-const stdx = @import("stdx");
-
 const arith = dialects.arith;
 const cf = dialects.cf;
 const math = dialects.math;
 const scf = dialects.scf;
 const ttir = dialects.ttir;
+const dsl = @import("kernels/common");
+const tupleArity = dsl.tupleArity;
+const mlir = @import("mlir");
+const stdx = @import("stdx");
 
+const dtypes = @import("dtype.zig");
 pub const DType = dtypes.DType;
+const isFloatDtype = dtypes.isFloatDtype;
+const dtypeBitwidth = dtypes.dtypeBitwidth;
+const intBitwidth = dtypes.intBitwidth;
+
+test {
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(Builder);
+    std.testing.refAllDecls(Value);
+}
 
 pub const Value = struct {
     inner: *const mlir.Value,
@@ -231,17 +240,13 @@ pub const Value = struct {
     }
 };
 
-const isFloatDtype = dtypes.isFloatDtype;
-const dtypeBitwidth = dtypes.dtypeBitwidth;
-const intBitwidth = dtypes.intBitwidth;
-
 fn computeReducedType(src_shape: []const i64, axis: i32, elem: *const mlir.Type) *const mlir.Type {
     if (src_shape.len <= 1) return elem;
     var out: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
     for (src_shape, 0..) |d, i| {
         if (@as(i32, @intCast(i)) != axis) out.appendAssumeCapacity(d);
     }
-    return mlir.rankedTensorType(out.constSlice(), elem);
+    return .rankedTensor(out.constSlice(), elem);
 }
 
 pub const ArgSpec = struct {
@@ -373,8 +378,6 @@ pub const DeviceAssertOpts = struct {
 pub const ReturnIfOpts = struct {
     inline_return: bool = false,
 };
-
-const tupleArity = dsl.tupleArity;
 
 pub fn ForScope(comptime N: usize) type {
     return dsl.ForScope(Builder, Value, N);
@@ -579,55 +582,38 @@ pub const Builder = struct {
 
         const arg_types = try scratch.alloc(*const mlir.Type, args.len);
         const arg_locs = try scratch.alloc(*const mlir.Location, args.len);
-        for (args, 0..) |a, i| {
-            arg_types[i] = switch (a.kind) {
+        for (arg_types, arg_locs, args) |*ty, *a_loc, a| {
+            ty.* = switch (a.kind) {
                 .ptr => |dt| ttir.pointerType(dt.toMlir(ctx), 1),
                 .ptr_opts => |p| ttir.pointerType(p.dtype.toMlir(ctx), p.address_space),
                 .scalar => |dt| dt.toMlir(ctx),
                 .scalar_opts => |s| s.dtype.toMlir(ctx),
-                .tensor => |t| mlir.rankedTensorType(t[0], t[1].toMlir(ctx)),
+                .tensor => |t| .rankedTensor(t[0], t[1].toMlir(ctx)),
             };
-            arg_locs[i] = unknown_loc.named(ctx, a.name);
+            a_loc.* = unknown_loc.named(ctx, a.name);
         }
 
         const entry = mlir.Block.init(arg_types, arg_locs);
 
         const arg_attrs = try scratch.alloc(*const mlir.Attribute, args.len);
+        const empty_dict: *const mlir.Attribute = .dict(ctx, &.{});
         var any_arg_attr = false;
-        for (args, 0..) |a, i| {
-            const empty_dict: *const mlir.Attribute = mlir.dictionaryAttribute(ctx, &.{});
-            switch (a.kind) {
-                .ptr => {
-                    const div_attr = mlir.dictionaryAttribute(ctx, &.{
-                        .named(ctx, "tt.divisibility", mlir.integerAttribute(ctx, .i32, 16)),
-                    });
-                    arg_attrs[i] = div_attr;
-                    any_arg_attr = true;
-                },
-                .ptr_opts => |p| {
-                    if (p.divisibility) |v| {
-                        const div_attr = mlir.dictionaryAttribute(ctx, &.{
-                            .named(ctx, "tt.divisibility", mlir.integerAttribute(ctx, .i32, v)),
-                        });
-                        arg_attrs[i] = div_attr;
-                        any_arg_attr = true;
-                    } else {
-                        arg_attrs[i] = empty_dict;
-                    }
-                },
-                .scalar_opts => |s| {
-                    if (s.divisibility) |v| {
-                        const div_attr = mlir.dictionaryAttribute(ctx, &.{
-                            .named(ctx, "tt.divisibility", mlir.integerAttribute(ctx, .i32, v)),
-                        });
-                        arg_attrs[i] = div_attr;
-                        any_arg_attr = true;
-                    } else {
-                        arg_attrs[i] = empty_dict;
-                    }
-                },
-                else => arg_attrs[i] = empty_dict,
-            }
+        for (arg_attrs, args) |*attr, a| {
+            attr.* = switch (a.kind) {
+                .ptr => .dict(ctx, &.{
+                    .named(ctx, "tt.divisibility", .int(ctx, .i32, 16)),
+                }),
+                .ptr_opts => |p| if (p.divisibility) |v|
+                    .dict(ctx, &.{.named(ctx, "tt.divisibility", .int(ctx, .i32, v))})
+                else
+                    empty_dict,
+                .scalar_opts => |s| if (s.divisibility) |v|
+                    .dict(ctx, &.{.named(ctx, "tt.divisibility", .int(ctx, .i32, v))})
+                else
+                    empty_dict,
+                else => empty_dict,
+            };
+            if (attr.* != empty_dict) any_arg_attr = true;
         }
 
         const func_op = ttir.func(ctx, .{
@@ -712,7 +698,7 @@ pub const Builder = struct {
     }
 
     pub fn tensorTy(self: *const Builder, shape: []const i64, dtype: DType) *const mlir.Type {
-        return mlir.rankedTensorType(shape, dtype.toMlir(self.ctx));
+        return .rankedTensor(shape, dtype.toMlir(self.ctx));
     }
 
     fn loadResultType(self: *const Builder, ptr: Value) *const mlir.Type {
@@ -723,14 +709,14 @@ pub const Builder = struct {
             const pointee = elem_ptr_ty.isA(ttir.PointerType).?.pointee();
             var shape: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
             for (0..shaped.rank()) |i| shape.appendAssumeCapacity(shaped.dimension(i));
-            return mlir.rankedTensorType(shape.constSlice(), pointee);
+            return .rankedTensor(shape.constSlice(), pointee);
         }
         return pt.isA(ttir.PointerType).?.pointee();
     }
 
     fn swapElem(self: *const Builder, src: Value, out_dtype: DType) *const mlir.Type {
         const out_elem = out_dtype.toMlir(self.ctx);
-        if (src.isTensor()) return mlir.rankedTensorType(src.shape().constSlice(), out_elem);
+        if (src.isTensor()) return .rankedTensor(src.shape().constSlice(), out_elem);
         return out_elem;
     }
 
@@ -778,7 +764,7 @@ pub const Builder = struct {
         const e: i32 = @intCast(end);
         std.debug.assert(e >= s);
         const len: i64 = @intCast(e - s);
-        const ty = mlir.rankedTensorType(&.{len}, mlir.integerType(self.ctx, .i32));
+        const ty = mlir.Type.rankedTensor(&.{len}, .int(self.ctx, .i32));
         return self.emit(ttir.make_range(self.ctx, s, e, ty, self.loc()));
     }
 
@@ -796,7 +782,7 @@ pub const Builder = struct {
     /// Broadcast a scalar Value or literal across `shape`. Literals lift first via `lift`.
     pub fn splat(self: *Builder, value: anytype, shape: []const i64) Value {
         const v: Value = if (@TypeOf(value) == Value) value else self.lift(value);
-        const ty = mlir.rankedTensorType(shape, v.type_());
+        const ty: *const mlir.Type = .rankedTensor(shape, v.type_());
         return self.emit(ttir.splat(self.ctx, v.inner, ty, self.loc()));
     }
 
@@ -1078,13 +1064,13 @@ pub const Builder = struct {
         for (0..in_shape.len + 1) |i| {
             if (i == ax) out_shape.appendAssumeCapacity(1) else out_shape.appendAssumeCapacity(in_shape.get(if (i < ax) i else i - 1));
         }
-        const ty = mlir.rankedTensorType(out_shape.constSlice(), value.elemType());
+        const ty = mlir.Type.rankedTensor(out_shape.constSlice(), value.elemType());
         return self.emit(ttir.expand_dims(self.ctx, value.inner, axis, ty, self.loc()));
     }
 
     pub fn broadcastTo(self: *Builder, value: Value, result_shape: []const i64) Value {
         const elem = mlir.RankedTensorType.fromShaped(value.inner.type_().isA(mlir.ShapedType).?).elementType();
-        const ty = mlir.rankedTensorType(result_shape, elem);
+        const ty = mlir.Type.rankedTensor(result_shape, elem);
         return self.emit(ttir.broadcast(self.ctx, value.inner, ty, self.loc()));
     }
 
@@ -1357,7 +1343,7 @@ pub const Builder = struct {
     pub fn intToPtr(self: *Builder, src: Value, pointee: DType, address_space: i32) Value {
         const ptr_elem = ttir.pointerType(pointee.toMlir(self.ctx), address_space);
         const result_type: *const mlir.Type = if (src.isTensor())
-            mlir.rankedTensorType(src.shape().constSlice(), ptr_elem)
+            .rankedTensor(src.shape().constSlice(), ptr_elem)
         else
             ptr_elem;
         return self.emit(ttir.int_to_ptr(self.ctx, src.inner, result_type, self.loc()));
@@ -1412,7 +1398,7 @@ pub const Builder = struct {
 
     /// tt.reshape with full options.
     pub fn reshapeOpts(self: *Builder, src: Value, new_shape: []const i64, opts: ReshapeOpts) Value {
-        const result_ty = mlir.rankedTensorType(new_shape, src.elemType());
+        const result_ty = mlir.Type.rankedTensor(new_shape, src.elemType());
         return self.emit(ttir.reshape(self.ctx, src.inner, result_ty, opts.can_reorder, opts.efficient_layout, self.loc()));
     }
 
@@ -1422,7 +1408,7 @@ pub const Builder = struct {
         std.debug.assert(order.len == src_shape.len);
         var out_shape: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
         for (order) |i| out_shape.appendAssumeCapacity(src_shape.get(@intCast(i)));
-        const result_type = mlir.rankedTensorType(out_shape.constSlice(), src.elemType());
+        const result_type = mlir.Type.rankedTensor(out_shape.constSlice(), src.elemType());
         return self.emit(ttir.trans(self.ctx, src.inner, order, result_type, self.loc()));
     }
 
@@ -1446,7 +1432,7 @@ pub const Builder = struct {
         var out_shape: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
         out_shape.appendAssumeCapacity(ls.get(0) + rs.get(0));
         for (1..ls.len) |i| out_shape.appendAssumeCapacity(ls.get(i));
-        const result_type = mlir.rankedTensorType(out_shape.constSlice(), lhs.elemType());
+        const result_type = mlir.Type.rankedTensor(out_shape.constSlice(), lhs.elemType());
         return self.emit(ttir.cat(self.ctx, lhs.inner, rhs.inner, result_type, self.loc()));
     }
 
@@ -1456,7 +1442,7 @@ pub const Builder = struct {
         var out_shape: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
         for (0..ls.len) |i| out_shape.appendAssumeCapacity(ls.get(i));
         out_shape.appendAssumeCapacity(2);
-        const result_type = mlir.rankedTensorType(out_shape.constSlice(), lhs.elemType());
+        const result_type = mlir.Type.rankedTensor(out_shape.constSlice(), lhs.elemType());
         return self.emit(ttir.join(self.ctx, lhs.inner, rhs.inner, result_type, self.loc()));
     }
 
@@ -1467,7 +1453,7 @@ pub const Builder = struct {
         std.debug.assert(ss.len >= 1 and ss.get(ss.len - 1) == 2);
         var out_shape: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
         for (0..ss.len - 1) |i| out_shape.appendAssumeCapacity(ss.get(i));
-        const result_type = mlir.rankedTensorType(out_shape.constSlice(), src.elemType());
+        const result_type = mlir.Type.rankedTensor(out_shape.constSlice(), src.elemType());
         const op = ttir.split(self.ctx, src.inner, result_type, self.loc());
         _ = op.appendTo(self.currentBlock());
         return .{
@@ -1483,7 +1469,7 @@ pub const Builder = struct {
 
     /// tt.gather — output shape matches indices, element type matches src.
     pub fn gather(self: *Builder, src: Value, indices: Value, axis: i32) Value {
-        const result_ty = mlir.rankedTensorType(indices.shape().constSlice(), src.elemType());
+        const result_ty = mlir.Type.rankedTensor(indices.shape().constSlice(), src.elemType());
         return self.emit(ttir.gather(self.ctx, src.inner, indices.inner, axis, result_ty, false, self.loc()));
     }
 
@@ -1494,7 +1480,7 @@ pub const Builder = struct {
 
     /// tt.histogram with mask option.
     pub fn histogramOpts(self: *Builder, src: Value, num_bins: i64, opts: HistogramOpts) Value {
-        const result_ty = mlir.rankedTensorType(&.{num_bins}, DType.i32.toMlir(self.ctx));
+        const result_ty = mlir.Type.rankedTensor(&.{num_bins}, DType.i32.toMlir(self.ctx));
         const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
         return self.emit(ttir.histogram(self.ctx, src.inner, mask_inner, result_ty, self.loc()));
     }
@@ -1611,7 +1597,7 @@ pub const Builder = struct {
         const result_type: *const mlir.Type = if (result_shape.len == 0)
             result_dtype.toMlir(self.ctx)
         else
-            mlir.rankedTensorType(result_shape, result_dtype.toMlir(self.ctx));
+            .rankedTensor(result_shape, result_dtype.toMlir(self.ctx));
         return self.emit(ttir.extern_elementwise(
             self.ctx,
             self.innerSlice(srcs),
@@ -1689,7 +1675,7 @@ pub const Builder = struct {
         dtype: DType,
         opts: DescriptorLoadOpts,
     ) Value {
-        const result_ty = mlir.rankedTensorType(shape, dtype.toMlir(self.ctx));
+        const result_ty = mlir.Type.rankedTensor(shape, dtype.toMlir(self.ctx));
         return self.emit(ttir.descriptor_load(self.ctx, desc.inner, self.innerSlice(indices), result_ty, opts.cache_modifier, opts.eviction_policy, self.loc()));
     }
 
@@ -1718,7 +1704,7 @@ pub const Builder = struct {
         shape: []const i64,
         dtype: DType,
     ) Value {
-        const result_ty = mlir.rankedTensorType(shape, dtype.toMlir(self.ctx));
+        const result_ty = mlir.Type.rankedTensor(shape, dtype.toMlir(self.ctx));
         return self.emit(ttir.descriptor_gather(self.ctx, desc.inner, x_offsets.inner, y_offset.inner, result_ty, self.loc()));
     }
 
