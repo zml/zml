@@ -97,11 +97,7 @@ pub const Partitioning = struct {
         const selected_sharding = sharding orelse try self.selectSharding(shape);
         return switch (self.partitioner) {
             .shardy => (try selected_sharding.data.sdyShardingAttrForShape(allocator, ctx, shape)).asAttr(),
-            .gspmd => blk: {
-                const sharding_attr = try selected_sharding.data.gspmdShardingAttrForShape(allocator, shape);
-                defer allocator.free(sharding_attr);
-                break :blk mlir.stringAttribute(ctx, sharding_attr);
-            },
+            .gspmd => try selected_sharding.data.gspmdShardingAttrForShape(allocator, ctx, shape),
         };
     }
 
@@ -1448,7 +1444,11 @@ pub const Data = struct {
         return .init(ctx, .{ .mesh = data.name, .dimensions = dimensions, .replicated_axes = replicated_axes });
     }
 
-    pub fn gspmdShardingAttrForShape(self: *const Data, allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
+    pub fn gspmdShardingAttrForShape(self: *const Data, parent_allocator: std.mem.Allocator, ctx: *mlir.Context, shape: Shape) !*const mlir.Attribute {
+        var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
         var has_sharding = false;
         for (0..shape.rank()) |ax| {
             if (shape.partition(ax) == .axis) {
@@ -1456,7 +1456,7 @@ pub const Data = struct {
                 break;
             }
         }
-        if (!has_sharding) return try allocator.dupe(u8, "{replicated}");
+        if (!has_sharding) return mlir.stringAttribute(ctx, try allocator.dupe(u8, "{replicated}"));
 
         const mapping = self.getDimMapping(shape);
         var tile_shape: stdx.BoundedArray(i64, Shape.MAX_RANK + 1) = .empty;
@@ -1509,7 +1509,7 @@ pub const Data = struct {
 
         try out.writer.writeAll("}");
 
-        return try out.toOwnedSlice();
+        return mlir.stringAttribute(ctx, try out.toOwnedSlice());
     }
 
     pub fn deviceAssignment(self: *const Data, allocator: std.mem.Allocator) ![]usize {
