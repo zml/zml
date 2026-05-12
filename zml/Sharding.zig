@@ -97,7 +97,11 @@ pub const Partitioning = struct {
         const selected_sharding = sharding orelse try self.selectSharding(shape);
         return switch (self.partitioner) {
             .shardy => (try selected_sharding.data.sdyShardingAttrForShape(allocator, ctx, shape)).asAttr(),
-            .gspmd => mlir.stringAttribute(ctx, try selected_sharding.data.gspmdShardingAttrForShape(allocator, shape)),
+            .gspmd => blk: {
+                const sharding_attr = try selected_sharding.data.gspmdShardingAttrForShape(allocator, shape);
+                defer allocator.free(sharding_attr);
+                break :blk mlir.stringAttribute(ctx, sharding_attr);
+            },
         };
     }
 
@@ -1444,11 +1448,7 @@ pub const Data = struct {
         return .init(ctx, .{ .mesh = data.name, .dimensions = dimensions, .replicated_axes = replicated_axes });
     }
 
-    pub fn gspmdShardingAttrForShape(self: *const Data, parent_allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
-        var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
-        defer arena.deinit();
-        const allocator = arena.allocator();
-
+    pub fn gspmdShardingAttrForShape(self: *const Data, allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
         var has_sharding = false;
         for (0..shape.rank()) |ax| {
             if (shape.partition(ax) == .axis) {
