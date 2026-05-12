@@ -78,6 +78,24 @@ pub const mosaic_tpu = struct {
             allocation_size += self.query_start_len.byteSize();
             return allocation_size;
         }
+
+        pub fn onMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
+            return .{
+                .opts = self.opts,
+                .block_table = self.block_table.onMemory(memory),
+                .seq_lens = self.seq_lens.onMemory(memory),
+                .query_start_len = self.query_start_len.onMemory(memory),
+            };
+        }
+
+        pub fn toMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
+            return .{
+                .opts = self.opts,
+                .block_table = self.block_table.toMemory(memory),
+                .seq_lens = self.seq_lens.toMemory(memory),
+                .query_start_len = self.query_start_len.toMemory(memory),
+            };
+        }
     };
 
     fn kernelFrontendAttrs(comp_ctx: *CompilationContext) *const mlir.Attribute {
@@ -226,18 +244,7 @@ pub const mosaic_tpu = struct {
         };
     }
 
-    pub const Context = struct {
-        pub fn init(parameters: Parameters, num_heads: i64, num_kv_heads: i64, head_dim: i64, page_size: i64) Context {
-            _ = parameters;
-            _ = num_heads;
-            _ = num_kv_heads;
-            _ = head_dim;
-            _ = page_size;
-            return .{};
-        }
-    };
-
-    pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, kv_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+    pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, kv_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
         stdx.debug.assert(opts.is_causal, "mosaic_tpu ragged paged attention currently only supports causal attention", .{});
 
         const prepared = prepareInputs(parameters, q, kv_cache);
@@ -255,7 +262,6 @@ pub const mosaic_tpu = struct {
             .{
                 .opts = opts,
                 .parameters = parameters,
-                .context = context,
             },
             (struct {
                 fn body(body_context: anytype, allocator: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {

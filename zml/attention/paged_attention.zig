@@ -54,6 +54,7 @@ pub const Options = union(Backend) {
                         .batch_size_prefill = args.batch_size,
                         .max_num_pages = max_num_pages,
                         .max_seqlen_k = args.seq_len,
+                        .max_seqlen_q = args.max_seqlen_q,
                         .max_token_count = args.max_token_count,
                         .num_heads = args.num_heads,
                         .num_kv_heads = args.num_kv_heads,
@@ -80,6 +81,7 @@ pub const Options = union(Backend) {
                         .batch_size_prefill = args.batch_size,
                         .max_num_pages = max_num_pages,
                         .max_seqlen_k = args.seq_len,
+                        .max_seqlen_q = args.max_seqlen_q,
                         .max_token_count = args.max_token_count,
                         .num_heads = args.num_heads,
                         .num_kv_heads = args.num_kv_heads,
@@ -164,21 +166,22 @@ pub const Parameters = union(Backend) {
             inline else => |v| v.allocationSize(),
         };
     }
-};
 
-/// Internal state that can be used inside the model code. It's derived from Parameters and Option.
-pub const Context = union(Backend) {
-    cuda_fa2: flashattn.paged_fa2.Context,
-    cuda_fa3: flashattn.paged_fa3.Context,
-    triton: triton.paged.Context,
-    mosaic_tpu: tpu.mosaic_tpu.Context,
+    pub fn onMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
+        return switch (self) {
+            .cuda_fa2 => |v| .{ .cuda_fa2 = v.onMemory(memory) },
+            .cuda_fa3 => |v| .{ .cuda_fa3 = v.onMemory(memory) },
+            .triton => |v| .{ .triton = v.onMemory(memory) },
+            .mosaic_tpu => |v| .{ .mosaic_tpu = v.onMemory(memory) },
+        };
+    }
 
-    pub fn init(parameters: Parameters, num_heads: i64, num_kv_heads: i64, head_dim: i64, page_size: i64) Context {
-        return switch (parameters) {
-            .cuda_fa2 => |cuda_fa2_parameters| .{ .cuda_fa2 = flashattn.paged_fa2.Context.init(cuda_fa2_parameters, num_heads, num_kv_heads, head_dim, page_size) },
-            .cuda_fa3 => |cuda_fa3_parameters| .{ .cuda_fa3 = flashattn.paged_fa3.Context.init(cuda_fa3_parameters, num_heads, num_kv_heads, head_dim, page_size) },
-            .triton => |triton_parameters| .{ .triton = triton.paged.Context.init(triton_parameters, num_heads, num_kv_heads, head_dim, page_size) },
-            .mosaic_tpu => |mosaic_tpu_parameters| .{ .mosaic_tpu = tpu.mosaic_tpu.Context.init(mosaic_tpu_parameters, num_heads, num_kv_heads, head_dim, page_size) },
+    pub fn toMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
+        return switch (self) {
+            .cuda_fa2 => |v| .{ .cuda_fa2 = v.toMemory(memory) },
+            .cuda_fa3 => |v| .{ .cuda_fa3 = v.toMemory(memory) },
+            .triton => |v| .{ .triton = v.toMemory(memory) },
+            .mosaic_tpu => |v| .{ .mosaic_tpu = v.toMemory(memory) },
         };
     }
 };
@@ -197,23 +200,23 @@ pub const KvCache = union(enum) {
     dense: zml.Tensor,
 };
 
-pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
+pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
     _ = k;
     _ = v;
     return switch (parameters) {
         .cuda_fa2 => |cuda_fa2_parameters| switch (kv_cache) {
-            .split => |split| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, context.cuda_fa2, q, split.k, split.v, opts),
+            .split => |split| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, q, split.k, split.v, opts),
             .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
         },
         .cuda_fa3 => |cuda_fa3_parameters| switch (kv_cache) {
-            .split => |split| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, context.cuda_fa3, q, split.k, split.v, opts),
+            .split => |split| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, q, split.k, split.v, opts),
             .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
         },
         .triton => |triton_parameters| switch (kv_cache) {
-            .split => |split| triton.paged.pagedAttention(triton_parameters, context.triton, q, split.k, split.v, opts),
+            .split => |split| triton.paged.pagedAttention(triton_parameters, q, split.k, split.v, opts),
             .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
         },
-        .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, context.mosaic_tpu, q, kv_cache.dense, opts),
+        .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, q, kv_cache.dense, opts),
     };
 }
 
