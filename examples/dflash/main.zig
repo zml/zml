@@ -114,7 +114,6 @@ pub fn main(init: std.process.Init) !void {
     const target_hidden_dim = draft_model.target_layer_ids.len * parsed_target_config.value.hidden_size;
     const input_tokens_tensor: zml.Tensor = .init(.{ .s = block_size }, .u32);
     const block_tokens_tensor: zml.Tensor = .init(.{ .s = block_size }, .u32);
-    const noise_embedding_tensor: zml.Tensor = .init(.{ .s = block_size, .d = parsed_target_config.value.hidden_size }, target_model.model.embed_tokens.weight.dtype());
     const token_index_tensor: zml.Tensor = .init(.{}, .u32);
     const target_kv_cache = llama.KvCache.init(.init(.{
         .layer = parsed_target_config.value.num_hidden_layers,
@@ -155,41 +154,30 @@ pub fn main(init: std.process.Init) !void {
     );
     defer target_prefill_exe.deinit();
 
-    log.info("Compiling target embedding...", .{});
-    var target_embed_exe = try platform.compileFn(
-        allocator,
-        io,
-        targetEmbed,
-        .{ target_model, block_tokens_tensor },
-        .{ .shardings = &all_shardings },
-    );
-    defer target_embed_exe.deinit();
-
-    log.info("Compiling DFlash draft variants...", .{});
-    const draft_exes = try allocator.alloc(DraftExe, block_size);
+    log.info("Compiling DFlash draft token variants...", .{});
+    const draft_token_exes = try allocator.alloc(DraftTokenExe, block_size);
     defer {
-        for (draft_exes) |*draft_exe| draft_exe.deinit();
-        allocator.free(draft_exes);
+        for (draft_token_exes) |*draft_exe| draft_exe.deinit();
+        allocator.free(draft_token_exes);
     }
-    for (draft_exes, 0..) |*draft_exe, i| {
+    const target_hidden_tensor: zml.Tensor = .init(.{
+        .s = block_size,
+        .d = target_hidden_dim,
+    }, target_model.model.embed_tokens.weight.dtype());
+    for (draft_token_exes, 0..) |*draft_exe, i| {
         const context_len: u32 = @intCast(i + 1);
-        const target_hidden_tensor: zml.Tensor = .init(.{
-            .s = context_len,
-            .d = target_hidden_dim,
-        }, target_model.model.embed_tokens.weight.dtype());
-        const draft_position_ids_tensor: zml.Tensor = .init(.{ .s = context_len + block_size }, .u32);
         draft_exe.* = .{
             .context_len = context_len,
-            .position_len = context_len + block_size,
             .exe = try platform.compileFn(
                 allocator,
                 io,
-                draftForward,
+                draftTokens,
                 .{
+                    DraftContext{ .len = context_len },
                     draft_model,
+                    target_model,
                     target_hidden_tensor,
-                    noise_embedding_tensor,
-                    draft_position_ids_tensor,
+                    block_tokens_tensor,
                     draft_kv_cache,
                     token_index_tensor,
                 },
@@ -197,16 +185,6 @@ pub fn main(init: std.process.Init) !void {
             ),
         };
     }
-
-    log.info("Compiling target lm_head...", .{});
-    var target_lm_head_exe = try platform.compileFn(
-        allocator,
-        io,
-        targetGreedyFromHidden,
-        .{ target_model, noise_embedding_tensor },
-        .{ .shardings = &all_shardings },
-    );
-    defer target_lm_head_exe.deinit();
 
     log.info("Compiling target verify...", .{});
     var target_verify_exe = try platform.compileFn(
@@ -225,30 +203,6 @@ pub fn main(init: std.process.Init) !void {
         .{ .shardings = &all_shardings },
     );
     defer target_verify_exe.deinit();
-
-    log.info("Compiling hidden prefix variants...", .{});
-    const hidden_prefix_exes = try allocator.alloc(PrefixExe, block_size);
-    defer {
-        for (hidden_prefix_exes) |*prefix_exe| prefix_exe.deinit();
-        allocator.free(hidden_prefix_exes);
-    }
-    const verified_hidden_tensor: zml.Tensor = .init(.{
-        .s = block_size,
-        .d = target_hidden_dim,
-    }, target_model.model.embed_tokens.weight.dtype());
-    for (hidden_prefix_exes, 0..) |*prefix_exe, i| {
-        const prefix_len: u32 = @intCast(i + 1);
-        prefix_exe.* = .{
-            .len = prefix_len,
-            .exe = try platform.compileFn(
-                allocator,
-                io,
-                hiddenPrefix,
-                .{ PrefixSpec{ .len = prefix_len }, verified_hidden_tensor },
-                .{ .shardings = &all_shardings },
-            ),
-        };
-    }
 
     log.info("Loading weights...", .{});
     var model_buffers = try zml.io.load(dflash.Model, &draft_model, allocator, io, platform, &store, .{
@@ -345,7 +299,7 @@ pub fn main(init: std.process.Init) !void {
         const step_started_at: std.Io.Timestamp = .now(io, .awake);
         const context_len = start - draft_cache_len;
         stdx.debug.assert(context_len >= 1 and context_len <= block_size, "invalid DFlash context length {}", .{context_len});
-        const selected_draft_exe = &draft_exes[@as(usize, @intCast(context_len - 1))];
+        const selected_draft_exe = &draft_token_exes[@as(usize, @intCast(context_len - 1))];
 
         @memset(block_tokens, parsed_config.value.dflash_config.mask_token_id.?);
         block_tokens[0] = generated.items[@intCast(start)];
@@ -357,26 +311,6 @@ pub fn main(init: std.process.Init) !void {
             .replicated,
         );
         defer block_tokens_buffer.deinit();
-
-        var embed_args = try target_embed_exe.args(allocator);
-        defer embed_args.deinit(allocator);
-        var embed_results = try target_embed_exe.results(allocator);
-        defer embed_results.deinit(allocator);
-        embed_args.set(.{ target_buffers, block_tokens_buffer });
-        target_embed_exe.call(embed_args, &embed_results);
-
-        var noise_embedding_buffer = embed_results.get(zml.Buffer);
-        defer noise_embedding_buffer.deinit();
-
-        const draft_position_ids = try arangeAlloc(allocator, draft_cache_len, selected_draft_exe.position_len);
-        defer allocator.free(draft_position_ids);
-        var draft_position_ids_buffer: zml.Buffer = try .fromSlice(
-            io,
-            platform,
-            zml.Slice.init(.init(.{ .s = selected_draft_exe.position_len }, .u32), std.mem.sliceAsBytes(draft_position_ids)),
-            .replicated,
-        );
-        defer draft_position_ids_buffer.deinit();
 
         var draft_cache_index = draft_cache_len;
         var draft_cache_index_buffer: zml.Buffer = try .fromSlice(
@@ -393,31 +327,21 @@ pub fn main(init: std.process.Init) !void {
         defer draft_results.deinit(allocator);
         draft_args.set(.{
             model_buffers,
+            target_buffers,
             target_hidden_increment_buffer,
-            noise_embedding_buffer,
-            draft_position_ids_buffer,
+            block_tokens_buffer,
             draft_kv_cache_buffers,
             draft_cache_index_buffer,
         });
         selected_draft_exe.exe.call(draft_args, &draft_results);
 
-        var draft_hidden_buffer, var updated_draft_kv_cache_buffers = draft_results.get(struct {
+        var draft_token_buffer, var updated_draft_kv_cache_buffers = draft_results.get(struct {
             zml.Buffer,
             dflash.KvCache.Buffer,
         });
-        defer draft_hidden_buffer.deinit();
+        defer draft_token_buffer.deinit();
         replaceDraftKvCacheBuffers(&draft_kv_cache_buffers, &updated_draft_kv_cache_buffers);
         draft_cache_len = start;
-
-        var lm_head_args = try target_lm_head_exe.args(allocator);
-        defer lm_head_args.deinit(allocator);
-        var lm_head_results = try target_lm_head_exe.results(allocator);
-        defer lm_head_results.deinit(allocator);
-        lm_head_args.set(.{ target_buffers, draft_hidden_buffer });
-        target_lm_head_exe.call(lm_head_args, &lm_head_results);
-
-        var draft_token_buffer = lm_head_results.get(zml.Buffer);
-        defer draft_token_buffer.deinit();
 
         var draft_token_slice = try draft_token_buffer.toSliceAlloc(allocator, io);
         defer draft_token_slice.free(allocator);
@@ -453,7 +377,7 @@ pub fn main(init: std.process.Init) !void {
         });
         target_verify_exe.call(verify_args, &verify_results);
 
-        var verified_hidden_buffer, var posterior_token_buffer, var verified_target_kv_cache_buffers = verify_results.get(struct {
+        const verified_hidden_buffer, var posterior_token_buffer, var verified_target_kv_cache_buffers = verify_results.get(struct {
             zml.Buffer,
             zml.Buffer,
             llama.KvCache.Buffer,
@@ -482,19 +406,9 @@ pub fn main(init: std.process.Init) !void {
             try setGeneratedToken(&generated, allocator, start, correction_token);
         }
 
-        const selected_prefix_exe = &hidden_prefix_exes[@as(usize, @intCast(committed_tokens - 1))];
-        var prefix_args = try selected_prefix_exe.exe.args(allocator);
-        defer prefix_args.deinit(allocator);
-        var prefix_results = try selected_prefix_exe.exe.results(allocator);
-        defer prefix_results.deinit(allocator);
-        prefix_args.set(.{verified_hidden_buffer});
-        selected_prefix_exe.exe.call(prefix_args, &prefix_results);
-
-        const next_target_hidden_increment_buffer = prefix_results.get(zml.Buffer);
         if (owns_target_hidden_increment_buffer) target_hidden_increment_buffer.deinit();
-        target_hidden_increment_buffer = next_target_hidden_increment_buffer;
+        target_hidden_increment_buffer = verified_hidden_buffer;
         owns_target_hidden_increment_buffer = true;
-        verified_hidden_buffer.deinit();
 
         const generated_step_end = @min(start, max_seq_len);
         var generated_step_text = try decodeTokens(allocator, &tokenizer, generated.items[generated_step_start..generated_step_end]);
@@ -520,6 +434,19 @@ pub fn main(init: std.process.Init) !void {
     try stdout.interface.flush();
 }
 
+const DraftContext = struct {
+    len: u32,
+};
+
+const DraftTokenExe = struct {
+    context_len: u32,
+    exe: zml.Exe,
+
+    pub fn deinit(self: *DraftTokenExe) void {
+        self.exe.deinit();
+    }
+};
+
 const TargetLayers = struct {
     ids: [32]u32 = undefined,
     len: usize = 0,
@@ -534,29 +461,6 @@ const TargetLayers = struct {
 
     pub fn slice(self: *const TargetLayers) []const u32 {
         return self.ids[0..self.len];
-    }
-};
-
-const DraftExe = struct {
-    context_len: u32,
-    position_len: u32,
-    exe: zml.Exe,
-
-    pub fn deinit(self: *DraftExe) void {
-        self.exe.deinit();
-    }
-};
-
-const PrefixSpec = struct {
-    len: u32,
-};
-
-const PrefixExe = struct {
-    len: u32,
-    exe: zml.Exe,
-
-    pub fn deinit(self: *PrefixExe) void {
-        self.exe.deinit();
     }
 };
 
@@ -598,27 +502,25 @@ fn targetVerify(
     );
 }
 
-fn targetEmbed(target_model: llama.Model, tokens: zml.Tensor) zml.Tensor {
-    return target_model.embedTokens(tokens);
-}
-
-fn draftForward(
+fn draftTokens(
+    context: DraftContext,
     draft_model: dflash.Model,
-    target_hidden: zml.Tensor,
-    noise_embedding: zml.Tensor,
-    position_ids: zml.Tensor,
+    target_model: llama.Model,
+    target_hidden_block: zml.Tensor,
+    block_tokens: zml.Tensor,
     draft_kv_cache: dflash.KvCache,
     cache_index: zml.Tensor,
 ) struct { zml.Tensor, dflash.KvCache } {
-    return draft_model.forwardCached(target_hidden, noise_embedding, position_ids, draft_kv_cache, cache_index);
-}
-
-fn targetGreedyFromHidden(target_model: llama.Model, hidden: zml.Tensor) zml.Tensor {
-    return target_model.greedyTokensFromHidden(hidden);
-}
-
-fn hiddenPrefix(spec: PrefixSpec, hidden: zml.Tensor) zml.Tensor {
-    return hidden.withPartialTags(.{ .s, .d }).slice1d(.s, .{ .start = 0, .end = spec.len });
+    const target_hidden = target_hidden_block.withPartialTags(.{ .s, .d }).slice1d(.s, .{
+        .start = 0,
+        .end = context.len,
+    });
+    const noise_embedding = target_model.embedTokens(block_tokens);
+    const position_ids = zml.Tensor.arange(.{ .end = context.len + block_tokens.dim(.s) }, cache_index.dtype())
+        .withTags(.{.s})
+        .add(cache_index.broad(.init(.{ .s = context.len + block_tokens.dim(.s) }, cache_index.dtype())));
+    const hidden, const updated_kv_cache = draft_model.forwardCached(target_hidden, noise_embedding, position_ids, draft_kv_cache, cache_index);
+    return .{ target_model.greedyTokensFromHidden(hidden), updated_kv_cache };
 }
 
 fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
@@ -722,12 +624,6 @@ fn parseConfig(comptime T: type, allocator: std.mem.Allocator, io: std.Io, dir: 
     defer reader.deinit();
 
     return try std.json.parseFromTokenSource(T, allocator, &reader, .{ .ignore_unknown_fields = true });
-}
-
-fn arangeAlloc(allocator: std.mem.Allocator, start: u32, len: u32) ![]u32 {
-    const res = try allocator.alloc(u32, len);
-    for (res, 0..) |*item, i| item.* = start + @as(u32, @intCast(i));
-    return res;
 }
 
 fn setGeneratedToken(tokens: *std.ArrayList(u32), allocator: std.mem.Allocator, index: u32, token: u32) !void {
