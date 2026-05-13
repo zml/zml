@@ -864,6 +864,8 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     
     zml_handler.tic(&zml_handler.timers.enc.prefill);
 
+    std.log.info("lyric_emb_buffer has shape {d}x{d}", .{ lyric_emb_buffer.shape().dim(0), lyric_emb_buffer.shape().dim(1) });
+    
     // encode lyrics
     std.log.info("encode_lyric", .{});
     aceenc.exes.encode_lyric_args.set(.{ aceenc.model_buffers, lyric_emb_buffer });

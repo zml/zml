@@ -47,6 +47,8 @@ pub const AceEnc_handler = struct {
         std.log.info("ENC encoder initialized", .{});
         const silence: SilenceGenerator = .init(store_s.view(), config, target_duration * 25);
         std.log.info("ENC silence initialized", .{});
+
+        std.log.info("lyric_emb has shape {d}x{d}", .{ lyric_len, config.text_hidden_dim });
         
         const params: Params = .{
             .text_emb = .init(.{ .s = text_len, .d = config.text_hidden_dim }, .bf16),
