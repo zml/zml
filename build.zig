@@ -1,30 +1,17 @@
 const std = @import("std");
 
+/// Disclaimer: this is not a real build.zig,
+/// it just defers to bazel to do anything.
+/// Our toolchain uses many third party dependencies outside of Zig ecosystem
+/// that are using Bazel one way or another.
+/// Leveraging Bazel and LLVM sandboxing also allows crazy things,
+/// like building a branch of ZML with a local Zig fork built with a local LLVM fork,
+/// all of this with a simple `bazel test //zml:test`
+///
+/// So this is just here to help code editor pick up this project as Zig,
+/// and exposing `zig build test` to the user.
 pub fn build(b: *std.Build) void {
-    const optimize = b.standardOptimizeOption(.{});
-    const run = b.step("run", "run");
-
-    {
-        const mnist = b.step("mnist", "mnist");
-        const mnist_cmd = b.addSystemCommand(&.{ "bazelisk", "run", "//examples/mnist" });
-        mnist.dependOn(&mnist_cmd.step);
-    }
-
-    {
-        const llm = b.step("llm", "llm");
-        const llm_cmd = b.addSystemCommand(&.{ "bazelisk", "run", "//examples/llm" });
-        if (optimize != .Debug) {
-            llm_cmd.addArg("--config=release");
-        }
-        llm_cmd.addArg("--");
-        if (b.args) |cli_args|
-            llm_cmd.addArgs(cli_args);
-
-        llm.dependOn(&llm_cmd.step);
-        run.dependOn(llm);
-    }
-
-    const test_ = b.step("test", "test");
+    const test_ = b.step("test", "Run unit tests");
 
     const stdx_test = b.addSystemCommand(&.{ "bazelisk", "test", "//stdx/..." });
     test_.dependOn(&stdx_test.step);
@@ -44,4 +31,11 @@ pub fn build(b: *std.Build) void {
 
     const zml_test = b.addSystemCommand(&.{ "bazelisk", "test", "//zml/..." });
     test_.dependOn(&zml_test.step);
+
+    _ = b.step("disclaimer",
+        \\
+        \\    ❗This is not a real build.zig, it just shells out to bazel.
+        \\    ❗You should be using `bazel run ...` see README to get started.
+        \\    ❗This is intended to help with editor integration.
+    );
 }
