@@ -340,7 +340,9 @@ pub fn main(init: std.process.Init) !void {
     var target_hidden_increment_buffer = target_hidden_buffer;
     var owns_target_hidden_increment_buffer = false;
     var step: usize = 0;
+    const decode_started_at: std.Io.Timestamp = .now(io, .awake);
     while (start < max_seq_len) : (step += 1) {
+        const step_started_at: std.Io.Timestamp = .now(io, .awake);
         const context_len = start - draft_cache_len;
         stdx.debug.assert(context_len >= 1 and context_len <= block_size, "invalid DFlash context length {}", .{context_len});
         const selected_draft_exe = &draft_exes[@as(usize, @intCast(context_len - 1))];
@@ -501,15 +503,20 @@ pub fn main(init: std.process.Init) !void {
         defer correction_text.deinit(allocator);
 
         try stdout.interface.print(
-            "step={} start={} context_len={} valid_draft_tokens={} committed_tokens={} correction={} correction_text=\"{s}\" text=\"{s}\"\n",
-            .{ step, start, context_len, valid_draft_tokens, committed_tokens, correction_token, correction_text.items, generated_step_text.items },
+            "step={} start={} context_len={} valid_draft_tokens={} committed_tokens={} correction={} elapsed={f} correction_text=\"{s}\" text=\"{s}\"\n",
+            .{ step, start, context_len, valid_draft_tokens, committed_tokens, correction_token, step_started_at.untilNow(io, .awake), correction_text.items, generated_step_text.items },
         );
     }
     if (owns_target_hidden_increment_buffer) target_hidden_increment_buffer.deinit();
 
+    const decode_elapsed = decode_started_at.untilNow(io, .awake);
+    const decoded_tokens: u32 = start - block_size;
+    const decode_seconds = @as(f64, @floatFromInt(decode_elapsed.nanoseconds)) / std.time.ns_per_s;
+    const tokens_per_second = @as(f64, @floatFromInt(decoded_tokens)) / decode_seconds;
     try printTokens(allocator, &tokenizer, &stdout.interface, "generated", generated.items[0..@min(generated.items.len, max_seq_len)]);
     try stdout.interface.print("target_cache_logical_len: {}\n", .{start});
     try stdout.interface.print("draft_cache_logical_len_after_crop: {}\n", .{draft_cache_len});
+    try stdout.interface.print("decode_elapsed={f} decoded_tokens={} tokens_per_second={d:.3}\n", .{ decode_elapsed, decoded_tokens, tokens_per_second });
     try stdout.interface.flush();
 }
 
