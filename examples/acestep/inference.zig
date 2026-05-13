@@ -80,8 +80,21 @@ pub const AudioMetadata = struct {
             .keyscale = try extractFieldBlock(allocator, trimmed, "keyscale:"),
             .language = try extractFieldBlock(allocator, trimmed, "language:"),
             .timesignature = try extractFieldBlock(allocator, trimmed, "timesignature:"),
-            .lyric = try extractFieldBlock(allocator, trimmed, "lyric:"),
+            .lyric = try extractLyricBlock(allocator, input),
         };
+    }
+
+    pub fn extractLyricBlock(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+        var split_1 = std.mem.splitSequence(u8, input, "# Lyric");
+        _ = split_1.first();
+        if (split_1.next()) |lyric_start| {
+            var split_2 = std.mem.splitSequence(u8, lyric_start, "<|im_end|>");
+            const lyric = split_2.first();
+            return try allocator.dupe(u8, lyric);
+        } else {
+            std.log.info("ERROR in parsing inspiration output", .{});
+            return "";
+        }
     }
 
     pub fn setDuration(self: *AudioMetadata, allocator: std.mem.Allocator, duration: i64) !void {
