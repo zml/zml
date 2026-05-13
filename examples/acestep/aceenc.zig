@@ -63,8 +63,8 @@ pub const AceEnc_handler = struct {
             .timbre_latent = .init(.{ .a = config.timbre_hidden_dim, .t = config.timbre_fix_frame }, .bf16),
             .audio_codes = .init(.{ .s = audiocodes }, .u32),
             .src_audio = .init(.{ .t = target_duration * 25, .a = config.audio_acoustic_hidden_dim }, .bf16),
-            .encoded_lyric = .init(.{ .s = lyric_len, .d = config.hidden_size }, .bf16),
-            .encoded_timbre = .init(.{ .s = 1, .d = config.hidden_size }, .bf16),
+            .encoded_lyric = .init(.{ .s = lyric_len, .d = config.encoder_hidden_size }, .bf16),
+            .encoded_timbre = .init(.{ .s = 1, .d = config.encoder_hidden_size }, .bf16),
         };
         
         const shardings: main.Shardings = try .init(zml_handler.platform);
@@ -478,8 +478,8 @@ pub const SelfAttention = struct {
             .o_proj = .init(store.createTensor("o_proj.weight", .{ .d_out, .d }, null), null, .d),
             .q_norm = .init(store.withPrefix("q_norm"), config.rms_norm_eps),
             .k_norm = .init(store.withPrefix("k_norm"), config.rms_norm_eps),
-            .num_heads = @intCast(config.num_attention_heads),
-            .num_kv_heads = @intCast(config.num_key_value_heads),
+            .num_heads = @intCast(config.encoder_num_attention_heads),
+            .num_kv_heads = @intCast(config.encoder_num_key_value_heads),
             .head_dim = @intCast(config.head_dim),
             .rope_opts = .{
                 .layout = .sequential,

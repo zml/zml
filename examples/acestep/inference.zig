@@ -801,7 +801,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
 
     const caption_len = text_emb.caption_embedding.shape.dim(0);
     const lyric_len = text_emb.lyric_embedding.shape.dim(0);
-    const emb_dim = aceenc.config.hidden_size;
+    const emb_dim = aceenc.config.encoder_hidden_size;
     const audio_dim = aceenc.config.timbre_hidden_dim;
     const t_timbre = aceenc.config.timbre_fix_frame;
     const t_25hz: i64 = 25 * target_duration;

@@ -48,7 +48,7 @@ pub const AceDit_handler = struct {
             .t_next = .init(.{}, .f32),
             .x = .init(.{ .t = 25 * target_duration, .a = config.timbre_hidden_dim }, .bf16),
             .context_latents = .init(.{ .t = 25 * target_duration, .a = 2 * config.timbre_hidden_dim }, .bf16),
-            .y = .init(.{ .s = conditions_len, .d = config.hidden_size }, .bf16),
+            .y = .init(.{ .s = conditions_len, .d = config.encoder_hidden_size }, .bf16),
             .y_proj = .init(.{ .s = conditions_len, .d = config.hidden_size }, .bf16),
             .mask = .init(.{ .q = @divFloor(25 * target_duration + 1, 2), .k = @divFloor(25 * target_duration + 1, 2) }, .bf16),
             .hidden_states = .init(.{ .t = @divFloor(25 * target_duration + 1, 2), .d = config.hidden_size }, .bf16),
