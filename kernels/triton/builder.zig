@@ -734,8 +734,8 @@ pub const Builder = struct {
         const op = mlir.Operation.make(self.ctx, "llvm.intr.assume", .{
             .operands = .{ .flat = &.{cond.inner} },
             .attributes = &.{
-                .named(self.ctx, "op_bundle_sizes", mlir.denseArrayAttribute(self.ctx, .i32, &.{})),
-                .named(self.ctx, "op_bundle_tags", mlir.arrayAttribute(self.ctx, &.{})),
+                .named(self.ctx, "op_bundle_sizes", .denseArray(self.ctx, .i32, &.{})),
+                .named(self.ctx, "op_bundle_tags", .array(self.ctx, &.{})),
             },
             .location = self.loc(),
         });

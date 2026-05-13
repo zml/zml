@@ -2111,7 +2111,7 @@ pub const Tensor = struct {
 
     pub fn uninitialized(sh: Shape) Tensor {
         const ctx = CompilationContext.current();
-        const buffer_type = mlir.memRefType(
+        const buffer_type = mlir.Type.memRef(
             mlirx.Type.fromDType(ctx.mlir_ctx, sh.dtype()),
             sh.dims(),
             null,

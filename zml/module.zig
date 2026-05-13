@@ -504,7 +504,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
             input_attributes[i].appendAssumeCapacity(.named(
                 compilation_context.mlir_ctx,
                 "mhlo.memory_kind",
-                mlir.stringAttribute(
+                .string(
                     compilation_context.mlir_ctx,
                     compilation_context.platform.memoryKind(memory_kind),
                 ),

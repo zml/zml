@@ -38,7 +38,7 @@ pub fn for_(
         attrs.appendAssumeCapacity(.named(ctx, "unsignedCmp", .unit(ctx)));
     }
     if (opts.num_stages) |n| {
-        attrs.appendAssumeCapacity(.named(ctx, "tt.num_stages", mlir.integerAttribute(ctx, .i32, n)));
+        attrs.appendAssumeCapacity(.named(ctx, "tt.num_stages", .int(ctx, .i32, n)));
     }
 
     return mlir.Operation.make(ctx, "scf.for", .{
