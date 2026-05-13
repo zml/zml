@@ -756,13 +756,14 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 1: Stage 1 — {d}-step guided denoising ===", .{args.num_inference_steps});
 
+    const s1_attn_mode = attnModeFromFlags(args.bf16_attn_stage1, platform);
     const s1 = try runStage1(
         allocator,
         io,
         platform,
         sharding,
         args.stage1_ckpt,
-        args.bf16_attn_stage1,
+        s1_attn_mode,
         args.image,
         pipe_meta,
         args.dump_intermediates,
@@ -833,7 +834,8 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 3: Stage 2 — {d}-step distilled denoising ===", .{stage2_sigmas.len - 1});
 
-    const s2 = try runStage2(allocator, io, platform, sharding, args.stage2_ckpt, &bridge, args.bf16_attn_stage2, stage2_sigmas, &timer_s2, args.profile);
+    const s2_attn_mode = attnModeFromFlags(args.bf16_attn_stage2, platform);
+    const s2 = try runStage2(allocator, io, platform, sharding, args.stage2_ckpt, &bridge, s2_attn_mode, stage2_sigmas, &timer_s2, args.profile);
 
     // Free bridge-only buffers (positions, masks, clean latents, contexts).
     // The noised latents (v_latent, a_latent) were consumed by Stage 2's loop
@@ -953,6 +955,47 @@ pub fn main(init: std.process.Init) !void {
 // Phase 1: Stage 1 — guided denoising
 // ============================================================================
 
+/// Compute the attention mode from CLI flags and platform target.
+/// Uses Backend.auto() to select the best attention kernel for the hardware.
+fn attnModeFromFlags(use_bf16_attn: bool, platform: *zml.Platform) model.AttnMode {
+    if (!use_bf16_attn) return .fp32_vanilla;
+    return switch (model.attention.Backend.auto(platform)) {
+        .cuda_fa3 => .bf16_cuda_fa3,
+        .rocm_triton_fa => .bf16_rocm_triton,
+        else => .bf16_sdpa,
+    };
+}
+
+/// Extract FA3 scratch buffer shapes for compile args (video + audio).
+/// Returns an 8-element tuple when `m == .bf16_cuda_fa3`, empty tuple otherwise.
+fn fa3CompileShapes(comptime m: model.AttnMode, video_meta: ?model.AttnMetadata, audio_meta: ?model.AttnMetadata) if (m == .bf16_cuda_fa3) struct {
+    zml.Tensor,
+    zml.Tensor,
+    zml.Tensor,
+    zml.Tensor,
+    zml.Tensor,
+    zml.Tensor,
+    zml.Tensor,
+    zml.Tensor,
+} else @TypeOf(.{}) {
+    if (m == .bf16_cuda_fa3) {
+        const v = video_meta.?.cuda_fa3;
+        const a = audio_meta.?.cuda_fa3;
+        return .{
+            v.softmax_lse,
+            v.softmax_lse_accum,
+            v.out_accum,
+            v.scheduler_metadata,
+            a.softmax_lse,
+            a.softmax_lse_accum,
+            a.out_accum,
+            a.scheduler_metadata,
+        };
+    } else {
+        return .{};
+    }
+}
+
 /// Run the full Stage 1 denoising phase: N-step guided Euler diffusion.
 ///
 /// This is the most expensive phase — each step runs 4 full forward passes
@@ -989,7 +1032,7 @@ fn runStage1(
     platform: *zml.Platform,
     sharding: zml.Sharding,
     ckpt_path: []const u8,
-    use_bf16_attn: bool,
+    attn_mode: model.AttnMode,
     image_path: ?[]const u8,
     pipe_meta: PipelineMeta,
     dump_intermediates: bool,
@@ -1418,58 +1461,37 @@ fn runStage1(
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
     };
-    const block_compile_args = block_compile_args_base ++ .{block_params_shape.blocks[0]};
+
+    // FA3 scratch buffer metadata — initialized only when attn_mode == .bf16_cuda_fa3.
+    // These shapes are used for compile args; buffers are allocated below before the denoising loop.
+    var video_attn_meta: ?model.AttnMetadata = null;
+    var audio_attn_meta: ?model.AttnMetadata = null;
+    if (attn_mode == .bf16_cuda_fa3) {
+        video_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, T_v1, 32, 128, .replicated));
+        audio_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, T_a, 32, 128, .replicated));
+    }
+
     const compile_opts: zml.module.CompilationOptions = .{ .shardings = &.{sharding} };
 
-    // HACK: temporarily force rocm_triton_fa on CUDA for H100 testing.
-    const use_fa3 = false;
-    const use_rocm_fa = platform.target == .cuda or platform.target == .rocm;
-
-    // FA3 metadata shapes (sized by Q seqlen for each attention group).
-    const video_seqlen: i64 = init_pre_out.vx.shape().dim(.t);
-    const audio_seqlen: i64 = init_pre_out.ax.shape().dim(.t);
-    const num_heads: i64 = 32; // all LTX attention kinds use 32 heads
-    const video_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, video_seqlen, num_heads, 128, .replicated));
-    const audio_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, audio_seqlen, num_heads, 128, .replicated));
-
-    // Compile args for bf16 variants include FA3 scratch buffer shapes (CUDA only).
-    const block_compile_args_bf16 = block_compile_args_base ++ .{
-        // video FA3 metadata
-        video_attn_meta.cuda_fa3.softmax_lse,
-        video_attn_meta.cuda_fa3.softmax_lse_accum,
-        video_attn_meta.cuda_fa3.out_accum,
-        video_attn_meta.cuda_fa3.scheduler_metadata,
-        // audio FA3 metadata
-        audio_attn_meta.cuda_fa3.softmax_lse,
-        audio_attn_meta.cuda_fa3.softmax_lse_accum,
-        audio_attn_meta.cuda_fa3.out_accum,
-        audio_attn_meta.cuda_fa3.scheduler_metadata,
-        block_params_shape.blocks[0],
+    std.log.info("Compiling block exe (normal, attn_mode={s})...", .{@tagName(attn_mode)});
+    var block_normal_exe = switch (attn_mode) {
+        inline else => |m| blk: {
+            const args = block_compile_args_base ++ fa3CompileShapes(m, video_attn_meta, audio_attn_meta) ++ .{block_params_shape.blocks[0]};
+            break :blk try platform.compileFn(allocator, io, model.ForwardBlock0(m, false).forward, args, compile_opts);
+        },
     };
-
-    std.log.info("Compiling block exe (normal, bf16_attn={}, fa3={}, rocm_fa={})...", .{ use_bf16_attn, use_fa3, use_rocm_fa });
-    var block_normal_exe = if (use_bf16_attn and use_fa3)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16Attn, block_compile_args_bf16, compile_opts)
-    else if (use_bf16_attn and use_rocm_fa)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16AttnRocm, block_compile_args, compile_opts)
-    else if (use_bf16_attn)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16AttnNoFA3, block_compile_args, compile_opts)
-    else
-        try platform.compileFn(allocator, io, model.forwardBlock0Native, block_compile_args, compile_opts);
     defer block_normal_exe.deinit();
 
-    std.log.info("Compiling block exe (STG, bf16_attn={}, fa3={}, rocm_fa={})...", .{ use_bf16_attn, use_fa3, use_rocm_fa });
-    var block_stg_exe = if (use_bf16_attn and use_fa3)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeSTGBf16Attn, block_compile_args_bf16, compile_opts)
-    else if (use_bf16_attn and use_rocm_fa)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeSTGBf16AttnRocm, block_compile_args, compile_opts)
-    else if (use_bf16_attn)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeSTGBf16AttnNoFA3, block_compile_args, compile_opts)
-    else
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeSTG, block_compile_args, compile_opts);
+    std.log.info("Compiling block exe (STG, attn_mode={s})...", .{@tagName(attn_mode)});
+    var block_stg_exe = switch (attn_mode) {
+        inline else => |m| blk: {
+            const args = block_compile_args_base ++ fa3CompileShapes(m, video_attn_meta, audio_attn_meta) ++ .{block_params_shape.blocks[0]};
+            break :blk try platform.compileFn(allocator, io, model.ForwardBlock0(m, true).forward, args, compile_opts);
+        },
+    };
     defer block_stg_exe.deinit();
 
-    std.log.info("Compiling block exe (isolated, bf16_attn={})...", .{use_bf16_attn});
+    std.log.info("Compiling block exe (isolated, attn_mode={s})...", .{@tagName(attn_mode)});
     const mask_scalar_shape = zml.Shape.init(.{}, .bf16);
     const iso_compile_args_base = .{
         zml.Tensor.fromShape(init_pre_out.vx.shape()),
@@ -1503,28 +1525,12 @@ fn runStage1(
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
         zml.Tensor.fromShape(mask_scalar_shape), // v2a_mask
     };
-    const iso_compile_args = iso_compile_args_base ++ .{block_params_shape.blocks[0]};
-    const iso_compile_args_bf16 = iso_compile_args_base ++ .{
-        // video FA3 metadata
-        video_attn_meta.cuda_fa3.softmax_lse,
-        video_attn_meta.cuda_fa3.softmax_lse_accum,
-        video_attn_meta.cuda_fa3.out_accum,
-        video_attn_meta.cuda_fa3.scheduler_metadata,
-        // audio FA3 metadata
-        audio_attn_meta.cuda_fa3.softmax_lse,
-        audio_attn_meta.cuda_fa3.softmax_lse_accum,
-        audio_attn_meta.cuda_fa3.out_accum,
-        audio_attn_meta.cuda_fa3.scheduler_metadata,
-        block_params_shape.blocks[0],
+    var block_iso_exe = switch (attn_mode) {
+        inline else => |m| blk: {
+            const args = iso_compile_args_base ++ fa3CompileShapes(m, video_attn_meta, audio_attn_meta) ++ .{block_params_shape.blocks[0]};
+            break :blk try platform.compileFn(allocator, io, model.ForwardBlock0WithAVMasks(m).forward, args, compile_opts);
+        },
     };
-    var block_iso_exe = if (use_bf16_attn and use_fa3)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasksBf16Attn, iso_compile_args_bf16, compile_opts)
-    else if (use_bf16_attn and use_rocm_fa)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasksBf16AttnRocm, iso_compile_args, compile_opts)
-    else if (use_bf16_attn)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasksBf16AttnNoFA3, iso_compile_args, compile_opts)
-    else
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasks, iso_compile_args, compile_opts);
     defer block_iso_exe.deinit();
 
     // ---- Compile output projection exes ----
@@ -1716,6 +1722,19 @@ fn runStage1(
     std.log.info("All Stage 1 weights loaded.", .{});
     timer.addLoad();
 
+    // ---- FA3 scratch buffers (allocated once, reused across all steps/passes) ----
+    var v_fa3_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
+    var a_fa3_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
+    if (attn_mode == .bf16_cuda_fa3) {
+        std.log.info("Allocating FA3 scratch buffers...", .{});
+        v_fa3_bufs = try video_attn_meta.?.initBuffer(io, platform, sharding);
+        a_fa3_bufs = try audio_attn_meta.?.initBuffer(io, platform, sharding);
+    }
+    defer if (attn_mode == .bf16_cuda_fa3) {
+        model.AttnMetadata.deinitBuffer(&v_fa3_bufs);
+        model.AttnMetadata.deinitBuffer(&a_fa3_bufs);
+    };
+
     // ---- Guidance scalars ----
     var zero_mask_buf = try zml.Buffer.scalar(io, platform, @as(f32, 0.0), .bf16);
     defer zero_mask_buf.deinit();
@@ -1735,18 +1754,6 @@ fn runStage1(
     defer mod_a_buf.deinit();
     var rescale_a_buf = try zml.Buffer.scalar(io, platform, rescale_a, .f32);
     defer rescale_a_buf.deinit();
-
-    // ---- FA3 scratch buffers (allocated once, reused every step — CUDA only) ----
-    var v_attn_meta_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
-    var a_attn_meta_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
-    if (use_bf16_attn and use_fa3) {
-        v_attn_meta_bufs = try video_attn_meta.initBuffer(io, platform, sharding);
-        a_attn_meta_bufs = try audio_attn_meta.initBuffer(io, platform, sharding);
-    }
-    defer if (use_bf16_attn and use_fa3) {
-        model.AttnMetadata.deinitBuffer(&v_attn_meta_bufs);
-        model.AttnMetadata.deinitBuffer(&a_attn_meta_bufs);
-    };
 
     // ---- Denoising loop ----
     std.log.info("Starting {d}-step denoising loop (4-pass guidance)...", .{num_stage1_steps});
@@ -1815,26 +1822,26 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                if (use_bf16_attn and use_fa3) {
+                if (attn_mode == .bf16_cuda_fa3) {
                     blk_args.set(.{
-                        cond_h_v,                              cond_h_a,
-                        pre_out.video_timesteps,               pre_out.audio_timesteps,
-                        pre_out.video_timesteps_zero,          pre_out.audio_timesteps_zero,
-                        pre_out.v_denoise_mask,                pre_out.a_denoise_mask,
-                        pre_out.v_prompt_timestep,             pre_out.a_prompt_timestep,
-                        pre_out.v_pe_cos,                      pre_out.v_pe_sin,
-                        pre_out.a_pe_cos,                      pre_out.a_pe_sin,
-                        pre_out.v_text_ctx,                    pre_out.a_text_ctx,
-                        pre_out.v_cross_ss_ts,                 pre_out.v_cross_gate_ts,
-                        pre_out.a_cross_ss_ts,                 pre_out.a_cross_gate_ts,
-                        pre_out.a2v_pe_cos,                    pre_out.a2v_pe_sin,
-                        pre_out.a2v_k_pe_cos,                  pre_out.a2v_k_pe_sin,
-                        pre_out.v2a_pe_cos,                    pre_out.v2a_pe_sin,
-                        pre_out.v2a_k_pe_cos,                  pre_out.v2a_k_pe_sin,
-                        v_attn_meta_bufs.cuda_fa3.softmax_lse, v_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
-                        v_attn_meta_bufs.cuda_fa3.out_accum,   v_attn_meta_bufs.cuda_fa3.scheduler_metadata,
-                        a_attn_meta_bufs.cuda_fa3.softmax_lse, a_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
-                        a_attn_meta_bufs.cuda_fa3.out_accum,   a_attn_meta_bufs.cuda_fa3.scheduler_metadata,
+                        cond_h_v,                        cond_h_a,
+                        pre_out.video_timesteps,         pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero,    pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,          pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,       pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,                pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,                pre_out.a_pe_sin,
+                        pre_out.v_text_ctx,              pre_out.a_text_ctx,
+                        pre_out.v_cross_ss_ts,           pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,           pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,              pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,            pre_out.a2v_k_pe_sin,
+                        pre_out.v2a_pe_cos,              pre_out.v2a_pe_sin,
+                        pre_out.v2a_k_pe_cos,            pre_out.v2a_k_pe_sin,
+                        v_fa3_bufs.cuda_fa3.softmax_lse, v_fa3_bufs.cuda_fa3.softmax_lse_accum,
+                        v_fa3_bufs.cuda_fa3.out_accum,   v_fa3_bufs.cuda_fa3.scheduler_metadata,
+                        a_fa3_bufs.cuda_fa3.softmax_lse, a_fa3_bufs.cuda_fa3.softmax_lse_accum,
+                        a_fa3_bufs.cuda_fa3.out_accum,   a_fa3_bufs.cuda_fa3.scheduler_metadata,
                         block_params_bufs[i],
                     });
                 } else {
@@ -1889,26 +1896,26 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                if (use_bf16_attn and use_fa3) {
+                if (attn_mode == .bf16_cuda_fa3) {
                     blk_args.set(.{
-                        neg_h_v,                               neg_h_a,
-                        pre_out.video_timesteps,               pre_out.audio_timesteps,
-                        pre_out.video_timesteps_zero,          pre_out.audio_timesteps_zero,
-                        pre_out.v_denoise_mask,                pre_out.a_denoise_mask,
-                        pre_out.v_prompt_timestep,             pre_out.a_prompt_timestep,
-                        pre_out.v_pe_cos,                      pre_out.v_pe_sin,
-                        pre_out.a_pe_cos,                      pre_out.a_pe_sin,
-                        v_context_neg_buf,                     a_context_neg_buf,
-                        pre_out.v_cross_ss_ts,                 pre_out.v_cross_gate_ts,
-                        pre_out.a_cross_ss_ts,                 pre_out.a_cross_gate_ts,
-                        pre_out.a2v_pe_cos,                    pre_out.a2v_pe_sin,
-                        pre_out.a2v_k_pe_cos,                  pre_out.a2v_k_pe_sin,
-                        pre_out.v2a_pe_cos,                    pre_out.v2a_pe_sin,
-                        pre_out.v2a_k_pe_cos,                  pre_out.v2a_k_pe_sin,
-                        v_attn_meta_bufs.cuda_fa3.softmax_lse, v_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
-                        v_attn_meta_bufs.cuda_fa3.out_accum,   v_attn_meta_bufs.cuda_fa3.scheduler_metadata,
-                        a_attn_meta_bufs.cuda_fa3.softmax_lse, a_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
-                        a_attn_meta_bufs.cuda_fa3.out_accum,   a_attn_meta_bufs.cuda_fa3.scheduler_metadata,
+                        neg_h_v,                         neg_h_a,
+                        pre_out.video_timesteps,         pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero,    pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,          pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,       pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,                pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,                pre_out.a_pe_sin,
+                        v_context_neg_buf,               a_context_neg_buf,
+                        pre_out.v_cross_ss_ts,           pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,           pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,              pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,            pre_out.a2v_k_pe_sin,
+                        pre_out.v2a_pe_cos,              pre_out.v2a_pe_sin,
+                        pre_out.v2a_k_pe_cos,            pre_out.v2a_k_pe_sin,
+                        v_fa3_bufs.cuda_fa3.softmax_lse, v_fa3_bufs.cuda_fa3.softmax_lse_accum,
+                        v_fa3_bufs.cuda_fa3.out_accum,   v_fa3_bufs.cuda_fa3.scheduler_metadata,
+                        a_fa3_bufs.cuda_fa3.softmax_lse, a_fa3_bufs.cuda_fa3.softmax_lse_accum,
+                        a_fa3_bufs.cuda_fa3.out_accum,   a_fa3_bufs.cuda_fa3.scheduler_metadata,
                         block_params_bufs[i],
                     });
                 } else {
@@ -1967,28 +1974,28 @@ fn runStage1(
             defer blk_stg_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                // Special handling for the STG block, which has additional inputs/outputs and a different forward fn.
+                // Special handling for the STG block, which uses V-passthrough.
                 if (i == STG_BLOCK_IDX) {
-                    if (use_bf16_attn and use_fa3) {
+                    if (attn_mode == .bf16_cuda_fa3) {
                         blk_stg_args.set(.{
-                            ptb_h_v,                               ptb_h_a,
-                            pre_out.video_timesteps,               pre_out.audio_timesteps,
-                            pre_out.video_timesteps_zero,          pre_out.audio_timesteps_zero,
-                            pre_out.v_denoise_mask,                pre_out.a_denoise_mask,
-                            pre_out.v_prompt_timestep,             pre_out.a_prompt_timestep,
-                            pre_out.v_pe_cos,                      pre_out.v_pe_sin,
-                            pre_out.a_pe_cos,                      pre_out.a_pe_sin,
-                            pre_out.v_text_ctx,                    pre_out.a_text_ctx,
-                            pre_out.v_cross_ss_ts,                 pre_out.v_cross_gate_ts,
-                            pre_out.a_cross_ss_ts,                 pre_out.a_cross_gate_ts,
-                            pre_out.a2v_pe_cos,                    pre_out.a2v_pe_sin,
-                            pre_out.a2v_k_pe_cos,                  pre_out.a2v_k_pe_sin,
-                            pre_out.v2a_pe_cos,                    pre_out.v2a_pe_sin,
-                            pre_out.v2a_k_pe_cos,                  pre_out.v2a_k_pe_sin,
-                            v_attn_meta_bufs.cuda_fa3.softmax_lse, v_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
-                            v_attn_meta_bufs.cuda_fa3.out_accum,   v_attn_meta_bufs.cuda_fa3.scheduler_metadata,
-                            a_attn_meta_bufs.cuda_fa3.softmax_lse, a_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
-                            a_attn_meta_bufs.cuda_fa3.out_accum,   a_attn_meta_bufs.cuda_fa3.scheduler_metadata,
+                            ptb_h_v,                         ptb_h_a,
+                            pre_out.video_timesteps,         pre_out.audio_timesteps,
+                            pre_out.video_timesteps_zero,    pre_out.audio_timesteps_zero,
+                            pre_out.v_denoise_mask,          pre_out.a_denoise_mask,
+                            pre_out.v_prompt_timestep,       pre_out.a_prompt_timestep,
+                            pre_out.v_pe_cos,                pre_out.v_pe_sin,
+                            pre_out.a_pe_cos,                pre_out.a_pe_sin,
+                            pre_out.v_text_ctx,              pre_out.a_text_ctx,
+                            pre_out.v_cross_ss_ts,           pre_out.v_cross_gate_ts,
+                            pre_out.a_cross_ss_ts,           pre_out.a_cross_gate_ts,
+                            pre_out.a2v_pe_cos,              pre_out.a2v_pe_sin,
+                            pre_out.a2v_k_pe_cos,            pre_out.a2v_k_pe_sin,
+                            pre_out.v2a_pe_cos,              pre_out.v2a_pe_sin,
+                            pre_out.v2a_k_pe_cos,            pre_out.v2a_k_pe_sin,
+                            v_fa3_bufs.cuda_fa3.softmax_lse, v_fa3_bufs.cuda_fa3.softmax_lse_accum,
+                            v_fa3_bufs.cuda_fa3.out_accum,   v_fa3_bufs.cuda_fa3.scheduler_metadata,
+                            a_fa3_bufs.cuda_fa3.softmax_lse, a_fa3_bufs.cuda_fa3.softmax_lse_accum,
+                            a_fa3_bufs.cuda_fa3.out_accum,   a_fa3_bufs.cuda_fa3.scheduler_metadata,
                             block_params_bufs[i],
                         });
                     } else {
@@ -2019,26 +2026,26 @@ fn runStage1(
                     ptb_h_v = out.vx_out;
                     ptb_h_a = out.ax_out;
                 } else {
-                    if (use_bf16_attn and use_fa3) {
+                    if (attn_mode == .bf16_cuda_fa3) {
                         blk_normal_args.set(.{
-                            ptb_h_v,                               ptb_h_a,
-                            pre_out.video_timesteps,               pre_out.audio_timesteps,
-                            pre_out.video_timesteps_zero,          pre_out.audio_timesteps_zero,
-                            pre_out.v_denoise_mask,                pre_out.a_denoise_mask,
-                            pre_out.v_prompt_timestep,             pre_out.a_prompt_timestep,
-                            pre_out.v_pe_cos,                      pre_out.v_pe_sin,
-                            pre_out.a_pe_cos,                      pre_out.a_pe_sin,
-                            pre_out.v_text_ctx,                    pre_out.a_text_ctx,
-                            pre_out.v_cross_ss_ts,                 pre_out.v_cross_gate_ts,
-                            pre_out.a_cross_ss_ts,                 pre_out.a_cross_gate_ts,
-                            pre_out.a2v_pe_cos,                    pre_out.a2v_pe_sin,
-                            pre_out.a2v_k_pe_cos,                  pre_out.a2v_k_pe_sin,
-                            pre_out.v2a_pe_cos,                    pre_out.v2a_pe_sin,
-                            pre_out.v2a_k_pe_cos,                  pre_out.v2a_k_pe_sin,
-                            v_attn_meta_bufs.cuda_fa3.softmax_lse, v_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
-                            v_attn_meta_bufs.cuda_fa3.out_accum,   v_attn_meta_bufs.cuda_fa3.scheduler_metadata,
-                            a_attn_meta_bufs.cuda_fa3.softmax_lse, a_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
-                            a_attn_meta_bufs.cuda_fa3.out_accum,   a_attn_meta_bufs.cuda_fa3.scheduler_metadata,
+                            ptb_h_v,                         ptb_h_a,
+                            pre_out.video_timesteps,         pre_out.audio_timesteps,
+                            pre_out.video_timesteps_zero,    pre_out.audio_timesteps_zero,
+                            pre_out.v_denoise_mask,          pre_out.a_denoise_mask,
+                            pre_out.v_prompt_timestep,       pre_out.a_prompt_timestep,
+                            pre_out.v_pe_cos,                pre_out.v_pe_sin,
+                            pre_out.a_pe_cos,                pre_out.a_pe_sin,
+                            pre_out.v_text_ctx,              pre_out.a_text_ctx,
+                            pre_out.v_cross_ss_ts,           pre_out.v_cross_gate_ts,
+                            pre_out.a_cross_ss_ts,           pre_out.a_cross_gate_ts,
+                            pre_out.a2v_pe_cos,              pre_out.a2v_pe_sin,
+                            pre_out.a2v_k_pe_cos,            pre_out.a2v_k_pe_sin,
+                            pre_out.v2a_pe_cos,              pre_out.v2a_pe_sin,
+                            pre_out.v2a_k_pe_cos,            pre_out.v2a_k_pe_sin,
+                            v_fa3_bufs.cuda_fa3.softmax_lse, v_fa3_bufs.cuda_fa3.softmax_lse_accum,
+                            v_fa3_bufs.cuda_fa3.out_accum,   v_fa3_bufs.cuda_fa3.scheduler_metadata,
+                            a_fa3_bufs.cuda_fa3.softmax_lse, a_fa3_bufs.cuda_fa3.softmax_lse_accum,
+                            a_fa3_bufs.cuda_fa3.out_accum,   a_fa3_bufs.cuda_fa3.scheduler_metadata,
                             block_params_bufs[i],
                         });
                     } else {
@@ -2094,27 +2101,27 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                if (use_bf16_attn and use_fa3) {
+                if (attn_mode == .bf16_cuda_fa3) {
                     blk_args.set(.{
-                        iso_h_v,                               iso_h_a,
-                        pre_out.video_timesteps,               pre_out.audio_timesteps,
-                        pre_out.video_timesteps_zero,          pre_out.audio_timesteps_zero,
-                        pre_out.v_denoise_mask,                pre_out.a_denoise_mask,
-                        pre_out.v_prompt_timestep,             pre_out.a_prompt_timestep,
-                        pre_out.v_pe_cos,                      pre_out.v_pe_sin,
-                        pre_out.a_pe_cos,                      pre_out.a_pe_sin,
-                        pre_out.v_text_ctx,                    pre_out.a_text_ctx,
-                        pre_out.v_cross_ss_ts,                 pre_out.v_cross_gate_ts,
-                        pre_out.a_cross_ss_ts,                 pre_out.a_cross_gate_ts,
-                        pre_out.a2v_pe_cos,                    pre_out.a2v_pe_sin,
-                        pre_out.a2v_k_pe_cos,                  pre_out.a2v_k_pe_sin,
-                        zero_mask_buf,                         pre_out.v2a_pe_cos,
-                        pre_out.v2a_pe_sin,                    pre_out.v2a_k_pe_cos,
-                        pre_out.v2a_k_pe_sin,                  zero_mask_buf,
-                        v_attn_meta_bufs.cuda_fa3.softmax_lse, v_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
-                        v_attn_meta_bufs.cuda_fa3.out_accum,   v_attn_meta_bufs.cuda_fa3.scheduler_metadata,
-                        a_attn_meta_bufs.cuda_fa3.softmax_lse, a_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
-                        a_attn_meta_bufs.cuda_fa3.out_accum,   a_attn_meta_bufs.cuda_fa3.scheduler_metadata,
+                        iso_h_v,                         iso_h_a,
+                        pre_out.video_timesteps,         pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero,    pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,          pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,       pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,                pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,                pre_out.a_pe_sin,
+                        pre_out.v_text_ctx,              pre_out.a_text_ctx,
+                        pre_out.v_cross_ss_ts,           pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,           pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,              pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,            pre_out.a2v_k_pe_sin,
+                        zero_mask_buf,                   pre_out.v2a_pe_cos,
+                        pre_out.v2a_pe_sin,              pre_out.v2a_k_pe_cos,
+                        pre_out.v2a_k_pe_sin,            zero_mask_buf,
+                        v_fa3_bufs.cuda_fa3.softmax_lse, v_fa3_bufs.cuda_fa3.softmax_lse_accum,
+                        v_fa3_bufs.cuda_fa3.out_accum,   v_fa3_bufs.cuda_fa3.scheduler_metadata,
+                        a_fa3_bufs.cuda_fa3.softmax_lse, a_fa3_bufs.cuda_fa3.softmax_lse_accum,
+                        a_fa3_bufs.cuda_fa3.out_accum,   a_fa3_bufs.cuda_fa3.scheduler_metadata,
                         block_params_bufs[i],
                     });
                 } else {
@@ -2714,15 +2721,12 @@ fn runStage2(
     sharding: zml.Sharding,
     ckpt_path: []const u8,
     bridge: *BridgeResult,
-    use_bf16_attn: bool,
+    attn_mode: model.AttnMode,
     stage2_sigmas: []const f32,
     timer: *PhaseTimer,
     profile: bool,
 ) !Stage2Result {
     timer.start();
-    // HACK: temporarily force rocm_triton_fa on CUDA for H100 testing.
-    const use_fa3 = false;
-    const use_rocm_fa = platform.target == .cuda or platform.target == .rocm;
 
     // ---- Open checkpoint store ----
     var ckpt_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path) catch |err| {
@@ -2805,7 +2809,7 @@ fn runStage2(
     var init_pre_out = pre_results_init.get(zml.Bufferized(model.PreprocessOutput));
 
     // ---- Compile block exe ----
-    std.log.info("Compiling Stage 2 block exe (bf16_attn={}, fa3={})...", .{ use_bf16_attn, use_fa3 });
+    std.log.info("Compiling Stage 2 block exe (attn_mode={s})...", .{@tagName(attn_mode)});
     var block_params_shape = try allocator.create(model.FullStepParams);
     defer allocator.destroy(block_params_shape);
     block_params_shape.* = model.initFullStepParams(ckpt_store.view());
@@ -2840,37 +2844,25 @@ fn runStage2(
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
     };
-    const block_compile_args = block_compile_args_base ++ .{block_params_shape.blocks[0]};
 
-    // FA3 metadata for Stage 2 (different seqlens than Stage 1)
-    const s2_video_seqlen: i64 = init_pre_out.vx.shape().dim(.t);
-    const s2_audio_seqlen: i64 = init_pre_out.ax.shape().dim(.t);
-    const s2_num_heads: i64 = 32;
-    const s2_video_fa3_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, s2_video_seqlen, s2_num_heads, 128, .replicated));
-    const s2_audio_fa3_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, s2_audio_seqlen, s2_num_heads, 128, .replicated));
-
-    const block_compile_args_bf16 = block_compile_args_base ++ .{
-        s2_video_fa3_meta.cuda_fa3.softmax_lse,
-        s2_video_fa3_meta.cuda_fa3.softmax_lse_accum,
-        s2_video_fa3_meta.cuda_fa3.out_accum,
-        s2_video_fa3_meta.cuda_fa3.scheduler_metadata,
-        s2_audio_fa3_meta.cuda_fa3.softmax_lse,
-        s2_audio_fa3_meta.cuda_fa3.softmax_lse_accum,
-        s2_audio_fa3_meta.cuda_fa3.out_accum,
-        s2_audio_fa3_meta.cuda_fa3.scheduler_metadata,
-        block_params_shape.blocks[0],
-    };
+    // FA3 scratch buffer metadata for Stage 2 sequence lengths.
+    const s2_T_v = v_latent_buf.shape().dim(1);
+    const s2_T_a = a_latent_buf.shape().dim(1);
+    var s2_video_attn_meta: ?model.AttnMetadata = null;
+    var s2_audio_attn_meta: ?model.AttnMetadata = null;
+    if (attn_mode == .bf16_cuda_fa3) {
+        s2_video_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, s2_T_v, 32, 128, .replicated));
+        s2_audio_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, s2_T_a, 32, 128, .replicated));
+    }
 
     const compile_opts: zml.module.CompilationOptions = .{ .shardings = &.{sharding} };
 
-    var block_exe = if (use_bf16_attn and use_fa3)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16Attn, block_compile_args_bf16, compile_opts)
-    else if (use_bf16_attn and use_rocm_fa)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16AttnRocm, block_compile_args, compile_opts)
-    else if (use_bf16_attn)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16AttnNoFA3, block_compile_args, compile_opts)
-    else
-        try platform.compileFn(allocator, io, model.forwardBlock0Native, block_compile_args, compile_opts);
+    var block_exe = switch (attn_mode) {
+        inline else => |m| blk: {
+            const args = block_compile_args_base ++ fa3CompileShapes(m, s2_video_attn_meta, s2_audio_attn_meta) ++ .{block_params_shape.blocks[0]};
+            break :blk try platform.compileFn(allocator, io, model.ForwardBlock0(m, false).forward, args, compile_opts);
+        },
+    };
     defer block_exe.deinit();
 
     // ---- Compile output projection exes ----
@@ -3004,16 +2996,17 @@ fn runStage2(
     std.log.info("All Stage 2 weights loaded.", .{});
     timer.addLoad();
 
-    // ---- FA3 scratch buffers for Stage 2 (CUDA only) ----
-    var s2_v_attn_meta_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
-    var s2_a_attn_meta_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
-    if (use_bf16_attn and use_fa3) {
-        s2_v_attn_meta_bufs = try s2_video_fa3_meta.initBuffer(io, platform, sharding);
-        s2_a_attn_meta_bufs = try s2_audio_fa3_meta.initBuffer(io, platform, sharding);
+    // ---- FA3 scratch buffers for Stage 2 ----
+    var s2_v_fa3_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
+    var s2_a_fa3_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
+    if (attn_mode == .bf16_cuda_fa3) {
+        std.log.info("Allocating Stage 2 FA3 scratch buffers...", .{});
+        s2_v_fa3_bufs = try s2_video_attn_meta.?.initBuffer(io, platform, sharding);
+        s2_a_fa3_bufs = try s2_audio_attn_meta.?.initBuffer(io, platform, sharding);
     }
-    defer if (use_bf16_attn and use_fa3) {
-        model.AttnMetadata.deinitBuffer(&s2_v_attn_meta_bufs);
-        model.AttnMetadata.deinitBuffer(&s2_a_attn_meta_bufs);
+    defer if (attn_mode == .bf16_cuda_fa3) {
+        model.AttnMetadata.deinitBuffer(&s2_v_fa3_bufs);
+        model.AttnMetadata.deinitBuffer(&s2_a_fa3_bufs);
     };
 
     // ---- Denoising loop: N-step Euler ----
@@ -3081,26 +3074,26 @@ fn runStage2(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                if (use_bf16_attn and use_fa3) {
+                if (attn_mode == .bf16_cuda_fa3) {
                     blk_args.set(.{
-                        h_v,                                      h_a,
-                        pre_out.video_timesteps,                  pre_out.audio_timesteps,
-                        pre_out.video_timesteps_zero,             pre_out.audio_timesteps_zero,
-                        pre_out.v_denoise_mask,                   pre_out.a_denoise_mask,
-                        pre_out.v_prompt_timestep,                pre_out.a_prompt_timestep,
-                        pre_out.v_pe_cos,                         pre_out.v_pe_sin,
-                        pre_out.a_pe_cos,                         pre_out.a_pe_sin,
-                        pre_out.v_text_ctx,                       pre_out.a_text_ctx,
-                        pre_out.v_cross_ss_ts,                    pre_out.v_cross_gate_ts,
-                        pre_out.a_cross_ss_ts,                    pre_out.a_cross_gate_ts,
-                        pre_out.a2v_pe_cos,                       pre_out.a2v_pe_sin,
-                        pre_out.a2v_k_pe_cos,                     pre_out.a2v_k_pe_sin,
-                        pre_out.v2a_pe_cos,                       pre_out.v2a_pe_sin,
-                        pre_out.v2a_k_pe_cos,                     pre_out.v2a_k_pe_sin,
-                        s2_v_attn_meta_bufs.cuda_fa3.softmax_lse, s2_v_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
-                        s2_v_attn_meta_bufs.cuda_fa3.out_accum,   s2_v_attn_meta_bufs.cuda_fa3.scheduler_metadata,
-                        s2_a_attn_meta_bufs.cuda_fa3.softmax_lse, s2_a_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
-                        s2_a_attn_meta_bufs.cuda_fa3.out_accum,   s2_a_attn_meta_bufs.cuda_fa3.scheduler_metadata,
+                        h_v,                                h_a,
+                        pre_out.video_timesteps,            pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero,       pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,             pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,          pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,                   pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,                   pre_out.a_pe_sin,
+                        pre_out.v_text_ctx,                 pre_out.a_text_ctx,
+                        pre_out.v_cross_ss_ts,              pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,              pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,                 pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,               pre_out.a2v_k_pe_sin,
+                        pre_out.v2a_pe_cos,                 pre_out.v2a_pe_sin,
+                        pre_out.v2a_k_pe_cos,               pre_out.v2a_k_pe_sin,
+                        s2_v_fa3_bufs.cuda_fa3.softmax_lse, s2_v_fa3_bufs.cuda_fa3.softmax_lse_accum,
+                        s2_v_fa3_bufs.cuda_fa3.out_accum,   s2_v_fa3_bufs.cuda_fa3.scheduler_metadata,
+                        s2_a_fa3_bufs.cuda_fa3.softmax_lse, s2_a_fa3_bufs.cuda_fa3.softmax_lse_accum,
+                        s2_a_fa3_bufs.cuda_fa3.out_accum,   s2_a_fa3_bufs.cuda_fa3.scheduler_metadata,
                         block_params_bufs[i],
                     });
                 } else {
