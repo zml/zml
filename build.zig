@@ -26,9 +26,22 @@ pub fn build(b: *std.Build) void {
 
     const test_ = b.step("test", "test");
 
-    const stdx_test = b.addSystemCommand(&.{ "bazelisk", "run", "//stdx:test" });
+    const stdx_test = b.addSystemCommand(&.{ "bazelisk", "test", "//stdx/..." });
     test_.dependOn(&stdx_test.step);
 
-    const zml_test = b.addSystemCommand(&.{ "bazelisk", "run", "//zml:test" });
+    const mlir_test = b.addSystemCommand(&.{ "bazelisk", "test", "//mlir/..." });
+    test_.dependOn(&mlir_test.step);
+
+    const kernel_test = b.addSystemCommand(&.{ "bazelisk", "test", "//kernels/..." });
+    test_.dependOn(&kernel_test.step);
+
+    const pjrt_test = b.addSystemCommand(&.{
+        "bazelisk",
+        "test",
+        "//pjrt/...",
+    });
+    test_.dependOn(&pjrt_test.step);
+
+    const zml_test = b.addSystemCommand(&.{ "bazelisk", "test", "//zml/..." });
     test_.dependOn(&zml_test.step);
 }
