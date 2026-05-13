@@ -89,6 +89,7 @@ pub const Uri_handler = struct {
     acellm: []const u8,
     aceemb: []const u8,
     acedit: []const u8,
+    is_xl: bool,
     acevae: []const u8,
     silence: []const u8 = "file://acestep//models//acestep-v15-turbo",
 
@@ -100,6 +101,7 @@ pub const Uri_handler = struct {
             .aceemb = "file://acestep//models//Qwen3-Embedding-0.6B",
             .acedit = if (args.dit_size == 0) "file://acestep//models//acestep-v15-turbo"
                                                      else "file://acestep//models//acestep-v15-xl-turbo",
+            .is_xl = args.dit_size == 1,
             .acevae = "file://acestep//models//Oobleck-vae",
         };
     }
@@ -114,6 +116,7 @@ pub const Uri_handler = struct {
             .aceemb = "hf://ACE-Step/Ace-Step1.5/Qwen3-Embedding-0.6B",
             .acedit = if (args.dit_size == 0) "hf://ACE-Step/Ace-Step1.5/acestep-v15-turbo"
                                                      else "hf://ACE-Step/acestep-v15-turbo-xl",
+            .is_xl = args.dit_size == 1,
             .acevae = "hf://ACE-Step/Ace-Step1.5/vae/",
         };
     }
@@ -213,7 +216,6 @@ const Args = struct {
 // info:   wav                                                 1.39s
 // info: total                                                21.06s
 
-// TODO: terminer compilation par bloc parallèle (enc)
 // TODO: reference audio
 // TODO: reference timbre
 // TODO: brancher modèle xl

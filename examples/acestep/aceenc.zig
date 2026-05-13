@@ -5,6 +5,7 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 
 const main = @import("main.zig");
+const dit = @import("acedit.zig");
 
 const dialects = @import("mlir/dialects");
 
@@ -13,7 +14,7 @@ pub const AceEnc_handler = struct {
     model: AceEnc,
     silence: SilenceGenerator,
     params: Params,
-    config: Config,
+    config: dit.ConfigXl,
     exes: Exes,
     model_buffers: zml.Bufferized(AceEnc),
     silence_buffers: zml.Bufferized(SilenceGenerator),
@@ -33,9 +34,17 @@ pub const AceEnc_handler = struct {
         defer registry_s.deinit();
         
         std.log.info("ENC parse config and safetensors", .{});
-        const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo_m);
-        defer parsed_config.deinit();
-        const config = try parsed_config.value.dupe(zml_handler.allocator);
+        var config: dit.ConfigXl = undefined;
+        if (zml_handler.uris.is_xl) {
+            const parsed_config = try main.parseConfig(dit.ConfigXl, zml_handler.allocator, zml_handler.io, repo_m);
+            defer parsed_config.deinit();
+            config = try parsed_config.value.dupe(zml_handler.allocator);
+        } else {
+            const parsed_config = try main.parseConfig(dit.ConfigBase, zml_handler.allocator, zml_handler.io, repo_m);
+            defer parsed_config.deinit();
+            const xl_config = try dit.ConfigXl.fromBase(parsed_config.value);
+            config = try xl_config.dupe(zml_handler.allocator);
+        }
         std.log.info("ENC parsed", .{});        
 
         var store_m: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry_m);
@@ -202,95 +211,6 @@ pub const Params = struct {
     encoded_timbre: zml.Tensor,
 };
 
-pub const Config = struct {
-    attention_bias: bool,
-    attention_dropout: f32,
-    audio_acoustic_hidden_dim: u32,
-    data_proportion: f32,
-    dtype: []const u8,
-    fsq_dim: u32,
-    fsq_input_levels: []const u32,
-    fsq_input_num_quantizers: u32,
-    head_dim: u32,
-    hidden_act: []u8,
-    hidden_size: u32,
-    in_channels: u32,
-    initializer_range: f32,
-    intermediate_size: u32,
-    layer_types: []const LayerType,
-    max_position_embeddings: u32,
-    num_attention_heads: u32,
-    num_attention_pooler_hidden_layers: u32,
-    num_audio_decoder_hidden_layers: u32,
-    num_hidden_layers: u32,
-    num_key_value_heads: u32,
-    num_lyric_encoder_hidden_layers: u32,
-    num_timbre_encoder_hidden_layers: u32,
-    patch_size: u32,
-    pool_window_size: u32,
-    rms_norm_eps: f32,
-    rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
-    rope_theta: f32,
-    sliding_window: u32,
-    text_hidden_dim: u32,
-    timbre_fix_frame: u32,
-    timbre_hidden_dim: u32,
-    timestep_mu: f32,
-    timestep_sigma: f32,
-    use_cache: bool,
-    use_sliding_window: bool,
-    vocab_size: u32,
-
-    pub fn dupe(self: Config, allocator: std.mem.Allocator) !Config {
-        return .{
-            .attention_bias = self.attention_bias,
-            .attention_dropout = self.attention_dropout,
-            .audio_acoustic_hidden_dim = self.audio_acoustic_hidden_dim,
-            .data_proportion = self.data_proportion,
-            .dtype = try allocator.dupe(u8, self.dtype),
-            .fsq_dim = self.fsq_dim,
-            .fsq_input_levels = try allocator.dupe(u32, self.fsq_input_levels),
-            .fsq_input_num_quantizers = self.fsq_input_num_quantizers,
-            .head_dim = self.head_dim,
-            .hidden_act = try allocator.dupe(u8, self.hidden_act),
-            .hidden_size = self.hidden_size,
-            .in_channels = self.in_channels,
-            .initializer_range = self.initializer_range,
-            .intermediate_size = self.intermediate_size,
-            .layer_types = try allocator.dupe(LayerType, self.layer_types),
-            .max_position_embeddings = self.max_position_embeddings,
-            .num_attention_heads = self.num_attention_heads,
-            .num_attention_pooler_hidden_layers = self.num_attention_pooler_hidden_layers,
-            .num_audio_decoder_hidden_layers = self.num_audio_decoder_hidden_layers,
-            .num_hidden_layers = self.num_hidden_layers,
-            .num_key_value_heads = self.num_key_value_heads,
-            .num_lyric_encoder_hidden_layers = self.num_lyric_encoder_hidden_layers,
-            .num_timbre_encoder_hidden_layers = self.num_timbre_encoder_hidden_layers,
-            .patch_size = self.patch_size,
-            .pool_window_size = self.pool_window_size,
-            .rms_norm_eps = self.rms_norm_eps,
-            .rope_scaling = self.rope_scaling,
-            .rope_theta = self.rope_theta,
-            .sliding_window = self.sliding_window,
-            .text_hidden_dim = self.text_hidden_dim,
-            .timbre_fix_frame = self.timbre_fix_frame,
-            .timbre_hidden_dim = self.timbre_hidden_dim,
-            .timestep_mu = self.timestep_mu,
-            .timestep_sigma = self.timestep_sigma,
-            .use_cache = self.use_cache,
-            .use_sliding_window = self.use_sliding_window,
-            .vocab_size = self.vocab_size,
-        };
-    }
-
-    pub fn deinit(self: Config, allocator: std.mem.Allocator) void {
-        allocator.free(self.dtype);
-        allocator.free(self.fsq_input_levels);
-        allocator.free(self.hidden_act);
-        allocator.free(self.layer_types);
-    }
-};
-
 pub const LayerType = enum {
     full_attention,
     sliding_attention,
@@ -343,7 +263,7 @@ pub const SilenceGenerator = struct {
     time_timbre: u32,
     time_25hz: u32,
     
-    pub fn init(store: zml.io.TensorStore.View, config: Config, time_25hz: u32) SilenceGenerator {
+    pub fn init(store: zml.io.TensorStore.View, config: dit.ConfigXl, time_25hz: u32) SilenceGenerator {
         return .{
             .silence_latent = store.createTensor("silence_latent", .{ .batch, .audio, .time }, null),
             .time_timbre = config.timbre_fix_frame,
@@ -385,7 +305,7 @@ pub const AceEnc = struct {
     timbre_encoder: TimbreEncoder,
     audiocode_encoder: AudioCodeEncoder,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !AceEnc {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: dit.ConfigXl) !AceEnc {
         return .{
             .text_encoder = try .init(store.withPrefix("encoder")),
             .lyric_encoder = try .init(allocator, store.withPrefix("encoder"), config),
@@ -461,7 +381,7 @@ pub const LyricEncoder = struct {
     lyric_layers: []EncoderLayer,
     lyric_norm: RmsNorm,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !LyricEncoder {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: dit.ConfigXl) !LyricEncoder {
         const layers = try allocator.alloc(EncoderLayer, config.num_lyric_encoder_hidden_layers);
         errdefer allocator.free(layers);
         for (layers, 0..) |*layer, i| {
@@ -509,7 +429,7 @@ pub const EncoderLayer = struct {
     post_attention_layernorm: RmsNorm,
     mlp: MlpLayer,
 
-    pub fn init(id: u32, store: zml.io.TensorStore.View, config: Config) !EncoderLayer {
+    pub fn init(id: u32, store: zml.io.TensorStore.View, config: dit.ConfigXl) !EncoderLayer {
         return .{
             .id = id,
             .input_layernorm = .init(store.withPrefix("input_layernorm"), config.rms_norm_eps),
@@ -548,7 +468,7 @@ pub const SelfAttention = struct {
     head_dim: i64,
     rope_opts: zml.nn.RopeOpts = undefined,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) !SelfAttention {
+    pub fn init(store: zml.io.TensorStore.View, config: dit.ConfigXl) !SelfAttention {
         var rope_scaling = config.rope_scaling;
         rope_scaling.setRopeTheta(config.rope_theta);
         return .{
@@ -658,7 +578,7 @@ pub const TimbreEncoder = struct {
     special_tokens: zml.Tensor,
     sliding_window: u32,
     
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !TimbreEncoder {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: dit.ConfigXl) !TimbreEncoder {
         const layers = try allocator.alloc(EncoderLayer, config.num_timbre_encoder_hidden_layers);
         errdefer allocator.free(layers);
         for (layers, 0..) |*layer, i| {
@@ -721,7 +641,7 @@ pub const AudioCodeEncoder = struct {
     pool_window_size: u32,
     sliding_window: u32,
     
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !AudioCodeEncoder {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: dit.ConfigXl) !AudioCodeEncoder {
         const layers = try allocator.alloc(EncoderLayer, config.num_attention_pooler_hidden_layers);
         errdefer allocator.free(layers);
         for (layers, 0..) |*layer, i| {
@@ -806,7 +726,7 @@ pub const AudioCodeDequantizer = struct {
     project_out: zml.nn.Linear, // for dequantization
     fsq_input_levels: []const u32,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) AudioCodeDequantizer {
+    pub fn init(store: zml.io.TensorStore.View, config: dit.ConfigXl) AudioCodeDequantizer {
         return .{
             .project_in = .init(
                 store.createTensor("project_in.weight", .{ .d_out, .d }, null),

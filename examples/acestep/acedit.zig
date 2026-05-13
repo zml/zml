@@ -12,7 +12,7 @@ const dialects = @import("mlir/dialects");
 pub const AceDit_handler = struct {
     model: AceDit,
     params: Params,
-    config: Config,
+    config: ConfigXl,
     exes: Exes,
     model_buffers: zml.Bufferized(AceDit),
     shardings: main.Shardings,
@@ -24,9 +24,17 @@ pub const AceDit_handler = struct {
         defer registry.deinit();
             
         std.log.info("DiT parse config and safetensors", .{});
-        const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
-        defer parsed_config.deinit();
-        const config = try parsed_config.value.dupe(zml_handler.allocator);
+        var config: ConfigXl = undefined;
+        if (zml_handler.uris.is_xl) {
+            const parsed_config = try main.parseConfig(ConfigXl, zml_handler.allocator, zml_handler.io, repo);
+            defer parsed_config.deinit();
+            config = try parsed_config.value.dupe(zml_handler.allocator);
+        } else {
+            const parsed_config = try main.parseConfig(ConfigBase, zml_handler.allocator, zml_handler.io, repo);
+            defer parsed_config.deinit();
+            const xl_config = try ConfigXl.fromBase(parsed_config.value);
+            config = try xl_config.dupe(zml_handler.allocator);
+        }
         std.log.info("DiT parsed", .{});
 
         var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
@@ -163,7 +171,7 @@ pub const Params = struct {
     timestep_proj: zml.Tensor,
 };
 
-pub const Config = struct {
+pub const ConfigBase = struct {
     attention_bias: bool,
     attention_dropout: f32,
     audio_acoustic_hidden_dim: u32,
@@ -202,7 +210,7 @@ pub const Config = struct {
     use_sliding_window: bool,
     vocab_size: u32,
 
-    pub fn dupe(self: Config, allocator: std.mem.Allocator) !Config {
+    pub fn dupe(self: ConfigBase, allocator: std.mem.Allocator) !ConfigBase {
         return .{
             .attention_bias = self.attention_bias,
             .attention_dropout = self.attention_dropout,
@@ -244,7 +252,150 @@ pub const Config = struct {
         };
     }
 
-    pub fn deinit(self: Config, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: ConfigBase, allocator: std.mem.Allocator) void {
+        allocator.free(self.dtype);
+        allocator.free(self.fsq_input_levels);
+        allocator.free(self.hidden_act);
+        allocator.free(self.layer_types);
+    }
+};
+
+pub const ConfigXl = struct {
+    attention_bias: bool,
+    attention_dropout: f32,
+    audio_acoustic_hidden_dim: u32,
+    data_proportion: f32,
+    dtype: []const u8,
+    encoder_hidden_size: u32,
+    encoder_intermediate_size: u32,
+    encoder_num_attention_heads: u32,
+    encoder_num_key_value_heads: u32,
+    fsq_dim: u32,
+    fsq_input_levels: []const u32,
+    fsq_input_num_quantizers: u32,
+    head_dim: u32,
+    hidden_act: []u8,
+    hidden_size: u32,
+    in_channels: u32,
+    initializer_range: f32,
+    intermediate_size: u32,
+    layer_types: []const DecoderLayerType,
+    max_position_embeddings: u32,
+    num_attention_heads: u32,
+    num_attention_pooler_hidden_layers: u32,
+    num_audio_decoder_hidden_layers: u32,
+    num_hidden_layers: u32,
+    num_key_value_heads: u32,
+    num_lyric_encoder_hidden_layers: u32,
+    num_timbre_encoder_hidden_layers: u32,
+    patch_size: u32,
+    pool_window_size: u32,
+    rms_norm_eps: f32,
+    rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
+    rope_theta: f32,
+    sliding_window: u32,
+    text_hidden_dim: u32,
+    timbre_fix_frame: u32,
+    timbre_hidden_dim: u32,
+    timestep_mu: f32,
+    timestep_sigma: f32,
+    use_cache: bool,
+    use_sliding_window: bool,
+    vocab_size: u32,
+
+    pub fn fromBase(base: ConfigBase) !ConfigXl {
+        return .{
+            .attention_bias = base.attention_bias,
+            .attention_dropout = base.attention_dropout,
+            .audio_acoustic_hidden_dim = base.audio_acoustic_hidden_dim,
+            .data_proportion = base.data_proportion,
+            .dtype = base.dtype,
+            .encoder_hidden_size = base.hidden_size,
+            .encoder_intermediate_size = base.intermediate_size,
+            .encoder_num_attention_heads = base.num_attention_heads,
+            .encoder_num_key_value_heads = base.num_key_value_heads,
+            .fsq_dim = base.fsq_dim,
+            .fsq_input_levels = base.fsq_input_levels,
+            .fsq_input_num_quantizers = base.fsq_input_num_quantizers,
+            .head_dim = base.head_dim,
+            .hidden_act = base.hidden_act,
+            .hidden_size = base.hidden_size,
+            .in_channels = base.in_channels,
+            .initializer_range = base.initializer_range,
+            .intermediate_size = base.intermediate_size,
+            .layer_types = base.layer_types,
+            .max_position_embeddings = base.max_position_embeddings,
+            .num_attention_heads = base.num_attention_heads,
+            .num_attention_pooler_hidden_layers = base.num_attention_pooler_hidden_layers,
+            .num_audio_decoder_hidden_layers = base.num_audio_decoder_hidden_layers,
+            .num_hidden_layers = base.num_hidden_layers,
+            .num_key_value_heads = base.num_key_value_heads,
+            .num_lyric_encoder_hidden_layers = base.num_lyric_encoder_hidden_layers,
+            .num_timbre_encoder_hidden_layers = base.num_timbre_encoder_hidden_layers,
+            .patch_size = base.patch_size,
+            .pool_window_size = base.pool_window_size,
+            .rms_norm_eps = base.rms_norm_eps,
+            .rope_scaling = base.rope_scaling,
+            .rope_theta = base.rope_theta,
+            .sliding_window = base.sliding_window,
+            .text_hidden_dim = base.text_hidden_dim,
+            .timbre_fix_frame = base.timbre_fix_frame,
+            .timbre_hidden_dim = base.timbre_hidden_dim,
+            .timestep_mu = base.timestep_mu,
+            .timestep_sigma = base.timestep_sigma,
+            .use_cache = base.use_cache,
+            .use_sliding_window = base.use_sliding_window,
+            .vocab_size = base.vocab_size,
+        };
+    }
+
+    pub fn dupe(self: ConfigXl, allocator: std.mem.Allocator) !ConfigXl {
+        return .{
+            .attention_bias = self.attention_bias,
+            .attention_dropout = self.attention_dropout,
+            .audio_acoustic_hidden_dim = self.audio_acoustic_hidden_dim,
+            .data_proportion = self.data_proportion,
+            .dtype = try allocator.dupe(u8, self.dtype),
+            .encoder_hidden_size = self.encoder_hidden_size,
+            .encoder_intermediate_size = self.encoder_intermediate_size,
+            .encoder_num_attention_heads = self.encoder_num_attention_heads,
+            .encoder_num_key_value_heads = self.encoder_num_key_value_heads,
+            .fsq_dim = self.fsq_dim,
+            .fsq_input_levels = try allocator.dupe(u32, self.fsq_input_levels),
+            .fsq_input_num_quantizers = self.fsq_input_num_quantizers,
+            .head_dim = self.head_dim,
+            .hidden_act = try allocator.dupe(u8, self.hidden_act),
+            .hidden_size = self.hidden_size,
+            .in_channels = self.in_channels,
+            .initializer_range = self.initializer_range,
+            .intermediate_size = self.intermediate_size,
+            .layer_types = try allocator.dupe(DecoderLayerType, self.layer_types),
+            .max_position_embeddings = self.max_position_embeddings,
+            .num_attention_heads = self.num_attention_heads,
+            .num_attention_pooler_hidden_layers = self.num_attention_pooler_hidden_layers,
+            .num_audio_decoder_hidden_layers = self.num_audio_decoder_hidden_layers,
+            .num_hidden_layers = self.num_hidden_layers,
+            .num_key_value_heads = self.num_key_value_heads,
+            .num_lyric_encoder_hidden_layers = self.num_lyric_encoder_hidden_layers,
+            .num_timbre_encoder_hidden_layers = self.num_timbre_encoder_hidden_layers,
+            .patch_size = self.patch_size,
+            .pool_window_size = self.pool_window_size,
+            .rms_norm_eps = self.rms_norm_eps,
+            .rope_scaling = self.rope_scaling,
+            .rope_theta = self.rope_theta,
+            .sliding_window = self.sliding_window,
+            .text_hidden_dim = self.text_hidden_dim,
+            .timbre_fix_frame = self.timbre_fix_frame,
+            .timbre_hidden_dim = self.timbre_hidden_dim,
+            .timestep_mu = self.timestep_mu,
+            .timestep_sigma = self.timestep_sigma,
+            .use_cache = self.use_cache,
+            .use_sliding_window = self.use_sliding_window,
+            .vocab_size = self.vocab_size,
+        };
+    }
+
+    pub fn deinit(self: ConfigXl, allocator: std.mem.Allocator) void {
         allocator.free(self.dtype);
         allocator.free(self.fsq_input_levels);
         allocator.free(self.hidden_act);
@@ -293,9 +444,9 @@ pub const AceDit = struct {
     layers: []DiTLayer,
     norm_out: RmsNorm,
     scale_shift_table: zml.Tensor,
-    config: Config,
+    config: ConfigXl,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !AceDit {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: ConfigXl) !AceDit {
         const layers = try allocator.alloc(DiTLayer, config.num_hidden_layers);
         errdefer allocator.free(layers);
 
@@ -523,9 +674,9 @@ pub const TimestepEmbedding = struct {
     time_proj_bias: zml.Tensor,
     linear_1: zml.nn.Linear,
     linear_2: zml.nn.Linear,
-    config: Config,
+    config: ConfigXl,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) TimestepEmbedding {
+    pub fn init(store: zml.io.TensorStore.View, config: ConfigXl) TimestepEmbedding {
         return .{
             .time_proj_weight = store.createTensor("time_proj.weight", .{ .d_emb_6, .d_emb }, null),
             .time_proj_bias = store.createTensor("time_proj.bias", .{ .d_emb_6 }, null),
@@ -590,7 +741,7 @@ pub const DiTLayer = struct {
     mlp: MlpLayer,
     scale_shift_table: zml.Tensor,
 
-    pub fn init(id: u32, store: zml.io.TensorStore.View, config: Config) !DiTLayer {
+    pub fn init(id: u32, store: zml.io.TensorStore.View, config: ConfigXl) !DiTLayer {
         return .{
             .id = id,
             .self_attn_norm = .init(store.withPrefix("self_attn_norm"), config.rms_norm_eps),
@@ -673,7 +824,7 @@ pub const SelfAttention = struct {
     num_kv_heads: i64,
     rope_opts: zml.nn.RopeOpts = undefined,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) !SelfAttention {
+    pub fn init(store: zml.io.TensorStore.View, config: ConfigXl) !SelfAttention {
         var rope_scaling = config.rope_scaling;
         rope_scaling.setRopeTheta(config.rope_theta);
         return .{
@@ -739,7 +890,7 @@ pub const CrossAttention = struct {
     head_dim: u32,
     rope_opts: zml.nn.RopeOpts = undefined,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) !CrossAttention {
+    pub fn init(store: zml.io.TensorStore.View, config: ConfigXl) !CrossAttention {
         var rope_scaling = config.rope_scaling;
         rope_scaling.setRopeTheta(config.rope_theta);
         return .{
@@ -796,9 +947,9 @@ pub const CrossAttention = struct {
 pub const PatchIn = struct {
     weight: zml.Tensor,
     bias: zml.Tensor,
-    config: Config,
+    config: ConfigXl,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) PatchIn {
+    pub fn init(store: zml.io.TensorStore.View, config: ConfigXl) PatchIn {
         return .{
             .weight = store.createTensor("1.weight", .{ .d, .c_in, .patch }, null),
             .bias = store.createTensor("1.bias", .{ .d }, null),
@@ -826,9 +977,9 @@ pub const PatchIn = struct {
 pub const PatchOut = struct {
     weight: zml.Tensor,
     bias: zml.Tensor,
-    config: Config,
+    config: ConfigXl,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) PatchOut {
+    pub fn init(store: zml.io.TensorStore.View, config: ConfigXl) PatchOut {
         return .{
             .weight = store.createTensor("1.weight", .{ .d_in, .c_out, .patch }, null),
             .bias = store.createTensor("1.bias", .{ .d }, null),
