@@ -212,6 +212,19 @@ pub const Tensor = struct {
         return res;
     }
 
+    pub fn onMemory(self: Tensor, kind: Memory.Kind) Tensor {
+        const ctx = CompilationContext.current();
+        if (ctx.platform.target == .cpu) return self;
+
+        if (ctx.currentScope().id_to_argument.get(self.id) == null) {
+            return self;
+        }
+
+        ctx.currentScope().id_to_input_memory_kind.put(ctx.currentScope().arena.allocator(), self.id, kind) catch unreachable;
+
+        return self;
+    }
+
     /// Returns a Tensor with new tag names.
     pub fn rename(self: Tensor, renames: anytype) Tensor {
         var res = self;
@@ -4123,6 +4136,10 @@ pub const Tensor = struct {
     /// Returns the output memory kind of the tensor.
     pub fn outputMemoryKind(self: Tensor) Memory.Kind {
         return CompilationContext.current().currentScope().id_to_output_memory_kind.get(self.id) orelse .device;
+    }
+
+    pub fn inputMemoryKind(self: Tensor) ?Memory.Kind {
+        return CompilationContext.current().currentScope().id_to_input_memory_kind.get(self.id);
     }
 };
 
