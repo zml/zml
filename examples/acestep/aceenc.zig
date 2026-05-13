@@ -501,8 +501,8 @@ pub const LyricEncoder = struct {
     }
 
     pub fn forward(self: LyricEncoder, lyric_emb: zml.Tensor) zml.Tensor {
-        var lyric_proj = self.lyric_projector.forward(lyric_emb.withTags(.{ .s, .d }));
-        lyric_proj = lyric_proj.rename(.{ .d_out = .d });
+        var lyric_proj = self.lyric_projector.forward(lyric_emb.withTags(.{ .s_lyric, .d }));
+        lyric_proj = lyric_proj.rename(.{ .d_out = .d, .s_lyric = .s });
         for (self.lyric_layers) |layer| {
             // lyrics use full bidirectionnal attention : no masking
             lyric_proj = layer.forward(lyric_proj, null);
