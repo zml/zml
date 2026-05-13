@@ -1,36 +1,38 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 import torch
 import transformers
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
-import zml_utils
 import inspect
 import copy
 import json
 from huggingface_hub import hf_hub_download
 import transformers.modeling_rope_utils
+from safetensors.torch import save_file
 
 MODEL_PATH = "stepfun-ai/Step-3.5-Flash"
 PATCHED_DIR = "./patched_config"
 
-# fix typo (num_hidden_layers: 48 != 45), save locally
+# --- 1. PATCH CONFIG ---
 os.makedirs(PATCHED_DIR, exist_ok=True)
 clean_config_path = hf_hub_download(repo_id=MODEL_PATH, filename="config.json")
 with open(clean_config_path, "r") as f:
     cfg = json.load(f)
 
 if "layer_types" in cfg:
-    cfg["num_hidden_layers"] = len(cfg["layer_types"]) # Forces exactly 48
+    cfg["num_hidden_layers"] = len(cfg["layer_types"]) 
 
 with open(os.path.join(PATCHED_DIR, "config.json"), "w") as f:
     json.dump(cfg, f, indent=2)
 
+
+# --- 2. ROPE & INIT PATCHING (Fixes 'list' vs 'tensor' math error) ---
 original_compute = transformers.modeling_rope_utils._compute_llama3_parameters
 
 def patched_compute_llama3(config, device=None, seq_len=None, **rope_kwargs):
     temp_config = copy.copy(config)
     base_list = None
     
+    # 1. Find the base list hiding in the config or kwargs
     if hasattr(temp_config, "rope_theta") and isinstance(temp_config.rope_theta, list):
         base_list = temp_config.rope_theta
     if hasattr(temp_config, "rope_scaling") and isinstance(temp_config.rope_scaling, dict):
@@ -39,42 +41,43 @@ def patched_compute_llama3(config, device=None, seq_len=None, **rope_kwargs):
     if "base" in rope_kwargs and isinstance(rope_kwargs["base"], list):
         base_list = rope_kwargs["base"]
 
-    if base_list is not None:
-        selected_base = float(base_list[0])
-        for frame_info in inspect.stack():
-            locals_dict = frame_info.frame.f_locals
-            if 'layer_idx' in locals_dict and locals_dict['layer_idx'] is not None:
-                idx = locals_dict['layer_idx']
-                if idx < len(base_list):
-                    selected_base = float(base_list[idx])
-                break
+    # 2. Extract the float for this specific layer
+    selected_base = float(base_list[0]) if base_list else 10000.0
+    for frame_info in inspect.stack():
+        locals_dict = frame_info.frame.f_locals
+        if 'layer_idx' in locals_dict and locals_dict['layer_idx'] is not None:
+            idx = locals_dict['layer_idx']
+            if base_list and idx < len(base_list):
+                selected_base = float(base_list[idx])
+            break
                 
-        temp_config.rope_theta = selected_base
-        if "base" in rope_kwargs:
-            rope_kwargs["base"] = selected_base
-
-    if getattr(temp_config, "rope_scaling", None) is None:
-        temp_config.rope_scaling = {}
-    else:
+    # 3. Aggressively overwrite the list with the float everywhere
+    temp_config.rope_theta = selected_base
+    
+    if getattr(temp_config, "rope_scaling", None) is not None:
         temp_config.rope_scaling = temp_config.rope_scaling.copy()
+    else:
+        temp_config.rope_scaling = {}
         
-    if base_list is not None:
-        temp_config.rope_scaling["rope_theta"] = selected_base
-
+    temp_config.rope_scaling["rope_theta"] = selected_base
     temp_config.rope_scaling.setdefault("factor", 8.0)
     temp_config.rope_scaling.setdefault("low_freq_factor", 1.0)
     temp_config.rope_scaling.setdefault("high_freq_factor", 4.0)
     temp_config.rope_scaling.setdefault("original_max_position_embeddings", 8192)
-
+        
     temp_config.head_dim = 64
     temp_config.rotary_dim = 64
     if hasattr(temp_config, "num_attention_heads"):
         temp_config.hidden_size = temp_config.num_attention_heads * 64
-
+    
+    if "base" in rope_kwargs:
+        rope_kwargs["base"] = selected_base
     rope_kwargs.pop("dim", None)
 
+    # 4. Compute
     result = original_compute(temp_config, device=device, seq_len=seq_len, **rope_kwargs)
     
+    # 5. Fix shape if Step 3.5 requires specific sizing
     for frame_info in inspect.stack():
         if frame_info.function == '_init_weights':
             module = frame_info.frame.f_locals.get('module')
@@ -104,63 +107,68 @@ def patched_init_weights(self, module):
 
 transformers.modeling_utils.PreTrainedModel._init_weights = patched_init_weights
 
-# 1. Load the patched config
-config = AutoConfig.from_pretrained(PATCHED_DIR, trust_remote_code=True)
 
+# --- 3. LOAD MODEL & TOKENIZER ---
+print("Loading Model and Tokenizer...")
+config = AutoConfig.from_pretrained(PATCHED_DIR, trust_remote_code=True)
 config.use_cache = False
 
-# 2. Point the tokenizer to the PATCHED directory
-tokenizer = AutoTokenizer.from_pretrained(PATCHED_DIR, trust_remote_code=True, device_map="auto")
-
+tokenizer = AutoTokenizer.from_pretrained(PATCHED_DIR, trust_remote_code=True, fix_mistral_regex=True)
 if isinstance(tokenizer.eos_token_id, list):
     config.pad_token_id = tokenizer.eos_token_id[0]
 else:
     config.pad_token_id = tokenizer.eos_token_id
 
-# distribute memory evenly
-cluster_memory = {
-    0: "180GiB",
-    1: "180GiB",
-    2: "180GiB",
-    3: "180GiB",
-}
-
-# 3. Stream the heavy weights from the Hub
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_PATH,
     config=config, 
     trust_remote_code=True,
     torch_dtype=torch.bfloat16,
-    device_map="auto",
-    max_memory=cluster_memory,
+    device_map="auto"
 )
 
-message = "Hello"
 
-# device is from raw model before wrapping with zml_utils
-# This is because we lose attribute lookups in ActivationCollector (TODO?)
-device = model.device
+# --- 4. FULL GRAPH HOOKING LOGIC FOR ZML ---
+activations = {}
 
-# replace model with zml_utils tracked model
-# model.model.layers[0] = zml_utils.ActivationCollector(model.model.layers[0], max_layers=30, stop_after_first_step=True)
-inputs = tokenizer(message, return_tensors="pt").to(device)
+def get_activation(name):
+    def hook(module, hook_inputs, hook_output):
+        # Capture Inputs
+        for i, inp in enumerate(hook_inputs):
+            if isinstance(inp, torch.Tensor):
+                # ADDED .clone() to prevent shared memory errors in safetensors
+                activations[f"{name}.input_{i}"] = inp.detach().cpu().clone()
+        
+        # Capture Outputs
+        if isinstance(hook_output, torch.Tensor):
+            activations[f"{name}.output"] = hook_output.detach().cpu().clone()
+        elif isinstance(hook_output, tuple):
+            for i, out in enumerate(hook_output):
+                if isinstance(out, torch.Tensor):
+                    activations[f"{name}.output_{i}"] = out.detach().cpu().clone()
+    return hook
 
-# perform forward pass to collect activations
-outputs = model(**inputs, max_new_tokens=1)
+print("Registering hooks for full ZML reconstruction...")
+for name, module in model.named_modules():
+    # Capture every primitive operation (leaf nodes) + routing gates
+    if len(list(module.children())) == 0 or "router" in name.lower() or "gate" in name.lower():
+        module.register_forward_hook(get_activation(name))
+
+
+# --- 5. RUN INFERENCE ---
+message = "The capital of France is"
+inputs = tokenizer(message, return_tensors="pt").to(model.device)
+
+print(f"Running forward pass on {model.device}...")
+with torch.no_grad():
+    outputs = model(**inputs)
 
 next_token_logits = outputs.logits[:, -1, :]
 next_token_id = torch.argmax(next_token_logits, dim=-1)
-text_output = tokenizer.decode(next_token_id)
+print(f"Verified Prediction: '{tokenizer.decode(next_token_id)}'")
 
-output_text = tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
 
-print(f"first token: '{text_output}'")
-
-if outputs:
-    print(outputs)
-
-print(f"collected {len(activations)} activations from forward pass!")
-# print(activations.keys())
-
-# save_file(activations, "step3_5flash.activations.safetensors")
-# print("Saved to step3_5flash.activations.safetensors")
+# --- 6. SAVE DATA ---
+print(f"Captured {len(activations)} tensors. Saving to safetensors...")
+save_file(activations, "step3_5flash_full_zml.safetensors")
+print("Done! File saved as step3_5flash_full_zml.safetensors")
