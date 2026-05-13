@@ -47,15 +47,13 @@ pub const AceEnc_handler = struct {
         std.log.info("ENC encoder initialized", .{});
         const silence: SilenceGenerator = .init(store_s.view(), config, target_duration * 25);
         std.log.info("ENC silence initialized", .{});
-
-        std.log.info("lyric_emb has shape {d}x{d}", .{ lyric_len, config.text_hidden_dim });
         
         const params: Params = .{
             .text_emb = .init(.{ .s = text_len, .d = config.text_hidden_dim }, .bf16),
             .lyric_emb = .init(.{ .s = lyric_len, .d = config.text_hidden_dim }, .bf16),
             .timbre_latent = .init(.{ .a = config.timbre_hidden_dim, .t = config.timbre_fix_frame }, .bf16),
             .audio_codes = .init(.{ .s = audiocodes }, .u32),
-            .src_audio = .init(.{ .a = config.audio_acoustic_hidden_dim, .t = target_duration * 25 }, .bf16),
+            .src_audio = .init(.{ .t = target_duration * 25, .a = config.audio_acoustic_hidden_dim }, .bf16),
             .encoded_lyric = .init(.{ .s = lyric_len, .d = config.hidden_size }, .bf16),
             .encoded_timbre = .init(.{ .s = 1, .d = config.hidden_size }, .bf16),
         };
