@@ -866,6 +866,12 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
 
     std.log.info("lyric_emb_buffer has shape {d}x{d}", .{ lyric_emb_buffer.shape().dim(0), lyric_emb_buffer.shape().dim(1) });
 
+    // encode audiocodes
+    std.log.info("encode_audiocodes", .{});
+    aceenc.exes.encode_audiocodes_args.set(.{ aceenc.model_buffers, audio_codes_buffer });
+    aceenc.exes.encode_audiocodes_exe.call(aceenc.exes.encode_audiocodes_args, &aceenc.exes.encode_audiocodes_results);
+    aceenc.exes.encode_audiocodes_results.fill(.{ &src_audio_buffer });
+    
     // encode timbre
     std.log.info("encode_timbre", .{});
     aceenc.exes.encode_timbre_args.set(.{ aceenc.model_buffers, timbre_buffer });
@@ -878,11 +884,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     aceenc.exes.encode_lyric_exe.call(aceenc.exes.encode_lyric_args, &aceenc.exes.encode_lyric_results);
     aceenc.exes.encode_lyric_results.fill(.{ &encoded_lyric_buffer });
     
-    // encode audiocodes
-    std.log.info("encode_audiocodes", .{});
-    aceenc.exes.encode_audiocodes_args.set(.{ aceenc.model_buffers, audio_codes_buffer });
-    aceenc.exes.encode_audiocodes_exe.call(aceenc.exes.encode_audiocodes_args, &aceenc.exes.encode_audiocodes_results);
-    aceenc.exes.encode_audiocodes_results.fill(.{ &src_audio_buffer });
+    
     // encode
     std.log.info("encode", .{});
     aceenc.exes.encode_args.set(.{ aceenc.model_buffers, text_emb_buffer, encoded_lyric_buffer, encoded_timbre_buffer, src_audio_buffer });
