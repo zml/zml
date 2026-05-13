@@ -2,13 +2,13 @@
   "architectures": [
     "AceStepConditionGenerationModel"
   ],
-  "attention_bias": false,
-  "attention_dropout": 0.0,
-  "audio_acoustic_hidden_dim": 64,
   "auto_map": {
     "AutoConfig": "configuration_acestep_v15.AceStepConfig",
     "AutoModel": "modeling_acestep_v15_turbo.AceStepConditionGenerationModel"
   },
+  "attention_bias": false,
+  "attention_dropout": 0.0,
+  "audio_acoustic_hidden_dim": 64,
   "data_proportion": 0.5,
   "dtype": "bfloat16",
   "fsq_dim": 2048,

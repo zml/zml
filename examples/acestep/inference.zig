@@ -337,6 +337,9 @@ pub fn tokenizeGenerationPrompt(allocator: std.mem.Allocator, tokenizer: zml.tok
     try uncond_prompt.appendSlice(allocator, user_uncond_prompt.items);
     try uncond_prompt.appendSlice(allocator, assistant_uncond_prompt.items);
 
+    std.log.info("Cond prompt:\n{s}", .{ cond_prompt.items });
+    std.log.info("Uncond prompt:\n{s}", .{ uncond_prompt.items });
+
     var cond_tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
     var uncond_tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
 

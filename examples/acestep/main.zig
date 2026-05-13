@@ -212,6 +212,7 @@ const Args = struct {
 // TODO: terminer compilation par bloc parallèle (enc)
 // TODO: reference audio
 // TODO: reference timbre
+// TODO: brancher modèle xl
 
 // TODO: remove test/debug code
 // TODO: move model related code from inference to Exes struct inside models
@@ -238,6 +239,10 @@ pub fn main(init: std.process.Init) !void {
     defer zml_handler.deinit();
 
     try printZmlLogo(zml_handler.io);
+
+    //var aceenc = try aceenc_.AceEnc_handler.init(&zml_handler, 10,10,10,50);
+    //defer aceenc.deinit(zml_handler.allocator);
+    //aceenc.unloadBuffers(zml_handler.allocator);
 
     zml_handler.tic(&zml_handler.timers.total);
     try runFullPipeline(&zml_handler);
