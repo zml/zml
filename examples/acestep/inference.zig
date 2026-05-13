@@ -900,6 +900,7 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
 
     // populate x with gaussian noise seeded with id
     const x: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = audio_dim }, .bf16));
+    defer x.free(allocator);
     const seed: u64 = @intCast(id);
     var prng = std.Random.DefaultPrng.init(seed);
     const random = prng.random();
