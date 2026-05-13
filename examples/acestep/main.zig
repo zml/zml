@@ -204,21 +204,25 @@ const Args = struct {
     ;
 };
 
-// 4090 (70s audio)
-// bazel run --config=release acestep --//platforms:cuda=true -- --prompt='a chill piano melody' --llm-size=1 --instru --local-files --duration=70
+// 4090
+// --prompt='a peak-time dark techno track'
+// --llm-size=2 --dit-size=1
+// --duration=180 --n=3
+// bazel run --config=release acestep --//platforms:cuda=true -- --instru --local-files 
 // info: Module    init  compile     load  prefill   decode    total
-// info:   llm    0.26s    1.82s    0.75s    0.06s    0.96s    3.84s
-// info:   cfg    0.00s    0.80s    0.00s    0.05s    4.26s    5.11s
-// info:   emb    0.00s    1.25s    0.58s    0.00s    0.00s    2.02s
-// info:   enc    0.00s    2.70s    0.60s    0.01s    0.00s    3.31s
-// info:   dit    0.00s    1.93s    0.64s    0.20s    0.00s    2.78s
-// info:   vae    0.00s    1.44s    0.59s    0.52s    0.00s    2.55s
-// info:   wav                                                 1.39s
-// info: total                                                21.06s
+// info:   llm    0.27s    1.81s    0.88s    0.09s    2.05s    5.10s
+// info:   cfg    0.00s    0.79s    0.00s    0.13s   21.53s   22.45s
+// info:   emb    0.00s    1.26s    0.55s    0.00s    0.00s    2.03s
+// info:   enc    0.00s    2.74s    0.60s    0.01s    0.00s    3.35s
+// info:   dit    0.00s    2.07s    0.81s    4.44s    0.00s    7.36s
+// info:   vae    0.00s    1.40s    0.56s    3.97s    0.00s    5.96s
+// info:   wav                                                 9.86s
+// info: total                                                56.18s
 
+// TODO: accelerate wav export, have a look at cfg, microtune vae decode_t
 // TODO: reference audio
 // TODO: reference timbre
-// TODO: brancher modèle xl
+// TODO: param steps Karras schedule
 
 // TODO: move model related code from inference to Exes struct inside models
 
@@ -244,10 +248,6 @@ pub fn main(init: std.process.Init) !void {
     defer zml_handler.deinit();
 
     try printZmlLogo(zml_handler.io);
-
-    //var aceenc = try aceenc_.AceEnc_handler.init(&zml_handler, 10,10,10,50);
-    //defer aceenc.deinit(zml_handler.allocator);
-    //aceenc.unloadBuffers(zml_handler.allocator);
 
     zml_handler.tic(&zml_handler.timers.total);
     try runFullPipeline(&zml_handler);

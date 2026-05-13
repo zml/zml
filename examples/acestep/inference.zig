@@ -945,7 +945,16 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     defer result_buffer.deinit();
 
     // the full forward pass on the dit model is one iteration of the denoising
-    const timestamps: [9]f32 = .{ 1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3, 0.0 };
+    //const timestamps: [9]f32 = .{ 1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3, 0.0 };
+
+    const timestamps: [13]f32 = .{ 
+        1.0, 
+        0.97, 0.94, 0.91, // High-noise precision (Small steps)
+        0.87, 0.82, 0.76, // Transition
+        0.68, 0.58, 0.48, // Acceleration
+        0.38, 0.25, 0.0        // Final Leap (Going slightly deeper than 0.3)
+    };
+    
     const steps = timestamps.len - 1;
     zml_handler.tic(&zml_handler.timers.dit.prefill);
     for (0..steps) |i| {
