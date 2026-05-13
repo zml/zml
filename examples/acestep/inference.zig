@@ -878,7 +878,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     aceenc.exes.encode_timbre_results.fill(.{ &encoded_timbre_buffer });
     // encode audiocodes
     std.log.info("encode_audiocodes", .{});
-    aceenc.exes.encode_audiocodes_args.set(.{ aceenc.model_buffers.audiocodes_encoder, audio_codes_buffer });
+    aceenc.exes.encode_audiocodes_args.set(.{ aceenc.model_buffers.audiocode_encoder, audio_codes_buffer });
     aceenc.exes.encode_audiocodes_exe.call(aceenc.exes.encode_audiocodes_args, &aceenc.exes.encode_audiocodes_results);
     aceenc.exes.encode_audiocodes_results.fill(.{ &src_audio_buffer });
     
