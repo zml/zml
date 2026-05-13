@@ -8,15 +8,13 @@ const main = @import("main.zig");
 
 const dialects = @import("mlir/dialects");
 
-// TODO: clean the audiocodes vs silent source in cover/text2music mode
 
 pub const AceEnc_handler = struct {
     model: AceEnc,
     silence: SilenceGenerator,
     params: Params,
     config: Config,
-    encode_exe: zml.Exe,
-    silence_exe: zml.Exe,
+    exes: Exes,
     model_buffers: zml.Bufferized(AceEnc),
     silence_buffers: zml.Bufferized(SilenceGenerator),
     shardings: main.Shardings,
@@ -29,7 +27,7 @@ pub const AceEnc_handler = struct {
         var registry_m: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo_m);
         defer registry_m.deinit();
 
-        //try main.printSafetensors(registry_m);
+        try main.printSafetensors(registry_m);
         
         var registry_s: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.io, repo_s, "silence_latent.safetensors");
         defer registry_s.deinit();
@@ -56,6 +54,8 @@ pub const AceEnc_handler = struct {
             .timbre_latent = .init(.{ .a = config.timbre_hidden_dim, .t = config.timbre_fix_frame }, .bf16),
             .audio_codes = .init(.{ .s = audiocodes }, .u32),
             .src_audio = .init(.{ .a = config.audio_acoustic_hidden_dim, .t = target_duration * 25 }, .bf16),
+            .encoded_lyric = .init(.{ .s = lyric_len, .d = config.hidden_size }, .bf16),
+            .encoded_timbre = .init(.{ .s = 1, .d = config.hidden_size }, .bf16),
         };
         
         const shardings: main.Shardings = try .init(zml_handler.platform);
@@ -64,10 +64,8 @@ pub const AceEnc_handler = struct {
         zml_handler.tic(&zml_handler.timers.enc.compile);
         
         std.log.info("ENC compile models", .{});
-        const encode_exe = try compileModel(zml_handler, model, params, shardings);
-        std.log.info("ENC compiled encoder", .{});
-        const silence_exe = try compileSilence(zml_handler, silence, shardings);
-        std.log.info("ENC compiled silence", .{});
+        const exes = try compileModel(zml_handler, model, silence, params, shardings);
+        std.log.info("ENC compiled", .{});
 
         zml_handler.toc(&zml_handler.timers.enc.compile);
         zml_handler.tic(&zml_handler.timers.enc.load);
@@ -85,44 +83,96 @@ pub const AceEnc_handler = struct {
             .silence = silence,
             .params = params,
             .config = config,
-            .encode_exe = encode_exe,
-            .silence_exe = silence_exe,
+            .exes = exes,
             .model_buffers = model_buffers,
             .silence_buffers = silence_buffers,
             .shardings = shardings,
         };
     }
-    
-    pub fn compileModel(zml_handler: *main.Zml_handler, model: AceEnc, params: Params, shardings: main.Shardings) !zml.Exe {
-        const shardings_arr = shardings.all();
-        const opts: zml.module.CompilationOptions = .{
-            .shardings = &shardings_arr,
-        };
-        return zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .forward,
-            .{ params.text_emb, params.lyric_emb, params.timbre_latent, params.audio_codes, params.src_audio },
-            opts,
-        );
-    }
-    
-    pub fn compileSilence(zml_handler: *main.Zml_handler, model: SilenceGenerator, shardings: main.Shardings) !zml.Exe {
-        const shardings_arr = shardings.all();
-        const opts: zml.module.CompilationOptions = .{
-            .shardings = &shardings_arr,
-        };
-        return zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .forward,
-            .{ },
-            opts,
-        );
-    }
 
+    pub fn compileModel(zml_handler: *main.Zml_handler, model: AceEnc, silence: SilenceGenerator, params: Params, shardings: main.Shardings) !Exes {
+        const shardings_arr = shardings.all();
+        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
+        std.log.info("EMB compile models", .{});
+
+        var encode_lyric_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: LyricEncoder, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
+                        params_.lyric_emb }, opts_);
+            }
+        }.call, .{ zml_handler, model.lyric_encoder, params, opts });
+        var encode_lyric_future_awaited = false;
+        errdefer if (!encode_lyric_future_awaited) if (encode_lyric_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        var encode_timbre_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: TimbreEncoder, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
+                        params_.timbre_latent }, opts_);
+            }
+        }.call, .{ zml_handler, model.timbre_encoder, params, opts });
+        var encode_timbre_future_awaited = false;
+        errdefer if (!encode_timbre_future_awaited) if (encode_timbre_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        var encode_audiocodes_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AudioCodeEncoder, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
+                        params_.audio_codes }, opts_);
+            }
+        }.call, .{ zml_handler, model.audiocode_encoder, params, opts });
+        var encode_audiocodes_future_awaited = false;
+        errdefer if (!encode_audiocodes_future_awaited) if (encode_audiocodes_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+        
+        var encode_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceEnc, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward,
+                    .{ params_.text_emb, params_.encoded_lyric, params_.encoded_timbre, params_.src_audio }, opts_);
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var encode_future_awaited = false;
+        errdefer if (!encode_future_awaited) if (encode_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+        
+        var silence_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: SilenceGenerator, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{ }, opts_);
+            }
+        }.call, .{ zml_handler, silence, opts });
+        var silence_future_awaited = false;
+        errdefer if (!silence_future_awaited) if (silence_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+        
+        const encode_lyric_exe = try encode_lyric_future.await(zml_handler.io);
+        encode_lyric_future_awaited = true;
+        
+        const encode_timbre_exe = try encode_timbre_future.await(zml_handler.io);
+        encode_timbre_future_awaited = true;
+        
+        const encode_audiocodes_exe = try encode_audiocodes_future.await(zml_handler.io);
+        encode_audiocodes_future_awaited = true;
+
+        const encode_exe = try encode_future.await(zml_handler.io);
+        encode_future_awaited = true;
+        
+        const silence_exe = try silence_future.await(zml_handler.io);
+        silence_future_awaited = true;
+
+        return .{
+            .encode_lyric_exe = encode_lyric_exe,
+            .encode_lyric_args = try encode_lyric_exe.args(zml_handler.allocator),
+            .encode_lyric_results = try encode_lyric_exe.results(zml_handler.allocator),
+            .encode_timbre_exe = encode_timbre_exe,
+            .encode_timbre_args = try encode_timbre_exe.args(zml_handler.allocator),
+            .encode_timbre_results = try encode_timbre_exe.results(zml_handler.allocator),
+            .encode_audiocodes_exe = encode_audiocodes_exe,
+            .encode_audiocodes_args = try encode_audiocodes_exe.args(zml_handler.allocator),
+            .encode_audiocodes_results = try encode_audiocodes_exe.results(zml_handler.allocator),
+            .encode_exe = encode_exe,
+            .encode_args = try encode_exe.args(zml_handler.allocator),
+            .encode_results = try encode_exe.results(zml_handler.allocator),
+            .silence_exe = silence_exe,
+            .silence_args = try silence_exe.args(zml_handler.allocator),
+            .silence_results = try silence_exe.results(zml_handler.allocator),
+        };
+    }
+    
     pub fn unloadBuffers(self: *AceEnc_handler, allocator: std.mem.Allocator) void {
         AceEnc.unloadBuffers(&self.model_buffers, allocator);
         SilenceGenerator.unloadBuffers(&self.silence_buffers);
@@ -131,8 +181,7 @@ pub const AceEnc_handler = struct {
     pub fn deinit(self: *AceEnc_handler, allocator: std.mem.Allocator) void {
         self.model.deinit(allocator);
         self.config.deinit(allocator);
-        self.encode_exe.deinit();
-        self.silence_exe.deinit();
+        self.exes.deinit(allocator);
     }
     
 };
@@ -149,6 +198,9 @@ pub const Params = struct {
     audio_codes: zml.Tensor,
     // source audio, expected shape: [t_25hz, d_audio]
     src_audio: zml.Tensor,
+
+    encoded_lyric: zml.Tensor,
+    encoded_timbre: zml.Tensor,
 };
 
 pub const Config = struct {
@@ -245,6 +297,46 @@ pub const LayerType = enum {
     sliding_attention,
 };
 
+pub const Exes = struct {
+    encode_lyric_exe: zml.Exe,
+    encode_lyric_args: zml.Exe.Arguments,
+    encode_lyric_results: zml.Exe.Results,
+
+    encode_timbre_exe: zml.Exe,
+    encode_timbre_args: zml.Exe.Arguments,
+    encode_timbre_results: zml.Exe.Results,
+
+    encode_audiocodes_exe: zml.Exe,
+    encode_audiocodes_args: zml.Exe.Arguments,
+    encode_audiocodes_results: zml.Exe.Results,
+
+    encode_exe: zml.Exe,
+    encode_args: zml.Exe.Arguments,
+    encode_results: zml.Exe.Results,
+
+    silence_exe: zml.Exe,
+    silence_args: zml.Exe.Arguments,
+    silence_results: zml.Exe.Results,
+
+    pub fn deinit(self: Exes, allocator: std.mem.Allocator) void {
+        self.encode_lyric_exe.deinit();
+        self.encode_lyric_args.deinit(allocator);
+        self.encode_lyric_results.deinit(allocator);
+        self.encode_timbre_exe.deinit();
+        self.encode_timbre_args.deinit(allocator);
+        self.encode_timbre_results.deinit(allocator);
+        self.encode_audiocodes_exe.deinit();
+        self.encode_audiocodes_args.deinit(allocator);
+        self.encode_audiocodes_results.deinit(allocator);
+        self.encode_exe.deinit();
+        self.encode_args.deinit(allocator);
+        self.encode_results.deinit(allocator);
+        self.silence_exe.deinit();
+        self.silence_args.deinit(allocator);
+        self.silence_results.deinit(allocator);
+    }
+};
+
 
 pub const SilenceGenerator = struct {
     // dim = [1, 64, 15000] = [.b, .a, .t_25hz] where 15000 in 25hz is 600s the max audio output length
@@ -328,30 +420,22 @@ pub const AceEnc = struct {
          AudioCodeEncoder.unloadBuffers(&self.audiocode_encoder, allocator);
     }
 
-    pub fn forward(self: AceEnc, text_emb: zml.Tensor, lyric_emb: zml.Tensor, timbre_latent: zml.Tensor, audio_codes: zml.Tensor, src_latent: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
+    pub fn forward(self: AceEnc, text_emb: zml.Tensor, encoded_lyric: zml.Tensor, encoded_timbre: zml.Tensor, src_latent: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
         // dim [s_text, d_emb_cond]
         const encoded_text = self.text_encoder.forward(text_emb);
-        // dim [s_lyric, d_emb_cond]
-        const encoded_lyric = self.lyric_encoder.forward(lyric_emb);
-        // dim [1, d_emb_cond]
-        const encoded_timbre = self.timbre_encoder.forward(timbre_latent);
         
         // dim [s_text + s_lyric + 1, d_emb_cond]
         const encoded_conditions = zml.Tensor.concatenate(&.{ encoded_lyric, encoded_timbre, encoded_text }, .s);
         
         // dim [a, t_25hz]
-        const latent_source = self.audiocode_encoder.forward(audio_codes);
-        _ = src_latent;
-        //const latent_source = if (audio_codes) |codes| self.audiocode_encoder.forward(codes) else src_latent;
-        // dim [a, t_25hz]
-        const latent_mask = zml.Tensor.constant(zml.DataType.constant(.bf16, 1)).broad(latent_source.shape());
+        const latent_mask = zml.Tensor.constant(zml.DataType.constant(.bf16, 1)).broad(src_latent.shape());
         
         // dim [t_25hz, 2 * a]
-        const context_latents = zml.Tensor.concatenate(&.{ latent_source, latent_mask }, .a).transpose(.{ .t, .a });
+        const context_latents = zml.Tensor.concatenate(&.{ src_latent, latent_mask }, .a).transpose(.{ .t, .a });
         
         // x is initialized with random gaussian noise
-        const d_time = latent_source.dim(.t);
-        const d_audio = latent_source.dim(.a);
+        const d_time = src_latent.dim(.t);
+        const d_audio = src_latent.dim(.a);
         const x_shape = zml.Shape.init(.{ .t = d_time, .a = d_audio}, .bf16);
         const x = zml.Tensor.Rng.normal(x_shape, .{}); // TODO: we can't seed the normal distribution ?
         

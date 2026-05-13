@@ -818,19 +818,12 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     var timbre_buffer: zml.Buffer = try .fromSlice(io, platform, timbre_slice, sharding);
     defer timbre_buffer.deinit();
 
-    const src_audio_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_25hz }, .bf16));
-    defer src_audio_slice.free(allocator);
-    var src_audio_buffer: zml.Buffer = try .fromSlice(io, platform, src_audio_slice, sharding);
-    defer src_audio_buffer.deinit();
+    var silence_audio_buffer: zml.Buffer = undefined;
+    defer silence_audio_buffer.deinit();
 
-    var silence_args = try aceenc.silence_exe.args(allocator);
-    defer silence_args.deinit(allocator);
-    var silence_results = try aceenc.silence_exe.results(allocator);
-    defer silence_results.deinit(allocator);
-
-    silence_args.set(.{ aceenc.silence_buffers });
-    aceenc.silence_exe.call(silence_args, &silence_results);
-    silence_results.fill(.{ &timbre_buffer, &src_audio_buffer });
+    aceenc.exes.silence_args.set(.{ aceenc.silence_buffers });
+    aceenc.exes.silence_exe.call(aceenc.exes.silence_args, &aceenc.exes.silence_results);
+    aceenc.exes.silence_results.fill(.{ &timbre_buffer, &silence_audio_buffer });
 
     std.log.info("ENC call encoder cap={d}x{d} lyr={d}x{d} tim={d}x{d} audioc={d} src={d}x{d}", .{
         caption_len, emb_dim,
@@ -862,16 +855,32 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     var audio_codes_buffer: zml.Buffer = try .fromSlice(io, platform, audio_codes_slice, sharding);
     defer audio_codes_buffer.deinit();
 
+    var encoded_lyric_buffer: zml.Buffer = undefined;
+    defer encoded_lyric_buffer.deinit();
+    var encoded_timbre_buffer: zml.Buffer = undefined;
+    defer encoded_timbre_buffer.deinit();
+    var src_audio_buffer: zml.Buffer = undefined;
+    defer src_audio_buffer.deinit();
+    
     zml_handler.tic(&zml_handler.timers.enc.prefill);
 
-    var encode_args = try aceenc.encode_exe.args(allocator);
-    defer encode_args.deinit(allocator);
-    var encode_results = try aceenc.encode_exe.results(allocator);
-    defer encode_results.deinit(allocator);
-
-    encode_args.set(.{ aceenc.model_buffers, text_emb_buffer, lyric_emb_buffer, timbre_buffer, audio_codes_buffer, src_audio_buffer });
-    aceenc.encode_exe.call(encode_args, &encode_results);
-    encode_results.fill(.{ &x_buffer, &context_latents_buffer, &encoded_conditions_buffer });
+    // encode lyrics
+    aceenc.exes.encode_lyric_args.set(.{ aceenc.model_buffers, lyric_emb_buffer });
+    aceenc.exes.encode_lyric_exe.call(aceenc.exes.encode_lyric_args, &aceenc.exes.encode_lyric_results);
+    aceenc.exes.encode_lyric_results.fill(.{ &encoded_lyric_buffer });
+    // encode timbre
+    aceenc.exes.encode_timbre_args.set(.{ aceenc.model_buffers, timbre_buffer });
+    aceenc.exes.encode_timbre_exe.call(aceenc.exes.encode_timbre_args, &aceenc.exes.encode_timbre_results);
+    aceenc.exes.encode_timbre_results.fill(.{ &encoded_timbre_buffer });
+    // encode audiocodes
+    aceenc.exes.encode_audiocodes_args.set(.{ aceenc.model_buffers, audio_codes_buffer });
+    aceenc.exes.encode_audiocodes_exe.call(aceenc.exes.encode_audiocodes_args, &aceenc.exes.encode_audiocodes_results);
+    aceenc.exes.encode_audiocodes_results.fill(.{ &src_audio_buffer });
+    
+    aceenc.exes.encode_args.set(.{ aceenc.model_buffers, text_emb_buffer, encoded_lyric_buffer, encoded_timbre_buffer, src_audio_buffer });
+    aceenc.exes.encode_exe.call(aceenc.exes.encode_args, &aceenc.exes.encode_results);
+    aceenc.exes.encode_results.fill(.{ &x_buffer, &context_latents_buffer, &encoded_conditions_buffer });
+    
     std.log.info("ENC done encoding, output shape : context={d}x{d} conditions={d}x{d}", .{ 2 * audio_dim, t_25hz, s_enc, emb_dim });
 
     try x_buffer.toSlice(io, x_slice);
