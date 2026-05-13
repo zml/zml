@@ -870,6 +870,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     std.log.info("encode_lyric", .{});
     aceenc.exes.encode_lyric_args.set(.{ aceenc.model_buffers, lyric_emb_buffer });
     aceenc.exes.encode_lyric_exe.call(aceenc.exes.encode_lyric_args, &aceenc.exes.encode_lyric_results);
+    std.log.info("encoded_lyric", .{});
     aceenc.exes.encode_lyric_results.fill(.{ &encoded_lyric_buffer });
     // encode timbre
     std.log.info("encode_timbre", .{});
