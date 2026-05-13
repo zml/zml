@@ -219,10 +219,10 @@ const Args = struct {
 // info:   wav                                                 9.86s
 // info: total                                                56.18s
 
+// TODO: why does it goes oom during diffusion ??
 // TODO: accelerate wav export, have a look at cfg, microtune vae decode_t
 // TODO: reference audio
 // TODO: reference timbre
-// TODO: param steps Karras schedule
 
 // TODO: move model related code from inference to Exes struct inside models
 
