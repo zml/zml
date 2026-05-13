@@ -167,7 +167,6 @@ pub fn main(init: std.process.Init) !void {
     for (draft_token_exes, 0..) |*draft_exe, i| {
         const context_len: u32 = @intCast(i + 1);
         draft_exe.* = .{
-            .context_len = context_len,
             .exe = try platform.compileFn(
                 allocator,
                 io,
@@ -290,14 +289,14 @@ pub fn main(init: std.process.Init) !void {
     try printTokens(allocator, &tokenizer, &stdout.interface, "target_next", target_token_slice.constItems(u32));
 
     var start: u32 = block_size;
-    var draft_cache_len: u32 = 0;
-    var target_hidden_increment_buffer = target_hidden_buffer;
-    var owns_target_hidden_increment_buffer = false;
+    var draft_cache_base: u32 = 0;
+    var target_hidden_block_buffer = target_hidden_buffer;
+    var owns_target_hidden_block_buffer = false;
     var step: usize = 0;
     const decode_started_at: std.Io.Timestamp = .now(io, .awake);
     while (start < max_seq_len) : (step += 1) {
         const step_started_at: std.Io.Timestamp = .now(io, .awake);
-        const context_len = start - draft_cache_len;
+        const context_len = start - draft_cache_base;
         stdx.debug.assert(context_len >= 1 and context_len <= block_size, "invalid DFlash context length {}", .{context_len});
         const selected_draft_exe = &draft_token_exes[@as(usize, @intCast(context_len - 1))];
 
@@ -312,7 +311,7 @@ pub fn main(init: std.process.Init) !void {
         );
         defer block_tokens_buffer.deinit();
 
-        var draft_cache_index = draft_cache_len;
+        var draft_cache_index = draft_cache_base;
         var draft_cache_index_buffer: zml.Buffer = try .fromSlice(
             io,
             platform,
@@ -328,7 +327,7 @@ pub fn main(init: std.process.Init) !void {
         draft_args.set(.{
             model_buffers,
             target_buffers,
-            target_hidden_increment_buffer,
+            target_hidden_block_buffer,
             block_tokens_buffer,
             draft_kv_cache_buffers,
             draft_cache_index_buffer,
@@ -341,7 +340,7 @@ pub fn main(init: std.process.Init) !void {
         });
         defer draft_token_buffer.deinit();
         replaceDraftKvCacheBuffers(&draft_kv_cache_buffers, &updated_draft_kv_cache_buffers);
-        draft_cache_len = start;
+        draft_cache_base = start;
 
         var draft_token_slice = try draft_token_buffer.toSliceAlloc(allocator, io);
         defer draft_token_slice.free(allocator);
@@ -406,9 +405,11 @@ pub fn main(init: std.process.Init) !void {
             try setGeneratedToken(&generated, allocator, start, correction_token);
         }
 
-        if (owns_target_hidden_increment_buffer) target_hidden_increment_buffer.deinit();
-        target_hidden_increment_buffer = verified_hidden_buffer;
-        owns_target_hidden_increment_buffer = true;
+        // Keep the full verified target block on device. The next selected draft
+        // executable slices the valid prefix using its static context length.
+        if (owns_target_hidden_block_buffer) target_hidden_block_buffer.deinit();
+        target_hidden_block_buffer = verified_hidden_buffer;
+        owns_target_hidden_block_buffer = true;
 
         const generated_step_end = @min(start, max_seq_len);
         var generated_step_text = try decodeTokens(allocator, &tokenizer, generated.items[generated_step_start..generated_step_end]);
@@ -421,7 +422,7 @@ pub fn main(init: std.process.Init) !void {
             .{ step, start, context_len, valid_draft_tokens, committed_tokens, correction_token, step_started_at.untilNow(io, .awake), correction_text.items, generated_step_text.items },
         );
     }
-    if (owns_target_hidden_increment_buffer) target_hidden_increment_buffer.deinit();
+    if (owns_target_hidden_block_buffer) target_hidden_block_buffer.deinit();
 
     const decode_elapsed = decode_started_at.untilNow(io, .awake);
     const decoded_tokens: u32 = start - block_size;
@@ -429,7 +430,7 @@ pub fn main(init: std.process.Init) !void {
     const tokens_per_second = @as(f64, @floatFromInt(decoded_tokens)) / decode_seconds;
     try printTokens(allocator, &tokenizer, &stdout.interface, "generated", generated.items[0..@min(generated.items.len, max_seq_len)]);
     try stdout.interface.print("target_cache_logical_len: {}\n", .{start});
-    try stdout.interface.print("draft_cache_logical_len_after_crop: {}\n", .{draft_cache_len});
+    try stdout.interface.print("draft_cache_base_index: {}\n", .{draft_cache_base});
     try stdout.interface.print("decode_elapsed={f} decoded_tokens={} tokens_per_second={d:.3}\n", .{ decode_elapsed, decoded_tokens, tokens_per_second });
     try stdout.interface.flush();
 }
@@ -439,7 +440,6 @@ const DraftContext = struct {
 };
 
 const DraftTokenExe = struct {
-    context_len: u32,
     exe: zml.Exe,
 
     pub fn deinit(self: *DraftTokenExe) void {
