@@ -72,15 +72,15 @@ pub const Zml_handler = struct {
         self.platform.deinit(self.allocator);
     }
 
-    pub fn tic(self: *Zml_handler, target: *std.Io.Timestamp) void {
-        target.* = std.Io.Timestamp.now(self.io, .awake);
+    pub fn tic(self: *Zml_handler, target: *Timing_handler.Module_timer.Field_timer) void {
+        target.init = std.Io.Timestamp.now(self.io, .awake);
     }
     
-    pub fn toc(self: *Zml_handler, target: *std.Io.Timestamp) void {
+    pub fn toc(self: *Zml_handler, target: *Timing_handler.Module_timer.Field_timer) void {
         const end = std.Io.Timestamp.now(self.io, .awake);
-        const start: std.Io.Timestamp = target.*;
+        const start: std.Io.Timestamp = target.init;
         const duration = std.Io.Timestamp.durationTo(start, end);
-        target.* = .{ .nanoseconds = duration.nanoseconds };
+        target.nanoseconds += duration.nanoseconds;
     }
     
 };
@@ -123,12 +123,18 @@ pub const Uri_handler = struct {
 pub const Timing_handler = struct {
     
     pub const Module_timer = struct {
-        init: std.Io.Timestamp = std.Io.Timestamp.zero,
-        load: std.Io.Timestamp = std.Io.Timestamp.zero,
-        compile: std.Io.Timestamp = std.Io.Timestamp.zero,
-        prefill: std.Io.Timestamp = std.Io.Timestamp.zero,
-        decode: std.Io.Timestamp = std.Io.Timestamp.zero,
-        total: std.Io.Timestamp = std.Io.Timestamp.zero,
+        
+        pub const Field_timer = struct {
+            nanoseconds: i96 = 0,
+            init: std.Io.Timestamp = std.Io.Timestamp.zero,
+        };
+        
+        init: Field_timer = .{},
+        load: Field_timer = .{},
+        compile: Field_timer = .{},
+        prefill: Field_timer = .{},
+        decode: Field_timer = .{},
+        total: Field_timer = .{},
         
         pub fn print(self: Module_timer, name: []const u8) void {
             std.log.info("{s}  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s", .{
@@ -150,8 +156,8 @@ pub const Timing_handler = struct {
     dit: Module_timer = .{},
     vae: Module_timer = .{},
 
-    wav: std.Io.Timestamp = std.Io.Timestamp.zero,
-    total: std.Io.Timestamp = std.Io.Timestamp.zero,
+    wav: Module_timer.Field_timer = .{},
+    total: Module_timer.Field_timer = .{},
 
     pub fn print(self: Timing_handler) void {
         std.log.info("Module    init  compile     load  prefill   decode    total", .{});
@@ -207,14 +213,11 @@ const Args = struct {
 // info:   wav                                                 1.27s
 // info: total                                                23.42s
 
-// TODO: instrumental est hardcodé qq part
-// TODO: réparer tic toc après tiled generation
 // TODO: terminer compilation par bloc parallèle (enc)
 // TODO: reference audio
 // TODO: reference timbre
 // TODO: brancher modèle xl
 
-// TODO: remove test/debug code
 // TODO: move model related code from inference to Exes struct inside models
 
 pub fn main(init: std.process.Init) !void {
@@ -349,12 +352,19 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     // Tiled generation : compile DiT and VAE models
     // ------------------------------------------------
 
+    zml_handler.tic(&zml_handler.timers.dit.total);
+    
     var acedit = try acedit_.AceDit_handler.init(zml_handler, duration, diffuse_args.encoder_conditions.shape.dim(.s_enc));
     defer acedit.deinit(zml_handler.allocator);
-
+    
+    zml_handler.toc(&zml_handler.timers.dit.total);
+    zml_handler.tic(&zml_handler.timers.vae.total);
+    
     const decode_t: u32 = 1;
     var acevae = try acevae_.AceVae_handler.init(zml_handler, decode_t + 2);
     defer acevae.deinit(zml_handler.allocator);
+    
+    zml_handler.toc(&zml_handler.timers.vae.total);
     
     for (0..zml_handler.args.n) |i| {
         
@@ -492,233 +502,6 @@ pub fn parseConfig(comptime T: type, allocator: std.mem.Allocator, io: std.Io, d
 
     return try std.json.parseFromTokenSource(T, allocator, &reader, .{ .ignore_unknown_fields = true });
 }
-
-
-pub fn test5Hz(zml_handler: *Zml_handler) !void {
-    var llm = try acellm_.AceLlm_handler.initFromFile(zml_handler);
-    defer llm.deinit(zml_handler.allocator);
-    try acellm_.testModel(zml_handler, llm);
-    llm.unloadBuffers();
-}
-
-pub fn testEmb(zml_handler: *Zml_handler) !void {
-    const path = "//Users//sboulmier//zml//examples//acestep//models//Qwen3-Embedding-0.6B//activations.safetensors";
-    try printSafetensors(zml_handler.allocator, zml_handler.io, path);
-    const lyric_tokens = try getSlice(zml_handler, path, "lyric_token_ids", .i64);
-    const text_tokens = try getSlice(zml_handler, path, "text_token_ids", .i64);
-    defer lyric_tokens.free(zml_handler.allocator);
-    defer text_tokens.free(zml_handler.allocator);
-
-    const lyric_tokens_i64 = lyric_tokens.items(i64);
-    const text_tokens_i64 = text_tokens.items(i64);
-    const nb_lyric = lyric_tokens_i64.len;
-    const nb_text = text_tokens_i64.len;
-
-    var emb = try aceemb_.AceEmb_handler.initFromFile(zml_handler, @intCast(nb_text), @intCast(nb_lyric));
-    defer emb.deinit(zml_handler.allocator);
-
-    const lyric_tokens_u32 = try zml_handler.allocator.alloc(u32, nb_lyric);
-    const text_tokens_u32 = try zml_handler.allocator.alloc(u32, nb_text);
-    defer zml_handler.allocator.free(lyric_tokens_u32);
-    defer zml_handler.allocator.free(text_tokens_u32);
-
-    for (lyric_tokens_i64, 0..) |token, i| {
-        lyric_tokens_u32[i] = std.math.cast(u32, token) orelse return error.InvalidTokenValue;
-    }
-    for (text_tokens_i64, 0..) |token, i| {
-        text_tokens_u32[i] = std.math.cast(u32, token) orelse return error.InvalidTokenValue;
-    }
-
-    const lyric_embedding = try inference.generateTextEmbedding(zml_handler, &emb, lyric_tokens_u32, true);
-    const text_embedding = try inference.generateTextEmbedding(zml_handler, &emb, text_tokens_u32, false);
-    defer lyric_embedding.free(zml_handler.allocator);
-    defer text_embedding.free(zml_handler.allocator);
-
-    const lyric_activation = try getSlice(zml_handler, path, "lyric_embedding", .f32);
-    const text_activation = try getSlice(zml_handler, path, "text_embedding", .f32);
-    defer lyric_activation.free(zml_handler.allocator);
-    defer text_activation.free(zml_handler.allocator);
-
-    var lyric_max_abs_error: f32 = 0.0;
-    var lyric_max_rel_error: f32 = 0.0;
-    for (lyric_embedding.constItems(f32), lyric_activation.constItems(f32)) |actual, expected| {
-        const abs_error = @abs(actual - expected);
-        const rel_error = abs_error / (1.0 + @abs(actual) + @abs(expected));
-        if (abs_error > lyric_max_abs_error) lyric_max_abs_error = abs_error;
-        if (rel_error > lyric_max_rel_error) lyric_max_rel_error = rel_error;
-    }
-
-    var text_max_abs_error: f32 = 0.0;
-    var text_max_rel_error: f32 = 0.0;
-    for (text_embedding.constItems(f32), text_activation.constItems(f32)) |actual, expected| {
-        const abs_error = @abs(actual - expected);
-        const rel_error = abs_error / (1.0 + @abs(actual) + @abs(expected));
-        if (abs_error > text_max_abs_error) text_max_abs_error = abs_error;
-        if (rel_error > text_max_rel_error) text_max_rel_error = rel_error;
-    }
-
-    std.log.info("EMB lyric max absolute error: {d}", .{lyric_max_abs_error});
-    std.log.info("EMB lyric max relative error: {d}", .{lyric_max_rel_error});
-    std.log.info("EMB text max absolute error: {d}", .{text_max_abs_error});
-    std.log.info("EMB text max relative error: {d}", .{text_max_rel_error});
-
-    emb.unloadBuffers();
-}
-
-pub fn testEnc(zml_handler: *Zml_handler) !void {
-    var enc = try aceenc_.AceEnc_handler.initFromFile(zml_handler, 68, 30, 120, 0);
-    defer enc.deinit(zml_handler.allocator);
-    try aceenc_.testModel(zml_handler, enc);
-    enc.unloadBuffers();
-}
-
-pub fn testDit(zml_handler: *Zml_handler) !void {
-    var dit = try acedit_.AceDit_handler.initFromFile(zml_handler, 3000, 65);
-    defer dit.deinit(zml_handler.allocator);
-    try acedit_.testModel(zml_handler, dit);
-    dit.unloadBuffers();
-}
-
-pub fn testVae(zml_handler: *Zml_handler) !void {
-    var vae = try acevae_.AceVae_handler.initFromFile(zml_handler, 300);
-    defer vae.deinit(zml_handler.allocator);
-    try acevae_.testModel(zml_handler, vae);
-    vae.unloadBuffers();
-}
-
-pub fn testVaeExampleWav(zml_handler: *Zml_handler) !void {
-    const path = "//Users//sboulmier//zml//examples//acestep//models//Oobleck-vae//example_encoded.safetensors";
-    const encoded_slice = try getSlice(zml_handler, path, "latents_tc");
-    const t = encoded_slice.shape.dim(1);
-    defer encoded_slice.free(zml_handler.allocator);
-
-    var acevae = try acevae_.AceVae_handler.initFromFile(zml_handler, @intCast(@divExact(t, 25)));
-    defer acevae.deinit(zml_handler.allocator);
-
-    const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, .{ .x = encoded_slice });
-    defer decoded_audio.deinit(zml_handler.allocator);
-    acevae.unloadBuffers();
-
-    try exportDecodedAudioAsWav(zml_handler.io, decoded_audio, "decoded_audio.wav");
-}
-
-pub fn testVaeDiffused(zml_handler: *Zml_handler) !void {
-    const path = "//Users//sboulmier//zml//examples//acestep//models//Oobleck-vae//diffused_latents4.safetensors";
-    const diffused_slice = try getSlice(zml_handler, path, "diffused_latents", .f32);
-    const t = diffused_slice.shape.dim(1);
-    defer diffused_slice.free(zml_handler.allocator);
-
-    var acevae = try acevae_.AceVae_handler.initFromFile(zml_handler, @intCast(@divExact(t, 25)));
-    defer acevae.deinit(zml_handler.allocator);
-
-    const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, .{ .x = diffused_slice });
-    defer decoded_audio.deinit(zml_handler.allocator);
-    acevae.unloadBuffers();
-
-    try exportDecodedAudioAsWav(zml_handler.io, decoded_audio, "decoded_audio.wav");
-}
-
-pub fn testDiffusion(zml_handler: *Zml_handler) !void {
-    //x shape torch.Size([1, 300, 64])
-    //encoder_hidden_states shape torch.Size([1, 65, 2048])
-    //context_latents shape torch.Size([1, 300, 128])
-    const initial_latents: inference.InitialLatents = .{
-        .x = try getSlice(zml_handler, "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//dit_args.safetensors", "xt", .f32),
-        .context_latents = try getSlice(zml_handler, "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//dit_args.safetensors", "context_latents", .f32),
-        .encoder_conditions = try getSlice(zml_handler, "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//dit_args.safetensors", "encoder_hidden_states", .f32),
-    };
-    defer initial_latents.deinit(zml_handler.allocator);
-    std.log.info("Slices extracted", .{});
-
-    var acedit = try acedit_.AceDit_handler.initFromFile(zml_handler, 12, initial_latents.encoder_conditions.shape.dim(0));
-    defer acedit.deinit(zml_handler.allocator);
-
-    // Test model activations
-    //try acedit.testModel(zml_handler);
-
-    const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, initial_latents);
-    defer diffused_latents.deinit(zml_handler.allocator);
-
-    //try diffused_latents.print(zml_handler.io);
-    acedit.unloadBuffers();
-
-    // ------------------------------------------------
-    // Output latents of the DiT model are decoded
-    // with the VAE model
-    // ------------------------------------------------
-
-    var acevae = try acevae_.AceVae_handler.initFromFile(zml_handler, 12);
-    defer acevae.deinit(zml_handler.allocator);
-
-    // Test model activations
-    //try acevae.testModel(zml_handler);
-
-    const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents);
-    defer decoded_audio.deinit(zml_handler.allocator);
-
-    //try decoded_audio.print(zml_handler.io);
-    acevae.unloadBuffers();
-
-    // ------------------------------------------------
-    // Export decoded audio as WAV
-    // ------------------------------------------------
-
-     try exportDecodedAudioAsWav(zml_handler.io, decoded_audio, "decoded_audio.wav");
-}
-
-pub fn getSlice(zml_handler: *Zml_handler, file_name: []const u8, tensor_name: []const u8, dtype: anytype) !zml.Slice {
-    std.log.info("Getting slice {s}", .{tensor_name});
-    var registry: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, file_name);
-    defer registry.deinit();
-    var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
-    defer store.deinit();
-    const model: TensorExtractor = .init(store.view(), tensor_name);
-    const shardings: Shardings = try .init(zml_handler.platform);
-    const shardings_arr = shardings.all();
-    const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
-    const extract_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward, .{}, opts);
-    defer extract_exe.deinit();
-    var model_buffers = try model.load(zml_handler, &store, &shardings.all());
-    defer TensorExtractor.unloadBuffers(&model_buffers);
-    const slice: zml.Slice = try .alloc(zml_handler.allocator, .init(model.shape(), dtype));
-    var buffer: zml.Buffer = try .fromSlice(zml_handler.io, zml_handler.platform, slice, shardings.all()[0]);
-    defer buffer.deinit();
-    var extract_args = try extract_exe.args(zml_handler.allocator);
-    defer extract_args.deinit(zml_handler.allocator);
-    var extract_results = try extract_exe.results(zml_handler.allocator);
-    defer extract_results.deinit(zml_handler.allocator);
-    extract_args.set(.{ model_buffers });
-    extract_exe.call(extract_args, &extract_results);
-    extract_results.fill(.{ &buffer });
-    try buffer.toSlice(zml_handler.io, slice);
-    return slice;
-}
-
-const TensorExtractor = struct {
-    tensor: zml.Tensor,
-    pub fn init(store: zml.io.TensorStore.View, tensor_name: []const u8) TensorExtractor {
-        return .{
-            .tensor = store.createTensor(tensor_name, null, null),
-        };
-    }
-    pub fn load(self: *const TensorExtractor, zml_handler: Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(TensorExtractor) {
-        return zml.io.load(TensorExtractor, self, zml_handler.arena.allocator(), zml_handler.io, zml_handler.platform, store, .{
-            .shardings = shardings,
-            .parallelism = 1,
-            .dma_chunks = 1,
-            .dma_chunk_size = 128 * 1024 * 1024,
-        });
-    }
-    pub fn unloadBuffers(self: *zml.Bufferized(TensorExtractor)) void {
-        self.tensor.deinit();
-    }
-    pub fn shape(self: TensorExtractor) zml.Shape {
-        return self.tensor.shape();
-    }
-    pub fn forward(self: TensorExtractor) zml.Tensor {
-        return self.tensor;
-    }
-};
 
 
 pub fn printZmlLogo(io: std.Io) !void {

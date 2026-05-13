@@ -627,16 +627,6 @@ pub const AceLlm = struct {
 };
 
 
-const EmbedWrapper = struct {
-    embed: zml.nn.TokenEmbedding,
-
-    pub fn forward(wrapper: EmbedWrapper, input: zml.Tensor) zml.Tensor {
-        const tagged_input = input.withTags(.{ .b, .s }).squeeze(.b);
-        const output = wrapper.embed.forward(tagged_input).withPartialTags(.{.d});
-        return output.insertAxes(0, .{ .b });
-    }
-};
-
 const TransformerLayer = struct {
     id: u8,
     input_norm: RmsNorm,
@@ -668,22 +658,6 @@ const TransformerLayer = struct {
         const x1_normalized = self.post_att_norm.forward(x1);
         const x2 = self.mlp_layer.forward(x1_normalized).add(x1);
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
-    }
-};
-
-pub const TransWrapper = struct {
-    trans: TransformerLayer,
-    tok_id: zml.Tensor,
-    kv_cache: KvCache,
-
-    pub fn forward(wrapper: TransWrapper, input: zml.Tensor, att_mask: zml.Tensor, pos_id: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
-        _ = att_mask;
-        _ = pos_id;
-        _ = cos;
-        _ = sin;
-        const tagged_input = input.withTags(.{ .b, .s, .d }).squeeze(.b);
-        const output, _ = wrapper.trans.forward(tagged_input, wrapper.tok_id, wrapper.kv_cache.atLayer(0));
-        return output.insertAxes(0, .{ .b });
     }
 };
 
@@ -759,22 +733,6 @@ const AttLayer = struct {
     }
 };
 
-const AttWrapper = struct {
-    att: AttLayer,
-    tok_id: zml.Tensor,
-    kv_cache: KvCache,
-
-    pub fn forward(wrapper: AttWrapper, input: zml.Tensor, att_mask: zml.Tensor, pos_id: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
-        _ = att_mask;
-        _ = pos_id;
-        _ = cos;
-        _ = sin;
-        const tagged_input = input.withTags(.{ .b, .s, .d }).squeeze(.b);
-        const output, _ = wrapper.att.forward(tagged_input, wrapper.tok_id, wrapper.kv_cache);
-        return output.insertAxes(0, .{ .b });
-    }
-};
-
 const MlpLayer = struct {
     up_proj: zml.Tensor,
     gate_proj: zml.Tensor,
@@ -803,36 +761,6 @@ const MlpLayer = struct {
     }
 };
 
-const MlpWrapper = struct {
-    mlp: MlpLayer,
-
-    pub fn forward(wrapper: MlpWrapper, input: zml.Tensor) zml.Tensor {
-        const tagged_input = input.withTags(.{ .b, .s, .d }).squeeze(.b);
-        const output = wrapper.mlp.forward(tagged_input);
-        return output.insertAxes(0, .{ .b });
-    }
-};
-
-const TensorWrapper = struct {
-    tensor: zml.Tensor,
-
-    pub fn forward(wrapper: TensorWrapper, input: zml.Tensor) zml.Tensor {
-        const tagged_input = input.withTags(.{ .b, .s, .d }).squeeze(.b);
-        const output = tagged_input.dot(wrapper.tensor, .d);
-        return output.insertAxes(0, .{ .b });
-    }
-};
-
-const TensorWrapperI = struct {
-    tensor: zml.Tensor,
-
-    pub fn forward(wrapper: TensorWrapperI, input: zml.Tensor) zml.Tensor {
-        const tagged_input = input.withTags(.{ .b, .s, .d_out }).squeeze(.b);
-        const output = tagged_input.dot(wrapper.tensor, .d_out);
-        return output.insertAxes(0, .{ .b });
-    }
-};
-
 const RmsNorm = struct {
     weights: zml.Tensor,
     eps: f32,
@@ -854,35 +782,6 @@ const RmsNorm = struct {
     }
 };
 
-pub const RmsWrapper = struct {
-    norm: RmsNorm,
-
-    pub fn forward(wrapper: RmsWrapper, input: zml.Tensor) zml.Tensor {
-        const tagged_input = input.withTags(.{ .b, .s, .d }).squeeze(.b);
-        const output = wrapper.norm.forward(tagged_input);
-        return output.insertAxes(0, .{ .b });
-    }
-};
-
-pub const RmshWrapper = struct {
-    norm: RmsNorm,
-
-    pub fn forward(wrapper: RmshWrapper, input: zml.Tensor) zml.Tensor {
-        const tagged_input = input.withTags(.{ .b, .s, .h, .d }).squeeze(.b);
-        const output = wrapper.norm.forward(tagged_input);
-        return output.insertAxes(0, .{ .b });
-    }
-};
-
-pub const ProjWrapper = struct {
-    proj: zml.nn.Linear,
-
-    pub fn forward(wrapper: ProjWrapper, input: zml.Tensor) zml.Tensor {
-        const tagged_input = input.withTags(.{ .b, .s, .d }).squeeze(.b);
-        const output = wrapper.proj.forward(tagged_input);
-        return output.insertAxes(0, .{ .b });
-    }
-};
 
 pub const KvCache = struct {
     k: zml.Tensor,
@@ -940,189 +839,3 @@ pub const KvCache = struct {
         };
     }
 };
-
-
-pub fn testModel(zml_handler: *main.Zml_handler, acellm: AceLlm_handler) !void {
-    const allocator = zml_handler.allocator;
-    const io = zml_handler.io;
-    const platform = zml_handler.platform;
-    const parameters = acellm.params;
-    const acellm_model = acellm.model;
-    const acellm_buffers = acellm.model_buffers;
-    const kv_cache_buffers = acellm.kv_cache_buffers;
-
-    const activations_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//activations.safetensors";
-
-    try main.printSafetensors(zml_handler.allocator, zml_handler.io, activations_path);
-
-    var activations_registry = try zml.safetensors.TensorRegistry.fromPath(zml_handler.allocator, zml_handler.io, activations_path);
-    defer activations_registry.deinit();
-
-    var activations_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry);
-    defer activations_store.deinit();
-    var prefill_token_pos_buffer = try zml.Buffer.scalar(io, platform, 0, .u32, parameters.shardings.model);
-    defer prefill_token_pos_buffer.deinit();
-    const tok_id = zml.Tensor.fromShape(.init(.{}, .u32));
-
-    std.log.info("Test activations : embed layer", .{});
-    const wrapper_embed: EmbedWrapper = .{
-        .embed = acellm_model.embed_tokens,
-    };
-    const wrapper_buffers_embed: zml.Bufferized(EmbedWrapper) = .{
-        .embed = acellm_buffers.embed_tokens,
-    };
-    const layer_embed = "model.model.embed_tokens";
-    try zml.testing.testLayer(allocator, io, platform, wrapper_embed, .forward, activations_store.view(), layer_embed, wrapper_buffers_embed, &parameters.shardings.all(), .{});
-
-    std.log.info("Test activations : rms layer input norm", .{});
-    const wrapper_rms: RmsWrapper = .{
-        .norm = acellm_model.layers[0].input_norm,
-    };
-    const wrapper_buffers_rms: zml.Bufferized(RmsWrapper) = .{
-        .norm = acellm_buffers.layers[0].input_norm,
-    };
-    const layer_rms = "model.model.layers.0.input_layernorm";
-    try zml.testing.testLayer(allocator, io, platform, wrapper_rms, .forward, activations_store.view(), layer_rms, wrapper_buffers_rms, &parameters.shardings.all(), .{});
-
-    std.log.info("Test activations : q_proj", .{});
-    const wrapper_q_proj: ProjWrapper = .{
-        .proj = acellm_model.layers[0].att_layer.q_proj,
-    };
-    const wrapper_buffers_q_proj: zml.Bufferized(ProjWrapper) = .{
-        .proj = acellm_buffers.layers[0].att_layer.q_proj,
-    };
-    const layer_q_proj = "model.model.layers.0.self_attn.q_proj";
-    try zml.testing.testLayer(allocator, io, platform, wrapper_q_proj, .forward, activations_store.view(), layer_q_proj, wrapper_buffers_q_proj, &parameters.shardings.all(), .{});
-
-    std.log.info("Test activations : k_proj", .{});
-    const wrapper_k_proj: ProjWrapper = .{
-        .proj = acellm_model.layers[0].att_layer.k_proj,
-    };
-    const wrapper_buffers_k_proj: zml.Bufferized(ProjWrapper) = .{
-        .proj = acellm_buffers.layers[0].att_layer.k_proj,
-    };
-    const layer_k_proj = "model.model.layers.0.self_attn.k_proj";
-    try zml.testing.testLayer(allocator, io, platform, wrapper_k_proj, .forward, activations_store.view(), layer_k_proj, wrapper_buffers_k_proj, &parameters.shardings.all(), .{});
-
-    std.log.info("Test activations : v_proj", .{});
-    const wrapper_v_proj: ProjWrapper = .{
-        .proj = acellm_model.layers[0].att_layer.v_proj,
-    };
-    const wrapper_buffers_v_proj: zml.Bufferized(ProjWrapper) = .{
-        .proj = acellm_buffers.layers[0].att_layer.v_proj,
-    };
-    const layer_v_proj = "model.model.layers.0.self_attn.v_proj";
-    try zml.testing.testLayer(allocator, io, platform, wrapper_v_proj, .forward, activations_store.view(), layer_v_proj, wrapper_buffers_v_proj, &parameters.shardings.all(), .{});
-
-    std.log.info("Test activations : o_proj", .{});
-    const wrapper_o_proj: ProjWrapper = .{
-        .proj = acellm_model.layers[0].att_layer.o_proj,
-    };
-    const wrapper_buffers_o_proj: zml.Bufferized(ProjWrapper) = .{
-        .proj = acellm_buffers.layers[0].att_layer.o_proj,
-    };
-    const layer_o_proj = "model.model.layers.0.self_attn.o_proj";
-    try zml.testing.testLayer(allocator, io, platform, wrapper_o_proj, .forward, activations_store.view(), layer_o_proj, wrapper_buffers_o_proj, &parameters.shardings.all(), .{});
-
-    std.log.info("Test activations : k_norm", .{});
-    const wrapper_k_norm: RmshWrapper = .{
-        .norm = acellm_model.layers[0].att_layer.k_norm,
-    };
-    const wrapper_buffers_k_norm: zml.Bufferized(RmshWrapper) = .{
-        .norm = acellm_buffers.layers[0].att_layer.k_norm,
-    };
-    const layer_k_norm = "model.model.layers.0.self_attn.k_norm";
-    try zml.testing.testLayer(allocator, io, platform, wrapper_k_norm, .forward, activations_store.view(), layer_k_norm, wrapper_buffers_k_norm, &parameters.shardings.all(), .{});
-
-    std.log.info("Test activations : q_norm", .{});
-    const wrapper_q_norm: RmshWrapper = .{
-        .norm = acellm_model.layers[0].att_layer.q_norm,
-    };
-    const wrapper_buffers_q_norm: zml.Bufferized(RmshWrapper) = .{
-        .norm = acellm_buffers.layers[0].att_layer.q_norm,
-    };
-    const layer_q_norm = "model.model.layers.0.self_attn.q_norm";
-    try zml.testing.testLayer(allocator, io, platform, wrapper_q_norm, .forward, activations_store.view(), layer_q_norm, wrapper_buffers_q_norm, &parameters.shardings.all(), .{});
-
-    std.log.info("Test activations : self attention", .{});
-    const wrapper_att: AttWrapper = .{
-        .att = acellm_model.layers[0].att_layer,
-        .tok_id = tok_id,
-        .kv_cache = parameters.kv_cache,
-    };
-    const wrapper_buffers_att: zml.Bufferized(AttWrapper) = .{
-        .att = acellm_buffers.layers[0].att_layer,
-        .tok_id = prefill_token_pos_buffer,
-        .kv_cache = kv_cache_buffers,
-    };
-    const layer_att = "model.model.layers.0.self_attn";
-    try zml.testing.testLayer(allocator, io, platform, wrapper_att, .forward, activations_store.view(), layer_att, wrapper_buffers_att, &parameters.shardings.all(), .{});
-
-    std.log.info("Test activations : up_proj", .{});
-    const wrapper_up_proj: TensorWrapper = .{
-        .tensor = acellm_model.layers[0].mlp_layer.up_proj,
-    };
-    const wrapper_buffers_up_proj: zml.Bufferized(TensorWrapper) = .{
-        .tensor = acellm_buffers.layers[0].mlp_layer.up_proj,
-    };
-    const layer_up_proj = "model.model.layers.0.mlp.up_proj";
-    try zml.testing.testLayer(allocator, io, platform, wrapper_up_proj, .forward, activations_store.view(), layer_up_proj, wrapper_buffers_up_proj, &parameters.shardings.all(), .{});
-
-    std.log.info("Test activations : gate_proj", .{});
-    const wrapper_gate_proj: TensorWrapper = .{
-        .tensor = acellm_model.layers[0].mlp_layer.gate_proj,
-    };
-    const wrapper_buffers_gate_proj: zml.Bufferized(TensorWrapper) = .{
-        .tensor = acellm_buffers.layers[0].mlp_layer.gate_proj,
-    };
-    const layer_gate_proj = "model.model.layers.0.mlp.gate_proj";
-    try zml.testing.testLayer(allocator, io, platform, wrapper_gate_proj, .forward, activations_store.view(), layer_gate_proj, wrapper_buffers_gate_proj, &parameters.shardings.all(), .{});
-
-    std.log.info("Test activations : down_proj", .{});
-    const wrapper_down_proj: TensorWrapperI = .{
-        .tensor = acellm_model.layers[0].mlp_layer.down_proj,
-    };
-    const wrapper_buffers_down_proj: zml.Bufferized(TensorWrapperI) = .{
-        .tensor = acellm_buffers.layers[0].mlp_layer.down_proj,
-    };
-    const layer_down_proj = "model.model.layers.0.mlp.down_proj";
-    try zml.testing.testLayer(allocator, io, platform, wrapper_down_proj, .forward, activations_store.view(), layer_down_proj, wrapper_buffers_down_proj, &parameters.shardings.all(), .{});
-
-    std.log.info("Test activations : mlp", .{});
-    const wrapper_mlp: MlpWrapper = .{
-        .mlp = acellm_model.layers[0].mlp_layer,
-    };
-    const wrapper_buffers_mlp: zml.Bufferized(MlpWrapper) = .{
-        .mlp = acellm_buffers.layers[0].mlp_layer,
-    };
-    const layer_mlp = "model.model.layers.0.mlp";
-    try zml.testing.testLayer(allocator, io, platform, wrapper_mlp, .forward, activations_store.view(), layer_mlp, wrapper_buffers_mlp, &parameters.shardings.all(), .{});
-
-    std.log.info("Test activations : transformer layer", .{});
-    const wrapper: TransWrapper = .{
-        .trans = acellm_model.layers[0],
-        .tok_id = tok_id,
-        .kv_cache = parameters.kv_cache,
-    };
-    const wrapper_buffers: zml.Bufferized(TransWrapper) = .{
-        .trans = acellm_buffers.layers[0],
-        .tok_id = prefill_token_pos_buffer,
-        .kv_cache = kv_cache_buffers,
-    };
-    const layer = "model.model.layers.0";
-    try zml.testing.testLayer(allocator, io, platform, wrapper, .forward, activations_store.view(), layer, wrapper_buffers, &parameters.shardings.all(), .{});
-}
-
-pub fn print(x: zml.Tensor, n: u8) void {
-    const name = &.{ n };
-    const sh = x._shape;
-    const nb_dims = sh.rank();
-    switch (nb_dims) {
-        0 => std.log.info("{s} is scalar", .{ name }),
-        1 => std.log.info("{s} is dim 1 : {s} = {d}", .{ name, sh.tag(0), sh.dim(0) }),
-        2 => std.log.info("{s} is dim 2 : {s} x {s} = {d} x {d}", .{ name, sh.tag(0), sh.tag(1), sh.dim(0), sh.dim(1) }),
-        3 => std.log.info("{s} is dim 3 : {s} x {s} x {s} = {d} x {d} x {d}", .{ name, sh.tag(0), sh.tag(1), sh.tag(2), sh.dim(0), sh.dim(1), sh.dim(2) }),
-        4 => std.log.info("{s} is dim 4 : {s} x {s} x {s} x {s} = {d} x {d} x {d} x {d}", .{ name, sh.tag(0), sh.tag(1), sh.tag(2), sh.tag(3), sh.dim(0), sh.dim(1), sh.dim(2), sh.dim(3) }),
-        else => std.log.info("{s} is rank >= 5", .{ name }),
-    }
-}
