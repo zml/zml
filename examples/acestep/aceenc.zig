@@ -459,8 +459,7 @@ pub const TextEncoder = struct {
     }
 
     pub fn forward(self: TextEncoder, text_emb: zml.Tensor) zml.Tensor {
-        const text_proj = self.text_projector.forward(text_emb.withTags(.{ .s_text, .d }));
-        return text_proj.rename(.{ .d_out = .d }).rename(.{ .s_text = .s });
+        return self.text_projector.forward(text_emb).rename(.{ .d_out = .d });
     }
 };
 
@@ -501,8 +500,7 @@ pub const LyricEncoder = struct {
     }
 
     pub fn forward(self: LyricEncoder, lyric_emb: zml.Tensor) zml.Tensor {
-        var lyric_proj = self.lyric_projector.forward(lyric_emb.withTags(.{ .s_lyric, .d }));
-        lyric_proj = lyric_proj.rename(.{ .d_out = .d, .s_lyric = .s });
+        var lyric_proj = self.lyric_projector.forward(lyric_emb).rename(.{ .d_out = .d });
         for (self.lyric_layers) |layer| {
             // lyrics use full bidirectionnal attention : no masking
             lyric_proj = layer.forward(lyric_proj, null);
