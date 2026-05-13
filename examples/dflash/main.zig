@@ -94,15 +94,6 @@ pub fn main(init: std.process.Init) !void {
     const draft_model = try dflash.Model.init(allocator, store.view(), parsed_config.value);
     defer draft_model.deinit(allocator);
 
-    const target_model = try llama.Model.init(allocator, target_store.view(), parsed_target_config.value, .{
-        .sampling_strategy = .{},
-        .max_seq_len = parsed_config.value.block_size,
-    });
-    defer target_model.deinit(allocator);
-
-    const shardings: Shardings = try .init(platform);
-    const all_shardings = shardings.all();
-
     const block_size = parsed_config.value.block_size;
     if (args.max_seq_len < block_size + 1) {
         log.err("--max-seq-len must be greater than DFlash block_size ({}), got {}", .{ block_size, args.max_seq_len });
@@ -110,6 +101,16 @@ pub fn main(init: std.process.Init) !void {
     }
     const max_seq_len = args.max_seq_len;
     const cache_seq_len = max_seq_len + block_size;
+
+    const target_model = try llama.Model.init(allocator, target_store.view(), parsed_target_config.value, .{
+        .sampling_strategy = .{},
+        .max_seq_len = cache_seq_len,
+    });
+    defer target_model.deinit(allocator);
+
+    const shardings: Shardings = try .init(platform);
+    const all_shardings = shardings.all();
+
     const target_hidden_dim = draft_model.target_layer_ids.len * parsed_target_config.value.hidden_size;
     const input_tokens_tensor: zml.Tensor = .init(.{ .s = block_size }, .u32);
     const block_tokens_tensor: zml.Tensor = .init(.{ .s = block_size }, .u32);
@@ -127,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
         .h = parsed_config.value.num_key_value_heads,
         .hd = parsed_config.value.head_dim orelse parsed_config.value.hidden_size / parsed_config.value.num_attention_heads,
     }, .f32));
-    const attention_backend: zml.attention.attention.Backend = .vanilla;
+    const attention_backend: zml.attention.attention.Backend = .auto(platform);
     const attention_metadata = zml.attention.attention.Metadata.init(.fromBackend(
         attention_backend,
         cache_seq_len,
@@ -224,6 +225,30 @@ pub fn main(init: std.process.Init) !void {
         .{ .shardings = &all_shardings },
     );
     defer target_verify_exe.deinit();
+
+    log.info("Compiling hidden prefix variants...", .{});
+    const hidden_prefix_exes = try allocator.alloc(PrefixExe, block_size);
+    defer {
+        for (hidden_prefix_exes) |*prefix_exe| prefix_exe.deinit();
+        allocator.free(hidden_prefix_exes);
+    }
+    const verified_hidden_tensor: zml.Tensor = .init(.{
+        .s = block_size,
+        .d = target_hidden_dim,
+    }, target_model.model.embed_tokens.weight.dtype());
+    for (hidden_prefix_exes, 0..) |*prefix_exe, i| {
+        const prefix_len: u32 = @intCast(i + 1);
+        prefix_exe.* = .{
+            .len = prefix_len,
+            .exe = try platform.compileFn(
+                allocator,
+                io,
+                hiddenPrefix,
+                .{ PrefixSpec{ .len = prefix_len }, verified_hidden_tensor },
+                .{ .shardings = &all_shardings },
+            ),
+        };
+    }
 
     log.info("Loading weights...", .{});
     var model_buffers = try zml.io.load(dflash.Model, &draft_model, allocator, io, platform, &store, .{
@@ -455,16 +480,17 @@ pub fn main(init: std.process.Init) !void {
             try setGeneratedToken(&generated, allocator, start, correction_token);
         }
 
+        const selected_prefix_exe = &hidden_prefix_exes[@as(usize, @intCast(committed_tokens - 1))];
+        var prefix_args = try selected_prefix_exe.exe.args(allocator);
+        defer prefix_args.deinit(allocator);
+        var prefix_results = try selected_prefix_exe.exe.results(allocator);
+        defer prefix_results.deinit(allocator);
+        prefix_args.set(.{verified_hidden_buffer});
+        selected_prefix_exe.exe.call(prefix_args, &prefix_results);
+
+        const next_target_hidden_increment_buffer = prefix_results.get(zml.Buffer);
         if (owns_target_hidden_increment_buffer) target_hidden_increment_buffer.deinit();
-        target_hidden_increment_buffer = try hiddenPrefixBuffer(
-            allocator,
-            io,
-            platform,
-            verified_hidden_buffer,
-            committed_tokens,
-            target_hidden_dim,
-            target_model.model.embed_tokens.weight.dtype(),
-        );
+        target_hidden_increment_buffer = next_target_hidden_increment_buffer;
         owns_target_hidden_increment_buffer = true;
         verified_hidden_buffer.deinit();
 
@@ -510,6 +536,19 @@ const DraftExe = struct {
     exe: zml.Exe,
 
     pub fn deinit(self: *DraftExe) void {
+        self.exe.deinit();
+    }
+};
+
+const PrefixSpec = struct {
+    len: u32,
+};
+
+const PrefixExe = struct {
+    len: u32,
+    exe: zml.Exe,
+
+    pub fn deinit(self: *PrefixExe) void {
         self.exe.deinit();
     }
 };
@@ -569,6 +608,10 @@ fn draftForward(
 
 fn targetGreedyFromHidden(target_model: llama.Model, hidden: zml.Tensor) zml.Tensor {
     return target_model.greedyTokensFromHidden(hidden);
+}
+
+fn hiddenPrefix(spec: PrefixSpec, hidden: zml.Tensor) zml.Tensor {
+    return hidden.withPartialTags(.{ .s, .d }).slice1d(.s, .{ .start = 0, .end = spec.len });
 }
 
 fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
@@ -688,25 +731,6 @@ fn setGeneratedToken(tokens: *std.ArrayList(u32), allocator: std.mem.Allocator, 
         stdx.debug.assert(idx == tokens.items.len, "generated token stream has a gap at index {}", .{index});
         try tokens.append(allocator, token);
     }
-}
-
-fn hiddenPrefixBuffer(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    source: zml.Buffer,
-    prefix_len: u32,
-    hidden_dim: usize,
-    dtype: zml.DataType,
-) !zml.Buffer {
-    var full = try source.toSliceAlloc(allocator, io);
-    defer full.free(allocator);
-
-    const prefix_shape = zml.Shape.init(.{ .s = prefix_len, .d = hidden_dim }, dtype);
-    const prefix_bytes = try allocator.alloc(u8, prefix_shape.byteSize());
-    defer allocator.free(prefix_bytes);
-    @memcpy(prefix_bytes, full.constData()[0..prefix_bytes.len]);
-    return zml.Buffer.fromSlice(io, platform, zml.Slice.init(prefix_shape, prefix_bytes), .replicated);
 }
 
 fn initZeroTargetKvCacheBuffer(
