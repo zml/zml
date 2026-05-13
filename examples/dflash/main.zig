@@ -312,7 +312,8 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(valid_draft_token_histogram);
     @memset(valid_draft_token_histogram, 0);
     const decode_started_at: std.Io.Timestamp = .now(io, .awake);
-    while (start < max_seq_len) : (step += 1) {
+    var stopped_on_eos = false;
+    while (start < max_seq_len and !stopped_on_eos) : (step += 1) {
         const step_started_at: std.Io.Timestamp = .now(io, .awake);
         const context_len = start - draft_cache_base;
         stdx.debug.assert(context_len >= 1 and context_len <= block_size, "invalid DFlash context length {}", .{context_len});
@@ -422,12 +423,20 @@ pub fn main(init: std.process.Init) !void {
 
         const generated_step_start = start;
         for (block_tokens[0..@as(usize, @intCast(committed_tokens))]) |token| {
+            if (isEosToken(&parsed_target_config.value, token)) {
+                stopped_on_eos = true;
+                break;
+            }
             try setGeneratedToken(&generated, allocator, start, token);
             start += 1;
             if (start >= max_seq_len) break;
         }
-        if (start < max_seq_len) {
-            try setGeneratedToken(&generated, allocator, start, correction_token);
+        if (!stopped_on_eos and start < max_seq_len) {
+            if (isEosToken(&parsed_target_config.value, correction_token)) {
+                stopped_on_eos = true;
+            } else {
+                try setGeneratedToken(&generated, allocator, start, correction_token);
+            }
         }
 
         // Keep the full verified target block on device. The next selected draft
@@ -482,6 +491,7 @@ pub fn main(init: std.process.Init) !void {
         \\  steps: {}
         \\  target_cache_logical_len: {}
         \\  draft_cache_base_index: {}
+        \\  stopped_on_eos: {}
         \\  valid_draft_tokens:
         \\    avg: {d:.3}
         \\    min: {}
@@ -499,6 +509,7 @@ pub fn main(init: std.process.Init) !void {
             step,
             start,
             draft_cache_base,
+            stopped_on_eos,
             avg_valid_draft_tokens,
             min_valid_draft_tokens,
             max_valid_draft_tokens,
@@ -651,6 +662,15 @@ fn firstEosToken(config: llama.Config) u32 {
     return switch (config.eos_token_id.value) {
         .int => |eos| eos,
         .ints => |eos_list| eos_list[0],
+    };
+}
+
+fn isEosToken(config: *const llama.Config, token_id: u32) bool {
+    return switch (config.eos_token_id.value) {
+        .int => |eos| token_id == eos,
+        .ints => |eos_list| for (eos_list) |eos| {
+            if (token_id == eos) break true;
+        } else false,
     };
 }
 
