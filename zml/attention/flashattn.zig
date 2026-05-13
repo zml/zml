@@ -603,10 +603,33 @@ pub const paged_fa2 = struct {
         pub fn allocationSize(self: DecodeParameters) usize {
             var allocation_size: usize = 0;
 
-            // TODO: Take scratch buffer into account
             allocation_size += self.block_table.byteSize();
             allocation_size += self.cu_seqlens_q.byteSize();
             allocation_size += self.seqused_k.byteSize();
+
+            const out_accum_shape: zml.Shape = .init(.{
+                .splits = MAX_NUM_SPLITS,
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.batch_size,
+                .hd = self.options.head_dim,
+            }, .f32);
+            allocation_size += out_accum_shape.byteSize();
+
+            const softmax_lse_shape: zml.Shape = .init(.{
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.batch_size,
+            }, .f32);
+            allocation_size += softmax_lse_shape.byteSize();
+
+            const softmax_lse_accum_shape: zml.Shape = .init(.{
+                .splits = MAX_NUM_SPLITS,
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.batch_size,
+            }, .f32);
+            allocation_size += softmax_lse_accum_shape.byteSize();
 
             return allocation_size;
         }
@@ -681,6 +704,54 @@ pub const paged_fa2 = struct {
             allocation_size += self.seqused_k_decode.byteSize();
             allocation_size += self.metadata.allocationSize();
 
+            const out_accum_prefill_shape: zml.Shape = .init(.{
+                .splits = MAX_NUM_SPLITS,
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.max_token_count,
+                .hd = self.options.head_dim,
+            }, .f32);
+            allocation_size += out_accum_prefill_shape.byteSize();
+
+            const softmax_lse_prefill_shape: zml.Shape = .init(.{
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.max_token_count,
+            }, .f32);
+            allocation_size += softmax_lse_prefill_shape.byteSize();
+
+            const softmax_lse_accum_prefill_shape: zml.Shape = .init(.{
+                .splits = MAX_NUM_SPLITS,
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.max_token_count,
+            }, .f32);
+            allocation_size += softmax_lse_accum_prefill_shape.byteSize();
+
+            const out_accum_decode_shape: zml.Shape = .init(.{
+                .splits = MAX_NUM_SPLITS,
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.batch_size_decode,
+                .hd = self.options.head_dim,
+            }, .f32);
+            allocation_size += out_accum_decode_shape.byteSize();
+
+            const softmax_lse_decode_shape: zml.Shape = .init(.{
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.max_token_count,
+            }, .f32);
+            allocation_size += softmax_lse_decode_shape.byteSize();
+
+            const softmax_lse_accum_decode_shape: zml.Shape = .init(.{
+                .splits = MAX_NUM_SPLITS,
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.batch_size_decode,
+            }, .f32);
+            allocation_size += softmax_lse_accum_decode_shape.byteSize();
+
             return allocation_size;
         }
 
@@ -723,7 +794,6 @@ pub const paged_fa2 = struct {
 
         pub fn allocationSize(self: MixedMetadata) usize {
             var allocation_size: usize = 0;
-            // TODO: Take scratch buffer into account
             allocation_size += self.decode_offset.byteSize();
             return allocation_size;
         }
@@ -1209,10 +1279,33 @@ pub const paged_fa3 = struct {
         pub fn allocationSize(self: DecodeParameters) usize {
             var allocation_size: usize = 0;
 
-            // TODO: Take scratch buffer into account
             allocation_size += self.block_table.byteSize();
             allocation_size += self.cu_seqlens_q.byteSize();
             allocation_size += self.seqused_k.byteSize();
+
+            const out_accum_shape: zml.Shape = .init(.{
+                .splits = MAX_NUM_SPLITS,
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.batch_size,
+                .hd = self.options.head_dim,
+            }, .f32);
+            allocation_size += out_accum_shape.byteSize();
+
+            const softmax_lse_shape: zml.Shape = .init(.{
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.batch_size,
+            }, .f32);
+            allocation_size += softmax_lse_shape.byteSize();
+
+            const softmax_lse_accum_shape: zml.Shape = .init(.{
+                .splits = MAX_NUM_SPLITS,
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.batch_size,
+            }, .f32);
+            allocation_size += softmax_lse_accum_shape.byteSize();
 
             return allocation_size;
         }
@@ -1284,6 +1377,54 @@ pub const paged_fa3 = struct {
             allocation_size += self.seqused_k_decode.byteSize();
             allocation_size += self.metadata.allocationSize();
 
+            const out_accum_prefill_shape: zml.Shape = .init(.{
+                .splits = MAX_NUM_SPLITS,
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.max_token_count,
+                .hd = self.options.head_dim,
+            }, .f32);
+            allocation_size += out_accum_prefill_shape.byteSize();
+
+            const softmax_lse_prefill_shape: zml.Shape = .init(.{
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.max_token_count,
+            }, .f32);
+            allocation_size += softmax_lse_prefill_shape.byteSize();
+
+            const softmax_lse_accum_prefill_shape: zml.Shape = .init(.{
+                .splits = MAX_NUM_SPLITS,
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.max_token_count,
+            }, .f32);
+            allocation_size += softmax_lse_accum_prefill_shape.byteSize();
+
+            const out_accum_decode_shape: zml.Shape = .init(.{
+                .splits = MAX_NUM_SPLITS,
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.batch_size_decode,
+                .hd = self.options.head_dim,
+            }, .f32);
+            allocation_size += out_accum_decode_shape.byteSize();
+
+            const softmax_lse_decode_shape: zml.Shape = .init(.{
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.max_token_count,
+            }, .f32);
+            allocation_size += softmax_lse_decode_shape.byteSize();
+
+            const softmax_lse_accum_decode_shape: zml.Shape = .init(.{
+                .splits = MAX_NUM_SPLITS,
+                .hkv = self.options.num_kv_heads,
+                .hg = @divExact(self.options.num_heads, self.options.num_kv_heads),
+                .b = self.options.batch_size_decode,
+            }, .f32);
+            allocation_size += softmax_lse_accum_decode_shape.byteSize();
+
             return allocation_size;
         }
 
@@ -1326,7 +1467,6 @@ pub const paged_fa3 = struct {
 
         pub fn allocationSize(self: MixedMetadata) usize {
             var allocation_size: usize = 0;
-            // TODO: Take scratch buffer into account
             allocation_size += self.decode_offset.byteSize();
             return allocation_size;
         }
