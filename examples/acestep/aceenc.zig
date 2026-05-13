@@ -419,7 +419,7 @@ pub const AceEnc = struct {
          AudioCodeEncoder.unloadBuffers(&self.audiocode_encoder, allocator);
     }
 
-    pub fn forward(self: AceEnc, text_emb: zml.Tensor, encoded_lyric: zml.Tensor, encoded_timbre: zml.Tensor, src_latent: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
+    pub fn forward(self: AceEnc, text_emb: zml.Tensor, encoded_lyric: zml.Tensor, encoded_timbre: zml.Tensor, src_latent: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         // dim [s_text, d_emb_cond]
         const encoded_text = self.text_encoder.forward(text_emb);
         
@@ -432,13 +432,7 @@ pub const AceEnc = struct {
         // dim [t_25hz, 2 * a]
         const context_latents = zml.Tensor.concatenate(&.{ src_latent, latent_mask }, .a).transpose(.{ .t, .a });
         
-        // x is initialized with random gaussian noise
-        const d_time = src_latent.dim(.t);
-        const d_audio = src_latent.dim(.a);
-        const x_shape = zml.Shape.init(.{ .t = d_time, .a = d_audio}, .bf16);
-        const x = zml.Tensor.Rng.normal(x_shape, .{}); // TODO: we can't seed the normal distribution ?
-        
-        return .{ x, context_latents, encoded_conditions };
+        return .{ context_latents, encoded_conditions };
     }
 };
 

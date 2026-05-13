@@ -201,7 +201,6 @@ pub const TextEmbedding = struct {
 };
 
 pub const InitialLatents = struct {
-    x: zml.Slice,
     context_latents: zml.Slice,
     encoder_conditions: zml.Slice,
 
@@ -211,16 +210,13 @@ pub const InitialLatents = struct {
         const options: std.fmt.Number = .{};
 
         std.log.info("Initial latents shapes", .{});
-        try self.x.shape.format(writer);
         try self.context_latents.shape.format(writer);
         try self.encoder_conditions.shape.format(writer);
-        try self.x.prettyPrint(writer, options);
         try self.context_latents.prettyPrint(writer, options);
         try self.encoder_conditions.prettyPrint(writer, options);
     }
 
     pub fn deinit(self: InitialLatents, allocator: std.mem.Allocator) void {
-        self.x.free(allocator);
         self.context_latents.free(allocator);
         self.encoder_conditions.free(allocator);
     }
@@ -834,13 +830,10 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     });
 
     // the result latents we return
-    const x_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = audio_dim }, .bf16));
     const context_latents_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = 2 * audio_dim }, .bf16));
     const encoded_conditions_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s_enc = s_enc, .d = emb_dim }, .bf16));
-    var x_buffer: zml.Buffer = try .fromSlice(io, platform, x_slice, sharding);
     var context_latents_buffer: zml.Buffer = try .fromSlice(io, platform, context_latents_slice, sharding);
     var encoded_conditions_buffer: zml.Buffer = try .fromSlice(io, platform, encoded_conditions_slice, sharding);
-    defer x_buffer.deinit();
     defer context_latents_buffer.deinit();
     defer encoded_conditions_buffer.deinit();
 
@@ -879,18 +872,16 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     // encode
     aceenc.exes.encode_args.set(.{ aceenc.model_buffers, text_emb_buffer, encoded_lyric_buffer, encoded_timbre_buffer, src_audio_buffer });
     aceenc.exes.encode_exe.call(aceenc.exes.encode_args, &aceenc.exes.encode_results);
-    aceenc.exes.encode_results.fill(.{ &x_buffer, &context_latents_buffer, &encoded_conditions_buffer });
+    aceenc.exes.encode_results.fill(.{ &context_latents_buffer, &encoded_conditions_buffer });
     
     std.log.info("ENC done encoding, output shape : context={d}x{d} conditions={d}x{d}", .{ 2 * audio_dim, t_25hz, s_enc, emb_dim });
 
-    try x_buffer.toSlice(io, x_slice);
     try context_latents_buffer.toSlice(io, context_latents_slice);
     try encoded_conditions_buffer.toSlice(io, encoded_conditions_slice);
 
     zml_handler.toc(&zml_handler.timers.enc.prefill);
 
     return .{
-        .x = x_slice,
         .context_latents = context_latents_slice,
         .encoder_conditions = encoded_conditions_slice,
     };
@@ -908,20 +899,21 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     std.log.info("DiT call with input size : {d}x{d} {d}x{d}", .{ t_25hz, audio_dim, latents.encoder_conditions.shape.dim(0), latents.encoder_conditions.shape.dim(1) });
 
     // populate x with gaussian noise seeded with id
+    const x: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = audio_dim }, .bf16));
     const seed: u64 = @intCast(id);
     var prng = std.Random.DefaultPrng.init(seed);
     const random = prng.random();
-    const dimI: usize = @intCast(latents.x.shape.dim(0));
-    const dimJ: usize = @intCast(latents.x.shape.dim(1));
+    const dimI: usize = @intCast(x.shape.dim(0));
+    const dimJ: usize = @intCast(x.shape.dim(1));
     for (0..dimI) |i| {
         for (0..dimJ) |j| {
             const rand: f32 = random.floatNorm(f32);
-            latents.x.items(zml.floats.BFloat16)[i * dimJ + j] = zml.floats.BFloat16.fromF32(rand);
+            x.items(zml.floats.BFloat16)[i * dimJ + j] = zml.floats.BFloat16.fromF32(rand);
         }
     }
 
     // prepare arguments buffers
-    var x_buffer: zml.Buffer = try .fromSlice(io, platform, latents.x, sharding);
+    var x_buffer: zml.Buffer = try .fromSlice(io, platform, x, sharding);
     var context_latents_buffer: zml.Buffer = try .fromSlice(io, platform, latents.context_latents, sharding);
     var encoded_conditions_buffer: zml.Buffer = try .fromSlice(io, platform, latents.encoder_conditions, sharding);
     defer x_buffer.deinit();
