@@ -1,70 +1,68 @@
 const std = @import("std");
 const zml = @import("zml");
 
-// --- THE BLUEPRINT ---
-pub const Step3p5Model = struct {
-    model: Step3p5Flash, 
+// --- 1. ACTIVATION NODE ---
+// This replaces zml.nn.Linear/LayerNorm. 
+// Using `?zml.Tensor` (optional) prevents crashes if an MoE expert wasn't used!
+pub const NodeActs = struct {
+    input_0: ?zml.Tensor = null,
+    output: ?zml.Tensor = null,
 };
 
-pub const Step3p5Layer = struct {
-    input_layernorm: zml.nn.LayerNorm,
+// --- 2. ACTIVATION BLUEPRINT ---
+pub const Step3p5LayerActs = struct {
+    input_layernorm: NodeActs,
     self_attn: struct {
-        q_proj: zml.nn.Linear,
-        k_proj: zml.nn.Linear,
-        v_proj: zml.nn.Linear,
-        o_proj: zml.nn.Linear,
-        q_norm: zml.nn.LayerNorm,
-        k_norm: zml.nn.LayerNorm,
+        q_proj: NodeActs,
+        k_proj: NodeActs,
+        v_proj: NodeActs,
+        o_proj: NodeActs,
+        q_norm: NodeActs,
+        k_norm: NodeActs,
     },
-    post_attention_layernorm: zml.nn.LayerNorm,
+    post_attention_layernorm: NodeActs,
     moe: struct {
-        gate: zml.nn.Linear,
-        experts: []zml.nn.Linear, 
+        gate: NodeActs,
+        experts: []NodeActs, 
     },
 };
 
-pub const Step3p5Flash = struct {
-    embed_tokens: zml.nn.TokenEmbedding, 
-    layers: []Step3p5Layer,
-    norm: zml.nn.LayerNorm,
-    lm_head: zml.nn.Linear,
+pub const Step3p5FlashActs = struct {
+    embed_tokens: NodeActs, 
+    layers: []Step3p5LayerActs,
+    norm: NodeActs,
+    lm_head: NodeActs,
+};
 
-    pub fn forward(self: *Step3p5Flash, input: zml.Tensor) !zml.Tensor {
-        _ = self; return input; 
-    }
+pub const Step3p5ModelActs = struct {
+    model: Step3p5FlashActs, 
 };
 
 pub fn main(init: std.process.Init) !void {
-    // 1. ZIG 0.16.0 "Juicy Main" Initialization
+    // Zig 0.16.0 Juicy Main Init
     const allocator = init.gpa;
     const arena = init.arena.allocator();
     const io = init.io;
     
-    // Initialize ZML VFS
     var vfs = try zml.io.VFS.init(allocator, io);
     defer vfs.deinit();
     const vfs_io = vfs.io();
 
-    // Use the new arena allocator for args so we don't need to manually free
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len < 2) {
-        std.debug.print("Usage: torch2zml <path_to_index_json>\n", .{});
-        return;
-    }
+    if (args.len < 2) return;
 
-    // 2. FIX: The official Zig 0.16.0 std.Io.Dir absolute path resolution
+    // Resolve Absolute Path
     const weights_path_raw = args[1];
     const cwd = std.Io.Dir.cwd();
-    const absolute_path = try cwd.realPathFileAlloc(io, weights_path_raw, arena);    
-    // 3. Platform init (Blackwell cluster)
+    const absolute_path = try cwd.realPathFileAlloc(io, weights_path_raw, arena);
+
     const platform = try zml.Platform.auto(allocator, vfs_io, .{});
     defer platform.deinit(allocator, vfs_io); 
 
-    // 4. Load Registry using the absolute path
     var registry = try zml.safetensors.TensorRegistry.fromPath(allocator, vfs_io, absolute_path);
     defer registry.deinit();
 
-    // 5. Dynamic Counting Logic
+    // Dynamic Layer/Expert Counting
     var max_layer: usize = 0;
     var max_expert: usize = 0;
     var it = registry.tensors.iterator();
@@ -88,34 +86,46 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    std.log.info("ZML/v2: Detected {d} layers and {d} experts per layer.", .{ max_layer, max_expert });
+    std.log.info("ZML/v2: Verification Mode. Detected {d} layers and {d} experts max.", .{ max_layer, max_expert });
 
-    // 6. Allocate Slices
-    const layers = try allocator.alloc(Step3p5Layer, max_layer);
+    // Safely Allocate and Initialize the Slices
+    const layers = try allocator.alloc(Step3p5LayerActs, max_layer);
     defer allocator.free(layers);
+    
     for (layers) |*layer| {
-        layer.moe.experts = try allocator.alloc(zml.nn.Linear, max_expert);
+        layer.* = .{
+            .input_layernorm = .{},
+            .self_attn = .{
+                .q_proj = .{}, .k_proj = .{}, .v_proj = .{}, .o_proj = .{}, .q_norm = .{}, .k_norm = .{}
+            },
+            .post_attention_layernorm = .{},
+            .moe = .{
+                .gate = .{},
+                .experts = try allocator.alloc(NodeActs, max_expert),
+            },
+        };
+        // Initialize experts to nulls so the loader doesn't crash on empty memory
+        @memset(layer.moe.experts, .{});
     }
     defer for (layers) |layer| allocator.free(layer.moe.experts);
 
-    const model_blueprint = Step3p5Flash{
-        .embed_tokens = undefined,
+    const model_blueprint = Step3p5FlashActs{
+        .embed_tokens = .{},
         .layers = layers,
-        .norm = undefined,
-        .lm_head = undefined,
+        .norm = .{},
+        .lm_head = .{},
     };
     
-    // Wrap in Step3p5Model to match the 'model.' prefix
-    const root_blueprint = Step3p5Model{ .model = model_blueprint };
+    const root_blueprint = Step3p5ModelActs{ .model = model_blueprint };
 
-    // 7. Load Weights to Metal
-    var store = zml.io.TensorStore.fromRegistry(allocator, &registry);
-    const model = try zml.io.load(Step3p5Model, &root_blueprint, allocator, vfs_io, platform, &store, .{
+    // Load Activations to Metal
+    var store = zml.io.TensorStore.fromRegistry(allocator, &registry);    
+    const model = try zml.io.load(Step3p5ModelActs, &root_blueprint, arena, vfs_io, platform, &store, .{
         .parallelism = 1,
         .dma_chunks = 2,
         .dma_chunk_size = 1024 * 1024 * 128, 
     });
     _ = model; 
 
-    std.log.info("🚀 SUCCESS: All {d} tensors mapped to Blackwells!", .{registry.tensors.count()});
+    std.log.info("all captured activations loaded", .{});
 }
