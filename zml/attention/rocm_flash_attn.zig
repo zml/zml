@@ -68,22 +68,27 @@ pub fn fullSequenceAttention(q: Tensor, k: Tensor, v: Tensor, params: Parameters
         .USE_INT64_STRIDES = false,
     };
 
-    // Flatten q/k/v to 1-D buffers (the kernel addresses via strides).
-    const q_flat = q.reshape(.{@as(i64, batch) * num_q_heads * seqlen_q * head_dim}).withTags(.{.flat});
-    const k_flat = k.reshape(.{@as(i64, batch) * num_k_heads * seqlen_k * head_dim}).withTags(.{.flat});
-    const v_flat = v.reshape(.{@as(i64, batch) * num_k_heads * seqlen_k * head_dim}).withTags(.{.flat});
+    // Ensure q/k/v are physically contiguous in BHSD order, then flatten to 1-D.
+    // The tensors arrive with logical tags [b, h, q/k, hd] but may have a
+    // different physical layout (e.g. BSHD). Making all four axes contiguous
+    // inserts a transpose when needed, so the flat pointer + strides below
+    // are consistent.
+    const q_flat = q.contiguous(.{ .b, .h, .q, .hd }).flatten().withTags(.{.flat});
+    const k_flat = k.contiguous(.{ .b, .h, .k, .hd }).flatten().withTags(.{.flat});
+    const v_flat = v.contiguous(.{ .b, .h, .k, .hd }).flatten().withTags(.{.flat});
 
     // Dummy/unused inputs (not FP8, no ALiBi, no sink).
-    const descale_q = Tensor.init(.{1}, .f32);
-    const descale_k = Tensor.init(.{1}, .f32);
-    const descale_v = Tensor.init(.{1}, .f32);
-    const alibi_slopes = Tensor.init(.{num_q_heads}, .f32);
-    const sink = Tensor.init(.{1}, .f32);
+    // Must be graph-valued tensors (not Tensor.init which is metadata-only).
+    const descale_q = Tensor.scalar(@as(f32, 1.0), .f32);
+    const descale_k = Tensor.scalar(@as(f32, 1.0), .f32);
+    const descale_v = Tensor.scalar(@as(f32, 1.0), .f32);
+    const alibi_slopes = Tensor.zeroes(Shape.init(.{num_q_heads}, .f32));
+    const sink = Tensor.scalar(@as(f32, 0.0), .f32);
 
     // softmax_lse: written by kernel but not consumed downstream.
-    const softmax_lse = Tensor.init(.{@as(i64, seqlen_q) * num_q_heads}, .f32);
+    const softmax_lse = Tensor.zeroes(Shape.init(.{@as(i64, seqlen_q) * num_q_heads}, .f32));
 
-    // Strides for BSHD layout: q[b, h, s, d]
+    // Strides for BHSD layout: tensor[b, h, s, d]
     const stride_qz = Tensor.scalar(@as(i32, num_q_heads * seqlen_q * head_dim), .i32);
     const stride_qh = Tensor.scalar(@as(i32, seqlen_q * head_dim), .i32);
     const stride_qm = Tensor.scalar(head_dim, .i32);
@@ -121,8 +126,8 @@ pub fn fullSequenceAttention(q: Tensor, k: Tensor, v: Tensor, params: Parameters
 
     // Runtime scalars.
     const sm_scale_tensor = Tensor.scalar(sm_scale, .f32);
-    const cu_seqlens_q = Tensor.init(.{@as(i64, batch) + 1}, .i32);
-    const cu_seqlens_k = Tensor.init(.{@as(i64, batch) + 1}, .i32);
+    const cu_seqlens_q = Tensor.zeroes(Shape.init(.{@as(i64, batch) + 1}, .i32));
+    const cu_seqlens_k = Tensor.zeroes(Shape.init(.{@as(i64, batch) + 1}, .i32));
 
     // Grid: one program per (batch * heads * ceil(seqlen_q / BLOCK_M)).
     const grid_x: i32 = batch * num_q_heads * @divTrunc(seqlen_q + BLOCK_M - 1, BLOCK_M);
@@ -177,8 +182,11 @@ pub fn fullSequenceAttention(q: Tensor, k: Tensor, v: Tensor, params: Parameters
         },
     );
 
-    // Reshape flat output back to [batch, heads, seqlen_q, head_dim] then tag.
+    // Reshape flat output back to [batch, heads, seqlen_q, head_dim],
+    // then transpose to [batch, seqlen_q, heads, head_dim] to match
+    // the layout other backends return (h and hd adjacent for merge).
     return results.out
         .reshape(.{ @as(i64, batch), @as(i64, num_q_heads), @as(i64, seqlen_q), @as(i64, head_dim) })
-        .withTags(.{ .b, .h, .q, .hd });
+        .withTags(.{ .b, .h, .q, .hd })
+        .transpose(.{ .b, .q, .h, .hd });
 }

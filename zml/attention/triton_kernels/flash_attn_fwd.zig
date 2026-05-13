@@ -75,11 +75,12 @@ fn loadFnBothMask(
     offset_second: Value,
     boundary_first: anytype,
     boundary_second: anytype,
+    dtype: DType,
 ) Value {
     // mask = (offset_first[:, None] < boundary_first) & (offset_second[None, :] < boundary_second)
     const mask = offset_first.expandDims(1).lt(boundary_first)
         .bitAnd(offset_second.expandDims(0).lt(boundary_second));
-    return b.loadOpts(ptrs, .{ .mask = mask, .other = b.zeros(ptrs.shape().constSlice(), .f32) });
+    return b.loadOpts(ptrs, .{ .mask = mask, .other = b.zeros(ptrs.shape().constSlice(), dtype) });
 }
 
 fn loadFnFirstMaskOnly(
@@ -87,10 +88,11 @@ fn loadFnFirstMaskOnly(
     ptrs: Value,
     offset_first: Value,
     boundary_first: anytype,
+    dtype: DType,
 ) Value {
     // mask = offset_first[:, None] < boundary_first
     const mask = offset_first.expandDims(1).lt(boundary_first);
-    return b.loadOpts(ptrs, .{ .mask = mask, .other = b.zeros(ptrs.shape().constSlice(), .f32) });
+    return b.loadOpts(ptrs, .{ .mask = mask, .other = b.zeros(ptrs.shape().constSlice(), dtype) });
 }
 
 fn loadFnSecondMaskOnly(
@@ -98,10 +100,11 @@ fn loadFnSecondMaskOnly(
     ptrs: Value,
     offset_second: Value,
     boundary_second: anytype,
+    dtype: DType,
 ) Value {
     // mask = offset_second[None, :] < boundary_second
     const mask = offset_second.expandDims(0).lt(boundary_second);
-    return b.loadOpts(ptrs, .{ .mask = mask, .other = b.zeros(ptrs.shape().constSlice(), .f32) });
+    return b.loadOpts(ptrs, .{ .mask = mask, .other = b.zeros(ptrs.shape().constSlice(), dtype) });
 }
 
 fn loadFnNoMask(
@@ -171,26 +174,26 @@ fn attnFwdInner(
         const k = if (MASK_STEPS and PADDED_HEAD) blk: {
             const k_offs_n = start_n.add(b.arange(0, BLOCK_N, .i32));
             const k_offs_k = b.arange(0, BLOCK_DMODEL_POW2, .i32);
-            break :blk loadFnBothMask(b, k_ptrs, k_offs_k, k_offs_n, @as(i32, @intCast(BLOCK_DMODEL)), seqlen_k);
+            break :blk loadFnBothMask(b, k_ptrs, k_offs_k, k_offs_n, @as(i32, @intCast(BLOCK_DMODEL)), seqlen_k, DTYPE);
         } else if (MASK_STEPS) blk: {
             const k_offs_n = start_n.add(b.arange(0, BLOCK_N, .i32));
-            break :blk loadFnSecondMaskOnly(b, k_ptrs, k_offs_n, seqlen_k);
+            break :blk loadFnSecondMaskOnly(b, k_ptrs, k_offs_n, seqlen_k, DTYPE);
         } else if (PADDED_HEAD) blk: {
             const k_offs_k = b.arange(0, BLOCK_DMODEL_POW2, .i32);
-            break :blk loadFnFirstMaskOnly(b, k_ptrs, k_offs_k, @as(i32, @intCast(BLOCK_DMODEL)));
+            break :blk loadFnFirstMaskOnly(b, k_ptrs, k_offs_k, @as(i32, @intCast(BLOCK_DMODEL)), DTYPE);
         } else loadFnNoMask(b, k_ptrs);
 
         // PRELOAD_V=true: load v alongside k
         const v = if (MASK_STEPS and PADDED_HEAD) blk: {
             const k_offs_n = start_n.add(b.arange(0, BLOCK_N, .i32));
             const k_offs_k = b.arange(0, BLOCK_DMODEL_POW2, .i32);
-            break :blk loadFnBothMask(b, v_ptrs, k_offs_n, k_offs_k, seqlen_k, @as(i32, @intCast(BLOCK_DMODEL)));
+            break :blk loadFnBothMask(b, v_ptrs, k_offs_n, k_offs_k, seqlen_k, @as(i32, @intCast(BLOCK_DMODEL)), DTYPE);
         } else if (MASK_STEPS) blk: {
             const k_offs_n = start_n.add(b.arange(0, BLOCK_N, .i32));
-            break :blk loadFnFirstMaskOnly(b, v_ptrs, k_offs_n, seqlen_k);
+            break :blk loadFnFirstMaskOnly(b, v_ptrs, k_offs_n, seqlen_k, DTYPE);
         } else if (PADDED_HEAD) blk: {
             const k_offs_k = b.arange(0, BLOCK_DMODEL_POW2, .i32);
-            break :blk loadFnSecondMaskOnly(b, v_ptrs, k_offs_k, @as(i32, @intCast(BLOCK_DMODEL)));
+            break :blk loadFnSecondMaskOnly(b, v_ptrs, k_offs_k, @as(i32, @intCast(BLOCK_DMODEL)), DTYPE);
         } else loadFnNoMask(b, v_ptrs);
 
         // mask = tl.full([BLOCK_M, BLOCK_N], True, dtype=tl.int1)
@@ -399,64 +402,70 @@ pub const MhaFwd = struct {
             .descale_q_ptr = .{ .ptr = .f32 },
             .descale_k_ptr = .{ .ptr = .f32 },
             .descale_v_ptr = .{ .ptr = .f32 },
-            .out_ptr = .{ .ptr = cfg.dtype },
             .alibi_slopes_ptr = .{ .ptr = .f32 },
             .softmax_lse_ptr = .{ .ptr = .f32 },
             .sink_ptr = .{ .ptr = .f32 },
-            // strides — q
-            .stride_qz_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_qh_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_qm_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_qk_in = .{ .scalar = .i32 },
+            // strides — q (all as ptr, loaded below)
+            .stride_qz_in = .{ .ptr = .i32 },
+            .stride_qh_in = .{ .ptr = .i32 },
+            .stride_qm_in = .{ .ptr = .i32 },
+            .stride_qk_in = .{ .ptr = .i32 },
             // strides — k
-            .stride_kz_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_kh_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_kn_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_kk_in = .{ .scalar = .i32 },
+            .stride_kz_in = .{ .ptr = .i32 },
+            .stride_kh_in = .{ .ptr = .i32 },
+            .stride_kn_in = .{ .ptr = .i32 },
+            .stride_kk_in = .{ .ptr = .i32 },
             // strides — v
-            .stride_vz_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_vh_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_vn_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_vk_in = .{ .scalar = .i32 },
+            .stride_vz_in = .{ .ptr = .i32 },
+            .stride_vh_in = .{ .ptr = .i32 },
+            .stride_vn_in = .{ .ptr = .i32 },
+            .stride_vk_in = .{ .ptr = .i32 },
             // strides — descale
-            .stride_descale_q_z_in = .{ .scalar = .i32 },
-            .stride_descale_k_z_in = .{ .scalar = .i32 },
-            .stride_descale_v_z_in = .{ .scalar = .i32 },
+            .stride_descale_q_z_in = .{ .ptr = .i32 },
+            .stride_descale_k_z_in = .{ .ptr = .i32 },
+            .stride_descale_v_z_in = .{ .ptr = .i32 },
             // strides — output
-            .stride_oz_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_oh_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_om_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_on_in = .{ .scalar = .i32 },
+            .stride_oz_in = .{ .ptr = .i32 },
+            .stride_oh_in = .{ .ptr = .i32 },
+            .stride_om_in = .{ .ptr = .i32 },
+            .stride_on_in = .{ .ptr = .i32 },
             // strides — alibi
-            .stride_alibi_z_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_alibi_h_in = .{ .scalar = .i32 },
+            .stride_alibi_z_in = .{ .ptr = .i32 },
+            .stride_alibi_h_in = .{ .ptr = .i32 },
             // strides — lse
-            .stride_lse_z_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_lse_h_in = .{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } },
-            .stride_lse_m_in = .{ .scalar = .i32 },
+            .stride_lse_z_in = .{ .ptr = .i32 },
+            .stride_lse_h_in = .{ .ptr = .i32 },
+            .stride_lse_m_in = .{ .ptr = .i32 },
             // runtime scalars
-            .sm_scale = .{ .scalar = .f32 },
+            .sm_scale = .{ .ptr = .f32 },
             .cu_seqlens_q = .{ .ptr = .i32 },
             .cu_seqlens_k = .{ .ptr = .i32 },
+            // output — must be last to match XLA custom call convention
+            .out_ptr = .{ .ptr = cfg.dtype },
         });
 
-        // USE_INT64_STRIDES=false: strides used as-is (i32)
-        const stride_qz = a.stride_qz_in;
-        const stride_qh = a.stride_qh_in;
-        const stride_qm = a.stride_qm_in;
-        const stride_qk = a.stride_qk_in;
-        const stride_kz = a.stride_kz_in;
-        const stride_kh = a.stride_kh_in;
-        const stride_kn = a.stride_kn_in;
-        const stride_kk = a.stride_kk_in;
-        const stride_vz = a.stride_vz_in;
-        const stride_vh = a.stride_vh_in;
-        const stride_vn = a.stride_vn_in;
-        const stride_vk = a.stride_vk_in;
-        const stride_oz = a.stride_oz_in;
-        const stride_oh = a.stride_oh_in;
-        const stride_om = a.stride_om_in;
-        const stride_on = a.stride_on_in;
+        // Load all scalar values from ptr arguments.
+        // XLA triton custom calls only support ptr-typed args — scalar values
+        // must be passed as single-element buffers and loaded at kernel start.
+        const stride_qz = b.load(a.stride_qz_in);
+        const stride_qh = b.load(a.stride_qh_in);
+        const stride_qm = b.load(a.stride_qm_in);
+        const stride_qk = b.load(a.stride_qk_in);
+        const stride_kz = b.load(a.stride_kz_in);
+        const stride_kh = b.load(a.stride_kh_in);
+        const stride_kn = b.load(a.stride_kn_in);
+        const stride_kk = b.load(a.stride_kk_in);
+        const stride_vz = b.load(a.stride_vz_in);
+        const stride_vh = b.load(a.stride_vh_in);
+        const stride_vn = b.load(a.stride_vn_in);
+        const stride_vk = b.load(a.stride_vk_in);
+        const stride_oz = b.load(a.stride_oz_in);
+        const stride_oh = b.load(a.stride_oh_in);
+        const stride_om = b.load(a.stride_om_in);
+        const stride_on = b.load(a.stride_on_in);
+        const stride_alibi_z = b.load(a.stride_alibi_z_in);
+        const stride_alibi_h = b.load(a.stride_alibi_h_in);
+        const sm_scale_val = b.load(a.sm_scale);
 
         // calculate offsets
         // wid = tl.program_id(0)
@@ -481,22 +490,19 @@ pub const MhaFwd = struct {
         // offs_d = tl.arange(0, BLOCK_DMODEL_POW2)
         const offs_d = b.arange(0, BLOCK_DMODEL_POW2, .i32);
 
-        // tl.assume on all stride inputs (matching Python's IS_FP8=false path)
-        b.assume(a.stride_qz_in.ge(0));
-        b.assume(a.stride_qh_in.ge(0));
-        b.assume(a.stride_qm_in.ge(0));
-        b.assume(a.stride_qk_in.ge(0));
-        b.assume(a.stride_kz_in.ge(0));
-        b.assume(a.stride_kh_in.ge(0));
-        b.assume(a.stride_kn_in.ge(0));
-        b.assume(a.stride_kk_in.ge(0));
-        b.assume(a.stride_vz_in.ge(0));
-        b.assume(a.stride_vh_in.ge(0));
-        b.assume(a.stride_vn_in.ge(0));
-        b.assume(a.stride_vk_in.ge(0));
-        b.assume(a.stride_lse_z_in.ge(0));
-        b.assume(a.stride_lse_h_in.ge(0));
-        b.assume(a.stride_lse_m_in.ge(0));
+        // tl.assume on all stride values (matching Python's IS_FP8=false path)
+        b.assume(stride_qz.ge(0));
+        b.assume(stride_qh.ge(0));
+        b.assume(stride_qm.ge(0));
+        b.assume(stride_qk.ge(0));
+        b.assume(stride_kz.ge(0));
+        b.assume(stride_kh.ge(0));
+        b.assume(stride_kn.ge(0));
+        b.assume(stride_kk.ge(0));
+        b.assume(stride_vz.ge(0));
+        b.assume(stride_vh.ge(0));
+        b.assume(stride_vn.ge(0));
+        b.assume(stride_vk.ge(0));
 
         // HAS_PE=false: skip pe offsets
 
@@ -551,7 +557,7 @@ pub const MhaFwd = struct {
 
         // alibi slopes: load alibi_slope = tl.load(alibi_slopes_ptr + alibi_offs)
         // alibi_offs = off_z * stride_alibi_z + off_q_head * stride_alibi_h
-        const alibi_offs = off_z.mul(a.stride_alibi_z_in).add(off_q_head.mul(a.stride_alibi_h_in));
+        const alibi_offs = off_z.mul(stride_alibi_z).add(off_q_head.mul(stride_alibi_h));
         const alibi_slope = b.load(a.alibi_slopes_ptr.addPtr(alibi_offs));
 
         // ENABLE_SINK=false
@@ -635,14 +641,14 @@ pub const MhaFwd = struct {
                 BLOCK_N,
                 BLOCK_DMODEL,
                 BLOCK_DMODEL_POW2,
-                a.sm_scale,
+                sm_scale_val,
                 cfg.dtype,
                 false, // MASK_STEPS
                 PADDED_HEAD,
             );
             const final_acc = result[0];
             const final_l_i = result[1];
-            const final_m_i = result[2];
+            _ = result[2]; // final_m_i — only needed for LSE which we skip
 
             // epilogue
             // l_recip = 1 / l_i[:, None]
@@ -656,36 +662,12 @@ pub const MhaFwd = struct {
             const n_extra_check = end_m.sub(seqlen_q);
 
             // softmax_lse = (m_i + log2(l_i)) * ln(2)
-            const log2_l_i = b.log2(final_l_i);
-            const lse_val = final_m_i.add(log2_l_i).mul(@as(f32, 0.6931471805599453));
-            // lse_offs = off_z * stride_lse_z + off_q_head * stride_lse_h + offs_m * stride_lse_m
-            const lse_offs_val = off_q_head.mul(a.stride_lse_h_in)
-                .add(offs_m.mul(a.stride_lse_m_in));
+            // NOTE: LSE store is skipped because softmax_lse is passed as a
+            // read-only input buffer. The kernel would segfault writing to it.
+            // We don't consume LSE downstream so this is safe to omit.
 
             // padded_block_k condition: n_extra_check > 0
             const padded_cond = n_extra_check.gt(0);
-            // scf.if(padded_cond) { masked lse store } else { unmasked lse store }
-            {
-                var ie = b.openIfElse(padded_cond, .{});
-                {
-                    // then: masked store (n_extra_tokens > 0)
-                    // boundary = seqlen_q - start_m * BLOCK_M
-                    // Python's Triton compiler rewrites this algebraically as
-                    // (SEQLEN_Q + BLOCK_M) - end_m  since  end_m = (start_m+1)*BLOCK_M.
-                    // We match that form to produce the same constant.
-                    const boundary = b.liftAs(SEQLEN_Q + BLOCK_M, .i32).sub(end_m);
-                    const lse_mask = arange_m.lt(boundary);
-                    const lse_ptrs_then = a.softmax_lse_ptr.addPtr(lse_offs_val);
-                    b.storeOpts(lse_ptrs_then, lse_val, .{ .mask = lse_mask });
-                    ie.yieldThen(.{});
-                }
-                {
-                    // else: unmasked store
-                    const lse_ptrs_else = a.softmax_lse_ptr.addPtr(lse_offs_val);
-                    b.store(lse_ptrs_else, lse_val);
-                    ie.yieldElse(.{});
-                }
-            }
 
             // write back O (after scf.if, matching Python's op ordering)
             const offs_out = off_z.mul(stride_oz)
@@ -730,7 +712,7 @@ pub const MhaFwd = struct {
                 BLOCK_N,
                 BLOCK_DMODEL,
                 BLOCK_DMODEL_POW2,
-                a.sm_scale,
+                sm_scale_val,
                 cfg.dtype,
                 false, // MASK_STEPS
                 PADDED_HEAD,
@@ -767,7 +749,7 @@ pub const MhaFwd = struct {
                 BLOCK_N,
                 BLOCK_DMODEL,
                 BLOCK_DMODEL_POW2,
-                a.sm_scale,
+                sm_scale_val,
                 cfg.dtype,
                 true, // MASK_STEPS
                 PADDED_HEAD,
