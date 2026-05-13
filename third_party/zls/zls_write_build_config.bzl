@@ -13,12 +13,20 @@ load(
     "zig_target_platform",
 )
 
+def _is_zig_target(kind):
+    if not kind.startswith("zig_"):
+        return False
+    for end in ("_binary", "_static_library", "_shared_library", "_test"):
+        if kind.endswith(end):
+            return True
+    return False
+
 def _zls_construct_zig_module_info_impl(target, ctx):
     """Aspect that constructs ZigModuleInfo for zig_binary and zig_library rules."""
     if ZigModuleInfo in target:
         return []
 
-    if ctx.rule.kind not in ("zig_binary", "zig_static_library", "zig_shared_library", "zig_test"):
+    if _is_zig_target(ctx.rule.kind) == False:
         return []
 
     cdeps = []
@@ -89,7 +97,6 @@ def _zls_write_build_config_impl(ctx):
             name = "c",
             canonical_name = "c",
             zigtoolchaininfo = zigtoolchaininfo,
-            global_args = global_args,
             cc_infos = [cc_info],
         )
 
