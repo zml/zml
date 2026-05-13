@@ -254,7 +254,7 @@ pub const Model = struct {
         return logits.argMax(.voc).indices.squeeze(.voc).convert(.u32);
     }
 
-    pub fn dflashInputs(
+    pub fn dflashPrefill(
         self: Model,
         tokens_: zml.Tensor,
         token_index: zml.Tensor,
@@ -262,9 +262,8 @@ pub const Model = struct {
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
         target_layer_ids: []const u32,
-        mask_token_id: u32,
-    ) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
-        const target_hidden, const out = self.model.forwardSelected(
+    ) struct { zml.Tensor, zml.Tensor, KvCache } {
+        const target_hidden, const out, const updated_kv_cache = self.model.forwardSelected(
             tokens_.withPartialTags(.{.s}),
             token_index,
             kv_cache,
@@ -275,12 +274,32 @@ pub const Model = struct {
 
         const sampled_tokens = self.greedyTokensFromHidden(out);
         const sampled_last = sampled_tokens.slice1d(.s, .single(sampled_tokens.dim(.s) - 1)).reshape(.{ .s = 1 });
-        const noise_tokens = zml.Tensor.scalar(mask_token_id, .u32)
-            .broad(tokens_.shape())
-            .dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(0, .u32) }, sampled_last);
-        const noise_embedding = embed_tokensForward(self.model.embed_tokens, noise_tokens);
+        return .{ target_hidden, sampled_last, updated_kv_cache };
+    }
 
-        return .{ target_hidden, noise_embedding, sampled_last, noise_tokens };
+    pub fn dflashVerify(
+        self: Model,
+        tokens_: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: KvCache,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
+        target_layer_ids: []const u32,
+    ) struct { zml.Tensor, zml.Tensor, KvCache } {
+        const target_hidden, const out, const updated_kv_cache = self.model.forwardSelected(
+            tokens_.withPartialTags(.{.s}),
+            token_index,
+            kv_cache,
+            attention_metadata,
+            attention_parameters,
+            target_layer_ids,
+        );
+
+        return .{ target_hidden, self.greedyTokensFromHidden(out), updated_kv_cache };
+    }
+
+    pub fn embedTokens(self: Model, tokens_: zml.Tensor) zml.Tensor {
+        return embed_tokensForward(self.model.embed_tokens, tokens_.withPartialTags(.{.s}));
     }
 };
 
@@ -359,7 +378,7 @@ pub const Llama = struct {
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
         target_layer_ids: []const u32,
-    ) struct { zml.Tensor, zml.Tensor } {
+    ) struct { zml.Tensor, zml.Tensor, KvCache } {
         const embeds = embed_tokensForward(self.embed_tokens, tokens);
         var hidden = embeds;
         var updated_kv_cache = kv_cache;
@@ -385,8 +404,7 @@ pub const Llama = struct {
         }
 
         stdx.debug.assert(selected_len > 0, "DFlash requires at least one target layer id", .{});
-        _ = updated_kv_cache.reuseBuffer(kv_cache);
-        return .{ zml.Tensor.concatenate(selected[0..selected_len], .d), self.norm.forward(hidden) };
+        return .{ zml.Tensor.concatenate(selected[0..selected_len], .d), self.norm.forward(hidden), updated_kv_cache.reuseBuffer(kv_cache) };
     }
 };
 
