@@ -20,6 +20,7 @@ const Args = struct {
     target_model: []const u8,
     prompt: []const u8 = default_prompt,
     max_seq_len: u32 = 256,
+    verbose: bool = false,
 
     pub const help =
         \\Use dflash --model=<path> --target-model=<path> [--prompt=<text>]
@@ -31,6 +32,7 @@ const Args = struct {
         \\  --target-model=<path>   Path to the target LLaMA model repository
         \\  --prompt=<text>         Prompt to tokenize; defaults to the built-in smoke-test prompt
         \\  --max-seq-len=<n>       Decode until this many accepted positions; defaults to 256
+        \\  --verbose               Print per-step speculative decoding diagnostics
         \\
     ;
 };
@@ -285,14 +287,30 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(block_tokens);
 
     var stdout = std.Io.File.stdout().writerStreaming(io, &.{});
-    try printTokens(allocator, &tokenizer, &stdout.interface, "prompt", token_ids);
-    try printTokens(allocator, &tokenizer, &stdout.interface, "target_next", target_token_slice.constItems(u32));
+    if (args.verbose) {
+        try printTokens(allocator, &tokenizer, &stdout.interface, "prompt", token_ids);
+        try printTokens(allocator, &tokenizer, &stdout.interface, "target_next", target_token_slice.constItems(u32));
+    } else {
+        var prompt_text = try decodeTokens(allocator, &tokenizer, token_ids);
+        defer prompt_text.deinit(allocator);
+        try stdout.interface.writeAll(prompt_text.items);
+        try stdout.interface.flush();
+    }
 
     var start: u32 = block_size;
     var draft_cache_base: u32 = 0;
     var target_hidden_block_buffer = target_hidden_buffer;
     var owns_target_hidden_block_buffer = false;
     var step: usize = 0;
+    var total_valid_draft_tokens: usize = 0;
+    var total_draft_tokens_checked: usize = 0;
+    var full_accept_steps: usize = 0;
+    var zero_accept_steps: usize = 0;
+    var min_valid_draft_tokens: usize = block_size - 1;
+    var max_valid_draft_tokens: usize = 0;
+    const valid_draft_token_histogram = try allocator.alloc(usize, block_size);
+    defer allocator.free(valid_draft_token_histogram);
+    @memset(valid_draft_token_histogram, 0);
     const decode_started_at: std.Io.Timestamp = .now(io, .awake);
     while (start < max_seq_len) : (step += 1) {
         const step_started_at: std.Io.Timestamp = .now(io, .awake);
@@ -392,6 +410,13 @@ pub fn main(init: std.process.Init) !void {
         while (valid_draft_tokens + 1 < block_size and block_tokens[valid_draft_tokens + 1] == posterior_tokens[valid_draft_tokens]) {
             valid_draft_tokens += 1;
         }
+        total_valid_draft_tokens += valid_draft_tokens;
+        total_draft_tokens_checked += block_size - 1;
+        min_valid_draft_tokens = @min(min_valid_draft_tokens, valid_draft_tokens);
+        max_valid_draft_tokens = @max(max_valid_draft_tokens, valid_draft_tokens);
+        valid_draft_token_histogram[valid_draft_tokens] += 1;
+        if (valid_draft_tokens == block_size - 1) full_accept_steps += 1;
+        if (valid_draft_tokens == 0) zero_accept_steps += 1;
         const correction_token = posterior_tokens[valid_draft_tokens];
         const committed_tokens: u32 = @intCast(valid_draft_tokens + 1);
 
@@ -414,13 +439,17 @@ pub fn main(init: std.process.Init) !void {
         const generated_step_end = @min(start, max_seq_len);
         var generated_step_text = try decodeTokens(allocator, &tokenizer, generated.items[generated_step_start..generated_step_end]);
         defer generated_step_text.deinit(allocator);
-        var correction_text = try decodeTokens(allocator, &tokenizer, &.{correction_token});
-        defer correction_text.deinit(allocator);
-
-        try stdout.interface.print(
-            "step={} start={} context_len={} valid_draft_tokens={} committed_tokens={} correction={} elapsed={f} correction_text=\"{s}\" text=\"{s}\"\n",
-            .{ step, start, context_len, valid_draft_tokens, committed_tokens, correction_token, step_started_at.untilNow(io, .awake), correction_text.items, generated_step_text.items },
-        );
+        if (args.verbose) {
+            var correction_text = try decodeTokens(allocator, &tokenizer, &.{correction_token});
+            defer correction_text.deinit(allocator);
+            try stdout.interface.print(
+                "step={} start={} context_len={} valid_draft_tokens={} committed_tokens={} correction={} elapsed={f} correction_text=\"{s}\" text=\"{s}\"\n",
+                .{ step, start, context_len, valid_draft_tokens, committed_tokens, correction_token, step_started_at.untilNow(io, .awake), correction_text.items, generated_step_text.items },
+            );
+        } else {
+            try stdout.interface.writeAll(generated_step_text.items);
+            try stdout.interface.flush();
+        }
     }
     if (owns_target_hidden_block_buffer) target_hidden_block_buffer.deinit();
 
@@ -428,10 +457,73 @@ pub fn main(init: std.process.Init) !void {
     const decoded_tokens: u32 = start - block_size;
     const decode_seconds = @as(f64, @floatFromInt(decode_elapsed.nanoseconds)) / std.time.ns_per_s;
     const tokens_per_second = @as(f64, @floatFromInt(decoded_tokens)) / decode_seconds;
-    try printTokens(allocator, &tokenizer, &stdout.interface, "generated", generated.items[0..@min(generated.items.len, max_seq_len)]);
-    try stdout.interface.print("target_cache_logical_len: {}\n", .{start});
-    try stdout.interface.print("draft_cache_base_index: {}\n", .{draft_cache_base});
-    try stdout.interface.print("decode_elapsed={f} decoded_tokens={} tokens_per_second={d:.3}\n", .{ decode_elapsed, decoded_tokens, tokens_per_second });
+    const draft_acceptance_rate = if (total_draft_tokens_checked == 0)
+        0
+    else
+        @as(f64, @floatFromInt(total_valid_draft_tokens)) / @as(f64, @floatFromInt(total_draft_tokens_checked));
+    const avg_valid_draft_tokens = if (step == 0)
+        0
+    else
+        @as(f64, @floatFromInt(total_valid_draft_tokens)) / @as(f64, @floatFromInt(step));
+    if (step == 0) min_valid_draft_tokens = 0;
+    if (args.verbose) {
+        var generated_text = try decodeTokens(allocator, &tokenizer, generated.items[0..@min(generated.items.len, max_seq_len)]);
+        defer generated_text.deinit(allocator);
+        try stdout.interface.print("\n--- generated_text ---\n{s}\n", .{generated_text.items});
+    } else {
+        try stdout.interface.writeByte('\n');
+    }
+    try stdout.interface.print(
+        \\
+        \\--- decode_summary ---
+        \\  elapsed: {f}
+        \\  decoded_tokens: {}
+        \\  tokens_per_second: {d:.3}
+        \\  steps: {}
+        \\  target_cache_logical_len: {}
+        \\  draft_cache_base_index: {}
+        \\  valid_draft_tokens:
+        \\    avg: {d:.3}
+        \\    min: {}
+        \\    max: {}
+        \\    total: {}
+        \\  draft_acceptance_rate: {d:.3}
+        \\  full_accept_steps: {}
+        \\  zero_accept_steps: {}
+        \\
+    ,
+        .{
+            decode_elapsed,
+            decoded_tokens,
+            tokens_per_second,
+            step,
+            start,
+            draft_cache_base,
+            avg_valid_draft_tokens,
+            min_valid_draft_tokens,
+            max_valid_draft_tokens,
+            total_valid_draft_tokens,
+            draft_acceptance_rate,
+            full_accept_steps,
+            zero_accept_steps,
+        },
+    );
+    try stdout.interface.print("\n--- valid_draft_tokens_histogram ---\n", .{});
+    const histogram_bar_width: usize = 80;
+    for (valid_draft_token_histogram, 0..) |count, valid_tokens| {
+        if (count == 0) {
+            try stdout.interface.print("  {d:>2}: {d:>4}\n", .{ valid_tokens, count });
+            continue;
+        }
+        const pct = if (step == 0)
+            0
+        else
+            100.0 * @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(step));
+        const bar_len = @max(@as(usize, 1), count * histogram_bar_width / step);
+        try stdout.interface.print("  {d:>2}: {d:>4} ({d:>5.1}%)  ", .{ valid_tokens, count, pct });
+        try stdout.interface.splatByteAll('x', bar_len);
+        try stdout.interface.writeByte('\n');
+    }
     try stdout.interface.flush();
 }
 
