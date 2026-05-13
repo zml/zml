@@ -262,10 +262,10 @@ pub fn main(init: std.process.Init) !void {
     );
     defer token_index_buffer.deinit();
 
-    var target_kv_cache_buffers = try llama.KvCache.initBuffer(target_kv_cache, io, platform, shardings.model);
+    var target_kv_cache_buffers = try initZeroTargetKvCacheBuffer(allocator, io, platform, target_kv_cache, shardings.model);
     defer llama.KvCache.deinitBuffer(&target_kv_cache_buffers);
 
-    var draft_kv_cache_buffers = try dflash.KvCache.initBuffer(draft_kv_cache, io, platform, shardings.model);
+    var draft_kv_cache_buffers = try initZeroDraftKvCacheBuffer(allocator, io, platform, draft_kv_cache, shardings.model);
     defer dflash.KvCache.deinitBuffer(&draft_kv_cache_buffers);
 
     var attention_metadata_buffers = try attention_metadata.initBuffer(io, platform, shardings.model);
@@ -445,6 +445,7 @@ pub fn main(init: std.process.Init) !void {
         const correction_token = posterior_tokens[valid_draft_tokens];
         const committed_tokens: u32 = @intCast(valid_draft_tokens + 1);
 
+        const generated_step_start = start;
         for (block_tokens[0..@as(usize, @intCast(committed_tokens))]) |token| {
             try setGeneratedToken(&generated, allocator, start, token);
             start += 1;
@@ -467,9 +468,15 @@ pub fn main(init: std.process.Init) !void {
         owns_target_hidden_increment_buffer = true;
         verified_hidden_buffer.deinit();
 
+        const generated_step_end = @min(start, max_seq_len);
+        var generated_step_text = try decodeTokens(allocator, &tokenizer, generated.items[generated_step_start..generated_step_end]);
+        defer generated_step_text.deinit(allocator);
+        var correction_text = try decodeTokens(allocator, &tokenizer, &.{correction_token});
+        defer correction_text.deinit(allocator);
+
         try stdout.interface.print(
-            "step={} start={} context_len={} valid_draft_tokens={} committed_tokens={} correction={}\n",
-            .{ step, start, context_len, valid_draft_tokens, committed_tokens, correction_token },
+            "step={} start={} context_len={} valid_draft_tokens={} committed_tokens={} correction={} correction_text=\"{s}\" text=\"{s}\"\n",
+            .{ step, start, context_len, valid_draft_tokens, committed_tokens, correction_token, correction_text.items, generated_step_text.items },
         );
     }
     if (owns_target_hidden_increment_buffer) target_hidden_increment_buffer.deinit();
@@ -631,6 +638,16 @@ fn printTokens(
     try stdout.writeAll("]\n");
 }
 
+fn decodeTokens(
+    allocator: std.mem.Allocator,
+    tokenizer: *const zml.tokenizer.Tokenizer,
+    token_ids: []const u32,
+) !std.ArrayList(u8) {
+    var decoder = try tokenizer.decoder();
+    defer decoder.deinit();
+    return decoder.decodeAlloc(allocator, token_ids);
+}
+
 const Shardings = struct {
     model: zml.Sharding,
 
@@ -690,6 +707,45 @@ fn hiddenPrefixBuffer(
     defer allocator.free(prefix_bytes);
     @memcpy(prefix_bytes, full.constData()[0..prefix_bytes.len]);
     return zml.Buffer.fromSlice(io, platform, zml.Slice.init(prefix_shape, prefix_bytes), .replicated);
+}
+
+fn initZeroTargetKvCacheBuffer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    kv_cache: llama.KvCache,
+    sharding: zml.Sharding,
+) !llama.KvCache.Buffer {
+    return .{
+        .k = try zeroBuffer(allocator, io, platform, kv_cache.k.shape(), sharding),
+        .v = try zeroBuffer(allocator, io, platform, kv_cache.v.shape(), sharding),
+    };
+}
+
+fn initZeroDraftKvCacheBuffer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    kv_cache: dflash.KvCache,
+    sharding: zml.Sharding,
+) !dflash.KvCache.Buffer {
+    return .{
+        .k = try zeroBuffer(allocator, io, platform, kv_cache.k.shape(), sharding),
+        .v = try zeroBuffer(allocator, io, platform, kv_cache.v.shape(), sharding),
+    };
+}
+
+fn zeroBuffer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    shape: zml.Shape,
+    sharding: zml.Sharding,
+) !zml.Buffer {
+    const bytes = try allocator.alloc(u8, shape.byteSize());
+    defer allocator.free(bytes);
+    @memset(bytes, 0);
+    return zml.Buffer.fromSlice(io, platform, zml.Slice.init(shape, bytes), sharding);
 }
 
 fn replaceTargetKvCacheBuffers(dst: *llama.KvCache.Buffer, src: *llama.KvCache.Buffer) void {
