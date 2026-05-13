@@ -95,7 +95,6 @@ pub const AceEnc_handler = struct {
     pub fn compileModel(zml_handler: *main.Zml_handler, model: AceEnc, silence: SilenceGenerator, params: Params, shardings: main.Shardings) !Exes {
         const shardings_arr = shardings.all();
         const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
-        std.log.info("EMB compile models", .{});
 
         var encode_lyric_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: LyricEncoder, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
@@ -502,7 +501,7 @@ pub const LyricEncoder = struct {
     }
 
     pub fn forward(self: LyricEncoder, lyric_emb: zml.Tensor) zml.Tensor {
-        var lyric_proj = self.lyric_projector.forward(lyric_emb);
+        var lyric_proj = self.lyric_projector.forward(lyric_emb.withTags(.{ .s, .d }));
         lyric_proj = lyric_proj.rename(.{ .d_out = .d });
         for (self.lyric_layers) |layer| {
             // lyrics use full bidirectionnal attention : no masking
