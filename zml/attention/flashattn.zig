@@ -715,7 +715,7 @@ pub const paged_fa2 = struct {
         decode_offset: zml.Tensor,
 
         pub fn init(opts: MixedOptions) MixedMetadata {
-            _ = opts; // autofix
+            _ = opts;
             return .{
                 .decode_offset = .init(.{}, .i32),
             };
@@ -1318,7 +1318,7 @@ pub const paged_fa3 = struct {
         decode_offset: zml.Tensor,
 
         pub fn init(opts: MixedOptions) MixedMetadata {
-            _ = opts; // autofix
+            _ = opts;
             return .{
                 .decode_offset = .init(.{}, .i32),
             };
