@@ -33,9 +33,7 @@ pub const AceLlm_handler = struct {
         const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
         defer parsed_config.deinit();
         const config = try parsed_config.value.dupe(zml_handler.allocator);
-        const acellm_options: Options = .{
-            .seq_len = 1024,
-        };
+        const acellm_options: Options = .{};
         std.log.info("5Hz parsed", .{});
 
         const tokenizer = try loadTokenizer(zml_handler, repo);
@@ -434,7 +432,7 @@ pub const Config = struct {
 };
 
 pub const Options = struct {
-    seq_len: u32 = 1024,
+    seq_len: u32 = 2048,
 };
 
 pub const Phase = struct {
