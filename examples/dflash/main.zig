@@ -575,7 +575,7 @@ fn draftTokens(
         .cmp(.LT, active_context_len.convert(.u32).broad(.init(.{ .s = context.len }, .u32)));
     const target_hidden = active_mask.broad(target_hidden_slice.shape())
         .select(target_hidden_slice, zml.Tensor.constant(target_hidden_slice.dtype().zero()).broad(target_hidden_slice.shape()));
-    const noise_embedding = target_model.embedTokens(block_tokens);
+    const noise_embedding = target_model.embedForward(block_tokens);
     const context_position_ids = zml.Tensor.arange(.{ .end = context.len }, cache_index.dtype())
         .withTags(.{.s})
         .add(cache_index.broad(.init(.{ .s = context.len }, cache_index.dtype())));
@@ -585,7 +585,7 @@ fn draftTokens(
         .add(cache_index.broad(.init(.{ .s = block_tokens.dim(.s) }, cache_index.dtype())));
     const position_ids = zml.Tensor.concatenate(&.{ context_position_ids, proposal_position_ids }, .s);
     const hidden, const updated_kv_cache = draft_model.forward(target_hidden, noise_embedding, position_ids, draft_kv_cache, cache_index, active_context_len);
-    return .{ target_model.greedyTokensFromHidden(hidden), updated_kv_cache };
+    return .{ target_model.sampleForward(hidden), updated_kv_cache };
 }
 
 fn paddedPromptTokens(allocator: std.mem.Allocator, token_ids: []const u32, block_size: u32) ![]u32 {
