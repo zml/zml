@@ -21,6 +21,7 @@ const Args = struct {
     target_model: []const u8,
     prompt: []const u8 = default_prompt,
     max_seq_len: u32 = 256,
+    temperature: f32 = 0.0,
 
     pub const help =
         \\Options:
@@ -28,6 +29,7 @@ const Args = struct {
         \\  --target-model=<path>   Path to the target LLaMA model repository
         \\  --prompt=<text>         Prompt to tokenize; defaults to the built-in smoke-test prompt
         \\  --max-seq-len=<n>       Decode until this many accepted positions; defaults to 256
+        \\  --temperature=<t>       Sampling temperature; 0 uses greedy decoding
         \\
     ;
 };
@@ -42,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
     var prompt = try tokenizePrompt(project, args);
     defer prompt.deinit(allocator);
 
-    var models = try initModelsAndCaches(project, prompt);
+    var models = try initModelsAndCaches(project, prompt, args);
     defer models.deinit(allocator);
 
     var compiled = try compile(allocator, project, models, prompt);
@@ -77,6 +79,9 @@ pub fn main(init: std.process.Init) !void {
     var attention_metadata_buffers = try models.target_attention.metadata.initBuffer(project.io, project.platform, project.shardings.model);
     defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
+    var rng_buffer = try zml.Tensor.Rng.initBuffer(project.io, project.platform, .replicated, 0);
+    defer zml.Tensor.Rng.deinitBuffer(&rng_buffer);
+
     var prefill_output = try runPrefill(
         allocator,
         project,
@@ -85,6 +90,7 @@ pub fn main(init: std.process.Init) !void {
         input_tokens_buffer,
         token_index_buffer,
         &target_kv_cache_buffers,
+        &rng_buffer,
         attention_metadata_buffers,
     );
     defer prefill_output.target_hidden_buffer.deinit();
@@ -100,6 +106,7 @@ pub fn main(init: std.process.Init) !void {
         prefill_output,
         &target_kv_cache_buffers,
         &draft_kv_cache_buffers,
+        &rng_buffer,
         attention_metadata_buffers,
         &stdout.interface,
     );
@@ -243,6 +250,8 @@ const ModelsAndCaches = struct {
     active_context_len_tensor: zml.Tensor,
     target_kv_cache: llama.KvCache,
     draft_kv_cache: dflash.KvCache,
+    rng: zml.Tensor.Rng,
+    sampling: llama.SamplingConfig,
     target_attention: llama_inference.TargetAttention,
     target_layers: llama_inference.TargetLayers,
     block_size: u32,
@@ -253,7 +262,7 @@ const ModelsAndCaches = struct {
     }
 };
 
-fn initModelsAndCaches(project: *Project, prompt: TokenizedPrompt) !ModelsAndCaches {
+fn initModelsAndCaches(project: *Project, prompt: TokenizedPrompt, args: Args) !ModelsAndCaches {
     const draft_model = try dflash.Model.init(project.allocator, project.store.view(), project.parsed_config.value);
     errdefer draft_model.deinit(project.allocator);
 
@@ -274,6 +283,8 @@ fn initModelsAndCaches(project: *Project, prompt: TokenizedPrompt) !ModelsAndCac
         .active_context_len_tensor = .init(.{}, .u32),
         .target_kv_cache = target_model.initKvCache(project.parsed_target_config.value, cache_seq_len),
         .draft_kv_cache = draft_model.initKvCache(project.parsed_config.value, cache_seq_len),
+        .rng = .init(),
+        .sampling = .{ .temperature = args.temperature },
         .target_attention = target_attention,
         .target_layers = llama_inference.TargetLayers.init(draft_model.target_layer_ids),
         .block_size = block_size,
@@ -307,6 +318,8 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
         models.input_tokens_tensor,
         models.token_index_tensor,
         models.target_kv_cache,
+        models.rng,
+        models.sampling,
         models.target_attention,
         &all_shardings,
     );
@@ -330,6 +343,8 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
                 models.draft_kv_cache,
                 models.token_index_tensor,
                 models.active_context_len_tensor,
+                models.rng,
+                models.sampling,
             },
             .{ .shardings = &all_shardings },
         );
@@ -348,6 +363,8 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
         models.block_tokens_tensor,
         models.token_index_tensor,
         models.target_kv_cache,
+        models.rng,
+        models.sampling,
         models.target_attention,
         &all_shardings,
     );
@@ -391,6 +408,7 @@ fn runPrefill(
     input_tokens_buffer: zml.Buffer,
     token_index_buffer: zml.Buffer,
     target_kv_cache_buffers: *llama.KvCache.Buffer,
+    rng_buffer: *zml.Tensor.Rng.Buffer,
     attention_metadata_buffers: anytype,
 ) !PrefillOutput {
     var prefill_args = try compiled.target_prefill_exe.args(allocator);
@@ -404,17 +422,20 @@ fn runPrefill(
         input_tokens_buffer,
         token_index_buffer,
         target_kv_cache_buffers.*,
+        rng_buffer.*,
         attention_metadata_buffers,
     });
     compiled.target_prefill_exe.call(prefill_args, &prefill_results);
 
-    const target_hidden_buffer, var target_token_buffer, var prefilled_target_kv_cache_buffers = prefill_results.get(struct {
+    const target_hidden_buffer, var target_token_buffer, var prefilled_target_kv_cache_buffers, var updated_rng_buffer = prefill_results.get(struct {
         zml.Buffer,
         zml.Buffer,
         llama.KvCache.Buffer,
+        zml.Tensor.Rng.Buffer,
     });
     defer target_token_buffer.deinit();
     llama.KvCache.replaceBuffers(target_kv_cache_buffers, &prefilled_target_kv_cache_buffers);
+    replaceRngBuffer(rng_buffer, &updated_rng_buffer);
 
     var target_token_slice = try target_token_buffer.toSliceAlloc(allocator, project.io);
     defer target_token_slice.free(allocator);
@@ -427,12 +448,16 @@ fn runPrefill(
 
 const VerificationOutput = struct {
     verified_hidden_buffer: zml.Buffer,
-    posterior_token_buffer: zml.Buffer,
-    posterior_token_slice: zml.Slice,
+    valid_draft_tokens_buffer: zml.Buffer,
+    correction_token_buffer: zml.Buffer,
+    valid_draft_tokens_slice: zml.Slice,
+    correction_token_slice: zml.Slice,
 
     pub fn deinitTransient(self: *VerificationOutput, allocator: std.mem.Allocator) void {
-        self.posterior_token_slice.free(allocator);
-        self.posterior_token_buffer.deinit();
+        self.correction_token_slice.free(allocator);
+        self.valid_draft_tokens_slice.free(allocator);
+        self.correction_token_buffer.deinit();
+        self.valid_draft_tokens_buffer.deinit();
     }
 };
 
@@ -447,6 +472,7 @@ fn runVerification(
     block_tokens_buffer: zml.Buffer,
     token_index: u32,
     target_kv_cache_buffers: *llama.KvCache.Buffer,
+    rng_buffer: *zml.Tensor.Rng.Buffer,
     attention_metadata_buffers: anytype,
 ) !VerificationOutput {
     var verify_token_index = token_index;
@@ -463,21 +489,27 @@ fn runVerification(
         block_tokens_buffer,
         verify_token_index_buffer,
         target_kv_cache_buffers.*,
+        rng_buffer.*,
         attention_metadata_buffers,
     });
     compiled.target_verify_exe.call(verify_args.*, verify_results);
 
-    const verified_hidden_buffer, const posterior_token_buffer, var verified_target_kv_cache_buffers = verify_results.get(struct {
+    const verified_hidden_buffer, const valid_draft_tokens_buffer, const correction_token_buffer, var verified_target_kv_cache_buffers, var updated_rng_buffer = verify_results.get(struct {
+        zml.Buffer,
         zml.Buffer,
         zml.Buffer,
         llama.KvCache.Buffer,
+        zml.Tensor.Rng.Buffer,
     });
     llama.KvCache.replaceBuffers(target_kv_cache_buffers, &verified_target_kv_cache_buffers);
+    replaceRngBuffer(rng_buffer, &updated_rng_buffer);
 
     return .{
         .verified_hidden_buffer = verified_hidden_buffer,
-        .posterior_token_buffer = posterior_token_buffer,
-        .posterior_token_slice = try posterior_token_buffer.toSliceAlloc(allocator, project.io),
+        .valid_draft_tokens_buffer = valid_draft_tokens_buffer,
+        .correction_token_buffer = correction_token_buffer,
+        .valid_draft_tokens_slice = try valid_draft_tokens_buffer.toSliceAlloc(allocator, project.io),
+        .correction_token_slice = try correction_token_buffer.toSliceAlloc(allocator, project.io),
     };
 }
 
@@ -513,6 +545,7 @@ fn runSpeculativeDecoding(
     prefill_output: PrefillOutput,
     target_kv_cache_buffers: *llama.KvCache.Buffer,
     draft_kv_cache_buffers: *dflash.KvCache.Buffer,
+    rng_buffer: *zml.Tensor.Rng.Buffer,
     attention_metadata_buffers: anytype,
     stdout: *std.Io.Writer,
 ) !DecodeResult {
@@ -598,15 +631,18 @@ fn runSpeculativeDecoding(
             draft_kv_cache_buffers.*,
             draft_cache_index_buffer,
             draft_active_context_len_buffer,
+            rng_buffer.*,
         });
         selected_draft_exe.exe.call(selected_draft_exe.args, &selected_draft_exe.results);
 
-        var draft_token_buffer, var updated_draft_kv_cache_buffers = selected_draft_exe.results.get(struct {
+        var draft_token_buffer, var updated_draft_kv_cache_buffers, var updated_rng_buffer = selected_draft_exe.results.get(struct {
             zml.Buffer,
             dflash.KvCache.Buffer,
+            zml.Tensor.Rng.Buffer,
         });
         defer draft_token_buffer.deinit();
         dflash.KvCache.replaceBuffers(draft_kv_cache_buffers, &updated_draft_kv_cache_buffers);
+        replaceRngBuffer(rng_buffer, &updated_rng_buffer);
         draft_cache_base = start;
 
         var draft_token_slice = try draft_token_buffer.toSliceAlloc(allocator, project.io);
@@ -632,15 +668,12 @@ fn runSpeculativeDecoding(
             block_tokens_buffer,
             start,
             target_kv_cache_buffers,
+            rng_buffer,
             attention_metadata_buffers,
         );
         defer verification.deinitTransient(allocator);
-        const posterior_tokens = verification.posterior_token_slice.constItems(u32);
-
-        var valid_draft_tokens: usize = 0;
-        while (valid_draft_tokens + 1 < models.block_size and block_tokens[valid_draft_tokens + 1] == posterior_tokens[valid_draft_tokens]) {
-            valid_draft_tokens += 1;
-        }
+        const valid_draft_tokens: usize = @intCast(verification.valid_draft_tokens_slice.constItems(u32)[0]);
+        const correction_token = verification.correction_token_slice.constItems(u32)[0];
         total_valid_draft_tokens += valid_draft_tokens;
         total_draft_tokens_checked += models.block_size - 1;
         min_valid_draft_tokens = @min(min_valid_draft_tokens, valid_draft_tokens);
@@ -649,7 +682,6 @@ fn runSpeculativeDecoding(
         if (valid_draft_tokens == models.block_size - 1) full_accept_steps += 1;
         if (valid_draft_tokens == 0) zero_accept_steps += 1;
 
-        const correction_token = posterior_tokens[valid_draft_tokens];
         const committed_tokens: u32 = @intCast(valid_draft_tokens + 1);
         const generated_step_start = start;
         for (block_tokens[0..@as(usize, @intCast(committed_tokens))]) |token| {
@@ -803,7 +835,9 @@ fn draftTokens(
     draft_kv_cache: dflash.KvCache,
     cache_index: zml.Tensor,
     active_context_len: zml.Tensor,
-) struct { zml.Tensor, dflash.KvCache } {
+    rng: zml.Tensor.Rng,
+    sampling: llama.SamplingConfig,
+) struct { zml.Tensor, dflash.KvCache, zml.Tensor.Rng } {
     const target_hidden_slice = target_hidden_block.withPartialTags(.{ .s, .d }).slice1d(.s, .{
         .start = 0,
         .end = context.len,
@@ -822,7 +856,8 @@ fn draftTokens(
         .add(cache_index.broad(.init(.{ .s = block_tokens.dim(.s) }, cache_index.dtype())));
     const position_ids = zml.Tensor.concatenate(&.{ context_position_ids, proposal_position_ids }, .s);
     const hidden, const updated_kv_cache = draft_model.forward(target_hidden, noise_embedding, position_ids, draft_kv_cache, cache_index, active_context_len);
-    return .{ target_model.sampleForward(hidden), updated_kv_cache };
+    const sampled_tokens, const updated_rng = target_model.sampleForward(hidden, sampling, rng);
+    return .{ sampled_tokens, updated_kv_cache, updated_rng };
 }
 
 fn paddedPromptTokens(allocator: std.mem.Allocator, token_ids: []const u32, block_size: u32) ![]u32 {
@@ -883,6 +918,10 @@ fn replaceBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
         dst.deinit();
     }
     dst.* = src.*;
+}
+
+fn replaceRngBuffer(dst: *zml.Tensor.Rng.Buffer, src: *zml.Tensor.Rng.Buffer) void {
+    replaceBuffer(&dst._state, &src._state);
 }
 
 fn sameBufferHandle(a: zml.Buffer, b: zml.Buffer) bool {

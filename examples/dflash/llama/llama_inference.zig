@@ -62,6 +62,8 @@ pub fn compileTargetPrefill(
     input_tokens: zml.Tensor,
     token_index: zml.Tensor,
     target_kv_cache: model.KvCache,
+    rng: zml.Tensor.Rng,
+    sampling: model.SamplingConfig,
     target_attention: TargetAttention,
     shardings: []const zml.Sharding,
 ) !zml.Exe {
@@ -76,6 +78,8 @@ pub fn compileTargetPrefill(
             input_tokens,
             token_index,
             target_kv_cache,
+            rng,
+            sampling,
             target_attention.metadata,
             target_attention.parameters,
         },
@@ -93,6 +97,8 @@ pub fn compileTargetVerify(
     block_tokens: zml.Tensor,
     token_index: zml.Tensor,
     target_kv_cache: model.KvCache,
+    rng: zml.Tensor.Rng,
+    sampling: model.SamplingConfig,
     target_attention: TargetAttention,
     shardings: []const zml.Sharding,
 ) !zml.Exe {
@@ -107,6 +113,8 @@ pub fn compileTargetVerify(
             block_tokens,
             token_index,
             target_kv_cache,
+            rng,
+            sampling,
             target_attention.metadata,
             target_attention.parameters,
         },
@@ -121,22 +129,26 @@ fn targetPrefill(
     tokens: zml.Tensor,
     token_index: zml.Tensor,
     target_kv_cache: model.KvCache,
+    rng: zml.Tensor.Rng,
+    sampling: model.SamplingConfig,
     attention_metadata: attention.Metadata,
     attention_parameters: attention.Parameters,
-) struct { zml.Tensor, zml.Tensor, model.KvCache } {
+) struct { zml.Tensor, zml.Tensor, model.KvCache, zml.Tensor.Rng } {
     const prefill_tokens = tokens.withPartialTags(.{.s}).slice1d(.s, .{
         .start = 0,
         .end = context.len,
     });
-    const target_hidden, const target_token, const updated_kv_cache = target_model.prefillForward(
+    const target_hidden, const target_token, const updated_kv_cache, const updated_rng = target_model.prefillForward(
         prefill_tokens,
         token_index,
         target_kv_cache,
         attention_metadata,
         attention_parameters,
         target_layers.slice(),
+        sampling,
+        rng,
     );
-    return .{ padTargetHidden(target_hidden, tokens.dim(.s)), target_token, updated_kv_cache };
+    return .{ padTargetHidden(target_hidden, tokens.dim(.s)), target_token, updated_kv_cache, updated_rng };
 }
 
 fn targetVerify(
@@ -146,18 +158,22 @@ fn targetVerify(
     tokens: zml.Tensor,
     token_index: zml.Tensor,
     target_kv_cache: model.KvCache,
+    rng: zml.Tensor.Rng,
+    sampling: model.SamplingConfig,
     attention_metadata: attention.Metadata,
     attention_parameters: attention.Parameters,
-) struct { zml.Tensor, zml.Tensor, model.KvCache } {
-    const target_hidden, const target_token, const updated_kv_cache = target_model.verifyForward(
+) struct { zml.Tensor, zml.Tensor, zml.Tensor, model.KvCache, zml.Tensor.Rng } {
+    const target_hidden, const valid_draft_tokens, const correction_token, const updated_kv_cache, const updated_rng = target_model.verifyForward(
         tokens,
         token_index,
         target_kv_cache,
         attention_metadata,
         attention_parameters,
         target_layers.slice(),
+        sampling,
+        rng,
     );
-    return .{ padTargetHidden(target_hidden, context.hidden_len), target_token, updated_kv_cache };
+    return .{ padTargetHidden(target_hidden, context.hidden_len), valid_draft_tokens, correction_token, updated_kv_cache, updated_rng };
 }
 
 pub fn padTargetHidden(target_hidden_: zml.Tensor, hidden_len: i64) zml.Tensor {
