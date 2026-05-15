@@ -502,54 +502,6 @@ pub const AceDit = struct {
         self.scale_shift_table.deinit();
     }
 
-    // given a given latent state x, and a timestamp t, computes the predicted flow velocity v by running the full decoder model,
-    // conditioned on the encoder hidden states y. we also return it's transposate, as it's relatively small, because on the last
-    // step of diffusion, the final latent must be in transposed shape for the decoder.
-    pub fn forward(self: AceDit, t_curr: zml.Tensor, t_next: zml.Tensor, x: zml.Tensor, context_latents: zml.Tensor, y_enc: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        var y = self.condition_embedder.forward(y_enc.withTags(.{ .s, .d }));
-        y = y.rename(.{ .d_out = .d });
-        
-        // embed timesteps
-        const temb_t, const timestep_proj_t = self.time_embed.forward(t_curr);
-        const temb_r, const timestep_proj_r = self.time_embed_r.forward(t_curr.sub(t_curr));
-        const temb = temb_t.add(temb_r);
-        const timestep_proj = timestep_proj_t.add(timestep_proj_r);
-        
-        var hidden_states = self.mergeAndPadLatents(x, context_latents);
-
-        // embed latents into decoder hidden dim
-        // proj_in projects three concatenated audio channels into the embedding space
-        // time is patched with size 2 so patchIn does [t, 3 * a] -> [t / 2, d_emb]
-        hidden_states = self.proj_in.forward(hidden_states);
-
-        // pass through decoder transformer layers
-        // decoder uses alternating full/sliding attention layers, each contaning a cross attention and a self attention
-        hidden_states = hidden_states.rename(.{ .t = .s });
-        const window_attention_mask = createBidirectionalWindowMask(hidden_states.dim(.s), self.config.sliding_window);
-        for (self.layers) |layer| {
-            const actual_mask = if (layer.id % 2 == 0) window_attention_mask else null;
-            hidden_states = layer.forward(hidden_states, y, timestep_proj, actual_mask);
-        }
-        hidden_states = hidden_states.rename(.{ .s = .t });
-        
-        // adaptive layer norm based on scale shift
-        hidden_states = self.scale_shift(hidden_states, temb);
-        
-        // project back latent embeddings into original latent space
-        // proj_out projects from the embedding space onto a single audio channel
-        // also depatches the time : [t / 2, d_emb] -> [t, a]
-        hidden_states = self.proj_out.forward(hidden_states);
-           
-        // remove padding from output : this is now the predicted flow velocity v
-        const v = hidden_states.slice1d(.t, .{ .start = 0, .end = x.dim(.t) });
-        
-        // update noised latent x with one step of flow matching
-        const dt = t_next.sub(t_curr).broad(x.shape()).convert(.bf16);
-        const x_next = x.add(v.mul(dt));
-     
-        return .{ x_next, x_next.withTags(.{ .t, .a }).transpose(.{ .a, .t }) };
-    }
-
     pub fn preprocess(self: AceDit, t_curr: zml.Tensor, x: zml.Tensor, context_latents: zml.Tensor, y_enc: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
         var y = self.condition_embedder.forward(y_enc.withTags(.{ .s, .d }));
         y = y.rename(.{ .d_out = .d });
@@ -570,6 +522,20 @@ pub const AceDit = struct {
         return .{ y, hidden_states, temb, timestep_proj };
     }
 
+    pub fn mergeAndPadLatents(self: AceDit, x: zml.Tensor, context_latents: zml.Tensor) zml.Tensor {
+        // merge the three input audio channels : context_latents = [src_audio, mask] with x = [target_audio]
+        var hidden_states = zml.Tensor.concatenate(&.{ context_latents, x }, .a);
+        // pad hidden_states so that time dim is a multiple of patch_size
+        const d_time: u32 = @intCast(hidden_states.dim(.t));
+        if (d_time % self.config.patch_size != 0) {
+            const d_pad: u32 = self.config.patch_size - (d_time % self.config.patch_size);
+            // [.a, .t] -> [.a, .t + d_pad]
+            const pad_shape = zml.Shape.init(.{ d_pad, hidden_states.dim(.a) }, hidden_states.dtype());
+            hidden_states = zml.Tensor.concatenate(&.{ hidden_states, zml.Tensor.zeroes(pad_shape) }, .t);
+        }
+        return hidden_states;
+    }
+
     pub fn postprocess(self: AceDit, t_curr: zml.Tensor, t_next: zml.Tensor, x: zml.Tensor, hidden_states_: zml.Tensor, temb: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         // adaptive layer norm based on scale shift
         var hidden_states = self.scale_shift(hidden_states_, temb);
@@ -586,69 +552,7 @@ pub const AceDit = struct {
         const dt = t_next.sub(t_curr).broad(x.shape()).convert(.bf16);
         const x_next = x.add(v.mul(dt));
      
-        return .{ x_next, x_next.withTags(.{ .t, .a }).transpose(.{ .a, .t }) };
-    }
-
-    pub fn forwardNoIter(self: AceDit, t_curr: zml.Tensor, t_next: zml.Tensor, x: zml.Tensor, context_latents: zml.Tensor, y_enc: zml.Tensor) zml.Tensor {
-        var y = self.condition_embedder.forward(y_enc.withTags(.{ .s, .d }));
-        y = y.rename(.{ .d_out = .d });
-        
-        // embed timesteps
-        const temb_t, const timestep_proj_t = self.time_embed.forward(t_curr);
-        const temb_r, const timestep_proj_r = self.time_embed_r.forward(t_curr.sub(t_curr));
-        const temb = temb_t.add(temb_r);
-        const timestep_proj = timestep_proj_t.add(timestep_proj_r);
-        
-        var hidden_states = self.mergeAndPadLatents(x, context_latents);
-
-        // embed latents into decoder hidden dim
-        // proj_in projects three concatenated audio channels into the embedding space
-        // time is patched with size 2 so patchIn does [t, 3 * a] -> [t / 2, d_emb]
-        hidden_states = self.proj_in.forward(hidden_states);
-
-        // pass through decoder transformer layers
-        // decoder uses alternating full/sliding attention layers, each contaning a cross attention and a self attention
-        hidden_states = hidden_states.rename(.{ .t = .s });
-        const window_attention_mask = createBidirectionalWindowMask(hidden_states.dim(.s), self.config.sliding_window);
-        for (self.layers) |layer| {
-            const actual_mask = if (layer.id % 2 == 0) window_attention_mask else null;
-            hidden_states = layer.forward(hidden_states, y, timestep_proj, actual_mask);
-        }
-        hidden_states = hidden_states.rename(.{ .s = .t });
-        
-        // adaptive layer norm based on scale shift
-        hidden_states = self.scale_shift(hidden_states, temb);
-        
-        // project back latent embeddings into original latent space
-        // proj_out projects from the embedding space onto a single audio channel
-        // also depatches the time : [t / 2, d_emb] -> [t, a]
-        hidden_states = self.proj_out.forward(hidden_states);
-           
-        // remove padding from output : this is now the predicted flow velocity v
-        const v = hidden_states.slice1d(.t, .{ .start = 0, .end = x.dim(.t) });
-        
-        _ = t_next;
-        return v;
-    }
-    
-    pub fn mergeAndPadLatents(self: AceDit, x: zml.Tensor, context_latents: zml.Tensor) zml.Tensor {
-        // merge the three input audio channels : context_latents = [src_audio, mask] with x = [target_audio]
-        var hidden_states = zml.Tensor.concatenate(&.{ context_latents, x }, .a);
-        // pad hidden_states so that time dim is a multiple of patch_size
-        const d_time: u32 = @intCast(hidden_states.dim(.t));
-        if (d_time % self.config.patch_size != 0) {
-            const d_pad: u32 = self.config.patch_size - (d_time % self.config.patch_size);
-            // [.a, .t] -> [.a, .t + d_pad]
-            const pad_shape = zml.Shape.init(.{ d_pad, hidden_states.dim(.a) }, hidden_states.dtype());
-            hidden_states = zml.Tensor.concatenate(&.{ hidden_states, zml.Tensor.zeroes(pad_shape) }, .t);
-        }
-        return hidden_states;
-    }
-    
-    pub fn forwardLayer(self: AceDit, x: zml.Tensor, y: zml.Tensor, t: zml.Tensor, layer: DiTLayer, window: bool) zml.Tensor {
-        const window_attention_mask = createBidirectionalWindowMask(x.dim(.s), self.config.sliding_window);
-        const actual_mask = if (window) window_attention_mask else null;
-        return layer.forward(x, y, t, actual_mask);
+        return .{ x_next.reuseBuffer(x), x_next.withTags(.{ .t, .a }).transpose(.{ .a, .t }) };
     }
     
     pub fn scale_shift(self: AceDit, hidden_states: zml.Tensor, temb: zml.Tensor) zml.Tensor {
@@ -797,7 +701,7 @@ pub const DiTLayer = struct {
         x_norm = x_norm.mul(scale_msa.addConstant(1.0).broad(x_norm.shape()));
         x_norm = x_norm.add(shift_msa.broad(x_norm.shape()));
         
-        return x_norm;
+        return x_norm.reuseBuffer(x);
     }
   
     pub fn mlpAln(self: DiTLayer, x: zml.Tensor, time_emb: zml.Tensor) zml.Tensor {
@@ -1065,22 +969,3 @@ pub const RmsNorm = struct {
         return normalized.mul(self.weights.withTags(.{ .d }).broad(input.shape()));
     }
 };
-
-
-pub fn createBidirectionalWindowMask(seq_len: i64, window_len: u32) zml.Tensor {
-     const attn_shape = zml.Shape.init(.{ .q = seq_len, .k = seq_len }, .bf16);
-     const window = zml.DataType.constant(.i32, window_len);
-     
-    // tokens at pos i attend to tokens at pos [i - w, i + w] ie pos j st. |i - j| <= w
-    const q_idx = zml.Tensor.iota(attn_shape, .q);
-    const k_idx = zml.Tensor.iota(attn_shape, .k);
-    const idx_dist = zml.Tensor.abs(q_idx.sub(k_idx));
-    const max_dist = zml.Tensor.constant(window).broad(attn_shape);
-    const is_in_window = idx_dist.cmp(.LE, max_dist);
-
-    const zeros = zml.Tensor.zeroes(attn_shape);
-    const minf = zml.floats.Float32.toF32(zml.floats.Float32.minus_inf);
-    const minus_inf = zml.Tensor.constant(zml.DataType.constant(.bf16, minf)).broad(attn_shape);
-     
-    return zml.Tensor.select(is_in_window, zeros, minus_inf);
-}

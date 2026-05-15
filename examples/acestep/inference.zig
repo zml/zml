@@ -429,7 +429,7 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
 
     var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer token_slice.free(allocator);
-    var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
+    var token_buffer: zml.Buffer = undefined;
     defer token_buffer.deinit();
     var token_embed_buffer: zml.Buffer = undefined;
     defer token_embed_buffer.deinit();
@@ -484,6 +484,7 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
 
     acellm.exes.sample_args.set(.{ acellm.model_buffers, logits_buffer, rng_buffers });
     acellm.exes.sample_exe.callOpts(io, acellm.exes.sample_args, &acellm.exes.sample_results, .{ .wait = true });
+    zml.Tensor.Rng.deinitBuffer(&rng_buffers);
     acellm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
 
     try token_buffer.toSlice(io, token_slice);
@@ -524,6 +525,7 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
         // call to generate the next token
         acellm.exes.decode_embed_args.set(.{ acellm.model_buffers, token_buffer });
         acellm.exes.decode_embed_exe.callOpts(io, acellm.exes.decode_embed_args, &acellm.exes.decode_embed_results, .{ .wait = true });
+        token_embed_buffer.deinit();
         acellm.exes.decode_embed_results.fill(.{ &token_embed_buffer });
         for (0..acellm.config.num_hidden_layers) |ii| {
             acellm.exes.decode_layer_args.set(.{ acellm.model_buffers.layers[ii], token_embed_buffer, pos_buffer, acellm.kv_cache_buffers, layer_index_buffers[ii] });
@@ -532,9 +534,13 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
         }
         acellm.exes.logits_args.set(.{ acellm.model_buffers, token_embed_buffer });
         acellm.exes.logits_exe.callOpts(io, acellm.exes.logits_args, &acellm.exes.logits_results, .{ .wait = true });
+        logits_buffer.deinit();
         acellm.exes.logits_results.fill(.{ &logits_buffer });
+        
         acellm.exes.sample_args.set(.{ acellm.model_buffers, logits_buffer, rng_buffers });
         acellm.exes.sample_exe.callOpts(io, acellm.exes.sample_args, &acellm.exes.sample_results, .{ .wait = true });
+        token_buffer.deinit();
+        zml.Tensor.Rng.deinitBuffer(&rng_buffers);
         acellm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
 
         // extract the generated token from the buffer
@@ -573,7 +579,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
 
     var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer token_slice.free(allocator);
-    var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
+    var token_buffer: zml.Buffer = undefined;
     defer token_buffer.deinit();
     var cond_embed_buffer: zml.Buffer = undefined;
     defer cond_embed_buffer.deinit();
@@ -661,6 +667,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     // sample next token
     acecfg.exes.sample_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, rng_buffers });
     acecfg.exes.sample_exe.callOpts(io, acecfg.exes.sample_args, &acecfg.exes.sample_results, .{ .wait = true });
+    zml.Tensor.Rng.deinitBuffer(&rng_buffers);
     acecfg.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
 
     try token_buffer.toSlice(io, token_slice);
@@ -687,10 +694,12 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
         // embed cond tokens
         acecfg.llm.exes.decode_embed_args.set(.{ acecfg.llm.model_buffers, token_buffer });
         acecfg.llm.exes.decode_embed_exe.callOpts(io, acecfg.llm.exes.decode_embed_args, &acecfg.llm.exes.decode_embed_results, .{ .wait = true });
+        cond_embed_buffer.deinit();
         acecfg.llm.exes.decode_embed_results.fill(.{ &cond_embed_buffer });
         // embed uncond tokens
         acecfg.llm.exes.decode_embed_args.set(.{ acecfg.llm.model_buffers, token_buffer });
         acecfg.llm.exes.decode_embed_exe.callOpts(io, acecfg.llm.exes.decode_embed_args, &acecfg.llm.exes.decode_embed_results, .{ .wait = true });
+        uncond_embed_buffer.deinit();
         acecfg.llm.exes.decode_embed_results.fill(.{ &uncond_embed_buffer });
         for (0..acecfg.llm.config.num_hidden_layers) |ii| {
             // layer ii the cond embeds
@@ -705,10 +714,12 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
         // compute cond logits
         acecfg.llm.exes.logits_args.set(.{ acecfg.llm.model_buffers, cond_embed_buffer });
         acecfg.llm.exes.logits_exe.callOpts(io, acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results, .{ .wait = true });
+        cond_logits_buffer.deinit();
         acecfg.llm.exes.logits_results.fill(.{ &cond_logits_buffer });
         // compute uncond logits
         acecfg.llm.exes.logits_args.set(.{ acecfg.llm.model_buffers, uncond_embed_buffer });
         acecfg.llm.exes.logits_exe.callOpts(io, acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results, .{ .wait = true });
+        uncond_logits_buffer.deinit();
         acecfg.llm.exes.logits_results.fill(.{ &uncond_logits_buffer });
         // combine them with cfg
         acecfg.exes.cfg_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, uncond_logits_buffer });
@@ -717,6 +728,8 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
         // sample next token
         acecfg.exes.sample_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, rng_buffers, true });
         acecfg.exes.sample_exe.callOpts(io, acecfg.exes.sample_args, &acecfg.exes.sample_results, .{ .wait = true });
+        token_buffer.deinit();
+        zml.Tensor.Rng.deinitBuffer(&rng_buffers);
         acecfg.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
         try token_buffer.toSlice(io, token_slice);
     }
@@ -742,7 +755,7 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
     zml_handler.tic(&zml_handler.timers.emb.prefill);
 
     const lyric_embedding_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = lyric_tokens.len, .d = aceemb.config.hidden_size }, .bf16));
-    var lyric_embedding_buffer: zml.Buffer = try .fromSlice(io, platform, lyric_embedding_slice, sharding);
+    var lyric_embedding_buffer: zml.Buffer = undefined;
     defer lyric_embedding_buffer.deinit();
 
     const lyric_tokens_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = lyric_tokens.len }, .u32));
@@ -761,7 +774,7 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
     zml_handler.tic(&zml_handler.timers.emb.decode);
 
     const text_embedding_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = text_tokens.len, .d = aceemb.config.hidden_size }, .bf16));
-    var text_embedding_buffer: zml.Buffer = try .fromSlice(io, platform, text_embedding_slice, sharding);
+    var text_embedding_buffer: zml.Buffer = undefined;
     defer text_embedding_buffer.deinit();
 
     const text_tokens_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = text_tokens.len }, .u32));
@@ -811,9 +824,9 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
 
     const timbre_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_timbre }, .bf16));
     defer timbre_slice.free(allocator);
-    var timbre_buffer: zml.Buffer = try .fromSlice(io, platform, timbre_slice, sharding);
+    
+    var timbre_buffer: zml.Buffer = undefined;
     defer timbre_buffer.deinit();
-
     var silence_audio_buffer: zml.Buffer = undefined;
     defer silence_audio_buffer.deinit();
 
@@ -832,8 +845,8 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     // the result latents we return
     const context_latents_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = 2 * audio_dim }, .bf16));
     const encoded_conditions_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s_enc = s_enc, .d = emb_dim }, .bf16));
-    var context_latents_buffer: zml.Buffer = try .fromSlice(io, platform, context_latents_slice, sharding);
-    var encoded_conditions_buffer: zml.Buffer = try .fromSlice(io, platform, encoded_conditions_slice, sharding);
+    var context_latents_buffer: zml.Buffer = undefined;
+    var encoded_conditions_buffer: zml.Buffer = undefined;
     defer context_latents_buffer.deinit();
     defer encoded_conditions_buffer.deinit();
 
@@ -920,6 +933,9 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     defer x_buffer.deinit();
     defer context_latents_buffer.deinit();
     defer encoded_conditions_buffer.deinit();
+
+    var hidden_states_buffer: zml.Buffer = undefined;
+    defer hidden_states_buffer.deinit();
     
     const full_mask_slice = try createBidirectionalFullMask(allocator, @divFloor(t_25hz + 1, 2));
     defer full_mask_slice.free(allocator);
@@ -942,8 +958,6 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     for (0..steps) |i| {
         var y_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
         defer y_proj_buffer.deinit();
-        var hidden_states_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
-        defer hidden_states_buffer.deinit();
         var temb_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
         defer temb_buffer.deinit();
         var timestep_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
@@ -956,7 +970,6 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
         acedit.exes.preprocess_args.set(.{ acedit.model_buffers, t_curr, x_buffer, context_latents_buffer, encoded_conditions_buffer });
         acedit.exes.preprocess_exe.callOpts(io, acedit.exes.preprocess_args, &acedit.exes.preprocess_results, .{ .wait = true });
         y_proj_buffer.deinit();
-        hidden_states_buffer.deinit();
         temb_buffer.deinit();
         timestep_proj_buffer.deinit();
         acedit.exes.preprocess_results.fill(.{ &y_proj_buffer, &hidden_states_buffer, &temb_buffer, &timestep_proj_buffer });
@@ -964,12 +977,10 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
             const mask_buffer = if (acedit.config.layer_types[ii] == .sliding_attention) sliding_mask_buffer else full_mask_buffer;
             acedit.exes.layer_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer });
             acedit.exes.layer_exe.callOpts(io, acedit.exes.layer_args, &acedit.exes.layer_results, .{ .wait = true });
-            hidden_states_buffer.deinit();
             acedit.exes.layer_results.fill(.{ &hidden_states_buffer });
         }
         acedit.exes.postprocess_args.set(.{ acedit.model_buffers, t_curr, t_next, x_buffer, hidden_states_buffer, temb_buffer });
         acedit.exes.postprocess_exe.callOpts(io, acedit.exes.postprocess_args, &acedit.exes.postprocess_results, .{ .wait = true });
-        x_buffer.deinit();
         result_buffer.deinit();
         acedit.exes.postprocess_results.fill(.{ &x_buffer, &result_buffer });
     }
@@ -979,49 +990,7 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     return .{ .x = result_slice };
 }
 
-pub fn decodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVae_handler, latents: DiffusedLatents) !DecodedAudio {
-    const io = zml_handler.io;
-    const allocator = zml_handler.allocator;
-    const sharding = acevae.shardings.replicated;
-    const platform = zml_handler.platform;
-
-    const t_25hz = latents.x.shape.dim(1);
-    var t_48khz = t_25hz;
-    for (acevae.config.downsampling_ratios) |ratio| {
-        t_48khz *= ratio;
-    }
-    const audio_dim = latents.x.shape.dim(0);
-
-    std.log.info("VAE call decode with input size : {d}x{d}", .{ audio_dim, t_25hz });
-
-    // the result latents we return
-    const audio_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = 2, .t = t_48khz }, .f32));
-    var audio_buffer: zml.Buffer = try .fromSlice(io, platform, audio_slice, sharding);
-    defer audio_buffer.deinit();
-
-    var latent_buffer: zml.Buffer = try .fromSlice(io, platform, latents.x, sharding);
-    defer latent_buffer.deinit();
-
-    var decode_args = try acevae.decode_exe.args(allocator);
-    defer decode_args.deinit(allocator);
-    var decode_results = try acevae.decode_exe.results(allocator);
-    defer decode_results.deinit(allocator);
-
-    zml_handler.tic(&zml_handler.timers.vae.prefill);
-
-    decode_args.set(.{ acevae.model_buffers, latent_buffer });
-    acevae.decode_exe.callOpts(io, decode_args, &decode_results, .{ .wait = true });
-    decode_results.fill(.{ &audio_buffer });
-    std.log.info("VAE done decoding, output shape : {d}x{d}", .{ 2, t_48khz });
-
-    try audio_buffer.toSlice(io, audio_slice);
-
-    zml_handler.toc(&zml_handler.timers.vae.prefill);
-
-    return .{ .audio = audio_slice };
-}
-
-pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVae_handler, latents: DiffusedLatents, decode_t: u32) !DecodedAudio {
+pub fn decodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVae_handler, latents: DiffusedLatents, decode_t: u32) !DecodedAudio {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = acevae.shardings.replicated;
@@ -1061,7 +1030,7 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
     defer encoded_chunk_slice.free(allocator);
     const decoded_chunk_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_channels, .t = decoded_chunk_frames }, .f32));
     defer decoded_chunk_slice.free(allocator);
-    var decoded_chunk_buffer: zml.Buffer = try .fromSlice(io, platform, decoded_chunk_slice, sharding);
+    var decoded_chunk_buffer: zml.Buffer = try zml.Buffer.fromSlice(io, platform, decoded_chunk_slice, sharding);
     defer decoded_chunk_buffer.deinit();
 
     zml_handler.tic(&zml_handler.timers.vae.prefill);
@@ -1102,6 +1071,7 @@ pub fn decodeAudioLatentsTiled(zml_handler: *main.Zml_handler, acevae: *acevae_.
         // decode it
         decode_args.set(.{ acevae.model_buffers, encoded_chunk_buffer });
         acevae.decode_exe.callOpts(io, decode_args, &decode_results, .{ .wait = true });
+        decoded_chunk_buffer.deinit();
         decode_results.fill(.{ &decoded_chunk_buffer });
         // send the decoded chunk back to the CPU
         try decoded_chunk_buffer.toSlice(io, decoded_chunk_slice);

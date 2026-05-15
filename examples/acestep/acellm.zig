@@ -576,7 +576,8 @@ pub const AceLlm = struct {
     
     pub fn cfg(self: AceLlm, cond_logits: zml.Tensor, uncond_logits: zml.Tensor) zml.Tensor {
         _ = self;
-        return uncond_logits.add((cond_logits.sub(uncond_logits)).scale(2.0)).reuseBuffer(cond_logits);
+        const combined = uncond_logits.add((cond_logits.sub(uncond_logits)).scale(2.0));
+        return combined.reuseBuffer(cond_logits);
     }
     
     pub fn sampleTokens(self: AceLlm, logits: zml.Tensor, rng: zml.Tensor.Rng, cfg_phase: bool) struct { zml.Tensor, zml.Tensor.Rng } {
@@ -657,7 +658,7 @@ const TransformerLayer = struct {
         const x1 = x0.add(delta0);
         const x1_normalized = self.post_att_norm.forward(x1);
         const x2 = self.mlp_layer.forward(x1_normalized).add(x1);
-        return .{ x2.reuseBuffer(x0), updated_kv_cache };
+        return .{ x2.reuseBuffer(x0), updated_kv_cache.reuseBuffer(kv_cache) };
     }
 };
 
