@@ -686,7 +686,8 @@ pub const DiTLayer = struct {
         const x2 = x1.add(delta_cross);
 
         // step 3: mlp with adaptive layer norm
-        return self.mlpAln(x2, time_emb).rename(.{ .s = .t });
+        const output = self.mlpAln(x2, time_emb).rename(.{ .s = .t });
+        return output.reuseBuffer(x_);
     }
     
     pub fn scaleShift(self: DiTLayer, x: zml.Tensor, time_emb: zml.Tensor) zml.Tensor {
