@@ -65,6 +65,7 @@ pub const AceLlm_handler = struct {
             .layer_index = .init(.{}, .u32),
             .rng = .init(),
             .shardings = try .init(zml_handler.platform),
+            .attention_metadata = .init(.fromBackend(.cuda_fa2, @intCast(2048), @intCast(config.num_attention_heads))),
         };
 
         zml_handler.toc(&zml_handler.timers.llm.init);
@@ -76,7 +77,7 @@ pub const AceLlm_handler = struct {
         zml_handler.tic(&zml_handler.timers.llm.load);
 
         std.log.info("5Hz load buffers", .{});
-        const model_buffers = try model.load(zml_handler, store, &params.shardings.all());
+        const model_buffers = try model.load(zml_handler, &store, &params.shardings.all());
         std.log.info("5Hz model loaded", .{});
 
         zml_handler.toc(&zml_handler.timers.llm.load);
@@ -120,7 +121,7 @@ pub const AceLlm_handler = struct {
         var prefill_layer_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, params_: LlmParams, opts_: zml.module.CompilationOptions) !zml.Exe {
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward,
-                    .{ params_.prefill_embeds, params_.token_index, params_.kv_cache, params_.layer_index }, opts_);
+                    .{ params_.prefill_embeds, params_.token_index, params_.kv_cache, params_.layer_index, params_.attention_metadata }, opts_);
             }
         }.call, .{ zml_handler, model.layers[0], params, opts });
         var prefill_layer_future_awaited = false;
@@ -147,7 +148,7 @@ pub const AceLlm_handler = struct {
         var decode_layer_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, params_: LlmParams, opts_: zml.module.CompilationOptions) !zml.Exe {
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward,
-                    .{ params_.decode_embeds, params_.token_index, params_.kv_cache, params_.layer_index }, opts_);
+                    .{ params_.decode_embeds, params_.token_index, params_.kv_cache, params_.layer_index, params_.attention_metadata }, opts_);
             }
         }.call, .{ zml_handler, model.layers[0], params, opts });
         var decode_layer_future_awaited = false;
@@ -369,6 +370,7 @@ pub const LlmParams = struct {
     layer_index: zml.Tensor,
     rng: zml.Tensor.Rng,
     shardings: main.Shardings,
+    attention_metadata: zml.attention.attention.Metadata,
 };
 
 pub const CfgParams = struct {
@@ -651,9 +653,9 @@ const TransformerLayer = struct {
         MlpLayer.unloadBuffers(&self.mlp_layer);
     }
     
-    pub fn forward(self: TransformerLayer, x0: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, layer_index: zml.Tensor) struct { zml.Tensor, KvCache } {
+    pub fn forward(self: TransformerLayer, x0: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, layer_index: zml.Tensor, attention_metadata: zml.attention.attention.Metadata) struct { zml.Tensor, KvCache } {
         const x0_normalized = self.input_norm.forward(x0);
-        const delta0, const updated_kv_cache = self.att_layer.forward(x0_normalized, token_index, kv_cache, layer_index);
+        const delta0, const updated_kv_cache = self.att_layer.forward(x0_normalized, token_index, kv_cache, layer_index, attention_metadata);
         const x1 = x0.add(delta0);
         const x1_normalized = self.post_att_norm.forward(x1);
         const x2 = self.mlp_layer.forward(x1_normalized).add(x1);
@@ -671,8 +673,8 @@ const AttLayer = struct {
     num_heads: i64 = undefined,
     num_kv_heads: i64 = 0,
     rope_opts: zml.nn.RopeOpts = undefined,
-    attention_metadata: zml.attention.attention.Metadata = undefined,
     attention_parameters: zml.attention.attention.Parameters = undefined,
+    
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) !AttLayer {
         var rope_scaling = config.rope_scaling;
@@ -690,7 +692,6 @@ const AttLayer = struct {
                 .layout = .sequential,
                 .scaling = rope_scaling,
             },
-            .attention_metadata = .init(.fromBackend(.cuda_fa2, @intCast(2048), @intCast(config.num_attention_heads))),
             .attention_parameters = .init(.fromBackend(.cuda_fa2)),
         };
     }
@@ -704,7 +705,7 @@ const AttLayer = struct {
         RmsNorm.unloadBuffers(&self.k_norm);
     }
 
-    pub fn forward(self: AttLayer, x: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, layer_index: zml.Tensor) struct { zml.Tensor, KvCache } {
+    pub fn forward(self: AttLayer, x: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, layer_index: zml.Tensor, attention_metadata: zml.attention.attention.Metadata) struct { zml.Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
 
         var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
@@ -729,7 +730,7 @@ const AttLayer = struct {
         k = new_kv_cache.keys(layer_index).convert(dtype);
         v = new_kv_cache.values(layer_index).convert(dtype);
 
-        const attn_output = zml.attention.attention.attention(q, k, v, token_index, .vanilla, .vanilla);
+        const attn_output = zml.attention.attention.attention(q, k, v, token_index, attention_metadata, self.attention_parameters);
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         const delta = self.o_proj.forward(attn).rename(.{ .d_out = .d });

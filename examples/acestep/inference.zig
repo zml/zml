@@ -422,6 +422,9 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
+    var attention_buffers = try acellm.params.attention_metadata.initBuffer(io, platform, sharding);
+    defer zml.attention.attention.Metadata.deinitBuffer(&attention_buffers);
+    
     var zero_buffer: zml.Buffer = try .scalar(io, platform, 0, .u32, sharding);
     defer zero_buffer.deinit();
     var prompt_buffer: zml.Buffer = try .scalar(io, platform, prompt_tok.len - 1, .u32, sharding);
@@ -470,7 +473,7 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     acellm.exes.prefill_embed_results.fill(.{ &prefill_embed_buffer });
 
     for (0..acellm.config.num_hidden_layers) |i| {
-        acellm.exes.prefill_layer_args.set(.{ acellm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, acellm.kv_cache_buffers, layer_index_buffers[i] });
+        acellm.exes.prefill_layer_args.set(.{ acellm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, acellm.kv_cache_buffers, layer_index_buffers[i], attention_buffers });
         acellm.exes.prefill_layer_exe.call(acellm.exes.prefill_layer_args, &acellm.exes.prefill_layer_results);
         acellm.exes.prefill_layer_results.fill(.{ &prefill_embed_buffer, &acellm.kv_cache_buffers });
     }
@@ -528,7 +531,7 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
         token_embed_buffer.deinit();
         acellm.exes.decode_embed_results.fill(.{ &token_embed_buffer });
         for (0..acellm.config.num_hidden_layers) |ii| {
-            acellm.exes.decode_layer_args.set(.{ acellm.model_buffers.layers[ii], token_embed_buffer, pos_buffer, acellm.kv_cache_buffers, layer_index_buffers[ii] });
+            acellm.exes.decode_layer_args.set(.{ acellm.model_buffers.layers[ii], token_embed_buffer, pos_buffer, acellm.kv_cache_buffers, layer_index_buffers[ii], attention_buffers });
             acellm.exes.decode_layer_exe.call(acellm.exes.decode_layer_args, &acellm.exes.decode_layer_results);
             acellm.exes.decode_layer_results.fill(.{ &token_embed_buffer, &acellm.kv_cache_buffers });
         }
@@ -569,6 +572,9 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
 
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
+
+    var attention_buffers = try acecfg.llm.params.attention_metadata.initBuffer(io, platform, sharding);
+    defer zml.attention.attention.Metadata.deinitBuffer(&attention_buffers);
 
     var zero_buffer: zml.Buffer = try .scalar(io, platform, 0, .u32, sharding);
     defer zero_buffer.deinit();
@@ -636,11 +642,11 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     acecfg.llm.exes.prefill_embed_results.fill(.{ &uncond_prefill_embed_buffer });
     for (0..acecfg.llm.config.num_hidden_layers) |i| {
         // layer i the cond embeds
-        acecfg.llm.exes.prefill_layer_args.set(.{ acecfg.llm.model_buffers.layers[i], cond_prefill_embed_buffer, zero_buffer, acecfg.cond_kv_cache_buffers, layer_index_buffers[i] });
+        acecfg.llm.exes.prefill_layer_args.set(.{ acecfg.llm.model_buffers.layers[i], cond_prefill_embed_buffer, zero_buffer, acecfg.cond_kv_cache_buffers, layer_index_buffers[i], attention_buffers });
         acecfg.llm.exes.prefill_layer_exe.call(acecfg.llm.exes.prefill_layer_args, &acecfg.llm.exes.prefill_layer_results);
         acecfg.llm.exes.prefill_layer_results.fill(.{ &cond_prefill_embed_buffer, &acecfg.cond_kv_cache_buffers });
         // layer i the uncond embeds
-        acecfg.llm.exes.prefill_layer_args.set(.{ acecfg.llm.model_buffers.layers[i], uncond_prefill_embed_buffer, zero_buffer, acecfg.uncond_kv_cache_buffers, layer_index_buffers[i] });
+        acecfg.llm.exes.prefill_layer_args.set(.{ acecfg.llm.model_buffers.layers[i], uncond_prefill_embed_buffer, zero_buffer, acecfg.uncond_kv_cache_buffers, layer_index_buffers[i], attention_buffers });
         acecfg.llm.exes.prefill_layer_exe.call(acecfg.llm.exes.prefill_layer_args, &acecfg.llm.exes.prefill_layer_results);
         acecfg.llm.exes.prefill_layer_results.fill(.{ &uncond_prefill_embed_buffer, &acecfg.uncond_kv_cache_buffers });
     }
@@ -703,11 +709,11 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
         acecfg.llm.exes.decode_embed_results.fill(.{ &uncond_embed_buffer });
         for (0..acecfg.llm.config.num_hidden_layers) |ii| {
             // layer ii the cond embeds
-            acecfg.llm.exes.decode_layer_args.set(.{ acecfg.llm.model_buffers.layers[ii], cond_embed_buffer, cond_pos_buffer, acecfg.cond_kv_cache_buffers, layer_index_buffers[ii] });
+            acecfg.llm.exes.decode_layer_args.set(.{ acecfg.llm.model_buffers.layers[ii], cond_embed_buffer, cond_pos_buffer, acecfg.cond_kv_cache_buffers, layer_index_buffers[ii], attention_buffers });
             acecfg.llm.exes.decode_layer_exe.call(acecfg.llm.exes.decode_layer_args, &acecfg.llm.exes.decode_layer_results);
             acecfg.llm.exes.decode_layer_results.fill(.{ &cond_embed_buffer, &acecfg.cond_kv_cache_buffers });
             // layer ii the uncond embeds
-            acecfg.llm.exes.decode_layer_args.set(.{ acecfg.llm.model_buffers.layers[ii], uncond_embed_buffer, uncond_pos_buffer, acecfg.uncond_kv_cache_buffers, layer_index_buffers[ii] });
+            acecfg.llm.exes.decode_layer_args.set(.{ acecfg.llm.model_buffers.layers[ii], uncond_embed_buffer, uncond_pos_buffer, acecfg.uncond_kv_cache_buffers, layer_index_buffers[ii], attention_buffers });
             acecfg.llm.exes.decode_layer_exe.call(acecfg.llm.exes.decode_layer_args, &acecfg.llm.exes.decode_layer_results);
             acecfg.llm.exes.decode_layer_results.fill(.{ &uncond_embed_buffer, &acecfg.uncond_kv_cache_buffers });
         }
