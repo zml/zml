@@ -3,9 +3,6 @@ const std = @import("std");
 const zml = @import("zml");
 const stdx = zml.stdx;
 
-const common = @import("../common.zig");
-const inference = @import("llama_inference.zig");
-
 pub const Config = struct {
     bos_token_id: u32,
     eos_token_id: stdx.json.Union(union(enum) {
@@ -25,94 +22,56 @@ pub const Config = struct {
     rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
 };
 
-pub const Options = struct {
-    sampling_strategy: ?zml.nn.SamplingStrategy,
-    max_seq_len: u32,
-};
-
-pub const LoadedModel = struct {
-    inner: Model,
-    parsed_config: std.json.Parsed(Config),
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        repo: std.Io.Dir,
-        store: zml.io.TensorStore.View,
-        generation: common.GenerationOptions,
-    ) !LoadedModel {
-        const parsed_config = try common.parseConfig(Config, allocator, io, repo);
-        errdefer parsed_config.deinit();
-
-        const options: Options = .{
-            .sampling_strategy = generation.sampling_strategy,
-            .max_seq_len = parsed_config.value.max_position_embeddings,
-        };
-
-        return .{
-            .inner = try .init(allocator, store, parsed_config.value, options),
-            .parsed_config = parsed_config,
-        };
-    }
-
-    pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
-        self.inner.deinit(allocator);
-        self.parsed_config.deinit();
-    }
-
-    pub fn loadBuffers(
-        self: *const LoadedModel,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *zml.io.TensorStore,
-        progress: *std.Progress.Node,
-        shardings: common.Shardings,
-    ) !Buffers {
-        progress.increaseEstimatedTotalItems(store.view().count());
-        const now: std.Io.Timestamp = .now(io, .awake);
-        var total_bytes: usize = 0;
-        defer {
-            const took = now.untilNow(io, .awake);
-            const bytes_per_sec: u64 = @intFromFloat(
-                @as(f64, @floatFromInt(total_bytes)) /
-                    (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s),
-            );
-            std.log.scoped(.llama).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
-        }
-
-        return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 128 * zml.MiB,
-            .progress = progress,
-            .shardings = &shardings.all(),
-            .parallelism = 16,
-            .total_bytes = &total_bytes,
-        });
-    }
-
-    pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
-        _ = self;
-        if (buffers.lm_head) |*lm_head| lm_head.weight.deinit();
-        Llama.unloadBuffers(&buffers.model, allocator);
-    }
-
-    pub fn compile(
-        self: *const LoadedModel,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        backend: zml.attention.attention.Backend,
-        shardings: common.Shardings,
-        seqlen: usize,
-        progress: *std.Progress.Node,
-    ) !inference.CompiledModel {
-        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, shardings);
-        return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
-    }
-};
-
 pub const Buffers = zml.Bufferized(Model);
+
+pub fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
+    const file = try dir.openFile(io, "tokenizer.json", .{});
+    defer file.close(io);
+
+    var reader = file.reader(io, &.{});
+    const bytes = try reader.interface.readAlloc(allocator, try file.length(io));
+    defer allocator.free(bytes);
+
+    return try .fromBytes(allocator, bytes);
+}
+
+pub fn tokenizePrompt(
+    allocator: std.mem.Allocator,
+    tokenizer: *zml.tokenizer.Tokenizer,
+    config: Config,
+    prompt: []const u8,
+) ![]u32 {
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+
+    const start_header = tokenizer.tokenId("<|start_header_id|>") orelse return error.NoSuchToken;
+    const end_header = tokenizer.tokenId("<|end_header_id|>") orelse return error.NoSuchToken;
+    const eot = tokenizer.tokenId("<|eot_id|>") orelse return error.NoSuchToken;
+    const newline = tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
+
+    var tokens = std.Io.Writer.Allocating.initAligned(allocator, .of(u32));
+    try tokens.ensureUnusedCapacity(prompt.len);
+
+    const w: *std.Io.Writer = &tokens.writer;
+    try encoder.appendTokens(w, &.{ config.bos_token_id, start_header });
+    try encoder.encode(w, "user");
+    try encoder.appendTokens(w, &.{ end_header, newline });
+    try encoder.encode(w, prompt);
+    try encoder.appendTokens(w, &.{ eot, newline, start_header });
+    try encoder.encode(w, "assistant");
+    try encoder.appendTokens(w, &.{ end_header, newline });
+
+    return @ptrCast(@alignCast(try tokens.toOwnedSlice()));
+}
+
+pub fn isEosToken(config: *const Config, token_id: u32) bool {
+    return switch (config.eos_token_id.value) {
+        .int => |eos| token_id == eos,
+        .ints => |eos_list| for (eos_list) |eos| {
+            if (token_id == eos) break true;
+        } else false,
+    };
+}
 
 /// Llama architecture, using huggingface transformers naming.
 /// Dimensions of activations: {.b, .s, .d}
@@ -120,14 +79,10 @@ pub const Model = struct {
     lm_head: ?zml.nn.Linear,
     model: Llama,
 
-    gen_opts: zml.nn.SamplingStrategy = .{},
-    config: Config,
-
     pub fn init(
         allocator: std.mem.Allocator,
         store: zml.io.TensorStore.View,
         config: Config,
-        options: Options,
     ) !Model {
         const lm_head: ?zml.nn.Linear = if (store.withPrefix("lm_head").maybeCreateTensor(
             "weight",
@@ -141,13 +96,20 @@ pub const Model = struct {
         return .{
             .lm_head = lm_head,
             .model = try .init(allocator, store.withPrefix("model"), config),
-            .gen_opts = options.sampling_strategy orelse .{},
-            .config = config,
         };
     }
 
     pub fn deinit(self: Model, allocator: std.mem.Allocator) void {
         self.model.deinit(allocator);
+    }
+
+    pub fn initKvCache(self: Model, config: Config, cache_seq_len: u32) KvCache {
+        return .init(.init(.{
+            .layer = config.num_hidden_layers,
+            .k = cache_seq_len,
+            .h = config.num_key_value_heads,
+            .hd = config.head_dim orelse config.hidden_size / config.num_attention_heads,
+        }, self.model.embed_tokens.weight.dtype()));
     }
 
     pub fn loadBuffers(
@@ -157,84 +119,18 @@ pub const Model = struct {
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
         shardings: []const zml.Sharding,
-        progress: *std.Progress.Node,
-    ) !zml.Bufferized(Model) {
-        progress.increaseEstimatedTotalItems(store.view().count());
-        const now: std.Io.Timestamp = .now(io, .awake);
-        var total_bytes: usize = 0;
-
-        defer {
-            const took = now.untilNow(io, .awake);
-            const bytes_per_sec: u64 = @intFromFloat(
-                @as(f64, @floatFromInt(total_bytes)) /
-                    (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s),
-            );
-            std.log.scoped(.llama).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
-        }
-
+    ) !Buffers {
         return zml.io.load(Model, self, allocator, io, platform, store, .{
+            .parallelism = 16,
+            .shardings = shardings,
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
-            .progress = progress,
-            .shardings = shardings,
-            .parallelism = 16,
-            .total_bytes = &total_bytes,
         });
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
         if (self.lm_head) |*lm_head| lm_head.weight.deinit();
         Llama.unloadBuffers(&self.model, allocator);
-    }
-    /// Predicts the token at `token_index` position.
-    /// Returns:
-    ///  - updated `tokens`,
-    ///  - updated KV cache
-    ///  - a Rng state to allow for probabilistic generation
-    pub fn forward(
-        self: Model,
-        tokens_: zml.Tensor,
-        token_index: zml.Tensor,
-        kv_cache: KvCache,
-        rng: zml.Tensor.Rng,
-        attention_metadata: zml.attention.attention.Metadata,
-        attention_parameters: zml.attention.attention.Parameters,
-    ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
-        const tokens = tokens_.withPartialTags(.{.s});
-        const out, const updated_kv_cache = self.model.forward(
-            tokens,
-            token_index,
-            kv_cache,
-            attention_metadata,
-            attention_parameters,
-        );
-        const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
-
-        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
-    }
-
-    pub fn sampleTokens(
-        self: Model,
-        lm_head_: ?zml.nn.Linear,
-        out_: zml.Tensor,
-        rng: zml.Tensor.Rng,
-        opts: zml.nn.SamplingStrategy,
-    ) struct { zml.Tensor, zml.Tensor.Rng } {
-        const out = out_.withPartialTags(.{ .s, .d });
-
-        var logits = blk: {
-            if (lm_head_) |lm_head| {
-                break :blk lm_head.forward(out).rename(.{ .dout = .d });
-            } else {
-                break :blk self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .d);
-            }
-        };
-
-        if (logits.shape().hasTag(.voc) == null)
-            logits = logits.rename(.{ .d = .voc });
-
-        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
-        return .{ next_tokens, new_rng };
     }
 
     pub fn greedyTokensFromHidden(self: Model, out_: zml.Tensor) zml.Tensor {
@@ -263,7 +159,7 @@ pub const Model = struct {
         attention_parameters: zml.attention.attention.Parameters,
         target_layer_ids: []const u32,
     ) struct { zml.Tensor, zml.Tensor, KvCache } {
-        const target_hidden, const out, const updated_kv_cache = self.model.forwardSelected(
+        const target_hidden, const out, const updated_kv_cache = self.model.forward(
             tokens_.withPartialTags(.{.s}),
             token_index,
             kv_cache,
@@ -286,7 +182,7 @@ pub const Model = struct {
         attention_parameters: zml.attention.attention.Parameters,
         target_layer_ids: []const u32,
     ) struct { zml.Tensor, zml.Tensor, KvCache } {
-        const target_hidden, const out, const updated_kv_cache = self.model.forwardSelected(
+        const target_hidden, const out, const updated_kv_cache = self.model.forward(
             tokens_.withPartialTags(.{.s}),
             token_index,
             kv_cache,
@@ -299,7 +195,7 @@ pub const Model = struct {
     }
 
     pub fn embedTokens(self: Model, tokens_: zml.Tensor) zml.Tensor {
-        return embed_tokensForward(self.model.embed_tokens, tokens_.withPartialTags(.{.s}));
+        return embedTokensForward(self.model.embed_tokens, tokens_.withPartialTags(.{.s}));
     }
 };
 
@@ -343,34 +239,7 @@ pub const Llama = struct {
         allocator.free(self.layers);
     }
 
-    /// Forward one token, using KV cache for previous tokens.
-    /// Returns result and updated KV cache.
     pub fn forward(
-        self: Llama,
-        tokens: zml.Tensor,
-        token_index: zml.Tensor,
-        kv_cache: KvCache,
-        attention_metadata: zml.attention.attention.Metadata,
-        attention_parameters: zml.attention.attention.Parameters,
-    ) struct { zml.Tensor, KvCache } {
-        const embeds = embed_tokensForward(self.embed_tokens, tokens);
-        var hidden = embeds;
-        var updated_kv_cache = kv_cache;
-
-        for (self.layers, 0..) |layer, i| {
-            hidden, updated_kv_cache = layer.forward(
-                hidden,
-                token_index,
-                updated_kv_cache.atLayer(i),
-                attention_metadata,
-                attention_parameters,
-            );
-        }
-
-        return .{ self.norm.forward(hidden), updated_kv_cache.reuseBuffer(kv_cache) };
-    }
-
-    pub fn forwardSelected(
         self: Llama,
         tokens: zml.Tensor,
         token_index: zml.Tensor,
@@ -379,7 +248,7 @@ pub const Llama = struct {
         attention_parameters: zml.attention.attention.Parameters,
         target_layer_ids: []const u32,
     ) struct { zml.Tensor, zml.Tensor, KvCache } {
-        const embeds = embed_tokensForward(self.embed_tokens, tokens);
+        const embeds = embedTokensForward(self.embed_tokens, tokens);
         var hidden = embeds;
         var updated_kv_cache = kv_cache;
 
@@ -403,12 +272,13 @@ pub const Llama = struct {
             }
         }
 
-        stdx.debug.assert(selected_len > 0, "DFlash requires at least one target layer id", .{});
-        return .{ zml.Tensor.concatenate(selected[0..selected_len], .d), self.norm.forward(hidden), updated_kv_cache.reuseBuffer(kv_cache) };
+        const target_hidden = zml.Tensor.concatenate(selected[0..selected_len], .d);
+        const out = self.norm.forward(hidden);
+        return .{ target_hidden, out, updated_kv_cache.reuseBuffer(kv_cache) };
     }
 };
 
-fn embed_tokensForward(embed_tokens_: zml.nn.TokenEmbedding, tokens_: zml.Tensor) zml.Tensor {
+fn embedTokensForward(embed_tokens_: zml.nn.TokenEmbedding, tokens_: zml.Tensor) zml.Tensor {
     return embed_tokens_.forward(tokens_).withPartialTags(.{.d});
 }
 
@@ -653,16 +523,27 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
-        return .{
-            .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), sharding, .{}),
-            .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), sharding, .{}),
-        };
-    }
-
     pub fn deinitBuffer(kv: *Buffer) void {
         kv.k.deinit();
         kv.v.deinit();
+    }
+
+    pub fn replaceBuffers(dst: *Buffer, src: *Buffer) void {
+        replaceBuffer(&dst.k, &src.k);
+        replaceBuffer(&dst.v, &src.v);
+    }
+
+    pub fn initZeroBuffer(
+        kv: KvCache,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        sharding: zml.Sharding,
+    ) !Buffer {
+        return .{
+            .k = try zeroBuffer(allocator, io, platform, kv.k.shape(), sharding),
+            .v = try zeroBuffer(allocator, io, platform, kv.v.shape(), sharding),
+        };
     }
 
     pub fn keys(kv: KvCache) zml.Tensor {
@@ -673,22 +554,15 @@ pub const KvCache = struct {
         return kv.v.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
     }
 
-    pub fn update(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: ?zml.Tensor) KvCache {
+    pub fn update(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor) KvCache {
         const k_shape = kv.k.shape().drop(.layer);
         const layer: zml.Tensor = .scalar(kv.layer_index orelse @panic("forgot to call atLayer"), .u32);
 
-        return if (token_index) |idx|
-            .{
-                .k = kv.k.scatterSlices(.{ .layer = layer, .k = idx }, new_k.convert(kv.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
-                .v = kv.v.scatterSlices(.{ .layer = layer, .k = idx }, new_v.convert(kv.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
-                .layer_index = kv.layer_index,
-            }
-        else
-            .{
-                .k = kv.k.scatterSlices(.{ .layer = layer }, new_k.convert(kv.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
-                .v = kv.v.scatterSlices(.{ .layer = layer }, new_v.convert(kv.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
-                .layer_index = kv.layer_index,
-            };
+        return .{
+            .k = kv.k.scatterSlices(.{ .layer = layer, .k = token_index }, new_k.convert(kv.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
+            .v = kv.v.scatterSlices(.{ .layer = layer, .k = token_index }, new_v.convert(kv.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
+            .layer_index = kv.layer_index,
+        };
     }
 
     pub fn atLayer(kv: KvCache, layer_index: usize) KvCache {
@@ -707,3 +581,31 @@ pub const KvCache = struct {
         };
     }
 };
+
+fn zeroBuffer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    shape: zml.Shape,
+    sharding: zml.Sharding,
+) !zml.Buffer {
+    const bytes = try allocator.alloc(u8, shape.byteSize());
+    defer allocator.free(bytes);
+    @memset(bytes, 0);
+    return zml.Buffer.fromSlice(io, platform, zml.Slice.init(shape, bytes), sharding);
+}
+
+fn replaceBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
+    if (!sameBufferHandle(dst.*, src.*)) {
+        dst.deinit();
+    }
+    dst.* = src.*;
+}
+
+fn sameBufferHandle(a: zml.Buffer, b: zml.Buffer) bool {
+    if (a._shards.len != b._shards.len) return false;
+    for (a._shards.constSlice(), b._shards.constSlice()) |a_shard, b_shard| {
+        if (a_shard != b_shard) return false;
+    }
+    return true;
+}

@@ -4,6 +4,7 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 
 const dflash = @import("dflash_model.zig");
+const llama_inference = @import("llama/llama_inference.zig");
 const llama = @import("llama/llama_model.zig");
 
 pub const std_options: std.Options = .{
@@ -92,10 +93,10 @@ pub fn main(init: std.process.Init) !void {
     var target_store: zml.io.TensorStore = .fromRegistry(allocator, &target_registry);
     defer target_store.deinit();
 
-    var tokenizer = try loadTokenizer(allocator, io, target_repo);
+    var tokenizer = try llama.loadTokenizer(allocator, io, target_repo);
     defer tokenizer.deinit();
 
-    const token_ids = try promptTokens(allocator, &tokenizer, parsed_target_config.value, args.prompt);
+    const token_ids = try llama.tokenizePrompt(allocator, &tokenizer, parsed_target_config.value, args.prompt);
     defer allocator.free(token_ids);
     const prompt_len: u32 = @intCast(token_ids.len);
     if (token_ids.len == 0) {
@@ -115,60 +116,42 @@ pub fn main(init: std.process.Init) !void {
 
     const block_size = parsed_config.value.block_size;
     const max_seq_len = args.max_seq_len;
-    const cache_seq_len = max_seq_len + block_size;
+    const cache_seq_len = @max(max_seq_len, prefill_seq_len) + block_size;
 
-    const target_model = try llama.Model.init(allocator, target_store.view(), parsed_target_config.value, .{
-        .sampling_strategy = .{},
-        .max_seq_len = cache_seq_len,
-    });
+    const target_model = try llama.Model.init(allocator, target_store.view(), parsed_target_config.value);
     defer target_model.deinit(allocator);
 
     const shardings: Shardings = try .init(platform);
     const all_shardings = shardings.all();
 
-    const target_hidden_dim = draft_model.target_layer_ids.len * parsed_target_config.value.hidden_size;
     const input_tokens_tensor: zml.Tensor = .init(.{ .s = prefill_seq_len }, .u32);
     const block_tokens_tensor: zml.Tensor = .init(.{ .s = block_size }, .u32);
     const token_index_tensor: zml.Tensor = .init(.{}, .u32);
     const active_context_len_tensor: zml.Tensor = .init(.{}, .u32);
-    const target_kv_cache = llama.KvCache.init(.init(.{
-        .layer = parsed_target_config.value.num_hidden_layers,
-        .k = cache_seq_len,
-        .h = parsed_target_config.value.num_key_value_heads,
-        .hd = parsed_target_config.value.head_dim orelse parsed_target_config.value.hidden_size / parsed_target_config.value.num_attention_heads,
-    }, target_model.model.embed_tokens.weight.dtype()));
+    const target_kv_cache = target_model.initKvCache(parsed_target_config.value, cache_seq_len);
     const draft_kv_cache = dflash.KvCache.init(.init(.{
         .layer = parsed_config.value.num_hidden_layers,
         .k = cache_seq_len,
         .h = parsed_config.value.num_key_value_heads,
         .hd = parsed_config.value.head_dim orelse parsed_config.value.hidden_size / parsed_config.value.num_attention_heads,
     }, .f32));
-    const attention_backend = zml.attention.attention.Backend.auto(platform);
-    log.info("Selected target attention backend: {}", .{attention_backend});
-    const attention_metadata = zml.attention.attention.Metadata.init(.fromBackend(
-        attention_backend,
-        cache_seq_len,
-        parsed_target_config.value.num_attention_heads,
-    ));
-    const attention_parameters = zml.attention.attention.Parameters.init(.fromBackend(attention_backend));
-    const target_layers = TargetLayers.init(draft_model.target_layer_ids);
+    const target_attention = llama_inference.TargetAttention.init(platform, cache_seq_len, parsed_target_config.value.num_attention_heads);
+    log.info("Selected target attention backend: {}", .{target_attention.backend});
+    const target_layers = llama_inference.TargetLayers.init(draft_model.target_layer_ids);
 
     log.info("Compiling target prefill...", .{});
-    var target_prefill_exe = try platform.compileFn(
+    var target_prefill_exe = try llama_inference.compileTargetPrefill(
         allocator,
         io,
-        targetPrefill,
-        .{
-            target_model,
-            target_layers,
-            TargetPrefillContext{ .len = @intCast(token_ids.len) },
-            input_tokens_tensor,
-            token_index_tensor,
-            target_kv_cache,
-            attention_metadata,
-            attention_parameters,
-        },
-        .{ .shardings = &all_shardings },
+        platform,
+        target_model,
+        target_layers,
+        @intCast(token_ids.len),
+        input_tokens_tensor,
+        token_index_tensor,
+        target_kv_cache,
+        target_attention,
+        &all_shardings,
     );
     defer target_prefill_exe.deinit();
 
@@ -179,10 +162,7 @@ pub fn main(init: std.process.Init) !void {
         for (draft_token_exes) |*draft_exe| draft_exe.deinit();
         allocator.free(draft_token_exes);
     }
-    const target_hidden_tensor: zml.Tensor = .init(.{
-        .s = prefill_seq_len,
-        .d = target_hidden_dim,
-    }, target_model.model.embed_tokens.weight.dtype());
+    const target_hidden_tensor = llama_inference.targetHiddenTensor(target_model, parsed_target_config.value, target_layers, prefill_seq_len);
     for (draft_token_exes, draft_context_lens) |*draft_exe, context_len| {
         draft_exe.* = .{
             .context_len = context_len,
@@ -206,20 +186,18 @@ pub fn main(init: std.process.Init) !void {
     }
 
     log.info("Compiling target verify...", .{});
-    var target_verify_exe = try platform.compileFn(
+    var target_verify_exe = try llama_inference.compileTargetVerify(
         allocator,
         io,
-        targetVerify,
-        .{
-            target_model,
-            target_layers,
-            block_tokens_tensor,
-            token_index_tensor,
-            target_kv_cache,
-            attention_metadata,
-            attention_parameters,
-        },
-        .{ .shardings = &all_shardings },
+        platform,
+        target_model,
+        target_layers,
+        prefill_seq_len,
+        block_tokens_tensor,
+        token_index_tensor,
+        target_kv_cache,
+        target_attention,
+        &all_shardings,
     );
     defer target_verify_exe.deinit();
 
@@ -232,12 +210,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer dflash.Model.unloadBuffers(&model_buffers, allocator);
 
-    var target_buffers = try zml.io.load(llama.Model, &target_model, allocator, io, platform, &target_store, .{
-        .parallelism = 16,
-        .shardings = &all_shardings,
-        .dma_chunks = 32,
-        .dma_chunk_size = 128 * zml.MiB,
-    });
+    var target_buffers = try target_model.loadBuffers(allocator, io, platform, &target_store, &all_shardings);
     defer llama.Model.unloadBuffers(&target_buffers, allocator);
 
     const padded_token_ids = try paddedPromptTokens(allocator, token_ids, prefill_seq_len);
@@ -260,13 +233,13 @@ pub fn main(init: std.process.Init) !void {
     );
     defer token_index_buffer.deinit();
 
-    var target_kv_cache_buffers = try initZeroTargetKvCacheBuffer(allocator, io, platform, target_kv_cache, shardings.model);
+    var target_kv_cache_buffers = try target_kv_cache.initZeroBuffer(allocator, io, platform, shardings.model);
     defer llama.KvCache.deinitBuffer(&target_kv_cache_buffers);
 
     var draft_kv_cache_buffers = try initZeroDraftKvCacheBuffer(allocator, io, platform, draft_kv_cache, shardings.model);
     defer dflash.KvCache.deinitBuffer(&draft_kv_cache_buffers);
 
-    var attention_metadata_buffers = try attention_metadata.initBuffer(io, platform, shardings.model);
+    var attention_metadata_buffers = try target_attention.metadata.initBuffer(io, platform, shardings.model);
     defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
     var prefill_args = try target_prefill_exe.args(allocator);
@@ -291,7 +264,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer target_hidden_buffer.deinit();
     defer target_token_buffer.deinit();
-    replaceTargetKvCacheBuffers(&target_kv_cache_buffers, &prefilled_target_kv_cache_buffers);
+    llama.KvCache.replaceBuffers(&target_kv_cache_buffers, &prefilled_target_kv_cache_buffers);
 
     var target_token_slice = try target_token_buffer.toSliceAlloc(allocator, io);
     defer target_token_slice.free(allocator);
@@ -434,7 +407,7 @@ pub fn main(init: std.process.Init) !void {
             llama.KvCache.Buffer,
         });
         defer posterior_token_buffer.deinit();
-        replaceTargetKvCacheBuffers(&target_kv_cache_buffers, &verified_target_kv_cache_buffers);
+        llama.KvCache.replaceBuffers(&target_kv_cache_buffers, &verified_target_kv_cache_buffers);
 
         var posterior_token_slice = try posterior_token_buffer.toSliceAlloc(allocator, io);
         defer posterior_token_slice.free(allocator);
@@ -456,7 +429,7 @@ pub fn main(init: std.process.Init) !void {
 
         const generated_step_start = start;
         for (block_tokens[0..@as(usize, @intCast(committed_tokens))]) |token| {
-            if (isEosToken(&parsed_target_config.value, token)) {
+            if (llama.isEosToken(&parsed_target_config.value, token)) {
                 stopped_on_eos = true;
                 break;
             }
@@ -465,7 +438,7 @@ pub fn main(init: std.process.Init) !void {
             if (start >= max_seq_len) break;
         }
         if (!stopped_on_eos and start < max_seq_len) {
-            if (isEosToken(&parsed_target_config.value, correction_token)) {
+            if (llama.isEosToken(&parsed_target_config.value, correction_token)) {
                 stopped_on_eos = true;
             } else {
                 try setGeneratedToken(&generated, allocator, start, correction_token);
@@ -578,10 +551,6 @@ const DraftContext = struct {
     len: u32,
 };
 
-const TargetPrefillContext = struct {
-    len: u32,
-};
-
 const DraftTokenExe = struct {
     context_len: u32,
     exe: zml.Exe,
@@ -596,68 +565,6 @@ fn findDraftTokenExe(draft_token_exes: []DraftTokenExe, context_len: u32) *Draft
         if (context_len <= draft_exe.context_len) return draft_exe;
     }
     std.debug.panic("no DFlash draft executable compiled for context length {}", .{context_len});
-}
-
-const TargetLayers = struct {
-    ids: [32]u32 = undefined,
-    len: usize = 0,
-
-    pub fn init(ids: []const u32) TargetLayers {
-        stdx.debug.assert(ids.len <= 32, "DFlash example supports at most 32 target layers, got {}", .{ids.len});
-        var res: TargetLayers = .{};
-        res.len = ids.len;
-        @memcpy(res.ids[0..ids.len], ids);
-        return res;
-    }
-
-    pub fn slice(self: *const TargetLayers) []const u32 {
-        return self.ids[0..self.len];
-    }
-};
-
-fn targetPrefill(
-    target_model: llama.Model,
-    target_layers: TargetLayers,
-    context: TargetPrefillContext,
-    tokens: zml.Tensor,
-    token_index: zml.Tensor,
-    target_kv_cache: llama.KvCache,
-    attention_metadata: zml.attention.attention.Metadata,
-    attention_parameters: zml.attention.attention.Parameters,
-) struct { zml.Tensor, zml.Tensor, llama.KvCache } {
-    const prefill_tokens = tokens.withPartialTags(.{.s}).slice1d(.s, .{
-        .start = 0,
-        .end = context.len,
-    });
-    const target_hidden, const target_token, const updated_kv_cache = target_model.dflashPrefill(
-        prefill_tokens,
-        token_index,
-        target_kv_cache,
-        attention_metadata,
-        attention_parameters,
-        target_layers.slice(),
-    );
-    return .{ padTargetHidden(target_hidden, tokens.dim(.s)), target_token, updated_kv_cache };
-}
-
-fn targetVerify(
-    target_model: llama.Model,
-    target_layers: TargetLayers,
-    tokens: zml.Tensor,
-    token_index: zml.Tensor,
-    target_kv_cache: llama.KvCache,
-    attention_metadata: zml.attention.attention.Metadata,
-    attention_parameters: zml.attention.attention.Parameters,
-) struct { zml.Tensor, zml.Tensor, llama.KvCache } {
-    const target_hidden, const target_token, const updated_kv_cache = target_model.dflashVerify(
-        tokens,
-        token_index,
-        target_kv_cache,
-        attention_metadata,
-        attention_parameters,
-        target_layers.slice(),
-    );
-    return .{ padTargetHidden(target_hidden, prefill_seq_len), target_token, updated_kv_cache };
 }
 
 fn draftTokens(
@@ -691,79 +598,11 @@ fn draftTokens(
     return .{ target_model.greedyTokensFromHidden(hidden), updated_kv_cache };
 }
 
-fn padTargetHidden(target_hidden_: zml.Tensor, hidden_len: i64) zml.Tensor {
-    const target_hidden = target_hidden_.withPartialTags(.{ .s, .d });
-    if (target_hidden.dim(.s) == hidden_len) return target_hidden;
-
-    stdx.debug.assert(target_hidden.dim(.s) < hidden_len, "target hidden length {} exceeds DFlash block size {}", .{ target_hidden.dim(.s), hidden_len });
-    const padding = zml.Tensor.constant(target_hidden.dtype().zero()).broad(.init(.{
-        .s = hidden_len - target_hidden.dim(.s),
-        .d = target_hidden.dim(.d),
-    }, target_hidden.dtype()));
-    return zml.Tensor.concatenate(&.{ target_hidden, padding }, .s);
-}
-
-fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
-    const file = try dir.openFile(io, "tokenizer.json", .{});
-    defer file.close(io);
-
-    var reader = file.reader(io, &.{});
-    const bytes = try reader.interface.readAlloc(allocator, try file.length(io));
-    defer allocator.free(bytes);
-
-    return try .fromBytes(allocator, bytes);
-}
-
-fn promptTokens(
-    allocator: std.mem.Allocator,
-    tokenizer: *zml.tokenizer.Tokenizer,
-    config: llama.Config,
-    prompt: []const u8,
-) ![]u32 {
-    var encoder = try tokenizer.encoder();
-    defer encoder.deinit();
-
-    const start_header = tokenizer.tokenId("<|start_header_id|>") orelse return error.NoSuchToken;
-    const end_header = tokenizer.tokenId("<|end_header_id|>") orelse return error.NoSuchToken;
-    const eot = tokenizer.tokenId("<|eot_id|>") orelse return error.NoSuchToken;
-    const newline = tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
-
-    var tokens = std.Io.Writer.Allocating.initAligned(allocator, .of(u32));
-    try tokens.ensureUnusedCapacity(prompt.len);
-
-    const w: *std.Io.Writer = &tokens.writer;
-    try encoder.appendTokens(w, &.{ config.bos_token_id, start_header });
-    try encoder.encode(w, "user");
-    try encoder.appendTokens(w, &.{ end_header, newline });
-    try encoder.encode(w, prompt);
-    try encoder.appendTokens(w, &.{ eot, newline, start_header });
-    try encoder.encode(w, "assistant");
-    try encoder.appendTokens(w, &.{ end_header, newline });
-
-    return @ptrCast(@alignCast(try tokens.toOwnedSlice()));
-}
-
 fn paddedPromptTokens(allocator: std.mem.Allocator, token_ids: []const u32, block_size: u32) ![]u32 {
     const padded = try allocator.alloc(u32, block_size);
     @memset(padded, 0);
     @memcpy(padded[0..token_ids.len], token_ids);
     return padded;
-}
-
-fn firstEosToken(config: llama.Config) u32 {
-    return switch (config.eos_token_id.value) {
-        .int => |eos| eos,
-        .ints => |eos_list| eos_list[0],
-    };
-}
-
-fn isEosToken(config: *const llama.Config, token_id: u32) bool {
-    return switch (config.eos_token_id.value) {
-        .int => |eos| token_id == eos,
-        .ints => |eos_list| for (eos_list) |eos| {
-            if (token_id == eos) break true;
-        } else false,
-    };
 }
 
 fn printTokens(
@@ -840,19 +679,6 @@ fn setGeneratedToken(tokens: *std.ArrayList(u32), allocator: std.mem.Allocator, 
     }
 }
 
-fn initZeroTargetKvCacheBuffer(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    kv_cache: llama.KvCache,
-    sharding: zml.Sharding,
-) !llama.KvCache.Buffer {
-    return .{
-        .k = try zeroBuffer(allocator, io, platform, kv_cache.k.shape(), sharding),
-        .v = try zeroBuffer(allocator, io, platform, kv_cache.v.shape(), sharding),
-    };
-}
-
 fn initZeroDraftKvCacheBuffer(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -877,11 +703,6 @@ fn zeroBuffer(
     defer allocator.free(bytes);
     @memset(bytes, 0);
     return zml.Buffer.fromSlice(io, platform, zml.Slice.init(shape, bytes), sharding);
-}
-
-fn replaceTargetKvCacheBuffers(dst: *llama.KvCache.Buffer, src: *llama.KvCache.Buffer) void {
-    replaceBuffer(&dst.k, &src.k);
-    replaceBuffer(&dst.v, &src.v);
 }
 
 fn replaceDraftKvCacheBuffers(dst: *dflash.KvCache.Buffer, src: *dflash.KvCache.Buffer) void {
