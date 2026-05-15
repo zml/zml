@@ -12,10 +12,9 @@
 
 const std = @import("std");
 
-const mlir = @import("mlir");
-
 const harness = @import("harness");
 const ragged_paged = @import("platforms/tpu/ragged_paged");
+const zml = @import("zml");
 
 // =============================================================================
 // Kernel adapter — projects `ragged_paged.{Cfg, buildIr}` into the
@@ -26,7 +25,9 @@ pub const Kernel = struct {
     pub const name: [:0]const u8 = "ragged_paged_attention_kernel";
     pub const Config = ragged_paged.Cfg;
 
-    pub fn emit(allocator: std.mem.Allocator, ctx: *mlir.Context, cfg: Config) ![:0]const u8 {
+    pub fn emit(allocator: std.mem.Allocator, cfg: Config) ![:0]const u8 {
+        const ctx = try zml.kernel.mosaic_tpu.newContext();
+        defer ctx.deinit();
         return ragged_paged.buildIr(allocator, ctx, cfg);
     }
 };

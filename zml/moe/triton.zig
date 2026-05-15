@@ -81,7 +81,7 @@ pub const Metadata = struct {
     }
 
     pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
-        const replicated_sharding = try zml.sharding.replicatedSharding(platform);
+        const replicated_sharding = platform.replicated_sharding;
         return .{
             .w1_zero_bias = if (self.w1_zero_bias) |tensor| try initZeroBiasBuffer(io, platform, replicated_sharding, tensor.shape()) else null,
             .w2_zero_bias = if (self.w2_zero_bias) |tensor| try initZeroBiasBuffer(io, platform, replicated_sharding, tensor.shape()) else null,
@@ -94,7 +94,7 @@ pub fn deinitBuffer(bufferized: *zml.Bufferized(Metadata)) void {
     if (bufferized.w2_zero_bias) |*buffer| buffer.deinit();
 }
 
-fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding, shape: Shape) !zml.Buffer {
+fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding, shape: Shape) !zml.Buffer {
     var zero_slice: zml.Slice = try .alloc(std.heap.c_allocator, shape);
     defer zero_slice.free(std.heap.c_allocator);
     @memset(zero_slice.data(), 0);

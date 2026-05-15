@@ -100,9 +100,9 @@ const kernel_lib = @import("{lib_import}");
 const Kernel = kernel_lib.Kernel;
 const SWEEPS = kernel_lib.SWEEPS;
 
-fn emitFn(allocator: std.mem.Allocator, ctx: *mlir.Context, cfg_idx: usize) anyerror![:0]const u8 {{
+fn emitFn(allocator: std.mem.Allocator, cfg_idx: usize) anyerror![:0]const u8 {{
     inline for (SWEEPS, 0..) |sweep, i| {{
-        if (i == cfg_idx) return Kernel.emit(allocator, ctx, sweep.cfg);
+        if (i == cfg_idx) return Kernel.emit(allocator, sweep.cfg);
     }}
     return error.InvalidSweepIndex;
 }}
@@ -132,7 +132,7 @@ fn compileFn(
     kernel_lib.setActiveTtir(ttir);
     defer kernel_lib.setActiveTtir("");
 
-    const replicated = try zml.sharding.replicatedSharding(platform);
+    const replicated = platform.replicated_sharding;
     var exe = try zml.module.compile(allocator, io, kernel_lib.forward, kernel_lib.args(), platform, .{{
         .program_name = Kernel.name,
         .shardings = &.{{replicated}},
