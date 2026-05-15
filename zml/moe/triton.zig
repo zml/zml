@@ -381,11 +381,11 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
                 .grid = .{ 2, 1, 1 },
                 .num_stages = 1,
                 .num_warps = 8,
-                .output_operand_aliases = &.{
-                    .{ .output_index = 0, .operand_index = 1 },
-                    .{ .output_index = 1, .operand_index = 2 },
-                    .{ .output_index = 2, .operand_index = 3 },
-                    .{ .output_index = 3, .operand_index = 4 },
+                .output_operand_aliases = .{
+                    .sorted_token_ids = .sorted_token_ids_ptr,
+                    .expert_ids = .expert_ids_ptr,
+                    .num_tokens_post_pad = .num_tokens_post_pad_ptr,
+                    .cumsum = .cumsum_ptr,
                 },
             },
         );
@@ -415,9 +415,9 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
                 .grid = .{ @intCast(sort_grid_x), 1, 1 },
                 .num_stages = 1,
                 .num_warps = 4,
-                .output_operand_aliases = &.{
-                    .{ .output_index = 0, .operand_index = 1 },
-                    .{ .output_index = 1, .operand_index = 2 },
+                .output_operand_aliases = .{
+                    .sorted_token_ids = .sorted_token_ids_ptr,
+                    .cumsum = .cumsum_ptr,
                 },
             },
         );

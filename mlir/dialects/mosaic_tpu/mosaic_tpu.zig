@@ -646,7 +646,7 @@ pub fn concatenate(
 pub fn transpose(
     ctx: *mlir.Context,
     src: *const mlir.Value,
-    permutation: []const i32,
+    permutation: []const i64,
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
@@ -654,7 +654,7 @@ pub fn transpose(
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "permutation", .denseArray(ctx, .i32, permutation)),
+            .named(ctx, "permutation", mlir.Attribute.denseArray(ctx, .i64, permutation)),
         },
         .location = location,
     });
@@ -1149,14 +1149,14 @@ pub fn delay(
 pub fn assume_multiple(
     ctx: *mlir.Context,
     src: *const mlir.Value,
-    multiple: i64,
+    multiple: i32,
     location: *const mlir.Location,
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "tpu.assume_multiple", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{src.type_()} },
         .attributes = &.{
-            .named(ctx, "multiple", .int(ctx, .i64, multiple)),
+            .named(ctx, "multiple", mlir.Attribute.int(ctx, .i32, multiple)),
         },
         .location = location,
     });
@@ -1166,11 +1166,11 @@ pub fn assume_multiple(
 // Internal helpers
 // =============================================================================
 
-/// `DenseBoolArrayAttr` is distinct from `DenseArrayAttr<bool>`; pack bools as i8.
+/// `tpu.DenseBoolArrayAttr` stores one C `int` (i32) per bool, see `mlirDenseBoolArrayGet`
 fn denseBoolArrayAttribute(ctx: *mlir.Context, values: []const bool) *const mlir.Attribute {
-    var bytes: stdx.BoundedArray(i32, 64) = .empty;
-    for (values) |b| bytes.appendAssumeCapacity(@intFromBool(b));
-    return .denseArray(ctx, .bool, bytes.constSlice());
+    var ints: stdx.BoundedArray(i32, 64) = .empty;
+    for (values) |b| ints.appendAssumeCapacity(@intFromBool(b));
+    return mlir.Attribute.denseArray(ctx, .bool, ints.constSlice());
 }
 
 test {

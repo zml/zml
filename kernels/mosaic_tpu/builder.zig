@@ -39,6 +39,8 @@ const isFloatDtype = dtypes.isFloatDtype;
 const dtypeBitwidth = dtypes.dtypeBitwidth;
 const intBitwidth = dtypes.intBitwidth;
 
+pub const pipeline = @import("pipeline.zig");
+
 // =============================================================================
 // Value — a handle to an MLIR value inside the kernel body.
 // =============================================================================
@@ -215,6 +217,44 @@ pub const Value = struct {
     /// Absolute value (float→absf, int→absi).
     pub fn abs(self: Value) Value {
         return self.kern().abs(self);
+    }
+
+    /// Best-effort fold to an `i64` for `arith.constant` (and `addi`/`muli` of folded
+    /// operands). Returns `null` for anything else; the caller decides what to do.
+    /// TODO(raph): check if there is no better way
+    pub fn asConstantInt(self: Value) ?i64 {
+        if (self.inner.isA(mlir.OpResult) == null) return null;
+
+        const op = self.inner.owner();
+        const op_name = op.name();
+
+        if (std.mem.eql(u8, op_name, "arith.constant")) {
+            const attr = op.attributeByName("value") orelse return null;
+            const iattr = attr.isA(mlir.IntegerAttribute) orelse return null;
+            return iattr.value(i64);
+        }
+
+        if (std.mem.eql(u8, op_name, "arith.muli")) {
+            const lhs = Value{ .inner = op.operand(0), .kernel = self.kernel };
+            const rhs = Value{ .inner = op.operand(1), .kernel = self.kernel };
+            const lv = lhs.asConstantInt();
+            const rv = rhs.asConstantInt();
+            if (lv) |l| if (rv) |r| return l *% r;
+            // One side null, the other known: still folds if the known side is 0.
+            if (lv) |l| if (l == 0) return 0;
+            if (rv) |r| if (r == 0) return 0;
+            return null;
+        }
+
+        if (std.mem.eql(u8, op_name, "arith.addi")) {
+            const lhs = Value{ .inner = op.operand(0), .kernel = self.kernel };
+            const rhs = Value{ .inner = op.operand(1), .kernel = self.kernel };
+            const lv = lhs.asConstantInt() orelse return null;
+            const rv = rhs.asConstantInt() orelse return null;
+            return lv +% rv;
+        }
+
+        return null;
     }
 };
 
@@ -1644,7 +1684,7 @@ pub const Builder = struct {
         return self.emit(tpu.concatenate(self.ctx, self.innerSlice(sources), dimension, ty, self.loc()));
     }
 
-    pub fn transpose(self: *Builder, src: Value, permutation: []const i32) Value {
+    pub fn transpose(self: *Builder, src: Value, permutation: []const i64) Value {
         const in_shape = src.shape();
         std.debug.assert(permutation.len == in_shape.len);
         var out: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
