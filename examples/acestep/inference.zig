@@ -933,9 +933,6 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     defer x_buffer.deinit();
     defer context_latents_buffer.deinit();
     defer encoded_conditions_buffer.deinit();
-
-    var hidden_states_buffer: zml.Buffer = undefined;
-    defer hidden_states_buffer.deinit();
     
     const full_mask_slice = try createBidirectionalFullMask(allocator, @divFloor(t_25hz + 1, 2));
     defer full_mask_slice.free(allocator);
@@ -958,6 +955,8 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     for (0..steps) |i| {
         var y_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
         defer y_proj_buffer.deinit();
+        var hidden_states_buffer: zml.Buffer = undefined;
+        defer hidden_states_buffer.deinit();
         var temb_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
         defer temb_buffer.deinit();
         var timestep_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
@@ -983,7 +982,6 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
         acedit.exes.postprocess_exe.callOpts(io, acedit.exes.postprocess_args, &acedit.exes.postprocess_results, .{ .wait = true });
         result_buffer.deinit();
         acedit.exes.postprocess_results.fill(.{ &x_buffer, &result_buffer });
-        hidden_states_buffer.deinit();
     }
     zml_handler.toc(&zml_handler.timers.dit.prefill);
 
