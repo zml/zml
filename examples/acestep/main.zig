@@ -430,7 +430,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     
          zml_handler.tic(&zml_handler.timers.wav);
          
-         try exportDecodedAudioAsWav(zml_handler, decoded_audio, i);
+         try exportDecodedAudioAsWav2(zml_handler, decoded_audio, i);
     
          zml_handler.toc(&zml_handler.timers.wav);
     }
@@ -556,11 +556,11 @@ pub fn exportDecodedAudioAsWav2(zml_handler: *Zml_handler, decoded_audio: infere
         }
     }
 
-    if (@import("builtin").target.cpu.arch.endian() != .little) {
-        for (interleaved_words) |*word| {
-            word.* = std.mem.nativeToLittle(u32, word.*);
-        }
-    }
+    //if (@import("builtin").target.cpu.arch.endian() != .little) {
+    //    for (interleaved_words) |*word| {
+    //        word.* = std.mem.nativeToLittle(u32, word.*);
+            //    }
+        //}
 
     var file = try std.Io.Dir.createFile(.cwd(), io, indexed_output_path, .{ .truncate = true });
     defer file.close(io);

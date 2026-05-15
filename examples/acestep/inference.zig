@@ -1068,9 +1068,8 @@ pub fn decodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVa
         var encoded_chunk_buffer: zml.Buffer = try .fromSlice(io, platform, encoded_chunk_slice, sharding);
         defer encoded_chunk_buffer.deinit();
         // decode it
-        decode_args.set(.{ acevae.model_buffers, encoded_chunk_buffer });
+        decode_args.set(.{ acevae.model_buffers, encoded_chunk_buffer, decoded_chunk_buffer });
         acevae.decode_exe.callOpts(io, decode_args, &decode_results, .{ .wait = true });
-        decoded_chunk_buffer.deinit();
         decode_results.fill(.{ &decoded_chunk_buffer });
         // send the decoded chunk back to the CPU
         try decoded_chunk_buffer.toSlice(io, decoded_chunk_slice);
