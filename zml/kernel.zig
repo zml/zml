@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const stdx = @import("stdx");
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const mosaic_tpu_builder = @import("kernels/mosaic_tpu/builder");
@@ -36,6 +37,24 @@ fn makeKernelContext(comptime dialects_needed: []const []const u8) std.mem.Alloc
     ctx.loadAllAvailableDialects();
 
     return ctx;
+}
+
+fn resolveOutputOperandAliases(
+    aliases_opt: anytype,
+    operand_offset: i64,
+) stdx.BoundedArray(dialects.stablehlo.CustomCallOpts.OutputOperandAlias, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) {
+    var out: stdx.BoundedArray(dialects.stablehlo.CustomCallOpts.OutputOperandAlias, dialects.stablehlo.CustomCallOpts.MAX_RESULTS) = .empty;
+    
+    if (aliases_opt) |a| {
+        inline for (@typeInfo(@TypeOf(a)).@"struct".fields, 0..) |field, output_index| {
+            if (@field(a, field.name)) |operand| out.appendAssumeCapacity(.{
+                .output_index = @intCast(output_index),
+                .operand_index = @as(i64, @intCast(@intFromEnum(operand))) + operand_offset,
+            });
+        }
+    }
+    
+    return out;
 }
 
 pub const triton = struct {
@@ -90,7 +109,7 @@ pub const triton = struct {
                 grid: [3]i32,
                 num_stages: i32,
                 num_warps: i32,
-                output_operand_aliases: @FieldType(ops.TritonOps, "output_operand_aliases") = &.{},
+                output_operand_aliases: ?ops.CustomCallOutputOperandAliases(Inputs, Outputs) = null,
                 debug: bool = false,
             };
 
@@ -119,6 +138,8 @@ pub const triton = struct {
                 var outputs_arr: [spec.outputs.len]Shape = undefined;
                 inline for (spec.outputs, 0..) |fname, i| outputs_arr[i] = @field(outputs, fname);
 
+                const aliases = resolveOutputOperandAliases(opts.output_operand_aliases, 0);
+
                 const tensor_results = ops.triton(inputs_arr, outputs_arr, .{
                     .debug = opts.debug,
                     .name = name,
@@ -126,7 +147,7 @@ pub const triton = struct {
                     .grid = opts.grid,
                     .num_stages = opts.num_stages,
                     .num_warps = opts.num_warps,
-                    .output_operand_aliases = opts.output_operand_aliases,
+                    .output_operand_aliases = aliases.constSlice(),
                 });
 
                 var results: Results = undefined;
@@ -183,6 +204,16 @@ pub const mosaic_tpu = struct {
             pub const Outputs = StructOf(spec.outputs, Shape);
             pub const Results = StructOf(spec.outputs, Tensor);
 
+            pub const CallExtras = struct {
+                vmem_limit_bytes: ?i64 = null,
+                disable_bounds_checks: ?bool = null,
+                disable_semaphore_checks: ?bool = null,
+                has_communication: ?bool = null,
+                additional_attributes: []const mlir.NamedAttribute = &.{},
+                output_operand_aliases: ?ops.CustomCallOutputOperandAliases(Inputs, Outputs) = null,
+                dynamic_grid_bounds: []const Tensor = &.{},
+            };
+
             pub const CallOpts = struct {
                 cfg: ConfigT,
                 extras: CallExtras = .{},
@@ -207,7 +238,12 @@ pub const mosaic_tpu = struct {
                     std.debug.panic("zml.kernel.mosaic_tpu.Kernel({s}).call: emit failed: {}", .{ name, err });
                 defer cur.allocator.free(ir);
 
-                const backend_config = buildBackendConfig(cur.allocator, ir, opts.extras) catch |err|
+                const backend_config = buildBackendConfig(cur.allocator, ir, .{
+                    .vmem_limit_bytes = opts.extras.vmem_limit_bytes,
+                    .disable_bounds_checks = opts.extras.disable_bounds_checks,
+                    .disable_semaphore_checks = opts.extras.disable_semaphore_checks,
+                    .has_communication = opts.extras.has_communication,
+                }) catch |err|
                     std.debug.panic("zml.kernel.mosaic_tpu.Kernel({s}).call: backend_config build failed: {}", .{ name, err });
                 defer cur.allocator.free(backend_config);
 
@@ -219,7 +255,16 @@ pub const mosaic_tpu = struct {
                     r.* = mlirx.Type.rankedTensor(cur.mlir_ctx, @field(outputs, fname));
                 }
 
-                const op = callTpuCustomCall(&values, &res_types, backend_config, opts.extras);
+                const aliases = resolveOutputOperandAliases(opts.extras.output_operand_aliases, @intCast(opts.extras.dynamic_grid_bounds.len));
+
+                const op = callTpuCustomCall(.{
+                    .inputs = &values,
+                    .result_types = &res_types,
+                    .backend_config = backend_config,
+                    .aliases = aliases.constSlice(),
+                    .dynamic_grid_bounds = opts.extras.dynamic_grid_bounds,
+                    .additional_attributes = opts.extras.additional_attributes,
+                });
 
                 var results: Results = undefined;
                 inline for (spec.outputs, 0..) |fname, i| {
@@ -230,15 +275,6 @@ pub const mosaic_tpu = struct {
             }
         };
     }
-
-    const CallExtras = struct {
-        vmem_limit_bytes: ?i64 = null,
-        disable_bounds_checks: ?bool = null,
-        disable_semaphore_checks: ?bool = null,
-        has_communication: ?bool = null,
-        additional_attributes: []const mlir.NamedAttribute = &.{},
-        output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
-    };
 
     const CustomCallConfig = struct {
         body: []const u8,
@@ -261,10 +297,17 @@ pub const mosaic_tpu = struct {
         scoped_memory_configs: ?[]const ScopedMemoryConfig = null,
     };
 
+    const BackendConfigOpts = struct {
+        vmem_limit_bytes: ?i64 = null,
+        disable_bounds_checks: ?bool = null,
+        disable_semaphore_checks: ?bool = null,
+        has_communication: ?bool = null,
+    };
+
     fn buildBackendConfig(
         allocator: std.mem.Allocator,
         ir: [:0]const u8,
-        extras: CallExtras,
+        opts: BackendConfigOpts,
     ) ![]u8 {
         const ctx = try newContext();
         defer ctx.deinit();
@@ -295,11 +338,11 @@ pub const mosaic_tpu = struct {
         const config = BackendConfig{
             .custom_call_config = .{
                 .body = b64,
-                .has_communication = extras.has_communication,
-                .disable_bounds_checks = extras.disable_bounds_checks,
-                .disable_semaphore_checks = extras.disable_semaphore_checks,
+                .has_communication = opts.has_communication,
+                .disable_bounds_checks = opts.disable_bounds_checks,
+                .disable_semaphore_checks = opts.disable_semaphore_checks,
             },
-            .scoped_memory_configs = if (extras.vmem_limit_bytes) |vmem|
+            .scoped_memory_configs = if (opts.vmem_limit_bytes) |vmem|
                 &.{.{ .size = vmem }}
             else
                 null,
@@ -312,24 +355,33 @@ pub const mosaic_tpu = struct {
         return try json.toOwnedSlice();
     }
 
-    fn callTpuCustomCall(
+    const TpuCustomCallArgs = struct {
         inputs: []const *const mlir.Value,
         result_types: []const *const mlir.Type,
         backend_config: []const u8,
-        extras: CallExtras,
-    ) *mlir.Operation {
+        aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias,
+        dynamic_grid_bounds: []const Tensor,
+        additional_attributes: []const mlir.NamedAttribute,
+    };
+
+    fn callTpuCustomCall(args: TpuCustomCallArgs) *mlir.Operation {
         const cur = CompilationContext.current();
+
+        var all_inputs: stdx.BoundedArray(*const mlir.Value, dialects.stablehlo.CustomCallOpts.MAX_OPERANDS) = .empty;
+        for (args.dynamic_grid_bounds) |t| all_inputs.appendAssumeCapacity(t.value());
+        all_inputs.appendSliceAssumeCapacity(args.inputs);
+
         return dialects.stablehlo.custom_call(
             cur.mlir_ctx,
-            inputs,
-            result_types,
+            all_inputs.constSlice(),
+            args.result_types,
             .{
                 .call_target_name = "tpu_custom_call",
-                .backend_config = .{ .original = backend_config },
+                .backend_config = .{ .original = args.backend_config },
                 .has_side_effect = false,
                 .api_version = .original,
-                .additional_attributes = extras.additional_attributes,
-                .output_operand_aliases = extras.output_operand_aliases,
+                .additional_attributes = args.additional_attributes,
+                .output_operand_aliases = args.aliases,
             },
             .unknown(cur.mlir_ctx),
         ).appendTo(cur.currentScope().block);

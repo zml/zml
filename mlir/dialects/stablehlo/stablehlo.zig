@@ -719,6 +719,9 @@ pub fn convolution(
 }
 
 pub const CustomCallOpts = struct {
+    pub const MAX_OPERANDS = 64;
+    pub const MAX_RESULTS = 16;
+
     pub const ApiVersion = enum(i32) {
         original = 1,
         status_returning = 2,
@@ -749,8 +752,8 @@ pub const CustomCallOpts = struct {
 };
 
 pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result_types: []const *const mlir.Type, opts: CustomCallOpts, location: *const mlir.Location) *mlir.Operation {
-    const MAX_OPERANDS = 64;
-    const MAX_RESULTS = 16;
+    const MAX_OPERANDS = CustomCallOpts.MAX_OPERANDS;
+    const MAX_RESULTS = CustomCallOpts.MAX_RESULTS;
     const MINOR_TO_MAJOR = comptime blk: {
         var ret: [mlir.ShapedType.MAX_RANK]usize = undefined;
         for (0..ret.len) |i| {
