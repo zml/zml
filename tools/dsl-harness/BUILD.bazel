@@ -1,6 +1,6 @@
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
-load(":kernel.bzl", "aggregator_gen")
 load("//tools/dsl-harness:kernels.bzl", "mosaic_tpu_kernel_labels", "triton_kernel_labels")
+load(":kernel.bzl", "aggregator_gen")
 
 zig_library(
     name = "harness",
@@ -39,8 +39,10 @@ zig_binary(
     name = "dsl-harness",
     main = "main.zig",
     visibility = ["//visibility:public"],
-    data = triton_kernel_labels("_py") +
-           mosaic_tpu_kernel_labels("_py"),
+    data = mosaic_tpu_kernel_labels("_py") + select({
+        "@platforms//os:linux": triton_kernel_labels("_py"),
+        "//conditions:default": [],
+    }),
     deps = [
         ":aggregator",
         ":harness",

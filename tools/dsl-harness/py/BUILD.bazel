@@ -20,7 +20,6 @@ py_library(
     name = "runtime",
     srcs = ["runtime.py"],
     imports = ["."],
-    target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//visibility:public"],
 )
 
