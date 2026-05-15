@@ -129,12 +129,7 @@ pub fn main(init: std.process.Init) !void {
     const token_index_tensor: zml.Tensor = .init(.{}, .u32);
     const active_context_len_tensor: zml.Tensor = .init(.{}, .u32);
     const target_kv_cache = target_model.initKvCache(parsed_target_config.value, cache_seq_len);
-    const draft_kv_cache = dflash.KvCache.init(.init(.{
-        .layer = parsed_config.value.num_hidden_layers,
-        .k = cache_seq_len,
-        .h = parsed_config.value.num_key_value_heads,
-        .hd = parsed_config.value.head_dim orelse parsed_config.value.hidden_size / parsed_config.value.num_attention_heads,
-    }, .f32));
+    const draft_kv_cache = draft_model.initKvCache(parsed_config.value, cache_seq_len);
     const target_attention = llama_inference.TargetAttention.init(platform, cache_seq_len, parsed_target_config.value.num_attention_heads);
     log.info("Selected target attention backend: {}", .{target_attention.backend});
     const target_layers = llama_inference.TargetLayers.init(draft_model.target_layer_ids);
@@ -202,12 +197,7 @@ pub fn main(init: std.process.Init) !void {
     defer target_verify_exe.deinit();
 
     log.info("Loading weights...", .{});
-    var model_buffers = try zml.io.load(dflash.Model, &draft_model, allocator, io, platform, &store, .{
-        .parallelism = 16,
-        .shardings = &all_shardings,
-        .dma_chunks = 32,
-        .dma_chunk_size = 128 * zml.MiB,
-    });
+    var model_buffers = try draft_model.loadBuffers(allocator, io, platform, &store, &all_shardings);
     defer dflash.Model.unloadBuffers(&model_buffers, allocator);
 
     var target_buffers = try target_model.loadBuffers(allocator, io, platform, &target_store, &all_shardings);
@@ -236,7 +226,7 @@ pub fn main(init: std.process.Init) !void {
     var target_kv_cache_buffers = try target_kv_cache.initZeroBuffer(allocator, io, platform, shardings.model);
     defer llama.KvCache.deinitBuffer(&target_kv_cache_buffers);
 
-    var draft_kv_cache_buffers = try initZeroDraftKvCacheBuffer(allocator, io, platform, draft_kv_cache, shardings.model);
+    var draft_kv_cache_buffers = try draft_kv_cache.initZeroBuffer(allocator, io, platform, shardings.model);
     defer dflash.KvCache.deinitBuffer(&draft_kv_cache_buffers);
 
     var attention_metadata_buffers = try target_attention.metadata.initBuffer(io, platform, shardings.model);
@@ -364,7 +354,7 @@ pub fn main(init: std.process.Init) !void {
             dflash.KvCache.Buffer,
         });
         defer draft_token_buffer.deinit();
-        replaceDraftKvCacheBuffers(&draft_kv_cache_buffers, &updated_draft_kv_cache_buffers);
+        dflash.KvCache.replaceBuffers(&draft_kv_cache_buffers, &updated_draft_kv_cache_buffers);
         draft_cache_base = start;
 
         var draft_token_slice = try draft_token_buffer.toSliceAlloc(allocator, io);
@@ -594,7 +584,7 @@ fn draftTokens(
         .add(active_context_len.convert(cache_index.dtype()).broad(.init(.{ .s = block_tokens.dim(.s) }, cache_index.dtype())))
         .add(cache_index.broad(.init(.{ .s = block_tokens.dim(.s) }, cache_index.dtype())));
     const position_ids = zml.Tensor.concatenate(&.{ context_position_ids, proposal_position_ids }, .s);
-    const hidden, const updated_kv_cache = draft_model.forwardCached(target_hidden, noise_embedding, position_ids, draft_kv_cache, cache_index, active_context_len);
+    const hidden, const updated_kv_cache = draft_model.forward(target_hidden, noise_embedding, position_ids, draft_kv_cache, cache_index, active_context_len);
     return .{ target_model.greedyTokensFromHidden(hidden), updated_kv_cache };
 }
 
@@ -677,37 +667,6 @@ fn setGeneratedToken(tokens: *std.ArrayList(u32), allocator: std.mem.Allocator, 
         stdx.debug.assert(idx == tokens.items.len, "generated token stream has a gap at index {}", .{index});
         try tokens.append(allocator, token);
     }
-}
-
-fn initZeroDraftKvCacheBuffer(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    kv_cache: dflash.KvCache,
-    sharding: zml.Sharding,
-) !dflash.KvCache.Buffer {
-    return .{
-        .k = try zeroBuffer(allocator, io, platform, kv_cache.k.shape(), sharding),
-        .v = try zeroBuffer(allocator, io, platform, kv_cache.v.shape(), sharding),
-    };
-}
-
-fn zeroBuffer(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    shape: zml.Shape,
-    sharding: zml.Sharding,
-) !zml.Buffer {
-    const bytes = try allocator.alloc(u8, shape.byteSize());
-    defer allocator.free(bytes);
-    @memset(bytes, 0);
-    return zml.Buffer.fromSlice(io, platform, zml.Slice.init(shape, bytes), sharding);
-}
-
-fn replaceDraftKvCacheBuffers(dst: *dflash.KvCache.Buffer, src: *dflash.KvCache.Buffer) void {
-    replaceBuffer(&dst.k, &src.k);
-    replaceBuffer(&dst.v, &src.v);
 }
 
 fn replaceBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
