@@ -232,14 +232,14 @@ const Args = struct {
 // --duration=180 --n=3
 // bazel run --config=release acestep --//platforms:cuda=true -- --instru --local-files 
 // info: Module    init  compile     load  prefill   decode    total
-// info:   llm    0.27s    1.81s    0.88s    0.09s    2.05s    5.10s
-// info:   cfg    0.00s    0.79s    0.00s    0.13s   21.53s   22.45s
-// info:   emb    0.00s    1.26s    0.55s    0.00s    0.00s    2.03s
-// info:   enc    0.00s    2.74s    0.60s    0.01s    0.00s    3.35s
-// info:   dit    0.00s    2.07s    0.81s    4.44s    0.00s    7.36s
-// info:   vae    0.00s    1.40s    0.56s    3.97s    0.00s    5.96s
-// info:   wav                                                 9.86s
-// info: total                                                56.18s
+// info:   llm    0.26s    1.88s    0.92s    0.17s    2.69s    5.93s
+// info:   cfg    0.00s    0.80s    0.00s    0.29s   20.32s   21.42s
+// info:   emb    0.00s    1.37s    0.57s    0.00s    0.00s    2.15s
+// info:   enc    0.00s    2.92s    0.57s    0.01s    0.00s    3.51s
+// info:   dit    0.00s    2.03s    0.83s    4.36s    0.00s    7.25s
+// info:   vae    0.00s    1.82s    0.58s    2.24s    0.00s    4.67s
+// info:   wav                                                 0.24s
+// info: total                                                45.24s
 
 // TODO: have a look at cfg
 // TODO: reference audio
@@ -390,7 +390,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     zml_handler.toc(&zml_handler.timers.dit.total);
     zml_handler.tic(&zml_handler.timers.vae.total);
     
-    const decode_t: u32 = 3;
+    const decode_t: u32 = 5;
     var acevae = try acevae_.AceVae_handler.init(zml_handler, decode_t);
     defer acevae.deinit(zml_handler.allocator);
     

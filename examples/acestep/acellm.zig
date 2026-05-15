@@ -670,6 +670,8 @@ const AttLayer = struct {
     num_heads: i64 = undefined,
     num_kv_heads: i64 = 0,
     rope_opts: zml.nn.RopeOpts = undefined,
+    attention_metadata: zml.attention.attention.Metadata = undefined,
+    attention_parameters: zml.attention.attention.Parameters = undefined,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) !AttLayer {
         var rope_scaling = config.rope_scaling;
@@ -687,6 +689,8 @@ const AttLayer = struct {
                 .layout = .sequential,
                 .scaling = rope_scaling,
             },
+            .attention_metadata = .init(.fromBackend(.cuda_fa3, @intCast(2048), @intCast(config.num_attention_heads))),
+            .attention_parameters = .init(.fromBackend(.cuda_fa3)),
         };
     }
 
@@ -724,7 +728,7 @@ const AttLayer = struct {
         k = new_kv_cache.keys(layer_index).convert(dtype);
         v = new_kv_cache.values(layer_index).convert(dtype);
 
-        const attn_output = zml.attention.attention.attention(q, k, v, token_index, .vanilla, .vanilla);
+        const attn_output = zml.attention.attention.attention(q, k, v, token_index, self.attention_metadata, self.attention_parameters);
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         const delta = self.o_proj.forward(attn).rename(.{ .d_out = .d });
