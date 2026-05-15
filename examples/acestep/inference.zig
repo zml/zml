@@ -920,17 +920,7 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     defer x_buffer.deinit();
     defer context_latents_buffer.deinit();
     defer encoded_conditions_buffer.deinit();
-
-    // intermediate buffers
-    var y_proj_buffer: zml.Buffer = undefined;
-    defer y_proj_buffer.deinit();
-    var hidden_states_buffer: zml.Buffer = undefined;
-    defer hidden_states_buffer.deinit();
-    var temb_buffer: zml.Buffer = undefined;
-    defer temb_buffer.deinit();
-    var timestep_proj_buffer: zml.Buffer = undefined;
-    defer timestep_proj_buffer.deinit();
-
+    
     const full_mask_slice = try createBidirectionalFullMask(allocator, @divFloor(t_25hz + 1, 2));
     defer full_mask_slice.free(allocator);
     var full_mask_buffer: zml.Buffer = try .fromSlice(io, platform, full_mask_slice, sharding);
@@ -950,6 +940,14 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     const steps = timestamps.len - 1;
     zml_handler.tic(&zml_handler.timers.dit.prefill);
     for (0..steps) |i| {
+        var y_proj_buffer: zml.Buffer = undefined;
+        defer y_proj_buffer.deinit();
+        var hidden_states_buffer: zml.Buffer = undefined;
+        defer hidden_states_buffer.deinit();
+        var temb_buffer: zml.Buffer = undefined;
+        defer temb_buffer.deinit();
+        var timestep_proj_buffer: zml.Buffer = undefined;
+        defer timestep_proj_buffer.deinit();
         std.log.info("DiT ************* step {d}/{d}", .{ i+1, steps });
         var t_curr: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i], .f32, sharding);
         var t_next: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i + 1], .f32, sharding);

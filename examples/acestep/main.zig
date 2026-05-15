@@ -377,14 +377,13 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     
         zml_handler.tic(&zml_handler.timers.dit.total);
 
-        std.log.info("device debug string: {s}", .{ zml_handler.platform.devices[0].debugString() });
         const stats_before = zml_handler.platform.devices[0].memoryStats();
         
         const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, diffuse_args, i);
         defer diffused_latents.deinit(zml_handler.allocator);
 
         const stats_after = zml_handler.platform.devices[0].memoryStats();
-        std.log.info("memory stats: before={} after={}", .{ stats_before.bytes_in_use, stats_after.bytes_in_use });
+        std.log.info("memory stats dit: before={} after={}", .{ stats_before.bytes_in_use, stats_after.bytes_in_use });
     
         zml_handler.toc(&zml_handler.timers.dit.total);
         
@@ -393,10 +392,15 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
         // ------------------------------------------------
     
         zml_handler.tic(&zml_handler.timers.vae.total);
+
+        const stats_before2 = zml_handler.platform.devices[0].memoryStats();
     
         const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatentsTiled(zml_handler, &acevae, diffused_latents, decode_t);
         defer decoded_audio.deinit(zml_handler.allocator);
-    
+
+        const stats_after2 = zml_handler.platform.devices[0].memoryStats();
+        std.log.info("memory stats vae: before={} after={}", .{ stats_before2.bytes_in_use, stats_after2.bytes_in_use });
+        
         zml_handler.toc(&zml_handler.timers.vae.total);
     
         // ------------------------------------------------
