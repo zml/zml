@@ -83,7 +83,7 @@ pub const Driver = struct {
         const zig_mlir = blk: {
             var step = progress.start("zig emit", 0);
             defer step.end();
-            break :blk entry.emitFn(zig_arena.allocator(), self.ctx, idx) catch |err| {
+            break :blk entry.emitFn(zig_arena.allocator(), idx) catch |err| {
                 lower_group.await(self.io) catch {};
                 return errorRow(entry, sref.label, @errorName(err));
             };

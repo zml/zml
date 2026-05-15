@@ -39,7 +39,6 @@ pub const SweepRef = struct {
 
 pub const EmitFn = *const fn (
     allocator: std.mem.Allocator,
-    ctx: *mlir.Context,
     cfg_idx: usize,
 ) anyerror![:0]const u8;
 
