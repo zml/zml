@@ -38,7 +38,18 @@ pub const Step3p5ModelActs = struct {
     model: Step3p5FlashActs,
 };
 
-const Mlp = struct { up_proj: zml.nn.Linear, gate_proj: zml.nn.Linear, down_proj: zml.nn.Linear };
+const Mlp = struct {
+    up_proj: zml.nn.Linear,
+    gate_proj: zml.nn.Linear,
+    down_proj: zml.nn.Linear,
+
+    pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
+        const up_proj = self.up_proj.forward(x);
+        var output = self.gate_proj.forward(x);
+        output = output.swiglu().mul(up_proj);
+        return self.down_proj.forward(output);
+    }
+};
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -153,5 +164,9 @@ pub fn main(init: std.process.Init) !void {
         .down_proj = .init(mlp_view.withPrefix("down_proj").createTensor("weight", .{ .d, .dout }, .{ .d = .replicated, .dout = .model }), mlp_view.withPrefix("down_proj").maybeCreateTensor("bias", .{.d}, .{ .d = .replicated }), .dout),
     };
 
-    _ = mlp; // autofix
+    // at this point, weights are on disk and layer is initialized
+
+    var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, vfs_io, platform, &store, .auto);
+    _ = mlp_weights; // autofix
+
 }
