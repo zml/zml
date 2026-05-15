@@ -143,7 +143,8 @@ pub fn main(init: std.process.Init) !void {
         .h = parsed_config.value.num_key_value_heads,
         .hd = parsed_config.value.head_dim orelse parsed_config.value.hidden_size / parsed_config.value.num_attention_heads,
     }, .f32));
-    const attention_backend: zml.attention.attention.Backend = .vanilla;
+    const attention_backend = zml.attention.attention.Backend.auto(platform);
+    log.info("Selected target attention backend: {}", .{attention_backend});
     const attention_metadata = zml.attention.attention.Metadata.init(.fromBackend(
         attention_backend,
         cache_seq_len,
