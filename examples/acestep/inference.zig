@@ -983,6 +983,7 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
         acedit.exes.postprocess_exe.callOpts(io, acedit.exes.postprocess_args, &acedit.exes.postprocess_results, .{ .wait = true });
         result_buffer.deinit();
         acedit.exes.postprocess_results.fill(.{ &x_buffer, &result_buffer });
+        hidden_states_buffer.deinit();
     }
     zml_handler.toc(&zml_handler.timers.dit.prefill);
 
