@@ -12,6 +12,8 @@ pub const std_options: std.Options = .{
 
 const log = std.log.scoped(.dflash);
 
+const prefill_seq_len = 64;
+
 const default_prompt =
     "Paris is the city of lights, fun, and love where everyone can enjoy the amazing culture, food, and art.";
 
@@ -93,12 +95,15 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer = try loadTokenizer(allocator, io, target_repo);
     defer tokenizer.deinit();
 
-    const token_ids = try promptTokens(allocator, &tokenizer, parsed_config.value.block_size, args.prompt);
+    const token_ids = try promptTokens(allocator, &tokenizer, parsed_target_config.value, args.prompt);
     defer allocator.free(token_ids);
     const prompt_len: u32 = @intCast(token_ids.len);
     if (token_ids.len == 0) {
         log.err("prompt produced no tokens", .{});
         return error.EmptyPrompt;
+    }
+    if (token_ids.len > prefill_seq_len) {
+        std.debug.panic("prompt token count {} exceeds DFlash prefill length {}", .{ token_ids.len, prefill_seq_len });
     }
     if (args.max_seq_len <= token_ids.len) {
         log.err("--max-seq-len must be greater than prompt token count ({}), got {}", .{ token_ids.len, args.max_seq_len });
@@ -122,9 +127,10 @@ pub fn main(init: std.process.Init) !void {
     const all_shardings = shardings.all();
 
     const target_hidden_dim = draft_model.target_layer_ids.len * parsed_target_config.value.hidden_size;
-    const input_tokens_tensor: zml.Tensor = .init(.{ .s = block_size }, .u32);
+    const input_tokens_tensor: zml.Tensor = .init(.{ .s = prefill_seq_len }, .u32);
     const block_tokens_tensor: zml.Tensor = .init(.{ .s = block_size }, .u32);
     const token_index_tensor: zml.Tensor = .init(.{}, .u32);
+    const active_context_len_tensor: zml.Tensor = .init(.{}, .u32);
     const target_kv_cache = llama.KvCache.init(.init(.{
         .layer = parsed_target_config.value.num_hidden_layers,
         .k = cache_seq_len,
@@ -166,18 +172,19 @@ pub fn main(init: std.process.Init) !void {
     defer target_prefill_exe.deinit();
 
     log.info("Compiling DFlash draft token variants...", .{});
-    const draft_token_exes = try allocator.alloc(DraftTokenExe, block_size);
+    const draft_context_lens = [_]u32{ 1, 2, 3, 5, 10, prefill_seq_len };
+    const draft_token_exes = try allocator.alloc(DraftTokenExe, draft_context_lens.len);
     defer {
         for (draft_token_exes) |*draft_exe| draft_exe.deinit();
         allocator.free(draft_token_exes);
     }
     const target_hidden_tensor: zml.Tensor = .init(.{
-        .s = block_size,
+        .s = prefill_seq_len,
         .d = target_hidden_dim,
     }, target_model.model.embed_tokens.weight.dtype());
-    for (draft_token_exes, 0..) |*draft_exe, i| {
-        const context_len: u32 = @intCast(i + 1);
+    for (draft_token_exes, draft_context_lens) |*draft_exe, context_len| {
         draft_exe.* = .{
+            .context_len = context_len,
             .exe = try platform.compileFn(
                 allocator,
                 io,
@@ -190,6 +197,7 @@ pub fn main(init: std.process.Init) !void {
                     block_tokens_tensor,
                     draft_kv_cache,
                     token_index_tensor,
+                    active_context_len_tensor,
                 },
                 .{ .shardings = &all_shardings },
             ),
@@ -231,7 +239,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer llama.Model.unloadBuffers(&target_buffers, allocator);
 
-    const padded_token_ids = try paddedPromptTokens(allocator, token_ids, block_size);
+    const padded_token_ids = try paddedPromptTokens(allocator, token_ids, prefill_seq_len);
     defer allocator.free(padded_token_ids);
 
     var input_tokens_buffer: zml.Buffer = try .fromSlice(
@@ -306,6 +314,11 @@ pub fn main(init: std.process.Init) !void {
         try stdout.interface.flush();
     }
 
+    var stream_decoder: ?zml.tokenizer.Tokenizer.Decoder = if (args.verbose) null else try tokenizer.decoder();
+    defer if (stream_decoder) |*decoder| decoder.deinit();
+    const decoder_out_buffer: []u8 = if (args.verbose) &.{} else try allocator.alloc(u8, 256);
+    defer if (!args.verbose) allocator.free(decoder_out_buffer);
+
     var start: u32 = @intCast(token_ids.len);
     var draft_cache_base: u32 = 0;
     var target_hidden_block_buffer = target_hidden_buffer;
@@ -325,8 +338,8 @@ pub fn main(init: std.process.Init) !void {
     while (start < max_seq_len and !stopped_on_eos) : (step += 1) {
         const step_started_at: std.Io.Timestamp = .now(io, .awake);
         const context_len = start - draft_cache_base;
-        stdx.debug.assert(context_len >= 1 and context_len <= block_size, "invalid DFlash context length {}", .{context_len});
-        const selected_draft_exe = &draft_token_exes[@as(usize, @intCast(context_len - 1))];
+        stdx.debug.assert(context_len >= 1 and context_len <= prefill_seq_len, "invalid DFlash context length {}", .{context_len});
+        const selected_draft_exe = findDraftTokenExe(draft_token_exes, context_len);
 
         @memset(block_tokens, parsed_config.value.dflash_config.mask_token_id.?);
         block_tokens[0] = generated.items[@intCast(start)];
@@ -348,6 +361,15 @@ pub fn main(init: std.process.Init) !void {
         );
         defer draft_cache_index_buffer.deinit();
 
+        var draft_active_context_len: u32 = context_len;
+        var draft_active_context_len_buffer: zml.Buffer = try .fromSlice(
+            io,
+            platform,
+            zml.Slice.init(active_context_len_tensor.shape(), std.mem.asBytes(&draft_active_context_len)),
+            .replicated,
+        );
+        defer draft_active_context_len_buffer.deinit();
+
         var draft_args = try selected_draft_exe.exe.args(allocator);
         defer draft_args.deinit(allocator);
         var draft_results = try selected_draft_exe.exe.results(allocator);
@@ -359,6 +381,7 @@ pub fn main(init: std.process.Init) !void {
             block_tokens_buffer,
             draft_kv_cache_buffers,
             draft_cache_index_buffer,
+            draft_active_context_len_buffer,
         });
         selected_draft_exe.exe.call(draft_args, &draft_results);
 
@@ -465,7 +488,9 @@ pub fn main(init: std.process.Init) !void {
                 .{ step, start, context_len, valid_draft_tokens, committed_tokens, correction_token, step_started_at.untilNow(io, .awake), correction_text.items, generated_step_text.items },
             );
         } else {
-            try stdout.interface.writeAll(generated_step_text.items);
+            for (generated.items[generated_step_start..generated_step_end]) |token| {
+                try stdout.interface.writeAll(try stream_decoder.?.feedOne(token, decoder_out_buffer));
+            }
             try stdout.interface.flush();
         }
     }
@@ -489,6 +514,7 @@ pub fn main(init: std.process.Init) !void {
         defer generated_text.deinit(allocator);
         try stdout.interface.print("\n--- generated_text ---\n{s}\n", .{generated_text.items});
     } else {
+        try stdout.interface.writeAll(try stream_decoder.?.finalize(decoder_out_buffer));
         try stdout.interface.writeByte('\n');
     }
     try stdout.interface.print(
@@ -556,12 +582,20 @@ const TargetPrefillContext = struct {
 };
 
 const DraftTokenExe = struct {
+    context_len: u32,
     exe: zml.Exe,
 
     pub fn deinit(self: *DraftTokenExe) void {
         self.exe.deinit();
     }
 };
+
+fn findDraftTokenExe(draft_token_exes: []DraftTokenExe, context_len: u32) *DraftTokenExe {
+    for (draft_token_exes) |*draft_exe| {
+        if (context_len <= draft_exe.context_len) return draft_exe;
+    }
+    std.debug.panic("no DFlash draft executable compiled for context length {}", .{context_len});
+}
 
 const TargetLayers = struct {
     ids: [32]u32 = undefined,
@@ -614,7 +648,7 @@ fn targetVerify(
     attention_metadata: zml.attention.attention.Metadata,
     attention_parameters: zml.attention.attention.Parameters,
 ) struct { zml.Tensor, zml.Tensor, llama.KvCache } {
-    return target_model.dflashVerify(
+    const target_hidden, const target_token, const updated_kv_cache = target_model.dflashVerify(
         tokens,
         token_index,
         target_kv_cache,
@@ -622,6 +656,7 @@ fn targetVerify(
         attention_parameters,
         target_layers.slice(),
     );
+    return .{ padTargetHidden(target_hidden, prefill_seq_len), target_token, updated_kv_cache };
 }
 
 fn draftTokens(
@@ -632,16 +667,26 @@ fn draftTokens(
     block_tokens: zml.Tensor,
     draft_kv_cache: dflash.KvCache,
     cache_index: zml.Tensor,
+    active_context_len: zml.Tensor,
 ) struct { zml.Tensor, dflash.KvCache } {
-    const target_hidden = target_hidden_block.withPartialTags(.{ .s, .d }).slice1d(.s, .{
+    const target_hidden_slice = target_hidden_block.withPartialTags(.{ .s, .d }).slice1d(.s, .{
         .start = 0,
         .end = context.len,
     });
+    const active_mask = zml.Tensor.iota(.init(.{ .s = context.len }, .u32), .s).convert(.u32)
+        .cmp(.LT, active_context_len.convert(.u32).broad(.init(.{ .s = context.len }, .u32)));
+    const target_hidden = active_mask.broad(target_hidden_slice.shape())
+        .select(target_hidden_slice, zml.Tensor.constant(target_hidden_slice.dtype().zero()).broad(target_hidden_slice.shape()));
     const noise_embedding = target_model.embedTokens(block_tokens);
-    const position_ids = zml.Tensor.arange(.{ .end = context.len + block_tokens.dim(.s) }, cache_index.dtype())
+    const context_position_ids = zml.Tensor.arange(.{ .end = context.len }, cache_index.dtype())
         .withTags(.{.s})
-        .add(cache_index.broad(.init(.{ .s = context.len + block_tokens.dim(.s) }, cache_index.dtype())));
-    const hidden, const updated_kv_cache = draft_model.forwardCached(target_hidden, noise_embedding, position_ids, draft_kv_cache, cache_index);
+        .add(cache_index.broad(.init(.{ .s = context.len }, cache_index.dtype())));
+    const proposal_position_ids = zml.Tensor.arange(.{ .end = block_tokens.dim(.s) }, cache_index.dtype())
+        .withTags(.{.s})
+        .add(active_context_len.convert(cache_index.dtype()).broad(.init(.{ .s = block_tokens.dim(.s) }, cache_index.dtype())))
+        .add(cache_index.broad(.init(.{ .s = block_tokens.dim(.s) }, cache_index.dtype())));
+    const position_ids = zml.Tensor.concatenate(&.{ context_position_ids, proposal_position_ids }, .s);
+    const hidden, const updated_kv_cache = draft_model.forwardCached(target_hidden, noise_embedding, position_ids, draft_kv_cache, cache_index, active_context_len);
     return .{ target_model.greedyTokensFromHidden(hidden), updated_kv_cache };
 }
 
@@ -671,19 +716,30 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml
 fn promptTokens(
     allocator: std.mem.Allocator,
     tokenizer: *zml.tokenizer.Tokenizer,
-    block_size: u32,
+    config: llama.Config,
     prompt: []const u8,
 ) ![]u32 {
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
-    const encoded = try encoder.encodeAlloc(allocator, prompt);
-    defer allocator.free(encoded);
 
-    const len = @min(@as(usize, @intCast(block_size)), encoded.len);
-    const token_ids = try allocator.alloc(u32, len);
-    errdefer allocator.free(token_ids);
-    @memcpy(token_ids, encoded[0..len]);
-    return token_ids;
+    const start_header = tokenizer.tokenId("<|start_header_id|>") orelse return error.NoSuchToken;
+    const end_header = tokenizer.tokenId("<|end_header_id|>") orelse return error.NoSuchToken;
+    const eot = tokenizer.tokenId("<|eot_id|>") orelse return error.NoSuchToken;
+    const newline = tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
+
+    var tokens = std.Io.Writer.Allocating.initAligned(allocator, .of(u32));
+    try tokens.ensureUnusedCapacity(prompt.len);
+
+    const w: *std.Io.Writer = &tokens.writer;
+    try encoder.appendTokens(w, &.{ config.bos_token_id, start_header });
+    try encoder.encode(w, "user");
+    try encoder.appendTokens(w, &.{ end_header, newline });
+    try encoder.encode(w, prompt);
+    try encoder.appendTokens(w, &.{ eot, newline, start_header });
+    try encoder.encode(w, "assistant");
+    try encoder.appendTokens(w, &.{ end_header, newline });
+
+    return @ptrCast(@alignCast(try tokens.toOwnedSlice()));
 }
 
 fn paddedPromptTokens(allocator: std.mem.Allocator, token_ids: []const u32, block_size: u32) ![]u32 {

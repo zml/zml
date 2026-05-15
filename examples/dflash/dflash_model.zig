@@ -113,6 +113,7 @@ pub const Model = struct {
         position_ids_: zml.Tensor,
         kv_cache: KvCache,
         cache_index: zml.Tensor,
+        active_context_len: zml.Tensor,
     ) struct { zml.Tensor, KvCache } {
         var hidden = noise_embedding_.withPartialTags(.{ .s, .d }).convert(self.norm.weight.dtype());
         const target_hidden = self.hidden_norm.forward(
@@ -129,6 +130,7 @@ pub const Model = struct {
                 position_ids,
                 updated_kv_cache.atLayer(i),
                 cache_index,
+                active_context_len,
             );
         }
 
@@ -181,6 +183,7 @@ pub const DecoderLayer = struct {
         position_ids: zml.Tensor,
         kv_cache: KvCache,
         cache_index: zml.Tensor,
+        active_context_len: zml.Tensor,
     ) struct { zml.Tensor, KvCache } {
         const residual = hidden_states.withPartitioning(.{ .d = .replicated });
         const attn_out, const updated_kv_cache = self.self_attn.forwardCached(
@@ -189,6 +192,7 @@ pub const DecoderLayer = struct {
             position_ids,
             kv_cache,
             cache_index,
+            active_context_len,
         );
 
         const post_attn = residual.add(attn_out).withPartitioning(.{ .d = .replicated });
@@ -296,6 +300,7 @@ pub const DFlashAttention = struct {
         position_ids_: zml.Tensor,
         kv_cache: KvCache,
         cache_index: zml.Tensor,
+        active_context_len: zml.Tensor,
     ) struct { zml.Tensor, KvCache } {
         const hidden_states = hidden_states_.withPartialTags(.{ .s, .d }).withPartitioning(.{ .d = .replicated });
         const target_hidden = target_hidden_.withPartialTags(.{ .s, .d }).withPartitioning(.{ .d = .replicated });
@@ -325,15 +330,16 @@ pub const DFlashAttention = struct {
         new_k = zml.nn.rope(new_k, position_ids, self.rope_opts).rename(.{ .s = .k });
         new_v = new_v.rename(.{ .s = .k });
 
-        const updated_kv_cache = kv_cache.update(new_k, new_v, cache_index);
+        const updated_kv_cache = kv_cache.updateBucketed(new_k, new_v, cache_index, active_context_len, target_hidden.dim(.s));
         var k = updated_kv_cache.keys().convert(q.dtype());
         var v = updated_kv_cache.values().convert(.f32);
         k = k.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
         v = v.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
 
-        const valid_k = cache_index.add(zml.Tensor.scalar(position_ids.dim(.s), cache_index.dtype()));
         const attn_shape = zml.Shape.init(.{ .q = q.dim(.q), .k = k.dim(.k) }, .bool);
         const k_idx = zml.Tensor.iota(attn_shape, .k).convert(cache_index.dtype());
+        const active_context_end = cache_index.add(active_context_len.convert(cache_index.dtype()));
+        const valid_k = active_context_end.add(zml.Tensor.scalar(hidden_states.dim(.s), cache_index.dtype()));
         const valid_mask = k_idx.cmp(.LT, valid_k.broad(k_idx.shape()));
         const zeros = zml.Tensor.scalar(@as(f32, 0.0), .f32).broad(attn_shape.withDtype(.f32));
         const minus_inf = zml.Tensor.scalar(-std.math.inf(f32), .f32).broad(attn_shape.withDtype(.f32));
@@ -398,6 +404,17 @@ pub const KvCache = struct {
             .v = kv.v.scatterSlices(.{ .layer = layer, .k = token_index }, new_v.convert(kv.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
             .layer_index = kv.layer_index,
         };
+    }
+
+    pub fn updateBucketed(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor, active_context_len: zml.Tensor, context_len: i64) KvCache {
+        const context_k = new_k.slice1d(.k, .{ .start = 0, .end = context_len });
+        const context_v = new_v.slice1d(.k, .{ .start = 0, .end = context_len });
+        const proposal_k = new_k.slice1d(.k, .{ .start = context_len, .end = new_k.dim(.k) });
+        const proposal_v = new_v.slice1d(.k, .{ .start = context_len, .end = new_v.dim(.k) });
+
+        const context_cache = kv.update(context_k, context_v, token_index);
+        const proposal_index = token_index.add(active_context_len.convert(token_index.dtype()));
+        return context_cache.update(proposal_k, proposal_v, proposal_index);
     }
 
     pub fn atLayer(kv: KvCache, layer_index: usize) KvCache {
