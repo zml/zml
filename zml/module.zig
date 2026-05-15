@@ -106,7 +106,7 @@ pub const CompilationContext = struct {
         mlir_ctx.loadAllAvailableDialects();
 
         const module = mlir.Module.init(.unknown(mlir_ctx));
-        module.operation().setAttributeByName("sym_name", mlir.stringAttribute(mlir_ctx, opts.program_name));
+        module.operation().setAttributeByName("sym_name", .string(mlir_ctx, opts.program_name));
 
         const pass_manager = mlir.PassManager.init(mlir_ctx);
         {
@@ -225,11 +225,11 @@ pub fn compile(
 
     compilation_context.module.operation().setAttributeByName(
         "mhlo.num_partitions",
-        mlir.integerAttribute(compilation_context.mlir_ctx, .i32, num_partitions),
+        .int(compilation_context.mlir_ctx, .i32, num_partitions),
     );
     compilation_context.module.operation().setAttributeByName(
         "mhlo.num_replicas",
-        mlir.integerAttribute(compilation_context.mlir_ctx, .i32, num_replicas),
+        .int(compilation_context.mlir_ctx, .i32, num_replicas),
     );
 
     compilation_context.mlir_pass_manager.runOnOp(compilation_context.module.operation()) catch |err| switch (err) {
@@ -279,7 +279,7 @@ fn addPartitionerOperations(ctx: *CompilationContext) !void {
 
                 const mesh_op = mlir.Operation.make(mlir_ctx, "sdy.mesh", .{
                     .attributes = &.{
-                        .named(mlir_ctx, "sym_name", mlir.stringAttribute(mlir_ctx, name)),
+                        .named(mlir_ctx, "sym_name", .string(mlir_ctx, name)),
                         .named(mlir_ctx, "mesh", mesh_attr),
                     },
                     .location = .unknown(mlir_ctx),
@@ -417,7 +417,7 @@ const EmitMlirResult = struct {
 fn finalizeAttributeList(allocator_: std.mem.Allocator, mlir_ctx: *mlir.Context, attributes: []AttributeList) ![]*const mlir.Attribute {
     const res = try allocator_.alloc(*const mlir.Attribute, attributes.len);
     for (res, attributes) |*r, attr| {
-        r.* = mlir.dictionaryAttribute(mlir_ctx, attr.constSlice());
+        r.* = .dict(mlir_ctx, attr.constSlice());
     }
     return res;
 }
@@ -444,10 +444,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     };
     meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
-            const mlir_type = mlir.rankedTensorType(
-                tensor.dims(),
-                mlirx.Type.fromDType(ctx_.compilation_context.mlir_ctx, tensor.dtype()),
-            );
+            const mlir_type = mlirx.Type.rankedTensor(ctx_.compilation_context.mlir_ctx, tensor.shape());
             _ = ctx_.compilation_context.currentScope().block.addArgument(mlir_type, .unknown(ctx_.compilation_context.mlir_ctx));
             ctx_.compilation_context.currentScope().id_to_argument.put(ctx_.compilation_context.currentScope().arena.allocator(), tensor.id, ctx_.current_argument_id) catch unreachable;
             ctx_.current_argument_id += 1;
@@ -478,14 +475,14 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     @memset(output_attributes, .empty);
 
     for (output_info.donations, 0..) |donation, index| if (donation) |argument_index| {
-        input_attributes[argument_index].appendAssumeCapacity(.named(compilation_context.mlir_ctx, "tf.aliasing_output", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, index)));
+        input_attributes[argument_index].appendAssumeCapacity(.named(compilation_context.mlir_ctx, "tf.aliasing_output", .int(compilation_context.mlir_ctx, .i32, index)));
     };
     for (output_info.output_memory_kinds, 0..) |output_memory_kind, index| {
         if (output_memory_kind == .device) continue;
         output_attributes[index].appendAssumeCapacity(.named(
             compilation_context.mlir_ctx,
             "mhlo.memory_kind",
-            mlir.stringAttribute(
+            .string(
                 compilation_context.mlir_ctx,
                 compilation_context.platform.memoryKind(output_memory_kind),
             ),
@@ -507,7 +504,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
             input_attributes[i].appendAssumeCapacity(.named(
                 compilation_context.mlir_ctx,
                 "mhlo.memory_kind",
-                mlir.stringAttribute(
+                .string(
                     compilation_context.mlir_ctx,
                     compilation_context.platform.memoryKind(memory_kind),
                 ),

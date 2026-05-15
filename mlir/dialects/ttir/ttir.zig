@@ -217,9 +217,9 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
 
     var attr_tuples_buffer: stdx.BoundedArray(mlir.NamedAttribute, 16) = .empty;
     attr_tuples_buffer.appendSliceAssumeCapacity(&.{
-        .named(ctx, "sym_name", mlir.stringAttribute(ctx, args.name)),
-        .named(ctx, "sym_visibility", mlir.stringAttribute(ctx, @tagName(args.visibility))),
-        .named(ctx, "function_type", mlir.typeAttribute(mlir.functionType(
+        .named(ctx, "sym_name", .string(ctx, args.name)),
+        .named(ctx, "sym_visibility", .string(ctx, @tagName(args.visibility))),
+        .named(ctx, "function_type", .typeAttr(.function(
             ctx,
             args.args orelse args_: {
                 for (0..args.block.numArguments()) |i| {
@@ -240,15 +240,15 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
     });
 
     if (args.args_attributes) |args_attributes| {
-        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "arg_attrs", mlir.arrayAttribute(ctx, args_attributes)));
+        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "arg_attrs", .array(ctx, args_attributes)));
     }
     if (args.results_attributes) |results_attributes| {
-        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "res_attrs", mlir.arrayAttribute(ctx, results_attributes)));
+        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "res_attrs", .array(ctx, results_attributes)));
     }
     // Always emit noinline even when false — matches Triton's IR convention.
-    attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "noinline", mlir.boolAttribute(ctx, args.no_inline)));
+    attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "noinline", .boolean(ctx, args.no_inline)));
 
-    return mlir.Operation.make(ctx, "tt.func", .{
+    return .make(ctx, "tt.func", .{
         .blocks = &.{args.block},
         .attributes = attr_tuples_buffer.constSlice(),
         .location = args.location,
@@ -257,7 +257,7 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
 }
 
 pub fn return_(ctx: *mlir.Context, values: []const *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.return", .{
+    return .make(ctx, "tt.return", .{
         .operands = .{ .flat = values },
         .verify = false,
         .location = location,
@@ -269,8 +269,8 @@ pub fn return_(ctx: *mlir.Context, values: []const *const mlir.Value, location: 
 // =============================================================================
 
 pub fn get_program_id(ctx: *mlir.Context, axis: ProgramIDDim, location: *const mlir.Location) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.get_program_id", .{
-        .results = .{ .flat = &.{mlir.integerType(ctx, .i32)} },
+    return .make(ctx, "tt.get_program_id", .{
+        .results = .{ .flat = &.{.int(ctx, .i32)} },
         .attributes = &.{
             .named(ctx, "axis", programDim(ctx, axis)),
         },
@@ -279,8 +279,8 @@ pub fn get_program_id(ctx: *mlir.Context, axis: ProgramIDDim, location: *const m
 }
 
 pub fn get_num_programs(ctx: *mlir.Context, axis: ProgramIDDim, location: *const mlir.Location) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.get_num_programs", .{
-        .results = .{ .flat = &.{mlir.integerType(ctx, .i32)} },
+    return .make(ctx, "tt.get_num_programs", .{
+        .results = .{ .flat = &.{.int(ctx, .i32)} },
         .attributes = &.{
             .named(ctx, "axis", programDim(ctx, axis)),
         },
@@ -299,11 +299,11 @@ pub fn make_range(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.make_range", .{
+    return .make(ctx, "tt.make_range", .{
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "start", mlir.integerAttribute(ctx, .i32, start)),
-            .named(ctx, "end", mlir.integerAttribute(ctx, .i32, end)),
+            .named(ctx, "start", .int(ctx, .i32, start)),
+            .named(ctx, "end", .int(ctx, .i32, end)),
         },
         .location = location,
     });
@@ -319,7 +319,7 @@ pub fn splat(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.splat", .{
+    return .make(ctx, "tt.splat", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .location = location,
@@ -333,11 +333,11 @@ pub fn expand_dims(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.expand_dims", .{
+    return .make(ctx, "tt.expand_dims", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "axis", mlir.integerAttribute(ctx, .i32, axis)),
+            .named(ctx, "axis", .int(ctx, .i32, axis)),
         },
         .location = location,
     });
@@ -349,7 +349,7 @@ pub fn broadcast(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.broadcast", .{
+    return .make(ctx, "tt.broadcast", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .location = location,
@@ -366,12 +366,12 @@ pub fn reshape(
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
     if (allow_reorder) {
-        attrs.appendAssumeCapacity(.named(ctx, "allow_reorder", mlir.unitAttribute(ctx)));
+        attrs.appendAssumeCapacity(.named(ctx, "allow_reorder", .unit(ctx)));
     }
     if (efficient_layout) {
-        attrs.appendAssumeCapacity(.named(ctx, "efficient_layout", mlir.unitAttribute(ctx)));
+        attrs.appendAssumeCapacity(.named(ctx, "efficient_layout", .unit(ctx)));
     }
-    return mlir.Operation.make(ctx, "tt.reshape", .{
+    return .make(ctx, "tt.reshape", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .attributes = attrs.constSlice(),
@@ -386,11 +386,11 @@ pub fn trans(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.trans", .{
+    return .make(ctx, "tt.trans", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "order", mlir.denseArrayAttribute(ctx, .i32, order)),
+            .named(ctx, "order", .denseArray(ctx, .i32, order)),
         },
         .location = location,
     });
@@ -407,7 +407,7 @@ pub fn addptr(
     offset: *const mlir.Value,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.addptr", .{
+    return .make(ctx, "tt.addptr", .{
         .operands = .{ .flat = &.{ ptr_val, offset } },
         .results = .{ .flat = &.{ptr_val.type_()} },
         .location = location,
@@ -439,14 +439,14 @@ pub fn load(
     } else 0;
 
     const seg_sizes = [3]i32{ 1, mask_len, other_len };
-    return mlir.Operation.make(ctx, "tt.load", .{
+    return .make(ctx, "tt.load", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
             .named(ctx, "cache", cacheModifier(ctx, cache)),
             .named(ctx, "evict", evictionPolicy(ctx, evict)),
-            .named(ctx, "isVolatile", mlir.boolAttribute(ctx, is_volatile)),
+            .named(ctx, "isVolatile", .boolean(ctx, is_volatile)),
         },
         .location = location,
     });
@@ -465,7 +465,7 @@ pub fn store(
     var buf: stdx.BoundedArray(*const mlir.Value, 3) = .empty;
     buf.appendSliceAssumeCapacity(&.{ ptr_val, value });
     if (mask) |m| buf.appendAssumeCapacity(m);
-    return mlir.Operation.make(ctx, "tt.store", .{
+    return .make(ctx, "tt.store", .{
         .operands = .{ .flat = buf.constSlice() },
         .attributes = &.{
             .named(ctx, "cache", cacheModifier(ctx, cache)),
@@ -489,12 +489,12 @@ pub fn dot(
     max_num_imprecise_acc: i32,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.dot", .{
+    return .make(ctx, "tt.dot", .{
         .operands = .{ .flat = &.{ a, b, c_acc } },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
             .named(ctx, "inputPrecision", inputPrecision(ctx, input_precision_)),
-            .named(ctx, "maxNumImpreciseAcc", mlir.integerAttribute(ctx, .i32, max_num_imprecise_acc)),
+            .named(ctx, "maxNumImpreciseAcc", .int(ctx, .i32, max_num_imprecise_acc)),
         },
         .location = location,
     });
@@ -511,12 +511,12 @@ pub fn reduce(
     location: *const mlir.Location,
 ) *mlir.Operation {
     // Single variadic operand group — flat list, no operandSegmentSizes needed.
-    return mlir.Operation.make(ctx, "tt.reduce", .{
+    return .make(ctx, "tt.reduce", .{
         .operands = .{ .flat = srcs },
         .results = .{ .flat = result_types },
         .blocks = &.{combine_block},
         .attributes = &.{
-            .named(ctx, "axis", mlir.integerAttribute(ctx, .i32, axis)),
+            .named(ctx, "axis", .int(ctx, .i32, axis)),
         },
         .location = location,
     });
@@ -527,7 +527,7 @@ pub fn reduce_return(
     values: []const *const mlir.Value,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.reduce.return", .{
+    return .make(ctx, "tt.reduce.return", .{
         .operands = .{ .flat = values },
         .verify = false,
         .location = location,
@@ -545,7 +545,7 @@ pub fn int_to_ptr(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.int_to_ptr", .{
+    return .make(ctx, "tt.int_to_ptr", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .location = location,
@@ -559,7 +559,7 @@ pub fn ptr_to_int(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.ptr_to_int", .{
+    return .make(ctx, "tt.ptr_to_int", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .location = location,
@@ -574,7 +574,7 @@ pub fn bitcast(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.bitcast", .{
+    return .make(ctx, "tt.bitcast", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .location = location,
@@ -594,7 +594,7 @@ pub fn fp_to_fp(
     if (rounding) |rm| {
         attrs.appendAssumeCapacity(.named(ctx, "rounding", roundingMode(ctx, rm)));
     }
-    return mlir.Operation.make(ctx, "tt.fp_to_fp", .{
+    return .make(ctx, "tt.fp_to_fp", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .attributes = attrs.constSlice(),
@@ -615,7 +615,7 @@ pub fn clampf(
     propagate_nan: PropagateNan,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.clampf", .{
+    return .make(ctx, "tt.clampf", .{
         .operands = .{ .flat = &.{ x, min, max } },
         .results = .{ .flat = &.{x.type_()} },
         .attributes = &.{
@@ -631,7 +631,7 @@ pub fn precise_sqrt(
     x: *const mlir.Value,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.precise_sqrt", .{
+    return .make(ctx, "tt.precise_sqrt", .{
         .operands = .{ .flat = &.{x} },
         .results = .{ .flat = &.{x.type_()} },
         .location = location,
@@ -645,7 +645,7 @@ pub fn precise_divf(
     y: *const mlir.Value,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.precise_divf", .{
+    return .make(ctx, "tt.precise_divf", .{
         .operands = .{ .flat = &.{ x, y } },
         .results = .{ .flat = &.{x.type_()} },
         .location = location,
@@ -659,7 +659,7 @@ pub fn mulhiui(
     y: *const mlir.Value,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.mulhiui", .{
+    return .make(ctx, "tt.mulhiui", .{
         .operands = .{ .flat = &.{ x, y } },
         .results = .{ .flat = &.{x.type_()} },
         .location = location,
@@ -677,7 +677,7 @@ pub fn unsplat(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.unsplat", .{
+    return .make(ctx, "tt.unsplat", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .location = location,
@@ -692,7 +692,7 @@ pub fn cat(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.cat", .{
+    return .make(ctx, "tt.cat", .{
         .operands = .{ .flat = &.{ lhs, rhs } },
         .results = .{ .flat = &.{result_type} },
         .location = location,
@@ -707,7 +707,7 @@ pub fn join(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.join", .{
+    return .make(ctx, "tt.join", .{
         .operands = .{ .flat = &.{ lhs, rhs } },
         .results = .{ .flat = &.{result_type} },
         .location = location,
@@ -721,7 +721,7 @@ pub fn split(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.split", .{
+    return .make(ctx, "tt.split", .{
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{ result_type, result_type } },
         .location = location,
@@ -744,11 +744,11 @@ pub fn gather(
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
-    attrs.appendAssumeCapacity(.named(ctx, "axis", mlir.integerAttribute(ctx, .i32, axis)));
+    attrs.appendAssumeCapacity(.named(ctx, "axis", .int(ctx, .i32, axis)));
     if (efficient_layout) {
-        attrs.appendAssumeCapacity(.named(ctx, "efficient_layout", mlir.unitAttribute(ctx)));
+        attrs.appendAssumeCapacity(.named(ctx, "efficient_layout", .unit(ctx)));
     }
-    return mlir.Operation.make(ctx, "tt.gather", .{
+    return .make(ctx, "tt.gather", .{
         .operands = .{ .flat = &.{ src, indices } },
         .results = .{ .flat = &.{result_type} },
         .attributes = attrs.constSlice(),
@@ -767,7 +767,7 @@ pub fn histogram(
     var buf: stdx.BoundedArray(*const mlir.Value, 2) = .empty;
     buf.appendAssumeCapacity(src);
     if (mask) |m| buf.appendAssumeCapacity(m);
-    return mlir.Operation.make(ctx, "tt.histogram", .{
+    return .make(ctx, "tt.histogram", .{
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .location = location,
@@ -789,13 +789,13 @@ pub fn scan(
     result_types: []const *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.scan", .{
+    return .make(ctx, "tt.scan", .{
         .operands = .{ .variadic = &.{srcs} },
         .results = .{ .flat = result_types },
         .blocks = &.{combine_block},
         .attributes = &.{
-            .named(ctx, "axis", mlir.integerAttribute(ctx, .i32, axis)),
-            .named(ctx, "reverse", mlir.boolAttribute(ctx, reverse)),
+            .named(ctx, "axis", .int(ctx, .i32, axis)),
+            .named(ctx, "reverse", .boolean(ctx, reverse)),
         },
         .location = location,
     });
@@ -806,7 +806,7 @@ pub fn scan_return(
     values: []const *const mlir.Value,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.scan.return", .{
+    return .make(ctx, "tt.scan.return", .{
         .operands = .{ .flat = values },
         .verify = false,
         .location = location,
@@ -832,7 +832,7 @@ pub fn atomic_rmw(
     operands_buf.appendSliceAssumeCapacity(&.{ ptr_val, val });
     if (mask) |m| operands_buf.appendAssumeCapacity(m);
 
-    return mlir.Operation.make(ctx, "tt.atomic_rmw", .{
+    return .make(ctx, "tt.atomic_rmw", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{val.type_()} },
         .attributes = &.{
@@ -854,7 +854,7 @@ pub fn atomic_cas(
     scope: MemSyncScope,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.atomic_cas", .{
+    return .make(ctx, "tt.atomic_cas", .{
         .operands = .{ .flat = &.{ ptr_val, cmp, val } },
         .results = .{ .flat = &.{val.type_()} },
         .attributes = &.{
@@ -876,10 +876,10 @@ pub fn assert_(
     message: []const u8,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.assert", .{
+    return .make(ctx, "tt.assert", .{
         .operands = .{ .flat = &.{condition} },
         .attributes = &.{
-            .named(ctx, "message", mlir.stringAttribute(ctx, message)),
+            .named(ctx, "message", .string(ctx, message)),
         },
         .location = location,
     });
@@ -901,14 +901,14 @@ pub fn call(
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 3) = .empty;
-    attrs.appendAssumeCapacity(.named(ctx, "callee", mlir.flatSymbolRefAttribute(ctx, callee)));
+    attrs.appendAssumeCapacity(.named(ctx, "callee", .flatSymbolRef(ctx, callee)));
     if (arg_attrs) |aa| {
-        attrs.appendAssumeCapacity(.named(ctx, "arg_attrs", mlir.arrayAttribute(ctx, aa)));
+        attrs.appendAssumeCapacity(.named(ctx, "arg_attrs", .array(ctx, aa)));
     }
     if (res_attrs) |ra| {
-        attrs.appendAssumeCapacity(.named(ctx, "res_attrs", mlir.arrayAttribute(ctx, ra)));
+        attrs.appendAssumeCapacity(.named(ctx, "res_attrs", .array(ctx, ra)));
     }
-    return mlir.Operation.make(ctx, "tt.call", .{
+    return .make(ctx, "tt.call", .{
         .operands = .{ .flat = operands },
         .results = .{ .flat = result_types },
         .attributes = attrs.constSlice(),
@@ -949,16 +949,16 @@ pub fn dot_scaled(
     } else 0;
 
     const seg_sizes = [5]i32{ 1, 1, 1, a_scale_len, b_scale_len };
-    return mlir.Operation.make(ctx, "tt.dot_scaled", .{
+    return .make(ctx, "tt.dot_scaled", .{
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
             .named(ctx, "a_elem_type", scaleDotElemType(ctx, a_elem_type)),
             .named(ctx, "b_elem_type", scaleDotElemType(ctx, b_elem_type)),
-            .named(ctx, "fastMath", mlir.boolAttribute(ctx, fast_math)),
-            .named(ctx, "lhs_k_pack", mlir.boolAttribute(ctx, lhs_k_pack)),
-            .named(ctx, "rhs_k_pack", mlir.boolAttribute(ctx, rhs_k_pack)),
+            .named(ctx, "fastMath", .boolean(ctx, fast_math)),
+            .named(ctx, "lhs_k_pack", .boolean(ctx, lhs_k_pack)),
+            .named(ctx, "rhs_k_pack", .boolean(ctx, rhs_k_pack)),
         },
         .location = location,
     });
@@ -978,14 +978,14 @@ pub fn extern_elementwise(
     pure: bool,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.extern_elementwise", .{
+    return .make(ctx, "tt.extern_elementwise", .{
         .operands = .{ .flat = srcs },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "libname", mlir.stringAttribute(ctx, libname)),
-            .named(ctx, "libpath", mlir.stringAttribute(ctx, libpath)),
-            .named(ctx, "symbol", mlir.stringAttribute(ctx, symbol)),
-            .named(ctx, "pure", mlir.boolAttribute(ctx, pure)),
+            .named(ctx, "libname", .string(ctx, libname)),
+            .named(ctx, "libpath", .string(ctx, libpath)),
+            .named(ctx, "symbol", .string(ctx, symbol)),
+            .named(ctx, "pure", .boolean(ctx, pure)),
         },
         .location = location,
     });
@@ -1007,12 +1007,12 @@ pub fn print(
     location: *const mlir.Location,
 ) *mlir.Operation {
     std.debug.assert(args.len == is_signed.len);
-    return mlir.Operation.make(ctx, "tt.print", .{
+    return .make(ctx, "tt.print", .{
         .operands = .{ .flat = args },
         .attributes = &.{
-            .named(ctx, "prefix", mlir.stringAttribute(ctx, prefix)),
-            .named(ctx, "hex", mlir.boolAttribute(ctx, hex)),
-            .named(ctx, "isSigned", mlir.denseArrayAttribute(ctx, .i32, is_signed)),
+            .named(ctx, "prefix", .string(ctx, prefix)),
+            .named(ctx, "hex", .boolean(ctx, hex)),
+            .named(ctx, "isSigned", .denseArray(ctx, .i32, is_signed)),
         },
         .location = location,
     });
@@ -1038,7 +1038,7 @@ pub fn make_tensor_descriptor(
     buf.appendSliceAssumeCapacity(shape);
     buf.appendSliceAssumeCapacity(strides);
     // SameVariadicOperandSize — flatten all operands.
-    return mlir.Operation.make(ctx, "tt.make_tensor_descriptor", .{
+    return .make(ctx, "tt.make_tensor_descriptor", .{
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
@@ -1060,7 +1060,7 @@ pub fn descriptor_load(
     var buf: stdx.BoundedArray(*const mlir.Value, 16) = .empty;
     buf.appendAssumeCapacity(desc);
     buf.appendSliceAssumeCapacity(indices);
-    return mlir.Operation.make(ctx, "tt.descriptor_load", .{
+    return .make(ctx, "tt.descriptor_load", .{
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
@@ -1081,7 +1081,7 @@ pub fn descriptor_store(
     var buf: stdx.BoundedArray(*const mlir.Value, 16) = .empty;
     buf.appendSliceAssumeCapacity(&.{ desc, src });
     buf.appendSliceAssumeCapacity(indices);
-    return mlir.Operation.make(ctx, "tt.descriptor_store", .{
+    return .make(ctx, "tt.descriptor_store", .{
         .operands = .{ .flat = buf.constSlice() },
         .location = location,
     });
@@ -1098,7 +1098,7 @@ pub fn descriptor_reduce(
     var buf: stdx.BoundedArray(*const mlir.Value, 16) = .empty;
     buf.appendSliceAssumeCapacity(&.{ desc, src });
     buf.appendSliceAssumeCapacity(indices);
-    return mlir.Operation.make(ctx, "tt.descriptor_reduce", .{
+    return .make(ctx, "tt.descriptor_reduce", .{
         .operands = .{ .flat = buf.constSlice() },
         .attributes = &.{
             .named(ctx, "kind", descriptorReduceKind(ctx, kind)),
@@ -1115,7 +1115,7 @@ pub fn descriptor_gather(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.descriptor_gather", .{
+    return .make(ctx, "tt.descriptor_gather", .{
         .operands = .{ .flat = &.{ desc, x_offsets, y_offset } },
         .results = .{ .flat = &.{result_type} },
         .location = location,
@@ -1130,7 +1130,7 @@ pub fn descriptor_scatter(
     src: *const mlir.Value,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.descriptor_scatter", .{
+    return .make(ctx, "tt.descriptor_scatter", .{
         .operands = .{ .flat = &.{ desc, x_offsets, y_offset, src } },
         .location = location,
     });
@@ -1151,12 +1151,12 @@ pub fn map_elementwise(
     result_types: []const *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.map_elementwise", .{
+    return .make(ctx, "tt.map_elementwise", .{
         .operands = .{ .flat = srcs },
         .results = .{ .flat = result_types },
         .blocks = &.{scalar_block},
         .attributes = &.{
-            .named(ctx, "pack", mlir.integerAttribute(ctx, .i32, pack)),
+            .named(ctx, "pack", .int(ctx, .i32, pack)),
         },
         .location = location,
     });
@@ -1167,7 +1167,7 @@ pub fn map_elementwise_return(
     values: []const *const mlir.Value,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.map_elementwise.return", .{
+    return .make(ctx, "tt.map_elementwise.return", .{
         .operands = .{ .flat = values },
         .verify = false,
         .location = location,
@@ -1190,14 +1190,14 @@ pub fn elementwise_inline_asm(
     packed_element: i32,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    return mlir.Operation.make(ctx, "tt.elementwise_inline_asm", .{
+    return .make(ctx, "tt.elementwise_inline_asm", .{
         .operands = .{ .flat = args },
         .results = .{ .flat = result_types },
         .attributes = &.{
-            .named(ctx, "asm_string", mlir.stringAttribute(ctx, asm_string)),
-            .named(ctx, "constraints", mlir.stringAttribute(ctx, constraints)),
-            .named(ctx, "pure", mlir.boolAttribute(ctx, pure)),
-            .named(ctx, "packed_element", mlir.integerAttribute(ctx, .i32, packed_element)),
+            .named(ctx, "asm_string", .string(ctx, asm_string)),
+            .named(ctx, "constraints", .string(ctx, constraints)),
+            .named(ctx, "pure", .boolean(ctx, pure)),
+            .named(ctx, "packed_element", .int(ctx, .i32, packed_element)),
         },
         .location = location,
     });
@@ -1235,12 +1235,10 @@ test "tt.func round-trip" {
     const module: *mlir.Module = .init(loc);
     defer module.deinit();
 
-    const f32_ty = mlir.floatType(ctx, .f32);
+    const f32_ty = mlir.Type.float(ctx, .f32);
     const ptr_ty = pointerType(f32_ty, 1);
-    const arg_types: []const *const mlir.Type = &.{ ptr_ty, ptr_ty };
-    const arg_locs: []const *const mlir.Location = &.{ loc, loc };
 
-    const entry = mlir.Block.init(arg_types, arg_locs);
+    const entry = mlir.Block.init(&.{ ptr_ty, ptr_ty }, &.{ loc, loc });
 
     const arg0 = entry.argument(0);
     const arg1 = entry.argument(1);
@@ -1250,7 +1248,7 @@ test "tt.func round-trip" {
     _ = loaded.appendTo(entry);
 
     // %1 = arith.constant 1.0 : f32 — built with Operation.make to avoid cross-dialect import
-    const one_attr: *const mlir.Attribute = mlir.floatAttribute(ctx, .f32, 1.0);
+    const one_attr: *const mlir.Attribute = .float(ctx, .f32, 1.0);
     const one = mlir.Operation.make(ctx, "arith.constant", .{
         .results = .{ .flat = &.{f32_ty} },
         .attributes = &.{.named(ctx, "value", one_attr)},

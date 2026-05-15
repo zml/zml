@@ -18,9 +18,9 @@ pub fn apply(
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "affine.apply", .{
         .operands = .{ .flat = map_operands },
-        .results = .{ .flat = &.{mlir.indexType(ctx)} },
+        .results = .{ .flat = &.{.index(ctx)} },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -35,9 +35,9 @@ pub fn min(
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "affine.min", .{
         .operands = .{ .flat = map_operands },
-        .results = .{ .flat = &.{mlir.indexType(ctx)} },
+        .results = .{ .flat = &.{.index(ctx)} },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -52,9 +52,9 @@ pub fn max(
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "affine.max", .{
         .operands = .{ .flat = map_operands },
-        .results = .{ .flat = &.{mlir.indexType(ctx)} },
+        .results = .{ .flat = &.{.index(ctx)} },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -120,10 +120,10 @@ pub fn for_(
         .results = .{ .flat = result_types.constSlice() },
         .blocks = &.{body},
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
-            .named(ctx, "lowerBoundMap", mlir.affineMapAttribute(lb_map)),
-            .named(ctx, "upperBoundMap", mlir.affineMapAttribute(ub_map)),
-            .named(ctx, "step", mlir.integerAttribute(ctx, .i64, args.step)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
+            .named(ctx, "lowerBoundMap", .affineMap(lb_map)),
+            .named(ctx, "upperBoundMap", .affineMap(ub_map)),
+            .named(ctx, "step", .int(ctx, .i64, args.step)),
         },
         // The for body may reference outer SSA values that only become
         // reachable once it's appended to its parent — defer to module-level
@@ -162,7 +162,7 @@ pub fn if_(
     state.addOperands(operands);
     state.addResults(result_types);
     state.addAttributes(&.{
-        .named(ctx, "condition", mlir.integerSetAttribute(condition)),
+        .named(ctx, "condition", .integerSet(condition)),
     });
 
     const then_region = mlir.Region.init();
@@ -195,7 +195,7 @@ pub fn load(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -216,7 +216,7 @@ pub fn store(
     return mlir.Operation.make(ctx, "affine.store", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -238,7 +238,7 @@ pub fn vector_load(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -259,7 +259,7 @@ pub fn vector_store(
     return mlir.Operation.make(ctx, "affine.vector_store", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "map", mlir.affineMapAttribute(map)),
+            .named(ctx, "map", .affineMap(map)),
         },
         .location = location,
     });
@@ -301,26 +301,26 @@ pub fn parallel(
     // I32ElementsAttr — dense<[...]> : tensor<NxI32>.
     const lb_groups_ty = mlir.RankedTensorType.get(
         &.{@intCast(args.lower_bounds_groups.len)},
-        mlir.integerType(ctx, .i32),
+        .int(ctx, .i32),
         null,
     ).shaped();
     const ub_groups_ty = mlir.RankedTensorType.get(
         &.{@intCast(args.upper_bounds_groups.len)},
-        mlir.integerType(ctx, .i32),
+        .int(ctx, .i32),
         null,
     ).shaped();
 
     // I64SmallVectorArrayAttr — built as ArrayAttr<IntegerAttr<I64>>.
     var steps_attrs: stdx.BoundedArray(*const mlir.Attribute, 16) = .empty;
     for (args.steps) |s| {
-        steps_attrs.appendAssumeCapacity(mlir.integerAttribute(ctx, .i64, s));
+        steps_attrs.appendAssumeCapacity(.int(ctx, .i64, s));
     }
 
     // Reductions are AtomicRMWKindAttr (I64EnumAttr). We let callers pass
     // raw int values to avoid coupling against the enum table.
     var reductions_attrs: stdx.BoundedArray(*const mlir.Attribute, 16) = .empty;
     for (args.reductions) |k| {
-        reductions_attrs.appendAssumeCapacity(mlir.integerAttribute(ctx, .i64, k));
+        reductions_attrs.appendAssumeCapacity(.int(ctx, .i64, k));
     }
 
     return mlir.Operation.make(ctx, "affine.parallel", .{
@@ -328,12 +328,12 @@ pub fn parallel(
         .results = .{ .flat = result_types },
         .blocks = &.{body_block},
         .attributes = &.{
-            .named(ctx, "reductions", mlir.arrayAttribute(ctx, reductions_attrs.constSlice())),
-            .named(ctx, "lowerBoundsMap", mlir.affineMapAttribute(args.lower_bounds_map)),
-            .named(ctx, "lowerBoundsGroups", mlir.denseElementsAttribute(lb_groups_ty, args.lower_bounds_groups)),
-            .named(ctx, "upperBoundsMap", mlir.affineMapAttribute(args.upper_bounds_map)),
-            .named(ctx, "upperBoundsGroups", mlir.denseElementsAttribute(ub_groups_ty, args.upper_bounds_groups)),
-            .named(ctx, "steps", mlir.arrayAttribute(ctx, steps_attrs.constSlice())),
+            .named(ctx, "reductions", .array(ctx, reductions_attrs.constSlice())),
+            .named(ctx, "lowerBoundsMap", .affineMap(args.lower_bounds_map)),
+            .named(ctx, "lowerBoundsGroups", .denseElements(lb_groups_ty, args.lower_bounds_groups)),
+            .named(ctx, "upperBoundsMap", .affineMap(args.upper_bounds_map)),
+            .named(ctx, "upperBoundsGroups", .denseElements(ub_groups_ty, args.upper_bounds_groups)),
+            .named(ctx, "steps", .array(ctx, steps_attrs.constSlice())),
         },
         .verify = false,
         .location = location,
@@ -364,7 +364,7 @@ pub fn delinearize_index(
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = result_types },
         .attributes = &.{
-            .named(ctx, "static_basis", mlir.denseArrayAttribute(ctx, .i64, args.static_basis)),
+            .named(ctx, "static_basis", .denseArray(ctx, .i64, args.static_basis)),
         },
         .location = location,
     });
@@ -394,11 +394,11 @@ pub fn linearize_index(
 
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 3) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
-        .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
-        .named(ctx, "static_basis", mlir.denseArrayAttribute(ctx, .i64, args.static_basis)),
+        .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
+        .named(ctx, "static_basis", .denseArray(ctx, .i64, args.static_basis)),
     });
     if (args.disjoint) {
-        attrs.appendAssumeCapacity(.named(ctx, "disjoint", mlir.unitAttribute(ctx)));
+        attrs.appendAssumeCapacity(.named(ctx, "disjoint", .unit(ctx)));
     }
 
     return mlir.Operation.make(ctx, "affine.linearize_index", .{

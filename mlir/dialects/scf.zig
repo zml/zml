@@ -35,10 +35,10 @@ pub fn for_(
 
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
     if (opts.unsigned_cmp) {
-        attrs.appendAssumeCapacity(.named(ctx, "unsignedCmp", mlir.unitAttribute(ctx)));
+        attrs.appendAssumeCapacity(.named(ctx, "unsignedCmp", .unit(ctx)));
     }
     if (opts.num_stages) |n| {
-        attrs.appendAssumeCapacity(.named(ctx, "tt.num_stages", mlir.integerAttribute(ctx, .i32, n)));
+        attrs.appendAssumeCapacity(.named(ctx, "tt.num_stages", .int(ctx, .i32, n)));
     }
 
     return mlir.Operation.make(ctx, "scf.for", .{
@@ -151,7 +151,7 @@ pub fn execute_region(
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.no_inline) {
-        attrs.appendAssumeCapacity(.named(ctx, "no_inline", mlir.unitAttribute(ctx)));
+        attrs.appendAssumeCapacity(.named(ctx, "no_inline", .unit(ctx)));
     }
     return mlir.Operation.make(ctx, "scf.execute_region", .{
         .results = .{ .flat = result_types },
@@ -198,7 +198,7 @@ pub fn parallel(
         .results = .{ .flat = result_types },
         .blocks = &.{body_block},
         .attributes = &.{
-            .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
+            .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
         },
         .verify = false,
         .location = location,
@@ -284,10 +284,10 @@ pub fn forall(
 
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 5) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
-        .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
-        .named(ctx, "staticLowerBound", mlir.denseArrayAttribute(ctx, .i64, sentinel_slice)),
-        .named(ctx, "staticUpperBound", mlir.denseArrayAttribute(ctx, .i64, sentinel_slice)),
-        .named(ctx, "staticStep", mlir.denseArrayAttribute(ctx, .i64, sentinel_slice)),
+        .named(ctx, "operandSegmentSizes", .denseArray(ctx, .i32, &seg_sizes)),
+        .named(ctx, "staticLowerBound", .denseArray(ctx, .i64, sentinel_slice)),
+        .named(ctx, "staticUpperBound", .denseArray(ctx, .i64, sentinel_slice)),
+        .named(ctx, "staticStep", .denseArray(ctx, .i64, sentinel_slice)),
     });
     if (mapping) |m| attrs.appendAssumeCapacity(.named(ctx, "mapping", m));
 
@@ -334,7 +334,7 @@ pub fn index_switch(
     state.addOperands(&.{arg});
     state.addResults(result_types);
     state.addAttributes(&.{
-        .named(ctx, "cases", mlir.denseArrayAttribute(ctx, .i64, cases)),
+        .named(ctx, "cases", .denseArray(ctx, .i64, cases)),
     });
 
     // First region is the default, then one per case — this is how

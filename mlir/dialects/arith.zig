@@ -53,10 +53,9 @@ pub fn constant_int(
     int_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    const attr: *const mlir.Attribute = @ptrCast(c.mlirIntegerAttrGet(int_type.ptr(), value).ptr);
     return mlir.Operation.make(ctx, "arith.constant", .{
         .results = .{ .flat = &.{int_type} },
-        .attributes = &.{.named(ctx, "value", attr)},
+        .attributes = &.{.named(ctx, "value", .intFromType(@ptrCast(int_type), value))},
         .location = location,
     });
 }
@@ -69,15 +68,15 @@ pub fn constant_float(
     location: *const mlir.Location,
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "arith.constant", .{
-        .results = .{ .flat = &.{mlir.floatType(ctx, ft)} },
-        .attributes = &.{.named(ctx, "value", mlir.floatAttribute(ctx, ft, value))},
+        .results = .{ .flat = &.{.float(ctx, ft)} },
+        .attributes = &.{.named(ctx, "value", .float(ctx, ft, value))},
         .location = location,
     });
 }
 
 /// arith.constant for an `index`-typed integer.
 pub fn constant_index(ctx: *mlir.Context, value: i64, location: *const mlir.Location) *mlir.Operation {
-    const idx_ty = mlir.indexType(ctx);
+    const idx_ty = mlir.Type.index(ctx);
     const attr: *const mlir.Attribute = @ptrCast(c.mlirIntegerAttrGet(idx_ty.ptr(), value).ptr);
     return mlir.Operation.make(ctx, "arith.constant", .{
         .results = .{ .flat = &.{idx_ty} },
@@ -315,7 +314,7 @@ pub fn convertf(
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.rounding) |rm| {
-        attrs.appendAssumeCapacity(.named(ctx, "roundingmode", mlir.integerAttribute(ctx, .i32, @intFromEnum(rm))));
+        attrs.appendAssumeCapacity(.named(ctx, "roundingmode", .int(ctx, .i32, @intFromEnum(rm))));
     }
     return mlir.Operation.make(ctx, "arith.convertf", .{
         .operands = .{ .flat = &.{src} },
@@ -336,7 +335,7 @@ pub fn scaling_truncf(
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.rounding) |rm| {
-        attrs.appendAssumeCapacity(.named(ctx, "roundingmode", mlir.integerAttribute(ctx, .i32, @intFromEnum(rm))));
+        attrs.appendAssumeCapacity(.named(ctx, "roundingmode", .int(ctx, .i32, @intFromEnum(rm))));
     }
     return mlir.Operation.make(ctx, "arith.scaling_truncf", .{
         .operands = .{ .flat = &.{ src, scale } },
@@ -361,7 +360,7 @@ pub fn cmpi(
         .operands = .{ .flat = &.{ lhs, rhs } },
         .result_type_inference = true,
         .attributes = &.{
-            .named(ctx, "predicate", mlir.integerAttribute(ctx, .i64, @intFromEnum(predicate))),
+            .named(ctx, "predicate", .int(ctx, .i64, @intFromEnum(predicate))),
         },
         .location = location,
     });
@@ -378,7 +377,7 @@ pub fn cmpf(
         .operands = .{ .flat = &.{ lhs, rhs } },
         .result_type_inference = true,
         .attributes = &.{
-            .named(ctx, "predicate", mlir.integerAttribute(ctx, .i64, @intFromEnum(predicate))),
+            .named(ctx, "predicate", .int(ctx, .i64, @intFromEnum(predicate))),
         },
         .location = location,
     });

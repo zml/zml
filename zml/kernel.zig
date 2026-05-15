@@ -1,18 +1,17 @@
 const std = @import("std");
 
-const mlir = @import("mlir");
 const dialects = @import("mlir/dialects");
-
-const triton_builder = @import("kernels/triton/builder");
+const mlir = @import("mlir");
 const mosaic_tpu_builder = @import("kernels/mosaic_tpu/builder");
 const tpu_dialect = @import("mlir/dialects/mosaic_tpu");
+const triton_builder = @import("kernels/triton/builder");
 
-const DataType = @import("dtype.zig").DataType;
-const Shape = @import("shape.zig").Shape;
-const ops = @import("ops.zig");
-const Tensor = @import("tensor.zig").Tensor;
 const CompilationContext = @import("module.zig").CompilationContext;
+const DataType = @import("dtype.zig").DataType;
 const mlirx = @import("mlirx.zig");
+const ops = @import("ops.zig");
+const Shape = @import("shape.zig").Shape;
+const Tensor = @import("tensor.zig").Tensor;
 
 /// Build a struct type with one field per name, all of type `FieldT`.
 fn StructOf(comptime names: []const [:0]const u8, comptime FieldT: type) type {
@@ -216,9 +215,8 @@ pub const mosaic_tpu = struct {
                 inline for (spec.inputs, 0..) |fname, i| values[i] = @field(inputs, fname).value();
 
                 var res_types: [spec.outputs.len]*const mlir.Type = undefined;
-                inline for (spec.outputs, 0..) |fname, i| {
-                    const out = @field(outputs, fname);
-                    res_types[i] = mlir.rankedTensorType(out.dims(), mlirx.Type.fromDType(cur.mlir_ctx, out.dtype()));
+                inline for (&res_types, spec.outputs) |*r, fname| {
+                    r.* = mlirx.Type.rankedTensor(cur.mlir_ctx, @field(outputs, fname));
                 }
 
                 const op = callTpuCustomCall(&values, &res_types, backend_config, opts.extras);

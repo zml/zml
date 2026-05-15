@@ -1456,7 +1456,7 @@ pub const Data = struct {
                 break;
             }
         }
-        if (!has_sharding) return mlir.stringAttribute(ctx, try allocator.dupe(u8, "{replicated}"));
+        if (!has_sharding) return .string(ctx, try allocator.dupe(u8, "{replicated}"));
 
         const mapping = self.getDimMapping(shape);
         var tile_shape: stdx.BoundedArray(i64, Shape.MAX_RANK + 1) = .empty;
@@ -1509,7 +1509,7 @@ pub const Data = struct {
 
         try out.writer.writeAll("}");
 
-        return mlir.stringAttribute(ctx, try out.toOwnedSlice());
+        return .string(ctx, try out.toOwnedSlice());
     }
 
     pub fn deviceAssignment(self: *const Data, allocator: std.mem.Allocator) ![]usize {

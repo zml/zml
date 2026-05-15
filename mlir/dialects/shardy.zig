@@ -205,7 +205,7 @@ pub const TensorShardingAttribute = opaque {
         const unreduced: []const c.struct_MlirAttribute = @ptrCast(args.unreduced_axes);
         return @ptrCast(c.sdyTensorShardingAttrGet(
             ctx.ptr(),
-            mlir.flatSymbolRefAttribute(ctx, args.mesh).ptr(),
+            mlir.Attribute.flatSymbolRef(ctx, args.mesh).ptr(),
             @intCast(dimensions.len),
             dimensions.ptr,
             @intCast(replicated.len),

@@ -248,16 +248,15 @@ test "Options.fromBackend configures mosaic_tpu ragged backend" {
 
 test "Backend.auto selects mosaic_tpu on TPU" {
     const platform: zml.Platform = .{
-        .arena_state = .{},
+        .arena = undefined,
         .target = .tpu,
         .pjrt_api = undefined,
         .pjrt_client = undefined,
-        .devices = &[_]zml.platform.Device{},
-        .memories = &[_]zml.platform.Memory{},
+        .devices = &.{},
+        .memories = &.{},
         .physical_mesh = undefined,
         .replicated_sharding = undefined,
-        .triton_runtime = null,
-        .tpu_ir_runtime = null,
+        .shardings = .empty,
     };
 
     try std.testing.expectEqual(Backend.mosaic_tpu, Backend.auto(&platform));

@@ -341,6 +341,52 @@ pub const Type = opaque {
     pub fn parse(ctx: *Context, str: []const u8) Error!*const Type {
         return @ptrCast(c.mlirTypeParseGet(ctx.ptr(), stringRef(str)).ptr orelse return Error.InvalidMlir);
     }
+
+    pub fn index(ctx: *Context) *const Type {
+        return @ptrCast(IndexType.get(ctx));
+    }
+
+    pub fn int(ctx: *Context, it: IntegerTypes) *const Type {
+        return @ptrCast(IntegerType.get(ctx, it));
+    }
+
+    pub fn float(ctx: *Context, ft: FloatTypes) *const Type {
+        return switch (ft) {
+            inline else => |v| @ptrCast(FloatType(v).get(ctx)),
+        };
+    }
+
+    pub fn complex(ctx: *Context, complex_type: ComplexTypes) *const Type {
+        return @ptrCast(ComplexType.get(ctx, complex_type));
+    }
+
+    pub fn rankedTensor(dimensions: []const i64, elem_type: *const Type) *const Type {
+        return @ptrCast(RankedTensorType.get(dimensions, elem_type, null));
+    }
+
+    pub fn rankedTensorWithEncoding(dimensions: []const i64, elem_type: *const Type, encoding: *Attribute) *const Type {
+        return @ptrCast(RankedTensorType.get(dimensions, elem_type, encoding));
+    }
+
+    pub fn function(ctx: *Context, args: []const *const Type, results: []const *const Type) *const Type {
+        return @ptrCast(FunctionType.init(ctx, args, results));
+    }
+
+    pub fn memRef(element_type: *const Type, shape: []const i64, layout: ?*const Attribute, memory_space: ?*const Attribute) *const Type {
+        return @ptrCast(MemRefType.init(element_type, shape, layout, memory_space));
+    }
+
+    pub fn element(self: *const VectorType) *const Type {
+        return @ptrCast(c.mlirShapedTypeGetElementType(self.ptr()).ptr);
+    }
+
+    pub fn vector(shape: []const i64, element_type: *const Type) *const Type {
+        return @ptrCast(VectorType.init(shape, element_type));
+    }
+
+    pub fn unrankedMemRef(element_type: *const Type, memory_space: ?*const Attribute) *const Type {
+        return @ptrCast(UnrankedMemRefType.init(element_type, memory_space));
+    }
 };
 
 pub const IndexType = opaque {
@@ -355,10 +401,6 @@ pub const IndexType = opaque {
         return @ptrCast(c.mlirIndexTypeGet(ctx.ptr()).ptr);
     }
 };
-
-pub fn indexType(ctx: *Context) *const Type {
-    return @ptrCast(IndexType.get(ctx));
-}
 
 pub const IntegerTypes = enum {
     i1,
@@ -434,10 +476,6 @@ pub const IntegerType = opaque {
     }
 };
 
-pub fn integerType(ctx: *Context, it: IntegerTypes) *const Type {
-    return @ptrCast(IntegerType.get(ctx, it));
-}
-
 pub const FloatTypes = enum {
     f4e2m1fn,
     f6e2m3fn,
@@ -494,12 +532,6 @@ pub fn FloatType(comptime ft: FloatTypes) type {
     };
 }
 
-pub fn floatType(ctx: *Context, ft: FloatTypes) *const Type {
-    return switch (ft) {
-        inline else => |v| @ptrCast(FloatType(v).get(ctx)),
-    };
-}
-
 pub const ComplexTypes = enum {
     c64,
     c128,
@@ -515,15 +547,11 @@ pub const ComplexType = opaque {
 
     pub fn get(ctx: *Context, complex_type: ComplexTypes) *const ComplexType {
         return @ptrCast(c.mlirComplexTypeGet(switch (complex_type) {
-            .c64 => floatType(ctx, .f32).ptr(),
-            .c128 => floatType(ctx, .f64).ptr(),
+            .c64 => Type.float(ctx, .f32).ptr(),
+            .c128 => Type.float(ctx, .f64).ptr(),
         }).ptr);
     }
 };
-
-pub fn complexType(ctx: *Context, complex_type: ComplexTypes) *const Type {
-    return @ptrCast(ComplexType.get(ctx, complex_type));
-}
 
 pub const Attribute = opaque {
     const M = Methods(Attribute, c.MlirAttribute);
@@ -544,6 +572,60 @@ pub const Attribute = opaque {
     pub fn dialect(self: *const Context) *const Dialect {
         return @ptrCast(c.mlirAttributeGetDialect(self.ptr()).ptr);
     }
+
+    pub fn string(ctx: *Context, str: []const u8) *const Attribute {
+        return @ptrCast(StringAttribute.init(ctx, str));
+    }
+
+    pub fn int(ctx: *Context, it: IntegerTypes, value_: anytype) *const Attribute {
+        return @ptrCast(IntegerAttribute.init(ctx, it, value_));
+    }
+
+    pub fn intFromType(it: *const IntegerType, value_: i64) *const Attribute {
+        return @ptrCast(IntegerAttribute.fromType(it, value_));
+    }
+
+    pub fn float(ctx: *Context, comptime ft: FloatTypes, value_: anytype) *const Attribute {
+        return @ptrCast(FloatAttribute.init(ctx, ft, value_));
+    }
+    pub fn boolean(ctx: *Context, value: bool) *const Attribute {
+        return @ptrCast(BoolAttribute.init(ctx, value));
+    }
+
+    pub fn typeAttr(type_: *const Type) *const Attribute {
+        return @ptrCast(TypeAttribute.init(type_));
+    }
+
+    pub fn dict(ctx: *Context, attributes: []const NamedAttribute) *const Attribute {
+        return @ptrCast(DictionaryAttribute.init(ctx, attributes));
+    }
+
+    pub fn denseElements(shaped_type: *const ShapedType, values: anytype) *const Attribute {
+        return @ptrCast(DenseElementsAttribute.init(shaped_type, values));
+    }
+
+    pub fn denseArray(ctx: *Context, comptime ElementType: DenseArrayTypes, values: []const ElementType.ZigType()) *const Attribute {
+        return @ptrCast(DenseArrayAttribute(ElementType).init(ctx, @ptrCast(values)));
+    }
+    pub fn array(ctx: *Context, attrs: []const *const Attribute) *const Attribute {
+        return @ptrCast(ArrayAttribute.init(ctx, attrs));
+    }
+
+    pub fn flatSymbolRef(ctx: *Context, symbol: []const u8) *const Attribute {
+        return @ptrCast(FlatSymbolRefAttribute.init(ctx, symbol));
+    }
+
+    pub fn unit(ctx: *Context) *const Attribute {
+        return @ptrCast(UnitAttribute.get(ctx));
+    }
+
+    pub fn affineMap(map: *const AffineMap) *const Attribute {
+        return @ptrCast(AffineMapAttribute.init(map));
+    }
+
+    pub fn integerSet(set: *const IntegerSet) *const Attribute {
+        return @ptrCast(IntegerSetAttribute.init(set));
+    }
 };
 
 pub const StringAttribute = opaque {
@@ -563,10 +645,6 @@ pub const StringAttribute = opaque {
     }
 };
 
-pub fn stringAttribute(ctx: *Context, str: []const u8) *const Attribute {
-    return @ptrCast(StringAttribute.init(ctx, str));
-}
-
 pub const IntegerAttribute = opaque {
     const M = Methods(IntegerAttribute, c.MlirAttribute);
 
@@ -576,10 +654,11 @@ pub const IntegerAttribute = opaque {
     pub const format = M.format(c.mlirAttributePrint);
 
     pub fn init(ctx: *Context, it: IntegerTypes, value_: anytype) *const IntegerAttribute {
-        return @ptrCast(c.mlirIntegerAttrGet(
-            IntegerType.get(ctx, it).ptr(),
-            @intCast(value_),
-        ).ptr);
+        return .fromType(.get(ctx, it), @intCast(value_));
+    }
+
+    pub fn fromType(it: *const IntegerType, value_: i64) *const IntegerAttribute {
+        return @ptrCast(c.mlirIntegerAttrGet(it.ptr(), value_).ptr);
     }
 
     pub fn value(self: *const IntegerAttribute, comptime T: type) T {
@@ -590,10 +669,6 @@ pub const IntegerAttribute = opaque {
         return @intCast(getValue(self.ptr()));
     }
 };
-
-pub fn integerAttribute(ctx: *Context, it: IntegerTypes, value_: anytype) *const Attribute {
-    return @ptrCast(IntegerAttribute.init(ctx, it, value_));
-}
 
 pub const FloatAttribute = opaque {
     const M = Methods(FloatAttribute, c.MlirAttribute);
@@ -612,10 +687,6 @@ pub const FloatAttribute = opaque {
     }
 };
 
-pub fn floatAttribute(ctx: *Context, comptime ft: FloatTypes, value_: anytype) *const Attribute {
-    return @ptrCast(FloatAttribute.init(ctx, ft, value_));
-}
-
 pub const BoolAttribute = opaque {
     const M = Methods(BoolAttribute, c.MlirAttribute);
 
@@ -633,10 +704,6 @@ pub const BoolAttribute = opaque {
     }
 };
 
-pub fn boolAttribute(ctx: *Context, value: bool) *const Attribute {
-    return @ptrCast(BoolAttribute.init(ctx, value));
-}
-
 pub const TypeAttribute = opaque {
     const M = Methods(TypeAttribute, c.MlirAttribute);
 
@@ -653,10 +720,6 @@ pub const TypeAttribute = opaque {
         return @ptrCast(c.mlirTypeAttrGetValue(self.ptr()).ptr);
     }
 };
-
-pub fn typeAttribute(type_: *const Type) *const Attribute {
-    return @ptrCast(TypeAttribute.init(type_));
-}
 
 pub const Dialect = struct {
     const M = Methods(Dialect, c.MlirDialect);
@@ -906,10 +969,6 @@ pub const DictionaryAttribute = opaque {
         return @ptrCast(c.mlirDictionaryAttrGetElementByName(self.ptr(), stringRef(name)).ptr);
     }
 };
-
-pub fn dictionaryAttribute(ctx: *Context, attributes: []const NamedAttribute) *const Attribute {
-    return @ptrCast(DictionaryAttribute.init(ctx, attributes));
-}
 
 pub const Value = opaque {
     const M = Methods(Value, c.MlirValue);
@@ -1209,7 +1268,7 @@ pub const Operation = opaque {
                     sizes.appendAssumeCapacity(@intCast(segment_operands.len));
                 }
                 state.addAttributes(&.{
-                    .named(ctx, "operandSegmentSizes", denseElementsAttribute(RankedTensorType.get(&.{@intCast(sizes.len)}, integerType(ctx, .i32), null).shaped(), sizes.constSlice())),
+                    .named(ctx, "operandSegmentSizes", .denseElements(RankedTensorType.get(&.{@intCast(sizes.len)}, .int(ctx, .i32), null).shaped(), sizes.constSlice())),
                 });
             },
         };
@@ -1222,7 +1281,7 @@ pub const Operation = opaque {
                     sizes.appendAssumeCapacity(@intCast(segment_results.len));
                 }
                 state.addAttributes(&.{
-                    .named(ctx, "resultSegmentSizes", denseElementsAttribute(RankedTensorType.get(&.{@intCast(sizes.len)}, integerType(ctx, .i32), null).shaped(), sizes.constSlice())),
+                    .named(ctx, "resultSegmentSizes", .denseElements(RankedTensorType.get(&.{@intCast(sizes.len)}, .int(ctx, .i32), null).shaped(), sizes.constSlice())),
                 });
             },
         };
@@ -1407,6 +1466,14 @@ pub const ShapedType = opaque {
     pub fn dimension(self: *const ShapedType, dim: usize) i64 {
         return c.mlirShapedTypeGetDimSize(self.ptr(), @intCast(dim));
     }
+
+    pub fn rankedTensor(dimensions: []const i64, elem_type: *const Type) *const ShapedType {
+        return @ptrCast(RankedTensorType.get(dimensions, elem_type, null));
+    }
+
+    pub fn rankedTensorWithEncoding(dimensions: []const i64, elem_type: *const Type, encoding: *Attribute) *const ShapedType {
+        return @ptrCast(RankedTensorType.get(dimensions, elem_type, encoding));
+    }
 };
 
 pub const RankedTensorType = opaque {
@@ -1417,11 +1484,11 @@ pub const RankedTensorType = opaque {
     pub const eql = M.eql(c.mlirTypeEqual);
     pub const format = M.format(c.mlirTypePrint);
 
-    pub fn get(dimensions: []const i64, elemType: *const Type, encoding: ?*Attribute) *const RankedTensorType {
+    pub fn get(dimensions: []const i64, elem_type: *const Type, encoding: ?*Attribute) *const RankedTensorType {
         return @ptrCast(c.mlirRankedTensorTypeGet(
             @intCast(dimensions.len),
             @ptrCast(dimensions),
-            elemType.ptr(),
+            elem_type.ptr(),
             if (encoding) |e| e.ptr() else c.mlirAttributeGetNull(),
         ).ptr);
     }
@@ -1455,14 +1522,6 @@ pub const RankedTensorType = opaque {
     }
 };
 
-pub fn rankedTensorType(dimensions: []const i64, elem_type: *const Type) *const Type {
-    return @ptrCast(RankedTensorType.get(dimensions, elem_type, null));
-}
-
-pub fn rankedTensorTypeWithEncoding(dimensions: []const i64, elem_type: *const Type, encoding: *Attribute) *const Type {
-    return @ptrCast(RankedTensorType.get(dimensions, elem_type, encoding));
-}
-
 pub const DenseElementsAttribute = opaque {
     const M = Methods(DenseElementsAttribute, c.MlirAttribute);
 
@@ -1480,10 +1539,6 @@ pub const DenseElementsAttribute = opaque {
         ).ptr orelse unreachable);
     }
 };
-
-pub fn denseElementsAttribute(shaped_type: *const ShapedType, values: anytype) *const Attribute {
-    return @ptrCast(DenseElementsAttribute.init(shaped_type, values));
-}
 
 pub const DenseArrayTypes = enum {
     bool,
@@ -1544,10 +1599,6 @@ pub fn DenseArrayAttribute(comptime ElementType: DenseArrayTypes) type {
     };
 }
 
-pub fn denseArrayAttribute(ctx: *Context, comptime ElementType: DenseArrayTypes, values: []const ElementType.ZigType()) *const Attribute {
-    return @ptrCast(DenseArrayAttribute(ElementType).init(ctx, @ptrCast(values)));
-}
-
 pub const ArrayAttribute = opaque {
     const M = Methods(ArrayAttribute, c.MlirAttribute);
 
@@ -1569,10 +1620,6 @@ pub const ArrayAttribute = opaque {
     }
 };
 
-pub fn arrayAttribute(ctx: *Context, attrs: []const *const Attribute) *const Attribute {
-    return @ptrCast(ArrayAttribute.init(ctx, attrs));
-}
-
 pub const FunctionType = opaque {
     const M = Methods(FunctionType, c.MlirType);
     pub const isAFn = c.mlirTypeIsAFunction;
@@ -1592,10 +1639,6 @@ pub const FunctionType = opaque {
     }
 };
 
-pub fn functionType(ctx: *Context, args: []const *const Type, results: []const *const Type) *const Type {
-    return @ptrCast(FunctionType.init(ctx, args, results));
-}
-
 pub const FlatSymbolRefAttribute = opaque {
     const M = Methods(FlatSymbolRefAttribute, c.MlirAttribute);
 
@@ -1613,10 +1656,6 @@ pub const FlatSymbolRefAttribute = opaque {
     }
 };
 
-pub fn flatSymbolRefAttribute(ctx: *Context, symbol: []const u8) *const Attribute {
-    return @ptrCast(FlatSymbolRefAttribute.init(ctx, symbol));
-}
-
 pub const UnitAttribute = opaque {
     const M = Methods(UnitAttribute, c.MlirAttribute);
 
@@ -1629,10 +1668,6 @@ pub const UnitAttribute = opaque {
         return @ptrCast(c.mlirUnitAttrGet(ctx.ptr()).ptr);
     }
 };
-
-pub fn unitAttribute(ctx: *Context) *const Attribute {
-    return @ptrCast(UnitAttribute.get(ctx));
-}
 
 pub const MemRefType = opaque {
     const M = Methods(MemRefType, c.MlirType);
@@ -1692,10 +1727,6 @@ pub const MemRefType = opaque {
     }
 };
 
-pub fn memRefType(element_type: *const Type, shape: []const i64, layout: ?*const Attribute, memory_space: ?*const Attribute) *const Type {
-    return @ptrCast(MemRefType.init(element_type, shape, layout, memory_space));
-}
-
 pub const VectorType = opaque {
     const M = Methods(VectorType, c.MlirType);
 
@@ -1730,10 +1761,6 @@ pub const VectorType = opaque {
         ).ptr);
     }
 
-    pub fn elementType(self: *const VectorType) *const Type {
-        return @ptrCast(c.mlirShapedTypeGetElementType(self.ptr()).ptr);
-    }
-
     pub fn rank(self: *const VectorType) usize {
         return @intCast(c.mlirShapedTypeGetRank(self.ptr()));
     }
@@ -1746,10 +1773,6 @@ pub const VectorType = opaque {
         return @ptrCast(self);
     }
 };
-
-pub fn vectorType(shape: []const i64, element_type: *const Type) *const Type {
-    return @ptrCast(VectorType.init(shape, element_type));
-}
 
 pub const UnrankedMemRefType = opaque {
     const M = Methods(UnrankedMemRefType, c.MlirType);
@@ -1767,10 +1790,6 @@ pub const UnrankedMemRefType = opaque {
         ).ptr);
     }
 };
-
-pub fn unrankedMemRefType(element_type: *const Type, memory_space: ?*const Attribute) *const Type {
-    return @ptrCast(UnrankedMemRefType.init(element_type, memory_space));
-}
 
 pub const AffineExpr = opaque {
     const M = Methods(AffineExpr, c.MlirAffineExpr);
@@ -1885,14 +1904,6 @@ pub const AffineMapAttribute = opaque {
     }
 };
 
-pub fn affineMapAttribute(map: *const AffineMap) *const Attribute {
-    return @ptrCast(AffineMapAttribute.init(map));
-}
-
-pub fn parseAffineMapAttribute(ctx: *Context, src: []const u8) Error!*const Attribute {
-    return Attribute.parse(ctx, src);
-}
-
 pub const IntegerSet = opaque {
     const M = Methods(IntegerSet, c.MlirIntegerSet);
 
@@ -1931,7 +1942,3 @@ pub const IntegerSetAttribute = opaque {
         return @ptrCast(c.mlirIntegerSetAttrGet(set.ptr()).ptr);
     }
 };
-
-pub fn integerSetAttribute(set: *const IntegerSet) *const Attribute {
-    return @ptrCast(IntegerSetAttribute.init(set));
-}

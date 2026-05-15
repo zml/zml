@@ -1,5 +1,10 @@
-const zml = @import("../../zml.zig");
 const ragged_paged = @import("platforms/tpu/ragged_paged");
+
+const zml = @import("../../zml.zig");
+
+test {
+    _ = Kernel;
+}
 
 pub const Kernel = zml.kernel.mosaic_tpu.Kernel(ragged_paged.Cfg, .{
     .name = "ragged_paged_attention_kernel",
