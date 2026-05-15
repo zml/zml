@@ -499,14 +499,11 @@ pub fn exportDecodedAudioAsWav(zml_handler: *Zml_handler, decoded_audio: inferen
     try writer.writeAll("data");
     try writer.writeInt(u32, data_chunk_size, .little);
 
-    const channel_1 = samples[0..num_frames];
-    const channel_2 = samples[num_frames..num_frames * 2];
-
     for (0..num_frames) |frame_idx| {
-        const sample_1 = channel_1[frame_idx];
-        const sample_2 = channel_2[frame_idx];
-        try writer.writeInt(u32, @bitCast(sample_1), .little);
-        try writer.writeInt(u32, @bitCast(sample_2), .little);
+        for (0..num_channels) |channel_idx| {
+            const sample = samples[channel_idx * num_frames + frame_idx];
+            try writer.writeInt(u32, @bitCast(sample), .little);
+        }
     }
 
     try writer.flush();
