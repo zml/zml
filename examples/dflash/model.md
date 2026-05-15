@@ -1,6 +1,12 @@
 # DFlash Model Notes
 
-Use these model paths on the `9960x-5090x2` remote:
+The repository checkout on the `9960x-5090x2` remote is at:
+
+```text
+~/zml
+```
+
+Use these model paths on that remote:
 
 ```text
 DFlash model: /var/models/z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat/
