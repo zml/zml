@@ -278,18 +278,16 @@ fn verifyDraftTokens(
     const sentinel = zml.Tensor.scalar(@as(u32, @intCast(verify_len)), .u32).broad(candidate_idx.shape());
     const valid_draft_tokens = accepted.select(sentinel, candidate_idx).min(.s).squeeze(.s);
 
-    const target_correction_logits = target_logits.gather(.{ .s = valid_draft_tokens }, .{});
-    const target_correction_token, const target_rng = Model.sampleLogits(target_correction_logits, sampling, accept_rng);
-
     const residual_probs = target_probs.sub(draft_probs).relu();
     const residual_idx = valid_draft_tokens.minimum(zml.Tensor.scalar(@as(u32, @intCast(verify_len - 1)), .u32));
     const residual = residual_probs.gather(.{ .s = residual_idx }, .{});
     const residual_logits = residual.log();
-    const residual_correction_token, const residual_rng = Model.sampleLogits(residual_logits, .{ .temperature = 1.0 }, target_rng);
 
     const no_rejection = valid_draft_tokens.cmp(.EQ, zml.Tensor.scalar(@as(u32, @intCast(verify_len)), .u32));
-    const correction_token = no_rejection.select(target_correction_token, residual_correction_token).convert(.u32);
-    return .{ valid_draft_tokens, correction_token, residual_rng };
+    const target_correction_logits = target_logits.gather(.{ .s = valid_draft_tokens }, .{}).convert(.f32).scale(1 / sampling.temperature);
+    const correction_logits = no_rejection.broad(target_correction_logits.shape()).select(target_correction_logits, residual_logits);
+    const correction_token, const updated_rng = Model.sampleLogits(correction_logits, .{ .temperature = 1.0 }, accept_rng);
+    return .{ valid_draft_tokens, correction_token.convert(.u32), updated_rng };
 }
 
 fn tokenProbs(logits_: zml.Tensor, sampling: SamplingConfig) zml.Tensor {
