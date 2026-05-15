@@ -582,9 +582,7 @@ pub const AceLlm = struct {
     
     pub fn sampleTokens(self: AceLlm, logits: zml.Tensor, rng: zml.Tensor.Rng, cfg_phase: bool) struct { zml.Tensor, zml.Tensor.Rng } {
         const phase_logits = logits.slice1d(.voc, if (cfg_phase) self.phase.phase2_voc else self.phase.phase1_voc);
-        //var next_token, const new_rng = sampleNucleus(phase_logits, rng);
-        var next_token = phase_logits.argMax(.voc).indices.squeeze(.voc);
-        const new_rng = rng;
+        var next_token, const new_rng = sampleNucleus(phase_logits, rng);
         // in cfg, next token is a position relative to the audiocodes sub voc slice, translate it back to the full voc slice
         if (cfg_phase) next_token = next_token.addConstant(self.phase.text_voc_size);
         return .{ next_token.convert(.u32), new_rng };
