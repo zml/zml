@@ -390,7 +390,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     zml_handler.toc(&zml_handler.timers.dit.total);
     zml_handler.tic(&zml_handler.timers.vae.total);
     
-    const decode_t: u32 = 1;
+    const decode_t: u32 = 5;
     var acevae = try acevae_.AceVae_handler.init(zml_handler, decode_t);
     defer acevae.deinit(zml_handler.allocator);
     
@@ -430,7 +430,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     
          zml_handler.tic(&zml_handler.timers.wav);
          
-         try exportDecodedAudioAsWav2(zml_handler, decoded_audio, i);
+         try exportDecodedAudioAsWav(zml_handler, decoded_audio, i);
     
          zml_handler.toc(&zml_handler.timers.wav);
     }
@@ -441,76 +441,6 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
 }
 
 pub fn exportDecodedAudioAsWav(zml_handler: *Zml_handler, decoded_audio: inference.DecodedAudio, index: usize) !void {
-    const io = zml_handler.local_io;
-    const indexed_output_path = try std.fmt.allocPrint(zml_handler.allocator, "decoded_audio_{d}.wav", .{index});
-    defer zml_handler.allocator.free(indexed_output_path);
-
-    const audio = decoded_audio.audio;
-    const shape = audio.shape;
-
-    if (shape.rank() != 2) return error.InvalidAudioRank;
-    if (audio.dtype() != .f32) return error.UnsupportedAudioType;
-
-    const num_channels_i64 = shape.dim(0);
-    const num_frames_i64 = shape.dim(1);
-
-    const num_frames: u32 = std.math.cast(u32, num_frames_i64) orelse return error.AudioTooLong;
-    const num_channels: u16 = std.math.cast(u16, num_channels_i64) orelse return error.InvalidChannelCount;
-    const sample_rate: u32 = 48_000;
-    const bytes_per_sample: u16 = @sizeOf(f32);
-    const bits_per_sample: u16 = bytes_per_sample * 8;
-    const block_align: u16 = num_channels * bytes_per_sample;
-    const byte_rate: u32 = sample_rate * block_align;
-
-    const samples = audio.constItems(f32);
-    const expected_samples_u64 = @as(u64, num_frames) * num_channels;
-    const expected_samples: usize = std.math.cast(usize, expected_samples_u64) orelse return error.AudioTooLarge;
-    if (samples.len != expected_samples) return error.InvalidAudioBufferSize;
-
-    const data_chunk_size_u64 = @as(u64, samples.len) * @sizeOf(f32);
-    const data_chunk_size: u32 = std.math.cast(u32, data_chunk_size_u64) orelse return error.AudioTooLarge;
-    const fact_chunk_size: u32 = 4;
-    const riff_chunk_size_u64: u64 = 36 + 12 + data_chunk_size;
-    const riff_chunk_size: u32 = std.math.cast(u32, riff_chunk_size_u64) orelse return error.AudioTooLarge;
-
-    var file = try std.Io.Dir.createFile(.cwd(), io, indexed_output_path, .{ .truncate = true });
-    defer file.close(io);
-
-    var file_writer = file.writer(io, &.{});
-    const writer: *std.Io.Writer = &file_writer.interface;
-
-    try writer.writeAll("RIFF");
-    try writer.writeInt(u32, riff_chunk_size, .little);
-    try writer.writeAll("WAVE");
-
-    try writer.writeAll("fmt ");
-    try writer.writeInt(u32, 16, .little);
-    try writer.writeInt(u16, 3, .little);
-    try writer.writeInt(u16, num_channels, .little);
-    try writer.writeInt(u32, sample_rate, .little);
-    try writer.writeInt(u32, byte_rate, .little);
-    try writer.writeInt(u16, block_align, .little);
-    try writer.writeInt(u16, bits_per_sample, .little);
-
-    try writer.writeAll("fact");
-    try writer.writeInt(u32, fact_chunk_size, .little);
-    try writer.writeInt(u32, num_frames, .little);
-
-    try writer.writeAll("data");
-    try writer.writeInt(u32, data_chunk_size, .little);
-
-    for (0..num_frames) |frame_idx| {
-        for (0..num_channels) |channel_idx| {
-            const sample = samples[channel_idx * num_frames + frame_idx];
-            try writer.writeInt(u32, @bitCast(sample), .little);
-        }
-    }
-
-    try writer.flush();
-    log.info("Exported decoded audio to {s}", .{ indexed_output_path });
-}
-
-pub fn exportDecodedAudioAsWav2(zml_handler: *Zml_handler, decoded_audio: inference.DecodedAudio, index: usize) !void {
     const io = zml_handler.local_io;
     const indexed_output_path = try std.fmt.allocPrint(zml_handler.allocator, "decoded_audio_{d}.wav", .{index});
     defer zml_handler.allocator.free(indexed_output_path);
@@ -555,12 +485,6 @@ pub fn exportDecodedAudioAsWav2(zml_handler: *Zml_handler, decoded_audio: infere
             interleaved_words[dst_index] = @bitCast(samples[src_index]);
         }
     }
-
-    //if (@import("builtin").target.cpu.arch.endian() != .little) {
-    //    for (interleaved_words) |*word| {
-    //        word.* = std.mem.nativeToLittle(u32, word.*);
-            //    }
-        //}
 
     var file = try std.Io.Dir.createFile(.cwd(), io, indexed_output_path, .{ .truncate = true });
     defer file.close(io);
