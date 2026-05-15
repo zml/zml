@@ -38,7 +38,9 @@ pub const Step3p5ModelActs = struct {
     model: Step3p5FlashActs,
 };
 
-pub fn loadReferenceActivations(init: std.process.Init) !void {
+const Mlp = struct { up_proj: zml.nn.Linear, gate_proj: zml.nn.Linear, down_proj: zml.nn.Linear };
+
+pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const arena = init.arena.allocator();
     const io = init.io;
@@ -50,21 +52,28 @@ pub fn loadReferenceActivations(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
     if (args.len < 2) return;
 
-    // Resolve absolute path
+    // Load + resolve paths (the latter, because Zig 0.16.0 treats relative paths as maybes, which breaks GPU)
     const weights_path_raw = args[1];
+    const activations_path_raw = args[2];
     const cwd = std.Io.Dir.cwd();
-    const absolute_path = try cwd.realPathFileAlloc(io, weights_path_raw, arena);
+    const model_path = try cwd.realPathFileAlloc(io, weights_path_raw, arena);
+    const activations_path = try cwd.realPathFileAlloc(io, activations_path_raw, arena);
 
+    // Init registries
+    var model_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, vfs_io, model_path);
+    defer model_registry.deinit();
+
+    var activations_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, activations_path);
+    defer activations_registry.deinit();
+
+    // Connect to GPUs, load drivers, create memory map
     const platform = try zml.Platform.auto(allocator, vfs_io, .{});
     defer platform.deinit(allocator, vfs_io);
-
-    var registry = try zml.safetensors.TensorRegistry.fromPath(allocator, vfs_io, absolute_path);
-    defer registry.deinit();
 
     // Find the max_layer and max_expert - via search highest indices in tensor names
     var max_layer: usize = 0;
     var max_expert: usize = 0;
-    var it = registry.tensors.iterator();
+    var it = model_registry.tensors.iterator();
     while (it.next()) |entry| {
         const name = entry.key_ptr.*;
         if (std.mem.indexOf(u8, name, "layers.")) |idx| {
@@ -117,7 +126,8 @@ pub fn loadReferenceActivations(init: std.process.Init) !void {
     const root_blueprint = Step3p5ModelActs{ .model = model_blueprint };
 
     // Fetch actual data from registry (from safetensors file). In other words, a model input
-    var store = zml.io.TensorStore.fromRegistry(allocator, &registry);
+    var store = zml.io.TensorStore.fromRegistry(allocator, &model_registry);
+    defer store.deinit();
 
     // Structural mapping - map struct field names to safetensors parameter names
     // For example, `model.layers.0.self_attn.q_proj.input_0` in the safetensors file would map to: root_blueprint.layers[0].self_attn.q_proj
@@ -129,4 +139,19 @@ pub fn loadReferenceActivations(init: std.process.Init) !void {
     _ = model;
 
     std.log.info("all captured activations loaded", .{});
+
+    // For Step 3.5 Flash, we have two types of layers:
+    // - MLP layer; load `model.layers.i.mlp`
+    // - MoE layer; load `model.layers.i.moe` and `model.layers.i.share_expert`
+
+    const mlp_view = store.view().withPrefix("model.layers.0.mlp");
+
+    // start with initialized version zand then change it to the pub const later
+    const mlp: Mlp = .{
+        .up_proj = .init(mlp_view.withPrefix("up_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }), mlp_view.withPrefix("up_proj").maybeCreateTensor("bias", .{.dout}, .{ .dout = .model }), .d),
+        .gate_proj = .init(mlp_view.withPrefix("gate_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }), mlp_view.withPrefix("gate_proj").maybeCreateTensor("bias", .{.dout}, .{ .dout = .model }), .d),
+        .down_proj = .init(mlp_view.withPrefix("down_proj").createTensor("weight", .{ .d, .dout }, .{ .d = .replicated, .dout = .model }), mlp_view.withPrefix("down_proj").maybeCreateTensor("bias", .{.d}, .{ .d = .replicated }), .dout),
+    };
+
+    _ = mlp; // autofix
 }
