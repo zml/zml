@@ -51,6 +51,16 @@ const Mlp = struct {
     }
 };
 
+// intercept inputs before providing to our layer
+pub const Wrapper = struct {
+    mlp: Mlp,
+
+    pub fn forward(wrapper: Wrapper, input: zml.Tensor) zml.Tensor {
+        const tagged_input = input.withTags(.{ .b, .s, .d });
+        return wrapper.mlp.forward(tagged_input);
+    }
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const arena = init.arena.allocator();
@@ -70,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
     const model_path = try cwd.realPathFileAlloc(io, weights_path_raw, arena);
     const activations_path = try cwd.realPathFileAlloc(io, activations_path_raw, arena);
 
-    // Init registries
+    // Init registries. See line 150 for model_store, activation_store
     var model_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, vfs_io, model_path);
     defer model_registry.deinit();
 
@@ -137,12 +147,15 @@ pub fn main(init: std.process.Init) !void {
     const root_blueprint = Step3p5ModelActs{ .model = model_blueprint };
 
     // Fetch actual data from registry (from safetensors file). In other words, a model input
-    var store = zml.io.TensorStore.fromRegistry(allocator, &model_registry);
-    defer store.deinit();
+    var model_store = zml.io.TensorStore.fromRegistry(allocator, &model_registry);
+    defer model_store.deinit();
+
+    var activation_store = zml.io.TensorStore.fromRegistry(allocator, &activations_registry);
+    defer activation_store.deinit();
 
     // Structural mapping - map struct field names to safetensors parameter names
     // For example, `model.layers.0.self_attn.q_proj.input_0` in the safetensors file would map to: root_blueprint.layers[0].self_attn.q_proj
-    const model = try zml.io.load(Step3p5ModelActs, &root_blueprint, arena, vfs_io, platform, &store, .{
+    const model = try zml.io.load(Step3p5ModelActs, &root_blueprint, arena, vfs_io, platform, &model_store, .{
         .parallelism = 1,
         .dma_chunks = 2,
         .dma_chunk_size = 1024 * 1024 * 128,
@@ -155,7 +168,7 @@ pub fn main(init: std.process.Init) !void {
     // - MLP layer; load `model.layers.i.mlp`
     // - MoE layer; load `model.layers.i.moe` and `model.layers.i.share_expert`
 
-    const mlp_view = store.view().withPrefix("model.layers.0.mlp");
+    const mlp_view = model_store.view().withPrefix("model.layers.0.mlp");
 
     // start with initialized version zand then change it to the pub const later
     const mlp: Mlp = .{
@@ -166,7 +179,6 @@ pub fn main(init: std.process.Init) !void {
 
     // at this point, weights are on disk and layer is initialized
 
-    var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, vfs_io, platform, &store, .auto);
-    _ = mlp_weights; // autofix
-
+    const mlp_weights = try zml.io.load(Mlp, &mlp, allocator, vfs_io, platform, &model_store, .auto);
+    try zml.testing.testLayer(arena, vfs_io, platform, Wrapper{ .mlp = mlp }, .forward, activation_store.view(), "model.layers.0.mlp", .{ .mlp = mlp_weights }, &.{}, .{});
 }
