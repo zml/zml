@@ -9,5 +9,5 @@ def repo():
         build_file = "//:third_party/flashattn/flashattention.BUILD.bazel",
     )
 
-    new_local_repository(name = "flashattn", build_file="//:third_party/flashattn/BUILD.bazel", path="/home/sboulmier/flashattn/")
+    #new_local_repository(name = "flashattn", build_file="//:third_party/flashattn/BUILD.bazel", path="/home/sboulmier/flashattn/")
 
