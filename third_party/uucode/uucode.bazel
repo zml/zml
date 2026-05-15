@@ -11,29 +11,22 @@ zig_library(
         "src/fields.zig",
         "src/multi_slice.zig",
         "src/quirks.zig",
+        "src/storage.zig",
         "src/types.zig",
     ],
-    zigopts = ["--dep", "storage.zig=_storage_gen"],  # circular: config.zig <-> storage.zig
-)
-
-zig_library(
-    name = "_storage_gen",
-    import_name = "storage.zig",
-    main = "src/storage.zig",
-    deps = [":_config_gen"],
 )
 
 zig_library(
     name = "_build_config_gen",
     import_name = "build_config",
     main = "build_config.zig",
-    deps = [":_config_gen", ":_storage_gen"],
+    deps = [":_config_gen"],
 )
 
 zig_binary(
     name = "gen_tables",
     main = "src/generate.zig",
-    deps = [":_build_config_gen", ":_config_gen", ":_storage_gen"],
+    deps = [":_build_config_gen", ":_config_gen"],
 )
 
 genrule(
@@ -61,30 +54,23 @@ zig_library(
         "src/fields.zig",
         "src/multi_slice.zig",
         "src/quirks.zig",
+        "src/storage.zig",
     ],
     deps = [":types"],
-    zigopts = ["--dep", "storage.zig=storage"],  # circular: config.zig <-> storage.zig
-)
-
-zig_library(
-    name = "storage",
-    import_name = "storage.zig",
-    main = "src/storage.zig",
-    deps = [":config"],
 )
 
 zig_library(
     name = "build_config",
     import_name = "build_config",
     main = "build_config.zig",
-    deps = [":config", ":storage"],
+    deps = [":config"],
 )
 
 zig_library(
     name = "tables_lib",
     import_name = "tables",
     main = ":tables",
-    deps = [":build_config", ":config", ":storage"],
+    deps = [":build_config", ":config"],
 )
 
 zig_library(
