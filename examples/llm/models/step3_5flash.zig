@@ -91,18 +91,40 @@ pub const Config = struct {
 
 // Multilayer Perceptron
 const Mlp = struct {
-    up_proj: zml.nn.Linear,
-    gate_proj: zml.nn.Linear,
-    down_proj: zml.nn.Linear,
+    up_proj: zml.nn.Linear, // (dim -> hidden_dim)
+    gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
+    down_proj: zml.nn.Linear, // (hidden_dim -> dim)
+    limit: ?i32,
+
+    pub fn init(self: Mlp, store: zml.io.TensorStore.View, swiglu_limit: ?i32) Mlp {
+        self.limit = swiglu_limit;
+        return .{
+            .up_proj = .init(store.createTensor("up_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .gate_proj = .init(store.createTensor("gate_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .down_proj = .init(store.createTensor("down_proj.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
+        };
+    }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
         // Add tags to input before providing to our layer.
         const input = x.withTags(.{ .b, .s, .d });
 
-        const up_proj = self.up_proj.forward(input);
+        var up_proj = self.up_proj.forward(input);
         var gate = self.gate_proj.forward(input);
         gate = gate.silu();
 
+        // Step 3.5 Flash clamps gate projection asymmetrically
+        if (self.limit) |limit| {
+            if (limit != 0) {
+                const lim_f = @as(f32, @floatFromInt(limit));
+                const max_t = zml.Tensor.scalar(lim_f, gate.dtype());
+                const min_t = zml.Tensor.scalar(-lim_f, gate.dtype());
+
+                // Step 3.5 Flash has asymmetric clamping of gate projection
+                gate = gate.minimum(max_t);
+                up_proj = up_proj.clamp(min_t, max_t);
+            }
+        }
         return self.down_proj.forward(gate.mul(up_proj));
     }
 };
@@ -111,10 +133,6 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const arena = init.arena.allocator();
     const io = init.io;
-
-    var vfs = try zml.io.VFS.init(allocator, io);
-    defer vfs.deinit();
-    const vfs_io = vfs.io();
 
     const args = try init.minimal.args.toSlice(arena);
     if (args.len < 4) return;
@@ -203,15 +221,15 @@ pub fn main(init: std.process.Init) !void {
     const activations_path = try cwd.realPathFileAlloc(io, activations_path_raw, arena);
 
     // Registries
-    const repo = try zml.safetensors.resolveModelRepo(vfs_io, weights_path_raw);
-    var model_registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, vfs_io, repo);
+    const repo = try zml.safetensors.resolveModelRepo(io, weights_path_raw);
+    var model_registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer model_registry.deinit();
-    var activations_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, vfs_io, activations_path);
+    var activations_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, activations_path);
     defer activations_registry.deinit();
 
     // Connect to GPUs, load drivers, create memory map
-    const platform = try zml.Platform.auto(allocator, vfs_io, .{});
-    defer platform.deinit(allocator, vfs_io);
+    const platform = try zml.Platform.auto(allocator, io, .{});
+    defer platform.deinit(allocator, io);
 
     // Stores
     var model_store = zml.io.TensorStore.fromRegistry(allocator, &model_registry);
@@ -225,13 +243,14 @@ pub fn main(init: std.process.Init) !void {
     // Load config
     const config_path_raw = args[3];
 
-    const dir = try std.Io.Dir.openDir(.cwd(), vfs_io, config_path_raw, .{});
-    defer dir.close(vfs_io);
-    const parsed = try common.parseConfig(Config, allocator, vfs_io, dir);
+    const dir = try std.Io.Dir.openDir(.cwd(), io, config_path_raw, .{});
+    defer dir.close(io);
+    const parsed = try common.parseConfig(Config, allocator, io, dir);
     defer parsed.deinit();
 
     ////////////////////////////////////////////////////////////////
-    const current_layer = "model.layers.45.mlp";
+    const current_layer = "model.layers.2.mlp";
+    const swiglu_limit = 0;
     ////////////////////////////////////////////////////////////////
     const mlp_view = model_store.view().withPrefix(current_layer);
 
@@ -240,9 +259,10 @@ pub fn main(init: std.process.Init) !void {
         .up_proj = .init(mlp_view.withPrefix("up_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }), mlp_view.withPrefix("up_proj").maybeCreateTensor("bias", .{.dout}, .{ .dout = .model }), .d),
         .gate_proj = .init(mlp_view.withPrefix("gate_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }), mlp_view.withPrefix("gate_proj").maybeCreateTensor("bias", .{.dout}, .{ .dout = .model }), .d),
         .down_proj = .init(mlp_view.withPrefix("down_proj").createTensor("weight", .{ .d, .dout }, .{ .d = .replicated, .dout = .replicated }), mlp_view.withPrefix("down_proj").maybeCreateTensor("bias", .{.d}, .{ .d = .replicated }), .dout),
+        .limit = swiglu_limit,
     };
 
     // at this point, weights are on disk and layer is initialized
-    const mlp_weights = try zml.io.load(Mlp, &mlp, allocator, vfs_io, platform, &model_store, .auto);
-    try zml.testing.testLayer(arena, vfs_io, platform, mlp, .forward, activation_store.view(), current_layer, mlp_weights, &.{}, .{});
+    const mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, &model_store, .auto);
+    try zml.testing.testLayer(arena, io, platform, mlp, .forward, activation_store.view(), current_layer, mlp_weights, &.{}, .{});
 }
