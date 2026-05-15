@@ -573,7 +573,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
-    var attention_buffers = try acecfg.llm.params.attention_metadata.initBuffer(io, platform, sharding);
+    var attention_buffers = try acecfg.llm.params.attention_metadata.initBuffer(io, platform, acecfg.params.shardings.model);
     defer zml.attention.attention.Metadata.deinitBuffer(&attention_buffers);
 
     var zero_buffer: zml.Buffer = try .scalar(io, platform, 0, .u32, sharding);
