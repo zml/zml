@@ -1071,7 +1071,7 @@ fn customCallAdditionalAttributes(ctx: *CompilationContext, opts: CustomCallOpti
     return additional_attributes;
 }
 
-fn customCallOutputOperandAliases(
+pub fn customCallOutputOperandAliases(
     comptime I: type,
     comptime O: type,
     comptime aliases: ?CustomCallOutputOperandAliases(I, O),
