@@ -241,7 +241,7 @@ const Args = struct {
 // info:   wav                                                 9.86s
 // info: total                                                56.18s
 
-// TODO: have a look at cfg, microtune vae decode_t
+// TODO: have a look at cfg
 // TODO: reference audio
 // TODO: reference timbre
 // TODO: sft model for max quality
@@ -390,7 +390,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     zml_handler.toc(&zml_handler.timers.dit.total);
     zml_handler.tic(&zml_handler.timers.vae.total);
     
-    const decode_t: u32 = 10;
+    const decode_t: u32 = 3;
     var acevae = try acevae_.AceVae_handler.init(zml_handler, decode_t);
     defer acevae.deinit(zml_handler.allocator);
     

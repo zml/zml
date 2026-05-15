@@ -466,24 +466,24 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     zml_handler.tic(&zml_handler.timers.llm.prefill);
 
     acellm.exes.prefill_embed_args.set(.{ acellm.model_buffers, prefill_tokens_buffer });
-    acellm.exes.prefill_embed_exe.callOpts(io, acellm.exes.prefill_embed_args, &acellm.exes.prefill_embed_results, .{ .wait = true });
+    acellm.exes.prefill_embed_exe.call(acellm.exes.prefill_embed_args, &acellm.exes.prefill_embed_results);
     acellm.exes.prefill_embed_results.fill(.{ &prefill_embed_buffer });
 
     for (0..acellm.config.num_hidden_layers) |i| {
         acellm.exes.prefill_layer_args.set(.{ acellm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, acellm.kv_cache_buffers, layer_index_buffers[i] });
-        acellm.exes.prefill_layer_exe.callOpts(io, acellm.exes.prefill_layer_args, &acellm.exes.prefill_layer_results, .{ .wait = true });
+        acellm.exes.prefill_layer_exe.call(acellm.exes.prefill_layer_args, &acellm.exes.prefill_layer_results);
         acellm.exes.prefill_layer_results.fill(.{ &prefill_embed_buffer, &acellm.kv_cache_buffers });
     }
     acellm.exes.prefill_select_args.set(.{ acellm.model_buffers, prefill_embed_buffer, prompt_buffer });
-    acellm.exes.prefill_select_exe.callOpts(io, acellm.exes.prefill_select_args, &acellm.exes.prefill_select_results, .{ .wait = true });
+    acellm.exes.prefill_select_exe.call(acellm.exes.prefill_select_args, &acellm.exes.prefill_select_results);
     acellm.exes.prefill_select_results.fill(.{ &token_embed_buffer });
 
     acellm.exes.logits_args.set(.{ acellm.model_buffers, token_embed_buffer });
-    acellm.exes.logits_exe.callOpts(io, acellm.exes.logits_args, &acellm.exes.logits_results, .{ .wait = true });
+    acellm.exes.logits_exe.call(acellm.exes.logits_args, &acellm.exes.logits_results);
     acellm.exes.logits_results.fill(.{ &logits_buffer });
 
     acellm.exes.sample_args.set(.{ acellm.model_buffers, logits_buffer, rng_buffers });
-    acellm.exes.sample_exe.callOpts(io, acellm.exes.sample_args, &acellm.exes.sample_results, .{ .wait = true });
+    acellm.exes.sample_exe.call(acellm.exes.sample_args, &acellm.exes.sample_results);
     zml.Tensor.Rng.deinitBuffer(&rng_buffers);
     acellm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
 
@@ -524,21 +524,21 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
 
         // call to generate the next token
         acellm.exes.decode_embed_args.set(.{ acellm.model_buffers, token_buffer });
-        acellm.exes.decode_embed_exe.callOpts(io, acellm.exes.decode_embed_args, &acellm.exes.decode_embed_results, .{ .wait = true });
+        acellm.exes.decode_embed_exe.call(acellm.exes.decode_embed_args, &acellm.exes.decode_embed_results);
         token_embed_buffer.deinit();
         acellm.exes.decode_embed_results.fill(.{ &token_embed_buffer });
         for (0..acellm.config.num_hidden_layers) |ii| {
             acellm.exes.decode_layer_args.set(.{ acellm.model_buffers.layers[ii], token_embed_buffer, pos_buffer, acellm.kv_cache_buffers, layer_index_buffers[ii] });
-            acellm.exes.decode_layer_exe.callOpts(io, acellm.exes.decode_layer_args, &acellm.exes.decode_layer_results, .{ .wait = true });
+            acellm.exes.decode_layer_exe.call(acellm.exes.decode_layer_args, &acellm.exes.decode_layer_results);
             acellm.exes.decode_layer_results.fill(.{ &token_embed_buffer, &acellm.kv_cache_buffers });
         }
         acellm.exes.logits_args.set(.{ acellm.model_buffers, token_embed_buffer });
-        acellm.exes.logits_exe.callOpts(io, acellm.exes.logits_args, &acellm.exes.logits_results, .{ .wait = true });
+        acellm.exes.logits_exe.call(acellm.exes.logits_args, &acellm.exes.logits_results);
         logits_buffer.deinit();
         acellm.exes.logits_results.fill(.{ &logits_buffer });
         
         acellm.exes.sample_args.set(.{ acellm.model_buffers, logits_buffer, rng_buffers });
-        acellm.exes.sample_exe.callOpts(io, acellm.exes.sample_args, &acellm.exes.sample_results, .{ .wait = true });
+        acellm.exes.sample_exe.call(acellm.exes.sample_args, &acellm.exes.sample_results);
         token_buffer.deinit();
         zml.Tensor.Rng.deinitBuffer(&rng_buffers);
         acellm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
@@ -628,45 +628,45 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
 
     // embed cond tokens
     acecfg.llm.exes.prefill_embed_args.set(.{ acecfg.llm.model_buffers, cond_prefill_tokens_buffer });
-    acecfg.llm.exes.prefill_embed_exe.callOpts(io, acecfg.llm.exes.prefill_embed_args, &acecfg.llm.exes.prefill_embed_results, .{ .wait = true });
+    acecfg.llm.exes.prefill_embed_exe.call(acecfg.llm.exes.prefill_embed_args, &acecfg.llm.exes.prefill_embed_results);
     acecfg.llm.exes.prefill_embed_results.fill(.{ &cond_prefill_embed_buffer });
     // embed uncond tokens
     acecfg.llm.exes.prefill_embed_args.set(.{ acecfg.llm.model_buffers, uncond_prefill_tokens_buffer });
-    acecfg.llm.exes.prefill_embed_exe.callOpts(io, acecfg.llm.exes.prefill_embed_args, &acecfg.llm.exes.prefill_embed_results, .{ .wait = true });
+    acecfg.llm.exes.prefill_embed_exe.call(acecfg.llm.exes.prefill_embed_args, &acecfg.llm.exes.prefill_embed_results);
     acecfg.llm.exes.prefill_embed_results.fill(.{ &uncond_prefill_embed_buffer });
     for (0..acecfg.llm.config.num_hidden_layers) |i| {
         // layer i the cond embeds
         acecfg.llm.exes.prefill_layer_args.set(.{ acecfg.llm.model_buffers.layers[i], cond_prefill_embed_buffer, zero_buffer, acecfg.cond_kv_cache_buffers, layer_index_buffers[i] });
-        acecfg.llm.exes.prefill_layer_exe.callOpts(io, acecfg.llm.exes.prefill_layer_args, &acecfg.llm.exes.prefill_layer_results, .{ .wait = true });
+        acecfg.llm.exes.prefill_layer_exe.call(acecfg.llm.exes.prefill_layer_args, &acecfg.llm.exes.prefill_layer_results);
         acecfg.llm.exes.prefill_layer_results.fill(.{ &cond_prefill_embed_buffer, &acecfg.cond_kv_cache_buffers });
         // layer i the uncond embeds
         acecfg.llm.exes.prefill_layer_args.set(.{ acecfg.llm.model_buffers.layers[i], uncond_prefill_embed_buffer, zero_buffer, acecfg.uncond_kv_cache_buffers, layer_index_buffers[i] });
-        acecfg.llm.exes.prefill_layer_exe.callOpts(io, acecfg.llm.exes.prefill_layer_args, &acecfg.llm.exes.prefill_layer_results, .{ .wait = true });
+        acecfg.llm.exes.prefill_layer_exe.call(acecfg.llm.exes.prefill_layer_args, &acecfg.llm.exes.prefill_layer_results);
         acecfg.llm.exes.prefill_layer_results.fill(.{ &uncond_prefill_embed_buffer, &acecfg.uncond_kv_cache_buffers });
     }
     // select cond embed
     acecfg.llm.exes.prefill_select_args.set(.{ acecfg.llm.model_buffers, cond_prefill_embed_buffer, cond_prompt_buffer });
-    acecfg.llm.exes.prefill_select_exe.callOpts(io, acecfg.llm.exes.prefill_select_args, &acecfg.llm.exes.prefill_select_results, .{ .wait = true });
+    acecfg.llm.exes.prefill_select_exe.call(acecfg.llm.exes.prefill_select_args, &acecfg.llm.exes.prefill_select_results);
     acecfg.llm.exes.prefill_select_results.fill(.{ &cond_embed_buffer });
     // select uncond embed
     acecfg.llm.exes.prefill_select_args.set(.{ acecfg.llm.model_buffers, uncond_prefill_embed_buffer, uncond_prompt_buffer });
-    acecfg.llm.exes.prefill_select_exe.callOpts(io, acecfg.llm.exes.prefill_select_args, &acecfg.llm.exes.prefill_select_results, .{ .wait = true });
+    acecfg.llm.exes.prefill_select_exe.call(acecfg.llm.exes.prefill_select_args, &acecfg.llm.exes.prefill_select_results);
     acecfg.llm.exes.prefill_select_results.fill(.{ &uncond_embed_buffer });
     // compute cond logits
     acecfg.llm.exes.logits_args.set(.{ acecfg.llm.model_buffers, cond_embed_buffer });
-    acecfg.llm.exes.logits_exe.callOpts(io, acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results, .{ .wait = true });
+    acecfg.llm.exes.logits_exe.call(acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results);
     acecfg.llm.exes.logits_results.fill(.{ &cond_logits_buffer });
     // compute uncond logits
     acecfg.llm.exes.logits_args.set(.{ acecfg.llm.model_buffers, uncond_embed_buffer });
-    acecfg.llm.exes.logits_exe.callOpts(io, acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results, .{ .wait = true });
+    acecfg.llm.exes.logits_exe.call(acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results);
     acecfg.llm.exes.logits_results.fill(.{ &uncond_logits_buffer });
     // combine them with cfg
     acecfg.exes.cfg_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, uncond_logits_buffer });
-    acecfg.exes.cfg_exe.callOpts(io, acecfg.exes.cfg_args, &acecfg.exes.cfg_results, .{ .wait = true });
+    acecfg.exes.cfg_exe.call(acecfg.exes.cfg_args, &acecfg.exes.cfg_results);
     acecfg.exes.cfg_results.fill(.{ &cond_logits_buffer });
     // sample next token
     acecfg.exes.sample_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, rng_buffers });
-    acecfg.exes.sample_exe.callOpts(io, acecfg.exes.sample_args, &acecfg.exes.sample_results, .{ .wait = true });
+    acecfg.exes.sample_exe.call(acecfg.exes.sample_args, &acecfg.exes.sample_results);
     zml.Tensor.Rng.deinitBuffer(&rng_buffers);
     acecfg.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
 
@@ -693,41 +693,41 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
 
         // embed cond tokens
         acecfg.llm.exes.decode_embed_args.set(.{ acecfg.llm.model_buffers, token_buffer });
-        acecfg.llm.exes.decode_embed_exe.callOpts(io, acecfg.llm.exes.decode_embed_args, &acecfg.llm.exes.decode_embed_results, .{ .wait = true });
+        acecfg.llm.exes.decode_embed_exe.call(acecfg.llm.exes.decode_embed_args, &acecfg.llm.exes.decode_embed_results);
         cond_embed_buffer.deinit();
         acecfg.llm.exes.decode_embed_results.fill(.{ &cond_embed_buffer });
         // embed uncond tokens
         acecfg.llm.exes.decode_embed_args.set(.{ acecfg.llm.model_buffers, token_buffer });
-        acecfg.llm.exes.decode_embed_exe.callOpts(io, acecfg.llm.exes.decode_embed_args, &acecfg.llm.exes.decode_embed_results, .{ .wait = true });
+        acecfg.llm.exes.decode_embed_exe.call(acecfg.llm.exes.decode_embed_args, &acecfg.llm.exes.decode_embed_results);
         uncond_embed_buffer.deinit();
         acecfg.llm.exes.decode_embed_results.fill(.{ &uncond_embed_buffer });
         for (0..acecfg.llm.config.num_hidden_layers) |ii| {
             // layer ii the cond embeds
             acecfg.llm.exes.decode_layer_args.set(.{ acecfg.llm.model_buffers.layers[ii], cond_embed_buffer, cond_pos_buffer, acecfg.cond_kv_cache_buffers, layer_index_buffers[ii] });
-            acecfg.llm.exes.decode_layer_exe.callOpts(io, acecfg.llm.exes.decode_layer_args, &acecfg.llm.exes.decode_layer_results, .{ .wait = true });
+            acecfg.llm.exes.decode_layer_exe.call(acecfg.llm.exes.decode_layer_args, &acecfg.llm.exes.decode_layer_results);
             acecfg.llm.exes.decode_layer_results.fill(.{ &cond_embed_buffer, &acecfg.cond_kv_cache_buffers });
             // layer ii the uncond embeds
             acecfg.llm.exes.decode_layer_args.set(.{ acecfg.llm.model_buffers.layers[ii], uncond_embed_buffer, uncond_pos_buffer, acecfg.uncond_kv_cache_buffers, layer_index_buffers[ii] });
-            acecfg.llm.exes.decode_layer_exe.callOpts(io, acecfg.llm.exes.decode_layer_args, &acecfg.llm.exes.decode_layer_results, .{ .wait = true });
+            acecfg.llm.exes.decode_layer_exe.call(acecfg.llm.exes.decode_layer_args, &acecfg.llm.exes.decode_layer_results);
             acecfg.llm.exes.decode_layer_results.fill(.{ &uncond_embed_buffer, &acecfg.uncond_kv_cache_buffers });
         }
         // compute cond logits
         acecfg.llm.exes.logits_args.set(.{ acecfg.llm.model_buffers, cond_embed_buffer });
-        acecfg.llm.exes.logits_exe.callOpts(io, acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results, .{ .wait = true });
+        acecfg.llm.exes.logits_exe.call(acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results);
         cond_logits_buffer.deinit();
         acecfg.llm.exes.logits_results.fill(.{ &cond_logits_buffer });
         // compute uncond logits
         acecfg.llm.exes.logits_args.set(.{ acecfg.llm.model_buffers, uncond_embed_buffer });
-        acecfg.llm.exes.logits_exe.callOpts(io, acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results, .{ .wait = true });
+        acecfg.llm.exes.logits_exe.call(acecfg.llm.exes.logits_args, &acecfg.llm.exes.logits_results);
         uncond_logits_buffer.deinit();
         acecfg.llm.exes.logits_results.fill(.{ &uncond_logits_buffer });
         // combine them with cfg
         acecfg.exes.cfg_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, uncond_logits_buffer });
-        acecfg.exes.cfg_exe.callOpts(io, acecfg.exes.cfg_args, &acecfg.exes.cfg_results, .{ .wait = true });
+        acecfg.exes.cfg_exe.call(acecfg.exes.cfg_args, &acecfg.exes.cfg_results);
         acecfg.exes.cfg_results.fill(.{ &cond_logits_buffer });
         // sample next token
         acecfg.exes.sample_args.set(.{ acecfg.llm.model_buffers, cond_logits_buffer, rng_buffers, true });
-        acecfg.exes.sample_exe.callOpts(io, acecfg.exes.sample_args, &acecfg.exes.sample_results, .{ .wait = true });
+        acecfg.exes.sample_exe.call(acecfg.exes.sample_args, &acecfg.exes.sample_results);
         token_buffer.deinit();
         zml.Tensor.Rng.deinitBuffer(&rng_buffers);
         acecfg.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
@@ -967,7 +967,7 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
         defer t_curr.deinit();
         defer t_next.deinit();
         acedit.exes.preprocess_args.set(.{ acedit.model_buffers, t_curr, x_buffer, context_latents_buffer, encoded_conditions_buffer });
-        acedit.exes.preprocess_exe.callOpts(io, acedit.exes.preprocess_args, &acedit.exes.preprocess_results, .{ .wait = true });
+        acedit.exes.preprocess_exe.call(acedit.exes.preprocess_args, &acedit.exes.preprocess_results);
         y_proj_buffer.deinit();
         temb_buffer.deinit();
         timestep_proj_buffer.deinit();
@@ -975,7 +975,7 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
         for (0..acedit.config.num_hidden_layers) |ii| {
             const mask_buffer = if (acedit.config.layer_types[ii] == .sliding_attention) sliding_mask_buffer else full_mask_buffer;
             acedit.exes.layer_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer });
-            acedit.exes.layer_exe.callOpts(io, acedit.exes.layer_args, &acedit.exes.layer_results, .{ .wait = true });
+            acedit.exes.layer_exe.call(acedit.exes.layer_args, &acedit.exes.layer_results);
             acedit.exes.layer_results.fill(.{ &hidden_states_buffer });
         }
         acedit.exes.postprocess_args.set(.{ acedit.model_buffers, t_curr, t_next, x_buffer, hidden_states_buffer, temb_buffer });
@@ -1069,7 +1069,7 @@ pub fn decodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVa
         defer encoded_chunk_buffer.deinit();
         // decode it
         decode_args.set(.{ acevae.model_buffers, encoded_chunk_buffer, decoded_chunk_buffer });
-        acevae.decode_exe.callOpts(io, decode_args, &decode_results, .{ .wait = true });
+        acevae.decode_exe.call(decode_args, &decode_results);
         decode_results.fill(.{ &decoded_chunk_buffer });
         // send the decoded chunk back to the CPU
         try decoded_chunk_buffer.toSlice(io, decoded_chunk_slice);
