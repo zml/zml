@@ -138,9 +138,12 @@ pub const triton = struct {
 };
 
 pub const mosaic_tpu = struct {
-    const Builder = mosaic_tpu_builder.Builder;
-    const DType = mosaic_tpu_builder.DType;
-    const FinishError = mosaic_tpu_builder.FinishError;
+    pub const Builder = mosaic_tpu_builder.Builder;
+    pub const DType = mosaic_tpu_builder.DType;
+    pub const FinishError = mosaic_tpu_builder.FinishError;
+    pub const Value = mosaic_tpu_builder.Value;
+    pub const TransformStubBuilder = mosaic_tpu_builder.TransformStubBuilder;
+    pub const ArgSpec = mosaic_tpu_builder.ArgSpec;
 
     pub fn newContext() std.mem.Allocator.Error!*mlir.Context {
         return makeKernelContext(&mosaic_tpu_builder.dialects_needed);

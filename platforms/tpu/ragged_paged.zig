@@ -322,14 +322,15 @@ fn stridedLoadKv(
     while (i < kv_load_step) : (i += 1) {
         const shift_k: i32 = @intCast(@as(i64, @intCast(i)) * 2 * bitwidth);
         const shift_v: i32 = @intCast((@as(i64, @intCast(i)) * 2 + 1) * bitwidth);
-        const bk = k.shrui(b, k.splat(shift_k, splat_shape, .i32));
+        const bk_src = if (shift_k == 0) b else k.shrui(b, k.splat(shift_k, splat_shape, .i32));
+        const bk_trunc = k.trunci(bk_src, trunc_dtype);
+        const k_v = k.bitcastTo(bk_trunc, cfg.kv_dtype);
+
         const bv = k.shrui(b, k.splat(shift_v, splat_shape, .i32));
-        const bk_trunc = k.trunci(bk, trunc_dtype);
         const bv_trunc = k.trunci(bv, trunc_dtype);
-        result[i] = .{
-            .k = k.bitcastTo(bk_trunc, cfg.kv_dtype),
-            .v = k.bitcastTo(bv_trunc, cfg.kv_dtype),
-        };
+        const v_v = k.bitcastTo(bv_trunc, cfg.kv_dtype);
+
+        result[i] = .{ .k = k_v, .v = v_v };
     }
     return result;
 }
@@ -391,10 +392,9 @@ fn flashAttention(
     const row_iota = k.iota(&.{ flash_q, flash_k }, .i32, &.{0});
     const row_q = k.divFloor(row_iota, @as(i32, @intCast(num_q_heads_per_kv_head)));
     const row_ids = k.addi(k.broadcastTo(row_offset, &.{ flash_q, flash_k }), row_q);
-    const col_ids = k.addi(
-        k.broadcastTo(kv_len_start, &.{ flash_q, flash_k }),
-        k.iota(&.{ flash_q, flash_k }, .i32, &.{1}),
-    );
+    const col_iota = k.iota(&.{ flash_q, flash_k }, .i32, &.{1});
+    const kv_len_start_bc = k.broadcastTo(kv_len_start, &.{ flash_q, flash_k });
+    const col_ids = k.addi(kv_len_start_bc, col_iota);
     var causal_mask = k.cmpi(.slt, row_ids, col_ids);
     if (cfg.sliding_window) |sw| {
         const sw_splat = k.splat(@as(i32, @intCast(sw)), &.{ flash_q, flash_k }, .i32);
@@ -432,16 +432,17 @@ fn flashAttention(
     const l_curr_bc = k.broadcastTo(k.shapeCast(l_curr_v, &.{ flash_q, 1 }), &.{ flash_q, lm_lane });
 
     const head_l_ref_idx = k.cIndex(kv_head_idx);
+    const is_first_kv = k.cmpi(.eq, kv_blk_idx, k.lift(@as(i32, 0)));
     const m_prev_load = k.shapeCast(
         k.vectorLoadShape(a.m_ref, &.{ head_l_ref_idx, k.cIndex(0), k.cIndex(0) }, &.{ 1, flash_q, lm_lane }),
         &.{ flash_q, lm_lane },
     );
-    const m_prev = k.select(k.cmpi(.eq, kv_blk_idx, k.lift(@as(i32, 0))), k.splat(@as(f32, -std.math.inf(f32)), &.{ flash_q, lm_lane }, .f32), m_prev_load);
+    const m_prev = k.select(is_first_kv, k.splat(@as(f32, -std.math.inf(f32)), &.{ flash_q, lm_lane }, .f32), m_prev_load);
     const l_prev_load = k.shapeCast(
         k.vectorLoadShape(a.l_ref, &.{ head_l_ref_idx, k.cIndex(0), k.cIndex(0) }, &.{ 1, flash_q, lm_lane }),
         &.{ flash_q, lm_lane },
     );
-    const l_prev = k.select(k.cmpi(.eq, kv_blk_idx, k.lift(@as(i32, 0))), k.zeros(&.{ flash_q, lm_lane }, .f32), l_prev_load);
+    const l_prev = k.select(is_first_kv, k.zeros(&.{ flash_q, lm_lane }, .f32), l_prev_load);
 
     const m_next = k.maximumf(m_prev, m_curr_bc);
     maskedStoreLM(k, a.m_ref, m_next, head_l_ref_idx, store_start, store_end, num_q_heads_per_kv_head);
@@ -460,7 +461,7 @@ fn flashAttention(
     const q_head_idx_idx = k.cIndex(q_head_idx);
     const o_curr_3d = k.vectorLoadShape(a.acc_ref, &.{ k.cIndex(0), q_head_idx_idx, k.cIndex(0) }, &.{ num_q_per_blk, num_q_heads_per_kv_head, head_dim });
     const o_curr_pre = k.select(
-        k.cmpi(.eq, kv_blk_idx, k.lift(@as(i32, 0))),
+        is_first_kv,
         k.zeros(&.{ num_q_per_blk, num_q_heads_per_kv_head, head_dim }, .f32),
         o_curr_3d,
     );

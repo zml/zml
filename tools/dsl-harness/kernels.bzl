@@ -120,6 +120,12 @@ MOSAIC_TPU_KERNELS = [
         "py_src": "py/ragged_paged.py",
         "py_kernel": "ragged_paged_attention",
     },
+    {
+        "name": "megablox_gmm",
+        "src": "zig/megablox_gmm.zig",
+        "py_src": "py/megablox_gmm.py",
+        "py_kernel": "megablox_gmm_kernel",
+    },
 ]
 
 def _kernel_labels(kind, kernels, suffix):
