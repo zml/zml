@@ -1,1 +1,10 @@
 # Package marker for XLA patches
+exports_files([
+    "grpc_bazel9_native_cc.patch",
+    "eigen_bazel9_loads.patch",
+    "farmhash_bazel9_loads.patch",
+    "ml_dtypes_bazel9_loads.patch",
+    "shardy_bazel9_loads.patch",
+    "tsl_bazel9_loads.patch",
+    "xspace_to_perfetto.patch",
+])

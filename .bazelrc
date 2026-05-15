@@ -38,7 +38,7 @@ common          --experimental_check_output_files=false
 # Performance
 common          --legacy_external_runfiles=false
 
-common          --experimental_output_directory_naming_scheme=diff_against_dynamic_baseline
+# common        --experimental_output_directory_naming_scheme=diff_against_dynamic_baseline
 
 # Mount the zig cache into the sandboxes
 build:macos     --sandbox_add_mount_pair=/var/tmp
@@ -46,9 +46,6 @@ build:linux     --sandbox_add_mount_pair=/tmp
 
 # Ensure workers are sandboxed
 build           --worker_sandboxing
-
-# Allows symlinks with spaces
-build           --experimental_inprocess_symlink_creation
 
 # Build in debug for now, by default
 common          --compilation_mode=dbg
@@ -58,6 +55,7 @@ common          --experimental_cc_static_library
 common          --experimental_cc_shared_library
 common          --incompatible_use_cc_configure_from_rules_cc
 common          --experimental_starlark_cc_import
+common          --incompatible_autoload_externally=+@rules_cc,+@rules_python
 
 common          --experimental_platform_in_output_dir
 
@@ -72,6 +70,8 @@ common          --incompatible_enable_proto_toolchain_resolution
 
 # Allow empty globs since some legacy rules
 common          --incompatible_disallow_empty_glob=false
+# Vendored projects still contain stale layering_check metadata with the Bazel 9 toolchain.
+common          --features=-layering_check
 
 # Use the C linker to link Zig code
 common          --@rules_zig//zig/settings:use_cc_common_link=true

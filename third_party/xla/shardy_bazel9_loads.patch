@@ -1,0 +1,256 @@
+diff --git a/third_party/shardy/BUILD b/third_party/shardy/BUILD
+--- a/third_party/shardy/BUILD
++++ b/third_party/shardy/BUILD
+@@ -4,6 +4,7 @@
+ # copybara:uncomment package(default_applicable_licenses = ["//third_party/tensorflow:license"])
+ 
+ exports_files(srcs = [
++    "bazel9_loads.patch",
+     "temporary.patch",
+     "workspace.bzl",
+ ])
+diff --git a/third_party/shardy/bazel9_loads.patch b/third_party/shardy/bazel9_loads.patch
+new file mode 100644
+--- /dev/null
++++ b/third_party/shardy/bazel9_loads.patch
+@@ -0,0 +1,228 @@
++diff --git a/shardy/common/BUILD b/shardy/common/BUILD
++index 1cb0186..7ed3a20 100755
++--- a/shardy/common/BUILD
+++++ b/shardy/common/BUILD
++@@ -1,3 +1,5 @@
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++
++ package(default_visibility = ["//visibility:public"])
++ 
++ cc_library(
++diff --git a/shardy/dialect/mpmd/ir/BUILD b/shardy/dialect/mpmd/ir/BUILD
++index 6b8f3ae..42725c5 100755
++--- a/shardy/dialect/mpmd/ir/BUILD
+++++ b/shardy/dialect/mpmd/ir/BUILD
++@@ -1,7 +1,7 @@
++ # The MPMD MLIR dialect.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
++-# load("@rules_cc//cc:cc_test.bzl", "cc_test")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_test.bzl", "cc_test")
++ load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "gentbl_filegroup", "td_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++diff --git a/shardy/dialect/mpmd/transforms/BUILD b/shardy/dialect/mpmd/transforms/BUILD
++index 750ca00..2f3b477 100755
++--- a/shardy/dialect/mpmd/transforms/BUILD
+++++ b/shardy/dialect/mpmd/transforms/BUILD
++@@ -1,6 +1,6 @@
++ # The MPMD dialect passes and pipelines.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++ 
++diff --git a/shardy/dialect/mpmd/transforms/common/BUILD b/shardy/dialect/mpmd/transforms/common/BUILD
++index 9ed6919..70d0cfd 100755
++--- a/shardy/dialect/mpmd/transforms/common/BUILD
+++++ b/shardy/dialect/mpmd/transforms/common/BUILD
++@@ -1,7 +1,7 @@
++ # The MPMD common library and passes.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
++-# load("@rules_cc//cc:cc_test.bzl", "cc_test")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_test.bzl", "cc_test")
++ load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++diff --git a/shardy/dialect/mpmd/transforms/export/BUILD b/shardy/dialect/mpmd/transforms/export/BUILD
++index 86f3e7f..aa6650a 100755
++--- a/shardy/dialect/mpmd/transforms/export/BUILD
+++++ b/shardy/dialect/mpmd/transforms/export/BUILD
++@@ -1,7 +1,7 @@
++ # The MPMD export passes and pipeline.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
++-# load("@rules_cc//cc:cc_test.bzl", "cc_test")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_test.bzl", "cc_test")
++ load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++diff --git a/shardy/dialect/mpmd/transforms/import/BUILD b/shardy/dialect/mpmd/transforms/import/BUILD
++index e0fae3d..529bd76 100755
++--- a/shardy/dialect/mpmd/transforms/import/BUILD
+++++ b/shardy/dialect/mpmd/transforms/import/BUILD
++@@ -1,7 +1,7 @@
++ # The MPMD import passes and pipeline.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
++-# load("@rules_cc//cc:cc_test.bzl", "cc_test")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_test.bzl", "cc_test")
++ load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++diff --git a/shardy/dialect/mpmd/transforms/optimize/BUILD b/shardy/dialect/mpmd/transforms/optimize/BUILD
++index 5ec1f44..0f1f0ea 100755
++--- a/shardy/dialect/mpmd/transforms/optimize/BUILD
+++++ b/shardy/dialect/mpmd/transforms/optimize/BUILD
++@@ -1,7 +1,7 @@
++ # The MPMD optimize passes and pipeline.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
++-# load("@rules_cc//cc:cc_test.bzl", "cc_test")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_test.bzl", "cc_test")
++ load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++diff --git a/shardy/dialect/mpmd/transforms/sharding_propagation/BUILD b/shardy/dialect/mpmd/transforms/sharding_propagation/BUILD
++index 0c9222d..ca766b9 100755
++--- a/shardy/dialect/mpmd/transforms/sharding_propagation/BUILD
+++++ b/shardy/dialect/mpmd/transforms/sharding_propagation/BUILD
++@@ -1,6 +1,6 @@
++ # The MPMD sharding propagation passes and pipeline.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++ load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++diff --git a/shardy/dialect/sdy/ir/BUILD b/shardy/dialect/sdy/ir/BUILD
++index ce57a60..fc63329 100755
++--- a/shardy/dialect/sdy/ir/BUILD
+++++ b/shardy/dialect/sdy/ir/BUILD
++@@ -1,7 +1,7 @@
++ # The SDY MLIR dialect.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
++-# load("@rules_cc//cc:cc_test.bzl", "cc_test")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_test.bzl", "cc_test")
++ load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "gentbl_filegroup", "td_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++diff --git a/shardy/dialect/sdy/transforms/BUILD b/shardy/dialect/sdy/transforms/BUILD
++index 0fe2920..b624f91 100755
++--- a/shardy/dialect/sdy/transforms/BUILD
+++++ b/shardy/dialect/sdy/transforms/BUILD
++@@ -1,6 +1,6 @@
++ # The SDY dialect passes and pipelines.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++ 
++diff --git a/shardy/dialect/sdy/transforms/common/BUILD b/shardy/dialect/sdy/transforms/common/BUILD
++index fffdd08..3d6f77a 100755
++--- a/shardy/dialect/sdy/transforms/common/BUILD
+++++ b/shardy/dialect/sdy/transforms/common/BUILD
++@@ -1,7 +1,7 @@
++ # The SDY transformations common library.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
++-# load("@rules_cc//cc:cc_test.bzl", "cc_test")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_test.bzl", "cc_test")
++ 
++ package(default_visibility = ["//visibility:public"])
++ 
++diff --git a/shardy/dialect/sdy/transforms/export/BUILD b/shardy/dialect/sdy/transforms/export/BUILD
++index be00f89..95aa4e4 100755
++--- a/shardy/dialect/sdy/transforms/export/BUILD
+++++ b/shardy/dialect/sdy/transforms/export/BUILD
++@@ -1,6 +1,6 @@
++ # The SDY export passes and pipeline.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++ load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++diff --git a/shardy/dialect/sdy/transforms/import/BUILD b/shardy/dialect/sdy/transforms/import/BUILD
++index e6637e9..ec20d10 100755
++--- a/shardy/dialect/sdy/transforms/import/BUILD
+++++ b/shardy/dialect/sdy/transforms/import/BUILD
++@@ -1,6 +1,6 @@
++ # The SDY import passes and pipeline.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++ load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++diff --git a/shardy/dialect/sdy/transforms/propagation/BUILD b/shardy/dialect/sdy/transforms/propagation/BUILD
++index d22060b..da6a393 100755
++--- a/shardy/dialect/sdy/transforms/propagation/BUILD
+++++ b/shardy/dialect/sdy/transforms/propagation/BUILD
++@@ -1,7 +1,7 @@
++ # The SDY sharding propagation system.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
++-# load("@rules_cc//cc:cc_test.bzl", "cc_test")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_test.bzl", "cc_test")
++ load("@llvm-project//mlir:tblgen.bzl", "gentbl_cc_library", "td_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++diff --git a/shardy/dialect/sdy/transforms/propagation/debugging/BUILD b/shardy/dialect/sdy/transforms/propagation/debugging/BUILD
++index 1aa8344..ffdc6f3 100755
++--- a/shardy/dialect/sdy/transforms/propagation/debugging/BUILD
+++++ b/shardy/dialect/sdy/transforms/propagation/debugging/BUILD
++@@ -1,6 +1,6 @@
++ # Systems to debug SDY propagation.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++ 
++diff --git a/shardy/integrations/c/mpmd/BUILD b/shardy/integrations/c/mpmd/BUILD
++index a867133..a74f570 100755
++--- a/shardy/integrations/c/mpmd/BUILD
+++++ b/shardy/integrations/c/mpmd/BUILD
++@@ -1,6 +1,6 @@
++ # MPMD C APIs.
++ 
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++ 
++diff --git a/shardy/integrations/python/jax/mpmd/jaxlib/BUILD b/shardy/integrations/python/jax/mpmd/jaxlib/BUILD
++index 45e9c63..ea2fb99 100755
++--- a/shardy/integrations/python/jax/mpmd/jaxlib/BUILD
+++++ b/shardy/integrations/python/jax/mpmd/jaxlib/BUILD
++@@ -1,4 +1,4 @@
++-# load("@rules_cc//cc:cc_library.bzl", "cc_library")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++ 
++ package(default_visibility = ["//visibility:public"])
++ 
++diff --git a/shardy/tools/BUILD b/shardy/tools/BUILD
++index 8ce3b63..367ad55 100755
++--- a/shardy/tools/BUILD
+++++ b/shardy/tools/BUILD
++@@ -1,6 +1,6 @@
++ # Shardy tools.
++ 
++-# load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+++load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
++ 
++ package(default_visibility = ["//visibility:public"])
++ 
+diff --git a/third_party/shardy/workspace.bzl b/third_party/shardy/workspace.bzl
+--- a/third_party/shardy/workspace.bzl
++++ b/third_party/shardy/workspace.bzl
+@@ -11,4 +11,7 @@ def repo():
+         strip_prefix = "shardy-{commit}".format(commit = SHARDY_COMMIT),
+         urls = tf_mirror_urls("https://github.com/openxla/shardy/archive/{commit}.zip".format(commit = SHARDY_COMMIT)),
+-        patch_file = ["//third_party/shardy:temporary.patch"],
++        patch_file = [
++            "//third_party/shardy:temporary.patch",
++            "//third_party/shardy:bazel9_loads.patch",
++        ],
+     )

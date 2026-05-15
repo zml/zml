@@ -1,0 +1,11 @@
+diff --git a/third_party/py/ml_dtypes/ml_dtypes.BUILD b/third_party/py/ml_dtypes/ml_dtypes.BUILD
+--- a/third_party/py/ml_dtypes/ml_dtypes.BUILD
++++ b/third_party/py/ml_dtypes/ml_dtypes.BUILD
+@@ -1,5 +1,7 @@
+ """ Main ml_dtypes library. """
+ 
++load("@rules_cc//cc:cc_library.bzl", "cc_library")
+ load("@pybind11_bazel//:build_defs.bzl", "pybind_extension")
++load("@rules_python//python:py_library.bzl", "py_library")
+ 
+ package(

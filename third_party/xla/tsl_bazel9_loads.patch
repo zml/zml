@@ -1,0 +1,8 @@
+diff --git a/third_party/tsl/BUILD.bazel b/third_party/tsl/BUILD.bazel
+--- a/third_party/tsl/BUILD.bazel
++++ b/third_party/tsl/BUILD.bazel
+@@ -1,3 +1,4 @@
++load("@rules_cc//cc:cc_library.bzl", "cc_library")
+ load("@rules_license//rules:license.bzl", "license")
+ 
+ package(

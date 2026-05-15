@@ -46,3 +46,25 @@ index 090c87f860..ed1ab94fd0 100644
  
  def defaulting_select(selector):
      """Pass through to select() with special semantics when converting to CMake.
+diff --git a/build_tools/bazel/cc_binary_benchmark.bzl b/build_tools/bazel/cc_binary_benchmark.bzl
+index 0beb198dc1..a74e959d8e 100644
+--- a/build_tools/bazel/cc_binary_benchmark.bzl
++++ b/build_tools/bazel/cc_binary_benchmark.bzl
+@@ -11,6 +11,7 @@
+ binaries and then invoke them as tests with `--benchmark_min_time=0s`.
+ """
+ 
++load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+ load(":native_binary.bzl", "native_test")
+ 
+ def cc_binary_benchmark(
+@@ -34,7 +35,7 @@ def cc_binary_benchmark(
+       name, srcs, data, deps, copts, defines, linkopts, tags, testonly, **kwargs
+     Arguments passed to the test target:
+       {name}_test, tags, size, timeout, args (merged with --benchmark_min_time=0s), **kwargs
+     """
+-    native.cc_binary(
++    cc_binary(
+         name = name,
+         srcs = srcs,
+         data = data,

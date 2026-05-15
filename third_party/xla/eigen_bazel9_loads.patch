@@ -1,0 +1,12 @@
+diff --git a/third_party/eigen3/eigen_archive.BUILD b/third_party/eigen3/eigen_archive.BUILD
+--- a/third_party/eigen3/eigen_archive.BUILD
++++ b/third_party/eigen3/eigen_archive.BUILD
+@@ -3,6 +3,8 @@
+ #   matrices, and related algorithms.
+ # This is the BUILD file used for the @eigen_archive external repository.
+ 
++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++
+ licenses([
+     "reciprocal",  # MPL2
+     "notice",  # Portions BSD
