@@ -448,6 +448,56 @@
         ]
       }
     },
+    "@@aspect_rules_py+//uv/private/tomltool:extension.bzl%tomltool": {
+      "general": {
+        "bzlTransitiveDigest": "9BC6q6vdlG+lqF9L13wVxxakVkZBx8buKPFIndN6mHk=",
+        "usagesDigest": "tQ76lH+Nn5OlAFLvBbnfvnCzNIiwGgY6tOumYZXH44w=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "toml2json_aarch64_osx_libsystem": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "url": "https://github.com/dzbarsky/toml2json/releases/download/v0.0.4/toml2json_darwin_arm64",
+              "sha256": "9adc44d976e8f5baf5a6d613ceb3db6e5f56b2e22e75ac56521fdce62f227d88",
+              "executable": true
+            }
+          },
+          "toml2json_x86_64_osx_libsystem": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "url": "https://github.com/dzbarsky/toml2json/releases/download/v0.0.4/toml2json_darwin_amd64",
+              "sha256": "425bac4015394fd9840fabcd52ac60fc796a9c10655b36c57e36ffb7dc9f3dd4",
+              "executable": true
+            }
+          },
+          "toml2json_aarch64_linux_gnu": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "url": "https://github.com/dzbarsky/toml2json/releases/download/v0.0.4/toml2json_linux_arm64",
+              "sha256": "be8376c8e3232a242eae0d187f741a475498a949b942361a9af6e95072ef5670",
+              "executable": true
+            }
+          },
+          "toml2json_x86_64_linux_gnu": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_file",
+            "attributes": {
+              "url": "https://github.com/dzbarsky/toml2json/releases/download/v0.0.4/toml2json_linux_amd64",
+              "sha256": "f3dd54fabf2d27d0c027b0421860e5d9d909080be1613f0ffd87057633b65e9a",
+              "executable": true
+            }
+          }
+        },
+        "recordedRepoMappingEntries": [
+          [
+            "aspect_rules_py+",
+            "bazel_tools",
+            "bazel_tools"
+          ]
+        ]
+      }
+    },
     "@@aspect_tools_telemetry+//:extension.bzl%telemetry": {
       "general": {
         "bzlTransitiveDigest": "MePriaXmQNSqUfE+YQvEtzBc2bU1mjITINIffFiZYgo=",
@@ -476,6 +526,545 @@
             "aspect_tools_telemetry+",
             "bazel_skylib",
             "bazel_skylib+"
+          ]
+        ]
+      }
+    },
+    "@@cel-spec+//:extensions.bzl%non_module_dependencies": {
+      "general": {
+        "bzlTransitiveDigest": "VN89nCHLUuqo5KktrpNZqv8O+QKrrsGIqdoLPn91hhY=",
+        "usagesDigest": "HFQJtQrL9nKaFZEjgwaHVMHALMW+cafu696xy7J4ueM=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "com_google_googleapis": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "sha256": "bd8e735d881fb829751ecb1a77038dda4a8d274c45490cb9fcf004583ee10571",
+              "strip_prefix": "googleapis-07c27163ac591955d736f3057b1619ece66f5b99",
+              "urls": [
+                "https://github.com/googleapis/googleapis/archive/07c27163ac591955d736f3057b1619ece66f5b99.tar.gz"
+              ]
+            }
+          }
+        },
+        "recordedRepoMappingEntries": [
+          [
+            "cel-spec+",
+            "bazel_tools",
+            "bazel_tools"
+          ]
+        ]
+      }
+    },
+    "@@cel-spec+//:googleapis_ext.bzl%googleapis_ext": {
+      "general": {
+        "bzlTransitiveDigest": "65z4sd8o73L2a8X2Pd3yAjn73l9HBG45JVnVY2DUbzI=",
+        "usagesDigest": "Ek7VfZ+tuyRBx/1h5wcmtnW9EGpOb0dkXUwBluZbD8k=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "com_google_googleapis_imports": {
+            "repoRuleId": "@@cel-spec++non_module_dependencies+com_google_googleapis//:repository_rules.bzl%switched_rules",
+            "attributes": {
+              "rules": {
+                "proto_library_with_info": [
+                  "",
+                  ""
+                ],
+                "moved_proto_library": [
+                  "",
+                  ""
+                ],
+                "java_proto_library": [
+                  "",
+                  ""
+                ],
+                "java_grpc_library": [
+                  "",
+                  ""
+                ],
+                "java_gapic_library": [
+                  "",
+                  ""
+                ],
+                "java_gapic_test": [
+                  "",
+                  ""
+                ],
+                "java_gapic_assembly_gradle_pkg": [
+                  "",
+                  ""
+                ],
+                "py_proto_library": [
+                  "",
+                  ""
+                ],
+                "py_grpc_library": [
+                  "",
+                  ""
+                ],
+                "py_gapic_library": [
+                  "",
+                  ""
+                ],
+                "py_test": [
+                  "",
+                  ""
+                ],
+                "py_gapic_assembly_pkg": [
+                  "",
+                  ""
+                ],
+                "py_import": [
+                  "",
+                  ""
+                ],
+                "go_proto_library": [
+                  "",
+                  ""
+                ],
+                "go_library": [
+                  "",
+                  ""
+                ],
+                "go_test": [
+                  "",
+                  ""
+                ],
+                "go_gapic_library": [
+                  "",
+                  ""
+                ],
+                "go_gapic_assembly_pkg": [
+                  "",
+                  ""
+                ],
+                "cc_proto_library": [
+                  "native.cc_proto_library",
+                  ""
+                ],
+                "cc_grpc_library": [
+                  "",
+                  ""
+                ],
+                "cc_gapic_library": [
+                  "",
+                  ""
+                ],
+                "php_proto_library": [
+                  "",
+                  "php_proto_library"
+                ],
+                "php_grpc_library": [
+                  "",
+                  "php_grpc_library"
+                ],
+                "php_gapic_library": [
+                  "",
+                  "php_gapic_library"
+                ],
+                "php_gapic_assembly_pkg": [
+                  "",
+                  "php_gapic_assembly_pkg"
+                ],
+                "nodejs_gapic_library": [
+                  "",
+                  "typescript_gapic_library"
+                ],
+                "nodejs_gapic_assembly_pkg": [
+                  "",
+                  "typescript_gapic_assembly_pkg"
+                ],
+                "ruby_proto_library": [
+                  "",
+                  ""
+                ],
+                "ruby_grpc_library": [
+                  "",
+                  ""
+                ],
+                "ruby_ads_gapic_library": [
+                  "",
+                  ""
+                ],
+                "ruby_cloud_gapic_library": [
+                  "",
+                  ""
+                ],
+                "ruby_gapic_assembly_pkg": [
+                  "",
+                  ""
+                ],
+                "csharp_proto_library": [
+                  "",
+                  ""
+                ],
+                "csharp_grpc_library": [
+                  "",
+                  ""
+                ],
+                "csharp_gapic_library": [
+                  "",
+                  ""
+                ],
+                "csharp_gapic_assembly_pkg": [
+                  "",
+                  ""
+                ]
+              }
+            }
+          }
+        },
+        "recordedRepoMappingEntries": [
+          [
+            "cel-spec+",
+            "com_google_googleapis",
+            "cel-spec++non_module_dependencies+com_google_googleapis"
+          ]
+        ]
+      }
+    },
+    "@@envoy_api+//bazel:repositories.bzl%non_module_deps": {
+      "general": {
+        "bzlTransitiveDigest": "JQHl7KCG4m+2+/1IddYzhdiav5qs2iUe+gkg5f+kUPA=",
+        "usagesDigest": "OP2p9QPxt4WFY/lah8Iecqt6SOUwZHs89hYRyaV+rSg=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "prometheus_metrics_model": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/prometheus/client_model/archive/v0.6.1.tar.gz"
+              ],
+              "sha256": "b9b690bc35d80061f255faa7df7621eae39fe157179ccd78ff6409c3b004f05e",
+              "strip_prefix": "client_model-0.6.1",
+              "build_file_content": "\nload(\"@envoy_api//bazel:api_build_system.bzl\", \"api_cc_py_proto_library\")\nload(\"@io_bazel_rules_go//proto:def.bzl\", \"go_proto_library\")\n\napi_cc_py_proto_library(\n    name = \"client_model\",\n    srcs = [\n        \"io/prometheus/client/metrics.proto\",\n    ],\n    visibility = [\"//visibility:public\"],\n)\n\ngo_proto_library(\n    name = \"client_model_go_proto\",\n    importpath = \"github.com/prometheus/client_model/go\",\n    proto = \":client_model\",\n    visibility = [\"//visibility:public\"],\n)\n"
+            }
+          },
+          "com_github_bufbuild_buf": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/bufbuild/buf/releases/download/v1.49.0/buf-Linux-x86_64.tar.gz"
+              ],
+              "sha256": "ee8da9748249f7946d79191e36469ce7bc3b8ba80019bff1fa4289a44cbc23bf",
+              "strip_prefix": "buf",
+              "build_file_content": "\npackage(\n    default_visibility = [\"//visibility:public\"],\n)\n\nfilegroup(\n    name = \"buf\",\n    srcs = [\n        \"@com_github_bufbuild_buf//:bin/buf\",\n    ],\n    tags = [\"manual\"], # buf is downloaded as a linux binary; tagged manual to prevent build for non-linux users\n)\n"
+            }
+          },
+          "envoy_toolshed": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/envoyproxy/toolshed/archive/bazel-v0.2.2.tar.gz"
+              ],
+              "sha256": "443fe177aba0cef8c17b7a48905c925c67b09005b10dd70ff12cd9f729a72d51",
+              "strip_prefix": "toolshed-bazel-v0.2.2/bazel"
+            }
+          }
+        },
+        "recordedRepoMappingEntries": [
+          [
+            "envoy_api+",
+            "bazel_tools",
+            "bazel_tools"
+          ],
+          [
+            "envoy_api+",
+            "envoy_api",
+            "envoy_api+"
+          ]
+        ]
+      }
+    },
+    "@@googleapis+//:extensions.bzl%switched_rules": {
+      "general": {
+        "bzlTransitiveDigest": "JLpojYeGHLdgnwSUuQWOrtkL9UMygBUUEFJZh7ASlmA=",
+        "usagesDigest": "66rLsrgz6YqDpU0pD+02mTGNxYxhb/of6Fh0ulHzjdE=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "com_google_googleapis_imports": {
+            "repoRuleId": "@@googleapis+//:repository_rules.bzl%switched_rules",
+            "attributes": {
+              "rules": {
+                "proto_library_with_info": [
+                  "",
+                  ""
+                ],
+                "moved_proto_library": [
+                  "",
+                  ""
+                ],
+                "java_proto_library": [
+                  "",
+                  ""
+                ],
+                "java_grpc_library": [
+                  "",
+                  ""
+                ],
+                "java_gapic_library": [
+                  "",
+                  ""
+                ],
+                "java_gapic_test": [
+                  "",
+                  ""
+                ],
+                "java_gapic_assembly_gradle_pkg": [
+                  "",
+                  ""
+                ],
+                "py_proto_library": [
+                  "",
+                  ""
+                ],
+                "py_grpc_library": [
+                  "",
+                  ""
+                ],
+                "py_gapic_library": [
+                  "",
+                  ""
+                ],
+                "py_test": [
+                  "",
+                  ""
+                ],
+                "py_gapic_assembly_pkg": [
+                  "",
+                  ""
+                ],
+                "py_import": [
+                  "",
+                  ""
+                ],
+                "go_proto_library": [
+                  "",
+                  ""
+                ],
+                "go_grpc_library": [
+                  "",
+                  ""
+                ],
+                "go_library": [
+                  "",
+                  ""
+                ],
+                "go_test": [
+                  "",
+                  ""
+                ],
+                "go_gapic_library": [
+                  "",
+                  ""
+                ],
+                "go_gapic_assembly_pkg": [
+                  "",
+                  ""
+                ],
+                "cc_proto_library": [
+                  "",
+                  ""
+                ],
+                "cc_grpc_library": [
+                  "",
+                  ""
+                ],
+                "cc_gapic_library": [
+                  "",
+                  ""
+                ],
+                "php_proto_library": [
+                  "",
+                  "php_proto_library"
+                ],
+                "php_grpc_library": [
+                  "",
+                  "php_grpc_library"
+                ],
+                "php_gapic_library": [
+                  "",
+                  "php_gapic_library"
+                ],
+                "php_gapic_assembly_pkg": [
+                  "",
+                  "php_gapic_assembly_pkg"
+                ],
+                "nodejs_gapic_library": [
+                  "",
+                  "typescript_gapic_library"
+                ],
+                "nodejs_gapic_assembly_pkg": [
+                  "",
+                  "typescript_gapic_assembly_pkg"
+                ],
+                "ruby_proto_library": [
+                  "",
+                  ""
+                ],
+                "ruby_grpc_library": [
+                  "",
+                  ""
+                ],
+                "ruby_ads_gapic_library": [
+                  "",
+                  ""
+                ],
+                "ruby_cloud_gapic_library": [
+                  "",
+                  ""
+                ],
+                "ruby_gapic_assembly_pkg": [
+                  "",
+                  ""
+                ],
+                "csharp_proto_library": [
+                  "",
+                  ""
+                ],
+                "csharp_grpc_library": [
+                  "",
+                  ""
+                ],
+                "csharp_gapic_library": [
+                  "",
+                  ""
+                ],
+                "csharp_gapic_assembly_pkg": [
+                  "",
+                  ""
+                ]
+              }
+            }
+          }
+        },
+        "recordedRepoMappingEntries": []
+      }
+    },
+    "@@rules_apple+//apple:apple.bzl%provisioning_profile_repository_extension": {
+      "general": {
+        "bzlTransitiveDigest": "uPXHPr6/YdHK89/x69cJN1hdhUF74hBsmCHaOkor2Fg=",
+        "usagesDigest": "vsJl8Rw5NL+5Ag2wdUDoTeRF/5klkXO8545Iy7U1Q08=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "local_provisioning_profiles": {
+            "repoRuleId": "@@rules_apple+//apple/internal:local_provisioning_profiles.bzl%provisioning_profile_repository",
+            "attributes": {}
+          }
+        },
+        "recordedRepoMappingEntries": [
+          [
+            "apple_support+",
+            "bazel_skylib",
+            "bazel_skylib+"
+          ],
+          [
+            "bazel_tools",
+            "rules_cc",
+            "rules_cc+"
+          ],
+          [
+            "rules_apple+",
+            "bazel_skylib",
+            "bazel_skylib+"
+          ],
+          [
+            "rules_apple+",
+            "bazel_tools",
+            "bazel_tools"
+          ],
+          [
+            "rules_apple+",
+            "build_bazel_apple_support",
+            "apple_support+"
+          ],
+          [
+            "rules_apple+",
+            "build_bazel_rules_swift",
+            "rules_swift+"
+          ],
+          [
+            "rules_cc+",
+            "bazel_tools",
+            "bazel_tools"
+          ],
+          [
+            "rules_cc+",
+            "cc_compatibility_proxy",
+            "rules_cc++compatibility_proxy+cc_compatibility_proxy"
+          ],
+          [
+            "rules_cc+",
+            "rules_cc",
+            "rules_cc+"
+          ],
+          [
+            "rules_cc++compatibility_proxy+cc_compatibility_proxy",
+            "rules_cc",
+            "rules_cc+"
+          ],
+          [
+            "rules_swift+",
+            "bazel_skylib",
+            "bazel_skylib+"
+          ],
+          [
+            "rules_swift+",
+            "bazel_tools",
+            "bazel_tools"
+          ],
+          [
+            "rules_swift+",
+            "build_bazel_apple_support",
+            "apple_support+"
+          ],
+          [
+            "rules_swift+",
+            "build_bazel_rules_swift",
+            "rules_swift+"
+          ],
+          [
+            "rules_swift+",
+            "build_bazel_rules_swift_local_config",
+            "rules_swift++non_module_deps+build_bazel_rules_swift_local_config"
+          ]
+        ]
+      }
+    },
+    "@@rules_apple+//apple:extensions.bzl%non_module_deps": {
+      "general": {
+        "bzlTransitiveDigest": "fe3Htkk5VXHdsIrdLtxsT4oUgADmqgmxwx83bja4UqY=",
+        "usagesDigest": "M3VqFpeTCo4qmrNKGZw0dxBHvTYDrfV3cscGzlSAhQ4=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "xctestrunner": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/google/xctestrunner/archive/b7698df3d435b6491b4b4c0f9fc7a63fbed5e3a6.tar.gz"
+              ],
+              "strip_prefix": "xctestrunner-b7698df3d435b6491b4b4c0f9fc7a63fbed5e3a6",
+              "sha256": "ae3a063c985a8633cb7eb566db21656f8db8eb9a0edb8c182312c7f0db53730d"
+            }
+          }
+        },
+        "recordedRepoMappingEntries": [
+          [
+            "rules_apple+",
+            "bazel_tools",
+            "bazel_tools"
           ]
         ]
       }
@@ -764,6 +1353,80 @@
         ]
       }
     },
+    "@@rules_perl+//perl:extensions.bzl%perl_repositories": {
+      "general": {
+        "bzlTransitiveDigest": "hVM1gWzR35NfpY87MWdNF1xPgjhXCgJv3lHedzj33TY=",
+        "usagesDigest": "qSSNDdCNVxNhY36wMndEAFacdhR0ooLTmumfad0km9s=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "perl_darwin_arm64": {
+            "repoRuleId": "@@rules_perl+//perl:repo.bzl%perl_download",
+            "attributes": {
+              "strip_prefix": "perl-darwin-arm64",
+              "sha256": "285769f3c50c339fb59a3987b216ae3c5c573b95babe6875a1ef56fb178433da",
+              "urls": [
+                "https://github.com/skaji/relocatable-perl/releases/download/5.36.0.1/perl-darwin-arm64.tar.xz"
+              ]
+            }
+          },
+          "perl_darwin_amd64": {
+            "repoRuleId": "@@rules_perl+//perl:repo.bzl%perl_download",
+            "attributes": {
+              "strip_prefix": "perl-darwin-amd64",
+              "sha256": "63bc5ee36f5394d71c50cca6cafdd333ee58f9eaa40bca63c85f9bd06f2c1fd6",
+              "urls": [
+                "https://github.com/skaji/relocatable-perl/releases/download/5.36.0.1/perl-darwin-amd64.tar.xz"
+              ]
+            }
+          },
+          "perl_linux_amd64": {
+            "repoRuleId": "@@rules_perl+//perl:repo.bzl%perl_download",
+            "attributes": {
+              "strip_prefix": "perl-linux-amd64",
+              "sha256": "3bdffa9d7a3f97c0207314637b260ba5115b1d0829f97e3e2e301191a4d4d076",
+              "urls": [
+                "https://github.com/skaji/relocatable-perl/releases/download/5.36.0.1/perl-linux-amd64.tar.xz"
+              ]
+            }
+          },
+          "perl_linux_arm64": {
+            "repoRuleId": "@@rules_perl+//perl:repo.bzl%perl_download",
+            "attributes": {
+              "strip_prefix": "perl-linux-arm64",
+              "sha256": "6fa4ece99e790ecbc2861f6ecb7b52694c01c2eeb215b4370f16a3b12d952117",
+              "urls": [
+                "https://github.com/skaji/relocatable-perl/releases/download/5.36.0.1/perl-linux-arm64.tar.xz"
+              ]
+            }
+          },
+          "perl_windows_x86_64": {
+            "repoRuleId": "@@rules_perl+//perl:repo.bzl%perl_download",
+            "attributes": {
+              "strip_prefix": "",
+              "sha256": "aeb973da474f14210d3e1a1f942dcf779e2ae7e71e4c535e6c53ebabe632cc98",
+              "urls": [
+                "https://mirror.bazel.build/strawberryperl.com/download/5.32.1.1/strawberry-perl-5.32.1.1-64bit.zip",
+                "https://strawberryperl.com/download/5.32.1.1/strawberry-perl-5.32.1.1-64bit.zip"
+              ]
+            }
+          }
+        },
+        "recordedRepoMappingEntries": [
+          [
+            "rules_perl+",
+            "bazel_tools",
+            "bazel_tools"
+          ],
+          [
+            "rules_perl+",
+            "rules_perl",
+            "rules_perl+"
+          ]
+        ]
+      }
+    },
     "@@rules_python+//python/uv:uv.bzl%uv": {
       "general": {
         "bzlTransitiveDigest": "LM8+g04lV+afYP67YcE7wenTJMrNqvF5u/ZnOctwctY=",
@@ -932,6 +1595,165 @@
             "rules_python+",
             "platforms",
             "platforms"
+          ]
+        ]
+      }
+    },
+    "@@rules_swift+//swift:extensions.bzl%non_module_deps": {
+      "general": {
+        "bzlTransitiveDigest": "vwewHB1JdoOb38MyyeRQPIdGOkEKD52YNUYgGwmeOy8=",
+        "usagesDigest": "mhACFnrdMv9Wi0Mt67bxocJqviRkDSV+Ee5Mqdj5akA=",
+        "recordedFileInputs": {},
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "com_github_apple_swift_protobuf": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/apple/swift-protobuf/archive/1.20.2.tar.gz"
+              ],
+              "sha256": "3fb50bd4d293337f202d917b6ada22f9548a0a0aed9d9a4d791e6fbd8a246ebb",
+              "strip_prefix": "swift-protobuf-1.20.2/",
+              "build_file": "@@rules_swift+//third_party:com_github_apple_swift_protobuf/BUILD.overlay"
+            }
+          },
+          "com_github_grpc_grpc_swift": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/grpc/grpc-swift/archive/1.16.0.tar.gz"
+              ],
+              "sha256": "58b60431d0064969f9679411264b82e40a217ae6bd34e17096d92cc4e47556a5",
+              "strip_prefix": "grpc-swift-1.16.0/",
+              "build_file": "@@rules_swift+//third_party:com_github_grpc_grpc_swift/BUILD.overlay"
+            }
+          },
+          "com_github_apple_swift_docc_symbolkit": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/apple/swift-docc-symbolkit/archive/refs/tags/swift-5.10-RELEASE.tar.gz"
+              ],
+              "sha256": "de1d4b6940468ddb53b89df7aa1a81323b9712775b0e33e8254fa0f6f7469a97",
+              "strip_prefix": "swift-docc-symbolkit-swift-5.10-RELEASE",
+              "build_file": "@@rules_swift+//third_party:com_github_apple_swift_docc_symbolkit/BUILD.overlay"
+            }
+          },
+          "com_github_apple_swift_nio": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/apple/swift-nio/archive/2.42.0.tar.gz"
+              ],
+              "sha256": "e3304bc3fb53aea74a3e54bd005ede11f6dc357117d9b1db642d03aea87194a0",
+              "strip_prefix": "swift-nio-2.42.0/",
+              "build_file": "@@rules_swift+//third_party:com_github_apple_swift_nio/BUILD.overlay"
+            }
+          },
+          "com_github_apple_swift_nio_http2": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/apple/swift-nio-http2/archive/1.26.0.tar.gz"
+              ],
+              "sha256": "f0edfc9d6a7be1d587e5b403f2d04264bdfae59aac1d74f7d974a9022c6d2b25",
+              "strip_prefix": "swift-nio-http2-1.26.0/",
+              "build_file": "@@rules_swift+//third_party:com_github_apple_swift_nio_http2/BUILD.overlay"
+            }
+          },
+          "com_github_apple_swift_nio_transport_services": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/apple/swift-nio-transport-services/archive/1.15.0.tar.gz"
+              ],
+              "sha256": "f3498dafa633751a52b9b7f741f7ac30c42bcbeb3b9edca6d447e0da8e693262",
+              "strip_prefix": "swift-nio-transport-services-1.15.0/",
+              "build_file": "@@rules_swift+//third_party:com_github_apple_swift_nio_transport_services/BUILD.overlay"
+            }
+          },
+          "com_github_apple_swift_nio_extras": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/apple/swift-nio-extras/archive/1.4.0.tar.gz"
+              ],
+              "sha256": "4684b52951d9d9937bb3e8ccd6b5daedd777021ef2519ea2f18c4c922843b52b",
+              "strip_prefix": "swift-nio-extras-1.4.0/",
+              "build_file": "@@rules_swift+//third_party:com_github_apple_swift_nio_extras/BUILD.overlay"
+            }
+          },
+          "com_github_apple_swift_log": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/apple/swift-log/archive/1.4.4.tar.gz"
+              ],
+              "sha256": "48fe66426c784c0c20031f15dc17faf9f4c9037c192bfac2f643f65cb2321ba0",
+              "strip_prefix": "swift-log-1.4.4/",
+              "build_file": "@@rules_swift+//third_party:com_github_apple_swift_log/BUILD.overlay"
+            }
+          },
+          "com_github_apple_swift_nio_ssl": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/apple/swift-nio-ssl/archive/2.23.0.tar.gz"
+              ],
+              "sha256": "4787c63f61dd04d99e498adc3d1a628193387e41efddf8de19b8db04544d016d",
+              "strip_prefix": "swift-nio-ssl-2.23.0/",
+              "build_file": "@@rules_swift+//third_party:com_github_apple_swift_nio_ssl/BUILD.overlay"
+            }
+          },
+          "com_github_apple_swift_collections": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/apple/swift-collections/archive/1.0.4.tar.gz"
+              ],
+              "sha256": "d9e4c8a91c60fb9c92a04caccbb10ded42f4cb47b26a212bc6b39cc390a4b096",
+              "strip_prefix": "swift-collections-1.0.4/",
+              "build_file": "@@rules_swift+//third_party:com_github_apple_swift_collections/BUILD.overlay"
+            }
+          },
+          "com_github_apple_swift_atomics": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "urls": [
+                "https://github.com/apple/swift-atomics/archive/1.1.0.tar.gz"
+              ],
+              "sha256": "1bee7f469f7e8dc49f11cfa4da07182fbc79eab000ec2c17bfdce468c5d276fb",
+              "strip_prefix": "swift-atomics-1.1.0/",
+              "build_file": "@@rules_swift+//third_party:com_github_apple_swift_atomics/BUILD.overlay"
+            }
+          },
+          "build_bazel_rules_swift_index_import": {
+            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
+            "attributes": {
+              "build_file": "@@rules_swift+//third_party:build_bazel_rules_swift_index_import/BUILD.overlay",
+              "canonical_id": "index-import-5.8",
+              "urls": [
+                "https://github.com/MobileNativeFoundation/index-import/releases/download/5.8.0.1/index-import.tar.gz"
+              ],
+              "sha256": "28c1ffa39d99e74ed70623899b207b41f79214c498c603915aef55972a851a15"
+            }
+          },
+          "build_bazel_rules_swift_local_config": {
+            "repoRuleId": "@@rules_swift+//swift/internal:swift_autoconfiguration.bzl%swift_autoconfiguration",
+            "attributes": {}
+          }
+        },
+        "recordedRepoMappingEntries": [
+          [
+            "rules_swift+",
+            "bazel_tools",
+            "bazel_tools"
+          ],
+          [
+            "rules_swift+",
+            "build_bazel_rules_swift",
+            "rules_swift+"
           ]
         ]
       }

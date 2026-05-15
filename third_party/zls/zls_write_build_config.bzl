@@ -97,6 +97,7 @@ def _zls_write_build_config_impl(ctx):
             name = "c",
             canonical_name = "c",
             zigtoolchaininfo = zigtoolchaininfo,
+            global_args = global_args,
             cc_infos = [cc_info],
         )
 
