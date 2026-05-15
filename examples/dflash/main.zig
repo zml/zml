@@ -470,6 +470,7 @@ fn runVerification(
     verify_args: *zml.Exe.Arguments,
     verify_results: *zml.Exe.Results,
     block_tokens_buffer: zml.Buffer,
+    draft_logits_buffer: zml.Buffer,
     token_index: u32,
     target_kv_cache_buffers: *llama.KvCache.Buffer,
     rng_buffer: *zml.Tensor.Rng.Buffer,
@@ -487,6 +488,7 @@ fn runVerification(
     verify_args.set(.{
         loaded_buffers.target_buffers,
         block_tokens_buffer,
+        draft_logits_buffer,
         verify_token_index_buffer,
         target_kv_cache_buffers.*,
         rng_buffer.*,
@@ -635,12 +637,14 @@ fn runSpeculativeDecoding(
         });
         selected_draft_exe.exe.call(selected_draft_exe.args, &selected_draft_exe.results);
 
-        var draft_token_buffer, var updated_draft_kv_cache_buffers, var updated_rng_buffer = selected_draft_exe.results.get(struct {
+        var draft_token_buffer, var draft_logits_buffer, var updated_draft_kv_cache_buffers, var updated_rng_buffer = selected_draft_exe.results.get(struct {
+            zml.Buffer,
             zml.Buffer,
             dflash.KvCache.Buffer,
             zml.Tensor.Rng.Buffer,
         });
         defer draft_token_buffer.deinit();
+        defer draft_logits_buffer.deinit();
         dflash.KvCache.replaceBuffers(draft_kv_cache_buffers, &updated_draft_kv_cache_buffers);
         replaceRngBuffer(rng_buffer, &updated_rng_buffer);
         draft_cache_base = start;
@@ -666,6 +670,7 @@ fn runSpeculativeDecoding(
             &verify_args,
             &verify_results,
             block_tokens_buffer,
+            draft_logits_buffer,
             start,
             target_kv_cache_buffers,
             rng_buffer,
@@ -837,7 +842,7 @@ fn draftTokens(
     active_context_len: zml.Tensor,
     rng: zml.Tensor.Rng,
     sampling: llama.SamplingConfig,
-) struct { zml.Tensor, dflash.KvCache, zml.Tensor.Rng } {
+) struct { zml.Tensor, zml.Tensor, dflash.KvCache, zml.Tensor.Rng } {
     const target_hidden_slice = target_hidden_block.withPartialTags(.{ .s, .d }).slice1d(.s, .{
         .start = 0,
         .end = context.len,
@@ -856,8 +861,10 @@ fn draftTokens(
         .add(cache_index.broad(.init(.{ .s = block_tokens.dim(.s) }, cache_index.dtype())));
     const position_ids = zml.Tensor.concatenate(&.{ context_position_ids, proposal_position_ids }, .s);
     const hidden, const updated_kv_cache = draft_model.forward(target_hidden, noise_embedding, position_ids, draft_kv_cache, cache_index, active_context_len);
-    const sampled_tokens, const updated_rng = target_model.sampleForward(hidden, sampling, rng);
-    return .{ sampled_tokens, updated_kv_cache, updated_rng };
+    const draft_logits = target_model.logitsForward(hidden);
+    const topk: u32 = if (sampling.temperature < 0.00001) 1 else @intCast(draft_logits.dim(.voc));
+    const sampled_tokens, const updated_rng = zml.nn.sampleTokens(draft_logits, .{ .topk = topk, .temperature = sampling.temperature }, rng);
+    return .{ sampled_tokens, draft_logits, updated_kv_cache, updated_rng };
 }
 
 fn paddedPromptTokens(allocator: std.mem.Allocator, token_ids: []const u32, block_size: u32) ![]u32 {

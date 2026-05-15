@@ -27,15 +27,6 @@ pub const Config = struct {
 
 pub const Buffers = zml.Bufferized(Model);
 
-pub const TargetForwardOutput = struct {
-    target_hidden: zml.Tensor,
-    sampled_tokens: zml.Tensor,
-    valid_draft_tokens: zml.Tensor,
-    correction_token: zml.Tensor,
-    kv_cache: KvCache,
-    rng: zml.Tensor.Rng,
-};
-
 pub const SamplingConfig = struct {
     temperature: f32 = 0.0,
 };
@@ -166,48 +157,22 @@ pub const Model = struct {
         return logits;
     }
 
-    pub fn sampleForward(self: Model, out_: zml.Tensor, sampling: SamplingConfig, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
+    fn sampleTargetTokens(self: Model, out_: zml.Tensor, sampling: SamplingConfig, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
         const logits = self.logitsForward(out_);
+        return sampleLogits(logits, sampling, rng);
+    }
+
+    fn sampleLogits(logits_: zml.Tensor, sampling: SamplingConfig, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
+        const logits = logits_.withPartialTags(.{.voc});
         const topk: u32 = if (sampling.temperature < 0.00001) 1 else @intCast(logits.dim(.voc));
         const tokens, const updated_rng = zml.nn.sampleTokens(logits, .{ .topk = topk, .temperature = sampling.temperature }, rng);
         return .{ tokens.convert(.u32), updated_rng };
     }
 
-    pub fn forward(
-        self: Model,
-        tokens_: zml.Tensor,
-        token_index: zml.Tensor,
-        kv_cache: KvCache,
-        attention_metadata: zml.attention.attention.Metadata,
-        attention_parameters: zml.attention.attention.Parameters,
-        target_layer_ids: []const u32,
-        draft_tokens_: ?zml.Tensor,
-        sampling: SamplingConfig,
-        rng: zml.Tensor.Rng,
-    ) TargetForwardOutput {
-        const target_hidden, const out, const updated_kv_cache = self.model.forward(
-            tokens_.withPartialTags(.{.s}),
-            token_index,
-            kv_cache,
-            attention_metadata,
-            attention_parameters,
-            target_layer_ids,
-        );
-
-        const sampled_tokens, const updated_rng = self.sampleForward(out, sampling, rng);
-        const draft_tokens = if (draft_tokens_) |draft| draft.withPartialTags(.{.s}) else null;
-        const valid_draft_tokens, const correction_token = if (draft_tokens) |draft| verifyDraftTokens(draft, sampled_tokens) else .{
-            zml.Tensor.scalar(@as(u32, 0), .u32),
-            zml.Tensor.scalar(@as(u32, 0), .u32),
-        };
-        return .{
-            .target_hidden = target_hidden,
-            .sampled_tokens = sampled_tokens,
-            .valid_draft_tokens = valid_draft_tokens,
-            .correction_token = correction_token,
-            .kv_cache = updated_kv_cache,
-            .rng = updated_rng,
-        };
+    fn sampleLastTargetToken(self: Model, out_: zml.Tensor, sampling: SamplingConfig, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
+        const out = out_.withPartialTags(.{ .s, .d });
+        const last = out.slice1d(.s, .single(out.dim(.s) - 1)).reshape(.{ .s = 1, .d = out.dim(.d) });
+        return self.sampleTargetTokens(last, sampling, rng);
     }
 
     pub fn prefillForward(
@@ -221,26 +186,23 @@ pub const Model = struct {
         sampling: SamplingConfig,
         rng: zml.Tensor.Rng,
     ) struct { zml.Tensor, zml.Tensor, KvCache, zml.Tensor.Rng } {
-        const output = self.forward(
-            tokens_,
+        const target_hidden, const out, const updated_kv_cache = self.model.forward(
+            tokens_.withPartialTags(.{.s}),
             token_index,
             kv_cache,
             attention_metadata,
             attention_parameters,
             target_layer_ids,
-            null,
-            sampling,
-            rng,
         );
 
-        const sampled_tokens = output.sampled_tokens;
-        const sampled_last = sampled_tokens.slice1d(.s, .single(sampled_tokens.dim(.s) - 1)).reshape(.{ .s = 1 });
-        return .{ output.target_hidden, sampled_last, output.kv_cache, output.rng };
+        const sampled_last, const updated_rng = self.sampleLastTargetToken(out, sampling, rng);
+        return .{ target_hidden, sampled_last, updated_kv_cache, updated_rng };
     }
 
     pub fn verifyForward(
         self: Model,
         tokens_: zml.Tensor,
+        draft_logits_: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: KvCache,
         attention_metadata: zml.attention.attention.Metadata,
@@ -249,19 +211,24 @@ pub const Model = struct {
         sampling: SamplingConfig,
         rng: zml.Tensor.Rng,
     ) struct { zml.Tensor, zml.Tensor, zml.Tensor, KvCache, zml.Tensor.Rng } {
-        const output = self.forward(
-            tokens_,
+        const target_hidden, const out, const updated_kv_cache = self.model.forward(
+            tokens_.withPartialTags(.{.s}),
             token_index,
             kv_cache,
             attention_metadata,
             attention_parameters,
             target_layer_ids,
+        );
+
+        const target_logits = self.logitsForward(out);
+        const valid_draft_tokens, const correction_token, const updated_rng = verifyDraftTokens(
             tokens_,
+            draft_logits_,
+            target_logits,
             sampling,
             rng,
         );
-
-        return .{ output.target_hidden, output.valid_draft_tokens, output.correction_token, output.kv_cache, output.rng };
+        return .{ target_hidden, valid_draft_tokens, correction_token, updated_kv_cache, updated_rng };
     }
 
     pub fn embedForward(self: Model, tokens_: zml.Tensor) zml.Tensor {
@@ -269,20 +236,65 @@ pub const Model = struct {
     }
 };
 
-fn verifyDraftTokens(draft_tokens_: zml.Tensor, sampled_tokens_: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+fn verifyDraftTokens(
+    draft_tokens_: zml.Tensor,
+    draft_logits_: zml.Tensor,
+    target_logits_: zml.Tensor,
+    sampling: SamplingConfig,
+    rng: zml.Tensor.Rng,
+) struct { zml.Tensor, zml.Tensor, zml.Tensor.Rng } {
     const draft_tokens = draft_tokens_.withPartialTags(.{.s});
-    const sampled_tokens = sampled_tokens_.withPartialTags(.{.s});
+    const draft_logits = draft_logits_.withPartialTags(.{ .s, .voc });
+    const target_logits = target_logits_.withPartialTags(.{ .s, .voc });
     const draft_len = draft_tokens.dim(.s);
     const verify_len = draft_len - 1;
 
+    if (sampling.temperature < 0.00001) {
+        const sampled_tokens, const updated_rng = Model.sampleLogits(target_logits, sampling, rng);
+        const proposals = draft_tokens.slice1d(.s, .{ .start = 1, .end = draft_len });
+        const posterior = sampled_tokens.slice1d(.s, .{ .start = 0, .end = verify_len });
+        const matches = proposals.cmp(.EQ, posterior);
+        const candidate_idx = zml.Tensor.iota(.init(.{ .s = verify_len }, .u32), .s).convert(.u32);
+        const sentinel = zml.Tensor.scalar(@as(u32, @intCast(verify_len)), .u32).broad(candidate_idx.shape());
+        const valid_draft_tokens = matches.select(sentinel, candidate_idx).min(.s).squeeze(.s);
+        const correction_token = sampled_tokens.gather(.{ .s = valid_draft_tokens }, .{}).convert(.u32);
+        return .{ valid_draft_tokens, correction_token, updated_rng };
+    }
+
     const proposals = draft_tokens.slice1d(.s, .{ .start = 1, .end = draft_len });
-    const posterior = sampled_tokens.slice1d(.s, .{ .start = 0, .end = verify_len });
-    const matches = proposals.cmp(.EQ, posterior);
+    const draft_proposal_logits = draft_logits.slice1d(.s, .{ .start = 1, .end = draft_len });
+    const target_proposal_logits = target_logits.slice1d(.s, .{ .start = 0, .end = verify_len });
+    const draft_probs = tokenProbs(draft_proposal_logits, sampling);
+    const target_probs = tokenProbs(target_proposal_logits, sampling);
+
+    const p = target_probs.gather(.{ .voc = proposals }, .{});
+    const q = draft_probs.gather(.{ .voc = proposals }, .{});
+    const epsilon = zml.Tensor.scalar(std.math.floatEps(f32), .f32).broad(q.shape());
+    const acceptance = p.div(q.maximum(epsilon));
+
+    const accept_rng, const u = rng.uniform(acceptance.shape().withDtype(.f32), .{ .min = std.math.floatEps(f32), .max = 1 });
+    const accepted = acceptance.cmp(.GT, u);
     const candidate_idx = zml.Tensor.iota(.init(.{ .s = verify_len }, .u32), .s).convert(.u32);
     const sentinel = zml.Tensor.scalar(@as(u32, @intCast(verify_len)), .u32).broad(candidate_idx.shape());
-    const valid_draft_tokens = matches.select(sentinel, candidate_idx).min(.s).squeeze(.s);
-    const correction_token = sampled_tokens.gather(.{ .s = valid_draft_tokens }, .{}).convert(.u32);
-    return .{ valid_draft_tokens, correction_token };
+    const valid_draft_tokens = accepted.select(sentinel, candidate_idx).min(.s).squeeze(.s);
+
+    const target_correction_logits = target_logits.gather(.{ .s = valid_draft_tokens }, .{});
+    const target_correction_token, const target_rng = Model.sampleLogits(target_correction_logits, sampling, accept_rng);
+
+    const residual_probs = target_probs.sub(draft_probs).relu();
+    const residual_idx = valid_draft_tokens.minimum(zml.Tensor.scalar(@as(u32, @intCast(verify_len - 1)), .u32));
+    const residual = residual_probs.gather(.{ .s = residual_idx }, .{});
+    const residual_logits = residual.maximum(zml.Tensor.scalar(std.math.floatEps(f32), .f32).broad(residual.shape())).log();
+    const residual_correction_token, const residual_rng = Model.sampleLogits(residual_logits, .{ .temperature = 1.0 }, target_rng);
+
+    const no_rejection = valid_draft_tokens.cmp(.EQ, zml.Tensor.scalar(@as(u32, @intCast(verify_len)), .u32));
+    const correction_token = no_rejection.select(target_correction_token, residual_correction_token).convert(.u32);
+    return .{ valid_draft_tokens, correction_token, residual_rng };
+}
+
+fn tokenProbs(logits_: zml.Tensor, sampling: SamplingConfig) zml.Tensor {
+    const logits = logits_.withPartialTags(.{.voc}).convert(.f32);
+    return logits.scale(1 / sampling.temperature).softmax(.voc);
 }
 
 pub const Llama = struct {

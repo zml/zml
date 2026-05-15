@@ -102,6 +102,10 @@ pub fn compileTargetVerify(
     target_attention: TargetAttention,
     shardings: []const zml.Sharding,
 ) !zml.Exe {
+    const draft_logits = zml.Tensor.init(
+        .{ .s = block_tokens.dim(.s), .voc = target_model.model.embed_tokens.weight.dim(.voc) },
+        target_model.model.embed_tokens.weight.dtype(),
+    );
     return platform.compileFn(
         allocator,
         io,
@@ -111,6 +115,7 @@ pub fn compileTargetVerify(
             target_layers,
             TargetVerifyContext{ .hidden_len = hidden_len },
             block_tokens,
+            draft_logits,
             token_index,
             target_kv_cache,
             rng,
@@ -156,6 +161,7 @@ fn targetVerify(
     target_layers: TargetLayers,
     context: TargetVerifyContext,
     tokens: zml.Tensor,
+    draft_logits: zml.Tensor,
     token_index: zml.Tensor,
     target_kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
@@ -165,6 +171,7 @@ fn targetVerify(
 ) struct { zml.Tensor, zml.Tensor, zml.Tensor, model.KvCache, zml.Tensor.Rng } {
     const target_hidden, const valid_draft_tokens, const correction_token, const updated_kv_cache, const updated_rng = target_model.verifyForward(
         tokens,
+        draft_logits,
         token_index,
         target_kv_cache,
         attention_metadata,
@@ -176,7 +183,7 @@ fn targetVerify(
     return .{ padTargetHidden(target_hidden, context.hidden_len), valid_draft_tokens, correction_token, updated_kv_cache, updated_rng };
 }
 
-pub fn padTargetHidden(target_hidden_: zml.Tensor, hidden_len: i64) zml.Tensor {
+fn padTargetHidden(target_hidden_: zml.Tensor, hidden_len: i64) zml.Tensor {
     const target_hidden = target_hidden_.withPartialTags(.{ .s, .d });
     if (target_hidden.dim(.s) == hidden_len) return target_hidden;
 
