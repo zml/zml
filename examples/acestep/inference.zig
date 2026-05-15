@@ -422,7 +422,7 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
-    var attention_buffers = try acellm.params.attention_metadata.initBuffer(io, platform, sharding);
+    var attention_buffers = try acellm.params.attention_metadata.initBuffer(io, platform, acellm.params.shardings.model);
     defer zml.attention.attention.Metadata.deinitBuffer(&attention_buffers);
     
     var zero_buffer: zml.Buffer = try .scalar(io, platform, 0, .u32, sharding);

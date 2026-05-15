@@ -536,7 +536,6 @@ pub const AceLlm = struct {
     pub fn load(self: *const AceLlm, zml_handler: *main.Zml_handler, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceLlm) {
         var progress = zml_handler.progress.start("Load 5Hz weights", store.registry.tensors.count());
         defer progress.end();
-        std.log.info("OK", .{});
         return zml.io.load(AceLlm, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
             .parallelism = 16,
