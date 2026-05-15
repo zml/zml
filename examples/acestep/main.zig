@@ -219,7 +219,8 @@ const Args = struct {
 // info:   wav                                                 9.86s
 // info: total                                                56.18s
 
-// TODO: propager good memory management
+// TODO: propager good memory management: fill ne réutilise pas le buffer mémoire
+// TODO: set seq_len higher than default 1024 if target duration is very long
 // TODO: accelerate wav export, have a look at cfg, microtune vae decode_t
 // TODO: reference audio
 // TODO: reference timbre
@@ -262,8 +263,6 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     // ------------------------------------------------
     // Thinking/Inspiration phase : 5Hz LLM model
     // ------------------------------------------------
-
-    // TODO: set seq_len higher than default 1024 if target duration is very long
     
     zml_handler.tic(&zml_handler.timers.llm.total);
     
@@ -272,11 +271,16 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     
     const inspi_tokens = try inference.tokenizeInspirationPrompt(zml_handler, acellm.tokenizer);
     defer zml_handler.allocator.free(inspi_tokens);
+
+    const stats_before_llm = zml_handler.platform.devices[0].memoryStats();
     
     const inspi_result = try inference.generateInspirationText(zml_handler, &acellm, inspi_tokens);
     defer zml_handler.allocator.free(inspi_result);
     var audio_metadata: inference.AudioMetadata = try .initFromString(zml_handler.allocator, inspi_result);
     defer audio_metadata.deinit(zml_handler.allocator);
+
+    const stats_after_llm = zml_handler.platform.devices[0].memoryStats();
+    std.log.info("memory stats llm: before={} after={}", .{ stats_before_llm.bytes_in_use, stats_after_llm.bytes_in_use });   
     
     if (zml_handler.args.duration > 0) try audio_metadata.setDuration(zml_handler.allocator, zml_handler.args.duration);
     const duration = try audio_metadata.duration_s();
@@ -296,9 +300,14 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
         var acecfg = try acellm_.AceCfg_handler.initFromLlm(zml_handler, &acellm);
         defer acecfg.deinit(zml_handler.allocator);
         defer acecfg.unloadBuffers();
+
+        const stats_before_cfg = zml_handler.platform.devices[0].memoryStats();
         
         audio_codes.deinit(zml_handler.allocator);
         audio_codes = try inference.generateAudioCodes(zml_handler, &acecfg, cond_tok, uncond_tok, audio_metadata);
+
+        const stats_after_cfg = zml_handler.platform.devices[0].memoryStats();
+        std.log.info("memory stats cfg: before={} after={}", .{ stats_before_cfg.bytes_in_use, stats_after_cfg.bytes_in_use });
 
         zml_handler.toc(&zml_handler.timers.cfg.total);
     }
@@ -310,6 +319,8 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     // using the AceEmb model embedding, not 5Hz
     // ------------------------------------------------
 
+    const stats_before_emb = zml_handler.platform.devices[0].memoryStats();
+    
     zml_handler.tic(&zml_handler.timers.emb.total);
 
     const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.aceemb);
@@ -331,11 +342,16 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
 
     zml_handler.toc(&zml_handler.timers.emb.total);
 
+    const stats_after_emb = zml_handler.platform.devices[0].memoryStats();
+    std.log.info("memory stats emb: before={} after={}", .{ stats_before_emb.bytes_in_use, stats_after_emb.bytes_in_use });    
+
     // ------------------------------------------------
     // Encoding phase : prepare input latents and
     // encoded conditions for diffusion
     // ------------------------------------------------
 
+    const stats_before_enc = zml_handler.platform.devices[0].memoryStats();
+    
     zml_handler.tic(&zml_handler.timers.enc.total);
     
     const int_codes = try audio_codes.getIntCodes(zml_handler.allocator);
@@ -350,6 +366,9 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     aceenc.unloadBuffers(zml_handler.allocator);
 
     zml_handler.toc(&zml_handler.timers.enc.total);
+
+    const stats_after_enc = zml_handler.platform.devices[0].memoryStats();
+    std.log.info("memory stats enc: before={} after={}", .{ stats_before_enc.bytes_in_use, stats_after_enc.bytes_in_use });
 
     // ------------------------------------------------
     // Tiled generation : compile DiT and VAE models
@@ -377,13 +396,13 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     
         zml_handler.tic(&zml_handler.timers.dit.total);
 
-        const stats_before = zml_handler.platform.devices[0].memoryStats();
+        const stats_before_dit = zml_handler.platform.devices[0].memoryStats();
         
         const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, diffuse_args, i);
         defer diffused_latents.deinit(zml_handler.allocator);
 
-        const stats_after = zml_handler.platform.devices[0].memoryStats();
-        std.log.info("memory stats dit: before={} after={}", .{ stats_before.bytes_in_use, stats_after.bytes_in_use });
+        const stats_after_dit = zml_handler.platform.devices[0].memoryStats();
+        std.log.info("memory stats dit: before={} after={}", .{ stats_before_dit.bytes_in_use, stats_after_dit.bytes_in_use });
     
         zml_handler.toc(&zml_handler.timers.dit.total);
         
@@ -393,13 +412,13 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     
         zml_handler.tic(&zml_handler.timers.vae.total);
 
-        const stats_before2 = zml_handler.platform.devices[0].memoryStats();
+        const stats_before_vae = zml_handler.platform.devices[0].memoryStats();
     
         const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatentsTiled(zml_handler, &acevae, diffused_latents, decode_t);
         defer decoded_audio.deinit(zml_handler.allocator);
 
-        const stats_after2 = zml_handler.platform.devices[0].memoryStats();
-        std.log.info("memory stats vae: before={} after={}", .{ stats_before2.bytes_in_use, stats_after2.bytes_in_use });
+        const stats_after_vae = zml_handler.platform.devices[0].memoryStats();
+        std.log.info("memory stats vae: before={} after={}", .{ stats_before_vae.bytes_in_use, stats_after_vae.bytes_in_use });
         
         zml_handler.toc(&zml_handler.timers.vae.total);
     

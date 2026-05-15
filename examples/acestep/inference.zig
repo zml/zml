@@ -940,7 +940,7 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     const steps = timestamps.len - 1;
     zml_handler.tic(&zml_handler.timers.dit.prefill);
     for (0..steps) |i| {
-        var y_proj_buffer: zml.Buffer = undefined;
+        var y_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
         defer y_proj_buffer.deinit();
         var hidden_states_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
         defer hidden_states_buffer.deinit();
