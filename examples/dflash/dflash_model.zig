@@ -1,6 +1,9 @@
 const std = @import("std");
 
 const zml = @import("zml");
+const common = @import("common.zig");
+
+pub const KvCache = common.KvCache;
 
 pub const Config = struct {
     hidden_size: u32,
@@ -30,8 +33,6 @@ pub const Model = struct {
     fc: zml.nn.Linear,
     hidden_norm: RmsNorm,
     target_layer_ids: []u32,
-    block_size: u32,
-    mask_token_id: ?u32,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Model {
         const layers = try allocator.alloc(DecoderLayer, config.num_hidden_layers);
@@ -55,8 +56,6 @@ pub const Model = struct {
             ),
             .hidden_norm = .init(store.withPrefix("hidden_norm"), config.rms_norm_eps),
             .target_layer_ids = target_layer_ids,
-            .block_size = config.block_size,
-            .mask_token_id = config.dflash_config.mask_token_id,
         };
     }
 
@@ -74,39 +73,33 @@ pub const Model = struct {
         RmsNorm.unloadBuffers(&self.hidden_norm);
     }
 
-    /// Forward pass for DFlashDraftModel.
-    /// `target_hidden` is the concatenated target feature from the selected target layers.
-    /// `noise_embedding` is the target model embedding of the current noisy block.
+    pub fn initKvCache(self: Model, config: Config, cache_seq_len: u32) KvCache {
+        _ = self;
+        return .init(.init(.{
+            .layer = config.num_hidden_layers,
+            .k = cache_seq_len,
+            .h = config.num_key_value_heads,
+            .hd = config.head_dim orelse config.hidden_size / config.num_attention_heads,
+        }, .f32));
+    }
+
+    pub fn loadBuffers(
+        self: *const Model,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        shardings: []const zml.Sharding,
+    ) !Buffers {
+        return zml.io.load(Model, self, allocator, io, platform, store, .{
+            .parallelism = 16,
+            .shardings = shardings,
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+        });
+    }
+
     pub fn forward(
-        self: Model,
-        target_hidden_: zml.Tensor,
-        noise_embedding_: zml.Tensor,
-        position_ids_: zml.Tensor,
-    ) zml.Tensor {
-        var hidden = noise_embedding_.withPartialTags(.{ .s, .d }).convert(self.norm.weight.dtype());
-        const target_hidden = self.hidden_norm.forward(
-            self.fc.forward(target_hidden_.withPartialTags(.{ .s, .d }).convert(self.fc.weight.dtype()))
-                .rename(.{ .dout = .d }),
-        );
-        const position_ids = position_ids_.withPartialTags(.{.s});
-
-        for (self.layers) |layer| {
-            hidden = layer.forward(hidden, target_hidden, position_ids);
-        }
-
-        return self.norm.forward(hidden);
-    }
-
-    pub fn forwardF32(
-        self: Model,
-        target_hidden: zml.Tensor,
-        noise_embedding: zml.Tensor,
-        position_ids: zml.Tensor,
-    ) zml.Tensor {
-        return self.forward(target_hidden, noise_embedding, position_ids).convert(.f32);
-    }
-
-    pub fn forwardCached(
         self: Model,
         target_hidden_: zml.Tensor,
         noise_embedding_: zml.Tensor,
@@ -124,7 +117,7 @@ pub const Model = struct {
         var updated_kv_cache = kv_cache;
 
         for (self.layers, 0..) |layer, i| {
-            hidden, updated_kv_cache = layer.forwardCached(
+            hidden, updated_kv_cache = layer.forward(
                 hidden,
                 target_hidden,
                 position_ids,
@@ -160,23 +153,7 @@ pub const DecoderLayer = struct {
         Mlp.unloadBuffers(&self.mlp);
     }
 
-    pub fn forward(self: DecoderLayer, hidden_states: zml.Tensor, target_hidden: zml.Tensor, position_ids: zml.Tensor) zml.Tensor {
-        const residual = hidden_states.withPartitioning(.{ .d = .replicated });
-        const attn_out = self.self_attn.forward(
-            self.input_layernorm.forward(residual),
-            target_hidden,
-            position_ids,
-        );
-
-        const post_attn = residual.add(attn_out).withPartitioning(.{ .d = .replicated });
-        const mlp_out = self.mlp.forward(self.post_attention_layernorm.forward(post_attn))
-            .rename(.{ .dout = .d })
-            .withPartitioning(.{ .d = .replicated });
-
-        return post_attn.add(mlp_out).withPartitioning(.{ .d = .replicated });
-    }
-
-    pub fn forwardCached(
+    pub fn forward(
         self: DecoderLayer,
         hidden_states: zml.Tensor,
         target_hidden: zml.Tensor,
@@ -186,7 +163,7 @@ pub const DecoderLayer = struct {
         active_context_len: zml.Tensor,
     ) struct { zml.Tensor, KvCache } {
         const residual = hidden_states.withPartitioning(.{ .d = .replicated });
-        const attn_out, const updated_kv_cache = self.self_attn.forwardCached(
+        const attn_out, const updated_kv_cache = self.self_attn.forward(
             self.input_layernorm.forward(residual),
             target_hidden,
             position_ids,
@@ -249,55 +226,6 @@ pub const DFlashAttention = struct {
         hidden_states_: zml.Tensor,
         target_hidden_: zml.Tensor,
         position_ids_: zml.Tensor,
-    ) zml.Tensor {
-        const hidden_states = hidden_states_.withPartialTags(.{ .s, .d }).withPartitioning(.{ .d = .replicated });
-        const target_hidden = target_hidden_.withPartialTags(.{ .s, .d }).withPartitioning(.{ .d = .replicated });
-        const position_ids = position_ids_.withPartialTags(.{.s});
-
-        var q = self.q_proj.forward(hidden_states)
-            .splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
-
-        var k = zml.Tensor.concatenate(&.{
-            self.k_proj.forward(target_hidden),
-            self.k_proj.forward(hidden_states),
-        }, .s).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
-
-        var v = zml.Tensor.concatenate(&.{
-            linearForwardF32(self.v_proj, target_hidden),
-            linearForwardF32(self.v_proj, hidden_states),
-        }, .s).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
-
-        q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
-        k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
-
-        const q_pos = if (position_ids.dim(.s) == hidden_states.dim(.s))
-            position_ids
-        else
-            position_ids.slice1d(.s, .{
-                .start = position_ids.dim(.s) - hidden_states.dim(.s),
-                .end = position_ids.dim(.s),
-            });
-
-        q = zml.nn.rope(q, q_pos, self.rope_opts).rename(.{ .s = .q });
-        k = zml.nn.rope(k, position_ids, self.rope_opts).rename(.{ .s = .k });
-        v = v.rename(.{ .s = .k });
-
-        const attn = zml.nn.sdpa(q.convert(.f32), k.convert(.f32), v.convert(.f32), .{}) // no attention mask => full non-causal attention
-            .withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated })
-            .merge(.{ .d = .{ .h, .hd } })
-            .rename(.{ .q = .s })
-            .convert(self.o_proj.weight.dtype());
-
-        return self.o_proj.forward(attn)
-            .rename(.{ .dout = .d })
-            .withPartitioning(.{ .d = .replicated });
-    }
-
-    pub fn forwardCached(
-        self: DFlashAttention,
-        hidden_states_: zml.Tensor,
-        target_hidden_: zml.Tensor,
-        position_ids_: zml.Tensor,
         kv_cache: KvCache,
         cache_index: zml.Tensor,
         active_context_len: zml.Tensor,
@@ -330,7 +258,7 @@ pub const DFlashAttention = struct {
         new_k = zml.nn.rope(new_k, position_ids, self.rope_opts).rename(.{ .s = .k });
         new_v = new_v.rename(.{ .s = .k });
 
-        const updated_kv_cache = kv_cache.updateBucketed(new_k, new_v, cache_index, active_context_len, target_hidden.dim(.s));
+        const updated_kv_cache = updateBucketed(kv_cache, new_k, new_v, cache_index, active_context_len, target_hidden.dim(.s));
         var k = updated_kv_cache.keys().convert(q.dtype());
         var v = updated_kv_cache.values().convert(.f32);
         k = k.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
@@ -356,80 +284,6 @@ pub const DFlashAttention = struct {
                 .rename(.{ .dout = .d })
                 .withPartitioning(.{ .d = .replicated }),
             updated_kv_cache,
-        };
-    }
-};
-
-pub const KvCache = struct {
-    k: zml.Tensor,
-    v: zml.Tensor,
-    layer_index: ?u32,
-
-    pub const Buffer = zml.Bufferized(KvCache);
-
-    pub fn init(kv_shape: zml.Shape) KvCache {
-        const sharded_shape = kv_shape.withPartitioning(.{ .h = .model });
-        return .{
-            .k = .fromShape(sharded_shape),
-            .v = .fromShape(sharded_shape),
-            .layer_index = null,
-        };
-    }
-
-    pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
-        return .{
-            .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), sharding, .{}),
-            .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), sharding, .{}),
-        };
-    }
-
-    pub fn deinitBuffer(kv: *Buffer) void {
-        kv.k.deinit();
-        kv.v.deinit();
-    }
-
-    pub fn keys(kv: KvCache) zml.Tensor {
-        return kv.k.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
-    }
-
-    pub fn values(kv: KvCache) zml.Tensor {
-        return kv.v.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
-    }
-
-    pub fn update(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor) KvCache {
-        const k_shape = kv.k.shape().drop(.layer);
-        const layer: zml.Tensor = .scalar(kv.layer_index orelse @panic("forgot to call atLayer"), .u32);
-        return .{
-            .k = kv.k.scatterSlices(.{ .layer = layer, .k = token_index }, new_k.convert(kv.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
-            .v = kv.v.scatterSlices(.{ .layer = layer, .k = token_index }, new_v.convert(kv.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
-            .layer_index = kv.layer_index,
-        };
-    }
-
-    pub fn updateBucketed(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor, active_context_len: zml.Tensor, context_len: i64) KvCache {
-        const context_k = new_k.slice1d(.k, .{ .start = 0, .end = context_len });
-        const context_v = new_v.slice1d(.k, .{ .start = 0, .end = context_len });
-        const proposal_k = new_k.slice1d(.k, .{ .start = context_len, .end = new_k.dim(.k) });
-        const proposal_v = new_v.slice1d(.k, .{ .start = context_len, .end = new_v.dim(.k) });
-
-        const context_cache = kv.update(context_k, context_v, token_index);
-        const proposal_index = token_index.add(active_context_len.convert(token_index.dtype()));
-        return context_cache.update(proposal_k, proposal_v, proposal_index);
-    }
-
-    pub fn atLayer(kv: KvCache, layer_index: usize) KvCache {
-        return .{
-            .k = kv.k,
-            .v = kv.v,
-            .layer_index = @intCast(layer_index),
-        };
-    }
-
-    pub fn reuseBuffer(kv: KvCache, other: KvCache) KvCache {
-        return .{
-            .k = kv.k.reuseBuffer(other.k),
-            .v = kv.v.reuseBuffer(other.v),
-            .layer_index = null,
         };
     }
 };
@@ -507,4 +361,15 @@ fn unloadLinear(linear_: anytype) void {
 fn linearForwardF32(linear_: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
     var y = x.convert(.f32).dot(linear_.weight.convert(.f32), linear_.tag);
     return if (linear_.bias) |bias| y.add(bias.convert(.f32).broad(y.shape())) else y;
+}
+
+fn updateBucketed(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor, active_context_len: zml.Tensor, context_len: i64) KvCache {
+    const context_k = new_k.slice1d(.k, .{ .start = 0, .end = context_len });
+    const context_v = new_v.slice1d(.k, .{ .start = 0, .end = context_len });
+    const proposal_k = new_k.slice1d(.k, .{ .start = context_len, .end = new_k.dim(.k) });
+    const proposal_v = new_v.slice1d(.k, .{ .start = context_len, .end = new_v.dim(.k) });
+
+    const context_cache = kv.update(context_k, context_v, token_index);
+    const proposal_index = token_index.add(active_context_len.convert(token_index.dtype()));
+    return context_cache.update(proposal_k, proposal_v, proposal_index);
 }
