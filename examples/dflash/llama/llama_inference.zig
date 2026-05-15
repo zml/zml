@@ -128,7 +128,7 @@ fn targetPrefill(
         .start = 0,
         .end = context.len,
     });
-    const target_hidden, const target_token, const updated_kv_cache = target_model.dflashPrefill(
+    const target_hidden, const target_token, const updated_kv_cache = target_model.prefillForward(
         prefill_tokens,
         token_index,
         target_kv_cache,
@@ -149,7 +149,7 @@ fn targetVerify(
     attention_metadata: attention.Metadata,
     attention_parameters: attention.Parameters,
 ) struct { zml.Tensor, zml.Tensor, model.KvCache } {
-    const target_hidden, const target_token, const updated_kv_cache = target_model.dflashVerify(
+    const target_hidden, const target_token, const updated_kv_cache = target_model.verifyForward(
         tokens,
         token_index,
         target_kv_cache,

@@ -136,7 +136,7 @@ pub const Model = struct {
         Llama.unloadBuffers(&self.model, allocator);
     }
 
-    pub fn greedyTokensFromHidden(self: Model, out_: zml.Tensor) zml.Tensor {
+    pub fn sampleForward(self: Model, out_: zml.Tensor) zml.Tensor {
         const out = out_.withPartialTags(.{ .s, .d });
 
         var logits = blk: {
@@ -153,7 +153,7 @@ pub const Model = struct {
         return logits.argMax(.voc).indices.squeeze(.voc).convert(.u32);
     }
 
-    pub fn dflashPrefill(
+    pub fn prefillForward(
         self: Model,
         tokens_: zml.Tensor,
         token_index: zml.Tensor,
@@ -171,12 +171,12 @@ pub const Model = struct {
             target_layer_ids,
         );
 
-        const sampled_tokens = self.greedyTokensFromHidden(out);
+        const sampled_tokens = self.sampleForward(out);
         const sampled_last = sampled_tokens.slice1d(.s, .single(sampled_tokens.dim(.s) - 1)).reshape(.{ .s = 1 });
         return .{ target_hidden, sampled_last, updated_kv_cache };
     }
 
-    pub fn dflashVerify(
+    pub fn verifyForward(
         self: Model,
         tokens_: zml.Tensor,
         token_index: zml.Tensor,
@@ -194,11 +194,11 @@ pub const Model = struct {
             target_layer_ids,
         );
 
-        return .{ target_hidden, self.greedyTokensFromHidden(out), updated_kv_cache };
+        return .{ target_hidden, self.sampleForward(out), updated_kv_cache };
     }
 
-    pub fn embedTokens(self: Model, tokens_: zml.Tensor) zml.Tensor {
-        return embedTokensForward(self.model.embed_tokens, tokens_.withPartialTags(.{.s}));
+    pub fn embedForward(self: Model, tokens_: zml.Tensor) zml.Tensor {
+        return self.model.embed_tokens.forward(tokens_.withPartialTags(.{.s})).withPartialTags(.{.d});
     }
 };
 
@@ -251,7 +251,7 @@ pub const Llama = struct {
         attention_parameters: zml.attention.attention.Parameters,
         target_layer_ids: []const u32,
     ) struct { zml.Tensor, zml.Tensor, KvCache } {
-        const embeds = embedTokensForward(self.embed_tokens, tokens);
+        const embeds = embedForward(self.embed_tokens, tokens);
         var hidden = embeds;
         var updated_kv_cache = kv_cache;
 
@@ -281,7 +281,7 @@ pub const Llama = struct {
     }
 };
 
-fn embedTokensForward(embed_tokens_: zml.nn.TokenEmbedding, tokens_: zml.Tensor) zml.Tensor {
+fn embedForward(embed_tokens_: zml.nn.TokenEmbedding, tokens_: zml.Tensor) zml.Tensor {
     return embed_tokens_.forward(tokens_).withPartialTags(.{.d});
 }
 
