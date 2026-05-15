@@ -941,13 +941,13 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     zml_handler.tic(&zml_handler.timers.dit.prefill);
     for (0..steps) |i| {
         {
-            var y_proj_buffer: zml.Buffer = undefined;
+            var y_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
             defer y_proj_buffer.deinit();
-            var hidden_states_buffer: zml.Buffer = undefined;
+            var hidden_states_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
             defer hidden_states_buffer.deinit();
-            var temb_buffer: zml.Buffer = undefined;
+            var temb_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
             defer temb_buffer.deinit();
-            var timestep_proj_buffer: zml.Buffer = undefined;
+            var timestep_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
             defer timestep_proj_buffer.deinit();
             std.log.info("DiT ************* step {d}/{d}", .{ i+1, steps });
             var t_curr: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i], .f32, sharding);
@@ -956,15 +956,22 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
             defer t_next.deinit();
             acedit.exes.preprocess_args.set(.{ acedit.model_buffers, t_curr, x_buffer, context_latents_buffer, encoded_conditions_buffer });
             acedit.exes.preprocess_exe.callOpts(io, acedit.exes.preprocess_args, &acedit.exes.preprocess_results, .{ .wait = true });
+            y_proj_buffer.deinit();
+            hidden_states_buffer.deinit();
+            temb_buffer.deinit();
+            timestep_proj_buffer.deinit();
             acedit.exes.preprocess_results.fill(.{ &y_proj_buffer, &hidden_states_buffer, &temb_buffer, &timestep_proj_buffer });
             for (0..acedit.config.num_hidden_layers) |ii| {
                 const mask_buffer = if (acedit.config.layer_types[ii] == .sliding_attention) sliding_mask_buffer else full_mask_buffer;
                 acedit.exes.layer_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer });
                 acedit.exes.layer_exe.callOpts(io, acedit.exes.layer_args, &acedit.exes.layer_results, .{ .wait = true });
+                hidden_states_buffer.deinit();
                 acedit.exes.layer_results.fill(.{ &hidden_states_buffer });
             }
             acedit.exes.postprocess_args.set(.{ acedit.model_buffers, t_curr, t_next, x_buffer, hidden_states_buffer, temb_buffer });
             acedit.exes.postprocess_exe.callOpts(io, acedit.exes.postprocess_args, &acedit.exes.postprocess_results, .{ .wait = true });
+            x_buffer.deinit();
+            result_buffer.deinit();
             acedit.exes.postprocess_results.fill(.{ &x_buffer, &result_buffer });
         }
     }
