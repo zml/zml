@@ -728,7 +728,7 @@ const AttLayer = struct {
         k = new_kv_cache.keys(layer_index).convert(dtype);
         v = new_kv_cache.values(layer_index).convert(dtype);
 
-        const attn_output = zml.attention.attention.attention(q, k, v, token_index, self.attention_metadata, self.attention_parameters);
+        const attn_output = zml.attention.attention.attention(q, k, v, token_index, .vanilla, .vanilla);
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         const delta = self.o_proj.forward(attn).rename(.{ .d_out = .d });
