@@ -230,7 +230,7 @@ const Args = struct {
 // --prompt='a peak-time dark techno track'
 // --llm-size=2 --dit-size=1
 // --duration=180 --n=3
-// bazel run --config=release acestep --//platforms:cuda=true -- --instru --local-files 
+// bazel run --config=release examples/acestep --//platforms:cuda=true -- --instru --local-files 
 // info: Module    init  compile     load  prefill   decode    total
 // info:   llm    0.26s    1.88s    0.92s    0.17s    2.69s    5.93s
 // info:   cfg    0.00s    0.80s    0.00s    0.29s   20.32s   21.42s

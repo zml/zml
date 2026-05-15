@@ -689,8 +689,8 @@ const AttLayer = struct {
                 .layout = .sequential,
                 .scaling = rope_scaling,
             },
-            .attention_metadata = .init(.fromBackend(.cuda_fa3, @intCast(2048), @intCast(config.num_attention_heads))),
-            .attention_parameters = .init(.fromBackend(.cuda_fa3)),
+            .attention_metadata = .init(.fromBackend(.cuda_fa2, @intCast(2048), @intCast(config.num_attention_heads))),
+            .attention_parameters = .init(.fromBackend(.cuda_fa2)),
         };
     }
 
