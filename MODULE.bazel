@@ -30,7 +30,7 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 git_override(
     module_name = "rules_zig",
-    commit = "b65a2bb460b9dbcbcc3231ba648c3c1a266c4eb5",
+    commit = "6e9d876037ecb01ce4354c9c9e0c93e026e84e37", # upstreamable-20260515.1
     remote = "https://github.com/zml/rules_zig.git",
 )
 
@@ -65,7 +65,6 @@ use_repo(
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(
-    translate_c = "@translate-c",
     zig_version = "0.16.0",
 )
 zig.mirrors(urls = [
@@ -89,6 +88,7 @@ use_repo(zig, "zig_toolchains")
 register_toolchains("@rules_zig//zig/target:all")
 
 register_toolchains("@zig_toolchains//:all")
+register_toolchains("//:translate_c_toolchain")
 ###
 
 ### LLVM Bootstrapped toolchains

@@ -1,17 +1,19 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_configure_binary", "zig_library")
 
 zig_library(
     name = "c_builtins",
     main = "lib/c_builtins.zig",
+    visibility = ["//visibility:public"],
 )
 
 zig_library(
     name = "helpers",
     main = "lib/helpers.zig",
+    visibility = ["//visibility:public"],
 )
 
 zig_binary(
-    name = "translate-c",
+    name = "translate-c_raw",
     data = glob(["lib/**/*.zig"]),
     srcs = glob(["src/**/*.zig"]),
     main = "src/main.zig",
@@ -21,5 +23,18 @@ zig_binary(
         ":helpers",
         "@arocc//:aro",
     ],
+    visibility = ["//visibility:public"],
+)
+
+# TODO(cerisier): Generate 1 translate-c toolchain per target platform
+# So that the choice of doing this for a given platform is given to users.
+#
+# Right now we do this because the arocc source code has the same support
+# for platforms than the official zig compiler and in the case of using a
+# custom zig version with support for newer chips, arocc cannot be built.
+zig_configure_binary(
+    name = "translate-c",
+    actual = ":translate-c_raw",
+    bootstrapped = 0,
     visibility = ["//visibility:public"],
 )

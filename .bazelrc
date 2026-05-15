@@ -78,6 +78,8 @@ common          --@rules_zig//zig/settings:use_cc_common_link=true
 # Zig self hosted backend is too fragile for now
 common          --@rules_zig//zig/settings:zigopt=-fllvm
 
+common          --@rules_zig//zig/settings:use_standalone_translate_c=True
+
 common          --@llvm//config:experimental_stub_libgcc_s=true
 
 common          --macos_minimum_os=13.0

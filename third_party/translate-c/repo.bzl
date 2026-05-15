@@ -5,5 +5,5 @@ def repo():
         name = "translate-c",
         remote = "https://codeberg.org/ziglang/translate-c",
         commit = "46b5609b5ac4c0a896217d1d984f3ae50e4810b5",
-        build_file = "//third_party/translate-c:translate-c.bazel",
+        build_file = Label("//third_party/translate-c:translate-c.bazel"),
     )
