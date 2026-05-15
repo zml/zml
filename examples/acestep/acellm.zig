@@ -76,7 +76,7 @@ pub const AceLlm_handler = struct {
         zml_handler.tic(&zml_handler.timers.llm.load);
 
         std.log.info("5Hz load buffers", .{});
-        const model_buffers = try model.load(zml_handler, &store, &params.shardings.all());
+        const model_buffers = try model.load(zml_handler, store, &params.shardings.all());
         std.log.info("5Hz model loaded", .{});
 
         zml_handler.toc(&zml_handler.timers.llm.load);
@@ -534,6 +534,7 @@ pub const AceLlm = struct {
     pub fn load(self: *const AceLlm, zml_handler: *main.Zml_handler, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceLlm) {
         var progress = zml_handler.progress.start("Load 5Hz weights", store.registry.tensors.count());
         defer progress.end();
+        std.log.info("OK", .{});
         return zml.io.load(AceLlm, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
             .parallelism = 16,
