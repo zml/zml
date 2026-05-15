@@ -6,13 +6,11 @@ const zml = @import("../zml.zig");
 const DataType = zml.DataType;
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const bazel = @import("bazel");
-const bazel_builtin = @import("bazel_builtin");
 
 const tri = zml.kernel.triton;
 const DType = tri.DType;
 
-const kernels = @import("triton_kernels/triton_kernels.zig");
+const kernels = @import("triton_kernels.zig");
 
 const toDType = tri.from;
 
@@ -24,7 +22,7 @@ const log = std.log.scoped(.moe_triton);
 
 pub const Options = struct {
     inplace: bool = false,
-    activation: Parameters.ActivationMode = .silu,
+    activation: []const u8 = "silu",
     apply_router_weight_on_input: bool = false,
     use_fp8_w8a8: bool = false,
     use_int8_w8a8: bool = false,
@@ -54,22 +52,14 @@ pub const Options = struct {
 
 pub const Parameters = struct {
     num_experts_per_tok: u32,
-    activation: ActivationMode,
-
-    pub const ActivationMode = enum {
-        silu,
-        relu,
-    };
 
     pub const InitOptions = struct {
         num_experts_per_tok: u32,
-        activation: ActivationMode,
     };
 
     pub fn init(opts: InitOptions) Parameters {
         return .{
             .num_experts_per_tok = opts.num_experts_per_tok,
-            .activation = opts.activation,
         };
     }
 };
@@ -91,7 +81,7 @@ pub const Metadata = struct {
     }
 
     pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
-        const replicated_sharding = platform.replicated_sharding;
+        const replicated_sharding = try zml.sharding.replicatedSharding(platform);
         return .{
             .w1_zero_bias = if (self.w1_zero_bias) |tensor| try initZeroBiasBuffer(io, platform, replicated_sharding, tensor.shape()) else null,
             .w2_zero_bias = if (self.w2_zero_bias) |tensor| try initZeroBiasBuffer(io, platform, replicated_sharding, tensor.shape()) else null,
@@ -104,7 +94,7 @@ pub fn deinitBuffer(bufferized: *zml.Bufferized(Metadata)) void {
     if (bufferized.w2_zero_bias) |*buffer| buffer.deinit();
 }
 
-fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding, shape: Shape) !zml.Buffer {
+fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding, shape: Shape) !zml.Buffer {
     var zero_slice: zml.Slice = try .alloc(std.heap.c_allocator, shape);
     defer zero_slice.free(std.heap.c_allocator);
     @memset(zero_slice.data(), 0);
@@ -125,10 +115,8 @@ pub fn fusedExpertsImpl(
     opts: Options,
 ) !Tensor {
     try validateOptions(opts);
-    const options = applyJsonTokenConfig(opts, hidden_states.dim(0)) catch |err| fallback: {
-        log.warn("Failed to load MoE launch config from JSON ({}), falling back to built-in token heuristic", .{err});
-        break :fallback applyDefaultTokenConfig(opts, hidden_states.dim(0), w1.dim(0));
-    };
+    const options = applyDefaultTokenConfig(opts, hidden_states.dim(0), w1.dim(0));
+
     const b = hidden_states.dim(.b);
     const s = hidden_states.dim(.s);
 
@@ -179,11 +167,7 @@ pub fn fusedExpertsImpl(
         .bf16,
     );
 
-    const b_bias_1 =
-        opts.w1_bias orelse
-        metadata.w1_zero_bias orelse
-        Tensor.zeroes(Shape.init(.{ .expert = gate_up.dim(.expert), .out = gate_up.dim(.out) }, .bf16));
-
+    const b_bias_1 = opts.w1_bias orelse metadata.w1_zero_bias.?;
     const b_scale_1 = opts.w1_scale orelse Tensor.scalar(1.0, .f32);
 
     const first_out = callFusedMoe(
@@ -203,13 +187,8 @@ pub fn fusedExpertsImpl(
         Shape.init(.{ .token = num_assignments, .out = gate_up.dim(.out) }, .bf16),
     );
 
-    const activated = switch (opts.activation) {
-        .silu => b: {
-            const gate, const up = zml.nn.splitRealImg(first_out, .sequential);
-            break :b gate.silu().mul(up);
-        },
-        .relu => first_out.relu().powByConst(2),
-    };
+    const gate, const up = zml.nn.splitRealImg(first_out, .sequential);
+    const activated = gate.silu().mul(up);
 
     var activated_quant = activated;
     a_scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);
@@ -228,11 +207,7 @@ pub fn fusedExpertsImpl(
         .bf16,
     );
 
-    const b_bias_2 =
-        opts.w2_bias orelse
-        metadata.w2_zero_bias orelse
-        Tensor.zeroes(Shape.init(.{ .expert = down.dim(.expert), .out = down.dim(.out) }, .bf16));
-
+    const b_bias_2 = opts.w2_bias orelse metadata.w2_zero_bias.?;
     const b_scale_2 = opts.w2_scale orelse Tensor.scalar(1.0, .f32);
 
     const second_out = callFusedMoe(
@@ -514,108 +489,45 @@ const DefaultTokenBucket = struct {
     num_stages: i64,
 };
 
-fn applyDefaultTokenConfig(opts: Options, num_tokens: i64, num_experts: i64) Options {
-    var out = opts;
-    if (!opts.dynamic_launch_by_num_tokens) return out;
-
-    // General default policy for NVIDIA bf16/fp16 and fp8 per-tensor.
-    // Tile sizes scale with batch size: small batches are more memory-bound,
-    // while larger batches benefit from wider M/N tiles and more warps.
-    if (num_tokens <= 32) {
-        out.block_size_m = 16;
-    } else if (num_tokens <= 96) {
-        out.block_size_m = 32;
-    } else if (num_tokens <= 512) {
-        out.block_size_m = 64;
-    } else {
-        out.block_size_m = 128;
-    }
-
-    out.block_size_n = if (num_tokens <= 64) 64 else 128;
-    out.block_size_k = if (opts.use_fp8_w8a8 or num_tokens <= 64) 128 else 64;
-
-    const tokens_per_expert = @divFloor(num_tokens, @max(num_experts, 1));
-    out.group_size_m = if (tokens_per_expert > 128) 16 else 1;
-    out.num_warps = if (num_tokens <= 128) 4 else 8;
-    out.num_stages = if (num_tokens <= 32) 4 else 3;
-
-    return out;
-}
-
-fn getLaunchConfigJsonPath(allocator: std.mem.Allocator) ![]const u8 {
-    const runfiles = bazel.runfiles(bazel_builtin.current_repository) catch |err| {
-        log.err("Failed to initialize runfiles for MoE launch config: {}", .{err});
-        return err;
-    };
-
-    var config_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const config_path =
-        runfiles.rlocation("zml/zml/moe/triton_kernels/config.json", &config_path_buf) catch null orelse
-        runfiles.rlocation("zml/zml/moe/triton/triton_kernels/config.json", &config_path_buf) catch |err| {
-            log.err("Failed to resolve MoE launch config in runfiles: {}", .{err});
-            return err;
-        };
-
-    const config_json = config_path orelse {
-        log.warn("MoE launch config is missing from runfiles at both zml/zml/moe/triton_kernels/config.json and zml/zml/moe/triton/triton_kernels/config.json", .{});
-        return error.MissingLaunchConfigRunfile;
-    };
-
-    return try allocator.dupe(u8, config_json);
-}
-
-const JsonConfigFields = struct {
-    BLOCK_SIZE_M: i64,
-    BLOCK_SIZE_N: i64,
-    BLOCK_SIZE_K: i64,
-    GROUP_SIZE_M: i64,
-    num_warps: i64,
-    num_stages: i64,
+const default_token_buckets = [_]DefaultTokenBucket{
+    .{ .tokens = 1, .block_size_m = 16, .block_size_n = 32, .block_size_k = 64, .group_size_m = 1, .num_warps = 4, .num_stages = 4 },
+    .{ .tokens = 2, .block_size_m = 16, .block_size_n = 32, .block_size_k = 64, .group_size_m = 1, .num_warps = 4, .num_stages = 4 },
+    .{ .tokens = 4, .block_size_m = 16, .block_size_n = 32, .block_size_k = 64, .group_size_m = 1, .num_warps = 4, .num_stages = 3 },
+    .{ .tokens = 8, .block_size_m = 16, .block_size_n = 128, .block_size_k = 128, .group_size_m = 1, .num_warps = 8, .num_stages = 3 },
+    .{ .tokens = 16, .block_size_m = 16, .block_size_n = 64, .block_size_k = 64, .group_size_m = 64, .num_warps = 4, .num_stages = 5 },
+    .{ .tokens = 24, .block_size_m = 16, .block_size_n = 64, .block_size_k = 128, .group_size_m = 1, .num_warps = 8, .num_stages = 2 },
+    .{ .tokens = 32, .block_size_m = 16, .block_size_n = 32, .block_size_k = 128, .group_size_m = 1, .num_warps = 4, .num_stages = 2 },
+    .{ .tokens = 48, .block_size_m = 16, .block_size_n = 32, .block_size_k = 128, .group_size_m = 64, .num_warps = 4, .num_stages = 2 },
+    .{ .tokens = 64, .block_size_m = 16, .block_size_n = 64, .block_size_k = 128, .group_size_m = 1, .num_warps = 4, .num_stages = 2 },
+    .{ .tokens = 96, .block_size_m = 16, .block_size_n = 128, .block_size_k = 128, .group_size_m = 1, .num_warps = 8, .num_stages = 3 },
+    .{ .tokens = 128, .block_size_m = 16, .block_size_n = 256, .block_size_k = 128, .group_size_m = 1, .num_warps = 8, .num_stages = 2 },
+    .{ .tokens = 256, .block_size_m = 16, .block_size_n = 256, .block_size_k = 128, .group_size_m = 1, .num_warps = 8, .num_stages = 2 },
+    .{ .tokens = 512, .block_size_m = 32, .block_size_n = 128, .block_size_k = 128, .group_size_m = 1, .num_warps = 8, .num_stages = 3 },
+    .{ .tokens = 1024, .block_size_m = 64, .block_size_n = 128, .block_size_k = 64, .group_size_m = 1, .num_warps = 4, .num_stages = 3 },
+    .{ .tokens = 1536, .block_size_m = 64, .block_size_n = 128, .block_size_k = 64, .group_size_m = 1, .num_warps = 4, .num_stages = 3 },
+    .{ .tokens = 2048, .block_size_m = 128, .block_size_n = 128, .block_size_k = 64, .group_size_m = 16, .num_warps = 8, .num_stages = 3 },
+    .{ .tokens = 3072, .block_size_m = 128, .block_size_n = 256, .block_size_k = 64, .group_size_m = 1, .num_warps = 8, .num_stages = 4 },
+    .{ .tokens = 4096, .block_size_m = 128, .block_size_n = 256, .block_size_k = 64, .group_size_m = 16, .num_warps = 8, .num_stages = 4 },
 };
 
-fn applyJsonTokenConfig(opts: Options, num_tokens: i64) !Options {
+fn applyDefaultTokenConfig(opts: Options, num_tokens: i64, num_experts: i64) Options {
+    _ = num_experts;
     var out = opts;
     if (!opts.dynamic_launch_by_num_tokens) return out;
 
-    const compilation_context = zml.module.CompilationContext.current();
-    const io = compilation_context.io;
-    const allocator = compilation_context.allocator;
-
-    const config_path = try getLaunchConfigJsonPath(allocator);
-    defer allocator.free(config_path);
-    const config_json = try std.Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .unlimited);
-    defer allocator.free(config_json);
-    const parsed = try std.json.parseFromSlice(
-        std.json.ArrayHashMap(JsonConfigFields),
-        allocator,
-        config_json,
-        .{},
-    );
-    defer parsed.deinit();
-
-    var best_diff: u64 = std.math.maxInt(u64);
-    var best_m: ?i64 = null;
-    var best_config: ?JsonConfigFields = null;
-
-    var it = parsed.value.map.iterator();
-    while (it.next()) |entry| {
-        const m = try std.fmt.parseInt(i64, entry.key_ptr.*, 10);
-
-        const diff: u64 = @intCast(@abs(m - num_tokens));
-        if (best_m == null or diff < best_diff or (diff == best_diff and m < best_m.?)) {
-            best_m = m;
-            best_config = entry.value_ptr.*;
-            best_diff = diff;
+    const bucket = bucket: {
+        for (default_token_buckets) |b| {
+            if (b.tokens >= num_tokens) break :bucket b;
         }
-    }
+        break :bucket default_token_buckets[default_token_buckets.len - 1];
+    };
 
-    const cfg = best_config orelse return error.NoMatchingLaunchConfig;
-    out.block_size_m = cfg.BLOCK_SIZE_M;
-    out.block_size_n = cfg.BLOCK_SIZE_N;
-    out.block_size_k = cfg.BLOCK_SIZE_K;
-    out.group_size_m = cfg.GROUP_SIZE_M;
-    out.num_warps = cfg.num_warps;
-    out.num_stages = cfg.num_stages;
+    out.block_size_m = bucket.block_size_m;
+    out.block_size_n = bucket.block_size_n;
+    out.block_size_k = bucket.block_size_k;
+    out.group_size_m = bucket.group_size_m;
+    out.num_warps = bucket.num_warps;
+    out.num_stages = bucket.num_stages;
 
     return out;
 }
@@ -628,7 +540,7 @@ fn fp8ActivationGroupSize(x: Tensor) i64 {
 
 fn validateOptions(opts: Options) !void {
     if (opts.inplace) return error.Unimplemented;
-    if (opts.activation != .silu and opts.activation != .relu) return error.UnsupportedActivation;
+    if (!std.mem.eql(u8, opts.activation, "silu")) return error.UnsupportedActivation;
     if (opts.apply_router_weight_on_input) return error.UnsupportedOption;
     if (opts.use_fp8_w8a8 or opts.use_int8_w8a8 or opts.use_int8_w8a16 or opts.use_int4_w4a16) return error.UnsupportedQuantization;
     if (opts.ocp_mx_scheme != null or opts.per_channel_quant) return error.UnsupportedOption;
