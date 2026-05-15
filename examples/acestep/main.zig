@@ -391,7 +391,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     zml_handler.tic(&zml_handler.timers.vae.total);
     
     const decode_t: u32 = 1;
-    var acevae = try acevae_.AceVae_handler.init(zml_handler, decode_t + 2);
+    var acevae = try acevae_.AceVae_handler.init(zml_handler, decode_t);
     defer acevae.deinit(zml_handler.allocator);
     
     zml_handler.toc(&zml_handler.timers.vae.total);
