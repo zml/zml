@@ -10,95 +10,209 @@ const llama = @import("llama/llama_model.zig");
 pub const std_options: std.Options = .{
     .log_level = .info,
 };
-
 const log = std.log.scoped(.dflash);
 
 const prefill_seq_len = 64;
-
 const default_prompt =
-    "Paris is the city of lights, fun, and love where everyone can enjoy the amazing culture, food, and art.";
+    "Tell me a story about Paris, the city of lights, fun, and romance.";
 
 const Args = struct {
     model: []const u8,
     target_model: []const u8,
     prompt: []const u8 = default_prompt,
     max_seq_len: u32 = 256,
-    verbose: bool = false,
 
     pub const help =
-        \\Use dflash --model=<path> --target-model=<path> [--prompt=<text>]
-        \\
-        \\Compile target prefill, DFlash draft, and target verification separately.
-        \\
         \\Options:
         \\  --model=<path>          Path to the DFlash model repository
         \\  --target-model=<path>   Path to the target LLaMA model repository
         \\  --prompt=<text>         Prompt to tokenize; defaults to the built-in smoke-test prompt
         \\  --max-seq-len=<n>       Decode until this many accepted positions; defaults to 256
-        \\  --verbose               Print per-step speculative decoding diagnostics
         \\
     ;
 };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-
-    if (init.environ_map.get("BUILD_WORKING_DIRECTORY")) |build_working_directory| {
-        var working_dir = try std.Io.Dir.openDirAbsolute(init.io, build_working_directory, .{});
-        defer working_dir.close(init.io);
-        try std.process.setCurrentDir(init.io, working_dir);
-    }
-
     const args = stdx.flags.parse(init.minimal.args, Args);
 
-    var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
-    defer vfs_file.deinit();
+    var project = try initProject(init, args);
+    defer project.deinit();
 
-    var http_client: std.http.Client = .{ .allocator = allocator, .io = init.io };
-    defer http_client.deinit();
+    var prompt = try tokenizePrompt(project, args);
+    defer prompt.deinit(allocator);
 
-    var hf_vfs: zml.io.VFS.HF = try .auto(allocator, init.io, &http_client, init.environ_map);
-    defer hf_vfs.deinit();
+    var models = try initModelsAndCaches(project, prompt);
+    defer models.deinit(allocator);
 
-    var vfs: zml.io.VFS = try .init(allocator, init.io);
-    defer vfs.deinit();
+    var compiled = try compile(allocator, project, models, prompt);
+    defer compiled.deinit(allocator);
 
-    try vfs.register("file", vfs_file.io());
-    try vfs.register("hf", hf_vfs.io());
+    var loaded_buffers = try loadBuffers(allocator, project, models);
+    defer loaded_buffers.deinit(allocator);
 
-    const io = vfs.io();
+    var input_tokens_buffer: zml.Buffer = try .fromSlice(
+        project.io,
+        project.platform,
+        zml.Slice.init(models.input_tokens_tensor.shape(), std.mem.sliceAsBytes(prompt.padded_token_ids)),
+        .replicated,
+    );
+    defer input_tokens_buffer.deinit();
 
-    const platform: *zml.Platform = try .auto(allocator, io, .{});
-    defer platform.deinit(allocator, io);
+    var token_index: u32 = 0;
+    var token_index_buffer: zml.Buffer = try .fromSlice(
+        project.io,
+        project.platform,
+        zml.Slice.init(models.token_index_tensor.shape(), std.mem.asBytes(&token_index)),
+        .replicated,
+    );
+    defer token_index_buffer.deinit();
 
-    log.info("\n{f}", .{platform.fmtVerbose()});
+    var target_kv_cache_buffers = try models.target_kv_cache.initZeroBuffer(allocator, project.io, project.platform, project.shardings.model);
+    defer llama.KvCache.deinitBuffer(&target_kv_cache_buffers);
 
-    const repo = try zml.safetensors.resolveModelRepo(io, args.model);
-    const target_repo = try zml.safetensors.resolveModelRepo(io, args.target_model);
+    var draft_kv_cache_buffers = try models.draft_kv_cache.initZeroBuffer(allocator, project.io, project.platform, project.shardings.model);
+    defer dflash.KvCache.deinitBuffer(&draft_kv_cache_buffers);
 
-    const parsed_config = try parseConfig(dflash.Config, allocator, io, repo);
-    defer parsed_config.deinit();
-    const parsed_target_config = try parseConfig(llama.Config, allocator, io, target_repo);
-    defer parsed_target_config.deinit();
+    var attention_metadata_buffers = try models.target_attention.metadata.initBuffer(project.io, project.platform, project.shardings.model);
+    defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
-    var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
-    defer registry.deinit();
+    var prefill_output = try runPrefill(
+        allocator,
+        project,
+        &compiled,
+        loaded_buffers,
+        input_tokens_buffer,
+        token_index_buffer,
+        &target_kv_cache_buffers,
+        attention_metadata_buffers,
+    );
+    defer prefill_output.target_hidden_buffer.deinit();
 
-    var target_registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, target_repo);
-    defer target_registry.deinit();
+    var stdout = std.Io.File.stdout().writerStreaming(project.io, &.{});
+    var decode_result = try runSpeculativeDecoding(
+        allocator,
+        project,
+        prompt,
+        &models,
+        &compiled,
+        loaded_buffers,
+        prefill_output,
+        &target_kv_cache_buffers,
+        &draft_kv_cache_buffers,
+        attention_metadata_buffers,
+        &stdout.interface,
+    );
+    defer decode_result.deinit(allocator);
 
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
-    defer store.deinit();
+    try printDecodeAnalysis(&stdout.interface, decode_result);
+    try stdout.interface.flush();
+}
 
-    var target_store: zml.io.TensorStore = .fromRegistry(allocator, &target_registry);
-    defer target_store.deinit();
+const Project = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    vfs_file: zml.io.VFS.File,
+    http_client: std.http.Client,
+    hf_vfs: zml.io.VFS.HF,
+    vfs: zml.io.VFS,
+    platform: *zml.Platform,
+    repo: std.Io.Dir,
+    target_repo: std.Io.Dir,
+    parsed_config: std.json.Parsed(dflash.Config),
+    parsed_target_config: std.json.Parsed(llama.Config),
+    registry: zml.safetensors.TensorRegistry,
+    target_registry: zml.safetensors.TensorRegistry,
+    store: zml.io.TensorStore,
+    target_store: zml.io.TensorStore,
+    tokenizer: zml.tokenizer.Tokenizer,
+    shardings: Shardings,
 
-    var tokenizer = try llama.loadTokenizer(allocator, io, target_repo);
-    defer tokenizer.deinit();
+    pub fn deinit(self: *Project) void {
+        const allocator = self.allocator;
+        self.tokenizer.deinit();
+        self.target_store.deinit();
+        self.store.deinit();
+        self.target_registry.deinit();
+        self.registry.deinit();
+        self.parsed_target_config.deinit();
+        self.parsed_config.deinit();
+        self.platform.deinit(allocator, self.io);
+        self.vfs.deinit();
+        self.hf_vfs.deinit();
+        self.http_client.deinit();
+        self.vfs_file.deinit();
+        allocator.destroy(self);
+    }
+};
 
-    const token_ids = try llama.tokenizePrompt(allocator, &tokenizer, parsed_target_config.value, args.prompt);
-    defer allocator.free(token_ids);
-    const prompt_len: u32 = @intCast(token_ids.len);
+fn initProject(init: std.process.Init, args: Args) !*Project {
+    const allocator = init.gpa;
+    const project = try allocator.create(Project);
+    errdefer allocator.destroy(project);
+
+    project.allocator = allocator;
+    project.vfs_file = .init(allocator, init.io, .{});
+    errdefer project.vfs_file.deinit();
+
+    project.http_client = .{ .allocator = allocator, .io = init.io };
+    errdefer project.http_client.deinit();
+
+    project.hf_vfs = try .auto(allocator, init.io, &project.http_client, init.environ_map);
+    errdefer project.hf_vfs.deinit();
+
+    project.vfs = try .init(allocator, init.io);
+    errdefer project.vfs.deinit();
+
+    try project.vfs.register("file", project.vfs_file.io());
+    try project.vfs.register("hf", project.hf_vfs.io());
+    project.io = project.vfs.io();
+
+    project.platform = try .auto(allocator, project.io, .{});
+    errdefer project.platform.deinit(allocator, project.io);
+    log.info("\n{f}", .{project.platform.fmtVerbose()});
+
+    project.repo = try zml.safetensors.resolveModelRepo(project.io, args.model);
+    project.target_repo = try zml.safetensors.resolveModelRepo(project.io, args.target_model);
+
+    project.parsed_config = try parseConfig(dflash.Config, allocator, project.io, project.repo);
+    errdefer project.parsed_config.deinit();
+    project.parsed_target_config = try parseConfig(llama.Config, allocator, project.io, project.target_repo);
+    errdefer project.parsed_target_config.deinit();
+
+    project.registry = try .fromRepo(allocator, project.io, project.repo);
+    errdefer project.registry.deinit();
+    project.target_registry = try .fromRepo(allocator, project.io, project.target_repo);
+    errdefer project.target_registry.deinit();
+
+    project.store = .fromRegistry(allocator, &project.registry);
+    errdefer project.store.deinit();
+    project.target_store = .fromRegistry(allocator, &project.target_registry);
+    errdefer project.target_store.deinit();
+
+    project.tokenizer = try llama.loadTokenizer(allocator, project.io, project.target_repo);
+    errdefer project.tokenizer.deinit();
+
+    project.shardings = try .init(project.platform);
+    return project;
+}
+
+const TokenizedPrompt = struct {
+    token_ids: []u32,
+    padded_token_ids: []u32,
+    prompt_len: u32,
+    max_seq_len: u32,
+
+    pub fn deinit(self: TokenizedPrompt, allocator: std.mem.Allocator) void {
+        allocator.free(self.padded_token_ids);
+        allocator.free(self.token_ids);
+    }
+};
+
+fn tokenizePrompt(project: *Project, args: Args) !TokenizedPrompt {
+    const token_ids = try llama.tokenizePrompt(project.allocator, &project.tokenizer, project.parsed_target_config.value, args.prompt);
+    errdefer project.allocator.free(token_ids);
+
     if (token_ids.len == 0) {
         log.err("prompt produced no tokens", .{});
         return error.EmptyPrompt;
@@ -111,377 +225,497 @@ pub fn main(init: std.process.Init) !void {
         return error.InvalidMaxSeqLen;
     }
 
-    const draft_model = try dflash.Model.init(allocator, store.view(), parsed_config.value);
-    defer draft_model.deinit(allocator);
+    const padded_token_ids = try paddedPromptTokens(project.allocator, token_ids, prefill_seq_len);
+    return .{
+        .token_ids = token_ids,
+        .padded_token_ids = padded_token_ids,
+        .prompt_len = @intCast(token_ids.len),
+        .max_seq_len = args.max_seq_len,
+    };
+}
 
-    const block_size = parsed_config.value.block_size;
-    const max_seq_len = args.max_seq_len;
-    const cache_seq_len = @max(max_seq_len, prefill_seq_len) + block_size;
+const ModelsAndCaches = struct {
+    draft_model: dflash.Model,
+    target_model: llama.Model,
+    input_tokens_tensor: zml.Tensor,
+    block_tokens_tensor: zml.Tensor,
+    token_index_tensor: zml.Tensor,
+    active_context_len_tensor: zml.Tensor,
+    target_kv_cache: llama.KvCache,
+    draft_kv_cache: dflash.KvCache,
+    target_attention: llama_inference.TargetAttention,
+    target_layers: llama_inference.TargetLayers,
+    block_size: u32,
 
-    const target_model = try llama.Model.init(allocator, target_store.view(), parsed_target_config.value);
-    defer target_model.deinit(allocator);
+    pub fn deinit(self: ModelsAndCaches, allocator: std.mem.Allocator) void {
+        self.target_model.deinit(allocator);
+        self.draft_model.deinit(allocator);
+    }
+};
 
-    const shardings: Shardings = try .init(platform);
-    const all_shardings = shardings.all();
+fn initModelsAndCaches(project: *Project, prompt: TokenizedPrompt) !ModelsAndCaches {
+    const draft_model = try dflash.Model.init(project.allocator, project.store.view(), project.parsed_config.value);
+    errdefer draft_model.deinit(project.allocator);
 
-    const input_tokens_tensor: zml.Tensor = .init(.{ .s = prefill_seq_len }, .u32);
-    const block_tokens_tensor: zml.Tensor = .init(.{ .s = block_size }, .u32);
-    const token_index_tensor: zml.Tensor = .init(.{}, .u32);
-    const active_context_len_tensor: zml.Tensor = .init(.{}, .u32);
-    const target_kv_cache = target_model.initKvCache(parsed_target_config.value, cache_seq_len);
-    const draft_kv_cache = draft_model.initKvCache(parsed_config.value, cache_seq_len);
-    const target_attention = llama_inference.TargetAttention.init(platform, cache_seq_len, parsed_target_config.value.num_attention_heads);
+    const target_model = try llama.Model.init(project.allocator, project.target_store.view(), project.parsed_target_config.value);
+    errdefer target_model.deinit(project.allocator);
+
+    const block_size = project.parsed_config.value.block_size;
+    const cache_seq_len = @max(prompt.max_seq_len, prefill_seq_len) + block_size;
+    const target_attention = llama_inference.TargetAttention.init(project.platform, cache_seq_len, project.parsed_target_config.value.num_attention_heads);
     log.info("Selected target attention backend: {}", .{target_attention.backend});
-    const target_layers = llama_inference.TargetLayers.init(draft_model.target_layer_ids);
+
+    return .{
+        .draft_model = draft_model,
+        .target_model = target_model,
+        .input_tokens_tensor = .init(.{ .s = prefill_seq_len }, .u32),
+        .block_tokens_tensor = .init(.{ .s = block_size }, .u32),
+        .token_index_tensor = .init(.{}, .u32),
+        .active_context_len_tensor = .init(.{}, .u32),
+        .target_kv_cache = target_model.initKvCache(project.parsed_target_config.value, cache_seq_len),
+        .draft_kv_cache = draft_model.initKvCache(project.parsed_config.value, cache_seq_len),
+        .target_attention = target_attention,
+        .target_layers = llama_inference.TargetLayers.init(draft_model.target_layer_ids),
+        .block_size = block_size,
+    };
+}
+
+const CompiledExes = struct {
+    target_prefill_exe: zml.Exe,
+    draft_token_exes: []DraftTokenExe,
+    target_verify_exe: zml.Exe,
+
+    pub fn deinit(self: *CompiledExes, allocator: std.mem.Allocator) void {
+        self.target_verify_exe.deinit();
+        for (self.draft_token_exes) |*draft_exe| draft_exe.deinit(allocator);
+        allocator.free(self.draft_token_exes);
+        self.target_prefill_exe.deinit();
+    }
+};
+
+fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCaches, prompt: TokenizedPrompt) !CompiledExes {
+    const all_shardings = project.shardings.all();
 
     log.info("Compiling target prefill...", .{});
-    var target_prefill_exe = try llama_inference.compileTargetPrefill(
+    const target_prefill_exe = try llama_inference.compileTargetPrefill(
         allocator,
-        io,
-        platform,
-        target_model,
-        target_layers,
-        @intCast(token_ids.len),
-        input_tokens_tensor,
-        token_index_tensor,
-        target_kv_cache,
-        target_attention,
+        project.io,
+        project.platform,
+        models.target_model,
+        models.target_layers,
+        prompt.prompt_len,
+        models.input_tokens_tensor,
+        models.token_index_tensor,
+        models.target_kv_cache,
+        models.target_attention,
         &all_shardings,
     );
-    defer target_prefill_exe.deinit();
 
     log.info("Compiling DFlash draft token variants...", .{});
     const draft_context_lens = [_]u32{ 1, 2, 3, 5, 10, prefill_seq_len };
     const draft_token_exes = try allocator.alloc(DraftTokenExe, draft_context_lens.len);
-    defer {
-        for (draft_token_exes) |*draft_exe| draft_exe.deinit();
-        allocator.free(draft_token_exes);
-    }
-    const target_hidden_tensor = llama_inference.targetHiddenTensor(target_model, parsed_target_config.value, target_layers, prefill_seq_len);
+    const target_hidden_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, prefill_seq_len);
     for (draft_token_exes, draft_context_lens) |*draft_exe, context_len| {
-        draft_exe.* = .{
-            .context_len = context_len,
-            .exe = try platform.compileFn(
-                allocator,
-                io,
-                draftTokens,
-                .{
-                    DraftContext{ .len = context_len },
-                    draft_model,
-                    target_model,
-                    target_hidden_tensor,
-                    block_tokens_tensor,
-                    draft_kv_cache,
-                    token_index_tensor,
-                    active_context_len_tensor,
-                },
-                .{ .shardings = &all_shardings },
-            ),
-        };
+        draft_exe.context_len = context_len;
+        draft_exe.exe = try project.platform.compileFn(
+            allocator,
+            project.io,
+            draftTokens,
+            .{
+                DraftContext{ .len = context_len },
+                models.draft_model,
+                models.target_model,
+                target_hidden_tensor,
+                models.block_tokens_tensor,
+                models.draft_kv_cache,
+                models.token_index_tensor,
+                models.active_context_len_tensor,
+            },
+            .{ .shardings = &all_shardings },
+        );
+        draft_exe.args = try draft_exe.exe.args(allocator);
+        draft_exe.results = try draft_exe.exe.results(allocator);
     }
 
     log.info("Compiling target verify...", .{});
-    var target_verify_exe = try llama_inference.compileTargetVerify(
+    const target_verify_exe = try llama_inference.compileTargetVerify(
         allocator,
-        io,
-        platform,
-        target_model,
-        target_layers,
+        project.io,
+        project.platform,
+        models.target_model,
+        models.target_layers,
         prefill_seq_len,
-        block_tokens_tensor,
-        token_index_tensor,
-        target_kv_cache,
-        target_attention,
+        models.block_tokens_tensor,
+        models.token_index_tensor,
+        models.target_kv_cache,
+        models.target_attention,
         &all_shardings,
     );
-    defer target_verify_exe.deinit();
 
+    return .{
+        .target_prefill_exe = target_prefill_exe,
+        .draft_token_exes = draft_token_exes,
+        .target_verify_exe = target_verify_exe,
+    };
+}
+
+const LoadedBuffers = struct {
+    model_buffers: dflash.Buffers,
+    target_buffers: llama.Buffers,
+
+    pub fn deinit(self: *LoadedBuffers, allocator: std.mem.Allocator) void {
+        llama.Model.unloadBuffers(&self.target_buffers, allocator);
+        dflash.Model.unloadBuffers(&self.model_buffers, allocator);
+    }
+};
+
+fn loadBuffers(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCaches) !LoadedBuffers {
+    const all_shardings = project.shardings.all();
     log.info("Loading weights...", .{});
-    var model_buffers = try draft_model.loadBuffers(allocator, io, platform, &store, &all_shardings);
-    defer dflash.Model.unloadBuffers(&model_buffers, allocator);
+    return .{
+        .model_buffers = try models.draft_model.loadBuffers(allocator, project.io, project.platform, &project.store, &all_shardings),
+        .target_buffers = try models.target_model.loadBuffers(allocator, project.io, project.platform, &project.target_store, &all_shardings),
+    };
+}
 
-    var target_buffers = try target_model.loadBuffers(allocator, io, platform, &target_store, &all_shardings);
-    defer llama.Model.unloadBuffers(&target_buffers, allocator);
+const PrefillOutput = struct {
+    target_hidden_buffer: zml.Buffer,
+    target_token: u32,
+};
 
-    const padded_token_ids = try paddedPromptTokens(allocator, token_ids, prefill_seq_len);
-    defer allocator.free(padded_token_ids);
-
-    var input_tokens_buffer: zml.Buffer = try .fromSlice(
-        io,
-        platform,
-        zml.Slice.init(input_tokens_tensor.shape(), std.mem.sliceAsBytes(padded_token_ids)),
-        .replicated,
-    );
-    defer input_tokens_buffer.deinit();
-
-    var token_index: u32 = 0;
-    var token_index_buffer: zml.Buffer = try .fromSlice(
-        io,
-        platform,
-        zml.Slice.init(token_index_tensor.shape(), std.mem.asBytes(&token_index)),
-        .replicated,
-    );
-    defer token_index_buffer.deinit();
-
-    var target_kv_cache_buffers = try target_kv_cache.initZeroBuffer(allocator, io, platform, shardings.model);
-    defer llama.KvCache.deinitBuffer(&target_kv_cache_buffers);
-
-    var draft_kv_cache_buffers = try draft_kv_cache.initZeroBuffer(allocator, io, platform, shardings.model);
-    defer dflash.KvCache.deinitBuffer(&draft_kv_cache_buffers);
-
-    var attention_metadata_buffers = try target_attention.metadata.initBuffer(io, platform, shardings.model);
-    defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
-
-    var prefill_args = try target_prefill_exe.args(allocator);
+fn runPrefill(
+    allocator: std.mem.Allocator,
+    project: *Project,
+    compiled: *CompiledExes,
+    loaded_buffers: LoadedBuffers,
+    input_tokens_buffer: zml.Buffer,
+    token_index_buffer: zml.Buffer,
+    target_kv_cache_buffers: *llama.KvCache.Buffer,
+    attention_metadata_buffers: anytype,
+) !PrefillOutput {
+    var prefill_args = try compiled.target_prefill_exe.args(allocator);
     defer prefill_args.deinit(allocator);
 
-    var prefill_results = try target_prefill_exe.results(allocator);
+    var prefill_results = try compiled.target_prefill_exe.results(allocator);
     defer prefill_results.deinit(allocator);
 
     prefill_args.set(.{
-        target_buffers,
+        loaded_buffers.target_buffers,
         input_tokens_buffer,
         token_index_buffer,
-        target_kv_cache_buffers,
+        target_kv_cache_buffers.*,
         attention_metadata_buffers,
     });
-    target_prefill_exe.call(prefill_args, &prefill_results);
+    compiled.target_prefill_exe.call(prefill_args, &prefill_results);
 
-    var target_hidden_buffer, var target_token_buffer, var prefilled_target_kv_cache_buffers = prefill_results.get(struct {
+    const target_hidden_buffer, var target_token_buffer, var prefilled_target_kv_cache_buffers = prefill_results.get(struct {
         zml.Buffer,
         zml.Buffer,
         llama.KvCache.Buffer,
     });
-    defer target_hidden_buffer.deinit();
     defer target_token_buffer.deinit();
-    llama.KvCache.replaceBuffers(&target_kv_cache_buffers, &prefilled_target_kv_cache_buffers);
+    llama.KvCache.replaceBuffers(target_kv_cache_buffers, &prefilled_target_kv_cache_buffers);
 
-    var target_token_slice = try target_token_buffer.toSliceAlloc(allocator, io);
+    var target_token_slice = try target_token_buffer.toSliceAlloc(allocator, project.io);
     defer target_token_slice.free(allocator);
 
-    var generated = try std.ArrayList(u32).initCapacity(allocator, max_seq_len + 1);
-    defer generated.deinit(allocator);
-    try generated.appendSlice(allocator, token_ids);
-    try generated.append(allocator, target_token_slice.constItems(u32)[0]);
+    return .{
+        .target_hidden_buffer = target_hidden_buffer,
+        .target_token = target_token_slice.constItems(u32)[0],
+    };
+}
 
-    var block_tokens = try allocator.alloc(u32, block_size);
+const VerificationOutput = struct {
+    verified_hidden_buffer: zml.Buffer,
+    posterior_token_buffer: zml.Buffer,
+    posterior_token_slice: zml.Slice,
+
+    pub fn deinitTransient(self: *VerificationOutput, allocator: std.mem.Allocator) void {
+        self.posterior_token_slice.free(allocator);
+        self.posterior_token_buffer.deinit();
+    }
+};
+
+fn runVerification(
+    allocator: std.mem.Allocator,
+    project: *Project,
+    models: *ModelsAndCaches,
+    compiled: *CompiledExes,
+    loaded_buffers: LoadedBuffers,
+    verify_args: *zml.Exe.Arguments,
+    verify_results: *zml.Exe.Results,
+    block_tokens_buffer: zml.Buffer,
+    token_index: u32,
+    target_kv_cache_buffers: *llama.KvCache.Buffer,
+    attention_metadata_buffers: anytype,
+) !VerificationOutput {
+    var verify_token_index = token_index;
+    var verify_token_index_buffer: zml.Buffer = try .fromSlice(
+        project.io,
+        project.platform,
+        zml.Slice.init(models.token_index_tensor.shape(), std.mem.asBytes(&verify_token_index)),
+        .replicated,
+    );
+    defer verify_token_index_buffer.deinit();
+
+    verify_args.set(.{
+        loaded_buffers.target_buffers,
+        block_tokens_buffer,
+        verify_token_index_buffer,
+        target_kv_cache_buffers.*,
+        attention_metadata_buffers,
+    });
+    compiled.target_verify_exe.call(verify_args.*, verify_results);
+
+    const verified_hidden_buffer, const posterior_token_buffer, var verified_target_kv_cache_buffers = verify_results.get(struct {
+        zml.Buffer,
+        zml.Buffer,
+        llama.KvCache.Buffer,
+    });
+    llama.KvCache.replaceBuffers(target_kv_cache_buffers, &verified_target_kv_cache_buffers);
+
+    return .{
+        .verified_hidden_buffer = verified_hidden_buffer,
+        .posterior_token_buffer = posterior_token_buffer,
+        .posterior_token_slice = try posterior_token_buffer.toSliceAlloc(allocator, project.io),
+    };
+}
+
+const DecodeResult = struct {
+    generated: std.ArrayList(u32),
+    decode_elapsed: std.Io.Duration,
+    decoded_tokens: u32,
+    step: usize,
+    target_cache_logical_len: u32,
+    draft_cache_base: u32,
+    stopped_on_eos: bool,
+    total_valid_draft_tokens: usize,
+    total_draft_tokens_checked: usize,
+    min_valid_draft_tokens: usize,
+    max_valid_draft_tokens: usize,
+    full_accept_steps: usize,
+    zero_accept_steps: usize,
+    valid_draft_token_histogram: []usize,
+
+    pub fn deinit(self: *DecodeResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.valid_draft_token_histogram);
+        self.generated.deinit(allocator);
+    }
+};
+
+fn runSpeculativeDecoding(
+    allocator: std.mem.Allocator,
+    project: *Project,
+    prompt: TokenizedPrompt,
+    models: *ModelsAndCaches,
+    compiled: *CompiledExes,
+    loaded_buffers: LoadedBuffers,
+    prefill_output: PrefillOutput,
+    target_kv_cache_buffers: *llama.KvCache.Buffer,
+    draft_kv_cache_buffers: *dflash.KvCache.Buffer,
+    attention_metadata_buffers: anytype,
+    stdout: *std.Io.Writer,
+) !DecodeResult {
+    var generated = try std.ArrayList(u32).initCapacity(allocator, prompt.max_seq_len + 1);
+    errdefer generated.deinit(allocator);
+    try generated.appendSlice(allocator, prompt.token_ids);
+    try generated.append(allocator, prefill_output.target_token);
+
+    var prompt_text = try decodeTokens(allocator, &project.tokenizer, prompt.token_ids);
+    defer prompt_text.deinit(allocator);
+    try stdout.writeAll(prompt_text.items);
+    try stdout.flush();
+
+    var stream_decoder = try project.tokenizer.decoder();
+    defer stream_decoder.deinit();
+    const decoder_out_buffer = try allocator.alloc(u8, 256);
+    defer allocator.free(decoder_out_buffer);
+
+    var block_tokens = try allocator.alloc(u32, models.block_size);
     defer allocator.free(block_tokens);
 
-    var stdout = std.Io.File.stdout().writerStreaming(io, &.{});
-    if (args.verbose) {
-        try printTokens(allocator, &tokenizer, &stdout.interface, "prompt", token_ids);
-        try printTokens(allocator, &tokenizer, &stdout.interface, "target_next", target_token_slice.constItems(u32));
-    } else {
-        var prompt_text = try decodeTokens(allocator, &tokenizer, token_ids);
-        defer prompt_text.deinit(allocator);
-        try stdout.interface.writeAll(prompt_text.items);
-        try stdout.interface.flush();
-    }
+    var verify_args = try compiled.target_verify_exe.args(allocator);
+    defer verify_args.deinit(allocator);
+    var verify_results = try compiled.target_verify_exe.results(allocator);
+    defer verify_results.deinit(allocator);
 
-    var stream_decoder: ?zml.tokenizer.Tokenizer.Decoder = if (args.verbose) null else try tokenizer.decoder();
-    defer if (stream_decoder) |*decoder| decoder.deinit();
-    const decoder_out_buffer: []u8 = if (args.verbose) &.{} else try allocator.alloc(u8, 256);
-    defer if (!args.verbose) allocator.free(decoder_out_buffer);
-
-    var start: u32 = @intCast(token_ids.len);
+    var start: u32 = prompt.prompt_len;
     var draft_cache_base: u32 = 0;
-    var target_hidden_block_buffer = target_hidden_buffer;
+    var target_hidden_block_buffer = prefill_output.target_hidden_buffer;
     var owns_target_hidden_block_buffer = false;
     var step: usize = 0;
     var total_valid_draft_tokens: usize = 0;
     var total_draft_tokens_checked: usize = 0;
     var full_accept_steps: usize = 0;
     var zero_accept_steps: usize = 0;
-    var min_valid_draft_tokens: usize = block_size - 1;
+    var min_valid_draft_tokens: usize = models.block_size - 1;
     var max_valid_draft_tokens: usize = 0;
-    const valid_draft_token_histogram = try allocator.alloc(usize, block_size);
-    defer allocator.free(valid_draft_token_histogram);
+    const valid_draft_token_histogram = try allocator.alloc(usize, models.block_size);
+    errdefer allocator.free(valid_draft_token_histogram);
     @memset(valid_draft_token_histogram, 0);
-    const decode_started_at: std.Io.Timestamp = .now(io, .awake);
+    const decode_started_at: std.Io.Timestamp = .now(project.io, .awake);
     var stopped_on_eos = false;
-    while (start < max_seq_len and !stopped_on_eos) : (step += 1) {
-        const step_started_at: std.Io.Timestamp = .now(io, .awake);
+
+    while (start < prompt.max_seq_len and !stopped_on_eos) : (step += 1) {
         const context_len = start - draft_cache_base;
         stdx.debug.assert(context_len >= 1 and context_len <= prefill_seq_len, "invalid DFlash context length {}", .{context_len});
-        const selected_draft_exe = findDraftTokenExe(draft_token_exes, context_len);
+        const selected_draft_exe = findDraftTokenExe(compiled.draft_token_exes, context_len);
 
-        @memset(block_tokens, parsed_config.value.dflash_config.mask_token_id.?);
+        @memset(block_tokens, project.parsed_config.value.dflash_config.mask_token_id.?);
         block_tokens[0] = generated.items[@intCast(start)];
 
         var block_tokens_buffer: zml.Buffer = try .fromSlice(
-            io,
-            platform,
-            zml.Slice.init(block_tokens_tensor.shape(), std.mem.sliceAsBytes(block_tokens)),
+            project.io,
+            project.platform,
+            zml.Slice.init(models.block_tokens_tensor.shape(), std.mem.sliceAsBytes(block_tokens)),
             .replicated,
         );
         defer block_tokens_buffer.deinit();
 
         var draft_cache_index = draft_cache_base;
         var draft_cache_index_buffer: zml.Buffer = try .fromSlice(
-            io,
-            platform,
-            zml.Slice.init(token_index_tensor.shape(), std.mem.asBytes(&draft_cache_index)),
+            project.io,
+            project.platform,
+            zml.Slice.init(models.token_index_tensor.shape(), std.mem.asBytes(&draft_cache_index)),
             .replicated,
         );
         defer draft_cache_index_buffer.deinit();
 
         var draft_active_context_len: u32 = context_len;
         var draft_active_context_len_buffer: zml.Buffer = try .fromSlice(
-            io,
-            platform,
-            zml.Slice.init(active_context_len_tensor.shape(), std.mem.asBytes(&draft_active_context_len)),
+            project.io,
+            project.platform,
+            zml.Slice.init(models.active_context_len_tensor.shape(), std.mem.asBytes(&draft_active_context_len)),
             .replicated,
         );
         defer draft_active_context_len_buffer.deinit();
 
-        var draft_args = try selected_draft_exe.exe.args(allocator);
-        defer draft_args.deinit(allocator);
-        var draft_results = try selected_draft_exe.exe.results(allocator);
-        defer draft_results.deinit(allocator);
-        draft_args.set(.{
-            model_buffers,
-            target_buffers,
+        selected_draft_exe.args.set(.{
+            loaded_buffers.model_buffers,
+            loaded_buffers.target_buffers,
             target_hidden_block_buffer,
             block_tokens_buffer,
-            draft_kv_cache_buffers,
+            draft_kv_cache_buffers.*,
             draft_cache_index_buffer,
             draft_active_context_len_buffer,
         });
-        selected_draft_exe.exe.call(draft_args, &draft_results);
+        selected_draft_exe.exe.call(selected_draft_exe.args, &selected_draft_exe.results);
 
-        var draft_token_buffer, var updated_draft_kv_cache_buffers = draft_results.get(struct {
+        var draft_token_buffer, var updated_draft_kv_cache_buffers = selected_draft_exe.results.get(struct {
             zml.Buffer,
             dflash.KvCache.Buffer,
         });
         defer draft_token_buffer.deinit();
-        dflash.KvCache.replaceBuffers(&draft_kv_cache_buffers, &updated_draft_kv_cache_buffers);
+        dflash.KvCache.replaceBuffers(draft_kv_cache_buffers, &updated_draft_kv_cache_buffers);
         draft_cache_base = start;
 
-        var draft_token_slice = try draft_token_buffer.toSliceAlloc(allocator, io);
+        var draft_token_slice = try draft_token_buffer.toSliceAlloc(allocator, project.io);
         defer draft_token_slice.free(allocator);
         const draft_tokens = draft_token_slice.constItems(u32);
-        for (block_tokens[1..], draft_tokens[1..block_size]) |*dst, src| dst.* = src;
+        for (block_tokens[1..], draft_tokens[1..models.block_size]) |*dst, src| dst.* = src;
         var drafted_block_tokens_buffer = try zml.Buffer.fromSlice(
-            io,
-            platform,
-            zml.Slice.init(block_tokens_tensor.shape(), std.mem.sliceAsBytes(block_tokens)),
+            project.io,
+            project.platform,
+            zml.Slice.init(models.block_tokens_tensor.shape(), std.mem.sliceAsBytes(block_tokens)),
             .replicated,
         );
         replaceBuffer(&block_tokens_buffer, &drafted_block_tokens_buffer);
 
-        token_index = start;
-        var verify_token_index_buffer: zml.Buffer = try .fromSlice(
-            io,
-            platform,
-            zml.Slice.init(token_index_tensor.shape(), std.mem.asBytes(&token_index)),
-            .replicated,
-        );
-        defer verify_token_index_buffer.deinit();
-
-        var verify_args = try target_verify_exe.args(allocator);
-        defer verify_args.deinit(allocator);
-        var verify_results = try target_verify_exe.results(allocator);
-        defer verify_results.deinit(allocator);
-        verify_args.set(.{
-            target_buffers,
+        var verification = try runVerification(
+            allocator,
+            project,
+            models,
+            compiled,
+            loaded_buffers,
+            &verify_args,
+            &verify_results,
             block_tokens_buffer,
-            verify_token_index_buffer,
+            start,
             target_kv_cache_buffers,
             attention_metadata_buffers,
-        });
-        target_verify_exe.call(verify_args, &verify_results);
-
-        const verified_hidden_buffer, var posterior_token_buffer, var verified_target_kv_cache_buffers = verify_results.get(struct {
-            zml.Buffer,
-            zml.Buffer,
-            llama.KvCache.Buffer,
-        });
-        defer posterior_token_buffer.deinit();
-        llama.KvCache.replaceBuffers(&target_kv_cache_buffers, &verified_target_kv_cache_buffers);
-
-        var posterior_token_slice = try posterior_token_buffer.toSliceAlloc(allocator, io);
-        defer posterior_token_slice.free(allocator);
-        const posterior_tokens = posterior_token_slice.constItems(u32);
+        );
+        defer verification.deinitTransient(allocator);
+        const posterior_tokens = verification.posterior_token_slice.constItems(u32);
 
         var valid_draft_tokens: usize = 0;
-        while (valid_draft_tokens + 1 < block_size and block_tokens[valid_draft_tokens + 1] == posterior_tokens[valid_draft_tokens]) {
+        while (valid_draft_tokens + 1 < models.block_size and block_tokens[valid_draft_tokens + 1] == posterior_tokens[valid_draft_tokens]) {
             valid_draft_tokens += 1;
         }
         total_valid_draft_tokens += valid_draft_tokens;
-        total_draft_tokens_checked += block_size - 1;
+        total_draft_tokens_checked += models.block_size - 1;
         min_valid_draft_tokens = @min(min_valid_draft_tokens, valid_draft_tokens);
         max_valid_draft_tokens = @max(max_valid_draft_tokens, valid_draft_tokens);
         valid_draft_token_histogram[valid_draft_tokens] += 1;
-        if (valid_draft_tokens == block_size - 1) full_accept_steps += 1;
+        if (valid_draft_tokens == models.block_size - 1) full_accept_steps += 1;
         if (valid_draft_tokens == 0) zero_accept_steps += 1;
+
         const correction_token = posterior_tokens[valid_draft_tokens];
         const committed_tokens: u32 = @intCast(valid_draft_tokens + 1);
-
         const generated_step_start = start;
         for (block_tokens[0..@as(usize, @intCast(committed_tokens))]) |token| {
-            if (llama.isEosToken(&parsed_target_config.value, token)) {
+            if (llama.isEosToken(&project.parsed_target_config.value, token)) {
                 stopped_on_eos = true;
                 break;
             }
             try setGeneratedToken(&generated, allocator, start, token);
             start += 1;
-            if (start >= max_seq_len) break;
+            if (start >= prompt.max_seq_len) break;
         }
-        if (!stopped_on_eos and start < max_seq_len) {
-            if (llama.isEosToken(&parsed_target_config.value, correction_token)) {
+        if (!stopped_on_eos and start < prompt.max_seq_len) {
+            if (llama.isEosToken(&project.parsed_target_config.value, correction_token)) {
                 stopped_on_eos = true;
             } else {
                 try setGeneratedToken(&generated, allocator, start, correction_token);
             }
         }
 
-        // Keep the full verified target block on device. The next selected draft
-        // executable slices the valid prefix using its static context length.
         if (owns_target_hidden_block_buffer) target_hidden_block_buffer.deinit();
-        target_hidden_block_buffer = verified_hidden_buffer;
+        target_hidden_block_buffer = verification.verified_hidden_buffer;
         owns_target_hidden_block_buffer = true;
 
-        const generated_step_end = @min(start, max_seq_len);
-        var generated_step_text = try decodeTokens(allocator, &tokenizer, generated.items[generated_step_start..generated_step_end]);
-        defer generated_step_text.deinit(allocator);
-        if (args.verbose) {
-            var correction_text = try decodeTokens(allocator, &tokenizer, &.{correction_token});
-            defer correction_text.deinit(allocator);
-            try stdout.interface.print(
-                "step={} start={} context_len={} valid_draft_tokens={} committed_tokens={} correction={} elapsed={f} correction_text=\"{s}\" text=\"{s}\"\n",
-                .{ step, start, context_len, valid_draft_tokens, committed_tokens, correction_token, step_started_at.untilNow(io, .awake), correction_text.items, generated_step_text.items },
-            );
-        } else {
-            for (generated.items[generated_step_start..generated_step_end]) |token| {
-                try stdout.interface.writeAll(try stream_decoder.?.feedOne(token, decoder_out_buffer));
-            }
-            try stdout.interface.flush();
+        const generated_step_end = @min(start, prompt.max_seq_len);
+        for (generated.items[generated_step_start..generated_step_end]) |token| {
+            try stdout.writeAll(try stream_decoder.feedOne(token, decoder_out_buffer));
         }
+        try stdout.flush();
     }
     if (owns_target_hidden_block_buffer) target_hidden_block_buffer.deinit();
 
-    const decode_elapsed = decode_started_at.untilNow(io, .awake);
-    const decoded_tokens: u32 = start - prompt_len;
-    const decode_seconds = @as(f64, @floatFromInt(decode_elapsed.nanoseconds)) / std.time.ns_per_s;
-    const tokens_per_second = @as(f64, @floatFromInt(decoded_tokens)) / decode_seconds;
-    const draft_acceptance_rate = if (total_draft_tokens_checked == 0)
-        0
-    else
-        @as(f64, @floatFromInt(total_valid_draft_tokens)) / @as(f64, @floatFromInt(total_draft_tokens_checked));
-    const avg_valid_draft_tokens = if (step == 0)
-        0
-    else
-        @as(f64, @floatFromInt(total_valid_draft_tokens)) / @as(f64, @floatFromInt(step));
+    try stdout.writeAll(try stream_decoder.finalize(decoder_out_buffer));
+    try stdout.writeByte('\n');
+
     if (step == 0) min_valid_draft_tokens = 0;
-    if (args.verbose) {
-        var generated_text = try decodeTokens(allocator, &tokenizer, generated.items[0..@min(generated.items.len, max_seq_len)]);
-        defer generated_text.deinit(allocator);
-        try stdout.interface.print("\n--- generated_text ---\n{s}\n", .{generated_text.items});
-    } else {
-        try stdout.interface.writeAll(try stream_decoder.?.finalize(decoder_out_buffer));
-        try stdout.interface.writeByte('\n');
-    }
-    try stdout.interface.print(
+    return .{
+        .generated = generated,
+        .decode_elapsed = decode_started_at.untilNow(project.io, .awake),
+        .decoded_tokens = start - prompt.prompt_len,
+        .step = step,
+        .target_cache_logical_len = start,
+        .draft_cache_base = draft_cache_base,
+        .stopped_on_eos = stopped_on_eos,
+        .total_valid_draft_tokens = total_valid_draft_tokens,
+        .total_draft_tokens_checked = total_draft_tokens_checked,
+        .min_valid_draft_tokens = min_valid_draft_tokens,
+        .max_valid_draft_tokens = max_valid_draft_tokens,
+        .full_accept_steps = full_accept_steps,
+        .zero_accept_steps = zero_accept_steps,
+        .valid_draft_token_histogram = valid_draft_token_histogram,
+    };
+}
+
+fn printDecodeAnalysis(stdout: *std.Io.Writer, result: DecodeResult) !void {
+    const decode_seconds = @as(f64, @floatFromInt(result.decode_elapsed.nanoseconds)) / std.time.ns_per_s;
+    const tokens_per_second = @as(f64, @floatFromInt(result.decoded_tokens)) / decode_seconds;
+    const draft_acceptance_rate = if (result.total_draft_tokens_checked == 0)
+        0
+    else
+        @as(f64, @floatFromInt(result.total_valid_draft_tokens)) / @as(f64, @floatFromInt(result.total_draft_tokens_checked));
+    const avg_valid_draft_tokens = if (result.step == 0)
+        0
+    else
+        @as(f64, @floatFromInt(result.total_valid_draft_tokens)) / @as(f64, @floatFromInt(result.step));
+
+    try stdout.print(
         \\
         \\--- decode_summary ---
         \\  elapsed: {f}
@@ -502,39 +736,38 @@ pub fn main(init: std.process.Init) !void {
         \\
     ,
         .{
-            decode_elapsed,
-            decoded_tokens,
+            result.decode_elapsed,
+            result.decoded_tokens,
             tokens_per_second,
-            step,
-            start,
-            draft_cache_base,
-            stopped_on_eos,
+            result.step,
+            result.target_cache_logical_len,
+            result.draft_cache_base,
+            result.stopped_on_eos,
             avg_valid_draft_tokens,
-            min_valid_draft_tokens,
-            max_valid_draft_tokens,
-            total_valid_draft_tokens,
+            result.min_valid_draft_tokens,
+            result.max_valid_draft_tokens,
+            result.total_valid_draft_tokens,
             draft_acceptance_rate,
-            full_accept_steps,
-            zero_accept_steps,
+            result.full_accept_steps,
+            result.zero_accept_steps,
         },
     );
-    try stdout.interface.print("\n--- valid_draft_tokens_histogram ---\n", .{});
+    try stdout.print("\n--- valid_draft_tokens_histogram ---\n", .{});
     const histogram_bar_width: usize = 80;
-    for (valid_draft_token_histogram, 0..) |count, valid_tokens| {
+    for (result.valid_draft_token_histogram, 0..) |count, valid_tokens| {
         if (count == 0) {
-            try stdout.interface.print("  {d:>2}: {d:>4}\n", .{ valid_tokens, count });
+            try stdout.print("  {d:>2}: {d:>4}\n", .{ valid_tokens, count });
             continue;
         }
-        const pct = if (step == 0)
+        const pct = if (result.step == 0)
             0
         else
-            100.0 * @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(step));
-        const bar_len = @max(@as(usize, 1), count * histogram_bar_width / step);
-        try stdout.interface.print("  {d:>2}: {d:>4} ({d:>5.1}%)  ", .{ valid_tokens, count, pct });
-        try stdout.interface.splatByteAll('x', bar_len);
-        try stdout.interface.writeByte('\n');
+            100.0 * @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(result.step));
+        const bar_len = @max(@as(usize, 1), count * histogram_bar_width / result.step);
+        try stdout.print("  {d:>2}: {d:>4} ({d:>5.1}%)  ", .{ valid_tokens, count, pct });
+        try stdout.splatByteAll('x', bar_len);
+        try stdout.writeByte('\n');
     }
-    try stdout.interface.flush();
 }
 
 const DraftContext = struct {
@@ -544,8 +777,12 @@ const DraftContext = struct {
 const DraftTokenExe = struct {
     context_len: u32,
     exe: zml.Exe,
+    args: zml.Exe.Arguments,
+    results: zml.Exe.Results,
 
-    pub fn deinit(self: *DraftTokenExe) void {
+    pub fn deinit(self: *DraftTokenExe, allocator: std.mem.Allocator) void {
+        self.results.deinit(allocator);
+        self.args.deinit(allocator);
         self.exe.deinit();
     }
 };
@@ -593,34 +830,6 @@ fn paddedPromptTokens(allocator: std.mem.Allocator, token_ids: []const u32, bloc
     @memset(padded, 0);
     @memcpy(padded[0..token_ids.len], token_ids);
     return padded;
-}
-
-fn printTokens(
-    allocator: std.mem.Allocator,
-    tokenizer: *const zml.tokenizer.Tokenizer,
-    stdout: *std.Io.Writer,
-    comptime name: []const u8,
-    token_ids: []const u32,
-) !void {
-    try stdout.print("{s}_ids: {any}\n", .{ name, token_ids });
-
-    var decoder = try tokenizer.decoder();
-    defer decoder.deinit();
-    var text = try decoder.decodeAlloc(allocator, token_ids);
-    defer text.deinit(allocator);
-    try stdout.print("{s}_text: {s}\n", .{ name, text.items });
-
-    try stdout.print("{s}_tokens: [", .{name});
-    for (token_ids, 0..) |token_id, i| {
-        if (i != 0) try stdout.writeAll(", ");
-        const one = [1]u32{token_id};
-        var piece_decoder = try tokenizer.decoder();
-        defer piece_decoder.deinit();
-        var piece = try piece_decoder.decodeAlloc(allocator, &one);
-        defer piece.deinit(allocator);
-        try stdout.print("{}=\"{s}\"", .{ token_id, piece.items });
-    }
-    try stdout.writeAll("]\n");
 }
 
 fn decodeTokens(
