@@ -284,7 +284,7 @@ fn verifyDraftTokens(
     const residual_probs = target_probs.sub(draft_probs).relu();
     const residual_idx = valid_draft_tokens.minimum(zml.Tensor.scalar(@as(u32, @intCast(verify_len - 1)), .u32));
     const residual = residual_probs.gather(.{ .s = residual_idx }, .{});
-    const residual_logits = residual.maximum(zml.Tensor.scalar(std.math.floatEps(f32), .f32).broad(residual.shape())).log();
+    const residual_logits = residual.log();
     const residual_correction_token, const residual_rng = Model.sampleLogits(residual_logits, .{ .temperature = 1.0 }, target_rng);
 
     const no_rejection = valid_draft_tokens.cmp(.EQ, zml.Tensor.scalar(@as(u32, @intCast(verify_len)), .u32));
