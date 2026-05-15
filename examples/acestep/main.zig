@@ -219,11 +219,12 @@ const Args = struct {
 // info:   wav                                                 9.86s
 // info: total                                                56.18s
 
-// TODO: why does it goes oom during diffusion ??
+// TODO: why does it go oom during diffusion ??
 // TODO: accelerate wav export, have a look at cfg, microtune vae decode_t
 // TODO: reference audio
 // TODO: reference timbre
-
+// TODO: sft model for max quality
+// TODO: passe sur les autres fonctionnalités intéressantes
 // TODO: move model related code from inference to Exes struct inside models
 
 pub fn main(init: std.process.Init) !void {
@@ -375,9 +376,15 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
         // ------------------------------------------------
     
         zml_handler.tic(&zml_handler.timers.dit.total);
-    
+
+        std.log.info("device debug string: {s}", .{ zml_handler.platform.devices[0].debugString() });
+        const stats_before = zml_handler.platform.devices[0].memoryStats();
+        
         const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, diffuse_args, i);
         defer diffused_latents.deinit(zml_handler.allocator);
+
+        const stats_after = zml_handler.platform.devices[0].memoryStats();
+        std.log.info("memory stats: before={} after={}", .{ stats_before.bytes_in_use, stats_after.bytes_in_use });
     
         zml_handler.toc(&zml_handler.timers.dit.total);
         
