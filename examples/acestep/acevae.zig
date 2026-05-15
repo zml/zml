@@ -42,12 +42,14 @@ pub const AceVae_handler = struct {
         }
         const t_25hz = decode_t * 25;
         const t_48khz = t_25hz * upsampling_ratio;
+        
         const overlap = 25;
         const stride = decode_t * 25;
         const chunk_frames = stride + 2 * overlap;
         const decoded_chunk_frames = chunk_frames * upsampling_ratio;
+        
         const params: Params = .{
-            .latents = .init(.{ .c = config.decoder_input_channels, .t = t_25hz }, .bf16),
+            .latents = .init(.{ .c = config.decoder_input_channels, .t = chunk_frames }, .bf16),
             .decoded_chunk = .init(.{ .a = 2, .t = decoded_chunk_frames }, .f32),
             .audio = .init(.{ .c = config.audio_channels, .t = t_48khz }, .f32),
         };
@@ -86,16 +88,16 @@ pub const AceVae_handler = struct {
         return .{ encode_exe, decode_exe };
     }
 
-    pub fn compileEncodeModel(zml_handler: *main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
+    pub fn compileEncodeModel(zml_handler: *main.Zml_handler, model: AceVae, params: Params, shardings: main.Shardings) !zml.Exe {
         std.log.info("VAE compile encoder", .{});
         const opts: zml.module.CompilationOptions = .{ .shardings = &shardings.all() };
-        return zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .encode, .{ parameters.audio }, opts);
+        return zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .encode, .{ params.audio }, opts);
     }
     
-    pub fn compileDecodeModel(zml_handler: *main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
+    pub fn compileDecodeModel(zml_handler: *main.Zml_handler, model: AceVae, params: Params, shardings: main.Shardings) !zml.Exe {
         std.log.info("VAE compile decoder", .{});
         const opts: zml.module.CompilationOptions = .{ .shardings = &shardings.all() };
-        return zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .decode, .{ parameters.latents, parameters.decoded_chunk }, opts);
+        return zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .decode, .{ params.latents, params.decoded_chunk }, opts);
     }
 
     pub fn compileModelParallel(zml_handler: *main.Zml_handler, model: AceVae, params: Params, shardings: main.Shardings) !struct { zml.Exe, zml.Exe } {
