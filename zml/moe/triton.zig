@@ -6,6 +6,7 @@ const zml = @import("../zml.zig");
 const DataType = zml.DataType;
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
+const common = @import("common.zig");
 
 const tri = zml.kernel.triton;
 const DType = tri.DType;
@@ -22,7 +23,7 @@ const log = std.log.scoped(.moe_triton);
 
 pub const Options = struct {
     inplace: bool = false,
-    activation: []const u8 = "silu",
+    activation: common.ActivationMode = .silu,
     apply_router_weight_on_input: bool = false,
     use_fp8_w8a8: bool = false,
     use_int8_w8a8: bool = false,
@@ -52,14 +53,19 @@ pub const Options = struct {
 
 pub const Parameters = struct {
     num_experts_per_tok: u32,
+    activation: common.ActivationMode,
+
+    pub const ActivationMode = common.ActivationMode;
 
     pub const InitOptions = struct {
         num_experts_per_tok: u32,
+        activation: common.ActivationMode = .silu,
     };
 
     pub fn init(opts: InitOptions) Parameters {
         return .{
             .num_experts_per_tok = opts.num_experts_per_tok,
+            .activation = opts.activation,
         };
     }
 };
@@ -540,7 +546,7 @@ fn fp8ActivationGroupSize(x: Tensor) i64 {
 
 fn validateOptions(opts: Options) !void {
     if (opts.inplace) return error.Unimplemented;
-    if (!std.mem.eql(u8, opts.activation, "silu")) return error.UnsupportedActivation;
+    if (opts.activation != .silu) return error.UnsupportedActivation;
     if (opts.apply_router_weight_on_input) return error.UnsupportedOption;
     if (opts.use_fp8_w8a8 or opts.use_int8_w8a8 or opts.use_int8_w8a16 or opts.use_int4_w4a16) return error.UnsupportedQuantization;
     if (opts.ocp_mx_scheme != null or opts.per_channel_quant) return error.UnsupportedOption;

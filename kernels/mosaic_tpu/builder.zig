@@ -255,7 +255,7 @@ pub const TransformStubBuilder = struct {
     }
 
     pub fn toIndex(self: *TransformStubBuilder, src: Value) Value {
-        return self.indexCast(src, mlir.indexType(self.ctx));
+        return self.indexCast(src, mlir.Type.index(self.ctx));
     }
 
     fn innerSlice(self: *TransformStubBuilder, values: []const Value) []const *const mlir.Value {
