@@ -99,14 +99,14 @@ pub const Uri_handler = struct {
 
     pub fn fromLocal(args: Args) Uri_handler {
         return .{
-            .acellm = if (args.llm_size == 0) "file://acestep//models//acestep-5Hz-lm-0.6B"
-                             else if (args.llm_size == 1) "file://acestep//models//acestep-5Hz-lm-1.7B"
-                                                     else "file://acestep//models//acestep-5Hz-lm-4B",
-            .aceemb = "file://acestep//models//Qwen3-Embedding-0.6B",
-            .acedit = if (args.dit_size == 0) "file://acestep//models//acestep-v15-turbo"
-                                                     else "file://acestep//models//acestep-v15-xl-turbo",
+            .acellm = if (args.llm_size == 0) "file://examples//acestep//models//acestep-5Hz-lm-0.6B"
+                             else if (args.llm_size == 1) "file://examples//acestep//models//acestep-5Hz-lm-1.7B"
+                                                     else "file://examples//acestep//models//acestep-5Hz-lm-4B",
+            .aceemb = "file://examples//acestep//models//Qwen3-Embedding-0.6B",
+            .acedit = if (args.dit_size == 0) "file://examples//acestep//models//acestep-v15-turbo"
+                                                     else "file://examples//acestep//models//acestep-v15-xl-turbo",
             .is_xl = args.dit_size == 1,
-            .acevae = "file://acestep//models//Oobleck-vae",
+            .acevae = "file://examples//acestep//models//Oobleck-vae",
         };
     }
 
