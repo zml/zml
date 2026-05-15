@@ -13,4 +13,17 @@ py_library(
     deps = ["@triton_py_deps//triton:pkg"],
 )
 
+# Shared @triton.jit MoE kernel definitions (verbatim vLLM-derived source).
+# The per_token_group_quant_fp8 / fused_moe / moe_align_block_size /
+# count_and_sort_expert_tokens registrations import their @triton.jit
+# functions from this single source of truth.
+py_library(
+    name = "moe_kernels",
+    srcs = ["py/moe.py"],
+    imports = ["py"],
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+    deps = ["@triton_py_deps//triton:pkg"],
+)
+
 declare_triton_kernels()
