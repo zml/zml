@@ -219,7 +219,7 @@ const Args = struct {
 // info:   wav                                                 9.86s
 // info: total                                                56.18s
 
-// TODO: why does it go oom during diffusion ??
+// TODO: propager good memory management
 // TODO: accelerate wav export, have a look at cfg, microtune vae decode_t
 // TODO: reference audio
 // TODO: reference timbre
