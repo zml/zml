@@ -69,6 +69,8 @@ def format_main_file(main):
 def _zls_write_build_config_impl(ctx):
     zigtoolchaininfo = ctx.toolchains["@rules_zig//zig:toolchain_type"].zigtoolchaininfo
     zigtargetinfo = ctx.toolchains["@rules_zig//zig/target:toolchain_type"].zigtargetinfo
+    translate_c_toolchain = ctx.toolchains["@rules_zig//zig/translate-c:toolchain_type"]
+    translatectoolchaininfo = translate_c_toolchain.translatectoolchaininfo if translate_c_toolchain else None
 
     c_module_contexts = []
     c_module_inputs = []
@@ -99,6 +101,7 @@ def _zls_write_build_config_impl(ctx):
             zigtoolchaininfo = zigtoolchaininfo,
             global_args = global_args,
             cc_infos = [cc_info],
+            translatectoolchaininfo = translatectoolchaininfo,
         )
 
         c_module_contexts = [depset(
@@ -168,6 +171,7 @@ zls_write_build_config = rule(
     toolchains = [
         "@rules_zig//zig:toolchain_type",
         "@rules_zig//zig/target:toolchain_type",
+        config_common.toolchain_type("@rules_zig//zig/translate-c:toolchain_type", mandatory = False),
     ] + use_cc_toolchain(mandatory = False),
     fragments = ["cpp", "apple"],
 )
