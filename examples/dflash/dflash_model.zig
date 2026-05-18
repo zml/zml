@@ -49,24 +49,15 @@ pub const KvCache = struct {
     }
 
     pub fn update(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor) KvCache {
-        return kv.updatePacked(kv.pack(new_k, new_v), token_index);
-    }
-
-    fn layer(kv: KvCache) zml.Tensor {
-        return kv.kv.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
-    }
-
-    fn pack(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor) zml.Tensor {
-        return zml.Tensor.stack(&.{
+        const update_shape = kv.kv.shape().drop(.layer);
+        const layer: zml.Tensor = .scalar(kv.layer_index orelse @panic("forgot to call atLayer"), .u32);
+        const new_kv = zml.Tensor.stack(&.{
             new_k.convert(kv.kv.dtype()),
             new_v.convert(kv.kv.dtype()),
-        }, .k, .kv).transpose(kv.kv.shape().drop(.layer));
-    }
+        }, .k, .kv);
 
-    fn updatePacked(kv: KvCache, new_kv: zml.Tensor, token_index: zml.Tensor) KvCache {
-        const layer_index: zml.Tensor = .scalar(kv.layer_index orelse @panic("forgot to call atLayer"), .u32);
         return .{
-            .kv = kv.kv.scatterSlices(.{ .layer = layer_index, .k = token_index }, new_kv.transpose(kv.kv.shape().drop(.layer)), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.kv),
+            .kv = kv.kv.scatterSlices(.{ .layer = layer, .k = token_index }, new_kv.transpose(update_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.kv),
             .layer_index = kv.layer_index,
         };
     }
@@ -445,10 +436,11 @@ fn linearForwardF32(linear_: zml.nn.Linear, x: zml.Tensor) zml.Tensor {
 }
 
 fn updateBucketed(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor, active_context_len: zml.Tensor, context_len: i64) KvCache {
-    return kv.updatePacked(mergeBucketed(kv, new_k, new_v, token_index, active_context_len, context_len), token_index);
+    const merged_k, const merged_v = mergeBucketed(kv, new_k, new_v, token_index, active_context_len, context_len);
+    return kv.update(merged_k, merged_v, token_index);
 }
 
-fn mergeBucketed(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor, active_context_len: zml.Tensor, context_len: i64) zml.Tensor {
+fn mergeBucketed(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor, active_context_len: zml.Tensor, context_len: i64) struct { zml.Tensor, zml.Tensor } {
     const proposal_len = new_k.dim(.k) - context_len;
     const merged_len = context_len + proposal_len;
     const context_start = zml.Tensor.scalar(@as(u32, 0), .u32);
@@ -459,10 +451,13 @@ fn mergeBucketed(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index:
     const proposal_k = new_k.slice1d(.k, .{ .start = context_len, .end = new_k.dim(.k) });
     const proposal_v = new_v.slice1d(.k, .{ .start = context_len, .end = new_v.dim(.k) });
 
-    var merged_kv = kv.layer().dynamicSlice(.{ .k = zml.Tensor.DynSlice{ .start = token_index, .len = merged_len } });
-    merged_kv = merged_kv.dynamicUpdateSlice(.{ .k = context_start }, kv.pack(context_k, context_v));
-    merged_kv = merged_kv.dynamicUpdateSlice(.{ .k = proposal_start }, kv.pack(proposal_k, proposal_v));
-    return merged_kv;
+    var merged_k = kv.keys().dynamicSlice(.{ .k = zml.Tensor.DynSlice{ .start = token_index, .len = merged_len } }).convert(new_k.dtype());
+    var merged_v = kv.values().dynamicSlice(.{ .k = zml.Tensor.DynSlice{ .start = token_index, .len = merged_len } }).convert(new_v.dtype());
+    merged_k = merged_k.dynamicUpdateSlice(.{ .k = context_start }, context_k);
+    merged_v = merged_v.dynamicUpdateSlice(.{ .k = context_start }, context_v);
+    merged_k = merged_k.dynamicUpdateSlice(.{ .k = proposal_start }, proposal_k);
+    merged_v = merged_v.dynamicUpdateSlice(.{ .k = proposal_start }, proposal_v);
+    return .{ merged_k, merged_v };
 }
 
 fn zeroBuffer(
