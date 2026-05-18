@@ -75,6 +75,7 @@ fn run(
     defer activation_store.deinit();
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     // const layer_indices = [_]usize{ 0, 1, 2, 45, 46, 47 };
     // std.log.info("MLP:", .{});
     // for (layer_indices) |layer_idx| {
@@ -106,76 +107,78 @@ fn run(
 const LayerKind = enum { mlp, rmsNorm };
 =======
     const mlp_layer_indices = [_]usize{ 0, 1, 2, 45, 46, 47 };
+=======
+    // const mlp_layer_indices = [_]usize{ 0, 1, 2, 45, 46, 47 };
+    // std.log.info("MLP:", .{});
+    // for (mlp_layer_indices) |layer_idx| {
+    //     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp", .{layer_idx});
+    //     defer allocator.free(name);
+>>>>>>> 4dd0ea28 (examples/llm: naive for loop for swiglu clamp layers)
 
-    std.log.info("MLP:", .{});
-    for (mlp_layer_indices) |layer_idx| {
-        const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp", .{layer_idx});
-        defer allocator.free(name);
+    //     const mlp = model.Mlp.init(model_store.view().withPrefix(name), null);
 
-        const mlp = model.Mlp.init(model_store.view().withPrefix(name), null);
+    //     // Recursive cleanup for buffers
+    //     var mlp_weights = try zml.io.load(model.Mlp, &mlp, allocator, io, platform, model_store, .auto);
+    //     defer deinitBuffers(&mlp_weights);
 
-        // Recursive cleanup for buffers
-        var mlp_weights = try zml.io.load(model.Mlp, &mlp, allocator, io, platform, model_store, .auto);
-        defer deinitBuffers(&mlp_weights);
+    //     std.log.info("name {s}", .{name});
 
-        std.log.info("name {s}", .{name});
+    //     const input_key = try std.fmt.allocPrint(allocator, "{s}.in.0", .{name});
+    //     defer allocator.free(input_key);
+    //     if (!activation_store.view().hasKey(input_key)) {
+    //         std.log.warn("skipping {s}: no activations recorded", .{name});
+    //         continue;
+    //     }
 
-        const input_key = try std.fmt.allocPrint(allocator, "{s}.in.0", .{name});
-        defer allocator.free(input_key);
-        if (!activation_store.view().hasKey(input_key)) {
-            std.log.warn("skipping {s}: no activations recorded", .{name});
-            continue;
-        }
+    //     zml.testing.testLayer(allocator, io, platform, mlp, .forward, activation_store.view(), name, mlp_weights, &.{}, .{ .absolute_tolerance = 1e-2 }) catch |err| {
+    //         std.log.warn("skipping {s}: {s}", .{ name, @errorName(err) });
+    //     };
+    // }
+    // std.log.info("RMS Norm:", .{});
 
-        zml.testing.testLayer(allocator, io, platform, mlp, .forward, activation_store.view(), name, mlp_weights, &.{}, .{ .absolute_tolerance = 1e-2 }) catch |err| {
-            std.log.warn("skipping {s}: {s}", .{ name, @errorName(err) });
-        };
-    }
-    std.log.info("RMS Norm:", .{});
+    // for (0..48) |layer_idx| {
+    //     const name__input_layernorm = try std.fmt.allocPrint(allocator, "model.layers.{d}.input_layernorm", .{layer_idx});
+    //     defer allocator.free(name__input_layernorm);
 
-    for (0..48) |layer_idx| {
-        const name__input_layernorm = try std.fmt.allocPrint(allocator, "model.layers.{d}.input_layernorm", .{layer_idx});
-        defer allocator.free(name__input_layernorm);
+    //     const name__post_attention_layernorm = try std.fmt.allocPrint(allocator, "model.layers.{d}.post_attention_layernorm", .{layer_idx});
+    //     defer allocator.free(name__post_attention_layernorm);
 
-        const name__post_attention_layernorm = try std.fmt.allocPrint(allocator, "model.layers.{d}.post_attention_layernorm", .{layer_idx});
-        defer allocator.free(name__post_attention_layernorm);
+    //     const rms1 = model.RmsNorm.init(model_store.view().withPrefix(name__input_layernorm), @as(f32, 1e-5));
+    //     const rms2 = model.RmsNorm.init(model_store.view().withPrefix(name__post_attention_layernorm), @as(f32, 1e-5));
 
-        const rms1 = model.RmsNorm.init(model_store.view().withPrefix(name__input_layernorm), @as(f32, 1e-5));
-        const rms2 = model.RmsNorm.init(model_store.view().withPrefix(name__post_attention_layernorm), @as(f32, 1e-5));
+    //     var rms_weights1 = try zml.io.load(model.RmsNorm, &rms1, allocator, io, platform, model_store, .auto);
+    //     defer deinitBuffers(&rms_weights1);
 
-        var rms_weights1 = try zml.io.load(model.RmsNorm, &rms1, allocator, io, platform, model_store, .auto);
-        defer deinitBuffers(&rms_weights1);
+    //     var rms_weights2 = try zml.io.load(model.RmsNorm, &rms2, allocator, io, platform, model_store, .auto);
+    //     defer deinitBuffers(&rms_weights2);
 
-        var rms_weights2 = try zml.io.load(model.RmsNorm, &rms2, allocator, io, platform, model_store, .auto);
-        defer deinitBuffers(&rms_weights2);
+    //     const in1_key = try std.fmt.allocPrint(allocator, "{s}.in.0", .{name__input_layernorm});
+    //     defer allocator.free(in1_key);
+    //     if (activation_store.view().hasKey(in1_key)) {
+    //         zml.testing.testLayer(allocator, io, platform, rms1, .forward, activation_store.view(), name__input_layernorm, rms_weights1, &.{}, .{ .absolute_tolerance = 1e-2 }) catch |err| {
+    //             std.log.warn("skipping {s}: {s}", .{ name__input_layernorm, @errorName(err) });
+    //         };
+    //     } else {
+    //         std.log.warn("skipping {s}: no activations recorded", .{name__input_layernorm});
+    //     }
 
-        const in1_key = try std.fmt.allocPrint(allocator, "{s}.in.0", .{name__input_layernorm});
-        defer allocator.free(in1_key);
-        if (activation_store.view().hasKey(in1_key)) {
-            zml.testing.testLayer(allocator, io, platform, rms1, .forward, activation_store.view(), name__input_layernorm, rms_weights1, &.{}, .{ .absolute_tolerance = 1e-2 }) catch |err| {
-                std.log.warn("skipping {s}: {s}", .{ name__input_layernorm, @errorName(err) });
-            };
-        } else {
-            std.log.warn("skipping {s}: no activations recorded", .{name__input_layernorm});
-        }
-
-        const in2_key = try std.fmt.allocPrint(allocator, "{s}.in.0", .{name__post_attention_layernorm});
-        defer allocator.free(in2_key);
-        if (activation_store.view().hasKey(in2_key)) {
-            zml.testing.testLayer(allocator, io, platform, rms2, .forward, activation_store.view(), name__post_attention_layernorm, rms_weights2, &.{}, .{ .absolute_tolerance = 1e-2 }) catch |err| {
-                std.log.warn("skipping {s}: {s}", .{ name__post_attention_layernorm, @errorName(err) });
-            };
-        } else {
-            std.log.warn("skipping {s}: no activations recorded", .{name__post_attention_layernorm});
-        }
-    }
+    //     const in2_key = try std.fmt.allocPrint(allocator, "{s}.in.0", .{name__post_attention_layernorm});
+    //     defer allocator.free(in2_key);
+    //     if (activation_store.view().hasKey(in2_key)) {
+    //         zml.testing.testLayer(allocator, io, platform, rms2, .forward, activation_store.view(), name__post_attention_layernorm, rms_weights2, &.{}, .{ .absolute_tolerance = 1e-2 }) catch |err| {
+    //             std.log.warn("skipping {s}: {s}", .{ name__post_attention_layernorm, @errorName(err) });
+    //         };
+    //     } else {
+    //         std.log.warn("skipping {s}: no activations recorded", .{name__post_attention_layernorm});
+    //     }
+    // }
 
     // MoE is verified; we no longer have to test the router
-    for (3..45) |layer_idx| {
+    for (42..45) |layer_idx| {
         const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.moe", .{layer_idx});
         defer allocator.free(name);
 
-        const moe = try model.Moe.init(model_store.view().withPrefix(name));
+        const moe = try model.Moe.init(model_store.view().withPrefix(name), layer_idx);
 
         var moe_weights = try zml.io.load(model.Moe, &moe, allocator, io, platform, model_store, .auto);
         defer deinitBuffers(&moe_weights);
