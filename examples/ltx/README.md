@@ -112,6 +112,31 @@ stdout. Pipe to ffmpeg for the final MP4:
 
 **Note:** Use the built binary directly (not `bazel run`) since Bazel may interfere with stdout piping.
 
+### Multi-GPU (tensor parallelism)
+
+On a 2-GPU setup, the pipeline automatically shards the 48-block transformer
+across both devices using Megatron-style tensor parallelism (attention heads and
+FF inner dim split by 2).
+
+**2× A100-40GB:** The 39040-token Stage 2 self-attention is memory-constrained.
+XLA's latency-hiding scheduler aggressively overlaps SDPA chunk computations,
+causing peak memory to exceed the ~17 GiB free per device after weights are
+loaded. Work around this with:
+
+```bash
+XLA_FLAGS="--xla_gpu_enable_latency_hiding_scheduler=false --xla_gpu_memory_limit_slop_factor=0" \
+  ./bazel-bin/examples/ltx/inference ... | ffmpeg ...
+```
+
+Both flags are required:
+- `--xla_gpu_enable_latency_hiding_scheduler=false` — prevents XLA from
+  materializing multiple attention chunks simultaneously
+- `--xla_gpu_memory_limit_slop_factor=0` — eliminates buffer padding that
+  pushes allocations over the memory limit
+
+This costs ~5% throughput on Stage 1 (5.9s → 6.2s/step) but enables Stage 2 to
+run within the 40GB VRAM budget. Not needed on H100-80GB or larger memory GPUs.
+
 ### Input constraints
 
 - `height` and `width` must be divisible by 32 (multiples of 64 recommended)

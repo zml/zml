@@ -47,12 +47,12 @@ pub const FeedForward = struct {
 
         return .{
             .proj = .init(
-                proj_store.createTensor("weight", .{ .d_ff, .d }, .replicated),
-                proj_store.createTensor("bias", .{.d_ff}, .replicated),
+                proj_store.createTensor("weight", .{ .d_ff, .d }, .{ .d_ff = .model }),
+                proj_store.createTensor("bias", .{.d_ff}, .{ .d_ff = .model }),
                 .d,
             ),
             .out = .init(
-                out_store.createTensor("weight", .{ .d, .d_ff }, .replicated),
+                out_store.createTensor("weight", .{ .d, .d_ff }, .{ .d_ff = .model }),
                 out_store.createTensor("bias", .{.d}, .replicated),
                 .d_ff,
             ),
@@ -361,7 +361,6 @@ fn sdpaNoF32Upcast(q_: Tensor, k_: Tensor, v_: Tensor, opts: zml.nn.SdpaOpts) Te
 
     const n_queries: usize = @intCast(q.dim(.q));
 
-    // Choose chunk size: 1024 queries per chunk → attention tile is [H, 1024, K] which is manageable.
     const CHUNK_Q: usize = 1024;
     const n_full_chunks = n_queries / CHUNK_Q;
     const remainder = n_queries % CHUNK_Q;
@@ -463,30 +462,30 @@ pub const Attention = struct {
         const to_out_store = attn_store.withPrefix("to_out").withLayer(0);
 
         return .{
-            .q_norm_weight = attn_store.withPrefix("q_norm").createTensor("weight", .{.d_q}, .replicated),
-            .k_norm_weight = attn_store.withPrefix("k_norm").createTensor("weight", .{.d_k}, .replicated),
+            .q_norm_weight = attn_store.withPrefix("q_norm").createTensor("weight", .{.d_q}, .{ .d_q = .model }),
+            .k_norm_weight = attn_store.withPrefix("k_norm").createTensor("weight", .{.d_k}, .{ .d_k = .model }),
             .to_q = .init(
-                attn_store.withPrefix("to_q").createTensor("weight", .{ .d_q, .d }, .replicated),
-                attn_store.withPrefix("to_q").createTensor("bias", .{.d_q}, .replicated),
+                attn_store.withPrefix("to_q").createTensor("weight", .{ .d_q, .d }, .{ .d_q = .model }),
+                attn_store.withPrefix("to_q").createTensor("bias", .{.d_q}, .{ .d_q = .model }),
                 .d,
             ),
             .to_k = .init(
-                attn_store.withPrefix("to_k").createTensor("weight", .{ .d_k, .d }, .replicated),
-                attn_store.withPrefix("to_k").createTensor("bias", .{.d_k}, .replicated),
+                attn_store.withPrefix("to_k").createTensor("weight", .{ .d_k, .d }, .{ .d_k = .model }),
+                attn_store.withPrefix("to_k").createTensor("bias", .{.d_k}, .{ .d_k = .model }),
                 .d,
             ),
             .to_v = .init(
-                attn_store.withPrefix("to_v").createTensor("weight", .{ .d_v, .d }, .replicated),
-                attn_store.withPrefix("to_v").createTensor("bias", .{.d_v}, .replicated),
+                attn_store.withPrefix("to_v").createTensor("weight", .{ .d_v, .d }, .{ .d_v = .model }),
+                attn_store.withPrefix("to_v").createTensor("bias", .{.d_v}, .{ .d_v = .model }),
                 .d,
             ),
             .to_gate_logits = .init(
-                attn_store.withPrefix("to_gate_logits").createTensor("weight", .{ .h, .d }, .replicated),
-                attn_store.withPrefix("to_gate_logits").createTensor("bias", .{.h}, .replicated),
+                attn_store.withPrefix("to_gate_logits").createTensor("weight", .{ .h, .d }, .{ .h = .model }),
+                attn_store.withPrefix("to_gate_logits").createTensor("bias", .{.h}, .{ .h = .model }),
                 .d,
             ),
             .to_out = .init(
-                to_out_store.createTensor("weight", .{ .d, .d_v }, .replicated),
+                to_out_store.createTensor("weight", .{ .d, .d_v }, .{ .d_v = .model }),
                 to_out_store.createTensor("bias", .{.d}, .replicated),
                 .d_v,
             ),
@@ -577,6 +576,7 @@ pub const Attention = struct {
         var qh = q.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
         var kh = k.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
         var vh = v.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
+
 
         // Apply RoPE if present in checkpoint.
         if (opts.pe_cos) |pe_cos| {

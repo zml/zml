@@ -717,7 +717,11 @@ pub fn main(init: std.process.Init) !void {
     // ---- Platform init ----
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
-    const sharding = platform.replicated_sharding;
+    const sharding: zml.Sharding = try platform.registerSharding(
+        "ltx_mesh",
+        .mesh(.{ .model = .high_bandwidth }),
+    );
+    std.log.info("Platform: {d} devices, sharding mesh: {f}", .{ platform.devices.len, sharding });
 
     // ---- Phase timers ----
     var timer_s1 = PhaseTimer.init("Stage 1", io);
@@ -837,6 +841,12 @@ pub fn main(init: std.process.Init) !void {
     const s2_attn_mode = attnModeFromFlags(args.bf16_attn_stage2, platform);
     const s2 = try runStage2(allocator, io, platform, sharding, args.stage2_ckpt, &bridge, s2_attn_mode, stage2_sigmas, &timer_s2, args.profile);
 
+    // Force device synchronization to ensure Stage 2 work is fully complete
+    // and memory is freed before entering VAE phases.
+    try s2.v_latent.await(io);
+    try s2.a_latent.await(io);
+    std.log.info("Stage 2 outputs synchronized.", .{});
+
     // Free bridge-only buffers (positions, masks, clean latents, contexts).
     // The noised latents (v_latent, a_latent) were consumed by Stage 2's loop
     // and replaced with final outputs — runStage2 set them to undefined.
@@ -860,7 +870,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ========================================================================
-    // Phase 4: Video VAE Decode
+    // Phase 4: Video VAE Decode (runs on single device to save memory)
     // ========================================================================
     std.log.info("", .{});
     std.log.info("=== Phase 4: Video VAE Decode ===", .{});
@@ -3115,8 +3125,7 @@ fn runStage2(
                         block_params_bufs[i],
                     });
                 }
-                // ROCm requires synchronous execution here; async causes segfault at address 0x8.
-                block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
+                block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
 
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
