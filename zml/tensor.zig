@@ -1344,11 +1344,15 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing the SwiGLU activation function applied to the input Tensor.
-    pub fn swiglu(self: Tensor, beta: f32, w: Tensor, b: Tensor, tag: Shape.Tag) Tensor {
-        const sigmoid_tensor = self.mul(Tensor.constant(DataType.Value.init(self.dtype(), beta)).broad(.init(self._shape, self.dtype()))).sigmoid();
-        const one_minus_sigmoid_tensor = Tensor.constant(.init(self.dtype(), 1)).broad(.init(self._shape, self.dtype())).sub(sigmoid_tensor);
+    pub fn swiglu(self: Tensor, beta: f32, w: Tensor, v: Tensor, b: Tensor, c: Tensor, tag: Shape.Tag) Tensor {
+        var value_path = self.dot(w, tag);
+        value_path = value_path.add(b.broad(value_path.shape()));
 
-        return self.mul(sigmoid_tensor).add(one_minus_sigmoid_tensor.mul(w.dot(self, tag).add(b)));
+        const sigmoid_tensor = value_path.scale(beta).sigmoid();
+        var gate_path = self.dot(v, tag);
+
+        gate_path = gate_path.add(c.broad(gate_path.shape()));
+        return value_path.mul(sigmoid_tensor).outer(gate_path);
     }
 
     /// Returns a Tensor containing the Gaussian Error Linear Units (GeLU) activation function applied to each element of the input Tensor.
