@@ -126,12 +126,10 @@ pub const AceVaeEncoder_handler = struct {
         for (config.downsampling_ratios) |ratio| {
             upsampling_ratio *= ratio;
         }
-        const t_25hz = decode_t * 25;
-        const t_48khz = t_25hz * upsampling_ratio;
-
         const overlap = 25;
         const stride = decode_t * 25;
         const chunk_frames = stride + 2 * overlap;
+        const t_48khz = chunk_frames * upsampling_ratio;
 
         const params: EncoderParams = .{
             .audio = .init(.{ .c = config.audio_channels, .t = t_48khz }, .f32),
@@ -252,8 +250,12 @@ pub const AceVaeEncoder = struct {
     }
 
     pub fn encode(self: AceVaeEncoder, audio: zml.Tensor, encoded_chunk: zml.Tensor) zml.Tensor {
-        const chunk = self.encoder.forward(audio.convert(.bf16));
-        return chunk.reuseBuffer(encoded_chunk);
+        const posterior_params = self.encoder.forward(audio.convert(.bf16));
+        const latent_channels = encoded_chunk.dim(.c);
+        const c_slice: zml.Tensor.Slice = .{ .start = 0, .end = latent_channels };
+        const t_slice: zml.Tensor.Slice = .{ .start = 0, .end = posterior_params.dim(.t) };
+        const mean = posterior_params.slice(&.{ c_slice, t_slice });
+        return mean.reuseBuffer(encoded_chunk);
     }
 
 };
@@ -718,3 +720,17 @@ pub const ConvTranspose1D = struct {
     }
 
 };
+
+pub fn print(x: zml.Tensor, n: u8) void {
+    const name = &.{ n };
+    const sh = x._shape;
+    const nb_dims = sh.rank();
+    switch (nb_dims) {
+        0 => std.log.info("{s} is scalar", .{ name }),
+        1 => std.log.info("{s} is dim 1 : {s} = {d}", .{ name, sh.tag(0), sh.dim(0) }),
+        2 => std.log.info("{s} is dim 2 : {s} x {s} = {d} x {d}", .{ name, sh.tag(0), sh.tag(1), sh.dim(0), sh.dim(1) }),
+        3 => std.log.info("{s} is dim 3 : {s} x {s} x {s} = {d} x {d} x {d}", .{ name, sh.tag(0), sh.tag(1), sh.tag(2), sh.dim(0), sh.dim(1), sh.dim(2) }),
+        4 => std.log.info("{s} is dim 4 : {s} x {s} x {s} x {s} = {d} x {d} x {d} x {d}", .{ name, sh.tag(0), sh.tag(1), sh.tag(2), sh.tag(3), sh.dim(0), sh.dim(1), sh.dim(2), sh.dim(3) }),
+        else => std.log.info("{s} is rank >= 5", .{ name }),
+    }
+}

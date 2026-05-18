@@ -1056,14 +1056,13 @@ pub fn encodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVa
             win_end = core_end + overlap;
         }
 
-        @memset(audio_chunk_slice.items(f32), 0);
         const win_audio_start = win_start * upsampling_ratio;
         const win_audio_end = win_end * upsampling_ratio;
         for (0..audio_channels) |i| {
             for (win_audio_start..win_audio_end) |j| {
                 const j_chunk = j - win_audio_start;
                 if (j < audio_frames) {
-                    audio_chunk_slice.items(f32)[i * chunk_audio_frames + j_chunk] = audio_frames.audio.items(f32)[i * audio_frames + j];
+                    audio_chunk_slice.items(f32)[i * chunk_audio_frames + j_chunk] = audio_input.audio.items(f32)[i * audio_frames + j];
                 }
             }
         }

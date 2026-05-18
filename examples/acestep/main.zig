@@ -285,23 +285,21 @@ pub fn runVaePipeline(zml_handler: *Zml_handler) !void {
     const input_audio = try importAudio(zml_handler, zml_handler.uris.audio);
     defer input_audio.deinit(zml_handler.allocator);
     
-    if (2 - (0 - 3) < 0) {
-        var acevae_encoder = try acevae_.AceVaeEncoder_handler.init(zml_handler, decode_t);
-        defer acevae_encoder.deinit(zml_handler.allocator);
-        
-        const input_latents = try inference.encodeAudioLatents(zml_handler, &acevae_encoder, input_audio, decode_t);
-        defer input_latents.deinit(zml_handler.allocator);
-        
-        acevae_encoder.unloadBuffers(zml_handler.allocator);
+    var acevae_encoder = try acevae_.AceVaeEncoder_handler.init(zml_handler, decode_t);
+    defer acevae_encoder.deinit(zml_handler.allocator);
     
-        var acevae = try acevae_.AceVaeDecoder_handler.init(zml_handler, decode_t);
-        defer acevae.deinit(zml_handler.allocator);
+    const input_latents = try inference.encodeAudioLatents(zml_handler, &acevae_encoder, input_audio, decode_t);
+    defer input_latents.deinit(zml_handler.allocator);
     
-        const decoded_audio = try inference.decodeAudioLatents(zml_handler, &acevae, input_latents, decode_t);
-        defer decoded_audio.deinit(zml_handler.allocator);
+    acevae_encoder.unloadBuffers(zml_handler.allocator);
 
-        acevae.unloadBuffers(zml_handler.allocator);
-    }
+    var acevae = try acevae_.AceVaeDecoder_handler.init(zml_handler, decode_t);
+    defer acevae.deinit(zml_handler.allocator);
+
+    const decoded_audio = try inference.decodeAudioLatents(zml_handler, &acevae, input_latents, decode_t);
+    defer decoded_audio.deinit(zml_handler.allocator);
+
+    acevae.unloadBuffers(zml_handler.allocator);
 
     //try exportAudio(zml_handler, decoded_audio, 0);
     try exportAudio(zml_handler, input_audio, 0);
