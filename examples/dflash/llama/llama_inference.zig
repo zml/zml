@@ -150,6 +150,7 @@ pub fn compileTargetPrefillHead(
     io: std.Io,
     platform: *const zml.Platform,
     target_model: model.Model,
+    output_hidden_len: u32,
     hidden: zml.Tensor,
     target_hidden: zml.Tensor,
     rng: zml.Tensor.Rng,
@@ -162,7 +163,7 @@ pub fn compileTargetPrefillHead(
         targetPrefillHead,
         .{
             target_model,
-            TargetVerifyContext{ .hidden_len = prefillHiddenLen(target_hidden) },
+            TargetVerifyContext{ .hidden_len = output_hidden_len },
             hidden,
             target_hidden,
             rng,

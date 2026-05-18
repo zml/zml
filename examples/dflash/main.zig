@@ -88,6 +88,7 @@ pub fn main(init: std.process.Init) !void {
         &models,
         &compiled,
         loaded_buffers,
+        prompt.prompt_len,
         input_tokens_buffer,
         token_index_buffer,
         target_kv_cache_buffers,
@@ -317,6 +318,7 @@ const CompiledExes = struct {
 fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCaches, prompt: TokenizedPrompt) !CompiledExes {
     const all_shardings = project.shardings.all();
 
+    const target_prefill_hidden_block_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, prompt.prompt_len);
     const target_hidden_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, prefill_seq_len);
     const target_prefill_hidden_tensor = zml.Tensor.init(.{
         .s = prompt.prompt_len,
@@ -344,7 +346,7 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
         project.platform,
         models.target_model,
         target_prefill_hidden_tensor,
-        target_hidden_tensor,
+        target_prefill_hidden_block_tensor,
         models.token_index_tensor,
         models.target_layer_kv_cache,
         models.target_attention,
@@ -355,8 +357,9 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
         project.io,
         project.platform,
         models.target_model,
+        prefill_seq_len,
         target_prefill_hidden_tensor,
-        target_hidden_tensor,
+        target_prefill_hidden_block_tensor,
         models.rng,
         models.sampling,
         &all_shardings,
@@ -480,6 +483,7 @@ fn runPrefill(
     models: *ModelsAndCaches,
     compiled: *CompiledExes,
     loaded_buffers: LoadedBuffers,
+    prompt_len: u32,
     input_tokens_buffer: zml.Buffer,
     token_index_buffer: zml.Buffer,
     target_kv_cache_buffers: []llama.LayerKvCache.Buffer,
@@ -498,7 +502,7 @@ fn runPrefill(
     compiled.target_prefill_embed_exe.call(embed_args, &embed_results);
 
     var hidden_buffer = embed_results.get(zml.Buffer);
-    var target_hidden_accum = try zeroDeviceBuffer(allocator, project, llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, prefill_seq_len));
+    var target_hidden_accum = try zeroDeviceBuffer(allocator, project, llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, prompt_len));
 
     var layer_args = try compiled.target_prefill_layer_exe.args(allocator);
     defer layer_args.deinit(allocator);
