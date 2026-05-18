@@ -45,9 +45,11 @@ const Mlp = struct {
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
         const up_proj = self.up_proj.forward(x);
-        var output = self.gate_proj.forward(x);
-        output = output.swiglu().mul(up_proj);
-        return self.down_proj.forward(output);
+        const gate = self.gate_proj.forward(x);
+
+        // for later: clamp
+
+        return self.down_proj.forward(gate.mul(up_proj));
     }
 };
 
@@ -172,9 +174,9 @@ pub fn main(init: std.process.Init) !void {
 
     // start with initialized version zand then change it to the pub const later
     const mlp: Mlp = .{
-        .up_proj = .init(mlp_view.withPrefix("up_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }), mlp_view.withPrefix("up_proj").maybeCreateTensor("bias", .{.dout}, .{ .dout = .model }), .d),
-        .gate_proj = .init(mlp_view.withPrefix("gate_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }), mlp_view.withPrefix("gate_proj").maybeCreateTensor("bias", .{.dout}, .{ .dout = .model }), .d),
-        .down_proj = .init(mlp_view.withPrefix("down_proj").createTensor("weight", .{ .d, .dout }, .{ .d = .replicated, .dout = .model }), mlp_view.withPrefix("down_proj").maybeCreateTensor("bias", .{.d}, .{ .d = .replicated }), .dout),
+        .up_proj = .init(mlp_view.withPrefix("up_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }), mlp_view.withPrefix("up_proj").maybeCreateTensor("bias", .{.dout}, .{ .dout = .model }), .d),
+        .gate_proj = .init(mlp_view.withPrefix("gate_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }), mlp_view.withPrefix("gate_proj").maybeCreateTensor("bias", .{.dout}, .{ .dout = .model }), .d),
+        .down_proj = .init(mlp_view.withPrefix("down_proj").createTensor("weight", .{ .d, .dout }, .{ .d = .replicated, .dout = .replicated }), mlp_view.withPrefix("down_proj").maybeCreateTensor("bias", .{.d}, .{ .d = .replicated }), .dout),
     };
 
     // at this point, weights are on disk and layer is initialized
