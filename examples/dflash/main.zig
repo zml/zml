@@ -293,12 +293,14 @@ fn initModelsAndCaches(project: *Project, prompt: TokenizedPrompt, args: Args) !
 
 const CompiledExes = struct {
     target_prefill_exe: zml.Exe,
+    prefill_draft_token_exe: DraftTokenExe,
     draft_token_exe: DraftTokenExe,
     target_verify_exe: zml.Exe,
 
     pub fn deinit(self: *CompiledExes, allocator: std.mem.Allocator) void {
         self.target_verify_exe.deinit();
         self.draft_token_exe.deinit(allocator);
+        self.prefill_draft_token_exe.deinit(allocator);
         self.target_prefill_exe.deinit();
     }
 };
@@ -323,32 +325,29 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
         &all_shardings,
     );
 
-    log.info("Compiling DFlash draft token...", .{});
-    const target_hidden_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, prefill_seq_len);
-    var draft_token_exe: DraftTokenExe = .{
-        .exe = try project.platform.compileFn(
-            allocator,
-            project.io,
-            draftTokens,
-            .{
-                DraftContext{ .len = prefill_seq_len },
-                models.draft_model,
-                models.target_model,
-                target_hidden_tensor,
-                models.block_tokens_tensor,
-                models.draft_kv_cache,
-                models.token_index_tensor,
-                models.active_context_len_tensor,
-                models.rng,
-                models.sampling,
-            },
-            .{ .shardings = &all_shardings },
-        ),
-        .args = undefined,
-        .results = undefined,
-    };
-    draft_token_exe.args = try draft_token_exe.exe.args(allocator);
-    draft_token_exe.results = try draft_token_exe.exe.results(allocator);
+    log.info("Compiling DFlash prefill draft token...", .{});
+    const prefill_target_hidden_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, prefill_seq_len);
+    var prefill_draft_token_exe = try compileDraftTokenExe(
+        allocator,
+        project,
+        models,
+        &all_shardings,
+        prefill_seq_len,
+        prefill_target_hidden_tensor,
+    );
+    errdefer prefill_draft_token_exe.deinit(allocator);
+
+    log.info("Compiling DFlash steady-state draft token...", .{});
+    const draft_target_hidden_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, models.block_size);
+    var draft_token_exe = try compileDraftTokenExe(
+        allocator,
+        project,
+        models,
+        &all_shardings,
+        models.block_size,
+        draft_target_hidden_tensor,
+    );
+    errdefer draft_token_exe.deinit(allocator);
 
     log.info("Compiling target verify...", .{});
     const target_verify_exe = try llama_inference.compileTargetVerify(
@@ -357,7 +356,7 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
         project.platform,
         models.target_model,
         models.target_layers,
-        prefill_seq_len,
+        models.block_size,
         models.block_tokens_tensor,
         models.token_index_tensor,
         models.target_kv_cache,
@@ -369,9 +368,49 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
 
     return .{
         .target_prefill_exe = target_prefill_exe,
+        .prefill_draft_token_exe = prefill_draft_token_exe,
         .draft_token_exe = draft_token_exe,
         .target_verify_exe = target_verify_exe,
     };
+}
+
+fn compileDraftTokenExe(
+    allocator: std.mem.Allocator,
+    project: *Project,
+    models: ModelsAndCaches,
+    shardings: []const zml.Sharding,
+    context_len: u32,
+    target_hidden_tensor: zml.Tensor,
+) !DraftTokenExe {
+    var draft_token_exe: DraftTokenExe = .{
+        .exe = try project.platform.compileFn(
+            allocator,
+            project.io,
+            draftTokens,
+            .{
+                DraftContext{ .len = context_len },
+                models.draft_model,
+                models.target_model,
+                target_hidden_tensor,
+                models.block_tokens_tensor,
+                models.draft_kv_cache,
+                models.token_index_tensor,
+                models.active_context_len_tensor,
+                models.rng,
+                models.sampling,
+            },
+            .{ .shardings = shardings },
+        ),
+        .args = undefined,
+        .results = undefined,
+    };
+    errdefer draft_token_exe.exe.deinit();
+
+    draft_token_exe.args = try draft_token_exe.exe.args(allocator);
+    errdefer draft_token_exe.args.deinit(allocator);
+
+    draft_token_exe.results = try draft_token_exe.exe.results(allocator);
+    return draft_token_exe;
 }
 
 const LoadedBuffers = struct {
@@ -591,8 +630,12 @@ fn runSpeculativeDecoding(
 
     while (start < prompt.max_seq_len and !stopped_on_eos) : (step += 1) {
         const context_len = start - draft_cache_base;
-        stdx.debug.assert(context_len >= 1 and context_len <= prefill_seq_len, "invalid DFlash context length {}", .{context_len});
-        const draft_exe = &compiled.draft_token_exe;
+        const draft_exe = if (draft_cache_base == 0)
+            &compiled.prefill_draft_token_exe
+        else
+            &compiled.draft_token_exe;
+        const max_context_len = if (draft_cache_base == 0) prefill_seq_len else models.block_size;
+        stdx.debug.assert(context_len >= 1 and context_len <= max_context_len, "invalid DFlash context length {}", .{context_len});
 
         @memset(block_tokens, project.parsed_config.value.dflash_config.mask_token_id.?);
         block_tokens[0] = generated.items[@intCast(start)];
