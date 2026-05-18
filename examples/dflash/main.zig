@@ -293,13 +293,12 @@ fn initModelsAndCaches(project: *Project, prompt: TokenizedPrompt, args: Args) !
 
 const CompiledExes = struct {
     target_prefill_exe: zml.Exe,
-    draft_token_exes: []DraftTokenExe,
+    draft_token_exe: DraftTokenExe,
     target_verify_exe: zml.Exe,
 
     pub fn deinit(self: *CompiledExes, allocator: std.mem.Allocator) void {
         self.target_verify_exe.deinit();
-        for (self.draft_token_exes) |*draft_exe| draft_exe.deinit(allocator);
-        allocator.free(self.draft_token_exes);
+        self.draft_token_exe.deinit(allocator);
         self.target_prefill_exe.deinit();
     }
 };
@@ -324,18 +323,15 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
         &all_shardings,
     );
 
-    log.info("Compiling DFlash draft token variants...", .{});
-    const draft_context_lens = [_]u32{ 1, 2, 3, 5, 10, prefill_seq_len };
-    const draft_token_exes = try allocator.alloc(DraftTokenExe, draft_context_lens.len);
+    log.info("Compiling DFlash draft token...", .{});
     const target_hidden_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, prefill_seq_len);
-    for (draft_token_exes, draft_context_lens) |*draft_exe, context_len| {
-        draft_exe.context_len = context_len;
-        draft_exe.exe = try project.platform.compileFn(
+    var draft_token_exe: DraftTokenExe = .{
+        .exe = try project.platform.compileFn(
             allocator,
             project.io,
             draftTokens,
             .{
-                DraftContext{ .len = context_len },
+                DraftContext{ .len = prefill_seq_len },
                 models.draft_model,
                 models.target_model,
                 target_hidden_tensor,
@@ -347,10 +343,12 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
                 models.sampling,
             },
             .{ .shardings = &all_shardings },
-        );
-        draft_exe.args = try draft_exe.exe.args(allocator);
-        draft_exe.results = try draft_exe.exe.results(allocator);
-    }
+        ),
+        .args = undefined,
+        .results = undefined,
+    };
+    draft_token_exe.args = try draft_token_exe.exe.args(allocator);
+    draft_token_exe.results = try draft_token_exe.exe.results(allocator);
 
     log.info("Compiling target verify...", .{});
     const target_verify_exe = try llama_inference.compileTargetVerify(
@@ -371,7 +369,7 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
 
     return .{
         .target_prefill_exe = target_prefill_exe,
-        .draft_token_exes = draft_token_exes,
+        .draft_token_exe = draft_token_exe,
         .target_verify_exe = target_verify_exe,
     };
 }
@@ -594,7 +592,7 @@ fn runSpeculativeDecoding(
     while (start < prompt.max_seq_len and !stopped_on_eos) : (step += 1) {
         const context_len = start - draft_cache_base;
         stdx.debug.assert(context_len >= 1 and context_len <= prefill_seq_len, "invalid DFlash context length {}", .{context_len});
-        const selected_draft_exe = findDraftTokenExe(compiled.draft_token_exes, context_len);
+        const draft_exe = &compiled.draft_token_exe;
 
         @memset(block_tokens, project.parsed_config.value.dflash_config.mask_token_id.?);
         block_tokens[0] = generated.items[@intCast(start)];
@@ -625,7 +623,7 @@ fn runSpeculativeDecoding(
         );
         defer draft_active_context_len_buffer.deinit();
 
-        selected_draft_exe.args.set(.{
+        draft_exe.args.set(.{
             loaded_buffers.model_buffers,
             loaded_buffers.target_buffers,
             target_hidden_block_buffer,
@@ -635,9 +633,9 @@ fn runSpeculativeDecoding(
             draft_active_context_len_buffer,
             rng_buffer.*,
         });
-        selected_draft_exe.exe.call(selected_draft_exe.args, &selected_draft_exe.results);
+        draft_exe.exe.call(draft_exe.args, &draft_exe.results);
 
-        var draft_token_buffer, var draft_logits_buffer, var updated_draft_kv_cache_buffers, var updated_rng_buffer = selected_draft_exe.results.get(struct {
+        var draft_token_buffer, var draft_logits_buffer, var updated_draft_kv_cache_buffers, var updated_rng_buffer = draft_exe.results.get(struct {
             zml.Buffer,
             zml.Buffer,
             dflash.KvCache.Buffer,
@@ -812,7 +810,6 @@ const DraftContext = struct {
 };
 
 const DraftTokenExe = struct {
-    context_len: u32,
     exe: zml.Exe,
     args: zml.Exe.Arguments,
     results: zml.Exe.Results,
@@ -823,13 +820,6 @@ const DraftTokenExe = struct {
         self.exe.deinit();
     }
 };
-
-fn findDraftTokenExe(draft_token_exes: []DraftTokenExe, context_len: u32) *DraftTokenExe {
-    for (draft_token_exes) |*draft_exe| {
-        if (context_len <= draft_exe.context_len) return draft_exe;
-    }
-    std.debug.panic("no DFlash draft executable compiled for context length {}", .{context_len});
-}
 
 fn draftTokens(
     context: DraftContext,
