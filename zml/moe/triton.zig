@@ -274,61 +274,95 @@ fn callFusedMoe(
     num_valid_tokens: i64,
     output_shape: Shape,
 ) Tensor {
-    const block_size_m: i64 = @intCast(cfg.block_size_m);
-    const block_size_n: i64 = @intCast(cfg.block_size_n);
-    const m_tokens = a.dim(0);
-    const em_effective = if (m_tokens < block_size_m)
-        @min(max_num_tokens_padded, num_valid_tokens * block_size_m)
-    else
-        max_num_tokens_padded;
-    const grid_x =
-        (std.math.divCeil(i64, em_effective, block_size_m) catch unreachable) *
-        (std.math.divCeil(i64, b.dim(1), block_size_n) catch unreachable);
-
-    const stride_asm: i64 = if (cfg.b_scale_dtype != null and a_scale.rank() == 2) a_scale.dim(1) else 0;
-    const stride_ask: i64 = if (cfg.b_scale_dtype != null and a_scale.rank() == 2) 1 else 0;
-    const stride_bse: i64 = if (cfg.b_scale_dtype != null and b_scale.rank() == 3)
-        b_scale.dim(1) * b_scale.dim(2)
-    else
-        0;
-    const stride_bsk: i64 = if (cfg.b_scale_dtype != null and b_scale.rank() == 3) 1 else 0;
-    const stride_bsn: i64 = if (cfg.b_scale_dtype != null and b_scale.rank() == 3) b_scale.dim(2) else 0;
-
-    return kernels.FusedMoe.Kernel.call(
+    return zml.ops.manualComputation(
         .{
-            .a_ptr = a,
-            .b_ptr = b,
-            .b_bias_ptr = b_bias,
-            .a_scale_ptr = a_scale,
-            .b_scale_ptr = b_scale,
-            .topk_weights_ptr = topk_weights,
-            .sorted_token_ids_ptr = sorted_token_ids,
-            .expert_ids_ptr = expert_ids,
-            .num_tokens_post_padded_ptr = num_tokens_post_padded,
-            .N_ptr = Tensor.constant(.{ .i64 = b.dim(1) }).reshape(.{1}),
-            .K_ptr = Tensor.constant(.{ .i64 = b.dim(2) }).reshape(.{1}),
-            .EM_ptr = Tensor.constant(.{ .i64 = em_effective }).reshape(.{1}),
-            .num_valid_tokens_ptr = Tensor.constant(.{ .i64 = num_valid_tokens }).reshape(.{1}),
-            .stride_am_ptr = Tensor.constant(.{ .i64 = a.dim(1) }).reshape(.{1}),
-            .stride_be_ptr = Tensor.constant(.{ .i64 = b.dim(1) * b.dim(2) }).reshape(.{1}),
-            .stride_bn_ptr = Tensor.constant(.{ .i64 = b.dim(2) }).reshape(.{1}),
-            .stride_cm_ptr = Tensor.constant(.{ .i64 = b.dim(.out) }).reshape(.{1}),
-            .stride_asm_ptr = Tensor.constant(.{ .i64 = stride_asm }).reshape(.{1}),
-            .stride_ask_ptr = Tensor.constant(.{ .i64 = stride_ask }).reshape(.{1}),
-            .stride_bse_ptr = Tensor.constant(.{ .i64 = stride_bse }).reshape(.{1}),
-            .stride_bsk_ptr = Tensor.constant(.{ .i64 = stride_bsk }).reshape(.{1}),
-            .stride_bsn_ptr = Tensor.constant(.{ .i64 = stride_bsn }).reshape(.{1}),
-            .stride_bbe_ptr = Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
-            .stride_bbn_ptr = Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
+            a,
+            b,
+            b_bias,
+            a_scale,
+            b_scale,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
         },
-        .{ .c = output_shape },
+        output_shape,
         .{
             .cfg = cfg,
-            .grid = .{ @intCast(grid_x), 1, 1 },
-            .num_warps = @intCast(options.num_warps),
-            .num_stages = @intCast(options.num_stages),
+            .options = options,
+            .max_num_tokens_padded = max_num_tokens_padded,
+            .num_valid_tokens = num_valid_tokens,
         },
-    ).c;
+        (struct {
+            fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_shape_: zml.Shape) zml.Tensor {
+                const a_ = sharded_inputs[0];
+                const b_ = sharded_inputs[1];
+                const b_bias_ = sharded_inputs[2];
+                const a_scale_ = sharded_inputs[3];
+                const b_scale_ = sharded_inputs[4];
+                const topk_weights_ = sharded_inputs[5];
+                const sorted_token_ids_ = sharded_inputs[6];
+                const expert_ids_ = sharded_inputs[7];
+                const num_tokens_post_padded_ = sharded_inputs[8];
+
+                const block_size_m: i64 = @intCast(ctx_.cfg.block_size_m);
+                const block_size_n: i64 = @intCast(ctx_.cfg.block_size_n);
+                const m_tokens = a_.dim(0);
+                const em_effective = if (m_tokens < block_size_m)
+                    @min(ctx_.max_num_tokens_padded, ctx_.num_valid_tokens * block_size_m)
+                else
+                    ctx_.max_num_tokens_padded;
+                const grid_x =
+                    (std.math.divCeil(i64, em_effective, block_size_m) catch unreachable) *
+                    (std.math.divCeil(i64, b_.dim(1), block_size_n) catch unreachable);
+
+                const stride_asm: i64 = if (ctx_.cfg.b_scale_dtype != null and a_scale_.rank() == 2) a_scale_.dim(1) else 0;
+                const stride_ask: i64 = if (ctx_.cfg.b_scale_dtype != null and a_scale_.rank() == 2) 1 else 0;
+                const stride_bse: i64 = if (ctx_.cfg.b_scale_dtype != null and b_scale_.rank() == 3)
+                    b_scale_.dim(1) * b_scale_.dim(2)
+                else
+                    0;
+                const stride_bsk: i64 = if (ctx_.cfg.b_scale_dtype != null and b_scale_.rank() == 3) 1 else 0;
+                const stride_bsn: i64 = if (ctx_.cfg.b_scale_dtype != null and b_scale_.rank() == 3) b_scale_.dim(2) else 0;
+
+                return kernels.FusedMoe.Kernel.call(
+                    .{
+                        .a_ptr = a_,
+                        .b_ptr = b_,
+                        .b_bias_ptr = b_bias_,
+                        .a_scale_ptr = a_scale_,
+                        .b_scale_ptr = b_scale_,
+                        .topk_weights_ptr = topk_weights_,
+                        .sorted_token_ids_ptr = sorted_token_ids_,
+                        .expert_ids_ptr = expert_ids_,
+                        .num_tokens_post_padded_ptr = num_tokens_post_padded_,
+                        .N_ptr = Tensor.constant(.{ .i64 = b_.dim(1) }).reshape(.{1}),
+                        .K_ptr = Tensor.constant(.{ .i64 = b_.dim(2) }).reshape(.{1}),
+                        .EM_ptr = Tensor.constant(.{ .i64 = em_effective }).reshape(.{1}),
+                        .num_valid_tokens_ptr = Tensor.constant(.{ .i64 = ctx_.num_valid_tokens }).reshape(.{1}),
+                        .stride_am_ptr = Tensor.constant(.{ .i64 = a_.dim(1) }).reshape(.{1}),
+                        .stride_be_ptr = Tensor.constant(.{ .i64 = b_.dim(1) * b_.dim(2) }).reshape(.{1}),
+                        .stride_bn_ptr = Tensor.constant(.{ .i64 = b_.dim(2) }).reshape(.{1}),
+                        .stride_cm_ptr = Tensor.constant(.{ .i64 = b_.dim(.out) }).reshape(.{1}),
+                        .stride_asm_ptr = Tensor.constant(.{ .i64 = stride_asm }).reshape(.{1}),
+                        .stride_ask_ptr = Tensor.constant(.{ .i64 = stride_ask }).reshape(.{1}),
+                        .stride_bse_ptr = Tensor.constant(.{ .i64 = stride_bse }).reshape(.{1}),
+                        .stride_bsk_ptr = Tensor.constant(.{ .i64 = stride_bsk }).reshape(.{1}),
+                        .stride_bsn_ptr = Tensor.constant(.{ .i64 = stride_bsn }).reshape(.{1}),
+                        .stride_bbe_ptr = Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
+                        .stride_bbn_ptr = Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
+                    },
+                    .{ .c = output_shape_ },
+                    .{
+                        .cfg = ctx_.cfg,
+                        .grid = .{ @intCast(grid_x), 1, 1 },
+                        .num_warps = @intCast(ctx_.options.num_warps),
+                        .num_stages = @intCast(ctx_.options.num_stages),
+                    },
+                ).c;
+            }
+        }).body,
+    );
 }
 
 fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct { Tensor, Tensor, Tensor } {
@@ -354,75 +388,115 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
     var num_tokens_post_padded = Tensor.zeroes(Shape.init(.{ .g = 1 }, .i32));
 
     {
-        const align_outs = kernels.MoeAlignBlockSize.Kernel.call(
+        const align_outs = zml.ops.manualComputation(
+            .{ flat_experts, sorted_token_ids, expert_ids, num_tokens_post_padded, cumsums },
+            .{ sorted_token_ids.shape(), expert_ids.shape(), num_tokens_post_padded.shape(), cumsums.shape() },
             .{
-                .topk_ids_ptr = flat_experts,
-                .sorted_token_ids_ptr = sorted_token_ids,
-                .expert_ids_ptr = expert_ids,
-                .num_tokens_post_pad_ptr = num_tokens_post_padded,
-                .cumsum_ptr = cumsums,
+                .num_assignments = num_assignments,
+                .num_experts = num_experts,
+                .padded_num_experts = padded_num_experts,
+                .max_num_tokens_padded = max_num_tokens_padded,
+                .max_num_m_blocks = max_num_m_blocks,
+                .block_size_m = block_size_m,
             },
-            .{
-                .sorted_token_ids = sorted_token_ids.shape(),
-                .expert_ids = expert_ids.shape(),
-                .num_tokens_post_pad = num_tokens_post_padded.shape(),
-                .cumsum = cumsums.shape(),
-            },
-            .{
-                .cfg = .{
-                    .numel = @intCast(num_assignments),
-                    .num_experts = @intCast(num_experts),
-                    .padded_num_experts = @intCast(padded_num_experts),
-                    .max_num_tokens_padded = @intCast(max_num_tokens_padded),
-                    .max_num_m_blocks = @intCast(max_num_m_blocks),
-                    .block_size_m = @intCast(block_size_m),
-                    .hist_block = 256,
-                },
-                .grid = .{ 2, 1, 1 },
-                .num_stages = 1,
-                .num_warps = 8,
-                .output_operand_aliases = &.{
-                    .{ .output_index = 0, .operand_index = 1 },
-                    .{ .output_index = 1, .operand_index = 2 },
-                    .{ .output_index = 2, .operand_index = 3 },
-                    .{ .output_index = 3, .operand_index = 4 },
-                },
-            },
+            (struct {
+                fn body(ctx_: anytype, allocator: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_shapes: []const zml.Shape) []const zml.Tensor {
+                    const outs = kernels.MoeAlignBlockSize.Kernel.call(
+                        .{
+                            .topk_ids_ptr = sharded_inputs[0],
+                            .sorted_token_ids_ptr = sharded_inputs[1],
+                            .expert_ids_ptr = sharded_inputs[2],
+                            .num_tokens_post_pad_ptr = sharded_inputs[3],
+                            .cumsum_ptr = sharded_inputs[4],
+                        },
+                        .{
+                            .sorted_token_ids = output_shapes[0],
+                            .expert_ids = output_shapes[1],
+                            .num_tokens_post_pad = output_shapes[2],
+                            .cumsum = output_shapes[3],
+                        },
+                        .{
+                            .cfg = .{
+                                .numel = @intCast(ctx_.num_assignments),
+                                .num_experts = @intCast(ctx_.num_experts),
+                                .padded_num_experts = @intCast(ctx_.padded_num_experts),
+                                .max_num_tokens_padded = @intCast(ctx_.max_num_tokens_padded),
+                                .max_num_m_blocks = @intCast(ctx_.max_num_m_blocks),
+                                .block_size_m = @intCast(ctx_.block_size_m),
+                                .hist_block = 256,
+                            },
+                            .grid = .{ 2, 1, 1 },
+                            .num_stages = 1,
+                            .num_warps = 8,
+                            .output_operand_aliases = &.{
+                                .{ .output_index = 0, .operand_index = 1 },
+                                .{ .output_index = 1, .operand_index = 2 },
+                                .{ .output_index = 2, .operand_index = 3 },
+                                .{ .output_index = 3, .operand_index = 4 },
+                            },
+                        },
+                    );
+                    const result = allocator.alloc(zml.Tensor, 4) catch unreachable;
+                    result[0] = outs.sorted_token_ids;
+                    result[1] = outs.expert_ids;
+                    result[2] = outs.num_tokens_post_pad;
+                    result[3] = outs.cumsum;
+                    return result;
+                }
+            }).body,
         );
-        sorted_token_ids = align_outs.sorted_token_ids;
-        expert_ids = align_outs.expert_ids;
-        num_tokens_post_padded = align_outs.num_tokens_post_pad;
-        cumsums = align_outs.cumsum;
+        sorted_token_ids = align_outs[0];
+        expert_ids = align_outs[1];
+        num_tokens_post_padded = align_outs[2];
+        cumsums = align_outs[3];
     }
 
     {
-        const sort_outs = kernels.CountAndSortExpertTokens.Kernel.call(
+        const sort_outs = zml.ops.manualComputation(
+            .{ flat_experts, sorted_token_ids, cumsums },
+            .{ sorted_token_ids.shape(), cumsums.shape() },
             .{
-                .topk_ids_ptr = flat_experts,
-                .sorted_token_ids_ptr = sorted_token_ids,
-                .cumsum_ptr = cumsums,
+                .num_assignments = num_assignments,
+                .num_experts = num_experts,
+                .sort_block_size = sort_block_size,
+                .sort_grid_x = sort_grid_x,
             },
-            .{
-                .sorted_token_ids = sorted_token_ids.shape(),
-                .cumsum = cumsums.shape(),
-            },
-            .{
-                .cfg = .{
-                    .numel = @intCast(num_assignments),
-                    .num_experts = @intCast(num_experts),
-                    .sort_block_size = @intCast(sort_block_size),
-                },
-                .grid = .{ @intCast(sort_grid_x), 1, 1 },
-                .num_stages = 1,
-                .num_warps = 4,
-                .output_operand_aliases = &.{
-                    .{ .output_index = 0, .operand_index = 1 },
-                    .{ .output_index = 1, .operand_index = 2 },
-                },
-            },
+            (struct {
+                fn body(ctx_: anytype, allocator: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_shapes: []const zml.Shape) []const zml.Tensor {
+                    const outs = kernels.CountAndSortExpertTokens.Kernel.call(
+                        .{
+                            .topk_ids_ptr = sharded_inputs[0],
+                            .sorted_token_ids_ptr = sharded_inputs[1],
+                            .cumsum_ptr = sharded_inputs[2],
+                        },
+                        .{
+                            .sorted_token_ids = output_shapes[0],
+                            .cumsum = output_shapes[1],
+                        },
+                        .{
+                            .cfg = .{
+                                .numel = @intCast(ctx_.num_assignments),
+                                .num_experts = @intCast(ctx_.num_experts),
+                                .sort_block_size = @intCast(ctx_.sort_block_size),
+                            },
+                            .grid = .{ @intCast(ctx_.sort_grid_x), 1, 1 },
+                            .num_stages = 1,
+                            .num_warps = 4,
+                            .output_operand_aliases = &.{
+                                .{ .output_index = 0, .operand_index = 1 },
+                                .{ .output_index = 1, .operand_index = 2 },
+                            },
+                        },
+                    );
+                    const result = allocator.alloc(zml.Tensor, 2) catch unreachable;
+                    result[0] = outs.sorted_token_ids;
+                    result[1] = outs.cumsum;
+                    return result;
+                }
+            }).body,
         );
-        sorted_token_ids = sort_outs.sorted_token_ids;
-        cumsums = sort_outs.cumsum;
+        sorted_token_ids = sort_outs[0];
+        cumsums = sort_outs[1];
     }
 
     return .{ sorted_token_ids, expert_ids, num_tokens_post_padded };
@@ -436,32 +510,47 @@ fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64) struct { Tensor, Tensor 
     const quantized = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .feature = x.dim(1) }, .f8e4m3fn));
     const scales = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .group = groups_per_row }, .bf16));
 
-    const outs = kernels.PerTokenGroupQuantFp8.Kernel.call(
-        .{
-            .y_ptr = x,
-            .group_size_ptr = Tensor.constant(.{ .i64 = group_size }).reshape(.{1}),
-            .y_num_columns_ptr = Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
-            .y_row_stride_ptr = Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
-            .eps_ptr = Tensor.scalar(1e-6, .f32),
-        },
-        .{ .y_q = quantized.shape(), .y_s = scales.shape() },
-        .{
-            .cfg = .{
-                .input_dtype = toDType(x.dtype()),
-                .output_dtype = .f8e4m3fn,
-                .scale_dtype = .bf16,
-                .block = @intCast(group_size),
-                .fp8_min = -448.0,
-                .fp8_max = 448.0,
-                .use_ue8m0 = false,
-            },
-            .grid = .{ @intCast(x.dim(0) * groups_per_row), 1, 1 },
-            .num_stages = 1,
-            .num_warps = 1,
-        },
+    const outs = zml.ops.manualComputation(
+        .{x},
+        .{ quantized.shape(), scales.shape() },
+        .{ .group_size = group_size },
+        (struct {
+            fn body(ctx_: anytype, allocator: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_shapes: []const zml.Shape) []const zml.Tensor {
+                const x_ = sharded_inputs[0];
+                const groups_per_row_ = @divExact(x_.dim(1), ctx_.group_size);
+                const outs_ = kernels.PerTokenGroupQuantFp8.Kernel.call(
+                    .{
+                        .y_ptr = x_,
+                        .group_size_ptr = Tensor.constant(.{ .i64 = ctx_.group_size }).reshape(.{1}),
+                        .y_num_columns_ptr = Tensor.constant(.{ .i64 = x_.dim(1) }).reshape(.{1}),
+                        .y_row_stride_ptr = Tensor.constant(.{ .i64 = x_.dim(1) }).reshape(.{1}),
+                        .eps_ptr = Tensor.scalar(1e-6, .f32),
+                    },
+                    .{ .y_q = output_shapes[0], .y_s = output_shapes[1] },
+                    .{
+                        .cfg = .{
+                            .input_dtype = toDType(x_.dtype()),
+                            .output_dtype = .f8e4m3fn,
+                            .scale_dtype = .bf16,
+                            .block = @intCast(ctx_.group_size),
+                            .fp8_min = -448.0,
+                            .fp8_max = 448.0,
+                            .use_ue8m0 = false,
+                        },
+                        .grid = .{ @intCast(x_.dim(0) * groups_per_row_), 1, 1 },
+                        .num_stages = 1,
+                        .num_warps = 1,
+                    },
+                );
+                const result = allocator.alloc(zml.Tensor, 2) catch unreachable;
+                result[0] = outs_.y_q;
+                result[1] = outs_.y_s;
+                return result;
+            }
+        }).body,
     );
 
-    return .{ outs.y_q, outs.y_s };
+    return .{ outs[0], outs[1] };
 }
 
 // =============================================================================
