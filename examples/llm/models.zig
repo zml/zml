@@ -10,6 +10,7 @@ pub const lfm2 = @import("models/lfm2.zig");
 pub const llama = @import("models/llama.zig");
 pub const qwen3_5 = @import("models/qwen3_5.zig");
 pub const qwen3_5_moe = @import("models/qwen3_5_moe.zig");
+pub const deepseek_v4 = @import("models/deepseek_v4.zig");
 
 const log = std.log.scoped(.llm);
 
@@ -18,6 +19,7 @@ pub const ModelType = enum {
     llama,
     qwen3_5,
     qwen3_5_moe,
+    deepseek_v4,
 };
 
 const RawConfig = struct {
@@ -29,6 +31,7 @@ pub const LoadedModel = union(ModelType) {
     llama: llama.LoadedModel,
     qwen3_5: qwen3_5.LoadedModel,
     qwen3_5_moe: qwen3_5_moe.LoadedModel,
+    deepseek_v4: deepseek_v4.LoadedModel,
 
     pub fn load(
         allocator: std.mem.Allocator,
@@ -45,6 +48,7 @@ pub const LoadedModel = union(ModelType) {
             .llama => .{ .llama = try llama.LoadedModel.init(allocator, io, repo, store, generation) },
             .qwen3_5 => .{ .qwen3_5 = try qwen3_5.LoadedModel.init(allocator, io, repo, store, generation) },
             .qwen3_5_moe => .{ .qwen3_5_moe = try qwen3_5_moe.LoadedModel.init(allocator, io, repo, store, generation) },
+            .deepseek_v4 => .{ .deepseek_v4 = try deepseek_v4.LoadedModel.init(allocator, io, repo, store, generation) },
         };
     }
 
@@ -60,6 +64,7 @@ pub const LoadedModel = union(ModelType) {
             .llama => |*m| .{ .llama = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
             .qwen3_5 => |*m| .{ .qwen3_5 = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
             .qwen3_5_moe => |*m| .{ .qwen3_5_moe = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
+            .deepseek_v4 => |*m| .{ .deepseek_v4 = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
         };
     }
 
@@ -79,6 +84,10 @@ pub const LoadedModel = union(ModelType) {
             },
             .qwen3_5_moe => |*loaded_model| switch (buffers.*) {
                 .qwen3_5_moe => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
+                else => unreachable,
+            },
+            .deepseek_v4 => |*loaded_model| switch (buffers.*) {
+                .deepseek_v4 => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
                 else => unreachable,
             },
         }
@@ -131,6 +140,15 @@ pub const LoadedModel = union(ModelType) {
                 seqlen,
                 progress,
             ) },
+            .deepseek_v4 => |*m| .{ .deepseek_v4 = try m.compile(
+                allocator,
+                io,
+                platform,
+                backend,
+                shardings,
+                seqlen,
+                progress,
+            ) },
         };
         return .{
             .inner = inner,
@@ -145,6 +163,7 @@ pub const CompiledModel = struct {
         llama: llama.inference.CompiledModel,
         qwen3_5: qwen3_5.inference.CompiledModel,
         qwen3_5_moe: qwen3_5_moe.inference.CompiledModel,
+        deepseek_v4: deepseek_v4.inference.CompiledModel,
     };
 
     inner: Inner,
@@ -156,6 +175,7 @@ pub const CompiledModel = struct {
             .llama => |*b| b.deinit(),
             .qwen3_5 => |*b| b.deinit(),
             .qwen3_5_moe => |*b| b.deinit(),
+            .deepseek_v4 => |*b| b.deinit(),
         }
     }
 
@@ -212,6 +232,17 @@ pub const CompiledModel = struct {
                 ) },
                 .seqlen = self.seqlen,
             },
+            .deepseek_v4 => |*compiled| .{
+                .inner = .{ .deepseek_v4 = try deepseek_v4.Session.init(
+                    allocator,
+                    io,
+                    platform,
+                    tokenizer,
+                    compiled,
+                    &model_buffers.deepseek_v4,
+                ) },
+                .seqlen = self.seqlen,
+            },
         };
     }
 };
@@ -221,6 +252,7 @@ pub const Buffers = union(ModelType) {
     llama: llama.Buffers,
     qwen3_5: qwen3_5.Buffers,
     qwen3_5_moe: qwen3_5_moe.Buffers,
+    deepseek_v4: deepseek_v4.Buffers,
 };
 
 pub const Session = struct {
@@ -229,6 +261,7 @@ pub const Session = struct {
         llama: llama.Session,
         qwen3_5: qwen3_5.Session,
         qwen3_5_moe: qwen3_5_moe.Session,
+        deepseek_v4: deepseek_v4.Session,
     };
 
     inner: Inner,

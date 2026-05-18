@@ -1,0 +1,11 @@
+pub const inference = @import("deepseek_v4/inference.zig");
+pub const CompilationParameters = inference.CompilationParameters;
+pub const CompilationOptions = inference.CompilationParameters;
+pub const CompiledModel = inference.CompiledModel;
+pub const model = @import("deepseek_v4/model.zig");
+pub const Config = model.Config;
+pub const Buffers = model.Buffers;
+pub const Model = model.Model;
+pub const LoadedModel = model.LoadedModel;
+pub const session = @import("deepseek_v4/session.zig");
+pub const Session = session.Session;
