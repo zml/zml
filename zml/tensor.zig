@@ -1394,9 +1394,13 @@ pub const Tensor = struct {
         gate_path = gate_path.add(c.broad(gate_path.shape()));
 
 <<<<<<< HEAD
+<<<<<<< HEAD
         return value_path.mul(sigmoid_tensor).outer(gate_path);
 =======
         return value_path.mul(sigmoid_tensor).mul(gate_path);
+=======
+        return value_path.mul(sigmoid_tensor).outer(gate_path);
+>>>>>>> 0596cfba (zml/tensor: fix duplicate tagging in outer product)
     }
 
     test swiglu {
@@ -1406,9 +1410,9 @@ pub const Tensor = struct {
         const input: Tensor = .init(.{ .d = 4 }, .f32);
         const beta = 3;
         const w: Tensor = .init(.{ .c = 3, .d = 4 }, .f32);
-        const v: Tensor = .init(.{ .c = 3, .d = 4 }, .f32);
+        const v: Tensor = .init(.{ .e = 3, .d = 4 }, .f32);
         const b: Tensor = .init(.{ .c = 3 }, .f32);
-        const c: Tensor = .init(.{ .c = 3 }, .f32);
+        const c: Tensor = .init(.{ .e = 3 }, .f32);
 
         var exe = try zml.module.compile(
             std.testing.allocator,
