@@ -127,7 +127,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Registries
     const repo = try zml.safetensors.resolveModelRepo(vfs_io, weights_path_raw);
-    var model_registry = try .fromRepo(allocator, vfs_io, repo);
+    var model_registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, vfs_io, repo);
     defer model_registry.deinit();
     var activations_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, vfs_io, activations_path);
     defer activations_registry.deinit();
@@ -154,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
     defer parsed.deinit();
 
     ////////////////////////////////////////////////////////////////
-    const current_layer = "model.layers.46.mlp";
+    const current_layer = "model.layers.45.mlp";
     ////////////////////////////////////////////////////////////////
     const mlp_view = model_store.view().withPrefix(current_layer);
 
