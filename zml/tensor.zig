@@ -1450,8 +1450,12 @@ pub const Tensor = struct {
         var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.swiglu, .{ input_buffer, w_buffer, v_buffer, b_buffer, c_buffer });
         defer res.deinit();
 
-        const output_shape = Shape.init(.{ .c = 3 }, .f32);
-        const expectation: zml.Slice = .init(output_shape, std.mem.sliceAsBytes(&[3]f32{ 23.9998, 120.0, 7.9802 }));
+        const output_shape = Shape.init(.{ .c = 3, .e = 3 }, .f32);
+        const expectation: zml.Slice = .init(output_shape, std.mem.sliceAsBytes(&[3][3]f32{
+            .{ 23.999856, 39.99976, 15.999904 },
+            .{ 72.000000, 120.000000, 48.000000 },
+            .{ 11.970324, 19.950540, 7.980216 },
+        }));
 
         try zml.testing.expectClose(std.testing.io, expectation, res, .{});
 >>>>>>> 8d72489d (zml/tensor: test swiglu)
