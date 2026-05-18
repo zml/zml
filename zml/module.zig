@@ -44,7 +44,7 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
     return mlir_global_registry.?;
 }
 pub const CompilationOptions = struct {
-    shardings: []const Sharding = &.{},
+    shardings: []const *const Sharding = &.{},
     // If null, will be initialized from the target
     partitioner: ?Sharding.Partitioner = null,
     // Debugging options
