@@ -67,6 +67,15 @@ zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(
     zig_version = "0.16.0",
 )
+zig.toolchain_variant(
+    name = "remote",
+    target_settings = ["//bazel/zig_toolchain_config:local_execution_disabled"],
+)
+zig.toolchain_variant(
+    name = "local",
+    exec_compatible_with = ["//bazel/zig_toolchain_config:local_zig_execution"],
+    target_settings = ["//bazel/zig_toolchain_config:local_execution_enabled"],
+)
 zig.mirrors(urls = [
     "https://pkg.machengine.org/zig",
     "https://zigmirror.hryx.net/zig",
@@ -83,20 +92,11 @@ zig.mirrors(urls = [
     "https://fs.liujiacai.net/zigbuilds",
     "https://ziglang.org/builds/",
 ])
-use_repo(
-    zig,
-    "zig_0.16.0_aarch64-linux",
-    "zig_0.16.0_aarch64-macos",
-    "zig_0.16.0_aarch64-windows",
-    "zig_0.16.0_x86_64-linux",
-    "zig_0.16.0_x86_64-macos",
-    "zig_0.16.0_x86_64-windows",
-    "zig_toolchains",
-)
+use_repo(zig, "zig_toolchains")
 
 register_toolchains("@rules_zig//zig/target:all")
 
-register_toolchains("//bazel/zig_toolchains:all")
+register_toolchains("@zig_toolchains//:all")
 register_toolchains("//:translate_c_toolchain")
 register_execution_platforms("//bazel/zig_toolchain_config:local_execution_platform")
 ###
