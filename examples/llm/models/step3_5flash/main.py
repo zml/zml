@@ -137,15 +137,15 @@ def get_activation(name):
         for i, inp in enumerate(hook_inputs):
             if isinstance(inp, torch.Tensor):
                 # ADDED .clone() to prevent shared memory errors in safetensors
-                activations[f"{name}.input_{i}"] = inp.detach().cpu().clone()
+                activations[f"{name}.in.{i}"] = inp.detach().cpu().clone()
         
         # Capture Outputs
         if isinstance(hook_output, torch.Tensor):
-            activations[f"{name}.output"] = hook_output.detach().cpu().clone()
+            activations[f"{name}.out.0"] = hook_output.detach().cpu().clone()
         elif isinstance(hook_output, tuple):
             for i, out in enumerate(hook_output):
                 if isinstance(out, torch.Tensor):
-                    activations[f"{name}.output_{i}"] = out.detach().cpu().clone()
+                    activations[f"{name}.out.{i}"] = out.detach().cpu().clone()
     return hook
 
 print("Registering hooks for full ZML reconstruction...")
