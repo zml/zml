@@ -418,6 +418,7 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
         project.io,
         project.platform,
         models.target_model,
+        prefill_seq_len,
         target_verify_hidden_tensor,
         target_verify_hidden_block_tensor,
         models.block_tokens_tensor,
