@@ -1,9 +1,0 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary")
-
-zig_binary(
-    name = "torch2zml",
-    main = "torch2zml.zig",
-    deps = [
-        "@zml//zml",
-    ],
-)

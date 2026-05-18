@@ -1,6 +1,6 @@
 const std = @import("std");
 const zml = @import("zml");
-const common = @import("../common.zig");
+const common = @import("common.zig");
 
 pub const Config = struct {
     architectures: []const []const u8 = &.{},
@@ -55,12 +55,6 @@ pub const Config = struct {
     num_nextn_predict_layers: u32 = 0,
     partial_rotary_factors: []const f32 = &.{},
 
-    eos_token_id: stdx.json.Union(union(enum) {
-        int: u32,
-        ints: []const u32,
-    }),
-    bos_token_id: u32,
-
     attention_other_setting: ?AttentionOtherSetting = null,
 
     swiglu_limits: []const f32 = &.{},
@@ -103,10 +97,10 @@ const Mlp = struct {
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
         // Add tags to input before providing to our layer.
-        x = x.withTags(.{ .b, .s, .d });
+        const input = x.withTags(.{ .b, .s, .d });
 
-        const up_proj = self.up_proj.forward(x);
-        var gate = self.gate_proj.forward(x);
+        const up_proj = self.up_proj.forward(input);
+        var gate = self.gate_proj.forward(input);
         gate = gate.silu();
 
         return self.down_proj.forward(gate.mul(up_proj));
@@ -123,7 +117,7 @@ pub fn main(init: std.process.Init) !void {
     const vfs_io = vfs.io();
 
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len < 5) return;
+    if (args.len < 4) return;
 
     // Load + resolve paths (Zig 0.16.0 treats relative paths as maybes, which breaks GPU)
     const weights_path_raw = args[1];
@@ -173,5 +167,5 @@ pub fn main(init: std.process.Init) !void {
 
     // at this point, weights are on disk and layer is initialized
     const mlp_weights = try zml.io.load(Mlp, &mlp, allocator, vfs_io, platform, &model_store, .auto);
-    try zml.testing.testLayer(arena, vfs_io, platform, mlp, .forward, activation_store.view(), current_layer, .{ .mlp = mlp_weights }, &.{}, .{});
+    try zml.testing.testLayer(arena, vfs_io, platform, mlp, .forward, activation_store.view(), current_layer, mlp_weights, &.{}, .{});
 }
