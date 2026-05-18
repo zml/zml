@@ -200,11 +200,11 @@ pub const TextEmbedding = struct {
     }
 };
 
-pub const InitialLatents = struct {
+pub const ContextLatents = struct {
     context_latents: zml.Slice,
     encoder_conditions: zml.Slice,
 
-    pub fn print(self: InitialLatents, io: std.Io) !void {
+    pub fn print(self: ContextLatents, io: std.Io) !void {
         var stdout = std.Io.File.stdout().writer(io, &.{});
         const writer: *std.Io.Writer = &stdout.interface;
         const options: std.fmt.Number = .{};
@@ -216,7 +216,7 @@ pub const InitialLatents = struct {
         try self.encoder_conditions.prettyPrint(writer, options);
     }
 
-    pub fn deinit(self: InitialLatents, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: ContextLatents, allocator: std.mem.Allocator) void {
         self.context_latents.free(allocator);
         self.encoder_conditions.free(allocator);
     }
@@ -812,7 +812,7 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
     };
 }
 
-pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_handler, text_emb: TextEmbedding, audio_codes: []u32, target_duration: u32) !InitialLatents {
+pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_handler, text_emb: TextEmbedding, audio_codes: []u32, target_duration: u32, audio_latents: ?AudioLatents, style_latents: ?AudioLatents) !ContextLatents {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = aceenc.shardings.replicated;
@@ -826,20 +826,36 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     const t_25hz: i64 = 25 * target_duration;
     const s_enc = caption_len + lyric_len + 1;
 
-    std.log.info("ENC generate timbre reference of length {d} and {d} from silence latent", .{ t_timbre, t_25hz });
-
-    const timbre_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_timbre }, .bf16));
-    defer timbre_slice.free(allocator);
-    
-    var timbre_buffer: zml.Buffer = undefined;
-    defer timbre_buffer.deinit();
-    var silence_audio_buffer: zml.Buffer = undefined;
-    defer silence_audio_buffer.deinit();
+    var timbre_silence_buffer: zml.Buffer = undefined;
+    defer timbre_silence_buffer.deinit();
+    var audio_silence_buffer: zml.Buffer = undefined;
+    defer audio_silence_buffer.deinit();
 
     aceenc.exes.silence_args.set(.{ aceenc.silence_buffers });
     aceenc.exes.silence_exe.call(aceenc.exes.silence_args, &aceenc.exes.silence_results);
-    aceenc.exes.silence_results.fill(.{ &timbre_buffer, &silence_audio_buffer });
+    aceenc.exes.silence_results.fill(.{ &timbre_silence_buffer, &audio_silence_buffer });
 
+    var timbre_buffer: zml.Buffer = undefined;
+    defer timbre_buffer.deinit();
+    var audio_buffer: zml.Buffer = undefined;
+    defer audio_buffer.deinit();
+    
+    if (style_latents) |style| {
+        std.log.info("ENC init timbre reference of length {d} from silence latent", .{ t_timbre });
+        timbre_buffer = try .fromSlice(io, platform, style.x, sharding);
+    } else {
+        std.log.info("ENC using timbre reference of length {d}", .{ t_timbre });
+        timbre_buffer = timbre_silence_buffer;
+    }
+
+    if (audio_latents) |audio| {
+        std.log.info("ENC init audio reference of length {d} from silence latent", .{ t_25hz });
+        audio_buffer = try .fromSlice(io, platform, audio.x, sharding);
+    } else {
+        std.log.info("ENC using audio reference of length {d}", .{ t_25hz });
+        audio_buffer = audio_silence_buffer;
+    }
+    
     std.log.info("ENC call encoder cap={d}x{d} lyr={d}x{d} tim={d}x{d} audioc={d} src={d}x{d}", .{
         caption_len, emb_dim,
         lyric_len, emb_dim,
@@ -871,8 +887,8 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     defer encoded_lyric_buffer.deinit();
     var encoded_timbre_buffer: zml.Buffer = undefined;
     defer encoded_timbre_buffer.deinit();
-    var src_audio_buffer: zml.Buffer = undefined;
-    defer src_audio_buffer.deinit();
+    var encoded_audiocodes_buffer: zml.Buffer = undefined;
+    defer encoded_audiocodes_buffer.deinit();
     
     zml_handler.tic(&zml_handler.timers.enc.prefill);
 
@@ -887,9 +903,10 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     // encode audiocodes
     aceenc.exes.encode_audiocodes_args.set(.{ aceenc.model_buffers.audiocode_encoder, audio_codes_buffer });
     aceenc.exes.encode_audiocodes_exe.call(aceenc.exes.encode_audiocodes_args, &aceenc.exes.encode_audiocodes_results);
-    aceenc.exes.encode_audiocodes_results.fill(.{ &src_audio_buffer });
+    aceenc.exes.encode_audiocodes_results.fill(.{ &encoded_audiocodes_buffer });
     // encode
-    aceenc.exes.encode_args.set(.{ aceenc.model_buffers, text_emb_buffer, encoded_lyric_buffer, encoded_timbre_buffer, src_audio_buffer });
+    const source_audio_buffer = if (audio_latents) |_| audio_buffer else if (audio_codes.len > 0) encoded_audiocodes_buffer else audio_silence_buffer;
+    aceenc.exes.encode_args.set(.{ aceenc.model_buffers, text_emb_buffer, encoded_lyric_buffer, encoded_timbre_buffer, source_audio_buffer });
     aceenc.exes.encode_exe.call(aceenc.exes.encode_args, &aceenc.exes.encode_results);
     aceenc.exes.encode_results.fill(.{ &context_latents_buffer, &encoded_conditions_buffer });
     
@@ -906,16 +923,19 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     };
 }
 
-pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_handler, latents: InitialLatents, id: usize) !AudioLatents {
+pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_handler, source: ?AudioLatents, context: ContextLatents, id: usize, match_level: u8) !AudioLatents {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = acedit.shardings.replicated;
     const platform = zml_handler.platform;
 
     const audio_dim = acedit.config.timbre_hidden_dim;
-    const t_25hz = latents.context_latents.shape.dim(0);
+    const t_25hz = context.context_latents.shape.dim(0);
 
-    std.log.info("DiT call with input size : {d}x{d} {d}x{d}", .{ t_25hz, audio_dim, latents.encoder_conditions.shape.dim(0), latents.encoder_conditions.shape.dim(1) });
+    std.log.info("DiT call with input size : {d}x{d} {d}x{d}", .{ t_25hz, audio_dim, context.encoder_conditions.shape.dim(0), context.encoder_conditions.shape.dim(1) });
+
+    const timestamps: [9]f32 = .{ 1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3, 0.0 };
+    const noise = timestamps[match_level];
 
     // populate x with gaussian noise seeded with id
     const x: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = audio_dim }, .bf16));
@@ -925,17 +945,31 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     const random = prng.random();
     const dimI: usize = @intCast(x.shape.dim(0));
     const dimJ: usize = @intCast(x.shape.dim(1));
-    for (0..dimI) |i| {
-        for (0..dimJ) |j| {
-            const rand: f32 = random.floatNorm(f32);
-            x.items(zml.floats.BFloat16)[i * dimJ + j] = zml.floats.BFloat16.fromF32(rand);
+    if (source) |s| {
+        for (0..dimI) |i| {
+            for (0..dimJ) |j| {
+                const rand: f32 = random.floatNorm(f32);
+                // apply noise to s.x to initialize x : we only add noise in quantity that matches a noise level of the schedule,
+                // and we then start the diffusion from that level.
+                const t = s.x.items(f32)[i * dimJ + j];
+                const noised = noise * rand + (1 - noise) * t;
+                x.items(zml.floats.BFloat16)[i * dimJ + j] = zml.floats.BFloat16.fromF32(noised);
+            }
+        }
+    } else {
+        for (0..dimI) |i| {
+            for (0..dimJ) |j| {
+                // initialize x with pure gaussian noise
+                const rand: f32 = random.floatNorm(f32);
+                x.items(zml.floats.BFloat16)[i * dimJ + j] = zml.floats.BFloat16.fromF32(rand);
+            }
         }
     }
 
     // prepare arguments buffers
     var x_buffer: zml.Buffer = try .fromSlice(io, platform, x, sharding);
-    var context_latents_buffer: zml.Buffer = try .fromSlice(io, platform, latents.context_latents, sharding);
-    var encoded_conditions_buffer: zml.Buffer = try .fromSlice(io, platform, latents.encoder_conditions, sharding);
+    var context_latents_buffer: zml.Buffer = try .fromSlice(io, platform, context.context_latents, sharding);
+    var encoded_conditions_buffer: zml.Buffer = try .fromSlice(io, platform, context.encoder_conditions, sharding);
     defer x_buffer.deinit();
     defer context_latents_buffer.deinit();
     defer encoded_conditions_buffer.deinit();
@@ -954,11 +988,9 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     defer result_buffer.deinit();
 
     // the full forward pass on the dit model is one iteration of the denoising
-    const timestamps: [9]f32 = .{ 1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3, 0.0 };
-    //const timestamps: [13]f32 = .{1.0, 0.97, 0.94, 0.91, 0.87, 0.82, 0.76, 0.68, 0.58, 0.48, 0.38, 0.25, 0.0 };
     const steps = timestamps.len - 1;
     zml_handler.tic(&zml_handler.timers.dit.prefill);
-    for (0..steps) |i| {
+    for (match_level..steps) |i| {
         var y_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
         defer y_proj_buffer.deinit();
         var hidden_states_buffer: zml.Buffer = undefined;
