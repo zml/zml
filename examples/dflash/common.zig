@@ -87,59 +87,6 @@ pub const KvCache = struct {
     }
 };
 
-pub const LayerKvCache = struct {
-    k: zml.Tensor,
-    v: zml.Tensor,
-
-    pub const Buffer = zml.Bufferized(LayerKvCache);
-
-    pub fn init(kv_shape: zml.Shape) LayerKvCache {
-        const sharded_shape = kv_shape.drop(.layer).withPartitioning(.{ .h = .model });
-        return .{
-            .k = .fromShape(sharded_shape),
-            .v = .fromShape(sharded_shape),
-        };
-    }
-
-    pub fn deinitBuffer(kv: *Buffer) void {
-        kv.k.deinit();
-        kv.v.deinit();
-    }
-
-    pub fn replaceBuffers(dst: *Buffer, src: *Buffer) void {
-        replaceBuffer(&dst.k, &src.k);
-        replaceBuffer(&dst.v, &src.v);
-    }
-
-    pub fn initZeroBuffer(
-        kv: LayerKvCache,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        sharding: zml.Sharding,
-    ) !Buffer {
-        return .{
-            .k = try zeroBuffer(allocator, io, platform, kv.k.shape(), sharding),
-            .v = try zeroBuffer(allocator, io, platform, kv.v.shape(), sharding),
-        };
-    }
-
-    pub fn keys(kv: LayerKvCache) zml.Tensor {
-        return kv.k;
-    }
-
-    pub fn values(kv: LayerKvCache) zml.Tensor {
-        return kv.v;
-    }
-
-    pub fn update(kv: LayerKvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor) LayerKvCache {
-        return .{
-            .k = kv.k.scatterSlices(.{ .k = token_index }, new_k.convert(kv.k.dtype()).transpose(kv.k.shape()), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
-            .v = kv.v.scatterSlices(.{ .k = token_index }, new_v.convert(kv.v.dtype()).transpose(kv.v.shape()), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
-        };
-    }
-};
-
 pub const Shardings = struct {
     model: zml.Sharding,
 

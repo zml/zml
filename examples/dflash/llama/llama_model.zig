@@ -5,7 +5,6 @@ const stdx = zml.stdx;
 const common = @import("../common.zig");
 
 pub const KvCache = common.KvCache;
-pub const LayerKvCache = common.LayerKvCache;
 
 pub const Config = struct {
     bos_token_id: u32,
@@ -120,15 +119,6 @@ pub const Model = struct {
         }, self.model.embed_tokens.weight.dtype()));
     }
 
-    pub fn initLayerKvCache(self: Model, config: Config, cache_seq_len: u32) LayerKvCache {
-        return .init(.init(.{
-            .layer = config.num_hidden_layers,
-            .k = cache_seq_len,
-            .h = config.num_key_value_heads,
-            .hd = config.head_dim orelse config.hidden_size / config.num_attention_heads,
-        }, self.model.embed_tokens.weight.dtype()));
-    }
-
     pub fn loadBuffers(
         self: *const Model,
         allocator: std.mem.Allocator,
@@ -167,19 +157,19 @@ pub const Model = struct {
         return logits;
     }
 
-    pub fn sampleTargetTokens(self: Model, out_: zml.Tensor, sampling: SamplingConfig, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
+    fn sampleTargetTokens(self: Model, out_: zml.Tensor, sampling: SamplingConfig, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
         const logits = self.logitsForward(out_);
         return sampleLogits(logits, sampling, rng);
     }
 
-    pub fn sampleLogits(logits_: zml.Tensor, sampling: SamplingConfig, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
+    fn sampleLogits(logits_: zml.Tensor, sampling: SamplingConfig, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
         const logits = logits_.withPartialTags(.{.voc});
         const topk: u32 = if (sampling.temperature < 0.00001) 1 else @intCast(logits.dim(.voc));
         const tokens, const updated_rng = zml.nn.sampleTokens(logits, .{ .topk = topk, .temperature = sampling.temperature }, rng);
         return .{ tokens.convert(.u32), updated_rng };
     }
 
-    pub fn sampleLastTargetToken(self: Model, out_: zml.Tensor, sampling: SamplingConfig, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
+    fn sampleLastTargetToken(self: Model, out_: zml.Tensor, sampling: SamplingConfig, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
         const out = out_.withPartialTags(.{ .s, .d });
         const last = out.slice1d(.s, .single(out.dim(.s) - 1)).reshape(.{ .s = 1, .d = out.dim(.d) });
         return self.sampleTargetTokens(last, sampling, rng);
@@ -246,7 +236,7 @@ pub const Model = struct {
     }
 };
 
-pub fn verifyDraftTokens(
+fn verifyDraftTokens(
     draft_tokens_: zml.Tensor,
     draft_logits_: zml.Tensor,
     target_logits_: zml.Tensor,
@@ -349,7 +339,7 @@ pub const Llama = struct {
         self: Llama,
         tokens: zml.Tensor,
         token_index: zml.Tensor,
-        kv_cache: anytype,
+        kv_cache: KvCache,
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
         target_layer_ids: []const u32,
@@ -384,7 +374,7 @@ pub const Llama = struct {
     }
 };
 
-pub fn embedForward(embed_tokens_: zml.nn.TokenEmbedding, tokens_: zml.Tensor) zml.Tensor {
+fn embedForward(embed_tokens_: zml.nn.TokenEmbedding, tokens_: zml.Tensor) zml.Tensor {
     return embed_tokens_.forward(tokens_).withPartialTags(.{.d});
 }
 
@@ -414,10 +404,10 @@ pub const TransformerLayer = struct {
         self: TransformerLayer,
         x0: zml.Tensor,
         token_index: zml.Tensor,
-        kv_cache: anytype,
+        kv_cache: KvCache,
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
-    ) struct { zml.Tensor, @TypeOf(kv_cache) } {
+    ) struct { zml.Tensor, KvCache } {
         // Self Attention
         //log.debug("TransformerLayer({f}) -> {f}", .{ x0, self.input_layernorm.forward(x0) });
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
@@ -557,10 +547,10 @@ pub const SelfAttn = struct {
         self: SelfAttn,
         x: zml.Tensor,
         token_index: zml.Tensor,
-        kv_cache: anytype,
+        kv_cache: KvCache,
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
-    ) struct { zml.Tensor, @TypeOf(kv_cache) } {
+    ) struct { zml.Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
 
         // Make hidden state replicated once and reuse it across q/k/v projections.
