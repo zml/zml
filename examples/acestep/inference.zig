@@ -827,9 +827,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     const s_enc = caption_len + lyric_len + 1;
 
     var timbre_silence_buffer: zml.Buffer = undefined;
-    defer timbre_silence_buffer.deinit();
     var audio_silence_buffer: zml.Buffer = undefined;
-    defer audio_silence_buffer.deinit();
 
     aceenc.exes.silence_args.set(.{ aceenc.silence_buffers });
     aceenc.exes.silence_exe.call(aceenc.exes.silence_args, &aceenc.exes.silence_results);
@@ -843,6 +841,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     if (style_latents) |style| {
         std.log.info("ENC init timbre reference of length {d} from silence latent", .{ t_timbre });
         timbre_buffer = try .fromSlice(io, platform, style.x, sharding);
+        timbre_silence_buffer.deinit();
     } else {
         std.log.info("ENC using timbre reference of length {d}", .{ t_timbre });
         timbre_buffer = timbre_silence_buffer;
@@ -851,6 +850,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     if (audio_latents) |audio| {
         std.log.info("ENC init audio reference of length {d} from silence latent", .{ t_25hz });
         audio_buffer = try .fromSlice(io, platform, audio.x, sharding);
+        audio_silence_buffer.deinit();
     } else {
         std.log.info("ENC using audio reference of length {d}", .{ t_25hz });
         audio_buffer = audio_silence_buffer;
