@@ -152,7 +152,11 @@ pub const Buffer = struct {
     /// Copies the given Zig bytes to the accelerator memory and
     /// return a Buffer with the given dimensions.
     pub fn fromBytes(io: std.Io, platform: *const Platform, sh: Shape, sharding: Sharding, data: []const u8) !Buffer {
-        return from(io, platform, sh, sharding, data, .{});
+        return fromBytesOpts(io, platform, sh, sharding, data, .{});
+    }
+
+    pub fn fromBytesOpts(io: std.Io, platform: *const Platform, sh: Shape, sharding: Sharding, data: []const u8, opts: FromOptions) !Buffer {
+        return from(io, platform, sh, sharding, data, opts);
     }
 
     /// Copies the given zml.Slice to the accelerator memory and
