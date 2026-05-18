@@ -1,5 +1,99 @@
 const std = @import("std");
 const zml = @import("zml");
+const common = @import("../common.zig");
+
+pub const Config = struct {
+    architectures: []const []const u8 = &.{},
+    model_type: []const u8,
+
+    auto_map: ?AutoMap = null,
+
+    rope_scaling: RopeScaling,
+    yarn_only_types: []const []const u8 = &.{},
+
+    hidden_size: u32,
+    intermediate_size: u32,
+    num_hidden_layers: u32,
+    max_seq_len: u32,
+    vocab_size: u32,
+
+    torch_dtype: []const u8 = "bfloat16",
+
+    use_qk_norm: bool = false,
+
+    moe_layers_enum: []const u8 = "",
+    num_attention_heads: u32,
+    num_attention_groups: u32,
+    head_dim: u32,
+
+    use_moe: bool = false,
+    moe_num_experts: u32 = 0,
+    moe_top_k: u32 = 0,
+    moe_intermediate_size: u32 = 0,
+    share_expert_dim: u32 = 0,
+    moe_layer_offset: u32 = 0,
+    moe_every_n_layer: u32 = 1,
+    norm_expert_weight: bool = false,
+    moe_router_activation: []const u8 = "sigmoid",
+    moe_router_scaling_factor: f32 = 1.0,
+
+    att_impl_type: []const u8 = "GQA",
+    tie_word_embeddings: bool = false,
+
+    rope_theta: []const f32,
+
+    use_head_wise_attn_gate: bool = false,
+    sliding_window: u32 = 0,
+
+    use_moe_router_bias: bool = false,
+    need_fp32_gate: bool = false,
+    sink: bool = false,
+
+    layer_types: []const []const u8 = &.{},
+    use_rope_layers: []const u32 = &.{},
+
+    num_nextn_predict_layers: u32 = 0,
+    partial_rotary_factors: []const f32 = &.{},
+
+    eos_token_id: stdx.json.Union(union(enum) {
+        int: u32,
+        ints: []const u32,
+    }),
+    bos_token_id: u32,
+
+    attention_other_setting: ?AttentionOtherSetting = null,
+
+    swiglu_limits: []const f32 = &.{},
+    swiglu_limits_shared: []const f32 = &.{},
+
+    zero_centered: bool = false,
+    max_position_embeddings: u32,
+
+    pub const AutoMap = struct {
+        AutoConfig: []const u8,
+        AutoModelForCausalLM: []const u8,
+    };
+
+    pub const RopeScaling = struct {
+        rope_type: []const u8,
+        factor: f32,
+        original_max_position_embeddings: u32,
+        low_freq_factor: f32,
+        high_freq_factor: f32,
+    };
+
+    pub const AttentionOtherSetting = struct {
+        attention_type: []const u8,
+        num_attention_heads: u32,
+        num_attention_groups: u32,
+        head_dim: u32,
+        true_head_dim: u32,
+    };
+
+    pub fn numKeyValueHeads(self: Config) u32 {
+        return self.num_attention_groups;
+    }
+};
 
 // Multilayer Perceptron
 const Mlp = struct {
@@ -29,7 +123,7 @@ pub fn main(init: std.process.Init) !void {
     const vfs_io = vfs.io();
 
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len < 3) return;
+    if (args.len < 5) return;
 
     // Load + resolve paths (Zig 0.16.0 treats relative paths as maybes, which breaks GPU)
     const weights_path_raw = args[1];
@@ -56,6 +150,14 @@ pub fn main(init: std.process.Init) !void {
     defer activation_store.deinit();
 
     std.log.info("All captured activations loaded", .{});
+
+    // Load config
+    const config_path_raw = args[3];
+
+    const dir = try std.Io.Dir.openDir(.cwd(), vfs_io, config_path_raw, .{});
+    defer dir.close(vfs_io);
+    const parsed = try common.parseConfig(Config, allocator, vfs_io, dir);
+    defer parsed.deinit();
 
     ////////////////////////////////////////////////////////////////
     const current_layer = "model.layers.46.mlp";
