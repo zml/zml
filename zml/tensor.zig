@@ -1399,7 +1399,72 @@ pub const Tensor = struct {
         var gate_path = self.dot(v, tag);
         gate_path = gate_path.add(c.broad(gate_path.shape()));
 
+<<<<<<< HEAD
+<<<<<<< HEAD
         return value_path.mul(sigmoid_tensor).outer(gate_path);
+=======
+        return value_path.mul(sigmoid_tensor).mul(gate_path);
+=======
+        return value_path.mul(sigmoid_tensor).outer(gate_path);
+>>>>>>> 0596cfba (zml/tensor: fix duplicate tagging in outer product)
+    }
+
+    test swiglu {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const input: Tensor = .init(.{ .d = 4 }, .f32);
+        const beta = 3;
+        const w: Tensor = .init(.{ .c = 3, .d = 4 }, .f32);
+        const v: Tensor = .init(.{ .e = 3, .d = 4 }, .f32);
+        const b: Tensor = .init(.{ .c = 3 }, .f32);
+        const c: Tensor = .init(.{ .e = 3 }, .f32);
+
+        var exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            Tensor.swiglu,
+            .{ input, beta, w, v, b, c, Shape.toTag(.d) },
+            platform,
+            .{},
+        );
+        defer exe.deinit();
+
+        var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&[4]f32{ 1, 0, 1, 2 }));
+        defer input_buffer.deinit();
+
+        var w_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, w.shape(), .replicated, std.mem.sliceAsBytes(&[3][4]f32{
+            .{ 1, 0, 2, 0 },
+            .{ 2, 1, 3, 3 },
+            .{ 1, 1, 0, 0 },
+        }));
+        defer w_buffer.deinit();
+
+        var v_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, v.shape(), .replicated, std.mem.sliceAsBytes(&[3][4]f32{
+            .{ 0, 0, 2, 1 },
+            .{ 1, 2, 1, 3 },
+            .{ 0, 0, 2, 0 },
+        }));
+        defer v_buffer.deinit();
+
+        var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), .replicated, std.mem.sliceAsBytes(&[3]f32{ 1, 1, 1 }));
+        defer b_buffer.deinit();
+
+        var c_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, c.shape(), .replicated, std.mem.sliceAsBytes(&[3]f32{ 2, 2, 2 }));
+        defer c_buffer.deinit();
+
+        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.swiglu, .{ input_buffer, w_buffer, v_buffer, b_buffer, c_buffer });
+        defer res.deinit();
+
+        const output_shape = Shape.init(.{ .c = 3, .e = 3 }, .f32);
+        const expectation: zml.Slice = .init(output_shape, std.mem.sliceAsBytes(&[3][3]f32{
+            .{ 23.999856, 39.99976, 15.999904 },
+            .{ 72.000000, 120.000000, 48.000000 },
+            .{ 11.970324, 19.950540, 7.980216 },
+        }));
+
+        try zml.testing.expectClose(std.testing.io, expectation, res, .{});
+>>>>>>> 8d72489d (zml/tensor: test swiglu)
     }
 
     test swiglu {
