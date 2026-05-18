@@ -166,18 +166,23 @@ pub const paged = struct {
         pub fn options(self: Parameters) Options {
             return self.options_;
         }
-    };
 
-    pub const Context = struct {
-        is_prefill: bool,
-        max_seqlen_q: usize,
+        pub fn onMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
+            return .{
+                .options_ = self.options_,
+                .block_table = self.block_table.onMemory(memory),
+                .seq_lens = self.seq_lens.onMemory(memory),
+                .query_start_len = self.query_start_len.onMemory(memory),
+            };
+        }
 
-        pub fn init(parameters: Parameters, num_heads: i64, num_kv_heads: i64, head_dim: i64, page_size: i64) Context {
-            _ = num_heads;
-            _ = num_kv_heads;
-            _ = head_dim;
-            _ = page_size;
-            return .{ .is_prefill = parameters.options_.is_prefill, .max_seqlen_q = parameters.options_.max_seqlen_q };
+        pub fn toMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
+            return .{
+                .options_ = self.options_,
+                .block_table = self.block_table.toMemory(memory),
+                .seq_lens = self.seq_lens.toMemory(memory),
+                .query_start_len = self.query_start_len.toMemory(memory),
+            };
         }
     };
 
@@ -210,7 +215,7 @@ pub const paged = struct {
         }
     };
 
-    pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+    pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
         const output = zml.ops.manualComputation(
             .{
                 q,
@@ -224,7 +229,6 @@ pub const paged = struct {
             .{
                 .opts = opts,
                 .options = parameters.options_,
-                .context = context,
             },
             (struct {
                 fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
@@ -276,9 +280,9 @@ pub const paged = struct {
                         paged_attention_opts.num_2d_prgms,
                     );
                     const output = if (use_2d_kernel)
-                        pagedAttention2d(parameters_, ctx_.context, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts)
+                        pagedAttention2d(parameters_, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts)
                     else
-                        pagedAttention3d(parameters_, ctx_.context, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts);
+                        pagedAttention3d(parameters_, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts);
 
                     return output;
                 }
@@ -288,8 +292,7 @@ pub const paged = struct {
         return output;
     }
 
-    pub fn pagedAttention2d(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
-        _ = context;
+    pub fn pagedAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
         _ = opts;
         const config = select2dConfig(paged_attention_opts);
 
@@ -375,8 +378,7 @@ pub const paged = struct {
         return output.output;
     }
 
-    pub fn pagedAttention3d(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
-        _ = context;
+    pub fn pagedAttention3d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
         _ = opts;
 
         const config = select3dConfig(paged_attention_opts);
