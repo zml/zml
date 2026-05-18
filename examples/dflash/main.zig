@@ -70,8 +70,8 @@ pub fn main(init: std.process.Init) !void {
     );
     defer token_index_buffer.deinit();
 
-    const target_kv_cache_buffers = try initTargetLayerKvCacheBuffers(allocator, project, models);
-    defer deinitTargetLayerKvCacheBuffers(allocator, target_kv_cache_buffers);
+    var target_kv_cache_buffers = try models.target_kv_cache.initZeroBuffer(allocator, project.io, project.platform, project.shardings.model);
+    defer llama.KvCache.deinitBuffer(&target_kv_cache_buffers);
 
     var draft_kv_cache_buffers = try models.draft_kv_cache.initZeroBuffer(allocator, project.io, project.platform, project.shardings.model);
     defer dflash.KvCache.deinitBuffer(&draft_kv_cache_buffers);
@@ -85,13 +85,11 @@ pub fn main(init: std.process.Init) !void {
     var prefill_output = try runPrefill(
         allocator,
         project,
-        &models,
         &compiled,
         loaded_buffers,
-        prompt.prompt_len,
         input_tokens_buffer,
         token_index_buffer,
-        target_kv_cache_buffers,
+        &target_kv_cache_buffers,
         &rng_buffer,
         attention_metadata_buffers,
     );
@@ -106,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
         &compiled,
         loaded_buffers,
         prefill_output,
-        target_kv_cache_buffers,
+        &target_kv_cache_buffers,
         &draft_kv_cache_buffers,
         &rng_buffer,
         attention_metadata_buffers,
@@ -251,7 +249,6 @@ const ModelsAndCaches = struct {
     token_index_tensor: zml.Tensor,
     active_context_len_tensor: zml.Tensor,
     target_kv_cache: llama.KvCache,
-    target_layer_kv_cache: llama.LayerKvCache,
     draft_kv_cache: dflash.KvCache,
     rng: zml.Tensor.Rng,
     sampling: llama.SamplingConfig,
@@ -285,7 +282,6 @@ fn initModelsAndCaches(project: *Project, prompt: TokenizedPrompt, args: Args) !
         .token_index_tensor = .init(.{}, .u32),
         .active_context_len_tensor = .init(.{}, .u32),
         .target_kv_cache = target_model.initKvCache(project.parsed_target_config.value, cache_seq_len),
-        .target_layer_kv_cache = target_model.initLayerKvCache(project.parsed_target_config.value, cache_seq_len),
         .draft_kv_cache = draft_model.initKvCache(project.parsed_config.value, cache_seq_len),
         .rng = .init(),
         .sampling = .{ .temperature = args.temperature },
@@ -296,76 +292,39 @@ fn initModelsAndCaches(project: *Project, prompt: TokenizedPrompt, args: Args) !
 }
 
 const CompiledExes = struct {
-    target_prefill_embed_exe: zml.Exe,
-    target_prefill_layer_exe: zml.Exe,
-    target_prefill_head_exe: zml.Exe,
-    target_verify_embed_exe: zml.Exe,
-    target_verify_layer_exe: zml.Exe,
-    target_verify_head_exe: zml.Exe,
+    target_prefill_exe: zml.Exe,
     draft_token_exe: DraftTokenExe,
+    target_verify_exe: zml.Exe,
 
     pub fn deinit(self: *CompiledExes, allocator: std.mem.Allocator) void {
+        self.target_verify_exe.deinit();
         self.draft_token_exe.deinit(allocator);
-        self.target_verify_head_exe.deinit();
-        self.target_verify_layer_exe.deinit();
-        self.target_verify_embed_exe.deinit();
-        self.target_prefill_head_exe.deinit();
-        self.target_prefill_layer_exe.deinit();
-        self.target_prefill_embed_exe.deinit();
+        self.target_prefill_exe.deinit();
     }
 };
 
 fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCaches, prompt: TokenizedPrompt) !CompiledExes {
     const all_shardings = project.shardings.all();
 
-    const target_prefill_hidden_block_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, prompt.prompt_len);
-    const target_hidden_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, prefill_seq_len);
-    const target_prefill_hidden_tensor = zml.Tensor.init(.{
-        .s = prompt.prompt_len,
-        .d = project.parsed_target_config.value.hidden_size,
-    }, models.target_model.model.embed_tokens.weight.dtype());
-    const target_verify_hidden_tensor = zml.Tensor.init(.{
-        .s = models.block_size,
-        .d = project.parsed_target_config.value.hidden_size,
-    }, models.target_model.model.embed_tokens.weight.dtype());
-    const target_verify_hidden_block_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, models.block_size);
-
-    log.info("Compiling target prefill parts...", .{});
-    const target_prefill_embed_exe = try llama_inference.compileTargetEmbed(
+    log.info("Compiling target prefill...", .{});
+    const target_prefill_exe = try llama_inference.compileTargetPrefill(
         allocator,
         project.io,
         project.platform,
         models.target_model,
+        models.target_layers,
         prompt.prompt_len,
         models.input_tokens_tensor,
-        &all_shardings,
-    );
-    const target_prefill_layer_exe = try llama_inference.compileTargetLayer(
-        allocator,
-        project.io,
-        project.platform,
-        models.target_model,
-        target_prefill_hidden_tensor,
-        target_prefill_hidden_block_tensor,
         models.token_index_tensor,
-        models.target_layer_kv_cache,
-        models.target_attention,
-        &all_shardings,
-    );
-    const target_prefill_head_exe = try llama_inference.compileTargetPrefillHead(
-        allocator,
-        project.io,
-        project.platform,
-        models.target_model,
-        prefill_seq_len,
-        target_prefill_hidden_tensor,
-        target_prefill_hidden_block_tensor,
+        models.target_kv_cache,
         models.rng,
         models.sampling,
+        models.target_attention,
         &all_shardings,
     );
 
     log.info("Compiling DFlash draft token...", .{});
+    const target_hidden_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, prefill_seq_len);
     var draft_token_exe: DraftTokenExe = .{
         .exe = try project.platform.compileFn(
             allocator,
@@ -391,50 +350,27 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
     draft_token_exe.args = try draft_token_exe.exe.args(allocator);
     draft_token_exe.results = try draft_token_exe.exe.results(allocator);
 
-    log.info("Compiling target verify parts...", .{});
-    const target_verify_embed_exe = try llama_inference.compileTargetEmbed(
+    log.info("Compiling target verify...", .{});
+    const target_verify_exe = try llama_inference.compileTargetVerify(
         allocator,
         project.io,
         project.platform,
         models.target_model,
-        models.block_size,
-        models.block_tokens_tensor,
-        &all_shardings,
-    );
-    const target_verify_layer_exe = try llama_inference.compileTargetLayer(
-        allocator,
-        project.io,
-        project.platform,
-        models.target_model,
-        target_verify_hidden_tensor,
-        target_verify_hidden_block_tensor,
-        models.token_index_tensor,
-        models.target_layer_kv_cache,
-        models.target_attention,
-        &all_shardings,
-    );
-    const target_verify_head_exe = try llama_inference.compileTargetVerifyHead(
-        allocator,
-        project.io,
-        project.platform,
-        models.target_model,
+        models.target_layers,
         prefill_seq_len,
-        target_verify_hidden_tensor,
-        target_verify_hidden_block_tensor,
         models.block_tokens_tensor,
+        models.token_index_tensor,
+        models.target_kv_cache,
         models.rng,
         models.sampling,
+        models.target_attention,
         &all_shardings,
     );
 
     return .{
-        .target_prefill_embed_exe = target_prefill_embed_exe,
-        .target_prefill_layer_exe = target_prefill_layer_exe,
-        .target_prefill_head_exe = target_prefill_head_exe,
-        .target_verify_embed_exe = target_verify_embed_exe,
-        .target_verify_layer_exe = target_verify_layer_exe,
-        .target_verify_head_exe = target_verify_head_exe,
+        .target_prefill_exe = target_prefill_exe,
         .draft_token_exe = draft_token_exe,
+        .target_verify_exe = target_verify_exe,
     };
 }
 
@@ -457,22 +393,6 @@ fn loadBuffers(allocator: std.mem.Allocator, project: *Project, models: ModelsAn
     };
 }
 
-fn initTargetLayerKvCacheBuffers(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCaches) ![]llama.LayerKvCache.Buffer {
-    const buffers = try allocator.alloc(llama.LayerKvCache.Buffer, project.parsed_target_config.value.num_hidden_layers);
-    errdefer allocator.free(buffers);
-
-    for (buffers, 0..) |*buffer, i| {
-        errdefer for (buffers[0..i]) |*initialized| llama.LayerKvCache.deinitBuffer(initialized);
-        buffer.* = try models.target_layer_kv_cache.initZeroBuffer(allocator, project.io, project.platform, project.shardings.model);
-    }
-    return buffers;
-}
-
-fn deinitTargetLayerKvCacheBuffers(allocator: std.mem.Allocator, buffers: []llama.LayerKvCache.Buffer) void {
-    for (buffers) |*buffer| llama.LayerKvCache.deinitBuffer(buffer);
-    allocator.free(buffers);
-}
-
 const PrefillOutput = struct {
     target_hidden_buffer: zml.Buffer,
     target_token: u32,
@@ -481,85 +401,38 @@ const PrefillOutput = struct {
 fn runPrefill(
     allocator: std.mem.Allocator,
     project: *Project,
-    models: *ModelsAndCaches,
     compiled: *CompiledExes,
     loaded_buffers: LoadedBuffers,
-    prompt_len: u32,
     input_tokens_buffer: zml.Buffer,
     token_index_buffer: zml.Buffer,
-    target_kv_cache_buffers: []llama.LayerKvCache.Buffer,
+    target_kv_cache_buffers: *llama.KvCache.Buffer,
     rng_buffer: *zml.Tensor.Rng.Buffer,
     attention_metadata_buffers: anytype,
 ) !PrefillOutput {
-    var embed_args = try compiled.target_prefill_embed_exe.args(allocator);
-    defer embed_args.deinit(allocator);
-    var embed_results = try compiled.target_prefill_embed_exe.results(allocator);
-    defer embed_results.deinit(allocator);
+    var prefill_args = try compiled.target_prefill_exe.args(allocator);
+    defer prefill_args.deinit(allocator);
 
-    embed_args.set(.{
-        loaded_buffers.target_buffers.model.embed_tokens,
-        input_tokens_buffer,
-    });
-    compiled.target_prefill_embed_exe.call(embed_args, &embed_results);
+    var prefill_results = try compiled.target_prefill_exe.results(allocator);
+    defer prefill_results.deinit(allocator);
 
-    var hidden_buffer = embed_results.get(zml.Buffer);
-    var target_hidden_accum = try zeroDeviceBuffer(allocator, project, llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, prompt_len));
-
-    var layer_args = try compiled.target_prefill_layer_exe.args(allocator);
-    defer layer_args.deinit(allocator);
-    var layer_results = try compiled.target_prefill_layer_exe.results(allocator);
-    defer layer_results.deinit(allocator);
-
-    for (loaded_buffers.target_buffers.model.layers, 0..) |layer_buffers, layer_index| {
-        const selected = targetLayerSelection(models.target_layers, project.parsed_target_config.value.hidden_size, layer_index);
-        var target_hidden_offset_buffer = try scalarBuffer(project, selected.offset, .u32);
-        defer target_hidden_offset_buffer.deinit();
-        var store_target_hidden_buffer = try scalarBuffer(project, selected.store, .bool);
-        defer store_target_hidden_buffer.deinit();
-
-        layer_args.set(.{
-            layer_buffers,
-            hidden_buffer,
-            target_hidden_accum,
-            token_index_buffer,
-            target_kv_cache_buffers[layer_index],
-            target_hidden_offset_buffer,
-            store_target_hidden_buffer,
-            attention_metadata_buffers,
-        });
-        compiled.target_prefill_layer_exe.call(layer_args, &layer_results);
-
-        var next_hidden_buffer, var next_target_hidden_accum, var updated_layer_kv_cache = layer_results.get(struct {
-            zml.Buffer,
-            zml.Buffer,
-            llama.LayerKvCache.Buffer,
-        });
-        replaceBuffer(&hidden_buffer, &next_hidden_buffer);
-        replaceBuffer(&target_hidden_accum, &next_target_hidden_accum);
-        llama.LayerKvCache.replaceBuffers(&target_kv_cache_buffers[layer_index], &updated_layer_kv_cache);
-    }
-
-    var head_args = try compiled.target_prefill_head_exe.args(allocator);
-    defer head_args.deinit(allocator);
-    var head_results = try compiled.target_prefill_head_exe.results(allocator);
-    defer head_results.deinit(allocator);
-
-    head_args.set(.{
+    prefill_args.set(.{
         loaded_buffers.target_buffers,
-        hidden_buffer,
-        target_hidden_accum,
+        input_tokens_buffer,
+        token_index_buffer,
+        target_kv_cache_buffers.*,
         rng_buffer.*,
+        attention_metadata_buffers,
     });
-    compiled.target_prefill_head_exe.call(head_args, &head_results);
+    compiled.target_prefill_exe.call(prefill_args, &prefill_results);
 
-    const target_hidden_buffer, var target_token_buffer, var updated_rng_buffer = head_results.get(struct {
+    const target_hidden_buffer, var target_token_buffer, var prefilled_target_kv_cache_buffers, var updated_rng_buffer = prefill_results.get(struct {
         zml.Buffer,
         zml.Buffer,
+        llama.KvCache.Buffer,
         zml.Tensor.Rng.Buffer,
     });
-    hidden_buffer.deinit();
-    if (!sameBufferHandle(target_hidden_accum, target_hidden_buffer)) target_hidden_accum.deinit();
     defer target_token_buffer.deinit();
+    llama.KvCache.replaceBuffers(target_kv_cache_buffers, &prefilled_target_kv_cache_buffers);
     replaceRngBuffer(rng_buffer, &updated_rng_buffer);
 
     var target_token_slice = try target_token_buffer.toSliceAlloc(allocator, project.io);
@@ -586,28 +459,18 @@ const VerificationOutput = struct {
     }
 };
 
-fn targetLayerSelection(target_layers: llama_inference.TargetLayers, hidden_size: u32, layer_index: usize) struct { offset: u32, store: bool } {
-    for (target_layers.slice(), 0..) |target_layer_id, selected_index| {
-        if (target_layer_id == layer_index) {
-            return .{
-                .offset = @intCast(selected_index * hidden_size),
-                .store = true,
-            };
-        }
-    }
-    return .{ .offset = 0, .store = false };
-}
-
 fn runVerification(
     allocator: std.mem.Allocator,
     project: *Project,
     models: *ModelsAndCaches,
     compiled: *CompiledExes,
     loaded_buffers: LoadedBuffers,
+    verify_args: *zml.Exe.Arguments,
+    verify_results: *zml.Exe.Results,
     block_tokens_buffer: zml.Buffer,
     draft_logits_buffer: zml.Buffer,
     token_index: u32,
-    target_kv_cache_buffers: []llama.LayerKvCache.Buffer,
+    target_kv_cache_buffers: *llama.KvCache.Buffer,
     rng_buffer: *zml.Tensor.Rng.Buffer,
     attention_metadata_buffers: anytype,
 ) !VerificationOutput {
@@ -620,77 +483,25 @@ fn runVerification(
     );
     defer verify_token_index_buffer.deinit();
 
-    var embed_args = try compiled.target_verify_embed_exe.args(allocator);
-    defer embed_args.deinit(allocator);
-    var embed_results = try compiled.target_verify_embed_exe.results(allocator);
-    defer embed_results.deinit(allocator);
-
-    embed_args.set(.{
-        loaded_buffers.target_buffers.model.embed_tokens,
-        block_tokens_buffer,
-    });
-    compiled.target_verify_embed_exe.call(embed_args, &embed_results);
-
-    var hidden_buffer = embed_results.get(zml.Buffer);
-    var target_hidden_accum = try zeroDeviceBuffer(allocator, project, llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, models.block_size));
-
-    var layer_args = try compiled.target_verify_layer_exe.args(allocator);
-    defer layer_args.deinit(allocator);
-    var layer_results = try compiled.target_verify_layer_exe.results(allocator);
-    defer layer_results.deinit(allocator);
-
-    for (loaded_buffers.target_buffers.model.layers, 0..) |layer_buffers, layer_index| {
-        const selected = targetLayerSelection(models.target_layers, project.parsed_target_config.value.hidden_size, layer_index);
-        var target_hidden_offset_buffer = try scalarBuffer(project, selected.offset, .u32);
-        defer target_hidden_offset_buffer.deinit();
-        var store_target_hidden_buffer = try scalarBuffer(project, selected.store, .bool);
-        defer store_target_hidden_buffer.deinit();
-
-        layer_args.set(.{
-            layer_buffers,
-            hidden_buffer,
-            target_hidden_accum,
-            verify_token_index_buffer,
-            target_kv_cache_buffers[layer_index],
-            target_hidden_offset_buffer,
-            store_target_hidden_buffer,
-            attention_metadata_buffers,
-        });
-        compiled.target_verify_layer_exe.call(layer_args, &layer_results);
-
-        var next_hidden_buffer, var next_target_hidden_accum, var updated_layer_kv_cache = layer_results.get(struct {
-            zml.Buffer,
-            zml.Buffer,
-            llama.LayerKvCache.Buffer,
-        });
-        replaceBuffer(&hidden_buffer, &next_hidden_buffer);
-        replaceBuffer(&target_hidden_accum, &next_target_hidden_accum);
-        llama.LayerKvCache.replaceBuffers(&target_kv_cache_buffers[layer_index], &updated_layer_kv_cache);
-    }
-
-    var head_args = try compiled.target_verify_head_exe.args(allocator);
-    defer head_args.deinit(allocator);
-    var head_results = try compiled.target_verify_head_exe.results(allocator);
-    defer head_results.deinit(allocator);
-
-    head_args.set(.{
+    verify_args.set(.{
         loaded_buffers.target_buffers,
-        hidden_buffer,
-        target_hidden_accum,
         block_tokens_buffer,
         draft_logits_buffer,
+        verify_token_index_buffer,
+        target_kv_cache_buffers.*,
         rng_buffer.*,
+        attention_metadata_buffers,
     });
-    compiled.target_verify_head_exe.call(head_args, &head_results);
+    compiled.target_verify_exe.call(verify_args.*, verify_results);
 
-    const verified_hidden_buffer, const valid_draft_tokens_buffer, const correction_token_buffer, var updated_rng_buffer = head_results.get(struct {
+    const verified_hidden_buffer, const valid_draft_tokens_buffer, const correction_token_buffer, var verified_target_kv_cache_buffers, var updated_rng_buffer = verify_results.get(struct {
         zml.Buffer,
         zml.Buffer,
         zml.Buffer,
+        llama.KvCache.Buffer,
         zml.Tensor.Rng.Buffer,
     });
-    hidden_buffer.deinit();
-    if (!sameBufferHandle(target_hidden_accum, verified_hidden_buffer)) target_hidden_accum.deinit();
+    llama.KvCache.replaceBuffers(target_kv_cache_buffers, &verified_target_kv_cache_buffers);
     replaceRngBuffer(rng_buffer, &updated_rng_buffer);
 
     return .{
@@ -732,7 +543,7 @@ fn runSpeculativeDecoding(
     compiled: *CompiledExes,
     loaded_buffers: LoadedBuffers,
     prefill_output: PrefillOutput,
-    target_kv_cache_buffers: []llama.LayerKvCache.Buffer,
+    target_kv_cache_buffers: *llama.KvCache.Buffer,
     draft_kv_cache_buffers: *dflash.KvCache.Buffer,
     rng_buffer: *zml.Tensor.Rng.Buffer,
     attention_metadata_buffers: anytype,
@@ -755,6 +566,11 @@ fn runSpeculativeDecoding(
 
     var block_tokens = try allocator.alloc(u32, models.block_size);
     defer allocator.free(block_tokens);
+
+    var verify_args = try compiled.target_verify_exe.args(allocator);
+    defer verify_args.deinit(allocator);
+    var verify_results = try compiled.target_verify_exe.results(allocator);
+    defer verify_results.deinit(allocator);
 
     var start: u32 = prompt.prompt_len;
     var draft_cache_base: u32 = 0;
@@ -849,6 +665,8 @@ fn runSpeculativeDecoding(
             models,
             compiled,
             loaded_buffers,
+            &verify_args,
+            &verify_results,
             block_tokens_buffer,
             draft_logits_buffer,
             start,
@@ -1090,17 +908,6 @@ fn setGeneratedToken(tokens: *std.ArrayList(u32), allocator: std.mem.Allocator, 
         stdx.debug.assert(idx == tokens.items.len, "generated token stream has a gap at index {}", .{index});
         try tokens.append(allocator, token);
     }
-}
-
-fn zeroDeviceBuffer(allocator: std.mem.Allocator, project: *Project, tensor: zml.Tensor) !zml.Buffer {
-    const bytes = try allocator.alloc(u8, tensor.shape().byteSize());
-    defer allocator.free(bytes);
-    @memset(bytes, 0);
-    return zml.Buffer.fromSlice(project.io, project.platform, zml.Slice.init(tensor.shape(), bytes), project.shardings.model);
-}
-
-fn scalarBuffer(project: *Project, value: anytype, dtype: zml.DataType) !zml.Buffer {
-    return zml.Buffer.fromSlice(project.io, project.platform, zml.Slice.init(.scalar(dtype), std.mem.asBytes(&value)), .replicated);
 }
 
 fn replaceBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
