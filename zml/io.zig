@@ -170,6 +170,36 @@ pub const TensorStore = struct {
             return self.maybeCreateTensor(subkey, tagz, partitioning).?;
         }
 
+        pub fn maybeCreateTensorWithShape(self: View, subkey: []const u8, shape_: anytype, partitioning: anytype) ?Tensor {
+            var buffer: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+
+            const ptr = self.store.getPtrFromKey(key) orelse return null;
+            ptr.shape = ptr.shape.reshape(shape_);
+
+            if (@TypeOf(partitioning) == @TypeOf(null)) {
+                @compileError("TensorStore.View.createTensorWithShape partitioning cannot be null; pass .replicated or an explicit partitioning");
+            }
+
+            switch (@typeInfo(@TypeOf(partitioning))) {
+                .optional => @compileError("TensorStore.View.createTensorWithShape partitioning cannot be optional; pass .replicated or an explicit partitioning"),
+                .enum_literal => switch (partitioning) {
+                    .replicated => ptr.shape = ptr.shape.withReplicatedPartitioning(),
+                    else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
+                },
+                else => ptr.shape = ptr.shape.withPartitioning(partitioning),
+            }
+
+            const tensor: Tensor = .fromShape(ptr.shape);
+            self.store.bindIdToKey(key, tensor.id) catch unreachable;
+
+            return tensor;
+        }
+
+        pub fn createTensorWithShape(self: View, subkey: []const u8, shape_: anytype, partitioning: anytype) Tensor {
+            return self.maybeCreateTensorWithShape(subkey, shape_, partitioning).?;
+        }
+
         pub fn getShape(self: View, subkey: []const u8) ?Shape {
             var buffer: [256]u8 = undefined;
             const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
@@ -1167,7 +1197,13 @@ pub fn load(
                         shape,
                         sharding,
                         ctx_.buffers[i_],
-                    ) catch unreachable;
+                    ) catch |err| {
+                        log.err(
+                            "Failed to create sharded writer for tensor {s} with shape {f} and sharding {f}: {}",
+                            .{ reader.tensor.name, shape, sharding, err },
+                        );
+                        unreachable;
+                    };
                     defer writer.deinit(ctx_.allocator);
 
                     const scale = 1024;

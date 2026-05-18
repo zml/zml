@@ -133,7 +133,7 @@ pub fn fusedExpertsImpl(
     const s = hidden_states.dim(.s);
 
     const hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
-    const gate_up = w1.withTags(.{ .expert, .out, .in });
+    const gate_up = normalizeGateUpWeight(w1);
     const down = w2.withTags(.{ .expert, .out, .mid });
     const weights = topk_weights.reshape(.{ .token = b * s, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
     const ids = topk_ids.reshape(.{ .token = b * s, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
@@ -182,9 +182,28 @@ pub fn fusedExpertsImpl(
     const b_bias_1 =
         opts.w1_bias orelse
         metadata.w1_zero_bias orelse
-        Tensor.zeroes(Shape.init(.{ .expert = gate_up.dim(.expert), .out = gate_up.dim(.out) }, .bf16));
+        Tensor.zeroes(Shape.init(.{ .expert = gate_up.dim(.expert), .out = gateUpOutDim(gate_up) }, .bf16));
 
     const b_scale_1 = opts.w1_scale orelse Tensor.scalar(1.0, .f32);
+
+    const first_out_shape = if (gate_up.rank() == 4)
+        Shape.init(.{
+            .token = num_assignments,
+            .gate_up = gate_up.dim(.gate_up),
+            .mid = gate_up.dim(.mid),
+        }, .bf16).withPartitioning(.{
+            .token = .replicated,
+            .gate_up = .replicated,
+            .mid = .model,
+        })
+    else
+        Shape.init(.{
+            .token = num_assignments,
+            .out = gate_up.dim(.out),
+        }, .bf16).withPartitioning(.{
+            .token = .replicated,
+            .out = .model,
+        });
 
     const first_out = callFusedMoe(
         hidden_quant,
@@ -200,12 +219,18 @@ pub fn fusedExpertsImpl(
         options,
         max_num_tokens_padded,
         num_assignments,
-        Shape.init(.{ .token = num_assignments, .out = gate_up.dim(.out) }, .bf16),
+        first_out_shape,
     );
 
     const activated = switch (opts.activation) {
         .silu => b: {
-            const gate, const up = zml.nn.splitRealImg(first_out, .sequential);
+            const gate, const up = if (first_out.rank() == 3)
+                .{
+                    first_out.slice1d(.gate_up, .{ .start = 0, .end = 1 }).squeeze(.gate_up),
+                    first_out.slice1d(.gate_up, .{ .start = 1, .end = 2 }).squeeze(.gate_up),
+                }
+            else
+                zml.nn.splitRealImg(first_out, .sequential);
             break :b gate.silu().mul(up);
         },
         .relu => first_out.relu().powByConst(2),
@@ -235,6 +260,8 @@ pub fn fusedExpertsImpl(
 
     const b_scale_2 = opts.w2_scale orelse Tensor.scalar(1.0, .f32);
 
+    // activated_quant = activated_quant.withPartitioning(.{});
+
     const second_out = callFusedMoe(
         activated_quant,
         down,
@@ -249,7 +276,11 @@ pub fn fusedExpertsImpl(
         options,
         max_num_tokens_padded,
         num_assignments,
-        Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
+        Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16).withPartitioning(.{
+            .token = .replicated,
+            .topk = .replicated,
+            .out = .replicated,
+        }),
     );
 
     const output = second_out.sum(.topk).squeeze(.topk);
@@ -296,7 +327,7 @@ fn callFusedMoe(
         (struct {
             fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_shape_: zml.Shape) zml.Tensor {
                 const a_ = sharded_inputs[0];
-                const b_ = sharded_inputs[1];
+                const b_unflattened = sharded_inputs[1];
                 const b_bias_ = sharded_inputs[2];
                 const a_scale_ = sharded_inputs[3];
                 const b_scale_ = sharded_inputs[4];
@@ -304,6 +335,8 @@ fn callFusedMoe(
                 const sorted_token_ids_ = sharded_inputs[6];
                 const expert_ids_ = sharded_inputs[7];
                 const num_tokens_post_padded_ = sharded_inputs[8];
+                const b_ = flattenGateUpLocalForKernel(b_unflattened);
+                const kernel_output_shape = kernelOutputShape(b_unflattened, output_shape_);
 
                 const block_size_m: i64 = @intCast(ctx_.cfg.block_size_m);
                 const block_size_n: i64 = @intCast(ctx_.cfg.block_size_n);
@@ -325,7 +358,7 @@ fn callFusedMoe(
                 const stride_bsk: i64 = if (ctx_.cfg.b_scale_dtype != null and b_scale_.rank() == 3) 1 else 0;
                 const stride_bsn: i64 = if (ctx_.cfg.b_scale_dtype != null and b_scale_.rank() == 3) b_scale_.dim(2) else 0;
 
-                return kernels.FusedMoe.Kernel.call(
+                const kernel_output = kernels.FusedMoe.Kernel.call(
                     .{
                         .a_ptr = a_,
                         .b_ptr = b_,
@@ -352,7 +385,7 @@ fn callFusedMoe(
                         .stride_bbe_ptr = Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
                         .stride_bbn_ptr = Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
                     },
-                    .{ .c = output_shape_ },
+                    .{ .c = kernel_output_shape },
                     .{
                         .cfg = ctx_.cfg,
                         .grid = .{ @intCast(grid_x), 1, 1 },
@@ -360,9 +393,63 @@ fn callFusedMoe(
                         .num_stages = @intCast(ctx_.options.num_stages),
                     },
                 ).c;
+                return reshapeKernelOutputForLogicalShape(b_unflattened, output_shape_, kernel_output_shape, kernel_output);
             }
         }).body,
     );
+}
+
+fn normalizeGateUpWeight(w1: Tensor) Tensor {
+    return switch (w1.rank()) {
+        3 => w1.withTags(.{ .expert, .out, .in }),
+        4 => w1.withTags(.{ .expert, .gate_up, .mid, .in }),
+        else => stdx.debug.panic("Unsupported gate_up weight rank {}, expected 3 or 4", .{w1.rank()}),
+    };
+}
+
+fn gateUpOutDim(gate_up: Tensor) i64 {
+    return if (gate_up.rank() == 4)
+        gate_up.dim(.gate_up) * gate_up.dim(.mid)
+    else
+        gate_up.dim(.out);
+}
+
+fn flattenGateUpLocalForKernel(gate_up: Tensor) Tensor {
+    if (gate_up.rank() == 3) return gate_up;
+
+    stdx.debug.assert(gate_up.rank() == 4, "Unsupported gate_up local rank {}, expected 4", .{gate_up.rank()});
+    return gate_up.reshape(.{
+        .expert = gate_up.dim(.expert),
+        .out = gate_up.dim(.gate_up) * gate_up.dim(.mid),
+        .in = gate_up.dim(.in),
+    }).withTags(.{ .expert, .out, .in });
+}
+
+fn kernelOutputShape(gate_up: Tensor, logical_output_shape: Shape) Shape {
+    if (gate_up.rank() != 4 or logical_output_shape.rank() != 3 or logical_output_shape.hasTag(.gate_up) == null) {
+        return logical_output_shape;
+    }
+
+    return Shape.init(.{
+        .token = logical_output_shape.dim(.token),
+        .out = logical_output_shape.dim(.gate_up) * logical_output_shape.dim(.mid),
+    }, logical_output_shape.dtype()).withPartitioning(.{
+        .token = .replicated,
+        .out = .model,
+    });
+}
+
+fn reshapeKernelOutputForLogicalShape(gate_up: Tensor, logical_output_shape: Shape, kernel_output_shape: Shape, output: Tensor) Tensor {
+    _ = kernel_output_shape;
+    if (gate_up.rank() != 4 or logical_output_shape.rank() != 3 or logical_output_shape.hasTag(.gate_up) == null) {
+        return output;
+    }
+
+    return output.reshape(.{
+        .token = logical_output_shape.dim(.token),
+        .gate_up = logical_output_shape.dim(.gate_up),
+        .mid = logical_output_shape.dim(.mid),
+    }).withTags(.{ .token, .gate_up, .mid });
 }
 
 fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct { Tensor, Tensor, Tensor } {
@@ -735,8 +822,13 @@ fn validateInputs(hidden: Tensor, gate_up: Tensor, down: Tensor, weights: Tensor
     if (weights.dtype() != .f32 and weights.dtype() != .bf16) return error.UnsupportedType;
     if (ids.dtype() != .i32) return error.UnsupportedType;
     if (hidden.dim(.in) != gate_up.dim(.in)) return error.InvalidShape;
-    if (@rem(gate_up.dim(.out), 2) != 0) return error.InvalidShape;
-    if (down.dim(.mid) != @divFloor(gate_up.dim(.out), 2)) return error.InvalidShape;
+    if (gate_up.rank() == 4) {
+        if (gate_up.dim(.gate_up) != 2) return error.InvalidShape;
+        if (down.dim(.mid) != gate_up.dim(.mid)) return error.InvalidShape;
+    } else {
+        if (@rem(gate_up.dim(.out), 2) != 0) return error.InvalidShape;
+        if (down.dim(.mid) != @divFloor(gate_up.dim(.out), 2)) return error.InvalidShape;
+    }
     if (ids.dim(.token) != hidden.dim(.token) or weights.dim(.token) != hidden.dim(.token)) return error.InvalidShape;
     if (ids.dim(.topk) != weights.dim(.topk)) return error.InvalidShape;
     if (gate_up.dim(.expert) != down.dim(.expert)) return error.InvalidShape;

@@ -707,19 +707,32 @@ pub const Moe = struct {
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Moe {
         _ = allocator;
         const experts_store = store.withPrefix("experts");
-        const gate_up_proj_tensor = experts_store.createTensor(
+        const shared_expert = Mlp.init(store.withPrefix("shared_expert"));
+        const mid = shared_expert.gate_proj.weight.dim(.dout);
+        const gate_up_proj_tensor = experts_store.createTensorWithShape(
             "gate_up_proj",
-            .{ .expert, .dout, .d },
-            .{ .expert = .model, .dout = .replicated, .d = .replicated },
+            .{
+                .expert = config.text_config.num_experts.?,
+                .gate_up = 2,
+                .mid = mid,
+                .d = config.text_config.hidden_size,
+            },
+            .{
+                .expert = .replicated,
+                .gate_up = .replicated,
+                .mid = .model,
+                .d = .replicated,
+            },
         );
+
         const down_proj_tensor = experts_store.createTensor(
             "down_proj",
             .{ .expert, .d, .dout },
-            .{ .expert = .model, .d = .replicated, .dout = .replicated },
+            .{ .expert = .replicated, .d = .replicated, .dout = .model },
         );
 
         return .{
-            .shared_expert = Mlp.init(store.withPrefix("shared_expert")),
+            .shared_expert = shared_expert,
             .shared_expert_gate = .init(
                 store.withPrefix("shared_expert_gate").createTensor("weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }),
                 store.withPrefix("shared_expert_gate").maybeCreateTensor("bias", .{.dout}, .{ .dout = .replicated }),

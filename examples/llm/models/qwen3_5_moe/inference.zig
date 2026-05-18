@@ -18,6 +18,14 @@ const CompileModelResult = struct {
     decode_sampling_exe: zml.Exe,
 };
 
+fn makeDumpSubdir(allocator: std.mem.Allocator, io: std.Io, base: ?[]const u8, subdir: []const u8) !?[]const u8 {
+    const base_ = base orelse return null;
+    const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ base_, subdir });
+    errdefer allocator.free(full);
+    try std.Io.Dir.cwd().createDirPath(io, full);
+    return full;
+}
+
 pub const CompilationParameters = struct {
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
@@ -38,7 +46,7 @@ pub const CompilationParameters = struct {
             .moe_parameters = .init(.fromBackend(moe_backend, config.text_config.num_experts_per_tok, zml.moe.triton.Parameters.ActivationMode.silu)),
             .seqlen = seqlen,
             .shardings = shardings,
-            .xla_dump_to = "/home/ubuntu/xla_dump",
+            .xla_dump_to = "/tmp/xla_hlo",
         };
     }
 };
@@ -246,6 +254,15 @@ fn compileModel(
     const full_layer_model = qwen35_model.text_model.layers[full_layer_index];
     const linear_layer_model = qwen35_model.text_model.layers[linear_layer_index];
 
+    const dump_prefill_full = try makeDumpSubdir(allocator, io, parameters.xla_dump_to, "prefill_full_layer");
+    defer if (dump_prefill_full) |p| allocator.free(p);
+    const dump_decode_full = try makeDumpSubdir(allocator, io, parameters.xla_dump_to, "decode_full_layer");
+    defer if (dump_decode_full) |p| allocator.free(p);
+    const dump_prefill_linear = try makeDumpSubdir(allocator, io, parameters.xla_dump_to, "prefill_linear_layer");
+    defer if (dump_prefill_linear) |p| allocator.free(p);
+    const dump_decode_linear = try makeDumpSubdir(allocator, io, parameters.xla_dump_to, "decode_linear_layer");
+    defer if (dump_decode_linear) |p| allocator.free(p);
+
     var prefill_full_layer_future = try io.concurrent(struct {
         fn call(
             allocator_: std.mem.Allocator,
@@ -264,7 +281,7 @@ fn compileModel(
         ) !zml.Exe {
             return compileSelfAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "prefill full-attention layer...");
         }
-    }.call, .{ allocator, io, platform, full_layer_model, prefill_hidden, token_index, self_attn_cache, qwen35_model.config, parameters.prefill_moe_metadata, parameters.moe_parameters, &all_shardings, parameters.xla_dump_to, progress });
+    }.call, .{ allocator, io, platform, full_layer_model, prefill_hidden, token_index, self_attn_cache, qwen35_model.config, parameters.prefill_moe_metadata, parameters.moe_parameters, &all_shardings, dump_prefill_full, progress });
     errdefer if (prefill_full_layer_future.cancel(io)) |v| v.deinit() else |_| {};
 
     var decode_full_layer_future = try io.concurrent(struct {
@@ -285,7 +302,7 @@ fn compileModel(
         ) !zml.Exe {
             return compileSelfAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "decode full-attention layer...");
         }
-    }.call, .{ allocator, io, platform, full_layer_model, decode_hidden, token_index, self_attn_cache, qwen35_model.config, parameters.decode_moe_metadata, parameters.moe_parameters, &all_shardings, parameters.xla_dump_to, progress });
+    }.call, .{ allocator, io, platform, full_layer_model, decode_hidden, token_index, self_attn_cache, qwen35_model.config, parameters.decode_moe_metadata, parameters.moe_parameters, &all_shardings, dump_decode_full, progress });
     errdefer if (decode_full_layer_future.cancel(io)) |v| v.deinit() else |_| {};
 
     var prefill_full_layer_exe: ?zml.Exe = null;
@@ -294,56 +311,6 @@ fn compileModel(
     errdefer if (decode_full_layer_exe) |exe| exe.deinit();
     prefill_full_layer_exe = try prefill_full_layer_future.await(io);
     decode_full_layer_exe = try decode_full_layer_future.await(io);
-
-    var prefill_linear_layer_future = try io.concurrent(struct {
-        fn call(
-            allocator_: std.mem.Allocator,
-            io_: std.Io,
-            platform_: *const zml.Platform,
-            layer_model_: model.TransformerLayer,
-            hidden_: zml.Tensor,
-            token_index_: zml.Tensor,
-            cache_: model.KvCache.GatedDeltaNetCache,
-            config_: model.Config,
-            moe_metadata_: zml.moe.Metadata,
-            moe_parameters_: zml.moe.Parameters,
-            shardings_: []const zml.Sharding,
-            xla_dump_to_: ?[]const u8,
-            progress_: *std.Progress.Node,
-        ) !zml.Exe {
-            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "prefill linear-attention layer...");
-        }
-    }.call, .{ allocator, io, platform, linear_layer_model, prefill_hidden, token_index, linear_attn_cache, qwen35_model.config, parameters.prefill_moe_metadata, parameters.moe_parameters, &all_shardings, parameters.xla_dump_to, progress });
-    errdefer if (prefill_linear_layer_future.cancel(io)) |v| v.deinit() else |_| {};
-
-    var decode_linear_layer_future = try io.concurrent(struct {
-        fn call(
-            allocator_: std.mem.Allocator,
-            io_: std.Io,
-            platform_: *const zml.Platform,
-            layer_model_: model.TransformerLayer,
-            hidden_: zml.Tensor,
-            token_index_: zml.Tensor,
-            cache_: model.KvCache.GatedDeltaNetCache,
-            config_: model.Config,
-            moe_metadata_: zml.moe.Metadata,
-            moe_parameters_: zml.moe.Parameters,
-            shardings_: []const zml.Sharding,
-            xla_dump_to_: ?[]const u8,
-            progress_: *std.Progress.Node,
-        ) !zml.Exe {
-            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "decode linear-attention layer...");
-        }
-    }.call, .{ allocator, io, platform, linear_layer_model, decode_hidden, token_index, linear_attn_cache, qwen35_model.config, parameters.decode_moe_metadata, parameters.moe_parameters, &all_shardings, parameters.xla_dump_to, progress });
-    errdefer if (decode_linear_layer_future.cancel(io)) |v| v.deinit() else |_| {};
-
-    var prefill_linear_layer_exe: ?zml.Exe = null;
-    errdefer if (prefill_linear_layer_exe) |exe| exe.deinit();
-    var decode_linear_layer_exe: ?zml.Exe = null;
-    errdefer if (decode_linear_layer_exe) |exe| exe.deinit();
-
-    prefill_linear_layer_exe = try prefill_linear_layer_future.await(io);
-    decode_linear_layer_exe = try decode_linear_layer_future.await(io);
 
     var prefill_sampling_future = try io.concurrent(struct {
         fn call(
@@ -394,6 +361,56 @@ fn compileModel(
     } else |_| {};
 
     const decode_sampling_exe = try decode_sampling_future.await(io);
+
+    var prefill_linear_layer_future = try io.concurrent(struct {
+        fn call(
+            allocator_: std.mem.Allocator,
+            io_: std.Io,
+            platform_: *const zml.Platform,
+            layer_model_: model.TransformerLayer,
+            hidden_: zml.Tensor,
+            token_index_: zml.Tensor,
+            cache_: model.KvCache.GatedDeltaNetCache,
+            config_: model.Config,
+            moe_metadata_: zml.moe.Metadata,
+            moe_parameters_: zml.moe.Parameters,
+            shardings_: []const zml.Sharding,
+            xla_dump_to_: ?[]const u8,
+            progress_: *std.Progress.Node,
+        ) !zml.Exe {
+            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "prefill linear-attention layer...");
+        }
+    }.call, .{ allocator, io, platform, linear_layer_model, prefill_hidden, token_index, linear_attn_cache, qwen35_model.config, parameters.prefill_moe_metadata, parameters.moe_parameters, &all_shardings, dump_prefill_linear, progress });
+    errdefer if (prefill_linear_layer_future.cancel(io)) |v| v.deinit() else |_| {};
+
+    var decode_linear_layer_future = try io.concurrent(struct {
+        fn call(
+            allocator_: std.mem.Allocator,
+            io_: std.Io,
+            platform_: *const zml.Platform,
+            layer_model_: model.TransformerLayer,
+            hidden_: zml.Tensor,
+            token_index_: zml.Tensor,
+            cache_: model.KvCache.GatedDeltaNetCache,
+            config_: model.Config,
+            moe_metadata_: zml.moe.Metadata,
+            moe_parameters_: zml.moe.Parameters,
+            shardings_: []const zml.Sharding,
+            xla_dump_to_: ?[]const u8,
+            progress_: *std.Progress.Node,
+        ) !zml.Exe {
+            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "decode linear-attention layer...");
+        }
+    }.call, .{ allocator, io, platform, linear_layer_model, decode_hidden, token_index, linear_attn_cache, qwen35_model.config, parameters.decode_moe_metadata, parameters.moe_parameters, &all_shardings, dump_decode_linear, progress });
+    errdefer if (decode_linear_layer_future.cancel(io)) |v| v.deinit() else |_| {};
+
+    var prefill_linear_layer_exe: ?zml.Exe = null;
+    errdefer if (prefill_linear_layer_exe) |exe| exe.deinit();
+    var decode_linear_layer_exe: ?zml.Exe = null;
+    errdefer if (decode_linear_layer_exe) |exe| exe.deinit();
+
+    prefill_linear_layer_exe = try prefill_linear_layer_future.await(io);
+    decode_linear_layer_exe = try decode_linear_layer_future.await(io);
 
     return .{
         .prefill_embedding_exe = prefill_embedding_exe,

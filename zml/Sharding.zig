@@ -1898,6 +1898,8 @@ pub const Placement = struct {
             }
         }
 
+        std.log.info("dim = {d}, product = {d}", .{ dim, plan.product });
+
         // Validate divisibility
         if (plan.product > 0 and @rem(dim, plan.product) != 0) {
             return error.IncompatibleSharding;
