@@ -7,18 +7,17 @@ const stdx = zml.stdx;
 const main = @import("main.zig");
 
 
-pub const AceVae_handler = struct {
-    model: AceVae,
-    params: Params,
+pub const AceVaeDecoder_handler = struct {
+    model: AceVaeDecoder,
+    params: DecoderParams,
     config: Config,
     decode_exe: zml.Exe,
-    encode_exe: zml.Exe,
-    model_buffers: zml.Bufferized(AceVae),
+    model_buffers: zml.Bufferized(AceVaeDecoder),
     shardings: main.Shardings,
 
-    pub fn init(zml_handler: *main.Zml_handler, decode_t: u32) !AceVae_handler {
+    pub fn init(zml_handler: *main.Zml_handler, decode_t: u32) !AceVaeDecoder_handler {
         zml_handler.tic(&zml_handler.timers.vae.init);        
-        std.log.info("VAE init", .{});
+        std.log.info("VAE init decoder", .{});
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acevae);
         var registry: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.io, repo, "diffusion_pytorch_model.safetensors");
         defer registry.deinit();
@@ -33,7 +32,94 @@ pub const AceVae_handler = struct {
         defer store.deinit();
 
         std.log.info("VAE initialize model", .{});
-        const model: AceVae = try .init(zml_handler.allocator, store.view(), config);
+        const model: AceVaeDecoder = try .init(zml_handler.allocator, store.view(), config);
+        std.log.info("VAE initialized", .{});
+
+        var upsampling_ratio: u32 = 1;
+        for (config.downsampling_ratios) |ratio| {
+            upsampling_ratio *= ratio;
+        }
+        const overlap = 25;
+        const stride = decode_t * 25;
+        const chunk_frames = stride + 2 * overlap;
+        const decoded_chunk_frames = chunk_frames * upsampling_ratio;
+
+        const params: DecoderParams = .{
+            .latents = .init(.{ .c = config.decoder_input_channels, .t = chunk_frames }, .bf16),
+            .decoded_chunk = .init(.{ .a = 2, .t = decoded_chunk_frames }, .f32),
+        };
+
+        const shardings: main.Shardings = try .init(zml_handler.platform);
+
+        zml_handler.toc(&zml_handler.timers.vae.init);
+        zml_handler.tic(&zml_handler.timers.vae.compile);
+
+        const decode_exe = try compileModel(zml_handler, model, params, shardings);
+
+        zml_handler.toc(&zml_handler.timers.vae.compile);
+        zml_handler.tic(&zml_handler.timers.vae.load);
+
+        std.log.info("VAE load buffers", .{});
+        const model_buffers = try model.load(zml_handler, &store, &shardings.all());
+        std.log.info("VAE loaded buffers", .{});
+
+        zml_handler.toc(&zml_handler.timers.vae.load);
+
+        return .{
+            .model = model,
+            .params = params,
+            .config = config,
+            .decode_exe = decode_exe,
+            .model_buffers = model_buffers,
+            .shardings = shardings,
+        };
+    }
+
+    pub fn compileModel(zml_handler: *main.Zml_handler, model: AceVaeDecoder, params: DecoderParams, shardings: main.Shardings) !zml.Exe {
+        std.log.info("VAE compile decoder", .{});
+        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings.all() };
+        const exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .decode, .{ params.latents, params.decoded_chunk }, opts);
+        std.log.info("VAE compiled decoder", .{});
+        return exe;
+    }
+
+    pub fn unloadBuffers(self: *AceVaeDecoder_handler, allocator: std.mem.Allocator) void {
+        AceVaeDecoder.unloadBuffers(&self.model_buffers, allocator);
+    }
+
+    pub fn deinit(self: *AceVaeDecoder_handler, allocator: std.mem.Allocator) void {
+        self.model.deinit(allocator);
+        self.config.deinit(allocator);
+        self.decode_exe.deinit();
+    }
+};
+
+pub const AceVaeEncoder_handler = struct {
+    model: AceVaeEncoder,
+    params: EncoderParams,
+    config: Config,
+    encode_exe: zml.Exe,
+    model_buffers: zml.Bufferized(AceVaeEncoder),
+    shardings: main.Shardings,
+
+    pub fn init(zml_handler: *main.Zml_handler, decode_t: u32) !AceVaeEncoder_handler {
+        zml_handler.tic(&zml_handler.timers.vae.init);        
+        std.log.info("VAE init encoder", .{});
+        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acevae);
+        var registry: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.io, repo, "diffusion_pytorch_model.safetensors");
+        defer registry.deinit();
+
+        std.log.info("VAE config and safetensors", .{});
+        const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
+        defer parsed_config.deinit();
+        const config = try parsed_config.value.dupe(zml_handler.allocator);
+        std.log.info("VAE parsed", .{});
+
+        var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
+        defer store.deinit();
+
+        std.log.info("VAE initialize model", .{});
+        const model: AceVaeEncoder = try .init(zml_handler.allocator, store.view(), config);
         std.log.info("VAE initialized", .{});
 
         var upsampling_ratio: u32 = 1;
@@ -42,110 +128,70 @@ pub const AceVae_handler = struct {
         }
         const t_25hz = decode_t * 25;
         const t_48khz = t_25hz * upsampling_ratio;
-        
+
         const overlap = 25;
         const stride = decode_t * 25;
         const chunk_frames = stride + 2 * overlap;
-        const decoded_chunk_frames = chunk_frames * upsampling_ratio;
-        
-        const params: Params = .{
-            .latents = .init(.{ .c = config.decoder_input_channels, .t = chunk_frames }, .bf16),
-            .decoded_chunk = .init(.{ .a = 2, .t = decoded_chunk_frames }, .f32),
+
+        const params: EncoderParams = .{
             .audio = .init(.{ .c = config.audio_channels, .t = t_48khz }, .f32),
+            .encoded_chunk = .init(.{ .c = config.decoder_input_channels, .t = chunk_frames }, .bf16),
         };
-        
+
         const shardings: main.Shardings = try .init(zml_handler.platform);
 
         zml_handler.toc(&zml_handler.timers.vae.init);
         zml_handler.tic(&zml_handler.timers.vae.compile);
 
-        const encode_exe, const decode_exe = try compileModels(zml_handler, model, params, shardings);
-        
+        const encode_exe = try compileModel(zml_handler, model, params, shardings);
+
         zml_handler.toc(&zml_handler.timers.vae.compile);
         zml_handler.tic(&zml_handler.timers.vae.load);
-        
+
         std.log.info("VAE load buffers", .{});
         const model_buffers = try model.load(zml_handler, &store, &shardings.all());
         std.log.info("VAE loaded buffers", .{});
-        
+
         zml_handler.toc(&zml_handler.timers.vae.load);
-        
+
         return .{
             .model = model,
             .params = params,
             .config = config,
-            .decode_exe = decode_exe,
             .encode_exe = encode_exe,
             .model_buffers = model_buffers,
             .shardings = shardings,
         };
     }
 
-    pub fn compileModels(zml_handler: *main.Zml_handler, model: AceVae, params: Params, shardings: main.Shardings) !struct { zml.Exe, zml.Exe } {
-        const encode_exe = try compileEncodeModel(zml_handler, model, params, shardings);
-        const decode_exe = try compileDecodeModel(zml_handler, model, params, shardings);
-        std.log.info("VAE compiled models", .{});
-        return .{ encode_exe, decode_exe };
-    }
-
-    pub fn compileEncodeModel(zml_handler: *main.Zml_handler, model: AceVae, params: Params, shardings: main.Shardings) !zml.Exe {
+    pub fn compileModel(zml_handler: *main.Zml_handler, model: AceVaeEncoder, params: EncoderParams, shardings: main.Shardings) !zml.Exe {
         std.log.info("VAE compile encoder", .{});
         const opts: zml.module.CompilationOptions = .{ .shardings = &shardings.all() };
-        return zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .encode, .{ params.audio }, opts);
-    }
-    
-    pub fn compileDecodeModel(zml_handler: *main.Zml_handler, model: AceVae, params: Params, shardings: main.Shardings) !zml.Exe {
-        std.log.info("VAE compile decoder", .{});
-        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings.all() };
-        return zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .decode, .{ params.latents, params.decoded_chunk }, opts);
+        const exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .encode, .{ params.audio, params.encoded_chunk }, opts);
+        std.log.info("VAE compiled encoder", .{});
+        return exe;
     }
 
-    pub fn compileModelParallel(zml_handler: *main.Zml_handler, model: AceVae, params: Params, shardings: main.Shardings) !struct { zml.Exe, zml.Exe } {
-        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings.all() };
-        std.log.info("VAE compile encode/decode", .{});
-    
-        var encode_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: AceVae, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .encode, .{ params_.audio }, opts_);
-            }
-        }.call, .{ zml_handler, model, params, opts });
-        var encode_future_awaited = false;
-        errdefer if (!encode_future_awaited) if (encode_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
-
-        var dencode_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: AceVae, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .dencode, .{ params_.latents }, opts_);
-            }
-        }.call, .{ zml_handler, model, params, opts });
-        var dencode_future_awaited = false;
-        errdefer if (!dencode_future_awaited) if (dencode_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
-    
-        const encode_exe = try encode_future.await(zml_handler.io);
-        encode_future_awaited = true;
-    
-        const decode_exe = try dencode_future.await(zml_handler.io);
-        dencode_future_awaited = true;
-    
-        return .{ encode_exe, decode_exe };
-    }
-    
-    pub fn unloadBuffers(self: *AceVae_handler, allocator: std.mem.Allocator) void {
-        AceVae.unloadBuffers(&self.model_buffers, allocator);
+    pub fn unloadBuffers(self: *AceVaeEncoder_handler, allocator: std.mem.Allocator) void {
+        AceVaeEncoder.unloadBuffers(&self.model_buffers, allocator);
     }
 
-    pub fn deinit(self: *AceVae_handler, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *AceVaeEncoder_handler, allocator: std.mem.Allocator) void {
         self.model.deinit(allocator);
         self.config.deinit(allocator);
-        self.decode_exe.deinit();
         self.encode_exe.deinit();
     }
 };
 
 
-pub const Params = struct {
+pub const EncoderParams = struct {
+    audio: zml.Tensor,
+    encoded_chunk: zml.Tensor,
+};
+
+pub const DecoderParams = struct {
     latents: zml.Tensor,
     decoded_chunk: zml.Tensor,
-    audio: zml.Tensor,
 };
 
 pub const Config = struct {
@@ -176,21 +222,19 @@ pub const Config = struct {
 };
 
 
-pub const AceVae = struct {
+pub const AceVaeEncoder = struct {
     encoder: OobleckEncoder,
-    decoder: OobleckDecoder,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !AceVae {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !AceVaeEncoder {
         return .{
             .encoder = try .init(allocator, store.withPrefix("encoder"), config),
-            .decoder = try .init(allocator, store.withPrefix("decoder"), config),
         };
     }
 
-    pub fn load(self: *const AceVae, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceVae) {
+    pub fn load(self: *const AceVaeEncoder, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceVaeEncoder) {
         var progress = zml_handler.progress.start("Load VAE weights", store.registry.tensors.count());
         defer progress.end();
-        return zml.io.load(AceVae, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
+        return zml.io.load(AceVaeEncoder, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
             .parallelism = 16,
             .dma_chunks = 32,
@@ -199,25 +243,56 @@ pub const AceVae = struct {
         });
     }
 
-    pub fn deinit(self: *const AceVae, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *const AceVaeEncoder, allocator: std.mem.Allocator) void {
         self.encoder.deinit(allocator);
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(AceVaeEncoder), allocator: std.mem.Allocator) void {
+        OobleckEncoder.unloadBuffers(&self.encoder, allocator);
+    }
+
+    pub fn encode(self: AceVaeEncoder, audio: zml.Tensor, encoded_chunk: zml.Tensor) zml.Tensor {
+        const chunk = self.encoder.forward(audio.convert(.bf16));
+        return chunk.reuseBuffer(encoded_chunk);
+    }
+
+};
+
+pub const AceVaeDecoder = struct {
+    decoder: OobleckDecoder,
+
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !AceVaeDecoder {
+        return .{
+            .decoder = try .init(allocator, store.withPrefix("decoder"), config),
+        };
+    }
+
+    pub fn load(self: *const AceVaeDecoder, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceVaeDecoder) {
+        var progress = zml_handler.progress.start("Load VAE weights", store.registry.tensors.count());
+        defer progress.end();
+        return zml.io.load(AceVaeDecoder, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
+            .shardings = shardings,
+            .parallelism = 16,
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = &progress,
+        });
+    }
+
+    pub fn deinit(self: *const AceVaeDecoder, allocator: std.mem.Allocator) void {
         self.decoder.deinit(allocator);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(AceVae), allocator: std.mem.Allocator) void {
-        OobleckEncoder.unloadBuffers(&self.encoder, allocator);
+    pub fn unloadBuffers(self: *zml.Bufferized(AceVaeDecoder), allocator: std.mem.Allocator) void {
         OobleckDecoder.unloadBuffers(&self.decoder, allocator);
     }
 
-    pub fn encode(self: AceVae, audio: zml.Tensor) zml.Tensor {
-        return self.encoder.forward(audio.convert(.bf16));
-    }
-
-    pub fn decode(self: AceVae, latents: zml.Tensor, decoded_chunk: zml.Tensor) zml.Tensor {
+    pub fn decode(self: AceVaeDecoder, latents: zml.Tensor, decoded_chunk: zml.Tensor) zml.Tensor {
         const chunk = self.decoder.forward(latents).convert(.f32);
         return chunk.reuseBuffer(decoded_chunk);
     }
 };
+
 
 
 pub const OobleckEncoder = struct {
@@ -309,7 +384,7 @@ pub const EncoderBlock = struct {
                 output_dim,
                 2 * stride,
                 stride,
-                @divFloor(stride + 1, 2),
+                @divTrunc(stride + 1, 2),
                 1,
             ),
         };
@@ -331,7 +406,6 @@ pub const EncoderBlock = struct {
         return hidden_state;
     }
 };
-
 
 pub const OobleckDecoder = struct {
     conv1: Conv1D,
@@ -405,15 +479,6 @@ pub const OobleckDecoder = struct {
     }
 };
 
-const OobleckDecoderWrapper = struct {
-    decoder: OobleckDecoder,
-    pub fn forward(wrapper: OobleckDecoderWrapper, input: zml.Tensor) zml.Tensor {
-        const tagged_input = input.withTags(.{ .b, .a, .t }).squeeze(.b);
-        const output = wrapper.decoder.forward(tagged_input).withTags(.{ .t, .a });
-        return output.insertAxes(0, .{ .b });
-    }
-};
-
 pub const DecoderBlock = struct {
     snake1: Snake1D,
     conv_t1: ConvTranspose1D,
@@ -430,7 +495,7 @@ pub const DecoderBlock = struct {
                 output_dim,
                 2 * stride,
                 stride,
-                @divFloor(stride + 1, 2),
+                @divTrunc(stride + 1, 2),
             ),
             .res_unit1 = .init(store.withPrefix("res_unit1"), output_dim, 1),
             .res_unit2 = .init(store.withPrefix("res_unit2"), output_dim, 3),
@@ -455,7 +520,6 @@ pub const DecoderBlock = struct {
         return hidden_state;
     }
 };
-
 
 pub const ResidualUnit = struct {
     snake1: Snake1D,
@@ -487,7 +551,7 @@ pub const ResidualUnit = struct {
 
         const hidden_len = hidden_state0.shape().dim(.t);
         const output_len = output_tensor.shape().dim(.t);
-        const padding = @divFloor(hidden_len - output_len, 2);
+        const padding = @divTrunc(hidden_len - output_len, 2);
 
         var hidden_state = hidden_state0;
         if (padding > 0) {

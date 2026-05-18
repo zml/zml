@@ -222,37 +222,37 @@ pub const InitialLatents = struct {
     }
 };
 
-pub const DiffusedLatents = struct {
+pub const AudioLatents = struct {
     x: zml.Slice,
 
-    pub fn print(self: DiffusedLatents, io: std.Io) !void {
+    pub fn print(self: AudioLatents, io: std.Io) !void {
         var stdout = std.Io.File.stdout().writer(io, &.{});
         const writer: *std.Io.Writer = &stdout.interface;
         const options: std.fmt.Number = .{};
 
-        std.log.info("Encoded text shape", .{});
+        std.log.info("Audio latents shape", .{});
         try self.x.shape.format(writer);
         try self.x.prettyPrint(writer, options);
     }
 
-    pub fn deinit(self: DiffusedLatents, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: AudioLatents, allocator: std.mem.Allocator) void {
         self.x.free(allocator);
     }
 };
 
-pub const DecodedAudio = struct {
+pub const AudioFrames = struct {
     audio: zml.Slice,
 
-    pub fn deinit(self: DecodedAudio, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: AudioFrames, allocator: std.mem.Allocator) void {
         self.audio.free(allocator);
     }
 
-    pub fn print(self: DecodedAudio, io: std.Io) !void {
+    pub fn print(self: AudioFrames, io: std.Io) !void {
         var stdout = std.Io.File.stdout().writer(io, &.{});
         const writer: *std.Io.Writer = &stdout.interface;
         const options: std.fmt.Number = .{};
 
-        std.log.info("Encoded text shape", .{});
+        std.log.info("Audio frames shape", .{});
         try self.audio.shape.format(writer);
         try self.audio.prettyPrint(writer, options);
     }
@@ -906,7 +906,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     };
 }
 
-pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_handler, latents: InitialLatents, id: usize) !DiffusedLatents {
+pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_handler, latents: InitialLatents, id: usize) !AudioLatents {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = acedit.shardings.replicated;
@@ -995,7 +995,108 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     return .{ .x = result_slice };
 }
 
-pub fn decodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVae_handler, latents: DiffusedLatents, decode_t: u32) !DecodedAudio {
+pub fn encodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVaeEncoder_handler, audio_input: AudioFrames, decode_t: u32) !AudioLatents {
+    const io = zml_handler.io;
+    const allocator = zml_handler.allocator;
+    const sharding = acevae.shardings.replicated;
+    const platform = zml_handler.platform;
+
+    var encode_args = try acevae.encode_exe.args(allocator);
+    defer encode_args.deinit(allocator);
+    var encode_results = try acevae.encode_exe.results(allocator);
+    defer encode_results.deinit(allocator);
+
+    const overlap = 25;
+    const stride = decode_t * 25;
+    const chunk_frames = stride + 2 * overlap;
+    var upsampling_ratio: u32 = 1;
+    for (acevae.config.downsampling_ratios) |ratio| {
+        upsampling_ratio *= ratio;
+    }
+
+    const audio_channels: usize = @intCast(audio_input.audio.shape.dim(0));
+    const audio_frames: usize = @intCast(audio_input.audio.shape.dim(1));
+    const latent_dim: usize = acevae.config.decoder_input_channels;
+    const latent_frames: usize = @divFloor(audio_frames, upsampling_ratio);
+    const chunk_latent_frames: usize = chunk_frames;
+    const chunk_audio_frames: usize = chunk_frames * upsampling_ratio;
+
+    std.log.info("VAE call encode with input size : {d}x{d}", .{ audio_channels, audio_frames });
+
+    const latents_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = latent_dim, .t = latent_frames }, .bf16));
+    
+    const audio_chunk_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_channels, .t = chunk_audio_frames }, .f32));
+    defer audio_chunk_slice.free(allocator);
+    
+    const latent_chunk_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = latent_dim, .t = chunk_latent_frames }, .bf16));
+    defer latent_chunk_slice.free(allocator);
+    var latent_chunk_buffer: zml.Buffer = try zml.Buffer.fromSlice(io, platform, latent_chunk_slice, sharding);
+    defer latent_chunk_buffer.deinit();
+
+    zml_handler.tic(&zml_handler.timers.vae.prefill);
+
+    var core_start: usize = 0;
+    var core_end: usize = core_start + stride;
+    var win_start: usize = undefined;
+    var win_end: usize = undefined;
+
+    while (true) {
+        var last_chunk = false;
+        if (core_start == 0) {
+            win_start = 0;
+            win_end = core_end + 2 * overlap;
+        } else if (core_end + overlap >= latent_frames) {
+            last_chunk = true;
+            win_end = latent_frames;
+            core_end = latent_frames;
+            core_start = core_end - stride;
+            win_start = core_start - 2 * overlap;
+        } else {
+            win_start = core_start - overlap;
+            win_end = core_end + overlap;
+        }
+
+        @memset(audio_chunk_slice.items(f32), 0);
+        const win_audio_start = win_start * upsampling_ratio;
+        const win_audio_end = win_end * upsampling_ratio;
+        for (0..audio_channels) |i| {
+            for (win_audio_start..win_audio_end) |j| {
+                const j_chunk = j - win_audio_start;
+                if (j < audio_frames) {
+                    audio_chunk_slice.items(f32)[i * chunk_audio_frames + j_chunk] = audio_frames.audio.items(f32)[i * audio_frames + j];
+                }
+            }
+        }
+
+        var audio_chunk_buffer: zml.Buffer = try .fromSlice(io, platform, audio_chunk_slice, sharding);
+        defer audio_chunk_buffer.deinit();
+        
+        encode_args.set(.{ acevae.model_buffers, audio_chunk_buffer, latent_chunk_buffer });
+        acevae.encode_exe.call(encode_args, &encode_results);
+        encode_results.fill(.{ &latent_chunk_buffer });
+        
+        try latent_chunk_buffer.toSlice(io, latent_chunk_slice);
+
+        const chunk_core_start = (core_start - win_start);
+        for (0..latent_dim) |i| {
+            for (core_start..core_end) |j| {
+                const j_chunk = (j - core_start) + chunk_core_start;
+                latents_slice.items(zml.floats.BFloat16)[i * latent_frames + j] = latent_chunk_slice.items(zml.floats.BFloat16)[i * chunk_latent_frames + j_chunk];
+            }
+        }
+
+        if (last_chunk) break;
+        core_start += stride;
+        core_end += stride;
+    }
+
+    std.log.info("VAE done encoding, output shape : {d}x{d}", .{ latent_dim, latent_frames });
+    zml_handler.toc(&zml_handler.timers.vae.prefill);
+
+    return .{ .x = latents_slice };
+}
+
+pub fn decodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVaeDecoder_handler, latents: AudioLatents, decode_t: u32) !AudioFrames {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = acevae.shardings.replicated;
