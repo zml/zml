@@ -325,7 +325,7 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
         &all_shardings,
     );
 
-    log.info("Compiling DFlash prefill draft token...", .{});
+    log.info("Compiling DFlash prefill drafter...", .{});
     const prefill_target_hidden_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, prefill_seq_len);
     var prefill_draft_token_exe = try compileDraftTokenExe(
         allocator,
@@ -337,7 +337,7 @@ fn compile(allocator: std.mem.Allocator, project: *Project, models: ModelsAndCac
     );
     errdefer prefill_draft_token_exe.deinit(allocator);
 
-    log.info("Compiling DFlash steady-state draft token...", .{});
+    log.info("Compiling DFlash steady-state drafter...", .{});
     const draft_target_hidden_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, models.block_size);
     var draft_token_exe = try compileDraftTokenExe(
         allocator,
