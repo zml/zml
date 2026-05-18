@@ -577,7 +577,6 @@ pub const Attention = struct {
         var kh = k.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
         var vh = v.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
 
-
         // Apply RoPE if present in checkpoint.
         if (opts.pe_cos) |pe_cos| {
             if (opts.pe_sin) |pe_sin| {
