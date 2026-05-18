@@ -297,6 +297,8 @@ pub fn main(init: std.process.Init) !void {
 pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     const decode_t: u32 = 5;
 
+    std.log.info("A", .{});
+    
     // ------------------------------------------------
     // Read/encode audio and style references
     // ------------------------------------------------
@@ -307,6 +309,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     defer if (style_latent) |latent| latent.deinit(zml_handler.allocator);
     
     if (zml_handler.args.use_audio_ref or zml_handler.args.use_style_ref) {
+        std.log.info("B", .{});
         var input_audio: ?inference.AudioFrames = null;
         defer if (input_audio) |audio| audio.deinit(zml_handler.allocator);
         var input_style: ?inference.AudioFrames = null;
@@ -340,6 +343,8 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
         zml_handler.toc(&zml_handler.timers.vae.total);
     }
 
+    std.log.info("C", .{});
+    
     // ------------------------------------------------
     // Thinking/Inspiration phase : 5Hz LLM model
     // ------------------------------------------------

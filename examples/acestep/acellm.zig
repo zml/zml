@@ -22,6 +22,7 @@ pub const AceLlm_handler = struct {
     kv_cache_buffers: zml.Bufferized(KvCache),
 
     pub fn init(zml_handler: *main.Zml_handler) !AceLlm_handler {
+        std.log.info("D", .{});
         zml_handler.tic(&zml_handler.timers.llm.init);
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acellm);
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
