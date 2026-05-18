@@ -123,11 +123,11 @@ pub fn main(init: std.process.Init) !void {
     const weights_path_raw = args[1];
     const activations_path_raw = args[2];
     const cwd = std.Io.Dir.cwd();
-    const model_path = try cwd.realPathFileAlloc(io, weights_path_raw, arena);
     const activations_path = try cwd.realPathFileAlloc(io, activations_path_raw, arena);
 
     // Registries
-    var model_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, vfs_io, model_path);
+    const repo = try zml.safetensors.resolveModelRepo(vfs_io, weights_path_raw);
+    var model_registry = try .fromRepo(allocator, vfs_io, repo);
     defer model_registry.deinit();
     var activations_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, vfs_io, activations_path);
     defer activations_registry.deinit();
