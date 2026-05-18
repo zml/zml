@@ -84,8 +84,13 @@ pub const Partitioning = struct {
         else
             sharding orelse try self.selectSharding(shape);
         return switch (self.partitioner) {
+<<<<<<< HEAD:zml/sharding.zig
             .shardy => try selected_sharding.sdyShardingAttrForShape(allocator, shape, .{ .close_open_dims = self.close_open_dims }),
             .gspmd => try selected_sharding.gspmdShardingAttrForShape(allocator, shape),
+=======
+            .shardy => (try selected_sharding.data.sdyShardingAttrForShape(allocator, ctx, shape, self.close_open_dims)).asAttr(),
+            .gspmd => try selected_sharding.data.gspmdShardingAttrForShape(allocator, ctx, shape),
+>>>>>>> 71af35d0d (bump zml):zml/Sharding.zig
         };
     }
 
@@ -106,9 +111,14 @@ pub const Partitioning = struct {
         var out: std.Io.Writer.Allocating = .init(allocator);
         out.writer.writeAll("#sdy.sharding_per_value<[") catch unreachable;
         for (shapes, 0..) |shape, i| {
+<<<<<<< HEAD:zml/sharding.zig
             const attr_str = try self.tensorShardingAttr(allocator, shape, null);
             if (i > 0) out.writer.writeAll(", ") catch unreachable;
             out.writer.writeAll(attr_str["#sdy.sharding".len..]) catch unreachable;
+=======
+            const sharding = try self.selectSharding(shape);
+            shardings[i] = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape, self.close_open_dims);
+>>>>>>> 71af35d0d (bump zml):zml/Sharding.zig
         }
         out.writer.writeAll("]>") catch unreachable;
         return out.toOwnedSlice() catch unreachable;
@@ -141,12 +151,39 @@ pub const Partitioning = struct {
         };
 
         for (in_shapes) |shape| {
+<<<<<<< HEAD:zml/sharding.zig
             const attr_str = try self.tensorShardingAttr(allocator, shape, null);
             Collect.scan(&axis_names, allocator, attr_str);
         }
         for (out_shapes) |shape| {
             const attr_str = try self.tensorShardingAttr(allocator, shape, null);
             Collect.scan(&axis_names, allocator, attr_str);
+=======
+            const sharding = try self.selectSharding(shape);
+            const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape, self.close_open_dims);
+            for (0..attr.numReplicatedAxes()) |i| {
+                Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
+            }
+            for (0..attr.numDimensions()) |i| {
+                const dim = attr.dimension(i);
+                for (0..dim.numAxes()) |j| {
+                    Collect.appendUnique(&axis_names, allocator, dim.axis(j).name());
+                }
+            }
+        }
+        for (out_shapes) |shape| {
+            const sharding = try self.selectSharding(shape);
+            const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape, self.close_open_dims);
+            for (0..attr.numReplicatedAxes()) |i| {
+                Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
+            }
+            for (0..attr.numDimensions()) |i| {
+                const dim = attr.dimension(i);
+                for (0..dim.numAxes()) |j| {
+                    Collect.appendUnique(&axis_names, allocator, dim.axis(j).name());
+                }
+            }
+>>>>>>> 71af35d0d (bump zml):zml/Sharding.zig
         }
 
         var out: std.Io.Writer.Allocating = .init(allocator);
@@ -1304,11 +1341,24 @@ pub const Sharding = struct {
         };
     }
 
+<<<<<<< HEAD:zml/sharding.zig
     pub const SdyAttrOptions = struct {
         close_open_dims: bool = false,
     };
 
     pub fn sdyShardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape, opts: SdyAttrOptions) ![]const u8 {
+=======
+    pub fn sdyShardingAttrForShape(
+        data: *const Data,
+        parent_allocator: std.mem.Allocator,
+        ctx: *mlir.Context,
+        shape: Shape,
+        close_open_dims: bool,
+    ) !*const dialects.shardy.TensorShardingAttribute {
+        var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+>>>>>>> 71af35d0d (bump zml):zml/Sharding.zig
         var any_explicit = false;
         for (0..shape.rank()) |ax| {
             if (shape.partition(ax) != .unknown) {
@@ -1317,7 +1367,6 @@ pub const Sharding = struct {
             }
         }
         const all_replicated = !any_explicit;
-        const open_marker: []const u8 = if (opts.close_open_dims) "{}" else "{?}";
 
         const mapping = self.getDimMapping(shape);
         var out: std.Io.Writer.Allocating = .init(allocator);
@@ -1343,6 +1392,7 @@ pub const Sharding = struct {
                             try out.writer.writeAll("}");
                         }
                     } else {
+<<<<<<< HEAD:zml/sharding.zig
                         try out.writer.writeAll(open_marker);
                     }
                 },
@@ -1355,6 +1405,14 @@ pub const Sharding = struct {
                     }
                 },
             }
+=======
+                        break :d if (close_open_dims) .closed(ctx, &.{}) else .open(ctx, &.{});
+                    }
+                },
+                .replicated => .replicated(ctx),
+                .open, .unknown => if (all_replicated) .replicated(ctx) else if (close_open_dims) .closed(ctx, &.{}) else .open(ctx, &.{}),
+            };
+>>>>>>> 71af35d0d (bump zml):zml/Sharding.zig
         }
         try out.writer.writeAll("]");
 
@@ -1651,7 +1709,15 @@ pub const Placement = struct {
 
         pub fn platformDeviceIndex(self: *const Shard, platform: *const Platform) ?usize {
             for (platform.devices, 0..) |d, device_index| {
+<<<<<<< HEAD:zml/sharding.zig
                 if (d.id() == self.device_id) return device_index;
+=======
+                const device_id = switch (platform.target) {
+                    .neuron => @as(usize, @intCast(d.localHardwareId())),
+                    .cuda, .rocm, .tpu, .cpu, .tt => d.id(),
+                };
+                if (device_id == self.device_id) return device_index;
+>>>>>>> 71af35d0d (bump zml):zml/Sharding.zig
             }
 
             return null;
@@ -1950,9 +2016,26 @@ const ShardingTest = struct {
 
         // Verify MLIR String
         if (s.expected_sdy) |expected_attr| {
+<<<<<<< HEAD:zml/sharding.zig
             const actual_attr = try sharding.sdyShardingAttrForShape(self.allocator, s.shape, .{});
             defer self.allocator.free(actual_attr);
             try std.testing.expectEqualStrings(expected_attr, actual_attr);
+=======
+            const registry: *mlir.DialectRegistry = try .init();
+            defer registry.deinit();
+            registry.registerDialect("sdy");
+            mlir.registerFuncExtensions(registry);
+
+            var ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
+            defer ctx.deinit();
+            ctx.loadAllAvailableDialects();
+
+            const actual_attr = try sharding.sdyShardingAttrForShape(self.allocator, ctx, s.shape, false);
+            var writer: std.Io.Writer.Allocating = .init(self.allocator);
+            defer writer.deinit();
+            try actual_attr.asAttr().format(&writer.writer);
+            try std.testing.expectEqualStrings(expected_attr, writer.written());
+>>>>>>> 71af35d0d (bump zml):zml/Sharding.zig
         }
 
         // Verify Placement logic / Error
