@@ -904,12 +904,13 @@ pub const KvCache = struct {
 
         pub fn update(kv: SelfAttnCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: ?zml.Tensor) SelfAttnCache {
             const k_shape = kv.k.shape().drop(.layer);
-            const layer: zml.Tensor = .scalar(kv.layer_index orelse @panic("forgot to call atLayer"), .u32);
+            var layer: zml.Tensor = .scalar(kv.layer_index orelse @panic("forgot to call atLayer"), .u32);
+            layer = if (token_index) |idx| layer.broad(idx.shape()) else layer;
 
             return if (token_index) |idx|
                 .{
-                    .k = kv.k.scatterSlices(.{ .layer = layer, .k = idx }, new_k.convert(kv.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
-                    .v = kv.v.scatterSlices(.{ .layer = layer, .k = idx }, new_v.convert(kv.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
+                    .k = kv.k.scatterSlices(.{ .layer = layer, .s = idx }, new_k.convert(kv.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
+                    .v = kv.v.scatterSlices(.{ .layer = layer, .s = idx }, new_v.convert(kv.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
                     .layer_index = kv.layer_index,
                 }
             else
@@ -939,7 +940,7 @@ pub const KvCache = struct {
     pub const GatedDeltaNetCache = struct {
         conv_state: zml.Tensor,
         recurrent_state: zml.Tensor,
-        layer_index: ?u32,
+        layer_index: zml.Tensor,
 
         pub const Buffers = zml.Bufferized(GatedDeltaNetCache);
 
@@ -964,7 +965,7 @@ pub const KvCache = struct {
             return .{
                 .conv_state = .fromShape(sharded_conv_state_shape),
                 .recurrent_state = .fromShape(sharded_recurrent_state_shape),
-                .layer_index = null,
+                .layer_index = .init(.{}, .u32),
             };
         }
 
@@ -972,27 +973,28 @@ pub const KvCache = struct {
             return .{
                 .conv_state = try zml.Buffer.uninitialized(io, platform, self.conv_state.shape(), sharding, .{}),
                 .recurrent_state = try zml.Buffer.uninitialized(io, platform, self.recurrent_state.shape(), sharding, .{}),
+                .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32),
             };
         }
 
         pub fn deinitBuffer(self: *GatedDeltaNetCache.Buffers) void {
             self.conv_state.deinit();
             self.recurrent_state.deinit();
+            self.layer_index.deinit();
         }
 
         pub fn convState(self: GatedDeltaNetCache) zml.Tensor {
-            return self.conv_state.slice1d(.layer, .single(self.layer_index orelse @panic("forgot to call atLayer")));
+            return self.conv_state.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
         }
 
         pub fn recurrentState(self: GatedDeltaNetCache) zml.Tensor {
-            return self.recurrent_state.slice1d(.layer, .single(self.layer_index orelse @panic("forgot to call atLayer")));
+            return self.recurrent_state.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
         }
 
         pub fn update(self: GatedDeltaNetCache, new_conv_state: ?zml.Tensor, new_recurrent_state: ?zml.Tensor) GatedDeltaNetCache {
-            const layer: zml.Tensor = .scalar(self.layer_index, .u32);
             const conv_state = if (new_conv_state) |state|
                 self.conv_state.scatterSlices(
-                    .{ .layer = layer },
+                    .{ .layer = self.layer_index },
                     state.convert(self.conv_state.dtype()).transpose(self.conv_state.shape().drop(.layer)),
                     .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
                 ).reuseBuffer(self.conv_state)
@@ -1001,7 +1003,7 @@ pub const KvCache = struct {
 
             const recurrent_state = if (new_recurrent_state) |state|
                 self.recurrent_state.scatterSlices(
-                    .{ .layer = layer },
+                    .{ .layer = self.layer_index },
                     state.convert(self.recurrent_state.dtype()).transpose(self.recurrent_state.shape().drop(.layer)),
                     .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
                 ).reuseBuffer(self.recurrent_state)
@@ -1019,7 +1021,7 @@ pub const KvCache = struct {
             return .{
                 .conv_state = self.conv_state,
                 .recurrent_state = self.recurrent_state,
-                .layer_index = @intCast(layer_index),
+                .layer_index = zml.Tensor.scalar(layer_index, .u32),
             };
         }
 
@@ -1027,7 +1029,7 @@ pub const KvCache = struct {
             return .{
                 .conv_state = self.conv_state.reuseBuffer(other.conv_state),
                 .recurrent_state = self.recurrent_state.reuseBuffer(other.recurrent_state),
-                .layer_index = null,
+                .layer_index = self.layer_index.reuseBuffer(other.layer_index),
             };
         }
     };
