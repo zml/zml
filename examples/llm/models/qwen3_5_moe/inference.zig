@@ -7,6 +7,18 @@ const model = @import("model.zig");
 
 const log = std.log.scoped(.qwen3_5_moe);
 
+const ShardedEmbedding = struct {
+    model: zml.nn.TokenEmbedding,
+
+    pub fn forward(self: ShardedEmbedding, tokens: zml.Tensor) zml.Tensor {
+        return self.model.forward(tokens).withPartitioning(.{
+            .b = .replicated,
+            .s = .replicated,
+            .d = .model,
+        });
+    }
+};
+
 const CompileModelResult = struct {
     prefill_embedding_exe: zml.Exe,
     decode_embedding_exe: zml.Exe,
@@ -188,8 +200,23 @@ fn compileModel(
 
     const prefill_tokens = zml.Tensor.init(.{ .b = 1, .s = prefill_len }, .u32);
     const decode_tokens = zml.Tensor.init(.{ .b = 1, .s = 1 }, .u32);
-    const prefill_hidden = zml.Tensor.init(.{ .b = 1, .s = prefill_len, .d = qwen35_model.config.text_config.hidden_size }, qwen35_model.text_model.embed_tokens.weight.dtype());
-    const decode_hidden = zml.Tensor.init(.{ .b = 1, .s = 1, .d = qwen35_model.config.text_config.hidden_size }, qwen35_model.text_model.embed_tokens.weight.dtype());
+    const hidden_dtype = qwen35_model.text_model.embed_tokens.weight.dtype();
+    const prefill_hidden: zml.Tensor = .fromShape(zml.Shape.init(
+        .{ .b = 1, .s = prefill_len, .d = qwen35_model.config.text_config.hidden_size },
+        hidden_dtype,
+    ).withPartitioning(.{
+        .b = .replicated,
+        .s = .replicated,
+        .d = .model,
+    }));
+    const decode_hidden: zml.Tensor = .fromShape(zml.Shape.init(
+        .{ .b = 1, .s = 1, .d = qwen35_model.config.text_config.hidden_size },
+        hidden_dtype,
+    ).withPartitioning(.{
+        .b = .replicated,
+        .s = .replicated,
+        .d = .model,
+    }));
     const token_index = zml.Tensor.init(.{}, .u32);
     const self_attn_cache: model.KvCache.SelfAttnCache = .{
         .k = parameters.kv_cache.self_attn.k,
@@ -217,7 +244,7 @@ fn compileModel(
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled prefill embedding [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, model_, .forward, .{prefill_tokens_}, .{ .shardings = shardings_ });
+            return platform_.compile(allocator_, io_, ShardedEmbedding{ .model = model_ }, .forward, .{prefill_tokens_}, .{ .shardings = shardings_ });
         }
     }.call, .{ allocator, io, platform, qwen35_model.text_model.embed_tokens, prefill_tokens, &all_shardings, progress });
     errdefer if (prefill_embedding_future.cancel(io)) |v| {
@@ -239,7 +266,7 @@ fn compileModel(
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled decode embedding [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, model_, .forward, .{decode_tokens_}, .{ .shardings = shardings_ });
+            return platform_.compile(allocator_, io_, ShardedEmbedding{ .model = model_ }, .forward, .{decode_tokens_}, .{ .shardings = shardings_ });
         }
     }.call, .{ allocator, io, platform, qwen35_model.text_model.embed_tokens, decode_tokens, &all_shardings, progress });
     errdefer if (decode_embedding_future.cancel(io)) |v| {

@@ -19,6 +19,141 @@ pub const ShapeToCustomCallBuffer = @import("pjrtx.zig").ShapeToCustomCallBuffer
 const Tensor = @import("tensor.zig").Tensor;
 pub const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
 
+pub fn allReduceSum(input: Tensor) Tensor {
+    const ctx = CompilationContext.current();
+    const mlir_ctx = ctx.mlir_ctx;
+
+    const reducer_block = b: {
+        const scalar_shape = Shape.init(.{}, input.dtype());
+        const left: Tensor = .fromShape(scalar_shape);
+        const right: Tensor = .fromShape(scalar_shape);
+
+        const block_types = [_]*const mlir.Type{
+            mlirx.Type.rankedTensor(mlir_ctx, scalar_shape),
+            mlirx.Type.rankedTensor(mlir_ctx, scalar_shape),
+        };
+        const block_locs = [_]*const mlir.Location{
+            mlir.Location.unknown(mlir_ctx),
+            mlir.Location.unknown(mlir_ctx),
+        };
+        const block = mlir.Block.init(&block_types, &block_locs);
+        errdefer block.deinit();
+
+        ctx.pushBlock(block);
+        defer ctx.popBlock();
+
+        const scope = ctx.currentScope();
+        scope.id_to_argument.put(scope.arena.allocator(), left.id, 0) catch unreachable;
+        scope.id_to_argument.put(scope.arena.allocator(), right.id, 1) catch unreachable;
+
+        const sum = left.add(right);
+        _ = dialects.stablehlo.return_(mlir_ctx, sum.value(), .unknown(mlir_ctx)).appendTo(block);
+        break :b block;
+    };
+
+    const num_devices = ctx.partitioning.numPartitions();
+    if (num_devices <= 1) return input;
+
+    var replica_group_storage: [constants.MAX_RANK]i64 = undefined;
+    for (0..@intCast(num_devices)) |i| {
+        replica_group_storage[i] = @intCast(i);
+    }
+    const replica_group_slice = replica_group_storage[0..@intCast(num_devices)];
+    const replica_groups_attr = mlir.Attribute.denseElements(
+        .rankedTensor(&.{ 1, num_devices }, .int(mlir_ctx, .i64)),
+        replica_group_slice,
+    );
+
+    const channel_handle_attr = mlir.Attribute.parse(
+        mlir_ctx,
+        "#stablehlo.channel_handle<handle = 1, type = 1>",
+    ) catch unreachable;
+
+    const op = mlir.Operation.make(mlir_ctx, "stablehlo.all_reduce", .{
+        .operands = .{ .flat = &.{input.value()} },
+        .results = .{ .flat = &.{input.value().type_()} },
+        .blocks = &.{reducer_block},
+        .attributes = &.{
+            .named(mlir_ctx, "replica_groups", replica_groups_attr),
+            // This is a cross-partition collective under SPMD, not a replica-only
+            // collective. StableHLO models that with a channel handle and a unit
+            // attribute for global device ids.
+            .named(mlir_ctx, "channel_handle", channel_handle_attr),
+            .named(mlir_ctx, "use_global_device_ids", .unit(mlir_ctx)),
+        },
+        .verify = true,
+        .location = .unknown(mlir_ctx),
+    }).appendTo(ctx.currentScope().block);
+
+    return Tensor._result(input.shape(), op.result(0));
+}
+
+pub fn reduceScatterSum(input: Tensor, output_shape: Shape, scatter_axis: anytype) Tensor {
+    const ctx = CompilationContext.current();
+    const mlir_ctx = ctx.mlir_ctx;
+
+    const reducer_block = b: {
+        const scalar_shape = Shape.init(.{}, input.dtype());
+        const left: Tensor = .fromShape(scalar_shape);
+        const right: Tensor = .fromShape(scalar_shape);
+
+        const block_types = [_]*const mlir.Type{
+            mlirx.Type.rankedTensor(mlir_ctx, scalar_shape),
+            mlirx.Type.rankedTensor(mlir_ctx, scalar_shape),
+        };
+        const block_locs = [_]*const mlir.Location{
+            mlir.Location.unknown(mlir_ctx),
+            mlir.Location.unknown(mlir_ctx),
+        };
+        const block = mlir.Block.init(&block_types, &block_locs);
+        errdefer block.deinit();
+
+        ctx.pushBlock(block);
+        defer ctx.popBlock();
+
+        const scope = ctx.currentScope();
+        scope.id_to_argument.put(scope.arena.allocator(), left.id, 0) catch unreachable;
+        scope.id_to_argument.put(scope.arena.allocator(), right.id, 1) catch unreachable;
+
+        const sum = left.add(right);
+        _ = dialects.stablehlo.return_(mlir_ctx, sum.value(), .unknown(mlir_ctx)).appendTo(block);
+        break :b block;
+    };
+
+    const num_devices = ctx.partitioning.numPartitions();
+    if (num_devices <= 1) return input.reshape(output_shape.dims()).withTags(output_shape);
+
+    var replica_group_storage: [constants.MAX_RANK]i64 = undefined;
+    for (0..@intCast(num_devices)) |i| {
+        replica_group_storage[i] = @intCast(i);
+    }
+    const replica_group_slice = replica_group_storage[0..@intCast(num_devices)];
+    const replica_groups_attr = mlir.Attribute.denseElements(
+        .rankedTensor(&.{ 1, num_devices }, .int(mlir_ctx, .i64)),
+        replica_group_slice,
+    );
+    const channel_handle_attr = mlir.Attribute.parse(
+        mlir_ctx,
+        "#stablehlo.channel_handle<handle = 2, type = 1>",
+    ) catch unreachable;
+
+    const op = mlir.Operation.make(mlir_ctx, "stablehlo.reduce_scatter", .{
+        .operands = .{ .flat = &.{input.value()} },
+        .results = .{ .flat = &.{mlirx.Type.rankedTensor(mlir_ctx, output_shape)} },
+        .blocks = &.{reducer_block},
+        .attributes = &.{
+            .named(mlir_ctx, "replica_groups", replica_groups_attr),
+            .named(mlir_ctx, "scatter_dimension", .int(mlir_ctx, .i64, input.axis(scatter_axis))),
+            .named(mlir_ctx, "channel_handle", channel_handle_attr),
+            .named(mlir_ctx, "use_global_device_ids", .unit(mlir_ctx)),
+        },
+        .verify = true,
+        .location = .unknown(mlir_ctx),
+    }).appendTo(ctx.currentScope().block);
+
+    return Tensor._result(output_shape, op.result(0));
+}
+
 pub const ReduceArgs = struct {
     left: Tensor,
     right: Tensor,

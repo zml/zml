@@ -407,7 +407,7 @@ pub const TransformerLayer = struct {
 
         const moe_output = self.moe.forward(normalized_hidden, moe_metadata, moe_parameters);
 
-        return .{ moe_output.add(residual1).reuseBuffer(x0), updated_kv_cache };
+        return .{ moe_output.add(residual1), updated_kv_cache };
     }
 
     pub fn forwardLinearAttn(
@@ -436,7 +436,7 @@ pub const TransformerLayer = struct {
 
         const moe_output = self.moe.forward(normalized_hidden, moe_metadata, moe_parameters);
 
-        return .{ moe_output.add(residual1).reuseBuffer(x0), updated_kv_cache };
+        return .{ moe_output.add(residual1), updated_kv_cache };
     }
 
     pub fn forward(
@@ -750,24 +750,45 @@ pub const Moe = struct {
     }
 
     pub fn forward(self: Moe, x: zml.Tensor, moe_metadata: zml.moe.Metadata, moe_parameters: zml.moe.Parameters) zml.Tensor {
+        _ = moe_metadata;
         const routing_scores, const topk_ids = self.router.forward(x);
 
-        const moe_output = zml.moe.forwardMoe(
-            x,
-            topk_ids,
-            routing_scores,
-            self.gate_up_proj,
-            null,
-            null,
-            self.down_proj,
-            null,
-            null,
-            moe_metadata,
-            moe_parameters,
-        ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+        const moe_output = zml.ops.manualComputation(
+            .{ x, topk_ids, routing_scores, self.gate_up_proj, self.down_proj },
+            x.shape().withPartitioning(.{ .b = .replicated, .s = .replicated, .d = .model }),
+            .{
+                .moe_parameters = moe_parameters,
+            },
+            (struct {
+                fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_shape: zml.Shape) zml.Tensor {
+                    const local_moe_metadata: zml.moe.Metadata = switch (ctx_.moe_parameters) {
+                        .triton => .{ .triton = .{} },
+                    };
+                    const moe_output_ = zml.moe.forwardMoe(
+                        sharded_inputs[0],
+                        sharded_inputs[1],
+                        sharded_inputs[2],
+                        sharded_inputs[3],
+                        null,
+                        null,
+                        sharded_inputs[4],
+                        null,
+                        null,
+                        local_moe_metadata,
+                        ctx_.moe_parameters,
+                    ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+                    const partial = moe_output_.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d });
+                    return zml.ops.reduceScatterSum(partial, output_shape, .d);
+                }
+            }).body,
+        );
 
         const shared_gate = self.shared_expert_gate.forward(x).sigmoid().broad(x.shape());
-        const shared = self.shared_expert.forward(x).mul(shared_gate);
+        const shared = self.shared_expert.forward(x).rename(.{ .dout = .d }).mul(shared_gate).withPartitioning(.{
+            .b = .replicated,
+            .s = .replicated,
+            .d = .model,
+        });
 
         return moe_output.add(shared);
     }
