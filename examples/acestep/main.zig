@@ -301,8 +301,7 @@ pub fn runVaePipeline(zml_handler: *Zml_handler) !void {
 
     acevae.unloadBuffers(zml_handler.allocator);
 
-    //try exportAudio(zml_handler, decoded_audio, 0);
-    try exportAudio(zml_handler, input_audio, 0);
+    try exportAudio(zml_handler, decoded_audio, 0);
 }
 
 pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
