@@ -17,6 +17,18 @@ pub const TargetLayers = struct {
         return res;
     }
 
+    pub fn initOffset(ids: []const u32, offset: i32, num_hidden_layers: u32) !TargetLayers {
+        stdx.debug.assert(ids.len <= 32, "Gemma 4 DFlash supports at most 32 target layers, got {}", .{ids.len});
+        var res: TargetLayers = .{};
+        res.len = ids.len;
+        for (ids, 0..) |id, i| {
+            const adjusted: i64 = @as(i64, @intCast(id)) + @as(i64, @intCast(offset));
+            if (adjusted < 0 or adjusted >= @as(i64, @intCast(num_hidden_layers))) return error.InvalidDFlashTargetLayer;
+            res.ids[i] = @intCast(adjusted);
+        }
+        return res;
+    }
+
     pub fn slice(self: *const TargetLayers) []const u32 {
         return self.ids[0..self.len];
     }
