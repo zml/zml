@@ -42,7 +42,7 @@ The target model path should contain `config.json`, tokenizer files, a supported
 To test, SSH to the remote machine:
 
 ```sh
-ssh -A 9960x-5090x2
+ssh -A tristan@9960x-5090x2
 ```
 
 Then run:
