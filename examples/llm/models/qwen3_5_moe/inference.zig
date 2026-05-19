@@ -217,6 +217,12 @@ fn compileModel(
         .s = .replicated,
         .d = .model,
     }));
+    // ).withPartitioning(.{
+    //     .b = .replicated,
+    //     .s = .replicated,
+    //     .d = .model,
+    // }));
+
     const token_index = zml.Tensor.init(.{}, .u32);
     const self_attn_cache: model.KvCache.SelfAttnCache = .{
         .k = parameters.kv_cache.self_attn.k,

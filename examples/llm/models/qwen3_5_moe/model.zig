@@ -404,7 +404,6 @@ pub const TransformerLayer = struct {
         const x1 = attention_output.add(residual0);
         const residual1 = x1;
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
-
         const moe_output = self.moe.forward(normalized_hidden, moe_metadata, moe_parameters);
 
         return .{ moe_output.add(residual1), updated_kv_cache };
@@ -433,7 +432,6 @@ pub const TransformerLayer = struct {
         const x1 = attention_output.add(residual0);
         const residual1 = x1;
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
-
         const moe_output = self.moe.forward(normalized_hidden, moe_metadata, moe_parameters);
 
         return .{ moe_output.add(residual1), updated_kv_cache };
@@ -470,7 +468,6 @@ pub const TransformerLayer = struct {
         const x1 = attention_output.add(residual0);
         const residual1 = x1;
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
-
         const moe_output = self.moe.forward(normalized_hidden, moe_metadata, moe_parameters);
 
         return .{ moe_output.add(residual1), updated_kv_cache };

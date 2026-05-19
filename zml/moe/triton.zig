@@ -260,7 +260,6 @@ pub fn fusedExpertsImpl(
 
     const b_scale_2 = opts.w2_scale orelse Tensor.scalar(1.0, .f32);
 
-
     const second_out = callFusedMoe(
         activated_quant,
         down,
