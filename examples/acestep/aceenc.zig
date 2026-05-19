@@ -713,8 +713,9 @@ pub const AudioCodeEncoder = struct {
         // rename back to [t, p, d], with d now being the audio dimension
         hidden_states = hidden_states.rename(.{ .d_out = .a, .s = .p, .b = .t });
         
-        // depatch time dimension from 5hz * p = 5 to 25hz : [t, p, d] -> [t * p, d]
-        return hidden_states.merge(.{ .t = .{ .t, .p }});
+        // depatch time dimension from 5hz * p = 5 to 25hz : [t, p, a] -> [t * p, a]
+        hidden_states = hidden_states.merge(.{ .t = .{ .t, .p }});
+        return hidden_states.transpose(.{ .a, .t });
     }
     
 };
