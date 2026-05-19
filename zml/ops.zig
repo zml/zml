@@ -88,6 +88,15 @@ pub fn allReduceSum(input: Tensor) Tensor {
     return Tensor._result(input.shape(), op.result(0));
 }
 
+pub fn partitionId() Tensor {
+    const ctx = CompilationContext.current();
+    const op = mlir.Operation.make(ctx.mlir_ctx, "stablehlo.partition_id", .{
+        .results = .{ .flat = &.{mlirx.Type.rankedTensor(ctx.mlir_ctx, Shape.scalar(.u32))} },
+        .location = .unknown(ctx.mlir_ctx),
+    }).appendTo(ctx.currentScope().block);
+    return Tensor._result(.init(.{}, .u32), op.result(0));
+}
+
 pub fn reduceScatterSum(input: Tensor, output_shape: Shape, scatter_axis: anytype) Tensor {
     const ctx = CompilationContext.current();
     const mlir_ctx = ctx.mlir_ctx;

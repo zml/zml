@@ -14,7 +14,7 @@ const ShardedEmbedding = struct {
         return self.model.forward(tokens).withPartitioning(.{
             .b = .replicated,
             .s = .replicated,
-            .d = .model,
+            .d = .replicated,
         });
     }
 };
@@ -207,7 +207,7 @@ fn compileModel(
     ).withPartitioning(.{
         .b = .replicated,
         .s = .replicated,
-        .d = .model,
+        .d = .replicated,
     }));
     const decode_hidden: zml.Tensor = .fromShape(zml.Shape.init(
         .{ .b = 1, .s = 1, .d = qwen35_model.config.text_config.hidden_size },
@@ -215,7 +215,7 @@ fn compileModel(
     ).withPartitioning(.{
         .b = .replicated,
         .s = .replicated,
-        .d = .model,
+        .d = .replicated,
     }));
     // ).withPartitioning(.{
     //     .b = .replicated,

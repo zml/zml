@@ -208,7 +208,7 @@ pub const Session = struct {
         const prefill_hidden_shape = zml.Shape.init(.{ .b = 1, .s = self.seqlen, .d = hidden_size }, model_dtype).withPartitioning(.{
             .b = .replicated,
             .s = .replicated,
-            .d = .model,
+            .d = .replicated,
         });
 
         const prefill_tokens_slice = try zml.Slice.alloc(self.allocator, prefill_tokens_shape);
@@ -216,7 +216,6 @@ pub const Session = struct {
         @memset(prefill_tokens_slice.items(u32), 0);
         @memcpy(prefill_tokens_slice.items(u32)[0..all_tokens.len], all_tokens);
 
-        const hidden_sharding = self.compiled_model.params.shardings.model;
         const replicated_sharding: zml.Sharding = .replicated;
 
         var prefill_tokens_buffer = try zml.Buffer.fromSlice(self.io, self.platform, prefill_tokens_slice, replicated_sharding);
@@ -225,7 +224,7 @@ pub const Session = struct {
         var prefill_token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 0), .u32);
         defer prefill_token_index_buffer.deinit();
 
-        var prefill_hidden_buffer = try zml.Buffer.uninitialized(self.io, self.platform, prefill_hidden_shape, hidden_sharding, .{});
+        var prefill_hidden_buffer = try zml.Buffer.uninitialized(self.io, self.platform, prefill_hidden_shape, replicated_sharding, .{});
         defer prefill_hidden_buffer.deinit();
 
         var embedding_prefill_args = try self.compiled_model.prefill_embedding_exe.args(self.allocator);
@@ -304,9 +303,8 @@ pub const Session = struct {
         const decode_hidden_shape = zml.Shape.init(.{ .b = 1, .s = 1, .d = hidden_size }, model_dtype).withPartitioning(.{
             .b = .replicated,
             .s = .replicated,
-            .d = .model,
+            .d = .replicated,
         });
-        const hidden_sharding = self.compiled_model.params.shardings.model;
         const replicated_sharding: zml.Sharding = .replicated;
 
         var embedding_decode_args = try self.compiled_model.decode_embedding_exe.args(self.allocator);
@@ -329,7 +327,7 @@ pub const Session = struct {
         var sampling_decode_results = try self.compiled_model.decode_sampling_exe.results(self.allocator);
         defer sampling_decode_results.deinit(self.allocator);
 
-        var decode_hidden_buffer = try zml.Buffer.uninitialized(self.io, self.platform, decode_hidden_shape, hidden_sharding, .{});
+        var decode_hidden_buffer = try zml.Buffer.uninitialized(self.io, self.platform, decode_hidden_shape, replicated_sharding, .{});
         defer decode_hidden_buffer.deinit();
 
         var current_token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.generated_token_slice, replicated_sharding);

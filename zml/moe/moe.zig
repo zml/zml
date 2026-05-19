@@ -106,6 +106,7 @@ pub fn forwardMoe(
     weights_down: zml.Tensor,
     scales_down: ?zml.Tensor,
     bias_down: ?zml.Tensor,
+    triton_opts: ?triton.Options,
     metadata: Metadata,
     parameters: Parameters,
 ) !zml.Tensor {
@@ -114,6 +115,12 @@ pub fn forwardMoe(
             const triton_metadata = switch (metadata) {
                 .triton => |v| v,
             };
+            var opts = triton_opts orelse triton.Options{};
+            opts.activation = parameters.triton.activation;
+            opts.w1_scale = scales_gate_up;
+            opts.w2_scale = scales_down;
+            opts.w1_bias = bias_gate_up;
+            opts.w2_bias = bias_down;
 
             break :b try triton.fusedExpertsImpl(
                 input,
@@ -122,13 +129,7 @@ pub fn forwardMoe(
                 topk_weights,
                 topk_ids,
                 triton_metadata,
-                .{
-                    .activation = parameters.triton.activation,
-                    .w1_scale = scales_gate_up,
-                    .w2_scale = scales_down,
-                    .w1_bias = bias_gate_up,
-                    .w2_bias = bias_down,
-                },
+                opts,
             );
         },
     };

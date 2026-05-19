@@ -672,7 +672,7 @@ const Router = struct {
     pub fn init(store: zml.io.TensorStore.View, num_experts_per_tok: u32) Router {
         return .{
             .router = .init(
-                store.createTensor("weight", .{ .expert, .d }, .{ .expert = .replicated, .d = .model }),
+                store.createTensor("weight", .{ .expert, .d }, .{ .expert = .replicated, .d = .replicated }),
                 store.maybeCreateTensor("bias", .{.expert}, .{ .expert = .replicated }),
                 .d,
             ),
@@ -715,9 +715,9 @@ pub const Moe = struct {
                 .d = config.text_config.hidden_size,
             },
             .{
-                .expert = .replicated,
+                .expert = .experts,
                 .gate_up = .replicated,
-                .mid = .model,
+                .mid = .replicated,
                 .d = .replicated,
             },
         );
@@ -725,7 +725,7 @@ pub const Moe = struct {
         const down_proj_tensor = experts_store.createTensor(
             "down_proj",
             .{ .expert, .d, .dout },
-            .{ .expert = .replicated, .d = .replicated, .dout = .model },
+            .{ .expert = .experts, .d = .replicated, .dout = .replicated },
         );
 
         return .{
@@ -749,18 +749,30 @@ pub const Moe = struct {
     pub fn forward(self: Moe, x: zml.Tensor, moe_metadata: zml.moe.Metadata, moe_parameters: zml.moe.Parameters) zml.Tensor {
         _ = moe_metadata;
         const routing_scores, const topk_ids = self.router.forward(x);
+        const global_num_experts = self.gate_up_proj.dim(.expert);
 
         const moe_output = zml.ops.manualComputation(
             .{ x, topk_ids, routing_scores, self.gate_up_proj, self.down_proj },
-            x.shape().withPartitioning(.{ .b = .replicated, .s = .replicated, .d = .model }),
+            x.shape().withPartitioning(.{ .b = .replicated, .s = .replicated, .d = .replicated }),
             .{
                 .moe_parameters = moe_parameters,
+                .global_num_experts = global_num_experts,
             },
             (struct {
                 fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_shape: zml.Shape) zml.Tensor {
                     const local_moe_metadata: zml.moe.Metadata = switch (ctx_.moe_parameters) {
                         .triton => .{ .triton = .{} },
                     };
+                    const local_num_experts = sharded_inputs[3].dim(.expert);
+                    const partition_id = zml.ops.partitionId().convert(.i32);
+                    const expert_start = partition_id.scale(local_num_experts).convert(.i32);
+                    const global_expert_ids = zml.Tensor.arange(.{ .end = ctx_.global_num_experts }, .i32).withTags(.{.expert});
+                    const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
+                        .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
+                    const expert_map = local_expert_mask.select(
+                        global_expert_ids.sub(expert_start),
+                        zml.Tensor.scalar(-1, .i32),
+                    );
                     const moe_output_ = zml.moe.forwardMoe(
                         sharded_inputs[0],
                         sharded_inputs[1],
@@ -771,11 +783,19 @@ pub const Moe = struct {
                         sharded_inputs[4],
                         null,
                         null,
+                        switch (ctx_.moe_parameters) {
+                            .triton => .{
+                                .activation = ctx_.moe_parameters.triton.activation,
+                                .global_num_experts = ctx_.global_num_experts,
+                                .expert_map = expert_map,
+                            },
+                        },
                         local_moe_metadata,
                         ctx_.moe_parameters,
                     ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
                     const partial = moe_output_.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d });
-                    return zml.ops.reduceScatterSum(partial, output_shape, .d);
+                    _ = output_shape;
+                    return zml.ops.allReduceSum(partial);
                 }
             }).body,
         );
@@ -784,7 +804,7 @@ pub const Moe = struct {
         const shared = self.shared_expert.forward(x).rename(.{ .dout = .d }).mul(shared_gate).withPartitioning(.{
             .b = .replicated,
             .s = .replicated,
-            .d = .model,
+            .d = .replicated,
         });
 
         return moe_output.add(shared);
