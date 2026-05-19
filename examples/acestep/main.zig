@@ -251,8 +251,7 @@ const Args = struct {
 // info:   wav                                                 0.24s
 // info: total                                                45.24s
 
-// TODO: reference audio
-// TODO: reference timbre
+// TODO: debug refs
 // ranger decode_t
 // TODO: shard the llm and/or batch cfg
 
@@ -360,6 +359,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     zml_handler.mem.check(0);
     
     if (zml_handler.args.duration > 0) try audio_metadata.setDuration(zml_handler.allocator, zml_handler.args.duration);
+    if (audio_latent) |audio| try audio_metadata.setDuration(zml_handler.allocator, @divExact(audio.x.shape.dim(1), 5));
     const duration = try audio_metadata.duration_s();
 
     zml_handler.toc(&zml_handler.timers.llm.total);
@@ -551,14 +551,25 @@ pub fn importAudio(zml_handler: *Zml_handler, input_path: []const u8) !inference
 
     const num_frames = data.len / block_align;
     const samples = std.mem.bytesAsSlice(u32, @constCast(data));
-    const audio_slice: zml.Slice = try .alloc(zml_handler.allocator, zml.Shape.init(.{ .a = num_channels, .t = num_frames }, .f32));
+
+    // make sure audio has an integer duration in seconds
+    const pad_frames = (48_000 - (num_frames % 48_000)) % 48_000;
+    const effective_num_frames = num_frames + pad_frames;
+    
+    const audio_slice: zml.Slice = try .alloc(zml_handler.allocator, zml.Shape.init(.{ .a = num_channels, .t = effective_num_frames }, .f32));
     errdefer audio_slice.free(zml_handler.allocator);
 
     for (0..num_frames) |frame_idx| {
         for (0..num_channels) |channel_idx| {
             const src_index = frame_idx * num_channels + channel_idx;
-            const dst_index = channel_idx * num_frames + frame_idx;
+            const dst_index = channel_idx * effective_num_frames + frame_idx;
             audio_slice.items(f32)[dst_index] = @bitCast(samples[src_index]);
+        }
+    }
+    for (num_frames..effective_num_frames) |frame_idx| {
+        for (0..num_channels) |channel_idx| {
+            const dst_index = channel_idx * effective_num_frames + frame_idx;
+            audio_slice.items(f32)[dst_index] = 0.0;
         }
     }
 
