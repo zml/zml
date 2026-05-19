@@ -1,8 +1,8 @@
 # DFlash Gemma 4 Implementation Spec
 
 This document specifies the first implementation pass for a Gemma 4 target model in
-the DFlash example. It intentionally does not add Zig code yet. The implementation
-should live under `examples/dflash_gemma4` and should mirror the existing
+the DFlash example. The implementation lives under `examples/dflash_gemma4` and
+should mirror the existing
 `examples/dflash` flow from branch `tristan/dflash`, replacing the Llama 3.1 8B
 target model with Gemma 4.
 
@@ -111,6 +111,7 @@ examples/dflash_gemma4/BUILD.bazel
 examples/dflash_gemma4/main.zig
 examples/dflash_gemma4/dflash_model.zig
 examples/dflash_gemma4/common.zig
+examples/dflash_gemma4/chat_template.zig
 examples/dflash_gemma4/gemma4/gemma4_inference.zig
 examples/dflash_gemma4/gemma4/gemma4_model.zig
 examples/dflash_gemma4/model.md
@@ -459,6 +460,8 @@ The implementation can either:
 - port `llmd/chat_template.zig` into `examples/dflash_gemma4`, or
 - if the `zml` branch already has equivalent chat-template support by the time
   code is written, reuse that shared implementation.
+- for the first pass, explicitly reject non-Gemma templates if the local renderer
+  only supports the standard Gemma single-user turn format.
 
 For an initial CLI with only `--prompt`, render one user message and request an
 assistant continuation. The resulting token IDs should feed the same DFlash
