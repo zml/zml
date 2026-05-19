@@ -930,7 +930,7 @@ fn draftTokens(
         .add(cache_index.broad(.init(.{ .s = block_tokens.dim(.s) }, cache_index.dtype())));
     const position_ids = zml.Tensor.concatenate(&.{ context_position_ids, proposal_position_ids }, .s);
     const hidden, const updated_kv_cache = draft_model.forward(target_hidden, noise_embedding, position_ids, draft_kv_cache, cache_index, active_context_len);
-    const draft_logits = target_model.logitsForward(hidden);
+    const draft_logits = target_model.draftLogitsForward(hidden);
     const topk: u32 = if (sampling.temperature < 0.00001) 1 else @intCast(draft_logits.dim(.voc));
     const sampled_tokens, const updated_rng = zml.nn.sampleTokens(draft_logits, .{ .topk = topk, .temperature = sampling.temperature }, rng);
     return .{ sampled_tokens, draft_logits, updated_kv_cache, updated_rng };
