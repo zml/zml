@@ -15,7 +15,7 @@ pub const ChatTemplate = struct {
         defer allocator.free(source);
 
         if (!isSupportedGemmaTemplate(source)) {
-            log.err("Gemma 4 DFlash requires a Gemma single-user chat template with add_generation_prompt support", .{});
+            log.err("Gemma 4 DFlash requires a supported Gemma 4 single-user chat template with add_generation_prompt support", .{});
             return error.UnsupportedGemmaChatTemplate;
         }
 
@@ -49,7 +49,7 @@ pub const ChatTemplate = struct {
         const bos = self.config.bos_token orelse "<bos>";
         return try std.fmt.allocPrint(
             allocator,
-            "{s}<start_of_turn>user\n{s}<end_of_turn>\n<start_of_turn>model\n",
+            "{s}<|turn>user\n{s}<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
             .{ bos, prompt },
         );
     }
@@ -144,11 +144,11 @@ fn getLegacyChatTemplateFromConfig(chat_template_json: std.json.Value) ?[]const 
 }
 
 fn isSupportedGemmaTemplate(source: []const u8) bool {
-    const has_turn_tokens = std.mem.indexOf(u8, source, "<start_of_turn>") != null and
-        std.mem.indexOf(u8, source, "<end_of_turn>") != null and
+    const has_turn_tokens = std.mem.indexOf(u8, source, "<|turn>") != null and
+        std.mem.indexOf(u8, source, "<turn|>") != null and
         std.mem.indexOf(u8, source, "model") != null;
-    const can_start_generation = std.mem.indexOf(u8, source, "add_generation_prompt") != null or
-        std.mem.indexOf(u8, source, "<start_of_turn>model") != null;
+    const can_start_generation = std.mem.indexOf(u8, source, "add_generation_prompt") != null and
+        std.mem.indexOf(u8, source, "<|channel>thought") != null;
 
     return has_turn_tokens and can_start_generation;
 }

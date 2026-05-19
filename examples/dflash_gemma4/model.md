@@ -8,7 +8,7 @@ This example lives on branch `tristan/dflash_gemma4` under `examples/dflash_gemm
 - `--target-model`: Gemma 4 text or top-level Gemma 4 repository. The loader follows `llmd` semantics:
   - top-level Gemma 4 configs read `text_config` and load weights below `model.language_model`;
   - text-only Gemma 4 configs read the repository root and load weights without adding a prefix.
-- `--prompt`: raw user text. The executable formats it as a single Gemma chat turn before tokenization.
+- `--prompt`: raw user text. The executable formats it as a single Gemma 4 chat turn before tokenization.
 
 ## Reference Implementations
 
