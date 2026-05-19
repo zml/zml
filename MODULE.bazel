@@ -65,14 +65,7 @@ use_repo(
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(
-    name = "remote",
-    extra_target_settings = ["//bazel/zig_toolchain_config:local_execution_disabled"],
-    zig_version = "0.16.0",
-)
-zig.toolchain(
-    name = "local",
     extra_exec_compatible_with = ["//bazel/zig_toolchain_config:local_zig_execution"],
-    extra_target_settings = ["//bazel/zig_toolchain_config:local_execution_enabled"],
     zig_version = "0.16.0",
 )
 zig.mirrors(urls = [

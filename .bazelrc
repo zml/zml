@@ -146,11 +146,6 @@ common:remote   --jobs=2000
 common:remote   --extra_execution_platforms=@zml//:rbe_platform
 common:remote   --experimental_repo_remote_exec=true
 
-# Run Zig compile actions locally while allowing the rest of the build to use remote execution.
-common:zig_local --//bazel/zig_toolchain_config:local_execution=true
-common:zig_local --modify_execution_info=Zig.*=+no-remote-exec
-
-
 # Runtime profiling helpers for `bazel run`.
 run:nsys       --@zml//platforms:cuda=true
 run:nsys       --run_under=//tools:nsys

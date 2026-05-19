@@ -1,27 +1,5 @@
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 
-bool_flag(
-    name = "local_execution",
-    build_setting_default = False,
-    visibility = ["//visibility:public"],
-)
-
-config_setting(
-    name = "local_execution_enabled",
-    flag_values = {
-        ":local_execution": "true",
-    },
-    visibility = ["//visibility:public"],
-)
-
-config_setting(
-    name = "local_execution_disabled",
-    flag_values = {
-        ":local_execution": "false",
-    },
-    visibility = ["//visibility:public"],
-)
-
 constraint_setting(name = "zig_execution_location")
 
 constraint_value(
@@ -39,5 +17,8 @@ platform(
     name = "local_execution_platform",
     parents = ["@platforms//host"],
     constraint_values = [":local_zig_execution"],
+    exec_properties = {
+        "no-remote-exec": "1",
+    },
     visibility = ["//visibility:public"],
 )

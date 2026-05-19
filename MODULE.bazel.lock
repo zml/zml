@@ -1763,7 +1763,7 @@
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
         "bzlTransitiveDigest": "EaYJJCRO2HziyWvz9gAd7QTWXSkGP8GVY9fYFJ7w88I=",
-        "usagesDigest": "gm2KFxWCTTV35PJL//NplchCpNCzEg7WVqZ7vZU+bGc=",
+        "usagesDigest": "5XEfWW1w91pfg8tfjun45RGjw1lJZYeu8eiEGVfPhhM=",
         "recordedFileInputs": {
           "@@//bazel/zig_index.json": "2e3b4b83f1add5d3ca12fd05797c04c38af21d86c7fc7c1a9b356560141a4797",
           "@@rules_zig+//zig/private/versions.json": "3e4e370dee9c3f3fdc8bfc7a600e76743278fde40815eead5d0bcda3aec3e2bd"
@@ -2003,31 +2003,19 @@
             "repoRuleId": "@@rules_zig+//zig/private/repo:toolchains_repo.bzl%toolchains_repo",
             "attributes": {
               "names": [
-                "zig_0.16.0_aarch64-linux_remote",
-                "zig_0.16.0_aarch64-linux_local",
-                "zig_0.16.0_aarch64-macos_remote",
-                "zig_0.16.0_aarch64-macos_local",
-                "zig_0.16.0_aarch64-windows_remote",
-                "zig_0.16.0_aarch64-windows_local",
-                "zig_0.16.0_x86_64-linux_remote",
-                "zig_0.16.0_x86_64-linux_local",
-                "zig_0.16.0_x86_64-macos_remote",
-                "zig_0.16.0_x86_64-macos_local",
-                "zig_0.16.0_x86_64-windows_remote",
-                "zig_0.16.0_x86_64-windows_local"
+                "zig_0.16.0_aarch64-linux",
+                "zig_0.16.0_aarch64-macos",
+                "zig_0.16.0_aarch64-windows",
+                "zig_0.16.0_x86_64-linux",
+                "zig_0.16.0_x86_64-macos",
+                "zig_0.16.0_x86_64-windows"
               ],
               "labels": [
                 "@zig_0.16.0_aarch64-linux//:zig_toolchain",
-                "@zig_0.16.0_aarch64-linux//:zig_toolchain",
-                "@zig_0.16.0_aarch64-macos//:zig_toolchain",
                 "@zig_0.16.0_aarch64-macos//:zig_toolchain",
                 "@zig_0.16.0_aarch64-windows//:zig_toolchain",
-                "@zig_0.16.0_aarch64-windows//:zig_toolchain",
-                "@zig_0.16.0_x86_64-linux//:zig_toolchain",
                 "@zig_0.16.0_x86_64-linux//:zig_toolchain",
                 "@zig_0.16.0_x86_64-macos//:zig_toolchain",
-                "@zig_0.16.0_x86_64-macos//:zig_toolchain",
-                "@zig_0.16.0_x86_64-windows//:zig_toolchain",
                 "@zig_0.16.0_x86_64-windows//:zig_toolchain"
               ],
               "zig_versions": [
@@ -2036,56 +2024,32 @@
                 "0.16.0",
                 "0.16.0",
                 "0.16.0",
-                "0.16.0",
-                "0.16.0",
-                "0.16.0",
-                "0.16.0",
-                "0.16.0",
-                "0.16.0",
                 "0.16.0"
               ],
               "exec_lengths": [
-                2,
                 3,
-                2,
                 3,
-                2,
                 3,
-                2,
                 3,
-                2,
                 3,
-                2,
                 3
               ],
               "exec_constraints": [
                 "@platforms//os:linux",
                 "@platforms//cpu:aarch64",
-                "@platforms//os:linux",
-                "@platforms//cpu:aarch64",
                 "'@@//bazel/zig_toolchain_config:local_zig_execution'",
-                "@platforms//os:macos",
-                "@platforms//cpu:aarch64",
                 "@platforms//os:macos",
                 "@platforms//cpu:aarch64",
                 "'@@//bazel/zig_toolchain_config:local_zig_execution'",
                 "@platforms//os:windows",
                 "@platforms//cpu:aarch64",
-                "@platforms//os:windows",
-                "@platforms//cpu:aarch64",
                 "'@@//bazel/zig_toolchain_config:local_zig_execution'",
-                "@platforms//os:linux",
-                "@platforms//cpu:x86_64",
                 "@platforms//os:linux",
                 "@platforms//cpu:x86_64",
                 "'@@//bazel/zig_toolchain_config:local_zig_execution'",
                 "@platforms//os:macos",
                 "@platforms//cpu:x86_64",
-                "@platforms//os:macos",
-                "@platforms//cpu:x86_64",
                 "'@@//bazel/zig_toolchain_config:local_zig_execution'",
-                "@platforms//os:windows",
-                "@platforms//cpu:x86_64",
                 "@platforms//os:windows",
                 "@platforms//cpu:x86_64",
                 "'@@//bazel/zig_toolchain_config:local_zig_execution'"
@@ -2096,7 +2060,10 @@
                 0,
                 0,
                 0,
-                0,
+                0
+              ],
+              "target_compatible_constraints": [],
+              "target_settings_lengths": [
                 0,
                 0,
                 0,
@@ -2104,35 +2071,7 @@
                 0,
                 0
               ],
-              "target_compatible_constraints": [],
-              "target_settings_lengths": [
-                1,
-                1,
-                1,
-                1,
-                1,
-                1,
-                1,
-                1,
-                1,
-                1,
-                1,
-                1
-              ],
-              "target_settings": [
-                "'@@//bazel/zig_toolchain_config:local_execution_disabled'",
-                "'@@//bazel/zig_toolchain_config:local_execution_enabled'",
-                "'@@//bazel/zig_toolchain_config:local_execution_disabled'",
-                "'@@//bazel/zig_toolchain_config:local_execution_enabled'",
-                "'@@//bazel/zig_toolchain_config:local_execution_disabled'",
-                "'@@//bazel/zig_toolchain_config:local_execution_enabled'",
-                "'@@//bazel/zig_toolchain_config:local_execution_disabled'",
-                "'@@//bazel/zig_toolchain_config:local_execution_enabled'",
-                "'@@//bazel/zig_toolchain_config:local_execution_disabled'",
-                "'@@//bazel/zig_toolchain_config:local_execution_enabled'",
-                "'@@//bazel/zig_toolchain_config:local_execution_disabled'",
-                "'@@//bazel/zig_toolchain_config:local_execution_enabled'"
-              ]
+              "target_settings": []
             }
           }
         },
