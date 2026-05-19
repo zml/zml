@@ -946,14 +946,14 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     const dimT: usize = @intCast(x.shape.dim(0));
     const dimA: usize = @intCast(x.shape.dim(1));
     if (source) |s| {
-        std.log.info("{any}", .{ s.x.shape });
+        std.log.info("Renoising reference audio with noise level {d}, starting DiT from step {d}", .{ noise, match_level });
         for (0..dimT) |t| {
             for (0..dimA) |a| {
                 const rand: f32 = random.floatNorm(f32);
-                // apply noise to s.x to initialize x : we only add noise in quantity that matches a noise level of the schedule,
+                // apply noise to s.x to initialize x : we only add noise in quantity that matches a level of the schedule,
                 // and we then start the diffusion from that level.
                 const target: f32 = s.x.items(zml.floats.BFloat16)[t + a * dimT].toF32(); // s.x is [a, t]
-                const noised = noise * rand + (1 - noise) * target;
+                const noised = noise * rand + (1.0 - noise) * target;
                 x.items(zml.floats.BFloat16)[t * dimA + a] = zml.floats.BFloat16.fromF32(noised);
             }
         }
