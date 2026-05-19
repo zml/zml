@@ -239,6 +239,10 @@ pub const KvCache = struct {
     layout: Gemma4CacheLayout,
 
     pub const Buffer = zml.Bufferized(KvCache);
+    pub const BufferShardings = struct {
+        sliding: zml.Sharding,
+        full: zml.Sharding,
+    };
 
     pub fn init(allocator: std.mem.Allocator, config: Config, cache_seq_len: u32, dtype: zml.DataType) !KvCache {
         const layer_kinds = try allocator.alloc(Gemma4CacheKind, config.num_hidden_layers);
@@ -264,10 +268,10 @@ pub const KvCache = struct {
         layout.deinit(allocator);
     }
 
-    pub fn initZeroBuffer(self: KvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
+    pub fn initZeroBuffer(self: KvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shardings: BufferShardings) !Buffer {
         return .{
-            .sliding = try self.sliding.initZeroBuffer(allocator, io, platform, sharding),
-            .full = try self.full.initZeroBuffer(allocator, io, platform, sharding),
+            .sliding = try self.sliding.initZeroBuffer(allocator, io, platform, shardings.sliding),
+            .full = try self.full.initZeroBuffer(allocator, io, platform, shardings.full),
         };
     }
 

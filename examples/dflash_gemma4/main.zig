@@ -72,7 +72,15 @@ pub fn main(init: std.process.Init) !void {
     );
     defer token_index_buffer.deinit();
 
-    var target_kv_cache_buffers = try models.target_kv_cache.initZeroBuffer(allocator, project.io, project.platform, project.shardings.model);
+    var target_kv_cache_buffers = try models.target_kv_cache.initZeroBuffer(
+        allocator,
+        project.io,
+        project.platform,
+        .{
+            .sliding = project.shardings.model,
+            .full = project.shardings.kv,
+        },
+    );
     defer gemma4.KvCache.deinitBuffer(&target_kv_cache_buffers);
 
     var draft_kv_cache_buffers = try models.draft_kv_cache.initZeroBuffer(allocator, project.io, project.platform, project.shardings.model);
@@ -944,10 +952,19 @@ fn decodeTokens(
 
 const Shardings = struct {
     model: zml.Sharding,
+    kv: zml.Sharding,
 
     pub fn init(platform: *zml.Platform) !Shardings {
+        var model_strategy: zml.Sharding.Strategy = .init;
+        model_strategy.addBinding(.model, .link_x);
+        model_strategy.addBinding(.model, .link_y);
+
+        var kv_strategy: zml.Sharding.Strategy = .init;
+        kv_strategy.addBinding(.model, .link_y);
+
         return .{
-            .model = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })),
+            .model = try platform.registerShardingWithStrategy("model", .mesh(.{ .model = .high_bandwidth }), model_strategy),
+            .kv = try platform.registerShardingWithStrategy("kv", .mesh(.{ .model = .high_bandwidth }), kv_strategy),
         };
     }
 
