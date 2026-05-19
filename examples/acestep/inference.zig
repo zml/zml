@@ -943,25 +943,26 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     const seed: u64 = @intCast(id);
     var prng = std.Random.DefaultPrng.init(seed);
     const random = prng.random();
-    const dimI: usize = @intCast(x.shape.dim(0));
-    const dimJ: usize = @intCast(x.shape.dim(1));
+    const dimT: usize = @intCast(x.shape.dim(0));
+    const dimA: usize = @intCast(x.shape.dim(1));
     if (source) |s| {
-        for (0..dimI) |i| {
-            for (0..dimJ) |j| {
+        std.log.info("{any}", .{s.x.shape});
+        for (0..dimT) |t| {
+            for (0..dimA) |a| {
                 const rand: f32 = random.floatNorm(f32);
                 // apply noise to s.x to initialize x : we only add noise in quantity that matches a noise level of the schedule,
                 // and we then start the diffusion from that level.
-                const t = s.x.items(f32)[i * dimJ + j];
-                const noised = noise * rand + (1 - noise) * t;
-                x.items(zml.floats.BFloat16)[i * dimJ + j] = zml.floats.BFloat16.fromF32(noised);
+                const target = s.x.items(f32)[t + a * dimT]; // s.x is [a, t]
+                const noised = noise * rand + (1 - noise) * target;
+                x.items(zml.floats.BFloat16)[t * dimA + a] = zml.floats.BFloat16.fromF32(noised);
             }
         }
     } else {
-        for (0..dimI) |i| {
-            for (0..dimJ) |j| {
+        for (0..dimT) |i| {
+            for (0..dimA) |j| {
                 // initialize x with pure gaussian noise
                 const rand: f32 = random.floatNorm(f32);
-                x.items(zml.floats.BFloat16)[i * dimJ + j] = zml.floats.BFloat16.fromF32(rand);
+                x.items(zml.floats.BFloat16)[i * dimA + j] = zml.floats.BFloat16.fromF32(rand);
             }
         }
     }
