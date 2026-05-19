@@ -219,7 +219,7 @@ pub fn main(init: std.process.Init) !void {
         .{input},
         .{
             .partitioner = args.partitioner,
-            .shardings = &.{sharding},
+            .shardings = &.{&sharding},
         },
     );
     defer exe.deinit();
