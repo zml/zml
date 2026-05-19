@@ -13,10 +13,12 @@ const log = std.log.scoped(.@"zml/attention/triton");
 const toDType = tri.from;
 
 fn use2dKernel(head_size: usize, sliding_window: usize, all_decode: bool, max_seqlen_q: usize, max_seqlen_k: usize, target_num_prgms: usize, num_2d_prgms: usize) bool {
-    _ = head_size;
     _ = all_decode;
     _ = max_seqlen_q;
-    return sliding_window > 0 or max_seqlen_k <= 512 or num_2d_prgms > target_num_prgms;
+    // The segmented 3D kernel is not reliable for large-head attention today.
+    // Gemma 4 full-attention layers use head_dim=512; routing them through the
+    // 2D kernel keeps decode continuations consistent with prefill.
+    return head_size >= 256 or sliding_window > 0 or max_seqlen_k <= 512 or num_2d_prgms > target_num_prgms;
 }
 
 pub const Config2D = struct {
