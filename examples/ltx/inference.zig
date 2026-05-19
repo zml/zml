@@ -716,10 +716,16 @@ pub fn main(init: std.process.Init) !void {
     // ---- Platform init ----
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
-    const sharding: zml.Sharding = try platform.registerSharding(
-        "ltx_mesh",
-        .mesh(.{ .model = .high_bandwidth }),
-    );
+    const logical: zml.Sharding.LogicalMesh = .mesh(.{ .model = .high_bandwidth });
+    const sharding: zml.Sharding = if (platform.target == .tpu) blk: {
+        // TPU v5e has link_x[2] × link_y[4] = 8 chips. Fold both physical axes into
+        // .model so weights are sharded across all chips (8-way), not just link_x (2-way).
+        // Without this, 22B model weights (~44GB) don't fit in 16GB/chip HBM.
+        var strategy: zml.Sharding.Strategy = .init;
+        strategy.addBinding(.model, .link_x);
+        strategy.addBinding(.model, .link_y);
+        break :blk try platform.registerShardingWithStrategy("ltx_mesh", logical, strategy);
+    } else try platform.registerSharding("ltx_mesh", logical);
     std.log.info("Platform: {d} devices, sharding mesh: {f}", .{ platform.devices.len, sharding });
 
     // ---- Phase timers ----
