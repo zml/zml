@@ -464,7 +464,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
         zml_handler.tic(&zml_handler.timers.dit.total);
         zml_handler.mem.start(0);
         
-        const diffused_latents = try inference.runDiffusion(zml_handler, &acedit, audio_latent, diffuse_args, i, i);//zml_handler.args.match_level);
+        const diffused_latents = try inference.runDiffusion(zml_handler, &acedit, audio_latent, diffuse_args, i, @intCast(i));//zml_handler.args.match_level);
         defer diffused_latents.deinit(zml_handler.allocator);
 
         zml_handler.mem.check(0);
