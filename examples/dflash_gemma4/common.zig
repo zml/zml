@@ -89,10 +89,19 @@ pub const KvCache = struct {
 
 pub const Shardings = struct {
     model: zml.Sharding,
+    kv: zml.Sharding,
 
     pub fn init(platform: *zml.Platform) !Shardings {
+        var model_strategy: zml.Sharding.Strategy = .init;
+        model_strategy.addBinding(.model, .link_x);
+        model_strategy.addBinding(.model, .link_y);
+
+        var kv_strategy: zml.Sharding.Strategy = .init;
+        kv_strategy.addBinding(.model, .link_y);
+
         return .{
-            .model = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })),
+            .model = try platform.registerShardingWithStrategy("model", .mesh(.{ .model = .high_bandwidth }), model_strategy),
+            .kv = try platform.registerShardingWithStrategy("kv", .mesh(.{ .model = .high_bandwidth }), kv_strategy),
         };
     }
 
