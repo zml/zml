@@ -920,7 +920,7 @@ fn draftTokens(
         .cmp(.LT, active_context_len.convert(.u32).broad(.init(.{ .s = context.len }, .u32)));
     const target_hidden = active_mask.broad(target_hidden_slice.shape())
         .select(target_hidden_slice, zml.Tensor.constant(target_hidden_slice.dtype().zero()).broad(target_hidden_slice.shape()));
-    const noise_embedding = target_model.embedForward(block_tokens);
+    const noise_embedding = target_model.rawEmbedForward(block_tokens);
     const context_position_ids = zml.Tensor.arange(.{ .end = context.len }, cache_index.dtype())
         .withTags(.{.s})
         .add(cache_index.broad(.init(.{ .s = context.len }, cache_index.dtype())));
