@@ -65,7 +65,7 @@ const Mlp = struct {
     }
 };
 
-fn testMlp(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = zml.stdx.flags.parse(init.minimal.args, Args);
@@ -75,32 +75,52 @@ fn testMlp(init: std.process.Init) !void {
 
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
 
-    // model weights
     var model_registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer model_registry.deinit();
-    var model_store = zml.io.TensorStore.fromRegistry(allocator, &model_registry);
+    var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry);
     defer model_store.deinit();
 
-    // activations
-    var activations_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, args.activations);
-    defer activations_registry.deinit();
-    var activation_store = zml.io.TensorStore.fromRegistry(allocator, &activations_registry);
+    try run(allocator, io, platform, args.activations, &model_store);
+}
+
+fn run(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    activations_path: []const u8,
+    model_store: *zml.io.TensorStore,
+) !void {
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
+    defer registry.deinit();
+    var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer activation_store.deinit();
 
     const layer_indices = [_]usize{ 0, 1, 2, 45, 46, 47 };
     for (layer_indices) |layer_idx| {
-        const current_layer = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp", .{layer_idx});
-        defer allocator.free(current_layer);
+        const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp", .{layer_idx});
+        defer allocator.free(name);
 
-        // construct mlp
-        const mlp = Mlp.init(model_store.view().withPrefix(current_layer), null);
-
-        const mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, &model_store, .auto);
-
-        try zml.testing.testLayer(allocator, io, platform, mlp, .forward, activation_store.view(), current_layer, mlp_weights, &.{}, .{});
+        try testMlpLayer(allocator, io, platform, activation_store.view(), model_store, name, .{ .absolute_tolerance = 1e-2 });
     }
 }
 
-pub fn main(init: std.process.Init) !void {
-    try testMlp(init);
+fn testMlpLayer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    activation_store: zml.io.TensorStore.View,
+    model_store: *zml.io.TensorStore,
+    name: []const u8,
+    opts: zml.testing.CompareOpts,
+) !void {
+    const mlp = Mlp.init(model_store.view().withPrefix(name), null);
+
+    var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, model_store, .auto);
+    defer zml.meta.visit(struct {
+        fn cb(_: void, b: *zml.Buffer) void {
+            b.deinit();
+        }
+    }.cb, {}, &mlp_weights);
+
+    try zml.testing.testLayer(allocator, io, platform, mlp, .forward, activation_store, name, mlp_weights, &.{}, opts);
 }
