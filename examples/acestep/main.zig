@@ -574,7 +574,7 @@ pub fn importAudio(zml_handler: *Zml_handler, input_path: []const u8) !inference
     }
 
     zml_handler.allocator.free(bytes);
-    log.info("Imported audio from {s}", .{ input_path });
+    log.info("Imported {d} s of audio from {s}", .{ @divExact(effective_num_frames, 48_000), input_path });
     return .{ .audio = audio_slice };
 }
 
