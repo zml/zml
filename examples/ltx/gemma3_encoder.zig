@@ -79,9 +79,9 @@ pub const Mlp = struct {
 
     pub fn init(store: zml.io.TensorStore.View) Mlp {
         return .{
-            .gate_proj = .init(store.withPrefix("gate_proj").createTensor("weight", .{ .dout, .d }, .{}), null, .d),
-            .up_proj = .init(store.withPrefix("up_proj").createTensor("weight", .{ .dout, .d }, .{}), null, .d),
-            .down_proj = .init(store.withPrefix("down_proj").createTensor("weight", .{ .dout, .d }, .{}), null, .d),
+            .gate_proj = .init(store.withPrefix("gate_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .up_proj = .init(store.withPrefix("up_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .down_proj = .init(store.withPrefix("down_proj").createTensor("weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
         };
     }
 
@@ -114,16 +114,11 @@ pub const Attention = struct {
     rope_opts: zml.nn.RopeOpts,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config, layer_type: LayerType) Attention {
-        const linear = struct {
-            fn mk(s: zml.io.TensorStore.View, prefix: []const u8) zml.nn.Linear {
-                return .init(s.withPrefix(prefix).createTensor("weight", .{ .dout, .d }, .{}), null, .d);
-            }
-        };
         return .{
-            .q_proj = linear.mk(store, "q_proj"),
-            .k_proj = linear.mk(store, "k_proj"),
-            .v_proj = linear.mk(store, "v_proj"),
-            .o_proj = linear.mk(store, "o_proj"),
+            .q_proj = .init(store.withPrefix("q_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .k_proj = .init(store.withPrefix("k_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .v_proj = .init(store.withPrefix("v_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .o_proj = .init(store.withPrefix("o_proj").createTensor("weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
             .q_norm = .init(store.withPrefix("q_norm"), config.rms_norm_eps),
             .k_norm = .init(store.withPrefix("k_norm"), config.rms_norm_eps),
             .num_heads = config.num_attention_heads,
@@ -218,7 +213,7 @@ pub const ScaledWordEmbedding = struct {
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) ScaledWordEmbedding {
         return .{
-            .embed_tokens = .{ .weight = store.createTensor("weight", .{ .voc, .d }, .{}) },
+            .embed_tokens = .{ .weight = store.createTensor("weight", .{ .voc, .d }, .{ .voc = .model }) },
             .scale = @sqrt(@as(f32, @floatFromInt(config.hidden_size))),
         };
     }
