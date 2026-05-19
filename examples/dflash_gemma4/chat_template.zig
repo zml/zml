@@ -49,7 +49,7 @@ pub const ChatTemplate = struct {
         const bos = self.config.bos_token orelse "<bos>";
         return try std.fmt.allocPrint(
             allocator,
-            "{s}<|turn>user\n{s}<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+            "{s}<|turn>system\n<|think|>\n<turn|>\n<|turn>user\n{s}<turn|>\n<|turn>model\n",
             .{ bos, prompt },
         );
     }
