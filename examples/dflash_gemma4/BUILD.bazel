@@ -1,0 +1,32 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+zig_library(
+    name = "dflash_model",
+    main = "dflash_model.zig",
+    srcs = ["common.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_binary(
+    name = "dflash_gemma4",
+    srcs = [
+        "chat_template.zig",
+        "common.zig",
+        "dflash_model.zig",
+        "gemma4/gemma4_inference.zig",
+        "gemma4/gemma4_model.zig",
+    ],
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+build_test(
+    name = "test",
+    targets = [
+        ":dflash_gemma4",
+        ":dflash_model",
+    ],
+)
