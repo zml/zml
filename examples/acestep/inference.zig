@@ -371,7 +371,8 @@ pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: zml.tokeniz
     if (cover) {
         try formatted_prompt.appendSlice(allocator, "Generate audio semantic tokens based on the given conditions:\n\n");
     } else {
-        try formatted_prompt.appendSlice(allocator, "Fill the audio semantic mask based on the given conditions:\n\n");
+        try formatted_prompt.appendSlice(allocator, "Generate audio semantic tokens based on the given conditions:\n\n");
+        //try formatted_prompt.appendSlice(allocator, "Fill the audio semantic mask based on the given conditions:\n\n");
     }
     try formatted_prompt.appendSlice(allocator, "# Caption\n");
     try formatted_prompt.appendSlice(allocator, metadata.caption);

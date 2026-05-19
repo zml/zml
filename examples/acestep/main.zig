@@ -415,10 +415,6 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     const caption_tok_non_cover = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata, false);
     const caption_tok_cover = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata, true);
     const lyric_tok = try inference.tokenizeInputLyrics(zml_handler.allocator, tokenizer, audio_metadata);
-
-    std.log.info("Cover prompt len {d}", .{caption_tok_cover.len});
-    std.log.info("Non-cover prompt len {d}", .{caption_tok_non_cover.len});
-    
     defer zml_handler.allocator.free(caption_tok_non_cover);
     defer zml_handler.allocator.free(caption_tok_cover);
     defer zml_handler.allocator.free(lyric_tok);
