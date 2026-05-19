@@ -359,7 +359,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     zml_handler.mem.check(0);
     
     if (zml_handler.args.duration > 0) try audio_metadata.setDuration(zml_handler.allocator, zml_handler.args.duration);
-    if (audio_latent) |audio| try audio_metadata.setDuration(zml_handler.allocator, @divExact(audio.x.shape.dim(1), 5));
+    if (audio_latent) |audio| try audio_metadata.setDuration(zml_handler.allocator, @divExact(audio.x.shape.dim(1), 25));
     const duration = try audio_metadata.duration_s();
 
     zml_handler.toc(&zml_handler.timers.llm.total);
@@ -574,7 +574,7 @@ pub fn importAudio(zml_handler: *Zml_handler, input_path: []const u8) !inference
     }
 
     zml_handler.allocator.free(bytes);
-    log.info("Imported {d} s of audio from {s}", .{ @divExact(effective_num_frames, 48_000), input_path });
+    log.info("Imported {d}s of audio from {s}", .{ @divExact(effective_num_frames, 48_000), input_path });
     return .{ .audio = audio_slice };
 }
 
