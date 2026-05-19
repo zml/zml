@@ -1002,8 +1002,6 @@ pub fn prepareNonCoverLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.A
     defer encoded_lyric_buffer.deinit();
     var encoded_timbre_buffer: zml.Buffer = undefined;
     defer encoded_timbre_buffer.deinit();
-    var encoded_audiocodes_buffer: zml.Buffer = undefined;
-    defer encoded_audiocodes_buffer.deinit();
     
     zml_handler.tic(&zml_handler.timers.enc.prefill);
 
