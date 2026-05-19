@@ -212,6 +212,7 @@ const Args = struct {
     use_audio_ref: bool = false,
     use_style_ref: bool = false,
     match_level: u8 = 0,
+    cover_strength: u8 = 0,
     seed: u32 = 0,
 
     pub const help =
@@ -220,18 +221,19 @@ const Args = struct {
         \\ Run audio generation with the selected models.
         \\
         \\ Options:
-        \\   --prompt=<string>     Prompt to use for generation (required)
-        \\   --instru              Ask for an instrumental audio (default: 0)
-        \\   --local-files         Use local model paths, see README to setup (default: 0)
-        \\   --llm-size=<int>      Size of the 5Hz LLM (0/1/2 for 0.6B/1.7B/4B, default: 0)
-        \\   --dit-size=<int>      Size of the DiT model (0/1 for turbo/turbo-xl, default: 0)
-        \\   --skip-cfg            Optional, disable CFG phase (default: 0)
-        \\   --duration=<number>   Constrains the duration in seconds (required if CFG is disabled, default: -1)
-        \\   --n=<int>             Number of audio files to generate with different seeds for the diffusion (default: 1)
-        \\   --use-audio-ref       Use references/source.wav as source to remix (default: 0)
-        \\   --use-style-ref       Use references/style.wav as style/timbre reference (default: 0)
-        \\   --match-level=<int>   Between 0 (pure noise) and 8 (exact audio ref) to init the diffusion (default: 0)
-        \\   --seed=<int>          Random seed (default: 0)
+        \\   --prompt=<string>      Prompt to use for generation (required)
+        \\   --instru               Ask for an instrumental audio (default: 0)
+        \\   --local-files          Use local model paths, see README to setup (default: 0)
+        \\   --llm-size=<int>       Size of the 5Hz LLM (0/1/2 for 0.6B/1.7B/4B, default: 0)
+        \\   --dit-size=<int>       Size of the DiT model (0/1 for turbo/turbo-xl, default: 0)
+        \\   --skip-cfg             Optional, disable CFG phase (default: 0)
+        \\   --duration=<number>    Constrains the duration in seconds (required if CFG is disabled, default: -1)
+        \\   --n=<int>              Number of audio files to generate with different seeds for the diffusion (default: 1)
+        \\   --use-audio-ref        Use references/source.wav as source to remix (default: 0)
+        \\   --use-style-ref        Use references/style.wav as style/timbre reference (default: 0)
+        \\   --match-level=<int>    Between 0 (pure noise) and 8 (exact audio ref) to init the diffusion (default: 0)
+        \\   --cover-strength=<int> Between 0 (no cover) and 8 (full cover) iterations in cover mode before switching to non-cover mode (default: 0)
+        \\   --seed=<int>           Random seed (default: 0)
         \\
     ;
 };
@@ -251,9 +253,19 @@ const Args = struct {
 // info:   wav                                                 0.24s
 // info: total                                                45.24s
 
-// TODO: debug refs
-// ranger decode_t
-// TODO: shard the llm and/or batch cfg
+// param1 : match_level: dimention iter, in 0-8, initial noise level matches the scheduled noised at iter match_level
+// param2 : cover_strength: dimension iter, in 0-8, has to be >= match_level, how many iters we do in cover mode before switching to non cover
+
+// TODO: faire remix basique
+// - prepare no cover branch
+// - smooth transitions between cover and non cover modes ?
+// - if needed, context_latents from dequantized quantized source latents instead of source latents
+// - ajouter variance
+// - ranger decode_t
+// TODO: essayer de faire lyric remix
+// - embed old and new lyric
+// - switch/blend/dice between the two during the diffusion
+// TODO: batch cfg
 
 // TODO: move model related code from inference to Exes struct inside models
 
@@ -400,15 +412,21 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     var tokenizer = try aceemb_.AceEmb_handler.loadTokenizer(zml_handler, repo);
     defer tokenizer.deinit();
 
-    const caption_tok = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata);
+    const caption_tok_non_cover = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata, false);
+    const caption_tok_cover = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata, true);
     const lyric_tok = try inference.tokenizeInputLyrics(zml_handler.allocator, tokenizer, audio_metadata);
-    defer zml_handler.allocator.free(caption_tok);
+
+    std.log.info("Cover prompt len {d}", .{caption_tok_cover.len});
+    std.log.info("Non-cover prompt len {d}", .{caption_tok_non_cover.len});
+    
+    defer zml_handler.allocator.free(caption_tok_non_cover);
+    defer zml_handler.allocator.free(caption_tok_cover);
     defer zml_handler.allocator.free(lyric_tok);
 
-    var aceemb = try aceemb_.AceEmb_handler.init(zml_handler, @intCast(caption_tok.len), @intCast(lyric_tok.len));
+    var aceemb = try aceemb_.AceEmb_handler.init(zml_handler, @intCast(caption_tok_cover.len), @intCast(lyric_tok.len));
     defer aceemb.deinit(zml_handler.allocator);
 
-    const text_emb = try inference.generateTextEmbedding(zml_handler, &aceemb, tokenizer, caption_tok, lyric_tok);
+    const text_emb = try inference.generateTextEmbedding(zml_handler, &aceemb, tokenizer, caption_tok_cover, caption_tok_non_cover, lyric_tok);
     defer text_emb.deinit(zml_handler.allocator);
 
     aceemb.unloadBuffers(zml_handler.allocator);
@@ -430,8 +448,10 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     var aceenc = try aceenc_.AceEnc_handler.init(zml_handler, text_emb.textLen(), text_emb.lyricLen(), duration, int_codes.len);
     defer aceenc.deinit(zml_handler.allocator);
 
-    const diffuse_args = try inference.prepareLatents(zml_handler, &aceenc, text_emb, int_codes, duration, audio_latent, style_latent);
-    defer diffuse_args.deinit(zml_handler.allocator);
+    const diffuse_args_cover = try inference.prepareCoverLatents(zml_handler, &aceenc, text_emb, int_codes, duration, audio_latent, style_latent);
+    defer diffuse_args_cover.deinit(zml_handler.allocator);
+    const diffuse_args_non_cover = try inference.prepareNonCoverLatents(zml_handler, &aceenc, text_emb, duration, style_latent);
+    defer diffuse_args_non_cover.deinit(zml_handler.allocator);
 
     aceenc.unloadBuffers(zml_handler.allocator);
 
@@ -444,7 +464,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
 
     zml_handler.tic(&zml_handler.timers.dit.total);
     
-    var acedit = try acedit_.AceDit_handler.init(zml_handler, duration, diffuse_args.encoder_conditions.shape.dim(.s_enc));
+    var acedit = try acedit_.AceDit_handler.init(zml_handler, duration, diffuse_args_cover.encoder_conditions.shape.dim(.s_enc));
     defer acedit.deinit(zml_handler.allocator);
     
     zml_handler.toc(&zml_handler.timers.dit.total);
@@ -464,7 +484,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
         zml_handler.tic(&zml_handler.timers.dit.total);
         zml_handler.mem.start(0);
         
-        const diffused_latents = try inference.runDiffusion(zml_handler, &acedit, audio_latent, diffuse_args, i, zml_handler.args.match_level);
+        const diffused_latents = try inference.runDiffusion(zml_handler, &acedit, audio_latent, diffuse_args_cover, diffuse_args_cover, i, zml_handler.args.match_level);
         defer diffused_latents.deinit(zml_handler.allocator);
 
         zml_handler.mem.check(0);

@@ -169,11 +169,12 @@ pub const AudioCodes = struct {
 };
 
 pub const TextEmbedding = struct {
-    caption_embedding: zml.Slice,
+    caption_embedding_cover: zml.Slice,
+    caption_embedding_non_cover: zml.Slice,
     lyric_embedding: zml.Slice,
 
     pub fn textLen(self: TextEmbedding) u32 {
-        return @intCast(self.caption_embedding.shape.dim(.s));
+        return @intCast(self.caption_embedding_cover.shape.dim(.s));
     }
 
     pub fn lyricLen(self: TextEmbedding) u32 {
@@ -186,8 +187,8 @@ pub const TextEmbedding = struct {
         const options: std.fmt.Number = .{};
 
         std.log.info("Caption embedding shape", .{});
-        try self.caption_embedding.shape.format(writer);
-        try self.caption_embedding.prettyPrint(writer, options);
+        try self.caption_embedding_cover.shape.format(writer);
+        try self.caption_embedding_cover.prettyPrint(writer, options);
 
         std.log.info("Lyric embedding shape", .{});
         try self.lyric_embedding.shape.format(writer);
@@ -195,7 +196,8 @@ pub const TextEmbedding = struct {
     }
 
     pub fn deinit(self: TextEmbedding, allocator: std.mem.Allocator) void {
-        self.caption_embedding.free(allocator);
+        self.caption_embedding_cover.free(allocator);
+        self.caption_embedding_non_cover.free(allocator);
         self.lyric_embedding.free(allocator);
     }
 };
@@ -358,7 +360,7 @@ pub fn tokenizeGenerationPrompt(allocator: std.mem.Allocator, tokenizer: zml.tok
     return .{ try cond_tokens.toOwnedSlice(allocator), try uncond_tokens.toOwnedSlice(allocator) };
 }
 
-pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, metadata: AudioMetadata) ![]u32 {
+pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, metadata: AudioMetadata, cover: bool) ![]u32 {
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
@@ -366,9 +368,11 @@ pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: zml.tokeniz
     defer formatted_prompt.deinit(allocator);
 
     try formatted_prompt.appendSlice(allocator, "# Instruction\n");
-    // TODO
-    //try formatted_prompt.appendSlice(allocator, "Fill the audio semantic mask based on the given conditions:\n\n");
-    try formatted_prompt.appendSlice(allocator, "Generate audio semantic tokens based on the given conditions:\n\n");
+    if (cover) {
+        try formatted_prompt.appendSlice(allocator, "Generate audio semantic tokens based on the given conditions:\n\n");
+    } else {
+        try formatted_prompt.appendSlice(allocator, "Fill the audio semantic mask based on the given conditions:\n\n");
+    }
     try formatted_prompt.appendSlice(allocator, "# Caption\n");
     try formatted_prompt.appendSlice(allocator, metadata.caption);
     try formatted_prompt.appendSlice(allocator, "\n\n# Metas\n");
@@ -749,7 +753,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     };
 }
 
-pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.AceEmb_handler, tokenizer: zml.tokenizer.Tokenizer, text_tokens: []const u32, lyric_tokens: []const u32) !TextEmbedding {
+pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.AceEmb_handler, tokenizer: zml.tokenizer.Tokenizer, cover_text_tokens: []const u32, non_cover_text_tokens: []const u32, lyric_tokens: []const u32) !TextEmbedding {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = aceemb.params.shardings.replicated;
@@ -777,6 +781,27 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
     try lyric_embedding_buffer.toSlice(io, lyric_embedding_slice);
 
     zml_handler.toc(&zml_handler.timers.emb.prefill);
+
+    const cover_text_embedding_slice = try embedText(zml_handler, aceemb, tokenizer, cover_text_tokens);
+    const non_cover_text_embedding_slice = try embedText(zml_handler, aceemb, tokenizer, non_cover_text_tokens);
+
+    std.log.info("EMB done embedding", .{});
+    return .{
+        .caption_embedding_cover = cover_text_embedding_slice,
+        .caption_embedding_non_cover = non_cover_text_embedding_slice,
+        .lyric_embedding = lyric_embedding_slice,
+    };
+}
+
+pub fn embedText(zml_handler: *main.Zml_handler, aceemb: *aceemb_.AceEmb_handler, tokenizer: zml.tokenizer.Tokenizer, text_tokens: []const u32) !zml.Slice {
+    const io = zml_handler.io;
+    const allocator = zml_handler.allocator;
+    const sharding = aceemb.params.shardings.replicated;
+    const platform = zml_handler.platform;
+
+    var tokenizer_decoder = try tokenizer.decoder();
+    defer tokenizer_decoder.deinit();
+
     zml_handler.tic(&zml_handler.timers.emb.decode);
 
     const text_embedding_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = text_tokens.len, .d = aceemb.config.hidden_size }, .bf16));
@@ -805,20 +830,16 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
 
     zml_handler.toc(&zml_handler.timers.emb.decode);
 
-    std.log.info("EMB done embedding", .{});
-    return .{
-        .caption_embedding = text_embedding_slice,
-        .lyric_embedding = lyric_embedding_slice,
-    };
+    return text_embedding_slice;
 }
 
-pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_handler, text_emb: TextEmbedding, audio_codes: []u32, target_duration: u32, audio_latents: ?AudioLatents, style_latents: ?AudioLatents) !ContextLatents {
+pub fn prepareCoverLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_handler, text_emb: TextEmbedding, audio_codes: []u32, target_duration: u32, audio_latents: ?AudioLatents, style_latents: ?AudioLatents) !ContextLatents {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = aceenc.shardings.replicated;
     const platform = zml_handler.platform;
 
-    const caption_len = text_emb.caption_embedding.shape.dim(0);
+    const caption_len = text_emb.caption_embedding_cover.shape.dim(0);
     const lyric_len = text_emb.lyric_embedding.shape.dim(0);
     const emb_dim = aceenc.config.encoder_hidden_size;
     const audio_dim = aceenc.config.timbre_hidden_dim;
@@ -856,7 +877,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
         audio_buffer = audio_silence_buffer;
     }
     
-    std.log.info("ENC call encoder cap={d}x{d} lyr={d}x{d} tim={d}x{d} audioc={d} src={d}x{d}", .{
+    std.log.info("ENC cover cap={d}x{d} lyr={d}x{d} tim={d}x{d} audioc={d} src={d}x{d}", .{
         caption_len, emb_dim,
         lyric_len, emb_dim,
         audio_dim, t_timbre,
@@ -872,7 +893,7 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     defer context_latents_buffer.deinit();
     defer encoded_conditions_buffer.deinit();
 
-    var text_emb_buffer: zml.Buffer = try .fromSlice(io, platform, text_emb.caption_embedding, sharding);
+    var text_emb_buffer: zml.Buffer = try .fromSlice(io, platform, text_emb.caption_embedding_cover, sharding);
     var lyric_emb_buffer: zml.Buffer = try .fromSlice(io, platform, text_emb.lyric_embedding, sharding);
     defer text_emb_buffer.deinit();
     defer lyric_emb_buffer.deinit();
@@ -923,16 +944,104 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     };
 }
 
-pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_handler, source: ?AudioLatents, context: ContextLatents, id: usize, match_level: u8) !AudioLatents {
+pub fn prepareNonCoverLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_handler, text_emb: TextEmbedding, target_duration: u32, style_latents: ?AudioLatents) !ContextLatents {
+    const io = zml_handler.io;
+    const allocator = zml_handler.allocator;
+    const sharding = aceenc.shardings.replicated;
+    const platform = zml_handler.platform;
+
+    const caption_len = text_emb.caption_embedding_non_cover.shape.dim(0);
+    const lyric_len = text_emb.lyric_embedding.shape.dim(0);
+    const emb_dim = aceenc.config.encoder_hidden_size;
+    const audio_dim = aceenc.config.timbre_hidden_dim;
+    const t_timbre = aceenc.config.timbre_fix_frame;
+    const t_25hz: i64 = 25 * target_duration;
+    const s_enc = caption_len + lyric_len + 1;
+
+    var timbre_silence_buffer: zml.Buffer = undefined;
+    var audio_silence_buffer: zml.Buffer = undefined;
+
+    aceenc.exes.silence_args.set(.{ aceenc.silence_buffers });
+    aceenc.exes.silence_exe.call(aceenc.exes.silence_args, &aceenc.exes.silence_results);
+    aceenc.exes.silence_results.fill(.{ &timbre_silence_buffer, &audio_silence_buffer });
+
+    var timbre_buffer: zml.Buffer = undefined;
+    defer timbre_buffer.deinit();
+
+    if (style_latents) |style| {
+        std.log.info("ENC init timbre reference of length {d} from silence latent", .{ t_timbre });
+        timbre_buffer = try .fromSlice(io, platform, style.x, sharding);
+        timbre_silence_buffer.deinit();
+    } else {
+        std.log.info("ENC using timbre reference of length {d}", .{ t_timbre });
+        timbre_buffer = timbre_silence_buffer;
+    }
+    
+    std.log.info("ENC non-cover cap={d}x{d} lyr={d}x{d} tim={d}x{d} src={d}x{d}", .{
+        caption_len, emb_dim,
+        lyric_len, emb_dim,
+        audio_dim, t_timbre,
+        audio_dim, t_25hz,
+    });
+
+    // the result latents we return
+    const context_latents_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = 2 * audio_dim }, .bf16));
+    const encoded_conditions_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s_enc = s_enc, .d = emb_dim }, .bf16));
+    var context_latents_buffer: zml.Buffer = undefined;
+    var encoded_conditions_buffer: zml.Buffer = undefined;
+    defer context_latents_buffer.deinit();
+    defer encoded_conditions_buffer.deinit();
+
+    var text_emb_buffer: zml.Buffer = try .fromSlice(io, platform, text_emb.caption_embedding_non_cover, sharding);
+    var lyric_emb_buffer: zml.Buffer = try .fromSlice(io, platform, text_emb.lyric_embedding, sharding);
+    defer text_emb_buffer.deinit();
+    defer lyric_emb_buffer.deinit();
+
+    var encoded_lyric_buffer: zml.Buffer = undefined;
+    defer encoded_lyric_buffer.deinit();
+    var encoded_timbre_buffer: zml.Buffer = undefined;
+    defer encoded_timbre_buffer.deinit();
+    var encoded_audiocodes_buffer: zml.Buffer = undefined;
+    defer encoded_audiocodes_buffer.deinit();
+    
+    zml_handler.tic(&zml_handler.timers.enc.prefill);
+
+    // encode lyrics
+    aceenc.exes.encode_lyric_args.set(.{ aceenc.model_buffers.lyric_encoder, lyric_emb_buffer });
+    aceenc.exes.encode_lyric_exe.call(aceenc.exes.encode_lyric_args, &aceenc.exes.encode_lyric_results);
+    aceenc.exes.encode_lyric_results.fill(.{ &encoded_lyric_buffer });
+    // encode timbre
+    aceenc.exes.encode_timbre_args.set(.{ aceenc.model_buffers.timbre_encoder, timbre_buffer });
+    aceenc.exes.encode_timbre_exe.call(aceenc.exes.encode_timbre_args, &aceenc.exes.encode_timbre_results);
+    aceenc.exes.encode_timbre_results.fill(.{ &encoded_timbre_buffer });
+    // encode
+    aceenc.exes.encode_args.set(.{ aceenc.model_buffers, text_emb_buffer, encoded_lyric_buffer, encoded_timbre_buffer, audio_silence_buffer });
+    aceenc.exes.encode_exe.call(aceenc.exes.encode_args, &aceenc.exes.encode_results);
+    aceenc.exes.encode_results.fill(.{ &context_latents_buffer, &encoded_conditions_buffer });
+    
+    std.log.info("ENC done encoding, output shape : context={d}x{d} conditions={d}x{d}", .{ 2 * audio_dim, t_25hz, s_enc, emb_dim });
+
+    try context_latents_buffer.toSlice(io, context_latents_slice);
+    try encoded_conditions_buffer.toSlice(io, encoded_conditions_slice);
+
+    zml_handler.toc(&zml_handler.timers.enc.prefill);
+
+    return .{
+        .context_latents = context_latents_slice,
+        .encoder_conditions = encoded_conditions_slice,
+    };
+}
+
+pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_handler, source: ?AudioLatents, context_cover: ContextLatents, context_non_cover: ContextLatents, id: usize, match_level: u8) !AudioLatents {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = acedit.shardings.replicated;
     const platform = zml_handler.platform;
 
     const audio_dim = acedit.config.timbre_hidden_dim;
-    const t_25hz = context.context_latents.shape.dim(0);
+    const t_25hz = context_cover.context_latents.shape.dim(0);
 
-    std.log.info("DiT call with input size : {d}x{d} {d}x{d}", .{ t_25hz, audio_dim, context.encoder_conditions.shape.dim(0), context.encoder_conditions.shape.dim(1) });
+    std.log.info("DiT call with input size : {d}x{d} {d}x{d}", .{ t_25hz, audio_dim, context_cover.encoder_conditions.shape.dim(0), context_cover.encoder_conditions.shape.dim(1) });
 
     const timestamps: [9]f32 = .{ 1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3, 0.0 };
     const noise = timestamps[match_level];
@@ -969,11 +1078,15 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
 
     // prepare arguments buffers
     var x_buffer: zml.Buffer = try .fromSlice(io, platform, x, sharding);
-    var context_latents_buffer: zml.Buffer = try .fromSlice(io, platform, context.context_latents, sharding);
-    var encoded_conditions_buffer: zml.Buffer = try .fromSlice(io, platform, context.encoder_conditions, sharding);
+    var context_latents_cover_buffer: zml.Buffer = try .fromSlice(io, platform, context_cover.context_latents, sharding);
+    var encoded_conditions_cover_buffer: zml.Buffer = try .fromSlice(io, platform, context_cover.encoder_conditions, sharding);
+    var context_latents_non_cover_buffer: zml.Buffer = try .fromSlice(io, platform, context_non_cover.context_latents, sharding);
+    var encoded_conditions_non_cover_buffer: zml.Buffer = try .fromSlice(io, platform, context_non_cover.encoder_conditions, sharding);
     defer x_buffer.deinit();
-    defer context_latents_buffer.deinit();
-    defer encoded_conditions_buffer.deinit();
+    defer context_latents_cover_buffer.deinit();
+    defer encoded_conditions_cover_buffer.deinit();
+    defer context_latents_non_cover_buffer.deinit();
+    defer encoded_conditions_non_cover_buffer.deinit();
     
     const full_mask_slice = try createBidirectionalFullMask(allocator, @divFloor(t_25hz + 1, 2));
     defer full_mask_slice.free(allocator);
@@ -1000,11 +1113,16 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
         defer temb_buffer.deinit();
         var timestep_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
         defer timestep_proj_buffer.deinit();
-        std.log.info("DiT ************* step {d}/{d}", .{ i+1, steps });
+        
         var t_curr: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i], .f32, sharding);
         var t_next: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i + 1], .f32, sharding);
         defer t_curr.deinit();
         defer t_next.deinit();
+        const is_cover = i < zml_handler.args.cover_strength;
+        const context_latents_buffer = if (is_cover) context_latents_cover_buffer else context_latents_non_cover_buffer;
+        const encoded_conditions_buffer = if (is_cover) encoded_conditions_cover_buffer else encoded_conditions_non_cover_buffer;
+        std.log.info("DiT ************* step {d}/{d}, is_cover: {any}", .{ i+1, steps, is_cover });
+        
         acedit.exes.preprocess_args.set(.{ acedit.model_buffers, t_curr, x_buffer, context_latents_buffer, encoded_conditions_buffer });
         acedit.exes.preprocess_exe.call(acedit.exes.preprocess_args, &acedit.exes.preprocess_results);
         y_proj_buffer.deinit();
