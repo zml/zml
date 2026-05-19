@@ -16,7 +16,6 @@
 ///       --prompt "A cat sitting on a windowsill watching rain" \
 ///       --negative-prompt "blurry, low quality" \
 ///       --seed 42 \
-///       --output-dir /root/e2e_demo/unified_out/ \
 ///       --height 1024 --width 1536 --num-frames 121 --fps 24 \
 ///       --bf16-attn-stage2
 const std = @import("std");
@@ -251,7 +250,7 @@ fn parseArgs(it: anytype) !CliArgs {
         .stage2_ckpt = undefined,
         .upsampler_ckpt = undefined,
         .meta = null,
-        .output_dir = undefined,
+        .output_dir = "/tmp/ltx_output",
         .seed = 42,
         .bf16_attn_stage1 = false,
         .bf16_attn_stage2 = false,
@@ -275,7 +274,7 @@ fn parseArgs(it: anytype) !CliArgs {
         .mod_a = 3.0,
         .rescale_a = 0.7,
     };
-    var have = [_]bool{false} ** 5;
+    var have = [_]bool{false} ** 4;
 
     _ = it.next(); // exe name
 
@@ -293,7 +292,6 @@ fn parseArgs(it: anytype) !CliArgs {
             args.meta = it.next() orelse return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "--output-dir")) {
             args.output_dir = it.next() orelse return error.InvalidArgs;
-            have[3] = true;
         } else if (std.mem.eql(u8, arg, "--seed")) {
             const seed_str = it.next() orelse return error.InvalidArgs;
             args.seed = std.fmt.parseInt(u64, seed_str, 10) catch return error.InvalidArgs;
@@ -316,7 +314,7 @@ fn parseArgs(it: anytype) !CliArgs {
             args.image = it.next() orelse return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "--gemma-ckpt")) {
             args.gemma_ckpt = it.next() orelse return error.InvalidArgs;
-            have[4] = true;
+            have[3] = true;
         } else if (std.mem.eql(u8, arg, "--prompt")) {
             args.prompt = it.next() orelse return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "--negative-prompt")) {
@@ -364,8 +362,9 @@ fn parseArgs(it: anytype) !CliArgs {
         if (!h) {
             std.log.err(
                 "Usage: inference --stage1-ckpt <path> --stage2-ckpt <path> " ++
-                    "--upsampler-ckpt <path> --output-dir <path> " ++
+                    "--upsampler-ckpt <path> " ++
                     "--gemma-ckpt <path> " ++
+                    "[--output-dir <path>] " ++
                     "[--prompt <text>] [--negative-prompt <text>] " ++
                     "[--height <int>] [--width <int>] [--num-frames <int>] [--fps <float>] " ++
                     "[--num-inference-steps <int>] [--meta <path>] [--seed <int>] [--image <path>] " ++
