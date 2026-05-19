@@ -364,6 +364,14 @@ pub const Model = struct {
 
     pub fn logitsForward(self: Model, hidden_: zml.Tensor) zml.Tensor {
         const hidden = self.model.norm.forward(hidden_.withPartialTags(.{ .s, .d }));
+        return self.logitsFromFinalHidden(hidden);
+    }
+
+    pub fn draftLogitsForward(self: Model, hidden_: zml.Tensor) zml.Tensor {
+        return self.logitsFromFinalHidden(hidden_.withPartialTags(.{ .s, .d }));
+    }
+
+    fn logitsFromFinalHidden(self: Model, hidden: zml.Tensor) zml.Tensor {
         const lm_head: zml.nn.Linear = .init(
             self.model.embed_tokens.embed_tokens.weight.withTags(.{ .voc, .d }).withPartitioning(.{ .voc = .replicated, .d = .model }),
             null,
