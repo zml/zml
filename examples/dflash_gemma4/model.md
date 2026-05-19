@@ -36,3 +36,17 @@ bazel run //examples/dflash_gemma4:dflash_gemma4 -- \
 ```
 
 The target model path should contain `config.json`, tokenizer files, a supported Gemma chat template, and safetensors weights. The DFlash path should contain its `config.json` and safetensors weights; tokenization is loaded from the target model repository.
+
+## Remote Smoke Test
+
+To test, SSH to the remote machine:
+
+```sh
+ssh -A 9960x-5090x2
+```
+
+Then run:
+
+```sh
+CUDA_VISIBLE_DEVICES=0,1 bazel run --@zml//platforms:cuda=true //examples/dflash_gemma4 -- --model=/var/models/z-lab/gemma-4-31B-it-DFlash --target-model=/var/models/google/gemma-4-31B-it --prompt="Give me a detailed account of the history of the Richelieu-Drouot part of Paris." --max-seq-len=4096 --temperature=0
+```
