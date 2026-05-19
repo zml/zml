@@ -30,6 +30,11 @@ constraint_value(
     visibility = ["//visibility:public"],
 )
 
+# Special constrained host platform that toolchain can use as exec_compatible_with
+# if they want to only be used when executing on the local machine.
+#
+# This is currently used by Zig toolchains so that they are only resolved for
+# the host platform and thus can be used for no-remote-exec actions.
 platform(
     name = "local_execution_platform",
     parents = ["@platforms//host"],
