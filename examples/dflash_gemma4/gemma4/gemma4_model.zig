@@ -407,11 +407,10 @@ pub const Model = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache,
         target_layer_ids: []const u32,
-        capture_pre_layer_scalar: bool,
         sampling: SamplingConfig,
         rng: zml.Tensor.Rng,
     ) struct { zml.Tensor, zml.Tensor, KvCache, zml.Tensor.Rng } {
-        const target_hidden, const out, const updated_kv_cache = self.model.forward(tokens_.withPartialTags(.{.s}), token_index, kv_cache, target_layer_ids, capture_pre_layer_scalar);
+        const target_hidden, const out, const updated_kv_cache = self.model.forward(tokens_.withPartialTags(.{.s}), token_index, kv_cache, target_layer_ids);
         const sampled_last, const updated_rng = self.sampleLastTargetToken(out, sampling, rng);
         return .{ target_hidden, sampled_last, updated_kv_cache, updated_rng };
     }
@@ -423,11 +422,10 @@ pub const Model = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache,
         target_layer_ids: []const u32,
-        capture_pre_layer_scalar: bool,
         sampling: SamplingConfig,
         rng: zml.Tensor.Rng,
     ) struct { zml.Tensor, zml.Tensor, zml.Tensor, KvCache, zml.Tensor.Rng } {
-        const target_hidden, const out, const updated_kv_cache = self.model.forward(tokens_.withPartialTags(.{.s}), token_index, kv_cache, target_layer_ids, capture_pre_layer_scalar);
+        const target_hidden, const out, const updated_kv_cache = self.model.forward(tokens_.withPartialTags(.{.s}), token_index, kv_cache, target_layer_ids);
         const target_logits = self.logitsForward(out);
         const valid_draft_tokens, const correction_token, const updated_rng = verifyDraftTokens(tokens_, draft_logits_, target_logits, sampling, rng);
         return .{ target_hidden, valid_draft_tokens, correction_token, updated_kv_cache, updated_rng };
@@ -530,19 +528,17 @@ pub const Gemma4Text = struct {
         allocator.free(self.layers);
     }
 
-    pub fn forward(self: Gemma4Text, tokens: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, target_layer_ids: []const u32, capture_pre_layer_scalar: bool) struct { zml.Tensor, zml.Tensor, KvCache } {
+    pub fn forward(self: Gemma4Text, tokens: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, target_layer_ids: []const u32) struct { zml.Tensor, zml.Tensor, KvCache } {
         var hidden = self.embed_tokens.forward(tokens);
         var updated_kv_cache = kv_cache;
         var selected: [32]zml.Tensor = undefined;
         var selected_len: usize = 0;
 
         for (self.layers, 0..) |layer, i| {
-            const layer_hidden, const pre_layer_scalar, const layer_kv_cache = layer.forward(hidden, token_index, updated_kv_cache);
-            hidden = layer_hidden;
-            updated_kv_cache = layer_kv_cache;
+            hidden, updated_kv_cache = layer.forward(hidden, token_index, updated_kv_cache);
             for (target_layer_ids) |target_layer_id| {
                 if (target_layer_id == i) {
-                    selected[selected_len] = if (capture_pre_layer_scalar) pre_layer_scalar else hidden;
+                    selected[selected_len] = hidden;
                     selected_len += 1;
                     break;
                 }
@@ -608,7 +604,7 @@ pub const Gemma4DecoderLayer = struct {
         Gemma4LayerScalar.unloadBuffers(&self.layer_scalar);
     }
 
-    pub fn forward(self: Gemma4DecoderLayer, hidden_states_: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache) struct { zml.Tensor, zml.Tensor, KvCache } {
+    pub fn forward(self: Gemma4DecoderLayer, hidden_states_: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache) struct { zml.Tensor, KvCache } {
         stdx.debug.assert(hidden_states_.rank() >= 2 and hidden_states_.shape().hasTags(.{ .s, .d }), "Gemma4DecoderLayer expected {{.s, .d}}, received: {f}", .{hidden_states_});
         var hidden_states = hidden_states_.withPartialTags(.{ .s, .d }).withPartitioning(.{ .d = .replicated });
         var residual = hidden_states;
@@ -624,9 +620,8 @@ pub const Gemma4DecoderLayer = struct {
         hidden_states = self.post_feedforward_layernorm.forward(hidden_states.rename(.{ .dout = .d }));
         hidden_states = hidden_states.add(residual).withPartialTags(.{ .s, .d }).withPartitioning(.{ .d = .replicated });
 
-        const pre_layer_scalar = hidden_states;
         hidden_states = self.layer_scalar.forward(hidden_states);
-        return .{ hidden_states.reuseBuffer(hidden_states_), pre_layer_scalar, updated_kv_cache.reuseBuffer(kv_cache) };
+        return .{ hidden_states.reuseBuffer(hidden_states_), updated_kv_cache.reuseBuffer(kv_cache) };
     }
 };
 
