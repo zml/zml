@@ -946,7 +946,7 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     const dimT: usize = @intCast(x.shape.dim(0));
     const dimA: usize = @intCast(x.shape.dim(1));
     if (source) |s| {
-        std.log.info("{any}", .{s.x.shape});
+        std.log.info("{any}", .{ s.x.shape });
         for (0..dimT) |t| {
             for (0..dimA) |a| {
                 const rand: f32 = random.floatNorm(f32);
