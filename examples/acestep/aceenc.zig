@@ -60,7 +60,7 @@ pub const AceEnc_handler = struct {
             .lyric_emb = .init(.{ .s = lyric_len, .d = config.text_hidden_dim }, .bf16),
             .timbre_latent = .init(.{ .a = config.timbre_hidden_dim, .t = config.timbre_fix_frame }, .bf16),
             .audio_codes = .init(.{ .s = audiocodes }, .u32),
-            .src_audio = .init(.{ .t = target_duration * 25, .a = config.audio_acoustic_hidden_dim }, .bf16),
+            .src_audio = .init(.{ .a = config.audio_acoustic_hidden_dim, .t = target_duration * 25 }, .bf16),
             .encoded_lyric = .init(.{ .s = lyric_len, .d = config.encoder_hidden_size }, .bf16),
             .encoded_timbre = .init(.{ .s = 1, .d = config.encoder_hidden_size }, .bf16),
         };
@@ -285,8 +285,6 @@ pub const SilenceGenerator = struct {
     // we return 2 silence slices : one for the timbre reference, of length time_timbre
     // and one for the source audio reference, of length time_25hz
     pub fn forward(self: SilenceGenerator) struct {zml.Tensor, zml.Tensor } {
-        print(self.silence_latent, 's');
-        
         const full_audio_slice: zml.Tensor.Slice = .{ .start = 0, .end = self.silence_latent.dim(.audio) };
         const target_timbre_slice: zml.Tensor.Slice = .{ .start = 0, .end = self.time_timbre };
         const target_time_slice: zml.Tensor.Slice = .{ .start = 0, .end = self.time_25hz };
