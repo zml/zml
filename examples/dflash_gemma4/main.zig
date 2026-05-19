@@ -956,8 +956,8 @@ const Shardings = struct {
 
     pub fn init(platform: *zml.Platform) !Shardings {
         var model_strategy: zml.Sharding.Strategy = .init;
-        model_strategy.addBinding(.model, .link_x);
         model_strategy.addBinding(.model, .link_y);
+        model_strategy.addBinding(.model, .link_x);
 
         var kv_strategy: zml.Sharding.Strategy = .init;
         kv_strategy.addBinding(.model, .link_y);
