@@ -360,6 +360,7 @@ pub const DFlashAttention = struct {
         if (self.sliding_window) |window| {
             const q_idx = zml.Tensor.iota(attn_shape, .q).convert(cache_index.dtype());
             const q_abs = q_idx.add(active_context_end.broad(q_idx.shape()));
+            valid_mask = valid_mask.logical(.AND, k_idx.cmp(.LE, q_abs));
             valid_mask = valid_mask.logical(.AND, q_abs.cmp(.LT, k_idx.addConstant(window)));
         }
         const zeros = zml.Tensor.scalar(@as(f32, 0.0), .f32).broad(attn_shape.withDtype(.f32));
