@@ -23,6 +23,7 @@ const Args = struct {
     prompt: []const u8 = default_prompt,
     max_seq_len: u32 = 256,
     temperature: f32 = 0.0,
+    target_layer_offset: i32 = 0,
 
     pub const help =
         \\Options:
@@ -31,6 +32,8 @@ const Args = struct {
         \\  --prompt=<text>         User prompt to format with the Gemma 4 chat template
         \\  --max-seq-len=<n>       Decode until this many accepted positions; defaults to 256
         \\  --temperature=<t>       Sampling temperature; 0 uses greedy decoding
+        \\  --target-layer-offset=<n>
+        \\                         Apply a signed offset to DFlash target layer ids; defaults to 0
         \\
     ;
 };
@@ -295,6 +298,13 @@ fn initModelsAndCaches(project: *Project, prompt: TokenizedPrompt, args: Args) !
     try validateModelCompatibility(draft_model, target_model);
 
     const block_size = project.parsed_config.value.block_size;
+    const target_layers = try gemma4_inference.TargetLayers.initOffset(
+        draft_model.target_layer_ids,
+        args.target_layer_offset,
+        target_model.config.num_hidden_layers,
+    );
+    log.info("using DFlash target layers {any} with offset {}", .{ target_layers.slice(), args.target_layer_offset });
+
     const cache_seq_len = @max(prompt.max_seq_len, prefill_seq_len) + block_size;
     return .{
         .draft_model = draft_model,
@@ -307,7 +317,7 @@ fn initModelsAndCaches(project: *Project, prompt: TokenizedPrompt, args: Args) !
         .draft_kv_cache = draft_model.initKvCache(project.parsed_config.value, cache_seq_len),
         .rng = .init(),
         .sampling = .{ .temperature = args.temperature },
-        .target_layers = gemma4_inference.TargetLayers.init(draft_model.target_layer_ids),
+        .target_layers = target_layers,
         .block_size = block_size,
     };
 }

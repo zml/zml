@@ -440,9 +440,13 @@ fn verifyDraftTokens(draft_tokens_: zml.Tensor, draft_logits_: zml.Tensor, targe
     const target_logits = target_logits_.withPartialTags(.{ .s, .voc });
     const draft_len = draft_tokens.dim(.s);
     const verify_len = draft_len - 1;
+    stdx.debug.assert(draft_len >= 2, "DFlash verify requires anchor + at least one proposal", .{});
+    stdx.debug.assert(draft_logits.dim(.s) == draft_len, "draft logits/token length mismatch", .{});
+    stdx.debug.assert(target_logits.dim(.s) == draft_len, "target logits/token length mismatch", .{});
+    stdx.debug.assert(draft_logits.dim(.voc) == target_logits.dim(.voc), "draft/target vocab mismatch", .{});
 
     if (sampling.temperature < 0.00001) {
-        const sampled_tokens, const updated_rng = Model.sampleLogits(target_logits, sampling, rng);
+        const sampled_tokens = target_logits.argMax(.voc).indices.squeeze(.voc).convert(.u32);
         const proposals = draft_tokens.slice1d(.s, .{ .start = 1, .end = draft_len });
         const posterior = sampled_tokens.slice1d(.s, .{ .start = 0, .end = verify_len });
         const matches = proposals.cmp(.EQ, posterior);
@@ -450,7 +454,7 @@ fn verifyDraftTokens(draft_tokens_: zml.Tensor, draft_logits_: zml.Tensor, targe
         const sentinel = zml.Tensor.scalar(@as(u32, @intCast(verify_len)), .u32).broad(candidate_idx.shape());
         const valid_draft_tokens = matches.select(sentinel, candidate_idx).min(.s).squeeze(.s);
         const correction_token = sampled_tokens.gather(.{ .s = valid_draft_tokens }, .{}).convert(.u32);
-        return .{ valid_draft_tokens, correction_token, updated_rng };
+        return .{ valid_draft_tokens, correction_token, rng };
     }
 
     const proposals = draft_tokens.slice1d(.s, .{ .start = 1, .end = draft_len });
