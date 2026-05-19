@@ -3021,6 +3021,9 @@ fn runStage2(
 
     // ---- Denoising loop: N-step Euler ----
     const num_steps = stage2_sigmas.len - 1;
+    // On CUDA we chain block calls asynchronously (wait=false) for better pipelining.
+    // ROCm needs synchronous execution (wait=true) to avoid memory issues.
+    const block_wait = platform.target != .cuda;
     std.log.info("Starting {d}-step denoising loop...", .{num_steps});
 
     // Profile step 1 (step_idx == 0) to capture a single denoising step trace.
@@ -3125,7 +3128,7 @@ fn runStage2(
                         block_params_bufs[i],
                     });
                 }
-                block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
+                block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = block_wait });
 
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
