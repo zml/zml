@@ -952,7 +952,7 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
                 const rand: f32 = random.floatNorm(f32);
                 // apply noise to s.x to initialize x : we only add noise in quantity that matches a noise level of the schedule,
                 // and we then start the diffusion from that level.
-                const target = s.x.items(f32)[t + a * dimT]; // s.x is [a, t]
+                const target: f32 = s.x.items(zml.floats.BFloat16)[t + a * dimT].toF32(); // s.x is [a, t]
                 const noised = noise * rand + (1 - noise) * target;
                 x.items(zml.floats.BFloat16)[t * dimA + a] = zml.floats.BFloat16.fromF32(noised);
             }
