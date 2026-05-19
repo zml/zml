@@ -100,27 +100,35 @@ fn run(
         const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp", .{layer_idx});
         defer allocator.free(name);
 
-        try testMlpLayer(allocator, io, platform, activation_store.view(), model_store, name, .{ .absolute_tolerance = 1e-2 });
+        try testLayer(allocator, io, platform, activation_store.view(), model_store, .mlp, name, .{ .absolute_tolerance = 1e-2 });
     }
 }
 
-fn testMlpLayer(
+const LayerKind = enum { mlp };
+
+// Chose to test this way for one unified test function
+fn testLayer(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
     activation_store: zml.io.TensorStore.View,
     model_store: *zml.io.TensorStore,
+    kind: LayerKind,
     name: []const u8,
     opts: zml.testing.CompareOpts,
 ) !void {
-    const mlp = Mlp.init(model_store.view().withPrefix(name), null);
+    switch (kind) {
+        .mlp => {
+            const mlp = Mlp.init(model_store.view().withPrefix(name), null);
 
-    var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, model_store, .auto);
-    defer zml.meta.visit(struct {
-        fn cb(_: void, b: *zml.Buffer) void {
-            b.deinit();
-        }
-    }.cb, {}, &mlp_weights);
+            var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, model_store, .auto);
+            defer zml.meta.visit(struct {
+                fn cb(_: void, b: *zml.Buffer) void {
+                    b.deinit();
+                }
+            }.cb, {}, &mlp_weights);
 
-    try zml.testing.testLayer(allocator, io, platform, mlp, .forward, activation_store, name, mlp_weights, &.{}, opts);
+            try zml.testing.testLayer(allocator, io, platform, mlp, .forward, activation_store, name, mlp_weights, &.{}, opts);
+        },
+    }
 }
