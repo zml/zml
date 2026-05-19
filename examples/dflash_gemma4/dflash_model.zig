@@ -89,7 +89,15 @@ pub const Config = struct {
     rope_theta: f32,
     rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
     block_size: u32,
+    sliding_window: ?u32 = null,
+    use_sliding_window: bool = false,
+    layer_types: []const LayerType = &.{},
     dflash_config: DFlashConfig,
+};
+
+pub const LayerType = enum {
+    full_attention,
+    sliding_attention,
 };
 
 pub const DFlashConfig = struct {
@@ -110,8 +118,10 @@ pub const Model = struct {
         const layers = try allocator.alloc(DecoderLayer, config.num_hidden_layers);
         errdefer allocator.free(layers);
 
+        if (config.layer_types.len != 0 and config.layer_types.len != config.num_hidden_layers) return error.InvalidDFlashLayerTypes;
         for (layers, 0..) |*layer, i| {
-            layer.* = try .init(store.withPrefix("layers").withLayer(i), config);
+            const layer_type = if (config.layer_types.len == 0) .full_attention else config.layer_types[i];
+            layer.* = try .init(store.withPrefix("layers").withLayer(i), config, layer_type);
         }
 
         const target_layer_ids = try allocator.alloc(u32, config.dflash_config.target_layer_ids.len);
@@ -209,10 +219,10 @@ pub const DecoderLayer = struct {
     post_attention_layernorm: RmsNorm,
     mlp: Mlp,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) !DecoderLayer {
+    pub fn init(store: zml.io.TensorStore.View, config: Config, layer_type: LayerType) !DecoderLayer {
         return .{
             .input_layernorm = .init(store.withPrefix("input_layernorm"), config.rms_norm_eps),
-            .self_attn = try .init(store.withPrefix("self_attn"), config),
+            .self_attn = try .init(store.withPrefix("self_attn"), config, layer_type),
             .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), config.rms_norm_eps),
             .mlp = .init(store.withPrefix("mlp")),
         };
@@ -263,10 +273,15 @@ pub const DFlashAttention = struct {
     num_heads: i64,
     num_kv_heads: i64,
     rope_opts: zml.nn.RopeOpts,
+    sliding_window: ?u32,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) !DFlashAttention {
+    pub fn init(store: zml.io.TensorStore.View, config: Config, layer_type: LayerType) !DFlashAttention {
         var rope_scaling = config.rope_scaling;
         rope_scaling.setRopeTheta(config.rope_theta);
+        const sliding_window = switch (layer_type) {
+            .full_attention => null,
+            .sliding_attention => config.sliding_window orelse return error.MissingDFlashSlidingWindow,
+        };
 
         return .{
             .q_proj = linear(store, "q_proj", config.attention_bias, .{ .dout = .model, .d = .replicated }),
@@ -281,6 +296,7 @@ pub const DFlashAttention = struct {
                 .layout = .sequential,
                 .scaling = rope_scaling,
             },
+            .sliding_window = sliding_window,
         };
     }
 
@@ -340,7 +356,12 @@ pub const DFlashAttention = struct {
         const k_idx = zml.Tensor.iota(attn_shape, .k).convert(cache_index.dtype());
         const active_context_end = cache_index.add(active_context_len.convert(cache_index.dtype()));
         const valid_k = active_context_end.add(zml.Tensor.scalar(hidden_states.dim(.s), cache_index.dtype()));
-        const valid_mask = k_idx.cmp(.LT, valid_k.broad(k_idx.shape()));
+        var valid_mask = k_idx.cmp(.LT, valid_k.broad(k_idx.shape()));
+        if (self.sliding_window) |window| {
+            const q_idx = zml.Tensor.iota(attn_shape, .q).convert(cache_index.dtype());
+            const q_abs = q_idx.add(active_context_end.broad(q_idx.shape()));
+            valid_mask = valid_mask.logical(.AND, q_abs.cmp(.LT, k_idx.addConstant(window)));
+        }
         const zeros = zml.Tensor.scalar(@as(f32, 0.0), .f32).broad(attn_shape.withDtype(.f32));
         const minus_inf = zml.Tensor.scalar(-std.math.inf(f32), .f32).broad(attn_shape.withDtype(.f32));
         const attn_mask = valid_mask.select(zeros, minus_inf).convert(q.dtype());
