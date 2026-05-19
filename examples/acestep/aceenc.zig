@@ -285,6 +285,8 @@ pub const SilenceGenerator = struct {
     // we return 2 silence slices : one for the timbre reference, of length time_timbre
     // and one for the source audio reference, of length time_25hz
     pub fn forward(self: SilenceGenerator) struct {zml.Tensor, zml.Tensor } {
+        print(self.silence_latent, 's');
+        
         const full_audio_slice: zml.Tensor.Slice = .{ .start = 0, .end = self.silence_latent.dim(.audio) };
         const target_timbre_slice: zml.Tensor.Slice = .{ .start = 0, .end = self.time_timbre };
         const target_time_slice: zml.Tensor.Slice = .{ .start = 0, .end = self.time_25hz };
