@@ -145,8 +145,11 @@ common:remote   --grpc_keepalive_time=30s
 common:remote   --jobs=2000
 common:remote   --extra_execution_platforms=@zml//:rbe_platform
 common:remote   --experimental_repo_remote_exec=true
-common:remote   --//bazel/zig_toolchain_config:local_execution=true
-common:remote   --modify_execution_info=Zig.*=+no-remote-exec
+
+# Run Zig compile actions locally while allowing the rest of the build to use remote execution.
+common:zig_local --//bazel/zig_toolchain_config:local_execution=true
+common:zig_local --modify_execution_info=Zig.*=+no-remote-exec
+
 
 # Runtime profiling helpers for `bazel run`.
 run:nsys       --@zml//platforms:cuda=true
