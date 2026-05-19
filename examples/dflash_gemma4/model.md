@@ -76,6 +76,24 @@ The run then failed while loading weights with a CUDA PJRT out-of-memory error. 
 
 With Gemma 4 31B, the DFlash draft model, and `--max-seq-len=4096`, 2x32GB is not enough for this current implementation. Use a larger GPU pool, a shorter `--max-seq-len`, or a smaller target model for the next runtime iteration.
 
+The same command succeeded on `gh200-2` via `ssh -A tristan@100.71.245.118`. The hostname `gh200-2` did not resolve from the local machine, but the IP did. On that machine, Bazel initially failed because `/tmp/zig-cache` was not writable; this was fixed with:
+
+```sh
+sudo mkdir -p /tmp/zig-cache
+sudo chown -R tristan:tristan /tmp/zig-cache
+```
+
+After that, the CUDA build and full run completed on one visible `NVIDIA GH200 480GB` device. The run generated 1168 tokens before EOS in 36.299s, for 32.177 tokens/s. DFlash acceptance was very low:
+
+```text
+steps: 1159
+valid_draft_tokens total: 9
+draft_acceptance_rate: 0.001
+zero_accept_steps: 1150
+```
+
+This confirms the Gemma 4 target path works end-to-end, but the DFlash draft model is not yet useful for acceleration on this checkpoint/config.
+
 ## Notes From The First Remote Iteration
 
 - The working SSH command is `ssh -A tristan@9960x-5090x2`; the bare host alias did not resolve locally.
@@ -84,3 +102,4 @@ With Gemma 4 31B, the DFlash draft model, and `--max-seq-len=4096`, 2x32GB is no
 - The real Gemma 4 chat template uses `<|turn>...<turn|>` and generation starts with `<|turn>model\n<|channel>thought\n<channel|>`. Older Gemma-style `<start_of_turn>` templates are not correct for this checkpoint.
 - For future remote iterations, skip local Bazel builds after small fixes. Commit locally, push, pull on the remote, and use the remote CUDA build as the verification gate.
 - If testing on a new multi-GPU machine, first check free memory with `nvidia-smi` and confirm both model paths with `du -sh`.
+- If a remote build fails with `AccessDenied` under `/tmp/zig-cache`, fix ownership of that cache directory before retrying.
