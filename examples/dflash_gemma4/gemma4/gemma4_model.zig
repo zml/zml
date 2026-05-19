@@ -362,6 +362,10 @@ pub const Model = struct {
         return self.model.embed_tokens.forward(tokens.withPartialTags(.{.s})).withPartialTags(.{.d});
     }
 
+    pub fn rawEmbedForward(self: Model, tokens: zml.Tensor) zml.Tensor {
+        return self.model.embed_tokens.embed_tokens.forward(tokens.withPartialTags(.{.s})).withPartialTags(.{.d});
+    }
+
     pub fn logitsForward(self: Model, hidden_: zml.Tensor) zml.Tensor {
         const hidden = self.model.norm.forward(hidden_.withPartialTags(.{ .s, .d }));
         return self.logitsFromFinalHidden(hidden);
