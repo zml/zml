@@ -24,6 +24,7 @@ const Args = struct {
     max_seq_len: u32 = 256,
     temperature: f32 = 0.0,
     target_layer_offset: i32 = 0,
+    target_hidden_pre_layer_scalar: bool = false,
 
     pub const help =
         \\Options:
@@ -34,6 +35,8 @@ const Args = struct {
         \\  --temperature=<t>       Sampling temperature; 0 uses greedy decoding
         \\  --target-layer-offset=<n>
         \\                         Apply a signed offset to DFlash target layer ids; defaults to 0
+        \\  --target-hidden-pre-layer-scalar
+        \\                         Capture target hidden states before Gemma 4 layer_scalar
         \\
     ;
 };
@@ -302,8 +305,9 @@ fn initModelsAndCaches(project: *Project, prompt: TokenizedPrompt, args: Args) !
         draft_model.target_layer_ids,
         args.target_layer_offset,
         target_model.config.num_hidden_layers,
+        args.target_hidden_pre_layer_scalar,
     );
-    log.info("using DFlash target layers {any} with offset {}", .{ target_layers.slice(), args.target_layer_offset });
+    log.info("using DFlash target layers {any} with offset {}, pre_layer_scalar={}", .{ target_layers.slice(), args.target_layer_offset, args.target_hidden_pre_layer_scalar });
 
     const cache_seq_len = @max(prompt.max_seq_len, prefill_seq_len) + block_size;
     return .{

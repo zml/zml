@@ -8,6 +8,7 @@ const model = @import("gemma4_model.zig");
 pub const TargetLayers = struct {
     ids: [32]u32 = undefined,
     len: usize = 0,
+    capture_pre_layer_scalar: bool = false,
 
     pub fn init(ids: []const u32) TargetLayers {
         stdx.debug.assert(ids.len <= 32, "Gemma 4 DFlash supports at most 32 target layers, got {}", .{ids.len});
@@ -17,9 +18,9 @@ pub const TargetLayers = struct {
         return res;
     }
 
-    pub fn initOffset(ids: []const u32, offset: i32, num_hidden_layers: u32) !TargetLayers {
+    pub fn initOffset(ids: []const u32, offset: i32, num_hidden_layers: u32, capture_pre_layer_scalar: bool) !TargetLayers {
         stdx.debug.assert(ids.len <= 32, "Gemma 4 DFlash supports at most 32 target layers, got {}", .{ids.len});
-        var res: TargetLayers = .{};
+        var res: TargetLayers = .{ .capture_pre_layer_scalar = capture_pre_layer_scalar };
         res.len = ids.len;
         for (ids, 0..) |id, i| {
             const adjusted: i64 = @as(i64, @intCast(id)) + @as(i64, @intCast(offset));
@@ -137,6 +138,7 @@ fn targetPrefill(
         token_index,
         target_kv_cache,
         target_layers.slice(),
+        target_layers.capture_pre_layer_scalar,
         sampling,
         rng,
     );
@@ -160,6 +162,7 @@ fn targetVerify(
         token_index,
         target_kv_cache,
         target_layers.slice(),
+        target_layers.capture_pre_layer_scalar,
         sampling,
         rng,
     );
