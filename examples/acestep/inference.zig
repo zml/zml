@@ -791,7 +791,8 @@ pub fn embedLyric(zml_handler: *Zml_handler, aceemb: *aceemb_.AceEmb_handler, to
     zml_handler.toc(&zml_handler.timers.emb.prefill);
 
     const lyric_embedding: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = lyric_tokens.len, .d = aceemb.config.hidden_size }, .bf16));
-    @memcpy(lyric_embedding.items(zml.floats.BFloat16)[0..(lyric_tokens.len * aceemb.config.hidden_size)], lyric_embedding_slice.items(zml.floats.BFloat16));
+    const n: usize = lyric_tokens.len * aceemb.config.hidden_size;
+    @memcpy(lyric_embedding.items(zml.floats.BFloat16)[0..n], lyric_embedding_slice.items(zml.floats.BFloat16)[0..n]);
 
     return lyric_embedding;
 }
@@ -834,7 +835,8 @@ pub fn embedText(zml_handler: *Zml_handler, aceemb: *aceemb_.AceEmb_handler, tok
     zml_handler.toc(&zml_handler.timers.emb.decode);
 
     const text_embedding: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = text_tokens.len, .d = aceemb.config.hidden_size }, .bf16));
-    @memcpy(text_embedding.items(zml.floats.BFloat16)[0..(text_tokens.len * aceemb.config.hidden_size)], text_embedding_slice.items(zml.floats.BFloat16));
+    const n: usize = text_tokens.len * aceemb.config.hidden_size;
+    @memcpy(text_embedding.items(zml.floats.BFloat16)[0..n], text_embedding_slice.items(zml.floats.BFloat16)[0..n]);
 
     return text_embedding;
 }
