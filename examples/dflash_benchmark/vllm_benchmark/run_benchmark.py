@@ -170,7 +170,22 @@ def sampling_params(args: argparse.Namespace):
     )
 
 
-def unload_llm(llm: Any) -> None:
+def unload_llm(llm: Any | None) -> None:
+    if llm is None:
+        return
+    engine = getattr(llm, "llm_engine", None)
+    engine_core = getattr(engine, "engine_core", None)
+    for owner in (engine_core, engine, llm):
+        for method_name in ("shutdown", "close"):
+            method = getattr(owner, method_name, None)
+            if callable(method):
+                try:
+                    method()
+                except Exception:
+                    pass
+                break
+    del engine_core
+    del engine
     del llm
     gc.collect()
     try:
@@ -204,10 +219,12 @@ def main() -> None:
     prompt_tokens = [prompt_token_count(baseline_llm, sample.prompt) for sample in samples]
     baseline_outputs = [run_one(baseline_llm, params, sample.prompt) for sample in samples]
     unload_llm(baseline_llm)
+    baseline_llm = None
 
     dflash_llm = make_llm(args, speculative=True)
     dflash_outputs = [run_one(dflash_llm, params, sample.prompt) for sample in samples]
     unload_llm(dflash_llm)
+    dflash_llm = None
 
     results: list[SampleResult] = []
     for index, sample in enumerate(samples):
