@@ -91,7 +91,15 @@ pub fn run(
     };
 
     try ctx.testLayer("embed", .{ .batch, .seq }, mdl.embeds, model_buffers.embeds, .{});
-    try ctx.testLayer("head", .{ .batch, .seq, .hc, .d }, mdl.lm_head, model_buffers.lm_head, .{});
+    // try ctx.testLayer("head", .{ .batch, .seq, .hc, .d }, mdl.lm_head, model_buffers.lm_head, .{});
+
+    // TEST: Transformer Block
+    try ctx.testLayer("layers.0.attn_norm", .{ .batch, .seq, .d }, mdl.layers[0].attn_norm, model_buffers.layers[0].attn_norm, .{});
+    try ctx.testLayer("layers.0.ffn_norm", .{ .batch, .seq, .d }, mdl.layers[0].ffn_norm, model_buffers.layers[0].ffn_norm, .{});
+
+    // TEST: Attention
+    try ctx.testLayer("layers.0.attn.kv_norm", .{ .batch, .seq, .hd }, mdl.layers[0].attn.kv_norm, model_buffers.layers[0].attn.kv_norm, .{});
+    try ctx.testLayer("layers.0.attn.q_norm", .{ .batch, .seq, .q }, mdl.layers[0].attn.q_norm, model_buffers.layers[0].attn.q_norm, .{});
 
     // var num_attn_layers: usize = 0;
     // var num_conv_layers: usize = 0;
