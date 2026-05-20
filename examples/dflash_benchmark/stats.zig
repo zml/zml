@@ -165,6 +165,8 @@ pub fn computeSummary(allocator: std.mem.Allocator, samples: []const SampleResul
         aggregateHistogram(histogram, sample.dflash);
         aggregatePositions(position_accepts, position_trials, sample.dflash);
     }
+    var histogram_total: u64 = 0;
+    for (histogram) |count| histogram_total += count;
 
     const position_rates = try allocator.alloc(f64, max_position_count);
     errdefer allocator.free(position_rates);
@@ -178,10 +180,10 @@ pub fn computeSummary(allocator: std.mem.Allocator, samples: []const SampleResul
     const histogram_rates = try allocator.alloc(f64, histogram.len);
     errdefer allocator.free(histogram_rates);
     for (histogram_rates, histogram) |*rate, count| {
-        rate.* = if (acceptance_step_count == 0)
+        rate.* = if (histogram_total == 0)
             0
         else
-            @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(acceptance_step_count));
+            @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(histogram_total));
     }
 
     const baseline_elapsed: Duration = .{ .nanoseconds = baseline_ns };
