@@ -16,6 +16,7 @@ locally and on remote benchmark hosts:
 bazel run //tools/hf -- download datasets/HuggingFaceH4/MATH-500 --local-dir ~/data/MATH-500
 bazel run //tools/hf -- download datasets/princeton-nlp/SWE-bench_Lite --local-dir ~/data/SWE-bench_Lite
 bazel run //tools/hf -- download datasets/tatsu-lab/alpaca --local-dir ~/data/alpaca
+bazel run //tools/hf -- download lmsys/mt_bench --local-dir ~/data/mt-bench
 ```
 
 The benchmark reads dataset files from `--dataset-path`; it does not download
@@ -39,6 +40,12 @@ parquet shard to normalized JSONL before passing it to this benchmark:
 ```text
 ~/data/alpaca/data/train-00000-of-00001-a09b74b3ef9c3b56.parquet
 ~/data/alpaca/train.jsonl
+```
+
+MT-Bench is distributed as JSONL and can be run from:
+
+```text
+~/data/mt-bench/raw/question.jsonl
 ```
 
 ## CUDA Smoke Command
