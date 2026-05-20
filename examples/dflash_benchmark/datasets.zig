@@ -5,6 +5,7 @@ pub const Dataset = enum {
     sharegpt,
     alpaca,
     swe_bench_lite,
+    mt_bench,
     generic_jsonl,
     generic_json,
 };
@@ -82,7 +83,7 @@ pub fn loadSamplesFromSlice(allocator: std.mem.Allocator, opts: LoadOptions, dat
 
     switch (opts.dataset) {
         .sharegpt, .generic_json => try loadJsonArrayLike(allocator, data, opts, split, &valid, &stats),
-        .math500, .alpaca, .swe_bench_lite, .generic_jsonl => try loadJsonl(allocator, data, opts, split, &valid, &stats),
+        .math500, .alpaca, .swe_bench_lite, .mt_bench, .generic_jsonl => try loadJsonl(allocator, data, opts, split, &valid, &stats),
     }
 
     if (valid.items.len < opts.samples) {
@@ -223,6 +224,7 @@ fn sampleFromValue(
         .math500 => try formatMathPrompt(allocator, value),
         .alpaca => try formatAlpacaPrompt(allocator, value),
         .swe_bench_lite => try formatSweBenchPrompt(allocator, value),
+        .mt_bench => try formatMtBenchPrompt(allocator, value),
         .sharegpt => try formatShareGptPrompt(allocator, value),
         .generic_jsonl, .generic_json => try formatGenericPrompt(allocator, value),
     };
@@ -289,6 +291,28 @@ fn formatSweBenchPrompt(allocator: std.mem.Allocator, value: std.json.Value) Row
     );
 }
 
+fn formatMtBenchPrompt(allocator: std.mem.Allocator, value: std.json.Value) RowError![]const u8 {
+    const prompts = getArrayField(value, "prompt") orelse return error.MalformedRow;
+    if (prompts.len == 0) return error.EmptyPrompt;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (prompts, 0..) |prompt_value, i| {
+        const prompt = switch (prompt_value) {
+            .string => |string| std.mem.trim(u8, string, " \t\r\n"),
+            .number_string => |string| std.mem.trim(u8, string, " \t\r\n"),
+            else => return error.MalformedRow,
+        };
+        if (prompt.len == 0) continue;
+        if (out.items.len != 0) try out.appendSlice(allocator, "\n\n");
+        const turn = try std.fmt.allocPrint(allocator, "Turn {d}:\n{s}", .{ i + 1, prompt });
+        defer allocator.free(turn);
+        try out.appendSlice(allocator, turn);
+    }
+    if (out.items.len == 0) return error.EmptyPrompt;
+    return try out.toOwnedSlice(allocator);
+}
+
 fn formatShareGptPrompt(allocator: std.mem.Allocator, value: std.json.Value) RowError![]const u8 {
     const conversations = getArrayField(value, "conversations") orelse
         getArrayField(value, "messages") orelse
@@ -330,6 +354,7 @@ fn sampleId(allocator: std.mem.Allocator, value: std.json.Value, row_index: usiz
         const trimmed = std.mem.trim(u8, id, " \t\r\n");
         if (trimmed.len != 0) return try allocator.dupe(u8, trimmed);
     }
+    if (getIntegerField(value, "question_id")) |id| return try std.fmt.allocPrint(allocator, "{d}", .{id});
 
     return try std.fmt.allocPrint(allocator, "{d}", .{row_index});
 }
@@ -352,6 +377,15 @@ fn getStringField(value: std.json.Value, field: []const u8) ?[]const u8 {
     };
 }
 
+fn getIntegerField(value: std.json.Value, field: []const u8) ?i64 {
+    if (value != .object) return null;
+    const field_value = value.object.get(field) orelse return null;
+    return switch (field_value) {
+        .integer => |integer| integer,
+        else => null,
+    };
+}
+
 fn getArrayField(value: std.json.Value, field: []const u8) ?[]std.json.Value {
     if (value != .object) return null;
     const field_value = value.object.get(field) orelse return null;
@@ -364,7 +398,7 @@ fn getArrayField(value: std.json.Value, field: []const u8) ?[]std.json.Value {
 fn effectiveSplit(opts: LoadOptions) []const u8 {
     if (opts.split) |split| return split;
     return switch (opts.dataset) {
-        .math500, .swe_bench_lite => "test",
+        .math500, .swe_bench_lite, .mt_bench => "test",
         .alpaca => "train",
         .sharegpt, .generic_jsonl, .generic_json => "default",
     };
@@ -465,6 +499,24 @@ test "alpaca and swe bench normalized jsonl formats" {
     defer swe_loaded.deinit(std.testing.allocator);
     try std.testing.expect(std.mem.startsWith(u8, swe_loaded.samples[0].prompt, "Problem Statement:\nTests fail"));
     try std.testing.expectEqualStrings("swe-1", swe_loaded.samples[0].id);
+}
+
+test "mt bench jsonl formats prompt turns" {
+    const data =
+        \\{"question_id":81,"category":"writing","prompt":["Compose a post.","Rewrite it as a poem."],"reference":[]}
+        \\
+    ;
+    var loaded = try loadSamplesFromSlice(std.testing.allocator, .{
+        .dataset = .mt_bench,
+        .path = "question.jsonl",
+        .samples = 1,
+        .seed = 0,
+    }, data);
+    defer loaded.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("81", loaded.samples[0].id);
+    try std.testing.expectEqualStrings("test", loaded.samples[0].source_split);
+    try std.testing.expect(std.mem.indexOf(u8, loaded.samples[0].prompt, "Turn 1:\nCompose a post.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, loaded.samples[0].prompt, "Turn 2:\nRewrite it as a poem.") != null);
 }
 
 test "generic jsonl filters malformed empty and overlong rows" {
