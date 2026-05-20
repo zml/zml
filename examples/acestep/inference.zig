@@ -876,7 +876,7 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
 
     if (audio_codes) |codes| {
         std.log.info("ENC init source latents from audiocodes", .{});
-        const audio_codes_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = aceenc.options.seq_len_time * 25 }, .u32));
+        const audio_codes_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = aceenc.options.seq_len_time * 5 }, .u32));
         defer audio_codes_slice.free(allocator);
         @memcpy(audio_codes_slice.items(u32)[0..codes.len], codes);
         var audio_codes_buffer: zml.Buffer = try .fromSlice(io, platform, audio_codes_slice, sharding);
