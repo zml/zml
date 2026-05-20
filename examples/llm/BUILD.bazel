@@ -29,6 +29,14 @@ zig_binary(
     deps = ["//zml"],
 )
 
+zig_binary(
+    name = "deepseek_v4_tests",
+    srcs = glob(["**/*.zig"]),
+    main = "models/deepseek_v4_tests.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
 build_test(
     name = "test",
     targets = [":llm"],
