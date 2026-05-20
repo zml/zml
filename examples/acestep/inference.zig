@@ -938,7 +938,7 @@ pub fn prepareDiffusionConditions(zml_handler: *Zml_handler, aceenc: *aceenc_.Ac
     defer caption_slice.free(allocator);
     const lyric_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = aceenc.options.seq_len_text, .d = emb_dim }, .bf16));
     defer lyric_slice.free(allocator);
-    const timbre_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = t_timbre_25hz, .d = emb_dim }, .bf16));
+    const timbre_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1, .d = emb_dim }, .bf16));
     defer timbre_slice.free(allocator);
 
     const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = s_enc, .d = emb_dim }, .bf16));
