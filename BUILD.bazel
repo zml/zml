@@ -1,4 +1,4 @@
-load("//third_party/zls:zls_completion.bzl", "zls_completion")
+load("@rules_zig//zig/zls:zls_completion.bzl", "zls_completion")
 load("@rules_zig//zig/translate-c:toolchain.bzl", "translate_c_toolchain")
 
 alias(
