@@ -298,6 +298,14 @@ pub const Buffer = struct {
         const slice = try Slice.alloc(allocator, self.shape());
         errdefer slice.free(allocator);
 
+        if (self.shape().isFullyReplicated()) {
+            const maybe_event = try self._shards.get(0).toHostBuffer(self._platform.pjrt_api, slice.data());
+            if (maybe_event) |event| {
+                try event.await(self._platform.pjrt_api, io);
+            }
+            return slice;
+        }
+
         for (self.placement().shards.constSlice(), 0..) |shard, shard_index| {
             const sub_slice = shard.shardSlice(slice);
 
