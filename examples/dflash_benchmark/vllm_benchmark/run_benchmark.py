@@ -50,6 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--tensor-parallel-size", type=int, default=1)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=2048,
+        help="vLLM max_model_len for both engines. Keep this low to reduce KV-cache memory.",
+    )
     parser.add_argument("--num-speculative-tokens", type=int, default=10)
     parser.add_argument("--output-json", default="")
     parser.add_argument("--verbose", action="store_true")
@@ -144,6 +150,7 @@ def make_llm(args: argparse.Namespace, speculative: bool):
         "model": args.target_model,
         "tensor_parallel_size": args.tensor_parallel_size,
         "gpu_memory_utilization": args.gpu_memory_utilization,
+        "max_model_len": args.max_model_len,
     }
     if speculative:
         kwargs["speculative_config"] = {
