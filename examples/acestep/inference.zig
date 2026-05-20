@@ -872,7 +872,6 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
     defer latents_slice.free(allocator);
 
     const return_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = 2 * audio_dim }, .bf16));
-    defer return_slice.free(allocator);
 
     if (audio_codes) |codes| {
         std.log.info("ENC init source latents from audiocodes", .{});
@@ -942,7 +941,6 @@ pub fn prepareDiffusionConditions(zml_handler: *Zml_handler, aceenc: *aceenc_.Ac
     defer timbre_slice.free(allocator);
 
     const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = s_enc, .d = emb_dim }, .bf16));
-    defer result_slice.free(allocator);
 
     // encode text
     std.log.info("ENC encoding text", .{});
