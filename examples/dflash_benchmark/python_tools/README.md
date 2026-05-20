@@ -15,8 +15,8 @@ binary. It currently supports:
 From the repository root:
 
 ```bash
-uv venv examples/dflash_benchmark/venv/.venv
-uv pip install --python examples/dflash_benchmark/venv/.venv/bin/python -r examples/dflash_benchmark/venv/requirements.txt
+uv venv examples/dflash_benchmark/python_tools/.venv
+uv pip install --python examples/dflash_benchmark/python_tools/.venv/bin/python -r examples/dflash_benchmark/python_tools/requirements.txt
 ```
 
 ## Convert Downloads
@@ -25,14 +25,14 @@ The commands below assume the datasets were downloaded to `~/data` with
 `bazel run //tools/hf -- download ... --local-dir ...`.
 
 ```bash
-examples/dflash_benchmark/venv/.venv/bin/python examples/dflash_benchmark/venv/convert_datasets.py swe_bench_lite
-examples/dflash_benchmark/venv/.venv/bin/python examples/dflash_benchmark/venv/convert_datasets.py alpaca
+examples/dflash_benchmark/python_tools/.venv/bin/python examples/dflash_benchmark/python_tools/convert_datasets.py swe_bench_lite
+examples/dflash_benchmark/python_tools/.venv/bin/python examples/dflash_benchmark/python_tools/convert_datasets.py alpaca
 ```
 
 Or convert both:
 
 ```bash
-examples/dflash_benchmark/venv/.venv/bin/python examples/dflash_benchmark/venv/convert_datasets.py all
+examples/dflash_benchmark/python_tools/.venv/bin/python examples/dflash_benchmark/python_tools/convert_datasets.py all
 ```
 
 Expected outputs:
