@@ -209,6 +209,10 @@ fn forwardVaeResBlock(x: Tensor, rb: VaeResBlock) Tensor {
 /// DepthToSpace 3D (pixel-shuffle): CausalConv3d → rearrange → optionally remove first frame.
 /// stride = (p1, p2, p3): spatial/temporal upsample factors.
 /// Rearrange: [B, C*p1*p2*p3, F, H, W] → [B, C, F*p1, H*p2, W*p3]
+///
+/// Implemented as 3 sequential rank-6 reshape+transpose+reshape steps to avoid
+/// rank-8 transposes that cause TPU XLA layout issues.
+/// Channel split order is (c outer, p1, p2, p3 inner) — matches row-major reshape.
 fn forwardDepthToSpace(x: Tensor, w: VaeDepthToSpaceBlock, comptime stride: [3]i64) Tensor {
     var h = forwardCausalConv3dNonCausal(x, w.conv);
 
@@ -222,11 +226,28 @@ fn forwardDepthToSpace(x: Tensor, w: VaeDepthToSpaceBlock, comptime stride: [3]i
     const p3 = stride[2];
     const C = @divExact(C_total, p1 * p2 * p3);
 
-    // [B, C*p1*p2*p3, F, H, W] → [B, C, p1, p2, p3, F, H, W]
-    h = h.reshape(.{ B, C, p1, p2, p3, F, H, W });
-    // → [B, C, F, p1, H, p2, W, p3]
-    h = h.transpose(.{ 0, 1, 5, 2, 6, 3, 7, 4 });
-    // → [B, C, F*p1, H*p2, W*p3]
+    // Step 1: extract p3 (innermost channel factor) → merge into W.
+    // [B, C*p1*p2*p3, F, H, W] → [B, C*p1*p2, p3, F, H, W]
+    //                          → [B, C*p1*p2, F, H, W, p3]
+    //                          → [B, C*p1*p2, F, H, W*p3]
+    h = h.reshape(.{ B, C * p1 * p2, p3, F, H, W });
+    h = h.transpose(.{ 0, 1, 3, 4, 5, 2 });
+    h = h.reshape(.{ B, C * p1 * p2, F, H, W * p3 });
+
+    // Step 2: extract p2 → merge into H.
+    // [B, C*p1*p2, F, H, W*p3] → [B, C*p1, p2, F, H, W*p3]
+    //                          → [B, C*p1, F, H, p2, W*p3]
+    //                          → [B, C*p1, F, H*p2, W*p3]
+    h = h.reshape(.{ B, C * p1, p2, F, H, W * p3 });
+    h = h.transpose(.{ 0, 1, 3, 4, 2, 5 });
+    h = h.reshape(.{ B, C * p1, F, H * p2, W * p3 });
+
+    // Step 3: extract p1 → merge into F.
+    // [B, C*p1, F, H*p2, W*p3] → [B, C, p1, F, H*p2, W*p3]
+    //                          → [B, C, F, p1, H*p2, W*p3]
+    //                          → [B, C, F*p1, H*p2, W*p3]
+    h = h.reshape(.{ B, C, p1, F, H * p2, W * p3 });
+    h = h.transpose(.{ 0, 1, 3, 2, 4, 5 });
     h = h.reshape(.{ B, C, F * p1, H * p2, W * p3 });
 
     // Remove first frame if temporal upsample (p1 == 2)
@@ -238,20 +259,33 @@ fn forwardDepthToSpace(x: Tensor, w: VaeDepthToSpaceBlock, comptime stride: [3]i
 
 /// Unpatchify for VAE output: [B, 48, F, H, W] → [B, 3, F, 4H, 4W].
 /// "b (c p r q) f h w -> b c (f p) (h q) (w r)" with c=3, p=1, q=4, r=4
-/// Channel decomposition: 48 = c(3) * p(1) * r(4) * q(4), where q→H and r→W.
+/// Channel decomposition order (outer→inner): c, p, r, q. q→H, r→W, p→F.
+///
+/// Implemented as sequential rank-6 ops to avoid rank-8 transposes on TPU.
 fn forwardUnpatchifyVae(x: Tensor) Tensor {
     const B = x.dim(0);
     const F = x.dim(2);
     const H = x.dim(3);
     const W = x.dim(4);
-    // 48 = 3 * 1 * 4 * 4 → (c=3, p=1, r=4, q=4) in channel decomposition order
-    // reshape [B, 48, F, H, W] → [B, 3, 1, 4, 4, F, H, W]
-    //   dims:                      [B, c, p, r, q, F, H, W]
-    var h = x.reshape(.{ B, 3, 1, 4, 4, F, H, W });
-    // transpose → [B, c, F, p, H, q, W, r]  (q pairs with H, r pairs with W)
-    h = h.transpose(.{ 0, 1, 5, 2, 6, 4, 7, 3 });
-    // reshape → [B, 3, F*p, H*q, W*r] = [B, 3, F, 4H, 4W]
-    return h.reshape(.{ B, 3, F * 1, H * 4, W * 4 });
+
+    // Step 1: extract q=4 (innermost) → merge into H.
+    // [B, 48, F, H, W] → [B, 12, q=4, F, H, W]
+    //                  → [B, 12, F, H, q=4, W]
+    //                  → [B, 12, F, H*4, W]
+    var h = x.reshape(.{ B, 12, 4, F, H, W });
+    h = h.transpose(.{ 0, 1, 3, 4, 2, 5 });
+    h = h.reshape(.{ B, 12, F, H * 4, W });
+
+    // Step 2: extract r=4 → merge into W.
+    // [B, 12, F, H*4, W] → [B, 3, r=4, F, H*4, W]
+    //                    → [B, 3, F, H*4, W, r=4]
+    //                    → [B, 3, F, H*4, W*4]
+    h = h.reshape(.{ B, 3, 4, F, H * 4, W });
+    h = h.transpose(.{ 0, 1, 3, 4, 5, 2 });
+    h = h.reshape(.{ B, 3, F, H * 4, W * 4 });
+
+    // p=1 is a no-op, skip. Final shape: [B, 3, F, 4H, 4W].
+    return h;
 }
 
 /// Full video VAE decoder forward pass.

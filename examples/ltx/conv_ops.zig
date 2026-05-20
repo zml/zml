@@ -2,6 +2,7 @@ const std = @import("std");
 
 const zml = @import("zml");
 const Tensor = zml.Tensor;
+const ops = zml.ops;
 
 // ============================================================================
 // Shared convolution types and operations
@@ -81,28 +82,22 @@ pub fn forwardGroupNorm(input: Tensor, w: GroupNormWeight, comptime num_groups: 
     const H = input.dim(3);
     const W = input.dim(4);
     const channels_per_group = @divExact(C, num_groups);
+    const group_size = channels_per_group * D * H * W;
 
     // Reshape: [B, C, D, H, W] → [B, G, C/G, D, H, W]
     const grouped = input.reshape(.{ B, num_groups, channels_per_group, D, H, W });
-
-    // Compute mean and variance over axes 2..5 (C/G, D, H, W)
     const grouped_f32 = grouped.convert(.f32);
 
-    // Reduce over axes [2, 3, 4, 5] from last to first for stable indices
-    var reduced_mean = grouped_f32;
-    reduced_mean = reduced_mean.mean(5);
-    reduced_mean = reduced_mean.mean(4);
-    reduced_mean = reduced_mean.mean(3);
-    reduced_mean = reduced_mean.mean(2);
-    // reduced_mean shape: [B, G]
+    // Multi-axis sum over dims {2,3,4,5} (C/G, D, H, W) in a single HLO reduce.
+    // This avoids sequential single-axis reductions that cause TPU layout conflicts.
+    const reduced_sum = multiAxisSum(grouped_f32, &.{ 2, 3, 4, 5 });
+    const reduced_mean = reduced_sum.divByConst(group_size);
+    // reduced_mean shape: [B, G, 1, 1, 1, 1]
 
     // Variance: E[(x - mean)^2]
     const centered = grouped_f32.sub(reduced_mean.broadcastLeft(grouped_f32.shape()));
-    var reduced_var = centered.mul(centered);
-    reduced_var = reduced_var.mean(5);
-    reduced_var = reduced_var.mean(4);
-    reduced_var = reduced_var.mean(3);
-    reduced_var = reduced_var.mean(2);
+    const var_sum = multiAxisSum(centered.mul(centered), &.{ 2, 3, 4, 5 });
+    const reduced_var = var_sum.divByConst(group_size);
 
     // Normalize: (x - mean) / sqrt(var + eps)
     const eps: f32 = 1e-5;
@@ -135,4 +130,20 @@ pub fn forwardPixelShuffle2d(input: Tensor, comptime upscale_factor: i64) Tensor
         .reshape(.{ B, C, r, r, H, W })
         .transpose(.{ 0, 1, 4, 2, 5, 3 })
         .reshape(.{ B, C, H * r, W * r });
+}
+
+/// Multi-axis sum: reduce over all given axes in a single HLO reduce op.
+/// Avoids sequential single-axis reductions that can cause TPU layout conflicts.
+fn multiAxisSum(tensor: Tensor, comptime axes: []const i64) Tensor {
+    return ops.reduce(
+        .{tensor},
+        .{Tensor.constant(tensor.dtype().zero())},
+        axes,
+        struct {
+            pub fn add(args: ops.ReduceArgs) struct { Tensor } {
+                return .{args.right.add(args.left.convert(args.right.dtype()))};
+            }
+        }.add,
+        .{},
+    )[0];
 }

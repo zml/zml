@@ -3978,8 +3978,10 @@ fn runVideoVaeDecodeTiled(
             @memcpy(tile_buf[dst_base..][0..copy_len], latent_bytes[src_base..][0..copy_len]);
         }
 
-        // Upload tile to GPU
-        const tile_slice = zml.Slice.init(tile_latent_shape, tile_buf);
+        // Upload tile to GPU, using the compiled executable's input shape
+        // (which carries the correct partition annotations from the compiler).
+        const compiled_input_shape = vae_exe.input_shapes[0];
+        const tile_slice = zml.Slice.init(compiled_input_shape, tile_buf);
         var tile_gpu = try zml.Buffer.fromSlice(io, platform, tile_slice, sharding);
 
         if (tile_idx == 0) {
