@@ -99,14 +99,6 @@ platform(
     visibility = ["//visibility:public"],
 )
 
-platform(
-    name = "host_glibc",
-    constraint_values = [
-        "@llvm//constraints/libc:gnu.2.28",
-    ],
-    parents = ["@platforms//host"],
-)
-
 constraint_setting(name = "execution_location")
 
 constraint_value(
