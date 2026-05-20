@@ -14,13 +14,6 @@ pub const Config = struct {
 
 pub const Buffers = zml.Bufferized(Model);
 
-const Layer = struct {
-    pub fn init(i: usize) Layer {
-        _ = i; // autofix
-        return .{};
-    }
-};
-
 const RmsNorm = struct {
     weight: zml.Tensor,
     eps: f32,
@@ -60,6 +53,72 @@ pub const LinearF32 = struct {
     pub fn forward(self: LinearF32, x: zml.Tensor) zml.Tensor {
         var y = x.dot(self.weight.convert(.f32), self.tag);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
+    }
+};
+
+// TODO: Use union(enum) depending if it's either a SCA or HCA layer.
+const Attention = struct {
+    kv_norm: RmsNorm,
+    q_norm: RmsNorm,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Config) Attention {
+        return .{
+            .kv_norm = .init(store.createTensor("kv_norm.weight", .{ .hd }, .replicated), config.rms_norm_eps, .hd),
+            .q_norm = .init(store.createTensor("q_norm.weight", .{ .q }, .replicated), config.rms_norm_eps, .q),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Attention)) void {
+        RmsNorm.unloadBuffers(&self.kv_norm);
+        RmsNorm.unloadBuffers(&self.q_norm);
+    }
+};
+
+const MoE = struct {
+    pub fn init() MoE {
+        return .{};
+    }
+};
+
+const Layer = struct {
+    attn_norm: RmsNorm,
+    ffn_norm: RmsNorm,
+    hc_attn_base: zml.Tensor,
+    hc_attn_fn: zml.nn.Linear,
+    hc_attn_scale: zml.Tensor,
+    hc_ffn_base: zml.Tensor,
+    hc_ffn_fn: zml.nn.Linear,
+    hc_ffn_scale: zml.Tensor,
+    attn: Attention,
+    ffn: MoE,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Config, i: usize) Layer {
+        _ = i; // autofix
+
+        return .{
+            .attn_norm = .init(store.createTensor("attn_norm.weight", .{ .d }, .replicated), config.rms_norm_eps, .d),
+            .ffn_norm = .init(store.createTensor("ffn_norm.weight", .{ .d }, .replicated), config.rms_norm_eps, .d),
+            .hc_attn_base = store.createTensor("hc_attn_base", .{.b}, .replicated),
+            .hc_attn_fn = .init(store.createTensor("hc_attn_fn", .{.b, .r}, .replicated), null, .b),
+            .hc_attn_scale = store.createTensor("hc_attn_scale", .{.scale}, .replicated),
+            .hc_ffn_base = store.createTensor("hc_ffn_base", .{.b}, .replicated),
+            .hc_ffn_fn = .init(store.createTensor("hc_ffn_fn", .{.b, .r}, .replicated), null, .b),
+            .hc_ffn_scale = store.createTensor("hc_ffn_scale", .{.b}, .replicated),
+            .attn = .init(store.withPrefix("attn"), config),
+            .ffn = .init(),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Layer)) void {
+        self.attn_norm.weight.deinit();
+        self.ffn_norm.weight.deinit();
+        self.hc_attn_base.deinit();
+        self.hc_attn_fn.weight.deinit();
+        self.hc_attn_scale.deinit();
+        self.hc_ffn_base.deinit();
+        self.hc_ffn_fn.weight.deinit();
+        self.hc_ffn_scale.deinit();
+        Attention.unloadBuffers(&self.attn);
     }
 };
 
@@ -124,8 +183,10 @@ pub const Model = struct {
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Model {
         const layers = try allocator.alloc(Layer, config.num_hidden_layers);
+
         for (layers, 0..) |*layer, i| {
-            layer.* = .init(i);
+            const layer_store = store.withPrefix("layers").withLayer(i);
+            layer.* = .init(layer_store, config, i);
         }
 
         return .{
@@ -138,8 +199,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
-        _ = allocator; // autofix
-        _ = self; // autofix
+        allocator.free(self.layers);
     }
 
     pub fn loadBuffers(
@@ -176,12 +236,12 @@ pub const Model = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
-        _ = allocator; // autofix
         self.embeds.weight.deinit();
 
-        // for (self.layers) |*layer| {
-        //     allocator.destroy(layer);
-        // }
+        for (self.layers) |*layer| {
+            Layer.unloadBuffers(layer);
+        }
+        allocator.free(self.layers);
 
         LmHead.unloadBuffers(&self.lm_head);
     }
