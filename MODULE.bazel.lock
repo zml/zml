@@ -1107,7 +1107,7 @@
     },
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
-        "bzlTransitiveDigest": "EaYJJCRO2HziyWvz9gAd7QTWXSkGP8GVY9fYFJ7w88I=",
+        "bzlTransitiveDigest": "u7Psh7szBG3+lbRmEeBBbWlZRHJWhWtxQo/wtRqvnTg=",
         "usagesDigest": "5XEfWW1w91pfg8tfjun45RGjw1lJZYeu8eiEGVfPhhM=",
         "recordedFileInputs": {
           "@@//bazel/zig_index.json": "2e3b4b83f1add5d3ca12fd05797c04c38af21d86c7fc7c1a9b356560141a4797",
@@ -1421,6 +1421,147 @@
           }
         },
         "recordedRepoMappingEntries": [
+          [
+            "rules_zig+",
+            "bazel_skylib",
+            "bazel_skylib+"
+          ],
+          [
+            "rules_zig+",
+            "bazel_tools",
+            "bazel_tools"
+          ]
+        ]
+      }
+    },
+    "@@rules_zig+//zig/zls:extensions.bzl%zls": {
+      "general": {
+        "bzlTransitiveDigest": "8ZwSSF/7dE4rb0W0cZqil2SfGF1bPK04LTv1/zjtkTM=",
+        "usagesDigest": "YshYFJTNj1/Ilfi+nCC8XODbX91CrKpjfFOqQSa7qow=",
+        "recordedFileInputs": {
+          "@@rules_zig+//zig/zls/private/versions.json": "127803289dfd79b5255db5f74be1d9a2f790f03292d6147009af702d888aba69"
+        },
+        "recordedDirentsInputs": {},
+        "envVariables": {},
+        "generatedRepoSpecs": {
+          "zls_0.16.0_aarch64-linux": {
+            "repoRuleId": "@@rules_zig+//zig/zls/private/repo:zls_repository.bzl%zls_repository",
+            "attributes": {
+              "url": "https://builds.zigtools.org/zls-aarch64-linux-0.16.0.tar.xz",
+              "mirrors": [],
+              "sha256": "430cd293d201eb70ae2519dbc96c854bf8791b8df7fc9392e8d2dc9680a2bed7",
+              "zls_version": "0.16.0",
+              "platform": "aarch64-linux"
+            }
+          },
+          "zls_0.16.0_aarch64-macos": {
+            "repoRuleId": "@@rules_zig+//zig/zls/private/repo:zls_repository.bzl%zls_repository",
+            "attributes": {
+              "url": "https://builds.zigtools.org/zls-aarch64-macos-0.16.0.tar.xz",
+              "mirrors": [],
+              "sha256": "b93ec549f8558a7e85984a840e9276d274f1059b54ade4254296ef4982958359",
+              "zls_version": "0.16.0",
+              "platform": "aarch64-macos"
+            }
+          },
+          "zls_0.16.0_aarch64-windows": {
+            "repoRuleId": "@@rules_zig+//zig/zls/private/repo:zls_repository.bzl%zls_repository",
+            "attributes": {
+              "url": "https://builds.zigtools.org/zls-aarch64-windows-0.16.0.zip",
+              "mirrors": [],
+              "sha256": "ef4c5ccb93c80c9f023105c5f558ae8774ac6668d560ba6f92a2f87d95df2311",
+              "zls_version": "0.16.0",
+              "platform": "aarch64-windows"
+            }
+          },
+          "zls_0.16.0_x86_64-linux": {
+            "repoRuleId": "@@rules_zig+//zig/zls/private/repo:zls_repository.bzl%zls_repository",
+            "attributes": {
+              "url": "https://builds.zigtools.org/zls-x86_64-linux-0.16.0.tar.xz",
+              "mirrors": [],
+              "sha256": "ded6d562a0b86ee878b1ddf70ffab2797ce3cdca3b02d6077548f9d56dff96b6",
+              "zls_version": "0.16.0",
+              "platform": "x86_64-linux"
+            }
+          },
+          "zls_0.16.0_x86_64-macos": {
+            "repoRuleId": "@@rules_zig+//zig/zls/private/repo:zls_repository.bzl%zls_repository",
+            "attributes": {
+              "url": "https://builds.zigtools.org/zls-x86_64-macos-0.16.0.tar.xz",
+              "mirrors": [],
+              "sha256": "49f716ea96c1aadaecaa5d9c0a50874cbcf443dc42b825f1e7ee35499ad3eb96",
+              "zls_version": "0.16.0",
+              "platform": "x86_64-macos"
+            }
+          },
+          "zls_0.16.0_x86_64-windows": {
+            "repoRuleId": "@@rules_zig+//zig/zls/private/repo:zls_repository.bzl%zls_repository",
+            "attributes": {
+              "url": "https://builds.zigtools.org/zls-x86_64-windows-0.16.0.zip",
+              "mirrors": [],
+              "sha256": "35cbb7163224e8cf92d21099c1b1391f2aba927f25d389f021b13a21d40b96dd",
+              "zls_version": "0.16.0",
+              "platform": "x86_64-windows"
+            }
+          },
+          "zls_toolchains": {
+            "repoRuleId": "@@rules_zig+//zig/zls/private/repo:toolchains_repo.bzl%toolchains_repo",
+            "attributes": {
+              "names": [
+                "0.16.0_for_0.16.0_aarch64-linux",
+                "0.16.0_for_0.16.0_aarch64-macos",
+                "0.16.0_for_0.16.0_aarch64-windows",
+                "0.16.0_for_0.16.0_x86_64-linux",
+                "0.16.0_for_0.16.0_x86_64-macos",
+                "0.16.0_for_0.16.0_x86_64-windows"
+              ],
+              "labels": [
+                "@zls_0.16.0_aarch64-linux//:zls_toolchain",
+                "@zls_0.16.0_aarch64-macos//:zls_toolchain",
+                "@zls_0.16.0_aarch64-windows//:zls_toolchain",
+                "@zls_0.16.0_x86_64-linux//:zls_toolchain",
+                "@zls_0.16.0_x86_64-macos//:zls_toolchain",
+                "@zls_0.16.0_x86_64-windows//:zls_toolchain"
+              ],
+              "zig_versions": [
+                "0.16.0",
+                "0.16.0",
+                "0.16.0",
+                "0.16.0",
+                "0.16.0",
+                "0.16.0"
+              ],
+              "exec_lengths": [
+                2,
+                2,
+                2,
+                2,
+                2,
+                2
+              ],
+              "exec_constraints": [
+                "@platforms//os:linux",
+                "@platforms//cpu:aarch64",
+                "@platforms//os:macos",
+                "@platforms//cpu:aarch64",
+                "@platforms//os:windows",
+                "@platforms//cpu:aarch64",
+                "@platforms//os:linux",
+                "@platforms//cpu:x86_64",
+                "@platforms//os:macos",
+                "@platforms//cpu:x86_64",
+                "@platforms//os:windows",
+                "@platforms//cpu:x86_64"
+              ]
+            }
+          }
+        },
+        "recordedRepoMappingEntries": [
+          [
+            "",
+            "rules_zig",
+            "rules_zig+"
+          ],
           [
             "rules_zig+",
             "bazel_skylib",

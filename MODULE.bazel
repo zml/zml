@@ -30,8 +30,8 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 git_override(
     module_name = "rules_zig",
-    commit = "6e9d876037ecb01ce4354c9c9e0c93e026e84e37", # upstreamable-20260515.1
-    remote = "https://github.com/zml/rules_zig.git",
+    commit = "f2915a18037c9cc65437465b76758462e8c589b2", # main
+    remote = "https://github.com/aherrmann/rules_zig.git",
 )
 
 bazel_dep(name = "tar.bzl", version = "0.9.0")
@@ -94,6 +94,19 @@ register_toolchains("@rules_zig//zig/target:all")
 register_toolchains("@zig_toolchains//:all")
 register_toolchains("//:translate_c_toolchain")
 register_execution_platforms("//bazel/zig_toolchain_config:local_execution_platform")
+
+
+zls = use_extension("@rules_zig//zig/zls:extensions.bzl", "zls")
+zls.index(file = "@rules_zig//zig/zls/private:versions.json")
+zls.toolchain(
+    zig_version = "0.16.0",
+    zls_version = "0.16.0",
+)
+
+use_repo(zls, "zls_toolchains")
+
+register_toolchains("@zls_toolchains//:all")
+
 ###
 
 ### LLVM Bootstrapped toolchains
@@ -160,11 +173,6 @@ use_repo(tpu, "libpjrt_tpu")
 
 neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron")
-
-zls = use_extension("//third_party/zls:zls_toolchain.bzl", "zls_toolchains")
-use_repo(zls, "zls_toolchains")
-
-register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
 use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg", "mosaic_tpu")
