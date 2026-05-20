@@ -1072,6 +1072,8 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
         }
     }
 
+    std.log.info("A", .{});
+
     // prepare arguments buffers
     var x_buffer: zml.Buffer = try .fromSlice(io, platform, x, sharding);
     var latents_buffer: zml.Buffer = try .fromSlice(io, platform, context.latents, sharding);
@@ -1079,6 +1081,8 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     defer x_buffer.deinit();
     defer latents_buffer.deinit();
     defer conditions_buffer.deinit();
+
+    std.log.info("B", .{});
 
     const full_mask_slice = try createBidirectionalFullMask(allocator, @divFloor(t + 1, 2));
     defer full_mask_slice.free(allocator);
@@ -1089,9 +1093,13 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     var sliding_mask_buffer: zml.Buffer = try .fromSlice(io, platform, sliding_mask_slice, sharding);
     defer sliding_mask_buffer.deinit();
 
+    std.log.info("C", .{});    
+
     const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = a, .t = t }, .bf16));
     var result_buffer: zml.Buffer = try .fromSlice(io, platform, result_slice, sharding);
     defer result_buffer.deinit();
+
+    std.log.info("D", .{});    
 
     // the full forward pass on the dit model is one iteration of the denoising
     const steps = timestamps.len - 1;

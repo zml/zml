@@ -318,7 +318,6 @@ pub fn runText2MusicPipeline(zml_handler: *Zml_handler) !void {
     // ------------------------------------------------
 
     zml_handler.tic(&zml_handler.timers.llm.total);
-    zml_handler.mem.start(0);
 
     var acellm = try acellm_.AceLlm_handler.init(zml_handler);
     defer acellm.deinit(zml_handler.allocator);
@@ -326,15 +325,16 @@ pub fn runText2MusicPipeline(zml_handler: *Zml_handler) !void {
     const inspi_tokens = try inference.tokenizeInspirationPrompt(zml_handler, acellm.tokenizer);
     defer zml_handler.allocator.free(inspi_tokens);
 
+    zml_handler.mem.start(0);
     const inspi_result = try inference.generateInspirationText(zml_handler, &acellm, inspi_tokens);
     defer zml_handler.allocator.free(inspi_result);
+    zml_handler.mem.check(0);
     var audio_metadata: inference.AudioMetadata = try .initFromString(zml_handler.allocator, inspi_result);
     defer audio_metadata.deinit(zml_handler.allocator);
 
     if (zml_handler.args.duration > 0) try audio_metadata.setDuration(zml_handler.allocator, zml_handler.args.duration);
     const duration = try audio_metadata.duration_s();
 
-    zml_handler.mem.check(0);
     zml_handler.toc(&zml_handler.timers.llm.total);
 
     var audio_codes: inference.AudioCodes = try .empty(zml_handler.allocator);
@@ -342,7 +342,6 @@ pub fn runText2MusicPipeline(zml_handler: *Zml_handler) !void {
 
     if (!zml_handler.args.skip_cfg) {
         zml_handler.tic(&zml_handler.timers.cfg.total);
-        zml_handler.mem.start(0);
 
         const cond_tok, const uncond_tok = try inference.tokenizeGenerationPrompt(zml_handler.allocator, acellm.tokenizer, audio_metadata);
         defer zml_handler.allocator.free(cond_tok);
@@ -353,9 +352,10 @@ pub fn runText2MusicPipeline(zml_handler: *Zml_handler) !void {
         defer acecfg.unloadBuffers();
 
         audio_codes.deinit(zml_handler.allocator);
+        zml_handler.mem.start(0);
         audio_codes = try inference.generateAudioCodes(zml_handler, &acecfg, cond_tok, uncond_tok, audio_metadata);
-
         zml_handler.mem.check(0);
+        
         zml_handler.toc(&zml_handler.timers.cfg.total);
     }
 
@@ -366,7 +366,6 @@ pub fn runText2MusicPipeline(zml_handler: *Zml_handler) !void {
     // using the AceEmb model embedding, not 5Hz
     // ------------------------------------------------
 
-    zml_handler.mem.start(0);
     zml_handler.tic(&zml_handler.timers.emb.total);
 
     const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.aceemb);
@@ -381,22 +380,22 @@ pub fn runText2MusicPipeline(zml_handler: *Zml_handler) !void {
     var aceemb = try aceemb_.AceEmb_handler.init(zml_handler);
     defer aceemb.deinit(zml_handler.allocator);
 
+    zml_handler.mem.start(0);
     const caption_emb = try inference.embedText(zml_handler, &aceemb, tokenizer, caption_tok);
     const lyric_emb = try inference.embedLyric(zml_handler, &aceemb, tokenizer, lyric_tok);
+    zml_handler.mem.check(0);
     defer caption_emb.free(zml_handler.allocator);
     defer lyric_emb.free(zml_handler.allocator);
 
     aceemb.unloadBuffers(zml_handler.allocator);
 
     zml_handler.toc(&zml_handler.timers.emb.total);
-    zml_handler.mem.check(0);
 
     // ------------------------------------------------
     // Encoding phase : prepare input latents and
     // encoded conditions for diffusion
     // ------------------------------------------------
 
-    zml_handler.mem.start(0);
     zml_handler.tic(&zml_handler.timers.enc.total);
 
     const int_codes = if (zml_handler.args.skip_cfg) null else try audio_codes.getIntCodes(zml_handler.allocator);
@@ -405,16 +404,17 @@ pub fn runText2MusicPipeline(zml_handler: *Zml_handler) !void {
     var aceenc = try aceenc_.AceEnc_handler.init(zml_handler);
     defer aceenc.deinit(zml_handler.allocator);
 
+    zml_handler.mem.start(0);
     const diffusion_args: inference.ContextLatents = .{
         .latents = try inference.prepareDiffusionLatents(zml_handler, &aceenc, duration, int_codes, null),
         .conditions = try inference.prepareDiffusionConditions(zml_handler, &aceenc, caption_emb, lyric_emb, null),
     };
     defer diffusion_args.deinit(zml_handler.allocator);
+    zml_handler.mem.check(0);
 
     aceenc.unloadBuffers(zml_handler.allocator);
 
     zml_handler.toc(&zml_handler.timers.enc.total);
-    zml_handler.mem.check(0);
 
     // ------------------------------------------------
     // Tiled generation : compile DiT and VAE models
