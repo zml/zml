@@ -22,6 +22,8 @@ pub const MethodResult = struct {
 
     /// One entry per DFlash speculative step: number of accepted draft tokens.
     acceptance_lengths: []const u32 = &.{},
+    /// One entry per DFlash speculative step: total committed output tokens.
+    committed_lengths: []const u32 = &.{},
     /// Optional precomputed counts indexed by accepted draft-token count.
     acceptance_length_histogram: []const u64 = &.{},
     /// Optional per-position counts. Position 0 represents first draft token.
@@ -129,11 +131,16 @@ pub fn computeSummary(allocator: std.mem.Allocator, samples: []const SampleResul
             max_acceptance_len = @max(max_acceptance_len, sample.dflash.acceptance_length_histogram.len - 1);
         }
         if (sample.dflash.acceptance_lengths.len != 0) {
-            acceptance_step_count += sample.dflash.acceptance_lengths.len;
             for (sample.dflash.acceptance_lengths) |len| {
                 max_acceptance_len = @max(max_acceptance_len, len);
-                acceptance_total += len + 1;
             }
+        }
+        if (sample.dflash.committed_lengths.len != 0) {
+            acceptance_step_count += sample.dflash.committed_lengths.len;
+            for (sample.dflash.committed_lengths) |len| acceptance_total += len;
+        } else if (sample.dflash.acceptance_lengths.len != 0) {
+            acceptance_step_count += sample.dflash.acceptance_lengths.len;
+            for (sample.dflash.acceptance_lengths) |len| acceptance_total += len + 1;
         } else {
             for (sample.dflash.acceptance_length_histogram, 0..) |count, len| {
                 if (count == 0) continue;
@@ -337,6 +344,8 @@ fn writeMethodJson(writer: *std.Io.Writer, method: MethodResult, include_accepta
         try writer.print("{d:.6}", .{methodTau(method)});
         try writer.writeAll(",\"acceptance_lengths\":");
         try writeU32Array(writer, method.acceptance_lengths);
+        try writer.writeAll(",\"committed_lengths\":");
+        try writeU32Array(writer, method.committed_lengths);
         try writer.writeAll(",\"acceptance_length_histogram\":");
         try writeU64Array(writer, method.acceptance_length_histogram);
         try writer.writeAll(",\"per_position_accepts\":");
@@ -392,7 +401,10 @@ fn durationMs(elapsed: Duration) f64 {
 fn methodTau(method: MethodResult) f64 {
     var steps: u64 = 0;
     var total: u64 = 0;
-    if (method.acceptance_lengths.len != 0) {
+    if (method.committed_lengths.len != 0) {
+        steps = method.committed_lengths.len;
+        for (method.committed_lengths) |len| total += len;
+    } else if (method.acceptance_lengths.len != 0) {
         steps = method.acceptance_lengths.len;
         for (method.acceptance_lengths) |len| total += len + 1;
     } else {
@@ -595,4 +607,36 @@ test "summary preserves fixed draft width for zero acceptance histogram" {
         try std.testing.expectApproxEqAbs(@as(f64, 0), rate, 0.0001);
     }
     try std.testing.expectEqualSlices(u64, &.{ 1, 1, 1, 1, 1 }, summary.per_position_trials);
+}
+
+test "summary separates raw acceptance from committed tau" {
+    const samples = [_]SampleResult{
+        .{
+            .id = "capped",
+            .dataset = "fixture/test",
+            .prompt_tokens = 4,
+            .baseline = .{
+                .decoded_tokens = 1,
+                .elapsed = .{ .nanoseconds = std.time.ns_per_ms },
+            },
+            .dflash = .{
+                .decoded_tokens = 1,
+                .elapsed = .{ .nanoseconds = std.time.ns_per_ms },
+                .acceptance_lengths = &.{5},
+                .committed_lengths = &.{1},
+                .acceptance_length_histogram = &.{ 0, 0, 0, 0, 0, 1 },
+            },
+            .quality = .{ .exact_match = true, .compared_tokens = 1 },
+        },
+    };
+
+    const allocator = std.testing.allocator;
+    const summary = try computeSummary(allocator, &samples);
+    defer summary.deinit(allocator);
+
+    try std.testing.expectApproxEqAbs(@as(f64, 1), summary.tau, 0.0001);
+    try std.testing.expectEqualSlices(u64, &.{ 0, 0, 0, 0, 0, 1 }, summary.acceptance_length_histogram);
+    for (summary.per_position_acceptance_rates) |rate| {
+        try std.testing.expectApproxEqAbs(@as(f64, 1), rate, 0.0001);
+    }
 }
