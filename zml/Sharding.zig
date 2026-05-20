@@ -103,8 +103,9 @@ pub const Partitioning = struct {
 
     pub fn localShapeForShape(self: Partitioning, shape: Shape) !Shape {
         const sharding = try self.selectSharding(shape);
-        const placement = try Placement.init(sharding, shape);
-        return placement.shards.get(0).shape.withDefaultPartitioning();
+        var shards = Placement.shardIterator(sharding, shape);
+        const shard = (try shards.next()) orelse return error.InvalidPhysicalMesh;
+        return shard.shape.withDefaultPartitioning();
     }
 
     pub fn numPartitionsForLogicalAxis(self: Partitioning, shape: Shape, logical_axis: anytype) !i64 {
@@ -1766,7 +1767,7 @@ pub const Placement = struct {
             try writer.writeAll("]");
         }
     };
-    pub const Shards = stdx.BoundedArray(Shard, Platform.MAX_NUM_DEVICES);
+    pub const Shards = []Shard;
 
     const AxisSplit = struct {
         product: i64,
@@ -1794,71 +1795,106 @@ pub const Placement = struct {
         }
     };
 
+    pub const ShardIterator = struct {
+        sharding: Sharding,
+        shape: Shape,
+        ordered_devices: Devices,
+        index: usize = 0,
+
+        pub fn count(self: *const ShardIterator) usize {
+            return self.ordered_devices.len;
+        }
+
+        pub fn next(self: *ShardIterator) !?Shard {
+            if (self.index >= self.ordered_devices.len) return null;
+            defer self.index += 1;
+
+            return try shardForDevice(self.sharding, self.shape, self.ordered_devices.get(self.index));
+        }
+    };
+
     sharding: Sharding,
     shape: Shape,
     shards: Shards,
 
+    pub fn shardIterator(sharding: Sharding, shape: Shape) ShardIterator {
+        return .{
+            .sharding = sharding,
+            .shape = shape,
+            .ordered_devices = sharding.data.devicesInCanonicalOrder(),
+        };
+    }
+
+    /// Caller owns `shards` and must call `deinit` with the same allocator.
     pub fn init(
+        allocator: std.mem.Allocator,
         sharding: Sharding,
         shape: Shape,
     ) !Placement {
         const ordered_devices = sharding.data.devicesInCanonicalOrder();
-        var shards: Shards = .empty;
+        const shards = try allocator.alloc(Shard, ordered_devices.len);
+        errdefer allocator.free(shards);
 
-        for (ordered_devices.constSlice()) |d| {
-            if (d.coords.len == 0) return error.MissingDeviceCoords;
-
-            shards.appendAssumeCapacity(.{
-                .device_id = d.id,
-                .device_coords = d.coords,
-                .shape = undefined, // Calculated below
-                .global_shape = shape,
-                .slices = .empty,
-            });
+        for (ordered_devices.constSlice(), 0..) |d, i| {
+            shards[i] = try shardForDevice(sharding, shape, d);
         }
 
-        var self: Placement = .{
+        return .{
             .sharding = sharding,
             .shape = shape,
             .shards = shards,
         };
+    }
 
-        for (self.shards.slice()) |*s| {
-            var used_axes: std.EnumSet(PhysicalAxisTag) = .empty;
+    pub fn deinit(self: *Placement, allocator: std.mem.Allocator) void {
+        allocator.free(self.shards);
+    }
 
-            for (0..shape.rank()) |ax| {
-                const axis_index: u8 = @intCast(ax);
-                const slice = try self.sliceForDevice(s.device_coords.constSlice(), &used_axes, axis_index);
-                s.slices.appendAssumeCapacity(slice);
-            }
+    fn shardForDevice(sharding: Sharding, shape: Shape, device: Device) !Shard {
+        if (device.coords.len == 0) return error.MissingDeviceCoords;
 
-            s.shape = blk: {
-                var sh = shape;
-                for (s.slices.constSlice()) |slice| {
-                    sh = sh.set(slice.axis, slice.size);
-                }
-                break :blk sh;
-            };
+        var shard: Shard = .{
+            .device_id = device.id,
+            .device_coords = device.coords,
+            .shape = undefined,
+            .global_shape = shape,
+            .slices = .empty,
+        };
+        var used_axes: std.EnumSet(PhysicalAxisTag) = .empty;
+
+        for (0..shape.rank()) |ax| {
+            const axis_index: u8 = @intCast(ax);
+            const slice = try sliceForDevice(sharding, shape, shard.device_coords.constSlice(), &used_axes, axis_index);
+            shard.slices.appendAssumeCapacity(slice);
         }
 
-        return self;
+        shard.shape = blk: {
+            var sh = shape;
+            for (shard.slices.constSlice()) |slice| {
+                sh = sh.set(slice.axis, slice.size);
+            }
+            break :blk sh;
+        };
+
+        return shard;
     }
 
     fn sliceForDevice(
-        self: *Placement,
+        sharding: Sharding,
+        shape: Shape,
         device_coords: []const usize,
         used_axes: *std.EnumSet(PhysicalAxisTag),
         axis_index: u8,
     ) !Slice1d {
-        const dim = self.shape.dim(axis_index);
-        const spec = self.shape.partition(axis_index);
+        const dim = shape.dim(axis_index);
+        const spec = shape.partition(axis_index);
 
         switch (spec) {
             .axis => |logical_tag| {
-                const binding = self.sharding.data.binding(logical_tag) orelse return error.MissingLogicalBinding;
+                const binding = sharding.data.binding(logical_tag) orelse return error.MissingLogicalBinding;
 
                 // Calculate the split based on the physical coordinates of the current device
-                const plan = try self.calculateSplit(dim, binding, device_coords, used_axes);
+                const plan = try calculateSplit(sharding, dim, binding, device_coords, used_axes);
 
                 const size = @divExact(dim, plan.product);
                 const start = plan.linearIndex() * size;
@@ -1874,7 +1910,7 @@ pub const Placement = struct {
     }
 
     fn calculateSplit(
-        self: *Placement,
+        sharding: Sharding,
         dim: i64,
         binding: []const PhysicalAxisTag,
         device_coords: []const usize,
@@ -1884,16 +1920,16 @@ pub const Placement = struct {
 
         for (binding) |p_tag| {
             // Expand the physical tag: check if it's a target for folded source axes
-            if (self.sharding.data.foldSources(p_tag)) |sources| {
+            if (sharding.data.foldSources(p_tag)) |sources| {
                 for (sources) |src| {
                     if (used_axes.contains(src)) continue;
-                    self.addPhysicalToSplit(&plan, src, device_coords);
+                    addPhysicalToSplit(sharding, &plan, src, device_coords);
                     used_axes.insert(src);
                 }
             } else {
                 // Standard case: directly bound, not part of an explicit fold
                 if (used_axes.contains(p_tag)) continue;
-                self.addPhysicalToSplit(&plan, p_tag, device_coords);
+                addPhysicalToSplit(sharding, &plan, p_tag, device_coords);
                 used_axes.insert(p_tag);
             }
         }
@@ -1906,8 +1942,8 @@ pub const Placement = struct {
     }
 
     /// Extract coordinate data from the physical mesh for a specific axis.
-    fn addPhysicalToSplit(self: *Placement, plan: *AxisSplit, tag: PhysicalAxisTag, device_coords: []const usize) void {
-        const physical = self.sharding.data.physical;
+    fn addPhysicalToSplit(sharding: Sharding, plan: *AxisSplit, tag: PhysicalAxisTag, device_coords: []const usize) void {
+        const physical = sharding.data.physical;
         const info = physical.axisInfo(tag) orelse return;
         const depth = physical.axis_traversal.depth(tag) orelse return;
         const coord = device_coords[depth];
@@ -1916,17 +1952,45 @@ pub const Placement = struct {
     }
 
     pub fn format(self: Placement, writer: *std.Io.Writer) !void {
-        try writer.print("Placement(shape={f} shards={d})\n", .{ self.shape, self.shards.len });
+        const Iterator = struct {
+            shards: []const Shard,
+            index: usize = 0,
+
+            fn count(it: @This()) usize {
+                return it.shards.len;
+            }
+
+            fn next(it: *@This()) !?Shard {
+                if (it.index >= it.shards.len) return null;
+                defer it.index += 1;
+
+                return it.shards[it.index];
+            }
+        };
+        return formatFromShardSource(self.shape, Iterator{ .shards = self.shards }, writer);
+    }
+
+    pub fn formatShards(sharding: Sharding, shape: Shape, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        return formatFromShardSource(shape, shardIterator(sharding, shape), writer);
+    }
+
+    fn formatFromShardSource(shape: Shape, shards_: anytype, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        var shards = shards_;
+        const first_shard = shards.next() catch |err| {
+            return formatShardError(shape, shards.count(), err, writer);
+        };
+
+        try writer.print("Placement(shape={f} shards={d})\n", .{ shape, shards.count() });
 
         try writer.writeAll("Axis partitioning summary:\n");
-        for (0..self.shape.rank()) |ax| {
-            const dim = self.shape.dim(ax);
-            const spec = self.shape.partition(ax);
-            const axis_label = self.shape.debugTag(ax);
+        for (0..shape.rank()) |ax| {
+            const dim = shape.dim(ax);
+            const spec = shape.partition(ax);
+            const axis_label = shape.debugTag(ax);
 
             var shard_size: i64 = dim;
-            if (self.shards.len > 0) {
-                for (self.shards.constSlice()[0].slices.constSlice()) |s| {
+            if (first_shard) |shard| {
+                for (shard.slices.constSlice()) |s| {
                     if (s.axis == ax) {
                         shard_size = s.size;
                         break;
@@ -1946,9 +2010,27 @@ pub const Placement = struct {
         }
 
         try writer.writeAll("Per-shard placement:\n");
-        for (self.shards.constSlice(), 0..) |shard, i| {
-            try writer.print("└─ Shard[{d}] {f}\n", .{ i, shard });
+        var shard_index: usize = 0;
+        if (first_shard) |shard| {
+            try writer.print("└─ Shard[{d}] {f}\n", .{ shard_index, shard });
+            shard_index += 1;
         }
+        while (shards.next() catch |err| {
+            try writer.print("└─ Shard[{d}] error={s}\n", .{ shard_index, @errorName(err) });
+            return;
+        }) |shard| : (shard_index += 1) {
+            try writer.print("└─ Shard[{d}] {f}\n", .{ shard_index, shard });
+        }
+    }
+
+    fn formatShardError(
+        shape: Shape,
+        shard_count: usize,
+        err: anyerror,
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        try writer.print("Placement(shape={f} shards={d})\n", .{ shape, shard_count });
+        try writer.print("Shard placement error: {s}\n", .{@errorName(err)});
     }
 };
 
@@ -2026,15 +2108,16 @@ const ShardingTest = struct {
 
         // Verify Placement logic / Error
         if (s.expect_error) |err| {
-            try std.testing.expectError(err, Placement.init(.{ .data = &sharding }, s.shape));
+            try std.testing.expectError(err, Placement.init(self.allocator, .{ .data = &sharding }, s.shape));
             return;
         }
 
         // Verify Shard Slices (Math)
         if (s.expected_shards.len > 0) {
-            const placement = try Placement.init(.{ .data = &sharding }, s.shape);
+            var placement = try Placement.init(self.allocator, .{ .data = &sharding }, s.shape);
+            defer placement.deinit(self.allocator);
             try std.testing.expectEqual(s.expected_shards.len, placement.shards.len);
-            for (s.expected_shards, placement.shards.constSlice()) |expected, actual| {
+            for (s.expected_shards, placement.shards) |expected, actual| {
                 try std.testing.expectEqual(expected.device_id, actual.device_id);
                 for (expected.slices, actual.slices.constSlice()) |exp_slice, actual_slice| {
                     try std.testing.expectEqual(exp_slice[0], actual_slice.start);

@@ -628,7 +628,7 @@ pub const DirectMemoryWriter = struct {
         }
 
         fn collectRawSegments(self: *StreamPlanner) !void {
-            for (self.placement.shards.constSlice(), 0..) |shard, writer_index| {
+            for (self.placement.shards, 0..) |shard, writer_index| {
                 try self.appendShardSegments(shard, writer_index);
             }
         }
@@ -788,7 +788,8 @@ pub const DirectMemoryWriter = struct {
         sharding: Sharding,
         buffer: *Buffer,
     ) !DirectMemoryWriter {
-        const placement = try Placement.init(sharding, shape);
+        var placement = try Placement.init(allocator, sharding, shape);
+        defer placement.deinit(allocator);
         var shard_writers = try allocator.alloc(DirectShardWriter, placement.shards.len);
         errdefer allocator.free(shard_writers);
 
@@ -798,7 +799,7 @@ pub const DirectMemoryWriter = struct {
         };
 
         var pjrt_buffers: Buffer.Shards = .empty;
-        for (placement.shards.constSlice(), 0..) |shard, i| {
+        for (placement.shards, 0..) |shard, i| {
             defer initialized += 1;
 
             const device_index = shard.platformDeviceIndex(platform) orelse return error.UnknownShardDevice;
