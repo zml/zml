@@ -316,10 +316,13 @@ const RmsNorm = struct {
     }
 
     /// L2 normalization of input tensor along .d axis
+    /// Step 3.5 Flash uses offset-style RMSNorm: the effective scale is `1 + weight`,
+    /// not just `weight`.
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
         const normalized = zml.nn.rmsNorm(x, .d, self.eps);
-        return normalized.mul(self.weight.convert(x.dtype())).withTags(.{.d}).broad(x.shape());
+        const scale = self.weight.convert(.f32).addConstant(1).convert(x.dtype());
+        return normalized.mul(scale).withTags(.{.d}).broad(x.shape());
     }
 };
 
