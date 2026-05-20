@@ -28,6 +28,7 @@ const Args = struct {
     max_prompt_tokens: u32 = default_prefill_seq_len,
     temperature: f32 = 0.0,
     output_json: []const u8 = "",
+    verbose: bool = false,
 
     pub const help =
         \\Options:
@@ -42,6 +43,7 @@ const Args = struct {
         \\  --max-prompt-tokens=<n>    Minimum prompt cache capacity; actual selected prompts may be longer and run in chunks
         \\  --temperature=<t>          Sampling temperature; 0 uses greedy decoding
         \\  --output-json=<path>       Optional result JSON output path
+        \\  --verbose                  Print each selected prompt and both generated answers
         \\
     ;
 };
@@ -194,6 +196,9 @@ pub fn main(init: std.process.Init) !void {
         };
 
         try stats.printSample(writer, i + 1, loaded_samples.samples.len, sample_result);
+        if (args.verbose) {
+            try printVerboseSample(writer, sample.prompt, baseline_text_slice, dflash_text_slice);
+        }
         try writer.flush();
         try sample_results.append(allocator, sample_result);
         owns_dataset_name = false;
@@ -218,6 +223,29 @@ pub fn main(init: std.process.Init) !void {
         var json_writer = output.writerStreaming(project.io, &.{});
         try writeJsonReport(&json_writer.interface, args, split, sample_results.items, summary);
         try json_writer.interface.flush();
+    }
+}
+
+fn printVerboseSample(
+    writer: *std.Io.Writer,
+    prompt: []const u8,
+    baseline_text: []const u8,
+    dflash_text: []const u8,
+) !void {
+    try writer.writeAll("  Prompt:\n");
+    try writeIndentedBlock(writer, prompt);
+    try writer.writeAll("  Baseline answer:\n");
+    try writeIndentedBlock(writer, baseline_text);
+    try writer.writeAll("  DFlash answer:\n");
+    try writeIndentedBlock(writer, dflash_text);
+}
+
+fn writeIndentedBlock(writer: *std.Io.Writer, text: []const u8) !void {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        try writer.writeAll("    ");
+        try writer.writeAll(line);
+        try writer.writeByte('\n');
     }
 }
 
