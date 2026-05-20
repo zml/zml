@@ -54,7 +54,7 @@ pub const Zml_handler = struct {
         errdefer platform.deinit(init.gpa);
 
         const args = stdx.flags.parse(init.minimal.args, Args);
-        
+
         return .{
             .allocator = init.gpa,
             .arena = init.arena,
@@ -77,7 +77,7 @@ pub const Zml_handler = struct {
     pub fn tic(self: *Zml_handler, target: *Timing_handler.Module_timer.Field_timer) void {
         target.init = std.Io.Timestamp.now(self.io, .awake);
     }
-    
+
     pub fn toc(self: *Zml_handler, target: *Timing_handler.Module_timer.Field_timer) void {
         const end = std.Io.Timestamp.now(self.io, .awake);
         const start: std.Io.Timestamp = target.init;
@@ -85,8 +85,13 @@ pub const Zml_handler = struct {
         target.nanoseconds += duration.nanoseconds;
     }
 
+    pub fn tokensPerSecond(duration: std.Io.Duration, tokens: u64) f64 {
+        if (tokens == 0) return 0;
+        const seconds = @as(f64, @floatFromInt(duration.toNanoseconds())) / 1e9;
+        if (seconds <= 0) return 0;
+        return @as(f64, @floatFromInt(tokens)) / seconds;
+    }
 
-    
 };
 
 pub const Uri_handler = struct {
@@ -130,21 +135,21 @@ pub const Uri_handler = struct {
 };
 
 pub const Timing_handler = struct {
-    
+
     pub const Module_timer = struct {
-        
+
         pub const Field_timer = struct {
             nanoseconds: i96 = 0,
             init: std.Io.Timestamp = std.Io.Timestamp.zero,
         };
-        
+
         init: Field_timer = .{},
         load: Field_timer = .{},
         compile: Field_timer = .{},
         prefill: Field_timer = .{},
         decode: Field_timer = .{},
         total: Field_timer = .{},
-        
+
         pub fn print(self: Module_timer, name: []const u8) void {
             std.log.info("{s}  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s", .{
                 name,
@@ -157,7 +162,7 @@ pub const Timing_handler = struct {
             });
         }
     };
-    
+
     llm: Module_timer = .{},
     cfg: Module_timer = .{},
     emb: Module_timer = .{},
@@ -242,7 +247,7 @@ const Args = struct {
 // --prompt='a peak-time dark techno track'
 // --llm-size=2 --dit-size=1
 // --duration=180 --n=3
-// bazel run --config=release examples/acestep --//platforms:cuda=true -- --instru --local-files 
+// bazel run --config=release examples/acestep --//platforms:cuda=true -- --instru --local-files
 // info: Module    init  compile     load  prefill   decode    total
 // info:   llm    0.26s    1.88s    0.92s    0.17s    2.69s    5.93s
 // info:   cfg    0.00s    0.80s    0.00s    0.29s   20.32s   21.42s
@@ -261,16 +266,17 @@ const Args = struct {
 // - smooth transitions between cover and non cover modes ?
 // - if needed, context_latents from dequantized quantized source latents instead of source latents
 // - ajouter variance
-// - ranger decode_t
-// TODO: essayer de faire lyric remix
+// TODO: essayer de faire lyric remix (flow-edit...)
 // - embed old and new lyric
 // - switch/blend/dice between the two during the diffusion
 // TODO: batch cfg
 
+// TODO: split acefsq from aceenc
 // TODO: move model related code from inference to Exes struct inside models
+// TODO: load in parallel as compile
 
 // TODO: investigate audio level normalization
-// TODO: sft model for max quality
+// TODO: sft/base model for max quality
 // TODO: post process VAE output to improve audio quality (AudioSR/Vocos BWE + Music De-limiter Network/DSP Transient Shaper)
 // TODO: to remove voice distortion, extract voice with MelBand RoFormer / BS-RoFormer, instru with HTDemucs v4
 //       then recover audio (ex: DDDM-VC) voice, then recombine. Or: frequency cutoff with AudioSR
@@ -299,105 +305,60 @@ pub fn main(init: std.process.Init) !void {
     try printZmlLogo(zml_handler.io);
 
     zml_handler.tic(&zml_handler.timers.total);
-    try runFullPipeline(&zml_handler);
+    try runText2MusicPipeline(&zml_handler);
     zml_handler.toc(&zml_handler.timers.total);
 
     zml_handler.timers.print();
 }
 
-pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
-    const decode_t: u32 = 5;
-    
-    // ------------------------------------------------
-    // Read/encode audio and style references
-    // ------------------------------------------------
+pub fn runText2MusicPipeline(zml_handler: *Zml_handler) !void {
 
-    var audio_latent: ?inference.AudioLatents = null;
-    defer if (audio_latent) |latent| latent.deinit(zml_handler.allocator);
-    var style_latent: ?inference.AudioLatents = null;
-    defer if (style_latent) |latent| latent.deinit(zml_handler.allocator);
-    
-    if (zml_handler.args.use_audio_ref or zml_handler.args.use_style_ref) {
-        var input_audio: ?inference.AudioFrames = null;
-        defer if (input_audio) |audio| audio.deinit(zml_handler.allocator);
-        var input_style: ?inference.AudioFrames = null;
-        defer if (input_style) |style| style.deinit(zml_handler.allocator);
-        
-        zml_handler.tic(&zml_handler.timers.wav);
-
-        if (zml_handler.args.use_audio_ref) {
-            input_audio = try importAudio(zml_handler, zml_handler.uris.audio_ref);
-        }
-        if (zml_handler.args.use_style_ref) {
-            const style = try importAudio(zml_handler, zml_handler.uris.style_ref);
-            defer style.deinit(zml_handler.allocator);
-            input_style = try extractSummary(zml_handler, style);
-        }
-        
-        zml_handler.toc(&zml_handler.timers.wav);
-        zml_handler.tic(&zml_handler.timers.vae.total);
-
-        var acevae_encoder = try acevae_.AceVaeEncoder_handler.init(zml_handler, decode_t);
-        defer acevae_encoder.deinit(zml_handler.allocator);
-
-        if (input_audio) |audio| {
-            audio_latent = try inference.encodeAudioLatents(zml_handler, &acevae_encoder, audio, decode_t);
-        }
-        if (input_style) |style| {
-            style_latent = try inference.encodeAudioLatents(zml_handler, &acevae_encoder, style, decode_t);
-        }
-        acevae_encoder.unloadBuffers(zml_handler.allocator);
-        
-        zml_handler.toc(&zml_handler.timers.vae.total);
-    }
-    
     // ------------------------------------------------
     // Thinking/Inspiration phase : 5Hz LLM model
     // ------------------------------------------------
-    
+
     zml_handler.tic(&zml_handler.timers.llm.total);
-    
+    zml_handler.mem.start(0);
+
     var acellm = try acellm_.AceLlm_handler.init(zml_handler);
     defer acellm.deinit(zml_handler.allocator);
-    
+
     const inspi_tokens = try inference.tokenizeInspirationPrompt(zml_handler, acellm.tokenizer);
     defer zml_handler.allocator.free(inspi_tokens);
-    
-    zml_handler.mem.start(0);
+
     const inspi_result = try inference.generateInspirationText(zml_handler, &acellm, inspi_tokens);
     defer zml_handler.allocator.free(inspi_result);
     var audio_metadata: inference.AudioMetadata = try .initFromString(zml_handler.allocator, inspi_result);
     defer audio_metadata.deinit(zml_handler.allocator);
-    zml_handler.mem.check(0);
-    
+
     if (zml_handler.args.duration > 0) try audio_metadata.setDuration(zml_handler.allocator, zml_handler.args.duration);
-    if (audio_latent) |audio| try audio_metadata.setDuration(zml_handler.allocator, @divExact(audio.x.shape.dim(1), 25));
     const duration = try audio_metadata.duration_s();
 
+    zml_handler.mem.check(0);
     zml_handler.toc(&zml_handler.timers.llm.total);
 
     var audio_codes: inference.AudioCodes = try .empty(zml_handler.allocator);
     defer audio_codes.deinit(zml_handler.allocator);
-    
-    if (!zml_handler.args.skip_cfg and !zml_handler.args.use_audio_ref) {
+
+    if (!zml_handler.args.skip_cfg) {
         zml_handler.tic(&zml_handler.timers.cfg.total);
-        
+        zml_handler.mem.start(0);
+
         const cond_tok, const uncond_tok = try inference.tokenizeGenerationPrompt(zml_handler.allocator, acellm.tokenizer, audio_metadata);
         defer zml_handler.allocator.free(cond_tok);
         defer zml_handler.allocator.free(uncond_tok);
-        
+
         var acecfg = try acellm_.AceCfg_handler.initFromLlm(zml_handler, &acellm);
         defer acecfg.deinit(zml_handler.allocator);
         defer acecfg.unloadBuffers();
 
-        zml_handler.mem.start(0);
         audio_codes.deinit(zml_handler.allocator);
         audio_codes = try inference.generateAudioCodes(zml_handler, &acecfg, cond_tok, uncond_tok, audio_metadata);
-        zml_handler.mem.check(0);
 
+        zml_handler.mem.check(0);
         zml_handler.toc(&zml_handler.timers.cfg.total);
     }
-    
+
     acellm.unloadBuffers(zml_handler.allocator);
 
     // ------------------------------------------------
@@ -412,18 +373,18 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     var tokenizer = try aceemb_.AceEmb_handler.loadTokenizer(zml_handler, repo);
     defer tokenizer.deinit();
 
-    const caption_tok_non_cover = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata, false);
-    const caption_tok_cover = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata, true);
+    const caption_tok = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata, !zml_handler.args.skip_cfg);
     const lyric_tok = try inference.tokenizeInputLyrics(zml_handler.allocator, tokenizer, audio_metadata);
-    defer zml_handler.allocator.free(caption_tok_non_cover);
-    defer zml_handler.allocator.free(caption_tok_cover);
+    defer zml_handler.allocator.free(caption_tok);
     defer zml_handler.allocator.free(lyric_tok);
 
-    var aceemb = try aceemb_.AceEmb_handler.init(zml_handler, @intCast(caption_tok_cover.len), @intCast(lyric_tok.len));
+    var aceemb = try aceemb_.AceEmb_handler.init(zml_handler);
     defer aceemb.deinit(zml_handler.allocator);
 
-    const text_emb = try inference.generateTextEmbedding(zml_handler, &aceemb, tokenizer, caption_tok_cover, caption_tok_non_cover, lyric_tok);
-    defer text_emb.deinit(zml_handler.allocator);
+    const caption_emb = try inference.embedText(zml_handler, &aceemb, tokenizer, caption_tok);
+    const lyric_emb = try inference.embedLyric(zml_handler, &aceemb, tokenizer, lyric_tok);
+    defer caption_emb.free(zml_handler.allocator);
+    defer lyric_emb.free(zml_handler.allocator);
 
     aceemb.unloadBuffers(zml_handler.allocator);
 
@@ -437,17 +398,18 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
 
     zml_handler.mem.start(0);
     zml_handler.tic(&zml_handler.timers.enc.total);
-    
-    const int_codes = try audio_codes.getIntCodes(zml_handler.allocator);
-    defer zml_handler.allocator.free(int_codes);
 
-    var aceenc = try aceenc_.AceEnc_handler.init(zml_handler, text_emb.textLen(), text_emb.lyricLen(), duration, int_codes.len);
+    const int_codes = if (zml_handler.args.skip_cfg) null else try audio_codes.getIntCodes(zml_handler.allocator);
+    defer if (int_codes) |codes| zml_handler.allocator.free(codes);
+
+    var aceenc = try aceenc_.AceEnc_handler.init(zml_handler);
     defer aceenc.deinit(zml_handler.allocator);
 
-    const diffuse_args_cover = try inference.prepareCoverLatents(zml_handler, &aceenc, text_emb, int_codes, duration, audio_latent, style_latent);
-    defer diffuse_args_cover.deinit(zml_handler.allocator);
-    const diffuse_args_non_cover = try inference.prepareNonCoverLatents(zml_handler, &aceenc, text_emb, duration, style_latent);
-    defer diffuse_args_non_cover.deinit(zml_handler.allocator);
+    const diffusion_args: inference.ContextLatents = .{
+        .latents = try inference.prepareDiffusionLatents(zml_handler, &aceenc, duration, int_codes, null),
+        .conditions = try inference.prepareDiffusionConditions(zml_handler, &aceenc, caption_emb, lyric_emb, null),
+    };
+    defer diffusion_args.deinit(zml_handler.allocator);
 
     aceenc.unloadBuffers(zml_handler.allocator);
 
@@ -459,60 +421,228 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     // ------------------------------------------------
 
     zml_handler.tic(&zml_handler.timers.dit.total);
-    
-    var acedit = try acedit_.AceDit_handler.init(zml_handler, duration, diffuse_args_cover.encoder_conditions.shape.dim(.s_enc));
+
+    var acedit = try acedit_.AceDit_handler.init(zml_handler, duration, diffusion_args.conditions.shape.dim(.s));
     defer acedit.deinit(zml_handler.allocator);
-    
+
     zml_handler.toc(&zml_handler.timers.dit.total);
     zml_handler.tic(&zml_handler.timers.vae.total);
-    
-    var acevae = try acevae_.AceVaeDecoder_handler.init(zml_handler, decode_t);
+
+    var acevae = try acevae_.AceVaeDecoder_handler.init(zml_handler);
     defer acevae.deinit(zml_handler.allocator);
-    
+
     zml_handler.toc(&zml_handler.timers.vae.total);
-    
+
     for (0..zml_handler.args.n) |i| {
-        
+
         // ------------------------------------------------
         // Generation phase : diffusion with DiT model
         // ------------------------------------------------
-    
+
         zml_handler.tic(&zml_handler.timers.dit.total);
         zml_handler.mem.start(0);
-        
-        const diffused_latents = try inference.runDiffusion(zml_handler, &acedit, audio_latent, diffuse_args_cover, diffuse_args_non_cover, i, zml_handler.args.match_level);
+
+        const diffused_latents = try inference.runCoverDiffusion(zml_handler, &acedit, diffusion_args, i);
         defer diffused_latents.deinit(zml_handler.allocator);
 
         zml_handler.mem.check(0);
         zml_handler.toc(&zml_handler.timers.dit.total);
-        
+
         // ------------------------------------------------
         // Decode diffused latents with the VAE model
         // ------------------------------------------------
-    
+
         zml_handler.tic(&zml_handler.timers.vae.total);
         zml_handler.mem.start(0);
-    
-        const decoded_audio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents, decode_t);
+
+        const decoded_audio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents);
         defer decoded_audio.deinit(zml_handler.allocator);
-        
+
         zml_handler.mem.check(0);
         zml_handler.toc(&zml_handler.timers.vae.total);
-    
+
         // ------------------------------------------------
         // Export decoded audio as WAV
         // ------------------------------------------------
-    
+
          zml_handler.tic(&zml_handler.timers.wav);
-         
+
          try exportAudio(zml_handler, decoded_audio, i);
-    
+
          zml_handler.toc(&zml_handler.timers.wav);
     }
 
     acedit.unloadBuffers(zml_handler.allocator);
     acevae.unloadBuffers(zml_handler.allocator);
+
+}
+
+pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
+
+    // ------------------------------------------------
+    // Read/encode audio and style references
+    // ------------------------------------------------
+
+    zml_handler.tic(&zml_handler.timers.wav);
+
+    var input_audio = try importAudio(zml_handler, zml_handler.uris.audio_ref);
+    defer input_audio.deinit(zml_handler.allocator);
+
+    var input_style: ?inference.AudioFrames = null;
+    defer if (input_style) |style| style.deinit(zml_handler.allocator);
+    if (zml_handler.args.use_style_ref) {
+        const style = try importAudio(zml_handler, zml_handler.uris.style_ref);
+        defer style.deinit(zml_handler.allocator);
+        input_style = try extractSummary(zml_handler, style);
+    }
+
+    zml_handler.toc(&zml_handler.timers.wav);
+    zml_handler.tic(&zml_handler.timers.vae.total);
+
+    var acevae_encoder = try acevae_.AceVaeEncoder_handler.init(zml_handler);
+    defer acevae_encoder.deinit(zml_handler.allocator);
+
+    var audio_latent = try inference.encodeAudioLatents(zml_handler, &acevae_encoder, input_audio);
+    defer audio_latent.deinit(zml_handler.allocator);
+
+    const style_latent = if (input_style) try inference.encodeAudioLatents(zml_handler, &acevae_encoder, input_style) else null;
+    defer if (style_latent) |latent| latent.deinit(zml_handler.allocator);
+
+    acevae_encoder.unloadBuffers(zml_handler.allocator);
+
+    zml_handler.toc(&zml_handler.timers.vae.total);
+
+    // ------------------------------------------------
+    // No 5Hz task in remix mode
+    // ------------------------------------------------
+
+    const audio_metadata = inference.AudioMetadata.empty(zml_handler.allocator);
+    defer audio_metadata.deinit(zml_handler.allocator);
+
+    audio_metadata.setDuration(zml_handler.allocator, audio_latent.duration_s());
+    const duration = audio_latent.duration_s();
+
+    // ------------------------------------------------
+    // Embed text inputs for diffusion conditions
+    // ------------------------------------------------
+
+    zml_handler.mem.start(0);
+    zml_handler.tic(&zml_handler.timers.emb.total);
+
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.aceemb);
+    var tokenizer = try aceemb_.AceEmb_handler.loadTokenizer(zml_handler, repo);
+    defer tokenizer.deinit();
+
+    const caption_tok_non_cover = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata, false);
+    const caption_tok_cover = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata, true);
+    const lyric_tok = try inference.tokenizeInputLyrics(zml_handler.allocator, tokenizer, audio_metadata);
+    defer caption_tok_non_cover.free(zml_handler.allocator);
+    defer caption_tok_cover.free(zml_handler.allocator);
+    defer lyric_tok.free(zml_handler.allocator);
+
+    std.log.info("caption_tok_cover: {d}, caption_tok_non_cover: {d}", .{caption_tok_cover.len, caption_tok_non_cover.len});
+
+    var aceemb = try aceemb_.AceEmb_handler.init(zml_handler);
+    defer aceemb.deinit(zml_handler.allocator);
+
+    const caption_emb_non_cover = try inference.embedText(zml_handler, &aceemb, tokenizer, caption_tok_non_cover);
+    const caption_emb_cover = try inference.embedText(zml_handler, &aceemb, tokenizer, caption_tok_cover);
+    const lyric_emb = try inference.embedLyric(zml_handler, &aceemb, tokenizer, lyric_tok);
+    defer zml_handler.allocator.free(caption_emb_non_cover);
+    defer zml_handler.allocator.free(caption_emb_cover);
+    defer zml_handler.allocator.free(lyric_emb);
+
+    aceemb.unloadBuffers(zml_handler.allocator);
+
+    zml_handler.toc(&zml_handler.timers.emb.total);
+    zml_handler.mem.check(0);
+
+    // ------------------------------------------------
+    // Encode context and conditions for diffusion
+    // ------------------------------------------------
+
+    zml_handler.mem.start(0);
+    zml_handler.tic(&zml_handler.timers.enc.total);
+
+    var aceenc = try aceenc_.AceEnc_handler.init(zml_handler);
+    defer aceenc.deinit(zml_handler.allocator);
+
+    const diffusion_args_cover: inference.ContextLatents = .{
+        .latents = try inference.prepareDiffusionLatents(zml_handler, &aceenc, duration, null, audio_latent),
+        .encoder_conditions = try inference.prepareDiffusionConditions(zml_handler, &aceenc, caption_emb_cover, lyric_emb, style_latent),
+    };
+    defer diffusion_args_cover.deinit(zml_handler.allocator);
     
+    const diffusion_args_non_cover: inference.ContextLatents = .{
+        .latents = try inference.prepareDiffusionLatents(zml_handler, &aceenc, duration, null, null),
+        .conditions = try inference.prepareDiffusionConditions(zml_handler, &aceenc, caption_emb_non_cover, lyric_emb, style_latent),
+    };
+    defer diffusion_args_non_cover.deinit(zml_handler.allocator);
+
+    aceenc.unloadBuffers(zml_handler.allocator);
+
+    zml_handler.toc(&zml_handler.timers.enc.total);
+    zml_handler.mem.check(0);
+
+    // ------------------------------------------------
+    // Tiled generation : compile DiT and VAE models
+    // ------------------------------------------------
+
+    zml_handler.tic(&zml_handler.timers.dit.total);
+
+    var acedit = try acedit_.AceDit_handler.init(zml_handler, duration, diffusion_args_cover.conditions.shape.dim(.s));
+    defer acedit.deinit(zml_handler.allocator);
+
+    zml_handler.toc(&zml_handler.timers.dit.total);
+    zml_handler.tic(&zml_handler.timers.vae.total);
+
+    var acevae = try acevae_.AceVaeDecoder_handler.init(zml_handler);
+    defer acevae.deinit(zml_handler.allocator);
+
+    zml_handler.toc(&zml_handler.timers.vae.total);
+
+    for (0..zml_handler.args.n) |i| {
+
+        // ------------------------------------------------
+        // Generation phase : diffusion with DiT model
+        // ------------------------------------------------
+
+        zml_handler.tic(&zml_handler.timers.dit.total);
+        zml_handler.mem.start(0);
+
+        const diffused_latents = try inference.runRemixDiffusion(zml_handler, &acedit, audio_latent, diffusion_args_cover, diffusion_args_non_cover, i, zml_handler.args.match_level);
+        defer diffused_latents.deinit(zml_handler.allocator);
+
+        zml_handler.mem.check(0);
+        zml_handler.toc(&zml_handler.timers.dit.total);
+
+        // ------------------------------------------------
+        // Decode diffused latents with the VAE model
+        // ------------------------------------------------
+
+        zml_handler.tic(&zml_handler.timers.vae.total);
+        zml_handler.mem.start(0);
+
+        const decoded_audio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents);
+        defer decoded_audio.deinit(zml_handler.allocator);
+
+        zml_handler.mem.check(0);
+        zml_handler.toc(&zml_handler.timers.vae.total);
+
+        // ------------------------------------------------
+        // Export decoded audio as WAV
+        // ------------------------------------------------
+
+         zml_handler.tic(&zml_handler.timers.wav);
+
+         try exportAudio(zml_handler, decoded_audio, i);
+
+         zml_handler.toc(&zml_handler.timers.wav);
+    }
+
+    acedit.unloadBuffers(zml_handler.allocator);
+    acevae.unloadBuffers(zml_handler.allocator);
+
 }
 
 
@@ -571,7 +701,7 @@ pub fn importAudio(zml_handler: *Zml_handler, input_path: []const u8) !inference
     // make sure audio has an integer duration in seconds
     const pad_frames = (48_000 - (num_frames % 48_000)) % 48_000;
     const effective_num_frames = num_frames + pad_frames;
-    
+
     const audio_slice: zml.Slice = try .alloc(zml_handler.allocator, zml.Shape.init(.{ .a = num_channels, .t = effective_num_frames }, .f32));
     errdefer audio_slice.free(zml_handler.allocator);
 

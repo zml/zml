@@ -6,6 +6,8 @@ const stdx = zml.stdx;
 
 const main = @import("main.zig");
 
+pub const decode_t = 5;
+
 
 pub const AceVaeDecoder_handler = struct {
     model: AceVaeDecoder,
@@ -15,7 +17,7 @@ pub const AceVaeDecoder_handler = struct {
     model_buffers: zml.Bufferized(AceVaeDecoder),
     shardings: main.Shardings,
 
-    pub fn init(zml_handler: *main.Zml_handler, decode_t: u32) !AceVaeDecoder_handler {
+    pub fn init(zml_handler: *main.Zml_handler) !AceVaeDecoder_handler {
         zml_handler.tic(&zml_handler.timers.vae.init);        
         std.log.info("VAE init decoder", .{});
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acevae);
@@ -102,7 +104,7 @@ pub const AceVaeEncoder_handler = struct {
     model_buffers: zml.Bufferized(AceVaeEncoder),
     shardings: main.Shardings,
 
-    pub fn init(zml_handler: *main.Zml_handler, decode_t: u32) !AceVaeEncoder_handler {
+    pub fn init(zml_handler: *main.Zml_handler) !AceVaeEncoder_handler {
         zml_handler.tic(&zml_handler.timers.vae.init);        
         std.log.info("VAE init encoder", .{});
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acevae);

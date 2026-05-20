@@ -12,10 +12,11 @@ pub const AceEmb_handler = struct {
     model: AceEmb,
     params: Params,
     config: Config,
+    options: Options,
     exes: Exes,
     model_buffers: zml.Bufferized(AceEmb),
 
-    pub fn init(zml_handler: *main.Zml_handler, text_len: u32, lyric_len: u32) !AceEmb_handler {
+    pub fn init(zml_handler: *main.Zml_handler) !AceEmb_handler {
         zml_handler.tic(&zml_handler.timers.emb.init);
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.aceemb);
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
@@ -26,6 +27,8 @@ pub const AceEmb_handler = struct {
         defer parsed_config.deinit();
         const config = try parsed_config.value.dupe(zml_handler.allocator);
         std.log.info("EMB parsed", .{});
+
+        const options: Options = .{};
         
         std.log.info("EMB init model", .{});
         var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
@@ -34,9 +37,9 @@ pub const AceEmb_handler = struct {
         std.log.info("EMB initialized", .{});
         
         const params: Params = .{
-            .lyric_tokens = .init(.{ .s = lyric_len }, .u32),
-            .text_tokens = .init(.{ .s = text_len }, .u32),
-            .text_embeds = .init(.{ .s = text_len, .d = config.hidden_size }, .bf16),
+            .lyric_tokens = .init(.{ .s = options.seq_len }, .u32),
+            .text_tokens = .init(.{ .s = options.seq_len }, .u32),
+            .text_embeds = .init(.{ .s = options.seq_len, .d = config.hidden_size }, .bf16),
             .shardings = try .init(zml_handler.platform),
         };
 
@@ -58,6 +61,7 @@ pub const AceEmb_handler = struct {
             .model = model,
             .params = params,
             .config = config,
+            .options = options,
             .exes = exes,
             .model_buffers = model_buffers,
         };
@@ -199,6 +203,10 @@ pub const Config = struct {
     pub fn deinit(self: Config, _: std.mem.Allocator) void {
         _ = self;
     }
+};
+
+pub const Options = struct {
+    seq_len: u32 = 2048,
 };
 
 pub const Exes = struct {

@@ -15,12 +15,13 @@ pub const AceEnc_handler = struct {
     silence: SilenceGenerator,
     params: Params,
     config: dit.ConfigXl,
+    options: Options,
     exes: Exes,
     model_buffers: zml.Bufferized(AceEnc),
     silence_buffers: zml.Bufferized(SilenceGenerator),
     shardings: main.Shardings,
     
-    pub fn init(zml_handler: *main.Zml_handler, text_len: u32, lyric_len: u32, target_duration: u32, audiocodes: usize) !AceEnc_handler {
+    pub fn init(zml_handler: *main.Zml_handler) !AceEnc_handler {
         zml_handler.tic(&zml_handler.timers.enc.init);
         const repo_m = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acedit);
         const repo_s = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.silence);
@@ -43,7 +44,9 @@ pub const AceEnc_handler = struct {
             const xl_config = try dit.ConfigXl.fromBase(parsed_config.value);
             config = try xl_config.dupe(zml_handler.allocator);
         }
-        std.log.info("ENC parsed", .{});        
+        std.log.info("ENC parsed", .{});
+
+        const options: Options = .{};
 
         var store_m: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry_m);
         var store_s: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry_s);
@@ -52,17 +55,15 @@ pub const AceEnc_handler = struct {
         std.log.info("ENC init models", .{});
         const model: AceEnc = try .init(zml_handler.allocator, store_m.view(), config);
         std.log.info("ENC encoder initialized", .{});
-        const silence: SilenceGenerator = .init(store_s.view(), config, target_duration * 25);
+        const silence: SilenceGenerator = .init(store_s.view());
         std.log.info("ENC silence initialized", .{});
         
         const params: Params = .{
-            .text_emb = .init(.{ .s = text_len, .d = config.text_hidden_dim }, .bf16),
-            .lyric_emb = .init(.{ .s = lyric_len, .d = config.text_hidden_dim }, .bf16),
+            .text_emb = .init(.{ .s = options.seq_len_text, .d = config.text_hidden_dim }, .bf16),
+            .lyric_emb = .init(.{ .s = options.seq_len_text, .d = config.text_hidden_dim }, .bf16),
+            .lyric_mask = .init(.{ .s1 = options.seq_len_text, .s2 = options.seq_len_text }, .bf16),
             .timbre_latent = .init(.{ .a = config.timbre_hidden_dim, .t = config.timbre_fix_frame }, .bf16),
-            .audio_codes = .init(.{ .s = audiocodes }, .u32),
-            .src_audio = .init(.{ .a = config.audio_acoustic_hidden_dim, .t = target_duration * 25 }, .bf16),
-            .encoded_lyric = .init(.{ .s = lyric_len, .d = config.encoder_hidden_size }, .bf16),
-            .encoded_timbre = .init(.{ .s = 1, .d = config.encoder_hidden_size }, .bf16),
+            .audio_codes = .init(.{ .s = options.seq_len_time * 5 }, .u32),
         };
         
         const shardings: main.Shardings = try .init(zml_handler.platform);
@@ -90,6 +91,7 @@ pub const AceEnc_handler = struct {
             .silence = silence,
             .params = params,
             .config = config,
+            .options = options,
             .exes = exes,
             .model_buffers = model_buffers,
             .silence_buffers = silence_buffers,
@@ -101,10 +103,19 @@ pub const AceEnc_handler = struct {
         const shardings_arr = shardings.all();
         const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
 
+        var encode_text_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: TextEncoder, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward,
+                    .{ params_.text_emb }, opts_);
+            }
+        }.call, .{ zml_handler, model.text_encoder, params, opts });
+        var encode_text_future_awaited = false;
+        errdefer if (!encode_text_future_awaited) if (encode_text_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+        
         var encode_lyric_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: LyricEncoder, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
-                        params_.lyric_emb }, opts_);
+                        params_.lyric_emb, params_.lyric_mask }, opts_);
             }
         }.call, .{ zml_handler, model.lyric_encoder, params, opts });
         var encode_lyric_future_awaited = false;
@@ -128,15 +139,6 @@ pub const AceEnc_handler = struct {
         var encode_audiocodes_future_awaited = false;
         errdefer if (!encode_audiocodes_future_awaited) if (encode_audiocodes_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
         
-        var encode_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: AceEnc, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward,
-                    .{ params_.text_emb, params_.encoded_lyric, params_.encoded_timbre, params_.src_audio }, opts_);
-            }
-        }.call, .{ zml_handler, model, params, opts });
-        var encode_future_awaited = false;
-        errdefer if (!encode_future_awaited) if (encode_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
-        
         var silence_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: SilenceGenerator, opts_: zml.module.CompilationOptions) !zml.Exe {
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{ }, opts_);
@@ -144,6 +146,9 @@ pub const AceEnc_handler = struct {
         }.call, .{ zml_handler, silence, opts });
         var silence_future_awaited = false;
         errdefer if (!silence_future_awaited) if (silence_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        const encode_text_exe = try encode_text_future.await(zml_handler.io);
+        encode_text_future_awaited = true;
         
         const encode_lyric_exe = try encode_lyric_future.await(zml_handler.io);
         encode_lyric_future_awaited = true;
@@ -154,13 +159,13 @@ pub const AceEnc_handler = struct {
         const encode_audiocodes_exe = try encode_audiocodes_future.await(zml_handler.io);
         encode_audiocodes_future_awaited = true;
 
-        const encode_exe = try encode_future.await(zml_handler.io);
-        encode_future_awaited = true;
-        
         const silence_exe = try silence_future.await(zml_handler.io);
         silence_future_awaited = true;
 
         return .{
+            .encode_text_exe = encode_text_exe,
+            .encode_text_args = try encode_text_exe.args(zml_handler.allocator),
+            .encode_text_results = try encode_text_exe.results(zml_handler.allocator),
             .encode_lyric_exe = encode_lyric_exe,
             .encode_lyric_args = try encode_lyric_exe.args(zml_handler.allocator),
             .encode_lyric_results = try encode_lyric_exe.results(zml_handler.allocator),
@@ -170,9 +175,6 @@ pub const AceEnc_handler = struct {
             .encode_audiocodes_exe = encode_audiocodes_exe,
             .encode_audiocodes_args = try encode_audiocodes_exe.args(zml_handler.allocator),
             .encode_audiocodes_results = try encode_audiocodes_exe.results(zml_handler.allocator),
-            .encode_exe = encode_exe,
-            .encode_args = try encode_exe.args(zml_handler.allocator),
-            .encode_results = try encode_exe.results(zml_handler.allocator),
             .silence_exe = silence_exe,
             .silence_args = try silence_exe.args(zml_handler.allocator),
             .silence_results = try silence_exe.results(zml_handler.allocator),
@@ -198,15 +200,17 @@ pub const Params = struct {
     text_emb: zml.Tensor,
     // lyric embeddings, expected shape: [s_lyric, d_emb]
     lyric_emb: zml.Tensor,
+    // lyric mask, expected shape: [s_lyric, s_lyric]
+    lyric_mask: zml.Tensor,
     // timbre source, expected shape: [config.timbre_fix_frame, d_audio]
     timbre_latent: zml.Tensor,
     // audio codes, expected shape: [t_5hz, 1]
     audio_codes: zml.Tensor,
-    // source audio, expected shape: [t_25hz, d_audio]
-    src_audio: zml.Tensor,
+};
 
-    encoded_lyric: zml.Tensor,
-    encoded_timbre: zml.Tensor,
+pub const Options = struct {
+    seq_len_text: u32 = 2048,
+    seq_len_time: u32 = 600,
 };
 
 pub const LayerType = enum {
@@ -215,6 +219,10 @@ pub const LayerType = enum {
 };
 
 pub const Exes = struct {
+    encode_text_exe: zml.Exe,
+    encode_text_args: zml.Exe.Arguments,
+    encode_text_results: zml.Exe.Results,
+    
     encode_lyric_exe: zml.Exe,
     encode_lyric_args: zml.Exe.Arguments,
     encode_lyric_results: zml.Exe.Results,
@@ -227,15 +235,14 @@ pub const Exes = struct {
     encode_audiocodes_args: zml.Exe.Arguments,
     encode_audiocodes_results: zml.Exe.Results,
 
-    encode_exe: zml.Exe,
-    encode_args: zml.Exe.Arguments,
-    encode_results: zml.Exe.Results,
-
     silence_exe: zml.Exe,
     silence_args: zml.Exe.Arguments,
     silence_results: zml.Exe.Results,
 
     pub fn deinit(self: Exes, allocator: std.mem.Allocator) void {
+        self.encode_text_exe.deinit();
+        self.encode_text_args.deinit(allocator);
+        self.encode_text_results.deinit(allocator);
         self.encode_lyric_exe.deinit();
         self.encode_lyric_args.deinit(allocator);
         self.encode_lyric_results.deinit(allocator);
@@ -245,9 +252,6 @@ pub const Exes = struct {
         self.encode_audiocodes_exe.deinit();
         self.encode_audiocodes_args.deinit(allocator);
         self.encode_audiocodes_results.deinit(allocator);
-        self.encode_exe.deinit();
-        self.encode_args.deinit(allocator);
-        self.encode_results.deinit(allocator);
         self.silence_exe.deinit();
         self.silence_args.deinit(allocator);
         self.silence_results.deinit(allocator);
@@ -258,14 +262,10 @@ pub const Exes = struct {
 pub const SilenceGenerator = struct {
     // dim = [1, 64, 15000] = [.b, .a, .t_25hz] where 15000 in 25hz is 600s the max audio output length
     silence_latent: zml.Tensor,
-    time_timbre: u32,
-    time_25hz: u32,
     
-    pub fn init(store: zml.io.TensorStore.View, config: dit.ConfigXl, time_25hz: u32) SilenceGenerator {
+    pub fn init(store: zml.io.TensorStore.View) SilenceGenerator {
         return .{
             .silence_latent = store.createTensor("silence_latent", .{ .batch, .audio, .time }, null),
-            .time_timbre = config.timbre_fix_frame,
-            .time_25hz = time_25hz,
         };
     }
     
@@ -282,17 +282,8 @@ pub const SilenceGenerator = struct {
         self.silence_latent.deinit();
     }
     
-    // we return 2 silence slices : one for the timbre reference, of length time_timbre
-    // and one for the source audio reference, of length time_25hz
-    pub fn forward(self: SilenceGenerator) struct {zml.Tensor, zml.Tensor } {
-        const full_audio_slice: zml.Tensor.Slice = .{ .start = 0, .end = self.silence_latent.dim(.audio) };
-        const target_timbre_slice: zml.Tensor.Slice = .{ .start = 0, .end = self.time_timbre };
-        const target_time_slice: zml.Tensor.Slice = .{ .start = 0, .end = self.time_25hz };
-        
-        const timbre_slice = self.silence_latent.squeeze(.batch).slice(&.{ full_audio_slice, target_timbre_slice });
-        const audio_slice = self.silence_latent.squeeze(.batch).slice(&.{ full_audio_slice, target_time_slice });
-        
-        return .{ timbre_slice.convert(.bf16), audio_slice.convert(.bf16) };
+    pub fn forward(self: SilenceGenerator) zml.Tensor {
+        return self.silence_latent.squeeze(.batch).convert(.bf16);
     }
 };
 
@@ -337,21 +328,6 @@ pub const AceEnc = struct {
          AudioCodeEncoder.unloadBuffers(&self.audiocode_encoder, allocator);
     }
 
-    pub fn forward(self: AceEnc, text_emb: zml.Tensor, encoded_lyric: zml.Tensor, encoded_timbre: zml.Tensor, src_latent: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        // dim [s_text, d_emb_cond]
-        const encoded_text = self.text_encoder.forward(text_emb);
-        
-        // dim [s_text + s_lyric + 1, d_emb_cond]
-        const encoded_conditions = zml.Tensor.concatenate(&.{ encoded_lyric, encoded_timbre, encoded_text }, .s);
-        
-        // dim [a, t_25hz]
-        const latent_mask = zml.Tensor.constant(zml.DataType.constant(.bf16, 1)).broad(src_latent.shape());
-        
-        // dim [t_25hz, 2 * a]
-        const context_latents = zml.Tensor.concatenate(&.{ src_latent, latent_mask }, .a).transpose(.{ .t, .a });
-        
-        return .{ context_latents, encoded_conditions };
-    }
 };
 
 
@@ -409,11 +385,11 @@ pub const LyricEncoder = struct {
         RmsNorm.unloadBuffers(&self.lyric_norm);
     }
 
-    pub fn forward(self: LyricEncoder, lyric_emb: zml.Tensor) zml.Tensor {
+    pub fn forward(self: LyricEncoder, lyric_emb: zml.Tensor, mask: zml.Tensor) zml.Tensor {
         var lyric_proj = self.lyric_projector.forward(lyric_emb).rename(.{ .d_out = .d });
         for (self.lyric_layers) |layer| {
-            // lyrics use full bidirectionnal attention : no masking
-            lyric_proj = layer.forward(lyric_proj, null);
+            // lyrics use full bidirectionnal attention : the mask is only here to select active seq range
+            lyric_proj = layer.forward(lyric_proj, mask);
         }
         lyric_proj = self.lyric_norm.forward(lyric_proj);
         return lyric_proj;
@@ -617,7 +593,7 @@ pub const TimbreEncoder = struct {
         timbre_emb = timbre_emb.rename(.{ .t = .s });
         const window_attention_mask = createBidirectionalWindowMask(timbre_emb.dim(.s), self.sliding_window);
         for (self.timbre_layers) |layer| {
-            // timbre use alternating window/full bidirectionnal attention
+            // timbre use alternating window/full bidirectionnal attention, it's seq_len is actually fixed to 30s, no need for a range mask
             const actual_mask = if (layer.id % 2 == 0) window_attention_mask else null;
             timbre_emb = layer.forward(timbre_emb, actual_mask);
         }
@@ -694,13 +670,14 @@ pub const AudioCodeEncoder = struct {
         hidden_states = hidden_states.insertAxes(1, .{ .p });
         hidden_states = hidden_states.repeat1d(.p, self.pool_window_size);
         // add special tokens
-        // TODO: in python these seem to be initialized at random instead of from the tensor file
-        // special_tokens = nn.Parameter(torch.randn(1, config.pool_window_size, config.hidden_size) * 0.02)
         const special_tokens = self.special_tokens.squeeze(.b).broad(hidden_states.shape());
         hidden_states = hidden_states.add(special_tokens);
         // encoder layers process tensors of dim [b, s, d]
         hidden_states = hidden_states.rename(.{ .t = .b, .p = .s });
         // audiocodes encoder uses alternating window/full bidirectional attention
+        // the time dimension becomes a batch dimension in attention : timesteps are treated independently,
+        // we don't need a range mask for valid time sequence, we simply truncate the embeddings CPU side
+        // TODO : makes no sense, pooling dimention is 5, window is useless here ?
         const window_attention_mask = createBidirectionalWindowMask(hidden_states.dim(.s), self.sliding_window);
         for (self.layers) |layer| {
             if (hidden_states.dim(.b) == 0) break;
@@ -714,8 +691,7 @@ pub const AudioCodeEncoder = struct {
         hidden_states = hidden_states.rename(.{ .d_out = .a, .s = .p, .b = .t });
         
         // depatch time dimension from 5hz * p = 5 to 25hz : [t, p, a] -> [t * p, a]
-        hidden_states = hidden_states.merge(.{ .t = .{ .t, .p }});
-        return hidden_states.transpose(.{ .a, .t });
+        return hidden_states.merge(.{ .t = .{ .t, .p }});
     }
     
 };
@@ -789,7 +765,7 @@ pub const AudioCodeDequantizer = struct {
         // - summation over quantizers is therefore identity
         const summed = fsq_features.convert(.bf16); // NUM
         
-        // out projection 
+        // out projection : from [nb_codes, 6] to [nb_codes, d_out = hidden_dim (ex 2048)]
         return self.project_out.forward(summed).rename(.{ .d_out = .d });
     }
     
