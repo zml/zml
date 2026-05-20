@@ -26,73 +26,9 @@ const Args = struct {
     ;
 };
 
-const RmsNorm = struct {
-    weight: zml.Tensor,
-    eps: f32,
-
-    pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNorm {
-        return .{
-            .weight = store.createTensor("weight", .{.d}, .{ .d = .replicated }),
-            .eps = eps,
-        };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
-        self.weight.deinit();
-    }
-
-    /// L2 normalization of input tensor along .d axis
-    /// Step 3.5 Flash uses offset-style RMSNorm: the effective scale is `1 + weight`,
-    /// not just `weight`.
-    pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
-        const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
-        const normalized = zml.nn.rmsNorm(x, .d, self.eps);
-        const scale = self.weight.convert(.f32).addConstant(1).convert(x.dtype()).withTags(.{.d});
-        std.log.warn("normalized={f} scale={f}", .{ normalized.shape(), scale.shape() });
-        return normalized.mul(scale.broad(normalized.shape()));
-    }
-};
-
-const Mlp = struct {
-    up_proj: zml.nn.Linear, // (dim -> hidden_dim)
-    gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
-    down_proj: zml.nn.Linear, // (hidden_dim -> dim)
-    limit: ?i32,
-
-    pub fn init(store: zml.io.TensorStore.View, swiglu_limit: ?i32) Mlp {
-        return .{
-            .up_proj = .init(store.createTensor("up_proj.weight", .{ .dout, .d }, .{ .dout = .replicated }), null, .d),
-            .gate_proj = .init(store.createTensor("gate_proj.weight", .{ .dout, .d }, .{ .dout = .replicated }), null, .d),
-            .down_proj = .init(store.createTensor("down_proj.weight", .{ .d, .dout }, .{ .d = .replicated }), null, .dout),
-            .limit = swiglu_limit,
-        };
-    }
-
-    pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        // Add tags to input before providing to our layer.
-        const input = x.withTags(.{ .b, .s, .d });
-
-        var up_proj = self.up_proj.forward(input);
-        var gate = self.gate_proj.forward(input);
-        gate = gate.silu();
-
-        // Step 3.5 Flash clamps gate projection asymmetrically
-        if (self.limit) |limit| {
-            if (limit != 0) {
-                const lim_f = @as(f32, @floatFromInt(limit));
-                const max_t = zml.Tensor.scalar(lim_f, gate.dtype());
-                const min_t = zml.Tensor.scalar(-lim_f, gate.dtype());
-
-                // Step 3.5 Flash has asymmetric clamping of gate projection
-                gate = gate.minimum(max_t);
-                up_proj = up_proj.clamp(min_t, max_t);
-            }
-        }
-        return self.down_proj.forward(gate.mul(up_proj));
-    }
-};
-
 pub fn main(init: std.process.Init) !void {
+    std.log.info("main", .{});
+
     const allocator = init.gpa;
     const io = init.io;
     const args = zml.stdx.flags.parse(init.minimal.args, Args);
@@ -117,8 +53,11 @@ fn run(
     activations_path: []const u8,
     model_store: *zml.io.TensorStore,
 ) !void {
+    std.log.info("run", .{});
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
+
+    std.log.info("activation store", .{});
     var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer activation_store.deinit();
 
@@ -127,6 +66,8 @@ fn run(
     for (layer_indices) |layer_idx| {
         const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp", .{layer_idx});
         defer allocator.free(name);
+
+        std.log.info("name {s}", .{name});
 
         try testLayer(allocator, io, platform, activation_store.view(), model_store, .mlp, name, .{ .absolute_tolerance = 1e-2 });
     }
@@ -153,9 +94,11 @@ fn run(
 const LayerKind = enum { mlp, rmsNorm };
 
 fn deinitBuffers(bufs: anytype) void {
+    std.log.info("deinit buffers", .{});
     zml.meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
             b.deinit();
+            std.log.info("deinit", .{});
         }
     }.cb, {}, bufs);
 }
@@ -173,18 +116,20 @@ fn testLayer(
 ) !void {
     switch (kind) {
         .mlp => {
-            const mlp = Mlp.init(model_store.view().withPrefix(name), null);
+            std.log.info("testlayer mlp {s}", .{name});
+            const mlp = model.Mlp.init(model_store.view().withPrefix(name), null);
 
+            std.log.info("before recursive cleanup for buffers", .{});
             // Recursive cleanup for buffers
-            var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, model_store, .auto);
+            var mlp_weights = try zml.io.load(model.Mlp, &mlp, allocator, io, platform, model_store, .auto);
             defer deinitBuffers(&mlp_weights);
 
             try zml.testing.testLayer(allocator, io, platform, mlp, .forward, activation_store, name, mlp_weights, &.{}, opts);
         },
         .rmsNorm => {
-            const rms = RmsNorm.init(model_store.view().withPrefix(name), @as(f32, 1e-5));
+            const rms = model.RmsNorm.init(model_store.view().withPrefix(name), @as(f32, 1e-5));
 
-            var rms_weights = try zml.io.load(RmsNorm, &rms, allocator, io, platform, model_store, .auto);
+            var rms_weights = try zml.io.load(model.RmsNorm, &rms, allocator, io, platform, model_store, .auto);
             defer deinitBuffers(&rms_weights);
 
             try zml.testing.testLayer(allocator, io, platform, rms, .forward, activation_store, name, rms_weights, &.{}, opts);

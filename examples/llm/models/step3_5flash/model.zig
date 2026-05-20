@@ -96,6 +96,17 @@ pub const Options = struct {
     max_seq_len: u32,
 };
 
+// LayerType
+
+// Rope
+// - parameters
+
+// There are some partitioning functions re: KV Cache
+
+// TextRotaryEmbedding
+
+// Moe
+
 // LoadedModel
 pub const LoadedModel = struct {
     inner: Model,
@@ -163,7 +174,7 @@ pub const LoadedModel = struct {
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         _ = self;
         if (buffers.lm_head) |*lm_head| lm_head.weight.deinit();
-        Step3p5Flash.unloadBuffers(&buffers.model, allocator);
+        Step3p5Flash.unloadBuffers(&buffers.replicated, allocator);
     }
 
     // pub fn compile(
@@ -195,7 +206,7 @@ const Model = struct {
         const lm_head: ?zml.nn.Linear = if (store.withPrefix("lm_head").maybeCreateTensor(
             "weight",
             .{ .dout, .d },
-            .{ .dout = .model, .d = .replicated },
+            .{ .dout = .replicated, .d = .replicated },
         )) |weight|
             .init(weight, null, .d)
         else
@@ -203,7 +214,7 @@ const Model = struct {
 
         return .{
             .lm_head = lm_head,
-            .model = try .init(allocator, store.withPrefix("model"), config),
+            .replicated = try .init(allocator, store.withPrefix("model"), config),
             .gen_opts = options.sampling_strategy orelse .{},
             .config = config,
         };
@@ -228,7 +239,7 @@ const Step3p5Flash = struct {
             .embed_tokens = .{ .weight = store.createTensor(
                 "embed_tokens.weight",
                 .{ .voc, .d },
-                .{ .voc = .replicated, .d = .model },
+                .{ .voc = .replicated, .d = .replicated },
             ) },
             .norm = .{
                 .weight = store.withPrefix("norm").createTensor("weight", .{.d}, .{ .d = .replicated }),
@@ -300,7 +311,7 @@ pub const TransformerLayer = struct {
 };
 
 // RmsNorm
-const RmsNorm = struct {
+pub const RmsNorm = struct {
     weight: zml.Tensor,
     eps: f32,
 
@@ -321,23 +332,36 @@ const RmsNorm = struct {
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
         const normalized = zml.nn.rmsNorm(x, .d, self.eps);
-        const scale = self.weight.convert(.f32).addConstant(1).convert(x.dtype());
-        return normalized.mul(scale).withTags(.{.d}).broad(x.shape());
+        const scale = self.weight.convert(.f32).addConstant(1).convert(x.dtype()).withTags(.{.d});
+        std.log.warn("normalized={f} scale={f}", .{ normalized.shape(), scale.shape() });
+        return normalized.mul(scale.broad(normalized.shape()));
     }
 };
 
-const Mlp = struct {
+pub const Mlp = struct {
     up_proj: zml.nn.Linear, // (dim -> hidden_dim)
     gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
     down_proj: zml.nn.Linear, // (hidden_dim -> dim)
     limit: ?i32,
 
-    pub fn init(self: Mlp, store: zml.io.TensorStore.View, swiglu_limit: ?i32) Mlp {
-        self.limit = swiglu_limit;
+    pub fn init(store: zml.io.TensorStore.View, swiglu_limit: ?i32) Mlp {
         return .{
-            .up_proj = .init(store.createTensor("up_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .gate_proj = .init(store.createTensor("gate_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .down_proj = .init(store.createTensor("down_proj.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
+            .up_proj = .init(
+                store.createTensor("up_proj.weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }),
+                null,
+                .d,
+            ),
+            .gate_proj = .init(
+                store.createTensor("gate_proj.weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }),
+                null,
+                .d,
+            ),
+            .down_proj = .init(
+                store.createTensor("down_proj.weight", .{ .d, .dout }, .{ .d = .replicated, .dout = .replicated }),
+                null,
+                .dout,
+            ),
+            .limit = swiglu_limit,
         };
     }
 
