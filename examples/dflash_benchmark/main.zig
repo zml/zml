@@ -162,6 +162,9 @@ pub fn main(init: std.process.Init) !void {
         const acceptance_lengths = try dflash_result.acceptance_lengths.toOwnedSlice(allocator);
         var owns_acceptance_lengths = true;
         errdefer if (owns_acceptance_lengths) allocator.free(acceptance_lengths);
+        const committed_lengths = try dflash_result.committed_lengths.toOwnedSlice(allocator);
+        var owns_committed_lengths = true;
+        errdefer if (owns_committed_lengths) allocator.free(committed_lengths);
         const histogram = try allocator.dupe(u64, dflash_result.valid_draft_token_histogram);
         var owns_histogram = true;
         errdefer if (owns_histogram) allocator.free(histogram);
@@ -184,6 +187,7 @@ pub fn main(init: std.process.Init) !void {
                 .elapsed = .{ .nanoseconds = dflash_result.decode_elapsed.nanoseconds },
                 .stopped_on_eos = dflash_result.stopped_on_eos,
                 .acceptance_lengths = acceptance_lengths,
+                .committed_lengths = committed_lengths,
                 .acceptance_length_histogram = histogram,
             },
             .quality = quality,
@@ -199,6 +203,7 @@ pub fn main(init: std.process.Init) !void {
         owns_baseline_tokens = false;
         owns_dflash_tokens = false;
         owns_acceptance_lengths = false;
+        owns_committed_lengths = false;
         owns_histogram = false;
     }
 
@@ -283,6 +288,8 @@ fn writeMethodJson(writer: *std.Io.Writer, method: stats.MethodResult, include_a
     if (include_acceptance) {
         try writer.writeAll(",\"acceptance_lengths\":");
         try writeU32Array(writer, method.acceptance_lengths);
+        try writer.writeAll(",\"committed_lengths\":");
+        try writeU32Array(writer, method.committed_lengths);
         try writer.writeAll(",\"acceptance_length_histogram\":");
         try writeU64Array(writer, method.acceptance_length_histogram);
     }
@@ -766,12 +773,14 @@ fn runPrefill(
 const MethodRunResult = struct {
     generated: std.ArrayList(u32),
     acceptance_lengths: std.ArrayList(u32),
+    committed_lengths: std.ArrayList(u32),
     valid_draft_token_histogram: []u64,
     decode_elapsed: stats.Duration,
     stopped_on_eos: bool,
 
     pub fn deinit(self: *MethodRunResult, allocator: std.mem.Allocator) void {
         allocator.free(self.valid_draft_token_histogram);
+        self.committed_lengths.deinit(allocator);
         self.acceptance_lengths.deinit(allocator);
         self.generated.deinit(allocator);
     }
@@ -970,6 +979,7 @@ fn runBaseline(
     return .{
         .generated = generated,
         .acceptance_lengths = .empty,
+        .committed_lengths = .empty,
         .valid_draft_token_histogram = histogram,
         .decode_elapsed = .{ .nanoseconds = started_at.untilNow(project.io, .awake).nanoseconds },
         .stopped_on_eos = stopped_on_eos,
@@ -1013,6 +1023,8 @@ fn runDFlash(
 
     var acceptance_lengths: std.ArrayList(u32) = .empty;
     errdefer acceptance_lengths.deinit(allocator);
+    var committed_lengths: std.ArrayList(u32) = .empty;
+    errdefer committed_lengths.deinit(allocator);
     var valid_draft_token_histogram = try allocator.alloc(u64, models.block_size + 1);
     errdefer allocator.free(valid_draft_token_histogram);
     @memset(valid_draft_token_histogram, 0);
@@ -1126,8 +1138,9 @@ fn runDFlash(
         const remaining_output_slots: usize = @intCast(prompt.max_seq_len - start);
         const max_usable_draft_tokens = if (remaining_output_slots == 0) 0 else remaining_output_slots - 1;
         const usable_draft_tokens = @min(valid_draft_tokens, max_usable_draft_tokens);
-        valid_draft_token_histogram[usable_draft_tokens] += 1;
-        try acceptance_lengths.append(allocator, @intCast(usable_draft_tokens));
+        valid_draft_token_histogram[valid_draft_tokens] += 1;
+        try acceptance_lengths.append(allocator, @intCast(valid_draft_tokens));
+        try committed_lengths.append(allocator, @intCast(usable_draft_tokens + 1));
 
         const committed_tokens: u32 = @intCast(usable_draft_tokens + 1);
         for (block_tokens[0..@as(usize, @intCast(committed_tokens))]) |token| {
@@ -1158,6 +1171,7 @@ fn runDFlash(
     return .{
         .generated = output_tokens,
         .acceptance_lengths = acceptance_lengths,
+        .committed_lengths = committed_lengths,
         .valid_draft_token_histogram = valid_draft_token_histogram,
         .decode_elapsed = .{ .nanoseconds = started_at.untilNow(project.io, .awake).nanoseconds },
         .stopped_on_eos = stopped_on_eos,
@@ -1390,5 +1404,6 @@ fn deinitSampleResult(allocator: std.mem.Allocator, sample: *stats.SampleResult)
     allocator.free(sample.dflash.token_ids);
     allocator.free(sample.dflash.generated_text);
     allocator.free(sample.dflash.acceptance_lengths);
+    allocator.free(sample.dflash.committed_lengths);
     allocator.free(sample.dflash.acceptance_length_histogram);
 }
