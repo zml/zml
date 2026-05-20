@@ -53,15 +53,16 @@ python examples/dflash_benchmark/vllm_benchmark/run_benchmark.py \
   --dataset math500 \
   --dataset-path ~/data/MATH-500/test.jsonl \
   --samples 10 \
+  --max-model-len 2048 \
   --temperature 0
 ```
 
 Other useful datasets:
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 python examples/dflash_benchmark/vllm_benchmark/run_benchmark.py --model /var/models/z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat/ --target-model /var/models/meta-llama/Llama-3.1-8B-Instruct/ --dataset swe_bench_lite --dataset-path ~/data/SWE-bench_Lite/test.jsonl --samples 10 --temperature 0
-CUDA_VISIBLE_DEVICES=1 python examples/dflash_benchmark/vllm_benchmark/run_benchmark.py --model /var/models/z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat/ --target-model /var/models/meta-llama/Llama-3.1-8B-Instruct/ --dataset alpaca --dataset-path ~/data/alpaca/train.jsonl --samples 10 --temperature 0
-CUDA_VISIBLE_DEVICES=1 python examples/dflash_benchmark/vllm_benchmark/run_benchmark.py --model /var/models/z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat/ --target-model /var/models/meta-llama/Llama-3.1-8B-Instruct/ --dataset mt_bench --dataset-path ~/data/mt-bench/test.jsonl --samples 10 --temperature 0
+CUDA_VISIBLE_DEVICES=1 python examples/dflash_benchmark/vllm_benchmark/run_benchmark.py --model /var/models/z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat/ --target-model /var/models/meta-llama/Llama-3.1-8B-Instruct/ --dataset swe_bench_lite --dataset-path ~/data/SWE-bench_Lite/test.jsonl --samples 10 --max-model-len 2048 --temperature 0
+CUDA_VISIBLE_DEVICES=1 python examples/dflash_benchmark/vllm_benchmark/run_benchmark.py --model /var/models/z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat/ --target-model /var/models/meta-llama/Llama-3.1-8B-Instruct/ --dataset alpaca --dataset-path ~/data/alpaca/train.jsonl --samples 10 --max-model-len 2048 --temperature 0
+CUDA_VISIBLE_DEVICES=1 python examples/dflash_benchmark/vllm_benchmark/run_benchmark.py --model /var/models/z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat/ --target-model /var/models/meta-llama/Llama-3.1-8B-Instruct/ --dataset mt_bench --dataset-path ~/data/mt-bench/test.jsonl --samples 10 --max-model-len 2048 --temperature 0
 ```
 
 ## Notes
@@ -73,5 +74,7 @@ CUDA_VISIBLE_DEVICES=1 python examples/dflash_benchmark/vllm_benchmark/run_bench
   counts in a stable offline API. When those metrics are unavailable, the
   benchmark still reports TPOT/TPS/speedup and exact-match quality, while tau
   and histogram fields remain zero/empty.
+- `--max-model-len` defaults to 2048 to keep KV-cache allocation smaller on the
+  RTX 5090. Raise it only when prompts plus generated tokens need more context.
 - `--num-speculative-tokens` defaults to 10 and is passed through vLLM's
   `speculative_config`.
