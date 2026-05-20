@@ -511,7 +511,7 @@ pub const fa3 = struct {
 
 pub const paged_fa2 = struct {
     // God knows why flash attention uses this number and not something else.
-    const MAX_NUM_SPLITS = 8;
+    pub const MAX_NUM_SPLITS = 8;
 
     pub const Variant = enum {
         decode,
@@ -1187,7 +1187,7 @@ pub const paged_fa2 = struct {
 
 pub const paged_fa3 = struct {
     // God knows why flash attention uses this number and not something else.
-    const MAX_NUM_SPLITS = 32;
+    pub const MAX_NUM_SPLITS = 32;
 
     pub const Variant = enum {
         decode,
