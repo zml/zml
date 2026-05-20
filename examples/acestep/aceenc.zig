@@ -283,7 +283,7 @@ pub const SilenceGenerator = struct {
     }
     
     pub fn forward(self: SilenceGenerator) zml.Tensor {
-        return self.silence_latent.squeeze(.batch).convert(.bf16);
+        return self.silence_latent.squeeze(.batch).convert(.bf16).transpose(.{ .time, .audio });
     }
 };
 
