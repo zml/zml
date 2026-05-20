@@ -252,20 +252,14 @@ pub fn printReport(writer: *std.Io.Writer, summary: Summary) !void {
     try writer.print("Speedup:        {d:.2}x\n", .{summary.speedup});
     try writer.print("Tau:            {d:.2}\n\n", .{summary.tau});
 
-    try writer.writeAll("Per-position acceptance rate:\n");
-    for (summary.per_position_acceptance_rates, 0..) |rate, i| {
-        try writer.print("  pos {d:>2}: {d:.3} ", .{ i + 1, rate });
+    try writer.writeAll("Valid draft tokens histogram:\n");
+    for (summary.acceptance_length_histogram_rates, 0..) |rate, valid_tokens| {
+        try writer.print("  {d:>2}: {d:.3} ", .{ valid_tokens, rate });
         try writer.splatByteAll('x', barLen(rate, 50));
         try writer.writeByte('\n');
     }
-    if (summary.per_position_acceptance_rates.len == 0) try writer.writeAll("  (no DFlash acceptance data)\n");
-
-    try writer.writeAll("\nAcceptance length histogram: [");
-    for (summary.acceptance_length_histogram_rates, 0..) |rate, i| {
-        if (i != 0) try writer.writeAll(", ");
-        try writer.print("{d:.3}", .{rate});
-    }
-    try writer.writeAll("]\n\n");
+    if (summary.acceptance_length_histogram_rates.len == 0) try writer.writeAll("  (no DFlash acceptance data)\n");
+    try writer.writeByte('\n');
     try writer.print("Output quality: {d}/{d} samples match baseline exactly\n", .{
         summary.exact_match_count,
         summary.sample_count,
