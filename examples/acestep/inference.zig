@@ -760,14 +760,11 @@ pub fn tokenizeInputLyrics(allocator: std.mem.Allocator, tokenizer: Tokenizer, m
     return tokens.toOwnedSlice(allocator);
 }
 
-pub fn embedLyric(zml_handler: *Zml_handler, aceemb: *aceemb_.AceEmb_handler, tokenizer: Tokenizer, lyric_tokens: []const u32) !zml.Slice {
+pub fn embedLyric(zml_handler: *Zml_handler, aceemb: *aceemb_.AceEmb_handler, lyric_tokens: []const u32) !zml.Slice {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = aceemb.params.shardings.replicated;
     const platform = zml_handler.platform;
-
-    var tokenizer_decoder = try tokenizer.decoder();
-    defer tokenizer_decoder.deinit();
 
     zml_handler.tic(&zml_handler.timers.emb.prefill);
 
@@ -797,18 +794,16 @@ pub fn embedLyric(zml_handler: *Zml_handler, aceemb: *aceemb_.AceEmb_handler, to
     return lyric_embedding;
 }
 
-pub fn embedText(zml_handler: *Zml_handler, aceemb: *aceemb_.AceEmb_handler, tokenizer: Tokenizer, text_tokens: []const u32) !zml.Slice {
+pub fn embedText(zml_handler: *Zml_handler, aceemb: *aceemb_.AceEmb_handler, text_tokens: []const u32) !zml.Slice {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = aceemb.params.shardings.replicated;
     const platform = zml_handler.platform;
 
-    var tokenizer_decoder = try tokenizer.decoder();
-    defer tokenizer_decoder.deinit();
-
     zml_handler.tic(&zml_handler.timers.emb.decode);
 
     const text_embedding_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = aceemb.options.seq_len, .d = aceemb.config.hidden_size }, .bf16));
+    defer text_embedding_slice.free(allocator);
     var text_embedding_buffer: zml.Buffer = undefined;
     defer text_embedding_buffer.deinit();
 
@@ -852,7 +847,7 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
     const platform = zml_handler.platform;
 
     const audio_dim = aceenc.config.timbre_hidden_dim;
-    const t_25hz: i64 = 25 * duration;
+    const t_25hz = 25 * duration;
     const n: usize = @intCast(t_25hz * audio_dim);
 
     zml_handler.tic(&zml_handler.timers.enc.prefill);
@@ -899,9 +894,13 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
         try latent_buffer.toSlice(io, latents_slice);
     }
 
-    // concatenate slices
-    @memcpy(return_slice.items(zml.floats.BFloat16)[0..n], latents_slice.items(zml.floats.BFloat16)[0..n]);
-    @memcpy(return_slice.items(zml.floats.BFloat16)[n..2*n], mask_slice.items(zml.floats.BFloat16)[0..n]);
+    // concatenate slices rows : can't simply memcpy
+    for (0..t_25hz) |i| {
+        for (0..audio_dim) |j| {
+            return_slice.items(zml.floats.BFloat16)[i * (2 * audio_dim) + j] = latents_slice.items(zml.floats.BFloat16)[i * audio_dim + j];
+            return_slice.items(zml.floats.BFloat16)[i * (2 * audio_dim) + j + audio_dim] = mask_slice.items(zml.floats.BFloat16)[i * audio_dim + j];
+        }
+    }
 
     zml_handler.toc(&zml_handler.timers.enc.prefill);
 
@@ -984,7 +983,7 @@ pub fn prepareDiffusionConditions(zml_handler: *Zml_handler, aceenc: *aceenc_.Ac
         std.log.info("ENC encoding timbre from silence latent", .{});
         const silence_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = aceenc.options.seq_len_time * 25, .d = audio_dim }, .bf16));
         defer silence_slice.free(allocator);
-        var silence_buffer: zml.Buffer = try .fromSlice(io, platform, silence_slice, sharding);
+        var silence_buffer: zml.Buffer = undefined;
         defer silence_buffer.deinit();
         aceenc.exes.silence_args.set(.{ aceenc.silence_buffers });
         aceenc.exes.silence_exe.call(aceenc.exes.silence_args, &aceenc.exes.silence_results);
@@ -1066,11 +1065,9 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     for (0..dimT) |i| {
         for (0..dimA) |j| {
             const rand: f32 = random.floatNorm(f32);
-            x.items(zml.floats.BFloat16)[i * dimA + j] = zml.floats.BFloat16.fromF32(rand);
+            x.items(zml.floats.BFloat16)[j + i * dimA] = zml.floats.BFloat16.fromF32(rand);
         }
     }
-
-    std.log.info("A", .{});
 
     // prepare arguments buffers
     var x_buffer: zml.Buffer = try .fromSlice(io, platform, x, sharding);
@@ -1079,8 +1076,6 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     defer x_buffer.deinit();
     defer latents_buffer.deinit();
     defer conditions_buffer.deinit();
-
-    std.log.info("B", .{});
 
     const full_mask_slice = try createBidirectionalFullMask(allocator, @divFloor(t + 1, 2));
     defer full_mask_slice.free(allocator);
@@ -1091,13 +1086,9 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     var sliding_mask_buffer: zml.Buffer = try .fromSlice(io, platform, sliding_mask_slice, sharding);
     defer sliding_mask_buffer.deinit();
 
-    std.log.info("C", .{});    
-
     const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = a, .t = t }, .bf16));
     var result_buffer: zml.Buffer = try .fromSlice(io, platform, result_slice, sharding);
     defer result_buffer.deinit();
-
-    std.log.info("D", .{});    
 
     // the full forward pass on the dit model is one iteration of the denoising
     const steps = timestamps.len - 1;
@@ -1170,9 +1161,9 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
             const rand: f32 = random.floatNorm(f32);
             // apply noise to s.x to initialize x : we only add noise in quantity that matches a level of the schedule,
             // and we then start the diffusion from that level.
-            const target: f32 = source.x.items(zml.floats.BFloat16)[i + j * dimT].toF32(); // source.x is [a, t]
+            const target: f32 = source.x.items(zml.floats.BFloat16)[i + j * dimT].toF32(); // source.x is [a, t] because it comes from VAE encode
             const noised = noise * rand + (1.0 - noise) * target;
-            x.items(zml.floats.BFloat16)[i * dimA + j] = zml.floats.BFloat16.fromF32(noised); // x is [t, a]
+            x.items(zml.floats.BFloat16)[j + i * dimA] = zml.floats.BFloat16.fromF32(noised); // x is [t, a]
         }
     }
 

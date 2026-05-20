@@ -271,7 +271,6 @@ const Args = struct {
 // - switch/blend/dice between the two during the diffusion
 // TODO: batch cfg
 
-// TODO: split acefsq from aceenc
 // TODO: move model related code from inference to Exes struct inside models
 // TODO: load in parallel as compile
 
@@ -381,8 +380,8 @@ pub fn runText2MusicPipeline(zml_handler: *Zml_handler) !void {
     defer aceemb.deinit(zml_handler.allocator);
 
     zml_handler.mem.start(0);
-    const caption_emb = try inference.embedText(zml_handler, &aceemb, tokenizer, caption_tok);
-    const lyric_emb = try inference.embedLyric(zml_handler, &aceemb, tokenizer, lyric_tok);
+    const caption_emb = try inference.embedText(zml_handler, &aceemb, caption_tok);
+    const lyric_emb = try inference.embedLyric(zml_handler, &aceemb, lyric_tok);
     zml_handler.mem.check(0);
     defer caption_emb.free(zml_handler.allocator);
     defer lyric_emb.free(zml_handler.allocator);
@@ -545,9 +544,9 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
     var aceemb = try aceemb_.AceEmb_handler.init(zml_handler);
     defer aceemb.deinit(zml_handler.allocator);
 
-    const caption_emb_non_cover = try inference.embedText(zml_handler, &aceemb, tokenizer, caption_tok_non_cover);
-    const caption_emb_cover = try inference.embedText(zml_handler, &aceemb, tokenizer, caption_tok_cover);
-    const lyric_emb = try inference.embedLyric(zml_handler, &aceemb, tokenizer, lyric_tok);
+    const caption_emb_non_cover = try inference.embedText(zml_handler, &aceemb, caption_tok_non_cover);
+    const caption_emb_cover = try inference.embedText(zml_handler, &aceemb, caption_tok_cover);
+    const lyric_emb = try inference.embedLyric(zml_handler, &aceemb, lyric_tok);
     defer zml_handler.allocator.free(caption_emb_non_cover);
     defer zml_handler.allocator.free(caption_emb_cover);
     defer zml_handler.allocator.free(lyric_emb);
