@@ -43,13 +43,4 @@ zig_test(
     ],
 )
 
-zig_binary(
-    name = "gemma3_validate",
-    main = "gemma3_validate.zig",
-    srcs = [
-        "gemma3_encoder.zig",
-    ],
-    deps = [
-        "//zml",
-    ],
-)
+
