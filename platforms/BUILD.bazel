@@ -19,11 +19,11 @@ PLATFORMS = {
 
 config_setting(
     name = "rocm.enabled",
-    flag_values = {":rocm": "True"},
     constraint_values = [
         "@platforms//cpu:x86_64",
         "@platforms//os:linux",
     ],
+    flag_values = {":rocm": "True"},
     visibility = ["//visibility:public"],
 )
 
@@ -33,13 +33,18 @@ config_setting(
         flag_values = {":{}".format(runtime): "True"},
         visibility = ["//visibility:public"],
     )
-    for runtime in ["cpu", "cuda", "tpu", "neuron"]
+    for runtime in [
+        "cpu",
+        "cuda",
+        "tpu",
+        "neuron",
+    ]
 ]
 
 zig_library(
     name = "platforms",
-    tags = ["manual"],
     main = "platforms.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         "//pjrt",
@@ -96,8 +101,31 @@ platform(
 
 platform(
     name = "host_glibc",
-    parents = ["@platforms//host"],
     constraint_values = [
         "@llvm//constraints/libc:gnu.2.28",
     ],
+    parents = ["@platforms//host"],
+)
+
+constraint_setting(name = "execution_location")
+
+constraint_value(
+    name = "local_execution",
+    constraint_setting = ":execution_location",
+    visibility = ["//visibility:public"],
+)
+
+# Special constrained host platform that toolchain can use as exec_compatible_with
+# if they want to only be used when executing on the local machine.
+#
+# This is currently used by Zig toolchains so that they are only resolved for
+# the host platform and thus can be used for no-remote-exec actions.
+platform(
+    name = "local_execution_platform",
+    constraint_values = [":local_execution"],
+    exec_properties = {
+        "no-remote-exec": "1",
+    },
+    parents = ["@platforms//host"],
+    visibility = ["//visibility:public"],
 )

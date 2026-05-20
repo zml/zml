@@ -1108,7 +1108,7 @@
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
         "bzlTransitiveDigest": "u7Psh7szBG3+lbRmEeBBbWlZRHJWhWtxQo/wtRqvnTg=",
-        "usagesDigest": "5XEfWW1w91pfg8tfjun45RGjw1lJZYeu8eiEGVfPhhM=",
+        "usagesDigest": "tAXabbZty5wQDs8D2YATunNvUDXykQ6HWiX6/FsGETQ=",
         "recordedFileInputs": {
           "@@//bazel/zig_index.json": "2e3b4b83f1add5d3ca12fd05797c04c38af21d86c7fc7c1a9b356560141a4797",
           "@@rules_zig+//zig/private/versions.json": "3e4e370dee9c3f3fdc8bfc7a600e76743278fde40815eead5d0bcda3aec3e2bd"
@@ -1382,22 +1382,22 @@
               "exec_constraints": [
                 "@platforms//os:linux",
                 "@platforms//cpu:aarch64",
-                "'@@//bazel/zig_toolchain_config:local_zig_execution'",
+                "'@@//platforms:local_execution'",
                 "@platforms//os:macos",
                 "@platforms//cpu:aarch64",
-                "'@@//bazel/zig_toolchain_config:local_zig_execution'",
+                "'@@//platforms:local_execution'",
                 "@platforms//os:windows",
                 "@platforms//cpu:aarch64",
-                "'@@//bazel/zig_toolchain_config:local_zig_execution'",
+                "'@@//platforms:local_execution'",
                 "@platforms//os:linux",
                 "@platforms//cpu:x86_64",
-                "'@@//bazel/zig_toolchain_config:local_zig_execution'",
+                "'@@//platforms:local_execution'",
                 "@platforms//os:macos",
                 "@platforms//cpu:x86_64",
-                "'@@//bazel/zig_toolchain_config:local_zig_execution'",
+                "'@@//platforms:local_execution'",
                 "@platforms//os:windows",
                 "@platforms//cpu:x86_64",
-                "'@@//bazel/zig_toolchain_config:local_zig_execution'"
+                "'@@//platforms:local_execution'"
               ],
               "target_compatible_lengths": [
                 0,

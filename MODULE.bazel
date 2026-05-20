@@ -30,7 +30,7 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 git_override(
     module_name = "rules_zig",
-    commit = "f2915a18037c9cc65437465b76758462e8c589b2", # main
+    commit = "f2915a18037c9cc65437465b76758462e8c589b2",  # main
     remote = "https://github.com/aherrmann/rules_zig.git",
 )
 
@@ -38,11 +38,14 @@ bazel_dep(name = "tar.bzl", version = "0.9.0")
 bazel_dep(name = "llvm", version = "0.7.3")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 bazel_dep(name = "grpc", version = "1.74.0")
+
 # Added to support bazel 9+ since an old version is pulled by GRPC
 # TODO: remove when GRPC is updated to v1.80+
 bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
+
 # Same as rules_foreign_cc
 bazel_dep(name = "rules_go", version = "0.60.0")
+
 # Same as rules_foreign_cc
 bazel_dep(name = "jsoncpp", version = "1.9.6.bcr.2", repo_name = "jsoncpp_git")
 
@@ -65,7 +68,8 @@ use_repo(
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(
-    extra_exec_compatible_with = ["//bazel/zig_toolchain_config:local_zig_execution"],
+    # Ensure Zig actions are run locally only
+    extra_exec_compatible_with = ["//platforms:local_execution"],
     zig_version = "0.16.0",
 )
 zig.mirrors(urls = [
@@ -84,17 +88,22 @@ zig.mirrors(urls = [
     "https://fs.liujiacai.net/zigbuilds",
     "https://ziglang.org/builds/",
 ])
-use_repo(
-    zig,
-    "zig_toolchains",
-)
+use_repo(zig, "zig_toolchains")
 
 register_toolchains("@rules_zig//zig/target:all")
 
 register_toolchains("@zig_toolchains//:all")
-register_toolchains("//:translate_c_toolchain")
-register_execution_platforms("//bazel/zig_toolchain_config:local_execution_platform")
 
+register_toolchains("//:translate_c_toolchain")
+
+# Add the local execution platform to the set of eligible execution platforms
+# This is used so that Zig toolchains that are only declared as compatible with
+# the constraints described by this platform be selected and matched with only
+# this platform only.
+# This ensures Zig actions only run locally because they're slower remotely
+# due to the Zig compilation model which concentrates one action for the whole
+# build graph.
+register_execution_platforms("//platforms:local_execution_platform")
 
 zls = use_extension("@rules_zig//zig/zls:extensions.bzl", "zls")
 zls.index(file = "@rules_zig//zig/zls/private:versions.json")
@@ -102,7 +111,6 @@ zls.toolchain(
     zig_version = "0.16.0",
     zls_version = "0.16.0",
 )
-
 use_repo(zls, "zls_toolchains")
 
 register_toolchains("@zls_toolchains//:all")
@@ -163,7 +171,7 @@ cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 
 cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
-use_repo(cuda, "libpjrt_cuda_linux_amd64", "libpjrt_cuda_linux_arm64", "cuda_nvml_dev_linux_x86_64", "cuda_nvml_dev_linux_sbsa", "zlib1g_linux_arm64", "zlib1g_linux_amd64", "cuda_nvtx_linux_x86_64", "cuda_nvtx_linux_sbsa")
+use_repo(cuda, "cuda_nvml_dev_linux_sbsa", "cuda_nvml_dev_linux_x86_64", "cuda_nvtx_linux_sbsa", "cuda_nvtx_linux_x86_64", "libpjrt_cuda_linux_amd64", "libpjrt_cuda_linux_arm64", "zlib1g_linux_amd64", "zlib1g_linux_arm64")
 
 rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
 use_repo(rocm, "amd-smi-lib", "hipblaslt", "libdrm-amdgpu-amdgpu1", "libdrm2-amdgpu", "libpjrt_rocm", "rocblas", "rocprofiler-sdk", "rocprofiler-sdk-roctx")
@@ -175,7 +183,7 @@ neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg", "mosaic_tpu")
+use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "mosaic_tpu", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg")
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(
@@ -184,6 +192,8 @@ use_repo(
     "eigen_archive",
     "farmhash_archive",
     "farmhash_gpu_archive",
+    "highwayhash",
+    "hwloc",
     "llvm-raw",
     "local_config_cuda",
     "local_config_remote_execution",
@@ -194,14 +204,12 @@ use_repo(
     "python_version_repo",
     "rules_ml_toolchain",
     "shardy",
+    "snappy",
     "stablehlo",
     "sycl_configure",
     "sycl_configure_ext",
     "triton",
     "tsl",
-    "highwayhash",
-    "snappy",
-    "hwloc",
 )
 
 llvm = use_extension("//third_party/xla:llvm.bzl", "llvm")
