@@ -53,8 +53,5 @@ CUDA_VISIBLE_DEVICES=1 bazel run --@zml//platforms:cuda=true //examples/dflash_b
   --dataset=math500 \
   --dataset-path=$HOME/data/MATH-500/test.jsonl \
   --samples=1 \
-  --max-new-tokens=1 \
-  --max-prompt-tokens=64 \
-  --seed=1 \
   --temperature=0
 ```

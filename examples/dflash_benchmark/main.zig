@@ -23,9 +23,9 @@ const Args = struct {
     dataset: datasets.Dataset,
     split: []const u8 = "",
     samples: usize,
-    seed: u64 = 0,
-    max_new_tokens: u32 = 256,
-    max_prompt_tokens: u32 = default_prefill_seq_len,
+    seed: u64 = 1,
+    max_new_tokens: u32 = 1024,
+    max_prompt_tokens: u32 = 512,
     temperature: f32 = 0.0,
     output_json: []const u8 = "",
     verbose: bool = false,
@@ -38,9 +38,9 @@ const Args = struct {
         \\  --dataset=<name>           math500|sharegpt|alpaca|swe_bench_lite|generic_jsonl|generic_json
         \\  --split=<name>             Dataset split label; defaults by dataset
         \\  --samples=<n>              Number of randomly selected valid samples
-        \\  --seed=<n>                 Deterministic sample/RNG seed; defaults to 0
-        \\  --max-new-tokens=<n>       Generated output tokens per method; defaults to 256
-        \\  --max-prompt-tokens=<n>    Minimum prompt cache capacity; actual selected prompts may be longer and run in chunks
+        \\  --seed=<n>                 Deterministic sample/RNG seed; defaults to 1
+        \\  --max-new-tokens=<n>       Generated output tokens per method; defaults to 1024
+        \\  --max-prompt-tokens=<n>    Minimum prompt cache capacity; defaults to 512; actual selected prompts may be longer and run in chunks
         \\  --temperature=<t>          Sampling temperature; 0 uses greedy decoding
         \\  --output-json=<path>       Optional result JSON output path
         \\  --verbose                  Print each selected prompt and both generated answers
