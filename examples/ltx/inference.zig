@@ -3706,82 +3706,16 @@ fn runVideoVaeDecode(
     patchified_input.deinit();
 
     // ========================================================================
-    // Step 2: Tiling decision — for tiled path, download latent to host
-    // and free GPU buffer BEFORE loading VAE weights to minimize peak memory.
+    // Step 2: Tiling decision
     // ========================================================================
     const tiling_config: video_vae.TemporalTilingConfig = .{};
     const use_tiling = F > tiling_config.tile_latent_frames;
 
-    // For tiled path: download to host and free GPU latent early
-    var latent_host: ?zml.Slice = null;
     if (use_tiling) {
-        std.log.info("Temporal tiling enabled: F'={d}, tile={d}, overlap={d}, stride={d}", .{
+        std.log.info("Temporal tiling enabled (on-device slicing): F'={d}, tile={d}, overlap={d}, stride={d}", .{
             F, tiling_config.tile_latent_frames, tiling_config.overlap_latent_frames, tiling_config.stride(),
         });
-        std.log.info("Downloading latent to host for tiling...", .{});
-        latent_host = try v_latent_5d.toSliceAlloc(allocator, io);
-
-        // === DEBUG 1: Verify latent host download integrity ===
-        {
-            const dbg_bytes = latent_host.?.constData();
-            const dbg_H: usize = @intCast(H);
-            const dbg_W: usize = @intCast(W);
-            const dbg_F: usize = @intCast(F);
-            const dbg_HW: usize = dbg_H * dbg_W;
-            const dbg_HW2: usize = dbg_HW * 2;
-            std.log.info("=== DEBUG 1: LATENT HOST DOWNLOAD ===", .{});
-            std.log.info("  Total bytes: {d}, expected: {d}", .{ dbg_bytes.len, @as(usize, 1 * 128 * dbg_F * dbg_HW * 2) });
-            std.log.info("  Shape: [1, 128, {d}, {d}, {d}] bf16", .{ dbg_F, dbg_H, dbg_W });
-
-            // Print first 10 values at [c=0, f=0, h=0, w=0..9]
-            for (0..@min(10, dbg_W)) |w_idx| {
-                const offset = (0 * dbg_F * dbg_HW2) + (0 * dbg_HW2) + (0 * dbg_W * 2) + (w_idx * 2);
-                const bf16_val = std.mem.readInt(u16, dbg_bytes[offset..][0..2], .little);
-                const f32_val: f32 = @bitCast(@as(u32, bf16_val) << 16);
-                std.log.info("  latent[c=0,f=0,h=0,w={d}] = {d:.6}", .{ w_idx, f32_val });
-            }
-            // c=0, f=1
-            for (0..@min(10, dbg_W)) |w_idx| {
-                const offset = (0 * dbg_F * dbg_HW2) + (1 * dbg_HW2) + (0 * dbg_W * 2) + (w_idx * 2);
-                const bf16_val = std.mem.readInt(u16, dbg_bytes[offset..][0..2], .little);
-                const f32_val: f32 = @bitCast(@as(u32, bf16_val) << 16);
-                std.log.info("  latent[c=0,f=1,h=0,w={d}] = {d:.6}", .{ w_idx, f32_val });
-            }
-            // c=1, f=0
-            for (0..@min(10, dbg_W)) |w_idx| {
-                const offset = (1 * dbg_F * dbg_HW2) + (0 * dbg_HW2) + (0 * dbg_W * 2) + (w_idx * 2);
-                const bf16_val = std.mem.readInt(u16, dbg_bytes[offset..][0..2], .little);
-                const f32_val: f32 = @bitCast(@as(u32, bf16_val) << 16);
-                std.log.info("  latent[c=1,f=0,h=0,w={d}] = {d:.6}", .{ w_idx, f32_val });
-            }
-
-            // Per-channel mean/std for channels 0, 1, 64, 127
-            const dbg_channels = [_]usize{ 0, 1, 64, 127 };
-            for (dbg_channels) |ch| {
-                var sum: f64 = 0;
-                var sum_sq: f64 = 0;
-                const count: f64 = @floatFromInt(dbg_F * dbg_HW);
-                for (0..dbg_F) |ff| {
-                    for (0..dbg_HW) |hw| {
-                        const offset = (ch * dbg_F * dbg_HW2) + (ff * dbg_HW2) + (hw * 2);
-                        const bf16_val = std.mem.readInt(u16, dbg_bytes[offset..][0..2], .little);
-                        const f32_val: f32 = @bitCast(@as(u32, bf16_val) << 16);
-                        const f64_val: f64 = @floatCast(f32_val);
-                        sum += f64_val;
-                        sum_sq += f64_val * f64_val;
-                    }
-                }
-                const mean = sum / count;
-                const variance = sum_sq / count - mean * mean;
-                const stddev = @sqrt(@max(variance, 0.0));
-                std.log.info("  channel {d}: mean={d:.6}, std={d:.6}", .{ ch, mean, stddev });
-            }
-        }
-
-        // Free 5D GPU latent — we have the host copy, tiles will be uploaded individually.
-        v_latent_5d.deinit();
     }
-    defer if (latent_host) |lh| lh.free(allocator);
 
     // ========================================================================
     // Step 3: Load VAE decoder weights + per-channel stats
@@ -3838,12 +3772,13 @@ fn runVideoVaeDecode(
     // Step 4: Dispatch to tiled or single-shot decode
     // ========================================================================
     if (use_tiling) {
+        defer v_latent_5d.deinit(); // Free GPU latent after all tiles decoded
         return runVideoVaeDecodeTiled(
             allocator,
             io,
             platform,
             sharding,
-            latent_host.?,
+            v_latent_5d,
             vae_params,
             vae_bufs,
             stats_shape,
@@ -3894,25 +3829,6 @@ fn runVideoVaeDecode(
     defer vae_args.deinit(allocator);
     var vae_results = try vae_exe.results(allocator);
     defer vae_results.deinit(allocator);
-    // === DEBUG 6: Non-tiled input buffer sharding ===
-    {
-        std.log.info("=== DEBUG 6: NON-TILED INPUT SHARDING ===", .{});
-        std.log.info("  v_latent_5d shape: {any}", .{v_latent_5d.shape().dims()});
-        const dbg_placement = v_latent_5d.placement();
-        std.log.info("  num shards: {d}", .{dbg_placement.shards.len});
-        for (dbg_placement.shards.constSlice(), 0..) |shard, si| {
-            std.log.info("  shard {d}: device_id={d}, shape={any}", .{ si, shard.device_id, shard.shape.dims() });
-            for (shard.slices.constSlice()) |sl| {
-                std.log.info("    axis={d} start={d} size={d}", .{ sl.axis, sl.start, sl.size });
-            }
-        }
-        // Print partition specs for each axis
-        const dbg_shape = v_latent_5d.shape();
-        for (0..@intCast(dbg_shape.rank())) |ax| {
-            std.log.info("  axis {d}: dim={d}, partition={s}", .{ ax, dbg_shape.dim(@intCast(ax)), @tagName(dbg_shape.partition(@intCast(ax))) });
-        }
-    }
-
     vae_args.set(.{ v_latent_5d, stats_bufs, vae_bufs });
     vae_exe.callOpts(io, vae_args, &vae_results, .{ .wait = true });
     v_latent_5d.deinit(); // Free GPU latent after VAE consumes it
@@ -3931,15 +3847,43 @@ fn runVideoVaeDecode(
     return postProcessDecodedVideo(allocator, io, decoded_video);
 }
 
-/// Tiled VAE decode path: decode overlapping temporal chunks and blend on host.
-/// The latent has already been downloaded to host (latent_host) and the GPU buffer freed
-/// to minimize peak GPU memory during VAE weight loading and execution.
+/// Fused tile extraction + VAE decode: pads the latent on device, extracts a tile
+/// via dynamicSlice1d, and runs the VAE decoder — all in a single compiled XLA program.
+/// This avoids host→device buffer upload layout issues on TPU.
+fn fusedTileVaeDecode(
+    full_latent: zml.Tensor,
+    start_frame: zml.Tensor,
+    stats: conv_ops.PerChannelStats,
+    params: video_vae.VideoVaeDecoderParams,
+) zml.Tensor {
+    const F = full_latent.dim(2);
+    const config = video_vae.TemporalTilingConfig{};
+    const tile_plan = video_vae.computeTemporalTiles(F, config);
+    const last_start = tile_plan.tiles[tile_plan.count - 1].lat_start;
+    const padded_F = last_start + config.tile_latent_frames;
+    const pad_needed = padded_F - F;
+
+    const padded = if (pad_needed > 0)
+        full_latent.pad(0, .{ ._2 = zml.Tensor.Pad{ .high = pad_needed } })
+    else
+        full_latent;
+
+    const tile = padded.dynamicSlice1d(2, .{
+        .start = start_frame,
+        .len = config.tile_latent_frames,
+    });
+
+    return video_vae.forwardVideoVaeDecode(tile, stats, params);
+}
+
+/// Tiled VAE decode path: decode overlapping temporal chunks on device and blend on host.
+/// Uses on-device tile extraction (dynamicSlice) to avoid host→device layout mismatch on TPU.
 fn runVideoVaeDecodeTiled(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
     sharding: zml.Sharding,
-    latent_host: zml.Slice,
+    v_latent: zml.Buffer,
     vae_params: video_vae.VideoVaeDecoderParams,
     vae_bufs: zml.Bufferized(video_vae.VideoVaeDecoderParams),
     stats_shape: conv_ops.PerChannelStats,
@@ -3951,8 +3895,6 @@ fn runVideoVaeDecodeTiled(
     timer: *PhaseTimer,
     profile: bool,
 ) !VideoFrames {
-    const C: i64 = 128;
-
     // Compute tile plan
     const tile_plan = video_vae.computeTemporalTiles(F, config);
     std.log.info("  Tile plan: {d} tiles", .{tile_plan.count});
@@ -3962,15 +3904,17 @@ fn runVideoVaeDecodeTiled(
     const H_px: usize = @intCast(32 * H);
     const W_px: usize = @intCast(32 * W);
 
-    // Compile VAE decoder once for the tile shape [1, 128, tile_latent_frames, H, W]
-    const tile_latent_shape = zml.Shape.init(.{ 1, C, config.tile_latent_frames, H, W }, .bf16);
-    std.log.info("Compiling VAE decoder for tile shape: {any}...", .{tile_latent_shape.dims()});
+    // Compile fused tile-extract + VAE decode function.
+    // Input: full latent [1, 128, F, H, W] + scalar start_frame + stats + params
+    // The function pads the latent, extracts a tile via dynamicSlice, and runs VAE decode.
+    std.log.info("Compiling fused tile-extract + VAE decoder for latent shape: {any}...", .{v_latent.shape().dims()});
     var vae_exe = try platform.compileFn(
         allocator,
         io,
-        video_vae.forwardVideoVaeDecode,
+        fusedTileVaeDecode,
         .{
-            zml.Tensor.fromShape(tile_latent_shape),
+            zml.Tensor.fromShape(v_latent.shape()),
+            zml.Tensor.fromShape(zml.Shape.scalar(.i32)),
             stats_shape,
             vae_params,
         },
@@ -3978,8 +3922,6 @@ fn runVideoVaeDecodeTiled(
     );
     defer vae_exe.deinit();
     timer.addCompile();
-
-    const latent_bytes = latent_host.constData();
 
     // Host accumulation buffers (f32 for precision during blending)
     // Layout: [F_px, H_px, W_px, 3] in NHWC for easy frame-sequential access
@@ -3992,14 +3934,7 @@ fn runVideoVaeDecodeTiled(
     defer allocator.free(weight_accum);
     @memset(weight_accum, 0.0);
 
-    // Process each tile
-    const tile_lat_frames_usize: usize = @intCast(config.tile_latent_frames);
-    const tile_byte_size: usize = @intCast(1 * C * config.tile_latent_frames * H * W * 2); // bf16=2 bytes
-
-    // Pre-allocate tile buffer, args, and results outside the loop (same shape every tile).
-    const tile_buf = try allocator.alloc(u8, tile_byte_size);
-    defer allocator.free(tile_buf);
-
+    // Pre-allocate args and results outside the loop (same shape every tile).
     var vae_args = try vae_exe.args(allocator);
     defer vae_args.deinit(allocator);
     var vae_results = try vae_exe.results(allocator);
@@ -4029,79 +3964,9 @@ fn runVideoVaeDecodeTiled(
             tile.px_end,
         });
 
-        // Create tile latent on host: [1, 128, tile_latent_frames, H, W] bf16
-        // Copy actual frames, zero-pad if last tile is shorter.
-        @memset(tile_buf, 0); // zero-fill (handles padding for short last tile)
-
-        // Copy frame data. Layout is [B=1, C=128, F, H, W] contiguous.
-        // Offset for frame f in the full latent: f * C * H * W * 2 bytes,
-        // but C is dim 1 (outermost after B), so frames are NOT contiguous
-        // in the standard [B,C,F,H,W] layout. We need to copy per-channel.
-        //
-        // Actually, in [B, C, F, H, W] layout with C=128:
-        //   stride of dim 2 (F) = H * W * 2 bytes
-        //   stride of dim 1 (C) = F * H * W * 2 bytes
-        // To slice frames [start..end) we need to copy, for each channel c:
-        //   source: c * F_full * HW2 + start * HW2 .. + end * HW2
-        //   dest:   c * tile_F * HW2 + 0 .. actual * HW2
-        const HW2: usize = @intCast(H * W * 2);
-        const F_full: usize = @intCast(F);
-        const start: usize = @intCast(tile.lat_start);
-
-        for (0..128) |c| {
-            const src_base = c * F_full * HW2 + start * HW2;
-            const dst_base = c * tile_lat_frames_usize * HW2;
-            const copy_len = actual_lat_frames * HW2;
-            @memcpy(tile_buf[dst_base..][0..copy_len], latent_bytes[src_base..][0..copy_len]);
-        }
-
-        // === DEBUG 2: Verify tile copy correctness (tile 0 only) ===
-        if (tile_idx == 0) {
-            std.log.info("=== DEBUG 2: TILE 0 COPY VERIFICATION ===", .{});
-            for (0..@min(10, @as(usize, @intCast(W)))) |w_idx| {
-                const tile_offset = (0 * tile_lat_frames_usize * HW2) + (0 * HW2) + (w_idx * 2);
-                const src_offset = (0 * F_full * HW2) + (start * HW2) + (w_idx * 2);
-                const tile_bf16 = std.mem.readInt(u16, tile_buf[tile_offset..][0..2], .little);
-                const src_bf16 = std.mem.readInt(u16, latent_bytes[src_offset..][0..2], .little);
-                const tile_f32: f32 = @bitCast(@as(u32, tile_bf16) << 16);
-                const src_f32: f32 = @bitCast(@as(u32, src_bf16) << 16);
-                std.log.info("  tile[c=0,f=0,w={d}]: tile={d:.6} src={d:.6} match={}", .{ w_idx, tile_f32, src_f32, tile_bf16 == src_bf16 });
-            }
-            // Also verify a few values at c=1, f=0
-            for (0..@min(5, @as(usize, @intCast(W)))) |w_idx| {
-                const tile_offset = (1 * tile_lat_frames_usize * HW2) + (0 * HW2) + (w_idx * 2);
-                const src_offset = (1 * F_full * HW2) + (start * HW2) + (w_idx * 2);
-                const tile_bf16 = std.mem.readInt(u16, tile_buf[tile_offset..][0..2], .little);
-                const src_bf16 = std.mem.readInt(u16, latent_bytes[src_offset..][0..2], .little);
-                const tile_f32: f32 = @bitCast(@as(u32, tile_bf16) << 16);
-                const src_f32: f32 = @bitCast(@as(u32, src_bf16) << 16);
-                std.log.info("  tile[c=1,f=0,w={d}]: tile={d:.6} src={d:.6} match={}", .{ w_idx, tile_f32, src_f32, tile_bf16 == src_bf16 });
-            }
-        }
-
-        // Upload tile to GPU, using the compiled executable's input shape
-        // (which carries the correct partition annotations from the compiler).
-        const compiled_input_shape = vae_exe.input_shapes[0];
-        const tile_slice = zml.Slice.init(compiled_input_shape, tile_buf);
-
-        // === DEBUG 5: Verify sharding placement on upload (tile 0 only) ===
-        if (tile_idx == 0) {
-            std.log.info("=== DEBUG 5: TILE UPLOAD SHARDING ===", .{});
-            std.log.info("  compiled_input_shape dims: {any}", .{compiled_input_shape.dims()});
-            for (0..@intCast(compiled_input_shape.rank())) |ax| {
-                std.log.info("    axis {d}: dim={d}, partition={s}", .{ ax, compiled_input_shape.dim(@intCast(ax)), @tagName(compiled_input_shape.partition(@intCast(ax))) });
-            }
-            const dbg_placement = try zml.Sharding.Placement.init(sharding, compiled_input_shape);
-            std.log.info("  num shards: {d}", .{dbg_placement.shards.len});
-            for (dbg_placement.shards.constSlice(), 0..) |shard, si| {
-                std.log.info("  shard {d}: device_id={d}, shape={any}", .{ si, shard.device_id, shard.shape.dims() });
-                for (shard.slices.constSlice()) |sl| {
-                    std.log.info("    axis={d} start={d} size={d}", .{ sl.axis, sl.start, sl.size });
-                }
-            }
-        }
-
-        var tile_gpu = try zml.Buffer.fromSlice(io, platform, tile_slice, sharding);
+        // Create scalar buffer with tile start frame index
+        var start_buf = try zml.Buffer.scalar(io, platform, @as(i32, @intCast(tile.lat_start)), .i32);
+        defer start_buf.deinit();
 
         if (tile_idx == 0) {
             if (vae_tile_profiler) |*p| p.start() catch |err| {
@@ -4109,8 +3974,8 @@ fn runVideoVaeDecodeTiled(
             };
         }
 
-        // Run VAE decoder
-        vae_args.set(.{ tile_gpu, stats_bufs, vae_bufs });
+        // Run fused tile-extract + VAE decode on device
+        vae_args.set(.{ v_latent, start_buf, stats_bufs, vae_bufs });
         vae_exe.callOpts(io, vae_args, &vae_results, .{ .wait = true });
         var decoded_tile = vae_results.get(zml.Buffer); // [1, 3, F_tile_px, H_px, W_px] bf16
         defer decoded_tile.deinit();
@@ -4123,9 +3988,6 @@ fn runVideoVaeDecodeTiled(
             }
         }
 
-        // Free GPU tile input immediately
-        tile_gpu.deinit();
-
         // Download decoded tile to host
         const tile_decoded_slice = try decoded_tile.toSliceAlloc(allocator, io);
         defer tile_decoded_slice.free(allocator);
@@ -4134,33 +3996,6 @@ fn runVideoVaeDecodeTiled(
         // Determine actual pixel frame count for this tile (crop padding)
         const tile_F_px_full: usize = @intCast(decoded_tile.shape().dim(2)); // 8*(tile_lat-1)+1
 
-        // === DEBUG 3: Dump tile 0 decoded output for comparison ===
-        if (tile_idx == 0) {
-            std.log.info("=== DEBUG 3: TILE 0 DECODED OUTPUT ===", .{});
-            std.log.info("  Decoded tile shape: {any}", .{decoded_tile.shape().dims()});
-            std.log.info("  tile_F_px_full={d}, H_px={d}, W_px={d}", .{ tile_F_px_full, H_px, W_px });
-            // Print first 20 pixel values at [c=0, f=0, h=0]
-            for (0..@min(20, W_px)) |w_idx| {
-                const offset = (0 * tile_F_px_full * H_px * W_px + 0 * H_px * W_px + 0 * W_px + w_idx) * 2;
-                const bf16_val = std.mem.readInt(u16, tile_decoded_bytes[offset..][0..2], .little);
-                const f32_val: f32 = @bitCast(@as(u32, bf16_val) << 16);
-                std.log.info("  decoded_tile[c=0,f=0,h=0,w={d}] = {d:.6}", .{ w_idx, f32_val });
-            }
-            // Dump to file
-            const dump_path = "/tmp/tile0_decoded_bf16.bin";
-            const dump_file = std.fs.cwd().createFile(dump_path, .{}) catch |err| blk: {
-                std.log.warn("Cannot create dump file: {}", .{err});
-                break :blk null;
-            };
-            if (dump_file) |f| {
-                defer f.close();
-                const byte_size: usize = @intCast(decoded_tile.shape().byteSize());
-                f.writeAll(tile_decoded_bytes[0..byte_size]) catch |err| {
-                    std.log.warn("Write failed: {}", .{err});
-                };
-                std.log.info("  Dumped {d} bytes to {s}", .{ byte_size, dump_path });
-            }
-        }
         const actual_px_frames: usize = @intCast(tile.px_end - tile.px_start);
         const tile_F_px = @min(tile_F_px_full, actual_px_frames);
 
@@ -4250,34 +4085,6 @@ fn postProcessDecodedVideo(
 
     const num_pixels = F_out * H_out * W_out * 3;
     const frames_u8 = try allocator.alloc(u8, num_pixels);
-
-    // === DEBUG 4: Non-tiled reference dump ===
-    {
-        std.log.info("=== DEBUG 4: NON-TILED DECODED OUTPUT ===", .{});
-        std.log.info("  Decoded shape: [1, 3, {d}, {d}, {d}]", .{ F_out, H_out, W_out });
-        const dbg_data = decoded_slice.constData();
-        // Print first 20 pixel values at [c=0, f=0, h=0]
-        for (0..@min(20, W_out)) |w_idx| {
-            const offset = (0 * F_out * H_out * W_out + 0 * H_out * W_out + 0 * W_out + w_idx) * 2;
-            const bf16_val = std.mem.readInt(u16, dbg_data[offset..][0..2], .little);
-            const f32_val: f32 = @bitCast(@as(u32, bf16_val) << 16);
-            std.log.info("  decoded[c=0,f=0,h=0,w={d}] = {d:.6}", .{ w_idx, f32_val });
-        }
-        // Dump to file for comparison
-        const dump_path = "/tmp/nontiled_decoded_bf16.bin";
-        const dump_file = std.fs.cwd().createFile(dump_path, .{}) catch |err| blk: {
-            std.log.warn("Cannot create dump file: {}", .{err});
-            break :blk null;
-        };
-        if (dump_file) |f| {
-            defer f.close();
-            const byte_size: usize = @intCast(decoded_video.shape().byteSize());
-            f.writeAll(dbg_data[0..byte_size]) catch |err| {
-                std.log.warn("Write failed: {}", .{err});
-            };
-            std.log.info("  Dumped {d} bytes to {s}", .{ byte_size, dump_path });
-        }
-    }
 
     // Convert bf16 [1, 3, F, H, W] → u8 [F, H, W, 3] (NHWC)
     // (x + 1) / 2 * 255, clamped to [0, 255]
