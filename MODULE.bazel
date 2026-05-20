@@ -27,12 +27,7 @@ bazel_dep(name = "rules_oci", version = "2.2.7")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.9.0")
 bazel_dep(name = "rules_shell", version = "0.6.1")
-bazel_dep(name = "rules_zig", version = "0.12.2")
-git_override(
-    module_name = "rules_zig",
-    commit = "f2915a18037c9cc65437465b76758462e8c589b2",  # main
-    remote = "https://github.com/aherrmann/rules_zig.git",
-)
+bazel_dep(name = "rules_zig", version = "0.15.0")
 
 bazel_dep(name = "tar.bzl", version = "0.9.0")
 bazel_dep(name = "llvm", version = "0.7.3")
