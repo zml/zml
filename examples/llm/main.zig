@@ -134,26 +134,9 @@ pub fn main(init: std.process.Init) !void {
     var compiled_model = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
     defer compiled_model.deinit();
 
-    const devices = platform.pjrt_client.devices(platform.pjrt_api);
-    const pjrt_api = platform.pjrt_api;
-    const num_devices = 2;
-    var device_weights_bytes: [num_devices]u64 = undefined;
-
-    var before: [num_devices]u64 = undefined;
-    for (devices, 0..) |device, i| {
-        const stats = try device.memoryStats(pjrt_api);
-        before[i] = stats.bytes_in_use;
-    }
-
     // Load buffers after the model compilation to be sure to give enough room to the autotune.
     var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, shardings);
     defer model.unloadBuffers(&model_buffers, allocator);
-
-    for (devices, 0..) |device, i| {
-        const stats = try device.memoryStats(pjrt_api);
-        device_weights_bytes[i] = stats.bytes_in_use - before[i];
-        std.debug.print("Device {}: {Bi} of weights\n", .{ i, device_weights_bytes[i] });
-    }
 
     progress.end();
 

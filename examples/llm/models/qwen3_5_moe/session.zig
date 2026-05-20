@@ -10,6 +10,26 @@ const LayerIndexBuffer = union(enum) {
     linear_attn: zml.Buffer,
 };
 
+const ExecutionCache = struct {
+    args: zml.Exe.Arguments,
+    results: zml.Exe.Results,
+
+    fn deinit(self: *ExecutionCache, allocator: std.mem.Allocator) void {
+        self.args.deinit(allocator);
+        self.results.deinit(allocator);
+    }
+};
+
+const LayerTypeExecutionCaches = struct {
+    self_attn: ?ExecutionCache = null,
+    linear_attn: ?ExecutionCache = null,
+
+    fn deinit(self: *LayerTypeExecutionCaches, allocator: std.mem.Allocator) void {
+        if (self.self_attn) |*cache| cache.deinit(allocator);
+        if (self.linear_attn) |*cache| cache.deinit(allocator);
+    }
+};
+
 pub const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -21,9 +41,17 @@ pub const Session = struct {
     decode_moe_metadata_buffers: zml.Bufferized(zml.moe.Metadata),
     rng_buffers: zml.Bufferized(zml.Tensor.Rng),
     layer_index_buffers: []LayerIndexBuffer,
-    decode_token_index_buffer: zml.Buffer,
+    self_attn_dense_indices: []const usize,
+    linear_attn_dense_indices: []const usize,
     self_attn_layers_caches: []zml.Bufferized(model.KvCache.SelfAttnCache),
     linear_attn_layers_caches: []zml.Bufferized(model.KvCache.GatedDeltaNetCache),
+    prefill_layer_execution_caches: LayerTypeExecutionCaches,
+    decode_layer_execution_caches: LayerTypeExecutionCaches,
+    prefill_embedding_execution_cache: ExecutionCache,
+    prefill_sampling_execution_cache: ExecutionCache,
+    decode_embedding_execution_cache: ExecutionCache,
+    decode_sampling_execution_cache: ExecutionCache,
+    decode_hidden_buffer: zml.Buffer,
     step_token_slice: zml.Slice,
     generated_token_slice: zml.Slice,
     tokenizer: zml.tokenizer.Tokenizer,
@@ -41,8 +69,7 @@ pub const Session = struct {
         compiled_model: *const inference.CompiledModel,
         model_buffers: *model.Buffers,
     ) !Session {
-        const shardings = compiled_model.params.shardings;
-        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, shardings.model);
+        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, .replicated);
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
         var prefill_moe_metadata_buffers = try compiled_model.params.prefill_moe_metadata.initBuffer(io, platform);
@@ -84,8 +111,10 @@ pub const Session = struct {
             }
         }
 
-        var decode_token_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, 0), .u32);
-        errdefer decode_token_index_buffer.deinit();
+        var self_attn_dense_indices = try allocator.alloc(usize, layer_types.len);
+        errdefer allocator.free(self_attn_dense_indices);
+        var linear_attn_dense_indices = try allocator.alloc(usize, layer_types.len);
+        errdefer allocator.free(linear_attn_dense_indices);
 
         var self_attn_layers_caches = try allocator.alloc(zml.Bufferized(model.KvCache.SelfAttnCache), self_attn_layer_index);
         errdefer allocator.free(self_attn_layers_caches);
@@ -107,6 +136,8 @@ pub const Session = struct {
                         .v = kv_cache_buffers.self_attn.v,
                         .layer_index = layer_index_buffer,
                     };
+                    self_attn_dense_indices[layer_index] = self_attn_cache_index;
+                    linear_attn_dense_indices[layer_index] = std.math.maxInt(usize);
                     self_attn_cache_index += 1;
                 },
                 .linear_attention => {
@@ -119,10 +150,75 @@ pub const Session = struct {
                         .recurrent_state = kv_cache_buffers.gated_delta_net.recurrent_state,
                         .layer_index = layer_index_buffer,
                     };
+                    self_attn_dense_indices[layer_index] = std.math.maxInt(usize);
+                    linear_attn_dense_indices[layer_index] = linear_attn_cache_index;
                     linear_attn_cache_index += 1;
                 },
             }
         }
+
+        var prefill_layer_execution_caches: LayerTypeExecutionCaches = .{};
+        errdefer prefill_layer_execution_caches.deinit(allocator);
+        if (compiled_model.prefill_self_attn_exe) |*exe| {
+            prefill_layer_execution_caches.self_attn = .{
+                .args = try exe.args(allocator),
+                .results = try exe.results(allocator),
+            };
+        }
+        if (compiled_model.prefill_linear_attn_exe) |*exe| {
+            prefill_layer_execution_caches.linear_attn = .{
+                .args = try exe.args(allocator),
+                .results = try exe.results(allocator),
+            };
+        }
+
+        var decode_layer_execution_caches: LayerTypeExecutionCaches = .{};
+        errdefer decode_layer_execution_caches.deinit(allocator);
+        if (compiled_model.decode_self_attn_exe) |*exe| {
+            decode_layer_execution_caches.self_attn = .{
+                .args = try exe.args(allocator),
+                .results = try exe.results(allocator),
+            };
+        }
+        if (compiled_model.decode_linear_attn_exe) |*exe| {
+            decode_layer_execution_caches.linear_attn = .{
+                .args = try exe.args(allocator),
+                .results = try exe.results(allocator),
+            };
+        }
+
+        var prefill_embedding_execution_cache: ExecutionCache = .{
+            .args = try compiled_model.prefill_embedding_exe.args(allocator),
+            .results = try compiled_model.prefill_embedding_exe.results(allocator),
+        };
+        errdefer prefill_embedding_execution_cache.deinit(allocator);
+        var prefill_sampling_execution_cache: ExecutionCache = .{
+            .args = try compiled_model.prefill_sampling_exe.args(allocator),
+            .results = try compiled_model.prefill_sampling_exe.results(allocator),
+        };
+        errdefer prefill_sampling_execution_cache.deinit(allocator);
+        var decode_embedding_execution_cache: ExecutionCache = .{
+            .args = try compiled_model.decode_embedding_exe.args(allocator),
+            .results = try compiled_model.decode_embedding_exe.results(allocator),
+        };
+        errdefer decode_embedding_execution_cache.deinit(allocator);
+        var decode_sampling_execution_cache: ExecutionCache = .{
+            .args = try compiled_model.decode_sampling_exe.args(allocator),
+            .results = try compiled_model.decode_sampling_exe.results(allocator),
+        };
+        errdefer decode_sampling_execution_cache.deinit(allocator);
+
+        const hidden_dtype = compiled_model.loaded_model.inner.text_model.embed_tokens.weight.dtype();
+        const decode_hidden_shape = zml.Shape.init(
+            .{ .b = 1, .s = 1, .d = compiled_model.loaded_model.inner.config.text_config.hidden_size },
+            hidden_dtype,
+        ).withPartitioning(.{
+            .b = .replicated,
+            .s = .replicated,
+            .d = .replicated,
+        });
+        var decode_hidden_buffer = try zml.Buffer.uninitialized(io, platform, decode_hidden_shape, .replicated, .{});
+        errdefer decode_hidden_buffer.deinit();
 
         return .{
             .allocator = allocator,
@@ -135,9 +231,17 @@ pub const Session = struct {
             .decode_moe_metadata_buffers = decode_moe_metadata_buffers,
             .rng_buffers = rng_buffers,
             .layer_index_buffers = layer_index_buffers,
-            .decode_token_index_buffer = decode_token_index_buffer,
+            .self_attn_dense_indices = self_attn_dense_indices,
+            .linear_attn_dense_indices = linear_attn_dense_indices,
             .self_attn_layers_caches = self_attn_layers_caches,
             .linear_attn_layers_caches = linear_attn_layers_caches,
+            .prefill_layer_execution_caches = prefill_layer_execution_caches,
+            .decode_layer_execution_caches = decode_layer_execution_caches,
+            .prefill_embedding_execution_cache = prefill_embedding_execution_cache,
+            .prefill_sampling_execution_cache = prefill_sampling_execution_cache,
+            .decode_embedding_execution_cache = decode_embedding_execution_cache,
+            .decode_sampling_execution_cache = decode_sampling_execution_cache,
+            .decode_hidden_buffer = decode_hidden_buffer,
             .step_token_slice = try .alloc(allocator, zml.Shape.init(.{ .b = 1, .s = 1 }, .u32)),
             .generated_token_slice = try .alloc(allocator, zml.Shape.init(.{ .b = 1, .s = 1 }, .u32)),
             .tokenizer = tokenizer,
@@ -154,7 +258,6 @@ pub const Session = struct {
         zml.moe.Metadata.deinitBuffer(&self.prefill_moe_metadata_buffers);
         zml.moe.Metadata.deinitBuffer(&self.decode_moe_metadata_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
-        self.decode_token_index_buffer.deinit();
         for (self.layer_index_buffers) |*layer_index_buffer| {
             switch (layer_index_buffer.*) {
                 .self_attn => |*buffer| buffer.deinit(),
@@ -162,8 +265,17 @@ pub const Session = struct {
             }
         }
         self.allocator.free(self.layer_index_buffers);
+        self.allocator.free(self.self_attn_dense_indices);
+        self.allocator.free(self.linear_attn_dense_indices);
         self.allocator.free(self.self_attn_layers_caches);
         self.allocator.free(self.linear_attn_layers_caches);
+        self.prefill_layer_execution_caches.deinit(self.allocator);
+        self.decode_layer_execution_caches.deinit(self.allocator);
+        self.prefill_embedding_execution_cache.deinit(self.allocator);
+        self.prefill_sampling_execution_cache.deinit(self.allocator);
+        self.decode_embedding_execution_cache.deinit(self.allocator);
+        self.decode_sampling_execution_cache.deinit(self.allocator);
+        self.decode_hidden_buffer.deinit();
         self.step_token_slice.free(self.allocator);
         self.generated_token_slice.free(self.allocator);
     }
@@ -227,63 +339,43 @@ pub const Session = struct {
         var prefill_hidden_buffer = try zml.Buffer.uninitialized(self.io, self.platform, prefill_hidden_shape, replicated_sharding, .{});
         defer prefill_hidden_buffer.deinit();
 
-        var embedding_prefill_args = try self.compiled_model.prefill_embedding_exe.args(self.allocator);
-        defer embedding_prefill_args.deinit(self.allocator);
-        var embedding_prefill_results = try self.compiled_model.prefill_embedding_exe.results(self.allocator);
-        defer embedding_prefill_results.deinit(self.allocator);
+        self.prefill_embedding_execution_cache.args.set(.{ self.model_buffers.text_model.embed_tokens, prefill_tokens_buffer });
+        self.compiled_model.prefill_embedding_exe.call(self.prefill_embedding_execution_cache.args, &self.prefill_embedding_execution_cache.results);
+        self.prefill_embedding_execution_cache.results.fill(.{&prefill_hidden_buffer});
 
-        embedding_prefill_args.set(.{ self.model_buffers.text_model.embed_tokens, prefill_tokens_buffer });
-        self.compiled_model.prefill_embedding_exe.call(embedding_prefill_args, &embedding_prefill_results);
-        embedding_prefill_results.fill(.{&prefill_hidden_buffer});
-
-        var prefill_full_layer_args: ?zml.Exe.Arguments = if (self.compiled_model.prefill_full_layer_exe) |exe| try exe.args(self.allocator) else null;
-        defer if (prefill_full_layer_args) |*args| args.deinit(self.allocator);
-        var prefill_full_layer_results: ?zml.Exe.Results = if (self.compiled_model.prefill_full_layer_exe) |exe| try exe.results(self.allocator) else null;
-        defer if (prefill_full_layer_results) |*results| results.deinit(self.allocator);
-
-        var prefill_linear_layer_args: ?zml.Exe.Arguments = if (self.compiled_model.prefill_linear_layer_exe) |exe| try exe.args(self.allocator) else null;
-        defer if (prefill_linear_layer_args) |*args| args.deinit(self.allocator);
-        var prefill_linear_layer_results: ?zml.Exe.Results = if (self.compiled_model.prefill_linear_layer_exe) |exe| try exe.results(self.allocator) else null;
-        defer if (prefill_linear_layer_results) |*results| results.deinit(self.allocator);
-
-        var self_attn_cache_index: usize = 0;
-        var linear_attn_cache_index: usize = 0;
-
+        const layer_types = self.compiled_model.loaded_model.inner.config.text_config.layer_types;
         for (self.model_buffers.text_model.layers, 0..) |layer_weights, i| {
-            switch (self.layer_index_buffers[i]) {
-                .self_attn => {
-                    const exe = self.compiled_model.prefill_full_layer_exe orelse unreachable;
+            switch (layer_types[i]) {
+                .full_attention => {
+                    const exe = &(self.compiled_model.prefill_self_attn_exe orelse unreachable);
+                    const layer_execution_cache = &(self.prefill_layer_execution_caches.self_attn orelse unreachable);
+                    const self_attn_cache_index = self.self_attn_dense_indices[i];
                     self.self_attn_layers_caches[self_attn_cache_index].k = self.kv_cache_buffers.self_attn.k;
                     self.self_attn_layers_caches[self_attn_cache_index].v = self.kv_cache_buffers.self_attn.v;
-                    prefill_full_layer_args.?.set(.{ layer_weights, prefill_hidden_buffer, prefill_token_index_buffer, self.self_attn_layers_caches[self_attn_cache_index], self.compiled_model.loaded_model.inner.config, self.prefill_moe_metadata_buffers });
-                    exe.call(prefill_full_layer_args.?, &prefill_full_layer_results.?);
-                    prefill_full_layer_results.?.fill(.{ &prefill_hidden_buffer, &self.kv_cache_buffers.self_attn });
-                    self_attn_cache_index += 1;
+                    layer_execution_cache.args.set(.{ layer_weights, prefill_hidden_buffer, prefill_token_index_buffer, self.self_attn_layers_caches[self_attn_cache_index], self.compiled_model.loaded_model.inner.config, self.prefill_moe_metadata_buffers });
+                    exe.call(layer_execution_cache.args, &layer_execution_cache.results);
+                    layer_execution_cache.results.fill(.{ &prefill_hidden_buffer, &self.kv_cache_buffers.self_attn });
                 },
-                .linear_attn => {
-                    const exe = self.compiled_model.prefill_linear_layer_exe orelse unreachable;
+                .linear_attention => {
+                    const exe = &(self.compiled_model.prefill_linear_attn_exe orelse unreachable);
+                    const layer_execution_cache = &(self.prefill_layer_execution_caches.linear_attn orelse unreachable);
+                    const linear_attn_cache_index = self.linear_attn_dense_indices[i];
                     self.linear_attn_layers_caches[linear_attn_cache_index].conv_state = self.kv_cache_buffers.gated_delta_net.conv_state;
                     self.linear_attn_layers_caches[linear_attn_cache_index].recurrent_state = self.kv_cache_buffers.gated_delta_net.recurrent_state;
-                    prefill_linear_layer_args.?.set(.{ layer_weights, prefill_hidden_buffer, prefill_token_index_buffer, self.linear_attn_layers_caches[linear_attn_cache_index], self.compiled_model.loaded_model.inner.config, self.prefill_moe_metadata_buffers });
-                    exe.call(prefill_linear_layer_args.?, &prefill_linear_layer_results.?);
-                    prefill_linear_layer_results.?.fill(.{ &prefill_hidden_buffer, &self.kv_cache_buffers.gated_delta_net });
-                    linear_attn_cache_index += 1;
+                    layer_execution_cache.args.set(.{ layer_weights, prefill_hidden_buffer, prefill_token_index_buffer, self.linear_attn_layers_caches[linear_attn_cache_index], self.compiled_model.loaded_model.inner.config, self.prefill_moe_metadata_buffers });
+                    exe.call(layer_execution_cache.args, &layer_execution_cache.results);
+                    layer_execution_cache.results.fill(.{ &prefill_hidden_buffer, &self.kv_cache_buffers.gated_delta_net });
                 },
             }
         }
 
-        var sampling_prefill_args = try self.compiled_model.prefill_sampling_exe.args(self.allocator);
-        defer sampling_prefill_args.deinit(self.allocator);
-        var sampling_prefill_results = try self.compiled_model.prefill_sampling_exe.results(self.allocator);
-        defer sampling_prefill_results.deinit(self.allocator);
-
-        sampling_prefill_args.set(.{ .{
+        self.prefill_sampling_execution_cache.args.set(.{ .{
             .norm = self.model_buffers.text_model.norm,
             .lm_head = self.model_buffers.text_model.lm_head,
             .gen_options = self.compiled_model.loaded_model.inner.text_model.gen_options,
         }, prefill_hidden_buffer, self.rng_buffers });
-        self.compiled_model.prefill_sampling_exe.call(sampling_prefill_args, &sampling_prefill_results);
-        sampling_prefill_results.fill(.{ &prefill_tokens_buffer, &self.rng_buffers });
+        self.compiled_model.prefill_sampling_exe.call(self.prefill_sampling_execution_cache.args, &self.prefill_sampling_execution_cache.results);
+        self.prefill_sampling_execution_cache.results.fill(.{ &prefill_tokens_buffer, &self.rng_buffers });
 
         try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
         const generated_token = prefill_tokens_slice.items(u32)[all_tokens.len - 1];
@@ -296,49 +388,6 @@ pub const Session = struct {
 
         const out_tokens_buffer: []u8 = try self.allocator.alloc(u8, 1024);
         defer self.allocator.free(out_tokens_buffer);
-
-        const hidden_size = self.compiled_model.loaded_model.inner.config.text_config.hidden_size;
-        const model_dtype = self.compiled_model.loaded_model.inner.text_model.embed_tokens.weight.dtype();
-
-        const decode_hidden_shape = zml.Shape.init(.{ .b = 1, .s = 1, .d = hidden_size }, model_dtype).withPartitioning(.{
-            .b = .replicated,
-            .s = .replicated,
-            .d = .replicated,
-        });
-        const replicated_sharding: zml.Sharding = .replicated;
-
-        var embedding_decode_args = try self.compiled_model.decode_embedding_exe.args(self.allocator);
-        defer embedding_decode_args.deinit(self.allocator);
-        var embedding_decode_results = try self.compiled_model.decode_embedding_exe.results(self.allocator);
-        defer embedding_decode_results.deinit(self.allocator);
-
-        var decode_full_layer_args: ?zml.Exe.Arguments = if (self.compiled_model.decode_full_layer_exe) |exe| try exe.args(self.allocator) else null;
-        defer if (decode_full_layer_args) |*args| args.deinit(self.allocator);
-        var decode_full_layer_results: ?zml.Exe.Results = if (self.compiled_model.decode_full_layer_exe) |exe| try exe.results(self.allocator) else null;
-        defer if (decode_full_layer_results) |*results| results.deinit(self.allocator);
-
-        var decode_linear_layer_args: ?zml.Exe.Arguments = if (self.compiled_model.decode_linear_layer_exe) |exe| try exe.args(self.allocator) else null;
-        defer if (decode_linear_layer_args) |*args| args.deinit(self.allocator);
-        var decode_linear_layer_results: ?zml.Exe.Results = if (self.compiled_model.decode_linear_layer_exe) |exe| try exe.results(self.allocator) else null;
-        defer if (decode_linear_layer_results) |*results| results.deinit(self.allocator);
-
-        var sampling_decode_args = try self.compiled_model.decode_sampling_exe.args(self.allocator);
-        defer sampling_decode_args.deinit(self.allocator);
-        var sampling_decode_results = try self.compiled_model.decode_sampling_exe.results(self.allocator);
-        defer sampling_decode_results.deinit(self.allocator);
-
-        var decode_hidden_buffer = try zml.Buffer.uninitialized(self.io, self.platform, decode_hidden_shape, replicated_sharding, .{});
-        defer decode_hidden_buffer.deinit();
-
-        var current_token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.generated_token_slice, replicated_sharding);
-        defer current_token_buffer.deinit();
-
-        var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.items.len)), .u32);
-        defer token_index_buffer.deinit();
-
-        var self_attn_layer_index: usize = 0;
-        var linear_attn_layer_index: usize = 0;
-
         generation: while (true) {
             const token_id = self.generated_token_slice.items(u32)[0];
             if (token_id == self.eos_token_id) break :generation;
@@ -355,71 +404,78 @@ pub const Session = struct {
 
             try all_tokens.append(self.allocator, token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
-
-            self_attn_layer_index = 0;
-            linear_attn_layer_index = 0;
-
-            embedding_decode_args.set(.{ self.model_buffers.text_model.embed_tokens, current_token_buffer });
-            self.compiled_model.decode_embedding_exe.call(embedding_decode_args, &embedding_decode_results);
-            embedding_decode_results.fill(.{&decode_hidden_buffer});
-
-            for (self.model_buffers.text_model.layers, 0..) |layer_weights, layer_index| {
-                switch (self.layer_index_buffers[layer_index]) {
-                    .self_attn => {
-                        const exe = self.compiled_model.decode_full_layer_exe orelse unreachable;
-                        self.self_attn_layers_caches[self_attn_layer_index].k = self.kv_cache_buffers.self_attn.k;
-                        self.self_attn_layers_caches[self_attn_layer_index].v = self.kv_cache_buffers.self_attn.v;
-
-                        decode_full_layer_args.?.set(.{
-                            layer_weights,
-                            decode_hidden_buffer,
-                            token_index_buffer,
-                            self.self_attn_layers_caches[self_attn_layer_index],
-                            self.compiled_model.loaded_model.inner.config,
-                            self.decode_moe_metadata_buffers,
-                        });
-
-                        exe.call(decode_full_layer_args.?, &decode_full_layer_results.?);
-                        decode_full_layer_results.?.fill(.{ &decode_hidden_buffer, &self.kv_cache_buffers.self_attn });
-
-                        self_attn_layer_index += 1;
-                    },
-                    .linear_attn => {
-                        const exe = self.compiled_model.decode_linear_layer_exe orelse unreachable;
-
-                        self.linear_attn_layers_caches[linear_attn_layer_index].conv_state = self.kv_cache_buffers.gated_delta_net.conv_state;
-                        self.linear_attn_layers_caches[linear_attn_layer_index].recurrent_state = self.kv_cache_buffers.gated_delta_net.recurrent_state;
-
-                        decode_linear_layer_args.?.set(.{
-                            layer_weights,
-                            decode_hidden_buffer,
-                            token_index_buffer,
-                            self.linear_attn_layers_caches[linear_attn_layer_index],
-                            self.compiled_model.loaded_model.inner.config,
-                            self.decode_moe_metadata_buffers,
-                        });
-
-                        exe.call(decode_linear_layer_args.?, &decode_linear_layer_results.?);
-                        decode_linear_layer_results.?.fill(.{ &decode_hidden_buffer, &self.kv_cache_buffers.gated_delta_net });
-
-                        linear_attn_layer_index += 1;
-                    },
-                }
-            }
-
-            sampling_decode_args.set(.{ .{
-                .norm = self.model_buffers.text_model.norm,
-                .lm_head = self.model_buffers.text_model.lm_head,
-                .gen_options = self.compiled_model.loaded_model.inner.text_model.gen_options,
-            }, decode_hidden_buffer, self.rng_buffers, token_index_buffer });
-            self.compiled_model.decode_sampling_exe.call(sampling_decode_args, &sampling_decode_results);
-            sampling_decode_results.fill(.{ &current_token_buffer, &self.rng_buffers, &token_index_buffer });
-
-            try current_token_buffer.toSlice(self.io, self.generated_token_slice);
+            try self.runDecodeStep(token_id, @intCast(all_tokens.items.len));
         }
 
         try stdout.writeAll(try decoder.finalize(out_tokens_buffer));
         try stdout.flush();
+    }
+
+    fn runDecodeStep(
+        self: *Session,
+        token_id: u32,
+        token_index: u32,
+    ) !void {
+        self.step_token_slice.items(u32)[0] = token_id;
+
+        var token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.step_token_slice, .replicated);
+        defer token_buffer.deinit();
+
+        var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, token_index, .u32);
+        defer token_index_buffer.deinit();
+
+        self.decode_embedding_execution_cache.args.set(.{ self.model_buffers.text_model.embed_tokens, token_buffer });
+        self.compiled_model.decode_embedding_exe.call(self.decode_embedding_execution_cache.args, &self.decode_embedding_execution_cache.results);
+        self.decode_embedding_execution_cache.results.fill(.{&self.decode_hidden_buffer});
+
+        const layer_types = self.compiled_model.loaded_model.inner.config.text_config.layer_types;
+        for (self.model_buffers.text_model.layers, 0..) |layer_weights, layer_index| {
+            switch (layer_types[layer_index]) {
+                .full_attention => {
+                    const exe = &(self.compiled_model.decode_self_attn_exe orelse unreachable);
+                    const layer_execution_cache = &(self.decode_layer_execution_caches.self_attn orelse unreachable);
+                    const self_attn_cache_index = self.self_attn_dense_indices[layer_index];
+                    self.self_attn_layers_caches[self_attn_cache_index].k = self.kv_cache_buffers.self_attn.k;
+                    self.self_attn_layers_caches[self_attn_cache_index].v = self.kv_cache_buffers.self_attn.v;
+                    layer_execution_cache.args.set(.{
+                        layer_weights,
+                        self.decode_hidden_buffer,
+                        token_index_buffer,
+                        self.self_attn_layers_caches[self_attn_cache_index],
+                        self.compiled_model.loaded_model.inner.config,
+                        self.decode_moe_metadata_buffers,
+                    });
+                    exe.call(layer_execution_cache.args, &layer_execution_cache.results);
+                    layer_execution_cache.results.fill(.{ &self.decode_hidden_buffer, &self.kv_cache_buffers.self_attn });
+                },
+                .linear_attention => {
+                    const exe = &(self.compiled_model.decode_linear_attn_exe orelse unreachable);
+                    const layer_execution_cache = &(self.decode_layer_execution_caches.linear_attn orelse unreachable);
+                    const linear_attn_cache_index = self.linear_attn_dense_indices[layer_index];
+                    self.linear_attn_layers_caches[linear_attn_cache_index].conv_state = self.kv_cache_buffers.gated_delta_net.conv_state;
+                    self.linear_attn_layers_caches[linear_attn_cache_index].recurrent_state = self.kv_cache_buffers.gated_delta_net.recurrent_state;
+                    layer_execution_cache.args.set(.{
+                        layer_weights,
+                        self.decode_hidden_buffer,
+                        token_index_buffer,
+                        self.linear_attn_layers_caches[linear_attn_cache_index],
+                        self.compiled_model.loaded_model.inner.config,
+                        self.decode_moe_metadata_buffers,
+                    });
+                    exe.call(layer_execution_cache.args, &layer_execution_cache.results);
+                    layer_execution_cache.results.fill(.{ &self.decode_hidden_buffer, &self.kv_cache_buffers.gated_delta_net });
+                },
+            }
+        }
+
+        self.decode_sampling_execution_cache.args.set(.{ .{
+            .norm = self.model_buffers.text_model.norm,
+            .lm_head = self.model_buffers.text_model.lm_head,
+            .gen_options = self.compiled_model.loaded_model.inner.text_model.gen_options,
+        }, self.decode_hidden_buffer, self.rng_buffers, token_index_buffer });
+        self.compiled_model.decode_sampling_exe.call(self.decode_sampling_execution_cache.args, &self.decode_sampling_execution_cache.results);
+        self.decode_sampling_execution_cache.results.fill(.{ &token_buffer, &self.rng_buffers, &token_index_buffer });
+        try token_buffer.toSlice(self.io, self.generated_token_slice);
     }
 };
 

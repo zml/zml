@@ -20,13 +20,13 @@ const ShardedEmbedding = struct {
 };
 
 const CompileModelResult = struct {
+    prefill_self_attn_exe: ?zml.Exe,
+    prefill_linear_attn_exe: ?zml.Exe,
     prefill_embedding_exe: zml.Exe,
-    decode_embedding_exe: zml.Exe,
-    prefill_full_layer_exe: ?zml.Exe,
-    decode_full_layer_exe: ?zml.Exe,
-    prefill_linear_layer_exe: ?zml.Exe,
-    decode_linear_layer_exe: ?zml.Exe,
     prefill_sampling_exe: zml.Exe,
+    decode_self_attn_exe: ?zml.Exe,
+    decode_linear_attn_exe: ?zml.Exe,
+    decode_embedding_exe: zml.Exe,
     decode_sampling_exe: zml.Exe,
 };
 
@@ -50,8 +50,10 @@ pub const CompilationParameters = struct {
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, moe_backend: zml.moe.Backend, shardings: common.Shardings) CompilationParameters {
         const dtype = mdl.text_model.embed_tokens.weight.dtype();
+        const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
+
         return .{
-            .kv_cache = .init(config, 1, seqlen, dtype, .f32),
+            .kv_cache = .init(config, 1, seqlen, dtype, .f32, model_partitions),
             .rng = .init(),
             .prefill_moe_metadata = initMoeMetadata(mdl, @intCast(seqlen), 1, moe_backend),
             .decode_moe_metadata = initMoeMetadata(mdl, 1, 1, moe_backend),
@@ -67,15 +69,16 @@ pub const CompilationOptions = CompilationParameters;
 
 pub const CompiledModel = struct {
     loaded_model: *const model.LoadedModel,
+    prefill_self_attn_exe: ?zml.Exe,
+    prefill_linear_attn_exe: ?zml.Exe,
     prefill_embedding_exe: zml.Exe,
-    decode_embedding_exe: zml.Exe,
-    prefill_full_layer_exe: ?zml.Exe,
-    decode_full_layer_exe: ?zml.Exe,
-    prefill_linear_layer_exe: ?zml.Exe,
-    decode_linear_layer_exe: ?zml.Exe,
     prefill_sampling_exe: zml.Exe,
+    decode_self_attn_exe: ?zml.Exe,
+    decode_linear_attn_exe: ?zml.Exe,
+    decode_embedding_exe: zml.Exe,
     decode_sampling_exe: zml.Exe,
     params: CompilationParameters,
+    allocator: std.mem.Allocator,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -89,31 +92,81 @@ pub const CompiledModel = struct {
         const compile_result = try compileModel(allocator, io, platform, qwen_model, parameters, progress);
         return .{
             .loaded_model = loaded_model,
+            .prefill_self_attn_exe = compile_result.prefill_self_attn_exe,
+            .prefill_linear_attn_exe = compile_result.prefill_linear_attn_exe,
             .prefill_embedding_exe = compile_result.prefill_embedding_exe,
-            .decode_embedding_exe = compile_result.decode_embedding_exe,
-            .prefill_full_layer_exe = compile_result.prefill_full_layer_exe,
-            .decode_full_layer_exe = compile_result.decode_full_layer_exe,
-            .prefill_linear_layer_exe = compile_result.prefill_linear_layer_exe,
-            .decode_linear_layer_exe = compile_result.decode_linear_layer_exe,
             .prefill_sampling_exe = compile_result.prefill_sampling_exe,
+            .decode_self_attn_exe = compile_result.decode_self_attn_exe,
+            .decode_linear_attn_exe = compile_result.decode_linear_attn_exe,
+            .decode_embedding_exe = compile_result.decode_embedding_exe,
             .decode_sampling_exe = compile_result.decode_sampling_exe,
             .params = parameters,
+            .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *CompiledModel) void {
         self.prefill_embedding_exe.deinit();
-        self.decode_embedding_exe.deinit();
-        if (self.prefill_full_layer_exe) |exe| exe.deinit();
-        if (self.decode_full_layer_exe) |exe| exe.deinit();
-        if (self.prefill_linear_layer_exe) |exe| exe.deinit();
-        if (self.decode_linear_layer_exe) |exe| exe.deinit();
+        if (self.prefill_self_attn_exe) |*exe| exe.deinit();
+        if (self.prefill_linear_attn_exe) |*exe| exe.deinit();
         self.prefill_sampling_exe.deinit();
+        self.decode_embedding_exe.deinit();
+        if (self.decode_self_attn_exe) |*exe| exe.deinit();
+        if (self.decode_linear_attn_exe) |*exe| exe.deinit();
         self.decode_sampling_exe.deinit();
+    }
+
+    pub fn duplicateExe(
+        self: *const CompiledModel,
+        allocator: std.mem.Allocator,
+        platform: *const zml.Platform,
+    ) !CompiledModel {
+        const dup_prefill_self_attn_exe = if (self.prefill_self_attn_exe) |exe| try cloneExe(allocator, platform, exe) else null;
+        errdefer if (dup_prefill_self_attn_exe) |*exe| exe.deinit();
+        const dup_prefill_linear_attn_exe = if (self.prefill_linear_attn_exe) |exe| try cloneExe(allocator, platform, exe) else null;
+        errdefer if (dup_prefill_linear_attn_exe) |*exe| exe.deinit();
+        const dup_decode_self_attn_exe = if (self.decode_self_attn_exe) |exe| try cloneExe(allocator, platform, exe) else null;
+        errdefer if (dup_decode_self_attn_exe) |*exe| exe.deinit();
+        const dup_decode_linear_attn_exe = if (self.decode_linear_attn_exe) |exe| try cloneExe(allocator, platform, exe) else null;
+        errdefer if (dup_decode_linear_attn_exe) |*exe| exe.deinit();
+
+        return .{
+            .loaded_model = self.loaded_model,
+            .prefill_self_attn_exe = dup_prefill_self_attn_exe,
+            .prefill_linear_attn_exe = dup_prefill_linear_attn_exe,
+            .prefill_embedding_exe = try cloneExe(allocator, platform, self.prefill_embedding_exe),
+            .prefill_sampling_exe = try cloneExe(allocator, platform, self.prefill_sampling_exe),
+            .decode_self_attn_exe = dup_decode_self_attn_exe,
+            .decode_linear_attn_exe = dup_decode_linear_attn_exe,
+            .decode_embedding_exe = try cloneExe(allocator, platform, self.decode_embedding_exe),
+            .decode_sampling_exe = try cloneExe(allocator, platform, self.decode_sampling_exe),
+            .params = self.params,
+            .allocator = allocator,
+        };
     }
 };
 
 pub const Inference = CompiledModel;
+
+fn cloneExe(allocator: std.mem.Allocator, platform: *const zml.Platform, exe: zml.Exe) !zml.Exe {
+    const pjrt_exe = try exe.exe.executable(exe.platform.pjrt_api);
+    var result = try pjrt_exe.serialize(exe.platform.pjrt_api);
+    defer result.deinit();
+
+    const exec_clone = try platform.pjrt_client.deserializeAndLoad(platform.pjrt_api, result.bytes);
+
+    return zml.Exe.init(
+        allocator,
+        platform,
+        exec_clone,
+        exe.num_devices,
+        exe.num_partitions,
+        exe.input_shapes,
+        exe.output_shapes,
+        exe.input_shardings,
+        exe.output_shardings,
+    );
+}
 
 fn compileSelfAttnLayerExe(
     allocator: std.mem.Allocator,
@@ -177,13 +230,6 @@ fn compileLinearAttnLayerExe(
     });
 }
 
-fn findFirstLayerIndex(layer_types: []const model.LayerType, target: model.LayerType) ?usize {
-    for (layer_types, 0..) |layer_type, index| {
-        if (layer_type == target) return index;
-    }
-    return null;
-}
-
 fn compileModel(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -209,6 +255,7 @@ fn compileModel(
         .s = .replicated,
         .d = .replicated,
     }));
+    const token_index = zml.Tensor.init(.{}, .u32);
     const decode_hidden: zml.Tensor = .fromShape(zml.Shape.init(
         .{ .b = 1, .s = 1, .d = qwen35_model.config.text_config.hidden_size },
         hidden_dtype,
@@ -217,13 +264,6 @@ fn compileModel(
         .s = .replicated,
         .d = .replicated,
     }));
-    // ).withPartitioning(.{
-    //     .b = .replicated,
-    //     .s = .replicated,
-    //     .d = .model,
-    // }));
-
-    const token_index = zml.Tensor.init(.{}, .u32);
     const self_attn_cache: model.KvCache.SelfAttnCache = .{
         .k = parameters.kv_cache.self_attn.k,
         .v = parameters.kv_cache.self_attn.v,
@@ -257,93 +297,7 @@ fn compileModel(
         v.deinit();
     } else |_| {};
 
-    var decode_embedding_future = try io.concurrent(struct {
-        fn call(
-            allocator_: std.mem.Allocator,
-            io_: std.Io,
-            platform_: *const zml.Platform,
-            model_: zml.nn.TokenEmbedding,
-            decode_tokens_: zml.Tensor,
-            shardings_: []const zml.Sharding,
-            progress_: *std.Progress.Node,
-        ) !zml.Exe {
-            progress_.increaseEstimatedTotalItems(1);
-            var node_ = progress_.start("Compiling decode embedding...", 1);
-            defer node_.end();
-            const now_: std.Io.Timestamp = .now(io_, .awake);
-            defer log.info("Compiled decode embedding [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, ShardedEmbedding{ .model = model_ }, .forward, .{decode_tokens_}, .{ .shardings = shardings_ });
-        }
-    }.call, .{ allocator, io, platform, qwen35_model.text_model.embed_tokens, decode_tokens, &all_shardings, progress });
-    errdefer if (decode_embedding_future.cancel(io)) |v| {
-        v.deinit();
-    } else |_| {};
-
     const prefill_embedding_exe = try prefill_embedding_future.await(io);
-    const decode_embedding_exe = try decode_embedding_future.await(io);
-
-    const full_layer_index = findFirstLayerIndex(qwen35_model.config.text_config.layer_types, .full_attention) orelse return error.MissingFullAttentionLayer;
-    const linear_layer_index = findFirstLayerIndex(qwen35_model.config.text_config.layer_types, .linear_attention) orelse return error.MissingLinearAttentionLayer;
-    const full_layer_model = qwen35_model.text_model.layers[full_layer_index];
-    const linear_layer_model = qwen35_model.text_model.layers[linear_layer_index];
-
-    const dump_prefill_full = try makeDumpSubdir(allocator, io, parameters.xla_dump_to, "prefill_full_layer");
-    defer if (dump_prefill_full) |p| allocator.free(p);
-    const dump_decode_full = try makeDumpSubdir(allocator, io, parameters.xla_dump_to, "decode_full_layer");
-    defer if (dump_decode_full) |p| allocator.free(p);
-    const dump_prefill_linear = try makeDumpSubdir(allocator, io, parameters.xla_dump_to, "prefill_linear_layer");
-    defer if (dump_prefill_linear) |p| allocator.free(p);
-    const dump_decode_linear = try makeDumpSubdir(allocator, io, parameters.xla_dump_to, "decode_linear_layer");
-    defer if (dump_decode_linear) |p| allocator.free(p);
-
-    var prefill_full_layer_future = try io.concurrent(struct {
-        fn call(
-            allocator_: std.mem.Allocator,
-            io_: std.Io,
-            platform_: *const zml.Platform,
-            layer_model_: model.TransformerLayer,
-            hidden_: zml.Tensor,
-            token_index_: zml.Tensor,
-            cache_: model.KvCache.SelfAttnCache,
-            config_: model.Config,
-            moe_metadata_: zml.moe.Metadata,
-            moe_parameters_: zml.moe.Parameters,
-            shardings_: []const zml.Sharding,
-            xla_dump_to_: ?[]const u8,
-            progress_: *std.Progress.Node,
-        ) !zml.Exe {
-            return compileSelfAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "prefill full-attention layer...");
-        }
-    }.call, .{ allocator, io, platform, full_layer_model, prefill_hidden, token_index, self_attn_cache, qwen35_model.config, parameters.prefill_moe_metadata, parameters.moe_parameters, &all_shardings, dump_prefill_full, progress });
-    errdefer if (prefill_full_layer_future.cancel(io)) |v| v.deinit() else |_| {};
-
-    var decode_full_layer_future = try io.concurrent(struct {
-        fn call(
-            allocator_: std.mem.Allocator,
-            io_: std.Io,
-            platform_: *const zml.Platform,
-            layer_model_: model.TransformerLayer,
-            hidden_: zml.Tensor,
-            token_index_: zml.Tensor,
-            cache_: model.KvCache.SelfAttnCache,
-            config_: model.Config,
-            moe_metadata_: zml.moe.Metadata,
-            moe_parameters_: zml.moe.Parameters,
-            shardings_: []const zml.Sharding,
-            xla_dump_to_: ?[]const u8,
-            progress_: *std.Progress.Node,
-        ) !zml.Exe {
-            return compileSelfAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "decode full-attention layer...");
-        }
-    }.call, .{ allocator, io, platform, full_layer_model, decode_hidden, token_index, self_attn_cache, qwen35_model.config, parameters.decode_moe_metadata, parameters.moe_parameters, &all_shardings, dump_decode_full, progress });
-    errdefer if (decode_full_layer_future.cancel(io)) |v| v.deinit() else |_| {};
-
-    var prefill_full_layer_exe: ?zml.Exe = null;
-    errdefer if (prefill_full_layer_exe) |exe| exe.deinit();
-    var decode_full_layer_exe: ?zml.Exe = null;
-    errdefer if (decode_full_layer_exe) |exe| exe.deinit();
-    prefill_full_layer_exe = try prefill_full_layer_future.await(io);
-    decode_full_layer_exe = try decode_full_layer_future.await(io);
 
     var prefill_sampling_future = try io.concurrent(struct {
         fn call(
@@ -369,6 +323,37 @@ fn compileModel(
     } else |_| {};
     const prefill_sampling_exe = try prefill_sampling_future.await(io);
 
+    var decode_embedding_future = try io.concurrent(struct {
+        fn call(
+            allocator_: std.mem.Allocator,
+            io_: std.Io,
+            platform_: *const zml.Platform,
+            model_: zml.nn.TokenEmbedding,
+            decode_tokens_: zml.Tensor,
+            shardings_: []const zml.Sharding,
+            progress_: *std.Progress.Node,
+        ) !zml.Exe {
+            progress_.increaseEstimatedTotalItems(1);
+            var node_ = progress_.start("Compiling decode embedding...", 1);
+            defer node_.end();
+            const now_: std.Io.Timestamp = .now(io_, .awake);
+            defer log.info("Compiled decode embedding [{f}]", .{now_.untilNow(io_, .awake)});
+            return platform_.compile(allocator_, io_, ShardedEmbedding{ .model = model_ }, .forward, .{decode_tokens_}, .{ .shardings = shardings_ });
+        }
+    }.call, .{
+        allocator,
+        io,
+        platform,
+        qwen35_model.text_model.embed_tokens,
+        decode_tokens,
+        &all_shardings,
+        progress,
+    });
+    errdefer if (decode_embedding_future.cancel(io)) |v| {
+        v.deinit();
+    } else |_| {};
+    const decode_embedding_exe = try decode_embedding_future.await(io);
+
     var decode_sampling_future = try io.concurrent(struct {
         fn call(
             allocator_: std.mem.Allocator,
@@ -392,67 +377,110 @@ fn compileModel(
     errdefer if (decode_sampling_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
-
     const decode_sampling_exe = try decode_sampling_future.await(io);
 
-    var prefill_linear_layer_future = try io.concurrent(struct {
-        fn call(
-            allocator_: std.mem.Allocator,
-            io_: std.Io,
-            platform_: *const zml.Platform,
-            layer_model_: model.TransformerLayer,
-            hidden_: zml.Tensor,
-            token_index_: zml.Tensor,
-            cache_: model.KvCache.GatedDeltaNetCache,
-            config_: model.Config,
-            moe_metadata_: zml.moe.Metadata,
-            moe_parameters_: zml.moe.Parameters,
-            shardings_: []const zml.Sharding,
-            xla_dump_to_: ?[]const u8,
-            progress_: *std.Progress.Node,
-        ) !zml.Exe {
-            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "prefill linear-attention layer...");
+    // Compile one executable per layer type and reuse it across matching layers.
+    var prefill_self_attn_exe: ?zml.Exe = null;
+    var prefill_linear_attn_exe: ?zml.Exe = null;
+    var decode_self_attn_exe: ?zml.Exe = null;
+    var decode_linear_attn_exe: ?zml.Exe = null;
+    errdefer if (prefill_self_attn_exe) |*exe| exe.deinit();
+    errdefer if (prefill_linear_attn_exe) |*exe| exe.deinit();
+    errdefer if (decode_self_attn_exe) |*exe| exe.deinit();
+    errdefer if (decode_linear_attn_exe) |*exe| exe.deinit();
+
+    for (0..@as(usize, @intCast(qwen35_model.config.text_config.num_hidden_layers))) |layer_index| {
+        const layer_model = qwen35_model.text_model.layers[layer_index];
+        const layer_type = qwen35_model.config.text_config.layer_types[layer_index];
+
+        switch (layer_type) {
+            .full_attention => {
+                if (prefill_self_attn_exe == null) {
+                    prefill_self_attn_exe = try compileSelfAttnLayerExe(
+                        allocator,
+                        io,
+                        platform,
+                        layer_model,
+                        prefill_hidden,
+                        token_index,
+                        self_attn_cache,
+                        qwen35_model.config,
+                        parameters.prefill_moe_metadata,
+                        parameters.moe_parameters,
+                        &all_shardings,
+                        parameters.xla_dump_to,
+                        progress,
+                        "prefill full-attention (template)",
+                    );
+                }
+                if (decode_self_attn_exe == null) {
+                    decode_self_attn_exe = try compileSelfAttnLayerExe(
+                        allocator,
+                        io,
+                        platform,
+                        layer_model,
+                        decode_hidden,
+                        token_index,
+                        self_attn_cache,
+                        qwen35_model.config,
+                        parameters.decode_moe_metadata,
+                        parameters.moe_parameters,
+                        &all_shardings,
+                        parameters.xla_dump_to,
+                        progress,
+                        "decode full-attention (template)",
+                    );
+                }
+            },
+            .linear_attention => {
+                if (prefill_linear_attn_exe == null) {
+                    prefill_linear_attn_exe = try compileLinearAttnLayerExe(
+                        allocator,
+                        io,
+                        platform,
+                        layer_model,
+                        prefill_hidden,
+                        token_index,
+                        linear_attn_cache,
+                        qwen35_model.config,
+                        parameters.prefill_moe_metadata,
+                        parameters.moe_parameters,
+                        &all_shardings,
+                        parameters.xla_dump_to,
+                        progress,
+                        "prefill linear-attention (template)",
+                    );
+                }
+                if (decode_linear_attn_exe == null) {
+                    decode_linear_attn_exe = try compileLinearAttnLayerExe(
+                        allocator,
+                        io,
+                        platform,
+                        layer_model,
+                        decode_hidden,
+                        token_index,
+                        linear_attn_cache,
+                        qwen35_model.config,
+                        parameters.decode_moe_metadata,
+                        parameters.moe_parameters,
+                        &all_shardings,
+                        parameters.xla_dump_to,
+                        progress,
+                        "decode linear-attention (template)",
+                    );
+                }
+            },
         }
-    }.call, .{ allocator, io, platform, linear_layer_model, prefill_hidden, token_index, linear_attn_cache, qwen35_model.config, parameters.prefill_moe_metadata, parameters.moe_parameters, &all_shardings, dump_prefill_linear, progress });
-    errdefer if (prefill_linear_layer_future.cancel(io)) |v| v.deinit() else |_| {};
-
-    var decode_linear_layer_future = try io.concurrent(struct {
-        fn call(
-            allocator_: std.mem.Allocator,
-            io_: std.Io,
-            platform_: *const zml.Platform,
-            layer_model_: model.TransformerLayer,
-            hidden_: zml.Tensor,
-            token_index_: zml.Tensor,
-            cache_: model.KvCache.GatedDeltaNetCache,
-            config_: model.Config,
-            moe_metadata_: zml.moe.Metadata,
-            moe_parameters_: zml.moe.Parameters,
-            shardings_: []const zml.Sharding,
-            xla_dump_to_: ?[]const u8,
-            progress_: *std.Progress.Node,
-        ) !zml.Exe {
-            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "decode linear-attention layer...");
-        }
-    }.call, .{ allocator, io, platform, linear_layer_model, decode_hidden, token_index, linear_attn_cache, qwen35_model.config, parameters.decode_moe_metadata, parameters.moe_parameters, &all_shardings, dump_decode_linear, progress });
-    errdefer if (decode_linear_layer_future.cancel(io)) |v| v.deinit() else |_| {};
-
-    var prefill_linear_layer_exe: ?zml.Exe = null;
-    errdefer if (prefill_linear_layer_exe) |exe| exe.deinit();
-    var decode_linear_layer_exe: ?zml.Exe = null;
-    errdefer if (decode_linear_layer_exe) |exe| exe.deinit();
-
-    prefill_linear_layer_exe = try prefill_linear_layer_future.await(io);
-    decode_linear_layer_exe = try decode_linear_layer_future.await(io);
+    }
 
     return .{
+        .prefill_self_attn_exe = prefill_self_attn_exe,
+        .prefill_linear_attn_exe = prefill_linear_attn_exe,
         .prefill_embedding_exe = prefill_embedding_exe,
-        .decode_embedding_exe = decode_embedding_exe,
-        .prefill_full_layer_exe = prefill_full_layer_exe,
-        .decode_full_layer_exe = decode_full_layer_exe,
-        .prefill_linear_layer_exe = prefill_linear_layer_exe,
-        .decode_linear_layer_exe = decode_linear_layer_exe,
         .prefill_sampling_exe = prefill_sampling_exe,
+        .decode_self_attn_exe = decode_self_attn_exe,
+        .decode_linear_attn_exe = decode_linear_attn_exe,
+        .decode_embedding_exe = decode_embedding_exe,
         .decode_sampling_exe = decode_sampling_exe,
     };
 }
