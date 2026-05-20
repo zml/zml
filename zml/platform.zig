@@ -440,6 +440,7 @@ pub const Platform = struct {
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator, io: std.Io) void {
         _ = io;
         _ = allocator;
+        self.physical_mesh.deinit(self.arena.allocator());
         self.pjrt_client.deinit(self.pjrt_api);
         self.arena.deinit();
     }
@@ -531,7 +532,7 @@ pub const Platform = struct {
     /// Create a Sharding based on the given logical mesh and the default strategy.
     /// Memory is owned by the platform, making it safe to copy around.
     pub fn registerSharding(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh) !Sharding {
-        return platform.registerShardingWithStrategy(name, logical, .suggest(logical, platform.physical_mesh));
+        return platform.registerShardingWithStrategy(name, logical, .suggest(logical, &platform.physical_mesh));
     }
 
     /// Create a Sharding based on the given logical mesh and a strategy.
@@ -545,7 +546,7 @@ pub const Platform = struct {
 
         const owned_name = try arena.dupe(u8, name);
         const owned_data = try arena.create(Sharding.Data);
-        owned_data.* = try .init(owned_name, platform.physical_mesh, logical, strategy);
+        owned_data.* = try .init(owned_name, &platform.physical_mesh, logical, strategy);
         const sharding: Sharding = .{ .data = owned_data };
         entry.key_ptr.* = owned_name;
         entry.value_ptr.* = sharding;

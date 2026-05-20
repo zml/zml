@@ -231,16 +231,9 @@ pub fn main(init: std.process.Init) !void {
     var input_buf = try createSequenceBuffer(allocator, io, platform, input_shape, sharding, 1000.0);
     defer input_buf.deinit();
 
-    var input_placement = try input_buf.placement(allocator);
-    defer input_placement.deinit(allocator);
-    var w_placement = try w_buf.placement(allocator);
-    defer w_placement.deinit(allocator);
-    var b_placement = try b_buf.placement(allocator);
-    defer b_placement.deinit(allocator);
-
-    log.info("input placement: {f}", .{input_placement});
-    log.info("weight placement: {f}", .{w_placement});
-    log.info("bias placement: {f}", .{b_placement});
+    log.info("input placement: {f}", .{input_buf});
+    log.info("weight placement: {f}", .{w_buf});
+    log.info("bias placement: {f}", .{b_buf});
 
     var exe_args = try exe.args(allocator);
     defer exe_args.deinit(allocator);
