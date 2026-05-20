@@ -61,7 +61,7 @@ pub const AceEnc_handler = struct {
         const params: Params = .{
             .text_emb = .init(.{ .s = options.seq_len_text, .d = config.text_hidden_dim }, .bf16),
             .lyric_emb = .init(.{ .s = options.seq_len_text, .d = config.text_hidden_dim }, .bf16),
-            .lyric_mask = .init(.{ .s1 = options.seq_len_text, .s2 = options.seq_len_text }, .bf16),
+            .lyric_mask = .init(.{ .k = options.seq_len_text, .q = options.seq_len_text }, .bf16),
             .timbre_latent = .init(.{ .a = config.timbre_hidden_dim, .t = config.timbre_fix_frame }, .bf16),
             .audio_codes = .init(.{ .s = options.seq_len_time * 5 }, .u32),
         };
