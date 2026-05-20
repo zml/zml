@@ -1,157 +1,31 @@
-# AGENTS.md - ZML Agent Guide
+# Repository Guidelines
 
-This guide is for autonomous coding agents working in this repository.
+## Project Structure & Module Organization
 
-## Scope and Environment
+ZML is a Zig project built with Bazel. Core library code lives in `zml/`, with IO under `zml/io/`, tokenizers under `zml/tokenizer/`, attention implementations under `zml/attention/`, and MoE support under `zml/moe/`. Shared Zig utilities are in `stdx/`; FFI and C helpers are in `ffi/` and `upb/`. Bazel rules and workspace helpers live in `bazel/` and `third_party/`. Runnable examples are in `examples/`, while user-facing documentation is in `docs/`. Keep tests close to implementation files unless a package already has a separate test file.
 
-- Primary language: Zig (dev snapshot), built and tested with Bazel.
-- Main subsystems: `zml/`, `stdx/`, `mlir/`, `pjrt/`, `platforms/`, `examples/`.
-- Bazel version is pinned in `.bazelversion` (`8.5.1`).
-- Build mode defaults to debug via `.bazelrc` (`--compilation_mode=dbg`).
+## Build, Test, and Development Commands
 
-## External Instruction Files
+- `bazel build //zml`: builds the main ZML library.
+- `bazel test //zml:test`: runs the core Zig test target.
+- `bazel test //stdx:test`: runs shared utility tests.
+- `bazel test //zml/tokenizer:test`: runs tokenizer tests.
+- `bazel run //examples/mnist`: runs the quick MNIST smoke test.
+- `bazel run //examples/llm -- --model=hf://... --prompt="..."`: runs the LLM example.
+- `bazel build //...` and `bazel test //...`: use before broad or shared changes.
+- `./tools/buildifier.sh`: formats Bazel/Starlark files.
+- `echo "$(bazel info output_base)/$(bazel cquery --output=files "$(bazel cquery "filter('zig_toolchain', deps(//zml))" 2>/dev/null | cut -d' ' -f1 | head -n1)" 2>/dev/null | rg "/lib\$")/std"`: find the current Zig standard library used by Bazel.
 
-- Cursor rules: `.cursor/rules/**` and `.cursorrules` are not present.
-- Copilot rules: `.github/copilot-instructions.md` is not present.
-- If any of these files appear later, treat them as required constraints.
+Append platform flags when relevant, for example `--@zml//platforms:cuda=true`, `--@zml//platforms:rocm=true`, `--@zml//platforms:tpu=true`, or `--@zml//platforms:cpu=false`.
 
-## Core Build Commands
+## Coding Style & Naming Conventions
 
-```bash
-# Build all targets
-bazel build //...
+Follow the Zig style guide and format Zig code with `zig fmt`; CI checks `zig fmt --check` outside `third_party/`. Use four-space indentation. Prefer `const x: Foo = .{ .bar = 1 };`, `pub fn method(self: Foo)`, and module imports such as `const foo = @import("foo.zig"); foo.bar()`. Use `PascalCase` for types and `lowerCamelCase` for functions, fields, and locals. Add comments only for non-obvious invariants, ownership, tensor shape semantics, or platform behavior.
 
-# Build specific targets/packages
-bazel build //zml
-bazel build //examples/llama
-bazel build //examples/mnist
+## Testing Guidelines
 
-# Alternate build configs
-bazel build --config=debug //...
-bazel build --config=alldebug //...
-bazel build --config=release //...
-bazel build --config=native //...
-```
+Tests are generally inline Zig `test "..." {}` blocks near the code they cover. Use descriptive test names and narrow Bazel targets first, then broaden when touching shared APIs. For tensor or graph changes, cover shape/tag inference and runtime behavior when practical. CI builds all targets and runs tests on CPU, CUDA, and ROCm where available.
 
-### Useful `.bazelrc` config meanings
+## Commit & Pull Request Guidelines
 
-- `--config=debug`: optimized backend, Zig frontend debug mode.
-- `--config=release`: optimized (`-Ofast`, Zig `release_safe`).
-- `--config=alldebug` / `--config=native` / `--config=silent`: debug-all, local CPU tuning, reduced UI noise.
-
-## Test Commands
-
-```bash
-# Run everything
-bazel test //...
-
-# Common package tests
-bazel test //zml:test
-bazel test //stdx:test
-bazel test //mlir:test
-bazel test //zml/tokenizer:test
-
-# Discover Zig test targets
-bazel query 'kind(zig_test, //...)'
-```
-
-### Run a single test (inside a `zig_test` target)
-
-`zml/test_runner.zig` supports substring filtering from positional args.
-Pass filter with `--test_arg`:
-
-```bash
-# Runs tests whose name contains "normalizeL2"
-bazel test //zml:test --test_arg=normalizeL2
-
-# Example on another target
-bazel test //stdx:test --test_arg=json
-```
-
-- Matching is substring-based on test function identifier; `.bazelrc` already sets `test --test_output=errors`.
-
-## Lint / Formatting Commands
-
-```bash
-# Format Bazel/Starlark files
-./tools/buildifier.sh
-
-# Run ZLS through Bazel (editor and language tooling)
-./tools/zls.sh
-```
-
-## Platform / Accelerator Flags
-
-Append these to `bazel build|test|run` as needed:
-
-```bash
---@zml//platforms:cuda=true
---@zml//platforms:rocm=true
---@zml//platforms:tpu=true
---@zml//platforms:neuron=true
---@zml//platforms:cpu=false
-```
-
-## Code Style (Repository Conventions)
-
-### Imports and namespacing
-
-- Prefer module imports, then namespaced access.
-- Prefer: `const foo = @import("foo.zig"); foo.bar()`.
-- Avoid: `const bar = @import("foo.zig").bar` as default style.
-- Import specific types directly only when heavily used.
-- Keep local imports relative within a package.
-
-### Formatting and structure
-
-- Follow Zig style and existing local patterns first.
-- Prefer typed anonymous initialization where clear: `const x: Foo = .{ .bar = 1 };`.
-- Keep functions focused; pair resource acquisition with nearby `defer`/`errdefer`.
-- Add comments only for non-obvious invariants, ownership, or shape semantics.
-
-### Types, naming, and tensor semantics
-
-- Types/structs: `PascalCase`.
-- Functions/vars/fields: Zig lower camel case.
-- Keep names descriptive; avoid short opaque identifiers unless very local.
-- Use semantic tensor tags (`.b`, `.s`, `.d`, `.h`, `.hd`, etc.) over raw index assumptions.
-
-### Errors, assertions, and cleanup
-
-- Prefer `try`-based propagation.
-- Use `catch |err|` when you add useful recovery or context.
-- Use `errdefer` on partial initialization paths.
-- Prefer `stdx.debug.assert` over bare `std.debug.assert` in this codebase.
-- Avoid panic-style control flow except for unrecoverable programmer errors.
-
-### Logging and CLI entrypoints
-
-- Use scoped logs (for example `std.log.scoped(.@"zml/io")`).
-- CLI binaries commonly define `pub const std_options`.
-- Argument parsing usually follows `stdx.flags` conventions.
-
-## Testing Patterns
-
-- Tests are usually inline Zig `test "..." {}` blocks near implementation.
-- Common helpers: `zml.testing.env`, `zml.testing.expectClose`, `zml.testing.approxEq`.
-- `zig_test` targets often use `zml/test_runner.zig` for progress/filter/leak checks.
-
-## Critical Architecture Guardrails
-
-- `Tensor` ops in `forward` build an MLIR graph; they do not execute immediately.
-- Preserve distinctions:
-  - `Shape` = metadata only
-  - `Tensor` = compile-time graph value
-  - `Buffer` = runtime device allocation
-  - `Slice` = host-side data view
-- `zml.Bufferized(T)` maps tensor-typed model structures to runtime buffer structures.
-- Weight loading paths are centered on safetensors + TensorStore/VFS.
-
-## Practical Agent Workflow
-
-- Read the target file, nearby tests, and owning `BUILD.bazel`.
-- Check whether behavior lives in compile-time graph construction or runtime execution.
-
-- Run the narrowest relevant tests first (`--test_arg` when possible).
-- Run broader package tests if shared code changed.
-- Run `./tools/buildifier.sh` when any Bazel files changed.
+Recent history uses scoped, imperative commit subjects such as `zml/tensor: add Tensor.onMemory()` or `workspace: use latest version of upstreamable rules_zig`. Keep subjects concise and mention the affected area first. Pull requests should include a short description, relevant linked issue, platform impact if any, and the exact `bazel build` or `bazel test` commands run. Include screenshots only for docs or UI-visible changes.
