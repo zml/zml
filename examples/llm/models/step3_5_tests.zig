@@ -26,6 +26,33 @@ const Args = struct {
     ;
 };
 
+const RmsNorm = struct {
+    weight: zml.Tensor,
+    eps: f32,
+
+    pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNorm {
+        return .{
+            .weight = store.createTensor("weight", .{.d}, .{ .d = .replicated }),
+            .eps = eps,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
+        self.weight.deinit();
+    }
+
+    /// L2 normalization of input tensor along .d axis
+    /// Step 3.5 Flash uses offset-style RMSNorm: the effective scale is `1 + weight`,
+    /// not just `weight`.
+    pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
+        const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
+        const normalized = zml.nn.rmsNorm(x, .d, self.eps);
+        const scale = self.weight.convert(.f32).addConstant(1).convert(x.dtype()).withTags(.{.d});
+        std.log.warn("normalized={f} scale={f}", .{ normalized.shape(), scale.shape() });
+        return normalized.mul(scale.broad(normalized.shape()));
+    }
+};
+
 const Mlp = struct {
     up_proj: zml.nn.Linear, // (dim -> hidden_dim)
     gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
@@ -96,15 +123,42 @@ fn run(
     defer activation_store.deinit();
 
     const layer_indices = [_]usize{ 0, 1, 2, 45, 46, 47 };
+    std.log.info("MLP:", .{});
     for (layer_indices) |layer_idx| {
         const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp", .{layer_idx});
         defer allocator.free(name);
 
         try testLayer(allocator, io, platform, activation_store.view(), model_store, .mlp, name, .{ .absolute_tolerance = 1e-2 });
     }
+    std.log.info("RMS Norm:", .{});
+
+    for (0..48) |layer_idx| {
+        const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.input_layernorm", .{layer_idx});
+        defer allocator.free(name);
+
+        try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, .{ .absolute_tolerance = 1e-2 });
+    }
+    for (0..48) |layer_idx| {
+        const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.post_attention_layernorm", .{layer_idx});
+        defer allocator.free(name);
+
+        try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, .{ .absolute_tolerance = 1e-2 });
+    }
+
+    // Step 3.5 Flash put the MTP heads in the same last three layers as the regular layernorm, k norm
+
+    try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, "model.norm", .{ .absolute_tolerance = 1e-2 });
 }
 
-const LayerKind = enum { mlp };
+const LayerKind = enum { mlp, rmsNorm };
+
+fn deinitBuffers(bufs: anytype) void {
+    zml.meta.visit(struct {
+        fn cb(_: void, b: *zml.Buffer) void {
+            b.deinit();
+        }
+    }.cb, {}, bufs);
+}
 
 // Chose to test this way for one unified test function
 fn testLayer(
@@ -121,14 +175,19 @@ fn testLayer(
         .mlp => {
             const mlp = Mlp.init(model_store.view().withPrefix(name), null);
 
+            // Recursive cleanup for buffers
             var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, model_store, .auto);
-            defer zml.meta.visit(struct {
-                fn cb(_: void, b: *zml.Buffer) void {
-                    b.deinit();
-                }
-            }.cb, {}, &mlp_weights);
+            defer deinitBuffers(&mlp_weights);
 
             try zml.testing.testLayer(allocator, io, platform, mlp, .forward, activation_store, name, mlp_weights, &.{}, opts);
+        },
+        .rmsNorm => {
+            const rms = RmsNorm.init(model_store.view().withPrefix(name), @as(f32, 1e-5));
+
+            var rms_weights = try zml.io.load(RmsNorm, &rms, allocator, io, platform, model_store, .auto);
+            defer deinitBuffers(&rms_weights);
+
+            try zml.testing.testLayer(allocator, io, platform, rms, .forward, activation_store, name, rms_weights, &.{}, opts);
         },
     }
 }
