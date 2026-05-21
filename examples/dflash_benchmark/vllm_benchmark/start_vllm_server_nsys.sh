@@ -16,6 +16,8 @@ Environment overrides:
   TENSOR_PARALLEL_SIZE=1
   GPU_MEMORY_UTILIZATION=0.9
   MAX_MODEL_LEN=2048
+  MAX_NUM_BATCHED_TOKENS=4096
+  MAX_NUM_SEQS=16
   NUM_SPECULATIVE_TOKENS=10
 
 The vLLM executable is resolved as ./.venv/bin/vllm next to this script.
@@ -60,6 +62,8 @@ port="${PORT:-8000}"
 tensor_parallel_size="${TENSOR_PARALLEL_SIZE:-1}"
 gpu_memory_utilization="${GPU_MEMORY_UTILIZATION:-0.9}"
 max_model_len="${MAX_MODEL_LEN:-2048}"
+max_num_batched_tokens="${MAX_NUM_BATCHED_TOKENS:-4096}"
+max_num_seqs="${MAX_NUM_SEQS:-16}"
 num_speculative_tokens="${NUM_SPECULATIVE_TOKENS:-10}"
 
 serve_args=(
@@ -69,6 +73,8 @@ serve_args=(
   --tensor-parallel-size "${tensor_parallel_size}"
   --gpu-memory-utilization "${gpu_memory_utilization}"
   --max-model-len "${max_model_len}"
+  --max-num-batched-tokens "${max_num_batched_tokens}"
+  --max-num-seqs "${max_num_seqs}"
 )
 
 case "${mode}" in
