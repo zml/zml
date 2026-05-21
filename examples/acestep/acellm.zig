@@ -744,9 +744,10 @@ const AttLayer = struct {
             //mask = range_mask.add(causal_mask);
         }
         
-        const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = mask });
-        const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        const delta = self.o_proj.forward(attn_output).rename(.{ .d_out = .d });
+        //const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = mask });
+        //const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
+        //const delta = self.o_proj.forward(attn_output).rename(.{ .d_out = .d });
+        const delta = x;
         
         return .{ delta, new_kv_cache };
     }
