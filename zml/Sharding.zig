@@ -42,8 +42,9 @@ pub const Partitioner = union(enum) {
 
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
-            .cpu, .cuda, .rocm, .tpu => .shardy,
-            .neuron, .oneapi => .gspmd,
+            .oneapi, .cpu, .cuda, .rocm, .tpu => .shardy,
+            .neuron,
+            => .gspmd,
         };
     }
 };
@@ -1502,7 +1503,7 @@ pub const Data = struct {
             tile_shape.appendAssumeCapacity(repl_size);
         }
 
-        var out: std.Io.Writer.Allocating = .init(parent_allocator);
+        var out: std.Io.Writer.Allocating = .init(allocator);
         errdefer out.deinit();
 
         // Emit explicit device assignment list to avoid XLA requiring

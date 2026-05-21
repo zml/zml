@@ -62,6 +62,8 @@ pub const Exe = struct {
     }
 
     pub fn deinit(self: *const Exe) void {
+        if (self.context) |context| context.deinit(self.platform.pjrt_api);
+        self.exe.deinit(self.platform.pjrt_api);
         self.arena.deinit();
     }
 
