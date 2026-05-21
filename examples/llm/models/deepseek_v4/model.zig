@@ -10,6 +10,9 @@ pub const Config = struct {
     num_hidden_layers: u16,
     rms_norm_eps: f32,
     hc_eps: f32,
+    routed_scaling_factor: f32,
+    num_hash_layers: u32,
+    num_experts_per_tok: u32,
 };
 
 pub const Buffers = zml.Bufferized(Model);
@@ -56,27 +59,133 @@ pub const LinearF32 = struct {
     }
 };
 
+// TODO: depending of the type of load the right tensors.
+const FP8Linear = struct {
+    scale: zml.Tensor,
+    weight: zml.Tensor,
+
+    pub fn init(store: zml.io.TensorStore.View, tag: anytype) FP8Linear {
+        return .{
+            .scale = store.createTensor("scale", null, .replicated),
+            .weight = store.createTensor("weight", tag, .replicated),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(FP8Linear)) void {
+        self.scale.deinit();
+        self.weight.deinit();
+    }
+
+    pub fn forward(self: FP8Linear, x: zml.Tensor) zml.Tensor {
+        const fp8_min = zml.Tensor.constant(zml.DataType.f8e4m3fn.minValue()).convert(x.dtype());
+        const fp8_max = zml.Tensor.constant(zml.DataType.f8e4m3fn.maxValue()).convert(x.dtype());
+        const x_scaled = x.div(self.scale).clamp(fp8_min, fp8_max).convert(.f8e4m3fn);
+        _ = x_scaled; // autofix
+
+        // const y = zml.ops.scaled_dot(x_scaled, self.weight, self.scale, self.weight_scale_inv.?, .d).convert(x.dtype());
+        // return y;
+        return x;
+    }
+};
+
 // TODO: Use union(enum) depending if it's either a SCA or HCA layer.
 const Attention = struct {
     kv_norm: RmsNorm,
     q_norm: RmsNorm,
+    wq_a: FP8Linear,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) Attention {
         return .{
             .kv_norm = .init(store.createTensor("kv_norm.weight", .{ .hd }, .replicated), config.rms_norm_eps, .hd),
             .q_norm = .init(store.createTensor("q_norm.weight", .{ .q }, .replicated), config.rms_norm_eps, .q),
+            .wq_a = .init(store.withPrefix("wq_a"), .{ .hd, .d }),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Attention)) void {
         RmsNorm.unloadBuffers(&self.kv_norm);
         RmsNorm.unloadBuffers(&self.q_norm);
+        FP8Linear.unloadBuffers(&self.wq_a);
     }
 };
 
 const MoE = struct {
-    pub fn init() MoE {
-        return .{};
+    gate: Gate,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Config, i: usize) MoE {
+        return .{
+            .gate = .init(store.withPrefix("gate"), config, i),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(MoE)) void {
+        Gate.unloadBuffers(&self.gate);
+    }
+};
+
+const Gate = struct {
+    const Kind = union(enum) {
+        bias: zml.Tensor,
+        tid2eid: zml.Tensor,
+    };
+
+    k: u32,
+    kind: Kind,
+    proj: LinearF32,
+    scaling_factor: f32,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Config, i: usize) Gate {
+        // TODO: use `maybeTensor` instead of the id?
+        const op = blk: {
+            if (i < config.num_hash_layers) {
+                break :blk Kind{ .tid2eid = store.createTensor("tid2eid", .{.tid, .eid}, .replicated) };
+            } else {
+                break :blk Kind { .bias = store.createTensor("bias", .{.expert}, .replicated) };
+            }
+        };
+
+        return .{
+            .k = config.num_experts_per_tok,
+            .kind = op,
+            .proj = .init(store.createTensor("weight", .{.expert, .d}, .replicated), null, .d),
+            .scaling_factor = config.routed_scaling_factor,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Gate)) void {
+        self.proj.weight.deinit();
+        // switch(self.kind) {
+        //     .bias => |t| t.deinit(),
+        //     .tid2eid => |t| t.deinit(),
+        // }
+    }
+
+    // TODO: add to `nn.zig`
+    fn softplus(x: zml.Tensor) zml.Tensor {
+        return x.exp().addConstant(1).log();
+    }
+
+    // TODO: Fix bias path
+    pub fn forward(self: Gate, x: zml.Tensor, input_ids: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        // TODO: support `softmax`, `sigmoid`?
+        const scores = softplus(self.proj.forward(x.convert(.f32))).sqrt();
+
+        const indices = switch(self.kind) {
+            // TODO: remove `renameTag`?
+            .bias => |bias| scores.add(bias.broad(scores.shape())).topK(-1, self.k, .{}).indices.renameTag(.expert, .eid),
+            .tid2eid => |tid2eid| tid2eid.gather(.{.tid = input_ids}, .{}),
+        };
+
+        // scores.print("scores");
+        // indices.print("indices");
+
+        // TODO: figure out why the heck gather returns `inf`
+        var weights = scores.gather(.{ .expert = indices }, .{});
+        // weights.print("weights");
+        weights = weights.div(weights.sum(.eid));
+        weights = weights.scale(self.scaling_factor);
+
+        return .{weights, indices.convert(.i32)};
     }
 };
 
@@ -93,8 +202,6 @@ const Layer = struct {
     ffn: MoE,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config, i: usize) Layer {
-        _ = i; // autofix
-
         return .{
             .attn_norm = .init(store.createTensor("attn_norm.weight", .{ .d }, .replicated), config.rms_norm_eps, .d),
             .ffn_norm = .init(store.createTensor("ffn_norm.weight", .{ .d }, .replicated), config.rms_norm_eps, .d),
@@ -105,7 +212,7 @@ const Layer = struct {
             .hc_ffn_fn = .init(store.createTensor("hc_ffn_fn", .{.b, .r}, .replicated), null, .b),
             .hc_ffn_scale = store.createTensor("hc_ffn_scale", .{.b}, .replicated),
             .attn = .init(store.withPrefix("attn"), config),
-            .ffn = .init(),
+            .ffn = .init(store.withPrefix("ffn"), config, i),
         };
     }
 
@@ -119,6 +226,7 @@ const Layer = struct {
         self.hc_ffn_fn.weight.deinit();
         self.hc_ffn_scale.deinit();
         Attention.unloadBuffers(&self.attn);
+        MoE.unloadBuffers(&self.ffn);
     }
 };
 
