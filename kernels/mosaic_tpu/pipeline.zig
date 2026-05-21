@@ -83,7 +83,7 @@ pub const PipelineOpts = struct {
     trace_scopes: bool = true,
 };
 
-/// Emit `pltpu.emit_pipeline(body, grid=..., in_specs=..., out_specs=...)(*refs, scratches=...)`.
+/// Emits `pltpu.emit_pipeline(body, grid=..., in_specs=..., out_specs=...)(*refs, scratches=...)`.
 /// `refs` = `in_refs ++ out_refs`. Emits into `b.currentBlock()`.
 pub fn emitPipeline(
     b: *Builder,
@@ -98,17 +98,17 @@ pub fn emitPipeline(
 
     const a = b.arena.allocator();
 
-    var brefs = std.ArrayList(BufferedRef).empty;
+    var brefs: std.ArrayList(BufferedRef) = try .initCapacity(a, opts.in_specs.len + opts.out_specs.len);
     for (opts.in_specs, 0..) |maybe_spec, i| {
         if (maybe_spec) |spec| {
             std.debug.assert(refs[i] != null);
-            try brefs.append(a, BufferedRef.create(b, spec, .input, refs[i].?, i));
+            brefs.appendAssumeCapacity(BufferedRef.create(b, spec, .input, refs[i].?, i));
         }
     }
     for (opts.out_specs, 0..) |maybe_spec, j| {
         if (maybe_spec) |spec| {
             std.debug.assert(refs[n_in + j] != null);
-            try brefs.append(a, BufferedRef.create(b, spec, .output, refs[n_in + j].?, n_in + j));
+            brefs.appendAssumeCapacity(BufferedRef.create(b, spec, .output, refs[n_in + j].?, n_in + j));
         }
     }
 
@@ -144,9 +144,9 @@ pub fn emitPipeline(
             }
 
             // iter_args: each bref's slots in spec order (see appendSlotInits), then grid_idx.
-            var inits = std.ArrayList(*const mlir.Value).empty;
-            for (brefs.items) |*br| br.appendSlotInits(b, &inits, a);
-            inits.append(a, c0_i32.inner) catch unreachable;
+            var inits: std.ArrayList(*const mlir.Value) = try .initCapacity(a, brefs.items.len * 2 + 1);
+            for (brefs.items) |*br| br.appendSlotInits(b, &inits);
+            inits.appendAssumeCapacity(c0_i32.inner);
             const n_slots = inits.items.len - 1;
 
             const i32_ty = b.scalarTy(.i32);
@@ -193,10 +193,10 @@ pub fn emitPipeline(
 
             for (brefs.items) |*br| if (br.buffer_type == .input) sched.advanceSlots(b, br);
 
-            var yields = std.ArrayList(*const mlir.Value).empty;
-            for (brefs.items) |*br| br.appendSlotYields(b, &yields, a);
+            var yields: std.ArrayList(*const mlir.Value) = try .initCapacity(a, brefs.items.len * 2 + 1);
+            for (brefs.items) |*br| br.appendSlotYields(b, &yields);
             const next_idx = nextIndex1D(b, grid_idx, num_steps);
-            yields.append(a, next_idx.inner) catch unreachable;
+            yields.appendAssumeCapacity(next_idx.inner);
             _ = scf.yield(b.ctx, yields.items, b.loc()).appendTo(for_body);
             b.popBlock();
 
@@ -259,17 +259,18 @@ const BufferedRef = struct {
         if (spec.buffer_count == null and trivial) bc = 1;
         if (bt == .output and bc > 2) @panic("emitPipeline: output buffer_count > 2 unsupported");
 
-        var keep = std.ArrayList(usize).empty;
-        var compact = std.ArrayList(i64).empty;
+        const block_len = if (spec.block_shape) |bs| bs.len else 0;
+        var keep = std.ArrayList(usize).initCapacity(a, block_len) catch unreachable;
+        var compact = std.ArrayList(i64).initCapacity(a, block_len) catch unreachable;
         if (spec.block_shape) |bs| {
             for (bs, 0..) |bd, di| switch (bd) {
                 .blocked => |n| {
-                    keep.append(a, di) catch unreachable;
-                    compact.append(a, n) catch unreachable;
+                    keep.appendAssumeCapacity(di);
+                    compact.appendAssumeCapacity(n);
                 },
                 .bounded_slice => |n| {
-                    keep.append(a, di) catch unreachable;
-                    compact.append(a, n) catch unreachable;
+                    keep.appendAssumeCapacity(di);
+                    compact.appendAssumeCapacity(n);
                 },
                 .squeezed => {},
             };
@@ -312,21 +313,21 @@ const BufferedRef = struct {
         }
     }
 
-    fn appendSlotInits(self: *BufferedRef, b: *Builder, out: *std.ArrayList(*const mlir.Value), a: std.mem.Allocator) void {
+    fn appendSlotInits(self: *BufferedRef, b: *Builder, out: *std.ArrayList(*const mlir.Value)) void {
         const c0 = b.lift(@as(i32, 0)).inner;
         const c1 = b.lift(@as(i32, 1)).inner;
         switch (self.buffer_type) {
             .input => {
                 if (self.is_trivial) {
-                    out.append(a, c0) catch unreachable;
+                    out.appendAssumeCapacity(c0);
                 } else {
-                    out.append(a, c1) catch unreachable; // copy_in_slot: initialize_step advanced 0→1
-                    out.append(a, c0) catch unreachable;
+                    out.appendAssumeCapacity(c1); // copy_in_slot: initialize_step advanced 0→1
+                    out.appendAssumeCapacity(c0);
                 }
             },
             .output => {
-                out.append(a, c0) catch unreachable;
-                out.append(a, c0) catch unreachable;
+                out.appendAssumeCapacity(c0);
+                out.appendAssumeCapacity(c0);
             },
         }
     }
@@ -364,20 +365,20 @@ const BufferedRef = struct {
         return k;
     }
 
-    fn appendSlotYields(self: *BufferedRef, b: *Builder, out: *std.ArrayList(*const mlir.Value), a: std.mem.Allocator) void {
+    fn appendSlotYields(self: *BufferedRef, b: *Builder, out: *std.ArrayList(*const mlir.Value)) void {
         _ = b;
         switch (self.buffer_type) {
             .input => {
                 if (self.is_trivial) {
-                    out.append(a, self.slot.?.inner) catch unreachable;
+                    out.appendAssumeCapacity(self.slot.?.inner);
                 } else {
-                    out.append(a, self.copy_in_slot.?.inner) catch unreachable;
-                    out.append(a, self.wait_in_slot.?.inner) catch unreachable;
+                    out.appendAssumeCapacity(self.copy_in_slot.?.inner);
+                    out.appendAssumeCapacity(self.wait_in_slot.?.inner);
                 }
             },
             .output => {
-                out.append(a, self.copy_out_slot.?.inner) catch unreachable;
-                out.append(a, self.wait_out_slot.?.inner) catch unreachable;
+                out.appendAssumeCapacity(self.copy_out_slot.?.inner);
+                out.appendAssumeCapacity(self.wait_out_slot.?.inner);
             },
         }
     }
@@ -488,13 +489,13 @@ const BufferedRef = struct {
         const a = b.arena.allocator();
         const bs = self.spec.block_shape.?;
         var base = a.alloc(Value, bs.len) catch unreachable;
-        var dyn = std.ArrayList(Value).empty;
+        var dyn = std.ArrayList(Value).initCapacity(a, bs.len) catch unreachable;
         var result_shape = a.alloc(i64, bs.len) catch unreachable;
         for (bs, 0..) |bd, d| {
             base[d] = dma.base[d];
             if (dma.size[d]) |sz| {
                 result_shape[d] = kDyn;
-                dyn.append(a, sz) catch unreachable;
+                dyn.appendAssumeCapacity(sz);
             } else {
                 result_shape[d] = switch (bd) {
                     .squeezed => 1,
@@ -506,7 +507,7 @@ const BufferedRef = struct {
         return b.memRefSlice(self.src, base, result_shape, dyn.items);
     }
 
-    /// Slice `alloca[slot, 0…]` (non-squeezed dims) then squeeze the slot dim.
+    /// Slices `alloca[slot, 0…]` (non-squeezed dims) then squeezes the slot dim.
     fn sliceWindowAt(self: *const BufferedRef, b: *Builder, slot: Value, dma: DmaSlice) Value {
         const a = b.arena.allocator();
         const bs = self.spec.block_shape.?;
@@ -514,14 +515,14 @@ const BufferedRef = struct {
         const nd = 1 + self.block_compact.len;
         var base = a.alloc(Value, nd) catch unreachable;
         var result_shape = a.alloc(i64, nd) catch unreachable;
-        var dyn = std.ArrayList(Value).empty;
+        var dyn = std.ArrayList(Value).initCapacity(a, self.block_keep.len) catch unreachable;
         base[0] = slot;
         result_shape[0] = 1;
         for (self.block_keep, 0..) |sd, ci| {
             base[ci + 1] = c0;
             if (dma.size[sd]) |sz| {
                 result_shape[ci + 1] = kDyn;
-                dyn.append(a, sz) catch unreachable;
+                dyn.appendAssumeCapacity(sz);
             } else {
                 result_shape[ci + 1] = switch (bs[sd]) {
                     .blocked => |n| n,
@@ -643,7 +644,7 @@ const Scheduler = struct {
     fn init(b: *Builder, step: Value, grid: []const Value, num_steps: Value, num_stages: usize, trace_scopes: bool) Scheduler {
         const c0 = b.lift(@as(i32, 0));
         const c1 = b.lift(@as(i32, 1));
-        var s = Scheduler{
+        var s: Scheduler = .{
             .step = step,
             .grid = grid,
             .num_steps = num_steps,
@@ -823,7 +824,7 @@ const Scheduler = struct {
 pub fn memRefAlloca(b: *Builder, ty: *const mlir.Type) Value {
     return b.emit(mlir.Operation.make(b.ctx, "memref.alloca", .{
         .results = .{ .flat = &.{ty} },
-        .attributes = &.{.named(b.ctx, "operandSegmentSizes", mlir.Attribute.denseArray(b.ctx, .i32, &[2]i32{ 0, 0 }))},
+        .attributes = &.{.named(b.ctx, "operandSegmentSizes", .denseArray(b.ctx, .i32, &.{ 0, 0 }))},
         .verify = false,
         .location = b.loc(),
     }));

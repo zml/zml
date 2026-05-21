@@ -235,8 +235,8 @@ pub const Value = struct {
         }
 
         if (std.mem.eql(u8, op_name, "arith.muli")) {
-            const lhs = Value{ .inner = op.operand(0), .kernel = self.kernel };
-            const rhs = Value{ .inner = op.operand(1), .kernel = self.kernel };
+            const lhs: Value = .{ .inner = op.operand(0), .kernel = self.kernel };
+            const rhs: Value = .{ .inner = op.operand(1), .kernel = self.kernel };
             const lv = lhs.asConstantInt();
             const rv = rhs.asConstantInt();
             if (lv) |l| if (rv) |r| return l *% r;
@@ -247,8 +247,8 @@ pub const Value = struct {
         }
 
         if (std.mem.eql(u8, op_name, "arith.addi")) {
-            const lhs = Value{ .inner = op.operand(0), .kernel = self.kernel };
-            const rhs = Value{ .inner = op.operand(1), .kernel = self.kernel };
+            const lhs: Value = .{ .inner = op.operand(0), .kernel = self.kernel };
+            const rhs: Value = .{ .inner = op.operand(1), .kernel = self.kernel };
             const lv = lhs.asConstantInt() orelse return null;
             const rv = rhs.asConstantInt() orelse return null;
             return lv +% rv;

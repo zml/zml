@@ -140,15 +140,12 @@ pub const StridedSliceArgs = struct {
     strides: []const i64,
 };
 
-// `vector.extract_strided_slice` / `insert_strided_slice` use `ArrayAttr` of
-// `IntegerAttr` for `offsets`/`sizes`/`strides` (which print as `[i, j, k]`),
-// NOT `DenseArrayAttr` (which prints as `array<i64: i, j, k>`). The verifier
-// rejects the latter — its trait checks for ArrayAttr.
+/// extract/insert_strided_slice need offsets/sizes/strides as an ArrayAttr of IntegerAttr, not a DenseArrayAttr
 fn intArrayAttribute(ctx: *mlir.Context, comptime T: type, values: []const T) *const mlir.Attribute {
     const it: mlir.IntegerTypes = comptime @field(mlir.IntegerTypes, @typeName(T));
     var buf: stdx.BoundedArray(*const mlir.Attribute, mlir.ShapedType.MAX_RANK) = .empty;
-    for (values) |v| buf.appendAssumeCapacity(mlir.Attribute.int(ctx, it, v));
-    return mlir.Attribute.array(ctx, buf.constSlice());
+    for (values) |v| buf.appendAssumeCapacity(.int(ctx, it, v));
+    return .array(ctx, buf.constSlice());
 }
 
 pub fn extract_strided_slice(

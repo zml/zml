@@ -654,7 +654,7 @@ pub fn transpose(
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "permutation", mlir.Attribute.denseArray(ctx, .i64, permutation)),
+            .named(ctx, "permutation", .denseArray(ctx, .i64, permutation)),
         },
         .location = location,
     });
@@ -1156,7 +1156,7 @@ pub fn assume_multiple(
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{src.type_()} },
         .attributes = &.{
-            .named(ctx, "multiple", mlir.Attribute.int(ctx, .i32, multiple)),
+            .named(ctx, "multiple", .int(ctx, .i32, multiple)),
         },
         .location = location,
     });
@@ -1170,7 +1170,7 @@ pub fn assume_multiple(
 fn denseBoolArrayAttribute(ctx: *mlir.Context, values: []const bool) *const mlir.Attribute {
     var ints: stdx.BoundedArray(i32, 64) = .empty;
     for (values) |b| ints.appendAssumeCapacity(@intFromBool(b));
-    return mlir.Attribute.denseArray(ctx, .bool, ints.constSlice());
+    return .denseArray(ctx, .bool, ints.constSlice());
 }
 
 test {
