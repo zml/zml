@@ -201,6 +201,32 @@ pub const Model = struct {
 
         return .{ self.norm.forward(hidden), updated_kv_cache.reuseBuffer(kv_cache) };
     }
+
+    pub fn precomputeAndStoreContextKv(
+        self: Model,
+        target_hidden_: zml.Tensor,
+        position_ids_: zml.Tensor,
+        kv_cache: KvCache,
+        cache_index: zml.Tensor,
+    ) KvCache {
+        const target_hidden = self.hidden_norm.forward(
+            self.fc.forward(target_hidden_.withPartialTags(.{ .s, .d }).convert(self.fc.weight.dtype()))
+                .rename(.{ .dout = .d }),
+        );
+        const position_ids = position_ids_.withPartialTags(.{.s});
+        var updated_kv_cache = kv_cache;
+
+        for (self.layers, 0..) |layer, i| {
+            updated_kv_cache = layer.precomputeAndStoreContextKv(
+                target_hidden,
+                position_ids,
+                updated_kv_cache.atLayer(i),
+                cache_index,
+            );
+        }
+
+        return updated_kv_cache.reuseBuffer(kv_cache);
+    }
 };
 
 pub const DecoderLayer = struct {
@@ -250,6 +276,21 @@ pub const DecoderLayer = struct {
             .withPartitioning(.{ .d = .replicated });
 
         return .{ post_attn.add(mlp_out).withPartitioning(.{ .d = .replicated }), updated_kv_cache };
+    }
+
+    pub fn precomputeAndStoreContextKv(
+        self: DecoderLayer,
+        target_hidden: zml.Tensor,
+        position_ids: zml.Tensor,
+        kv_cache: KvCache,
+        cache_index: zml.Tensor,
+    ) KvCache {
+        return self.self_attn.precomputeAndStoreContextKv(
+            target_hidden,
+            position_ids,
+            kv_cache,
+            cache_index,
+        );
     }
 };
 
@@ -357,6 +398,28 @@ pub const DFlashAttention = struct {
                 .withPartitioning(.{ .d = .replicated }),
             updated_kv_cache,
         };
+    }
+
+    pub fn precomputeAndStoreContextKv(
+        self: DFlashAttention,
+        target_hidden_: zml.Tensor,
+        position_ids_: zml.Tensor,
+        kv_cache: KvCache,
+        cache_index: zml.Tensor,
+    ) KvCache {
+        const target_hidden = target_hidden_.withPartialTags(.{ .s, .d }).withPartitioning(.{ .d = .replicated });
+        const position_ids = position_ids_.withPartialTags(.{.s});
+
+        var new_k = self.k_proj.forward(target_hidden)
+            .splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
+        var new_v = linearForwardF32(self.v_proj, target_hidden)
+            .splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
+
+        new_k = self.k_norm.forward(new_k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
+        new_k = zml.nn.rope(new_k, position_ids, self.rope_opts).rename(.{ .s = .k });
+        new_v = new_v.rename(.{ .s = .k });
+
+        return kv_cache.update(new_k, new_v, cache_index);
     }
 };
 

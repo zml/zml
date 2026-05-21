@@ -587,6 +587,7 @@ fn initModelsAndCaches(project: *Project, args: Args, selected_max_prompt_tokens
 
 const CompiledExes = struct {
     target_prefill_exe: zml.Exe,
+    draft_context_precompute_exe: zml.Exe,
     prefill_draft_token_exe: DraftTokenExe,
     draft_token_exe: DraftTokenExe,
     target_verify_exe: zml.Exe,
@@ -597,6 +598,7 @@ const CompiledExes = struct {
         self.target_verify_exe.deinit();
         self.draft_token_exe.deinit(allocator);
         self.prefill_draft_token_exe.deinit(allocator);
+        self.draft_context_precompute_exe.deinit();
         self.target_prefill_exe.deinit();
     }
 };
@@ -622,6 +624,11 @@ fn compileShared(allocator: std.mem.Allocator, project: *Project, models: Models
         &all_shardings,
     );
     errdefer target_prefill_exe.deinit();
+
+    log.info("Compiling DFlash context KV precompute...", .{});
+    const context_precompute_target_hidden_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, default_prefill_seq_len);
+    const draft_context_precompute_exe = try compileDraftContextPrecomputeExe(allocator, project, models, &all_shardings, default_prefill_seq_len, context_precompute_target_hidden_tensor);
+    errdefer draft_context_precompute_exe.deinit();
 
     log.info("Compiling DFlash prefill drafter...", .{});
     const prefill_target_hidden_tensor = llama_inference.targetHiddenTensor(models.target_model, project.parsed_target_config.value, models.target_layers, default_prefill_seq_len);
@@ -672,11 +679,36 @@ fn compileShared(allocator: std.mem.Allocator, project: *Project, models: Models
 
     return .{
         .target_prefill_exe = target_prefill_exe,
+        .draft_context_precompute_exe = draft_context_precompute_exe,
         .prefill_draft_token_exe = prefill_draft_token_exe,
         .draft_token_exe = draft_token_exe,
         .target_verify_exe = target_verify_exe,
         .target_decode_exe = target_decode_exe,
     };
+}
+
+fn compileDraftContextPrecomputeExe(
+    allocator: std.mem.Allocator,
+    project: *Project,
+    models: ModelsAndCaches,
+    shardings: []const zml.Sharding,
+    context_len: u32,
+    target_hidden_tensor: zml.Tensor,
+) !zml.Exe {
+    return project.platform.compileFn(
+        allocator,
+        project.io,
+        precomputeDraftContextKv,
+        .{
+            DraftContext{ .len = context_len },
+            models.draft_model,
+            target_hidden_tensor,
+            models.draft_kv_cache,
+            models.token_index_tensor,
+            models.active_context_len_tensor,
+        },
+        .{ .shardings = shardings },
+    );
 }
 
 fn compileDraftTokenExe(
@@ -857,6 +889,7 @@ fn runPrefillChunks(
     target_kv_cache_buffers: *llama.KvCache.Buffer,
     rng_buffer: *zml.Tensor.Rng.Buffer,
     attention_metadata_buffers: anytype,
+    draft_kv_cache_buffers: ?*dflash.KvCache.Buffer,
 ) !PrefillOutput {
     var offset: usize = 0;
     var final_output: ?PrefillOutput = null;
@@ -913,6 +946,18 @@ fn runPrefillChunks(
             attention_metadata_buffers,
         );
 
+        if (draft_kv_cache_buffers) |draft_buffers| {
+            try runDraftContextPrecompute(
+                allocator,
+                compiled.draft_context_precompute_exe,
+                loaded_buffers,
+                output.target_hidden_buffer,
+                active_len_buffer,
+                token_index_buffer,
+                draft_buffers,
+            );
+        }
+
         if (final_output) |previous| deinitPrefillOutput(previous);
         final_output = output;
         offset += if (chunk_offset == tail_start and offset != tail_start) remaining else active_len;
@@ -945,6 +990,7 @@ fn runBaseline(
         &state.target_kv_cache_buffers,
         &state.rng_buffer,
         state.attention_metadata_buffers,
+        null,
     );
     defer deinitPrefillOutput(prefill_output);
 
@@ -1046,6 +1092,7 @@ fn runDFlash(
         &state.target_kv_cache_buffers,
         &state.rng_buffer,
         state.attention_metadata_buffers,
+        &draft_kv_cache_buffers,
     );
 
     var generated = try std.ArrayList(u32).initCapacity(allocator, prompt.max_seq_len + 1);
@@ -1286,6 +1333,34 @@ const DraftContext = struct {
     len: u32,
 };
 
+fn runDraftContextPrecompute(
+    allocator: std.mem.Allocator,
+    draft_context_precompute_exe: zml.Exe,
+    loaded_buffers: LoadedBuffers,
+    target_hidden_buffer: zml.Buffer,
+    active_len_buffer: zml.Buffer,
+    token_index_buffer: zml.Buffer,
+    draft_kv_cache_buffers: *dflash.KvCache.Buffer,
+) !void {
+    var precompute_args = try draft_context_precompute_exe.args(allocator);
+    defer precompute_args.deinit(allocator);
+
+    var precompute_results = try draft_context_precompute_exe.results(allocator);
+    defer precompute_results.deinit(allocator);
+
+    precompute_args.set(.{
+        loaded_buffers.model_buffers,
+        target_hidden_buffer,
+        draft_kv_cache_buffers.*,
+        token_index_buffer,
+        active_len_buffer,
+    });
+    draft_context_precompute_exe.call(precompute_args, &precompute_results);
+
+    var updated_draft_kv_cache_buffers = precompute_results.get(dflash.KvCache.Buffer);
+    dflash.KvCache.replaceBuffers(draft_kv_cache_buffers, &updated_draft_kv_cache_buffers);
+}
+
 const DraftTokenExe = struct {
     exe: zml.Exe,
     args: zml.Exe.Arguments,
@@ -1297,6 +1372,28 @@ const DraftTokenExe = struct {
         self.exe.deinit();
     }
 };
+
+fn precomputeDraftContextKv(
+    context: DraftContext,
+    draft_model: dflash.Model,
+    target_hidden_block: zml.Tensor,
+    draft_kv_cache: dflash.KvCache,
+    cache_index: zml.Tensor,
+    active_context_len: zml.Tensor,
+) dflash.KvCache {
+    const target_hidden_slice = target_hidden_block.withPartialTags(.{ .s, .d }).slice1d(.s, .{
+        .start = 0,
+        .end = context.len,
+    });
+    const active_mask = zml.Tensor.iota(.init(.{ .s = context.len }, .u32), .s).convert(.u32)
+        .cmp(.LT, active_context_len.convert(.u32).broad(.init(.{ .s = context.len }, .u32)));
+    const target_hidden = active_mask.broad(target_hidden_slice.shape())
+        .select(target_hidden_slice, zml.Tensor.constant(target_hidden_slice.dtype().zero()).broad(target_hidden_slice.shape()));
+    const position_ids = zml.Tensor.arange(.{ .end = context.len }, cache_index.dtype())
+        .withTags(.{.s})
+        .add(cache_index.broad(.init(.{ .s = context.len }, cache_index.dtype())));
+    return draft_model.precomputeAndStoreContextKv(target_hidden, position_ids, draft_kv_cache, cache_index);
+}
 
 fn draftTokens(
     context: DraftContext,
