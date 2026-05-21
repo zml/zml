@@ -1745,7 +1745,7 @@ pub const Placement = struct {
             for (platform.devices, 0..) |d, device_index| {
                 const device_id = switch (platform.target) {
                     .neuron => @as(usize, @intCast(d.localHardwareId())),
-                    .cuda, .rocm, .tpu, .cpu => d.id(),
+                    .oneapi, .cuda, .rocm, .tpu, .cpu => d.id(),
                 };
                 if (device_id == self.device_id) return device_index;
             }
