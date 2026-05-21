@@ -1,0 +1,44 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+COMMON_SRCS = [
+    "chat_template.zig",
+    "common.zig",
+    "datasets.zig",
+    "dflash_model.zig",
+    "gemma4/gemma4_inference.zig",
+    "gemma4/gemma4_model.zig",
+    "stats.zig",
+]
+
+COMMON_DATA = glob(["data/*.jsonl"])
+
+zig_binary(
+    name = "benchmark",
+    srcs = [
+        "main-baseline-comparison.zig",
+    ] + COMMON_SRCS,
+    data = COMMON_DATA,
+    main = "main-baseline-comparison.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_binary(
+    name = "dry_run",
+    srcs = [
+        "main-dry-run.zig",
+    ] + COMMON_SRCS,
+    data = COMMON_DATA,
+    main = "main-dry-run.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+build_test(
+    name = "test",
+    targets = [
+        ":benchmark",
+        ":dry_run",
+    ],
+)
