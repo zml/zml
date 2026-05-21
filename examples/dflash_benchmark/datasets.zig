@@ -66,7 +66,14 @@ pub fn parquetConversionMessage() []const u8 {
 pub fn loadSamples(allocator: std.mem.Allocator, io: std.Io, opts: LoadOptions) !LoadedSamples {
     if (isParquetPath(opts.path)) return LoadError.UnsupportedParquetDataset;
 
-    const data = try std.Io.Dir.cwd().readFileAlloc(io, opts.path, allocator, .limited(opts.max_file_bytes));
+    const data = std.Io.Dir.cwd().readFileAlloc(io, opts.path, allocator, .limited(opts.max_file_bytes)) catch |err| switch (err) {
+        error.FileNotFound => blk: {
+            const data_path = try std.fmt.allocPrint(allocator, "examples/dflash_benchmark/data/{s}", .{opts.path});
+            defer allocator.free(data_path);
+            break :blk try std.Io.Dir.cwd().readFileAlloc(io, data_path, allocator, .limited(opts.max_file_bytes));
+        },
+        else => return err,
+    };
     defer allocator.free(data);
 
     return loadSamplesFromSlice(allocator, opts, data);
