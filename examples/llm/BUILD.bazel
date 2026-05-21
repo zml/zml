@@ -29,6 +29,14 @@ zig_binary(
     deps = ["//zml"],
 )
 
+zig_binary(
+    name = "qwen3_5_moe_harness",
+    srcs = glob(["**/*.zig"]),
+    main = "models/qwen3_5_moe_harness.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
 build_test(
     name = "test",
     targets = [":llm"],
