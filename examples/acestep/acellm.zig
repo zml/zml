@@ -66,6 +66,7 @@ pub const AceLlm_handler = struct {
             .layer_index = .init(.{}, .u32),
             .range_mask = .init(.{ .b = 2, .q = acellm_options.seq_len, .k = acellm_options.seq_len }, .bf16),
             .decode_mask = .init(.{ .b = 2, .q = 1, .k = acellm_options.seq_len }, .bf16),
+            .pad_index = .init(.{ .b = 2 }, .u32),
             .rng = .init(),
             .shardings = try .init(zml_handler.platform),
         };
@@ -123,7 +124,7 @@ pub const AceLlm_handler = struct {
         var prefill_layer_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward,
-                    .{ params_.prefill_embeds, params_.token_index, params_.kv_cache, params_.layer_index, params_.range_mask }, opts_);
+                    .{ params_.prefill_embeds, params_.token_index, params_.kv_cache, params_.layer_index, params_.range_mask, params_.pad_index }, opts_);
             }
         }.call, .{ zml_handler, model.layers[0], params, opts });
         var prefill_layer_future_awaited = false;
@@ -150,7 +151,7 @@ pub const AceLlm_handler = struct {
         var decode_layer_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward,
-                    .{ params_.decode_embeds, params_.token_index, params_.kv_cache, params_.layer_index, params_.decode_mask }, opts_);
+                    .{ params_.decode_embeds, params_.token_index, params_.kv_cache, params_.layer_index, params_.decode_mask, params_.pad_index }, opts_);
             }
         }.call, .{ zml_handler, model.layers[0], params, opts });
         var decode_layer_future_awaited = false;
@@ -355,6 +356,7 @@ pub const Params = struct {
     layer_index: zml.Tensor,
     range_mask: zml.Tensor,
     decode_mask: zml.Tensor,
+    pad_index: zml.Tensor,
     rng: zml.Tensor.Rng,
     shardings: main.Shardings,
 };
@@ -630,12 +632,7 @@ const TransformerLayer = struct {
     
     pub fn forward(self: TransformerLayer, x0: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, layer_index: zml.Tensor, range_mask: zml.Tensor) struct { zml.Tensor, KvCache } {
         const x0_normalized = self.input_norm.forward(x0);
-        //const delta0, const updated_kv_cache = self.att_layer.forward(x0_normalized, token_index, kv_cache, layer_index, range_mask);
-        const delta0 = x0_normalized;
-        const updated_kv_cache = kv_cache;
-        _ = token_index;
-        _ = layer_index;
-        _ = range_mask;
+        const delta0, const updated_kv_cache = self.att_layer.forward(x0_normalized, token_index, kv_cache, layer_index, range_mask);
         const x1 = x0.add(delta0);
         const x1_normalized = self.post_att_norm.forward(x1);
         const x2 = self.mlp_layer.forward(x1_normalized).add(x1);
@@ -682,7 +679,7 @@ const AttLayer = struct {
         RmsNorm.unloadBuffers(&self.k_norm);
     }
 
-    pub fn forward(self: AttLayer, x: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, layer_index: zml.Tensor, range_mask: zml.Tensor) struct { zml.Tensor, KvCache } {
+    pub fn forward(self: AttLayer, x: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, layer_index: zml.Tensor, range_mask: zml.Tensor, pad_index: zml.Tensor) struct { zml.Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
 
         var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
@@ -696,6 +693,8 @@ const AttLayer = struct {
         var pos_index = zml.Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype()).withTags(.{ .s });
         // translate to [0..seq_len] in prefill and { token_index } in decode
         pos_index = pos_index.add(token_index.broad(pos_index.shape()));
+        // translate to take padding into account (we rope with logical position, not physical)
+        pos_index = pos_index.sub(pad_index.broad(pos_index.shape()));
         
         q = zml.nn.rope(q, pos_index, self.rope_opts);
         k = zml.nn.rope(k, pos_index, self.rope_opts);
