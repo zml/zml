@@ -107,7 +107,8 @@ pub const Options = struct {
 
 // Router
 pub const Router = struct {
-    gate: zml.nn.Linear,
+    gate: zml.nn.Linear, // no bias inside the Linear; router_bias is applied post-sigmoid
+    router_bias: ?zml.Tensor,
     num_experts_per_tok: u32,
 
     // k = num_experts_per_tok
@@ -118,38 +119,47 @@ pub const Router = struct {
         return .{
             .gate = .init(
                 store.createTensor("gate.weight", .{ .expert, .d }, .{ .expert = .replicated, .d = .replicated }),
-                store.maybeCreateTensor("router_bias", .{.expert}, .{ .expert = .replicated }),
+                null,
                 .d,
             ),
+            .router_bias = store.maybeCreateTensor("router_bias", .{.expert}, .{ .expert = .replicated }),
             .num_experts_per_tok = num_experts_per_tok,
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Router)) void {
         self.gate.weight.deinit();
-        if (self.gate.bias) |*bias| bias.deinit();
+        if (self.router_bias) |*bias| bias.deinit();
     }
 
-    // .{.b, .s, .expert}
+    /// Returns (topk weights, topk indices) with shapes {.b, .s, .topk}.
+    /// Matches `Step3p5MoEMLP.router_bias_func`:
+    ///   logits = x @ W^T
+    ///   probs  = sigmoid(logits)        (in fp32)
+    ///   biased = probs + router_bias    (only used to choose indices)
+    ///   ids    = topk(biased)
+    ///   wts    = gather(probs, ids)     (from UNBIASED probs)
+    ///   if renormalize: wts /= sum(wts) + 1e-20
     pub fn forward(self: Router, x: zml.Tensor, renormalize: bool) struct { zml.Tensor, zml.Tensor } {
-        var router_prob = x.sigmoid();
+        const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
+        const orig_dtype = input.dtype();
+        const logits = self.gate.forward(input).convert(.f32); // {.b, .s, .expert}
+        const probs = logits.sigmoid();
 
-        // with bias:
-        if (self.gate.bias) |bias| {
-            const b = bias.insertAxes(0, .{.s}).broad(router_prob.shape());
-            router_prob = router_prob.add(b);
-        }
-        const topk = router_prob.topK(.{ .topk = .expert }, self.num_experts_per_tok, .{});
+        const scores_for_topk = if (self.router_bias) |bias|
+            probs.add(bias.convert(.f32).broad(probs.shape()))
+        else
+            probs;
 
-        // indices, weights
+        const topk = scores_for_topk.topK(.{ .topk = .expert }, self.num_experts_per_tok, .{});
         const topk_ids = topk.indices.convert(.i32);
-        var router_scores = router_prob.gather(.{ .expert = topk_ids }, .{});
 
+        var router_scores = probs.gather(.{ .expert = topk_ids }, .{});
         if (renormalize) {
-            router_scores = router_scores.div(router_scores.sum(1));
+            const denom = router_scores.sum(.topk).addConstant(1e-20);
+            router_scores = router_scores.div(denom.broad(router_scores.shape()));
         }
-
-        return .{ router_scores, topk_ids };
+        return .{ router_scores.convert(orig_dtype), topk_ids };
     }
 };
 

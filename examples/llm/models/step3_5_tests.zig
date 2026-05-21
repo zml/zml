@@ -97,7 +97,7 @@ fn run(
         model_store,
         .router,
         "model.layers.10.moe", // weight prefix in the model checkpoint
-        "model.expert36.gate_act.call28", // activation prefix in the activations dump
+        "model.layers.10.moe.router", // activation prefix in router_ref.safetensors
         .{ .absolute_tolerance = 1e-2 },
     );
 }
