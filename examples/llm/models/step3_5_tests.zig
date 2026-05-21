@@ -88,10 +88,21 @@ fn run(
     //     try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, .{ .absolute_tolerance = 1e-2 });
     // }
 
-    try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, "model.norm", .{ .absolute_tolerance = 1e-2 });
+    // layers 3..44 (45 with 0 indexing but i wont bake it in rn)
+    try testLayer(
+        allocator,
+        io,
+        platform,
+        activation_store.view(),
+        model_store,
+        .router,
+        "model.layers.10.moe", // weight prefix in the model checkpoint
+        "model.expert36.gate_act.call28", // activation prefix in the activations dump
+        .{ .absolute_tolerance = 1e-2 },
+    );
 }
 
-const LayerKind = enum { mlp, rmsNorm };
+const LayerKind = enum { mlp, rmsNorm, router };
 
 fn deinitBuffers(bufs: anytype) void {
     std.log.info("deinit buffers", .{});
@@ -111,28 +122,43 @@ fn testLayer(
     activation_store: zml.io.TensorStore.View,
     model_store: *zml.io.TensorStore,
     kind: LayerKind,
-    name: []const u8,
+    weights_name: []const u8,
+    activations_name: []const u8,
     opts: zml.testing.CompareOpts,
 ) !void {
     switch (kind) {
         .mlp => {
-            std.log.info("testlayer mlp {s}", .{name});
-            const mlp = model.Mlp.init(model_store.view().withPrefix(name), null);
+            std.log.info("testlayer mlp weights={s} act={s}", .{ weights_name, activations_name });
+            const mlp = model.Mlp.init(model_store.view().withPrefix(weights_name), null);
 
             std.log.info("before recursive cleanup for buffers", .{});
             // Recursive cleanup for buffers
             var mlp_weights = try zml.io.load(model.Mlp, &mlp, allocator, io, platform, model_store, .auto);
             defer deinitBuffers(&mlp_weights);
 
-            try zml.testing.testLayer(allocator, io, platform, mlp, .forward, activation_store, name, mlp_weights, &.{}, opts);
+            try zml.testing.testLayer(allocator, io, platform, mlp, .forward, activation_store, activations_name, mlp_weights, &.{}, opts);
         },
         .rmsNorm => {
-            const rms = model.RmsNorm.init(model_store.view().withPrefix(name), @as(f32, 1e-5));
+            const rms = model.RmsNorm.init(model_store.view().withPrefix(weights_name), @as(f32, 1e-5));
 
             var rms_weights = try zml.io.load(model.RmsNorm, &rms, allocator, io, platform, model_store, .auto);
             defer deinitBuffers(&rms_weights);
 
-            try zml.testing.testLayer(allocator, io, platform, rms, .forward, activation_store, name, rms_weights, &.{}, opts);
+            try zml.testing.testLayer(allocator, io, platform, rms, .forward, activation_store, activations_name, rms_weights, &.{}, opts);
+        },
+        .router => {
+            //hardcoded k=num_experts_per_tok=288 for now
+            std.log.info("router weights={s} act={s}", .{ weights_name, activations_name });
+
+            const router = model.Router.init(model_store.view().withPrefix(weights_name), 288);
+
+            std.log.info("router initted", .{});
+            var router_weights = try zml.io.load(model.Router, &router, allocator, io, platform, model_store, .auto);
+            defer deinitBuffers(&router_weights);
+
+            std.log.info("router weights created", .{});
+
+            try zml.testing.testLayer(allocator, io, platform, router, .forward, activation_store, activations_name, router_weights, &.{}, opts);
         },
     }
 }

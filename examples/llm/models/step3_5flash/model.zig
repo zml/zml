@@ -106,38 +106,47 @@ pub const Options = struct {
 // TextRotaryEmbedding
 
 // Router
-const Router = struct {
-    router: zml.nn.Linear,
+pub const Router = struct {
+    gate: zml.nn.Linear,
     num_experts_per_tok: u32,
-    pub fn init(store: zml.io.TensorStore.View, num_experts_per_tok: u32, top_k: u32) Router {
+
+    // k = num_experts_per_tok
+    // `store` is the view at the parent `...moe` prefix; HF layout is:
+    //   <prefix>.gate.weight
+    //   <prefix>.router_bias   (optional)
+    pub fn init(store: zml.io.TensorStore.View, num_experts_per_tok: u32) Router {
         return .{
-            .router = .init(
-                store.createTensor("weight", .{ .expert, .d }, .{ .expert, .d }),
-                store.maybeCreateTensor("bias", .{.expert}, .{ .expert = .replicated }),
+            .gate = .init(
+                store.createTensor("gate.weight", .{ .expert, .d }, .{ .expert = .replicated, .d = .replicated }),
+                store.maybeCreateTensor("router_bias", .{.expert}, .{ .expert = .replicated }),
                 .d,
             ),
             .num_experts_per_tok = num_experts_per_tok,
-            .top_k = top_k,
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Router)) void {
-        self.router.weight.deinit();
+        self.gate.weight.deinit();
+        if (self.gate.bias) |*bias| bias.deinit();
     }
 
+    // .{.b, .s, .expert}
     pub fn forward(self: Router, x: zml.Tensor, renormalize: bool) struct { zml.Tensor, zml.Tensor } {
         var router_prob = x.sigmoid();
+
         // with bias:
-        router_prob = router_prob + self.bias.insertAxes(0);
+        if (self.gate.bias) |bias| {
+            const b = bias.insertAxes(0, .{.s}).broad(router_prob.shape());
+            router_prob = router_prob.add(b);
+        }
+        const topk = router_prob.topK(.{ .topk = .expert }, self.num_experts_per_tok, .{});
 
-        // get as ids and weight
-        const topk_ids = router_prob.indices.convert(.i32);
-
-        // FLAG: unsure if this makes sense for indexing:
-        var router_scores = router_prob.gather(.{ .d = topk_ids }, .{});
+        // indices, weights
+        const topk_ids = topk.indices.convert(.i32);
+        var router_scores = router_prob.gather(.{ .expert = topk_ids }, .{});
 
         if (renormalize) {
-            router_scores = router_scores / router_scores.sum(1);
+            router_scores = router_scores.div(router_scores.sum(1));
         }
 
         return .{ router_scores, topk_ids };
