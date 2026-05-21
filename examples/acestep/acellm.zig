@@ -27,7 +27,7 @@ pub const AceLlm_handler = struct {
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
 
-        //try main.printSafetensors(registry);
+        try main.printSafetensors(registry);
 
         std.log.info("5Hz parse config and safetensors", .{});
         const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
@@ -429,6 +429,7 @@ pub const LlmExes = struct {
     prefill_select_exe: zml.Exe,
     prefill_select_args: zml.Exe.Arguments,
     prefill_select_results: zml.Exe.Results,
+    
     decode_embed_exe: zml.Exe,
     decode_embed_args: zml.Exe.Arguments,
     decode_embed_results: zml.Exe.Results,
@@ -439,7 +440,6 @@ pub const LlmExes = struct {
     logits_exe: zml.Exe,
     logits_args: zml.Exe.Arguments,
     logits_results: zml.Exe.Results,
-    
     sample_exe: zml.Exe,
     sample_args: zml.Exe.Arguments,
     sample_results: zml.Exe.Results,
@@ -744,7 +744,10 @@ const AttLayer = struct {
         const v0 = v.slice1d(.b , .{ .start = 0, .end = 1}).squeeze(.b);
         const m0 = mask.slice1d(.b , .{ .start = 0, .end = 1}).squeeze(.b);
 
-        const attn_heads_output0 = zml.nn.sdpa(q0, k0, v0, .{ .attn_mask = m0 });
+        const attn_heads_output0 = q0;//zml.nn.sdpa(q0, k0, v0, .{ .attn_mask = m0 });
+        _ = k0;
+        _ = v0;
+        _ = m0;
         const attn_output0 = attn_heads_output0.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         const delta0 = self.o_proj.forward(attn_output0).rename(.{ .d_out = .d });
 
@@ -753,7 +756,10 @@ const AttLayer = struct {
         const v1 = v.slice1d(.b , .{ .start = 1, .end = 2}).squeeze(.b);
         const m1 = mask.slice1d(.b , .{ .start = 1, .end = 2}).squeeze(.b);
 
-        const attn_heads_output1 = zml.nn.sdpa(q1, k1, v1, .{ .attn_mask = m1 });
+        const attn_heads_output1 = q1;//zml.nn.sdpa(q1, k1, v1, .{ .attn_mask = m1 });
+        _ = k1;
+        _ = v1;
+        _ = m1;
         const attn_output1 = attn_heads_output1.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         const delta1 = self.o_proj.forward(attn_output1).rename(.{ .d_out = .d });
         

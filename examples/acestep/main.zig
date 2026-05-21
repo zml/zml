@@ -257,15 +257,31 @@ const Args = struct {
 // info:   vae    0.00s    1.82s    0.58s    2.24s    0.00s    4.67s
 // info:   wav                                                 0.24s
 // info: total                                                45.24s
+// info: Module    init  compile     load  prefill   decode    total
+// info:   llm    0.30s    2.14s    0.93s    0.34s    3.94s    7.66s
+// info:   cfg    0.00s    0.81s    0.00s    0.29s   11.54s   12.66s
+// info:   emb    0.00s    1.29s    0.61s    0.00s    0.03s    2.16s
+// info:   enc    0.00s    3.35s    0.69s    0.02s    0.03s    4.09s
+// info:   dit    0.00s    2.27s    0.91s    4.47s    0.00s    7.68s
+// info:   vae    0.00s    1.12s    0.59s    1.93s    0.00s    3.67s
+// info:   wav                                                 0.17s
+// info: total                                                38.15s
 
-// param1 : match_level: dimention iter, in 0-8, initial noise level matches the scheduled noised at iter match_level
-// param2 : cover_strength: dimension iter, in 0-8, has to be >= match_level, how many iters we do in cover mode before switching to non cover
+// Fin CFG batched :
+// - dont pad, just track positions in sequences
+// - compile attention once without a .b dim
+// - compile everything else with a .b = 2 dim
+// - in inspiration : we still do x2 MLP, but it's cheap, we only do 1 sdpa
+// - in generation : we do batched MLP, two sdpas (only caveat, is the kv cache update worse ?)
+// - for compile : only compile attention once and without a .b dim
 
 // TODO: finir remix basique
 // - check no cover branch, instructions and stuff
 // - export all cases over space of cover/noise strength
 // - implement fsq of the source audio latents
 // - ajouter variance
+// param1 : match_level: dimention iter, in 0-8, initial noise level matches the scheduled noised at iter match_level
+// param2 : cover_strength: dimension iter, in 0-8, has to be >= match_level, how many iters we do in cover mode before switching to non cover
 
 // TODO: essayer de faire lyric remix (flow-edit...)
 // - embed old and new lyric
@@ -275,7 +291,6 @@ const Args = struct {
 // - repaint a chunk
 // - extend audio
 
-// TODO: batch cfg
 // TODO: make DiT compiled model time independent with masks and range
 // TODO: move model related code from inference to Exes struct inside models
 // TODO: load in parallel as compile
