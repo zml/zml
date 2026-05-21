@@ -868,11 +868,18 @@ fn runPrefillChunks(
     var offset: usize = 0;
     var final_output: ?PrefillOutput = null;
     errdefer if (final_output) |output| deinitPrefillOutput(output);
+    const tail_len = @min(prompt.token_ids.len, default_prefill_seq_len);
+    const tail_start = prompt.token_ids.len - tail_len;
 
     while (offset < prompt.token_ids.len) {
-        const active_len: u32 = @intCast(@min(prompt.token_ids.len - offset, default_prefill_seq_len));
+        const remaining = prompt.token_ids.len - offset;
+        const active_len: u32 = if (remaining <= default_prefill_seq_len and offset != tail_start)
+            @intCast(tail_len)
+        else
+            @intCast(@min(remaining, default_prefill_seq_len));
+        const chunk_offset = if (remaining <= default_prefill_seq_len and offset != tail_start) tail_start else offset;
         const active_len_usize: usize = @intCast(active_len);
-        const chunk_tokens = try paddedPromptTokens(allocator, prompt.token_ids[offset..][0..active_len_usize], default_prefill_seq_len);
+        const chunk_tokens = try paddedPromptTokens(allocator, prompt.token_ids[chunk_offset..][0..active_len_usize], default_prefill_seq_len);
         defer allocator.free(chunk_tokens);
 
         var input_tokens_buffer: zml.Buffer = try .fromSlice(
@@ -891,7 +898,7 @@ fn runPrefillChunks(
         );
         defer active_len_buffer.deinit();
 
-        var token_index: u32 = @intCast(offset);
+        var token_index: u32 = @intCast(chunk_offset);
         var token_index_buffer: zml.Buffer = try .fromSlice(
             project.io,
             project.platform,
@@ -915,7 +922,7 @@ fn runPrefillChunks(
 
         if (final_output) |previous| deinitPrefillOutput(previous);
         final_output = output;
-        offset += active_len;
+        offset += if (chunk_offset == tail_start and offset != tail_start) remaining else active_len;
     }
 
     const output = final_output.?;
@@ -1073,7 +1080,7 @@ fn runDFlash(
     defer verify_results.deinit(allocator);
 
     var start: u32 = prompt.prompt_len;
-    const last_prefill_chunk_len: u32 = if (prompt.prompt_len % default_prefill_seq_len == 0) default_prefill_seq_len else prompt.prompt_len % default_prefill_seq_len;
+    const last_prefill_chunk_len: u32 = @min(prompt.prompt_len, default_prefill_seq_len);
     var draft_cache_base: u32 = prompt.prompt_len - last_prefill_chunk_len;
     var first_draft_step = true;
     var target_hidden_block_buffer = prefill_output.target_hidden_buffer;
