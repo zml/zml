@@ -596,7 +596,7 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
     const minus_inf = zml.floats.BFloat16.fromF32(zml.floats.Float32.toF32(zml.floats.Float32.minus_inf));
     for (0..acecfg.llm.options.seq_len) |i| {
         for (0..acecfg.llm.options.seq_len) |j| {
-            const pos_cond = 2 * acecfg.llm.options.seq_len * acecfg.llm.options.seq_len + i * acecfg.llm.options.seq_len + j;
+            const pos_cond = acecfg.llm.options.seq_len * acecfg.llm.options.seq_len + i * acecfg.llm.options.seq_len + j;
             const pos_uncond = i * acecfg.llm.options.seq_len + j;
             const is_in_range = (i >= delta) and (j >= delta);
             range_mask_slice.items(zml.floats.BFloat16)[pos_cond] = zero;
