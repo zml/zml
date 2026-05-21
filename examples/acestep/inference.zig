@@ -627,7 +627,7 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
     const pad_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2 }, .u32));
     defer pad_slice.free(allocator);
     pad_slice.items(u32)[0] = 0;
-    pad_slice.items(u32)[1] = delta;
+    pad_slice.items(u32)[1] = @intCast(delta);
     var pad_buffer = try zml.Buffer.fromSlice(io, platform, pad_slice, sharding);
     defer pad_buffer.deinit();
 
