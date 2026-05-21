@@ -12,6 +12,7 @@ zig_binary(
         "main.zig",
         "stats.zig",
     ],
+    data = glob(["data/*.jsonl"]),
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],
