@@ -639,8 +639,6 @@ pub const PhysicalMesh = struct {
             .neuron => &.{ .link, .link_x, .link_y, .link_z },
             .cuda, .rocm => &.{.link},
             .cpu => &.{.bus},
-            // oneAPI topology can either expose interconnect `coords` (link)
-            // or fall back to a flat CPU-like layout (bus).
             .oneapi => &.{ .link, .bus },
         };
     }
@@ -872,10 +870,6 @@ pub const PhysicalMesh = struct {
         return try fromOwnedTree(target, root);
     }
 
-    /// oneAPI topology: try the GPU builder first (PJRT `coords` attribute);
-    /// fall back to the CPU-style flat layout when the plugin does not
-    /// expose device coordinates (e.g. intel-extension-for-openxla which
-    /// masquerades as CPU).
     pub fn oneapi(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
         return gpu(allocator, platform_devices) catch |err| switch (err) {
             error.MissingDeviceCoords,

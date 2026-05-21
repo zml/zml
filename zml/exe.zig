@@ -266,7 +266,7 @@ pub const Exe = struct {
         const partition_events = events[0..@intCast(self.num_partitions)];
         const events_slice: ?[]?*pjrt.Event = switch (self.platform.target) {
             .neuron => partition_events,
-            .oneapi, .cpu, .cuda, .rocm, .tpu => if (opts.wait) partition_events else null,
+            .cpu, .cuda, .rocm, .tpu, .oneapi => if (opts.wait) partition_events else null,
         };
 
         self.exe.execute(self.platform.pjrt_api, .{

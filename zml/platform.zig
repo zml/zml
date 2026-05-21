@@ -513,7 +513,6 @@ pub const Platform = struct {
     };
 
     pub fn registerFfi(self: *const zml.Platform, registration: FfiRegistration) !void {
-        // oneAPI plugin does not implement the PJRT FFI extension.
         if (self.target == .oneapi) return;
         const platform_name = registration.platform_name orelse self.pjrt_client.platformName(self.pjrt_api);
         if (self.pjrt_api.ffi()) |ffi| {
