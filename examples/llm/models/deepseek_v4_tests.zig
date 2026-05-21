@@ -100,6 +100,9 @@ pub fn run(
     // TEST: Attention
     try ctx.testLayer("layers.0.attn.kv_norm", .{ .batch, .seq, .hd }, mdl.layers[0].attn.kv_norm, model_buffers.layers[0].attn.kv_norm, .{});
     try ctx.testLayer("layers.0.attn.q_norm", .{ .batch, .seq, .q }, mdl.layers[0].attn.q_norm, model_buffers.layers[0].attn.q_norm, .{});
+    // try ctx.testLayer("layers.0.attn.wq_a", .{ .batch, .seq, .d }, mdl.layers[0].attn.wq_a, model_buffers.layers[0].attn.wq_a, .{});
+    try ctx.testGateLayer("layers.0.ffn.gate", .{ .seq, .d }, mdl.layers[0].ffn.gate, model_buffers.layers[0].ffn.gate, .{});
+    // try ctx.testGateLayer("layers.6.ffn.gate", .{ .seq, .d }, mdl.layers[6].ffn.gate, model_buffers.layers[6].ffn.gate, .{});
 
     // var num_attn_layers: usize = 0;
     // var num_conv_layers: usize = 0;
@@ -179,6 +182,52 @@ const TestContext = struct {
         defer out_result.deinit();
 
         try zml.testing.expectClose(self.io, out_result, out_buffer_expected, opts);
+        std.log.info("Layer {s} passed!", .{name});
+    }
+
+    fn testGateLayer(self: *TestContext, name: []const u8, tagz: anytype, layer: anytype, layer_buffers: anytype, opts: zml.testing.CompareOpts) !void {
+        std.log.info("Testing layer: {s}", .{name});
+
+        const in_key = try std.fmt.allocPrint(self.allocator, "{s}.in.0", .{name});
+        defer self.allocator.free(in_key);
+        var in_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key, self.sharding);
+        defer in_buffer.deinit();
+        const in_tensor = zml.Tensor.fromShape(in_buffer.shape()).withTags(tagz);
+
+        const in_1_key = try std.fmt.allocPrint(self.allocator, "{s}.in.1", .{name});
+        defer self.allocator.free(in_1_key);
+        var in_1_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_1_key, self.sharding);
+        defer in_1_buffer.deinit();
+        const in_1_tensor = zml.Tensor.fromShape(in_1_buffer.shape()).withTags(.{.seq});
+
+        const out_key = try std.fmt.allocPrint(self.allocator, "{s}.out.0", .{name});
+        defer self.allocator.free(out_key);
+        var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
+        defer out_buffer_expected.deinit();
+
+        const out_1_key = try std.fmt.allocPrint(self.allocator, "{s}.out.1", .{name});
+        defer self.allocator.free(out_1_key);
+        var out_1_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_1_key, self.sharding);
+        defer out_1_buffer_expected.deinit();
+
+        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, in_1_tensor }, .{ .shardings = &.{self.sharding} });
+        defer exe.deinit();
+
+        var args = try exe.args(self.allocator);
+        defer args.deinit(self.allocator);
+        args.set(.{ layer_buffers, in_buffer, in_1_buffer });
+
+        var res = try exe.results(self.allocator);
+        defer res.deinit(self.allocator);
+
+        exe.call(args, &res);
+
+        var out_result, var out_1_result = res.get(struct { zml.Buffer, zml.Buffer });
+        defer out_result.deinit();
+        defer out_1_result.deinit();
+
+        try zml.testing.expectClose(self.io, out_result, out_buffer_expected, opts);
+        try zml.testing.expectClose(self.io, out_1_result, out_1_buffer_expected, opts);
         std.log.info("Layer {s} passed!", .{name});
     }
 
