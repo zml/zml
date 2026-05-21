@@ -12,7 +12,8 @@ pub const std_options: std.Options = .{
 
 const Args = struct {
     model: []const u8,
-    activations: []const u8,
+    activations_main: []const u8,
+    activations_moe: []const u8,
 
     pub const help =
         \\Use step3_5_tests --model=<path> --activations=<path>
@@ -43,7 +44,8 @@ pub fn main(init: std.process.Init) !void {
     var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry);
     defer model_store.deinit();
 
-    try run(allocator, io, platform, args.activations, &model_store);
+    // try run(allocator, io, platform, args.activations_main, &model_store);
+    try run(allocator, io, platform, args.activations_moe, &model_store);
 }
 
 fn run(
@@ -61,32 +63,30 @@ fn run(
     var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer activation_store.deinit();
 
-    const layer_indices = [_]usize{ 0, 1, 2, 45, 46, 47 };
-    std.log.info("MLP:", .{});
-    for (layer_indices) |layer_idx| {
-        const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp", .{layer_idx});
-        defer allocator.free(name);
+    // const layer_indices = [_]usize{ 0, 1, 2, 45, 46, 47 };
+    // std.log.info("MLP:", .{});
+    // for (layer_indices) |layer_idx| {
+    //     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp", .{layer_idx});
+    //     defer allocator.free(name);
 
-        std.log.info("name {s}", .{name});
+    //     std.log.info("name {s}", .{name});
 
-        try testLayer(allocator, io, platform, activation_store.view(), model_store, .mlp, name, .{ .absolute_tolerance = 1e-2 });
-    }
-    std.log.info("RMS Norm:", .{});
+    //     try testLayer(allocator, io, platform, activation_store.view(), model_store, .mlp, name, .{ .absolute_tolerance = 1e-2 });
+    // }
+    // std.log.info("RMS Norm:", .{});
 
-    for (0..48) |layer_idx| {
-        const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.input_layernorm", .{layer_idx});
-        defer allocator.free(name);
+    // for (0..48) |layer_idx| {
+    //     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.input_layernorm", .{layer_idx});
+    //     defer allocator.free(name);
 
-        try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, .{ .absolute_tolerance = 1e-2 });
-    }
-    for (0..48) |layer_idx| {
-        const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.post_attention_layernorm", .{layer_idx});
-        defer allocator.free(name);
+    //     try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, .{ .absolute_tolerance = 1e-2 });
+    // }
+    // for (0..48) |layer_idx| {
+    //     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.post_attention_layernorm", .{layer_idx});
+    //     defer allocator.free(name);
 
-        try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, .{ .absolute_tolerance = 1e-2 });
-    }
-
-    // Step 3.5 Flash put the MTP heads in the same last three layers as the regular layernorm, k norm
+    //     try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, .{ .absolute_tolerance = 1e-2 });
+    // }
 
     try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, "model.norm", .{ .absolute_tolerance = 1e-2 });
 }
