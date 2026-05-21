@@ -99,9 +99,15 @@ pub fn main(init: std.process.Init) !void {
 
     var summary: DryRunSummary = .{
         .histogram = try allocator.alloc(u64, models.block_size + 1),
+        .per_position_accepts = try allocator.alloc(u64, models.block_size - 1),
+        .per_position_trials = try allocator.alloc(u64, models.block_size - 1),
     };
     defer allocator.free(summary.histogram);
+    defer allocator.free(summary.per_position_accepts);
+    defer allocator.free(summary.per_position_trials);
     @memset(summary.histogram, 0);
+    @memset(summary.per_position_accepts, 0);
+    @memset(summary.per_position_trials, 0);
 
     for (loaded_samples.samples, 0..) |sample, i| {
         const prompt = tokenized_prompts[i] orelse {
@@ -131,7 +137,7 @@ pub fn main(init: std.process.Init) !void {
             sample.id,
             prompt.token_ids.len,
         });
-        try writer.print("  DFlash: {d} tokens, TPOT={d:.2}ms, TPS={d:.1}, tau={d:.2}, accepted_tau={d:.2}, steps={d}, eos={}\n", .{
+        try writer.print("  DFlash: {d} tokens, TPOT={d:.2}ms, TPS={d:.1}, tau={d:.2}, accepted_tau={d:.2}, steps={d}, eos={}, eos_source={s}, boundary_capped_steps={d}, boundary_lost_draft_tokens={d}\n", .{
             dflash_result.generated.items.len,
             tpotMs(dflash_result.decode_elapsed, dflash_result.generated.items.len),
             tokensPerSecond(dflash_result.decode_elapsed, dflash_result.generated.items.len),
@@ -139,7 +145,13 @@ pub fn main(init: std.process.Init) !void {
             averageU64(sample_accepted, sample_steps),
             sample_steps,
             dflash_result.stopped_on_eos,
+            @tagName(dflash_result.eos_source),
+            dflash_result.boundary_capped_steps,
+            dflash_result.boundary_lost_draft_tokens,
         });
+        if (dflash_result.eos_position) |eos_position| {
+            try writer.print("  EOS position: {d}\n", .{eos_position});
+        }
         if (args.verbose) {
             var dflash_text = try decodeTokens(allocator, &project.tokenizer, dflash_result.generated.items);
             const dflash_text_slice = dflash_text.toOwnedSlice(allocator) catch |err| {
@@ -167,6 +179,11 @@ const DryRunSummary = struct {
     committed_total: u64 = 0,
     accepted_total: u64 = 0,
     histogram: []u64,
+    per_position_accepts: []u64,
+    per_position_trials: []u64,
+    boundary_capped_steps: u64 = 0,
+    boundary_lost_draft_tokens: u64 = 0,
+    eos_source_counts: [@typeInfo(EosSource).@"enum".fields.len]u64 = .{0} ** @typeInfo(EosSource).@"enum".fields.len,
 
     fn add(self: *DryRunSummary, result: MethodRunResult) void {
         self.sample_count += 1;
@@ -179,6 +196,15 @@ const DryRunSummary = struct {
         for (result.valid_draft_token_histogram, 0..) |count, i| {
             if (i < self.histogram.len) self.histogram[i] += count;
         }
+        for (result.per_position_accepts, 0..) |count, i| {
+            if (i < self.per_position_accepts.len) self.per_position_accepts[i] += count;
+        }
+        for (result.per_position_trials, 0..) |count, i| {
+            if (i < self.per_position_trials.len) self.per_position_trials[i] += count;
+        }
+        self.boundary_capped_steps += result.boundary_capped_steps;
+        self.boundary_lost_draft_tokens += result.boundary_lost_draft_tokens;
+        self.eos_source_counts[@intFromEnum(result.eos_source)] += 1;
     }
 };
 
@@ -197,7 +223,15 @@ fn printDryRunReport(writer: *std.Io.Writer, summary: DryRunSummary) !void {
     try writer.print("Tau:            {d:.2} committed tokens/step\n", .{averageU64(summary.committed_total, summary.step_count)});
     try writer.print("Accepted tau:   {d:.2} accepted draft tokens/step\n", .{averageU64(summary.accepted_total, summary.step_count)});
     try writer.print("Steps:          {d}\n", .{summary.step_count});
-    try writer.print("EOS samples:    {d}/{d}\n\n", .{ summary.stopped_on_eos_count, summary.sample_count });
+    try writer.print("EOS samples:    {d}/{d}\n", .{ summary.stopped_on_eos_count, summary.sample_count });
+    try writer.print("Boundary capped steps:      {d}\n", .{summary.boundary_capped_steps});
+    try writer.print("Boundary lost draft tokens: {d}\n", .{summary.boundary_lost_draft_tokens});
+    try writer.print("EOS sources: none={d} prefill_target={d} committed_block={d} correction_token={d}\n\n", .{
+        summary.eos_source_counts[@intFromEnum(EosSource.none)],
+        summary.eos_source_counts[@intFromEnum(EosSource.prefill_target)],
+        summary.eos_source_counts[@intFromEnum(EosSource.committed_block)],
+        summary.eos_source_counts[@intFromEnum(EosSource.correction_token)],
+    });
 
     var histogram_total: u64 = 0;
     for (summary.histogram) |count| histogram_total += count;
@@ -207,6 +241,12 @@ fn printDryRunReport(writer: *std.Io.Writer, summary: DryRunSummary) !void {
         try writer.print("  {d:>2}: {d:.3} ", .{ valid_tokens, rate });
         try writer.splatByteAll('x', barLen(rate, 50));
         try writer.writeByte('\n');
+    }
+
+    try writer.writeAll("\nPer-position acceptance:\n");
+    for (summary.per_position_accepts, summary.per_position_trials, 0..) |accepted, trials, pos| {
+        const rate = if (trials == 0) 0 else @as(f64, @floatFromInt(accepted)) / @as(f64, @floatFromInt(trials));
+        try writer.print("  p{d:0>2}: {d}/{d} {d:.3}\n", .{ pos, accepted, trials, rate });
     }
 }
 
@@ -810,15 +850,30 @@ const MethodRunResult = struct {
     acceptance_lengths: std.ArrayList(u32),
     committed_lengths: std.ArrayList(u32),
     valid_draft_token_histogram: []u64,
+    per_position_accepts: []u64,
+    per_position_trials: []u64,
+    boundary_capped_steps: u64 = 0,
+    boundary_lost_draft_tokens: u64 = 0,
     decode_elapsed: stats.Duration,
     stopped_on_eos: bool,
+    eos_source: EosSource = .none,
+    eos_position: ?u32 = null,
 
     pub fn deinit(self: *MethodRunResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.per_position_trials);
+        allocator.free(self.per_position_accepts);
         allocator.free(self.valid_draft_token_histogram);
         self.committed_lengths.deinit(allocator);
         self.acceptance_lengths.deinit(allocator);
         self.generated.deinit(allocator);
     }
+};
+
+const EosSource = enum {
+    none,
+    prefill_target,
+    committed_block,
+    correction_token,
 };
 
 const RuntimeState = struct {
@@ -1018,13 +1073,21 @@ fn runBaseline(
 
     const histogram = try allocator.alloc(u64, 0);
     errdefer allocator.free(histogram);
+    const per_position_accepts = try allocator.alloc(u64, 0);
+    errdefer allocator.free(per_position_accepts);
+    const per_position_trials = try allocator.alloc(u64, 0);
+    errdefer allocator.free(per_position_trials);
     return .{
         .generated = generated,
         .acceptance_lengths = .empty,
         .committed_lengths = .empty,
         .valid_draft_token_histogram = histogram,
+        .per_position_accepts = per_position_accepts,
+        .per_position_trials = per_position_trials,
         .decode_elapsed = .{ .nanoseconds = started_at.untilNow(project.io, .awake).nanoseconds },
         .stopped_on_eos = stopped_on_eos,
+        .eos_source = if (stopped_on_eos) .prefill_target else .none,
+        .eos_position = if (stopped_on_eos) 0 else null,
     };
 }
 
@@ -1067,9 +1130,17 @@ fn runDFlash(
     errdefer acceptance_lengths.deinit(allocator);
     var committed_lengths: std.ArrayList(u32) = .empty;
     errdefer committed_lengths.deinit(allocator);
-    var valid_draft_token_histogram = try allocator.alloc(u64, models.block_size + 1);
+    const valid_draft_token_histogram = try allocator.alloc(u64, models.block_size + 1);
     errdefer allocator.free(valid_draft_token_histogram);
     @memset(valid_draft_token_histogram, 0);
+    const per_position_accepts = try allocator.alloc(u64, models.block_size - 1);
+    errdefer allocator.free(per_position_accepts);
+    @memset(per_position_accepts, 0);
+    const per_position_trials = try allocator.alloc(u64, models.block_size - 1);
+    errdefer allocator.free(per_position_trials);
+    @memset(per_position_trials, 0);
+    var boundary_capped_steps: u64 = 0;
+    var boundary_lost_draft_tokens: u64 = 0;
 
     var block_tokens = try allocator.alloc(u32, models.block_size);
     defer allocator.free(block_tokens);
@@ -1086,7 +1157,9 @@ fn runDFlash(
     var target_hidden_block_buffer = prefill_output.target_hidden_buffer;
     var owns_target_hidden_block_buffer = true;
     const started_at: std.Io.Timestamp = .now(project.io, .awake);
-    var stopped_on_eos = false;
+    var stopped_on_eos = llama.isEosToken(&project.parsed_target_config.value, prefill_output.target_token);
+    var eos_source: EosSource = if (stopped_on_eos) .prefill_target else .none;
+    var eos_position: ?u32 = if (stopped_on_eos) 0 else null;
 
     while (start < prompt.max_seq_len and !stopped_on_eos) {
         const context_len = start - draft_cache_base;
@@ -1181,6 +1254,14 @@ fn runDFlash(
         const max_usable_draft_tokens = if (remaining_output_slots == 0) 0 else remaining_output_slots - 1;
         const usable_draft_tokens = @min(valid_draft_tokens, max_usable_draft_tokens);
         valid_draft_token_histogram[valid_draft_tokens] += 1;
+        if (valid_draft_tokens > usable_draft_tokens) {
+            boundary_capped_steps += 1;
+            boundary_lost_draft_tokens += valid_draft_tokens - usable_draft_tokens;
+        }
+        for (per_position_trials, 0..) |*trials, pos| {
+            trials.* += 1;
+            if (pos < valid_draft_tokens) per_position_accepts[pos] += 1;
+        }
         try acceptance_lengths.append(allocator, @intCast(valid_draft_tokens));
         try committed_lengths.append(allocator, @intCast(usable_draft_tokens + 1));
 
@@ -1188,6 +1269,8 @@ fn runDFlash(
         for (block_tokens[0..@as(usize, @intCast(committed_tokens))]) |token| {
             if (llama.isEosToken(&project.parsed_target_config.value, token)) {
                 stopped_on_eos = true;
+                eos_source = .committed_block;
+                eos_position = start - prompt.prompt_len;
                 break;
             }
             try setGeneratedToken(&generated, allocator, start, token);
@@ -1198,6 +1281,8 @@ fn runDFlash(
         if (!stopped_on_eos and start < prompt.max_seq_len) {
             if (llama.isEosToken(&project.parsed_target_config.value, correction_token)) {
                 stopped_on_eos = true;
+                eos_source = .correction_token;
+                eos_position = start - prompt.prompt_len;
             } else {
                 try setGeneratedToken(&generated, allocator, start, correction_token);
             }
@@ -1215,8 +1300,14 @@ fn runDFlash(
         .acceptance_lengths = acceptance_lengths,
         .committed_lengths = committed_lengths,
         .valid_draft_token_histogram = valid_draft_token_histogram,
+        .per_position_accepts = per_position_accepts,
+        .per_position_trials = per_position_trials,
+        .boundary_capped_steps = boundary_capped_steps,
+        .boundary_lost_draft_tokens = boundary_lost_draft_tokens,
         .decode_elapsed = .{ .nanoseconds = started_at.untilNow(project.io, .awake).nanoseconds },
         .stopped_on_eos = stopped_on_eos,
+        .eos_source = eos_source,
+        .eos_position = eos_position,
     };
 }
 
