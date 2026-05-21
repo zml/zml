@@ -492,7 +492,7 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
         }
         decode_tokens_slice.items(u32)[0] = generated_token;
         decode_tokens_slice.items(u32)[1] = generated_token;
-        var decode_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, sharding);
+        var decode_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, decode_tokens_slice, sharding);
         defer decode_tokens_buffer.deinit();
 
         // we need a new 1 token buffer to pass the token_index
@@ -671,7 +671,7 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
 
         decode_tokens_slice.items(u32)[0] = generated_token;
         decode_tokens_slice.items(u32)[1] = generated_token;
-        var decode_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, sharding);
+        var decode_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, decode_tokens_slice, sharding);
         defer decode_tokens_buffer.deinit();
 
         // embed tokens
