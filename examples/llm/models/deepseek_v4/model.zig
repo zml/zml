@@ -1,4 +1,5 @@
 const std = @import("std");
+const stdx = zml.stdx;
 
 const zml = @import("zml");
 const common = @import("../common.zig");
@@ -13,6 +14,9 @@ pub const Config = struct {
     routed_scaling_factor: f32,
     num_hash_layers: u32,
     num_experts_per_tok: u32,
+    swiglu_limit: f32,
+    compress_ratios: []usize,
+    rope_scaling: zml.nn.RopeOpts,
 };
 
 pub const Buffers = zml.Bufferized(Model);
@@ -57,6 +61,10 @@ pub const LinearF32 = struct {
         var y = x.dot(self.weight.convert(.f32), self.tag);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(LinearF32)) void {
+        self.weight.deinit();
+    }
 };
 
 // TODO: depending of the type of load the right tensors.
@@ -89,16 +97,114 @@ const FP8Linear = struct {
 };
 
 // TODO: Use union(enum) depending if it's either a SCA or HCA layer.
+const Compressor = struct {
+    norm: RmsNorm,
+    wgate: LinearF32,
+    wkv: LinearF32,
+    ape: zml.Tensor,
+    ratio: usize,
+    overlap: bool,
+    rope_opts: zml.nn.RopeOpts,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize) ?Compressor {
+        if (layer_idx >= config.compress_ratios.len or config.compress_ratios[layer_idx] == 0) return null;
+
+        const ratio = config.compress_ratios[layer_idx];
+        const compressor_store = store.withPrefix("compressor");
+
+        return .{
+            .norm = .init(compressor_store.createTensor("norm.weight", .{.r}, .replicated), config.rms_norm_eps, .r),
+            .wgate = .init(compressor_store.createTensor("wgate.weight", .{.hc, .d}, .replicated), null, .d),
+            .wkv = .init(compressor_store.createTensor("wkv.weight", .{.hc, .d}, .replicated), null, .d),
+            .ape = compressor_store.createTensor("ape", .{.hc, .d}, .replicated),
+            .ratio = ratio,
+            .overlap = (ratio == 4),
+            .rope_opts = config.rope_scaling,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Compressor)) void {
+        RmsNorm.unloadBuffers(self.norm);
+        LinearF32.unloadBuffers(self.wgate);
+        LinearF32.unloadBuffers(self.wkv);
+        self.ape.deinit();
+    }
+
+    pub fn forward(self: Compressor, x: zml.Tensor, start_pos: usize) void {
+        // shape(x) = [batch,seq,r]
+        stdx.debug.assert(start_pos == 0, "not implemented for `start_pos != 0`", .{});
+
+        const seqlen = x.dim(.seq);
+        const should_compress = seqlen >= self.ratio;
+        _ = should_compress; // autofix
+        const remainder = @mod(seqlen, self.ratio);
+        const cutoff = seqlen - remainder;
+        _ = cutoff; // autofix
+        const offset = if (self.overlap) self.ratio else 0;
+        _ = offset; // autofix
+
+        //if self.overlap > 0 and cutoff >= self.ratio:
+        var kv = self.wkv.forward(x);
+        kv = kv.split(.{1}, .{ .auto, self.ratio });
+
+        var score = self.wgate.forward(x);
+        score = score.split(.{1}, .{ .auto, self.ratio });
+        score = score.add(self.ape);
+
+        //TODO: if overlap:
+
+        kv = kv.mul(score.softmax(.{2})).sum(.{2});
+
+        // TODO: if not should_compress path
+
+        const pos_idx = blk: {
+            // TODO: compute pos depending of `start_pos`
+            break :blk x;
+        };
+
+        kv = zml.nn.rope(self.norm(kv), pos_idx, self.rope_opts);
+
+        //TODO: Update the kv cache
+        return kv;
+    }
+};
+
+const Indexer = struct {
+    // compressor: Compressor,
+    proj: zml.nn.Linear,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize) ?Indexer {
+        if (layer_idx >= config.compress_ratios.len or config.compress_ratios[layer_idx] != 4) return null;
+
+        // const comp: ?Compressor = .init(store, config, layer_idx);
+        // stdx.debug.assert(comp != null, "expected non null compressor from indexer", .{});
+
+        return .{
+            // .compressor = comp.?,
+            .proj = .init(store.createTensor("weights_proj.weight", .{.sq, .d}, .replicated), null, .d),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Indexer)) void {
+        // Compressor.unloadBuffers(&self.compressor);
+        self.proj.weight.deinit();
+    }
+};
+
 const Attention = struct {
     kv_norm: RmsNorm,
     q_norm: RmsNorm,
     wq_a: FP8Linear,
+    compressor: ?Compressor,
+    indexer: ?Indexer,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) Attention {
+    pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize) Attention {
         return .{
             .kv_norm = .init(store.createTensor("kv_norm.weight", .{ .hd }, .replicated), config.rms_norm_eps, .hd),
             .q_norm = .init(store.createTensor("q_norm.weight", .{ .q }, .replicated), config.rms_norm_eps, .q),
             .wq_a = .init(store.withPrefix("wq_a"), .{ .hd, .d }),
+            .compressor = .init(store, config, layer_idx),
+            .indexer = .init(store.withPrefix("indexer"), config, layer_idx),
         };
     }
 
@@ -111,15 +217,18 @@ const Attention = struct {
 
 const MoE = struct {
     gate: Gate,
+    shared_experts: Expert,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config, i: usize) MoE {
         return .{
             .gate = .init(store.withPrefix("gate"), config, i),
+            .shared_experts = .init(store.withPrefix("shared_experts"), config.swiglu_limit),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(MoE)) void {
         Gate.unloadBuffers(&self.gate);
+        Expert.unloadBuffers(&self.shared_experts);
     }
 };
 
@@ -189,6 +298,43 @@ const Gate = struct {
     }
 };
 
+const Expert = struct {
+    w1: FP8Linear,
+    w2: FP8Linear,
+    w3: FP8Linear,
+    activation_threshold: f32,
+
+    pub fn init(store: zml.io.TensorStore.View, activation_threshold: f32) Expert {
+        return .{
+            .w1 = .init(store.withPrefix("w1"), .{ .moe_d, .moe_dout }),
+            .w2 = .init(store.withPrefix("w2"), .{ .d, .n }),
+            .w3 = .init(store.withPrefix("w3"), .{ .moe_d, .moe_dout }),
+            .activation_threshold = activation_threshold,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Expert)) void {
+        FP8Linear.unloadBuffers(&self.w1);
+        FP8Linear.unloadBuffers(&self.w2);
+        FP8Linear.unloadBuffers(&self.w3);
+    }
+
+    pub fn forward(self: Expert, x: zml.Tensor, weights: ?zml.Tensor) zml.Tensor {
+        var gate = self.w1.forward(x);
+        var up = self.w3.forward(x);
+
+        const threshold = zml.Tensor.scalar(self.activation_threshold, up.dtype());
+        up = up.clamp(threshold, threshold);
+        gate = gate.clamp(threshold, threshold);
+
+        var x_ = gate.silu().mul(up);
+        if (weights) | w | {
+            x_ = x_.mul(w);
+        }
+        return self.w2.forward(x_);
+    }
+};
+
 const Layer = struct {
     attn_norm: RmsNorm,
     ffn_norm: RmsNorm,
@@ -211,7 +357,7 @@ const Layer = struct {
             .hc_ffn_base = store.createTensor("hc_ffn_base", .{.b}, .replicated),
             .hc_ffn_fn = .init(store.createTensor("hc_ffn_fn", .{.b, .r}, .replicated), null, .b),
             .hc_ffn_scale = store.createTensor("hc_ffn_scale", .{.b}, .replicated),
-            .attn = .init(store.withPrefix("attn"), config),
+            .attn = .init(store.withPrefix("attn"), config, i),
             .ffn = .init(store.withPrefix("ffn"), config, i),
         };
     }
