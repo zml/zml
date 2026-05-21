@@ -1639,10 +1639,12 @@ fn runStage1(
         zml.Tensor.fromShape(init_pre_out.a2v_pe_sin.shape()),
         zml.Tensor.fromShape(init_pre_out.a2v_k_pe_cos.shape()),
         zml.Tensor.fromShape(init_pre_out.a2v_k_pe_sin.shape()),
+        {}, // a2v_mask (void for non-isolated variants)
         zml.Tensor.fromShape(init_pre_out.v2a_pe_cos.shape()),
         zml.Tensor.fromShape(init_pre_out.v2a_pe_sin.shape()),
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
+        {}, // v2a_mask (void for non-isolated variants)
     };
 
     // FA3 scratch buffer metadata — initialized only when attn_mode == .bf16_cuda_fa3.
@@ -2799,10 +2801,12 @@ fn runStage2(
         zml.Tensor.fromShape(init_pre_out.a2v_pe_sin.shape()),
         zml.Tensor.fromShape(init_pre_out.a2v_k_pe_cos.shape()),
         zml.Tensor.fromShape(init_pre_out.a2v_k_pe_sin.shape()),
+        {}, // a2v_mask (void for non-isolated variants)
         zml.Tensor.fromShape(init_pre_out.v2a_pe_cos.shape()),
         zml.Tensor.fromShape(init_pre_out.v2a_pe_sin.shape()),
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
+        {}, // v2a_mask (void for non-isolated variants)
     };
 
     // FA3 scratch buffer metadata for Stage 2 sequence lengths.

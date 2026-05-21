@@ -767,6 +767,19 @@ fn adaValueAtMasked(sst: Tensor, ts_sigma: Tensor, ts_zero: Tensor, mask: Tensor
         .add(one_minus.broad(target).mul(val_z.convert(.f32).broad(target)));
 }
 
+/// Shift/scale/gate triple from 3 consecutive AdaLN rows.
+const AdaLNTriple = struct { shift: Tensor, scale: Tensor, gate: Tensor };
+
+/// Extract a shift/scale/gate triple from `adaValueAtMasked` at consecutive indices
+/// `base_idx`, `base_idx+1`, `base_idx+2`, converting each to `dtype`.
+fn adaTripleMasked(sst: Tensor, ts: Tensor, ts_zero: Tensor, mask: Tensor, base_idx: i64, dtype: zml.dtype.DataType) AdaLNTriple {
+    return .{
+        .shift = adaValueAtMasked(sst, ts, ts_zero, mask, base_idx + 0).convert(dtype),
+        .scale = adaValueAtMasked(sst, ts, ts_zero, mask, base_idx + 1).convert(dtype),
+        .gate = adaValueAtMasked(sst, ts, ts_zero, mask, base_idx + 2).convert(dtype),
+    };
+}
+
 // ============================================================================
 // Section 7: BasicAVTransformerBlock (single block forward)
 // Python ref: ltx_core/models/transformer_ltx_2.py — BasicAVTransformerBlock.forward()
@@ -919,6 +932,15 @@ pub const BasicAVTransformerBlock = struct {
     /// `params.audio_scale_shift_table` (audio) rather than accepting pre-captured
     /// per-module query tensors from Python activation traces. This is the
     /// threading-compatible path used by `LTXModel.forwardNative`.
+    ///
+    /// Comptime bools control precision and attention mode:
+    /// - `audio_ff_residual_f32`: audio FF uses f32 matmuls (currently unused — always false).
+    /// - `audio_all_residuals_f32`: all audio residual adds in f32; implies f32 FF (currently unused).
+    /// - `video_all_residuals_f32`: all video residual adds in f32 (currently unused).
+    /// - `bf16_attn`: use bf16 attention (SDPA/FA3/Triton) instead of fp32 vanilla.
+    /// - `skip_video_self_attn`: video self-attn uses V-passthrough (to_out(to_v(x)))
+    ///   instead of Q·K·V. Used for STG perturbation at block 28.
+    /// - `skip_audio_self_attn`: same for audio. Always set together with `skip_video_self_attn`.
     fn forwardNativeImpl(self: BasicAVTransformerBlock, comptime audio_ff_residual_f32: bool, comptime audio_all_residuals_f32: bool, comptime video_all_residuals_f32: bool, comptime bf16_attn: bool, comptime skip_video_self_attn: bool, comptime skip_audio_self_attn: bool, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
         const vx = vx_in.withPartialTags(.{ .b, .t, .d });
         const ax = ax_in.withPartialTags(.{ .b, .t, .d });
@@ -930,12 +952,10 @@ pub const BasicAVTransformerBlock = struct {
         const ad = ax.dtype();
 
         // ── Video: AdaLN self-attn (rows 0,1,2 → shift, scale, gate) ─────────────────
-        const vshift_msa = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 0).convert(vd);
-        const vscale_msa = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 1).convert(vd);
-        const vgate_msa = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 2).convert(vd);
+        const v_msa = adaTripleMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 0, vd);
         const norm_vx = zml.nn.rmsNorm(vx, .d, 1e-6)
-            .mul(vscale_msa.addConstant(1.0).broad(vx.shape()))
-            .add(vshift_msa.broad(vx.shape()));
+            .mul(v_msa.scale.addConstant(1.0).broad(vx.shape()))
+            .add(v_msa.shift.broad(vx.shape()));
 
         // M1: video self-attn residual.
         const attn1_out = if (skip_video_self_attn)
@@ -949,19 +969,17 @@ pub const BasicAVTransformerBlock = struct {
             .pe_cos = inputs.v_pe_cos,
             .pe_sin = inputs.v_pe_sin,
         });
-        const video_msa_delta = attn1_out.mul(vgate_msa.broad(attn1_out.shape()));
+        const video_msa_delta = attn1_out.mul(v_msa.gate.broad(attn1_out.shape()));
         var h_v = if (video_all_residuals_f32) blk: {
             const video_dtype = vx.dtype();
             break :blk vx.convert(.f32).add(video_msa_delta.convert(.f32)).convert(video_dtype);
         } else vx.add(video_msa_delta);
 
         // M2: video text cross-attn residual (cross-attention AdaLN path).
-        const v_shift_q = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 6).convert(vd);
-        const v_scale_q = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 7).convert(vd);
-        const v_gate_q = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 8).convert(vd);
+        const v_ca = adaTripleMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 6, vd);
         const v_text_x = zml.nn.rmsNorm(h_v, .d, 1e-6)
-            .mul(v_scale_q.addConstant(1.0).broad(h_v.shape()))
-            .add(v_shift_q.broad(h_v.shape()));
+            .mul(v_ca.scale.addConstant(1.0).broad(h_v.shape()))
+            .add(v_ca.shift.broad(h_v.shape()));
         // v_shift_kv/v_scale_kv are applied to v_text_ctx (always bf16), not the f32 stream.
         const v_shift_kv = adaValueAt(params.prompt_scale_shift_table, inputs.v_prompt_timestep, 0).convert(vd);
         const v_scale_kv = adaValueAt(params.prompt_scale_shift_table, inputs.v_prompt_timestep, 1).convert(vd);
@@ -975,7 +993,7 @@ pub const BasicAVTransformerBlock = struct {
         }) else self.attn2.forward(v_text_x, params.attn2, kindNumHeads(.attn2), .{
             .context = v_text_ctx_mod,
         });
-        const video_text_ca_delta = v_text_ca_out.mul(v_gate_q.broad(v_text_ca_out.shape()));
+        const video_text_ca_delta = v_text_ca_out.mul(v_ca.gate.broad(v_text_ca_out.shape()));
         if (video_all_residuals_f32) {
             const video_dtype = h_v.dtype();
             h_v = h_v.convert(.f32).add(video_text_ca_delta.convert(.f32)).convert(video_dtype);
@@ -984,12 +1002,10 @@ pub const BasicAVTransformerBlock = struct {
         }
 
         // ── Audio: AdaLN self-attn (rows 0,1,2 → shift, scale, gate) ─────────────────
-        const ashift_msa = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 0).convert(ad);
-        const ascale_msa = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 1).convert(ad);
-        const agate_msa = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 2).convert(ad);
+        const a_msa = adaTripleMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 0, ad);
         const norm_ax = zml.nn.rmsNorm(ax, .d, 1e-6)
-            .mul(ascale_msa.addConstant(1.0).broad(ax.shape()))
-            .add(ashift_msa.broad(ax.shape()));
+            .mul(a_msa.scale.addConstant(1.0).broad(ax.shape()))
+            .add(a_msa.shift.broad(ax.shape()));
 
         // M4-A: audio self-attn residual.
         const audio_attn1_out = if (skip_audio_self_attn)
@@ -1003,19 +1019,17 @@ pub const BasicAVTransformerBlock = struct {
             .pe_cos = inputs.a_pe_cos,
             .pe_sin = inputs.a_pe_sin,
         });
-        const audio_msa_delta = audio_attn1_out.mul(agate_msa.broad(audio_attn1_out.shape()));
+        const audio_msa_delta = audio_attn1_out.mul(a_msa.gate.broad(audio_attn1_out.shape()));
         var h_a = if (audio_all_residuals_f32) blk: {
             const audio_dtype = ax.dtype();
             break :blk ax.convert(.f32).add(audio_msa_delta.convert(.f32)).convert(audio_dtype);
         } else ax.add(audio_msa_delta);
 
         // M4-B: audio text cross-attn residual (cross-attention AdaLN path).
-        const a_shift_q = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 6).convert(ad);
-        const a_scale_q = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 7).convert(ad);
-        const a_gate_q = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 8).convert(ad);
+        const a_ca = adaTripleMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 6, ad);
         const a_text_x = zml.nn.rmsNorm(h_a, .d, 1e-6)
-            .mul(a_scale_q.addConstant(1.0).broad(h_a.shape()))
-            .add(a_shift_q.broad(h_a.shape()));
+            .mul(a_ca.scale.addConstant(1.0).broad(h_a.shape()))
+            .add(a_ca.shift.broad(h_a.shape()));
         // a_shift_kv/a_scale_kv are applied to a_text_ctx (always bf16), not the f32 stream.
         const a_shift_kv = adaValueAt(params.audio_prompt_scale_shift_table, inputs.a_prompt_timestep, 0).convert(ad);
         const a_scale_kv = adaValueAt(params.audio_prompt_scale_shift_table, inputs.a_prompt_timestep, 1).convert(ad);
@@ -1029,7 +1043,7 @@ pub const BasicAVTransformerBlock = struct {
         }) else self.audio_attn2.forward(a_text_x, params.audio_attn2, kindNumHeads(.audio_attn2), .{
             .context = a_text_ctx_mod,
         });
-        const audio_text_ca_delta = a_text_ca_out.mul(a_gate_q.broad(a_text_ca_out.shape()));
+        const audio_text_ca_delta = a_text_ca_out.mul(a_ca.gate.broad(a_text_ca_out.shape()));
         if (audio_all_residuals_f32) {
             const audio_dtype = h_a.dtype();
             h_a = h_a.convert(.f32).add(audio_text_ca_delta.convert(.f32)).convert(audio_dtype);
@@ -1130,17 +1144,15 @@ pub const BasicAVTransformerBlock = struct {
         }
 
         // ── Video FF: AdaLN rows 3,4,5 (shift, scale, gate) ─────────────────────────
-        const vshift_mlp = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 3).convert(vd);
-        const vscale_mlp = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 4).convert(vd);
-        const vgate_mlp = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 5).convert(vd);
+        const v_mlp = adaTripleMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 3, vd);
         const vx_scaled_ff = zml.nn.rmsNorm(h_v, .d, 1e-6)
-            .mul(vscale_mlp.addConstant(1.0).broad(h_v.shape()))
-            .add(vshift_mlp.broad(h_v.shape()));
+            .mul(v_mlp.scale.addConstant(1.0).broad(h_v.shape()))
+            .add(v_mlp.shift.broad(h_v.shape()));
         const video_ff_out = if (video_all_residuals_f32)
             forwardAudioFFPrecise(vx_scaled_ff, params.ff)
         else
             self.ff.forward(vx_scaled_ff, params.ff);
-        const video_ff_delta = video_ff_out.mul(vgate_mlp.broad(video_ff_out.shape()));
+        const video_ff_delta = video_ff_out.mul(v_mlp.gate.broad(video_ff_out.shape()));
         if (video_all_residuals_f32) {
             const video_dtype = h_v.dtype();
             h_v = h_v.convert(.f32).add(video_ff_delta.convert(.f32)).convert(video_dtype);
@@ -1149,12 +1161,10 @@ pub const BasicAVTransformerBlock = struct {
         }
 
         // ── Audio FF: AdaLN rows 3,4,5 ─────────────────────────────────────────────
-        const ashift_mlp = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 3).convert(ad);
-        const ascale_mlp = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 4).convert(ad);
-        const agate_mlp = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 5).convert(ad);
+        const a_mlp = adaTripleMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 3, ad);
         const ax_scaled_ff = zml.nn.rmsNorm(h_a, .d, 1e-6)
-            .mul(ascale_mlp.addConstant(1.0).broad(h_a.shape()))
-            .add(ashift_mlp.broad(h_a.shape()));
+            .mul(a_mlp.scale.addConstant(1.0).broad(h_a.shape()))
+            .add(a_mlp.shift.broad(h_a.shape()));
         // Use forwardAudioFFPrecise (f32 matmuls) when the audio stream is f32 (f32-carry mode)
         // or when an explicit audio-precision flag is set. Plain forward() uses zml.nn.Linear
         // which panics if x is f32 and weight is bf16.
@@ -1162,7 +1172,7 @@ pub const BasicAVTransformerBlock = struct {
             forwardAudioFFPrecise(ax_scaled_ff, params.audio_ff)
         else
             self.audio_ff.forward(ax_scaled_ff, params.audio_ff);
-        const audio_ff_delta = audio_ff_out.mul(agate_mlp.broad(audio_ff_out.shape()));
+        const audio_ff_delta = audio_ff_out.mul(a_mlp.gate.broad(audio_ff_out.shape()));
         if (audio_ff_residual_f32 or audio_all_residuals_f32) {
             const audio_dtype = h_a.dtype();
             h_a = h_a.convert(.f32)
@@ -1850,14 +1860,14 @@ fn buildSharedInputs(
     };
 }
 
-/// Comptime-generic block entrypoint for normal and STG variants.
+/// Comptime-generic block entrypoint for all block forward variants.
 ///
 /// `attn_mode` selects the attention compute path (fp32 vanilla, bf16 SDPA, bf16 FA3, or bf16 ROCm Triton).
 /// `is_stg` enables V-passthrough on self-attention (used for STG perturbation at block 28).
+/// `has_av_masks` adds a2v_mask/v2a_mask tensor args (used for isolated-modality Pass 4 in Stage 1).
 ///
-/// Normal and STG share the same function signature since neither requires AV masks.
 /// When `attn_mode == .bf16_cuda_fa3`, forward takes 8 extra Tensor params for FA3 scratch buffers.
-pub fn ForwardBlock0(comptime attn_mode: AttnMode, comptime is_stg: bool) type {
+pub fn ForwardBlock0Generic(comptime attn_mode: AttnMode, comptime is_stg: bool, comptime has_av_masks: bool) type {
     return struct {
         pub const forward = if (attn_mode == .bf16_cuda_fa3) forwardFA3 else forwardBase;
 
@@ -1892,13 +1902,15 @@ pub fn ForwardBlock0(comptime attn_mode: AttnMode, comptime is_stg: bool) type {
             a2v_pe_sin: Tensor,
             a2v_k_pe_cos: Tensor,
             a2v_k_pe_sin: Tensor,
+            a2v_mask: if (has_av_masks) Tensor else void,
             v2a_pe_cos: Tensor,
             v2a_pe_sin: Tensor,
             v2a_k_pe_cos: Tensor,
             v2a_k_pe_sin: Tensor,
+            v2a_mask: if (has_av_masks) Tensor else void,
             params: Block0FullParams,
         ) BasicAVTransformerBlock.FullOutputs {
-            const inputs = buildSharedInputs(
+            var inputs = buildSharedInputs(
                 attn_mode,
                 video_timesteps,
                 audio_timesteps,
@@ -1927,6 +1939,10 @@ pub fn ForwardBlock0(comptime attn_mode: AttnMode, comptime is_stg: bool) type {
                 v2a_k_pe_cos,
                 v2a_k_pe_sin,
             );
+            if (has_av_masks) {
+                inputs.a2v_mask = a2v_mask;
+                inputs.v2a_mask = v2a_mask;
+            }
             return doForward(vx_in, ax_in, inputs, params);
         }
 
@@ -1955,10 +1971,12 @@ pub fn ForwardBlock0(comptime attn_mode: AttnMode, comptime is_stg: bool) type {
             a2v_pe_sin: Tensor,
             a2v_k_pe_cos: Tensor,
             a2v_k_pe_sin: Tensor,
+            a2v_mask: if (has_av_masks) Tensor else void,
             v2a_pe_cos: Tensor,
             v2a_pe_sin: Tensor,
             v2a_k_pe_cos: Tensor,
             v2a_k_pe_sin: Tensor,
+            v2a_mask: if (has_av_masks) Tensor else void,
             v_fa3_softmax_lse: Tensor,
             v_fa3_softmax_lse_accum: Tensor,
             v_fa3_out_accum: Tensor,
@@ -1998,6 +2016,10 @@ pub fn ForwardBlock0(comptime attn_mode: AttnMode, comptime is_stg: bool) type {
                 v2a_k_pe_cos,
                 v2a_k_pe_sin,
             );
+            if (has_av_masks) {
+                inputs.a2v_mask = a2v_mask;
+                inputs.v2a_mask = v2a_mask;
+            }
             // Overwrite attention metadata and params for FA3 path
             inputs.video_attn_meta = .{ .cuda_fa3 = .{
                 .softmax_lse = v_fa3_softmax_lse,
@@ -2017,176 +2039,14 @@ pub fn ForwardBlock0(comptime attn_mode: AttnMode, comptime is_stg: bool) type {
     };
 }
 
-/// Comptime-generic block entrypoint for isolated-modality variants (with AV masks).
-///
-/// Used during Pass 4 (isolated/modality guidance) in Stage 1 denoising, where
-/// both a2v_mask and v2a_mask are set to zero to prevent cross-modal information flow.
-/// When `attn_mode == .bf16_cuda_fa3`, forward takes 8 extra Tensor params for FA3 scratch buffers.
+/// Normal/STG block entrypoint (no AV masks).
+pub fn ForwardBlock0(comptime attn_mode: AttnMode, comptime is_stg: bool) type {
+    return ForwardBlock0Generic(attn_mode, is_stg, false);
+}
+
+/// Isolated-modality block entrypoint (with AV masks, is_stg=false).
 pub fn ForwardBlock0WithAVMasks(comptime attn_mode: AttnMode) type {
-    return struct {
-        pub const forward = if (attn_mode == .bf16_cuda_fa3) forwardFA3 else forwardBase;
-
-        fn doForward(vx_in: Tensor, ax_in: Tensor, inputs: BasicAVTransformerBlock.SharedInputs, params: Block0FullParams) BasicAVTransformerBlock.FullOutputs {
-            const block = BasicAVTransformerBlock.init();
-            const use_bf16 = attn_mode != .fp32_vanilla;
-            return block.forwardNativeImpl(false, false, false, use_bf16, false, false, vx_in, ax_in, inputs, params);
-        }
-
-        fn forwardBase(
-            vx_in: Tensor,
-            ax_in: Tensor,
-            video_timesteps: Tensor,
-            audio_timesteps: Tensor,
-            video_timesteps_zero: Tensor,
-            audio_timesteps_zero: Tensor,
-            v_denoise_mask: Tensor,
-            a_denoise_mask: Tensor,
-            v_prompt_timestep: Tensor,
-            a_prompt_timestep: Tensor,
-            v_pe_cos: Tensor,
-            v_pe_sin: Tensor,
-            a_pe_cos: Tensor,
-            a_pe_sin: Tensor,
-            v_text_ctx: Tensor,
-            a_text_ctx: Tensor,
-            v_cross_ss_ts: Tensor,
-            v_cross_gate_ts: Tensor,
-            a_cross_ss_ts: Tensor,
-            a_cross_gate_ts: Tensor,
-            a2v_pe_cos: Tensor,
-            a2v_pe_sin: Tensor,
-            a2v_k_pe_cos: Tensor,
-            a2v_k_pe_sin: Tensor,
-            a2v_mask: Tensor,
-            v2a_pe_cos: Tensor,
-            v2a_pe_sin: Tensor,
-            v2a_k_pe_cos: Tensor,
-            v2a_k_pe_sin: Tensor,
-            v2a_mask: Tensor,
-            params: Block0FullParams,
-        ) BasicAVTransformerBlock.FullOutputs {
-            var inputs = buildSharedInputs(
-                attn_mode,
-                video_timesteps,
-                audio_timesteps,
-                video_timesteps_zero,
-                audio_timesteps_zero,
-                v_denoise_mask,
-                a_denoise_mask,
-                v_prompt_timestep,
-                a_prompt_timestep,
-                v_pe_cos,
-                v_pe_sin,
-                a_pe_cos,
-                a_pe_sin,
-                v_text_ctx,
-                a_text_ctx,
-                v_cross_ss_ts,
-                v_cross_gate_ts,
-                a_cross_ss_ts,
-                a_cross_gate_ts,
-                a2v_pe_cos,
-                a2v_pe_sin,
-                a2v_k_pe_cos,
-                a2v_k_pe_sin,
-                v2a_pe_cos,
-                v2a_pe_sin,
-                v2a_k_pe_cos,
-                v2a_k_pe_sin,
-            );
-            inputs.a2v_mask = a2v_mask;
-            inputs.v2a_mask = v2a_mask;
-            return doForward(vx_in, ax_in, inputs, params);
-        }
-
-        fn forwardFA3(
-            vx_in: Tensor,
-            ax_in: Tensor,
-            video_timesteps: Tensor,
-            audio_timesteps: Tensor,
-            video_timesteps_zero: Tensor,
-            audio_timesteps_zero: Tensor,
-            v_denoise_mask: Tensor,
-            a_denoise_mask: Tensor,
-            v_prompt_timestep: Tensor,
-            a_prompt_timestep: Tensor,
-            v_pe_cos: Tensor,
-            v_pe_sin: Tensor,
-            a_pe_cos: Tensor,
-            a_pe_sin: Tensor,
-            v_text_ctx: Tensor,
-            a_text_ctx: Tensor,
-            v_cross_ss_ts: Tensor,
-            v_cross_gate_ts: Tensor,
-            a_cross_ss_ts: Tensor,
-            a_cross_gate_ts: Tensor,
-            a2v_pe_cos: Tensor,
-            a2v_pe_sin: Tensor,
-            a2v_k_pe_cos: Tensor,
-            a2v_k_pe_sin: Tensor,
-            a2v_mask: Tensor,
-            v2a_pe_cos: Tensor,
-            v2a_pe_sin: Tensor,
-            v2a_k_pe_cos: Tensor,
-            v2a_k_pe_sin: Tensor,
-            v2a_mask: Tensor,
-            v_fa3_softmax_lse: Tensor,
-            v_fa3_softmax_lse_accum: Tensor,
-            v_fa3_out_accum: Tensor,
-            v_fa3_scheduler_metadata: Tensor,
-            a_fa3_softmax_lse: Tensor,
-            a_fa3_softmax_lse_accum: Tensor,
-            a_fa3_out_accum: Tensor,
-            a_fa3_scheduler_metadata: Tensor,
-            params: Block0FullParams,
-        ) BasicAVTransformerBlock.FullOutputs {
-            var inputs = buildSharedInputs(
-                attn_mode,
-                video_timesteps,
-                audio_timesteps,
-                video_timesteps_zero,
-                audio_timesteps_zero,
-                v_denoise_mask,
-                a_denoise_mask,
-                v_prompt_timestep,
-                a_prompt_timestep,
-                v_pe_cos,
-                v_pe_sin,
-                a_pe_cos,
-                a_pe_sin,
-                v_text_ctx,
-                a_text_ctx,
-                v_cross_ss_ts,
-                v_cross_gate_ts,
-                a_cross_ss_ts,
-                a_cross_gate_ts,
-                a2v_pe_cos,
-                a2v_pe_sin,
-                a2v_k_pe_cos,
-                a2v_k_pe_sin,
-                v2a_pe_cos,
-                v2a_pe_sin,
-                v2a_k_pe_cos,
-                v2a_k_pe_sin,
-            );
-            inputs.a2v_mask = a2v_mask;
-            inputs.v2a_mask = v2a_mask;
-            inputs.video_attn_meta = .{ .cuda_fa3 = .{
-                .softmax_lse = v_fa3_softmax_lse,
-                .softmax_lse_accum = v_fa3_softmax_lse_accum,
-                .out_accum = v_fa3_out_accum,
-                .scheduler_metadata = v_fa3_scheduler_metadata,
-            } };
-            inputs.audio_attn_meta = .{ .cuda_fa3 = .{
-                .softmax_lse = a_fa3_softmax_lse,
-                .softmax_lse_accum = a_fa3_softmax_lse_accum,
-                .out_accum = a_fa3_out_accum,
-                .scheduler_metadata = a_fa3_scheduler_metadata,
-            } };
-            inputs.attn_params = .{ .cuda_fa3 = .{ .is_causal = false } };
-            return doForward(vx_in, ax_in, inputs, params);
-        }
-    };
+    return ForwardBlock0Generic(attn_mode, false, true);
 }
 
 // ============================================================================
