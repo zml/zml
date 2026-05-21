@@ -69,7 +69,8 @@ pub const Session = struct {
         compiled_model: *const inference.CompiledModel,
         model_buffers: *model.Buffers,
     ) !Session {
-        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, .replicated);
+        // CHANGE: self/linear attention caches now use the model sharding required by tensor parallelism.
+        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, compiled_model.params.shardings.model);
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
         var prefill_moe_metadata_buffers = try compiled_model.params.prefill_moe_metadata.initBuffer(io, platform);
