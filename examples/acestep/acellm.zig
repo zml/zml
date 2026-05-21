@@ -694,7 +694,7 @@ const AttLayer = struct {
         // translate to [0..seq_len] in prefill and { token_index } in decode
         pos_index = pos_index.add(token_index.broad(pos_index.shape()));
         // translate to take padding into account (we rope with logical position, not physical)
-        pos_index = pos_index.insertAxes(0, .b);
+        pos_index = pos_index.insertAxes(0, .{ .b });
         pos_index = pos_index.repeat1d(.b, 2);
         pos_index = pos_index.sub(pad_index.broad(pos_index.shape()));
         
