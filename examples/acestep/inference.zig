@@ -562,8 +562,8 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
 
     const prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = acecfg.llm.options.seq_len }, .u32));
     defer prefill_tokens_slice.free(allocator);
-    // in .b = 1, we put the cond prompt
-    // in .b = 2, we put the uncond prompt, pushed to the right so it ends at same .s index
+    // in .b = 0, we put the cond prompt
+    // in .b = 1, we put the uncond prompt, pushed to the right so it ends at same .s index
     const delta = cond_tok.len - uncond_tok.len;
     @memcpy(prefill_tokens_slice.items(u32)[0..cond_tok.len], cond_tok);
     @memcpy(prefill_tokens_slice.items(u32)[(acecfg.llm.options.seq_len + delta)..][0..uncond_tok.len], uncond_tok);
@@ -596,8 +596,8 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
     const minus_inf = zml.floats.BFloat16.fromF32(zml.floats.Float32.toF32(zml.floats.Float32.minus_inf));
     for (0..acecfg.llm.options.seq_len) |i| {
         for (0..acecfg.llm.options.seq_len) |j| {
-            const pos_cond = acecfg.llm.options.seq_len * acecfg.llm.options.seq_len + i * acecfg.llm.options.seq_len + j;
-            const pos_uncond = i * acecfg.llm.options.seq_len + j;
+            const pos_cond = i * acecfg.llm.options.seq_len + j;
+            const pos_uncond = acecfg.llm.options.seq_len * acecfg.llm.options.seq_len + i * acecfg.llm.options.seq_len + j;
             const is_in_range = (i >= delta) and (j >= delta);
             range_mask_slice.items(zml.floats.BFloat16)[pos_cond] = zero;
             range_mask_slice.items(zml.floats.BFloat16)[pos_uncond] = if (is_in_range) zero else minus_inf;

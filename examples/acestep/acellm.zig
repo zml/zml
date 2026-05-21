@@ -723,10 +723,10 @@ const AttLayer = struct {
         } else {
             // init causal mask : 1 x seq_len = [0...0]@[-inf ... -inf] at pos [0..token_index], [token_index..seq_len]
             const zeros = zml.Tensor.zeroes(range_mask.shape());
-            //const minf = zml.floats.Float32.toF32(zml.floats.Float32.minus_inf);
-            //const minus_inf = zml.Tensor.constant(zml.DataType.constant(.bf16, minf)).broad(range_mask.shape());
-           //const id_valid = zml.Tensor.iota(range_mask.shape(), .k).convert(token_index.dtype()).cmp(.LE, token_index.broad(range_mask.shape()));
-            var causal_mask = zeros;//zml.Tensor.select(id_valid, zeros, minus_inf);
+            const minf = zml.floats.Float32.toF32(zml.floats.Float32.minus_inf);
+            const minus_inf = zml.Tensor.constant(zml.DataType.constant(.bf16, minf)).broad(range_mask.shape());
+            const id_valid = zml.Tensor.iota(range_mask.shape(), .k).convert(token_index.dtype()).cmp(.LE, token_index.broad(range_mask.shape()));
+            var causal_mask = zml.Tensor.select(id_valid, zeros, minus_inf);
             // repeat the causal mask to match the range mask dim : this adds the batching dimension
             causal_mask = causal_mask.broad(range_mask.shape());
             // combine the two masks
