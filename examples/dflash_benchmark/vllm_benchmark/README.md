@@ -27,6 +27,20 @@ Run with:
 source examples/dflash_benchmark/vllm_benchmark/.venv/bin/activate
 ```
 
+## vLLM Server Under Nsys
+
+Start an OpenAI-compatible vLLM server under `nsys launch` on the target host:
+
+```bash
+examples/dflash_benchmark/vllm_benchmark/start_vllm_server_nsys.sh baseline
+examples/dflash_benchmark/vllm_benchmark/start_vllm_server_nsys.sh dflash
+```
+
+The script uses `.venv/bin/vllm` next to the script, defaults to
+`CUDA_VISIBLE_DEVICES=1`, and accepts extra `vllm serve` arguments after `--`.
+Override paths and server settings with `TARGET_MODEL`, `DFLASH_MODEL`, `PORT`,
+`MAX_MODEL_LEN`, and `NUM_SPECULATIVE_TOKENS`.
+
 ## Dataset Paths
 
 The runner expects JSONL inputs and supports the same prompt formats as the Zig
