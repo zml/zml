@@ -630,7 +630,12 @@ const TransformerLayer = struct {
     
     pub fn forward(self: TransformerLayer, x0: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, layer_index: zml.Tensor, range_mask: zml.Tensor) struct { zml.Tensor, KvCache } {
         const x0_normalized = self.input_norm.forward(x0);
-        const delta0, const updated_kv_cache = self.att_layer.forward(x0_normalized, token_index, kv_cache, layer_index, range_mask);
+        //const delta0, const updated_kv_cache = self.att_layer.forward(x0_normalized, token_index, kv_cache, layer_index, range_mask);
+        const delta0 = x0_normalized;
+        const updated_kv_cache = kv_cache;
+        _ = token_index;
+        _ = layer_index;
+        _ = range_mask;
         const x1 = x0.add(delta0);
         const x1_normalized = self.post_att_norm.forward(x1);
         const x2 = self.mlp_layer.forward(x1_normalized).add(x1);
