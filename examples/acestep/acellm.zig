@@ -727,9 +727,9 @@ const AttLayer = struct {
             // combine the two masks
             mask = range_mask.add(causal_mask);
         } else {
-            //var attn_mask2 = zml.nn.causalAttnMask(.{ .q = k.dim(.k), .k = k.dim(.k) }, q.dtype(), null);
-            //attn_mask2 = attn_mask2.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask2.dtype()), token_index.reshape(.{ .coord = 1 }), .{});
-            //mask = attn_mask2;
+            var attn_mask2 = zml.nn.causalAttnMask(.{ .q = k.dim(.k), .k = k.dim(.k) }, q.dtype(), null);
+            attn_mask2 = attn_mask2.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask2.dtype()), token_index.reshape(.{ .coord = 1 }), .{});
+            mask = attn_mask2;
             //print(attn_mask2, '2');
             
             // init causal mask : 1 x seq_len = [0...0]@[-inf ... -inf] at pos [0..token_index], [token_index..seq_len]
@@ -744,7 +744,7 @@ const AttLayer = struct {
             //mask = range_mask.add(causal_mask);
         }
         
-        const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = null });
+        const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = mask });
         const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         const delta = self.o_proj.forward(attn_output).rename(.{ .d_out = .d });
         
