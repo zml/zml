@@ -877,7 +877,108 @@ pub const Router = struct {
     }
 };
 
+// Router
+pub const Router = struct {
+    gate: zml.nn.Linear, // no bias inside the Linear; router_bias is applied post-sigmoid
+    router_bias: zml.Tensor,
+    num_experts_per_tok: u32,
+    routed_scaling_factor: f32,
+
+    // k = num_experts_per_tok
+    // `store` is the view at the parent `...moe` prefix; HF layout is:
+    //   <prefix>.gate.weight
+    //   <prefix>.router_bias   (optional)
+    pub fn init(
+        store: zml.io.TensorStore.View,
+        num_experts_per_tok: u32,
+        routed_scaling_factor: f32,
+    ) Router {
+        return .{
+            .gate = .init(
+                store.createTensor("gate.weight", .{ .expert, .d }, .{ .expert = .replicated, .d = .replicated }),
+                null,
+                .d,
+            ),
+            .router_bias = store.createTensor("router_bias", .{.expert}, .{ .expert = .replicated }),
+            .num_experts_per_tok = num_experts_per_tok,
+            .routed_scaling_factor = routed_scaling_factor,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Router)) void {
+        self.gate.weight.deinit();
+        self.router_bias.deinit();
+    }
+
+    /// Returns (topk weights, topk indices) with shapes {.b, .s, .topk}.
+    /// Matches `Step3p5MoEMLP.router_bias_func`:
+    ///   logits = x @ W^T
+    ///   probs  = sigmoid(logits)        (in fp32)
+    ///   biased = probs + router_bias    (only used to choose indices)
+    ///   ids    = topk(biased)
+    ///   wts    = gather(probs, ids)     (from UNBIASED probs)
+    ///   if renormalize: wts /= sum(wts) + 1e-20
+<<<<<<< HEAD
+    pub fn forward(self: Router, x: zml.Tensor, renormalize: bool) struct { zml.Tensor, zml.Tensor } {
+        const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
+        const orig_dtype = input.dtype();
+        const logits = self.gate.forward(input).convert(.f32); // {.b, .s, .expert}
+        const probs = logits.sigmoid();
+=======
+    pub fn forward(self: Router, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        // Match HF reference: always run gate matmul + sigmoid in fp32.
+        const tagged = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
+        const input = tagged.convert(.f32);
+>>>>>>> 844fa04b (examples/llm: wip router forward)
+
+        const gate_f32: zml.nn.Linear = .init(
+            self.gate.weight.convert(.f32),
+            null,
+            .d,
+        );
+
+        // calculate raw logits
+        const logits = gate_f32.forward(input);
+
+        // calculate scores of how strongly a token matches an expert
+        const expert_scores = logits.sigmoid();
+
+        // add bias to influence how experts are distributed
+        const expert_scores_with_bias = expert_scores.add(self.router_bias.convert(.f32).broad(expert_scores.shape()));
+
+        // with N=288 total experts, pick top_k (k=8)
+        const topk = expert_scores_with_bias.topK(.{ .topk = .expert }, self.num_experts_per_tok, .{});
+        const topk_ids = topk.indices.convert(.i32);
+
+<<<<<<< HEAD
+        var router_scores = probs.gather(.{ .expert = topk_ids }, .{});
+        if (renormalize) {
+            const denom = router_scores.sum(.topk).addConstant(1e-20);
+            router_scores = router_scores.div(denom.broad(router_scores.shape()));
+        }
+        return .{ router_scores.convert(orig_dtype), topk_ids };
+=======
+        // Gather from UNBIASED probs — bias is only used to pick indices.
+        const router_scores = expert_scores.gather(.{ .expert = topk_ids }, .{});
+
+        // Renormalize so the topk weights sum to 1. Scaling by
+        // routed_scaling_factor happens in the caller (Moe.forward), matching
+        // the HF reference where `route()` returns unscaled weights.
+        const denom = router_scores.sum(.topk).addConstant(1e-20);
+        const normalized = router_scores.div(denom);
+
+        expert_scores.print("zml_gate_prob");
+        expert_scores_with_bias.print("zml_gate_prob_with_bias");
+        router_scores.print("zml_topk_prob");
+        normalized.print("zml_renormalized");
+
+        return .{ normalized, topk_ids };
+>>>>>>> 844fa04b (examples/llm: wip router forward)
+    }
+};
+
 // Moe
+<<<<<<< HEAD
 pub const Moe = struct {
     up_proj: zml.Tensor,
     gate_proj: zml.Tensor,
@@ -914,11 +1015,14 @@ pub const Moe = struct {
             .gate_proj = gate_proj_tensor,
             .down_proj = down_proj_tensor,
             .router = .init(store, 8, 3.0),
+<<<<<<< HEAD
             .layer_idx = layer_idx,
             .limit = switch (layer_idx) {
                 43, 44 => 7.0,
                 else => null,
             },
+=======
+>>>>>>> 844fa04b (examples/llm: wip router forward)
         };
     }
 
@@ -935,19 +1039,28 @@ pub const Moe = struct {
         return self.forwardTriton(x);
     }
 
+<<<<<<< HEAD
     fn forwardTriton(self: Moe, x: zml.Tensor) zml.Tensor {
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
 
+=======
+>>>>>>> 844fa04b (examples/llm: wip router forward)
         // collect topk weights and indices (renormalized, unscaled)
         const routing_scores, const topk_ids = self.router.forward(input);
 
         // apply routed_scaling_factor here, matching reference's
         // `routing_weights = routing_weights * self.routed_scaling_factor`
         const scaled = routing_scores.scale(self.router.routed_scaling_factor);
+<<<<<<< HEAD
 
         // Triton MoE backend expects the top-k axis tagged as `.top_expert`.
         const topk_ids_tensor = topk_ids.rename(.{ .topk = .top_expert });
         const scaled_tensor = scaled.rename(.{ .topk = .top_expert });
+<<<<<<< HEAD
+=======
+>>>>>>> 844fa04b (examples/llm: wip router forward)
+=======
+>>>>>>> 0b9d05c9 (examples/llm: extract .top_expert as tensor)
 
         // concat the gate and up
         const gate_up_proj = zml.Tensor.concatenate(&.{ self.gate_proj, self.up_proj }, .dout).rename(.{ .dout = .out, .d = .in });
@@ -958,6 +1071,13 @@ pub const Moe = struct {
         // hardcoded zml.moe.metadata, zml.moe.parameters
         const moe_metadata = zml.moe.Metadata.init(.{ .triton = .{} });
         const moe_parameters = zml.moe.Parameters.init(.{ .triton = .{ .num_experts_per_tok = self.router.num_experts_per_tok, .activation = .silu } });
+
+        // in Moe.forward, before forwardMoe
+        topk_ids.print("zml_topk_ids");
+
+        topk_ids.print("zml_topk_ids"); // → check min/max ≥ 256
+        scaled.print("zml_topk_weights"); // → compare to Python routing_weights
+        input.print("zml_moe_input"); // → compare to layer 42 in.0 fixture
 
         // get all expert outputs as tensor via fused triton kernel instead of Python loop
         // NOTE: swiglu limit not considered. may have to edit
@@ -1017,13 +1137,25 @@ pub const Moe = struct {
         return acc;
     }
 };
+=======
+// const Moe = struct {
+//     shared_expert: Mlp,
+//     shared_expert_gate: zml.nn.Linear,
+//     gate_up_proj: zml.Tensor,
+//     down_proj: zml.Tensor,
+//     router: Router,
+// };
+>>>>>>> 2ba32fe2 (examples/llm: Step 3.5 Flash router)
 // hidden size
 // intermediate size
 // router bias
 // routed scaling factor
 
 // gating
+<<<<<<< HEAD
 >>>>>>> c856b0f1 (examples/llm: clean up tests and model annotations)
+=======
+>>>>>>> 2ba32fe2 (examples/llm: Step 3.5 Flash router)
 
 // LoadedModel
 pub const LoadedModel = struct {
