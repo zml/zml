@@ -62,4 +62,4 @@ if __name__ == "__main__":
   test_definition_constructs()
 
   # Uncomment only when ready to load real weights.
-  # test_full_forward()
+  test_full_forward()
