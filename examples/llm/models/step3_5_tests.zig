@@ -27,9 +27,9 @@ const Args = struct {
     ;
 };
 
-pub fn main(init: std.process.Init) !void {
-    std.log.info("main", .{});
+const TEST_LAYER = 1;
 
+pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
     const args = zml.stdx.flags.parse(init.minimal.args, Args);
@@ -44,8 +44,13 @@ pub fn main(init: std.process.Init) !void {
     var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry);
     defer model_store.deinit();
 
-    // try run(allocator, io, platform, args.activations_main, &model_store);
-    try run(allocator, io, platform, args.activations_moe, &model_store);
+    if (TEST_LAYER == 0) {
+        // test main
+        try run(allocator, io, platform, args.activations_main, &model_store);
+    } else if (TEST_LAYER == 1) {
+        // test sublayer (within-gate activations)
+        try run(allocator, io, platform, args.activations_moe, &model_store);
+    }
 }
 
 fn run(
@@ -55,61 +60,59 @@ fn run(
     activations_path: []const u8,
     model_store: *zml.io.TensorStore,
 ) !void {
-    std.log.info("run", .{});
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
 
-    std.log.info("activation store", .{});
     var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer activation_store.deinit();
 
-    // const layer_indices = [_]usize{ 0, 1, 2, 45, 46, 47 };
-    // std.log.info("MLP:", .{});
-    // for (layer_indices) |layer_idx| {
-    //     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp", .{layer_idx});
-    //     defer allocator.free(name);
+    if (TEST_LAYER == 0) {
+        const mlp_layer_indices = [_]usize{ 0, 1, 2, 45, 46, 47 };
+        std.log.info("MLP:", .{});
+        for (mlp_layer_indices) |layer_idx| {
+            const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp", .{layer_idx});
+            defer allocator.free(name);
 
-    //     std.log.info("name {s}", .{name});
+            std.log.info("name {s}", .{name});
 
-    //     try testLayer(allocator, io, platform, activation_store.view(), model_store, .mlp, name, .{ .absolute_tolerance = 1e-2 });
-    // }
-    // std.log.info("RMS Norm:", .{});
+            try testLayer(allocator, io, platform, activation_store.view(), model_store, .mlp, name, name, .{ .absolute_tolerance = 1e-2 });
+        }
+        std.log.info("RMS Norm:", .{});
 
-    // for (0..48) |layer_idx| {
-    //     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.input_layernorm", .{layer_idx});
-    //     defer allocator.free(name);
+        for (0..48) |layer_idx| {
+            const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.input_layernorm", .{layer_idx});
+            defer allocator.free(name);
 
-    //     try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, .{ .absolute_tolerance = 1e-2 });
-    // }
-    // for (0..48) |layer_idx| {
-    //     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.post_attention_layernorm", .{layer_idx});
-    //     defer allocator.free(name);
+            try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, name, .{ .absolute_tolerance = 1e-2 });
+        }
+        for (0..48) |layer_idx| {
+            const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.post_attention_layernorm", .{layer_idx});
+            defer allocator.free(name);
 
-    //     try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, .{ .absolute_tolerance = 1e-2 });
-    // }
+            try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, name, .{ .absolute_tolerance = 1e-2 });
+        }
+    } else if (TEST_LAYER == 1) {
+        // layers 3..44 (45 with 0 indexing but i wont bake it in rn)
 
-    // layers 3..44 (45 with 0 indexing but i wont bake it in rn)
-    try testLayer(
-        allocator,
-        io,
-        platform,
-        activation_store.view(),
-        model_store,
-        .router,
-        "model.layers.10.moe", // weight prefix in the model checkpoint
-        "model.layers.10.moe.router", // activation prefix in router_ref.safetensors
-        .{ .absolute_tolerance = 1e-2 },
-    );
+        for (3..45) |layer_idx| {
+            const weight_name = try std.fmt.allocPrint(allocator, "model.layers.{d}.moe", .{layer_idx});
+            defer allocator.free(weight_name);
+            const activation_name = try std.fmt.allocPrint(allocator, "model.layers.{d}.moe.router", .{layer_idx});
+            defer allocator.free(activation_name);
+
+            try testLayer(allocator, io, platform, activation_store.view(), model_store, .router, weight_name, // weight prefix in the model checkpoint
+                activation_name, // activation prefix in router_ref.safetensors
+                .{ .absolute_tolerance = 1e-2 });
+        }
+    }
 }
 
 const LayerKind = enum { mlp, rmsNorm, router };
 
 fn deinitBuffers(bufs: anytype) void {
-    std.log.info("deinit buffers", .{});
     zml.meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
             b.deinit();
-            std.log.info("deinit", .{});
         }
     }.cb, {}, bufs);
 }
@@ -128,10 +131,8 @@ fn testLayer(
 ) !void {
     switch (kind) {
         .mlp => {
-            std.log.info("testlayer mlp weights={s} act={s}", .{ weights_name, activations_name });
             const mlp = model.Mlp.init(model_store.view().withPrefix(weights_name), null);
 
-            std.log.info("before recursive cleanup for buffers", .{});
             // Recursive cleanup for buffers
             var mlp_weights = try zml.io.load(model.Mlp, &mlp, allocator, io, platform, model_store, .auto);
             defer deinitBuffers(&mlp_weights);
@@ -148,17 +149,91 @@ fn testLayer(
         },
         .router => {
             //hardcoded k=num_experts_per_tok=288 for now
-            std.log.info("router weights={s} act={s}", .{ weights_name, activations_name });
-
             const router = model.Router.init(model_store.view().withPrefix(weights_name), 288);
 
-            std.log.info("router initted", .{});
             var router_weights = try zml.io.load(model.Router, &router, allocator, io, platform, model_store, .auto);
             defer deinitBuffers(&router_weights);
 
-            std.log.info("router weights created", .{});
-
-            try zml.testing.testLayer(allocator, io, platform, router, .forward, activation_store, activations_name, router_weights, &.{}, opts);
+            try compareRouterTopK(allocator, io, platform, router, router_weights, activation_store, activations_name, 8);
         },
     }
+}
+
+fn compareRouterTopK(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    router: model.Router,
+    router_weights: zml.Bufferized(model.Router),
+    activation_store: zml.io.TensorStore.View,
+    activations_name: []const u8,
+    comptime show: usize,
+) !void {
+    var args: struct { zml.Tensor, bool } = .{
+        activation_store.withPrefix(activations_name).withPrefix("in").createTensor("0", null, .replicated),
+        true,
+    };
+
+    const exe = try platform.compile(allocator, io, router, .forward, args, .{});
+    defer exe.deinit();
+
+    var args_buffers = try zml.io.load(@TypeOf(args), &args, allocator, io, platform, activation_store.store, .auto);
+    defer deinitBuffers(&args_buffers);
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ router_weights, args_buffers });
+    exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+
+    var results: [2]zml.Buffer = undefined;
+    exe_results.fill(.{&results});
+
+    const got = try results[1].toSliceAlloc(allocator, io);
+    defer got.free(allocator);
+
+    const out_view = activation_store.withPrefix(activations_name).withPrefix("out");
+    const exp_shape = out_view.getShape("1") orelse return;
+    var read_buf: [4096]u8 = undefined;
+    var reader = try out_view.getReader("1", io, &read_buf);
+    defer reader.deinit();
+    const exp: zml.Slice = try .alloc(allocator, exp_shape);
+    defer exp.free(allocator);
+    try reader.interface.readSliceAll(exp.data());
+
+    const dims = exp.shape.dims();
+    const k: usize = @intCast(dims[dims.len - 1]);
+    var positions: usize = 1;
+    for (dims[0 .. dims.len - 1]) |d| positions *= @intCast(d);
+
+    const exp_ids = exp.constItems(i32);
+    const got_ids = got.constItems(i32);
+
+    var mismatches: usize = 0;
+    var first: usize = 0;
+    for (0..positions) |p| {
+        if (!topSetEqual(exp_ids[p * k ..][0..show], got_ids[p * k ..][0..show])) {
+            if (mismatches == 0) first = p;
+            mismatches += 1;
+        }
+    }
+
+    if (mismatches == 0) {
+        std.log.info("✅ {s}: top-{d} matches at all {d} positions", .{ activations_name, show, positions });
+    } else {
+        std.log.warn("⚠️  {s}: {d}/{d} positions differ. first @{d}: exp={any} got={any}", .{
+            activations_name,               first,
+            mismatches,                     positions,
+            exp_ids[first * k ..][0..show], got_ids[first * k ..][0..show],
+        });
+    }
+}
+
+fn topSetEqual(a: []const i32, b: []const i32) bool {
+    outer: for (a) |x| {
+        for (b) |y| if (x == y) continue :outer;
+        return false;
+    }
+    return true;
 }
