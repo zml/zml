@@ -3,8 +3,9 @@
 This package benchmarks Gemma4 baseline decoding against DFlash speculative
 decoding with the local ZML runner, vLLM, and SGLang.
 
-The commands below are intended for `9960x-5090x2` from `~/zml` on branch
-`tristan/dflash`.
+The commands below are intended for a GH200 machine from `~/zml` on branch
+`tristan/dflash`. Gemma4 31B plus the DFlash draft model is too large for the
+current 2x32GB RTX 5090 setup for the full ZML benchmark.
 
 ## Common Setup
 
@@ -159,4 +160,3 @@ examples/dflash_benchmark_gemma4/SGLang_benchmark/run_benchmark.py \
   --gpu=1 \
   --server-log="${OUT_DIR}/sglang_dflash_stories.log"
 ```
-
