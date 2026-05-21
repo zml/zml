@@ -43,17 +43,32 @@ class Step3p5RotaryEmbedding(nn.Module):
 
     def __init__(self, config: Step3p5Config, device=None, layer_idx=None):
         super().__init__()
-        # BC: "rope_type" was originally "type"
         self.layer_idx = layer_idx
-        self.rope_type = "default"
+
+        if not hasattr(config, "_step3p5_base_rope_cfg"):
+            base_rope_cfg = (
+                getattr(config, "rope_scaling", None) or
+                getattr(config, "rope_parameters", None) or {}
+            ).copy()
+            config._step3p5_base_rope_cfg = base_rope_cfg
+
+        base_rope_cfg = config._step3p5_base_rope_cfg.copy()
+        self.rope_type = base_rope_cfg.get(
+            "rope_type", base_rope_cfg.get("type", "llama3"))
+
         self.max_seq_len_cached = config.max_position_embeddings
         self.original_max_seq_len = config.max_position_embeddings
 
-        config.partial_rotary_factor = partial_rotary_factors[
-                self.layer_idx]
+        partial_rotary_factors = config.partial_rotary_factors
+        config.partial_rotary_factor = partial_rotary_factors[self.layer_idx]
 
         self.rope_theta = config.rope_theta.copy()
-        config.rope_theta = self.rope_theta[self.layer_idx]
+        selected_rope_theta = self.rope_theta[self.layer_idx]
+        config.rope_theta = selected_rope_theta
+
+        base_rope_cfg["rope_theta"] = selected_rope_theta
+        config.rope_parameters = base_rope_cfg
+        config.rope_scaling = base_rope_cfg.copy()
 
         self.config = config
         self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
@@ -393,6 +408,10 @@ class Step3p5Attention(nn.Module):
         if hasattr(config, "yarn_only_types") and layer_types[
                 self.layer_idx] not in config.yarn_only_types:
             config.rope_parameters = None
+        else:
+            config.rope_parameters = getattr(
+                config, "_step3p5_base_rope_cfg",
+                getattr(config, "rope_scaling", None))
      
         self.sliding_window = config.sliding_window
         if enable_sliding_window:
@@ -604,6 +623,21 @@ class Step3p5PreTrainedModel(PreTrainedModel):
     _supports_static_cache = True
     _supports_attention_backend = True
 
+    def _init_weights(self, module):
+        if isinstance(module, Step3p5RotaryEmbedding):
+            return
+        std = getattr(self.config, "initializer_range", 0.02)
+        if isinstance(module, MoELinear):
+            module.weight.data.normal_(mean=0.0, std=std)
+        elif isinstance(module, nn.Linear):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
+
 
 class Step3p5Model(Step3p5PreTrainedModel, GenerationMixin):
     _no_split_modules = ["Step3p5DecoderLayer"]
@@ -628,8 +662,11 @@ class Step3p5Model(Step3p5PreTrainedModel, GenerationMixin):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def get_input_embeddings(self, input_ids):
-        return self.embed_tokens(input_ids)
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+    def set_input_embeddings(self, value):
+        self.embed_tokens = value
 
     @can_return_tuple
     def forward(
@@ -863,3 +900,4 @@ class Step3p5ForCausalLM(Step3p5PreTrainedModel, GenerationMixin):
             return key[len("language_model."):], True
 
         return key, False
+
