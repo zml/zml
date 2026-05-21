@@ -42,7 +42,7 @@ examples/dflash_benchmark_gemma4/SGLang_benchmark/setup.sh
 model and DFlash in one process.
 
 ```bash
-CUDA_VISIBLE_DEVICES=1 bazel run --@zml//platforms:cuda=true \
+bazel run --@zml//platforms:cuda=true \
   //examples/dflash_benchmark_gemma4:benchmark -- \
   --model="${DFLASH_MODEL}" \
   --target-model="${TARGET_MODEL}" \
@@ -52,7 +52,7 @@ CUDA_VISIBLE_DEVICES=1 bazel run --@zml//platforms:cuda=true \
   --max-new-tokens=1024 \
   --output-json="${OUT_DIR}/zml_math500.json"
 
-CUDA_VISIBLE_DEVICES=1 bazel run --@zml//platforms:cuda=true \
+bazel run --@zml//platforms:cuda=true \
   //examples/dflash_benchmark_gemma4:benchmark -- \
   --model="${DFLASH_MODEL}" \
   --target-model="${TARGET_MODEL}" \
@@ -77,7 +77,6 @@ examples/dflash_benchmark_gemma4/vllm_benchmark/.venv/bin/python \
   --dflash-model="${DFLASH_MODEL}" \
   --samples=10 \
   --max-tokens=1024 \
-  --cuda-visible-devices=1 \
   --output-json="${OUT_DIR}/vllm_baseline_math500.json" \
   --log-file="${OUT_DIR}/vllm_baseline_math500.log"
 
@@ -89,7 +88,6 @@ examples/dflash_benchmark_gemma4/vllm_benchmark/.venv/bin/python \
   --dflash-model="${DFLASH_MODEL}" \
   --samples=10 \
   --max-tokens=1024 \
-  --cuda-visible-devices=1 \
   --output-json="${OUT_DIR}/vllm_dflash_math500.json" \
   --log-file="${OUT_DIR}/vllm_dflash_math500.log"
 
@@ -101,7 +99,6 @@ examples/dflash_benchmark_gemma4/vllm_benchmark/.venv/bin/python \
   --dflash-model="${DFLASH_MODEL}" \
   --samples=10 \
   --max-tokens=1024 \
-  --cuda-visible-devices=1 \
   --output-json="${OUT_DIR}/vllm_baseline_stories.json" \
   --log-file="${OUT_DIR}/vllm_baseline_stories.log"
 
@@ -113,7 +110,6 @@ examples/dflash_benchmark_gemma4/vllm_benchmark/.venv/bin/python \
   --dflash-model="${DFLASH_MODEL}" \
   --samples=10 \
   --max-tokens=1024 \
-  --cuda-visible-devices=1 \
   --output-json="${OUT_DIR}/vllm_dflash_stories.json" \
   --log-file="${OUT_DIR}/vllm_dflash_stories.log"
 ```
@@ -130,7 +126,6 @@ examples/dflash_benchmark_gemma4/SGLang_benchmark/run_benchmark.py \
   --dflash-model="${DFLASH_MODEL}" \
   --samples=10 \
   --max-tokens=1024 \
-  --gpu=1 \
   --server-log="${OUT_DIR}/sglang_baseline_math500.log"
 
 examples/dflash_benchmark_gemma4/SGLang_benchmark/run_benchmark.py \
@@ -139,7 +134,6 @@ examples/dflash_benchmark_gemma4/SGLang_benchmark/run_benchmark.py \
   --dflash-model="${DFLASH_MODEL}" \
   --samples=10 \
   --max-tokens=1024 \
-  --gpu=1 \
   --server-log="${OUT_DIR}/sglang_dflash_math500.log"
 
 examples/dflash_benchmark_gemma4/SGLang_benchmark/run_benchmark.py \
@@ -148,7 +142,6 @@ examples/dflash_benchmark_gemma4/SGLang_benchmark/run_benchmark.py \
   --dflash-model="${DFLASH_MODEL}" \
   --samples=10 \
   --max-tokens=1024 \
-  --gpu=1 \
   --server-log="${OUT_DIR}/sglang_baseline_stories.log"
 
 examples/dflash_benchmark_gemma4/SGLang_benchmark/run_benchmark.py \
@@ -157,6 +150,5 @@ examples/dflash_benchmark_gemma4/SGLang_benchmark/run_benchmark.py \
   --dflash-model="${DFLASH_MODEL}" \
   --samples=10 \
   --max-tokens=1024 \
-  --gpu=1 \
   --server-log="${OUT_DIR}/sglang_dflash_stories.log"
 ```
