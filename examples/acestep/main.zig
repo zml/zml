@@ -261,16 +261,22 @@ const Args = struct {
 // param1 : match_level: dimention iter, in 0-8, initial noise level matches the scheduled noised at iter match_level
 // param2 : cover_strength: dimension iter, in 0-8, has to be >= match_level, how many iters we do in cover mode before switching to non cover
 
-// TODO: faire remix basique
-// - prepare no cover branch
-// - smooth transitions between cover and non cover modes ?
-// - if needed, context_latents from dequantized quantized source latents instead of source latents
+// TODO: finir remix basique
+// - check no cover branch, instructions and stuff
+// - export all cases over space of cover/noise strength
+// - implement fsq of the source audio latents
 // - ajouter variance
+
 // TODO: essayer de faire lyric remix (flow-edit...)
 // - embed old and new lyric
 // - switch/blend/dice between the two during the diffusion
-// TODO: batch cfg
 
+// TODO: edit mode
+// - repaint a chunk
+// - extend audio
+
+// TODO: batch cfg
+// TODO: make DiT compiled model time independent with masks and range
 // TODO: move model related code from inference to Exes struct inside models
 // TODO: load in parallel as compile
 
