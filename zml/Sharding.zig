@@ -43,7 +43,7 @@ pub const Partitioner = union(enum) {
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
             .cpu, .cuda, .rocm, .tpu => .shardy,
-            .neuron => .gspmd,
+            .neuron, .oneapi => .gspmd,
         };
     }
 };
@@ -638,6 +638,9 @@ pub const PhysicalMesh = struct {
             .neuron => &.{ .link, .link_x, .link_y, .link_z },
             .cuda, .rocm => &.{.link},
             .cpu => &.{.bus},
+            // oneAPI topology can either expose interconnect `coords` (link)
+            // or fall back to a flat CPU-like layout (bus).
+            .oneapi => &.{ .link, .bus },
         };
     }
 
@@ -861,10 +864,28 @@ pub const PhysicalMesh = struct {
             .cuda, .rocm => gpu(allocator, platform_devices),
             .tpu => tpu(allocator, platform_devices),
             .neuron => neuron(allocator, platform_devices),
+            .oneapi => oneapi(allocator, platform_devices),
         };
         errdefer freeNode(allocator, root);
 
         return try fromOwnedTree(target, root);
+    }
+
+    /// oneAPI topology: try the GPU builder first (PJRT `coords` attribute);
+    /// fall back to the CPU-style flat layout when the plugin does not
+    /// expose device coordinates (e.g. intel-extension-for-openxla which
+    /// masquerades as CPU).
+    pub fn oneapi(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
+        return gpu(allocator, platform_devices) catch |err| switch (err) {
+            error.MissingDeviceCoords,
+            error.InvalidDeviceCoords,
+            error.InvalidDeviceCoordsRank,
+            error.UnsupportedDeviceCoordsRank,
+            error.InvalidDeviceTopology,
+            error.InvalidPhysicalMesh,
+            => cpu(allocator, platform_devices),
+            else => err,
+        };
     }
 
     pub fn cpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
@@ -1481,7 +1502,7 @@ pub const Data = struct {
             tile_shape.appendAssumeCapacity(repl_size);
         }
 
-        var out: std.Io.Writer.Allocating = .init(allocator);
+        var out: std.Io.Writer.Allocating = .init(parent_allocator);
         errdefer out.deinit();
 
         // Emit explicit device assignment list to avoid XLA requiring

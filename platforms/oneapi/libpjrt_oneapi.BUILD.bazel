@@ -1,0 +1,58 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+
+filegroup(
+    name = "libpjrt_oneapi_files",
+    srcs = ["libpjrt_oneapi.so"],
+)
+
+ONEAPI_PLUGIN_RUNFILES = "lib/pjrt_c_api_gpu_plugin.so.runfiles"
+ONEAPI_VERSION = "2025.1"
+ONEAPI_BASE_LIB = "{}/lib".format(ONEAPI_VERSION)
+ONEAPI_COMPILER_LIB = "compiler/{}/lib".format(ONEAPI_VERSION)
+ONEAPI_MKL_LIB = "mkl/{}/lib".format(ONEAPI_VERSION)
+ONEAPI_BASE_SOLIB = ONEAPI_PLUGIN_RUNFILES + "/xla/_solib_x86_64/_U_A_Aoneapi_S_S_Clibs___U{}_Slib".format(ONEAPI_VERSION)
+ONEAPI_COMPILER_SOLIB = ONEAPI_PLUGIN_RUNFILES + "/xla/_solib_x86_64/_U_A_Aoneapi_S_S_Clibs___Ucompiler_S{}_Slib".format(ONEAPI_VERSION)
+ONEAPI_MKL_SOLIB = ONEAPI_PLUGIN_RUNFILES + "/xla/_solib_x86_64/_U_S_Sxla_Sstream_Uexecutor_Ssycl_Csycl_Ublas_Ult_Uplugin___Umkl_S{}_Slib".format(ONEAPI_VERSION)
+ONEAPI_ZERO_LOADER_SOLIB = ONEAPI_PLUGIN_RUNFILES + "/xla/_solib_x86_64/_U_A_Azero_Uloader_S_S_Clibze_Uloader___Ulib"
+
+copy_to_directory(
+    name = "zero_loader_solib",
+    srcs = ["@zero_loader//:all"],
+    add_directory_to_runfiles = False,
+    allow_overwrites = True,
+    hardlink = "auto",
+    include_external_repositories = ["**"],
+    replace_prefixes = {
+        "lib": ONEAPI_ZERO_LOADER_SOLIB,
+    },
+    root_paths = ["."],
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":libpjrt_oneapi_files",
+        ":zero_loader_solib",
+        "@oneapi//:base_runtime",
+        "@oneapi//:compiler_runtime",
+        "@oneapi//:mkl_runtime",
+    ],
+    add_directory_to_runfiles = False,
+    allow_overwrites = True,
+    hardlink = "auto",
+    include_external_repositories = ["**"],
+    replace_prefixes = {
+        "libpjrt_oneapi.so": "lib/libpjrt_oneapi.so",
+        ONEAPI_BASE_LIB: ONEAPI_BASE_SOLIB,
+        ONEAPI_COMPILER_LIB: ONEAPI_COMPILER_SOLIB,
+        ONEAPI_MKL_LIB: ONEAPI_MKL_SOLIB,
+        "zero_loader_solib": ".",
+    },
+    root_paths = ["."],
+)
+
+cc_library(
+    name = "libpjrt_oneapi",
+    data = [":sandbox"],
+    visibility = ["@zml//platforms/oneapi:__subpackages__"],
+)

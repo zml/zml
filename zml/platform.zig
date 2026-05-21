@@ -45,7 +45,7 @@ fn disableXlaLogs() void {
 
 fn validateDeviceCount(target: Target, num_devices: usize) !void {
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi => {
             if (num_devices == 0) {
                 log.err("Platform {} requires at least 1 device, got {}", .{ target, num_devices });
                 return error.ZeroVisibleDevices;
@@ -107,7 +107,7 @@ pub const Memory = struct {
                 };
                 return zml_kind == kind_;
             },
-            .cpu, .neuron => return true,
+            .cpu, .neuron, .oneapi => return true,
         }
     }
 
@@ -313,6 +313,7 @@ pub const Platform = struct {
             .neuron,
             .rocm,
             .cuda,
+            .oneapi,
             .cpu,
         };
         return for (ordered_targets) |target| {
@@ -512,6 +513,8 @@ pub const Platform = struct {
     };
 
     pub fn registerFfi(self: *const zml.Platform, registration: FfiRegistration) !void {
+        // oneAPI plugin does not implement the PJRT FFI extension.
+        if (self.target == .oneapi) return;
         const platform_name = registration.platform_name orelse self.pjrt_client.platformName(self.pjrt_api);
         if (self.pjrt_api.ffi()) |ffi| {
             try ffi.register(self.pjrt_api, registration.name, platform_name, registration.handler, registration.traits);
@@ -589,6 +592,7 @@ pub const CreateOptions = struct {
     rocm: struct {} = .{},
     tpu: struct {} = .{},
     neuron: struct {} = .{},
+    oneapi: struct {} = .{},
 
     pub const Cpu = struct {
         device_count: u32,
