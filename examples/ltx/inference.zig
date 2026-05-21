@@ -1011,6 +1011,174 @@ fn fa3CompileShapes(comptime m: model.AttnMode, video_meta: ?model.AttnMetadata,
     }
 }
 
+/// Create an optional profiler, logging warnings on failure.
+/// Returns null when `enable` is false or creation fails.
+fn createProfiler(
+    enable: bool,
+    platform: *zml.Platform,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    session_id: []const u8,
+) ?zml.Platform.Profiler {
+    if (!enable) return null;
+    return platform.profiler(allocator, io, .{
+        .repository_path = "/tmp/xprof",
+        .session_id = session_id,
+    }) catch |err| {
+        std.log.warn("Could not create profiler: {}", .{err});
+        return null;
+    };
+}
+
+/// Start profiling. Logs a warning on failure.
+fn startProfiler(prof: *?zml.Platform.Profiler) void {
+    if (prof.*) |*p| p.start() catch |err| {
+        std.log.warn("Could not start profiler: {}", .{err});
+    };
+}
+
+/// Stop profiling and log the output path.
+fn stopProfiler(prof: *?zml.Platform.Profiler) void {
+    if (prof.*) |*p| {
+        if (p.stop() catch null) |result| {
+            std.log.info("Profile dumped: {s}", .{result.perfetto_path});
+        }
+    }
+}
+
+const FA3MetaPair = struct {
+    video: ?model.AttnMetadata = null,
+    audio: ?model.AttnMetadata = null,
+};
+
+/// Initialize FA3 scratch buffer metadata for a given pair of sequence lengths.
+/// Returns null metadata when attn_mode is not FA3.
+fn initFA3Metadata(attn_mode: model.AttnMode, T_v: i64, T_a: i64) FA3MetaPair {
+    if (attn_mode == .bf16_cuda_fa3) {
+        return .{
+            .video = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, T_v, 32, 128, .replicated)),
+            .audio = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, T_a, 32, 128, .replicated)),
+        };
+    }
+    return .{};
+}
+
+/// Sets block arguments for normal/STG block executables (ForwardBlock0).
+/// Used in passes 1, 2, and 3 where the arg layout does not include AV cross-attention masks.
+fn setNormalBlockArgs(
+    blk_args: anytype,
+    h_v: zml.Buffer,
+    h_a: zml.Buffer,
+    pre_out: zml.Bufferized(model.PreprocessOutput),
+    v_context: zml.Buffer,
+    a_context: zml.Buffer,
+    attn_mode: model.AttnMode,
+    v_fa3_bufs: zml.Bufferized(model.AttnMetadata),
+    a_fa3_bufs: zml.Bufferized(model.AttnMetadata),
+    block_params: zml.Bufferized(model.Block0FullParams),
+) void {
+    if (attn_mode == .bf16_cuda_fa3) {
+        blk_args.set(.{
+            h_v,                             h_a,
+            pre_out.video_timesteps,         pre_out.audio_timesteps,
+            pre_out.video_timesteps_zero,    pre_out.audio_timesteps_zero,
+            pre_out.v_denoise_mask,          pre_out.a_denoise_mask,
+            pre_out.v_prompt_timestep,       pre_out.a_prompt_timestep,
+            pre_out.v_pe_cos,                pre_out.v_pe_sin,
+            pre_out.a_pe_cos,                pre_out.a_pe_sin,
+            v_context,                       a_context,
+            pre_out.v_cross_ss_ts,           pre_out.v_cross_gate_ts,
+            pre_out.a_cross_ss_ts,           pre_out.a_cross_gate_ts,
+            pre_out.a2v_pe_cos,              pre_out.a2v_pe_sin,
+            pre_out.a2v_k_pe_cos,            pre_out.a2v_k_pe_sin,
+            pre_out.v2a_pe_cos,              pre_out.v2a_pe_sin,
+            pre_out.v2a_k_pe_cos,            pre_out.v2a_k_pe_sin,
+            v_fa3_bufs.cuda_fa3.softmax_lse, v_fa3_bufs.cuda_fa3.softmax_lse_accum,
+            v_fa3_bufs.cuda_fa3.out_accum,   v_fa3_bufs.cuda_fa3.scheduler_metadata,
+            a_fa3_bufs.cuda_fa3.softmax_lse, a_fa3_bufs.cuda_fa3.softmax_lse_accum,
+            a_fa3_bufs.cuda_fa3.out_accum,   a_fa3_bufs.cuda_fa3.scheduler_metadata,
+            block_params,
+        });
+    } else {
+        blk_args.set(.{
+            h_v,                          h_a,
+            pre_out.video_timesteps,      pre_out.audio_timesteps,
+            pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+            pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+            pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+            pre_out.v_pe_cos,             pre_out.v_pe_sin,
+            pre_out.a_pe_cos,             pre_out.a_pe_sin,
+            v_context,                    a_context,
+            pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+            pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+            pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+            pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+            pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+            pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+            block_params,
+        });
+    }
+}
+
+/// Sets block arguments for isolated block executables (ForwardBlock0WithAVMasks).
+/// Used in pass 4 where AV cross-attention masks are zeroed out.
+fn setIsoBlockArgs(
+    blk_args: anytype,
+    h_v: zml.Buffer,
+    h_a: zml.Buffer,
+    pre_out: zml.Bufferized(model.PreprocessOutput),
+    a2v_mask: zml.Buffer,
+    v2a_mask: zml.Buffer,
+    attn_mode: model.AttnMode,
+    v_fa3_bufs: zml.Bufferized(model.AttnMetadata),
+    a_fa3_bufs: zml.Bufferized(model.AttnMetadata),
+    block_params: zml.Bufferized(model.Block0FullParams),
+) void {
+    if (attn_mode == .bf16_cuda_fa3) {
+        blk_args.set(.{
+            h_v,                             h_a,
+            pre_out.video_timesteps,         pre_out.audio_timesteps,
+            pre_out.video_timesteps_zero,    pre_out.audio_timesteps_zero,
+            pre_out.v_denoise_mask,          pre_out.a_denoise_mask,
+            pre_out.v_prompt_timestep,       pre_out.a_prompt_timestep,
+            pre_out.v_pe_cos,                pre_out.v_pe_sin,
+            pre_out.a_pe_cos,                pre_out.a_pe_sin,
+            pre_out.v_text_ctx,              pre_out.a_text_ctx,
+            pre_out.v_cross_ss_ts,           pre_out.v_cross_gate_ts,
+            pre_out.a_cross_ss_ts,           pre_out.a_cross_gate_ts,
+            pre_out.a2v_pe_cos,              pre_out.a2v_pe_sin,
+            pre_out.a2v_k_pe_cos,            pre_out.a2v_k_pe_sin,
+            a2v_mask,                        pre_out.v2a_pe_cos,
+            pre_out.v2a_pe_sin,              pre_out.v2a_k_pe_cos,
+            pre_out.v2a_k_pe_sin,            v2a_mask,
+            v_fa3_bufs.cuda_fa3.softmax_lse, v_fa3_bufs.cuda_fa3.softmax_lse_accum,
+            v_fa3_bufs.cuda_fa3.out_accum,   v_fa3_bufs.cuda_fa3.scheduler_metadata,
+            a_fa3_bufs.cuda_fa3.softmax_lse, a_fa3_bufs.cuda_fa3.softmax_lse_accum,
+            a_fa3_bufs.cuda_fa3.out_accum,   a_fa3_bufs.cuda_fa3.scheduler_metadata,
+            block_params,
+        });
+    } else {
+        blk_args.set(.{
+            h_v,                          h_a,
+            pre_out.video_timesteps,      pre_out.audio_timesteps,
+            pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+            pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+            pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+            pre_out.v_pe_cos,             pre_out.v_pe_sin,
+            pre_out.a_pe_cos,             pre_out.a_pe_sin,
+            pre_out.v_text_ctx,           pre_out.a_text_ctx,
+            pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+            pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+            pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+            pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+            a2v_mask,                     pre_out.v2a_pe_cos,
+            pre_out.v2a_pe_sin,           pre_out.v2a_k_pe_cos,
+            pre_out.v2a_k_pe_sin,         v2a_mask,
+            block_params,
+        });
+    }
+}
+
 /// Run the full Stage 1 denoising phase: N-step guided Euler diffusion.
 ///
 /// This is the most expensive phase — each step runs 4 full forward passes
@@ -1479,19 +1647,14 @@ fn runStage1(
 
     // FA3 scratch buffer metadata — initialized only when attn_mode == .bf16_cuda_fa3.
     // These shapes are used for compile args; buffers are allocated below before the denoising loop.
-    var video_attn_meta: ?model.AttnMetadata = null;
-    var audio_attn_meta: ?model.AttnMetadata = null;
-    if (attn_mode == .bf16_cuda_fa3) {
-        video_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, T_v1, 32, 128, .replicated));
-        audio_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, T_a, 32, 128, .replicated));
-    }
+    const fa3_meta = initFA3Metadata(attn_mode, T_v1, T_a);
 
     const compile_opts: zml.module.CompilationOptions = .{ .shardings = &.{sharding} };
 
     std.log.info("Compiling block exe (normal, attn_mode={s})...", .{@tagName(attn_mode)});
     var block_normal_exe = switch (attn_mode) {
         inline else => |m| blk: {
-            const args = block_compile_args_base ++ fa3CompileShapes(m, video_attn_meta, audio_attn_meta) ++ .{block_params_shape.blocks[0]};
+            const args = block_compile_args_base ++ fa3CompileShapes(m, fa3_meta.video, fa3_meta.audio) ++ .{block_params_shape.blocks[0]};
             break :blk try platform.compileFn(allocator, io, model.ForwardBlock0(m, false).forward, args, compile_opts);
         },
     };
@@ -1500,7 +1663,7 @@ fn runStage1(
     std.log.info("Compiling block exe (STG, attn_mode={s})...", .{@tagName(attn_mode)});
     var block_stg_exe = switch (attn_mode) {
         inline else => |m| blk: {
-            const args = block_compile_args_base ++ fa3CompileShapes(m, video_attn_meta, audio_attn_meta) ++ .{block_params_shape.blocks[0]};
+            const args = block_compile_args_base ++ fa3CompileShapes(m, fa3_meta.video, fa3_meta.audio) ++ .{block_params_shape.blocks[0]};
             break :blk try platform.compileFn(allocator, io, model.ForwardBlock0(m, true).forward, args, compile_opts);
         },
     };
@@ -1542,7 +1705,7 @@ fn runStage1(
     };
     var block_iso_exe = switch (attn_mode) {
         inline else => |m| blk: {
-            const args = iso_compile_args_base ++ fa3CompileShapes(m, video_attn_meta, audio_attn_meta) ++ .{block_params_shape.blocks[0]};
+            const args = iso_compile_args_base ++ fa3CompileShapes(m, fa3_meta.video, fa3_meta.audio) ++ .{block_params_shape.blocks[0]};
             break :blk try platform.compileFn(allocator, io, model.ForwardBlock0WithAVMasks(m).forward, args, compile_opts);
         },
     };
@@ -1742,8 +1905,8 @@ fn runStage1(
     var a_fa3_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
     if (attn_mode == .bf16_cuda_fa3) {
         std.log.info("Allocating FA3 scratch buffers...", .{});
-        v_fa3_bufs = try video_attn_meta.?.initBuffer(io, platform, sharding);
-        a_fa3_bufs = try audio_attn_meta.?.initBuffer(io, platform, sharding);
+        v_fa3_bufs = try fa3_meta.video.?.initBuffer(io, platform, sharding);
+        a_fa3_bufs = try fa3_meta.audio.?.initBuffer(io, platform, sharding);
     }
     defer if (attn_mode == .bf16_cuda_fa3) {
         model.AttnMetadata.deinitBuffer(&v_fa3_bufs);
@@ -1775,21 +1938,11 @@ fn runStage1(
 
     // Profile step 2 (step_idx == 1) to capture a single denoising step trace,
     // skipping step 1 to avoid warmup effects.
-    var step_profiler = if (profile) platform.profiler(allocator, io, .{
-        .repository_path = "/tmp/xprof",
-        .session_id = "stage1_step1",
-    }) catch |err| blk: {
-        std.log.warn("Could not create profiler: {}", .{err});
-        break :blk null;
-    } else null;
+    var step_profiler = createProfiler(profile, platform, allocator, io, "stage1_step1");
     defer if (step_profiler) |*p| p.deinit();
 
     for (0..num_stage1_steps) |step_idx| {
-        if (step_idx == 1) {
-            if (step_profiler) |*p| p.start() catch |err| {
-                std.log.warn("Could not start profiler: {}", .{err});
-            };
-        }
+        if (step_idx == 1) startProfiler(&step_profiler);
 
         const step_start: std.Io.Timestamp = .now(io, .awake);
         const sigma = sigmas[step_idx];
@@ -1837,47 +1990,7 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                if (attn_mode == .bf16_cuda_fa3) {
-                    blk_args.set(.{
-                        cond_h_v,                        cond_h_a,
-                        pre_out.video_timesteps,         pre_out.audio_timesteps,
-                        pre_out.video_timesteps_zero,    pre_out.audio_timesteps_zero,
-                        pre_out.v_denoise_mask,          pre_out.a_denoise_mask,
-                        pre_out.v_prompt_timestep,       pre_out.a_prompt_timestep,
-                        pre_out.v_pe_cos,                pre_out.v_pe_sin,
-                        pre_out.a_pe_cos,                pre_out.a_pe_sin,
-                        pre_out.v_text_ctx,              pre_out.a_text_ctx,
-                        pre_out.v_cross_ss_ts,           pre_out.v_cross_gate_ts,
-                        pre_out.a_cross_ss_ts,           pre_out.a_cross_gate_ts,
-                        pre_out.a2v_pe_cos,              pre_out.a2v_pe_sin,
-                        pre_out.a2v_k_pe_cos,            pre_out.a2v_k_pe_sin,
-                        pre_out.v2a_pe_cos,              pre_out.v2a_pe_sin,
-                        pre_out.v2a_k_pe_cos,            pre_out.v2a_k_pe_sin,
-                        v_fa3_bufs.cuda_fa3.softmax_lse, v_fa3_bufs.cuda_fa3.softmax_lse_accum,
-                        v_fa3_bufs.cuda_fa3.out_accum,   v_fa3_bufs.cuda_fa3.scheduler_metadata,
-                        a_fa3_bufs.cuda_fa3.softmax_lse, a_fa3_bufs.cuda_fa3.softmax_lse_accum,
-                        a_fa3_bufs.cuda_fa3.out_accum,   a_fa3_bufs.cuda_fa3.scheduler_metadata,
-                        block_params_bufs[i],
-                    });
-                } else {
-                    blk_args.set(.{
-                        cond_h_v,                     cond_h_a,
-                        pre_out.video_timesteps,      pre_out.audio_timesteps,
-                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                        pre_out.v_text_ctx,           pre_out.a_text_ctx,
-                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                        pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
-                        pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                        block_params_bufs[i],
-                    });
-                }
+                setNormalBlockArgs(&blk_args, cond_h_v, cond_h_a, pre_out, pre_out.v_text_ctx, pre_out.a_text_ctx, attn_mode, v_fa3_bufs, a_fa3_bufs, block_params_bufs[i]);
                 block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
@@ -1911,47 +2024,7 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                if (attn_mode == .bf16_cuda_fa3) {
-                    blk_args.set(.{
-                        neg_h_v,                         neg_h_a,
-                        pre_out.video_timesteps,         pre_out.audio_timesteps,
-                        pre_out.video_timesteps_zero,    pre_out.audio_timesteps_zero,
-                        pre_out.v_denoise_mask,          pre_out.a_denoise_mask,
-                        pre_out.v_prompt_timestep,       pre_out.a_prompt_timestep,
-                        pre_out.v_pe_cos,                pre_out.v_pe_sin,
-                        pre_out.a_pe_cos,                pre_out.a_pe_sin,
-                        v_context_neg_buf,               a_context_neg_buf,
-                        pre_out.v_cross_ss_ts,           pre_out.v_cross_gate_ts,
-                        pre_out.a_cross_ss_ts,           pre_out.a_cross_gate_ts,
-                        pre_out.a2v_pe_cos,              pre_out.a2v_pe_sin,
-                        pre_out.a2v_k_pe_cos,            pre_out.a2v_k_pe_sin,
-                        pre_out.v2a_pe_cos,              pre_out.v2a_pe_sin,
-                        pre_out.v2a_k_pe_cos,            pre_out.v2a_k_pe_sin,
-                        v_fa3_bufs.cuda_fa3.softmax_lse, v_fa3_bufs.cuda_fa3.softmax_lse_accum,
-                        v_fa3_bufs.cuda_fa3.out_accum,   v_fa3_bufs.cuda_fa3.scheduler_metadata,
-                        a_fa3_bufs.cuda_fa3.softmax_lse, a_fa3_bufs.cuda_fa3.softmax_lse_accum,
-                        a_fa3_bufs.cuda_fa3.out_accum,   a_fa3_bufs.cuda_fa3.scheduler_metadata,
-                        block_params_bufs[i],
-                    });
-                } else {
-                    blk_args.set(.{
-                        neg_h_v,                      neg_h_a,
-                        pre_out.video_timesteps,      pre_out.audio_timesteps,
-                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                        v_context_neg_buf,            a_context_neg_buf,
-                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                        pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
-                        pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                        block_params_bufs[i],
-                    });
-                }
+                setNormalBlockArgs(&blk_args, neg_h_v, neg_h_a, pre_out, v_context_neg_buf, a_context_neg_buf, attn_mode, v_fa3_bufs, a_fa3_bufs, block_params_bufs[i]);
                 block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
@@ -1991,47 +2064,7 @@ fn runStage1(
             for (0..model.num_transformer_blocks) |i| {
                 // Special handling for the STG block, which uses V-passthrough.
                 if (i == STG_BLOCK_IDX) {
-                    if (attn_mode == .bf16_cuda_fa3) {
-                        blk_stg_args.set(.{
-                            ptb_h_v,                         ptb_h_a,
-                            pre_out.video_timesteps,         pre_out.audio_timesteps,
-                            pre_out.video_timesteps_zero,    pre_out.audio_timesteps_zero,
-                            pre_out.v_denoise_mask,          pre_out.a_denoise_mask,
-                            pre_out.v_prompt_timestep,       pre_out.a_prompt_timestep,
-                            pre_out.v_pe_cos,                pre_out.v_pe_sin,
-                            pre_out.a_pe_cos,                pre_out.a_pe_sin,
-                            pre_out.v_text_ctx,              pre_out.a_text_ctx,
-                            pre_out.v_cross_ss_ts,           pre_out.v_cross_gate_ts,
-                            pre_out.a_cross_ss_ts,           pre_out.a_cross_gate_ts,
-                            pre_out.a2v_pe_cos,              pre_out.a2v_pe_sin,
-                            pre_out.a2v_k_pe_cos,            pre_out.a2v_k_pe_sin,
-                            pre_out.v2a_pe_cos,              pre_out.v2a_pe_sin,
-                            pre_out.v2a_k_pe_cos,            pre_out.v2a_k_pe_sin,
-                            v_fa3_bufs.cuda_fa3.softmax_lse, v_fa3_bufs.cuda_fa3.softmax_lse_accum,
-                            v_fa3_bufs.cuda_fa3.out_accum,   v_fa3_bufs.cuda_fa3.scheduler_metadata,
-                            a_fa3_bufs.cuda_fa3.softmax_lse, a_fa3_bufs.cuda_fa3.softmax_lse_accum,
-                            a_fa3_bufs.cuda_fa3.out_accum,   a_fa3_bufs.cuda_fa3.scheduler_metadata,
-                            block_params_bufs[i],
-                        });
-                    } else {
-                        blk_stg_args.set(.{
-                            ptb_h_v,                      ptb_h_a,
-                            pre_out.video_timesteps,      pre_out.audio_timesteps,
-                            pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                            pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                            pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                            pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                            pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                            pre_out.v_text_ctx,           pre_out.a_text_ctx,
-                            pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                            pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                            pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                            pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                            pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
-                            pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                            block_params_bufs[i],
-                        });
-                    }
+                    setNormalBlockArgs(&blk_stg_args, ptb_h_v, ptb_h_a, pre_out, pre_out.v_text_ctx, pre_out.a_text_ctx, attn_mode, v_fa3_bufs, a_fa3_bufs, block_params_bufs[i]);
                     block_stg_exe.callOpts(io, blk_stg_args, &blk_stg_results, .{ .wait = false });
                     const out = blk_stg_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                     if (i > 0) {
@@ -2041,47 +2074,7 @@ fn runStage1(
                     ptb_h_v = out.vx_out;
                     ptb_h_a = out.ax_out;
                 } else {
-                    if (attn_mode == .bf16_cuda_fa3) {
-                        blk_normal_args.set(.{
-                            ptb_h_v,                         ptb_h_a,
-                            pre_out.video_timesteps,         pre_out.audio_timesteps,
-                            pre_out.video_timesteps_zero,    pre_out.audio_timesteps_zero,
-                            pre_out.v_denoise_mask,          pre_out.a_denoise_mask,
-                            pre_out.v_prompt_timestep,       pre_out.a_prompt_timestep,
-                            pre_out.v_pe_cos,                pre_out.v_pe_sin,
-                            pre_out.a_pe_cos,                pre_out.a_pe_sin,
-                            pre_out.v_text_ctx,              pre_out.a_text_ctx,
-                            pre_out.v_cross_ss_ts,           pre_out.v_cross_gate_ts,
-                            pre_out.a_cross_ss_ts,           pre_out.a_cross_gate_ts,
-                            pre_out.a2v_pe_cos,              pre_out.a2v_pe_sin,
-                            pre_out.a2v_k_pe_cos,            pre_out.a2v_k_pe_sin,
-                            pre_out.v2a_pe_cos,              pre_out.v2a_pe_sin,
-                            pre_out.v2a_k_pe_cos,            pre_out.v2a_k_pe_sin,
-                            v_fa3_bufs.cuda_fa3.softmax_lse, v_fa3_bufs.cuda_fa3.softmax_lse_accum,
-                            v_fa3_bufs.cuda_fa3.out_accum,   v_fa3_bufs.cuda_fa3.scheduler_metadata,
-                            a_fa3_bufs.cuda_fa3.softmax_lse, a_fa3_bufs.cuda_fa3.softmax_lse_accum,
-                            a_fa3_bufs.cuda_fa3.out_accum,   a_fa3_bufs.cuda_fa3.scheduler_metadata,
-                            block_params_bufs[i],
-                        });
-                    } else {
-                        blk_normal_args.set(.{
-                            ptb_h_v,                      ptb_h_a,
-                            pre_out.video_timesteps,      pre_out.audio_timesteps,
-                            pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                            pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                            pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                            pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                            pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                            pre_out.v_text_ctx,           pre_out.a_text_ctx,
-                            pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                            pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                            pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                            pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                            pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
-                            pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                            block_params_bufs[i],
-                        });
-                    }
+                    setNormalBlockArgs(&blk_normal_args, ptb_h_v, ptb_h_a, pre_out, pre_out.v_text_ctx, pre_out.a_text_ctx, attn_mode, v_fa3_bufs, a_fa3_bufs, block_params_bufs[i]);
                     block_normal_exe.callOpts(io, blk_normal_args, &blk_normal_results, .{ .wait = false });
                     const out = blk_normal_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                     if (i > 0) {
@@ -2116,49 +2109,7 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                if (attn_mode == .bf16_cuda_fa3) {
-                    blk_args.set(.{
-                        iso_h_v,                         iso_h_a,
-                        pre_out.video_timesteps,         pre_out.audio_timesteps,
-                        pre_out.video_timesteps_zero,    pre_out.audio_timesteps_zero,
-                        pre_out.v_denoise_mask,          pre_out.a_denoise_mask,
-                        pre_out.v_prompt_timestep,       pre_out.a_prompt_timestep,
-                        pre_out.v_pe_cos,                pre_out.v_pe_sin,
-                        pre_out.a_pe_cos,                pre_out.a_pe_sin,
-                        pre_out.v_text_ctx,              pre_out.a_text_ctx,
-                        pre_out.v_cross_ss_ts,           pre_out.v_cross_gate_ts,
-                        pre_out.a_cross_ss_ts,           pre_out.a_cross_gate_ts,
-                        pre_out.a2v_pe_cos,              pre_out.a2v_pe_sin,
-                        pre_out.a2v_k_pe_cos,            pre_out.a2v_k_pe_sin,
-                        zero_mask_buf,                   pre_out.v2a_pe_cos,
-                        pre_out.v2a_pe_sin,              pre_out.v2a_k_pe_cos,
-                        pre_out.v2a_k_pe_sin,            zero_mask_buf,
-                        v_fa3_bufs.cuda_fa3.softmax_lse, v_fa3_bufs.cuda_fa3.softmax_lse_accum,
-                        v_fa3_bufs.cuda_fa3.out_accum,   v_fa3_bufs.cuda_fa3.scheduler_metadata,
-                        a_fa3_bufs.cuda_fa3.softmax_lse, a_fa3_bufs.cuda_fa3.softmax_lse_accum,
-                        a_fa3_bufs.cuda_fa3.out_accum,   a_fa3_bufs.cuda_fa3.scheduler_metadata,
-                        block_params_bufs[i],
-                    });
-                } else {
-                    blk_args.set(.{
-                        iso_h_v,                      iso_h_a,
-                        pre_out.video_timesteps,      pre_out.audio_timesteps,
-                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                        pre_out.v_text_ctx,           pre_out.a_text_ctx,
-                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                        zero_mask_buf,                pre_out.v2a_pe_cos,
-                        pre_out.v2a_pe_sin,           pre_out.v2a_k_pe_cos,
-                        pre_out.v2a_k_pe_sin,         zero_mask_buf,
-                        block_params_bufs[i],
-                    });
-                }
+                setIsoBlockArgs(&blk_args, iso_h_v, iso_h_a, pre_out, zero_mask_buf, zero_mask_buf, attn_mode, v_fa3_bufs, a_fa3_bufs, block_params_bufs[i]);
                 block_iso_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
@@ -2273,13 +2224,7 @@ fn runStage1(
         timer.recordStep(step_ns);
         std.log.info("  Step {d} complete ({d:.1}s).", .{ step_idx + 1, PhaseTimer.fmtSecs(step_ns) });
 
-        if (step_idx == 1) {
-            if (step_profiler) |*p| {
-                if (p.stop() catch null) |prof| {
-                    std.log.info("Profile dumped: {s}", .{prof.perfetto_path});
-                }
-            }
-        }
+        if (step_idx == 1) stopProfiler(&step_profiler);
     }
     timer.addExec();
 
@@ -2863,18 +2808,13 @@ fn runStage2(
     // FA3 scratch buffer metadata for Stage 2 sequence lengths.
     const s2_T_v = v_latent_buf.shape().dim(1);
     const s2_T_a = a_latent_buf.shape().dim(1);
-    var s2_video_attn_meta: ?model.AttnMetadata = null;
-    var s2_audio_attn_meta: ?model.AttnMetadata = null;
-    if (attn_mode == .bf16_cuda_fa3) {
-        s2_video_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, s2_T_v, 32, 128, .replicated));
-        s2_audio_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, s2_T_a, 32, 128, .replicated));
-    }
+    const s2_fa3_meta = initFA3Metadata(attn_mode, s2_T_v, s2_T_a);
 
     const compile_opts: zml.module.CompilationOptions = .{ .shardings = &.{sharding} };
 
     var block_exe = switch (attn_mode) {
         inline else => |m| blk: {
-            const args = block_compile_args_base ++ fa3CompileShapes(m, s2_video_attn_meta, s2_audio_attn_meta) ++ .{block_params_shape.blocks[0]};
+            const args = block_compile_args_base ++ fa3CompileShapes(m, s2_fa3_meta.video, s2_fa3_meta.audio) ++ .{block_params_shape.blocks[0]};
             break :blk try platform.compileFn(allocator, io, model.ForwardBlock0(m, false).forward, args, compile_opts);
         },
     };
@@ -3016,8 +2956,8 @@ fn runStage2(
     var s2_a_fa3_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
     if (attn_mode == .bf16_cuda_fa3) {
         std.log.info("Allocating Stage 2 FA3 scratch buffers...", .{});
-        s2_v_fa3_bufs = try s2_video_attn_meta.?.initBuffer(io, platform, sharding);
-        s2_a_fa3_bufs = try s2_audio_attn_meta.?.initBuffer(io, platform, sharding);
+        s2_v_fa3_bufs = try s2_fa3_meta.video.?.initBuffer(io, platform, sharding);
+        s2_a_fa3_bufs = try s2_fa3_meta.audio.?.initBuffer(io, platform, sharding);
     }
     defer if (attn_mode == .bf16_cuda_fa3) {
         model.AttnMetadata.deinitBuffer(&s2_v_fa3_bufs);
@@ -3032,21 +2972,11 @@ fn runStage2(
     std.log.info("Starting {d}-step denoising loop...", .{num_steps});
 
     // Profile step 1 (step_idx == 0) to capture a single denoising step trace.
-    var s2_profiler = if (profile) platform.profiler(allocator, io, .{
-        .repository_path = "/tmp/xprof",
-        .session_id = "stage2_step0",
-    }) catch |err| blk: {
-        std.log.warn("Could not create Stage 2 profiler: {}", .{err});
-        break :blk null;
-    } else null;
+    var s2_profiler = createProfiler(profile, platform, allocator, io, "stage2_step0");
     defer if (s2_profiler) |*p| p.deinit();
 
     for (0..num_steps) |step_idx| {
-        if (step_idx == 0) {
-            if (s2_profiler) |*p| p.start() catch |err| {
-                std.log.warn("Could not start Stage 2 profiler: {}", .{err});
-            };
-        }
+        if (step_idx == 0) startProfiler(&s2_profiler);
 
         const step_start: std.Io.Timestamp = .now(io, .awake);
         const sigma = stage2_sigmas[step_idx];
@@ -3232,13 +3162,7 @@ fn runStage2(
         timer.recordStep(step_ns);
         std.log.info("  Step {d} complete ({d:.1}s).", .{ step_idx, PhaseTimer.fmtSecs(step_ns) });
 
-        if (step_idx == 0) {
-            if (s2_profiler) |*p| {
-                if (p.stop() catch null) |prof| {
-                    std.log.info("Stage 2 profile dumped: {s}", .{prof.perfetto_path});
-                }
-            }
-        }
+        if (step_idx == 0) stopProfiler(&s2_profiler);
     }
     timer.addExec();
 
@@ -3813,17 +3737,9 @@ fn runVideoVaeDecode(
     std.log.info("Running VAE decode...", .{});
 
     // Profile the VAE decode execution.
-    var vae_profiler = if (profile) platform.profiler(allocator, io, .{
-        .repository_path = "/tmp/xprof",
-        .session_id = "video_vae_decode",
-    }) catch |err| blk: {
-        std.log.warn("Could not create VAE profiler: {}", .{err});
-        break :blk null;
-    } else null;
+    var vae_profiler = createProfiler(profile, platform, allocator, io, "video_vae_decode");
     defer if (vae_profiler) |*p| p.deinit();
-    if (vae_profiler) |*p| p.start() catch |err| {
-        std.log.warn("Could not start VAE profiler: {}", .{err});
-    };
+    startProfiler(&vae_profiler);
 
     var vae_args = try vae_exe.args(allocator);
     defer vae_args.deinit(allocator);
@@ -3835,11 +3751,7 @@ fn runVideoVaeDecode(
     var decoded_video = vae_results.get(zml.Buffer); // [1, 3, F_out, H_out, W_out] bf16
     std.log.info("  Decoded video: {any}", .{decoded_video.shape().dims()});
 
-    if (vae_profiler) |*p| {
-        if (p.stop() catch null) |prof| {
-            std.log.info("VAE decode profile dumped: {s}", .{prof.perfetto_path});
-        }
-    }
+    stopProfiler(&vae_profiler);
 
     timer.addExec();
 
