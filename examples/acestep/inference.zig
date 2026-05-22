@@ -425,7 +425,6 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
     var one_embed_buffer: zml.Buffer = undefined;
     defer one_embed_buffer.deinit();
     var logit_buffer: zml.Buffer = undefined;
-    defer logit_buffer.deinit();
 
     acellm.exes.prefill_embed_args.set(.{ acellm.model_buffers, prefill_tokens_buffer });
     acellm.exes.prefill_embed_exe.call(acellm.exes.prefill_embed_args, &acellm.exes.prefill_embed_results);
@@ -451,6 +450,7 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
 
     try token_buffer.toSlice(io, token_slice);
     token_buffer.deinit();
+    logit_buffer.deinit();
     zml_handler.toc(&zml_handler.timers.llm.prefill);
 
     std.log.info("5Hz run decode", .{});
@@ -459,7 +459,6 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
     const decode_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = 1 }, .u32));
     defer decode_tokens_slice.free(allocator);
     var decode_embed_buffer: zml.Buffer = undefined;
-    defer decode_embed_buffer.deinit();
     
     const output_tokens_len = acellm.options.seq_len - prompt_tok.len - 1;
     var num_tokens_generated: usize = 0;
