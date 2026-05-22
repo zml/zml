@@ -257,11 +257,11 @@ pub const Moe = struct {
         std.log.info("after forward moe", .{});
 
         // run shared expert gate
-        const shared = self.shared_expert.forward(input);
+        // const shared = self.shared_expert.forward(input);
 
         std.log.info("after shared moe", .{});
 
-        return moe_output.add(shared);
+        return moe_output;
     }
 };
 // hidden size
