@@ -863,24 +863,11 @@ pub const PhysicalMesh = struct {
             .cuda, .rocm => gpu(allocator, platform_devices),
             .tpu => tpu(allocator, platform_devices),
             .neuron => neuron(allocator, platform_devices),
-            .oneapi => oneapi(allocator, platform_devices),
+            .oneapi => cpu(allocator, platform_devices),
         };
         errdefer freeNode(allocator, root);
 
         return try fromOwnedTree(target, root);
-    }
-
-    pub fn oneapi(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
-        return gpu(allocator, platform_devices) catch |err| switch (err) {
-            error.MissingDeviceCoords,
-            error.InvalidDeviceCoords,
-            error.InvalidDeviceCoordsRank,
-            error.UnsupportedDeviceCoordsRank,
-            error.InvalidDeviceTopology,
-            error.InvalidPhysicalMesh,
-            => cpu(allocator, platform_devices),
-            else => err,
-        };
     }
 
     pub fn cpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {

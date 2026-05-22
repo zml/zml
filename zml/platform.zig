@@ -513,7 +513,6 @@ pub const Platform = struct {
     };
 
     pub fn registerFfi(self: *const zml.Platform, registration: FfiRegistration) !void {
-        if (self.target == .oneapi) return;
         const platform_name = registration.platform_name orelse self.pjrt_client.platformName(self.pjrt_api);
         if (self.pjrt_api.ffi()) |ffi| {
             try ffi.register(self.pjrt_api, registration.name, platform_name, registration.handler, registration.traits);

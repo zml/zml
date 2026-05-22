@@ -4196,7 +4196,7 @@ pub const Tensor = struct {
                     }
                 }).body);
             },
-            .neuron => {},
+            .oneapi, .neuron => {},
         }
     }
 
