@@ -58,7 +58,10 @@ filegroup(
         "{ONEAPI_MKL_LIB}/libmkl_sequential.so.2",
         "{ONEAPI_MKL_LIB}/libmkl_sycl_blas.so.5"
 ])
-""".format(ONEAPI_BASE_LIB = ONEAPI_BASE_LIB, ONEAPI_COMPILER_LIB = ONEAPI_COMPILER_LIB, ONEAPI_MKL_LIB = ONEAPI_MKL_LIB)
+""".format(
+    ONEAPI_BASE_LIB = ONEAPI_BASE_LIB, 
+    ONEAPI_COMPILER_LIB = ONEAPI_COMPILER_LIB, 
+    ONEAPI_MKL_LIB = ONEAPI_MKL_LIB)
 
 _ZERO_LOADER_BUILD_FILE_CONTENT = """
 package(default_visibility = ["//visibility:public"])
