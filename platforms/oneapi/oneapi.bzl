@@ -116,11 +116,7 @@ def _oneapi_impl(mctx):
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = [
-            "libpjrt_oneapi",
-            "oneapi",
-            "zero_loader",
-        ],
+        root_module_direct_deps = [],
         root_module_direct_dev_deps = [],
     )
 
