@@ -42,11 +42,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-model", default=DEFAULT_TARGET_MODEL)
     parser.add_argument("--dflash-model", default=DEFAULT_DFLASH_MODEL)
     parser.add_argument("--tp-size", type=int, default=1)
-    parser.add_argument("--context-length", type=int, default=2048)
-    parser.add_argument("--mem-fraction-static", type=float, default=0.7)
-    parser.add_argument("--cuda-graph-max-bs", type=int, default=8)
-    parser.add_argument("--dtype", default="float16")
-    parser.add_argument("--log-level", default="warning")
+    parser.add_argument("--context-length", type=int, default=None)
+    parser.add_argument("--mem-fraction-static", type=float, default=None)
+    parser.add_argument("--cuda-graph-max-bs", type=int, default=None)
+    parser.add_argument("--dtype", default=None)
+    parser.add_argument("--log-level", default=None)
+    parser.add_argument("--attention-backend", default="triton")
+    parser.add_argument("--draft-attention-backend", default="fa4")
+    parser.add_argument("--speculative-num-draft-tokens", type=int, default=16)
     parser.add_argument("--readiness-timeout-s", type=float, default=900.0)
     parser.add_argument("--server-extra-arg", action="append", default=[])
     parser.add_argument("--server-log", default=None)
@@ -56,10 +59,31 @@ def parse_args() -> argparse.Namespace:
 
 def default_python() -> str:
     script_dir = Path(__file__).resolve().parent
+    venv_python = Path("~/sglang_tests/.venv/bin/python").expanduser()
+    if venv_python.exists():
+        return str(venv_python)
     venv_python = script_dir / ".venv" / "bin" / "python"
     if venv_python.exists():
         return str(venv_python)
     return sys.executable
+
+
+def server_env(args: argparse.Namespace) -> dict[str, str]:
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = args.gpu
+
+    sglang_tests = Path("~/sglang_tests").expanduser()
+    path_prefixes = [Path("~/.cargo/bin").expanduser(), sglang_tests / "bin"]
+    existing_path = env.get("PATH", "")
+    env["PATH"] = os.pathsep.join(
+        [str(path) for path in path_prefixes] + [existing_path]
+    )
+
+    protoc_shim = sglang_tests / "bin" / "protoc"
+    if protoc_shim.exists():
+        env.setdefault("PROTOC", str(protoc_shim))
+
+    return env
 
 
 def server_command(args: argparse.Namespace) -> list[str]:
@@ -75,17 +99,21 @@ def server_command(args: argparse.Namespace) -> list[str]:
         str(args.port),
         "--tp-size",
         str(args.tp_size),
-        "--context-length",
-        str(args.context_length),
-        "--mem-fraction-static",
-        str(args.mem_fraction_static),
-        "--cuda-graph-max-bs",
-        str(args.cuda_graph_max_bs),
-        "--dtype",
-        args.dtype,
-        "--log-level",
-        args.log_level,
+        "--attention-backend",
+        args.attention_backend,
+        "--trust-remote-code",
     ]
+
+    optional_args = (
+        (args.context_length, "--context-length"),
+        (args.mem_fraction_static, "--mem-fraction-static"),
+        (args.cuda_graph_max_bs, "--cuda-graph-max-bs"),
+        (args.dtype, "--dtype"),
+        (args.log_level, "--log-level"),
+    )
+    for value, flag in optional_args:
+        if value is not None:
+            cmd.extend([flag, str(value)])
 
     if args.mode == "dflash":
         cmd.extend(
@@ -94,11 +122,14 @@ def server_command(args: argparse.Namespace) -> list[str]:
                 "DFLASH",
                 "--speculative-draft-model-path",
                 args.dflash_model,
+                "--speculative-num-draft-tokens",
+                str(args.speculative_num_draft_tokens),
+                "--speculative-draft-attention-backend",
+                args.draft_attention_backend,
             ]
         )
 
         optional_env_args = (
-            ("SPECULATIVE_NUM_DRAFT_TOKENS", "--speculative-num-draft-tokens"),
             ("SPECULATIVE_DFLASH_BLOCK_SIZE", "--speculative-dflash-block-size"),
             (
                 "SPECULATIVE_DFLASH_DRAFT_WINDOW_SIZE",
@@ -155,8 +186,7 @@ def main() -> None:
     args.model = args.target_model
 
     cmd = server_command(args)
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = args.gpu
+    env = server_env(args)
 
     log_path = Path(args.server_log).expanduser() if args.server_log else None
     log_file = log_path.open("w", encoding="utf-8") if log_path else None
