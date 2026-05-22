@@ -42,7 +42,7 @@ pub const Partitioner = union(enum) {
 
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
-            .oneapi, .cpu, .cuda, .rocm, .tpu => .shardy,
+            .cpu, .cuda, .rocm, .tpu, .oneapi => .shardy,
             .neuron,
             => .gspmd,
         };
@@ -1727,7 +1727,7 @@ pub const Placement = struct {
             for (platform.devices, 0..) |d, device_index| {
                 const device_id = switch (platform.target) {
                     .neuron => @as(usize, @intCast(d.localHardwareId())),
-                    .oneapi, .cuda, .rocm, .tpu, .cpu => d.id(),
+                    .cuda, .rocm, .tpu, .cpu, .oneapi => d.id(),
                 };
                 if (device_id == self.device_id) return device_index;
             }

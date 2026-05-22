@@ -205,7 +205,7 @@ pub const Buffer = struct {
 
                 return try Buffer.from(io, platform, sh, sharding, host, .{ .wait = true, .memory = opts.memory });
             },
-            .oneapi, .cpu, .cuda, .rocm, .tpu => {},
+            .cpu, .cuda, .rocm, .tpu, .oneapi => {},
         }
 
         var res: Buffer = .{
