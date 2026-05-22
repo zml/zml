@@ -213,20 +213,32 @@ pub const Moe = struct {
     }
 
     pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
-        _ = self; // autofix
-        _ = x; // autofix
-
-        // calculate routing
+        const routing_scores, const topk_ids = self.router.forward(x);
 
         // concat the gate and up
+        const gate_up_proj = zml.Tensor.concatenate(&.{ self.gate_proj, self.up_proj }, .dout).rename(.{ .dout = .out, .d = .in });
 
         // pipe into kernel
-
-        // forward MoE
+        // no scales as not quantized
+        // no bias as only our only bias is within router
+        const moe_output = zml.moe.forwardMoe(
+            x,
+            topk_ids,
+            routing_scores,
+            gate_up_proj,
+            null,
+            null,
+            self.down_proj,
+            null,
+            null,
+            .{},
+            .{},
+        ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
         // run shared expert gate
+        const shared = self.shared_expert.forward(x);
 
-        // return
+        return moe_output.add(shared);
     }
 };
 // hidden size
