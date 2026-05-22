@@ -374,29 +374,30 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, zml_handler.args.seed, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
-    var zero_buffer: zml.Buffer = try .scalar(io, platform, 0, .u32, sharding);
+    var zero_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .b = 2 }, .u32));
+    defer zero_slice.free(allocator);
+    zero_slice.items(u32)[0] = 0;
+    zero_slice.items(u32)[1] = 0;
+    var zero_buffer: zml.Buffer = try .fromSlice(io, platform, zero_slice, sharding);
     defer zero_buffer.deinit();
+
+    const pred_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = 1 }, .u32));
+    defer pred_slice.free(allocator);
+    pred_slice.items(u32)[0] = @intCast(prompt_tok.len - 1);
+    pred_slice.items(u32)[1] = @intCast(prompt_tok.len - 1);
+    var pred_buffer: zml.Buffer = try .fromSlice(io, platform, pred_slice, sharding);
+    defer pred_buffer.deinit();
 
     var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer token_slice.free(allocator);
+    var token_buffer: zml.Buffer = undefined;
 
     const prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = acellm.options.seq_len }, .u32));
     defer prefill_tokens_slice.free(allocator);
     @memcpy(prefill_tokens_slice.items(u32)[0..prompt_tok.len], prompt_tok);
     @memcpy(prefill_tokens_slice.items(u32)[acellm.options.seq_len..][0..prompt_tok.len], prompt_tok);
-
-    var buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, sharding);
-    defer buffer.deinit();
-    
-    var x1_buffer: zml.Buffer = undefined;
-    var x2_buffer: zml.Buffer = undefined;
-    var q1_buffer: zml.Buffer = undefined;
-    var q2_buffer: zml.Buffer = undefined;
-    var k1_buffer: zml.Buffer = undefined;
-    var k2_buffer: zml.Buffer = undefined;
-    var v1_buffer: zml.Buffer = undefined;
-    var v2_buffer: zml.Buffer = undefined;
-    var delta1_buffer: zml.Buffer = undefined;
+    var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, sharding);
+    defer prefill_tokens_buffer.deinit();
     
     const layer_index_slices = try allocator.alloc(zml.Slice, acellm.config.num_hidden_layers);
     defer {
@@ -419,57 +420,37 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
     std.log.info("5Hz run prefill with seq_len/prompt_len of {d}/{d} tokens", .{ acellm.options.seq_len, prompt_tok.len });
     zml_handler.tic(&zml_handler.timers.llm.prefill);
 
-    acellm.exes.prefill_embed_args.set(.{ acellm.model_buffers, buffer });
+    var prefill_embed_buffer: zml.Buffer = undefined;
+    defer prefill_embed_buffer.deinit();
+    var one_embed_buffer: zml.Buffer = undefined;
+    defer one_embed_buffer.deinit();
+    var logit_buffer: zml.Buffer = undefined;
+    defer logit_buffer.deinit();
+
+    acellm.exes.prefill_embed_args.set(.{ acellm.model_buffers, prefill_tokens_buffer });
     acellm.exes.prefill_embed_exe.call(acellm.exes.prefill_embed_args, &acellm.exes.prefill_embed_results);
-    //buffer.deinit();
-    acellm.exes.prefill_embed_results.fill(.{ &buffer });
+    acellm.exes.prefill_embed_results.fill(.{ &prefill_embed_buffer });
 
     for (0..acellm.config.num_hidden_layers) |i| {
-        acellm.exes.prefill_layer_pre_args.set(.{ acellm.model_buffers.layers[i], buffer });
-        acellm.exes.prefill_layer_pre_exe.call(acellm.exes.prefill_layer_pre_args, &acellm.exes.prefill_layer_pre_results);
-        acellm.exes.prefill_layer_pre_results.fill(.{ &x1_buffer, &q1_buffer, &k1_buffer, &v1_buffer, &x2_buffer, &q2_buffer, &k2_buffer, &v2_buffer });
-
-        acellm.exes.prefill_layer_attn_args.set(.{ acellm.model_buffers.layers[i], x1_buffer, zero_buffer, acellm.kv_cache_buffers, layer_index_buffers[i], q1_buffer, k1_buffer, v1_buffer });
-        acellm.exes.prefill_layer_attn_exe.call(acellm.exes.prefill_layer_attn_args, &acellm.exes.prefill_layer_attn_results);
-        acellm.exes.prefill_layer_attn_results.fill(.{ &delta1_buffer, &acellm.kv_cache_buffers });
-
-        acellm.exes.prefill_layer_post_args.set(.{ acellm.model_buffers.layers[i], x1_buffer, delta1_buffer, x1_buffer, delta1_buffer });
-        acellm.exes.prefill_layer_post_exe.call(acellm.exes.prefill_layer_post_args, &acellm.exes.prefill_layer_post_results);
-        //buffer.deinit();
-        acellm.exes.prefill_layer_post_results.fill(.{ &buffer });
-        x1_buffer.deinit();
-        x2_buffer.deinit();
-        q1_buffer.deinit();
-        q2_buffer.deinit();
-        k1_buffer.deinit();
-        k2_buffer.deinit();
-        v1_buffer.deinit();
-        v2_buffer.deinit();
-        delta1_buffer.deinit();
+        acellm.exes.prefill_layer_args.set(.{ acellm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, acellm.kv_cache_buffers_1, acellm.kv_cache_buffers_2 });
+        acellm.exes.prefill_layer_exe.call(acellm.exes.prefill_layer_args, &acellm.exes.prefill_layer_results);
+        acellm.exes.prefill_layer_results.fill(.{ &prefill_embed_buffer, &acellm.kv_cache_buffers_1, &acellm.kv_cache_buffers_2 });
     }
-    const prompt_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = 1 }, .u32));
-    defer prompt_slice.free(allocator);
-    prompt_slice.items(u32)[0] = @intCast(prompt_tok.len - 1);
-    prompt_slice.items(u32)[1] = @intCast(prompt_tok.len - 1);
-    var prompt_buffer: zml.Buffer = try .fromSlice(io, platform, prompt_slice, sharding);
-    defer prompt_buffer.deinit();
-    acellm.exes.prefill_select_args.set(.{ acellm.model_buffers, buffer, prompt_buffer });
+    
+    acellm.exes.prefill_select_args.set(.{ acellm.model_buffers, prefill_embed_buffer, pred_buffer });
     acellm.exes.prefill_select_exe.call(acellm.exes.prefill_select_args, &acellm.exes.prefill_select_results);
-    //buffer.deinit();
-    acellm.exes.prefill_select_results.fill(.{ &buffer });
+    acellm.exes.prefill_select_results.fill(.{ &one_embed_buffer });
 
-    acellm.exes.logits_args.set(.{ acellm.model_buffers, buffer });
+    acellm.exes.logits_args.set(.{ acellm.model_buffers, one_embed_buffer });
     acellm.exes.logits_exe.call(acellm.exes.logits_args, &acellm.exes.logits_results);
-    //buffer.deinit();
-    acellm.exes.logits_results.fill(.{ &buffer });
+    acellm.exes.logits_results.fill(.{ &logit_buffer });
 
-    acellm.exes.sample_args.set(.{ acellm.model_buffers, buffer, rng_buffers });
+    acellm.exes.sample_args.set(.{ acellm.model_buffers, logit_buffer, rng_buffers });
     acellm.exes.sample_exe.call(acellm.exes.sample_args, &acellm.exes.sample_results);
-    //zml.Tensor.Rng.deinitBuffer(&rng_buffers);
-    //buffer.deinit();
-    acellm.exes.sample_results.fill(.{ &buffer, &rng_buffers });
+    acellm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
 
-    try buffer.toSlice(io, token_slice);
+    try token_buffer.toSlice(io, token_slice);
+    token_buffer.deinit();
     zml_handler.toc(&zml_handler.timers.llm.prefill);
 
     std.log.info("5Hz run decode", .{});
@@ -477,6 +458,8 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
 
     const decode_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = 1 }, .u32));
     defer decode_tokens_slice.free(allocator);
+    var decode_embed_buffer: zml.Buffer = undefined;
+    defer decode_embed_buffer.deinit();
     
     const output_tokens_len = acellm.options.seq_len - prompt_tok.len - 1;
     var num_tokens_generated: usize = 0;
@@ -504,54 +487,36 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
         }
         decode_tokens_slice.items(u32)[0] = generated_token;
         decode_tokens_slice.items(u32)[1] = generated_token;
-        buffer.deinit();
-        buffer = try .fromSlice(io, platform, decode_tokens_slice, sharding);
+        var decode_token_buffer: zml.Buffer = try .fromSlice(io, platform, decode_tokens_slice, sharding);
+        defer decode_token_buffer.deinit();
 
-        // we need a new 1 token buffer to pass the token_index
-        var pos_buffer: zml.Buffer = try .scalar(io, platform, prompt_tok.len + i, .u32, sharding);
+        pred_slice.items(u32)[0] = @intCast(prompt_tok.len + i);
+        pred_slice.items(u32)[1] = @intCast(prompt_tok.len + i);
+        var pos_buffer: zml.Buffer = try .fromSlice(io, platform, pred_slice, sharding);
         defer pos_buffer.deinit();
 
         // call to generate the next token
-        acellm.exes.decode_embed_args.set(.{ acellm.model_buffers, buffer });
+        acellm.exes.decode_embed_args.set(.{ acellm.model_buffers, decode_token_buffer });
         acellm.exes.decode_embed_exe.call(acellm.exes.decode_embed_args, &acellm.exes.decode_embed_results);
-        buffer.deinit();
-        acellm.exes.decode_embed_results.fill(.{ &buffer });
+        acellm.exes.decode_embed_results.fill(.{ &decode_embed_buffer });
         for (0..acellm.config.num_hidden_layers) |ii| {
-            acellm.exes.decode_layer_pre_args.set(.{ acellm.model_buffers.layers[ii], buffer });
-            acellm.exes.decode_layer_pre_exe.call(acellm.exes.decode_layer_pre_args, &acellm.exes.decode_layer_pre_results);
-            acellm.exes.decode_layer_pre_results.fill(.{ &x1_buffer, &q1_buffer, &k1_buffer, &v1_buffer, &x2_buffer, &q2_buffer, &k2_buffer, &v2_buffer });
-
-            acellm.exes.decode_layer_attn_args.set(.{ acellm.model_buffers.layers[ii], x1_buffer, pos_buffer, acellm.kv_cache_buffers, layer_index_buffers[ii], q1_buffer, k1_buffer, v1_buffer });
-            acellm.exes.decode_layer_attn_exe.call(acellm.exes.decode_layer_attn_args, &acellm.exes.decode_layer_attn_results);
-            acellm.exes.decode_layer_attn_results.fill(.{ &delta1_buffer, &acellm.kv_cache_buffers });
-
-            acellm.exes.decode_layer_post_args.set(.{ acellm.model_buffers.layers[ii], x1_buffer, delta1_buffer, x1_buffer, delta1_buffer });
-            acellm.exes.decode_layer_post_exe.call(acellm.exes.decode_layer_post_args, &acellm.exes.decode_layer_post_results);
-            buffer.deinit();
-            acellm.exes.decode_layer_post_results.fill(.{ &buffer });
-            x1_buffer.deinit();
-            x2_buffer.deinit();
-            q1_buffer.deinit();
-            q2_buffer.deinit();
-            k1_buffer.deinit();
-            k2_buffer.deinit();
-            v1_buffer.deinit();
-            v2_buffer.deinit();
-            delta1_buffer.deinit();
+            acellm.exes.decode_layer_args.set(.{ acellm.model_buffers.layers[ii], decode_embed_buffer, pos_buffer, acellm.kv_cache_buffers_1, acellm.kv_cache_buffers_2 });
+            acellm.exes.decode_layer_exe.call(acellm.exes.decode_layer_args, &acellm.exes.decode_layer_results);
+            acellm.exes.decode_layer_results.fill(.{ &decode_embed_buffer, &acellm.kv_cache_buffers_1, &acellm.kv_cache_buffers_2 });
         }
-        acellm.exes.logits_args.set(.{ acellm.model_buffers, buffer });
+        acellm.exes.logits_args.set(.{ acellm.model_buffers, decode_embed_buffer });
         acellm.exes.logits_exe.call(acellm.exes.logits_args, &acellm.exes.logits_results);
-        buffer.deinit();
-        acellm.exes.logits_results.fill(.{ &buffer });
+        acellm.exes.logits_results.fill(.{ &logit_buffer });
 
-        acellm.exes.sample_args.set(.{ acellm.model_buffers, buffer, rng_buffers });
+        acellm.exes.sample_args.set(.{ acellm.model_buffers, logit_buffer, rng_buffers });
         acellm.exes.sample_exe.call(acellm.exes.sample_args, &acellm.exes.sample_results);
-        buffer.deinit();
-        zml.Tensor.Rng.deinitBuffer(&rng_buffers);
-        acellm.exes.sample_results.fill(.{ &buffer, &rng_buffers });
+        acellm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
 
         // extract the generated token from the buffer
-        try buffer.toSlice(io, token_slice);
+        try token_buffer.toSlice(io, token_slice);
+        token_buffer.deinit();
+        decode_embed_buffer.deinit();
+        logit_buffer.deinit();
     }
     try writer.writeAll("\n");
     try writer.flush();
@@ -578,18 +543,32 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, zml_handler.args.seed, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
-    var zero_buffer: zml.Buffer = try .scalar(io, platform, 0, .u32, sharding);
+    var zero_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .b = 2 }, .u32));
+    defer zero_slice.free(allocator);
+    zero_slice.items(u32)[0] = 0;
+    zero_slice.items(u32)[1] = 0;
+    var zero_buffer: zml.Buffer = try .fromSlice(io, platform, zero_slice, sharding);
     defer zero_buffer.deinit();
+
+    const pred_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = 1 }, .u32));
+    defer pred_slice.free(allocator);
+    pred_slice.items(u32)[0] = @intCast(cond_tok.len - 1);
+    pred_slice.items(u32)[1] = @intCast(uncond_tok.len - 1);
+    var pred_buffer: zml.Buffer = try .fromSlice(io, platform, pred_slice, sharding);
+    defer pred_buffer.deinit();
     
     var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer token_slice.free(allocator);
-
+    var token_buffer: zml.Buffer = undefined;
+    
     const prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = acecfg.llm.options.seq_len }, .u32));
     defer prefill_tokens_slice.free(allocator);
     // in .b = 0, we put the cond prompt
     // in .b = 1, we put the uncond prompt
     @memcpy(prefill_tokens_slice.items(u32)[0..cond_tok.len], cond_tok);
     @memcpy(prefill_tokens_slice.items(u32)[acecfg.llm.options.seq_len..][0..uncond_tok.len], uncond_tok);
+    var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, sharding);
+    defer prefill_tokens_buffer.deinit();
 
     const layer_index_slices = try allocator.alloc(zml.Slice, acecfg.llm.config.num_hidden_layers);
     defer {
@@ -609,84 +588,40 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
         layer_index_buffers[i] = try zml.Buffer.fromSlice(io, platform, layer_index_slices[i], sharding);
     }
 
-    var buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, sharding);
-    defer buffer.deinit();
-    
-    var x1_buffer: zml.Buffer = undefined;
-    var x2_buffer: zml.Buffer = undefined;
-    var q1_buffer: zml.Buffer = undefined;
-    var q2_buffer: zml.Buffer = undefined;
-    var k1_buffer: zml.Buffer = undefined;
-    var k2_buffer: zml.Buffer = undefined;
-    var v1_buffer: zml.Buffer = undefined;
-    var v2_buffer: zml.Buffer = undefined;
-    var delta1_buffer: zml.Buffer = undefined;
-    var delta2_buffer: zml.Buffer = undefined;
-
     std.log.info("5Hz run CFG prefill", .{});
     zml_handler.tic(&zml_handler.timers.cfg.prefill);
     
-    acellm.exes.prefill_embed_args.set(.{ acellm.model_buffers, buffer });
+    var prefill_embed_buffer: zml.Buffer = undefined;
+    defer prefill_embed_buffer.deinit();
+    var one_embed_buffer: zml.Buffer = undefined;
+    defer one_embed_buffer.deinit();
+    var logit_buffer: zml.Buffer = undefined;
+    defer logit_buffer.deinit();
+
+    acellm.exes.prefill_embed_args.set(.{ acellm.model_buffers, prefill_tokens_buffer });
     acellm.exes.prefill_embed_exe.call(acellm.exes.prefill_embed_args, &acellm.exes.prefill_embed_results);
-    buffer.deinit();
-    acellm.exes.prefill_embed_results.fill(.{ &buffer });
+    acellm.exes.prefill_embed_results.fill(.{ &prefill_embed_buffer });
 
     for (0..acellm.config.num_hidden_layers) |i| {
-        acellm.exes.prefill_layer_pre_args.set(.{ acellm.model_buffers.layers[i], buffer });
-        acellm.exes.prefill_layer_pre_exe.call(acellm.exes.prefill_layer_pre_args, &acellm.exes.prefill_layer_pre_results);
-        acellm.exes.prefill_layer_pre_results.fill(.{ &x1_buffer, &q1_buffer, &k1_buffer, &v1_buffer, &x2_buffer, &q2_buffer, &k2_buffer, &v2_buffer });
-        
-        acellm.exes.prefill_layer_attn_args.set(.{ acellm.model_buffers.layers[i], x1_buffer, zero_buffer, acecfg.cond_kv_cache_buffers, layer_index_buffers[i], q1_buffer, k1_buffer, v1_buffer });
-        acellm.exes.prefill_layer_attn_exe.call(acellm.exes.prefill_layer_attn_args, &acellm.exes.prefill_layer_attn_results);
-        acellm.exes.prefill_layer_attn_results.fill(.{ &delta1_buffer, &acecfg.cond_kv_cache_buffers });
-
-        acellm.exes.prefill_layer_attn_args.set(.{ acellm.model_buffers.layers[i], x2_buffer, zero_buffer, acecfg.uncond_kv_cache_buffers, layer_index_buffers[i], q2_buffer, k2_buffer, v2_buffer });
-        acellm.exes.prefill_layer_attn_exe.call(acellm.exes.prefill_layer_attn_args, &acellm.exes.prefill_layer_attn_results);
-        acellm.exes.prefill_layer_attn_results.fill(.{ &delta2_buffer, &acecfg.uncond_kv_cache_buffers });
-
-        acellm.exes.prefill_layer_post_args.set(.{ acellm.model_buffers.layers[i], x1_buffer, delta1_buffer, x2_buffer, delta2_buffer });
-        acellm.exes.prefill_layer_post_exe.call(acellm.exes.prefill_layer_post_args, &acellm.exes.prefill_layer_post_results);
-        buffer.deinit();
-        acellm.exes.prefill_layer_post_results.fill(.{ &buffer });
-        x1_buffer.deinit();
-        x2_buffer.deinit();
-        q1_buffer.deinit();
-        q2_buffer.deinit();
-        k1_buffer.deinit();
-        k2_buffer.deinit();
-        v1_buffer.deinit();
-        v2_buffer.deinit();
-        delta1_buffer.deinit();
-        delta2_buffer.deinit();
+        acellm.exes.prefill_layer_args.set(.{ acellm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, acecfg.cond_kv_cache_buffers, acecfg.uncond_kv_cache_buffers });
+        acellm.exes.prefill_layer_exe.call(acellm.exes.prefill_layer_args, &acellm.exes.prefill_layer_results);
+        acellm.exes.prefill_layer_results.fill(.{ &prefill_embed_buffer, &acecfg.cond_kv_cache_buffers, &acecfg.uncond_kv_cache_buffers });
     }
-    const prompt_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = 1 }, .u32));
-    defer prompt_slice.free(allocator);
-    prompt_slice.items(u32)[0] = @intCast(cond_tok.len - 1);
-    prompt_slice.items(u32)[1] = @intCast(uncond_tok.len - 1);
-    var prompt_buffer: zml.Buffer = try .fromSlice(io, platform, prompt_slice, sharding);
-    defer prompt_buffer.deinit();
-    acellm.exes.prefill_select_args.set(.{ acellm.model_buffers, buffer, prompt_buffer });
+    
+    acellm.exes.prefill_select_args.set(.{ acellm.model_buffers, prefill_embed_buffer, pred_buffer });
     acellm.exes.prefill_select_exe.call(acellm.exes.prefill_select_args, &acellm.exes.prefill_select_results);
-    buffer.deinit();
-    acellm.exes.prefill_select_results.fill(.{ &buffer });
+    acellm.exes.prefill_select_results.fill(.{ &one_embed_buffer });
 
-    acellm.exes.logits_args.set(.{ acellm.model_buffers, buffer });
+    acellm.exes.logits_args.set(.{ acellm.model_buffers, one_embed_buffer });
     acellm.exes.logits_exe.call(acellm.exes.logits_args, &acellm.exes.logits_results);
-    buffer.deinit();
-    acellm.exes.logits_results.fill(.{ &buffer });
+    acellm.exes.logits_results.fill(.{ &logit_buffer });
 
-    acecfg.exes.cfg_args.set(.{ acellm.model_buffers, buffer });
-    acecfg.exes.cfg_exe.call(acecfg.exes.cfg_args, &acecfg.exes.cfg_results);
-    buffer.deinit();
-    acecfg.exes.cfg_results.fill(.{ &buffer });
+    acellm.exes.sample_args.set(.{ acellm.model_buffers, logit_buffer, rng_buffers });
+    acellm.exes.sample_exe.call(acellm.exes.sample_args, &acellm.exes.sample_results);
+    acellm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
 
-    acecfg.exes.sample_args.set(.{ acellm.model_buffers, buffer, rng_buffers });
-    acecfg.exes.sample_exe.call(acecfg.exes.sample_args, &acecfg.exes.sample_results);
-    zml.Tensor.Rng.deinitBuffer(&rng_buffers);
-    buffer.deinit();
-    acecfg.exes.sample_results.fill(.{ &buffer, &rng_buffers });
-
-    try buffer.toSlice(io, token_slice);
+    try token_buffer.toSlice(io, token_slice);
+    token_buffer.deinit();
     zml_handler.toc(&zml_handler.timers.cfg.prefill);
 
     std.log.info("5Hz run decode CFG, need {d} audio codes", .{ nb_audio_codes });
@@ -694,6 +629,7 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
 
     const decode_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = 1 }, .u32));
     defer decode_tokens_slice.free(allocator);
+    var decode_embed_buffer: zml.Buffer = undefined;
     
     var stdout = std.Io.File.stdout().writer(io, &.{});
     var writer: *std.Io.Writer = &stdout.interface;
@@ -706,66 +642,38 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
         try writer.writeAll(chunk);
         if (result_tok.items.len == nb_audio_codes) break;
 
-        var cond_pos_buffer: zml.Buffer = try .scalar(io, platform, cond_tok.len + i, .u32, sharding);
-        defer cond_pos_buffer.deinit();
-        var uncond_pos_buffer: zml.Buffer = try .scalar(io, platform, uncond_tok.len + i, .u32, sharding);
-        defer uncond_pos_buffer.deinit();
-
         decode_tokens_slice.items(u32)[0] = generated_token;
         decode_tokens_slice.items(u32)[1] = generated_token;
-        buffer.deinit();
-        buffer = try .fromSlice(io, platform, decode_tokens_slice, sharding);
+        var decode_token_buffer: zml.Buffer = try .fromSlice(io, platform, decode_tokens_slice, sharding);
+        defer decode_token_buffer.deinit();
+
+        pred_slice.items(u32)[0] = @intCast(cond_tok.len + i);
+        pred_slice.items(u32)[1] = @intCast(uncond_tok.len + i);
+        var pos_buffer: zml.Buffer = try .fromSlice(io, platform, pred_slice, sharding);
+        defer pos_buffer.deinit();
 
         // call to generate the next token
-        acellm.exes.decode_embed_args.set(.{ acellm.model_buffers, buffer });
+        acellm.exes.decode_embed_args.set(.{ acellm.model_buffers, decode_token_buffer });
         acellm.exes.decode_embed_exe.call(acellm.exes.decode_embed_args, &acellm.exes.decode_embed_results);
-        buffer.deinit();
-        acellm.exes.decode_embed_results.fill(.{ &buffer });
+        acellm.exes.decode_embed_results.fill(.{ &decode_embed_buffer });
         for (0..acellm.config.num_hidden_layers) |ii| {
-            acellm.exes.decode_layer_pre_args.set(.{ acellm.model_buffers.layers[ii], buffer });
-            acellm.exes.decode_layer_pre_exe.call(acellm.exes.decode_layer_pre_args, &acellm.exes.decode_layer_pre_results);
-            acellm.exes.decode_layer_pre_results.fill(.{ &x1_buffer, &q1_buffer, &k1_buffer, &v1_buffer, &x2_buffer, &q2_buffer, &k2_buffer, &v2_buffer });
-
-            acellm.exes.decode_layer_attn_args.set(.{ acellm.model_buffers.layers[ii], x1_buffer, cond_pos_buffer, acecfg.cond_kv_cache_buffers, layer_index_buffers[ii], q1_buffer, k1_buffer, v1_buffer });
-            acellm.exes.decode_layer_attn_exe.call(acellm.exes.decode_layer_attn_args, &acellm.exes.decode_layer_attn_results);
-            acellm.exes.decode_layer_attn_results.fill(.{ &delta1_buffer, &acecfg.cond_kv_cache_buffers });
-
-            acellm.exes.decode_layer_attn_args.set(.{ acellm.model_buffers.layers[ii], x2_buffer, uncond_pos_buffer, acecfg.uncond_kv_cache_buffers, layer_index_buffers[ii], q2_buffer, k2_buffer, v2_buffer });
-            acellm.exes.decode_layer_attn_exe.call(acellm.exes.decode_layer_attn_args, &acellm.exes.decode_layer_attn_results);
-            acellm.exes.decode_layer_attn_results.fill(.{ &delta2_buffer, &acecfg.uncond_kv_cache_buffers });
-
-            acellm.exes.decode_layer_post_args.set(.{ acellm.model_buffers.layers[ii], x1_buffer, delta1_buffer, x2_buffer, delta2_buffer });
-            acellm.exes.decode_layer_post_exe.call(acellm.exes.decode_layer_post_args, &acellm.exes.decode_layer_post_results);
-            buffer.deinit();
-            acellm.exes.decode_layer_post_results.fill(.{ &buffer });
-            x1_buffer.deinit();
-            x2_buffer.deinit();
-            q1_buffer.deinit();
-            q2_buffer.deinit();
-            k1_buffer.deinit();
-            k2_buffer.deinit();
-            v1_buffer.deinit();
-            v2_buffer.deinit();
-            delta1_buffer.deinit();
-            delta2_buffer.deinit();            
+            acellm.exes.decode_layer_args.set(.{ acellm.model_buffers.layers[ii], decode_embed_buffer, pos_buffer, acecfg.cond_kv_cache_buffers, acecfg.uncond_kv_cache_buffers });
+            acellm.exes.decode_layer_exe.call(acellm.exes.decode_layer_args, &acellm.exes.decode_layer_results);
+            acellm.exes.decode_layer_results.fill(.{ &decode_embed_buffer, &acecfg.cond_kv_cache_buffers, &acecfg.uncond_kv_cache_buffers });
         }
-        acellm.exes.logits_args.set(.{ acellm.model_buffers, buffer });
+        acellm.exes.logits_args.set(.{ acellm.model_buffers, decode_embed_buffer });
         acellm.exes.logits_exe.call(acellm.exes.logits_args, &acellm.exes.logits_results);
-        buffer.deinit();
-        acellm.exes.logits_results.fill(.{ &buffer });
+        acellm.exes.logits_results.fill(.{ &logit_buffer });
 
-        acecfg.exes.cfg_args.set(.{ acellm.model_buffers, buffer });
-        acecfg.exes.cfg_exe.call(acecfg.exes.cfg_args, &acecfg.exes.cfg_results);
-        buffer.deinit();
-        acecfg.exes.cfg_results.fill(.{ &buffer });
-    
-        acecfg.exes.sample_args.set(.{ acellm.model_buffers, buffer, rng_buffers });
-        acecfg.exes.sample_exe.call(acecfg.exes.sample_args, &acecfg.exes.sample_results);
-        zml.Tensor.Rng.deinitBuffer(&rng_buffers);
-        buffer.deinit();
-        acecfg.exes.sample_results.fill(.{ &buffer, &rng_buffers });
-        
-        try buffer.toSlice(io, token_slice);
+        acellm.exes.sample_args.set(.{ acellm.model_buffers, logit_buffer, rng_buffers });
+        acellm.exes.sample_exe.call(acellm.exes.sample_args, &acellm.exes.sample_results);
+        acellm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
+
+        // extract the generated token from the buffer
+        try token_buffer.toSlice(io, token_slice);
+        token_buffer.deinit();
+        decode_embed_buffer.deinit();
+        logit_buffer.deinit();
     }
     try writer.writeAll("\n");
     try writer.flush();
