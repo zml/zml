@@ -421,7 +421,7 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
 
     acellm.exes.prefill_embed_args.set(.{ acellm.model_buffers, buffer });
     acellm.exes.prefill_embed_exe.call(acellm.exes.prefill_embed_args, &acellm.exes.prefill_embed_results);
-    buffer.deinit();
+    //buffer.deinit();
     acellm.exes.prefill_embed_results.fill(.{ &buffer });
 
     for (0..acellm.config.num_hidden_layers) |i| {
@@ -435,7 +435,7 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
 
         acellm.exes.prefill_layer_post_args.set(.{ acellm.model_buffers.layers[i], x1_buffer, delta1_buffer, x1_buffer, delta1_buffer });
         acellm.exes.prefill_layer_post_exe.call(acellm.exes.prefill_layer_post_args, &acellm.exes.prefill_layer_post_results);
-        buffer.deinit();
+        //buffer.deinit();
         acellm.exes.prefill_layer_post_results.fill(.{ &buffer });
         x1_buffer.deinit();
         x2_buffer.deinit();
@@ -455,18 +455,18 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
     defer prompt_buffer.deinit();
     acellm.exes.prefill_select_args.set(.{ acellm.model_buffers, buffer, prompt_buffer });
     acellm.exes.prefill_select_exe.call(acellm.exes.prefill_select_args, &acellm.exes.prefill_select_results);
-    buffer.deinit();
+    //buffer.deinit();
     acellm.exes.prefill_select_results.fill(.{ &buffer });
 
     acellm.exes.logits_args.set(.{ acellm.model_buffers, buffer });
     acellm.exes.logits_exe.call(acellm.exes.logits_args, &acellm.exes.logits_results);
-    buffer.deinit();
+    //buffer.deinit();
     acellm.exes.logits_results.fill(.{ &buffer });
 
     acellm.exes.sample_args.set(.{ acellm.model_buffers, buffer, rng_buffers });
     acellm.exes.sample_exe.call(acellm.exes.sample_args, &acellm.exes.sample_results);
-    zml.Tensor.Rng.deinitBuffer(&rng_buffers);
-    buffer.deinit();
+    //zml.Tensor.Rng.deinitBuffer(&rng_buffers);
+    //buffer.deinit();
     acellm.exes.sample_results.fill(.{ &buffer, &rng_buffers });
 
     try buffer.toSlice(io, token_slice);
