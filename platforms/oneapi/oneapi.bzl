@@ -49,28 +49,26 @@ _ONEAPI_BUILD_FILE_CONTENT = "\n".join([
     """filegroup(
     name = "compiler_runtime",
     srcs = glob(["{compiler_lib}/*.spv"]) + [
-        "{compiler_lib}/libOpenCL.so",
         "{compiler_lib}/libOpenCL.so.1",
-        "{compiler_lib}/libOpenCL.so.1.0.0",
         "{compiler_lib}/libimf.so",
         "{compiler_lib}/libintlc.so.5",
         "{compiler_lib}/libirc.so",
         "{compiler_lib}/libirng.so",
         "{compiler_lib}/libsvml.so",
-        "{compiler_lib}/libsycl.so.8",
-        "{compiler_lib}/libur_loader.so.0",
     ],
 )""".format(compiler_lib = ONEAPI_COMPILER_LIB),
     packages.filegroup(
+        name = "libsycl_so",
+        srcs = [
+            _compiler_lib("libsycl.so.8"),
+        ],
+    ),
+    packages.filegroup(
         name = "mkl_runtime",
         srcs = [
-            _mkl_lib("libmkl_core.so"),
             _mkl_lib("libmkl_core.so.2"),
-            _mkl_lib("libmkl_intel_ilp64.so"),
             _mkl_lib("libmkl_intel_ilp64.so.2"),
-            _mkl_lib("libmkl_sequential.so"),
             _mkl_lib("libmkl_sequential.so.2"),
-            _mkl_lib("libmkl_sycl_blas.so"),
             _mkl_lib("libmkl_sycl_blas.so.5"),
         ],
     ),
