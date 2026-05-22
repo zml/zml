@@ -702,8 +702,10 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
         try writer.writeAll(chunk);
         if (result_tok.items.len == nb_audio_codes) break;
 
-        var pos_buffer: zml.Buffer = try .scalar(io, platform, cond_tok.len + i, .u32, sharding);
-        defer pos_buffer.deinit();
+        var cond_pos_buffer: zml.Buffer = try .scalar(io, platform, cond_tok.len + i, .u32, sharding);
+        defer cond_pos_buffer.deinit();
+        var uncond_pos_buffer: zml.Buffer = try .scalar(io, platform, uncond_tok.len + i, .u32, sharding);
+        defer uncond_pos_buffer.deinit();
 
         decode_tokens_slice.items(u32)[0] = generated_token;
         decode_tokens_slice.items(u32)[1] = generated_token;
@@ -720,11 +722,11 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
             acellm.exes.decode_layer_pre_exe.call(acellm.exes.decode_layer_pre_args, &acellm.exes.decode_layer_pre_results);
             acellm.exes.decode_layer_pre_results.fill(.{ &x1_buffer, &q1_buffer, &k1_buffer, &v1_buffer, &x2_buffer, &q2_buffer, &k2_buffer, &v2_buffer });
 
-            acellm.exes.decode_layer_attn_args.set(.{ acellm.model_buffers.layers[ii], x1_buffer, pos_buffer, acecfg.cond_kv_cache_buffers, layer_index_buffers[ii], q1_buffer, k1_buffer, v1_buffer });
+            acellm.exes.decode_layer_attn_args.set(.{ acellm.model_buffers.layers[ii], x1_buffer, cond_pos_buffer, acecfg.cond_kv_cache_buffers, layer_index_buffers[ii], q1_buffer, k1_buffer, v1_buffer });
             acellm.exes.decode_layer_attn_exe.call(acellm.exes.decode_layer_attn_args, &acellm.exes.decode_layer_attn_results);
             acellm.exes.decode_layer_attn_results.fill(.{ &delta1_buffer, &acecfg.cond_kv_cache_buffers });
 
-            acellm.exes.decode_layer_attn_args.set(.{ acellm.model_buffers.layers[ii], x2_buffer, pos_buffer, acecfg.uncond_kv_cache_buffers, layer_index_buffers[ii], q2_buffer, k2_buffer, v2_buffer });
+            acellm.exes.decode_layer_attn_args.set(.{ acellm.model_buffers.layers[ii], x2_buffer, uncond_pos_buffer, acecfg.uncond_kv_cache_buffers, layer_index_buffers[ii], q2_buffer, k2_buffer, v2_buffer });
             acellm.exes.decode_layer_attn_exe.call(acellm.exes.decode_layer_attn_args, &acellm.exes.decode_layer_attn_results);
             acellm.exes.decode_layer_attn_results.fill(.{ &delta2_buffer, &acecfg.uncond_kv_cache_buffers });
 
