@@ -1,9 +1,4 @@
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
-load("//platforms:packages.bzl", "packages")
-
-_BUILD_FILE_DEFAULT_VISIBILITY = """\
-package(default_visibility = ["//visibility:public"])
-"""
 
 PJRT_ONEAPI_RELEASE = "manual-2026-05-21T17-13-00Z"
 PJRT_ONEAPI_ARTIFACT_SHA256 = "24c518768b5f4994cde22603c7451ce6c53e9d236c3e574e65ca73cd32c6368a"
@@ -27,71 +22,42 @@ ONEAPI_RUNTIME_STRIP_PREFIX = "oneapi"
 ONEAPI_ZERO_LOADER_URL = "https://tensorflow-file-hosting.s3.us-east-1.amazonaws.com/ze_loader_libs.tar.gz"
 ONEAPI_ZERO_LOADER_SHA256 = "71cbfd8ac59e1231f013e827ea8efe6cf5da36fad771da2e75e202423bd6b82e"
 
-def _base_lib(file):
-    return "{}/{}".format(ONEAPI_BASE_LIB, file)
+_ONEAPI_BUILD_FILE_CONTENT = """
+package(default_visibility = ["//visibility:public"])
+filegroup(name = "base_runtime", srcs = [
+        "{ONEAPI_BASE_LIB}/libhwloc.so.15",
+        "{ONEAPI_BASE_LIB}/libumf.so.0",
+        "{ONEAPI_BASE_LIB}/libur_adapter_level_zero.so.0",
+        "{ONEAPI_BASE_LIB}/libur_adapter_opencl.so.0",
+        "{ONEAPI_BASE_LIB}/libur_loader.so.0",
+])
 
-def _compiler_lib(file):
-    return "{}/{}".format(ONEAPI_COMPILER_LIB, file)
+filegroup(name = "compiler_runtime", srcs = glob(["{ONEAPI_COMPILER_LIB}/*.spv"]) + [
+        "{ONEAPI_COMPILER_LIB}/libOpenCL.so.1",
+        "{ONEAPI_COMPILER_LIB}/libimf.so",
+        "{ONEAPI_COMPILER_LIB}/libintlc.so.5",
+        "{ONEAPI_COMPILER_LIB}/libirc.so",
+        "{ONEAPI_COMPILER_LIB}/libirng.so",
+        "{ONEAPI_COMPILER_LIB}/libsvml.so",
+])
 
-def _mkl_lib(file):
-    return "{}/{}".format(ONEAPI_MKL_LIB, file)
+filegroup(name = "libsycl_so", srcs = ["{ONEAPI_COMPILER_LIB}/libsycl.so.8"])
 
-_ONEAPI_FILEGROUPS = [
-    packages.filegroup(
-        name = "base_runtime",
-        srcs = [
-            _base_lib("libhwloc.so.15"),
-            _base_lib("libumf.so.0"),
-            _base_lib("libur_adapter_level_zero.so.0"),
-            _base_lib("libur_adapter_opencl.so.0"),
-            _base_lib("libur_loader.so.0"),
-        ],
-    ),
-    packages.filegroup_glob(
-        name = "compiler_runtime",
-        srcs_glob = [
-            _compiler_lib("*.spv"),
-        ],
-        srcs = [
-            _compiler_lib("libOpenCL.so.1"),
-            _compiler_lib("libimf.so"),
-            _compiler_lib("libintlc.so.5"),
-            _compiler_lib("libirc.so"),
-            _compiler_lib("libirng.so"),
-            _compiler_lib("libsvml.so"),
-        ],
-    ),
-    packages.filegroup(
-        name = "libsycl_so",
-        srcs = [
-            _compiler_lib("libsycl.so.8"),
-        ],
-    ),
-    packages.filegroup(
-        name = "mkl_runtime",
-        srcs = [
-            _mkl_lib("libmkl_core.so.2"),
-            _mkl_lib("libmkl_intel_ilp64.so.2"),
-            _mkl_lib("libmkl_sequential.so.2"),
-            _mkl_lib("libmkl_sycl_blas.so.5"),
-        ],
-    ),
-]
+filegroup(name = "mkl_runtime", srcs = [
+        "{ONEAPI_MKL_LIB}/libmkl_core.so.2",
+        "{ONEAPI_MKL_LIB}/libmkl_intel_ilp64.so.2",
+        "{ONEAPI_MKL_LIB}/libmkl_sequential.so.2",
+        "{ONEAPI_MKL_LIB}/libmkl_sycl_blas.so.5"
+])
+""".format(ONEAPI_BASE_LIB = ONEAPI_BASE_LIB, ONEAPI_COMPILER_LIB = ONEAPI_COMPILER_LIB, ONEAPI_MKL_LIB = ONEAPI_MKL_LIB)
 
-_ONEAPI_BUILD_FILE_CONTENT = "\n".join([
-    _BUILD_FILE_DEFAULT_VISIBILITY,
-] + _ONEAPI_FILEGROUPS)
-
-_ZERO_LOADER_FILEGROUPS = [
-    packages.filegroup_glob(
-        name = "all",
-        srcs_glob = ["lib/**"],
-    ),
-]
-
-_ZERO_LOADER_BUILD_FILE_CONTENT = "\n".join([
-    _BUILD_FILE_DEFAULT_VISIBILITY,
-] + _ZERO_LOADER_FILEGROUPS)
+_ZERO_LOADER_BUILD_FILE_CONTENT = """
+package(default_visibility = ["//visibility:public"])
+filegroup(
+    name = "all",
+    srcs = glob(["lib/**"]),
+)
+"""
 
 def _oneapi_impl(mctx):
     http_archive(

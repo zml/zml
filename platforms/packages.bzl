@@ -35,14 +35,6 @@ cc_import(
 def _filegroup(**kwargs):
     return """filegroup({})""".format(_kwargs(**kwargs))
 
-def _filegroup_glob(name, srcs_glob, srcs = []):
-    return """\
-filegroup(
-    name = "{name}",
-    srcs = glob({srcs_glob}) + {srcs},
-)
-""".format(name = name, srcs_glob = repr(srcs_glob), srcs = repr(srcs))
-
 def _patchelf(**kwargs):
     return """patchelf({})""".format(_kwargs(**kwargs))
 
