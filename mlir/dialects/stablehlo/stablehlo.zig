@@ -897,7 +897,7 @@ pub fn unpin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir
 
 pub fn partition_id(ctx: *mlir.Context, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.partition_id", .{
-        .results = .{ .flat = &.{.rankedTensor(&.{}, mlir.integerType(ctx, .u32))} },
+        .results = .{ .flat = &.{.rankedTensor(&.{}, .int(ctx, .u32))} },
         .location = location,
     });
 }

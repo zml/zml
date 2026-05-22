@@ -141,7 +141,11 @@ pub fn fusedExpertsImpl(
     try validateInputs(hidden, gate_up, down, weights, ids);
 
     const block_size_m = options.block_size_m;
-    const num_experts = gate_up.dim(.expert);
+    const num_experts = if (opts.global_num_experts != -1) opts.global_num_experts else gate_up.dim(.expert);
+    if (opts.expert_map) |expert_map| {
+        if (expert_map.dtype() != .i32) return error.UnsupportedType;
+        if (expert_map.rank() != 1 or expert_map.dim(.expert) != num_experts) return error.InvalidShape;
+    }
     const num_assignments = hidden.dim(.token) * ids.dim(.topk);
     const sparsity_factor: i64 = 4;
     const naive_block_assignment = num_assignments * sparsity_factor <= num_experts;
@@ -153,13 +157,18 @@ pub fn fusedExpertsImpl(
     else
         num_assignments + num_experts * (block_size_m - 1);
 
-    const sorted_token_ids, const expert_ids, const num_tokens_post_padded = if (naive_block_assignment) blk: {
+    const sorted_token_ids, const expert_ids_global, const num_tokens_post_padded = if (naive_block_assignment) blk: {
         log.info("Using naive block assignment for MoE kernels. Num assignments: {d}, Num experts: {d}", .{ num_assignments, num_experts });
         const naive_sorted_ids = Tensor.zeroes(Shape.init(.{ .g = 1 }, .i32));
         const naive_expert_ids = ids.reshape(.{ .g = num_assignments });
         const naive_num_tokens_post_padded = Tensor.constant(.{ .i32 = @as(i32, @intCast(max_num_tokens_padded)) }).reshape(.{1});
         break :blk .{ naive_sorted_ids, naive_expert_ids, naive_num_tokens_post_padded };
     } else alignBlockSize(ids, num_experts, block_size_m);
+
+    const expert_ids = if (opts.expert_map) |expert_map|
+        expert_map.gather(.{ .expert = expert_ids_global }, .{}).withTags(.{.g})
+    else
+        expert_ids_global;
 
     var hidden_quant = hidden;
     var a_scale = opts.a1_scale orelse Tensor.scalar(1.0, .f32);
@@ -632,8 +641,7 @@ fn validateOptions(opts: Options) !void {
     if (opts.apply_router_weight_on_input) return error.UnsupportedOption;
     if (opts.use_fp8_w8a8 or opts.use_int8_w8a8 or opts.use_int8_w8a16 or opts.use_int4_w4a16) return error.UnsupportedQuantization;
     if (opts.ocp_mx_scheme != null or opts.per_channel_quant) return error.UnsupportedOption;
-    if (opts.global_num_experts != -1) return error.UnsupportedOption;
-    if (opts.expert_map != null) return error.UnsupportedOption;
+    if (opts.expert_map != null and opts.global_num_experts == -1) return error.InvalidShape;
     if (opts.w1_zp != null or opts.w2_zp != null) return error.UnsupportedOption;
     if (opts.a1_scale != null or opts.a2_scale != null or opts.block_shape != null) return error.UnsupportedOption;
     if (opts.w1_bias != null or opts.w2_bias != null) return error.UnsupportedOption;

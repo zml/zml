@@ -1,5 +1,6 @@
 const std = @import("std");
 const zml = @import("../zml.zig");
+const stdx = zml.stdx;
 pub const triton = @import("triton.zig");
 
 pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
@@ -115,6 +116,67 @@ pub fn forwardMoe(
                 .triton => |v| v,
             };
 
+            const expert_partition = weights_gate_up.shape().partition(.expert);
+
+            if (expert_partition.eql(.init(.experts))) {
+                const expert_partitions = zml.module.CompilationContext.current().partitioning.numPartitionsForLogicalAxis(
+                    weights_gate_up.shape(),
+                    .experts,
+                ) catch unreachable;
+
+                const global_num_experts = weights_down.shape().dim(.expert) * expert_partitions;
+
+                const partial_output = zml.ops.manualComputation(
+                    .{ input, topk_ids, topk_weights, weights_gate_up, weights_down },
+                    input.shape().withPartitioning(.{ .b = .replicated, .s = .replicated, .d = .replicated }),
+                    .{
+                        .activation = parameters.triton.activation,
+                        .global_num_experts = global_num_experts,
+                        .scales_gate_up = scales_gate_up,
+                        .bias_gate_up = bias_gate_up,
+                        .scales_down = scales_down,
+                        .bias_down = bias_down,
+                    },
+                    (struct {
+                        fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_shape: zml.Shape) zml.Tensor {
+                            const local_num_experts = sharded_inputs[3].dim(.expert);
+                            const partition_id = zml.ops.partitionId().convert(.i32);
+                            const expert_start = partition_id.scale(local_num_experts).convert(.i32);
+                            // List of global expert ids
+                            const global_expert_ids = zml.Tensor.arange(.{ .end = ctx.global_num_experts }, .i32).withTags(.{.expert});
+
+                            // Mapping of local experts to global expert ids, -1 if the global expert is not present in the local partition
+                            const local_expert_mask = global_expert_ids.cmp(.GE, expert_start)
+                                .logical(.AND, global_expert_ids.cmp(.LT, expert_start.addConstant(local_num_experts)));
+                            const expert_map = local_expert_mask.select(
+                                global_expert_ids.sub(expert_start),
+                                zml.Tensor.scalar(-1, .i32),
+                            );
+                            const local_output = triton.fusedExpertsImpl(
+                                sharded_inputs[0],
+                                sharded_inputs[3],
+                                sharded_inputs[4],
+                                sharded_inputs[2],
+                                sharded_inputs[1],
+                                .{},
+                                .{
+                                    .activation = ctx.activation,
+                                    .global_num_experts = ctx.global_num_experts,
+                                    .expert_map = expert_map,
+                                    .w1_scale = ctx.scales_gate_up,
+                                    .w2_scale = ctx.scales_down,
+                                    .w1_bias = ctx.bias_gate_up,
+                                    .w2_bias = ctx.bias_down,
+                                },
+                            ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+                            _ = output_shape;
+                            return local_output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d });
+                        }
+                    }).body,
+                );
+                break :b zml.ops.allReduceSum(partial_output);
+            }
+
             break :b try triton.fusedExpertsImpl(
                 input,
                 weights_gate_up,
@@ -124,6 +186,7 @@ pub fn forwardMoe(
                 triton_metadata,
                 .{
                     .activation = parameters.triton.activation,
+                    .global_num_experts = weights_gate_up.dim(.expert),
                     .w1_scale = scales_gate_up,
                     .w2_scale = scales_down,
                     .w1_bias = bias_gate_up,

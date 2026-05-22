@@ -113,7 +113,7 @@ fn compileModel(
             platform_: *const zml.Platform,
             llama_model_: model.Model,
             parameters_: CompilationParameters,
-            shardings_: [1]zml.Sharding,
+            shardings_: []const zml.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
@@ -134,11 +134,11 @@ fn compileModel(
                     parameters_.prefill_attention_parameters,
                 },
                 .{
-                    .shardings = &shardings_,
+                    .shardings = shardings_,
                 },
             );
         }
-    }.call, .{ allocator, io, platform, llama_model, parameters, all_shardings, progress });
+    }.call, .{ allocator, io, platform, llama_model, parameters, &all_shardings, progress });
     var prefill_future_awaited = false;
     errdefer if (!prefill_future_awaited) if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
 
