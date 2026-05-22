@@ -381,7 +381,7 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
     var zero_buffer: zml.Buffer = try .fromSlice(io, platform, zero_slice, sharding);
     defer zero_buffer.deinit();
 
-    const pred_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = 1 }, .u32));
+    const pred_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2 }, .u32));
     defer pred_slice.free(allocator);
     pred_slice.items(u32)[0] = @intCast(prompt_tok.len - 1);
     pred_slice.items(u32)[1] = @intCast(prompt_tok.len - 1);
@@ -550,7 +550,7 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
     var zero_buffer: zml.Buffer = try .fromSlice(io, platform, zero_slice, sharding);
     defer zero_buffer.deinit();
 
-    const pred_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = 1 }, .u32));
+    const pred_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2 }, .u32));
     defer pred_slice.free(allocator);
     pred_slice.items(u32)[0] = @intCast(cond_tok.len - 1);
     pred_slice.items(u32)[1] = @intCast(uncond_tok.len - 1);
