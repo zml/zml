@@ -563,8 +563,8 @@ pub const AceLlm = struct {
         const e1 = embeddings.slice1d(.b, .{ .start = 0, .end = 1 }).squeeze(.b);
         const e2 = embeddings.slice1d(.b, .{ .start = 1, .end = 2 }).squeeze(.b);
         
-        const p1 = pred_index.slice1d(.b, .{ .start = 0, .end = 1 }).squeeze(.b).squeeze(.s);
-        const p2 = pred_index.slice1d(.b, .{ .start = 1, .end = 2 }).squeeze(.b).squeeze(.s);
+        const p1 = pred_index.slice1d(.b, .{ .start = 0, .end = 1 }).squeeze(.b);
+        const p2 = pred_index.slice1d(.b, .{ .start = 1, .end = 2 }).squeeze(.b);
 
         const s1 = e1.dynamicSlice1d(e1.axis(.s), .{ .start = p1, .len = 1 });
         const s2 = e2.dynamicSlice1d(e2.axis(.s), .{ .start = p2, .len = 1 });
