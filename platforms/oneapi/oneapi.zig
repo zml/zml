@@ -37,7 +37,6 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     }
 
     if (!hasOneApiDevices(io)) {
-        log.warn("oneAPI platform requested but no compatible devices were found; skipping.", .{});
         return error.Unavailable;
     }
 
