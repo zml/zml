@@ -219,10 +219,14 @@ pub const Moe = struct {
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
         std.log.info("after tagging x", .{});
 
+        // collect topk weights and indices
         const routing_scores, const topk_ids = self.router.forward(input);
 
+        // multiply topk weights by scaling factor
+        const scaled = routing_scores.scale(3);
+
         // concat the gate and up
-        const gate_up_proj = zml.Tensor.concatenate(&.{ self.gate_proj, self.up_proj }, .dout).rename(.{ .dout = .out, .d = .in });
+        const gate_up_proj = zml.Tensor.concatenate(&.{ self.up_proj, self.gate_proj }, .dout).rename(.{ .dout = .out, .d = .in });
 
         // pipe into kernel
         // no scales as not quantized
@@ -234,10 +238,12 @@ pub const Moe = struct {
 
         std.log.info("before forward moe", .{});
 
+        // get all expert outputs as tensor via fused triton kernel instead of Python loop
+        // NOTE: swiglu limit not considered. may have to edit
         const moe_output = zml.moe.forwardMoe(
             input,
             topk_ids,
-            routing_scores,
+            scaled,
             gate_up_proj,
             null,
             null,
