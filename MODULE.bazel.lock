@@ -343,8 +343,8 @@
     "https://bcr.bazel.build/modules/rules_swift/1.18.0/MODULE.bazel": "a6aba73625d0dc64c7b4a1e831549b6e375fbddb9d2dde9d80c9de6ec45b24c9",
     "https://bcr.bazel.build/modules/rules_swift/2.1.1/MODULE.bazel": "494900a80f944fc7aa61500c2073d9729dff0b764f0e89b824eb746959bc1046",
     "https://bcr.bazel.build/modules/rules_swift/2.1.1/source.json": "40fc69dfaac64deddbb75bd99cdac55f4427d9ca0afbe408576a65428427a186",
-    "https://bcr.bazel.build/modules/rules_zig/0.15.0/MODULE.bazel": "8464afbe0a1b59967bf3d56cb166f889f1e53599a1194b2c0e668aae651cb9f8",
-    "https://bcr.bazel.build/modules/rules_zig/0.15.0/source.json": "33e47f366fae6e81fb5398972af4208c3546be162ca58be9142c018b516d4252",
+    "https://bcr.bazel.build/modules/rules_zig/0.15.1/MODULE.bazel": "f0b813d9191c8d201e0b3ecbe5c5220ddedb717a15009fc711a78b3e1db8710d",
+    "https://bcr.bazel.build/modules/rules_zig/0.15.1/source.json": "0bd91d7459f504196dfdc90cd0fffbf1f0df2667c9cd5eb708feb3fd27578e6a",
     "https://bcr.bazel.build/modules/stardoc/0.5.3/MODULE.bazel": "c7f6948dae6999bf0db32c1858ae345f112cacf98f174c7a8bb707e41b974f1c",
     "https://bcr.bazel.build/modules/stardoc/0.5.4/MODULE.bazel": "6569966df04610b8520957cb8e97cf2e9faac2c0309657c537ab51c16c18a2a4",
     "https://bcr.bazel.build/modules/stardoc/0.5.6/MODULE.bazel": "c43dabc564990eeab55e25ed61c07a1aadafe9ece96a4efabb3f8bf9063b71ef",
@@ -1110,7 +1110,7 @@
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
         "bzlTransitiveDigest": "u7Psh7szBG3+lbRmEeBBbWlZRHJWhWtxQo/wtRqvnTg=",
-        "usagesDigest": "E3Q/pEwXzITKlwKks+3Y68QKa4eUgIuqZzlQCbDX7dU=",
+        "usagesDigest": "4xBoe2eIScx2QI0jVieHWXdflezUUDIApwMqS+SWGbw=",
         "recordedFileInputs": {
           "@@//bazel/zig_index.json": "2e3b4b83f1add5d3ca12fd05797c04c38af21d86c7fc7c1a9b356560141a4797",
           "@@rules_zig+//zig/private/versions.json": "3e4e370dee9c3f3fdc8bfc7a600e76743278fde40815eead5d0bcda3aec3e2bd"
@@ -1439,7 +1439,7 @@
     "@@rules_zig+//zig/zls:extensions.bzl%zls": {
       "general": {
         "bzlTransitiveDigest": "8ZwSSF/7dE4rb0W0cZqil2SfGF1bPK04LTv1/zjtkTM=",
-        "usagesDigest": "FAKFOHWIN8RdVDOmVLmwjLdv/f9a2WDp48ekZEePDlA=",
+        "usagesDigest": "b/ERjMTWazfa8VFWuTc0PTtQQzLDuloWSHlzXj6Zb5w=",
         "recordedFileInputs": {
           "@@rules_zig+//zig/zls/private/versions.json": "127803289dfd79b5255db5f74be1d9a2f790f03292d6147009af702d888aba69"
         },
