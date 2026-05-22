@@ -164,7 +164,7 @@ pub const Router = struct {
 };
 
 // Moe
-const Moe = struct {
+pub const Moe = struct {
     shared_expert: Mlp,
     up_proj: zml.Tensor,
     gate_proj: zml.Tensor,
@@ -173,30 +173,36 @@ const Moe = struct {
 
     pub fn init(store: zml.io.TensorStore.View) !Moe {
         // init the up, gate, down tensors
+
+        std.log.info("before creating tensors", .{});
         const up_proj_tensor = store.createTensor(
-            "up_proj",
+            "up_proj.weight",
             .{ .expert, .dout, .d },
             .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
         );
+        std.log.info("after up proj tensor creation", .{});
 
         const gate_proj_tensor = store.createTensor(
-            "gate_proj",
+            "gate_proj.weight",
             .{ .expert, .dout, .d },
             .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
         );
+        std.log.info("after gate proj tensor creation", .{});
 
         const down_proj_tensor = store.createTensor(
-            "down_proj",
+            "down_proj.weight",
             .{ .expert, .dout, .d },
             .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
         );
+        std.log.info("after gate proj tensor creation", .{});
 
         return .{
-            .shared_expert = .init(store.withPrefix("share_expert")),
+            // swiglu limit temporarily hardcoded to 0
+            .shared_expert = .init(store.parent().withPrefix("share_expert"), 0),
             .up_proj = up_proj_tensor,
             .gate_proj = gate_proj_tensor,
             .down_proj = down_proj_tensor,
-            .router = .init(store.withPrefix("moe.gate"), store.withPrefix("moe"), 8),
+            .router = .init(store, 8),
         };
     }
 
