@@ -9,20 +9,25 @@ const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/platforms/oneapi");
 
-const default_xla_flags = "--xla_gpu_enable_command_buffer= --xla_gpu_autotune_level=0";
-
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_ONEAPI");
 }
 
-fn setupDefaultXlaFlags(allocator: std.mem.Allocator) !void {
-    const xla_flags = if (std.c.getenv("XLA_FLAGS")) |flags_z| std.mem.span(flags_z) else "";
-    const new_xla_flagsZ = try std.fmt.allocPrintSentinel(allocator, "{s} {s}", .{ xla_flags, default_xla_flags }, 0);
-    defer allocator.free(new_xla_flagsZ);
-    _ = c.setenv("XLA_FLAGS", new_xla_flagsZ, 1);
+fn hasOneApiDevices(io: std.Io) bool {
+    var dir = std.Io.Dir.openDirAbsolute(io, "/dev/dri", .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (std.mem.startsWith(u8, entry.name, "renderD")) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
-pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
+pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     if (comptime !isEnabled()) {
         return error.Unavailable;
     }
@@ -31,7 +36,10 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    try setupDefaultXlaFlags(allocator);
+    if (!hasOneApiDevices(io)) {
+        log.warn("oneAPI platform requested but no compatible devices were found; skipping.", .{});
+        return error.Unavailable;
+    }
 
     return loadFromRunfiles(io) catch |err| switch (err) {
         error.FileNotFound => {
