@@ -1,2 +1,4 @@
-sglang==0.5.12
-openai
+# SGLang is installed from the known working PR in setup.sh:
+# git+https://github.com/sgl-project/sglang.git@refs/pull/23000/head#subdirectory=python
+#
+# Keep this file for local helper-only additions if they are ever needed.
