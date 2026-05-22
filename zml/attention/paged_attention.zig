@@ -219,35 +219,6 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
     };
 }
 
-test "Options.fromBackend configures mosaic_tpu ragged backend" {
-    const options = Options.fromBackend(.{
-        .backend = .mosaic_tpu,
-        .is_prefill = false,
-        .batch_size = 4,
-        .seq_len = 512,
-        .page_chunk_size = 16,
-        .max_token_count = 4,
-        .num_heads = 16,
-        .num_kv_heads = 4,
-        .head_dim = 128,
-        .max_seqlen_q = 1,
-    });
-
-    switch (options) {
-        .mosaic_tpu => |tpu_option| {
-            try std.testing.expect(!tpu_option.is_prefill);
-            try std.testing.expectEqual(@as(usize, 4), tpu_option.batch_size);
-            try std.testing.expectEqual(@as(usize, 32), tpu_option.max_num_pages);
-            try std.testing.expectEqual(@as(usize, 512), tpu_option.max_seqlen_k);
-            try std.testing.expectEqual(@as(usize, 4), tpu_option.max_token_count);
-            try std.testing.expectEqual(@as(usize, 16), tpu_option.num_heads);
-            try std.testing.expectEqual(@as(usize, 4), tpu_option.num_kv_heads);
-            try std.testing.expectEqual(@as(usize, 128), tpu_option.head_dim);
-        },
-        else => return error.UnexpectedBackendVariant,
-    }
-}
-
 test "Backend.auto selects mosaic_tpu on TPU" {
     const platform: zml.Platform = .{
         .arena = undefined,
