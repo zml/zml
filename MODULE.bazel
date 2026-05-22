@@ -172,7 +172,7 @@ rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
 use_repo(rocm, "amd-smi-lib", "hipblaslt", "libdrm-amdgpu-amdgpu1", "libdrm2-amdgpu", "libpjrt_rocm", "rocblas", "rocprofiler-sdk", "rocprofiler-sdk-roctx")
 
 oneapi = use_extension("//platforms/oneapi:oneapi.bzl", "oneapi_packages")
-use_repo(oneapi, "libpjrt_oneapi", "oneapi", "zero_loader")
+use_repo(oneapi, "libpjrt_oneapi")
 
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")

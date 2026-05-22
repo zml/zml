@@ -56,7 +56,6 @@ packages = struct(
     cc_library = _cc_library,
     cc_library_hdrs_glob = _cc_library_hdrs_glob,
     filegroup = _filegroup,
-    filegroup_glob = _filegroup_glob,
     load_ = _load,
     patchelf = _patchelf,
 )
