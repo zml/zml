@@ -554,7 +554,7 @@ pub const AceLlm = struct {
         pub fn prefill(options: Options) SelectEmbedsParams {
             return .{
                 .embeds = .init(.{ .b = 2, .s = options.seq_len, .d = options.hidden_size }, .bf16),
-                .pred_index = .init(.{ .b = 2, .s = 1 }, .u32),
+                .pred_index = .init(.{ .b = 2 }, .u32),
             };
         }
     };
@@ -694,7 +694,7 @@ const TransformerLayer = struct {
         pub fn prefill(options: Options) TransformerParams {
             return .{
                 .x = .init(.{ .b = 2, .s = options.seq_len, .d = options.hidden_size }, .bf16),
-                .index = .init(.{.b = 2 }, .u32),
+                .index = .init(.{ .b = 2 }, .u32),
                 .kv_cache_1 = .init(zml.Shape.init(.{
                     .layer = options.num_hidden_layers,
                     .k = options.seq_len,
@@ -713,7 +713,7 @@ const TransformerLayer = struct {
         pub fn decode(options: Options) TransformerParams {
             return .{
                 .x = .init(.{ .b = 2, .s = 1, .d = options.hidden_size }, .bf16),
-                .index = .init(.{.b = 2 }, .u32),
+                .index = .init(.{ .b = 2 }, .u32),
                 .kv_cache_1 = .init(zml.Shape.init(.{
                     .layer = options.num_hidden_layers,
                     .k = options.seq_len,
