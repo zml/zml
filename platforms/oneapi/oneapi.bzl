@@ -114,11 +114,7 @@ def _oneapi_impl(mctx):
         url = ONEAPI_ZERO_LOADER_URL,
     )
 
-    return mctx.extension_metadata(
-        reproducible = True,
-        root_module_direct_deps = [],
-        root_module_direct_dev_deps = [],
-    )
+    return mctx.extension_metadata(reproducible = True)
 
 oneapi_packages = module_extension(
     implementation = _oneapi_impl,
