@@ -726,7 +726,7 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
 
             acellm.exes.decode_layer_attn_args.set(.{ acellm.model_buffers.layers[ii], x2_buffer, pos_buffer, acecfg.uncond_kv_cache_buffers, layer_index_buffers[ii], q2_buffer, k2_buffer, v2_buffer });
             acellm.exes.decode_layer_attn_exe.call(acellm.exes.decode_layer_attn_args, &acellm.exes.decode_layer_attn_results);
-            acellm.exes.decode_layer_attn_results.fill(.{ &delta1_buffer, &acecfg.uncond_kv_cache_buffers });
+            acellm.exes.decode_layer_attn_results.fill(.{ &delta2_buffer, &acecfg.uncond_kv_cache_buffers });
 
             acellm.exes.decode_layer_post_args.set(.{ acellm.model_buffers.layers[ii], x1_buffer, delta1_buffer, x2_buffer, delta2_buffer });
             acellm.exes.decode_layer_post_exe.call(acellm.exes.decode_layer_post_args, &acellm.exes.decode_layer_post_results);
