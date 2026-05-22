@@ -614,9 +614,9 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
     acellm.exes.logits_exe.call(acellm.exes.logits_args, &acellm.exes.logits_results);
     acellm.exes.logits_results.fill(.{ &logit_buffer });
 
-    acellm.exes.sample_args.set(.{ acellm.model_buffers, logit_buffer, rng_buffers });
-    acellm.exes.sample_exe.call(acellm.exes.sample_args, &acellm.exes.sample_results);
-    acellm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
+    acecfg.exes.sample_args.set(.{ acellm.model_buffers, logit_buffer, rng_buffers });
+    acecfg.exes.sample_exe.call(acecfg.exes.sample_args, &acecfg.exes.sample_results);
+    acecfg.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
 
     try token_buffer.toSlice(io, token_slice);
     token_buffer.deinit();
