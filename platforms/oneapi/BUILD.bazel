@@ -1,5 +1,20 @@
+load("//platforms/oneapi:oneapi.bzl", "ONEAPI_UMF_VERSION", "ONEAPI_UR_VERSION")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
+
+zig_shared_library(
+    name = "zmlxoneapi",
+    main = "zmlxoneapi.zig",
+    shared_lib_name = "libzmlxoneapi.so.0",
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["@libpjrt_oneapi//:__subpackages__"],
+    zigopts = [
+        "-fno-stack-check",
+        "-DONEAPI_UMF_VERSION=\"{}\"".format(ONEAPI_UMF_VERSION),
+        "-DONEAPI_UR_VERSION=\"{}\"".format(ONEAPI_UR_VERSION),
+    ],
+    deps = ["//stdx"],
+)
 
 cc_library(
     name = "empty",

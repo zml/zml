@@ -1,9 +1,24 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
+ONEAPI_UMF_VERSION = "0.10.0"
+ONEAPI_UR_VERSION = "0.11.10"
+
 patchelf(
     name = "libpjrt_oneapi_so",
     src = "libpjrt_oneapi.so",
+    add_needed = [
+        "libzmlxoneapi.so.0",
+    ],
+    rename_dynamic_symbols = {
+        "dlopen": "zmlxoneapi_dlopen",
+    },
+    replace_needed = {
+        "libumf.so.0": "libumf.so.{}".format(ONEAPI_UMF_VERSION),
+        "libur_adapter_level_zero.so.0": "libur_adapter_level_zero.so.{}".format(ONEAPI_UR_VERSION),
+        "libur_adapter_opencl.so.0": "libur_adapter_opencl.so.{}".format(ONEAPI_UR_VERSION),
+        "libur_loader.so.0": "libur_loader.so.{}".format(ONEAPI_UR_VERSION),
+    },
     set_rpath = "$ORIGIN",
 )
 
@@ -16,6 +31,7 @@ copy_to_directory(
     name = "sandbox",
     srcs = [
         ":libpjrt_oneapi_so",
+        "@zml//platforms/oneapi:zmlxoneapi",
         "@oneapi//:base_runtime",
         "@oneapi//:compiler_runtime",
         "@oneapi//:mkl_runtime",
@@ -30,6 +46,7 @@ copy_to_directory(
         ONEAPI_BASE_LIB: "lib",
         ONEAPI_COMPILER_LIB: "lib",
         ONEAPI_MKL_LIB: "lib",
+        "platforms/oneapi/libzmlxoneapi": "lib/libzmlxoneapi",
     },
     root_paths = ["."],
 )
