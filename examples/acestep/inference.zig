@@ -421,6 +421,7 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
 
     acellm.exes.prefill_embed_args.set(.{ acellm.model_buffers, buffer });
     acellm.exes.prefill_embed_exe.call(acellm.exes.prefill_embed_args, &acellm.exes.prefill_embed_results);
+    buffer.deinit();
     acellm.exes.prefill_embed_results.fill(.{ &buffer });
 
     for (0..acellm.config.num_hidden_layers) |i| {
@@ -447,6 +448,7 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
         delta1_buffer.deinit();
     }
     const prompt_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = 1 }, .u32));
+    defer prompt_slice.free(allocator);
     prompt_slice.items(u32)[0] = @intCast(prompt_tok.len - 1);
     prompt_slice.items(u32)[1] = @intCast(prompt_tok.len - 1);
     var prompt_buffer: zml.Buffer = try .fromSlice(io, platform, prompt_slice, sharding);
@@ -626,6 +628,7 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
     
     acellm.exes.prefill_embed_args.set(.{ acellm.model_buffers, buffer });
     acellm.exes.prefill_embed_exe.call(acellm.exes.prefill_embed_args, &acellm.exes.prefill_embed_results);
+    buffer.deinit();
     acellm.exes.prefill_embed_results.fill(.{ &buffer });
 
     for (0..acellm.config.num_hidden_layers) |i| {
@@ -657,6 +660,7 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
         delta2_buffer.deinit();
     }
     const prompt_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = 1 }, .u32));
+    defer prompt_slice.free(allocator);
     prompt_slice.items(u32)[0] = @intCast(cond_tok.len - 1);
     prompt_slice.items(u32)[1] = @intCast(uncond_tok.len - 1);
     var prompt_buffer: zml.Buffer = try .fromSlice(io, platform, prompt_slice, sharding);
