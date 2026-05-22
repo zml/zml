@@ -43,8 +43,7 @@ pub const Partitioner = union(enum) {
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
             .cpu, .cuda, .rocm, .tpu, .oneapi => .shardy,
-            .neuron,
-            => .gspmd,
+            .neuron => .gspmd,
         };
     }
 };
