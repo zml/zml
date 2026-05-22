@@ -585,7 +585,7 @@ test "summary preserves fixed draft width for zero acceptance histogram" {
                 .decoded_tokens = 1,
                 .elapsed = .{ .nanoseconds = std.time.ns_per_ms },
                 .acceptance_lengths = &.{0},
-                .acceptance_length_histogram = &.{ 1, 0, 0, 0, 0, 0 },
+                .acceptance_length_histogram = &.{ 1, 0, 0, 0, 0 },
             },
             .quality = .{ .exact_match = true, .compared_tokens = 1 },
         },
@@ -595,8 +595,8 @@ test "summary preserves fixed draft width for zero acceptance histogram" {
     const summary = try computeSummary(allocator, &samples);
     defer summary.deinit(allocator);
 
-    try std.testing.expectEqual(@as(usize, 6), summary.acceptance_length_histogram.len);
-    try std.testing.expectEqualSlices(u64, &.{ 1, 0, 0, 0, 0, 0 }, summary.acceptance_length_histogram);
+    try std.testing.expectEqual(@as(usize, 5), summary.acceptance_length_histogram.len);
+    try std.testing.expectEqualSlices(u64, &.{ 1, 0, 0, 0, 0 }, summary.acceptance_length_histogram);
     try std.testing.expectEqual(@as(usize, 5), summary.per_position_acceptance_rates.len);
     try std.testing.expectApproxEqAbs(@as(f64, 1), summary.tau, 0.0001);
     for (summary.per_position_acceptance_rates) |rate| {
