@@ -641,8 +641,8 @@ pub const AceLlm = struct {
     };
     
     pub fn selectEmbed(_: AceLlm, embeddings: zml.Tensor, pred_index: zml.Tensor) zml.Tensor {
-        const e1 = embeddings.slice1d(.b, .{ .start = 0, .end = 1 });
-        const e2 = embeddings.slice1d(.b, .{ .start = 1, .end = 2 });
+        const e1 = embeddings.slice1d(.b, .{ .start = 0, .end = 1 }).squeeze(.b);
+        const e2 = embeddings.slice1d(.b, .{ .start = 1, .end = 2 }).squeeze(.b);
         
         const p1 = pred_index.slice1d(.b, .{ .start = 0, .end = 1 }).squeeze(.b).squeeze(.s);
         const p2 = pred_index.slice1d(.b, .{ .start = 1, .end = 2 }).squeeze(.b).squeeze(.s);
