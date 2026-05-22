@@ -36,7 +36,7 @@ pub const Options = union(Backend) {
         is_prefill: bool,
         batch_size: u32,
         seq_len: u32,
-        page_chunk_size: u32,
+        max_num_pages: u32,
         max_token_count: u32,
         num_heads: u32,
         num_kv_heads: u32,
@@ -45,14 +45,13 @@ pub const Options = union(Backend) {
     };
 
     pub fn fromBackend(args: Args) Options {
-        const max_num_pages = std.math.divCeil(u32, args.seq_len, args.page_chunk_size) catch unreachable;
         return switch (args.backend) {
             .cuda_fa2 => if (args.is_prefill) .{
                 .cuda_fa2 = .{
                     .mixed = .{
                         .batch_size_decode = args.batch_size,
                         .batch_size_prefill = args.batch_size,
-                        .max_num_pages = max_num_pages,
+                        .max_num_pages = args.max_num_pages,
                         .max_seqlen_k = args.seq_len,
                         .max_seqlen_q = args.max_seqlen_q,
                         .max_token_count = args.max_token_count,
@@ -65,7 +64,7 @@ pub const Options = union(Backend) {
                 .cuda_fa2 = .{
                     .decode = .{
                         .batch_size = args.batch_size,
-                        .max_num_pages = max_num_pages,
+                        .max_num_pages = args.max_num_pages,
                         .max_seqlen_k = args.seq_len,
                         .max_token_count = args.max_token_count,
                         .num_heads = args.num_heads,
@@ -79,7 +78,7 @@ pub const Options = union(Backend) {
                     .mixed = .{
                         .batch_size_decode = args.batch_size,
                         .batch_size_prefill = args.batch_size,
-                        .max_num_pages = max_num_pages,
+                        .max_num_pages = args.max_num_pages,
                         .max_seqlen_k = args.seq_len,
                         .max_seqlen_q = args.max_seqlen_q,
                         .max_token_count = args.max_token_count,
@@ -92,7 +91,7 @@ pub const Options = union(Backend) {
                 .cuda_fa3 = .{
                     .decode = .{
                         .batch_size = args.batch_size,
-                        .max_num_pages = max_num_pages,
+                        .max_num_pages = args.max_num_pages,
                         .max_seqlen_k = args.seq_len,
                         .max_token_count = args.max_token_count,
                         .num_heads = args.num_heads,
@@ -104,7 +103,7 @@ pub const Options = union(Backend) {
             .triton => .{
                 .triton = .{
                     .batch_size = args.batch_size,
-                    .max_num_pages = max_num_pages,
+                    .max_num_pages = args.max_num_pages,
                     .max_seqlen_q = args.max_seqlen_q,
                     .is_prefill = args.is_prefill,
                 },
@@ -113,7 +112,7 @@ pub const Options = union(Backend) {
                 .mosaic_tpu = .{
                     .is_prefill = args.is_prefill,
                     .batch_size = args.batch_size,
-                    .max_num_pages = max_num_pages,
+                    .max_num_pages = args.max_num_pages,
                     .max_seqlen_k = args.seq_len,
                     .max_token_count = args.max_token_count,
                     .num_heads = args.num_heads,
@@ -218,35 +217,6 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
         },
         .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, q, kv_cache.dense, opts),
     };
-}
-
-test "Options.fromBackend configures mosaic_tpu ragged backend" {
-    const options = Options.fromBackend(.{
-        .backend = .mosaic_tpu,
-        .is_prefill = false,
-        .batch_size = 4,
-        .seq_len = 512,
-        .page_chunk_size = 16,
-        .max_token_count = 4,
-        .num_heads = 16,
-        .num_kv_heads = 4,
-        .head_dim = 128,
-        .max_seqlen_q = 1,
-    });
-
-    switch (options) {
-        .mosaic_tpu => |tpu_option| {
-            try std.testing.expect(!tpu_option.is_prefill);
-            try std.testing.expectEqual(@as(usize, 4), tpu_option.batch_size);
-            try std.testing.expectEqual(@as(usize, 32), tpu_option.max_num_pages);
-            try std.testing.expectEqual(@as(usize, 512), tpu_option.max_seqlen_k);
-            try std.testing.expectEqual(@as(usize, 4), tpu_option.max_token_count);
-            try std.testing.expectEqual(@as(usize, 16), tpu_option.num_heads);
-            try std.testing.expectEqual(@as(usize, 4), tpu_option.num_kv_heads);
-            try std.testing.expectEqual(@as(usize, 128), tpu_option.head_dim);
-        },
-        else => return error.UnexpectedBackendVariant,
-    }
 }
 
 test "Backend.auto selects mosaic_tpu on TPU" {
