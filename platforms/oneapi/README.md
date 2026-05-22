@@ -29,7 +29,7 @@ export ONEAPI_DEVICE_SELECTOR=level_zero:0
 
 To run the LLM example with oneAPI and the Llama 3.2 1B model:
 ```bash
-ONEAPI_DEVICE_SELECTOR=level_zero:0
+ONEAPI_DEVICE_SELECTOR=level_zero:0 \
 bazel run //examples/llm \
     --config=release \
     --@zml//platforms:cpu=false \
@@ -41,7 +41,7 @@ bazel run //examples/llm \
 
 To run the LLM example with oneAPI and a local model:
 ```bash
-ONEAPI_DEVICE_SELECTOR=level_zero:0
+ONEAPI_DEVICE_SELECTOR=level_zero:0 \
 bazel run //examples/llm \
     --config=release \
     --@zml//platforms:cpu=false \
