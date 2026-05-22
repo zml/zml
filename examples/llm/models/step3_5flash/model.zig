@@ -140,7 +140,7 @@ pub const Router = struct {
     ///   ids    = topk(biased)
     ///   wts    = gather(probs, ids)     (from UNBIASED probs)
     ///   if renormalize: wts /= sum(wts) + 1e-20
-    pub fn forward(self: Router, x: zml.Tensor, renormalize: bool) struct { zml.Tensor, zml.Tensor } {
+    pub fn forward(self: Router, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
         const orig_dtype = input.dtype();
         const logits = self.gate.forward(input).convert(.f32); // {.b, .s, .expert}
@@ -155,11 +155,13 @@ pub const Router = struct {
         const topk_ids = topk.indices.convert(.i32);
 
         var router_scores = probs.gather(.{ .expert = topk_ids }, .{});
-        if (renormalize) {
-            const denom = router_scores.sum(.topk).addConstant(1e-20);
-            router_scores = router_scores.div(denom.broad(router_scores.shape()));
-        }
-        return .{ router_scores.convert(orig_dtype), topk_ids };
+
+        // renormalize
+        const denom = router_scores.sum(.topk).addConstant(1e-20);
+        router_scores = router_scores.div(denom.broad(router_scores.shape()));
+        const router_scores_out = router_scores.rename(.{ .topk = .top_expert });
+        const topk_ids_out = topk_ids.rename(.{ .topk = .top_expert });
+        return .{ router_scores_out.convert(orig_dtype), topk_ids_out };
     }
 };
 
@@ -213,7 +215,11 @@ pub const Moe = struct {
     }
 
     pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
-        const routing_scores, const topk_ids = self.router.forward(x);
+        std.log.info("before tagging x", .{});
+        const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
+        std.log.info("after tagging x", .{});
+
+        const routing_scores, const topk_ids = self.router.forward(input);
 
         // concat the gate and up
         const gate_up_proj = zml.Tensor.concatenate(&.{ self.gate_proj, self.up_proj }, .dout).rename(.{ .dout = .out, .d = .in });
@@ -221,8 +227,15 @@ pub const Moe = struct {
         // pipe into kernel
         // no scales as not quantized
         // no bias as only our only bias is within router
+
+        // hardcoded zml.moe.metadata, zml.moe.parameters
+        const moe_metadata = zml.moe.Metadata.init(.{ .triton = .{} });
+        const moe_parameters = zml.moe.Parameters.init(.{ .triton = .{ .num_experts_per_tok = self.router.num_experts_per_tok, .activation = .silu } });
+
+        std.log.info("before forward moe", .{});
+
         const moe_output = zml.moe.forwardMoe(
-            x,
+            input,
             topk_ids,
             routing_scores,
             gate_up_proj,
@@ -231,12 +244,16 @@ pub const Moe = struct {
             self.down_proj,
             null,
             null,
-            .{},
-            .{},
+            moe_metadata,
+            moe_parameters,
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
+        std.log.info("after forward moe", .{});
+
         // run shared expert gate
-        const shared = self.shared_expert.forward(x);
+        const shared = self.shared_expert.forward(input);
+
+        std.log.info("after shared moe", .{});
 
         return moe_output.add(shared);
     }

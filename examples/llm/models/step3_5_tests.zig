@@ -27,7 +27,7 @@ const Args = struct {
     ;
 };
 
-const TEST_LAYER = 1;
+const TEST_LAYER = 0;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -50,6 +50,14 @@ pub fn main(init: std.process.Init) !void {
     } else if (TEST_LAYER == 1) {
         // test sublayer (within-gate activations)
         try run(allocator, io, platform, args.activations_moe, &model_store);
+    } else if (TEST_LAYER == 2) {
+        const moe_view = model_store.view()
+            .withPrefix("model")
+            .withPrefix("layers")
+            .withLayer(3)
+            .withPrefix("moe");
+        const moe = try model.Moe.init(moe_view);
+        std.log.info("moe init'd: {any}", .{moe});
     }
 }
 
@@ -67,30 +75,35 @@ fn run(
     defer activation_store.deinit();
 
     if (TEST_LAYER == 0) {
-        const mlp_layer_indices = [_]usize{ 0, 1, 2, 45, 46, 47 };
-        std.log.info("MLP:", .{});
-        for (mlp_layer_indices) |layer_idx| {
-            const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp", .{layer_idx});
-            defer allocator.free(name);
+        // const mlp_layer_indices = [_]usize{ 0, 1, 2, 45, 46, 47 };
+        // std.log.info("MLP:", .{});
+        // for (mlp_layer_indices) |layer_idx| {
+        //     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.mlp", .{layer_idx});
+        //     defer allocator.free(name);
 
-            std.log.info("name {s}", .{name});
+        //     std.log.info("name {s}", .{name});
 
-            try testLayer(allocator, io, platform, activation_store.view(), model_store, .mlp, name, name, .{ .absolute_tolerance = 1e-2 });
-        }
-        std.log.info("RMS Norm:", .{});
+        //     try testLayer(allocator, io, platform, activation_store.view(), model_store, .mlp, name, name, .{ .absolute_tolerance = 1e-2 });
+        // }
+        // std.log.info("RMS Norm:", .{});
 
-        for (0..48) |layer_idx| {
-            const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.input_layernorm", .{layer_idx});
-            defer allocator.free(name);
+        // for (0..48) |layer_idx| {
+        //     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.input_layernorm", .{layer_idx});
+        //     defer allocator.free(name);
 
-            try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, name, .{ .absolute_tolerance = 1e-2 });
-        }
-        for (0..48) |layer_idx| {
-            const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.post_attention_layernorm", .{layer_idx});
-            defer allocator.free(name);
+        //     try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, name, .{ .absolute_tolerance = 1e-2 });
+        // }
+        // for (0..48) |layer_idx| {
+        //     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.post_attention_layernorm", .{layer_idx});
+        //     defer allocator.free(name);
 
-            try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, name, .{ .absolute_tolerance = 1e-2 });
-        }
+        //     try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, name, .{ .absolute_tolerance = 1e-2 });
+        // }
+
+        const name = try std.fmt.allocPrint(allocator, "model.layers.3.moe", .{});
+        defer allocator.free(name);
+
+        try testLayer(allocator, io, platform, activation_store.view(), model_store, .moe, name, name, .{ .absolute_tolerance = 1e-2 });
     } else if (TEST_LAYER == 1) {
         // layers 3..44 (45 with 0 indexing but i wont bake it in rn)
 
@@ -107,7 +120,7 @@ fn run(
     }
 }
 
-const LayerKind = enum { mlp, rmsNorm, router };
+const LayerKind = enum { mlp, rmsNorm, router, moe };
 
 fn deinitBuffers(bufs: anytype) void {
     zml.meta.visit(struct {
@@ -148,13 +161,21 @@ fn testLayer(
             try zml.testing.testLayer(allocator, io, platform, rms, .forward, activation_store, activations_name, rms_weights, &.{}, opts);
         },
         .router => {
-            //hardcoded k=num_experts_per_tok=288 for now
-            const router = model.Router.init(model_store.view().withPrefix(weights_name), 288);
+            //hardcoded k=num_experts_per_tok=8 for now
+            const router = model.Router.init(model_store.view().withPrefix(weights_name), 8);
 
             var router_weights = try zml.io.load(model.Router, &router, allocator, io, platform, model_store, .auto);
             defer deinitBuffers(&router_weights);
 
             try compareRouterTopK(allocator, io, platform, router, router_weights, activation_store, activations_name, 8);
+        },
+        .moe => {
+            const moe = try model.Moe.init(model_store.view().withPrefix(weights_name));
+
+            var moe_weights = try zml.io.load(model.Moe, &moe, allocator, io, platform, model_store, .auto);
+            defer deinitBuffers(&moe_weights);
+
+            try zml.testing.testLayer(allocator, io, platform, moe, .forward, activation_store, activations_name, moe_weights, &.{}, opts);
         },
     }
 }
@@ -169,9 +190,8 @@ fn compareRouterTopK(
     activations_name: []const u8,
     comptime show: usize,
 ) !void {
-    var args: struct { zml.Tensor, bool } = .{
+    var args: struct { zml.Tensor } = .{
         activation_store.withPrefix(activations_name).withPrefix("in").createTensor("0", null, .replicated),
-        true,
     };
 
     const exe = try platform.compile(allocator, io, router, .forward, args, .{});
