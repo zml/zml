@@ -267,14 +267,6 @@ const Args = struct {
 // info:   wav                                                 0.17s
 // info: total                                                38.15s
 
-// Fin CFG batched :
-// - dont pad, just track positions in sequences
-// - compile attention once without a .b dim
-// - compile everything else with a .b = 2 dim
-// - in inspiration : we still do x2 MLP, but it's cheap, we only do 1 sdpa
-// - in generation : we do batched MLP, two sdpas (only caveat, is the kv cache update worse ?)
-// - for compile : only compile attention once and without a .b dim
-
 // TODO: finir remix basique
 // - check no cover branch, instructions and stuff
 // - export all cases over space of cover/noise strength
