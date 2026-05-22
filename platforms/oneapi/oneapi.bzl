@@ -13,8 +13,6 @@ PJRT_ONEAPI_ARTIFACT_URL = "https://github.com/zml/pjrt-artifacts/releases/downl
 
 ONEAPI_VERSION = "2025.1"
 ONEAPI_BASE_TOOLKIT_VERSION = "2025.1.3.7"
-ONEAPI_UMF_VERSION = "0.10.0"
-ONEAPI_UR_VERSION = "0.11.10"
 
 ONEAPI_BASE_LIB = "{}/lib".format(ONEAPI_VERSION)
 ONEAPI_COMPILER_LIB = "compiler/{}/lib".format(ONEAPI_VERSION)
@@ -43,10 +41,10 @@ _ONEAPI_FILEGROUPS = [
         name = "base_runtime",
         srcs = [
             _base_lib("libhwloc.so.15"),
-            _base_lib("libumf.so.{}".format(ONEAPI_UMF_VERSION)),
-            _base_lib("libur_adapter_level_zero.so.{}".format(ONEAPI_UR_VERSION)),
-            _base_lib("libur_adapter_opencl.so.{}".format(ONEAPI_UR_VERSION)),
-            _base_lib("libur_loader.so.{}".format(ONEAPI_UR_VERSION)),
+            _base_lib("libumf.so.0"),
+            _base_lib("libur_adapter_level_zero.so.0"),
+            _base_lib("libur_adapter_opencl.so.0"),
+            _base_lib("libur_loader.so.0"),
         ],
     ),
     packages.filegroup_glob(

@@ -1,26 +1,14 @@
 const std = @import("std");
-const c = @cImport({});
+
 const stdx = @import("stdx");
-
-const oneapiUmfVersion = c.ONEAPI_UMF_VERSION.*[0..];
-const oneapiUrVersion = c.ONEAPI_UR_VERSION.*[0..];
-
-const libUmf = std.fmt.comptimePrint("libumf.so.{s}", .{oneapiUmfVersion});
-const libUrAdapterLevelZero = std.fmt.comptimePrint("libur_adapter_level_zero.so.{s}", .{oneapiUrVersion});
-const libUrAdapterOpencl = std.fmt.comptimePrint("libur_adapter_opencl.so.{s}", .{oneapiUrVersion});
-const libUrLoader = std.fmt.comptimePrint("libur_loader.so.{s}", .{oneapiUrVersion});
 
 pub export fn zmlxoneapi_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaque {
     const replacements: std.StaticStringMap([:0]const u8) = .initComptime(.{
         .{ "libOpenCL.so", "libOpenCL.so.1" },
-        .{ "libumf.so", libUmf },
-        .{ "libumf.so.0", libUmf },
-        .{ "libur_loader.so", libUrLoader },
-        .{ "libur_adapter_level_zero.so", libUrAdapterLevelZero },
-        .{ "libur_adapter_level_zero.so.0", libUrAdapterLevelZero },
-        .{ "libur_adapter_opencl.so", libUrAdapterOpencl },
-        .{ "libur_adapter_opencl.so.0", libUrAdapterOpencl },
-        .{ "libur_loader.so.0", libUrLoader },
+        .{ "libumf.so", "libumf.so.0" },
+        .{ "libur_loader.so", "libur_loader.so.0" },
+        .{ "libur_adapter_level_zero.so", "libur_adapter_level_zero.so.0" },
+        .{ "libur_adapter_opencl.so", "libur_adapter_opencl.so.0" },
         .{ "libsycl.so", "libsycl.so.8" },
         .{ "libmkl_core.so", "libmkl_core.so.2" },
         .{ "libmkl_intel_ilp64.so", "libmkl_intel_ilp64.so.2" },

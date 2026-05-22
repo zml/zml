@@ -13,21 +13,12 @@ patchelf(
     rename_dynamic_symbols = {
         "dlopen": "zmlxoneapi_dlopen",
     },
-    replace_needed = {
-        "libumf.so.0": "libumf.so.{}".format(ONEAPI_UMF_VERSION),
-        "libur_adapter_level_zero.so.0": "libur_adapter_level_zero.so.{}".format(ONEAPI_UR_VERSION),
-        "libur_adapter_opencl.so.0": "libur_adapter_opencl.so.{}".format(ONEAPI_UR_VERSION),
-        "libur_loader.so.0": "libur_loader.so.{}".format(ONEAPI_UR_VERSION),
-    },
     set_rpath = "$ORIGIN",
 )
 
 patchelf(
     name = "libsycl_so",
     src = "@oneapi//:libsycl_so",
-    replace_needed = {
-        "libur_loader.so.0": "libur_loader.so.{}".format(ONEAPI_UR_VERSION),
-    },
     set_rpath = "$ORIGIN",
 )
 
