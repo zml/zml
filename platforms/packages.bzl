@@ -35,6 +35,14 @@ cc_import(
 def _filegroup(**kwargs):
     return """filegroup({})""".format(_kwargs(**kwargs))
 
+def _filegroup_glob(name, srcs_glob, srcs = []):
+    return """\
+filegroup(
+    name = "{name}",
+    srcs = glob({srcs_glob}) + {srcs},
+)
+""".format(name = name, srcs_glob = repr(srcs_glob), srcs = repr(srcs))
+
 def _patchelf(**kwargs):
     return """patchelf({})""".format(_kwargs(**kwargs))
 
@@ -56,6 +64,7 @@ packages = struct(
     cc_library = _cc_library,
     cc_library_hdrs_glob = _cc_library_hdrs_glob,
     filegroup = _filegroup,
+    filegroup_glob = _filegroup_glob,
     load_ = _load,
     patchelf = _patchelf,
 )

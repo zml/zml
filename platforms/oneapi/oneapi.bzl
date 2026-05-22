@@ -1,6 +1,10 @@
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//platforms:packages.bzl", "packages")
 
+_BUILD_FILE_DEFAULT_VISIBILITY = """\
+package(default_visibility = ["//visibility:public"])
+"""
+
 PJRT_ONEAPI_RELEASE = "manual-2026-05-21T17-13-00Z"
 PJRT_ONEAPI_ARTIFACT_SHA256 = "24c518768b5f4994cde22603c7451ce6c53e9d236c3e574e65ca73cd32c6368a"
 PJRT_ONEAPI_ARTIFACT_URL = "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-oneapi_linux-amd64.tar.gz".format(
@@ -34,8 +38,7 @@ def _compiler_lib(file):
 def _mkl_lib(file):
     return "{}/{}".format(ONEAPI_MKL_LIB, file)
 
-_ONEAPI_BUILD_FILE_CONTENT = "\n".join([
-    """package(default_visibility = ["//visibility:public"])""",
+_ONEAPI_FILEGROUPS = [
     packages.filegroup(
         name = "base_runtime",
         srcs = [
@@ -46,17 +49,20 @@ _ONEAPI_BUILD_FILE_CONTENT = "\n".join([
             _base_lib("libur_loader.so.{}".format(ONEAPI_UR_VERSION)),
         ],
     ),
-    """filegroup(
-    name = "compiler_runtime",
-    srcs = glob(["{compiler_lib}/*.spv"]) + [
-        "{compiler_lib}/libOpenCL.so.1",
-        "{compiler_lib}/libimf.so",
-        "{compiler_lib}/libintlc.so.5",
-        "{compiler_lib}/libirc.so",
-        "{compiler_lib}/libirng.so",
-        "{compiler_lib}/libsvml.so",
-    ],
-)""".format(compiler_lib = ONEAPI_COMPILER_LIB),
+    packages.filegroup_glob(
+        name = "compiler_runtime",
+        srcs_glob = [
+            _compiler_lib("*.spv"),
+        ],
+        srcs = [
+            _compiler_lib("libOpenCL.so.1"),
+            _compiler_lib("libimf.so"),
+            _compiler_lib("libintlc.so.5"),
+            _compiler_lib("libirc.so"),
+            _compiler_lib("libirng.so"),
+            _compiler_lib("libsvml.so"),
+        ],
+    ),
     packages.filegroup(
         name = "libsycl_so",
         srcs = [
@@ -72,15 +78,22 @@ _ONEAPI_BUILD_FILE_CONTENT = "\n".join([
             _mkl_lib("libmkl_sycl_blas.so.5"),
         ],
     ),
-])
+]
+
+_ONEAPI_BUILD_FILE_CONTENT = "\n".join([
+    _BUILD_FILE_DEFAULT_VISIBILITY,
+] + _ONEAPI_FILEGROUPS)
+
+_ZERO_LOADER_FILEGROUPS = [
+    packages.filegroup_glob(
+        name = "all",
+        srcs_glob = ["lib/**"],
+    ),
+]
 
 _ZERO_LOADER_BUILD_FILE_CONTENT = "\n".join([
-    """package(default_visibility = ["//visibility:public"])""",
-    """filegroup(
-    name = "all",
-    srcs = glob(["lib/**"]),
-)""",
-])
+    _BUILD_FILE_DEFAULT_VISIBILITY,
+] + _ZERO_LOADER_FILEGROUPS)
 
 def _oneapi_impl(mctx):
     http_archive(
