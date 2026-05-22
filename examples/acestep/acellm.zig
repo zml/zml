@@ -28,7 +28,7 @@ pub const AceLlm_handler = struct {
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
 
-        try main.printSafetensors(registry);
+        //try main.printSafetensors(registry);
 
         std.log.info("5Hz parse config and safetensors", .{});
         const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);

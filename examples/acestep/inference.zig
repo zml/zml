@@ -707,8 +707,8 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
 
         decode_tokens_slice.items(u32)[0] = generated_token;
         decode_tokens_slice.items(u32)[1] = generated_token;
-        var decode_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, decode_tokens_slice, sharding);
-        defer decode_tokens_buffer.deinit();
+        buffer.deinit();
+        buffer = try .fromSlice(io, platform, decode_tokens_slice, sharding);
 
         // call to generate the next token
         acellm.exes.decode_embed_args.set(.{ acellm.model_buffers, buffer });
