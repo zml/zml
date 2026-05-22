@@ -5,7 +5,7 @@
 
 This directory contains the oneAPI backend for ZML. It is currently in an early stage of development, and only supports a subset of ZML's features. The oneAPI backend is only available on Linux, and requires an Intel GPU.
 
-The shardind is not yet supported, so only models that fit in the GPU memory can be run.
+The sharding is not yet supported, so only models that fit in the GPU memory can be run.
 
 # Getting Started
 
