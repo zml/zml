@@ -365,7 +365,7 @@ pub const AceCfg_handler = struct {
         var sample_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: AceLlm, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: AceLlm.SampleParams = .exec(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .sampleTokens, .{ params.logits, params.rng, false }, opts_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .sampleTokens, .{ params.logits, params.rng, true }, opts_);
             }
         }.call, .{ zml_handler, llm.model, llm.options, opts });
         var sample_future_awaited = false;
