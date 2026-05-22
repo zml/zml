@@ -432,7 +432,7 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
     acellm.exes.prefill_embed_results.fill(.{ &prefill_embed_buffer });
 
     for (0..acellm.config.num_hidden_layers) |i| {
-        acellm.exes.prefill_layer_args.set(.{ acellm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, acellm.kv_cache_buffers_1, acellm.kv_cache_buffers_2 });
+        acellm.exes.prefill_layer_args.set(.{ acellm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, acellm.kv_cache_buffers_1, acellm.kv_cache_buffers_2, layer_index_buffers[i] });
         acellm.exes.prefill_layer_exe.call(acellm.exes.prefill_layer_args, &acellm.exes.prefill_layer_results);
         acellm.exes.prefill_layer_results.fill(.{ &prefill_embed_buffer, &acellm.kv_cache_buffers_1, &acellm.kv_cache_buffers_2 });
     }
@@ -500,7 +500,7 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
         acellm.exes.decode_embed_exe.call(acellm.exes.decode_embed_args, &acellm.exes.decode_embed_results);
         acellm.exes.decode_embed_results.fill(.{ &decode_embed_buffer });
         for (0..acellm.config.num_hidden_layers) |ii| {
-            acellm.exes.decode_layer_args.set(.{ acellm.model_buffers.layers[ii], decode_embed_buffer, pos_buffer, acellm.kv_cache_buffers_1, acellm.kv_cache_buffers_2 });
+            acellm.exes.decode_layer_args.set(.{ acellm.model_buffers.layers[ii], decode_embed_buffer, pos_buffer, acellm.kv_cache_buffers_1, acellm.kv_cache_buffers_2, layer_index_buffers[ii] });
             acellm.exes.decode_layer_exe.call(acellm.exes.decode_layer_args, &acellm.exes.decode_layer_results);
             acellm.exes.decode_layer_results.fill(.{ &decode_embed_buffer, &acellm.kv_cache_buffers_1, &acellm.kv_cache_buffers_2 });
         }
@@ -603,7 +603,7 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
     acellm.exes.prefill_embed_results.fill(.{ &prefill_embed_buffer });
 
     for (0..acellm.config.num_hidden_layers) |i| {
-        acellm.exes.prefill_layer_args.set(.{ acellm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, acecfg.cond_kv_cache_buffers, acecfg.uncond_kv_cache_buffers });
+        acellm.exes.prefill_layer_args.set(.{ acellm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, acecfg.cond_kv_cache_buffers, acecfg.uncond_kv_cache_buffers, layer_index_buffers[i] });
         acellm.exes.prefill_layer_exe.call(acellm.exes.prefill_layer_args, &acellm.exes.prefill_layer_results);
         acellm.exes.prefill_layer_results.fill(.{ &prefill_embed_buffer, &acecfg.cond_kv_cache_buffers, &acecfg.uncond_kv_cache_buffers });
     }
@@ -657,7 +657,7 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
         acellm.exes.decode_embed_exe.call(acellm.exes.decode_embed_args, &acellm.exes.decode_embed_results);
         acellm.exes.decode_embed_results.fill(.{ &decode_embed_buffer });
         for (0..acellm.config.num_hidden_layers) |ii| {
-            acellm.exes.decode_layer_args.set(.{ acellm.model_buffers.layers[ii], decode_embed_buffer, pos_buffer, acecfg.cond_kv_cache_buffers, acecfg.uncond_kv_cache_buffers });
+            acellm.exes.decode_layer_args.set(.{ acellm.model_buffers.layers[ii], decode_embed_buffer, pos_buffer, acecfg.cond_kv_cache_buffers, acecfg.uncond_kv_cache_buffers, layer_index_buffers[ii] });
             acellm.exes.decode_layer_exe.call(acellm.exes.decode_layer_args, &acellm.exes.decode_layer_results);
             acellm.exes.decode_layer_results.fill(.{ &decode_embed_buffer, &acecfg.cond_kv_cache_buffers, &acecfg.uncond_kv_cache_buffers });
         }
