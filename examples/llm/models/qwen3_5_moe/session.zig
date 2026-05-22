@@ -510,9 +510,6 @@ fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
     const assistant = try encoder.encodeAlloc(allocator, "assistant\n");
     try tokens.appendSlice(allocator, assistant);
     allocator.free(assistant);
-    const think = try encoder.encodeAlloc(allocator, "<think>\n");
-    try tokens.appendSlice(allocator, think);
-    allocator.free(think);
 
     return tokens.toOwnedSlice(allocator);
 }
