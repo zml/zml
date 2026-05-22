@@ -164,13 +164,65 @@ pub const Router = struct {
 };
 
 // Moe
-// const Moe = struct {
-//     shared_expert: Mlp,
-//     shared_expert_gate: zml.nn.Linear,
-//     gate_up_proj: zml.Tensor,
-//     down_proj: zml.Tensor,
-//     router: Router,
-// };
+const Moe = struct {
+    shared_expert: Mlp,
+    up_proj: zml.Tensor,
+    gate_proj: zml.Tensor,
+    down_proj: zml.Tensor,
+    router: Router,
+
+    pub fn init(store: zml.io.TensorStore.View) !Moe {
+        // init the up, gate, down tensors
+        const up_proj_tensor = store.createTensor(
+            "up_proj",
+            .{ .expert, .dout, .d },
+            .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
+        );
+
+        const gate_proj_tensor = store.createTensor(
+            "gate_proj",
+            .{ .expert, .dout, .d },
+            .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
+        );
+
+        const down_proj_tensor = store.createTensor(
+            "down_proj",
+            .{ .expert, .dout, .d },
+            .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
+        );
+
+        return .{
+            .shared_expert = .init(store.withPrefix("share_expert")),
+            .up_proj = up_proj_tensor,
+            .gate_proj = gate_proj_tensor,
+            .down_proj = down_proj_tensor,
+            .router = .init(store.withPrefix("moe.gate"), store.withPrefix("moe"), 8),
+        };
+    }
+
+    pub fn deinit(self: *zml.Bufferized(Moe)) void {
+        self.up_proj.deinit();
+        self.gate_proj.deinit();
+        self.down_proj.deinit();
+    }
+
+    pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
+        _ = self; // autofix
+        _ = x; // autofix
+
+        // calculate routing
+
+        // concat the gate and up
+
+        // pipe into kernel
+
+        // forward MoE
+
+        // run shared expert gate
+
+        // return
+    }
+};
 // hidden size
 // intermediate size
 // router bias
