@@ -595,7 +595,6 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
     var one_embed_buffer: zml.Buffer = undefined;
     defer one_embed_buffer.deinit();
     var logit_buffer: zml.Buffer = undefined;
-    defer logit_buffer.deinit();
 
     acellm.exes.prefill_embed_args.set(.{ acellm.model_buffers, prefill_tokens_buffer });
     acellm.exes.prefill_embed_exe.call(acellm.exes.prefill_embed_args, &acellm.exes.prefill_embed_results);
@@ -621,6 +620,7 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
 
     try token_buffer.toSlice(io, token_slice);
     token_buffer.deinit();
+    logit_buffer.deinit();
     zml_handler.toc(&zml_handler.timers.cfg.prefill);
 
     std.log.info("5Hz run decode CFG, need {d} audio codes", .{ nb_audio_codes });
@@ -664,9 +664,13 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
         acellm.exes.logits_exe.call(acellm.exes.logits_args, &acellm.exes.logits_results);
         acellm.exes.logits_results.fill(.{ &logit_buffer });
 
-        acellm.exes.sample_args.set(.{ acellm.model_buffers, logit_buffer, rng_buffers });
-        acellm.exes.sample_exe.call(acellm.exes.sample_args, &acellm.exes.sample_results);
-        acellm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
+        acecfg.exes.cfg_args.set(.{ acellm.model_buffers, logit_buffer });
+        acecfg.exes.cfg_exe.call(acecfg.exes.cfg_args, &acecfg.exes.cfg_results);
+        acecfg.exes.cfg_results.fill(.{ &logit_buffer });
+
+        acecfg.exes.sample_args.set(.{ acellm.model_buffers, logit_buffer, rng_buffers });
+        acecfg.exes.sample_exe.call(acecfg.exes.sample_args, &acecfg.exes.sample_results);
+        acecfg.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
 
         // extract the generated token from the buffer
         try token_buffer.toSlice(io, token_slice);
