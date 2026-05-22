@@ -756,14 +756,13 @@ const TransformerLayer = struct {
         const d1, const new_cache_1 = self.att_layer.forward(x1, id1, kv_cache_1, layer_index, q1, k1, v1);
         const d2, const new_cache_2 = self.att_layer.forward(x2, id2, kv_cache_2, layer_index, q2, k2, v2);
 
-        var x3 = zml.Tensor.stack(&.{ x1, x2 }, 0, .b);
         const attn = zml.Tensor.stack(&.{ d1, d2 }, 0, .b);
         
         const delta1 = self.att_layer.o_proj.forward(attn).rename(.{ .d_out = .d });
-        x3 = x3.add(delta1);
-        const delta2 = self.mlp_layer.forward(self.post_att_norm.forward(x));
-        x3 = x3.add(delta2);
-        return .{ x3.reuseBuffer(x), new_cache_1.reuseBuffer(kv_cache_1), new_cache_2.reuseBuffer(kv_cache_2) };
+        const x_after_attn = x.add(delta1);
+        const delta2 = self.mlp_layer.forward(self.post_att_norm.forward(x_after_attn));
+        const out = x_after_attn.add(delta2);
+        return .{ out.reuseBuffer(x), new_cache_1.reuseBuffer(kv_cache_1), new_cache_2.reuseBuffer(kv_cache_2) };
     }
     
 };
