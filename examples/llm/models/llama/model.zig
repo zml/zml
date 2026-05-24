@@ -317,7 +317,7 @@ pub const Llama = struct {
 };
 
 fn embed_tokensForward(embed_tokens_: zml.nn.TokenEmbedding, tokens_: zml.Tensor) zml.Tensor {
-    return embed_tokens_.forward(tokens_).withPartialTags(.{.d});
+    return embed_tokens_.forward(tokens_).withPartialTags(.{.d}).withPartitioning(.{ .d = .model });
 }
 
 pub const TransformerLayer = struct {
