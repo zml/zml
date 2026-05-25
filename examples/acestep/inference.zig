@@ -350,8 +350,8 @@ pub fn tokenizeGenerationPrompt(allocator: std.mem.Allocator, tokenizer: Tokeniz
     try uncond_prompt.appendSlice(allocator, user_uncond_prompt.items);
     try uncond_prompt.appendSlice(allocator, assistant_uncond_prompt.items);
 
-    std.log.info("Cond prompt:\n{s}", .{ cond_prompt.items });
-    std.log.info("Uncond prompt:\n{s}", .{ uncond_prompt.items });
+    //std.log.info("Cond prompt:\n{s}", .{ cond_prompt.items });
+    //std.log.info("Uncond prompt:\n{s}", .{ uncond_prompt.items });
 
     var cond_tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
     var uncond_tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
@@ -398,7 +398,7 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
     @memcpy(prefill_tokens_slice.items(u32)[acellm.options.seq_len..][0..prompt_tok.len], prompt_tok);
     var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, sharding);
     defer prefill_tokens_buffer.deinit();
-    
+
     const layer_index_slices = try allocator.alloc(zml.Slice, acellm.config.num_hidden_layers);
     defer {
         for (layer_index_slices) |*s| s.free(allocator);
@@ -435,7 +435,7 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
         acellm.exes.prefill_layer_exe.call(acellm.exes.prefill_layer_args, &acellm.exes.prefill_layer_results);
         acellm.exes.prefill_layer_results.fill(.{ &prefill_embed_buffer, &acellm.kv_cache_buffers_1, &acellm.kv_cache_buffers_2 });
     }
-    
+
     acellm.exes.prefill_select_args.set(.{ acellm.model_buffers, prefill_embed_buffer, pred_buffer });
     acellm.exes.prefill_select_exe.call(acellm.exes.prefill_select_args, &acellm.exes.prefill_select_results);
     acellm.exes.prefill_select_results.fill(.{ &one_embed_buffer });
@@ -459,7 +459,7 @@ pub fn generateInspirationText(zml_handler: *Zml_handler, acellm: *acellm_.AceLl
     const decode_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = 1 }, .u32));
     defer decode_tokens_slice.free(allocator);
     var decode_embed_buffer: zml.Buffer = undefined;
-    
+
     const output_tokens_len = acellm.options.seq_len - prompt_tok.len - 1;
     var num_tokens_generated: usize = 0;
     var result: std.ArrayList(u8) = try .initCapacity(allocator, 0);
@@ -555,11 +555,11 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
     pred_slice.items(u32)[1] = @intCast(uncond_tok.len - 1);
     var pred_buffer: zml.Buffer = try .fromSlice(io, platform, pred_slice, sharding);
     defer pred_buffer.deinit();
-    
+
     var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer token_slice.free(allocator);
     var token_buffer: zml.Buffer = undefined;
-    
+
     const prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = acecfg.llm.options.seq_len }, .u32));
     defer prefill_tokens_slice.free(allocator);
     // in .b = 0, we put the cond prompt
@@ -589,7 +589,7 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
 
     std.log.info("5Hz run CFG prefill", .{});
     zml_handler.tic(&zml_handler.timers.cfg.prefill);
-    
+
     var prefill_embed_buffer: zml.Buffer = undefined;
     defer prefill_embed_buffer.deinit();
     var one_embed_buffer: zml.Buffer = undefined;
@@ -605,7 +605,7 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
         acellm.exes.prefill_layer_exe.call(acellm.exes.prefill_layer_args, &acellm.exes.prefill_layer_results);
         acellm.exes.prefill_layer_results.fill(.{ &prefill_embed_buffer, &acecfg.cond_kv_cache_buffers, &acecfg.uncond_kv_cache_buffers });
     }
-    
+
     acellm.exes.prefill_select_args.set(.{ acellm.model_buffers, prefill_embed_buffer, pred_buffer });
     acellm.exes.prefill_select_exe.call(acellm.exes.prefill_select_args, &acellm.exes.prefill_select_results);
     acellm.exes.prefill_select_results.fill(.{ &one_embed_buffer });
@@ -633,7 +633,9 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
     const decode_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ .b = 2, .s = 1 }, .u32));
     defer decode_tokens_slice.free(allocator);
     var decode_embed_buffer: zml.Buffer = undefined;
-    
+
+    const print_freq = nb_audio_codes / 10;
+
     var stdout = std.Io.File.stdout().writer(io, &.{});
     var writer: *std.Io.Writer = &stdout.interface;
     for (0..nb_audio_codes) |i| {
@@ -681,6 +683,9 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
         token_buffer.deinit();
         decode_embed_buffer.deinit();
         logit_buffer.deinit();
+        if ((i + 1) % print_freq == 0) {
+            std.log.info("Generated {d} audio codes - {d}% done", .{ i + 1, @divFloor((i + 1) * 100, nb_audio_codes) });
+        }
     }
     try writer.writeAll("\n");
     try writer.flush();
@@ -915,7 +920,7 @@ pub fn prepareDiffusionConditions(zml_handler: *Zml_handler, aceenc: *aceenc_.Ac
     const n_cap_in: usize = @intCast(input_dim * caption_len);
     const n_tim_in: usize = @intCast(audio_dim * t_timbre_25hz);
     const n_lyr_in: usize = @intCast(input_dim * lyric_len);
-    
+
     zml_handler.tic(&zml_handler.timers.enc.decode);
 
     // the diffusion conditions are composed of three parts :
@@ -1001,13 +1006,13 @@ pub fn prepareDiffusionConditions(zml_handler: *Zml_handler, aceenc: *aceenc_.Ac
     const timbre_end = timbre_start + n_tim;
     const lyr_start = timbre_end;
     const lyr_end = lyr_start + n_lyr;
-    
+
     @memcpy(result_slice.items(zml.floats.BFloat16)[cap_start..cap_end], caption_slice.items(zml.floats.BFloat16)[0..n_cap]);
     @memcpy(result_slice.items(zml.floats.BFloat16)[timbre_start..timbre_end], timbre_slice.items(zml.floats.BFloat16)[0..n_tim]);
     @memcpy(result_slice.items(zml.floats.BFloat16)[lyr_start..lyr_end], lyric_slice.items(zml.floats.BFloat16)[0..n_lyr]);
 
     zml_handler.toc(&zml_handler.timers.enc.decode);
-    
+
     return result_slice;
 }
 
@@ -1118,7 +1123,7 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     try result_buffer.toSlice(io, result_slice);
 
     zml_handler.toc(&zml_handler.timers.dit.prefill);
-    
+
     return .{ .x = result_slice };
 }
 
@@ -1222,11 +1227,11 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
         result_buffer.deinit();
         acedit.exes.postprocess_results.fill(.{ &x_buffer, &result_buffer });
     }
-    
+
     try result_buffer.toSlice(io, result_slice);
 
     zml_handler.toc(&zml_handler.timers.dit.prefill);
-    
+
     return .{ .x = result_slice };
 }
 

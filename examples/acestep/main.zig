@@ -248,20 +248,14 @@ const Args = struct {
 // --llm-size=2 --dit-size=1
 // --duration=180 --n=3
 // info: Module    init  compile     load  prefill   decode    total
-// info:   llm    0.27s    2.03s    0.91s    0.31s    6.51s   10.04s
-// info:   cfg    0.00s    0.93s    0.00s    0.29s   12.00s   13.22s
-// info:   emb    0.00s    1.40s    0.61s    0.00s    0.03s    2.27s
-// info:   enc    0.00s    3.38s    0.64s    0.02s    0.04s    4.09s
-// info:   dit    0.00s    2.27s    0.90s    4.63s    0.00s    7.83s
-// info:   vae    0.00s    1.13s    0.59s    1.92s    0.00s    3.68s
-// info:   wav                                                 0.19s
-// info: total                                                41.38s
-
-// still this language issue
-// check :
-// - time signature normalization
-// - caption twice ?
-// - language on metadata
+// info:   llm    0.26s    2.07s    1.02s    0.34s    4.87s    8.57s
+// info:   cfg    0.00s    0.92s    0.00s    0.29s   10.60s   11.81s
+// info:   emb    0.00s    1.33s    0.72s    0.00s    0.03s    2.31s
+// info:   enc    0.00s    3.27s    0.70s    0.02s    0.03s    4.03s
+// info:   dit    0.00s    2.44s    0.96s    4.53s    0.00s    7.97s
+// info:   vae    0.00s    1.25s    0.69s    1.91s    0.00s    3.89s
+// info:   wav                                                 0.17s
+// info: total                                                38.81s
 
 // TODO: finir remix basique
 // - check no cover branch, instructions and stuff
@@ -278,6 +272,12 @@ const Args = struct {
 // TODO: edit mode
 // - repaint a chunk
 // - extend audio
+
+// still this language issue
+// check :
+// - time signature normalization
+// - caption twice ?
+// - language on metadata
 
 // TODO: make DiT compiled model time independent with masks and range
 // TODO: move model related code from inference to Exes struct inside models
