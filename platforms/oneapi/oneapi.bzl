@@ -22,52 +22,57 @@ ONEAPI_RUNTIME_STRIP_PREFIX = "oneapi"
 ONEAPI_ZERO_LOADER_URL = "https://tensorflow-file-hosting.s3.us-east-1.amazonaws.com/ze_loader_libs.tar.gz"
 ONEAPI_ZERO_LOADER_SHA256 = "71cbfd8ac59e1231f013e827ea8efe6cf5da36fad771da2e75e202423bd6b82e"
 
-_ONEAPI_BUILD_FILE_CONTENT = """
+_ONEAPI_BUILD_FILE_CONTENT = """\
 package(default_visibility = ["//visibility:public"])
-filegroup(
-        name = "base_runtime",
-        srcs = [
-            "{ONEAPI_BASE_LIB}/libhwloc.so.15",
-            "{ONEAPI_BASE_LIB}/libumf.so.0",
-            "{ONEAPI_BASE_LIB}/libur_adapter_level_zero.so.0",
-            "{ONEAPI_BASE_LIB}/libur_adapter_opencl.so.0",
-            "{ONEAPI_BASE_LIB}/libur_loader.so.0",
-])
 
 filegroup(
-        name = "compiler_runtime", 
-        srcs = glob(["{ONEAPI_COMPILER_LIB}/*.spv"]) + [
+    name = "base_runtime",
+    srcs = [
+        "{ONEAPI_BASE_LIB}/libhwloc.so.15",
+        "{ONEAPI_BASE_LIB}/libumf.so.0",
+        "{ONEAPI_BASE_LIB}/libur_adapter_level_zero.so.0",
+        "{ONEAPI_BASE_LIB}/libur_adapter_opencl.so.0",
+        "{ONEAPI_BASE_LIB}/libur_loader.so.0",
+    ],
+)
+
+filegroup(
+    name = "compiler_runtime",
+    srcs = glob(["{ONEAPI_COMPILER_LIB}/*.spv"]) + [
         "{ONEAPI_COMPILER_LIB}/libOpenCL.so.1",
         "{ONEAPI_COMPILER_LIB}/libimf.so",
         "{ONEAPI_COMPILER_LIB}/libintlc.so.5",
         "{ONEAPI_COMPILER_LIB}/libirc.so",
         "{ONEAPI_COMPILER_LIB}/libirng.so",
         "{ONEAPI_COMPILER_LIB}/libsvml.so",
-])
-
-filegroup(
-        name = "libsycl_so", 
-        srcs = ["{ONEAPI_COMPILER_LIB}/libsycl.so.8"]
+    ],
 )
 
 filegroup(
-        name = "mkl_runtime", 
-        srcs = [
+    name = "libsycl_so",
+    srcs = ["{ONEAPI_COMPILER_LIB}/libsycl.so.8"]
+)
+
+filegroup(
+    name = "mkl_runtime",
+    srcs = [
         "{ONEAPI_MKL_LIB}/libmkl_core.so.2",
         "{ONEAPI_MKL_LIB}/libmkl_intel_ilp64.so.2",
         "{ONEAPI_MKL_LIB}/libmkl_sequential.so.2",
-        "{ONEAPI_MKL_LIB}/libmkl_sycl_blas.so.5"
-])
+        "{ONEAPI_MKL_LIB}/libmkl_sycl_blas.so.5",
+    ],
+)
 """.format(
-    ONEAPI_BASE_LIB = ONEAPI_BASE_LIB, 
-    ONEAPI_COMPILER_LIB = ONEAPI_COMPILER_LIB, 
-    ONEAPI_MKL_LIB = ONEAPI_MKL_LIB)
+    ONEAPI_BASE_LIB = ONEAPI_BASE_LIB,
+    ONEAPI_COMPILER_LIB = ONEAPI_COMPILER_LIB,
+    ONEAPI_MKL_LIB = ONEAPI_MKL_LIB,
+)
 
-_ZERO_LOADER_BUILD_FILE_CONTENT = """
-package(default_visibility = ["//visibility:public"])
+_ZERO_LOADER_BUILD_FILE_CONTENT = """\
 filegroup(
     name = "all",
     srcs = glob(["lib/**"]),
+    visibility = ["//visibility:public"],
 )
 """
 
