@@ -730,7 +730,7 @@ pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: Tokenizer, 
     try formatted_prompt.appendSlice(allocator, "# Caption\n");
     try formatted_prompt.appendSlice(allocator, metadata.caption);
     // make both tokenizations same length
-    if (!cover) try formatted_prompt.appendSlice(allocator, "\n");
+    //if (!cover) try formatted_prompt.appendSlice(allocator, "\n");
     try formatted_prompt.appendSlice(allocator, "\n\n# Metas\n");
     try formatted_prompt.appendSlice(allocator, "- bpm: ");
     try formatted_prompt.appendSlice(allocator, metadata.bpm);
