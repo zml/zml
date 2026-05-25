@@ -1,0 +1,44 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
+
+zig_shared_library(
+    name = "zmlxoneapi",
+    main = "zmlxoneapi.zig",
+    shared_lib_name = "libzmlxoneapi.so.0",
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["@libpjrt_oneapi//:__subpackages__"],
+    zigopts = ["-fno-stack-check"],
+    deps = ["//stdx"],
+)
+
+cc_library(
+    name = "empty",
+    defines = ["ZML_RUNTIME_ONEAPI_DISABLED"],
+    tags = ["manual"],
+)
+
+cc_library(
+    name = "libpjrt_oneapi",
+    defines = ["ZML_RUNTIME_ONEAPI"],
+    tags = ["manual"],
+    deps = ["@libpjrt_oneapi"],
+)
+
+zig_library(
+    name = "oneapi",
+    import_name = "platforms/oneapi",
+    main = "oneapi.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//pjrt",
+        "//stdx",
+        "@rules_zig//zig/runfiles",
+    ] + select({
+        "//platforms:oneapi.enabled": [
+            ":libpjrt_oneapi",
+        ],
+        "//conditions:default": [":empty"],
+    }),
+)

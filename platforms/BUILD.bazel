@@ -7,6 +7,7 @@ PLATFORMS = {
     "rocm": False,
     "tpu": False,
     "neuron": False,
+    "oneapi": False,
 }
 
 [
@@ -33,12 +34,7 @@ config_setting(
         flag_values = {":{}".format(runtime): "True"},
         visibility = ["//visibility:public"],
     )
-    for runtime in [
-        "cpu",
-        "cuda",
-        "tpu",
-        "neuron",
-    ]
+    for runtime in ["cpu", "cuda", "tpu", "neuron", "oneapi"]
 ]
 
 zig_library(

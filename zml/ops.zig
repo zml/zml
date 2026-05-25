@@ -520,7 +520,7 @@ test "triton" {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
-    if (platform.target != .cuda and platform.target != .rocm) return error.SkipZigTest;
+    if (platform.target != .cuda and platform.target != .rocm and platform.target != .oneapi) return error.SkipZigTest;
 
     const ir =
         \\ module {

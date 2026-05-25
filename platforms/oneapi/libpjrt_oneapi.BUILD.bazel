@@ -1,0 +1,60 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@zml//bazel:patchelf.bzl", "patchelf")
+
+ONEAPI_UMF_VERSION = "0.10.0"
+ONEAPI_UR_VERSION = "0.11.10"
+
+patchelf(
+    name = "libpjrt_oneapi_so",
+    src = "libpjrt_oneapi.so",
+    add_needed = [
+        "libzmlxoneapi.so.0",
+    ],
+    rename_dynamic_symbols = {
+        "dlopen": "zmlxoneapi_dlopen",
+    },
+    set_rpath = "$ORIGIN",
+)
+
+patchelf(
+    name = "libsycl_so",
+    src = "@oneapi//:libsycl_so",
+    set_rpath = "$ORIGIN",
+)
+
+ONEAPI_VERSION = "2025.1"
+ONEAPI_BASE_LIB = "{}/lib".format(ONEAPI_VERSION)
+ONEAPI_COMPILER_LIB = "compiler/{}/lib".format(ONEAPI_VERSION)
+ONEAPI_MKL_LIB = "mkl/{}/lib".format(ONEAPI_VERSION)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":libpjrt_oneapi_so",
+        ":libsycl_so",
+        "@zml//platforms/oneapi:zmlxoneapi",
+        "@oneapi//:base_runtime",
+        "@oneapi//:compiler_runtime",
+        "@oneapi//:mkl_runtime",
+        "@zero_loader//:all",
+    ],
+    add_directory_to_runfiles = False,
+    allow_overwrites = True,
+    hardlink = "auto",
+    include_external_repositories = ["**"],
+    replace_prefixes = {
+        "libpjrt_oneapi_so": "lib",
+        "libsycl_so": "lib",
+        ONEAPI_BASE_LIB: "lib",
+        ONEAPI_COMPILER_LIB: "lib",
+        ONEAPI_MKL_LIB: "lib",
+        "platforms/oneapi/libzmlxoneapi": "lib/libzmlxoneapi",
+    },
+    root_paths = ["."],
+)
+
+cc_library(
+    name = "libpjrt_oneapi",
+    data = [":sandbox"],
+    visibility = ["@zml//platforms/oneapi:__subpackages__"],
+)

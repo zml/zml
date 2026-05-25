@@ -45,7 +45,7 @@ fn disableXlaLogs() void {
 
 fn validateDeviceCount(target: Target, num_devices: usize) !void {
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi => {
             if (num_devices == 0) {
                 log.err("Platform {} requires at least 1 device, got {}", .{ target, num_devices });
                 return error.ZeroVisibleDevices;
@@ -98,7 +98,7 @@ pub const Memory = struct {
 
     pub fn isOfKind(self: Memory, kind_: Kind) bool {
         switch (self.platform.target) {
-            .cuda, .rocm, .tpu => {
+            .cuda, .rocm, .oneapi, .tpu => {
                 const zml_kind: Memory.Kind = switch (self.kind().len) {
                     "device".len => .device,
                     "pinned_host".len => .host_pinned,
@@ -313,6 +313,7 @@ pub const Platform = struct {
             .neuron,
             .rocm,
             .cuda,
+            .oneapi,
             .cpu,
         };
         return for (ordered_targets) |target| {
@@ -589,6 +590,7 @@ pub const CreateOptions = struct {
     rocm: struct {} = .{},
     tpu: struct {} = .{},
     neuron: struct {} = .{},
+    oneapi: struct {} = .{},
 
     pub const Cpu = struct {
         device_count: u32,
