@@ -247,28 +247,21 @@ const Args = struct {
 // --prompt='a peak-time dark techno track'
 // --llm-size=2 --dit-size=1
 // --duration=180 --n=3
-// bazel run --config=release examples/acestep --//platforms:cuda=true -- --instru --local-files
 // info: Module    init  compile     load  prefill   decode    total
-// info:   llm    0.26s    1.88s    0.92s    0.17s    2.69s    5.93s
-// info:   cfg    0.00s    0.80s    0.00s    0.29s   20.32s   21.42s
-// info:   emb    0.00s    1.37s    0.57s    0.00s    0.00s    2.15s
-// info:   enc    0.00s    2.92s    0.57s    0.01s    0.00s    3.51s
-// info:   dit    0.00s    2.03s    0.83s    4.36s    0.00s    7.25s
-// info:   vae    0.00s    1.82s    0.58s    2.24s    0.00s    4.67s
-// info:   wav                                                 0.24s
-// info: total                                                45.24s
-// info: Module    init  compile     load  prefill   decode    total
-// info:   llm    0.30s    2.14s    0.93s    0.34s    3.94s    7.66s
-// info:   cfg    0.00s    0.81s    0.00s    0.29s   11.54s   12.66s
-// info:   emb    0.00s    1.29s    0.61s    0.00s    0.03s    2.16s
-// info:   enc    0.00s    3.35s    0.69s    0.02s    0.03s    4.09s
-// info:   dit    0.00s    2.27s    0.91s    4.47s    0.00s    7.68s
-// info:   vae    0.00s    1.12s    0.59s    1.93s    0.00s    3.67s
-// info:   wav                                                 0.17s
-// info: total                                                38.15s
+// info:   llm    0.27s    2.03s    0.91s    0.31s    6.51s   10.04s
+// info:   cfg    0.00s    0.93s    0.00s    0.29s   12.00s   13.22s
+// info:   emb    0.00s    1.40s    0.61s    0.00s    0.03s    2.27s
+// info:   enc    0.00s    3.38s    0.64s    0.02s    0.04s    4.09s
+// info:   dit    0.00s    2.27s    0.90s    4.63s    0.00s    7.83s
+// info:   vae    0.00s    1.13s    0.59s    1.92s    0.00s    3.68s
+// info:   wav                                                 0.19s
+// info: total                                                41.38s
 
 // still this language issue
-// time signature normalization
+// check :
+// - time signature normalization
+// - caption twice ?
+// - language on metadata
 
 // TODO: finir remix basique
 // - check no cover branch, instructions and stuff

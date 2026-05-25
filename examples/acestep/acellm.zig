@@ -627,7 +627,6 @@ pub const AceLlm = struct {
 
         const sorted = logits.sort(.voc, .{ .descending = true });
         var sorted_logits = sorted.values;
-        sorted_logits = sorted_logits.scale(1.0 / temperature);
 
         // softmax implementation is resilient to overflows
         const probs = sorted_logits.softmax(.voc);
@@ -644,7 +643,8 @@ pub const AceLlm = struct {
         const is_in_top_p = shifted_cum_probs.cmp(.LE, top_p_tensor);
 
         const zero = zml.Tensor.scalar(0.0, .f32).broad(probs.shape());
-        const filtered_probs = is_in_top_p.select(probs, zero);
+        var filtered_probs = is_in_top_p.select(probs, zero);
+        filtered_probs = filtered_probs.scale(1.0 / temperature);
         const filtered_sum = filtered_probs.sum(.voc);
         const normalized_probs = filtered_probs.div(filtered_sum.broad(filtered_probs.shape()));
 
