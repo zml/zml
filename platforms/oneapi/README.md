@@ -36,6 +36,7 @@ bazel run //examples/llm \
     --@zml//platforms:oneapi=true \
     -- \
     --model=hf://meta-llama/Llama-3.2-1B-Instruct \
+    --topk=1 \
     --prompt="Tell me a story about a cat in 2 lines"
 ```
 
@@ -48,5 +49,6 @@ bazel run //examples/llm \
     --@zml//platforms:oneapi=true \
     -- \
     --model=path/to/your/model/Llama-3.1-8B-Instruct \
+    --topk=1 \
     --prompt="Tell me a story about a cat in 2 lines"
 ```
