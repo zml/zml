@@ -542,7 +542,7 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
     // ------------------------------------------------
     // No 5Hz task in remix mode, but user can feed data
     // ------------------------------------------------
-
+ 
     var audio_metadata = try inference.AudioMetadata.empty(zml_handler.allocator);
     defer audio_metadata.deinit(zml_handler.allocator);
 
@@ -578,7 +578,7 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
     defer zml_handler.allocator.free(caption_tok_cover);
     defer zml_handler.allocator.free(lyric_tok);
 
-    std.log.info("caption_tok_cover: {d}, caption_tok_non_cover: {d}", .{caption_tok_cover.len, caption_tok_non_cover.len});
+    std.log.info("caption_tok_cover: {d}, caption_tok_non_cover: {d}", .{ caption_tok_cover.len, caption_tok_non_cover.len });
 
     var aceemb = try aceemb_.AceEmb_handler.init(zml_handler);
     defer aceemb.deinit(zml_handler.allocator);
