@@ -636,15 +636,15 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
 
     const print_freq = nb_audio_codes / 10;
 
-    var stdout = std.Io.File.stdout().writer(io, &.{});
-    var writer: *std.Io.Writer = &stdout.interface;
+    //var stdout = std.Io.File.stdout().writer(io, &.{});
+    //var writer: *std.Io.Writer = &stdout.interface;
     for (0..nb_audio_codes) |i| {
         // collect and print generated sequence
         const generated_token = token_slice.items(u32)[0];
         const chunk = try tokenizer_decoder.decode(&.{ generated_token });
         try result_tok.append(allocator, generated_token);
         try result_str.appendSlice(allocator, chunk);
-        try writer.writeAll(chunk);
+        //try writer.writeAll(chunk);
         if (result_tok.items.len == nb_audio_codes) break;
 
         decode_tokens_slice.items(u32)[0] = generated_token;
@@ -687,8 +687,8 @@ pub fn generateAudioCodes(zml_handler: *Zml_handler, acecfg: *acellm_.AceCfg_han
             std.log.info("Generated {d} audio codes - {d}% done", .{ i + 1, @divFloor((i + 1) * 100, nb_audio_codes) });
         }
     }
-    try writer.writeAll("\n");
-    try writer.flush();
+    //try writer.writeAll("\n");
+    //try writer.flush();
     std.log.info("5Hz CFG done, generated {d} tokens", .{ result_tok.items.len });
     zml_handler.toc(&zml_handler.timers.cfg.decode);
     return .{
