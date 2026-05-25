@@ -5,6 +5,7 @@ zig_library(
     tags = ["manual"],
     srcs = [
         "dtype.zig",
+        "pipeline.zig",
     ],
     import_name = "kernels/mosaic_tpu/builder",
     main = "builder.zig",

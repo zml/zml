@@ -1175,6 +1175,11 @@ pub const Operation = opaque {
         c.mlirOperationSetAttributeByName(self.ptr(), stringRef(name_), attribute.ptr());
     }
 
+    pub fn attributeByName(self: *const Operation, name_: []const u8) ?*const Attribute {
+        const attr = c.mlirOperationGetAttributeByName(self.ptr(), stringRef(name_));
+        return if (attr.ptr == null) null else @ptrCast(attr.ptr);
+    }
+
     pub const PrintFlags = struct {
         elide_large_elements_attrs: ?usize = null,
         debug_info: bool = false,
