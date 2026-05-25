@@ -97,7 +97,13 @@ def _oneapi_impl(mctx):
         url = ONEAPI_ZERO_LOADER_URL,
     )
 
-    return mctx.extension_metadata(reproducible = True)
+    return mctx.extension_metadata(
+        reproducible = True,
+        root_module_direct_deps = [
+            "libpjrt_oneapi",
+        ],
+        root_module_direct_dev_deps = [],
+    )
 
 oneapi_packages = module_extension(
     implementation = _oneapi_impl,
