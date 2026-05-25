@@ -40,17 +40,6 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    return loadFromRunfiles(io) catch |err| switch (err) {
-        error.FileNotFound => {
-            log.warn("oneAPI platform requested but no Bazel-packaged plugin was found; skipping.", .{});
-            return error.Unavailable;
-        },
-        else => return err,
-    };
-}
-
-fn loadFromRunfiles(io: std.Io) !*const pjrt.Api {
-    _ = io;
     const r = try bazel.runfiles(bazel_builtin.current_repository);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -59,7 +48,9 @@ fn loadFromRunfiles(io: std.Io) !*const pjrt.Api {
         return error.FileNotFound;
     };
 
-    var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_oneapi.so" });
-    return pjrt.Api.loadFrom(path);
+    return blk: {
+        var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_oneapi.so" });
+        break :blk pjrt.Api.loadFrom(path);
+    };
 }
