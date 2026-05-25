@@ -104,15 +104,28 @@ pub const AudioMetadata = struct {
         const max_len = 20;
         var buf: [max_len]u8 = undefined;
         const numAsString = try std.fmt.bufPrint(&buf, "{}", .{ duration });
+        const new_duration = try allocator.dupe(u8, numAsString);
         allocator.free(self.duration);
-        self.duration = try allocator.dupe(u8, numAsString);
+        self.duration = new_duration;
+    }
+
+    pub fn setCaption(self: *AudioMetadata, allocator: std.mem.Allocator, caption: []const u8) !void {
+        const new_caption = try allocator.dupe(u8, caption);
+        allocator.free(self.caption);
+        self.caption = new_caption;
+    }
+
+    pub fn setLyric(self: *AudioMetadata, allocator: std.mem.Allocator, lyric: []const u8) !void {
+        const new_lyric = try allocator.dupe(u8, lyric);
+        allocator.free(self.lyric);
+        self.lyric = new_lyric;
     }
 
     pub fn duration_s(self: *AudioMetadata) !u32 {
         return try std.fmt.parseUnsigned(u32, self.duration, 10);
     }
 
-    pub fn empty(allocator: std.mem.Allocator) AudioMetadata {
+    pub fn empty(allocator: std.mem.Allocator) !AudioMetadata {
         return .{
             .bpm = try allocator.dupe(u8, "N/A"),
             .caption = try allocator.dupe(u8, ""),
@@ -225,7 +238,7 @@ pub const AudioLatents = struct {
         try self.x.prettyPrint(writer, options);
     }
 
-    pub fn duration_s(self: AudioLatents) u32 {
+    pub fn duration_s(self: AudioLatents) i64 {
         // latent space is 25hz
         return @divExact(self.x.shape.dim(1), 25);
     }
@@ -729,7 +742,7 @@ pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: Tokenizer, 
     try formatted_prompt.appendSlice(allocator, metadata.duration);
     try formatted_prompt.appendSlice(allocator, "\n<|endoftext|>\n");
 
-    std.log.info("text input\n{s}", .{formatted_prompt.items});
+    //std.log.info("text input\n{s}", .{formatted_prompt.items});
 
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
     try tokens.appendSlice(allocator, try encoder.encode(formatted_prompt.items));
@@ -749,7 +762,7 @@ pub fn tokenizeInputLyrics(allocator: std.mem.Allocator, tokenizer: Tokenizer, m
     try formatted_prompt.appendSlice(allocator, metadata.lyric);
     try formatted_prompt.appendSlice(allocator, "<|endoftext|>");
 
-    std.log.info("lyric input\n{s}", .{formatted_prompt.items});
+    //std.log.info("lyric input\n{s}", .{formatted_prompt.items});
 
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
     try tokens.appendSlice(allocator, try encoder.encode(formatted_prompt.items));
@@ -844,6 +857,7 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
 
     const audio_dim = aceenc.config.timbre_hidden_dim;
     const t_25hz = 25 * duration;
+    const t_25hz_max = aceenc.options.seq_len_time * 25;
     const n: usize = @intCast(t_25hz * audio_dim);
 
     zml_handler.tic(&zml_handler.timers.enc.prefill);
@@ -852,18 +866,18 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
     // diffusion will use to denoise towards, and second, a logical mask that constrains temporally where the diffusion acts
     // the source latent can come from dequantized and detokenized audio codes, from silence latent or from source audio
 
+    const latents_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_25hz_max }, .bf16));
+    defer latents_slice.free(allocator);
+
+    // diffusion works in [.t, .a]
+    const return_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = 2 * audio_dim }, .bf16));
     const mask_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = audio_dim }, .bf16));
     defer mask_slice.free(allocator);
     const one = zml.floats.BFloat16.fromF32(1.0);
     for (0..n) |i| {
         mask_slice.items(zml.floats.BFloat16)[i] = one;
     }
-
-    const latents_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = aceenc.options.seq_len_time * 25, .a = audio_dim }, .bf16));
-    defer latents_slice.free(allocator);
-
-    const return_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = 2 * audio_dim }, .bf16));
-
+    
     if (audio_codes) |codes| {
         std.log.info("ENC init source latents from audiocodes", .{});
         const audio_codes_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = aceenc.options.seq_len_time * 5 }, .u32));
@@ -871,15 +885,38 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
         @memcpy(audio_codes_slice.items(u32)[0..codes.len], codes);
         var audio_codes_buffer: zml.Buffer = try .fromSlice(io, platform, audio_codes_slice, sharding);
         defer audio_codes_buffer.deinit();
-        aceenc.exes.encode_audiocodes_args.set(.{ aceenc.model_buffers.audiocode_encoder, audio_codes_buffer });
-        aceenc.exes.encode_audiocodes_exe.call(aceenc.exes.encode_audiocodes_args, &aceenc.exes.encode_audiocodes_results);
+        aceenc.exes.detokenize_args.set(.{ aceenc.model_buffers.audio_detokenizer, audio_codes_buffer });
+        aceenc.exes.detokenize_exe.call(aceenc.exes.detokenize_args, &aceenc.exes.detokenize_results);
         var latent_buffer: zml.Buffer = undefined;
         defer latent_buffer.deinit();
-        aceenc.exes.encode_audiocodes_results.fill(.{ &latent_buffer });
+        aceenc.exes.detokenize_results.fill(.{ &latent_buffer });
         try latent_buffer.toSlice(io, latents_slice);
     } else if (audio_latents) |audio| {
-        std.log.info("ENC init source latents from audio latents", .{});
-        @memcpy(latents_slice.items(zml.floats.BFloat16)[0..n], audio.x.items(zml.floats.BFloat16));
+        // set latent slice as a copy of exact source latents. x has length duration, while latents_slice has length max duration
+        for (0..audio_dim) |a| {
+            for (0..t_25hz) |t| {
+                latents_slice.items(zml.floats.BFloat16)[t + t_25hz_max * a] = audio.x.items(zml.floats.BFloat16)[t + t_25hz * a];
+            }
+        }
+        if (zml_handler.args.no_fsq) {
+            std.log.info("ENC init source latents from audio latents", .{});
+            // already initialized from exact source latents
+        } else {
+            std.log.info("ENC init source latents from FSQ audio latents", .{});
+            var source_latents_buffer: zml.Buffer = try .fromSlice(io, platform, latents_slice, sharding);
+            defer source_latents_buffer.deinit();
+            var target_latents_buffer: zml.Buffer = undefined;
+            defer target_latents_buffer.deinit();
+            var audio_codes_buffer: zml.Buffer = undefined;
+            defer audio_codes_buffer.deinit();
+            aceenc.exes.tokenize_args.set(.{ aceenc.model_buffers.audio_tokenizer, source_latents_buffer });
+            aceenc.exes.tokenize_exe.call(aceenc.exes.tokenize_args, &aceenc.exes.tokenize_results);
+            aceenc.exes.tokenize_results.fill(.{ &audio_codes_buffer });
+            aceenc.exes.detokenize_args.set(.{ aceenc.model_buffers.audio_detokenizer, audio_codes_buffer });
+            aceenc.exes.detokenize_exe.call(aceenc.exes.detokenize_args, &aceenc.exes.detokenize_results);
+            aceenc.exes.detokenize_results.fill(.{ &target_latents_buffer });
+            try target_latents_buffer.toSlice(io, latents_slice);
+        }
     } else {
         std.log.info("ENC init source latents from silence latents", .{});
         aceenc.exes.silence_args.set(.{ aceenc.silence_buffers });
@@ -891,10 +928,10 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
     }
 
     // concatenate slices rows
-    for (0..t_25hz) |i| {
-        for (0..audio_dim) |j| {
-            return_slice.items(zml.floats.BFloat16)[i * (2 * audio_dim) + j] = latents_slice.items(zml.floats.BFloat16)[i * audio_dim + j];
-            return_slice.items(zml.floats.BFloat16)[i * (2 * audio_dim) + j + audio_dim] = mask_slice.items(zml.floats.BFloat16)[i * audio_dim + j];
+    for (0..t_25hz) |t| {
+        for (0..audio_dim) |a| {
+            return_slice.items(zml.floats.BFloat16)[a + t * (2 * audio_dim)] = latents_slice.items(zml.floats.BFloat16)[t + a * t_25hz_max];
+            return_slice.items(zml.floats.BFloat16)[(a + audio_dim) + t * (2 * audio_dim)] = mask_slice.items(zml.floats.BFloat16)[a + t * audio_dim];
         }
     }
 
@@ -970,14 +1007,15 @@ pub fn prepareDiffusionConditions(zml_handler: *Zml_handler, aceenc: *aceenc_.Ac
     try lyric_output_buffer.toSlice(io, lyric_slice);
 
     // encode timbre
-    const timbre_input_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = t_timbre_25hz, .d = audio_dim }, .bf16));
+    const timbre_input_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_timbre_25hz }, .bf16));
     defer timbre_input_slice.free(allocator);
     if (style_latents) |latents| {
         std.log.info("ENC encoding timbre from reference audio", .{});
         @memcpy(timbre_input_slice.items(zml.floats.BFloat16)[0..n_tim_in], latents.x.items(zml.floats.BFloat16));
     } else {
         std.log.info("ENC encoding timbre from silence latent", .{});
-        const silence_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = aceenc.options.seq_len_time * 25, .d = audio_dim }, .bf16));
+        const t_max_25hz = aceenc.options.seq_len_time * 25;
+        const silence_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_max_25hz }, .bf16));
         defer silence_slice.free(allocator);
         var silence_buffer: zml.Buffer = undefined;
         defer silence_buffer.deinit();
@@ -985,7 +1023,11 @@ pub fn prepareDiffusionConditions(zml_handler: *Zml_handler, aceenc: *aceenc_.Ac
         aceenc.exes.silence_exe.call(aceenc.exes.silence_args, &aceenc.exes.silence_results);
         aceenc.exes.silence_results.fill(.{ &silence_buffer });
         try silence_buffer.toSlice(io, silence_slice);
-        @memcpy(timbre_input_slice.items(zml.floats.BFloat16)[0..n_tim_in], silence_slice.items(zml.floats.BFloat16)[0..n_tim_in]);
+        for (0..audio_dim) |a| {
+            for (0..t_timbre_25hz) |t| {
+                timbre_input_slice.items(zml.floats.BFloat16)[t + a * t_timbre_25hz] = silence_slice.items(zml.floats.BFloat16)[t + a * t_max_25hz];
+            }
+        }
     }
     var timbre_input_buffer: zml.Buffer = try .fromSlice(io, platform, timbre_input_slice, sharding);
     defer timbre_input_buffer.deinit();
@@ -1056,13 +1098,10 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     const seed: u64 = @intCast(id);
     var prng = std.Random.DefaultPrng.init(seed);
     const random = prng.random();
-    const dimT: usize = @intCast(t);
-    const dimA: usize = @intCast(a);
-    for (0..dimT) |i| {
-        for (0..dimA) |j| {
-            const rand: f32 = random.floatNorm(f32);
-            x.items(zml.floats.BFloat16)[j + i * dimA] = zml.floats.BFloat16.fromF32(rand);
-        }
+    const dim: usize = @intCast(t * a);
+    for (0..dim) |i| {
+        const rand: f32 = random.floatNorm(f32);
+        x.items(zml.floats.BFloat16)[i] = zml.floats.BFloat16.fromF32(rand);
     }
 
     // prepare arguments buffers
@@ -1144,6 +1183,14 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     const timestamps: [9]f32 = .{ 1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3, 0.0 };
     const noise = timestamps[match_level];
 
+    // note on random initialization
+    // drawing a full random gaussian noise to initialize x is diversification, each output can be completely different
+    // if we have a good seed and want to explore arround it, implement retake variance :
+    // generate the random noise once, with the good seed, generate another random gaussian noise tensor
+    // from the retake seed, and combine the two noises with
+    // noise = base * cos(v * pi / 2) + retake * sin(v * pi / 2),
+    // where v is the variance we want to achieve in the output
+
     // populate x with gaussian noise seeded with id
     const x: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t, .a = a }, .bf16));
     defer x.free(allocator);
@@ -1191,6 +1238,8 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     // the full forward pass on the dit model is one iteration of the denoising
     const steps = timestamps.len - 1;
     zml_handler.tic(&zml_handler.timers.dit.prefill);
+    const time: f32 = @floatFromInt(steps - match_level);
+    const cover_iters: usize = @intFromFloat(@floor(time * zml_handler.args.cover_strength));
     for (match_level..steps) |i| {
         var y_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
         defer y_proj_buffer.deinit();
@@ -1205,7 +1254,7 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
         var t_next: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i + 1], .f32, sharding);
         defer t_curr.deinit();
         defer t_next.deinit();
-        const is_cover = i < zml_handler.args.cover_strength;
+        const is_cover = i - match_level < cover_iters;
         const latents_buffer = if (is_cover) latents_cover_buffer else latents_non_cover_buffer;
         const conditions_buffer = if (is_cover) conditions_cover_buffer else conditions_non_cover_buffer;
         std.log.info("DiT ************* step {d}/{d}, is_cover: {any}", .{ i+1, steps, is_cover });

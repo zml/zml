@@ -62,8 +62,9 @@ pub const AceEnc_handler = struct {
             .text_emb = .init(.{ .s = options.seq_len_text, .d = config.text_hidden_dim }, .bf16),
             .lyric_emb = .init(.{ .s = options.seq_len_text, .d = config.text_hidden_dim }, .bf16),
             .lyric_mask = .init(.{ .k = options.seq_len_text, .q = options.seq_len_text }, .bf16),
-            .timbre_latent = .init(.{ .t = config.timbre_fix_frame, .a = config.timbre_hidden_dim }, .bf16),
+            .timbre_latent = .init(.{ .a = config.timbre_hidden_dim, .t = config.timbre_fix_frame}, .bf16),
             .audio_codes = .init(.{ .s = options.seq_len_time * 5 }, .u32),
+            .audio_latents = .init(.{ .a = config.audio_acoustic_hidden_dim, .t = options.seq_len_time * 25 }, .bf16),
         };
         
         const shardings: main.Shardings = try .init(zml_handler.platform);
@@ -130,14 +131,23 @@ pub const AceEnc_handler = struct {
         var encode_timbre_future_awaited = false;
         errdefer if (!encode_timbre_future_awaited) if (encode_timbre_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
-        var encode_audiocodes_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: AudioCodeEncoder, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+        var tokenize_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AudioTokenizer, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
+                        params_.audio_latents }, opts_);
+            }
+        }.call, .{ zml_handler, model.audio_tokenizer, params, opts });
+        var tokenize_future_awaited = false;
+        errdefer if (!tokenize_future_awaited) if (tokenize_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+        
+        var detokenize_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AudioDetokenizer, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
                         params_.audio_codes }, opts_);
             }
-        }.call, .{ zml_handler, model.audiocode_encoder, params, opts });
-        var encode_audiocodes_future_awaited = false;
-        errdefer if (!encode_audiocodes_future_awaited) if (encode_audiocodes_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+        }.call, .{ zml_handler, model.audio_detokenizer, params, opts });
+        var detokenize_future_awaited = false;
+        errdefer if (!detokenize_future_awaited) if (detokenize_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
         
         var silence_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: SilenceGenerator, opts_: zml.module.CompilationOptions) !zml.Exe {
@@ -156,8 +166,11 @@ pub const AceEnc_handler = struct {
         const encode_timbre_exe = try encode_timbre_future.await(zml_handler.io);
         encode_timbre_future_awaited = true;
         
-        const encode_audiocodes_exe = try encode_audiocodes_future.await(zml_handler.io);
-        encode_audiocodes_future_awaited = true;
+        const tokenize_future_exe = try tokenize_future.await(zml_handler.io);
+        tokenize_future_awaited = true;
+
+        const detokenize_future_exe = try detokenize_future.await(zml_handler.io);
+        detokenize_future_awaited = true;
 
         const silence_exe = try silence_future.await(zml_handler.io);
         silence_future_awaited = true;
@@ -172,9 +185,12 @@ pub const AceEnc_handler = struct {
             .encode_timbre_exe = encode_timbre_exe,
             .encode_timbre_args = try encode_timbre_exe.args(zml_handler.allocator),
             .encode_timbre_results = try encode_timbre_exe.results(zml_handler.allocator),
-            .encode_audiocodes_exe = encode_audiocodes_exe,
-            .encode_audiocodes_args = try encode_audiocodes_exe.args(zml_handler.allocator),
-            .encode_audiocodes_results = try encode_audiocodes_exe.results(zml_handler.allocator),
+            .tokenize_exe = tokenize_future_exe,
+            .tokenize_args = try tokenize_future_exe.args(zml_handler.allocator),
+            .tokenize_results = try tokenize_future_exe.results(zml_handler.allocator),
+            .detokenize_exe = detokenize_future_exe,
+            .detokenize_args = try detokenize_future_exe.args(zml_handler.allocator),
+            .detokenize_results = try detokenize_future_exe.results(zml_handler.allocator),
             .silence_exe = silence_exe,
             .silence_args = try silence_exe.args(zml_handler.allocator),
             .silence_results = try silence_exe.results(zml_handler.allocator),
@@ -206,6 +222,8 @@ pub const Params = struct {
     timbre_latent: zml.Tensor,
     // audio codes, expected shape: [t_5hz, 1]
     audio_codes: zml.Tensor,
+    // source audio, expected shape: [t_max = 15000, d_audio]
+    audio_latents: zml.Tensor,
 };
 
 pub const Options = struct {
@@ -231,9 +249,13 @@ pub const Exes = struct {
     encode_timbre_args: zml.Exe.Arguments,
     encode_timbre_results: zml.Exe.Results,
 
-    encode_audiocodes_exe: zml.Exe,
-    encode_audiocodes_args: zml.Exe.Arguments,
-    encode_audiocodes_results: zml.Exe.Results,
+    tokenize_exe: zml.Exe,
+    tokenize_args: zml.Exe.Arguments,
+    tokenize_results: zml.Exe.Results,
+
+    detokenize_exe: zml.Exe,
+    detokenize_args: zml.Exe.Arguments,
+    detokenize_results: zml.Exe.Results,
 
     silence_exe: zml.Exe,
     silence_args: zml.Exe.Arguments,
@@ -249,9 +271,12 @@ pub const Exes = struct {
         self.encode_timbre_exe.deinit();
         self.encode_timbre_args.deinit(allocator);
         self.encode_timbre_results.deinit(allocator);
-        self.encode_audiocodes_exe.deinit();
-        self.encode_audiocodes_args.deinit(allocator);
-        self.encode_audiocodes_results.deinit(allocator);
+        self.tokenize_exe.deinit();
+        self.tokenize_args.deinit(allocator);
+        self.tokenize_results.deinit(allocator);
+        self.detokenize_exe.deinit();
+        self.detokenize_args.deinit(allocator);
+        self.detokenize_results.deinit(allocator);
         self.silence_exe.deinit();
         self.silence_args.deinit(allocator);
         self.silence_results.deinit(allocator);
@@ -283,7 +308,7 @@ pub const SilenceGenerator = struct {
     }
     
     pub fn forward(self: SilenceGenerator) zml.Tensor {
-        return self.silence_latent.squeeze(.batch).convert(.bf16).transpose(.{ .time, .audio });
+        return self.silence_latent.squeeze(.batch).convert(.bf16);
     }
 };
 
@@ -292,14 +317,16 @@ pub const AceEnc = struct {
     text_encoder: TextEncoder,
     lyric_encoder: LyricEncoder,
     timbre_encoder: TimbreEncoder,
-    audiocode_encoder: AudioCodeEncoder,
+    audio_tokenizer: AudioTokenizer,
+    audio_detokenizer: AudioDetokenizer,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: dit.ConfigXl) !AceEnc {
         return .{
             .text_encoder = try .init(store.withPrefix("encoder")),
             .lyric_encoder = try .init(allocator, store.withPrefix("encoder"), config),
             .timbre_encoder = try .init(allocator, store.withPrefix("encoder"), config),
-            .audiocode_encoder = try .init(allocator, store, config),
+            .audio_tokenizer = try .init(allocator, store.withPrefix("audio_tokenizer"), config),
+            .audio_detokenizer = try .init(allocator, store.withPrefix("audio_detokenizer"), config),
         };
     }
 
@@ -318,14 +345,16 @@ pub const AceEnc = struct {
     pub fn deinit(self: *const AceEnc, allocator: std.mem.Allocator) void {
         self.lyric_encoder.deinit(allocator);
         self.timbre_encoder.deinit(allocator);
-        self.audiocode_encoder.deinit(allocator);
+        self.audio_tokenizer.deinit(allocator);
+        self.audio_detokenizer.deinit(allocator);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(AceEnc), allocator: std.mem.Allocator) void {
          TextEncoder.unloadBuffers(&self.text_encoder);
          LyricEncoder.unloadBuffers(&self.lyric_encoder, allocator);
          TimbreEncoder.unloadBuffers(&self.timbre_encoder, allocator);
-         AudioCodeEncoder.unloadBuffers(&self.audiocode_encoder, allocator);
+         AudioTokenizer.unloadBuffers(&self.audio_tokenizer, allocator);
+         AudioDetokenizer.unloadBuffers(&self.audio_detokenizer, allocator);
     }
 
 };
@@ -586,7 +615,7 @@ pub const TimbreEncoder = struct {
     }
 
     pub fn forward(self: TimbreEncoder, timbre_latent: zml.Tensor) zml.Tensor {
-        var timbre_emb = self.embed_timbre.forward(timbre_latent);
+        var timbre_emb = self.embed_timbre.forward(timbre_latent.withTags(.{ .a, .t }).transpose(.{ .t, .a }));
         // the special tokens appending is commented in the python reference
         // inputs_embeds = torch.cat([self.special_token.expand(inputs_embeds.shape[0], 1, -1), inputs_embeds], dim=1)
         // the encoder layers assume sequence length to be tagged with s
@@ -605,8 +634,8 @@ pub const TimbreEncoder = struct {
 };
 
 
-pub const AudioCodeEncoder = struct {
-    dequantizer: AudioCodeDequantizer,
+pub const AudioDetokenizer = struct {
+    dequantizer: AudioDequantizer,
     embed_tokens: zml.nn.Linear,
     layers: []EncoderLayer,
     norm: RmsNorm,
@@ -615,7 +644,7 @@ pub const AudioCodeEncoder = struct {
     pool_window_size: u32,
     sliding_window: u32,
     
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: dit.ConfigXl) !AudioCodeEncoder {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: dit.ConfigXl) !AudioDetokenizer {
         const layers = try allocator.alloc(EncoderLayer, config.num_attention_pooler_hidden_layers);
         errdefer allocator.free(layers);
         for (layers, 0..) |*layer, i| {
@@ -641,12 +670,12 @@ pub const AudioCodeEncoder = struct {
         };
     }
 
-    pub fn deinit(self: AudioCodeEncoder, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: AudioDetokenizer, allocator: std.mem.Allocator) void {
         allocator.free(self.layers);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(AudioCodeEncoder), allocator: std.mem.Allocator) void {
-        AudioCodeDequantizer.unloadBuffers(&self.dequantizer);
+    pub fn unloadBuffers(self: *zml.Bufferized(AudioDetokenizer), allocator: std.mem.Allocator) void {
+        AudioDequantizer.unloadBuffers(&self.dequantizer);
         self.embed_tokens.weight.deinit();
         if (self.embed_tokens.bias) |*bias| bias.deinit();
         for (self.layers) |*layer| {
@@ -659,7 +688,7 @@ pub const AudioCodeEncoder = struct {
         self.special_tokens.deinit();
     }
 
-    pub fn forward(self: AudioCodeEncoder, audio_codes_int: zml.Tensor) zml.Tensor {
+    pub fn forward(self: AudioDetokenizer, audio_codes_int: zml.Tensor) zml.Tensor {
         const x = self.dequantizer.dequantize(audio_codes_int);
         // Expected input: [t_code, d]
         var hidden_states = self.embed_tokens.forward(x.withTags(.{ .t_code, .d }));
@@ -677,12 +706,8 @@ pub const AudioCodeEncoder = struct {
         // audiocodes encoder uses alternating window/full bidirectional attention
         // the time dimension becomes a batch dimension in attention : timesteps are treated independently,
         // we don't need a range mask for valid time sequence, we simply truncate the embeddings CPU side
-        // TODO : makes no sense, pooling dimention is 5, window is useless here ?
-        const window_attention_mask = createBidirectionalWindowMask(hidden_states.dim(.s), self.sliding_window);
         for (self.layers) |layer| {
-            if (hidden_states.dim(.b) == 0) break;
-            const actual_mask = if (layer.id % 2 == 0) window_attention_mask else null;
-            hidden_states = layer.forward(hidden_states, actual_mask);
+            hidden_states = layer.forward(hidden_states, null);
         }
         hidden_states = self.norm.forward(hidden_states);
         // project from encoder hidden dim into input audio channel dimension (d -> a, 2048 -> 64)
@@ -690,24 +715,164 @@ pub const AudioCodeEncoder = struct {
         // rename back to [t, p, d], with d now being the audio dimension
         hidden_states = hidden_states.rename(.{ .d_out = .a, .s = .p, .b = .t });
         
-        // depatch time dimension from 5hz * p = 5 to 25hz : [t, p, a] -> [t * p, a]
-        return hidden_states.merge(.{ .t = .{ .t, .p }});
+        // depatch time dimension from 5hz * p = 5 to 25hz : [t, p, a] -> [t * p, a] -> [a, t * p]
+        return hidden_states.merge(.{ .t = .{ .t, .p }}).transpose(.{ .a, .t });
     }
     
 };
 
-pub const AudioCodeDequantizer = struct {
-    project_in: zml.nn.Linear, // for quantization
-    project_out: zml.nn.Linear, // for dequantization
+pub const AudioTokenizer = struct {
+    quantizer: AudioQuantizer,
+    audio_acoustic_proj: zml.nn.Linear,
+    pool_embed_tokens: zml.nn.Linear,
+    pool_layers: []EncoderLayer,
+    pool_norm: RmsNorm,
+    pool_special_token: zml.Tensor,
+    pool_window_size: u32,
+    sliding_window: u32,
+
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: dit.ConfigXl) !AudioTokenizer {
+        const layers = try allocator.alloc(EncoderLayer, config.num_attention_pooler_hidden_layers);
+        errdefer allocator.free(layers);
+        for (layers, 0..) |*layer, i| {
+            layer.* = try .init(@intCast(i), store.withPrefix("tokenizer.attention_pooler.layers").withLayer(i), config);
+        }
+        return .{
+            .audio_acoustic_proj = .init(
+                store.createTensor("tokenizer.audio_acoustic_proj.weight", .{ .d, .a }, null),
+                store.createTensor("tokenizer.audio_acoustic_proj.bias", .{ .d }, null),
+                .a,
+            ),
+            .pool_embed_tokens = .init(
+                store.createTensor("tokenizer.attention_pooler.embed_tokens.weight", .{ .d_out, .d }, null),
+                store.createTensor("tokenizer.attention_pooler.embed_tokens.bias", .{ .d_out }, null),
+                .d,
+            ),
+            .pool_layers = layers,
+            .pool_norm = .init(store.withPrefix("tokenizer.attention_pooler.norm"), config.rms_norm_eps),
+            .pool_special_token = store.createTensor("tokenizer.attention_pooler.special_token", .{ .b, .p, .d }, null),
+            .quantizer = .init(store.withPrefix("tokenizer.quantizer"), config),
+            .pool_window_size = config.pool_window_size,
+            .sliding_window = config.sliding_window,
+        };
+    }
+
+    pub fn deinit(self: AudioTokenizer, allocator: std.mem.Allocator) void {
+        allocator.free(self.pool_layers);
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(AudioTokenizer), allocator: std.mem.Allocator) void {
+        self.audio_acoustic_proj.weight.deinit();
+        if (self.audio_acoustic_proj.bias) |*bias| bias.deinit();
+        self.pool_embed_tokens.weight.deinit();
+        if (self.pool_embed_tokens.bias) |*bias| bias.deinit();
+        for (self.pool_layers) |*layer| {
+            EncoderLayer.unloadBuffers(layer);
+        }
+        allocator.free(self.pool_layers);
+        RmsNorm.unloadBuffers(&self.pool_norm);
+        self.pool_special_token.deinit();
+        AudioQuantizer.unloadBuffers(&self.quantizer);
+    }
+
+    pub fn forward(self: AudioTokenizer, audio_latents: zml.Tensor) zml.Tensor {
+        const patches = audio_latents.withTags(.{ .a, .t }).transpose(.{ .t, .a }).splitAxis(.t, .{ .t_code = .auto, .p = self.pool_window_size });
+        
+        // Project acoustic latents and pool each 25Hz patch group into one 5Hz token embedding.
+        var hidden_states = self.audio_acoustic_proj.forward(patches.withTags(.{ .t_code, .p, .a }));
+        
+        hidden_states = self.pool_embed_tokens.forward(hidden_states).rename(.{ .d_out = .d });
+        const special_shape = zml.Shape.init(.{ .t_code = hidden_states.dim(.t_code), .p = 1, .d = hidden_states.dim(.d) }, hidden_states.dtype());
+        const special_tokens = self.pool_special_token.squeeze(.b).broad(special_shape);
+        hidden_states = zml.Tensor.concatenate(&.{ special_tokens, hidden_states }, .p);
+
+        // Encoder layers process each 5Hz frame independently over the patch dimension.
+        hidden_states = hidden_states.rename(.{ .t_code = .b, .p = .s });
+        for (self.pool_layers) |layer| {
+            hidden_states = layer.forward(hidden_states, null);
+        }
+        hidden_states = self.pool_norm.forward(hidden_states);
+
+        // Extract the special token output as the pooled representation.
+        hidden_states = hidden_states.choose1d(.s, 0).rename(.{ .b = .t_code });
+        
+        return self.quantizer.quantize(hidden_states);
+    }
+
+};
+
+
+pub const AudioQuantizer = struct {
+    project_in: zml.nn.Linear,
     fsq_input_levels: []const u32,
 
-    pub fn init(store: zml.io.TensorStore.View, config: dit.ConfigXl) AudioCodeDequantizer {
+    pub fn init(store: zml.io.TensorStore.View, config: dit.ConfigXl) AudioQuantizer {
         return .{
             .project_in = .init(
                 store.createTensor("project_in.weight", .{ .d_out, .d }, null),
                 store.createTensor("project_in.bias", .{ .d_out }, null),
                 .d,
             ),
+            .fsq_input_levels = config.fsq_input_levels,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(AudioQuantizer)) void {
+        self.project_in.weight.deinit();
+        if (self.project_in.bias) |*bias| bias.deinit();
+    }
+
+    pub fn quantize(self: AudioQuantizer, audio_codes: zml.Tensor) zml.Tensor {
+        const projected = self.project_in.forward(audio_codes.withTags(.{ .t_code, .d })).rename(.{ .d_out = .d }).convert(.f32);
+
+        // ResidualFSQ in ACE-Step uses one FSQ layer with preserve_symmetry=true and bound_hard_clamp=true.
+        // The input is first softly clamped per dimension, then converted to level indices with:
+        // floor((levels - 1) * (clamp(x, -1, 1) + 1) / 2 + 0.5).
+        const levels = self.fsq_input_levels;
+        const idx0 = quantizeLevel(projected.choose1d(.d, 0), levels[0]);
+        const idx1 = quantizeLevel(projected.choose1d(.d, 1), levels[1]);
+        const idx2 = quantizeLevel(projected.choose1d(.d, 2), levels[2]);
+        const idx3 = quantizeLevel(projected.choose1d(.d, 3), levels[3]);
+        const idx4 = quantizeLevel(projected.choose1d(.d, 4), levels[4]);
+        const idx5 = quantizeLevel(projected.choose1d(.d, 5), levels[5]);
+
+        const b0: f32 = 1.0;
+        const b1: f32 = @floatFromInt(levels[0]);
+        const b2: f32 = b1 * @as(f32, @floatFromInt(levels[1]));
+        const b3: f32 = b2 * @as(f32, @floatFromInt(levels[2]));
+        const b4: f32 = b3 * @as(f32, @floatFromInt(levels[3]));
+        const b5: f32 = b4 * @as(f32, @floatFromInt(levels[4]));
+        var indices = idx0.scale(b0);
+        indices = indices.add(idx1.scale(b1));
+        indices = indices.add(idx2.scale(b2));
+        indices = indices.add(idx3.scale(b3));
+        indices = indices.add(idx4.scale(b4));
+        indices = indices.add(idx5.scale(b5));
+
+        return indices.round().convert(.u32);
+    }
+
+    fn quantizeLevel(x: zml.Tensor, level: u32) zml.Tensor {
+        const levels_minus_1: f32 = @floatFromInt(@max(level - 1, 1));
+        const clamp_value = 1.0 + (1.0 / levels_minus_1);
+        const clamped = x.div(zml.Tensor.scalar(clamp_value, .f32).broad(x.shape()))
+            .tanh()
+            .scale(clamp_value)
+            .clamp(
+                zml.Tensor.scalar(-1.0, .f32).broad(x.shape()),
+                zml.Tensor.scalar(1.0, .f32).broad(x.shape()),
+            );
+        const level_index = clamped.addConstant(1.0).scale(levels_minus_1 / 2.0).addConstant(0.5).floor();
+        return level_index;
+    }
+};
+
+pub const AudioDequantizer = struct {
+    project_out: zml.nn.Linear,
+    fsq_input_levels: []const u32,
+
+    pub fn init(store: zml.io.TensorStore.View, config: dit.ConfigXl) AudioDequantizer {
+        return .{
             .project_out = .init(
                 store.createTensor("project_out.weight", .{ .d_out, .d }, null),
                 store.createTensor("project_out.bias", .{ .d_out }, null),
@@ -717,14 +882,12 @@ pub const AudioCodeDequantizer = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(AudioCodeDequantizer)) void {
-        self.project_in.weight.deinit();
-        if (self.project_in.bias) |*bias| bias.deinit();
+    pub fn unloadBuffers(self: *zml.Bufferized(AudioDequantizer)) void {
         self.project_out.weight.deinit();
         if (self.project_out.bias) |*bias| bias.deinit();
     }
 
-    pub fn dequantize(self: AudioCodeDequantizer, audio_codes: zml.Tensor) zml.Tensor {
+    pub fn dequantize(self: AudioDequantizer, audio_codes: zml.Tensor) zml.Tensor {
         const code_ids = audio_codes.withTags(.{ .t_code });
         
         // from ResidualFSQ implementation : this is the implicit codebook

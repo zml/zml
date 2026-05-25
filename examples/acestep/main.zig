@@ -103,6 +103,8 @@ pub const Uri_handler = struct {
     silence: []const u8 = "file://examples//acestep//models//acestep-v15-turbo",
     audio_ref: []const u8 = "file://examples//acestep//references//source.wav",
     style_ref: []const u8 = "file://examples//acestep//references//style.wav",
+    caption_ref: []const u8 = "file://examples//acestep//references//caption.txt",
+    lyrics_ref: []const u8 = "file://examples//acestep//references//lyrics.txt",
 
     pub fn fromLocal(args: Args) Uri_handler {
         return .{
@@ -208,17 +210,23 @@ pub const MemoryChecker = struct {
 const Args = struct {
     prompt: []const u8,
     instru: bool = false,
+    duration: i64 = -1,
+    n: u8 = 1,
+    seed: u32 = 0,
+    
     local_files: bool = false,
     llm_size: u8 = 0,
     dit_size: u8 = 0,
     skip_cfg: bool = false,
-    duration: i64 = -1,
-    n: u8 = 1,
-    use_audio_ref: bool = false,
-    use_style_ref: bool = false,
-    match_level: u8 = 0,
-    cover_strength: u8 = 0,
-    seed: u32 = 0,
+    
+    audio_ref: bool = false,
+    style_ref: bool = false,
+    caption_ref: bool = false,
+    lyrics_ref: bool = false,
+    
+    match_level: u3 = 0,
+    cover_strength: f32 = 0.0,
+    no_fsq: bool = false,
 
     pub const help =
         \\ Use acestep --prompt=<...> [options]
@@ -226,19 +234,30 @@ const Args = struct {
         \\ Run audio generation with the selected models.
         \\
         \\ Options:
-        \\   --prompt=<string>      Prompt to use for generation (required)
-        \\   --instru               Ask for an instrumental audio (default: 0)
-        \\   --local-files          Use local model paths, see README to setup (default: 0)
-        \\   --llm-size=<int>       Size of the 5Hz LLM (0/1/2 for 0.6B/1.7B/4B, default: 0)
-        \\   --dit-size=<int>       Size of the DiT model (0/1 for turbo/turbo-xl, default: 0)
-        \\   --skip-cfg             Optional, disable CFG phase (default: 0)
-        \\   --duration=<number>    Constrains the duration in seconds (required if CFG is disabled, default: -1)
-        \\   --n=<int>              Number of audio files to generate with different seeds for the diffusion (default: 1)
-        \\   --use-audio-ref        Use references/source.wav as source to remix (default: 0)
-        \\   --use-style-ref        Use references/style.wav as style/timbre reference (default: 0)
-        \\   --match-level=<int>    Between 0 (pure noise) and 8 (exact audio ref) to init the diffusion (default: 0)
-        \\   --cover-strength=<int> Between 0 (no cover) and 8 (full cover) iterations in cover mode before switching to non-cover mode (default: 0)
-        \\   --seed=<int>           Random seed (default: 0)
+        \\
+        \\   --prompt=<string>         Prompt to use for generation (required)
+        \\   --instru                  Ask for an instrumental audio (default: 0)
+        \\   --duration=<number>       Constrains the duration in seconds (required if CFG is disabled, default: -1)
+        \\   --n=<int>                 Number of audio files to generate with different seeds for the diffusion (default: 1)
+        \\   --seed=<int>              Random seed (default: 0)
+        \\
+        \\   --local-files             Use local model paths, see README to setup (default: 0)
+        \\   --llm-size=<int>          Size of the 5Hz LLM (0/1/2 for 0.6B/1.7B/4B, default: 0)
+        \\   --dit-size=<int>          Size of the DiT model (0/1 for turbo/turbo-xl, default: 0)
+        \\   --skip-cfg                Disable CFG phase (default: 0)
+        \\
+        \\   --audio-ref               Use references/source.wav as source to remix (default: 0)
+        \\   --style-ref               Use references/style.wav as style/timbre reference (default: 0)
+        \\   --caption-ref             Use references/caption.txt as caption reference (default: 0)
+        \\   --lyrics-ref              Use references/lyrics.txt as lyrics reference (default: 0)
+        \\                             -> text references are used as is, without LLM intervention
+        \\
+        \\   --match-level=<int>       Between 0 (pure noise) and 7 (exact audio ref) to init the diffusion (default: 0)
+        \\                             -> how much structure is preserved in the remix
+        \\   --cover-strength=<float>  Float in [0,1] : the % of diffusion iterations in cover mode before switching to non-cover mode (default: 0)
+        \\                             -> how much texture and details are preserved in the remix
+        \\   --no-fsq                  Disable FSQ quantization for remix (default: 0)
+        \\                             -> do we remix from the exact audio or from a compressed summary ?
         \\
     ;
 };
@@ -265,13 +284,13 @@ const Args = struct {
 // param1 : match_level: dimention iter, in 0-8, initial noise level matches the scheduled noised at iter match_level
 // param2 : cover_strength: dimension iter, in 0-8, has to be >= match_level, how many iters we do in cover mode before switching to non cover
 
-// TODO: essayer de faire lyric remix (flow-edit...)
-// - embed old and new lyric
-// - switch/blend/dice between the two during the diffusion
-
 // TODO: edit mode
 // - repaint a chunk
 // - extend audio
+
+// TODO: essayer de faire lyric remix (flow-edit...)
+// - embed old and new lyric
+// - switch/blend/dice between the two during the diffusion
 
 // still this language issue
 // check :
@@ -313,7 +332,7 @@ pub fn main(init: std.process.Init) !void {
     try printZmlLogo(zml_handler.io);
 
     zml_handler.tic(&zml_handler.timers.total);
-    try runText2MusicPipeline(&zml_handler);
+    try runRemixPipeline(&zml_handler);
     zml_handler.toc(&zml_handler.timers.total);
 
     zml_handler.timers.print();
@@ -498,7 +517,7 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
 
     var input_style: ?inference.AudioFrames = null;
     defer if (input_style) |style| style.deinit(zml_handler.allocator);
-    if (zml_handler.args.use_style_ref) {
+    if (zml_handler.args.style_ref) {
         const style = try importAudio(zml_handler, zml_handler.uris.style_ref);
         defer style.deinit(zml_handler.allocator);
         input_style = try extractSummary(zml_handler, style);
@@ -513,7 +532,7 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
     var audio_latent = try inference.encodeAudioLatents(zml_handler, &acevae_encoder, input_audio);
     defer audio_latent.deinit(zml_handler.allocator);
 
-    const style_latent = if (input_style) try inference.encodeAudioLatents(zml_handler, &acevae_encoder, input_style) else null;
+    const style_latent = if (input_style) |s| try inference.encodeAudioLatents(zml_handler, &acevae_encoder, s) else null;
     defer if (style_latent) |latent| latent.deinit(zml_handler.allocator);
 
     acevae_encoder.unloadBuffers(zml_handler.allocator);
@@ -521,14 +540,25 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
     zml_handler.toc(&zml_handler.timers.vae.total);
 
     // ------------------------------------------------
-    // No 5Hz task in remix mode
+    // No 5Hz task in remix mode, but user can feed data
     // ------------------------------------------------
 
-    const audio_metadata = inference.AudioMetadata.empty(zml_handler.allocator);
+    var audio_metadata = try inference.AudioMetadata.empty(zml_handler.allocator);
     defer audio_metadata.deinit(zml_handler.allocator);
 
-    audio_metadata.setDuration(zml_handler.allocator, audio_latent.duration_s());
+    try audio_metadata.setDuration(zml_handler.allocator, audio_latent.duration_s());
     const duration = audio_latent.duration_s();
+    
+    if (zml_handler.args.caption_ref) {
+        const caption = try importText(zml_handler, zml_handler.uris.caption_ref);
+        defer zml_handler.allocator.free(caption);
+        try audio_metadata.setCaption(zml_handler.allocator, caption);
+    }
+    if (zml_handler.args.lyrics_ref) {
+        const lyrics = try importText(zml_handler, zml_handler.uris.lyrics_ref);
+        defer zml_handler.allocator.free(lyrics);
+        try audio_metadata.setLyric(zml_handler.allocator, lyrics);
+    }
 
     // ------------------------------------------------
     // Embed text inputs for diffusion conditions
@@ -544,9 +574,9 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
     const caption_tok_non_cover = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata, false);
     const caption_tok_cover = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata, true);
     const lyric_tok = try inference.tokenizeInputLyrics(zml_handler.allocator, tokenizer, audio_metadata);
-    defer caption_tok_non_cover.free(zml_handler.allocator);
-    defer caption_tok_cover.free(zml_handler.allocator);
-    defer lyric_tok.free(zml_handler.allocator);
+    defer zml_handler.allocator.free(caption_tok_non_cover);
+    defer zml_handler.allocator.free(caption_tok_cover);
+    defer zml_handler.allocator.free(lyric_tok);
 
     std.log.info("caption_tok_cover: {d}, caption_tok_non_cover: {d}", .{caption_tok_cover.len, caption_tok_non_cover.len});
 
@@ -556,9 +586,9 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
     const caption_emb_non_cover = try inference.embedText(zml_handler, &aceemb, caption_tok_non_cover);
     const caption_emb_cover = try inference.embedText(zml_handler, &aceemb, caption_tok_cover);
     const lyric_emb = try inference.embedLyric(zml_handler, &aceemb, lyric_tok);
-    defer zml_handler.allocator.free(caption_emb_non_cover);
-    defer zml_handler.allocator.free(caption_emb_cover);
-    defer zml_handler.allocator.free(lyric_emb);
+    defer caption_emb_non_cover.free(zml_handler.allocator);
+    defer caption_emb_cover.free(zml_handler.allocator);
+    defer lyric_emb.free(zml_handler.allocator);
 
     aceemb.unloadBuffers(zml_handler.allocator);
 
@@ -576,13 +606,13 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
     defer aceenc.deinit(zml_handler.allocator);
 
     const diffusion_args_cover: inference.ContextLatents = .{
-        .latents = try inference.prepareDiffusionLatents(zml_handler, &aceenc, duration, null, audio_latent),
-        .encoder_conditions = try inference.prepareDiffusionConditions(zml_handler, &aceenc, caption_emb_cover, lyric_emb, style_latent),
+        .latents = try inference.prepareDiffusionLatents(zml_handler, &aceenc, @intCast(duration), null, audio_latent),
+        .conditions = try inference.prepareDiffusionConditions(zml_handler, &aceenc, caption_emb_cover, lyric_emb, style_latent),
     };
     defer diffusion_args_cover.deinit(zml_handler.allocator);
     
     const diffusion_args_non_cover: inference.ContextLatents = .{
-        .latents = try inference.prepareDiffusionLatents(zml_handler, &aceenc, duration, null, null),
+        .latents = try inference.prepareDiffusionLatents(zml_handler, &aceenc, @intCast(duration), null, null),
         .conditions = try inference.prepareDiffusionConditions(zml_handler, &aceenc, caption_emb_non_cover, lyric_emb, style_latent),
     };
     defer diffusion_args_non_cover.deinit(zml_handler.allocator);
@@ -598,7 +628,7 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
 
     zml_handler.tic(&zml_handler.timers.dit.total);
 
-    var acedit = try acedit_.AceDit_handler.init(zml_handler, duration, diffusion_args_cover.conditions.shape.dim(.s));
+    var acedit = try acedit_.AceDit_handler.init(zml_handler, @intCast(duration), diffusion_args_cover.conditions.shape.dim(.s));
     defer acedit.deinit(zml_handler.allocator);
 
     zml_handler.toc(&zml_handler.timers.dit.total);
@@ -653,6 +683,16 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
 
 }
 
+
+pub fn importText(zml_handler: *Zml_handler, input_path: []const u8) ![]u8 {
+    const io = zml_handler.io;
+
+    const file = try std.Io.Dir.openFile(.cwd(), io, input_path, .{});
+    defer file.close(io);
+
+    var reader = file.reader(io, &.{});
+    return try reader.interface.readAlloc(zml_handler.allocator, try file.length(io));
+}
 
 pub fn importAudio(zml_handler: *Zml_handler, input_path: []const u8) !inference.AudioFrames {
     const io = zml_handler.io;
