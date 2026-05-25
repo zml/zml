@@ -637,6 +637,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
             .oneapi => {
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_autotune_level", 0, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "", upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_cublaslt", false, upb_arena);
             },
             else => {},
         }
