@@ -225,7 +225,7 @@ const Args = struct {
     lyrics_ref: bool = false,
     
     match_level: u3 = 0,
-    cover_strength: f32 = 0.0,
+    cover_strength: f32 = 0.5,
     no_fsq: bool = false,
 
     pub const help =
@@ -254,7 +254,7 @@ const Args = struct {
         \\
         \\   --match-level=<int>       Between 0 (pure noise) and 7 (exact audio ref) to init the diffusion (default: 0)
         \\                             -> how much structure is preserved in the remix
-        \\   --cover-strength=<float>  Float in [0,1] : the % of diffusion iterations in cover mode before switching to non-cover mode (default: 0)
+        \\   --cover-strength=<float>  Float in [0,1] : the % of diffusion iterations in cover mode before switching to non-cover mode (default: 0.5)
         \\                             -> how much texture and details are preserved in the remix
         \\   --no-fsq                  Disable FSQ quantization for remix (default: 0)
         \\                             -> do we remix from the exact audio or from a compressed summary ?
