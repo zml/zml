@@ -329,7 +329,7 @@ pub fn tokenizeGenerationPrompt(allocator: std.mem.Allocator, tokenizer: Tokeniz
     //try assistant_cond_prompt.appendSlice(allocator, "\nlanguage: ");
     //try assistant_cond_prompt.appendSlice(allocator, metadata.language);
     try assistant_cond_prompt.appendSlice(allocator, "\ntimesignature: ");
-    try assistant_cond_prompt.appendSlice(allocator, metadata.timesignature[0]);
+    try assistant_cond_prompt.appendSlice(allocator, metadata.timesignature[0..0]);
     try assistant_cond_prompt.appendSlice(allocator, "\n</think>\n\n");
 
     var assistant_uncond_prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
