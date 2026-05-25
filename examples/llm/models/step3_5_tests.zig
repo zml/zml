@@ -100,10 +100,12 @@ fn run(
         //     try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, name, .{ .absolute_tolerance = 1e-2 });
         // }
 
-        const name = try std.fmt.allocPrint(allocator, "model.layers.3.moe", .{});
-        defer allocator.free(name);
+        for (3..45) |layer_idx| {
+            const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.moe", .{layer_idx});
+            defer allocator.free(name);
 
-        try testLayer(allocator, io, platform, activation_store.view(), model_store, .moe, name, name, .{ .absolute_tolerance = 1e-2 });
+            try testLayer(allocator, io, platform, activation_store.view(), model_store, .moe, name, name, .{ .absolute_tolerance = 1e-2 });
+        }
     } else if (TEST_LAYER == 1) {
         // layers 3..44 (45 with 0 indexing but i wont bake it in rn)
 
@@ -162,7 +164,7 @@ fn testLayer(
         },
         .router => {
             //hardcoded k=num_experts_per_tok=8 for now
-            const router = model.Router.init(model_store.view().withPrefix(weights_name), 8);
+            const router = model.Router.init(model_store.view().withPrefix(weights_name), 8, 1);
 
             var router_weights = try zml.io.load(model.Router, &router, allocator, io, platform, model_store, .auto);
             defer deinitBuffers(&router_weights);
