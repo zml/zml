@@ -325,8 +325,8 @@ pub const AceEnc = struct {
             .text_encoder = try .init(store.withPrefix("encoder")),
             .lyric_encoder = try .init(allocator, store.withPrefix("encoder"), config),
             .timbre_encoder = try .init(allocator, store.withPrefix("encoder"), config),
-            .audio_tokenizer = try .init(allocator, store.withPrefix("audio_tokenizer"), config),
-            .audio_detokenizer = try .init(allocator, store.withPrefix("audio_detokenizer"), config),
+            .audio_tokenizer = try .init(allocator, store, config),
+            .audio_detokenizer = try .init(allocator, store, config),
         };
     }
 
