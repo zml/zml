@@ -179,10 +179,10 @@ pub const Router = struct {
         const denom = router_scores.sum(.topk).addConstant(1e-20);
         const normalized = router_scores.div(denom);
 
-        expert_scores.print("zml_gate_prob");
-        expert_scores_with_bias.print("zml_gate_prob_with_bias");
-        router_scores.print("zml_topk_prob");
-        normalized.print("zml_renormalized");
+        // expert_scores.print("zml_gate_prob");
+        // expert_scores_with_bias.print("zml_gate_prob_with_bias");
+        // router_scores.print("zml_topk_prob");
+        // normalized.print("zml_renormalized");
 
         return .{ normalized, topk_ids };
     }
@@ -248,6 +248,10 @@ pub const Moe = struct {
         // `routing_weights = routing_weights * self.routed_scaling_factor`
         const scaled = routing_scores.scale(self.router.routed_scaling_factor);
 
+        // Triton MoE backend expects the top-k axis tagged as `.top_expert`.
+        const topk_ids_te = topk_ids.rename(.{ .topk = .top_expert });
+        const scaled_te = scaled.rename(.{ .topk = .top_expert });
+
         // concat the gate and up
         const gate_up_proj = zml.Tensor.concatenate(&.{ self.gate_proj, self.up_proj }, .dout).rename(.{ .dout = .out, .d = .in });
 
@@ -264,8 +268,8 @@ pub const Moe = struct {
         // NOTE: swiglu limit not considered. may have to edit
         const moe_output = zml.moe.forwardMoe(
             input,
-            topk_ids,
-            scaled,
+            topk_ids_te,
+            scaled_te,
             gate_up_proj,
             null,
             null,
