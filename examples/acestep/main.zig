@@ -208,7 +208,7 @@ pub const MemoryChecker = struct {
 
 
 const Args = struct {
-    prompt: []const u8,
+    prompt: []const u8 = "",
     instru: bool = false,
     duration: i64 = -1,
     n: u8 = 1,
@@ -229,13 +229,13 @@ const Args = struct {
     no_fsq: bool = false,
 
     pub const help =
-        \\ Use acestep --prompt=<...> [options]
+        \\ Use acestep [options]
         \\
         \\ Run audio generation with the selected models.
         \\
         \\ Options:
         \\
-        \\   --prompt=<string>         Prompt to use for generation (required)
+        \\   --prompt=<string>         Prompt to use for generation (default: '')
         \\   --instru                  Ask for an instrumental audio (default: 0)
         \\   --duration=<number>       Constrains the duration in seconds (required if CFG is disabled, default: -1)
         \\   --n=<int>                 Number of audio files to generate with different seeds for the diffusion (default: 1)
