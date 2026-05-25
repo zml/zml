@@ -276,13 +276,7 @@ const Args = struct {
 // info:   wav                                                 0.17s
 // info: total                                                38.81s
 
-// TODO: finir remix basique
-// - check no cover branch, instructions and stuff
-// - export all cases over space of cover/noise strength
-// - implement fsq of the source audio latents
-// - ajouter variance
-// param1 : match_level: dimention iter, in 0-8, initial noise level matches the scheduled noised at iter match_level
-// param2 : cover_strength: dimension iter, in 0-8, has to be >= match_level, how many iters we do in cover mode before switching to non cover
+// TODO: make DiT compiled model time independent with masks and range
 
 // TODO: edit mode
 // - repaint a chunk
@@ -298,7 +292,6 @@ const Args = struct {
 // - caption twice ?
 // - language on metadata
 
-// TODO: make DiT compiled model time independent with masks and range
 // TODO: move model related code from inference to Exes struct inside models
 // TODO: load in parallel as compile
 
