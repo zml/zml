@@ -209,19 +209,6 @@ pub const Model = struct {
         // hands this block argument directly to `update_cache`.
         const token_index = token_index_.squeeze(.pos);
 
-        // TT-FIX: draw Gumbel noise up front (outside the trace body) and
-        // don't return the advanced rng — `ttnn.rand` is non-hoistable, and
-        // returning rng strands `mesh_shard` mid-graph (`Non-hoistable op
-        // found in the middle of hoistable ops`).
-        var gumbel_noise: ?zml.Tensor = null;
-        if (self.gen_opts.topk > 1) {
-            const noise_shape = zml.Shape.init(
-                .{ .b = tokens.dim(.b), .s = 1, .topk = self.gen_opts.topk },
-                .f32,
-            );
-            gumbel_noise = rng.gumbel(noise_shape)[1];
-        }
-
         const out, const updated_kv_cache = self.model.forward(
             tokens,
             token_index,
@@ -242,7 +229,7 @@ pub const Model = struct {
                     .convert(out.dtype());
                 break :sel out.dot(onehot, .s).insertAxes(.d, .{.s});
             };
-            const sampled = self.sampleTokens(self.lm_head, out_last, gumbel_noise, self.gen_opts);
+            const sampled, _ = self.sampleTokens(self.lm_head, out_last, rng, self.gen_opts);
             const toks = if (out.dim(.s) == 1)
                 sampled.convert(tokens.dtype())
             else tok: {
@@ -259,6 +246,9 @@ pub const Model = struct {
             break :blk toks;
         };
 
+        // Drop the advanced rng: on TT, returning it makes
+        // TTNNTraceHoistTransform append a `to_layout` after the epilogue's
+        // `mesh_shard` ops, stranding them mid-graph.
         return .{ new_tokens.reuseBuffer(tokens), updated_kv_cache };
     }
 
@@ -266,36 +256,42 @@ pub const Model = struct {
         self: Model,
         lm_head_: ?zml.nn.Linear,
         out_: zml.Tensor,
-        gumbel_noise: ?zml.Tensor,
+        rng: zml.Tensor.Rng,
         opts: zml.nn.SamplingStrategy,
-    ) zml.Tensor {
+    ) struct { zml.Tensor, zml.Tensor.Rng } {
         const out = out_.withPartialTags(.{ .s, .d });
-
-        var logits = blk: {
-            // TT-FIX: `.s`-leading transpose around lm_head — rank-3
-            // [B,S=1,N] otherwise pads to [1,B,1,N] for reduce_scatter where
-            // `.s=1` next-to-last tile-pads each batch row to 32 → 32x blowup.
-            const out_t = out.transpose(.{ .s, .b, .d });
-            if (lm_head_) |lm_head| {
-                break :blk lm_head.forward(out_t).rename(.{ .dout = .d }).transpose(.{ .b, .s, .d });
-            } else {
-                break :blk out_t.dot(self.model.embed_tokens.weight.withTags(.{ .voc, .d }), .d).transpose(.{ .b, .s, .voc });
-            }
-        };
-
-        if (logits.shape().hasTag(.voc) == null)
-            logits = logits.rename(.{ .d = .voc });
-
-        if (opts.topk <= 1) return logits.argMax(.voc).indices.squeeze(.voc);
-
-        const topk = logits.topK(.{ .topk = .voc }, opts.topk, .{});
-        var x = topk.values;
-        if (opts.temperature != 1.0) {
-            x = x.scale(1 / opts.temperature);
+        const ctx = zml.module.CompilationContext.current();
+        switch (ctx.platform.target) {
+            .tt => {
+                // TT-FIX: `.s`-leading transpose around lm_head — rank-3
+                // [B,S=1,N] otherwise pads to [1,B,1,N] for reduce_scatter
+                // where `.s=1` next-to-last tile-pads each batch row to 32.
+                const out_t = out.transpose(.{ .s, .b, .d });
+                var logits = if (lm_head_) |lm_head|
+                    lm_head.forward(out_t).rename(.{ .dout = .d }).transpose(.{ .b, .s, .d })
+                else
+                    out_t.dot(self.model.embed_tokens.weight.withTags(.{ .voc, .d }), .d).transpose(.{ .b, .s, .voc });
+                if (logits.shape().hasTag(.voc) == null) logits = logits.rename(.{ .d = .voc });
+                if (opts.topk <= 1) return .{ logits.argMax(.voc).indices.squeeze(.voc), rng };
+                // TT-FIX: tt.sampling broken at trace + opt>=1 (tt-xla #4570);
+                // dead-coded at topk=1, set ZML_TT_OPTIMIZATION_LEVEL=0 otherwise.
+                const topk = logits.topK(.{ .topk = .voc }, opts.topk, .{});
+                const token = tt_nn.sampling(topk.values.squeeze(.s), topk.indices.squeeze(.s), opts).insertAxes(.last, .{.s});
+                return .{ token, rng };
+            },
+            .cpu, .cuda, .rocm, .tpu, .neuron => {
+                var logits = blk: {
+                    if (lm_head_) |lm_head| {
+                        break :blk lm_head.forward(out).rename(.{ .dout = .d });
+                    } else {
+                        break :blk self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .d);
+                    }
+                };
+                if (logits.shape().hasTag(.voc) == null) logits = logits.rename(.{ .d = .voc });
+                const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
+                return .{ next_tokens, new_rng };
+            },
         }
-        x = x.add(gumbel_noise.?.convert(x.dtype()).transpose(x.shape()));
-        const topk_idx = x.argMax(.topk).indices;
-        return topk.indices.gather(.{ .topk = topk_idx.squeeze(.topk) }, .{});
     }
 };
 

@@ -2,8 +2,6 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
-const dialects = @import("mlir/dialects");
-const mlir = @import("mlir");
 
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
@@ -12,8 +10,6 @@ const Shape = @import("shape.zig").Shape;
 const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
 const zml = @import("zml.zig");
-const mlirx = @import("mlirx.zig");
-const CompilationContext = @import("module.zig").CompilationContext;
 
 const log = std.log.scoped(.@"zml/nn");
 
