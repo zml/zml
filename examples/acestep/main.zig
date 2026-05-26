@@ -337,6 +337,33 @@ pub fn main(init: std.process.Init) !void {
 pub fn runText2MusicPipeline(zml_handler: *Zml_handler) !void {
 
     // ------------------------------------------------
+    // Read/encode style reference
+    // ------------------------------------------------
+
+    zml_handler.tic(&zml_handler.timers.wav);
+
+    var input_style: ?inference.AudioFrames = null;
+    defer if (input_style) |style| style.deinit(zml_handler.allocator);
+    if (zml_handler.args.style_ref) {
+        const style = try importAudio(zml_handler, zml_handler.uris.style_ref);
+        defer style.deinit(zml_handler.allocator);
+        input_style = try extractSummary(zml_handler, style);
+    }
+
+    zml_handler.toc(&zml_handler.timers.wav);
+    zml_handler.tic(&zml_handler.timers.vae.total);
+
+    var acevae_encoder = try acevae_.AceVaeEncoder_handler.init(zml_handler);
+    defer acevae_encoder.deinit(zml_handler.allocator);
+
+    const style_latent = if (input_style) |s| try inference.encodeAudioLatents(zml_handler, &acevae_encoder, s) else null;
+    defer if (style_latent) |latent| latent.deinit(zml_handler.allocator);
+
+    acevae_encoder.unloadBuffers(zml_handler.allocator);
+
+    zml_handler.toc(&zml_handler.timers.vae.total);
+    
+    // ------------------------------------------------
     // Thinking/Inspiration phase : 5Hz LLM model
     // ------------------------------------------------
 
@@ -430,7 +457,7 @@ pub fn runText2MusicPipeline(zml_handler: *Zml_handler) !void {
     zml_handler.mem.start(0);
     const diffusion_args: inference.ContextLatents = .{
         .latents = try inference.prepareDiffusionLatents(zml_handler, &aceenc, duration, int_codes, null),
-        .conditions = try inference.prepareDiffusionConditions(zml_handler, &aceenc, caption_emb, lyric_emb, null),
+        .conditions = try inference.prepareDiffusionConditions(zml_handler, &aceenc, caption_emb, lyric_emb, style_latent),
     };
     defer diffusion_args.deinit(zml_handler.allocator);
     zml_handler.mem.check(0);
