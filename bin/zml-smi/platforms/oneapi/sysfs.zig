@@ -1,19 +1,19 @@
 const std = @import("std");
 const smi_sysfs = @import("zml-smi/sysfs");
 
-pub const bdf_len = "0000:00:00.0".len;
+pub const bus_device_function_len = "0000:00:00.0".len;
 
 pub const Handle = struct {
     render_idx: usize,
     drm_path: []const u8,
     dev_path: []const u8,
     hwmon_path: ?[]const u8,
-    bdf: ?[bdf_len]u8,
+    bus_device_function: ?[bus_device_function_len]u8,
 };
 
 pub const Target = struct {
     device_idx: u16,
-    bdf: ?[bdf_len]u8,
+    bus_device_function: ?[bus_device_function_len]u8,
 };
 
 pub const EnergySample = struct {
@@ -85,7 +85,7 @@ fn openHandle(allocator: std.mem.Allocator, io: std.Io, render_idx: usize) !Hand
         .drm_path = drm_path,
         .dev_path = dev_path,
         .hwmon_path = findHwmon(allocator, io, dev_path) catch null,
-        .bdf = readBdf(allocator, io, dev_path) catch null,
+        .bus_device_function = readBdf(allocator, io, dev_path) catch null,
     };
 }
 
@@ -213,7 +213,8 @@ pub fn collectProcessUsage(allocator: std.mem.Allocator, io: std.Io, targets: []
             var file_path_buf: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
             const file_path = std.fmt.bufPrintZ(&file_path_buf, "{s}/{s}", .{ fdinfo_path, fd_entry.name }) catch continue;
             const parsed = parseFdinfoFile(file_path, now_ns) catch continue;
-            const dev_idx = matchTarget(targets, parsed.bdf orelse continue) orelse continue;
+            const bus_device_function = parsed.bus_device_function orelse continue;
+            const dev_idx = matchTarget(targets, bus_device_function) orelse continue;
             const key = processKey(pid, dev_idx);
             const gop = try result.getOrPut(allocator, key);
             if (!gop.found_existing) {
@@ -282,13 +283,13 @@ fn findHwmon(allocator: std.mem.Allocator, io: std.Io, dev_path: []const u8) !?[
     return null;
 }
 
-fn readBdf(allocator: std.mem.Allocator, io: std.Io, dev_path: []const u8) ![bdf_len]u8 {
+fn readBdf(allocator: std.mem.Allocator, io: std.Io, dev_path: []const u8) ![bus_device_function_len]u8 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/uevent", .{dev_path});
     const raw = try smi_sysfs.readFieldString(allocator, io, path, "PCI_SLOT_NAME=");
     const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
-    if (trimmed.len != bdf_len) return error.not_found;
-    var out: [bdf_len]u8 = undefined;
+    if (trimmed.len != bus_device_function_len) return error.not_found;
+    var out: [bus_device_function_len]u8 = undefined;
     @memcpy(&out, trimmed);
     return out;
 }
@@ -383,7 +384,7 @@ const FdinfoSample = struct {
 };
 
 const ParsedFdinfo = struct {
-    bdf: ?[bdf_len]u8 = null,
+    bus_device_function: ?[bus_device_function_len]u8 = null,
     sample: FdinfoSample = .{},
     resident_vram_kib: u64 = 0,
     total_vram_kib: u64 = 0,
@@ -460,7 +461,7 @@ fn finishFdinfo(self: *ParsedFdinfo) void {
 
 fn parseFdinfoLine(parsed: *ParsedFdinfo, line: []const u8, timestamp_ns: u64) void {
     if (std.mem.startsWith(u8, line, "drm-pdev:")) {
-        parsed.bdf = parseBdf(line["drm-pdev:".len..]);
+        parsed.bus_device_function = parseBdf(line["drm-pdev:".len..]);
         return;
     }
 
@@ -541,10 +542,10 @@ fn mergeProcessSample(dst: *ProcessSample, src: FdinfoSample) void {
     }
 }
 
-fn matchTarget(targets: []const Target, bdf: [bdf_len]u8) ?u16 {
+fn matchTarget(targets: []const Target, bus_device_function: [bus_device_function_len]u8) ?u16 {
     for (targets) |target| {
-        if (target.bdf) |target_bdf| {
-            if (std.mem.eql(u8, &target_bdf, &bdf)) return target.device_idx;
+        if (target.bus_device_function) |target_bus_device_function| {
+            if (std.mem.eql(u8, &target_bus_device_function, &bus_device_function)) return target.device_idx;
         }
     }
     return null;
@@ -561,8 +562,8 @@ pub const BdfParts = struct {
     function: u32,
 };
 
-pub fn formatBdf(parts: BdfParts) [bdf_len]u8 {
-    var buf: [bdf_len]u8 = undefined;
+pub fn formatBdf(parts: BdfParts) [bus_device_function_len]u8 {
+    var buf: [bus_device_function_len]u8 = undefined;
     _ = std.fmt.bufPrint(&buf, "{x:0>4}:{x:0>2}:{x:0>2}.{x}", .{
         parts.domain,
         parts.bus,
@@ -572,11 +573,11 @@ pub fn formatBdf(parts: BdfParts) [bdf_len]u8 {
     return buf;
 }
 
-fn parseBdf(raw: []const u8) ?[bdf_len]u8 {
+fn parseBdf(raw: []const u8) ?[bus_device_function_len]u8 {
     const trimmed = std.mem.trim(u8, raw, " \t\n");
-    var out: [bdf_len]u8 = undefined;
-    if (trimmed.len == bdf_len) {
-        @memcpy(&out, trimmed[0..bdf_len]);
+    var out: [bus_device_function_len]u8 = undefined;
+    if (trimmed.len == bus_device_function_len) {
+        @memcpy(&out, trimmed[0..bus_device_function_len]);
         return out;
     }
     if (trimmed.len == "00:00.0".len) {
@@ -610,8 +611,8 @@ test "oneAPI fdinfo parser" {
     parseFdinfoLine(&parsed, "drm-engine-compute:\t50 ns", 10);
     finishFdinfo(&parsed);
 
-    try std.testing.expect(parsed.bdf != null);
-    try std.testing.expectEqualSlices(u8, "0000:03:00.0", &parsed.bdf.?);
+    try std.testing.expect(parsed.bus_device_function != null);
+    try std.testing.expectEqualSlices(u8, "0000:03:00.0", &parsed.bus_device_function.?);
     try std.testing.expectEqual(@as(?u64, 2048), parsed.sample.mem_kib);
     try std.testing.expectEqual(@as(u64, 150), parsed.sample.engine.?.engine_ns);
 }

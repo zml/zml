@@ -12,7 +12,6 @@ pub fn start(collector: *Collector) !void {
     oneapi.* = try OneApi.init(collector.arena, collector.io);
 
     const dev_offset: u16 = @intCast(collector.device_infos.items.len);
-    var warmups: std.ArrayList(Warmup) = .empty;
     var process_targets: std.ArrayList(process.Target) = .empty;
 
     for (0..oneapi.deviceCount()) |i| {
@@ -22,10 +21,10 @@ pub fn start(collector: *Collector) !void {
         const initial = dev.initial(collector.arena);
         const info = try collector.addDevice(.{ .oneapi = .{ .values = .{ initial, initial } } });
 
-        try collector.spawnPoll(pollOnce, .{ poll_arena, collector.io, &info.oneapi, dev });
         if (collector.poll_only) {
-            try warmups.append(collector.arena, .{ .arena = poll_arena, .db = &info.oneapi, .dev = dev });
+            pollOnce(poll_arena, collector.io, &info.oneapi, dev);
         }
+        try collector.spawnPoll(pollOnce, .{ poll_arena, collector.io, &info.oneapi, dev });
         try process_targets.append(collector.arena, dev.target());
     }
 
@@ -33,19 +32,7 @@ pub fn start(collector: *Collector) !void {
 
     const processes = try collector.createProcessList();
     try process.init(collector, processes, try process_targets.toOwnedSlice(collector.arena));
-
-    if (collector.poll_only) {
-        for (warmups.items) |warmup| {
-            pollOnce(warmup.arena, collector.io, warmup.db, warmup.dev);
-        }
-    }
 }
-
-const Warmup = struct {
-    arena: *std.heap.ArenaAllocator,
-    db: *DoubleBuffer(GpuInfo),
-    dev: *Device,
-};
 
 fn pollOnce(arena: *std.heap.ArenaAllocator, io: std.Io, db: *DoubleBuffer(GpuInfo), dev: *Device) void {
     _ = arena.reset(.retain_capacity);

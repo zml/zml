@@ -30,7 +30,7 @@ pub fn handleByIndex(self: OneApi, device_id: usize) !Handle {
 
 pub fn target(self: OneApi, handle: Handle, device_idx: u16) Target {
     _ = self;
-    return .{ .device_idx = device_idx, .bdf = handle.bdf };
+    return .{ .device_idx = device_idx, .bus_device_function = handle.bus_device_function };
 }
 
 pub fn name(self: OneApi, allocator: std.mem.Allocator, handle: Handle) ![]const u8 {
