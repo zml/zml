@@ -1,0 +1,35 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+
+filegroup(
+    name = "plugin_tree",
+    srcs = glob(
+        [
+            "pjrt_plugin_tt/**",
+            "pjrt_plugin_tt.libs/**",
+        ],
+        exclude = [
+            "pjrt_plugin_tt/__init__.py",
+            "pjrt_plugin_tt/wrapper.py",
+        ],
+    ),
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":plugin_tree",
+        "@libsfpi//:files",
+    ],
+    replace_prefixes = {
+        "compiler": "pjrt_plugin_tt/tt-metal/runtime/sfpi/compiler",
+        "include": "pjrt_plugin_tt/tt-metal/runtime/sfpi/include",
+    },
+    add_directory_to_runfiles = True,
+    include_external_repositories = ["**"],
+)
+
+cc_library(
+    name = "libpjrt_tt",
+    data = [":sandbox"],
+    visibility = ["@zml//platforms/tt:__subpackages__"],
+)
