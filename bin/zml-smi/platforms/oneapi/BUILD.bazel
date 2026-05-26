@@ -5,7 +5,9 @@ zig_library(
     import_name = "zml-smi/platforms/oneapi",
     main = "metrics.zig",
     srcs = [
+        "oneapi.zig",
         "process.zig",
+        "sysfs.zig",
     ],
     visibility = ["//visibility:public"],
     deps = [

@@ -1,0 +1,679 @@
+const std = @import("std");
+const smi_sysfs = @import("zml-smi/sysfs");
+
+pub const bdf_len = "0000:00:00.0".len;
+
+pub const Handle = struct {
+    render_idx: usize,
+    drm_path: []const u8,
+    dev_path: []const u8,
+    hwmon_path: ?[]const u8,
+    bdf: ?[bdf_len]u8,
+};
+
+pub const Target = struct {
+    device_idx: u16,
+    bdf: ?[bdf_len]u8,
+};
+
+pub const EnergySample = struct {
+    micro_joules: u64,
+    timestamp_ns: u64,
+};
+
+pub const EngineSample = struct {
+    engine_ns: u64,
+    timestamp_ns: u64,
+};
+
+pub const DeviceSample = struct {
+    mem_kib: u64 = 0,
+    engine: ?EngineSample = null,
+};
+
+pub const ProcessSample = struct {
+    pid: u32,
+    device_idx: u16,
+    mem_kib: ?u64 = null,
+    engine: ?EngineSample = null,
+};
+
+pub const ProcessUsage = std.AutoHashMapUnmanaged(u64, ProcessSample);
+pub const DeviceUsage = std.AutoHashMapUnmanaged(u16, DeviceSample);
+
+pub fn discoverIntelDevices(allocator: std.mem.Allocator, io: std.Io) ![]Handle {
+    var handles: std.ArrayList(Handle) = .empty;
+    errdefer handles.deinit(allocator);
+
+    var dir = std.Io.Dir.openDirAbsolute(io, "/dev/dri", .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return &.{},
+        else => |e| return e,
+    };
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        const render_idx = parseRenderIndex(entry.name) orelse continue;
+        const handle = openHandle(allocator, io, render_idx) catch continue;
+        try handles.append(allocator, handle);
+    }
+
+    std.mem.sort(Handle, handles.items, {}, struct {
+        fn lessThan(_: void, lhs: Handle, rhs: Handle) bool {
+            return lhs.render_idx < rhs.render_idx;
+        }
+    }.lessThan);
+    return handles.toOwnedSlice(allocator);
+}
+
+fn openHandle(allocator: std.mem.Allocator, io: std.Io, render_idx: usize) !Handle {
+    const drm_path = try std.fmt.allocPrint(allocator, "/sys/class/drm/renderD{d}", .{render_idx});
+    errdefer allocator.free(drm_path);
+
+    const dev_path = try std.fmt.allocPrint(allocator, "{s}/device", .{drm_path});
+    errdefer allocator.free(dev_path);
+
+    var vendor_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const vendor_path = try std.fmt.bufPrint(&vendor_path_buf, "{s}/vendor", .{dev_path});
+    const vendor = try smi_sysfs.readString(allocator, io, vendor_path);
+    if (!std.mem.eql(u8, std.mem.trim(u8, vendor, &std.ascii.whitespace), "0x8086")) {
+        return error.not_intel;
+    }
+
+    return .{
+        .render_idx = render_idx,
+        .drm_path = drm_path,
+        .dev_path = dev_path,
+        .hwmon_path = findHwmon(allocator, io, dev_path) catch null,
+        .bdf = readBdf(allocator, io, dev_path) catch null,
+    };
+}
+
+pub fn deviceId(allocator: std.mem.Allocator, io: std.Io, handle: Handle) ![]const u8 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/device", .{handle.dev_path});
+    const raw = try smi_sysfs.readString(allocator, io, path);
+    return std.mem.trim(u8, raw, &std.ascii.whitespace);
+}
+
+pub fn driverVersion(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
+    const version = smi_sysfs.readString(allocator, io, "/sys/module/xe/version") catch
+        smi_sysfs.readString(allocator, io, "/sys/module/xe/srcversion") catch
+        smi_sysfs.readString(allocator, io, "/sys/module/i915/version") catch
+        try smi_sysfs.readString(allocator, io, "/sys/module/i915/srcversion");
+    const trimmed = std.mem.trim(u8, version, &std.ascii.whitespace);
+    if (trimmed.len == 0) return error.not_found;
+    return trimmed;
+}
+
+pub fn temperature(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
+    const hwmon = handle.hwmon_path orelse return error.not_found;
+    const milli_c = readHwmonInput(allocator, io, hwmon, "temp", "pkg") catch
+        readHwmonInput(allocator, io, hwmon, "temp", "gpu") catch
+        readNumberedInput(allocator, io, hwmon, "temp", 2) catch
+        try readNumberedInput(allocator, io, hwmon, "temp", 1);
+    return (milli_c + 500) / 1000;
+}
+
+pub fn energy(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !EnergySample {
+    const hwmon = handle.hwmon_path orelse return error.not_found;
+    const micro_joules = readHwmonInput(allocator, io, hwmon, "energy", "card") catch
+        readHwmonInput(allocator, io, hwmon, "energy", "pkg") catch
+        try readNumberedInput(allocator, io, hwmon, "energy", 1);
+    return .{
+        .micro_joules = micro_joules,
+        .timestamp_ns = @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds),
+    };
+}
+
+pub fn powerLimit(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
+    const hwmon = handle.hwmon_path orelse return error.not_found;
+    const microwatts = readNumberedSuffix(allocator, io, hwmon, "power", 1, "cap") catch
+        try readNumberedSuffix(allocator, io, hwmon, "power", 1, "max");
+    return microwatts / 1000;
+}
+
+pub fn clockGraphics(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
+    return readFreq(allocator, io, handle, "act_freq") catch readFreq(allocator, io, handle, "cur_freq");
+}
+
+pub fn maxClockGraphics(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
+    return readFreq(allocator, io, handle, "max_freq");
+}
+
+pub fn memTotal(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/resource", .{handle.dev_path});
+    return readLargestResource(allocator, io, path);
+}
+
+pub fn pcieLinkGen(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_speed", .{handle.dev_path});
+    const raw = try smi_sysfs.readString(allocator, io, path);
+    return pcieGenFromSpeed(raw);
+}
+
+pub fn pcieLinkWidth(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_width", .{handle.dev_path});
+    return smi_sysfs.readInt(allocator, io, path);
+}
+
+pub fn pcieBandwidth(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
+    const gen = try pcieLinkGen(allocator, io, handle);
+    const width = try pcieLinkWidth(allocator, io, handle);
+    return pcieBandwidthFromLink(gen, width) orelse error.not_found;
+}
+
+pub fn collectDeviceUsage(allocator: std.mem.Allocator, io: std.Io, targets: []const Target) !DeviceUsage {
+    var processes = try collectProcessUsage(allocator, io, targets);
+    defer processes.deinit(allocator);
+
+    var result: DeviceUsage = .{};
+    errdefer result.deinit(allocator);
+
+    var it = processes.iterator();
+    while (it.next()) |entry| {
+        const sample = entry.value_ptr.*;
+        const gop = try result.getOrPut(allocator, sample.device_idx);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        if (sample.mem_kib) |mem| gop.value_ptr.mem_kib += mem;
+        if (sample.engine) |engine| {
+            const current = gop.value_ptr.engine orelse EngineSample{ .engine_ns = 0, .timestamp_ns = engine.timestamp_ns };
+            gop.value_ptr.engine = .{
+                .engine_ns = current.engine_ns + engine.engine_ns,
+                .timestamp_ns = engine.timestamp_ns,
+            };
+        }
+    }
+
+    return result;
+}
+
+pub fn collectProcessUsage(allocator: std.mem.Allocator, io: std.Io, targets: []const Target) !ProcessUsage {
+    var result: ProcessUsage = .{};
+    errdefer result.deinit(allocator);
+
+    var proc_dir = try std.Io.Dir.openDirAbsolute(io, "/proc", .{ .iterate = true });
+    defer proc_dir.close(io);
+
+    const now_ns: u64 = @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds);
+    var proc_it = proc_dir.iterate();
+    while (proc_it.next(io) catch null) |proc_entry| {
+        const pid = std.fmt.parseInt(u32, proc_entry.name, 10) catch continue;
+
+        var fdinfo_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const fdinfo_path = std.fmt.bufPrint(&fdinfo_path_buf, "/proc/{d}/fdinfo", .{pid}) catch continue;
+        var fdinfo_dir = std.Io.Dir.openDirAbsolute(io, fdinfo_path, .{ .iterate = true }) catch continue;
+        defer fdinfo_dir.close(io);
+
+        var fd_it = fdinfo_dir.iterate();
+        while (fd_it.next(io) catch null) |fd_entry| {
+            var file_path_buf: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
+            const file_path = std.fmt.bufPrintZ(&file_path_buf, "{s}/{s}", .{ fdinfo_path, fd_entry.name }) catch continue;
+            const parsed = parseFdinfoFile(file_path, now_ns) catch continue;
+            const dev_idx = matchTarget(targets, parsed.bdf orelse continue) orelse continue;
+            const key = processKey(pid, dev_idx);
+            const gop = try result.getOrPut(allocator, key);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .{ .pid = pid, .device_idx = dev_idx };
+            }
+            mergeProcessSample(gop.value_ptr, parsed.sample);
+        }
+    }
+
+    return result;
+}
+
+pub fn processUtil(previous: ?EngineSample, current: ?EngineSample) ?u16 {
+    const prev = previous orelse return null;
+    const cur = current orelse return null;
+    if (cur.timestamp_ns <= prev.timestamp_ns or cur.engine_ns < prev.engine_ns) return null;
+    const engine_delta = cur.engine_ns - prev.engine_ns;
+    const time_delta = cur.timestamp_ns - prev.timestamp_ns;
+    if (time_delta == 0) return null;
+    const pct = @min(engine_delta * 100 / time_delta, 100);
+    return @intCast(if (pct == 0 and engine_delta > 0) 1 else pct);
+}
+
+pub fn powerMilliwatts(previous: ?EnergySample, current: ?EnergySample) ?u64 {
+    const prev = previous orelse return null;
+    const cur = current orelse return null;
+    return milliwattsFromEnergyDelta(prev.micro_joules, cur.micro_joules, prev.timestamp_ns, cur.timestamp_ns);
+}
+
+pub fn milliwattsFromEnergyDelta(prev_uj: u64, cur_uj: u64, prev_ns: u64, cur_ns: u64) ?u64 {
+    if (cur_uj < prev_uj or cur_ns <= prev_ns) return null;
+    const energy_delta = cur_uj - prev_uj;
+    const time_delta = cur_ns - prev_ns;
+    if (time_delta == 0) return null;
+    return energy_delta * 1_000_000 / time_delta;
+}
+
+fn readFreq(allocator: std.mem.Allocator, io: std.Io, handle: Handle, file: []const u8) !u64 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/tile0/gt0/freq0/{s}", .{ handle.dev_path, file });
+    return smi_sysfs.readInt(allocator, io, path);
+}
+
+fn parseRenderIndex(name: []const u8) ?usize {
+    if (!std.mem.startsWith(u8, name, "renderD")) return null;
+    return std.fmt.parseInt(usize, name["renderD".len..], 10) catch null;
+}
+
+fn findHwmon(allocator: std.mem.Allocator, io: std.Io, dev_path: []const u8) !?[]const u8 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const hwmon_root = try std.fmt.bufPrint(&path_buf, "{s}/hwmon", .{dev_path});
+    var dir = std.Io.Dir.openDirAbsolute(io, hwmon_root, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "hwmon")) continue;
+        const candidate = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ hwmon_root, entry.name });
+        var name_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const name_path = try std.fmt.bufPrint(&name_buf, "{s}/name", .{candidate});
+        const name = smi_sysfs.readString(allocator, io, name_path) catch return candidate;
+        const trimmed = std.mem.trim(u8, name, &std.ascii.whitespace);
+        if (std.mem.eql(u8, trimmed, "xe") or std.mem.eql(u8, trimmed, "i915")) return candidate;
+        allocator.free(candidate);
+    }
+    return null;
+}
+
+fn readBdf(allocator: std.mem.Allocator, io: std.Io, dev_path: []const u8) ![bdf_len]u8 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/uevent", .{dev_path});
+    const raw = try smi_sysfs.readFieldString(allocator, io, path, "PCI_SLOT_NAME=");
+    const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
+    if (trimmed.len != bdf_len) return error.not_found;
+    var out: [bdf_len]u8 = undefined;
+    @memcpy(&out, trimmed);
+    return out;
+}
+
+fn readHwmonInput(allocator: std.mem.Allocator, io: std.Io, hwmon: []const u8, comptime prefix: []const u8, label: []const u8) !u64 {
+    for (1..16) |idx| {
+        var label_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const label_path = try std.fmt.bufPrint(&label_path_buf, "{s}/{s}{d}_label", .{ hwmon, prefix, idx });
+        const raw = smi_sysfs.readString(allocator, io, label_path) catch continue;
+        const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
+        if (!std.ascii.eqlIgnoreCase(trimmed, label)) continue;
+        return readNumberedInput(allocator, io, hwmon, prefix, idx);
+    }
+    return error.not_found;
+}
+
+inline fn readNumberedInput(allocator: std.mem.Allocator, io: std.Io, hwmon: []const u8, comptime prefix: []const u8, idx: usize) !u64 {
+    return readNumberedSuffix(allocator, io, hwmon, prefix, idx, "input");
+}
+
+inline fn readNumberedSuffix(allocator: std.mem.Allocator, io: std.Io, hwmon: []const u8, comptime prefix: []const u8, idx: usize, suffix: []const u8) !u64 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}{d}_{s}", .{ hwmon, prefix, idx, suffix });
+    return smi_sysfs.readInt(allocator, io, path);
+}
+
+fn readLargestResource(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !u64 {
+    var file = try std.Io.Dir.openFile(.cwd(), io, path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    var read_buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+    var line_writer: std.Io.Writer.Allocating = .init(allocator);
+    defer line_writer.deinit();
+
+    var largest: u64 = 0;
+    while (true) {
+        line_writer.clearRetainingCapacity();
+        _ = reader.interface.streamDelimiter(&line_writer.writer, '\n') catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => |e| return e,
+        };
+        reader.interface.toss(1);
+        largest = @max(largest, resourceLineSize(line_writer.written()) orelse 0);
+    }
+    if (largest == 0) return error.not_found;
+    return largest;
+}
+
+fn resourceLineSize(line: []const u8) ?u64 {
+    var it = std.mem.tokenizeAny(u8, line, " \t");
+    const base = parseHex(it.next() orelse return null) orelse return null;
+    const end = parseHex(it.next() orelse return null) orelse return null;
+    if (end < base) return null;
+    const size = end - base + 1;
+    return if (size >= 256 * 1024 * 1024) size else null;
+}
+
+fn parseHex(raw: []const u8) ?u64 {
+    const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
+    const digits = if (std.mem.startsWith(u8, trimmed, "0x")) trimmed[2..] else trimmed;
+    return std.fmt.parseInt(u64, digits, 16) catch null;
+}
+
+fn pcieGenFromSpeed(raw: []const u8) !u64 {
+    const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
+    if (std.mem.startsWith(u8, trimmed, "2.5")) return 1;
+    if (std.mem.startsWith(u8, trimmed, "5.0") or std.mem.startsWith(u8, trimmed, "5 ")) return 2;
+    if (std.mem.startsWith(u8, trimmed, "8.0") or std.mem.startsWith(u8, trimmed, "8 ")) return 3;
+    if (std.mem.startsWith(u8, trimmed, "16.0") or std.mem.startsWith(u8, trimmed, "16 ")) return 4;
+    if (std.mem.startsWith(u8, trimmed, "32.0") or std.mem.startsWith(u8, trimmed, "32 ")) return 5;
+    if (std.mem.startsWith(u8, trimmed, "64.0") or std.mem.startsWith(u8, trimmed, "64 ")) return 6;
+    return error.not_found;
+}
+
+fn pcieBandwidthFromLink(gen: u64, width: u64) ?u64 {
+    const lane_mb_s: u64 = switch (gen) {
+        1 => 250,
+        2 => 500,
+        3 => 985,
+        4 => 1969,
+        5 => 3938,
+        6 => 7563,
+        else => return null,
+    };
+    return lane_mb_s * width;
+}
+
+const FdinfoSample = struct {
+    mem_kib: ?u64 = null,
+    engine: ?EngineSample = null,
+};
+
+const ParsedFdinfo = struct {
+    bdf: ?[bdf_len]u8 = null,
+    sample: FdinfoSample = .{},
+    resident_vram_kib: u64 = 0,
+    total_vram_kib: u64 = 0,
+    resident_memory_kib: u64 = 0,
+    total_memory_kib: u64 = 0,
+    cycle_counter: u64 = 0,
+    total_cycle_counter: u64 = 0,
+    engine_time_seen: bool = false,
+};
+
+fn parseFdinfoFile(path: [:0]const u8, timestamp_ns: u64) !ParsedFdinfo {
+    const linux = std.os.linux;
+    const open_rc = linux.open(path.ptr, .{
+        .ACCMODE = .RDONLY,
+        .CLOEXEC = true,
+    }, 0);
+    switch (linux.errno(open_rc)) {
+        .SUCCESS => {},
+        .ACCES, .NOENT, .NOTDIR, .PERM, .SRCH => return error.FileUnavailable,
+        else => return error.FileUnavailable,
+    }
+    const fd: i32 = @intCast(open_rc);
+    defer _ = linux.close(fd);
+
+    var read_buf: [8192]u8 = undefined;
+    var len: usize = 0;
+    while (len < read_buf.len) {
+        const read_rc = linux.read(fd, read_buf[len..].ptr, read_buf.len - len);
+        switch (linux.errno(read_rc)) {
+            .SUCCESS => {
+                const n = read_rc;
+                if (n == 0) break;
+                len += n;
+            },
+            .INTR => continue,
+            .ACCES, .BADF, .IO, .NOENT, .PERM, .SRCH => return error.FileUnavailable,
+            else => return error.FileUnavailable,
+        }
+    }
+
+    var parsed: ParsedFdinfo = .{};
+
+    var start: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, read_buf[0..len], start, '\n')) |end| {
+        parseFdinfoLine(&parsed, read_buf[start..end], timestamp_ns);
+        start = end + 1;
+    }
+    if (start < len) {
+        parseFdinfoLine(&parsed, read_buf[start..len], timestamp_ns);
+    }
+    finishFdinfo(&parsed);
+
+    return parsed;
+}
+
+fn finishFdinfo(self: *ParsedFdinfo) void {
+    if (self.resident_vram_kib > 0) {
+        self.sample.mem_kib = self.resident_vram_kib;
+    } else if (self.total_vram_kib > 0) {
+        self.sample.mem_kib = self.total_vram_kib;
+    } else if (self.resident_memory_kib > 0) {
+        self.sample.mem_kib = self.resident_memory_kib;
+    } else if (self.total_memory_kib > 0) {
+        self.sample.mem_kib = self.total_memory_kib;
+    }
+
+    if (!self.engine_time_seen and self.total_cycle_counter > 0) {
+        self.sample.engine = .{
+            .engine_ns = self.cycle_counter,
+            .timestamp_ns = self.total_cycle_counter,
+        };
+    }
+}
+
+fn parseFdinfoLine(parsed: *ParsedFdinfo, line: []const u8, timestamp_ns: u64) void {
+    if (std.mem.startsWith(u8, line, "drm-pdev:")) {
+        parsed.bdf = parseBdf(line["drm-pdev:".len..]);
+        return;
+    }
+
+    if (std.mem.startsWith(u8, line, "vram mem:")) {
+        parsed.total_vram_kib += memoryKiB(line["vram mem:".len..]);
+        return;
+    }
+
+    if (std.mem.startsWith(u8, line, "drm-cycles-")) {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return;
+        parsed.cycle_counter += firstInt(line[colon + 1 ..]);
+        return;
+    }
+
+    if (std.mem.startsWith(u8, line, "drm-total-cycles-")) {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return;
+        parsed.total_cycle_counter = @max(parsed.total_cycle_counter, firstInt(line[colon + 1 ..]));
+        return;
+    }
+
+    if (std.mem.startsWith(u8, line, "drm-engine-capacity-")) {
+        return;
+    }
+
+    if (std.mem.startsWith(u8, line, "drm-engine-")) {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return;
+        const value = firstInt(line[colon + 1 ..]);
+        parsed.engine_time_seen = true;
+        const engine = parsed.sample.engine orelse EngineSample{ .engine_ns = 0, .timestamp_ns = timestamp_ns };
+        parsed.sample.engine = .{
+            .engine_ns = engine.engine_ns + value,
+            .timestamp_ns = timestamp_ns,
+        };
+        return;
+    }
+
+    if (std.mem.startsWith(u8, line, "drm-")) {
+        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return;
+        const key = line[0..colon];
+        const value = memoryKiB(line[colon + 1 ..]);
+        if (value == 0) return;
+
+        if (std.mem.startsWith(u8, key, "drm-resident-vram")) {
+            parsed.resident_vram_kib += value;
+            return;
+        }
+        if (std.mem.startsWith(u8, key, "drm-total-vram") or std.mem.startsWith(u8, key, "drm-memory-vram")) {
+            parsed.total_vram_kib += value;
+            return;
+        }
+        if (std.mem.startsWith(u8, key, "drm-resident-")) {
+            parsed.resident_memory_kib += value;
+            return;
+        }
+        if (std.mem.startsWith(u8, key, "drm-total-")) {
+            parsed.total_memory_kib += value;
+            return;
+        }
+        if (std.mem.eql(u8, key, "drm-resident-memory")) {
+            parsed.resident_memory_kib += value;
+            return;
+        }
+        if (std.mem.eql(u8, key, "drm-total-memory")) {
+            parsed.total_memory_kib += value;
+            return;
+        }
+    }
+}
+
+fn mergeProcessSample(dst: *ProcessSample, src: FdinfoSample) void {
+    if (src.mem_kib) |mem| dst.mem_kib = (dst.mem_kib orelse 0) + mem;
+    if (src.engine) |engine| {
+        const current = dst.engine orelse EngineSample{ .engine_ns = 0, .timestamp_ns = engine.timestamp_ns };
+        dst.engine = .{
+            .engine_ns = current.engine_ns + engine.engine_ns,
+            .timestamp_ns = engine.timestamp_ns,
+        };
+    }
+}
+
+fn matchTarget(targets: []const Target, bdf: [bdf_len]u8) ?u16 {
+    for (targets) |target| {
+        if (target.bdf) |target_bdf| {
+            if (std.mem.eql(u8, &target_bdf, &bdf)) return target.device_idx;
+        }
+    }
+    return null;
+}
+
+fn processKey(pid: u32, device_idx: u16) u64 {
+    return (@as(u64, device_idx) << 32) | pid;
+}
+
+pub const BdfParts = struct {
+    domain: u32,
+    bus: u32,
+    device: u32,
+    function: u32,
+};
+
+pub fn formatBdf(parts: BdfParts) [bdf_len]u8 {
+    var buf: [bdf_len]u8 = undefined;
+    _ = std.fmt.bufPrint(&buf, "{x:0>4}:{x:0>2}:{x:0>2}.{x}", .{
+        parts.domain,
+        parts.bus,
+        parts.device,
+        parts.function,
+    }) catch unreachable;
+    return buf;
+}
+
+fn parseBdf(raw: []const u8) ?[bdf_len]u8 {
+    const trimmed = std.mem.trim(u8, raw, " \t\n");
+    var out: [bdf_len]u8 = undefined;
+    if (trimmed.len == bdf_len) {
+        @memcpy(&out, trimmed[0..bdf_len]);
+        return out;
+    }
+    if (trimmed.len == "00:00.0".len) {
+        _ = std.fmt.bufPrint(&out, "0000:{s}", .{trimmed}) catch return null;
+        return out;
+    }
+    return null;
+}
+
+fn firstInt(raw: []const u8) u64 {
+    var iter = std.mem.tokenizeAny(u8, raw, " \t");
+    return std.fmt.parseInt(u64, iter.next() orelse return 0, 10) catch 0;
+}
+
+fn memoryKiB(raw: []const u8) u64 {
+    var iter = std.mem.tokenizeAny(u8, raw, " \t");
+    const value = std.fmt.parseInt(u64, iter.next() orelse return 0, 10) catch return 0;
+    const unit = iter.next() orelse return value;
+    if (std.ascii.eqlIgnoreCase(unit, "KiB")) return value;
+    if (std.ascii.eqlIgnoreCase(unit, "MiB")) return value * 1024;
+    if (std.ascii.eqlIgnoreCase(unit, "GiB")) return value * 1024 * 1024;
+    if (std.ascii.eqlIgnoreCase(unit, "B")) return value / 1024;
+    return value;
+}
+
+test "oneAPI fdinfo parser" {
+    var parsed: ParsedFdinfo = .{};
+    parseFdinfoLine(&parsed, "drm-pdev:\t0000:03:00.0", 10);
+    parseFdinfoLine(&parsed, "drm-total-memory:\t2048 KiB", 10);
+    parseFdinfoLine(&parsed, "drm-engine-render:\t100 ns", 10);
+    parseFdinfoLine(&parsed, "drm-engine-compute:\t50 ns", 10);
+    finishFdinfo(&parsed);
+
+    try std.testing.expect(parsed.bdf != null);
+    try std.testing.expectEqualSlices(u8, "0000:03:00.0", &parsed.bdf.?);
+    try std.testing.expectEqual(@as(?u64, 2048), parsed.sample.mem_kib);
+    try std.testing.expectEqual(@as(u64, 150), parsed.sample.engine.?.engine_ns);
+}
+
+test "oneAPI fdinfo parser cycle counters" {
+    var parsed: ParsedFdinfo = .{};
+    parseFdinfoLine(&parsed, "drm-pdev:\t0000:03:00.0", 10);
+    parseFdinfoLine(&parsed, "drm-cycles-rcs:\t10", 10);
+    parseFdinfoLine(&parsed, "drm-total-cycles-rcs:\t100", 10);
+    parseFdinfoLine(&parsed, "drm-engine-capacity-vcs:\t2", 10);
+    parseFdinfoLine(&parsed, "drm-cycles-ccs:\t30", 10);
+    parseFdinfoLine(&parsed, "drm-total-cycles-ccs:\t100", 10);
+    finishFdinfo(&parsed);
+
+    try std.testing.expectEqual(@as(u64, 40), parsed.sample.engine.?.engine_ns);
+    try std.testing.expectEqual(@as(u64, 100), parsed.sample.engine.?.timestamp_ns);
+}
+
+test "oneAPI fdinfo parser xe vram regions" {
+    var parsed: ParsedFdinfo = .{};
+    parseFdinfoLine(&parsed, "drm-pdev:\t0000:03:00.0", 10);
+    parseFdinfoLine(&parsed, "drm-total-system:\t184 MiB", 10);
+    parseFdinfoLine(&parsed, "drm-total-vram0:\t4096 KiB", 10);
+    parseFdinfoLine(&parsed, "drm-resident-vram0:\t3072 KiB", 10);
+    finishFdinfo(&parsed);
+
+    try std.testing.expectEqual(@as(?u64, 3072), parsed.sample.mem_kib);
+}
+
+test "oneAPI fdinfo parser falls back to total vram" {
+    var parsed: ParsedFdinfo = .{};
+    parseFdinfoLine(&parsed, "drm-total-vram0:\t2 MiB", 10);
+    finishFdinfo(&parsed);
+
+    try std.testing.expectEqual(@as(?u64, 2048), parsed.sample.mem_kib);
+}
+
+test "oneAPI process utilization delta" {
+    try std.testing.expectEqual(@as(?u16, 50), processUtil(.{ .engine_ns = 100, .timestamp_ns = 1000 }, .{ .engine_ns = 600, .timestamp_ns = 2000 }));
+    try std.testing.expectEqual(@as(?u16, 1), processUtil(.{ .engine_ns = 100, .timestamp_ns = 1000 }, .{ .engine_ns = 101, .timestamp_ns = 2000 }));
+    try std.testing.expectEqual(@as(?u16, null), processUtil(null, .{ .engine_ns = 600, .timestamp_ns = 2000 }));
+}
+
+test "oneAPI power delta from hwmon energy" {
+    try std.testing.expectEqual(@as(?u64, 20_000), milliwattsFromEnergyDelta(1_000, 11_000, 1_000, 501_000));
+    try std.testing.expectEqual(@as(?u64, null), milliwattsFromEnergyDelta(11_000, 1_000, 1_000, 501_000));
+    try std.testing.expectEqual(@as(?u64, null), milliwattsFromEnergyDelta(1_000, 11_000, 501_000, 1_000));
+}
+
+test "oneAPI resource line chooses large memory BARs" {
+    try std.testing.expectEqual(@as(?u64, 34_359_738_368), resourceLineSize("0x0000048800000000 0x0000048fffffffff 0x000000000014220c"));
+    try std.testing.expectEqual(@as(?u64, null), resourceLineSize("0x00000000f6c00000 0x00000000f6dfffff 0x0000000000046200"));
+}
+
+test "oneAPI PCIe speed maps to generation" {
+    try std.testing.expectEqual(@as(u64, 1), try pcieGenFromSpeed("2.5 GT/s PCIe"));
+    try std.testing.expectEqual(@as(u64, 4), try pcieGenFromSpeed("16.0 GT/s PCIe"));
+    try std.testing.expectError(error.not_found, pcieGenFromSpeed("Unknown"));
+}
+
+test "oneAPI PCIe bandwidth derives from generation and width" {
+    try std.testing.expectEqual(@as(?u64, 250), pcieBandwidthFromLink(1, 1));
+    try std.testing.expectEqual(@as(?u64, 63_008), pcieBandwidthFromLink(5, 16));
+    try std.testing.expectEqual(@as(?u64, null), pcieBandwidthFromLink(0, 16));
+}
