@@ -242,7 +242,7 @@ pub const Params = struct {
 };
 
 pub const Options = struct {
-    seq_len_text: u32 = 2048,
+    seq_len_text: u32 = 1024,
     seq_len_time: u32 = 600,
 };
 
