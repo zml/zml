@@ -643,7 +643,7 @@ pub const TimbreEncoder = struct {
     pub fn forward(self: TimbreEncoder, timbre_latent: zml.Tensor) zml.Tensor {
         var timbre_emb = self.embed_timbre.forward(timbre_latent.withTags(.{ .a, .t }).transpose(.{ .t, .a }));
 
-        const special_frame = self.special_tokens.withTags(.{ .s, .t, .a }).squeeze(.s);
+        const special_frame = self.special_tokens.withTags(.{ .s, .t, .d }).squeeze(.s);
         
         timbre_emb = zml.Tensor.concatenate(&.{ special_frame, timbre_emb }, .t);
         
