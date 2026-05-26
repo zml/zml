@@ -903,17 +903,29 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
             std.log.info("ENC init source latents from FSQ audio latents", .{});
             var source_latents_buffer: zml.Buffer = try .fromSlice(io, platform, latents_slice, sharding);
             defer source_latents_buffer.deinit();
-            var target_latents_buffer: zml.Buffer = undefined;
-            defer target_latents_buffer.deinit();
+            var quantized_latents_buffer: zml.Buffer = undefined;
+            defer quantized_latents_buffer.deinit();
             var audio_codes_buffer: zml.Buffer = undefined;
             defer audio_codes_buffer.deinit();
+
+            const audio_codes_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = aceenc.options.seq_len_time * 5 }, .bf16));
+            defer audio_codes_slice.free(allocator);
+            
             aceenc.exes.tokenize_args.set(.{ aceenc.model_buffers.audio_tokenizer, source_latents_buffer });
             aceenc.exes.tokenize_exe.call(aceenc.exes.tokenize_args, &aceenc.exes.tokenize_results);
             aceenc.exes.tokenize_results.fill(.{ &audio_codes_buffer });
+
+            try audio_codes_buffer.toSlice(io, audio_codes_slice);
+
+            for (0..100) |i| {
+                std.log.info("code {d} = {d}", .{ i, audio_codes_slice.items(u32)[i] });
+                
+            }
+            
             aceenc.exes.detokenize_args.set(.{ aceenc.model_buffers.audio_detokenizer, audio_codes_buffer });
             aceenc.exes.detokenize_exe.call(aceenc.exes.detokenize_args, &aceenc.exes.detokenize_results);
-            aceenc.exes.detokenize_results.fill(.{ &target_latents_buffer });
-            try target_latents_buffer.toSlice(io, latents_slice);
+            aceenc.exes.detokenize_results.fill(.{ &quantized_latents_buffer });
+            try quantized_latents_buffer.toSlice(io, latents_slice);
         }
     } else {
         std.log.info("ENC init source latents from silence latents", .{});
@@ -1050,6 +1062,8 @@ pub fn prepareDiffusionConditions(zml_handler: *Zml_handler, aceenc: *aceenc_.Ac
     @memcpy(result_slice.items(zml.floats.BFloat16)[cap_start..cap_end], caption_slice.items(zml.floats.BFloat16)[0..n_cap]);
     @memcpy(result_slice.items(zml.floats.BFloat16)[timbre_start..timbre_end], timbre_slice.items(zml.floats.BFloat16)[0..n_tim]);
     @memcpy(result_slice.items(zml.floats.BFloat16)[lyr_start..lyr_end], lyric_slice.items(zml.floats.BFloat16)[0..n_lyr]);
+
+    std.log.info("ENC generated conditions of length {d}", .{ s_enc });
 
     zml_handler.toc(&zml_handler.timers.enc.decode);
 

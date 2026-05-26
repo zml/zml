@@ -277,6 +277,7 @@ const Args = struct {
 // info: total                                                38.81s
 
 // TODO: validate remix diagnostics
+// TODO: diagnose style reference
 
 // TODO: edit mode
 // - clone source latents on keep regions, add noise, modify mask channels
