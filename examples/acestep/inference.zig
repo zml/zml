@@ -1177,7 +1177,7 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     const sharding = acedit.shardings.replicated;
     const platform = zml_handler.platform;
 
-    // for now, contexts have same size
+    // cover/non cover have same latents size but different conditions sizes
     const t = context_cover.latents.shape.dim(0);
     const a = @divExact(context_cover.latents.shape.dim(1), 2);
     const s_cover = context_cover.conditions.shape.dim(0);
@@ -1222,11 +1222,11 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     var latents_cover_buffer: zml.Buffer = try .fromSlice(io, platform, context_cover.latents, sharding);
     var latents_non_cover_buffer: zml.Buffer = try .fromSlice(io, platform, context_non_cover.latents, sharding);
     
-    const conditions_cover_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = acedit.config.encoder_hidden_size }, .bf16));
+    const conditions_cover_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = d }, .bf16));
     @memcpy(conditions_cover_slice.items(zml.floats.BFloat16)[0..@intCast(s_cover * d)], context_cover.latents.items(zml.floats.BFloat16));
     var conditions_cover_buffer: zml.Buffer = try .fromSlice(io, platform, conditions_cover_slice, sharding);
 
-    const conditions_non_cover_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = acedit.config.encoder_hidden_size }, .bf16));
+    const conditions_non_cover_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = d }, .bf16));
     @memcpy(conditions_non_cover_slice.items(zml.floats.BFloat16)[0..@intCast(s_non_cover * d)], context_non_cover.latents.items(zml.floats.BFloat16));
     var conditions_non_cover_buffer: zml.Buffer = try .fromSlice(io, platform, conditions_non_cover_slice, sharding);
         
