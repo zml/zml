@@ -628,9 +628,9 @@ pub const DirectMemoryWriter = struct {
         }
 
         fn collectRawSegments(self: *StreamPlanner) !void {
+            const placement = try self.sharding.placement(self.shape);
             for (self.sharding.devicesInCanonicalOrder(), 0..) |device, writer_index| {
-                const placement = try self.sharding.placement(self.shape, device);
-                try self.appendShardSegments(placement, writer_index);
+                try self.appendShardSegments(placement.slices(device.id).constSlice(), writer_index);
             }
         }
 
@@ -691,8 +691,8 @@ pub const DirectMemoryWriter = struct {
             });
         }
 
-        fn axisRange(self: *const StreamPlanner, placement: Placement, axis: usize) AxisRange {
-            for (placement.slices.constSlice()) |slice| {
+        fn axisRange(self: *const StreamPlanner, slices: []const Placement.Slice1d, axis: usize) AxisRange {
+            for (slices) |slice| {
                 if (slice.axis == axis) {
                     return .{
                         .start = slice.start,
@@ -709,14 +709,14 @@ pub const DirectMemoryWriter = struct {
 
         fn appendShardSegmentsAtAxis(
             self: *StreamPlanner,
-            placement: Placement,
+            slices: []const Placement.Slice1d,
             writer_index: usize,
             rank: usize,
             axis: usize,
             base_start: i64,
             strides: []const i64,
         ) !void {
-            const range = self.axisRange(placement, axis);
+            const range = self.axisRange(slices, axis);
             if (range.size == 0) return;
 
             if (axis + 1 == rank) {
@@ -729,11 +729,11 @@ pub const DirectMemoryWriter = struct {
             var i: i64 = 0;
             while (i < range.size) : (i += 1) {
                 const child_start = base_start + (range.start + i) * strides[axis];
-                try self.appendShardSegmentsAtAxis(placement, writer_index, rank, axis + 1, child_start, strides);
+                try self.appendShardSegmentsAtAxis(slices, writer_index, rank, axis + 1, child_start, strides);
             }
         }
 
-        fn appendShardSegments(self: *StreamPlanner, placement: Placement, writer_index: usize) !void {
+        fn appendShardSegments(self: *StreamPlanner, slices: []const Placement.Slice1d, writer_index: usize) !void {
             const rank = self.shape.rank();
             if (rank == 0) {
                 try self.appendRawSegment(writer_index, 0, self.shape.byteSize());
@@ -741,7 +741,7 @@ pub const DirectMemoryWriter = struct {
             }
 
             const strides = self.shape.computeByteStrides();
-            try self.appendShardSegmentsAtAxis(placement, writer_index, rank, 0, 0, strides.constSlice());
+            try self.appendShardSegmentsAtAxis(slices, writer_index, rank, 0, 0, strides.constSlice());
         }
     };
 
@@ -799,14 +799,13 @@ pub const DirectMemoryWriter = struct {
         };
 
         var pjrt_buffers: Buffer.Shards = .empty;
+        const placement = try sharding.placement(shape);
         for (ordered_devices, 0..) |device, i| {
             defer initialized += 1;
 
-            const placement = try sharding.placement(shape, device);
-            const device_index = placement.platformDeviceIndex(platform) orelse return error.UnknownShardDevice;
-            const pool = &pools[device_index];
-            const shard_dma_allocator = dma_allocators[device_index].allocator();
-            const dst_memory = platform.devices[device_index].memory(.default);
+            const pool = &pools[device.id];
+            const shard_dma_allocator = dma_allocators[device.id].allocator();
+            const dst_memory = platform.devices[device.id].memory(.default);
 
             shard_writers[i] = try DirectShardWriter.init(shard_dma_allocator, io, dst_memory, pool, placement.shape);
 

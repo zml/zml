@@ -85,7 +85,10 @@ pub const Buffer = struct {
     }
 
     pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
-        try writer.print("{f}", .{self._sharding.fmtPlacements(self._shape)});
+        const placement = self._sharding.placement(self._shape) catch {
+            return try writer.print("sharding error {} vs {}", .{ self._sharding, self._shape });
+        };
+        try writer.print("{f}", .{placement});
     }
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
@@ -110,11 +113,12 @@ pub const Buffer = struct {
         const slice = Slice.init(sh, data_);
         const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
 
-        var shard_dims: Shape.DimsArray = res._sharding.shardedDims(sh);
+        const placement = try res._sharding.placement(res._shape);
+        const shard_dims: []const i64 = placement.shape.dims();
         const layout: pjrt.MemoryLayout = switch (platform.target) {
             .tpu => tpu: {
                 if (comptime !platforms.isEnabled(.tpu)) unreachable;
-                const default = try platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, buffer_type, shard_dims.slice());
+                const default = try platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, buffer_type, shard_dims);
                 break :tpu default.toMemoryLayout();
             },
             else => .{ .tiled = .{
@@ -124,17 +128,16 @@ pub const Buffer = struct {
             } },
         };
 
-        for (0.., platform.physical_mesh.devices_in_canonical_order) |device_id, device| {
-            const placement = try res._sharding.placement(res._shape, device);
-            const sub_slice = placement.shardSlice(slice);
+        for (platform.physical_mesh.devices_in_canonical_order) |device| {
+            const sub_slice = placement.shardSlice(device.id, slice);
 
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
                 .data = sub_slice.constData().ptr,
-                .dst = .{ .memory = platform.devices[device_id].memory(opts.memory).pjrt_memory },
+                .dst = .{ .memory = platform.devices[device.id].memory(opts.memory).pjrt_memory },
                 // Constant across devices
                 .layout = layout,
-                .dims = shard_dims.slice(),
+                .dims = shard_dims,
                 .buffer_type = buffer_type,
                 .byte_strides = slice.byte_strides.constSlice(),
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
@@ -283,9 +286,9 @@ pub const Buffer = struct {
     pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
         stdx.debug.assert(self._shape.eql(slice.shape), "Buffer shape {f} doesn't match destination slice {f}", .{ self._shape, slice.shape });
 
+        const placement = try self._sharding.placement(self._shape);
         for (self._sharding.devicesInCanonicalOrder(), 0..) |device, shard_index| {
-            const placement = try self._sharding.placement(self._shape, device);
-            const sub_slice = placement.shardSlice(slice);
+            const sub_slice = placement.shardSlice(device.id, slice);
             if (!sub_slice.isContiguous()) return error.NonContiguousShardRead;
 
             const size_bytes = placement.shape.byteSize();
@@ -308,9 +311,9 @@ pub const Buffer = struct {
         const slice = try Slice.alloc(allocator, self.shape());
         errdefer slice.free(allocator);
 
+        const placement = try self._sharding.placement(self._shape);
         for (self._sharding.devicesInCanonicalOrder(), 0..) |device, shard_index| {
-            const placement = try self._sharding.placement(self._shape, device);
-            const sub_slice = placement.shardSlice(slice);
+            const sub_slice = placement.shardSlice(device.id, slice);
 
             var shard_slice = try Slice.alloc(allocator, sub_slice.shape);
             defer shard_slice.free(allocator);
