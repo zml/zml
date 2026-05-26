@@ -5,8 +5,8 @@ def _tt_impl(mctx):
         name = "libpjrt_tt",
         build_file = "libpjrt_tt.BUILD.bazel",
         type = "zip",
-        url = "https://pypi.eng.aws.tenstorrent.com/pjrt-plugin-tt/pjrt_plugin_tt-1.2.0.dev20260525002927-cp312-cp312-manylinux_2_34_x86_64.whl",
-        sha256 = "a4567bffaf2715634350277b4980b64d7d31dc670bf50d5075c3aee1c104b722",
+        url = "https://pypi.eng.aws.tenstorrent.com/pjrt-plugin-tt/pjrt_plugin_tt-1.2.0.dev20260526002843-cp312-cp312-manylinux_2_34_x86_64.whl",
+        sha256 = "365e9a0f817011fa6314904b80054c9d7ef505491cc596f720ecdc470fc0258e",
         patch_cmds = [
             "find pjrt_plugin_tt/tt-metal -name 'BUILD.bazel' -delete",
         ],
