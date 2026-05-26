@@ -546,7 +546,7 @@ pub const AceDit = struct {
         return hidden_states;
     }
 
-    pub fn postprocess(self: AceDit, t_curr: zml.Tensor, t_next: zml.Tensor, x: zml.Tensor, hidden_states_: zml.Tensor, temb: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+    pub fn postprocess(self: AceDit, t_curr: zml.Tensor, t_next: zml.Tensor, x: zml.Tensor, hidden_states_: zml.Tensor, temb: zml.Tensor) zml.Tensor {
         // adaptive layer norm based on scale shift
         var hidden_states = self.scale_shift(hidden_states_, temb);
         
@@ -562,7 +562,7 @@ pub const AceDit = struct {
         const dt = t_next.sub(t_curr).broad(x.shape()).convert(.bf16);
         const x_next = x.add(v.mul(dt));
      
-        return .{ x_next.reuseBuffer(x), x_next.withTags(.{ .t, .a }).transpose(.{ .a, .t }) };
+        return x_next.reuseBuffer(x);
     }
     
     pub fn scale_shift(self: AceDit, hidden_states: zml.Tensor, temb: zml.Tensor) zml.Tensor {

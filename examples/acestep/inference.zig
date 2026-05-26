@@ -1126,33 +1126,30 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     var cross_mask_buffer: zml.Buffer = try .fromSlice(io, platform, cross_mask_slice, sharding);
     defer cross_mask_buffer.deinit();
 
-    const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = a, .t = t }, .bf16));
-    var result_buffer: zml.Buffer = try .fromSlice(io, platform, result_slice, sharding);
-    defer result_buffer.deinit();
-
     // the full forward pass on the dit model is one iteration of the denoising
     const steps = timestamps.len - 1;
     zml_handler.tic(&zml_handler.timers.dit.prefill);
     for (0..steps) |i| {
-        var y_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
-        defer y_proj_buffer.deinit();
+        // we need some buffers to hold intermediate results
+        var y_proj_buffer: zml.Buffer = undefined;
         var hidden_states_buffer: zml.Buffer = undefined;
+        var temb_buffer: zml.Buffer = undefined;
+        var timestep_proj_buffer: zml.Buffer = undefined;
+        defer y_proj_buffer.deinit();
         defer hidden_states_buffer.deinit();
-        var temb_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
         defer temb_buffer.deinit();
-        var timestep_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
         defer timestep_proj_buffer.deinit();
+
+        std.log.info("DiT ************* step {d}/{d}, is_cover: {any}", .{ i+1, steps, true });
         var t_curr: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i], .f32, sharding);
         var t_next: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i + 1], .f32, sharding);
         defer t_curr.deinit();
         defer t_next.deinit();
-        std.log.info("DiT ************* step {d}/{d}, is_cover: {any}", .{ i+1, steps, true });
+        
         acedit.exes.preprocess_args.set(.{ acedit.model_buffers, t_curr, x_buffer, latents_buffer, conditions_buffer });
         acedit.exes.preprocess_exe.call(acedit.exes.preprocess_args, &acedit.exes.preprocess_results);
-        y_proj_buffer.deinit();
-        temb_buffer.deinit();
-        timestep_proj_buffer.deinit();
         acedit.exes.preprocess_results.fill(.{ &y_proj_buffer, &hidden_states_buffer, &temb_buffer, &timestep_proj_buffer });
+
         for (0..acedit.config.num_hidden_layers) |ii| {
             const mask_buffer = if (acedit.config.layer_types[ii] == .sliding_attention) sliding_mask_buffer else full_mask_buffer;
             acedit.exes.layer_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer, cross_mask_buffer });
@@ -1161,12 +1158,23 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
         }
         acedit.exes.postprocess_args.set(.{ acedit.model_buffers, t_curr, t_next, x_buffer, hidden_states_buffer, temb_buffer });
         acedit.exes.postprocess_exe.call(acedit.exes.postprocess_args, &acedit.exes.postprocess_results);
-        result_buffer.deinit();
-        acedit.exes.postprocess_results.fill(.{ &x_buffer, &result_buffer });
+        acedit.exes.postprocess_results.fill(.{ &x_buffer });
     }
-    try result_buffer.toSlice(io, result_slice);
+    try x_buffer.toSlice(io, x);
 
     zml_handler.toc(&zml_handler.timers.dit.prefill);
+
+    const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = a, .t = t }, .bf16));
+    // result is x transposed
+    const dimT: usize = @intCast(t);
+    const dimA: usize = @intCast(a);
+    for (0..dimT) |tt| {
+        for (0..dimA) |aa| {
+            const pos = tt * dimA + aa;
+            const pos_tr = aa * dimT + tt;
+            result_slice.items(zml.floats.BFloat16)[pos_tr] = x.items(zml.floats.BFloat16)[pos];
+        }
+    }
 
     return .{ .x = result_slice };
 }
@@ -1255,41 +1263,37 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     var cross_mask_buffer_non_cover: zml.Buffer = try .fromSlice(io, platform, cross_mask_slice_non_cover, sharding);
     defer cross_mask_buffer_non_cover.deinit();    
 
-    const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = a, .t = t }, .bf16));
-    var result_buffer: zml.Buffer = try .fromSlice(io, platform, result_slice, sharding);
-    defer result_buffer.deinit();
-
     // the full forward pass on the dit model is one iteration of the denoising
     const steps = timestamps.len - 1;
     zml_handler.tic(&zml_handler.timers.dit.prefill);
     const time: f32 = @floatFromInt(steps - match_level);
     const cover_iters: usize = @intFromFloat(@floor(time * zml_handler.args.cover_strength));
     for (match_level..steps) |i| {
-        var y_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
-        defer y_proj_buffer.deinit();
+        // we need some buffers to hold intermediate results
+        var y_proj_buffer: zml.Buffer = undefined;
         var hidden_states_buffer: zml.Buffer = undefined;
+        var temb_buffer: zml.Buffer = undefined;
+        var timestep_proj_buffer: zml.Buffer = undefined;
+        defer y_proj_buffer.deinit();
         defer hidden_states_buffer.deinit();
-        var temb_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
         defer temb_buffer.deinit();
-        var timestep_proj_buffer: zml.Buffer = try zml.Buffer.scalar(io, platform, 0, .bf16, sharding);
         defer timestep_proj_buffer.deinit();
 
-        var t_curr: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i], .f32, sharding);
-        var t_next: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i + 1], .f32, sharding);
-        defer t_curr.deinit();
-        defer t_next.deinit();
         const is_cover = i - match_level < cover_iters;
         const latents_buffer = if (is_cover) latents_cover_buffer else latents_non_cover_buffer;
         const conditions_buffer = if (is_cover) conditions_cover_buffer else conditions_non_cover_buffer;
         const cross_mask_buffer = if (is_cover) cross_mask_buffer_cover else cross_mask_buffer_non_cover;
-        std.log.info("DiT ************* step {d}/{d}, is_cover: {any}", .{ i+1, steps, is_cover });
 
+        std.log.info("DiT ************* step {d}/{d}, is_cover: {any}", .{ i+1, steps, is_cover });
+        var t_curr: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i], .f32, sharding);
+        var t_next: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i + 1], .f32, sharding);
+        defer t_curr.deinit();
+        defer t_next.deinit();
+        
         acedit.exes.preprocess_args.set(.{ acedit.model_buffers, t_curr, x_buffer, latents_buffer, conditions_buffer });
         acedit.exes.preprocess_exe.call(acedit.exes.preprocess_args, &acedit.exes.preprocess_results);
-        y_proj_buffer.deinit();
-        temb_buffer.deinit();
-        timestep_proj_buffer.deinit();
         acedit.exes.preprocess_results.fill(.{ &y_proj_buffer, &hidden_states_buffer, &temb_buffer, &timestep_proj_buffer });
+        
         for (0..acedit.config.num_hidden_layers) |ii| {
             const mask_buffer = if (acedit.config.layer_types[ii] == .sliding_attention) sliding_mask_buffer else full_mask_buffer;
             acedit.exes.layer_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer, cross_mask_buffer });
@@ -1298,13 +1302,22 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
         }
         acedit.exes.postprocess_args.set(.{ acedit.model_buffers, t_curr, t_next, x_buffer, hidden_states_buffer, temb_buffer });
         acedit.exes.postprocess_exe.call(acedit.exes.postprocess_args, &acedit.exes.postprocess_results);
-        result_buffer.deinit();
-        acedit.exes.postprocess_results.fill(.{ &x_buffer, &result_buffer });
+        acedit.exes.postprocess_results.fill(.{ &x_buffer });
     }
 
-    try result_buffer.toSlice(io, result_slice);
+    try x_buffer.toSlice(io, x);
 
     zml_handler.toc(&zml_handler.timers.dit.prefill);
+
+    const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = a, .t = t }, .bf16));
+    // result is x transposed
+    for (0..dimT) |tt| {
+        for (0..dimA) |aa| {
+            const pos = tt * dimA + aa;
+            const pos_tr = aa * dimT + tt;
+            result_slice.items(zml.floats.BFloat16)[pos_tr] = x.items(zml.floats.BFloat16)[pos];
+        }
+    }
 
     return .{ .x = result_slice };
 }
