@@ -98,6 +98,7 @@ zig_binary(
     }) + select({
         "@llvm//platforms/config:linux_x86_64": [
             "//bin/zml-smi/platforms/amdsmi",
+            "//bin/zml-smi/platforms/oneapi",
             "//bin/zml-smi/platforms/neuron",
             "//bin/zml-smi/platforms/nvml",
             "//bin/zml-smi/platforms/tpu",

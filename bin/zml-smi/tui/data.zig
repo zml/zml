@@ -131,7 +131,7 @@ pub const SystemState = struct {
     pub fn recordHistory(self: *SystemState) void {
         for (0..self.deviceCount()) |i| {
             switch (self.devices[i].*) {
-                .cuda, .rocm => |*sv| {
+                .cuda, .rocm, .oneapi => |*sv| {
                     const gpu = sv.front().*;
                     self.history.util[i].push(gpu.util_percent orelse 0);
                     const used = gpu.mem_used_bytes orelse 0;

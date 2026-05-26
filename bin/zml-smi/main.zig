@@ -64,6 +64,7 @@ const device_backends = switch (builtin.os.tag) {
         .x86_64 => .{
             .{ .cuda, @import("zml-smi/platforms/nvml") },
             .{ .rocm, @import("zml-smi/platforms/amdsmi") },
+            .{ .oneapi, @import("zml-smi/platforms/oneapi") },
             .{ .neuron, @import("zml-smi/platforms/neuron") },
             .{ .tpu, @import("zml-smi/platforms/tpu") },
         },
@@ -187,6 +188,10 @@ fn detect(io: std.Io) smi_info.Targets {
                         targets.insert(.rocm);
                     }
 
+                    if (hasOneApiDevices(io)) {
+                        targets.insert(.oneapi);
+                    }
+
                     if (hasDevice(io, c.NEURON_DEVICE_PREFIX ++ "0")) {
                         targets.insert(.neuron);
                     }
@@ -212,4 +217,18 @@ fn detect(io: std.Io) smi_info.Targets {
 fn hasDevice(io: std.Io, path: []const u8) bool {
     std.Io.Dir.accessAbsolute(io, path, .{ .read = true }) catch return false;
     return true;
+}
+
+fn hasOneApiDevices(io: std.Io) bool {
+    var dir = std.Io.Dir.openDirAbsolute(io, "/dev/dri", .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (std.mem.startsWith(u8, entry.name, "renderD")) {
+            return true;
+        }
+    }
+
+    return false;
 }
