@@ -327,7 +327,8 @@ pub fn main(init: std.process.Init) !void {
     try printZmlLogo(zml_handler.io);
 
     zml_handler.tic(&zml_handler.timers.total);
-    try runRemixPipeline(&zml_handler);
+    try runText2MusicPipeline(&zml_handler);
+    //try runRemixPipeline(&zml_handler);
     zml_handler.toc(&zml_handler.timers.total);
 
     zml_handler.timers.print();
