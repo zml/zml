@@ -104,7 +104,7 @@ pub const Uri_handler = struct {
     audio_ref: []const u8 = "file://examples//acestep//references//source.wav",
     style_ref: []const u8 = "file://examples//acestep//references//style.wav",
     caption_ref: []const u8 = "file://examples//acestep//references//caption.txt",
-    lyrics_ref: []const u8 = "file://examples//acestep//references//lyrics.txt",
+    lyrics_ref: []const u8 = "file://examples//acestep//references//lyric.txt",
 
     pub fn fromLocal(args: Args) Uri_handler {
         return .{
@@ -276,6 +276,10 @@ const Args = struct {
 // info:   wav                                                 0.17s
 // info: total                                                38.81s
 
+// TODO: try implement lyric remix (flow-edit mode in python)
+// - embed old and new lyric
+// - switch/blend/dice between the two during the diffusion
+
 // TODO: edit mode
 // - clone source latents on keep regions, add noise, modify mask channels
 // - add silence latent on paint regions (of same range)
@@ -284,10 +288,6 @@ const Args = struct {
 // - this is simple/fast enough to be done on CPU in inference.zig
 // - if needed, smooth junctions with blending
 // - extend audio : same but repaint added range at the end
-
-// TODO: try implement lyric remix (flow-edit mode in python)
-// - embed old and new lyric
-// - switch/blend/dice between the two during the diffusion
 
 // still this language issue
 // check :
@@ -567,6 +567,7 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
     var audio_metadata = try inference.AudioMetadata.empty(zml_handler.allocator);
     defer audio_metadata.deinit(zml_handler.allocator);
 
+    try audio_metadata.setCaption(zml_handler.allocator, zml_handler.args.prompt);
     try audio_metadata.setDuration(zml_handler.allocator, audio_latent.duration_s());
     const duration = audio_latent.duration_s();
     
