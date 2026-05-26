@@ -908,7 +908,7 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
             var audio_codes_buffer: zml.Buffer = undefined;
             defer audio_codes_buffer.deinit();
 
-            const audio_codes_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = aceenc.options.seq_len_time * 5 }, .bf16));
+            const audio_codes_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t_code = aceenc.options.seq_len_time * 5 }, .u32));
             defer audio_codes_slice.free(allocator);
             
             aceenc.exes.tokenize_args.set(.{ aceenc.model_buffers.audio_tokenizer, source_latents_buffer });
