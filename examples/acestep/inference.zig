@@ -864,8 +864,15 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
     // diffusion will use to denoise towards, and second, a logical mask that constrains temporally where the diffusion acts
     // the source latent can come from dequantized and detokenized audio codes, from silence latent or from source audio
 
+    // start from silence everywhere
     const latents_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_25hz_max }, .bf16));
     defer latents_slice.free(allocator);
+    var latent_buffer: zml.Buffer = undefined;
+    defer latent_buffer.deinit();
+    aceenc.exes.silence_args.set(.{ aceenc.silence_buffers });
+    aceenc.exes.silence_exe.call(aceenc.exes.silence_args, &aceenc.exes.silence_results);
+    aceenc.exes.silence_results.fill(.{ &latent_buffer });
+    try latent_buffer.toSlice(io, latents_slice);
 
     // diffusion works in [.t, .a]
     const return_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = 2 * audio_dim }, .bf16));
@@ -885,8 +892,7 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
         defer audio_codes_buffer.deinit();
         aceenc.exes.detokenize_args.set(.{ aceenc.model_buffers.audio_detokenizer, audio_codes_buffer });
         aceenc.exes.detokenize_exe.call(aceenc.exes.detokenize_args, &aceenc.exes.detokenize_results);
-        var latent_buffer: zml.Buffer = undefined;
-        defer latent_buffer.deinit();
+        latent_buffer.deinit();
         aceenc.exes.detokenize_results.fill(.{ &latent_buffer });
         try latent_buffer.toSlice(io, latents_slice);
     } else if (audio_latents) |audio| {
@@ -907,21 +913,9 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
             defer quantized_latents_buffer.deinit();
             var audio_codes_buffer: zml.Buffer = undefined;
             defer audio_codes_buffer.deinit();
-
-            const audio_codes_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t_code = aceenc.options.seq_len_time * 5 }, .u32));
-            defer audio_codes_slice.free(allocator);
-            
             aceenc.exes.tokenize_args.set(.{ aceenc.model_buffers.audio_tokenizer, source_latents_buffer });
             aceenc.exes.tokenize_exe.call(aceenc.exes.tokenize_args, &aceenc.exes.tokenize_results);
             aceenc.exes.tokenize_results.fill(.{ &audio_codes_buffer });
-
-            try audio_codes_buffer.toSlice(io, audio_codes_slice);
-
-            for (0..100) |i| {
-                std.log.info("code {d} = {d}", .{ i, audio_codes_slice.items(u32)[i] });
-                
-            }
-            
             aceenc.exes.detokenize_args.set(.{ aceenc.model_buffers.audio_detokenizer, audio_codes_buffer });
             aceenc.exes.detokenize_exe.call(aceenc.exes.detokenize_args, &aceenc.exes.detokenize_results);
             aceenc.exes.detokenize_results.fill(.{ &quantized_latents_buffer });
@@ -929,12 +923,6 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
         }
     } else {
         std.log.info("ENC init source latents from silence latents", .{});
-        aceenc.exes.silence_args.set(.{ aceenc.silence_buffers });
-        aceenc.exes.silence_exe.call(aceenc.exes.silence_args, &aceenc.exes.silence_results);
-        var latent_buffer: zml.Buffer = undefined;
-        defer latent_buffer.deinit();
-        aceenc.exes.silence_results.fill(.{ &latent_buffer });
-        try latent_buffer.toSlice(io, latents_slice);
     }
 
     // concatenate slices rows
