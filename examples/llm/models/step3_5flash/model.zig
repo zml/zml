@@ -243,8 +243,8 @@ pub const Moe = struct {
         const scaled = routing_scores.scale(self.router.routed_scaling_factor);
 
         // Triton MoE backend expects the top-k axis tagged as `.top_expert`.
-        const topk_ids_te = topk_ids.rename(.{ .topk = .top_expert });
-        const scaled_te = scaled.rename(.{ .topk = .top_expert });
+        const topk_ids_tensor = topk_ids.rename(.{ .topk = .top_expert });
+        const scaled_tensor = scaled.rename(.{ .topk = .top_expert });
 
         // concat the gate and up
         const gate_up_proj = zml.Tensor.concatenate(&.{ self.gate_proj, self.up_proj }, .dout).rename(.{ .dout = .out, .d = .in });
@@ -256,12 +256,19 @@ pub const Moe = struct {
         const moe_metadata = zml.moe.Metadata.init(.{ .triton = .{} });
         const moe_parameters = zml.moe.Parameters.init(.{ .triton = .{ .num_experts_per_tok = self.router.num_experts_per_tok, .activation = .silu } });
 
+        // in Moe.forward, before forwardMoe
+        topk_ids.print("zml_topk_ids");
+
+        topk_ids.print("zml_topk_ids"); // → check min/max ≥ 256
+        scaled.print("zml_topk_weights"); // → compare to Python routing_weights
+        input.print("zml_moe_input"); // → compare to layer 42 in.0 fixture
+
         // get all expert outputs as tensor via fused triton kernel instead of Python loop
         // NOTE: swiglu limit not considered. may have to edit
         const moe_output = zml.moe.forwardMoe(
             input,
-            topk_ids_te,
-            scaled_te,
+            topk_ids_tensor,
+            scaled_tensor,
             gate_up_proj,
             null,
             null,
