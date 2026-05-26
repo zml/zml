@@ -49,6 +49,7 @@ const Model = struct {
     overview: Overview = undefined,
 
     fn deinit(self: *Model) void {
+        self.process_table.deinit(self.allocator);
         self.overview.deinit(self.allocator);
         image_cache.global.deinit(self.allocator);
     }
