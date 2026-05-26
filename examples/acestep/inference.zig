@@ -879,9 +879,9 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
     const return_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = 2 * audio_dim }, .bf16));
     const mask_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = audio_dim }, .bf16));
     defer mask_slice.free(allocator);
-    const two = zml.floats.BFloat16.fromF32(2.0);
+    const one = zml.floats.BFloat16.fromF32(1.0);
     for (0..n) |i| {
-        mask_slice.items(zml.floats.BFloat16)[i] = two;
+        mask_slice.items(zml.floats.BFloat16)[i] = one;
     }
     
     if (audio_codes) |codes| {
