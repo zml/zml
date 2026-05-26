@@ -133,6 +133,8 @@ const Device = struct {
             .power_limit_mw = self.powerLimitMilliwatts(allocator, io) catch null,
             .clock_graphics_max_mhz = self.maxClockGraphics(allocator, io) catch null,
             .mem_total_bytes = self.memTotal(allocator, io) catch null,
+            .pcie_link_gen = self.pcieLinkGen(allocator, io) catch null,
+            .pcie_link_width = self.pcieLinkWidth(allocator, io) catch null,
         };
         return self;
     }
@@ -233,6 +235,19 @@ const Device = struct {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/resource", .{self.dev_path});
         return readLargestResource(allocator, io, path);
+    }
+
+    fn pcieLinkGen(self: Device, allocator: std.mem.Allocator, io: std.Io) !u64 {
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_speed", .{self.dev_path});
+        const raw = try sysfs.readString(allocator, io, path);
+        return pcieGenFromSpeed(raw);
+    }
+
+    fn pcieLinkWidth(self: Device, allocator: std.mem.Allocator, io: std.Io) !u64 {
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_width", .{self.dev_path});
+        return sysfs.readInt(allocator, io, path);
     }
 };
 
@@ -358,6 +373,17 @@ fn parseHex(raw: []const u8) ?u64 {
     return std.fmt.parseInt(u64, digits, 16) catch null;
 }
 
+fn pcieGenFromSpeed(raw: []const u8) !u64 {
+    const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
+    if (std.mem.startsWith(u8, trimmed, "2.5")) return 1;
+    if (std.mem.startsWith(u8, trimmed, "5.0") or std.mem.startsWith(u8, trimmed, "5 ")) return 2;
+    if (std.mem.startsWith(u8, trimmed, "8.0") or std.mem.startsWith(u8, trimmed, "8 ")) return 3;
+    if (std.mem.startsWith(u8, trimmed, "16.0") or std.mem.startsWith(u8, trimmed, "16 ")) return 4;
+    if (std.mem.startsWith(u8, trimmed, "32.0") or std.mem.startsWith(u8, trimmed, "32 ")) return 5;
+    if (std.mem.startsWith(u8, trimmed, "64.0") or std.mem.startsWith(u8, trimmed, "64 ")) return 6;
+    return error.not_found;
+}
+
 test "oneAPI fdinfo utilization fallback" {
     try std.testing.expectEqual(@as(?u64, 50), fdinfoUtilization(.{ .engine_ns = 100, .timestamp_ns = 1000 }, .{ .engine_ns = 600, .timestamp_ns = 2000 }));
     try std.testing.expectEqual(@as(?u64, null), fdinfoUtilization(null, .{ .engine_ns = 600, .timestamp_ns = 2000 }));
@@ -372,4 +398,10 @@ test "oneAPI power delta from hwmon energy" {
 test "oneAPI resource line chooses large memory BARs" {
     try std.testing.expectEqual(@as(?u64, 34_359_738_368), resourceLineSize("0x0000048800000000 0x0000048fffffffff 0x000000000014220c"));
     try std.testing.expectEqual(@as(?u64, null), resourceLineSize("0x00000000f6c00000 0x00000000f6dfffff 0x0000000000046200"));
+}
+
+test "oneAPI PCIe speed maps to generation" {
+    try std.testing.expectEqual(@as(u64, 1), try pcieGenFromSpeed("2.5 GT/s PCIe"));
+    try std.testing.expectEqual(@as(u64, 4), try pcieGenFromSpeed("16.0 GT/s PCIe"));
+    try std.testing.expectError(error.not_found, pcieGenFromSpeed("Unknown"));
 }

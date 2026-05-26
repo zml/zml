@@ -99,24 +99,18 @@ pub fn draw(
 
     // ── Clocks + PCIe ───────────────────────────────────────
     var clock_lines: std.ArrayList(MetricCard.LineEntry) = .empty;
-    try clock_lines.append(ctx.arena, .{ .label = "Graphics ", .value = try std.fmt.allocPrint(ctx.arena, " {d} / {d} MHz", .{
-        gpu.clock_graphics_mhz orelse 0, gpu.clock_graphics_max_mhz orelse 0,
-    }) });
+    try clock_lines.append(ctx.arena, .{ .label = "Graphics ", .value = try formatClockPair(ctx.arena, gpu.clock_graphics_mhz, gpu.clock_graphics_max_mhz) });
     if (gpu.clock_sm_mhz) |sm| {
         try clock_lines.append(ctx.arena, .{ .label = "SM       ", .value = try std.fmt.allocPrint(ctx.arena, " {d} MHz", .{sm}) });
     }
     if (gpu.clock_soc_mhz) |soc| {
         try clock_lines.append(ctx.arena, .{ .label = "SOC      ", .value = try std.fmt.allocPrint(ctx.arena, " {d} MHz", .{soc}) });
     }
-    try clock_lines.append(ctx.arena, .{ .label = "Memory   ", .value = try std.fmt.allocPrint(ctx.arena, " {d} / {d} MHz", .{
-        gpu.clock_mem_mhz orelse 0, gpu.clock_mem_max_mhz orelse 0,
-    }) });
+    try clock_lines.append(ctx.arena, .{ .label = "Memory   ", .value = try formatClockPair(ctx.arena, gpu.clock_mem_mhz, gpu.clock_mem_max_mhz) });
     const clocks_card: MetricCard = .{ .title = "Clocks", .lines = clock_lines.items };
 
     var pcie_lines: std.ArrayList(MetricCard.LineEntry) = .empty;
-    try pcie_lines.append(ctx.arena, .{ .label = "Link     ", .value = try std.fmt.allocPrint(ctx.arena, " Gen{d} x{d}", .{
-        gpu.pcie_link_gen orelse 0, gpu.pcie_link_width orelse 0,
-    }) });
+    try pcie_lines.append(ctx.arena, .{ .label = "Link     ", .value = try formatPcieLink(ctx.arena, gpu.pcie_link_gen, gpu.pcie_link_width) });
     if (gpu.pcie_tx_kbps != null or gpu.pcie_rx_kbps != null) {
         try pcie_lines.append(ctx.arena, .{ .label = "TX       ", .value = try formatBandwidth(ctx.arena, gpu.pcie_tx_kbps orelse 0) });
         try pcie_lines.append(ctx.arena, .{ .label = "RX       ", .value = try formatBandwidth(ctx.arena, gpu.pcie_rx_kbps orelse 0) });
@@ -141,6 +135,16 @@ pub fn draw(
         },
         .gap = 1,
     }, w, parent_widget);
+}
+
+fn formatClockPair(arena: std.mem.Allocator, current: ?u64, max: ?u64) std.mem.Allocator.Error![]const u8 {
+    if (current == null and max == null) return " N/A";
+    return std.fmt.allocPrint(arena, " {d} / {d} MHz", .{ current orelse 0, max orelse 0 });
+}
+
+fn formatPcieLink(arena: std.mem.Allocator, gen: ?u64, width: ?u64) std.mem.Allocator.Error![]const u8 {
+    if (gen == null and width == null) return " N/A";
+    return std.fmt.allocPrint(arena, " Gen{d} x{d}", .{ gen orelse 0, width orelse 0 });
 }
 
 fn formatBandwidth(arena: std.mem.Allocator, kbps: u64) std.mem.Allocator.Error![]const u8 {
