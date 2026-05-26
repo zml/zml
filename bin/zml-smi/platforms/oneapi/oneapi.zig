@@ -1,82 +1,83 @@
 const std = @import("std");
-const sysfs = @import("sysfs.zig");
+const Monitor = @import("monitor.zig");
 
 const OneApi = @This();
 
-pub const Handle = sysfs.Handle;
-pub const Target = sysfs.Target;
-pub const EngineSample = sysfs.EngineSample;
-pub const EnergySample = sysfs.EnergySample;
-pub const DeviceSample = sysfs.DeviceSample;
+pub const Handle = Monitor.Handle;
+pub const ProcessInfo = Monitor.ProcessInfo;
 
-io: std.Io,
-handles: []Handle,
+monitor: Monitor,
 
 pub fn init(allocator: std.mem.Allocator, io: std.Io) !OneApi {
     return .{
-        .io = io,
-        .handles = try sysfs.discoverIntelDevices(allocator, io),
+        .monitor = try Monitor.init(allocator, io),
     };
 }
 
-pub fn deviceCount(self: OneApi) usize {
-    return self.handles.len;
+pub fn deviceCount(self: *const OneApi) usize {
+    return self.monitor.deviceCount();
 }
 
-pub fn handleByIndex(self: OneApi, device_id: usize) !Handle {
-    if (device_id >= self.handles.len) return error.not_found;
-    return self.handles[device_id];
+pub fn handleByIndex(self: *const OneApi, device_id: usize) !Handle {
+    return self.monitor.handleByIndex(device_id);
 }
 
-pub fn target(self: OneApi, handle: Handle, device_idx: u16) Target {
-    _ = self;
-    return .{ .device_idx = device_idx, .bus_device_function = handle.bus_device_function };
-}
-
-pub fn name(self: OneApi, allocator: std.mem.Allocator, handle: Handle) ![]const u8 {
-    const id = try sysfs.deviceId(allocator, self.io, handle);
+pub fn name(self: *const OneApi, allocator: std.mem.Allocator, handle: Handle) ![]const u8 {
+    const id = try self.monitor.deviceId(allocator, handle);
     if (std.ascii.eqlIgnoreCase(id, "0xe223")) {
         return try allocator.dupe(u8, "Intel(R) Arc(TM) Pro B70 Graphics");
     }
     return try std.fmt.allocPrint(allocator, "Intel GPU {s}", .{id});
 }
 
-pub fn driverVersion(self: OneApi, allocator: std.mem.Allocator) ![]const u8 {
-    return sysfs.driverVersion(allocator, self.io);
+pub fn driverVersion(self: *const OneApi, allocator: std.mem.Allocator) ![]const u8 {
+    return self.monitor.driverVersion(allocator);
 }
 
-pub fn temperature(self: OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
-    return sysfs.temperature(allocator, self.io, handle);
+pub fn powerUsage(self: *OneApi, handle: Handle) !u64 {
+    return self.monitor.powerUsage(handle);
 }
 
-pub fn energy(self: OneApi, allocator: std.mem.Allocator, handle: Handle) !EnergySample {
-    return sysfs.energy(allocator, self.io, handle);
+pub fn powerLimit(self: *OneApi, handle: Handle) !u64 {
+    return self.monitor.powerLimit(handle);
 }
 
-pub fn powerLimit(self: OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
-    return sysfs.powerLimit(allocator, self.io, handle);
+pub fn temperature(self: *OneApi, handle: Handle) !u64 {
+    return self.monitor.temperature(handle);
 }
 
-pub fn clockGraphics(self: OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
-    return sysfs.clockGraphics(allocator, self.io, handle);
+pub fn gpuUtil(self: *OneApi, handle: Handle) !u64 {
+    return self.monitor.gpuUtil(handle);
 }
 
-pub fn maxClockGraphics(self: OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
-    return sysfs.maxClockGraphics(allocator, self.io, handle);
+pub fn clockGraphics(self: *OneApi, handle: Handle) !u64 {
+    return self.monitor.clockGraphics(handle);
 }
 
-pub fn memTotal(self: OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
-    return sysfs.memTotal(allocator, self.io, handle);
+pub fn maxClockGraphics(self: *OneApi, handle: Handle) !u64 {
+    return self.monitor.maxClockGraphics(handle);
 }
 
-pub fn pcieLinkGen(self: OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
-    return sysfs.pcieLinkGen(allocator, self.io, handle);
+pub fn memUsed(self: *OneApi, handle: Handle) !u64 {
+    return self.monitor.memUsed(handle);
 }
 
-pub fn pcieLinkWidth(self: OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
-    return sysfs.pcieLinkWidth(allocator, self.io, handle);
+pub fn memTotal(self: *OneApi, handle: Handle) !u64 {
+    return self.monitor.memTotal(handle);
 }
 
-pub fn pcieBandwidth(self: OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
-    return sysfs.pcieBandwidth(allocator, self.io, handle);
+pub fn pcieLinkGen(self: *OneApi, handle: Handle) !u64 {
+    return self.monitor.pcieLinkGen(handle);
+}
+
+pub fn pcieLinkWidth(self: *OneApi, handle: Handle) !u64 {
+    return self.monitor.pcieLinkWidth(handle);
+}
+
+pub fn pcieBandwidth(self: *OneApi, handle: Handle) !u64 {
+    return self.monitor.pcieBandwidth(handle);
+}
+
+pub fn processList(self: *OneApi, allocator: std.mem.Allocator) !std.ArrayList(ProcessInfo) {
+    return self.monitor.processList(allocator);
 }

@@ -1,49 +1,239 @@
 const std = @import("std");
 const smi_sysfs = @import("zml-smi/sysfs");
 
-pub const bus_device_function_len = "0000:00:00.0".len;
+const Monitor = @This();
 
-pub const Handle = struct {
+pub const bus_device_identifier_len = "0000:00:00.0".len;
+pub const Handle = enum(u32) { _ };
+
+const Device = struct {
     render_idx: usize,
     drm_path: []const u8,
     dev_path: []const u8,
     hwmon_path: ?[]const u8,
-    bus_device_function: ?[bus_device_function_len]u8,
+    bus_device_identifier: ?[bus_device_identifier_len]u8,
+    scratch: std.heap.ArenaAllocator,
+    activity_prev: ?EngineSample = null,
+    energy_prev: ?EnergySample = null,
 };
 
-pub const Target = struct {
+pub const ProcessInfo = struct {
+    pid: u32,
     device_idx: u16,
-    bus_device_function: ?[bus_device_function_len]u8,
+    mem_kib: ?u64 = null,
+    util_percent: ?u16 = null,
 };
 
-pub const EnergySample = struct {
+const EnergySample = struct {
     micro_joules: u64,
     timestamp_ns: u64,
 };
 
-pub const EngineSample = struct {
+const EngineSample = struct {
     engine_ns: u64,
     timestamp_ns: u64,
 };
 
-pub const DeviceSample = struct {
+const DeviceSample = struct {
     mem_kib: u64 = 0,
     engine: ?EngineSample = null,
 };
 
-pub const ProcessSample = struct {
+const ProcessSample = struct {
     pid: u32,
     device_idx: u16,
     mem_kib: ?u64 = null,
     engine: ?EngineSample = null,
 };
 
-pub const ProcessUsage = std.AutoHashMapUnmanaged(u64, ProcessSample);
-pub const DeviceUsage = std.AutoHashMapUnmanaged(u16, DeviceSample);
+const ProcessUsage = std.AutoHashMapUnmanaged(u64, ProcessSample);
+const DeviceUsage = std.AutoHashMapUnmanaged(u16, DeviceSample);
 
-pub fn discoverIntelDevices(allocator: std.mem.Allocator, io: std.Io) ![]Handle {
-    var handles: std.ArrayList(Handle) = .empty;
-    errdefer handles.deinit(allocator);
+allocator: std.mem.Allocator,
+io: std.Io,
+devices: []Device,
+process_previous: std.AutoHashMapUnmanaged(u64, EngineSample) = .{},
+
+pub fn init(allocator: std.mem.Allocator, io: std.Io) !Monitor {
+    var monitor: Monitor = .{
+        .allocator = allocator,
+        .io = io,
+        .devices = try discoverIntelDevices(allocator, io),
+    };
+    monitor.seed() catch {};
+    return monitor;
+}
+
+pub fn deviceCount(self: *const Monitor) usize {
+    return self.devices.len;
+}
+
+pub fn handleByIndex(self: *const Monitor, device_id: usize) !Handle {
+    if (device_id >= self.devices.len) return error.not_found;
+    return @enumFromInt(@as(u32, @intCast(device_id)));
+}
+
+pub fn deviceId(self: *const Monitor, allocator: std.mem.Allocator, handle: Handle) ![]const u8 {
+    const dev = try self.deviceConst(handle);
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/device", .{dev.dev_path});
+    const raw = try smi_sysfs.readString(allocator, self.io, path);
+    return std.mem.trim(u8, raw, &std.ascii.whitespace);
+}
+
+pub fn driverVersion(self: *const Monitor, allocator: std.mem.Allocator) ![]const u8 {
+    const version = smi_sysfs.readString(allocator, self.io, "/sys/module/xe/version") catch
+        smi_sysfs.readString(allocator, self.io, "/sys/module/xe/srcversion") catch
+        smi_sysfs.readString(allocator, self.io, "/sys/module/i915/version") catch
+        try smi_sysfs.readString(allocator, self.io, "/sys/module/i915/srcversion");
+    const trimmed = std.mem.trim(u8, version, &std.ascii.whitespace);
+    if (trimmed.len == 0) return error.not_found;
+    return trimmed;
+}
+
+pub fn temperature(self: *Monitor, handle: Handle) !u64 {
+    const dev = try self.device(handle);
+    const allocator = resetScratch(dev);
+    return readTemperature(allocator, self.io, dev.*);
+}
+
+pub fn powerUsage(self: *Monitor, handle: Handle) !u64 {
+    const dev = try self.device(handle);
+    const allocator = resetScratch(dev);
+    const current = readEnergy(allocator, self.io, dev.*) catch |err| {
+        dev.energy_prev = null;
+        return err;
+    };
+    const power = powerMilliwatts(dev.energy_prev, current) orelse {
+        dev.energy_prev = current;
+        return error.not_found;
+    };
+    dev.energy_prev = current;
+    return power;
+}
+
+pub fn powerLimit(self: *Monitor, handle: Handle) !u64 {
+    const dev = try self.device(handle);
+    const allocator = resetScratch(dev);
+    return readPowerLimit(allocator, self.io, dev.*);
+}
+
+pub fn gpuUtil(self: *Monitor, handle: Handle) !u64 {
+    const dev_idx: u16 = @intCast(handleIndex(handle));
+    const dev = try self.device(handle);
+    const allocator = resetScratch(dev);
+
+    var usage = collectDeviceUsage(allocator, self.io, self.devices) catch {
+        dev.activity_prev = null;
+        return 0;
+    };
+    defer usage.deinit(allocator);
+
+    const current = if (usage.get(dev_idx)) |sample| sample.engine else null;
+    const util = processUtil(dev.activity_prev, current) orelse 0;
+    dev.activity_prev = current;
+    return util;
+}
+
+pub fn clockGraphics(self: *Monitor, handle: Handle) !u64 {
+    const dev = try self.device(handle);
+    const allocator = resetScratch(dev);
+    return readClockGraphics(allocator, self.io, dev.*);
+}
+
+pub fn maxClockGraphics(self: *Monitor, handle: Handle) !u64 {
+    const dev = try self.device(handle);
+    const allocator = resetScratch(dev);
+    return readMaxClockGraphics(allocator, self.io, dev.*);
+}
+
+pub fn memUsed(self: *Monitor, handle: Handle) !u64 {
+    const dev_idx: u16 = @intCast(handleIndex(handle));
+    const dev = try self.device(handle);
+    const allocator = resetScratch(dev);
+
+    var usage = collectDeviceUsage(allocator, self.io, self.devices) catch return 0;
+    defer usage.deinit(allocator);
+
+    return if (usage.get(dev_idx)) |sample| sample.mem_kib * 1024 else 0;
+}
+
+pub fn memTotal(self: *Monitor, handle: Handle) !u64 {
+    const dev = try self.device(handle);
+    const allocator = resetScratch(dev);
+    return readMemTotal(allocator, self.io, dev.*);
+}
+
+pub fn pcieLinkGen(self: *Monitor, handle: Handle) !u64 {
+    const dev = try self.device(handle);
+    const allocator = resetScratch(dev);
+    return readPcieLinkGen(allocator, self.io, dev.*);
+}
+
+pub fn pcieLinkWidth(self: *Monitor, handle: Handle) !u64 {
+    const dev = try self.device(handle);
+    const allocator = resetScratch(dev);
+    return readPcieLinkWidth(allocator, self.io, dev.*);
+}
+
+pub fn pcieBandwidth(self: *Monitor, handle: Handle) !u64 {
+    const dev = try self.device(handle);
+    const allocator = resetScratch(dev);
+    return readPcieBandwidth(allocator, self.io, dev.*);
+}
+
+pub fn processList(self: *Monitor, allocator: std.mem.Allocator) !std.ArrayList(ProcessInfo) {
+    var usage = try collectProcessUsage(allocator, self.io, self.devices);
+    defer usage.deinit(allocator);
+
+    var processes: std.ArrayList(ProcessInfo) = .empty;
+    errdefer processes.deinit(allocator);
+
+    var it = usage.iterator();
+    while (it.next()) |entry| {
+        const sample = entry.value_ptr.*;
+        try processes.append(allocator, .{
+            .pid = sample.pid,
+            .device_idx = sample.device_idx,
+            .mem_kib = sample.mem_kib,
+            .util_percent = processUtil(self.process_previous.get(entry.key_ptr.*), sample.engine),
+        });
+    }
+
+    self.saveProcessPrevious(&usage) catch {};
+    return processes;
+}
+
+fn seed(self: *Monitor) !void {
+    var device_usage = collectDeviceUsage(self.allocator, self.io, self.devices) catch DeviceUsage{};
+    defer device_usage.deinit(self.allocator);
+
+    for (self.devices, 0..) |*dev, idx| {
+        const allocator = resetScratch(dev);
+        dev.energy_prev = readEnergy(allocator, self.io, dev.*) catch null;
+        dev.activity_prev = if (device_usage.get(@intCast(idx))) |sample| sample.engine else null;
+    }
+
+    var usage = collectProcessUsage(self.allocator, self.io, self.devices) catch return;
+    defer usage.deinit(self.allocator);
+    self.saveProcessPrevious(&usage) catch {};
+}
+
+fn saveProcessPrevious(self: *Monitor, usage: *const ProcessUsage) !void {
+    self.process_previous.clearRetainingCapacity();
+    try self.process_previous.ensureTotalCapacity(self.allocator, @intCast(usage.count()));
+
+    var it = usage.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.engine) |engine| {
+            self.process_previous.putAssumeCapacity(entry.key_ptr.*, engine);
+        }
+    }
+}
+
+fn discoverIntelDevices(allocator: std.mem.Allocator, io: std.Io) ![]Device {
+    var devices: std.ArrayList(Device) = .empty;
+    errdefer devices.deinit(allocator);
 
     var dir = std.Io.Dir.openDirAbsolute(io, "/dev/dri", .{ .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return &.{},
@@ -54,19 +244,19 @@ pub fn discoverIntelDevices(allocator: std.mem.Allocator, io: std.Io) ![]Handle 
     var it = dir.iterate();
     while (it.next(io) catch null) |entry| {
         const render_idx = parseRenderIndex(entry.name) orelse continue;
-        const handle = openHandle(allocator, io, render_idx) catch continue;
-        try handles.append(allocator, handle);
+        const dev = openDevice(allocator, io, render_idx) catch continue;
+        try devices.append(allocator, dev);
     }
 
-    std.mem.sort(Handle, handles.items, {}, struct {
-        fn lessThan(_: void, lhs: Handle, rhs: Handle) bool {
+    std.mem.sort(Device, devices.items, {}, struct {
+        fn lessThan(_: void, lhs: Device, rhs: Device) bool {
             return lhs.render_idx < rhs.render_idx;
         }
     }.lessThan);
-    return handles.toOwnedSlice(allocator);
+    return devices.toOwnedSlice(allocator);
 }
 
-fn openHandle(allocator: std.mem.Allocator, io: std.Io, render_idx: usize) !Handle {
+fn openDevice(allocator: std.mem.Allocator, io: std.Io, render_idx: usize) !Device {
     const drm_path = try std.fmt.allocPrint(allocator, "/sys/class/drm/renderD{d}", .{render_idx});
     errdefer allocator.free(drm_path);
 
@@ -85,29 +275,34 @@ fn openHandle(allocator: std.mem.Allocator, io: std.Io, render_idx: usize) !Hand
         .drm_path = drm_path,
         .dev_path = dev_path,
         .hwmon_path = findHwmon(allocator, io, dev_path) catch null,
-        .bus_device_function = readBdf(allocator, io, dev_path) catch null,
+        .bus_device_identifier = readBusDeviceId(allocator, io, dev_path) catch null,
+        .scratch = std.heap.ArenaAllocator.init(allocator),
     };
 }
 
-pub fn deviceId(allocator: std.mem.Allocator, io: std.Io, handle: Handle) ![]const u8 {
-    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/device", .{handle.dev_path});
-    const raw = try smi_sysfs.readString(allocator, io, path);
-    return std.mem.trim(u8, raw, &std.ascii.whitespace);
+fn handleIndex(handle: Handle) usize {
+    return @intFromEnum(handle);
 }
 
-pub fn driverVersion(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
-    const version = smi_sysfs.readString(allocator, io, "/sys/module/xe/version") catch
-        smi_sysfs.readString(allocator, io, "/sys/module/xe/srcversion") catch
-        smi_sysfs.readString(allocator, io, "/sys/module/i915/version") catch
-        try smi_sysfs.readString(allocator, io, "/sys/module/i915/srcversion");
-    const trimmed = std.mem.trim(u8, version, &std.ascii.whitespace);
-    if (trimmed.len == 0) return error.not_found;
-    return trimmed;
+fn device(self: *Monitor, handle: Handle) !*Device {
+    const idx = handleIndex(handle);
+    if (idx >= self.devices.len) return error.not_found;
+    return &self.devices[idx];
 }
 
-pub fn temperature(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
-    const hwmon = handle.hwmon_path orelse return error.not_found;
+fn deviceConst(self: *const Monitor, handle: Handle) !*const Device {
+    const idx = handleIndex(handle);
+    if (idx >= self.devices.len) return error.not_found;
+    return &self.devices[idx];
+}
+
+fn resetScratch(dev: *Device) std.mem.Allocator {
+    _ = dev.scratch.reset(.retain_capacity);
+    return dev.scratch.allocator();
+}
+
+fn readTemperature(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
+    const hwmon = dev.hwmon_path orelse return error.not_found;
     const milli_c = readHwmonInput(allocator, io, hwmon, "temp", "pkg") catch
         readHwmonInput(allocator, io, hwmon, "temp", "gpu") catch
         readNumberedInput(allocator, io, hwmon, "temp", 2) catch
@@ -115,8 +310,8 @@ pub fn temperature(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u6
     return (milli_c + 500) / 1000;
 }
 
-pub fn energy(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !EnergySample {
-    const hwmon = handle.hwmon_path orelse return error.not_found;
+fn readEnergy(allocator: std.mem.Allocator, io: std.Io, dev: Device) !EnergySample {
+    const hwmon = dev.hwmon_path orelse return error.not_found;
     const micro_joules = readHwmonInput(allocator, io, hwmon, "energy", "card") catch
         readHwmonInput(allocator, io, hwmon, "energy", "pkg") catch
         try readNumberedInput(allocator, io, hwmon, "energy", 1);
@@ -126,48 +321,48 @@ pub fn energy(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !EnergyS
     };
 }
 
-pub fn powerLimit(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
-    const hwmon = handle.hwmon_path orelse return error.not_found;
+fn readPowerLimit(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
+    const hwmon = dev.hwmon_path orelse return error.not_found;
     const microwatts = readNumberedSuffix(allocator, io, hwmon, "power", 1, "cap") catch
         try readNumberedSuffix(allocator, io, hwmon, "power", 1, "max");
     return microwatts / 1000;
 }
 
-pub fn clockGraphics(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
-    return readFreq(allocator, io, handle, "act_freq") catch readFreq(allocator, io, handle, "cur_freq");
+fn readClockGraphics(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
+    return readFreq(allocator, io, dev, "act_freq") catch readFreq(allocator, io, dev, "cur_freq");
 }
 
-pub fn maxClockGraphics(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
-    return readFreq(allocator, io, handle, "max_freq");
+fn readMaxClockGraphics(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
+    return readFreq(allocator, io, dev, "max_freq");
 }
 
-pub fn memTotal(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
+fn readMemTotal(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/resource", .{handle.dev_path});
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/resource", .{dev.dev_path});
     return readLargestResource(allocator, io, path);
 }
 
-pub fn pcieLinkGen(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
+fn readPcieLinkGen(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_speed", .{handle.dev_path});
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_speed", .{dev.dev_path});
     const raw = try smi_sysfs.readString(allocator, io, path);
     return pcieGenFromSpeed(raw);
 }
 
-pub fn pcieLinkWidth(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
+fn readPcieLinkWidth(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_width", .{handle.dev_path});
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_width", .{dev.dev_path});
     return smi_sysfs.readInt(allocator, io, path);
 }
 
-pub fn pcieBandwidth(allocator: std.mem.Allocator, io: std.Io, handle: Handle) !u64 {
-    const gen = try pcieLinkGen(allocator, io, handle);
-    const width = try pcieLinkWidth(allocator, io, handle);
+fn readPcieBandwidth(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
+    const gen = try readPcieLinkGen(allocator, io, dev);
+    const width = try readPcieLinkWidth(allocator, io, dev);
     return pcieBandwidthFromLink(gen, width) orelse error.not_found;
 }
 
-pub fn collectDeviceUsage(allocator: std.mem.Allocator, io: std.Io, targets: []const Target) !DeviceUsage {
-    var processes = try collectProcessUsage(allocator, io, targets);
+fn collectDeviceUsage(allocator: std.mem.Allocator, io: std.Io, devices: []const Device) !DeviceUsage {
+    var processes = try collectProcessUsage(allocator, io, devices);
     defer processes.deinit(allocator);
 
     var result: DeviceUsage = .{};
@@ -191,7 +386,7 @@ pub fn collectDeviceUsage(allocator: std.mem.Allocator, io: std.Io, targets: []c
     return result;
 }
 
-pub fn collectProcessUsage(allocator: std.mem.Allocator, io: std.Io, targets: []const Target) !ProcessUsage {
+fn collectProcessUsage(allocator: std.mem.Allocator, io: std.Io, devices: []const Device) !ProcessUsage {
     var result: ProcessUsage = .{};
     errdefer result.deinit(allocator);
 
@@ -213,8 +408,8 @@ pub fn collectProcessUsage(allocator: std.mem.Allocator, io: std.Io, targets: []
             var file_path_buf: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
             const file_path = std.fmt.bufPrintZ(&file_path_buf, "{s}/{s}", .{ fdinfo_path, fd_entry.name }) catch continue;
             const parsed = parseFdinfoFile(file_path, now_ns) catch continue;
-            const bus_device_function = parsed.bus_device_function orelse continue;
-            const dev_idx = matchTarget(targets, bus_device_function) orelse continue;
+            const bus_device_identifier = parsed.bus_device_identifier orelse continue;
+            const dev_idx = matchDevice(devices, bus_device_identifier) orelse continue;
             const key = processKey(pid, dev_idx);
             const gop = try result.getOrPut(allocator, key);
             if (!gop.found_existing) {
@@ -227,7 +422,7 @@ pub fn collectProcessUsage(allocator: std.mem.Allocator, io: std.Io, targets: []
     return result;
 }
 
-pub fn processUtil(previous: ?EngineSample, current: ?EngineSample) ?u16 {
+fn processUtil(previous: ?EngineSample, current: ?EngineSample) ?u16 {
     const prev = previous orelse return null;
     const cur = current orelse return null;
     if (cur.timestamp_ns <= prev.timestamp_ns or cur.engine_ns < prev.engine_ns) return null;
@@ -238,13 +433,13 @@ pub fn processUtil(previous: ?EngineSample, current: ?EngineSample) ?u16 {
     return @intCast(if (pct == 0 and engine_delta > 0) 1 else pct);
 }
 
-pub fn powerMilliwatts(previous: ?EnergySample, current: ?EnergySample) ?u64 {
+fn powerMilliwatts(previous: ?EnergySample, current: ?EnergySample) ?u64 {
     const prev = previous orelse return null;
     const cur = current orelse return null;
     return milliwattsFromEnergyDelta(prev.micro_joules, cur.micro_joules, prev.timestamp_ns, cur.timestamp_ns);
 }
 
-pub fn milliwattsFromEnergyDelta(prev_uj: u64, cur_uj: u64, prev_ns: u64, cur_ns: u64) ?u64 {
+fn milliwattsFromEnergyDelta(prev_uj: u64, cur_uj: u64, prev_ns: u64, cur_ns: u64) ?u64 {
     if (cur_uj < prev_uj or cur_ns <= prev_ns) return null;
     const energy_delta = cur_uj - prev_uj;
     const time_delta = cur_ns - prev_ns;
@@ -252,9 +447,9 @@ pub fn milliwattsFromEnergyDelta(prev_uj: u64, cur_uj: u64, prev_ns: u64, cur_ns
     return energy_delta * 1_000_000 / time_delta;
 }
 
-fn readFreq(allocator: std.mem.Allocator, io: std.Io, handle: Handle, file: []const u8) !u64 {
+fn readFreq(allocator: std.mem.Allocator, io: std.Io, dev: Device, file: []const u8) !u64 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/tile0/gt0/freq0/{s}", .{ handle.dev_path, file });
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/tile0/gt0/freq0/{s}", .{ dev.dev_path, file });
     return smi_sysfs.readInt(allocator, io, path);
 }
 
@@ -283,18 +478,18 @@ fn findHwmon(allocator: std.mem.Allocator, io: std.Io, dev_path: []const u8) !?[
     return null;
 }
 
-fn readBdf(allocator: std.mem.Allocator, io: std.Io, dev_path: []const u8) ![bus_device_function_len]u8 {
+inline fn readBusDeviceId(allocator: std.mem.Allocator, io: std.Io, dev_path: []const u8) ![bus_device_identifier_len]u8 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/uevent", .{dev_path});
     const raw = try smi_sysfs.readFieldString(allocator, io, path, "PCI_SLOT_NAME=");
     const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
-    if (trimmed.len != bus_device_function_len) return error.not_found;
-    var out: [bus_device_function_len]u8 = undefined;
+    if (trimmed.len != bus_device_identifier_len) return error.not_found;
+    var out: [bus_device_identifier_len]u8 = undefined;
     @memcpy(&out, trimmed);
     return out;
 }
 
-fn readHwmonInput(allocator: std.mem.Allocator, io: std.Io, hwmon: []const u8, comptime prefix: []const u8, label: []const u8) !u64 {
+inline fn readHwmonInput(allocator: std.mem.Allocator, io: std.Io, hwmon: []const u8, comptime prefix: []const u8, label: []const u8) !u64 {
     for (1..16) |idx| {
         var label_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const label_path = try std.fmt.bufPrint(&label_path_buf, "{s}/{s}{d}_label", .{ hwmon, prefix, idx });
@@ -384,7 +579,7 @@ const FdinfoSample = struct {
 };
 
 const ParsedFdinfo = struct {
-    bus_device_function: ?[bus_device_function_len]u8 = null,
+    bus_device_identifier: ?[bus_device_identifier_len]u8 = null,
     sample: FdinfoSample = .{},
     resident_vram_kib: u64 = 0,
     total_vram_kib: u64 = 0,
@@ -461,7 +656,7 @@ fn finishFdinfo(self: *ParsedFdinfo) void {
 
 fn parseFdinfoLine(parsed: *ParsedFdinfo, line: []const u8, timestamp_ns: u64) void {
     if (std.mem.startsWith(u8, line, "drm-pdev:")) {
-        parsed.bus_device_function = parseBdf(line["drm-pdev:".len..]);
+        parsed.bus_device_identifier = parseBdf(line["drm-pdev:".len..]);
         return;
     }
 
@@ -542,10 +737,10 @@ fn mergeProcessSample(dst: *ProcessSample, src: FdinfoSample) void {
     }
 }
 
-fn matchTarget(targets: []const Target, bus_device_function: [bus_device_function_len]u8) ?u16 {
-    for (targets) |target| {
-        if (target.bus_device_function) |target_bus_device_function| {
-            if (std.mem.eql(u8, &target_bus_device_function, &bus_device_function)) return target.device_idx;
+fn matchDevice(devices: []const Device, bus_device_identifier: [bus_device_identifier_len]u8) ?u16 {
+    for (devices, 0..) |dev, idx| {
+        if (dev.bus_device_identifier) |device_bus_device_identifier| {
+            if (std.mem.eql(u8, &device_bus_device_identifier, &bus_device_identifier)) return @intCast(idx);
         }
     }
     return null;
@@ -562,8 +757,8 @@ pub const BdfParts = struct {
     function: u32,
 };
 
-pub fn formatBdf(parts: BdfParts) [bus_device_function_len]u8 {
-    var buf: [bus_device_function_len]u8 = undefined;
+pub fn formatBdf(parts: BdfParts) [bus_device_identifier_len]u8 {
+    var buf: [bus_device_identifier_len]u8 = undefined;
     _ = std.fmt.bufPrint(&buf, "{x:0>4}:{x:0>2}:{x:0>2}.{x}", .{
         parts.domain,
         parts.bus,
@@ -573,11 +768,11 @@ pub fn formatBdf(parts: BdfParts) [bus_device_function_len]u8 {
     return buf;
 }
 
-fn parseBdf(raw: []const u8) ?[bus_device_function_len]u8 {
+fn parseBdf(raw: []const u8) ?[bus_device_identifier_len]u8 {
     const trimmed = std.mem.trim(u8, raw, " \t\n");
-    var out: [bus_device_function_len]u8 = undefined;
-    if (trimmed.len == bus_device_function_len) {
-        @memcpy(&out, trimmed[0..bus_device_function_len]);
+    var out: [bus_device_identifier_len]u8 = undefined;
+    if (trimmed.len == bus_device_identifier_len) {
+        @memcpy(&out, trimmed[0..bus_device_identifier_len]);
         return out;
     }
     if (trimmed.len == "00:00.0".len) {
@@ -611,8 +806,8 @@ test "oneAPI fdinfo parser" {
     parseFdinfoLine(&parsed, "drm-engine-compute:\t50 ns", 10);
     finishFdinfo(&parsed);
 
-    try std.testing.expect(parsed.bus_device_function != null);
-    try std.testing.expectEqualSlices(u8, "0000:03:00.0", &parsed.bus_device_function.?);
+    try std.testing.expect(parsed.bus_device_identifier != null);
+    try std.testing.expectEqualSlices(u8, "0000:03:00.0", &parsed.bus_device_identifier.?);
     try std.testing.expectEqual(@as(?u64, 2048), parsed.sample.mem_kib);
     try std.testing.expectEqual(@as(u64, 150), parsed.sample.engine.?.engine_ns);
 }

@@ -1,54 +1,30 @@
 const std = @import("std");
-const sysfs = @import("sysfs.zig");
+const OneApi = @import("oneapi.zig");
 const pi = @import("zml-smi/info").process_info;
 const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 const Collector = @import("zml-smi/collector").Collector;
 
-pub const Target = sysfs.Target;
-pub const EngineSample = sysfs.EngineSample;
-pub const DeviceSample = sysfs.DeviceSample;
-
-pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, targets: []const Target) !void {
-    const state = try collector.arena.create(ProcessState);
-    state.* = .{ .allocator = collector.arena };
-
-    try collector.spawnPoll(pollOnce, .{ collector.gpa, collector.io, list, targets, state });
+pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, oneapi: *OneApi, dev_offset: u16) !void {
+    try collector.spawnPoll(pollOnce, .{ collector.gpa, list, oneapi, dev_offset });
 }
 
-const ProcessState = struct {
-    allocator: std.mem.Allocator,
-    previous: std.AutoHashMapUnmanaged(u64, EngineSample) = .{},
-};
-
-fn pollOnce(allocator: std.mem.Allocator, io: std.Io, list: *ProcessDoubleBuffer, targets: []const Target, state: *ProcessState) void {
+fn pollOnce(allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, oneapi: *OneApi, dev_offset: u16) void {
     const back = list.back();
     back.clearRetainingCapacity();
 
-    var usage = sysfs.collectProcessUsage(allocator, io, targets) catch {
+    var processes = oneapi.processList(allocator) catch {
         list.swap();
         return;
     };
-    defer usage.deinit(allocator);
+    defer processes.deinit(allocator);
 
-    var it = usage.iterator();
-    while (it.next()) |entry| {
-        const sample = entry.value_ptr.*;
+    for (processes.items) |proc| {
         back.append(allocator, .{
-            .pid = sample.pid,
-            .device_idx = sample.device_idx,
-            .dev_mem_kib = sample.mem_kib,
-            .dev_util_percent = sysfs.processUtil(state.previous.get(entry.key_ptr.*), sample.engine),
+            .pid = proc.pid,
+            .device_idx = @intCast(proc.device_idx + dev_offset),
+            .dev_mem_kib = proc.mem_kib,
+            .dev_util_percent = proc.util_percent,
         }) catch break;
-    }
-
-    state.previous.clearRetainingCapacity();
-    state.previous.ensureTotalCapacity(state.allocator, @intCast(usage.count())) catch {};
-
-    var sample_it = usage.iterator();
-    while (sample_it.next()) |entry| {
-        if (entry.value_ptr.engine) |engine| {
-            state.previous.putAssumeCapacity(entry.key_ptr.*, engine);
-        }
     }
 
     list.swap();
