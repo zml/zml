@@ -1103,8 +1103,8 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     // prepare arguments buffers. conditions are compact while dit expects a seq_len buffer
     var x_buffer: zml.Buffer = try .fromSlice(io, platform, x, sharding);
     var latents_buffer: zml.Buffer = try .fromSlice(io, platform, context.latents, sharding);
-    const conditions_slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = acedit.config.encoder_hidden_size }, .bf16));
-    @memcpy(conditions_slice.items(zml.floats.BFloat16)[0..(s*d)], context.conditions.items(zml.floats.BFloat16));
+    const conditions_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = acedit.config.encoder_hidden_size }, .bf16));
+    @memcpy(conditions_slice.items(zml.floats.BFloat16)[0..@intCast(s*d)], context.conditions.items(zml.floats.BFloat16));
     var conditions_buffer: zml.Buffer = try .fromSlice(io, platform, conditions_slice, sharding);
     defer x_buffer.deinit();
     defer latents_buffer.deinit();
