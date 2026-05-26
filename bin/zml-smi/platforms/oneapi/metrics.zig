@@ -8,98 +8,82 @@ const process = @import("process.zig");
 
 pub fn start(collector: *Collector) !void {
     const poll_arena = try collector.createPollArena();
-    const sampler = try Sampler.init(collector.arena, poll_arena, collector.io);
-    if (sampler.devices.len == 0) return;
-
     const dev_offset: u16 = @intCast(collector.device_infos.items.len);
-    const buffers = try collector.arena.alloc(*DoubleBuffer(GpuInfo), sampler.devices.len);
-    const process_targets = try collector.arena.alloc(process.Target, sampler.devices.len);
 
-    for (sampler.devices, 0..) |*dev, i| {
+    var devices: std.ArrayList(Device) = .empty;
+    var buffers: std.ArrayList(*DoubleBuffer(GpuInfo)) = .empty;
+    var process_targets: std.ArrayList(process.Target) = .empty;
+
+    for (0..64) |card_idx| {
+        var dev = Device.open(collector.arena, poll_arena, collector.io, card_idx) catch continue;
+        dev.device_idx = @intCast(dev_offset + devices.items.len);
+
         const initial = dev.static_info;
         const info = try collector.addDevice(.{ .oneapi = .{ .values = .{ initial, initial } } });
-        buffers[i] = &info.oneapi;
-        dev.device_idx = @intCast(dev_offset + i);
-        process_targets[i] = .{
+
+        try devices.append(collector.arena, dev);
+        try buffers.append(collector.arena, &info.oneapi);
+        try process_targets.append(collector.arena, .{
             .device_idx = dev.device_idx,
             .bdf = dev.bdf,
-        };
+        });
     }
 
-    if (collector.poll_only) {
-        pollOnce(sampler, buffers);
-        collector.io.sleep(.fromMilliseconds(collector.worker.poll_interval_ms), .awake) catch {};
-        pollOnce(sampler, buffers);
-    } else {
-        try collector.spawnPoll(pollOnce, .{ sampler, buffers });
-    }
+    if (devices.items.len == 0) return;
+
+    try collector.spawnPoll(pollOnce, .{
+        poll_arena,
+        collector.io,
+        try devices.toOwnedSlice(collector.arena),
+        try buffers.toOwnedSlice(collector.arena),
+    });
 
     const processes = try collector.createProcessList();
-    try process.init(collector, processes, process_targets);
+    try process.init(collector, processes, try process_targets.toOwnedSlice(collector.arena));
 }
 
-fn pollOnce(sampler: *Sampler, buffers: []*DoubleBuffer(GpuInfo)) void {
-    sampler.poll(buffers) catch |err| {
+fn pollOnce(arena: *std.heap.ArenaAllocator, io: std.Io, devices: []Device, buffers: []*DoubleBuffer(GpuInfo)) void {
+    poll(arena, io, devices, buffers) catch |err| {
         std.log.debug("oneapi poll skipped: {s}", .{@errorName(err)});
     };
 }
 
-const Sampler = struct {
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    devices: []Device,
-    scratch: *std.heap.ArenaAllocator,
+fn poll(arena: *std.heap.ArenaAllocator, io: std.Io, devices: []Device, buffers: []*DoubleBuffer(GpuInfo)) !void {
+    try pollSnapshot(arena, io, devices, buffers);
+}
 
-    fn init(allocator: std.mem.Allocator, scratch: *std.heap.ArenaAllocator, io: std.Io) !*Sampler {
-        const self = try allocator.create(Sampler);
-        var devices: std.ArrayList(Device) = .empty;
-        errdefer devices.deinit(allocator);
+fn pollSnapshot(arena: *std.heap.ArenaAllocator, io: std.Io, devices: []Device, buffers: []*DoubleBuffer(GpuInfo)) !void {
+    _ = arena.reset(.retain_capacity);
+    var usage = process.collectDeviceUsage(arena.allocator(), io, processTargets(arena, devices)) catch std.AutoHashMapUnmanaged(u16, process.DeviceSample){};
+    defer usage.deinit(arena.allocator());
 
-        for (0..64) |card_idx| {
-            const dev = Device.open(allocator, io, card_idx) catch continue;
-            try devices.append(allocator, dev);
-        }
+    for (devices, buffers) |*dev, db| {
+        const current = dev.snapshot(usage.get(dev.device_idx)) catch continue;
+        defer dev.saveSnapshot(current);
 
-        self.* = .{
-            .allocator = allocator,
-            .io = io,
-            .devices = try devices.toOwnedSlice(allocator),
-            .scratch = scratch,
+        const back = db.back();
+        back.* = dev.static_info;
+        dev.fillMetrics(back, current);
+        dev.fillDeltas(back, current);
+        db.swap();
+    }
+}
+
+fn processTargets(arena: *std.heap.ArenaAllocator, devices: []const Device) []process.Target {
+    const targets = arena.allocator().alloc(process.Target, devices.len) catch return &.{};
+    for (devices, targets) |dev, *target| {
+        target.* = .{
+            .device_idx = dev.device_idx,
+            .bdf = dev.bdf,
         };
-        return self;
     }
-
-    fn poll(self: *Sampler, buffers: []*DoubleBuffer(GpuInfo)) !void {
-        _ = self.scratch.reset(.retain_capacity);
-        var usage = process.collectDeviceUsage(self.scratch.allocator(), self.io, self.processTargets()) catch std.AutoHashMapUnmanaged(u16, process.DeviceSample){};
-        defer usage.deinit(self.scratch.allocator());
-
-        for (self.devices, buffers) |*dev, db| {
-            const current = dev.snapshot(self, usage.get(dev.device_idx)) catch continue;
-            defer dev.saveSnapshot(current);
-
-            const back = db.back();
-            back.* = dev.static_info;
-            dev.fillInstant(back, current);
-            dev.fillDeltas(back, current);
-            db.swap();
-        }
-    }
-
-    fn processTargets(self: *Sampler) []process.Target {
-        const targets = self.scratch.allocator().alloc(process.Target, self.devices.len) catch return &.{};
-        for (self.devices, targets) |dev, *target| {
-            target.* = .{
-                .device_idx = dev.device_idx,
-                .bdf = dev.bdf,
-            };
-        }
-        return targets;
-    }
-};
+    return targets;
+}
 
 const Device = struct {
     device_idx: u16 = 0,
+    io: std.Io,
+    arena: *std.heap.ArenaAllocator,
     card_path: []const u8,
     dev_path: []const u8,
     hwmon_path: ?[]const u8,
@@ -108,7 +92,7 @@ const Device = struct {
     fdinfo_prev: ?process.EngineSample = null,
     energy_prev: ?EnergySample = null,
 
-    fn open(allocator: std.mem.Allocator, io: std.Io, card_idx: usize) !Device {
+    fn open(allocator: std.mem.Allocator, scratch: *std.heap.ArenaAllocator, io: std.Io, card_idx: usize) !Device {
         const card_path = try std.fmt.allocPrint(allocator, "/sys/class/drm/card{d}", .{card_idx});
         errdefer allocator.free(card_path);
         const dev_path = try std.fmt.allocPrint(allocator, "{s}/device", .{card_path});
@@ -121,6 +105,8 @@ const Device = struct {
 
         const hwmon_path = findHwmon(allocator, io, dev_path) catch null;
         var self: Device = .{
+            .io = io,
+            .arena = scratch,
             .card_path = card_path,
             .dev_path = dev_path,
             .hwmon_path = hwmon_path,
@@ -130,30 +116,28 @@ const Device = struct {
         self.static_info = .{
             .name = self.name(allocator, io) catch null,
             .driver_version = self.driverVersion(allocator, io) catch null,
-            .power_limit_mw = self.powerLimitMilliwatts(allocator, io) catch null,
-            .clock_graphics_max_mhz = self.maxClockGraphics(allocator, io) catch null,
-            .mem_total_bytes = self.memTotal(allocator, io) catch null,
-            .pcie_link_gen = self.pcieLinkGen(allocator, io) catch null,
-            .pcie_link_width = self.pcieLinkWidth(allocator, io) catch null,
-            .pcie_bandwidth_mbps = self.pcieBandwidth(allocator, io) catch null,
+            .power_limit_mw = self.powerLimit() catch null,
+            .clock_graphics_max_mhz = self.maxClockGraphics() catch null,
+            .mem_total_bytes = self.memTotal() catch null,
+            .pcie_link_gen = self.pcieLinkGen() catch null,
+            .pcie_link_width = self.pcieLinkWidth() catch null,
+            .pcie_bandwidth_mbps = self.pcieBandwidth() catch null,
         };
         return self;
     }
 
-    fn snapshot(self: Device, sampler: *Sampler, usage: ?process.DeviceSample) !Snapshot {
+    fn snapshot(self: Device, usage: ?process.DeviceSample) !Snapshot {
         return .{
             .fdinfo_activity = if (usage) |sample| sample.engine else null,
-            .energy = self.energy(sampler.scratch.allocator(), sampler.io) catch null,
-            .clock_graphics_mhz = self.clockGraphics(sampler.scratch.allocator(), sampler.io) catch null,
-            .temperature = self.temperature(sampler.scratch.allocator(), sampler.io) catch null,
+            .energy = self.energy() catch null,
             .mem_used_bytes = if (usage) |sample| sample.mem_kib * 1024 else 0,
         };
     }
 
-    fn fillInstant(self: Device, info: *GpuInfo, snap: Snapshot) void {
-        _ = self;
-        info.clock_graphics_mhz = snap.clock_graphics_mhz;
-        info.temperature = snap.temperature;
+    fn fillMetrics(self: Device, info: *GpuInfo, snap: Snapshot) void {
+        inline for (metrics) |m| {
+            @field(info, m.field) = m.query(self) catch null;
+        }
         info.mem_used_bytes = snap.mem_used_bytes;
     }
 
@@ -193,78 +177,90 @@ const Device = struct {
         return std.mem.trim(u8, raw, &std.ascii.whitespace);
     }
 
-    fn temperature(self: Device, allocator: std.mem.Allocator, io: std.Io) !u64 {
+    pub fn temperature(self: Device) !u64 {
+        const allocator = self.arena.allocator();
         const hwmon = self.hwmon_path orelse return error.not_found;
-        const milli_c = readHwmonInput(allocator, io, hwmon, "temp", "pkg") catch
-            readHwmonInput(allocator, io, hwmon, "temp", "gpu") catch
-            readNumberedInput(allocator, io, hwmon, "temp", 2) catch
-            try readNumberedInput(allocator, io, hwmon, "temp", 1);
+        const milli_c = readHwmonInput(allocator, self.io, hwmon, "temp", "pkg") catch
+            readHwmonInput(allocator, self.io, hwmon, "temp", "gpu") catch
+            readNumberedInput(allocator, self.io, hwmon, "temp", 2) catch
+            try readNumberedInput(allocator, self.io, hwmon, "temp", 1);
         return (milli_c + 500) / 1000;
     }
 
-    fn energy(self: Device, allocator: std.mem.Allocator, io: std.Io) !EnergySample {
+    fn energy(self: Device) !EnergySample {
+        const allocator = self.arena.allocator();
         const hwmon = self.hwmon_path orelse return error.not_found;
-        const micro_joules = readHwmonInput(allocator, io, hwmon, "energy", "card") catch
-            readHwmonInput(allocator, io, hwmon, "energy", "pkg") catch
-            try readNumberedInput(allocator, io, hwmon, "energy", 1);
+        const micro_joules = readHwmonInput(allocator, self.io, hwmon, "energy", "card") catch
+            readHwmonInput(allocator, self.io, hwmon, "energy", "pkg") catch
+            try readNumberedInput(allocator, self.io, hwmon, "energy", 1);
         return .{
             .micro_joules = micro_joules,
-            .timestamp_ns = @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds),
+            .timestamp_ns = @intCast(std.Io.Timestamp.now(self.io, .awake).nanoseconds),
         };
     }
 
-    fn powerLimitMilliwatts(self: Device, allocator: std.mem.Allocator, io: std.Io) !u64 {
+    pub fn powerLimit(self: Device) !u64 {
+        const allocator = self.arena.allocator();
         const hwmon = self.hwmon_path orelse return error.not_found;
-        const microwatts = readNumberedSuffix(allocator, io, hwmon, "power", 1, "cap") catch
-            try readNumberedSuffix(allocator, io, hwmon, "power", 1, "max");
+        const microwatts = readNumberedSuffix(allocator, self.io, hwmon, "power", 1, "cap") catch
+            try readNumberedSuffix(allocator, self.io, hwmon, "power", 1, "max");
         return microwatts / 1000;
     }
 
-    fn clockGraphics(self: Device, allocator: std.mem.Allocator, io: std.Io) !u64 {
-        return self.readFreq(allocator, io, "act_freq") catch self.readFreq(allocator, io, "cur_freq");
+    pub fn clockGraphics(self: Device) !u64 {
+        return self.readFreq("act_freq") catch self.readFreq("cur_freq");
     }
 
-    fn maxClockGraphics(self: Device, allocator: std.mem.Allocator, io: std.Io) !u64 {
-        return self.readFreq(allocator, io, "max_freq");
+    pub fn maxClockGraphics(self: Device) !u64 {
+        return self.readFreq("max_freq");
     }
 
-    fn readFreq(self: Device, allocator: std.mem.Allocator, io: std.Io, file: []const u8) !u64 {
+    fn readFreq(self: Device, file: []const u8) !u64 {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/tile0/gt0/freq0/{s}", .{ self.dev_path, file });
-        return sysfs.readInt(allocator, io, path);
+        return sysfs.readInt(self.arena.allocator(), self.io, path);
     }
 
-    fn memTotal(self: Device, allocator: std.mem.Allocator, io: std.Io) !u64 {
+    pub fn memTotal(self: Device) !u64 {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/resource", .{self.dev_path});
-        return readLargestResource(allocator, io, path);
+        return readLargestResource(self.arena.allocator(), self.io, path);
     }
 
-    fn pcieLinkGen(self: Device, allocator: std.mem.Allocator, io: std.Io) !u64 {
+    pub fn pcieLinkGen(self: Device) !u64 {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_speed", .{self.dev_path});
-        const raw = try sysfs.readString(allocator, io, path);
+        const raw = try sysfs.readString(self.arena.allocator(), self.io, path);
         return pcieGenFromSpeed(raw);
     }
 
-    fn pcieLinkWidth(self: Device, allocator: std.mem.Allocator, io: std.Io) !u64 {
+    pub fn pcieLinkWidth(self: Device) !u64 {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_width", .{self.dev_path});
-        return sysfs.readInt(allocator, io, path);
+        return sysfs.readInt(self.arena.allocator(), self.io, path);
     }
 
-    fn pcieBandwidth(self: Device, allocator: std.mem.Allocator, io: std.Io) !u64 {
-        const gen = try self.pcieLinkGen(allocator, io);
-        const width = try self.pcieLinkWidth(allocator, io);
+    pub fn pcieBandwidth(self: Device) !u64 {
+        const gen = try self.pcieLinkGen();
+        const width = try self.pcieLinkWidth();
         return pcieBandwidthFromLink(gen, width) orelse error.not_found;
     }
+};
+
+const metrics = .{
+    .{ .field = "power_limit_mw", .query = Device.powerLimit },
+    .{ .field = "temperature", .query = Device.temperature },
+    .{ .field = "clock_graphics_mhz", .query = Device.clockGraphics },
+    .{ .field = "clock_graphics_max_mhz", .query = Device.maxClockGraphics },
+    .{ .field = "mem_total_bytes", .query = Device.memTotal },
+    .{ .field = "pcie_bandwidth_mbps", .query = Device.pcieBandwidth },
+    .{ .field = "pcie_link_gen", .query = Device.pcieLinkGen },
+    .{ .field = "pcie_link_width", .query = Device.pcieLinkWidth },
 };
 
 const Snapshot = struct {
     fdinfo_activity: ?process.EngineSample = null,
     energy: ?EnergySample = null,
-    clock_graphics_mhz: ?u64 = null,
-    temperature: ?u64 = null,
     mem_used_bytes: ?u64 = null,
 };
 
