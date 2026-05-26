@@ -222,7 +222,7 @@ const Args = struct {
     audio_ref: bool = false,
     style_ref: bool = false,
     caption_ref: bool = false,
-    lyrics_ref: bool = false,
+    lyric_ref: bool = false,
     
     match_level: u3 = 0,
     cover_strength: f32 = 0.5,
@@ -249,7 +249,7 @@ const Args = struct {
         \\   --audio-ref               Use references/source.wav as source to remix (default: 0)
         \\   --style-ref               Use references/style.wav as style/timbre reference (default: 0)
         \\   --caption-ref             Use references/caption.txt as caption reference (default: 0)
-        \\   --lyrics-ref              Use references/lyrics.txt as lyrics reference (default: 0)
+        \\   --lyric-ref              Use references/lyrics.txt as lyrics reference (default: 0)
         \\                             -> text references are used as is, without LLM intervention
         \\
         \\   --match-level=<int>       Between 0 (pure noise) and 7 (exact audio ref) to init the diffusion (default: 0)
@@ -275,8 +275,6 @@ const Args = struct {
 // info:   vae    0.00s    1.25s    0.69s    1.91s    0.00s    3.89s
 // info:   wav                                                 0.17s
 // info: total                                                38.81s
-
-// TODO: diagnose style reference
 
 // TODO: edit mode
 // - clone source latents on keep regions, add noise, modify mask channels
@@ -327,8 +325,8 @@ pub fn main(init: std.process.Init) !void {
     try printZmlLogo(zml_handler.io);
 
     zml_handler.tic(&zml_handler.timers.total);
-    try runText2MusicPipeline(&zml_handler);
-    //try runRemixPipeline(&zml_handler);
+    //try runText2MusicPipeline(&zml_handler);
+    try runRemixPipeline(&zml_handler);
     zml_handler.toc(&zml_handler.timers.total);
 
     zml_handler.timers.print();
@@ -577,7 +575,7 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
         defer zml_handler.allocator.free(caption);
         try audio_metadata.setCaption(zml_handler.allocator, caption);
     }
-    if (zml_handler.args.lyrics_ref) {
+    if (zml_handler.args.lyric_ref) {
         const lyrics = try importText(zml_handler, zml_handler.uris.lyrics_ref);
         defer zml_handler.allocator.free(lyrics);
         try audio_metadata.setLyric(zml_handler.allocator, lyrics);
