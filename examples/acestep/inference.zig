@@ -1180,10 +1180,11 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     // for now, contexts have same size
     const t = context_cover.latents.shape.dim(0);
     const a = @divExact(context_cover.latents.shape.dim(1), 2);
-    const s = context_cover.conditions.shape.dim(0);
+    const s_cover = context_cover.conditions.shape.dim(0);
+    const s_non_cover = context_non_cover.conditions.shape.dim(0);
     const d = context_cover.conditions.shape.dim(1);
 
-    std.log.info("DiT call with input size : {d}x{d} {d}x{d}", .{ t, a, s, d });
+    std.log.info("DiT call with input size : {d}x{d} {d}x{d}", .{ t, a, s_cover, d });
 
     const timestamps: [9]f32 = .{ 1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3, 0.0 };
     const noise = timestamps[match_level];
@@ -1222,11 +1223,11 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     var latents_non_cover_buffer: zml.Buffer = try .fromSlice(io, platform, context_non_cover.latents, sharding);
     
     const conditions_cover_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = acedit.config.encoder_hidden_size }, .bf16));
-    @memcpy(conditions_cover_slice.items(zml.floats.BFloat16)[0..@intCast(s*d)], context_cover.latents.items(zml.floats.BFloat16));
+    @memcpy(conditions_cover_slice.items(zml.floats.BFloat16)[0..@intCast(s_cover * d)], context_cover.latents.items(zml.floats.BFloat16));
     var conditions_cover_buffer: zml.Buffer = try .fromSlice(io, platform, conditions_cover_slice, sharding);
 
     const conditions_non_cover_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = acedit.config.encoder_hidden_size }, .bf16));
-    @memcpy(conditions_non_cover_slice.items(zml.floats.BFloat16)[0..@intCast(s*d)], context_non_cover.latents.items(zml.floats.BFloat16));
+    @memcpy(conditions_non_cover_slice.items(zml.floats.BFloat16)[0..@intCast(s_non_cover * d)], context_non_cover.latents.items(zml.floats.BFloat16));
     var conditions_non_cover_buffer: zml.Buffer = try .fromSlice(io, platform, conditions_non_cover_slice, sharding);
         
     defer x_buffer.deinit();
@@ -1244,10 +1245,15 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     var sliding_mask_buffer: zml.Buffer = try .fromSlice(io, platform, sliding_mask_slice, sharding);
     defer sliding_mask_buffer.deinit();
 
-    const cross_mask_slice = try createCrossAttentionMask(allocator, s, acedit.options.enc_seq_len);
-    defer cross_mask_slice.free(allocator);
-    var cross_mask_buffer: zml.Buffer = try .fromSlice(io, platform, cross_mask_slice, sharding);
-    defer cross_mask_buffer.deinit();
+    const cross_mask_slice_cover = try createCrossAttentionMask(allocator, s_cover, acedit.options.enc_seq_len);
+    defer cross_mask_slice_cover.free(allocator);
+    var cross_mask_buffer_cover: zml.Buffer = try .fromSlice(io, platform, cross_mask_slice_cover, sharding);
+    defer cross_mask_buffer_cover.deinit();
+
+    const cross_mask_slice_non_cover = try createCrossAttentionMask(allocator, s_non_cover, acedit.options.enc_seq_len);
+    defer cross_mask_slice_non_cover.free(allocator);
+    var cross_mask_buffer_non_cover: zml.Buffer = try .fromSlice(io, platform, cross_mask_slice_non_cover, sharding);
+    defer cross_mask_buffer_non_cover.deinit();    
 
     const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = a, .t = t }, .bf16));
     var result_buffer: zml.Buffer = try .fromSlice(io, platform, result_slice, sharding);
@@ -1275,6 +1281,7 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
         const is_cover = i - match_level < cover_iters;
         const latents_buffer = if (is_cover) latents_cover_buffer else latents_non_cover_buffer;
         const conditions_buffer = if (is_cover) conditions_cover_buffer else conditions_non_cover_buffer;
+        const cross_mask_buffer = if (is_cover) cross_mask_buffer_cover else cross_mask_buffer_non_cover;
         std.log.info("DiT ************* step {d}/{d}, is_cover: {any}", .{ i+1, steps, is_cover });
 
         acedit.exes.preprocess_args.set(.{ acedit.model_buffers, t_curr, x_buffer, latents_buffer, conditions_buffer });
@@ -1285,7 +1292,7 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
         acedit.exes.preprocess_results.fill(.{ &y_proj_buffer, &hidden_states_buffer, &temb_buffer, &timestep_proj_buffer });
         for (0..acedit.config.num_hidden_layers) |ii| {
             const mask_buffer = if (acedit.config.layer_types[ii] == .sliding_attention) sliding_mask_buffer else full_mask_buffer;
-            acedit.exes.layer_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer });
+            acedit.exes.layer_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer, cross_mask_buffer });
             acedit.exes.layer_exe.call(acedit.exes.layer_args, &acedit.exes.layer_results);
             acedit.exes.layer_results.fill(.{ &hidden_states_buffer });
         }
