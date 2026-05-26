@@ -178,7 +178,7 @@ pub const Params = struct {
 };
 
 pub const Options = struct {
-    enc_seq_len: u32 = 1024,
+    enc_seq_len: u32 = 2048,
 };
 
 pub const ConfigBase = struct {
