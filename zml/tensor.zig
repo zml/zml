@@ -22,6 +22,9 @@ test {
     std.testing.refAllDecls(Tensor);
 }
 
+// TODO: Expose
+pub const ComparisonDirection = dialects.stablehlo.ComparisonDirection.Direction;
+
 pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
 
@@ -3502,6 +3505,7 @@ pub const Tensor = struct {
         }
     }
 
+    // TODO: add test
     pub fn split(self: Tensor, axis_: anytype, split_sizes: []const i64) []Tensor {
         stdx.debug.assert(split_sizes.len > 0, "split expects at least one 'split_sizes', got 0", .{});
 
