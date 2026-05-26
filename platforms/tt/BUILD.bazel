@@ -32,3 +32,32 @@ zig_library(
         "//conditions:default": [":empty"],
     }),
 )
+
+# TT-specific `stablehlo.custom_call` emit helpers. Pure mlir, no zml dep:
+# zml/ wrappers call in to keep all TT custom-call bodies under platforms/tt/.
+zig_library(
+    name = "tt_ops",
+    tags = ["manual"],
+    import_name = "platforms/tt/ops",
+    main = "ops.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//mlir/dialects",
+    ],
+)
+
+# Tensor-level TT wrappers. Depends on zml (so zml/ can't import this).
+# Call sites in models switch on `target` and invoke directly for `.tt`.
+zig_library(
+    name = "tt_nn",
+    tags = ["manual"],
+    import_name = "platforms/tt/nn",
+    main = "nn.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tt_ops",
+        "//mlir",
+        "//zml",
+    ],
+)

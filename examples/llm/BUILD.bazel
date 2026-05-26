@@ -10,7 +10,7 @@ zig_binary(
     srcs = glob(["**/*.zig"]),
     main = "main.zig",
     visibility = ["//visibility:public"],
-    deps = ["//zml", "@linenoise"],
+    deps = ["//zml", "//platforms/tt:tt_nn", "@linenoise"],
 )
 
 zig_binary(
@@ -18,7 +18,7 @@ zig_binary(
     srcs = glob(["**/*.zig"]),
     main = "models/lfm2_tests.zig",
     visibility = ["//visibility:public"],
-    deps = ["//zml"],
+    deps = ["//zml", "//platforms/tt:tt_nn"],
 )
 
 zig_binary(
@@ -26,7 +26,7 @@ zig_binary(
     srcs = glob(["**/*.zig"]),
     main = "models/llama_tests.zig",
     visibility = ["//visibility:public"],
-    deps = ["//zml"],
+    deps = ["//zml", "//platforms/tt:tt_nn"],
 )
 
 build_test(

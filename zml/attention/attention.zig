@@ -3,6 +3,7 @@ const std = @import("std");
 const zml = @import("../zml.zig");
 const attnd = @import("attnd.zig");
 const flashattn = @import("flashattn.zig");
+const tenstorrent = @import("tenstorrent.zig");
 
 const Attention = @This();
 
@@ -11,6 +12,7 @@ pub const Backend = enum {
     attnd,
     cuda_fa2,
     cuda_fa3,
+    tenstorrent,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
@@ -26,6 +28,7 @@ pub const Backend = enum {
 
                 break :b .vanilla;
             },
+            .tt => .tenstorrent,
             else => .vanilla,
         };
     }
@@ -36,12 +39,14 @@ pub const Parameters = union(Backend) {
     attnd: attnd.Parameters,
     cuda_fa2: flashattn.fa2.Parameters,
     cuda_fa3: flashattn.fa3.Parameters,
+    tenstorrent: tenstorrent.Parameters,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
         attnd: void,
         cuda_fa2: flashattn.fa2.Parameters.InitOptions,
         cuda_fa3: flashattn.fa3.Parameters.InitOptions,
+        tenstorrent: tenstorrent.Parameters.InitOptions,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
@@ -49,6 +54,7 @@ pub const Parameters = union(Backend) {
                 .attnd => @panic("Must be initialized manually"),
                 .cuda_fa2 => .{ .cuda_fa2 = .{} },
                 .cuda_fa3 => .{ .cuda_fa3 = .{} },
+                .tenstorrent => .{ .tenstorrent = .{} },
             };
         }
     };
@@ -59,6 +65,7 @@ pub const Parameters = union(Backend) {
             .attnd => @panic("Must be initialized manually"),
             .cuda_fa2 => |v| .{ .cuda_fa2 = .init(v) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = .init(v) },
+            .tenstorrent => |v| .{ .tenstorrent = .init(v) },
         };
     }
 };
@@ -68,12 +75,14 @@ pub const Metadata = union(Backend) {
     attnd: attnd.Metadata,
     cuda_fa2: flashattn.fa2.Metadata,
     cuda_fa3: flashattn.fa3.Metadata,
+    tenstorrent: tenstorrent.Metadata,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
         attnd: void,
         cuda_fa2: flashattn.fa2.Metadata.InitOptions,
         cuda_fa3: flashattn.fa3.Metadata.InitOptions,
+        tenstorrent: tenstorrent.Metadata.InitOptions,
 
         pub fn fromBackend(backend: Backend, seqlen: i64, num_heads: i64) InitOptions {
             return switch (backend) {
@@ -81,6 +90,7 @@ pub const Metadata = union(Backend) {
                 .attnd => .{ .attnd = {} },
                 .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
                 .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads } },
+                .tenstorrent => .{ .tenstorrent = .{} },
             };
         }
     };
@@ -91,12 +101,14 @@ pub const Metadata = union(Backend) {
             .attnd => @panic("Must be initialized manually"),
             .cuda_fa2 => |o| .{ .cuda_fa2 = flashattn.fa2.Metadata.init(o) },
             .cuda_fa3 => |o| .{ .cuda_fa3 = flashattn.fa3.Metadata.init(o) },
+            .tenstorrent => |o| .{ .tenstorrent = tenstorrent.Metadata.init(o) },
         };
     }
 
     pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(Metadata) {
         return switch (self) {
             .vanilla => .{ .vanilla = {} },
+            .tenstorrent => .{ .tenstorrent = {} },
             .attnd => |v| .{ .attnd = try v.initBuffer(io, platform, sharding) },
             .cuda_fa2 => |v| .{ .cuda_fa2 = try v.initBuffer(io, platform, sharding) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = try v.initBuffer(io, platform, sharding) },
@@ -105,7 +117,7 @@ pub const Metadata = union(Backend) {
 
     pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
         switch (self.*) {
-            .vanilla => {},
+            .vanilla, .tenstorrent => {},
             .attnd => |*v| attnd.Metadata.deinitBuffer(v),
             .cuda_fa2 => |*v| flashattn.fa2.Metadata.deinitBuffer(v),
             .cuda_fa3 => |*v| flashattn.fa3.Metadata.deinitBuffer(v),
@@ -129,5 +141,10 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         .attnd => attnd.causalAttention(q, k, v, token_index, metadata.attnd, parameters.attnd),
         .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
         .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
+        .tenstorrent => tenstorrent.attention(q, k, v, token_index, metadata.tenstorrent, parameters.tenstorrent),
     };
 }
+
+/// Platform-neutral scatter-based KV-cache update; on TT it's fused into
+/// `ttir.update_cache`/`fill_cache` via tt-mlir's `CacheFillUpdatePattern`.
+pub const updateKvCache = tenstorrent.updateKvCache;
