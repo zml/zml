@@ -135,6 +135,7 @@ const Device = struct {
             .mem_total_bytes = self.memTotal(allocator, io) catch null,
             .pcie_link_gen = self.pcieLinkGen(allocator, io) catch null,
             .pcie_link_width = self.pcieLinkWidth(allocator, io) catch null,
+            .pcie_bandwidth_mbps = self.pcieBandwidth(allocator, io) catch null,
         };
         return self;
     }
@@ -157,7 +158,7 @@ const Device = struct {
     }
 
     fn fillDeltas(self: Device, info: *GpuInfo, current: Snapshot) void {
-        info.util_percent = fdinfoUtilization(self.fdinfo_prev, current.fdinfo_activity);
+        info.util_percent = fdinfoUtilization(self.fdinfo_prev, current.fdinfo_activity) orelse 0;
         info.power_mw = powerMilliwatts(self.energy_prev, current.energy);
     }
 
@@ -177,7 +178,9 @@ const Device = struct {
     fn driverVersion(self: Device, allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
         _ = self;
         const version = sysfs.readString(allocator, io, "/sys/module/xe/version") catch
-            try sysfs.readString(allocator, io, "/sys/module/i915/version");
+            sysfs.readString(allocator, io, "/sys/module/xe/srcversion") catch
+            sysfs.readString(allocator, io, "/sys/module/i915/version") catch
+            try sysfs.readString(allocator, io, "/sys/module/i915/srcversion");
         const trimmed = std.mem.trim(u8, version, &std.ascii.whitespace);
         if (trimmed.len == 0) return error.not_found;
         return trimmed;
@@ -248,6 +251,12 @@ const Device = struct {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_width", .{self.dev_path});
         return sysfs.readInt(allocator, io, path);
+    }
+
+    fn pcieBandwidth(self: Device, allocator: std.mem.Allocator, io: std.Io) !u64 {
+        const gen = try self.pcieLinkGen(allocator, io);
+        const width = try self.pcieLinkWidth(allocator, io);
+        return pcieBandwidthFromLink(gen, width) orelse error.not_found;
     }
 };
 
@@ -384,6 +393,19 @@ fn pcieGenFromSpeed(raw: []const u8) !u64 {
     return error.not_found;
 }
 
+fn pcieBandwidthFromLink(gen: u64, width: u64) ?u64 {
+    const lane_mb_s: u64 = switch (gen) {
+        1 => 250,
+        2 => 500,
+        3 => 985,
+        4 => 1969,
+        5 => 3938,
+        6 => 7563,
+        else => return null,
+    };
+    return lane_mb_s * width;
+}
+
 test "oneAPI fdinfo utilization fallback" {
     try std.testing.expectEqual(@as(?u64, 50), fdinfoUtilization(.{ .engine_ns = 100, .timestamp_ns = 1000 }, .{ .engine_ns = 600, .timestamp_ns = 2000 }));
     try std.testing.expectEqual(@as(?u64, null), fdinfoUtilization(null, .{ .engine_ns = 600, .timestamp_ns = 2000 }));
@@ -404,4 +426,10 @@ test "oneAPI PCIe speed maps to generation" {
     try std.testing.expectEqual(@as(u64, 1), try pcieGenFromSpeed("2.5 GT/s PCIe"));
     try std.testing.expectEqual(@as(u64, 4), try pcieGenFromSpeed("16.0 GT/s PCIe"));
     try std.testing.expectError(error.not_found, pcieGenFromSpeed("Unknown"));
+}
+
+test "oneAPI PCIe bandwidth derives from generation and width" {
+    try std.testing.expectEqual(@as(?u64, 250), pcieBandwidthFromLink(1, 1));
+    try std.testing.expectEqual(@as(?u64, 63_008), pcieBandwidthFromLink(5, 16));
+    try std.testing.expectEqual(@as(?u64, null), pcieBandwidthFromLink(0, 16));
 }
