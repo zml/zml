@@ -54,7 +54,7 @@ pub const AceDit_handler = struct {
             .y = .init(.{ .s = options.enc_seq_len, .d = config.encoder_hidden_size }, .bf16),
             .y_proj = .init(.{ .s = options.enc_seq_len, .d = config.hidden_size }, .bf16),
             .self_mask = .init(.{ .q = @divFloor(25 * target_duration + 1, 2), .k = @divFloor(25 * target_duration + 1, 2) }, .bf16),
-            .cross_mask = .init(.{ .q = options.enc_seq_len, .k = 1 }, .bf16),
+            .cross_mask = .init(.{ .q = 1, .k = options.enc_seq_len }, .bf16),
             .hidden_states = .init(.{ .t = @divFloor(25 * target_duration + 1, 2), .d = config.hidden_size }, .bf16),
             .temb = .init(.{ .d_emb = config.hidden_size }, .bf16),
             .timestep_proj = .init(.{ .n2 = config.fsq_input_levels.len, .d_emb = config.hidden_size }, .bf16),
@@ -849,8 +849,10 @@ pub const CrossAttention = struct {
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
         q = q.rename(.{ .s = .q });
+
+        const mask_ = mask.repeat1d(mask.axis(.q), q.dim(.q));
         
-        const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = mask, .allow_cudnn = true });
+        const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = mask_, .allow_cudnn = true });
         const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
 
         const delta = self.o_proj.forward(attn_output);
