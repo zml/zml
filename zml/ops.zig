@@ -23,6 +23,9 @@ pub fn allReduceSum(input: Tensor) Tensor {
     const ctx = CompilationContext.current();
     const mlir_ctx = ctx.mlir_ctx;
 
+    const num_devices = ctx.partitioning.numPartitions();
+    if (num_devices <= 1) return input;
+
     const reducer_block = b: {
         const scalar_shape = Shape.init(.{}, input.dtype());
         const left: Tensor = .fromShape(scalar_shape);
@@ -51,9 +54,6 @@ pub fn allReduceSum(input: Tensor) Tensor {
         break :b block;
     };
 
-    const num_devices = ctx.partitioning.numPartitions();
-    if (num_devices <= 1) return input;
-
     var replica_group_storage: [constants.MAX_RANK]i64 = undefined;
     for (0..@intCast(num_devices)) |i| {
         replica_group_storage[i] = @intCast(i);
@@ -72,7 +72,7 @@ pub fn allReduceSum(input: Tensor) Tensor {
     );
 
     const op = dialects.stablehlo.allReduce(
-        ctx.mlir_ctx,
+        mlir_ctx,
         input.value(),
         reducer_block,
         replica_groups_attr,
