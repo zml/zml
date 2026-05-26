@@ -174,7 +174,7 @@ pub fn forwardMoe(
                         }
                     }).body,
                 );
-                break :b zml.ops.allReduceSum(partial_output);
+                break :b zml.ops.allReduce(partial_output, zml.Tensor.add);
             }
 
             break :b try triton.fusedExpertsImpl(

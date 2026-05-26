@@ -19,26 +19,69 @@ pub const ShapeToCustomCallBuffer = @import("pjrtx.zig").ShapeToCustomCallBuffer
 const Tensor = @import("tensor.zig").Tensor;
 pub const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
 
-pub fn allReduceSum(input: Tensor) Tensor {
+
+
+pub fn allReduce(inputs: anytype, comptime func: anytype) allReduceReturnType(@TypeOf(inputs)) {
     const ctx = CompilationContext.current();
     const mlir_ctx = ctx.mlir_ctx;
 
+    const InputsT = @TypeOf(inputs);
+    const n_inputs = switch (@typeInfo(InputsT)) {
+        .@"struct" => |struct_info| b: {
+            if (InputsT == Tensor) break :b 1;
+            if (!struct_info.is_tuple) {
+                @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs");
+            }
+            break :b struct_info.fields.len;
+        },
+        .array => |array_info| b: {
+            if (array_info.child != Tensor) {
+                @compileError("zml.ops.allReduce expects [N]Tensor inputs");
+            }
+            break :b array_info.len;
+        },
+        else => @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs"),
+    };
+    comptime stdx.debug.assertComptime(n_inputs > 0, "zml.ops.allReduce requires at least one input tensor", .{});
+
+    const input_tensors: [n_inputs]Tensor = switch (@typeInfo(InputsT)) {
+        .@"struct" => |struct_info| b: {
+            if (InputsT == Tensor) {
+                break :b .{inputs};
+            }
+            if (!struct_info.is_tuple) {
+                @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs");
+            }
+
+            var flat_inputs: [n_inputs]Tensor = undefined;
+            meta.collectBuf((struct {
+                pub fn cb(t: Tensor) Tensor {
+                    return t;
+                }
+            }).cb, {}, &inputs, &flat_inputs);
+            break :b flat_inputs;
+        },
+        .array => inputs,
+        else => @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs"),
+    };
+
     const num_devices = ctx.partitioning.numPartitions();
-    if (num_devices <= 1) return input;
+    if (num_devices <= 1) return inputs;
 
     const reducer_block = b: {
-        const scalar_shape = Shape.init(.{}, input.dtype());
-        const left: Tensor = .fromShape(scalar_shape);
-        const right: Tensor = .fromShape(scalar_shape);
+        var args: std.meta.Tuple(&[1]type{ReduceArgs} ** input_tensors.len) = undefined;
+        var block_types: [2 * input_tensors.len]*const mlir.Type = undefined;
 
-        const block_types = [_]*const mlir.Type{
-            mlirx.Type.rankedTensor(mlir_ctx, scalar_shape),
-            mlirx.Type.rankedTensor(mlir_ctx, scalar_shape),
-        };
-        const block_locs = [_]*const mlir.Location{
-            mlir.Location.unknown(mlir_ctx),
-            mlir.Location.unknown(mlir_ctx),
-        };
+        inline for (0..input_tensors.len) |i| {
+            const scalar_shape = Shape.init(.{}, input_tensors[i].dtype());
+            args[i].left = .fromShape(scalar_shape);
+            args[i].right = .fromShape(scalar_shape);
+            block_types[i] = mlirx.Type.rankedTensor(mlir_ctx, scalar_shape);
+            block_types[i + input_tensors.len] = mlirx.Type.rankedTensor(mlir_ctx, scalar_shape);
+        }
+
+        const block_locs: [2 * input_tensors.len]*const mlir.Location = @splat(mlir.Location.unknown(mlir_ctx));
+
         const block = mlir.Block.init(&block_types, &block_locs);
         errdefer block.deinit();
 
@@ -46,11 +89,30 @@ pub fn allReduceSum(input: Tensor) Tensor {
         defer ctx.popBlock();
 
         const scope = ctx.currentScope();
-        scope.id_to_argument.put(scope.arena.allocator(), left.id, 0) catch unreachable;
-        scope.id_to_argument.put(scope.arena.allocator(), right.id, 1) catch unreachable;
+        inline for (0..input_tensors.len) |i| {
+            scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
+            scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + input_tensors.len) catch unreachable;
+        }
 
-        const sum = left.add(right);
-        _ = dialects.stablehlo.return_(mlir_ctx, sum.value(), .unknown(mlir_ctx)).appendTo(block);
+        var reduced_values: [input_tensors.len]*const mlir.Value = undefined;
+        if (input_tensors.len == 1) {
+            const reduced = @call(.auto, func, .{ args[0].left, args[0].right });
+            reduced_values[0] = reduced.value();
+        } else {
+            var reduced = @call(.auto, func, args);
+            var reduced_tensors: [input_tensors.len]Tensor = undefined;
+            meta.collectBuf((struct {
+                pub fn cb(t: Tensor) Tensor {
+                    return t;
+                }
+            }).cb, {}, &reduced, &reduced_tensors);
+
+            inline for (0..input_tensors.len) |i| {
+                reduced_values[i] = reduced_tensors[i].value();
+            }
+        }
+
+        _ = dialects.stablehlo.returns(mlir_ctx, &reduced_values, .unknown(mlir_ctx)).appendTo(block);
         break :b block;
     };
 
@@ -71,15 +133,63 @@ pub fn allReduceSum(input: Tensor) Tensor {
         .collective,
     );
 
+    var input_values: [input_tensors.len]*const mlir.Value = undefined;
+    var result_types: [input_tensors.len]*const mlir.Type = undefined;
+    inline for (0..input_tensors.len) |i| {
+        input_values[i] = input_tensors[i].value();
+        result_types[i] = input_values[i].type_();
+    }
+
     const op = dialects.stablehlo.allReduce(
         mlir_ctx,
-        input.value(),
+        &input_values,
+        &result_types,
         reducer_block,
         replica_groups_attr,
         channel_handle_attr,
     ).appendTo(ctx.currentScope().block);
 
-    return Tensor._result(input.shape(), op.result(0));
+    return switch (@typeInfo(@TypeOf(inputs))) {
+        .@"struct" => |struct_info| b: {
+            if (@TypeOf(inputs) == Tensor) {
+                break :b Tensor._result(input_tensors[0].shape(), op.result(0));
+            }
+
+            var out: @TypeOf(inputs) = undefined;
+            inline for (struct_info.fields, 0..) |field, i| {
+                @field(out, field.name) = Tensor._result(input_tensors[i].shape(), op.result(i));
+            }
+            break :b out;
+        },
+        .array => |array_info| b: {
+            var out: [array_info.len]Tensor = undefined;
+            inline for (0..array_info.len) |i| {
+                out[i] = Tensor._result(input_tensors[i].shape(), op.result(i));
+            }
+            break :b out;
+        },
+        else => unreachable,
+    };
+}
+
+fn allReduceReturnType(comptime InputsT: type) type {
+    if (InputsT == Tensor) return Tensor;
+
+    return switch (@typeInfo(InputsT)) {
+        .@"struct" => |struct_info| b: {
+            if (!struct_info.is_tuple) {
+                @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor or [N]Tensor inputs");
+            }
+            break :b InputsT;
+        },
+        .array => |array_info| b: {
+            if (array_info.child != Tensor) {
+                @compileError("zml.ops.allReduce expects [N]Tensor inputs");
+            }
+            break :b InputsT;
+        },
+        else => @compileError("zml.ops.allReduce expects Tensor, tuple of Tensor, or [N]Tensor inputs"),
+    };
 }
 
 pub fn partitionId() Tensor {

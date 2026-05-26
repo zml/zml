@@ -1433,14 +1433,15 @@ pub fn channelHandle(
 
 pub fn allReduce(
     ctx: *mlir.Context,
-    input: *const mlir.Value,
+    inputs: []const *const mlir.Value,
+    result_types: []const *const mlir.Type,
     reducer_block: *mlir.Block,
     replica_groups: *const mlir.Attribute,
     channel_handle: *const mlir.Attribute,
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.all_reduce", .{
-        .operands = .{ .flat = &.{input} },
-        .results = .{ .flat = &.{input.type_()} },
+        .operands = .{ .variadic = &.{inputs} },
+        .results = .{ .flat = result_types },
         .blocks = &.{reducer_block},
         .attributes = &.{
             .named(ctx, "replica_groups", replica_groups),
