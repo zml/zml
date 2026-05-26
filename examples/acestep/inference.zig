@@ -1335,7 +1335,7 @@ pub fn createBidirectionalWindowMask(allocator: std.mem.Allocator, seq_len: i64,
 }
 
 pub fn createCrossAttentionMask(allocator: std.mem.Allocator, dim_enc: i64, max_dim_enc: i64) !zml.Slice {
-    var mask: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .q = 1, .k = max_dim_enc }, .bf16));
+    var mask: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .q = max_dim_enc, .k = 1 }, .bf16));
     const zero = zml.floats.BFloat16.fromF32(0.0);
     const valid: usize = @intCast(dim_enc);
     for (0..valid) |s| {
