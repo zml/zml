@@ -110,44 +110,41 @@ pub const Buffer = struct {
         const slice = Slice.init(sh, data_);
         const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
 
-        var layout: pjrt.MemoryLayout = undefined;
-        var shard_dims: Shape.DimsArray = .{ .buffer = undefined, .len = sh.rank() };
+        var shard_dims: Shape.DimsArray = res._sharding.shardedDims(sh);
+        const layout: pjrt.MemoryLayout = switch (platform.target) {
+            .tpu => tpu: {
+            	if (comptime !platforms.isEnabled(.tpu)) unreachable;
+                const default = try platform.pjrt_client.defaultMemoryLayout(
+                    platform.pjrt_api,
+                    buffer_type,
+                    shard_dims.slice()
+                );
+                break :tpu default.toMemoryLayout();
+            },
+            else => .{
+                .tiled = .{
+                    .minor_to_major = constants.minorToMajor(sh.rank()),
+                    .tile_dims = &.{},
+                    .tile_dims_sizes = &.{},
+                }
+            },
+        };
 
         for (0.., platform.physical_mesh.devices_in_canonical_order) |device_id, device| {
             const placement = try res._sharding.placement(res._shape, device);
             const sub_slice = placement.shardSlice(slice);
-            if (device_id == 0) {
-	            shard_dims.buffer = placement.shape._dims.buffer;
-	            layout = switch (platform.target) {
-	                .tpu => tpu: {
-	                	if (comptime !platforms.isEnabled(.tpu)) unreachable;
-	                    const default = try platform.pjrt_client.defaultMemoryLayout(
-	                        platform.pjrt_api,
-	                        buffer_type,
-	                        shard_dims.slice()
-	                    );
-	                    break :tpu default.toMemoryLayout();
-	                },
-	                else => .{
-	                    .tiled = .{
-	                        .minor_to_major = constants.minorToMajor(sh.rank()),
-	                        .tile_dims = &.{},
-	                        .tile_dims_sizes = &.{},
-	                    }
-	                },
-	            };
-            }
 
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
+            	// Change for each device
 	            .data = sub_slice.constData().ptr,
 	            .dst = .{ .memory = platform.devices[device_id].memory(opts.memory).pjrt_memory },
-	            .layout = layout, // set on first iter
-	            .dims = shard_dims.slice(), // filled on first iter
+	            // Constant across devices
+	            .layout = layout,
+	            .dims = shard_dims.slice(),
 	            .buffer_type = buffer_type,
 	            .byte_strides = slice.byte_strides.constSlice(),
 	            .host_buffer_semantics = .ImmutableUntilTransferCompletes,
 	        };
-
 
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
             if (event) |ev| ev.deinit(platform.pjrt_api);

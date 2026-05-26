@@ -217,9 +217,6 @@ pub const Device = struct {
     /// Coordinates in the physical mesh
     coords: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty,
 
-    /// Placeholder
-    pjrt_device: ?*const pjrt.Device = null,
-
     pub fn coordsSlice(self: *const Device) ?[]const usize {
         if (self.coords.len == 0) return null;
         return self.coords.constSlice();
@@ -299,7 +296,6 @@ pub const PhysicalNode = union(enum) {
             .leaf = .{
                 .id = @intCast(device_.id()),
                 .coords = .empty,
-                .pjrt_device = device_.pjrt_device,
             },
         };
     }
@@ -477,7 +473,6 @@ pub const PhysicalMesh = struct {
                 .leaf = .{
                     .id = d.id,
                     .coords = d.coords,
-                    .pjrt_device = d.pjrt_device,
                 },
             },
             .branch => |b| blk: {
@@ -709,7 +704,6 @@ pub const PhysicalMesh = struct {
     const CoordsTopology = struct {
         const CoordPlacement = struct {
             device_id: usize,
-            pjrt_device: ?*const pjrt.Device,
             coords: stdx.BoundedArray(usize, Shape.MAX_RANK),
         };
 
@@ -740,7 +734,6 @@ pub const PhysicalMesh = struct {
 
             return .{
                 .device_id = device.id(),
-                .pjrt_device = device.pjrt_device,
                 .coords = coords,
             };
         }
@@ -819,7 +812,6 @@ pub const PhysicalMesh = struct {
                 .leaf = .{
                     .id = coord_placement.device_id,
                     .coords = try .fromSlice(coords_slice),
-                    .pjrt_device = coord_placement.pjrt_device,
                 },
             };
         }
@@ -1223,9 +1215,8 @@ pub const Data = struct {
     folds_consumed: std.EnumSet(PhysicalAxisTag),
 
     pub fn binding(self: *const Data, tag: Shape.Tag) ?[]const PhysicalAxisTag {
-        const target = std.mem.span(tag);
         for (self.bindings.constSlice()) |*b| {
-            if (std.mem.eql(u8, std.mem.span(b.logical), target)) return b.physical.constSlice();
+            if (b.logical == tag) return b.physical.constSlice();
         }
         return null;
     }
@@ -1714,7 +1705,18 @@ pub const Strategy = struct {
     }
 };
 
+/// For a given shape, compute the size of the slice each shard will receive.
+pub fn shardedDims(sharding: Sharding, shape: Shape) Shape.DimsArray {
+	// TODO: simplify me
+	// placement is doing too much work because Sharding creation doesn't enough.
+	const pl = sharding.placement(shape, sharding.data.physical.devices_in_canonical_order[0]) catch @panic("MissingDeviceCoords");
+	return pl.shape._dims;
+}
+
 pub fn placement(sharding: Sharding, shape: Shape, device: Device) !Placement {
+	// TODO: placement should be device agnostic
+	// For a given shape compute how it should be sharded across all devices,
+	// then getting the offset for a specific device should be easy peasy.
     if (device.coords.len == 0) return error.MissingDeviceCoords;
 
     var placement_: Placement = .{
