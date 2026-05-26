@@ -643,7 +643,9 @@ pub const TimbreEncoder = struct {
     pub fn forward(self: TimbreEncoder, timbre_latent: zml.Tensor) zml.Tensor {
         var timbre_emb = self.embed_timbre.forward(timbre_latent.withTags(.{ .a, .t }).transpose(.{ .t, .a }));
 
-        timbre_emb = zml.Tensor.concatenate(&.{ self.special_tokens, timbre_emb }, .t);
+        const special_frame = self.special_tokens.withTags(.{ .s, .t, .a }).squeeze(.s);
+        
+        timbre_emb = zml.Tensor.concatenate(&.{ special_frame, timbre_emb }, .t);
         
         // the special tokens appending is commented in the python reference
         // inputs_embeds = torch.cat([self.special_token.expand(inputs_embeds.shape[0], 1, -1), inputs_embeds], dim=1)
