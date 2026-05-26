@@ -27,7 +27,7 @@ const Args = struct {
     ;
 };
 
-const TEST_LAYER = 0;
+const TEST_LAYER = 1;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -100,11 +100,30 @@ fn run(
         //     try testLayer(allocator, io, platform, activation_store.view(), model_store, .rmsNorm, name, name, .{ .absolute_tolerance = 1e-2 });
         // }
 
-        for (3..45) |layer_idx| {
-            const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.moe", .{layer_idx});
-            defer allocator.free(name);
+        for (41..45) |layer_idx| {
+            const moe_view = model_store.view().withPrefix("model").withPrefix("layers").withLayer(layer_idx).withPrefix("moe");
+            const moe = try model.Moe.init(moe_view);
 
-            try testLayer(allocator, io, platform, activation_store.view(), model_store, .moe, name, name, .{ .absolute_tolerance = 1e-2 });
+            var bufs = try zml.io.load(model.Moe, &moe, allocator, io, platform, model_store, .auto);
+            defer deinitBuffers(&bufs);
+
+            std.log.info("=== layer {d} weight slices ===", .{layer_idx});
+            try dumpFirst8(allocator, io, platform, "up_proj", layer_idx, moe.up_proj, bufs.up_proj);
+            try dumpFirst8(allocator, io, platform, "gate_proj", layer_idx, moe.gate_proj, bufs.gate_proj);
+            try dumpFirst8(allocator, io, platform, "down_proj", layer_idx, moe.down_proj, bufs.down_proj);
+
+            try dumpFirst8With(allocator, io, platform, Slicer.first8_2d, "router.gate.weight[0,:8]", layer_idx, moe.router.gate.weight, bufs.router.gate.weight);
+            try dumpFirst8With(allocator, io, platform, Slicer.first8_1d, "router.router_bias[:8]", layer_idx, moe.router.router_bias, bufs.router.router_bias);
+
+            // Also dump the saved MoE input from the activations file.
+            const in_name = try std.fmt.allocPrint(allocator, "model.layers.{d}.moe.in", .{layer_idx});
+            defer allocator.free(in_name);
+            var in_args: struct { zml.Tensor } = .{
+                activation_store.view().withPrefix(in_name).createTensor("0", null, .replicated),
+            };
+            var in_bufs = try zml.io.load(@TypeOf(in_args), &in_args, allocator, io, platform, &activation_store, .auto);
+            defer deinitBuffers(&in_bufs);
+            try dumpFirst8(allocator, io, platform, "moe.in.0", layer_idx, in_args[0], in_bufs[0]);
         }
     } else if (TEST_LAYER == 1) {
         // layers 3..44 (45 with 0 indexing but i wont bake it in rn)
@@ -225,17 +244,31 @@ fn compareRouterTopK(
     try reader.interface.readSliceAll(exp.data());
 
     const dims = exp.shape.dims();
-    const k: usize = @intCast(dims[dims.len - 1]);
+    const exp_stride: usize = @intCast(dims[dims.len - 1]); // typically 288 (all experts, ranked)
     var positions: usize = 1;
     for (dims[0 .. dims.len - 1]) |d| positions *= @intCast(d);
+
+    const got_dims = got.shape.dims();
+    const got_stride: usize = @intCast(got_dims[got_dims.len - 1]); // typically 8 (top-k)
 
     const exp_ids = exp.constItems(i32);
     const got_ids = got.constItems(i32);
 
+    std.log.info("{s}: exp.shape={any} got.shape={any} exp_stride={d} got_stride={d} positions={d}", .{
+        activations_name, dims, got_dims, exp_stride, got_stride, positions,
+    });
+
+    if (exp_stride < show or got_stride < show) {
+        std.log.warn("  stride too small for show={d}; skipping", .{show});
+        return;
+    }
+
     var mismatches: usize = 0;
     var first: usize = 0;
     for (0..positions) |p| {
-        if (!topSetEqual(exp_ids[p * k ..][0..show], got_ids[p * k ..][0..show])) {
+        const exp_row = exp_ids[p * exp_stride ..][0..show];
+        const got_row = got_ids[p * got_stride ..][0..show];
+        if (!topSetEqual(exp_row, got_row)) {
             if (mismatches == 0) first = p;
             mismatches += 1;
         }
@@ -245,9 +278,12 @@ fn compareRouterTopK(
         std.log.info("✅ {s}: top-{d} matches at all {d} positions", .{ activations_name, show, positions });
     } else {
         std.log.warn("⚠️  {s}: {d}/{d} positions differ. first @{d}: exp={any} got={any}", .{
-            activations_name,               first,
-            mismatches,                     positions,
-            exp_ids[first * k ..][0..show], got_ids[first * k ..][0..show],
+            activations_name,
+            mismatches,
+            positions,
+            first,
+            exp_ids[first * exp_stride ..][0..show],
+            got_ids[first * got_stride ..][0..show],
         });
     }
 }
@@ -258,4 +294,70 @@ fn topSetEqual(a: []const i32, b: []const i32) bool {
         return false;
     }
     return true;
+}
+
+const Slicer = struct {
+    pub fn first8(t: zml.Tensor) zml.Tensor {
+        return t
+            .slice1d(0, .{ .end = 1 })
+            .slice1d(1, .{ .end = 1 })
+            .slice1d(2, .{ .end = 8 })
+            .convert(.f32)
+            .reshape(.{8});
+    }
+
+    pub fn first8_2d(t: zml.Tensor) zml.Tensor {
+        return t
+            .slice1d(0, .{ .end = 1 })
+            .slice1d(1, .{ .end = 8 })
+            .convert(.f32)
+            .reshape(.{8});
+    }
+
+    pub fn first8_1d(t: zml.Tensor) zml.Tensor {
+        return t.slice1d(0, .{ .end = 8 }).convert(.f32).reshape(.{8});
+    }
+};
+
+fn dumpFirst8(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    name: []const u8,
+    layer_idx: usize,
+    tensor_template: zml.Tensor,
+    buffer: zml.Buffer,
+) !void {
+    var exe = try zml.module.compile(allocator, io, Slicer.first8, .{tensor_template}, platform, .{});
+    defer exe.deinit();
+
+    var output = try zml.testing.autoCall(allocator, io, &exe, Slicer.first8, .{buffer});
+    defer output.deinit();
+
+    const slice = try output.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+
+    std.log.info("layer {d} {s}[0,0,:8] = {any}", .{ layer_idx, name, slice.constItems(f32) });
+}
+
+fn dumpFirst8With(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    comptime slicer_fn: anytype,
+    name: []const u8,
+    layer_idx: usize,
+    tensor_template: zml.Tensor,
+    buffer: zml.Buffer,
+) !void {
+    var exe = try zml.module.compile(allocator, io, slicer_fn, .{tensor_template}, platform, .{});
+    defer exe.deinit();
+
+    var output = try zml.testing.autoCall(allocator, io, &exe, slicer_fn, .{buffer});
+    defer output.deinit();
+
+    const slice = try output.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+
+    std.log.info("layer {d} {s} = {any}", .{ layer_idx, name, slice.constItems(f32) });
 }
