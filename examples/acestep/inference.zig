@@ -729,8 +729,6 @@ pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: Tokenizer, 
     }
     try formatted_prompt.appendSlice(allocator, "# Caption\n");
     try formatted_prompt.appendSlice(allocator, metadata.caption);
-    // make both tokenizations same length
-    if (cover) try formatted_prompt.appendSlice(allocator, "\n \n");
     try formatted_prompt.appendSlice(allocator, "\n\n# Metas\n");
     try formatted_prompt.appendSlice(allocator, "- bpm: ");
     try formatted_prompt.appendSlice(allocator, metadata.bpm);
@@ -1093,7 +1091,7 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     const timestamps: [9]f32 = .{ 1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3, 0.0 };
 
     // populate x with gaussian noise seeded with id
-    const x: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t, .a = a }, .bf16));
+    const x: zml.Slice = try .alloc(allocator, .init(.{ .t = t, .a = a }, .bf16));
     defer x.free(allocator);
     const seed: u64 = @intCast(id);
     var prng = std.Random.DefaultPrng.init(seed);
@@ -1104,10 +1102,12 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
         x.items(zml.floats.BFloat16)[i] = zml.floats.BFloat16.fromF32(rand);
     }
 
-    // prepare arguments buffers
+    // prepare arguments buffers. conditions are compact while dit expects a seq_len buffer
     var x_buffer: zml.Buffer = try .fromSlice(io, platform, x, sharding);
     var latents_buffer: zml.Buffer = try .fromSlice(io, platform, context.latents, sharding);
-    var conditions_buffer: zml.Buffer = try .fromSlice(io, platform, context.conditions, sharding);
+    const conditions_slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = acedit.config.encoder_hidden_size }, .bf16));
+    @memcpy(conditions_slice.items(zml.floats.BFloat16)[0..(s*d)], context.latents.items(zml.floats.BFloat16));
+    var conditions_buffer: zml.Buffer = try .fromSlice(io, platform, conditions_slice, sharding);
     defer x_buffer.deinit();
     defer latents_buffer.deinit();
     defer conditions_buffer.deinit();
@@ -1120,6 +1120,11 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     defer sliding_mask_slice.free(allocator);
     var sliding_mask_buffer: zml.Buffer = try .fromSlice(io, platform, sliding_mask_slice, sharding);
     defer sliding_mask_buffer.deinit();
+
+    const cross_mask_slice = try createCrossAttentionMask(allocator, s, acedit.options.enc_seq_len);
+    defer cross_mask_slice.free(allocator);
+    var cross_mask_buffer: zml.Buffer = try .fromSlice(io, platform, cross_mask_slice, sharding);
+    defer cross_mask_buffer.deinit();
 
     const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = a, .t = t }, .bf16));
     var result_buffer: zml.Buffer = try .fromSlice(io, platform, result_slice, sharding);
@@ -1150,7 +1155,7 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
         acedit.exes.preprocess_results.fill(.{ &y_proj_buffer, &hidden_states_buffer, &temb_buffer, &timestep_proj_buffer });
         for (0..acedit.config.num_hidden_layers) |ii| {
             const mask_buffer = if (acedit.config.layer_types[ii] == .sliding_attention) sliding_mask_buffer else full_mask_buffer;
-            acedit.exes.layer_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer });
+            acedit.exes.layer_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer, cross_mask_buffer });
             acedit.exes.layer_exe.call(acedit.exes.layer_args, &acedit.exes.layer_results);
             acedit.exes.layer_results.fill(.{ &hidden_states_buffer });
         }
@@ -1212,10 +1217,18 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
 
     // prepare arguments buffers
     var x_buffer: zml.Buffer = try .fromSlice(io, platform, x, sharding);
+    
     var latents_cover_buffer: zml.Buffer = try .fromSlice(io, platform, context_cover.latents, sharding);
-    var conditions_cover_buffer: zml.Buffer = try .fromSlice(io, platform, context_cover.conditions, sharding);
     var latents_non_cover_buffer: zml.Buffer = try .fromSlice(io, platform, context_non_cover.latents, sharding);
-    var conditions_non_cover_buffer: zml.Buffer = try .fromSlice(io, platform, context_non_cover.conditions, sharding);
+    
+    const conditions_cover_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = acedit.config.encoder_hidden_size }, .bf16));
+    @memcpy(conditions_cover_slice.items(zml.floats.BFloat16)[0..@intCast(s*d)], context_cover.latents.items(zml.floats.BFloat16));
+    var conditions_cover_buffer: zml.Buffer = try .fromSlice(io, platform, conditions_cover_slice, sharding);
+
+    const conditions_non_cover_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = acedit.config.encoder_hidden_size }, .bf16));
+    @memcpy(conditions_non_cover_slice.items(zml.floats.BFloat16)[0..@intCast(s*d)], context_non_cover.latents.items(zml.floats.BFloat16));
+    var conditions_non_cover_buffer: zml.Buffer = try .fromSlice(io, platform, conditions_non_cover_slice, sharding);
+        
     defer x_buffer.deinit();
     defer latents_cover_buffer.deinit();
     defer conditions_cover_buffer.deinit();
@@ -1230,6 +1243,11 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     defer sliding_mask_slice.free(allocator);
     var sliding_mask_buffer: zml.Buffer = try .fromSlice(io, platform, sliding_mask_slice, sharding);
     defer sliding_mask_buffer.deinit();
+
+    const cross_mask_slice = try createCrossAttentionMask(allocator, s, acedit.options.enc_seq_len);
+    defer cross_mask_slice.free(allocator);
+    var cross_mask_buffer: zml.Buffer = try .fromSlice(io, platform, cross_mask_slice, sharding);
+    defer cross_mask_buffer.deinit();
 
     const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = a, .t = t }, .bf16));
     var result_buffer: zml.Buffer = try .fromSlice(io, platform, result_slice, sharding);
@@ -1312,6 +1330,20 @@ pub fn createBidirectionalWindowMask(allocator: std.mem.Allocator, seq_len: i64,
             const idx = q * seq_len_u + k;
             mask_items[idx] = if (@abs(q_i64 - k_i64) <= window_len_i64) zeros else minus_inf;
         }
+    }
+    return mask;
+}
+
+pub fn createCrossAttentionMask(allocator: std.mem.Allocator, dim_enc: i64, max_dim_enc: i64) !zml.Slice {
+    var mask: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .q = 1, .k = max_dim_enc }, .bf16));
+    const zero = zml.floats.BFloat16.fromF32(0.0);
+    const valid: usize = @intCast(dim_enc);
+    for (0..valid) |s| {
+        mask.items(zml.floats.BFloat16)[s] = zero;
+    }
+    const minus_inf = zml.floats.BFloat16.fromF32(zml.floats.Float32.toF32(zml.floats.Float32.minus_inf));
+    for (valid..@intCast(max_dim_enc)) |s| {
+        mask.items(zml.floats.BFloat16)[s] = minus_inf;
     }
     return mask;
 }

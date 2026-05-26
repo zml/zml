@@ -13,11 +13,12 @@ pub const AceDit_handler = struct {
     model: AceDit,
     params: Params,
     config: ConfigXl,
+    options: Options,
     exes: Exes,
     model_buffers: zml.Bufferized(AceDit),
     shardings: main.Shardings,
     
-    pub fn init(zml_handler: *main.Zml_handler, target_duration: u32, conditions_len: i64) !AceDit_handler {
+    pub fn init(zml_handler: *main.Zml_handler, target_duration: u32) !AceDit_handler {
         zml_handler.tic(&zml_handler.timers.dit.init);
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acedit);
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
@@ -37,6 +38,8 @@ pub const AceDit_handler = struct {
         }
         std.log.info("DiT parsed", .{});
 
+        const options: Options = .{};
+
         var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
         defer store.deinit();
         std.log.info("DiT init model", .{});
@@ -48,9 +51,10 @@ pub const AceDit_handler = struct {
             .t_next = .init(.{}, .f32),
             .x = .init(.{ .t = 25 * target_duration, .a = config.timbre_hidden_dim }, .bf16),
             .context_latents = .init(.{ .t = 25 * target_duration, .a = 2 * config.timbre_hidden_dim }, .bf16),
-            .y = .init(.{ .s = conditions_len, .d = config.encoder_hidden_size }, .bf16),
-            .y_proj = .init(.{ .s = conditions_len, .d = config.hidden_size }, .bf16),
-            .mask = .init(.{ .q = @divFloor(25 * target_duration + 1, 2), .k = @divFloor(25 * target_duration + 1, 2) }, .bf16),
+            .y = .init(.{ .s = options.enc_seq_len, .d = config.encoder_hidden_size }, .bf16),
+            .y_proj = .init(.{ .s = options.enc_seq_len, .d = config.hidden_size }, .bf16),
+            .self_mask = .init(.{ .q = @divFloor(25 * target_duration + 1, 2), .k = @divFloor(25 * target_duration + 1, 2) }, .bf16),
+            .cross_mask = .init(.{ .q = 1, .k = options.enc_seq_len }, .bf16),
             .hidden_states = .init(.{ .t = @divFloor(25 * target_duration + 1, 2), .d = config.hidden_size }, .bf16),
             .temb = .init(.{ .d_emb = config.hidden_size }, .bf16),
             .timestep_proj = .init(.{ .n2 = config.fsq_input_levels.len, .d_emb = config.hidden_size }, .bf16),
@@ -78,6 +82,7 @@ pub const AceDit_handler = struct {
             .model = model,
             .params = params,
             .config = config,
+            .options = options,
             .exes = exes,
             .model_buffers = model_buffers,
             .shardings = shardings,
@@ -100,7 +105,7 @@ pub const AceDit_handler = struct {
         var layer_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: DiTLayer, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
                 return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
-                        params_.hidden_states, params_.y_proj, params_.timestep_proj, params_.mask }, opts_);
+                        params_.hidden_states, params_.y_proj, params_.timestep_proj, params_.self_mask, params_.cross_mask }, opts_);
             }
         }.call, .{ zml_handler, model.layers[0], params, opts });
         var layer_future_awaited = false;
@@ -165,10 +170,15 @@ pub const Params = struct {
 
     // intermediate arguments
     y_proj: zml.Tensor,
-    mask: zml.Tensor,
+    self_mask: zml.Tensor,
+    cross_mask: zml.Tensor,
     hidden_states: zml.Tensor,
     temb: zml.Tensor,
     timestep_proj: zml.Tensor,
+};
+
+pub const Options = struct {
+    enc_seq_len: u32 = 1024,
 };
 
 pub const ConfigBase = struct {
@@ -668,11 +678,11 @@ pub const DiTLayer = struct {
         self.scale_shift_table.deinit();
     }
     
-    pub fn forward(self: DiTLayer, x_: zml.Tensor, y: zml.Tensor, time_emb: zml.Tensor, attn_mask: zml.Tensor) zml.Tensor {
+    pub fn forward(self: DiTLayer, x_: zml.Tensor, y: zml.Tensor, time_emb: zml.Tensor, self_attn_mask: zml.Tensor, cross_attn_mask: zml.Tensor) zml.Tensor {
         const x = x_.rename(.{ .t = .s });
         const x_norm = self.scaleShift(x, time_emb);
         
-        const delta_self = self.self_attn.forward(x_norm, attn_mask);
+        const delta_self = self.self_attn.forward(x_norm, self_attn_mask);
         
         // gated residual connection: x = x + attn_output * gate
         const layer_mod = self.scale_shift_table.squeeze(.n1).add(time_emb.rename(.{ .d_emb = .d }));
@@ -682,7 +692,7 @@ pub const DiTLayer = struct {
 
         // step 2: cross-attention (always full)
         const x1_norm = self.cross_attn_norm.forward(x1);
-        const delta_cross = self.cross_attn.forward(x1_norm, y);
+        const delta_cross = self.cross_attn.forward(x1_norm, y, cross_attn_mask);
         const x2 = x1.add(delta_cross);
 
         // step 3: mlp with adaptive layer norm
@@ -757,7 +767,7 @@ pub const SelfAttention = struct {
         RmsNorm.unloadBuffers(&self.k_norm);
     }
 
-    // full bidirectional self attention, no kv caching
+    // full/window bidirectional self attention, no kv caching
     pub fn forward(self: SelfAttention, x: zml.Tensor, attn_mask: zml.Tensor) zml.Tensor {
         var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
         var k = self.k_proj.forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
@@ -828,7 +838,7 @@ pub const CrossAttention = struct {
     // - queries on the x space (hidden_states in embedded latent space)
     // - keys/values on the y space (encoder_hidden_states in embedded conditions space)
     // - cross attention doesn't use rope
-    pub fn forward(self: CrossAttention, x: zml.Tensor, y: zml.Tensor) zml.Tensor {
+    pub fn forward(self: CrossAttention, x: zml.Tensor, y: zml.Tensor, mask: zml.Tensor) zml.Tensor {
         var k = self.k_proj.forward(y).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
         var v = self.v_proj.forward(y).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
         var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = self.head_dim });
@@ -840,7 +850,7 @@ pub const CrossAttention = struct {
         v = v.rename(.{ .s = .k });
         q = q.rename(.{ .s = .q });
         
-        const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = null, .allow_cudnn = true });
+        const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = mask, .allow_cudnn = true });
         const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
 
         const delta = self.o_proj.forward(attn_output);

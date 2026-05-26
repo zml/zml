@@ -276,13 +276,19 @@ const Args = struct {
 // info:   wav                                                 0.17s
 // info: total                                                38.81s
 
-// TODO: make DiT compiled model time independent with masks and range
+// TODO: cleaner buffers inférence dit
+// TODO: validate remix diagnostics
 
 // TODO: edit mode
-// - repaint a chunk
-// - extend audio
+// - clone source latents on keep regions, add noise, modify mask channels
+// - add silence latent on paint regions (of same range)
+// - mask is 0 : leave frame intact, 1 edit the frame
+// - hard latent injection at the end of each diffusion step : denoise linearly on keep regions (scale initial noise with schedule), iterate normally on paint regions. stop at some point (like cover/non cover)
+// - this is simple/fast enough to be done on CPU in inference.zig
+// - if needed, smooth junctions with blending
+// - extend audio : same but repaint added range at the end
 
-// TODO: essayer de faire lyric remix (flow-edit...)
+// TODO: try implement lyric remix (flow-edit mode in python)
 // - embed old and new lyric
 // - switch/blend/dice between the two during the diffusion
 
@@ -291,9 +297,6 @@ const Args = struct {
 // - time signature normalization
 // - caption twice ?
 // - language on metadata
-
-// TODO: move model related code from inference to Exes struct inside models
-// TODO: load in parallel as compile
 
 // TODO: investigate audio level normalization
 // TODO: sft/base model for max quality
@@ -442,7 +445,7 @@ pub fn runText2MusicPipeline(zml_handler: *Zml_handler) !void {
 
     zml_handler.tic(&zml_handler.timers.dit.total);
 
-    var acedit = try acedit_.AceDit_handler.init(zml_handler, duration, diffusion_args.conditions.shape.dim(.s));
+    var acedit = try acedit_.AceDit_handler.init(zml_handler, duration);
     defer acedit.deinit(zml_handler.allocator);
 
     zml_handler.toc(&zml_handler.timers.dit.total);
@@ -621,7 +624,7 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
 
     zml_handler.tic(&zml_handler.timers.dit.total);
 
-    var acedit = try acedit_.AceDit_handler.init(zml_handler, @intCast(duration), diffusion_args_cover.conditions.shape.dim(.s));
+    var acedit = try acedit_.AceDit_handler.init(zml_handler, @intCast(duration));
     defer acedit.deinit(zml_handler.allocator);
 
     zml_handler.toc(&zml_handler.timers.dit.total);
