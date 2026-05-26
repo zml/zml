@@ -276,6 +276,29 @@ pub const Slice = struct {
             destination_outer.copy(source[source_outer_start..source_outer_end]);
         }
     }
+
+    pub fn copyTo(self: Slice, destination: Slice) void {
+        stdx.debug.assert(self.shape.eql(destination.shape), "copyTo: shape mismatch (self: {f}, destination: {f})", .{ self.shape, destination.shape });
+        const total_bytes = self.shape.byteSize();
+        if (total_bytes == 0) return;
+
+        if (self.isContiguous() and destination.isContiguous()) {
+            @memcpy(destination.data()[0..total_bytes], self.constData()[0..total_bytes]);
+            return;
+        }
+
+        const rank = self.shape.rank();
+        stdx.debug.assert(rank > 0, "Non-contiguous slice with rank 0 is unexpected", .{});
+
+        const outer_len: usize = @intCast(self.shape.dim(0));
+        stdx.debug.assert(outer_len > 0, "Invalid dimension size: {d}", .{outer_len});
+
+        for (0..outer_len) |i| {
+            const self_outer = self.subSlice(0, @intCast(i), 1).dropAxis(0);
+            const dest_outer = destination.subSlice(0, @intCast(i), 1).dropAxis(0);
+            self_outer.copyTo(dest_outer);
+        }
+    }
 };
 
 test "slice pretty print rank 3" {

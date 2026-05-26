@@ -112,6 +112,29 @@ pub const Buffer = struct {
         var shard_iter = Sharding.Placement.shardIterator(res._sharding, res._shape);
         while (try shard_iter.next()) |shard| {
             const sub_slice = shard.shardSlice(slice);
+
+            // TT-FIX: tt-pjrt's bufferFromHostBuffer ignores byte_strides, so
+            // non-contiguous shard slices (TP-sliced weights) must be copied
+            // into a contiguous temp before upload.
+            var temp_slice: ?Slice = null;
+            defer if (temp_slice) |ts| ts.free(std.heap.smp_allocator);
+
+            const is_tt = switch (platform.target) {
+                .tt => true,
+                .cpu, .cuda, .rocm, .tpu, .neuron => false,
+            };
+            const final_slice = if (is_tt and !sub_slice.isContiguous()) blk: {
+                temp_slice = try Slice.alloc(std.heap.smp_allocator, shard.shape);
+                sub_slice.copyTo(temp_slice.?);
+                break :blk temp_slice.?;
+            } else sub_slice;
+
+            const data_ptr = final_slice.constData().ptr;
+            const data_strides = if (is_tt)
+                shard.shape.computeByteStrides()
+            else
+                final_slice.byte_strides;
+
             var default_layout: ?pjrt.DefaultMemoryLayout = null;
             const layout: pjrt.MemoryLayout = switch (platform.target) {
                 .tpu => blk: {
@@ -122,6 +145,7 @@ pub const Buffer = struct {
                     );
                     break :blk default_layout.?.toMemoryLayout();
                 },
+                .tt => .{ .strides = .{ .byte_strides = data_strides.constSlice() } },
                 else => .{
                     .tiled = .{
                         .minor_to_major = constants.minorToMajor(shard.shape.rank()),
@@ -130,13 +154,22 @@ pub const Buffer = struct {
                     },
                 },
             };
+
+            // TT-FIX: tt-pjrt's `readyEvent` and `done_with_host_buffer`
+            // callbacks both lie — only `ImmutableOnlyDuringCall` keeps the
+            // host buffer alive long enough.
+            const host_buffer_semantics: pjrt.HostBufferSemantics = switch (platform.target) {
+                .tt => .ImmutableOnlyDuringCall,
+                else => .ImmutableUntilTransferCompletes,
+            };
+
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
-                .data = sub_slice.constData().ptr,
+                .data = data_ptr,
                 .buffer_type = buffer_type,
                 .dims = shard.shape.dims(),
-                .byte_strides = sub_slice.byte_strides.constSlice(),
+                .byte_strides = data_strides.constSlice(),
                 .layout = layout,
-                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                .host_buffer_semantics = host_buffer_semantics,
                 .dst = .{ .memory = shard.memory(platform, opts.memory).pjrt_memory },
             };
 
@@ -197,11 +230,15 @@ pub const Buffer = struct {
         opts: UnitializedOptions,
     ) !Buffer {
         switch (platform.target) {
-            .neuron => {
+            .neuron, .tt => {
                 const allocator = std.heap.smp_allocator;
 
                 const host = try allocator.alloc(u8, sh.byteSize());
                 defer allocator.free(host);
+
+                // TT-FIX: zero-init KV caches — stale memory leaks into
+                // attention scores when seqlen >> prompt_len.
+                @memset(host, 0);
 
                 return try Buffer.from(io, platform, sh, sharding, host, .{ .wait = true, .memory = opts.memory });
             },

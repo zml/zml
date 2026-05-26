@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
+const tt_ops = @import("platforms/tt/ops");
 
 const CompilationContext = @import("module.zig").CompilationContext;
 const constants = @import("constants.zig");
@@ -155,6 +156,18 @@ pub const Tensor = struct {
 
         const op_result = switch (ctx.partitioning.partitioner) {
             .shardy => blk: {
+                // TT-FIX: tt-xla doesn't consume `sdy.sharding_constraint`;
+                // emit `tt.sharding_constraint` custom_call instead.
+                switch (ctx.platform.target) {
+                    .tt => {
+                        var sharding_str: std.Io.Writer.Allocating = .init(ctx.allocator);
+                        defer sharding_str.deinit();
+                        attr.format(&sharding_str.writer) catch unreachable;
+                        break :blk tt_ops.shardingConstraint(ctx.mlir_ctx, currentBlock(), self.value(), sharding_str.written());
+                    },
+                    .cpu, .cuda, .rocm, .tpu, .neuron => {},
+                }
+
                 const op = mlir.Operation.make(ctx.mlir_ctx, "sdy.sharding_constraint", .{
                     .operands = .{ .flat = &.{self.value()} },
                     .results = .{ .flat = &.{self.value().type_()} },
@@ -4189,7 +4202,7 @@ pub const Tensor = struct {
     /// so it will slow down the program execution.
     pub fn print(input: Tensor, name: []const u8) void {
         switch (CompilationContext.current().platform.target) {
-            .cpu, .cuda, .rocm, .tpu => {
+            .cpu, .cuda, .rocm, .tpu, .tt => {
                 ops.manualComputation(input, {}, .{ .name = name }, (struct {
                     fn body(ctx_: anytype, _: std.mem.Allocator, sharded_input: Tensor, _: void) void {
                         ops.customCall("zml$print", sharded_input, {}, .{ .name = ctx_.name }, .{ .has_side_effect = true });

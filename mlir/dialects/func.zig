@@ -24,7 +24,10 @@ const FuncOpArgs = struct {
 
 pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
     var args_buffer: stdx.BoundedArray(*const mlir.Type, 1024) = .empty;
-    var results_buffer: stdx.BoundedArray(*const mlir.Type, 32) = .empty;
+    // Sized to match `args_buffer`: a model whose `forward` returns a large
+    // struct (e.g. a per-layer KV cache — one tensor per transformer layer)
+    // can easily exceed a few dozen results.
+    var results_buffer: stdx.BoundedArray(*const mlir.Type, 1024) = .empty;
 
     var attr_tuples_buffer: stdx.BoundedArray(mlir.NamedAttribute, 16) = .empty;
     attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "sym_name", .string(ctx, args.name)));

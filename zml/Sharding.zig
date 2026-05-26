@@ -42,7 +42,7 @@ pub const Partitioner = union(enum) {
 
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
-            .cpu, .cuda, .rocm, .tpu => .shardy,
+            .cpu, .cuda, .rocm, .tpu, .tt => .shardy,
             .neuron => .gspmd,
         };
     }
@@ -51,6 +51,13 @@ pub const Partitioner = union(enum) {
 pub const Partitioning = struct {
     partitioner: Partitioner,
     shardings: []const Sharding,
+
+    // TT-FIX: tt-mlir rejects shardy open dimensions (ShardyUtils.cpp:574).
+    // https://github.com/tenstorrent/tt-mlir/blob/c440cae68ca060026a779b81c5f83815c547d504/lib/Dialect/StableHLO/Utils/ShardyUtils.cpp#L574
+    close_open_dims: bool = false,
+    // TT-FIX: tt-mlir asserts exactly one `sdy.mesh` op per module.
+    // https://github.com/tenstorrent/tt-mlir/blob/8a964d3cf8310d65dd6bd4e37d3a197996c1756c/lib/Conversion/StableHLOToTTIR/ShardyToTTIRPatterns.cpp#L171-L174
+    single_mesh: bool = false,
 
     pub fn init(partitioner: Partitioner, shardings: []const Sharding) !Partitioning {
         stdx.debug.assert(shardings.len >= 1, "Waiting at leat 1 sharding strategy to be implemented", .{});
@@ -96,7 +103,7 @@ pub const Partitioning = struct {
     pub fn tensorShardingAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, shape: Shape, sharding: ?Sharding) !*const mlir.Attribute {
         const selected_sharding = sharding orelse try self.selectSharding(shape);
         return switch (self.partitioner) {
-            .shardy => (try selected_sharding.data.sdyShardingAttrForShape(allocator, ctx, shape)).asAttr(),
+            .shardy => (try selected_sharding.data.sdyShardingAttrForShape(allocator, ctx, shape, self.close_open_dims)).asAttr(),
             .gspmd => try selected_sharding.data.gspmdShardingAttrForShape(allocator, ctx, shape),
         };
     }
@@ -119,7 +126,7 @@ pub const Partitioning = struct {
         const shardings = try allocator.alloc(*const dialects.shardy.TensorShardingAttribute, shapes.len);
         for (shapes, 0..) |shape, i| {
             const sharding = try self.selectSharding(shape);
-            shardings[i] = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
+            shardings[i] = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape, self.close_open_dims);
         }
         return dialects.shardy.TensorShardingPerValueAttribute.init(ctx, shardings).asAttr();
     }
@@ -141,7 +148,7 @@ pub const Partitioning = struct {
 
         for (in_shapes) |shape| {
             const sharding = try self.selectSharding(shape);
-            const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
+            const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape, self.close_open_dims);
             for (0..attr.numReplicatedAxes()) |i| {
                 Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
             }
@@ -154,7 +161,7 @@ pub const Partitioning = struct {
         }
         for (out_shapes) |shape| {
             const sharding = try self.selectSharding(shape);
-            const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
+            const attr = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape, self.close_open_dims);
             for (0..attr.numReplicatedAxes()) |i| {
                 Collect.appendUnique(&axis_names, allocator, attr.replicatedAxis(i).name());
             }
@@ -636,7 +643,7 @@ pub const PhysicalMesh = struct {
         return switch (self.target) {
             .tpu => &.{ .link_x, .link_y, .link_z },
             .neuron => &.{ .link, .link_x, .link_y, .link_z },
-            .cuda, .rocm => &.{.link},
+            .cuda, .rocm, .tt => &.{.link},
             .cpu => &.{.bus},
         };
     }
@@ -861,6 +868,7 @@ pub const PhysicalMesh = struct {
             .cuda, .rocm => gpu(allocator, platform_devices),
             .tpu => tpu(allocator, platform_devices),
             .neuron => neuron(allocator, platform_devices),
+            .tt => tt(allocator, platform_devices),
         };
         errdefer freeNode(allocator, root);
 
@@ -1045,6 +1053,20 @@ pub const PhysicalMesh = struct {
             &coords_buf,
             &next_device,
         );
+    }
+
+    pub fn tt(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
+        const nodes = try allocator.alloc(PhysicalNode, platform_devices.len);
+
+        for (nodes, platform_devices) |*n, d| n.* = .device(d);
+
+        return .{
+            .branch = .{
+                .tag = .link,
+                .geometry = .{ .ring = .closed_ring },
+                .children = nodes,
+            },
+        };
     }
 };
 
@@ -1397,6 +1419,7 @@ pub const Data = struct {
         parent_allocator: std.mem.Allocator,
         ctx: *mlir.Context,
         shape: Shape,
+        close_open_dims: bool,
     ) !*const dialects.shardy.TensorShardingAttribute {
         var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
         defer arena.deinit();
@@ -1429,11 +1452,11 @@ pub const Data = struct {
                             break :d .closed(ctx, axes);
                         }
                     } else {
-                        break :d .open(ctx, &.{});
+                        break :d if (close_open_dims) .closed(ctx, &.{}) else .open(ctx, &.{});
                     }
                 },
                 .replicated => .replicated(ctx),
-                .open, .unknown => if (all_replicated) .replicated(ctx) else .open(ctx, &.{}),
+                .open, .unknown => if (all_replicated) .replicated(ctx) else if (close_open_dims) .closed(ctx, &.{}) else .open(ctx, &.{}),
             };
         }
 
@@ -1724,7 +1747,7 @@ pub const Placement = struct {
             for (platform.devices, 0..) |d, device_index| {
                 const device_id = switch (platform.target) {
                     .neuron => @as(usize, @intCast(d.localHardwareId())),
-                    .cuda, .rocm, .tpu, .cpu => d.id(),
+                    .cuda, .rocm, .tpu, .cpu, .tt => d.id(),
                 };
                 if (device_id == self.device_id) return device_index;
             }
@@ -2099,7 +2122,7 @@ const ShardingTest = struct {
             defer ctx.deinit();
             ctx.loadAllAvailableDialects();
 
-            const actual_attr = try sharding.sdyShardingAttrForShape(self.allocator, ctx, s.shape);
+            const actual_attr = try sharding.sdyShardingAttrForShape(self.allocator, ctx, s.shape, false);
             var writer: std.Io.Writer.Allocating = .init(self.allocator);
             defer writer.deinit();
             try actual_attr.asAttr().format(&writer.writer);

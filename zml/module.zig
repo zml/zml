@@ -19,6 +19,7 @@ const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
 const Partitioning = Sharding.Partitioning;
 const Tensor = @import("tensor.zig").Tensor;
+const tt_ops = @import("platforms/tt/ops");
 
 const log = std.log.scoped(.@"zml/module");
 
@@ -53,6 +54,11 @@ pub const CompilationOptions = struct {
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
     xla_dump_emitter_re: ?[]const u8 = null,
+
+    // TT-FIX: emit `tt.mark_argument` on argument 0 so tt-xla's frontend
+    // tags those tensors as `<parameter>` and keeps them device-resident
+    // across trace captures.
+    tt_parameter_args: bool = false,
 };
 
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
@@ -93,6 +99,7 @@ pub const CompilationContext = struct {
     module: *mlir.Module,
     platform: *const Platform,
     partitioning: Sharding.Partitioning,
+    tt_parameter_args: bool,
 
     scopes: stdx.BoundedArray(Scope, 16) = .empty,
     manual_computation_depth: usize = 0,
@@ -130,7 +137,15 @@ pub const CompilationContext = struct {
         }
         if (needs_replicated) shardings.appendAssumeCapacity(platform.replicated_sharding);
 
-        const partitioning = Sharding.Partitioning.init(opts.partitioner orelse .fromTarget(platform.target), shardings.items) catch @panic("OOM");
+        var partitioning = Sharding.Partitioning.init(opts.partitioner orelse .fromTarget(platform.target), shardings.items) catch @panic("OOM");
+        // TT-FIX: tt-mlir's shardy support rejects open dims and asserts one mesh op.
+        switch (platform.target) {
+            .tt => {
+                partitioning.close_open_dims = true;
+                partitioning.single_mesh = true;
+            },
+            .cpu, .cuda, .rocm, .tpu, .neuron => {},
+        }
 
         return .{
             .allocator = allocator,
@@ -142,6 +157,7 @@ pub const CompilationContext = struct {
             .module = module,
             .platform = platform,
             .partitioning = partitioning,
+            .tt_parameter_args = opts.tt_parameter_args,
         };
     }
 
@@ -270,7 +286,12 @@ fn addPartitionerOperations(ctx: *CompilationContext) !void {
     switch (partitioning.partitioner) {
         .gspmd => {},
         .shardy => {
-            for (partitioning.shardings) |sharding| {
+            // TT-FIX: emit only the primary sharding's mesh when `single_mesh`.
+            const shardings_to_emit = if (partitioning.single_mesh)
+                partitioning.shardings[0..1]
+            else
+                partitioning.shardings;
+            for (shardings_to_emit) |sharding| {
                 const attr_str = try sharding.data.sdyMeshAttr(allocator);
                 defer allocator.free(attr_str);
 
@@ -414,6 +435,19 @@ const EmitMlirResult = struct {
     output_info: OutputInfo,
 };
 
+/// TT-FIX: emit `tt.mark_argument` for the first `n` block args so tt-xla's
+/// frontend tags them as `<parameter>` (`has_side_effect=true` prevents ZML's
+/// canonicalizer from dropping the op).
+fn markParameterArguments(compilation_context: *CompilationContext, n: u32) void {
+    const mlir_ctx = compilation_context.mlir_ctx;
+    const block = compilation_context.currentScope().block;
+    for (0..n) |i| {
+        var name_buf: [40]u8 = undefined;
+        const name = std.fmt.bufPrint(&name_buf, "parameter_{d}", .{i}) catch unreachable;
+        tt_ops.markArgument(mlir_ctx, block, block.argument(i), name);
+    }
+}
+
 fn finalizeAttributeList(allocator_: std.mem.Allocator, mlir_ctx: *mlir.Context, attributes: []AttributeList) ![]*const mlir.Attribute {
     const res = try allocator_.alloc(*const mlir.Attribute, attributes.len);
     for (res, attributes) |*r, attr| {
@@ -450,6 +484,12 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
             ctx_.current_argument_id += 1;
         }
     }.cb, &context, &args);
+
+    // TT-FIX: tag argument 0's tensors as `<parameter>` for trace residency.
+    if (compilation_context.tt_parameter_args) switch (compilation_context.platform.target) {
+        .tt => markParameterArguments(compilation_context, meta.count(Tensor, &args[0])),
+        .cpu, .cuda, .rocm, .tpu, .neuron => {},
+    };
 
     const output_info, const input_info = b: {
         compilation_context.activate();
@@ -634,6 +674,20 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // This is what AMD recommendeds in the meantime.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CUBLAS,CUBLASLT,CUSTOM_CALL,CUDNN,DYNAMIC_SLICE_FUSION", upb_arena);
             },
+            .tt => {
+                // TT-FIX: env-overridable XLA defaults. opt=2 and bfp_bf8 each
+                // give ~9 tok/s on Llama-3B batch=32; trace ~10x, env-gated.
+                const fid: []const u8 = if (std.c.getenv("ZML_TT_MATH_FIDELITY")) |r| std.mem.span(r) else "hifi3";
+                const dtype: []const u8 = if (std.c.getenv("ZML_TT_WEIGHT_DTYPE")) |r| std.mem.span(r) else "bfp_bf8";
+                const opt: i64 = if (std.c.getenv("ZML_TT_OPTIMIZATION_LEVEL")) |r| std.fmt.parseInt(i64, std.mem.span(r), 10) catch 2 else 2;
+                try setXlaOverrideFlag(overrides_map, "math_fidelity", fid, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "fp32_dest_acc_en", std.c.getenv("ZML_TT_FP32_DEST_ACC_EN") != null, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "optimization_level", opt, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "experimental_weight_dtype", dtype, upb_arena);
+                if (std.c.getenv("ZML_TT_TRACE") != null) {
+                    try setXlaOverrideFlag(overrides_map, "enable_trace", true, upb_arena);
+                }
+            },
             else => {},
         }
 
@@ -654,6 +708,16 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
         break :blk options;
     };
 
+    // TT-FIX: tt-xla's compile is not thread-safe; serialize TT compiles.
+    switch (platform.target) {
+        .tt => tt_compile_mutex.lockUncancelable(io),
+        .cpu, .cuda, .rocm, .tpu, .neuron => {},
+    }
+    defer switch (platform.target) {
+        .tt => tt_compile_mutex.unlock(io),
+        .cpu, .cuda, .rocm, .tpu, .neuron => {},
+    };
+
     const loaded_executable = try pjrtx.Client.compile(
         platform.pjrt_client,
         platform.pjrt_api,
@@ -666,3 +730,5 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
 
     return loaded_executable;
 }
+
+var tt_compile_mutex: std.Io.Mutex = .init;
