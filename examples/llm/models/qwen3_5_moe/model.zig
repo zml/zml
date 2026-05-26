@@ -49,29 +49,37 @@ pub const RopeParameters = struct {
     rope_theta: f32,
 };
 
-fn kvHeadsAreReplicated(axis_size: i64, model_partitions: i64) bool {
-    return axis_size > 0 and axis_size < model_partitions and @rem(model_partitions, axis_size) == 0;
+fn kvHeadsAreReplicated(axis_size: i64, model_partitions: i64) struct { bool, ?u32 } {
+    const is_replicated = axis_size > 0 and axis_size < model_partitions and @rem(model_partitions, axis_size) == 0;
+    const repeat_factor = if (is_replicated) @as(u32, @intCast(@divExact(model_partitions, axis_size))) else null;
+    return .{ is_replicated, repeat_factor };
 }
 
-fn partitionProjectedKv(tensor: zml.Tensor, replicate_kv_heads: bool) zml.Tensor {
+fn partitionProjectedKv(tensor: zml.Tensor, replicate_kv_heads: bool, repeat_factor: ?u32) zml.Tensor {
     return if (replicate_kv_heads)
-        tensor.withPartitioning(.{ .s = .replicated, .h = .replicated, .hd = .replicated })
+        tensor.repeat1d(.h, @as(u63, repeat_factor.?)).withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated })
     else
         tensor.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
 }
 
-fn partitionCachedKv(tensor: zml.Tensor, replicate_kv_heads: bool) zml.Tensor {
+fn partitionCachedKv(tensor: zml.Tensor, replicate_kv_heads: bool, repeat_factor: ?u32) zml.Tensor {
     return if (replicate_kv_heads)
-        tensor.rename(.{ .s = .k }).withPartitioning(.{ .k = .replicated, .h = .replicated, .hd = .replicated })
+        tensor.rename(.{ .s = .k }).repeat1d(.h, @as(u63, repeat_factor.?)).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated })
     else
         tensor.rename(.{ .s = .k }).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
 }
 
 fn partitionKvCacheShape(kv_shape: zml.Shape, kv_heads: i64, model_partitions: i64) zml.Shape {
-    return if (kvHeadsAreReplicated(kv_heads, model_partitions))
-        kv_shape.withPartitioning(.{ .h = .replicated })
-    else
-        kv_shape.withPartitioning(.{ .h = .model });
+    const is_replicated, const repeat_factor = kvHeadsAreReplicated(kv_heads, model_partitions);
+
+    if (is_replicated) {
+        const repeated_h = kv_shape.dim(.h) * @as(i64, @intCast(repeat_factor.?));
+        return kv_shape
+            .setDim(.h, repeated_h)
+            .withPartitioning(.{ .h = .model });
+    }
+
+    return kv_shape.withPartitioning(.{ .h = .model });
 }
 
 pub const LoadedModel = struct {
@@ -572,15 +580,15 @@ pub const SelfAttn = struct {
         kv_cache: KvCache.SelfAttnCache,
     ) struct { zml.Tensor, KvCache.SelfAttnCache } {
         const model_partitions = zml.module.CompilationContext.current().partitioning.numPartitionsForLogicalAxis(self.q_proj.weight.shape(), .model) catch unreachable;
-        const replicate_kv_heads = kvHeadsAreReplicated(self.num_kv_heads, model_partitions);
+        const replicate_kv_heads, const repeat_factor = kvHeadsAreReplicated(self.num_kv_heads, model_partitions);
         const x_qkv = x.withPartitioning(.{ .d = .replicated });
 
         var q, var gate = self.projectQAndGate(x_qkv);
         var k, var v = self.projectKV(x_qkv);
         q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
         gate = gate.withPartitioning(.{ .s = .replicated, .d_out_proj = .model });
-        k = partitionProjectedKv(k, replicate_kv_heads);
-        v = partitionProjectedKv(v, replicate_kv_heads);
+        k = partitionProjectedKv(k, replicate_kv_heads, repeat_factor);
+        v = partitionProjectedKv(v, replicate_kv_heads, repeat_factor);
         q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
         k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
 
@@ -593,15 +601,15 @@ pub const SelfAttn = struct {
         q = self.rotary_embed.applyRope(q, cos, sin);
         k = self.rotary_embed.applyRope(k, cos, sin);
         q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
-        k = partitionProjectedKv(k, replicate_kv_heads);
-        v = partitionProjectedKv(v, replicate_kv_heads);
+        k = partitionProjectedKv(k, replicate_kv_heads, repeat_factor);
+        v = partitionProjectedKv(v, replicate_kv_heads, repeat_factor);
 
         const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
         q = q.rename(.{ .s = .q }).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
-        k = partitionCachedKv(k, replicate_kv_heads);
-        v = partitionCachedKv(v, replicate_kv_heads);
+        k = partitionCachedKv(k, replicate_kv_heads, repeat_factor);
+        v = partitionCachedKv(v, replicate_kv_heads, repeat_factor);
 
         const attn_output = zml.attention.attention.attention(
             q,
