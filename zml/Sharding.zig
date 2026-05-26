@@ -1707,16 +1707,16 @@ pub const Strategy = struct {
 
 /// For a given shape, compute the size of the slice each shard will receive.
 pub fn shardedDims(sharding: Sharding, shape: Shape) Shape.DimsArray {
-	// TODO: simplify me
-	// placement is doing too much work because Sharding creation doesn't enough.
-	const pl = sharding.placement(shape, sharding.data.physical.devices_in_canonical_order[0]) catch @panic("MissingDeviceCoords");
-	return pl.shape._dims;
+    // TODO: simplify me
+    // placement is doing too much work because Sharding creation doesn't enough.
+    const pl = sharding.placement(shape, sharding.data.physical.devices_in_canonical_order[0]) catch @panic("MissingDeviceCoords");
+    return pl.shape._dims;
 }
 
 pub fn placement(sharding: Sharding, shape: Shape, device: Device) !Placement {
-	// TODO: placement should be device agnostic
-	// For a given shape compute how it should be sharded across all devices,
-	// then getting the offset for a specific device should be easy peasy.
+    // TODO: placement should be device agnostic
+    // For a given shape compute how it should be sharded across all devices,
+    // then getting the offset for a specific device should be easy peasy.
     if (device.coords.len == 0) return error.MissingDeviceCoords;
 
     var placement_: Placement = .{
