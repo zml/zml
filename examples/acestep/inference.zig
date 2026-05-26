@@ -911,14 +911,9 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
             defer source_latents_buffer.deinit();
             var quantized_latents_buffer: zml.Buffer = undefined;
             defer quantized_latents_buffer.deinit();
-            var audio_codes_buffer: zml.Buffer = undefined;
-            defer audio_codes_buffer.deinit();
-            aceenc.exes.tokenize_args.set(.{ aceenc.model_buffers.audio_tokenizer, source_latents_buffer });
-            aceenc.exes.tokenize_exe.call(aceenc.exes.tokenize_args, &aceenc.exes.tokenize_results);
-            aceenc.exes.tokenize_results.fill(.{ &audio_codes_buffer });
-            aceenc.exes.detokenize_args.set(.{ aceenc.model_buffers.audio_detokenizer, audio_codes_buffer });
-            aceenc.exes.detokenize_exe.call(aceenc.exes.detokenize_args, &aceenc.exes.detokenize_results);
-            aceenc.exes.detokenize_results.fill(.{ &quantized_latents_buffer });
+            aceenc.exes.audio_fqs_args.set(.{ aceenc.model_buffers.audio_fqs, source_latents_buffer });
+            aceenc.exes.audio_fqs_exe.call(aceenc.exes.audio_fqs_args, &aceenc.exes.audio_fqs_results);
+            aceenc.exes.audio_fqs_results.fill(.{ &quantized_latents_buffer });
             try quantized_latents_buffer.toSlice(io, latents_slice);
         }
     } else {
