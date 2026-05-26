@@ -12,26 +12,35 @@ pub const CompilationParameters = struct {
     prefill_tokens: zml.Tensor,
     decode_tokens: zml.Tensor,
     token_index: zml.Tensor,
+    last_token_index: zml.Tensor,
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
     attention_metadata: attention.Metadata,
     prefill_attention_parameters: attention.Parameters,
     decode_attention_parameters: attention.Parameters,
     seqlen: usize,
+    batch_size: u32,
     shardings: common.Shardings,
+    /// Owns `kv_cache`'s per-layer tensor slices; freed in `deinit`.
+    allocator: std.mem.Allocator,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, shardings: common.Shardings) CompilationParameters {
+    pub fn init(allocator: std.mem.Allocator, mdl: model.Model, config: model.Config, seqlen: u32, batch_size: u32, backend: attention.Backend, shardings: common.Shardings) !CompilationParameters {
         const head_dim = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads);
         return .{
-            .prefill_tokens = .init(.{ .s = seqlen }, .u32),
-            .decode_tokens = .init(.{ .s = 1 }, .u32),
-            .token_index = .init(.{}, .u32),
-            .kv_cache = .init(.init(.{
-                .layer = mdl.model.layers.len,
-                .k = seqlen,
+            .prefill_tokens = .init(.{ .b = batch_size, .s = seqlen }, .u32),
+            .decode_tokens = .init(.{ .b = batch_size, .s = 1 }, .u32),
+            // TT-FIX: rank-1 i32 `{.pos=1}` token_index — tt-mlir's
+            // `CacheFillUpdatePattern` requires a rank-1 INT32 index.
+            .token_index = .init(.{ .pos = 1 }, .i32),
+            // Index of the consumed `.s` position (prefill: last prompt token).
+            .last_token_index = .init(.{}, .i32),
+            // TT-FIX: one rank-4 KV tensor per layer — see KvCache doc-comment.
+            .kv_cache = try .init(allocator, .init(.{
+                .b = batch_size,
                 .h = config.num_key_value_heads,
+                .k = seqlen,
                 .hd = head_dim,
-            }, mdl.model.embed_tokens.weight.dtype())),
+            }, mdl.model.embed_tokens.weight.dtype()), @intCast(mdl.model.layers.len)),
             .rng = .init(),
             .attention_metadata = switch (backend) {
                 .attnd => .{ .attnd = .init() },
@@ -58,8 +67,14 @@ pub const CompilationParameters = struct {
                 else => .init(.fromBackend(backend)),
             },
             .seqlen = seqlen,
+            .batch_size = batch_size,
             .shardings = shardings,
+            .allocator = allocator,
         };
+    }
+
+    pub fn deinit(self: CompilationParameters) void {
+        self.kv_cache.deinit(self.allocator);
     }
 };
 
@@ -85,6 +100,7 @@ pub const CompiledModel = struct {
     pub fn deinit(self: *CompiledModel) void {
         self.prefill_exe.deinit();
         self.decode_exe.deinit();
+        self.params.deinit();
     }
 };
 
@@ -128,6 +144,7 @@ fn compileModel(
                 .{
                     parameters_.prefill_tokens,
                     parameters_.token_index,
+                    parameters_.last_token_index,
                     parameters_.kv_cache,
                     parameters_.rng,
                     parameters_.attention_metadata,
@@ -135,6 +152,9 @@ fn compileModel(
                 },
                 .{
                     .shardings = &shardings_,
+                    // TT-FIX: tag arg 0 (model weights) as `<parameter>` so
+                    // tt-xla keeps them device-resident across trace captures.
+                    .tt_parameter_args = true,
                 },
             );
         }
@@ -164,12 +184,13 @@ fn compileModel(
                 .{
                     parameters_.decode_tokens,
                     parameters_.token_index,
+                    parameters_.last_token_index,
                     parameters_.kv_cache,
                     parameters_.rng,
                     parameters_.attention_metadata,
                     parameters_.decode_attention_parameters,
                 },
-                .{ .shardings = shardings_ },
+                .{ .shardings = shardings_, .tt_parameter_args = true },
             );
         }
     }.call, .{ allocator, io, platform, llama_model, parameters, &all_shardings, progress });

@@ -17,6 +17,7 @@ pub const Session = struct {
     tokenizer: zml.tokenizer.Tokenizer,
     config: *const model.Config,
     seqlen: u32,
+    batch_size: u32,
     last_generated_token: u32 = 0,
     conversation_id: u64,
 
@@ -29,8 +30,8 @@ pub const Session = struct {
         model_buffers: *model.Buffers,
     ) !Session {
         const shardings = &compiled_model.params.shardings;
-        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, shardings.model);
-        errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
+        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(allocator, io, platform, shardings.model);
+        errdefer model.KvCache.deinitBuffer(&kv_cache_buffers, allocator);
 
         var attention_metadata_buffers = try compiled_model.params.attention_metadata.initBuffer(io, platform, shardings.model);
         errdefer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
@@ -51,12 +52,13 @@ pub const Session = struct {
             .tokenizer = tokenizer,
             .config = &compiled_model.loaded_model.parsed_config.value,
             .seqlen = @intCast(compiled_model.params.seqlen),
+            .batch_size = compiled_model.params.batch_size,
             .conversation_id = @bitCast(std.Io.Clock.now(.real, io).toMicroseconds()),
         };
     }
 
     pub fn deinit(self: *Session) void {
-        model.KvCache.deinitBuffer(&self.kv_cache_buffers);
+        model.KvCache.deinitBuffer(&self.kv_cache_buffers, self.allocator);
         zml.attention.attention.Metadata.deinitBuffer(&self.attention_metadata_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
     }
@@ -116,15 +118,28 @@ pub const Session = struct {
         var prefill_results = try self.compiled_model.prefill_exe.results(self.allocator);
         defer prefill_results.deinit(self.allocator);
 
-        const prefill_tokens_slice: zml.Slice = try .alloc(self.allocator, .init(.{self.seqlen}, .u32));
+        const prefill_tokens_slice: zml.Slice = try .alloc(self.allocator, .init(.{ .b = self.batch_size, .s = self.seqlen }, .u32));
         defer prefill_tokens_slice.free(self.allocator);
-        @memcpy(prefill_tokens_slice.items(u32)[0..all_tokens.len], all_tokens);
+        // TT-FIX: zero-init then tile the prompt across all `.b` rows — the
+        // embedding lookup reads padding positions (attention masks them out)
+        // so garbage IDs would cause OOR lookups.
+        @memset(prefill_tokens_slice.items(u32), 0);
+        const row_stride: usize = self.seqlen;
+        const flat = prefill_tokens_slice.items(u32);
+        var bi: usize = 0;
+        while (bi < self.batch_size) : (bi += 1) {
+            @memcpy(flat[bi * row_stride ..][0..all_tokens.len], all_tokens);
+        }
 
         var prefill_tokens_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, prefill_tokens_slice, .replicated);
         defer prefill_tokens_buffer.deinit();
 
-        var prefill_token_pos_buffer = try zml.Buffer.scalar(self.io, self.platform, 0, .u32);
+        const prefill_pos: i32 = 0;
+        var prefill_token_pos_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .pos = 1 }, .i32), .replicated, std.mem.asBytes(&prefill_pos));
         defer prefill_token_pos_buffer.deinit();
+
+        var prefill_last_token_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.len - 1, .i32);
+        defer prefill_last_token_buffer.deinit();
 
         const attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata) = switch (self.compiled_model.params.prefill_attention_parameters) {
             .attnd => .{ .attnd = .{
@@ -132,20 +147,21 @@ pub const Session = struct {
                 .layer_id = try zml.Buffer.scalar(self.io, self.platform, 0, .u16),
                 .num_tokens = try zml.Buffer.scalar(self.io, self.platform, all_tokens.len, .u32),
             } },
-            .vanilla, .cuda_fa2, .cuda_fa3 => self.attention_metadata_buffers,
+            .vanilla, .cuda_fa2, .cuda_fa3, .tenstorrent => self.attention_metadata_buffers,
         };
 
         prefill_args.set(.{
             self.model_buffers,
             prefill_tokens_buffer,
             prefill_token_pos_buffer,
+            prefill_last_token_buffer,
             &self.kv_cache_buffers,
             &self.rng_buffers,
             &attention_metadata_buffers,
         });
         self.compiled_model.prefill_exe.call(prefill_args, &prefill_results);
 
-        prefill_results.fill(.{ &prefill_tokens_buffer, &self.kv_cache_buffers, &self.rng_buffers });
+        prefill_results.fill(.{ &prefill_tokens_buffer, &self.kv_cache_buffers });
         try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
 
         self.last_generated_token = prefill_tokens_slice.items(u32)[all_tokens.len - 1];
@@ -166,9 +182,19 @@ pub const Session = struct {
         var decode_results = try self.compiled_model.decode_exe.results(self.allocator);
         defer decode_results.deinit(self.allocator);
 
+        // Batched current-token buffer: one slot per batch row, all set to
+        // the prefill-generated token (we tile the same prompt across rows).
         var last_token_id: u32 = self.last_generated_token;
-        var current_token_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .s = 1 }, .u32), .replicated, @ptrCast(&last_token_id));
+        const current_tokens_slice: zml.Slice = try .alloc(self.allocator, .init(.{ .b = self.batch_size, .s = 1 }, .u32));
+        defer current_tokens_slice.free(self.allocator);
+        const cur = current_tokens_slice.items(u32);
+        for (cur) |*t| t.* = last_token_id;
+        var current_token_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, current_tokens_slice, .replicated);
         defer current_token_buffer.deinit();
+
+        // Unused on decode (out has single .s) but `forward` still takes it.
+        var decode_last_token_buffer: zml.Buffer = try .scalar(self.io, self.platform, 0, .i32);
+        defer decode_last_token_buffer.deinit();
 
         generation: while (true) {
             if (isEosToken(self.config, last_token_id)) break :generation;
@@ -179,7 +205,8 @@ pub const Session = struct {
             try all_tokens.append(self.allocator, last_token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
 
-            var token_pos_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.items.len, .u32);
+            const decode_pos: i32 = @intCast(all_tokens.items.len);
+            var token_pos_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .pos = 1 }, .i32), .replicated, std.mem.asBytes(&decode_pos));
             defer token_pos_buffer.deinit();
 
             const attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata) = switch (self.compiled_model.params.decode_attention_parameters) {
@@ -188,20 +215,23 @@ pub const Session = struct {
                     .layer_id = try zml.Buffer.scalar(self.io, self.platform, 0, .u16),
                     .num_tokens = try zml.Buffer.scalar(self.io, self.platform, 1, .u32),
                 } },
-                .vanilla, .cuda_fa2, .cuda_fa3 => self.attention_metadata_buffers,
+                .vanilla, .cuda_fa2, .cuda_fa3, .tenstorrent => self.attention_metadata_buffers,
             };
 
             decode_args.set(.{
                 current_token_buffer,
                 token_pos_buffer,
+                decode_last_token_buffer,
                 &self.kv_cache_buffers,
                 &self.rng_buffers,
                 &attention_metadata_buffers,
             });
             self.compiled_model.decode_exe.call(decode_args, &decode_results);
 
-            decode_results.fill(.{ &current_token_buffer, &self.kv_cache_buffers, &self.rng_buffers });
-            last_token_id = try current_token_buffer.getValue(u32, self.io);
+            decode_results.fill(.{ &current_token_buffer, &self.kv_cache_buffers });
+            try current_token_buffer.toSlice(self.io, current_tokens_slice);
+            // All rows decode the same tiled prompt → row 0 is canonical.
+            last_token_id = current_tokens_slice.items(u32)[0];
         }
 
         try stdout.writeAll(try decoder.finalize(decoder_out_buffer));

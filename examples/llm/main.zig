@@ -18,6 +18,7 @@ const Args = struct {
     prompt: ?[]const u8 = null,
     seqlen: u32 = 2048,
     topk: u32 = 4,
+    batch_size: u32 = 1,
     backend: ?zml.attention.attention.Backend = null,
     attnd_ip: ?[]const u8 = null,
     single: bool = false,
@@ -33,6 +34,7 @@ const Args = struct {
         \\   --prompt=<string>   Prompt to use for generation (default: none)
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
+        \\   --batch-size=<n>    Run llama with batched prefill+decode (default: 1; llama only)
         \\   --backend=<text>    Attention backend to use ([vanilla, attnd, cuda_fa2, cuda_fa3], default: auto-selection)
         \\   --attnd-ip=<addr>   Register and prefer the `attnd` backend at the provided `IP:PORT`
         \\   --single            Create a single kernel encompassing all the layers when supported
@@ -131,7 +133,7 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
     defer tokenizer.deinit();
 
-    var compiled_model = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
+    var compiled_model = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, args.batch_size, &progress);
     defer compiled_model.deinit();
 
     // Load buffers after the model compilation to be sure to give enough room to the autotune.
