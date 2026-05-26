@@ -850,7 +850,7 @@ pub const CrossAttention = struct {
         v = v.rename(.{ .s = .k });
         q = q.rename(.{ .s = .q });
 
-        const mask_ = mask.repeat1d(mask.axis(.q), q.dim(.q));
+        const mask_ = mask.repeat1d(mask.axis(.q), @intCast(q.dim(.q)));
         
         const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = mask_, .allow_cudnn = true });
         const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
