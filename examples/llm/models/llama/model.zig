@@ -135,7 +135,7 @@ pub const Model = struct {
         const lm_head: ?zml.nn.Linear = if (store.withPrefix("lm_head").maybeCreateTensor(
             "weight",
             .{ .dout, .d },
-            .{ .dout = .replicated, .d = .model },
+            .{ .dout = .replicated, .d = .model }, // somehow this works but not .{ .dout = .model, .d = .replicated }
         )) |weight|
             .init(weight, null, .d)
         else
@@ -204,8 +204,8 @@ pub const Model = struct {
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
         const tokens = tokens_.withPartialTags(.{.s});
-        // TT-FIX: rank-1 token_index — tt-mlir's `CacheFillUpdatePattern`
-        // hands this block argument directly to `update_cache`.
+        // TT-FIX: token_index needed to be a vector, but the rest of the math
+        // uses a scalar so we convert it back to a scalar
         const token_index = token_index_.squeeze(.pos);
 
         const out, const updated_kv_cache = self.model.forward(
@@ -215,6 +215,7 @@ pub const Model = struct {
             attention_metadata,
             attention_parameters,
         );
+
         // TT-FIX: drop the advanced rng — returning it tags a `to_layout`
         // after the epilogue's `mesh_shard` and trips TTNNTraceHoistTransform.
         const new_tokens, _ = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
@@ -232,16 +233,21 @@ pub const Model = struct {
         const ctx = zml.module.CompilationContext.current();
         switch (ctx.platform.target) {
             .tt => {
-                // TT-FIX: `.s`-leading transpose around lm_head — rank-3
-                // [B,S=1,N] otherwise pads to [1,B,1,N] for reduce_scatter
-                // where `.s=1` next-to-last tile-pads each batch row to 32.
+                // TT-FIX: `s` needs to lead for the matcher
                 const out_t = out.transpose(.{ .s, .b, .d });
                 var logits = if (lm_head_) |lm_head|
                     lm_head.forward(out_t).rename(.{ .dout = .d }).transpose(.{ .b, .s, .d })
                 else
                     out_t.dot(self.model.embed_tokens.weight.withTags(.{ .voc, .d }), .d).transpose(.{ .b, .s, .voc });
-                if (logits.shape().hasTag(.voc) == null) logits = logits.rename(.{ .d = .voc });
-                if (opts.topk <= 1) return .{ logits.argMax(.voc).indices.squeeze(.voc), rng };
+
+                if (logits.shape().hasTag(.voc) == null) {
+                    logits = logits.rename(.{ .d = .voc });
+                }
+
+                if (opts.topk <= 1) {
+                    return .{ logits.argMax(.voc).indices.squeeze(.voc), rng };
+                }
+
                 // TT-FIX: tt.sampling broken at trace + opt>=1 (tt-xla #4570);
                 // dead-coded at topk=1, set ZML_TT_OPTIMIZATION_LEVEL=0 otherwise.
                 const topk = logits.topK(.{ .topk = .voc }, opts.topk, .{});
@@ -256,7 +262,11 @@ pub const Model = struct {
                         break :blk self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .d);
                     }
                 };
-                if (logits.shape().hasTag(.voc) == null) logits = logits.rename(.{ .d = .voc });
+
+                if (logits.shape().hasTag(.voc) == null) {
+                    logits = logits.rename(.{ .d = .voc });
+                }
+
                 const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
                 return .{ next_tokens, new_rng };
             },
@@ -318,12 +328,7 @@ pub const Llama = struct {
         const b_size = embeds.dim(.b);
         const s_size = embeds.dim(.s);
         // Flatten the residual stream to rank-2 {.tokens, .d} so it matches
-        // tt-mlir's 2D-native `ttnn.matmul` / `ttnn.rms_norm` lowering —
-        // `ttnn.add` is then the same rank as the norm and the
-        // `to_memory_config + reshape + to_memory_config` bridge that
-        // otherwise sits between every residual add and the next norm goes
-        // away. We split back to {.b, .s, .d} after the final norm so the
-        // caller (sampling) sees the original rank-3 shape.
+        // tt-mlir's 2D-native `ttnn.matmul`
         var hidden = embeds.merge(.{ .tokens = .{ .b, .s } });
         var updated_kv_cache = kv_cache;
 

@@ -28,10 +28,9 @@ pub const CompilationParameters = struct {
         return .{
             .prefill_tokens = .init(.{ .b = batch_size, .s = seqlen }, .u32),
             .decode_tokens = .init(.{ .b = batch_size, .s = 1 }, .u32),
-            // TT-FIX: rank-1 i32 `{.pos=1}` token_index — tt-mlir's
-            // `CacheFillUpdatePattern` requires a rank-1 INT32 index.
+            // TT-FIX: rank-1 i32 `{.pos=1}` token_index, required for pattern match
             .token_index = .init(.{ .pos = 1 }, .i32),
-            // TT-FIX: one rank-4 KV tensor per layer — see KvCache doc-comment.
+            // TT-FIX: one rank-4 KV tensor per layer, required for pattern match
             .kv_cache = try .init(allocator, .init(.{
                 .b = batch_size,
                 .h = config.num_key_value_heads,
@@ -148,8 +147,7 @@ fn compileModel(
                 },
                 .{
                     .shardings = &shardings_,
-                    // TT-FIX: tag arg 0 (model weights) as `<parameter>` so
-                    // tt-xla keeps them device-resident across trace captures.
+                    // TT-FIX: tag arg 0 (model weights) as `<parameter>` so tt-xla keeps them device-resident across trace captures.
                     .tt_parameter_args = true,
                 },
             );
