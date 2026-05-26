@@ -22,6 +22,9 @@ test {
     std.testing.refAllDecls(Tensor);
 }
 
+// TODO: Expose
+pub const ComparisonDirection = dialects.stablehlo.ComparisonDirection.Direction;
+
 pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
 
@@ -3502,6 +3505,7 @@ pub const Tensor = struct {
         }
     }
 
+    // TODO: add test
     pub fn split(self: Tensor, axis_: anytype, split_sizes: []const i64) []Tensor {
         stdx.debug.assert(split_sizes.len > 0, "split expects at least one 'split_sizes', got 0", .{});
 
@@ -3511,10 +3515,11 @@ pub const Tensor = struct {
         for (split_sizes) |n| split_sum += n;
         stdx.debug.assert(split_sum == d, "split expects sum of 'split_sizes' values and axis dimension to be equal, got {} and {}", .{ split_sum, d });
 
-        var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
-        defer arena.deinit();
+        // var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+        const allocator = CompilationContext.current().arena.allocator();
+        // defer arena.deinit();
 
-        const res = arena.allocator().alloc(Tensor, split_sizes.len) catch @panic("OOM");
+        const res = allocator.alloc(Tensor, split_sizes.len) catch @panic("OOM");
 
         var start: i64 = 0;
         for (split_sizes, 0..) |n, i| {
