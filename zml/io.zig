@@ -592,16 +592,16 @@ pub const DirectMemoryWriter = struct {
 
         allocator: std.mem.Allocator,
         shape: Shape,
-        placement: Placement,
+        sharding: Sharding,
         raw_segments: std.ArrayList(RawSegment) = .empty,
         segments: std.ArrayList(StreamSegment) = .empty,
         mirrors: std.ArrayList(usize) = .empty,
 
-        fn init(allocator: std.mem.Allocator, shape: Shape, placement: Placement) StreamPlanner {
+        fn init(allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) StreamPlanner {
             return .{
                 .allocator = allocator,
                 .shape = shape,
-                .placement = placement,
+                .sharding = sharding,
             };
         }
 
@@ -628,8 +628,9 @@ pub const DirectMemoryWriter = struct {
         }
 
         fn collectRawSegments(self: *StreamPlanner) !void {
-            for (self.placement.shards, 0..) |shard, writer_index| {
-                try self.appendShardSegments(shard, writer_index);
+            for (self.sharding.devicesInCanonicalOrder(), 0..) |device, writer_index| {
+                const placement = try self.sharding.placement(self.shape, device);
+                try self.appendShardSegments(placement, writer_index);
             }
         }
 
@@ -690,8 +691,8 @@ pub const DirectMemoryWriter = struct {
             });
         }
 
-        fn axisRange(self: *const StreamPlanner, shard: Placement.Shard, axis: usize) AxisRange {
-            for (shard.slices.constSlice()) |slice| {
+        fn axisRange(self: *const StreamPlanner, placement: Placement, axis: usize) AxisRange {
+            for (placement.slices.constSlice()) |slice| {
                 if (slice.axis == axis) {
                     return .{
                         .start = slice.start,
@@ -708,14 +709,14 @@ pub const DirectMemoryWriter = struct {
 
         fn appendShardSegmentsAtAxis(
             self: *StreamPlanner,
-            shard: Placement.Shard,
+            placement: Placement,
             writer_index: usize,
             rank: usize,
             axis: usize,
             base_start: i64,
             strides: []const i64,
         ) !void {
-            const range = self.axisRange(shard, axis);
+            const range = self.axisRange(placement, axis);
             if (range.size == 0) return;
 
             if (axis + 1 == rank) {
@@ -728,11 +729,11 @@ pub const DirectMemoryWriter = struct {
             var i: i64 = 0;
             while (i < range.size) : (i += 1) {
                 const child_start = base_start + (range.start + i) * strides[axis];
-                try self.appendShardSegmentsAtAxis(shard, writer_index, rank, axis + 1, child_start, strides);
+                try self.appendShardSegmentsAtAxis(placement, writer_index, rank, axis + 1, child_start, strides);
             }
         }
 
-        fn appendShardSegments(self: *StreamPlanner, shard: Placement.Shard, writer_index: usize) !void {
+        fn appendShardSegments(self: *StreamPlanner, placement: Placement, writer_index: usize) !void {
             const rank = self.shape.rank();
             if (rank == 0) {
                 try self.appendRawSegment(writer_index, 0, self.shape.byteSize());
@@ -740,7 +741,7 @@ pub const DirectMemoryWriter = struct {
             }
 
             const strides = self.shape.computeByteStrides();
-            try self.appendShardSegmentsAtAxis(shard, writer_index, rank, 0, 0, strides.constSlice());
+            try self.appendShardSegmentsAtAxis(placement, writer_index, rank, 0, 0, strides.constSlice());
         }
     };
 
@@ -788,9 +789,8 @@ pub const DirectMemoryWriter = struct {
         sharding: Sharding,
         buffer: *Buffer,
     ) !DirectMemoryWriter {
-        var placement = try Placement.init(allocator, sharding, shape);
-        defer placement.deinit(allocator);
-        var shard_writers = try allocator.alloc(DirectShardWriter, placement.shards.len);
+        const ordered_devices = sharding.devicesInCanonicalOrder();
+        var shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
         errdefer allocator.free(shard_writers);
 
         var initialized: usize = 0;
@@ -799,21 +799,22 @@ pub const DirectMemoryWriter = struct {
         };
 
         var pjrt_buffers: Buffer.Shards = .empty;
-        for (placement.shards, 0..) |shard, i| {
+        for (ordered_devices, 0..) |device, i| {
             defer initialized += 1;
 
-            const device_index = shard.platformDeviceIndex(platform) orelse return error.UnknownShardDevice;
+            const placement = try sharding.placement(shape, device);
+            const device_index = placement.platformDeviceIndex(platform) orelse return error.UnknownShardDevice;
             const pool = &pools[device_index];
             const shard_dma_allocator = dma_allocators[device_index].allocator();
 
-            shard_writers[i] = try DirectShardWriter.init(shard_dma_allocator, io, shard.memory(platform, .default), pool, shard.shape);
+            shard_writers[i] = try DirectShardWriter.init(shard_dma_allocator, io, placement.memory(platform, .default), pool, placement.shape);
 
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
         }
 
         buffer.* = Buffer.fromPjrtBuffers(platform, shape, sharding, pjrt_buffers.constSlice());
 
-        var planner = StreamPlanner.init(allocator, shape, placement);
+        var planner = StreamPlanner.init(allocator, shape, sharding);
         defer planner.deinit();
 
         const stream_plan = try planner.build();
@@ -1273,7 +1274,7 @@ const DirectMemoryWriterDeviceTest = struct {
         var platform = Platform.auto(self.allocator, self.io, scenario.create_options) catch return error.SkipZigTest;
         defer platform.deinit(self.allocator, self.io);
 
-        const sharding: Sharding.Data = try .init(scenario.name, platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
+        const sharding: Sharding.Data = try .init(scenario.name, &platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
         try self.runDirectMemoryWriter(
             platform,
             scenario.shape,

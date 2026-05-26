@@ -84,7 +84,7 @@ pub const Buffer = struct {
     }
 
     pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
-        try Sharding.Placement.formatShards(self._sharding, self._shape, writer);
+        try writer.print("{f}", .{self._sharding.fmtPlacements(self._shape)});
     }
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
@@ -109,22 +109,22 @@ pub const Buffer = struct {
         const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
         const slice = Slice.init(sh, data_);
 
-        var shard_iter = Sharding.Placement.shardIterator(res._sharding, res._shape);
-        while (try shard_iter.next()) |shard| {
-            const sub_slice = shard.shardSlice(slice);
+        for (res._sharding.devicesInCanonicalOrder()) |device| {
+            const placement = try res._sharding.placement(res._shape, device);
+            const sub_slice = placement.shardSlice(slice);
             var default_layout: ?pjrt.DefaultMemoryLayout = null;
             const layout: pjrt.MemoryLayout = switch (platform.target) {
                 .tpu => blk: {
                     default_layout = try platform.pjrt_client.defaultMemoryLayout(
                         platform.pjrt_api,
-                        pjrtx.bufferTypeFromDtype(shard.shape.dtype()),
-                        shard.shape.dims(),
+                        pjrtx.bufferTypeFromDtype(placement.shape.dtype()),
+                        placement.shape.dims(),
                     );
                     break :blk default_layout.?.toMemoryLayout();
                 },
                 else => .{
                     .tiled = .{
-                        .minor_to_major = constants.minorToMajor(shard.shape.rank()),
+                        .minor_to_major = constants.minorToMajor(placement.shape.rank()),
                         .tile_dims = &.{},
                         .tile_dims_sizes = &.{},
                     },
@@ -133,11 +133,11 @@ pub const Buffer = struct {
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 .data = sub_slice.constData().ptr,
                 .buffer_type = buffer_type,
-                .dims = shard.shape.dims(),
+                .dims = placement.shape.dims(),
                 .byte_strides = sub_slice.byte_strides.constSlice(),
                 .layout = layout,
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
-                .dst = .{ .memory = shard.memory(platform, opts.memory).pjrt_memory },
+                .dst = .{ .memory = placement.memory(platform, opts.memory).pjrt_memory },
             };
 
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
@@ -218,31 +218,33 @@ pub const Buffer = struct {
             shard.deinit(platform.pjrt_api);
         };
 
-        var shard_iter = Sharding.Placement.shardIterator(res._sharding, res._shape);
-        while (try shard_iter.next()) |shard| {
+        const minor_to_major = constants.minorToMajor(res._shape.rank()); // Rank doesn't change with sharding.
+        const element_type = pjrtx.bufferTypeFromDtype(res._shape.dtype()); // dtype doesn't change with sharding.
+        for (res._sharding.devicesInCanonicalOrder()) |device| {
+            const placement = try res._sharding.placement(res._shape, device);
             var default_layout: ?pjrt.DefaultMemoryLayout = null;
             const layout: pjrt.MemoryLayout = switch (platform.target) {
                 .tpu => blk: {
                     default_layout = try platform.pjrt_client.defaultMemoryLayout(
                         platform.pjrt_api,
-                        pjrtx.bufferTypeFromDtype(shard.shape.dtype()),
-                        shard.shape.dims(),
+                        pjrtx.bufferTypeFromDtype(placement.shape.dtype()),
+                        placement.shape.dims(),
                     );
                     break :blk default_layout.?.toMemoryLayout();
                 },
                 else => .{
                     .tiled = .{
-                        .minor_to_major = constants.minorToMajor(shard.shape.rank()),
+                        .minor_to_major = minor_to_major,
                         .tile_dims = &.{},
                         .tile_dims_sizes = &.{},
                     },
                 },
             };
             const args: pjrt.Client.CreateUninitializedBufferArgs = .{
-                .dims = shard.shape.dims(),
-                .element_type = pjrtx.bufferTypeFromDtype(shard.shape.dtype()),
+                .dims = placement.shape.dims(),
+                .element_type = element_type,
                 .layout = layout,
-                .dst = .{ .memory = shard.memory(platform, opts.memory).pjrt_memory },
+                .dst = .{ .memory = placement.memory(platform, opts.memory).pjrt_memory },
             };
 
             const shard_buffer = try platform.pjrt_client.createUninitializedBuffer(platform.pjrt_api, args);
@@ -279,13 +281,12 @@ pub const Buffer = struct {
     pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
         stdx.debug.assert(self._shape.eql(slice.shape), "Buffer shape {f} doesn't match destination slice {f}", .{ self._shape, slice.shape });
 
-        var shard_iter = Sharding.Placement.shardIterator(self._sharding, self._shape);
-        var shard_index: usize = 0;
-        while (try shard_iter.next()) |shard| : (shard_index += 1) {
-            const sub_slice = shard.shardSlice(slice);
+        for (self._sharding.devicesInCanonicalOrder(), 0..) |device, shard_index| {
+            const placement = try self._sharding.placement(self._shape, device);
+            const sub_slice = placement.shardSlice(slice);
             if (!sub_slice.isContiguous()) return error.NonContiguousShardRead;
 
-            const size_bytes = shard.shape.byteSize();
+            const size_bytes = placement.shape.byteSize();
             const start = sub_slice.offset_bytes;
             const end = start + size_bytes;
             stdx.debug.assert(end <= slice.constData().len, "Shard sub_slice exceeds destination slice", .{});
@@ -305,10 +306,9 @@ pub const Buffer = struct {
         const slice = try Slice.alloc(allocator, self.shape());
         errdefer slice.free(allocator);
 
-        var shard_iter = Sharding.Placement.shardIterator(self._sharding, self._shape);
-        var shard_index: usize = 0;
-        while (try shard_iter.next()) |shard| : (shard_index += 1) {
-            const sub_slice = shard.shardSlice(slice);
+        for (self._sharding.devicesInCanonicalOrder(), 0..) |device, shard_index| {
+            const placement = try self._sharding.placement(self._shape, device);
+            const sub_slice = placement.shardSlice(slice);
 
             var shard_slice = try Slice.alloc(allocator, sub_slice.shape);
             defer shard_slice.free(allocator);
@@ -327,15 +327,11 @@ pub const Buffer = struct {
     pub fn byteSize(self: Buffer) usize {
         var byte_size: usize = 0;
 
-        var shard_iter = Sharding.Placement.shardIterator(self._sharding, self._shape);
-        while (shard_iter.next() catch unreachable) |shard| {
-            byte_size += shard.shape.byteSize();
+        for (self._sharding.devicesInCanonicalOrder()) |device| {
+            const placement = self._sharding.placement(self._shape, device) catch unreachable;
+            byte_size += placement.shape.byteSize();
         }
 
         return byte_size;
-    }
-
-    pub fn placement(self: Buffer, allocator: std.mem.Allocator) !Sharding.Placement {
-        return Sharding.Placement.init(allocator, self._sharding, self._shape);
     }
 };
