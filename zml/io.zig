@@ -806,8 +806,9 @@ pub const DirectMemoryWriter = struct {
             const device_index = placement.platformDeviceIndex(platform) orelse return error.UnknownShardDevice;
             const pool = &pools[device_index];
             const shard_dma_allocator = dma_allocators[device_index].allocator();
+            const dst_memory = platform.devices[device_index].memory(.default);
 
-            shard_writers[i] = try DirectShardWriter.init(shard_dma_allocator, io, placement.memory(platform, .default), pool, placement.shape);
+            shard_writers[i] = try DirectShardWriter.init(shard_dma_allocator, io, dst_memory, pool, placement.shape);
 
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
         }

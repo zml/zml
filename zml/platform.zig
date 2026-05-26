@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const c = @import("c");
 const pjrt = @import("pjrt");
@@ -128,6 +129,7 @@ pub const Device = struct {
     pjrt_device: *const pjrt.Device,
     pjrt_desc: *const pjrt.DeviceDescription,
     addressable_memories: []*const Memory,
+    memory_by_kind: std.EnumArray(Memory.Kind, *const Memory),
 
     fn init(allocator: std.mem.Allocator, pjrt_device_: *const pjrt.Device, platform: *const Platform) !Device {
         const pjrt_addressable_memories = pjrt_device_.addressableMemories(platform.pjrt_api);
@@ -136,16 +138,39 @@ pub const Device = struct {
             addressable_memory.* = platform.memoryFromPjrt(pjrt_memory);
         }
 
+        var memory_by_kind: std.EnumArray(Memory.Kind, *const Memory) = undefined;
+        inline for (std.meta.tags(Memory.Kind)) |memory_kind| {
+            memory_by_kind.set(memory_kind, resolveMemory(pjrt_device_, platform, addressable_memories, memory_kind));
+        }
+
         return .{
             .platform = platform,
             .pjrt_device = pjrt_device_,
             .pjrt_desc = pjrt_device_.getDescription(platform.pjrt_api),
             .addressable_memories = addressable_memories,
+            .memory_by_kind = memory_by_kind,
         };
     }
 
     fn deinit(self: *Device, allocator: std.mem.Allocator) void {
         allocator.free(self.addressable_memories);
+    }
+
+    fn resolveMemory(pjrt_device_: *const pjrt.Device, platform: *const Platform, addressable_memories: []*const Memory, memory_kind: Memory.Kind) *const Memory {
+        if (memory_kind == .default) {
+            const pjrt_memory = pjrt_device_.defaultMemory(platform.pjrt_api);
+            for (addressable_memories) |mem| {
+                if (mem.pjrt_memory == pjrt_memory) return mem;
+            }
+            return platform.memoryFromPjrt(pjrt_memory);
+        }
+
+        for (addressable_memories) |mem| {
+            if (mem.isOfKind(memory_kind)) {
+                return mem;
+            }
+        }
+        unreachable;
     }
 
     pub fn id(self: Device) usize {
@@ -183,23 +208,35 @@ pub const Device = struct {
         });
     }
 
-    pub fn memory(self: Device, memory_kind: Memory.Kind) *const Memory {
-        if (memory_kind == .default) {
-            const pjrt_memory = self.pjrt_device.defaultMemory(self.platform.pjrt_api);
-            for (self.addressable_memories) |mem| {
-                if (mem.pjrt_memory == pjrt_memory) return mem;
-            }
-            return self.platform.memoryFromPjrt(pjrt_memory);
-        }
-
-        for (self.addressable_memories) |mem| {
-            if (mem.isOfKind(memory_kind)) {
-                return mem;
-            }
-        }
-        unreachable;
+    pub fn memory(self: *const Device, memory_kind: Memory.Kind) *const Memory {
+        return self.memory_by_kind.values[@intFromEnum(memory_kind)];
     }
 };
+
+fn platformDeviceSortId(target: Target, device: Device) usize {
+    return switch (target) {
+        .neuron => @intCast(device.localHardwareId()),
+        .cuda, .rocm, .tpu, .cpu, .oneapi => device.id(),
+    };
+}
+
+fn sortDevicesById(target: Target, devices: []Device) void {
+    const Context = struct {
+        target: Target,
+
+        fn lessThan(ctx: @This(), lhs: Device, rhs: Device) bool {
+            return platformDeviceSortId(ctx.target, lhs) < platformDeviceSortId(ctx.target, rhs);
+        }
+    };
+
+    std.mem.sort(Device, devices, Context{ .target = target }, Context.lessThan);
+
+    if (builtin.mode == .Debug) {
+        for (devices, 0..) |device, expected_id| {
+            std.debug.assert(platformDeviceSortId(target, device) == expected_id);
+        }
+    }
+}
 
 pub const Platform = struct {
     arena: std.heap.ArenaAllocator,
@@ -271,6 +308,7 @@ pub const Platform = struct {
             for (pjrt_devices, devices) |pjrt_device, *platform_device| {
                 platform_device.* = try .init(arena, pjrt_device, platform);
             }
+            sortDevicesById(target, devices);
             for (memories) |*platform_memory| {
                 platform_memory.populateAddressableByDevices();
             }

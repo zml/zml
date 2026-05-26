@@ -8,7 +8,6 @@ const pjrt = @import("pjrt");
 const platforms = @import("platforms");
 const stdx = @import("stdx");
 
-const Memory = @import("platform.zig").Memory;
 const Platform = @import("platform.zig").Platform;
 const PlatformDevice = @import("platform.zig").Device;
 const Shape = @import("shape.zig").Shape;
@@ -1758,24 +1757,8 @@ pub const Placement = struct {
     slices: stdx.BoundedArray(Slice1d, Shape.MAX_RANK),
 
     pub fn platformDeviceIndex(self: *const Placement, platform: *const Platform) ?usize {
-        for (platform.devices, 0..) |d, device_index| {
-            const device_id = switch (platform.target) {
-                .neuron => @as(usize, @intCast(d.localHardwareId())),
-                .cuda, .rocm, .tpu, .cpu, .oneapi => d.id(),
-            };
-            if (device_id == self.device_id) return device_index;
-        }
-
-        return null;
-    }
-
-    pub fn device(self: *const Placement, platform: *const Platform) PlatformDevice {
-        const device_index = self.platformDeviceIndex(platform) orelse unreachable;
-        return platform.devices[device_index];
-    }
-
-    pub fn memory(self: *const Placement, platform: *const Platform, kind: Memory.Kind) *const Memory {
-        return self.device(platform).memory(kind);
+        if (self.device_id >= platform.devices.len) return null;
+        return self.device_id;
     }
 
     pub fn shardSlice(self: *const Placement, slice: Slice) Slice {

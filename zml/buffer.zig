@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const pjrt = @import("pjrt");
+const platforms = @import("platforms");
 const stdx = @import("stdx");
 
 const constants = @import("constants.zig");
@@ -106,39 +107,47 @@ pub const Buffer = struct {
             shard.deinit(platform.pjrt_api);
         };
 
-        const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
         const slice = Slice.init(sh, data_);
+        const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
 
-        for (res._sharding.devicesInCanonicalOrder()) |device| {
+        var layout: pjrt.MemoryLayout = undefined;
+        var shard_dims: Shape.DimsArray = .{ .buffer = undefined, .len = sh.rank() };
+
+        for (0.., platform.physical_mesh.devices_in_canonical_order) |device_id, device| {
             const placement = try res._sharding.placement(res._shape, device);
             const sub_slice = placement.shardSlice(slice);
-            var default_layout: ?pjrt.DefaultMemoryLayout = null;
-            const layout: pjrt.MemoryLayout = switch (platform.target) {
-                .tpu => blk: {
-                    default_layout = try platform.pjrt_client.defaultMemoryLayout(
-                        platform.pjrt_api,
-                        pjrtx.bufferTypeFromDtype(placement.shape.dtype()),
-                        placement.shape.dims(),
-                    );
-                    break :blk default_layout.?.toMemoryLayout();
-                },
-                else => .{
-                    .tiled = .{
-                        .minor_to_major = constants.minorToMajor(placement.shape.rank()),
-                        .tile_dims = &.{},
-                        .tile_dims_sizes = &.{},
-                    },
-                },
-            };
+            if (device_id == 0) {
+	            shard_dims.buffer = placement.shape._dims.buffer;
+	            layout = switch (platform.target) {
+	                .tpu => tpu: {
+	                	if (comptime !platforms.isEnabled(.tpu)) unreachable;
+	                    const default = try platform.pjrt_client.defaultMemoryLayout(
+	                        platform.pjrt_api,
+	                        buffer_type,
+	                        shard_dims.slice()
+	                    );
+	                    break :tpu default.toMemoryLayout();
+	                },
+	                else => .{
+	                    .tiled = .{
+	                        .minor_to_major = constants.minorToMajor(sh.rank()),
+	                        .tile_dims = &.{},
+	                        .tile_dims_sizes = &.{},
+	                    }
+	                },
+	            };
+            }
+
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
-                .data = sub_slice.constData().ptr,
-                .buffer_type = buffer_type,
-                .dims = placement.shape.dims(),
-                .byte_strides = sub_slice.byte_strides.constSlice(),
-                .layout = layout,
-                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
-                .dst = .{ .memory = placement.memory(platform, opts.memory).pjrt_memory },
-            };
+	            .data = sub_slice.constData().ptr,
+	            .dst = .{ .memory = platform.devices[device_id].memory(opts.memory).pjrt_memory },
+	            .layout = layout, // set on first iter
+	            .dims = shard_dims.slice(), // filled on first iter
+	            .buffer_type = buffer_type,
+	            .byte_strides = slice.byte_strides.constSlice(),
+	            .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+	        };
+
 
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);
             if (event) |ev| ev.deinit(platform.pjrt_api);
@@ -222,6 +231,8 @@ pub const Buffer = struct {
         const element_type = pjrtx.bufferTypeFromDtype(res._shape.dtype()); // dtype doesn't change with sharding.
         for (res._sharding.devicesInCanonicalOrder()) |device| {
             const placement = try res._sharding.placement(res._shape, device);
+            const device_index = placement.platformDeviceIndex(platform) orelse unreachable;
+            const dst_memory = platform.devices[device_index].memory(opts.memory);
             var default_layout: ?pjrt.DefaultMemoryLayout = null;
             const layout: pjrt.MemoryLayout = switch (platform.target) {
                 .tpu => blk: {
@@ -244,7 +255,7 @@ pub const Buffer = struct {
                 .dims = placement.shape.dims(),
                 .element_type = element_type,
                 .layout = layout,
-                .dst = .{ .memory = placement.memory(platform, opts.memory).pjrt_memory },
+                .dst = .{ .memory = dst_memory.pjrt_memory },
             };
 
             const shard_buffer = try platform.pjrt_client.createUninitializedBuffer(platform.pjrt_api, args);
