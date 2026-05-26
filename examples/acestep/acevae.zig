@@ -254,10 +254,22 @@ pub const AceVaeEncoder = struct {
     pub fn encode(self: AceVaeEncoder, audio: zml.Tensor, encoded_chunk: zml.Tensor) zml.Tensor {
         const posterior_params = self.encoder.forward(audio.convert(.bf16));
         const latent_channels = encoded_chunk.dim(.c);
-        const c_slice: zml.Tensor.Slice = .{ .start = 0, .end = latent_channels };
+        const mean_c_slice: zml.Tensor.Slice = .{ .start = 0, .end = latent_channels };
+        const scale_c_slice: zml.Tensor.Slice = .{ .start = latent_channels, .end = 2 * latent_channels };
         const t_slice: zml.Tensor.Slice = .{ .start = 0, .end = posterior_params.dim(.t) };
-        const mean = posterior_params.slice(&.{ c_slice, t_slice });
-        return mean.reuseBuffer(encoded_chunk);
+
+        const mean = posterior_params.slice(&.{ mean_c_slice, t_slice }).convert(.f32);
+        const scale = posterior_params.slice(&.{ scale_c_slice, t_slice }).convert(.f32);
+
+        // std = softplus(scale) + 1e-4, with a linear branch for large values
+        // z = mean + std * normal(0, 1)
+        const large_scale = scale.cmp(.GT, zml.Tensor.scalar(20.0, .f32).broad(scale.shape()));
+        const softplus = large_scale.select(scale, scale.exp().addConstant(1.0).log());
+        const stddev = softplus.addConstant(1e-4);
+        const noise = zml.Tensor.Rng.normal(mean.shape(), .{ .mean = 0, .stddev = 1 });
+        const sample = mean.add(stddev.mul(noise));
+
+        return sample.convert(encoded_chunk.dtype()).reuseBuffer(encoded_chunk);
     }
 
 };

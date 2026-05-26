@@ -738,6 +738,7 @@ pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: Tokenizer, 
     try formatted_prompt.appendSlice(allocator, metadata.keyscale);
     try formatted_prompt.appendSlice(allocator, "\n- duration: ");
     try formatted_prompt.appendSlice(allocator, metadata.duration);
+    try formatted_prompt.appendSlice(allocator, " seconds");
     try formatted_prompt.appendSlice(allocator, "\n<|endoftext|>\n");
 
     //std.log.info("text input\n{s}", .{formatted_prompt.items});
@@ -878,9 +879,9 @@ pub fn prepareDiffusionLatents(zml_handler: *Zml_handler, aceenc: *aceenc_.AceEn
     const return_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = 2 * audio_dim }, .bf16));
     const mask_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = audio_dim }, .bf16));
     defer mask_slice.free(allocator);
-    const one = zml.floats.BFloat16.fromF32(1.0);
+    const two = zml.floats.BFloat16.fromF32(2.0);
     for (0..n) |i| {
-        mask_slice.items(zml.floats.BFloat16)[i] = one;
+        mask_slice.items(zml.floats.BFloat16)[i] = two;
     }
     
     if (audio_codes) |codes| {
@@ -1103,7 +1104,7 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     var x_buffer: zml.Buffer = try .fromSlice(io, platform, x, sharding);
     var latents_buffer: zml.Buffer = try .fromSlice(io, platform, context.latents, sharding);
     const conditions_slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = acedit.config.encoder_hidden_size }, .bf16));
-    @memcpy(conditions_slice.items(zml.floats.BFloat16)[0..(s*d)], context.latents.items(zml.floats.BFloat16));
+    @memcpy(conditions_slice.items(zml.floats.BFloat16)[0..(s*d)], context.conditions.items(zml.floats.BFloat16));
     var conditions_buffer: zml.Buffer = try .fromSlice(io, platform, conditions_slice, sharding);
     defer x_buffer.deinit();
     defer latents_buffer.deinit();
