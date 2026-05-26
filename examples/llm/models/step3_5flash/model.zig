@@ -198,27 +198,23 @@ pub const Moe = struct {
     pub fn init(store: zml.io.TensorStore.View) !Moe {
         // init the up, gate, down tensors
 
-        std.log.info("before creating tensors", .{});
         const up_proj_tensor = store.createTensor(
             "up_proj.weight",
             .{ .expert, .dout, .d },
             .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
         );
-        std.log.info("after up proj tensor creation", .{});
 
         const gate_proj_tensor = store.createTensor(
             "gate_proj.weight",
             .{ .expert, .dout, .d },
             .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
         );
-        std.log.info("after gate proj tensor creation", .{});
 
         const down_proj_tensor = store.createTensor(
             "down_proj.weight",
             .{ .expert, .dout, .d },
             .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
         );
-        std.log.info("after gate proj tensor creation", .{});
 
         return .{
             // swiglu limit temporarily hardcoded to 0
@@ -237,9 +233,7 @@ pub const Moe = struct {
     }
 
     pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
-        std.log.info("before tagging x", .{});
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
-        std.log.info("after tagging x", .{});
 
         // collect topk weights and indices (renormalized, unscaled)
         const routing_scores, const topk_ids = self.router.forward(input);
@@ -261,8 +255,6 @@ pub const Moe = struct {
         // hardcoded zml.moe.metadata, zml.moe.parameters
         const moe_metadata = zml.moe.Metadata.init(.{ .triton = .{} });
         const moe_parameters = zml.moe.Parameters.init(.{ .triton = .{ .num_experts_per_tok = self.router.num_experts_per_tok, .activation = .silu } });
-
-        std.log.info("before forward moe", .{});
 
         // get all expert outputs as tensor via fused triton kernel instead of Python loop
         // NOTE: swiglu limit not considered. may have to edit
