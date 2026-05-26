@@ -64,23 +64,20 @@ pub fn allReduceSum(input: Tensor) Tensor {
         replica_group_slice,
     );
 
-    const channel_handle_attr = mlir.Attribute.parse(
+    const handle = ctx.nextChannelId();
+    const channel_handle_attr = dialects.stablehlo.channelHandle(
         mlir_ctx,
-        "#stablehlo.channel_handle<handle = 1, type = 1>",
-    ) catch unreachable;
+        handle,
+        .collective,
+    );
 
-    const op = mlir.Operation.make(mlir_ctx, "stablehlo.all_reduce", .{
-        .operands = .{ .flat = &.{input.value()} },
-        .results = .{ .flat = &.{input.value().type_()} },
-        .blocks = &.{reducer_block},
-        .attributes = &.{
-            .named(mlir_ctx, "replica_groups", replica_groups_attr),
-            .named(mlir_ctx, "channel_handle", channel_handle_attr),
-            .named(mlir_ctx, "use_global_device_ids", .unit(mlir_ctx)),
-        },
-        .verify = true,
-        .location = .unknown(mlir_ctx),
-    }).appendTo(ctx.currentScope().block);
+    const op = dialects.stablehlo.allReduce(
+        ctx.mlir_ctx,
+        input.value(),
+        reducer_block,
+        replica_groups_attr,
+        channel_handle_attr,
+    ).appendTo(ctx.currentScope().block);
 
     return Tensor._result(input.shape(), op.result(0));
 }

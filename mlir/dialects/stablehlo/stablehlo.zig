@@ -1413,3 +1413,41 @@ pub fn returns(ctx: *mlir.Context, values: []const *const mlir.Value, location: 
         .location = location,
     });
 }
+
+pub const ChannelType = enum(i64) {
+    collective = 0,
+    send_recv = 1,
+};
+
+pub fn channelHandle(
+    ctx: *mlir.Context,
+    handle: i64,
+    channel_type: ChannelType,
+) *const mlir.Attribute {
+    return @ptrCast(c.stablehloChannelHandleGet(
+        ctx.ptr(),
+        handle,
+        @intFromEnum(channel_type),
+    ).ptr);
+}
+
+pub fn allReduce(
+    ctx: *mlir.Context,
+    input: *const mlir.Value,
+    reducer_block: *mlir.Block,
+    replica_groups: *const mlir.Attribute,
+    channel_handle: *const mlir.Attribute,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.all_reduce", .{
+        .operands = .{ .flat = &.{input} },
+        .results = .{ .flat = &.{input.type_()} },
+        .blocks = &.{reducer_block},
+        .attributes = &.{
+            .named(ctx, "replica_groups", replica_groups),
+            .named(ctx, "channel_handle", channel_handle),
+            .named(ctx, "use_global_device_ids", .unit(ctx)),
+        },
+        .verify = true,
+        .location = .unknown(ctx),
+    });
+}
