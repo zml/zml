@@ -12,7 +12,6 @@ pub const CompilationParameters = struct {
     prefill_tokens: zml.Tensor,
     decode_tokens: zml.Tensor,
     token_index: zml.Tensor,
-    last_token_index: zml.Tensor,
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
     attention_metadata: attention.Metadata,
@@ -32,8 +31,6 @@ pub const CompilationParameters = struct {
             // TT-FIX: rank-1 i32 `{.pos=1}` token_index — tt-mlir's
             // `CacheFillUpdatePattern` requires a rank-1 INT32 index.
             .token_index = .init(.{ .pos = 1 }, .i32),
-            // Index of the consumed `.s` position (prefill: last prompt token).
-            .last_token_index = .init(.{}, .i32),
             // TT-FIX: one rank-4 KV tensor per layer — see KvCache doc-comment.
             .kv_cache = try .init(allocator, .init(.{
                 .b = batch_size,
@@ -144,7 +141,6 @@ fn compileModel(
                 .{
                     parameters_.prefill_tokens,
                     parameters_.token_index,
-                    parameters_.last_token_index,
                     parameters_.kv_cache,
                     parameters_.rng,
                     parameters_.attention_metadata,
@@ -184,7 +180,6 @@ fn compileModel(
                 .{
                     parameters_.decode_tokens,
                     parameters_.token_index,
-                    parameters_.last_token_index,
                     parameters_.kv_cache,
                     parameters_.rng,
                     parameters_.attention_metadata,

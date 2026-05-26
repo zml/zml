@@ -198,7 +198,6 @@ pub const Model = struct {
         self: Model,
         tokens_: zml.Tensor,
         token_index_: zml.Tensor,
-        last_token_index: zml.Tensor,
         kv_cache: KvCache,
         rng: zml.Tensor.Rng,
         attention_metadata: zml.attention.attention.Metadata,
@@ -216,40 +215,10 @@ pub const Model = struct {
             attention_metadata,
             attention_parameters,
         );
-        const new_tokens = blk: {
-            // TT-FIX: one-hot `dot` over `.s` instead of `dynamic_slice` —
-            // dynamic_slice confuses tt-mlir's SPMD partitioner (sharded `.d`
-            // operand with global `slice_sizes`).
-            const out_last = if (out.dim(.s) == 1)
-                out
-            else sel: {
-                const sel_shape = zml.Shape.init(.{ .s = out.dim(.s) }, last_token_index.dtype());
-                const onehot = zml.Tensor.iota(sel_shape, .s)
-                    .cmp(.EQ, last_token_index.broad(sel_shape))
-                    .convert(out.dtype());
-                break :sel out.dot(onehot, .s).insertAxes(.d, .{.s});
-            };
-            const sampled, _ = self.sampleTokens(self.lm_head, out_last, rng, self.gen_opts);
-            const toks = if (out.dim(.s) == 1)
-                sampled.convert(tokens.dtype())
-            else tok: {
-                // TT-FIX: one-hot `select` instead of `dynamic_update_slice` —
-                // the latter has no TTNN lowering and would CPU-hoist.
-                const idx_shape = tokens.shape().withDtype(last_token_index.dtype());
-                const at_last = zml.Tensor.iota(idx_shape, .s)
-                    .cmp(.EQ, last_token_index.broad(idx_shape));
-                break :tok at_last.select(
-                    sampled.convert(tokens.dtype()).broad(tokens.shape()),
-                    tokens,
-                );
-            };
-            break :blk toks;
-        };
-
-        // Drop the advanced rng: on TT, returning it makes
-        // TTNNTraceHoistTransform append a `to_layout` after the epilogue's
-        // `mesh_shard` ops, stranding them mid-graph.
-        return .{ new_tokens.reuseBuffer(tokens), updated_kv_cache };
+        // TT-FIX: drop the advanced rng — returning it tags a `to_layout`
+        // after the epilogue's `mesh_shard` and trips TTNNTraceHoistTransform.
+        const new_tokens, _ = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
+        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache };
     }
 
     pub fn sampleTokens(

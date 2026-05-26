@@ -138,9 +138,6 @@ pub const Session = struct {
         var prefill_token_pos_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .pos = 1 }, .i32), .replicated, std.mem.asBytes(&prefill_pos));
         defer prefill_token_pos_buffer.deinit();
 
-        var prefill_last_token_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.len - 1, .i32);
-        defer prefill_last_token_buffer.deinit();
-
         const attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata) = switch (self.compiled_model.params.prefill_attention_parameters) {
             .attnd => .{ .attnd = .{
                 .conversation_id = try zml.Buffer.scalar(self.io, self.platform, self.conversation_id, .u64),
@@ -154,7 +151,6 @@ pub const Session = struct {
             self.model_buffers,
             prefill_tokens_buffer,
             prefill_token_pos_buffer,
-            prefill_last_token_buffer,
             &self.kv_cache_buffers,
             &self.rng_buffers,
             &attention_metadata_buffers,
@@ -192,10 +188,6 @@ pub const Session = struct {
         var current_token_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, current_tokens_slice, .replicated);
         defer current_token_buffer.deinit();
 
-        // Unused on decode (out has single .s) but `forward` still takes it.
-        var decode_last_token_buffer: zml.Buffer = try .scalar(self.io, self.platform, 0, .i32);
-        defer decode_last_token_buffer.deinit();
-
         generation: while (true) {
             if (isEosToken(self.config, last_token_id)) break :generation;
 
@@ -221,7 +213,6 @@ pub const Session = struct {
             decode_args.set(.{
                 current_token_buffer,
                 token_pos_buffer,
-                decode_last_token_buffer,
                 &self.kv_cache_buffers,
                 &self.rng_buffers,
                 &attention_metadata_buffers,
