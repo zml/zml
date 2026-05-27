@@ -13,6 +13,7 @@ const PlatformDevice = @import("platform.zig").Device;
 const Shape = @import("shape.zig").Shape;
 const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
+const builtin = @import("builtin");
 
 const Sharding = @This();
 
@@ -1706,20 +1707,15 @@ pub const Strategy = struct {
 
 /// For a given shape, compute the shape of the slice each shard will receive.
 pub fn shardedShape(sharding: Sharding, shape: Shape) !Shape {
-    // TODO: simplify me
-    // placement is doing too much work because Sharding creation doesn't enough.
     const pl = try sharding.placement(shape);
     return pl.shape;
-}
-
-pub fn shardedDims(sharding: Sharding, shape: Shape) !Shape.DimsArray {
-    return (try sharding.shardedShape(shape))._dims;
 }
 
 pub fn placement(sharding: Sharding, shape: Shape) !Placement {
     return .init(sharding, shape);
 }
 
+/// Precompute sharding information common to all devices for a given shape.
 pub const Placement = struct {
     pub const Slices = stdx.BoundedArray(Slice1d, Shape.MAX_RANK);
     pub const Slice1d = struct {
@@ -1730,36 +1726,36 @@ pub const Placement = struct {
 
     sharding: Sharding,
     shape: Shape,
-    global_shape: Shape,
+    global_shape: if (builtin.mode == .Debug) Shape else void,
+
     // This is a big field, reconsider how AxisSplit store information
-    axis_splits: stdx.BoundedArray(AxisSplit, Shape.MAX_RANK),
+    axis_plans: stdx.BoundedArray(AxisSplit, Shape.MAX_RANK),
 
     pub fn init(sharding: Sharding, shape: Shape) !Placement {
         // TODO: placement should be device agnostic
         var pl: Placement = .{
             .sharding = sharding,
             .shape = shape, // modified below
-            .global_shape = shape,
-            .axis_splits = .empty, // set below
+            .global_shape = if (builtin.mode == .Debug) shape else {},
+            .axis_plans = .empty, // set below
         };
         var used_axes: std.EnumSet(PhysicalAxisTag) = .empty;
 
         for (0..shape.rank()) |ax| {
             const axis_index: u8 = @intCast(ax);
-            pl.axis_splits.appendAssumeCapacity(try axisSplit(sharding, shape, &used_axes, axis_index));
+            pl.axis_plans.appendAssumeCapacity(try axisSplit(sharding, shape, &used_axes, axis_index));
         }
 
-        for (0.., pl.axis_splits.constSlice()) |a, split| {
-            pl.shape._dims.buffer[a] = split.product;
+        for (0.., shape.dims(), pl.axis_plans.constSlice()) |a, dim, plan| {
+            pl.shape._dims.buffer[a] = @divExact(dim, plan.product);
         }
         return pl;
     }
 
     pub fn slices(self: *const Placement, device_id: usize) Slices {
-        const coords = self.sharding.devicesInCanonicalOrder()[device_id].coords.constSlice();
+        const coords = self.deviceCoords(device_id);
         var res: Slices = .{ .buffer = undefined, .len = self.shape.rank() };
-        for (0.., res.slice(), self.shape.dims(), self.axis_splits.constSlice()) |a, *r, dim, plan| {
-            const size = @divExact(dim, plan.product);
+        for (0.., res.slice(), self.shape.dims(), self.axis_plans.constSlice()) |a, *r, size, plan| {
             const start = plan.linearIndex(coords) * size;
             r.* = .{
                 .axis = @intCast(a),
@@ -1771,20 +1767,23 @@ pub const Placement = struct {
     }
 
     pub fn shardSlice(self: *const Placement, device_id: usize, slice: Slice) Slice {
-        _ = device_id; // TODO
-        stdx.debug.assert(
-            self.global_shape.eql(slice.shape),
-            "Placement global shape {f} doesn't match slice shape {f}",
-            .{ self.global_shape, slice.shape },
-        );
+        if (builtin.mode == .Debug) {
+            // there is a bug in caller code that used a placement for a different shape
+            std.debug.assert(self.global_shape.eql(slice.shape));
+        }
 
         var offset_i64: i64 = @intCast(slice.offset_bytes);
-        for (self.axis_splits.constSlice()) |split| {
-            // const dim = slice.shape.dim(s.axis);
-            const stride_bytes = slice.byte_strides.get(split.axis);
-            offset_i64 += split.start * stride_bytes;
+
+        const coords = self.deviceCoords(device_id);
+        for (self.shape.dims(), self.axis_plans.constSlice(), slice.byte_strides.constSlice()) |size, plan, stride| {
+            const start = plan.linearIndex(coords) * size;
+            offset_i64 += start * stride;
         }
         return .{ .inner_data = slice.inner_data, .shape = self.shape, .offset_bytes = @intCast(offset_i64), .byte_strides = slice.byte_strides };
+    }
+
+    fn deviceCoords(self: Placement, device_id: usize) []const usize {
+        return self.sharding.devicesInCanonicalOrder()[device_id].coords.constSlice();
     }
 
     pub fn format(self: Placement, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -1794,13 +1793,13 @@ pub const Placement = struct {
         try writer.writeAll("Per-shard placement:\n");
         for (ordered_devices, 0..) |device, shard_index| {
             const device_id: u8 = @intCast(device.id);
-            try writer.print("└─ Shard[{d}] device_id={d} coords={any}, slices=[", .{ shard_index, device_id, device.coords });
+            try writer.print("└─ Shard[{d}] device_id={d} coords={any}, slices=[", .{ shard_index, device_id, device.coords.constSlice() });
             for (self.slices(device_id).constSlice(), 0..) |s, i| {
                 if (i > 0) try writer.writeAll(", ");
-                const axis_label = self.global_shape.debugTag(s.axis);
+                const axis_label = self.shape.debugTag(s.axis);
                 try writer.print("{s}:[{d}:{d}]", .{ axis_label, s.start, s.start + s.size });
             }
-            try writer.writeAll("]");
+            try writer.writeAll("]\n");
         }
     }
 
@@ -1808,19 +1807,12 @@ pub const Placement = struct {
         try writer.print("Placement(shape={f} shards={d})\n", .{ shape, shard_count });
 
         try writer.writeAll("Axis partitioning summary:\n");
-        for (0..shape.rank()) |ax| {
+        for (0.., self.slices(0).constSlice()) |ax, slice| {
             const dim = shape.dim(ax);
             const spec = shape.partition(ax);
             const axis_label = shape.debugTag(ax);
 
-            var shard_size: i64 = dim;
-            for (self._slices.constSlice()) |s| {
-                if (s.axis == ax) {
-                    shard_size = s.size;
-                    break;
-                }
-            }
-
+            const shard_size: i64 = slice.size;
             const shards_count: i64 = if (shard_size > 0 and @rem(dim, shard_size) == 0)
                 @divExact(dim, shard_size)
             else
@@ -1854,7 +1846,7 @@ const AxisSplit = struct {
     pub fn linearIndex(self: AxisSplit, device_coords: []const usize) i64 {
         var linear: i64 = 0;
         for (self.counts.constSlice(), self.depths.constSlice()) |c_, depth| {
-            linear = linear * c_ + device_coords[depth];
+            linear = linear * c_ + @as(i64, @intCast(device_coords[depth]));
         }
         return linear;
     }
@@ -1920,6 +1912,7 @@ fn addPhysicalToSplit(sharding: Sharding, plan: *AxisSplit, tag: PhysicalAxisTag
 
 const ShardingTest = struct {
     pub const ExpectedShard = struct {
+        // TODO: remove device_id from here, we always have ids from 0 to N
         device_id: usize,
         slices: []const [2]i64,
     };
@@ -1928,10 +1921,19 @@ const ShardingTest = struct {
         sharding: Sharding.Data,
         shape: Shape,
 
+        expect_error: ?anyerror = null,
         expected_sdy: ?[]const u8 = null,
         expected_shards: []const ExpectedShard = &.{},
 
-        expect_error: ?anyerror = null,
+        pub fn format(scenario: Scenario, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            try writer.print("Scenario:\n", .{});
+            if (scenario.expect_error) |err| try writer.print("- error {}\n", .{err});
+            if (scenario.expected_sdy) |sdy| try writer.print("- shardy: {s}\n", .{sdy});
+            if (scenario.expected_shards.len > 0) try writer.print("- shards:\n", .{});
+            for (scenario.expected_shards) |shard| {
+                try writer.print("\t- device {d}: slices={any}\n", .{ shard.device_id, shard.slices });
+            }
+        }
     };
 
     allocator: std.mem.Allocator,
@@ -1971,9 +1973,11 @@ const ShardingTest = struct {
 
     pub fn run(self: ShardingTest, s: Scenario) !void {
         const sharding = s.sharding;
+        errdefer std.log.warn("Failed sharding {f}", .{s});
 
         // Verify MLIR String
         if (s.expected_sdy) |expected_attr| {
+            errdefer std.log.warn("Expected shardy annotation failed", .{});
             const registry: *mlir.DialectRegistry = try .init();
             defer registry.deinit();
             registry.registerDialect("sdy");
@@ -1994,6 +1998,7 @@ const ShardingTest = struct {
         const sharding_ref: Sharding = .{ .data = &sharding };
         const ordered_devices = sharding_ref.devicesInCanonicalOrder();
         if (s.expect_error) |err| {
+            errdefer std.log.warn("Expected error failed", .{});
             try std.testing.expect(ordered_devices.len > 0);
             try std.testing.expectError(err, sharding_ref.placement(s.shape));
             return;
@@ -2002,12 +2007,31 @@ const ShardingTest = struct {
         const pl = try sharding_ref.placement(s.shape);
         // Verify Shard Slices (Math)
         if (s.expected_shards.len > 0) {
+            errdefer std.log.warn("Expected shards failed. Got {f}", .{pl});
             try std.testing.expectEqual(s.expected_shards.len, ordered_devices.len);
-            for (s.expected_shards, ordered_devices) |expected, device| {
-                const actual = pl.slices(@intCast(device.id));
-                for (expected.slices, actual.constSlice()) |exp_slice, actual_slice| {
-                    try std.testing.expectEqual(exp_slice[0], actual_slice.start);
-                    try std.testing.expectEqual(exp_slice[1], actual_slice.size);
+            for (s.expected_shards) |expected| {
+                {
+                    // Check pl.slices(device.id)
+                    const actual_slices = pl.slices(expected.device_id);
+
+                    // Consider rewriting test cases to use Slice1D. This requires passing the axis
+                    const actual_start_len = try self.allocator.alloc([2]i64, actual_slices.len);
+                    defer self.allocator.free(actual_start_len);
+                    for (actual_start_len, actual_slices.constSlice()) |*s_l, slice| {
+                        s_l.* = .{ slice.start, slice.size };
+                    }
+
+                    try std.testing.expectEqualSlices([2]i64, expected.slices, actual_start_len);
+                }
+                {
+                    // Check pl.shape
+                    const expected_sizes = try self.allocator.alloc(i64, expected.slices.len);
+                    defer self.allocator.free(expected_sizes);
+                    for (expected_sizes, expected.slices) |*expected_size, slice| {
+                        expected_size.* = slice[1];
+                    }
+
+                    try std.testing.expectEqualSlices(i64, expected_sizes, pl.shape.dims());
                 }
             }
         }

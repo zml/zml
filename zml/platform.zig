@@ -13,6 +13,7 @@ const pjrtx = @import("pjrtx.zig");
 const profiler_ = @import("profiling/profiler.zig");
 const Sharding = @import("Sharding.zig");
 const zml = @import("zml.zig");
+const constants = @import("constants.zig");
 
 const log = std.log.scoped(.zml);
 
@@ -604,6 +605,24 @@ pub const Platform = struct {
             if (device.pjrt_device == pjrt_device) return device;
         }
         unreachable;
+    }
+
+    pub fn defaultMemoryLayout(noalias platform: *const Platform, shape: zml.Shape) pjrt.MemoryLayout {
+        return switch (platform.target) {
+            .tpu => {
+                if (comptime !platforms.isEnabled(.tpu)) unreachable;
+                const element_type = pjrtx.bufferTypeFromDtype(shape._dtype);
+                const default = try platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, shape.dims());
+                return default.toMemoryLayout();
+            },
+            else => .{
+                .tiled = .{
+                    .minor_to_major = constants.minorToMajor(shape.rank()),
+                    .tile_dims = &.{},
+                    .tile_dims_sizes = &.{},
+                },
+            },
+        };
     }
 };
 
