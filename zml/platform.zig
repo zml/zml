@@ -130,7 +130,7 @@ pub const Device = struct {
     pjrt_device: *const pjrt.Device,
     pjrt_desc: *const pjrt.DeviceDescription,
     addressable_memories: []*const Memory,
-    memory_by_kind: std.EnumArray(Memory.Kind, *const Memory),
+    memory_by_kind: std.EnumArray(Memory.Kind, ?*const Memory),
 
     fn init(allocator: std.mem.Allocator, pjrt_device_: *const pjrt.Device, platform: *const Platform) !Device {
         const pjrt_addressable_memories = pjrt_device_.addressableMemories(platform.pjrt_api);
@@ -139,10 +139,14 @@ pub const Device = struct {
             addressable_memory.* = platform.memoryFromPjrt(pjrt_memory);
         }
 
-        var memory_by_kind: std.EnumArray(Memory.Kind, *const Memory) = undefined;
-        inline for (std.meta.tags(Memory.Kind)) |memory_kind| {
-            memory_by_kind.set(memory_kind, resolveMemory(pjrt_device_, platform, addressable_memories, memory_kind));
-        }
+        // Cache memory lookups since they are expensive
+        const default_memory: *const Memory = resolveDefaultMemory(pjrt_device_, platform, addressable_memories);
+        const memory_by_kind: std.EnumArray(Memory.Kind, ?*const Memory) = .init(.{
+            .default = default_memory,
+            .device = resolveMemory(addressable_memories, .device),
+            .host_pinned = resolveMemory(addressable_memories, .host_pinned),
+            .host_unpinned = resolveMemory(addressable_memories, .host_unpinned),
+        });
 
         return .{
             .platform = platform,
@@ -157,21 +161,23 @@ pub const Device = struct {
         allocator.free(self.addressable_memories);
     }
 
-    fn resolveMemory(pjrt_device_: *const pjrt.Device, platform: *const Platform, addressable_memories: []*const Memory, memory_kind: Memory.Kind) *const Memory {
-        if (memory_kind == .default) {
-            const pjrt_memory = pjrt_device_.defaultMemory(platform.pjrt_api);
-            for (addressable_memories) |mem| {
-                if (mem.pjrt_memory == pjrt_memory) return mem;
-            }
-            return platform.memoryFromPjrt(pjrt_memory);
+    fn resolveDefaultMemory(pjrt_device_: *const pjrt.Device, platform: *const Platform, addressable_memories: []*const Memory) *const Memory {
+        const pjrt_memory = pjrt_device_.defaultMemory(platform.pjrt_api);
+        for (addressable_memories) |mem| {
+            if (mem.pjrt_memory == pjrt_memory) return mem;
         }
+        return platform.memoryFromPjrt(pjrt_memory);
+    }
+
+    fn resolveMemory(addressable_memories: []*const Memory, memory_kind: Memory.Kind) ?*const Memory {
+        std.debug.assert(memory_kind != .default);
 
         for (addressable_memories) |mem| {
             if (mem.isOfKind(memory_kind)) {
                 return mem;
             }
         }
-        unreachable;
+        return null;
     }
 
     pub fn id(self: Device) u32 {
@@ -209,7 +215,7 @@ pub const Device = struct {
         });
     }
 
-    pub fn memory(self: *const Device, memory_kind: Memory.Kind) *const Memory {
+    pub fn memory(self: *const Device, memory_kind: Memory.Kind) ?*const Memory {
         return self.memory_by_kind.values[@intFromEnum(memory_kind)];
     }
 };

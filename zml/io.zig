@@ -789,7 +789,7 @@ pub const DirectMemoryWriter = struct {
 
             const pool = &pools[device.id];
             const shard_dma_allocator = dma_allocators[device.id].allocator();
-            const dst_memory = platform.devices[device.id].memory(.default);
+            const dst_memory = platform.devices[device.id].memory(.default).?;
 
             shard_writers[i] = try DirectShardWriter.init(shard_dma_allocator, io, dst_memory, pool, placement.shape);
 

@@ -121,7 +121,7 @@ pub const Buffer = struct {
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
                 .data = placement.shardPtr(device.coords, slice),
-                .dst = .{ .memory = platform.devices[device.id].memory(opts.memory).pjrt_memory },
+                .dst = .{ .memory = if (platform.devices[device.id].memory(opts.memory)) |m| m.pjrt_memory else @panic("Device doesn't have this memory") },
                 // Constant across devices
                 .layout = layout,
                 .dims = shard_dims,
