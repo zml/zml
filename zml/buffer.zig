@@ -112,30 +112,17 @@ pub const Buffer = struct {
         for (res._sharding.devicesInCanonicalOrder()) |device| {
             const placement = try res._sharding.placement(res._shape, device);
             const sub_slice = placement.shardSlice(slice);
-            var default_layout: ?pjrt.DefaultMemoryLayout = null;
-            const layout: pjrt.MemoryLayout = switch (platform.target) {
-                .tpu => blk: {
-                    default_layout = try platform.pjrt_client.defaultMemoryLayout(
-                        platform.pjrt_api,
-                        pjrtx.bufferTypeFromDtype(placement.shape.dtype()),
-                        placement.shape.dims(),
-                    );
-                    break :blk default_layout.?.toMemoryLayout();
-                },
-                else => .{
-                    .tiled = .{
-                        .minor_to_major = constants.minorToMajor(placement.shape.rank()),
-                        .tile_dims = &.{},
-                        .tile_dims_sizes = &.{},
-                    },
-                },
-            };
+            var default_layout = try platform.pjrt_client.defaultMemoryLayout(
+                platform.pjrt_api,
+                pjrtx.bufferTypeFromDtype(placement.shape.dtype()),
+                placement.shape.dims(),
+            );
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 .data = sub_slice.constData().ptr,
                 .buffer_type = buffer_type,
                 .dims = placement.shape.dims(),
                 .byte_strides = sub_slice.byte_strides.constSlice(),
-                .layout = layout,
+                .layout = default_layout.toMemoryLayout(),
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
                 .dst = .{ .memory = placement.memory(platform, opts.memory).pjrt_memory },
             };
