@@ -221,14 +221,11 @@ fn compileSingleKernelExe(
             // for lfm2 — trips "Device-resident argument N must already
             // be in device memory" on some weight tensor.
             .tt_parameter_args = false,
-            // TT-FIX: disable trace for prefill — ttnn's `Conv2dOp`
-            // requires the depthwise weight in `SystemMemory + RowMajor`,
-            // so a `to_layout (device → system_memory)` ends up inside the
-            // forward function. The `ttnn.capture_or_execute_trace`
-            // verifier rejects ops with non-device outputs. Decode uses
-            // the elementwise mul/sum path (no Conv2dOp) so it stays
-            // trace-eligible via the env var.
-            .tt_enable_trace = if (is_prefill) false else null,
+            // Env var (ZML_TT_TRACE) controls both prefill and decode.
+            // Prefill became trace-eligible after replacing the depthwise
+            // `conv1d` with an unrolled mul/add chain — see the TT-FIX in
+            // ShortConv.forward in model.zig.
+            .tt_enable_trace = null,
         },
     );
 

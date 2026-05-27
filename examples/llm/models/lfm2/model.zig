@@ -497,21 +497,29 @@ pub const ShortConv = struct {
                 break :sd Bx.gather(.{ .seq = bx_seq_indices }, .{}).rename(.{ .window = .seq });
             };
             const updated = layer_state.scatterSlices(.{ .seq = cache_seq_indices }, scatter_data, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override });
-            const padding = self.config.conv_L_cache - 1;
-            const conv_out_ = zml.Tensor.conv1d(Bx, self.kernel, .{
-                .padding = &.{ padding, 0 },
-                .input_batch_dimension = Bx.axis(.batch),
-                .input_feature_dimension = B.axis(.d),
-                .input_spatial_dimensions = Bx.axis(.seq),
-                .kernel_output_feature_dimension = self.kernel.axis(.out),
-                .kernel_input_feature_dimension = self.kernel.axis(.in),
-                .kernel_spatial_dimensions = self.kernel.axis(.kernel_size),
-                .output_batch_dimension = Bx.axis(.batch),
-                .output_feature_dimension = Bx.axis(.d),
-                .output_spatial_dimensions = Bx.axis(.seq),
-                .feature_group_count = Bx.dim(.d),
-            });
-            break :b .{ conv_out_.slice1d(.seq, .{ .end = Bx.dim(.seq) }), updated };
+            // TT-FIX: replace causal depthwise `conv1d` with K shifted
+            // mul/adds. ttnn's `Conv2dOp` stages weights through
+            // `system_memory` (the weight asserts `to_layout` to
+            // SystemMemory + RowMajor before the prepare pass). That
+            // transition sits inside the forward function and trips the
+            // `ttnn.capture_or_execute_trace` verifier's "all outputs on
+            // device" check — making prefill trace-ineligible. The
+            // unrolled mul/add path lowers to plain `ttnn.multiply` +
+            // `ttnn.add` on device, so prefill becomes trace-eligible.
+            // Mirrors the decode path which already uses mul/sum.
+            const K_runtime: i64 = @intCast(self.config.conv_L_cache);
+            const S: i64 = Bx.dim(.seq);
+            const padded = Bx.pad(0, .{ .seq = zml.Tensor.Pad{ .low = K_runtime - 1 } });
+            const flat_kernel = self.kernel.squeeze(.in).rename(.{ .out = .d });
+            var conv_out_: zml.Tensor = undefined;
+            for (0..self.config.conv_L_cache) |k| {
+                const k_i64: i64 = @intCast(k);
+                const shifted = padded.slice1d(.seq, .{ .start = k_i64, .end = k_i64 + S });
+                const k_weight = flat_kernel.slice1d(.kernel_size, .{ .start = k_i64, .end = k_i64 + 1 }).squeeze(.kernel_size);
+                const term = shifted.mul(k_weight.broad(shifted.shape()));
+                conv_out_ = if (k == 0) term else conv_out_.add(term);
+            }
+            break :b .{ conv_out_, updated };
         } else b: {
             const updated = layer_state.rollRight1d(.seq, -1).scatterSlices(.{ .seq = tokens_position_offset.convert(.u32).clamp(.scalar(@as(u32, 0), .u32), .scalar(self.config.conv_L_cache - 1, .u32)) }, Bx, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override });
             const kernel = self.kernel.squeeze(.in).rename(.{ .out = .d, .kernel_size = .seq });
