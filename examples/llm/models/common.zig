@@ -12,6 +12,37 @@ pub const GenerationOptions = struct {
     sampling_strategy: zml.nn.SamplingStrategy = .{},
 };
 
+pub const Phase = enum {
+    prefill,
+    decode,
+
+    pub fn isPrefill(self: Phase) bool {
+        return self == .prefill;
+    }
+
+    pub fn label(self: Phase) []const u8 {
+        return @tagName(self);
+    }
+
+    pub fn startMessage(self: Phase, comptime component: []const u8) []const u8 {
+        return switch (self) {
+            .prefill => "Compiling prefill " ++ component ++ "...",
+            .decode => "Compiling decode " ++ component ++ "...",
+        };
+    }
+
+    pub fn programName(self: Phase, comptime model_name: []const u8, comptime component: []const u8) []const u8 {
+        return switch (self) {
+            .prefill => "llm_" ++ model_name ++ "_prefill_" ++ component,
+            .decode => "llm_" ++ model_name ++ "_decode_" ++ component,
+        };
+    }
+
+    pub fn logCompileDone(self: Phase, logger: anytype, comptime component: []const u8, io: std.Io, from: std.Io.Timestamp) void {
+        logger.info("Compiled {s} " ++ component ++ " [{f}]", .{ self.label(), from.untilNow(io, .awake) });
+    }
+};
+
 pub const Shardings = struct {
     model: zml.Sharding,
     experts: zml.Sharding,

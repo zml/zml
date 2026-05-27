@@ -320,7 +320,7 @@ pub const TensorRegistry = struct {
             if (gop.found_existing) {
                 gop.value_ptr.*.deinit(allocator);
                 gop.value_ptr.* = value;
-                log.info("Overwrote existing metadata key={s} with value={f}", .{ key, value });
+                log.debug("Overwrote existing metadata key={s} with value={f}", .{ key, value });
             } else {
                 gop.value_ptr.* = value;
                 log.debug("Added new metadata key={s} with value={f}", .{ key, value });

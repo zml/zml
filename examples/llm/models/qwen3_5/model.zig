@@ -989,7 +989,7 @@ pub const KvCache = struct {
         }
 
         pub fn update(self: GatedDeltaNetCache, new_conv_state: ?zml.Tensor, new_recurrent_state: ?zml.Tensor) GatedDeltaNetCache {
-            const layer: zml.Tensor = .scalar(self.layer_index, .u32);
+            const layer: zml.Tensor = .scalar(self.layer_index orelse @panic("forgot to call atLayer"), .u32);
             const conv_state = if (new_conv_state) |state|
                 self.conv_state.scatterSlices(
                     .{ .layer = layer },

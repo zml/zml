@@ -8,6 +8,7 @@ const common = @import("../common.zig");
 const model = @import("model.zig");
 
 const log = std.log.scoped(.lfm);
+const Phase = common.Phase;
 
 pub const CompilationParameters = struct {
     hidden_dim: usize,
@@ -83,8 +84,8 @@ pub const CompiledModel = struct {
         progress: *std.Progress.Node,
     ) !CompiledModel {
         if (opts.single) {
-            const prefill_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, opts.seqlen, true, progress, opts.shardings);
-            const decode_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, 1, false, progress, opts.shardings);
+            const prefill_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, opts.seqlen, .prefill, progress, opts.shardings);
+            const decode_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, 1, .decode, progress, opts.shardings);
 
             return .{
                 .loaded_model = loaded_model,
@@ -93,8 +94,8 @@ pub const CompiledModel = struct {
                 .params = opts,
             };
         } else {
-            const prefill_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, opts.seqlen, true, progress, opts.shardings);
-            const decode_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, 1, false, progress, opts.shardings);
+            const prefill_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, opts.seqlen, .prefill, progress, opts.shardings);
+            const decode_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, 1, .decode, progress, opts.shardings);
 
             return .{
                 .loaded_model = loaded_model,
@@ -175,15 +176,15 @@ fn compileSingleKernelExe(
     mdl: model.Model,
     opts: CompilationOptions,
     seqlen: u32,
-    is_prefill: bool,
+    phase: Phase,
     progress: *std.Progress.Node,
     shardings: common.Shardings,
 ) !SingleKernelExe {
     progress.increaseEstimatedTotalItems(1);
-    var node = progress.start("Compiling single kernel...", 1);
+    var node = progress.start(phase.startMessage("single kernel"), 1);
     defer node.end();
-    const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Compiled single kernel [{f}]", .{now.untilNow(io, .awake)});
+    const from: std.Io.Timestamp = .now(io, .awake);
+    defer phase.logCompileDone(log, "single kernel", io, from);
 
     const actual_seq_len: zml.Tensor = .init(.{}, .u32);
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
@@ -203,9 +204,12 @@ fn compileSingleKernelExe(
             opts.cache,
             opts.attention_metadata,
             opts.attention_parameters,
-            model.ConvParameters{ .is_prefill = is_prefill },
+            model.ConvParameters{ .is_prefill = phase.isPrefill() },
         },
-        .{ .shardings = &all_shardings },
+        .{
+            .shardings = &all_shardings,
+            .program_name = phase.programName("lfm2", "single"),
+        },
     );
 
     return .{ .exe = exe };
@@ -323,14 +327,14 @@ fn compileComposedKernelExe(
     mdl: model.Model,
     opts: CompilationOptions,
     seqlen: u32,
-    is_prefill: bool,
+    phase: Phase,
     progress: *std.Progress.Node,
     shardings: common.Shardings,
 ) !ComposedKernelExe {
-    const embed_tokens_exe = try compileEmbedTokens(allocator, io, platform, mdl.embed_tokens, opts, seqlen, progress, shardings);
-    const conv_layer_exe = try compileConvLayer(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings);
-    const attn_layer_exe = try compileAttnLayer(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings);
-    const lm_head_exe = try compileLmHead(allocator, io, platform, mdl, opts, seqlen, progress, shardings);
+    const embed_tokens_exe = try compileEmbedTokens(allocator, io, platform, mdl.embed_tokens, opts, seqlen, phase, progress, shardings);
+    const conv_layer_exe = try compileConvLayer(allocator, io, platform, mdl, opts, seqlen, phase, progress, shardings);
+    const attn_layer_exe = try compileAttnLayer(allocator, io, platform, mdl, opts, seqlen, phase, progress, shardings);
+    const lm_head_exe = try compileLmHead(allocator, io, platform, mdl, opts, seqlen, phase, progress, shardings);
     return .{
         .embed_tokens = embed_tokens_exe,
         .conv_layer = conv_layer_exe,
@@ -346,18 +350,22 @@ fn compileEmbedTokens(
     embed_tokens: model.TokenEmbedding,
     opts: CompilationOptions,
     seqlen: u32,
+    phase: Phase,
     progress: *std.Progress.Node,
     shardings: common.Shardings,
 ) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
-    var node = progress.start("Compiling embed_tokens...", 1);
+    var node = progress.start(phase.startMessage("embed_tokens"), 1);
     defer node.end();
-    const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Compiled embed_tokens [{f}]", .{now.untilNow(io, .awake)});
+    const from: std.Io.Timestamp = .now(io, .awake);
+    defer phase.logCompileDone(log, "embed_tokens", io, from);
 
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const all_shardings = shardings.all();
-    return platform.compile(allocator, io, embed_tokens, .forward, .{tokens}, .{ .shardings = &all_shardings });
+    return platform.compile(allocator, io, embed_tokens, .forward, .{tokens}, .{
+        .shardings = &all_shardings,
+        .program_name = phase.programName("lfm2", "embed_tokens"),
+    });
 }
 
 fn compileConvLayer(
@@ -367,15 +375,15 @@ fn compileConvLayer(
     mdl: model.Model,
     opts: CompilationOptions,
     seqlen: u32,
-    is_prefill: bool,
+    phase: Phase,
     progress: *std.Progress.Node,
     shardings: common.Shardings,
 ) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
-    var node = progress.start("Compiling conv layer...", 1);
+    var node = progress.start(phase.startMessage("conv layer"), 1);
     defer node.end();
-    const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Compiled conv layer [{f}]", .{now.untilNow(io, .awake)});
+    const from: std.Io.Timestamp = .now(io, .awake);
+    defer phase.logCompileDone(log, "conv layer", io, from);
 
     const conv_layer = for (mdl.layers) |layer| {
         if (layer.operator == .conv) break layer;
@@ -397,8 +405,11 @@ fn compileConvLayer(
         kv_cache_index,
         opts.attention_metadata,
         opts.attention_parameters,
-        model.ConvParameters{ .is_prefill = is_prefill },
-    }, .{ .shardings = &all_shardings });
+        model.ConvParameters{ .is_prefill = phase.isPrefill() },
+    }, .{
+        .shardings = &all_shardings,
+        .program_name = phase.programName("lfm2", "conv_layer"),
+    });
 }
 
 fn compileAttnLayer(
@@ -408,15 +419,15 @@ fn compileAttnLayer(
     mdl: model.Model,
     opts: CompilationOptions,
     seqlen: u32,
-    is_prefill: bool,
+    phase: Phase,
     progress: *std.Progress.Node,
     shardings: common.Shardings,
 ) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
-    var node = progress.start("Compiling attn layer...", 1);
+    var node = progress.start(phase.startMessage("attn layer"), 1);
     defer node.end();
-    const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Compiled attn layer [{f}]", .{now.untilNow(io, .awake)});
+    const from: std.Io.Timestamp = .now(io, .awake);
+    defer phase.logCompileDone(log, "attn layer", io, from);
 
     const attn_layer = for (mdl.layers) |layer| {
         if (layer.operator == .self_attn) break layer;
@@ -438,8 +449,11 @@ fn compileAttnLayer(
         kv_cache_index,
         opts.attention_metadata,
         opts.attention_parameters,
-        model.ConvParameters{ .is_prefill = is_prefill },
-    }, .{ .shardings = &all_shardings });
+        model.ConvParameters{ .is_prefill = phase.isPrefill() },
+    }, .{
+        .shardings = &all_shardings,
+        .program_name = phase.programName("lfm2", "attn_layer"),
+    });
 }
 
 fn compileLmHead(
@@ -449,17 +463,30 @@ fn compileLmHead(
     mdl: model.Model,
     opts: CompilationOptions,
     seqlen: u32,
+    phase: Phase,
     progress: *std.Progress.Node,
     shardings: common.Shardings,
 ) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
-    var node = progress.start("Compiling lm_head...", 1);
+    var node = progress.start(phase.startMessage("lm_head"), 1);
     defer node.end();
-    const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Compiled lm_head [{f}]", .{now.untilNow(io, .awake)});
+    const from: std.Io.Timestamp = .now(io, .awake);
+    defer phase.logCompileDone(log, "lm_head", io, from);
 
     const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype());
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const all_shardings = shardings.all();
-    return platform.compile(allocator, io, mdl.lm_head, .forward, .{ hidden, mdl.embed_tokens, tokens, opts.rng }, .{ .shardings = &all_shardings });
+    return platform.compile(allocator, io, mdl.lm_head, .forward, .{ hidden, mdl.embed_tokens, tokens, opts.rng }, .{
+        .shardings = &all_shardings,
+        .program_name = phase.programName("lfm2", "lm_head"),
+    });
+}
+
+test "lfm2 phase helper emits distinct program names and labels" {
+    try std.testing.expectEqualStrings("prefill", Phase.prefill.label());
+    try std.testing.expectEqualStrings("decode", Phase.decode.label());
+    try std.testing.expectEqualStrings("llm_lfm2_prefill_single", Phase.prefill.programName("lfm2", "single"));
+    try std.testing.expectEqualStrings("llm_lfm2_decode_attn_layer", Phase.decode.programName("lfm2", "attn_layer"));
+    try std.testing.expectEqualStrings("Compiling prefill embed_tokens...", Phase.prefill.startMessage("embed_tokens"));
+    try std.testing.expectEqualStrings("Compiling decode lm_head...", Phase.decode.startMessage("lm_head"));
 }
