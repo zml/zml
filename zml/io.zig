@@ -691,22 +691,6 @@ pub const DirectMemoryWriter = struct {
             });
         }
 
-        fn axisRange(self: *const StreamPlanner, slices: []const Placement.Slice1d, axis: usize) AxisRange {
-            for (slices) |slice| {
-                if (slice.axis == axis) {
-                    return .{
-                        .start = slice.start,
-                        .size = slice.size,
-                    };
-                }
-            }
-
-            return .{
-                .start = 0,
-                .size = self.shape.dim(axis),
-            };
-        }
-
         fn appendShardSegmentsAtAxis(
             self: *StreamPlanner,
             slices: []const Placement.Slice1d,
@@ -716,7 +700,7 @@ pub const DirectMemoryWriter = struct {
             base_start: i64,
             strides: []const i64,
         ) !void {
-            const range = self.axisRange(slices, axis);
+            const range: AxisRange = .{ .start = slices[axis].start, .size = slices[axis].size };
             if (range.size == 0) return;
 
             if (axis + 1 == rank) {

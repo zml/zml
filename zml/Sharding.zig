@@ -209,20 +209,21 @@ fn shapeHasAxisPartition(shape: Shape) bool {
     return false;
 }
 
-/// Device is the leaf representation in a PhysicalMesh.
-/// It carries identity, optional coordinates, and PJRT handle.
+/// Device as part of a PhysicalMesh.
 pub const Device = struct {
     /// Unique device identifier in the mesh
-    id: usize,
+    id: u32,
 
     /// Coordinates in the physical mesh
     coords: Coords,
 
     const Coords = [MAX_MESH_RANK]u8;
     // Placeholder coords, that would most likely trigger panic if used like that.
+    // Those are used when creating a mesh, before calling assignCoords
+    // Private so it's kept as implementation detail
     const undefined_coords: Coords = @splat(0xff);
 
-    fn isFullInitialized(device: Device) bool {
+    fn asValidCoords(device: Device) bool {
         return @as(u32, @bitCast(device.coords)) != @as(u32, @bitCast(undefined_coords));
     }
 
@@ -348,7 +349,7 @@ pub const PhysicalMesh = struct {
             axisOrderNode(root, &order);
 
             var depth_by_tag: DepthByTag = .initFill(null);
-            for (order.constSlice(), 0..) |t, i| {
+            for (order.slice(), 0..) |t, i| {
                 depth_by_tag.set(t, @intCast(i));
             }
 
@@ -365,7 +366,7 @@ pub const PhysicalMesh = struct {
         pub fn format(self: AxisTraversal, writer: *std.Io.Writer) !void {
             try writer.writeAll("AxisTraversal(order=[");
 
-            for (self.order.constSlice(), 0..) |tag, i| {
+            for (self.order.slice(), 0..) |tag, i| {
                 if (i > 0) try writer.writeAll(", ");
                 try writer.writeAll(@tagName(tag));
             }
@@ -450,7 +451,7 @@ pub const PhysicalMesh = struct {
         try mesh.populateDevicesInCanonicalOrder(allocator);
         for (0.., mesh.devices_in_canonical_order) |i, device| {
             std.debug.assert(device.id == i);
-            std.debug.assert(device.isFullInitialized());
+            std.debug.assert(device.asValidCoords());
         }
         return mesh;
     }
@@ -566,7 +567,7 @@ pub const PhysicalMesh = struct {
         switch (node.*) {
             .leaf => |*d| {
                 // Coords can already been set by caller
-                if (d.isFullInitialized()) return;
+                if (d.asValidCoords()) return;
 
                 d.coords = path.*;
             },
@@ -601,7 +602,7 @@ pub const PhysicalMesh = struct {
     pub fn linearIndexFromCoords(self: PhysicalMesh, coords: Device.Coords) usize {
         const order = self.axisOrder();
         var idx: usize = 0;
-        for (order.constSlice()) |tag| {
+        for (order.slice()) |tag| {
             const depth = self.axis_traversal.depth(tag);
             if (depth) |d| {
                 const coord = coords[@intCast(d)];
@@ -708,22 +709,17 @@ pub const PhysicalMesh = struct {
 
     /// CoordsTopology builds a mesh from PJRT `coords` attributes.
     const CoordsTopology = struct {
-        const CoordPlacement = struct {
-            device_id: usize,
-            coords: Device.Coords,
-        };
-
         const CoordLayout = struct {
             rank: usize,
             axis_sizes: [MAX_MESH_RANK]usize,
         };
 
         const IndexedCoord = struct {
-            placement: CoordPlacement,
+            placement: Device,
             linear: usize,
         };
 
-        fn parseDevice(device: PlatformDevice) !CoordPlacement {
+        fn parseDevice(device: PlatformDevice) !Device {
             const api = device.platform.pjrt_api;
             const coords_attr = device.pjrt_desc.attribute(api, "coords") orelse return error.MissingDeviceCoords;
             const coords: Device.Coords = coords: switch (coords_attr) {
@@ -739,18 +735,18 @@ pub const PhysicalMesh = struct {
                 else => return error.InvalidDeviceCoords,
             };
 
-            return .{ .device_id = device.id(), .coords = coords };
+            return .{ .id = device.id(), .coords = coords };
         }
 
-        pub fn collect(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) ![]CoordPlacement {
-            const placements = try allocator.alloc(CoordPlacement, platform_devices.len);
+        pub fn collect(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) ![]Device {
+            const placements = try allocator.alloc(Device, platform_devices.len);
             for (platform_devices, 0..) |device, i| {
                 placements[i] = try parseDevice(device);
             }
             return placements;
         }
 
-        pub fn layout(placements: []const CoordPlacement, max_rank: usize) !CoordLayout {
+        pub fn layout(placements: []const Device, max_rank: usize) !CoordLayout {
             if (placements.len == 0) return error.InvalidPhysicalMesh;
 
             const rank = placements[0].coords.len;
@@ -788,7 +784,7 @@ pub const PhysicalMesh = struct {
             return linear;
         }
 
-        pub fn sorted(allocator: std.mem.Allocator, placements: []const CoordPlacement, rank: usize, axis_sizes: []const usize) ![]IndexedCoord {
+        pub fn sorted(allocator: std.mem.Allocator, placements: []const Device, rank: usize, axis_sizes: []const usize) ![]IndexedCoord {
             const indexed = try allocator.alloc(IndexedCoord, placements.len);
             for (placements, indexed) |coord_placement, *out| {
                 out.* = .{
@@ -809,10 +805,6 @@ pub const PhysicalMesh = struct {
             }
 
             return indexed;
-        }
-
-        pub fn leaf(coord_placement: *const CoordPlacement, coords: Device.Coords) !PhysicalNode {
-            return .{ .leaf = .{ .id = coord_placement.device_id, .coords = coords } };
         }
 
         pub fn axisStrides(axis_sizes: []const usize) ![MAX_MESH_RANK]usize {
@@ -839,8 +831,8 @@ pub const PhysicalMesh = struct {
             base_offset: usize,
         ) !PhysicalNode {
             if (depth == axis_sizes.len) {
-                const coord_placement = &indexed[base_offset].placement;
-                return leaf(coord_placement, coord_placement.coords);
+                const device = &indexed[base_offset].placement;
+                return .{ .leaf = device.* };
             }
 
             const children = try allocator.alloc(PhysicalNode, axis_sizes[depth]);
@@ -911,7 +903,7 @@ pub const PhysicalMesh = struct {
         const nodes = try allocator.alloc(PhysicalNode, platform_devices.len);
         for (nodes, indexed, 0..) |*n, entry, i| {
             const linear_coord: Device.Coords = .{ @intCast(i), 0, 0, 0 };
-            n.* = try CoordsTopology.leaf(&entry.placement, linear_coord);
+            n.* = .{ .leaf = .{ .id = entry.placement.id, .coords = linear_coord } };
         }
 
         return .{
@@ -1057,9 +1049,9 @@ pub const PhysicalMesh = struct {
             allocator,
             platform_devices,
             topology.placements,
-            axis_tags.constSlice(),
-            axis_sizes.constSlice(),
-            axis_geometries.constSlice(),
+            axis_tags.slice(),
+            axis_sizes.slice(),
+            axis_geometries.slice(),
             0,
             &coords_buf,
             &next_device,
@@ -1128,7 +1120,7 @@ pub const LogicalMesh = struct {
 
     pub fn intent(self: LogicalMesh, tag: Shape.Tag) ?LogicalAxisIntent {
         const target = std.mem.span(tag);
-        for (self.axes.constSlice(), self.intents.constSlice()) |t, i| {
+        for (self.axes.slice(), self.intents.slice()) |t, i| {
             if (std.mem.eql(u8, std.mem.span(t), target)) return i;
         }
 
@@ -1148,7 +1140,7 @@ pub const LogicalMesh = struct {
 
     pub fn format(self: LogicalMesh, writer: *std.Io.Writer) !void {
         try writer.writeAll("LogicalMesh(");
-        for (self.axes.constSlice(), self.intents.constSlice()) |axis, int| {
+        for (self.axes.slice(), self.intents.slice()) |axis, int| {
             try writer.print(" {s}={s}", .{ axis, @tagName(int) });
         }
         try writer.writeAll(")");
@@ -1176,7 +1168,7 @@ pub const Axis = struct {
 
     pub fn contains(self: *const Axis, tag: PhysicalAxisTag) bool {
         if (self.tag == tag) return true;
-        for (self.folded.constSlice()) |t| if (t == tag) return true;
+        for (self.folded.slice()) |t| if (t == tag) return true;
         return false;
     }
 };
@@ -1187,7 +1179,7 @@ pub const PhysicalView = struct {
 
     pub fn axisCoordFromLinearShard(self: *const PhysicalView, axis_index: usize, linear_idx: usize) usize {
         const stride = self.axisStrideForLinear(axis_index);
-        const axis_size: usize = @intCast(self.axes.constSlice()[axis_index].size);
+        const axis_size: usize = @intCast(self.axes.slice()[axis_index].size);
         return (linear_idx / stride) % axis_size;
     }
 
@@ -1195,7 +1187,7 @@ pub const PhysicalView = struct {
         var stride: usize = 1;
         var j = axis_index + 1;
         while (j < self.axes.len) : (j += 1) {
-            stride *= @intCast(self.axes.constSlice()[j].size);
+            stride *= @intCast(self.axes.slice()[j].size);
         }
         return stride;
     }
@@ -1214,8 +1206,8 @@ pub const Data = struct {
     folds_consumed: std.EnumSet(PhysicalAxisTag),
 
     pub fn binding(self: *const Data, tag: Shape.Tag) ?[]const PhysicalAxisTag {
-        for (self.bindings.constSlice()) |*b| {
-            if (b.logical == tag) return b.physical.constSlice();
+        for (self.bindings.slice()) |*b| {
+            if (b.logical == tag) return b.physical.slice();
         }
         return null;
     }
@@ -1226,19 +1218,19 @@ pub const Data = struct {
         logical: LogicalMesh,
         strategy: Strategy,
     ) !Data {
-        const axis_order = physical.axisOrder().constSlice();
+        const axis_order = physical.axisOrder().slice();
         if (axis_order.len == 0) return error.InvalidPhysicalMesh;
         if (strategy.bindings.len == 0) return error.InvalidStrategy;
 
         var bindings: Bindings = .empty;
-        for (strategy.bindings.constSlice()) |bind| {
+        for (strategy.bindings.slice()) |bind| {
             bindings.appendAssumeCapacity(.{ .logical = bind.logical, .physical = bind.physical });
         }
 
         var folds: Folds = .empty;
         var folds_consumed: std.EnumSet(PhysicalAxisTag) = .empty;
-        for (strategy.folding.constSlice()) |entry| {
-            for (entry.sources.constSlice()) |src| {
+        for (strategy.folding.slice()) |entry| {
+            for (entry.sources.slice()) |src| {
                 if (!physical.hasAxis(src)) return error.InvalidPhysicalAxis;
                 folds_consumed.insert(src);
             }
@@ -1256,8 +1248,8 @@ pub const Data = struct {
     }
 
     fn foldSources(self: *const Data, tag: PhysicalAxisTag) ?[]const PhysicalAxisTag {
-        for (self.folds.constSlice()) |*f| {
-            if (f.target == tag) return f.sources.constSlice();
+        for (self.folds.slice()) |*f| {
+            if (f.target == tag) return f.sources.slice();
         }
         return null;
     }
@@ -1269,7 +1261,7 @@ pub const Data = struct {
             .total_devices = 1,
         };
 
-        const axis_order = physical.axisOrder().constSlice();
+        const axis_order = physical.axisOrder().slice();
 
         for (axis_order) |tag| {
             if (!physical.hasAxis(tag)) continue;
@@ -1339,7 +1331,7 @@ pub const Data = struct {
     }
 
     pub fn covers(sharding: *const Data, shape: Shape) bool {
-        for (shape._partitioning.constSlice()) |partitioning| {
+        for (shape._partitioning.slice()) |partitioning| {
             switch (partitioning) {
                 .axis => |tag| if (sharding.binding(tag) == null) return false,
                 else => {},
@@ -1354,7 +1346,7 @@ pub const Data = struct {
 
         const view = self.physicalView();
         try out.writer.writeAll("#sdy.mesh<[");
-        for (view.axes.constSlice(), 0..) |p, i| {
+        for (view.axes.slice(), 0..) |p, i| {
             if (i > 0) try out.writer.writeAll(", ");
             try out.writer.print("\"{s}\"={d}", .{ @tagName(p.tag), p.size });
         }
@@ -1385,7 +1377,7 @@ pub const Data = struct {
             if (spec == .axis) {
                 if (self.binding(spec.axis)) |binding_| {
                     for (binding_) |p_tag| {
-                        for (view.axes.constSlice(), 0..) |v_ax, i| {
+                        for (view.axes.slice(), 0..) |v_ax, i| {
                             // Only use the axis if it's bound and hasn't been consumed by a previous dimension
                             if (v_ax.contains(p_tag) and !globally_used.contains(v_ax.tag)) {
                                 dim_axes.appendAssumeCapacity(i);
@@ -1442,7 +1434,7 @@ pub const Data = struct {
                             break :d .replicated(ctx);
                         } else {
                             const axes = try allocator.alloc(*const dialects.shardy.AxisRefAttribute, dim_phys_indices.len);
-                            for (dim_phys_indices.constSlice(), 0..) |p_idx, i| {
+                            for (dim_phys_indices.slice(), 0..) |p_idx, i| {
                                 axes[i] = .named(ctx, @tagName(mapping.view.axes.get(p_idx).tag));
                             }
                             break :d .closed(ctx, axes);
@@ -1457,7 +1449,7 @@ pub const Data = struct {
         }
 
         const replicated_axes = try allocator.alloc(*const dialects.shardy.AxisRefAttribute, mapping.replicated_axes.len);
-        for (replicated_axes, mapping.replicated_axes.constSlice()) |*r, p_idx| {
+        for (replicated_axes, mapping.replicated_axes.slice()) |*r, p_idx| {
             r.* = .named(ctx, @tagName(mapping.view.axes.get(p_idx).tag));
         }
 
@@ -1482,9 +1474,9 @@ pub const Data = struct {
         var tile_shape: stdx.BoundedArray(i64, Shape.MAX_RANK + 1) = .empty;
 
         //  Calculate tile sizes per tensor dimension
-        for (mapping.axes_per_dim.constSlice()) |dim_axes| {
+        for (mapping.axes_per_dim.slice()) |dim_axes| {
             var combined: i64 = 1;
-            for (dim_axes.constSlice()) |idx| {
+            for (dim_axes.slice()) |idx| {
                 combined *= mapping.view.axes.get(idx).size;
             }
             tile_shape.appendAssumeCapacity(combined);
@@ -1494,7 +1486,7 @@ pub const Data = struct {
         const has_replication = mapping.replicated_axes.len > 0;
         if (has_replication) {
             var repl_size: i64 = 1;
-            for (mapping.replicated_axes.constSlice()) |idx| {
+            for (mapping.replicated_axes.slice()) |idx| {
                 repl_size *= mapping.view.axes.get(idx).size;
             }
             tile_shape.appendAssumeCapacity(repl_size);
@@ -1509,7 +1501,7 @@ pub const Data = struct {
         defer allocator.free(ids);
 
         try out.writer.writeAll("{devices=[");
-        for (tile_shape.constSlice(), 0..) |s, i| {
+        for (tile_shape.slice(), 0..) |s, i| {
             if (i > 0) try out.writer.writeAll(",");
             try out.writer.print("{d}", .{s});
         }
@@ -1556,7 +1548,7 @@ pub const Data = struct {
         try writer.print("Sharding(name={s})\n", .{self.name});
 
         try writer.writeAll("Bindings:\n");
-        for (self.logical.axes.constSlice(), self.logical.intents.constSlice()) |l_tag, l_intent| {
+        for (self.logical.axes.slice(), self.logical.intents.slice()) |l_tag, l_intent| {
             try writer.print("  - {s} ({s}) -> ", .{ l_tag, @tagName(l_intent) });
 
             if (self.binding(l_tag)) |axes| {
@@ -1582,7 +1574,7 @@ pub const Data = struct {
         if (view.axes.len == 0) {
             try writer.writeAll("(none)\n");
         } else {
-            for (view.axes.constSlice(), 0..) |axis, i| {
+            for (view.axes.slice(), 0..) |axis, i| {
                 if (i > 0) try writer.writeAll(" × ");
                 try writer.print("{s}[{d}]", .{ @tagName(axis.tag), axis.size });
             }
@@ -1593,7 +1585,7 @@ pub const Data = struct {
         if (view.axes.len == 0) {
             try writer.writeAll("(none)\n");
         } else {
-            for (view.axes.constSlice(), 0..) |axis, i| {
+            for (view.axes.slice(), 0..) |axis, i| {
                 if (i > 0) try writer.writeAll(", ");
                 try writer.print("{s}={s}", .{
                     @tagName(axis.tag),
@@ -1621,6 +1613,8 @@ pub const Strategy = struct {
     bindings: Strategy.Bindings,
     folding: Folding,
 
+    // TODO: remove .init, promote .parseBindings to .init
+    // It's currently an error to call .init and never calling `addBinding`
     pub const init: Strategy = .{
         .bindings = .empty,
         .folding = .empty,
@@ -1628,8 +1622,10 @@ pub const Strategy = struct {
 
     pub fn parseBindings(bindings: anytype) Strategy {
         const err_msg = "Strategy.parseBindings excepts fields to be PhysicalAxisTag or tuple of PhysicalAxisTag, got {}";
-        var res: Strategy = .init;
-        inline for (@typeInfo(@TypeOf(bindings)).@"struct".fields) |field_info| {
+        var res: Strategy = .{ .bindings = .empty, .folding = .empty };
+        const fields = @typeInfo(@TypeOf(bindings)).@"struct".fields;
+        if (fields.len == 0) @compileError("Strategy.parseBindings requires at least one binding");
+        inline for (fields) |field_info| {
             switch (@typeInfo(field_info.type)) {
                 .enum_literal, .@"enum" => res.addBinding(field_info, @field(bindings, field_info.name)),
                 .@"struct" => |struct_info| {
@@ -1697,14 +1693,14 @@ pub const Strategy = struct {
         }
 
         if (available.len == 0) {
-            for (physical.axisOrder().constSlice()) |tag| available.appendAssumeCapacity(tag);
+            for (physical.axisOrder().slice()) |tag| available.appendAssumeCapacity(tag);
         }
 
-        const avail = available.constSlice();
+        const avail = available.slice();
         var counters = std.EnumArray(LogicalAxisIntent, usize).initFill(0);
 
         inline for (std.meta.tags(LogicalAxisIntent)) |target_intent| {
-            for (logical.axes.constSlice(), logical.intents.constSlice()) |l_tag, l_intent| {
+            for (logical.axes.slice(), logical.intents.slice()) |l_tag, l_intent| {
                 if (l_intent != target_intent) continue;
 
                 const i = counters.get(target_intent);
@@ -1737,7 +1733,6 @@ pub fn placement(sharding: Sharding, shape: Shape) !Placement {
 pub const Placement = struct {
     pub const Slices = stdx.BoundedArray(Slice1d, Shape.MAX_RANK);
     pub const Slice1d = struct {
-        axis: u8,
         start: i64,
         size: i64,
     };
@@ -1746,11 +1741,9 @@ pub const Placement = struct {
     shape: Shape,
     global_shape: if (builtin.mode == .Debug) Shape else void,
 
-    // This is a big field, reconsider how AxisSplit store information
     axis_plans: stdx.BoundedArray(AxisSplit, Shape.MAX_RANK),
 
     pub fn init(sharding: Sharding, shape: Shape) !Placement {
-        // TODO: placement should be device agnostic
         var pl: Placement = .{
             .sharding = sharding,
             .shape = shape, // modified below
@@ -1764,7 +1757,7 @@ pub const Placement = struct {
             pl.axis_plans.appendAssumeCapacity(try axisSplit(sharding, shape, &used_axes, axis_index));
         }
 
-        for (0.., shape.dims(), pl.axis_plans.constSlice()) |a, dim, plan| {
+        for (0.., shape.dims(), pl.axis_plans.slice()) |a, dim, plan| {
             pl.shape._dims.buffer[a] = @divExact(dim, plan.product());
         }
         return pl;
@@ -1772,10 +1765,9 @@ pub const Placement = struct {
 
     pub fn slices(pl: *const Placement, device: Device.Coords) Slices {
         var res: Slices = .{ .buffer = undefined, .len = pl.shape.rank() };
-        for (0.., res.slice(), pl.shape.dims(), pl.axis_plans.constSlice()) |a, *r, size, plan| {
+        for (res.slice(), pl.shape.dims(), pl.axis_plans.slice()) |*r, size, plan| {
             const start = plan.linearIndex(device) * size;
             r.* = .{
-                .axis = @intCast(a),
                 .start = start,
                 .size = size,
             };
@@ -1790,7 +1782,7 @@ pub const Placement = struct {
         }
 
         var ptr: [*]const u8 = slice.constData().ptr;
-        for (pl.shape.dims(), pl.axis_plans.constSlice(), slice.byte_strides.constSlice()) |size, plan, stride| {
+        for (pl.shape.dims(), pl.axis_plans.slice(), slice.byte_strides.slice()) |size, plan, stride| {
             const start = plan.linearIndex(device) * size;
             ptr = ptr[@intCast(start * stride)..];
         }
@@ -1818,9 +1810,9 @@ pub const Placement = struct {
         try writer.writeAll("Per-shard placement:\n");
         for (ordered_devices, 0..) |device, shard_index| {
             try writer.print("└─ Shard[{d}] device={d} coords={any}, slices=[", .{ shard_index, device.id, device.coords });
-            for (pl.slices(device.coords).constSlice(), 0..) |s, i| {
-                if (i > 0) try writer.writeAll(", ");
-                const axis_label = pl.shape.debugTag(s.axis);
+            for (0.., pl.slices(device.coords).slice()) |ax, s| {
+                if (ax > 0) try writer.writeAll(", ");
+                const axis_label = pl.shape.debugTag(ax);
                 try writer.print("{s}:[{d}:{d}]", .{ axis_label, s.start, s.start + s.size });
             }
             try writer.writeAll("]\n");
@@ -1835,7 +1827,7 @@ pub const Placement = struct {
         try writer.print("Placement(shape={f} shards={d})\n", .{ shape, shard_count });
 
         try writer.writeAll("Axis partitioning summary:\n");
-        for (0.., pl.slices(@splat(0)).constSlice()) |ax, slice| {
+        for (0.., pl.slices(@splat(0)).slice()) |ax, slice| {
             const dim = shape.dim(ax);
             const spec = shape.partition(ax);
             const axis_label = shape.debugTag(ax);
@@ -1990,12 +1982,12 @@ const ShardingTest = struct {
         }
 
         const tags: [3]PhysicalAxisTag = .{ .link_x, .link_y, .link_z };
-        var next_id: usize = 0;
+        var next_id: u32 = 0;
         const root = try self.buildNode(tags[0..N], sizes[0..N], 0, &next_id, geometry);
         return try .fromTree(self.allocator, .tpu, root);
     }
 
-    fn buildNode(self: ShardingTest, tags: []const PhysicalAxisTag, sizes: []const usize, depth: usize, next_id: *usize, geometry: AxisGeometry) !PhysicalNode {
+    fn buildNode(self: ShardingTest, tags: []const PhysicalAxisTag, sizes: []const usize, depth: usize, next_id: *u32, geometry: AxisGeometry) !PhysicalNode {
         if (depth == tags.len) {
             const id = next_id.*;
             next_id.* += 1;
@@ -2057,7 +2049,7 @@ const ShardingTest = struct {
                     // Consider rewriting test cases to use Slice1D. This requires passing the axis
                     const actual_start_len = try self.allocator.alloc([2]i64, actual_slices.len);
                     defer self.allocator.free(actual_start_len);
-                    for (actual_start_len, actual_slices.constSlice()) |*s_l, slice| {
+                    for (actual_start_len, actual_slices.slice()) |*s_l, slice| {
                         s_l.* = .{ slice.start, slice.size };
                     }
 

@@ -113,20 +113,9 @@ pub const Buffer = struct {
         const slice = Slice.init(sh, data_);
         const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
 
-        const placement = try res._sharding.placement(res._shape);
+        const placement = try res._sharding.placement(sh);
         const shard_dims: []const i64 = placement.shape.dims();
-        const layout: pjrt.MemoryLayout = switch (platform.target) {
-            .tpu => tpu: {
-                if (comptime !platforms.isEnabled(.tpu)) unreachable;
-                const default = try platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, buffer_type, shard_dims);
-                break :tpu default.toMemoryLayout();
-            },
-            else => .{ .tiled = .{
-                .minor_to_major = constants.minorToMajor(sh.rank()),
-                .tile_dims = &.{},
-                .tile_dims_sizes = &.{},
-            } },
-        };
+        const layout = platform.defaultMemoryLayout(sh);
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
             const args: pjrt.Client.BufferFromHostBufferArgs = .{

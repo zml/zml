@@ -174,8 +174,8 @@ pub const Device = struct {
         unreachable;
     }
 
-    pub fn id(self: Device) usize {
-        return self.pjrt_desc.id(self.platform.pjrt_api);
+    pub fn id(self: Device) u32 {
+        return @intCast(self.pjrt_desc.id(self.platform.pjrt_api));
     }
 
     pub fn processIndex(self: Device) i32 {
