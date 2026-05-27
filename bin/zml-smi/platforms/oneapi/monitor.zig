@@ -16,19 +16,12 @@ const Device = struct {
     energy_prev: ?EnergySample = null,
 };
 
-pub const ProcessInfo = struct {
-    pid: u32,
-    device_idx: u16,
-    mem_kib: ?u64 = null,
-    util_percent: ?u16 = null,
-};
-
 const EnergySample = struct {
     micro_joules: u64,
     timestamp_ns: u64,
 };
 
-const EngineSample = struct {
+pub const EngineSample = struct {
     engine_ns: u64,
     timestamp_ns: u64,
 };
@@ -38,20 +31,20 @@ const DeviceSample = struct {
     engine: ?EngineSample = null,
 };
 
-const ProcessSample = struct {
+pub const ProcessSample = struct {
     pid: u32,
     device_idx: u16,
     mem_kib: ?u64 = null,
     engine: ?EngineSample = null,
 };
 
-const ProcessUsage = std.AutoHashMapUnmanaged(u64, ProcessSample);
+pub const ProcessUsage = std.AutoHashMapUnmanaged(u64, ProcessSample);
+pub const ProcessPrevious = std.AutoHashMapUnmanaged(u64, EngineSample);
 const DeviceUsage = std.AutoHashMapUnmanaged(u16, DeviceSample);
 
 allocator: std.mem.Allocator,
 io: std.Io,
 devices: []Device,
-process_previous: std.AutoHashMapUnmanaged(u64, EngineSample) = .{},
 
 pub fn init(allocator: std.mem.Allocator, io: std.Io) !Monitor {
     var monitor: Monitor = .{
@@ -59,7 +52,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) !Monitor {
         .io = io,
         .devices = try discoverIntelDevices(allocator, io),
     };
-    monitor.seed() catch {};
+    monitor.seedDeviceMetrics() catch {};
     return monitor;
 }
 
@@ -71,7 +64,7 @@ pub fn deviceId(self: *const Monitor, allocator: std.mem.Allocator, handle: Hand
     return std.mem.trim(u8, raw, &std.ascii.whitespace);
 }
 
-inline fn seed(self: *Monitor) !void {
+inline fn seedDeviceMetrics(self: *Monitor) !void {
     var device_usage = collectDeviceUsage(self.allocator, self.io, self.devices) catch DeviceUsage{};
     defer device_usage.deinit(self.allocator);
 
@@ -79,20 +72,16 @@ inline fn seed(self: *Monitor) !void {
         dev.energy_prev = readEnergy(self.allocator, self.io, dev) catch null;
         dev.activity_prev = if (device_usage.get(@intCast(idx))) |sample| sample.engine else null;
     }
-
-    var usage = collectProcessUsage(self.allocator, self.io, self.devices) catch return;
-    defer usage.deinit(self.allocator);
-    self.saveProcessPrevious(&usage) catch {};
 }
 
-pub fn saveProcessPrevious(self: *Monitor, usage: *const ProcessUsage) !void {
-    self.process_previous.clearRetainingCapacity();
-    try self.process_previous.ensureTotalCapacity(self.allocator, @intCast(usage.count()));
+pub fn saveProcessPrevious(allocator: std.mem.Allocator, previous: *ProcessPrevious, usage: *const ProcessUsage) !void {
+    previous.clearRetainingCapacity();
+    try previous.ensureTotalCapacity(allocator, @intCast(usage.count()));
 
     var it = usage.iterator();
     while (it.next()) |entry| {
         if (entry.value_ptr.engine) |engine| {
-            self.process_previous.putAssumeCapacity(entry.key_ptr.*, engine);
+            previous.putAssumeCapacity(entry.key_ptr.*, engine);
         }
     }
 }
@@ -698,6 +687,33 @@ test "oneAPI process utilization delta" {
     try std.testing.expectEqual(@as(?u16, 50), processUtil(.{ .engine_ns = 100, .timestamp_ns = 1000 }, .{ .engine_ns = 600, .timestamp_ns = 2000 }));
     try std.testing.expectEqual(@as(?u16, 1), processUtil(.{ .engine_ns = 100, .timestamp_ns = 1000 }, .{ .engine_ns = 101, .timestamp_ns = 2000 }));
     try std.testing.expectEqual(@as(?u16, null), processUtil(null, .{ .engine_ns = 600, .timestamp_ns = 2000 }));
+}
+
+test "oneAPI process previous keeps engine samples" {
+    var usage: ProcessUsage = .{};
+    defer usage.deinit(std.testing.allocator);
+
+    const engine_key = processKey(10, 1);
+    const mem_only_key = processKey(20, 1);
+    try usage.put(std.testing.allocator, engine_key, .{
+        .pid = 10,
+        .device_idx = 1,
+        .engine = .{ .engine_ns = 100, .timestamp_ns = 1000 },
+    });
+    try usage.put(std.testing.allocator, mem_only_key, .{
+        .pid = 20,
+        .device_idx = 1,
+        .mem_kib = 2048,
+    });
+
+    var previous: ProcessPrevious = .{};
+    defer previous.deinit(std.testing.allocator);
+
+    try saveProcessPrevious(std.testing.allocator, &previous, &usage);
+
+    try std.testing.expectEqual(@as(u32, 1), previous.count());
+    try std.testing.expectEqual(@as(?EngineSample, .{ .engine_ns = 100, .timestamp_ns = 1000 }), previous.get(engine_key));
+    try std.testing.expectEqual(@as(?EngineSample, null), previous.get(mem_only_key));
 }
 
 test "oneAPI power delta from hwmon energy" {

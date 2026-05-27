@@ -5,7 +5,6 @@ const smi_sysfs = @import("zml-smi/sysfs");
 const OneApi = @This();
 
 pub const Handle = Monitor.Handle;
-pub const ProcessInfo = Monitor.ProcessInfo;
 
 monitor: Monitor,
 io: std.Io,
@@ -125,26 +124,4 @@ pub fn pcieLinkWidth(self: *OneApi, allocator: std.mem.Allocator, handle: Handle
 pub fn pcieBandwidth(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
     return Monitor.readPcieBandwidth(allocator, self.io, dev);
-}
-
-pub fn processList(self: *OneApi, allocator: std.mem.Allocator) !std.ArrayList(ProcessInfo) {
-    var usage = try Monitor.collectProcessUsage(allocator, self.io, self.monitor.devices);
-    defer usage.deinit(allocator);
-
-    var processes: std.ArrayList(ProcessInfo) = .empty;
-    errdefer processes.deinit(allocator);
-
-    var it = usage.iterator();
-    while (it.next()) |entry| {
-        const sample = entry.value_ptr.*;
-        try processes.append(allocator, .{
-            .pid = sample.pid,
-            .device_idx = sample.device_idx,
-            .mem_kib = sample.mem_kib,
-            .util_percent = Monitor.processUtil(self.monitor.process_previous.get(entry.key_ptr.*), sample.engine),
-        });
-    }
-
-    self.monitor.saveProcessPrevious(&usage) catch {};
-    return processes;
 }
