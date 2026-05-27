@@ -704,7 +704,7 @@ pub const PhysicalMesh = struct {
     const CoordsTopology = struct {
         const CoordPlacement = struct {
             device_id: usize,
-            coords: stdx.BoundedArray(usize, Shape.MAX_RANK),
+            coords: stdx.BoundedArray(u8, Shape.MAX_RANK),
         };
 
         const CoordLayout = struct {
@@ -720,7 +720,7 @@ pub const PhysicalMesh = struct {
         fn parseDevice(device: PlatformDevice) !CoordPlacement {
             const api = device.platform.pjrt_api;
             const coords_attr = device.pjrt_desc.attribute(api, "coords") orelse return error.MissingDeviceCoords;
-            var coords: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty;
+            var coords: stdx.BoundedArray(u8, Shape.MAX_RANK) = .empty;
             switch (coords_attr) {
                 .int64list => |values| {
                     if (values.len == 0 or values.len > Shape.MAX_RANK) return error.InvalidDeviceCoords;
@@ -772,7 +772,7 @@ pub const PhysicalMesh = struct {
             };
         }
 
-        fn linearIndex(coords: []const usize, rank: usize, axis_sizes: []const usize) usize {
+        fn linearIndex(coords: []const u8, rank: usize, axis_sizes: []const usize) usize {
             var linear: usize = 0;
             var stride: usize = 1;
             var ax = rank;
@@ -807,7 +807,7 @@ pub const PhysicalMesh = struct {
             return indexed;
         }
 
-        pub fn leaf(coord_placement: *const CoordPlacement, coords_slice: []const usize) !PhysicalNode {
+        pub fn leaf(coord_placement: *const CoordPlacement, coords_slice: []const u8) !PhysicalNode {
             return .{
                 .leaf = .{
                     .id = coord_placement.device_id,
@@ -911,7 +911,7 @@ pub const PhysicalMesh = struct {
 
         const nodes = try allocator.alloc(PhysicalNode, platform_devices.len);
         for (nodes, indexed, 0..) |*n, entry, i| {
-            const linear_coord: [1]usize = .{i};
+            const linear_coord: [1]u8 = .{@intCast(i)};
             n.* = try CoordsTopology.leaf(&entry.placement, linear_coord[0..]);
         }
 
@@ -1009,7 +1009,7 @@ pub const PhysicalMesh = struct {
                     const device = platform_devices_[placement_.input_index];
                     next_device_.* += 1;
 
-                    var coords: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty;
+                    var coords: stdx.BoundedArray(u8, Shape.MAX_RANK) = .empty;
                     for (coords_buf_[0..axis_tags_.len]) |coord| coords.appendAssumeCapacity(coord);
 
                     return .{
@@ -1300,7 +1300,7 @@ pub const Data = struct {
         return view;
     }
 
-    pub fn logicalIndexFromCoords(self: *const Data, coords: []const usize) usize {
+    pub fn logicalIndexFromCoords(self: *const Data, coords: []const u8) usize {
         return self.physical.linearIndexFromCoords(coords);
     }
 
@@ -1625,6 +1625,24 @@ pub const Strategy = struct {
         .bindings = .empty,
         .folding = .empty,
     };
+
+    pub fn parse(strategy: anytype) Strategy {
+        const err_msg = "Strategy.parse excepts fields to be PhysicalAxisTag or tuple of PhysicalAxisTag";
+        var res: Strategy = .init;
+        inline for (@typeInfo(@TypeOf(strategy)).@"struct".fields) |field_info| {
+            switch (@typeInfo(field_info.type)) {
+                .@"enum" => res.addBinding(field_info, @field(strategy, field_info.name)),
+                .@"struct" => |struct_info| {
+                    stdx.debug.assertComptime(struct_info.is_tuple, err_msg, .{});
+                    inline for (@field(strategy, field_info.name)) |axis_tag| {
+                        res.addBinding(field_info, axis_tag);
+                    }
+                },
+                else => @compileError(err_msg),
+            }
+        }
+        return res;
+    }
 
     pub fn addBinding(self: *Strategy, logical: anytype, physical: PhysicalAxisTag) void {
         const raw_tag = Shape.toTag(logical);
@@ -2018,7 +2036,7 @@ const ShardingTest = struct {
         // Verify Shard Slices (Math)
         if (s.expected_shards.len > 0) {
             const pl = try sharding_ref.placement(s.shape);
-
+            std.log.warn("Sharding {f} -> \nPlacement {f}", .{ s, pl });
             errdefer std.log.warn("Expected shards failed. Got {f}", .{pl});
             try std.testing.expectEqual(s.expected_shards.len, ordered_devices.len);
             for (s.expected_shards) |expected| {
@@ -2062,12 +2080,8 @@ test "sharding: unknown partitioning implies replication" {
     strategy.addBinding(.batch, .link_x);
 
     const scenario: ShardingTest.Scenario = .{
-        .sharding = try .init(
-            "folded_mesh",
-            &physical,
-            logical,
-            strategy,
-        ),
+        .sharding = try .init("folded_mesh", &physical, logical, strategy),
+        // No partitioning on shape
         .shape = Shape.init(.{ .batch = 8 }, .f32),
         .expected_sdy = "#sdy.sharding<@folded_mesh, [{}], replicated={\"link_x\", \"link_y\"}>",
         .expected_shards = &.{
@@ -2150,22 +2164,37 @@ test "sharding: multiple physical axes on one logical dimension (folding)" {
     const physical: PhysicalMesh = try runner.physical(.{ 2, 2 }, .{ .mesh = .torus });
     const logical: LogicalMesh = .mesh(.{ .model = .high_bandwidth });
 
-    var strategy: Strategy = .init;
-    strategy.addBinding(.model, .link_x);
-    strategy.addBinding(.model, .link_y);
+    {
+        const strategy: Strategy = .parse(.{ .model = .{ .link_x, .link_y } });
+        try runner.run(.{
+            .sharding = try .init("folded_mesh", &physical, logical, strategy),
+            .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(.{ .model = .model }),
+            .expected_sdy = "#sdy.sharding<@folded_mesh, [{\"link_x\", \"link_y\"}]>",
+            .expected_shards = &.{
+                .{ .device_id = 0, .slices = &.{.{ 0, 4 }} },
+                .{ .device_id = 1, .slices = &.{.{ 4, 4 }} },
+                .{ .device_id = 2, .slices = &.{.{ 8, 4 }} },
+                .{ .device_id = 3, .slices = &.{.{ 12, 4 }} },
+            },
+        });
+    }
 
-    const scenario: ShardingTest.Scenario = .{
-        .sharding = try .init("folded_mesh", &physical, logical, strategy),
-        .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(.{ .model = .model }),
-        .expected_sdy = "#sdy.sharding<@folded_mesh, [{\"link_x\", \"link_y\"}]>",
-        .expected_shards = &.{
-            .{ .device_id = 0, .slices = &.{.{ 0, 4 }} },
-            .{ .device_id = 1, .slices = &.{.{ 4, 4 }} },
-            .{ .device_id = 2, .slices = &.{.{ 8, 4 }} },
-            .{ .device_id = 3, .slices = &.{.{ 12, 4 }} },
-        },
-    };
-    try runner.run(scenario);
+    {
+        // Swap link_x and link_y order:
+        // -> the roles of devices 1 (0,1) and 2 (1,0) are swapped
+        const strategy: Strategy = .parse(.{ .model = .{ .link_y, .link_x } });
+        try runner.run(.{
+            .sharding = try .init("folded_mesh", &physical, logical, strategy),
+            .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(.{ .model = .model }),
+            .expected_sdy = "#sdy.sharding<@folded_mesh, [{\"link_y\", \"link_x\"}]>",
+            .expected_shards = &.{
+                .{ .device_id = 0, .slices = &.{.{ 0, 4 }} },
+                .{ .device_id = 1, .slices = &.{.{ 8, 4 }} },
+                .{ .device_id = 2, .slices = &.{.{ 4, 4 }} },
+                .{ .device_id = 3, .slices = &.{.{ 12, 4 }} },
+            },
+        });
+    }
 }
 
 test "sharding: explicit strategy folding" {
@@ -2239,17 +2268,18 @@ test "sharding: full 3D cluster sharding" {
 
     const scenario: ShardingTest.Scenario = .{
         .sharding = try .init("3d_mesh", &physical, logical, strategy),
-        .shape = Shape.init(.{ .batch = 4, .model = 4, .context = 4 }, .f32)
+        // Note: .context and .model are swapped compared to .link_x and .link_z
+        .shape = Shape.init(.{ .batch = 4, .context = 4, .model = 4 }, .f32)
             .withPartitioning(.{ .batch = .batch, .model = .model, .context = .context }),
-        .expected_sdy = "#sdy.sharding<@\"3d_mesh\", [{\"link_x\"}, {\"link_y\"}, {\"link_z\"}]>",
+        .expected_sdy = "#sdy.sharding<@\"3d_mesh\", [{\"link_x\"}, {\"link_z\"}, {\"link_y\"}]>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{ .{ 0, 2 }, .{ 0, 2 }, .{ 0, 2 } } },
-            .{ .device_id = 1, .slices = &.{ .{ 0, 2 }, .{ 0, 2 }, .{ 2, 2 } } },
-            .{ .device_id = 2, .slices = &.{ .{ 0, 2 }, .{ 2, 2 }, .{ 0, 2 } } },
+            .{ .device_id = 1, .slices = &.{ .{ 0, 2 }, .{ 2, 2 }, .{ 0, 2 } } },
+            .{ .device_id = 2, .slices = &.{ .{ 0, 2 }, .{ 0, 2 }, .{ 2, 2 } } },
             .{ .device_id = 3, .slices = &.{ .{ 0, 2 }, .{ 2, 2 }, .{ 2, 2 } } },
             .{ .device_id = 4, .slices = &.{ .{ 2, 2 }, .{ 0, 2 }, .{ 0, 2 } } },
-            .{ .device_id = 5, .slices = &.{ .{ 2, 2 }, .{ 0, 2 }, .{ 2, 2 } } },
-            .{ .device_id = 6, .slices = &.{ .{ 2, 2 }, .{ 2, 2 }, .{ 0, 2 } } },
+            .{ .device_id = 5, .slices = &.{ .{ 2, 2 }, .{ 2, 2 }, .{ 0, 2 } } },
+            .{ .device_id = 6, .slices = &.{ .{ 2, 2 }, .{ 0, 2 }, .{ 2, 2 } } },
             .{ .device_id = 7, .slices = &.{ .{ 2, 2 }, .{ 2, 2 }, .{ 2, 2 } } },
         },
     };
