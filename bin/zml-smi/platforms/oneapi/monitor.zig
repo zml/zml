@@ -69,7 +69,7 @@ pub fn handleByIndex(self: *const Monitor, device_id: usize) !Handle {
 }
 
 pub fn deviceId(self: *const Monitor, allocator: std.mem.Allocator, handle: Handle) ![]const u8 {
-    const dev = try self.deviceConst(handle);
+    const dev = try self.device(handle);
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/device", .{dev.dev_path});
     const raw = try smi_sysfs.readString(allocator, self.io, path);
@@ -150,13 +150,7 @@ fn openDevice(allocator: std.mem.Allocator, io: std.Io, render_idx: usize) !Devi
     };
 }
 
-pub fn device(self: *Monitor, handle: Handle) !*Device {
-    const idx = @intFromEnum(handle);
-    if (idx >= self.devices.len) return error.not_found;
-    return &self.devices[idx];
-}
-
-fn deviceConst(self: *const Monitor, handle: Handle) !*const Device {
+pub fn device(self: *const Monitor, handle: Handle) !*const Device {
     const idx = @intFromEnum(handle);
     if (idx >= self.devices.len) return error.not_found;
     return &self.devices[idx];

@@ -40,7 +40,11 @@ pub fn driverVersion(self: *const OneApi, allocator: std.mem.Allocator) ![]const
 }
 
 pub fn powerUsage(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
-    const dev = try self.monitor.device(handle);
+    const dev = block: {
+        const idx = @intFromEnum(handle);
+        if (idx >= self.monitor.devices.len) return error.not_found;
+        break :block &self.monitor.devices[idx];
+    };
     const current = Monitor.readEnergy(allocator, self.io, dev) catch |err| {
         dev.energy_prev = null;
         return err;
@@ -64,8 +68,11 @@ pub fn temperature(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) 
 }
 
 pub fn gpuUtil(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
-    const dev_idx: u16 = @intCast(@intFromEnum(handle));
-    const dev = try self.monitor.device(handle);
+    const dev = block: {
+        const idx = @intFromEnum(handle);
+        if (idx >= self.monitor.devices.len) return error.not_found;
+        break :block &self.monitor.devices[idx];
+    };
 
     var usage = Monitor.collectDeviceUsage(allocator, self.io, self.monitor.devices) catch {
         dev.activity_prev = null;
@@ -73,6 +80,7 @@ pub fn gpuUtil(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64
     };
     defer usage.deinit(allocator);
 
+    const dev_idx: u16 = @intCast(@intFromEnum(handle));
     const current = if (usage.get(dev_idx)) |sample| sample.engine else null;
     const util = Monitor.processUtil(dev.activity_prev, current) orelse 0;
     dev.activity_prev = current;
