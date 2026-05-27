@@ -1361,12 +1361,7 @@ test "DirectMemoryWriter: replicated with auto topology" {
         .shape = Shape.init(.{ .rows = 8, .cols = 128 }, .f32)
             .withPartitioning(.{ .rows = .replicated, .cols = .replicated }),
         .logical_mesh = .mesh(.{ .x = .high_bandwidth }),
-        .strategy = blk: {
-            var strategy: Sharding.Strategy = .init;
-            strategy.addBinding(.x, .link_x);
-
-            break :blk strategy;
-        },
+        .strategy = .parseBindings(.{ .x = .link_x }),
     });
 }
 
@@ -1385,12 +1380,7 @@ test "DirectMemoryWriter: 1D model split with 2x2 physical mesh" {
         .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
             .withPartitioning(.{ .rows = .replicated, .cols = .model }),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
-        .strategy = blk: {
-            var strategy: Sharding.Strategy = .init;
-            strategy.addBinding(.model, .link_x);
-
-            break :blk strategy;
-        },
+        .strategy = .parseBindings(.{ .model = .link_x }),
     });
 }
 
@@ -1412,13 +1402,7 @@ test "DirectMemoryWriter: 2D batch/model split with 2x2 physical mesh" {
             .batch = .low_bandwidth,
             .model = .high_bandwidth,
         }),
-        .strategy = blk: {
-            var strategy: Sharding.Strategy = .init;
-            strategy.addBinding(.batch, .link_x);
-            strategy.addBinding(.model, .link_y);
-
-            break :blk strategy;
-        },
+        .strategy = .parseBindings(.{ .batch = .link_x, .model = .link_y }),
     });
 }
 
@@ -1437,10 +1421,8 @@ test "DirectMemoryWriter: folded model sharding with 2x2 physical mesh" {
         .shape = Shape.init(.{ .model = 4096 }, .f32).withPartitioning(.{ .model = .model }),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = blk: {
-            var strategy: Sharding.Strategy = .init;
-            strategy.addBinding(.model, .link_x);
+            var strategy: Sharding.Strategy = .parseBindings(.{ .model = .link_x });
             strategy.addFold(.link_x, &.{ .link_x, .link_y });
-
             break :blk strategy;
         },
     });
@@ -1461,12 +1443,7 @@ test "DirectMemoryWriter: writableSliceGreedy with mirrored shards" {
         .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
             .withPartitioning(.{ .rows = .replicated, .cols = .model }),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
-        .strategy = blk: {
-            var strategy: Sharding.Strategy = .init;
-            strategy.addBinding(.model, .link_x);
-
-            break :blk strategy;
-        },
+        .strategy = .parseBindings(.{ .model = .link_x }),
         .write_mode = .writable_slice_greedy,
         .writable_slice_min_len = 64,
         .pool_chunk_size = 1024,
@@ -1492,10 +1469,8 @@ test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
             .model = .high_bandwidth,
         }),
         .strategy = blk: {
-            var strategy: Sharding.Strategy = .init;
-            strategy.addBinding(.model, .link_x);
+            var strategy: Sharding.Strategy = .parseBindings(.{ .model = .link_x });
             strategy.addFold(.link_x, &.{ .link_x, .link_z });
-
             break :blk strategy;
         },
     });

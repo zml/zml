@@ -1615,10 +1615,7 @@ pub const Strategy = struct {
 
     // TODO: remove .init, promote .parseBindings to .init
     // It's currently an error to call .init and never calling `addBinding`
-    pub const init: Strategy = .{
-        .bindings = .empty,
-        .folding = .empty,
-    };
+    pub const init: Strategy = .{ .bindings = .empty, .folding = .empty };
 
     pub fn parseBindings(bindings: anytype) Strategy {
         const err_msg = "Strategy.parseBindings excepts fields to be PhysicalAxisTag or tuple of PhysicalAxisTag, got {}";
@@ -1684,7 +1681,7 @@ pub const Strategy = struct {
 
     /// suggest builds a Strategy from logical intents.
     pub fn suggest(logical: LogicalMesh, physical: *const PhysicalMesh) Strategy {
-        var strategy: Strategy = .init;
+        var strategy: Strategy = .{ .bindings = .empty, .folding = .empty };
 
         const base_order = physical.shardableAxes();
         var available: stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK) = .empty;
@@ -1738,6 +1735,8 @@ pub const Placement = struct {
     };
 
     sharding: Sharding,
+    // Note this shape is mainly use to indicate the dims of the sharded buffer.
+    // We may want to only store that.
     shape: Shape,
     global_shape: if (builtin.mode == .Debug) Shape else void,
 
@@ -1757,8 +1756,8 @@ pub const Placement = struct {
             pl.axis_plans.appendAssumeCapacity(try axisSplit(sharding, shape, &used_axes, axis_index));
         }
 
-        for (0.., shape.dims(), pl.axis_plans.slice()) |a, dim, plan| {
-            pl.shape._dims.buffer[a] = @divExact(dim, plan.product());
+        for (pl.shape._dims.slice(), shape.dims(), pl.axis_plans.slice()) |*shard_dim, dim, plan| {
+            shard_dim.* = @divExact(dim, plan.num_devices);
         }
         return pl;
     }
@@ -1851,19 +1850,19 @@ const AxisSplit = struct {
     /// to the linear shard index. Unused depths have stride 0.
     coord_strides: Device.Coords,
     counts: Device.Coords,
-    product_count: u32,
+    num_devices: u32,
 
     pub const empty: AxisSplit = .{
         .coord_strides = @splat(0),
         .counts = @splat(0),
-        .product_count = 1,
+        .num_devices = 1,
     };
 
     pub fn add(split: *AxisSplit, size: u8, depth: u8) void {
         for (&split.coord_strides) |*stride| stride.* *= size;
         split.coord_strides[depth] = 1;
         split.counts[depth] = size;
-        split.product_count *= size;
+        split.num_devices *= size;
     }
 
     pub fn linearIndex(split: AxisSplit, device_coords: Device.Coords) u32 {
@@ -1871,10 +1870,6 @@ const AxisSplit = struct {
         const coords_u8: @Vector(MAX_MESH_RANK, u8) = device_coords;
         const strides: @Vector(MAX_MESH_RANK, u8) = split.coord_strides;
         return @reduce(.Add, coords_u8 * strides);
-    }
-
-    pub fn product(split: AxisSplit) u32 {
-        return split.product_count;
     }
 
     pub fn format(split: AxisSplit, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -1926,7 +1921,7 @@ fn calculateSplit(
         }
     }
 
-    if (plan.product() > 0 and @rem(dim, plan.product()) != 0) {
+    if (plan.num_devices > 0 and @rem(dim, plan.num_devices) != 0) {
         return error.IncompatibleSharding;
     }
     return plan;
