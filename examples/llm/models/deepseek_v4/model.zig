@@ -144,10 +144,10 @@ const Compressor = struct {
         const compressor_store = store.withPrefix("compressor");
 
         return .{
-            .norm = .init(compressor_store.createTensor("norm.weight", .{.r}, .replicated), config.rms_norm_eps, .r),
+            .norm = .init(compressor_store.createTensor("norm.weight", .{.hd}, .replicated), config.rms_norm_eps, .hd),
             .wgate = .init(compressor_store.createTensor("wgate.weight", .{.hc, .d}, .replicated), null, .d),
             .wkv = .init(compressor_store.createTensor("wkv.weight", .{.hc, .d}, .replicated), null, .d),
-            .ape = compressor_store.createTensor("ape", .{.hc, .d}, .replicated),
+            .ape = compressor_store.createTensor("ape", .{.r, .hc}, .replicated),
             .ratio = ratio,
             .rotate = rotate,
             .overlap = (ratio == 4),
@@ -165,30 +165,28 @@ const Compressor = struct {
         self.ape.deinit();
     }
 
-    pub fn overlap_transform(self: Compressor, x: zml.Tensor, v: i64) zml.Tensor {
-        _ = v; // autofix
+    pub fn overlap_transform(self: Compressor, x: zml.Tensor, v: f32) zml.Tensor {
         // shape(x) = [b,s,r,2d]
-        const b = x.dim(.batch);
-        const s = x.dim(.seq);
-
-        const shape: zml.Shape = .init(.{.batch = b, .seq = s, .r = 2*self.ratio, .hd = self.head_dim}, x.dtype());
-        _ = shape; // autofix
-
         const right_half = x.slice(&[_]zml.Tensor.Slice{
             .{},
             .{},
             .{},
             .{ .start = self.head_dim },
         });
-        _ = right_half; // autofix
 
-        // const left_half_shifted = x.slice(&[_]zml.Tensor.Slice{.{
-        //     .start = &[_]i64{ 0, 0, 0, 0 },
-        //     .end = &[_]i64{ b, s - 1, self.ratio, self.head_dim },
-        // }});
-        // _ = left_half_shifted; // autofix
+        const left_half = x.slice(&[_]zml.Tensor.Slice{
+            .{},
+            .{ .end = x.dim(.seq) - 1},
+            .{},
+            .{ .end = self.head_dim },
+        });
 
-        return x;
+        // TODO: rewrite
+        const pad_shape: zml.Shape = .init(.{.batch = x.dim(.batch), .seq = 1, .r = self.ratio, .hd = self.head_dim}, x.dtype());
+        const pad = zeroes(pad_shape).addConstant(v);
+        const left_padded = zml.Tensor.concatenate(&[_]zml.Tensor{pad,left_half}, 1);
+
+        return zml.Tensor.concatenate(&[_]zml.Tensor{left_padded, right_half}, 2);
     }
 
     fn forwardPrefill(self: Compressor, x: zml.Tensor) ?zml.Tensor {
@@ -197,34 +195,31 @@ const Compressor = struct {
         // Nothing to compress my friend
         if (seqlen < self.ratio) return null;
 
-        log.info("x: {f}", .{x.shape()});
         const x32 = x.convert(.f32);
         var kv = self.wkv.forward(x32);
-        log.info("kv: {f}", .{kv.shape()});
         var score = self.wgate.forward(x32);
-        log.info("score: {f}", .{score.shape()});
 
         const remainder = @mod(seqlen, self.ratio);
         const cutoff = seqlen - remainder;
 
         if (remainder > 0) {
-            const s = kv.split(1, &[_]i64{cutoff, remainder});
+            const s = kv.split(.seq, &[_]i64{cutoff, remainder});
             kv = s[0];
-            score = score.choose1d(1, cutoff);
+
+            const score_split = score.split(.seq, &[_]i64{cutoff, remainder});
+            score = score_split[0];
         }
 
-        kv = kv.splitAxis(.hc, .{ .r = self.ratio, .d = .auto });
-        score = score.splitAxis(.hc, .{ .r = self.ratio, .d = .auto });
-        //score = score.add(self.ape);
+        kv = kv.splitAxis(.seq, .{ .seq = .auto, .r = self.ratio });
+        score = score.splitAxis(.seq, .{ .seq = .auto, .r = self.ratio });
+        score = score.add(self.ape.broad(score.shape()));
 
         if (self.overlap) {
             kv = self.overlap_transform(kv, 0);
-            score = self.overlap_transform(score, 0); // replace `0` with `-inf`.
+            score = self.overlap_transform(score, -std.math.inf(f32));
         }
-        //
-        // kv = kv.mul(score.broad(kv.shape()).softmax(2)).sum(2);
 
-        return kv;
+        return kv.mul(score.broad(kv.shape()).softmax(.r)).sum(.r).squeeze(.r);
     }
 
     fn forwardDecode(self: Compressor, x: zml.Tensor) ?zml.Tensor {
@@ -239,22 +234,30 @@ const Compressor = struct {
         const maybe_kv = if (start_pos == 0) self.forwardPrefill(x) else self.forwardDecode(x);
         if (maybe_kv == null) return null;
 
-        const kv = maybe_kv.?.convert(x.dtype());
-        // kv = self.norm.forward(kv);
+        var kv = maybe_kv.?.convert(x.dtype());
+
+        kv = self.norm.forward(kv);
+        kv = apply_rope(kv.rename(.{.seq = .s}), self.nope_head_dim, self.rope_head_dim, self.rope_opts);
         // kv = blk: {
         //     const split = kv.split(-1, &[_]i64{self.nope_head_dim, self.rope_head_dim});
-        //     const kv_rope = zml.nn.rope(split[1], null, self.rope_opts);
+        //     const kv_rope = zml.nn.rope(split[1].renameTag(.seq, .s), null, self.rope_opts);
         //     break :blk zml.Tensor.concatenate(&[_]zml.Tensor{split[0], kv_rope}, -1);
         // };
-        //
-        // if (self.rotate) {
-        //     kv = hadamard_rotation(kv);
-        //     // TODO: quantize to FP4
-        // }
+
+        if (self.rotate) {
+            kv = hadamard_rotation(kv);
+            // TODO: quantize to FP4
+        }
 
         return kv;
     }
 };
+
+fn apply_rope(x: zml.Tensor, nope_dim: i64, rope_dim: i64, opts: zml.nn.RopeOpts) zml.Tensor {
+    const split = x.split(-1, &[_]i64{nope_dim, rope_dim});
+    const x_rope = zml.nn.rope(split[1], null, opts);
+    return zml.Tensor.concatenate(&[_]zml.Tensor{split[0], x_rope}, -1);
+}
 
 fn hadamard_rotation(x: zml.Tensor) zml.Tensor {
     return x;
@@ -387,6 +390,10 @@ const Attention = struct {
             //  > FP8-simulate non-rope dims to match QAT; rope dims stay bf16 for positional precision
             break :blk zml.Tensor.concatenate(&[_]zml.Tensor{kv_split[0], kv_rope}, .hd);
         }.rename(.{ .seq = .k });
+
+        // TODO 
+        // const new_kv_cache = kv_cache.update(kv, tokens_position_offset, cache_index);
+        // kv = new_kv_cache.keys(cache_index);
 
         const topk = topk_window(self.window_size, x.dim(.batch), x.dim(.seq), start_pos).withTags(.{.batch, .seq, .topk});
 
