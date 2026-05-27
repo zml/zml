@@ -50,7 +50,7 @@ pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
 
 test "zml" {
-    std.testing.refAllDecls(Sharding);
+    std.testing.refAllDecls(@This());
 }
 
 pub const KiB = 1024;

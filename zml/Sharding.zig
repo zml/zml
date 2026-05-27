@@ -215,9 +215,9 @@ pub const Device = struct {
     id: usize,
 
     /// Coordinates in the physical mesh
-    coords: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty,
+    coords: stdx.BoundedArray(u8, Shape.MAX_RANK) = .empty,
 
-    pub fn coordsSlice(self: *const Device) ?[]const usize {
+    pub fn coordsSlice(self: *const Device) ?[]const u8 {
         if (self.coords.len == 0) return null;
         return self.coords.constSlice();
     }
@@ -434,7 +434,7 @@ pub const PhysicalMesh = struct {
         try validateGeometry(root);
 
         var owned_root = root;
-        var path: [Shape.MAX_RANK]usize = @splat(0);
+        var path: [Shape.MAX_RANK]u8 = @splat(0);
         assignCoords(&owned_root, &path, 0);
 
         var mesh: PhysicalMesh = .{
@@ -556,17 +556,17 @@ pub const PhysicalMesh = struct {
     /// coords:
     ///   (0,0) (0,1)
     ///   (1,0) (1,1)
-    fn assignCoords(node: *PhysicalNode, path: *[Shape.MAX_RANK]usize, depth: usize) void {
+    fn assignCoords(node: *PhysicalNode, path: *[Shape.MAX_RANK]u8, depth: usize) void {
         switch (node.*) {
             .leaf => |*d| {
                 // Coords can already been set by caller
                 if (d.coords.len > 0) return;
 
-                d.coords = stdx.BoundedArray(usize, Shape.MAX_RANK).fromSlice(path[0..depth]) catch unreachable;
+                d.coords = .init(path[0..depth]);
             },
             .branch => |*b| {
                 for (b.children, 0..) |*child, i| {
-                    path[depth] = i;
+                    path[depth] = @intCast(i);
                     assignCoords(child, path, depth + 1);
                 }
             },
@@ -592,7 +592,7 @@ pub const PhysicalMesh = struct {
     ///
     /// sizes: S0..Sk, coords: C0..Ck
     /// linear = (((C0 * S1) + C1) * S2 + C2) ...
-    pub fn linearIndexFromCoords(self: PhysicalMesh, coords: []const usize) usize {
+    pub fn linearIndexFromCoords(self: PhysicalMesh, coords: []const u8) usize {
         const order = self.axisOrder();
         var idx: usize = 0;
         for (order.constSlice()) |tag| {
@@ -1747,7 +1747,7 @@ pub const Placement = struct {
         }
 
         for (0.., shape.dims(), pl.axis_plans.constSlice()) |a, dim, plan| {
-            pl.shape._dims.buffer[a] = @divExact(dim, plan.product);
+            pl.shape._dims.buffer[a] = @divExact(dim, plan.product());
         }
         return pl;
     }
@@ -1782,7 +1782,7 @@ pub const Placement = struct {
         return .{ .inner_data = slice.inner_data, .shape = self.shape, .offset_bytes = @intCast(offset_i64), .byte_strides = slice.byte_strides };
     }
 
-    fn deviceCoords(self: Placement, device_id: usize) []const usize {
+    fn deviceCoords(self: Placement, device_id: usize) []const u8 {
         return self.sharding.devicesInCanonicalOrder()[device_id].coords.constSlice();
     }
 
@@ -1800,6 +1800,10 @@ pub const Placement = struct {
                 try writer.print("{s}:[{d}:{d}]", .{ axis_label, s.start, s.start + s.size });
             }
             try writer.writeAll("]\n");
+        }
+
+        for (0.., self.axis_plans.slice()) |ax, plan| {
+            try writer.print("- axis{d} -> plan {f}\n", .{ ax, plan });
         }
     }
 
@@ -1827,28 +1831,35 @@ pub const Placement = struct {
 };
 
 const AxisSplit = struct {
-    product: i64,
-    counts: stdx.BoundedArray(i64, Shape.MAX_RANK),
+    counts: stdx.BoundedArray(u8, Shape.MAX_RANK),
     depths: stdx.BoundedArray(u8, Shape.MAX_RANK),
 
     pub const empty: AxisSplit = .{
-        .product = 1,
         .counts = .empty,
         .depths = .empty,
     };
 
-    pub fn add(split: *AxisSplit, size: i64, depth: u8) void {
+    pub fn add(split: *AxisSplit, size: u8, depth: u8) void {
         split.counts.appendAssumeCapacity(size);
         split.depths.appendAssumeCapacity(depth);
-        split.product *= size;
     }
 
-    pub fn linearIndex(self: AxisSplit, device_coords: []const usize) i64 {
-        var linear: i64 = 0;
-        for (self.counts.constSlice(), self.depths.constSlice()) |c_, depth| {
-            linear = linear * c_ + @as(i64, @intCast(device_coords[depth]));
+    pub fn linearIndex(self: AxisSplit, device_coords: []const u8) u32 {
+        var linear: u32 = 0;
+        for (self.counts.constSlice(), self.depths.constSlice()) |count, depth| {
+            linear = linear * count + @as(u32, device_coords[depth]);
         }
         return linear;
+    }
+
+    pub fn product(split: AxisSplit) u32 {
+        var p: u32 = 1;
+        for (split.counts.constSlice()) |count| p *= count;
+        return p;
+    }
+
+    pub fn format(self: AxisSplit, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("Plan(counts={any},depths={any})", .{ self.counts.slice(), self.depths.slice() });
     }
 };
 
@@ -1896,7 +1907,7 @@ fn calculateSplit(
         }
     }
 
-    if (plan.product > 0 and @rem(dim, plan.product) != 0) {
+    if (plan.product() > 0 and @rem(dim, plan.product()) != 0) {
         return error.IncompatibleSharding;
     }
     return plan;
@@ -1907,7 +1918,7 @@ fn addPhysicalToSplit(sharding: Sharding, plan: *AxisSplit, tag: PhysicalAxisTag
     const physical = sharding.data.physical;
     const info = physical.axisInfo(tag) orelse return;
     const depth = physical.axis_traversal.depth(tag) orelse return;
-    plan.add(info.size, depth);
+    plan.add(@intCast(info.size), depth);
 }
 
 const ShardingTest = struct {
@@ -2004,9 +2015,10 @@ const ShardingTest = struct {
             return;
         }
 
-        const pl = try sharding_ref.placement(s.shape);
         // Verify Shard Slices (Math)
         if (s.expected_shards.len > 0) {
+            const pl = try sharding_ref.placement(s.shape);
+
             errdefer std.log.warn("Expected shards failed. Got {f}", .{pl});
             try std.testing.expectEqual(s.expected_shards.len, ordered_devices.len);
             for (s.expected_shards) |expected| {

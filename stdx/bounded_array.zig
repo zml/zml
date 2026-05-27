@@ -49,6 +49,12 @@ pub fn BoundedArrayAligned(
 
         pub const empty: Self = .{ .buffer = undefined, .len = 0 };
 
+        pub fn init(m: []const T) Self {
+            var buf: Self = .{ .buffer = undefined, .len = m.len };
+            @memcpy(buf.buffer[0..m.len], m);
+            return buf;
+        }
+
         /// View the internal array as a slice whose size was previously set.
         pub fn slice(self: anytype) switch (@TypeOf(&self.buffer)) {
             *align(alignment.toByteUnits()) [buffer_capacity]T => []align(alignment.toByteUnits()) T,
@@ -78,10 +84,7 @@ pub fn BoundedArrayAligned(
         /// Copy the content of an existing slice.
         pub fn fromSlice(m: []const T) error{Overflow}!Self {
             if (m.len > buffer_capacity) return error.Overflow;
-
-            var list: Self = .{ .buffer = undefined, .len = m.len };
-            @memcpy(list.buffer[0..m.len], m);
-            return list;
+            return .init(m);
         }
 
         /// Return the element at index `i` of the slice.
