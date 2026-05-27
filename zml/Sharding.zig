@@ -1787,20 +1787,33 @@ pub const Placement = struct {
         return res;
     }
 
-    pub fn shardSlice(pl: *const Placement, device_id: usize, slice: Slice) Slice {
+    pub fn shardPtr(pl: *const Placement, device_id: usize, slice: Slice) [*]const u8 {
         if (builtin.mode == .Debug) {
             // there is a bug in caller code that used a placement for a different shape
             std.debug.assert(pl.global_shape.eql(slice.shape));
         }
-
-        var offset_i64: i64 = @intCast(slice.offset_bytes);
-
         const coords = pl.deviceCoords(device_id);
+
+        var ptr: [*]const u8 = slice.constData().ptr;
         for (pl.shape.dims(), pl.axis_plans.constSlice(), slice.byte_strides.constSlice()) |size, plan, stride| {
             const start = plan.linearIndex(coords) * size;
-            offset_i64 += start * stride;
+            ptr = ptr[@intCast(start * stride)..];
         }
-        return .{ .inner_data = slice.inner_data, .shape = pl.shape, .offset_bytes = @intCast(offset_i64), .byte_strides = slice.byte_strides };
+        return ptr;
+    }
+
+    /// Given a Slice, returns the subslice corresponding to a specific device.
+    /// Depending on the layout, the sub-slice may or may not be contiguous.
+    pub fn shardSlice(pl: *const Placement, device_id: usize, slice: Slice) Slice {
+        const shard_ptr = pl.shardPtr(device_id, slice);
+        const offset_bytes = @intFromPtr(shard_ptr) - @intFromPtr(slice.bytes.ptr);
+        return .{
+            .bytes = slice.bytes,
+            .mutable = slice.mutable,
+            .shape = pl.shape,
+            .offset_bytes = offset_bytes,
+            .byte_strides = slice.byte_strides,
+        };
     }
 
     fn deviceCoords(pl: Placement, device_id: usize) [MAX_MESH_RANK]u8 {

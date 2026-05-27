@@ -18,10 +18,8 @@ pub fn isBytes(comptime T: type) bool {
 }
 
 pub const Slice = struct {
-    inner_data: union(enum) {
-        mutable: []u8,
-        immutable: []const u8,
-    },
+    bytes: []const u8,
+    mutable: bool,
     shape: Shape,
     offset_bytes: usize = 0,
     byte_strides: stdx.BoundedArray(i64, constants.MAX_RANK),
@@ -31,10 +29,13 @@ pub const Slice = struct {
         stdx.debug.assert(bytes.len == shape.byteSize(), "Expected \"bytes\" to have the same length as shape.byteSize() ({}), got {}", .{ shape.byteSize(), bytes.len });
         const type_info = @typeInfo(@TypeOf(bytes));
         const byte_strides = shape.computeByteStrides();
-        return if (type_info.pointer.is_const)
-            .{ .inner_data = .{ .immutable = bytes }, .shape = shape, .offset_bytes = 0, .byte_strides = byte_strides }
-        else
-            .{ .inner_data = .{ .mutable = bytes }, .shape = shape, .offset_bytes = 0, .byte_strides = byte_strides };
+        return .{
+            .bytes = bytes,
+            .mutable = !type_info.pointer.is_const,
+            .shape = shape,
+            .offset_bytes = 0,
+            .byte_strides = byte_strides,
+        };
     }
 
     pub fn alloc(allocator: std.mem.Allocator, shape_: Shape) !Slice {
@@ -51,7 +52,8 @@ pub const Slice = struct {
         };
 
         return .{
-            .inner_data = .{ .mutable = bytes },
+            .bytes = bytes,
+            .mutable = true,
             .shape = shape_,
             .offset_bytes = 0,
             .byte_strides = shape_.computeByteStrides(),
@@ -59,8 +61,8 @@ pub const Slice = struct {
     }
 
     pub fn free(slice: Slice, allocator: std.mem.Allocator) void {
-        const d = slice.constData_();
-
+        const d = slice.bytes;
+        // TODO: It would be better to store the aligment, this can be error prone in the presence of type casting
         switch (slice.shape.dtype().alignOf()) {
             1 => allocator.free(@as([]align(1) const u8, @alignCast(d))),
             2 => allocator.free(@as([]align(2) const u8, @alignCast(d))),
@@ -79,9 +81,8 @@ pub const Slice = struct {
 
     pub fn isContiguous(slice: Slice) bool {
         const expected = slice.shape.computeByteStrides();
-        const rank = slice.shape.rank();
-        for (0..rank) |ax| {
-            if (slice.byte_strides.get(ax) != expected.get(ax)) return false;
+        for (expected.slice(), slice.byte_strides.slice()) |exp, actual| {
+            if (exp != actual) return false;
         }
         return true;
     }
@@ -122,36 +123,20 @@ pub const Slice = struct {
     }
 
     pub fn data(slice: Slice) []u8 {
-        const base = slice.data_();
-        stdx.debug.assert(slice.offset_bytes <= base.len, "Slice offset exceeds data length", .{});
-        return base[slice.offset_bytes..];
-    }
-
-    fn data_(slice: Slice) []u8 {
-        return switch (slice.inner_data) {
-            .mutable => |d| d,
-            else => stdx.debug.panic("Expected slice to be mutable but it's immutable", .{}),
-        };
+        std.debug.assert(slice.mutable);
+        return @constCast(slice.bytes[slice.offset_bytes..]);
     }
 
     pub fn constData(slice: Slice) []const u8 {
-        const base = slice.constData_();
-        stdx.debug.assert(slice.offset_bytes <= base.len, "Slice offset exceeds data length", .{});
-        return base[slice.offset_bytes..];
-    }
-
-    fn constData_(slice: Slice) []const u8 {
-        return switch (slice.inner_data) {
-            inline else => |d| d,
-        };
+        return slice.bytes[slice.offset_bytes..];
     }
 
     pub fn items(slice: Slice, comptime T: type) []T {
-        return @alignCast(std.mem.bytesAsSlice(T, slice.data()));
+        return @ptrCast(@alignCast(slice.data()));
     }
 
     pub fn constItems(slice: Slice, comptime T: type) []const T {
-        return @alignCast(std.mem.bytesAsSlice(T, slice.constData()));
+        return @ptrCast(@alignCast(slice.constData()));
     }
 
     pub fn format(

@@ -129,11 +129,9 @@ pub const Buffer = struct {
         };
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
-            const sub_slice = placement.shardSlice(device.id, slice);
-
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
-                .data = sub_slice.constData().ptr,
+                .data = placement.shardPtr(device.id, slice),
                 .dst = .{ .memory = platform.devices[device.id].memory(opts.memory).pjrt_memory },
                 // Constant across devices
                 .layout = layout,
@@ -272,15 +270,12 @@ pub const Buffer = struct {
 
         const placement = try self._sharding.placement(self._shape);
         for (self._sharding.devicesInCanonicalOrder(), 0..) |device, shard_index| {
+            // TODO: handle replicated information, we shouldn't iterate over all the devices unless needed
             const sub_slice = placement.shardSlice(device.id, slice);
             if (!sub_slice.isContiguous()) return error.NonContiguousShardRead;
 
             const size_bytes = placement.shape.byteSize();
-            const start = sub_slice.offset_bytes;
-            const end = start + size_bytes;
-            stdx.debug.assert(end <= slice.constData().len, "Shard sub_slice exceeds destination slice", .{});
-
-            const destination = slice.data()[start..end];
+            const destination = sub_slice.data()[0..size_bytes];
             const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, destination);
 
             if (maybe_event) |event| {
