@@ -1348,6 +1348,7 @@ pub fn runLyricRemixDiffusion(
     edit_n_min: f32,
     edit_n_max: f32,
     edit_n_avg: usize,
+    edit_strength: f32,
 ) !AudioLatents {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
@@ -1439,7 +1440,7 @@ pub fn runLyricRemixDiffusion(
         const t_curr = timestamps[i];
         const t_next = timestamps[i + 1];
         const dt = t_next - t_curr;
-        std.log.info("DiT lyric remix ************* step {d}/{d}, t={d}, n_avg={d}", .{ i + 1, steps, t_curr, edit_n_avg });
+        std.log.info("DiT lyric remix ************* step {d}/{d}, t={d}, n_avg={d}, strength={d}", .{ i + 1, steps, t_curr, edit_n_avg, edit_strength });
 
         for (0..dimT * dimA) |idx| {
             v_src.items(zml.floats.BFloat16)[idx] = zero;
@@ -1485,7 +1486,7 @@ pub fn runLyricRemixDiffusion(
         for (0..dimT * dimA) |idx| {
             const edit_value = zt_edit.items(zml.floats.BFloat16)[idx].toF32();
             const delta = v_tar.items(zml.floats.BFloat16)[idx].toF32() - v_src.items(zml.floats.BFloat16)[idx].toF32();
-            zt_edit.items(zml.floats.BFloat16)[idx] = zml.floats.BFloat16.fromF32(edit_value + dt * delta);
+            zt_edit.items(zml.floats.BFloat16)[idx] = zml.floats.BFloat16.fromF32(edit_value + edit_strength * dt * delta);
         }
     }
     zml_handler.toc(&zml_handler.timers.dit.prefill);

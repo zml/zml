@@ -232,6 +232,7 @@ const Args = struct {
     remix_lyric_min: f32 = 0.0,
     remix_lyric_max: f32 = 1.0,
     remix_lyric_avg: u8 = 1,
+    remix_lyric_strength: f32 = 1.0,
 
     pub const help =
         \\ Use acestep [options]
@@ -268,6 +269,7 @@ const Args = struct {
         \\   --remix-lyric-min=<float> Flow-edit start fraction in [0,1] (default: 0.0)
         \\   --remix-lyric-max=<float> Flow-edit end fraction in [0,1] (default: 1.0)
         \\   --remix-lyric-avg=<int>   Number of stochastic flow delta averages per step (default: 1)
+        \\   --remix-lyric-strength=<float> Constant multiplier for V_target - V_source (default: 1.0)
         \\
     ;
 };
@@ -858,6 +860,7 @@ pub fn runLyricRemixPipeline(zml_handler: *Zml_handler) !void {
             zml_handler.args.remix_lyric_min,
             zml_handler.args.remix_lyric_max,
             @intCast(zml_handler.args.remix_lyric_avg),
+            zml_handler.args.remix_lyric_strength,
         );
         defer diffused_latents.deinit(zml_handler.allocator);
 
