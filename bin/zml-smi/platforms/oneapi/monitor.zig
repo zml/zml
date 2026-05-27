@@ -86,7 +86,10 @@ fn seed(self: *Monitor) !void {
     defer device_usage.deinit(self.allocator);
 
     for (self.devices, 0..) |*dev, idx| {
-        const allocator = resetArena(dev);
+        const allocator = block: {
+            _ = dev.arena.reset(.retain_capacity);
+            break :block dev.arena.allocator();
+        };
         dev.energy_prev = readEnergy(allocator, self.io, dev.*) catch null;
         dev.activity_prev = if (device_usage.get(@intCast(idx))) |sample| sample.engine else null;
     }
@@ -171,11 +174,6 @@ fn deviceConst(self: *const Monitor, handle: Handle) !*const Device {
     const idx = handleIndex(handle);
     if (idx >= self.devices.len) return error.not_found;
     return &self.devices[idx];
-}
-
-fn resetArena(dev: *Device) std.mem.Allocator {
-    _ = dev.arena.reset(.retain_capacity);
-    return dev.arena.allocator();
 }
 
 pub fn readTemperature(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {

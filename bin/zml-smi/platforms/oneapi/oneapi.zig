@@ -8,10 +8,12 @@ pub const Handle = Monitor.Handle;
 pub const ProcessInfo = Monitor.ProcessInfo;
 
 monitor: Monitor,
+io: std.Io,
 
 pub fn init(allocator: std.mem.Allocator, io: std.Io) !OneApi {
     return .{
         .monitor = try Monitor.init(allocator, io),
+        .io = io,
     };
 }
 
@@ -32,10 +34,10 @@ pub fn name(self: *const OneApi, allocator: std.mem.Allocator, handle: Handle) !
 }
 
 pub fn driverVersion(self: *const OneApi, allocator: std.mem.Allocator) ![]const u8 {
-    const version = smi_sysfs.readString(allocator, self.monitor.io, "/sys/module/xe/version") catch
-        smi_sysfs.readString(allocator, self.monitor.io, "/sys/module/xe/srcversion") catch
-        smi_sysfs.readString(allocator, self.monitor.io, "/sys/module/i915/version") catch
-        try smi_sysfs.readString(allocator, self.monitor.io, "/sys/module/i915/srcversion");
+    const version = smi_sysfs.readString(allocator, self.io, "/sys/module/xe/version") catch
+        smi_sysfs.readString(allocator, self.io, "/sys/module/xe/srcversion") catch
+        smi_sysfs.readString(allocator, self.io, "/sys/module/i915/version") catch
+        try smi_sysfs.readString(allocator, self.io, "/sys/module/i915/srcversion");
     const trimmed = std.mem.trim(u8, version, &std.ascii.whitespace);
     if (trimmed.len == 0) return error.not_found;
     return trimmed;
@@ -47,7 +49,7 @@ pub fn powerUsage(self: *OneApi, handle: Handle) !u64 {
         _ = dev.arena.reset(.retain_capacity);
         break :block dev.arena.allocator();
     };
-    const current = Monitor.readEnergy(allocator, self.monitor.io, dev.*) catch |err| {
+    const current = Monitor.readEnergy(allocator, self.io, dev.*) catch |err| {
         dev.energy_prev = null;
         return err;
     };
@@ -65,7 +67,7 @@ pub fn powerLimit(self: *OneApi, handle: Handle) !u64 {
         _ = dev.arena.reset(.retain_capacity);
         break :block dev.arena.allocator();
     };
-    return Monitor.readPowerLimit(allocator, self.monitor.io, dev.*);
+    return Monitor.readPowerLimit(allocator, self.io, dev.*);
 }
 
 pub fn temperature(self: *OneApi, handle: Handle) !u64 {
@@ -74,7 +76,7 @@ pub fn temperature(self: *OneApi, handle: Handle) !u64 {
         _ = dev.arena.reset(.retain_capacity);
         break :block dev.arena.allocator();
     };
-    return Monitor.readTemperature(allocator, self.monitor.io, dev.*);
+    return Monitor.readTemperature(allocator, self.io, dev.*);
 }
 
 pub fn gpuUtil(self: *OneApi, handle: Handle) !u64 {
@@ -85,7 +87,7 @@ pub fn gpuUtil(self: *OneApi, handle: Handle) !u64 {
         break :block dev.arena.allocator();
     };
 
-    var usage = Monitor.collectDeviceUsage(allocator, self.monitor.io, self.monitor.devices) catch {
+    var usage = Monitor.collectDeviceUsage(allocator, self.io, self.monitor.devices) catch {
         dev.activity_prev = null;
         return 0;
     };
@@ -103,7 +105,7 @@ pub fn clockGraphics(self: *OneApi, handle: Handle) !u64 {
         _ = dev.arena.reset(.retain_capacity);
         break :block dev.arena.allocator();
     };
-    return Monitor.readClockGraphics(allocator, self.monitor.io, dev.*);
+    return Monitor.readClockGraphics(allocator, self.io, dev.*);
 }
 
 pub fn maxClockGraphics(self: *OneApi, handle: Handle) !u64 {
@@ -112,7 +114,7 @@ pub fn maxClockGraphics(self: *OneApi, handle: Handle) !u64 {
         _ = dev.arena.reset(.retain_capacity);
         break :block dev.arena.allocator();
     };
-    return Monitor.readMaxClockGraphics(allocator, self.monitor.io, dev.*);
+    return Monitor.readMaxClockGraphics(allocator, self.io, dev.*);
 }
 
 pub fn memUsed(self: *OneApi, handle: Handle) !u64 {
@@ -123,7 +125,7 @@ pub fn memUsed(self: *OneApi, handle: Handle) !u64 {
         break :block dev.arena.allocator();
     };
 
-    var usage = Monitor.collectDeviceUsage(allocator, self.monitor.io, self.monitor.devices) catch return 0;
+    var usage = Monitor.collectDeviceUsage(allocator, self.io, self.monitor.devices) catch return 0;
     defer usage.deinit(allocator);
 
     return if (usage.get(dev_idx)) |sample| sample.mem_kib * 1024 else 0;
@@ -135,7 +137,7 @@ pub fn memTotal(self: *OneApi, handle: Handle) !u64 {
         _ = dev.arena.reset(.retain_capacity);
         break :block dev.arena.allocator();
     };
-    return Monitor.readMemTotal(allocator, self.monitor.io, dev.*);
+    return Monitor.readMemTotal(allocator, self.io, dev.*);
 }
 
 pub fn pcieLinkGen(self: *OneApi, handle: Handle) !u64 {
@@ -144,7 +146,7 @@ pub fn pcieLinkGen(self: *OneApi, handle: Handle) !u64 {
         _ = dev.arena.reset(.retain_capacity);
         break :block dev.arena.allocator();
     };
-    return Monitor.readPcieLinkGen(allocator, self.monitor.io, dev.*);
+    return Monitor.readPcieLinkGen(allocator, self.io, dev.*);
 }
 
 pub fn pcieLinkWidth(self: *OneApi, handle: Handle) !u64 {
@@ -153,7 +155,7 @@ pub fn pcieLinkWidth(self: *OneApi, handle: Handle) !u64 {
         _ = dev.arena.reset(.retain_capacity);
         break :block dev.arena.allocator();
     };
-    return Monitor.readPcieLinkWidth(allocator, self.monitor.io, dev.*);
+    return Monitor.readPcieLinkWidth(allocator, self.io, dev.*);
 }
 
 pub fn pcieBandwidth(self: *OneApi, handle: Handle) !u64 {
@@ -162,11 +164,11 @@ pub fn pcieBandwidth(self: *OneApi, handle: Handle) !u64 {
         _ = dev.arena.reset(.retain_capacity);
         break :block dev.arena.allocator();
     };
-    return Monitor.readPcieBandwidth(allocator, self.monitor.io, dev.*);
+    return Monitor.readPcieBandwidth(allocator, self.io, dev.*);
 }
 
 pub fn processList(self: *OneApi, allocator: std.mem.Allocator) !std.ArrayList(ProcessInfo) {
-    var usage = try Monitor.collectProcessUsage(allocator, self.monitor.io, self.monitor.devices);
+    var usage = try Monitor.collectProcessUsage(allocator, self.io, self.monitor.devices);
     defer usage.deinit(allocator);
 
     var processes: std.ArrayList(ProcessInfo) = .empty;
