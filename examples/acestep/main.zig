@@ -274,21 +274,7 @@ const Args = struct {
     ;
 };
 
-// 4090
-// --prompt='a peak-time dark techno track'
-// --llm-size=2 --dit-size=1
-// --duration=180 --n=3
-// info: Module    init  compile     load  prefill   decode    total
-// info:   llm    0.26s    2.07s    1.02s    0.34s    4.87s    8.57s
-// info:   cfg    0.00s    0.92s    0.00s    0.29s   10.60s   11.81s
-// info:   emb    0.00s    1.33s    0.72s    0.00s    0.03s    2.31s
-// info:   enc    0.00s    3.27s    0.70s    0.02s    0.03s    4.03s
-// info:   dit    0.00s    2.44s    0.96s    4.53s    0.00s    7.97s
-// info:   vae    0.00s    1.25s    0.69s    1.91s    0.00s    3.89s
-// info:   wav                                                 0.17s
-// info: total                                                38.81s
-
-// TODO: edit mode/continue
+// TODO: edit mode/extend
 // - clone source latents on keep regions, add noise, modify mask channels
 // - add silence latent on paint regions (of same range)
 // - mask is 0 : leave frame intact, 1 edit the frame
@@ -296,12 +282,6 @@ const Args = struct {
 // - this is simple/fast enough to be done on CPU in inference.zig
 // - if needed, smooth junctions with blending
 // - extend audio : same but repaint added range at the end
-
-// still this language issue
-// check :
-// - time signature normalization
-// - caption twice ?
-// - language on metadata
 
 // TODO: investigate audio level normalization
 // TODO: sft/base model for max quality

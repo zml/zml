@@ -148,15 +148,6 @@ pub const AceEnc_handler = struct {
         }.call, .{ zml_handler, model.audio_detokenizer, params, opts });
         var detokenize_future_awaited = false;
         errdefer if (!detokenize_future_awaited) if (detokenize_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
-
-        var audio_fqs_future = try zml_handler.io.concurrent(struct {
-            fn call(zml_handler_: *main.Zml_handler, model_: AudioFQS, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
-                        params_.audio_latents }, opts_);
-            }
-        }.call, .{ zml_handler, model.audio_fqs, params, opts });
-        var audio_fqs_future_awaited = false;
-        errdefer if (!audio_fqs_future_awaited) if (audio_fqs_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
         
         var silence_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: SilenceGenerator, opts_: zml.module.CompilationOptions) !zml.Exe {
@@ -181,9 +172,6 @@ pub const AceEnc_handler = struct {
         const detokenize_future_exe = try detokenize_future.await(zml_handler.io);
         detokenize_future_awaited = true;
 
-        const audio_fqs_future_exe = try audio_fqs_future.await(zml_handler.io);
-        audio_fqs_future_awaited = true;
-
         const silence_exe = try silence_future.await(zml_handler.io);
         silence_future_awaited = true;
 
@@ -203,9 +191,6 @@ pub const AceEnc_handler = struct {
             .detokenize_exe = detokenize_future_exe,
             .detokenize_args = try detokenize_future_exe.args(zml_handler.allocator),
             .detokenize_results = try detokenize_future_exe.results(zml_handler.allocator),
-            .audio_fqs_exe = audio_fqs_future_exe,
-            .audio_fqs_args = try audio_fqs_future_exe.args(zml_handler.allocator),
-            .audio_fqs_results = try audio_fqs_future_exe.results(zml_handler.allocator),
             .silence_exe = silence_exe,
             .silence_args = try silence_exe.args(zml_handler.allocator),
             .silence_results = try silence_exe.results(zml_handler.allocator),
@@ -272,10 +257,6 @@ pub const Exes = struct {
     detokenize_args: zml.Exe.Arguments,
     detokenize_results: zml.Exe.Results,
 
-    audio_fqs_exe: zml.Exe,
-    audio_fqs_args: zml.Exe.Arguments,
-    audio_fqs_results: zml.Exe.Results,
-
     silence_exe: zml.Exe,
     silence_args: zml.Exe.Arguments,
     silence_results: zml.Exe.Results,
@@ -296,9 +277,6 @@ pub const Exes = struct {
         self.detokenize_exe.deinit();
         self.detokenize_args.deinit(allocator);
         self.detokenize_results.deinit(allocator);
-        self.audio_fqs_exe.deinit();
-        self.audio_fqs_args.deinit(allocator);
-        self.audio_fqs_results.deinit(allocator);
         self.silence_exe.deinit();
         self.silence_args.deinit(allocator);
         self.silence_results.deinit(allocator);
@@ -341,7 +319,6 @@ pub const AceEnc = struct {
     timbre_encoder: TimbreEncoder,
     audio_tokenizer: AudioTokenizer,
     audio_detokenizer: AudioDetokenizer,
-    audio_fqs: AudioFQS,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: dit.ConfigXl) !AceEnc {
         return .{
@@ -350,7 +327,6 @@ pub const AceEnc = struct {
             .timbre_encoder = try .init(allocator, store.withPrefix("encoder"), config),
             .audio_tokenizer = try .init(allocator, store, config),
             .audio_detokenizer = try .init(allocator, store, config),
-            .audio_fqs = try .init(allocator, store, config),
         };
     }
 
@@ -371,7 +347,6 @@ pub const AceEnc = struct {
         self.timbre_encoder.deinit(allocator);
         self.audio_tokenizer.deinit(allocator);
         self.audio_detokenizer.deinit(allocator);
-        self.audio_fqs.deinit(allocator);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(AceEnc), allocator: std.mem.Allocator) void {
@@ -380,7 +355,6 @@ pub const AceEnc = struct {
          TimbreEncoder.unloadBuffers(&self.timbre_encoder, allocator);
          AudioTokenizer.unloadBuffers(&self.audio_tokenizer, allocator);
          AudioDetokenizer.unloadBuffers(&self.audio_detokenizer, allocator);
-         AudioFQS.unloadBuffers(&self.audio_fqs, allocator);
     }
 
 };
@@ -718,13 +692,8 @@ pub const AudioDetokenizer = struct {
     }
 
     pub fn forward(self: AudioDetokenizer, audio_codes_int: zml.Tensor) zml.Tensor {
-        const x = self.dequantizer.dequantize(audio_codes_int);
-        return self.forwardQuantized(x);
-    }
-
-    pub fn forwardQuantized(self: AudioDetokenizer, quantized_codes: zml.Tensor) zml.Tensor {
-        // Expected input: [t_code, d]
-        var hidden_states = self.embed_tokens.forward(quantized_codes.withTags(.{ .t_code, .d }));
+        const tokens = self.dequantizer.dequantize(audio_codes_int);
+        var hidden_states = self.embed_tokens.forward(tokens.withTags(.{ .t_code, .d }));
         hidden_states = hidden_states.rename(.{ .t_code = .t });
         hidden_states = hidden_states.rename(.{ .d_out = .d });
         // expand each token into pool_window_size patches
@@ -751,7 +720,7 @@ pub const AudioDetokenizer = struct {
         // depatch time dimension from 5hz * p = 5 to 25hz : [t, p, a] -> [t * p, a] -> [a, t * p]
         return hidden_states.merge(.{ .t = .{ .t, .p }}).transpose(.{ .a, .t });
     }
-    
+
 };
 
 pub const AudioTokenizer = struct {
@@ -808,7 +777,7 @@ pub const AudioTokenizer = struct {
         AudioQuantizer.unloadBuffers(&self.quantizer);
     }
 
-    pub fn encode(self: AudioTokenizer, audio_latents: zml.Tensor) zml.Tensor {
+    pub fn forward(self: AudioTokenizer, audio_latents: zml.Tensor) zml.Tensor {
         const patches = audio_latents.withTags(.{ .a, .t }).transpose(.{ .t, .a }).splitAxis(.t, .{ .t_code = .auto, .p = self.pool_window_size });
         
         // Project acoustic latents and pool each 25Hz patch group into one 5Hz token embedding.
@@ -827,44 +796,12 @@ pub const AudioTokenizer = struct {
         hidden_states = self.pool_norm.forward(hidden_states);
 
         // Extract the special token output as the pooled representation.
-        return hidden_states.choose1d(.s, 0).rename(.{ .b = .t_code });
-    }
-
-    pub fn forward(self: AudioTokenizer, audio_latents: zml.Tensor) zml.Tensor {
-        return self.quantizer.quantize(self.encode(audio_latents));
+        const tokens = hidden_states.choose1d(.s, 0).rename(.{ .b = .t_code });
+        
+        return self.quantizer.quantize(tokens);
     }
 
 };
-
-pub const AudioFQS = struct {
-    audio_tokenizer: AudioTokenizer,
-    audio_detokenizer: AudioDetokenizer,
-
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: dit.ConfigXl) !AudioFQS {
-        return .{
-            .audio_tokenizer = try .init(allocator, store, config),
-            .audio_detokenizer = try .init(allocator, store, config),
-        };
-    }
-
-    pub fn deinit(self: AudioFQS, allocator: std.mem.Allocator) void {
-        self.audio_tokenizer.deinit(allocator);
-        self.audio_detokenizer.deinit(allocator);
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(AudioFQS), allocator: std.mem.Allocator) void {
-        AudioTokenizer.unloadBuffers(&self.audio_tokenizer, allocator);
-        AudioDetokenizer.unloadBuffers(&self.audio_detokenizer, allocator);
-    }
-
-    pub fn forward(self: AudioFQS, audio_latents: zml.Tensor) zml.Tensor {
-        const pooled = self.audio_tokenizer.encode(audio_latents);
-        const fsq_features = self.audio_tokenizer.quantizer.quantizeFeatures(pooled);
-        const quantized = self.audio_detokenizer.dequantizer.project_out.forward(fsq_features.convert(.bf16)).rename(.{ .d_out = .d });
-        return self.audio_detokenizer.forwardQuantized(quantized);
-    }
-};
-
 
 pub const AudioQuantizer = struct {
     project_in: zml.nn.Linear,
@@ -886,46 +823,28 @@ pub const AudioQuantizer = struct {
         if (self.project_in.bias) |*bias| bias.deinit();
     }
 
-    pub fn quantizeFeatures(self: AudioQuantizer, audio_codes: zml.Tensor) zml.Tensor {
+    pub fn quantize(self: AudioQuantizer, audio_codes: zml.Tensor) zml.Tensor {
         const projected = self.project_in.forward(audio_codes.withTags(.{ .t_code, .d })).rename(.{ .d_out = .d }).convert(.f32);
+        const levels = self.fsq_input_levels;
 
         // ResidualFSQ in ACE-Step uses one FSQ layer with preserve_symmetry=true and bound_hard_clamp=true.
         // The input is first softly clamped per dimension, then converted to level indices with:
         // floor((levels - 1) * (clamp(x, -1, 1) + 1) / 2 + 0.5).
-        const levels = self.fsq_input_levels;
+        
         const idx0 = quantizeLevel(projected.choose1d(.d, 0), levels[0]);
         const idx1 = quantizeLevel(projected.choose1d(.d, 1), levels[1]);
         const idx2 = quantizeLevel(projected.choose1d(.d, 2), levels[2]);
         const idx3 = quantizeLevel(projected.choose1d(.d, 3), levels[3]);
         const idx4 = quantizeLevel(projected.choose1d(.d, 4), levels[4]);
         const idx5 = quantizeLevel(projected.choose1d(.d, 5), levels[5]);
-
-        const q0 = normalizeQuantLevel(idx0, levels[0]);
-        const q1 = normalizeQuantLevel(idx1, levels[1]);
-        const q2 = normalizeQuantLevel(idx2, levels[2]);
-        const q3 = normalizeQuantLevel(idx3, levels[3]);
-        const q4 = normalizeQuantLevel(idx4, levels[4]);
-        const q5 = normalizeQuantLevel(idx5, levels[5]);
-
-        return zml.Tensor.stack(&.{ q0, q1, q2, q3, q4, q5 }, .last, .d);
-    }
-
-    pub fn quantize(self: AudioQuantizer, audio_codes: zml.Tensor) zml.Tensor {
-        const levels = self.fsq_input_levels;
-        const features = self.quantizeFeatures(audio_codes);
-        const idx0 = scaleQuantLevel(features.choose1d(.d, 0), levels[0]);
-        const idx1 = scaleQuantLevel(features.choose1d(.d, 1), levels[1]);
-        const idx2 = scaleQuantLevel(features.choose1d(.d, 2), levels[2]);
-        const idx3 = scaleQuantLevel(features.choose1d(.d, 3), levels[3]);
-        const idx4 = scaleQuantLevel(features.choose1d(.d, 4), levels[4]);
-        const idx5 = scaleQuantLevel(features.choose1d(.d, 5), levels[5]);
-
+        
         const b0: f32 = 1.0;
         const b1: f32 = @floatFromInt(levels[0]);
         const b2: f32 = b1 * @as(f32, @floatFromInt(levels[1]));
         const b3: f32 = b2 * @as(f32, @floatFromInt(levels[2]));
         const b4: f32 = b3 * @as(f32, @floatFromInt(levels[3]));
         const b5: f32 = b4 * @as(f32, @floatFromInt(levels[4]));
+        
         var indices = idx0.scale(b0);
         indices = indices.add(idx1.scale(b1));
         indices = indices.add(idx2.scale(b2));
@@ -950,16 +869,6 @@ pub const AudioQuantizer = struct {
         return level_index;
     }
 
-    fn normalizeQuantLevel(x: zml.Tensor, level: u32) zml.Tensor {
-        const xf = x.convert(.f32);
-        const denom = @as(f32, @floatFromInt(@max(level - 1, 1)));
-        return xf.div(zml.Tensor.scalar(denom, .f32).broad(xf.shape())).scale(2.0).addConstant(-1.0);
-    }
-
-    fn scaleQuantLevel(x: zml.Tensor, level: u32) zml.Tensor {
-        const levels_minus_1: f32 = @floatFromInt(@max(level - 1, 1));
-        return x.addConstant(1.0).scale(levels_minus_1 / 2.0);
-    }
 };
 
 pub const AudioDequantizer = struct {
