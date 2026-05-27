@@ -71,7 +71,7 @@ pub fn deviceId(self: *const Monitor, allocator: std.mem.Allocator, handle: Hand
     return std.mem.trim(u8, raw, &std.ascii.whitespace);
 }
 
-fn seed(self: *Monitor) !void {
+inline fn seed(self: *Monitor) !void {
     var device_usage = collectDeviceUsage(self.allocator, self.io, self.devices) catch DeviceUsage{};
     defer device_usage.deinit(self.allocator);
 
@@ -97,7 +97,7 @@ pub fn saveProcessPrevious(self: *Monitor, usage: *const ProcessUsage) !void {
     }
 }
 
-fn discoverIntelDevices(allocator: std.mem.Allocator, io: std.Io) ![]Device {
+inline fn discoverIntelDevices(allocator: std.mem.Allocator, io: std.Io) ![]Device {
     var devices: std.ArrayList(Device) = .empty;
     errdefer devices.deinit(allocator);
 
@@ -122,7 +122,7 @@ fn discoverIntelDevices(allocator: std.mem.Allocator, io: std.Io) ![]Device {
     return devices.toOwnedSlice(allocator);
 }
 
-fn openDevice(allocator: std.mem.Allocator, io: std.Io, render_idx: usize) !Device {
+inline fn openDevice(allocator: std.mem.Allocator, io: std.Io, render_idx: usize) !Device {
     const drm_path = try std.fmt.allocPrint(allocator, "/sys/class/drm/renderD{d}", .{render_idx});
     errdefer allocator.free(drm_path);
 
@@ -288,7 +288,7 @@ pub fn powerMilliwatts(previous: ?EnergySample, current: ?EnergySample) ?u64 {
     return milliwattsFromEnergyDelta(prev.micro_joules, cur.micro_joules, prev.timestamp_ns, cur.timestamp_ns);
 }
 
-fn milliwattsFromEnergyDelta(prev_uj: u64, cur_uj: u64, prev_ns: u64, cur_ns: u64) ?u64 {
+inline fn milliwattsFromEnergyDelta(prev_uj: u64, cur_uj: u64, prev_ns: u64, cur_ns: u64) ?u64 {
     if (cur_uj < prev_uj or cur_ns <= prev_ns) return null;
     const energy_delta = cur_uj - prev_uj;
     const time_delta = cur_ns - prev_ns;
@@ -296,18 +296,18 @@ fn milliwattsFromEnergyDelta(prev_uj: u64, cur_uj: u64, prev_ns: u64, cur_ns: u6
     return energy_delta * 1_000_000 / time_delta;
 }
 
-fn readFreq(allocator: std.mem.Allocator, io: std.Io, dev: *const Device, file: []const u8) !u64 {
+inline fn readFreq(allocator: std.mem.Allocator, io: std.Io, dev: *const Device, file: []const u8) !u64 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/tile0/gt0/freq0/{s}", .{ dev.dev_path, file });
     return smi_sysfs.readInt(allocator, io, path);
 }
 
-fn parseRenderIndex(name: []const u8) ?usize {
+inline fn parseRenderIndex(name: []const u8) ?usize {
     if (!std.mem.startsWith(u8, name, "renderD")) return null;
     return std.fmt.parseInt(usize, name["renderD".len..], 10) catch null;
 }
 
-fn findHwmon(allocator: std.mem.Allocator, io: std.Io, dev_path: []const u8) !?[]const u8 {
+inline fn findHwmon(allocator: std.mem.Allocator, io: std.Io, dev_path: []const u8) !?[]const u8 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const hwmon_root = try std.fmt.bufPrint(&path_buf, "{s}/hwmon", .{dev_path});
     var dir = std.Io.Dir.openDirAbsolute(io, hwmon_root, .{ .iterate = true }) catch return null;
@@ -360,7 +360,7 @@ inline fn readNumberedSuffix(allocator: std.mem.Allocator, io: std.Io, hwmon: []
     return smi_sysfs.readInt(allocator, io, path);
 }
 
-fn readLargestResource(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !u64 {
+inline fn readLargestResource(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !u64 {
     var file = try std.Io.Dir.openFile(.cwd(), io, path, .{ .mode = .read_only });
     defer file.close(io);
 
@@ -383,7 +383,7 @@ fn readLargestResource(allocator: std.mem.Allocator, io: std.Io, path: []const u
     return largest;
 }
 
-fn resourceLineSize(line: []const u8) ?u64 {
+inline fn resourceLineSize(line: []const u8) ?u64 {
     var it = std.mem.tokenizeAny(u8, line, " \t");
     const base = parseHex(it.next() orelse return null) orelse return null;
     const end = parseHex(it.next() orelse return null) orelse return null;
@@ -392,13 +392,13 @@ fn resourceLineSize(line: []const u8) ?u64 {
     return if (size >= 256 * 1024 * 1024) size else null;
 }
 
-fn parseHex(raw: []const u8) ?u64 {
+inline fn parseHex(raw: []const u8) ?u64 {
     const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
     const digits = if (std.mem.startsWith(u8, trimmed, "0x")) trimmed[2..] else trimmed;
     return std.fmt.parseInt(u64, digits, 16) catch null;
 }
 
-fn pcieGenFromSpeed(raw: []const u8) !u64 {
+inline fn pcieGenFromSpeed(raw: []const u8) !u64 {
     const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
     if (std.mem.startsWith(u8, trimmed, "2.5")) return 1;
     if (std.mem.startsWith(u8, trimmed, "5.0") or std.mem.startsWith(u8, trimmed, "5 ")) return 2;
@@ -409,7 +409,7 @@ fn pcieGenFromSpeed(raw: []const u8) !u64 {
     return error.not_found;
 }
 
-fn pcieBandwidthFromLink(gen: u64, width: u64) ?u64 {
+inline fn pcieBandwidthFromLink(gen: u64, width: u64) ?u64 {
     const lane_mb_s: u64 = switch (gen) {
         1 => 250,
         2 => 500,
@@ -439,7 +439,7 @@ const ParsedFdinfo = struct {
     engine_time_seen: bool = false,
 };
 
-fn parseFdinfoFile(path: [:0]const u8, timestamp_ns: u64) !ParsedFdinfo {
+inline fn parseFdinfoFile(path: [:0]const u8, timestamp_ns: u64) !ParsedFdinfo {
     const linux = std.os.linux;
     const open_rc = linux.open(path.ptr, .{
         .ACCMODE = .RDONLY,
@@ -484,7 +484,7 @@ fn parseFdinfoFile(path: [:0]const u8, timestamp_ns: u64) !ParsedFdinfo {
     return parsed;
 }
 
-fn finishFdinfo(self: *ParsedFdinfo) void {
+inline fn finishFdinfo(self: *ParsedFdinfo) void {
     if (self.resident_vram_kib > 0) {
         self.sample.mem_kib = self.resident_vram_kib;
     } else if (self.total_vram_kib > 0) {
@@ -503,7 +503,7 @@ fn finishFdinfo(self: *ParsedFdinfo) void {
     }
 }
 
-fn parseFdinfoLine(parsed: *ParsedFdinfo, line: []const u8, timestamp_ns: u64) void {
+inline fn parseFdinfoLine(parsed: *ParsedFdinfo, line: []const u8, timestamp_ns: u64) void {
     if (std.mem.startsWith(u8, line, "drm-pdev:")) {
         parsed.bus_device_identifier = parseBdf(line["drm-pdev:".len..]);
         return;
