@@ -179,11 +179,6 @@ pub const Router = struct {
         const denom = router_scores.sum(.topk).addConstant(1e-20);
         const normalized = router_scores.div(denom);
 
-        // expert_scores.print("zml_gate_prob");
-        // expert_scores_with_bias.print("zml_gate_prob_with_bias");
-        // router_scores.print("zml_topk_prob");
-        // normalized.print("zml_renormalized");
-
         return .{ normalized, topk_ids };
     }
 };
@@ -255,13 +250,6 @@ pub const Moe = struct {
         // hardcoded zml.moe.metadata, zml.moe.parameters
         const moe_metadata = zml.moe.Metadata.init(.{ .triton = .{} });
         const moe_parameters = zml.moe.Parameters.init(.{ .triton = .{ .num_experts_per_tok = self.router.num_experts_per_tok, .activation = .silu } });
-
-        // in Moe.forward, before forwardMoe
-        topk_ids.print("zml_topk_ids");
-
-        topk_ids.print("zml_topk_ids"); // → check min/max ≥ 256
-        scaled.print("zml_topk_weights"); // → compare to Python routing_weights
-        input.print("zml_moe_input"); // → compare to layer 42 in.0 fixture
 
         // get all expert outputs as tensor via fused triton kernel instead of Python loop
         // NOTE: swiglu limit not considered. may have to edit
