@@ -205,32 +205,18 @@ pub const Buffer = struct {
             shard.deinit(platform.pjrt_api);
         };
 
-        const minor_to_major = constants.minorToMajor(res._shape.rank()); // Rank doesn't change with sharding.
         const element_type = pjrtx.bufferTypeFromDtype(res._shape.dtype()); // dtype doesn't change with sharding.
         for (res._sharding.devicesInCanonicalOrder()) |device| {
             const placement = try res._sharding.placement(res._shape, device);
-            var default_layout: ?pjrt.DefaultMemoryLayout = null;
-            const layout: pjrt.MemoryLayout = switch (platform.target) {
-                .tpu => blk: {
-                    default_layout = try platform.pjrt_client.defaultMemoryLayout(
-                        platform.pjrt_api,
-                        pjrtx.bufferTypeFromDtype(placement.shape.dtype()),
-                        placement.shape.dims(),
-                    );
-                    break :blk default_layout.?.toMemoryLayout();
-                },
-                else => .{
-                    .tiled = .{
-                        .minor_to_major = minor_to_major,
-                        .tile_dims = &.{},
-                        .tile_dims_sizes = &.{},
-                    },
-                },
-            };
+            const default_layout = try platform.pjrt_client.defaultMemoryLayout(
+                platform.pjrt_api,
+                pjrtx.bufferTypeFromDtype(placement.shape.dtype()),
+                placement.shape.dims(),
+            );
             const args: pjrt.Client.CreateUninitializedBufferArgs = .{
                 .dims = placement.shape.dims(),
                 .element_type = element_type,
-                .layout = layout,
+                .layout = default_layout.toMemoryLayout(),
                 .dst = .{ .memory = placement.memory(platform, opts.memory).pjrt_memory },
             };
 
