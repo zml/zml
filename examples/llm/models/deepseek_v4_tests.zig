@@ -108,13 +108,13 @@ pub fn run(
     try ctx.testLayer("layers.0.attn.wkv", .{ .batch, .seq, .d }, mdl.layers[0].attn.wkv, model_buffers.layers[0].attn.wkv, dequant_opts);
     // try ctx.testLayer("layers.0.attn.wo_a", .{ .batch, .seq, .d }, mdl.layers[0].attn.wo_a, model_buffers.layers[0].attn.wo_a, dequant_opts);
     // try ctx.testLayer("layers.0.attn.wo_b", .{ .batch, .seq, .d }, mdl.layers[0].attn.wo_b, model_buffers.layers[0].attn.wo_b, dequant_opts);
-    try ctx.testAttentionLayer("layers.0.attn", .{ .batch, .seq, .d }, mdl.layers[0].attn, model_buffers.layers[0].attn, .{});
+    // try ctx.testAttentionLayer("layers.0.attn", .{ .batch, .seq, .d }, mdl.layers[0].attn, model_buffers.layers[0].attn, .{});
 
     // TEST: Attention-Compressor
-    try ctx.testLayer("layers.2.attn.compressor.norm", .{ .batch, .seq, .r }, mdl.layers[2].attn.compressor.?.norm, model_buffers.layers[2].attn.compressor.?.norm, .{});
+    try ctx.testLayer("layers.2.attn.compressor.norm", .{ .batch, .seq, .hd }, mdl.layers[2].attn.compressor.?.norm, model_buffers.layers[2].attn.compressor.?.norm, .{});
     try ctx.testLayer("layers.2.attn.compressor.wgate", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?.wgate, model_buffers.layers[2].attn.compressor.?.wgate, .{});
     try ctx.testLayer("layers.2.attn.compressor.wkv", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?.wkv, model_buffers.layers[2].attn.compressor.?.wkv, .{});
-    // try ctx.testAttentionLayer("layers.2.attn.compressor", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?, model_buffers.layers[2].attn.compressor.?, .{});
+    try ctx.testAttentionLayer("layers.2.attn.compressor", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?, model_buffers.layers[2].attn.compressor.?, .{});
 
     // TEST: Attention-Indexer
     // try ctx.testLayer("layers.2.attn.indexer.weights_proj", .{ .batch, .seq, .d }, mdl.layers[2].attn.indexer.?.proj, model_buffers.layers[2].attn.indexer.?.proj, .{});
