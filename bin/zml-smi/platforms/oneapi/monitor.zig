@@ -81,7 +81,7 @@ fn seed(self: *Monitor) !void {
     defer device_usage.deinit(self.allocator);
 
     for (self.devices, 0..) |*dev, idx| {
-        dev.energy_prev = readEnergy(self.allocator, self.io, dev.*) catch null;
+        dev.energy_prev = readEnergy(self.allocator, self.io, dev) catch null;
         dev.activity_prev = if (device_usage.get(@intCast(idx))) |sample| sample.engine else null;
     }
 
@@ -150,23 +150,19 @@ fn openDevice(allocator: std.mem.Allocator, io: std.Io, render_idx: usize) !Devi
     };
 }
 
-fn handleIndex(handle: Handle) usize {
-    return @intFromEnum(handle);
-}
-
 pub fn device(self: *Monitor, handle: Handle) !*Device {
-    const idx = handleIndex(handle);
+    const idx = @intFromEnum(handle);
     if (idx >= self.devices.len) return error.not_found;
     return &self.devices[idx];
 }
 
 fn deviceConst(self: *const Monitor, handle: Handle) !*const Device {
-    const idx = handleIndex(handle);
+    const idx = @intFromEnum(handle);
     if (idx >= self.devices.len) return error.not_found;
     return &self.devices[idx];
 }
 
-pub fn readTemperature(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
+pub fn readTemperature(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
     const hwmon = dev.hwmon_path orelse return error.not_found;
     const milli_c = readHwmonInput(allocator, io, hwmon, "temp", "pkg") catch
         readHwmonInput(allocator, io, hwmon, "temp", "gpu") catch
@@ -175,7 +171,7 @@ pub fn readTemperature(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u
     return (milli_c + 500) / 1000;
 }
 
-pub fn readEnergy(allocator: std.mem.Allocator, io: std.Io, dev: Device) !EnergySample {
+pub fn readEnergy(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !EnergySample {
     const hwmon = dev.hwmon_path orelse return error.not_found;
     const micro_joules = readHwmonInput(allocator, io, hwmon, "energy", "card") catch
         readHwmonInput(allocator, io, hwmon, "energy", "pkg") catch
@@ -185,41 +181,41 @@ pub fn readEnergy(allocator: std.mem.Allocator, io: std.Io, dev: Device) !Energy
         .timestamp_ns = @intCast(std.Io.Timestamp.now(io, .awake).nanoseconds),
     };
 }
-pub fn readPowerLimit(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
+pub fn readPowerLimit(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
     const hwmon = dev.hwmon_path orelse return error.not_found;
     const microwatts = readNumberedSuffix(allocator, io, hwmon, "power", 1, "cap") catch
         try readNumberedSuffix(allocator, io, hwmon, "power", 1, "max");
     return microwatts / 1000;
 }
 
-pub fn readClockGraphics(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
+pub fn readClockGraphics(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
     return readFreq(allocator, io, dev, "act_freq") catch readFreq(allocator, io, dev, "cur_freq");
 }
 
-pub fn readMaxClockGraphics(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
+pub fn readMaxClockGraphics(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
     return readFreq(allocator, io, dev, "max_freq");
 }
 
-pub fn readMemTotal(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
+pub fn readMemTotal(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/resource", .{dev.dev_path});
     return readLargestResource(allocator, io, path);
 }
 
-pub fn readPcieLinkGen(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
+pub fn readPcieLinkGen(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_speed", .{dev.dev_path});
     const raw = try smi_sysfs.readString(allocator, io, path);
     return pcieGenFromSpeed(raw);
 }
 
-pub fn readPcieLinkWidth(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
+pub fn readPcieLinkWidth(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_width", .{dev.dev_path});
     return smi_sysfs.readInt(allocator, io, path);
 }
 
-pub fn readPcieBandwidth(allocator: std.mem.Allocator, io: std.Io, dev: Device) !u64 {
+pub fn readPcieBandwidth(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
     const gen = try readPcieLinkGen(allocator, io, dev);
     const width = try readPcieLinkWidth(allocator, io, dev);
     return pcieBandwidthFromLink(gen, width) orelse error.not_found;
@@ -311,7 +307,7 @@ fn milliwattsFromEnergyDelta(prev_uj: u64, cur_uj: u64, prev_ns: u64, cur_ns: u6
     return energy_delta * 1_000_000 / time_delta;
 }
 
-fn readFreq(allocator: std.mem.Allocator, io: std.Io, dev: Device, file: []const u8) !u64 {
+fn readFreq(allocator: std.mem.Allocator, io: std.Io, dev: *const Device, file: []const u8) !u64 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/tile0/gt0/freq0/{s}", .{ dev.dev_path, file });
     return smi_sysfs.readInt(allocator, io, path);

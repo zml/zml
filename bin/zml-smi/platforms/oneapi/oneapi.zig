@@ -17,7 +17,6 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) !OneApi {
     };
 }
 
-
 pub fn handleByIndex(self: *const OneApi, device_id: usize) !Handle {
     return self.monitor.handleByIndex(device_id);
 }
@@ -42,7 +41,7 @@ pub fn driverVersion(self: *const OneApi, allocator: std.mem.Allocator) ![]const
 
 pub fn powerUsage(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    const current = Monitor.readEnergy(allocator, self.io, dev.*) catch |err| {
+    const current = Monitor.readEnergy(allocator, self.io, dev) catch |err| {
         dev.energy_prev = null;
         return err;
     };
@@ -56,12 +55,12 @@ pub fn powerUsage(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !
 
 pub fn powerLimit(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    return Monitor.readPowerLimit(allocator, self.io, dev.*);
+    return Monitor.readPowerLimit(allocator, self.io, dev);
 }
 
 pub fn temperature(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    return Monitor.readTemperature(allocator, self.io, dev.*);
+    return Monitor.readTemperature(allocator, self.io, dev);
 }
 
 pub fn gpuUtil(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
@@ -82,12 +81,12 @@ pub fn gpuUtil(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64
 
 pub fn clockGraphics(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    return Monitor.readClockGraphics(allocator, self.io, dev.*);
+    return Monitor.readClockGraphics(allocator, self.io, dev);
 }
 
 pub fn maxClockGraphics(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    return Monitor.readMaxClockGraphics(allocator, self.io, dev.*);
+    return Monitor.readMaxClockGraphics(allocator, self.io, dev);
 }
 
 pub fn memUsed(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
@@ -101,22 +100,22 @@ pub fn memUsed(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64
 
 pub fn memTotal(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    return Monitor.readMemTotal(allocator, self.io, dev.*);
+    return Monitor.readMemTotal(allocator, self.io, dev);
 }
 
 pub fn pcieLinkGen(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    return Monitor.readPcieLinkGen(allocator, self.io, dev.*);
+    return Monitor.readPcieLinkGen(allocator, self.io, dev);
 }
 
 pub fn pcieLinkWidth(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    return Monitor.readPcieLinkWidth(allocator, self.io, dev.*);
+    return Monitor.readPcieLinkWidth(allocator, self.io, dev);
 }
 
 pub fn pcieBandwidth(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    return Monitor.readPcieBandwidth(allocator, self.io, dev.*);
+    return Monitor.readPcieBandwidth(allocator, self.io, dev);
 }
 
 pub fn processList(self: *OneApi, allocator: std.mem.Allocator) !std.ArrayList(ProcessInfo) {
