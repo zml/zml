@@ -17,9 +17,6 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) !OneApi {
     };
 }
 
-pub fn deviceCount(self: *const OneApi) usize {
-    return self.monitor.deviceCount();
-}
 
 pub fn handleByIndex(self: *const OneApi, device_id: usize) !Handle {
     return self.monitor.handleByIndex(device_id);

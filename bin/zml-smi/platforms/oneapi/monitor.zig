@@ -64,10 +64,6 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) !Monitor {
     return monitor;
 }
 
-pub fn deviceCount(self: *const Monitor) usize {
-    return self.devices.len;
-}
-
 pub fn handleByIndex(self: *const Monitor, device_id: usize) !Handle {
     if (device_id >= self.devices.len) return error.not_found;
     return @enumFromInt(@as(u32, @intCast(device_id)));

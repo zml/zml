@@ -11,7 +11,7 @@ pub fn start(collector: *Collector) !void {
     const oneapi = try collector.arena.create(OneApi);
     oneapi.* = try OneApi.init(collector.arena, collector.io);
 
-    const count = oneapi.deviceCount();
+    const count = oneapi.monitor.devices.len;
     const dev_offset: u16 = @intCast(collector.device_infos.items.len);
 
     for (0..count) |i| {
