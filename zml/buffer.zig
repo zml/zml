@@ -112,7 +112,7 @@ pub const Buffer = struct {
         for (res._sharding.devicesInCanonicalOrder()) |device| {
             const placement = try res._sharding.placement(res._shape, device);
             const sub_slice = placement.shardSlice(slice);
-            var default_layout = try platform.pjrt_client.defaultMemoryLayout(
+            const default_layout = try platform.pjrt_client.defaultMemoryLayout(
                 platform.pjrt_api,
                 pjrtx.bufferTypeFromDtype(placement.shape.dtype()),
                 placement.shape.dims(),
