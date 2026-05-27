@@ -513,7 +513,18 @@ pub const ShortConv = struct {
             });
             break :b .{ conv_out_.slice1d(.seq, .{ .end = Bx.dim(.seq) }), updated };
         } else b: {
-            const updated = layer_state.rollRight1d(.seq, -1).scatterSlices(.{ .seq = tokens_position_offset.convert(.u32).clamp(.scalar(@as(u32, 0), .u32), .scalar(self.config.conv_L_cache - 1, .u32)) }, Bx, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override });
+            // TT-FIX: `rollRight1d + scatterSlices` lowered to ~8 small
+            // `ttnn.scatter` ops per layer (~80 total across 10 conv layers).
+            // Replace with `concat(cache[1:K], Bx)` — 1 slice + 1 concat. Math
+            // is identical: with K=3 we always want the last K values as a
+            // sliding window. The cache is zero-initialized so early positions
+            // (pos < K-1) work correctly without the `pos.clamp(0, K-1)`
+            // scatter index.
+            const K_dim: i64 = @intCast(self.config.conv_L_cache);
+            const updated = zml.Tensor.concatenate(&.{
+                layer_state.slice1d(.seq, .{ .start = 1, .end = K_dim }),
+                Bx,
+            }, layer_state.axis(.seq));
             const kernel = self.kernel.squeeze(.in).rename(.{ .out = .d, .kernel_size = .seq });
             const sh = kernel.shape().insert(.last, .{ .batch = tokens_position_offset.dim(.batch) });
             // Read back this layer's full window for the elementwise conv.
@@ -572,10 +583,15 @@ pub const Attention = struct {
     ) struct { zml.Tensor, KvCache } {
         // TT-FIX: replicate input `.d` so q/k/v share a gather; partition
         // the projected heads `.h = .model` to match the sharded KvCache.
-        const x_qkv = x.withPartitioning(.{ .d = .replicated });
-        var q = self.q_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
-        var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
-        var v = self.v_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
+        // TT-FIX: rename `.batch` → `.b` so `zml.attention.attention` finds
+        // the batch tag and stays in the rank-4 path. Then transpose
+        // `.{.h, .b, .seq, .hd}` so the metal kernel's
+        // `cos.shape[0]==1 && cos.shape[1]==1` assert passes — required for
+        // `ttnn.rotary_embedding` to fuse. Mirrors the Llama path.
+        const x_qkv = x.withPartitioning(.{ .d = .replicated }).rename(.{ .batch = .b });
+        var q = self.q_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim }).transpose(.{ .h, .b, .seq, .hd });
+        var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim }).transpose(.{ .h, .b, .seq, .hd });
+        var v = self.v_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim }).transpose(.{ .h, .b, .seq, .hd });
         q = q.withPartitioning(.{ .h = .model, .hd = .replicated });
         k = k.withPartitioning(.{ .h = .model, .hd = .replicated });
         v = v.withPartitioning(.{ .h = .model, .hd = .replicated });
@@ -584,10 +600,10 @@ pub const Attention = struct {
         k = self.k_layernorm.forward(k);
 
         const token_positions = b: {
-            const sh = tokens_position_offset.shape().insert(.last, .{ .seq = x.dim(.seq) });
+            const sh = tokens_position_offset.shape().rename(.{ .batch = .b }).insert(.last, .{ .seq = x.dim(.seq) });
             // Match the dtype of `tokens_position_offset` (now i32 to satisfy
             // tt-metal's update_cache `update_idxs` INT32 requirement).
-            break :b zml.Tensor.iota(sh, .seq).convert(tokens_position_offset.dtype()).add(tokens_position_offset.broad(sh));
+            break :b zml.Tensor.iota(sh, .seq).convert(tokens_position_offset.dtype()).add(tokens_position_offset.rename(.{ .batch = .b }).broad(sh));
         };
 
         q = zml.nn.rope(q, token_positions, self.rope_opts);
@@ -597,15 +613,15 @@ pub const Attention = struct {
         k = k.rename(.{ .seq = .k });
         v = v.rename(.{ .seq = .k });
 
-        const new_kv_cache = kv_cache.update(k, v, tokens_position_offset);
-        k = new_kv_cache.keys();
-        v = new_kv_cache.values();
+        // Cache update uses `.batch` tag (KV cache stores `.batch`), so rename
+        // `.b` → `.batch` only for the cache write, then back to `.b` for SDPA.
+        const new_kv_cache = kv_cache.update(k.rename(.{ .b = .batch }), v.rename(.{ .b = .batch }), tokens_position_offset);
+        k = new_kv_cache.keys().rename(.{ .batch = .b });
+        v = new_kv_cache.values().rename(.{ .batch = .b });
 
-        stdx.debug.assert(q.dim(.batch) == 1, "LFM attention currently expects batch size 1 for flash attention backend, got {}", .{q.dim(.batch)});
-        const attn = switch (attention_parameters) {
-            .vanilla => zml.attention.attention.attention(q, k, v, tokens_position_offset, attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }),
-            else => zml.attention.attention.attention(q.squeeze(.batch), k.squeeze(.batch), v.squeeze(.batch), tokens_position_offset.squeeze(.batch), attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .seq }).insertAxes(.seq, .{.batch}),
-        };
+        stdx.debug.assert(q.dim(.b) == 1, "LFM attention currently expects batch size 1, got {}", .{q.dim(.b)});
+        const tok_pos_b = tokens_position_offset.rename(.{ .batch = .b });
+        const attn = zml.attention.attention.attention(q, k, v, tok_pos_b, attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }).rename(.{ .b = .batch, .q = .seq });
 
         // TT-FIX: terminate the head-shard via reduce_scatter at out_proj,
         // then pin `.d = .replicated` so the residual add stays replicated.

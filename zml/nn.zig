@@ -297,8 +297,12 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
     const sin = inv_freq_pos.sin().scale(scaling).convert(x.dtype()).broad(x_real.shape());
 
     // apply rotation
+    // TT-FIX: `y_imag` operand-order flipped so the TTIR
+    // `RoPEComplexRotationFusingPattern` matches
+    // (`isSecondHalfSlice(addSlice0) && isFirstHalfSlice(addSlice1)`).
+    // Mathematically identical (add commutes); add reorder gates the fusion.
     const y_real = x_real.mul(cos).sub(x_imag.mul(sin));
-    const y_imag = x_real.mul(sin).add(x_imag.mul(cos));
+    const y_imag = x_imag.mul(cos).add(x_real.mul(sin));
 
     // flatten last dimensions
     return mergeRealImg(y_real, y_imag, opts.layout);
