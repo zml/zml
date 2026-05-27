@@ -5,7 +5,6 @@ const zml = @import("zml");
 pub const SessionOptions = struct {
     seqlen: u32,
     backend: zml.attention.attention.Backend,
-    single: bool,
 };
 
 pub const GenerationOptions = struct {
