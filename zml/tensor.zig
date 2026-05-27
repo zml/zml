@@ -281,6 +281,46 @@ pub const Tensor = struct {
         return self;
     }
 
+    test reuseBuffer {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+        const io = std.testing.io;
+
+        const inputs: [2][6]f32 = .{ .{ -3.0, -2, -1, 1, 2, 3 }, .{ 1, 2, 3, 4, 5, -5 } };
+        const left = Tensor.init(.{ 2, 6 }, .f32);
+        const right = Tensor.init(.{ 2, 6 }, .f32);
+
+        const Local = struct {
+            pub fn memcopy(x: Tensor, y: Tensor) Tensor {
+                return x.addConstant(1).reuseBuffer(y);
+            }
+        };
+
+        const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.memcopy, .{ left, right }, platform, .{});
+        defer exe.deinit();
+
+        var left_d = try zml.Buffer.fromBytes(io, platform, left.shape(), .replicated, @ptrCast(&inputs));
+        defer left_d.deinit();
+
+        var right_d = try zml.Buffer.uninitialized(io, platform, left.shape(), .replicated, .{});
+        defer right_d.deinit();
+
+        var right_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
+        for (0..right_d.numDevices()) |dev| {
+            right_memory[dev] = right_d.opaqueDevicePtr(dev);
+        }
+
+        const output_d = try zml.testing.autoCall(std.testing.allocator, io, &exe, Local.memcopy, .{ left_d, right_d });
+
+        var output_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
+        for (0..output_d.numDevices()) |dev| {
+            output_memory[dev] = output_d.opaqueDevicePtr(dev);
+        }
+
+        // Check that right_d and output_d point to the same addresses on the devices.
+        try std.testing.expectEqualSlices(*anyopaque, right_memory[0..right_d.numDevices()], output_memory[0..output_d.numDevices()]);
+    }
+
     /// Returns a Tensor containing the absolute value of each element of the input Tensor.
     pub fn abs(self: Tensor) Tensor {
         const op = dialects.stablehlo.abs(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());

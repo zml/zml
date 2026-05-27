@@ -77,6 +77,10 @@ pub const Buffer = struct {
         return self._shape;
     }
 
+    pub fn numDevices(self: Buffer) u32 {
+        return @intCast(self._shards.len);
+    }
+
     pub fn shards(self: *const Buffer) ShardIterator {
         return .{
             ._platform = self._platform,
@@ -118,10 +122,12 @@ pub const Buffer = struct {
         const layout = platform.defaultMemoryLayout(sh);
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
+            // TODO: detect this failure earlier and out of the for loop.
+            const memory = platform.devices[device.id].memory(opts.memory) orelse @panic("Device doesn't have this memory");
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
                 .data = placement.shardPtr(device.coords, slice),
-                .dst = .{ .memory = if (platform.devices[device.id].memory(opts.memory)) |m| m.pjrt_memory else @panic("Device doesn't have this memory") },
+                .dst = .{ .memory = memory.pjrt_memory },
                 // Constant across devices
                 .layout = layout,
                 .dims = shard_dims,
@@ -214,9 +220,10 @@ pub const Buffer = struct {
         const layout = platform.defaultMemoryLayout(res._shape);
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
+            const memory = platform.devices[device.id].memory(opts.memory) orelse @panic("Device doesn't have this memory");
             const args: pjrt.Client.CreateUninitializedBufferArgs = .{
                 // Change for each device
-                .dst = .{ .memory = platform.devices[device.id].memory(opts.memory).pjrt_memory },
+                .dst = .{ .memory = memory.pjrt_memory },
                 // Constant across devices
                 .layout = layout,
                 .dims = shard_dims,
@@ -306,5 +313,9 @@ pub const Buffer = struct {
         }
 
         return byte_size;
+    }
+
+    pub fn opaqueDevicePtr(self: Buffer, device_id: usize) *anyopaque {
+        return self._shards.get(device_id).opaqueDeviceMemoryDataPointer(self._platform.pjrt_api) catch unreachable;
     }
 };
