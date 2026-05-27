@@ -18,7 +18,8 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) !OneApi {
 }
 
 pub fn handleByIndex(self: *const OneApi, device_id: usize) !Handle {
-    return self.monitor.handleByIndex(device_id);
+    if (device_id >= self.monitor.devices.len) return error.not_found;
+    return @enumFromInt(@as(u32, @intCast(device_id)));
 }
 
 pub fn name(self: *const OneApi, allocator: std.mem.Allocator, handle: Handle) ![]const u8 {

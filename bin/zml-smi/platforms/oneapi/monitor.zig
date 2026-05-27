@@ -63,11 +63,6 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) !Monitor {
     return monitor;
 }
 
-pub fn handleByIndex(self: *const Monitor, device_id: usize) !Handle {
-    if (device_id >= self.devices.len) return error.not_found;
-    return @enumFromInt(@as(u32, @intCast(device_id)));
-}
-
 pub fn deviceId(self: *const Monitor, allocator: std.mem.Allocator, handle: Handle) ![]const u8 {
     const dev = try self.device(handle);
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -622,7 +617,7 @@ pub fn formatBdf(parts: BdfParts) [bus_device_identifier_len]u8 {
     return buf;
 }
 
-fn parseBdf(raw: []const u8) ?[bus_device_identifier_len]u8 {
+inline fn parseBdf(raw: []const u8) ?[bus_device_identifier_len]u8 {
     const trimmed = std.mem.trim(u8, raw, " \t\n");
     var out: [bus_device_identifier_len]u8 = undefined;
     if (trimmed.len == bus_device_identifier_len) {
@@ -636,12 +631,12 @@ fn parseBdf(raw: []const u8) ?[bus_device_identifier_len]u8 {
     return null;
 }
 
-fn firstInt(raw: []const u8) u64 {
+inline fn firstInt(raw: []const u8) u64 {
     var iter = std.mem.tokenizeAny(u8, raw, " \t");
     return std.fmt.parseInt(u64, iter.next() orelse return 0, 10) catch 0;
 }
 
-fn memoryKiB(raw: []const u8) u64 {
+inline fn memoryKiB(raw: []const u8) u64 {
     var iter = std.mem.tokenizeAny(u8, raw, " \t");
     const value = std.fmt.parseInt(u64, iter.next() orelse return 0, 10) catch return 0;
     const unit = iter.next() orelse return value;
