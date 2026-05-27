@@ -205,7 +205,11 @@ pub const Session = struct {
         const model_dtype = self.compiled_model.loaded_model.inner.text_model.embed_tokens.weight.dtype();
 
         const prefill_tokens_shape = zml.Shape.init(.{ .b = 1, .s = self.seqlen }, .u32);
-        const prefill_hidden_shape = zml.Shape.init(.{ .b = 1, .s = self.seqlen, .d = hidden_size }, model_dtype);
+        const prefill_hidden_shape = zml.Shape.init(.{ .b = 1, .s = self.seqlen, .d = hidden_size }, model_dtype).withPartitioning(.{
+            .b = .replicated,
+            .s = .replicated,
+            .d = .replicated,
+        });
 
         const prefill_tokens_slice = try zml.Slice.alloc(self.allocator, prefill_tokens_shape);
         defer prefill_tokens_slice.free(self.allocator);
@@ -296,7 +300,11 @@ pub const Session = struct {
         const hidden_size = self.compiled_model.loaded_model.inner.config.text_config.hidden_size;
         const model_dtype = self.compiled_model.loaded_model.inner.text_model.embed_tokens.weight.dtype();
 
-        const decode_hidden_shape = zml.Shape.init(.{ .b = 1, .s = 1, .d = hidden_size }, model_dtype);
+        const decode_hidden_shape = zml.Shape.init(.{ .b = 1, .s = 1, .d = hidden_size }, model_dtype).withPartitioning(.{
+            .b = .replicated,
+            .s = .replicated,
+            .d = .replicated,
+        });
         const replicated_sharding: zml.Sharding = .replicated;
 
         var embedding_decode_args = try self.compiled_model.decode_embedding_exe.args(self.allocator);
@@ -445,9 +453,6 @@ fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
     const assistant = try encoder.encodeAlloc(allocator, "assistant\n");
     try tokens.appendSlice(allocator, assistant);
     allocator.free(assistant);
-    const think = try encoder.encodeAlloc(allocator, "<think>\n");
-    try tokens.appendSlice(allocator, think);
-    allocator.free(think);
 
     return tokens.toOwnedSlice(allocator);
 }

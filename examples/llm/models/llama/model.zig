@@ -81,11 +81,12 @@ pub const LoadedModel = struct {
             std.log.scoped(.llama).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         }
 
+        const all_shardings = shardings.all();
         return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
             .progress = progress,
-            .shardings = &shardings.all(),
+            .shardings = &all_shardings,
             .parallelism = 16,
             .total_bytes = &total_bytes,
         });

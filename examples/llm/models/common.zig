@@ -14,15 +14,17 @@ pub const GenerationOptions = struct {
 
 pub const Shardings = struct {
     model: zml.Sharding,
+    experts: zml.Sharding,
 
     pub fn init(platform: *zml.Platform) !Shardings {
         return .{
             .model = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })),
+            .experts = try platform.registerSharding("experts", .mesh(.{ .experts = .high_bandwidth })),
         };
     }
 
-    pub fn all(self: Shardings) [1]zml.Sharding {
-        return .{self.model};
+    pub fn all(self: Shardings) [2]zml.Sharding {
+        return .{ self.model, self.experts };
     }
 };
 

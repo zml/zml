@@ -897,7 +897,7 @@ pub fn unpin(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir
 
 pub fn partition_id(ctx: *mlir.Context, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.partition_id", .{
-        .results = .{ .flat = &.{.rankedTensor(&.{}, mlir.integerType(ctx, .u32))} },
+        .results = .{ .flat = &.{.rankedTensor(&.{}, .int(ctx, .u32))} },
         .location = location,
     });
 }
@@ -1411,5 +1411,44 @@ pub fn returns(ctx: *mlir.Context, values: []const *const mlir.Value, location: 
         .operands = .{ .variadic = &.{values} },
         .verify = false,
         .location = location,
+    });
+}
+
+pub const ChannelType = enum(i64) {
+    collective = 0,
+    send_recv = 1,
+};
+
+pub fn channelHandle(
+    ctx: *mlir.Context,
+    handle: i64,
+    channel_type: ChannelType,
+) *const mlir.Attribute {
+    return @ptrCast(c.stablehloChannelHandleGet(
+        ctx.ptr(),
+        handle,
+        @intFromEnum(channel_type),
+    ).ptr);
+}
+
+pub fn allReduce(
+    ctx: *mlir.Context,
+    inputs: []const *const mlir.Value,
+    result_types: []const *const mlir.Type,
+    reducer_block: *mlir.Block,
+    replica_groups: *const mlir.Attribute,
+    channel_handle: *const mlir.Attribute,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.all_reduce", .{
+        .operands = .{ .variadic = &.{inputs} },
+        .results = .{ .flat = result_types },
+        .blocks = &.{reducer_block},
+        .attributes = &.{
+            .named(ctx, "replica_groups", replica_groups),
+            .named(ctx, "channel_handle", channel_handle),
+            .named(ctx, "use_global_device_ids", .unit(ctx)),
+        },
+        .verify = true,
+        .location = .unknown(ctx),
     });
 }

@@ -30,8 +30,9 @@ pub const CompilationParameters = struct {
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, moe_backend: zml.moe.Backend, shardings: common.Shardings) CompilationParameters {
         const dtype = mdl.text_model.embed_tokens.weight.dtype();
+        const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
         return .{
-            .kv_cache = .init(config, 1, seqlen, dtype, .f32),
+            .kv_cache = .init(config, 1, seqlen, dtype, .f32, model_partitions),
             .rng = .init(),
             .prefill_moe_metadata = initMoeMetadata(mdl, @intCast(seqlen), 1, moe_backend),
             .decode_moe_metadata = initMoeMetadata(mdl, 1, 1, moe_backend),
@@ -180,8 +181,23 @@ fn compileModel(
 
     const prefill_tokens = zml.Tensor.init(.{ .b = 1, .s = prefill_len }, .u32);
     const decode_tokens = zml.Tensor.init(.{ .b = 1, .s = 1 }, .u32);
-    const prefill_hidden = zml.Tensor.init(.{ .b = 1, .s = prefill_len, .d = qwen35_model.config.text_config.hidden_size }, qwen35_model.text_model.embed_tokens.weight.dtype());
-    const decode_hidden = zml.Tensor.init(.{ .b = 1, .s = 1, .d = qwen35_model.config.text_config.hidden_size }, qwen35_model.text_model.embed_tokens.weight.dtype());
+    const hidden_dtype = qwen35_model.text_model.embed_tokens.weight.dtype();
+    const prefill_hidden: zml.Tensor = .fromShape(zml.Shape.init(
+        .{ .b = 1, .s = prefill_len, .d = qwen35_model.config.text_config.hidden_size },
+        hidden_dtype,
+    ).withPartitioning(.{
+        .b = .replicated,
+        .s = .replicated,
+        .d = .replicated,
+    }));
+    const decode_hidden: zml.Tensor = .fromShape(zml.Shape.init(
+        .{ .b = 1, .s = 1, .d = qwen35_model.config.text_config.hidden_size },
+        hidden_dtype,
+    ).withPartitioning(.{
+        .b = .replicated,
+        .s = .replicated,
+        .d = .replicated,
+    }));
     const token_index = zml.Tensor.init(.{}, .u32);
     const self_attn_cache: model.KvCache.SelfAttnCache = .{
         .k = parameters.kv_cache.self_attn.k,

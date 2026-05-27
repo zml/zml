@@ -97,6 +97,8 @@ pub const CompilationContext = struct {
     scopes: stdx.BoundedArray(Scope, 16) = .empty,
     manual_computation_depth: usize = 0,
 
+    channel_id: i64 = 0,
+
     threadlocal var _current: ?*CompilationContext = null;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: CompilationOptions) CompilationContext {
@@ -180,6 +182,11 @@ pub const CompilationContext = struct {
         if (maybe_popped_scope) |*popped| {
             popped.deinit();
         }
+    }
+
+    pub fn nextChannelId(self: *CompilationContext) i64 {
+        self.channel_id += 1;
+        return self.channel_id;
     }
 };
 
