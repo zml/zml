@@ -1,5 +1,6 @@
 const std = @import("std");
 const Monitor = @import("monitor.zig");
+const smi_sysfs = @import("zml-smi/sysfs");
 
 const OneApi = @This();
 
@@ -31,53 +32,157 @@ pub fn name(self: *const OneApi, allocator: std.mem.Allocator, handle: Handle) !
 }
 
 pub fn driverVersion(self: *const OneApi, allocator: std.mem.Allocator) ![]const u8 {
-    return self.monitor.driverVersion(allocator);
+    const version = smi_sysfs.readString(allocator, self.monitor.io, "/sys/module/xe/version") catch
+        smi_sysfs.readString(allocator, self.monitor.io, "/sys/module/xe/srcversion") catch
+        smi_sysfs.readString(allocator, self.monitor.io, "/sys/module/i915/version") catch
+        try smi_sysfs.readString(allocator, self.monitor.io, "/sys/module/i915/srcversion");
+    const trimmed = std.mem.trim(u8, version, &std.ascii.whitespace);
+    if (trimmed.len == 0) return error.not_found;
+    return trimmed;
 }
 
 pub fn powerUsage(self: *OneApi, handle: Handle) !u64 {
-    return self.monitor.powerUsage(handle);
+    const dev = try self.monitor.device(handle);
+    const allocator = block: {
+        _ = dev.arena.reset(.retain_capacity);
+        break :block dev.arena.allocator();
+    };
+    const current = Monitor.readEnergy(allocator, self.monitor.io, dev.*) catch |err| {
+        dev.energy_prev = null;
+        return err;
+    };
+    const power = Monitor.powerMilliwatts(dev.energy_prev, current) orelse {
+        dev.energy_prev = current;
+        return error.not_found;
+    };
+    dev.energy_prev = current;
+    return power;
 }
 
 pub fn powerLimit(self: *OneApi, handle: Handle) !u64 {
-    return self.monitor.powerLimit(handle);
+    const dev = try self.monitor.device(handle);
+    const allocator = block: {
+        _ = dev.arena.reset(.retain_capacity);
+        break :block dev.arena.allocator();
+    };
+    return Monitor.readPowerLimit(allocator, self.monitor.io, dev.*);
 }
 
 pub fn temperature(self: *OneApi, handle: Handle) !u64 {
-    return self.monitor.temperature(handle);
+    const dev = try self.monitor.device(handle);
+    const allocator = block: {
+        _ = dev.arena.reset(.retain_capacity);
+        break :block dev.arena.allocator();
+    };
+    return Monitor.readTemperature(allocator, self.monitor.io, dev.*);
 }
 
 pub fn gpuUtil(self: *OneApi, handle: Handle) !u64 {
-    return self.monitor.gpuUtil(handle);
+    const dev_idx: u16 = @intCast(@intFromEnum(handle));
+    const dev = try self.monitor.device(handle);
+    const allocator = block: {
+        _ = dev.arena.reset(.retain_capacity);
+        break :block dev.arena.allocator();
+    };
+
+    var usage = Monitor.collectDeviceUsage(allocator, self.monitor.io, self.monitor.devices) catch {
+        dev.activity_prev = null;
+        return 0;
+    };
+    defer usage.deinit(allocator);
+
+    const current = if (usage.get(dev_idx)) |sample| sample.engine else null;
+    const util = Monitor.processUtil(dev.activity_prev, current) orelse 0;
+    dev.activity_prev = current;
+    return util;
 }
 
 pub fn clockGraphics(self: *OneApi, handle: Handle) !u64 {
-    return self.monitor.clockGraphics(handle);
+    const dev = try self.monitor.device(handle);
+    const allocator = block: {
+        _ = dev.arena.reset(.retain_capacity);
+        break :block dev.arena.allocator();
+    };
+    return Monitor.readClockGraphics(allocator, self.monitor.io, dev.*);
 }
 
 pub fn maxClockGraphics(self: *OneApi, handle: Handle) !u64 {
-    return self.monitor.maxClockGraphics(handle);
+    const dev = try self.monitor.device(handle);
+    const allocator = block: {
+        _ = dev.arena.reset(.retain_capacity);
+        break :block dev.arena.allocator();
+    };
+    return Monitor.readMaxClockGraphics(allocator, self.monitor.io, dev.*);
 }
 
 pub fn memUsed(self: *OneApi, handle: Handle) !u64 {
-    return self.monitor.memUsed(handle);
+    const dev_idx: u16 = @intCast(@intFromEnum(handle));
+    const dev = try self.monitor.device(handle);
+    const allocator = block: {
+        _ = dev.arena.reset(.retain_capacity);
+        break :block dev.arena.allocator();
+    };
+
+    var usage = Monitor.collectDeviceUsage(allocator, self.monitor.io, self.monitor.devices) catch return 0;
+    defer usage.deinit(allocator);
+
+    return if (usage.get(dev_idx)) |sample| sample.mem_kib * 1024 else 0;
 }
 
 pub fn memTotal(self: *OneApi, handle: Handle) !u64 {
-    return self.monitor.memTotal(handle);
+    const dev = try self.monitor.device(handle);
+    const allocator = block: {
+        _ = dev.arena.reset(.retain_capacity);
+        break :block dev.arena.allocator();
+    };
+    return Monitor.readMemTotal(allocator, self.monitor.io, dev.*);
 }
 
 pub fn pcieLinkGen(self: *OneApi, handle: Handle) !u64 {
-    return self.monitor.pcieLinkGen(handle);
+    const dev = try self.monitor.device(handle);
+    const allocator = block: {
+        _ = dev.arena.reset(.retain_capacity);
+        break :block dev.arena.allocator();
+    };
+    return Monitor.readPcieLinkGen(allocator, self.monitor.io, dev.*);
 }
 
 pub fn pcieLinkWidth(self: *OneApi, handle: Handle) !u64 {
-    return self.monitor.pcieLinkWidth(handle);
+    const dev = try self.monitor.device(handle);
+    const allocator = block: {
+        _ = dev.arena.reset(.retain_capacity);
+        break :block dev.arena.allocator();
+    };
+    return Monitor.readPcieLinkWidth(allocator, self.monitor.io, dev.*);
 }
 
 pub fn pcieBandwidth(self: *OneApi, handle: Handle) !u64 {
-    return self.monitor.pcieBandwidth(handle);
+    const dev = try self.monitor.device(handle);
+    const allocator = block: {
+        _ = dev.arena.reset(.retain_capacity);
+        break :block dev.arena.allocator();
+    };
+    return Monitor.readPcieBandwidth(allocator, self.monitor.io, dev.*);
 }
 
 pub fn processList(self: *OneApi, allocator: std.mem.Allocator) !std.ArrayList(ProcessInfo) {
-    return self.monitor.processList(allocator);
+    var usage = try Monitor.collectProcessUsage(allocator, self.monitor.io, self.monitor.devices);
+    defer usage.deinit(allocator);
+
+    var processes: std.ArrayList(ProcessInfo) = .empty;
+    errdefer processes.deinit(allocator);
+
+    var it = usage.iterator();
+    while (it.next()) |entry| {
+        const sample = entry.value_ptr.*;
+        try processes.append(allocator, .{
+            .pid = sample.pid,
+            .device_idx = sample.device_idx,
+            .mem_kib = sample.mem_kib,
+            .util_percent = Monitor.processUtil(self.monitor.process_previous.get(entry.key_ptr.*), sample.engine),
+        });
+    }
+
+    self.monitor.saveProcessPrevious(&usage) catch {};
+    return processes;
 }
