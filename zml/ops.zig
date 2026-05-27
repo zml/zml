@@ -19,8 +19,6 @@ pub const ShapeToCustomCallBuffer = @import("pjrtx.zig").ShapeToCustomCallBuffer
 const Tensor = @import("tensor.zig").Tensor;
 pub const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
 
-
-
 pub fn allReduce(inputs: anytype, comptime func: anytype) allReduceReturnType(@TypeOf(inputs)) {
     const ctx = CompilationContext.current();
     const mlir_ctx = ctx.mlir_ctx;
