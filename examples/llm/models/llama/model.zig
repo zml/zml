@@ -81,19 +81,17 @@ pub const LoadedModel = struct {
             std.log.scoped(.llama).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         }
 
-        const all_shardings = shardings.all();
         return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
             .progress = progress,
-            .shardings = &all_shardings,
+            .shardings = &shardings.all(),
             .parallelism = 16,
             .total_bytes = &total_bytes,
         });
     }
 
-    pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
-        _ = self;
+    pub fn unloadBuffers(_: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         if (buffers.lm_head) |*lm_head| lm_head.weight.deinit();
         Llama.unloadBuffers(&buffers.model, allocator);
     }
@@ -109,6 +107,7 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
         const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, shardings);
+
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
 };
@@ -327,7 +326,7 @@ pub const LmHead = struct {
     }
 };
 
-const TransformerLayer = struct {
+pub const TransformerLayer = struct {
     input_layernorm: RmsNorm,
     self_attn: SelfAttn,
     post_attention_layernorm: RmsNorm,

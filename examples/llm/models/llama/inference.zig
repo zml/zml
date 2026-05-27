@@ -23,6 +23,7 @@ pub const CompilationParameters = struct {
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, shardings: common.Shardings) CompilationParameters {
         const head_dim = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads);
+
         return .{
             .prefill_tokens = .init(.{ .s = seqlen }, .u32),
             .decode_tokens = .init(.{ .s = 1 }, .u32),
@@ -134,8 +135,10 @@ pub const KernelExe = struct {
             ) !Layers {
                 const args = try allocator.alloc(zml.exe.Exe.Arguments, model_buffers.model.layers.len);
                 errdefer allocator.free(args);
+
                 const results = try allocator.alloc(zml.exe.Exe.Results, model_buffers.model.layers.len);
                 errdefer allocator.free(results);
+
                 const kv_cache_indices = try allocator.alloc(zml.Buffer, model_buffers.model.layers.len);
                 errdefer allocator.free(kv_cache_indices);
 
@@ -180,10 +183,12 @@ pub const KernelExe = struct {
                     exe_args.deinit(allocator);
                 }
                 allocator.free(self.args);
+
                 for (self.results) |*exe_results| {
                     exe_results.deinit(allocator);
                 }
                 allocator.free(self.results);
+
                 for (self.kv_cache_indices) |*kv_cache_index| {
                     kv_cache_index.deinit();
                 }
@@ -200,6 +205,7 @@ pub const KernelExe = struct {
         ) !Runner {
             var embed_args = try exe.embed_tokens.args(allocator);
             errdefer embed_args.deinit(allocator);
+
             embed_args.bake(ComposedKernelExe.embedTokensBuffers(model_buffers));
 
             var embed_results = try exe.embed_tokens.results(allocator);
@@ -210,6 +216,7 @@ pub const KernelExe = struct {
 
             var lm_head_args = try exe.lm_head.args(allocator);
             errdefer lm_head_args.deinit(allocator);
+
             lm_head_args.bake(ComposedKernelExe.lmHeadBuffers(model_buffers));
 
             var lm_head_results = try exe.lm_head.results(allocator);
@@ -237,6 +244,7 @@ pub const KernelExe = struct {
             var hidden_buf: zml.Buffer = b: {
                 self.embed_args.set(.{args.tokens_buf});
                 self.exe.embed_tokens.call(self.embed_args, &self.embed_results);
+
                 break :b self.embed_results.get(zml.Buffer);
             };
             defer hidden_buf.deinit();
@@ -280,7 +288,7 @@ pub const KernelExe = struct {
         platform: *const zml.Platform,
         model_buffers: *model.Buffers,
     ) !Runner {
-        return Runner.init(allocator, io, platform, &self.composed, model_buffers);
+        return .init(allocator, io, platform, &self.composed, model_buffers);
     }
 };
 
@@ -294,10 +302,9 @@ const ComposedKernelExe = struct {
 
         pub fn forward(self: EmbedTokens, tokens_: zml.Tensor) zml.Tensor {
             const tokens = tokens_.withPartialTags(.{.s});
-            const hidden_sharded = self.embed_tokens.forward(tokens)
+            return self.embed_tokens.forward(tokens)
                 .withPartialTags(.{.d})
-                .withPartitioning(.{ .d = .model });
-            return hidden_sharded.withPartitioning(.{ .d = .replicated });
+                .withPartitioning(.{ .d = .replicated });
         }
     };
 
@@ -317,6 +324,7 @@ const ComposedKernelExe = struct {
 
         const layer = try ComposedKernelExe.compileLayer(allocator, io, platform, llama_model, parameters, seqlen, attention_parameters, phase, progress);
         errdefer layer.deinit();
+
         const lm_head = try ComposedKernelExe.compileLmHead(allocator, io, platform, llama_model, parameters, seqlen, phase, progress);
         errdefer lm_head.deinit();
 
@@ -337,12 +345,15 @@ const ComposedKernelExe = struct {
         var hidden_buf: zml.Buffer = b: {
             var exe_args = try self.embed_tokens.args(args.allocator);
             defer exe_args.deinit(args.allocator);
+
             var results = try self.embed_tokens.results(args.allocator);
             defer results.deinit(args.allocator);
 
             exe_args.bake(ComposedKernelExe.embedTokensBuffers(args.model_buffers));
             exe_args.set(.{args.tokens_buf});
+
             self.embed_tokens.call(exe_args, &results);
+
             break :b results.get(zml.Buffer);
         };
         defer hidden_buf.deinit();
@@ -350,22 +361,27 @@ const ComposedKernelExe = struct {
         for (args.model_buffers.model.layers, 0..) |layer_bufs, i| {
             var exe_args = try self.layer.args(args.allocator);
             defer exe_args.deinit(args.allocator);
+
             var results = try self.layer.results(args.allocator);
             defer results.deinit(args.allocator);
+
             var kv_cache_index_buf: zml.Buffer = try .scalar(args.io, args.platform, i, .u32);
             defer kv_cache_index_buf.deinit();
 
             exe_args.bake(layer_bufs);
+
             self.runLayer(&exe_args, &results, args, &hidden_buf, &kv_cache_index_buf);
         }
 
         {
             var exe_args = try self.lm_head.args(args.allocator);
             defer exe_args.deinit(args.allocator);
+
             var results = try self.lm_head.results(args.allocator);
             defer results.deinit(args.allocator);
 
             exe_args.bake(ComposedKernelExe.lmHeadBuffers(args.model_buffers));
+
             self.runLmHead(&exe_args, &results, args, &hidden_buf);
         }
     }
@@ -385,12 +401,14 @@ const ComposedKernelExe = struct {
             kv_cache_index_buf,
             args.attention_metadata_buffers,
         });
+
         self.layer.call(exe_args.*, results);
 
         var new_hidden, var new_kv_cache = results.get(struct {
             zml.Buffer,
             zml.Bufferized(model.KvCache),
         });
+
         ComposedKernelExe.replaceBuffer(hidden_buf, &new_hidden);
         ComposedKernelExe.replaceKvCacheBuffers(args.kv_cache_buffers, &new_kv_cache);
     }
@@ -409,6 +427,7 @@ const ComposedKernelExe = struct {
             zml.Buffer,
             zml.Bufferized(zml.Tensor.Rng),
         });
+
         ComposedKernelExe.replaceBuffer(args.tokens_buf, &new_tokens);
         ComposedKernelExe.replaceBuffer(&args.rng_buffers._state, &new_rng._state);
     }
@@ -436,14 +455,17 @@ const ComposedKernelExe = struct {
         if (!ComposedKernelExe.sameBufferHandle(dst.*, src.*)) {
             dst.deinit();
         }
+
         dst.* = src.*;
     }
 
     fn sameBufferHandle(a: zml.Buffer, b: zml.Buffer) bool {
         if (a._shards.len != b._shards.len) return false;
+
         for (a._shards.constSlice(), b._shards.constSlice()) |a_shard, b_shard| {
             if (a_shard != b_shard) return false;
         }
+
         return true;
     }
 
@@ -460,13 +482,14 @@ const ComposedKernelExe = struct {
         progress.increaseEstimatedTotalItems(1);
         var node = progress.start(phase.startMessage("embed_tokens"), 1);
         defer node.end();
+
         const from: std.Io.Timestamp = .now(io, .awake);
         defer phase.logCompileDone(log, "embed_tokens", io, from);
 
         const tokens: zml.Tensor = .init(.{ .s = seqlen }, .u32);
-        const all_shardings = parameters.shardings.all();
+
         return platform.compile(allocator, io, EmbedTokens{ .embed_tokens = embed_tokens }, .forward, .{tokens}, .{
-            .shardings = &all_shardings,
+            .shardings = &parameters.shardings.all(),
             .program_name = phase.programName("llama", "embed_tokens"),
         });
     }
@@ -483,7 +506,7 @@ const ComposedKernelExe = struct {
         progress: *std.Progress.Node,
     ) !zml.Exe {
         const Layer = struct {
-            layer: @TypeOf(llama_model.model.layers[0]),
+            layer: model.TransformerLayer,
 
             pub fn forward(
                 self: @This(),
@@ -502,13 +525,16 @@ const ComposedKernelExe = struct {
                     attention_metadata,
                     attention_parameters_,
                 );
+
                 return .{ new_hidden, new_kv_cache };
             }
         };
 
         progress.increaseEstimatedTotalItems(1);
+
         var node = progress.start(phase.startMessage("transformer layer"), 1);
         defer node.end();
+
         const from: std.Io.Timestamp = .now(io, .awake);
         defer phase.logCompileDone(log, "transformer layer", io, from);
 
@@ -516,8 +542,9 @@ const ComposedKernelExe = struct {
             .{ .s = seqlen, .d = llama_model.config.hidden_size },
             llama_model.model.embed_tokens.weight.dtype(),
         ).withPartitioning(.{ .d = .replicated }));
+
         const kv_cache_index: zml.Tensor = .init(.{}, .u32);
-        const all_shardings = parameters.shardings.all();
+
         return platform.compile(
             allocator,
             io,
@@ -532,7 +559,7 @@ const ComposedKernelExe = struct {
                 attention_parameters,
             },
             .{
-                .shardings = &all_shardings,
+                .shardings = &parameters.shardings.all(),
                 .program_name = phase.programName("llama", "layer"),
             },
         );
@@ -549,8 +576,10 @@ const ComposedKernelExe = struct {
         progress: *std.Progress.Node,
     ) !zml.Exe {
         progress.increaseEstimatedTotalItems(1);
+
         var node = progress.start(phase.startMessage("lm_head"), 1);
         defer node.end();
+
         const from: std.Io.Timestamp = .now(io, .awake);
         defer phase.logCompileDone(log, "lm_head", io, from);
 
@@ -558,10 +587,11 @@ const ComposedKernelExe = struct {
             .{ .s = seqlen, .d = llama_model.config.hidden_size },
             llama_model.model.embed_tokens.weight.dtype(),
         ).withPartitioning(.{ .d = .replicated }));
+
         const tokens: zml.Tensor = .init(.{ .s = seqlen }, .u32);
-        const all_shardings = parameters.shardings.all();
+
         return platform.compile(allocator, io, model.LmHead.init(llama_model), .forward, .{ hidden, tokens, parameters.rng }, .{
-            .shardings = &all_shardings,
+            .shardings = &parameters.shardings.all(),
             .program_name = phase.programName("llama", "lm_head"),
         });
     }
