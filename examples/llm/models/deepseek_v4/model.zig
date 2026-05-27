@@ -29,6 +29,9 @@ pub const Config = struct {
     qk_rope_head_dim: u32,
     o_groups: u32,
     o_lora_rank: u32,
+    index_head_dim: u32,
+    index_n_heads: u32,
+    index_topk: u32,
 };
 
 pub const Buffers = zml.Bufferized(Model);
@@ -223,14 +226,17 @@ const Compressor = struct {
     }
 
     fn forwardDecode(self: Compressor, x: zml.Tensor) ?zml.Tensor {
-        _ = self; // autofix
-        _ = x; // autofix
+        const x32 = x.convert(.f32);
+        const kv = self.wkv.forward(x32);
+        _ = kv; // autofix
+        var score = self.wgate.forward(x32);
+        score = score.add(self.ape.broad(score.shape()));
+
         return null;
     }
 
     pub fn forward(self: Compressor, x: zml.Tensor, start_pos: i64) ?zml.Tensor {
         // shape(x) = [batch,seq,r]
-        // TODO: Handle `should_compress`
         const maybe_kv = if (start_pos == 0) self.forwardPrefill(x) else self.forwardDecode(x);
         if (maybe_kv == null) return null;
 
@@ -238,16 +244,13 @@ const Compressor = struct {
 
         kv = self.norm.forward(kv);
         kv = apply_rope(kv.rename(.{.seq = .s}), self.nope_head_dim, self.rope_head_dim, self.rope_opts);
-        // kv = blk: {
-        //     const split = kv.split(-1, &[_]i64{self.nope_head_dim, self.rope_head_dim});
-        //     const kv_rope = zml.nn.rope(split[1].renameTag(.seq, .s), null, self.rope_opts);
-        //     break :blk zml.Tensor.concatenate(&[_]zml.Tensor{split[0], kv_rope}, -1);
-        // };
 
         if (self.rotate) {
             kv = hadamard_rotation(kv);
             // TODO: quantize to FP4
         }
+
+        // TODO: update cache
 
         return kv;
     }
@@ -264,30 +267,95 @@ fn hadamard_rotation(x: zml.Tensor) zml.Tensor {
 }
 
 const Indexer = struct {
-    // compressor: Compressor,
     proj: zml.nn.Linear,
     wq_b: FP8Linear,
+    compressor: Compressor,
+    index_head_dim: u32,
+    index_n_heads: u32,
+    index_topk: u32,
+    rope_opts: zml.nn.RopeOpts,
+    rope_head_dim: u32,
+    nope_head_dim: u32,
+    ratio: u32,
+    softmax_scale: f32,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize) ?Indexer {
         if (layer_idx >= config.compress_ratios.len or config.compress_ratios[layer_idx] != 4) return null;
 
-        // const comp: ?Compressor = .init(store, config, layer_idx);
-        // stdx.debug.assert(comp != null, "expected non null compressor from indexer", .{});
+        const compressor: ?Compressor = .init(store, config, layer_idx, true);
+        stdx.debug.assert(compressor != null, "expected non null compressor from indexer", .{});
 
         const block_size = config.quantization_config.weight_block_size[0];
 
         const indexer_store = store.withPrefix("indexer");
 
         return .{
-            // .compressor = comp.?,
             .proj = .init(indexer_store.createTensor("weights_proj.weight", .{.sq, .d}, .replicated), null, .d),
-            .wq_b = .init(indexer_store.withPrefix("wq_n"), .{ .hd, .d }, block_size, .d),
+            .wq_b = .init(indexer_store.withPrefix("wq_b"), .{ .hd, .d }, block_size, .d),
+            .compressor = compressor.?,
+            .index_head_dim = config.index_head_dim,
+            .index_n_heads = config.index_n_heads,
+            .index_topk = config.index_topk,
+            .rope_opts = config.rope_scaling,
+            .rope_head_dim = config.qk_rope_head_dim,
+            .nope_head_dim = config.index_head_dim - config.qk_rope_head_dim, //< Not sure about `index_head_dim`
+            .ratio = 4,
+            .softmax_scale = @sqrt(@floatFromInt(config.index_head_dim)),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Indexer)) void {
-        // Compressor.unloadBuffers(&self.compressor);
         self.proj.weight.deinit();
+        FP8Linear.unloadBuffers(&self.wq_b);
+        Compressor.unloadBuffers(&self.compressor);
+    }
+
+    pub fn forward(self: Indexer, x: zml.Tensor, qr: zml.Tensor, start_pos: i64) zml.Tensor {
+        var q = self.wq_b.forward(qr);
+        q = q.splitAxis(-1, .{ .h = self.index_n_heads, .hd = .auto });
+        q = apply_rope(q.rename(.{.seq = .s}), self.nope_head_dim, self.rope_head_dim, self.rope_opts);
+        q = hadamard_rotation(q).rename(.{.s = .seq});
+
+        // TODO: FP4 quant q
+        _ = self.compressor.forward(x, start_pos);
+
+        var weights = self.proj.forward(x);
+        weights = weights.scale(@sqrt(self.softmax_scale * @as(f32, @floatFromInt(self.index_n_heads))));
+        //
+        // const kv = qr; //< TODO: get it from KV cache
+        //
+        // var index_score = q.dot(kv, .d);
+        // index_score = index_score.relu().mul(weights).sum(2).squeeze(2);
+        //
+        // const offset = 0; //< TBD
+        // const end_pos: u32 = @intCast(start_pos + x.dim(.seq));
+        // const k =  @min(self.index_topk, @mod(end_pos, self.ratio));
+        //
+        // const seq = x.dim(.seq);
+        //
+        // const topk_idxs = blk: {
+        //     if (start_pos == 0) {
+        //         const a = zml.Tensor.arange(.{ .end = @mod(seq, self.ratio) }, .i64).repeat(&[_]u63{1});
+        //         const b = zml.Tensor.arange(.{ .end = seq + 1 }, .i64).reshape(.{ seq+1, 1});
+        //         const mask = a.cmp(.GT,  b);
+        //         _ = mask; // autofix
+        //
+        //         // index_score.add(zml.Tensor.select(mask, -inf, zeroes(index_score.shape());
+        //
+        //         var topk_idxs = index_score.topK(-1, k, .{}).indices;
+        //
+        //         const mask_ = topk_idxs.cmp(.GT, b);
+        //         topk_idxs = zml.Tensor.select(mask_, zml.Tensor.scalar(-1, topk_idxs.dtype()).broad(topk_idxs.shape()), topk_idxs.addConstant(offset));
+        //         break :blk topk_idxs;
+        //     } else {
+        //         var topk_idxs = index_score.topK(-1, k, .{}).indices;
+        //         topk_idxs = topk_idxs.addConstant(offset);
+        //         break :blk topk_idxs;
+        //     }
+        // };
+        //
+        // return topk_idxs;
+        return x;
     }
 };
 
@@ -301,7 +369,7 @@ const Attention = struct {
     wo_a: FP8Linear,
     wo_b: FP8Linear,
     compressor: ?Compressor,
-    // indexer: ?Indexer,
+    indexer: ?Indexer,
     eps: f32,
     rope_opts: zml.nn.RopeOpts,
     window_size: u32,
@@ -341,7 +409,7 @@ const Attention = struct {
             .wo_a = .init(store.withPrefix("wo_a"), .{ .hd, .d }, block_size, .d),
             .wo_b = .init(store.withPrefix("wo_b"), .{ .hd, .d }, block_size, .d),
             .compressor = .init(store, config, layer_idx, false),
-            // .indexer = .init(store, config, layer_idx),
+            .indexer = .init(store, config, layer_idx),
             .eps = config.rms_norm_eps,
             .rope_opts = rope_opts,
             .window_size = config.sliding_window,
