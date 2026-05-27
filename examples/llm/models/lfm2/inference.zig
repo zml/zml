@@ -19,23 +19,27 @@ pub const CompilationParameters = struct {
     attention_parameters: attention.Parameters,
     seqlen: u32,
     shardings: common.Shardings,
+    /// Owns the per-layer cache tensor slices.
+    allocator: std.mem.Allocator,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, single: bool, shardings: common.Shardings) CompilationParameters {
+    pub fn init(allocator: std.mem.Allocator, mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, single: bool, shardings: common.Shardings) !CompilationParameters {
         stdx.debug.assert(seqlen >= config.conv_L_cache, "seqlen ({}) must be at least conv_L_cache ({})", .{ seqlen, config.conv_L_cache });
         const cache: model.Cache = .{
-            .kv = .init(.init(.{
-                .layer = mdl.num_attention_layers,
+            // TT-FIX: per-layer rank-4 KV with `{.batch, .h, .k, .hd}` dim
+            // order (head before seq) — matches the canonical layout that
+            // tt-mlir's `CacheFillUpdatePattern` matches. Llama uses the
+            // same order.
+            .kv = try .init(allocator, .init(.{
                 .batch = 1,
-                .k = seqlen,
                 .h = config.num_key_value_heads,
+                .k = seqlen,
                 .hd = config.hidden_size / config.num_attention_heads,
-            }, mdl.embed_tokens.weight.dtype())),
-            .conv = .init(.init(.{
-                .layer = mdl.num_conv_layers,
+            }, mdl.embed_tokens.weight.dtype()), @intCast(mdl.num_attention_layers)),
+            .conv = try .init(allocator, .init(.{
                 .batch = 1,
                 .seq = config.conv_L_cache,
                 .d = config.hidden_size,
-            }, mdl.embed_tokens.weight.dtype())),
+            }, mdl.embed_tokens.weight.dtype()), @intCast(mdl.num_conv_layers)),
         };
 
         return .{
@@ -48,7 +52,13 @@ pub const CompilationParameters = struct {
             .attention_parameters = .init(.fromBackend(backend)),
             .seqlen = seqlen,
             .shardings = shardings,
+            .allocator = allocator,
         };
+    }
+
+    pub fn deinit(self: CompilationParameters) void {
+        self.cache.kv.deinit(self.allocator);
+        self.cache.conv.deinit(self.allocator);
     }
 };
 
@@ -108,6 +118,7 @@ pub const CompiledModel = struct {
     pub fn deinit(self: *CompiledModel) void {
         self.prefill.deinit();
         self.decode.deinit();
+        self.params.deinit();
     }
 };
 
@@ -157,14 +168,12 @@ pub const SingleKernelExe = struct {
         });
         self.exe.call(exe_args, &results);
 
-        var new_tokens, var new_cache, var new_rng = results.get(struct {
-            zml.Buffer,
-            zml.Bufferized(model.Cache),
-            zml.Bufferized(zml.Tensor.Rng),
-        });
-        replaceBuffer(args.tokens_buf, &new_tokens);
-        replaceCacheBuffers(args.cache_buffers, &new_cache);
-        replaceBuffer(&args.rng_buf._state, &new_rng._state);
+        // TT-FIX: with per-layer `[]Buffer` cache fields, `Results.get`
+        // returns an `undefined` struct and tries to walk its slices —
+        // segfaults. `fill` writes into pre-allocated buffers
+        // (matches llama's path). Model.forward also no longer returns
+        // the rng — see the TT-FIX comment in Model.forward.
+        results.fill(.{ args.tokens_buf, args.cache_buffers });
     }
 };
 
@@ -187,7 +196,7 @@ fn compileSingleKernelExe(
 
     const actual_seq_len: zml.Tensor = .init(.{}, .u32);
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
-    const token_position_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
+    const token_position_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .i32);
 
     const all_shardings = shardings.all();
     const exe = try platform.compile(
@@ -205,7 +214,22 @@ fn compileSingleKernelExe(
             opts.attention_parameters,
             model.ConvParameters{ .is_prefill = is_prefill },
         },
-        .{ .shardings = &all_shardings },
+        .{
+            .shardings = &all_shardings,
+            // TT-FIX: tag arg 0 (Model weights) as `<parameter>` so tt-xla
+            // keeps them device-resident across trace captures. Disabled
+            // for lfm2 — trips "Device-resident argument N must already
+            // be in device memory" on some weight tensor.
+            .tt_parameter_args = false,
+            // TT-FIX: disable trace for prefill — ttnn's `Conv2dOp`
+            // requires the depthwise weight in `SystemMemory + RowMajor`,
+            // so a `to_layout (device → system_memory)` ends up inside the
+            // forward function. The `ttnn.capture_or_execute_trace`
+            // verifier rejects ops with non-device outputs. Decode uses
+            // the elementwise mul/sum path (no Conv2dOp) so it stays
+            // trace-eligible via the env var.
+            .tt_enable_trace = if (is_prefill) false else null,
+        },
     );
 
     return .{ .exe = exe };
@@ -237,11 +261,9 @@ pub const ComposedKernelExe = struct {
         };
         defer hidden_buf.deinit();
 
-        var conv_cache_index_buf: zml.Buffer = try .scalar(args.io, args.platform, 0, .u32);
-        defer conv_cache_index_buf.deinit();
-        var kv_cache_index_buf: zml.Buffer = try .scalar(args.io, args.platform, 0, .u32);
-        defer kv_cache_index_buf.deinit();
-
+        // Composed-kernel path is unused on TT (single-kernel is forced).
+        // The per-layer cache plumbing makes the runtime-index cache buffer
+        // unnecessary.
         for (args.model_buffers.layers) |layer_bufs| {
             const exe = switch (layer_bufs.operator) {
                 .conv => &self.conv_layer,
@@ -259,22 +281,16 @@ pub const ComposedKernelExe = struct {
                 args.tokens_pos_buf,
                 args.actual_seq_len_buf,
                 args.cache_buffers,
-                &conv_cache_index_buf,
-                &kv_cache_index_buf,
                 args.attention_metadata_buffers,
             });
             exe.call(exe_args, &results);
 
-            var new_hidden, var new_cache, var new_conv_cache_index, var new_kv_cache_index = results.get(struct {
+            var new_hidden, var new_cache = results.get(struct {
                 zml.Buffer,
                 zml.Bufferized(model.Cache),
-                zml.Buffer,
-                zml.Buffer,
             });
             replaceBuffer(&hidden_buf, &new_hidden);
             replaceCacheBuffers(args.cache_buffers, &new_cache);
-            replaceBuffer(&conv_cache_index_buf, &new_conv_cache_index);
-            replaceBuffer(&kv_cache_index_buf, &new_kv_cache_index);
         }
 
         {
@@ -296,9 +312,9 @@ pub const ComposedKernelExe = struct {
 };
 
 fn replaceCacheBuffers(dst: *zml.Bufferized(model.Cache), src: *zml.Bufferized(model.Cache)) void {
-    replaceBuffer(&dst.conv.state, &src.conv.state);
-    replaceBuffer(&dst.kv.k, &src.kv.k);
-    replaceBuffer(&dst.kv.v, &src.kv.v);
+    for (dst.conv.state, src.conv.state) |*d, *s| replaceBuffer(d, s);
+    for (dst.kv.k, src.kv.k) |*d, *s| replaceBuffer(d, s);
+    for (dst.kv.v, src.kv.v) |*d, *s| replaceBuffer(d, s);
 }
 
 fn replaceBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
@@ -382,10 +398,8 @@ fn compileConvLayer(
     } else unreachable;
 
     const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype());
-    const token_position_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
+    const token_position_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .i32);
     const actual_seq_len: zml.Tensor = .init(.{}, .u32);
-    const conv_cache_index: zml.Tensor = .init(.{}, .u32);
-    const kv_cache_index: zml.Tensor = .init(.{}, .u32);
 
     const all_shardings = shardings.all();
     return platform.compile(allocator, io, conv_layer, .forward, .{
@@ -393,8 +407,8 @@ fn compileConvLayer(
         token_position_offset,
         actual_seq_len,
         opts.cache,
-        conv_cache_index,
-        kv_cache_index,
+        @as(usize, 0),
+        @as(usize, 0),
         opts.attention_metadata,
         opts.attention_parameters,
         model.ConvParameters{ .is_prefill = is_prefill },
@@ -423,10 +437,8 @@ fn compileAttnLayer(
     } else unreachable;
 
     const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype());
-    const token_position_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
+    const token_position_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .i32);
     const actual_seq_len: zml.Tensor = .init(.{}, .u32);
-    const conv_cache_index: zml.Tensor = .init(.{}, .u32);
-    const kv_cache_index: zml.Tensor = .init(.{}, .u32);
 
     const all_shardings = shardings.all();
     return platform.compile(allocator, io, attn_layer, .forward, .{
@@ -434,8 +446,8 @@ fn compileAttnLayer(
         token_position_offset,
         actual_seq_len,
         opts.cache,
-        conv_cache_index,
-        kv_cache_index,
+        @as(usize, 0),
+        @as(usize, 0),
         opts.attention_metadata,
         opts.attention_parameters,
         model.ConvParameters{ .is_prefill = is_prefill },

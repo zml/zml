@@ -3,6 +3,7 @@ const std = @import("std");
 const zml = @import("zml");
 const stdx = zml.stdx;
 const attention = zml.attention.attention;
+const tt_nn = @import("platforms/tt/nn");
 
 const common = @import("../common.zig");
 const inference = @import("inference.zig");
@@ -119,7 +120,12 @@ pub const LoadedModel = struct {
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
-        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, false, shardings);
+        // TT-FIX: force single-kernel mode. Composed mode hands inter-kernel
+        // buffers across PJRT executes which trips a mesh-dispatch assertion
+        // on multi-chip (`Can't get a single buffer from host storage
+        // distributed over mesh shape MeshShape([1,2])`).
+        const params = try inference.CompilationParameters.init(allocator, self.inner, self.parsed_config.value, @intCast(seqlen), backend, true, shardings);
+        errdefer params.deinit();
         return inference.CompiledModel.init(allocator, io, @constCast(platform), self, self.inner, params, progress);
     }
 };
@@ -215,31 +221,38 @@ pub const Model = struct {
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
         conv_parameters: ConvParameters,
-    ) struct { zml.Tensor, Cache, zml.Tensor.Rng } {
+    ) struct { zml.Tensor, Cache } {
         stdx.debug.assert(tokens.shape().hasTags(.{ .batch, .seq }), "Tokens should have tags {{.batch, .seq}}, got {f}", .{tokens.shape()});
 
         const embeds = self.embed_tokens.forward(tokens);
 
         var hidden = embeds;
         var cache = cache_;
-        // Incremented by the individual layers.
-        var conv_cache_index = zml.Tensor.scalar(@as(u32, 0), .u32);
-        var kv_cache_index = zml.Tensor.scalar(@as(u32, 0), .u32);
+        var conv_idx: usize = 0;
+        var attn_idx: usize = 0;
         for (self.layers) |layer| {
-            hidden, cache, conv_cache_index, kv_cache_index = layer.forward(
+            hidden, cache = layer.forward(
                 hidden,
                 tokens_position_offset,
                 actual_seq_len,
                 cache,
-                conv_cache_index,
-                kv_cache_index,
+                conv_idx,
+                attn_idx,
                 attention_metadata,
                 attention_parameters,
                 conv_parameters,
             );
+            switch (layer.operator) {
+                .conv => conv_idx += 1,
+                .self_attn => attn_idx += 1,
+            }
         }
-        const new_tokens, const new_rng = self.lm_head.forward(hidden, self.embed_tokens, tokens, rng);
-        return .{ new_tokens, cache.reuseBuffer(cache_), new_rng };
+        // TT-FIX: drop the advanced rng from the return value. Returning it
+        // tags a `to_layout` after the epilogue's `mesh_shard` and trips
+        // TTNNTraceHoistTransform with "Non-hoistable op found in middle of
+        // hoistable ops". Matches llama.
+        const new_tokens, _ = self.lm_head.forward(hidden, self.embed_tokens, tokens, rng);
+        return .{ new_tokens, cache.reuseBuffer(cache_) };
     }
 
     pub fn deinit(self: Model, allocator: std.mem.Allocator) void {
@@ -251,13 +264,27 @@ pub const TokenEmbedding = struct {
     weight: zml.Tensor,
 
     pub fn init(store: zml.io.TensorStore.View) TokenEmbedding {
+        // Keep replicated. With `.d = .model` shardy's verifier rejects
+        // the gather's `dynamic_slice slice_size 2048 > dim 1024` on the
+        // decode compile (it doesn't rewrite slice_sizes when sharding
+        // the operand). We instead work around the host-vector
+        // `ttnn::slice` runtime path by handling tokens specially below.
         return .{ .weight = store.createTensor("weight", .{ .voc, .d }, .replicated) };
     }
 
     pub fn forward(self: TokenEmbedding, tokens: zml.Tensor) zml.Tensor {
         stdx.debug.assert(tokens.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{tokens});
         stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight zml.Tensor to be a 2D matrix, got {f}", .{self.weight});
-        return self.weight.gather(.{ .voc = tokens }, .{});
+        // TT-FIX: single-token gather (decode `seq=1`) lowers to
+        // `ttnn.slice_dynamic` whose runtime path reads the index as a
+        // host vector — fails on a replicated index with N>1 shards.
+        // Multi-token gather (`seq>=2`) lowers to `ttnn.embedding` which
+        // runs on device. Pad to seq=2 and slice the first row back out.
+        if (tokens.dim(.seq) != 1) {
+            return self.weight.gather(.{ .voc = tokens }, .{});
+        }
+        const padded = zml.Tensor.concatenate(&.{ tokens, tokens }, tokens.axis(.seq));
+        return self.weight.gather(.{ .voc = padded }, .{}).slice1d(.seq, .{ .end = 1 });
     }
 
     pub fn unembed(self: TokenEmbedding, embeds: zml.Tensor) zml.Tensor {
@@ -278,9 +305,37 @@ pub const LmHead = struct {
     }
 
     pub fn forward(self: LmHead, hidden: zml.Tensor, embed_tokens: TokenEmbedding, tokens: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
-        const logits = embed_tokens.unembed(self.embedding_norm.forward(hidden));
-        const new_tokens, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, rng);
-        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), new_rng };
+        const ctx = zml.module.CompilationContext.current();
+        switch (ctx.platform.target) {
+            .tt => {
+                // TT-FIX: rename `batch`/`seq` -> `b`/`s` to match tt-mlir's
+                // expected axis names, then do the tied-embedding matmul
+                // with `s` leading so the unembedding stays on the optimized
+                // matmul path (mirrors the llama 3B tied-embed fix).
+                const normed = self.embedding_norm.forward(hidden).rename(.{ .batch = .b, .seq = .s });
+                const normed_t = normed.transpose(.{ .s, .b, .d });
+                var logits = normed_t.dot(embed_tokens.weight.withTags(.{ .voc, .d }), .d).transpose(.{ .b, .s, .voc });
+                if (logits.shape().hasTag(.voc) == null) logits = logits.rename(.{ .d = .voc });
+
+                if (self.sampling_strategy.topk <= 1 or logits.dim(.s) != 1) {
+                    // argMax works at any seq length (prefill takes the last).
+                    // TT-FIX: tt.sampling kernel is rank-2 `{.b,.topk}` only —
+                    // only usable on decode (seq=1).
+                    const new_tokens = logits.argMax(.voc).indices.squeeze(.voc).rename(.{ .b = .batch, .s = .seq });
+                    return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), rng };
+                }
+                const topk = logits.topK(.{ .topk = .voc }, self.sampling_strategy.topk, .{});
+                const tok = tt_nn.sampling(topk.values.squeeze(.s), topk.indices.squeeze(.s), self.sampling_strategy)
+                    .insertAxes(.last, .{.s})
+                    .rename(.{ .b = .batch, .s = .seq });
+                return .{ tok.convert(tokens.dtype()).reuseBuffer(tokens), rng };
+            },
+            .cpu, .cuda, .rocm, .tpu, .neuron => {
+                const logits = embed_tokens.unembed(self.embedding_norm.forward(hidden));
+                const new_tokens, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, rng);
+                return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), new_rng };
+            },
+        }
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(LmHead)) void {
@@ -327,51 +382,52 @@ pub const DecoderLayer = struct {
         tokens_position_offset: zml.Tensor,
         actual_seq_len: zml.Tensor,
         cache_: Cache,
-        conv_cache_index_: zml.Tensor,
-        kv_cache_index_: zml.Tensor,
+        conv_idx: usize,
+        attn_idx: usize,
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
         conv_parameters: ConvParameters,
-    ) struct { zml.Tensor, Cache, zml.Tensor, zml.Tensor } {
+    ) struct { zml.Tensor, Cache } {
         var cache = cache_;
-        var conv_cache_index = conv_cache_index_;
-        var kv_cache_index = kv_cache_index_;
+        // TT-FIX: pin the residual stream `.d = .replicated` at each layer
+        // boundary. Matches llama. The embedding output is `.d`-sharded,
+        // so without this every conv layer (whose weights are replicated)
+        // would force shardy to reshard between `.d`-sharded input and
+        // replicated weights — that's the `duplicate axis ref "link"`
+        // pattern. Forcing the residual replicated puts the reshard /
+        // all-gather at one well-defined spot per layer.
+        const input_repl = input.withPartitioning(.{ .d = .replicated });
         const residual = switch (self.operator) {
             .conv => |operator| b: {
                 const residual, const updated_conv_cache = operator.forward(
-                    self.operator_norm.forward(input),
+                    self.operator_norm.forward(input_repl),
                     tokens_position_offset,
                     actual_seq_len,
-                    cache.conv,
-                    conv_cache_index,
+                    cache.conv.atLayer(conv_idx),
                     conv_parameters,
                 );
                 cache.conv = updated_conv_cache;
-                conv_cache_index = conv_cache_index.add(zml.Tensor.scalar(@as(u32, 1), .u32));
                 break :b residual;
             },
             .self_attn => |operator| b: {
                 const residual, const updated_kv_cache = operator.forward(
-                    self.operator_norm.forward(input),
+                    self.operator_norm.forward(input_repl),
                     tokens_position_offset,
-                    cache.kv,
-                    kv_cache_index,
+                    cache.kv.atLayer(attn_idx),
                     attention_metadata,
                     attention_parameters,
                 );
                 cache.kv = updated_kv_cache;
-                kv_cache_index = kv_cache_index.add(zml.Tensor.scalar(@as(u32, 1), .u32));
                 break :b residual;
             },
         };
 
-        const x = input.add(residual);
+        const x = input_repl.add(residual).withPartitioning(.{ .d = .replicated });
+        const out = x.add(self.feed_forward.forward(self.ffn_norm.forward(x))).withPartitioning(.{ .d = .replicated });
 
         return .{
-            x.add(self.feed_forward.forward(self.ffn_norm.forward(x))).reuseBuffer(input),
+            out.reuseBuffer(input),
             cache.reuseBuffer(cache_),
-            conv_cache_index.reuseBuffer(conv_cache_index_),
-            kv_cache_index.reuseBuffer(kv_cache_index_),
         };
     }
 
@@ -396,22 +452,27 @@ pub const ShortConv = struct {
 
     pub fn init(config: Config, store: zml.io.TensorStore.View) ShortConv {
         stdx.debug.assert(!config.conv_bias, "conv_bias is not supported.", .{});
+        // Conv path stays replicated — depthwise conv1d can't be split.
         return .{
-            .in_proj = initLinear(store.withPrefix("in_proj"), .d),
-            .out_proj = initLinear(store.withPrefix("out_proj"), .d),
+            .in_proj = initLinear(store.withPrefix("in_proj"), .d, .replicated),
+            .out_proj = initLinear(store.withPrefix("out_proj"), .d, .replicated),
             .kernel = store.createTensor("conv.weight", .{ .out, .in, .kernel_size }, .replicated),
             .config = config,
         };
     }
 
-    pub fn forward(self: ShortConv, input: zml.Tensor, tokens_position_offset: zml.Tensor, actual_seq_len: zml.Tensor, cache_: ConvCache, cache_index: zml.Tensor, parameters: ConvParameters) struct { zml.Tensor, ConvCache } {
-        var cache = cache_;
+    pub fn forward(self: ShortConv, input: zml.Tensor, tokens_position_offset: zml.Tensor, actual_seq_len: zml.Tensor, cache_: ConvCache, parameters: ConvParameters) struct { zml.Tensor, ConvCache } {
+        const cache = cache_;
         const BCx = self.in_proj.forward(input);
 
         const B, const C, const x = BCx.chunkExact(.d, 3);
         const Bx = B.mul(x);
 
-        const conv_out = if (parameters.is_prefill) b: {
+        // TT-FIX: per-layer rank-3 conv state (no `.layer` axis); scatter
+        // operates directly on this layer's `[batch, seq, d]` buffer.
+        const layer_state = cache.current();
+
+        const conv_out, const new_state = if (parameters.is_prefill) b: {
             const actual_seq_len_i32 = actual_seq_len.convert(.i32);
             const start = actual_seq_len_i32.sub(zml.Tensor.scalar(@as(i32, @intCast(self.config.conv_L_cache)), .i32)).maximum(zml.Tensor.scalar(@as(i32, 0), .i32));
             const cache_seq_indices = lkp: {
@@ -420,8 +481,22 @@ pub const ShortConv = struct {
                 const sh = tokens_position_offset.shape().insert(.last, .{ .seq = self.config.conv_L_cache });
                 break :lkp zml.Tensor.iota(sh, .seq).convert(.u32).add(left_pad.convert(.u32).broad(sh)).broad(sh);
             };
-            const scatter_data = Bx.dynamicSlice(.{ .seq = @as(zml.Tensor.DynSlice, .{ .start = start.convert(.u32), .len = @intCast(self.config.conv_L_cache) }) });
-            cache.state = cache.state.scatterSlices(.{ .layer = cache_index, .seq = cache_seq_indices }, scatter_data, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(cache.state);
+            // TT-FIX: avoid `stablehlo.dynamic_slice` with a runtime index
+            // here — tt-metal's `ttnn::slice` reads the index as a host
+            // vector (`host_buffer::get_host_buffer`) and trips
+            // `buffers.size() == 1` because a replicated scalar on a
+            // multi-chip mesh has N host shards. `stablehlo.gather` with
+            // a precomputed index tensor lowers to `ttnn.embedding`
+            // instead and runs entirely on device.
+            const scatter_data = sd: {
+                // Indices tagged `.window` (not `.seq`) so `gather` can
+                // attach them to the `.seq` axis of `Bx` without a tag clash.
+                const sh = tokens_position_offset.shape().insert(.last, .{ .window = self.config.conv_L_cache });
+                const bx_seq_indices = zml.Tensor.iota(sh, .window).convert(.u32)
+                    .add(start.convert(.u32).broad(sh));
+                break :sd Bx.gather(.{ .seq = bx_seq_indices }, .{}).rename(.{ .window = .seq });
+            };
+            const updated = layer_state.scatterSlices(.{ .seq = cache_seq_indices }, scatter_data, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override });
             const padding = self.config.conv_L_cache - 1;
             const conv_out_ = zml.Tensor.conv1d(Bx, self.kernel, .{
                 .padding = &.{ padding, 0 },
@@ -436,18 +511,19 @@ pub const ShortConv = struct {
                 .output_spatial_dimensions = Bx.axis(.seq),
                 .feature_group_count = Bx.dim(.d),
             });
-            break :b conv_out_.slice1d(.seq, .{ .end = Bx.dim(.seq) });
+            break :b .{ conv_out_.slice1d(.seq, .{ .end = Bx.dim(.seq) }), updated };
         } else b: {
-            cache.state = cache.state.rollRight1d(.seq, -1).scatterSlices(.{ .layer = cache_index, .seq = tokens_position_offset.convert(.u32).clamp(.scalar(@as(u32, 0), .u32), .scalar(self.config.conv_L_cache - 1, .u32)) }, Bx, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(cache.state);
+            const updated = layer_state.rollRight1d(.seq, -1).scatterSlices(.{ .seq = tokens_position_offset.convert(.u32).clamp(.scalar(@as(u32, 0), .u32), .scalar(self.config.conv_L_cache - 1, .u32)) }, Bx, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override });
             const kernel = self.kernel.squeeze(.in).rename(.{ .out = .d, .kernel_size = .seq });
             const sh = kernel.shape().insert(.last, .{ .batch = tokens_position_offset.dim(.batch) });
-            break :b cache.state.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = cache_index, .len = 1 } }).squeeze(.layer).mul(kernel.broad(sh).transpose(.{ .batch, .seq, .d })).sum(.seq);
+            // Read back this layer's full window for the elementwise conv.
+            break :b .{ updated.mul(kernel.broad(sh).transpose(.{ .batch, .seq, .d })).sum(.seq), updated };
         };
 
         const y = C.mul(conv_out);
 
         const output = self.out_proj.forward(y);
-        return .{ output.reuseBuffer(input), cache.reuseBuffer(cache_) };
+        return .{ output.reuseBuffer(input), cache.replace(new_state) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(ShortConv)) void {
@@ -472,10 +548,12 @@ pub const Attention = struct {
         const head_dim = config.hidden_size / config.num_attention_heads;
         const num_key_value_groups = config.num_attention_heads / config.num_key_value_heads;
         return .{
-            .q_proj = initLinear(store.withPrefix("q_proj"), .d),
-            .k_proj = initLinear(store.withPrefix("k_proj"), .d),
-            .v_proj = initLinear(store.withPrefix("v_proj"), .d),
-            .out_proj = initLinear(store.withPrefix("out_proj"), .d),
+            // TT-FIX: q/k/v shard output (head columns) on `.model`; out_proj
+            // shards input (sharded `.d` from merged heads). Matches llama.
+            .q_proj = initLinear(store.withPrefix("q_proj"), .d, .{ .out = .model }),
+            .k_proj = initLinear(store.withPrefix("k_proj"), .d, .{ .out = .model }),
+            .v_proj = initLinear(store.withPrefix("v_proj"), .d, .{ .out = .model }),
+            .out_proj = initLinear(store.withPrefix("out_proj"), .d, .{ .d = .model }),
             .q_layernorm = RmsNorm.init(store.withPrefix("q_layernorm"), config.norm_eps, .hd),
             .k_layernorm = RmsNorm.init(store.withPrefix("k_layernorm"), config.norm_eps, .hd),
             .head_dim = head_dim,
@@ -489,20 +567,27 @@ pub const Attention = struct {
         x: zml.Tensor,
         tokens_position_offset: zml.Tensor,
         kv_cache: KvCache,
-        cache_index: zml.Tensor,
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
-        var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
-        var k = self.k_proj.forward(x).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
-        var v = self.v_proj.forward(x).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
+        // TT-FIX: replicate input `.d` so q/k/v share a gather; partition
+        // the projected heads `.h = .model` to match the sharded KvCache.
+        const x_qkv = x.withPartitioning(.{ .d = .replicated });
+        var q = self.q_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
+        var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
+        var v = self.v_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
+        q = q.withPartitioning(.{ .h = .model, .hd = .replicated });
+        k = k.withPartitioning(.{ .h = .model, .hd = .replicated });
+        v = v.withPartitioning(.{ .h = .model, .hd = .replicated });
 
         q = self.q_layernorm.forward(q);
         k = self.k_layernorm.forward(k);
 
         const token_positions = b: {
             const sh = tokens_position_offset.shape().insert(.last, .{ .seq = x.dim(.seq) });
-            break :b zml.Tensor.iota(sh, .seq).convert(.u32).add(tokens_position_offset.broad(sh));
+            // Match the dtype of `tokens_position_offset` (now i32 to satisfy
+            // tt-metal's update_cache `update_idxs` INT32 requirement).
+            break :b zml.Tensor.iota(sh, .seq).convert(tokens_position_offset.dtype()).add(tokens_position_offset.broad(sh));
         };
 
         q = zml.nn.rope(q, token_positions, self.rope_opts);
@@ -512,9 +597,9 @@ pub const Attention = struct {
         k = k.rename(.{ .seq = .k });
         v = v.rename(.{ .seq = .k });
 
-        const new_kv_cache = kv_cache.update(k, v, tokens_position_offset, cache_index);
-        k = new_kv_cache.keys(cache_index);
-        v = new_kv_cache.values(cache_index);
+        const new_kv_cache = kv_cache.update(k, v, tokens_position_offset);
+        k = new_kv_cache.keys();
+        v = new_kv_cache.values();
 
         stdx.debug.assert(q.dim(.batch) == 1, "LFM attention currently expects batch size 1 for flash attention backend, got {}", .{q.dim(.batch)});
         const attn = switch (attention_parameters) {
@@ -522,7 +607,10 @@ pub const Attention = struct {
             else => zml.attention.attention.attention(q.squeeze(.batch), k.squeeze(.batch), v.squeeze(.batch), tokens_position_offset.squeeze(.batch), attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .seq }).insertAxes(.seq, .{.batch}),
         };
 
-        return .{ self.out_proj.forward(attn).reuseBuffer(x), new_kv_cache.reuseBuffer(kv_cache) };
+        // TT-FIX: terminate the head-shard via reduce_scatter at out_proj,
+        // then pin `.d = .replicated` so the residual add stays replicated.
+        const delta = self.out_proj.forward(attn).withPartitioning(.{ .d = .replicated });
+        return .{ delta.reuseBuffer(x), new_kv_cache.reuseBuffer(kv_cache) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Attention)) void {
@@ -535,17 +623,35 @@ pub const Attention = struct {
     }
 };
 
+/// TT-FIX: per-layer rank-4 KV / rank-3 conv caches (no `.layer` axis on
+/// the buffers; selection happens at compile-time via `atLayer(idx)`).
+///
+/// Two reasons:
+///
+/// 1. With KvCache `.h = .model` sharding, the cache argument's sharding
+///    matches the `.h`-sharded scatter result from q/k/v projection ->
+///    shardy doesn't need to reshard between `replicated={"link"}` and
+///    `[{?},{?},{"link"},{?}]` and the `'sdy.reshard' op duplicate axis
+///    ref: "link"` error in `InsertExplicitReshardsPass` goes away.
+///
+/// 2. A rank-5 cache forces a runtime `dynamicSlice` on `.layer`, whose
+///    `slice_sizes` keeps the unsharded `.h = 8` while shardy shrinks
+///    the operand to `.h = 4` per chip -> verifier rejects with
+///    `slice_size 8 > dim 4`. Per-layer rank-4 sidesteps `.layer`.
 pub const Cache = struct {
     conv: ConvCache,
     kv: KvCache,
 
-    pub fn initBuffers(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(Cache) {
-        return .{ .conv = try self.conv.initBuffers(allocator, io, platform, sharding), .kv = try self.kv.initBuffers(io, platform, sharding) };
+    pub fn initBuffers(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shardings: common.Shardings) !zml.Bufferized(Cache) {
+        return .{
+            .conv = try self.conv.initBuffers(allocator, io, platform, .replicated),
+            .kv = try self.kv.initBuffers(allocator, io, platform, shardings.model),
+        };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Cache)) void {
-        ConvCache.unloadBuffers(&self.conv);
-        KvCache.unloadBuffers(&self.kv);
+    pub fn unloadBuffers(self: *zml.Bufferized(Cache), allocator: std.mem.Allocator) void {
+        ConvCache.unloadBuffers(&self.conv, allocator);
+        KvCache.unloadBuffers(&self.kv, allocator);
     }
 
     pub fn reuseBuffer(self: Cache, other: Cache) Cache {
@@ -554,70 +660,140 @@ pub const Cache = struct {
 };
 
 pub const ConvCache = struct {
-    state: zml.Tensor,
+    state: []zml.Tensor,
+    layer_index: ?u32 = null,
 
-    pub fn init(shape: zml.Shape) ConvCache {
-        return .{ .state = .fromShape(shape) };
+    pub fn init(allocator: std.mem.Allocator, layer_shape: zml.Shape, num_layers: u32) !ConvCache {
+        const state = try allocator.alloc(zml.Tensor, num_layers);
+        for (state) |*t| t.* = .fromShape(layer_shape);
+        return .{ .state = state, .layer_index = null };
+    }
+
+    pub fn deinit(self: ConvCache, allocator: std.mem.Allocator) void {
+        allocator.free(self.state);
     }
 
     pub fn initBuffers(self: ConvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(ConvCache) {
-        const sh = self.state.shape();
-        const host = try allocator.alloc(u8, sh.byteSize());
-        defer allocator.free(host);
-        @memset(host, 0);
-        return .{ .state = try zml.Buffer.fromBytes(io, platform, sh, sharding, host) };
+        const state = try allocator.alloc(zml.Buffer, self.state.len);
+        errdefer allocator.free(state);
+        for (self.state, state) |src, *dst| {
+            const sh = src.shape();
+            const host = try allocator.alloc(u8, sh.byteSize());
+            defer allocator.free(host);
+            @memset(host, 0);
+            dst.* = try zml.Buffer.fromBytes(io, platform, sh, sharding, host);
+        }
+        return .{ .state = state };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(ConvCache)) void {
-        self.state.deinit();
+    pub fn unloadBuffers(self: *zml.Bufferized(ConvCache), allocator: std.mem.Allocator) void {
+        for (self.state) |*b| b.deinit();
+        allocator.free(self.state);
+    }
+
+    pub fn atLayer(self: ConvCache, idx: usize) ConvCache {
+        return .{ .state = self.state, .layer_index = @intCast(idx) };
+    }
+
+    pub fn current(self: ConvCache) zml.Tensor {
+        return self.state[self.layer_index orelse @panic("forgot to call atLayer")];
+    }
+
+    pub fn replace(self: ConvCache, new_state: zml.Tensor) ConvCache {
+        const layer = self.layer_index orelse @panic("forgot to call atLayer");
+        const arena = zml.module.CompilationContext.current().arena.allocator();
+        const state = arena.dupe(zml.Tensor, self.state) catch @panic("OOM dup ConvCache");
+        state[layer] = new_state.reuseBuffer(self.state[layer]);
+        return .{ .state = state, .layer_index = self.layer_index };
     }
 
     pub fn reuseBuffer(self: ConvCache, other: ConvCache) ConvCache {
-        return .{ .state = self.state.reuseBuffer(other.state) };
+        const arena = zml.module.CompilationContext.current().arena.allocator();
+        const state = arena.dupe(zml.Tensor, self.state) catch @panic("OOM dup ConvCache");
+        for (state, other.state) |*t, o| t.* = t.reuseBuffer(o);
+        return .{ .state = state, .layer_index = null };
     }
 };
 
 pub const KvCache = struct {
-    k: zml.Tensor,
-    v: zml.Tensor,
+    k: []zml.Tensor,
+    v: []zml.Tensor,
+    layer_index: ?u32 = null,
 
-    pub fn init(kv_shape: zml.Shape) KvCache {
-        return .{ .k = .fromShape(kv_shape), .v = .fromShape(kv_shape) };
+    pub fn init(allocator: std.mem.Allocator, layer_shape: zml.Shape, num_layers: u32) !KvCache {
+        // TT-FIX: shard heads `.h = .model` so the cache arg sharding matches
+        // the `.h`-sharded scatter result from q/k/v projection (otherwise
+        // shardy emits a reshard listing the `.model` axis twice).
+        const sharded = layer_shape.withPartitioning(.{ .h = .model });
+        const k = try allocator.alloc(zml.Tensor, num_layers);
+        errdefer allocator.free(k);
+        const v = try allocator.alloc(zml.Tensor, num_layers);
+        for (k, v) |*kt, *vt| {
+            kt.* = .fromShape(sharded);
+            vt.* = .fromShape(sharded);
+        }
+        return .{ .k = k, .v = v, .layer_index = null };
     }
 
-    pub fn initBuffers(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(KvCache) {
-        return .{ .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), sharding, .{}), .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), sharding, .{}) };
+    pub fn deinit(self: KvCache, allocator: std.mem.Allocator) void {
+        allocator.free(self.k);
+        allocator.free(self.v);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(KvCache)) void {
-        self.k.deinit();
-        self.v.deinit();
+    pub fn initBuffers(self: KvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(KvCache) {
+        const k = try allocator.alloc(zml.Buffer, self.k.len);
+        errdefer allocator.free(k);
+        const v = try allocator.alloc(zml.Buffer, self.v.len);
+        errdefer allocator.free(v);
+        for (self.k, k) |src, *dst| dst.* = try zml.Buffer.uninitialized(io, platform, src.shape(), sharding, .{});
+        for (self.v, v) |src, *dst| dst.* = try zml.Buffer.uninitialized(io, platform, src.shape(), sharding, .{});
+        return .{ .k = k, .v = v };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(KvCache), allocator: std.mem.Allocator) void {
+        for (self.k) |*b| b.deinit();
+        for (self.v) |*b| b.deinit();
+        allocator.free(self.k);
+        allocator.free(self.v);
+    }
+
+    pub fn atLayer(self: KvCache, idx: usize) KvCache {
+        return .{ .k = self.k, .v = self.v, .layer_index = @intCast(idx) };
+    }
+
+    pub fn keys(self: KvCache) zml.Tensor {
+        return self.k[self.layer_index orelse @panic("forgot to call atLayer")];
+    }
+
+    pub fn values(self: KvCache) zml.Tensor {
+        return self.v[self.layer_index orelse @panic("forgot to call atLayer")];
+    }
+
+    /// Use the canonical TT cache-fill path so the scatter fuses into
+    /// `ttir.update_cache` / `ttir.fill_cache`. `pos` must trace back to
+    /// a rank-1 function input.
+    pub fn update(self: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, pos: zml.Tensor) KvCache {
+        const layer = self.layer_index orelse @panic("forgot to call atLayer");
+        const arena = zml.module.CompilationContext.current().arena.allocator();
+        const k = arena.dupe(zml.Tensor, self.k) catch @panic("OOM dup KvCache.k");
+        const v = arena.dupe(zml.Tensor, self.v) catch @panic("OOM dup KvCache.v");
+        k[layer] = zml.attention.attention.updateKvCache(self.k[layer], new_k, pos).reuseBuffer(self.k[layer]);
+        v[layer] = zml.attention.attention.updateKvCache(self.v[layer], new_v, pos).reuseBuffer(self.v[layer]);
+        return .{ .k = k, .v = v, .layer_index = self.layer_index };
     }
 
     pub fn reuseBuffer(self: KvCache, other: KvCache) KvCache {
-        return .{ .k = self.k.reuseBuffer(other.k), .v = self.v.reuseBuffer(other.v) };
-    }
-
-    pub fn keys(self: KvCache, cache_index: zml.Tensor) zml.Tensor {
-        return self.k.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = cache_index, .len = 1 } }).squeeze(.layer);
-    }
-
-    pub fn values(self: KvCache, cache_index: zml.Tensor) zml.Tensor {
-        return self.v.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = cache_index, .len = 1 } }).squeeze(.layer);
-    }
-
-    pub fn update(self: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_position: zml.Tensor, cache_index: zml.Tensor) KvCache {
-        const k_shape = self.k.shape().drop(.layer);
-        const layer = cache_index.broad(token_position.shape());
-        return .{
-            .k = self.k.scatterSlices(.{ .layer = layer, .k = token_position }, new_k.transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(self.k),
-            .v = self.v.scatterSlices(.{ .layer = layer, .k = token_position }, new_v.transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(self.v),
-        };
+        const arena = zml.module.CompilationContext.current().arena.allocator();
+        const k = arena.dupe(zml.Tensor, self.k) catch @panic("OOM dup KvCache.k");
+        const v = arena.dupe(zml.Tensor, self.v) catch @panic("OOM dup KvCache.v");
+        for (k, other.k) |*t, o| t.* = t.reuseBuffer(o);
+        for (v, other.v) |*t, o| t.* = t.reuseBuffer(o);
+        return .{ .k = k, .v = v, .layer_index = null };
     }
 };
 
-fn initLinear(store: zml.io.TensorStore.View, tag: anytype) Linear {
-    return .init(store.createTensor("weight", .{ .out, tag }, .replicated), null, tag);
+fn initLinear(store: zml.io.TensorStore.View, tag: anytype, sharding: anytype) Linear {
+    return .init(store.createTensor("weight", .{ .out, tag }, sharding), null, tag);
 }
 
 pub const Linear = struct {
@@ -650,7 +826,13 @@ const Mlp = struct {
     w3: Linear,
 
     pub fn init(store: zml.io.TensorStore.View) Mlp {
-        return .{ .w1 = initLinear(store.withPrefix("w1"), .d), .w2 = initLinear(store.withPrefix("w2"), .d), .w3 = initLinear(store.withPrefix("w3"), .d) };
+        // TT-FIX: w1/w3 shard `.out` (ff dim); w2 shards `.d` (ff input).
+        // Matches llama's gate_proj/up_proj/down_proj.
+        return .{
+            .w1 = initLinear(store.withPrefix("w1"), .d, .{ .out = .model }),
+            .w2 = initLinear(store.withPrefix("w2"), .d, .{ .d = .model }),
+            .w3 = initLinear(store.withPrefix("w3"), .d, .{ .out = .model }),
+        };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
@@ -678,7 +860,15 @@ const RmsNorm = struct {
     }
 
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
-        const normalized = zml.nn.rmsNorm(input, self.tag, self.eps);
-        return normalized.mul(self.weight.broad(input.shape())).reuseBuffer(input);
+        const ctx = zml.module.CompilationContext.current();
+        switch (ctx.platform.target) {
+            // TT-FIX: fused custom_call — math-decomposed RMSNorm trips
+            // shardy's `duplicate axis ref` on sharded weight.
+            .tt => return tt_nn.rmsNormFused(input, self.weight, self.eps),
+            .cpu, .cuda, .rocm, .tpu, .neuron => {
+                const normalized = zml.nn.rmsNorm(input, self.tag, self.eps);
+                return normalized.mul(self.weight.broad(input.shape())).reuseBuffer(input);
+            },
+        }
     }
 };
