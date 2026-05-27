@@ -17,18 +17,7 @@ const constants = @import("constants.zig");
 
 const log = std.log.scoped(.zml);
 
-fn StaticPlatformMap(comptime E: type, comptime T: type) type {
-    const tag_count = @typeInfo(E).@"enum".fields.len;
-    var struct_field_names: [tag_count][]const u8 = undefined;
-    var struct_field_types: [tag_count]type = @splat(T);
-    const is_optional = @typeInfo(T) == .optional;
-    const default_value_ptr: ?*const anyopaque = if (is_optional) @ptrCast(&@as(T, null)) else null;
-    var struct_field_attrs: [tag_count]std.builtin.Type.StructField.Attributes = @splat(.{ .default_value_ptr = default_value_ptr });
-    inline for (@typeInfo(E).@"enum".fields, 0..) |f, i| struct_field_names[i] = f.name;
-    return @Struct(.auto, null, &struct_field_names, &struct_field_types, &struct_field_attrs);
-}
-
-var api_map: StaticPlatformMap(Target, ?*const pjrt.Api) = .{};
+var api_map: std.enums.EnumArray(Target, ?*const pjrt.Api) = .initFill(null);
 
 fn disableXlaLogs() void {
     // https://deepreg.readthedocs.io/en/latest/docs/logging.html#tensorflow-logging
@@ -62,10 +51,10 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
 
 fn loadOrGetApi(allocator: std.mem.Allocator, io: std.Io, target: Target) !*const pjrt.Api {
     return switch (target) {
-        inline else => |tag| @field(api_map, @tagName(tag)) orelse b: {
+        inline else => |tag| api_map.get(tag) orelse b: {
             disableXlaLogs();
             const api = try platforms.load(allocator, io, tag);
-            @field(api_map, @tagName(tag)) = api;
+            api_map.set(tag, api);
             break :b api;
         },
     };
