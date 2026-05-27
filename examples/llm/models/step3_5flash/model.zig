@@ -189,8 +189,10 @@ pub const Moe = struct {
     gate_proj: zml.Tensor,
     down_proj: zml.Tensor,
     router: Router,
+    layer_idx: usize,
+    limit: ?f32,
 
-    pub fn init(store: zml.io.TensorStore.View) !Moe {
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !Moe {
         // init the up, gate, down tensors
 
         const up_proj_tensor = store.createTensor(
@@ -218,6 +220,11 @@ pub const Moe = struct {
             .gate_proj = gate_proj_tensor,
             .down_proj = down_proj_tensor,
             .router = .init(store, 8, 3.0),
+            .layer_idx = layer_idx,
+            .limit = switch (layer_idx) {
+                43, 44 => 7.0,
+                else => null,
+            },
         };
     }
 
@@ -228,6 +235,13 @@ pub const Moe = struct {
     }
 
     pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
+        if (self.layer_idx >= 42 and self.layer_idx <= 44) {
+            return self.forwardLoop(x);
+        }
+        return self.forwardTriton(x);
+    }
+
+    fn forwardTriton(self: Moe, x: zml.Tensor) zml.Tensor {
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
 
         // collect topk weights and indices (renormalized, unscaled)
@@ -268,6 +282,45 @@ pub const Moe = struct {
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
         return moe_output;
+    }
+
+    fn forwardLoop(self: Moe, x: zml.Tensor) zml.Tensor {
+        const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
+
+        const routing_scores, const topk_ids = self.router.forward(input);
+        const routing_scaled = routing_scores.scale(self.router.routed_scaling_factor);
+
+        const x_f32 = input.convert(.f32);
+        const gate_w = self.gate_proj.convert(.f32);
+        const up_w = self.up_proj.convert(.f32);
+        const down_w = self.down_proj.convert(.f32);
+
+        const gate_all = x_f32.dot(gate_w, .d);
+        const up_all = x_f32.dot(up_w, .d);
+
+        var gate_act = gate_all.silu();
+        var up_act = up_all;
+        if (self.limit) |lim| {
+            gate_act = gate_act.minimum(.scalar(lim, .f32));
+            up_act = up_act.clamp(.scalar(-lim, .f32), .scalar(lim, .f32));
+        }
+        const act_d = gate_act.mul(up_act).rename(.{ .dout = .d });
+        const down_all = act_d.dot(down_w, .d).transpose(.{ .b, .s, .expert, .dout });
+        const down_topk = down_all.gather(.{ .expert = topk_ids }, .{});
+        const routing = routing_scaled.convert(.f32).broad(down_topk.shape());
+        const weighted = down_topk.mul(routing).convert(x.dtype());
+        const sort_order = topk_ids.argsort(.topk, .{ .descending = false })
+            .rename(.{ .topk = .topk_sorted });
+        const weighted_sorted = weighted
+            .gather(.{ .topk = sort_order }, .{})
+            .rename(.{ .topk_sorted = .topk });
+
+        var acc = weighted_sorted.slice1d(.topk, .single(0));
+        inline for (1..8) |i| {
+            const contrib = weighted_sorted.slice1d(.topk, .single(@as(i64, @intCast(i))));
+            acc = acc.add(contrib);
+        }
+        return acc;
     }
 };
 // hidden size
