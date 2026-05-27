@@ -1,7 +1,6 @@
 //! Explain how to split a buffer across different devices.
 const std = @import("std");
 
-const c = @import("c");
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
@@ -217,17 +216,20 @@ pub const Device = struct {
     id: usize,
 
     /// Coordinates in the physical mesh
-    coords: stdx.BoundedArray(u8, MAX_MESH_RANK) = .empty,
+    coords: Coords,
 
-    pub fn coordsSlice(self: *const Device) ?[]const u8 {
-        if (self.coords.len == 0) return null;
-        return self.coords.constSlice();
+    const Coords = [MAX_MESH_RANK]u8;
+    // Placeholder coords, that would most likely trigger panic if used like that.
+    const undefined_coords: Coords = @splat(0xff);
+
+    fn isFullInitialized(device: Device) bool {
+        return @as(u32, @bitCast(device.coords)) != @as(u32, @bitCast(undefined_coords));
     }
 
-    pub fn format(self: Device, writer: *std.Io.Writer) !void {
+    pub fn format(device: Device, writer: *std.Io.Writer) !void {
         try writer.print(
             "Device(id={d} coords={any})",
-            .{ self.id, self.coords.constSlice() },
+            .{ device.id, device.coords },
         );
     }
 };
@@ -297,7 +299,7 @@ pub const PhysicalNode = union(enum) {
         return .{
             .leaf = .{
                 .id = @intCast(device_.id()),
-                .coords = .empty,
+                .coords = Device.undefined_coords,
             },
         };
     }
@@ -436,7 +438,7 @@ pub const PhysicalMesh = struct {
         try validateGeometry(root);
 
         var owned_root = root;
-        var path: [MAX_MESH_RANK]u8 = @splat(0);
+        var path: Device.Coords = @splat(0);
         assignCoords(&owned_root, &path, 0);
 
         var mesh: PhysicalMesh = .{
@@ -446,6 +448,10 @@ pub const PhysicalMesh = struct {
             .devices_in_canonical_order = undefined,
         };
         try mesh.populateDevicesInCanonicalOrder(allocator);
+        for (0.., mesh.devices_in_canonical_order) |i, device| {
+            std.debug.assert(device.id == i);
+            std.debug.assert(device.isFullInitialized());
+        }
         return mesh;
     }
 
@@ -458,10 +464,8 @@ pub const PhysicalMesh = struct {
         const Order = struct {
             mesh: *const PhysicalMesh,
             fn lessThan(ctx: @This(), a: Device, b: Device) bool {
-                const ca = a.coordsSlice() orelse unreachable;
-                const cb = b.coordsSlice() orelse unreachable;
-                const ia = ctx.mesh.linearIndexFromCoords(ca);
-                const ib = ctx.mesh.linearIndexFromCoords(cb);
+                const ia = ctx.mesh.linearIndexFromCoords(a.coords);
+                const ib = ctx.mesh.linearIndexFromCoords(b.coords);
                 return ia < ib;
             }
         };
@@ -558,13 +562,13 @@ pub const PhysicalMesh = struct {
     /// coords:
     ///   (0,0) (0,1)
     ///   (1,0) (1,1)
-    fn assignCoords(node: *PhysicalNode, path: *[MAX_MESH_RANK]u8, depth: usize) void {
+    fn assignCoords(node: *PhysicalNode, path: *Device.Coords, depth: usize) void {
         switch (node.*) {
             .leaf => |*d| {
                 // Coords can already been set by caller
-                if (d.coords.len > 0) return;
+                if (d.isFullInitialized()) return;
 
-                d.coords = .init(path[0..depth]);
+                d.coords = path.*;
             },
             .branch => |*b| {
                 for (b.children, 0..) |*child, i| {
@@ -594,7 +598,7 @@ pub const PhysicalMesh = struct {
     ///
     /// sizes: S0..Sk, coords: C0..Ck
     /// linear = (((C0 * S1) + C1) * S2 + C2) ...
-    pub fn linearIndexFromCoords(self: PhysicalMesh, coords: []const u8) usize {
+    pub fn linearIndexFromCoords(self: PhysicalMesh, coords: Device.Coords) usize {
         const order = self.axisOrder();
         var idx: usize = 0;
         for (order.constSlice()) |tag| {
@@ -706,7 +710,7 @@ pub const PhysicalMesh = struct {
     const CoordsTopology = struct {
         const CoordPlacement = struct {
             device_id: usize,
-            coords: stdx.BoundedArray(u8, MAX_MESH_RANK),
+            coords: Device.Coords,
         };
 
         const CoordLayout = struct {
@@ -722,22 +726,20 @@ pub const PhysicalMesh = struct {
         fn parseDevice(device: PlatformDevice) !CoordPlacement {
             const api = device.platform.pjrt_api;
             const coords_attr = device.pjrt_desc.attribute(api, "coords") orelse return error.MissingDeviceCoords;
-            var coords: stdx.BoundedArray(u8, MAX_MESH_RANK) = .empty;
-            switch (coords_attr) {
+            const coords: Device.Coords = coords: switch (coords_attr) {
                 .int64list => |values| {
+                    var coords: Device.Coords = @splat(0);
                     if (values.len == 0 or values.len > MAX_MESH_RANK) return error.InvalidDeviceCoords;
-                    for (values) |value| {
+                    for (coords[0..values.len], values) |*coord, value| {
                         if (value < 0) return error.InvalidDeviceCoords;
-                        coords.appendAssumeCapacity(@intCast(value));
+                        coord.* = @intCast(value);
                     }
+                    break :coords coords;
                 },
                 else => return error.InvalidDeviceCoords,
-            }
-
-            return .{
-                .device_id = device.id(),
-                .coords = coords,
             };
+
+            return .{ .device_id = device.id(), .coords = coords };
         }
 
         pub fn collect(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) ![]CoordPlacement {
@@ -763,7 +765,7 @@ pub const PhysicalMesh = struct {
             for (0..rank) |ax_i| {
                 var max_coord: usize = 0;
                 for (placements) |coord_placement| {
-                    max_coord = @max(max_coord, coord_placement.coords.constSlice()[ax_i]);
+                    max_coord = @max(max_coord, coord_placement.coords[ax_i]);
                 }
                 axis_sizes[ax_i] = max_coord + 1;
             }
@@ -774,7 +776,7 @@ pub const PhysicalMesh = struct {
             };
         }
 
-        fn linearIndex(coords: []const u8, rank: usize, axis_sizes: []const usize) usize {
+        fn linearIndex(coords: Device.Coords, rank: usize, axis_sizes: []const usize) usize {
             var linear: usize = 0;
             var stride: usize = 1;
             var ax = rank;
@@ -791,7 +793,7 @@ pub const PhysicalMesh = struct {
             for (placements, indexed) |coord_placement, *out| {
                 out.* = .{
                     .placement = coord_placement,
-                    .linear = linearIndex(coord_placement.coords.constSlice(), rank, axis_sizes),
+                    .linear = linearIndex(coord_placement.coords, rank, axis_sizes),
                 };
             }
 
@@ -809,13 +811,8 @@ pub const PhysicalMesh = struct {
             return indexed;
         }
 
-        pub fn leaf(coord_placement: *const CoordPlacement, coords_slice: []const u8) !PhysicalNode {
-            return .{
-                .leaf = .{
-                    .id = coord_placement.device_id,
-                    .coords = try .fromSlice(coords_slice),
-                },
-            };
+        pub fn leaf(coord_placement: *const CoordPlacement, coords: Device.Coords) !PhysicalNode {
+            return .{ .leaf = .{ .id = coord_placement.device_id, .coords = coords } };
         }
 
         pub fn axisStrides(axis_sizes: []const usize) ![MAX_MESH_RANK]usize {
@@ -843,7 +840,7 @@ pub const PhysicalMesh = struct {
         ) !PhysicalNode {
             if (depth == axis_sizes.len) {
                 const coord_placement = &indexed[base_offset].placement;
-                return leaf(coord_placement, coord_placement.coords.constSlice()[0..axis_sizes.len]);
+                return leaf(coord_placement, coord_placement.coords);
             }
 
             const children = try allocator.alloc(PhysicalNode, axis_sizes[depth]);
@@ -913,8 +910,8 @@ pub const PhysicalMesh = struct {
 
         const nodes = try allocator.alloc(PhysicalNode, platform_devices.len);
         for (nodes, indexed, 0..) |*n, entry, i| {
-            const linear_coord: [1]u8 = .{@intCast(i)};
-            n.* = try CoordsTopology.leaf(&entry.placement, linear_coord[0..]);
+            const linear_coord: Device.Coords = .{ @intCast(i), 0, 0, 0 };
+            n.* = try CoordsTopology.leaf(&entry.placement, linear_coord);
         }
 
         return .{
@@ -1543,7 +1540,7 @@ pub const Data = struct {
         @memset(ids, std.math.maxInt(usize));
 
         for (self.physical.devices_in_canonical_order) |d| {
-            const coords = d.coordsSlice() orelse return error.MissingDeviceCoords;
+            const coords = d.coords;
             const idx = self.physical.linearIndexFromCoords(coords);
             ids[idx] = d.id;
         }
@@ -1773,11 +1770,10 @@ pub const Placement = struct {
         return pl;
     }
 
-    pub fn slices(pl: *const Placement, device_id: usize) Slices {
-        const coords = pl.deviceCoords(device_id);
+    pub fn slices(pl: *const Placement, device: Device.Coords) Slices {
         var res: Slices = .{ .buffer = undefined, .len = pl.shape.rank() };
         for (0.., res.slice(), pl.shape.dims(), pl.axis_plans.constSlice()) |a, *r, size, plan| {
-            const start = plan.linearIndex(coords) * size;
+            const start = plan.linearIndex(device) * size;
             r.* = .{
                 .axis = @intCast(a),
                 .start = start,
@@ -1787,16 +1783,15 @@ pub const Placement = struct {
         return res;
     }
 
-    pub fn shardPtr(pl: *const Placement, device_id: usize, slice: Slice) [*]const u8 {
+    pub fn shardPtr(pl: *const Placement, device: Device.Coords, slice: Slice) [*]const u8 {
         if (builtin.mode == .Debug) {
             // there is a bug in caller code that used a placement for a different shape
             std.debug.assert(pl.global_shape.eql(slice.shape));
         }
-        const coords = pl.deviceCoords(device_id);
 
         var ptr: [*]const u8 = slice.constData().ptr;
         for (pl.shape.dims(), pl.axis_plans.constSlice(), slice.byte_strides.constSlice()) |size, plan, stride| {
-            const start = plan.linearIndex(coords) * size;
+            const start = plan.linearIndex(device) * size;
             ptr = ptr[@intCast(start * stride)..];
         }
         return ptr;
@@ -1804,8 +1799,8 @@ pub const Placement = struct {
 
     /// Given a Slice, returns the subslice corresponding to a specific device.
     /// Depending on the layout, the sub-slice may or may not be contiguous.
-    pub fn shardSlice(pl: *const Placement, device_id: usize, slice: Slice) Slice {
-        const shard_ptr = pl.shardPtr(device_id, slice);
+    pub fn shardSlice(pl: *const Placement, device: Device.Coords, slice: Slice) Slice {
+        const shard_ptr = pl.shardPtr(device, slice);
         const offset_bytes = @intFromPtr(shard_ptr) - @intFromPtr(slice.bytes.ptr);
         return .{
             .bytes = slice.bytes,
@@ -1816,23 +1811,14 @@ pub const Placement = struct {
         };
     }
 
-    fn deviceCoords(pl: Placement, device_id: usize) [MAX_MESH_RANK]u8 {
-        var coords: [MAX_MESH_RANK]u8 = @splat(0);
-        for (pl.sharding.devicesInCanonicalOrder()[device_id].coords.constSlice(), 0..) |coord, i| {
-            coords[i] = coord;
-        }
-        return coords;
-    }
-
     pub fn format(pl: Placement, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const ordered_devices = pl.sharding.devicesInCanonicalOrder();
 
         try pl.formatPlacementSummary(pl.shape, ordered_devices.len, writer);
         try writer.writeAll("Per-shard placement:\n");
         for (ordered_devices, 0..) |device, shard_index| {
-            const device_id: u8 = @intCast(device.id);
-            try writer.print("└─ Shard[{d}] device_id={d} coords={any}, slices=[", .{ shard_index, device_id, device.coords.constSlice() });
-            for (pl.slices(device_id).constSlice(), 0..) |s, i| {
+            try writer.print("└─ Shard[{d}] device={d} coords={any}, slices=[", .{ shard_index, device.id, device.coords });
+            for (pl.slices(device.coords).constSlice(), 0..) |s, i| {
                 if (i > 0) try writer.writeAll(", ");
                 const axis_label = pl.shape.debugTag(s.axis);
                 try writer.print("{s}:[{d}:{d}]", .{ axis_label, s.start, s.start + s.size });
@@ -1849,7 +1835,7 @@ pub const Placement = struct {
         try writer.print("Placement(shape={f} shards={d})\n", .{ shape, shard_count });
 
         try writer.writeAll("Axis partitioning summary:\n");
-        for (0.., pl.slices(0).constSlice()) |ax, slice| {
+        for (0.., pl.slices(@splat(0)).constSlice()) |ax, slice| {
             const dim = shape.dim(ax);
             const spec = shape.partition(ax);
             const axis_label = shape.debugTag(ax);
@@ -1871,8 +1857,8 @@ pub const Placement = struct {
 const AxisSplit = struct {
     /// For each physical coordinate depth, the contribution of that coordinate
     /// to the linear shard index. Unused depths have stride 0.
-    coord_strides: [MAX_MESH_RANK]u8,
-    counts: [MAX_MESH_RANK]u8,
+    coord_strides: Device.Coords,
+    counts: Device.Coords,
     product_count: u32,
 
     pub const empty: AxisSplit = .{
@@ -1888,7 +1874,7 @@ const AxisSplit = struct {
         split.product_count *= size;
     }
 
-    pub fn linearIndex(split: AxisSplit, device_coords: [MAX_MESH_RANK]u8) u32 {
+    pub fn linearIndex(split: AxisSplit, device_coords: Device.Coords) u32 {
         @setRuntimeSafety(false);
         const coords_u8: @Vector(MAX_MESH_RANK, u8) = device_coords;
         const strides: @Vector(MAX_MESH_RANK, u8) = split.coord_strides;
@@ -2013,7 +1999,7 @@ const ShardingTest = struct {
         if (depth == tags.len) {
             const id = next_id.*;
             next_id.* += 1;
-            return .{ .leaf = .{ .id = id } };
+            return .{ .leaf = .{ .id = id, .coords = Device.undefined_coords } };
         }
         const count = sizes[depth];
         const children = try self.allocator.alloc(PhysicalNode, count);
@@ -2061,10 +2047,12 @@ const ShardingTest = struct {
             const pl = try sharding_ref.placement(s.shape);
             errdefer std.log.warn("Expected shards failed. Got {f}", .{pl});
             try std.testing.expectEqual(s.expected_shards.len, ordered_devices.len);
-            for (s.expected_shards) |expected| {
+            for (s.expected_shards, ordered_devices) |expected, device| {
                 {
-                    // Check pl.slices(device.id)
-                    const actual_slices = pl.slices(expected.device_id);
+                    try std.testing.expectEqual(expected.device_id, device.id);
+
+                    // Check pl.slices(device)
+                    const actual_slices = pl.slices(device.coords);
 
                     // Consider rewriting test cases to use Slice1D. This requires passing the axis
                     const actual_start_len = try self.allocator.alloc([2]i64, actual_slices.len);

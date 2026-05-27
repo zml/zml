@@ -131,7 +131,7 @@ pub const Buffer = struct {
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
-                .data = placement.shardPtr(device.id, slice),
+                .data = placement.shardPtr(device.coords, slice),
                 .dst = .{ .memory = platform.devices[device.id].memory(opts.memory).pjrt_memory },
                 // Constant across devices
                 .layout = layout,
@@ -271,7 +271,7 @@ pub const Buffer = struct {
         const placement = try self._sharding.placement(self._shape);
         for (self._sharding.devicesInCanonicalOrder(), 0..) |device, shard_index| {
             // TODO: handle replicated information, we shouldn't iterate over all the devices unless needed
-            const sub_slice = placement.shardSlice(device.id, slice);
+            const sub_slice = placement.shardSlice(device.coords, slice);
             if (!sub_slice.isContiguous()) return error.NonContiguousShardRead;
 
             const size_bytes = placement.shape.byteSize();
@@ -292,7 +292,7 @@ pub const Buffer = struct {
 
         const placement = try self._sharding.placement(self._shape);
         for (self._sharding.devicesInCanonicalOrder(), 0..) |device, shard_index| {
-            const sub_slice = placement.shardSlice(device.id, slice);
+            const sub_slice = placement.shardSlice(device.coords, slice);
 
             var shard_slice = try Slice.alloc(allocator, sub_slice.shape);
             defer shard_slice.free(allocator);

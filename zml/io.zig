@@ -630,7 +630,7 @@ pub const DirectMemoryWriter = struct {
         fn collectRawSegments(self: *StreamPlanner) !void {
             const placement = try self.sharding.placement(self.shape);
             for (self.sharding.devicesInCanonicalOrder(), 0..) |device, writer_index| {
-                try self.appendShardSegments(placement.slices(device.id).constSlice(), writer_index);
+                try self.appendShardSegments(placement.slices(device.coords).constSlice(), writer_index);
             }
         }
 
