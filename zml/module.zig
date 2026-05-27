@@ -59,6 +59,13 @@ pub const CompilationOptions = struct {
     // tags those tensors as `<parameter>` and keeps them device-resident
     // across trace captures.
     tt_parameter_args: bool = false,
+
+    // TT-FIX: per-compile override for `enable_trace`. When `null` the
+    // global `ZML_TT_TRACE` env var is used. Use to force trace on/off
+    // for a specific compile — e.g. disable for a kernel whose IR
+    // contains ops that produce host-side tensors that the trace's
+    // "all outputs on device" verifier rejects.
+    tt_enable_trace: ?bool = null,
 };
 
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
@@ -684,7 +691,8 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 try setXlaOverrideFlag(overrides_map, "fp32_dest_acc_en", std.c.getenv("ZML_TT_FP32_DEST_ACC_EN") != null, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "optimization_level", opt, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "experimental_weight_dtype", dtype, upb_arena);
-                if (std.c.getenv("ZML_TT_TRACE") != null) {
+                const trace_on: bool = opts.tt_enable_trace orelse (std.c.getenv("ZML_TT_TRACE") != null);
+                if (trace_on) {
                     try setXlaOverrideFlag(overrides_map, "enable_trace", true, upb_arena);
                 }
             },
