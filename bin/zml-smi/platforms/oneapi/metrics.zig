@@ -15,7 +15,8 @@ pub fn start(collector: *Collector) !void {
     const dev_offset: u16 = @intCast(collector.device_infos.items.len);
 
     for (0..count) |i| {
-        const dev = Device.open(oneapi, i) catch continue;
+        const poll_arena = try collector.createPollArena();
+        const dev = Device.open(oneapi, i, poll_arena) catch continue;
         const initial: GpuInfo = .{
             .name = dev.name(collector.arena) catch null,
             .driver_version = dev.driverVersion(collector.arena) catch null,
@@ -28,7 +29,7 @@ pub fn start(collector: *Collector) !void {
         };
         const info = try collector.addDevice(.{ .oneapi = .{ .values = .{ initial, initial } } });
 
-        try collector.spawnPoll(pollOnce, .{ null, &info.oneapi, dev });
+        try collector.spawnPoll(pollOnce, .{ poll_arena, &info.oneapi, dev });
     }
 
     const processes = try collector.createProcessList();
@@ -39,11 +40,13 @@ const pollOnce = poll_metrics.poll(*DoubleBuffer(GpuInfo), Device, metrics);
 
 const Device = struct {
     oneapi: *OneApi,
+    arena: *std.heap.ArenaAllocator,
     handle: OneApi.Handle,
 
-    fn open(oneapi: *OneApi, index: usize) !Device {
+    fn open(oneapi: *OneApi, index: usize, arena: *std.heap.ArenaAllocator) !Device {
         return .{
             .oneapi = oneapi,
+            .arena = arena,
             .handle = try oneapi.handleByIndex(index),
         };
     }
@@ -57,47 +60,47 @@ const Device = struct {
     }
 
     pub fn powerUsage(self: Device) !u64 {
-        return self.oneapi.powerUsage(self.handle);
+        return self.oneapi.powerUsage(self.arena.allocator(), self.handle);
     }
 
     pub fn temperature(self: Device) !u64 {
-        return self.oneapi.temperature(self.handle);
+        return self.oneapi.temperature(self.arena.allocator(), self.handle);
     }
 
     pub fn gpuUtil(self: Device) !u64 {
-        return self.oneapi.gpuUtil(self.handle);
+        return self.oneapi.gpuUtil(self.arena.allocator(), self.handle);
     }
 
     pub fn powerLimit(self: Device) !u64 {
-        return self.oneapi.powerLimit(self.handle);
+        return self.oneapi.powerLimit(self.arena.allocator(), self.handle);
     }
 
     pub fn clockGraphics(self: Device) !u64 {
-        return self.oneapi.clockGraphics(self.handle);
+        return self.oneapi.clockGraphics(self.arena.allocator(), self.handle);
     }
 
     pub fn maxClockGraphics(self: Device) !u64 {
-        return self.oneapi.maxClockGraphics(self.handle);
+        return self.oneapi.maxClockGraphics(self.arena.allocator(), self.handle);
     }
 
     pub fn memUsed(self: Device) !u64 {
-        return self.oneapi.memUsed(self.handle);
+        return self.oneapi.memUsed(self.arena.allocator(), self.handle);
     }
 
     pub fn memTotal(self: Device) !u64 {
-        return self.oneapi.memTotal(self.handle);
+        return self.oneapi.memTotal(self.arena.allocator(), self.handle);
     }
 
     pub fn pcieLinkGen(self: Device) !u64 {
-        return self.oneapi.pcieLinkGen(self.handle);
+        return self.oneapi.pcieLinkGen(self.arena.allocator(), self.handle);
     }
 
     pub fn pcieLinkWidth(self: Device) !u64 {
-        return self.oneapi.pcieLinkWidth(self.handle);
+        return self.oneapi.pcieLinkWidth(self.arena.allocator(), self.handle);
     }
 
     pub fn pcieBandwidth(self: Device) !u64 {
-        return self.oneapi.pcieBandwidth(self.handle);
+        return self.oneapi.pcieBandwidth(self.arena.allocator(), self.handle);
     }
 };
 

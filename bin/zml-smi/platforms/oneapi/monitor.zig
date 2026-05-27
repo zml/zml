@@ -12,7 +12,6 @@ const Device = struct {
     dev_path: []const u8,
     hwmon_path: ?[]const u8,
     bus_device_identifier: ?[bus_device_identifier_len]u8,
-    arena: std.heap.ArenaAllocator,
     activity_prev: ?EngineSample = null,
     energy_prev: ?EnergySample = null,
 };
@@ -82,11 +81,7 @@ fn seed(self: *Monitor) !void {
     defer device_usage.deinit(self.allocator);
 
     for (self.devices, 0..) |*dev, idx| {
-        const allocator = block: {
-            _ = dev.arena.reset(.retain_capacity);
-            break :block dev.arena.allocator();
-        };
-        dev.energy_prev = readEnergy(allocator, self.io, dev.*) catch null;
+        dev.energy_prev = readEnergy(self.allocator, self.io, dev.*) catch null;
         dev.activity_prev = if (device_usage.get(@intCast(idx))) |sample| sample.engine else null;
     }
 
@@ -152,7 +147,6 @@ fn openDevice(allocator: std.mem.Allocator, io: std.Io, render_idx: usize) !Devi
         .dev_path = dev_path,
         .hwmon_path = findHwmon(allocator, io, dev_path) catch null,
         .bus_device_identifier = readBusDeviceId(allocator, io, dev_path) catch null,
-        .arena = std.heap.ArenaAllocator.init(allocator),
     };
 }
 

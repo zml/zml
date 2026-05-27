@@ -40,12 +40,8 @@ pub fn driverVersion(self: *const OneApi, allocator: std.mem.Allocator) ![]const
     return trimmed;
 }
 
-pub fn powerUsage(self: *OneApi, handle: Handle) !u64 {
+pub fn powerUsage(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    const allocator = block: {
-        _ = dev.arena.reset(.retain_capacity);
-        break :block dev.arena.allocator();
-    };
     const current = Monitor.readEnergy(allocator, self.io, dev.*) catch |err| {
         dev.energy_prev = null;
         return err;
@@ -58,31 +54,19 @@ pub fn powerUsage(self: *OneApi, handle: Handle) !u64 {
     return power;
 }
 
-pub fn powerLimit(self: *OneApi, handle: Handle) !u64 {
+pub fn powerLimit(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    const allocator = block: {
-        _ = dev.arena.reset(.retain_capacity);
-        break :block dev.arena.allocator();
-    };
     return Monitor.readPowerLimit(allocator, self.io, dev.*);
 }
 
-pub fn temperature(self: *OneApi, handle: Handle) !u64 {
+pub fn temperature(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    const allocator = block: {
-        _ = dev.arena.reset(.retain_capacity);
-        break :block dev.arena.allocator();
-    };
     return Monitor.readTemperature(allocator, self.io, dev.*);
 }
 
-pub fn gpuUtil(self: *OneApi, handle: Handle) !u64 {
+pub fn gpuUtil(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev_idx: u16 = @intCast(@intFromEnum(handle));
     const dev = try self.monitor.device(handle);
-    const allocator = block: {
-        _ = dev.arena.reset(.retain_capacity);
-        break :block dev.arena.allocator();
-    };
 
     var usage = Monitor.collectDeviceUsage(allocator, self.io, self.monitor.devices) catch {
         dev.activity_prev = null;
@@ -96,31 +80,18 @@ pub fn gpuUtil(self: *OneApi, handle: Handle) !u64 {
     return util;
 }
 
-pub fn clockGraphics(self: *OneApi, handle: Handle) !u64 {
+pub fn clockGraphics(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    const allocator = block: {
-        _ = dev.arena.reset(.retain_capacity);
-        break :block dev.arena.allocator();
-    };
     return Monitor.readClockGraphics(allocator, self.io, dev.*);
 }
 
-pub fn maxClockGraphics(self: *OneApi, handle: Handle) !u64 {
+pub fn maxClockGraphics(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    const allocator = block: {
-        _ = dev.arena.reset(.retain_capacity);
-        break :block dev.arena.allocator();
-    };
     return Monitor.readMaxClockGraphics(allocator, self.io, dev.*);
 }
 
-pub fn memUsed(self: *OneApi, handle: Handle) !u64 {
+pub fn memUsed(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev_idx: u16 = @intCast(@intFromEnum(handle));
-    const dev = try self.monitor.device(handle);
-    const allocator = block: {
-        _ = dev.arena.reset(.retain_capacity);
-        break :block dev.arena.allocator();
-    };
 
     var usage = Monitor.collectDeviceUsage(allocator, self.io, self.monitor.devices) catch return 0;
     defer usage.deinit(allocator);
@@ -128,39 +99,23 @@ pub fn memUsed(self: *OneApi, handle: Handle) !u64 {
     return if (usage.get(dev_idx)) |sample| sample.mem_kib * 1024 else 0;
 }
 
-pub fn memTotal(self: *OneApi, handle: Handle) !u64 {
+pub fn memTotal(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    const allocator = block: {
-        _ = dev.arena.reset(.retain_capacity);
-        break :block dev.arena.allocator();
-    };
     return Monitor.readMemTotal(allocator, self.io, dev.*);
 }
 
-pub fn pcieLinkGen(self: *OneApi, handle: Handle) !u64 {
+pub fn pcieLinkGen(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    const allocator = block: {
-        _ = dev.arena.reset(.retain_capacity);
-        break :block dev.arena.allocator();
-    };
     return Monitor.readPcieLinkGen(allocator, self.io, dev.*);
 }
 
-pub fn pcieLinkWidth(self: *OneApi, handle: Handle) !u64 {
+pub fn pcieLinkWidth(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    const allocator = block: {
-        _ = dev.arena.reset(.retain_capacity);
-        break :block dev.arena.allocator();
-    };
     return Monitor.readPcieLinkWidth(allocator, self.io, dev.*);
 }
 
-pub fn pcieBandwidth(self: *OneApi, handle: Handle) !u64 {
+pub fn pcieBandwidth(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = try self.monitor.device(handle);
-    const allocator = block: {
-        _ = dev.arena.reset(.retain_capacity);
-        break :block dev.arena.allocator();
-    };
     return Monitor.readPcieBandwidth(allocator, self.io, dev.*);
 }
 
