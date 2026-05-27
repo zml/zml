@@ -138,6 +138,12 @@ pub const Session = struct {
         var prefill_token_pos_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .pos = 1 }, .i32), .replicated, std.mem.asBytes(&prefill_pos));
         defer prefill_token_pos_buffer.deinit();
 
+        // Index of the last real prompt position; used by TT topk>1 path to
+        // pick the right position before sampling.
+        const prefill_last_pos: i32 = @intCast(all_tokens.len - 1);
+        var prefill_last_pos_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .pos = 1 }, .i32), .replicated, std.mem.asBytes(&prefill_last_pos));
+        defer prefill_last_pos_buffer.deinit();
+
         const attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata) = switch (self.compiled_model.params.prefill_attention_parameters) {
             .attnd => .{ .attnd = .{
                 .conversation_id = try zml.Buffer.scalar(self.io, self.platform, self.conversation_id, .u64),
@@ -151,6 +157,7 @@ pub const Session = struct {
             self.model_buffers,
             prefill_tokens_buffer,
             prefill_token_pos_buffer,
+            prefill_last_pos_buffer,
             &self.kv_cache_buffers,
             &self.rng_buffers,
             &attention_metadata_buffers,
@@ -200,6 +207,10 @@ pub const Session = struct {
             const decode_pos: i32 = @intCast(all_tokens.items.len);
             var token_pos_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .pos = 1 }, .i32), .replicated, std.mem.asBytes(&decode_pos));
             defer token_pos_buffer.deinit();
+            // Decode has .s=1 → position 0 inside that slot.
+            const decode_last_pos: i32 = 0;
+            var decode_last_pos_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .pos = 1 }, .i32), .replicated, std.mem.asBytes(&decode_last_pos));
+            defer decode_last_pos_buffer.deinit();
 
             const attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata) = switch (self.compiled_model.params.decode_attention_parameters) {
                 .attnd => .{ .attnd = .{
@@ -213,6 +224,7 @@ pub const Session = struct {
             decode_args.set(.{
                 current_token_buffer,
                 token_pos_buffer,
+                decode_last_pos_buffer,
                 &self.kv_cache_buffers,
                 &self.rng_buffers,
                 &attention_metadata_buffers,

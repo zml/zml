@@ -687,6 +687,9 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 if (std.c.getenv("ZML_TT_TRACE") != null) {
                     try setXlaOverrideFlag(overrides_map, "enable_trace", true, upb_arena);
                 }
+                if (std.c.getenv("ZML_TT_EXPORT_PATH")) |p| {
+                    try setXlaOverrideFlag(overrides_map, "export_path", std.mem.span(p), upb_arena);
+                }
             },
             else => {},
         }

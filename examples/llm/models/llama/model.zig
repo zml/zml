@@ -198,6 +198,7 @@ pub const Model = struct {
         self: Model,
         tokens_: zml.Tensor,
         token_index_: zml.Tensor,
+        last_token_index_: zml.Tensor,
         kv_cache: KvCache,
         rng: zml.Tensor.Rng,
         attention_metadata: zml.attention.attention.Metadata,
@@ -207,6 +208,7 @@ pub const Model = struct {
         // TT-FIX: token_index needed to be a vector, but the rest of the math
         // uses a scalar so we convert it back to a scalar
         const token_index = token_index_.squeeze(.pos);
+        const last_token_index = last_token_index_.squeeze(.pos);
 
         const out, const updated_kv_cache = self.model.forward(
             tokens,
@@ -216,10 +218,29 @@ pub const Model = struct {
             attention_parameters,
         );
 
+        // For topk>1 on TT, the sampling pipeline collapses .s to a single
+        // sampled token. We have to pick the RIGHT position (prompt_len-1,
+        // not S-1) before sampling — host reads
+        // `prefill_tokens[all_tokens.len - 1]` from the broadcast-back buffer.
+        // Use one-hot dot to dodge dynamic_slice over .d-sharded operand
+        // (matches the pre-de4c27e44 pattern).
+        const out_last = if (out.dim(.s) == 1) out else sel: {
+            const sel_shape = zml.Shape.init(.{ .s = out.dim(.s) }, last_token_index.dtype());
+            const onehot = zml.Tensor.iota(sel_shape, .s)
+                .cmp(.EQ, last_token_index.broad(sel_shape))
+                .convert(out.dtype());
+            break :sel out.dot(onehot, .s).insertAxes(.d, .{.s});
+        };
+
         // TT-FIX: drop the advanced rng — returning it tags a `to_layout`
         // after the epilogue's `mesh_shard` and trips TTNNTraceHoistTransform.
-        const new_tokens, _ = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
-        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache };
+        const new_tokens, _ = self.sampleTokens(self.lm_head, out_last, rng, self.gen_opts);
+        // Broadcast back to [B, S] for reuseBuffer + host's position read.
+        const broadcast_tokens = if (out.dim(.s) == 1)
+            new_tokens
+        else
+            new_tokens.broad(zml.Shape.init(.{ .b = tokens.dim(.b), .s = tokens.dim(.s) }, new_tokens.dtype()));
+        return .{ broadcast_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache };
     }
 
     pub fn sampleTokens(
@@ -233,7 +254,8 @@ pub const Model = struct {
         const ctx = zml.module.CompilationContext.current();
         switch (ctx.platform.target) {
             .tt => {
-                // TT-FIX: `s` needs to lead for the matcher
+                // TT-FIX: `s` needs to lead for the matcher (decode batch=32
+                // blowup on lm_head's reduce_scatter).
                 const out_t = out.transpose(.{ .s, .b, .d });
                 var logits = if (lm_head_) |lm_head|
                     lm_head.forward(out_t).rename(.{ .dout = .d }).transpose(.{ .b, .s, .d })
@@ -248,11 +270,36 @@ pub const Model = struct {
                     return .{ logits.argMax(.voc).indices.squeeze(.voc), rng };
                 }
 
-                // TT-FIX: tt.sampling broken at trace + opt>=1 (tt-xla #4570);
-                // dead-coded at topk=1, set ZML_TT_OPTIMIZATION_LEVEL=0 otherwise.
-                const topk = logits.topK(.{ .topk = .voc }, opts.topk, .{});
-                const token = tt_nn.sampling(topk.values.squeeze(.s), topk.indices.squeeze(.s), opts).insertAxes(.last, .{.s});
-                return .{ token, rng };
+                // Caller (Model.forward) already sliced to the right position
+                // via one-hot dot, so logits is [B, 1, voc] here. Squeeze .s.
+                const logits_last = logits.squeeze(.s);
+
+                // Chunked topK candidate set, matching torch-xla
+                // sampler.py:365-418. ttnn.topk is multi-core when inner dim is
+                // power-of-2 < 65536. Llama-3B's vocab=128256 fails both →
+                // split into 4 chunks of 32064, pad each to next-pow2=32768,
+                // topK(k=32) per chunk → concat to 128-wide candidate set.
+                const NUM_CHUNKS = 4;
+                const CHUNK_SIZE: i64 = 32064;
+                const PADDED_CHUNK: i64 = 32768;
+                const K_PER_CHUNK: u32 = 32;
+
+                var values_buf: [NUM_CHUNKS]zml.Tensor = undefined;
+                var indices_buf: [NUM_CHUNKS]zml.Tensor = undefined;
+                inline for (0..NUM_CHUNKS) |i| {
+                    const start: i64 = i * CHUNK_SIZE;
+                    const chunk = logits_last.slice1d(.voc, .{ .start = start, .end = start + CHUNK_SIZE });
+                    const padded = chunk.pad(-std.math.inf(f32), .{ .voc = zml.Tensor.Pad{ .high = PADDED_CHUNK - CHUNK_SIZE } });
+                    const tk = padded.topK(.{ .topk = .voc }, K_PER_CHUNK, .{});
+                    const offset = zml.Tensor.scalar(@as(i32, @intCast(start)), tk.indices.dtype()).broad(tk.indices.shape());
+                    values_buf[i] = tk.values;
+                    indices_buf[i] = tk.indices.add(offset);
+                }
+                const all_values = zml.Tensor.concatenate(&values_buf, .topk);
+                const all_indices = zml.Tensor.concatenate(&indices_buf, .topk);
+
+                const sampled = tt_nn.sampling(all_values, all_indices, opts);
+                return .{ sampled.insertAxes(.last, .{.s}), rng };
             },
             .cpu, .cuda, .rocm, .tpu, .neuron => {
                 var logits = blk: {

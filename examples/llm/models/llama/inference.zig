@@ -12,6 +12,7 @@ pub const CompilationParameters = struct {
     prefill_tokens: zml.Tensor,
     decode_tokens: zml.Tensor,
     token_index: zml.Tensor,
+    last_token_index: zml.Tensor,
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
     attention_metadata: attention.Metadata,
@@ -30,6 +31,11 @@ pub const CompilationParameters = struct {
             .decode_tokens = .init(.{ .b = batch_size, .s = 1 }, .u32),
             // TT-FIX: rank-1 i32 `{.pos=1}` token_index, required for pattern match
             .token_index = .init(.{ .pos = 1 }, .i32),
+            // Runtime index of the last meaningful prompt position (= prompt_len - 1
+            // for prefill, 0 for decode). Used by the TT topk>1 path to slice
+            // `out` to the right position before sampling — host then reads
+            // position prompt_len-1 from the broadcast-back output buffer.
+            .last_token_index = .init(.{ .pos = 1 }, .i32),
             // TT-FIX: one rank-4 KV tensor per layer, required for pattern match
             .kv_cache = try .init(allocator, .init(.{
                 .b = batch_size,
@@ -140,6 +146,7 @@ fn compileModel(
                 .{
                     parameters_.prefill_tokens,
                     parameters_.token_index,
+                    parameters_.last_token_index,
                     parameters_.kv_cache,
                     parameters_.rng,
                     parameters_.attention_metadata,
@@ -178,6 +185,7 @@ fn compileModel(
                 .{
                     parameters_.decode_tokens,
                     parameters_.token_index,
+                    parameters_.last_token_index,
                     parameters_.kv_cache,
                     parameters_.rng,
                     parameters_.attention_metadata,
