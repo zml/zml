@@ -217,14 +217,10 @@ fn compileSingleKernelExe(
         .{
             .shardings = &all_shardings,
             // TT-FIX: tag arg 0 (Model weights) as `<parameter>` so tt-xla
-            // keeps them device-resident across trace captures. Disabled
-            // for lfm2 — trips "Device-resident argument N must already
-            // be in device memory" on some weight tensor.
-            .tt_parameter_args = false,
-            // Env var (ZML_TT_TRACE) controls both prefill and decode.
-            // Prefill became trace-eligible after replacing the depthwise
-            // `conv1d` with an unrolled mul/add chain — see the TT-FIX in
-            // ShortConv.forward in model.zig.
+            // keeps them device-resident across trace captures. Required
+            // for the const-eval'd conv2d weight prepare path to keep the
+            // conv weight on device and the trace verifier happy.
+            .tt_parameter_args = true,
             .tt_enable_trace = null,
         },
     );
