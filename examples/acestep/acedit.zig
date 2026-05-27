@@ -58,6 +58,7 @@ pub const AceDit_handler = struct {
             .hidden_states = .init(.{ .t = @divFloor(25 * target_duration + 1, 2), .d = config.hidden_size }, .bf16),
             .temb = .init(.{ .d_emb = config.hidden_size }, .bf16),
             .timestep_proj = .init(.{ .n2 = config.fsq_input_levels.len, .d_emb = config.hidden_size }, .bf16),
+            .v = .init(.{ .t = 25 * target_duration, .a = config.timbre_hidden_dim }, .bf16),
         };
         
         const shardings: main.Shardings = try .init(zml_handler.platform);
@@ -111,14 +112,23 @@ pub const AceDit_handler = struct {
         var layer_future_awaited = false;
         errdefer if (!layer_future_awaited) if (layer_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
-        var post_future = try zml_handler.io.concurrent(struct {
+        var predict_velocity_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: AceDit, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .postprocess,
-                    .{ params_.t_curr, params_.t_next, params_.x, params_.hidden_states, params_.temb }, opts_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .predictVelocity,
+                    .{ params_.x, params_.hidden_states, params_.temb }, opts_);
             }
         }.call, .{ zml_handler, model, params, opts });
-        var post_future_awaited = false;
-        errdefer if (!post_future_awaited) if (post_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+        var predict_velocity_future_awaited = false;
+        errdefer if (!predict_velocity_future_awaited) if (predict_velocity_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        var update_flow_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceDit, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .updateFlow,
+                    .{ params_.t_curr, params_.t_next, params_.x, params_.v }, opts_);
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var update_flow_future_awaited = false;
+        errdefer if (!update_flow_future_awaited) if (update_flow_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
         const pre_future_exe = try pre_future.await(zml_handler.io);
         pre_future_awaited = true;
@@ -126,8 +136,11 @@ pub const AceDit_handler = struct {
         const layer_future_exe = try layer_future.await(zml_handler.io);
         layer_future_awaited = true;
 
-        const post_future_exe = try post_future.await(zml_handler.io);
-        post_future_awaited = true;
+        const predict_velocity_future_exe = try predict_velocity_future.await(zml_handler.io);
+        predict_velocity_future_awaited = true;
+
+        const update_flow_future_exe = try update_flow_future.await(zml_handler.io);
+        update_flow_future_awaited = true;
 
         return .{
             .preprocess_exe = pre_future_exe,
@@ -136,9 +149,12 @@ pub const AceDit_handler = struct {
             .layer_exe = layer_future_exe,
             .layer_args = try layer_future_exe.args(zml_handler.allocator),
             .layer_results = try layer_future_exe.results(zml_handler.allocator),
-            .postprocess_exe = post_future_exe,
-            .postprocess_args = try post_future_exe.args(zml_handler.allocator),
-            .postprocess_results = try post_future_exe.results(zml_handler.allocator),
+            .predict_velocity_exe = predict_velocity_future_exe,
+            .predict_velocity_args = try predict_velocity_future_exe.args(zml_handler.allocator),
+            .predict_velocity_results = try predict_velocity_future_exe.results(zml_handler.allocator),
+            .update_flow_exe = update_flow_future_exe,
+            .update_flow_args = try update_flow_future_exe.args(zml_handler.allocator),
+            .update_flow_results = try update_flow_future_exe.results(zml_handler.allocator),
         };
     }
     
@@ -175,6 +191,7 @@ pub const Params = struct {
     hidden_states: zml.Tensor,
     temb: zml.Tensor,
     timestep_proj: zml.Tensor,
+    v: zml.Tensor,
 };
 
 pub const Options = struct {
@@ -427,9 +444,13 @@ pub const Exes = struct {
     layer_args: zml.Exe.Arguments,
     layer_results: zml.Exe.Results,
     
-    postprocess_exe: zml.Exe,
-    postprocess_args: zml.Exe.Arguments,
-    postprocess_results: zml.Exe.Results,
+    predict_velocity_exe: zml.Exe,
+    predict_velocity_args: zml.Exe.Arguments,
+    predict_velocity_results: zml.Exe.Results,
+
+    update_flow_exe: zml.Exe,
+    update_flow_args: zml.Exe.Arguments,
+    update_flow_results: zml.Exe.Results,
 
     pub fn deinit(self: Exes, allocator: std.mem.Allocator) void {
         self.preprocess_exe.deinit();
@@ -438,9 +459,12 @@ pub const Exes = struct {
         self.layer_exe.deinit();
         self.layer_args.deinit(allocator);
         self.layer_results.deinit(allocator);
-        self.postprocess_exe.deinit();
-        self.postprocess_args.deinit(allocator);
-        self.postprocess_results.deinit(allocator);
+        self.predict_velocity_exe.deinit();
+        self.predict_velocity_args.deinit(allocator);
+        self.predict_velocity_results.deinit(allocator);
+        self.update_flow_exe.deinit();
+        self.update_flow_args.deinit(allocator);
+        self.update_flow_results.deinit(allocator);
     }
 };
 
@@ -546,7 +570,7 @@ pub const AceDit = struct {
         return hidden_states;
     }
 
-    pub fn postprocess(self: AceDit, t_curr: zml.Tensor, t_next: zml.Tensor, x: zml.Tensor, hidden_states_: zml.Tensor, temb: zml.Tensor) zml.Tensor {
+    pub fn predictVelocity(self: AceDit, x: zml.Tensor, hidden_states_: zml.Tensor, temb: zml.Tensor) zml.Tensor {
         // adaptive layer norm based on scale shift
         var hidden_states = self.scale_shift(hidden_states_, temb);
         
@@ -556,13 +580,20 @@ pub const AceDit = struct {
         hidden_states = self.proj_out.forward(hidden_states);
            
         // remove padding from output : this is now the predicted flow velocity v
-        const v = hidden_states.slice1d(.t, .{ .start = 0, .end = x.dim(.t) });
-        
+        return hidden_states.slice1d(.t, .{ .start = 0, .end = x.dim(.t) });
+    }
+
+    pub fn updateFlow(_: AceDit, t_curr: zml.Tensor, t_next: zml.Tensor, x: zml.Tensor, v: zml.Tensor) zml.Tensor {
         // update noised latent x with one step of flow matching
         const dt = t_next.sub(t_curr).broad(x.shape()).convert(.bf16);
         const x_next = x.add(v.mul(dt));
      
         return x_next.reuseBuffer(x);
+    }
+
+    pub fn postprocess(self: AceDit, t_curr: zml.Tensor, t_next: zml.Tensor, x: zml.Tensor, hidden_states_: zml.Tensor, temb: zml.Tensor) zml.Tensor {
+        const v = self.predictVelocity(x, hidden_states_, temb);
+        return self.updateFlow(t_curr, t_next, x, v);
     }
     
     pub fn scale_shift(self: AceDit, hidden_states: zml.Tensor, temb: zml.Tensor) zml.Tensor {

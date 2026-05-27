@@ -105,6 +105,7 @@ pub const Uri_handler = struct {
     style_ref: []const u8 = "file://examples//acestep//references//style.wav",
     caption_ref: []const u8 = "file://examples//acestep//references//caption.txt",
     lyrics_ref: []const u8 = "file://examples//acestep//references//lyric.txt",
+    lyrics_original_ref: []const u8 = "file://examples//acestep//references//lyric_original.txt",
 
     pub fn fromLocal(args: Args) Uri_handler {
         return .{
@@ -227,6 +228,10 @@ const Args = struct {
     match_level: u3 = 0,
     cover_strength: f32 = 0.5,
     no_fsq: bool = false,
+    remix_lyric: bool = false,
+    remix_lyric_min: f32 = 0.0,
+    remix_lyric_max: f32 = 1.0,
+    remix_lyric_avg: u8 = 1,
 
     pub const help =
         \\ Use acestep [options]
@@ -259,6 +264,11 @@ const Args = struct {
         \\   --no-fsq                  Disable FSQ quantization for remix (default: 0)
         \\                             -> do we remix from the exact audio or from a compressed summary ?
         \\
+        \\   --remix-lyric             Enable flow-edit style lyric remix using references/lyric_original.txt
+        \\   --remix-lyric-min=<float> Flow-edit start fraction in [0,1] (default: 0.0)
+        \\   --remix-lyric-max=<float> Flow-edit end fraction in [0,1] (default: 1.0)
+        \\   --remix-lyric-avg=<int>   Number of stochastic flow delta averages per step (default: 1)
+        \\
     ;
 };
 
@@ -276,11 +286,7 @@ const Args = struct {
 // info:   wav                                                 0.17s
 // info: total                                                38.81s
 
-// TODO: try implement lyric remix (flow-edit mode in python)
-// - embed old and new lyric
-// - switch/blend/dice between the two during the diffusion
-
-// TODO: edit mode
+// TODO: edit mode/continue
 // - clone source latents on keep regions, add noise, modify mask channels
 // - add silence latent on paint regions (of same range)
 // - mask is 0 : leave frame intact, 1 edit the frame
@@ -326,7 +332,11 @@ pub fn main(init: std.process.Init) !void {
 
     zml_handler.tic(&zml_handler.timers.total);
     //try runText2MusicPipeline(&zml_handler);
-    try runRemixPipeline(&zml_handler);
+    if (zml_handler.args.remix_lyric) {
+        try runLyricRemixPipeline(&zml_handler);
+    } else {
+        try runRemixPipeline(&zml_handler);
+    }
     zml_handler.toc(&zml_handler.timers.total);
 
     zml_handler.timers.print();
@@ -701,6 +711,185 @@ pub fn runRemixPipeline(zml_handler: *Zml_handler) !void {
     acedit.unloadBuffers(zml_handler.allocator);
     acevae.unloadBuffers(zml_handler.allocator);
 
+}
+
+pub fn runLyricRemixPipeline(zml_handler: *Zml_handler) !void {
+
+    // ------------------------------------------------
+    // Read/encode audio reference
+    // ------------------------------------------------
+
+    zml_handler.tic(&zml_handler.timers.wav);
+
+    var input_audio = try importAudio(zml_handler, zml_handler.uris.audio_ref);
+    defer input_audio.deinit(zml_handler.allocator);
+
+    zml_handler.toc(&zml_handler.timers.wav);
+    zml_handler.tic(&zml_handler.timers.vae.total);
+
+    var acevae_encoder = try acevae_.AceVaeEncoder_handler.init(zml_handler);
+    defer acevae_encoder.deinit(zml_handler.allocator);
+
+    var audio_latent = try inference.encodeAudioLatents(zml_handler, &acevae_encoder, input_audio);
+    defer audio_latent.deinit(zml_handler.allocator);
+
+    acevae_encoder.unloadBuffers(zml_handler.allocator);
+
+    zml_handler.toc(&zml_handler.timers.vae.total);
+
+    // ------------------------------------------------
+    // Build source/target lyric metadata
+    // ------------------------------------------------
+
+    var target_metadata = try inference.AudioMetadata.empty(zml_handler.allocator);
+    defer target_metadata.deinit(zml_handler.allocator);
+    var source_metadata = try inference.AudioMetadata.empty(zml_handler.allocator);
+    defer source_metadata.deinit(zml_handler.allocator);
+
+    try target_metadata.setCaption(zml_handler.allocator, zml_handler.args.prompt);
+    try source_metadata.setCaption(zml_handler.allocator, zml_handler.args.prompt);
+    try target_metadata.setDuration(zml_handler.allocator, audio_latent.duration_s());
+    try source_metadata.setDuration(zml_handler.allocator, audio_latent.duration_s());
+    const duration = audio_latent.duration_s();
+
+    if (zml_handler.args.caption_ref) {
+        const caption = try importText(zml_handler, zml_handler.uris.caption_ref);
+        defer zml_handler.allocator.free(caption);
+        try target_metadata.setCaption(zml_handler.allocator, caption);
+        try source_metadata.setCaption(zml_handler.allocator, caption);
+    }
+
+    const target_lyrics = try importText(zml_handler, zml_handler.uris.lyrics_ref);
+    defer zml_handler.allocator.free(target_lyrics);
+    const source_lyrics = try importText(zml_handler, zml_handler.uris.lyrics_original_ref);
+    defer zml_handler.allocator.free(source_lyrics);
+    try target_metadata.setLyric(zml_handler.allocator, target_lyrics);
+    try source_metadata.setLyric(zml_handler.allocator, source_lyrics);
+
+    // ------------------------------------------------
+    // Embed target/source text inputs for diffusion conditions
+    // ------------------------------------------------
+
+    zml_handler.mem.start(0);
+    zml_handler.tic(&zml_handler.timers.emb.total);
+
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.aceemb);
+    var tokenizer = try aceemb_.AceEmb_handler.loadTokenizer(zml_handler, repo);
+    defer tokenizer.deinit();
+
+    const caption_tok = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, target_metadata, true);
+    const target_lyric_tok = try inference.tokenizeInputLyrics(zml_handler.allocator, tokenizer, target_metadata);
+    const source_lyric_tok = try inference.tokenizeInputLyrics(zml_handler.allocator, tokenizer, source_metadata);
+    defer zml_handler.allocator.free(caption_tok);
+    defer zml_handler.allocator.free(target_lyric_tok);
+    defer zml_handler.allocator.free(source_lyric_tok);
+
+    var aceemb = try aceemb_.AceEmb_handler.init(zml_handler);
+    defer aceemb.deinit(zml_handler.allocator);
+
+    const caption_emb = try inference.embedText(zml_handler, &aceemb, caption_tok);
+    const target_lyric_emb = try inference.embedLyric(zml_handler, &aceemb, target_lyric_tok);
+    const source_lyric_emb = try inference.embedLyric(zml_handler, &aceemb, source_lyric_tok);
+    defer caption_emb.free(zml_handler.allocator);
+    defer target_lyric_emb.free(zml_handler.allocator);
+    defer source_lyric_emb.free(zml_handler.allocator);
+
+    aceemb.unloadBuffers(zml_handler.allocator);
+
+    zml_handler.toc(&zml_handler.timers.emb.total);
+    zml_handler.mem.check(0);
+
+    // ------------------------------------------------
+    // Encode shared source context and paired source/target conditions
+    // ------------------------------------------------
+
+    zml_handler.mem.start(0);
+    zml_handler.tic(&zml_handler.timers.enc.total);
+
+    var aceenc = try aceenc_.AceEnc_handler.init(zml_handler);
+    defer aceenc.deinit(zml_handler.allocator);
+
+    const context_latents = try inference.prepareDiffusionLatents(zml_handler, &aceenc, @intCast(duration), null, audio_latent);
+    defer context_latents.free(zml_handler.allocator);
+    const target_conditions = try inference.prepareDiffusionConditions(zml_handler, &aceenc, caption_emb, target_lyric_emb, null);
+    defer target_conditions.free(zml_handler.allocator);
+    const source_conditions = try inference.prepareDiffusionConditions(zml_handler, &aceenc, caption_emb, source_lyric_emb, null);
+    defer source_conditions.free(zml_handler.allocator);
+
+    aceenc.unloadBuffers(zml_handler.allocator);
+
+    zml_handler.toc(&zml_handler.timers.enc.total);
+    zml_handler.mem.check(0);
+
+    // ------------------------------------------------
+    // Tiled generation : compile DiT and VAE models
+    // ------------------------------------------------
+
+    zml_handler.tic(&zml_handler.timers.dit.total);
+
+    var acedit = try acedit_.AceDit_handler.init(zml_handler, @intCast(duration));
+    defer acedit.deinit(zml_handler.allocator);
+
+    zml_handler.toc(&zml_handler.timers.dit.total);
+    zml_handler.tic(&zml_handler.timers.vae.total);
+
+    var acevae = try acevae_.AceVaeDecoder_handler.init(zml_handler);
+    defer acevae.deinit(zml_handler.allocator);
+
+    zml_handler.toc(&zml_handler.timers.vae.total);
+
+    for (0..zml_handler.args.n) |i| {
+
+        // ------------------------------------------------
+        // Generation phase : paired lyric flow edit with DiT model
+        // ------------------------------------------------
+
+        zml_handler.tic(&zml_handler.timers.dit.total);
+        zml_handler.mem.start(0);
+
+        const diffused_latents = try inference.runLyricRemixDiffusion(
+            zml_handler,
+            &acedit,
+            audio_latent,
+            context_latents,
+            source_conditions,
+            target_conditions,
+            i,
+            zml_handler.args.remix_lyric_min,
+            zml_handler.args.remix_lyric_max,
+            @intCast(zml_handler.args.remix_lyric_avg),
+        );
+        defer diffused_latents.deinit(zml_handler.allocator);
+
+        zml_handler.mem.check(0);
+        zml_handler.toc(&zml_handler.timers.dit.total);
+
+        // ------------------------------------------------
+        // Decode diffused latents with the VAE model
+        // ------------------------------------------------
+
+        zml_handler.tic(&zml_handler.timers.vae.total);
+        zml_handler.mem.start(0);
+
+        const decoded_audio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents);
+        defer decoded_audio.deinit(zml_handler.allocator);
+
+        zml_handler.mem.check(0);
+        zml_handler.toc(&zml_handler.timers.vae.total);
+
+        // ------------------------------------------------
+        // Export decoded audio as WAV
+        // ------------------------------------------------
+
+        zml_handler.tic(&zml_handler.timers.wav);
+
+        try exportAudio(zml_handler, decoded_audio, i);
+
+        zml_handler.toc(&zml_handler.timers.wav);
+    }
+
+    acedit.unloadBuffers(zml_handler.allocator);
+    acevae.unloadBuffers(zml_handler.allocator);
 }
 
 

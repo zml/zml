@@ -1073,6 +1073,73 @@ pub fn createBidirectionalRangeMask(allocator: std.mem.Allocator, seq_len: i64, 
 //                 DiT tasks
 // ------------------------------------------------
 
+pub fn predictVelocityBuffer(
+    zml_handler: *Zml_handler,
+    acedit: *acedit_.AceDit_handler,
+    x_buffer: zml.Buffer,
+    latents_buffer: zml.Buffer,
+    conditions_buffer: zml.Buffer,
+    full_mask_buffer: zml.Buffer,
+    sliding_mask_buffer: zml.Buffer,
+    cross_mask_buffer: zml.Buffer,
+    t_curr_value: f32,
+) !zml.Buffer {
+    const io = zml_handler.io;
+    const sharding = acedit.shardings.replicated;
+    const platform = zml_handler.platform;
+
+    var y_proj_buffer: zml.Buffer = undefined;
+    var hidden_states_buffer: zml.Buffer = undefined;
+    var temb_buffer: zml.Buffer = undefined;
+    var timestep_proj_buffer: zml.Buffer = undefined;
+    defer y_proj_buffer.deinit();
+    defer hidden_states_buffer.deinit();
+    defer temb_buffer.deinit();
+    defer timestep_proj_buffer.deinit();
+
+    var t_curr: zml.Buffer = try zml.Buffer.scalar(io, platform, t_curr_value, .f32, sharding);
+    defer t_curr.deinit();
+
+    acedit.exes.preprocess_args.set(.{ acedit.model_buffers, t_curr, x_buffer, latents_buffer, conditions_buffer });
+    acedit.exes.preprocess_exe.call(acedit.exes.preprocess_args, &acedit.exes.preprocess_results);
+    acedit.exes.preprocess_results.fill(.{ &y_proj_buffer, &hidden_states_buffer, &temb_buffer, &timestep_proj_buffer });
+
+    for (0..acedit.config.num_hidden_layers) |ii| {
+        const mask_buffer = if (acedit.config.layer_types[ii] == .sliding_attention) sliding_mask_buffer else full_mask_buffer;
+        acedit.exes.layer_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer, cross_mask_buffer });
+        acedit.exes.layer_exe.call(acedit.exes.layer_args, &acedit.exes.layer_results);
+        acedit.exes.layer_results.fill(.{ &hidden_states_buffer });
+    }
+
+    var velocity_buffer: zml.Buffer = undefined;
+    acedit.exes.predict_velocity_args.set(.{ acedit.model_buffers, x_buffer, hidden_states_buffer, temb_buffer });
+    acedit.exes.predict_velocity_exe.call(acedit.exes.predict_velocity_args, &acedit.exes.predict_velocity_results);
+    acedit.exes.predict_velocity_results.fill(.{ &velocity_buffer });
+    return velocity_buffer;
+}
+
+pub fn updateFlowBuffer(
+    zml_handler: *Zml_handler,
+    acedit: *acedit_.AceDit_handler,
+    x_buffer: *zml.Buffer,
+    velocity_buffer: zml.Buffer,
+    t_curr_value: f32,
+    t_next_value: f32,
+) !void {
+    const io = zml_handler.io;
+    const sharding = acedit.shardings.replicated;
+    const platform = zml_handler.platform;
+
+    var t_curr: zml.Buffer = try zml.Buffer.scalar(io, platform, t_curr_value, .f32, sharding);
+    defer t_curr.deinit();
+    var t_next: zml.Buffer = try zml.Buffer.scalar(io, platform, t_next_value, .f32, sharding);
+    defer t_next.deinit();
+
+    acedit.exes.update_flow_args.set(.{ acedit.model_buffers, t_curr, t_next, x_buffer.*, velocity_buffer });
+    acedit.exes.update_flow_exe.call(acedit.exes.update_flow_args, &acedit.exes.update_flow_results);
+    acedit.exes.update_flow_results.fill(.{ x_buffer });
+}
+
 pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_handler, context: ContextLatents, id: usize) !AudioLatents {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
@@ -1128,35 +1195,10 @@ pub fn runCoverDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     const steps = timestamps.len - 1;
     zml_handler.tic(&zml_handler.timers.dit.prefill);
     for (0..steps) |i| {
-        // we need some buffers to hold intermediate results
-        var y_proj_buffer: zml.Buffer = undefined;
-        var hidden_states_buffer: zml.Buffer = undefined;
-        var temb_buffer: zml.Buffer = undefined;
-        var timestep_proj_buffer: zml.Buffer = undefined;
-        defer y_proj_buffer.deinit();
-        defer hidden_states_buffer.deinit();
-        defer temb_buffer.deinit();
-        defer timestep_proj_buffer.deinit();
-
         std.log.info("DiT ************* step {d}/{d}, is_cover: {any}", .{ i+1, steps, true });
-        var t_curr: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i], .f32, sharding);
-        var t_next: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i + 1], .f32, sharding);
-        defer t_curr.deinit();
-        defer t_next.deinit();
-        
-        acedit.exes.preprocess_args.set(.{ acedit.model_buffers, t_curr, x_buffer, latents_buffer, conditions_buffer });
-        acedit.exes.preprocess_exe.call(acedit.exes.preprocess_args, &acedit.exes.preprocess_results);
-        acedit.exes.preprocess_results.fill(.{ &y_proj_buffer, &hidden_states_buffer, &temb_buffer, &timestep_proj_buffer });
-
-        for (0..acedit.config.num_hidden_layers) |ii| {
-            const mask_buffer = if (acedit.config.layer_types[ii] == .sliding_attention) sliding_mask_buffer else full_mask_buffer;
-            acedit.exes.layer_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer, cross_mask_buffer });
-            acedit.exes.layer_exe.call(acedit.exes.layer_args, &acedit.exes.layer_results);
-            acedit.exes.layer_results.fill(.{ &hidden_states_buffer });
-        }
-        acedit.exes.postprocess_args.set(.{ acedit.model_buffers, t_curr, t_next, x_buffer, hidden_states_buffer, temb_buffer });
-        acedit.exes.postprocess_exe.call(acedit.exes.postprocess_args, &acedit.exes.postprocess_results);
-        acedit.exes.postprocess_results.fill(.{ &x_buffer });
+        var velocity_buffer = try predictVelocityBuffer(zml_handler, acedit, x_buffer, latents_buffer, conditions_buffer, full_mask_buffer, sliding_mask_buffer, cross_mask_buffer, timestamps[i]);
+        try updateFlowBuffer(zml_handler, acedit, &x_buffer, velocity_buffer, timestamps[i], timestamps[i + 1]);
+        velocity_buffer.deinit();
     }
     try x_buffer.toSlice(io, x);
 
@@ -1267,40 +1309,15 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
     const time: f32 = @floatFromInt(steps - match_level);
     const cover_iters: usize = @intFromFloat(@floor(time * zml_handler.args.cover_strength));
     for (match_level..steps) |i| {
-        // we need some buffers to hold intermediate results
-        var y_proj_buffer: zml.Buffer = undefined;
-        var hidden_states_buffer: zml.Buffer = undefined;
-        var temb_buffer: zml.Buffer = undefined;
-        var timestep_proj_buffer: zml.Buffer = undefined;
-        defer y_proj_buffer.deinit();
-        defer hidden_states_buffer.deinit();
-        defer temb_buffer.deinit();
-        defer timestep_proj_buffer.deinit();
-
         const is_cover = i - match_level < cover_iters;
         const latents_buffer = if (is_cover) latents_cover_buffer else latents_non_cover_buffer;
         const conditions_buffer = if (is_cover) conditions_cover_buffer else conditions_non_cover_buffer;
         const cross_mask_buffer = if (is_cover) cross_mask_buffer_cover else cross_mask_buffer_non_cover;
 
         std.log.info("DiT ************* step {d}/{d}, is_cover: {any}", .{ i+1, steps, is_cover });
-        var t_curr: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i], .f32, sharding);
-        var t_next: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i + 1], .f32, sharding);
-        defer t_curr.deinit();
-        defer t_next.deinit();
-        
-        acedit.exes.preprocess_args.set(.{ acedit.model_buffers, t_curr, x_buffer, latents_buffer, conditions_buffer });
-        acedit.exes.preprocess_exe.call(acedit.exes.preprocess_args, &acedit.exes.preprocess_results);
-        acedit.exes.preprocess_results.fill(.{ &y_proj_buffer, &hidden_states_buffer, &temb_buffer, &timestep_proj_buffer });
-        
-        for (0..acedit.config.num_hidden_layers) |ii| {
-            const mask_buffer = if (acedit.config.layer_types[ii] == .sliding_attention) sliding_mask_buffer else full_mask_buffer;
-            acedit.exes.layer_args.set(.{ acedit.model_buffers.layers[ii], hidden_states_buffer, y_proj_buffer, timestep_proj_buffer, mask_buffer, cross_mask_buffer });
-            acedit.exes.layer_exe.call(acedit.exes.layer_args, &acedit.exes.layer_results);
-            acedit.exes.layer_results.fill(.{ &hidden_states_buffer });
-        }
-        acedit.exes.postprocess_args.set(.{ acedit.model_buffers, t_curr, t_next, x_buffer, hidden_states_buffer, temb_buffer });
-        acedit.exes.postprocess_exe.call(acedit.exes.postprocess_args, &acedit.exes.postprocess_results);
-        acedit.exes.postprocess_results.fill(.{ &x_buffer });
+        var velocity_buffer = try predictVelocityBuffer(zml_handler, acedit, x_buffer, latents_buffer, conditions_buffer, full_mask_buffer, sliding_mask_buffer, cross_mask_buffer, timestamps[i]);
+        try updateFlowBuffer(zml_handler, acedit, &x_buffer, velocity_buffer, timestamps[i], timestamps[i + 1]);
+        velocity_buffer.deinit();
     }
 
     try x_buffer.toSlice(io, x);
@@ -1314,6 +1331,169 @@ pub fn runRemixDiffusion(zml_handler: *Zml_handler, acedit: *acedit_.AceDit_hand
             const pos = tt * dimA + aa;
             const pos_tr = aa * dimT + tt;
             result_slice.items(zml.floats.BFloat16)[pos_tr] = x.items(zml.floats.BFloat16)[pos];
+        }
+    }
+
+    return .{ .x = result_slice };
+}
+
+pub fn runLyricRemixDiffusion(
+    zml_handler: *Zml_handler,
+    acedit: *acedit_.AceDit_handler,
+    source: AudioLatents,
+    context_latents: zml.Slice,
+    source_conditions: zml.Slice,
+    target_conditions: zml.Slice,
+    id: usize,
+    edit_n_min: f32,
+    edit_n_max: f32,
+    edit_n_avg: usize,
+) !AudioLatents {
+    const io = zml_handler.io;
+    const allocator = zml_handler.allocator;
+    const sharding = acedit.shardings.replicated;
+    const platform = zml_handler.platform;
+
+    if (edit_n_avg == 0) return error.InvalidFlowEditAverage;
+    if (edit_n_min < 0.0 or edit_n_max > 1.0 or edit_n_min > edit_n_max) return error.InvalidFlowEditWindow;
+
+    const t = context_latents.shape.dim(0);
+    const a = @divExact(context_latents.shape.dim(1), 2);
+    const s_source = source_conditions.shape.dim(0);
+    const s_target = target_conditions.shape.dim(0);
+    const d = target_conditions.shape.dim(1);
+
+    const dimT: usize = @intCast(t);
+    const dimA: usize = @intCast(a);
+
+    std.log.info("DiT lyric remix call with input size : {d}x{d} src {d}x{d} target {d}x{d}", .{ t, a, s_source, d, s_target, d });
+
+    const timestamps: [9]f32 = .{ 1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3, 0.0 };
+    const steps = timestamps.len - 1;
+    const edit_start_step: usize = @min(steps, @as(usize, @intFromFloat(@floor(@as(f32, @floatFromInt(steps)) * edit_n_min))));
+    const edit_end_step: usize = @min(steps, @as(usize, @intFromFloat(@floor(@as(f32, @floatFromInt(steps)) * edit_n_max))));
+
+    const source_ta: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t, .a = a }, .bf16));
+    defer source_ta.free(allocator);
+    const zt_edit: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t, .a = a }, .bf16));
+    defer zt_edit.free(allocator);
+    const zt_src: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t, .a = a }, .bf16));
+    defer zt_src.free(allocator);
+    const zt_tar: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t, .a = a }, .bf16));
+    defer zt_tar.free(allocator);
+    const v_src: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t, .a = a }, .bf16));
+    defer v_src.free(allocator);
+    const v_tar: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t, .a = a }, .bf16));
+    defer v_tar.free(allocator);
+
+    for (0..dimT) |tt| {
+        for (0..dimA) |aa| {
+            const source_value = source.x.items(zml.floats.BFloat16)[aa * dimT + tt];
+            source_ta.items(zml.floats.BFloat16)[tt * dimA + aa] = source_value;
+            zt_edit.items(zml.floats.BFloat16)[tt * dimA + aa] = source_value;
+        }
+    }
+
+    var context_latents_buffer: zml.Buffer = try .fromSlice(io, platform, context_latents, sharding);
+    defer context_latents_buffer.deinit();
+
+    const zero = zml.floats.BFloat16.fromF32(0.0);
+    const source_conditions_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = d }, .bf16));
+    defer source_conditions_slice.free(allocator);
+    @memset(source_conditions_slice.items(zml.floats.BFloat16), zero);
+    @memcpy(source_conditions_slice.items(zml.floats.BFloat16)[0..@intCast(s_source * d)], source_conditions.items(zml.floats.BFloat16));
+    var source_conditions_buffer: zml.Buffer = try .fromSlice(io, platform, source_conditions_slice, sharding);
+    defer source_conditions_buffer.deinit();
+
+    const target_conditions_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = acedit.options.enc_seq_len, .d = d }, .bf16));
+    defer target_conditions_slice.free(allocator);
+    @memset(target_conditions_slice.items(zml.floats.BFloat16), zero);
+    @memcpy(target_conditions_slice.items(zml.floats.BFloat16)[0..@intCast(s_target * d)], target_conditions.items(zml.floats.BFloat16));
+    var target_conditions_buffer: zml.Buffer = try .fromSlice(io, platform, target_conditions_slice, sharding);
+    defer target_conditions_buffer.deinit();
+
+    const full_mask_slice = try createBidirectionalFullMask(allocator, @divFloor(t + 1, 2));
+    defer full_mask_slice.free(allocator);
+    var full_mask_buffer: zml.Buffer = try .fromSlice(io, platform, full_mask_slice, sharding);
+    defer full_mask_buffer.deinit();
+    const sliding_mask_slice = try createBidirectionalWindowMask(allocator, @divFloor(t + 1, 2), acedit.config.sliding_window);
+    defer sliding_mask_slice.free(allocator);
+    var sliding_mask_buffer: zml.Buffer = try .fromSlice(io, platform, sliding_mask_slice, sharding);
+    defer sliding_mask_buffer.deinit();
+
+    const source_cross_mask_slice = try createCrossAttentionMask(allocator, s_source, acedit.options.enc_seq_len);
+    defer source_cross_mask_slice.free(allocator);
+    var source_cross_mask_buffer: zml.Buffer = try .fromSlice(io, platform, source_cross_mask_slice, sharding);
+    defer source_cross_mask_buffer.deinit();
+
+    const target_cross_mask_slice = try createCrossAttentionMask(allocator, s_target, acedit.options.enc_seq_len);
+    defer target_cross_mask_slice.free(allocator);
+    var target_cross_mask_buffer: zml.Buffer = try .fromSlice(io, platform, target_cross_mask_slice, sharding);
+    defer target_cross_mask_buffer.deinit();
+
+    var prng = std.Random.DefaultPrng.init(@as(u64, zml_handler.args.seed) + @as(u64, @intCast(id)));
+    const random = prng.random();
+
+    zml_handler.tic(&zml_handler.timers.dit.prefill);
+    for (edit_start_step..edit_end_step) |i| {
+        const t_curr = timestamps[i];
+        const t_next = timestamps[i + 1];
+        const dt = t_next - t_curr;
+        std.log.info("DiT lyric remix ************* step {d}/{d}, t={d}, n_avg={d}", .{ i + 1, steps, t_curr, edit_n_avg });
+
+        for (0..dimT * dimA) |idx| {
+            v_src.items(zml.floats.BFloat16)[idx] = zero;
+            v_tar.items(zml.floats.BFloat16)[idx] = zero;
+        }
+
+        for (0..edit_n_avg) |_| {
+            for (0..dimT) |tt| {
+                for (0..dimA) |aa| {
+                    const idx = tt * dimA + aa;
+                    const src_value = source_ta.items(zml.floats.BFloat16)[idx].toF32();
+                    const edit_value = zt_edit.items(zml.floats.BFloat16)[idx].toF32();
+                    const noise = random.floatNorm(f32);
+                    const zsrc = (1.0 - t_curr) * src_value + t_curr * noise;
+                    const ztar = edit_value + zsrc - src_value;
+                    zt_src.items(zml.floats.BFloat16)[idx] = zml.floats.BFloat16.fromF32(zsrc);
+                    zt_tar.items(zml.floats.BFloat16)[idx] = zml.floats.BFloat16.fromF32(ztar);
+                }
+            }
+
+            var zt_src_buffer: zml.Buffer = try .fromSlice(io, platform, zt_src, sharding);
+            var zt_tar_buffer: zml.Buffer = try .fromSlice(io, platform, zt_tar, sharding);
+
+            var v_src_buffer = try predictVelocityBuffer(zml_handler, acedit, zt_src_buffer, context_latents_buffer, source_conditions_buffer, full_mask_buffer, sliding_mask_buffer, source_cross_mask_buffer, t_curr);
+            var v_tar_buffer = try predictVelocityBuffer(zml_handler, acedit, zt_tar_buffer, context_latents_buffer, target_conditions_buffer, full_mask_buffer, sliding_mask_buffer, target_cross_mask_buffer, t_curr);
+
+            try v_src_buffer.toSlice(io, zt_src);
+            try v_tar_buffer.toSlice(io, zt_tar);
+            v_src_buffer.deinit();
+            v_tar_buffer.deinit();
+            zt_src_buffer.deinit();
+            zt_tar_buffer.deinit();
+
+            const inv_avg = 1.0 / @as(f32, @floatFromInt(edit_n_avg));
+            for (0..dimT * dimA) |idx| {
+                const src_acc = v_src.items(zml.floats.BFloat16)[idx].toF32() + zt_src.items(zml.floats.BFloat16)[idx].toF32() * inv_avg;
+                const tar_acc = v_tar.items(zml.floats.BFloat16)[idx].toF32() + zt_tar.items(zml.floats.BFloat16)[idx].toF32() * inv_avg;
+                v_src.items(zml.floats.BFloat16)[idx] = zml.floats.BFloat16.fromF32(src_acc);
+                v_tar.items(zml.floats.BFloat16)[idx] = zml.floats.BFloat16.fromF32(tar_acc);
+            }
+        }
+
+        for (0..dimT * dimA) |idx| {
+            const edit_value = zt_edit.items(zml.floats.BFloat16)[idx].toF32();
+            const delta = v_tar.items(zml.floats.BFloat16)[idx].toF32() - v_src.items(zml.floats.BFloat16)[idx].toF32();
+            zt_edit.items(zml.floats.BFloat16)[idx] = zml.floats.BFloat16.fromF32(edit_value + dt * delta);
+        }
+    }
+    zml_handler.toc(&zml_handler.timers.dit.prefill);
+
+    const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = a, .t = t }, .bf16));
+    for (0..dimT) |tt| {
+        for (0..dimA) |aa| {
+            result_slice.items(zml.floats.BFloat16)[aa * dimT + tt] = zt_edit.items(zml.floats.BFloat16)[tt * dimA + aa];
         }
     }
 
