@@ -19,6 +19,8 @@ const Sharding = @This();
 
 data: *const Data,
 
+pub const MAX_MESH_RANK = 4;
+
 var _replicated: [11]u8 align(@alignOf(Data)) = "_replicated".*;
 
 // special value to make public apis more fluent.
@@ -215,7 +217,7 @@ pub const Device = struct {
     id: usize,
 
     /// Coordinates in the physical mesh
-    coords: stdx.BoundedArray(u8, Shape.MAX_RANK) = .empty,
+    coords: stdx.BoundedArray(u8, MAX_MESH_RANK) = .empty,
 
     pub fn coordsSlice(self: *const Device) ?[]const u8 {
         if (self.coords.len == 0) return null;
@@ -330,7 +332,7 @@ pub const PhysicalMesh = struct {
 
     /// AxisTraversal captures canonical axis order and depth mapping.
     pub const AxisTraversal = struct {
-        pub const Order = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK);
+        pub const Order = stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK);
         pub const DepthByTag = std.EnumArray(PhysicalAxisTag, ?u8);
 
         /// Order of axes (DFS, first-child descent).
@@ -434,7 +436,7 @@ pub const PhysicalMesh = struct {
         try validateGeometry(root);
 
         var owned_root = root;
-        var path: [Shape.MAX_RANK]u8 = @splat(0);
+        var path: [MAX_MESH_RANK]u8 = @splat(0);
         assignCoords(&owned_root, &path, 0);
 
         var mesh: PhysicalMesh = .{
@@ -556,7 +558,7 @@ pub const PhysicalMesh = struct {
     /// coords:
     ///   (0,0) (0,1)
     ///   (1,0) (1,1)
-    fn assignCoords(node: *PhysicalNode, path: *[Shape.MAX_RANK]u8, depth: usize) void {
+    fn assignCoords(node: *PhysicalNode, path: *[MAX_MESH_RANK]u8, depth: usize) void {
         switch (node.*) {
             .leaf => |*d| {
                 // Coords can already been set by caller
@@ -704,12 +706,12 @@ pub const PhysicalMesh = struct {
     const CoordsTopology = struct {
         const CoordPlacement = struct {
             device_id: usize,
-            coords: stdx.BoundedArray(u8, Shape.MAX_RANK),
+            coords: stdx.BoundedArray(u8, MAX_MESH_RANK),
         };
 
         const CoordLayout = struct {
             rank: usize,
-            axis_sizes: [Shape.MAX_RANK]usize,
+            axis_sizes: [MAX_MESH_RANK]usize,
         };
 
         const IndexedCoord = struct {
@@ -720,10 +722,10 @@ pub const PhysicalMesh = struct {
         fn parseDevice(device: PlatformDevice) !CoordPlacement {
             const api = device.platform.pjrt_api;
             const coords_attr = device.pjrt_desc.attribute(api, "coords") orelse return error.MissingDeviceCoords;
-            var coords: stdx.BoundedArray(u8, Shape.MAX_RANK) = .empty;
+            var coords: stdx.BoundedArray(u8, MAX_MESH_RANK) = .empty;
             switch (coords_attr) {
                 .int64list => |values| {
-                    if (values.len == 0 or values.len > Shape.MAX_RANK) return error.InvalidDeviceCoords;
+                    if (values.len == 0 or values.len > MAX_MESH_RANK) return error.InvalidDeviceCoords;
                     for (values) |value| {
                         if (value < 0) return error.InvalidDeviceCoords;
                         coords.appendAssumeCapacity(@intCast(value));
@@ -757,7 +759,7 @@ pub const PhysicalMesh = struct {
                 if (coord_placement.coords.len != rank) return error.InvalidDeviceCoordsRank;
             }
 
-            var axis_sizes = [_]usize{1} ** Shape.MAX_RANK;
+            var axis_sizes = [_]usize{1} ** MAX_MESH_RANK;
             for (0..rank) |ax_i| {
                 var max_coord: usize = 0;
                 for (placements) |coord_placement| {
@@ -816,8 +818,8 @@ pub const PhysicalMesh = struct {
             };
         }
 
-        pub fn axisStrides(axis_sizes: []const usize) ![Shape.MAX_RANK]usize {
-            var strides: [Shape.MAX_RANK]usize = @splat(0);
+        pub fn axisStrides(axis_sizes: []const usize) ![MAX_MESH_RANK]usize {
+            var strides: [MAX_MESH_RANK]usize = @splat(0);
             var stride: usize = 1;
 
             var i = axis_sizes.len;
@@ -905,7 +907,7 @@ pub const PhysicalMesh = struct {
         const placements = try CoordsTopology.collect(allocator, platform_devices);
         defer allocator.free(placements);
 
-        const layout = try CoordsTopology.layout(placements, Shape.MAX_RANK);
+        const layout = try CoordsTopology.layout(placements, MAX_MESH_RANK);
         const indexed = try CoordsTopology.sorted(allocator, placements, layout.rank, layout.axis_sizes[0..layout.rank]);
         defer allocator.free(indexed);
 
@@ -969,9 +971,9 @@ pub const PhysicalMesh = struct {
         var topology = try neuron_topology.visibleMeshFromNcIds(allocator, nc_ids);
         defer topology.deinit(allocator);
 
-        var axis_tags: stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK) = .empty;
-        var axis_sizes: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty;
-        var axis_geometries: stdx.BoundedArray(AxisGeometry, Shape.MAX_RANK) = .empty;
+        var axis_tags: stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK) = .empty;
+        var axis_sizes: stdx.BoundedArray(usize, MAX_MESH_RANK) = .empty;
+        var axis_geometries: stdx.BoundedArray(AxisGeometry, MAX_MESH_RANK) = .empty;
 
         for (topology.axes()) |mesh_axis| {
             axis_tags.appendAssumeCapacity(switch (mesh_axis.fabric) {
@@ -989,7 +991,7 @@ pub const PhysicalMesh = struct {
             });
         }
 
-        var coords_buf: [Shape.MAX_RANK]usize = [_]usize{0} ** Shape.MAX_RANK;
+        var coords_buf: [MAX_MESH_RANK]usize = [_]usize{0} ** MAX_MESH_RANK;
         var next_device: usize = 0;
 
         const Node = struct {
@@ -1001,7 +1003,7 @@ pub const PhysicalMesh = struct {
                 axis_sizes_: []const usize,
                 axis_geometries_: []const AxisGeometry,
                 depth: usize,
-                coords_buf_: *[Shape.MAX_RANK]usize,
+                coords_buf_: *[MAX_MESH_RANK]usize,
                 next_device_: *usize,
             ) !PhysicalNode {
                 if (depth == axis_tags_.len) {
@@ -1009,7 +1011,7 @@ pub const PhysicalMesh = struct {
                     const device = platform_devices_[placement_.input_index];
                     next_device_.* += 1;
 
-                    var coords: stdx.BoundedArray(u8, Shape.MAX_RANK) = .empty;
+                    var coords: stdx.BoundedArray(u8, MAX_MESH_RANK) = .empty;
                     for (coords_buf_[0..axis_tags_.len]) |coord| coords.appendAssumeCapacity(coord);
 
                     return .{
@@ -1099,8 +1101,8 @@ pub const LogicalAxisIntent = enum {
 /// Limitations:
 /// - No sizes here; no divisibility checks here.
 pub const LogicalMesh = struct {
-    pub const Axes = stdx.BoundedArray(Shape.Tag, Shape.MAX_RANK);
-    pub const Intents = stdx.BoundedArray(LogicalAxisIntent, Shape.MAX_RANK);
+    pub const Axes = stdx.BoundedArray(Shape.Tag, MAX_MESH_RANK);
+    pub const Intents = stdx.BoundedArray(LogicalAxisIntent, MAX_MESH_RANK);
 
     axes: Axes,
     intents: Intents,
@@ -1156,24 +1158,24 @@ pub const LogicalMesh = struct {
     }
 };
 
-pub const AxisList = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK);
+pub const AxisList = stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK);
 pub const Binding = struct {
     logical: Shape.Tag,
     physical: AxisList,
 };
-pub const Bindings = stdx.BoundedArray(Binding, Shape.MAX_RANK);
+pub const Bindings = stdx.BoundedArray(Binding, MAX_MESH_RANK);
 
 pub const Fold = struct {
     target: PhysicalAxisTag,
     sources: AxisList,
 };
-pub const Folds = stdx.BoundedArray(Fold, Shape.MAX_RANK);
+pub const Folds = stdx.BoundedArray(Fold, MAX_MESH_RANK);
 
 pub const Axis = struct {
     tag: PhysicalAxisTag,
     size: i64,
     geometry: ?AxisGeometry,
-    folded: stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK),
+    folded: stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK),
 
     pub fn contains(self: *const Axis, tag: PhysicalAxisTag) bool {
         if (self.tag == tag) return true;
@@ -1183,7 +1185,7 @@ pub const Axis = struct {
 };
 
 pub const PhysicalView = struct {
-    axes: stdx.BoundedArray(Axis, Shape.MAX_RANK),
+    axes: stdx.BoundedArray(Axis, MAX_MESH_RANK),
     total_devices: i64,
 
     pub fn axisCoordFromLinearShard(self: *const PhysicalView, axis_index: usize, linear_idx: usize) usize {
@@ -1275,7 +1277,7 @@ pub const Data = struct {
             if (!physical.hasAxis(tag)) continue;
             if (self.folds_consumed.contains(tag) and self.foldSources(tag) == null) continue;
 
-            var folded: stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK) = .empty;
+            var folded: stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK) = .empty;
             var size: i64 = 1;
 
             if (self.foldSources(tag)) |sources| {
@@ -1606,17 +1608,17 @@ pub const Data = struct {
 };
 
 pub const Strategy = struct {
-    pub const PhysicalList = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK);
+    pub const PhysicalList = stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK);
     pub const Binding = struct {
         logical: Shape.Tag,
         physical: PhysicalList,
     };
-    pub const Bindings = stdx.BoundedArray(Strategy.Binding, Shape.MAX_RANK);
+    pub const Bindings = stdx.BoundedArray(Strategy.Binding, MAX_MESH_RANK);
     pub const Fold = struct {
         target: PhysicalAxisTag,
         sources: PhysicalList,
     };
-    pub const Folding = stdx.BoundedArray(Strategy.Fold, Shape.MAX_RANK);
+    pub const Folding = stdx.BoundedArray(Strategy.Fold, MAX_MESH_RANK);
 
     bindings: Strategy.Bindings,
     folding: Folding,
@@ -1691,7 +1693,7 @@ pub const Strategy = struct {
         var strategy: Strategy = .init;
 
         const base_order = physical.shardableAxes();
-        var available: stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK) = .empty;
+        var available: stdx.BoundedArray(PhysicalAxisTag, MAX_MESH_RANK) = .empty;
         for (base_order) |tag| {
             if (physical.hasAxis(tag)) available.appendAssumeCapacity(tag);
         }
@@ -1849,8 +1851,8 @@ pub const Placement = struct {
 };
 
 const AxisSplit = struct {
-    counts: stdx.BoundedArray(u8, Shape.MAX_RANK),
-    depths: stdx.BoundedArray(u8, Shape.MAX_RANK),
+    counts: stdx.BoundedArray(u8, MAX_MESH_RANK),
+    depths: stdx.BoundedArray(u8, MAX_MESH_RANK),
 
     pub const empty: AxisSplit = .{
         .counts = .empty,
