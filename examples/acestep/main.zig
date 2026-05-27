@@ -754,6 +754,9 @@ pub fn runLyricRemixPipeline(zml_handler: *Zml_handler) !void {
     try source_metadata.setDuration(zml_handler.allocator, audio_latent.duration_s());
     const duration = audio_latent.duration_s();
 
+    try target_metadata.setLanguage(zml_handler.allocator, "fr");
+    try source_metadata.setLanguage(zml_handler.allocator, "fr");
+    
     if (zml_handler.args.caption_ref) {
         const caption = try importText(zml_handler, zml_handler.uris.caption_ref);
         defer zml_handler.allocator.free(caption);

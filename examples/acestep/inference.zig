@@ -115,6 +115,12 @@ pub const AudioMetadata = struct {
         self.caption = new_caption;
     }
 
+    pub fn setLanguage(self: *AudioMetadata, allocator: std.mem.Allocator, language: []const u8) !void {
+        const new_language = try allocator.dupe(u8, language);
+        allocator.free(self.language);
+        self.language = new_language;
+    }
+    
     pub fn setLyric(self: *AudioMetadata, allocator: std.mem.Allocator, lyric: []const u8) !void {
         const new_lyric = try allocator.dupe(u8, lyric);
         allocator.free(self.lyric);
