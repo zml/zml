@@ -52,7 +52,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) !Monitor {
         .io = io,
         .devices = try discoverIntelDevices(allocator, io),
     };
-    monitor.seedDeviceMetrics() catch {};
+    try monitor.seedDeviceMetrics();
     return monitor;
 }
 
@@ -201,7 +201,7 @@ pub fn readPcieBandwidth(allocator: std.mem.Allocator, io: std.Io, dev: *const D
 
 pub fn collectDeviceUsage(allocator: std.mem.Allocator, io: std.Io, devices: []const Device) !DeviceUsage {
     var processes = try collectProcessUsage(allocator, io, devices);
-    defer processes.deinit(allocator);
+    errdefer processes.deinit(allocator);
 
     var result: DeviceUsage = .{};
     errdefer result.deinit(allocator);
