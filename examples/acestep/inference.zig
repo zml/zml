@@ -1495,12 +1495,44 @@ pub fn runLyricRemixDiffusion(
             zt_edit.items(zml.floats.BFloat16)[idx] = zml.floats.BFloat16.fromF32(edit_value + edit_strength * dt * delta);
         }
     }
+
+    // If the paired V_target - V_source edit window ends before the end of the
+    // schedule, match Python's flow-edit continuation: initialize a target
+    // trajectory at the boundary, then finish with target-only flow denoising.
+    const final_ta = if (edit_end_step < steps) blk: {
+        const t_boundary = timestamps[edit_end_step];
+        std.log.info("DiT lyric remix target-only post-window from step {d}/{d}, t={d}", .{ edit_end_step + 1, steps, t_boundary });
+
+        for (0..dimT) |tt| {
+            for (0..dimA) |aa| {
+                const idx = tt * dimA + aa;
+                const src_value = source_ta.items(zml.floats.BFloat16)[idx].toF32();
+                const edit_value = zt_edit.items(zml.floats.BFloat16)[idx].toF32();
+                const noise = random.floatNorm(f32);
+                const xt_src = (1.0 - t_boundary) * src_value + t_boundary * noise;
+                const xt_tar = edit_value + xt_src - src_value;
+                zt_tar.items(zml.floats.BFloat16)[idx] = zml.floats.BFloat16.fromF32(xt_tar);
+            }
+        }
+
+        var xt_tar_buffer: zml.Buffer = try .fromSlice(io, platform, zt_tar, sharding);
+        for (edit_end_step..steps) |i| {
+            std.log.info("DiT lyric remix target-only ************* step {d}/{d}, t={d}", .{ i + 1, steps, timestamps[i] });
+            var velocity_buffer = try predictVelocityBuffer(zml_handler, acedit, xt_tar_buffer, context_latents_buffer, target_conditions_buffer, full_mask_buffer, sliding_mask_buffer, target_cross_mask_buffer, timestamps[i]);
+            try updateFlowBuffer(zml_handler, acedit, &xt_tar_buffer, velocity_buffer, timestamps[i], timestamps[i + 1]);
+            velocity_buffer.deinit();
+        }
+        try xt_tar_buffer.toSlice(io, zt_tar);
+        xt_tar_buffer.deinit();
+        break :blk zt_tar;
+    } else zt_edit;
+
     zml_handler.toc(&zml_handler.timers.dit.prefill);
 
     const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = a, .t = t }, .bf16));
     for (0..dimT) |tt| {
         for (0..dimA) |aa| {
-            result_slice.items(zml.floats.BFloat16)[aa * dimT + tt] = zt_edit.items(zml.floats.BFloat16)[tt * dimA + aa];
+            result_slice.items(zml.floats.BFloat16)[aa * dimT + tt] = final_ta.items(zml.floats.BFloat16)[tt * dimA + aa];
         }
     }
 
