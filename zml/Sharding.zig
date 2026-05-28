@@ -223,7 +223,7 @@ pub const Device = struct {
     // Private so it's kept as implementation detail
     const undefined_coords: Coords = @splat(0xff);
 
-    fn asValidCoords(device: Device) bool {
+    fn hasValidCoords(device: Device) bool {
         return @as(u32, @bitCast(device.coords)) != @as(u32, @bitCast(undefined_coords));
     }
 
@@ -451,7 +451,7 @@ pub const PhysicalMesh = struct {
         try mesh.populateDevicesInCanonicalOrder(allocator);
         for (0.., mesh.devices_in_canonical_order) |i, device| {
             std.debug.assert(device.id == i);
-            std.debug.assert(device.asValidCoords());
+            std.debug.assert(device.hasValidCoords());
         }
         return mesh;
     }
@@ -567,7 +567,7 @@ pub const PhysicalMesh = struct {
         switch (node.*) {
             .leaf => |*d| {
                 // Coords can already been set by caller
-                if (d.asValidCoords()) return;
+                if (d.hasValidCoords()) return;
 
                 d.coords = path.*;
             },
