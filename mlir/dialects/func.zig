@@ -23,8 +23,9 @@ const FuncOpArgs = struct {
 };
 
 pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
-    var args_buffer: stdx.BoundedArray(*const mlir.Type, 1024) = .empty;
-    var results_buffer: stdx.BoundedArray(*const mlir.Type, 32) = .empty;
+    const max_func_inputs_or_outputs = 4096;
+    var args_buffer: stdx.BoundedArray(*const mlir.Type, max_func_inputs_or_outputs) = .empty;
+    var results_buffer: stdx.BoundedArray(*const mlir.Type, max_func_inputs_or_outputs) = .empty;
 
     var attr_tuples_buffer: stdx.BoundedArray(mlir.NamedAttribute, 16) = .empty;
     attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "sym_name", .string(ctx, args.name)));
