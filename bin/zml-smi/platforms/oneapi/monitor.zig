@@ -1,6 +1,5 @@
 const std = @import("std");
 const smi_sysfs = @import("zml-smi/sysfs");
-
 const Monitor = @This();
 
 pub const bus_device_identifier_len = "0000:00:00.0".len;
@@ -14,6 +13,8 @@ const Device = struct {
     hwmon_path: ?[]const u8,
     bus_device_identifier: ?[bus_device_identifier_len]u8,
     activity_prev: ?EngineSample = null,
+    encoder_prev: ?EngineSample = null,
+    decoder_prev: ?EngineSample = null,
     energy_prev: ?EnergySample = null,
 };
 
@@ -30,6 +31,8 @@ pub const EngineSample = struct {
 const DeviceSample = struct {
     mem_kib: u64 = 0,
     engine: ?EngineSample = null,
+    encoder: ?EngineSample = null,
+    decoder: ?EngineSample = null,
 };
 
 pub const ProcessSample = struct {
@@ -37,6 +40,8 @@ pub const ProcessSample = struct {
     device_idx: u16,
     mem_kib: ?u64 = null,
     engine: ?EngineSample = null,
+    encoder: ?EngineSample = null,
+    decoder: ?EngineSample = null,
 };
 
 pub const ProcessUsage = std.AutoHashMapUnmanaged(u64, ProcessSample);
@@ -71,7 +76,11 @@ inline fn seedDeviceMetrics(self: *Monitor) !void {
 
     for (self.devices, 0..) |*dev, idx| {
         dev.energy_prev = readEnergy(self.allocator, self.io, dev) catch null;
-        dev.activity_prev = if (device_usage.get(@intCast(idx))) |sample| sample.engine else null;
+        if (device_usage.get(@intCast(idx))) |sample| {
+            dev.activity_prev = sample.engine;
+            dev.encoder_prev = sample.encoder;
+            dev.decoder_prev = sample.decoder;
+        }
     }
 }
 
@@ -141,12 +150,12 @@ inline fn openDevice(allocator: std.mem.Allocator, io: std.Io, render_idx: usize
 
 pub fn device(self: *const Monitor, handle: Handle) !*const Device {
     const idx = @intFromEnum(handle);
-    if (idx >= self.devices.len) return error.not_found;
+    if (idx >= self.devices.len) return error.NotFound;
     return &self.devices[idx];
 }
 
 pub fn readTemperature(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
-    const hwmon = dev.hwmon_path orelse return error.not_found;
+    const hwmon = dev.hwmon_path orelse return error.NotFound;
     const milli_c = readHwmonInput(allocator, io, hwmon, "temp", "pkg") catch
         readHwmonInput(allocator, io, hwmon, "temp", "gpu") catch
         readNumberedInput(allocator, io, hwmon, "temp", 2) catch
@@ -155,7 +164,7 @@ pub fn readTemperature(allocator: std.mem.Allocator, io: std.Io, dev: *const Dev
 }
 
 pub fn readEnergy(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !EnergySample {
-    const hwmon = dev.hwmon_path orelse return error.not_found;
+    const hwmon = dev.hwmon_path orelse return error.NotFound;
     const micro_joules = readHwmonInput(allocator, io, hwmon, "energy", "card") catch
         readHwmonInput(allocator, io, hwmon, "energy", "pkg") catch
         try readNumberedInput(allocator, io, hwmon, "energy", 1);
@@ -165,10 +174,15 @@ pub fn readEnergy(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) 
     };
 }
 pub fn readPowerLimit(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
-    const hwmon = dev.hwmon_path orelse return error.not_found;
+    const hwmon = dev.hwmon_path orelse return error.NotFound;
     const microwatts = readNumberedSuffix(allocator, io, hwmon, "power", 1, "cap") catch
         try readNumberedSuffix(allocator, io, hwmon, "power", 1, "max");
     return microwatts / 1000;
+}
+
+pub fn readFanSpeed(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
+    const hwmon = dev.hwmon_path orelse return error.NotFound;
+    return readPwmFanSpeed(allocator, io, hwmon) catch readRpmFanSpeedPercent(allocator, io, hwmon);
 }
 
 pub fn readClockGraphics(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
@@ -201,7 +215,7 @@ pub fn readPcieLinkWidth(allocator: std.mem.Allocator, io: std.Io, dev: *const D
 pub fn readPcieBandwidth(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
     const gen = try readPcieLinkGen(allocator, io, dev);
     const width = try readPcieLinkWidth(allocator, io, dev);
-    return pcieBandwidthFromLink(gen, width) orelse error.not_found;
+    return pcieBandwidthFromLink(gen, width) orelse error.NotFound;
 }
 
 pub fn collectDeviceUsage(allocator: std.mem.Allocator, io: std.Io, devices: []const Device) !DeviceUsage {
@@ -217,13 +231,9 @@ pub fn collectDeviceUsage(allocator: std.mem.Allocator, io: std.Io, devices: []c
         const gop = try result.getOrPut(allocator, sample.device_idx);
         if (!gop.found_existing) gop.value_ptr.* = .{};
         if (sample.mem_kib) |mem| gop.value_ptr.mem_kib += mem;
-        if (sample.engine) |engine| {
-            const current = gop.value_ptr.engine orelse EngineSample{ .engine_ns = 0, .timestamp_ns = engine.timestamp_ns };
-            gop.value_ptr.engine = .{
-                .engine_ns = current.engine_ns + engine.engine_ns,
-                .timestamp_ns = engine.timestamp_ns,
-            };
-        }
+        addEngineSample(&gop.value_ptr.engine, sample.engine);
+        addEngineSample(&gop.value_ptr.encoder, sample.encoder);
+        addEngineSample(&gop.value_ptr.decoder, sample.decoder);
     }
 
     return result;
@@ -325,7 +335,7 @@ inline fn readBusDeviceId(allocator: std.mem.Allocator, io: std.Io, dev_path: []
     const path = try std.fmt.bufPrint(&path_buf, "{s}/uevent", .{dev_path});
     const raw = try smi_sysfs.readFieldString(allocator, io, path, "PCI_SLOT_NAME=");
     const trimmed = std.mem.trim(u8, raw, &std.ascii.whitespace);
-    if (trimmed.len != bus_device_identifier_len) return error.not_found;
+    if (trimmed.len != bus_device_identifier_len) return error.NotFound;
     var out: [bus_device_identifier_len]u8 = undefined;
     @memcpy(&out, trimmed);
     return out;
@@ -371,7 +381,7 @@ inline fn readMaxPcieBandwidth(allocator: std.mem.Allocator, io: std.Io, dev_pat
     const width_path = try std.fmt.bufPrint(&width_path_buf, "{s}/max_link_width", .{dev_path});
     const width = try smi_sysfs.readInt(allocator, io, width_path);
     const gen = try pcieGenFromSpeed(raw_speed);
-    return pcieBandwidthFromLink(gen, width) orelse error.not_found;
+    return pcieBandwidthFromLink(gen, width) orelse error.NotFound;
 }
 
 inline fn readHwmonInput(allocator: std.mem.Allocator, io: std.Io, hwmon: []const u8, comptime prefix: []const u8, label: []const u8) !u64 {
@@ -383,7 +393,7 @@ inline fn readHwmonInput(allocator: std.mem.Allocator, io: std.Io, hwmon: []cons
         if (!std.ascii.eqlIgnoreCase(trimmed, label)) continue;
         return readNumberedInput(allocator, io, hwmon, prefix, idx);
     }
-    return error.not_found;
+    return error.NotFound;
 }
 
 inline fn readNumberedInput(allocator: std.mem.Allocator, io: std.Io, hwmon: []const u8, comptime prefix: []const u8, idx: usize) !u64 {
@@ -394,6 +404,34 @@ inline fn readNumberedSuffix(allocator: std.mem.Allocator, io: std.Io, hwmon: []
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}{d}_{s}", .{ hwmon, prefix, idx, suffix });
     return smi_sysfs.readInt(allocator, io, path);
+}
+
+inline fn readNumberedRaw(allocator: std.mem.Allocator, io: std.Io, hwmon: []const u8, comptime prefix: []const u8, idx: usize) !u64 {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}{d}", .{ hwmon, prefix, idx });
+    return smi_sysfs.readInt(allocator, io, path);
+}
+
+inline fn readPwmFanSpeed(allocator: std.mem.Allocator, io: std.Io, hwmon: []const u8) !u64 {
+    for (1..16) |idx| {
+        const pwm = readNumberedRaw(allocator, io, hwmon, "pwm", idx) catch continue;
+        return pwmToPercent(pwm);
+    }
+    return error.NotFound;
+}
+
+inline fn readRpmFanSpeedPercent(allocator: std.mem.Allocator, io: std.Io, hwmon: []const u8) !u64 {
+    for (1..16) |idx| {
+        const input = readNumberedSuffix(allocator, io, hwmon, "fan", idx, "input") catch continue;
+        const max = readNumberedSuffix(allocator, io, hwmon, "fan", idx, "max") catch continue;
+        if (max == 0) continue;
+        return @min(input * 100 / max, 100);
+    }
+    return error.NotFound;
+}
+
+inline fn pwmToPercent(pwm: u64) u64 {
+    return @min((@min(pwm, 255) * 100 + 127) / 255, 100);
 }
 
 inline fn readLargestResource(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !u64 {
@@ -415,7 +453,7 @@ inline fn readLargestResource(allocator: std.mem.Allocator, io: std.Io, path: []
         reader.interface.toss(1);
         largest = @max(largest, resourceLineSize(line_writer.written()) orelse 0);
     }
-    if (largest == 0) return error.not_found;
+    if (largest == 0) return error.NotFound;
     return largest;
 }
 
@@ -442,7 +480,7 @@ inline fn pcieGenFromSpeed(raw: []const u8) !u64 {
     if (std.mem.startsWith(u8, trimmed, "16.0") or std.mem.startsWith(u8, trimmed, "16 ")) return 4;
     if (std.mem.startsWith(u8, trimmed, "32.0") or std.mem.startsWith(u8, trimmed, "32 ")) return 5;
     if (std.mem.startsWith(u8, trimmed, "64.0") or std.mem.startsWith(u8, trimmed, "64 ")) return 6;
-    return error.not_found;
+    return error.NotFound;
 }
 
 inline fn pcieBandwidthFromLink(gen: u64, width: u64) ?u64 {
@@ -461,6 +499,8 @@ inline fn pcieBandwidthFromLink(gen: u64, width: u64) ?u64 {
 const FdinfoSample = struct {
     mem_kib: ?u64 = null,
     engine: ?EngineSample = null,
+    encoder: ?EngineSample = null,
+    decoder: ?EngineSample = null,
 };
 
 const ParsedFdinfo = struct {
@@ -481,16 +521,12 @@ inline fn parseFdinfoFile(io: std.Io, path: []const u8, timestamp_ns: u64) !Pars
 
     var parsed: ParsedFdinfo = .{};
 
-    var start: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, data, start, '\n')) |end| {
-        parseFdinfoLine(&parsed, data[start..end], timestamp_ns);
-        start = end + 1;
+    var lines = std.mem.tokenizeScalar(u8, data, '\n');
+    while (lines.next()) |line| {
+        parseFdinfoLine(&parsed, line, timestamp_ns);
     }
-    if (start < data.len) {
-        parseFdinfoLine(&parsed, data[start..], timestamp_ns);
-    }
-    finishFdinfo(&parsed);
 
+    finishFdinfo(&parsed);
     return parsed;
 }
 
@@ -542,13 +578,15 @@ inline fn parseFdinfoLine(parsed: *ParsedFdinfo, line: []const u8, timestamp_ns:
 
     if (std.mem.startsWith(u8, line, "drm-engine-")) {
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return;
+        const engine_label = line["drm-engine-".len..colon];
         const value = firstInt(line[colon + 1 ..]);
         parsed.engine_time_seen = true;
-        const engine = parsed.sample.engine orelse EngineSample{ .engine_ns = 0, .timestamp_ns = timestamp_ns };
-        parsed.sample.engine = .{
-            .engine_ns = engine.engine_ns + value,
-            .timestamp_ns = timestamp_ns,
-        };
+        addEngineTime(&parsed.sample.engine, value, timestamp_ns);
+        if (containsAsciiIgnoreCase(engine_label, "encode")) {
+            addEngineTime(&parsed.sample.encoder, value, timestamp_ns);
+        } else if (containsAsciiIgnoreCase(engine_label, "decode")) {
+            addEngineTime(&parsed.sample.decoder, value, timestamp_ns);
+        }
         return;
     }
 
@@ -587,13 +625,21 @@ inline fn parseFdinfoLine(parsed: *ParsedFdinfo, line: []const u8, timestamp_ns:
 
 fn mergeProcessSample(dst: *ProcessSample, src: FdinfoSample) void {
     if (src.mem_kib) |mem| dst.mem_kib = (dst.mem_kib orelse 0) + mem;
-    if (src.engine) |engine| {
-        const current = dst.engine orelse EngineSample{ .engine_ns = 0, .timestamp_ns = engine.timestamp_ns };
-        dst.engine = .{
-            .engine_ns = current.engine_ns + engine.engine_ns,
-            .timestamp_ns = engine.timestamp_ns,
-        };
-    }
+    addEngineSample(&dst.engine, src.engine);
+    addEngineSample(&dst.encoder, src.encoder);
+    addEngineSample(&dst.decoder, src.decoder);
+}
+
+fn addEngineSample(dst: *?EngineSample, src: ?EngineSample) void {
+    if (src) |engine| addEngineTime(dst, engine.engine_ns, engine.timestamp_ns);
+}
+
+fn addEngineTime(dst: *?EngineSample, engine_ns: u64, timestamp_ns: u64) void {
+    const current = dst.* orelse EngineSample{ .engine_ns = 0, .timestamp_ns = timestamp_ns };
+    dst.* = .{
+        .engine_ns = current.engine_ns + engine_ns,
+        .timestamp_ns = timestamp_ns,
+    };
 }
 
 fn matchDevice(devices: []const Device, bus_device_identifier: [bus_device_identifier_len]u8) ?u16 {
@@ -657,6 +703,15 @@ inline fn memoryKiB(raw: []const u8) u64 {
     return value;
 }
 
+inline fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    for (0..haystack.len - needle.len + 1) |i| {
+        if (std.ascii.eqlIgnoreCase(haystack[i .. i + needle.len], needle)) return true;
+    }
+    return false;
+}
+
 test "oneAPI fdinfo parser" {
     var parsed: ParsedFdinfo = .{};
     parseFdinfoLine(&parsed, "drm-pdev:\t0000:03:00.0", 10);
@@ -669,6 +724,32 @@ test "oneAPI fdinfo parser" {
     try std.testing.expectEqualSlices(u8, "0000:03:00.0", &parsed.bus_device_identifier.?);
     try std.testing.expectEqual(@as(?u64, 2048), parsed.sample.mem_kib);
     try std.testing.expectEqual(@as(u64, 150), parsed.sample.engine.?.engine_ns);
+    try std.testing.expectEqual(@as(?EngineSample, null), parsed.sample.encoder);
+    try std.testing.expectEqual(@as(?EngineSample, null), parsed.sample.decoder);
+}
+
+test "oneAPI fdinfo parser classifies explicit media engines" {
+    var parsed: ParsedFdinfo = .{};
+    parseFdinfoLine(&parsed, "drm-engine-video-decode:\t100 ns", 10);
+    parseFdinfoLine(&parsed, "drm-engine-media-encode:\t50 ns", 10);
+    parseFdinfoLine(&parsed, "drm-engine-VIDEO-DECODE1:\t25 ns", 10);
+    finishFdinfo(&parsed);
+
+    try std.testing.expectEqual(@as(u64, 175), parsed.sample.engine.?.engine_ns);
+    try std.testing.expectEqual(@as(u64, 50), parsed.sample.encoder.?.engine_ns);
+    try std.testing.expectEqual(@as(u64, 125), parsed.sample.decoder.?.engine_ns);
+}
+
+test "oneAPI fdinfo parser leaves generic video engines unclassified" {
+    var parsed: ParsedFdinfo = .{};
+    parseFdinfoLine(&parsed, "drm-engine-video:\t100 ns", 10);
+    parseFdinfoLine(&parsed, "drm-engine-vcs0:\t50 ns", 10);
+    parseFdinfoLine(&parsed, "drm-engine-vecs0:\t25 ns", 10);
+    finishFdinfo(&parsed);
+
+    try std.testing.expectEqual(@as(u64, 175), parsed.sample.engine.?.engine_ns);
+    try std.testing.expectEqual(@as(?EngineSample, null), parsed.sample.encoder);
+    try std.testing.expectEqual(@as(?EngineSample, null), parsed.sample.decoder);
 }
 
 test "oneAPI fdinfo parser cycle counters" {
@@ -708,6 +789,13 @@ test "oneAPI process utilization delta" {
     try std.testing.expectEqual(@as(?u16, 50), processUtil(.{ .engine_ns = 100, .timestamp_ns = 1000 }, .{ .engine_ns = 600, .timestamp_ns = 2000 }));
     try std.testing.expectEqual(@as(?u16, 1), processUtil(.{ .engine_ns = 100, .timestamp_ns = 1000 }, .{ .engine_ns = 101, .timestamp_ns = 2000 }));
     try std.testing.expectEqual(@as(?u16, null), processUtil(null, .{ .engine_ns = 600, .timestamp_ns = 2000 }));
+}
+
+test "oneAPI PWM fan speed conversion" {
+    try std.testing.expectEqual(@as(u64, 0), pwmToPercent(0));
+    try std.testing.expectEqual(@as(u64, 50), pwmToPercent(128));
+    try std.testing.expectEqual(@as(u64, 100), pwmToPercent(255));
+    try std.testing.expectEqual(@as(u64, 100), pwmToPercent(300));
 }
 
 test "oneAPI process previous keeps engine samples" {
@@ -751,7 +839,7 @@ test "oneAPI resource line chooses large memory BARs" {
 test "oneAPI PCIe speed maps to generation" {
     try std.testing.expectEqual(@as(u64, 1), try pcieGenFromSpeed("2.5 GT/s PCIe"));
     try std.testing.expectEqual(@as(u64, 4), try pcieGenFromSpeed("16.0 GT/s PCIe"));
-    try std.testing.expectError(error.not_found, pcieGenFromSpeed("Unknown"));
+    try std.testing.expectError(error.NotFound, pcieGenFromSpeed("Unknown"));
 }
 
 test "oneAPI PCIe bandwidth derives from generation and width" {

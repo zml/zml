@@ -83,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
 
-    const targets = detect(arena, io);
+    const targets = detect(gpa, io);
 
     var collector: Collector = .init(arena, gpa, io, .{
         .poll_interval_ms = args.poll_interval,
@@ -231,6 +231,7 @@ fn hasDrmRenderDevice(allocator: std.mem.Allocator, io: std.Io, comptime pci_ven
         var vendor_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const vendor_path = std.fmt.bufPrint(&vendor_path_buf, "/sys/class/drm/{s}/device/vendor", .{entry.name}) catch continue;
         const vendor = sysfs.readString(allocator, io, vendor_path) catch continue;
+        defer allocator.free(vendor);
         if (std.mem.eql(u8, std.mem.trim(u8, vendor, &std.ascii.whitespace), pci_vendor_id)) {
             return true;
         }

@@ -67,8 +67,20 @@ const Device = struct {
         return self.oneapi.temperature(self.arena.allocator(), self.handle);
     }
 
+    pub fn fanSpeed(self: Device) !u64 {
+        return self.oneapi.fanSpeed(self.arena.allocator(), self.handle);
+    }
+
     pub fn gpuUtil(self: Device) !u64 {
         return self.oneapi.gpuUtil(self.arena.allocator(), self.handle);
+    }
+
+    pub fn encoderUtil(self: Device) !u64 {
+        return self.oneapi.encoderUtil(self.arena.allocator(), self.handle);
+    }
+
+    pub fn decoderUtil(self: Device) !u64 {
+        return self.oneapi.decoderUtil(self.arena.allocator(), self.handle);
     }
 
     pub fn powerLimit(self: Device) !u64 {
@@ -108,7 +120,10 @@ const metrics = .{
     .{ .field = "power_mw", .query = Device.powerUsage },
     .{ .field = "power_limit_mw", .query = Device.powerLimit },
     .{ .field = "temperature", .query = Device.temperature },
+    .{ .field = "fan_speed_percent", .query = Device.fanSpeed },
     .{ .field = "util_percent", .query = Device.gpuUtil },
+    .{ .field = "encoder_util_percent", .query = Device.encoderUtil },
+    .{ .field = "decoder_util_percent", .query = Device.decoderUtil },
     .{ .field = "clock_graphics_mhz", .query = Device.clockGraphics },
     .{ .field = "clock_graphics_max_mhz", .query = Device.maxClockGraphics },
     .{ .field = "mem_used_bytes", .query = Device.memUsed },
