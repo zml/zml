@@ -512,9 +512,6 @@ const SelfAttn = struct {
         var q = self.q_proj.forward(x_qkv).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
         var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
         var v = self.v_proj.forward(x_qkv).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
-        q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
-        k = k.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
-        v = v.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
 
         // In self-attention, .s axis is used both for keys and queries.
         const pos_index = b: {
@@ -534,8 +531,6 @@ const SelfAttn = struct {
         const new_kv_cache = kv_cache.updateAt(k, v, token_index, kv_cache_index);
         k = new_kv_cache.keysAt(kv_cache_index).convert(dtype);
         v = new_kv_cache.valuesAt(kv_cache_index).convert(dtype);
-        k = k.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
-        v = v.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
 
         const layer_attention_metadata: zml.attention.attention.Metadata = switch (attention_parameters) {
             .attnd => .{ .attnd = .{
@@ -555,7 +550,7 @@ const SelfAttn = struct {
             token_index,
             layer_attention_metadata,
             attention_parameters,
-        ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
+        );
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         const delta = self.o_proj.forward(attn)

@@ -499,9 +499,6 @@ pub const Attention = struct {
         var q = self.q_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
         var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
         var v = self.v_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
-        q = q.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
-        k = k.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
-        v = v.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
 
         q = self.q_layernorm.forward(q);
         k = self.k_layernorm.forward(k);
@@ -514,13 +511,13 @@ pub const Attention = struct {
         q = zml.nn.rope(q, token_positions, self.rope_opts);
         k = zml.nn.rope(k, token_positions, self.rope_opts);
 
-        q = q.rename(.{ .seq = .q }).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
-        k = k.rename(.{ .seq = .k }).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
-        v = v.rename(.{ .seq = .k }).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+        q = q.rename(.{ .seq = .q });
+        k = k.rename(.{ .seq = .k });
+        v = v.rename(.{ .seq = .k });
 
         const new_kv_cache = kv_cache.update(k, v, tokens_position_offset, cache_index);
-        k = new_kv_cache.keys(cache_index).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
-        v = new_kv_cache.values(cache_index).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+        k = new_kv_cache.keys(cache_index);
+        v = new_kv_cache.values(cache_index);
 
         stdx.debug.assert(q.dim(.batch) == 1, "LFM attention currently expects batch size 1 for flash attention backend, got {}", .{q.dim(.batch)});
         const attn = switch (attention_parameters) {
@@ -531,7 +528,7 @@ pub const Attention = struct {
                 tokens_position_offset,
                 attention_metadata,
                 attention_parameters,
-            ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated }).merge(.{ .d = .{ .h, .hd } }),
+            ).merge(.{ .d = .{ .h, .hd } }),
             else => zml.attention.attention.attention(
                 q.squeeze(.batch),
                 k.squeeze(.batch),
@@ -539,8 +536,7 @@ pub const Attention = struct {
                 tokens_position_offset.squeeze(.batch),
                 attention_metadata,
                 attention_parameters,
-            ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated })
-                .merge(.{ .d = .{ .h, .hd } })
+            ).merge(.{ .d = .{ .h, .hd } })
                 .rename(.{ .q = .seq })
                 .insertAxes(.seq, .{.batch}),
         };
