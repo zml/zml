@@ -22,11 +22,81 @@ pub fn handleByIndex(self: *const OneApi, device_id: usize) !Handle {
 }
 
 pub fn name(self: *const OneApi, allocator: std.mem.Allocator, handle: Handle) ![]const u8 {
+    if (self.monitor.device(handle)) |dev| {
+        if (dev.bus_device_identifier) |bdf| {
+            if (try lspciName(allocator, self.io, bdf[0..])) |display_name| {
+                return display_name;
+            }
+        }
+    } else |_| {}
+
     const id = try self.monitor.deviceId(allocator, handle);
-    if (std.ascii.eqlIgnoreCase(id, "0xe223")) {
-        return try allocator.dupe(u8, "Intel(R) Arc(TM) Pro B70 Graphics");
-    }
     return try std.fmt.allocPrint(allocator, "Intel GPU {s}", .{id});
+}
+
+fn lspciName(allocator: std.mem.Allocator, io: std.Io, bdf: []const u8) !?[]const u8 {
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "lspci", "-Dnn", "-s", bdf },
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(1024),
+        .reserve_amount = 256,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| if (code != 0) return null,
+        else => return null,
+    }
+
+    return parseLspciName(allocator, result.stdout);
+}
+
+fn parseLspciName(allocator: std.mem.Allocator, output: []const u8) !?[]const u8 {
+    var lines = std.mem.tokenizeScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+        const header_end = std.mem.indexOf(u8, trimmed, "]: ") orelse continue;
+        const header = trimmed[0 .. header_end + 1];
+        if (!containsAsciiIgnoreCase(header, "VGA") and !containsAsciiIgnoreCase(header, "Display")) continue;
+
+        const name_start = header_end + "]: ".len;
+        const name_end = std.mem.lastIndexOf(u8, trimmed[name_start..], " [8086:") orelse
+            std.mem.indexOf(u8, trimmed[name_start..], " (rev ") orelse
+            trimmed[name_start..].len;
+        const raw_name = std.mem.trim(u8, trimmed[name_start .. name_start + name_end], &std.ascii.whitespace);
+        if (raw_name.len == 0 or std.mem.startsWith(u8, raw_name, "Intel Corporation Device ")) return null;
+        return try allocator.dupe(u8, raw_name);
+    }
+    return null;
+}
+
+fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    for (0..haystack.len - needle.len + 1) |idx| {
+        if (std.ascii.eqlIgnoreCase(haystack[idx .. idx + needle.len], needle)) return true;
+    }
+    return false;
+}
+
+test "parse lspci display name" {
+    const output =
+        \\0000:84:00.0 VGA compatible controller [0300]: Intel Corporation Battlemage G31 [Arc Pro B70] [8086:e223] (rev 04)
+    ;
+    const name_ = (try parseLspciName(std.testing.allocator, output)).?;
+    defer std.testing.allocator.free(name_);
+    try std.testing.expectEqualStrings("Intel Corporation Battlemage G31 [Arc Pro B70]", name_);
+}
+
+test "parse lspci display name skips generic device ids" {
+    const output =
+        \\0000:84:00.0 Display controller [0380]: Intel Corporation Device e223 [8086:e223] (rev 04)
+    ;
+    try std.testing.expect(try parseLspciName(std.testing.allocator, output) == null);
 }
 
 pub fn driverVersion(self: *const OneApi, allocator: std.mem.Allocator) ![]const u8 {

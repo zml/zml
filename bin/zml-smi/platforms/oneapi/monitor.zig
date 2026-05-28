@@ -283,7 +283,7 @@ pub fn processUtil(previous: ?EngineSample, current: ?EngineSample) ?u16 {
     const time_delta = cur.timestamp_ns - prev.timestamp_ns;
     if (time_delta == 0) return null;
     const pct = @min(engine_delta * 100 / time_delta, 100);
-    return @intCast(if (pct == 0 and engine_delta > 0) 1 else pct);
+    return @intCast(if (pct == 0 and engine_delta > 0) 0 else pct);
 }
 
 pub fn powerMilliwatts(previous: ?EnergySample, current: ?EnergySample) ?u64 {
