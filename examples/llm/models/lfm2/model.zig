@@ -253,43 +253,6 @@ pub const Model = struct {
         return .{ new_tokens, cache.reuseBuffer(cache_) };
     }
 
-    /// Block-composed entry: same as `forward` minus embed/lm_head. Runs all
-    /// 16 layers in a single compiled kernel so the composed-mode runtime
-    /// only pays 3 PJRT execute boundaries per token instead of 18.
-    pub fn forwardBlock(
-        self: Model,
-        hidden: zml.Tensor,
-        tokens_position_offset: zml.Tensor,
-        actual_seq_len: zml.Tensor,
-        cache_: Cache,
-        attention_metadata: zml.attention.attention.Metadata,
-        attention_parameters: zml.attention.attention.Parameters,
-        conv_parameters: ConvParameters,
-    ) struct { zml.Tensor, Cache } {
-        var hidden_ = hidden;
-        var cache = cache_;
-        var conv_idx: usize = 0;
-        var attn_idx: usize = 0;
-        for (self.layers) |layer| {
-            hidden_, cache = layer.forward(
-                hidden_,
-                tokens_position_offset,
-                actual_seq_len,
-                cache,
-                conv_idx,
-                attn_idx,
-                attention_metadata,
-                attention_parameters,
-                conv_parameters,
-            );
-            switch (layer.operator) {
-                .conv => conv_idx += 1,
-                .self_attn => attn_idx += 1,
-            }
-        }
-        return .{ hidden_.reuseBuffer(hidden), cache.reuseBuffer(cache_) };
-    }
-
     pub fn deinit(self: Model, allocator: std.mem.Allocator) void {
         allocator.free(self.layers);
     }

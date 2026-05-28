@@ -64,6 +64,17 @@ pub const CompilationOptions = struct {
     // weight gets `<parameter>` instead of re-tiling every decode call).
     tt_parameter_args: []const u32 = &.{},
 
+    // TT-FIX: indices of args that get the `ttcore.kv_cache` unit attribute.
+    // This skips the row-major coercion in `TTNNLayout::shouldForceInputRowMajor`
+    // and the row-major chase in `RowMajorLayoutPropagation`, so the input
+    // stays in tile layout (matching the previous kernel's tile output) and
+    // the kernel doesn't emit `ttnn.to_layout(arg, tile)` at entry. Use for
+    // donated buffers that are device-resident between executes (the hidden
+    // activation handed across composed kernels, the conv-state cache slice
+    // that updates via slice/concat — auto-inference only tags args that flow
+    // into a `CacheOpInterface`).
+    tt_kv_cache_args: []const u32 = &.{},
+
     // TT-FIX: per-compile override for `enable_trace`. When `null` the
     // global `ZML_TT_TRACE` env var is used. Use to force trace on/off
     // for a specific compile — e.g. disable for a kernel whose IR
@@ -72,7 +83,7 @@ pub const CompilationOptions = struct {
     tt_enable_trace: ?bool = null,
 };
 
-const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
+const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 4);
 
 pub const CompilationContext = struct {
     pub const Scope = struct {
@@ -111,6 +122,7 @@ pub const CompilationContext = struct {
     platform: *const Platform,
     partitioning: Sharding.Partitioning,
     tt_parameter_args: []const u32,
+    tt_kv_cache_args: []const u32,
 
     scopes: stdx.BoundedArray(Scope, 16) = .empty,
     manual_computation_depth: usize = 0,
@@ -169,6 +181,7 @@ pub const CompilationContext = struct {
             .platform = platform,
             .partitioning = partitioning,
             .tt_parameter_args = opts.tt_parameter_args,
+            .tt_kv_cache_args = opts.tt_kv_cache_args,
         };
     }
 
@@ -542,6 +555,30 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
 
     for (output_info.donations, 0..) |donation, index| if (donation) |argument_index| {
         input_attributes[argument_index].appendAssumeCapacity(.named(compilation_context.mlir_ctx, "tf.aliasing_output", .int(compilation_context.mlir_ctx, .i32, index)));
+    };
+    // TT-FIX: tag selected arg positions with `ttcore.kv_cache` so TTNNLayout
+    // doesn't force them to row major (and RowMajorLayoutPropagation doesn't
+    // chase them). Computed against the tuple arg index — same convention as
+    // `tt_parameter_args` — and expanded to the block-arg range for each
+    // requested position.
+    if (compilation_context.tt_kv_cache_args.len > 0) switch (compilation_context.platform.target) {
+        .tt => {
+            var block_arg_offset: usize = 0;
+            inline for (0..args.len) |i| {
+                const count = meta.count(Tensor, &args[i]);
+                const mark = blk: {
+                    for (compilation_context.tt_kv_cache_args) |idx| if (@as(usize, idx) == i) break :blk true;
+                    break :blk false;
+                };
+                if (mark) {
+                    for (block_arg_offset..block_arg_offset + count) |b| {
+                        input_attributes[b].appendAssumeCapacity(.named(compilation_context.mlir_ctx, "ttcore.kv_cache", .unit(compilation_context.mlir_ctx)));
+                    }
+                }
+                block_arg_offset += count;
+            }
+        },
+        .cpu, .cuda, .rocm, .tpu, .neuron => {},
     };
     for (output_info.output_memory_kinds, 0..) |output_memory_kind, index| {
         if (output_memory_kind == .device) continue;
