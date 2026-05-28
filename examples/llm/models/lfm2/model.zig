@@ -120,11 +120,7 @@ pub const LoadedModel = struct {
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
-        // TT-FIX: force single-kernel mode. Composed mode hands inter-kernel
-        // buffers across PJRT executes which trips a mesh-dispatch assertion
-        // on multi-chip (`Can't get a single buffer from host storage
-        // distributed over mesh shape MeshShape([1,2])`).
-        const params = try inference.CompilationParameters.init(allocator, self.inner, self.parsed_config.value, @intCast(seqlen), backend, true, shardings);
+        const params = try inference.CompilationParameters.init(allocator, self.inner, self.parsed_config.value, @intCast(seqlen), backend, false, shardings);
         errdefer params.deinit();
         return inference.CompiledModel.init(allocator, io, @constCast(platform), self, self.inner, params, progress);
     }
@@ -440,9 +436,93 @@ pub const DecoderLayer = struct {
         RmsNorm.unloadBuffers(&self.ffn_norm);
         Mlp.unloadBuffers(&self.feed_forward);
     }
+
+    /// TT-FIX: composed-kernel conv-layer entry. `Model.forward` (single-mode)
+    /// bakes per-layer `conv_idx` at compile-time inside its loop. In composed
+    /// mode each layer is a separate compile; we can't bake the index. Take
+    /// a *single-layer* `layer_conv_state` slice so the kernel is
+    /// layer-agnostic; the host loop hands it `cache.conv.state[conv_idx]`.
+    pub fn forwardConvComposed(
+        self: DecoderLayer,
+        input: zml.Tensor,
+        tokens_position_offset: zml.Tensor,
+        actual_seq_len: zml.Tensor,
+        layer_conv_state: zml.Tensor,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
+        conv_parameters: ConvParameters,
+    ) struct { zml.Tensor, zml.Tensor } {
+        _ = attention_metadata;
+        _ = attention_parameters;
+        const operator = switch (self.operator) {
+            .conv => |op| op,
+            .self_attn => unreachable,
+        };
+        const input_repl = input.withPartitioning(.{ .d = .replicated });
+        var arr: [1]zml.Tensor = .{layer_conv_state};
+        const one_layer = ConvCache{ .state = arr[0..1], .layer_index = 0 };
+        const residual, const updated = operator.forward(
+            self.operator_norm.forward(input_repl),
+            tokens_position_offset,
+            actual_seq_len,
+            one_layer,
+            conv_parameters,
+        );
+
+        const x = input_repl.add(residual).withPartitioning(.{ .d = .replicated });
+        const out = x.add(self.feed_forward.forward(self.ffn_norm.forward(x))).withPartitioning(.{ .d = .replicated });
+
+        return .{ out.reuseBuffer(input), updated.state[0].reuseBuffer(layer_conv_state) };
+    }
+
+    /// TT-FIX: composed-kernel attn-layer entry — same rationale as
+    /// `forwardConvComposed`. Takes a single-layer K + V (rank-4 each); the
+    /// host loop hands it `cache.kv.k[attn_idx]` and `cache.kv.v[attn_idx]`.
+    pub fn forwardAttnComposed(
+        self: DecoderLayer,
+        input: zml.Tensor,
+        tokens_position_offset: zml.Tensor,
+        actual_seq_len: zml.Tensor,
+        layer_k: zml.Tensor,
+        layer_v: zml.Tensor,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
+        conv_parameters: ConvParameters,
+    ) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
+        _ = actual_seq_len;
+        _ = conv_parameters;
+        const operator = switch (self.operator) {
+            .conv => unreachable,
+            .self_attn => |op| op,
+        };
+        const input_repl = input.withPartitioning(.{ .d = .replicated });
+        var ks: [1]zml.Tensor = .{layer_k};
+        var vs: [1]zml.Tensor = .{layer_v};
+        const one_layer = KvCache{ .k = ks[0..1], .v = vs[0..1], .layer_index = 0 };
+        const residual, const updated = operator.forward(
+            self.operator_norm.forward(input_repl),
+            tokens_position_offset,
+            one_layer,
+            attention_metadata,
+            attention_parameters,
+        );
+
+        const x = input_repl.add(residual).withPartitioning(.{ .d = .replicated });
+        const out = x.add(self.feed_forward.forward(self.ffn_norm.forward(x))).withPartitioning(.{ .d = .replicated });
+
+        // `Attention.forward` returns `kv_cache.reuseBuffer(...)` whose
+        // `layer_index` is reset to null — `.keys()/.values()` panics. Read
+        // `k[0]`/`v[0]` directly (one_layer wraps a single-element cache).
+        return .{
+            out.reuseBuffer(input),
+            updated.k[0].reuseBuffer(layer_k),
+            updated.v[0].reuseBuffer(layer_v),
+        };
+    }
 };
 
 pub const ConvParameters = struct { is_prefill: bool };
+
 
 pub const ShortConv = struct {
     in_proj: Linear,

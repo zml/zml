@@ -242,7 +242,22 @@ pub const ComposedKernelExe = struct {
     }
 
     pub fn run(self: *const ComposedKernelExe, args: Args) !void {
-        var hidden_buf: zml.Buffer = b: {
+        // TT-FIX: pre-allocate the inter-kernel `hidden` Buffer once per run,
+        // then `results.fill` into it after every kernel call. `results.get(T)`
+        // declares `T = undefined` which leaves embedded slices (`Cache.kv.k:
+        // []Buffer`, etc.) with garbage pointers — `meta.visit` segfaults
+        // walking them. `fill` writes into pre-allocated arrays, so we keep
+        // the cache slices intact.
+        const embed_w_shape = args.model_buffers.embed_tokens.weight.shape();
+        const hidden_shape = zml.Shape.init(.{
+            .batch = args.tokens_buf.shape().dim(.batch),
+            .seq = args.tokens_buf.shape().dim(.seq),
+            .d = embed_w_shape.dim(.d),
+        }, embed_w_shape.dtype());
+        var hidden_buf: zml.Buffer = try .uninitialized(args.io, args.platform, hidden_shape, args.platform.replicated_sharding, .{});
+        defer hidden_buf.deinit();
+
+        {
             var exe_args = try self.embed_tokens.args(args.allocator);
             defer exe_args.deinit(args.allocator);
             var results = try self.embed_tokens.results(args.allocator);
@@ -250,40 +265,49 @@ pub const ComposedKernelExe = struct {
 
             exe_args.set(.{ args.model_buffers.embed_tokens, args.tokens_buf });
             self.embed_tokens.call(exe_args, &results);
-            break :b results.get(zml.Buffer);
-        };
-        defer hidden_buf.deinit();
+            results.fill(.{&hidden_buf});
+        }
 
-        // Composed-kernel path is unused on TT (single-kernel is forced).
-        // The per-layer cache plumbing makes the runtime-index cache buffer
-        // unnecessary.
+        // TT-FIX: per-layer cache index — each composed kernel is layer-agnostic
+        // and operates on a single-layer cache slice; the host loop dispatches
+        // the right `state[conv_idx]` / `k,v[attn_idx]`.
+        var conv_idx: usize = 0;
+        var attn_idx: usize = 0;
         for (args.model_buffers.layers) |layer_bufs| {
-            const exe = switch (layer_bufs.operator) {
-                .conv => &self.conv_layer,
-                .self_attn => &self.attn_layer,
-            };
+            const is_conv = layer_bufs.operator == .conv;
+            const exe = if (is_conv) &self.conv_layer else &self.attn_layer;
 
             var exe_args = try exe.args(args.allocator);
             defer exe_args.deinit(args.allocator);
             var results = try exe.results(args.allocator);
             defer results.deinit(args.allocator);
 
-            exe_args.set(.{
-                layer_bufs,
-                &hidden_buf,
-                args.tokens_pos_buf,
-                args.actual_seq_len_buf,
-                args.cache_buffers,
-                args.attention_metadata_buffers,
-            });
-            exe.call(exe_args, &results);
-
-            var new_hidden, var new_cache = results.get(struct {
-                zml.Buffer,
-                zml.Bufferized(model.Cache),
-            });
-            replaceBuffer(&hidden_buf, &new_hidden);
-            replaceCacheBuffers(args.cache_buffers, &new_cache);
+            if (is_conv) {
+                exe_args.set(.{
+                    layer_bufs,
+                    &hidden_buf,
+                    args.tokens_pos_buf,
+                    args.actual_seq_len_buf,
+                    &args.cache_buffers.conv.state[conv_idx],
+                    args.attention_metadata_buffers,
+                });
+                exe.call(exe_args, &results);
+                results.fill(.{ &hidden_buf, &args.cache_buffers.conv.state[conv_idx] });
+                conv_idx += 1;
+            } else {
+                exe_args.set(.{
+                    layer_bufs,
+                    &hidden_buf,
+                    args.tokens_pos_buf,
+                    args.actual_seq_len_buf,
+                    &args.cache_buffers.kv.k[attn_idx],
+                    &args.cache_buffers.kv.v[attn_idx],
+                    args.attention_metadata_buffers,
+                });
+                exe.call(exe_args, &results);
+                results.fill(.{ &hidden_buf, &args.cache_buffers.kv.k[attn_idx], &args.cache_buffers.kv.v[attn_idx] });
+                attn_idx += 1;
+            }
         }
 
         {
@@ -294,12 +318,9 @@ pub const ComposedKernelExe = struct {
 
             exe_args.set(.{ args.model_buffers.lm_head, hidden_buf, args.model_buffers.embed_tokens, args.tokens_buf, args.rng_buf });
             self.lm_head.call(exe_args, &results);
-            var new_tokens, var new_rng = results.get(struct {
-                zml.Buffer,
-                zml.Bufferized(zml.Tensor.Rng),
-            });
-            replaceBuffer(args.tokens_buf, &new_tokens);
-            replaceBuffer(&args.rng_buf._state, &new_rng._state);
+            // lm_head returns `(new_tokens, rng)`; rng is unchanged on TT
+            // (see TT-FIX in Model.forward / LmHead.forward).
+            results.fill(.{ args.tokens_buf, args.rng_buf });
         }
     }
 };
@@ -366,7 +387,8 @@ fn compileEmbedTokens(
 
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const all_shardings = shardings.all();
-    return platform.compile(allocator, io, embed_tokens, .forward, .{tokens}, .{ .shardings = &all_shardings });
+    // TT-FIX: tag the embed weight as `<parameter>` for trace residency.
+    return platform.compile(allocator, io, embed_tokens, .forward, .{tokens}, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = false });
 }
 
 fn compileConvLayer(
@@ -393,19 +415,29 @@ fn compileConvLayer(
     const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype());
     const token_position_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .i32);
     const actual_seq_len: zml.Tensor = .init(.{}, .u32);
+    // TT-FIX: pass a single-layer conv state — each call sees only its own
+    // slot so the kernel stays layer-agnostic (host loop picks the right
+    // `state[conv_idx]`).
+    const layer_conv_state: zml.Tensor = opts.cache.conv.state[0];
 
     const all_shardings = shardings.all();
-    return platform.compile(allocator, io, conv_layer, .forward, .{
+    // TT-FIX: `tt_parameter_args = true` — required so the conv2d weight
+    // prep `to_layout(device→SystemMemory)` gets hoisted into a `LoadCachedOp`
+    // via `ConstEvalHoist`. Without it tt-metal's `MeshBuffer::create` rejects
+    // `SystemMemory` on multi-chip ("Unsupported buffer type"). The
+    // `LoadCachedOp` cache key includes `inputVersions`, so calling the same
+    // compiled kernel across 10 conv layers with 10 different weight tensors
+    // gets 10 distinct cache entries — re-prep happens once per layer at
+    // first execute, then is cached.
+    return platform.compile(allocator, io, conv_layer, .forwardConvComposed, .{
         hidden,
         token_position_offset,
         actual_seq_len,
-        opts.cache,
-        @as(usize, 0),
-        @as(usize, 0),
+        layer_conv_state,
         opts.attention_metadata,
         opts.attention_parameters,
         model.ConvParameters{ .is_prefill = is_prefill },
-    }, .{ .shardings = &all_shardings });
+    }, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = false });
 }
 
 fn compileAttnLayer(
@@ -432,19 +464,20 @@ fn compileAttnLayer(
     const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype());
     const token_position_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .i32);
     const actual_seq_len: zml.Tensor = .init(.{}, .u32);
+    const layer_k: zml.Tensor = opts.cache.kv.k[0];
+    const layer_v: zml.Tensor = opts.cache.kv.v[0];
 
     const all_shardings = shardings.all();
-    return platform.compile(allocator, io, attn_layer, .forward, .{
+    return platform.compile(allocator, io, attn_layer, .forwardAttnComposed, .{
         hidden,
         token_position_offset,
         actual_seq_len,
-        opts.cache,
-        @as(usize, 0),
-        @as(usize, 0),
+        layer_k,
+        layer_v,
         opts.attention_metadata,
         opts.attention_parameters,
         model.ConvParameters{ .is_prefill = is_prefill },
-    }, .{ .shardings = &all_shardings });
+    }, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = false });
 }
 
 fn compileLmHead(
@@ -466,5 +499,5 @@ fn compileLmHead(
     const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype());
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const all_shardings = shardings.all();
-    return platform.compile(allocator, io, mdl.lm_head, .forward, .{ hidden, mdl.embed_tokens, tokens, opts.rng }, .{ .shardings = &all_shardings });
+    return platform.compile(allocator, io, mdl.lm_head, .forward, .{ hidden, mdl.embed_tokens, tokens, opts.rng }, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = false });
 }
