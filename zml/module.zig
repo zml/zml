@@ -695,6 +695,23 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 if (trace_on) {
                     try setXlaOverrideFlag(overrides_map, "enable_trace", true, upb_arena);
                 }
+                // TT-FIX: tt-mlir's `TTNNConstEvalInputsToSystemMemory` pass
+                // moves const-eval'd weight inputs to SystemMemory, then the
+                // const-eval'd subfunc inserts `to_device` + layout/dtype prep
+                // and caches the result. The cache is keyed on
+                // `(deviceId, programHash, inputVersions)` and is INVALIDATED
+                // when an input wrapper is destroyed — which happens at the
+                // end of every PJRT execute. For composed-kernel inference
+                // (many PJRT executes per token), this fires the full
+                // `LoadCachedOp + ToDeviceOp` (~75ms together) on every
+                // execute. `ZML_TT_CONST_EVAL_INPUTS_TO_SYSTEM_MEMORY=0` keeps
+                // const-eval'd inputs device-resident so the subfunc becomes
+                // a pass-through.
+                if (std.c.getenv("ZML_TT_CONST_EVAL_INPUTS_TO_SYSTEM_MEMORY")) |r| {
+                    const on = std.mem.span(r);
+                    const enable = !(std.mem.eql(u8, on, "0") or std.mem.eql(u8, on, "false"));
+                    try setXlaOverrideFlag(overrides_map, "enable_const_eval_inputs_to_system_memory", enable, upb_arena);
+                }
             },
             else => {},
         }

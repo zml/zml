@@ -388,7 +388,7 @@ fn compileEmbedTokens(
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const all_shardings = shardings.all();
     // TT-FIX: tag the embed weight as `<parameter>` for trace residency.
-    return platform.compile(allocator, io, embed_tokens, .forward, .{tokens}, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = false });
+    return platform.compile(allocator, io, embed_tokens, .forward, .{tokens}, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = null });
 }
 
 fn compileConvLayer(
@@ -437,7 +437,7 @@ fn compileConvLayer(
         opts.attention_metadata,
         opts.attention_parameters,
         model.ConvParameters{ .is_prefill = is_prefill },
-    }, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = false });
+    }, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = null });
 }
 
 fn compileAttnLayer(
@@ -477,7 +477,7 @@ fn compileAttnLayer(
         opts.attention_metadata,
         opts.attention_parameters,
         model.ConvParameters{ .is_prefill = is_prefill },
-    }, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = false });
+    }, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = null });
 }
 
 fn compileLmHead(
@@ -499,5 +499,5 @@ fn compileLmHead(
     const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype());
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const all_shardings = shardings.all();
-    return platform.compile(allocator, io, mdl.lm_head, .forward, .{ hidden, mdl.embed_tokens, tokens, opts.rng }, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = false });
+    return platform.compile(allocator, io, mdl.lm_head, .forward, .{ hidden, mdl.embed_tokens, tokens, opts.rng }, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = null });
 }
