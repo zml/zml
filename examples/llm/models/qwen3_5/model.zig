@@ -577,8 +577,6 @@ pub const SelfAttn = struct {
 
         var q, var gate = self.projectQAndGate(x_qkv);
         var k, var v = self.projectKV(x_qkv);
-        q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
-        gate = gate.withPartitioning(.{ .s = .replicated, .d_out_proj = .model });
         k = partitionProjectedKv(k, replicate_kv_heads);
         v = partitionProjectedKv(v, replicate_kv_heads);
         q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
@@ -592,14 +590,13 @@ pub const SelfAttn = struct {
         const cos, const sin = self.rotary_embed.getCosAndSin(position_ids, dtype);
         q = self.rotary_embed.applyRope(q, cos, sin);
         k = self.rotary_embed.applyRope(k, cos, sin);
-        q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
         k = partitionProjectedKv(k, replicate_kv_heads);
         v = partitionProjectedKv(v, replicate_kv_heads);
 
         const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
-        q = q.rename(.{ .s = .q }).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
+        q = q.rename(.{ .s = .q });
         k = partitionCachedKv(k, replicate_kv_heads);
         v = partitionCachedKv(v, replicate_kv_heads);
 
@@ -610,10 +607,13 @@ pub const SelfAttn = struct {
             token_index,
             zml.attention.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads)),
             zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
-        ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
+        ).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
         const gated_output = attn_output.mul(gate.sigmoid());
-        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d })).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
+        const projected_output = self.o_proj
+            .forward(gated_output.rename(.{ .d_out_proj = .d }))
+            .rename(.{ .dout = .d })
+            .withPartitioning(.{ .d = .replicated });
 
         return .{ projected_output, new_kv_cache };
     }
@@ -818,7 +818,9 @@ pub const GatedDeltaNet = struct {
         const left_pad = self.conv_kernel_size - 1;
 
         const x_in = x.withPartitioning(.{ .d = .replicated });
-        const projected_qkv = self.in_proj_qkv.forward(x_in).rename(.{ .dout = .mix }).withPartitioning(.{ .s = .replicated, .mix = .model });
+        const projected_qkv = self.in_proj_qkv.forward(x_in)
+            .rename(.{ .dout = .mix })
+            .withPartitioning(.{ .s = .replicated, .mix = .model });
         const use_cached_state = x.dim(.s) == 1 and left_pad > 0;
         const conv_input = b: {
             if (use_cached_state) break :b zml.Tensor.concatenate(&.{ cache.convState(), projected_qkv }, .s);
@@ -851,23 +853,19 @@ pub const GatedDeltaNet = struct {
         mixed_qkv = mixed_qkv.withPartitioning(.{ .s = .replicated, .mix = .model });
 
         const z = self.in_proj_z.forward(x_in)
-            .splitAxis(.dout, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim })
-            .withPartitioning(.{ .s = .replicated, .vh = .model, .vhd = .replicated });
-        const b = self.in_proj_b.forward(x_in).rename(.{ .dout = .vh }).withPartitioning(.{ .s = .replicated, .vh = .model });
-        const a = self.in_proj_a.forward(x_in).rename(.{ .dout = .vh }).withPartitioning(.{ .s = .replicated, .vh = .model });
+            .splitAxis(.dout, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim });
+        const b = self.in_proj_b.forward(x_in).rename(.{ .dout = .vh });
+        const a = self.in_proj_a.forward(x_in).rename(.{ .dout = .vh });
 
         const query = mixed_qkv
             .slice1d(.mix, .{ .start = 0, .end = key_dim })
-            .splitAxis(.mix, .{ .kh = self.num_k_heads, .khd = self.head_k_dim })
-            .withPartitioning(.{ .s = .replicated, .kh = .model, .khd = .replicated });
+            .splitAxis(.mix, .{ .kh = self.num_k_heads, .khd = self.head_k_dim });
         const key = mixed_qkv
             .slice1d(.mix, .{ .start = key_dim, .end = 2 * key_dim })
-            .splitAxis(.mix, .{ .kh = self.num_k_heads, .khd = self.head_k_dim })
-            .withPartitioning(.{ .s = .replicated, .kh = .model, .khd = .replicated });
+            .splitAxis(.mix, .{ .kh = self.num_k_heads, .khd = self.head_k_dim });
         const value = mixed_qkv
             .slice1d(.mix, .{ .start = 2 * key_dim, .end = 2 * key_dim + value_dim })
-            .splitAxis(.mix, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim })
-            .withPartitioning(.{ .s = .replicated, .vh = .model, .vhd = .replicated });
+            .splitAxis(.mix, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim });
 
         const beta = b.sigmoid();
         const aLog_type = self.aLog.dtype();
@@ -899,10 +897,12 @@ pub const GatedDeltaNet = struct {
                 core_attn_out.rename(.{ .vhd = .d }),
                 z.rename(.{ .vhd = .d }),
             )
-            .rename(.{ .d = .vhd })
-            .withPartitioning(.{ .s = .replicated, .vh = .model, .vhd = .replicated });
+            .rename(.{ .d = .vhd });
 
-        const output = self.out_proj.forward(core_attn_out_normed.merge(.{ .d = .{ .vh, .vhd } })).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
+        const output = self.out_proj
+            .forward(core_attn_out_normed.merge(.{ .d = .{ .vh, .vhd } }))
+            .rename(.{ .dout = .d })
+            .withPartitioning(.{ .d = .replicated });
         const updated_cache = cache.update(
             buildUpdatedConvState(conv_input, left_pad),
             last_recurrent_state,
