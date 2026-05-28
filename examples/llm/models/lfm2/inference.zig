@@ -230,14 +230,12 @@ fn compileSingleKernelExe(
 
 pub const ComposedKernelExe = struct {
     embed_tokens: zml.Exe,
-    conv_layer: zml.Exe,
-    attn_layer: zml.Exe,
+    block: zml.Exe,
     lm_head: zml.Exe,
 
     fn deinit(self: ComposedKernelExe) void {
         self.embed_tokens.deinit();
-        self.conv_layer.deinit();
-        self.attn_layer.deinit();
+        self.block.deinit();
         self.lm_head.deinit();
     }
 
@@ -268,46 +266,24 @@ pub const ComposedKernelExe = struct {
             results.fill(.{&hidden_buf});
         }
 
-        // TT-FIX: per-layer cache index — each composed kernel is layer-agnostic
-        // and operates on a single-layer cache slice; the host loop dispatches
-        // the right `state[conv_idx]` / `k,v[attn_idx]`.
-        var conv_idx: usize = 0;
-        var attn_idx: usize = 0;
-        for (args.model_buffers.layers) |layer_bufs| {
-            const is_conv = layer_bufs.operator == .conv;
-            const exe = if (is_conv) &self.conv_layer else &self.attn_layer;
-
-            var exe_args = try exe.args(args.allocator);
+        // Single PJRT execute processes all 16 layers internally — saves
+        // 15 boundary round-trips vs the per-layer-type composed path.
+        {
+            var exe_args = try self.block.args(args.allocator);
             defer exe_args.deinit(args.allocator);
-            var results = try exe.results(args.allocator);
+            var results = try self.block.results(args.allocator);
             defer results.deinit(args.allocator);
 
-            if (is_conv) {
-                exe_args.set(.{
-                    layer_bufs,
-                    &hidden_buf,
-                    args.tokens_pos_buf,
-                    args.actual_seq_len_buf,
-                    &args.cache_buffers.conv.state[conv_idx],
-                    args.attention_metadata_buffers,
-                });
-                exe.call(exe_args, &results);
-                results.fill(.{ &hidden_buf, &args.cache_buffers.conv.state[conv_idx] });
-                conv_idx += 1;
-            } else {
-                exe_args.set(.{
-                    layer_bufs,
-                    &hidden_buf,
-                    args.tokens_pos_buf,
-                    args.actual_seq_len_buf,
-                    &args.cache_buffers.kv.k[attn_idx],
-                    &args.cache_buffers.kv.v[attn_idx],
-                    args.attention_metadata_buffers,
-                });
-                exe.call(exe_args, &results);
-                results.fill(.{ &hidden_buf, &args.cache_buffers.kv.k[attn_idx], &args.cache_buffers.kv.v[attn_idx] });
-                attn_idx += 1;
-            }
+            exe_args.set(.{
+                args.model_buffers,
+                &hidden_buf,
+                args.tokens_pos_buf,
+                args.actual_seq_len_buf,
+                args.cache_buffers,
+                args.attention_metadata_buffers,
+            });
+            self.block.call(exe_args, &results);
+            results.fill(.{ &hidden_buf, args.cache_buffers });
         }
 
         {
@@ -316,10 +292,15 @@ pub const ComposedKernelExe = struct {
             var results = try self.lm_head.results(args.allocator);
             defer results.deinit(args.allocator);
 
-            exe_args.set(.{ args.model_buffers.lm_head, hidden_buf, args.model_buffers.embed_tokens, args.tokens_buf, args.rng_buf });
+            // Match `compileLmHead`'s `LmHeadCombined` arg layout: args[0]
+            // wraps lm_head + embed_tokens so both weights are marked
+            // `<parameter>`.
+            const combined_bufs = .{
+                .lm_head = args.model_buffers.lm_head,
+                .embed_tokens = args.model_buffers.embed_tokens,
+            };
+            exe_args.set(.{ combined_bufs, hidden_buf, args.tokens_buf, args.rng_buf });
             self.lm_head.call(exe_args, &results);
-            // lm_head returns `(new_tokens, rng)`; rng is unchanged on TT
-            // (see TT-FIX in Model.forward / LmHead.forward).
             results.fill(.{ args.tokens_buf, args.rng_buf });
         }
     }
@@ -358,15 +339,50 @@ fn compileComposedKernelExe(
     shardings: common.Shardings,
 ) !ComposedKernelExe {
     const embed_tokens_exe = try compileEmbedTokens(allocator, io, platform, mdl.embed_tokens, opts, seqlen, progress, shardings);
-    const conv_layer_exe = try compileConvLayer(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings);
-    const attn_layer_exe = try compileAttnLayer(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings);
+    const block_exe = try compileBlock(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings);
     const lm_head_exe = try compileLmHead(allocator, io, platform, mdl, opts, seqlen, progress, shardings);
     return .{
         .embed_tokens = embed_tokens_exe,
-        .conv_layer = conv_layer_exe,
-        .attn_layer = attn_layer_exe,
+        .block = block_exe,
         .lm_head = lm_head_exe,
     };
+}
+
+fn compileBlock(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    mdl: model.Model,
+    opts: CompilationOptions,
+    seqlen: u32,
+    is_prefill: bool,
+    progress: *std.Progress.Node,
+    shardings: common.Shardings,
+) !zml.Exe {
+    progress.increaseEstimatedTotalItems(1);
+    var node = progress.start("Compiling block...", 1);
+    defer node.end();
+    const now: std.Io.Timestamp = .now(io, .awake);
+    defer log.info("Compiled block [{f}]", .{now.untilNow(io, .awake)});
+
+    const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype());
+    const token_position_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .i32);
+    const actual_seq_len: zml.Tensor = .init(.{}, .u32);
+
+    const all_shardings = shardings.all();
+    return platform.compile(allocator, io, mdl, .forwardBlock, .{
+        hidden,
+        token_position_offset,
+        actual_seq_len,
+        opts.cache,
+        opts.attention_metadata,
+        opts.attention_parameters,
+        model.ConvParameters{ .is_prefill = is_prefill },
+    }, .{
+        .shardings = &all_shardings,
+        .tt_parameter_args = true,
+        .tt_enable_trace = null,
+    });
 }
 
 fn compileEmbedTokens(
@@ -499,5 +515,22 @@ fn compileLmHead(
     const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype());
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const all_shardings = shardings.all();
-    return platform.compile(allocator, io, mdl.lm_head, .forward, .{ hidden, mdl.embed_tokens, tokens, opts.rng }, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = null });
+    // TT-FIX: wrap lm_head + embed_tokens in a single args[0] struct so
+    // tt_parameter_args=true tags BOTH weight tensors as `<parameter>`.
+    // Without this wrapper, only lm_head's embedding_norm got marked and the
+    // 65536×2048 embed_weight (256 MB) came in as `<input>` — tt-mlir then
+    // emits `ttnn.to_layout(arg, tile)` on it every decode call (re-tiling
+    // the whole 256 MB tensor at every PJRT execute). This was the dominant
+    // cost in composed-mode lm_head.
+    const combined = LmHeadCombined{ .lm_head = mdl.lm_head, .embed_tokens = mdl.embed_tokens };
+    return platform.compile(allocator, io, combined, .forward, .{ hidden, tokens, opts.rng }, .{ .shardings = &all_shardings, .program_name = "lfm2_composed_lm_head", .tt_parameter_args = true, .tt_enable_trace = null });
 }
+
+const LmHeadCombined = struct {
+    lm_head: model.LmHead,
+    embed_tokens: model.TokenEmbedding,
+
+    pub fn forward(self: LmHeadCombined, hidden: zml.Tensor, tokens: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
+        return self.lm_head.forward(hidden, self.embed_tokens, tokens, rng);
+    }
+};

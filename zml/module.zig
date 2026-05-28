@@ -695,6 +695,11 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 if (trace_on) {
                     try setXlaOverrideFlag(overrides_map, "enable_trace", true, upb_arena);
                 }
+                if (std.c.getenv("ZML_TT_EXPORT_PATH")) |raw| {
+                    var buf: [512]u8 = undefined;
+                    const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ std.mem.span(raw), opts.program_name }) catch std.mem.span(raw);
+                    try setXlaOverrideFlag(overrides_map, "export_path", path, upb_arena);
+                }
                 // TT-FIX: tt-mlir's `TTNNConstEvalInputsToSystemMemory` pass
                 // moves const-eval'd weight inputs to SystemMemory, then the
                 // const-eval'd subfunc inserts `to_device` + layout/dtype prep
