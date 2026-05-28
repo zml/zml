@@ -87,6 +87,7 @@ zig_binary(
         "//bin/zml-smi/json",
         "//bin/zml-smi/api",
         "//bin/zml-smi/prometheus",
+        "//bin/zml-smi/utils:sysfs",
         "//bin/zml-smi/info",
         "//bin/zml-smi/tui",
         "//stdx",
