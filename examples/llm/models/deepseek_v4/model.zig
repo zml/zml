@@ -21,7 +21,9 @@ pub const Config = struct {
     num_experts_per_tok: u32,
     swiglu_limit: f32,
     compress_ratios: []i64,
-    rope_scaling: zml.nn.RopeOpts,
+    rope_scaling: RopeScaling,
+    rope_theta: f32,
+    compress_rope_theta: f32,
     quantization_config: QuantizationConfig,
     sliding_window: u32,
     num_attention_heads: u32,
@@ -32,6 +34,21 @@ pub const Config = struct {
     index_head_dim: u32,
     index_n_heads: u32,
     index_topk: u32,
+};
+
+const RopeScaling = struct {
+    beta_fast: f32,
+    beta_slow: f32,
+    factor: f32,
+    original_max_position_embeddings: u32,
+};
+
+const RopeOpts = struct {
+    beta_fast: f32,
+    beta_slow: f32,
+    factor: f32,
+    original_max_position_embeddings: u32,
+    rope_theta: f32,
 };
 
 pub const Buffers = zml.Bufferized(Model);
@@ -135,12 +152,12 @@ const Compressor = struct {
     ratio: i64,
     rotate: bool,
     overlap: bool,
-    rope_opts: zml.nn.RopeOpts,
+    rope_opts: RopeOpts,
     head_dim: u32,
     rope_head_dim: i64,
     nope_head_dim: i64,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize, rotate: bool) ?Compressor {
+    pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize, rotate: bool, rope_opts: RopeOpts) ?Compressor {
         if (layer_idx >= config.compress_ratios.len or config.compress_ratios[layer_idx] == 0) return null;
 
         const ratio = config.compress_ratios[layer_idx];
@@ -154,7 +171,7 @@ const Compressor = struct {
             .ratio = ratio,
             .rotate = rotate,
             .overlap = (ratio == 4),
-            .rope_opts = config.rope_scaling,
+            .rope_opts = rope_opts,
             .head_dim = config.head_dim,
             .rope_head_dim = config.qk_rope_head_dim,
             .nope_head_dim = config.head_dim - config.qk_rope_head_dim,
@@ -206,11 +223,8 @@ const Compressor = struct {
         const cutoff = seqlen - remainder;
 
         if (remainder > 0) {
-            const s = kv.split(.seq, &[_]i64{cutoff, remainder});
-            kv = s[0];
-
-            const score_split = score.split(.seq, &[_]i64{cutoff, remainder});
-            score = score_split[0];
+            kv = kv.split(.seq, &[_]i64{cutoff, remainder})[0];
+            score = score.split(.seq, &[_]i64{cutoff, remainder})[0];
         }
 
         kv = kv.splitAxis(.seq, .{ .seq = .auto, .r = self.ratio });
@@ -243,10 +257,11 @@ const Compressor = struct {
         var kv = maybe_kv.?.convert(x.dtype());
 
         kv = self.norm.forward(kv);
-        kv = apply_rope(kv.rename(.{.seq = .s}), self.nope_head_dim, self.rope_head_dim, self.rope_opts);
+        // _ = precompute_yarn(@intCast(kv.dim(.hd)), self.rope_opts);
+        kv = apply_rope(kv, self.nope_head_dim, self.rope_head_dim, self.rope_opts);
 
         if (self.rotate) {
-            kv = hadamard_rotation(kv);
+            kv = hadamard_rotation(kv, null);
             // TODO: quantize to FP4
         }
 
@@ -256,14 +271,93 @@ const Compressor = struct {
     }
 };
 
-fn apply_rope(x: zml.Tensor, nope_dim: i64, rope_dim: i64, opts: zml.nn.RopeOpts) zml.Tensor {
+fn find_correction_dim(dim: u32, max_seq_len: u32, num_rotations: f32, base: f32) f32 {
+    const dim_f32: f32 = @floatFromInt(dim);
+    const max_seq_len_f32: f32 = @floatFromInt(max_seq_len);
+
+    return dim_f32
+    * std.math.log(f32, 10, max_seq_len_f32 / (num_rotations * 2 * std.math.pi))
+    / (2.0 * std.math.log(f32, 10, base));
+}
+
+fn find_correction_range(dim: u32, opts: RopeOpts) struct { f32, f32 } {
+     const low = std.math.floor(find_correction_dim(dim, opts.original_max_position_embeddings, opts.beta_fast, opts.rope_theta));
+     const high = std.math.ceil(find_correction_dim(dim, opts.original_max_position_embeddings, opts.beta_slow, opts.rope_theta));
+     return .{ @max(low, 0), @min(high, @as(f32, @floatFromInt(dim-1))) };
+}
+
+fn linear_ramp_factor(min: f32, max: f32, dim: u32) zml.Tensor {
+    const new_max = if (min == max) max + 0.001 else max;
+    _ = new_max; // autofix
+
+    const linear_func = zml.Tensor.arange(.{ .end = dim }, .f32).addConstant(-min).divByConst(max - min);
+    const shape = linear_func.shape();
+
+    return linear_func.clamp(zeroes(shape), ones(shape));
+}
+
+fn precompute_yarn(dim: u32, opts: RopeOpts) zml.Tensor {
+    var freqs = zml.Tensor.scalar(opts.rope_theta, .f32);
+    freqs = freqs.pow(zml.Tensor.arange(.{ .end = dim, .step = 2 }, .f32).divByConst(dim));
+    freqs = zml.Tensor.scalar(1.0, .f32).div(freqs);
+
+    if (opts.original_max_position_embeddings > 0) {
+        const low, const high = find_correction_range(dim, opts);
+        const ramp_factor = linear_ramp_factor(low, high, dim/2);
+        const smooth = zml.Tensor.scalar(1.0, .f32).sub(ramp_factor);
+
+        freqs = freqs.divByConst(opts.factor).mul(ramp_factor).add(freqs.mul(smooth));
+    }
+
+    return freqs;
+}
+
+fn apply_yarn(x: zml.Tensor, pos_idx: zml.Tensor, opts: RopeOpts) zml.Tensor {
+    // TODO: add assert on .s and .hd
+    const freqs = precompute_yarn(@intCast(x.dim(.hd)), opts).withTags(.{.hd});
+
+    const inv_freq = zml.Tensor.outer(pos_idx.convert(.f32), freqs);
+
+    const x_real, const x_imag = zml.nn.splitRealImg(x, .interleaved);
+    const cos = inv_freq.cos().convert(x.dtype()).broad(x_real.shape());
+    const sin = inv_freq.sin().convert(x.dtype()).broad(x_real.shape());
+
+    // apply rotation
+    const y_real = x_real.mul(cos).sub(x_imag.mul(sin));
+    const y_imag = x_real.mul(sin).add(x_imag.mul(cos));
+
+    return zml.nn.mergeRealImg(y_real, y_imag, .interleaved);
+}
+
+fn apply_rope(x: zml.Tensor, nope_dim: i64, rope_dim: i64, opts: RopeOpts) zml.Tensor {
     const split = x.split(-1, &[_]i64{nope_dim, rope_dim});
-    const x_rope = zml.nn.rope(split[1], null, opts);
+    const pos_idx = zml.Tensor.arange(.{ .end = 8, .step = 4}, .i64).withTags(.{.seq});
+    const x_rope = apply_yarn(split[1], pos_idx, opts);
     return zml.Tensor.concatenate(&[_]zml.Tensor{split[0], x_rope}, -1);
 }
 
-fn hadamard_rotation(x: zml.Tensor) zml.Tensor {
-    return x;
+fn hadamard_rotation(x: zml.Tensor, scale: ?f32) zml.Tensor {
+    _ = scale; // autofix
+    const n = x.dim(-1);
+    stdx.debug.assert(@mod(n, 2) == 0, "expect last dimension to be a power of 2, got: {}", .{ n });
+
+    var H = zml.Tensor.scalar(1, x.dtype()).reshape(.{ 1, 1 });
+
+    while (H.dim(0) < n) {
+        const H_plus = zml.Tensor.concatenate(&[_]zml.Tensor{H, H}, 1);
+        const H_moins = zml.Tensor.concatenate(&[_]zml.Tensor{H.scale(-1), H.scale(-1)}, 1);
+        H = zml.Tensor.concatenate(&[_]zml.Tensor{H_plus, H_moins}, 0);
+    }
+
+    const H_ =  H.divByConst(@sqrt(@as(f32, @floatFromInt(n)))).withTags(.{ .a, .hd });
+    std.log.info("x: {f}", .{ x.shape() });
+    std.log.info("H: {f}", .{ H_.shape() });
+    const r = x.dot(H_, .hd);
+    _ = r; // autofix
+    return H_;
+    // std.log.info("r: {f}", .{ r.shape() });
+    // const s = if (scale) |s| s else 1;
+    // return r.scale(s);
 }
 
 const Indexer = struct {
@@ -273,16 +367,16 @@ const Indexer = struct {
     index_head_dim: u32,
     index_n_heads: u32,
     index_topk: u32,
-    rope_opts: zml.nn.RopeOpts,
+    rope_opts: RopeOpts,
     rope_head_dim: u32,
     nope_head_dim: u32,
     ratio: u32,
     softmax_scale: f32,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize) ?Indexer {
+    pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize, rope_opts: RopeOpts) ?Indexer {
         if (layer_idx >= config.compress_ratios.len or config.compress_ratios[layer_idx] != 4) return null;
 
-        const compressor: ?Compressor = .init(store, config, layer_idx, true);
+        const compressor: ?Compressor = .init(store, config, layer_idx, true, rope_opts);
         stdx.debug.assert(compressor != null, "expected non null compressor from indexer", .{});
 
         const block_size = config.quantization_config.weight_block_size[0];
@@ -296,7 +390,7 @@ const Indexer = struct {
             .index_head_dim = config.index_head_dim,
             .index_n_heads = config.index_n_heads,
             .index_topk = config.index_topk,
-            .rope_opts = config.rope_scaling,
+            .rope_opts = rope_opts,
             .rope_head_dim = config.qk_rope_head_dim,
             .nope_head_dim = config.index_head_dim - config.qk_rope_head_dim, //< Not sure about `index_head_dim`
             .ratio = 4,
@@ -314,7 +408,7 @@ const Indexer = struct {
         var q = self.wq_b.forward(qr);
         q = q.splitAxis(-1, .{ .h = self.index_n_heads, .hd = .auto });
         q = apply_rope(q.rename(.{.seq = .s}), self.nope_head_dim, self.rope_head_dim, self.rope_opts);
-        q = hadamard_rotation(q).rename(.{.s = .seq});
+        q = hadamard_rotation(q, null).rename(.{.s = .seq});
 
         // TODO: FP4 quant q
         _ = self.compressor.forward(x, start_pos);
@@ -371,7 +465,7 @@ const Attention = struct {
     compressor: ?Compressor,
     indexer: ?Indexer,
     eps: f32,
-    rope_opts: zml.nn.RopeOpts,
+    rope_opts: RopeOpts,
     window_size: u32,
     local_heads: u32,
     head_dim: u32,
@@ -384,19 +478,15 @@ const Attention = struct {
     pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize) Attention {
         const block_size: usize = config.quantization_config.weight_block_size[0];
 
-        // TODO: fix
+        stdx.debug.assert(layer_idx < config.compress_ratios.len, "expected layer indices ({}) to be lower than compress ratios ({})", .{layer_idx, config.compress_ratios.len});
         const compress_ratio= config.compress_ratios[layer_idx];
-        _ = compress_ratio; // autofix
 
-        const rope_opts = blk: {
-            // TODO: fix
-            break :blk config.rope_scaling;
-            // if (compress_ratio != 0) break :blk config.rope_scaling;
-            //
-            // // disable YaRN and use base rope_theta in pure sliding-window attention
-            // var r = config.rope_scaling;
-            // r.scaling.yarn.original_max_position_embeddings = 0;
-            // break :blk r;
+        const rope_opts: RopeOpts = .{
+            .original_max_position_embeddings = if (compress_ratio == 0) 0 else config.rope_scaling.original_max_position_embeddings,
+            .rope_theta = if (compress_ratio == 0)  config.rope_theta else config.compress_rope_theta,
+            .beta_fast = config.rope_scaling.beta_fast,
+            .beta_slow = config.rope_scaling.beta_slow,
+            .factor = config.rope_scaling.factor,
         };
 
         return .{
@@ -408,8 +498,8 @@ const Attention = struct {
             .wkv = .init(store.withPrefix("wkv"), .{ .hd, .d }, block_size, .d),
             .wo_a = .init(store.withPrefix("wo_a"), .{ .hd, .d }, block_size, .d),
             .wo_b = .init(store.withPrefix("wo_b"), .{ .hd, .d }, block_size, .d),
-            .compressor = .init(store, config, layer_idx, false),
-            .indexer = .init(store, config, layer_idx),
+            .compressor = .init(store, config, layer_idx, false, rope_opts),
+            .indexer = .init(store, config, layer_idx, rope_opts),
             .eps = config.rms_norm_eps,
             .rope_opts = rope_opts,
             .window_size = config.sliding_window,
@@ -484,6 +574,9 @@ const Attention = struct {
 
 fn zeroes(s: zml.Shape) zml.Tensor {
     return zml.Tensor.constant(s.dtype().zero()).broad(s);
+}
+fn ones(s: zml.Shape) zml.Tensor {
+    return zml.Tensor.constant(s.dtype().one()).broad(s);
 }
 
 fn topk_window(window_size: i64, batch_size: i64, seqlen: i64, start_pos: i64) zml.Tensor {
