@@ -19,7 +19,7 @@ pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, oneapi: *OneApi, 
     try collector.spawnPoll(pollOnce, .{ collector.gpa, collector.arena, collector.io, list, oneapi, dev_offset, state });
 }
 
-fn pollOnce(allocator: std.mem.Allocator, state_allocator: std.mem.Allocator, io: std.Io, list: *ProcessDoubleBuffer, oneapi: *OneApi, dev_offset: u16, state: *Monitor.ProcessPrevious) void {
+fn pollOnce(allocator: std.mem.Allocator, arena: std.mem.Allocator, io: std.Io, list: *ProcessDoubleBuffer, oneapi: *OneApi, dev_offset: u16, state: *Monitor.ProcessPrevious) void {
     const back = list.back();
     back.clearRetainingCapacity();
 
@@ -40,6 +40,6 @@ fn pollOnce(allocator: std.mem.Allocator, state_allocator: std.mem.Allocator, io
         }) catch break;
     }
 
-    Monitor.saveProcessPrevious(state_allocator, state, &usage) catch {};
+    Monitor.saveProcessPrevious(arena, state, &usage) catch {};
     list.swap();
 }
