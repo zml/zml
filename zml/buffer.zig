@@ -120,7 +120,7 @@ pub const Buffer = struct {
 
         const placement = try res._sharding.placement(sh);
         const shard_dims: []const i64 = placement.shape.dims();
-        const layout = platform.defaultMemoryLayout(sh);
+        const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
             const memory = platform.devices[device.id].memory(opts.memory).?;
@@ -216,10 +216,10 @@ pub const Buffer = struct {
         };
 
         stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
-        const element_type = pjrtx.bufferTypeFromDtype(res._shape.dtype());
-        const placement = try res._sharding.placement(res._shape);
+        const element_type = pjrtx.bufferTypeFromDtype(sh.dtype());
+        const placement = try res._sharding.placement(sh);
         const shard_dims: []const i64 = placement.shape.dims();
-        const layout = platform.defaultMemoryLayout(res._shape);
+        const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
             const memory = platform.devices[device.id].memory(opts.memory).?;

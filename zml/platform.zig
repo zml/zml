@@ -602,17 +602,17 @@ pub const Platform = struct {
         unreachable;
     }
 
-    pub fn defaultMemoryLayout(noalias platform: *const Platform, shape: zml.Shape) pjrt.MemoryLayout {
+    pub fn defaultMemoryLayout(platform: *const Platform, dims: []const i64, dtype: zml.DataType) pjrt.MemoryLayout {
         return switch (platform.target) {
-            .tpu => {
-                if (comptime !platforms.isEnabled(.tpu)) unreachable;
-                const element_type = pjrtx.bufferTypeFromDtype(shape._dtype);
-                const default = try platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, shape.dims());
+            .cuda, .rocm, .tpu, .neuron, .oneapi => {
+                const element_type = pjrtx.bufferTypeFromDtype(dtype);
+                const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
             },
-            else => .{
+            // CPU always return this layout so avoid complicated logic from .defaultMemoryLayout
+            .cpu => .{
                 .tiled = .{
-                    .minor_to_major = constants.minorToMajor(shape.rank()),
+                    .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
                     .tile_dims = &.{},
                     .tile_dims_sizes = &.{},
                 },
