@@ -20,7 +20,6 @@ const Args = struct {
     topk: u32 = 4,
     backend: ?zml.attention.attention.Backend = null,
     attnd_ip: ?[]const u8 = null,
-    single: bool = false,
     profile: bool = false,
 
     pub const help =
@@ -35,8 +34,6 @@ const Args = struct {
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([vanilla, attnd, cuda_fa2, cuda_fa3], default: auto-selection)
         \\   --attnd-ip=<addr>   Register and prefer the `attnd` backend at the provided `IP:PORT`
-        \\   --single            Create a single kernel encompassing all the layers when supported
-        \\                       (only used by LFM2 which uses multiple kernels by default)
         \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
         \\
     ;

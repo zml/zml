@@ -25,7 +25,7 @@ pub const Config = struct {
     rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
 };
 
-pub const Options = struct {
+const Options = struct {
     sampling_strategy: ?zml.nn.SamplingStrategy,
     max_seq_len: u32,
 };
@@ -81,19 +81,17 @@ pub const LoadedModel = struct {
             std.log.scoped(.llama).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         }
 
-        const all_shardings = shardings.all();
         return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
             .progress = progress,
-            .shardings = &all_shardings,
+            .shardings = &shardings.all(),
             .parallelism = 16,
             .total_bytes = &total_bytes,
         });
     }
 
-    pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
-        _ = self;
+    pub fn unloadBuffers(_: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         if (buffers.lm_head) |*lm_head| lm_head.weight.deinit();
         Llama.unloadBuffers(&buffers.model, allocator);
     }
@@ -109,6 +107,7 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
         const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, shardings);
+
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
 };
@@ -187,6 +186,11 @@ pub const Model = struct {
         if (self.lm_head) |*lm_head| lm_head.weight.deinit();
         Llama.unloadBuffers(&self.model, allocator);
     }
+
+    fn lmHead(self: Model) LmHead {
+        return .init(self);
+    }
+
     /// Predicts the token at `token_index` position.
     /// Returns:
     ///  - updated `tokens`,
@@ -202,6 +206,7 @@ pub const Model = struct {
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
+
         const out, const updated_kv_cache = self.model.forward(
             tokens,
             token_index,
@@ -209,37 +214,14 @@ pub const Model = struct {
             attention_metadata,
             attention_parameters,
         );
-        const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
 
-        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
-    }
+        const new_tokens, const new_rng = self.lmHead().forward(out, tokens, rng);
 
-    pub fn sampleTokens(
-        self: Model,
-        lm_head_: ?zml.nn.Linear,
-        out_: zml.Tensor,
-        rng: zml.Tensor.Rng,
-        opts: zml.nn.SamplingStrategy,
-    ) struct { zml.Tensor, zml.Tensor.Rng } {
-        const out = out_.withPartialTags(.{ .s, .d });
-
-        var logits = blk: {
-            if (lm_head_) |lm_head| {
-                break :blk lm_head.forward(out).rename(.{ .dout = .d });
-            } else {
-                break :blk self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .d);
-            }
-        };
-
-        if (logits.shape().hasTag(.voc) == null)
-            logits = logits.rename(.{ .d = .voc });
-
-        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, opts, rng);
-        return .{ next_tokens, new_rng };
+        return .{ new_tokens, updated_kv_cache, new_rng };
     }
 };
 
-pub const Llama = struct {
+const Llama = struct {
     embed_tokens: zml.nn.TokenEmbedding,
     norm: RmsNorm,
     layers: []TransformerLayer,
@@ -289,26 +271,18 @@ pub const Llama = struct {
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
-        const embeds = embed_tokensForward(self.embed_tokens, tokens);
+        const embeds = self.embed_tokens.forward(tokens).withPartialTags(.{.d});
         var hidden = embeds;
         var updated_kv_cache = kv_cache;
+        var kv_cache_index = zml.Tensor.scalar(0, .u32);
 
-        for (self.layers, 0..) |layer, i| {
-            const layer_attention_metadata: zml.attention.attention.Metadata = switch (attention_parameters) {
-                .attnd => .{ .attnd = .{
-                    .layer_id = zml.Tensor.scalar(i, .u16),
-                    .conversation_id = attention_metadata.attnd.conversation_id,
-                    .num_tokens = attention_metadata.attnd.num_tokens,
-                } },
-                .vanilla => attention_metadata,
-                .cuda_fa2 => attention_metadata,
-                .cuda_fa3 => attention_metadata,
-            };
-            hidden, updated_kv_cache = layer.forward(
+        for (self.layers) |layer| {
+            hidden, updated_kv_cache, kv_cache_index = layer.forward(
                 hidden,
                 token_index,
-                updated_kv_cache.atLayer(i),
-                layer_attention_metadata,
+                updated_kv_cache,
+                kv_cache_index,
+                attention_metadata,
                 attention_parameters,
             );
         }
@@ -317,9 +291,40 @@ pub const Llama = struct {
     }
 };
 
-fn embed_tokensForward(embed_tokens_: zml.nn.TokenEmbedding, tokens_: zml.Tensor) zml.Tensor {
-    return embed_tokens_.forward(tokens_).withPartialTags(.{.d});
-}
+pub const LmHead = struct {
+    lm_head: ?zml.nn.Linear,
+    embed_tokens: zml.nn.TokenEmbedding,
+    norm: RmsNorm,
+    gen_opts: zml.nn.SamplingStrategy,
+
+    pub fn init(mdl: Model) LmHead {
+        return .{
+            .lm_head = mdl.lm_head,
+            .embed_tokens = mdl.model.embed_tokens,
+            .norm = mdl.model.norm,
+            .gen_opts = mdl.gen_opts,
+        };
+    }
+
+    pub fn forward(self: LmHead, hidden_: zml.Tensor, tokens_: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
+        const tokens = tokens_.withPartialTags(.{.s});
+        const hidden = self.norm.forward(hidden_.withPartialTags(.{ .s, .d }));
+
+        var logits = blk: {
+            if (self.lm_head) |lm_head| {
+                break :blk lm_head.forward(hidden).rename(.{ .dout = .d });
+            } else {
+                break :blk self.embed_tokens.weight.withTags(.{ .voc, .d }).dot(hidden, .d);
+            }
+        };
+
+        if (logits.shape().hasTag(.voc) == null)
+            logits = logits.rename(.{ .d = .voc });
+
+        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_opts, rng);
+        return .{ next_tokens.convert(tokens.dtype()).reuseBuffer(tokens), new_rng };
+    }
+};
 
 pub const TransformerLayer = struct {
     input_layernorm: RmsNorm,
@@ -348,9 +353,10 @@ pub const TransformerLayer = struct {
         x0: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: KvCache,
+        kv_cache_index: zml.Tensor,
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
-    ) struct { zml.Tensor, KvCache } {
+    ) struct { zml.Tensor, KvCache, zml.Tensor } {
         // Self Attention
         //log.debug("TransformerLayer({f}) -> {f}", .{ x0, self.input_layernorm.forward(x0) });
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
@@ -362,9 +368,11 @@ pub const TransformerLayer = struct {
             x0_normalized,
             token_index,
             kv_cache,
+            kv_cache_index,
             attention_metadata,
             attention_parameters,
         );
+        const updated_kv_cache_index = kv_cache_index.add(zml.Tensor.scalar(@as(u32, 1), .u32));
 
         // Fully Connected
         const x1 = x0_replicated.add(delta0).withPartitioning(.{ .d = .replicated });
@@ -375,7 +383,7 @@ pub const TransformerLayer = struct {
             .add(x1)
             .withPartitioning(.{ .d = .replicated });
 
-        return .{ x2.reuseBuffer(x0), updated_kv_cache };
+        return .{ x2.reuseBuffer(x0), updated_kv_cache, updated_kv_cache_index.reuseBuffer(kv_cache_index) };
     }
 };
 
@@ -432,7 +440,7 @@ const Mlp = struct {
     }
 };
 
-pub const SelfAttn = struct {
+const SelfAttn = struct {
     q_proj: zml.nn.Linear,
     k_proj: zml.nn.Linear,
     v_proj: zml.nn.Linear,
@@ -491,6 +499,7 @@ pub const SelfAttn = struct {
         x: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: KvCache,
+        kv_cache_index: zml.Tensor,
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
@@ -522,18 +531,29 @@ pub const SelfAttn = struct {
         v = v.rename(.{ .s = .k });
 
         const dtype = q.dtype();
-        const new_kv_cache = kv_cache.update(k, v, token_index);
-        k = new_kv_cache.keys().convert(dtype);
-        v = new_kv_cache.values().convert(dtype);
+        const new_kv_cache = kv_cache.updateAt(k, v, token_index, kv_cache_index);
+        k = new_kv_cache.keysAt(kv_cache_index).convert(dtype);
+        v = new_kv_cache.valuesAt(kv_cache_index).convert(dtype);
         k = k.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
         v = v.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+
+        const layer_attention_metadata: zml.attention.attention.Metadata = switch (attention_parameters) {
+            .attnd => .{ .attnd = .{
+                .layer_id = kv_cache_index.convert(.u16),
+                .conversation_id = attention_metadata.attnd.conversation_id,
+                .num_tokens = attention_metadata.attnd.num_tokens,
+            } },
+            .vanilla => attention_metadata,
+            .cuda_fa2 => attention_metadata,
+            .cuda_fa3 => attention_metadata,
+        };
 
         const attn_output = zml.attention.attention.attention(
             q,
             k,
             v,
             token_index,
-            attention_metadata,
+            layer_attention_metadata,
             attention_parameters,
         ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
@@ -548,7 +568,6 @@ pub const SelfAttn = struct {
 pub const KvCache = struct {
     k: zml.Tensor,
     v: zml.Tensor,
-    layer_index: ?u32,
 
     pub const Buffer = zml.Bufferized(KvCache);
 
@@ -558,7 +577,6 @@ pub const KvCache = struct {
         return .{
             .k = .fromShape(sharded_shape),
             .v = .fromShape(sharded_shape),
-            .layer_index = null,
         };
     }
 
@@ -574,37 +592,19 @@ pub const KvCache = struct {
         kv.v.deinit();
     }
 
-    pub fn keys(kv: KvCache) zml.Tensor {
-        return kv.k.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
+    pub fn keysAt(kv: KvCache, layer_index: zml.Tensor) zml.Tensor {
+        return kv.k.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = layer_index, .len = 1 } }).squeeze(.layer);
     }
 
-    pub fn values(kv: KvCache) zml.Tensor {
-        return kv.v.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
+    pub fn valuesAt(kv: KvCache, layer_index: zml.Tensor) zml.Tensor {
+        return kv.v.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = layer_index, .len = 1 } }).squeeze(.layer);
     }
 
-    pub fn update(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: ?zml.Tensor) KvCache {
+    pub fn updateAt(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor, layer_index: zml.Tensor) KvCache {
         const k_shape = kv.k.shape().drop(.layer);
-        const layer: zml.Tensor = .scalar(kv.layer_index orelse @panic("forgot to call atLayer"), .u32);
-
-        return if (token_index) |idx|
-            .{
-                .k = kv.k.scatterSlices(.{ .layer = layer, .k = idx }, new_k.convert(kv.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
-                .v = kv.v.scatterSlices(.{ .layer = layer, .k = idx }, new_v.convert(kv.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
-                .layer_index = kv.layer_index,
-            }
-        else
-            .{
-                .k = kv.k.scatterSlices(.{ .layer = layer }, new_k.convert(kv.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
-                .v = kv.v.scatterSlices(.{ .layer = layer }, new_v.convert(kv.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
-                .layer_index = kv.layer_index,
-            };
-    }
-
-    pub fn atLayer(kv: KvCache, layer_index: usize) KvCache {
         return .{
-            .k = kv.k,
-            .v = kv.v,
-            .layer_index = @intCast(layer_index),
+            .k = kv.k.scatterSlices(.{ .layer = layer_index, .k = token_index }, new_k.convert(kv.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
+            .v = kv.v.scatterSlices(.{ .layer = layer_index, .k = token_index }, new_v.convert(kv.v.dtype()).transpose(kv.v.shape().drop(.layer)), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
         };
     }
 
@@ -612,7 +612,6 @@ pub const KvCache = struct {
         return .{
             .k = kv.k.reuseBuffer(other.k),
             .v = kv.v.reuseBuffer(other.v),
-            .layer_index = null,
         };
     }
 };

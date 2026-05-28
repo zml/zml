@@ -11,10 +11,10 @@ pub const Session = struct {
     platform: *const zml.Platform,
     model_buffers: *model.Buffers,
     compiled_model: *const inference.CompiledModel,
+    decode_runner: inference.KernelExe.Runner,
     kv_cache_buffers: zml.Bufferized(model.KvCache),
     rng_buffers: zml.Bufferized(zml.Tensor.Rng),
     tokenizer: zml.tokenizer.Tokenizer,
-    step_token_slice: zml.Slice,
     generated_token_slice: zml.Slice,
     seqlen: u32,
     eos_token_id: u32,
@@ -37,16 +37,24 @@ pub const Session = struct {
         var rng_buffers = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
+        var decode_runner = try compiled_model.decode.initRunner(
+            allocator,
+            io,
+            platform,
+            model_buffers,
+        );
+        errdefer decode_runner.deinit(allocator);
+
         return .{
             .allocator = allocator,
             .io = io,
             .platform = platform,
             .model_buffers = model_buffers,
             .compiled_model = compiled_model,
+            .decode_runner = decode_runner,
             .kv_cache_buffers = kv_cache_buffers,
             .rng_buffers = rng_buffers,
             .tokenizer = tokenizer,
-            .step_token_slice = try .alloc(allocator, zml.Shape.init(.{ .b = 1, .s = 1 }, .u32)),
             .generated_token_slice = try .alloc(allocator, zml.Shape.init(.{ .b = 1, .s = 1 }, .u32)),
             .seqlen = compiled_model.params.seqlen,
             .eos_token_id = compiled_model.loaded_model.inner.special_tokens.end_of_text_token_id,
@@ -57,9 +65,9 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
+        self.decode_runner.deinit(self.allocator);
         model.KvCache.deinitBuffer(&self.kv_cache_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
-        self.step_token_slice.free(self.allocator);
         self.generated_token_slice.free(self.allocator);
     }
 
@@ -78,30 +86,26 @@ pub const Session = struct {
         @memset(prefill_tokens_slice.items(u32), 0);
         @memcpy(prefill_tokens_slice.items(u32)[0..all_tokens.len], all_tokens);
 
-        var prefill_tokens_buffer = try zml.Buffer.fromSlice(self.io, self.platform, prefill_tokens_slice, .replicated);
+        const replicated_sharding: zml.Sharding = .replicated;
+
+        var prefill_tokens_buffer = try zml.Buffer.fromSlice(self.io, self.platform, prefill_tokens_slice, replicated_sharding);
         defer prefill_tokens_buffer.deinit();
 
-        var prefill_token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, 0, .u32);
+        var prefill_token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 0), .u32);
         defer prefill_token_index_buffer.deinit();
 
-        var args = try self.compiled_model.prefill_exe.args(self.allocator);
-        defer args.deinit(self.allocator);
-
-        var results = try self.compiled_model.prefill_exe.results(self.allocator);
-        defer results.deinit(self.allocator);
-
-        args.set(.{
-            self.model_buffers,
-            prefill_tokens_buffer,
-            prefill_token_index_buffer,
-            &self.kv_cache_buffers,
-            &self.rng_buffers,
+        try self.compiled_model.prefill.run(.{
+            .allocator = self.allocator,
+            .io = self.io,
+            .platform = self.platform,
+            .model_buffers = self.model_buffers,
+            .tokens_buf = &prefill_tokens_buffer,
+            .token_index_buf = &prefill_token_index_buffer,
+            .kv_cache_buffers = &self.kv_cache_buffers,
+            .rng_buffers = &self.rng_buffers,
         });
-        self.compiled_model.prefill_exe.call(args, &results);
 
-        results.fill(.{ &prefill_tokens_buffer, &self.kv_cache_buffers, &self.rng_buffers });
         try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
-
         const generated_token = prefill_tokens_slice.items(u32)[all_tokens.len - 1];
         self.generated_token_slice.items(u32)[0] = generated_token;
     }
@@ -112,6 +116,14 @@ pub const Session = struct {
 
         const out_tokens_buffer: []u8 = try self.allocator.alloc(u8, 1024);
         defer self.allocator.free(out_tokens_buffer);
+        const replicated_sharding: zml.Sharding = .replicated;
+
+        var current_token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.generated_token_slice, replicated_sharding);
+        defer current_token_buffer.deinit();
+
+        var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.items.len)), .u32);
+        defer token_index_buffer.deinit();
+
         generation: while (true) {
             const token_id = self.generated_token_slice.items(u32)[0];
             if (token_id == self.eos_token_id) break :generation;
@@ -129,43 +141,32 @@ pub const Session = struct {
             try all_tokens.append(self.allocator, token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
 
-            try self.runDecodeStep(token_id, @intCast(all_tokens.items.len));
+            try self.decode_runner.run(.{
+                .allocator = self.allocator,
+                .io = self.io,
+                .platform = self.platform,
+                .model_buffers = self.model_buffers,
+                .tokens_buf = &current_token_buffer,
+                .token_index_buf = &token_index_buffer,
+                .kv_cache_buffers = &self.kv_cache_buffers,
+                .rng_buffers = &self.rng_buffers,
+            });
+
+            try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
 
         try stdout.writeAll(try decoder.finalize(out_tokens_buffer));
         try stdout.flush();
     }
-
-    fn runDecodeStep(self: *Session, token_id: u32, token_index: u32) !void {
-        self.step_token_slice.items(u32)[0] = token_id;
-
-        var token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.step_token_slice, .replicated);
-        defer token_buffer.deinit();
-
-        var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, token_index, .u32);
-        defer token_index_buffer.deinit();
-
-        var args = try self.compiled_model.decode_exe.args(self.allocator);
-        defer args.deinit(self.allocator);
-
-        var results = try self.compiled_model.decode_exe.results(self.allocator);
-        defer results.deinit(self.allocator);
-
-        args.set(.{
-            self.model_buffers,
-            token_buffer,
-            token_index_buffer,
-            &self.kv_cache_buffers,
-            &self.rng_buffers,
-        });
-        self.compiled_model.decode_exe.call(args, &results);
-
-        results.fill(.{ &token_buffer, &self.kv_cache_buffers, &self.rng_buffers });
-        try token_buffer.toSlice(self.io, self.generated_token_slice);
-    }
 };
 
-fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, special_tokens: model.Model.SpecialTokens, is_first_turn: bool) ![]const u32 {
+fn tokenizeChatPrompt(
+    allocator: std.mem.Allocator,
+    tokenizer: zml.tokenizer.Tokenizer,
+    prompt: []const u8,
+    special_tokens: model.Model.SpecialTokens,
+    is_first_turn: bool,
+) ![]const u32 {
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 

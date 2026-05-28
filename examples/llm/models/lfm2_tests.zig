@@ -53,7 +53,13 @@ pub fn main(init: std.process.Init) !void {
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
     const backend = args.backend orelse attention.Backend.auto(platform);
-    const params = lfm2.CompilationParameters.init(repo_model.inner, repo_model.parsed_config.value, repo_model.parsed_config.value.max_position_embeddings, backend, false, shardings);
+    const params = lfm2.CompilationParameters.init(
+        repo_model.inner,
+        repo_model.parsed_config.value,
+        repo_model.parsed_config.value.max_position_embeddings,
+        backend,
+        shardings,
+    );
     progress.end();
 
     try run(allocator, io, platform, args.activations, repo_model.parsed_config.value, repo_model.inner, &model_buffers, params.attention_metadata, params.attention_parameters);
