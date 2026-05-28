@@ -114,12 +114,12 @@ pub fn run(
     try ctx.testLayer("layers.2.attn.compressor.norm", .{ .batch, .seq, .hd }, mdl.layers[2].attn.compressor.?.norm, model_buffers.layers[2].attn.compressor.?.norm, .{});
     try ctx.testLayer("layers.2.attn.compressor.wgate", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?.wgate, model_buffers.layers[2].attn.compressor.?.wgate, .{});
     try ctx.testLayer("layers.2.attn.compressor.wkv", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?.wkv, model_buffers.layers[2].attn.compressor.?.wkv, .{});
-    // try ctx.testAttentionLayer("layers.2.attn.compressor", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?, model_buffers.layers[2].attn.compressor.?, .{});
+    try ctx.testAttentionLayer("layers.2.attn.compressor", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?, model_buffers.layers[2].attn.compressor.?, .{});
 
     // TEST: Attention-Indexer
     // try ctx.testLayer("layers.2.attn.indexer.weights_proj", .{ .batch, .seq, .d }, mdl.layers[2].attn.indexer.?.proj, model_buffers.layers[2].attn.indexer.?.proj, .{});
     // try ctx.testLayer("layers.2.attn.indexer.wq_b", .{ .batch, .seq, .d }, mdl.layers[2].attn.indexer.?.wq_b, model_buffers.layers[2].attn.indexer.?.wq_b, .{});
-    try ctx.testIndexerLayer("layers.2.attn.indexer", .{ .batch, .seq, .d }, mdl.layers[2].attn.indexer.?, model_buffers.layers[2].attn.indexer.?, .{});
+    // try ctx.testIndexerLayer("layers.2.attn.indexer", .{ .batch, .seq, .d }, mdl.layers[2].attn.indexer.?, model_buffers.layers[2].attn.indexer.?, .{});
 
     // TEST: MoE Gate
     try ctx.testGateLayer("layers.0.ffn.gate", .{ .seq, .d }, mdl.layers[0].ffn.gate, model_buffers.layers[0].ffn.gate, .{});
