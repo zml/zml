@@ -248,9 +248,9 @@ pub fn collectProcessUsage(allocator: std.mem.Allocator, io: std.Io, devices: []
 
         var fd_it = fdinfo_dir.iterate();
         while (fd_it.next(io) catch null) |fd_entry| {
-            var file_path_buf: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
-            const file_path = std.fmt.bufPrintZ(&file_path_buf, "{s}/{s}", .{ fdinfo_path, fd_entry.name }) catch continue;
-            const parsed = parseFdinfoFile(file_path, now_ns) catch continue;
+            var file_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const file_path = std.fmt.bufPrint(&file_path_buf, "{s}/{s}", .{ fdinfo_path, fd_entry.name }) catch continue;
+            const parsed = parseFdinfoFile(io, file_path, now_ns) catch continue;
             const bus_device_identifier = parsed.bus_device_identifier orelse continue;
             const dev_idx = matchDevice(devices, bus_device_identifier) orelse continue;
             const key = processKey(pid, dev_idx);
@@ -475,45 +475,19 @@ const ParsedFdinfo = struct {
     engine_time_seen: bool = false,
 };
 
-inline fn parseFdinfoFile(path: [:0]const u8, timestamp_ns: u64) !ParsedFdinfo {
-    const linux = std.os.linux;
-    const open_rc = linux.open(path.ptr, .{
-        .ACCMODE = .RDONLY,
-        .CLOEXEC = true,
-    }, 0);
-    switch (linux.errno(open_rc)) {
-        .SUCCESS => {},
-        .ACCES, .NOENT, .NOTDIR, .PERM, .SRCH => return error.FileUnavailable,
-        else => return error.FileUnavailable,
-    }
-    const fd: i32 = @intCast(open_rc);
-    defer _ = linux.close(fd);
-
+inline fn parseFdinfoFile(io: std.Io, path: []const u8, timestamp_ns: u64) !ParsedFdinfo {
     var read_buf: [8192]u8 = undefined;
-    var len: usize = 0;
-    while (len < read_buf.len) {
-        const read_rc = linux.read(fd, read_buf[len..].ptr, read_buf.len - len);
-        switch (linux.errno(read_rc)) {
-            .SUCCESS => {
-                const n = read_rc;
-                if (n == 0) break;
-                len += n;
-            },
-            .INTR => continue,
-            .ACCES, .BADF, .IO, .NOENT, .PERM, .SRCH => return error.FileUnavailable,
-            else => return error.FileUnavailable,
-        }
-    }
+    const data = std.Io.Dir.readFile(.cwd(), io, path, &read_buf) catch return error.FileUnavailable;
 
     var parsed: ParsedFdinfo = .{};
 
     var start: usize = 0;
-    while (std.mem.indexOfScalarPos(u8, read_buf[0..len], start, '\n')) |end| {
-        parseFdinfoLine(&parsed, read_buf[start..end], timestamp_ns);
+    while (std.mem.indexOfScalarPos(u8, data, start, '\n')) |end| {
+        parseFdinfoLine(&parsed, data[start..end], timestamp_ns);
         start = end + 1;
     }
-    if (start < len) {
-        parseFdinfoLine(&parsed, read_buf[start..len], timestamp_ns);
+    if (start < data.len) {
+        parseFdinfoLine(&parsed, data[start..], timestamp_ns);
     }
     finishFdinfo(&parsed);
 
