@@ -189,7 +189,7 @@ fn detect(allocator: std.mem.Allocator, io: std.Io) smi_info.Targets {
                         targets.insert(.rocm);
                     }
 
-                    if (hasIntelDrmRenderDevice(allocator, io)) {
+                    if (hasDrmRenderDevice(allocator, io, "0x8086")) {
                         targets.insert(.oneapi);
                     }
 
@@ -220,7 +220,7 @@ fn hasDevice(io: std.Io, path: []const u8) bool {
     return true;
 }
 
-fn hasIntelDrmRenderDevice(allocator: std.mem.Allocator, io: std.Io) bool {
+fn hasDrmRenderDevice(allocator: std.mem.Allocator, io: std.Io, comptime pci_vendor_id: []const u8) bool {
     var dir = std.Io.Dir.openDirAbsolute(io, "/dev/dri", .{ .iterate = true }) catch return false;
     defer dir.close(io);
 
@@ -231,8 +231,7 @@ fn hasIntelDrmRenderDevice(allocator: std.mem.Allocator, io: std.Io) bool {
         var vendor_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const vendor_path = std.fmt.bufPrint(&vendor_path_buf, "/sys/class/drm/{s}/device/vendor", .{entry.name}) catch continue;
         const vendor = sysfs.readString(allocator, io, vendor_path) catch continue;
-        const intel_pci_vendor_id = "0x8086";
-        if (std.mem.eql(u8, std.mem.trim(u8, vendor, &std.ascii.whitespace), intel_pci_vendor_id)) {
+        if (std.mem.eql(u8, std.mem.trim(u8, vendor, &std.ascii.whitespace), pci_vendor_id)) {
             return true;
         }
     }
