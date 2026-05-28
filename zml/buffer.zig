@@ -109,21 +109,21 @@ pub const Buffer = struct {
         const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
         const slice = Slice.init(sh, data_);
 
-        for (res._sharding.devicesInCanonicalOrder()) |device| {
+        const devices = res._sharding.devicesInCanonicalOrder();
+        // Sharding requires uniform local shapes, so one default layout can be reused for every shard.
+        const first_placement = try res._sharding.placement(res._shape, devices[0]);
+        const default_layout = switch (platform.target) {
+            .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi => try platform.pjrt_client.defaultMemoryLayout(
+                platform.pjrt_api,
+                buffer_type,
+                first_placement.shape.dims(),
+            ),
+        };
+        const layout = default_layout.toMemoryLayout();
+
+        for (devices) |device| {
             const placement = try res._sharding.placement(res._shape, device);
             const sub_slice = placement.shardSlice(slice);
-
-            const layout = switch (platform.target) {
-                .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi => blk: {
-                    // For neuron we observed that using the default layout causes a slowdown, so we use the same layout as the host buffer.
-                    const default_layout = try platform.pjrt_client.defaultMemoryLayout(
-                        platform.pjrt_api,
-                        pjrtx.bufferTypeFromDtype(placement.shape.dtype()),
-                        placement.shape.dims(),
-                    );
-                    break :blk default_layout.toMemoryLayout();
-                },
-            };
 
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 .data = sub_slice.constData().ptr,
@@ -214,19 +214,20 @@ pub const Buffer = struct {
         };
 
         const element_type = pjrtx.bufferTypeFromDtype(res._shape.dtype()); // dtype doesn't change with sharding.
-        for (res._sharding.devicesInCanonicalOrder()) |device| {
+        const devices = res._sharding.devicesInCanonicalOrder();
+        // Sharding requires uniform local shapes, so one default layout can be reused for every shard.
+        const first_placement = try res._sharding.placement(res._shape, devices[0]);
+        const default_layout = switch (platform.target) {
+            .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi => try platform.pjrt_client.defaultMemoryLayout(
+                platform.pjrt_api,
+                element_type,
+                first_placement.shape.dims(),
+            ),
+        };
+        const layout = default_layout.toMemoryLayout();
+
+        for (devices) |device| {
             const placement = try res._sharding.placement(res._shape, device);
-            const layout = switch (platform.target) {
-                .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi => blk: {
-                    // For neuron we observed that using the default layout causes a slowdown, so we use the same layout as the host buffer.
-                    const default_layout = try platform.pjrt_client.defaultMemoryLayout(
-                        platform.pjrt_api,
-                        pjrtx.bufferTypeFromDtype(placement.shape.dtype()),
-                        placement.shape.dims(),
-                    );
-                    break :blk default_layout.toMemoryLayout();
-                },
-            };
             const args: pjrt.Client.CreateUninitializedBufferArgs = .{
                 .dims = placement.shape.dims(),
                 .element_type = element_type,
