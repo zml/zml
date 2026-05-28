@@ -110,7 +110,6 @@ pub const Buffer = struct {
         const slice = Slice.init(sh, data_);
 
         const devices = res._sharding.devicesInCanonicalOrder();
-        // Sharding requires uniform local shapes, so one default layout can be reused for every shard.
         const first_placement = try res._sharding.placement(res._shape, devices[0]);
         const default_layout = switch (platform.target) {
             .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi => try platform.pjrt_client.defaultMemoryLayout(
@@ -213,9 +212,8 @@ pub const Buffer = struct {
             shard.deinit(platform.pjrt_api);
         };
 
-        const element_type = pjrtx.bufferTypeFromDtype(res._shape.dtype()); // dtype doesn't change with sharding.
+        const element_type = pjrtx.bufferTypeFromDtype(res._shape.dtype());
         const devices = res._sharding.devicesInCanonicalOrder();
-        // Sharding requires uniform local shapes, so one default layout can be reused for every shard.
         const first_placement = try res._sharding.placement(res._shape, devices[0]);
         const default_layout = switch (platform.target) {
             .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi => try platform.pjrt_client.defaultMemoryLayout(
