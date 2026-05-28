@@ -10,6 +10,7 @@ const Device = struct {
     render_idx: usize,
     drm_path: []const u8,
     dev_path: []const u8,
+    pcie_path: []const u8,
     hwmon_path: ?[]const u8,
     bus_device_identifier: ?[bus_device_identifier_len]u8,
     activity_prev: ?EngineSample = null,
@@ -125,10 +126,14 @@ inline fn openDevice(allocator: std.mem.Allocator, io: std.Io, render_idx: usize
         return error.not_intel;
     }
 
+    const pcie_path = try findPcieLinkPath(allocator, io, dev_path);
+    errdefer if (pcie_path.ptr != dev_path.ptr) allocator.free(pcie_path);
+
     return .{
         .render_idx = render_idx,
         .drm_path = drm_path,
         .dev_path = dev_path,
+        .pcie_path = pcie_path,
         .hwmon_path = findHwmon(allocator, io, dev_path) catch null,
         .bus_device_identifier = readBusDeviceId(allocator, io, dev_path) catch null,
     };
@@ -182,14 +187,14 @@ pub fn readMemTotal(allocator: std.mem.Allocator, io: std.Io, dev: *const Device
 
 pub fn readPcieLinkGen(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_speed", .{dev.dev_path});
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_speed", .{dev.pcie_path});
     const raw = try smi_sysfs.readString(allocator, io, path);
     return pcieGenFromSpeed(raw);
 }
 
 pub fn readPcieLinkWidth(allocator: std.mem.Allocator, io: std.Io, dev: *const Device) !u64 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_width", .{dev.dev_path});
+    const path = try std.fmt.bufPrint(&path_buf, "{s}/current_link_width", .{dev.pcie_path});
     return smi_sysfs.readInt(allocator, io, path);
 }
 
@@ -311,7 +316,6 @@ inline fn findHwmon(allocator: std.mem.Allocator, io: std.Io, dev_path: []const 
         const name = smi_sysfs.readString(allocator, io, name_path) catch return candidate;
         const trimmed = std.mem.trim(u8, name, &std.ascii.whitespace);
         if (std.mem.eql(u8, trimmed, "xe") or std.mem.eql(u8, trimmed, "i915")) return candidate;
-        allocator.free(candidate);
     }
     return null;
 }
@@ -325,6 +329,49 @@ inline fn readBusDeviceId(allocator: std.mem.Allocator, io: std.Io, dev_path: []
     var out: [bus_device_identifier_len]u8 = undefined;
     @memcpy(&out, trimmed);
     return out;
+}
+
+inline fn findPcieLinkPath(allocator: std.mem.Allocator, io: std.Io, dev_path: []const u8) ![]const u8 {
+    var candidate = dev_path;
+    var best_path: ?[]const u8 = null;
+
+    var best_bandwidth: u64 = 0;
+    var depth: usize = 0;
+    while (depth < 8) : (depth += 1) {
+        if (!try isIntelPciDevice(allocator, io, candidate)) break;
+
+        const bandwidth = readMaxPcieBandwidth(allocator, io, candidate) catch 0;
+        if (bandwidth > best_bandwidth) {
+            best_path = candidate;
+            best_bandwidth = bandwidth;
+        }
+
+        const parent = try std.fmt.allocPrint(allocator, "{s}/..", .{candidate});
+        candidate = parent;
+    }
+
+    return best_path orelse dev_path;
+}
+
+inline fn isIntelPciDevice(allocator: std.mem.Allocator, io: std.Io, dev_path: []const u8) !bool {
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const vendor_path = try std.fmt.bufPrint(&path_buf, "{s}/vendor", .{dev_path});
+    const vendor_raw = smi_sysfs.readString(allocator, io, vendor_path) catch return false;
+
+    const vendor = std.mem.trim(u8, vendor_raw, &std.ascii.whitespace);
+    return std.mem.eql(u8, vendor, "0x8086");
+}
+
+inline fn readMaxPcieBandwidth(allocator: std.mem.Allocator, io: std.Io, dev_path: []const u8) !u64 {
+    var speed_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const speed_path = try std.fmt.bufPrint(&speed_path_buf, "{s}/max_link_speed", .{dev_path});
+    const raw_speed = try smi_sysfs.readString(allocator, io, speed_path);
+
+    var width_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const width_path = try std.fmt.bufPrint(&width_path_buf, "{s}/max_link_width", .{dev_path});
+    const width = try smi_sysfs.readInt(allocator, io, width_path);
+    const gen = try pcieGenFromSpeed(raw_speed);
+    return pcieBandwidthFromLink(gen, width) orelse error.not_found;
 }
 
 inline fn readHwmonInput(allocator: std.mem.Allocator, io: std.Io, hwmon: []const u8, comptime prefix: []const u8, label: []const u8) !u64 {
