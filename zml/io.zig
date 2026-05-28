@@ -384,7 +384,8 @@ const DirectShardWriter = struct {
 
     allocator: std.mem.Allocator,
     io: std.Io,
-    memory: *const Memory,
+    platform: *const Platform,
+    memory: *const pjrt.Memory,
     pool: *mem.DynamicBufferPool,
     total: usize,
     pjrt_buffer: *pjrt.Buffer,
@@ -396,21 +397,26 @@ const DirectShardWriter = struct {
     flip_flop: u1 = 0,
     events_contexts: [2]?EventContext = @splat(null),
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape) !DirectShardWriter {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        memory: *const pjrt.Memory,
+        pool: *mem.DynamicBufferPool,
+        shape: Shape,
+    ) !DirectShardWriter {
         const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
-        const transfer_manager = try memory.platform.pjrt_client.createBuffersForAsyncHostToDevice(
-            memory.platform.pjrt_api,
-            .{
-                .shape_specs = &.{shape_spec},
-                .memory = memory.pjrt_memory,
-            },
+        const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(
+            platform.pjrt_api,
+            .{ .shape_specs = &.{shape_spec}, .memory = memory },
         );
 
-        const pjrt_buffer = transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0) catch unreachable;
+        const pjrt_buffer = transfer_manager.retrieveBuffer(platform.pjrt_api, 0) catch unreachable;
 
         return .{
             .allocator = allocator,
             .io = io,
+            .platform = platform,
             .memory = memory,
             .pool = pool,
             .total = shape.byteSize(),
@@ -429,7 +435,7 @@ const DirectShardWriter = struct {
     }
 
     pub fn deinit(self: *DirectShardWriter) void {
-        self.transfer_manager.deinit(self.memory.platform.pjrt_api);
+        self.transfer_manager.deinit(self.platform.pjrt_api);
     }
 
     fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
@@ -508,7 +514,7 @@ const DirectShardWriter = struct {
     fn submitBuffered(self: *DirectShardWriter) std.Io.Writer.Error!void {
         if (self.offset >= self.total) return;
 
-        const pjrt_api = self.memory.platform.pjrt_api;
+        const pjrt_api = self.platform.pjrt_api;
 
         const current_buffer = self.interface.buffer;
         const buffered = self.interface.buffered();
@@ -789,9 +795,9 @@ pub const DirectMemoryWriter = struct {
 
             const pool = &pools[device.id];
             const shard_dma_allocator = dma_allocators[device.id].allocator();
-            const dst_memory = platform.devices[device.id].memory(.default).?;
+            const dst_memory = platform.devices[device.id].memory(.default);
 
-            shard_writers[i] = try DirectShardWriter.init(shard_dma_allocator, io, dst_memory, pool, placement.shape);
+            shard_writers[i] = try DirectShardWriter.init(shard_dma_allocator, io, platform, dst_memory, pool, placement.shape);
 
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
         }
@@ -1082,7 +1088,7 @@ pub fn load(
     const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
     defer allocator.free(dma_allocators);
     for (platform.devices, 0..) |*device, i| {
-        dma_allocators[i] = .init(allocator, device);
+        dma_allocators[i] = .init(allocator, platform, device);
     }
 
     const buffer_pools = try allocator.alloc(mem.DynamicBufferPool, pool_count);
@@ -1291,7 +1297,7 @@ const DirectMemoryWriterDeviceTest = struct {
         const dma_allocators = try self.allocator.alloc(mem.DmaAllocator, pool_count);
         defer self.allocator.free(dma_allocators);
         for (platform.devices, 0..) |*device, i| {
-            dma_allocators[i] = .init(self.allocator, device);
+            dma_allocators[i] = .init(self.allocator, platform, device);
         }
 
         const pools = try self.allocator.alloc(mem.DynamicBufferPool, pool_count);

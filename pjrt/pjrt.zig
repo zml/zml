@@ -1395,7 +1395,7 @@ pub const Memory = opaque {
             "device".len => .device,
             "pinned_host".len => .host_pinned,
             "unpinned_host".len => .host_unpinned,
-            else => @panic("Memory kind not supported"),
+            else => std.debug.panic("unknown memory {s}", .{ret.kind[0..ret.kind_size]}),
         };
     }
 

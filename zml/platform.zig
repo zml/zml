@@ -61,175 +61,113 @@ fn loadOrGetApi(allocator: std.mem.Allocator, io: std.Io, target: Target) !*cons
 }
 
 pub const Memory = struct {
-    pub const Kind = enum {
+    // Note: is this worth it ? just so we can say Buffer.from(.{ .memory = .default }) ?
+    // What is .default supposed to be ? .device ? .host_pinned ?
+    pub const Kind = enum(u8) {
+        device = @intFromEnum(pjrt.Memory.Kind.device),
+        host_pinned = @intFromEnum(pjrt.Memory.Kind.host_pinned),
+        host_unpinned = @intFromEnum(pjrt.Memory.Kind.host_unpinned),
         default,
-        host_unpinned,
-        host_pinned,
-        device,
     };
-
-    pjrt_memory: *const pjrt.Memory,
-    platform: *const Platform,
-    addressable_by_devices: []*const Device,
-
-    fn init(allocator: std.mem.Allocator, pjrt_memory: *const pjrt.Memory, platform: *Platform) !Memory {
-        const pjrt_addressable_by_devices = pjrt_memory.addressableByDevices(platform.pjrt_api);
-        const addressable_by_devices = try allocator.alloc(*const Device, pjrt_addressable_by_devices.len);
-
-        return .{
-            .pjrt_memory = pjrt_memory,
-            .platform = platform,
-            .addressable_by_devices = addressable_by_devices,
-        };
-    }
-
-    pub fn kind(self: Memory) []const u8 {
-        return self.pjrt_memory.kind_(self.platform.pjrt_api);
-    }
-
-    pub fn isOfKind(self: Memory, kind_: Kind) bool {
-        switch (self.platform.target) {
-            .cuda, .rocm, .oneapi, .tpu => {
-                const zml_kind: Memory.Kind = switch (self.kind().len) {
-                    "device".len => .device,
-                    "pinned_host".len => .host_pinned,
-                    "unpinned_host".len => .host_unpinned,
-                    else => std.debug.panic("unknown memory {s}", .{self.kind()}),
-                };
-                return zml_kind == kind_;
-            },
-            .cpu, .neuron => return true,
-        }
-    }
-
-    fn deinit(self: *Memory, allocator: std.mem.Allocator) void {
-        allocator.free(self.addressable_devices);
-    }
-
-    fn populateAddressableByDevices(self: *Memory) void {
-        const pjrt_addressable_by_devices = self.pjrt_memory.addressableByDevices(self.platform.pjrt_api);
-        for (pjrt_addressable_by_devices, self.addressable_by_devices) |pjrt_device, *addressable_by_device| {
-            addressable_by_device.* = self.platform.deviceFromPjrt(pjrt_device);
-        }
-    }
 };
 
 pub const Device = struct {
-    platform: *const Platform,
+    pjrt_api: *const pjrt.Api,
     pjrt_device: *const pjrt.Device,
     pjrt_desc: *const pjrt.DeviceDescription,
-    addressable_memories: []*const Memory,
-    memory_by_kind: std.EnumArray(Memory.Kind, ?*const Memory),
+    addressable_memories: []const *const pjrt.Memory,
+    memory_by_kind: std.EnumArray(Memory.Kind, *const pjrt.Memory),
 
-    fn init(allocator: std.mem.Allocator, pjrt_device_: *const pjrt.Device, platform: *const Platform) !Device {
-        const pjrt_addressable_memories = pjrt_device_.addressableMemories(platform.pjrt_api);
-        const addressable_memories = try allocator.alloc(*const Memory, pjrt_addressable_memories.len);
-        for (pjrt_addressable_memories, addressable_memories) |pjrt_memory, *addressable_memory| {
-            addressable_memory.* = platform.memoryFromPjrt(pjrt_memory);
+    fn init(target: Target, pjrt_api: *const pjrt.Api, pjrt_device_: *const pjrt.Device) !Device {
+        const addressable_memories = pjrt_device_.addressableMemories(pjrt_api);
+
+        // Indentify one memory of each kind for easy access
+        const default_memory: *const pjrt.Memory = pjrt_device_.defaultMemory(pjrt_api);
+        var memory_by_kind: std.EnumArray(Memory.Kind, *const pjrt.Memory) = .initFill(default_memory);
+
+        switch (target) {
+            .cuda, .rocm, .oneapi, .tpu => {
+                for (addressable_memories) |mem| {
+                    const pjrt_kind = mem.kind(pjrt_api);
+                    memory_by_kind.set(@enumFromInt(@intFromEnum(pjrt_kind)), mem);
+                }
+                // In case host_unpinned wasn't found, use host_pinned instead.
+                if (memory_by_kind.get(.host_unpinned) == default_memory) {
+                    memory_by_kind.set(.host_unpinned, memory_by_kind.get(.host_pinned));
+                }
+            },
+            .cpu, .neuron => {
+                // Use the default memory for everything
+            },
         }
 
-        // Cache memory lookups since they are expensive
-        const default_memory: *const Memory = resolveDefaultMemory(pjrt_device_, platform, addressable_memories);
-        const memory_by_kind: std.EnumArray(Memory.Kind, ?*const Memory) = .init(.{
-            .default = default_memory,
-            .device = resolveMemory(addressable_memories, .device),
-            .host_pinned = resolveMemory(addressable_memories, .host_pinned),
-            .host_unpinned = resolveMemory(addressable_memories, .host_unpinned),
-        });
-
         return .{
-            .platform = platform,
+            .pjrt_api = pjrt_api,
             .pjrt_device = pjrt_device_,
-            .pjrt_desc = pjrt_device_.getDescription(platform.pjrt_api),
+            .pjrt_desc = pjrt_device_.getDescription(pjrt_api),
             .addressable_memories = addressable_memories,
             .memory_by_kind = memory_by_kind,
         };
     }
 
-    fn deinit(self: *Device, allocator: std.mem.Allocator) void {
-        allocator.free(self.addressable_memories);
-    }
-
-    fn resolveDefaultMemory(pjrt_device_: *const pjrt.Device, platform: *const Platform, addressable_memories: []*const Memory) *const Memory {
-        const pjrt_memory = pjrt_device_.defaultMemory(platform.pjrt_api);
-        for (addressable_memories) |mem| {
-            if (mem.pjrt_memory == pjrt_memory) return mem;
-        }
-        return platform.memoryFromPjrt(pjrt_memory);
-    }
-
-    fn resolveMemory(addressable_memories: []*const Memory, memory_kind: Memory.Kind) ?*const Memory {
-        std.debug.assert(memory_kind != .default);
-
-        for (addressable_memories) |mem| {
-            if (mem.isOfKind(memory_kind)) {
-                return mem;
-            }
-        }
-        return null;
-    }
-
     pub fn id(self: Device) u32 {
-        return @intCast(self.pjrt_desc.id(self.platform.pjrt_api));
+        return @intCast(self.pjrt_desc.id(self.pjrt_api));
     }
 
     pub fn processIndex(self: Device) i32 {
-        return self.pjrt_desc.processIndex(self.platform.pjrt_api);
+        return self.pjrt_desc.processIndex(self.pjrt_api);
     }
 
     pub fn localHardwareId(self: Device) i32 {
-        return @intCast(self.pjrt_device.localHardwareId(self.platform.pjrt_api));
+        return @intCast(self.pjrt_device.localHardwareId(self.pjrt_api));
     }
 
     pub fn kind(self: Device) []const u8 {
-        return self.pjrt_desc.kind(self.platform.pjrt_api);
+        return self.pjrt_desc.kind(self.pjrt_api);
     }
 
     pub fn debugString(self: Device) []const u8 {
-        return self.pjrt_desc.debugString(self.platform.pjrt_api);
+        return self.pjrt_desc.debugString(self.pjrt_api);
     }
 
     pub fn toString(self: Device) []const u8 {
-        return self.pjrt_desc.toString(self.platform.pjrt_api);
+        return self.pjrt_desc.toString(self.pjrt_api);
     }
 
     pub fn memoryStats(self: Device) pjrt.Device.MemoryStats {
-        return self.pjrt_device.memoryStats(self.platform.pjrt_api) catch .zeroes;
+        return self.pjrt_device.memoryStats(self.pjrt_api) catch .zeroes;
     }
 
     pub fn format(self: Device, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{s} ({s})", .{
-            self.pjrt_desc.kind(self.platform.pjrt_api),
-            self.pjrt_desc.debugString(self.platform.pjrt_api),
+            self.pjrt_desc.kind(self.pjrt_api),
+            self.pjrt_desc.debugString(self.pjrt_api),
         });
     }
 
-    pub fn memory(self: *const Device, memory_kind: Memory.Kind) ?*const Memory {
-        return self.memory_by_kind.values[@intFromEnum(memory_kind)];
+    pub fn memory(self: *const Device, memory_kind: Memory.Kind) *const pjrt.Memory {
+        return self.memory_by_kind.get(memory_kind);
     }
 };
 
-fn platformDeviceSortId(target: Target, device: Device) usize {
-    return switch (target) {
-        .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi => device.id(),
-    };
-}
-
 fn sortDevicesById(target: Target, devices: []Device) void {
-    const Context = struct {
-        target: Target,
+    const Local = struct {
+        fn lessThan(tgt: Target, lhs: Device, rhs: Device) bool {
+            return platformDeviceSortId(tgt, lhs) < platformDeviceSortId(tgt, rhs);
+        }
 
-        fn lessThan(ctx: @This(), lhs: Device, rhs: Device) bool {
-            return platformDeviceSortId(ctx.target, lhs) < platformDeviceSortId(ctx.target, rhs);
+        fn platformDeviceSortId(tgt: Target, device: Device) usize {
+            return switch (tgt) {
+                .neuron => @intCast(device.localHardwareId()),
+                .cuda, .rocm, .tpu, .cpu, .oneapi => device.id(),
+            };
         }
     };
 
-    std.mem.sort(Device, devices, Context{ .target = target }, Context.lessThan);
-
+    std.mem.sort(Device, devices, target, Local.lessThan);
     if (builtin.mode == .Debug) {
         for (devices, 0..) |device, expected_id| {
-            std.debug.assert(platformDeviceSortId(target, device) == expected_id);
+            std.debug.assert(Local.platformDeviceSortId(target, device) == expected_id);
         }
     }
 }
@@ -240,7 +178,6 @@ pub const Platform = struct {
     pjrt_api: *const pjrt.Api,
     pjrt_client: *pjrt.Client,
     devices: []const Device,
-    memories: []const Memory,
     physical_mesh: zml.Sharding.PhysicalMesh,
     replicated_sharding: zml.Sharding,
     shardings: std.StringArrayHashMapUnmanaged(zml.Sharding),
@@ -257,8 +194,6 @@ pub const Platform = struct {
         if (pjrt_devices.len > MAX_NUM_DEVICES) {
             log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
         }
-
-        const pjrt_memories = pjrt_client.addressableMemories(api);
 
         // Note: Platform is a self-owning struct. It contains the arena that created it in the first place
         // But it does mean we have to be careful to pass the arena state that contains the node
@@ -279,7 +214,6 @@ pub const Platform = struct {
                 .shardings = .empty,
                 // set below
                 .devices = undefined,
-                .memories = undefined,
                 .physical_mesh = undefined,
                 .replicated_sharding = undefined,
             };
@@ -293,21 +227,11 @@ pub const Platform = struct {
         {
             const devices = try arena.alloc(Device, pjrt_devices.len);
             platform.devices = devices;
-            const memories = try arena.alloc(Memory, pjrt_memories.len);
-            platform.memories = memories;
 
-            // TODO: part of the complication here is that we layout the data in spaghetti mode,
-            // where devices and memories point to each other and also point to the platform.
-            for (pjrt_memories, memories) |pjrt_memory, *platform_memory| {
-                platform_memory.* = try .init(arena, pjrt_memory, platform);
-            }
             for (pjrt_devices, devices) |pjrt_device, *platform_device| {
-                platform_device.* = try .init(arena, pjrt_device, platform);
+                platform_device.* = try .init(target, api, pjrt_device);
             }
             sortDevicesById(target, devices);
-            for (memories) |*platform_memory| {
-                platform_memory.populateAddressableByDevices();
-            }
 
             platform.physical_mesh = try switch (options.physical_mesh) {
                 .auto => zml.Sharding.PhysicalMesh.auto(arena, target, devices),
@@ -459,7 +383,7 @@ pub const Platform = struct {
                             child_indent,
                             memory_indent,
                             if (is_last_mem) langle else tee,
-                            mem.pjrt_memory.debugString(self.pjrt_api),
+                            mem.debugString(self.pjrt_api),
                         });
                     }
                 }
@@ -531,13 +455,8 @@ pub const Platform = struct {
         try writer.writeAll(" }");
     }
 
-    pub fn memoryKind(self: *const Platform, kind: Memory.Kind) []const u8 {
-        for (self.memories) |mem| {
-            if (mem.isOfKind(kind)) {
-                return mem.kind();
-            }
-        }
-        unreachable;
+    pub fn memoryKind(platform: *const Platform, kind: Memory.Kind) []const u8 {
+        return platform.devices[0].memory(kind).kind_(platform.pjrt_api);
     }
 
     pub const FfiRegistration = struct {

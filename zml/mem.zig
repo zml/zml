@@ -7,7 +7,6 @@ const pjrt = @import("pjrt");
 
 const Buffer = @import("buffer.zig").Buffer;
 const Device = @import("platform.zig").Device;
-const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const Platform = @import("platform.zig").Platform;
 const Tensor = @import("tensor.zig").Tensor;
@@ -19,10 +18,10 @@ pub const DmaAllocator = union(enum) {
     uib: UninitializedBufferAllocator,
     dmam: DmaMapAllocator,
 
-    pub fn init(parent: std.mem.Allocator, device: *const Device) DmaAllocator {
-        return switch (device.platform.target) {
-            .cuda => .{ .dmam = .init(parent, device.platform) },
-            .oneapi, .tpu => .{ .uib = .init(device.memory(.host_pinned).?) },
+    pub fn init(parent: std.mem.Allocator, platform: *const Platform, device: *const Device) DmaAllocator {
+        return switch (platform.target) {
+            .cuda => .{ .dmam = .init(parent, platform) },
+            .oneapi, .tpu => .{ .uib = .init(platform, device.memory(.host_pinned)) },
             .rocm, .cpu, .neuron => .{ .passthrough = parent },
         };
     }
@@ -36,14 +35,16 @@ pub const DmaAllocator = union(enum) {
 };
 
 pub const UninitializedBufferAllocator = struct {
-    memory: *const Memory,
+    platform: *const Platform,
+    memory: *const pjrt.Memory,
 
     const Header = struct {
         buffer: *pjrt.Buffer,
     };
 
-    pub fn init(memory: *const Memory) UninitializedBufferAllocator {
+    pub fn init(platform: *const Platform, memory: *const pjrt.Memory) UninitializedBufferAllocator {
         return .{
+            .platform = platform,
             .memory = memory,
         };
     }
@@ -62,8 +63,8 @@ pub const UninitializedBufferAllocator = struct {
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
         const self: *UninitializedBufferAllocator = @ptrCast(@alignCast(ctx));
-        const pjrt_api = self.memory.platform.pjrt_api;
-        const pjrt_client = self.memory.platform.pjrt_client;
+        const pjrt_api = self.platform.pjrt_api;
+        const pjrt_client = self.platform.pjrt_client;
 
         const total_len = std.mem.alignForward(usize, @sizeOf(Header) + len, alignment.toByteUnits());
 
@@ -77,7 +78,7 @@ pub const UninitializedBufferAllocator = struct {
                     .tile_dims_sizes = &.{},
                 },
             },
-            .dst = .{ .memory = self.memory.pjrt_memory },
+            .dst = .{ .memory = self.memory },
         }) catch return null;
 
         const opaque_ptr: [*]u8 = @ptrCast(pjrt_buffer.opaqueDeviceMemoryDataPointer(pjrt_api) catch unreachable);
@@ -94,7 +95,7 @@ pub const UninitializedBufferAllocator = struct {
     fn free(ctx: *anyopaque, buf: []u8, alignment: Alignment, ret_addr: usize) void {
         _ = ret_addr;
         const self: *UninitializedBufferAllocator = @ptrCast(@alignCast(ctx));
-        const pjrt_api = self.memory.platform.pjrt_api;
+        const pjrt_api = self.platform.pjrt_api;
         const header: *Header = @ptrFromInt(std.mem.alignBackward(usize, @intFromPtr(buf.ptr) - @sizeOf(Header), alignment.toByteUnits()));
         header.buffer.deinit(pjrt_api);
     }

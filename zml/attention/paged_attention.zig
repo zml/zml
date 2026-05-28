@@ -226,7 +226,6 @@ test "Backend.auto selects mosaic_tpu on TPU" {
         .pjrt_api = undefined,
         .pjrt_client = undefined,
         .devices = &.{},
-        .memories = &.{},
         .physical_mesh = undefined,
         .replicated_sharding = undefined,
         .shardings = .empty,

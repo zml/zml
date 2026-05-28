@@ -61,7 +61,7 @@ pub const Buffer = struct {
         }
     };
 
-    pub const FromOptions = struct { wait: bool = true, memory: Memory.Kind = .default };
+    pub const FromOptions = struct { wait: bool = true, memory: Memory.Kind = .device };
 
     /// Frees the accelerator memory.
     /// Depending on the platform, the memory is typically not released to the OS
@@ -114,7 +114,6 @@ pub const Buffer = struct {
             shard.deinit(platform.pjrt_api);
         };
 
-        stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
         const slice = Slice.init(sh, data_);
         const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
 
@@ -123,11 +122,11 @@ pub const Buffer = struct {
         const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
-            const memory = platform.devices[device.id].memory(opts.memory).?;
+            const memory = platform.devices[device.id].memory(opts.memory);
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
                 .data = placement.shardPtr(device.coords, slice),
-                .dst = .{ .memory = memory.pjrt_memory },
+                .dst = .{ .memory = memory },
                 // Constant across devices
                 .layout = layout,
                 .dims = shard_dims,
@@ -215,17 +214,16 @@ pub const Buffer = struct {
             shard.deinit(platform.pjrt_api);
         };
 
-        stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
         const element_type = pjrtx.bufferTypeFromDtype(sh.dtype());
         const placement = try res._sharding.placement(sh);
         const shard_dims: []const i64 = placement.shape.dims();
         const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
-            const memory = platform.devices[device.id].memory(opts.memory).?;
+            const memory = platform.devices[device.id].memory(opts.memory);
             const args: pjrt.Client.CreateUninitializedBufferArgs = .{
                 // Change for each device
-                .dst = .{ .memory = memory.pjrt_memory },
+                .dst = .{ .memory = memory },
                 // Constant across devices
                 .layout = layout,
                 .dims = shard_dims,

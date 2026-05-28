@@ -720,7 +720,7 @@ pub const PhysicalMesh = struct {
         };
 
         fn parseDevice(device: PlatformDevice) !Device {
-            const api = device.platform.pjrt_api;
+            const api = device.pjrt_api;
             const coords_attr = device.pjrt_desc.attribute(api, "coords") orelse return error.MissingDeviceCoords;
             const coords: Device.Coords = coords: switch (coords_attr) {
                 .int64list => |values| {

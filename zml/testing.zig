@@ -17,6 +17,7 @@ pub fn env() *const Platform {
         _platform = Platform.auto(std.heap.c_allocator, std.testing.io, .{
             .cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.85 } } },
         }) catch unreachable;
+        log.info("\n{f}", .{_platform.?.fmtVerbose()});
     }
 
     return _platform.?;
