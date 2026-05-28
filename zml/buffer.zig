@@ -114,6 +114,7 @@ pub const Buffer = struct {
             shard.deinit(platform.pjrt_api);
         };
 
+        stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
         const slice = Slice.init(sh, data_);
         const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
 
@@ -122,8 +123,7 @@ pub const Buffer = struct {
         const layout = platform.defaultMemoryLayout(sh);
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
-            // TODO: detect this failure earlier and out of the for loop.
-            const memory = platform.devices[device.id].memory(opts.memory) orelse @panic("Device doesn't have this memory");
+            const memory = platform.devices[device.id].memory(opts.memory).?;
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
                 .data = placement.shardPtr(device.coords, slice),
@@ -196,6 +196,7 @@ pub const Buffer = struct {
             .neuron => {
                 const allocator = std.heap.smp_allocator;
 
+                // TODO: use the strides trick to avoid allocating so much memory
                 const host = try allocator.alloc(u8, sh.byteSize());
                 defer allocator.free(host);
 
@@ -214,13 +215,14 @@ pub const Buffer = struct {
             shard.deinit(platform.pjrt_api);
         };
 
+        stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
         const element_type = pjrtx.bufferTypeFromDtype(res._shape.dtype());
         const placement = try res._sharding.placement(res._shape);
         const shard_dims: []const i64 = placement.shape.dims();
         const layout = platform.defaultMemoryLayout(res._shape);
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
-            const memory = platform.devices[device.id].memory(opts.memory) orelse @panic("Device doesn't have this memory");
+            const memory = platform.devices[device.id].memory(opts.memory).?;
             const args: pjrt.Client.CreateUninitializedBufferArgs = .{
                 // Change for each device
                 .dst = .{ .memory = memory.pjrt_memory },
