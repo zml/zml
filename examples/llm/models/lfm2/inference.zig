@@ -220,7 +220,7 @@ fn compileSingleKernelExe(
             // keeps them device-resident across trace captures. Required
             // for the const-eval'd conv2d weight prepare path to keep the
             // conv weight on device and the trace verifier happy.
-            .tt_parameter_args = true,
+            .tt_parameter_args = &.{0},
             .tt_enable_trace = null,
         },
     );
@@ -292,14 +292,7 @@ pub const ComposedKernelExe = struct {
             var results = try self.lm_head.results(args.allocator);
             defer results.deinit(args.allocator);
 
-            // Match `compileLmHead`'s `LmHeadCombined` arg layout: args[0]
-            // wraps lm_head + embed_tokens so both weights are marked
-            // `<parameter>`.
-            const combined_bufs = .{
-                .lm_head = args.model_buffers.lm_head,
-                .embed_tokens = args.model_buffers.embed_tokens,
-            };
-            exe_args.set(.{ combined_bufs, hidden_buf, args.tokens_buf, args.rng_buf });
+            exe_args.set(.{ args.model_buffers.lm_head, hidden_buf, args.model_buffers.embed_tokens, args.tokens_buf, args.rng_buf });
             self.lm_head.call(exe_args, &results);
             results.fill(.{ args.tokens_buf, args.rng_buf });
         }
@@ -380,7 +373,7 @@ fn compileBlock(
         model.ConvParameters{ .is_prefill = is_prefill },
     }, .{
         .shardings = &all_shardings,
-        .tt_parameter_args = true,
+        .tt_parameter_args = &.{0},
         .tt_enable_trace = null,
     });
 }
@@ -404,7 +397,7 @@ fn compileEmbedTokens(
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const all_shardings = shardings.all();
     // TT-FIX: tag the embed weight as `<parameter>` for trace residency.
-    return platform.compile(allocator, io, embed_tokens, .forward, .{tokens}, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = null });
+    return platform.compile(allocator, io, embed_tokens, .forward, .{tokens}, .{ .shardings = &all_shardings, .tt_parameter_args = &.{0}, .tt_enable_trace = null });
 }
 
 fn compileConvLayer(
@@ -453,7 +446,7 @@ fn compileConvLayer(
         opts.attention_metadata,
         opts.attention_parameters,
         model.ConvParameters{ .is_prefill = is_prefill },
-    }, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = null });
+    }, .{ .shardings = &all_shardings, .tt_parameter_args = &.{0}, .tt_enable_trace = null });
 }
 
 fn compileAttnLayer(
@@ -493,7 +486,7 @@ fn compileAttnLayer(
         opts.attention_metadata,
         opts.attention_parameters,
         model.ConvParameters{ .is_prefill = is_prefill },
-    }, .{ .shardings = &all_shardings, .tt_parameter_args = true, .tt_enable_trace = null });
+    }, .{ .shardings = &all_shardings, .tt_parameter_args = &.{0}, .tt_enable_trace = null });
 }
 
 fn compileLmHead(
@@ -515,22 +508,9 @@ fn compileLmHead(
     const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype());
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const all_shardings = shardings.all();
-    // TT-FIX: wrap lm_head + embed_tokens in a single args[0] struct so
-    // tt_parameter_args=true tags BOTH weight tensors as `<parameter>`.
-    // Without this wrapper, only lm_head's embedding_norm got marked and the
-    // 65536×2048 embed_weight (256 MB) came in as `<input>` — tt-mlir then
-    // emits `ttnn.to_layout(arg, tile)` on it every decode call (re-tiling
-    // the whole 256 MB tensor at every PJRT execute). This was the dominant
-    // cost in composed-mode lm_head.
-    const combined = LmHeadCombined{ .lm_head = mdl.lm_head, .embed_tokens = mdl.embed_tokens };
-    return platform.compile(allocator, io, combined, .forward, .{ hidden, tokens, opts.rng }, .{ .shardings = &all_shardings, .program_name = "lfm2_composed_lm_head", .tt_parameter_args = true, .tt_enable_trace = null });
+    // TT-FIX: tag args[0] (mdl.lm_head) AND args[2] (mdl.embed_tokens) as
+    // `<parameter>`. The 65536×2048 embed_weight comes in as a separate arg
+    // here (not via the receiver), so it'd otherwise be `<input>` — tt-mlir
+    // then re-tiles the whole 256 MB tensor every decode call.
+    return platform.compile(allocator, io, mdl.lm_head, .forward, .{ hidden, mdl.embed_tokens, tokens, opts.rng }, .{ .shardings = &all_shardings, .program_name = "lfm2_composed_lm_head", .tt_parameter_args = &.{ 0, 2 }, .tt_enable_trace = null });
 }
-
-const LmHeadCombined = struct {
-    lm_head: model.LmHead,
-    embed_tokens: model.TokenEmbedding,
-
-    pub fn forward(self: LmHeadCombined, hidden: zml.Tensor, tokens: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
-        return self.lm_head.forward(hidden, self.embed_tokens, tokens, rng);
-    }
-};

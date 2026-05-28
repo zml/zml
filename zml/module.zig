@@ -55,10 +55,14 @@ pub const CompilationOptions = struct {
     xla_dump_hlo_pass_re: ?[]const u8 = null,
     xla_dump_emitter_re: ?[]const u8 = null,
 
-    // TT-FIX: emit `tt.mark_argument` on argument 0 so tt-xla's frontend
-    // tags those tensors as `<parameter>` and keeps them device-resident
-    // across trace captures.
-    tt_parameter_args: bool = false,
+    // TT-FIX: indices (0-based, counting the receiver as 0) of args whose
+    // tensors get `tt.mark_argument` so tt-xla's frontend tags them as
+    // `<parameter>` and keeps them device-resident across trace captures.
+    // The most common shape is `&.{0}` — mark the receiver's weights only.
+    // Use `&.{0, 2}` etc. when extra weight tensors are passed as separate
+    // args (e.g. lm_head receiving `embed_tokens` at args[2] so its 256 MB
+    // weight gets `<parameter>` instead of re-tiling every decode call).
+    tt_parameter_args: []const u32 = &.{},
 
     // TT-FIX: per-compile override for `enable_trace`. When `null` the
     // global `ZML_TT_TRACE` env var is used. Use to force trace on/off
@@ -106,7 +110,7 @@ pub const CompilationContext = struct {
     module: *mlir.Module,
     platform: *const Platform,
     partitioning: Sharding.Partitioning,
-    tt_parameter_args: bool,
+    tt_parameter_args: []const u32,
 
     scopes: stdx.BoundedArray(Scope, 16) = .empty,
     manual_computation_depth: usize = 0,
@@ -442,16 +446,31 @@ const EmitMlirResult = struct {
     output_info: OutputInfo,
 };
 
-/// TT-FIX: emit `tt.mark_argument` for the first `n` block args so tt-xla's
-/// frontend tags them as `<parameter>` (`has_side_effect=true` prevents ZML's
-/// canonicalizer from dropping the op).
-fn markParameterArguments(compilation_context: *CompilationContext, n: u32) void {
+/// TT-FIX: emit `tt.mark_argument` on the block args belonging to the args
+/// at positions `indices` (counting the receiver as 0), so tt-xla's frontend
+/// tags them as `<parameter>` (`has_side_effect=true` prevents ZML's
+/// canonicalizer from dropping the op). One arg position can expand to many
+/// block args when the arg is a struct of tensors — we mark the full range.
+fn markParameterArguments(compilation_context: *CompilationContext, args: anytype, indices: []const u32) void {
     const mlir_ctx = compilation_context.mlir_ctx;
     const block = compilation_context.currentScope().block;
-    for (0..n) |i| {
-        var name_buf: [40]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "parameter_{d}", .{i}) catch unreachable;
-        tt_ops.markArgument(mlir_ctx, block, block.argument(i), name);
+    var name_buf: [40]u8 = undefined;
+    var name_counter: usize = 0;
+    var block_arg_offset: usize = 0;
+    inline for (0..args.len) |i| {
+        const count = meta.count(Tensor, &args[i]);
+        const mark = blk: {
+            for (indices) |idx| if (@as(usize, idx) == i) break :blk true;
+            break :blk false;
+        };
+        if (mark) {
+            for (block_arg_offset..block_arg_offset + count) |b| {
+                const name = std.fmt.bufPrint(&name_buf, "parameter_{d}", .{name_counter}) catch unreachable;
+                tt_ops.markArgument(mlir_ctx, block, block.argument(b), name);
+                name_counter += 1;
+            }
+        }
+        block_arg_offset += count;
     }
 }
 
@@ -492,9 +511,9 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
         }
     }.cb, &context, &args);
 
-    // TT-FIX: tag argument 0's tensors as `<parameter>` for trace residency.
-    if (compilation_context.tt_parameter_args) switch (compilation_context.platform.target) {
-        .tt => markParameterArguments(compilation_context, meta.count(Tensor, &args[0])),
+    // TT-FIX: tag selected arg positions' tensors as `<parameter>`.
+    if (compilation_context.tt_parameter_args.len > 0) switch (compilation_context.platform.target) {
+        .tt => markParameterArguments(compilation_context, args, compilation_context.tt_parameter_args),
         .cpu, .cuda, .rocm, .tpu, .neuron => {},
     };
 

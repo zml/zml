@@ -148,7 +148,7 @@ fn compileModel(
                 .{
                     .shardings = &shardings_,
                     // TT-FIX: tag arg 0 (model weights) as `<parameter>` so tt-xla keeps them device-resident across trace captures.
-                    .tt_parameter_args = true,
+                    .tt_parameter_args = &.{0},
                 },
             );
         }
@@ -183,7 +183,7 @@ fn compileModel(
                     parameters_.attention_metadata,
                     parameters_.decode_attention_parameters,
                 },
-                .{ .shardings = shardings_, .tt_parameter_args = true },
+                .{ .shardings = shardings_, .tt_parameter_args = &.{0} },
             );
         }
     }.call, .{ allocator, io, platform, llama_model, parameters, &all_shardings, progress });
