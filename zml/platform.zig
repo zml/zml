@@ -602,7 +602,10 @@ pub const Platform = struct {
         unreachable;
     }
 
-    pub fn defaultMemoryLayout(platform: *const Platform, dims: []const i64, dtype: zml.DataType) pjrt.MemoryLayout {
+    pub inline fn defaultMemoryLayout(platform: *const Platform, dims: []const i64, dtype: zml.DataType) pjrt.MemoryLayout {
+        // inline cause `default` is a huge ass struct allocated on the stack,
+        // and toMemoryLayout returns slices into it.
+        // There is probably a better way of doing this.
         return switch (platform.target) {
             .cuda, .rocm, .tpu, .neuron, .oneapi => {
                 const element_type = pjrtx.bufferTypeFromDtype(dtype);
