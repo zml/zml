@@ -53,6 +53,31 @@ test "zml" {
     std.testing.refAllDecls(@This());
 }
 
+test {
+    const p = testing.env();
+
+    const shapes = [_][]const i64{
+        &.{4096},
+        &.{ 4096, 4096 },
+        &.{ 4096, 4096, 4096 },
+    };
+    for (shapes) |dims| {
+        const default_layout = try p.pjrt_client.defaultMemoryLayout(
+            p.pjrt_api,
+            pjrtx.bufferTypeFromDtype(.f32),
+            dims,
+        );
+        const mem_layout = default_layout.toMemoryLayout();
+        try std.testing.expectEqualDeep(mem_layout, pjrt.MemoryLayout{
+            .tiled = .{
+                .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
+                .tile_dims = &.{},
+                .tile_dims_sizes = &.{},
+            },
+        });
+    }
+}
+
 pub const KiB = 1024;
 pub const MiB = 1024 * KiB;
 pub const GiB = 1024 * MiB;

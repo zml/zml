@@ -1086,8 +1086,10 @@ pub const DefaultMemoryLayout = struct {
     }
 
     pub fn parseSerialized(serialized: []const u8) !DefaultMemoryLayout {
+        std.log.warn("Parsing layout: {s}", .{serialized});
         var parsed: DefaultMemoryLayout = .{};
         try parseSerializedInto(serialized, &parsed);
+        std.log.warn("Parsed: {}", .{parsed.toMemoryLayout().tiled});
         return parsed;
     }
 
