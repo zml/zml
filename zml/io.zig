@@ -1189,12 +1189,12 @@ fn buildMesh2x2(
     if (devices.len < 4) return error.NotEnoughDevices;
     const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
         .axis(.link_y, .{ .mesh = .torus }, &.{
-            .device(devices[0]),
-            .device(devices[1]),
+            .{ .leaf = &devices[0] },
+            .{ .leaf = &devices[1] },
         }),
         .axis(.link_y, .{ .mesh = .torus }, &.{
-            .device(devices[2]),
-            .device(devices[3]),
+            .{ .leaf = &devices[2] },
+            .{ .leaf = &devices[3] },
         }),
     });
 
@@ -1210,22 +1210,22 @@ fn buildMesh2x2x2(
     const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
         .axis(.link_y, .{ .mesh = .torus }, &.{
             .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(devices[0]),
-                .device(devices[1]),
+                .{ .leaf = &devices[0] },
+                .{ .leaf = &devices[1] },
             }),
             .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(devices[2]),
-                .device(devices[3]),
+                .{ .leaf = &devices[2] },
+                .{ .leaf = &devices[3] },
             }),
         }),
         .axis(.link_y, .{ .mesh = .torus }, &.{
             .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(devices[4]),
-                .device(devices[5]),
+                .{ .leaf = &devices[4] },
+                .{ .leaf = &devices[5] },
             }),
             .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(devices[6]),
-                .device(devices[7]),
+                .{ .leaf = &devices[6] },
+                .{ .leaf = &devices[7] },
             }),
         }),
     });

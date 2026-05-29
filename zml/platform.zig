@@ -116,12 +116,18 @@ pub const Memory = struct {
 
 pub const Device = struct {
     platform: *const Platform,
+    id: u32,
     pjrt_device: *const pjrt.Device,
     pjrt_desc: *const pjrt.DeviceDescription,
     addressable_memories: []*const Memory,
     memory_by_kind: std.EnumArray(Memory.Kind, ?*const Memory),
 
-    fn init(allocator: std.mem.Allocator, pjrt_device_: *const pjrt.Device, platform: *const Platform) !Device {
+    /// Coordinates in the physical mesh
+    coords: Coords,
+
+    pub const Coords = [constants.MAX_MESH_RANK]u8;
+
+    fn init(allocator: std.mem.Allocator, platform: *const Platform, pjrt_device_: *const pjrt.Device, index: u8) !Device {
         const pjrt_addressable_memories = pjrt_device_.addressableMemories(platform.pjrt_api);
         const addressable_memories = try allocator.alloc(*const Memory, pjrt_addressable_memories.len);
         for (pjrt_addressable_memories, addressable_memories) |pjrt_memory, *addressable_memory| {
@@ -137,13 +143,36 @@ pub const Device = struct {
             .host_unpinned = resolveMemory(addressable_memories, .host_unpinned),
         });
 
+        const desc = pjrt_device_.getDescription(platform.pjrt_api);
+        const coords: Coords = parseDeviceCoords(platform.pjrt_api, desc) catch |err| switch (err) {
+            error.MissingDeviceCoords => .{ index, 0, 0, 0 },
+            else => |e| return e,
+        };
+
         return .{
             .platform = platform,
+            .id = @intCast(desc.id(platform.pjrt_api)),
             .pjrt_device = pjrt_device_,
-            .pjrt_desc = pjrt_device_.getDescription(platform.pjrt_api),
+            .pjrt_desc = desc,
             .addressable_memories = addressable_memories,
             .memory_by_kind = memory_by_kind,
+            .coords = coords,
         };
+    }
+
+    fn parseDeviceCoords(pjrt_api: *const pjrt.Api, desc: *const pjrt.DeviceDescription) !Coords {
+        const coords_attr = desc.attribute(pjrt_api, "coords") orelse return error.MissingDeviceCoords;
+
+        if (coords_attr != .int64list) return error.InvalidDeviceCoords;
+        const list = coords_attr.int64list;
+        if (list.len == 0 or list.len > constants.MAX_MESH_RANK) return error.InvalidDeviceCoords;
+
+        var coords: Device.Coords = @splat(0);
+        for (coords[0..list.len], list) |*coord, value| {
+            if (value < 0) return error.InvalidDeviceCoords;
+            coord.* = @intCast(value);
+        }
+        return coords;
     }
 
     fn deinit(self: *Device, allocator: std.mem.Allocator) void {
@@ -167,10 +196,6 @@ pub const Device = struct {
             }
         }
         return null;
-    }
-
-    pub fn id(self: Device) u32 {
-        return @intCast(self.pjrt_desc.id(self.platform.pjrt_api));
     }
 
     pub fn processIndex(self: Device) i32 {
@@ -197,11 +222,8 @@ pub const Device = struct {
         return self.pjrt_device.memoryStats(self.platform.pjrt_api) catch .zeroes;
     }
 
-    pub fn format(self: Device, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        try writer.print("{s} ({s})", .{
-            self.pjrt_desc.kind(self.platform.pjrt_api),
-            self.pjrt_desc.debugString(self.platform.pjrt_api),
-        });
+    pub fn format(device: Device, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("Device({d}, {any})", .{ device.id, device.coords });
     }
 
     pub fn memory(self: *const Device, memory_kind: Memory.Kind) ?*const Memory {
@@ -212,7 +234,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi => device.id,
     };
 }
 
@@ -301,8 +323,8 @@ pub const Platform = struct {
             for (pjrt_memories, memories) |pjrt_memory, *platform_memory| {
                 platform_memory.* = try .init(arena, pjrt_memory, platform);
             }
-            for (pjrt_devices, devices) |pjrt_device, *platform_device| {
-                platform_device.* = try .init(arena, pjrt_device, platform);
+            for (pjrt_devices, devices, 0..) |pjrt_device, *platform_device, linear| {
+                platform_device.* = try .init(arena, platform, pjrt_device, @intCast(linear));
             }
             sortDevicesById(target, devices);
             for (memories) |*platform_memory| {
@@ -351,7 +373,11 @@ pub const Platform = struct {
             .cpu,
         };
         return for (ordered_targets) |target| {
-            break init(allocator, io, target, options) catch continue;
+            if (!platforms.isEnabled(target)) continue;
+            break init(allocator, io, target, options) catch |err| {
+                log.err("Failed to init platform {}: {}", .{ target, err });
+                continue;
+            };
         } else error.Unavailable;
     }
 

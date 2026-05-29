@@ -123,7 +123,7 @@ pub const Buffer = struct {
         const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
-            const memory = platform.devices[device.id].memory(opts.memory).?;
+            const memory = device.memory(opts.memory).?;
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 // Change for each device
                 .data = placement.shardPtr(device.coords, slice),
