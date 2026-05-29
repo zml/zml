@@ -582,10 +582,7 @@ fn kernelUnifiedAttention2d(
 
         const seq_offset = j.mul(@as(i32, @intCast(TILE_SIZE))).add(offs_t);
 
-        const tile_mask: Value = if (TILE_SIZE == BLOCK_SIZE)
-            k.full(&.{TILE_SIZE}, 1, .i1)
-        else
-            seq_offset.lt(max_seq_prefix_len);
+        const tile_mask: Value = seq_offset.lt(max_seq_prefix_len);
 
         const physical_block_idx = k.load(
             block_tables_ptr_shifted.addPtr(seq_offset.div(@as(i32, @intCast(BLOCK_SIZE)))),
@@ -878,10 +875,7 @@ fn kernelUnifiedAttention3d(
         const acc = loop.carried[2];
 
         const seq_offset = j.mul(@as(i32, @intCast(TILE_SIZE))).add(offs_t);
-        const tile_mask: Value = if (TILE_SIZE == BLOCK_SIZE)
-            k.full(&.{TILE_SIZE}, 1, .i1)
-        else
-            seq_offset.lt(max_seq_prefix_len);
+        const tile_mask: Value = seq_offset.lt(max_seq_prefix_len);
 
         const physical_block_idx = k.load(
             block_tables_ptr.addPtr(block_table_offset).addPtr(seq_offset.div(@as(i32, @intCast(BLOCK_SIZE)))),
