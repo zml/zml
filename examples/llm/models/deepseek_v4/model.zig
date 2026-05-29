@@ -209,11 +209,11 @@ const Compressor = struct {
         return zml.Tensor.concatenate(&[_]zml.Tensor{left_padded, right_half}, 2);
     }
 
-    fn forwardPrefill(self: Compressor, x: zml.Tensor) ?zml.Tensor {
+    fn forwardPrefill(self: Compressor, x: zml.Tensor) struct { ?zml.Tensor, ?zml.Tensor } {
         const seqlen = x.dim(.seq);
 
         // Nothing to compress my friend
-        if (seqlen < self.ratio) return null;
+        if (seqlen < self.ratio) return .{ null, null };
 
         const x32 = x.convert(.f32);
         var kv = self.wkv.forward(x32);
@@ -236,29 +236,29 @@ const Compressor = struct {
             score = self.overlap_transform(score, -std.math.inf(f32));
         }
 
-        return kv.mul(score.broad(kv.shape()).softmax(.r)).sum(.r).squeeze(.r);
+        const pos_idx = zml.Tensor.arange(.{ .end = cutoff, .step = self.ratio}, .i64).withTags(.{.seq});
+        return .{ kv.mul(score.broad(kv.shape()).softmax(.r)).sum(.r).squeeze(.r), pos_idx };
     }
 
-    fn forwardDecode(self: Compressor, x: zml.Tensor) ?zml.Tensor {
+    fn forwardDecode(self: Compressor, x: zml.Tensor) struct { ?zml.Tensor, ?zml.Tensor } {
         const x32 = x.convert(.f32);
         const kv = self.wkv.forward(x32);
         _ = kv; // autofix
         var score = self.wgate.forward(x32);
         score = score.add(self.ape.broad(score.shape()));
 
-        return null;
+        return .{ null, null };
     }
 
     pub fn forward(self: Compressor, x: zml.Tensor, start_pos: i64) ?zml.Tensor {
         // shape(x) = [batch,seq,r]
-        const maybe_kv = if (start_pos == 0) self.forwardPrefill(x) else self.forwardDecode(x);
+        const maybe_kv, const maybe_pos_idx = if (start_pos == 0) self.forwardPrefill(x) else self.forwardDecode(x);
         if (maybe_kv == null) return null;
 
         var kv = maybe_kv.?.convert(x.dtype());
 
         kv = self.norm.forward(kv);
-        // _ = precompute_yarn(@intCast(kv.dim(.hd)), self.rope_opts);
-        kv = apply_rope(kv, self.nope_head_dim, self.rope_head_dim, self.rope_opts);
+        kv = apply_rope(kv, maybe_pos_idx.?, self.nope_head_dim, self.rope_head_dim, self.rope_opts);
 
         if (self.rotate) {
             kv = hadamard_rotation(kv, null);
@@ -329,9 +329,8 @@ fn apply_yarn(x: zml.Tensor, pos_idx: zml.Tensor, opts: RopeOpts) zml.Tensor {
     return zml.nn.mergeRealImg(y_real, y_imag, .interleaved);
 }
 
-fn apply_rope(x: zml.Tensor, nope_dim: i64, rope_dim: i64, opts: RopeOpts) zml.Tensor {
+fn apply_rope(x: zml.Tensor, pos_idx: zml.Tensor, nope_dim: i64, rope_dim: i64, opts: RopeOpts) zml.Tensor {
     const split = x.split(-1, &[_]i64{nope_dim, rope_dim});
-    const pos_idx = zml.Tensor.arange(.{ .end = 8, .step = 4}, .i64).withTags(.{.seq});
     const x_rope = apply_yarn(split[1], pos_idx, opts);
     return zml.Tensor.concatenate(&[_]zml.Tensor{split[0], x_rope}, -1);
 }
@@ -359,6 +358,35 @@ fn hadamard_rotation(x: zml.Tensor, scale: ?f32) zml.Tensor {
     // const s = if (scale) |s| s else 1;
     // return r.scale(s);
 }
+
+const KVCache = struct {
+    kv: zml.Tensor, 
+
+    pub fn init(kv_shape: zml.Shape) KVCache {
+        // TODO: add .layer to shape
+        return .{ .kv = .fromShape(kv_shape) };
+    }
+
+    pub fn initBuffers(self: KVCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(KVCache) {
+        return .{ .kv = try zml.Buffer.uninitialized(io, platform, self.kv.shape(), sharding, .{}) };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(KVCache)) void {
+        self.kv.deinit();
+    }
+
+    pub fn get(self: KVCache, cache_index: zml.Tensor) zml.Tensor {
+        return self.kv.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = cache_index, .len = 1 } }).squeeze(.layer);
+    }
+
+    pub fn update(self: KVCache, new_kv: zml.Tensor, token_position: zml.Tensor, cache_index: zml.Tensor) KVCache {
+        const kv_shape = self.kv.shape().drop(.layer);
+        const layer = cache_index.broad(token_position.shape());
+        return .{
+            .kv = self.kv.scatterSlices(.{ .layer = layer, .kv = token_position }, new_kv.transpose(kv_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(self.kv),
+        };
+    }
+};
 
 const Indexer = struct {
     proj: zml.nn.Linear,
@@ -405,9 +433,11 @@ const Indexer = struct {
     }
 
     pub fn forward(self: Indexer, x: zml.Tensor, qr: zml.Tensor, start_pos: i64) zml.Tensor {
+        const pos_idx = zml.Tensor.arange(.{ .start = start_pos, .end = start_pos + x.dim(.seq) }, .f32).withTags(.{ .seq });
+
         var q = self.wq_b.forward(qr);
         q = q.splitAxis(-1, .{ .h = self.index_n_heads, .hd = .auto });
-        q = apply_rope(q.rename(.{.seq = .s}), self.nope_head_dim, self.rope_head_dim, self.rope_opts);
+        q = apply_rope(q, pos_idx, self.nope_head_dim, self.rope_head_dim, self.rope_opts);
         q = hadamard_rotation(q, null).rename(.{.s = .seq});
 
         // TODO: FP4 quant q
@@ -568,7 +598,7 @@ const Attention = struct {
         o = o.reshape(.{ .batch = o.dim(.batch), .seq = o.dim(.seq), .g = o.dim(.g), .r = o.dim(.r)});
         o = o.merge(.{ .d = .{ .g, .r}});
 
-        return self.wo_b.forward(o);
+    return self.wo_b.forward(o);
     }
 };
 
@@ -806,8 +836,9 @@ const Expert = struct {
         const threshold = zml.Tensor.scalar(self.activation_threshold, .f32);
         const m_threshold = zml.Tensor.scalar(-self.activation_threshold, .f32);
 
-        const gate = self.w1.forward(x).convert(.f32);//.clamp(m_threshold, threshold);
         const up = self.w3.forward(x).convert(.f32).clamp(m_threshold, threshold);
+        var gate = self.w1.forward(x).convert(.f32);
+        gate = zml.Tensor.select(gate.cmp(.GT, threshold), threshold, gate);
 
         var x_ = gate.silu().mul(up);
         if (weights) | w | {
