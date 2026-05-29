@@ -21,7 +21,7 @@ pub fn draw(self: *const Detail, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
     const wgt = ui.widget(self);
 
     return switch (dev.*) {
-        .cuda, .rocm => |*sv| try gpu_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
+        .cuda, .rocm, .oneapi => |*sv| try gpu_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
         .neuron => |*sv| try neuron_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
         .tpu => |*sv| try tpu_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
     };

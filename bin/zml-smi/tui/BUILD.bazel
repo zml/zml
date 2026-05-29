@@ -34,6 +34,7 @@ zig_library(
     ],
     extra_srcs = [
         "assets/amd.png",
+        "assets/intel.png",
         "assets/logo.png",
         "assets/neuron.png",
         "assets/nvidia.png",

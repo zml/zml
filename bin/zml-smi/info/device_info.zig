@@ -4,6 +4,7 @@ const DoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer;
 pub const Target = enum {
     cuda,
     rocm,
+    oneapi,
     neuron,
     tpu,
 };
@@ -11,6 +12,7 @@ pub const Target = enum {
 pub const DeviceInfo = union(Target) {
     cuda: DoubleBuffer(GpuInfo),
     rocm: DoubleBuffer(GpuInfo),
+    oneapi: DoubleBuffer(GpuInfo),
     neuron: DoubleBuffer(NeuronInfo),
     tpu: DoubleBuffer(TpuInfo),
 

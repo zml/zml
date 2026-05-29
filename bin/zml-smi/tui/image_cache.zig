@@ -27,6 +27,7 @@ pub fn loadAll(self: *ImageCache, vx: *vaxis.Vaxis, allocator: std.mem.Allocator
     self.load(vx, allocator, writer, "logo", @embedFile("assets/logo.png"));
     self.load(vx, allocator, writer, "gpu_cuda", @embedFile("assets/nvidia.png"));
     self.load(vx, allocator, writer, "gpu_rocm", @embedFile("assets/amd.png"));
+    self.load(vx, allocator, writer, "gpu_oneapi", @embedFile("assets/intel.png"));
     self.load(vx, allocator, writer, "gpu_neuron", @embedFile("assets/neuron.png"));
     self.load(vx, allocator, writer, "gpu_tpu", @embedFile("assets/tpu.png"));
 }

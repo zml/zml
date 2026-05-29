@@ -23,6 +23,7 @@ const csv = @import("zml-smi/csv");
 const json = @import("zml-smi/json");
 const api = @import("zml-smi/api");
 const prometheus = @import("zml-smi/prometheus");
+const sysfs = @import("zml-smi/sysfs");
 const smi_tui = @import("zml-smi/tui");
 const tui = smi_tui.top;
 const static_print = smi_tui.print;
@@ -64,6 +65,7 @@ const device_backends = switch (builtin.os.tag) {
         .x86_64 => .{
             .{ .cuda, @import("zml-smi/platforms/nvml") },
             .{ .rocm, @import("zml-smi/platforms/amdsmi") },
+            .{ .oneapi, @import("zml-smi/platforms/oneapi") },
             .{ .neuron, @import("zml-smi/platforms/neuron") },
             .{ .tpu, @import("zml-smi/platforms/tpu") },
         },
@@ -81,7 +83,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
 
-    const targets = detect(io);
+    const targets = detect(gpa, io);
 
     var collector: Collector = .init(arena, gpa, io, .{
         .poll_interval_ms = args.poll_interval,
@@ -167,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn detect(io: std.Io) smi_info.Targets {
+fn detect(allocator: std.mem.Allocator, io: std.Io) smi_info.Targets {
     if (comptime builtin.os.tag == .macos) {
         return .{};
     }
@@ -185,6 +187,10 @@ fn detect(io: std.Io) smi_info.Targets {
 
                     if (hasDevice(io, "/dev/kfd")) {
                         targets.insert(.rocm);
+                    }
+
+                    if (hasDrmRenderDevice(allocator, io, "0x8086")) {
+                        targets.insert(.oneapi);
                     }
 
                     if (hasDevice(io, c.NEURON_DEVICE_PREFIX ++ "0")) {
@@ -212,4 +218,24 @@ fn detect(io: std.Io) smi_info.Targets {
 fn hasDevice(io: std.Io, path: []const u8) bool {
     std.Io.Dir.accessAbsolute(io, path, .{ .read = true }) catch return false;
     return true;
+}
+
+fn hasDrmRenderDevice(allocator: std.mem.Allocator, io: std.Io, comptime pci_vendor_id: []const u8) bool {
+    var dir = std.Io.Dir.openDirAbsolute(io, "/dev/dri", .{ .iterate = true }) catch return false;
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (it.next(io) catch null) |entry| {
+        if (!std.mem.startsWith(u8, entry.name, "renderD")) continue;
+
+        var vendor_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const vendor_path = std.fmt.bufPrint(&vendor_path_buf, "/sys/class/drm/{s}/device/vendor", .{entry.name}) catch continue;
+        const vendor = sysfs.readString(allocator, io, vendor_path) catch continue;
+        defer allocator.free(vendor);
+        if (std.mem.eql(u8, std.mem.trim(u8, vendor, &std.ascii.whitespace), pci_vendor_id)) {
+            return true;
+        }
+    }
+
+    return false;
 }

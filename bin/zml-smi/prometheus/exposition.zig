@@ -8,7 +8,7 @@ const device_metrics = .{
     .{ .field = "util_percent", .metric = "zml_device_utilization_percent", .help = "Device utilization percentage" },
     .{ .field = "mem_used_bytes", .metric = "zml_device_memory_used_bytes", .help = "Device memory used in bytes" },
     .{ .field = "mem_total_bytes", .metric = "zml_device_memory_total_bytes", .help = "Device memory total in bytes" },
-    // GPU (CUDA/ROCm)
+    // GPU (CUDA/ROCm/oneAPI)
     .{ .field = "encoder_util_percent", .metric = "zml_device_encoder_utilization_percent", .help = "Encoder utilization percentage" },
     .{ .field = "decoder_util_percent", .metric = "zml_device_decoder_utilization_percent", .help = "Decoder utilization percentage" },
     .{ .field = "power_mw", .metric = "zml_device_power_watts", .help = "Power draw in watts", .fmt = fmtMilliwattsAsWatts },

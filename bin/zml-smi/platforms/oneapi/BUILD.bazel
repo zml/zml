@@ -1,0 +1,24 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "oneapi",
+    import_name = "zml-smi/platforms/oneapi",
+    main = "metrics.zig",
+    srcs = [
+        "monitor.zig",
+        "oneapi.zig",
+        "process.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bin/zml-smi/collector",
+        "//bin/zml-smi/info",
+        "//bin/zml-smi/utils:double_buffer",
+        "//bin/zml-smi/utils:sysfs",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":oneapi"],
+)

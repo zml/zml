@@ -26,6 +26,10 @@ scroll_bars: vxfw.ScrollBars = .{
 },
 merged: std.ArrayList(ProcessInfo) = .empty,
 
+pub fn deinit(self: *ProcessTable, allocator: std.mem.Allocator) void {
+    self.merged.deinit(allocator);
+}
+
 pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u16) void {
     self.scroll_bars.scroll_view.children.builder.userdata = self;
     self.merged.clearRetainingCapacity();
