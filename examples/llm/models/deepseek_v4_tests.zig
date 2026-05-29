@@ -132,7 +132,7 @@ pub fn run(
     try ctx.testLayer("layers.0.ffn.shared_experts.w1", .{ .seq, .d }, mdl.layers[0].ffn.shared_experts.w1, model_buffers.layers[0].ffn.shared_experts.w1, dequant_opts);
     try ctx.testLayer("layers.0.ffn.shared_experts.w2", .{ .seq, .dint }, mdl.layers[0].ffn.shared_experts.w2, model_buffers.layers[0].ffn.shared_experts.w2, dequant_opts);
     try ctx.testLayer("layers.0.ffn.shared_experts.w3", .{ .seq, .d }, mdl.layers[0].ffn.shared_experts.w3, model_buffers.layers[0].ffn.shared_experts.w3, dequant_opts);
-    // try ctx.testExpertLayer("layers.0.ffn.shared_experts", .{ .seq, .d }, mdl.layers[0].ffn.shared_experts, model_buffers.layers[0].ffn.shared_experts, .{});
+    try ctx.testExpertLayer("layers.0.ffn.shared_experts", .{ .seq, .d }, mdl.layers[0].ffn.shared_experts, model_buffers.layers[0].ffn.shared_experts, dequant_opts);
 
     // TEST: MoE (complete)
     // try ctx.testMoELayer("layers.0.ffn", .{ .batch, .seq, .d }, mdl.layers[0].ffn, model_buffers.layers[0].ffn, .{});

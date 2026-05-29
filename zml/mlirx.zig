@@ -50,7 +50,7 @@ pub const Type = struct {
     pub fn toDType(ctx: *mlir.Context, mlir_type: *const mlir.Type) dtype.DataType {
         const mapping = .{
             .{ .bool, mlir.Type.int(ctx, .i1) },
-
+            .{ .f8e8m0, mlir.Type.float(ctx, .f8e8m0fnu) },
             .{ .f8e4m3b11fnuz, mlir.Type.float(ctx, .f8e4m3b11fnuz) },
             .{ .f8e4m3fn, mlir.Type.float(ctx, .f8e4m3fn) },
             .{ .f8e4m3fnuz, mlir.Type.float(ctx, .f8e4m3fnuz) },
