@@ -47,9 +47,7 @@ pub fn main(init: std.process.Init) !void {
     defer repo_model.deinit(allocator);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
-    const shardings: common.Shardings = .{
-        .model = try platform.registerSharding("tp_mesh", .mesh(.{ .model = .high_bandwidth })),
-    };
+    const shardings: common.Shardings = try .init(platform);
 
     var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
     progress.end();
