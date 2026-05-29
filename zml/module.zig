@@ -608,7 +608,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                     computation_device.* = try upb.new(c.xla_DeviceAssignmentProto_ComputationDevice, upb_arena);
                     _ = c.xla_DeviceAssignmentProto_ComputationDevice_add_replica_device_ids(
                         computation_device.*,
-                        @intCast(device_assignment[@intCast(i)]),
+                        @intCast(device_assignment[@intCast(i)].id),
                         upb_arena,
                     );
                 }
