@@ -216,11 +216,6 @@ fn compileSingleKernelExe(
         },
         .{
             .shardings = &all_shardings,
-            // TT-FIX: tag arg 0 (Model weights) as `<parameter>` so tt-xla
-            // keeps them device-resident across trace captures. Required
-            // for the const-eval'd conv2d weight prepare path to keep the
-            // conv weight on device and the trace verifier happy.
-            .tt_parameter_args = &.{0},
             .tt_enable_trace = null,
         },
     );
@@ -376,8 +371,7 @@ fn compileEmbedTokens(
 
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const all_shardings = shardings.all();
-    // TT-FIX: tag the embed weight as `<parameter>` for trace residency.
-    return platform.compile(allocator, io, embed_tokens, .forward, .{tokens}, .{ .shardings = &all_shardings, .tt_parameter_args = &.{0}, .tt_enable_trace = null });
+    return platform.compile(allocator, io, embed_tokens, .forward, .{tokens}, .{ .shardings = &all_shardings, .tt_enable_trace = null });
 }
 
 fn compileConvLayer(
@@ -410,14 +404,12 @@ fn compileConvLayer(
     const layer_conv_state: zml.Tensor = opts.cache.conv.state[0];
 
     const all_shardings = shardings.all();
-    // TT-FIX: `tt_parameter_args = true` — required so the conv2d weight
-    // prep `to_layout(device→SystemMemory)` gets hoisted into a `LoadCachedOp`
-    // via `ConstEvalHoist`. Without it tt-metal's `MeshBuffer::create` rejects
-    // `SystemMemory` on multi-chip ("Unsupported buffer type"). The
-    // `LoadCachedOp` cache key includes `inputVersions`, so calling the same
-    // compiled kernel across 10 conv layers with 10 different weight tensors
-    // gets 10 distinct cache entries — re-prep happens once per layer at
-    // first execute, then is cached.
+    // TT-FIX: the conv2d weight is a parameter (is_parameter=true from the store)
+    // so the `to_layout(device→SystemMemory)` prep gets hoisted into a `LoadCachedOp`
+    // via `ConstEvalHoist`. The `LoadCachedOp` cache key includes `inputVersions`,
+    // so calling the same compiled kernel across 10 conv layers with 10 different
+    // weight tensors gets 10 distinct cache entries — re-prep happens once per layer
+    // at first execute, then is cached.
     return platform.compile(allocator, io, conv_layer, .forwardConvComposed, .{
         hidden,
         token_position_offset,
@@ -428,7 +420,6 @@ fn compileConvLayer(
         model.ConvParameters{ .is_prefill = is_prefill },
     }, .{
         .shardings = &all_shardings,
-        .tt_parameter_args = &.{0},
         // Tag the hidden (args[1]) and conv_state (args[4]) as kv_cache so
         // TTNNLayout doesn't force them to row major. The previous kernel
         // hands them off in tile layout — without the marker each composed
@@ -478,7 +469,6 @@ fn compileAttnLayer(
         model.ConvParameters{ .is_prefill = is_prefill },
     }, .{
         .shardings = &all_shardings,
-        .tt_parameter_args = &.{0},
         // K (args[4]) and V (args[5]) already auto-tag via the
         // `paged_update_cache` user; the hidden (args[1]) does not, so mark
         // it explicitly to keep its tile layout across the layer boundary.
@@ -506,14 +496,13 @@ fn compileLmHead(
     const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype());
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const all_shardings = shardings.all();
-    // TT-FIX: tag args[0] (mdl.lm_head) AND args[2] (mdl.embed_tokens) as
-    // `<parameter>`. The 65536×2048 embed_weight comes in as a separate arg
-    // here (not via the receiver), so it'd otherwise be `<input>` — tt-mlir
-    // then re-tiles the whole 256 MB tensor every decode call.
+    // TT-FIX: mdl.lm_head weights (args[0]) and mdl.embed_tokens (args[2]) both
+    // carry is_parameter=true from TensorStore.View.maybeCreateTensor, so they
+    // auto-tag as `<parameter>` — the 256 MB embed weight no longer re-tiles
+    // every decode call.
     return platform.compile(allocator, io, mdl.lm_head, .forward, .{ hidden, mdl.embed_tokens, tokens, opts.rng }, .{
         .shardings = &all_shardings,
         .program_name = "lfm2_composed_lm_head",
-        .tt_parameter_args = &.{ 0, 2 },
         // The hidden (args[1]) arrives in tile layout from the last layer
         // kernel — mark it so lm_head doesn't add a `ttnn.to_layout` at entry.
         .tt_kv_cache_args = &.{1},

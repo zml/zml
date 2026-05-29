@@ -28,6 +28,7 @@ pub const Tensor = struct {
 
     id: usize,
     auto_broadcast: bool = false,
+    is_parameter: bool = false,
     _shape: Shape,
     _value: ?*const mlir.Value = null,
 

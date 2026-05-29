@@ -55,13 +55,12 @@ pub const CompilationOptions = struct {
     xla_dump_hlo_pass_re: ?[]const u8 = null,
     xla_dump_emitter_re: ?[]const u8 = null,
 
-    // TT-FIX: indices (0-based, counting the receiver as 0) of args whose
-    // tensors get `tt.mark_argument` so tt-xla's frontend tags them as
-    // `<parameter>` and keeps them device-resident across trace captures.
-    // The most common shape is `&.{0}` — mark the receiver's weights only.
-    // Use `&.{0, 2}` etc. when extra weight tensors are passed as separate
-    // args (e.g. lm_head receiving `embed_tokens` at args[2] so its 256 MB
-    // weight gets `<parameter>` instead of re-tiling every decode call).
+    // TT-FIX: explicit override — arg-tuple positions (0-based, receiver = 0)
+    // to force-mark as `<parameter>` regardless of the Tensor's `is_parameter`
+    // bit. Normally not needed: every weight loaded from a `TensorStore.View`
+    // carries `is_parameter=true` and is auto-tagged. Use this only when a
+    // non-store tensor (e.g. a device-resident activation) must be tagged as
+    // `<parameter>` for a specific compile. OR-merged with the auto rule.
     tt_parameter_args: []const u32 = &.{},
 
     // TT-FIX: indices of args that get the `ttcore.kv_cache` unit attribute.
@@ -459,31 +458,55 @@ const EmitMlirResult = struct {
     output_info: OutputInfo,
 };
 
-/// TT-FIX: emit `tt.mark_argument` on the block args belonging to the args
-/// at positions `indices` (counting the receiver as 0), so tt-xla's frontend
-/// tags them as `<parameter>` (`has_side_effect=true` prevents ZML's
-/// canonicalizer from dropping the op). One arg position can expand to many
-/// block args when the arg is a struct of tensors — we mark the full range.
-fn markParameterArguments(compilation_context: *CompilationContext, args: anytype, indices: []const u32) void {
+/// TT-FIX: emit `tt.mark_argument` on block args whose source Tensor has
+/// `is_parameter=true` (set at the weight origin in `TensorStore.View.maybeCreateTensor`),
+/// so tt-xla's frontend tags them as `<parameter>` and keeps them device-resident
+/// across trace captures. `has_side_effect=true` prevents ZML's canonicalizer from
+/// dropping the op.
+///
+/// The `override_indices` slice (the retained `tt_parameter_args` field) is OR-merged
+/// in: any arg-tuple position listed there is force-marked regardless of `is_parameter`,
+/// preserving backward compatibility for callers that pass non-weight tensors requiring
+/// parameter treatment.
+fn markParameterArguments(compilation_context: *CompilationContext, args: anytype, override_indices: []const u32) void {
     const mlir_ctx = compilation_context.mlir_ctx;
     const block = compilation_context.currentScope().block;
-    var name_buf: [40]u8 = undefined;
-    var name_counter: usize = 0;
-    var block_arg_offset: usize = 0;
+
+    const LocalContext = struct {
+        mlir_ctx: *mlir.Context,
+        block: *mlir.Block,
+        block_arg_idx: usize,
+        name_counter: usize,
+        name_buf: [40]u8,
+        is_override_pos: bool,
+    };
+
+    var context: LocalContext = .{
+        .mlir_ctx = mlir_ctx,
+        .block = block,
+        .block_arg_idx = 0,
+        .name_counter = 0,
+        .name_buf = undefined,
+        .is_override_pos = false,
+    };
+
     inline for (0..args.len) |i| {
-        const count = meta.count(Tensor, &args[i]);
-        const mark = blk: {
-            for (indices) |idx| if (@as(usize, idx) == i) break :blk true;
+        // Determine whether this entire arg-tuple position is force-marked via
+        // the positional override list (OR-merged with the per-leaf is_parameter check).
+        context.is_override_pos = blk: {
+            for (override_indices) |idx| if (idx == @as(u32, i)) break :blk true;
             break :blk false;
         };
-        if (mark) {
-            for (block_arg_offset..block_arg_offset + count) |b| {
-                const name = std.fmt.bufPrint(&name_buf, "parameter_{d}", .{name_counter}) catch unreachable;
-                tt_ops.markArgument(mlir_ctx, block, block.argument(b), name);
-                name_counter += 1;
+        meta.visit(struct {
+            fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
+                if (tensor.is_parameter or ctx_.is_override_pos) {
+                    const name = std.fmt.bufPrint(&ctx_.name_buf, "parameter_{d}", .{ctx_.name_counter}) catch unreachable;
+                    tt_ops.markArgument(ctx_.mlir_ctx, ctx_.block, ctx_.block.argument(ctx_.block_arg_idx), name);
+                    ctx_.name_counter += 1;
+                }
+                ctx_.block_arg_idx += 1;
             }
-        }
-        block_arg_offset += count;
+        }.cb, &context, &args[i]);
     }
 }
 
@@ -524,11 +547,13 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
         }
     }.cb, &context, &args);
 
-    // TT-FIX: tag selected arg positions' tensors as `<parameter>`.
-    if (compilation_context.tt_parameter_args.len > 0) switch (compilation_context.platform.target) {
+    // TT-FIX: auto-tag block args as `<parameter>` based on each leaf Tensor's
+    // `is_parameter` bit (set at weight origin in TensorStore.View.maybeCreateTensor).
+    // Any positions listed in `tt_parameter_args` are OR-merged in as an override.
+    switch (compilation_context.platform.target) {
         .tt => markParameterArguments(compilation_context, args, compilation_context.tt_parameter_args),
         .cpu, .cuda, .rocm, .tpu, .neuron => {},
-    };
+    }
 
     const output_info, const input_info = b: {
         compilation_context.activate();

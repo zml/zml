@@ -160,7 +160,8 @@ pub const TensorStore = struct {
                 else => ptr.shape = ptr.shape.withPartitioning(partitioning),
             }
 
-            const tensor: Tensor = .fromShape(ptr.shape);
+            var tensor: Tensor = .fromShape(ptr.shape);
+            tensor.is_parameter = true;
             self.store.bindIdToKey(key, tensor.id) catch unreachable;
 
             return tensor;
