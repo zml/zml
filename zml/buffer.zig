@@ -119,7 +119,9 @@ pub const Buffer = struct {
 
         const placement = try res._sharding.placement(sh);
         const shard_dims: []const i64 = placement.shape.dims();
-        const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
+        var default_memory_layout_buf: [256]u8 = undefined;
+        var fba: std.heap.FixedBufferAllocator = .init(&default_memory_layout_buf);
+        const layout = try platform.defaultMemoryLayout(fba.allocator(), shard_dims, sh.dtype());
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
             const memory = platform.devices[device.id].memory(opts.memory);
@@ -217,7 +219,9 @@ pub const Buffer = struct {
         const element_type = pjrtx.bufferTypeFromDtype(sh.dtype());
         const placement = try res._sharding.placement(sh);
         const shard_dims: []const i64 = placement.shape.dims();
-        const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
+        var default_memory_layout_buf: [256]u8 = undefined;
+        var fba: std.heap.FixedBufferAllocator = .init(&default_memory_layout_buf);
+        const layout = try platform.defaultMemoryLayout(fba.allocator(), shard_dims, sh.dtype());
 
         for (platform.physical_mesh.devices_in_canonical_order) |device| {
             const memory = platform.devices[device.id].memory(opts.memory);

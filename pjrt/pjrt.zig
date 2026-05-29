@@ -154,19 +154,20 @@ pub const Api = struct {
         };
     }
 
-    inline fn innerCall(self: *const Api, comptime method: Funcs, arg: *PJRTFnArg(method)) ApiError!void {
-        if (@offsetOf(c.PJRT_Api, @tagName(method)) > self.inner.struct_size) {
+    inline fn innerCall(api: *const Api, comptime method: Funcs, arg: *PJRTFnArg(method)) ApiError!void {
+        if (@offsetOf(c.PJRT_Api, @tagName(method)) > api.inner.struct_size) {
             std.debug.panic("PJRT Api method {s} not available in this plugin", .{@tagName(method)});
         }
-        const fn_ptr = @field(&self.inner, @tagName(method)).?;
+        const fn_ptr = @field(&api.inner, @tagName(method)).?;
         const result = fn_ptr(arg);
         if (@TypeOf(result) == void) {
             return;
         }
-        if (result) |pjrt_c_error| {
-            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
-            log.err("[{s}] {s}", .{ @tagName(method), pjrt_error.getMessage(self) });
-            return pjrt_error.getCode(self).toApiError();
+        if (result) |pjrt_err| {
+            const err: *Error = .init(pjrt_err);
+            log.err("[{s}] {s}", .{ @tagName(method), err.getMessage(api) });
+            defer err.deinit(api);
+            return err.getCode(api).toApiError();
         }
     }
 
@@ -174,6 +175,23 @@ pub const Api = struct {
         var ret = arg;
         try innerCall(self, method, @ptrCast(&ret));
         return ret;
+    }
+
+    pub fn check(api: *const Api, pjrt_c_err: ?*c.PJRT_Error) ApiError!void {
+        if (pjrt_c_err) |pjrt_err| {
+            const err: *Error = .init(pjrt_err);
+            defer err.deinit(api);
+            return err.getCode(api).toApiError();
+        }
+    }
+
+    pub fn checkLog(api: *const Api, pjrt_c_err: ?*c.PJRT_Error) ApiError!void {
+        if (pjrt_c_err) |pjrt_err| {
+            const err: *Error = .init(pjrt_err);
+            defer err.deinit(api);
+            log.err("PJRT error: {s}", .{err.getMessage(api)});
+            return err.getCode(api).toApiError();
+        }
     }
 
     pub const Extensions = struct {
@@ -194,7 +212,7 @@ pub const Api = struct {
             custom_call: *const c.PJRT_Gpu_Custom_Call,
             profiler: *const c.PJRT_Profiler_Extension,
             stream: *const c.PJRT_Stream_Extension,
-            layouts: *const c.PJRT_Layouts_Extension,
+            layouts: *const LayoutExtension,
             ffi: *const c.PJRT_FFI_Extension,
             memory_descriptions: *const c.PJRT_MemoryDescriptions_Extension,
             triton: *const c.PJRT_Triton_Extension,
@@ -345,6 +363,10 @@ pub const ErrorCode = enum(c.PJRT_Error_Code) {
 };
 
 pub const Error = opaque {
+    pub fn init(pjrt_err: *c.PJRT_Error) *Error {
+        return @ptrCast(pjrt_err);
+    }
+
     pub fn deinit(self: *Error, api: *const Api) void {
         _ = api.call(.PJRT_Error_Destroy, .{
             .@"error" = @ptrCast(self),
@@ -584,60 +606,31 @@ pub const Client = opaque {
     }
 
     pub fn defaultMemoryLayout(
-        self: *const Client,
+        client: *const Client,
         api: *const Api,
+        allocator: std.mem.Allocator,
         element_type: BufferType,
         dims: []const i64,
-    ) !DefaultMemoryLayout {
+    ) !MemoryLayout {
         const ext = if (api.extension(.layouts)) |e| e.layouts else return error.LayoutsExtensionUnavailable;
 
-        var get_args: c.PJRT_Layouts_PJRT_Client_GetDefaultLayout_Args = .{
-            .struct_size = c.PJRT_Layouts_PJRT_Client_GetDefaultLayout_Args_STRUCT_SIZE,
-            .extension_start = null,
-            .client = self.inner(),
-            .type = @intFromEnum(element_type),
-            .dims = dims.ptr,
-            .num_dims = dims.len,
-            .layout = null,
-        };
-        if (ext.PJRT_Layouts_PJRT_Client_GetDefaultLayout.?(&get_args)) |pjrt_c_error| {
-            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
-            defer pjrt_error.deinit(api);
-            return pjrt_error.getCode(api).toApiError();
-        }
-        defer {
-            var destroy_args: c.PJRT_Layouts_MemoryLayout_Destroy_Args = .{
-                .struct_size = c.PJRT_Layouts_MemoryLayout_Destroy_Args_STRUCT_SIZE,
-                .extension_start = null,
-                .layout = get_args.layout,
-            };
-            if (ext.PJRT_Layouts_MemoryLayout_Destroy.?(&destroy_args)) |pjrt_c_error| {
-                const pjrt_error: *Error = @ptrCast(pjrt_c_error);
-                defer pjrt_error.deinit(api);
-                log.err("[PJRT_Layouts_MemoryLayout_Destroy] {s}", .{pjrt_error.getMessage(api)});
-            }
-        }
+        const default_layout = try ext.defaultMemoryLayout(client, api, element_type, dims);
+        defer ext.destroyLayout(default_layout);
 
-        var serialize_args: c.PJRT_Layouts_MemoryLayout_Serialize_Args = .{
+        var args: c.PJRT_Layouts_MemoryLayout_Serialize_Args = .{
             .struct_size = c.PJRT_Layouts_MemoryLayout_Serialize_Args_STRUCT_SIZE,
             .extension_start = null,
-            .layout = get_args.layout,
+            .layout = default_layout,
             .serialized_bytes = null,
             .serialized_bytes_size = 0,
             .serialized_layout = null,
             .serialized_layout_deleter = null,
         };
-        if (ext.PJRT_Layouts_MemoryLayout_Serialize.?(&serialize_args)) |pjrt_c_error| {
-            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
-            defer pjrt_error.deinit(api);
-            return pjrt_error.getCode(api).toApiError();
-        }
-        defer if (serialize_args.serialized_layout_deleter) |deleter| {
-            deleter(serialize_args.serialized_layout);
-        };
+        try api.check(ext.vtable.PJRT_Layouts_MemoryLayout_Serialize.?(&args));
+        defer if (args.serialized_layout_deleter) |del| del(args.serialized_layout);
 
-        const serialized = serialize_args.serialized_bytes[0..serialize_args.serialized_bytes_size];
-        return try DefaultMemoryLayout.parseSerialized(serialized);
+        const serialized = args.serialized_bytes[0..args.serialized_bytes_size];
+        return try .parseSerialized(allocator, serialized);
     }
 
     pub const CreateUninitializedBufferArgs = struct {
@@ -1059,40 +1052,12 @@ pub const MemoryLayout = union(MemoryLayoutType) {
             },
         };
     }
-};
 
-pub const DefaultMemoryLayout = struct {
-    pub const MAX_MINOR_TO_MAJOR: usize = 16;
-    pub const MAX_TILE_DIMS: usize = 128;
-    pub const MAX_NUM_TILES: usize = 16;
+    // Note: this is the reverse operation of https://github.com/openxla/xla/blob/22eee29e01c8d20240567cee7d039c6b4d0c88f2/xla/layout.cc#L279-L383
+    // But I don't think this string to layout mapping is officially part of the PJRT API.
+    pub fn parseSerialized(allocator: std.mem.Allocator, serialized: []const u8) !MemoryLayout {
+        var result: MemoryLayout = .{ .tiled = .{ .minor_to_major = &.{}, .tile_dims = &.{}, .tile_dims_sizes = &.{} } };
 
-    minor_to_major_storage: [MAX_MINOR_TO_MAJOR]i64 = undefined,
-    minor_to_major_len: usize = 0,
-
-    tile_dims_storage: [MAX_TILE_DIMS]i64 = undefined,
-    tile_dims_len: usize = 0,
-
-    tile_dims_sizes_storage: [MAX_NUM_TILES]usize = undefined,
-    tile_dims_sizes_len: usize = 0,
-
-    pub fn toMemoryLayout(self: *const DefaultMemoryLayout) MemoryLayout {
-        return .{
-            .tiled = .{
-                .minor_to_major = self.minor_to_major_storage[0..self.minor_to_major_len],
-                .tile_dims = self.tile_dims_storage[0..self.tile_dims_len],
-                .tile_dims_sizes = self.tile_dims_sizes_storage[0..self.tile_dims_sizes_len],
-            },
-        };
-    }
-
-    pub fn parseSerialized(serialized: []const u8) !DefaultMemoryLayout {
-        var parsed: DefaultMemoryLayout = .{};
-        try parseSerializedInto(serialized, &parsed);
-        return parsed;
-    }
-
-    fn parseSerializedInto(serialized: []const u8, out: *DefaultMemoryLayout) !void {
-        out.* = .{};
         const raw = std.mem.trim(u8, serialized, " \t\n\r\x00");
 
         if (raw.len < 2 or raw[0] != '{' or raw[raw.len - 1] != '}') {
@@ -1100,57 +1065,97 @@ pub const DefaultMemoryLayout = struct {
         }
 
         const body = raw[1 .. raw.len - 1];
-        const first_colon = std.mem.indexOfScalar(u8, body, ':');
-
-        const minor_to_major_str = std.mem.trim(u8, if (first_colon) |index| body[0..index] else body, " \t\n\r");
+        const minor_to_major_str, const attrs = if (std.mem.indexOfScalar(u8, body, ':')) |first_colon|
+            .{ body[0..first_colon], body[first_colon + 1 ..] }
+        else
+            .{ body, "" };
 
         if (minor_to_major_str.len > 0) {
+            const rank = std.mem.countScalar(u8, minor_to_major_str, ',') + 1;
+            const minor_to_major = try allocator.alloc(i64, rank);
             var mtm_iter = std.mem.splitScalar(u8, minor_to_major_str, ',');
-            while (mtm_iter.next()) |part_raw| {
-                if (out.minor_to_major_len >= MAX_MINOR_TO_MAJOR) return error.LayoutTooLarge;
-                out.minor_to_major_storage[out.minor_to_major_len] = try parseI64Token(part_raw);
-                out.minor_to_major_len += 1;
+            for (minor_to_major) |*mtm| {
+                const part_raw = mtm_iter.next().?;
+                mtm.* = try parseI64Token(part_raw);
             }
+            result.tiled.minor_to_major = minor_to_major;
         }
 
-        if (first_colon) |index| {
-            const attrs = body[index + 1 ..];
-            var cursor: usize = 0;
-            while (cursor < attrs.len) {
-                const t_pos = std.mem.indexOfScalarPos(u8, attrs, cursor, 'T') orelse break;
-                cursor = t_pos + 1;
-                while (cursor < attrs.len and std.ascii.isWhitespace(attrs[cursor])) : (cursor += 1) {}
-                if (cursor >= attrs.len or attrs[cursor] != '(') continue;
+        if (attrs.len == 0) return result;
 
-                while (cursor < attrs.len and attrs[cursor] == '(') {
-                    const tuple_start = cursor + 1;
-                    const tuple_end = std.mem.indexOfScalarPos(u8, attrs, tuple_start, ')') orelse return error.InvalidLayoutString;
-                    const tuple = attrs[tuple_start..tuple_end];
+        var tile_dims: std.ArrayList(i64) = .empty;
+        var tile_dims_sizes: std.ArrayList(usize) = .empty;
+        var cursor: usize = 0;
+        while (cursor < attrs.len) {
+            const t_pos = std.mem.indexOfScalarPos(u8, attrs, cursor, 'T') orelse break;
+            cursor = t_pos + 1;
+            while (cursor < attrs.len and std.ascii.isWhitespace(attrs[cursor])) : (cursor += 1) {}
+            if (cursor >= attrs.len or attrs[cursor] != '(') continue;
 
-                    var dims_in_tile: usize = 0;
-                    var tuple_iter = std.mem.splitScalar(u8, tuple, ',');
-                    while (tuple_iter.next()) |dim_raw| {
-                        if (out.tile_dims_len >= MAX_TILE_DIMS) return error.LayoutTooLarge;
-                        out.tile_dims_storage[out.tile_dims_len] = try parseI64Token(dim_raw);
-                        out.tile_dims_len += 1;
-                        dims_in_tile += 1;
-                    }
-                    if (dims_in_tile == 0) return error.InvalidLayoutString;
+            while (cursor < attrs.len and attrs[cursor] == '(') {
+                const tuple_start = cursor + 1;
+                const tuple_end = std.mem.indexOfScalarPos(u8, attrs, tuple_start, ')') orelse return error.InvalidLayoutString;
+                const tuple = attrs[tuple_start..tuple_end];
 
-                    if (out.tile_dims_sizes_len >= MAX_NUM_TILES) return error.LayoutTooLarge;
-                    out.tile_dims_sizes_storage[out.tile_dims_sizes_len] = dims_in_tile;
-                    out.tile_dims_sizes_len += 1;
-
-                    cursor = tuple_end + 1;
+                var dims_in_tile: usize = 0;
+                var tuple_iter = std.mem.splitScalar(u8, tuple, ',');
+                while (tuple_iter.next()) |dim_raw| {
+                    try tile_dims.append(allocator, try parseI64Token(dim_raw));
+                    dims_in_tile += 1;
                 }
+                if (dims_in_tile == 0) return error.InvalidLayoutString;
+
+                try tile_dims_sizes.append(allocator, dims_in_tile);
+                cursor = tuple_end + 1;
             }
         }
+        result.tiled.tile_dims = try tile_dims.toOwnedSlice(allocator);
+        result.tiled.tile_dims_sizes = try tile_dims_sizes.toOwnedSlice(allocator);
+        return result;
     }
 
     fn parseI64Token(token_raw: []const u8) !i64 {
         const token = std.mem.trim(u8, token_raw, " \t\n\r");
         if (token.len == 0) return error.InvalidLayoutString;
         return std.fmt.parseInt(i64, token, 10);
+    }
+};
+
+pub const LayoutExtension = extern struct {
+    vtable: c.PJRT_Layouts_Extension,
+
+    pub fn init(ext: *const c.PJRT_Layouts_Extension) *const LayoutExtension {
+        return @ptrCast(ext);
+    }
+
+    pub fn destroyLayout(ext: *const LayoutExtension, layout: *c.PJRT_Layouts_MemoryLayout) void {
+        var destroy_args: c.PJRT_Layouts_MemoryLayout_Destroy_Args = .{
+            .struct_size = c.PJRT_Layouts_MemoryLayout_Destroy_Args_STRUCT_SIZE,
+            .extension_start = null,
+            .layout = layout,
+        };
+        // Ignore errors
+        _ = ext.vtable.PJRT_Layouts_MemoryLayout_Destroy.?(&destroy_args);
+    }
+
+    pub fn defaultMemoryLayout(
+        ext: *const LayoutExtension,
+        client: *const Client,
+        api: *const Api,
+        element_type: BufferType,
+        dims: []const i64,
+    ) !*c.PJRT_Layouts_MemoryLayout {
+        var get_args: c.PJRT_Layouts_PJRT_Client_GetDefaultLayout_Args = .{
+            .struct_size = c.PJRT_Layouts_PJRT_Client_GetDefaultLayout_Args_STRUCT_SIZE,
+            .extension_start = null,
+            .client = client.inner(),
+            .type = @intFromEnum(element_type),
+            .dims = dims.ptr,
+            .num_dims = dims.len,
+            .layout = null,
+        };
+        try api.checkLog(ext.vtable.PJRT_Layouts_PJRT_Client_GetDefaultLayout.?(&get_args));
+        return get_args.layout.?;
     }
 };
 

@@ -521,15 +521,14 @@ pub const Platform = struct {
         unreachable;
     }
 
-    pub inline fn defaultMemoryLayout(platform: *const Platform, dims: []const i64, dtype: zml.DataType) pjrt.MemoryLayout {
+    pub fn defaultMemoryLayout(platform: *const Platform, allocator: std.mem.Allocator, dims: []const i64, dtype: zml.DataType) !pjrt.MemoryLayout {
         // inline cause `default` is a huge ass struct allocated on the stack,
         // and toMemoryLayout returns slices into it.
         // There is probably a better way of doing this.
         return switch (platform.target) {
             .cuda, .rocm, .tpu, .neuron, .oneapi => {
                 const element_type = pjrtx.bufferTypeFromDtype(dtype);
-                const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
-                return default.toMemoryLayout();
+                return platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, allocator, element_type, dims);
             },
             // CPU always return this layout so avoid complicated logic from .defaultMemoryLayout
             .cpu => .{
