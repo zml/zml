@@ -1,0 +1,25 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "xet_cas",
+    main = "main.zig",
+    deps = ["//zml"],
+)
+
+zig_binary(
+    name = "test_xorb_map",
+    main = "test_xorb_map.zig",
+    deps = ["//zml/io"],
+)
+
+zig_binary(
+    name = "test_chunk_iter",
+    main = "test_chunk_iter.zig",
+    deps = ["//zml/io"],
+)
+
+zig_binary(
+    name = "test_decompress",
+    main = "test_decompress.zig",
+    deps = ["//zml/io"],
+)

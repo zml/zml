@@ -1,10 +1,12 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "io",
     tags = ["manual"],
     srcs = [
+        "lz4.zig",
         "vfs.zig",
+        "xet.zig",
     ],
     main = "io.zig",
     visibility = ["//visibility:public"],
@@ -12,4 +14,13 @@ zig_library(
         "//stdx",
         "//zml/io/vfs",
     ],
+)
+
+zig_test(
+    name = "test",
+    main = "xet.zig",
+    srcs = [
+        "lz4.zig",
+    ],
+    deps = ["//zml/io"],
 )
