@@ -449,8 +449,7 @@ pub const PhysicalMesh = struct {
             .devices_in_canonical_order = undefined,
         };
         try mesh.populateDevicesInCanonicalOrder(allocator);
-        for (0.., mesh.devices_in_canonical_order) |i, device| {
-            std.debug.assert(device.id == i);
+        for (mesh.devices_in_canonical_order) |device| {
             std.debug.assert(device.hasValidCoords());
         }
         return mesh;
@@ -870,12 +869,23 @@ pub const PhysicalMesh = struct {
             .cpu => cpu(allocator, platform_devices),
             .cuda, .rocm => gpu(allocator, platform_devices),
             .tpu => tpu(allocator, platform_devices),
-            .neuron => neuron(allocator, platform_devices),
+            .neuron => return neuron(allocator, platform_devices),
             .oneapi => cpu(allocator, platform_devices),
         };
         errdefer freeNode(allocator, root);
 
-        return try fromOwnedTree(allocator, target, root);
+        // We check a posteriori that the device id is a valid offset into platform.devices.
+        // This is generally true because platform.devices is sorted by id and ids are 0-N.
+        // For platforms where this isn't true like Neuron,
+        // the platform specific builder need to correctly update the ids so that it's true.
+        const mesh = try fromOwnedTree(allocator, target, root);
+        for (mesh.devices_in_canonical_order) |pl| {
+            const device = platform_devices[pl.id];
+            std.debug.assert(pl.hasValidCoords());
+            std.debug.assert(device.id() == pl.id);
+        }
+
+        return mesh;
     }
 
     pub fn cpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
@@ -944,7 +954,7 @@ pub const PhysicalMesh = struct {
         return CoordsTopology.buildMeshNode(allocator, indexed, axis_sizes[0..rank], axis_tags[0..rank], axis_strides[0..rank], 0, 0);
     }
 
-    pub fn neuron(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
+    pub fn neuron(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !PhysicalMesh {
         if (comptime !platforms.isEnabled(.neuron)) {
             return error.UnsupportedPlatform;
         }
@@ -997,19 +1007,12 @@ pub const PhysicalMesh = struct {
             ) !PhysicalNode {
                 if (depth == axis_tags_.len) {
                     const placement_ = placements[next_device_.*];
-                    const device = platform_devices_[placement_.input_index];
                     next_device_.* += 1;
 
                     var coords: stdx.BoundedArray(u8, MAX_MESH_RANK) = .empty;
-                    for (coords_buf_[0..axis_tags_.len]) |coord| coords.appendAssumeCapacity(coord);
+                    for (coords_buf_[0..axis_tags_.len]) |coord| coords.appendAssumeCapacity(@intCast(coord));
 
-                    return .{
-                        .leaf = .{
-                            .id = placement_.nc_id,
-                            .coords = coords,
-                            .pjrt_device = device.pjrt_device,
-                        },
-                    };
+                    return .{ .leaf = .{ .id = placement_.nc_id, .coords = coords } };
                 }
 
                 const children = try allocator_.alloc(PhysicalNode, axis_sizes_[depth]);
@@ -1045,7 +1048,7 @@ pub const PhysicalMesh = struct {
             }
         };
 
-        return Node.build(
+        const root = try Node.build(
             allocator,
             platform_devices,
             topology.placements,
@@ -1056,6 +1059,22 @@ pub const PhysicalMesh = struct {
             &coords_buf,
             &next_device,
         );
+        const mesh: PhysicalMesh = try fromOwnedTree(allocator, .neuron, root);
+        std.log.warn("Devices in devices_in_canonical_order with nc_ids: {any}", .{mesh.devices_in_canonical_order});
+        for (mesh.devices_in_canonical_order) |*dev| {
+            // In Node.build we use nc_id as the Device id.
+            // But now we want to use the id to get the offset into platform.devices.
+            const dev_nc_id = dev.id;
+            for (0.., topology.placements) |order, placement_| {
+                if (placement_.nc_id == dev_nc_id) {
+                    dev.id = @intCast(order);
+                    std.debug.assert(platform_devices[order].localHardwareId() == dev_nc_id);
+                    break;
+                }
+            }
+        }
+        std.log.warn("Devices in devices_in_canonical_order with final ids: {any}", .{mesh.devices_in_canonical_order});
+        return mesh;
     }
 };
 
