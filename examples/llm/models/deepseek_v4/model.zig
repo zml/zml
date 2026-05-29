@@ -14,7 +14,6 @@ pub const QuantizationConfig = struct {
 pub const Config = struct {
     num_hidden_layers: u16,
     rms_norm_eps: f32,
-    hc_eps: f32,
     routed_scaling_factor: f32,
     num_hash_layers: u32,
     n_routed_experts: u32,
@@ -34,6 +33,9 @@ pub const Config = struct {
     index_head_dim: u32,
     index_n_heads: u32,
     index_topk: u32,
+    hc_eps: f32,
+    hc_mult: u32,
+    hc_sinkhorn_iters: u32,
 };
 
 const RopeScaling = struct {
@@ -859,6 +861,7 @@ const Layer = struct {
     hc_ffn_scale: zml.Tensor,
     attn: Attention,
     ffn: MoE,
+    norm_eps: f32,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, i: usize) !Layer {
         return .{
@@ -872,6 +875,7 @@ const Layer = struct {
             .hc_ffn_scale = store.createTensor("hc_ffn_scale", .{.b}, .replicated),
             .attn = .init(store.withPrefix("attn"), config, i),
             .ffn = try .init(allocator, store.withPrefix("ffn"), config, i),
+            .norm_eps = config.rms_norm_eps, //< TODO: CHECK
         };
     }
 
@@ -887,7 +891,52 @@ const Layer = struct {
         Attention.unloadBuffers(&self.attn);
         MoE.unloadBuffers(&self.ffn, allocator);
     }
+
+    fn hc_pre(self: Layer, x: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
+        // shape(x) = [batch, seq, hc, d]
+        const x_ = x.merge(.{ .d = .{ .hc, .d }}).convert(.f32);
+
+        const rsqrt = x_.powByConst(2).mean(.d).addConstant(self.norm.eps).rsqrt();
+
+        const mixes = blk: {
+            const m = self.hc_fn.forward(x_);
+            break :blk m.mul(rsqrt.broad(m.shape()));
+        };
+
+        const pre, const post, const comb = hc_split_sinkhorn(mixes, self.hc_attn_scale, self.hc_attn_fn, self.hc_mult, self.hc_sinkhorn_iters, self.hc_eps);
+        const y = pre.sum(pre.mul(x), .seq);
+        return .{ y.convert(x.dtype()), post, comb };
+    }
+
+    fn hc_post(x: zml.Tensor, residual: zml.Tensor, post: zml.Tensor, comb: zml.Tensor) zml.Tensor {
+        // x: [b,s,d], residual: [b,s,hc,d], post: [b,s,hc], comb: [b,s,hc,hc], y: [b,s,hc,d]
+        const y1 = comb.mul(residual).sum(2);
+        return post.mul(x).add(y1);
+    }
+
+    pub fn forward(self: Layer, x: zml.Tensor) zml.Tensor {
+        var x_, const post, const comb = self.hc_pre(x);
+        x_ = self.attn_norm.forward(x_);
+        x_ = self.attn.forward(x_, 0);
+        x_ = hc_post(x_, x, post, comb);
+
+        var x_2, const post_2, const comb_2 = self.hc_pre(x_);
+        x_2 = self.ffn_norm.forward(x_2);
+        x_2 = self.ffn.forward(x_2, 0);
+        x_2 = hc_post(x_2, x_, post_2, comb_2);
+
+        return x_2;
+    }
 };
+
+fn hc_split_sinkhorn(mixes: zml.Tensor, hc_attn_scale: zml.Tensor, hc_attn_fn: zml.Tensor, hc_mult: f32, hc_sinkhorn_iters: zml.Tensor, hc_eps: f32) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
+    _ = hc_attn_scale; // autofix
+    _ = hc_attn_fn; // autofix
+    _ = hc_mult; // autofix
+    _ = hc_sinkhorn_iters; // autofix
+    _ = hc_eps; // autofix
+    return .{ mixes, mixes, mixes };
+}
 
 const LmHead = struct {
     norm: RmsNorm,
@@ -896,6 +945,7 @@ const LmHead = struct {
     hc_fn: zml.nn.Linear,
     hc_scale: zml.Tensor,
     hc_eps: f32,
+    hc_sinkhorn_iters: u32,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) LmHead {
         return .{
@@ -904,7 +954,8 @@ const LmHead = struct {
             .hc_base = store.createTensor("hc_head_base", .{.hc}, .replicated),
             .hc_fn = .init(store.createTensor("hc_head_fn", .{.hc, .d}, .replicated), null, .d),
             .hc_scale = store.createTensor("hc_head_scale", .{.batch}, .replicated),
-            .hc_eps = config.hc_eps
+            .hc_eps = config.hc_eps,
+            .hc_sinkhorn_iters = config.hc_sinkhorn_iters,
         };
     }
 
@@ -947,6 +998,7 @@ pub const Model = struct {
     embeds: zml.nn.TokenEmbedding,
     layers: []Layer,
     lm_head: LmHead, 
+    hc_mult: u32,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Model {
         const layers = try allocator.alloc(Layer, config.num_hidden_layers);
@@ -962,6 +1014,7 @@ pub const Model = struct {
             },
             .layers = layers,
             .lm_head = .init(store, config),
+            .hc_mult = config.hc_mult,
         };
     }
 
@@ -1014,6 +1067,21 @@ pub const Model = struct {
         allocator.free(self.layers);
 
         LmHead.unloadBuffers(&self.lm_head);
+    }
+
+    pub fn forward(self: Model, tokens: zml.Tensor) zml.Tensor {
+        stdx.debug.assert(tokens.shape().hasTags(.{ .batch, .seq, }), "expect input tokens to has tags {.batch, .seq} but got {f}", .{ tokens.shape() });
+
+        var hidden = self.embeds.forward(tokens).rename(.{ .voc = .d }); //< [batch, seq, d]
+        hidden = hidden.insertAxes(.seq, .hc).repeat1d(.hc, @intCast(self.hc_mult)); //< [batch, seq, hc, d]
+
+        for(self.layers) |layer| {
+            hidden = layer.forward(hidden); //< [batch, seq, d]
+        }
+
+        const logits = self.lm_head.forward(hidden); //< [batch, voc]
+        // TODO: rng stuff
+        return logits;
     }
 };
 
