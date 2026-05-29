@@ -605,15 +605,17 @@ pub const Platform = struct {
     pub inline fn defaultMemoryLayout(platform: *const Platform, dims: []const i64, dtype: zml.DataType) pjrt.MemoryLayout {
         // inline cause `default` is a huge ass struct allocated on the stack,
         // and toMemoryLayout returns slices into it.
-        // There is probably a better way of doing this.
+        // There is probably a better way of doing this,
+        // but given it's compiled out (except for TPU), I'm not gonna care for now.
         return switch (platform.target) {
-            .cuda, .rocm, .tpu, .neuron, .oneapi => {
+            .tpu => {
+                if (comptime !platforms.isEnabled(.tpu)) unreachable;
                 const element_type = pjrtx.bufferTypeFromDtype(dtype);
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
             },
-            // CPU always return this layout so avoid complicated logic from .defaultMemoryLayout
-            .cpu => .{
+            .cuda, .rocm, .neuron, .oneapi, .cpu => .{
+                // If this is the default layout on the platform, there is no point calling PJRT
                 .tiled = .{
                     .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
                     .tile_dims = &.{},
@@ -820,4 +822,30 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     log.info("{s} {f} [device={d}]: {d}", .{ name, slice.shape, device_ordinal, slice });
 
     return null;
+}
+
+test "platform defaultMemoryLayout is boring" {
+    const platform = zml.testing.env();
+
+    const shapes = [_][]const i64{
+        &.{4096},
+        &.{ 4096, 4096 },
+        &.{ 4096, 4096, 4096 },
+    };
+    for (shapes) |dims| {
+        // Checks that the PJRT client always return the same thing than `platform.defaultMemoryLayout`
+        // This allows to bypass the PJRT calls and the string of pjrt_client.defaultMemoryLayout.
+        const default_layout = try platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, pjrtx.bufferTypeFromDtype(.f32), dims);
+        const mem_layout = default_layout.toMemoryLayout();
+
+        // Note: I'm not just calling platform.defaultMemoryLayout because I'm investigating
+        // wether TPU requires its special branch.
+        try std.testing.expectEqualDeep(mem_layout, pjrt.MemoryLayout{
+            .tiled = .{
+                .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
+                .tile_dims = &.{},
+                .tile_dims_sizes = &.{},
+            },
+        });
+    }
 }
