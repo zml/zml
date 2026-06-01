@@ -105,61 +105,69 @@ pub const Options = struct {
 
 // TextRotaryEmbedding
 pub const TextRotaryEmbedding = struct {
-    // rope_opts: zml.nn.RopeOpts,
     rotary_dim: i64,
-    theta: i64,
-    attention_scaling: f32,
-    // mrope_section: [3]i64,
+    // hardcoded for now
+    theta: f32 = 10000.0,
+    attention_scaling: f32 = 1.0,
 
-    pub fn init(rotary_dim: i64) TextRotaryEmbedding {
+    pub fn init(rotary_dim: i64, theta: f32, attention_scaling: f32) TextRotaryEmbedding {
         return .{
             .rotary_dim = rotary_dim,
+            .theta = theta,
+            .attention_scaling = attention_scaling,
         };
     }
 
     // when I get to the attention layer I will make sure that I compute rotary dim with formula: rotary_dim = round(head_dim * partial_rotary_factor) per layer.
     // also ensure that position_ids is tagged when getting here
+    /// Expects `position_ids` tagged `{.b, .s}` and returns cos/sin tagged `{.b, .s, .hd}`
     pub fn getCosAndSin(self: TextRotaryEmbedding, position_ids: zml.Tensor, dtype: zml.DataType) struct { zml.Tensor, zml.Tensor } {
-        // inverse frequency is a deterministic math value derived from rotary dim
-        const inv_freq = zml.nn.invFreq(self.rotary_dim).withTags(.{.hd});
+        const opts: zml.nn.RopeOpts = .{ .scaling = .{ .default = .{ .rope_theta = self.theta } } };
+        const inv_freq = zml.nn.invFreq(self.rotary_dim, opts).withTags(.{.hd});
 
-        // run freqency over the position id's
-        // outer product so every combination
         const freqs_t = position_ids.convert(.f32).outer(inv_freq);
-
-        // duplicate the frequency table to match RoPE dimension layout
         const emb = zml.Tensor.concatenate(&.{ freqs_t, freqs_t }, .hd);
 
-        // calculate cos, sin precomputed table values for these position ids
-        const cos = emb.cos().convert(dtype).scale(self.attention_scaling);
-        const sin = emb.sin().convert(dtype).scale(self.attention_scaling); // test if i should convert then scale or vice versa
-
+        const cos = emb.cos().scale(self.attention_scaling).convert(dtype);
+        const sin = emb.sin().scale(self.attention_scaling).convert(dtype);
         return .{ cos, sin };
     }
 
-    fn rotateHalf(x: zml.Tensor) zml.Tensor {
-        const half_dim = @divExact(x.dim(-1), 2);
-
+    pub fn rotateHalf(x: zml.Tensor) zml.Tensor {
+        const half_dim = @divExact(x.dim(.hd), 2);
         const x1 = x.slice1d(.hd, .{ .start = 0, .end = half_dim });
         const x2 = x.slice1d(.hd, .{ .start = half_dim, .end = x.dim(.hd) });
         return zml.Tensor.concatenate(&.{ x2.negate(), x1 }, .hd);
     }
 
-    pub fn applyRope(self: TextRotaryEmbedding, x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
-        const q_rot = x.slice1d(.hd, .{ .start = 0, .end = self.rotary_dim });
-        const q_pass = x.slice1d(.hd, .{ .start = 0, .end = x.dim(.hd) });
+    /// Expects `q`/`k` tagged `{.b, .s, .h, .hd}` and `cos`/`sin` tagged `{.b, .s, .hd}`.
+    pub fn applyRope(
+        self: TextRotaryEmbedding,
+        q: zml.Tensor,
+        k: zml.Tensor,
+        cos: zml.Tensor,
+        sin: zml.Tensor,
+    ) struct { zml.Tensor, zml.Tensor } {
+        const q_rot = q.slice1d(.hd, .{ .start = 0, .end = self.rotary_dim });
+        const k_rot = k.slice1d(.hd, .{ .start = 0, .end = self.rotary_dim });
 
-        const k_rot = x.slice1d(.hd, .{ .start = 0, .end = self.rotary_dim });
-        const k_pass = x.slice1d(.hd, .{ .start = 0, .end = x.dim(.hd) });
+        // Insert a head axis so cos/sin broadcast over .h.
+        const cos_b = cos.insertAxes(.hd, .{.h}).broad(q_rot.shape());
+        const sin_b = sin.insertAxes(.hd, .{.h}).broad(q_rot.shape());
 
-        var q_embed = (q_rot * cos) + (rotateHalf(q_rot) * sin);
-        var k_embed = (k_rot * cos) + (rotateHalf(k_rot) * sin);
+        const q_rotated = q_rot.mul(cos_b).add(rotateHalf(q_rot).mul(sin_b));
+        const k_rotated = k_rot.mul(cos_b).add(rotateHalf(k_rot).mul(sin_b));
 
-        // Concatenate back to full shape
-        q_embed = zml.Tensor.concatenate(&.{ q_embed, q_pass }, .hd);
-        k_embed = zml.Tensor.concatenate(&.{ k_embed, k_pass }, .hd);
+        if (self.rotary_dim == q.dim(.hd)) {
+            return .{ q_rotated, k_rotated };
+        }
 
-        return zml.Tensor.concatenate(&.{ q_embed, k_embed }, .hd);
+        const q_pass = q.slice1d(.hd, .{ .start = self.rotary_dim, .end = q.dim(.hd) });
+        const k_pass = k.slice1d(.hd, .{ .start = self.rotary_dim, .end = k.dim(.hd) });
+        return .{
+            zml.Tensor.concatenate(&.{ q_rotated, q_pass }, .hd),
+            zml.Tensor.concatenate(&.{ k_rotated, k_pass }, .hd),
+        };
     }
 };
 
