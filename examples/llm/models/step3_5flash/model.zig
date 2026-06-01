@@ -22,7 +22,7 @@ pub const Config = struct {
 
     use_qk_norm: bool = false,
 
-    moe_layers_enum: []const u8 = "",
+    moe_layers_enum: []const u32 = &.{},
     num_attention_heads: u32,
     num_attention_groups: u32,
     head_dim: u32,
@@ -50,7 +50,7 @@ pub const Config = struct {
     need_fp32_gate: bool = false,
     sink: bool = false,
 
-    layer_types: []const []const u8 = &.{},
+    layer_types: []const AttnType = &.{},
     use_rope_layers: []const u32 = &.{},
 
     num_nextn_predict_layers: u32 = 0,
@@ -90,21 +90,422 @@ pub const Config = struct {
     }
 };
 
+/// Per-layer attention flavor. Field names match `config.json`'s `layer_types` strings,
+/// so `std.json` can parse the array directly into `[]const AttnType`.
+pub const AttnType = enum {
+    full_attention,
+    sliding_attention,
+};
+
 // Options
 pub const Options = struct {
     sampling_strategy: ?zml.nn.SamplingStrategy,
     max_seq_len: u32,
 };
 
-// LayerType
+// TODO: Model struct. Do we need a LoadedModel?
 
-// Rope
-// - parameters
+// TODO: buffers
 
-// There are some partitioning functions re: KV Cache
+// TODO: Transformer Layer
+
+/// Temporary deep copy of `config.json` for Step 3.5 Flash. TODO: run config through Model struct and remove this deep copy
+pub const default_config: Config = .{
+    .architectures = &.{"Step3p5ForCausalLM"},
+    .model_type = "step3p5",
+    .auto_map = .{
+        .AutoConfig = "configuration_step3p5.Step3p5Config",
+        .AutoModelForCausalLM = "modeling_step3p5.Step3p5ForCausalLM",
+    },
+    .rope_scaling = .{
+        .rope_type = "llama3",
+        .factor = 2.0,
+        .original_max_position_embeddings = 131072,
+        .low_freq_factor = 1.0,
+        .high_freq_factor = 32.0,
+    },
+    .yarn_only_types = &.{"full_attention"},
+    .hidden_size = 4096,
+    .intermediate_size = 11264,
+    .num_hidden_layers = 48,
+    .max_seq_len = 262144,
+    .vocab_size = 128896,
+    .torch_dtype = "bfloat16",
+    .use_qk_norm = true,
+    .moe_layers_enum = "3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44",
+    .num_attention_heads = 64,
+    .num_attention_groups = 8,
+    .head_dim = 128,
+    .use_moe = true,
+    .moe_num_experts = 288,
+    .moe_top_k = 8,
+    .moe_intermediate_size = 1280,
+    .share_expert_dim = 1280,
+    .moe_layer_offset = 0,
+    .moe_every_n_layer = 1,
+    .norm_expert_weight = true,
+    .moe_router_activation = "sigmoid",
+    .moe_router_scaling_factor = 3.0,
+    .att_impl_type = "GQA",
+    .tie_word_embeddings = false,
+    .rope_theta = &.{
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+    },
+    .use_head_wise_attn_gate = true,
+    .sliding_window = 512,
+    .use_moe_router_bias = true,
+    .need_fp32_gate = true,
+    .sink = false,
+    .layer_types = &.{
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+    },
+    .use_rope_layers = &.{},
+    .num_nextn_predict_layers = 3,
+    .partial_rotary_factors = &.{
+        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
+        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
+        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
+        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
+        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
+        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
+    },
+    .attention_other_setting = .{
+        .attention_type = "sliding_attention",
+        .num_attention_heads = 96,
+        .num_attention_groups = 8,
+        .head_dim = 128,
+        .true_head_dim = 128,
+    },
+    .swiglu_limits = &.{
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 7.0, 7.0, 0.0, 0.0, 0.0,
+    },
+    .swiglu_limits_shared = &.{
+        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 16.0, 0.0, 0.0, 0.0,
+    },
+    .zero_centered = true,
+    .max_position_embeddings = 262144,
+};
+
+// TODO: Attention struct wrapping SelfAttn and SwAttn
+pub const SelfAttn = struct {
+    layer_idx: usize,
+    enable_sliding_window: bool,
+
+    q_proj: zml.nn.Linear,
+    k_proj: zml.nn.Linear,
+    v_proj: zml.nn.Linear,
+    o_proj: zml.nn.Linear,
+    g_proj: zml.nn.Linear,
+
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
+
+    q_size: i64,
+    kv_size: i64,
+
+    head_dim: i64,
+    scaling: f32,
+
+    num_q_heads: i64,
+    num_kv_heads: i64,
+    num_kv_groups: i64,
+    rotary_dim: i64,
+    rotary_emb: TextRotaryEmbedding,
+
+    // do we need initProj
+    fn initProj(store: zml.io.TensorStore.View, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
+        return .init(
+            store.createTensor("weight", .{ .dout, .d }, partitions),
+            store.maybeCreateTensor("bias", .{.dout}, bias_partitions),
+            .d,
+        );
+    }
+
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !SelfAttn {
+        // Layers past the configured count are MTP/speculative blocks and use the SWA shape.
+        const kind: LayerType = if (layer_idx < default_config.layer_types.len)
+            default_config.layer_types[layer_idx]
+        else
+            .sliding_attention;
+        const is_full = kind == .full_attention;
+
+        const num_q_heads: i64 = @intCast(if (is_full)
+            default_config.num_attention_heads
+        else
+            (default_config.attention_other_setting orelse unreachable).num_attention_heads);
+        const num_kv_heads: i64 = @intCast(default_config.num_attention_groups);
+        const head_dim: i64 = @intCast(default_config.head_dim);
+
+        // partial_rotary_factor * head_dim: FULL=0.5 (=> 64), SWA=1.0 (=> 128).
+        const rotary_idx = @min(layer_idx, default_config.partial_rotary_factors.len - 1);
+        const rotary_dim: i64 = @intFromFloat(
+            default_config.partial_rotary_factors[rotary_idx] * @as(f32, @floatFromInt(default_config.head_dim)),
+        );
+
+        const rope_idx = @min(layer_idx, default_config.rope_theta.len - 1);
+        const rs = default_config.rope_scaling;
+        const rope_scaling: zml.nn.RopeOpts.Scaling = .{ .llama3 = .{
+            .factor = rs.factor,
+            .high_freq_factor = rs.high_freq_factor,
+            .low_freq_factor = rs.low_freq_factor,
+            .original_max_position_embeddings = rs.original_max_position_embeddings,
+            .rope_theta = default_config.rope_theta[rope_idx],
+        } };
+
+        return .{
+            .layer_idx = layer_idx,
+            .num_q_heads = num_q_heads,
+            .num_kv_heads = num_kv_heads,
+            .enable_sliding_window = !is_full,
+            .head_dim = head_dim,
+            .num_kv_groups = @divExact(num_q_heads, num_kv_heads),
+            .rotary_dim = rotary_dim,
+            .rotary_emb = .init(rotary_dim, rope_scaling, 1.0),
+            .q_size = num_q_heads * head_dim,
+            .kv_size = num_kv_heads * head_dim,
+            .scaling = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
+            .q_proj = initProj(store.withPrefix("q_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .k_proj = initProj(store.withPrefix("k_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .v_proj = initProj(store.withPrefix("v_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .o_proj = initProj(store.withPrefix("o_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .g_proj = initProj(store.withPrefix("g_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            // Step 3.5 doesn't expose rms_norm_eps in its config; HF reference uses 1e-5.
+            .q_norm = .init(store.withPrefix("q_norm"), 1e-5),
+            .k_norm = .init(store.withPrefix("k_norm"), 1e-5),
+        };
+    }
+
+    // unloadBuffers
+    pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
+        self.q_proj.weight.deinit();
+        if (self.q_proj.bias) |*b| b.deinit();
+        self.k_proj.weight.deinit();
+        if (self.k_proj.bias) |*b| b.deinit();
+        self.v_proj.weight.deinit();
+        if (self.v_proj.bias) |*b| b.deinit();
+        self.o_proj.weight.deinit();
+        if (self.o_proj.bias) |*b| b.deinit();
+        self.g_proj.weight.deinit();
+        if (self.g_proj.bias) |*b| b.deinit();
+        RmsNorm.unloadBuffers(&self.q_norm);
+        RmsNorm.unloadBuffers(&self.k_norm);
+    }
+
+    // project Q, Gate
+    // Step 3.5 Flash keeps q and gate as separate projections (q_proj and g_proj). q_proj outputs num_q_heads * head_dim (= 12288 for layer 30).
+    // g_proj is a head-wise attention gate: one scalar per query head (dout = num_q_heads), broadcast over .hd and applied to the per-head attention output before merging heads.
+    fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        const q = self.q_proj.forward(x)
+            .splitAxis(.dout, .{ .h = self.num_q_heads, .hd = self.head_dim });
+
+        const gate = self.g_proj.forward(x).rename(.{ .dout = .h });
+
+        return .{ q, gate };
+    }
+
+    fn projectKV(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        const k = self.k_proj.forward(x)
+            .splitAxis(.dout, .{
+            .h = self.num_kv_heads,
+            .hd = self.head_dim,
+        });
+
+        const v = self.v_proj.forward(x)
+            .splitAxis(.dout, .{
+            .h = self.num_kv_heads,
+            .hd = self.head_dim,
+        });
+
+        return .{ k, v };
+    }
+
+    pub fn forward(
+        self: SelfAttn,
+        x: zml.Tensor,
+        token_index: zml.Tensor,
+        // kv_cache: zml.Tensor,
+    ) struct { zml.Tensor } {
+        const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
+        var q, const gate = self.projectQAndGate(input);
+        var k, var v = self.projectKV(input);
+
+        q = self.q_norm.forward(q, .hd);
+        k = self.k_norm.forward(k, .hd);
+
+        const dtype = q.dtype();
+        // see how long the sequence is? what is x.dim(.s) for?
+        const position_ids = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
+
+        const cos, const sin = self.rotary_emb.getCosAndSin(position_ids, dtype);
+
+        q = self.rotary_emb.applyRope(q, cos, sin);
+        k = self.rotary_emb.applyRope(k, cos, sin);
+
+        q = q.rename(.{ .s = .q });
+        k = k.rename(.{ .s = .k });
+        v = v.rename(.{ .s = .k });
+
+        // The vanilla attention expects a scalar start index into the KV
+        // sequence; the recorded `cache_position` is the full per-token
+        // positions array, so take its first element.
+        const attn_start = token_index.slice1d(0, .{ .start = 0, .end = 1 });
+
+        const attn_output = zml.attention.attention.attention(
+            q,
+            k,
+            v,
+            attn_start,
+            zml.attention.attention.Metadata.init(.fromBackend(.vanilla, input.dim(.s), self.num_q_heads)),
+            zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
+        );
+
+        // Head-wise gate: sigmoid(gate) is {b, s, h}; broadcast over .hd and
+        // apply before merging heads and o_proj.
+        const gate_b = gate.sigmoid().rename(.{ .s = .q }).broad(attn_output.shape());
+        const gated_attn = attn_output.mul(gate_b);
+
+        const projected_output = self.o_proj.forward(
+            gated_attn.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s }),
+        );
+
+        return .{projected_output};
+    }
+
+    pub const Stages = struct {
+        q_proj: zml.Tensor,
+        k_proj: zml.Tensor,
+        v_proj: zml.Tensor,
+        g_proj: zml.Tensor,
+        q_norm: zml.Tensor,
+        k_norm: zml.Tensor,
+        // HF dumper records q/k pre-rope in [b,h,s,hd] layout (rope.q_in, rope.k_in)
+        q_pre_rope_hf: zml.Tensor,
+        k_pre_rope_hf: zml.Tensor,
+        // cos/sin in HF layout [1,s,hd]
+        cos: zml.Tensor,
+        sin: zml.Tensor,
+        // post-rope, HF layout [b,h,s,hd] (rope.q_embed, rope.k_embed)
+        q_rope_hf: zml.Tensor,
+        k_rope_hf: zml.Tensor,
+        attn: zml.Tensor,
+        gate_sig: zml.Tensor,
+        gated: zml.Tensor,
+        // input to o_proj: merged head output [b,s,h*hd]
+        o_proj_in: zml.Tensor,
+        out: zml.Tensor,
+    };
+
+    pub fn forwardStages(self: SelfAttn, x: zml.Tensor, token_index: zml.Tensor) Stages {
+        const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
+
+        const q_proj_raw = self.q_proj.forward(input);
+        const k_proj_raw = self.k_proj.forward(input);
+        const v_proj_raw = self.v_proj.forward(input);
+        const g_proj_raw = self.g_proj.forward(input);
+
+        var q = q_proj_raw.splitAxis(.dout, .{ .h = self.num_q_heads, .hd = self.head_dim });
+        var k = k_proj_raw.splitAxis(.dout, .{ .h = self.num_kv_heads, .hd = self.head_dim });
+        var v = v_proj_raw.splitAxis(.dout, .{ .h = self.num_kv_heads, .hd = self.head_dim });
+        const gate = g_proj_raw.rename(.{ .dout = .h });
+
+        const q_after_norm = self.q_norm.forward(q, .hd);
+        const k_after_norm = self.k_norm.forward(k, .hd);
+        q = q_after_norm;
+        k = k_after_norm;
+
+        const q_pre_rope_hf = q.transpose(.{ .b, .h, .s, .hd });
+        const k_pre_rope_hf = k.transpose(.{ .b, .h, .s, .hd });
+
+        const dtype = q.dtype();
+        const position_ids = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
+        const cos_raw, const sin_raw = self.rotary_emb.getCosAndSin(position_ids, dtype);
+        const cos = cos_raw.insertAxes(0, .{.b});
+        const sin = sin_raw.insertAxes(0, .{.b});
+
+        const q_rope = self.rotary_emb.applyRope(q, cos_raw, sin_raw);
+        const k_rope = self.rotary_emb.applyRope(k, cos_raw, sin_raw);
+
+        const q_rope_hf = q_rope.transpose(.{ .b, .h, .s, .hd });
+        const k_rope_hf = k_rope.transpose(.{ .b, .h, .s, .hd });
+
+        const q_for_attn = q_rope.rename(.{ .s = .q });
+        const k_for_attn = k_rope.rename(.{ .s = .k });
+        const v_for_attn = v.rename(.{ .s = .k });
+
+        const attn_start = token_index.slice1d(0, .{ .start = 0, .end = 1 });
+        const attn_output = zml.attention.attention.attention(
+            q_for_attn,
+            k_for_attn,
+            v_for_attn,
+            attn_start,
+            zml.attention.attention.Metadata.init(.fromBackend(.vanilla, input.dim(.s), self.num_q_heads)),
+            zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
+        );
+
+        const gate_sig = gate.sigmoid().rename(.{ .s = .q });
+        const gated = attn_output.mul(gate_sig.broad(attn_output.shape()));
+
+        const o_proj_in = gated.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
+        const out = self.o_proj.forward(o_proj_in);
+
+        return .{
+            .q_proj = q_proj_raw,
+            .k_proj = k_proj_raw,
+            .v_proj = v_proj_raw,
+            .g_proj = g_proj_raw,
+            .q_norm = q_after_norm,
+            .k_norm = k_after_norm,
+            .q_pre_rope_hf = q_pre_rope_hf,
+            .k_pre_rope_hf = k_pre_rope_hf,
+            .cos = cos,
+            .sin = sin,
+            .q_rope_hf = q_rope_hf,
+            .k_rope_hf = k_rope_hf,
+            .attn = attn_output,
+            .gate_sig = gate_sig,
+            .gated = gated,
+            .o_proj_in = o_proj_in,
+            .out = out,
+        };
+    }
+};
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 // TextRotaryEmbedding
+<<<<<<< HEAD
 =======
     input_layernorm: RmsNorm,
     attn: Attn,
@@ -120,7 +521,11 @@ pub const Options = struct {
             .input_layernorm = RmsNorm.init(store.withPrefix("input_layernorm")),
             .attn = try Attn.init(store.withPrefix("self_attn"), layer_idx, attention_type),
             .attention_type = attention_type,
+<<<<<<< HEAD
             .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx) } else .{ .mlp = .init(store.withPrefix("mlp"), default_config.swiglu_limits[layer_idx]) },
+=======
+            .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx) } else .{ .mlp = .init(store.withPrefix("mlp"), swigluLimitFor(layer_idx)) },
+>>>>>>> fc95f419 (examples/llm: moe and attention type defer to config)
             .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e5),
         };
     }
@@ -876,9 +1281,165 @@ pub const Router = struct {
 
         return .{ normalized, topk_ids };
     }
+=======
+=======
+>>>>>>> 6b38e42b (examples/llm: test attention with LLM generated tests)
+pub const TextRotaryEmbedding = struct {
+    rotary_dim: i64,
+    scaling: zml.nn.RopeOpts.Scaling,
+    attention_scaling: f32 = 1.0,
+
+    pub fn init(rotary_dimension: i64, scaling: zml.nn.RopeOpts.Scaling, attention_scaling: f32) TextRotaryEmbedding {
+        return .{
+            .rotary_dim = rotary_dimension,
+            .scaling = scaling,
+            .attention_scaling = attention_scaling,
+        };
+    }
+
+    /// Expects `position_ids` tagged `{.b, .s}` and returns cos/sin tagged `{.b, .s, .hd}`
+    pub fn getCosAndSin(self: TextRotaryEmbedding, position_ids: zml.Tensor, dtype: zml.DataType) struct { zml.Tensor, zml.Tensor } {
+        const opts: zml.nn.RopeOpts = .{ .scaling = self.scaling };
+        const inv_freq = zml.nn.invFreq(self.rotary_dim, opts).withTags(.{.hd});
+
+        const freqs_t = position_ids.convert(.f32).outer(inv_freq);
+        const emb = zml.Tensor.concatenate(&.{ freqs_t, freqs_t }, .hd);
+
+        const cos = emb.cos().scale(self.attention_scaling).convert(dtype);
+        const sin = emb.sin().scale(self.attention_scaling).convert(dtype);
+        return .{ cos, sin };
+    }
+
+    pub fn rotateHalf(x: zml.Tensor) zml.Tensor {
+        const half_dim = @divExact(x.dim(.hd), 2);
+        const x1 = x.slice1d(.hd, .{ .start = 0, .end = half_dim });
+        const x2 = x.slice1d(.hd, .{ .start = half_dim, .end = x.dim(.hd) });
+        return zml.Tensor.concatenate(&.{ x2.negate(), x1 }, .hd);
+    }
+
+    /// Expects `q`/`k` tagged `{.b, .s, .h, .hd}` and `cos`/`sin` tagged `{.b, .s, .hd}`.
+    pub fn applyRope(
+        self: TextRotaryEmbedding,
+        x: zml.Tensor,
+        cos: zml.Tensor,
+        sin: zml.Tensor,
+    ) zml.Tensor {
+        const x_rot = x.slice1d(.hd, .{ .start = 0, .end = self.rotary_dim });
+
+        // Insert head axis so cos/sin broadcast over .h.
+        const cos_b = cos.insertAxes(.hd, .{.h}).broad(x_rot.shape());
+        const sin_b = sin.insertAxes(.hd, .{.h}).broad(x_rot.shape());
+
+        const x_rotated = x_rot.mul(cos_b).add(rotateHalf(x_rot).mul(sin_b));
+
+        if (self.rotary_dim == x.dim(.hd)) {
+            return x_rotated;
+        }
+
+<<<<<<< HEAD
+<<<<<<< HEAD
+<<<<<<< HEAD
+    //     .rotary_embed = .init(rotary_dim, config.text_config.rope_parameters.rope_theta, config.text_config.rope_parameters.mrope_section),
+>>>>>>> f264d602 (examples/llm: RoPE getCosAndSin)
+=======
+        return zml.Tensor.concatenate(&.{ q_embed, k_embed }, .hd);
+=======
+        const q_pass = q.slice1d(.hd, .{ .start = self.rotary_dim, .end = q.dim(.hd) });
+        const k_pass = k.slice1d(.hd, .{ .start = self.rotary_dim, .end = k.dim(.hd) });
+        return .{
+            zml.Tensor.concatenate(&.{ q_rotated, q_pass }, .hd),
+            zml.Tensor.concatenate(&.{ k_rotated, k_pass }, .hd),
+        };
+>>>>>>> a636246d (examples/llm: RoPE & RoPE tests)
+=======
+        const x_pass = x.slice1d(.hd, .{ .start = self.rotary_dim, .end = x.dim(.hd) });
+
+        return zml.Tensor.concatenate(&.{ x_rotated, x_pass }, .hd);
+>>>>>>> 3b1e500f (examples/llm: wip attn)
+    }
+>>>>>>> 692a2d1e (examples/llm: integrate RoPE)
 };
 
-// Router
+// TODO: KV Cache
+
+pub const Mlp = struct {
+    up_proj: zml.nn.Linear, // (dim -> hidden_dim)
+    gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
+    down_proj: zml.nn.Linear, // (hidden_dim -> dim)
+    limit: ?i32,
+
+    pub fn init(store: zml.io.TensorStore.View, swiglu_limit: ?i32) Mlp {
+        return .{
+            .up_proj = .init(
+                store.createTensor("up_proj.weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }),
+                null,
+                .d,
+            ),
+            .gate_proj = .init(
+                store.createTensor("gate_proj.weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }),
+                null,
+                .d,
+            ),
+            .down_proj = .init(
+                store.createTensor("down_proj.weight", .{ .d, .dout }, .{ .d = .replicated, .dout = .replicated }),
+                null,
+                .dout,
+            ),
+            .limit = swiglu_limit,
+        };
+    }
+
+    pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
+        // Add tags to input before providing to our layer.
+        const input = x.withTags(.{ .b, .s, .d });
+
+        var up_proj = self.up_proj.forward(input);
+        var gate = self.gate_proj.forward(input);
+        gate = gate.silu();
+
+        // Step 3.5 Flash clamps gate projection asymmetrically
+        if (self.limit) |limit| {
+            if (limit != 0) {
+                const lim_f = @as(f32, @floatFromInt(limit));
+                const max_t = zml.Tensor.scalar(lim_f, gate.dtype());
+                const min_t = zml.Tensor.scalar(-lim_f, gate.dtype());
+
+                // Step 3.5 Flash has asymmetric clamping of gate projection
+                gate = gate.minimum(max_t);
+                up_proj = up_proj.clamp(min_t, max_t);
+            }
+        }
+        return self.down_proj.forward(gate.mul(up_proj));
+    }
+};
+
+// RmsNorm
+pub const RmsNorm = struct {
+    weight: zml.Tensor,
+    eps: f32,
+
+    pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNorm {
+        return .{
+            .weight = store.createTensor("weight", .{.d}, .{ .d = .replicated }),
+            .eps = eps,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
+        self.weight.deinit();
+    }
+
+    /// L2 normalization of input tensor along the given axis.
+    /// Step 3.5 Flash uses offset-style RMSNorm: the effective scale is `1 + weight`,
+    /// not just `weight`.
+    pub fn forward(self: RmsNorm, input: zml.Tensor, comptime axis: anytype) zml.Tensor {
+        const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{axis});
+        const normalized = zml.nn.rmsNorm(x, axis, self.eps);
+        const scale = self.weight.convert(.f32).addConstant(1).convert(x.dtype()).withTags(.{axis});
+        return normalized.mul(scale.broad(normalized.shape()));
+    }
+};
+
 pub const Router = struct {
     gate: zml.nn.Linear, // no bias inside the Linear; router_bias is applied post-sigmoid
     router_bias: zml.Tensor,
@@ -1059,7 +1620,14 @@ pub const Moe = struct {
             .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
         );
 
+        const limit: ?f32 = blk: {
+            if (layer_idx >= default_config.swiglu_limits.len) break :blk null;
+            const v = default_config.swiglu_limits[layer_idx];
+            break :blk if (v == 0) null else v;
+        };
+
         return .{
+<<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
             // swiglu limit temporarily hardcoded to 0
@@ -1091,6 +1659,14 @@ pub const Moe = struct {
             .down_proj = down_proj_tensor,
             .router = .init(store, 8),
 >>>>>>> a61302f2 (examples/llm: init MoE)
+=======
+            .up_proj = up_proj_tensor,
+            .gate_proj = gate_proj_tensor,
+            .down_proj = down_proj_tensor,
+            .router = .init(store, default_config.moe_top_k, default_config.moe_router_scaling_factor),
+            .layer_idx = layer_idx,
+            .limit = limit,
+>>>>>>> 597ae5ed (examples/llm: remove hardcoded values and defer to config)
         };
     }
 
@@ -1117,18 +1693,17 @@ pub const Moe = struct {
 <<<<<<< HEAD
     fn forwardTriton(self: Moe, x: zml.Tensor) zml.Tensor {
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
+<<<<<<< HEAD
 
 =======
 >>>>>>> 844fa04b (examples/llm: wip router forward)
         // collect topk weights and indices (renormalized, unscaled)
+=======
+>>>>>>> 6b38e42b (examples/llm: test attention with LLM generated tests)
         const routing_scores, const topk_ids = self.router.forward(input);
-
-        // apply routed_scaling_factor here, matching reference's
-        // `routing_weights = routing_weights * self.routed_scaling_factor`
         const scaled = routing_scores.scale(self.router.routed_scaling_factor);
 <<<<<<< HEAD
 
-        // Triton MoE backend expects the top-k axis tagged as `.top_expert`.
         const topk_ids_tensor = topk_ids.rename(.{ .topk = .top_expert });
         const scaled_tensor = scaled.rename(.{ .topk = .top_expert });
 <<<<<<< HEAD
@@ -1141,16 +1716,14 @@ pub const Moe = struct {
         const topk_ids_te = topk_ids.rename(.{ .topk = .top_expert });
         const scaled_te = scaled.rename(.{ .topk = .top_expert });
 
-        // concat the gate and up
         const gate_up_proj = zml.Tensor.concatenate(&.{ self.gate_proj, self.up_proj }, .dout).rename(.{ .dout = .out, .d = .in });
-
-        // we must rename down proj as well
         const down_proj = self.down_proj.rename(.{ .dout = .out, .d = .in });
 
-        // hardcoded zml.moe.metadata, zml.moe.parameters
+        // TODO: hardcoded zml.moe.metadata, zml.moe.parameters
         const moe_metadata = zml.moe.Metadata.init(.{ .triton = .{} });
         const moe_parameters = zml.moe.Parameters.init(.{ .triton = .{ .num_experts_per_tok = self.router.num_experts_per_tok, .activation = .silu } });
 
+<<<<<<< HEAD
 <<<<<<< HEAD
         // in Moe.forward, before forwardMoe
         topk_ids.print("zml_topk_ids");
@@ -1161,6 +1734,8 @@ pub const Moe = struct {
 
         // get all expert outputs as tensor via fused triton kernel instead of Python loop
         // NOTE: swiglu limit not considered. may have to edit
+=======
+>>>>>>> 6b38e42b (examples/llm: test attention with LLM generated tests)
         const moe_output = zml.moe.forwardMoe(
             input,
             topk_ids_tensor,
@@ -1217,6 +1792,7 @@ pub const Moe = struct {
         return acc;
     }
 };
+<<<<<<< HEAD
 =======
 // const Moe = struct {
 //     shared_expert: Mlp,
@@ -1480,7 +2056,7 @@ pub const TransformerLayer = struct {
 
         // Keep the residual stream replicated to avoid repeated gathers before q/k/v.
         const x0_replicated = x0.withPartitioning(.{ .d = .replicated });
-        const x0_normalized = self.input_layernorm.forward(x0_replicated);
+        const x0_normalized = self.input_layernorm.forward(x0_replicated, .d);
         const delta0, const updated_kv_cache = self.self_attn.forward(
             x0_normalized,
             token_index,
@@ -1491,7 +2067,7 @@ pub const TransformerLayer = struct {
 
         // Fully Connected
         const x1 = x0_replicated.add(delta0).withPartitioning(.{ .d = .replicated });
-        const x1_normalized = self.post_attention_layernorm.forward(x1);
+        const x1_normalized = self.post_attention_layernorm.forward(x1, .d);
         const x2 = self.mlp.forward(x1_normalized)
             .rename(.{ .dout = .d })
             .withPartitioning(.{ .d = .replicated })
@@ -1518,14 +2094,13 @@ pub const RmsNorm = struct {
         self.weight.deinit();
     }
 
-    /// L2 normalization of input tensor along .d axis
+    /// L2 normalization of input tensor along the given axis.
     /// Step 3.5 Flash uses offset-style RMSNorm: the effective scale is `1 + weight`,
     /// not just `weight`.
-    pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
-        const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
-        const normalized = zml.nn.rmsNorm(x, .d, self.eps);
-        const scale = self.weight.convert(.f32).addConstant(1).convert(x.dtype()).withTags(.{.d});
-        std.log.warn("normalized={f} scale={f}", .{ normalized.shape(), scale.shape() });
+    pub fn forward(self: RmsNorm, input: zml.Tensor, comptime axis: anytype) zml.Tensor {
+        const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{axis});
+        const normalized = zml.nn.rmsNorm(x, axis, self.eps);
+        const scale = self.weight.convert(.f32).addConstant(1).convert(x.dtype()).withTags(.{axis});
         return normalized.mul(scale.broad(normalized.shape()));
     }
 };
@@ -1583,6 +2158,177 @@ pub const Mlp = struct {
 
 // SwAttn
 
+const num_q_heads: i64 = 96;
+const num_kv_heads: i64 = 8;
+const head_dim: i64 = 128;
+const rotary_dim: i64 = head_dim;
 // SelfAttn
+pub const SelfAttn = struct {
+    // TODO: config
+
+    layer_idx: usize,
+    enable_sliding_window: bool,
+
+    q_proj: zml.nn.Linear,
+    k_proj: zml.nn.Linear,
+    v_proj: zml.nn.Linear,
+    o_proj: zml.nn.Linear,
+    g_proj: zml.nn.Linear,
+
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
+
+    q_size: i64,
+    kv_size: i64,
+
+    head_dim: i64,
+    scaling: f32,
+
+    num_q_heads: i64,
+    num_kv_heads: i64,
+    num_kv_groups: i64,
+    rotary_dim: i64,
+    rotary_emb: TextRotaryEmbedding,
+
+    // do we need initProj
+    fn initProj(store: zml.io.TensorStore.View, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
+        return .init(
+            store.createTensor("weight", .{ .dout, .d }, partitions),
+            store.maybeCreateTensor("bias", .{.dout}, bias_partitions),
+            .d,
+        );
+    }
+
+    // TODO: add config here
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !SelfAttn {
+        return .{
+            .layer_idx = layer_idx,
+            //TODO: hardcoded head
+            .num_q_heads = num_q_heads,
+            .num_kv_heads = num_kv_heads,
+            .enable_sliding_window = false,
+            //TODO: hardcoded head dim
+            .head_dim = head_dim,
+            .num_kv_groups = num_q_heads / num_kv_heads,
+            //TODO: hardcoded rotary emb
+            .rotary_dim = rotary_dim,
+            .rotary_emb = .init(rotary_dim, 10000.0, 1.0),
+            .q_size = num_q_heads * head_dim,
+            .kv_size = num_kv_heads * head_dim,
+            .scaling = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
+            .q_proj = initProj(store.withPrefix("q_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .k_proj = initProj(store.withPrefix("k_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .v_proj = initProj(store.withPrefix("v_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .o_proj = initProj(store.withPrefix("o_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .g_proj = initProj(store.withPrefix("g_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            //TODO: hardcoded eps
+            .q_norm = .init(store.withPrefix("q_norm"), 1e-5),
+            .k_norm = .init(store.withPrefix("k_norm"), 1e-5),
+        };
+    }
+
+    // unloadBuffers
+    pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
+        self.q_proj.weight.deinit();
+        if (self.q_proj.bias) |*b| b.deinit();
+        self.k_proj.weight.deinit();
+        if (self.k_proj.bias) |*b| b.deinit();
+        self.v_proj.weight.deinit();
+        if (self.v_proj.bias) |*b| b.deinit();
+        self.o_proj.weight.deinit();
+        if (self.o_proj.bias) |*b| b.deinit();
+        self.g_proj.weight.deinit();
+        if (self.g_proj.bias) |*b| b.deinit();
+        RmsNorm.unloadBuffers(&self.q_norm);
+        RmsNorm.unloadBuffers(&self.k_norm);
+    }
+
+    // project Q, Gate
+    // Step 3.5 Flash keeps q and gate as separate projections (q_proj and
+    // g_proj). q_proj outputs num_q_heads * head_dim (= 12288 for layer 30).
+    // g_proj is a head-wise attention gate: one scalar per query head
+    // (dout = num_q_heads), broadcast over .hd and applied to the per-head
+    // attention output before merging heads.
+    fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        const q = self.q_proj.forward(x)
+            .splitAxis(.dout, .{ .h = self.num_q_heads, .hd = self.head_dim });
+
+        const gate = self.g_proj.forward(x).rename(.{ .dout = .h });
+
+        return .{ q, gate };
+    }
+
+    // project KV
+    fn projectKV(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        const k = self.k_proj.forward(x)
+            .splitAxis(.dout, .{
+            .h = self.num_kv_heads,
+            .hd = self.head_dim,
+        });
+
+        const v = self.v_proj.forward(x)
+            .splitAxis(.dout, .{
+            .h = self.num_kv_heads,
+            .hd = self.head_dim,
+        });
+
+        return .{ k, v };
+    }
+
+    // forward
+    pub fn forward(
+        self: SelfAttn,
+        x: zml.Tensor,
+        token_index: zml.Tensor,
+        // kv_cache: zml.Tensor,
+    ) struct { zml.Tensor } {
+        const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
+        var q, const gate = self.projectQAndGate(input);
+        var k, var v = self.projectKV(input);
+
+        q = self.q_norm.forward(q, .hd);
+        k = self.k_norm.forward(k, .hd);
+
+        const dtype = q.dtype();
+        // see how long the sequence is? what is x.dim(.s) for?
+        const position_ids = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
+
+        const cos, const sin = self.rotary_emb.getCosAndSin(position_ids, dtype);
+
+        q = self.rotary_emb.applyRope(q, cos, sin);
+        k = self.rotary_emb.applyRope(k, cos, sin);
+
+        q = q.rename(.{ .s = .q });
+        k = k.rename(.{ .s = .k });
+        v = v.rename(.{ .s = .k });
+
+        // The vanilla attention expects a scalar start index into the KV
+        // sequence; the recorded `cache_position` is the full per-token
+        // positions array, so take its first element.
+        const attn_start = token_index.slice1d(0, .{ .start = 0, .end = 1 });
+
+        const attn_output = zml.attention.attention.attention(
+            q,
+            k,
+            v,
+            attn_start,
+            zml.attention.attention.Metadata.init(.fromBackend(.vanilla, input.dim(.s), self.num_q_heads)),
+            zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
+        );
+
+        // Head-wise gate: sigmoid(gate) is {b, s, h}; broadcast over .hd and
+        // apply before merging heads and o_proj.
+        const gate_b = gate.sigmoid().rename(.{ .s = .q }).broad(attn_output.shape());
+        const gated_attn = attn_output.mul(gate_b);
+
+        const projected_output = self.o_proj.forward(
+            gated_attn.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s }),
+        );
+
+        return .{projected_output};
+    }
+};
 
 // KvCache
+=======
+>>>>>>> 6b38e42b (examples/llm: test attention with LLM generated tests)
