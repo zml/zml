@@ -86,14 +86,15 @@ class Step3p5RotaryEmbedding(nn.Module):
     @torch.no_grad()
     @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(
-            position_ids.shape[0], -1, 1).to(x.device)
-        position_ids_expanded = position_ids[:, None, :].float().to(x.device)
+        # inv_freq_expanded = self.inv_freq[None, :, None].float().expand(
+        #     position_ids.shape[0], -1, 1).to(x.device)
+        # position_ids_expanded = position_ids[:, None, :].float().to(x.device)
 
-        device_type = x.device.type if isinstance(
-            x.device.type, str) and x.device.type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type,
-                            enabled=False):  # Force float32
+        # device_type = x.device.type if isinstance(
+        #     x.device.type, str) and x.device.type != "mps" else "cpu"
+        # with torch.autocast(device_type=device_type,
+        #                     enabled=False):  # Force float32
+            
             freqs = (inv_freq_expanded.float()
                      @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
@@ -367,6 +368,7 @@ class Step3p5RMSNorm(nn.Module):
         normed = x * torch.rsqrt(variance + self.variance_epsilon)
         normed = normed * (self.weight.float() + 1)
         return normed.to(dtype)
+
 class Step3p5Attention(nn.Module):
 
     def __init__(self, config: Step3p5Config, layer_idx):
@@ -469,11 +471,11 @@ class Step3p5Attention(nn.Module):
             **kwargs,
         )
         attn_output = attn_output.reshape(*input_shape, -1)
-        if self.use_head_wise_attn_gate:
-            output = attn_output.view(
-                *attn_output.shape[:-1], self.num_attention_heads,
-                self.head_dim) * gate_states.unsqueeze(-1).sigmoid()
-            attn_output = output.view(*attn_output.shape)
+
+        output = attn_output.view(
+            *attn_output.shape[:-1], self.num_attention_heads,
+            self.head_dim) * gate_states.unsqueeze(-1).sigmoid()
+        attn_output = output.view(*attn_output.shape)
         attn_output = self.o_proj(attn_output)
 
         return attn_output, attn_weights

@@ -111,9 +111,10 @@ pub const TextRotaryEmbedding = struct {
     attention_scaling: f32 = 1.0,
 
     pub fn init(rotary_dim: i64, theta: f32, attention_scaling: f32) TextRotaryEmbedding {
+        _ = theta; // autofix
         return .{
             .rotary_dim = rotary_dim,
-            .theta = theta,
+            // .theta = config.rope_theta.copy()[], we need a deep copy of rope_theta[layer_idx]
             .attention_scaling = attention_scaling,
         };
     }
@@ -151,7 +152,7 @@ pub const TextRotaryEmbedding = struct {
         const q_rot = q.slice1d(.hd, .{ .start = 0, .end = self.rotary_dim });
         const k_rot = k.slice1d(.hd, .{ .start = 0, .end = self.rotary_dim });
 
-        // Insert a head axis so cos/sin broadcast over .h.
+        // Insert head axis so cos/sin broadcast over .h.
         const cos_b = cos.insertAxes(.hd, .{.h}).broad(q_rot.shape());
         const sin_b = sin.insertAxes(.hd, .{.h}).broad(q_rot.shape());
 
@@ -681,5 +682,73 @@ pub const Mlp = struct {
 // SwAttn
 
 // SelfAttn
+pub const SelfAttn = struct {
+    // TODO: config
+
+    layer_idx: usize,
+    enable_sliding_window: bool,
+
+    q_proj: zml.nn.Linear,
+    k_proj: zml.nn.Linear,
+    v_proj: zml.nn.Linear,
+    o_proj: zml.nn.Linear,
+    g_proj: zml.nn.Linear,
+
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
+
+    q_size: i64,
+    kv_size: i64,
+
+    head_dim: i64,
+    scaling: i64,
+
+    num_heads: i64,
+    num_kv_heads: i64,
+    num_kv_groups: i64,
+    rotary_dim: i64,
+    rotary_emb: TextRotaryEmbedding,
+
+    // do we need initProj
+    fn initProj(store: zml.io.TensorStore.View, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
+        return .init{
+            store.createTensor("weight", .{ .dout, .d }, partitions),
+            store.maybeCreateTensor("bias", .{.dout}, bias_partitions),
+            .d,
+        };
+    }
+
+    // add config here
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !SelfAttn {
+        // TODO: un hardcode
+        return .{
+            .layer_id = layer_idx,
+            .num_attention_heads = 8,
+            .num_kv_heads = 8,
+            .enable_sliding_window = false,
+            .head_dim = 4096 / .num_attention_heads,
+            .num_kv_groups = .num_attention_heads / .num_kv_heads,
+            .rotary_emb = TextRotaryEmbedding(1.0, 10000.0, 1.0),
+            .q_size = .num_attention_heads * .head_dim,
+            .kv_size = .num_kv_heads * .head_dim,
+            .scaling = .head_dim ** -0.5,
+            .q_proj = initProj(store.withPrefix("q_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .k_proj = initProj(store.withPrefix("k_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .v_proj = initProj(store.withPrefix("v_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .o_proj = initProj(store.withPrefix(.q_size), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .g_proj = initProj(store.withPrefix("g_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .q_norm = RmsNorm(store.withPrefix("q_norm")),
+            .k_norm = RmsNorm(store.withPrefix("k_norm")),
+        };
+    }
+
+    // unloadBuffers
+
+    // project Q, Gate
+
+    // project KV
+
+    // forward
+};
 
 // KvCache
