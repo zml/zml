@@ -351,7 +351,10 @@ pub const Platform = struct {
             .cpu,
         };
         return for (ordered_targets) |target| {
-            break init(allocator, io, target, options) catch continue;
+            break init(allocator, io, target, options) catch |err| {
+                log.warn("platform {} unavailable: {}", .{ target, err });
+                continue;
+            };
         } else error.Unavailable;
     }
 

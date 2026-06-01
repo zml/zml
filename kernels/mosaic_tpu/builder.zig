@@ -259,6 +259,78 @@ pub const Value = struct {
 };
 
 // =============================================================================
+// Transform stub builder -- specialized helper for `transform_N` bodies.
+// =============================================================================
+
+pub const TransformStubBuilder = struct {
+    arena: std.mem.Allocator,
+    ctx: *mlir.Context,
+    block: *mlir.Block,
+    program_ids: []const Value,
+    prefetch_refs: []const Value,
+
+    pub fn loc(self: *const TransformStubBuilder) *const mlir.Location {
+        return .unknown(self.ctx);
+    }
+
+    pub fn emit(self: *TransformStubBuilder, op: *mlir.Operation) Value {
+        _ = op.appendTo(self.block);
+        return .{ .inner = op.result(0), .kernel = null };
+    }
+
+    pub fn programId(self: *const TransformStubBuilder, i: usize) Value {
+        return self.program_ids[i];
+    }
+
+    pub fn prefetchRef(self: *const TransformStubBuilder, i: usize) Value {
+        return self.prefetch_refs[i];
+    }
+
+    pub fn cIndex(self: *TransformStubBuilder, value: i64) Value {
+        return self.emit(arith.constant_index(self.ctx, value, self.loc()));
+    }
+
+    pub fn indexCast(self: *TransformStubBuilder, src: Value, target: *const mlir.Type) Value {
+        return self.emit(arith.index_cast(self.ctx, src.inner, target, self.loc()));
+    }
+
+    pub fn toIndex(self: *TransformStubBuilder, src: Value) Value {
+        return self.indexCast(src, mlir.Type.index(self.ctx));
+    }
+
+    fn innerSlice(self: *TransformStubBuilder, values: []const Value) []const *const mlir.Value {
+        const out = self.arena.alloc(*const mlir.Value, values.len) catch @panic("TransformStubBuilder.innerSlice OOM");
+        for (values, 0..) |v, i| out[i] = v.inner;
+        return out;
+    }
+
+    pub fn scalarLoad(self: *TransformStubBuilder, ref: Value, indices: []const Value) Value {
+        return self.emit(memref.load(self.ctx, ref.inner, self.innerSlice(indices), .{}, self.loc()));
+    }
+
+    pub fn subi(self: *TransformStubBuilder, lhs: Value, rhs: Value) Value {
+        return self.emit(arith.subi(self.ctx, lhs.inner, rhs.inner, self.loc()));
+    }
+
+    pub fn yield(self: *TransformStubBuilder, values: anytype) []const Value {
+        const T = @TypeOf(values);
+        const info = @typeInfo(T);
+        if (info != .@"struct" or !info.@"struct".is_tuple)
+            @compileError("TransformStubBuilder.yield expects a tuple literal like `.{ v1, v2 }`");
+        const n = info.@"struct".fields.len;
+        const out = self.arena.alloc(Value, n) catch @panic("TransformStubBuilder.yield OOM");
+        inline for (info.@"struct".fields, 0..) |f, i| {
+            if (f.type != Value)
+                @compileError("TransformStubBuilder.yield: every tuple element must be a Value");
+            out[i] = @field(values, f.name);
+        }
+        return out;
+    }
+};
+
+pub const TransformBodyFn = *const fn (tb: *TransformStubBuilder) []const Value;
+
+// =============================================================================
 // Arg spec — describes one function parameter.
 // =============================================================================
 
@@ -325,6 +397,9 @@ pub const ArgSpec = struct {
         /// must match `block_shape.len` (or operand rank if `block_shape`
         /// is `null`).
         transform_returns: ?[]const TransformReturn = null,
+        /// Optional custom transform body emitter. When present, it overrides
+        /// `transform_returns`.
+        transform_body: ?TransformBodyFn = null,
     };
 
     /// One return slot of a `transform_N` body. Mirrors what
@@ -484,6 +559,7 @@ pub const Builder = struct {
         skipped: bool,
         role: ArgSpec.Role,
         transform_returns: ?[]const ArgSpec.TransformReturn = null,
+        transform_body: ?TransformBodyFn = null,
     };
 
     /// Snapshot of the SMEM scalar-prefetch ref types (after the program-ids)
@@ -719,6 +795,7 @@ pub const Builder = struct {
                         .skipped = isSkippedWindowSpace(r.memory_space),
                         .role = r.role,
                         .transform_returns = if (r.window) |w| w.transform_returns else null,
+                        .transform_body = if (r.window) |w| w.transform_body else null,
                     });
                 } else if (r.role == .scalar_prefetch) {
                     try prefetch_types_buf.append(arena_alloc, arg_types[i]);
@@ -752,7 +829,7 @@ pub const Builder = struct {
                     // `bm.has_trivial_window()` in pallas — block_shape ==
                     // operand_shape AND the index_map is the identity
                     // (returns all zeros).
-                    const has_trivial_index_map = if (w.transform_returns) |trs| blk: {
+                    const has_trivial_index_map = if (w.transform_body != null) false else if (w.transform_returns) |trs| blk: {
                         for (trs) |tr| {
                             if (tr != .zero) break :blk false;
                         }
@@ -2176,18 +2253,37 @@ pub const Builder = struct {
             _ = c0.appendTo(block);
 
             const ret_vals = arena_alloc.alloc(*const mlir.Value, rank) catch @panic("OOM");
-            const returns = ra.transform_returns;
-            for (ret_vals, 0..) |*v, i| {
-                if (returns) |r_list| {
-                    if (i < r_list.len) {
-                        v.* = switch (r_list[i]) {
-                            .zero => c0.result(0),
-                            .program_id => |pid| block.argument(pid),
-                        };
-                        continue;
+            if (ra.transform_body) |body| {
+                const program_ids = arena_alloc.alloc(Value, self.grid_dim_count) catch @panic("OOM");
+                for (program_ids, 0..) |*v, i| v.* = .{ .inner = block.argument(i), .kernel = null };
+
+                const prefetch_refs = arena_alloc.alloc(Value, self.prefetch_args.len) catch @panic("OOM");
+                for (prefetch_refs, 0..) |*v, i| v.* = .{ .inner = block.argument(self.grid_dim_count + i), .kernel = null };
+
+                var tb: TransformStubBuilder = .{
+                    .arena = arena_alloc,
+                    .ctx = ctx,
+                    .block = block,
+                    .program_ids = program_ids,
+                    .prefetch_refs = prefetch_refs,
+                };
+                const emitted = body(&tb);
+                std.debug.assert(emitted.len == rank);
+                for (ret_vals, emitted) |*dst, src| dst.* = src.inner;
+            } else {
+                const returns = ra.transform_returns;
+                for (ret_vals, 0..) |*v, i| {
+                    if (returns) |r_list| {
+                        if (i < r_list.len) {
+                            v.* = switch (r_list[i]) {
+                                .zero => c0.result(0),
+                                .program_id => |pid| block.argument(pid),
+                            };
+                            continue;
+                        }
                     }
+                    v.* = c0.result(0);
                 }
-                v.* = c0.result(0);
             }
             _ = func.returns(ctx, ret_vals, unknown_loc).appendTo(block);
 
