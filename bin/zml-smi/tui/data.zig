@@ -6,6 +6,7 @@ pub const DeviceInfo = di.DeviceInfo;
 pub const GpuInfo = di.GpuInfo;
 pub const NeuronInfo = di.NeuronInfo;
 pub const TpuInfo = di.TpuInfo;
+pub const TenstorrentInfo = di.TenstorrentInfo;
 pub const Target = di.Target;
 pub const Targets = smi_info.Targets;
 const hi = smi_info.host_info;
@@ -139,6 +140,13 @@ pub const SystemState = struct {
                     self.history.mem_util[i].push(if (total > 0) used * 100 / total else 0);
                     self.history.temp[i].push(gpu.temperature orelse 0);
                     self.history.power[i].push(gpu.power_mw orelse 0);
+                },
+                .tenstorrent => |*sv| {
+                    // No util/mem-usage telemetry on TT; only temperature + power
+                    // have history, which the device card surfaces as its gauges.
+                    const tt = sv.front().*;
+                    self.history.temp[i].push(tt.temperature orelse 0);
+                    self.history.power[i].push(tt.power_mw orelse 0);
                 },
                 inline else => |*sv| {
                     const info = sv.front().*;

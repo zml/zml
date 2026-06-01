@@ -1,0 +1,53 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "tenstorrent",
+    srcs = [
+        "process.zig",
+        "tenstorrent.zig",
+    ],
+    import_name = "zml-smi/platforms/tenstorrent",
+    main = "metrics.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tt_umd_hdrs",
+        "//bin/zml-smi/collector",
+        "//bin/zml-smi/info",
+        "//bin/zml-smi/utils:double_buffer",
+        "//bin/zml-smi/utils:dynlib",
+        "//bin/zml-smi/utils:sandbox",
+        "//bin/zml-smi/utils:sysfs",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":tenstorrent"],
+)
+
+cc_library(
+    name = "tt_umd_hdrs",
+    hdrs = ["tt_umd.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_binary(
+    name = "libtt_umd.so",
+    srcs = [
+        "tt_umd.cpp",
+        "tt_umd.h",
+    ],
+    copts = [
+        "-include",
+        "stdlib.h",
+    ],
+    linkshared = True,
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tt_umd_hdrs",
+        "@fmt",
+        "@tt_umd",
+    ],
+)

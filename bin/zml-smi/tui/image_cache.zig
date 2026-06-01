@@ -30,6 +30,7 @@ pub fn loadAll(self: *ImageCache, vx: *vaxis.Vaxis, allocator: std.mem.Allocator
     self.load(vx, allocator, writer, "gpu_oneapi", @embedFile("assets/intel.png"));
     self.load(vx, allocator, writer, "gpu_neuron", @embedFile("assets/neuron.png"));
     self.load(vx, allocator, writer, "gpu_tpu", @embedFile("assets/tpu.png"));
+    self.load(vx, allocator, writer, "gpu_tenstorrent", @embedFile("assets/tenstorrent.png"));
 }
 
 pub fn get(self: *const ImageCache, key: []const u8) ?vaxis.Image {

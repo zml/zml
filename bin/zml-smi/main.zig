@@ -68,6 +68,7 @@ const device_backends = switch (builtin.os.tag) {
             .{ .oneapi, @import("zml-smi/platforms/oneapi") },
             .{ .neuron, @import("zml-smi/platforms/neuron") },
             .{ .tpu, @import("zml-smi/platforms/tpu") },
+            .{ .tenstorrent, @import("zml-smi/platforms/tenstorrent") },
         },
         .aarch64 => .{
             .{ .cuda, @import("zml-smi/platforms/nvml") },
@@ -199,6 +200,10 @@ fn detect(allocator: std.mem.Allocator, io: std.Io) smi_info.Targets {
 
                     if (hasDevice(io, "/dev/accel0") or hasDevice(io, "/dev/vfio/0")) {
                         targets.insert(.tpu);
+                    }
+
+                    if (hasDevice(io, "/dev/tenstorrent/0")) {
+                        targets.insert(.tenstorrent);
                     }
                 },
                 .aarch64 => {

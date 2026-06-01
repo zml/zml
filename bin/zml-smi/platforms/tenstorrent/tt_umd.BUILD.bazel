@@ -1,0 +1,45 @@
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "tt_umd",
+    srcs = glob(
+        [
+            "device/**/*.cpp",
+            "device/**/*.c",
+        ],
+        exclude = [
+            # those are not needed
+            "device/chip/sw_emule_chip.cpp",
+            "device/chip_helpers/simulation_tlb_manager.cpp",
+            "device/firmware/wormhole_18_3_firmware_info_provider.cpp",
+            "device/pcie/*sim*",
+            "device/simulation/**",
+            "device/tt_device/*sim*",
+        ],
+    ),
+    hdrs = glob([
+        "device/**/*.h",
+        "device/**/*.hpp",
+        "src/firmware/riscv/**",
+    ]),
+    copts = [
+        "-w",
+        "-include",
+        "stdlib.h",
+    ],
+    includes = [
+        "device",
+        "device/api",
+        "device/common",
+        "src/firmware/riscv",
+    ],
+    linkopts = ["-lrt"],
+    deps = [
+        "@asio",
+        "@fmt",
+        "@hwloc",
+        "@spdlog",
+        "@tt_logger",
+        "@yaml-cpp",
+    ],
+)
