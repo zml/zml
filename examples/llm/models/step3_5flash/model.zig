@@ -684,6 +684,7 @@ pub const Mlp = struct {
 const num_heads: i64 = 8;
 const num_kv_heads: i64 = 8;
 const head_dim: i64 = 4096 / num_heads;
+const rotary_dim: i64 = head_dim;
 // SelfAttn
 pub const SelfAttn = struct {
     // TODO: config
@@ -733,7 +734,8 @@ pub const SelfAttn = struct {
             .head_dim = 4096 / num_heads,
             .num_kv_groups = num_heads / num_kv_heads,
             //TODO: hardcoded rotary emb
-            .rotary_emb = .init(head_dim, 10000.0, 1.0),
+            .rotary_dim = rotary_dim,
+            .rotary_emb = .init(rotary_dim, 10000.0, 1.0),
             .q_size = num_heads * head_dim,
             .kv_size = num_kv_heads * head_dim,
             .scaling = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
@@ -749,12 +751,41 @@ pub const SelfAttn = struct {
     }
 
     // unloadBuffers
+    pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
+        self.q_proj.weight.deinit();
+        if (self.q_proj.bias) |*b| b.deinit();
+        self.k_proj.weight.deinit();
+        if (self.k_proj.bias) |*b| b.deinit();
+        self.v_proj.weight.deinit();
+        if (self.v_proj.bias) |*b| b.deinit();
+        self.o_proj.weight.deinit();
+        if (self.o_proj.bias) |*b| b.deinit();
+        self.g_proj.weight.deinit();
+        if (self.g_proj.bias) |*b| b.deinit();
+        RmsNorm.unloadBuffers(&self.q_norm);
+        RmsNorm.unloadBuffers(&self.k_norm);
+    }
 
     // project Q, Gate
 
     // project KV
 
     // forward
+    pub fn forward(
+        self: SelfAttn,
+        x: zml.Tensor,
+        token_index: zml.Tensor,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
+    ) struct { zml.Tensor } {
+        _ = x; // autofix
+        _ = self;
+        _ = token_index;
+        _ = attention_metadata;
+        _ = attention_parameters;
+        @panic("SelfAttn.forward not implemented");
+        // unreachable returns; once you remove the panic, return real tensors
+    }
 };
 
 // KvCache
