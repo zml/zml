@@ -306,7 +306,7 @@ pub const Tensor = struct {
         defer right_d.deinit();
 
         var right_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
-        for (0..right_d.numDevices()) |dev| {
+        for (0..right_d.numShards()) |dev| {
             right_memory[dev] = right_d.opaqueDevicePtr(dev);
         }
 
@@ -318,7 +318,7 @@ pub const Tensor = struct {
         }
 
         // Check that right_d and output_d point to the same addresses on the devices.
-        try std.testing.expectEqualSlices(*anyopaque, right_memory[0..right_d.numDevices()], output_memory[0..output_d.numDevices()]);
+        try std.testing.expectEqualSlices(*anyopaque, right_memory[0..right_d.numShards()], output_memory[0..output_d.numShards()]);
     }
 
     /// Returns a Tensor containing the absolute value of each element of the input Tensor.

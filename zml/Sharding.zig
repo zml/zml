@@ -1009,10 +1009,10 @@ pub const PhysicalMesh = struct {
                     const placement_ = placements[next_device_.*];
                     next_device_.* += 1;
 
-                    var coords: stdx.BoundedArray(u8, MAX_MESH_RANK) = .empty;
-                    for (coords_buf_[0..axis_tags_.len]) |coord| coords.appendAssumeCapacity(@intCast(coord));
+                    var coords: Device.Coords = @splat(0);
+                    for (coords_buf_[0..axis_tags_.len], 0..) |coord, i| coords[i] = @intCast(coord);
 
-                    return .{ .leaf = .{ .id = placement_.nc_id, .coords = coords } };
+                    return .{ .leaf = .{ .id = @intCast(placement_.nc_id), .coords = coords } };
                 }
 
                 const children = try allocator_.alloc(PhysicalNode, axis_sizes_[depth]);
@@ -1060,7 +1060,6 @@ pub const PhysicalMesh = struct {
             &next_device,
         );
         const mesh: PhysicalMesh = try fromOwnedTree(allocator, .neuron, root);
-        std.log.warn("Devices in devices_in_canonical_order with nc_ids: {any}", .{mesh.devices_in_canonical_order});
         for (mesh.devices_in_canonical_order) |*dev| {
             // In Node.build we use nc_id as the Device id.
             // But now we want to use the id to get the offset into platform.devices.
@@ -1073,7 +1072,6 @@ pub const PhysicalMesh = struct {
                 }
             }
         }
-        std.log.warn("Devices in devices_in_canonical_order with final ids: {any}", .{mesh.devices_in_canonical_order});
         return mesh;
     }
 };

@@ -77,7 +77,7 @@ pub const Buffer = struct {
         return self._shape;
     }
 
-    pub fn numDevices(self: Buffer) u32 {
+    pub fn numShards(self: Buffer) u32 {
         return @intCast(self._shards.len);
     }
 
