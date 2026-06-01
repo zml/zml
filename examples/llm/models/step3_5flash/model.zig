@@ -104,6 +104,57 @@ pub const Options = struct {
 // There are some partitioning functions re: KV Cache
 
 // TextRotaryEmbedding
+pub const TextRotaryEmbedding = struct {
+    // rope_opts: zml.nn.RopeOpts,
+    rotary_dim: i64,
+    theta: i64,
+    attention_scaling: i64,
+    // mrope_section: [3]i64,
+
+    pub fn init(rotary_dim: i64) TextRotaryEmbedding {
+        return .{
+            .rotary_dim = rotary_dim,
+        };
+    }
+
+    pub fn getCosAndSin(self: TextRotaryEmbedding, position_ids: zml.Tensor, dtype: zml.DataType) struct { zml.Tensor, zml.Tensor } {
+        // inverse frequency is a deterministic math value derived from rotary dim
+        const inv_freq = zml.nn.invFreq(self.rotary_dim).withTags(.{.hd});
+
+        // run freqency over the position id's
+        // outer product so every combination
+        const freqs_t = position_ids.convert(.f32).outer(inv_freq);
+
+        // duplicate the frequency table to match RoPE dimension layout
+        const emb = zml.Tensor.concatenate(&.{ freqs_t, freqs_t }, -1);
+
+        // calculate cos, sin precomputed table values for these position ids
+        const cos = emb.cos().convert(dtype) * self.attention_scaling;
+        const sin = emb.sin().convert(dtype) * self.attention_scaling;
+
+        return .{ cos, sin };
+    }
+
+    // not pub why??
+    fn rotateHalf(x: zml.Tensor) zml.Tensor {
+        const half_dim = @divExact(x.dim(-1), 2);
+
+        const x1 = x.slice1d(-1, .{ .start = 0, .end = half_dim });
+        const x2 = x.slice1d(-1, .{ .start = half_dim, .end = x.dim(-1) });
+        return zml.Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
+    }
+
+    // half dim??
+    // x1 and x2??
+
+    // }
+
+    // applyRope() {
+
+    // }
+
+    //     .rotary_embed = .init(rotary_dim, config.text_config.rope_parameters.rope_theta, config.text_config.rope_parameters.mrope_section),
+};
 
 // Router
 pub const Router = struct {
