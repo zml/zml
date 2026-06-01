@@ -7,6 +7,7 @@ const ui = @import("../lib/ui.zig");
 const compose = @import("../lib/compose.zig");
 const TitledBorder = @import("titled_border.zig");
 const ColumnLayout = @import("column_layout.zig");
+const Selection = @import("../selection.zig").Selection;
 const pi = @import("zml-smi/info").process_info;
 const ProcessInfo = pi.ProcessInfo;
 
@@ -25,13 +26,163 @@ scroll_bars: vxfw.ScrollBars = .{
     .draw_horizontal_scrollbar = false,
 },
 merged: std.ArrayList(ProcessInfo) = .empty,
+rows: std.ArrayList(Row) = .empty,
+selection: *Selection = undefined,
+
+last_click_at: std.Io.Timestamp = .zero,
+last_click_idx: ?u32 = null,
+
+io: ?std.Io = null,
+
+cmd_scroll: u16 = 0,
+cmd_scroll_pid: u32 = 0,
+cmd_scroll_max: u16 = 0,
+
+/// Highlight background for the selected row.
+const sel_bg: vaxis.Color = .{ .rgb = .{ 45, 55, 80 } };
+
+const Row = struct {
+    table: *ProcessTable,
+    idx: u32,
+
+    pub fn handleEvent(self: *Row, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
+        const table = self.table;
+
+        switch (event) {
+            .mouse => |mouse| {
+                if (mouse.type == .press and mouse.button == .left) {
+                    if (self.idx >= table.merged.items.len) {
+                        return;
+                    }
+
+                    table.scroll_bars.scroll_view.cursor = self.idx;
+                    _ = table.selection.setProcess(table.merged.items[self.idx].pid);
+
+                    // Double-click — the same row clicked again within 400ms — kills.
+                    var dbl = false;
+                    if (table.io) |io| {
+                        const now = std.Io.Timestamp.now(io, .awake);
+                        dbl = table.last_click_idx == self.idx and
+                            table.last_click_at.durationTo(now).toMilliseconds() < 400;
+                        table.last_click_at = now;
+                    }
+                    table.last_click_idx = self.idx;
+
+                    if (dbl) {
+                        table.killSelected();
+                    }
+
+                    return ctx.consumeAndRedraw();
+                }
+            },
+            else => {},
+        }
+    }
+
+    pub fn draw(self: *Row, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+        const table = self.table;
+        const vw: u16 = ctx.min.width;
+        if (self.idx >= table.merged.items.len) {
+            var empty_surf = try (RichText{ .text = &.{}, .softwrap = false, .overflow = .clip }).draw(ui.fixedSize(ctx, vw, 1));
+            empty_surf.widget = ui.widget(self);
+
+            return empty_surf;
+        }
+        const info = &table.merged.items[self.idx];
+        const selected = table.selection.processEq(info.pid);
+        const row_bg: vaxis.Color = if (selected) sel_bg else .default;
+        const val: vaxis.Style = .{ .fg = theme.text_primary, .bg = row_bg };
+        const dim: vaxis.Style = .{ .fg = theme.dim, .bg = row_bg };
+
+        const segs = try ctx.arena.alloc(Segment, 8);
+        segs[0] = .{ .style = val, .text = try col(ctx.arena, col_fmt.pid, "{d}", .{info.pid}) };
+        segs[1] = .{ .style = val, .text = try col(ctx.arena, col_fmt.user, "{s}", .{info.username[0..@min(info.username.len, 10)]}) };
+        segs[2] = .{ .style = val, .text = try col(ctx.arena, col_fmt.dev, "{d}", .{info.device_idx}) };
+        segs[3] = if (info.dev_util_percent) |util|
+            .{ .style = val, .text = try col(ctx.arena, col_fmt.util, "{d}%", .{util}) }
+        else
+            .{ .style = dim, .text = try col(ctx.arena, col_fmt.util, "-", .{}) };
+        segs[4] = if (info.dev_mem_kib) |mem|
+            .{ .style = val, .text = try col(ctx.arena, col_fmt.mem, "{s}", .{try fmtMem(ctx.arena, mem)}) }
+        else
+            .{ .style = dim, .text = try col(ctx.arena, col_fmt.mem, "-", .{}) };
+        segs[5] = .{ .style = val, .text = try col(ctx.arena, col_fmt.cpu, "{d}.{d}%", .{ info.cpu_percent / 10, info.cpu_percent % 10 }) };
+        segs[6] = .{ .style = val, .text = try col(ctx.arena, col_fmt.host_mem, "{s}", .{try fmtMem(ctx.arena, info.rss_kib)}) };
+        segs[7] = .{ .style = val, .text = info.comm };
+
+        const rich: RichText = .{ .text = segs, .softwrap = false, .overflow = .clip, .base_style = .{ .bg = row_bg } };
+
+        if (!selected) { // make it clipped
+            var surf = try rich.draw(ui.fixedSize(ctx, vw, 1));
+            surf.widget = ui.widget(self);
+            return surf;
+        }
+
+        const full = try rich.draw(ctx.withConstraints(
+            .{ .width = vw, .height = 1 },
+            .{ .width = null, .height = 1 },
+        ));
+        table.cmd_scroll_max = full.size.width -| vw;
+        const off: u16 = @min(table.cmd_scroll, table.cmd_scroll_max);
+
+        var sb = compose.surfaceBuilder(ctx.arena);
+        try sb.add(0, -@as(i17, off), full);
+        return sb.finish(.{ .width = vw, .height = 1 }, ui.widget(self));
+    }
+};
 
 pub fn deinit(self: *ProcessTable, allocator: std.mem.Allocator) void {
     self.merged.deinit(allocator);
+    self.rows.deinit(allocator);
+}
+
+pub fn rowIndexOfPid(self: *const ProcessTable, pid: u32) ?usize {
+    for (self.merged.items, 0..) |p, i| {
+        if (p.pid == pid) return i;
+    }
+
+    return null;
+}
+
+pub fn killableSelected(self: *const ProcessTable) bool {
+    if (self.selection.kind != .process) {
+        return false;
+    }
+
+    const idx = self.rowIndexOfPid(self.selection.pid) orelse return false;
+    const p = self.merged.items[idx];
+
+    return !p.remote and p.pid != 0;
+}
+
+pub fn killSelected(self: *ProcessTable) void {
+    if (!self.killableSelected()) {
+        return;
+    }
+
+    const idx = self.rowIndexOfPid(self.selection.pid).?;
+    std.posix.kill(@intCast(self.merged.items[idx].pid), std.posix.SIG.KILL) catch {};
+}
+
+pub fn scrollCommand(self: *ProcessTable, dir: i8) bool {
+    if (self.selection.kind != .process or self.cmd_scroll_max == 0) {
+        return false;
+    }
+
+    const step: u16 = 2;
+    const old = self.cmd_scroll;
+    if (dir > 0) {
+        self.cmd_scroll = @min(self.cmd_scroll + step, self.cmd_scroll_max);
+    } else {
+        self.cmd_scroll -|= step;
+    }
+
+    return self.cmd_scroll != old;
 }
 
 pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u16) void {
     self.scroll_bars.scroll_view.children.builder.userdata = self;
+    self.io = state.io;
     self.merged.clearRetainingCapacity();
 
     for (state.process_lists) |pl| {
@@ -61,6 +212,23 @@ pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u16) v
     const count: u32 = @intCast(self.merged.items.len);
     self.scroll_bars.estimated_content_height = count;
     self.scroll_bars.scroll_view.item_count = count;
+
+    if (self.rows.items.len != self.merged.items.len) {
+        self.rows.clearRetainingCapacity();
+        for (0..self.merged.items.len) |i| {
+            self.rows.append(state.gpa, .{ .table = self, .idx = @intCast(i) }) catch break;
+        }
+    }
+
+    if (self.selection.kind == .process) {
+        if (self.selection.pid != self.cmd_scroll_pid) {
+            self.cmd_scroll = 0;
+            self.cmd_scroll_pid = self.selection.pid;
+        }
+    } else {
+        self.cmd_scroll = 0;
+        self.cmd_scroll_pid = 0;
+    }
 }
 
 pub fn resetScroll(self: *ProcessTable) void {
@@ -104,10 +272,10 @@ pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
 /// Builds only data rows (no header) for the scroll view.
 fn buildRow(ptr: *const anyopaque, idx: usize, _: usize) ?vxfw.Widget {
     const self: *ProcessTable = @ptrCast(@alignCast(@constCast(ptr)));
-    if (idx >= self.merged.items.len) {
+    if (idx >= self.merged.items.len or idx >= self.rows.items.len) {
         return null;
     }
-    return .{ .userdata = @ptrCast(&self.merged.items[idx]), .drawFn = drawProcessRow };
+    return ui.widget(&self.rows.items[idx]);
 }
 
 // Column format strings — shared between header (comptime) and row (runtime).
@@ -138,34 +306,6 @@ const header_segs = blk: {
 /// Format a value into a column: col(arena, col_fmt.pid, "{d}", .{pid})
 fn col(arena: std.mem.Allocator, comptime column: []const u8, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error![]const u8 {
     return std.fmt.allocPrint(arena, column, .{try std.fmt.allocPrint(arena, fmt, args)});
-}
-
-fn drawProcessRow(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const info: *const ProcessInfo = @ptrCast(@alignCast(ptr));
-    const val: vaxis.Style = .{ .fg = theme.text_primary };
-    const dim: vaxis.Style = .{ .fg = theme.dim };
-
-    const segs = try ctx.arena.alloc(Segment, 8);
-    segs[0] = .{ .style = val, .text = try col(ctx.arena, col_fmt.pid, "{d}", .{info.pid}) };
-    segs[1] = .{ .style = val, .text = try col(ctx.arena, col_fmt.user, "{s}", .{info.username[0..@min(info.username.len, 10)]}) };
-    segs[2] = .{ .style = val, .text = try col(ctx.arena, col_fmt.dev, "{d}", .{info.device_idx}) };
-    segs[3] = if (info.dev_util_percent) |util|
-        .{ .style = val, .text = try col(ctx.arena, col_fmt.util, "{d}%", .{util}) }
-    else
-        .{ .style = dim, .text = try col(ctx.arena, col_fmt.util, "-", .{}) };
-    segs[4] = if (info.dev_mem_kib) |mem|
-        .{ .style = val, .text = try col(ctx.arena, col_fmt.mem, "{s}", .{try fmtMem(ctx.arena, mem)}) }
-    else
-        .{ .style = dim, .text = try col(ctx.arena, col_fmt.mem, "-", .{}) };
-    segs[5] = .{ .style = val, .text = try col(ctx.arena, col_fmt.cpu, "{d}.{d}%", .{ info.cpu_percent / 10, info.cpu_percent % 10 }) };
-    segs[6] = .{ .style = val, .text = try col(ctx.arena, col_fmt.host_mem, "{s}", .{try fmtMem(ctx.arena, info.rss_kib)}) };
-    segs[7] = .{ .style = val, .text = info.comm };
-
-    const rich: RichText = .{ .text = segs, .softwrap = false, .overflow = .clip };
-    return rich.draw(ctx.withConstraints(
-        .{ .width = ctx.min.width, .height = 1 },
-        .{ .width = ctx.max.width, .height = 1 },
-    ));
 }
 
 fn fmtMem(arena: std.mem.Allocator, kib: u64) std.mem.Allocator.Error![]const u8 {

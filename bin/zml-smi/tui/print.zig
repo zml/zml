@@ -5,6 +5,7 @@ const data = @import("data.zig");
 const ui = @import("lib/ui.zig");
 const image_cache = @import("image_cache.zig");
 const Overview = @import("pages/overview.zig");
+const Selection = @import("selection.zig").Selection;
 
 fn silentResize(vx: *vaxis.Vaxis, allocator: std.mem.Allocator, winsize: vaxis.Winsize) !void {
     vx.screen.deinit(allocator);
@@ -57,7 +58,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
     const content_w: u16 = @min(@as(u16, @intCast(vx.screen.width)), Overview.host_line_width + 2);
 
     var viewing_device: ?u16 = null;
-    var overview = try Overview.init(allocator, state, null, &viewing_device);
+    var selection: Selection = .{};
+    var overview = try Overview.init(allocator, state, null, &viewing_device, &selection);
     defer overview.deinit(allocator);
 
     const draw_ctx: vxfw.DrawContext = .{
