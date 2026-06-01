@@ -255,6 +255,36 @@ pub fn decompressChunk(chunk: ChunkIterator.Chunk, dst: []u8, tmp: []u8) ![]u8 {
     }
 }
 
+// ── Xorb Processing ─────────────────────────────────────────────────────────
+
+/// Iterates all chunks in a xorb, decompresses those referenced by `xorb_entry`,
+/// and calls `onChunk(context, term_idx, decompressed_data)` for each referencing term.
+///
+/// `dst` and `tmp` are caller-provided scratch buffers (>= 128 KiB each).
+/// Zero allocations on the hot path.
+pub fn processXorb(
+    xorb_data: []const u8,
+    xorb_entry: XorbMap.Entry,
+    start_chunk_index: u32,
+    dst: []u8,
+    tmp: []u8,
+    context: anytype,
+    comptime onChunk: fn (@TypeOf(context), term_idx: u32, data: []const u8) anyerror!void,
+) !void {
+    var iter = ChunkIterator{ .data = xorb_data, .chunk_index = start_chunk_index };
+    while (try iter.next()) |chunk| {
+        // Chunks beyond the map are not referenced by any term.
+        if (chunk.index >= xorb_entry.chunk_to_terms.len) continue;
+        const term_refs = xorb_entry.chunk_to_terms[chunk.index];
+        if (term_refs.len == 0) continue;
+
+        const decompressed = try decompressChunk(chunk, dst, tmp);
+        for (term_refs) |term_idx| {
+            try onChunk(context, term_idx, decompressed);
+        }
+    }
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 test "computeTermRanges: small synthetic case" {
@@ -637,4 +667,184 @@ test "decompressChunk: type 3 (FBS+LZ4)" {
     var tmp: [4]u8 = undefined;
     const result = try decompressChunk(chunk, &dst, &tmp);
     try std.testing.expectEqualSlices(u8, &original, result);
+}
+
+// ── processXorb tests ───────────────────────────────────────────────────────
+
+/// Helper: build a synthetic xorb binary from raw (uncompressed) payloads.
+fn buildSyntheticXorb(payloads: []const []const u8, buf: []u8) []const u8 {
+    var off: usize = 0;
+    for (payloads) |payload| {
+        writeChunkHeader(buf[off..][0..8], @intCast(payload.len), 0, @intCast(payload.len));
+        off += 8;
+        @memcpy(buf[off..][0..payload.len], payload);
+        off += payload.len;
+    }
+    return buf[0..off];
+}
+
+test "processXorb: basic routing and byte counts" {
+    // 4 chunks, 3 terms:
+    //   term 0 ("x"): chunks [0, 2) → chunks 0, 1
+    //   term 1 ("x"): chunks [2, 4) → chunks 2, 3
+    //   term 2 ("x"): chunks [1, 3) → chunks 1, 2 (overlaps both)
+    const payloads = [_][]const u8{ &.{ 0xAA, 0xBB }, &.{ 0xCC, 0xDD, 0xEE }, &.{0xFF}, &.{ 0x11, 0x22, 0x33, 0x44 } };
+    var xorb_buf: [4 * (8 + 4)]u8 = undefined;
+    const xorb_data = buildSyntheticXorb(&payloads, &xorb_buf);
+
+    const terms = [_]Term{
+        .{ .hash = "x", .unpacked_length = 5, .range = .{ .start = 0, .end = 2 } },
+        .{ .hash = "x", .unpacked_length = 5, .range = .{ .start = 2, .end = 4 } },
+        .{ .hash = "x", .unpacked_length = 4, .range = .{ .start = 1, .end = 3 } },
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const map = try buildXorbMap(arena.allocator(), &terms);
+    try std.testing.expectEqual(@as(usize, 1), map.entries.len);
+
+    const Ctx = struct {
+        counters: [3]u64,
+        // Fixed buffers to collect received data (max 10 bytes each is plenty).
+        data: [3][10]u8,
+        data_len: [3]usize,
+
+        fn onChunk(self: *@This(), term_idx: u32, data: []const u8) !void {
+            self.counters[term_idx] += data.len;
+            const off = self.data_len[term_idx];
+            @memcpy(self.data[term_idx][off..][0..data.len], data);
+            self.data_len[term_idx] = off + data.len;
+        }
+    };
+    var ctx = Ctx{
+        .counters = .{ 0, 0, 0 },
+        .data = undefined,
+        .data_len = .{ 0, 0, 0 },
+    };
+
+    var dst: [128]u8 = undefined;
+    var tmp: [128]u8 = undefined;
+    try processXorb(xorb_data, map.entries[0], 0, &dst, &tmp, &ctx, Ctx.onChunk);
+
+    // Verify byte counts match unpacked_length.
+    try std.testing.expectEqual(@as(u64, 5), ctx.counters[0]); // 2 + 3
+    try std.testing.expectEqual(@as(u64, 5), ctx.counters[1]); // 1 + 4
+    try std.testing.expectEqual(@as(u64, 4), ctx.counters[2]); // 3 + 1
+
+    // Verify actual data: term 0 gets chunks 0+1, term 1 gets chunks 2+3, term 2 gets chunks 1+2.
+    try std.testing.expectEqualSlices(u8, &.{ 0xAA, 0xBB, 0xCC, 0xDD, 0xEE }, ctx.data[0][0..ctx.data_len[0]]);
+    try std.testing.expectEqualSlices(u8, &.{ 0xFF, 0x11, 0x22, 0x33, 0x44 }, ctx.data[1][0..ctx.data_len[1]]);
+    try std.testing.expectEqualSlices(u8, &.{ 0xCC, 0xDD, 0xEE, 0xFF }, ctx.data[2][0..ctx.data_len[2]]);
+}
+
+test "processXorb: unreferenced chunks are skipped" {
+    // 3 chunks, but only chunk 1 is referenced.
+    const payloads = [_][]const u8{ &.{0x00}, &.{ 0xAA, 0xBB }, &.{0x00} };
+    var xorb_buf: [3 * (8 + 4)]u8 = undefined;
+    const xorb_data = buildSyntheticXorb(&payloads, &xorb_buf);
+
+    const terms = [_]Term{
+        .{ .hash = "y", .unpacked_length = 2, .range = .{ .start = 1, .end = 2 } },
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const map = try buildXorbMap(arena.allocator(), &terms);
+
+    const Ctx = struct {
+        call_count: u32,
+        chunks_seen: [3]bool,
+
+        fn onChunk(self: *@This(), _: u32, data: []const u8) !void {
+            self.call_count += 1;
+            // Only chunk 1 data (0xAA, 0xBB) should arrive.
+            if (data.len == 2 and data[0] == 0xAA and data[1] == 0xBB) {
+                self.chunks_seen[1] = true;
+            }
+        }
+    };
+    var ctx = Ctx{ .call_count = 0, .chunks_seen = .{ false, false, false } };
+
+    var dst: [128]u8 = undefined;
+    var tmp: [128]u8 = undefined;
+    try processXorb(xorb_data, map.entries[0], 0, &dst, &tmp, &ctx, Ctx.onChunk);
+
+    // Only 1 callback call (chunk 1 → term 0).
+    try std.testing.expectEqual(@as(u32, 1), ctx.call_count);
+    try std.testing.expect(!ctx.chunks_seen[0]);
+    try std.testing.expect(ctx.chunks_seen[1]);
+    try std.testing.expect(!ctx.chunks_seen[2]);
+}
+
+test "processXorb: deduplication — shared chunk calls callback twice" {
+    // 1 chunk referenced by 2 terms.
+    const payloads = [_][]const u8{&.{ 0xDE, 0xAD }};
+    var xorb_buf: [1 * (8 + 2)]u8 = undefined;
+    const xorb_data = buildSyntheticXorb(&payloads, &xorb_buf);
+
+    const terms = [_]Term{
+        .{ .hash = "z", .unpacked_length = 2, .range = .{ .start = 0, .end = 1 } },
+        .{ .hash = "z", .unpacked_length = 2, .range = .{ .start = 0, .end = 1 } },
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const map = try buildXorbMap(arena.allocator(), &terms);
+
+    const Ctx = struct {
+        call_count: u32,
+        term_seen: [2]bool,
+        last_data: [2]u8,
+
+        fn onChunk(self: *@This(), term_idx: u32, data: []const u8) !void {
+            self.call_count += 1;
+            self.term_seen[term_idx] = true;
+            @memcpy(&self.last_data, data[0..2]);
+        }
+    };
+    var ctx = Ctx{ .call_count = 0, .term_seen = .{ false, false }, .last_data = .{ 0, 0 } };
+
+    var dst: [128]u8 = undefined;
+    var tmp: [128]u8 = undefined;
+    try processXorb(xorb_data, map.entries[0], 0, &dst, &tmp, &ctx, Ctx.onChunk);
+
+    // Callback called twice (once per term), both see same data.
+    try std.testing.expectEqual(@as(u32, 2), ctx.call_count);
+    try std.testing.expect(ctx.term_seen[0]);
+    try std.testing.expect(ctx.term_seen[1]);
+    try std.testing.expectEqualSlices(u8, &.{ 0xDE, 0xAD }, &ctx.last_data);
+}
+
+test "processXorb: chunks beyond map length are skipped" {
+    // 3 chunks in xorb, but map only covers 1 chunk.
+    const payloads = [_][]const u8{ &.{0x01}, &.{0x02}, &.{0x03} };
+    var xorb_buf: [3 * (8 + 1)]u8 = undefined;
+    const xorb_data = buildSyntheticXorb(&payloads, &xorb_buf);
+
+    const terms = [_]Term{
+        .{ .hash = "w", .unpacked_length = 1, .range = .{ .start = 0, .end = 1 } },
+    };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const map = try buildXorbMap(arena.allocator(), &terms);
+
+    const Ctx = struct {
+        call_count: u32,
+        total_bytes: u64,
+
+        fn onChunk(self: *@This(), _: u32, data: []const u8) !void {
+            self.call_count += 1;
+            self.total_bytes += data.len;
+        }
+    };
+    var ctx = Ctx{ .call_count = 0, .total_bytes = 0 };
+
+    var dst: [128]u8 = undefined;
+    var tmp: [128]u8 = undefined;
+    try processXorb(xorb_data, map.entries[0], 0, &dst, &tmp, &ctx, Ctx.onChunk);
+
+    // Only chunk 0 triggers the callback.
+    try std.testing.expectEqual(@as(u32, 1), ctx.call_count);
+    try std.testing.expectEqual(@as(u64, 1), ctx.total_bytes);
 }
