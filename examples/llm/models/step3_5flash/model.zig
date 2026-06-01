@@ -681,6 +681,9 @@ pub const Mlp = struct {
 
 // SwAttn
 
+const num_heads: i64 = 8;
+const num_kv_heads: i64 = 8;
+const head_dim: i64 = 4096 / num_heads;
 // SelfAttn
 pub const SelfAttn = struct {
     // TODO: config
@@ -701,7 +704,7 @@ pub const SelfAttn = struct {
     kv_size: i64,
 
     head_dim: i64,
-    scaling: i64,
+    scaling: f32,
 
     num_heads: i64,
     num_kv_heads: i64,
@@ -711,34 +714,37 @@ pub const SelfAttn = struct {
 
     // do we need initProj
     fn initProj(store: zml.io.TensorStore.View, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
-        return .init{
+        return .init(
             store.createTensor("weight", .{ .dout, .d }, partitions),
             store.maybeCreateTensor("bias", .{.dout}, bias_partitions),
             .d,
-        };
+        );
     }
 
-    // add config here
+    // TODO: add config here
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !SelfAttn {
-        // TODO: un hardcode
         return .{
-            .layer_id = layer_idx,
-            .num_attention_heads = 8,
+            .layer_idx = layer_idx,
+            //TODO: hardcoded head
+            .num_heads = 8,
             .num_kv_heads = 8,
             .enable_sliding_window = false,
-            .head_dim = 4096 / .num_attention_heads,
-            .num_kv_groups = .num_attention_heads / .num_kv_heads,
-            .rotary_emb = TextRotaryEmbedding(1.0, 10000.0, 1.0),
-            .q_size = .num_attention_heads * .head_dim,
-            .kv_size = .num_kv_heads * .head_dim,
-            .scaling = .head_dim ** -0.5,
+            //TODO: hardcoded head dim
+            .head_dim = 4096 / num_heads,
+            .num_kv_groups = num_heads / num_kv_heads,
+            //TODO: hardcoded rotary emb
+            .rotary_emb = .init(head_dim, 10000.0, 1.0),
+            .q_size = num_heads * head_dim,
+            .kv_size = num_kv_heads * head_dim,
+            .scaling = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
             .q_proj = initProj(store.withPrefix("q_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
             .k_proj = initProj(store.withPrefix("k_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
             .v_proj = initProj(store.withPrefix("v_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
-            .o_proj = initProj(store.withPrefix(.q_size), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .o_proj = initProj(store.withPrefix("o_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
             .g_proj = initProj(store.withPrefix("g_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
-            .q_norm = RmsNorm(store.withPrefix("q_norm")),
-            .k_norm = RmsNorm(store.withPrefix("k_norm")),
+            //TODO: hardcoded eps
+            .q_norm = .init(store.withPrefix("q_norm"), 1e-5),
+            .k_norm = .init(store.withPrefix("k_norm"), 1e-5),
         };
     }
 
