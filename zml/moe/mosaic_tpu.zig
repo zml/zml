@@ -215,6 +215,46 @@ fn padRowsToTile(x: Tensor, tile_m: i64) Tensor {
     return x.pad(0, .{ .token = Tensor.Pad{ .high = tile_m - rem } });
 }
 
+fn alignSortedRowsByGroup(rows: Tensor, expert_ids_sorted: Tensor, group_sizes: Tensor, tile_m: i64) struct {
+    rows: Tensor,
+    group_sizes: Tensor,
+    positions: Tensor,
+} {
+    const num_groups = group_sizes.dim(.expert);
+    const max_padded_rows = rows.dim(.token) + num_groups * (tile_m - 1);
+
+    const group_ends = group_sizes.cumulativeSum(.expert);
+    const group_starts = Tensor.concatenate(&.{
+        Tensor.zeroes(.init(.{ .expert = 1 }, .i32)),
+        group_ends.slice1d(.expert, .{ .end = num_groups - 1 }),
+    }, .expert);
+
+    const padded_group_sizes = group_sizes.addConstant(tile_m - 1).divByConst(tile_m).mul(Tensor.scalar(tile_m, .i32));
+    const padded_group_ends = padded_group_sizes.cumulativeSum(.expert);
+    const padded_group_starts = Tensor.concatenate(&.{
+        Tensor.zeroes(.init(.{ .expert = 1 }, .i32)),
+        padded_group_ends.slice1d(.expert, .{ .end = num_groups - 1 }),
+    }, .expert);
+
+    const logical_positions = Tensor.arange(.{ .end = rows.dim(.token) }, .i32).withTags(.{.token});
+    const group_start_per_token = group_starts.gather(.{ .expert = expert_ids_sorted }, .{});
+    const padded_group_start_per_token = padded_group_starts.gather(.{ .expert = expert_ids_sorted }, .{});
+    const padded_positions = logical_positions.sub(group_start_per_token).add(padded_group_start_per_token).withTags(.{.token});
+
+    const padded = Tensor.zeroes(rows.shape().setDim(.token, max_padded_rows))
+        .scatterSlices(
+        .{ .token = padded_positions },
+        rows,
+        .{ .indices_are_unique = true, .update_fn = Tensor.ScatterOpts.override },
+    );
+
+    return .{
+        .rows = padded,
+        .group_sizes = padded_group_sizes,
+        .positions = padded_positions,
+    };
+}
+
 fn gmmDType(dtype: zml.DataType) mtt.DType {
     return switch (zml.kernel.mosaic_tpu.from(dtype)) {
         .bf16 => .bf16,
@@ -233,7 +273,7 @@ fn callMegabloxGmm(
     // Lower one grouped matmul custom call. By the time we get here, rows have
     // already been sorted by local expert and `group_sizes` describes the
     // resulting contiguous expert segments.
-    const tile_m: i64 = 128;
+    const tile_m: i64 = 8;
     const metadata = buildGroupMetadata(group_sizes.withTags(.{.expert}), lhs.dim(.token), tile_m);
     const cfg: megablox_gmm.Cfg = .{
         .m = @intCast(lhs.dim(.token)),
@@ -241,7 +281,7 @@ fn callMegabloxGmm(
         .n = @intCast(rhs.dim(.out)),
         .num_groups = @intCast(rhs.dim(.expert)),
         .num_active_tiles = @intCast(metadata.num_active_tiles.dim(0)),
-        .tm = 128,
+        .tm = @intCast(tile_m),
         .tk = 128,
         .tn = 128,
         .dtype = gmmDType(lhs.dtype()),
@@ -297,7 +337,7 @@ pub fn fusedExpertsImpl(
         if (expert_map.rank() != 1 or expert_map.dim(.expert) != num_experts) return error.InvalidShape;
     }
 
-    const routed_tokens = hidden.dim(.token) * ids.dim(.topk);
+    const tile_m: i64 = 8;
 
     // Expand [token, topk] routing into a flat routed-token view. Each
     // original token now appears once per selected expert.
@@ -337,12 +377,17 @@ pub fn fusedExpertsImpl(
     // Recover contiguous group sizes after sorting. This segment descriptor is
     // what drives the grouped matmul metadata builder.
     const group_sizes = histogramCounts(flat_ids_local, gate_up.dim(.expert));
-    const hidden_sorted_padded = padRowsToTile(hidden_sorted, 128);
+    const aligned_hidden = alignSortedRowsByGroup(hidden_sorted, expert_ids_sorted, group_sizes, tile_m);
 
     // First expert matmul: hidden x gate_up. Bias remains outside the custom
     // call and is applied per routed token in StableHLO.
-    var gate_up_out = callMegabloxGmm(hidden_sorted_padded, gate_up, group_sizes, hidden.dtype())
-        .slice1d(.token, .{ .end = routed_tokens });
+    const use_reference_moe = true;
+    var gate_up_out = if (use_reference_moe) blk: {
+        const gate_up_per_token = gate_up.gather(.{ .expert = expert_ids_sorted }, .{});
+        break :blk hidden_sorted.dot(gate_up_per_token, .in);
+    } else callMegabloxGmm(aligned_hidden.rows, gate_up, aligned_hidden.group_sizes, hidden.dtype())
+        .gather(.{ .token = aligned_hidden.positions.rename(.{ .token = .route }) }, .{})
+        .rename(.{ .route = .token });
     if (opts.w1_bias) |bias| {
         const bias_per_token = bias.withTags(.{ .expert, .out }).gather(.{ .expert = expert_ids_sorted }, .{});
         gate_up_out = gate_up_out.add(bias_per_token);
@@ -350,12 +395,16 @@ pub fn fusedExpertsImpl(
 
     // Apply the logical MoE activation between the two grouped matmuls.
     const activated = applyActivation(gate_up_out, opts.activation);
-    const activated_padded = padRowsToTile(activated, 128);
+    const aligned_activated = alignSortedRowsByGroup(activated, expert_ids_sorted, group_sizes, tile_m);
 
     // Second expert matmul: activated x down. As above, bias is handled in
     // StableHLO so the kernel only implements grouped GEMM.
-    var down_out = callMegabloxGmm(activated_padded, down, group_sizes, hidden.dtype())
-        .slice1d(.token, .{ .end = routed_tokens });
+    var down_out = if (use_reference_moe) blk: {
+        const down_per_token = down.gather(.{ .expert = expert_ids_sorted }, .{});
+        break :blk activated.rename(.{ .out = .mid }).dot(down_per_token, .mid);
+    } else callMegabloxGmm(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype())
+        .gather(.{ .token = aligned_activated.positions.rename(.{ .token = .route }) }, .{})
+        .rename(.{ .route = .token });
     if (opts.w2_bias) |bias| {
         const bias_per_token = bias.withTags(.{ .expert, .out }).gather(.{ .expert = expert_ids_sorted }, .{});
         down_out = down_out.add(bias_per_token);

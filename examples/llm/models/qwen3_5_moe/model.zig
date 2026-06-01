@@ -773,7 +773,11 @@ pub const Moe = struct {
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
         const shared_gate = self.shared_expert_gate.forward(x).sigmoid().broad(x.shape());
-        const shared = self.shared_expert.forward(x).rename(.{ .dout = .d }).mul(shared_gate);
+        const shared = self.shared_expert.forward(x).rename(.{ .dout = .d }).mul(shared_gate).withPartitioning(.{
+            .b = .replicated,
+            .s = .replicated,
+            .d = .replicated,
+        });
 
         return moe_output.add(shared);
     }
