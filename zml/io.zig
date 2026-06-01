@@ -628,9 +628,9 @@ pub const DirectMemoryWriter = struct {
         }
 
         fn collectRawSegments(self: *StreamPlanner) !void {
+            const placement = try self.sharding.placement(self.shape);
             for (self.sharding.devicesInCanonicalOrder(), 0..) |device, writer_index| {
-                const placement = try self.sharding.placement(self.shape, device);
-                try self.appendShardSegments(placement, writer_index);
+                try self.appendShardSegments(placement.slices(device.coords).constSlice(), writer_index);
             }
         }
 
@@ -691,32 +691,16 @@ pub const DirectMemoryWriter = struct {
             });
         }
 
-        fn axisRange(self: *const StreamPlanner, placement: Placement, axis: usize) AxisRange {
-            for (placement.slices.constSlice()) |slice| {
-                if (slice.axis == axis) {
-                    return .{
-                        .start = slice.start,
-                        .size = slice.size,
-                    };
-                }
-            }
-
-            return .{
-                .start = 0,
-                .size = self.shape.dim(axis),
-            };
-        }
-
         fn appendShardSegmentsAtAxis(
             self: *StreamPlanner,
-            placement: Placement,
+            slices: []const Placement.Slice1d,
             writer_index: usize,
             rank: usize,
             axis: usize,
             base_start: i64,
             strides: []const i64,
         ) !void {
-            const range = self.axisRange(placement, axis);
+            const range: AxisRange = .{ .start = slices[axis].start, .size = slices[axis].size };
             if (range.size == 0) return;
 
             if (axis + 1 == rank) {
@@ -729,11 +713,11 @@ pub const DirectMemoryWriter = struct {
             var i: i64 = 0;
             while (i < range.size) : (i += 1) {
                 const child_start = base_start + (range.start + i) * strides[axis];
-                try self.appendShardSegmentsAtAxis(placement, writer_index, rank, axis + 1, child_start, strides);
+                try self.appendShardSegmentsAtAxis(slices, writer_index, rank, axis + 1, child_start, strides);
             }
         }
 
-        fn appendShardSegments(self: *StreamPlanner, placement: Placement, writer_index: usize) !void {
+        fn appendShardSegments(self: *StreamPlanner, slices: []const Placement.Slice1d, writer_index: usize) !void {
             const rank = self.shape.rank();
             if (rank == 0) {
                 try self.appendRawSegment(writer_index, 0, self.shape.byteSize());
@@ -741,7 +725,7 @@ pub const DirectMemoryWriter = struct {
             }
 
             const strides = self.shape.computeByteStrides();
-            try self.appendShardSegmentsAtAxis(placement, writer_index, rank, 0, 0, strides.constSlice());
+            try self.appendShardSegmentsAtAxis(slices, writer_index, rank, 0, 0, strides.constSlice());
         }
     };
 
@@ -799,15 +783,15 @@ pub const DirectMemoryWriter = struct {
         };
 
         var pjrt_buffers: Buffer.Shards = .empty;
+        const placement = try sharding.placement(shape);
         for (ordered_devices, 0..) |device, i| {
             defer initialized += 1;
 
-            const placement = try sharding.placement(shape, device);
-            const device_index = placement.platformDeviceIndex(platform) orelse return error.UnknownShardDevice;
-            const pool = &pools[device_index];
-            const shard_dma_allocator = dma_allocators[device_index].allocator();
+            const pool = &pools[device.id];
+            const shard_dma_allocator = dma_allocators[device.id].allocator();
+            const dst_memory = platform.devices[device.id].memory(.default).?;
 
-            shard_writers[i] = try DirectShardWriter.init(shard_dma_allocator, io, placement.memory(platform, .default), pool, placement.shape);
+            shard_writers[i] = try DirectShardWriter.init(shard_dma_allocator, io, dst_memory, pool, placement.shape);
 
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
         }
@@ -1377,12 +1361,7 @@ test "DirectMemoryWriter: replicated with auto topology" {
         .shape = Shape.init(.{ .rows = 8, .cols = 128 }, .f32)
             .withPartitioning(.{ .rows = .replicated, .cols = .replicated }),
         .logical_mesh = .mesh(.{ .x = .high_bandwidth }),
-        .strategy = blk: {
-            var strategy: Sharding.Strategy = .init;
-            strategy.addBinding(.x, .link_x);
-
-            break :blk strategy;
-        },
+        .strategy = .parseBindings(.{ .x = .link_x }),
     });
 }
 
@@ -1401,12 +1380,7 @@ test "DirectMemoryWriter: 1D model split with 2x2 physical mesh" {
         .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
             .withPartitioning(.{ .rows = .replicated, .cols = .model }),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
-        .strategy = blk: {
-            var strategy: Sharding.Strategy = .init;
-            strategy.addBinding(.model, .link_x);
-
-            break :blk strategy;
-        },
+        .strategy = .parseBindings(.{ .model = .link_x }),
     });
 }
 
@@ -1428,13 +1402,7 @@ test "DirectMemoryWriter: 2D batch/model split with 2x2 physical mesh" {
             .batch = .low_bandwidth,
             .model = .high_bandwidth,
         }),
-        .strategy = blk: {
-            var strategy: Sharding.Strategy = .init;
-            strategy.addBinding(.batch, .link_x);
-            strategy.addBinding(.model, .link_y);
-
-            break :blk strategy;
-        },
+        .strategy = .parseBindings(.{ .batch = .link_x, .model = .link_y }),
     });
 }
 
@@ -1453,10 +1421,8 @@ test "DirectMemoryWriter: folded model sharding with 2x2 physical mesh" {
         .shape = Shape.init(.{ .model = 4096 }, .f32).withPartitioning(.{ .model = .model }),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = blk: {
-            var strategy: Sharding.Strategy = .init;
-            strategy.addBinding(.model, .link_x);
+            var strategy: Sharding.Strategy = .parseBindings(.{ .model = .link_x });
             strategy.addFold(.link_x, &.{ .link_x, .link_y });
-
             break :blk strategy;
         },
     });
@@ -1477,12 +1443,7 @@ test "DirectMemoryWriter: writableSliceGreedy with mirrored shards" {
         .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
             .withPartitioning(.{ .rows = .replicated, .cols = .model }),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
-        .strategy = blk: {
-            var strategy: Sharding.Strategy = .init;
-            strategy.addBinding(.model, .link_x);
-
-            break :blk strategy;
-        },
+        .strategy = .parseBindings(.{ .model = .link_x }),
         .write_mode = .writable_slice_greedy,
         .writable_slice_min_len = 64,
         .pool_chunk_size = 1024,
@@ -1508,10 +1469,8 @@ test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
             .model = .high_bandwidth,
         }),
         .strategy = blk: {
-            var strategy: Sharding.Strategy = .init;
-            strategy.addBinding(.model, .link_x);
+            var strategy: Sharding.Strategy = .parseBindings(.{ .model = .link_x });
             strategy.addFold(.link_x, &.{ .link_x, .link_z });
-
             break :blk strategy;
         },
     });

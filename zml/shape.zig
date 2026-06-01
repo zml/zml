@@ -302,9 +302,7 @@ pub const Shape = struct {
 
     fn isTagConvertible(comptime T: type) bool {
         return switch (T) {
-            @EnumLiteral() => true,
-            std.builtin.Type.StructField => true,
-            Tag => true,
+            @EnumLiteral(), std.builtin.Type.StructField, Tag => true,
             else => false,
         };
     }
@@ -319,8 +317,10 @@ pub const Shape = struct {
         };
     }
 
-    inline fn ensureAttributesAreSync(self: Shape) void {
-        stdx.debug.assert(self._dims.len == self._tags.len and self._dims.len == self._partitioning.len, "Tags, dims and partitioning have diverged! dims={d} tags={d} partitioning={d}", .{ self._dims.len, self._tags.len, self._partitioning.len });
+    fn ensureAttributesAreSync(self: Shape) void {
+        if (builtin.mode == .Debug) {
+            stdx.debug.assert(self._dims.len == self._tags.len and self._dims.len == self._partitioning.len, "Tags, dims and partitioning have diverged! dims={d} tags={d} partitioning={d}", .{ self._dims.len, self._tags.len, self._partitioning.len });
+        }
     }
 
     pub fn tag(self: Shape, ax: anytype) Tag {
@@ -387,15 +387,21 @@ pub const Shape = struct {
         self.ensureAttributesAreSync();
 
         const T = @TypeOf(axis_);
-        if (comptime stdx.meta.isInteger(T)) {
-            return self.axisFromInt(@intCast(axis_));
-        }
-
-        if (comptime isTagConvertible(T)) {
-            return self.axisFromTag(toTag(axis_));
-        }
-
-        stdx.debug.compileError("Wrong axis type, expected .literal, or an integer, got: {any}", .{T});
+        // Special handling of unsigned int, to remove runtime computations and favor inlining
+        return switch (@typeInfo(T)) {
+            .int => |info| if (info.signedness == .signed)
+                self.axisFromInt(axis_)
+            else
+                @intCast(axis_),
+            .comptime_int => if (axis_ < 0)
+                self.axisFromInt(axis_)
+            else
+                axis_,
+            else => if (comptime isTagConvertible(T))
+                self.axisFromTag(toTag(axis_))
+            else
+                stdx.debug.compileError("Wrong axis type, expected .literal, or an integer, got: {any}", .{T}),
+        };
     }
 
     pub fn axes(self: Shape, axes_: anytype) AxesArray {

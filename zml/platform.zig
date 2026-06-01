@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const c = @import("c");
 const pjrt = @import("pjrt");
@@ -12,21 +13,11 @@ const pjrtx = @import("pjrtx.zig");
 const profiler_ = @import("profiling/profiler.zig");
 const Sharding = @import("Sharding.zig");
 const zml = @import("zml.zig");
+const constants = @import("constants.zig");
 
 const log = std.log.scoped(.zml);
 
-fn StaticPlatformMap(comptime E: type, comptime T: type) type {
-    const tag_count = @typeInfo(E).@"enum".fields.len;
-    var struct_field_names: [tag_count][]const u8 = undefined;
-    var struct_field_types: [tag_count]type = @splat(T);
-    const is_optional = @typeInfo(T) == .optional;
-    const default_value_ptr: ?*const anyopaque = if (is_optional) @ptrCast(&@as(T, null)) else null;
-    var struct_field_attrs: [tag_count]std.builtin.Type.StructField.Attributes = @splat(.{ .default_value_ptr = default_value_ptr });
-    inline for (@typeInfo(E).@"enum".fields, 0..) |f, i| struct_field_names[i] = f.name;
-    return @Struct(.auto, null, &struct_field_names, &struct_field_types, &struct_field_attrs);
-}
-
-var api_map: StaticPlatformMap(Target, ?*const pjrt.Api) = .{};
+var api_map: std.enums.EnumArray(Target, ?*const pjrt.Api) = .initFill(null);
 
 fn disableXlaLogs() void {
     // https://deepreg.readthedocs.io/en/latest/docs/logging.html#tensorflow-logging
@@ -60,10 +51,10 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
 
 fn loadOrGetApi(allocator: std.mem.Allocator, io: std.Io, target: Target) !*const pjrt.Api {
     return switch (target) {
-        inline else => |tag| @field(api_map, @tagName(tag)) orelse b: {
+        inline else => |tag| api_map.get(tag) orelse b: {
             disableXlaLogs();
             const api = try platforms.load(allocator, io, tag);
-            @field(api_map, @tagName(tag)) = api;
+            api_map.set(tag, api);
             break :b api;
         },
     };
@@ -128,6 +119,7 @@ pub const Device = struct {
     pjrt_device: *const pjrt.Device,
     pjrt_desc: *const pjrt.DeviceDescription,
     addressable_memories: []*const Memory,
+    memory_by_kind: std.EnumArray(Memory.Kind, ?*const Memory),
 
     fn init(allocator: std.mem.Allocator, pjrt_device_: *const pjrt.Device, platform: *const Platform) !Device {
         const pjrt_addressable_memories = pjrt_device_.addressableMemories(platform.pjrt_api);
@@ -136,11 +128,21 @@ pub const Device = struct {
             addressable_memory.* = platform.memoryFromPjrt(pjrt_memory);
         }
 
+        // Cache memory lookups since they are expensive
+        const default_memory: *const Memory = resolveDefaultMemory(pjrt_device_, platform, addressable_memories);
+        const memory_by_kind: std.EnumArray(Memory.Kind, ?*const Memory) = .init(.{
+            .default = default_memory,
+            .device = resolveMemory(addressable_memories, .device),
+            .host_pinned = resolveMemory(addressable_memories, .host_pinned),
+            .host_unpinned = resolveMemory(addressable_memories, .host_unpinned),
+        });
+
         return .{
             .platform = platform,
             .pjrt_device = pjrt_device_,
             .pjrt_desc = pjrt_device_.getDescription(platform.pjrt_api),
             .addressable_memories = addressable_memories,
+            .memory_by_kind = memory_by_kind,
         };
     }
 
@@ -148,8 +150,27 @@ pub const Device = struct {
         allocator.free(self.addressable_memories);
     }
 
-    pub fn id(self: Device) usize {
-        return self.pjrt_desc.id(self.platform.pjrt_api);
+    fn resolveDefaultMemory(pjrt_device_: *const pjrt.Device, platform: *const Platform, addressable_memories: []*const Memory) *const Memory {
+        const pjrt_memory = pjrt_device_.defaultMemory(platform.pjrt_api);
+        for (addressable_memories) |mem| {
+            if (mem.pjrt_memory == pjrt_memory) return mem;
+        }
+        return platform.memoryFromPjrt(pjrt_memory);
+    }
+
+    fn resolveMemory(addressable_memories: []*const Memory, memory_kind: Memory.Kind) ?*const Memory {
+        std.debug.assert(memory_kind != .default);
+
+        for (addressable_memories) |mem| {
+            if (mem.isOfKind(memory_kind)) {
+                return mem;
+            }
+        }
+        return null;
+    }
+
+    pub fn id(self: Device) u32 {
+        return @intCast(self.pjrt_desc.id(self.platform.pjrt_api));
     }
 
     pub fn processIndex(self: Device) i32 {
@@ -183,23 +204,35 @@ pub const Device = struct {
         });
     }
 
-    pub fn memory(self: Device, memory_kind: Memory.Kind) *const Memory {
-        if (memory_kind == .default) {
-            const pjrt_memory = self.pjrt_device.defaultMemory(self.platform.pjrt_api);
-            for (self.addressable_memories) |mem| {
-                if (mem.pjrt_memory == pjrt_memory) return mem;
-            }
-            return self.platform.memoryFromPjrt(pjrt_memory);
-        }
-
-        for (self.addressable_memories) |mem| {
-            if (mem.isOfKind(memory_kind)) {
-                return mem;
-            }
-        }
-        unreachable;
+    pub fn memory(self: *const Device, memory_kind: Memory.Kind) ?*const Memory {
+        return self.memory_by_kind.values[@intFromEnum(memory_kind)];
     }
 };
+
+fn platformDeviceSortId(target: Target, device: Device) usize {
+    return switch (target) {
+        .neuron => @intCast(device.localHardwareId()),
+        .cuda, .rocm, .tpu, .cpu, .oneapi => device.id(),
+    };
+}
+
+fn sortDevicesById(target: Target, devices: []Device) void {
+    const Context = struct {
+        target: Target,
+
+        fn lessThan(ctx: @This(), lhs: Device, rhs: Device) bool {
+            return platformDeviceSortId(ctx.target, lhs) < platformDeviceSortId(ctx.target, rhs);
+        }
+    };
+
+    std.mem.sort(Device, devices, Context{ .target = target }, Context.lessThan);
+
+    if (builtin.mode == .Debug) {
+        for (devices, 0..) |device, expected_id| {
+            std.debug.assert(platformDeviceSortId(target, device) == expected_id);
+        }
+    }
+}
 
 pub const Platform = struct {
     arena: std.heap.ArenaAllocator,
@@ -271,6 +304,7 @@ pub const Platform = struct {
             for (pjrt_devices, devices) |pjrt_device, *platform_device| {
                 platform_device.* = try .init(arena, pjrt_device, platform);
             }
+            sortDevicesById(target, devices);
             for (memories) |*platform_memory| {
                 platform_memory.populateAddressableByDevices();
             }
@@ -567,6 +601,29 @@ pub const Platform = struct {
         }
         unreachable;
     }
+
+    pub inline fn defaultMemoryLayout(platform: *const Platform, dims: []const i64, dtype: zml.DataType) pjrt.MemoryLayout {
+        // inline cause `default` is a huge ass struct allocated on the stack,
+        // and toMemoryLayout returns slices into it.
+        // There is probably a better way of doing this,
+        // but given it's compiled out (except for TPU), I'm not gonna care for now.
+        return switch (platform.target) {
+            .tpu => {
+                if (comptime !platforms.isEnabled(.tpu)) unreachable;
+                const element_type = pjrtx.bufferTypeFromDtype(dtype);
+                const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
+                return default.toMemoryLayout();
+            },
+            .cuda, .rocm, .neuron, .oneapi, .cpu => .{
+                // If this is the default layout on the platform, there is no point calling PJRT
+                .tiled = .{
+                    .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
+                    .tile_dims = &.{},
+                    .tile_dims_sizes = &.{},
+                },
+            },
+        };
+    }
 };
 
 pub const CreateOptions = struct {
@@ -765,4 +822,30 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     log.info("{s} {f} [device={d}]: {d}", .{ name, slice.shape, device_ordinal, slice });
 
     return null;
+}
+
+test "platform defaultMemoryLayout is boring" {
+    const platform = zml.testing.env();
+
+    const shapes = [_][]const i64{
+        &.{4096},
+        &.{ 4096, 4096 },
+        &.{ 4096, 4096, 4096 },
+    };
+    for (shapes) |dims| {
+        // Checks that the PJRT client always return the same thing than `platform.defaultMemoryLayout`
+        // This allows to bypass the PJRT calls and the string of pjrt_client.defaultMemoryLayout.
+        const default_layout = try platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, pjrtx.bufferTypeFromDtype(.f32), dims);
+        const mem_layout = default_layout.toMemoryLayout();
+
+        // Note: I'm not just calling platform.defaultMemoryLayout because I'm investigating
+        // wether TPU requires its special branch.
+        try std.testing.expectEqualDeep(mem_layout, pjrt.MemoryLayout{
+            .tiled = .{
+                .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
+                .tile_dims = &.{},
+                .tile_dims_sizes = &.{},
+            },
+        });
+    }
 }
