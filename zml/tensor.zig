@@ -313,7 +313,7 @@ pub const Tensor = struct {
         const output_d = try zml.testing.autoCall(std.testing.allocator, io, &exe, Local.memcopy, .{ left_d, right_d });
 
         var output_memory: [Platform.MAX_NUM_DEVICES]*anyopaque = undefined;
-        for (0..output_d.numDevices()) |dev| {
+        for (0..output_d.numShards()) |dev| {
             output_memory[dev] = output_d.opaqueDevicePtr(dev);
         }
 
