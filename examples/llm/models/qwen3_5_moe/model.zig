@@ -56,14 +56,14 @@ fn kvHeadRepeatFactor(axis_size: i64, model_partitions: i64) ?u32 {
 
 fn partitionProjectedKv(tensor: zml.Tensor, repeat_factor: ?u32) zml.Tensor {
     return if (repeat_factor) |factor|
-        tensor.repeat1d(.h, @as(u63, factor)).withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated })
+        tensor.stutter1d(tensor.axis(.h), @as(u63, factor)).withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated })
     else
         tensor.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
 }
 
 fn partitionCachedKv(tensor: zml.Tensor, repeat_factor: ?u32) zml.Tensor {
     return if (repeat_factor) |factor|
-        tensor.rename(.{ .s = .k }).repeat1d(.h, @as(u63, factor)).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated })
+        tensor.rename(.{ .s = .k }).stutter1d(tensor.axis(.h), @as(u63, factor)).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated })
     else
         tensor.rename(.{ .s = .k }).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
 }
@@ -431,7 +431,6 @@ pub const TransformerLayer = struct {
         moe_parameters: zml.moe.Parameters,
     ) struct { zml.Tensor, KvCache.GatedDeltaNetCache } {
         _ = config;
-        _ = token_index;
         const x0_replicated = x0.withPartitioning(.{ .d = .replicated });
         const normalized_x0 = self.input_layernorm.forward(x0_replicated);
 
@@ -439,7 +438,7 @@ pub const TransformerLayer = struct {
             .linear_attn => |linear_attn| linear_attn,
             .self_attn => unreachable,
         };
-        const attention_output, const updated_kv_cache = linear_attn.forward(normalized_x0, kv_cache);
+        const attention_output, const updated_kv_cache = linear_attn.forward(normalized_x0, kv_cache, token_index);
 
         const x1 = attention_output.add(x0_replicated).withPartitioning(.{ .d = .replicated });
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
@@ -471,7 +470,7 @@ pub const TransformerLayer = struct {
                 updated_kv_cache.self_attn = result[1];
             },
             .linear_attn => |*linear_attn| {
-                const result = linear_attn.forward(normalized_x0, kv_cache.cache.linear_attn);
+                const result = linear_attn.forward(normalized_x0, kv_cache.cache.linear_attn, token_index);
                 attention_output = result[0];
                 updated_kv_cache.gated_delta_net = result[1];
             },
@@ -584,11 +583,9 @@ pub const SelfAttn = struct {
         var k, var v = self.projectKV(x_qkv);
         q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
         gate = gate.withPartitioning(.{ .s = .replicated, .d_out_proj = .model });
-        log.info("Attention q shape: {f}, k shape: {f}, v shape: {f}", .{ q.shape(), k.shape(), v.shape() });
 
         k = partitionProjectedKv(k, repeat_factor);
         v = partitionProjectedKv(v, repeat_factor);
-        log.info("Attention q shape: {f}, k shape: {f}, v shape: {f}", .{ q.shape(), k.shape(), v.shape() });
 
         q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
         k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
@@ -602,12 +599,10 @@ pub const SelfAttn = struct {
         q = self.rotary_embed.applyRope(q, cos, sin);
         k = self.rotary_embed.applyRope(k, cos, sin);
         q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
-        log.info("Attention q shape: {f}, k shape: {f}, v shape: {f}", .{ q.shape(), k.shape(), v.shape() });
 
         k = partitionProjectedKv(k, null);
         v = partitionProjectedKv(v, null);
 
-        log.info("Attention q shape: {f}, k shape: {f}, v shape: {f}", .{ q.shape(), k.shape(), v.shape() });
 
         const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
         k = new_kv_cache.keys().convert(dtype);
@@ -616,7 +611,6 @@ pub const SelfAttn = struct {
 
         k = partitionCachedKv(k, repeat_factor);
         v = partitionCachedKv(v, repeat_factor);
-        log.info("Attention q shape: {f}, k shape: {f}, v shape: {f}", .{ q.shape(), k.shape(), v.shape() });
 
         const attn_output = zml.attention.attention.attention(
             q,
@@ -979,7 +973,12 @@ pub const GatedDeltaNet = struct {
         return zml.Tensor.concatenate(&.{ padding, tail }, .s);
     }
 
-    pub fn forward(self: GatedDeltaNet, x: zml.Tensor, cache: KvCache.GatedDeltaNetCache) struct { zml.Tensor, KvCache.GatedDeltaNetCache } {
+    fn buildUpdatedConvStateFromPrefix(input: zml.Tensor, left_pad: i64, valid_len: zml.Tensor) zml.Tensor {
+        const start = valid_len.convert(.i64).addConstant(-left_pad).maximum(zml.Tensor.scalar(0, .i64));
+        return input.dynamicSlice1d(input.axis(.s), .{ .start = start, .len = left_pad });
+    }
+
+    pub fn forward(self: GatedDeltaNet, x: zml.Tensor, cache: KvCache.GatedDeltaNetCache, token_index: zml.Tensor) struct { zml.Tensor, KvCache.GatedDeltaNetCache } {
         const key_dim = self.num_k_heads * self.head_k_dim;
         const value_dim = self.num_v_heads * self.head_v_dim;
         const conv_dim = 2 * key_dim + value_dim;
@@ -1040,7 +1039,17 @@ pub const GatedDeltaNet = struct {
 
         const beta = b.sigmoid();
         const aLog_type = self.aLog.dtype();
-        const g = self.aLog.broad(a.shape()).exp().mul(softplus(a.convert(aLog_type).add(self.dt_bias.convert(aLog_type).broad(a.shape())))).negate();
+        var g = self.aLog.broad(a.shape()).exp().mul(softplus(a.convert(aLog_type).add(self.dt_bias.convert(aLog_type).broad(a.shape())))).negate();
+        var recurrent_value = value;
+        var recurrent_beta = beta;
+        if (!use_cached_state) {
+            const valid_mask = zml.Tensor.arange(.{ .end = x.dim(.s) }, .i64)
+                .withTags(.{.s})
+                .cmp(.LT, token_index.convert(.i64));
+            recurrent_value = valid_mask.broad(value.shape()).select(recurrent_value, zml.Tensor.zeroes(recurrent_value.shape()));
+            recurrent_beta = valid_mask.broad(beta.shape()).select(recurrent_beta, zml.Tensor.zeroes(recurrent_beta.shape()));
+            g = valid_mask.broad(g.shape()).select(g, zml.Tensor.zeroes(g.shape()));
+        }
 
         const query_for_rule = if (self.qk_head_repetition == 1) query else query.stutter1d(@intCast(query.axis(.kh)), @intCast(self.qk_head_repetition));
         const key_for_rule = if (self.qk_head_repetition == 1) key else key.stutter1d(@intCast(key.axis(.kh)), @intCast(self.qk_head_repetition));
@@ -1048,9 +1057,9 @@ pub const GatedDeltaNet = struct {
         const core_attn_out, const last_recurrent_state = recurrentGatedDeltaRule(
             query_for_rule,
             key_for_rule,
-            value,
+            recurrent_value,
             g,
-            beta,
+            recurrent_beta,
             if (use_cached_state) cache.recurrentState() else null,
         );
 
@@ -1065,7 +1074,7 @@ pub const GatedDeltaNet = struct {
         const output = self.out_proj.forward(core_attn_out_normed.merge(.{ .d = .{ .vh, .vhd } }))
             .rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
         const updated_cache = cache.update(
-            buildUpdatedConvState(conv_input, left_pad),
+            if (use_cached_state) buildUpdatedConvState(conv_input, left_pad) else buildUpdatedConvStateFromPrefix(projected_qkv, left_pad, token_index),
             last_recurrent_state,
         );
         return .{ output, updated_cache };
@@ -1170,7 +1179,6 @@ pub const KvCache = struct {
             const k_shape = self.k.shape().drop(.layer);
             var layer = self.layer_index;
             layer = if (token_index) |idx| layer.broad(idx.shape()) else layer;
-            log.info("layer shape: {f}, k shape: {f}, idx shape: {f}", .{ layer.shape(), k_shape, token_index.?.shape() });
 
             return if (token_index) |idx| .{
                 .k = self.k.scatterSlices(

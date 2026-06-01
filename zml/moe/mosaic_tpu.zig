@@ -337,8 +337,6 @@ pub fn fusedExpertsImpl(
         if (expert_map.rank() != 1 or expert_map.dim(.expert) != num_experts) return error.InvalidShape;
     }
 
-    const tile_m: i64 = 8;
-
     // Expand [token, topk] routing into a flat routed-token view. Each
     // original token now appears once per selected expert.
     const flat_ids_global = ids.transpose(.{ .topk, .token }).flatten().withTags(.{.route});
@@ -377,7 +375,6 @@ pub fn fusedExpertsImpl(
     // Recover contiguous group sizes after sorting. This segment descriptor is
     // what drives the grouped matmul metadata builder.
     const group_sizes = histogramCounts(flat_ids_local, gate_up.dim(.expert));
-    const aligned_hidden = alignSortedRowsByGroup(hidden_sorted, expert_ids_sorted, group_sizes, tile_m);
 
     // First expert matmul: hidden x gate_up. Bias remains outside the custom
     // call and is applied per routed token in StableHLO.
@@ -385,9 +382,13 @@ pub fn fusedExpertsImpl(
     var gate_up_out = if (use_reference_moe) blk: {
         const gate_up_per_token = gate_up.gather(.{ .expert = expert_ids_sorted }, .{});
         break :blk hidden_sorted.dot(gate_up_per_token, .in);
-    } else callMegabloxGmm(aligned_hidden.rows, gate_up, aligned_hidden.group_sizes, hidden.dtype())
-        .gather(.{ .token = aligned_hidden.positions.rename(.{ .token = .route }) }, .{})
-        .rename(.{ .route = .token });
+    } else blk: {
+        const tile_m: i64 = 8;
+        const aligned_hidden = alignSortedRowsByGroup(hidden_sorted, expert_ids_sorted, group_sizes, tile_m);
+        break :blk callMegabloxGmm(aligned_hidden.rows, gate_up, aligned_hidden.group_sizes, hidden.dtype())
+            .gather(.{ .token = aligned_hidden.positions.rename(.{ .token = .route }) }, .{})
+            .rename(.{ .route = .token });
+    };
     if (opts.w1_bias) |bias| {
         const bias_per_token = bias.withTags(.{ .expert, .out }).gather(.{ .expert = expert_ids_sorted }, .{});
         gate_up_out = gate_up_out.add(bias_per_token);
@@ -395,16 +396,19 @@ pub fn fusedExpertsImpl(
 
     // Apply the logical MoE activation between the two grouped matmuls.
     const activated = applyActivation(gate_up_out, opts.activation);
-    const aligned_activated = alignSortedRowsByGroup(activated, expert_ids_sorted, group_sizes, tile_m);
 
     // Second expert matmul: activated x down. As above, bias is handled in
     // StableHLO so the kernel only implements grouped GEMM.
     var down_out = if (use_reference_moe) blk: {
         const down_per_token = down.gather(.{ .expert = expert_ids_sorted }, .{});
         break :blk activated.rename(.{ .out = .mid }).dot(down_per_token, .mid);
-    } else callMegabloxGmm(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype())
-        .gather(.{ .token = aligned_activated.positions.rename(.{ .token = .route }) }, .{})
-        .rename(.{ .route = .token });
+    } else blk: {
+        const tile_m: i64 = 8;
+        const aligned_activated = alignSortedRowsByGroup(activated, expert_ids_sorted, group_sizes, tile_m);
+        break :blk callMegabloxGmm(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype())
+            .gather(.{ .token = aligned_activated.positions.rename(.{ .token = .route }) }, .{})
+            .rename(.{ .route = .token });
+    };
     if (opts.w2_bias) |bias| {
         const bias_per_token = bias.withTags(.{ .expert, .out }).gather(.{ .expert = expert_ids_sorted }, .{});
         down_out = down_out.add(bias_per_token);
