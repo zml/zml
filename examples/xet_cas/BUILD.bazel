@@ -29,3 +29,9 @@ zig_binary(
     main = "test_reconstruct.zig",
     deps = ["//zml/io"],
 )
+
+zig_binary(
+    name = "test_simple",
+    main = "test_simple.zig",
+    deps = ["//zml"],
+)
