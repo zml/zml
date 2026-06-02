@@ -4,7 +4,7 @@ pub const flashattn = @import("attention/flashattn.zig");
 pub const paged_attention = @import("attention/paged_attention.zig");
 pub const nki = struct {
     pub const attention = @import("attention/nki/attention.zig");
-    pub const paged_attention = @import("attention/nki/paged_attention.zig");
+    pub const paged = @import("attention/nki/paged_attention.zig");
 };
 pub const tpu = @import("attention/tpu_attention.zig");
 pub const triton = @import("attention/triton_attention.zig");
