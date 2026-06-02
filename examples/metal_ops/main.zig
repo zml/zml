@@ -234,6 +234,13 @@ fn reshapeNeg(a: zml.Tensor) zml.Tensor {
 fn sumAll(a: zml.Tensor) zml.Tensor {
     return a.sum(.n); // [n] -> scalar (num_out=1: the tree-reduction case)
 }
+// Reduce of a COMPUTED elementwise (RMSNorm's reduce(square(x)) shape): the
+// reduce's input is x*x, not a parameter. If XLA fuses the multiply into the
+// reduce, this is a reduction kFusion with a non-parameter reduce input — the
+// fused-reduction kernel (inline elementwise prologue in the reduce loop).
+fn sumSq(a: zml.Tensor) zml.Tensor {
+    return a.mul(a).sum(.j); // [i,j] -> [i], out_i = Σ_j a[i,j]^2
+}
 // Multi-axis reduce (one kReduce over several axes): zml.sum is single-axis, so
 // drop to ops.reduce. Only contiguous reduced axes are supported (they merge to
 // one extent/stride). sumJK reduces the trailing [j,k]; sumAll3 reduces all.
@@ -845,6 +852,16 @@ pub fn main(init: std.process.Init) !void {
     // Reduction (E4): sum over axis 1, [2,3] -> [2] = [3, 12].
     failures += checkShaped(allocator, io, cpu, metal, "sum", sumj,
         zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 2);
+
+    // Reduce of a computed elementwise (RMSNorm reduce(square(x)) shape):
+    // [2,3] -> [2], out_i = Σ_j a[i,j]^2 = [0+1+4, 9+16+25] = [5, 50].
+    failures += checkShaped(allocator, io, cpu, metal, "sumsq", sumSq,
+        zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 2);
+    // Same fused reduce at a larger reduced extent (512): num_out=3, exercises
+    // the serial-per-output fused kernel over a long reduce loop. Values 1..11
+    // → Σ of ≤512 squares ≤ 61952, exact in f32.
+    failures += checkShaped(allocator, io, cpu, metal, "sumsqB", sumSq,
+        zml.Shape.init(.{ .i = 3, .j = 512 }, .f32), &mat3x512, 3);
 
     // Multi-axis reduce (contiguous): [2,3,4] reduce {j,k} -> [2] = [66, 210];
     // reduce-all {i,j,k} -> [] = 276. Both merge to one extent/stride.
