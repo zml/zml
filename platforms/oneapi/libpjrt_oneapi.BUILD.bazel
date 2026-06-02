@@ -1,9 +1,6 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
-ONEAPI_UMF_VERSION = "0.10.0"
-ONEAPI_UR_VERSION = "0.11.10"
-
 patchelf(
     name = "libpjrt_oneapi_so",
     src = "libpjrt_oneapi.so",
@@ -13,19 +10,28 @@ patchelf(
     rename_dynamic_symbols = {
         "dlopen": "zmlxoneapi_dlopen",
     },
+    replace_needed = {
+        "libmkl_core.so.2": "libmkl_core.so.3",
+        "libmkl_intel_ilp64.so.2": "libmkl_intel_ilp64.so.3",
+        "libmkl_sequential.so.2": "libmkl_sequential.so.3",
+        "libmkl_sycl_blas.so.5": "libmkl_sycl_blas.so.6",
+        "libsycl.so.8": "libsycl.so.9",
+        "libumf.so.0": "libumf.so.1",
+    },
     set_rpath = "$ORIGIN",
 )
 
 patchelf(
     name = "libsycl_so",
-    src = "@oneapi//:libsycl_so",
+    src = "@intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0//:libsycl_so",
     set_rpath = "$ORIGIN",
 )
 
-ONEAPI_VERSION = "2025.1"
-ONEAPI_BASE_LIB = "{}/lib".format(ONEAPI_VERSION)
+ONEAPI_VERSION = "2026.0"
 ONEAPI_COMPILER_LIB = "compiler/{}/lib".format(ONEAPI_VERSION)
 ONEAPI_MKL_LIB = "mkl/{}/lib".format(ONEAPI_VERSION)
+ONEAPI_TCM_LIB = "tcm/1.5/lib"
+ONEAPI_UMF_LIB = "umf/1.1/lib"
 
 copy_to_directory(
     name = "sandbox",
@@ -33,9 +39,13 @@ copy_to_directory(
         ":libpjrt_oneapi_so",
         ":libsycl_so",
         "@zml//platforms/oneapi:zmlxoneapi",
-        "@oneapi//:base_runtime",
-        "@oneapi//:compiler_runtime",
-        "@oneapi//:mkl_runtime",
+        "@intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0//:sycl_runtime",
+        "@intel-oneapi-compiler-shared-runtime-2026.0//:compiler_runtime",
+        "@intel-oneapi-mkl-core-2026.0//:mkl_core_runtime",
+        "@intel-oneapi-mkl-sycl-blas-2026.0//:mkl_sycl_blas",
+        "@intel-oneapi-tcm-1.5//:hwloc",
+        "@intel-oneapi-umf-1.1//:umf",
+        "@zlib1g//:zlib1g",
         "@zero_loader//:all",
     ],
     add_directory_to_runfiles = False,
@@ -45,9 +55,11 @@ copy_to_directory(
     replace_prefixes = {
         "libpjrt_oneapi_so": "lib",
         "libsycl_so": "lib",
-        ONEAPI_BASE_LIB: "lib",
         ONEAPI_COMPILER_LIB: "lib",
         ONEAPI_MKL_LIB: "lib",
+        ONEAPI_TCM_LIB: "lib",
+        ONEAPI_UMF_LIB: "lib",
+        "lib/x86_64-linux-gnu": "lib",
         "platforms/oneapi/libzmlxoneapi": "lib/libzmlxoneapi",
     },
     root_paths = ["."],

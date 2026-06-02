@@ -249,8 +249,8 @@
     "https://bcr.bazel.build/modules/rules_cc/0.2.18/source.json": "abad668ff2fd63ada1ac49bf386d37e27048b89a3465a6fd968bb832b00a09d3",
     "https://bcr.bazel.build/modules/rules_cc/0.2.4/MODULE.bazel": "1ff1223dfd24f3ecf8f028446d4a27608aa43c3f41e346d22838a4223980b8cc",
     "https://bcr.bazel.build/modules/rules_cc/0.2.8/MODULE.bazel": "f1df20f0bf22c28192a794f29b501ee2018fa37a3862a1a2132ae2940a23a642",
-    "https://bcr.bazel.build/modules/rules_distroless/0.6.2/MODULE.bazel": "eafe8b473c0c78038d9a6e1dbd9278b7bf83457ddc78207297483bfbe1012d56",
-    "https://bcr.bazel.build/modules/rules_distroless/0.6.2/source.json": "830d7a25ce382e571e58791fbed3b47e6da3237805624bab8997ae59d763bdc2",
+    "https://bcr.bazel.build/modules/rules_distroless/0.8.0/MODULE.bazel": "a3e473943b685190e20668f5149f62a116fdcbeba66c7b9778f71d2aed4533c1",
+    "https://bcr.bazel.build/modules/rules_distroless/0.8.0/source.json": "a6931e20d97a13675693adb8b6cd3a0e6eb5218db43dfc83b75566ddc4158efc",
     "https://bcr.bazel.build/modules/rules_foreign_cc/0.10.1/MODULE.bazel": "b9527010e5fef060af92b6724edb3691970a5b1f76f74b21d39f7d433641be60",
     "https://bcr.bazel.build/modules/rules_foreign_cc/0.15.1/MODULE.bazel": "c2c60d26c79fda484acb95cdbec46e89d6b28b4845cb277160ce1e0c8622bb88",
     "https://bcr.bazel.build/modules/rules_foreign_cc/0.15.1/source.json": "a161811a63ba8a859086da3b7ff3ad04f2e9c255d7727b41087103fc0eb22f55",
@@ -386,7 +386,7 @@
   "moduleExtensions": {
     "@@aspect_rules_py+//py:extensions.bzl%py_tools": {
       "general": {
-        "bzlTransitiveDigest": "GLVIk55uU2jb460gpL1FFbE/tBFqzMxRfta5QXYfjQo=",
+        "bzlTransitiveDigest": "pI39mvkEpRkqO9fPgwuZp2cFsNe/MqGRNr3gPBzTHaQ=",
         "usagesDigest": "9BiP3ASHlGl4doGhzXJwK17taNzv/q6x/IZ4Hb6LxNY=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -1075,7 +1075,7 @@
     },
     "@@rules_kotlin+//src/main/starlark/core/repositories:bzlmod_setup.bzl%rules_kotlin_extensions": {
       "general": {
-        "bzlTransitiveDigest": "AEsQvKwdstptzt98AO1bJYfoWpPUn2upx53ra6o/Rc8=",
+        "bzlTransitiveDigest": "oA0OoCaohRv2x/x61/6mFy+2a9+GiuUKGAXLGcQy+hQ=",
         "usagesDigest": "QI2z8ZUR+mqtbwsf2fLqYdJAkPOHdOV+tF2yVAUgRzw=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -1139,7 +1139,7 @@
     },
     "@@rules_oci+//oci:extensions.bzl%oci": {
       "general": {
-        "bzlTransitiveDigest": "7oR14uSSRXhIDozspnn5ya0JWJlnqcG+JmT5yO1BsLw=",
+        "bzlTransitiveDigest": "Q7DvSdepUOK0DnFJtYmquDXHZCcR2DoLM9LbkrHSCKQ=",
         "usagesDigest": "JLbamplho20rviuebatMGqnQnaoj32ewCzLuRVusGoU=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -1433,7 +1433,7 @@
     },
     "@@rules_python+//python/uv:uv.bzl%uv": {
       "general": {
-        "bzlTransitiveDigest": "LM8+g04lV+afYP67YcE7wenTJMrNqvF5u/ZnOctwctY=",
+        "bzlTransitiveDigest": "IzGWfoGARM6X2a4AM7BN5gheLtDsFeP9Fra2qTod+mA=",
         "usagesDigest": "Ucfum/vsVnlkhtglTERDLTj+bBeG7dcpbV9h0LP9HOQ=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -1764,7 +1764,7 @@
     },
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
-        "bzlTransitiveDigest": "u7Psh7szBG3+lbRmEeBBbWlZRHJWhWtxQo/wtRqvnTg=",
+        "bzlTransitiveDigest": "VGLOg2kVw+STO9R5OrQnLFbv7Vl5TPdtIebIs324IpU=",
         "usagesDigest": "4xBoe2eIScx2QI0jVieHWXdflezUUDIApwMqS+SWGbw=",
         "recordedFileInputs": {
           "@@//bazel/zig_index.json": "2e3b4b83f1add5d3ca12fd05797c04c38af21d86c7fc7c1a9b356560141a4797",
@@ -2093,7 +2093,7 @@
     },
     "@@rules_zig+//zig/zls:extensions.bzl%zls": {
       "general": {
-        "bzlTransitiveDigest": "8ZwSSF/7dE4rb0W0cZqil2SfGF1bPK04LTv1/zjtkTM=",
+        "bzlTransitiveDigest": "ZuceGxE17jROQ+kQkaPqIcK7gMKGb56I97Aq1/Dubdc=",
         "usagesDigest": "b/ERjMTWazfa8VFWuTc0PTtQQzLDuloWSHlzXj6Zb5w=",
         "recordedFileInputs": {
           "@@rules_zig+//zig/zls/private/versions.json": "127803289dfd79b5255db5f74be1d9a2f790f03292d6147009af702d888aba69"
@@ -2235,7 +2235,7 @@
     "@@yq.bzl+//yq:extensions.bzl%yq": {
       "general": {
         "bzlTransitiveDigest": "iWlctm1cJYZLESuQEBygCQc6adq+oIRMb4Dmk0rYxkA=",
-        "usagesDigest": "J3TR36exv3ePI9O2y+uqrzTDmT6s6ADkTsROB++nm6I=",
+        "usagesDigest": "1CP5kLHwnlFZ3obmnV0eEOp+80JltkcSimeCHXe8/+E=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},

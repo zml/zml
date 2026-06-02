@@ -11,7 +11,7 @@ bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "libbacktrace", version = "1.0.0-20250926-7939218")
 bazel_dep(name = "patchelf", version = "0.18.0.bcr.1")
 bazel_dep(name = "pcre2", version = "10.45")
-bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "protobuf", version = "33.6", repo_name = "com_google_protobuf")
 single_version_override(
     module_name = "protobuf",
@@ -21,7 +21,7 @@ single_version_override(
 bazel_dep(name = "pybind11_bazel", version = "3.0.1")
 bazel_dep(name = "re2", version = "2025-11-05", repo_name = "com_googlesource_code_re2")
 bazel_dep(name = "rules_cc", version = "0.2.18")
-bazel_dep(name = "rules_distroless", version = "0.6.2")
+bazel_dep(name = "rules_distroless", version = "0.8.0")
 bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.7")
 bazel_dep(name = "rules_proto", version = "7.1.0")
@@ -235,6 +235,13 @@ apt.install(
     manifest = "//platforms/neuron:packages.yaml",
 )
 use_repo(apt, "apt_neuron")
+
+apt.install(
+    name = "apt_oneapi",
+    lock = "//platforms/oneapi:packages.lock.json",
+    manifest = "//platforms/oneapi:packages.yaml",
+)
+use_repo(apt, "apt_oneapi")
 
 oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
 oci.pull(
