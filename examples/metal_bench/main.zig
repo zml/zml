@@ -49,6 +49,10 @@ fn sumCols(a: zml.Tensor) zml.Tensor {
 fn sumAll(a: zml.Tensor) zml.Tensor {
     return a.sum(.n); // [n] -> scalar, num_out=1 (small-output reduction stress)
 }
+fn affine(x: zml.Tensor, scale: zml.Tensor, bias: zml.Tensor) zml.Tensor {
+    const xs = x.shape();
+    return x.mul(scale.broad(xs)).add(bias.broad(xs)); // x*scale+bias, [d]->[r,d] bcast in fusion (E5.2)
+}
 
 const BenchResult = struct {
     name: []const u8,
@@ -210,6 +214,49 @@ fn benchTernary(
     return makeResult(name, n, 4 * n * @sizeOf(f32), iters, total_ns); // 3 in + 1 out
 }
 
+/// Affine `x*scale + bias` over x=[rows,cols] with scale/bias=[cols] broadcast
+/// inside the fusion. Bytes ≈ read x + write out (the [cols] vectors are tiny).
+fn benchAffine(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    name: []const u8,
+    rows: usize,
+    cols: usize,
+    iters: usize,
+    warmup: usize,
+) !BenchResult {
+    const xs = zml.Shape.init(.{ .b = rows, .d = cols }, .f32);
+    const ds = zml.Shape.init(.{ .d = cols }, .f32);
+    const xt: zml.Tensor = .fromShape(xs);
+    const st: zml.Tensor = .fromShape(ds);
+    const bt: zml.Tensor = .fromShape(ds);
+    var exe = try platform.compileFn(allocator, io, affine, .{ xt, st, bt }, .{});
+    defer exe.deinit();
+
+    const x_data = try allocator.alloc(f32, rows * cols);
+    defer allocator.free(x_data);
+    const d_data = try allocator.alloc(f32, cols);
+    defer allocator.free(d_data);
+    fillPositive(x_data);
+    fillPositive(d_data);
+    var xb = try zml.Buffer.fromBytes(io, platform, xs, .replicated, std.mem.sliceAsBytes(x_data));
+    defer xb.deinit();
+    var sb = try zml.Buffer.fromBytes(io, platform, ds, .replicated, std.mem.sliceAsBytes(d_data));
+    defer sb.deinit();
+    var bb = try zml.Buffer.fromBytes(io, platform, ds, .replicated, std.mem.sliceAsBytes(d_data));
+    defer bb.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ xb, sb, bb });
+
+    const total_ns = try timeCalls(io, &exe, exe_args, &exe_results, iters, warmup);
+    return makeResult(name, rows * cols, 2 * rows * cols * @sizeOf(f32), iters, total_ns);
+}
+
 /// A unary shape-transform (transpose / reduce): caller supplies the input
 /// shape, the element count, and the bytes-moved model (they differ per op).
 fn benchShaped(
@@ -340,6 +387,7 @@ pub fn main(init: std.process.Init) !void {
     try results.append(allocator, try benchBinary(allocator, io, platform, "add", add, n, cli.iters, cli.warmup));
     try results.append(allocator, try benchBinary(allocator, io, platform, "div", div, n, cli.iters, cli.warmup));
     try results.append(allocator, try benchTernary(allocator, io, platform, "fma(a+b)*c", fma3, n, cli.iters, cli.warmup));
+    try results.append(allocator, try benchAffine(allocator, io, platform, "affine_bcast", cli.rows, cli.cols, cli.iters, cli.warmup));
     try results.append(allocator, try benchUnary(allocator, io, platform, "exp", exp_, n, cli.iters, cli.warmup));
     try results.append(allocator, try benchUnary(allocator, io, platform, "tanh", tanh_, n, cli.iters, cli.warmup));
 

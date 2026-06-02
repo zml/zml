@@ -37,6 +37,13 @@ fn minimum(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
 fn fma3(a: zml.Tensor, b: zml.Tensor, c: zml.Tensor) zml.Tensor {
     return a.add(b).mul(c); // (a+b)*c — should fuse into ONE kFusion kernel
 }
+// Broadcast INSIDE a fusion (E5.2): x*scale + bias with scale,bias [d] broadcast
+// to x's [b,d]. Fuses to one kFusion containing two broadcasts (the bias/scale
+// pattern). Exercises the index-remap in the fused elemental emitter.
+fn affineBcast(x: zml.Tensor, scale: zml.Tensor, bias: zml.Tensor) zml.Tensor {
+    const xs = x.shape();
+    return x.mul(scale.broad(xs)).add(bias.broad(xs));
+}
 fn negate(a: zml.Tensor) zml.Tensor {
     return a.negate();
 }
@@ -324,6 +331,75 @@ fn checkTernary(
     return compare(name, co[0..n], mo[0..n], rel_tol);
 }
 
+/// Run a `func(x, scale, bias)` where x has `x_shape` and scale/bias share the
+/// smaller `d_shape` (broadcast inside the fusion). Writes the flat result.
+fn runAffineBcast(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    comptime func: anytype,
+    x_shape: zml.Shape,
+    x_data: []const f32,
+    d_shape: zml.Shape,
+    scale_data: []const f32,
+    bias_data: []const f32,
+    out: []f32,
+) !void {
+    const xt: zml.Tensor = .fromShape(x_shape);
+    const st: zml.Tensor = .fromShape(d_shape);
+    const bt: zml.Tensor = .fromShape(d_shape);
+    var exe = try platform.compileFn(allocator, io, func, .{ xt, st, bt }, .{});
+    defer exe.deinit();
+
+    var xb = try zml.Buffer.fromBytes(io, platform, x_shape, .replicated, std.mem.sliceAsBytes(x_data));
+    defer xb.deinit();
+    var sb = try zml.Buffer.fromBytes(io, platform, d_shape, .replicated, std.mem.sliceAsBytes(scale_data));
+    defer sb.deinit();
+    var bb = try zml.Buffer.fromBytes(io, platform, d_shape, .replicated, std.mem.sliceAsBytes(bias_data));
+    defer bb.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ xb, sb, bb });
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(f32));
+}
+
+fn checkAffineBcast(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    name: []const u8,
+    comptime func: anytype,
+    x_shape: zml.Shape,
+    x_data: []const f32,
+    d_shape: zml.Shape,
+    scale_data: []const f32,
+    bias_data: []const f32,
+    n_out: usize,
+) usize {
+    var co: [64]f32 = undefined;
+    var mo: [64]f32 = undefined;
+    runAffineBcast(allocator, io, cpu, func, x_shape, x_data, d_shape, scale_data, bias_data, co[0..n_out]) catch |e| {
+        log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    runAffineBcast(allocator, io, metal, func, x_shape, x_data, d_shape, scale_data, bias_data, mo[0..n_out]) catch |e| {
+        log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    return compare(name, co[0..n_out], mo[0..n_out], 1e-6);
+}
+
 fn checkUnary(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -381,6 +457,12 @@ pub fn main(init: std.process.Init) !void {
         const c_bin = [_]f32{ 2, 2, 2, 2, 2, 2, 2, 2 };
         failures += checkTernary(allocator, io, cpu, metal, "fma", fma3, &a_bin, &b_bin, &c_bin, exact);
     }
+
+    // Broadcast inside a fusion (E5.2): x*scale + bias, scale/bias [d]->[2,3].
+    // = [[11,202,3003],[41,502,6003]]. A kFusion with two broadcasts inside.
+    failures += checkAffineBcast(allocator, io, cpu, metal, "affine", affineBcast,
+        zml.Shape.init(.{ .b = 2, .d = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
+        zml.Shape.init(.{ .d = 3 }, .f32), &[_]f32{ 10, 100, 1000 }, &[_]f32{ 1, 2, 3 }, 6);
     inline for (.{
         .{ "neg", negate, exact }, .{ "abs", abs, exact },
         .{ "exp", exp, transc }, .{ "log", log_, transc },
