@@ -82,6 +82,12 @@ fn matSum(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
 fn matAbsMat(x: zml.Tensor, w1: zml.Tensor, w2: zml.Tensor) zml.Tensor {
     return x.dot(w1, .k).abs().dot(w2, .n);
 }
+// Deeper chain (5 thunks: 3 matmuls + 2 abs kernels) — abs(abs(x·W1)·W2)·W3.
+// Stresses command-buffer pipelining: many launches with no per-thunk block and
+// several live intermediate + params buffers held until the single final block.
+fn mlpDeep(x: zml.Tensor, w1: zml.Tensor, w2: zml.Tensor, w3: zml.Tensor) zml.Tensor {
+    return x.dot(w1, .k).abs().dot(w2, .n).abs().dot(w3, .p);
+}
 // KV-cache indexing ops with a RUNTIME offset. dynSlice: read a fixed-length
 // window of x at a runtime start. dynUpdate: write `upd` into x at a runtime
 // start, returning the updated array (the KV-cache write).
@@ -976,6 +982,71 @@ fn check3Shaped(
     return compare(name, co[0..n_out], mo[0..n_out], rel_tol);
 }
 
+// Four differently-shaped inputs → out, for the deep MLP pipelining stress test.
+fn run4Shaped(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    comptime func: anytype,
+    shapes: [4]zml.Shape,
+    data: [4][]const f32,
+    out: []f32,
+) !void {
+    const t0: zml.Tensor = .fromShape(shapes[0]);
+    const t1: zml.Tensor = .fromShape(shapes[1]);
+    const t2: zml.Tensor = .fromShape(shapes[2]);
+    const t3: zml.Tensor = .fromShape(shapes[3]);
+    var exe = try platform.compileFn(allocator, io, func, .{ t0, t1, t2, t3 }, .{});
+    defer exe.deinit();
+
+    var b0 = try zml.Buffer.fromBytes(io, platform, shapes[0], .replicated, std.mem.sliceAsBytes(data[0]));
+    defer b0.deinit();
+    var b1 = try zml.Buffer.fromBytes(io, platform, shapes[1], .replicated, std.mem.sliceAsBytes(data[1]));
+    defer b1.deinit();
+    var b2 = try zml.Buffer.fromBytes(io, platform, shapes[2], .replicated, std.mem.sliceAsBytes(data[2]));
+    defer b2.deinit();
+    var b3 = try zml.Buffer.fromBytes(io, platform, shapes[3], .replicated, std.mem.sliceAsBytes(data[3]));
+    defer b3.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ b0, b1, b2, b3 });
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(f32));
+}
+
+fn check4Shaped(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    name: []const u8,
+    comptime func: anytype,
+    shapes: [4]zml.Shape,
+    data: [4][]const f32,
+    n_out: usize,
+    rel_tol: f32,
+) usize {
+    var co: [256]f32 = undefined;
+    var mo: [256]f32 = undefined;
+    run4Shaped(allocator, io, cpu, func, shapes, data, co[0..n_out]) catch |e| {
+        log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    run4Shaped(allocator, io, metal, func, shapes, data, mo[0..n_out]) catch |e| {
+        log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    return compare(name, co[0..n_out], mo[0..n_out], rel_tol);
+}
+
 // dtype-generic matmul (f16 = native f16, bf16 = zml.floats.BFloat16). Same as
 // runMatmul but typed; the output is converted to f32 by the caller for compare.
 fn runMatmulT(
@@ -1351,6 +1422,18 @@ pub fn main(init: std.process.Init) !void {
     failures += checkMatmul(allocator, io, cpu, metal, "matSum", matSum,
         zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
         zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 }, 2, exact);
+
+    // Deep chain (5 thunks: 3 matmuls + 2 abs) abs(abs(x·W1)·W2)·W3 — command-
+    // buffer pipelining stress (many un-blocked launches, several live buffers).
+    failures += check4Shaped(allocator, io, cpu, metal, "mlpDeep", mlpDeep, .{
+        zml.Shape.init(.{ .m = 2, .k = 3 }, .f32),
+        zml.Shape.init(.{ .k = 3, .n = 2 }, .f32),
+        zml.Shape.init(.{ .n = 2, .p = 2 }, .f32),
+        zml.Shape.init(.{ .p = 2, .q = 2 }, .f32),
+    }, .{
+        &[_]f32{ 1, -2, 3, -4, 5, -6 }, &[_]f32{ 1, 2, 3, 4, 5, 6 },
+        &[_]f32{ 1, 2, 3, 4 },          &[_]f32{ 1, 2, 3, 4 },
+    }, 4, exact);
 
     // Multi-output module (tuple root): one graph, two array results
     // (add, mul) returned together via the root tuple index table.
