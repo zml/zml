@@ -586,6 +586,71 @@ fn checkMatmulT(
     return compare(name, cof[0..n_out], mof[0..n_out], rel_tol);
 }
 
+fn dtOf(comptime T: type) zml.DataType {
+    return if (T == f32) .f32 else if (T == f16) .f16 else .bf16;
+}
+
+fn fillFrac(comptime T: type, s: []T, seed: usize) void {
+    for (s, 0..) |*e, i| {
+        const x: f32 = 0.5 - @as(f32, @floatFromInt((i * seed + 7) % 97)) / 97.0;
+        e.* = if (T == f32) x else if (T == f16) @floatCast(x) else zml.floats.BFloat16.fromF32(x);
+    }
+}
+
+// Heap-backed, dtype+layout-generic matmul check for medium shapes (the [16]
+// buffers of checkMatmulT can't hold them). transpose_b picks NN (b={k,n}) vs
+// NT (b={n,k}, the y=x·Wᵀ linear). Fractional values stress tiling/accumulation.
+fn checkMM(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    name: []const u8,
+    M: i64,
+    K: i64,
+    N: i64,
+    transpose_b: bool,
+    rel_tol: f32,
+) usize {
+    const dt = dtOf(T);
+    const a_shape = zml.Shape.init(.{ .m = M, .k = K }, dt);
+    const b_shape = if (transpose_b)
+        zml.Shape.init(.{ .n = N, .k = K }, dt)
+    else
+        zml.Shape.init(.{ .k = K, .n = N }, dt);
+    const mk: usize = @intCast(M * K);
+    const kn: usize = @intCast(K * N);
+    const mn: usize = @intCast(M * N);
+    const a = allocator.alloc(T, mk) catch return 1;
+    defer allocator.free(a);
+    const b = allocator.alloc(T, kn) catch return 1;
+    defer allocator.free(b);
+    fillFrac(T, a, 31);
+    fillFrac(T, b, 17);
+    const co = allocator.alloc(T, mn) catch return 1;
+    defer allocator.free(co);
+    const mo = allocator.alloc(T, mn) catch return 1;
+    defer allocator.free(mo);
+    runMatmulT(T, allocator, io, cpu, matmul, a_shape, a, b_shape, b, co) catch |e| {
+        log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    runMatmulT(T, allocator, io, metal, matmul, a_shape, a, b_shape, b, mo) catch |e| {
+        log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    const cof = allocator.alloc(f32, mn) catch return 1;
+    defer allocator.free(cof);
+    const mof = allocator.alloc(f32, mn) catch return 1;
+    defer allocator.free(mof);
+    for (0..mn) |i| {
+        cof[i] = toF32(T, co[i]);
+        mof[i] = toF32(T, mo[i]);
+    }
+    return compare(name, cof, mof, rel_tol);
+}
+
 fn checkUnary(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -741,37 +806,25 @@ pub fn main(init: std.process.Init) !void {
             zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
             zml.Shape.init(.{ .n = 2, .k = 3 }, .f32), &[_]f32{ 1, 0, 1, 0, 1, 0 }, 4, exact);
     }
-    // Medium matmul with fractional values: stresses tiling + fp32 accumulation
-    // (the path the tiny exact cases don't exercise). [96,64]·[64,48] -> [96,48].
-    {
-        const Md = 96;
-        const Kd = 64;
-        const Nd = 48;
-        const a = try allocator.alloc(f32, Md * Kd);
-        defer allocator.free(a);
-        const b = try allocator.alloc(f32, Kd * Nd);
-        defer allocator.free(b);
-        for (a, 0..) |*e, i| e.* = 0.5 - @as(f32, @floatFromInt((i * 31 + 7) % 97)) / 97.0;
-        for (b, 0..) |*e, i| e.* = 0.5 - @as(f32, @floatFromInt((i * 17 + 3) % 89)) / 89.0;
-        const co = try allocator.alloc(f32, Md * Nd);
-        defer allocator.free(co);
-        const mo = try allocator.alloc(f32, Md * Nd);
-        defer allocator.free(mo);
-        runMatmul(allocator, io, cpu, matmul, zml.Shape.init(.{ .m = Md, .k = Kd }, .f32), a, zml.Shape.init(.{ .k = Kd, .n = Nd }, .f32), b, co) catch |e| {
-            log.err("{s:>6}  CPU failed: {s}", .{ "mmMed", @errorName(e) });
-            failures += 1;
-        };
-        runMatmul(allocator, io, metal, matmul, zml.Shape.init(.{ .m = Md, .k = Kd }, .f32), a, zml.Shape.init(.{ .k = Kd, .n = Nd }, .f32), b, mo) catch |e| {
-            log.err("{s:>6}  Metal failed: {s}", .{ "mmMed", @errorName(e) });
-            failures += 1;
-        };
-        failures += compare("mmMed", co, mo, 1e-4);
-    }
+    // Medium NN ([96,64]·[64,48]) and NT (the y=x·Wᵀ linear: [96,64]·[48,64]ᵀ),
+    // fractional values. NN runs on every backend (metalBLAS → m5_tensor); NT
+    // under metalBLAS would route to m5_gemm, which isn't wired yet (it produced
+    // wrong output — simdgroup-builtin issue), so NT is MPS/naive only.
+    failures += checkMM(f32, allocator, io, cpu, metal, "mmMed", 96, 64, 48, false, 1e-4);
+    if (!mm_is_metalblas)
+        failures += checkMM(f32, allocator, io, cpu, metal, "mmNTmed", 96, 64, 48, true, 1e-4);
 
-    // f16 matmul — MPS default only (naive is f32-only; metalBLAS's tiny-N path
-    // isn't wired). Same NN as mmNN = [22,28,49,64]; exact in f16 for small ints.
+    // f16 — MPS default only (naive is f32-only; metalBLAS's tiny path isn't wired).
     if (!mm_is_naive and !mm_is_metalblas) {
         failures += checkMatmulT(f16, allocator, io, cpu, metal, "mmF16", matmul, zml.Shape.init(.{ .m = 2, .k = 3 }, .f16), &[_]f16{ 1, 2, 3, 4, 5, 6 }, zml.Shape.init(.{ .k = 3, .n = 2 }, .f16), &[_]f16{ 1, 2, 3, 4, 5, 6 }, 4, 1e-2);
+    }
+
+    // bf16 — metalBLAS only (MPS aborts on bf16; naive is f32-only). NN→m5_tensor,
+    // NT→m5_gemm. bf16 is metalBLAS's edge over MPS, so this is the key coverage.
+    if (mm_is_metalblas) {
+        // bf16 NN-square via metalBLAS m5_tensor (MPS can't do bf16; naive is
+        // f32-only). bf16 NT and other shapes route to m5_gemm/gemv, not yet wired.
+        failures += checkMM(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16NN", 96, 64, 48, false, 3e-2);
     }
 
     if (failures != 0) {
