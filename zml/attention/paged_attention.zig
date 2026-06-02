@@ -4,6 +4,7 @@ const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
 const flashattn = @import("flashattn.zig");
+const nki_paged = @import("nki/paged_attention.zig");
 const tpu = @import("tpu_attention.zig");
 const triton = @import("triton_attention.zig");
 
@@ -12,6 +13,7 @@ const PagedAttention = @This();
 pub const Backend = enum {
     cuda_fa2,
     cuda_fa3,
+    nki,
     triton,
     mosaic_tpu,
 
@@ -19,8 +21,9 @@ pub const Backend = enum {
         return switch (platform.target) {
             .cuda => .triton,
             .rocm => .triton,
+            .neuron => .nki,
             .tpu => .mosaic_tpu,
-            else => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
+            .cpu, .oneapi => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
     }
 };
@@ -28,6 +31,7 @@ pub const Backend = enum {
 pub const Options = union(Backend) {
     cuda_fa2: flashattn.paged_fa2.Options,
     cuda_fa3: flashattn.paged_fa3.Options,
+    nki: nki_paged.Options,
     triton: triton.paged.Options,
     mosaic_tpu: tpu.mosaic_tpu.Options,
 
@@ -108,6 +112,14 @@ pub const Options = union(Backend) {
                     .is_prefill = args.is_prefill,
                 },
             },
+            .nki => .{
+                .nki = .init(.{
+                    .batch_size = args.batch_size,
+                    .max_num_pages = args.max_num_pages,
+                    .max_seqlen_q = args.max_seqlen_q,
+                    .is_prefill = args.is_prefill,
+                }),
+            },
             .mosaic_tpu => .{
                 .mosaic_tpu = .{
                     .is_prefill = args.is_prefill,
@@ -139,6 +151,7 @@ pub const Options = union(Backend) {
 pub const Parameters = union(Backend) {
     cuda_fa2: flashattn.paged_fa2.Parameters,
     cuda_fa3: flashattn.paged_fa3.Parameters,
+    nki: nki_paged.Parameters,
     triton: triton.paged.Parameters,
     mosaic_tpu: tpu.mosaic_tpu.Parameters,
 
@@ -146,6 +159,7 @@ pub const Parameters = union(Backend) {
         return switch (options_) {
             .cuda_fa2 => |cuda_fa2_options| .{ .cuda_fa2 = flashattn.paged_fa2.Parameters.init(cuda_fa2_options) },
             .cuda_fa3 => |cuda_fa3_options| .{ .cuda_fa3 = flashattn.paged_fa3.Parameters.init(cuda_fa3_options) },
+            .nki => |nki_options| .{ .nki = nki_paged.Parameters.init(nki_options) },
             .triton => |triton_options| .{ .triton = triton.paged.Parameters.init(triton_options) },
             .mosaic_tpu => |mosaic_tpu_options| .{ .mosaic_tpu = tpu.mosaic_tpu.Parameters.init(mosaic_tpu_options) },
         };
@@ -155,6 +169,7 @@ pub const Parameters = union(Backend) {
         return switch (self) {
             .cuda_fa2 => |v| .{ .cuda_fa2 = v.options() },
             .cuda_fa3 => |v| .{ .cuda_fa3 = v.options() },
+            .nki => |v| .{ .nki = v.options() },
             .triton => |v| .{ .triton = v.options() },
             .mosaic_tpu => |v| .{ .mosaic_tpu = v.options() },
         };
@@ -170,6 +185,7 @@ pub const Parameters = union(Backend) {
         return switch (self) {
             .cuda_fa2 => |v| .{ .cuda_fa2 = v.onMemory(memory) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = v.onMemory(memory) },
+            .nki => |v| .{ .nki = v },
             .triton => |v| .{ .triton = v.onMemory(memory) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = v.onMemory(memory) },
         };
@@ -179,6 +195,7 @@ pub const Parameters = union(Backend) {
         return switch (self) {
             .cuda_fa2 => |v| .{ .cuda_fa2 = v.toMemory(memory) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = v.toMemory(memory) },
+            .nki => |v| .{ .nki = v },
             .triton => |v| .{ .triton = v.toMemory(memory) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = v.toMemory(memory) },
         };
@@ -195,13 +212,12 @@ pub const KvCache = union(enum) {
     split: struct {
         k: zml.Tensor,
         v: zml.Tensor,
+        slot_mapping: ?zml.Tensor = null,
     },
     dense: zml.Tensor,
 };
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
-    _ = k;
-    _ = v;
     return switch (parameters) {
         .cuda_fa2 => |cuda_fa2_parameters| switch (kv_cache) {
             .split => |split| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, q, split.k, split.v, opts),
@@ -216,6 +232,23 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
             .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
         },
         .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, q, kv_cache.dense, opts),
+        .nki => |nki_parameters| switch (kv_cache) {
+            .split => |split| nki_paged.pagedAttention(
+                nki_parameters,
+                .{
+                    .is_prefill = nki_parameters.options_.is_prefill,
+                    .max_seqlen_q = nki_parameters.options_.max_seqlen_q,
+                },
+                q,
+                split.k,
+                split.v,
+                k,
+                v,
+                split.slot_mapping,
+                opts,
+            ),
+            .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+        },
     };
 }
 

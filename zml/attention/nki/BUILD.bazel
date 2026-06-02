@@ -12,11 +12,38 @@ filegroup(
     srcs = ["attention.zig"],
 )
 
+filegroup(
+    name = "paged_attention_kernel",
+    srcs = ["paged_attention.py"],
+)
+
+filegroup(
+    name = "paged_attention",
+    srcs = ["paged_attention.zig"],
+)
+
 py_binary(
     name = "attention_harness",
     srcs = ["attention_harness.py"],
     data = [
         ":attention.py",
+        "@libpjrt_neuron//:sandbox",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@neuron_py_deps//ml_dtypes:pkg",
+        "@neuron_py_deps//neuronx_cc:pkg",
+        "@neuron_py_deps//nki:pkg",
+        "@neuron_py_deps//numpy:pkg",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_binary(
+    name = "paged_attention_harness",
+    srcs = ["paged_attention_harness.py"],
+    data = [
+        ":paged_attention.py",
         "@libpjrt_neuron//:sandbox",
     ],
     visibility = ["//visibility:public"],
