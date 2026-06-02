@@ -603,7 +603,6 @@ pub const SelfAttn = struct {
         k = partitionProjectedKv(k, null);
         v = partitionProjectedKv(v, null);
 
-
         const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
@@ -722,13 +721,13 @@ pub const Moe = struct {
         const experts_store = store.withPrefix("experts");
         const gate_up_proj_tensor = experts_store.createTensor(
             "gate_up_proj",
-            .{ .expert, .dout, .d },
-            .{ .expert = .experts, .dout = .replicated, .d = .replicated },
+            .{ .expert, .d, .dout },
+            .{ .expert = .experts, .d = .replicated, .dout = .replicated },
         );
         const down_proj_tensor = experts_store.createTensor(
             "down_proj",
-            .{ .expert, .d, .dout },
-            .{ .expert = .experts, .d = .replicated, .dout = .replicated },
+            .{ .expert, .dout, .d },
+            .{ .expert = .experts, .dout = .replicated, .d = .replicated },
         );
 
         return .{

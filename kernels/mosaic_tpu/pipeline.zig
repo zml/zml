@@ -321,7 +321,7 @@ const BufferedRef = struct {
                 if (self.is_trivial) {
                     out.appendAssumeCapacity(c0);
                 } else {
-                    out.appendAssumeCapacity(c1); // copy_in_slot: initialize_step advanced 0→1
+                    out.appendAssumeCapacity(c1); // copy_in_slot: initialize_step advanced 0->1
                     out.appendAssumeCapacity(c0);
                 }
             },
@@ -491,6 +491,7 @@ const BufferedRef = struct {
         var base = a.alloc(Value, bs.len) catch unreachable;
         var dyn = std.ArrayList(Value).initCapacity(a, bs.len) catch unreachable;
         var result_shape = a.alloc(i64, bs.len) catch unreachable;
+        var compact_shape = std.ArrayList(i64).initCapacity(a, self.block_keep.len) catch unreachable;
         for (bs, 0..) |bd, d| {
             base[d] = dma.base[d];
             if (dma.size[d]) |sz| {
@@ -503,8 +504,14 @@ const BufferedRef = struct {
                     .bounded_slice => unreachable,
                 };
             }
+            switch (bd) {
+                .squeezed => {},
+                else => compact_shape.appendAssumeCapacity(result_shape[d]),
+            }
         }
-        return b.memRefSlice(self.src, base, result_shape, dyn.items);
+        const sliced = b.memRefSlice(self.src, base, result_shape, dyn.items);
+        if (compact_shape.items.len == result_shape.len) return sliced;
+        return b.memRefSqueeze(sliced, compact_shape.items);
     }
 
     /// Slices `alloca[slot, 0…]` (non-squeezed dims) then squeezes the slot dim.

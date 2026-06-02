@@ -79,6 +79,7 @@ zig_library(
         "attention/triton_kernels/unified_attention.zig",
         "moe/common.zig",
         "moe/mosaic_tpu.zig",
+        "moe/mosaic_tpu_kernels/gmm_ep.zig",
         "moe/mosaic_tpu_kernels/megablox_gmm.zig",
         "moe/moe.zig",
         "moe/triton.zig",

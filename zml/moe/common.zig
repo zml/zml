@@ -31,8 +31,8 @@ pub fn canonicalizeInputs(
         .b = b,
         .s = s,
         .hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in }),
-        .gate_up = normalizeGateUpWeight(w1),
-        .down = w2.withTags(.{ .expert, .out, .mid }),
+        .gate_up = w1,
+        .down = w2.withTags(.{ .expert, .mid, .out }),
         .weights = topk_weights.reshape(.{ .token = b * s, .topk = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk }),
         .ids = topk_ids.reshape(.{ .token = b * s, .topk = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk }),
     };

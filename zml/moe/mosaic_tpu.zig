@@ -7,6 +7,7 @@ const Tensor = zml.Tensor;
 
 const common = @import("common.zig");
 const megablox_gmm = @import("mosaic_tpu_kernels/megablox_gmm.zig");
+pub const gmm_ep = @import("mosaic_tpu_kernels/gmm_ep.zig");
 const mtt = @import("kernels/mosaic_tpu/builder");
 
 pub const Options = struct {
@@ -90,6 +91,27 @@ fn validateInputs(hidden: Tensor, gate_up: Tensor, down: Tensor, weights: Tensor
     if (ids.dim(.token) != hidden.dim(.token) or weights.dim(.token) != hidden.dim(.token)) return error.InvalidShape;
     if (ids.dim(.topk) != weights.dim(.topk)) return error.InvalidShape;
     if (gate_up.dim(.expert) != down.dim(.expert)) return error.InvalidShape;
+}
+
+fn canonicalizeGateUpForGmm(w1: Tensor, hidden_size: i64) !Tensor {
+    if (w1.rank() != 3) return error.InvalidShape;
+
+    // Repacked Qwen MoE weights are stored directly as [expert, in, out].
+    // The original HF/ZML layout is [expert, out, in].
+    if (w1.dim(1) == hidden_size) return w1.withTags(.{ .expert, .in, .out });
+    if (w1.dim(2) == hidden_size) return w1.withTags(.{ .expert, .out, .in }).transpose(.{ .expert, .in, .out });
+    return error.InvalidShape;
+}
+
+fn canonicalizeDownForGmm(w2: Tensor, hidden_size: i64, gate_up_out: i64) !Tensor {
+    if (w2.rank() != 3) return error.InvalidShape;
+
+    const mid_size = @divFloor(gate_up_out, 2);
+    // Repacked Qwen MoE down projection is [expert, mid, out]. The original
+    // layout is [expert, out, mid].
+    if (w2.dim(1) == mid_size and w2.dim(2) == hidden_size) return w2.withTags(.{ .expert, .mid, .out });
+    if (w2.dim(1) == hidden_size and w2.dim(2) == mid_size) return w2.withTags(.{ .expert, .out, .mid }).transpose(.{ .expert, .mid, .out });
+    return error.InvalidShape;
 }
 
 fn histogramCounts(ids: Tensor, num_bins: i64) Tensor {
@@ -255,6 +277,29 @@ fn alignSortedRowsByGroup(rows: Tensor, expert_ids_sorted: Tensor, group_sizes: 
     };
 }
 
+fn permuteHiddenOneHotSmallBatchEp(hidden: Tensor, sorted_route: Tensor, topk: i64) Tensor {
+    // Equivalent to JAX small-batch EP path:
+    // onehot(token_indices_sorted, num_tokens) @ hidden
+    const num_tokens = hidden.dim(.token);
+    const num_routes = num_tokens * topk;
+
+    const token_indices = Tensor.arange(.{ .end = num_tokens }, .i32)
+        .withTags(.{.token})
+        .repeat1d(.token, @intCast(topk))
+        .rename(.{ .token = .route });
+    const token_indices_sorted = token_indices.gather(.{ .route = sorted_route }, .{}).rename(.{ .perm = .route });
+
+    const onehot_shape = zml.Shape.init(.{ .route = num_routes, .token_src = num_tokens }, .i32);
+    const token_indices_2d = token_indices_sorted.insertAxes(.last, .{.token_src}).broad(onehot_shape);
+    const source_tokens_2d = Tensor.arange(.{ .end = num_tokens }, .i32)
+        .withTags(.{.token_src})
+        .insertAxes(0, .{.route})
+        .broad(onehot_shape);
+    const onehot = token_indices_2d.cmp(.EQ, source_tokens_2d).convert(hidden.dtype());
+
+    return onehot.dot(hidden.rename(.{ .token = .token_src }), .token_src).rename(.{ .route = .token });
+}
+
 fn gmmDType(dtype: zml.DataType) mtt.DType {
     return switch (zml.kernel.mosaic_tpu.from(dtype)) {
         .bf16 => .bf16,
@@ -306,6 +351,46 @@ fn callMegabloxGmm(
     ).out;
 }
 
+fn callGmmEp(
+    lhs: Tensor,
+    rhs_k_n: Tensor,
+    group_sizes: Tensor,
+    out_dtype: zml.DataType,
+) Tensor {
+    const n = rhs_k_n.dim(.out);
+    const aligned_n = @divFloor(n + 127, 128) * 128;
+    const cfg: gmm_ep.Cfg = .{
+        .size_m = lhs.dim(.token),
+        .size_k = lhs.dim(1),
+        .size_n = n,
+        .size_group = rhs_k_n.dim(.expert),
+        .size_lhs_group = group_sizes.dim(.expert),
+        .tile_m = 8,
+        .tile_k = lhs.dim(1),
+        .tile_n = n,
+        .lhs_dtype = gmmDType(lhs.dtype()),
+        .rhs_dtype = gmmDType(rhs_k_n.dtype()),
+        .out_dtype = gmmDType(out_dtype),
+        .acc_dtype = .f32,
+        .size_lhs_sublane = 8,
+    };
+
+    const out = gmm_ep.TpuKernel.call(
+        .{
+            .group_sizes = group_sizes.withTags(.{.expert}),
+            .group_offset = Tensor.zeroes(.init(.{1}, .i32)),
+            .lhs = lhs,
+            .rhs = rhs_k_n,
+        },
+        .{
+            .out = zml.Shape.init(.{ .token = lhs.dim(.token), .out = aligned_n }, out_dtype),
+        },
+        .{ .cfg = cfg },
+    ).out;
+
+    return out.slice1d(.out, .{ .end = n });
+}
+
 pub fn fusedExpertsImpl(
     hidden_states: Tensor,
     w1: Tensor,
@@ -318,17 +403,16 @@ pub fn fusedExpertsImpl(
     _ = metadata;
     try validateOptions(opts);
 
-    // Canonicalize inputs into the shared logical MoE layout. TPU flattens the
-    // gate/up weight one step further because the grouped matmul kernel
-    // consumes a plain [expert, out, in] matrix.
-    const inputs = common.canonicalizeInputs(hidden_states, w1, w2, topk_weights, topk_ids);
-    const b = inputs.b;
-    const s = inputs.s;
-    const hidden = inputs.hidden;
-    const gate_up = common.flattenGateUpForMatmul(inputs.gate_up);
-    const down = inputs.down;
-    const weights = inputs.weights;
-    const ids = inputs.ids;
+    // Canonicalize inputs locally for the Mosaic GMM path. Repacked expert
+    // weights are already stored as [expert, K, N], so avoid common's
+    // [expert, N, K] assumption here.
+    const b = hidden_states.dim(.b);
+    const s = hidden_states.dim(.s);
+    const hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
+    const gate_up = try canonicalizeGateUpForGmm(w1, hidden.dim(.in));
+    const down = try canonicalizeDownForGmm(w2, hidden.dim(.in), gate_up.dim(.out));
+    const weights = topk_weights.reshape(.{ .token = b * s, .topk = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
+    const ids = topk_ids.reshape(.{ .token = b * s, .topk = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
 
     const num_experts = if (opts.global_num_experts != -1) opts.global_num_experts else gate_up.dim(.expert);
     try validateInputs(hidden, gate_up, down, weights, ids);
@@ -361,9 +445,13 @@ pub fn fusedExpertsImpl(
     // segment. Temporary permutation tensors use dedicated axis names, but the
     // tensors passed to grouped matmul are renamed back to the Triton-style
     // `token` axis.
-    const hidden_repeated = hidden.repeat1d(.token, @intCast(ids.dim(.topk))).rename(.{ .token = .route });
     const sorted_route = flat_ids_local.argsort(.route, .{ .descending = false }).rename(.{ .route = .perm });
-    const hidden_sorted = hidden_repeated.gather(.{ .route = sorted_route }, .{}).rename(.{ .perm = .token });
+    const hidden_sorted = if (opts.expert_map != null)
+        permuteHiddenOneHotSmallBatchEp(hidden, sorted_route, ids.dim(.topk))
+    else blk: {
+        const hidden_repeated = hidden.repeat1d(.token, @intCast(ids.dim(.topk))).rename(.{ .token = .route });
+        break :blk hidden_repeated.gather(.{ .route = sorted_route }, .{}).rename(.{ .perm = .token });
+    };
     const expert_ids_sorted = flat_ids_local.gather(.{ .route = sorted_route }, .{}).rename(.{ .perm = .token });
     const local_route_mask_sorted = local_route_mask.gather(.{ .route = sorted_route }, .{}).rename(.{ .perm = .token });
     const sorted_weights = flat_weights.gather(.{ .route = sorted_route }, .{}).rename(.{ .perm = .token });
@@ -378,14 +466,15 @@ pub fn fusedExpertsImpl(
 
     // First expert matmul: hidden x gate_up. Bias remains outside the custom
     // call and is applied per routed token in StableHLO.
-    const use_reference_moe = true;
+    const use_reference_moe = false;
     var gate_up_out = if (use_reference_moe) blk: {
         const gate_up_per_token = gate_up.gather(.{ .expert = expert_ids_sorted }, .{});
         break :blk hidden_sorted.dot(gate_up_per_token, .in);
     } else blk: {
         const tile_m: i64 = 8;
         const aligned_hidden = alignSortedRowsByGroup(hidden_sorted, expert_ids_sorted, group_sizes, tile_m);
-        break :blk callMegabloxGmm(aligned_hidden.rows, gate_up, aligned_hidden.group_sizes, hidden.dtype())
+        // const gate_up_k_n = gate_up.transpose(.{ .expert, .in, .out });
+        break :blk callGmmEp(aligned_hidden.rows, gate_up, aligned_hidden.group_sizes, hidden.dtype())
             .gather(.{ .token = aligned_hidden.positions.rename(.{ .token = .route }) }, .{})
             .rename(.{ .route = .token });
     };
@@ -405,7 +494,8 @@ pub fn fusedExpertsImpl(
     } else blk: {
         const tile_m: i64 = 8;
         const aligned_activated = alignSortedRowsByGroup(activated, expert_ids_sorted, group_sizes, tile_m);
-        break :blk callMegabloxGmm(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype())
+        // const down_k_n = down.transpose(.{ .expert, .mid, .out });
+        break :blk callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype())
             .gather(.{ .token = aligned_activated.positions.rename(.{ .token = .route }) }, .{})
             .rename(.{ .route = .token });
     };

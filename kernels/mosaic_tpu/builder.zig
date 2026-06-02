@@ -1683,6 +1683,16 @@ pub const Builder = struct {
         return self.emit(vector.extract(self.ctx, src.inner, position, &.{}, ty, self.loc()));
     }
 
+    /// `vector.extract_strided_slice` with static offsets/sizes/strides.
+    pub fn vectorExtractStridedSlice(self: *Builder, src: Value, offsets: []const i64, sizes: []const i64, strides: []const i64) Value {
+        const ty = mlir.Type.vector(sizes, src.elemType());
+        return self.emit(vector.extract_strided_slice(self.ctx, src.inner, .{
+            .offsets = offsets,
+            .sizes = sizes,
+            .strides = strides,
+        }, ty, self.loc()));
+    }
+
     /// `vector.reduction <kind>` — reduce a 1-D vector to a scalar.
     /// Emits the bare upstream op; on real TPU the layout pass may reject
     /// 1-D vectors, so prefer `reduceToScalar` for kernel-level reductions.

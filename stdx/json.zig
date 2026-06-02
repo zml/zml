@@ -178,7 +178,7 @@ pub fn NeverNull(comptime T: type, comptime default_value: T) type {
 }
 
 pub fn fillDefaultStructValues(comptime T: type, r: *T) !void {
-    inline for (@typeInfo(T).Struct.fields) |field| {
+    inline for (@typeInfo(T).@"struct".fields) |field| {
         if (field.default_value) |default_ptr| {
             if (@field(r, field.name) == null) {
                 const default = @as(*align(1) const field.type, @ptrCast(default_ptr)).*;
