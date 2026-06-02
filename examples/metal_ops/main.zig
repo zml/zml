@@ -70,6 +70,12 @@ fn matNegAbs(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
 fn matT(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
     return a.dot(b, .k).transpose(.{ .n, .m });
 }
+// Matmul → reduce: sum the dot result over its n axis. Exercises the graph
+// path's reduce thunk reading a computed buffer (and a top-level init constant).
+// sum_n([[22,28],[49,64]]) = [50,113].
+fn matSum(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
+    return a.dot(b, .k).sum(.n);
+}
 fn negate(a: zml.Tensor) zml.Tensor {
     return a.negate();
 }
@@ -949,6 +955,12 @@ pub fn main(init: std.process.Init) !void {
     failures += checkMatmul(allocator, io, cpu, metal, "matT", matT,
         zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
         zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 }, 4, exact);
+
+    // Matmul → reduce (sum of the dot result over n): a fourth graph-path shape —
+    // a reduce thunk reading a computed buffer. sum_n = [50, 113].
+    failures += checkMatmul(allocator, io, cpu, metal, "matSum", matSum,
+        zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
+        zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 }, 2, exact);
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
