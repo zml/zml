@@ -129,6 +129,47 @@ fn myRmsNorm(x: zml.Tensor) zml.Tensor {
     const inv = ms.addConstant(1e-6).rsqrt(); // [i]
     return x.mul(inv.broad(x.shape())); // [i,j]
 }
+// Axis-generic versions of the transformer normalizers (used by the block).
+fn softmaxAx(x: zml.Tensor, comptime axis: anytype) zml.Tensor {
+    const m = x.max(axis);
+    const e = x.sub(m.broad(x.shape())).exp();
+    return e.div(e.sum(axis).broad(x.shape()));
+}
+fn rmsNormAx(x: zml.Tensor, comptime axis: anytype) zml.Tensor {
+    const d: f32 = @floatFromInt(x.dim(axis));
+    const ms = x.mul(x).sum(axis).scale(1.0 / d);
+    const inv = ms.addConstant(1e-6).rsqrt();
+    return x.mul(inv.broad(x.shape()));
+}
+
+// A full tiny TRANSFORMER block end-to-end: pre-norm single-head self-attention
+// with a causal mask, residual, pre-norm MLP (relu), residual. Everything runs
+// through the Metal graph path: rmsNorm (reduce+fusion), Q/K/V/O matmuls, scaled
+// QKᵀ + mask, softmax (reduce→fusion→reduce→fusion), attn·V, MLP, two residuals.
+//   x[s,d]  wq/wk/wv[d,hd]  wo[hd,d]  mask[s,k]  w1[d,ff]  w2[ff,d] -> [s,d]
+fn attnBlock(
+    x: zml.Tensor,
+    wq: zml.Tensor,
+    wk: zml.Tensor,
+    wv: zml.Tensor,
+    wo: zml.Tensor,
+    mask: zml.Tensor,
+    w1: zml.Tensor,
+    w2: zml.Tensor,
+) zml.Tensor {
+    const hd: f32 = @floatFromInt(wq.dim(.hd));
+    const xn = rmsNormAx(x, .d); // [s,d]
+    const q = xn.dot(wq, .d); // [s,hd]
+    const k = xn.dot(wk, .d).rename(.{ .s = .k }); // [k,hd]
+    const v = xn.dot(wv, .d).rename(.{ .s = .k }); // [k,hd]
+    const scores = q.dot(k, .hd).scale(1.0 / @sqrt(hd)).add(mask); // [s,k]
+    const attn = softmaxAx(scores, .k); // [s,k]
+    const proj = attn.dot(v, .k).dot(wo, .hd); // [s,d]
+    const x2 = x.add(proj); // residual
+    const hn = rmsNormAx(x2, .d);
+    const h = hn.dot(w1, .d).relu(); // [s,ff]
+    return x2.add(h.dot(w2, .ff)); // residual [s,d]
+}
 // A tiny REAL model end-to-end: a per-token 2-layer MLP classifier.
 //   e      = embed(table, tokens)        // gather rows           [n, d]
 //   h      = relu(e·W1 + b1)             // matmul, +bias, relu   [n, h]
@@ -461,6 +502,119 @@ fn checkTinyMLP(
         return 1;
     };
     return compare("tinyMLP", co[0..n_out], mo[0..n_out], 1e-4);
+}
+
+// Tiny transformer block runner: S tokens, D model dim, Dh head dim, FF mlp dim.
+// 8 f32 inputs (x, wq, wk, wv, wo, mask, w1, w2) → [S,D].
+fn runAttnBlockOn(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    S: i64,
+    D: i64,
+    Dh: i64,
+    FF: i64,
+    x: []const f32,
+    wq: []const f32,
+    wk: []const f32,
+    wv: []const f32,
+    wo: []const f32,
+    mask: []const f32,
+    w1: []const f32,
+    w2: []const f32,
+    out: []f32,
+) !void {
+    const sx = zml.Shape.init(.{ .s = S, .d = D }, .f32);
+    const sqkv = zml.Shape.init(.{ .d = D, .hd = Dh }, .f32);
+    const swo = zml.Shape.init(.{ .hd = Dh, .d = D }, .f32);
+    const smask = zml.Shape.init(.{ .s = S, .k = S }, .f32);
+    const sw1 = zml.Shape.init(.{ .d = D, .ff = FF }, .f32);
+    const sw2 = zml.Shape.init(.{ .ff = FF, .d = D }, .f32);
+    const tx: zml.Tensor = .fromShape(sx);
+    const tq: zml.Tensor = .fromShape(sqkv);
+    const tk: zml.Tensor = .fromShape(sqkv);
+    const tv: zml.Tensor = .fromShape(sqkv);
+    const two: zml.Tensor = .fromShape(swo);
+    const tm: zml.Tensor = .fromShape(smask);
+    const t1: zml.Tensor = .fromShape(sw1);
+    const t2: zml.Tensor = .fromShape(sw2);
+    var exe = try platform.compileFn(allocator, io, attnBlock, .{ tx, tq, tk, tv, two, tm, t1, t2 }, .{});
+    defer exe.deinit();
+
+    var bx = try zml.Buffer.fromBytes(io, platform, sx, .replicated, std.mem.sliceAsBytes(x));
+    defer bx.deinit();
+    var bq = try zml.Buffer.fromBytes(io, platform, sqkv, .replicated, std.mem.sliceAsBytes(wq));
+    defer bq.deinit();
+    var bk = try zml.Buffer.fromBytes(io, platform, sqkv, .replicated, std.mem.sliceAsBytes(wk));
+    defer bk.deinit();
+    var bv = try zml.Buffer.fromBytes(io, platform, sqkv, .replicated, std.mem.sliceAsBytes(wv));
+    defer bv.deinit();
+    var bwo = try zml.Buffer.fromBytes(io, platform, swo, .replicated, std.mem.sliceAsBytes(wo));
+    defer bwo.deinit();
+    var bm = try zml.Buffer.fromBytes(io, platform, smask, .replicated, std.mem.sliceAsBytes(mask));
+    defer bm.deinit();
+    var b1 = try zml.Buffer.fromBytes(io, platform, sw1, .replicated, std.mem.sliceAsBytes(w1));
+    defer b1.deinit();
+    var b2 = try zml.Buffer.fromBytes(io, platform, sw2, .replicated, std.mem.sliceAsBytes(w2));
+    defer b2.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ bx, bq, bk, bv, bwo, bm, b1, b2 });
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(f32));
+}
+
+fn checkAttnBlock(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+) usize {
+    const S: i64 = 4;
+    const D: i64 = 6;
+    const Dh: i64 = 6;
+    const FF: i64 = 12;
+    var x: [24]f32 = undefined; // S*D
+    var wq: [36]f32 = undefined; // D*Dh
+    var wk: [36]f32 = undefined;
+    var wv: [36]f32 = undefined;
+    var wo: [36]f32 = undefined; // Dh*D
+    var w1: [72]f32 = undefined; // D*FF
+    var w2: [72]f32 = undefined; // FF*D
+    fillFrac(f32, &x, 11);
+    fillFrac(f32, &wq, 3);
+    fillFrac(f32, &wk, 5);
+    fillFrac(f32, &wv, 7);
+    fillFrac(f32, &wo, 9);
+    fillFrac(f32, &w1, 13);
+    fillFrac(f32, &w2, 17);
+    // Causal additive mask [S,S]: 0 on/below the diagonal, -1e9 above.
+    var mask: [16]f32 = undefined;
+    for (0..@intCast(S)) |i| {
+        for (0..@intCast(S)) |j| {
+            mask[i * @as(usize, @intCast(S)) + j] = if (j <= i) 0.0 else -1.0e9;
+        }
+    }
+    const n_out: usize = @intCast(S * D);
+    var co: [64]f32 = undefined;
+    var mo: [64]f32 = undefined;
+    runAttnBlockOn(allocator, io, cpu, S, D, Dh, FF, &x, &wq, &wk, &wv, &wo, &mask, &w1, &w2, co[0..n_out]) catch |e| {
+        log.err("attn  CPU failed: {s}", .{@errorName(e)});
+        return 1;
+    };
+    runAttnBlockOn(allocator, io, metal, S, D, Dh, FF, &x, &wq, &wk, &wv, &wo, &mask, &w1, &w2, mo[0..n_out]) catch |e| {
+        log.err("attn  Metal failed: {s}", .{@errorName(e)});
+        return 1;
+    };
+    return compare("attn", co[0..n_out], mo[0..n_out], 1e-3);
 }
 
 // Embedding lookup: table[V,D] f32 + idx[N] i32 → out[N,D] f32.
@@ -1588,6 +1742,11 @@ pub fn main(init: std.process.Init) !void {
     // ===== Tiny REAL model end-to-end: a per-token 2-layer MLP classifier =====
     // embed → matmul+bias → relu → matmul+bias → logits, in one Metal graph.
     failures += checkTinyMLP(allocator, io, cpu, metal);
+
+    // ===== Capstone: a full tiny TRANSFORMER block end-to-end =====
+    // pre-norm single-head causal self-attention + residual + pre-norm MLP +
+    // residual — rmsNorm, Q/K/V/O matmuls, scaled QKᵀ+mask, softmax, attn·V, MLP.
+    failures += checkAttnBlock(allocator, io, cpu, metal);
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
