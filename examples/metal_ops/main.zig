@@ -122,24 +122,33 @@ fn runUnaryOn(
     @memcpy(out, slice.items(f32));
 }
 
+// Shape transforms (E3, via the indexing-map / indexed-copy kernel).
 fn transpose23(a: zml.Tensor) zml.Tensor {
-    return a.transpose(.{ .j, .i }); // 2x3 -> 3x2
+    return a.transpose(.{ .j, .i }); // [2,3] -> [3,2]
+}
+fn bcast(a: zml.Tensor) zml.Tensor {
+    return a.broad(zml.Shape.init(.{ .i = 4, .j = 3 }, .f32)); // [3] -> [4,3]
+}
+fn reshape23(a: zml.Tensor) zml.Tensor {
+    return a.reshape(.{ .i = 2, .j = 3 }); // [6] -> [2,3]
 }
 
-/// Run the 2x3 -> 3x2 transpose on `platform`, writing 6 f32 into `out`.
-fn runTransposeOn(
+/// Run a unary shape-transform `func` (input `in_shape`) on `platform`,
+/// writing the flattened result into `out`.
+fn runUnaryShaped(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
+    comptime func: anytype,
+    in_shape: zml.Shape,
     in_data: []const f32,
     out: []f32,
 ) !void {
-    const shape = zml.Shape.init(.{ .i = 2, .j = 3 }, .f32);
-    const a_t: zml.Tensor = .fromShape(shape);
-    var exe = try platform.compileFn(allocator, io, transpose23, .{a_t}, .{});
+    const a_t: zml.Tensor = .fromShape(in_shape);
+    var exe = try platform.compileFn(allocator, io, func, .{a_t}, .{});
     defer exe.deinit();
 
-    var a_buf = try zml.Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(in_data));
+    var a_buf = try zml.Buffer.fromBytes(io, platform, in_shape, .replicated, std.mem.sliceAsBytes(in_data));
     defer a_buf.deinit();
 
     var exe_args = try exe.args(allocator);
@@ -155,6 +164,30 @@ fn runTransposeOn(
     const slice = try result.toSliceAlloc(allocator, io);
     defer slice.free(allocator);
     @memcpy(out, slice.items(f32));
+}
+
+fn checkShaped(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    name: []const u8,
+    comptime func: anytype,
+    in_shape: zml.Shape,
+    in_data: []const f32,
+    n_out: usize,
+) usize {
+    var co: [64]f32 = undefined;
+    var mo: [64]f32 = undefined;
+    runUnaryShaped(allocator, io, cpu, func, in_shape, in_data, co[0..n_out]) catch |e| {
+        log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    runUnaryShaped(allocator, io, metal, func, in_shape, in_data, mo[0..n_out]) catch |e| {
+        log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    return compare(name, co[0..n_out], mo[0..n_out], 1e-6);
 }
 
 /// Pass if every lane is within abs floor 1e-4 OR relative tolerance.
@@ -262,27 +295,17 @@ pub fn main(init: std.process.Init) !void {
         failures += checkUnary(allocator, io, cpu, metal, c[0], c[1], &a_un, c[2]);
     }
 
-    // Shape transform (E3): 2x3 -> 3x2 transpose, exact (pure data movement).
-    {
-        const t_in = [_]f32{ 0, 1, 2, 3, 4, 5 };
-        var co: [6]f32 = undefined;
-        var mo: [6]f32 = undefined;
-        if (runTransposeOn(allocator, io, cpu, &t_in, &co)) |_| {
-            if (runTransposeOn(allocator, io, metal, &t_in, &mo)) |_| {
-                failures += compare("transp", &co, &mo, exact);
-            } else |e| {
-                log.err("transp  Metal failed: {s}", .{@errorName(e)});
-                failures += 1;
-            }
-        } else |e| {
-            log.err("transp  CPU failed: {s}", .{@errorName(e)});
-            failures += 1;
-        }
-    }
+    // Shape transforms (E3): pure data movement, exact vs CPU.
+    failures += checkShaped(allocator, io, cpu, metal, "transp", transpose23,
+        zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 6);
+    failures += checkShaped(allocator, io, cpu, metal, "bcast", bcast,
+        zml.Shape.init(.{ .j = 3 }, .f32), &[_]f32{ 10, 20, 30 }, 12);
+    failures += checkShaped(allocator, io, cpu, metal, "reshape", reshape23,
+        zml.Shape.init(.{ .n = 6 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 6);
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
         return error.MetalMismatch;
     }
-    log.info("✅ PASS: all Metal ops match the CPU oracle (13 elementwise + transpose)", .{});
+    log.info("✅ PASS: all Metal ops match the CPU oracle (13 elementwise + transpose/bcast/reshape)", .{});
 }
