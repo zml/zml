@@ -46,6 +46,9 @@ fn transpose2d(a: zml.Tensor) zml.Tensor {
 fn sumCols(a: zml.Tensor) zml.Tensor {
     return a.sum(.j); // [i,j] -> [i], serial-per-thread reduction (E4)
 }
+fn sumAll(a: zml.Tensor) zml.Tensor {
+    return a.sum(.n); // [n] -> scalar, num_out=1 (small-output reduction stress)
+}
 
 const BenchResult = struct {
     name: []const u8,
@@ -344,8 +347,15 @@ pub fn main(init: std.process.Init) !void {
     const shape2d = zml.Shape.init(.{ .i = cli.rows, .j = cli.cols }, .f32);
     // transpose moves the whole tensor twice (read + write).
     try results.append(allocator, try benchShaped(allocator, io, platform, "transpose", transpose2d, shape2d, rc, 2 * rc * @sizeOf(f32), cli.iters, cli.warmup));
-    // sum reads the whole tensor, writes one element per row.
+    // sum_cols reads the whole tensor, writes one element per row.
     try results.append(allocator, try benchShaped(allocator, io, platform, "sum_cols", sumCols, shape2d, rc, (rc + cli.rows) * @sizeOf(f32), cli.iters, cli.warmup));
+    // sum_all reduces the whole vector to one scalar (num_out=1): the
+    // small-output reduction the tree reduction targets (serial-per-thread runs
+    // this on a single thread).
+    {
+        const vshape = zml.Shape.init(.{ .n = n }, .f32);
+        try results.append(allocator, try benchShaped(allocator, io, platform, "sum_all", sumAll, vshape, n, (n + 1) * @sizeOf(f32), cli.iters, cli.warmup));
+    }
 
     log.info("", .{});
     printTable(results.items);

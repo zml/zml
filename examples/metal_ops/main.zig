@@ -177,6 +177,24 @@ fn reshape23(a: zml.Tensor) zml.Tensor {
 fn sumj(a: zml.Tensor) zml.Tensor {
     return a.sum(.j); // [2,3] -> [2] (reduce over axis 1)
 }
+fn sumAll(a: zml.Tensor) zml.Tensor {
+    return a.sum(.n); // [n] -> scalar (num_out=1: the tree-reduction case)
+}
+
+// Inputs large enough (extent >= 256) to exercise the threadgroup tree
+// reduction rather than the serial-per-thread kernel.
+const vec1024: [1024]f32 = blk: {
+    @setEvalBranchQuota(4000);
+    var a: [1024]f32 = undefined;
+    for (&a, 0..) |*e, i| e.* = @floatFromInt(i % 13);
+    break :blk a;
+};
+const mat3x512: [1536]f32 = blk: {
+    @setEvalBranchQuota(4000);
+    var a: [1536]f32 = undefined;
+    for (&a, 0..) |*e, i| e.* = @floatFromInt((i % 11) + 1);
+    break :blk a;
+};
 
 /// Run a unary shape-transform `func` (input `in_shape`) on `platform`,
 /// writing the flattened result into `out`.
@@ -383,6 +401,16 @@ pub fn main(init: std.process.Init) !void {
     // Reduction (E4): sum over axis 1, [2,3] -> [2] = [3, 12].
     failures += checkShaped(allocator, io, cpu, metal, "sum", sumj,
         zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 2);
+    // Reduce-to-scalar via the TREE kernel (E4 harden): [1024] -> [], num_out=1,
+    // extent=1024 (>=256) so this is one threadgroup cooperatively reducing
+    // (base=0, exercises the grid-stride accumulate + tree). Serial-per-thread
+    // would run it on a single thread.
+    failures += checkShaped(allocator, io, cpu, metal, "sumall", sumAll,
+        zml.Shape.init(.{ .n = 1024 }, .f32), &vec1024, 1);
+    // Tree reduction with num_out>1: [3,512] -> [3]. base != 0, so this also
+    // exercises the tree kernel's output-index delinearization.
+    failures += checkShaped(allocator, io, cpu, metal, "sumtree", sumj,
+        zml.Shape.init(.{ .i = 3, .j = 512 }, .f32), &mat3x512, 3);
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
