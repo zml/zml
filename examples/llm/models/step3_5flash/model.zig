@@ -674,9 +674,8 @@ pub const Mlp = struct {
 
 // SwAttn
 
-const num_q_heads: i64 = 64;
+const num_q_heads: i64 = 96;
 const num_kv_heads: i64 = 8;
-const gate_dim_per_head = 64;
 const head_dim: i64 = 128;
 const rotary_dim: i64 = head_dim;
 // SelfAttn
@@ -721,11 +720,11 @@ pub const SelfAttn = struct {
         return .{
             .layer_idx = layer_idx,
             //TODO: hardcoded head
-            .num_q_heads = 96,
-            .num_kv_heads = 8,
+            .num_q_heads = num_q_heads,
+            .num_kv_heads = num_kv_heads,
             .enable_sliding_window = false,
             //TODO: hardcoded head dim
-            .head_dim = 64,
+            .head_dim = head_dim,
             .num_kv_groups = num_q_heads / num_kv_heads,
             //TODO: hardcoded rotary emb
             .rotary_dim = rotary_dim,
@@ -761,28 +760,16 @@ pub const SelfAttn = struct {
     }
 
     // project Q, Gate
+    // Step 3.5 Flash keeps q and gate as separate projections (q_proj and
+    // g_proj). q_proj outputs num_q_heads * head_dim (= 12288 for layer 30).
+    // g_proj is a head-wise attention gate: one scalar per query head
+    // (dout = num_q_heads), broadcast over .hd and applied to the per-head
+    // attention output before merging heads.
     fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        // const q_proj = self.q_proj.forward(x)
-        //     .splitAxis(.dout, .{
-        //     .h = self.num_q_heads,
-        //     .hd = 2 * self.head_dim,
-        // });
-        // const q, var gate = q_proj.chunkExact(.hd, 2);
-        // gate = gate.merge(.{ .d_out_proj = .{ .h, .hd } });
-        // return .{ q, gate };
+        const q = self.q_proj.forward(x)
+            .splitAxis(.dout, .{ .h = self.num_q_heads, .hd = self.head_dim });
 
-        const q_gate = self.q_proj.forward(x);
-
-        const q_size = self.num_q_heads * self.head_dim;
-        // 64 * 128 = 8192
-
-        const q_flat = q_gate.slice1d(.dout, .{ .start = 0, .end = q_size });
-
-        var gate = q_gate.slice1d(.dout, .{ .start = q_size, .end = q_gate.dim(.dout) });
-
-        const q = q_flat.splitAxis(.dout, .{ .h = self.num_q_heads, .hd = self.head_dim });
-
-        gate = gate.rename(.{ .dout = .d });
+        const gate = self.g_proj.forward(x).rename(.{ .dout = .h });
 
         return .{ q, gate };
     }
@@ -813,7 +800,7 @@ pub const SelfAttn = struct {
     ) struct { zml.Tensor } {
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
         var q, const gate = self.projectQAndGate(input);
-        var k, const v = self.projectKV(input);
+        var k, var v = self.projectKV(input);
 
         q = self.q_norm.forward(q, .hd);
         k = self.k_norm.forward(k, .hd);
@@ -828,20 +815,33 @@ pub const SelfAttn = struct {
         k = self.rotary_emb.applyRope(k, cos, sin);
 
         q = q.rename(.{ .s = .q });
+        k = k.rename(.{ .s = .k });
+        v = v.rename(.{ .s = .k });
+
+        // The vanilla attention expects a scalar start index into the KV
+        // sequence; the recorded `cache_position` is the full per-token
+        // positions array, so take its first element.
+        const attn_start = token_index.slice1d(0, .{ .start = 0, .end = 1 });
 
         const attn_output = zml.attention.attention.attention(
             q,
             k,
             v,
-            token_index,
+            attn_start,
             zml.attention.attention.Metadata.init(.fromBackend(.vanilla, input.dim(.s), self.num_q_heads)),
             zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
         );
 
-        const projected_output = self.o_proj.forward(attn_output.rename(.{ .d_out_proj = .d }));
-        const gated_output = projected_output.mul(gate.sigmoid());
+        // Head-wise gate: sigmoid(gate) is {b, s, h}; broadcast over .hd and
+        // apply before merging heads and o_proj.
+        const gate_b = gate.sigmoid().rename(.{ .s = .q }).broad(attn_output.shape());
+        const gated_attn = attn_output.mul(gate_b);
 
-        return .{gated_output};
+        const projected_output = self.o_proj.forward(
+            gated_attn.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s }),
+        );
+
+        return .{projected_output};
     }
 };
 
