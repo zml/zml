@@ -132,6 +132,9 @@ fn bcast(a: zml.Tensor) zml.Tensor {
 fn reshape23(a: zml.Tensor) zml.Tensor {
     return a.reshape(.{ .i = 2, .j = 3 }); // [6] -> [2,3]
 }
+fn sumj(a: zml.Tensor) zml.Tensor {
+    return a.sum(.j); // [2,3] -> [2] (reduce over axis 1)
+}
 
 /// Run a unary shape-transform `func` (input `in_shape`) on `platform`,
 /// writing the flattened result into `out`.
@@ -303,9 +306,13 @@ pub fn main(init: std.process.Init) !void {
     failures += checkShaped(allocator, io, cpu, metal, "reshape", reshape23,
         zml.Shape.init(.{ .n = 6 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 6);
 
+    // Reduction (E4): sum over axis 1, [2,3] -> [2] = [3, 12].
+    failures += checkShaped(allocator, io, cpu, metal, "sum", sumj,
+        zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 2);
+
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
         return error.MetalMismatch;
     }
-    log.info("✅ PASS: all Metal ops match the CPU oracle (13 elementwise + transpose/bcast/reshape)", .{});
+    log.info("✅ PASS: all Metal ops match the CPU oracle (elementwise + transpose/bcast/reshape + sum-reduce)", .{});
 }
