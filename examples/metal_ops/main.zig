@@ -122,6 +122,41 @@ fn runUnaryOn(
     @memcpy(out, slice.items(f32));
 }
 
+fn transpose23(a: zml.Tensor) zml.Tensor {
+    return a.transpose(.{ .j, .i }); // 2x3 -> 3x2
+}
+
+/// Run the 2x3 -> 3x2 transpose on `platform`, writing 6 f32 into `out`.
+fn runTransposeOn(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    in_data: []const f32,
+    out: []f32,
+) !void {
+    const shape = zml.Shape.init(.{ .i = 2, .j = 3 }, .f32);
+    const a_t: zml.Tensor = .fromShape(shape);
+    var exe = try platform.compileFn(allocator, io, transpose23, .{a_t}, .{});
+    defer exe.deinit();
+
+    var a_buf = try zml.Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(in_data));
+    defer a_buf.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{a_buf});
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(f32));
+}
+
 /// Pass if every lane is within abs floor 1e-4 OR relative tolerance.
 fn compare(name: []const u8, cpu_out: []const f32, metal_out: []const f32, rel_tol: f32) usize {
     var max_abs: f32 = 0;
@@ -227,9 +262,27 @@ pub fn main(init: std.process.Init) !void {
         failures += checkUnary(allocator, io, cpu, metal, c[0], c[1], &a_un, c[2]);
     }
 
+    // Shape transform (E3): 2x3 -> 3x2 transpose, exact (pure data movement).
+    {
+        const t_in = [_]f32{ 0, 1, 2, 3, 4, 5 };
+        var co: [6]f32 = undefined;
+        var mo: [6]f32 = undefined;
+        if (runTransposeOn(allocator, io, cpu, &t_in, &co)) |_| {
+            if (runTransposeOn(allocator, io, metal, &t_in, &mo)) |_| {
+                failures += compare("transp", &co, &mo, exact);
+            } else |e| {
+                log.err("transp  Metal failed: {s}", .{@errorName(e)});
+                failures += 1;
+            }
+        } else |e| {
+            log.err("transp  CPU failed: {s}", .{@errorName(e)});
+            failures += 1;
+        }
+    }
+
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
         return error.MetalMismatch;
     }
-    log.info("✅ PASS: all 13 elementwise ops match the CPU oracle", .{});
+    log.info("✅ PASS: all Metal ops match the CPU oracle (13 elementwise + transpose)", .{});
 }
