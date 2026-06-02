@@ -76,6 +76,12 @@ fn matT(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
 fn matSum(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
     return a.dot(b, .k).sum(.n);
 }
+// Deeper chain: abs(x·W1)·W2 — a matmul, then abs (elementwise), then a matmul
+// whose lhs is the abs RESULT (a computed buffer, not a parameter). Three thunks,
+// two intermediates — exercises a matmul thunk reading an intermediate.
+fn matAbsMat(x: zml.Tensor, w1: zml.Tensor, w2: zml.Tensor) zml.Tensor {
+    return x.dot(w1, .k).abs().dot(w2, .n);
+}
 fn negate(a: zml.Tensor) zml.Tensor {
     return a.negate();
 }
@@ -537,10 +543,11 @@ fn checkMatmul(
 
 // Three differently-shaped inputs (a:[M,K], b:[K,N], bias:[M,N]) → out:[M,N],
 // for the multi-op linearBias graph (matmul thunk → add kernel).
-fn runLinearBias(
+fn run3Shaped(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
+    comptime func: anytype,
     a_shape: zml.Shape,
     a_data: []const f32,
     b_shape: zml.Shape,
@@ -552,7 +559,7 @@ fn runLinearBias(
     const at: zml.Tensor = .fromShape(a_shape);
     const bt: zml.Tensor = .fromShape(b_shape);
     const ct: zml.Tensor = .fromShape(c_shape);
-    var exe = try platform.compileFn(allocator, io, linearBias, .{ at, bt, ct }, .{});
+    var exe = try platform.compileFn(allocator, io, func, .{ at, bt, ct }, .{});
     defer exe.deinit();
 
     var ab = try zml.Buffer.fromBytes(io, platform, a_shape, .replicated, std.mem.sliceAsBytes(a_data));
@@ -577,12 +584,13 @@ fn runLinearBias(
     @memcpy(out, slice.items(f32));
 }
 
-fn checkLinearBias(
+fn check3Shaped(
     allocator: std.mem.Allocator,
     io: std.Io,
     cpu: *zml.Platform,
     metal: *zml.Platform,
     name: []const u8,
+    comptime func: anytype,
     a_shape: zml.Shape,
     a_data: []const f32,
     b_shape: zml.Shape,
@@ -594,11 +602,11 @@ fn checkLinearBias(
 ) usize {
     var co: [256]f32 = undefined;
     var mo: [256]f32 = undefined;
-    runLinearBias(allocator, io, cpu, a_shape, a_data, b_shape, b_data, c_shape, c_data, co[0..n_out]) catch |e| {
+    run3Shaped(allocator, io, cpu, func, a_shape, a_data, b_shape, b_data, c_shape, c_data, co[0..n_out]) catch |e| {
         log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
         return 1;
     };
-    runLinearBias(allocator, io, metal, a_shape, a_data, b_shape, b_data, c_shape, c_data, mo[0..n_out]) catch |e| {
+    run3Shaped(allocator, io, metal, func, a_shape, a_data, b_shape, b_data, c_shape, c_data, mo[0..n_out]) catch |e| {
         log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
         return 1;
     };
@@ -938,10 +946,19 @@ pub fn main(init: std.process.Init) !void {
     // elementwise-add kernel. The dot always uses MPSGraph here (graph path is
     // backend-independent), so run it on every XLA_METAL_MATMUL setting.
     // [2,3]·[3,2]=[[22,28],[49,64]], + [[100,200],[300,400]] = [[122,228],[349,464]].
-    failures += checkLinearBias(allocator, io, cpu, metal, "linbias",
+    failures += check3Shaped(allocator, io, cpu, metal, "linbias", linearBias,
         zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
         zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
         zml.Shape.init(.{ .m = 2, .n = 2 }, .f32), &[_]f32{ 100, 200, 300, 400 }, 4, exact);
+
+    // Deeper chain (3 thunks, 2 intermediates): abs(x·W1)·W2. The SECOND matmul
+    // reads a COMPUTED buffer (the abs result), not a parameter — the matmul-
+    // reading-an-intermediate path. dot1=[[10,12],[-19,-24]], abs=[[10,12],[19,24]],
+    // ·W2[[1,2],[3,4]] = [[46,68],[91,134]]. Exact integers.
+    failures += check3Shaped(allocator, io, cpu, metal, "mlpAbs", matAbsMat,
+        zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, -2, 3, -4, 5, -6 },
+        zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
+        zml.Shape.init(.{ .n = 2, .p = 2 }, .f32), &[_]f32{ 1, 2, 3, 4 }, 4, exact);
 
     // Matmul → FUSION (abs∘negate consuming the dot result): the other graph-path
     // shape — a fusion thunk with a non-parameter operand. Mixed-sign inputs make
