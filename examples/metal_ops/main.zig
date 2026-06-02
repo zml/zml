@@ -91,6 +91,11 @@ fn dynSlice(x: zml.Tensor, off: zml.Tensor) zml.Tensor {
 fn dynUpdate(x: zml.Tensor, upd: zml.Tensor, off: zml.Tensor) zml.Tensor {
     return x.dynamicUpdateSlice1d(upd, 0, off);
 }
+// Embedding lookup: gather rows of a table[V,D] by an index vector[N] → [N,D].
+// out[n,:] = table[idx[n],:]. The canonical model embedding / vocab gather.
+fn embed(table: zml.Tensor, idx: zml.Tensor) zml.Tensor {
+    return table.gather(.{ .v = idx }, .{});
+}
 // KV-cache row write: cache[rows,cols], write row[1,cols] at a runtime position
 // along axis 0 (the other axis offset is a 0 constant) → updated cache. Rank-2,
 // exercises the DUS kernel's multi-dim coordinate logic.
@@ -325,6 +330,67 @@ fn checkDynUpdate(
         return 1;
     };
     return compare(name, co[0..n_out], mo[0..n_out], 1e-6);
+}
+
+// Embedding lookup: table[V,D] f32 + idx[N] i32 → out[N,D] f32.
+fn runEmbedOn(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    vocab: i64,
+    dim: i64,
+    table_data: []const f32,
+    idx_data: []const i32,
+    out: []f32,
+) !void {
+    const table_shape = zml.Shape.init(.{ .v = vocab, .d = dim }, .f32);
+    const idx_shape = zml.Shape.init(.{ .n = idx_data.len }, .i32);
+    const tt: zml.Tensor = .fromShape(table_shape);
+    const it: zml.Tensor = .fromShape(idx_shape);
+    var exe = try platform.compileFn(allocator, io, embed, .{ tt, it }, .{});
+    defer exe.deinit();
+
+    var tb = try zml.Buffer.fromBytes(io, platform, table_shape, .replicated, std.mem.sliceAsBytes(table_data));
+    defer tb.deinit();
+    var ib = try zml.Buffer.fromBytes(io, platform, idx_shape, .replicated, std.mem.sliceAsBytes(idx_data));
+    defer ib.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ tb, ib });
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(f32));
+}
+
+fn checkEmbed(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    vocab: i64,
+    dim: i64,
+    table_data: []const f32,
+    idx_data: []const i32,
+) usize {
+    const n: usize = @intCast(@as(i64, @intCast(idx_data.len)) * dim);
+    var co: [64]f32 = undefined;
+    var mo: [64]f32 = undefined;
+    runEmbedOn(allocator, io, cpu, vocab, dim, table_data, idx_data, co[0..n]) catch |e| {
+        log.err("embed  CPU failed: {s}", .{@errorName(e)});
+        return 1;
+    };
+    runEmbedOn(allocator, io, metal, vocab, dim, table_data, idx_data, mo[0..n]) catch |e| {
+        log.err("embed  Metal failed: {s}", .{@errorName(e)});
+        return 1;
+    };
+    return compare("embed", co[0..n], mo[0..n], 1e-6);
 }
 
 // KV-cache row write: cache[rows,cols] f32 + row[1,cols] f32 + runtime i32 pos
@@ -1299,6 +1365,10 @@ pub fn main(init: std.process.Init) !void {
     // Rank-2 KV-cache write: cache[4,3], write row [100,101,102] at pos=2.
     failures += checkKvWrite(allocator, io, cpu, metal, 4, 3,
         &[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }, &[_]f32{ 100, 101, 102 }, 2);
+    // Embedding lookup (gather rows): table[4,3], idx=[2,0,3] → rows 2,0,3 =
+    // [[6,7,8],[0,1,2],[9,10,11]].
+    failures += checkEmbed(allocator, io, cpu, metal, 4, 3,
+        &[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }, &[_]i32{ 2, 0, 3 });
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
