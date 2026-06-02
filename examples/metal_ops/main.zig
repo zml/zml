@@ -509,6 +509,83 @@ fn checkMatmul(
     return compare(name, co[0..n_out], mo[0..n_out], rel_tol);
 }
 
+// dtype-generic matmul (f16 = native f16, bf16 = zml.floats.BFloat16). Same as
+// runMatmul but typed; the output is converted to f32 by the caller for compare.
+fn runMatmulT(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    comptime func: anytype,
+    a_shape: zml.Shape,
+    a_data: []const T,
+    b_shape: zml.Shape,
+    b_data: []const T,
+    out: []T,
+) !void {
+    const at: zml.Tensor = .fromShape(a_shape);
+    const bt: zml.Tensor = .fromShape(b_shape);
+    var exe = try platform.compileFn(allocator, io, func, .{ at, bt }, .{});
+    defer exe.deinit();
+
+    var ab = try zml.Buffer.fromBytes(io, platform, a_shape, .replicated, std.mem.sliceAsBytes(a_data));
+    defer ab.deinit();
+    var bb = try zml.Buffer.fromBytes(io, platform, b_shape, .replicated, std.mem.sliceAsBytes(b_data));
+    defer bb.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ ab, bb });
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(T));
+}
+
+fn toF32(comptime T: type, v: T) f32 {
+    return if (T == f32) v else if (T == f16) @floatCast(v) else v.toF32();
+}
+
+fn checkMatmulT(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    name: []const u8,
+    comptime func: anytype,
+    a_shape: zml.Shape,
+    a_data: []const T,
+    b_shape: zml.Shape,
+    b_data: []const T,
+    n_out: usize,
+    rel_tol: f32,
+) usize {
+    var co: [16]T = undefined;
+    var mo: [16]T = undefined;
+    runMatmulT(T, allocator, io, cpu, func, a_shape, a_data, b_shape, b_data, co[0..n_out]) catch |e| {
+        log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    runMatmulT(T, allocator, io, metal, func, a_shape, a_data, b_shape, b_data, mo[0..n_out]) catch |e| {
+        log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    var cof: [16]f32 = undefined;
+    var mof: [16]f32 = undefined;
+    for (0..n_out) |i| {
+        cof[i] = toF32(T, co[i]);
+        mof[i] = toF32(T, mo[i]);
+    }
+    return compare(name, cof[0..n_out], mof[0..n_out], rel_tol);
+}
+
 fn checkUnary(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -676,6 +753,19 @@ pub fn main(init: std.process.Init) !void {
             failures += 1;
         };
         failures += compare("mmMed", co, mo, 1e-4);
+    }
+
+    // f16 matmul routes through MPS (the naive AIR kernel is f32-only, so skip
+    // when XLA_METAL_MATMUL=naive). Same NN as mmNN = [22,28,49,64]; those
+    // integers are exact in f16, so the result is exact. (bf16 is intentionally
+    // not covered: MPSMatrixMultiplication rejects bf16 — it's slated for the
+    // metalBLAS path, whose kernels support bf16 natively.)
+    const force_naive = blk: {
+        const v = std.c.getenv("XLA_METAL_MATMUL") orelse break :blk false;
+        break :blk std.mem.eql(u8, std.mem.span(v), "naive");
+    };
+    if (!force_naive) {
+        failures += checkMatmulT(f16, allocator, io, cpu, metal, "mmF16", matmul, zml.Shape.init(.{ .m = 2, .k = 3 }, .f16), &[_]f16{ 1, 2, 3, 4, 5, 6 }, zml.Shape.init(.{ .k = 3, .n = 2 }, .f16), &[_]f16{ 1, 2, 3, 4, 5, 6 }, 4, 1e-2);
     }
 
     if (failures != 0) {
