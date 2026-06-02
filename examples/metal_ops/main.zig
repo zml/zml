@@ -114,6 +114,21 @@ fn kvWrite(cache: zml.Tensor, row: zml.Tensor, pos: zml.Tensor) zml.Tensor {
 fn addMul(a: zml.Tensor, b: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
     return .{ a.add(b), a.mul(b) };
 }
+// Numerically-stable softmax over .j, built from supported ops only (no
+// compare/select): exp(x - max) / sum(exp(x - max)). The transformer attention
+// weight normalizer.
+fn mySoftmax(x: zml.Tensor) zml.Tensor {
+    const m = x.max(.j);
+    const e = x.sub(m.broad(x.shape())).exp();
+    return e.div(e.sum(.j).broad(x.shape()));
+}
+// RMSNorm over .j (mul-based, avoids pow): x · rsqrt(mean(x²) + eps).
+fn myRmsNorm(x: zml.Tensor) zml.Tensor {
+    const d: f32 = @floatFromInt(x.dim(.j));
+    const ms = x.mul(x).sum(.j).scale(1.0 / d); // [i] mean square
+    const inv = ms.addConstant(1e-6).rsqrt(); // [i]
+    return x.mul(inv.broad(x.shape())); // [i,j]
+}
 // A tiny REAL model end-to-end: a per-token 2-layer MLP classifier.
 //   e      = embed(table, tokens)        // gather rows           [n, d]
 //   h      = relu(e·W1 + b1)             // matmul, +bias, relu   [n, h]
@@ -1562,6 +1577,13 @@ pub fn main(init: std.process.Init) !void {
     // [[6,7,8],[0,1,2],[9,10,11]].
     failures += checkEmbed(allocator, io, cpu, metal, 4, 3,
         &[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }, &[_]i32{ 2, 0, 3 });
+
+    // Transformer building blocks (own composites, supported ops only).
+    // softmax over .j; rmsNorm over .j — both [2,3]->[2,3].
+    failures += checkShaped(allocator, io, cpu, metal, "smax", mySoftmax,
+        zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 6);
+    failures += checkShaped(allocator, io, cpu, metal, "rmsn", myRmsNorm,
+        zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 }, 6);
 
     // ===== Tiny REAL model end-to-end: a per-token 2-layer MLP classifier =====
     // embed → matmul+bias → relu → matmul+bias → logits, in one Metal graph.
