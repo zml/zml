@@ -82,6 +82,21 @@ fn matSum(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
 fn matAbsMat(x: zml.Tensor, w1: zml.Tensor, w2: zml.Tensor) zml.Tensor {
     return x.dot(w1, .k).abs().dot(w2, .n);
 }
+// KV-cache indexing ops with a RUNTIME offset. dynSlice: read a fixed-length
+// window of x at a runtime start. dynUpdate: write `upd` into x at a runtime
+// start, returning the updated array (the KV-cache write).
+fn dynSlice(x: zml.Tensor, off: zml.Tensor) zml.Tensor {
+    return x.dynamicSlice1d(0, .{ .start = off, .len = 3 });
+}
+fn dynUpdate(x: zml.Tensor, upd: zml.Tensor, off: zml.Tensor) zml.Tensor {
+    return x.dynamicUpdateSlice1d(upd, 0, off);
+}
+// KV-cache row write: cache[rows,cols], write row[1,cols] at a runtime position
+// along axis 0 (the other axis offset is a 0 constant) → updated cache. Rank-2,
+// exercises the DUS kernel's multi-dim coordinate logic.
+fn kvWrite(cache: zml.Tensor, row: zml.Tensor, pos: zml.Tensor) zml.Tensor {
+    return cache.dynamicUpdateSlice1d(row, 0, pos);
+}
 // Multi-output module: a single graph with TWO array results — root is a
 // tuple(add, mul). Exercises the graph executable's tuple-output path
 // (per-leaf buffer + root tuple index table via WriteRootTupleIndexTable).
@@ -182,6 +197,203 @@ fn runTernaryOn(
     const slice = try result.toSliceAlloc(allocator, io);
     defer slice.free(allocator);
     @memcpy(out, slice.items(f32));
+}
+
+// dynamic-slice: x[n] f32 + a runtime i32 scalar offset → out[len].
+fn runDynSliceOn(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    comptime func: anytype,
+    x_data: []const f32,
+    off_val: i32,
+    out: []f32,
+) !void {
+    const x_shape = zml.Shape.init(.{ .n = x_data.len }, .f32);
+    const off_shape = zml.Shape.init(.{}, .i32);
+    const xt: zml.Tensor = .fromShape(x_shape);
+    const ot: zml.Tensor = .fromShape(off_shape);
+    var exe = try platform.compileFn(allocator, io, func, .{ xt, ot }, .{});
+    defer exe.deinit();
+
+    var xb = try zml.Buffer.fromBytes(io, platform, x_shape, .replicated, std.mem.sliceAsBytes(x_data));
+    defer xb.deinit();
+    const off_arr = [_]i32{off_val};
+    var ob = try zml.Buffer.fromBytes(io, platform, off_shape, .replicated, std.mem.sliceAsBytes(&off_arr));
+    defer ob.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ xb, ob });
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(f32));
+}
+
+fn checkDynSlice(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    name: []const u8,
+    comptime func: anytype,
+    x_data: []const f32,
+    off_val: i32,
+    n_out: usize,
+) usize {
+    var co: [64]f32 = undefined;
+    var mo: [64]f32 = undefined;
+    runDynSliceOn(allocator, io, cpu, func, x_data, off_val, co[0..n_out]) catch |e| {
+        log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    runDynSliceOn(allocator, io, metal, func, x_data, off_val, mo[0..n_out]) catch |e| {
+        log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    return compare(name, co[0..n_out], mo[0..n_out], 1e-6);
+}
+
+// dynamic-update-slice: x[n] f32, upd[m] f32, runtime i32 offset → out[n].
+fn runDynUpdateOn(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    comptime func: anytype,
+    x_data: []const f32,
+    upd_data: []const f32,
+    off_val: i32,
+    out: []f32,
+) !void {
+    const x_shape = zml.Shape.init(.{ .n = x_data.len }, .f32);
+    const upd_shape = zml.Shape.init(.{ .n = upd_data.len }, .f32);
+    const off_shape = zml.Shape.init(.{}, .i32);
+    const xt: zml.Tensor = .fromShape(x_shape);
+    const ut: zml.Tensor = .fromShape(upd_shape);
+    const ot: zml.Tensor = .fromShape(off_shape);
+    var exe = try platform.compileFn(allocator, io, func, .{ xt, ut, ot }, .{});
+    defer exe.deinit();
+
+    var xb = try zml.Buffer.fromBytes(io, platform, x_shape, .replicated, std.mem.sliceAsBytes(x_data));
+    defer xb.deinit();
+    var ub = try zml.Buffer.fromBytes(io, platform, upd_shape, .replicated, std.mem.sliceAsBytes(upd_data));
+    defer ub.deinit();
+    const off_arr = [_]i32{off_val};
+    var ob = try zml.Buffer.fromBytes(io, platform, off_shape, .replicated, std.mem.sliceAsBytes(&off_arr));
+    defer ob.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ xb, ub, ob });
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(f32));
+}
+
+fn checkDynUpdate(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    name: []const u8,
+    comptime func: anytype,
+    x_data: []const f32,
+    upd_data: []const f32,
+    off_val: i32,
+    n_out: usize,
+) usize {
+    var co: [64]f32 = undefined;
+    var mo: [64]f32 = undefined;
+    runDynUpdateOn(allocator, io, cpu, func, x_data, upd_data, off_val, co[0..n_out]) catch |e| {
+        log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    runDynUpdateOn(allocator, io, metal, func, x_data, upd_data, off_val, mo[0..n_out]) catch |e| {
+        log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    return compare(name, co[0..n_out], mo[0..n_out], 1e-6);
+}
+
+// KV-cache row write: cache[rows,cols] f32 + row[1,cols] f32 + runtime i32 pos
+// → updated cache[rows,cols]. Exercises rank-2 dynamic-update-slice.
+fn runKvWriteOn(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    rows: i64,
+    cols: i64,
+    cache_data: []const f32,
+    row_data: []const f32,
+    pos_val: i32,
+    out: []f32,
+) !void {
+    const cache_shape = zml.Shape.init(.{ .r = rows, .c = cols }, .f32);
+    const row_shape = zml.Shape.init(.{ .r = 1, .c = cols }, .f32);
+    const pos_shape = zml.Shape.init(.{}, .i32);
+    const ct: zml.Tensor = .fromShape(cache_shape);
+    const rt: zml.Tensor = .fromShape(row_shape);
+    const pt: zml.Tensor = .fromShape(pos_shape);
+    var exe = try platform.compileFn(allocator, io, kvWrite, .{ ct, rt, pt }, .{});
+    defer exe.deinit();
+
+    var cb = try zml.Buffer.fromBytes(io, platform, cache_shape, .replicated, std.mem.sliceAsBytes(cache_data));
+    defer cb.deinit();
+    var rb = try zml.Buffer.fromBytes(io, platform, row_shape, .replicated, std.mem.sliceAsBytes(row_data));
+    defer rb.deinit();
+    const pos_arr = [_]i32{pos_val};
+    var pb = try zml.Buffer.fromBytes(io, platform, pos_shape, .replicated, std.mem.sliceAsBytes(&pos_arr));
+    defer pb.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ cb, rb, pb });
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(f32));
+}
+
+fn checkKvWrite(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    rows: i64,
+    cols: i64,
+    cache_data: []const f32,
+    row_data: []const f32,
+    pos_val: i32,
+) usize {
+    const n: usize = @intCast(rows * cols);
+    var co: [64]f32 = undefined;
+    var mo: [64]f32 = undefined;
+    runKvWriteOn(allocator, io, cpu, rows, cols, cache_data, row_data, pos_val, co[0..n]) catch |e| {
+        log.err("kvwrt  CPU failed: {s}", .{@errorName(e)});
+        return 1;
+    };
+    runKvWriteOn(allocator, io, metal, rows, cols, cache_data, row_data, pos_val, mo[0..n]) catch |e| {
+        log.err("kvwrt  Metal failed: {s}", .{@errorName(e)});
+        return 1;
+    };
+    return compare("kvwrt", co[0..n], mo[0..n], 1e-6);
 }
 
 // Run a binary func returning TWO tensors; fill out0/out1 from the two result
@@ -1077,6 +1289,16 @@ pub fn main(init: std.process.Init) !void {
     // Multi-output module (tuple root): one graph, two array results
     // (add, mul) returned together via the root tuple index table.
     failures += checkTwoOut(allocator, io, cpu, metal, "twoout", addMul, &a_bin, &b_bin, exact);
+
+    // KV-cache indexing (runtime offset). dynSlice: x[6] at start=2, len=3 →
+    // [12,13,14]. dynUpdate: write [7,8] into zeros[6] at start=3 → [0,0,0,7,8,0].
+    failures += checkDynSlice(allocator, io, cpu, metal, "dslice", dynSlice,
+        &[_]f32{ 10, 11, 12, 13, 14, 15 }, 2, 3);
+    failures += checkDynUpdate(allocator, io, cpu, metal, "dupd", dynUpdate,
+        &[_]f32{ 0, 0, 0, 0, 0, 0 }, &[_]f32{ 7, 8 }, 3, 6);
+    // Rank-2 KV-cache write: cache[4,3], write row [100,101,102] at pos=2.
+    failures += checkKvWrite(allocator, io, cpu, metal, 4, 3,
+        &[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }, &[_]f32{ 100, 101, 102 }, 2);
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
