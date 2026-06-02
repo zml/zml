@@ -217,6 +217,15 @@ const iota24: [24]f32 = blk: {
     for (&a, 0..) |*e, i| e.* = @floatFromInt(i);
     break :blk a;
 };
+// Reduce-window via cumulativeSum (a stride-1, [N-1,0]-padded, single-axis
+// window): 1D prefix sum, and 2D over the inner axis (exercises the kept-axis
+// base offset).
+fn cumsum1(a: zml.Tensor) zml.Tensor {
+    return a.cumulativeSum(.n); // [n] -> [n]
+}
+fn cumsum2(a: zml.Tensor) zml.Tensor {
+    return a.cumulativeSum(.j); // [i,j] -> [i,j], prefix sum along j
+}
 
 // Inputs large enough (extent >= 256) to exercise the threadgroup tree
 // reduction rather than the serial-per-thread kernel.
@@ -527,6 +536,13 @@ pub fn main(init: std.process.Init) !void {
         zml.Shape.init(.{ .i = 2, .j = 3, .k = 4 }, .f32), &iota24, 2);
     failures += checkShaped(allocator, io, cpu, metal, "sumall3", sumAll3,
         zml.Shape.init(.{ .i = 2, .j = 3, .k = 4 }, .f32), &iota24, 1);
+
+    // Reduce-window (E4+): cumulative sum. 1D [6]->[0,1,3,6,10,15]; 2D prefix
+    // sum along j (the windowed axis), i kept (tests the base offset).
+    failures += checkShaped(allocator, io, cpu, metal, "cumsum", cumsum1,
+        zml.Shape.init(.{ .n = 6 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 6);
+    failures += checkShaped(allocator, io, cpu, metal, "cumsum2", cumsum2,
+        zml.Shape.init(.{ .i = 2, .j = 4 }, .f32), &[_]f32{ 0, 1, 2, 3, 10, 20, 30, 40 }, 8);
     // Reduce-to-scalar via the TREE kernel (E4 harden): [1024] -> [], num_out=1,
     // extent=1024 (>=256) so this is one threadgroup cooperatively reducing
     // (base=0, exercises the grid-stride accumulate + tree). Serial-per-thread
