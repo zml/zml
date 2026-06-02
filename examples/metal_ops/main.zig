@@ -719,15 +719,28 @@ pub fn main(init: std.process.Init) !void {
             zml.Shape.init(.{ .i = 4, .j = 65536 }, .f32), big2d, 4);
     }
 
-    // Matmul (naive AIR kernel). NN: [2,3]·[3,2] = [[22,28],[49,64]]. NT (the
-    // y = x·Wᵀ linear, rhs contracts its inner dim): [2,3]·[2,3]ᵀ with
-    // W=[[1,0,1],[0,1,0]] = [[4,2],[10,5]]. Small integers → exact in f32.
-    failures += checkMatmul(allocator, io, cpu, metal, "mmNN", matmul,
-        zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
-        zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 }, 4, exact);
-    failures += checkMatmul(allocator, io, cpu, metal, "mmNT", matmul,
-        zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
-        zml.Shape.init(.{ .n = 2, .k = 3 }, .f32), &[_]f32{ 1, 0, 1, 0, 1, 0 }, 4, exact);
+    // Matmul. Backend mirrors XLA_METAL_MATMUL: "" (MPS default) | "naive" |
+    // "metalblas". Tiny NN/NT (N<32) route, under metalBLAS, to its m5/gemv
+    // kernels (not wired into the plugin yet → loud Unimplemented), so skip them
+    // there; mmMed (96x48, K=64) is m5_tensor-eligible and runs on every backend.
+    const mm_backend: []const u8 = blk: {
+        const v = std.c.getenv("XLA_METAL_MATMUL") orelse break :blk "";
+        break :blk std.mem.span(v);
+    };
+    const mm_is_metalblas = std.mem.eql(u8, mm_backend, "metalblas");
+    const mm_is_naive = std.mem.eql(u8, mm_backend, "naive");
+
+    // NN: [2,3]·[3,2] = [[22,28],[49,64]]. NT (the y = x·Wᵀ linear, rhs contracts
+    // its inner dim): [2,3]·[2,3]ᵀ with W=[[1,0,1],[0,1,0]] = [[4,2],[10,5]].
+    // Small integers → exact in f32.
+    if (!mm_is_metalblas) {
+        failures += checkMatmul(allocator, io, cpu, metal, "mmNN", matmul,
+            zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
+            zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 }, 4, exact);
+        failures += checkMatmul(allocator, io, cpu, metal, "mmNT", matmul,
+            zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
+            zml.Shape.init(.{ .n = 2, .k = 3 }, .f32), &[_]f32{ 1, 0, 1, 0, 1, 0 }, 4, exact);
+    }
     // Medium matmul with fractional values: stresses tiling + fp32 accumulation
     // (the path the tiny exact cases don't exercise). [96,64]·[64,48] -> [96,48].
     {
@@ -755,16 +768,9 @@ pub fn main(init: std.process.Init) !void {
         failures += compare("mmMed", co, mo, 1e-4);
     }
 
-    // f16 matmul routes through MPS (the naive AIR kernel is f32-only, so skip
-    // when XLA_METAL_MATMUL=naive). Same NN as mmNN = [22,28,49,64]; those
-    // integers are exact in f16, so the result is exact. (bf16 is intentionally
-    // not covered: MPSMatrixMultiplication rejects bf16 — it's slated for the
-    // metalBLAS path, whose kernels support bf16 natively.)
-    const force_naive = blk: {
-        const v = std.c.getenv("XLA_METAL_MATMUL") orelse break :blk false;
-        break :blk std.mem.eql(u8, std.mem.span(v), "naive");
-    };
-    if (!force_naive) {
+    // f16 matmul — MPS default only (naive is f32-only; metalBLAS's tiny-N path
+    // isn't wired). Same NN as mmNN = [22,28,49,64]; exact in f16 for small ints.
+    if (!mm_is_naive and !mm_is_metalblas) {
         failures += checkMatmulT(f16, allocator, io, cpu, metal, "mmF16", matmul, zml.Shape.init(.{ .m = 2, .k = 3 }, .f16), &[_]f16{ 1, 2, 3, 4, 5, 6 }, zml.Shape.init(.{ .k = 3, .n = 2 }, .f16), &[_]f16{ 1, 2, 3, 4, 5, 6 }, 4, 1e-2);
     }
 
