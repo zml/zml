@@ -110,10 +110,10 @@ pub const TextRotaryEmbedding = struct {
     theta: f32 = 10000.0,
     attention_scaling: f32 = 1.0,
 
-    pub fn init(rotary_dim: i64, theta: f32, attention_scaling: f32) TextRotaryEmbedding {
+    pub fn init(rotary_dimension: i64, theta: f32, attention_scaling: f32) TextRotaryEmbedding {
         _ = theta; // autofix
         return .{
-            .rotary_dim = rotary_dim,
+            .rotary_dim = rotary_dimension,
             // .theta = config.rope_theta.copy()[], we need a deep copy of rope_theta[layer_idx]
             .attention_scaling = attention_scaling,
         };
@@ -144,31 +144,25 @@ pub const TextRotaryEmbedding = struct {
     /// Expects `q`/`k` tagged `{.b, .s, .h, .hd}` and `cos`/`sin` tagged `{.b, .s, .hd}`.
     pub fn applyRope(
         self: TextRotaryEmbedding,
-        q: zml.Tensor,
-        k: zml.Tensor,
+        x: zml.Tensor,
         cos: zml.Tensor,
         sin: zml.Tensor,
-    ) struct { zml.Tensor, zml.Tensor } {
-        const q_rot = q.slice1d(.hd, .{ .start = 0, .end = self.rotary_dim });
-        const k_rot = k.slice1d(.hd, .{ .start = 0, .end = self.rotary_dim });
+    ) zml.Tensor {
+        const x_rot = x.slice1d(.hd, .{ .start = 0, .end = self.rotary_dim });
 
         // Insert head axis so cos/sin broadcast over .h.
-        const cos_b = cos.insertAxes(.hd, .{.h}).broad(q_rot.shape());
-        const sin_b = sin.insertAxes(.hd, .{.h}).broad(q_rot.shape());
+        const cos_b = cos.insertAxes(.hd, .{.h}).broad(x_rot.shape());
+        const sin_b = sin.insertAxes(.hd, .{.h}).broad(x_rot.shape());
 
-        const q_rotated = q_rot.mul(cos_b).add(rotateHalf(q_rot).mul(sin_b));
-        const k_rotated = k_rot.mul(cos_b).add(rotateHalf(k_rot).mul(sin_b));
+        const x_rotated = x_rot.mul(cos_b).add(rotateHalf(x_rot).mul(sin_b));
 
-        if (self.rotary_dim == q.dim(.hd)) {
-            return .{ q_rotated, k_rotated };
+        if (self.rotary_dim == x.dim(.hd)) {
+            return x_rotated;
         }
 
-        const q_pass = q.slice1d(.hd, .{ .start = self.rotary_dim, .end = q.dim(.hd) });
-        const k_pass = k.slice1d(.hd, .{ .start = self.rotary_dim, .end = k.dim(.hd) });
-        return .{
-            zml.Tensor.concatenate(&.{ q_rotated, q_pass }, .hd),
-            zml.Tensor.concatenate(&.{ k_rotated, k_pass }, .hd),
-        };
+        const x_pass = x.slice1d(.hd, .{ .start = self.rotary_dim, .end = x.dim(.hd) });
+
+        return zml.Tensor.concatenate(&.{ x_rotated, x_pass }, .hd);
     }
 };
 
@@ -578,7 +572,7 @@ pub const TransformerLayer = struct {
 
         // Keep the residual stream replicated to avoid repeated gathers before q/k/v.
         const x0_replicated = x0.withPartitioning(.{ .d = .replicated });
-        const x0_normalized = self.input_layernorm.forward(x0_replicated);
+        const x0_normalized = self.input_layernorm.forward(x0_replicated, .d);
         const delta0, const updated_kv_cache = self.self_attn.forward(
             x0_normalized,
             token_index,
@@ -589,7 +583,7 @@ pub const TransformerLayer = struct {
 
         // Fully Connected
         const x1 = x0_replicated.add(delta0).withPartitioning(.{ .d = .replicated });
-        const x1_normalized = self.post_attention_layernorm.forward(x1);
+        const x1_normalized = self.post_attention_layernorm.forward(x1, .d);
         const x2 = self.mlp.forward(x1_normalized)
             .rename(.{ .dout = .d })
             .withPartitioning(.{ .d = .replicated })
@@ -616,14 +610,13 @@ pub const RmsNorm = struct {
         self.weight.deinit();
     }
 
-    /// L2 normalization of input tensor along .d axis
+    /// L2 normalization of input tensor along the given axis.
     /// Step 3.5 Flash uses offset-style RMSNorm: the effective scale is `1 + weight`,
     /// not just `weight`.
-    pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
-        const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
-        const normalized = zml.nn.rmsNorm(x, .d, self.eps);
-        const scale = self.weight.convert(.f32).addConstant(1).convert(x.dtype()).withTags(.{.d});
-        std.log.warn("normalized={f} scale={f}", .{ normalized.shape(), scale.shape() });
+    pub fn forward(self: RmsNorm, input: zml.Tensor, comptime axis: anytype) zml.Tensor {
+        const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{axis});
+        const normalized = zml.nn.rmsNorm(x, axis, self.eps);
+        const scale = self.weight.convert(.f32).addConstant(1).convert(x.dtype()).withTags(.{axis});
         return normalized.mul(scale.broad(normalized.shape()));
     }
 };
@@ -681,9 +674,10 @@ pub const Mlp = struct {
 
 // SwAttn
 
-const num_heads: i64 = 8;
+const num_q_heads: i64 = 64;
 const num_kv_heads: i64 = 8;
-const head_dim: i64 = 4096 / num_heads;
+const gate_dim_per_head = 64;
+const head_dim: i64 = 128;
 const rotary_dim: i64 = head_dim;
 // SelfAttn
 pub const SelfAttn = struct {
@@ -707,7 +701,7 @@ pub const SelfAttn = struct {
     head_dim: i64,
     scaling: f32,
 
-    num_heads: i64,
+    num_q_heads: i64,
     num_kv_heads: i64,
     num_kv_groups: i64,
     rotary_dim: i64,
@@ -727,16 +721,16 @@ pub const SelfAttn = struct {
         return .{
             .layer_idx = layer_idx,
             //TODO: hardcoded head
-            .num_heads = 8,
+            .num_q_heads = 96,
             .num_kv_heads = 8,
             .enable_sliding_window = false,
             //TODO: hardcoded head dim
-            .head_dim = 4096 / num_heads,
-            .num_kv_groups = num_heads / num_kv_heads,
+            .head_dim = 64,
+            .num_kv_groups = num_q_heads / num_kv_heads,
             //TODO: hardcoded rotary emb
             .rotary_dim = rotary_dim,
             .rotary_emb = .init(rotary_dim, 10000.0, 1.0),
-            .q_size = num_heads * head_dim,
+            .q_size = num_q_heads * head_dim,
             .kv_size = num_kv_heads * head_dim,
             .scaling = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
             .q_proj = initProj(store.withPrefix("q_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
@@ -767,24 +761,87 @@ pub const SelfAttn = struct {
     }
 
     // project Q, Gate
+    fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        // const q_proj = self.q_proj.forward(x)
+        //     .splitAxis(.dout, .{
+        //     .h = self.num_q_heads,
+        //     .hd = 2 * self.head_dim,
+        // });
+        // const q, var gate = q_proj.chunkExact(.hd, 2);
+        // gate = gate.merge(.{ .d_out_proj = .{ .h, .hd } });
+        // return .{ q, gate };
+
+        const q_gate = self.q_proj.forward(x);
+
+        const q_size = self.num_q_heads * self.head_dim;
+        // 64 * 128 = 8192
+
+        const q_flat = q_gate.slice1d(.dout, .{ .start = 0, .end = q_size });
+
+        var gate = q_gate.slice1d(.dout, .{ .start = q_size, .end = q_gate.dim(.dout) });
+
+        const q = q_flat.splitAxis(.dout, .{ .h = self.num_q_heads, .hd = self.head_dim });
+
+        gate = gate.rename(.{ .dout = .d });
+
+        return .{ q, gate };
+    }
 
     // project KV
+    fn projectKV(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        const k = self.k_proj.forward(x)
+            .splitAxis(.dout, .{
+            .h = self.num_kv_heads,
+            .hd = self.head_dim,
+        });
+
+        const v = self.v_proj.forward(x)
+            .splitAxis(.dout, .{
+            .h = self.num_kv_heads,
+            .hd = self.head_dim,
+        });
+
+        return .{ k, v };
+    }
 
     // forward
     pub fn forward(
         self: SelfAttn,
         x: zml.Tensor,
         token_index: zml.Tensor,
-        attention_metadata: zml.attention.attention.Metadata,
-        attention_parameters: zml.attention.attention.Parameters,
+        // kv_cache: zml.Tensor,
     ) struct { zml.Tensor } {
-        _ = x; // autofix
-        _ = self;
-        _ = token_index;
-        _ = attention_metadata;
-        _ = attention_parameters;
-        @panic("SelfAttn.forward not implemented");
-        // unreachable returns; once you remove the panic, return real tensors
+        const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
+        var q, const gate = self.projectQAndGate(input);
+        var k, const v = self.projectKV(input);
+
+        q = self.q_norm.forward(q, .hd);
+        k = self.k_norm.forward(k, .hd);
+
+        const dtype = q.dtype();
+        // see how long the sequence is? what is x.dim(.s) for?
+        const position_ids = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
+
+        const cos, const sin = self.rotary_emb.getCosAndSin(position_ids, dtype);
+
+        q = self.rotary_emb.applyRope(q, cos, sin);
+        k = self.rotary_emb.applyRope(k, cos, sin);
+
+        q = q.rename(.{ .s = .q });
+
+        const attn_output = zml.attention.attention.attention(
+            q,
+            k,
+            v,
+            token_index,
+            zml.attention.attention.Metadata.init(.fromBackend(.vanilla, input.dim(.s), self.num_q_heads)),
+            zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
+        );
+
+        const projected_output = self.o_proj.forward(attn_output.rename(.{ .d_out_proj = .d }));
+        const gated_output = projected_output.mul(gate.sigmoid());
+
+        return .{gated_output};
     }
 };
 
