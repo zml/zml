@@ -122,6 +122,11 @@ fn mySoftmax(x: zml.Tensor) zml.Tensor {
     const e = x.sub(m.broad(x.shape())).exp();
     return e.div(e.sum(.j).broad(x.shape()));
 }
+// ZML's STOCK softmax (not the hand-written one): emits compare + select for the
+// all-(-inf)-row NaN guard. Verifies compare/select lower (fused, no PRED buffer).
+fn stockSoftmax(a: zml.Tensor) zml.Tensor {
+    return a.softmax(.j);
+}
 // RMSNorm over .j (mul-based, avoids pow): x · rsqrt(mean(x²) + eps).
 fn myRmsNorm(x: zml.Tensor) zml.Tensor {
     const d: f32 = @floatFromInt(x.dim(.j));
@@ -1752,6 +1757,9 @@ pub fn main(init: std.process.Init) !void {
         zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 6);
     failures += checkShaped(allocator, io, cpu, metal, "rmsn", myRmsNorm,
         zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 }, 6);
+    // ZML's stock softmax (compare + select for the masked-row guard).
+    failures += checkShaped(allocator, io, cpu, metal, "smaxZ", stockSoftmax,
+        zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 6);
 
     // ===== Tiny REAL model end-to-end: a per-token 2-layer MLP classifier =====
     // embed → matmul+bias → relu → matmul+bias → logits, in one Metal graph.
