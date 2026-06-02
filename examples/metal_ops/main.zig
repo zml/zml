@@ -184,6 +184,15 @@ fn reshape23(a: zml.Tensor) zml.Tensor {
 fn sumj(a: zml.Tensor) zml.Tensor {
     return a.sum(.j); // [2,3] -> [2] (reduce over axis 1)
 }
+// Transpose / reshape INSIDE a fusion (E5.2): a data-movement op feeding an
+// elementwise op must fuse into one kFusion (negate is exact, keeps the check
+// tight). If XLA keeps them separate these hit Unimplemented and fail loudly.
+fn transposeNeg(a: zml.Tensor) zml.Tensor {
+    return a.transpose(.{ .j, .i }).negate(); // [2,3]->[3,2] then negate
+}
+fn reshapeNeg(a: zml.Tensor) zml.Tensor {
+    return a.reshape(.{ .i = 3, .j = 2 }).negate(); // [2,3]->[3,2] (flat) then negate
+}
 fn sumAll(a: zml.Tensor) zml.Tensor {
     return a.sum(.n); // [n] -> scalar (num_out=1: the tree-reduction case)
 }
@@ -479,6 +488,13 @@ pub fn main(init: std.process.Init) !void {
         zml.Shape.init(.{ .j = 3 }, .f32), &[_]f32{ 10, 20, 30 }, 12);
     failures += checkShaped(allocator, io, cpu, metal, "reshape", reshape23,
         zml.Shape.init(.{ .n = 6 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 6);
+
+    // Transpose / reshape inside a fusion (E5.2 finish): negate∘transpose and
+    // negate∘reshape, [2,3]->[3,2], must each fuse into one kFusion.
+    failures += checkShaped(allocator, io, cpu, metal, "tneg", transposeNeg,
+        zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 6);
+    failures += checkShaped(allocator, io, cpu, metal, "rneg", reshapeNeg,
+        zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 6);
 
     // Reduction (E4): sum over axis 1, [2,3] -> [2] = [3, 12].
     failures += checkShaped(allocator, io, cpu, metal, "sum", sumj,
