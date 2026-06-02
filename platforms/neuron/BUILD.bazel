@@ -1,22 +1,32 @@
-load("@com_google_protobuf//bazel:upb_proto_library.bzl", "upb_c_proto_library")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library")
+load("@zml//bazel:cc_import.bzl", "cc_import")
 load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
+
+exports_files([
+    "neuronx_cc_shim.py",
+    "nki_kernel_compiler.py",
+])
 
 # A proxy PJRT Plugin that loads the Neuron PJRT Plugin
 # and returns the instance from nested GetPjrtApi.
 #
-# Additionally, it provides a way to load implicit transitive dependencies
-# of neuronx-cc (see add_needed of the patchelf target below).
+# The proxy also initializes the Neuron runtime environment and exposes the
+# sandboxed compiler binaries to libneuronxla 3.0.
 zig_shared_library(
     name = "libpjrt_neuron",
+    srcs = ["neuron.zig"],
     main = "libpjrt_neuron.zig",
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["@libpjrt_neuron//:__subpackages__"],
     zigopts = ["-fno-stack-check"],
     deps = [
-        ":libpython",
+        ":libnrt_headers",
+        ":neuron_nrt",
+        ":zmlxneuron",
+        "//bazel",
+        "//pjrt",
         "//stdx",
         "@rules_zig//zig/runfiles",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
@@ -25,12 +35,15 @@ zig_shared_library(
 
 zig_binary(
     name = "neuronx-cc",
-    target_compatible_with = ["@platforms//os:linux"],
     data = ["@neuron_py_deps//neuronx_cc"],
     linkopts = ["-Wl,-rpath,$$ORIGIN/../lib"],
-    main = "neuronx-cc.zig",
+    main = "neuronxcc_compiler_launcher.zig",
     tags = ["manual"],
-    deps = [":libpython"],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        ":libpython",
+        ":python_launcher",
+    ],
 )
 
 runfiles_to_default(
@@ -40,10 +53,18 @@ runfiles_to_default(
     deps = [":neuronx-cc"],
 )
 
+runfiles_to_default(
+    name = "nki-cc_files",
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["@libpjrt_neuron//:__subpackages__"],
+    deps = [":nki-cc"],
+)
+
 cc_library(
     name = "libpython",
-    tags = ["manual"],
     hdrs = ["libpython.h"],
+    tags = ["manual"],
+    visibility = ["//platforms/neuron:__subpackages__"],
     deps = [
         "@rules_python//python/cc:current_py_cc_headers",
         "@rules_python//python/cc:current_py_cc_libs",
@@ -52,57 +73,77 @@ cc_library(
 
 cc_library(
     name = "empty",
-    tags = ["manual"],
     defines = ["ZML_RUNTIME_NEURON_DISABLED"],
-    visibility = ["//platforms/neuron/topology:__pkg__"],
+    tags = ["manual"],
 )
 
 cc_library(
     name = "zmlxneuron",
-    tags = ["manual"],
     defines = ["ZML_RUNTIME_NEURON"],
-    visibility = ["//platforms/neuron/topology:__pkg__"],
+    tags = ["manual"],
 )
 
 cc_library(
     name = "libnrt_headers",
-    tags = ["manual"],
     hdrs = ["nrt.h"],
+    tags = ["manual"],
     visibility = [
         "//bin/zml-smi:__subpackages__",
-        "//platforms/neuron/topology:__pkg__",
     ],
     deps = ["@libpjrt_neuron//:libnrt_headers"],
 )
 
-upb_c_proto_library(
-    name = "xla_data_upb",
-    deps = ["@xla//xla:xla_data_proto"],
+cc_import(
+    name = "neuron_ncfw",
+    shared_library = "@aws-neuronx-runtime-lib//:libncfw.patchelf",
     tags = ["manual"],
 )
 
-upb_c_proto_library(
-    name = "hlo_proto_upb",
-    deps = ["@xla//xla/service:hlo_proto"],
+cc_import(
+    name = "neuron_nrt",
+    shared_library = "@aws-neuronx-runtime-lib//:libnrt.patchelf",
     tags = ["manual"],
+    deps = [":neuron_ncfw"],
 )
 
-zig_shared_library(
-    name = "libneuronxla",
-    main = "libneuronxla.zig",
-    shared_lib_name = "libneuronxla.so",
-    target_compatible_with = ["@platforms//os:linux"],
-    visibility = ["@libpjrt_neuron//:__subpackages__"],
-    zigopts = [
-        "-fno-stack-check",
-        "-fPIC",
+zig_library(
+    name = "python_launcher",
+    import_name = "platforms/neuron/python_launcher",
+    main = "python_launcher.zig",
+    tags = ["manual"],
+    visibility = ["//platforms/neuron:__subpackages__"],
+    deps = [":libpython"],
+)
+
+zig_binary(
+    name = "nki-cc",
+    data = [
+        "nki_kernel_compiler.py",
+        "@neuron_py_deps//neuronx_cc",
+        "@neuron_py_deps//nki",
     ],
+    linkopts = ["-Wl,-rpath,$$ORIGIN/../lib"],
+    main = "nki_compiler_launcher.zig",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//platforms/neuron:__pkg__"],
     deps = [
-        ":hlo_proto_upb",
         ":libpython",
-        ":xla_data_upb",
+        ":python_launcher",
+    ],
+)
+
+zig_library(
+    name = "nki_kernel",
+    import_name = "platforms/neuron/nki_kernel",
+    main = "nki_kernel.zig",
+    tags = ["manual"],
+    visibility = ["//zml:__pkg__"],
+    deps = [
+        ":neuron",
+        "//bazel",
         "//stdx",
-        "//upb",
+        "@rules_zig//zig/runfiles",
     ],
 )
 
@@ -122,16 +163,16 @@ uv_lock(
 
 zig_library(
     name = "neuron",
-    tags = ["manual"],
     import_name = "platforms/neuron",
     main = "neuron.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         "//pjrt",
     ] + select({
         "//platforms:neuron.enabled": [
             ":libnrt_headers",
-            ":libpython",
+            ":neuron_nrt",
             ":zmlxneuron",
             "//bazel",
             "//stdx",
@@ -140,4 +181,17 @@ zig_library(
         ],
         "//conditions:default": [":empty"],
     }),
+)
+
+zig_library(
+    name = "topology",
+    data = [":libpjrt_neuron"],
+    import_name = "platforms/neuron/topology",
+    main = "topology.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":neuron",
+        ":zmlxneuron",
+    ],
 )

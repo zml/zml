@@ -188,7 +188,10 @@ pub const Tensor = struct {
 
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = CompilationContext.current();
-        if (ctx.platform.target == .cpu) return self;
+        switch (ctx.platform.target) {
+            .cpu, .neuron, .oneapi => return self,
+            .cuda, .rocm, .tpu => {},
+        }
 
         const frontend_attributes: *const mlir.Attribute = .dict(ctx.mlir_ctx, &.{
             .named(
@@ -220,7 +223,10 @@ pub const Tensor = struct {
 
     pub fn onMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = CompilationContext.current();
-        if (ctx.platform.target == .cpu) return self;
+        switch (ctx.platform.target) {
+            .cpu, .neuron, .oneapi => return self,
+            .cuda, .rocm, .tpu => {},
+        }
 
         if (ctx.currentScope().id_to_argument.get(self.id) == null) {
             return self;
@@ -2302,6 +2308,8 @@ pub const Tensor = struct {
         // Already the right shape
         if (std.mem.eql(i64, self.dims(), other.dims())) return self;
 
+        if (ops.LoweringCompatibility.preserveIntegerScalarBroadcast(self, other)) |rewritten| return rewritten;
+
         // Non ambiguous broadcasting
         // TODO: broad is error prone because of this:
         // it will happily broadcast .{ .a = 10, .b = 1 } to .{ .b = 10, .a = 5 }
@@ -2315,6 +2323,19 @@ pub const Tensor = struct {
             axes_.appendAssumeCapacity(@intCast(other.axis(t)));
         }
         return self.broadcast(other, axes_.constSlice());
+    }
+
+    pub fn optimizationBarrier(self: Tensor) Tensor {
+        const ctx = CompilationContext.current();
+
+        const op = dialects.stablehlo.optimizationBarrier(
+            ctx.mlir_ctx,
+            &.{self.value()},
+            &.{self.value().type_()},
+            .unknown(ctx.mlir_ctx),
+        ).appendTo(ctx.currentScope().block);
+
+        return _result(self.shape(), op.result(0));
     }
 
     /// Reshapes the input Tensor with the given shape.
@@ -3221,9 +3242,53 @@ pub const Tensor = struct {
             },
             else => stdx.debug.compileError(err_msg, .{}),
         };
-        var result = self.sort(a, .{ .descending = opts.descending });
-        result.values = result.values.slice1d(a, .{ .end = k });
-        result.indices = result.indices.slice1d(a, .{ .end = k });
+        const ctx = CompilationContext.current();
+        var result: SortRes = switch (ctx.platform.target) {
+            // Work around https://github.com/aws-neuron/aws-neuron-sdk/issues/1339 until Neuron's sort+slice rewrite uses the slice size as k.
+            .neuron => blk: {
+                stdx.debug.assert(self.dtype().isFloat(), "Neuron Tensor.topK only supports float tensors, got {}", .{self.dtype()});
+                stdx.debug.assert(k <= 16384, "Neuron AwsNeuronTopK supports k <= 16384, got {}", .{k});
+
+                const last_axis: u4 = self.rank() - 1;
+                const topk_input = if (a == last_axis) self else self.swapAxes(a, last_axis);
+                const call_input = if (opts.descending) topk_input else topk_input.negate();
+                const values_shape = topk_input.shape().setDim(last_axis, @intCast(k));
+                const indices_shape = values_shape.withDtype(.i32);
+                const result_types = [_]*const mlir.Type{
+                    mlirx.Type.rankedTensor(ctx.mlir_ctx, values_shape),
+                    mlirx.Type.rankedTensor(ctx.mlir_ctx, indices_shape),
+                };
+
+                var backend_config_buf: [32]u8 = undefined;
+                const backend_config = std.fmt.bufPrint(&backend_config_buf, "{d}", .{k}) catch unreachable;
+                const op = dialects.stablehlo.custom_call(
+                    ctx.mlir_ctx,
+                    &.{call_input.value()},
+                    &result_types,
+                    .{
+                        .call_target_name = "AwsNeuronTopK",
+                        .has_side_effect = false,
+                        .backend_config = .{ .original = backend_config },
+                    },
+                    .unknown(ctx.mlir_ctx),
+                ).appendTo(currentBlock());
+
+                var values = Tensor._result(values_shape, op.result(0));
+                if (!opts.descending) values = values.negate();
+                var indices = Tensor._result(indices_shape, op.result(1));
+                if (a != last_axis) {
+                    values = values.swapAxes(a, last_axis);
+                    indices = indices.swapAxes(a, last_axis);
+                }
+                break :blk .{ .values = values, .indices = indices };
+            },
+            .cpu, .cuda, .rocm, .tpu, .oneapi => blk: {
+                var sorted = self.sort(a, .{ .descending = opts.descending });
+                sorted.values = sorted.values.slice1d(a, .{ .end = k });
+                sorted.indices = sorted.indices.slice1d(a, .{ .end = k });
+                break :blk sorted;
+            },
+        };
         if (has_name) |new_name| {
             result.values._shape._tags.set(a, new_name.ptr);
             result.indices._shape._tags.set(a, new_name.ptr);

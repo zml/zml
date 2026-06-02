@@ -62,7 +62,7 @@ pub const Session = struct {
                 } };
                 break :b buffers;
             },
-            .vanilla, .cuda_fa2, .cuda_fa3 => null,
+            .vanilla, .cuda_fa2, .cuda_fa3, .nki => null,
         };
         errdefer if (decode_attention_metadata_buffers) |*buffers| zml.attention.attention.Metadata.deinitBuffer(buffers);
 
@@ -167,7 +167,7 @@ pub const Session = struct {
                 .layer_id = try zml.Buffer.scalar(self.io, self.platform, 0, .u16),
                 .num_tokens = try zml.Buffer.scalar(self.io, self.platform, all_tokens.len, .u32),
             } },
-            .vanilla, .cuda_fa2, .cuda_fa3 => self.attention_metadata_buffers,
+            .vanilla, .cuda_fa2, .cuda_fa3, .nki => self.attention_metadata_buffers,
         };
 
         try self.compiled_model.prefill.run(.{
