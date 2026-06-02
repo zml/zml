@@ -36,7 +36,9 @@ fn disableXlaLogs() void {
 
 fn validateDeviceCount(target: Target, num_devices: usize) !void {
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi => {
+        // Metal is treated as a single-GPU platform (1 device); 1 is a power of
+        // two, so the standard count validation applies unchanged.
+        .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi, .metal => {
             if (num_devices == 0) {
                 log.err("Platform {} requires at least 1 device, got {}", .{ target, num_devices });
                 return error.ZeroVisibleDevices;
@@ -98,7 +100,9 @@ pub const Memory = struct {
                 };
                 return zml_kind == kind_;
             },
-            .cpu, .neuron => return true,
+            // Metal buffers are unified/host-visible shared memory; like the CPU
+            // plugin, ZML treats all of it as a single kind, so any kind matches.
+            .cpu, .neuron, .metal => return true,
         }
     }
 
@@ -212,7 +216,8 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi => device.id(),
+        // Metal exposes device ids like the other GPU/CPU plugins.
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal => device.id(),
     };
 }
 
@@ -348,6 +353,10 @@ pub const Platform = struct {
             .rocm,
             .cuda,
             .oneapi,
+            // Metal is tried before CPU on auto-discovery; init() returns
+            // error.Unavailable on non-macOS hosts (and when the plugin is
+            // disabled), so this is a no-op everywhere except Apple silicon.
+            .metal,
             .cpu,
         };
         return for (ordered_targets) |target| {
@@ -614,7 +623,9 @@ pub const Platform = struct {
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
             },
-            .cuda, .rocm, .neuron, .oneapi, .cpu => .{
+            // Metal has no special tiling requirement from ZML's side; use the
+            // trivial row-major layout like the other non-TPU platforms.
+            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal => .{
                 // If this is the default layout on the platform, there is no point calling PJRT
                 .tiled = .{
                     .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
@@ -648,6 +659,10 @@ pub const CreateOptions = struct {
     tpu: struct {} = .{},
     neuron: struct {} = .{},
     oneapi: struct {} = .{},
+    // Zero-sized: the Metal plugin takes no client-create named values (it keys
+    // off its own platform_name "METAL"). Required by toNamedValues' comptime
+    // assert that every Target has a matching, discarded CreateOptions field.
+    metal: struct {} = .{},
 
     pub const Cpu = struct {
         device_count: u32,

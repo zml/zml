@@ -302,7 +302,10 @@ pub const MemoryWriter = union(enum) {
     ) !MemoryWriter {
         return switch (platform.target) {
             .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer) },
-            .rocm, .tpu, .neuron, .cpu => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
+            // Metal uses the buffered writer; the .direct path needs a real DMA
+            // allocator, but Metal's DmaAllocator is passthrough (see mem.zig),
+            // so .buffered is the correct, safe pairing.
+            .rocm, .tpu, .neuron, .cpu, .metal => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
         };
     }
 

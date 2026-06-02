@@ -4301,7 +4301,10 @@ pub const Tensor = struct {
                     }
                 }).body);
             },
-            .oneapi, .neuron => {},
+            // Metal grouped with the no-op print arm for bring-up: zml$print uses
+            // an FFI custom-call whose handler may not yet be wired in the Metal
+            // plugin. Move metal up to the manualComputation arm once FFI works.
+            .oneapi, .neuron, .metal => {},
         }
     }
 

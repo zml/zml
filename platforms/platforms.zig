@@ -2,6 +2,7 @@ const std = @import("std");
 
 const cpu = @import("platforms/cpu");
 const cuda = @import("platforms/cuda");
+const metal = @import("platforms/metal");
 const neuron = @import("platforms/neuron");
 const pjrt = @import("pjrt");
 const rocm = @import("platforms/rocm");
@@ -15,6 +16,7 @@ pub const Platform = enum {
     tpu,
     neuron,
     oneapi,
+    metal,
 };
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io, tag: Platform) !*const pjrt.Api {
@@ -25,6 +27,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io, tag: Platform) !*const pjr
         .tpu => try tpu.load(allocator, io),
         .neuron => try neuron.load(allocator, io),
         .oneapi => try oneapi.load(allocator, io),
+        .metal => try metal.load(allocator, io),
     };
 }
 
@@ -36,5 +39,6 @@ pub fn isEnabled(tag: Platform) bool {
         .tpu => tpu.isEnabled(),
         .neuron => neuron.isEnabled(),
         .oneapi => oneapi.isEnabled(),
+        .metal => metal.isEnabled(),
     };
 }

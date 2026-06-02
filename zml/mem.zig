@@ -23,7 +23,10 @@ pub const DmaAllocator = union(enum) {
         return switch (device.platform.target) {
             .cuda => .{ .dmam = .init(parent, device.platform) },
             .oneapi, .tpu => .{ .uib = .init(device.memory(.host_pinned).?) },
-            .rocm, .cpu, .neuron => .{ .passthrough = parent },
+            // Metal: passthrough. The .uib path requires device.memory(.host_pinned)
+            // which Metal may not expose (would panic); passthrough is the safe
+            // choice and pairs with the .buffered MemoryWriter (see io.zig).
+            .rocm, .cpu, .neuron, .metal => .{ .passthrough = parent },
         };
     }
 

@@ -8,6 +8,9 @@ PLATFORMS = {
     "tpu": False,
     "neuron": False,
     "oneapi": False,
+    # Metal defaults to DISABLED so a normal ZML build is unaffected; enable with
+    # --@zml//platforms:metal=true on an Apple-silicon macOS host.
+    "metal": False,
 }
 
 [
@@ -28,13 +31,34 @@ config_setting(
     visibility = ["//visibility:public"],
 )
 
+# Like rocm.enabled, metal.enabled is constrained to its only valid host
+# (Apple-silicon macOS) in addition to the --metal=true flag, so the
+# select("//platforms:metal.enabled") in platforms/metal/BUILD.bazel can never
+# resolve to the real plugin on a non-macOS/non-arm64 build. It is therefore kept
+# out of the generic loop below.
+config_setting(
+    name = "metal.enabled",
+    constraint_values = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:macos",
+    ],
+    flag_values = {":metal": "True"},
+    visibility = ["//visibility:public"],
+)
+
 [
     config_setting(
         name = "{}.enabled".format(runtime),
         flag_values = {":{}".format(runtime): "True"},
         visibility = ["//visibility:public"],
     )
-    for runtime in ["cpu", "cuda", "tpu", "neuron", "oneapi"]
+    for runtime in [
+        "cpu",
+        "cuda",
+        "tpu",
+        "neuron",
+        "oneapi",
+    ]
 ]
 
 zig_library(

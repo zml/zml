@@ -47,7 +47,8 @@ pub const Partitioner = union(enum) {
 
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron => .shardy,
+            // Metal's PJRT plugin is built from an XLA fork on the GPU/Shardy path.
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal => .shardy,
         };
     }
 };
@@ -663,7 +664,10 @@ pub const PhysicalMesh = struct {
             .tpu => &.{ .link_x, .link_y, .link_z },
             .neuron => &.{ .link, .link_x, .link_y, .link_z },
             .cuda, .rocm => &.{.link},
-            .cpu => &.{.bus},
+            // Metal is single-GPU (1 device, no multi-device interconnect), so it
+            // gets the single-device CPU-like .bus axis. Pairs with .auto below
+            // mapping metal to the flat cpu() mesh builder.
+            .cpu, .metal => &.{.bus},
             .oneapi => &.{ .link, .bus },
         };
     }
@@ -869,7 +873,9 @@ pub const PhysicalMesh = struct {
             .cuda, .rocm => gpu(allocator, platform_devices),
             .tpu => tpu(allocator, platform_devices),
             .neuron => return neuron(allocator, platform_devices),
-            .oneapi => cpu(allocator, platform_devices),
+            // Single-device Metal maps to the flat cpu() mesh (matches the .bus
+            // axis in shardableAxes above).
+            .oneapi, .metal => cpu(allocator, platform_devices),
         };
         errdefer freeNode(allocator, root);
 
