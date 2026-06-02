@@ -114,6 +114,19 @@ fn kvWrite(cache: zml.Tensor, row: zml.Tensor, pos: zml.Tensor) zml.Tensor {
 fn addMul(a: zml.Tensor, b: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
     return .{ a.add(b), a.mul(b) };
 }
+// A tiny REAL model end-to-end: a per-token 2-layer MLP classifier.
+//   e      = embed(table, tokens)        // gather rows           [n, d]
+//   h      = relu(e·W1 + b1)             // matmul, +bias, relu   [n, h]
+//   logits = h·W2 + b2                   // matmul, +bias         [n, c]
+// Exercises the whole graph path at once: gather → matmul → fusion(bias-add +
+// relu, with a scalar constant inside) → matmul → fusion(bias-add), pipelined.
+fn tinyMLP(tokens: zml.Tensor, table: zml.Tensor, w1: zml.Tensor, b1: zml.Tensor, w2: zml.Tensor, b2: zml.Tensor) zml.Tensor {
+    const e = table.gather(.{ .v = tokens }, .{}); // [n, d]
+    const z1 = e.dot(w1, .d); // [n, h]
+    const h = z1.add(b1.broad(z1.shape())).relu(); // [n, h]
+    const z2 = h.dot(w2, .h); // [n, c]
+    return z2.add(b2.broad(z2.shape())); // [n, c]
+}
 fn negate(a: zml.Tensor) zml.Tensor {
     return a.negate();
 }
@@ -336,6 +349,103 @@ fn checkDynUpdate(
         return 1;
     };
     return compare(name, co[0..n_out], mo[0..n_out], 1e-6);
+}
+
+// Tiny MLP classifier end-to-end: tokens[N] i32 + table[V,D] + W1[D,H] + b1[H] +
+// W2[H,C] + b2[C] (all f32) → logits[N,C]. One graph, ~6 thunks.
+fn runTinyMLPOn(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    N: i64,
+    V: i64,
+    D: i64,
+    H: i64,
+    C: i64,
+    tokens: []const i32,
+    table: []const f32,
+    w1: []const f32,
+    b1: []const f32,
+    w2: []const f32,
+    b2: []const f32,
+    out: []f32,
+) !void {
+    const tok_shape = zml.Shape.init(.{ .n = N }, .i32);
+    const table_shape = zml.Shape.init(.{ .v = V, .d = D }, .f32);
+    const w1_shape = zml.Shape.init(.{ .d = D, .h = H }, .f32);
+    const b1_shape = zml.Shape.init(.{ .h = H }, .f32);
+    const w2_shape = zml.Shape.init(.{ .h = H, .c = C }, .f32);
+    const b2_shape = zml.Shape.init(.{ .c = C }, .f32);
+    const tokt: zml.Tensor = .fromShape(tok_shape);
+    const tat: zml.Tensor = .fromShape(table_shape);
+    const w1t: zml.Tensor = .fromShape(w1_shape);
+    const b1t: zml.Tensor = .fromShape(b1_shape);
+    const w2t: zml.Tensor = .fromShape(w2_shape);
+    const b2t: zml.Tensor = .fromShape(b2_shape);
+    var exe = try platform.compileFn(allocator, io, tinyMLP, .{ tokt, tat, w1t, b1t, w2t, b2t }, .{});
+    defer exe.deinit();
+
+    var tokb = try zml.Buffer.fromBytes(io, platform, tok_shape, .replicated, std.mem.sliceAsBytes(tokens));
+    defer tokb.deinit();
+    var tab = try zml.Buffer.fromBytes(io, platform, table_shape, .replicated, std.mem.sliceAsBytes(table));
+    defer tab.deinit();
+    var w1b = try zml.Buffer.fromBytes(io, platform, w1_shape, .replicated, std.mem.sliceAsBytes(w1));
+    defer w1b.deinit();
+    var b1b = try zml.Buffer.fromBytes(io, platform, b1_shape, .replicated, std.mem.sliceAsBytes(b1));
+    defer b1b.deinit();
+    var w2b = try zml.Buffer.fromBytes(io, platform, w2_shape, .replicated, std.mem.sliceAsBytes(w2));
+    defer w2b.deinit();
+    var b2b = try zml.Buffer.fromBytes(io, platform, b2_shape, .replicated, std.mem.sliceAsBytes(b2));
+    defer b2b.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ tokb, tab, w1b, b1b, w2b, b2b });
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(f32));
+}
+
+fn checkTinyMLP(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+) usize {
+    const N: i64 = 3;
+    const V: i64 = 5;
+    const D: i64 = 4;
+    const H: i64 = 6;
+    const C: i64 = 2;
+    const tokens = [_]i32{ 2, 0, 4 };
+    var table: [20]f32 = undefined; // V*D
+    var w1: [24]f32 = undefined; // D*H
+    var b1: [6]f32 = undefined; // H
+    var w2: [12]f32 = undefined; // H*C
+    var b2: [2]f32 = undefined; // C
+    fillFrac(f32, &table, 13);
+    fillFrac(f32, &w1, 7);
+    fillFrac(f32, &b1, 3);
+    fillFrac(f32, &w2, 5);
+    fillFrac(f32, &b2, 2);
+    const n_out: usize = @intCast(N * C);
+    var co: [16]f32 = undefined;
+    var mo: [16]f32 = undefined;
+    runTinyMLPOn(allocator, io, cpu, N, V, D, H, C, &tokens, &table, &w1, &b1, &w2, &b2, co[0..n_out]) catch |e| {
+        log.err("tinyMLP  CPU failed: {s}", .{@errorName(e)});
+        return 1;
+    };
+    runTinyMLPOn(allocator, io, metal, N, V, D, H, C, &tokens, &table, &w1, &b1, &w2, &b2, mo[0..n_out]) catch |e| {
+        log.err("tinyMLP  Metal failed: {s}", .{@errorName(e)});
+        return 1;
+    };
+    return compare("tinyMLP", co[0..n_out], mo[0..n_out], 1e-4);
 }
 
 // Embedding lookup: table[V,D] f32 + idx[N] i32 → out[N,D] f32.
@@ -1452,6 +1562,10 @@ pub fn main(init: std.process.Init) !void {
     // [[6,7,8],[0,1,2],[9,10,11]].
     failures += checkEmbed(allocator, io, cpu, metal, 4, 3,
         &[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }, &[_]i32{ 2, 0, 3 });
+
+    // ===== Tiny REAL model end-to-end: a per-token 2-layer MLP classifier =====
+    // embed → matmul+bias → relu → matmul+bias → logits, in one Metal graph.
+    failures += checkTinyMLP(allocator, io, cpu, metal);
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
