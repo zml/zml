@@ -1,0 +1,49 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+# Disabled-runtime stub: defines ZML_RUNTIME_METAL_DISABLED so metal.zig's
+# isEnabled() returns false and load() compiles to error.Unavailable.
+cc_library(
+    name = "empty",
+    defines = ["ZML_RUNTIME_METAL_DISABLED"],
+    tags = ["manual"],
+)
+
+# Stage the locally-provided plugin dylib (from the @libpjrt_metal repo created
+# by metal.bzl) into runfiles under sandbox/lib. Metal is arm64-macOS only, so
+# unlike cpu there is no per-arch select() -- a single source is sufficient.
+# The staged filename must be libpjrt_metal.dylib to match both metal.zig's
+# bufJoinZ target and the dylib's install_name (@rpath/libpjrt_metal.dylib).
+copy_to_directory(
+    name = "sandbox",
+    srcs = ["@libpjrt_metal"],
+    out = "sandbox/lib",
+    include_external_repositories = ["**"],
+)
+
+cc_library(
+    name = "libpjrt_metal",
+    data = [":sandbox"],
+    defines = ["ZML_RUNTIME_METAL"],
+    tags = ["manual"],
+)
+
+zig_library(
+    name = "metal",
+    import_name = "platforms/metal",
+    main = "metal.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+    ] + select({
+        "//platforms:metal.enabled": [
+            ":libpjrt_metal",
+            "//bazel",
+            "//stdx",
+            "@rules_zig//zig/runfiles",
+        ],
+        "//conditions:default": [":empty"],
+    }),
+)

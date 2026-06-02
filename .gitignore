@@ -9,6 +9,9 @@ bazel-*
 /llvm-project/
 /xla/
 
+# Locally-staged Metal PJRT plugin (71MB, built from the XLA fork; do not commit)
+/platforms/metal/prebuilt/
+
 # Just in case, Zig caches
 .zig-cache/
 zig-out/

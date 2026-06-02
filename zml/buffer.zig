@@ -202,7 +202,9 @@ pub const Buffer = struct {
 
                 return try Buffer.from(io, platform, sh, sharding, host, .{ .wait = true, .memory = opts.memory });
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi => {},
+            // Metal allocates device buffers like the GPU/CPU plugins (fall
+            // through to the normal device-allocation path below).
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => {},
         }
 
         var res: Buffer = .{
