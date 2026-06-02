@@ -64,6 +64,12 @@ fn linearBias(a: zml.Tensor, b: zml.Tensor, c: zml.Tensor) zml.Tensor {
 fn matNegAbs(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
     return a.dot(b, .k).negate().abs();
 }
+// Matmul → indexed transform: transpose of the dot result. Exercises the graph
+// path's indexed-copy thunk reading a computed (non-parameter) buffer.
+// dot=[[22,28],[49,64]] → transpose = [[22,49],[28,64]].
+fn matT(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
+    return a.dot(b, .k).transpose(.{ .n, .m });
+}
 fn negate(a: zml.Tensor) zml.Tensor {
     return a.negate();
 }
@@ -936,6 +942,12 @@ pub fn main(init: std.process.Init) !void {
     // abs meaningful. dot=[[10,12],[-19,-24]] → |−dot| = [[10,12],[19,24]].
     failures += checkMatmul(allocator, io, cpu, metal, "matneg", matNegAbs,
         zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, -2, 3, -4, 5, -6 },
+        zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 }, 4, exact);
+
+    // Matmul → indexed (transpose of the dot result): a third graph-path shape —
+    // an indexed-copy thunk reading a computed buffer. dotᵀ = [[22,49],[28,64]].
+    failures += checkMatmul(allocator, io, cpu, metal, "matT", matT,
+        zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
         zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 }, 4, exact);
 
     if (failures != 0) {
