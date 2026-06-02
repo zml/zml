@@ -44,6 +44,12 @@ fn affineBcast(x: zml.Tensor, scale: zml.Tensor, bias: zml.Tensor) zml.Tensor {
     const xs = x.shape();
     return x.mul(scale.broad(xs)).add(bias.broad(xs));
 }
+// Matmul: contract the shared .k axis. With a={.m,.k} and b={.k,.n} this is a
+// plain row-major NN matmul; with b={.n,.k} it's the y = x·Wᵀ linear (rhs
+// contracts its inner dim) — same forward fn, the input tags pick NN vs NT.
+fn matmul(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
+    return a.dot(b, .k);
+}
 fn negate(a: zml.Tensor) zml.Tensor {
     return a.negate();
 }
@@ -439,6 +445,70 @@ fn checkAffineBcast(
     return compare(name, co[0..n_out], mo[0..n_out], 1e-6);
 }
 
+// Two differently-shaped inputs (a:[M,K], b:[K,N] or [N,K]) → out:[M,N].
+fn runMatmul(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    comptime func: anytype,
+    a_shape: zml.Shape,
+    a_data: []const f32,
+    b_shape: zml.Shape,
+    b_data: []const f32,
+    out: []f32,
+) !void {
+    const at: zml.Tensor = .fromShape(a_shape);
+    const bt: zml.Tensor = .fromShape(b_shape);
+    var exe = try platform.compileFn(allocator, io, func, .{ at, bt }, .{});
+    defer exe.deinit();
+
+    var ab = try zml.Buffer.fromBytes(io, platform, a_shape, .replicated, std.mem.sliceAsBytes(a_data));
+    defer ab.deinit();
+    var bb = try zml.Buffer.fromBytes(io, platform, b_shape, .replicated, std.mem.sliceAsBytes(b_data));
+    defer bb.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ ab, bb });
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(f32));
+}
+
+fn checkMatmul(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    name: []const u8,
+    comptime func: anytype,
+    a_shape: zml.Shape,
+    a_data: []const f32,
+    b_shape: zml.Shape,
+    b_data: []const f32,
+    n_out: usize,
+    rel_tol: f32,
+) usize {
+    var co: [256]f32 = undefined;
+    var mo: [256]f32 = undefined;
+    runMatmul(allocator, io, cpu, func, a_shape, a_data, b_shape, b_data, co[0..n_out]) catch |e| {
+        log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    runMatmul(allocator, io, metal, func, a_shape, a_data, b_shape, b_data, mo[0..n_out]) catch |e| {
+        log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    return compare(name, co[0..n_out], mo[0..n_out], rel_tol);
+}
+
 fn checkUnary(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -571,6 +641,16 @@ pub fn main(init: std.process.Init) !void {
         failures += checkShaped(allocator, io, cpu, metal, "sum2dbig", sumj,
             zml.Shape.init(.{ .i = 4, .j = 65536 }, .f32), big2d, 4);
     }
+
+    // Matmul (naive AIR kernel). NN: [2,3]·[3,2] = [[22,28],[49,64]]. NT (the
+    // y = x·Wᵀ linear, rhs contracts its inner dim): [2,3]·[2,3]ᵀ with
+    // W=[[1,0,1],[0,1,0]] = [[4,2],[10,5]]. Small integers → exact in f32.
+    failures += checkMatmul(allocator, io, cpu, metal, "mmNN", matmul,
+        zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
+        zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 }, 4, exact);
+    failures += checkMatmul(allocator, io, cpu, metal, "mmNT", matmul,
+        zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
+        zml.Shape.init(.{ .n = 2, .k = 3 }, .f32), &[_]f32{ 1, 0, 1, 0, 1, 0 }, 4, exact);
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});

@@ -53,6 +53,9 @@ fn affine(x: zml.Tensor, scale: zml.Tensor, bias: zml.Tensor) zml.Tensor {
     const xs = x.shape();
     return x.mul(scale.broad(xs)).add(bias.broad(xs)); // x*scale+bias, [d]->[r,d] bcast in fusion (E5.2)
 }
+fn matmul(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
+    return a.dot(b, .k); // [m,k]·[k,n] -> [m,n], naive one-thread-per-output kernel
+}
 
 const BenchResult = struct {
     name: []const u8,
@@ -291,6 +294,49 @@ fn benchShaped(
     return makeResult(name, in_elems, bytes, iters, total_ns);
 }
 
+/// Matmul a:[m,k]·b:[k,n] -> [m,n]. Unlike the bandwidth-bound ops, matmul is
+/// compute-bound, so we store the FLOP count (2·M·N·K) in `bytes` — the shared
+/// `gbps` formula (count·iters/total_ns) then reads out as **GFLOP/s** for these
+/// rows. This is the naive one-thread-per-output baseline (MPS comes next).
+fn benchMatmul(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    name: []const u8,
+    m: usize,
+    k: usize,
+    n: usize,
+    iters: usize,
+    warmup: usize,
+) !BenchResult {
+    const a_shape = zml.Shape.init(.{ .m = m, .k = k }, .f32);
+    const b_shape = zml.Shape.init(.{ .k = k, .n = n }, .f32);
+    const a_t: zml.Tensor = .fromShape(a_shape);
+    const b_t: zml.Tensor = .fromShape(b_shape);
+    var exe = try platform.compileFn(allocator, io, matmul, .{ a_t, b_t }, .{});
+    defer exe.deinit();
+
+    const a_data = try allocator.alloc(f32, m * k);
+    defer allocator.free(a_data);
+    const b_data = try allocator.alloc(f32, k * n);
+    defer allocator.free(b_data);
+    fillPositive(a_data);
+    fillPositive(b_data);
+    var a_buf = try zml.Buffer.fromBytes(io, platform, a_shape, .replicated, std.mem.sliceAsBytes(a_data));
+    defer a_buf.deinit();
+    var b_buf = try zml.Buffer.fromBytes(io, platform, b_shape, .replicated, std.mem.sliceAsBytes(b_data));
+    defer b_buf.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ a_buf, b_buf });
+
+    const total_ns = try timeCalls(io, &exe, exe_args, &exe_results, iters, warmup);
+    return makeResult(name, m * n, 2 * m * k * n, iters, total_ns);
+}
+
 fn printTable(rows: []const BenchResult) void {
     log.info("{s:<13} {s:>12} {s:>11} {s:>10} {s:>9}", .{ "op", "elems", "bytes/call", "avg", "GB/s" });
     for (rows) |r| {
@@ -352,7 +398,7 @@ fn appendHistory(
 pub fn main(init: std.process.Init) !void {
     const CliArgs = struct {
         pub const help =
-            \\ metal_bench --device=metal|cpu --size=4194304 --iters=100 --warmup=10 --rows=4096 --cols=4096 --label=<tag> --out=<abs path>
+            \\ metal_bench --device=metal|cpu --size=4194304 --iters=100 --warmup=10 --rows=4096 --cols=4096 --mm=1024 --label=<tag> --out=<abs path>
         ;
         device: []const u8 = "metal", // "metal" (default) or "cpu" (oracle, for a contrast)
         size: usize = 1 << 22, // elementwise length (4_194_304 f32 = 16 MB/buffer)
@@ -360,6 +406,7 @@ pub fn main(init: std.process.Init) !void {
         warmup: usize = 10,
         rows: usize = 4096, // 2D shape for transpose / reduce
         cols: usize = 4096,
+        mm: usize = 1024, // square matmul size (M=N=K)
         label: []const u8 = "", // free tag, e.g. the xla plugin commit
         out: []const u8 = "/Users/raph/Documents/Git-Repos/metal-xla-docs/bench/history.jsonl",
     };
@@ -404,6 +451,12 @@ pub fn main(init: std.process.Init) !void {
         const vshape = zml.Shape.init(.{ .n = n }, .f32);
         try results.append(allocator, try benchShaped(allocator, io, platform, "sum_all", sumAll, vshape, n, (n + 1) * @sizeOf(f32), cli.iters, cli.warmup));
     }
+
+    // Matmul (naive kernel). Compute-bound: the table's gbps column is GFLOP/s
+    // for these rows (bytes = 2·M·N·K). A small square (512³) plus the
+    // configurable mm³ give a scaling datapoint and the MPS-comparison baseline.
+    try results.append(allocator, try benchMatmul(allocator, io, platform, "matmul512", 512, 512, 512, cli.iters, cli.warmup));
+    try results.append(allocator, try benchMatmul(allocator, io, platform, "matmul", cli.mm, cli.mm, cli.mm, cli.iters, cli.warmup));
 
     log.info("", .{});
     printTable(results.items);
