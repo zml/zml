@@ -108,6 +108,11 @@ fn embed(table: zml.Tensor, idx: zml.Tensor) zml.Tensor {
 fn kvWrite(cache: zml.Tensor, row: zml.Tensor, pos: zml.Tensor) zml.Tensor {
     return cache.dynamicUpdateSlice1d(row, 0, pos);
 }
+// Concatenate two tensors along .j: [2,2] ++ [2,2] -> [2,4]. (RoPE rotate-half /
+// KV-cache append use this op.)
+fn concatJ(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
+    return zml.Tensor.concatenate(&.{ a, b }, .j);
+}
 // Multi-output module: a single graph with TWO array results — root is a
 // tuple(add, mul). Exercises the graph executable's tuple-output path
 // (per-leaf buffer + root tuple index table via WriteRootTupleIndexTable).
@@ -1736,6 +1741,11 @@ pub fn main(init: std.process.Init) !void {
     // Multi-output module (tuple root): one graph, two array results
     // (add, mul) returned together via the root tuple index table.
     failures += checkTwoOut(allocator, io, cpu, metal, "twoout", addMul, &a_bin, &b_bin, exact);
+
+    // Concatenate along .j: [[1,2],[3,4]] ++ [[5,6],[7,8]] = [[1,2,5,6],[3,4,7,8]].
+    failures += checkMatmul(allocator, io, cpu, metal, "concat", concatJ,
+        zml.Shape.init(.{ .i = 2, .j = 2 }, .f32), &[_]f32{ 1, 2, 3, 4 },
+        zml.Shape.init(.{ .i = 2, .j = 2 }, .f32), &[_]f32{ 5, 6, 7, 8 }, 8, exact);
 
     // KV-cache indexing (runtime offset). dynSlice: x[6] at start=2, len=3 →
     // [12,13,14]. dynUpdate: write [7,8] into zeros[6] at start=3 → [0,0,0,7,8,0].
