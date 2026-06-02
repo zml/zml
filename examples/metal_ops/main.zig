@@ -412,6 +412,24 @@ pub fn main(init: std.process.Init) !void {
     failures += checkShaped(allocator, io, cpu, metal, "sumtree", sumj,
         zml.Shape.init(.{ .i = 3, .j = 512 }, .f32), &mat3x512, 3);
 
+    // Two-level reduction (extent >= 65536, tiny num_out): pass 1 runs many
+    // threadgroups per output into partials, pass 2 reduces them. sumbig is
+    // reduce-to-scalar (base=0); sum2dbig has num_out=4 (base!=0, exercises the
+    // pass-1 base delinearization). Runtime-allocated (too big for comptime).
+    {
+        const big = try allocator.alloc(f32, 65536);
+        defer allocator.free(big);
+        for (big, 0..) |*e, i| e.* = @floatFromInt(i % 13);
+        failures += checkShaped(allocator, io, cpu, metal, "sumbig", sumAll,
+            zml.Shape.init(.{ .n = 65536 }, .f32), big, 1);
+
+        const big2d = try allocator.alloc(f32, 4 * 65536);
+        defer allocator.free(big2d);
+        for (big2d, 0..) |*e, i| e.* = @floatFromInt((i % 13) + 1);
+        failures += checkShaped(allocator, io, cpu, metal, "sum2dbig", sumj,
+            zml.Shape.init(.{ .i = 4, .j = 65536 }, .f32), big2d, 4);
+    }
+
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
         return error.MetalMismatch;
