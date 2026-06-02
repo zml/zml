@@ -34,6 +34,9 @@ fn maximum(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
 fn minimum(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
     return a.minimum(b);
 }
+fn fma3(a: zml.Tensor, b: zml.Tensor, c: zml.Tensor) zml.Tensor {
+    return a.add(b).mul(c); // (a+b)*c — should fuse into ONE kFusion kernel
+}
 fn negate(a: zml.Tensor) zml.Tensor {
     return a.negate();
 }
@@ -81,6 +84,45 @@ fn runBinaryOn(
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
     exe_args.set(.{ a_buf, b_buf });
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(f32));
+}
+
+fn runTernaryOn(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    comptime func: anytype,
+    a_data: []const f32,
+    b_data: []const f32,
+    c_data: []const f32,
+    out: []f32,
+) !void {
+    const shape = zml.Shape.init(.{ .n = a_data.len }, .f32);
+    const a_t: zml.Tensor = .fromShape(shape);
+    const b_t: zml.Tensor = .fromShape(shape);
+    const c_t: zml.Tensor = .fromShape(shape);
+    var exe = try platform.compileFn(allocator, io, func, .{ a_t, b_t, c_t }, .{});
+    defer exe.deinit();
+
+    var a_buf = try zml.Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(a_data));
+    defer a_buf.deinit();
+    var b_buf = try zml.Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(b_data));
+    defer b_buf.deinit();
+    var c_buf = try zml.Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(c_data));
+    defer c_buf.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ a_buf, b_buf, c_buf });
     exe.call(exe_args, &exe_results);
     var result = exe_results.get(zml.Buffer);
     defer result.deinit();
@@ -238,6 +280,32 @@ fn checkBinary(
     return compare(name, co[0..n], mo[0..n], rel_tol);
 }
 
+fn checkTernary(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    name: []const u8,
+    comptime func: anytype,
+    a: []const f32,
+    b: []const f32,
+    c: []const f32,
+    rel_tol: f32,
+) usize {
+    var co: [64]f32 = undefined;
+    var mo: [64]f32 = undefined;
+    const n = a.len;
+    runTernaryOn(allocator, io, cpu, func, a, b, c, co[0..n]) catch |e| {
+        log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    runTernaryOn(allocator, io, metal, func, a, b, c, mo[0..n]) catch |e| {
+        log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    return compare(name, co[0..n], mo[0..n], rel_tol);
+}
+
 fn checkUnary(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -288,6 +356,12 @@ pub fn main(init: std.process.Init) !void {
         .{ "max", maximum, exact }, .{ "min", minimum, exact },
     }) |c| {
         failures += checkBinary(allocator, io, cpu, metal, c[0], c[1], &a_bin, &b_bin, c[2]);
+    }
+
+    // Multi-op fusion (E5): (a+b)*c must compile into ONE kFusion kernel.
+    {
+        const c_bin = [_]f32{ 2, 2, 2, 2, 2, 2, 2, 2 };
+        failures += checkTernary(allocator, io, cpu, metal, "fma", fma3, &a_bin, &b_bin, &c_bin, exact);
     }
     inline for (.{
         .{ "neg", negate, exact }, .{ "abs", abs, exact },
