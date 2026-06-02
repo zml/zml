@@ -189,7 +189,7 @@ pub const Tensor = struct {
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron => return self,
+            .cpu, .neuron, .metal => return self,
             .cuda, .rocm, .tpu, .oneapi => {},
         }
 
@@ -224,7 +224,7 @@ pub const Tensor = struct {
     pub fn onMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron => return self,
+            .cpu, .neuron, .metal => return self,
             .cuda, .rocm, .tpu, .oneapi => {},
         }
 
@@ -3283,7 +3283,7 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi => blk: {
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
                 sorted.values = sorted.values.slice1d(a, .{ .end = k });
                 sorted.indices = sorted.indices.slice1d(a, .{ .end = k });
@@ -4295,7 +4295,7 @@ pub const Tensor = struct {
     /// so it will slow down the program execution.
     pub fn print(input: Tensor, name: []const u8) void {
         switch (CompilationContext.current().platform.target) {
-            .cpu, .cuda, .rocm, .tpu => {
+            .cpu, .cuda, .rocm, .tpu, .metal => {
                 ops.manualComputation(input, {}, .{ .name = name }, (struct {
                     fn body(ctx_: anytype, _: std.mem.Allocator, sharded_input: Tensor, _: void) void {
                         ops.customCall("zml$print", sharded_input, {}, .{ .name = ctx_.name }, .{ .has_side_effect = true });
