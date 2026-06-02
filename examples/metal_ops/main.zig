@@ -196,6 +196,27 @@ fn reshapeNeg(a: zml.Tensor) zml.Tensor {
 fn sumAll(a: zml.Tensor) zml.Tensor {
     return a.sum(.n); // [n] -> scalar (num_out=1: the tree-reduction case)
 }
+// Multi-axis reduce (one kReduce over several axes): zml.sum is single-axis, so
+// drop to ops.reduce. Only contiguous reduced axes are supported (they merge to
+// one extent/stride). sumJK reduces the trailing [j,k]; sumAll3 reduces all.
+fn sumAxes(a: zml.Tensor, axes: []const i64) zml.Tensor {
+    return zml.ops.reduce(.{a}, .{zml.Tensor.constant(a.dtype().zero())}, axes, struct {
+        pub fn acc(args: zml.ops.ReduceArgs) struct { zml.Tensor } {
+            return .{args.right.add(args.left.convert(args.right.dtype()))};
+        }
+    }.acc, .{})[0];
+}
+fn sumJK(a: zml.Tensor) zml.Tensor {
+    return sumAxes(a, &.{ 1, 2 }); // [i,j,k] -> [i]
+}
+fn sumAll3(a: zml.Tensor) zml.Tensor {
+    return sumAxes(a, &.{ 0, 1, 2 }); // [i,j,k] -> scalar
+}
+const iota24: [24]f32 = blk: {
+    var a: [24]f32 = undefined;
+    for (&a, 0..) |*e, i| e.* = @floatFromInt(i);
+    break :blk a;
+};
 
 // Inputs large enough (extent >= 256) to exercise the threadgroup tree
 // reduction rather than the serial-per-thread kernel.
@@ -499,6 +520,13 @@ pub fn main(init: std.process.Init) !void {
     // Reduction (E4): sum over axis 1, [2,3] -> [2] = [3, 12].
     failures += checkShaped(allocator, io, cpu, metal, "sum", sumj,
         zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 2);
+
+    // Multi-axis reduce (contiguous): [2,3,4] reduce {j,k} -> [2] = [66, 210];
+    // reduce-all {i,j,k} -> [] = 276. Both merge to one extent/stride.
+    failures += checkShaped(allocator, io, cpu, metal, "sumjk", sumJK,
+        zml.Shape.init(.{ .i = 2, .j = 3, .k = 4 }, .f32), &iota24, 2);
+    failures += checkShaped(allocator, io, cpu, metal, "sumall3", sumAll3,
+        zml.Shape.init(.{ .i = 2, .j = 3, .k = 4 }, .f32), &iota24, 1);
     // Reduce-to-scalar via the TREE kernel (E4 harden): [1024] -> [], num_out=1,
     // extent=1024 (>=256) so this is one threadgroup cooperatively reducing
     // (base=0, exercises the grid-stride accumulate + tree). Serial-per-thread
