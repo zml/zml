@@ -57,6 +57,13 @@ fn matmul(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
 fn linearBias(a: zml.Tensor, b: zml.Tensor, c: zml.Tensor) zml.Tensor {
     return a.dot(b, .k).add(c);
 }
+// Matmul feeding a FUSION (not a bare op): abs(negate(x·W)). negate∘abs fuse into
+// one kFusion that CONSUMES the dot's result — exercises the graph path's fusion
+// thunk with a non-parameter operand (bound by buffer slot). The dot stays a
+// separate MPSGraph thunk (dots are kept out of fusions).
+fn matNegAbs(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
+    return a.dot(b, .k).negate().abs();
+}
 fn negate(a: zml.Tensor) zml.Tensor {
     return a.negate();
 }
@@ -923,6 +930,13 @@ pub fn main(init: std.process.Init) !void {
         zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
         zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
         zml.Shape.init(.{ .m = 2, .n = 2 }, .f32), &[_]f32{ 100, 200, 300, 400 }, 4, exact);
+
+    // Matmul → FUSION (abs∘negate consuming the dot result): the other graph-path
+    // shape — a fusion thunk with a non-parameter operand. Mixed-sign inputs make
+    // abs meaningful. dot=[[10,12],[-19,-24]] → |−dot| = [[10,12],[19,24]].
+    failures += checkMatmul(allocator, io, cpu, metal, "matneg", matNegAbs,
+        zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, -2, 3, -4, 5, -6 },
+        zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 }, 4, exact);
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
