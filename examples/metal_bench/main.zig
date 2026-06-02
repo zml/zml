@@ -294,11 +294,36 @@ fn benchShaped(
     return makeResult(name, in_elems, bytes, iters, total_ns);
 }
 
-/// Matmul a:[m,k]·b:[k,n] -> [m,n]. Unlike the bandwidth-bound ops, matmul is
-/// compute-bound, so we store the FLOP count (2·M·N·K) in `bytes` — the shared
-/// `gbps` formula (count·iters/total_ns) then reads out as **GFLOP/s** for these
-/// rows. This is the naive one-thread-per-output baseline (MPS comes next).
-fn benchMatmul(
+/// Fill `buf` (raw bytes for `dt`) with varied strictly-positive values. Manual
+/// byte writes keep it alignment-safe for any dtype (no bytesAsSlice).
+fn fillDtypeBytes(buf: []u8, dt: zml.DataType) void {
+    const sz: usize = dt.sizeOf();
+    var i: usize = 0;
+    while (i * sz < buf.len) : (i += 1) {
+        const x: f32 = 0.5 + @as(f32, @floatFromInt(i % 17)) * 0.0625;
+        switch (dt) {
+            .f32 => {
+                const b: [4]u8 = @bitCast(x);
+                @memcpy(buf[i * 4 ..][0..4], &b);
+            },
+            .f16 => {
+                const b: [2]u8 = @bitCast(@as(f16, @floatCast(x)));
+                @memcpy(buf[i * 2 ..][0..2], &b);
+            },
+            .bf16 => {
+                const b: [2]u8 = @bitCast(zml.floats.BFloat16.fromF32(x));
+                @memcpy(buf[i * 2 ..][0..2], &b);
+            },
+            else => unreachable,
+        }
+    }
+}
+
+/// Matmul a:[m,k]·op(b) -> [m,n], dtype-generic. NN feeds b as [k,n]; NT (the
+/// y=x·Wᵀ linear) feeds b as [n,k] — `a.dot(b,.k)` contracts by tag either way.
+/// Compute-bound, so we store the FLOP count (2·M·N·K) in `bytes`; the shared
+/// `gbps` formula reads out as **GFLOP/s** for these rows.
+fn benchMatmulImpl(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
@@ -306,25 +331,28 @@ fn benchMatmul(
     m: usize,
     k: usize,
     n: usize,
+    dt: zml.DataType,
+    nt: bool,
     iters: usize,
     warmup: usize,
 ) !BenchResult {
-    const a_shape = zml.Shape.init(.{ .m = m, .k = k }, .f32);
-    const b_shape = zml.Shape.init(.{ .k = k, .n = n }, .f32);
+    const sz: usize = dt.sizeOf();
+    const a_shape = zml.Shape.init(.{ .m = m, .k = k }, dt);
+    const b_shape = if (nt) zml.Shape.init(.{ .n = n, .k = k }, dt) else zml.Shape.init(.{ .k = k, .n = n }, dt);
     const a_t: zml.Tensor = .fromShape(a_shape);
     const b_t: zml.Tensor = .fromShape(b_shape);
     var exe = try platform.compileFn(allocator, io, matmul, .{ a_t, b_t }, .{});
     defer exe.deinit();
 
-    const a_data = try allocator.alloc(f32, m * k);
+    const a_data = try allocator.alloc(u8, m * k * sz);
     defer allocator.free(a_data);
-    const b_data = try allocator.alloc(f32, k * n);
+    const b_data = try allocator.alloc(u8, k * n * sz);
     defer allocator.free(b_data);
-    fillPositive(a_data);
-    fillPositive(b_data);
-    var a_buf = try zml.Buffer.fromBytes(io, platform, a_shape, .replicated, std.mem.sliceAsBytes(a_data));
+    fillDtypeBytes(a_data, dt);
+    fillDtypeBytes(b_data, dt);
+    var a_buf = try zml.Buffer.fromBytes(io, platform, a_shape, .replicated, a_data);
     defer a_buf.deinit();
-    var b_buf = try zml.Buffer.fromBytes(io, platform, b_shape, .replicated, std.mem.sliceAsBytes(b_data));
+    var b_buf = try zml.Buffer.fromBytes(io, platform, b_shape, .replicated, b_data);
     defer b_buf.deinit();
 
     var exe_args = try exe.args(allocator);
@@ -335,6 +363,28 @@ fn benchMatmul(
 
     const total_ns = try timeCalls(io, &exe, exe_args, &exe_results, iters, warmup);
     return makeResult(name, m * n, 2 * m * k * n, iters, total_ns);
+}
+
+/// As benchMatmulImpl, but a backend that can't compile/run this shape (e.g.
+/// metalBLAS routing a gemv/M==1 to an unwired kernel → loud Unimplemented)
+/// yields a sentinel row (gbps=0, iters=0) instead of aborting the whole run.
+fn benchMatmulG(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    name: []const u8,
+    m: usize,
+    k: usize,
+    n: usize,
+    dt: zml.DataType,
+    nt: bool,
+    iters: usize,
+    warmup: usize,
+) BenchResult {
+    return benchMatmulImpl(allocator, io, platform, name, m, k, n, dt, nt, iters, warmup) catch |e| {
+        log.warn("matmul {s}: unsupported on this backend ({s})", .{ name, @errorName(e) });
+        return .{ .name = name, .elems = m * n, .bytes = 2 * m * k * n, .iters = 0, .avg_ns = 0, .gbps = 0 };
+    };
 }
 
 fn printTable(rows: []const BenchResult) void {
@@ -452,11 +502,31 @@ pub fn main(init: std.process.Init) !void {
         try results.append(allocator, try benchShaped(allocator, io, platform, "sum_all", sumAll, vshape, n, (n + 1) * @sizeOf(f32), cli.iters, cli.warmup));
     }
 
-    // Matmul (naive kernel). Compute-bound: the table's gbps column is GFLOP/s
-    // for these rows (bytes = 2·M·N·K). A small square (512³) plus the
-    // configurable mm³ give a scaling datapoint and the MPS-comparison baseline.
-    try results.append(allocator, try benchMatmul(allocator, io, platform, "matmul512", 512, 512, 512, cli.iters, cli.warmup));
-    try results.append(allocator, try benchMatmul(allocator, io, platform, "matmul", cli.mm, cli.mm, cli.mm, cli.iters, cli.warmup));
+    // Matmul. gbps column reads as GFLOP/s (bytes = 2·M·N·K); backend = XLA_METAL_MATMUL.
+    // Backend-AWARE: a backend that can't do a shape returns a loud Unimplemented, which ZML's
+    // async compile surfaces as a PANIC (not a catchable error), so we must not submit it. Gates:
+    //   bf16  → MPSGraph (default) + metalBLAS only (legacy MPSMatrix aborts on bf16; naive=f32).
+    //   M==1  → any-shape backends (MPSGraph/MPSMatrix/naive); metalBLAS routes M=1 to its unwired
+    //           gemv kernel, so it's skipped there. Square NN runs on every backend (→ m5_tensor).
+    const be: []const u8 = blk: {
+        const v = std.c.getenv("XLA_METAL_MATMUL") orelse break :blk "";
+        break :blk std.mem.span(v);
+    };
+    const is_mm = std.mem.eql(u8, be, "mpsmatrix");
+    const is_mb = std.mem.eql(u8, be, "metalblas");
+    const is_naive = std.mem.eql(u8, be, "naive");
+    const is_graph = !is_mm and !is_mb and !is_naive; // default = MPSGraph
+    const can_bf16 = is_graph or is_mb;
+    const m1_ok = is_graph or is_mm or is_naive; // M==1 gemv (metalBLAS gemv unwired)
+    const it = cli.iters;
+    try results.append(allocator, benchMatmulG(allocator, io, platform, "mm512_f32", 512, 512, 512, .f32, false, it, cli.warmup));
+    try results.append(allocator, benchMatmulG(allocator, io, platform, "mm2048_f32", 2048, 2048, 2048, .f32, false, it, cli.warmup));
+    if (can_bf16) try results.append(allocator, benchMatmulG(allocator, io, platform, "mm512_bf16", 512, 512, 512, .bf16, false, it, cli.warmup));
+    if (can_bf16) try results.append(allocator, benchMatmulG(allocator, io, platform, "mm2048_bf16", 2048, 2048, 2048, .bf16, false, it, cli.warmup));
+    if (m1_ok) try results.append(allocator, benchMatmulG(allocator, io, platform, "dec_qkv_f32", 1, 4096, 4096, .f32, false, it, cli.warmup));
+    if (m1_ok and can_bf16) try results.append(allocator, benchMatmulG(allocator, io, platform, "dec_qkv_bf16", 1, 4096, 4096, .bf16, false, it, cli.warmup));
+    if (m1_ok and can_bf16) try results.append(allocator, benchMatmulG(allocator, io, platform, "dec_up_bf16", 1, 4096, 11008, .bf16, false, it, cli.warmup));
+    if (m1_ok and can_bf16) try results.append(allocator, benchMatmulG(allocator, io, platform, "dec_down_bf16", 1, 11008, 4096, .bf16, false, it, cli.warmup));
 
     log.info("", .{});
     printTable(results.items);
