@@ -651,6 +651,32 @@ pub fn main(init: std.process.Init) !void {
     failures += checkMatmul(allocator, io, cpu, metal, "mmNT", matmul,
         zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
         zml.Shape.init(.{ .n = 2, .k = 3 }, .f32), &[_]f32{ 1, 0, 1, 0, 1, 0 }, 4, exact);
+    // Medium matmul with fractional values: stresses tiling + fp32 accumulation
+    // (the path the tiny exact cases don't exercise). [96,64]·[64,48] -> [96,48].
+    {
+        const Md = 96;
+        const Kd = 64;
+        const Nd = 48;
+        const a = try allocator.alloc(f32, Md * Kd);
+        defer allocator.free(a);
+        const b = try allocator.alloc(f32, Kd * Nd);
+        defer allocator.free(b);
+        for (a, 0..) |*e, i| e.* = 0.5 - @as(f32, @floatFromInt((i * 31 + 7) % 97)) / 97.0;
+        for (b, 0..) |*e, i| e.* = 0.5 - @as(f32, @floatFromInt((i * 17 + 3) % 89)) / 89.0;
+        const co = try allocator.alloc(f32, Md * Nd);
+        defer allocator.free(co);
+        const mo = try allocator.alloc(f32, Md * Nd);
+        defer allocator.free(mo);
+        runMatmul(allocator, io, cpu, matmul, zml.Shape.init(.{ .m = Md, .k = Kd }, .f32), a, zml.Shape.init(.{ .k = Kd, .n = Nd }, .f32), b, co) catch |e| {
+            log.err("{s:>6}  CPU failed: {s}", .{ "mmMed", @errorName(e) });
+            failures += 1;
+        };
+        runMatmul(allocator, io, metal, matmul, zml.Shape.init(.{ .m = Md, .k = Kd }, .f32), a, zml.Shape.init(.{ .k = Kd, .n = Nd }, .f32), b, mo) catch |e| {
+            log.err("{s:>6}  Metal failed: {s}", .{ "mmMed", @errorName(e) });
+            failures += 1;
+        };
+        failures += compare("mmMed", co, mo, 1e-4);
+    }
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
