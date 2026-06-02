@@ -82,6 +82,12 @@ fn matSum(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
 fn matAbsMat(x: zml.Tensor, w1: zml.Tensor, w2: zml.Tensor) zml.Tensor {
     return x.dot(w1, .k).abs().dot(w2, .n);
 }
+// Multi-output module: a single graph with TWO array results — root is a
+// tuple(add, mul). Exercises the graph executable's tuple-output path
+// (per-leaf buffer + root tuple index table via WriteRootTupleIndexTable).
+fn addMul(a: zml.Tensor, b: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+    return .{ a.add(b), a.mul(b) };
+}
 fn negate(a: zml.Tensor) zml.Tensor {
     return a.negate();
 }
@@ -176,6 +182,78 @@ fn runTernaryOn(
     const slice = try result.toSliceAlloc(allocator, io);
     defer slice.free(allocator);
     @memcpy(out, slice.items(f32));
+}
+
+// Run a binary func returning TWO tensors; fill out0/out1 from the two result
+// buffers. Drives the tuple-output graph path.
+fn runTwoOutOn(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    comptime func: anytype,
+    a_data: []const f32,
+    b_data: []const f32,
+    out0: []f32,
+    out1: []f32,
+) !void {
+    const shape = zml.Shape.init(.{ .n = a_data.len }, .f32);
+    const a_t: zml.Tensor = .fromShape(shape);
+    const b_t: zml.Tensor = .fromShape(shape);
+    var exe = try platform.compileFn(allocator, io, func, .{ a_t, b_t }, .{});
+    defer exe.deinit();
+
+    var a_buf = try zml.Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(a_data));
+    defer a_buf.deinit();
+    var b_buf = try zml.Buffer.fromBytes(io, platform, shape, .replicated, std.mem.sliceAsBytes(b_data));
+    defer b_buf.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ a_buf, b_buf });
+    exe.call(exe_args, &exe_results);
+
+    var results = exe_results.get(struct { zml.Buffer, zml.Buffer });
+    defer results[0].deinit();
+    defer results[1].deinit();
+    _ = try results[0].await(io);
+    _ = try results[1].await(io);
+
+    const s0 = try results[0].toSliceAlloc(allocator, io);
+    defer s0.free(allocator);
+    const s1 = try results[1].toSliceAlloc(allocator, io);
+    defer s1.free(allocator);
+    @memcpy(out0, s0.items(f32));
+    @memcpy(out1, s1.items(f32));
+}
+
+fn checkTwoOut(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    name: []const u8,
+    comptime func: anytype,
+    a: []const f32,
+    b: []const f32,
+    rel_tol: f32,
+) usize {
+    var c0: [64]f32 = undefined;
+    var c1: [64]f32 = undefined;
+    var m0: [64]f32 = undefined;
+    var m1: [64]f32 = undefined;
+    const n = a.len;
+    runTwoOutOn(allocator, io, cpu, func, a, b, c0[0..n], c1[0..n]) catch |e| {
+        log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    runTwoOutOn(allocator, io, metal, func, a, b, m0[0..n], m1[0..n]) catch |e| {
+        log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    return compare(name, c0[0..n], m0[0..n], rel_tol) +
+        compare(name, c1[0..n], m1[0..n], rel_tol);
 }
 
 fn runUnaryOn(
@@ -995,6 +1073,10 @@ pub fn main(init: std.process.Init) !void {
     failures += checkMatmul(allocator, io, cpu, metal, "matSum", matSum,
         zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
         zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 }, 2, exact);
+
+    // Multi-output module (tuple root): one graph, two array results
+    // (add, mul) returned together via the root tuple index table.
+    failures += checkTwoOut(allocator, io, cpu, metal, "twoout", addMul, &a_bin, &b_bin, exact);
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
