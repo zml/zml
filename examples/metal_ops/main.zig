@@ -204,6 +204,19 @@ fn rsqrt(a: zml.Tensor) zml.Tensor {
 fn tanh(a: zml.Tensor) zml.Tensor {
     return a.tanh();
 }
+fn sin_(a: zml.Tensor) zml.Tensor {
+    return a.sin();
+}
+fn cos_(a: zml.Tensor) zml.Tensor {
+    return a.cos();
+}
+fn silu_(a: zml.Tensor) zml.Tensor {
+    return a.silu(); // x · sigmoid(x) — exercises the logistic op
+}
+// SwiGLU MLP (the Llama/Mistral feed-forward): silu(x·Wg) * (x·Wu) · Wd.
+fn swiglu(x: zml.Tensor, wg: zml.Tensor, wu: zml.Tensor, wd: zml.Tensor) zml.Tensor {
+    return x.dot(wg, .k).silu().mul(x.dot(wu, .k)).dot(wd, .n);
+}
 
 fn runBinaryOn(
     allocator: std.mem.Allocator,
@@ -1535,7 +1548,8 @@ pub fn main(init: std.process.Init) !void {
         .{ "neg", negate, exact }, .{ "abs", abs, exact },
         .{ "exp", exp, transc }, .{ "log", log_, transc },
         .{ "sqrt", sqrt, transc }, .{ "rsqrt", rsqrt, transc },
-        .{ "tanh", tanh, transc },
+        .{ "tanh", tanh, transc }, .{ "sin", sin_, transc },
+        .{ "cos", cos_, transc }, .{ "silu", silu_, transc },
     }) |c| {
         failures += checkUnary(allocator, io, cpu, metal, c[0], c[1], &a_un, c[2]);
     }
@@ -1742,6 +1756,18 @@ pub fn main(init: std.process.Init) !void {
     // ===== Tiny REAL model end-to-end: a per-token 2-layer MLP classifier =====
     // embed → matmul+bias → relu → matmul+bias → logits, in one Metal graph.
     failures += checkTinyMLP(allocator, io, cpu, metal);
+
+    // SwiGLU feed-forward (Llama/Mistral MLP): silu(x·Wg) * (x·Wu) · Wd. Two
+    // matmuls → silu(logistic fusion) * → matmul. [2,3]·... → [2,2].
+    failures += check4Shaped(allocator, io, cpu, metal, "swiglu", swiglu, .{
+        zml.Shape.init(.{ .m = 2, .k = 3 }, .f32),
+        zml.Shape.init(.{ .k = 3, .n = 2 }, .f32),
+        zml.Shape.init(.{ .k = 3, .n = 2 }, .f32),
+        zml.Shape.init(.{ .n = 2, .p = 2 }, .f32),
+    }, .{
+        &[_]f32{ 1, -2, 3, -4, 5, -6 }, &[_]f32{ 1, 2, 3, 4, 5, 6 },
+        &[_]f32{ 6, 5, 4, 3, 2, 1 },    &[_]f32{ 1, 2, 3, 4 },
+    }, 4, 1e-2);
 
     // ===== Capstone: a full tiny TRANSFORMER block end-to-end =====
     // pre-norm single-head causal self-attention + residual + pre-norm MLP +
