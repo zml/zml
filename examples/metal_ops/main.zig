@@ -784,16 +784,21 @@ pub fn main(init: std.process.Init) !void {
             zml.Shape.init(.{ .i = 4, .j = 65536 }, .f32), big2d, 4);
     }
 
-    // Matmul. Backend mirrors XLA_METAL_MATMUL: "" (MPS default) | "naive" |
-    // "metalblas". Tiny NN/NT (N<32) route, under metalBLAS, to its m5/gemv
-    // kernels (not wired into the plugin yet → loud Unimplemented), so skip them
-    // there; mmMed (96x48, K=64) is m5_tensor-eligible and runs on every backend.
+    // Matmul. Backend mirrors XLA_METAL_MATMUL: "" (default = MPSGraph, modern,
+    // f32/f16/bf16) | "naive" (f32) | "metalblas" | "mpsmatrix" (legacy MPS,
+    // f32/f16, aborts on bf16). Tiny NN/NT (N<32) route, under metalBLAS, to its
+    // m5/gemv kernels (not wired into the plugin yet → loud Unimplemented), so
+    // skip them there; mmMed (96x48, K=64) is m5_tensor-eligible and runs on
+    // every backend.
     const mm_backend: []const u8 = blk: {
         const v = std.c.getenv("XLA_METAL_MATMUL") orelse break :blk "";
         break :blk std.mem.span(v);
     };
     const mm_is_metalblas = std.mem.eql(u8, mm_backend, "metalblas");
     const mm_is_naive = std.mem.eql(u8, mm_backend, "naive");
+    const mm_is_mpsmatrix = std.mem.eql(u8, mm_backend, "mpsmatrix");  // legacy
+    // Default path (empty/unknown) = modern MPSGraph: f32/f16/bf16, any transpose.
+    const mm_is_mpsgraph = !mm_is_metalblas and !mm_is_naive and !mm_is_mpsmatrix;
 
     // NN: [2,3]·[3,2] = [[22,28],[49,64]]. NT (the y = x·Wᵀ linear, rhs contracts
     // its inner dim): [2,3]·[2,3]ᵀ with W=[[1,0,1],[0,1,0]] = [[4,2],[10,5]].
@@ -814,18 +819,22 @@ pub fn main(init: std.process.Init) !void {
     if (!mm_is_metalblas)
         failures += checkMM(f32, allocator, io, cpu, metal, "mmNTmed", 96, 64, 48, true, 1e-4);
 
-    // f16 — MPS default only (naive is f32-only; metalBLAS's tiny path isn't wired).
-    if (!mm_is_naive and !mm_is_metalblas) {
+    // f16 — the MPS family (MPSGraph default + legacy mpsmatrix); naive is
+    // f32-only, metalBLAS's tiny path isn't wired. MPSGraph also does f16 NT.
+    if (mm_is_mpsgraph or mm_is_mpsmatrix) {
         failures += checkMatmulT(f16, allocator, io, cpu, metal, "mmF16", matmul, zml.Shape.init(.{ .m = 2, .k = 3 }, .f16), &[_]f16{ 1, 2, 3, 4, 5, 6 }, zml.Shape.init(.{ .k = 3, .n = 2 }, .f16), &[_]f16{ 1, 2, 3, 4, 5, 6 }, 4, 1e-2);
+        failures += checkMM(f16, allocator, io, cpu, metal, "mmF16med", 96, 64, 48, false, 2e-2);
     }
 
-    // bf16 — metalBLAS only (MPS aborts on bf16; naive is f32-only). NN→m5_tensor,
-    // NT→m5_gemm. bf16 is metalBLAS's edge over MPS, so this is the key coverage.
-    if (mm_is_metalblas) {
-        // bf16 NN-square via metalBLAS m5_tensor (MPS can't do bf16; naive is
-        // f32-only). bf16 NT and other shapes route to m5_gemm/gemv, not yet wired.
+    // bf16 — MPSGraph (default) does it natively; this is the headline win over
+    // the legacy MPSMatrix path (which ABORTS on bf16). metalBLAS does NN via
+    // m5_tensor. naive/mpsmatrix can't. MPSGraph also handles bf16 NT (the
+    // y=x·Wᵀ linear), which metalBLAS can't yet (NT→m5_gemm, not wired).
+    if (mm_is_mpsgraph or mm_is_metalblas) {
         failures += checkMM(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16NN", 96, 64, 48, false, 3e-2);
     }
+    if (mm_is_mpsgraph)
+        failures += checkMM(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16NT", 96, 64, 48, true, 3e-2);
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
