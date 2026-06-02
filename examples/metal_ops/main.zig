@@ -50,6 +50,13 @@ fn affineBcast(x: zml.Tensor, scale: zml.Tensor, bias: zml.Tensor) zml.Tensor {
 fn matmul(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
     return a.dot(b, .k);
 }
+// Multi-op module (whole-graph execution): y = x·W + bias. The add consumes the
+// dot's RESULT, not an entry parameter — so this is NOT a single-op module and
+// routes through the thunk-sequence graph executable: an MPSGraph matmul writing
+// an intermediate buffer, then an elementwise-add kernel reading that + the bias.
+fn linearBias(a: zml.Tensor, b: zml.Tensor, c: zml.Tensor) zml.Tensor {
+    return a.dot(b, .k).add(c);
+}
 fn negate(a: zml.Tensor) zml.Tensor {
     return a.negate();
 }
@@ -509,6 +516,76 @@ fn checkMatmul(
     return compare(name, co[0..n_out], mo[0..n_out], rel_tol);
 }
 
+// Three differently-shaped inputs (a:[M,K], b:[K,N], bias:[M,N]) → out:[M,N],
+// for the multi-op linearBias graph (matmul thunk → add kernel).
+fn runLinearBias(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    a_shape: zml.Shape,
+    a_data: []const f32,
+    b_shape: zml.Shape,
+    b_data: []const f32,
+    c_shape: zml.Shape,
+    c_data: []const f32,
+    out: []f32,
+) !void {
+    const at: zml.Tensor = .fromShape(a_shape);
+    const bt: zml.Tensor = .fromShape(b_shape);
+    const ct: zml.Tensor = .fromShape(c_shape);
+    var exe = try platform.compileFn(allocator, io, linearBias, .{ at, bt, ct }, .{});
+    defer exe.deinit();
+
+    var ab = try zml.Buffer.fromBytes(io, platform, a_shape, .replicated, std.mem.sliceAsBytes(a_data));
+    defer ab.deinit();
+    var bb = try zml.Buffer.fromBytes(io, platform, b_shape, .replicated, std.mem.sliceAsBytes(b_data));
+    defer bb.deinit();
+    var cb = try zml.Buffer.fromBytes(io, platform, c_shape, .replicated, std.mem.sliceAsBytes(c_data));
+    defer cb.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ ab, bb, cb });
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(f32));
+}
+
+fn checkLinearBias(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    name: []const u8,
+    a_shape: zml.Shape,
+    a_data: []const f32,
+    b_shape: zml.Shape,
+    b_data: []const f32,
+    c_shape: zml.Shape,
+    c_data: []const f32,
+    n_out: usize,
+    rel_tol: f32,
+) usize {
+    var co: [256]f32 = undefined;
+    var mo: [256]f32 = undefined;
+    runLinearBias(allocator, io, cpu, a_shape, a_data, b_shape, b_data, c_shape, c_data, co[0..n_out]) catch |e| {
+        log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    runLinearBias(allocator, io, metal, a_shape, a_data, b_shape, b_data, c_shape, c_data, mo[0..n_out]) catch |e| {
+        log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    return compare(name, co[0..n_out], mo[0..n_out], rel_tol);
+}
+
 // dtype-generic matmul (f16 = native f16, bf16 = zml.floats.BFloat16). Same as
 // runMatmul but typed; the output is converted to f32 by the caller for compare.
 fn runMatmulT(
@@ -835,6 +912,17 @@ pub fn main(init: std.process.Init) !void {
     }
     if (mm_is_mpsgraph)
         failures += checkMM(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16NT", 96, 64, 48, true, 3e-2);
+
+    // Whole-graph execution (first multi-op module): y = x·W + bias. The add
+    // consumes the dot's result, so this routes through the thunk-sequence graph
+    // executable — MPSGraph matmul into an intermediate buffer, then an
+    // elementwise-add kernel. The dot always uses MPSGraph here (graph path is
+    // backend-independent), so run it on every XLA_METAL_MATMUL setting.
+    // [2,3]·[3,2]=[[22,28],[49,64]], + [[100,200],[300,400]] = [[122,228],[349,464]].
+    failures += checkLinearBias(allocator, io, cpu, metal, "linbias",
+        zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
+        zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
+        zml.Shape.init(.{ .m = 2, .n = 2 }, .f32), &[_]f32{ 100, 200, 300, 400 }, 4, exact);
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
