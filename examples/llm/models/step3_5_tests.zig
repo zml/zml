@@ -51,7 +51,7 @@ pub fn main(init: std.process.Init) !void {
     try run(allocator, io, platform, args.activations, &model_store);
 }
 
-const TEST_LAYER = 1;
+const TEST_LAYER = 3;
 
 fn run(
     allocator: std.mem.Allocator,
@@ -168,8 +168,17 @@ fn run(
         }
     } else if (TEST_LAYER == 1) {
         try runRopeTests(allocator, io, platform);
+    } else if (TEST_LAYER == 2) {
+        try surveySelfAttnShapes(allocator, model_store, &activation_store);
+        for (0..45) |layer_idx| {
+            runSelfAttnLayer(allocator, io, platform, model_store, &activation_store, layer_idx) catch |err| {
+                std.log.warn("skipping model.layers.{d}.self_attn: {s}", .{ layer_idx, @errorName(err) });
+            };
+        }
+    } else if (TEST_LAYER == 3) {
+        try debugSelfAttnStages(allocator, io, platform, model_store, &activation_store, 1);
     } else {
-        const layer_idx = 30;
+        const layer_idx = 1;
         const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.self_attn", .{layer_idx});
         defer allocator.free(name);
 
@@ -289,6 +298,252 @@ fn deinitBuffers(bufs: anytype) void {
             b.deinit();
         }
     }.cb, {}, bufs);
+}
+
+fn runSelfAttnLayer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    model_store: *zml.io.TensorStore,
+    activation_store: *zml.io.TensorStore,
+    layer_idx: usize,
+) !void {
+    const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.self_attn", .{layer_idx});
+    defer allocator.free(name);
+
+    const attn = try model.SelfAttn.init(model_store.view().withPrefix(name), layer_idx);
+
+    var attn_weights = try zml.io.load(model.SelfAttn, &attn, allocator, io, platform, model_store, .auto);
+    defer deinitBuffers(&attn_weights);
+
+    try testSelfAttn(
+        allocator,
+        io,
+        platform,
+        attn,
+        attn_weights,
+        activation_store.view(),
+        name,
+        .{ .absolute_tolerance = 1e-2, .minimum_close_fraction = 0.99 },
+    );
+}
+
+fn debugSelfAttnStages(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    model_store: *zml.io.TensorStore,
+    activation_store: *zml.io.TensorStore,
+    layer_idx: usize,
+) !void {
+    const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.self_attn", .{layer_idx});
+    defer allocator.free(name);
+
+    // 1. Discover every captured activation under this layer's attention.
+    std.log.info("=== captured activation keys under {s} ===", .{name});
+    {
+        var it = activation_store.registry.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            if (std.mem.startsWith(u8, key, name) and key.len > name.len and key[name.len] == '.') {
+                std.log.info("  {s}: shape={f}", .{ key, entry.value_ptr.shape });
+            }
+        }
+    }
+
+    // 2. Build attention layer and load its weights.
+    const attn = try model.SelfAttn.init(model_store.view().withPrefix(name), layer_idx);
+    var attn_weights = try zml.io.load(model.SelfAttn, &attn, allocator, io, platform, model_store, .auto);
+    defer deinitBuffers(&attn_weights);
+
+    // 3. Wire the recorded inputs (in.0 = hidden_states, in.3 = cache_position).
+    const view = activation_store.view().withPrefix(name);
+    const hidden_states = view.createTensor("in.0", null, .replicated);
+    const cache_position = view.createTensor("in.3", null, .replicated);
+
+    const Argsx = struct { zml.Tensor, zml.Tensor };
+    var argsx: Argsx = .{ hidden_states, cache_position };
+
+    const exe = try platform.compile(allocator, io, attn, .forwardStages, argsx, .{ .shardings = &.{} });
+    defer exe.deinit();
+
+    var args_buffers = try zml.io.load(Argsx, &argsx, allocator, io, platform, activation_store, .auto);
+    defer zml.meta.visit(struct {
+        fn cb(_: void, b: *zml.Buffer) void {
+            b.deinit();
+        }
+    }.cb, {}, &args_buffers);
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+
+    exe_args.set(.{ attn_weights, args_buffers });
+    exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+
+    var stages_buffers: zml.Bufferized(model.SelfAttn.Stages) = undefined;
+    exe_results.fill(.{&stages_buffers});
+    defer zml.meta.visit(struct {
+        fn cb(_: void, b: *zml.Buffer) void {
+            b.deinit();
+        }
+    }.cb, {}, &stages_buffers);
+
+    // 4. For each stage, print our shape/stats and compare against the matching reference.
+    const opts: zml.testing.CompareOpts = .{ .absolute_tolerance = 1e-2, .minimum_close_fraction = 0.99 };
+
+    const StageMap = struct { stage: []const u8, refs: []const []const u8 };
+    const stage_map = [_]StageMap{
+        .{ .stage = "q_proj", .refs = &.{"q_proj.out.0"} },
+        .{ .stage = "k_proj", .refs = &.{"k_proj.out.0"} },
+        .{ .stage = "v_proj", .refs = &.{"v_proj.out.0"} },
+        .{ .stage = "g_proj", .refs = &.{"g_proj.out.0"} },
+        .{ .stage = "q_norm", .refs = &.{"q_norm.out.0"} },
+        .{ .stage = "k_norm", .refs = &.{"k_norm.out.0"} },
+        .{ .stage = "q_pre_rope_hf", .refs = &.{"rope.q_in"} },
+        .{ .stage = "k_pre_rope_hf", .refs = &.{ "rope.k_in", "k_in" } },
+        .{ .stage = "cos", .refs = &.{ "rope.cos", "rotary_emb.out.0" } },
+        .{ .stage = "sin", .refs = &.{ "rope.sin", "rotary_emb.out.1" } },
+        .{ .stage = "q_rope_hf", .refs = &.{"rope.q_embed"} },
+        .{ .stage = "k_rope_hf", .refs = &.{"rope.k_embed"} },
+        .{ .stage = "o_proj_in", .refs = &.{"o_proj.in.0"} },
+        .{ .stage = "out", .refs = &.{"out.0"} },
+    };
+
+    inline for (std.meta.fields(model.SelfAttn.Stages)) |field| {
+        const stage_name = field.name;
+        const buf_ptr: *zml.Buffer = &@field(stages_buffers, field.name);
+
+        std.log.info("--- stage {s}: ours shape={f} ---", .{ stage_name, buf_ptr.shape() });
+
+        var ref_subkeys: []const []const u8 = &.{};
+        for (stage_map) |m| {
+            if (std.mem.eql(u8, m.stage, stage_name)) {
+                ref_subkeys = m.refs;
+                break;
+            }
+        }
+
+        if (ref_subkeys.len == 0) {
+            std.log.info("  (no reference mapping for this stage)", .{});
+        } else {
+            var matched = false;
+            for (ref_subkeys) |subkey| {
+                const ref_shape = view.getShape(subkey) orelse continue;
+                matched = true;
+                std.log.info("  ref '{s}.{s}': shape={f}", .{ name, subkey, ref_shape });
+
+                const our_dims = buf_ptr.shape().dims();
+                var our_count: i64 = 1;
+                for (our_dims) |d| our_count *= d;
+                var ref_count: i64 = 1;
+                for (ref_shape.dims()) |d| ref_count *= d;
+                if (our_count != ref_count) {
+                    std.log.info("  -> element-count mismatch ours={d} ref={d}", .{ our_count, ref_count });
+                    continue;
+                }
+
+                const expected: zml.Slice = try .alloc(allocator, ref_shape);
+                defer expected.free(allocator);
+                var reader_buffer: [4096]u8 = undefined;
+                var reader = try view.getReader(subkey, io, &reader_buffer);
+                defer reader.deinit();
+                try reader.interface.readSliceAll(expected.data());
+
+                const got = try buf_ptr.toSliceAlloc(allocator, io);
+                defer got.free(allocator);
+
+                const BF = zml.floats.BFloat16;
+                const report = try zml.testing.compareSlices(
+                    allocator,
+                    BF,
+                    BF,
+                    expected.constItems(BF),
+                    got.constItems(BF),
+                    opts,
+                );
+                std.log.info("{f}", .{report});
+                if (report.close_fraction < opts.minimum_close_fraction or report.nan_or_inf) {
+                    std.log.warn("  -> FAIL for {s}", .{subkey});
+                } else {
+                    std.log.info("  -> ok for {s}", .{subkey});
+                }
+            }
+            if (!matched) {
+                std.log.info("  (no captured reference for this stage)", .{});
+            }
+        }
+    }
+}
+
+fn surveySelfAttnShapes(
+    allocator: std.mem.Allocator,
+    model_store: *zml.io.TensorStore,
+    activation_store: *zml.io.TensorStore,
+) !void {
+    const expected_hidden: i64 = 4096;
+    const expected_kv: i64 = 8 * 128;
+    const num_q_full: i64 = 64;
+    const num_q_swa: i64 = 96;
+    const head_dim_val: i64 = 128;
+    const main_layers: usize = 45;
+
+    std.log.info("=== SelfAttn shape survey (hidden={d}, kv={d}, full_q={d}, swa_q={d}) ===", .{
+        expected_hidden, expected_kv, num_q_full * head_dim_val, num_q_swa * head_dim_val,
+    });
+
+    const proj_names = [_][]const u8{ "q_proj", "k_proj", "v_proj", "o_proj", "g_proj" };
+
+    for (0..48) |layer_idx| {
+        const attn_name = try std.fmt.allocPrint(allocator, "model.layers.{d}.self_attn", .{layer_idx});
+        defer allocator.free(attn_name);
+        const mview = model_store.view().withPrefix(attn_name);
+
+        // Step 3.5 Flash pattern: Full, SWA, SWA, SWA. Layers >= 45 are MTP/spec blocks (SWA-shaped).
+        const is_full = layer_idx < main_layers and layer_idx % 4 == 0;
+        const num_q: i64 = if (is_full) num_q_full else num_q_swa;
+        const expected_q: i64 = num_q * head_dim_val;
+        const kind: []const u8 = if (layer_idx >= main_layers) "MTP" else if (is_full) "FULL" else "SWA ";
+
+        var line: std.Io.Writer.Allocating = .init(allocator);
+        defer line.deinit();
+        const w = &line.writer;
+
+        try w.print("layer {d:>2} [{s}] (exp q={d}):", .{ layer_idx, kind, expected_q });
+
+        var mismatch = false;
+        for (proj_names) |pn| {
+            const wkey = try std.fmt.allocPrint(allocator, "{s}.weight", .{pn});
+            defer allocator.free(wkey);
+            if (mview.getShape(wkey)) |sh| {
+                try w.print(" {s}={f}", .{ pn, sh });
+                const dout = sh.dim(0);
+                const din = sh.dim(1);
+                if (std.mem.eql(u8, pn, "q_proj") and (dout != expected_q or din != expected_hidden)) mismatch = true;
+                if ((std.mem.eql(u8, pn, "k_proj") or std.mem.eql(u8, pn, "v_proj")) and (dout != expected_kv or din != expected_hidden)) mismatch = true;
+                if (std.mem.eql(u8, pn, "o_proj") and (dout != expected_hidden or din != expected_q)) mismatch = true;
+                if (std.mem.eql(u8, pn, "g_proj") and (dout != num_q or din != expected_hidden)) mismatch = true;
+            } else {
+                try w.print(" {s}=<missing>", .{pn});
+                mismatch = true;
+            }
+        }
+
+        const in_name = try std.fmt.allocPrint(allocator, "{s}.in.0", .{attn_name});
+        defer allocator.free(in_name);
+        if (activation_store.view().getShape(in_name)) |sh| {
+            try w.print(" act.in.0={f}", .{sh});
+        }
+
+        if (mismatch) {
+            std.log.warn("{s}  <-- MISMATCH", .{line.written()});
+        } else {
+            std.log.info("{s}", .{line.written()});
+        }
+    }
+
+    std.log.info("=== end survey ===", .{});
 }
 
 // ===========================================================================
