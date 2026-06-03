@@ -108,6 +108,68 @@ pub const Options = struct {
 // TODO: buffers
 
 // TODO: Transformer Layer
+pub const TransformerLayer = struct {
+    pub const Ffn = union(enum) {
+        mlp: Mlp,
+        moe: Moe,
+    };
+
+    // TODO: hardcoded; retrieve from config
+    fn swigluLimitFor(layer_idx: usize) ?f32 {
+        return switch (layer_idx) {
+            43, 44 => 7.0,
+            else => null,
+        };
+    }
+
+    input_layernorm: RmsNorm,
+    attn: Attn,
+    ffn: Ffn,
+    post_attention_layernorm: RmsNorm,
+
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !TransformerLayer {
+        const is_moe = layer_idx >= 3 and layer_idx < 45;
+
+        return .{
+            // TODO: config
+            .input_layernorm = RmsNorm.init(store.withPrefix("input_layernorm")),
+            .attn = Attn.init(store.withPrefix("self_attn")),
+            .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx) } else .{ .mlp = .init(store.withPrefix("mlp"), swigluLimitFor(layer_idx)) },
+            .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e5),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer)) void {
+        RmsNorm.unloadBuffers(&self.input_layernorm);
+        Attn.unloadBuffers(&self.self_attn);
+        Ffn.unloadBuffers(&self.ffn);
+        RmsNorm.unloadBuffers(&self.post_attention_layernorm);
+    }
+
+    pub fn forward(
+        self: TransformerLayer,
+        x0: zml.Tensor,
+        token_index: zml.Tensor,
+    ) struct { zml.Tensor } {
+        stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
+
+        // Keep the residual stream replicated to avoid repeated gathers before q/k/v.
+        const x0_normalized = self.input_layernorm.forward(x0);
+        const delta0 = self.self_attn.forward(
+            x0_normalized,
+            token_index,
+        );
+
+        // Fully Connected
+        const x1 = x0_normalized.add(delta0);
+        const x1_normalized = self.post_attention_layernorm.forward(x1);
+        const x2 = self.mlp.forward(x1_normalized)
+            .rename(.{ .dout = .d })
+            .add(x1);
+
+        return .{x2.reuseBuffer(x0)};
+    }
+};
 
 /// Temporary deep copy of `config.json` for Step 3.5 Flash. TODO: run config through Model struct and remove this deep copy
 pub const default_config: Config = .{
@@ -218,8 +280,8 @@ pub const default_config: Config = .{
     .max_position_embeddings = 262144,
 };
 
-// TODO: Attention struct wrapping SelfAttn and SwAttn
-pub const SelfAttn = struct {
+// TODO: Attention struct wrapping Attn and SwAttn
+pub const Attn = struct {
     layer_idx: usize,
     enable_sliding_window: bool,
 
@@ -253,7 +315,7 @@ pub const SelfAttn = struct {
         );
     }
 
-    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !SelfAttn {
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !Attn {
         // Layers past the configured count are MTP/speculative blocks and use the SWA shape.
         const kind: LayerType = if (layer_idx < default_config.layer_types.len)
             default_config.layer_types[layer_idx]
@@ -308,7 +370,7 @@ pub const SelfAttn = struct {
     }
 
     // unloadBuffers
-    pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(Attn)) void {
         self.q_proj.weight.deinit();
         if (self.q_proj.bias) |*b| b.deinit();
         self.k_proj.weight.deinit();
@@ -326,7 +388,7 @@ pub const SelfAttn = struct {
     // project Q, Gate
     // Step 3.5 Flash keeps q and gate as separate projections (q_proj and g_proj). q_proj outputs num_q_heads * head_dim (= 12288 for layer 30).
     // g_proj is a head-wise attention gate: one scalar per query head (dout = num_q_heads), broadcast over .hd and applied to the per-head attention output before merging heads.
-    fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+    fn projectQAndGate(self: Attn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const q = self.q_proj.forward(x)
             .splitAxis(.dout, .{ .h = self.num_q_heads, .hd = self.head_dim });
 
@@ -335,7 +397,7 @@ pub const SelfAttn = struct {
         return .{ q, gate };
     }
 
-    fn projectKV(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+    fn projectKV(self: Attn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const k = self.k_proj.forward(x)
             .splitAxis(.dout, .{
             .h = self.num_kv_heads,
@@ -352,7 +414,7 @@ pub const SelfAttn = struct {
     }
 
     pub fn forward(
-        self: SelfAttn,
+        self: Attn,
         x: zml.Tensor,
         token_index: zml.Tensor,
         // kv_cache: zml.Tensor,
@@ -365,7 +427,6 @@ pub const SelfAttn = struct {
         k = self.k_norm.forward(k, .hd);
 
         const dtype = q.dtype();
-        // see how long the sequence is? what is x.dim(.s) for?
         const position_ids = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
 
         const cos, const sin = self.rotary_emb.getCosAndSin(position_ids, dtype);
@@ -387,8 +448,8 @@ pub const SelfAttn = struct {
             k,
             v,
             attn_start,
-            zml.attention.attention.Metadata.init(.fromBackend(.vanilla, input.dim(.s), self.num_q_heads)),
-            zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
+            zml.attention.attention.Metadata.init(.fromBackend(.cuda_fa2, input.dim(.s), self.num_q_heads)),
+            zml.attention.attention.Parameters.init(.fromBackend(.cuda_fa2)),
         );
 
         // Head-wise gate: sigmoid(gate) is {b, s, h}; broadcast over .hd and
@@ -427,7 +488,7 @@ pub const SelfAttn = struct {
         out: zml.Tensor,
     };
 
-    pub fn forwardStages(self: SelfAttn, x: zml.Tensor, token_index: zml.Tensor) Stages {
+    pub fn forwardStages(self: Attn, x: zml.Tensor, token_index: zml.Tensor) Stages {
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
 
         const q_proj_raw = self.q_proj.forward(input);
