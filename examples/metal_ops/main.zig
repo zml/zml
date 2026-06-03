@@ -1900,6 +1900,13 @@ pub fn main(init: std.process.Init) !void {
     failures += checkMatmul(allocator, io, cpu, metal, "concat", concatJ,
         zml.Shape.init(.{ .i = 2, .j = 2 }, .f32), &[_]f32{ 1, 2, 3, 4 },
         zml.Shape.init(.{ .i = 2, .j = 2 }, .f32), &[_]f32{ 5, 6, 7, 8 }, 8, exact);
+    // bf16 concat — raw data movement (select-chain) at bf16 storage. The other
+    // indexed kernels (DUS/gather) share this exact load/store path. Bit-exact.
+    const cf_a = bf16a(.{ 1, 2, 3, 4 });
+    const cf_b = bf16a(.{ 5, 6, 7, 8 });
+    failures += checkMatmulT(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16cat", concatJ,
+        zml.Shape.init(.{ .i = 2, .j = 2 }, .bf16), &cf_a,
+        zml.Shape.init(.{ .i = 2, .j = 2 }, .bf16), &cf_b, 8, 1e-2);
 
     // KV-cache indexing (runtime offset). dynSlice: x[6] at start=2, len=3 →
     // [12,13,14]. dynUpdate: write [7,8] into zeros[6] at start=3 → [0,0,0,7,8,0].
