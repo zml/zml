@@ -35,3 +35,62 @@ zig_binary(
     main = "test_simple.zig",
     deps = ["//zml"],
 )
+
+zig_binary(
+    name = "test_pjrt_push",
+    main = "test_pjrt_push.zig",
+    deps = [
+        "//pjrt",
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "test_xorb_to_device",
+    main = "test_xorb_to_device.zig",
+    deps = [
+        "//pjrt",
+        "//zml",
+        "//zml/io",
+    ],
+)
+
+zig_binary(
+    name = "test_terms_to_device",
+    main = "test_terms_to_device.zig",
+    deps = [
+        "//pjrt",
+        "//zml",
+        "//zml/io",
+    ],
+)
+
+zig_binary(
+    name = "test_multi_xorb_to_device",
+    main = "test_multi_xorb_to_device.zig",
+    deps = [
+        "//pjrt",
+        "//zml",
+        "//zml/io",
+    ],
+)
+
+zig_binary(
+    name = "test_window_to_device",
+    main = "test_window_to_device.zig",
+    deps = [
+        "//pjrt",
+        "//zml",
+        "//zml/io",
+    ],
+)
+
+zig_binary(
+    name = "test_tensor_to_device",
+    main = "test_tensor_to_device.zig",
+    deps = [
+        "//pjrt",
+        "//zml",
+        "//zml/io",
+    ],
+)

@@ -15,11 +15,20 @@ pub const Term = struct {
     range: struct { start: u64, end: u64 },
 };
 
+/// JSON-compatible fetch_info entry: where to download a (sub)range of a xorb.
+pub const FetchUrl = struct {
+    range: struct { start: u64, end: u64 },
+    url: []const u8,
+    url_range: struct { start: u64, end: u64 },
+};
+
 /// JSON-compatible top-level reconstruction response for one group.
 pub const ReconstructionResponse = struct {
     offset_into_first_range: u64,
     terms: []const Term,
-    // fetch_info intentionally omitted (parsed separately in later steps).
+    /// Map xorb_hash → list of presigned URL entries. Default empty so older
+    /// fixtures and tests without fetch_info still parse.
+    fetch_info: std.json.ArrayHashMap([]const FetchUrl) = .{},
 };
 
 /// Computes the [file_start, file_end) byte range for each term.
@@ -283,6 +292,24 @@ pub fn processXorb(
             try onChunk(context, term_idx, decompressed);
         }
     }
+}
+
+// ── Destination Offset Resolver ─────────────────────────────────────────────
+
+/// Returns the destination file offset for `chunk_len` bytes about to be
+/// pushed for `term_idx`, then advances `bytes_pushed_per_term[term_idx]`.
+///
+/// `bytes_pushed_per_term` is caller-provided scratch sized to `term_ranges.len`
+/// and zeroed once before processing. No allocation, no memcpy.
+pub inline fn nextDestOffset(
+    term_ranges: []const TermRange,
+    bytes_pushed_per_term: []u64,
+    term_idx: u32,
+    chunk_len: u64,
+) u64 {
+    const dest = term_ranges[term_idx].file_start + bytes_pushed_per_term[term_idx];
+    bytes_pushed_per_term[term_idx] += chunk_len;
+    return dest;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -847,4 +874,67 @@ test "processXorb: chunks beyond map length are skipped" {
     // Only chunk 0 triggers the callback.
     try std.testing.expectEqual(@as(u32, 1), ctx.call_count);
     try std.testing.expectEqual(@as(u64, 1), ctx.total_bytes);
+}
+
+test "parse fetch_info: synthetic" {
+    const json_str =
+        \\{
+        \\  "offset_into_first_range": 0,
+        \\  "terms": [],
+        \\  "fetch_info": {
+        \\    "aaa": [
+        \\      {"range": {"start": 0, "end": 10},
+        \\       "url": "https://example.com/aaa",
+        \\       "url_range": {"start": 0, "end": 1024}}
+        \\    ],
+        \\    "bbb": [
+        \\      {"range": {"start": 0, "end": 5},
+        \\       "url": "https://example.com/bbb/0",
+        \\       "url_range": {"start": 0, "end": 512}},
+        \\      {"range": {"start": 5, "end": 12},
+        \\       "url": "https://example.com/bbb/1",
+        \\       "url_range": {"start": 512, "end": 2048}}
+        \\    ]
+        \\  }
+        \\}
+    ;
+    const parsed = try std.json.parseFromSlice(ReconstructionResponse, std.testing.allocator, json_str, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    const fi = parsed.value.fetch_info.map;
+    try std.testing.expectEqual(@as(usize, 2), fi.count());
+
+    const aaa = fi.get("aaa").?;
+    try std.testing.expectEqual(@as(usize, 1), aaa.len);
+    try std.testing.expectEqualStrings("https://example.com/aaa", aaa[0].url);
+    try std.testing.expectEqual(@as(u64, 1024), aaa[0].url_range.end);
+
+    const bbb = fi.get("bbb").?;
+    try std.testing.expectEqual(@as(usize, 2), bbb.len);
+    try std.testing.expectEqual(@as(u64, 512), bbb[1].url_range.start);
+    try std.testing.expectEqual(@as(u64, 5), bbb[1].range.start);
+}
+
+test "nextDestOffset: contiguous push per term" {
+    // Two terms in the file: term 0 at file offset 1000 (length 300),
+    // term 1 at file offset 1300 (length 200).
+    const term_ranges = [_]TermRange{
+        .{ .file_start = 1000, .file_end = 1300 },
+        .{ .file_start = 1300, .file_end = 1500 },
+    };
+    var bytes_pushed = [_]u64{ 0, 0 };
+
+    // Push 3 chunks of 100 bytes each into term 0, interleaved with one
+    // 200-byte chunk for term 1 in the middle (simulating term 1 sharing
+    // the same xorb pass).
+    try std.testing.expectEqual(@as(u64, 1000), nextDestOffset(&term_ranges, &bytes_pushed, 0, 100));
+    try std.testing.expectEqual(@as(u64, 1100), nextDestOffset(&term_ranges, &bytes_pushed, 0, 100));
+    try std.testing.expectEqual(@as(u64, 1300), nextDestOffset(&term_ranges, &bytes_pushed, 1, 200));
+    try std.testing.expectEqual(@as(u64, 1200), nextDestOffset(&term_ranges, &bytes_pushed, 0, 100));
+
+    // Each term is now fully consumed.
+    try std.testing.expectEqual(@as(u64, 300), bytes_pushed[0]);
+    try std.testing.expectEqual(@as(u64, 200), bytes_pushed[1]);
 }

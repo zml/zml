@@ -68,5 +68,30 @@ pub fn main(init: std.process.Init) !void {
     defer store.deinit();
 
     log.info("Done. Tensor store ready with {} tensors.", .{registry.tensors.count()});
-    log.info("Device buffers are only allocated when explicitly requested via `loadBuffers()`.", .{});
+
+    // List all tensor names
+    log.info("Tensor listing:", .{});
+    var it = registry.tensors.iterator();
+    while (it.next()) |entry| {
+        const tensor = entry.value_ptr.*;
+        log.info("  {s}  shape={f}  size={d} bytes", .{ tensor.name, tensor.shape, tensor.byteSize() });
+    }
+
+    // Select two non-consecutive tensors that share xorb chunks (to test caching and chunk reuse).
+    // xorb: af9a1e8432dffcede6d5c00493bff0fb41bb7296059dc70603abd1507fea23fe
+    const selected_names = [_][]const u8{
+        "model.layers.0.self_attn.k_proj.weight", // [6] 16 MB
+        "model.layers.0.self_attn.v_proj.weight", // [9] 16 MB
+    };
+
+    log.info("Selected tensors for loading:", .{});
+    for (selected_names) |name| {
+        const tensor = registry.tensors.get(name) orelse {
+            log.err("Tensor not found: {s}", .{name});
+            return error.TensorNotFound;
+        };
+        log.info("  {s}  shape={f}  offset={d}  size={d} bytes", .{
+            tensor.name, tensor.shape, tensor.offset, tensor.byteSize(),
+        });
+    }
 }
