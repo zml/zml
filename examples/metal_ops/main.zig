@@ -123,6 +123,16 @@ fn causalMask(x: zml.Tensor) zml.Tensor {
 fn posBias(x: zml.Tensor) zml.Tensor {
     return zml.Tensor.iota(x.shape(), .c).convert(.f32).add(x);
 }
+// RoPE (rotary position embedding) — the headline op, composed entirely of now-
+// supported pieces. With pos_idx=null it builds positions via arange (iota
+// s32→convert f32); inv_freq is a host-computed constant. Then: outer(pos,
+// inv_freq) = broadcast×broadcast×mul → sin/cos → scale → convert → broadcast;
+// splitRealImg STATIC-SLICEs the .hd axis into halves; the rotation is mul/sub +
+// mul/add; mergeRealImg CONCATENATEs. Exercises the new kSlice indexed path end
+// to end. Sequential layout (HF), default scaling (theta=10000).
+fn ropeFwd(x: zml.Tensor) zml.Tensor {
+    return zml.nn.rope(x, null, .{ .layout = .sequential, .scaling = .{ .default = .{} } });
+}
 // Mixed-precision elementwise: a*b + a. Verifies f16/bf16 STORAGE through the
 // fusion path — load half/bfloat → f32 compute → per-op round → store. The
 // interior a*b is rounded to the node dtype before the +a (matching XLA's
@@ -1835,6 +1845,14 @@ pub fn main(init: std.process.Init) !void {
     // (the RoPE-positions bridge). out[r,c] = c + x[r,c]. Integer→f32 exact.
     failures += checkShaped(allocator, io, cpu, metal, "cvtpos", posBias,
         zml.Shape.init(.{ .r = 2, .c = 4 }, .f32), &[_]f32{ 10, 20, 30, 40, 50, 60, 70, 80 }, 8);
+    // RoPE end to end (.s=4 positions, .hd=8 head dim → 32 outputs). The full
+    // chain: arange→outer→sin/cos→scale→convert→broadcast→SLICE(split)→
+    // mul/sub,mul/add→CONCAT(merge). sin/cos are fast-math → transc tolerance.
+    failures += checkUnaryT(f32, allocator, io, cpu, metal, "rope", ropeFwd,
+        zml.Shape.init(.{ .s = 4, .hd = 8 }, .f32),
+        &[_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6,
+                 1.7, 1.8, 1.9, 2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 3.0, 3.1, 3.2 },
+        32, transc);
     // f16 / bf16 STORAGE through the fusion path: a*b + a (load half/bfloat →
     // f32 compute → per-op round → store). Fractional data so the interior a*b
     // rounding is exercised. The graph is no longer f32-only. [[C12]]
