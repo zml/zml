@@ -1113,6 +1113,14 @@ fn maxAll(a: zml.Tensor) zml.Tensor {
 fn sumSq(a: zml.Tensor) zml.Tensor {
     return a.mul(a).sum(.j); // [i,j] -> [i], out_i = Σ_j a[i,j]^2
 }
+// The SAME variance, but squared via power(x, 2) — how XLA/Llama RMSNorm actually
+// lowers it (a kPower with a constant exponent feeding the reduce, not mul(x,x)).
+// Exercises kPower in the fused-reduction prologue. Negative inputs verify x^2 is
+// computed as repeated multiply (correct for x<0), not a pow/exp·log path (NaN).
+fn sumPow2(a: zml.Tensor) zml.Tensor {
+    const two = zml.Tensor.scalar(2.0, a.dtype()).broad(a.shape());
+    return a.pow(two).sum(.j);
+}
 // Multi-axis reduce (one kReduce over several axes): zml.sum is single-axis, so
 // drop to ops.reduce. Only contiguous reduced axes are supported (they merge to
 // one extent/stride). sumJK reduces the trailing [j,k]; sumAll3 reduces all.
@@ -1865,6 +1873,10 @@ pub fn main(init: std.process.Init) !void {
     // [2,3] -> [2], out_i = Σ_j a[i,j]^2 = [0+1+4, 9+16+25] = [5, 50].
     failures += checkShaped(allocator, io, cpu, metal, "sumsq", sumSq,
         zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ 0, 1, 2, 3, 4, 5 }, 2);
+    // Variance via power(x,2) (the real Llama RMSNorm lowering, kPower). NEGATIVE
+    // inputs: out_i = Σ_j x^2 = [4+1+0, 1+4+9] = [5, 14] (proves x<0 → x², not NaN).
+    failures += checkShaped(allocator, io, cpu, metal, "sumpow2", sumPow2,
+        zml.Shape.init(.{ .i = 2, .j = 3 }, .f32), &[_]f32{ -2, -1, 0, 1, 2, 3 }, 2);
     // Same fused reduce at a larger reduced extent (512): num_out=3, exercises
     // the serial-per-output fused kernel over a long reduce loop. Values 1..11
     // → Σ of ≤512 squares ≤ 61952, exact in f32.
