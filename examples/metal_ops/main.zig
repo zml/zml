@@ -232,6 +232,40 @@ fn attnBlock(
     const h = hn.dot(w1, .d).relu(); // [s,ff]
     return x2.add(h.dot(w2, .ff)); // residual [s,d]
 }
+// The same block, now the REAL Llama-decode-layer shape and dtype-generic (one
+// forward fn, run at f32/f16/bf16): pre-norm self-attention with RoPE on Q,K and
+// an ON-DEVICE causal mask, residual; pre-norm relu MLP, residual. Composes every
+// dtype-generic family at once — rmsNorm (reduce+fusion), Q/K/V/O matmuls, RoPE
+// (slice/iota/baked-const/sin-cos/concat fusions), scaled QKᵀ, iota×2→cmp→select
+// mask, softmax (reduce→fusion→reduce→fusion), attn·V, MLP. No mask input — it is
+// generated from iota — so the whole layer is just weights + x.
+//   x[s,d]  wq/wk/wv[d,hd]  wo[hd,d]  w1[d,ff]  w2[ff,d] -> [s,d]
+fn attnBlockRope(
+    x: zml.Tensor,
+    wq: zml.Tensor,
+    wk: zml.Tensor,
+    wv: zml.Tensor,
+    wo: zml.Tensor,
+    w1: zml.Tensor,
+    w2: zml.Tensor,
+) zml.Tensor {
+    const hd: f32 = @floatFromInt(wq.dim(.hd));
+    const xn = rmsNormAx(x, .d); // [s,d]
+    const q = zml.nn.rope(xn.dot(wq, .d), null, .{}); // [s,hd] + RoPE
+    const k = zml.nn.rope(xn.dot(wk, .d), null, .{}).rename(.{ .s = .k }); // [k,hd]
+    const v = xn.dot(wv, .d).rename(.{ .s = .k }); // [k,hd]
+    const raw = q.dot(k, .hd).scale(1.0 / @sqrt(hd)); // [s,k]
+    // On-device causal mask: keep key ≤ query, else −1e9 (in the score dtype).
+    const qi = zml.Tensor.iota(raw.shape(), .s);
+    const ki = zml.Tensor.iota(raw.shape(), .k);
+    const scores = ki.cmp(.LE, qi).select(raw, zml.Tensor.scalar(-1e9, raw.dtype()).broad(raw.shape()));
+    const attn = softmaxAx(scores, .k); // [s,k]
+    const proj = attn.dot(v, .k).dot(wo, .hd); // [s,d]
+    const x2 = x.add(proj); // residual
+    const hn = rmsNormAx(x2, .d);
+    const h = hn.dot(w1, .d).relu(); // [s,ff]
+    return x2.add(h.dot(w2, .ff)); // residual [s,d]
+}
 // A tiny REAL model end-to-end: a per-token 2-layer MLP classifier.
 //   e      = embed(table, tokens)        // gather rows           [n, d]
 //   h      = relu(e·W1 + b1)             // matmul, +bias, relu   [n, h]
@@ -690,6 +724,118 @@ fn checkAttnBlock(
         return 1;
     };
     return compare("attn", co[0..n_out], mo[0..n_out], 1e-3);
+}
+
+// Dtype-generic transformer-block-with-RoPE runner (attnBlockRope). 7 typed
+// inputs (x, wq, wk, wv, wo, w1, w2) → [S,D]; T = f32/f16/bf16.
+fn runAttnBlockRopeOn(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    S: i64,
+    D: i64,
+    Dh: i64,
+    FF: i64,
+    x: []const T,
+    wq: []const T,
+    wk: []const T,
+    wv: []const T,
+    wo: []const T,
+    w1: []const T,
+    w2: []const T,
+    out: []T,
+) !void {
+    const dt = dtOf(T);
+    const sx = zml.Shape.init(.{ .s = S, .d = D }, dt);
+    const sqkv = zml.Shape.init(.{ .d = D, .hd = Dh }, dt);
+    const swo = zml.Shape.init(.{ .hd = Dh, .d = D }, dt);
+    const sw1 = zml.Shape.init(.{ .d = D, .ff = FF }, dt);
+    const sw2 = zml.Shape.init(.{ .ff = FF, .d = D }, dt);
+    const tx: zml.Tensor = .fromShape(sx);
+    const tq: zml.Tensor = .fromShape(sqkv);
+    const tk: zml.Tensor = .fromShape(sqkv);
+    const tv: zml.Tensor = .fromShape(sqkv);
+    const two: zml.Tensor = .fromShape(swo);
+    const t1: zml.Tensor = .fromShape(sw1);
+    const t2: zml.Tensor = .fromShape(sw2);
+    var exe = try platform.compileFn(allocator, io, attnBlockRope, .{ tx, tq, tk, tv, two, t1, t2 }, .{});
+    defer exe.deinit();
+
+    var bx = try zml.Buffer.fromBytes(io, platform, sx, .replicated, std.mem.sliceAsBytes(x));
+    defer bx.deinit();
+    var bq = try zml.Buffer.fromBytes(io, platform, sqkv, .replicated, std.mem.sliceAsBytes(wq));
+    defer bq.deinit();
+    var bk = try zml.Buffer.fromBytes(io, platform, sqkv, .replicated, std.mem.sliceAsBytes(wk));
+    defer bk.deinit();
+    var bv = try zml.Buffer.fromBytes(io, platform, sqkv, .replicated, std.mem.sliceAsBytes(wv));
+    defer bv.deinit();
+    var bwo = try zml.Buffer.fromBytes(io, platform, swo, .replicated, std.mem.sliceAsBytes(wo));
+    defer bwo.deinit();
+    var b1 = try zml.Buffer.fromBytes(io, platform, sw1, .replicated, std.mem.sliceAsBytes(w1));
+    defer b1.deinit();
+    var b2 = try zml.Buffer.fromBytes(io, platform, sw2, .replicated, std.mem.sliceAsBytes(w2));
+    defer b2.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{ bx, bq, bk, bv, bwo, b1, b2 });
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(T));
+}
+
+fn checkAttnBlockRope(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    name: []const u8,
+    rel_tol: f32,
+) usize {
+    const S: i64 = 4;
+    const D: i64 = 6;
+    const Dh: i64 = 6;
+    const FF: i64 = 12;
+    var x: [24]T = undefined; // S*D
+    var wq: [36]T = undefined; // D*Dh
+    var wk: [36]T = undefined;
+    var wv: [36]T = undefined;
+    var wo: [36]T = undefined; // Dh*D
+    var w1: [72]T = undefined; // D*FF
+    var w2: [72]T = undefined; // FF*D
+    fillFrac(T, &x, 11);
+    fillFrac(T, &wq, 3);
+    fillFrac(T, &wk, 5);
+    fillFrac(T, &wv, 7);
+    fillFrac(T, &wo, 9);
+    fillFrac(T, &w1, 13);
+    fillFrac(T, &w2, 17);
+    const n_out: usize = @intCast(S * D);
+    var co: [64]T = undefined;
+    var mo: [64]T = undefined;
+    runAttnBlockRopeOn(T, allocator, io, cpu, S, D, Dh, FF, &x, &wq, &wk, &wv, &wo, &w1, &w2, co[0..n_out]) catch |e| {
+        log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    runAttnBlockRopeOn(T, allocator, io, metal, S, D, Dh, FF, &x, &wq, &wk, &wv, &wo, &w1, &w2, mo[0..n_out]) catch |e| {
+        log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    var cof: [64]f32 = undefined;
+    var mof: [64]f32 = undefined;
+    for (0..n_out) |i| {
+        cof[i] = toF32(T, co[i]);
+        mof[i] = toF32(T, mo[i]);
+    }
+    return compare(name, cof[0..n_out], mof[0..n_out], rel_tol);
 }
 
 // Embedding lookup: table[V,D] f32 + idx[N] i32 → out[N,D] f32.
@@ -1984,6 +2130,15 @@ pub fn main(init: std.process.Init) !void {
     // pre-norm single-head causal self-attention + residual + pre-norm MLP +
     // residual — rmsNorm, Q/K/V/O matmuls, scaled QKᵀ+mask, softmax, attn·V, MLP.
     failures += checkAttnBlock(allocator, io, cpu, metal);
+
+    // The real Llama-decode-layer shape, dtype-generic: same block + RoPE on Q/K
+    // + an on-device causal mask, run at f32/f16/bf16. This is the headline —
+    // every dtype-generic family composing into one low-precision transformer
+    // layer, matching the CPU oracle. bf16's coarse mantissa compounds ~1 ULP
+    // per op through a deep chain → looser tol at lower precision.
+    failures += checkAttnBlockRope(f32, allocator, io, cpu, metal, "ropeF32", 2e-3);
+    failures += checkAttnBlockRope(f16, allocator, io, cpu, metal, "ropeF16", 2e-2);
+    failures += checkAttnBlockRope(zml.floats.BFloat16, allocator, io, cpu, metal, "ropeBf16", 8e-2);
 
     if (failures != 0) {
         log.err("❌ {d} op(s) mismatched Metal vs CPU", .{failures});
