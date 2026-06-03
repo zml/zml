@@ -3521,8 +3521,8 @@ pub const Tensor = struct {
         stdx.debug.assert(split_sum == d, "split expects sum of 'split_sizes' values and axis dimension to be equal, got {} and {}", .{ split_sum, d });
 
         // var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
-        const allocator = CompilationContext.current().arena.allocator();
         // defer arena.deinit();
+        const allocator = CompilationContext.current().arena.allocator();
 
         const res = allocator.alloc(Tensor, split_sizes.len) catch @panic("OOM");
 
