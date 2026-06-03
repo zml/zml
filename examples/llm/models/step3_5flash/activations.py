@@ -377,6 +377,28 @@ def main() -> int:
     AttnCls = type(decoder_layers[0].self_attn)
     modeling_module = sys.modules[AttnCls.__module__]
 
+    # low_cpu_mem_usage=True initialized modules on the `meta` device, so the
+    # non-persistent `inv_freq` buffer in every Step3p5RotaryEmbedding was
+    # materialized as zeros. Since we also disabled _initialize_missing_keys,
+    # HF never re-ran the rotary init. Recompute inv_freq per-layer now.
+    for layer_idx, layer in enumerate(decoder_layers):
+        rot = getattr(layer.self_attn, "rotary_emb", None)
+        if rot is None:
+            continue
+        scalar = cfg.rope_theta[layer_idx] if isinstance(cfg.rope_theta, list) else cfg.rope_theta
+        if cfg.rope_parameters is not None:
+            cfg.rope_parameters["rope_theta"] = scalar
+        if getattr(cfg, "rope_scaling", None) is not None:
+            cfg.rope_scaling["rope_theta"] = scalar
+        prf = getattr(cfg, "partial_rotary_factors", None)
+        if prf is not None:
+            cfg.partial_rotary_factor = prf[layer_idx]
+        device = rot.inv_freq.device if rot.inv_freq.device.type != "meta" else "cpu"
+        inv_freq, scaling = rot.rope_init_fn(cfg, device)
+        rot.inv_freq = inv_freq.to(device)
+        rot.original_inv_freq = rot.inv_freq
+        rot.attention_scaling = scaling
+
     moe_cls = None
     for layer in decoder_layers:
         if hasattr(layer, "moe"):
