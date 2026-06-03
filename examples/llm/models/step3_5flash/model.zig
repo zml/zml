@@ -110,10 +110,99 @@ pub const Options = struct {
 
 // TODO: Model struct. Do we need a LoadedModel?
 // model should create KV cache
+<<<<<<< HEAD
+=======
+pub const Model = struct {
+    // finally config appears
+
+    // init
+
+    // deinit
+
+    // load
+
+    // unload buffers
+
+    // forward
+};
+>>>>>>> 2f63824b (examples/llm: wrap ffn forward)
 
 // TODO: buffers
 
-// TODO: Transformer Layer
+pub const TransformerLayer = struct {
+    pub const Ffn = union(enum) {
+        /// Layers [0, 1, 2] are a single SwiGLU MLP
+        mlp: Mlp,
+        /// Layers 3 - 48 are MoE layers, consisting of routed experts + a per-token shared expert
+        moe: struct {
+            experts: Moe,
+            shared: Mlp,
+        },
+
+        pub fn forward(self: Ffn, x: zml.Tensor) zml.Tensor {
+            return switch (self) {
+                .mlp => |mlp| mlp.forward(x),
+                .moe => |m| m.experts.forward(x).rename(.{ .dout = .d }).add(m.shared.forward(x)),
+            };
+        }
+    };
+
+    // TODO: hardcoded; retrieve from config
+    fn swigluLimitFor(layer_idx: usize) ?f32 {
+        return switch (layer_idx) {
+            43, 44 => 7.0,
+            else => null,
+        };
+    }
+
+    input_layernorm: RmsNorm,
+    attn: Attn,
+    ffn: Ffn,
+    post_attention_layernorm: RmsNorm,
+
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !TransformerLayer {
+        const is_moe = layer_idx >= 3 and layer_idx < 45;
+
+        return .{
+            // TODO: config
+            .input_layernorm = RmsNorm.init(store.withPrefix("input_layernorm")),
+            .attn = Attn.init(store.withPrefix("self_attn")),
+            .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx) } else .{ .mlp = .init(store.withPrefix("mlp"), swigluLimitFor(layer_idx)) },
+            .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e5),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer)) void {
+        RmsNorm.unloadBuffers(&self.input_layernorm);
+        Attn.unloadBuffers(&self.self_attn);
+        Ffn.unloadBuffers(&self.ffn);
+        RmsNorm.unloadBuffers(&self.post_attention_layernorm);
+    }
+
+    pub fn forward(
+        self: TransformerLayer,
+        x0: zml.Tensor,
+        token_index: zml.Tensor,
+    ) struct { zml.Tensor } {
+        stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
+
+        // Keep the residual stream replicated to avoid repeated gathers before q/k/v.
+        const x0_normalized = self.input_layernorm.forward(x0);
+        const delta0 = self.self_attn.forward(
+            x0_normalized,
+            token_index,
+        );
+
+        // Fully Connected
+        const x1 = x0_normalized.add(delta0);
+        const x1_normalized = self.post_attention_layernorm.forward(x1);
+        const x2 = self.mlp.forward(x1_normalized)
+            .rename(.{ .dout = .d })
+            .add(x1);
+
+        return .{x2.reuseBuffer(x0)};
+    }
+};
 
 /// Temporary deep copy of `config.json` for Step 3.5 Flash. TODO: run config through Model struct and remove this deep copy
 pub const default_config: Config = .{
@@ -224,8 +313,8 @@ pub const default_config: Config = .{
     .max_position_embeddings = 262144,
 };
 
-// TODO: Attention struct wrapping SelfAttn and SwAttn
-pub const SelfAttn = struct {
+// TODO: Attention struct wrapping Attn and SwAttn
+pub const Attn = struct {
     layer_idx: usize,
     enable_sliding_window: bool,
 
@@ -259,7 +348,7 @@ pub const SelfAttn = struct {
         );
     }
 
-    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !SelfAttn {
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !Attn {
         // Layers past the configured count are MTP/speculative blocks and use the SWA shape.
         const kind: LayerType = if (layer_idx < default_config.layer_types.len)
             default_config.layer_types[layer_idx]
@@ -314,7 +403,7 @@ pub const SelfAttn = struct {
     }
 
     // unloadBuffers
-    pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(Attn)) void {
         self.q_proj.weight.deinit();
         if (self.q_proj.bias) |*b| b.deinit();
         self.k_proj.weight.deinit();
@@ -332,7 +421,7 @@ pub const SelfAttn = struct {
     // project Q, Gate
     // Step 3.5 Flash keeps q and gate as separate projections (q_proj and g_proj). q_proj outputs num_q_heads * head_dim (= 12288 for layer 30).
     // g_proj is a head-wise attention gate: one scalar per query head (dout = num_q_heads), broadcast over .hd and applied to the per-head attention output before merging heads.
-    fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+    fn projectQAndGate(self: Attn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const q = self.q_proj.forward(x)
             .splitAxis(.dout, .{ .h = self.num_q_heads, .hd = self.head_dim });
 
@@ -341,7 +430,7 @@ pub const SelfAttn = struct {
         return .{ q, gate };
     }
 
-    fn projectKV(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+    fn projectKV(self: Attn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const k = self.k_proj.forward(x)
             .splitAxis(.dout, .{
             .h = self.num_kv_heads,
@@ -358,7 +447,7 @@ pub const SelfAttn = struct {
     }
 
     pub fn forward(
-        self: SelfAttn,
+        self: Attn,
         x: zml.Tensor,
         token_index: zml.Tensor,
         // kv_cache: zml.Tensor,
@@ -371,7 +460,6 @@ pub const SelfAttn = struct {
         k = self.k_norm.forward(k, .hd);
 
         const dtype = q.dtype();
-        // see how long the sequence is? what is x.dim(.s) for?
         const position_ids = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
 
         const cos, const sin = self.rotary_emb.getCosAndSin(position_ids, dtype);
@@ -393,8 +481,8 @@ pub const SelfAttn = struct {
             k,
             v,
             attn_start,
-            zml.attention.attention.Metadata.init(.fromBackend(.vanilla, input.dim(.s), self.num_q_heads)),
-            zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
+            zml.attention.attention.Metadata.init(.fromBackend(.cuda_fa2, input.dim(.s), self.num_q_heads)),
+            zml.attention.attention.Parameters.init(.fromBackend(.cuda_fa2)),
         );
 
         // Head-wise gate: sigmoid(gate) is {b, s, h}; broadcast over .hd and
@@ -433,7 +521,7 @@ pub const SelfAttn = struct {
         out: zml.Tensor,
     };
 
-    pub fn forwardStages(self: SelfAttn, x: zml.Tensor, token_index: zml.Tensor) Stages {
+    pub fn forwardStages(self: Attn, x: zml.Tensor, token_index: zml.Tensor) Stages {
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
 
         const q_proj_raw = self.q_proj.forward(input);
@@ -515,17 +603,29 @@ pub const SelfAttn = struct {
 =======
     input_layernorm: RmsNorm,
     attn: Attn,
-    attention_type: AttnType,
     ffn: Ffn,
-    ffn_type: FfnType,
-    shared_expert: Moe,
     post_attention_layernorm: RmsNorm,
 
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !TransformerLayer {
         const is_moe = std.mem.indexOfScalar(u32, default_config.moe_layers_enum, @intCast(layer_idx)) != null;
         const attention_type = default_config.layer_types[layer_idx];
 
+        const shared_limit: f32 = if (layer_idx < default_config.swiglu_limits_shared.len)
+            default_config.swiglu_limits_shared[layer_idx]
+        else
+            0.0;
+
+        const ffn: Ffn = if (is_moe) .{
+            .moe = .{
+                .experts = try .init(store.withPrefix("moe"), layer_idx),
+                .shared = .init(store.withPrefix("share_expert"), shared_limit),
+            },
+        } else .{
+            .mlp = .init(store.withPrefix("mlp"), shared_limit),
+        };
+
         return .{
+<<<<<<< HEAD
             .input_layernorm = RmsNorm.init(store.withPrefix("input_layernorm")),
             .attn = try Attn.init(store.withPrefix("self_attn"), layer_idx, attention_type),
             .attention_type = attention_type,
@@ -539,13 +639,32 @@ pub const SelfAttn = struct {
             .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx), .ffn_type = .moe } else .{ .mlp = .init(store.withPrefix("mlp"), default_config.swiglu_limits[layer_idx]), .ffn_type = .mlp },
 >>>>>>> def04688 (examples/llm: move fields (kv cache, layer kind) up in hierarchy)
             .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e5),
+=======
+            .input_layernorm = .init(store.withPrefix("input_layernorm"), 1e-5),
+            .attn = try .init(store.withPrefix("self_attn"), layer_idx, attention_type),
+            .ffn = ffn,
+            .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e-5),
+>>>>>>> 2f63824b (examples/llm: wrap ffn forward)
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer)) void {
         RmsNorm.unloadBuffers(&self.input_layernorm);
-        Attn.unloadBuffers(&self.self_attn);
-        Ffn.unloadBuffers(&self.ffn);
+        Attn.unloadBuffers(&self.attn);
+        switch (self.ffn) {
+            .mlp => |*mlp| {
+                mlp.up_proj.weight.deinit();
+                mlp.gate_proj.weight.deinit();
+                mlp.down_proj.weight.deinit();
+            },
+            .moe => |*m| {
+                Moe.deinit(&m.experts);
+                Router.unloadBuffers(&m.experts.router);
+                m.shared.up_proj.weight.deinit();
+                m.shared.gate_proj.weight.deinit();
+                m.shared.down_proj.weight.deinit();
+            },
+        }
         RmsNorm.unloadBuffers(&self.post_attention_layernorm);
     }
 
@@ -554,28 +673,19 @@ pub const SelfAttn = struct {
         x0: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: KvCache,
-    ) struct { zml.Tensor, zml.Tensor } {
+    ) struct { zml.Tensor, KvCache } {
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
-        const residual0 = x0;
 
-        // Attention block
-        const attn_input = self.input_layernorm.forward(x0);
+        // Attention block.
+        const attn_input = self.input_layernorm.forward(x0, .d);
         const attn_delta, const updated_kv_cache = self.attn.forward(attn_input, token_index, kv_cache);
+        const x1 = x0.add(attn_delta);
 
         // FFN block
-        const residual1 = residual0.add(attn_delta);
-        const ffn_input = self.post_attention_layernorm.forward(residual1);
-        const ffn_delta = self.ffn.forward(ffn_input).rename(.{ .dout = .d }).add(residual1);
+        const ffn_input = self.post_attention_layernorm.forward(x1, .d);
+        const ffn_delta = self.ffn.forward(ffn_input);
 
-        // Branch on whether it is MoE or MLP
-        if (self.ffn_type == .moe) {
-            const shared_expert_delta = self.shared_expert.forward(ffn_input);
-            const moe_output = ffn_delta.add(shared_expert_delta);
-            return .{ moe_output.add(residual1).reuseBuffer(x0), updated_kv_cache };
-        } else {
-            const mlp_output = self.shared_expert.forward(residual1);
-            return .{ mlp_output.add(residual1).reuseBuffer(x0), updated_kv_cache };
-        }
+        return .{ x1.add(ffn_delta).reuseBuffer(x0), updated_kv_cache };
     }
 };
 
@@ -867,11 +977,15 @@ pub const Attn = struct {
         q = self.rotary_emb.applyRope(q, cos, sin);
         k = self.rotary_emb.applyRope(k, cos, sin);
 
+<<<<<<< HEAD
         // Scatter the new k/v slice into the persistent cache, then read the full
         // history back so attention sees all prior tokens.
 <<<<<<< HEAD
         // scatterSlices wants a scalar start offset for the `.k` axis; the slice
         // length comes from the update tensor itself.
+=======
+        // Scatter the new k/v slice into the persistent cache, then read the full history back so attention sees all prior tokens
+>>>>>>> 2f63824b (examples/llm: wrap ffn forward)
         const cache_start = token_index.convert(.u32).slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0);
         const new_kv_cache = kv_cache.update(k, v, cache_start);
 =======
@@ -1249,8 +1363,7 @@ pub const Mlp = struct {
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        // Add tags to input before providing to our layer.
-        const input = x.withTags(.{ .b, .s, .d });
+        const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
 
         var up_proj = self.up_proj.forward(input);
         var gate = self.gate_proj.forward(input);
@@ -1854,7 +1967,9 @@ pub const Moe = struct {
             moe_parameters,
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
-        return moe_output;
+        // Triton backend returns {b, token, out}; forwardLoop returns {b, s, dout}.
+        // Normalize so callers (Ffn.forward) don't need to know which backend ran.
+        return moe_output.rename(.{ .token = .s, .out = .dout });
     }
 
     fn forwardLoop(self: Moe, x: zml.Tensor) zml.Tensor {
