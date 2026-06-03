@@ -123,6 +123,13 @@ fn causalMask(x: zml.Tensor) zml.Tensor {
 fn posBias(x: zml.Tensor) zml.Tensor {
     return zml.Tensor.iota(x.shape(), .c).convert(.f32).add(x);
 }
+// Mixed-precision elementwise: a*b + a. Verifies f16/bf16 STORAGE through the
+// fusion path — load half/bfloat → f32 compute → per-op round → store. The
+// interior a*b is rounded to the node dtype before the +a (matching XLA's
+// per-op rounding), so a rounding bug would show. Two ops → one fusion.
+fn mulAdd(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
+    return a.mul(b).add(a);
+}
 // KV-cache indexing ops with a RUNTIME offset. dynSlice: read a fixed-length
 // window of x at a runtime start. dynUpdate: write `upd` into x at a runtime
 // start, returning the updated array (the KV-cache write).
@@ -1427,6 +1434,13 @@ fn toF32(comptime T: type, v: T) f32 {
     return if (T == f32) v else if (T == f16) @floatCast(v) else v.toF32();
 }
 
+// Build a comptime bf16 array from f32 literals (for inline typed test data).
+fn bf16a(comptime vals: anytype) [vals.len]zml.floats.BFloat16 {
+    var out: [vals.len]zml.floats.BFloat16 = undefined;
+    inline for (vals, 0..) |v, i| out[i] = zml.floats.BFloat16.fromF32(v);
+    return out;
+}
+
 fn checkMatmulT(
     comptime T: type,
     allocator: std.mem.Allocator,
@@ -1758,6 +1772,17 @@ pub fn main(init: std.process.Init) !void {
     // (the RoPE-positions bridge). out[r,c] = c + x[r,c]. Integer→f32 exact.
     failures += checkShaped(allocator, io, cpu, metal, "cvtpos", posBias,
         zml.Shape.init(.{ .r = 2, .c = 4 }, .f32), &[_]f32{ 10, 20, 30, 40, 50, 60, 70, 80 }, 8);
+    // f16 / bf16 STORAGE through the fusion path: a*b + a (load half/bfloat →
+    // f32 compute → per-op round → store). Fractional data so the interior a*b
+    // rounding is exercised. The graph is no longer f32-only. [[C12]]
+    failures += checkMatmulT(f16, allocator, io, cpu, metal, "f16ew", mulAdd,
+        zml.Shape.init(.{ .n = 4 }, .f16), &[_]f16{ 0.1, 0.7, 1.3, 2.1 },
+        zml.Shape.init(.{ .n = 4 }, .f16), &[_]f16{ 3.0, 1.1, 0.6, 0.9 }, 4, 1e-2);
+    const bf_a = bf16a(.{ 0.1, 0.7, 1.3, 2.1 });
+    const bf_b = bf16a(.{ 3.0, 1.1, 0.6, 0.9 });
+    failures += checkMatmulT(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16ew", mulAdd,
+        zml.Shape.init(.{ .n = 4 }, .bf16), &bf_a,
+        zml.Shape.init(.{ .n = 4 }, .bf16), &bf_b, 4, 3e-2);
 
     // Deeper chain (3 thunks, 2 intermediates): abs(x·W1)·W2. The SECOND matmul
     // reads a COMPUTED buffer (the abs result), not a parameter — the matmul-
