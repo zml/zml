@@ -622,6 +622,60 @@ pub const TextRotaryEmbedding = struct {
 };
 
 // TODO: KV Cache
+pub const KvCache = struct {
+    k: zml.Tensor,
+    v: zml.Tensor,
+    layer_index: ?u32,
+
+    pub const Buffer = zml.Bufferized(KvCache);
+
+    pub fn init(kv_shape: zml.Shape) KvCache {
+        return .{
+            .k = .fromShape(kv_shape),
+            .v = .fromShape(kv_shape),
+            .layer_index = null,
+        };
+    }
+
+    pub fn initBuffer(kv: KvCache, io: std.io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
+        return .{
+            .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), sharding, .{}),
+            .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), sharding, .{}),
+        };
+    }
+
+    pub fn deinitBuffer(kv: *Buffer) void {
+        kv.k.deinit();
+        kv.v.deinit();
+    }
+
+    pub fn keys(kv: KvCache) zml.Tensor {
+        return kv.k.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
+    }
+
+    pub fn values(kv: KvCache) zml.Tensor {
+        return kv.k.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
+    }
+
+    pub fn update(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: ?zml.Tensor) KvCache {
+        const k_shape = kv.k.shape().drop(.layer);
+        const layer: zml.Tensor = .scalar(kv.layer_index orelse @panic("forgot to call atLayer"), .u32);
+
+        return if (token_index) |idx| .{
+            .k = kv.k.scatterSlices(.{ .layer = layer, .k = idx }, new_k.convert(kv.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
+            .v = kv.v.scatterSlices(.{ .layer = layer, .k = idx }, new_v.convert(kv.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
+            .layer_index = kv.layer_index,
+        } else .{
+            .k = kv.k.scatterSlices(.{ .layer = layer }, new_k.convert(kv.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
+            .v = kv.v.scatterSlices(.{ .layer = layer }, new_v.convert(kv.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
+            .layer_index = kv.layer_index,
+        };
+    }
+
+    // at layer
+
+    // reuse buffer
+};
 
 pub const Mlp = struct {
     up_proj: zml.nn.Linear, // (dim -> hidden_dim)
