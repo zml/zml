@@ -148,18 +148,6 @@ const Worker = struct {
     }
 };
 
-const RepoInfo = struct {
-    namespace: []const u8,
-    model: []const u8,
-    rev: []const u8,
-    filepath: []const u8,
-};
-
-const CasAuth = struct {
-    url: []const u8,
-    token: []const u8,
-};
-
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
@@ -220,11 +208,13 @@ pub fn main(init: std.process.Init) !void {
     var sink: Sink = .{ .buf = try allocator.alloc(u8, @intCast(tensor_size)) };
     defer allocator.free(sink.buf);
 
-    // ── Derive RepoInfo from file_uri (strip hf:// then parse) ─────────────
-    const repo = try parseFileUri(tensor.file_uri);
-    log.info("Repo: {s}/{s}@{s} path={s}", .{ repo.namespace, repo.model, repo.rev, repo.filepath });
+    // ── Derive Repo from file_uri (strip hf:// then parse) ────────────────────
+    const hf_path = if (std.mem.startsWith(u8, tensor.file_uri, "hf://")) tensor.file_uri["hf://".len..] else tensor.file_uri;
+    const hf_repo = try zml.io.VFS.HF.Repo.parse(hf_path);
+    const repo: xet.Client.Repo = .{ .repo = hf_repo.repo, .model = hf_repo.model, .rev = hf_repo.rev, .path = hf_repo.path };
+    log.info("Repo: {s}/{s}@{s} path={s}", .{ repo.repo, repo.model, repo.rev, repo.path });
 
-    // ── HF auth ─────────────────────────────────────────────────────────────
+    // ── HF auth (for the LFS oracle path) ─────────────────────────────────
     const hf_token = init.environ_map.get("HF_TOKEN") orelse {
         log.err("HF_TOKEN env var must be set", .{});
         return error.MissingToken;
@@ -232,37 +222,11 @@ pub fn main(init: std.process.Init) !void {
     var auth_buf: [1024]u8 = undefined;
     const auth = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{std.mem.trim(u8, hf_token, " \t\n\r")}) catch return error.TokenTooLong;
 
-    // ── Xet file ID + CAS token ─────────────────────────────────────────────
-    const file_id = try getXetFileId(allocator, &http_client, repo, auth);
-    defer allocator.free(file_id);
-    log.info("Xet file id: {s}", .{file_id});
-
-    const cas = try getCasToken(allocator, &http_client, repo, auth);
-    defer {
-        allocator.free(cas.url);
-        allocator.free(cas.token);
-    }
-    var cas_auth_buf: [65536]u8 = undefined;
-    const cas_auth = std.fmt.bufPrint(&cas_auth_buf, "Bearer {s}", .{cas.token}) catch return error.TokenTooLong;
-
     // ── CAS reconstruction for [tensor_offset, tensor_offset+size) ──────────
-    const recon_body = try callReconstruction(
-        allocator,
-        &http_client,
-        cas.url,
-        cas_auth,
-        file_id,
-        tensor_offset, // Start the window at the tensor's file offset
-        tensor_offset + tensor_size, // Request a window covering exactly the tensor's bytes within the file.
-    );
-    defer allocator.free(recon_body);
-
-    const parsed = try std.json.parseFromSlice(
-        xet.ReconstructionResponse,
-        allocator,
-        recon_body,
-        .{ .ignore_unknown_fields = true },
-    );
+    var xet_client: xet.Client = .init(allocator, &http_client, hf_token);
+    defer xet_client.deinit();
+    log.info("Xet file id: {s}", .{try xet_client.fileId(repo)});
+    const parsed = try xet_client.reconstruct(repo, tensor_offset, tensor_offset + tensor_size);
     defer parsed.deinit();
     const resp = parsed.value;
 
@@ -438,23 +402,6 @@ pub fn main(init: std.process.Init) !void {
     log.info("  scan/other = {d:.1} ms", .{to_ms(overhead_ns)});
 }
 
-fn parseFileUri(uri: []const u8) !RepoInfo {
-    // Expected: hf://{ns}/{model}[@rev]/{filepath...}
-    var path = uri;
-    if (std.mem.startsWith(u8, path, "hf://")) path = path["hf://".len..];
-    var parts = std.mem.splitScalar(u8, path, '/');
-    const namespace = parts.next() orelse return error.InvalidFileUri;
-    var model = parts.next() orelse return error.InvalidFileUri;
-    var rev: []const u8 = "main";
-    if (std.mem.indexOfScalar(u8, model, '@')) |at| {
-        rev = model[at + 1 ..];
-        model = model[0..at];
-    }
-    const filepath = parts.rest();
-    if (filepath.len == 0) return error.InvalidFileUri;
-    return .{ .namespace = namespace, .model = model, .rev = rev, .filepath = filepath };
-}
-
 // ── HTTP helpers (xorb fetch) ───────────────────────────────────────────────
 
 fn httpRangeGetIntoSlot(
@@ -482,117 +429,9 @@ fn httpRangeGetIntoSlot(
     try res.reader(&.{}).readSliceAll(slot);
 }
 
-// ── CAS helpers (duplicated from examples/xet_cas/main.zig) ─────────────────
-
-fn getXetFileId(
-    allocator: std.mem.Allocator,
-    client: *std.http.Client,
-    repo: RepoInfo,
-    auth: []const u8,
-) ![]const u8 {
-    var url_buf: [4096]u8 = undefined;
-    const resolve_url = try std.fmt.bufPrint(
-        &url_buf,
-        "https://huggingface.co/{s}/{s}/resolve/{s}/{s}",
-        .{ repo.namespace, repo.model, repo.rev, repo.filepath },
-    );
-    const uri: std.Uri = try .parse(resolve_url);
-    var req = try client.request(.GET, uri, .{
-        .redirect_behavior = .unhandled,
-        .headers = .{
-            .accept_encoding = .{ .override = "identity" },
-            .authorization = .{ .override = auth },
-        },
-    });
-    defer req.deinit();
-    try req.sendBodiless();
-    var redirect_buffer: [8 * 1024]u8 = undefined;
-    var res = try req.receiveHead(&redirect_buffer);
-    var header_it = res.head.iterateHeaders();
-    while (header_it.next()) |header| {
-        if (std.ascii.eqlIgnoreCase(header.name, "X-Xet-Hash")) {
-            return try allocator.dupe(u8, header.value);
-        }
-    }
-    log.err("X-Xet-Hash not found (status={}).", .{res.head.status});
-    return error.XetHashNotFound;
-}
-
-fn getCasToken(
-    allocator: std.mem.Allocator,
-    client: *std.http.Client,
-    repo: RepoInfo,
-    auth: []const u8,
-) !CasAuth {
-    var url_buf: [4096]u8 = undefined;
-    const token_url = try std.fmt.bufPrint(
-        &url_buf,
-        "https://huggingface.co/api/models/{s}/{s}/xet-read-token/{s}",
-        .{ repo.namespace, repo.model, repo.rev },
-    );
-    const uri: std.Uri = try .parse(token_url);
-    var req = try client.request(.GET, uri, .{
-        .headers = .{
-            .accept_encoding = .{ .override = "identity" },
-            .authorization = .{ .override = auth },
-        },
-    });
-    defer req.deinit();
-    try req.sendBodiless();
-    var redirect_buffer: [4 * 1024]u8 = undefined;
-    var res = try req.receiveHead(&redirect_buffer);
-    if (res.head.status != .ok) {
-        log.err("CAS token request failed: status={}", .{res.head.status});
-        return error.CasTokenFailed;
-    }
-    const body = try res.reader(&.{}).readAlloc(allocator, res.head.content_length orelse 128 * 1024);
-    defer allocator.free(body);
-    const parsed = try std.json.parseFromSlice(struct {
-        accessToken: []const u8,
-        casUrl: []const u8,
-    }, allocator, body, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    return .{
-        .url = try allocator.dupe(u8, parsed.value.casUrl),
-        .token = try allocator.dupe(u8, parsed.value.accessToken),
-    };
-}
-
-fn callReconstruction(
-    allocator: std.mem.Allocator,
-    client: *std.http.Client,
-    cas_url: []const u8,
-    cas_auth: []const u8,
-    file_id: []const u8,
-    range_start: u64,
-    range_end_exclusive: u64,
-) ![]const u8 {
-    var url_buf: [4096]u8 = undefined;
-    const recon_url = try std.fmt.bufPrint(&url_buf, "{s}/v1/reconstructions/{s}", .{ cas_url, file_id });
-    var range_buf: [64]u8 = undefined;
-    const range_header = std.fmt.bufPrint(&range_buf, "bytes={}-{}", .{ range_start, range_end_exclusive - 1 }) catch unreachable;
-    const uri: std.Uri = try .parse(recon_url);
-    var req = try client.request(.GET, uri, .{
-        .headers = .{
-            .accept_encoding = .{ .override = "identity" },
-            .authorization = .{ .override = cas_auth },
-        },
-        .extra_headers = &.{.{ .name = "Range", .value = range_header }},
-    });
-    defer req.deinit();
-    try req.sendBodiless();
-    var redirect_buffer: [8 * 1024]u8 = undefined;
-    var res = try req.receiveHead(&redirect_buffer);
-    if (res.head.status != .ok and res.head.status != .partial_content) {
-        log.err("Reconstruction failed: status={}", .{res.head.status});
-        return error.ReconstructionFailed;
-    }
-    return try res.reader(&.{}).readAlloc(allocator, res.head.content_length orelse 64 * 1024 * 1024);
-}
-
 fn sha256LfsRange(
     client: *std.http.Client,
-    repo: RepoInfo,
+    repo: xet.Client.Repo,
     auth: []const u8,
     range_start: u64,
     range_end_inclusive: u64,
@@ -603,7 +442,7 @@ fn sha256LfsRange(
     const lfs_url = try std.fmt.bufPrint(
         &url_buf,
         "https://huggingface.co/{s}/{s}/resolve/{s}/{s}",
-        .{ repo.namespace, repo.model, repo.rev, repo.filepath },
+        .{ repo.repo, repo.model, repo.rev, repo.path },
     );
     var range_buf: [64]u8 = undefined;
     const range_header = std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ range_start, range_end_inclusive }) catch unreachable;

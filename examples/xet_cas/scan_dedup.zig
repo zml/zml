@@ -20,18 +20,6 @@ pub const std_options: std.Options = .{ .log_level = .info };
 const MAX_XORBS: usize = 256;
 const MAX_PLANS: usize = 8192;
 
-const RepoInfo = struct {
-    namespace: []const u8,
-    model: []const u8,
-    rev: []const u8,
-    filepath: []const u8,
-};
-
-const CasAuth = struct {
-    url: []const u8,
-    token: []const u8,
-};
-
 const XorbKey = struct {
     hash: []const u8,
 };
@@ -88,29 +76,9 @@ pub fn main(init: std.process.Init) !void {
         log.err("HF_TOKEN env var must be set", .{});
         return error.MissingToken;
     };
-    var auth_buf: [1024]u8 = undefined;
-    const auth = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{std.mem.trim(u8, hf_token, " \t\n\r")}) catch return error.TokenTooLong;
 
-    // Per-file caches: file_id + cas auth are per (namespace, model, rev, filepath).
-    var file_id_cache: std.StringHashMap([]const u8) = .init(allocator);
-    defer {
-        var it = file_id_cache.iterator();
-        while (it.next()) |e| {
-            allocator.free(e.key_ptr.*);
-            allocator.free(e.value_ptr.*);
-        }
-        file_id_cache.deinit();
-    }
-    var cas_cache: std.StringHashMap(CasAuth) = .init(allocator);
-    defer {
-        var it = cas_cache.iterator();
-        while (it.next()) |e| {
-            allocator.free(e.key_ptr.*);
-            allocator.free(e.value_ptr.*.url);
-            allocator.free(e.value_ptr.*.token);
-        }
-        cas_cache.deinit();
-    }
+    var xet_client: xet.Client = .init(allocator, &http_client, hf_token);
+    defer xet_client.deinit();
 
     var xorbs: [MAX_XORBS]XorbKey = undefined;
     var plans: [MAX_PLANS]TermPlan = undefined;
@@ -130,65 +98,16 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
 
-        const repo = parseFileUri(tensor.file_uri) catch {
+        const hf_path = if (std.mem.startsWith(u8, tensor.file_uri, "hf://")) tensor.file_uri["hf://".len..] else tensor.file_uri;
+        const hf_repo = zml.io.VFS.HF.Repo.parse(hf_path) catch {
             log.warn("skip {s}: bad file_uri {s}", .{ tensor.name, tensor.file_uri });
             n_skipped += 1;
             continue;
         };
+        const repo: xet.Client.Repo = .{ .repo = hf_repo.repo, .model = hf_repo.model, .rev = hf_repo.rev, .path = hf_repo.path };
 
-        // Per-file repo key.
-        const repo_key = try std.fmt.allocPrint(allocator, "{s}/{s}@{s}/{s}", .{
-            repo.namespace, repo.model, repo.rev, repo.filepath,
-        });
-        defer allocator.free(repo_key);
-
-        const file_id = blk: {
-            if (file_id_cache.get(repo_key)) |fid| break :blk fid;
-            const fid = getXetFileId(allocator, &http_client, repo, auth) catch |e| {
-                log.warn("skip {s}: getXetFileId failed: {s}", .{ tensor.name, @errorName(e) });
-                n_skipped += 1;
-                continue;
-            };
-            try file_id_cache.put(try allocator.dupe(u8, repo_key), fid);
-            break :blk fid;
-        };
-
-        const cas = blk: {
-            if (cas_cache.get(repo_key)) |c| break :blk c;
-            const c = getCasToken(allocator, &http_client, repo, auth) catch |e| {
-                log.warn("skip {s}: getCasToken failed: {s}", .{ tensor.name, @errorName(e) });
-                n_skipped += 1;
-                continue;
-            };
-            try cas_cache.put(try allocator.dupe(u8, repo_key), c);
-            break :blk c;
-        };
-
-        var cas_auth_buf: [65536]u8 = undefined;
-        const cas_auth = std.fmt.bufPrint(&cas_auth_buf, "Bearer {s}", .{cas.token}) catch return error.TokenTooLong;
-
-        const recon_body = callReconstruction(
-            allocator,
-            &http_client,
-            cas.url,
-            cas_auth,
-            file_id,
-            tensor.offset,
-            tensor.offset + tensor.byteSize(),
-        ) catch |e| {
+        const parsed = xet_client.reconstruct(repo, tensor.offset, tensor.offset + tensor.byteSize()) catch |e| {
             log.warn("skip {s}: reconstruction failed: {s}", .{ tensor.name, @errorName(e) });
-            n_skipped += 1;
-            continue;
-        };
-        defer allocator.free(recon_body);
-
-        const parsed = std.json.parseFromSlice(
-            xet.ReconstructionResponse,
-            allocator,
-            recon_body,
-            .{ .ignore_unknown_fields = true },
-        ) catch |e| {
-            log.warn("skip {s}: json parse failed: {s}", .{ tensor.name, @errorName(e) });
             n_skipped += 1;
             continue;
         };
@@ -262,119 +181,4 @@ pub fn main(init: std.process.Init) !void {
     log.info("done: total={d} scanned={d} skipped={d} with_dup={d} total_dup_plans={d}", .{
         n_total, n_scanned, n_skipped, n_with_dup, total_dup_plans,
     });
-}
-
-fn parseFileUri(uri: []const u8) !RepoInfo {
-    var path = uri;
-    if (std.mem.startsWith(u8, path, "hf://")) path = path["hf://".len..];
-    var parts = std.mem.splitScalar(u8, path, '/');
-    const namespace = parts.next() orelse return error.InvalidFileUri;
-    var model = parts.next() orelse return error.InvalidFileUri;
-    var rev: []const u8 = "main";
-    if (std.mem.indexOfScalar(u8, model, '@')) |at| {
-        rev = model[at + 1 ..];
-        model = model[0..at];
-    }
-    const filepath = parts.rest();
-    if (filepath.len == 0) return error.InvalidFileUri;
-    return .{ .namespace = namespace, .model = model, .rev = rev, .filepath = filepath };
-}
-
-fn getXetFileId(
-    allocator: std.mem.Allocator,
-    client: *std.http.Client,
-    repo: RepoInfo,
-    auth: []const u8,
-) ![]const u8 {
-    var url_buf: [4096]u8 = undefined;
-    const resolve_url = try std.fmt.bufPrint(
-        &url_buf,
-        "https://huggingface.co/{s}/{s}/resolve/{s}/{s}",
-        .{ repo.namespace, repo.model, repo.rev, repo.filepath },
-    );
-    const uri: std.Uri = try .parse(resolve_url);
-    var req = try client.request(.GET, uri, .{
-        .redirect_behavior = .unhandled,
-        .headers = .{
-            .accept_encoding = .{ .override = "identity" },
-            .authorization = .{ .override = auth },
-        },
-    });
-    defer req.deinit();
-    try req.sendBodiless();
-    var redirect_buffer: [8 * 1024]u8 = undefined;
-    var res = try req.receiveHead(&redirect_buffer);
-    var header_it = res.head.iterateHeaders();
-    while (header_it.next()) |header| {
-        if (std.ascii.eqlIgnoreCase(header.name, "X-Xet-Hash")) {
-            return try allocator.dupe(u8, header.value);
-        }
-    }
-    return error.XetHashNotFound;
-}
-
-fn getCasToken(
-    allocator: std.mem.Allocator,
-    client: *std.http.Client,
-    repo: RepoInfo,
-    auth: []const u8,
-) !CasAuth {
-    var url_buf: [4096]u8 = undefined;
-    const token_url = try std.fmt.bufPrint(
-        &url_buf,
-        "https://huggingface.co/api/models/{s}/{s}/xet-read-token/{s}",
-        .{ repo.namespace, repo.model, repo.rev },
-    );
-    const uri: std.Uri = try .parse(token_url);
-    var req = try client.request(.GET, uri, .{
-        .headers = .{
-            .accept_encoding = .{ .override = "identity" },
-            .authorization = .{ .override = auth },
-        },
-    });
-    defer req.deinit();
-    try req.sendBodiless();
-    var redirect_buffer: [4 * 1024]u8 = undefined;
-    var res = try req.receiveHead(&redirect_buffer);
-    if (res.head.status != .ok) return error.CasTokenFailed;
-    const body = try res.reader(&.{}).readAlloc(allocator, res.head.content_length orelse 128 * 1024);
-    defer allocator.free(body);
-    const parsed = try std.json.parseFromSlice(struct {
-        accessToken: []const u8,
-        casUrl: []const u8,
-    }, allocator, body, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    return .{
-        .url = try allocator.dupe(u8, parsed.value.casUrl),
-        .token = try allocator.dupe(u8, parsed.value.accessToken),
-    };
-}
-
-fn callReconstruction(
-    allocator: std.mem.Allocator,
-    client: *std.http.Client,
-    cas_url: []const u8,
-    cas_auth: []const u8,
-    file_id: []const u8,
-    range_start: u64,
-    range_end_exclusive: u64,
-) ![]const u8 {
-    var url_buf: [4096]u8 = undefined;
-    const recon_url = try std.fmt.bufPrint(&url_buf, "{s}/v1/reconstructions/{s}", .{ cas_url, file_id });
-    var range_buf: [64]u8 = undefined;
-    const range_header = std.fmt.bufPrint(&range_buf, "bytes={}-{}", .{ range_start, range_end_exclusive - 1 }) catch unreachable;
-    const uri: std.Uri = try .parse(recon_url);
-    var req = try client.request(.GET, uri, .{
-        .headers = .{
-            .accept_encoding = .{ .override = "identity" },
-            .authorization = .{ .override = cas_auth },
-        },
-        .extra_headers = &.{.{ .name = "Range", .value = range_header }},
-    });
-    defer req.deinit();
-    try req.sendBodiless();
-    var redirect_buffer: [8 * 1024]u8 = undefined;
-    var res = try req.receiveHead(&redirect_buffer);
-    if (res.head.status != .ok and res.head.status != .partial_content) return error.ReconstructionFailed;
-    return try res.reader(&.{}).readAlloc(allocator, res.head.content_length orelse 64 * 1024 * 1024);
 }

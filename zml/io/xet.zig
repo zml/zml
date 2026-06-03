@@ -116,6 +116,228 @@ pub fn decompressChunk(chunk: ChunkIterator.Chunk, dst: []u8, tmp: []u8) ![]u8 {
     }
 }
 
+// ── HF CAS Client ───────────────────────────────────────────────────────────
+
+/// High-level Xet/HF CAS client. Holds the user's HF token and caches the
+/// per-file Xet id and per-(repo, rev) CAS access token so repeated
+/// `reconstruct` calls against the same model don't re-issue the handshake
+/// round-trips. Not thread-safe: serialize calls externally.
+pub const Client = struct {
+    pub const Repo = struct {
+        repo: []const u8,
+        model: []const u8,
+        rev: []const u8,
+        path: []const u8,
+    };
+
+    pub const CasAuth = struct {
+        url: []const u8,
+        token: []const u8,
+    };
+
+    allocator: std.mem.Allocator,
+    http: *std.http.Client,
+    /// User's HF token, raw (no "Bearer " prefix). Whitespace is trimmed on use.
+    hf_token: []const u8,
+
+    file_id_cache: std.StringHashMapUnmanaged([]const u8) = .{},
+    cas_cache: std.StringHashMapUnmanaged(CasAuth) = .{},
+
+    pub fn init(allocator: std.mem.Allocator, http: *std.http.Client, hf_token: []const u8) Client {
+        return .{ .allocator = allocator, .http = http, .hf_token = hf_token };
+    }
+
+    pub fn deinit(self: *Client) void {
+        var fit = self.file_id_cache.iterator();
+        while (fit.next()) |e| {
+            self.allocator.free(e.key_ptr.*);
+            self.allocator.free(e.value_ptr.*);
+        }
+        self.file_id_cache.deinit(self.allocator);
+        var cit = self.cas_cache.iterator();
+        while (cit.next()) |e| {
+            self.allocator.free(e.key_ptr.*);
+            self.allocator.free(e.value_ptr.url);
+            self.allocator.free(e.value_ptr.token);
+        }
+        self.cas_cache.deinit(self.allocator);
+    }
+
+    /// Returns the cached Xet file id for `repo` (or fetches+caches on miss).
+    /// The returned slice is owned by the client and valid until `deinit`.
+    pub fn fileId(self: *Client, repo: Repo) ![]const u8 {
+        var key_buf: [4096]u8 = undefined;
+        const key = try std.fmt.bufPrint(&key_buf, "{s}/{s}@{s}/{s}", .{ repo.repo, repo.model, repo.rev, repo.path });
+        if (self.file_id_cache.get(key)) |fid| return fid;
+
+        const owned_key = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(owned_key);
+        const fid = try fetchFileId(self.allocator, self.http, repo, self.hf_token);
+        errdefer self.allocator.free(fid);
+        try self.file_id_cache.put(self.allocator, owned_key, fid);
+        return fid;
+    }
+
+    /// Returns the cached CAS endpoint + access token for the (repo, rev)
+    /// pair (or fetches+caches on miss). Slices are owned by the client.
+    pub fn casAuth(self: *Client, repo: Repo) !CasAuth {
+        var key_buf: [4096]u8 = undefined;
+        const key = try std.fmt.bufPrint(&key_buf, "{s}/{s}@{s}", .{ repo.repo, repo.model, repo.rev });
+        if (self.cas_cache.get(key)) |c| return c;
+
+        const owned_key = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(owned_key);
+        const c = try fetchCasToken(self.allocator, self.http, repo, self.hf_token);
+        errdefer {
+            self.allocator.free(c.url);
+            self.allocator.free(c.token);
+        }
+        try self.cas_cache.put(self.allocator, owned_key, c);
+        return c;
+    }
+
+    /// Fetch + parse the CAS reconstruction plan for `repo`'s file range
+    /// `[range_start, range_end_exclusive)`. Caller owns the returned
+    /// `Parsed` and must call `.deinit()` when done.
+    pub fn reconstruct(
+        self: *Client,
+        repo: Repo,
+        range_start: u64,
+        range_end_exclusive: u64,
+    ) !std.json.Parsed(ReconstructionResponse) {
+        const file_id = try self.fileId(repo);
+        const cas = try self.casAuth(repo);
+
+        var cas_auth_buf: [65536]u8 = undefined;
+        const cas_auth = std.fmt.bufPrint(&cas_auth_buf, "Bearer {s}", .{cas.token}) catch return error.TokenTooLong;
+
+        const body = try fetchReconstruction(self.allocator, self.http, cas.url, cas_auth, file_id, range_start, range_end_exclusive);
+        defer self.allocator.free(body);
+
+        // .alloc_always: copy string fields into the Parsed arena so they
+        // outlive `body` (default for Scanner-backed parseFromSlice is
+        // .alloc_if_needed, which would leave dangling pointers into `body`).
+        return try std.json.parseFromSlice(ReconstructionResponse, self.allocator, body, .{
+            .ignore_unknown_fields = true,
+            .allocate = .alloc_always,
+        });
+    }
+};
+
+fn bearerAuth(hf_token: []const u8, buf: []u8) ![]u8 {
+    return std.fmt.bufPrint(buf, "Bearer {s}", .{std.mem.trim(u8, hf_token, " \t\n\r")}) catch error.TokenTooLong;
+}
+
+fn fetchFileId(
+    allocator: std.mem.Allocator,
+    client: *std.http.Client,
+    repo: Client.Repo,
+    hf_token: []const u8,
+) ![]const u8 {
+    var auth_buf: [1024]u8 = undefined;
+    const auth = try bearerAuth(hf_token, &auth_buf);
+    var url_buf: [4096]u8 = undefined;
+    const resolve_url = try std.fmt.bufPrint(
+        &url_buf,
+        "https://huggingface.co/{s}/{s}/resolve/{s}/{s}",
+        .{ repo.repo, repo.model, repo.rev, repo.path },
+    );
+    const uri: std.Uri = try .parse(resolve_url);
+    var req = try client.request(.GET, uri, .{
+        .redirect_behavior = .unhandled,
+        .headers = .{
+            .accept_encoding = .{ .override = "identity" },
+            .authorization = .{ .override = auth },
+        },
+    });
+    defer req.deinit();
+    try req.sendBodiless();
+    var redirect_buffer: [8 * 1024]u8 = undefined;
+    var res = try req.receiveHead(&redirect_buffer);
+    var header_it = res.head.iterateHeaders();
+    while (header_it.next()) |header| {
+        if (std.ascii.eqlIgnoreCase(header.name, "X-Xet-Hash")) {
+            return try allocator.dupe(u8, header.value);
+        }
+    }
+    log.err("X-Xet-Hash not found (status={}).", .{res.head.status});
+    return error.XetHashNotFound;
+}
+
+fn fetchCasToken(
+    allocator: std.mem.Allocator,
+    client: *std.http.Client,
+    repo: Client.Repo,
+    hf_token: []const u8,
+) !Client.CasAuth {
+    var auth_buf: [1024]u8 = undefined;
+    const auth = try bearerAuth(hf_token, &auth_buf);
+    var url_buf: [4096]u8 = undefined;
+    const token_url = try std.fmt.bufPrint(
+        &url_buf,
+        "https://huggingface.co/api/models/{s}/{s}/xet-read-token/{s}",
+        .{ repo.repo, repo.model, repo.rev },
+    );
+    const uri: std.Uri = try .parse(token_url);
+    var req = try client.request(.GET, uri, .{
+        .headers = .{
+            .accept_encoding = .{ .override = "identity" },
+            .authorization = .{ .override = auth },
+        },
+    });
+    defer req.deinit();
+    try req.sendBodiless();
+    var redirect_buffer: [4 * 1024]u8 = undefined;
+    var res = try req.receiveHead(&redirect_buffer);
+    if (res.head.status != .ok) {
+        log.err("CAS token request failed: status={}", .{res.head.status});
+        return error.CasTokenFailed;
+    }
+    const body = try res.reader(&.{}).readAlloc(allocator, res.head.content_length orelse 128 * 1024);
+    defer allocator.free(body);
+    const parsed = try std.json.parseFromSlice(struct {
+        accessToken: []const u8,
+        casUrl: []const u8,
+    }, allocator, body, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    return .{
+        .url = try allocator.dupe(u8, parsed.value.casUrl),
+        .token = try allocator.dupe(u8, parsed.value.accessToken),
+    };
+}
+
+fn fetchReconstruction(
+    allocator: std.mem.Allocator,
+    client: *std.http.Client,
+    cas_url: []const u8,
+    cas_auth: []const u8,
+    file_id: []const u8,
+    range_start: u64,
+    range_end_exclusive: u64,
+) ![]const u8 {
+    var url_buf: [4096]u8 = undefined;
+    const recon_url = try std.fmt.bufPrint(&url_buf, "{s}/v1/reconstructions/{s}", .{ cas_url, file_id });
+    var range_buf: [64]u8 = undefined;
+    const range_header = std.fmt.bufPrint(&range_buf, "bytes={}-{}", .{ range_start, range_end_exclusive - 1 }) catch unreachable;
+    const uri: std.Uri = try .parse(recon_url);
+    var req = try client.request(.GET, uri, .{
+        .headers = .{
+            .accept_encoding = .{ .override = "identity" },
+            .authorization = .{ .override = cas_auth },
+        },
+        .extra_headers = &.{.{ .name = "Range", .value = range_header }},
+    });
+    defer req.deinit();
+    try req.sendBodiless();
+    var redirect_buffer: [8 * 1024]u8 = undefined;
+    var res = try req.receiveHead(&redirect_buffer);
+    if (res.head.status != .ok and res.head.status != .partial_content) {
+        log.err("Reconstruction failed: status={}", .{res.head.status});
+        return error.ReconstructionFailed;
+    }
+    return try res.reader(&.{}).readAlloc(allocator, res.head.content_length orelse 64 * 1024 * 1024);
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 /// Helper: write a chunk header into a buffer.
