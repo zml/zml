@@ -1,4 +1,4 @@
-// "tensor-name → device buffer" end-to-end smoke test.
+// "tensor-name → host sink" end-to-end smoke test.
 //
 // Given an HF model repo URI + tensor name, this binary:
 //   1. uses ZML's safetensors machinery (TensorRegistry) to translate the
@@ -7,10 +7,12 @@
 //   3. calls the HF CAS reconstruction API with a Range covering exactly
 //      [offset, offset+byteSize) → ReconstructionResponse JSON in memory,
 //   4. fetches each needed xorb via HTTPS range GET into a BSS slot,
-//   5. decompresses + stitches into a single PJRT device buffer of size
-//      byteSize (with head-skip from offset_into_first_range and tail-clip
-//      on the last term),
-//   6. reads back and verifies.
+//   5. decompresses + stitches into a host `Sink` of size byteSize via
+//      std.Io.Writer (with head-skip from offset_into_first_range and
+//      tail-clip on the last term),
+//   6. SHA-256-verifies the sink against an HF LFS range GET of the same
+//      [offset, offset+byteSize) window, both digests computed by streaming
+//      through std.Io.Reader.
 //
 // Usage:
 //   test_tensor_to_device --model <uri> --tensor <name>
@@ -20,8 +22,6 @@
 
 const std = @import("std");
 const zml = @import("zml");
-const pjrt = @import("pjrt");
-const pjrtx = zml.pjrtx;
 const xet = @import("io").xet;
 
 const log = std.log.scoped(.test_tensor_to_device);
@@ -31,25 +31,30 @@ pub const std_options: std.Options = .{ .log_level = .info };
 // Per xorb spec: max 64 MiB compressed. One shared slot reused across xorbs.
 const MAX_XORB: usize = 64 * 1024 * 1024;
 const MAX_XORBS: usize = 128;
-// const MAX_UNCOMP: usize = 64 * 1024 * 1024;
-const MAX_UNCOMP: usize = 2560 * 1024 * 1024;
 const MAX_CHUNK: usize = 128 * 1024;
 const MAX_PLANS: usize = 4096;
 
 var xorb_buf: [MAX_XORB]u8 = undefined;
 
-// Single uncompressed-chunk staging slot. transferData sources its bytes from
-// here, then the next chunk overwrites it. No per-tensor host materialization.
+// Single uncompressed-chunk staging slot.
 var chunk_buf: [MAX_CHUNK]u8 = undefined;
 
 var dec_tmp: [MAX_CHUNK]u8 = undefined;
 
-// Verification only: parallel reference + device readback, both sized for the
-// full tensor. Not part of the streaming push path. Allocated on the heap in
-// main() — keeping multi-GB arrays in BSS makes dyld refuse to map the binary
-// on macOS.
-var host_ref: []u8 = &.{};
-var readback: []u8 = &.{};
+// Host destination: a flat buffer the size of the tensor, written at random
+// offsets via a std.Io.Writer, read back via a std.Io.Reader for verification.
+const Sink = struct {
+    buf: []u8,
+
+    fn writeAt(self: *Sink, off: usize, src: []const u8) !void {
+        var w: std.Io.Writer = .fixed(self.buf[off..]);
+        try w.writeAll(src);
+    }
+
+    fn reader(self: *Sink) std.Io.Reader {
+        return .fixed(self.buf);
+    }
+};
 
 const XorbWork = struct {
     hash: []const u8,
@@ -140,12 +145,9 @@ pub fn main(init: std.process.Init) !void {
     log.info("Tensor {s}: shape={f} offset={d} size={d} file={s}", .{
         tensor.name, tensor.shape, tensor_offset, tensor_size, tensor.file_uri,
     });
-    if (tensor_size > MAX_UNCOMP) return error.TensorTooLarge;
-
-    host_ref = try allocator.alloc(u8, @intCast(tensor_size));
-    defer allocator.free(host_ref);
-    readback = try allocator.alloc(u8, @intCast(tensor_size));
-    defer allocator.free(readback);
+    if (tensor_size > std.math.maxInt(usize)) return error.TensorTooLarge;
+    var sink: Sink = .{ .buf = try allocator.alloc(u8, @intCast(tensor_size)) };
+    defer allocator.free(sink.buf);
 
     // ── Derive RepoInfo from file_uri (strip hf:// then parse) ─────────────
     const repo = try parseFileUri(tensor.file_uri);
@@ -283,40 +285,13 @@ pub fn main(init: std.process.Init) !void {
         if (x.fetch_byte_len > xorb_buf.len) return error.XorbTooLargeForSlot;
     }
 
-    // ── Boot platform & create device buffer ────────────────────────────────
-    const platform: *zml.Platform = try .auto(allocator, init.io, .{});
-    defer platform.deinit(allocator, init.io);
-    if (platform.devices.len == 0) return error.NoDevices;
-    const memory = platform.devices[0].memory(.default);
-
-    const dev_size: usize = @intCast(tensor_size);
-    const dims: [1]i64 = .{@intCast(dev_size)};
-    const shape_spec: pjrt.ShapeSpec = .init(&dims, pjrtx.bufferTypeFromDtype(.u8));
-    const tm = try platform.pjrt_client.createBuffersForAsyncHostToDevice(
-        platform.pjrt_api,
-        .{ .shape_specs = &.{shape_spec}, .memory = memory.pjrt_memory },
-    );
-    defer tm.deinit(platform.pjrt_api);
-    const device_buffer = try tm.retrieveBuffer(platform.pjrt_api, 0);
-
-    // ── Sequential xorb streaming, chunk-sized host footprint ──────────────
-    // Each chunk is decompressed once into chunk_buf, then the wanted slice
-    // chunk_buf[src_off..src_off+take] is pushed to the device. The look-back
-    // pattern flushes the PREVIOUS pending push BEFORE overwriting chunk_buf
-    // with the next decompress, so a single chunk-sized staging slot suffices.
-    // host_ref is populated in parallel for the final readback comparison only.
-    var have_pending = false;
-    var pending_src_off: usize = 0;
-    var pending_dst_off: usize = 0;
-    var pending_len: usize = 0;
     var net_bytes: u64 = 0;
     var net_ns: u64 = 0;
     var decomp_ns: u64 = 0;
-    var transfer_ns: u64 = 0;
-    var memcpy_ns: u64 = 0;
+    var write_ns: u64 = 0;
     var chunkloop_ns: u64 = 0;
     var n_chunks_total: u64 = 0;
-    var n_transfers: u64 = 0;
+    const ts_xet_wall: std.Io.Timestamp = .now(init.io, .awake);
     for (xorbs[0..n_xorbs], 0..) |x, xi_usize| {
         const xi: u8 = @intCast(xi_usize);
         log.info("xorb {s}..: needed=[{d},{d}) fetch=[{d},{d}) bytes={d}", .{
@@ -353,78 +328,60 @@ pub fn main(init: std.process.Init) !void {
                 const remaining: usize = p.wanted_len - p.bytes_written;
                 const take: usize = @min(avail, remaining);
                 const slot_off: usize = p.dst_off + p.bytes_written;
-                // Flush previous pending while chunk_buf still holds its source bytes.
-                if (have_pending) {
-                    const ts_tx: std.Io.Timestamp = .now(init.io, .awake);
-                    const ev = try tm.transferData(platform.pjrt_api, 0, chunk_buf[pending_src_off .. pending_src_off + pending_len], @intCast(pending_dst_off), false);
-                    defer ev.deinit(platform.pjrt_api);
-                    try ev.await(platform.pjrt_api, init.io);
-                    transfer_ns += @intCast(ts_tx.untilNow(init.io, .awake).toNanoseconds());
-                    n_transfers += 1;
-                }
                 if (!decompressed) {
                     const ts_d: std.Io.Timestamp = .now(init.io, .awake);
                     _ = try xet.decompressChunk(chunk, chunk_buf[0..chunk.uncompressed_size], &dec_tmp);
                     decomp_ns += @intCast(ts_d.untilNow(init.io, .awake).toNanoseconds());
                     decompressed = true;
                 }
-                // Verification-only mirror; safe because user carved this out.
-                const ts_m: std.Io.Timestamp = .now(init.io, .awake);
-                @memcpy(host_ref[slot_off .. slot_off + take], chunk_buf[src_off .. src_off + take]);
-                memcpy_ns += @intCast(ts_m.untilNow(init.io, .awake).toNanoseconds());
-                pending_src_off = src_off;
-                pending_dst_off = slot_off;
-                pending_len = take;
-                have_pending = true;
+                const ts_w: std.Io.Timestamp = .now(init.io, .awake);
+                try sink.writeAt(slot_off, chunk_buf[src_off .. src_off + take]);
+                write_ns += @intCast(ts_w.untilNow(init.io, .awake).toNanoseconds());
                 p.bytes_written += @intCast(take);
             }
         }
         chunkloop_ns += @intCast(ts_cl.untilNow(init.io, .awake).toNanoseconds());
     }
+    const xet_wall_ns: u64 = @intCast(ts_xet_wall.untilNow(init.io, .awake).toNanoseconds());
     for (plans[0..n_plans]) |p| {
         if (p.bytes_written != p.wanted_len) {
             log.err("plan mismatch: written={d} expected={d}", .{ p.bytes_written, p.wanted_len });
             return error.PlanByteCountMismatch;
         }
     }
-    if (!have_pending) return error.NoChunksPushed;
-    {
-        const ev = try tm.transferData(platform.pjrt_api, 0, chunk_buf[pending_src_off .. pending_src_off + pending_len], @intCast(pending_dst_off), true);
-        defer ev.deinit(platform.pjrt_api);
-        try ev.await(platform.pjrt_api, init.io);
-    }
-
-    // ── Readback & verify ───────────────────────────────────────────────────
-    if (try device_buffer.toHostBuffer(platform.pjrt_api, readback[0..dev_size])) |ev| {
-        defer ev.deinit(platform.pjrt_api);
-        try ev.await(platform.pjrt_api, init.io);
-    }
-    if (!std.mem.eql(u8, host_ref[0..dev_size], readback[0..dev_size])) {
-        for (host_ref[0..dev_size], readback[0..dev_size], 0..) |a, b, j| {
-            if (a != b) {
-                log.err("mismatch at byte {d}: host=0x{x:0>2} dev=0x{x:0>2}", .{ j, a, b });
-                break;
-            }
-        }
-        return error.ReadbackMismatch;
+    // LFS SHA-256 oracle: stream both sides through std.Io.Reader.
+    var sink_reader = sink.reader();
+    const xet_digest = try sha256ReadAll(&sink_reader);
+    var lfs_net_ns: u64 = 0;
+    const lfs_digest = try sha256LfsRange(&http_client, repo, auth, tensor_offset, tensor_offset + tensor_size - 1, init.io, &lfs_net_ns);
+    if (!std.mem.eql(u8, &xet_digest, &lfs_digest)) {
+        log.err("LFS oracle MISMATCH: xet=0x{x} lfs=0x{x}", .{ xet_digest, lfs_digest });
+        return error.LfsOracleMismatch;
     }
     log.info("OK: tensor {s} ({d} bytes) from {d} term(s) / {d} xorb(s)", .{
-        tensor_name, dev_size, n_plans, n_xorbs,
+        tensor_name, sink.buf.len, n_plans, n_xorbs,
     });
+    log.info("OK: xet sha256 == lfs sha256 = 0x{x}", .{xet_digest});
     const net_mib = @as(f64, @floatFromInt(net_bytes)) / (1024.0 * 1024.0);
     const net_s = @as(f64, @floatFromInt(net_ns)) / 1e9;
     log.info("network: {d:.2} MiB in {d:.2} s ({d:.1} MiB/s aggregate)", .{ net_mib, net_s, net_mib / net_s });
+    // Apples-to-apples: wall time to land tensor_size bytes into a host Sink.
+    const tensor_mib = @as(f64, @floatFromInt(tensor_size)) / (1024.0 * 1024.0);
+    const xet_wall_s = @as(f64, @floatFromInt(xet_wall_ns)) / 1e9;
+    const lfs_wall_s = @as(f64, @floatFromInt(lfs_net_ns)) / 1e9;
+    log.info("COMPARE ({d:.2} MiB): xet={d:.2}s ({d:.1} MiB/s)  lfs={d:.2}s ({d:.1} MiB/s)", .{
+        tensor_mib, xet_wall_s, tensor_mib / xet_wall_s, lfs_wall_s, tensor_mib / lfs_wall_s,
+    });
     const to_ms = struct {
         fn f(ns: u64) f64 {
             return @as(f64, @floatFromInt(ns)) / 1e6;
         }
     }.f;
-    const overhead_ns = if (chunkloop_ns > decomp_ns + transfer_ns + memcpy_ns) chunkloop_ns - decomp_ns - transfer_ns - memcpy_ns else 0;
-    log.info("chunk-loop breakdown ({d} chunks, {d} transfers):", .{ n_chunks_total, n_transfers });
+    const overhead_ns = if (chunkloop_ns > decomp_ns + write_ns) chunkloop_ns - decomp_ns - write_ns else 0;
+    log.info("chunk-loop breakdown ({d} chunks):", .{n_chunks_total});
     log.info("  total      = {d:.1} ms", .{to_ms(chunkloop_ns)});
     log.info("  decompress = {d:.1} ms", .{to_ms(decomp_ns)});
-    log.info("  transfer   = {d:.1} ms  (transferData + await)", .{to_ms(transfer_ns)});
-    log.info("  memcpy ref = {d:.1} ms  (verification mirror)", .{to_ms(memcpy_ns)});
+    log.info("  sink write = {d:.1} ms", .{to_ms(write_ns)});
     log.info("  scan/other = {d:.1} ms", .{to_ms(overhead_ns)});
 }
 
@@ -578,4 +535,70 @@ fn callReconstruction(
         return error.ReconstructionFailed;
     }
     return try res.reader(&.{}).readAlloc(allocator, res.head.content_length orelse 64 * 1024 * 1024);
+}
+
+fn sha256LfsRange(
+    client: *std.http.Client,
+    repo: RepoInfo,
+    auth: []const u8,
+    range_start: u64,
+    range_end_inclusive: u64,
+    io: std.Io,
+    out_net_ns: *u64,
+) ![32]u8 {
+    var url_buf: [4096]u8 = undefined;
+    const lfs_url = try std.fmt.bufPrint(
+        &url_buf,
+        "https://huggingface.co/{s}/{s}/resolve/{s}/{s}",
+        .{ repo.namespace, repo.model, repo.rev, repo.filepath },
+    );
+    var range_buf: [64]u8 = undefined;
+    const range_header = std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ range_start, range_end_inclusive }) catch unreachable;
+    const uri: std.Uri = try .parse(lfs_url);
+    var req = try client.request(.GET, uri, .{
+        .headers = .{
+            .accept_encoding = .{ .override = "identity" },
+            .authorization = .{ .override = auth },
+        },
+        .extra_headers = &.{.{ .name = "Range", .value = range_header }},
+    });
+    defer req.deinit();
+    try req.sendBodiless();
+    var redirect_buffer: [8 * 1024]u8 = undefined;
+    var res = try req.receiveHead(&redirect_buffer);
+    if (res.head.status != .partial_content and res.head.status != .ok) {
+        log.err("LFS range GET failed: status={} url={s}", .{ res.head.status, lfs_url });
+        return error.HttpRequestFailed;
+    }
+    var transfer_buf: [16 * 1024]u8 = undefined;
+    const r = res.reader(&transfer_buf);
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var stage: [64 * 1024]u8 = undefined;
+    var net_ns_acc: u64 = 0;
+    while (true) {
+        const ts_net: std.Io.Timestamp = .now(io, .awake);
+        const n = try r.readSliceShort(&stage);
+        net_ns_acc += @intCast(ts_net.untilNow(io, .awake).toNanoseconds());
+        if (n == 0) break;
+        hasher.update(stage[0..n]);
+        if (n < stage.len) break;
+    }
+    out_net_ns.* = net_ns_acc;
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+fn sha256ReadAll(r: *std.Io.Reader) ![32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    var stage: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = try r.readSliceShort(&stage);
+        if (n == 0) break;
+        hasher.update(stage[0..n]);
+        if (n < stage.len) break;
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
 }
