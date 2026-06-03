@@ -1026,6 +1026,69 @@ fn runUnaryShaped(
     @memcpy(out, slice.items(f32));
 }
 
+// Typed (f16/bf16/f32) 1-input runner — for dtype tests of unary ops (transpose,
+// reductions, …). Output converted to f32 by the caller (checkUnaryT) to compare.
+fn runUnaryT(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    comptime func: anytype,
+    in_shape: zml.Shape,
+    in_data: []const T,
+    out: []T,
+) !void {
+    const a_t: zml.Tensor = .fromShape(in_shape);
+    var exe = try platform.compileFn(allocator, io, func, .{a_t}, .{});
+    defer exe.deinit();
+    var a_buf = try zml.Buffer.fromBytes(io, platform, in_shape, .replicated, std.mem.sliceAsBytes(in_data));
+    defer a_buf.deinit();
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    exe_args.set(.{a_buf});
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    defer result.deinit();
+    _ = try result.await(io);
+    const slice = try result.toSliceAlloc(allocator, io);
+    defer slice.free(allocator);
+    @memcpy(out, slice.items(T));
+}
+
+fn checkUnaryT(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cpu: *zml.Platform,
+    metal: *zml.Platform,
+    name: []const u8,
+    comptime func: anytype,
+    in_shape: zml.Shape,
+    in_data: []const T,
+    n_out: usize,
+    rel_tol: f32,
+) usize {
+    var co: [64]T = undefined;
+    var mo: [64]T = undefined;
+    runUnaryT(T, allocator, io, cpu, func, in_shape, in_data, co[0..n_out]) catch |e| {
+        log.err("{s:>6}  CPU failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    runUnaryT(T, allocator, io, metal, func, in_shape, in_data, mo[0..n_out]) catch |e| {
+        log.err("{s:>6}  Metal failed: {s}", .{ name, @errorName(e) });
+        return 1;
+    };
+    var cof: [64]f32 = undefined;
+    var mof: [64]f32 = undefined;
+    for (0..n_out) |i| {
+        cof[i] = toF32(T, co[i]);
+        mof[i] = toF32(T, mo[i]);
+    }
+    return compare(name, cof[0..n_out], mof[0..n_out], rel_tol);
+}
+
 fn checkShaped(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -1783,6 +1846,11 @@ pub fn main(init: std.process.Init) !void {
     failures += checkMatmulT(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16ew", mulAdd,
         zml.Shape.init(.{ .n = 4 }, .bf16), &bf_a,
         zml.Shape.init(.{ .n = 4 }, .bf16), &bf_b, 4, 3e-2);
+    // bf16 DATA MOVEMENT (raw copy, no arithmetic): a standalone transpose
+    // through the dtype-generic indexed-copy kernel at bf16 storage. Bit-exact.
+    const bf_t = bf16a(.{ 1, 2, 3, 4, 5, 6 });
+    failures += checkUnaryT(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16T", transpose23,
+        zml.Shape.init(.{ .i = 2, .j = 3 }, .bf16), &bf_t, 6, 1e-2);
 
     // Deeper chain (3 thunks, 2 intermediates): abs(x·W1)·W2. The SECOND matmul
     // reads a COMPUTED buffer (the abs result), not a parameter — the matmul-
