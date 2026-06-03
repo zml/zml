@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const zml = @import("zml");
+const zml = @import("../../zml.zig");
 const mtt = @import("kernels/mosaic_tpu/builder");
 const pipeline = mtt.pipeline;
 const mtt_kernel = zml.kernel.mosaic_tpu;

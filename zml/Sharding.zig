@@ -748,12 +748,21 @@ pub const PhysicalMesh = struct {
         pub fn layout(placements: []const Device, max_rank: usize) !CoordLayout {
             if (placements.len == 0) return error.InvalidPhysicalMesh;
 
-            const rank = placements[0].coords.len;
+            var rank = placements[0].coords.len;
+            while (rank > 1) {
+                for (placements) |coord_placement| {
+                    if (coord_placement.coords[rank - 1] != 0) break;
+                } else {
+                    rank -= 1;
+                    continue;
+                }
+                break;
+            }
             if (rank == 0) return error.InvalidDeviceCoords;
             if (rank > max_rank) return error.UnsupportedDeviceCoordsRank;
 
             for (placements[1..]) |coord_placement| {
-                if (coord_placement.coords.len != rank) return error.InvalidDeviceCoordsRank;
+                if (coord_placement.coords.len < rank) return error.InvalidDeviceCoordsRank;
             }
 
             var axis_sizes = [_]usize{1} ** MAX_MESH_RANK;
