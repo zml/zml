@@ -94,6 +94,18 @@ fn mlpDeep(x: zml.Tensor, w1: zml.Tensor, w2: zml.Tensor, w3: zml.Tensor) zml.Te
 fn bmm(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
     return a.dot(b, .k);
 }
+// Multi-head attention CORE (pre-split heads, no projections): per-head scaled
+// dot-product attention. q{h,s,e} k{h,t,e} v{h,t,e} → ctx{h,s,e}. Two BATCHED
+// matmuls — scores = q·kᵀ (contract .e), ctx = attn·v (contract .t) — with a
+// softmax over .t between; batch dim .h leads throughout. The exact shape real
+// multi-head attention produces — proves batched matmul composes with the
+// batched reduce/softmax path.
+fn mha(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor) zml.Tensor {
+    const e: f32 = @floatFromInt(q.dim(.e));
+    const scores = q.dot(k, .e).scale(1.0 / @sqrt(e)); // {h,s,t}
+    const attn = softmaxAx(scores, .t); // {h,s,t}
+    return attn.dot(v, .t); // {h,s,e}
+}
 // KV-cache indexing ops with a RUNTIME offset. dynSlice: read a fixed-length
 // window of x at a runtime start. dynUpdate: write `upd` into x at a runtime
 // start, returning the updated array (the KV-cache write).
@@ -1711,6 +1723,14 @@ pub fn main(init: std.process.Init) !void {
     failures += checkMatmul(allocator, io, cpu, metal, "bmm", bmm,
         zml.Shape.init(.{ .h = 2, .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 },
         zml.Shape.init(.{ .h = 2, .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 6, 5, 4, 3, 2, 1 }, 8, exact);
+
+    // Multi-head attention core: per-head q·kᵀ → softmax(.t) → ·v. Two batched
+    // matmuls + a batched softmax (reduce over .t of a {h,s,t} tensor) — the real
+    // MHA shape. h=2 heads, s=2 queries, t=3 keys, e=2 head dim. Distinct heads.
+    failures += check3Shaped(allocator, io, cpu, metal, "mha", mha,
+        zml.Shape.init(.{ .h = 2, .s = 2, .e = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 },
+        zml.Shape.init(.{ .h = 2, .t = 3, .e = 2 }, .f32), &[_]f32{ 1, 0, 0, 1, 1, 1, 2, 1, 0, 2, 1, 0 },
+        zml.Shape.init(.{ .h = 2, .t = 3, .e = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 6, 5, 4, 3, 2, 1 }, 8, 1e-5);
 
     // Deeper chain (3 thunks, 2 intermediates): abs(x·W1)·W2. The SECOND matmul
     // reads a COMPUTED buffer (the abs result), not a parameter — the matmul-
