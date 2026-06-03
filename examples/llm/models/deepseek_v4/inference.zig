@@ -34,6 +34,7 @@ pub const CompilationParameters = struct {
 pub const CompiledModel = struct {
     prefill: KernelExe,
     decode: KernelExe,
+    params: CompilationParameters,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -47,6 +48,7 @@ pub const CompiledModel = struct {
         return .{
             .prefill = try compileKernel(allocator, io, platform, mdl, seqlen, progress, opts),
             .decode = try compileKernel(allocator, io, platform, mdl, 1, progress, opts),
+            .params = opts,
         };
     }
 
@@ -93,12 +95,28 @@ fn compileKernel(
     return .{ .exe = exe };
 }
 
+pub const KernelArgs = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    model_buffers: *model.Buffers,
+    tokens_buf: *zml.Buffer,
+    tokens_pos_buf: *zml.Buffer,
+    rng_buf: *zml.Bufferized(zml.Tensor.Rng),
+    cache_buffers: *zml.Bufferized(model.KVCache),
+    attention_metadata_buffers: zml.Bufferized(attention.Metadata),
+};
 
 const KernelExe = struct {
     exe: zml.Exe,
 
     pub fn deinit(self: KernelExe) void {
         self.exe.deinit();
+    }
+
+    pub fn run(self: KernelExe, args: KernelArgs) !void {
+        _ = args; // autofix
+        _ = self; // autofix
     }
 };
 
