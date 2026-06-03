@@ -229,11 +229,18 @@ def make_patched_attn_forward(modeling_module):
             sliding_window=self.sliding_window,
             **kwargs,
         )
+        if prefix is not None:
+            _store(f"{prefix}.attn", attn_output)
         attn_output = attn_output.reshape(*input_shape, -1)
         if self.use_head_wise_attn_gate:
-            out = attn_output.view(
+            gate_sig = gate_states.unsqueeze(-1).sigmoid()
+            head_view = attn_output.view(
                 *attn_output.shape[:-1], self.num_attention_heads, self.head_dim
-            ) * gate_states.unsqueeze(-1).sigmoid()
+            )
+            out = head_view * gate_sig
+            if prefix is not None:
+                _store(f"{prefix}.gate_sig", gate_sig)
+                _store(f"{prefix}.gated", out)
             attn_output = out.view(*attn_output.shape)
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
