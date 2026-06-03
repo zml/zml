@@ -93,3 +93,12 @@ zig_binary(
         "//zml/io",
     ],
 )
+
+zig_binary(
+    name = "scan_dedup",
+    main = "scan_dedup.zig",
+    deps = [
+        "//zml",
+        "//zml/io",
+    ],
+)

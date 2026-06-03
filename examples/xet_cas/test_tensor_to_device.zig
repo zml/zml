@@ -28,18 +28,12 @@ const log = std.log.scoped(.test_tensor_to_device);
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
-// Per xorb spec: max 64 MiB compressed. One shared slot reused across xorbs.
+// Per xorb spec: max 64 MiB compressed.
 const MAX_XORB: usize = 64 * 1024 * 1024;
 const MAX_XORBS: usize = 128;
 const MAX_CHUNK: usize = 128 * 1024;
 const MAX_PLANS: usize = 4096;
-
-var xorb_buf: [MAX_XORB]u8 = undefined;
-
-// Single uncompressed-chunk staging slot.
-var chunk_buf: [MAX_CHUNK]u8 = undefined;
-
-var dec_tmp: [MAX_CHUNK]u8 = undefined;
+const DEFAULT_WORKERS: usize = 4;
 
 // Host destination: a flat buffer the size of the tensor, written at random
 // offsets via a std.Io.Writer, read back via a std.Io.Reader for verification.
@@ -82,6 +76,84 @@ const TermPlan = struct {
 
 var plans: [MAX_PLANS]TermPlan = undefined;
 
+const Worker = struct {
+    counter: *std.atomic.Value(u32),
+    n_xorbs: u8,
+    n_plans: u32,
+    sink: *Sink,
+    allocator: std.mem.Allocator,
+    env: *std.process.Environ.Map,
+    io: std.Io,
+    net_bytes: u64 = 0,
+    net_ns: u64 = 0,
+    decomp_ns: u64 = 0,
+    write_ns: u64 = 0,
+    chunkloop_ns: u64 = 0,
+    n_chunks_total: u64 = 0,
+    err: ?anyerror = null,
+
+    fn run(self: *Worker) void {
+        self.runImpl() catch |e| {
+            self.err = e;
+        };
+    }
+
+    fn runImpl(self: *Worker) !void {
+        var client: std.http.Client = .{ .allocator = self.allocator, .io = self.io };
+        try client.initDefaultProxies(self.allocator, self.env);
+        defer client.deinit();
+
+        const xb = try self.allocator.alloc(u8, MAX_XORB);
+        defer self.allocator.free(xb);
+        const cb = try self.allocator.alloc(u8, MAX_CHUNK);
+        defer self.allocator.free(cb);
+        const dt = try self.allocator.alloc(u8, MAX_CHUNK);
+        defer self.allocator.free(dt);
+
+        while (true) {
+            const next = self.counter.fetchAdd(1, .acq_rel);
+            if (next >= self.n_xorbs) break;
+            const xi: u8 = @intCast(next);
+            const x = xorbs[xi];
+
+            const t0: std.Io.Timestamp = .now(self.io, .awake);
+            try httpRangeGetIntoSlot(&client, x.fetch_url, x.fetch_url_range_start, x.fetch_url_range_end, xb[0..x.fetch_byte_len]);
+            self.net_ns += @intCast(t0.untilNow(self.io, .awake).toNanoseconds());
+            self.net_bytes += x.fetch_byte_len;
+
+            var it: xet.ChunkIterator = .{ .data = xb[0..x.fetch_byte_len] };
+            var chunk_idx: u32 = x.fetch_chunk_start;
+            const ts_cl: std.Io.Timestamp = .now(self.io, .awake);
+            while (try it.next()) |chunk| : (chunk_idx += 1) {
+                if (chunk.uncompressed_size > MAX_CHUNK) return error.ChunkTooLarge;
+                self.n_chunks_total += 1;
+                var decompressed = false;
+                for (plans[0..self.n_plans]) |*p| {
+                    if (p.xorb_idx != xi) continue;
+                    if (chunk_idx < p.chunk_start or chunk_idx >= p.chunk_end) continue;
+                    const need_skip = p.byte_skip > 0 and p.bytes_written == 0;
+                    const src_off: usize = if (need_skip) p.byte_skip else 0;
+                    const avail: usize = chunk.uncompressed_size - src_off;
+                    const remaining: usize = p.wanted_len - p.bytes_written;
+                    const take: usize = @min(avail, remaining);
+                    const slot_off: usize = p.dst_off + p.bytes_written;
+                    if (!decompressed) {
+                        const ts_d: std.Io.Timestamp = .now(self.io, .awake);
+                        _ = try xet.decompressChunk(chunk, cb[0..chunk.uncompressed_size], dt);
+                        self.decomp_ns += @intCast(ts_d.untilNow(self.io, .awake).toNanoseconds());
+                        decompressed = true;
+                    }
+                    const ts_w: std.Io.Timestamp = .now(self.io, .awake);
+                    try self.sink.writeAt(slot_off, cb[src_off .. src_off + take]);
+                    self.write_ns += @intCast(ts_w.untilNow(self.io, .awake).toNanoseconds());
+                    p.bytes_written += @intCast(take);
+                }
+            }
+            self.chunkloop_ns += @intCast(ts_cl.untilNow(self.io, .awake).toNanoseconds());
+        }
+    }
+};
+
 const RepoInfo = struct {
     namespace: []const u8,
     model: []const u8,
@@ -101,11 +173,16 @@ pub fn main(init: std.process.Init) !void {
     _ = args_it.skip();
     var model_arg: []const u8 = "";
     var tensor_name: []const u8 = "";
+    var n_workers: usize = DEFAULT_WORKERS;
     while (args_it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--model")) {
             model_arg = args_it.next() orelse return error.MissingModelArg;
         } else if (std.mem.eql(u8, arg, "--tensor")) {
             tensor_name = args_it.next() orelse return error.MissingTensorArg;
+        } else if (std.mem.eql(u8, arg, "--workers")) {
+            const v = args_it.next() orelse return error.MissingWorkersArg;
+            n_workers = try std.fmt.parseInt(usize, v, 10);
+            if (n_workers == 0) return error.InvalidWorkers;
         }
     }
     if (model_arg.len == 0 or tensor_name.len == 0) {
@@ -282,67 +359,45 @@ pub fn main(init: std.process.Init) !void {
         x.fetch_url_range_start = fetch.url_range.start;
         x.fetch_url_range_end = fetch.url_range.end;
         x.fetch_byte_len = fetch.url_range.end - fetch.url_range.start + 1;
-        if (x.fetch_byte_len > xorb_buf.len) return error.XorbTooLargeForSlot;
+        if (x.fetch_byte_len > MAX_XORB) return error.XorbTooLargeForSlot;
     }
 
+    log.info("spawning {d} worker(s) for {d} xorb(s)", .{ n_workers, n_xorbs });
+    var counter: std.atomic.Value(u32) = .init(0);
+    const workers = try allocator.alloc(Worker, n_workers);
+    defer allocator.free(workers);
+    const threads = try allocator.alloc(std.Thread, n_workers);
+    defer allocator.free(threads);
+    const ts_xet_wall: std.Io.Timestamp = .now(init.io, .awake);
+    for (workers, threads) |*w, *t| {
+        w.* = .{
+            .counter = &counter,
+            .n_xorbs = n_xorbs,
+            .n_plans = n_plans,
+            .sink = &sink,
+            .allocator = allocator,
+            .env = init.environ_map,
+            .io = init.io,
+        };
+        t.* = try std.Thread.spawn(.{}, Worker.run, .{w});
+    }
+    for (threads) |t| t.join();
+    const xet_wall_ns: u64 = @intCast(ts_xet_wall.untilNow(init.io, .awake).toNanoseconds());
     var net_bytes: u64 = 0;
     var net_ns: u64 = 0;
     var decomp_ns: u64 = 0;
     var write_ns: u64 = 0;
     var chunkloop_ns: u64 = 0;
     var n_chunks_total: u64 = 0;
-    const ts_xet_wall: std.Io.Timestamp = .now(init.io, .awake);
-    for (xorbs[0..n_xorbs], 0..) |x, xi_usize| {
-        const xi: u8 = @intCast(xi_usize);
-        log.info("xorb {s}..: needed=[{d},{d}) fetch=[{d},{d}) bytes={d}", .{
-            x.hash[0..16],       x.needed_chunk_start, x.needed_chunk_end,
-            x.fetch_chunk_start, x.fetch_chunk_end,    x.fetch_byte_len,
-        });
-        const t0: std.Io.Timestamp = .now(init.io, .awake);
-        try httpRangeGetIntoSlot(
-            &http_client,
-            x.fetch_url,
-            x.fetch_url_range_start,
-            x.fetch_url_range_end,
-            xorb_buf[0..x.fetch_byte_len],
-        );
-        const dt_ns = t0.untilNow(init.io, .awake).toNanoseconds();
-        net_bytes += x.fetch_byte_len;
-        net_ns += @intCast(dt_ns);
-        const mbps = (@as(f64, @floatFromInt(x.fetch_byte_len)) / (1024.0 * 1024.0)) / (@as(f64, @floatFromInt(dt_ns)) / 1e9);
-        log.info("  fetched {d} bytes in {d:.1} ms ({d:.1} MiB/s)", .{ x.fetch_byte_len, @as(f64, @floatFromInt(dt_ns)) / 1e6, mbps });
-
-        var it: xet.ChunkIterator = .{ .data = xorb_buf[0..x.fetch_byte_len] };
-        var chunk_idx: u32 = x.fetch_chunk_start;
-        const ts_cl: std.Io.Timestamp = .now(init.io, .awake);
-        while (try it.next()) |chunk| : (chunk_idx += 1) {
-            if (chunk.uncompressed_size > MAX_CHUNK) return error.ChunkTooLarge;
-            n_chunks_total += 1;
-            var decompressed = false;
-            for (plans[0..n_plans]) |*p| {
-                if (p.xorb_idx != xi) continue;
-                if (chunk_idx < p.chunk_start or chunk_idx >= p.chunk_end) continue;
-                const need_skip = p.byte_skip > 0 and p.bytes_written == 0;
-                const src_off: usize = if (need_skip) p.byte_skip else 0;
-                const avail: usize = chunk.uncompressed_size - src_off;
-                const remaining: usize = p.wanted_len - p.bytes_written;
-                const take: usize = @min(avail, remaining);
-                const slot_off: usize = p.dst_off + p.bytes_written;
-                if (!decompressed) {
-                    const ts_d: std.Io.Timestamp = .now(init.io, .awake);
-                    _ = try xet.decompressChunk(chunk, chunk_buf[0..chunk.uncompressed_size], &dec_tmp);
-                    decomp_ns += @intCast(ts_d.untilNow(init.io, .awake).toNanoseconds());
-                    decompressed = true;
-                }
-                const ts_w: std.Io.Timestamp = .now(init.io, .awake);
-                try sink.writeAt(slot_off, chunk_buf[src_off .. src_off + take]);
-                write_ns += @intCast(ts_w.untilNow(init.io, .awake).toNanoseconds());
-                p.bytes_written += @intCast(take);
-            }
-        }
-        chunkloop_ns += @intCast(ts_cl.untilNow(init.io, .awake).toNanoseconds());
+    for (workers) |w| {
+        if (w.err) |e| return e;
+        net_bytes += w.net_bytes;
+        net_ns += w.net_ns;
+        decomp_ns += w.decomp_ns;
+        write_ns += w.write_ns;
+        chunkloop_ns += w.chunkloop_ns;
+        n_chunks_total += w.n_chunks_total;
     }
-    const xet_wall_ns: u64 = @intCast(ts_xet_wall.untilNow(init.io, .awake).toNanoseconds());
     for (plans[0..n_plans]) |p| {
         if (p.bytes_written != p.wanted_len) {
             log.err("plan mismatch: written={d} expected={d}", .{ p.bytes_written, p.wanted_len });
