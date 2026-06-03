@@ -88,6 +88,12 @@ fn matAbsMat(x: zml.Tensor, w1: zml.Tensor, w2: zml.Tensor) zml.Tensor {
 fn mlpDeep(x: zml.Tensor, w1: zml.Tensor, w2: zml.Tensor, w3: zml.Tensor) zml.Tensor {
     return x.dot(w1, .k).abs().dot(w2, .n).abs().dot(w3, .p);
 }
+// Batched matmul — the multi-head-attention primitive. a{h,m,k}·b{h,k,n}
+// contracts .k and batches the shared .h → {h,m,n}: a batched dot_general (batch
+// dim .h), lowered via MPSGraph's native batched matmul on the graph path.
+fn bmm(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
+    return a.dot(b, .k);
+}
 // KV-cache indexing ops with a RUNTIME offset. dynSlice: read a fixed-length
 // window of x at a runtime start. dynUpdate: write `upd` into x at a runtime
 // start, returning the updated array (the KV-cache write).
@@ -1697,6 +1703,14 @@ pub fn main(init: std.process.Init) !void {
         zml.Shape.init(.{ .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
         zml.Shape.init(.{ .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6 },
         zml.Shape.init(.{ .m = 2, .n = 2 }, .f32), &[_]f32{ 100, 200, 300, 400 }, 4, exact);
+
+    // Batched matmul (multi-head attention's QKᵀ / AV primitive): a{h,m,k}·b{h,k,n}
+    // → {h,m,n}, batch dim .h. Distinct per-head data so a bug that collapses or
+    // mixes batch slices is caught vs the oracle. Graph path → MPSGraph batched
+    // matmul (backend-independent). Two heads of [2,3]·[3,2]; small ints → exact.
+    failures += checkMatmul(allocator, io, cpu, metal, "bmm", bmm,
+        zml.Shape.init(.{ .h = 2, .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 },
+        zml.Shape.init(.{ .h = 2, .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 6, 5, 4, 3, 2, 1 }, 8, exact);
 
     // Deeper chain (3 thunks, 2 intermediates): abs(x·W1)·W2. The SECOND matmul
     // reads a COMPUTED buffer (the abs result), not a parameter — the matmul-
