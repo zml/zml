@@ -12,6 +12,8 @@ pub const QuantizationConfig = struct {
 };
 
 pub const Config = struct {
+    max_position_embeddings: u32,
+    expert_dtype: []const u8, //< find better type
     num_hidden_layers: u16,
     rms_norm_eps: f32,
     routed_scaling_factor: f32,
@@ -101,6 +103,12 @@ pub const LinearF32 = struct {
     }
 };
 
+// fn dequantizeWeights(weight: zml.Tensor, scale: zml.Tensor, block_size: usize) zml.Tensor {
+//     const w = weight.splitAxis(0, .{ .auto, block_size }).splitAxis(-1, .{ .auto, block_size });
+//     const s= scale.insertAxes(1, .{.b}).insertAxes(.last, .{.d}).withTags(.{.a, .b, .c, .d});
+//     return w.convert(.bf16).mul(s.convert(.bf16).broad(w.shape())).reshape(weight.convert(.bf16).shape());
+// }
+
 // TODO: rewrite
 fn dequantizeWeights(weight: zml.Tensor, scale: zml.Tensor, block_size: usize) zml.Tensor {
     // Reshape scale from [8, 32] -> [8, 1, 32, 1] to inject dummy block dimensions
@@ -118,6 +126,33 @@ fn dequantizeWeights(weight: zml.Tensor, scale: zml.Tensor, block_size: usize) z
 
     // Element-wise multiplication completes the dequantization pipeline
     return weight.convert(.bf16).mul(scale_expanded);
+}
+
+fn to_fp8(x: zml.Tensor, block_size: u32) struct { zml.Tensor, zml.Tensor } {
+    // x = [seq, d=4096]
+    // block = 128
+    stdx.debug.assert(@mod(x.dim(-1), block_size) == 0, "last dimension {} must be divisible by block_size={}", .{x.dim(-1), block_size});
+
+    // x_blocked = [seq, 32, 128]
+    const x_blocked = x.splitAxis(-1, .{ .n = .auto, .m = block_size }).convert(.f32);
+
+    const min_value = zml.Tensor.scalar(1e-4, x_blocked.dtype());
+
+    var max_block = x_blocked.abs().max(-1);
+    max_block = zml.Tensor.select(max_block.cmp(.LT, min_value), min_value, max_block);
+
+    const fp8_min = zml.Tensor.constant(zml.DataType.f8e4m3fn.minValue()).convert(x_blocked.dtype());
+    const fp8_max = zml.Tensor.constant(zml.DataType.f8e4m3fn.maxValue()).convert(x_blocked.dtype());
+    const fp8_max_inv = ones(fp8_max.shape()).div(fp8_max);
+
+    const scale = max_block.mul(fp8_max_inv);
+    // scale.print("scale");
+    const x_fp8 = x_blocked.div(scale).clamp(fp8_min, fp8_max).reshape(x.shape());
+    // x_fp8.convert(.f8e4m3fn).print("x_fp8");
+    // const s = scale.convert(.f8e8m0).reshape(.{ scale.dim(0), scale.dim(1)});
+    // s.print("scale");
+
+    return .{ x_fp8.convert(.f8e4m3fn), scale.convert(.f8e8m0).reshape(.{ scale.dim(0), scale.dim(1) }) };
 }
 
 const FP8Linear = struct {
@@ -189,14 +224,14 @@ const Compressor = struct {
 
     pub fn overlap_transform(self: Compressor, x: zml.Tensor, v: f32) zml.Tensor {
         // shape(x) = [b,s,r,2d]
-        const right_half = x.slice(&[_]zml.Tensor.Slice{
+        const right_half = x.slice(&.{
             .{},
             .{},
             .{},
             .{ .start = self.head_dim },
         });
 
-        const left_half = x.slice(&[_]zml.Tensor.Slice{
+        const left_half = x.slice(&.{
             .{},
             .{ .end = x.dim(.seq) - 1},
             .{},
@@ -205,10 +240,10 @@ const Compressor = struct {
 
         // TODO: rewrite
         const pad_shape: zml.Shape = .init(.{.batch = x.dim(.batch), .seq = 1, .r = self.ratio, .hd = self.head_dim}, x.dtype());
-        const pad = zeroes(pad_shape).addConstant(v);
-        const left_padded = zml.Tensor.concatenate(&[_]zml.Tensor{pad,left_half}, 1);
+        const pad = zml.Tensor.zeroes(pad_shape).addConstant(v);
+        const left_padded = zml.Tensor.concatenate(&.{pad, left_half}, 1);
 
-        return zml.Tensor.concatenate(&[_]zml.Tensor{left_padded, right_half}, 2);
+        return zml.Tensor.concatenate(&.{left_padded, right_half}, 2);
     }
 
     fn forwardPrefill(self: Compressor, x: zml.Tensor) struct { ?zml.Tensor, ?zml.Tensor } {
@@ -225,8 +260,8 @@ const Compressor = struct {
         const cutoff = seqlen - remainder;
 
         if (remainder > 0) {
-            kv = kv.split(.seq, &[_]i64{cutoff, remainder})[0];
-            score = score.split(.seq, &[_]i64{cutoff, remainder})[0];
+            kv = kv.split(.seq, &.{cutoff, remainder})[0];
+            score = score.split(.seq, &.{cutoff, remainder})[0];
         }
 
         kv = kv.splitAxis(.seq, .{ .seq = .auto, .r = self.ratio });
@@ -263,7 +298,7 @@ const Compressor = struct {
         kv = apply_rope(kv, maybe_pos_idx.?, self.nope_head_dim, self.rope_head_dim, self.rope_opts);
 
         if (self.rotate) {
-            kv = hadamard_rotation(kv, null);
+            kv = hadamard_rotation(kv);
             // TODO: quantize to FP4
         }
 
@@ -277,9 +312,7 @@ fn find_correction_dim(dim: u32, max_seq_len: u32, num_rotations: f32, base: f32
     const dim_f32: f32 = @floatFromInt(dim);
     const max_seq_len_f32: f32 = @floatFromInt(max_seq_len);
 
-    return dim_f32
-    * std.math.log(f32, 10, max_seq_len_f32 / (num_rotations * 2 * std.math.pi))
-    / (2.0 * std.math.log(f32, 10, base));
+    return dim_f32 * @log10(max_seq_len_f32 / (num_rotations * 2 * std.math.pi)) / (2.0 * @log10(base));
 }
 
 fn find_correction_range(dim: u32, opts: RopeOpts) struct { f32, f32 } {
@@ -290,12 +323,11 @@ fn find_correction_range(dim: u32, opts: RopeOpts) struct { f32, f32 } {
 
 fn linear_ramp_factor(min: f32, max: f32, dim: u32) zml.Tensor {
     const new_max = if (min == max) max + 0.001 else max;
-    _ = new_max; // autofix
 
-    const linear_func = zml.Tensor.arange(.{ .end = dim }, .f32).addConstant(-min).divByConst(max - min);
+    const linear_func = zml.Tensor.arange(.{ .end = dim }, .f32).addConstant(-min).divByConst(new_max - min);
     const shape = linear_func.shape();
 
-    return linear_func.clamp(zeroes(shape), ones(shape));
+    return linear_func.clamp(zml.Tensor.zeroes(shape), ones(shape));
 }
 
 fn precompute_yarn(dim: u32, opts: RopeOpts) zml.Tensor {
@@ -314,7 +346,7 @@ fn precompute_yarn(dim: u32, opts: RopeOpts) zml.Tensor {
     return freqs;
 }
 
-fn apply_yarn(x: zml.Tensor, pos_idx: zml.Tensor, opts: RopeOpts) zml.Tensor {
+fn apply_yarn(x: zml.Tensor, pos_idx: zml.Tensor, opts: RopeOpts, reverse: bool) zml.Tensor {
     // TODO: add assert on .s and .hd
     const freqs = precompute_yarn(@intCast(x.dim(.hd)), opts).withTags(.{.hd});
 
@@ -324,48 +356,58 @@ fn apply_yarn(x: zml.Tensor, pos_idx: zml.Tensor, opts: RopeOpts) zml.Tensor {
     const cos = inv_freq.cos().convert(x.dtype()).broad(x_real.shape());
     const sin = inv_freq.sin().convert(x.dtype()).broad(x_real.shape());
 
-    // apply rotation
     const y_real = x_real.mul(cos).sub(x_imag.mul(sin));
     const y_imag = x_real.mul(sin).add(x_imag.mul(cos));
+
+    // TODO: make it branchless
+    if (reverse) {
+        const y_imag_conj = y_imag.scale(-1);
+        return zml.nn.mergeRealImg(y_real, y_imag_conj, .interleaved);
+    }
 
     return zml.nn.mergeRealImg(y_real, y_imag, .interleaved);
 }
 
-fn apply_rope(x: zml.Tensor, pos_idx: zml.Tensor, nope_dim: i64, rope_dim: i64, opts: RopeOpts) zml.Tensor {
-    const split = x.split(-1, &[_]i64{nope_dim, rope_dim});
-    const x_rope = apply_yarn(split[1], pos_idx, opts);
-    return zml.Tensor.concatenate(&[_]zml.Tensor{split[0], x_rope}, -1);
+fn apply_reverse_rope(x: zml.Tensor, pos_idx: zml.Tensor, nope_dim: i64, rope_dim: i64, opts: RopeOpts) zml.Tensor {
+    const split = x.split(-1, &.{nope_dim, rope_dim});
+    const x_rope = apply_yarn(split[1], pos_idx, opts, true);
+    return zml.Tensor.concatenate(&.{split[0], x_rope}, -1);
 }
 
-fn hadamard_rotation(x: zml.Tensor, scale: ?f32) zml.Tensor {
-    _ = scale; // autofix
+fn apply_rope(x: zml.Tensor, pos_idx: zml.Tensor, nope_dim: i64, rope_dim: i64, opts: RopeOpts) zml.Tensor {
+    const split = x.split(-1, &.{nope_dim, rope_dim});
+    const x_rope = apply_yarn(split[1], pos_idx, opts, false);
+    return zml.Tensor.concatenate(&.{split[0], x_rope}, -1);
+}
+
+// TODO: impl FWHT <https://en.wikipedia.org/wiki/Fast_Walsh%E2%80%93Hadamard_transform>
+fn hadamard_rotation(x: zml.Tensor) zml.Tensor {
     const n = x.dim(-1);
     stdx.debug.assert(@mod(n, 2) == 0, "expect last dimension to be a power of 2, got: {}", .{ n });
 
     var H = zml.Tensor.scalar(1, x.dtype()).reshape(.{ 1, 1 });
 
     while (H.dim(0) < n) {
-        const H_plus = zml.Tensor.concatenate(&[_]zml.Tensor{H, H}, 1);
-        const H_moins = zml.Tensor.concatenate(&[_]zml.Tensor{H.scale(-1), H.scale(-1)}, 1);
-        H = zml.Tensor.concatenate(&[_]zml.Tensor{H_plus, H_moins}, 0);
+        const H_plus = zml.Tensor.concatenate(&.{H, H}, 1);
+        const H_moins = zml.Tensor.concatenate(&.{H, H.scale(-1)}, 1);
+        H = zml.Tensor.concatenate(&.{H_plus, H_moins}, 0);
     }
 
-    const H_ =  H.divByConst(@sqrt(@as(f32, @floatFromInt(n)))).withTags(.{ .a, .hd });
-    std.log.info("x: {f}", .{ x.shape() });
-    std.log.info("H: {f}", .{ H_.shape() });
-    const r = x.dot(H_, .hd);
-    _ = r; // autofix
-    return H_;
-    // std.log.info("r: {f}", .{ r.shape() });
-    // const s = if (scale) |s| s else 1;
-    // return r.scale(s);
+    const scale = zml.Tensor.scalar(n, x.dtype()).rsqrt();
+    return x.dot(H.withTags(.{ .a, .hd }), .hd).mul(scale);
 }
 
-const KVCache = struct {
+pub const KVCache = struct {
     kv: zml.Tensor, 
 
-    pub fn init(kv_shape: zml.Shape) KVCache {
-        // TODO: add .layer to shape
+    pub fn init(mdl: Model, config: Config, batch_size: u32, seqlen: u32) KVCache {
+        const kv_shape: zml.Shape = .init(.{
+            .layer = config.num_hidden_layers,
+            .batch = batch_size,
+            .q = seqlen,
+            .kv = config.num_attention_heads,
+        }, mdl.embeds.weight.dtype());
+
         return .{ .kv = .fromShape(kv_shape) };
     }
 
@@ -424,7 +466,7 @@ const Indexer = struct {
             .rope_head_dim = config.qk_rope_head_dim,
             .nope_head_dim = config.index_head_dim - config.qk_rope_head_dim, //< Not sure about `index_head_dim`
             .ratio = 4,
-            .softmax_scale = @sqrt(@floatFromInt(config.index_head_dim)),
+            .softmax_scale = std.math.pow(f32,@floatFromInt(config.index_head_dim), -0.5),
         };
     }
 
@@ -440,13 +482,14 @@ const Indexer = struct {
         var q = self.wq_b.forward(qr);
         q = q.splitAxis(-1, .{ .h = self.index_n_heads, .hd = .auto });
         q = apply_rope(q, pos_idx, self.nope_head_dim, self.rope_head_dim, self.rope_opts);
-        q = hadamard_rotation(q, null).rename(.{.s = .seq});
+        q = hadamard_rotation(q);
 
         // TODO: FP4 quant q
-        _ = self.compressor.forward(x, start_pos);
+        // NOTE: executed to update the kv cache
+        // _ = self.compressor.forward(x, start_pos);
 
         var weights = self.proj.forward(x);
-        weights = weights.scale(@sqrt(self.softmax_scale * @as(f32, @floatFromInt(self.index_n_heads))));
+        weights = weights.mul(zml.Tensor.scalar(@as(f32, @floatFromInt(self.index_n_heads)), weights.dtype()).broad(weights.shape()).rsqrt().scale(self.softmax_scale));
         //
         // const kv = qr; //< TODO: get it from KV cache
         //
@@ -457,31 +500,33 @@ const Indexer = struct {
         // const end_pos: u32 = @intCast(start_pos + x.dim(.seq));
         // const k =  @min(self.index_topk, @mod(end_pos, self.ratio));
         //
-        // const seq = x.dim(.seq);
-        //
-        // const topk_idxs = blk: {
-        //     if (start_pos == 0) {
-        //         const a = zml.Tensor.arange(.{ .end = @mod(seq, self.ratio) }, .i64).repeat(&[_]u63{1});
-        //         const b = zml.Tensor.arange(.{ .end = seq + 1 }, .i64).reshape(.{ seq+1, 1});
-        //         const mask = a.cmp(.GT,  b);
-        //         _ = mask; // autofix
-        //
-        //         // index_score.add(zml.Tensor.select(mask, -inf, zeroes(index_score.shape());
-        //
-        //         var topk_idxs = index_score.topK(-1, k, .{}).indices;
-        //
-        //         const mask_ = topk_idxs.cmp(.GT, b);
-        //         topk_idxs = zml.Tensor.select(mask_, zml.Tensor.scalar(-1, topk_idxs.dtype()).broad(topk_idxs.shape()), topk_idxs.addConstant(offset));
-        //         break :blk topk_idxs;
-        //     } else {
-        //         var topk_idxs = index_score.topK(-1, k, .{}).indices;
-        //         topk_idxs = topk_idxs.addConstant(offset);
-        //         break :blk topk_idxs;
-        //     }
-        // };
-        //
-        // return topk_idxs;
-        return x;
+        const seq = x.dim(.seq);
+
+        const topk_idxs = blk: {
+            if (start_pos == 0) {
+                const a = zml.Tensor.iota(.init(.{ seq, @divFloor(seq, self.ratio) }, .i64), 1).convert(.i64);
+                const b = zml.Tensor.arange(.{ .start = 1, .end = seq + 1 }, .i64).reshape(.{ seq, 1}).divByConst(self.ratio).broad(a.shape()).convert(.i64);
+                const mask = a.cmp(.GT,  b);
+                _ = mask; // autofix
+                // _ = mask; // autofix
+
+                // index_score.add(zml.Tensor.select(mask, zml.Tensor.scalar(-std.math.inf(f32), .f32).broad(mask), zeroes(index_score.shape())));
+
+                // var topk_idxs = index_score.topK(-1, k, .{}).indices;
+                //
+                // const mask_ = topk_idxs.cmp(.GT, b);
+                // topk_idxs = zml.Tensor.select(mask_, zml.Tensor.scalar(-1, topk_idxs.dtype()).broad(topk_idxs.shape()), topk_idxs.addConstant(offset));
+                // break :blk topk_idxs;
+            } else {
+                // var topk_idxs = index_score.topK(-1, k, .{}).indices;
+                // topk_idxs = topk_idxs.addConstant(offset);
+                // break :blk topk_idxs;
+            }
+
+            break :blk x;
+        };
+
+        return topk_idxs;
     }
 };
 
@@ -522,7 +567,7 @@ const Attention = struct {
         };
 
         return .{
-            .attn_sink = store.createTensor("attn_sink", .{ .hd }, .replicated),
+            .attn_sink = store.createTensor("attn_sink", .{ .h }, .replicated),
             .kv_norm = .init(store.createTensor("kv_norm.weight", .{ .hd }, .replicated), config.rms_norm_eps, .hd),
             .q_norm = .init(store.createTensor("q_norm.weight", .{ .q }, .replicated), config.rms_norm_eps, .q),
             .wq_a = .init(store.withPrefix("wq_a"), .{ .q, .d }, block_size, .d),
@@ -557,119 +602,131 @@ const Attention = struct {
     }
 
     // TODO: Add KV cache
-    pub fn forward(self: Attention, x: zml.Tensor, start_pos: u32) zml.Tensor {
+    pub fn forward(
+        self: Attention,
+        x: zml.Tensor, 
+        token_idx_offset: zml.Tensor,
+        layer_idx: zml.Tensor,
+        cache: KVCache,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
+    ) struct { zml.Tensor, KVCache } {
+        _ = token_idx_offset; // autofix
+        _ = layer_idx; // autofix
+        _ = attention_metadata; // autofix
+        _ = attention_parameters; // autofix
         // shape(x) = [batch, seq, d]
-        const q = blk: { // shape(q) = [batch, q, h=64, hd=512]
-            var q_proj = self.q_norm.forward(self.wq_a.forward(x));
-            q_proj = self.wq_b.forward(q_proj).splitAxis(.hd, .{ .h = self.local_heads, .hd = self.head_dim });
-            q_proj = q_proj.mul(q_proj.powByConst(2).mean(.hd).addConstant(self.eps)).rsqrt();
+        // const start_pos = token_idx_offset.choose1d(0, 0);
+        const start_pos: i64 = 0;
+        const pos_idx = zml.Tensor.arange(.{ .start = start_pos, .end = start_pos + x.dim(.seq) }, .i64).withTags(.{ .seq });
 
-            const q_split = q_proj.split(.hd, &[_]i64{self.nope_head_dim, self.rope_head_dim});
-            stdx.debug.assert(q_split.len == 2, "expected two tensors from q split, got {}", .{q_split.len});
+        // shape(q) = [batch, q, h=64, hd=512]
+        var q = self.q_norm.forward(self.wq_a.forward(x));
+        q = self.wq_b.forward(q).splitAxis(.hd, .{ .h = self.local_heads, .hd = self.head_dim });
+        q = q.mul(q.powByConst(2).mean(.hd).addConstant(self.eps)).rsqrt();
+        q = apply_rope(q, pos_idx, self.nope_head_dim, self.rope_head_dim, self.rope_opts);
+        q = q.rename(.{ .seq = .q });
 
-            const q_rope = zml.nn.rope(q_split[1].renameTag(.seq, .s), null, self.rope_opts);
-            break :blk zml.Tensor.concatenate(&[_]zml.Tensor{q_split[0], q_rope}, .hd);
-        }.rename(.{ .seq = .q });
+        // TODO: FP8 quantize non-rope kv dims and let the rope-dim in bf16?
+        // shape(kv) = [batch, k, hd=512]
+        var kv = self.kv_norm.forward(self.wkv.forward(x));
+        kv = apply_rope(kv, pos_idx, self.nope_head_dim, self.rope_head_dim, self.rope_opts);
+        kv = kv.rename(.{ .seq = .k });
 
-        const kv = blk: { // shape(kv) = [batch, k, hd=512]
-            const kv_split = self.kv_norm.forward(self.wkv.forward(x)).split(.hd, &[_]i64{self.nope_head_dim, self.rope_head_dim});
-            stdx.debug.assert(kv_split.len == 2, "expected two tensors from kv split, got {}", .{kv_split.len});
-
-            const kv_rope = zml.nn.rope(kv_split[1].renameTag(.seq, .s), null, self.rope_opts);
-            // TODO: quantize kv_rope? Extracted from the inference code:
-            //  > FP8-simulate non-rope dims to match QAT; rope dims stay bf16 for positional precision
-            break :blk zml.Tensor.concatenate(&[_]zml.Tensor{kv_split[0], kv_rope}, .hd);
-        }.rename(.{ .seq = .k });
-
-        // TODO 
         // const new_kv_cache = kv_cache.update(kv, tokens_position_offset, cache_index);
         // kv = new_kv_cache.keys(cache_index);
+        const cache_ = cache;
 
         const topk = topk_window(self.window_size, x.dim(.batch), x.dim(.seq), start_pos).withTags(.{.batch, .seq, .topk});
 
         var attn = sparse_attn(q, kv, self.attn_sink, topk, self.softmax_scale);
-        attn = zml.nn.rope(attn.rename(.{.q = .s}), null, self.rope_opts);
+        attn = apply_reverse_rope(attn.rename(.{ .q = .seq }), pos_idx, self.nope_head_dim, self.rope_head_dim, self.rope_opts);
         attn = attn.reshape(.{ .batch = attn.dim(0), .seq = attn.dim(1), .g = self.o_groups, .d = self.head_dim * self.o_groups });
 
         var v = self.wo_a;
         v.weight = v.weight.splitAxis(.hd, .{ .g = self.o_groups, .r = self.o_lora_rank });
 
         var o = v.forward(attn);
-
         // TODO: figure out why this reshape is needed
         o = o.reshape(.{ .batch = o.dim(.batch), .seq = o.dim(.seq), .g = o.dim(.g), .r = o.dim(.r)});
         o = o.merge(.{ .d = .{ .g, .r}});
 
-    return self.wo_b.forward(o);
+        return .{ self.wo_b.forward(o), cache_ };
     }
 };
 
-fn zeroes(s: zml.Shape) zml.Tensor {
-    return zml.Tensor.constant(s.dtype().zero()).broad(s);
-}
 fn ones(s: zml.Shape) zml.Tensor {
     return zml.Tensor.constant(s.dtype().one()).broad(s);
 }
 
 fn topk_window(window_size: i64, batch_size: i64, seqlen: i64, start_pos: i64) zml.Tensor {
     const matrix = blk: {
-        if (start_pos >= window_size - 1) {
-            const end = @mod(start_pos, window_size);
-            const a = zml.Tensor.arange(.{ .start = end + 1, .end = window_size }, .i64);
-            const b = zml.Tensor.arange(.{ .end = end + 1}, .i64);
-            break :blk zml.Tensor.concatenate(&[_]zml.Tensor{a, b}, 0);
-        } else if (start_pos > 0) {
-            stdx.debug.assert(false, "not implemented", .{});
-            const v = zml.Tensor.arange(.{ .end = start_pos + 1 }, .i64);
-            _ = v; // autofix
-            // const matrix = v.pad(-1, .{ .{0} = .{ .low = 0, .high = window_size - start_pos - 1 } });
-        } else {
-            var base = zml.Tensor.arange(.{ .end = seqlen }, .i64);
+        if (start_pos == 0) {
+            const base = zml.Tensor.arange(.{ .end = seqlen }, .i64).reshape(.{seqlen, 1});
 
             // NOTE: equivalent to (base - window_size +1).clamp(0)
-            const s = zml.Tensor.select(
+            const base_clamped = zml.Tensor.select(
             base.cmp(.LT, zml.Tensor.scalar(window_size + 1, .i64)),
-            zeroes(base.shape()),
+            zml.Tensor.zeroes(base.shape()),
             base,
             );
 
-            // TODO: `matrix = (base - window_size + 1).clamp(0) + torch.arange(min(seqlen, window_size))`
-            const ns: zml.Shape = .init(.{11, 11}, .i64);
-            var matrix = s.reshape(.{11, 1}).broad(ns).add(zml.Tensor.arange(.{ .end = @min(seqlen, window_size) }, .i64).reshape(.{1, 11}).broad(ns));
-            // matrix.print("matrix");
-            const mask = matrix.cmp(.GT, base.reshape(.{11, 1}).broad(ns));
-            matrix = zml.Tensor.select(mask, zml.Tensor.scalar(-1, matrix.dtype()).broad(matrix.shape()), matrix);
+            const cols = @min(seqlen, window_size);
+            const row_indices = zml.Tensor.arange(.{ .end = cols }, .i64).reshape(.{1, cols});
+
+            const matrix_shape: zml.Shape = .init(.{seqlen, cols}, .i64);
+            var matrix = base_clamped.broad(matrix_shape).add(row_indices.broad(matrix_shape));
+            matrix = zml.Tensor.select(
+                matrix.cmp(.GT, base.broad(matrix_shape)),
+                zml.Tensor.scalar(-1, .i64).broad(matrix_shape),
+                matrix
+            );
 
             break :blk matrix;
+        } else if (start_pos >= window_size - 1) {
+            const cutoff = @mod(start_pos, window_size);
+            break :blk zml.Tensor.concatenate(&.{
+                zml.Tensor.arange(.{ .start = cutoff + 1, .end = window_size }, .i64),
+                zml.Tensor.arange(.{ .end = cutoff + 1}, .i64),
+            }, 0);
+        } else {
+            const base = zml.Tensor.arange(.{ .end = start_pos + 1 }, .i64);
+            const pad = zml.Tensor.scalar(-1, .i64).repeat(&.{@intCast(window_size - start_pos - 1)});
+            break :blk zml.Tensor.concatenate(&.{ base, pad }, 0);
         }
     };
 
-    return matrix.reshape(.{batch_size, 11, 11});
+    return matrix.insertAxes(0, .{ .batch }).reshape(.{ batch_size, matrix.dim(0), matrix.dim(1) });
 }
 
-// TODO: rename to `sparse_attn`.
-fn sparse_attn(q: zml.Tensor, kv: zml.Tensor, sink: zml.Tensor, topk: zml.Tensor, scale: ?f32) zml.Tensor {
-    _ = sink; // autofix
-    // shape = [batch, k, v, hd]
-    const selected_kv = kv.gather(.{ .k = topk }, .{}).rename(.{.seq = .q, .topk = .k});
+// From: <https://github.com/tile-ai/tilelang/blob/4e873220313c7e4dbfa0538582bc32ac5c81b1eb/examples/deepseek_v4/sparse_attn_fwd_sm90.py#L162>
+pub fn sparse_attn(q: zml.Tensor, kv: zml.Tensor, attn_sink: zml.Tensor, topk: zml.Tensor, scale: ?f32) zml.Tensor {
+    // q = [batch, q, h, hd], kv = [batch, k, hd], topk = [batch, seq, topk]
+    const selected_kv = kv.gather(.{ .k = topk }, .{}).rename(.{.seq = .q, .topk = .k}).convert(.f32);
 
     const dims = zml.nn.collectDims(.{ .h, .q, .k, .hd }, &.{ q, kv }, .strict) catch {
         stdx.debug.panic("Inputs have incompatible shapes (q: {f}, kv: {f}, attn_mask: ).", .{q, kv});
     };
 
     const sqrt_head_dim = if (scale) | m | m else 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
-    const head_scaling = zml.Tensor.scalar(sqrt_head_dim, kv.dtype());
+    const head_scaling = zml.Tensor.scalar(sqrt_head_dim, selected_kv.dtype());
 
-    const scores = q.dot(selected_kv, .hd).mul(head_scaling);
+    const q_32 = q.convert(.f32);
+    const scores = q_32.dot(selected_kv, .hd).mul(head_scaling);
 
-    // TODO: sink[64] -> [None, None, 64, None]
-    // concat (scores, sink)
-    // remove sink probability
+    const sink_shape = q.shape().set(.hd, 1);
+    const sink = attn_sink.insertAxes(0, .{ .batch, .q }).insertAxes(.last, .{ .hd }).broad(sink_shape);
+    const scores_sink = zml.Tensor.concatenate(&.{scores, sink.convert(scores.dtype())}, -1);
 
-    const attn_weights = scores.convert(.f32).softmax(.k).convert(q.dtype());
-    const attn = attn_weights.dot(selected_kv, .k);
-
-    return attn;
+    const attn_weights = scores_sink.convert(.f32).softmax(.k).convert(q_32.dtype());
+    const attn_weights_non_sink = attn_weights.slice(&.{
+        .{},
+        .{},
+        .{},
+        .{ .end = topk.dim(.topk) },
+    });
+    const attn = attn_weights_non_sink.dot(selected_kv, .k);
+    return attn.convert(.bf16);
 }
 
 const MoE = struct {
@@ -851,92 +908,144 @@ const Expert = struct {
 };
 
 const Layer = struct {
+    const SinkhornOpts = struct {
+        scale: zml.Tensor,
+        func: zml.nn.Linear,
+        base: zml.Tensor,
+    };
+
     attn_norm: RmsNorm,
     ffn_norm: RmsNorm,
-    hc_attn_base: zml.Tensor,
-    hc_attn_fn: zml.nn.Linear,
-    hc_attn_scale: zml.Tensor,
-    hc_ffn_base: zml.Tensor,
-    hc_ffn_fn: zml.nn.Linear,
-    hc_ffn_scale: zml.Tensor,
+    hc_attn: SinkhornOpts,
+    hc_ffn: SinkhornOpts,
     attn: Attention,
     ffn: MoE,
     norm_eps: f32,
+    hc_eps: f32,
+    hc_mult: u32,
+    hc_sinkhorn_iters: u32,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, i: usize) !Layer {
         return .{
             .attn_norm = .init(store.createTensor("attn_norm.weight", .{ .d }, .replicated), config.rms_norm_eps, .d),
             .ffn_norm = .init(store.createTensor("ffn_norm.weight", .{ .d }, .replicated), config.rms_norm_eps, .d),
-            .hc_attn_base = store.createTensor("hc_attn_base", .{.b}, .replicated),
-            .hc_attn_fn = .init(store.createTensor("hc_attn_fn", .{.b, .r}, .replicated), null, .b),
-            .hc_attn_scale = store.createTensor("hc_attn_scale", .{.scale}, .replicated),
-            .hc_ffn_base = store.createTensor("hc_ffn_base", .{.b}, .replicated),
-            .hc_ffn_fn = .init(store.createTensor("hc_ffn_fn", .{.b, .r}, .replicated), null, .b),
-            .hc_ffn_scale = store.createTensor("hc_ffn_scale", .{.b}, .replicated),
             .attn = .init(store.withPrefix("attn"), config, i),
             .ffn = try .init(allocator, store.withPrefix("ffn"), config, i),
             .norm_eps = config.rms_norm_eps, //< TODO: CHECK
+            .hc_eps = config.hc_eps,
+            .hc_mult = config.hc_mult,
+            .hc_sinkhorn_iters = config.hc_sinkhorn_iters,
+            .hc_attn = .{
+                .base = store.createTensor("hc_attn_base", .{.b}, .replicated),
+                .func = .init(store.createTensor("hc_attn_fn", .{.b, .d}, .replicated), null, .d),
+                .scale = store.createTensor("hc_attn_scale", .{.scale}, .replicated),
+            },
+            .hc_ffn = .{
+                .base = store.createTensor("hc_ffn_base", .{.b}, .replicated),
+                .func = .init(store.createTensor("hc_ffn_fn", .{.b, .d}, .replicated), null, .d),
+                .scale = store.createTensor("hc_ffn_scale", .{.b}, .replicated),
+            },
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Layer), allocator: std.mem.Allocator) void {
         self.attn_norm.weight.deinit();
         self.ffn_norm.weight.deinit();
-        self.hc_attn_base.deinit();
-        self.hc_attn_fn.weight.deinit();
-        self.hc_attn_scale.deinit();
-        self.hc_ffn_base.deinit();
-        self.hc_ffn_fn.weight.deinit();
-        self.hc_ffn_scale.deinit();
+        self.hc_attn.base.deinit();
+        self.hc_attn.func.weight.deinit();
+        self.hc_attn.scale.deinit();
+        self.hc_ffn.base.deinit();
+        self.hc_ffn.func.weight.deinit();
+        self.hc_ffn.scale.deinit();
         Attention.unloadBuffers(&self.attn);
         MoE.unloadBuffers(&self.ffn, allocator);
     }
 
-    fn hc_pre(self: Layer, x: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
+    // TODO: maybe implement mHC-lite: <https://arxiv.org/html/2601.05732v1>
+    fn hc_split_sinkhorn(mixes: zml.Tensor, n: usize, mult: u32, eps: f32, opts: SinkhornOpts) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
+        // mixes = [batch, seq, hc, d]
+        const pre_mix = mixes.slice1d(.b, .{ .end = mult });
+        const post_mix = mixes.slice1d(.b, .{ .start = mult, .end = 2 * mult });
+        const comb_mix = mixes.slice1d(.b, .{ .start = 2 * mult });
+
+        const base_pre = opts.base.slice1d(0, .{ .end = mult });
+        const base_post = opts.base.slice1d(0, .{ .start = mult, .end = 2 * mult });
+        const base_comb = opts.base.slice1d(0, .{ .start = 2 * mult }).splitAxis(-1, .{ mult, .auto});
+
+        const pre = pre_mix.mul(opts.scale.choose1d(0, 0)).add(base_pre.broad(pre_mix.shape())).sigmoid().addConstant(eps);
+        const post = post_mix.mul(opts.scale.choose1d(0, 1)).add(base_post.broad(post_mix.shape())).sigmoid().scale(2);
+
+        var comb = comb_mix.splitAxis(-1, .{ mult, .auto });
+        comb = comb.mul(opts.scale.choose1d(0, 2)).add(base_comb.insertAxes(0, .{ .batch, .seq }).broad(comb.shape()));
+        comb = comb.softmax(-1).addConstant(eps);
+        comb = comb.div(comb.sum(-2).addConstant(eps));
+
+        for(1..n) |_| {
+            comb = comb.div(comb.sum(-1).addConstant(eps));
+            comb = comb.div(comb.sum(-2).addConstant(eps));
+        }
+
+        return .{ pre, post, comb };
+    }
+
+    fn hc_pre(self: Layer, x: zml.Tensor, opts: SinkhornOpts) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
         // shape(x) = [batch, seq, hc, d]
         const x_ = x.merge(.{ .d = .{ .hc, .d }}).convert(.f32);
 
-        const rsqrt = x_.powByConst(2).mean(.d).addConstant(self.norm.eps).rsqrt();
-
         const mixes = blk: {
-            const m = self.hc_fn.forward(x_);
+            const rsqrt = x_.powByConst(2).mean(.d).addConstant(self.norm_eps).rsqrt();
+            const m = opts.func.forward(x_);
             break :blk m.mul(rsqrt.broad(m.shape()));
         };
 
-        const pre, const post, const comb = hc_split_sinkhorn(mixes, self.hc_attn_scale, self.hc_attn_fn, self.hc_mult, self.hc_sinkhorn_iters, self.hc_eps);
-        const y = pre.sum(pre.mul(x), .seq);
+        const pre, const post, const comb = hc_split_sinkhorn(mixes, self.hc_sinkhorn_iters, self.hc_mult, self.hc_eps, opts);
+
+        const y = x.convert(.f32).mul(pre.appendAxes(.{.d}).broad(x.shape())).sum(.hc).squeeze(.hc);
         return .{ y.convert(x.dtype()), post, comb };
     }
 
     fn hc_post(x: zml.Tensor, residual: zml.Tensor, post: zml.Tensor, comb: zml.Tensor) zml.Tensor {
         // x: [b,s,d], residual: [b,s,hc,d], post: [b,s,hc], comb: [b,s,hc,hc], y: [b,s,hc,d]
-        const y1 = comb.mul(residual).sum(2);
-        return post.mul(x).add(y1);
+        const p = post.appendAxes(.{ .hd }).rename(.{ .b = .hc });
+        const x_ = x.insertAxes(.hd, .{ .hc }).convert(.f32);
+
+        const s: zml.Shape = x_.shape().set(.hc, p.dim(.hc));
+        const m = x_.broad(s).mul(p.broad(s));
+
+        const r_32 = residual.insertAxes(.hc, .{ .hc2 }).convert(.f32);
+        const c = comb.appendAxes(.{ .d });//withTags(.{ .batch, .seq, .hc, .d });
+        const s2 = c.shape().set(.d, r_32.dim(.d));
+        const m2 = r_32.broad(s2).mul(c.broad(s2)).sum(2).squeeze(2).withTags(.{ .batch, .seq, .hc, .dd });
+        
+        const f = m.add(m2).rename(.{ .hd = .d });
+        return f.convert(x.dtype());
     }
 
-    pub fn forward(self: Layer, x: zml.Tensor) zml.Tensor {
-        var x_, const post, const comb = self.hc_pre(x);
+    pub fn forward(
+        self: Layer,
+        x: zml.Tensor,
+        tokens: zml.Tensor,
+        tokens_idx_offset: zml.Tensor,
+        layer_idx: zml.Tensor,
+        cache: KVCache,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
+    ) struct { zml.Tensor, KVCache } {
+        // x: [batch, seq, hc, d]
+        var x_, const post, const comb = self.hc_pre(x, self.hc_attn);
         x_ = self.attn_norm.forward(x_);
-        x_ = self.attn.forward(x_, 0);
+        x_, const cache_ = self.attn.forward(x_, tokens_idx_offset, layer_idx, cache, attention_metadata, attention_parameters);
         x_ = hc_post(x_, x, post, comb);
 
-        var x_2, const post_2, const comb_2 = self.hc_pre(x_);
-        x_2 = self.ffn_norm.forward(x_2);
-        x_2 = self.ffn.forward(x_2, 0);
-        x_2 = hc_post(x_2, x_, post_2, comb_2);
+        var x_2, const post_2, const comb_2 = self.hc_pre(x_, self.hc_ffn);
 
-        return x_2;
+        x_2 = self.ffn_norm.forward(x_2);
+        x_2 = self.ffn.forward(x_2, tokens);
+        x_2 = hc_post(x_2.rename(.{ .d = .hd}), x_, post_2, comb_2);
+
+        return .{ x_2, cache_ };
     }
 };
-
-fn hc_split_sinkhorn(mixes: zml.Tensor, hc_attn_scale: zml.Tensor, hc_attn_fn: zml.Tensor, hc_mult: f32, hc_sinkhorn_iters: zml.Tensor, hc_eps: f32) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
-    _ = hc_attn_scale; // autofix
-    _ = hc_attn_fn; // autofix
-    _ = hc_mult; // autofix
-    _ = hc_sinkhorn_iters; // autofix
-    _ = hc_eps; // autofix
-    return .{ mixes, mixes, mixes };
-}
 
 const LmHead = struct {
     norm: RmsNorm,
@@ -945,7 +1054,6 @@ const LmHead = struct {
     hc_fn: zml.nn.Linear,
     hc_scale: zml.Tensor,
     hc_eps: f32,
-    hc_sinkhorn_iters: u32,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) LmHead {
         return .{
@@ -955,7 +1063,6 @@ const LmHead = struct {
             .hc_fn = .init(store.createTensor("hc_head_fn", .{.hc, .d}, .replicated), null, .d),
             .hc_scale = store.createTensor("hc_head_scale", .{.batch}, .replicated),
             .hc_eps = config.hc_eps,
-            .hc_sinkhorn_iters = config.hc_sinkhorn_iters,
         };
     }
 
@@ -981,8 +1088,8 @@ const LmHead = struct {
     }
 
     pub fn forward(self: LmHead, x: zml.Tensor) zml.Tensor {
-        // TODO: fix with start = -1
-        return self.voc_proj.forward(self.norm.forward(self.hc_head(x)).convert(.f32)).slice1d(.seq, .{ .start = 10 }).squeeze(.seq);
+        const x_ = self.voc_proj.forward(self.norm.forward(self.hc_head(x)).convert(.f32));
+        return x_.slice1d(.seq, .{ .start = x_.dim(.seq) - 1 }).squeeze(.seq);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(LmHead)) void {
@@ -999,8 +1106,9 @@ pub const Model = struct {
     layers: []Layer,
     lm_head: LmHead, 
     hc_mult: u32,
+    sampling_strategy: zml.nn.SamplingStrategy,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Model {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
         const layers = try allocator.alloc(Layer, config.num_hidden_layers);
 
         for (layers, 0..) |*layer, i| {
@@ -1015,6 +1123,7 @@ pub const Model = struct {
             .layers = layers,
             .lm_head = .init(store, config),
             .hc_mult = config.hc_mult,
+            .sampling_strategy = generation.sampling_strategy,
         };
     }
 
@@ -1069,19 +1178,32 @@ pub const Model = struct {
         LmHead.unloadBuffers(&self.lm_head);
     }
 
-    pub fn forward(self: Model, tokens: zml.Tensor) zml.Tensor {
-        stdx.debug.assert(tokens.shape().hasTags(.{ .batch, .seq, }), "expect input tokens to has tags {.batch, .seq} but got {f}", .{ tokens.shape() });
+    pub fn forward(
+        self: Model,
+        tokens: zml.Tensor,
+        tokens_idx_offset: zml.Tensor,
+        rng: zml.Tensor.Rng,
+        cache: KVCache,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
+    ) struct { zml.Tensor, zml.Tensor.Rng, KVCache } {
+        stdx.debug.assert(tokens.shape().hasTags(.{ .batch, .seq, }), "expect input tokens to has tags (.batch, .seq) but got {f}", .{ tokens.shape() });
 
-        var hidden = self.embeds.forward(tokens).rename(.{ .voc = .d }); //< [batch, seq, d]
-        hidden = hidden.insertAxes(.seq, .hc).repeat1d(.hc, @intCast(self.hc_mult)); //< [batch, seq, hc, d]
+        var hidden = self.embeds.forward(tokens); //< [batch, seq, d]
+        hidden = hidden.insertAxes(.d, .{ .hc }).repeat1d(.hc, @intCast(self.hc_mult)); //< [batch, seq, hc, d]
+
+        var cache_ = cache;
+        var layer_idx = zml.Tensor.scalar(@as(u32, 0), .u32);
 
         for(self.layers) |layer| {
-            hidden = layer.forward(hidden); //< [batch, seq, d]
+            hidden, cache_ = layer.forward(hidden, tokens, tokens_idx_offset, layer_idx, cache_, attention_metadata, attention_parameters); //< [batch, seq, d]
+            layer_idx = layer_idx.addConstant(1);
         }
 
         const logits = self.lm_head.forward(hidden); //< [batch, voc]
-        // TODO: rng stuff
-        return logits;
+
+        const new_tokens, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, rng);
+        return .{ new_tokens.convert(tokens.dtype()), new_rng, cache_ };
     }
 };
 
@@ -1096,13 +1218,12 @@ pub const LoadedModel = struct {
         store: zml.io.TensorStore.View,
         generation: common.GenerationOptions,
     ) !LoadedModel {
-        _ = generation; // autofix
         
         const parsed_config = try common.parseConfig(Config, allocator, io, repo);
         errdefer parsed_config.deinit();
 
         return .{
-            .inner = try .init(allocator, store, parsed_config.value),
+            .inner = try .init(allocator, store, parsed_config.value, generation),
             .parsed_config = parsed_config,
         };
     }
@@ -1139,14 +1260,7 @@ pub const LoadedModel = struct {
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
-        _ = self; // autofix
-        _ = allocator; // autofix
-        _ = io; // autofix
-        _ = platform; // autofix
-        _ = backend; // autofix
-        _ = shardings; // autofix
-        _ = seqlen; // autofix
-        _ = progress; // autofix
-        return error.NotImplemented;
+        const opts = inference.CompilationParameters.init(@intCast(seqlen), self.parsed_config.value, self.inner, shardings, backend); 
+        return try inference.CompiledModel.init(allocator, io, @constCast(platform), self.inner, @intCast(seqlen), progress, opts);
     }
 };
