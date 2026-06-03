@@ -1,7 +1,6 @@
 //! Zig port of `pltpu.emit_pipeline` (jax/_src/pallas/mosaic/pipeline.py) —
 //! emits lowered `tpu`-dialect IR byte-equivalent to `pallas_call`.
 //!
-//! 1-D dynamic-bound grid; VMEM operands; `buffer_count ∈ {1,2}`;
 //! `.blocked`/`.squeezed`/one `.bounded_slice` block dim; trivial-windowing
 //! inputs peeled as sync copy; `trace_scopes`. Unsupported features panic.
 
@@ -57,6 +56,8 @@ pub const BodyFn = *const fn (b: *Builder, grid_indices: []const Value, refs: []
 pub const PipeSpec = struct {
     full_shape: []const i64,
     dtype: DType,
+    /// Optional HBM source/result view to materialize at each DMA use site.
+    source_reshape_shape: ?[]const i64 = null,
     /// `null` ⇒ trivial windowing (the whole array).
     block_shape: ?[]const BlockDim = null,
     /// `null` only allowed with trivial windowing.
@@ -64,7 +65,7 @@ pub const PipeSpec = struct {
     index_map_ctx: ?*anyopaque = null,
     /// Only `.vmem` supported.
     memory_space: MemorySpace = .vmem,
-    /// `null` ⇒ 2 (or 1 if trivial).
+    
     buffer_count: ?usize = null,
     /// Tile that `_create_bounded_slice` rounds the DMA size up to.
     bounded_slice_tiling: i32 = 1,
@@ -92,7 +93,7 @@ pub fn emitPipeline(
     opts: PipelineOpts,
 ) FinishError!void {
     std.debug.assert(opts.grid.len >= 1);
-    if (opts.grid.len != 1) @panic("emitPipeline: only 1-D grids supported (TODO: N-D `_next_index`)");
+    if (opts.grid.len > 4) @panic("emitPipeline: grids with rank > 4 unsupported");
     const n_in = opts.in_specs.len;
     std.debug.assert(refs.len == n_in + opts.out_specs.len);
 
@@ -118,7 +119,7 @@ pub fn emitPipeline(
 
     for (brefs.items) |*br| br.allocate(b);
 
-    const num_steps = opts.grid[0];
+    const num_steps = gridSize(b, opts.grid);
     const c0_i32 = b.lift(@as(i32, 0));
     const c1_i32 = b.lift(@as(i32, 1));
     {
@@ -143,11 +144,11 @@ pub fn emitPipeline(
                 if (opts.trace_scopes) b.traceStop();
             }
 
-            // iter_args: each bref's slots in spec order (see appendSlotInits), then grid_idx.
-            var inits: std.ArrayList(*const mlir.Value) = try .initCapacity(a, brefs.items.len * 2 + 1);
+            // iter_args: each bref's slots in spec order (see appendSlotInits), then grid indices.
+            var inits: std.ArrayList(*const mlir.Value) = try .initCapacity(a, brefs.items.len * 2 + opts.grid.len);
             for (brefs.items) |*br| br.appendSlotInits(b, &inits);
-            inits.appendAssumeCapacity(c0_i32.inner);
-            const n_slots = inits.items.len - 1;
+            for (0..opts.grid.len) |_| inits.appendAssumeCapacity(c0_i32.inner);
+            const n_slots = inits.items.len - opts.grid.len;
 
             const i32_ty = b.scalarTy(.i32);
             const block_types = a.alloc(*const mlir.Type, inits.items.len + 1) catch unreachable;
@@ -163,10 +164,13 @@ pub fn emitPipeline(
                 for (brefs.items) |*br| cur = br.bindSlotsAt(b, for_body, cur);
                 std.debug.assert(cur == n_slots + 1);
             }
-            const grid_idx: Value = .{ .inner = for_body.argument(@intCast(n_slots + 1)), .kernel = b };
+            var grid_indices_buf: [4]Value = undefined;
+            for (0..opts.grid.len) |i| {
+                grid_indices_buf[i] = .{ .inner = for_body.argument(@intCast(n_slots + 1 + i)), .kernel = b };
+            }
 
             var sched = Scheduler.init(b, iv, opts.grid, num_steps, num_stages, opts.trace_scopes);
-            sched.indices_storage[0] = grid_idx;
+            for (0..opts.grid.len) |i| sched.indices_storage[i] = grid_indices_buf[i];
             sched.recomputeDerivedIndices(b);
 
             for (brefs.items) |*br| if (br.buffer_type == .input) sched.copyIn(b, br);
@@ -193,10 +197,10 @@ pub fn emitPipeline(
 
             for (brefs.items) |*br| if (br.buffer_type == .input) sched.advanceSlots(b, br);
 
-            var yields: std.ArrayList(*const mlir.Value) = try .initCapacity(a, brefs.items.len * 2 + 1);
+            var yields: std.ArrayList(*const mlir.Value) = try .initCapacity(a, brefs.items.len * 2 + opts.grid.len);
             for (brefs.items) |*br| br.appendSlotYields(b, &yields);
-            const next_idx = nextIndex1D(b, grid_idx, num_steps);
-            yields.appendAssumeCapacity(next_idx.inner);
+            const next_indices = nextIndexND(b, sched.indices(), opts.grid);
+            for (next_indices) |idx| yields.appendAssumeCapacity(idx.inner);
             _ = scf.yield(b.ctx, yields.items, b.loc()).appendTo(for_body);
             b.popBlock();
 
@@ -204,12 +208,15 @@ pub fn emitPipeline(
             _ = for_op.appendTo(b.currentBlock());
             var k: usize = 0;
             for (brefs.items) |*br| k = br.readbackSlots(b, for_op, k);
-            const final_grid_idx: Value = .{ .inner = for_op.result(@intCast(n_slots)), .kernel = b };
+            var final_grid_indices_buf: [4]Value = undefined;
+            for (0..opts.grid.len) |i| {
+                final_grid_indices_buf[i] = .{ .inner = for_op.result(@intCast(n_slots + i)), .kernel = b };
+            }
 
-            // prev_index BEFORE Scheduler.init so its inner `subi(num_steps,1)` CSEs with `step`.
-            const final_idx = prevIndex1D(b, final_grid_idx, num_steps);
+            // prev_index BEFORE Scheduler.init so common arithmetic CSEs with `step`.
+            const final_idx = prevIndexND(b, final_grid_indices_buf[0..opts.grid.len], opts.grid);
             var sched_fin = Scheduler.init(b, b.subi(num_steps, c1_i32), opts.grid, num_steps, num_stages, opts.trace_scopes);
-            sched_fin.indices_storage[0] = final_idx;
+            for (0..opts.grid.len) |i| sched_fin.indices_storage[i] = final_idx[i];
             sched_fin.recomputeDerivedIndices(b);
             for (brefs.items) |*br| sched_fin.finalize(b, br);
             for (brefs.items) |*br| if (br.is_trivial and br.buffer_type == .output) br.syncCopyOut(b);
@@ -315,13 +322,12 @@ const BufferedRef = struct {
 
     fn appendSlotInits(self: *BufferedRef, b: *Builder, out: *std.ArrayList(*const mlir.Value)) void {
         const c0 = b.lift(@as(i32, 0)).inner;
-        const c1 = b.lift(@as(i32, 1)).inner;
         switch (self.buffer_type) {
             .input => {
                 if (self.is_trivial) {
                     out.appendAssumeCapacity(c0);
                 } else {
-                    out.appendAssumeCapacity(c1); // copy_in_slot: initialize_step advanced 0→1
+                    out.appendAssumeCapacity((self.copy_in_slot orelse b.lift(@as(i32, 0))).inner);
                     out.appendAssumeCapacity(c0);
                 }
             },
@@ -488,6 +494,7 @@ const BufferedRef = struct {
     fn sliceSrc(self: *const BufferedRef, b: *Builder, dma: DmaSlice) Value {
         const a = b.arena.allocator();
         const bs = self.spec.block_shape.?;
+        const src = if (self.spec.source_reshape_shape) |shape| b.memRefReshape(self.src, shape) else self.src;
         var base = a.alloc(Value, bs.len) catch unreachable;
         var dyn = std.ArrayList(Value).initCapacity(a, bs.len) catch unreachable;
         var result_shape = a.alloc(i64, bs.len) catch unreachable;
@@ -504,7 +511,12 @@ const BufferedRef = struct {
                 };
             }
         }
-        return b.memRefSlice(self.src, base, result_shape, dyn.items);
+        const sliced = b.memRefSlice(src, base, result_shape, dyn.items);
+        if (self.block_keep.len == bs.len) return sliced;
+
+        const squeezed_shape = a.alloc(i64, self.block_compact.len) catch unreachable;
+        for (self.block_keep, 0..) |sd, ci| squeezed_shape[ci] = result_shape[sd];
+        return b.memRefSqueeze(sliced, squeezed_shape);
     }
 
     /// Slices `alloca[slot, 0…]` (non-squeezed dims) then squeezes the slot dim.
@@ -639,9 +651,12 @@ const Scheduler = struct {
     indices_storage: [4]Value = undefined,
     prev_storage: [4]Value = undefined,
     next_storage: [4]Value = undefined,
+    fetch_storage: [8][4]Value = undefined,
+    fetch_len: usize,
     indices_len: usize,
 
     fn init(b: *Builder, step: Value, grid: []const Value, num_steps: Value, num_stages: usize, trace_scopes: bool) Scheduler {
+        if (num_stages + 1 > 8) @panic("emitPipeline: buffer_count > 7 unsupported");
         const c0 = b.lift(@as(i32, 0));
         const c1 = b.lift(@as(i32, 1));
         var s: Scheduler = .{
@@ -652,6 +667,7 @@ const Scheduler = struct {
             .trace_scopes = trace_scopes,
             .first_step = b.cmpi(.eq, step, c0),
             .last_step = b.cmpi(.eq, step, b.subi(num_steps, c1)),
+            .fetch_len = num_stages + 1,
             .indices_len = grid.len,
         };
         for (0..grid.len) |i| s.indices_storage[i] = c0;
@@ -668,11 +684,26 @@ const Scheduler = struct {
     fn nextIndices(self: *Scheduler) []const Value {
         return self.next_storage[0..self.indices_len];
     }
+    fn fetchIndices(self: *Scheduler, lookahead: usize) []const Value {
+        std.debug.assert(lookahead < self.fetch_len);
+        return self.fetch_storage[lookahead][0..self.indices_len];
+    }
 
     fn recomputeDerivedIndices(self: *Scheduler, b: *Builder) void {
-        const i = self.indices_storage[0];
-        self.prev_storage[0] = prevIndex1D(b, i, self.num_steps);
-        self.next_storage[0] = nextIndex1D(b, i, self.num_steps);
+        const prev = prevIndexND(b, self.indices(), self.grid);
+        const next = nextIndexND(b, self.indices(), self.grid);
+        for (0..self.indices_len) |i| {
+            self.prev_storage[i] = prev[i];
+            self.next_storage[i] = next[i];
+            self.fetch_storage[0][i] = self.indices_storage[i];
+            self.fetch_storage[1][i] = next[i];
+        }
+        var fetch = next;
+        var lookahead: usize = 2;
+        while (lookahead < self.fetch_len) : (lookahead += 1) {
+            fetch = nextIndexND(b, fetch, self.grid);
+            for (0..self.indices_len) |i| self.fetch_storage[lookahead][i] = fetch[i];
+        }
     }
 
     fn namedScope(self: *Scheduler, b: *Builder, name: []const u8) void {
@@ -719,8 +750,7 @@ const Scheduler = struct {
     fn willChangeFetch(self: *Scheduler, b: *Builder, br: *const BufferedRef) Value {
         std.debug.assert(br.isBuffered() and !br.is_trivial);
         if (br.buffer_count < 2) return self.hasChanged(b, br);
-        std.debug.assert(br.buffer_count == 2);
-        return indicesDiffer(b, br, self.indices(), self.nextIndices());
+        return indicesDiffer(b, br, self.fetchIndices(br.buffer_count - 2), self.fetchIndices(br.buffer_count - 1));
     }
 
     fn advance(b: *Builder, slot: Value, pred: Value) Value {
@@ -730,9 +760,24 @@ const Scheduler = struct {
     fn initializeStep(self: *Scheduler, b: *Builder, br: *BufferedRef, step: usize) void {
         if (br.buffer_type != .input or !br.isBuffered() or br.is_trivial) return;
         if (step + 1 >= br.buffer_count) return;
-        if (step != 0) @panic("emitPipeline: num_stages>2 (multi-step initialize) unsupported (TODO)");
-        // static_zero_start=true: Python-int 0 grid indices enable folds in getDmaSlice.
-        br.copyIn(b, self.indices(), b.lift(@as(i32, 0)), true);
+        if (br.copy_in_slot == null) br.copy_in_slot = b.lift(@as(i32, 0));
+
+        const pred = if (step == 0) self.first_step else blk: {
+            const block_changed = indicesDiffer(b, br, self.fetchIndices(step), self.fetchIndices(step - 1));
+            break :blk b.andi(self.first_step, block_changed);
+        };
+        const fetch_indices = self.fetchIndices(step);
+        if (step == 0) {
+            // static_zero_start=true: Python-int 0 grid indices enable folds in getDmaSlice.
+            br.copyIn(b, fetch_indices, br.copy_in_slot.?, true);
+        } else {
+            var when = b.openIf(pred);
+            {
+                br.copyIn(b, fetch_indices, br.copy_in_slot.?, false);
+                when.yieldThen(.{});
+            }
+        }
+        br.copy_in_slot = advance(b, br.copy_in_slot.?, pred);
     }
 
     fn copyIn(self: *Scheduler, b: *Builder, br: *BufferedRef) void {
@@ -744,7 +789,7 @@ const Scheduler = struct {
             var when = b.openIf(pred);
             {
                 self.namedScope(b, "ep_copy_in");
-                br.copyIn(b, self.nextIndices(), br.copy_in_slot.?, false);
+                br.copyIn(b, self.fetchIndices(br.buffer_count - 1), br.copy_in_slot.?, false);
                 self.endScope(b);
                 when.yieldThen(.{});
             }
@@ -844,16 +889,54 @@ pub fn dmaSemRefTy(b: *Builder, n: ?usize) *const mlir.Type {
     return mlir.Type.memRef(tpu.dmaSemaphoreType(b.ctx), shape, null, MemorySpace.semaphore_mem.attribute(b.ctx));
 }
 
-fn nextIndex1D(b: *Builder, i: Value, n: Value) Value {
-    const inc = b.addi(i, b.lift(@as(i32, 1)));
-    const carry = b.cmpi(.eq, inc, n);
-    return b.select(carry, b.lift(@as(i32, 0)), inc);
+fn gridSize(b: *Builder, grid: []const Value) Value {
+    var acc = grid[0];
+    for (grid[1..]) |g| acc = b.muli(acc, g);
+    return acc;
 }
 
-fn prevIndex1D(b: *Builder, i: Value, n: Value) Value {
-    const dec = b.subi(i, b.lift(@as(i32, 1)));
-    const borrow = b.cmpi(.eq, dec, b.lift(@as(i32, -1)));
-    return b.select(borrow, b.subi(n, b.lift(@as(i32, 1))), dec);
+fn filterIndices(b: *Builder, indices: []const Value, grid: []const Value) [4]Value {
+    var out: [4]Value = undefined;
+    const c0 = b.lift(@as(i32, 0));
+    for (indices, grid, 0..) |i, g, pos| {
+        out[pos] = if (g.asConstantInt() == @as(?i64, 1)) c0 else i;
+    }
+    return out;
+}
+
+fn nextIndexND(b: *Builder, indices: []const Value, grid: []const Value) []const Value {
+    const a = b.arena.allocator();
+    const out = a.alloc(Value, indices.len) catch @panic("nextIndexND OOM");
+    const c0 = b.lift(@as(i32, 0));
+    var carry: Value = b.cmpi(.eq, c0, c0);
+    var rev: usize = 0;
+    while (rev < indices.len) : (rev += 1) {
+        const pos = indices.len - 1 - rev;
+        const inc = b.select(carry, b.addi(indices[pos], b.lift(@as(i32, 1))), indices[pos]);
+        carry = b.cmpi(.eq, inc, grid[pos]);
+        out[pos] = b.select(carry, c0, inc);
+    }
+    const filtered = filterIndices(b, out, grid);
+    for (0..indices.len) |i| out[i] = filtered[i];
+    return out;
+}
+
+fn prevIndexND(b: *Builder, indices: []const Value, grid: []const Value) []const Value {
+    const a = b.arena.allocator();
+    const out = a.alloc(Value, indices.len) catch @panic("prevIndexND OOM");
+    const c0 = b.lift(@as(i32, 0));
+    var borrow: Value = b.cmpi(.eq, c0, c0);
+    const cm1 = b.lift(@as(i32, -1));
+    var rev: usize = 0;
+    while (rev < indices.len) : (rev += 1) {
+        const pos = indices.len - 1 - rev;
+        const dec = b.select(borrow, b.subi(indices[pos], b.lift(@as(i32, 1))), indices[pos]);
+        borrow = b.cmpi(.eq, dec, cm1);
+        out[pos] = b.select(borrow, b.subi(grid[pos], b.lift(@as(i32, 1))), dec);
+    }
+    const filtered = filterIndices(b, out, grid);
+    for (0..indices.len) |i| out[i] = filtered[i];
+    return out;
 }
 
 /// `null` block_shape, or every dim is `.blocked(full_dim)`.

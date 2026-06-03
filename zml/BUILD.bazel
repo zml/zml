@@ -150,6 +150,18 @@ zig_library(
     }),
 )
 
+zig_library(
+    name = "moe_mosaic_tpu_gmm_ep",
+    tags = ["manual"],
+    main = "moe/mosaic_tpu_kernels/gmm_ep.zig",
+    import_name = "zml/moe/mosaic_tpu_kernels/gmm_ep",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":zml",
+        "//kernels/mosaic_tpu:mosaic_tpu_builder",
+    ],
+)
+
 
 zig_test(
     name = "test",
