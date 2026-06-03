@@ -30,9 +30,7 @@ pub const std_options: std.Options = .{ .log_level = .info };
 
 // Per xorb spec: max 64 MiB compressed.
 const MAX_XORB: usize = 64 * 1024 * 1024;
-const MAX_XORBS: usize = 128;
 const MAX_CHUNK: usize = 128 * 1024;
-const MAX_PLANS: usize = 4096;
 const DEFAULT_WORKERS: usize = 4;
 
 // Host destination: a flat buffer the size of the tensor, written at random
@@ -62,8 +60,6 @@ const XorbWork = struct {
     fetch_byte_len: u64,
 };
 
-var xorbs: [MAX_XORBS]XorbWork = undefined;
-
 const TermPlan = struct {
     xorb_idx: u8,
     dst_off: u32, // offset within device buffer [0, byteSize)
@@ -74,12 +70,10 @@ const TermPlan = struct {
     bytes_written: u32,
 };
 
-var plans: [MAX_PLANS]TermPlan = undefined;
-
 const Worker = struct {
     counter: *std.atomic.Value(u32),
-    n_xorbs: u8,
-    n_plans: u32,
+    xorbs: []const XorbWork,
+    plans: []TermPlan,
     sink: *Sink,
     allocator: std.mem.Allocator,
     env: *std.process.Environ.Map,
@@ -112,9 +106,9 @@ const Worker = struct {
 
         while (true) {
             const next = self.counter.fetchAdd(1, .acq_rel);
-            if (next >= self.n_xorbs) break;
+            if (next >= self.xorbs.len) break;
             const xi: u8 = @intCast(next);
-            const x = xorbs[xi];
+            const x = self.xorbs[xi];
 
             const t0: std.Io.Timestamp = .now(self.io, .awake);
             try httpRangeGetIntoSlot(&client, x.fetch_url, x.fetch_url_range_start, x.fetch_url_range_end, xb[0..x.fetch_byte_len]);
@@ -128,7 +122,7 @@ const Worker = struct {
                 if (chunk.uncompressed_size > MAX_CHUNK) return error.ChunkTooLarge;
                 self.n_chunks_total += 1;
                 var decompressed = false;
-                for (plans[0..self.n_plans]) |*p| {
+                for (self.plans) |*p| {
                     if (p.xorb_idx != xi) continue;
                     if (chunk_idx < p.chunk_start or chunk_idx >= p.chunk_end) continue;
                     const need_skip = p.byte_skip > 0 and p.bytes_written == 0;
@@ -278,6 +272,12 @@ pub fn main(init: std.process.Init) !void {
     const win_start: u64 = resp.offset_into_first_range;
     const win_end: u64 = win_start + tensor_size;
 
+    // One plan per term; at most one xorb per term (fewer when hashes repeat).
+    const xorbs = try allocator.alloc(XorbWork, resp.terms.len);
+    defer allocator.free(xorbs);
+    const plans = try allocator.alloc(TermPlan, resp.terms.len);
+    defer allocator.free(plans);
+
     var n_xorbs: u8 = 0;
     var n_plans: u32 = 0;
     var stream_pos: u64 = 0;
@@ -295,8 +295,7 @@ pub fn main(init: std.process.Init) !void {
         while (xi < n_xorbs) : (xi += 1) {
             if (std.mem.eql(u8, xorbs[xi].hash, t.hash)) break;
         }
-        if (xi == n_xorbs) { // New xorb hash we haven't seen before. Add to xorbs if we have room.
-            if (n_xorbs >= MAX_XORBS) return error.TooManyXorbs;
+        if (xi == n_xorbs) { // New xorb hash we haven't seen before.
             xorbs[n_xorbs] = .{
                 .hash = t.hash,
                 .needed_chunk_start = std.math.maxInt(u32),
@@ -313,7 +312,6 @@ pub fn main(init: std.process.Init) !void {
         const x = &xorbs[xi];
         if (t.range.start < x.needed_chunk_start) x.needed_chunk_start = @intCast(t.range.start);
         if (t.range.end > x.needed_chunk_end) x.needed_chunk_end = @intCast(t.range.end);
-        if (n_plans >= plans.len) return error.TooManyPlans;
         plans[n_plans] = .{
             .xorb_idx = xi,
             .dst_off = @intCast(dst_off),
@@ -372,8 +370,8 @@ pub fn main(init: std.process.Init) !void {
     for (workers, threads) |*w, *t| {
         w.* = .{
             .counter = &counter,
-            .n_xorbs = n_xorbs,
-            .n_plans = n_plans,
+            .xorbs = xorbs[0..n_xorbs],
+            .plans = plans[0..n_plans],
             .sink = &sink,
             .allocator = allocator,
             .env = init.environ_map,

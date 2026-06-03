@@ -343,4 +343,3 @@ test "parse fetch_info: synthetic" {
     try std.testing.expectEqual(@as(u64, 512), bbb[1].url_range.start);
     try std.testing.expectEqual(@as(u64, 5), bbb[1].range.start);
 }
-
