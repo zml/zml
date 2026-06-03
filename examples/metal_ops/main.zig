@@ -1096,6 +1096,16 @@ fn reshapeNeg(a: zml.Tensor) zml.Tensor {
 fn sumAll(a: zml.Tensor) zml.Tensor {
     return a.sum(.n); // [n] -> scalar (num_out=1: the tree-reduction case)
 }
+// MAX reductions for the dtype-generic tree/two-level path: max is order-
+// independent and its result is one of the inputs, so a bf16/f16 max is EXACT vs
+// the oracle regardless of accumulation order — cleanly isolates the kernel's
+// load/store-dtype boundary from any sum-accumulation-precision question.
+fn maxj(a: zml.Tensor) zml.Tensor {
+    return a.max(.j); // [i,j] -> [i] (tree when extent>=256, num_out>1)
+}
+fn maxAll(a: zml.Tensor) zml.Tensor {
+    return a.max(.n); // [n] -> scalar (tree/two-level by extent)
+}
 // Reduce of a COMPUTED elementwise (RMSNorm's reduce(square(x)) shape): the
 // reduce's input is x*x, not a parameter. If XLA fuses the multiply into the
 // reduce, this is a reduction kFusion with a non-parameter reduce input — the
@@ -1901,6 +1911,26 @@ pub fn main(init: std.process.Init) !void {
         for (big2d, 0..) |*e, i| e.* = @floatFromInt((i % 13) + 1);
         failures += checkShaped(allocator, io, cpu, metal, "sum2dbig", sumj,
             zml.Shape.init(.{ .i = 4, .j = 65536 }, .f32), big2d, 4);
+    }
+
+    // The cooperative tree + two-level kernels now carry f16/bf16 (load→f32
+    // accumulate→store; two-level keeps f32 partials between passes). MAX
+    // reductions → exact vs the oracle (result is an input value), isolating the
+    // dtype boundary. bf16max: [3,512]→[3] tree (extent 512≥256, num_out 3).
+    // bf16maxbig: [65536]→[1] two-level (extent≥65536). Distinct bf16 values via
+    // a stride so the max is unambiguous; n_out≤64.
+    {
+        const T = zml.floats.BFloat16;
+        var m3x512: [1536]T = undefined;
+        for (&m3x512, 0..) |*e, i| e.* = T.fromF32(@as(f32, @floatFromInt((i * 7) % 251)) / 32.0);
+        failures += checkUnaryT(T, allocator, io, cpu, metal, "bf16max", maxj,
+            zml.Shape.init(.{ .i = 3, .j = 512 }, .bf16), &m3x512, 3, 1e-2);
+
+        const big = try allocator.alloc(T, 65536);
+        defer allocator.free(big);
+        for (big, 0..) |*e, i| e.* = T.fromF32(@as(f32, @floatFromInt((i * 7) % 251)) / 32.0);
+        failures += checkUnaryT(T, allocator, io, cpu, metal, "bf16maxbig", maxAll,
+            zml.Shape.init(.{ .n = 65536 }, .bf16), big, 1, 1e-2);
     }
 
     // Matmul. Backend mirrors XLA_METAL_MATMUL: "" (default = MPSGraph, modern,
