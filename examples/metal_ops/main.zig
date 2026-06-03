@@ -1851,6 +1851,15 @@ pub fn main(init: std.process.Init) !void {
     const bf_t = bf16a(.{ 1, 2, 3, 4, 5, 6 });
     failures += checkUnaryT(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16T", transpose23,
         zml.Shape.init(.{ .i = 2, .j = 3 }, .bf16), &bf_t, 6, 1e-2);
+    // bf16 REDUCTIONS — accumulate in f32, narrow to bf16 on store. Serial sum
+    // (sumj) and a fused reduce(square) (sumSq, RMSNorm's shape). The tree/two-
+    // level paths are f32-only, so a bf16 reduce uses the dtype-generic
+    // serial/fused kernels. Small data; bf16 tolerance.
+    const bf_r = bf16a(.{ 0.5, 1.5, 2.0, 0.25, 1.25, 3.0 });
+    failures += checkUnaryT(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16sum", sumj,
+        zml.Shape.init(.{ .i = 2, .j = 3 }, .bf16), &bf_r, 2, 3e-2);
+    failures += checkUnaryT(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16ssq", sumSq,
+        zml.Shape.init(.{ .i = 2, .j = 3 }, .bf16), &bf_r, 2, 3e-2);
 
     // Deeper chain (3 thunks, 2 intermediates): abs(x·W1)·W2. The SECOND matmul
     // reads a COMPUTED buffer (the abs result), not a parameter — the matmul-
