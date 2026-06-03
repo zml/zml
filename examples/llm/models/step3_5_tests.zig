@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
 >>>>>>> dfcbcfdf (examples/llm: compare attention outputs only (ignore second return value))
 }
 
-const TEST_LAYER = 2;
+const TEST_LAYER = 4;
 
 fn run(
     allocator: std.mem.Allocator,
@@ -366,9 +366,12 @@ const LayerKind = enum { mlp, rmsNorm };
         }
     } else if (TEST_LAYER == 3) {
 <<<<<<< HEAD
+<<<<<<< HEAD
         try debugSelfAttnStages(allocator, io, platform, model_store, &activation_store, 1);
 =======
 <<<<<<< HEAD
+=======
+>>>>>>> 44b24f7e (examples/llm: test for all Attn layer)
         try surveySelfAttnShapes(allocator, model_store, &activation_store);
         for (0..45) |layer_idx| {
             debugSelfAttnStages(allocator, io, platform, model_store, &activation_store, layer_idx) catch |err| {
@@ -377,7 +380,10 @@ const LayerKind = enum { mlp, rmsNorm };
         }
 
         // try debugSelfAttnStages(allocator, io, platform, model_store, &activation_store, 1);
+<<<<<<< HEAD
 >>>>>>> 24035ea3 (examples/llm: update tests)
+=======
+>>>>>>> 44b24f7e (examples/llm: test for all Attn layer)
     } else {
         const layer_idx = 1;
         const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.self_attn", .{layer_idx});
@@ -404,7 +410,20 @@ const LayerKind = enum { mlp, rmsNorm };
         };
 =======
         try runKvCacheTests(allocator, io, platform);
+<<<<<<< HEAD
 >>>>>>> 2bc2e8f0 (examples/llm: update tests)
+=======
+    } else if (TEST_LAYER == 4) {
+        // End-to-end TransformerLayer smoke test: one dense layer + one MoE layer.
+        // Validates that the residual + norm + attn + ffn composition matches
+        // the HF dump for the same hardware path the model would run on.
+        // const layer_indices = [_]usize{ 0, 1, 2, 3, 4, 5, 6 };
+        for (0..48) |layer_idx| {
+            runTransformerLayer(allocator, io, platform, model_store, &activation_store, sharding, layer_idx) catch |err| {
+                std.log.warn("skipping model.layers.{d}: {s}", .{ layer_idx, @errorName(err) });
+            };
+        }
+>>>>>>> 8935dcbc (examples/llm: test TransformerLayer)
     }
 }
 >>>>>>> c856b0f1 (examples/llm: clean up tests and model annotations)
@@ -815,6 +834,139 @@ fn runSelfAttnLayer(
     );
 }
 
+// full TransformerLayer test
+fn runTransformerLayer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    model_store: *zml.io.TensorStore,
+    activation_store: *zml.io.TensorStore,
+    sharding: zml.Sharding,
+    layer_idx: usize,
+) !void {
+    const name = try std.fmt.allocPrint(allocator, "model.layers.{d}", .{layer_idx});
+    defer allocator.free(name);
+
+    const layer = try model.TransformerLayer.init(model_store.view().withPrefix(name), layer_idx);
+    var layer_weights = try zml.io.load(model.TransformerLayer, &layer, allocator, io, platform, model_store, .auto);
+    defer deinitBuffers(&layer_weights);
+
+    const layer_view = activation_store.view().withPrefix(name);
+    if (!layer_view.hasKey("in.0")) {
+        std.log.warn("skipping {s}: no in.0 (hidden_states)", .{name});
+        return;
+    }
+    if (!layer_view.hasKey("out.0")) {
+        std.log.warn("skipping {s}: no out.0 (final hidden_states)", .{name});
+        return;
+    }
+
+    const self_attn_name = try std.fmt.allocPrint(allocator, "{s}.self_attn", .{name});
+    defer allocator.free(self_attn_name);
+    const self_attn_view = activation_store.view().withPrefix(self_attn_name);
+    if (!self_attn_view.hasKey("in.3")) {
+        std.log.warn("skipping {s}: no self_attn.in.3 (cache_position)", .{name});
+        return;
+    }
+
+    const hidden_states = layer_view.createTensor("in.0", .{ .b, .s, .d }, .replicated);
+    const cache_position = self_attn_view.createTensor("in.3", null, .replicated);
+
+    const batch_dim = hidden_states.dim(.b);
+    const seq_dim = hidden_states.dim(.s);
+    const kv_shape = zml.Shape.init(.{
+        .layer = @as(i64, @intCast(model.default_config.num_hidden_layers)),
+        .b = batch_dim,
+        .k = seq_dim,
+        .h = layer.attn.num_kv_heads,
+        .hd = layer.attn.head_dim,
+    }, hidden_states.dtype());
+    const kv_traced = model.KvCache.init(kv_shape).atLayer(layer_idx);
+
+    const Argsx = struct { zml.Tensor, zml.Tensor, model.KvCache };
+    const argsx: Argsx = .{ hidden_states, cache_position, kv_traced };
+
+    const exe = try platform.compile(allocator, io, layer, .forward, argsx, .{ .shardings = &.{&sharding} });
+    defer exe.deinit();
+
+    const ActArgs = struct { zml.Tensor, zml.Tensor };
+    var act_args: ActArgs = .{ hidden_states, cache_position };
+    var act_buffers = try zml.io.load(ActArgs, &act_args, allocator, io, platform, activation_store, .auto);
+    defer deinitBuffers(&act_buffers);
+
+    const kv_bytes = kv_shape.byteSize();
+    const k_init = try allocator.alloc(u8, kv_bytes);
+    defer allocator.free(k_init);
+    @memset(k_init, 0);
+    const v_init = try allocator.alloc(u8, kv_bytes);
+    defer allocator.free(v_init);
+    @memset(v_init, 0);
+
+    var k_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, k_init);
+    defer k_buf.deinit();
+    var v_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, v_init);
+    defer v_buf.deinit();
+    const kv_buffers: model.KvCache.Buffer = .{ .k = k_buf, .v = v_buf };
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+
+    const args_buffers = .{ act_buffers[0], act_buffers[1], kv_buffers };
+    exe_args.set(.{ layer_weights, args_buffers });
+    exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+
+    const output_count = exe.output_shapes.len;
+    var results = try allocator.alloc(zml.Buffer, output_count);
+    defer allocator.free(results);
+    exe_results.fill(.{results});
+
+    // forward returns (hidden_states, KvCache.k, KvCache.v); only the first
+    // output corresponds to a recorded HF activation (`out.0`).
+    if (output_count == 0) {
+        std.log.warn("{s}: compiled layer produced no outputs", .{name});
+        return;
+    }
+
+    const ref_shape = layer_view.getShape("out.0") orelse {
+        std.log.warn("{s}: no reference shape for out.0", .{name});
+        return;
+    };
+
+    const got_shape = results[0].shape();
+    var ref_count: i64 = 1;
+    for (ref_shape.dims()) |d| ref_count *= d;
+    var got_count: i64 = 1;
+    for (got_shape.dims()) |d| got_count *= d;
+    if (ref_count != got_count) {
+        std.log.warn("{s}.out.0: shape mismatch ref={f} ours={f}, skipping", .{ name, ref_shape, got_shape });
+        return;
+    }
+
+    var reader_buffer: [4096]u8 = undefined;
+    const expected_slice: zml.Slice = try .alloc(allocator, ref_shape);
+    defer expected_slice.free(allocator);
+    var reader = try layer_view.getReader("out.0", io, &reader_buffer);
+    defer reader.deinit();
+    try reader.interface.readSliceAll(expected_slice.data());
+
+    const got_slice = try results[0].toSliceAlloc(allocator, io);
+    defer got_slice.free(allocator);
+
+    zml.testing.expectClose(io, expected_slice, got_slice, .{
+        .absolute_tolerance = 1e-2,
+        .minimum_close_fraction = 0.99,
+    }) catch |err| switch (err) {
+        error.TestUnexpectedResult => {
+            std.log.warn("❌ {s} doesn't match", .{name});
+            return;
+        },
+        else => return err,
+    };
+    std.log.info("✅ {s} matches", .{name});
+}
+
 fn debugSelfAttnStages(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -928,6 +1080,9 @@ fn debugSelfAttnStages(
         .{ .stage = "sin", .refs = &.{ "rope.sin", "rotary_emb.out.1" } },
         .{ .stage = "q_rope_hf", .refs = &.{"rope.q_embed"} },
         .{ .stage = "k_rope_hf", .refs = &.{"rope.k_embed"} },
+        .{ .stage = "attn", .refs = &.{"attn"} },
+        .{ .stage = "gate_sig", .refs = &.{"gate_sig"} },
+        .{ .stage = "gated", .refs = &.{"gated"} },
         .{ .stage = "o_proj_in", .refs = &.{"o_proj.in.0"} },
         .{ .stage = "out", .refs = &.{"out.0"} },
     };
