@@ -50,7 +50,7 @@ pub const Config = struct {
     need_fp32_gate: bool = false,
     sink: bool = false,
 
-    layer_types: []const []const u8 = &.{},
+    layer_types: []const LayerType = &.{},
     use_rope_layers: []const u32 = &.{},
 
     num_nextn_predict_layers: u32 = 0,
@@ -90,6 +90,13 @@ pub const Config = struct {
     }
 };
 
+/// Per-layer attention flavor. Field names match `config.json`'s `layer_types` strings,
+/// so `std.json` can parse the array directly into `[]const LayerType`.
+pub const LayerType = enum {
+    full_attention,
+    sliding_attention,
+};
+
 // Options
 pub const Options = struct {
     sampling_strategy: ?zml.nn.SamplingStrategy,
@@ -102,37 +109,114 @@ pub const Options = struct {
 
 // TODO: Transformer Layer
 
-// TODO: retrieve hardcoded values from config
-const num_q_heads_full: i64 = 64;
-const num_q_heads_swa: i64 = 96;
-const num_kv_heads: i64 = 8;
-const head_dim: i64 = 128;
-const rotary_dim: i64 = head_dim;
-const main_layer_count: usize = 45;
-
-fn isFullAttentionLayer(layer_idx: usize) bool {
-    // Step 3.5 Flash pattern: Full, SWA, SWA, SWA, repeating, for the 45 main layers.
-    // Layers >= 45 are MTP/speculative blocks and use the SWA shape.
-    return layer_idx < main_layer_count and layer_idx % 4 == 0;
-}
-
-const rope_theta_full: f32 = 5000000.0;
-const rope_theta_swa: f32 = 10000.0;
-const rope_original_max_position: u32 = 131072;
-const rope_scaling_factor: f32 = 2.0;
-const rope_low_freq_factor: f32 = 1.0;
-const rope_high_freq_factor: f32 = 32.0;
-
-fn ropeScalingForLayer(layer_idx: usize) zml.nn.RopeOpts.Scaling {
-    const theta: f32 = if (isFullAttentionLayer(layer_idx)) rope_theta_full else rope_theta_swa;
-    return .{ .llama3 = .{
-        .factor = rope_scaling_factor,
-        .high_freq_factor = rope_high_freq_factor,
-        .low_freq_factor = rope_low_freq_factor,
-        .original_max_position_embeddings = rope_original_max_position,
-        .rope_theta = theta,
-    } };
-}
+/// Temporary deep copy of `config.json` for Step 3.5 Flash. TODO: run config through Model struct and remove this deep copy
+pub const default_config: Config = .{
+    .architectures = &.{"Step3p5ForCausalLM"},
+    .model_type = "step3p5",
+    .auto_map = .{
+        .AutoConfig = "configuration_step3p5.Step3p5Config",
+        .AutoModelForCausalLM = "modeling_step3p5.Step3p5ForCausalLM",
+    },
+    .rope_scaling = .{
+        .rope_type = "llama3",
+        .factor = 2.0,
+        .original_max_position_embeddings = 131072,
+        .low_freq_factor = 1.0,
+        .high_freq_factor = 32.0,
+    },
+    .yarn_only_types = &.{"full_attention"},
+    .hidden_size = 4096,
+    .intermediate_size = 11264,
+    .num_hidden_layers = 48,
+    .max_seq_len = 262144,
+    .vocab_size = 128896,
+    .torch_dtype = "bfloat16",
+    .use_qk_norm = true,
+    .moe_layers_enum = "3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44",
+    .num_attention_heads = 64,
+    .num_attention_groups = 8,
+    .head_dim = 128,
+    .use_moe = true,
+    .moe_num_experts = 288,
+    .moe_top_k = 8,
+    .moe_intermediate_size = 1280,
+    .share_expert_dim = 1280,
+    .moe_layer_offset = 0,
+    .moe_every_n_layer = 1,
+    .norm_expert_weight = true,
+    .moe_router_activation = "sigmoid",
+    .moe_router_scaling_factor = 3.0,
+    .att_impl_type = "GQA",
+    .tie_word_embeddings = false,
+    .rope_theta = &.{
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
+    },
+    .use_head_wise_attn_gate = true,
+    .sliding_window = 512,
+    .use_moe_router_bias = true,
+    .need_fp32_gate = true,
+    .sink = false,
+    .layer_types = &.{
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
+    },
+    .use_rope_layers = &.{},
+    .num_nextn_predict_layers = 3,
+    .partial_rotary_factors = &.{
+        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
+        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
+        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
+        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
+        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
+        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
+    },
+    .attention_other_setting = .{
+        .attention_type = "sliding_attention",
+        .num_attention_heads = 96,
+        .num_attention_groups = 8,
+        .head_dim = 128,
+        .true_head_dim = 128,
+    },
+    .swiglu_limits = &.{
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 7.0, 7.0, 0.0, 0.0, 0.0,
+    },
+    .swiglu_limits_shared = &.{
+        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
+        0.0, 0.0, 0.0, 0.0, 16.0, 0.0, 0.0, 0.0,
+    },
+    .zero_centered = true,
+    .max_position_embeddings = 262144,
+};
 
 // TODO: Attention struct wrapping SelfAttn and SwAttn
 pub const SelfAttn = struct {
@@ -169,21 +253,46 @@ pub const SelfAttn = struct {
         );
     }
 
-    // TODO: add config here
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !SelfAttn {
-        const is_full = isFullAttentionLayer(layer_idx);
-        const num_q_heads: i64 = if (is_full) num_q_heads_full else num_q_heads_swa;
+        // Layers past the configured count are MTP/speculative blocks and use the SWA shape.
+        const kind: LayerType = if (layer_idx < default_config.layer_types.len)
+            default_config.layer_types[layer_idx]
+        else
+            .sliding_attention;
+        const is_full = kind == .full_attention;
+
+        const num_q_heads: i64 = @intCast(if (is_full)
+            default_config.num_attention_heads
+        else
+            (default_config.attention_other_setting orelse unreachable).num_attention_heads);
+        const num_kv_heads: i64 = @intCast(default_config.num_attention_groups);
+        const head_dim: i64 = @intCast(default_config.head_dim);
+
+        // partial_rotary_factor * head_dim: FULL=0.5 (=> 64), SWA=1.0 (=> 128).
+        const rotary_idx = @min(layer_idx, default_config.partial_rotary_factors.len - 1);
+        const rotary_dim: i64 = @intFromFloat(
+            default_config.partial_rotary_factors[rotary_idx] * @as(f32, @floatFromInt(default_config.head_dim)),
+        );
+
+        const rope_idx = @min(layer_idx, default_config.rope_theta.len - 1);
+        const rs = default_config.rope_scaling;
+        const rope_scaling: zml.nn.RopeOpts.Scaling = .{ .llama3 = .{
+            .factor = rs.factor,
+            .high_freq_factor = rs.high_freq_factor,
+            .low_freq_factor = rs.low_freq_factor,
+            .original_max_position_embeddings = rs.original_max_position_embeddings,
+            .rope_theta = default_config.rope_theta[rope_idx],
+        } };
+
         return .{
             .layer_idx = layer_idx,
             .num_q_heads = num_q_heads,
             .num_kv_heads = num_kv_heads,
             .enable_sliding_window = !is_full,
-            //TODO: hardcoded head dim
             .head_dim = head_dim,
             .num_kv_groups = @divExact(num_q_heads, num_kv_heads),
-            //TODO: hardcoded rotary emb
             .rotary_dim = rotary_dim,
-            .rotary_emb = .init(rotary_dim, ropeScalingForLayer(layer_idx), 1.0),
+            .rotary_emb = .init(rotary_dim, rope_scaling, 1.0),
             .q_size = num_q_heads * head_dim,
             .kv_size = num_kv_heads * head_dim,
             .scaling = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
@@ -192,7 +301,7 @@ pub const SelfAttn = struct {
             .v_proj = initProj(store.withPrefix("v_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
             .o_proj = initProj(store.withPrefix("o_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
             .g_proj = initProj(store.withPrefix("g_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
-            //TODO: hardcoded eps
+            // Step 3.5 doesn't expose rms_norm_eps in its config; HF reference uses 1e-5.
             .q_norm = .init(store.withPrefix("q_norm"), 1e-5),
             .k_norm = .init(store.withPrefix("k_norm"), 1e-5),
         };
@@ -638,18 +747,19 @@ pub const Moe = struct {
             .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
         );
 
+        const limit: ?f32 = blk: {
+            if (layer_idx >= default_config.swiglu_limits.len) break :blk null;
+            const v = default_config.swiglu_limits[layer_idx];
+            break :blk if (v == 0) null else v;
+        };
+
         return .{
-            // swiglu limit temporarily hardcoded to 0
-            // .shared_expert = .init(store.parent().withPrefix("share_expert"), 0),
             .up_proj = up_proj_tensor,
             .gate_proj = gate_proj_tensor,
             .down_proj = down_proj_tensor,
-            .router = .init(store, 8, 3.0),
+            .router = .init(store, default_config.moe_top_k, default_config.moe_router_scaling_factor),
             .layer_idx = layer_idx,
-            .limit = switch (layer_idx) {
-                43, 44 => 7.0,
-                else => null,
-            },
+            .limit = limit,
         };
     }
 
