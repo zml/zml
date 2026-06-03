@@ -1860,6 +1860,11 @@ pub fn main(init: std.process.Init) !void {
         zml.Shape.init(.{ .i = 2, .j = 3 }, .bf16), &bf_r, 2, 3e-2);
     failures += checkUnaryT(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16ssq", sumSq,
         zml.Shape.init(.{ .i = 2, .j = 3 }, .bf16), &bf_r, 2, 3e-2);
+    // bf16 BARE elementwise (single op → the non-fused kernel): |x| at bf16
+    // storage (load→f32 compute→store). Bit-exact (abs preserves the value).
+    const bf_e = bf16a(.{ -1.5, 2.5, -0.25, 3.0 });
+    failures += checkUnaryT(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16abs", abs,
+        zml.Shape.init(.{ .n = 4 }, .bf16), &bf_e, 4, 1e-2);
 
     // Deeper chain (3 thunks, 2 intermediates): abs(x·W1)·W2. The SECOND matmul
     // reads a COMPUTED buffer (the abs result), not a parameter — the matmul-
