@@ -176,7 +176,14 @@ fn run(
             };
         }
     } else if (TEST_LAYER == 3) {
-        try debugSelfAttnStages(allocator, io, platform, model_store, &activation_store, 1);
+        try surveySelfAttnShapes(allocator, model_store, &activation_store);
+        for (0..45) |layer_idx| {
+            debugSelfAttnStages(allocator, io, platform, model_store, &activation_store, layer_idx) catch |err| {
+                std.log.warn("skipping model.layers.{d}.self_attn: {s}", .{ layer_idx, @errorName(err) });
+            };
+        }
+
+        // try debugSelfAttnStages(allocator, io, platform, model_store, &activation_store, 1);
     } else {
         const layer_idx = 1;
         const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.self_attn", .{layer_idx});
@@ -407,6 +414,9 @@ fn debugSelfAttnStages(
         .{ .stage = "sin", .refs = &.{ "rope.sin", "rotary_emb.out.1" } },
         .{ .stage = "q_rope_hf", .refs = &.{"rope.q_embed"} },
         .{ .stage = "k_rope_hf", .refs = &.{"rope.k_embed"} },
+        .{ .stage = "attn", .refs = &.{"attn"} },
+        .{ .stage = "gate_sig", .refs = &.{"gate_sig"} },
+        .{ .stage = "gated", .refs = &.{"gated"} },
         .{ .stage = "o_proj_in", .refs = &.{"o_proj.in.0"} },
         .{ .stage = "out", .refs = &.{"out.0"} },
     };
