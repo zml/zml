@@ -65,7 +65,7 @@ pub const PipeSpec = struct {
     index_map_ctx: ?*anyopaque = null,
     /// Only `.vmem` supported.
     memory_space: MemorySpace = .vmem,
-    
+
     buffer_count: ?usize = null,
     /// Tile that `_create_bounded_slice` rounds the DMA size up to.
     bounded_slice_tiling: i32 = 1,
