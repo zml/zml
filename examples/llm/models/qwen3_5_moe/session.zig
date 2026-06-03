@@ -223,6 +223,8 @@ pub const Session = struct {
 
         var prefill_token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 0), .u32);
         defer prefill_token_index_buffer.deinit();
+        var prefill_valid_len_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.len)), .u32);
+        defer prefill_valid_len_buffer.deinit();
 
         var prefill_hidden_buffer = try zml.Buffer.uninitialized(self.io, self.platform, prefill_hidden_shape, replicated_sharding, .{});
         defer prefill_hidden_buffer.deinit();
@@ -264,7 +266,7 @@ pub const Session = struct {
                     const exe = self.compiled_model.prefill_linear_layer_exe orelse unreachable;
                     self.linear_attn_layers_caches[linear_attn_cache_index].conv_state = self.kv_cache_buffers.gated_delta_net.conv_state;
                     self.linear_attn_layers_caches[linear_attn_cache_index].recurrent_state = self.kv_cache_buffers.gated_delta_net.recurrent_state;
-                    prefill_linear_layer_args.?.set(.{ layer_weights, prefill_hidden_buffer, prefill_token_index_buffer, self.linear_attn_layers_caches[linear_attn_cache_index], self.compiled_model.loaded_model.inner.config, self.prefill_moe_metadata_buffers });
+                    prefill_linear_layer_args.?.set(.{ layer_weights, prefill_hidden_buffer, prefill_valid_len_buffer, self.linear_attn_layers_caches[linear_attn_cache_index], self.compiled_model.loaded_model.inner.config, self.prefill_moe_metadata_buffers });
                     exe.call(prefill_linear_layer_args.?, &prefill_linear_layer_results.?);
                     prefill_linear_layer_results.?.fill(.{ &prefill_hidden_buffer, &self.kv_cache_buffers.gated_delta_net });
                     linear_attn_cache_index += 1;
