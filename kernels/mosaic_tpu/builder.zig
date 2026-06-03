@@ -297,6 +297,9 @@ pub const ArgSpec = struct {
         shape: []const i64,
         dtype: DType,
         memory_space: MemorySpace = .vmem,
+        /// Emit `{sc.persistent}` on this memref argument. Sparse-core Pallas
+        /// kernels mark persistent HBM operands this way.
+        persistent: bool = false,
         /// Block window. `null` ⇒ trivial window (block == operand shape);
         /// VMEM trivial windows auto-get `pipeline_mode = synchronous`.
         window: ?WindowSpec = null,
@@ -476,6 +479,10 @@ pub const Builder = struct {
     /// Whether to emit Pallas-style `transform_N` stubs at `finish` time.
     /// Set by `declareArgsLowOpts` from `Opts.pallas_window_params`.
     emit_transform_stubs: bool = false,
+    /// Optional prefix for generated transform function names.
+    transform_name_prefix: ?[]const u8 = null,
+    /// Whether generated transform functions carry `{sc.is_transform_indices}`.
+    sc_transform_indices: bool = false,
 
     /// Per-ref-arg snapshot for `finish`-time `transform_N` stub emission.
     /// `skipped` = ANY/HBM/SEMAPHORE memory space (empty window, no transform).
@@ -510,6 +517,9 @@ pub const Builder = struct {
         /// Pallas's `iteration_bounds = array<i64: …>` — the grid shape
         /// (one entry per `dimension_semantics`). `null` omits the attr.
         iteration_bounds: ?[]const i64 = null,
+        /// Emit `scalar_prefetch = N : i64`. Sparse-core kernels with no
+        /// scalar prefetches omit the zero-valued attr.
+        emit_scalar_prefetch_attr: bool = true,
         /// When `true`, auto-emit `window_params = [...]` and trailing
         /// `transform_N` stub funcs at `finish` time. Per-arg behavior
         /// matches `lowering.py:1014–1131`: ANY/HBM/SEMAPHORE refs get
@@ -517,6 +527,13 @@ pub const Builder = struct {
         /// auto-force `pipeline_mode = synchronous`. Override per-arg
         /// via `RefSpec.window`.
         pallas_window_params: bool = false,
+        /// Include HBM refs in Pallas-style `window_params`. Tensor-core
+        /// Pallas lowering skips HBM; sparse-core lowering includes it.
+        window_hbm_refs: bool = false,
+        /// Optional prefix for generated transform function names.
+        transform_name_prefix: ?[]const u8 = null,
+        /// Add `{sc.is_transform_indices}` to generated transform stubs.
+        sc_transform_indices: bool = false,
     };
 
     /// Create a sub-module containing a single public `func.func` of the
@@ -601,6 +618,7 @@ pub const Builder = struct {
                         .shape = inner.shape,
                         .dtype = inner.dtype,
                         .memory_space = if (@hasField(@TypeOf(inner), "memory_space")) inner.memory_space else .vmem,
+                        .persistent = if (@hasField(@TypeOf(inner), "persistent")) inner.persistent else false,
                         .window = if (@hasField(@TypeOf(inner), "window")) inner.window else null,
                         .role = if (@hasField(@TypeOf(inner), "role")) inner.role else .input,
                     } },
@@ -665,8 +683,7 @@ pub const Builder = struct {
 
         const entry = mlir.Block.init(arg_types, arg_locs);
 
-        // Build per-arg attribute dicts. The only ones we currently emit are
-        // `tpu.dimension_semantics` on iter args.
+        // Build per-arg attribute dicts.
         const arg_attrs = try scratch.alloc(*const mlir.Attribute, args.len);
         var any_arg_attr = false;
         for (args, 0..) |a, i| {
@@ -682,19 +699,31 @@ pub const Builder = struct {
                         arg_attrs[i] = empty_dict;
                     }
                 },
+                .ref => |r| {
+                    if (r.persistent) {
+                        arg_attrs[i] = .dict(ctx, &.{
+                            .named(ctx, "sc.persistent", .unit(ctx)),
+                        });
+                        any_arg_attr = true;
+                    } else {
+                        arg_attrs[i] = empty_dict;
+                    }
+                },
                 else => arg_attrs[i] = empty_dict,
             }
         }
 
         // Kernel-level func.func attributes. MLIR sorts attrs alphabetically on print.
-        var extra_attrs: stdx.BoundedArray(mlir.NamedAttribute, 8) = .empty;
+        var extra_attrs: stdx.BoundedArray(mlir.NamedAttribute, 12) = .empty;
         const dim_sem_buf = try scratch.alloc(*const mlir.Attribute, opts.dimension_semantics.len);
         for (opts.dimension_semantics, 0..) |s, i| dim_sem_buf[i] = s.attribute(ctx);
         extra_attrs.appendAssumeCapacity(.named(ctx, "dimension_semantics", .array(ctx, dim_sem_buf)));
         if (opts.iteration_bounds) |bounds| {
             extra_attrs.appendAssumeCapacity(.named(ctx, "iteration_bounds", .denseArray(ctx, .i64, bounds)));
         }
-        extra_attrs.appendAssumeCapacity(.named(ctx, "scalar_prefetch", .int(ctx, .i64, opts.scalar_prefetch)));
+        if (opts.emit_scalar_prefetch_attr) {
+            extra_attrs.appendAssumeCapacity(.named(ctx, "scalar_prefetch", .int(ctx, .i64, opts.scalar_prefetch)));
+        }
         extra_attrs.appendAssumeCapacity(.named(ctx, "scratch_operands", .int(ctx, .i64, opts.scratch_operands)));
         if (opts.core_type) |ct| {
             extra_attrs.appendAssumeCapacity(.named(ctx, "tpu.core_type", ct.attribute(ctx)));
@@ -714,9 +743,10 @@ pub const Builder = struct {
                         (w.block_shape orelse r.shape)
                     else
                         r.shape;
+                    const skipped = isSkippedWindowSpace(r.memory_space) and !(opts.window_hbm_refs and r.memory_space == .hbm);
                     try ref_args_buf.append(arena_alloc, .{
                         .block_rank = @intCast(block_shape.len),
-                        .skipped = isSkippedWindowSpace(r.memory_space),
+                        .skipped = skipped,
                         .role = r.role,
                         .transform_returns = if (r.window) |w| w.transform_returns else null,
                     });
@@ -730,6 +760,8 @@ pub const Builder = struct {
         self.prefetch_args = try arena_alloc.dupe(*const mlir.Type, prefetch_types_buf.items);
         self.grid_dim_count = opts.dimension_semantics.len;
         self.emit_transform_stubs = opts.pallas_window_params;
+        self.transform_name_prefix = opts.transform_name_prefix;
+        self.sc_transform_indices = opts.sc_transform_indices;
 
         // window_params: one entry per `.input` / `.output` ref.
         //   ANY/HBM/SEMAPHORE → empty dict, no transform_N.
@@ -741,7 +773,7 @@ pub const Builder = struct {
             for (args) |a| switch (a.kind) {
                 .ref => |r| {
                     if (r.role != .input and r.role != .output) continue;
-                    if (isSkippedWindowSpace(r.memory_space)) {
+                    if (isSkippedWindowSpace(r.memory_space) and !(opts.window_hbm_refs and r.memory_space == .hbm)) {
                         wp_buf[idx] = .dict(ctx, &.{});
                         idx += 1;
                         continue;
@@ -767,8 +799,10 @@ pub const Builder = struct {
                             break :blk null;
                         };
 
-                    var sym_buf: [32]u8 = undefined;
-                    const sym_name = std.fmt.bufPrint(&sym_buf, "transform_{d}", .{idx}) catch unreachable;
+                    const sym_name = if (opts.transform_name_prefix) |prefix|
+                        try std.fmt.allocPrint(scratch, "{s}_transform_{d}", .{ prefix, idx })
+                    else
+                        try std.fmt.allocPrint(scratch, "transform_{d}", .{idx});
 
                     var inner: stdx.BoundedArray(mlir.NamedAttribute, 5) = .empty;
                     if (resolved_pipeline) |pm| {
@@ -1433,6 +1467,23 @@ pub const Builder = struct {
         ));
     }
 
+    /// `tpu.vector_load` with an explicit result vector shape.
+    pub fn tpuVectorLoadShape(self: *Builder, ref: Value, indices: []const Value, shape: []const i64, opts: VectorLoadOpts) Value {
+        const ctx = self.ctx;
+        const result_ty = mlir.Type.vector(shape, ref.elemType());
+        const idx_inner = self.indicesOrZero(ref, indices);
+        const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
+        return self.emit(tpu.vector_load(
+            ctx,
+            ref.inner,
+            idx_inner,
+            mask_inner,
+            .{ .strides = opts.strides },
+            result_ty,
+            self.loc(),
+        ));
+    }
+
     /// `tpu.vector_store(value, ref)` — full-shape vector store.
     pub fn refStore(self: *Builder, ref: Value, value: Value) void {
         self.refStoreOpts(ref, value, &.{}, .{});
@@ -1606,6 +1657,16 @@ pub const Builder = struct {
         return self.emit(vector.extract(self.ctx, src.inner, position, &.{}, ty, self.loc()));
     }
 
+    /// `vector.extract_strided_slice` — statically slice a vector.
+    pub fn vectorExtractStridedSlice(self: *Builder, src: Value, offsets: []const i64, sizes: []const i64, strides: []const i64) Value {
+        const ty = mlir.Type.vector(sizes, src.elemType());
+        return self.emit(vector.extract_strided_slice(self.ctx, src.inner, .{
+            .offsets = offsets,
+            .sizes = sizes,
+            .strides = strides,
+        }, ty, self.loc()));
+    }
+
     /// `vector.reduction <kind>` — reduce a 1-D vector to a scalar.
     /// Emits the bare upstream op; on real TPU the layout pass may reject
     /// 1-D vectors, so prefer `reduceToScalar` for kernel-level reductions.
@@ -1726,7 +1787,7 @@ pub const Builder = struct {
         for (in_shape.constSlice(), 0..) |d, i| {
             if (@as(i32, @intCast(i)) != axis) out.appendAssumeCapacity(d);
         }
-        const ty = mlir.Type.vector(out.constSlice(), .integer(self.ctx, .i32));
+        const ty = mlir.Type.vector(out.constSlice(), .int(self.ctx, .i32));
         return self.emit(tpu.reduce_index(self.ctx, input.inner, axis, kind, ty, self.loc()));
     }
 
@@ -1791,6 +1852,10 @@ pub const Builder = struct {
         return self.emit(tpu.memref_reshape(self.ctx, mem_ref.inner, result_ty, self.loc()));
     }
 
+    pub fn memRefAlloca(self: *Builder, shape: []const i64, dtype: DType, memory_space: MemorySpace) Value {
+        return self.emit(memref.alloca(self.ctx, self.memRefTy(shape, dtype, memory_space), &.{}, &.{}, .{}, self.loc()));
+    }
+
     pub fn memRefBitcast(self: *Builder, mem_ref: Value, dt: DType) Value {
         const mr = mem_ref.type_().isA(mlir.MemRefType) orelse @panic("memRefBitcast: not a memref");
         var s: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .empty;
@@ -1847,15 +1912,16 @@ pub const Builder = struct {
     // ==================== Semaphores / DMA / barriers ====================
 
     pub fn semAlloc(self: *Builder, kind: ArgSpec.SemKind) Value {
-        const ty = switch (kind) {
+        const elem = switch (kind) {
             .regular => tpu.semaphoreType(self.ctx),
             .dma => tpu.dmaSemaphoreType(self.ctx),
         };
+        const ty = mlir.Type.memRef(elem, &.{}, null, MemorySpace.semaphore_mem.attribute(self.ctx));
         return self.emit(tpu.sem_alloc(self.ctx, ty, self.loc()));
     }
 
     pub fn semBarrier(self: *Builder) Value {
-        const ty = tpu.dmaSemaphoreType(self.ctx);
+        const ty = mlir.Type.memRef(tpu.semaphoreType(self.ctx), &.{}, null, MemorySpace.semaphore_mem.attribute(self.ctx));
         return self.emit(tpu.sem_barrier(self.ctx, ty, self.loc()));
     }
 
@@ -1949,6 +2015,22 @@ pub const Builder = struct {
     pub fn delay(self: *Builder, cycles: anytype) void {
         const c_ = if (@TypeOf(cycles) == Value) cycles else self.lift(cycles);
         _ = tpu.delay(self.ctx, c_.inner, self.loc()).appendTo(self.currentBlock());
+    }
+
+    pub fn assumeMultiple(self: *Builder, src: Value, multiple: i32) Value {
+        return self.emit(tpu.assume_multiple(self.ctx, src.inner, multiple, self.loc()));
+    }
+
+    pub fn openRegion(self: *Builder) *mlir.Block {
+        const block = mlir.Block.init(&.{}, &.{});
+        self.pushBlock(block);
+        return block;
+    }
+
+    pub fn closeRegion(self: *Builder, block: *mlir.Block) void {
+        _ = tpu.yield(self.ctx, &.{}, self.loc()).appendTo(block);
+        self.popBlock();
+        _ = tpu.region(self.ctx, block, &.{}, self.loc()).appendTo(self.currentBlock());
     }
 
     // ==================== SCF regions ====================
@@ -2191,8 +2273,17 @@ pub const Builder = struct {
             }
             _ = func.returns(ctx, ret_vals, unknown_loc).appendTo(block);
 
-            var name_buf: [32]u8 = undefined;
-            const name = std.fmt.bufPrint(&name_buf, "transform_{d}", .{idx}) catch unreachable;
+            const name = if (self.transform_name_prefix) |prefix|
+                std.fmt.allocPrint(arena_alloc, "{s}_transform_{d}", .{ prefix, idx }) catch @panic("OOM")
+            else blk: {
+                var name_buf: [32]u8 = undefined;
+                break :blk arena_alloc.dupe(u8, std.fmt.bufPrint(&name_buf, "transform_{d}", .{idx}) catch unreachable) catch @panic("OOM");
+            };
+
+            var extra_attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
+            if (self.sc_transform_indices) {
+                extra_attrs.appendAssumeCapacity(.named(ctx, "sc.is_transform_indices", .unit(ctx)));
+            }
 
             const stub_op = func.func(ctx, .{
                 .name = name,
@@ -2202,6 +2293,7 @@ pub const Builder = struct {
                 .location = unknown_loc,
                 .visibility = null,
                 .verify = false,
+                .extra_attributes = extra_attrs.constSlice(),
             });
             _ = stub_op.appendTo(self.module.body());
         }
