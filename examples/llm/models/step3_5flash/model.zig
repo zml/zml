@@ -637,7 +637,7 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(kv: KvCache, io: std.io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
+    pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
         return .{
             .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), sharding, .{}),
             .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), sharding, .{}),
@@ -654,7 +654,7 @@ pub const KvCache = struct {
     }
 
     pub fn values(kv: KvCache) zml.Tensor {
-        return kv.k.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
+        return kv.v.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
     }
 
     pub fn update(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: ?zml.Tensor) KvCache {
@@ -672,9 +672,21 @@ pub const KvCache = struct {
         };
     }
 
-    // at layer
+    pub fn atLayer(kv: KvCache, layer_index: usize) KvCache {
+        return .{
+            .k = kv.k,
+            .v = kv.v,
+            .layer_index = @intCast(layer_index),
+        };
+    }
 
-    // reuse buffer
+    pub fn reuseBuffer(kv: KvCache, other: KvCache) KvCache {
+        return .{
+            .k = kv.k.reuseBuffer(other.k),
+            .v = kv.v.reuseBuffer(other.v),
+            .layer_index = null,
+        };
+    }
 };
 
 pub const Mlp = struct {
