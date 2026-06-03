@@ -10,8 +10,8 @@ const mtt = @import("kernels/mosaic_tpu/builder");
 
 const log = std.log.scoped(.moe_mosaic_tpu);
 
-var warned_gate_up_runtime_transpose: std.atomic.Value(bool) = .init(false);
-var warned_down_runtime_transpose: std.atomic.Value(bool) = .init(false);
+var gate_up_transpose: std.atomic.Value(bool) = .init(false);
+var down_transpose: std.atomic.Value(bool) = .init(false);
 
 pub const ActivationMode = enum {
     silu,
@@ -98,30 +98,30 @@ fn validateInputs(hidden: Tensor, gate_up: Tensor, down: Tensor, weights: Tensor
     if (gate_up.dim(.expert) != down.dim(.expert)) return error.InvalidShape;
 }
 
-fn warnRuntimeWeightTranspose(flag: *std.atomic.Value(bool), projection_name: []const u8, expected_shape: []const u8) void {
+fn warningTranspose(flag: *std.atomic.Value(bool), projection_name: []const u8, expected_shape: []const u8) void {
     if (!flag.swap(true, .monotonic)) {
         log.warn("{s} MoE weights are transposed at runtime; weights must be loaded with the correct shape {s} to avoid the transpose at runtime.", .{ projection_name, expected_shape });
     }
 }
 
-fn canonicalizeGateUpForGmm(w1: Tensor, hidden_size: i64) !Tensor {
+fn canonicalizeGateUp(w1: Tensor, hidden_size: i64) !Tensor {
     if (w1.rank() != 3) return error.InvalidShape;
 
     if (w1.dim(1) == hidden_size) return w1.withTags(.{ .expert, .in, .out });
     if (w1.dim(2) == hidden_size) {
-        warnRuntimeWeightTranspose(&warned_gate_up_runtime_transpose, "gate_up_proj", "[expert, in, out]");
+        warningTranspose(&gate_up_transpose, "gate_up_proj", "[expert, in, out]");
         return w1.withTags(.{ .expert, .out, .in }).transpose(.{ .expert, .in, .out });
     }
     return error.InvalidShape;
 }
 
-fn canonicalizeDownForGmm(w2: Tensor, hidden_size: i64, gate_up_out: i64) !Tensor {
+fn canonicalizeDown(w2: Tensor, hidden_size: i64, gate_up_out: i64) !Tensor {
     if (w2.rank() != 3) return error.InvalidShape;
 
     const mid_size = @divFloor(gate_up_out, 2);
     if (w2.dim(1) == mid_size and w2.dim(2) == hidden_size) return w2.withTags(.{ .expert, .mid, .out });
     if (w2.dim(1) == hidden_size and w2.dim(2) == mid_size) {
-        warnRuntimeWeightTranspose(&warned_down_runtime_transpose, "down_proj", "[expert, mid, out]");
+        warningTranspose(&down_transpose, "down_proj", "[expert, mid, out]");
         return w2.withTags(.{ .expert, .out, .mid }).transpose(.{ .expert, .mid, .out });
     }
     return error.InvalidShape;
@@ -180,7 +180,7 @@ fn alignSortedRowsByGroup(rows: Tensor, expert_ids_sorted: Tensor, group_sizes: 
     };
 }
 
-fn permuteHiddenOneHotSmallBatchEp(hidden: Tensor, sorted_route: Tensor, topk: i64) Tensor {
+fn permuteSmallBatch(hidden: Tensor, sorted_route: Tensor, topk: i64) Tensor {
     const num_tokens = hidden.dim(.token);
     const num_routes = num_tokens * topk;
 
@@ -281,8 +281,8 @@ pub fn fusedExpertsImpl(
     const b = hidden_states.dim(.b);
     const s = hidden_states.dim(.s);
     const hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
-    const gate_up = try canonicalizeGateUpForGmm(w1, hidden.dim(.in));
-    const down = try canonicalizeDownForGmm(w2, hidden.dim(.in), gate_up.dim(.out));
+    const gate_up = try canonicalizeGateUp(w1, hidden.dim(.in));
+    const down = try canonicalizeDown(w2, hidden.dim(.in), gate_up.dim(.out));
     const weights = topk_weights.reshape(.{ .token = b * s, .topk = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
     const ids = topk_ids.reshape(.{ .token = b * s, .topk = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
 
@@ -308,7 +308,7 @@ pub fn fusedExpertsImpl(
 
     const sorted_route = flat_ids_local.argsort(.route, .{ .descending = false }).rename(.{ .route = .perm });
     const hidden_sorted = if (opts.expert_map != null)
-        permuteHiddenOneHotSmallBatchEp(hidden, sorted_route, ids.dim(.topk))
+        permuteSmallBatch(hidden, sorted_route, ids.dim(.topk))
     else blk: {
         const hidden_repeated = hidden.repeat1d(.token, @intCast(ids.dim(.topk))).rename(.{ .token = .route });
         break :blk hidden_repeated.gather(.{ .route = sorted_route }, .{}).rename(.{ .perm = .token });
