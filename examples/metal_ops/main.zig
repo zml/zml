@@ -117,6 +117,12 @@ fn causalMask(x: zml.Tensor) zml.Tensor {
     const keep = j.cmp(.LE, i); // s32 compare: col ≤ row
     return keep.select(x, zml.Tensor.scalar(-1e9, .f32).broad(x.shape()));
 }
+// CONVERT inside a fusion — the bridge from integer indices to float math (the
+// RoPE-positions building block): iota (s32) → convert(.f32) → add x. The
+// convert is an s32→f32 cast (sitofp) computed inline. out[r,c] = c + x[r,c].
+fn posBias(x: zml.Tensor) zml.Tensor {
+    return zml.Tensor.iota(x.shape(), .c).convert(.f32).add(x);
+}
 // KV-cache indexing ops with a RUNTIME offset. dynSlice: read a fixed-length
 // window of x at a runtime start. dynUpdate: write `upd` into x at a runtime
 // start, returning the updated array (the KV-cache write).
@@ -1748,6 +1754,10 @@ pub fn main(init: std.process.Init) !void {
     // compare inside a fusion (the on-device masking shape). Exact (select picks).
     failures += checkShaped(allocator, io, cpu, metal, "causal", causalMask,
         zml.Shape.init(.{ .r = 3, .c = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 }, 9);
+    // convert (s32→f32) inside a fusion: iota positions cast to f32, added to x
+    // (the RoPE-positions bridge). out[r,c] = c + x[r,c]. Integer→f32 exact.
+    failures += checkShaped(allocator, io, cpu, metal, "cvtpos", posBias,
+        zml.Shape.init(.{ .r = 2, .c = 4 }, .f32), &[_]f32{ 10, 20, 30, 40, 50, 60, 70, 80 }, 8);
 
     // Deeper chain (3 thunks, 2 intermediates): abs(x·W1)·W2. The SECOND matmul
     // reads a COMPUTED buffer (the abs result), not a parameter — the matmul-
