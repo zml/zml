@@ -97,6 +97,11 @@ pub const AttnType = enum {
     sliding_attention,
 };
 
+pub const FfnType = enum {
+    moe,
+    mlp,
+};
+
 // Options
 pub const Options = struct {
     sampling_strategy: ?zml.nn.SamplingStrategy,
@@ -104,6 +109,7 @@ pub const Options = struct {
 };
 
 // TODO: Model struct. Do we need a LoadedModel?
+// model should create KV cache
 
 // TODO: buffers
 
@@ -511,6 +517,8 @@ pub const SelfAttn = struct {
     attn: Attn,
     attention_type: AttnType,
     ffn: Ffn,
+    ffn_type: FfnType,
+    shared_expert: Moe,
     post_attention_layernorm: RmsNorm,
 
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !TransformerLayer {
@@ -522,10 +530,14 @@ pub const SelfAttn = struct {
             .attn = try Attn.init(store.withPrefix("self_attn"), layer_idx, attention_type),
             .attention_type = attention_type,
 <<<<<<< HEAD
+<<<<<<< HEAD
             .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx) } else .{ .mlp = .init(store.withPrefix("mlp"), default_config.swiglu_limits[layer_idx]) },
 =======
             .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx) } else .{ .mlp = .init(store.withPrefix("mlp"), swigluLimitFor(layer_idx)) },
 >>>>>>> fc95f419 (examples/llm: moe and attention type defer to config)
+=======
+            .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx), .ffn_type = .moe } else .{ .mlp = .init(store.withPrefix("mlp"), default_config.swiglu_limits[layer_idx]), .ffn_type = .mlp },
+>>>>>>> def04688 (examples/llm: move fields (kv cache, layer kind) up in hierarchy)
             .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e5),
         };
     }
@@ -541,30 +553,29 @@ pub const SelfAttn = struct {
         self: TransformerLayer,
         x0: zml.Tensor,
         token_index: zml.Tensor,
-    ) struct { zml.Tensor } {
-        _ = self; // autofix
-        _ = token_index; // autofix
+        kv_cache: KvCache,
+    ) struct { zml.Tensor, zml.Tensor } {
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
+        const residual0 = x0;
 
-        // const residual = x0;
-        // _ = residual; // autofix
+        // Attention block
+        const attn_input = self.input_layernorm.forward(x0);
+        const attn_delta, const updated_kv_cache = self.attn.forward(attn_input, token_index, kv_cache);
 
-        // var hidden_states = self.input_layernorm.forward(x0);
-        // _ = hidden_states; // autofix
+        // FFN block
+        const residual1 = residual0.add(attn_delta);
+        const ffn_input = self.post_attention_layernorm.forward(residual1);
+        const ffn_delta = self.ffn.forward(ffn_input).rename(.{ .dout = .d }).add(residual1);
 
-        // hidden_states, _ = self.attn.forward(
-        //     hidden_states,
-        //     token_index,
-        // );
-
-        // // Fully Connected
-        // const x1 = x0.add(delta0);
-        // const x1_normalized = self.post_attention_layernorm.forward(x1);
-        // const x2 = self.mlp.forward(x1_normalized)
-        //     .rename(.{ .dout = .d })
-        //     .add(x1);
-
-        // return .{x2.reuseBuffer(x0)};
+        // Branch on whether it is MoE or MLP
+        if (self.ffn_type == .moe) {
+            const shared_expert_delta = self.shared_expert.forward(ffn_input);
+            const moe_output = ffn_delta.add(shared_expert_delta);
+            return .{ moe_output.add(residual1).reuseBuffer(x0), updated_kv_cache };
+        } else {
+            const mlp_output = self.shared_expert.forward(residual1);
+            return .{ mlp_output.add(residual1).reuseBuffer(x0), updated_kv_cache };
+        }
     }
 };
 
@@ -708,7 +719,6 @@ pub const Attn = struct {
     rotary_dim: i64,
     rotary_emb: TextRotaryEmbedding,
 
-    // do we need initProj
     fn initProj(store: zml.io.TensorStore.View, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
         return .init(
             store.createTensor("weight", .{ .dout, .d }, partitions),
@@ -717,7 +727,14 @@ pub const Attn = struct {
         );
     }
 
+<<<<<<< HEAD
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, kind: AttnType) !Attn {
+=======
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !Attn {
+        // Layers past the configured count are MTP/speculative blocks and use the SWA shape.
+        const kind: LayerType = default_config.layer_types[layer_idx];
+
+>>>>>>> 6de435ef (examples/llm: KV cache)
         const num_q_heads: i64 = @intCast(if (kind == .full_attention)
             default_config.num_attention_heads
         else
@@ -766,10 +783,14 @@ pub const Attn = struct {
 >>>>>>> 157a1d1e (examples/llm: remove hardcoding of swiglu limit)
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 // Moe
 =======
 <<<<<<< HEAD
 // Router
+=======
+    // unloadBuffers
+>>>>>>> 6de435ef (examples/llm: KV cache)
 =======
 >>>>>>> 88deb96c (examples/llm: KV cache)
     pub fn unloadBuffers(self: *zml.Bufferized(Attn)) void {
@@ -848,10 +869,14 @@ pub const Attn = struct {
 
         // Scatter the new k/v slice into the persistent cache, then read the full
         // history back so attention sees all prior tokens.
+<<<<<<< HEAD
         // scatterSlices wants a scalar start offset for the `.k` axis; the slice
         // length comes from the update tensor itself.
         const cache_start = token_index.convert(.u32).slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0);
         const new_kv_cache = kv_cache.update(k, v, cache_start);
+=======
+        const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
+>>>>>>> 6de435ef (examples/llm: KV cache)
         const k_full = new_kv_cache.keys().convert(dtype);
         const v_full = new_kv_cache.values().convert(dtype);
 
@@ -906,10 +931,20 @@ pub const Attn = struct {
 
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> 6de435ef (examples/llm: KV cache)
+=======
+>>>>>>> af57d27f (examples/llm: update temp forward for testing KV cache)
     pub fn forwardStages(self: Attn, x: zml.Tensor, token_index: zml.Tensor) Stages {
 =======
     pub fn forwardTemp(self: Attn, x: zml.Tensor, token_index: zml.Tensor) Stages {
 >>>>>>> 88deb96c (examples/llm: KV cache)
+<<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> af57d27f (examples/llm: update temp forward for testing KV cache)
 =======
     pub fn forwardTemp(
         self: Attn,
@@ -918,6 +953,11 @@ pub const Attn = struct {
         kv_cache: KvCache,
     ) struct { Stages, KvCache } {
 >>>>>>> 52f36010 (examples/llm: update temp forward for testing KV cache)
+<<<<<<< HEAD
+=======
+>>>>>>> 6de435ef (examples/llm: KV cache)
+=======
+>>>>>>> af57d27f (examples/llm: update temp forward for testing KV cache)
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
 
         const q_proj_raw = self.q_proj.forward(input);
@@ -950,7 +990,11 @@ pub const Attn = struct {
         const q_rope_hf = q_rope.transpose(.{ .b, .h, .s, .hd });
         const k_rope_hf = k_rope.transpose(.{ .b, .h, .s, .hd });
 
+<<<<<<< HEAD
         const new_kv_cache = kv_cache.update(k_rope, v, token_index.convert(.u32).slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0));
+=======
+        const new_kv_cache = kv_cache.update(k_rope, v, token_index.convert(.u32));
+>>>>>>> af57d27f (examples/llm: update temp forward for testing KV cache)
         const k_full = new_kv_cache.keys().convert(dtype);
         const v_full = new_kv_cache.values().convert(dtype);
 
@@ -1071,7 +1115,15 @@ pub const KvCache = struct {
         };
     }
 
+<<<<<<< HEAD
+<<<<<<< HEAD
     pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
+=======
+    pub fn initBuffer(kv: KvCache, io: std.io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
+>>>>>>> f3f3edbf (examples/llm: KV Cache)
+=======
+    pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
+>>>>>>> d8f46768 (examples/llm: KV cache individual test)
         return .{
             .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), sharding, .{}),
             .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), sharding, .{}),
@@ -1088,13 +1140,26 @@ pub const KvCache = struct {
     }
 
     pub fn values(kv: KvCache) zml.Tensor {
+<<<<<<< HEAD
+<<<<<<< HEAD
         return kv.v.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
+=======
+        return kv.k.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
+>>>>>>> f3f3edbf (examples/llm: KV Cache)
+=======
+        return kv.v.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
+>>>>>>> d8f46768 (examples/llm: KV cache individual test)
     }
 
     pub fn update(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: ?zml.Tensor) KvCache {
         const k_shape = kv.k.shape().drop(.layer);
         const layer: zml.Tensor = .scalar(kv.layer_index orelse @panic("forgot to call atLayer"), .u32);
 
+<<<<<<< HEAD
+<<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> af57d27f (examples/llm: update temp forward for testing KV cache)
         // KV cache uses .k instead of .s, so change here so caller doesn't need to be aware of this naming scheme.
         // Accept callers that already provide .k (e.g. synthetic tests).
         const k_renamed = if (new_k.shape().hasTag(.s) != null) new_k.rename(.{ .s = .k }) else new_k;
@@ -1109,10 +1174,34 @@ pub const KvCache = struct {
         } else .{
             .k = kv.k.scatterSlices(.{ .layer = layer }, k_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
             .v = kv.v.scatterSlices(.{ .layer = layer }, v_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
+=======
+=======
+        // KV cache uses .k instead of .s, so change here so caller doesn't need to be aware of this naming scheme
+        const k_in = new_k.rename(.{ .s = .k }).convert(kv.k.dtype()).transpose(k_shape);
+        const v_in = new_v.rename(.{ .s = .k }).convert(kv.v.dtype()).transpose(k_shape);
+
+>>>>>>> 4ead65f5 (examples/llm: put onus on function to rename kv cache axes)
+        return if (token_index) |idx| .{
+            .k = kv.k.scatterSlices(.{ .layer = layer, .k = idx }, k_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
+            .v = kv.v.scatterSlices(.{ .layer = layer, .k = idx }, v_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
+            .layer_index = kv.layer_index,
+        } else .{
+<<<<<<< HEAD
+            .k = kv.k.scatterSlices(.{ .layer = layer }, new_k.convert(kv.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
+            .v = kv.v.scatterSlices(.{ .layer = layer }, new_v.convert(kv.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
+>>>>>>> f3f3edbf (examples/llm: KV Cache)
+=======
+            .k = kv.k.scatterSlices(.{ .layer = layer }, k_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
+            .v = kv.v.scatterSlices(.{ .layer = layer }, v_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
+>>>>>>> 4ead65f5 (examples/llm: put onus on function to rename kv cache axes)
             .layer_index = kv.layer_index,
         };
     }
 
+<<<<<<< HEAD
+<<<<<<< HEAD
+=======
+>>>>>>> d8f46768 (examples/llm: KV cache individual test)
     pub fn atLayer(kv: KvCache, layer_index: usize) KvCache {
         return .{
             .k = kv.k,
@@ -1120,6 +1209,7 @@ pub const KvCache = struct {
             .layer_index = @intCast(layer_index),
         };
     }
+<<<<<<< HEAD
 
     pub fn reuseBuffer(kv: KvCache, other: KvCache) KvCache {
         return .{
@@ -1361,6 +1451,20 @@ pub const TextRotaryEmbedding = struct {
 };
 
 // TODO: KV Cache
+=======
+    // at layer
+=======
+>>>>>>> d8f46768 (examples/llm: KV cache individual test)
+
+    pub fn reuseBuffer(kv: KvCache, other: KvCache) KvCache {
+        return .{
+            .k = kv.k.reuseBuffer(other.k),
+            .v = kv.v.reuseBuffer(other.v),
+            .layer_index = null,
+        };
+    }
+};
+>>>>>>> f3f3edbf (examples/llm: KV Cache)
 
 pub const Mlp = struct {
     up_proj: zml.nn.Linear, // (dim -> hidden_dim)

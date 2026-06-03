@@ -365,7 +365,19 @@ const LayerKind = enum { mlp, rmsNorm };
             };
         }
     } else if (TEST_LAYER == 3) {
+<<<<<<< HEAD
         try debugSelfAttnStages(allocator, io, platform, model_store, &activation_store, 1);
+=======
+<<<<<<< HEAD
+        try surveySelfAttnShapes(allocator, model_store, &activation_store);
+        for (0..45) |layer_idx| {
+            debugSelfAttnStages(allocator, io, platform, model_store, &activation_store, layer_idx) catch |err| {
+                std.log.warn("skipping model.layers.{d}.self_attn: {s}", .{ layer_idx, @errorName(err) });
+            };
+        }
+
+        // try debugSelfAttnStages(allocator, io, platform, model_store, &activation_store, 1);
+>>>>>>> 24035ea3 (examples/llm: update tests)
     } else {
         const layer_idx = 1;
         const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.self_attn", .{layer_idx});
@@ -390,6 +402,9 @@ const LayerKind = enum { mlp, rmsNorm };
         ) catch |err| {
             std.log.warn("skipping {s}: {s}", .{ name, @errorName(err) });
         };
+=======
+        try runKvCacheTests(allocator, io, platform);
+>>>>>>> 2bc2e8f0 (examples/llm: update tests)
     }
 }
 >>>>>>> c856b0f1 (examples/llm: clean up tests and model annotations)
@@ -781,7 +796,8 @@ fn runSelfAttnLayer(
     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.self_attn", .{layer_idx});
     defer allocator.free(name);
 
-    const attn = try model.Attn.init(model_store.view().withPrefix(name), layer_idx);
+    const attention_type = model.default_config.layer_types[layer_idx];
+    const attn = try model.Attn.init(model_store.view().withPrefix(name), layer_idx, attention_type);
 
     var attn_weights = try zml.io.load(model.Attn, &attn, allocator, io, platform, model_store, .auto);
     defer deinitBuffers(&attn_weights);
@@ -823,7 +839,8 @@ fn debugSelfAttnStages(
     }
 
     // 2. Build attention layer and load its weights.
-    const attn = try model.Attn.init(model_store.view().withPrefix(name), layer_idx);
+    const attention_type = model.default_config.layer_types[layer_idx];
+    const attn = try model.Attn.init(model_store.view().withPrefix(name), layer_idx, attention_type);
     var attn_weights = try zml.io.load(model.Attn, &attn, allocator, io, platform, model_store, .auto);
     defer deinitBuffers(&attn_weights);
 
@@ -846,7 +863,7 @@ fn debugSelfAttnStages(
     const Argsx = struct { zml.Tensor, zml.Tensor, model.KvCache };
     const argsx: Argsx = .{ hidden_states, cache_position, kv_traced };
 
-    const exe = try platform.compile(allocator, io, attn, .forwardStages, argsx, .{ .shardings = &.{} });
+    const exe = try platform.compile(allocator, io, attn, .forwardTemp, argsx, .{ .shardings = &.{} });
     defer exe.deinit();
 
     const ActArgs = struct { zml.Tensor, zml.Tensor };
@@ -1515,8 +1532,145 @@ fn testApplyRopePreservesNorm(allocator: std.mem.Allocator, io: std.Io, platform
     }
 }
 <<<<<<< HEAD
+<<<<<<< HEAD
 >>>>>>> a636246d (examples/llm: RoPE & RoPE tests)
 =======
 >>>>>>> a3188857 (examples/llm: remove RoPE tests)
 =======
 >>>>>>> 36ddcb6b (examples/llm: update RoPE tests to generalize)
+=======
+
+// ===========================================================================
+// KvCache synthetic tests
+//
+// Exercise KvCache.update + keys/values in isolation, no model weights needed.
+// Write a known value at a known token slot for a known layer, then verify the
+// slot we wrote got it and the rest stayed zero.
+// ===========================================================================
+
+const KvTest = struct {
+    const LAYERS: i64 = 2;
+    const B: i64 = 1;
+    const H: i64 = 2;
+    const K: i64 = 4;
+    const HD: i64 = 8;
+    const LAYER_IDX: usize = 1;
+    const TOKEN_IDX: u32 = 2;
+
+    const KV_LEN: usize = @as(usize, @intCast(LAYERS * B * H * K * HD));
+    const NEW_LEN: usize = @as(usize, @intCast(B * H * 1 * HD));
+    const READ_LEN: usize = @as(usize, @intCast(B * H * K * HD));
+
+    fn updateAndRead(
+        kv: model.KvCache,
+        new_k: zml.Tensor,
+        new_v: zml.Tensor,
+        token_index: zml.Tensor,
+    ) struct { zml.Tensor, zml.Tensor } {
+        const updated = kv.update(new_k, new_v, token_index);
+        return .{ updated.keys(), updated.values() };
+    }
+};
+
+fn runKvCacheTests(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !void {
+    std.log.info("KvCache synthetic tests:", .{});
+
+    const kv_shape = zml.Shape.init(
+        .{ .layer = KvTest.LAYERS, .b = KvTest.B, .h = KvTest.H, .k = KvTest.K, .hd = KvTest.HD },
+        .f32,
+    );
+    const new_shape = zml.Shape.init(
+        .{ .b = KvTest.B, .h = KvTest.H, .k = 1, .hd = KvTest.HD },
+        .f32,
+    );
+    const idx_shape = zml.Shape.init(.{}, .u32);
+
+    // Trace-time KvCache, pinned to LAYER_IDX.
+    const kv_traced = model.KvCache.init(kv_shape).atLayer(KvTest.LAYER_IDX);
+    const new_k_t = zml.Tensor.fromShape(new_shape);
+    const new_v_t = zml.Tensor.fromShape(new_shape);
+    const idx_t = zml.Tensor.fromShape(idx_shape);
+
+    var exe = try zml.module.compile(
+        allocator,
+        io,
+        KvTest.updateAndRead,
+        .{ kv_traced, new_k_t, new_v_t, idx_t },
+        platform,
+        .{},
+    );
+    defer exe.deinit();
+
+    // Runtime buffers.
+    var k_init: [KvTest.KV_LEN]f32 = .{0} ** KvTest.KV_LEN;
+    var v_init: [KvTest.KV_LEN]f32 = .{0} ** KvTest.KV_LEN;
+    var new_k_data: [KvTest.NEW_LEN]f32 = .{1.0} ** KvTest.NEW_LEN;
+    var new_v_data: [KvTest.NEW_LEN]f32 = .{2.0} ** KvTest.NEW_LEN;
+    var idx_data: [1]u32 = .{KvTest.TOKEN_IDX};
+
+    var k_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, std.mem.sliceAsBytes(&k_init));
+    defer k_buf.deinit();
+    var v_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, std.mem.sliceAsBytes(&v_init));
+    defer v_buf.deinit();
+    var new_k_buf: zml.Buffer = try .fromBytes(io, platform, new_shape, .replicated, std.mem.sliceAsBytes(&new_k_data));
+    defer new_k_buf.deinit();
+    var new_v_buf: zml.Buffer = try .fromBytes(io, platform, new_shape, .replicated, std.mem.sliceAsBytes(&new_v_data));
+    defer new_v_buf.deinit();
+    var idx_buf: zml.Buffer = try .fromBytes(io, platform, idx_shape, .replicated, std.mem.sliceAsBytes(&idx_data));
+    defer idx_buf.deinit();
+
+    const kv_buffers: model.KvCache.Buffer = .{ .k = k_buf, .v = v_buf };
+
+    var result = try zml.testing.autoCall(
+        allocator,
+        io,
+        &exe,
+        KvTest.updateAndRead,
+        .{ kv_buffers, new_k_buf, new_v_buf, idx_buf },
+    );
+    defer {
+        result[0].deinit();
+        result[1].deinit();
+    }
+
+    // Build expected: zeros everywhere except the written token slot for the
+    // selected layer. keys() returns shape `.b, .h, .k, .hd` (layer dropped).
+    var k_expected: [KvTest.READ_LEN]f32 = .{0} ** KvTest.READ_LEN;
+    var v_expected: [KvTest.READ_LEN]f32 = .{0} ** KvTest.READ_LEN;
+    {
+        const b: usize = @intCast(KvTest.B);
+        const h: usize = @intCast(KvTest.H);
+        const k: usize = @intCast(KvTest.K);
+        const hd: usize = @intCast(KvTest.HD);
+        const tok: usize = KvTest.TOKEN_IDX;
+        for (0..b) |bi| {
+            for (0..h) |hi| {
+                for (0..hd) |di| {
+                    const off = ((bi * h + hi) * k + tok) * hd + di;
+                    k_expected[off] = 1.0;
+                    v_expected[off] = 2.0;
+                }
+            }
+        }
+    }
+
+    const read_shape = zml.Shape.init(
+        .{ .b = KvTest.B, .h = KvTest.H, .k = KvTest.K, .hd = KvTest.HD },
+        .f32,
+    );
+    try zml.testing.expectClose(
+        io,
+        zml.Slice.init(read_shape, std.mem.sliceAsBytes(&k_expected)),
+        result[0],
+        .{ .absolute_tolerance = 1e-6 },
+    );
+    try zml.testing.expectClose(
+        io,
+        zml.Slice.init(read_shape, std.mem.sliceAsBytes(&v_expected)),
+        result[1],
+        .{ .absolute_tolerance = 1e-6 },
+    );
+
+    std.log.info("  KvCache update+read at layer={d} token={d} OK.", .{ KvTest.LAYER_IDX, KvTest.TOKEN_IDX });
+}
+>>>>>>> 24035ea3 (examples/llm: update tests)
