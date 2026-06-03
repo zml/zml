@@ -106,6 +106,17 @@ fn mha(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor) zml.Tensor {
     const attn = softmaxAx(scores, .t); // {h,s,t}
     return attn.dot(v, .t); // {h,s,e}
 }
+// Causal mask built ON-DEVICE from iota — the real use. Keep key j ≤ query i
+// (lower triangle incl. diagonal), else −1e9. ZML's iota is s32, so the two
+// iotas + the INTEGER compare + select + scalar all FUSE into one kernel: this
+// exercises an integer iota and an integer compare INSIDE a fusion
+// (EmitFusedValue), the shape real masking produces. Output stays f32 (select).
+fn causalMask(x: zml.Tensor) zml.Tensor {
+    const i = zml.Tensor.iota(x.shape(), .r); // query (row) index  (s32)
+    const j = zml.Tensor.iota(x.shape(), .c); // key (col) index    (s32)
+    const keep = j.cmp(.LE, i); // s32 compare: col ≤ row
+    return keep.select(x, zml.Tensor.scalar(-1e9, .f32).broad(x.shape()));
+}
 // KV-cache indexing ops with a RUNTIME offset. dynSlice: read a fixed-length
 // window of x at a runtime start. dynUpdate: write `upd` into x at a runtime
 // start, returning the updated array (the KV-cache write).
@@ -1731,6 +1742,12 @@ pub fn main(init: std.process.Init) !void {
         zml.Shape.init(.{ .h = 2, .s = 2, .e = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 },
         zml.Shape.init(.{ .h = 2, .t = 3, .e = 2 }, .f32), &[_]f32{ 1, 0, 0, 1, 1, 1, 2, 1, 0, 2, 1, 0 },
         zml.Shape.init(.{ .h = 2, .t = 3, .e = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 6, 5, 4, 3, 2, 1 }, 8, 1e-5);
+
+    // Causal mask FUSED from iota (s32 iota×2 → integer cmp → select → scalar):
+    // lower triangle keeps x, upper → −1e9. Exercises an integer iota + integer
+    // compare inside a fusion (the on-device masking shape). Exact (select picks).
+    failures += checkShaped(allocator, io, cpu, metal, "causal", causalMask,
+        zml.Shape.init(.{ .r = 3, .c = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 }, 9);
 
     // Deeper chain (3 thunks, 2 intermediates): abs(x·W1)·W2. The SECOND matmul
     // reads a COMPUTED buffer (the abs result), not a parameter — the matmul-
