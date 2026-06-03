@@ -94,6 +94,14 @@ fn mlpDeep(x: zml.Tensor, w1: zml.Tensor, w2: zml.Tensor, w3: zml.Tensor) zml.Te
 fn bmm(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
     return a.dot(b, .k);
 }
+// GQA attention QKᵀ — the GENERAL batched dot the simple matcher can't express:
+// the batch dim .hkv sits at a NON-leading operand position and q has TWO free
+// dims (.s, .hg). q{s,hkv,hg,hd}·k{t,hkv,hd} contracts .hd, batches shared .hkv →
+// {hkv,s,hg,t} (exactly Llama-3.2's shape). MPSGraph permutes each operand to
+// [batch,M,K]/[batch,K,N] in-graph; the [batch,M,N] result is XLA's output order.
+fn gqa(q: zml.Tensor, k: zml.Tensor) zml.Tensor {
+    return q.dot(k, .hd);
+}
 // Multi-head attention CORE (pre-split heads, no projections): per-head scaled
 // dot-product attention. q{h,s,e} k{h,t,e} v{h,t,e} → ctx{h,s,e}. Two BATCHED
 // matmuls — scores = q·kᵀ (contract .e), ctx = attn·v (contract .t) — with a
@@ -2015,6 +2023,16 @@ pub fn main(init: std.process.Init) !void {
     failures += checkMatmul(allocator, io, cpu, metal, "bmm", bmm,
         zml.Shape.init(.{ .h = 2, .m = 2, .k = 3 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 },
         zml.Shape.init(.{ .h = 2, .k = 3, .n = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 6, 5, 4, 3, 2, 1 }, 8, exact);
+
+    // GQA attention QKᵀ — the GENERAL batched dot (Llama-3.2 layout): batch .hkv at
+    // a NON-leading operand position + two lhs free dims (.s, .hg).
+    // q{s,hkv,hg,hd}·k{t,hkv,hd} contract .hd → {hkv,s,hg,t}. 2·2·2·2=16 out, K=2
+    // (exact). Verifies the in-graph permute→[batch,M,K]/[batch,K,N] matmul.
+    failures += checkMatmul(allocator, io, cpu, metal, "gqa", gqa,
+        zml.Shape.init(.{ .s = 2, .hkv = 2, .hg = 2, .hd = 2 }, .f32),
+        &[_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 },
+        zml.Shape.init(.{ .t = 2, .hkv = 2, .hd = 2 }, .f32),
+        &[_]f32{ 1, 0, 0, 1, 2, 1, 1, 2 }, 16, exact);
 
     // Multi-head attention core: per-head q·kᵀ → softmax(.t) → ·v. Two batched
     // matmuls + a batched softmax (reduce over .t of a {h,s,t} tensor) — the real
