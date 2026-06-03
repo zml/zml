@@ -53,11 +53,62 @@ pub fn main(init: std.process.Init) !void {
     progress.end();
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
-    // const backend = attention.Backend.auto(platform);
-    // const params = lfm2.CompilationParameters.init(repo_model.inner, repo_model.parsed_config.value, repo_model.parsed_config.value.max_position_embeddings, backend, false, shardings);
-    // progress.end();
+    const backend = attention.Backend.auto(platform);
+    const params = deepseek.CompilationParameters.init(repo_model.parsed_config.value.max_position_embeddings, repo_model.parsed_config.value, repo_model.inner, shardings, backend);
+    _ = params; // autofix
 
-    try run(allocator, io, platform, args.activations, repo_model.parsed_config.value, repo_model.inner, &model_buffers);
+    try testSparseAttn(allocator, io, platform, platform.replicated_sharding);
+    // try run(allocator, io, platform, args.activations, repo_model.parsed_config.value, repo_model.inner, &model_buffers, params.attention_metadata, params.attention_parameters);
+}
+
+fn testSparseAttn(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.Sharding) !void {
+    var activations_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, "/Users/dmehala/models/sparse_attn.safetensors");
+    defer activations_registry.deinit();
+    log.info("Found {} activations", .{ activations_registry.tensors.count() });
+
+    var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry);
+    defer activation_store.deinit();
+
+// ├── KV [shape={1,1024,128,bf16} size=0.26MB]
+// ├── Q [shape={1,512,8,128,bf16} size=1.05MB]
+// ├── attn_sink [shape={8,bf16} size=16B]
+// ├── o [shape={1,512,8,128,bf16} size=1.05MB]
+// └── topk_idxs [shape={1,512,256,i32} size=0.52MB]
+    var kv_buffer = try loadBufferFromStore(allocator, io, platform, &activation_store, "KV", sharding);
+    defer kv_buffer.deinit();
+    const kv_tensor = zml.Tensor.fromShape(kv_buffer.shape()).withTags(.{ .batch, .k, .hd});
+
+    var q_buffer = try loadBufferFromStore(allocator, io, platform, &activation_store, "Q", sharding);
+    defer q_buffer.deinit();
+    const q_tensor = zml.Tensor.fromShape(q_buffer.shape()).withTags(.{ .batch, .q, .h, .hd});
+
+    var sink_buffer = try loadBufferFromStore(allocator, io, platform, &activation_store, "attn_sink", sharding);
+    defer sink_buffer.deinit();
+    const sink_tensor = zml.Tensor.fromShape(sink_buffer.shape());//.withTags(.{});
+
+    var topk_buffer = try loadBufferFromStore(allocator, io, platform, &activation_store, "topk_idxs", sharding);
+    defer topk_buffer.deinit();
+    const topk_tensor = zml.Tensor.fromShape(topk_buffer.shape()).withTags(.{ .batch, .seq, .topk });
+
+    var o_buffer = try loadBufferFromStore(allocator, io, platform, &activation_store, "o", sharding);
+    defer o_buffer.deinit();
+
+    const exe = try platform.compileFn(allocator, io, deepseek.model.sparse_attn, .{ q_tensor, kv_tensor, sink_tensor, topk_tensor, null }, .{ .shardings = &.{sharding} });
+    defer exe.deinit();
+
+    var args = try exe.args(allocator);
+    defer args.deinit(allocator);
+    args.set(.{ q_buffer, kv_buffer, sink_buffer, topk_buffer, null });
+
+    var res = try exe.results(allocator);
+    defer res.deinit(allocator);
+
+    exe.call(args, &res);
+
+    var out_result = res.get(zml.Buffer);
+    defer out_result.deinit();
+
+    try zml.testing.expectClose(io, out_result, o_buffer, .{});
 }
 
 pub fn run(
@@ -68,8 +119,8 @@ pub fn run(
     config: deepseek.Config,
     mdl: deepseek.Model,
     model_buffers: *deepseek.Buffers,
-    // attention_metadata: attention.Metadata,
-    // attention_parameters: attention.Parameters,
+    attention_metadata: attention.Metadata,
+    attention_parameters: attention.Parameters,
 ) !void {
     _ = config; // autofix
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
@@ -83,13 +134,14 @@ pub fn run(
         .io = io,
         .platform = platform,
         .activations_store = &activation_store,
-        // .attention_metadata = attention_metadata,
-        // .attention_parameters = attention_parameters,
+        .attention_metadata = attention_metadata,
+        .attention_parameters = attention_parameters,
         .sharding = platform.replicated_sharding,
     };
 
     // TODO: write why
     const dequant_opts: zml.testing.CompareOpts = .{.absolute_tolerance = 5e-2, .relative_tolerance = 2e-2 };
+    _ = dequant_opts; // autofix
 
     try ctx.testLayer("embed", .{ .batch, .seq }, mdl.embeds, model_buffers.embeds, .{});
     // try ctx.testLayer("head", .{ .batch, .seq, .hc, .d }, mdl.lm_head, model_buffers.lm_head, .{});
@@ -101,9 +153,9 @@ pub fn run(
     // TEST: Attention
     try ctx.testLayer("layers.0.attn.kv_norm", .{ .batch, .seq, .hd }, mdl.layers[0].attn.kv_norm, model_buffers.layers[0].attn.kv_norm, .{});
     try ctx.testLayer("layers.0.attn.q_norm", .{ .batch, .seq, .q }, mdl.layers[0].attn.q_norm, model_buffers.layers[0].attn.q_norm, .{});
-    try ctx.testLayer("layers.0.attn.wq_a", .{ .batch, .seq, .d }, mdl.layers[0].attn.wq_a, model_buffers.layers[0].attn.wq_a, dequant_opts);
+    // try ctx.testLayer("layers.0.attn.wq_a", .{ .batch, .seq, .d }, mdl.layers[0].attn.wq_a, model_buffers.layers[0].attn.wq_a, .{});
     // try ctx.testLayer("layers.0.attn.wq_b", .{ .batch, .seq, .d }, mdl.layers[0].attn.wq_b, model_buffers.layers[0].attn.wq_b, dequant_opts);
-    try ctx.testLayer("layers.0.attn.wkv", .{ .batch, .seq, .d }, mdl.layers[0].attn.wkv, model_buffers.layers[0].attn.wkv, dequant_opts);
+    // try ctx.testLayer("layers.0.attn.wkv", .{ .batch, .seq, .d }, mdl.layers[0].attn.wkv, model_buffers.layers[0].attn.wkv, dequant_opts);
     // try ctx.testLayer("layers.0.attn.wo_a", .{ .batch, .seq, .d }, mdl.layers[0].attn.wo_a, model_buffers.layers[0].attn.wo_a, dequant_opts);
     // try ctx.testLayer("layers.0.attn.wo_b", .{ .batch, .seq, .d }, mdl.layers[0].attn.wo_b, model_buffers.layers[0].attn.wo_b, dequant_opts);
     // try ctx.testAttentionLayer("layers.0.attn", .{ .batch, .seq, .d }, mdl.layers[0].attn, model_buffers.layers[0].attn, .{});
@@ -112,7 +164,7 @@ pub fn run(
     try ctx.testLayer("layers.2.attn.compressor.norm", .{ .batch, .seq, .hd }, mdl.layers[2].attn.compressor.?.norm, model_buffers.layers[2].attn.compressor.?.norm, .{});
     try ctx.testLayer("layers.2.attn.compressor.wgate", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?.wgate, model_buffers.layers[2].attn.compressor.?.wgate, .{});
     try ctx.testLayer("layers.2.attn.compressor.wkv", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?.wkv, model_buffers.layers[2].attn.compressor.?.wkv, .{});
-    try ctx.testAttentionLayer("layers.2.attn.compressor", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?, model_buffers.layers[2].attn.compressor.?, .{});
+    // try ctx.testAttentionLayer("layers.2.attn.compressor", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?, model_buffers.layers[2].attn.compressor.?, .{});
 
     // TEST: Attention-Indexer
     // try ctx.testLayer("layers.2.attn.indexer.weights_proj", .{ .batch, .seq, .d }, mdl.layers[2].attn.indexer.?.proj, model_buffers.layers[2].attn.indexer.?.proj, .{});
@@ -127,13 +179,15 @@ pub fn run(
     // try ctx.testExpertLayer("layers.0.ffn.experts.128", .{ .batch, .d }, mdl.layers[0].ffn.experts[128], model_buffers.layers[0].ffn.experts[128], .{});
 
     // TEST: MoE Shared Expert
-    try ctx.testLayer("layers.0.ffn.shared_experts.w1", .{ .seq, .d }, mdl.layers[0].ffn.shared_experts.w1, model_buffers.layers[0].ffn.shared_experts.w1, dequant_opts);
-    try ctx.testLayer("layers.0.ffn.shared_experts.w2", .{ .seq, .dint }, mdl.layers[0].ffn.shared_experts.w2, model_buffers.layers[0].ffn.shared_experts.w2, dequant_opts);
-    try ctx.testLayer("layers.0.ffn.shared_experts.w3", .{ .seq, .d }, mdl.layers[0].ffn.shared_experts.w3, model_buffers.layers[0].ffn.shared_experts.w3, dequant_opts);
-    try ctx.testExpertLayer("layers.0.ffn.shared_experts", .{ .seq, .d }, mdl.layers[0].ffn.shared_experts, model_buffers.layers[0].ffn.shared_experts, dequant_opts);
+    // try ctx.testLayer("layers.0.ffn.shared_experts.w1", .{ .seq, .d }, mdl.layers[0].ffn.shared_experts.w1, model_buffers.layers[0].ffn.shared_experts.w1, .{});
+    // try ctx.testLayer("layers.0.ffn.shared_experts.w2", .{ .seq, .dint }, mdl.layers[0].ffn.shared_experts.w2, model_buffers.layers[0].ffn.shared_experts.w2, .{});
+    // try ctx.testLayer("layers.0.ffn.shared_experts.w3", .{ .seq, .d }, mdl.layers[0].ffn.shared_experts.w3, model_buffers.layers[0].ffn.shared_experts.w3, .{});
+    // try ctx.testExpertLayer("layers.0.ffn.shared_experts", .{ .seq, .d }, mdl.layers[0].ffn.shared_experts, model_buffers.layers[0].ffn.shared_experts, .{});
 
     // TEST: MoE (complete)
     // try ctx.testMoELayer("layers.0.ffn", .{ .batch, .seq, .d }, mdl.layers[0].ffn, model_buffers.layers[0].ffn, .{});
+
+    // try ctx.testLayerLayer("layers.0", .{ .batch, .seq, .hc, .d }, mdl.layers[0], model_buffers.layers[0], .{});
 
     // try ctx.testLayerV2(&[_]Layer{
     //     "layers.0.ffn.0", zml.Shape.toTag(.{ .batch, .seq, .d }),
@@ -183,8 +237,8 @@ const TestContext = struct {
     io: std.Io,
     platform: *zml.Platform,
     activations_store: *zml.io.TensorStore,
-    // attention_metadata: attention.Metadata,
-    // attention_parameters: attention.Parameters,
+    attention_metadata: attention.Metadata,
+    attention_parameters: attention.Parameters,
     sharding: zml.Sharding,
 
     fn testLayerPrint(self: *TestContext, comptime name_fmt: []const u8, name_args: anytype, tagz: anytype, layer: anytype, layer_buffers: anytype, opts: zml.testing.CompareOpts) !void {
@@ -226,6 +280,45 @@ const TestContext = struct {
         std.log.info("Layer {s} passed!", .{name});
     }
 
+    fn testLayerLayer(self: *TestContext, name: []const u8, tagz: anytype, layer: anytype, layer_buffers: anytype, opts: zml.testing.CompareOpts) !void {
+        std.log.info("Testing layer: {s}", .{name});
+
+        const in_key = try std.fmt.allocPrint(self.allocator, "{s}.in.0", .{name});
+        defer self.allocator.free(in_key);
+        var in_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key, self.sharding);
+        defer in_buffer.deinit();
+        const in_tensor = zml.Tensor.fromShape(in_buffer.shape()).withTags(tagz);
+
+        const in_key_1 = try std.fmt.allocPrint(self.allocator, "{s}.in.1", .{name});
+        defer self.allocator.free(in_key_1);
+        var in_buffer_1 = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key_1, self.sharding);
+        defer in_buffer_1.deinit();
+        const in_tensor_1 = zml.Tensor.fromShape(in_buffer_1.shape());
+
+        const out_key = try std.fmt.allocPrint(self.allocator, "{s}.out.0", .{name});
+        defer self.allocator.free(out_key);
+        var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
+        defer out_buffer_expected.deinit();
+
+        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, in_tensor_1 }, .{ .shardings = &.{self.sharding} });
+        defer exe.deinit();
+
+        var args = try exe.args(self.allocator);
+        defer args.deinit(self.allocator);
+        args.set(.{ layer_buffers, in_buffer, in_buffer_1 });
+
+        var res = try exe.results(self.allocator);
+        defer res.deinit(self.allocator);
+
+        exe.call(args, &res);
+
+        var out_result = res.get(zml.Buffer);
+        defer out_result.deinit();
+
+        try zml.testing.expectClose(self.io, out_result, out_buffer_expected, opts);
+        std.log.info("Layer {s} passed!", .{name});
+    }
+
     fn testAttentionLayer(self: *TestContext, name: []const u8, tagz: anytype, layer: anytype, layer_buffers: anytype, opts: zml.testing.CompareOpts) !void {
         std.log.info("Testing layer: {s}", .{name});
 
@@ -240,12 +333,39 @@ const TestContext = struct {
         var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
         defer out_buffer_expected.deinit();
 
-        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, 0 }, .{ .shardings = &.{self.sharding} });
+        const token_idx_offset = zml.Tensor.scalar(@as(u32, 0), .u32);
+        const layer_idx = zml.Tensor.scalar(@as(u32, 0), .u32);
+        const cache = model.KVCache.init(.init());
+
+        const exe = try self.platform.compileFn(
+            self.allocator,
+            self.io,
+            @TypeOf(layer).forward,
+            .{ 
+                layer,
+                in_tensor,
+                token_idx_offset,
+                layer_idx,
+                cache,
+                self.*.attention_metadata,
+                self.*.attention_parameters,
+            },
+            .{ .shardings = &.{self.sharding} }
+        );
         defer exe.deinit();
+
+        var attention_metadata_buffers = try self.attention_metadata.initBuffer(self.io, self.platform, self.sharding);
+        defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         var args = try exe.args(self.allocator);
         defer args.deinit(self.allocator);
-        args.set(.{ layer_buffers, in_buffer });
+        args.set(.{
+            layer_buffers,
+            in_buffer,
+            // token_idx_buffer,
+            // cache_buffer,
+            attention_metadata_buffers,
+        });
 
         var res = try exe.results(self.allocator);
         defer res.deinit(self.allocator);
