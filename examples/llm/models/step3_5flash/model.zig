@@ -97,6 +97,11 @@ pub const AttnType = enum {
     sliding_attention,
 };
 
+pub const FfnType = enum {
+    moe,
+    mlp,
+};
+
 // Options
 pub const Options = struct {
     sampling_strategy: ?zml.nn.SamplingStrategy,
@@ -104,6 +109,7 @@ pub const Options = struct {
 };
 
 // TODO: Model struct. Do we need a LoadedModel?
+// model should create KV cache
 
 // TODO: buffers
 
@@ -118,6 +124,8 @@ pub const TransformerLayer = struct {
     attn: Attn,
     attention_type: AttnType,
     ffn: Ffn,
+    ffn_type: FfnType,
+    shared_expert: Moe,
     post_attention_layernorm: RmsNorm,
 
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !TransformerLayer {
@@ -128,7 +136,7 @@ pub const TransformerLayer = struct {
             .input_layernorm = RmsNorm.init(store.withPrefix("input_layernorm")),
             .attn = try Attn.init(store.withPrefix("self_attn"), layer_idx, attention_type),
             .attention_type = attention_type,
-            .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx) } else .{ .mlp = .init(store.withPrefix("mlp"), default_config.swiglu_limits[layer_idx]) },
+            .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx), .ffn_type = .moe } else .{ .mlp = .init(store.withPrefix("mlp"), default_config.swiglu_limits[layer_idx]), .ffn_type = .mlp },
             .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e5),
         };
     }
@@ -144,30 +152,29 @@ pub const TransformerLayer = struct {
         self: TransformerLayer,
         x0: zml.Tensor,
         token_index: zml.Tensor,
-    ) struct { zml.Tensor } {
-        _ = self; // autofix
-        _ = token_index; // autofix
+        kv_cache: KvCache,
+    ) struct { zml.Tensor, zml.Tensor } {
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
+        const residual0 = x0;
 
-        // const residual = x0;
-        // _ = residual; // autofix
+        // Attention block
+        const attn_input = self.input_layernorm.forward(x0);
+        const attn_delta, const updated_kv_cache = self.attn.forward(attn_input, token_index, kv_cache);
 
-        // var hidden_states = self.input_layernorm.forward(x0);
-        // _ = hidden_states; // autofix
+        // FFN block
+        const residual1 = residual0.add(attn_delta);
+        const ffn_input = self.post_attention_layernorm.forward(residual1);
+        const ffn_delta = self.ffn.forward(ffn_input).rename(.{ .dout = .d }).add(residual1);
 
-        // hidden_states, _ = self.attn.forward(
-        //     hidden_states,
-        //     token_index,
-        // );
-
-        // // Fully Connected
-        // const x1 = x0.add(delta0);
-        // const x1_normalized = self.post_attention_layernorm.forward(x1);
-        // const x2 = self.mlp.forward(x1_normalized)
-        //     .rename(.{ .dout = .d })
-        //     .add(x1);
-
-        // return .{x2.reuseBuffer(x0)};
+        // Branch on whether it is MoE or MLP
+        if (self.ffn_type == .moe) {
+            const shared_expert_delta = self.shared_expert.forward(ffn_input);
+            const moe_output = ffn_delta.add(shared_expert_delta);
+            return .{ moe_output.add(residual1).reuseBuffer(x0), updated_kv_cache };
+        } else {
+            const mlp_output = self.shared_expert.forward(residual1);
+            return .{ mlp_output.add(residual1).reuseBuffer(x0), updated_kv_cache };
+        }
     }
 };
 
@@ -311,7 +318,6 @@ pub const Attn = struct {
     rotary_dim: i64,
     rotary_emb: TextRotaryEmbedding,
 
-    // do we need initProj
     fn initProj(store: zml.io.TensorStore.View, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
         return .init(
             store.createTensor("weight", .{ .dout, .d }, partitions),

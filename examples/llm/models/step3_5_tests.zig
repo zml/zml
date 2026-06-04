@@ -370,7 +370,8 @@ fn runSelfAttnLayer(
     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.self_attn", .{layer_idx});
     defer allocator.free(name);
 
-    const attn = try model.Attn.init(model_store.view().withPrefix(name), layer_idx);
+    const attention_type = model.default_config.layer_types[layer_idx];
+    const attn = try model.Attn.init(model_store.view().withPrefix(name), layer_idx, attention_type);
 
     var attn_weights = try zml.io.load(model.Attn, &attn, allocator, io, platform, model_store, .auto);
     defer deinitBuffers(&attn_weights);
@@ -412,7 +413,8 @@ fn debugSelfAttnStages(
     }
 
     // 2. Build attention layer and load its weights.
-    const attn = try model.Attn.init(model_store.view().withPrefix(name), layer_idx);
+    const attention_type = model.default_config.layer_types[layer_idx];
+    const attn = try model.Attn.init(model_store.view().withPrefix(name), layer_idx, attention_type);
     var attn_weights = try zml.io.load(model.Attn, &attn, allocator, io, platform, model_store, .auto);
     defer deinitBuffers(&attn_weights);
 
