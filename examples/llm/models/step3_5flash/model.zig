@@ -317,20 +317,16 @@ pub const Attn = struct {
 
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !Attn {
         // Layers past the configured count are MTP/speculative blocks and use the SWA shape.
-        const kind: LayerType = if (layer_idx < default_config.layer_types.len)
-            default_config.layer_types[layer_idx]
-        else
-            .sliding_attention;
-        const is_full = kind == .full_attention;
+        const kind: LayerType = default_config.layer_types[layer_idx];
 
-        const num_q_heads: i64 = @intCast(if (is_full)
+        const num_q_heads: i64 = @intCast(if (kind == .full_attention)
             default_config.num_attention_heads
         else
             (default_config.attention_other_setting orelse unreachable).num_attention_heads);
+
         const num_kv_heads: i64 = @intCast(default_config.num_attention_groups);
         const head_dim: i64 = @intCast(default_config.head_dim);
 
-        // partial_rotary_factor * head_dim: FULL=0.5 (=> 64), SWA=1.0 (=> 128).
         const rotary_idx = @min(layer_idx, default_config.partial_rotary_factors.len - 1);
         const rotary_dim: i64 = @intFromFloat(
             default_config.partial_rotary_factors[rotary_idx] * @as(f32, @floatFromInt(default_config.head_dim)),
@@ -350,7 +346,7 @@ pub const Attn = struct {
             .layer_idx = layer_idx,
             .num_q_heads = num_q_heads,
             .num_kv_heads = num_kv_heads,
-            .enable_sliding_window = !is_full,
+            .enable_sliding_window = !(kind == .full_attention),
             .head_dim = head_dim,
             .num_kv_groups = @divExact(num_q_heads, num_kv_heads),
             .rotary_dim = rotary_dim,
@@ -369,7 +365,10 @@ pub const Attn = struct {
         };
     }
 
+<<<<<<< HEAD
     // unloadBuffers
+=======
+>>>>>>> 88deb96c (examples/llm: KV cache)
     pub fn unloadBuffers(self: *zml.Bufferized(Attn)) void {
         self.q_proj.weight.deinit();
         if (self.q_proj.bias) |*b| b.deinit();
@@ -385,13 +384,15 @@ pub const Attn = struct {
         RmsNorm.unloadBuffers(&self.k_norm);
     }
 
+<<<<<<< HEAD
     // project Q, Gate
     // Step 3.5 Flash keeps q and gate as separate projections (q_proj and g_proj). q_proj outputs num_q_heads * head_dim (= 12288 for layer 30).
     // g_proj is a head-wise attention gate: one scalar per query head (dout = num_q_heads), broadcast over .hd and applied to the per-head attention output before merging heads.
+=======
+>>>>>>> 88deb96c (examples/llm: KV cache)
     fn projectQAndGate(self: Attn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const q = self.q_proj.forward(x)
             .splitAxis(.dout, .{ .h = self.num_q_heads, .hd = self.head_dim });
-
         const gate = self.g_proj.forward(x).rename(.{ .dout = .h });
 
         return .{ q, gate };
@@ -417,16 +418,24 @@ pub const Attn = struct {
         self: Attn,
         x: zml.Tensor,
         token_index: zml.Tensor,
-        // kv_cache: zml.Tensor,
-    ) struct { zml.Tensor } {
+        kv_cache: KvCache,
+    ) struct { zml.Tensor, KvCache } {
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
         var q, const gate = self.projectQAndGate(input);
-        var k, var v = self.projectKV(input);
+
+        // PREFILL: x has .s=prompt_len, project initial KV
+        // DECODE: x has .s=1, retrieve rest from KV cache
+        var k, const v = self.projectKV(input);
 
         q = self.q_norm.forward(q, .hd);
         k = self.k_norm.forward(k, .hd);
 
         const dtype = q.dtype();
+<<<<<<< HEAD
+=======
+
+        // TODO: shift by token_index in decode
+>>>>>>> 88deb96c (examples/llm: KV cache)
         const position_ids = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
 
         const cos, const sin = self.rotary_emb.getCosAndSin(position_ids, dtype);
@@ -434,26 +443,27 @@ pub const Attn = struct {
         q = self.rotary_emb.applyRope(q, cos, sin);
         k = self.rotary_emb.applyRope(k, cos, sin);
 
-        q = q.rename(.{ .s = .q });
-        k = k.rename(.{ .s = .k });
-        v = v.rename(.{ .s = .k });
+        // Scatter the new k/v slice into the persistent cache, then read the full
+        // history back so attention sees all prior tokens.
+        const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
+        const k_full = new_kv_cache.keys().convert(dtype);
+        const v_full = new_kv_cache.values().convert(dtype);
 
-        // The vanilla attention expects a scalar start index into the KV
-        // sequence; the recorded `cache_position` is the full per-token
-        // positions array, so take its first element.
+        q = q.rename(.{ .s = .q });
+
+        // Take first element of cache_positions array to match zml.attention.attention signature
         const attn_start = token_index.slice1d(0, .{ .start = 0, .end = 1 });
 
         const attn_output = zml.attention.attention.attention(
             q,
-            k,
-            v,
+            k_full,
+            v_full,
             attn_start,
             zml.attention.attention.Metadata.init(.fromBackend(.cuda_fa2, input.dim(.s), self.num_q_heads)),
             zml.attention.attention.Parameters.init(.fromBackend(.cuda_fa2)),
         );
 
-        // Head-wise gate: sigmoid(gate) is {b, s, h}; broadcast over .hd and
-        // apply before merging heads and o_proj.
+        // Head-wise gate is {b, s, h}
         const gate_b = gate.sigmoid().rename(.{ .s = .q }).broad(attn_output.shape());
         const gated_attn = attn_output.mul(gate_b);
 
@@ -461,7 +471,7 @@ pub const Attn = struct {
             gated_attn.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s }),
         );
 
-        return .{projected_output};
+        return .{ projected_output, new_kv_cache };
     }
 
     pub const Stages = struct {
@@ -488,7 +498,11 @@ pub const Attn = struct {
         out: zml.Tensor,
     };
 
+<<<<<<< HEAD
     pub fn forwardStages(self: Attn, x: zml.Tensor, token_index: zml.Tensor) Stages {
+=======
+    pub fn forwardTemp(self: Attn, x: zml.Tensor, token_index: zml.Tensor) Stages {
+>>>>>>> 88deb96c (examples/llm: KV cache)
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
 
         const q_proj_raw = self.q_proj.forward(input);
