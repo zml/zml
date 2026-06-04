@@ -118,6 +118,17 @@ pub const TransformerLayer = struct {
     pub const Ffn = union(enum) {
         mlp: Mlp,
         moe: Moe,
+
+        pub fn forward(self: Ffn, x: zml.Tensor) zml.Tensor {
+            return switch (self) {
+                .mlp => {
+
+                },
+                .moe => {
+                    
+                }
+            }
+        }
     };
 
     input_layernorm: RmsNorm,
@@ -153,27 +164,26 @@ pub const TransformerLayer = struct {
         x0: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: KvCache,
-    ) struct { zml.Tensor, zml.Tensor } {
+    ) struct { zml.Tensor, KvCache } {
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
-        const residual0 = x0;
-
         // Attention block
         const attn_input = self.input_layernorm.forward(x0);
         const attn_delta, const updated_kv_cache = self.attn.forward(attn_input, token_index, kv_cache);
 
         // FFN block
-        const residual1 = residual0.add(attn_delta);
-        const ffn_input = self.post_attention_layernorm.forward(residual1);
-        const ffn_delta = self.ffn.forward(ffn_input).rename(.{ .dout = .d }).add(residual1);
+        const x1 = x0.add(attn_delta);
+        const ffn_input = self.post_attention_layernorm.forward(x1);
+
+        // ffn_delta handles MoE and MLP case. Note that for MoE case, it is only finished when we add shared delta in branch below.
+        const ffn_delta = self.ffn.forward(ffn_input).rename(.{ .dout = .d });
 
         // Branch on whether it is MoE or MLP
         if (self.ffn_type == .moe) {
-            const shared_expert_delta = self.shared_expert.forward(ffn_input);
+            const shared_expert_delta = self.shared_expert.forward(ffn_input).rename(.{ .dout = .d });
             const moe_output = ffn_delta.add(shared_expert_delta);
-            return .{ moe_output.add(residual1).reuseBuffer(x0), updated_kv_cache };
+            return .{ x1.add(moe_output).reuseBuffer(x0), updated_kv_cache };
         } else {
-            const mlp_output = self.shared_expert.forward(residual1);
-            return .{ mlp_output.add(residual1).reuseBuffer(x0), updated_kv_cache };
+            return .{ x1.add(ffn_delta).reuseBuffer(x0), updated_kv_cache };
         }
     }
 };
