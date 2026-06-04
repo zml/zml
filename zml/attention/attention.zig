@@ -13,6 +13,10 @@ pub const Backend = enum {
     nki,
     cuda_fa2,
     cuda_fa3,
+    // Apple Metal fused flash-attention DECODE kernel (zml$flash_attn custom call,
+    // lowered to MetalFlashAttnThunk in the v2 backend). Opt-in via --backend=metal_fa;
+    // prefill (q>1) falls back to vanilla sdpa (the vec kernel is single-query).
+    metal_fa,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
@@ -40,6 +44,7 @@ pub const Parameters = union(Backend) {
     nki: nki.Parameters,
     cuda_fa2: flashattn.fa2.Parameters,
     cuda_fa3: flashattn.fa3.Parameters,
+    metal_fa: void,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
@@ -47,6 +52,7 @@ pub const Parameters = union(Backend) {
         nki: nki.Parameters,
         cuda_fa2: flashattn.fa2.Parameters.InitOptions,
         cuda_fa3: flashattn.fa3.Parameters.InitOptions,
+        metal_fa: void,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
@@ -55,6 +61,7 @@ pub const Parameters = union(Backend) {
                 .nki => .{ .nki = .init() },
                 .cuda_fa2 => .{ .cuda_fa2 = .{} },
                 .cuda_fa3 => .{ .cuda_fa3 = .{} },
+                .metal_fa => .{ .metal_fa = {} },
             };
         }
     };
@@ -66,6 +73,7 @@ pub const Parameters = union(Backend) {
             .nki => |v| .{ .nki = v },
             .cuda_fa2 => |v| .{ .cuda_fa2 = .init(v) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = .init(v) },
+            .metal_fa => .{ .metal_fa = {} },
         };
     }
 };
@@ -76,6 +84,7 @@ pub const Metadata = union(Backend) {
     nki: void,
     cuda_fa2: flashattn.fa2.Metadata,
     cuda_fa3: flashattn.fa3.Metadata,
+    metal_fa: void,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
@@ -83,6 +92,7 @@ pub const Metadata = union(Backend) {
         nki: void,
         cuda_fa2: flashattn.fa2.Metadata.InitOptions,
         cuda_fa3: flashattn.fa3.Metadata.InitOptions,
+        metal_fa: void,
 
         pub fn fromBackend(backend: Backend, seqlen: i64, num_heads: i64) InitOptions {
             return switch (backend) {
@@ -91,6 +101,7 @@ pub const Metadata = union(Backend) {
                 .nki => .{ .nki = {} },
                 .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
                 .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads } },
+                .metal_fa => .{ .metal_fa = {} },
             };
         }
     };
@@ -102,6 +113,7 @@ pub const Metadata = union(Backend) {
             .nki => .{ .nki = {} },
             .cuda_fa2 => |o| .{ .cuda_fa2 = flashattn.fa2.Metadata.init(o) },
             .cuda_fa3 => |o| .{ .cuda_fa3 = flashattn.fa3.Metadata.init(o) },
+            .metal_fa => .{ .metal_fa = {} },
         };
     }
 
@@ -112,6 +124,7 @@ pub const Metadata = union(Backend) {
             .nki => .{ .nki = {} },
             .cuda_fa2 => |v| .{ .cuda_fa2 = try v.initBuffer(io, platform, sharding) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = try v.initBuffer(io, platform, sharding) },
+            .metal_fa => .{ .metal_fa = {} },
         };
     }
 
@@ -122,6 +135,7 @@ pub const Metadata = union(Backend) {
             .nki => {},
             .cuda_fa2 => |*v| flashattn.fa2.Metadata.deinitBuffer(v),
             .cuda_fa3 => |*v| flashattn.fa3.Metadata.deinitBuffer(v),
+            .metal_fa => {},
         }
     }
 };
@@ -143,5 +157,26 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         .nki => |params| nki.attention(q, k, v, token_index, params),
         .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
         .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
+        .metal_fa => b: {
+            // Decode (single query, M=1): one fused flash-attention custom call
+            // (lowered to MetalFlashAttnThunk). Prefill (q>1) is not handled by the
+            // single-query vec kernel — fall back to the vanilla sdpa path.
+            if (q.dim(.q) != 1) {
+                const seq_len = k.dim(.k);
+                var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, q.dtype(), null);
+                attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()), token_index.reshape(.{ .coord = 1 }), .{});
+                break :b zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
+            }
+            // Force a canonical [heads, pos, head_dim] dim order so the custom-call
+            // operands are row-major [n, pos, hd] as the thunk reads them (the HLO
+            // is positional — tags are lost). ForceDefaultLayouts keeps them
+            // row-major. Output comes back {h, q, hd} -> transpose to q's order.
+            const qc = q.transpose(.{ .h, .q, .hd });
+            const kc = k.transpose(.{ .h, .k, .hd });
+            const vc = v.transpose(.{ .h, .k, .hd });
+            const tok_i32 = token_index.convert(.i32);
+            const attn = zml.ops.customCall("zml$flash_attn", .{ qc, kc, vc, tok_i32 }, qc.shape(), .{}, .{ .has_side_effect = false });
+            break :b attn.transpose(q.shape());
+        },
     };
 }
