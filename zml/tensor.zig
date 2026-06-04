@@ -4294,17 +4294,16 @@ pub const Tensor = struct {
     /// so it will slow down the program execution.
     pub fn print(input: Tensor, name: []const u8) void {
         switch (CompilationContext.current().platform.target) {
-            .cpu, .cuda, .rocm, .tpu => {
+            .cpu, .cuda, .rocm, .tpu, .metal => {
                 ops.manualComputation(input, {}, .{ .name = name }, (struct {
                     fn body(ctx_: anytype, _: std.mem.Allocator, sharded_input: Tensor, _: void) void {
                         ops.customCall("zml$print", sharded_input, {}, .{ .name = ctx_.name }, .{ .has_side_effect = true });
                     }
                 }).body);
             },
-            // Metal grouped with the no-op print arm for bring-up: zml$print uses
-            // an FFI custom-call whose handler may not yet be wired in the Metal
-            // plugin. Move metal up to the manualComputation arm once FFI works.
-            .oneapi, .neuron, .metal => {},
+            // Metal handles zml$print via a dedicated host-readback thunk in the v2
+            // backend (EmitMetalPrintThunk) rather than the FFI handler path.
+            .oneapi, .neuron => {},
         }
     }
 
