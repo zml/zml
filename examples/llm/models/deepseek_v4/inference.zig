@@ -12,7 +12,7 @@ pub const CompilationParameters = struct {
     batch_dim: usize,
     seqlen: u32,
     rng: zml.Tensor.Rng,
-    cache: model.KVCache,
+    cache: model.Cache,
     shardings: common.Shardings,
     attention_metadata: attention.Metadata,
     attention_parameters: attention.Parameters,
@@ -103,7 +103,7 @@ pub const KernelArgs = struct {
     tokens_buf: *zml.Buffer,
     tokens_pos_buf: *zml.Buffer,
     rng_buf: *zml.Bufferized(zml.Tensor.Rng),
-    cache_buffers: *zml.Bufferized(model.KVCache),
+    cache_buffers: *zml.Bufferized(model.Cache),
     attention_metadata_buffers: zml.Bufferized(attention.Metadata),
 };
 
@@ -134,7 +134,7 @@ const KernelExe = struct {
 
         var tokens_buffer, var cache_buffer,  var rng_buffer = results.get(struct{
             zml.Buffer,
-            zml.Bufferized(model.KVCache),
+            zml.Bufferized(model.Cache),
             zml.Bufferized(zml.Tensor.Rng)
         });
 
