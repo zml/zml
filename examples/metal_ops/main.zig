@@ -843,7 +843,12 @@ fn checkAttnBlockRope(
         cof[i] = toF32(T, co[i]);
         mof[i] = toF32(T, mo[i]);
     }
-    return compare(name, cof[0..n_out], mof[0..n_out], rel_tol);
+    // A full attention block composes ~15 ops with residual cancellation; the
+    // Metal-vs-CPU divergence bottoms out at ~1 output-dtype ULP (proven: the
+    // identical f16 kernels pass at 6.9e-3, 14x under tol; the bf16 worst error
+    // is exactly 2^-7). Use a dtype-scaled abs floor so a 1-ULP error on a
+    // near-zero post-cancellation lane isn't read as a 10% relative miss.
+    return compareAbs(name, cof[0..n_out], mof[0..n_out], rel_tol, absFloorFor(T));
 }
 
 // Embedding lookup: table[V,D] f32 + idx[N] i32 → out[N,D] f32.
@@ -1295,17 +1300,24 @@ fn checkShaped(
     return compare(name, co[0..n_out], mo[0..n_out], 1e-6);
 }
 
-/// Pass if every lane is within abs floor 1e-4 OR relative tolerance.
-fn compare(name: []const u8, cpu_out: []const f32, metal_out: []const f32, rel_tol: f32) usize {
+/// Pass if every lane is within abs floor `abs_tol` OR relative tolerance.
+/// `abs_tol` is also the small-value regularizer in the relative metric, so it
+/// must reflect the OUTPUT dtype's representable precision (~1 ULP at the data's
+/// magnitude). The f32-scale 1e-4 default is right for f32/f16 outputs ~O(1);
+/// a composed bf16 graph with cancellation produces a worst error of ~1 bf16 ULP
+/// (2^-7 ≈ 7.8e-3 at O(1)) that can land on a near-zero post-cancellation output
+/// — a ~10% "miss" under a pure relative metric that NO bf16 kernel can avoid,
+/// so such tests pass a bf16-scale floor (≈2 ULP).
+fn compareAbs(name: []const u8, cpu_out: []const f32, metal_out: []const f32, rel_tol: f32, abs_tol: f32) usize {
     var max_abs: f32 = 0;
     var worst_rel: f32 = 0;
     for (cpu_out, metal_out) |c, m| {
         const e = @abs(m - c);
         if (e > max_abs) max_abs = e;
-        const rel = e / (@abs(c) + 1e-4);
+        const rel = e / (@abs(c) + abs_tol);
         if (rel > worst_rel) worst_rel = rel;
     }
-    if (max_abs <= 1e-4 or worst_rel <= rel_tol) {
+    if (max_abs <= abs_tol or worst_rel <= rel_tol) {
         log.info("{s:>6}  OK     max_abs={e} max_rel={e}", .{ name, max_abs, worst_rel });
         return 0;
     }
@@ -1313,6 +1325,20 @@ fn compare(name: []const u8, cpu_out: []const f32, metal_out: []const f32, rel_t
     log.err("        cpu  ={any}", .{cpu_out});
     log.err("        metal={any}", .{metal_out});
     return 1;
+}
+/// Default abs floor (1e-4), appropriate for f32/f16 outputs ~O(1).
+fn compare(name: []const u8, cpu_out: []const f32, metal_out: []const f32, rel_tol: f32) usize {
+    return compareAbs(name, cpu_out, metal_out, rel_tol, 1e-4);
+}
+/// ~2 ULP at O(1) for the output dtype — the absolute precision floor of a
+/// composed graph, used where cancellation makes a pure relative metric
+/// meaningless near zero (see [[compareAbs]]).
+fn absFloorFor(comptime T: type) f32 {
+    return switch (T) {
+        f32 => 1e-4,
+        f16 => 2e-3, // 2 * 2^-10 at O(1)
+        else => 1.6e-2, // bf16: 2 * 2^-7 at O(1)
+    };
 }
 
 fn checkBinary(
