@@ -172,6 +172,15 @@ fn gatherRow(x: zml.Tensor, off: zml.Tensor) zml.Tensor {
 fn dynUpdate(x: zml.Tensor, upd: zml.Tensor, off: zml.Tensor) zml.Tensor {
     return x.dynamicUpdateSlice1d(upd, 0, off);
 }
+// KV-cache WRITE as the real model does it: scatterSlices a single .k-slice at a
+// RUNTIME index, override, with reuseBuffer (in-place donation). This is what
+// KvCache.updateAt uses (model.zig) — distinct from dynamicUpdateSlice (kvwrt).
+// off=2 into a [k=4,d=2] zero cache with row {7,8} -> {0,0, 0,0, 7,8, 0,0}.
+fn scatterRow(x: zml.Tensor, upd: zml.Tensor, off: zml.Tensor) zml.Tensor {
+    const cache = x.reshape(.{ .k = 4, .d = 2 });
+    const row = upd.reshape(.{ .k = 1, .d = 2 });
+    return cache.scatterSlices(.{ .k = off }, row, .{ .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(cache);
+}
 // Embedding lookup: gather rows of a table[V,D] by an index vector[N] → [N,D].
 // out[n,:] = table[idx[n],:]. The canonical model embedding / vocab gather.
 fn embed(table: zml.Tensor, idx: zml.Tensor) zml.Tensor {
@@ -2212,6 +2221,9 @@ pub fn main(init: std.process.Init) !void {
         &[_]f32{ 0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23, 30, 31, 32, 33 }, 2, 4);
     failures += checkDynUpdate(allocator, io, cpu, metal, "dupd", dynUpdate,
         &[_]f32{ 0, 0, 0, 0, 0, 0 }, &[_]f32{ 7, 8 }, 3, 6);
+    // scatterSlices at a runtime index — the REAL KV-cache write (KvCache.updateAt).
+    failures += checkDynUpdate(allocator, io, cpu, metal, "scatRow", scatterRow,
+        &[_]f32{ 0, 0, 0, 0, 0, 0, 0, 0 }, &[_]f32{ 7, 8 }, 2, 8);
     // Rank-2 KV-cache write: cache[4,3], write row [100,101,102] at pos=2.
     failures += checkKvWrite(allocator, io, cpu, metal, 4, 3,
         &[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }, &[_]f32{ 100, 101, 102 }, 2);
