@@ -11,6 +11,16 @@ zig_binary(
 )
 
 zig_binary(
+    name = "test_file_to_device",
+    srcs = ["util.zig"],
+    main = "test_file_to_device.zig",
+    deps = [
+        "//zml",
+        "//zml/io",
+    ],
+)
+
+zig_binary(
     name = "scan_dedup",
     main = "scan_dedup.zig",
     deps = [
