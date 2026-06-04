@@ -114,14 +114,6 @@ pub const TransformerLayer = struct {
         moe: Moe,
     };
 
-    // TODO: hardcoded; retrieve from config
-    fn swigluLimitFor(layer_idx: usize) ?f32 {
-        return switch (layer_idx) {
-            43, 44 => 7.0,
-            else => null,
-        };
-    }
-
     input_layernorm: RmsNorm,
     attn: Attn,
     attention_type: AttnType,
@@ -136,7 +128,7 @@ pub const TransformerLayer = struct {
             .input_layernorm = RmsNorm.init(store.withPrefix("input_layernorm")),
             .attn = try Attn.init(store.withPrefix("self_attn"), layer_idx, attention_type),
             .attention_type = attention_type,
-            .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx) } else .{ .mlp = .init(store.withPrefix("mlp"), swigluLimitFor(layer_idx)) },
+            .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx) } else .{ .mlp = .init(store.withPrefix("mlp"), default_config.swiglu_limits[layer_idx]) },
             .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e5),
         };
     }
@@ -741,9 +733,10 @@ pub const Mlp = struct {
     up_proj: zml.nn.Linear, // (dim -> hidden_dim)
     gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
     down_proj: zml.nn.Linear, // (hidden_dim -> dim)
-    limit: ?i32,
+    /// `0` means no clamp (matches the sentinel used in `config.swiglu_limits`).
+    limit: f32,
 
-    pub fn init(store: zml.io.TensorStore.View, swiglu_limit: ?i32) Mlp {
+    pub fn init(store: zml.io.TensorStore.View, swiglu_limit: f32) Mlp {
         return .{
             .up_proj = .init(
                 store.createTensor("up_proj.weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }),
@@ -772,17 +765,12 @@ pub const Mlp = struct {
         var gate = self.gate_proj.forward(input);
         gate = gate.silu();
 
-        // Step 3.5 Flash clamps gate projection asymmetrically
-        if (self.limit) |limit| {
-            if (limit != 0) {
-                const lim_f = @as(f32, @floatFromInt(limit));
-                const max_t = zml.Tensor.scalar(lim_f, gate.dtype());
-                const min_t = zml.Tensor.scalar(-lim_f, gate.dtype());
-
-                // Step 3.5 Flash has asymmetric clamping of gate projection
-                gate = gate.minimum(max_t);
-                up_proj = up_proj.clamp(min_t, max_t);
-            }
+        // Step 3.5 Flash clamps gate projection asymmetrically.
+        if (self.limit != 0) {
+            const max_t = zml.Tensor.scalar(self.limit, gate.dtype());
+            const min_t = zml.Tensor.scalar(-self.limit, gate.dtype());
+            gate = gate.minimum(max_t);
+            up_proj = up_proj.clamp(min_t, max_t);
         }
         return self.down_proj.forward(gate.mul(up_proj));
     }
