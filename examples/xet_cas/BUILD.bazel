@@ -2,6 +2,7 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "test_tensor_to_device",
+    srcs = ["util.zig"],
     main = "test_tensor_to_device.zig",
     deps = [
         "//zml",

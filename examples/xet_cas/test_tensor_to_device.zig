@@ -23,6 +23,7 @@
 const std = @import("std");
 const zml = @import("zml");
 const xet = @import("io").xet;
+const util = @import("util.zig");
 
 const log = std.log.scoped(.test_tensor_to_device);
 
@@ -111,7 +112,7 @@ const Worker = struct {
             const x = self.xorbs[xi];
 
             const t0: std.Io.Timestamp = .now(self.io, .awake);
-            try httpRangeGetIntoSlot(&client, x.fetch_url, x.fetch_url_range_start, x.fetch_url_range_end, xb[0..x.fetch_byte_len]);
+            try util.httpRangeGetIntoSlot(&client, x.fetch_url, x.fetch_url_range_start, x.fetch_url_range_end, xb[0..x.fetch_byte_len]);
             self.net_ns += @intCast(t0.untilNow(self.io, .awake).toNanoseconds());
             self.net_bytes += x.fetch_byte_len;
 
@@ -368,9 +369,9 @@ pub fn main(init: std.process.Init) !void {
     }
     // LFS SHA-256 oracle: stream both sides through std.Io.Reader.
     var sink_reader = sink.reader();
-    const xet_digest = try sha256ReadAll(&sink_reader);
+    const xet_digest = try util.sha256ReadAll(&sink_reader);
     var lfs_net_ns: u64 = 0;
-    const lfs_digest = try sha256LfsRange(&http_client, repo, auth, tensor_offset, tensor_offset + tensor_size - 1, init.io, &lfs_net_ns);
+    const lfs_digest = try util.sha256LfsRange(&http_client, repo, auth, tensor_offset, tensor_offset + tensor_size - 1, init.io, &lfs_net_ns);
     if (!std.mem.eql(u8, &xet_digest, &lfs_digest)) {
         log.err("LFS oracle MISMATCH: xet=0x{x} lfs=0x{x}", .{ xet_digest, lfs_digest });
         return error.LfsOracleMismatch;
@@ -400,97 +401,4 @@ pub fn main(init: std.process.Init) !void {
     log.info("  decompress = {d:.1} ms", .{to_ms(decomp_ns)});
     log.info("  sink write = {d:.1} ms", .{to_ms(write_ns)});
     log.info("  scan/other = {d:.1} ms", .{to_ms(overhead_ns)});
-}
-
-// ── HTTP helpers (xorb fetch) ───────────────────────────────────────────────
-
-fn httpRangeGetIntoSlot(
-    client: *std.http.Client,
-    url: []const u8,
-    range_start: u64,
-    range_end_inclusive: u64,
-    slot: []u8,
-) !void {
-    var range_buf: [64]u8 = undefined;
-    const range_header = std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ range_start, range_end_inclusive }) catch unreachable;
-    const uri: std.Uri = try .parse(url);
-    var req = try client.request(.GET, uri, .{
-        .headers = .{ .accept_encoding = .{ .override = "identity" } },
-        .extra_headers = &.{.{ .name = "Range", .value = range_header }},
-    });
-    defer req.deinit();
-    try req.sendBodiless();
-    var redirect_buffer: [8 * 1024]u8 = undefined;
-    var res = try req.receiveHead(&redirect_buffer);
-    if (res.head.status != .partial_content and res.head.status != .ok) {
-        log.err("HTTP range GET failed: status={} url={s}", .{ res.head.status, url });
-        return error.HttpRequestFailed;
-    }
-    try res.reader(&.{}).readSliceAll(slot);
-}
-
-fn sha256LfsRange(
-    client: *std.http.Client,
-    repo: xet.Client.Repo,
-    auth: []const u8,
-    range_start: u64,
-    range_end_inclusive: u64,
-    io: std.Io,
-    out_net_ns: *u64,
-) ![32]u8 {
-    var url_buf: [4096]u8 = undefined;
-    const lfs_url = try std.fmt.bufPrint(
-        &url_buf,
-        "https://huggingface.co/{s}/{s}/resolve/{s}/{s}",
-        .{ repo.repo, repo.model, repo.rev, repo.path },
-    );
-    var range_buf: [64]u8 = undefined;
-    const range_header = std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ range_start, range_end_inclusive }) catch unreachable;
-    const uri: std.Uri = try .parse(lfs_url);
-    var req = try client.request(.GET, uri, .{
-        .headers = .{
-            .accept_encoding = .{ .override = "identity" },
-            .authorization = .{ .override = auth },
-        },
-        .extra_headers = &.{.{ .name = "Range", .value = range_header }},
-    });
-    defer req.deinit();
-    try req.sendBodiless();
-    var redirect_buffer: [8 * 1024]u8 = undefined;
-    var res = try req.receiveHead(&redirect_buffer);
-    if (res.head.status != .partial_content and res.head.status != .ok) {
-        log.err("LFS range GET failed: status={} url={s}", .{ res.head.status, lfs_url });
-        return error.HttpRequestFailed;
-    }
-    var transfer_buf: [16 * 1024]u8 = undefined;
-    const r = res.reader(&transfer_buf);
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    var stage: [64 * 1024]u8 = undefined;
-    var net_ns_acc: u64 = 0;
-    while (true) {
-        const ts_net: std.Io.Timestamp = .now(io, .awake);
-        const n = try r.readSliceShort(&stage);
-        net_ns_acc += @intCast(ts_net.untilNow(io, .awake).toNanoseconds());
-        if (n == 0) break;
-        hasher.update(stage[0..n]);
-        if (n < stage.len) break;
-    }
-    out_net_ns.* = net_ns_acc;
-    var digest: [32]u8 = undefined;
-    hasher.final(&digest);
-    return digest;
-}
-
-fn sha256ReadAll(r: *std.Io.Reader) ![32]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    var stage: [64 * 1024]u8 = undefined;
-    while (true) {
-        const n = try r.readSliceShort(&stage);
-        if (n == 0) break;
-        hasher.update(stage[0..n]);
-        if (n < stage.len) break;
-    }
-    var digest: [32]u8 = undefined;
-    hasher.final(&digest);
-    return digest;
 }
