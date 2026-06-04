@@ -16,6 +16,7 @@ var down_transpose: std.atomic.Value(bool) = .init(false);
 pub const ActivationMode = enum {
     silu,
     relu,
+    gelu,
     quick_gelu_plus_one,
 };
 
@@ -67,7 +68,7 @@ pub fn deinitBuffer(bufferized: *zml.Bufferized(Metadata)) void {
 }
 
 fn validateOptions(opts: Options) !void {
-    if (opts.activation != .silu and opts.activation != .relu and opts.activation != .quick_gelu_plus_one) return error.UnsupportedActivation;
+    //if (opts.activation != .silu and opts.activation != .relu and opts.activation != .quick_gelu_plus_one) return error.UnsupportedActivation;
     if (opts.expert_map != null and opts.global_num_experts == -1) return error.InvalidShape;
     if (opts.w1_scale != null or opts.w2_scale != null) return error.UnsupportedQuantization;
 }
@@ -255,6 +256,7 @@ fn applyActivation(x: Tensor, mode: ActivationMode) Tensor {
     return switch (mode) {
         .silu => gate.silu().mul(up),
         .relu => x.relu().powByConst(2),
+        .gelu => gate.gelu().mul(up),
         .quick_gelu_plus_one => blk: {
             const gate_clamped = gate.minimum(Tensor.scalar(7, gate.dtype()).broad(gate.shape()));
             const up_clamped = up.clamp(
