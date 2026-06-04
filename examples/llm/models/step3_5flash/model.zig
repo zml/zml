@@ -22,7 +22,7 @@ pub const Config = struct {
 
     use_qk_norm: bool = false,
 
-    moe_layers_enum: []const u8 = "",
+    moe_layers_enum: []const u32 = &.{},
     num_attention_heads: u32,
     num_attention_groups: u32,
     head_dim: u32,
@@ -50,7 +50,7 @@ pub const Config = struct {
     need_fp32_gate: bool = false,
     sink: bool = false,
 
-    layer_types: []const LayerType = &.{},
+    layer_types: []const AttnType = &.{},
     use_rope_layers: []const u32 = &.{},
 
     num_nextn_predict_layers: u32 = 0,
@@ -91,8 +91,8 @@ pub const Config = struct {
 };
 
 /// Per-layer attention flavor. Field names match `config.json`'s `layer_types` strings,
-/// so `std.json` can parse the array directly into `[]const LayerType`.
-pub const LayerType = enum {
+/// so `std.json` can parse the array directly into `[]const AttnType`.
+pub const AttnType = enum {
     full_attention,
     sliding_attention,
 };
@@ -124,16 +124,18 @@ pub const TransformerLayer = struct {
 
     input_layernorm: RmsNorm,
     attn: Attn,
+    attention_type: AttnType,
     ffn: Ffn,
     post_attention_layernorm: RmsNorm,
 
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !TransformerLayer {
-        const is_moe = layer_idx >= 3 and layer_idx < 45;
+        const is_moe = std.mem.indexOfScalar(u32, default_config.moe_layers_enum, @intCast(layer_idx)) != null;
+        const attention_type = default_config.layer_types[layer_idx];
 
         return .{
-            // TODO: config
             .input_layernorm = RmsNorm.init(store.withPrefix("input_layernorm")),
-            .attn = Attn.init(store.withPrefix("self_attn")),
+            .attn = try Attn.init(store.withPrefix("self_attn"), layer_idx, attention_type),
+            .attention_type = attention_type,
             .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx) } else .{ .mlp = .init(store.withPrefix("mlp"), swigluLimitFor(layer_idx)) },
             .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e5),
         };
@@ -151,23 +153,29 @@ pub const TransformerLayer = struct {
         x0: zml.Tensor,
         token_index: zml.Tensor,
     ) struct { zml.Tensor } {
+        _ = self; // autofix
+        _ = token_index; // autofix
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
 
-        // Keep the residual stream replicated to avoid repeated gathers before q/k/v.
-        const x0_normalized = self.input_layernorm.forward(x0);
-        const delta0 = self.self_attn.forward(
-            x0_normalized,
-            token_index,
-        );
+        // const residual = x0;
+        // _ = residual; // autofix
 
-        // Fully Connected
-        const x1 = x0_normalized.add(delta0);
-        const x1_normalized = self.post_attention_layernorm.forward(x1);
-        const x2 = self.mlp.forward(x1_normalized)
-            .rename(.{ .dout = .d })
-            .add(x1);
+        // var hidden_states = self.input_layernorm.forward(x0);
+        // _ = hidden_states; // autofix
 
-        return .{x2.reuseBuffer(x0)};
+        // hidden_states, _ = self.attn.forward(
+        //     hidden_states,
+        //     token_index,
+        // );
+
+        // // Fully Connected
+        // const x1 = x0.add(delta0);
+        // const x1_normalized = self.post_attention_layernorm.forward(x1);
+        // const x2 = self.mlp.forward(x1_normalized)
+        //     .rename(.{ .dout = .d })
+        //     .add(x1);
+
+        // return .{x2.reuseBuffer(x0)};
     }
 };
 
@@ -194,7 +202,12 @@ pub const default_config: Config = .{
     .vocab_size = 128896,
     .torch_dtype = "bfloat16",
     .use_qk_norm = true,
-    .moe_layers_enum = "3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44",
+    .moe_layers_enum = &.{
+        3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14,
+        15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+        27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38,
+        39, 40, 41, 42, 43, 44,
+    },
     .num_attention_heads = 64,
     .num_attention_groups = 8,
     .head_dim = 128,
@@ -315,10 +328,7 @@ pub const Attn = struct {
         );
     }
 
-    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !Attn {
-        // Layers past the configured count are MTP/speculative blocks and use the SWA shape.
-        const kind: LayerType = default_config.layer_types[layer_idx];
-
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, kind: AttnType) !Attn {
         const num_q_heads: i64 = @intCast(if (kind == .full_attention)
             default_config.num_attention_heads
         else
