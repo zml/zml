@@ -17,9 +17,6 @@ const log = std.log.scoped(.scan_dedup);
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
-const MAX_XORBS: usize = 256;
-const MAX_PLANS: usize = 8192;
-
 const XorbKey = struct {
     hash: []const u8,
 };
@@ -80,9 +77,6 @@ pub fn main(init: std.process.Init) !void {
     var xet_client: xet.Client = .init(allocator, &http_client, hf_token);
     defer xet_client.deinit();
 
-    var xorbs: [MAX_XORBS]XorbKey = undefined;
-    var plans: [MAX_PLANS]TermPlan = undefined;
-
     var n_total: u32 = 0;
     var n_scanned: u32 = 0;
     var n_skipped: u32 = 0;
@@ -114,12 +108,17 @@ pub fn main(init: std.process.Init) !void {
         defer parsed.deinit();
         const resp = parsed.value;
 
+        // One plan per term; at most one xorb per term (fewer when hashes repeat).
+        const xorbs = try allocator.alloc(XorbKey, resp.terms.len);
+        defer allocator.free(xorbs);
+        const plans = try allocator.alloc(TermPlan, resp.terms.len);
+        defer allocator.free(plans);
+
         // Pass 1: build plans + unique xorb list.
         const win_start: u64 = resp.offset_into_first_range;
         var n_xorbs: u16 = 0;
         var n_plans: u32 = 0;
         var stream_pos: u64 = 0;
-        var overflowed = false;
         for (resp.terms) |t| {
             const t_off = stream_pos;
             stream_pos = t_off + t.unpacked_length;
@@ -130,16 +129,8 @@ pub fn main(init: std.process.Init) !void {
                 if (std.mem.eql(u8, xorbs[xi].hash, t.hash)) break;
             }
             if (xi == n_xorbs) {
-                if (n_xorbs >= MAX_XORBS) {
-                    overflowed = true;
-                    break;
-                }
                 xorbs[n_xorbs] = .{ .hash = t.hash };
                 n_xorbs += 1;
-            }
-            if (n_plans >= MAX_PLANS) {
-                overflowed = true;
-                break;
             }
             plans[n_plans] = .{
                 .xorb_idx = xi,
@@ -148,11 +139,6 @@ pub fn main(init: std.process.Init) !void {
                 .chunk_end = @intCast(t.range.end),
             };
             n_plans += 1;
-        }
-        if (overflowed) {
-            log.warn("skip {s}: plans/xorbs overflow ({d} terms)", .{ tensor.name, resp.terms.len });
-            n_skipped += 1;
-            continue;
         }
 
         var dup: u32 = 0;
