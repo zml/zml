@@ -141,6 +141,13 @@ fn posBias(x: zml.Tensor) zml.Tensor {
 fn ropeFwd(x: zml.Tensor) zml.Tensor {
     return zml.nn.rope(x, null, .{ .layout = .sequential, .scaling = .{ .default = .{} } });
 }
+// RoPE with EXPLICIT non-zero positions (the decode path: positions start at
+// token_index, not 0). metal_ops `rope` only covers pos_idx=null (arange from 0),
+// so the rope-at-offset math is otherwise untested.
+fn ropePosFwd(x: zml.Tensor) zml.Tensor {
+    const pos = zml.Tensor.arange(.{ .start = 5, .end = 5 + x.dim(.s) }, .i32).withTags(.{.s});
+    return zml.nn.rope(x, pos, .{ .layout = .sequential, .scaling = .{ .default = .{} } });
+}
 // Mixed-precision elementwise: a*b + a. Verifies f16/bf16 STORAGE through the
 // fusion path — load half/bfloat → f32 compute → per-op round → store. The
 // interior a*b is rounded to the node dtype before the +a (matching XLA's
@@ -2068,6 +2075,16 @@ pub fn main(init: std.process.Init) !void {
         zml.Shape.init(.{ .h = 2, .t = 3, .e = 2 }, .f32), &[_]f32{ 1, 0, 0, 1, 1, 1, 2, 1, 0, 2, 1, 0 },
         zml.Shape.init(.{ .h = 2, .t = 3, .e = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 6, 5, 4, 3, 2, 1 }, 8, 1e-5);
 
+    // DECODE-shape MHA: a SINGLE query (s=1) against t=3 keys/values, batched over
+    // h=2 heads. M=1 makes XLA's DotStrengthReduction rewrite the batched q·kᵀ and
+    // attn·v into broadcast-multiply-reduce (the path the full-Llama decode loop
+    // takes; distinct from the s>1 prefill batched dot above). Reproduces the
+    // decode attention math in isolation.
+    failures += check3Shaped(allocator, io, cpu, metal, "mhaDec", mha,
+        zml.Shape.init(.{ .h = 2, .s = 1, .e = 2 }, .f32), &[_]f32{ 1, 2, 3, 4 },
+        zml.Shape.init(.{ .h = 2, .t = 3, .e = 2 }, .f32), &[_]f32{ 1, 0, 0, 1, 1, 1, 2, 1, 0, 2, 1, 0 },
+        zml.Shape.init(.{ .h = 2, .t = 3, .e = 2 }, .f32), &[_]f32{ 1, 2, 3, 4, 5, 6, 6, 5, 4, 3, 2, 1 }, 4, 1e-5);
+
     // Causal mask FUSED from iota (s32 iota×2 → integer cmp → select → scalar):
     // lower triangle keeps x, upper → −1e9. Exercises an integer iota + integer
     // compare inside a fusion (the on-device masking shape). Exact (select picks).
@@ -2081,6 +2098,11 @@ pub fn main(init: std.process.Init) !void {
     // chain: arange→outer→sin/cos→scale→convert→broadcast→SLICE(split)→
     // mul/sub,mul/add→CONCAT(merge). sin/cos are fast-math → transc tolerance.
     failures += checkUnaryT(f32, allocator, io, cpu, metal, "rope", ropeFwd,
+        zml.Shape.init(.{ .s = 4, .hd = 8 }, .f32),
+        &[_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6,
+                 1.7, 1.8, 1.9, 2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 3.0, 3.1, 3.2 },
+        32, transc);
+    failures += checkUnaryT(f32, allocator, io, cpu, metal, "ropePos", ropePosFwd,
         zml.Shape.init(.{ .s = 4, .hd = 8 }, .f32),
         &[_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6,
                  1.7, 1.8, 1.9, 2.0, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 3.0, 3.1, 3.2 },
