@@ -13,6 +13,7 @@ pub const Backend = enum {
     nki,
     cuda_fa2,
     cuda_fa3,
+    metal_fa,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
@@ -29,6 +30,7 @@ pub const Backend = enum {
                 break :b .vanilla;
             },
             .neuron => .nki,
+            .metal => .metal_fa,
             .cpu, .rocm, .tpu, .oneapi => .vanilla,
         };
     }
@@ -40,6 +42,7 @@ pub const Parameters = union(Backend) {
     nki: nki.Parameters,
     cuda_fa2: flashattn.fa2.Parameters,
     cuda_fa3: flashattn.fa3.Parameters,
+    metal_fa: void,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
@@ -47,6 +50,7 @@ pub const Parameters = union(Backend) {
         nki: nki.Parameters,
         cuda_fa2: flashattn.fa2.Parameters.InitOptions,
         cuda_fa3: flashattn.fa3.Parameters.InitOptions,
+        metal_fa: void,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
@@ -55,6 +59,7 @@ pub const Parameters = union(Backend) {
                 .nki => .{ .nki = .init() },
                 .cuda_fa2 => .{ .cuda_fa2 = .{} },
                 .cuda_fa3 => .{ .cuda_fa3 = .{} },
+                .metal_fa => .{ .metal_fa = {} },
             };
         }
     };
@@ -66,6 +71,7 @@ pub const Parameters = union(Backend) {
             .nki => |v| .{ .nki = v },
             .cuda_fa2 => |v| .{ .cuda_fa2 = .init(v) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = .init(v) },
+            .metal_fa => .{ .metal_fa = {} },
         };
     }
 };
@@ -76,6 +82,7 @@ pub const Metadata = union(Backend) {
     nki: void,
     cuda_fa2: flashattn.fa2.Metadata,
     cuda_fa3: flashattn.fa3.Metadata,
+    metal_fa: void,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
@@ -83,6 +90,7 @@ pub const Metadata = union(Backend) {
         nki: void,
         cuda_fa2: flashattn.fa2.Metadata.InitOptions,
         cuda_fa3: flashattn.fa3.Metadata.InitOptions,
+        metal_fa: void,
 
         pub fn fromBackend(backend: Backend, seqlen: i64, num_heads: i64) InitOptions {
             return switch (backend) {
@@ -91,6 +99,7 @@ pub const Metadata = union(Backend) {
                 .nki => .{ .nki = {} },
                 .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
                 .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads } },
+                .metal_fa => .{ .metal_fa = {} },
             };
         }
     };
@@ -102,6 +111,7 @@ pub const Metadata = union(Backend) {
             .nki => .{ .nki = {} },
             .cuda_fa2 => |o| .{ .cuda_fa2 = flashattn.fa2.Metadata.init(o) },
             .cuda_fa3 => |o| .{ .cuda_fa3 = flashattn.fa3.Metadata.init(o) },
+            .metal_fa => .{ .metal_fa = {} },
         };
     }
 
@@ -112,6 +122,7 @@ pub const Metadata = union(Backend) {
             .nki => .{ .nki = {} },
             .cuda_fa2 => |v| .{ .cuda_fa2 = try v.initBuffer(io, platform, sharding) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = try v.initBuffer(io, platform, sharding) },
+            .metal_fa => .{ .metal_fa = {} },
         };
     }
 
@@ -122,6 +133,7 @@ pub const Metadata = union(Backend) {
             .nki => {},
             .cuda_fa2 => |*v| flashattn.fa2.Metadata.deinitBuffer(v),
             .cuda_fa3 => |*v| flashattn.fa3.Metadata.deinitBuffer(v),
+            .metal_fa => {},
         }
     }
 };
@@ -143,5 +155,13 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         .nki => |params| nki.attention(q, k, v, token_index, params),
         .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
         .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
+        .metal_fa => b: {
+            const qc = q.transpose(.{ .h, .q, .hd });
+            const kc = k.transpose(.{ .h, .k, .hd });
+            const vc = v.transpose(.{ .h, .k, .hd });
+            const tok_i32 = token_index.convert(.i32);
+            const attn = zml.ops.customCall("zml$flash_attn", .{ qc, kc, vc, tok_i32 }, qc.shape(), .{}, .{ .has_side_effect = false });
+            break :b attn.transpose(q.shape());
+        },
     };
 }
