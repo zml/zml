@@ -110,6 +110,19 @@ pub const Options = struct {
 
 // TODO: Model struct. Do we need a LoadedModel?
 // model should create KV cache
+// pub const Model = struct {
+//     // finally config appears
+
+//     // init
+
+//     // deinit
+
+//     // load
+
+//     // unload buffers
+
+//     // forward
+// }
 
 // TODO: buffers
 
