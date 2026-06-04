@@ -499,10 +499,19 @@ pub const Attn = struct {
     };
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     pub fn forwardStages(self: Attn, x: zml.Tensor, token_index: zml.Tensor) Stages {
 =======
     pub fn forwardTemp(self: Attn, x: zml.Tensor, token_index: zml.Tensor) Stages {
 >>>>>>> 88deb96c (examples/llm: KV cache)
+=======
+    pub fn forwardTemp(
+        self: Attn,
+        x: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: KvCache,
+    ) struct { Stages, KvCache } {
+>>>>>>> 52f36010 (examples/llm: update temp forward for testing KV cache)
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
 
         const q_proj_raw = self.q_proj.forward(input);
@@ -512,7 +521,7 @@ pub const Attn = struct {
 
         var q = q_proj_raw.splitAxis(.dout, .{ .h = self.num_q_heads, .hd = self.head_dim });
         var k = k_proj_raw.splitAxis(.dout, .{ .h = self.num_kv_heads, .hd = self.head_dim });
-        var v = v_proj_raw.splitAxis(.dout, .{ .h = self.num_kv_heads, .hd = self.head_dim });
+        const v = v_proj_raw.splitAxis(.dout, .{ .h = self.num_kv_heads, .hd = self.head_dim });
         const gate = g_proj_raw.rename(.{ .dout = .h });
 
         const q_after_norm = self.q_norm.forward(q, .hd);
@@ -535,15 +544,17 @@ pub const Attn = struct {
         const q_rope_hf = q_rope.transpose(.{ .b, .h, .s, .hd });
         const k_rope_hf = k_rope.transpose(.{ .b, .h, .s, .hd });
 
+        const new_kv_cache = kv_cache.update(k_rope, v, token_index.convert(.u32));
+        const k_full = new_kv_cache.keys().convert(dtype);
+        const v_full = new_kv_cache.values().convert(dtype);
+
         const q_for_attn = q_rope.rename(.{ .s = .q });
-        const k_for_attn = k_rope.rename(.{ .s = .k });
-        const v_for_attn = v.rename(.{ .s = .k });
 
         const attn_start = token_index.slice1d(0, .{ .start = 0, .end = 1 });
         const attn_output = zml.attention.attention.attention(
             q_for_attn,
-            k_for_attn,
-            v_for_attn,
+            k_full,
+            v_full,
             attn_start,
             zml.attention.attention.Metadata.init(.fromBackend(.vanilla, input.dim(.s), self.num_q_heads)),
             zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
@@ -556,23 +567,26 @@ pub const Attn = struct {
         const out = self.o_proj.forward(o_proj_in);
 
         return .{
-            .q_proj = q_proj_raw,
-            .k_proj = k_proj_raw,
-            .v_proj = v_proj_raw,
-            .g_proj = g_proj_raw,
-            .q_norm = q_after_norm,
-            .k_norm = k_after_norm,
-            .q_pre_rope_hf = q_pre_rope_hf,
-            .k_pre_rope_hf = k_pre_rope_hf,
-            .cos = cos,
-            .sin = sin,
-            .q_rope_hf = q_rope_hf,
-            .k_rope_hf = k_rope_hf,
-            .attn = attn_output,
-            .gate_sig = gate_sig,
-            .gated = gated,
-            .o_proj_in = o_proj_in,
-            .out = out,
+            .{
+                .q_proj = q_proj_raw,
+                .k_proj = k_proj_raw,
+                .v_proj = v_proj_raw,
+                .g_proj = g_proj_raw,
+                .q_norm = q_after_norm,
+                .k_norm = k_after_norm,
+                .q_pre_rope_hf = q_pre_rope_hf,
+                .k_pre_rope_hf = k_pre_rope_hf,
+                .cos = cos,
+                .sin = sin,
+                .q_rope_hf = q_rope_hf,
+                .k_rope_hf = k_rope_hf,
+                .attn = attn_output,
+                .gate_sig = gate_sig,
+                .gated = gated,
+                .o_proj_in = o_proj_in,
+                .out = out,
+            },
+            new_kv_cache,
         };
     }
 };
@@ -675,9 +689,12 @@ pub const KvCache = struct {
         const k_shape = kv.k.shape().drop(.layer);
         const layer: zml.Tensor = .scalar(kv.layer_index orelse @panic("forgot to call atLayer"), .u32);
 
-        // KV cache uses .k instead of .s, so change here so caller doesn't need to be aware of this naming scheme
-        const k_in = new_k.rename(.{ .s = .k }).convert(kv.k.dtype()).transpose(k_shape);
-        const v_in = new_v.rename(.{ .s = .k }).convert(kv.v.dtype()).transpose(k_shape);
+        // KV cache uses .k instead of .s, so change here so caller doesn't need to be aware of this naming scheme.
+        // Accept callers that already provide .k (e.g. synthetic tests).
+        const k_renamed = if (new_k.shape().hasTag(.s) != null) new_k.rename(.{ .s = .k }) else new_k;
+        const v_renamed = if (new_v.shape().hasTag(.s) != null) new_v.rename(.{ .s = .k }) else new_v;
+        const k_in = k_renamed.convert(kv.k.dtype()).transpose(k_shape);
+        const v_in = v_renamed.convert(kv.v.dtype()).transpose(k_shape);
 
         return if (token_index) |idx| .{
             .k = kv.k.scatterSlices(.{ .layer = layer, .k = idx }, k_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
