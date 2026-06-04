@@ -161,6 +161,14 @@ fn mulAdd(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
 fn dynSlice(x: zml.Tensor, off: zml.Tensor) zml.Tensor {
     return x.dynamicSlice1d(0, .{ .start = off, .len = 3 });
 }
+// gatherSlices with a RUNTIME index — exactly how zml.attention's vanilla backend
+// builds the DECODE attention mask: take the causal-mask ROW at `token_index`
+// (slice extent 1 along .q). Reshape the harness's flat x into a [q=4,k=4] mask
+// with distinct rows so a wrong row is obvious. off=2 must return row 2.
+fn gatherRow(x: zml.Tensor, off: zml.Tensor) zml.Tensor {
+    const m = x.reshape(.{ .q = 4, .k = 4 });
+    return m.gatherSlices(zml.Shape.init(.{ .q = 1 }, x.dtype()), off.reshape(.{ .coord = 1 }), .{});
+}
 fn dynUpdate(x: zml.Tensor, upd: zml.Tensor, off: zml.Tensor) zml.Tensor {
     return x.dynamicUpdateSlice1d(upd, 0, off);
 }
@@ -2198,6 +2206,10 @@ pub fn main(init: std.process.Init) !void {
     // [12,13,14]. dynUpdate: write [7,8] into zeros[6] at start=3 → [0,0,0,7,8,0].
     failures += checkDynSlice(allocator, io, cpu, metal, "dslice", dynSlice,
         &[_]f32{ 10, 11, 12, 13, 14, 15 }, 2, 3);
+    // gatherSlices row at runtime index 2 of a 4x4 → expect row 2 = {20,21,22,23}
+    // (the zml.attention vanilla DECODE mask-row gather, in isolation).
+    failures += checkDynSlice(allocator, io, cpu, metal, "gathRow", gatherRow,
+        &[_]f32{ 0, 1, 2, 3, 10, 11, 12, 13, 20, 21, 22, 23, 30, 31, 32, 33 }, 2, 4);
     failures += checkDynUpdate(allocator, io, cpu, metal, "dupd", dynUpdate,
         &[_]f32{ 0, 0, 0, 0, 0, 0 }, &[_]f32{ 7, 8 }, 3, 6);
     // Rank-2 KV-cache write: cache[4,3], write row [100,101,102] at pos=2.
