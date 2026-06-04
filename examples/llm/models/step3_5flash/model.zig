@@ -445,7 +445,10 @@ pub const Attn = struct {
 
         // Scatter the new k/v slice into the persistent cache, then read the full
         // history back so attention sees all prior tokens.
-        const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
+        // scatterSlices wants a scalar start offset for the `.k` axis; the slice
+        // length comes from the update tensor itself.
+        const cache_start = token_index.convert(.u32).slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0);
+        const new_kv_cache = kv_cache.update(k, v, cache_start);
         const k_full = new_kv_cache.keys().convert(dtype);
         const v_full = new_kv_cache.values().convert(dtype);
 
@@ -459,8 +462,8 @@ pub const Attn = struct {
             k_full,
             v_full,
             attn_start,
-            zml.attention.attention.Metadata.init(.fromBackend(.cuda_fa2, input.dim(.s), self.num_q_heads)),
-            zml.attention.attention.Parameters.init(.fromBackend(.cuda_fa2)),
+            zml.attention.attention.Metadata.init(.fromBackend(.vanilla, input.dim(.s), self.num_q_heads)),
+            zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
         );
 
         // Head-wise gate is {b, s, h}
@@ -544,7 +547,7 @@ pub const Attn = struct {
         const q_rope_hf = q_rope.transpose(.{ .b, .h, .s, .hd });
         const k_rope_hf = k_rope.transpose(.{ .b, .h, .s, .hd });
 
-        const new_kv_cache = kv_cache.update(k_rope, v, token_index.convert(.u32));
+        const new_kv_cache = kv_cache.update(k_rope, v, token_index.convert(.u32).slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0));
         const k_full = new_kv_cache.keys().convert(dtype);
         const v_full = new_kv_cache.values().convert(dtype);
 
