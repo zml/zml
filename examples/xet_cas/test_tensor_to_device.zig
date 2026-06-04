@@ -332,6 +332,12 @@ pub fn main(init: std.process.Init) !void {
     const threads = try allocator.alloc(std.Thread, n_workers);
     defer allocator.free(threads);
     const ts_xet_wall: std.Io.Timestamp = .now(init.io, .awake);
+    var n_spawned: usize = 0;
+    errdefer {
+        // Drain any already-spawned workers before unwinding frees their inputs.
+        counter.store(@intCast(n_xorbs), .release);
+        for (threads[0..n_spawned]) |t| t.join();
+    }
     for (workers, threads) |*w, *t| {
         w.* = .{
             .counter = &counter,
@@ -343,6 +349,7 @@ pub fn main(init: std.process.Init) !void {
             .io = init.io,
         };
         t.* = try std.Thread.spawn(.{}, Worker.run, .{w});
+        n_spawned += 1;
     }
     for (threads) |t| t.join();
     const xet_wall_ns: u64 = @intCast(ts_xet_wall.untilNow(init.io, .awake).toNanoseconds());
