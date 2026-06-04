@@ -111,6 +111,7 @@ pub const Options = struct {
 // TODO: Model struct. Do we need a LoadedModel?
 // model should create KV cache
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
 pub const Model = struct {
     // finally config appears
@@ -126,6 +127,21 @@ pub const Model = struct {
     // forward
 };
 >>>>>>> 2f63824b (examples/llm: wrap ffn forward)
+=======
+// pub const Model = struct {
+//     // finally config appears
+
+//     // init
+
+//     // deinit
+
+//     // load
+
+//     // unload buffers
+
+//     // forward
+// }
+>>>>>>> 5dee28ec (examples/llm: model struct scaffold)
 
 // TODO: buffers
 
