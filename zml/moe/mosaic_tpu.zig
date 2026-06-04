@@ -267,6 +267,7 @@ fn applyActivation(x: Tensor, mode: ActivationMode) Tensor {
         .silu => gate.silu().mul(up),
         .gelu => gate.gelu().mul(up),
         .relu => x.relu().powByConst(2),
+        .gelu => gate.gelu().mul(up),
         .quick_gelu_plus_one => blk: {
             const gate_clamped = gate.minimum(Tensor.scalar(7, gate.dtype()).broad(gate.shape()));
             const up_clamped = up.clamp(
