@@ -9,6 +9,7 @@ pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
 pub const ActivationMode = enum {
     silu,
     relu,
+    gelu,
 };
 
 pub const Backend = enum {
@@ -73,6 +74,7 @@ pub const Parameters = union(Backend) {
                     .activation = switch (activation) {
                         .silu => .silu,
                         .relu => .relu,
+                        .gelu => @panic("Not implemented"),
                     },
                 } },
                 .mosaic_tpu => .{ .mosaic_tpu = .{
@@ -80,6 +82,7 @@ pub const Parameters = union(Backend) {
                     .activation = switch (activation) {
                         .silu => .silu,
                         .relu => .relu,
+                        .gelu => .gelu,
                     },
                 } },
             };
