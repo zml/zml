@@ -931,7 +931,7 @@ pub const PhysicalMesh = struct {
         const placements = try CoordsTopology.collect(allocator, platform_devices);
         defer allocator.free(placements);
 
-        const layout = try CoordsTopology.layout(placements, 3);
+        const layout = try CoordsTopology.layout(placements, 4);
         var rank = layout.rank;
         var axis_sizes = layout.axis_sizes;
 
