@@ -55,10 +55,9 @@ pub fn main(init: std.process.Init) !void {
 
     const backend = attention.Backend.auto(platform);
     const params = deepseek.CompilationParameters.init(repo_model.parsed_config.value.max_position_embeddings, repo_model.parsed_config.value, repo_model.inner, shardings, backend);
-    _ = params; // autofix
 
-    try testSparseAttn(allocator, io, platform, platform.replicated_sharding);
-    // try run(allocator, io, platform, args.activations, repo_model.parsed_config.value, repo_model.inner, &model_buffers, params.attention_metadata, params.attention_parameters);
+    // try testSparseAttn(allocator, io, platform, platform.replicated_sharding);
+    try run(allocator, io, platform, args.activations, repo_model.parsed_config.value, repo_model.inner, &model_buffers, params.attention_metadata, params.attention_parameters);
 }
 
 fn testSparseAttn(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.Sharding) !void {
@@ -141,90 +140,212 @@ pub fn run(
 
     // TODO: write why
     const dequant_opts: zml.testing.CompareOpts = .{.absolute_tolerance = 5e-2, .relative_tolerance = 2e-2 };
-    _ = dequant_opts; // autofix
 
     try ctx.testLayer("embed", .{ .batch, .seq }, mdl.embeds, model_buffers.embeds, .{});
-    // try ctx.testLayer("head", .{ .batch, .seq, .hc, .d }, mdl.lm_head, model_buffers.lm_head, .{});
+    // try ctx.testLayer("head", .{ .batch, .seq, .hc, .d }, mdl.lm_head, model_buffers.lm_head, dequant_opts);
 
-    // TEST: Transformer Block
-    try ctx.testLayer("layers.0.attn_norm", .{ .batch, .seq, .d }, mdl.layers[0].attn_norm, model_buffers.layers[0].attn_norm, .{});
-    try ctx.testLayer("layers.0.ffn_norm", .{ .batch, .seq, .d }, mdl.layers[0].ffn_norm, model_buffers.layers[0].ffn_norm, .{});
+    const n = 3;//16; 
+    // const n = config.num_hidden_layers;
 
-    // TEST: Attention
-    try ctx.testLayer("layers.0.attn.kv_norm", .{ .batch, .seq, .hd }, mdl.layers[0].attn.kv_norm, model_buffers.layers[0].attn.kv_norm, .{});
-    try ctx.testLayer("layers.0.attn.q_norm", .{ .batch, .seq, .q }, mdl.layers[0].attn.q_norm, model_buffers.layers[0].attn.q_norm, .{});
-    // try ctx.testLayer("layers.0.attn.wq_a", .{ .batch, .seq, .d }, mdl.layers[0].attn.wq_a, model_buffers.layers[0].attn.wq_a, .{});
-    // try ctx.testLayer("layers.0.attn.wq_b", .{ .batch, .seq, .d }, mdl.layers[0].attn.wq_b, model_buffers.layers[0].attn.wq_b, dequant_opts);
-    // try ctx.testLayer("layers.0.attn.wkv", .{ .batch, .seq, .d }, mdl.layers[0].attn.wkv, model_buffers.layers[0].attn.wkv, dequant_opts);
-    // try ctx.testLayer("layers.0.attn.wo_a", .{ .batch, .seq, .d }, mdl.layers[0].attn.wo_a, model_buffers.layers[0].attn.wo_a, dequant_opts);
-    // try ctx.testLayer("layers.0.attn.wo_b", .{ .batch, .seq, .d }, mdl.layers[0].attn.wo_b, model_buffers.layers[0].attn.wo_b, dequant_opts);
-    // try ctx.testAttentionLayer("layers.0.attn", .{ .batch, .seq, .d }, mdl.layers[0].attn, model_buffers.layers[0].attn, .{});
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
 
-    // TEST: Attention-Compressor
-    try ctx.testLayer("layers.2.attn.compressor.norm", .{ .batch, .seq, .hd }, mdl.layers[2].attn.compressor.?.norm, model_buffers.layers[2].attn.compressor.?.norm, .{});
-    try ctx.testLayer("layers.2.attn.compressor.wgate", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?.wgate, model_buffers.layers[2].attn.compressor.?.wgate, .{});
-    try ctx.testLayer("layers.2.attn.compressor.wkv", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?.wkv, model_buffers.layers[2].attn.compressor.?.wkv, .{});
-    // try ctx.testAttentionLayer("layers.2.attn.compressor", .{ .batch, .seq, .d }, mdl.layers[2].attn.compressor.?, model_buffers.layers[2].attn.compressor.?, .{});
+    const arena_allocator = arena.allocator();
 
-    // TEST: Attention-Indexer
-    // try ctx.testLayer("layers.2.attn.indexer.weights_proj", .{ .batch, .seq, .d }, mdl.layers[2].attn.indexer.?.proj, model_buffers.layers[2].attn.indexer.?.proj, .{});
-    // try ctx.testLayer("layers.2.attn.indexer.wq_b", .{ .batch, .seq, .d }, mdl.layers[2].attn.indexer.?.wq_b, model_buffers.layers[2].attn.indexer.?.wq_b, .{});
-    // try ctx.testIndexerLayer("layers.2.attn.indexer", .{ .batch, .seq, .d }, mdl.layers[2].attn.indexer.?, model_buffers.layers[2].attn.indexer.?, .{});
+    for (0..n) |i| {
+        try ctx.testLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn_norm", .{i}),
+            .{ .batch, .seq, .d },
+            mdl.layers[i].attn_norm,
+            model_buffers.layers[i].attn_norm,
+            .{}
+        );
 
-    // TEST: MoE Gate
-    try ctx.testGateLayer("layers.0.ffn.gate", .{ .seq, .d }, mdl.layers[0].ffn.gate, model_buffers.layers[0].ffn.gate, .{});
-    // try ctx.testGateLayer("layers.6.ffn.gate", .{ .seq, .d }, mdl.layers[6].ffn.gate, model_buffers.layers[6].ffn.gate, .{});
+        // Attention
+        try ctx.testLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.wq_a", .{i}),
+        .{ .batch, .seq, .d },
+        mdl.layers[i].attn.wq_a,
+        model_buffers.layers[i].attn.wq_a,
+        dequant_opts,
+        );
 
-    // TEST: MoE Expert
-    // try ctx.testExpertLayer("layers.0.ffn.experts.128", .{ .batch, .d }, mdl.layers[0].ffn.experts[128], model_buffers.layers[0].ffn.experts[128], .{});
+        try ctx.testLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.q_norm", .{i}),
+            .{ .batch, .seq, .q },
+            mdl.layers[i].attn.q_norm,
+            model_buffers.layers[i].attn.q_norm,
+            .{},
+        );
 
-    // TEST: MoE Shared Expert
-    // try ctx.testLayer("layers.0.ffn.shared_experts.w1", .{ .seq, .d }, mdl.layers[0].ffn.shared_experts.w1, model_buffers.layers[0].ffn.shared_experts.w1, .{});
-    // try ctx.testLayer("layers.0.ffn.shared_experts.w2", .{ .seq, .dint }, mdl.layers[0].ffn.shared_experts.w2, model_buffers.layers[0].ffn.shared_experts.w2, .{});
-    // try ctx.testLayer("layers.0.ffn.shared_experts.w3", .{ .seq, .d }, mdl.layers[0].ffn.shared_experts.w3, model_buffers.layers[0].ffn.shared_experts.w3, .{});
-    // try ctx.testExpertLayer("layers.0.ffn.shared_experts", .{ .seq, .d }, mdl.layers[0].ffn.shared_experts, model_buffers.layers[0].ffn.shared_experts, .{});
+        // Disable because the activation only captured a 1/4 of the activations due
+        // to Parallel operations.
+        // try ctx.testLayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.wq_b", .{i}),
+        //     .{ .batch, .seq, .q },
+        //     mdl.layers[0].attn.wq_b,
+        //     model_buffers.layers[0].attn.wq_b,
+        //     dequant_opts,
+        // );
 
-    // TEST: MoE (complete)
-    // try ctx.testMoELayer("layers.0.ffn", .{ .batch, .seq, .d }, mdl.layers[0].ffn, model_buffers.layers[0].ffn, .{});
+        try ctx.testLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.wkv", .{i}),
+            .{ .batch, .seq, .d },
+            mdl.layers[i].attn.wkv,
+            model_buffers.layers[i].attn.wkv,
+            dequant_opts,
+        );
 
-    // try ctx.testLayerLayer("layers.0", .{ .batch, .seq, .hc, .d }, mdl.layers[0], model_buffers.layers[0], .{});
+        try ctx.testLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.kv_norm", .{i}),
+            .{ .batch, .seq, .hd },
+            mdl.layers[i].attn.kv_norm,
+            model_buffers.layers[i].attn.kv_norm,
+            .{},
+        );
 
-    // try ctx.testLayerV2(&[_]Layer{
-    //     "layers.0.ffn.0", zml.Shape.toTag(.{ .batch, .seq, .d }),
-    //     "layers.0.ffn.1", zml.Shape.toTag(.{ .batch, .seq }),
-    // }, mdl.layers[0].ffn, model_buffers.layers[0].ffn, .{});
+        // try ctx.testLayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.wo_a", .{i}),
+        //     .{ .batch, .seq, .d },
+        //     mdl.layers[i].attn.wo_a,
+        //     model_buffers.layers[i].attn.wo_a,
+        //     dequant_opts
+        // );
 
-    // var num_attn_layers: usize = 0;
-    // var num_conv_layers: usize = 0;
-    // for (0..config.num_hidden_layers) |i| {
-    //     const kind = std.meta.stringToEnum(model.OperatorKind, config.layer_types[i]) orelse unreachable;
-    //     const layer = mdl.layers[i];
-    //     const layer_buffers = model_buffers.layers[i];
-    //     switch (kind) {
-    //         .conv => {
-    //             try ctx.testLayerPrint("layers.{d}.conv.in_proj", .{i}, .{ .batch, .seq, .d }, layer.operator.conv.in_proj, layer_buffers.operator.conv.in_proj, .{});
-    //             try ctx.testLayerPrint("layers.{d}.conv.out_proj", .{i}, .{ .batch, .seq, .d }, layer.operator.conv.out_proj, layer_buffers.operator.conv.out_proj, .{});
-    //             try ctx.testLayerPrint("layers.{d}.feed_forward.w1", .{i}, .{ .batch, .seq, .d }, layer.feed_forward.w1, layer_buffers.feed_forward.w1, .{});
-    //             try ctx.testLayerPrint("layers.{d}.feed_forward.w2", .{i}, .{ .batch, .seq, .d }, layer.feed_forward.w2, layer_buffers.feed_forward.w2, .{});
-    //             try ctx.testLayerPrint("layers.{d}.feed_forward.w3", .{i}, .{ .batch, .seq, .d }, layer.feed_forward.w3, layer_buffers.feed_forward.w3, .{});
-    //             try ctx.testLayerPrint("layers.{d}.feed_forward", .{i}, .{ .batch, .seq, .d }, layer.feed_forward, layer_buffers.feed_forward, .{});
-    //             try ctx.testConvLayer(i, num_conv_layers, mdl.layers[i].operator.conv, model_buffers.layers[i].operator.conv, .{});
-    //             num_conv_layers += 1;
-    //         },
-    //         .full_attention => {
-    //             try ctx.testLayerPrint("layers.{d}.self_attn.k_proj", .{i}, .{ .batch, .seq, .d }, layer.operator.self_attn.k_proj, layer_buffers.operator.self_attn.k_proj, .{});
-    //             try ctx.testLayerPrint("layers.{d}.self_attn.q_proj", .{i}, .{ .batch, .seq, .d }, layer.operator.self_attn.q_proj, layer_buffers.operator.self_attn.q_proj, .{});
-    //             try ctx.testLayerPrint("layers.{d}.self_attn.out_proj", .{i}, .{ .batch, .seq, .d }, layer.operator.self_attn.out_proj, layer_buffers.operator.self_attn.out_proj, .{});
-    //             try ctx.testLayerPrint("layers.{d}.self_attn.v_proj", .{i}, .{ .batch, .seq, .d }, layer.operator.self_attn.v_proj, layer_buffers.operator.self_attn.v_proj, .{});
-    //             try ctx.testLayerPrint("layers.{d}.feed_forward.w1", .{i}, .{ .batch, .seq, .d }, layer.feed_forward.w1, layer_buffers.feed_forward.w1, .{});
-    //             try ctx.testLayerPrint("layers.{d}.feed_forward.w2", .{i}, .{ .batch, .seq, .d }, layer.feed_forward.w2, layer_buffers.feed_forward.w2, .{});
-    //             try ctx.testLayerPrint("layers.{d}.feed_forward.w3", .{i}, .{ .batch, .seq, .d }, layer.feed_forward.w3, layer_buffers.feed_forward.w3, .{});
-    //             try ctx.testLayerPrint("layers.{d}.feed_forward", .{i}, .{ .batch, .seq, .d }, layer.feed_forward, layer_buffers.feed_forward, .{});
-    //             try ctx.testAttnLayer(i, num_attn_layers, mdl.layers[i].operator.self_attn, model_buffers.layers[i].operator.self_attn, .{});
-    //             num_attn_layers += 1;
-    //         },
-    //     }
-    // }
+        // try ctx.testLayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.wo_b", .{i}),
+        //     .{ .batch, .seq, .d },
+        //     mdl.layers[0].attn.wo_b,
+        //     model_buffers.layers[0].attn.wo_b,
+        //     dequant_opts
+        // );
+
+        if (mdl.layers[i].attn.compressor) |compressor| {
+            try ctx.testLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.compressor.wkv", .{i}),
+            .{ .batch, .seq, .d },
+            compressor.wkv,
+            model_buffers.layers[i].attn.compressor.?.wkv,
+            .{}
+            );
+
+            try ctx.testLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.compressor.wgate", .{i}),
+            .{ .batch, .seq, .d },
+            compressor.wgate,
+            model_buffers.layers[i].attn.compressor.?.wgate,
+            .{}
+            );
+
+            // try ctx.testLayer(
+            // try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.compressor.norm", .{i}),
+            // .{ .batch, .seq, .hd },
+            // compressor.norm,
+            // model_buffers.layers[i].attn.compressor.?.norm,
+            // .{}
+            // );
+
+            try ctx.testCompressorLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.compressor", .{i}),
+            .{ .batch, .seq, .d },
+            compressor,
+            model_buffers.layers[i].attn.compressor.?,
+            .{},
+            );
+        }
+
+        // if (mdl.layers[i].attn.indexer) |indexer| {
+        //     try ctx.testCompressorLayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.compressor", .{i}),
+        //     .{ .batch, .seq, .d },
+        //     indexer.compressor,
+        //     model_buffers.layers[i].attn.compressor.?,
+        //     .{}
+        //     );
+        //
+        //     try ctx.testLayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.indexer.weights_proj", .{i}),
+        //     .{ .batch, .seq, .d },
+        //     indexer.proj,
+        //     model_buffers.layers[i].attn.indexer.?.proj,
+        //     .{}
+        //     );
+        //
+        //     try ctx.testLayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.indexer.wq_b", .{i}),
+        //     .{ .batch, .seq, .d },
+        //     indexer.wq_b,
+        //     model_buffers.layers[i].attn.indexer.?.wq_b,
+        //     .{}
+        //     );
+        //
+        //     try ctx.testIndexerLayer(
+        //     "layers.2.attn.indexer",
+        //     .{ .batch, .seq, .d },
+        //     indexer,
+        //     model_buffers.layers[i].attn.indexer.?,
+        //     .{},
+        //     );
+        // }
+
+        try ctx.testLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn_norm", .{i}),
+            .{ .batch, .seq, .d },
+            mdl.layers[i].ffn_norm,
+            model_buffers.layers[i].ffn_norm,
+            .{}
+        );
+
+        // MoE
+        // try ctx.testGateLayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn_gate", .{i}),
+        //     .{ .seq, .d },
+        //     mdl.layers[i].ffn.gate,
+        //     model_buffers.layers[i].ffn.gate,
+        //     .{}
+        // );
+        
+        try ctx.testLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.shared_experts.w1", .{i}),
+            .{ .seq, .d },
+            mdl.layers[i].ffn.shared_experts.w1,
+            model_buffers.layers[i].ffn.shared_experts.w1,
+            dequant_opts,
+        );
+
+        try ctx.testLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.shared_experts.w2", .{i}),
+            .{ .seq, .dint },
+            mdl.layers[i].ffn.shared_experts.w2,
+            model_buffers.layers[i].ffn.shared_experts.w2,
+            dequant_opts,
+        );
+
+        try ctx.testLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.shared_experts.w3", .{i}),
+            .{ .seq, .d },
+            mdl.layers[i].ffn.shared_experts.w3,
+            model_buffers.layers[i].ffn.shared_experts.w3,
+            dequant_opts,
+        );
+
+        try ctx.testExpertLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.shared_experts", .{i}),
+            .{ .seq, .d },
+            mdl.layers[i].ffn.shared_experts,
+            model_buffers.layers[i].ffn.shared_experts,
+            dequant_opts,
+        );
+
+        // TEST: MoE (complete)
+        // try ctx.testMoELayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn", .{i}),
+        //     .{ .batch, .seq, .d },
+        //     mdl.layers[0].ffn,
+        //     model_buffers.layers[0].ffn,
+        //     .{}
+        // );
+    }
 }
 
 pub const Layer = struct {
@@ -306,6 +427,55 @@ const TestContext = struct {
         var args = try exe.args(self.allocator);
         defer args.deinit(self.allocator);
         args.set(.{ layer_buffers, in_buffer, in_buffer_1 });
+
+        var res = try exe.results(self.allocator);
+        defer res.deinit(self.allocator);
+
+        exe.call(args, &res);
+
+        var out_result = res.get(zml.Buffer);
+        defer out_result.deinit();
+
+        try zml.testing.expectClose(self.io, out_result, out_buffer_expected, opts);
+        std.log.info("Layer {s} passed!", .{name});
+    }
+
+    fn testCompressorLayer(self: *TestContext, name: []const u8, tagz: anytype, layer: anytype, layer_buffers: anytype, opts: zml.testing.CompareOpts) !void {
+        std.log.info("Testing layer: {s}", .{name});
+
+        const in_key = try std.fmt.allocPrint(self.allocator, "{s}.in.0", .{name});
+        defer self.allocator.free(in_key);
+        var in_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key, self.sharding);
+        defer in_buffer.deinit();
+        const in_tensor = zml.Tensor.fromShape(in_buffer.shape()).withTags(tagz);
+
+        const out_key = try std.fmt.allocPrint(self.allocator, "{s}.out.0", .{name});
+        defer self.allocator.free(out_key);
+        var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
+        defer out_buffer_expected.deinit();
+
+        const exe = try self.platform.compileFn(
+            self.allocator,
+            self.io,
+            @TypeOf(layer).forward,
+            .{ 
+                layer,
+                in_tensor,
+                0,
+            },
+            .{ .shardings = &.{self.sharding} }
+        );
+        defer exe.deinit();
+
+        var attention_metadata_buffers = try self.attention_metadata.initBuffer(self.io, self.platform, self.sharding);
+        defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+
+        var args = try exe.args(self.allocator);
+        defer args.deinit(self.allocator);
+        args.set(.{
+            layer_buffers,
+            in_buffer,
+        });
 
         var res = try exe.results(self.allocator);
         defer res.deinit(self.allocator);
