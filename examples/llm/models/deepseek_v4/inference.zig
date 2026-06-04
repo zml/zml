@@ -115,8 +115,48 @@ const KernelExe = struct {
     }
 
     pub fn run(self: KernelExe, args: KernelArgs) !void {
-        _ = args; // autofix
-        _ = self; // autofix
+        var exe_args = try self.exe.args(args.allocator);
+        defer exe_args.deinit(args.allocator);
+
+        exe_args.set(.{
+            args.model_buffers,
+            args.tokens_buf,
+            args.tokens_pos_buf,
+            args.rng_buf,
+            args.cache_buffers,
+            args.attention_metadata_buffers,
+        });
+
+        var results = try self.exe.results(args.allocator);
+        defer results.deinit(args.allocator);
+
+        self.exe.call(exe_args, &results);
+
+        var tokens_buffer, var cache_buffer,  var rng_buffer = results.get(struct{
+            zml.Buffer,
+            zml.Bufferized(model.KVCache),
+            zml.Bufferized(zml.Tensor.Rng)
+        });
+
+        updateBuffer(args.tokens_buf, &tokens_buffer);
+        updateBuffer(&args.cache_buffers.kv, &cache_buffer.kv);
+        updateBuffer(&args.rng_buf._state, &rng_buffer._state);
     }
 };
 
+fn updateBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
+    if (!sameBufferHandle(dst.*, src.*)) {
+        dst.deinit();
+    }
+    dst.* = src.*;
+}
+
+fn sameBufferHandle(lhs: zml.Buffer, rhs: zml.Buffer) bool {
+    if (lhs._shards.len != rhs._shards.len) return false;
+
+    for (lhs._shards.constSlice(), rhs._shards.constSlice()) |lhs_shards, rhs_shards| {
+        if(lhs_shards != rhs_shards) return false;
+    }
+
+    return true;
+}
