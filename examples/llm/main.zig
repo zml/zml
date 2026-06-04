@@ -106,6 +106,7 @@ pub fn main(init: std.process.Init) !void {
 
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
+    try hf_vfs.registerTensorStore(&store);
 
     const generation: models.GenerationOptions = .{
         .sampling_strategy = .{

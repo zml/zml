@@ -1,0 +1,9 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "lm_head_xet",
+    args = [],
+    data = [],
+    main = "lm_head_xet.zig",
+    deps = ["//zml"],
+)

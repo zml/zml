@@ -4,6 +4,7 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 
 const log = std.log.scoped(.vfs);
+const XET_CONCURRENCY: usize = 32;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -157,15 +158,22 @@ pub fn main(init: std.process.Init) !void {
             const ShardingType = enum { replicated, sharded };
 
             const sharding_type: ShardingType = std.meta.stringToEnum(ShardingType, it.next() orelse "sharded") orelse return error.InvalidShardingKind;
+            log.info("Xet enabled by ZML_HF_XET, fixed concurrency: {d}", .{XET_CONCURRENCY});
 
             const platform: *zml.Platform = try .auto(allocator, io, .{});
             defer platform.deinit(allocator, io);
 
+            hf_vfs.xet.stats.reset();
+            const registry_started: std.Io.Timestamp = .now(io, .awake);
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();
+            const registry_took = registry_started.untilNow(io, .awake);
+            log.info("Registry loaded [{d} tensors, {Bi:.2}, {f}]", .{ registry.tensors.count(), registry.totalBytes(), registry_took });
+            logXetStats("xet registry", hf_vfs.xet.snapshotStats());
 
             var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
             defer store.deinit();
+            try hf_vfs.registerTensorStore(&store);
 
             const AllTensorsModel = struct {
                 tensors: []zml.Tensor,
@@ -199,13 +207,9 @@ pub fn main(init: std.process.Init) !void {
             progress.increaseEstimatedTotalItems(load_count);
             defer progress.end();
 
+            hf_vfs.xet.stats.reset();
             const now: std.Io.Timestamp = .now(io, .awake);
             var total_bytes: usize = 0;
-            defer {
-                const took = now.untilNow(io, .awake);
-                const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-                log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
-            }
 
             _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, &store, .{
                 .shardings = &.{sharded_sharding},
@@ -215,8 +219,35 @@ pub fn main(init: std.process.Init) !void {
                 .progress = &progress,
                 .total_bytes = &total_bytes,
             });
+            const took = now.untilNow(io, .awake);
+            const bytes_per_sec: u64 = rateBytesPerSec(total_bytes, @intCast(took.nanoseconds));
+            log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+            logXetStats("xet load", hf_vfs.xet.snapshotStats());
         },
     }
+}
+
+fn rateBytesPerSec(bytes: u64, ns: u64) u64 {
+    if (bytes == 0 or ns == 0) return 0;
+    const seconds = @as(f64, @floatFromInt(ns)) / std.time.ns_per_s;
+    return @intFromFloat(@as(f64, @floatFromInt(bytes)) / seconds);
+}
+
+fn logXetStats(label: []const u8, stats: anytype) void {
+    const decode_rate = rateBytesPerSec(stats.logical_bytes, stats.decode_ns);
+    const xorb_ratio: f64 = if (stats.logical_bytes == 0)
+        0
+    else
+        @as(f64, @floatFromInt(stats.xorb_bytes)) / @as(f64, @floatFromInt(stats.logical_bytes));
+
+    log.info("{s}: xet[logical={B:.2}, xorb={B:.2}, xorb/logical={d:.2}x, decode={f} {B:.2}/s]", .{
+        label,
+        stats.logical_bytes,
+        stats.xorb_bytes,
+        xorb_ratio,
+        std.Io.Duration.fromNanoseconds(@intCast(stats.decode_ns)),
+        decode_rate,
+    });
 }
 
 const TreeCounts = struct {

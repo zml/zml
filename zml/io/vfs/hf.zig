@@ -3,6 +3,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const VFSBase = @import("base.zig").VFSBase;
+const xet = @import("xet/xet.zig");
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
 
@@ -15,10 +16,13 @@ pub const API = struct {
         path: []const u8,
         type: []const u8,
         size: u64,
+        xetHash: ?[]const u8 = null,
     };
 };
 
 const ReadState = struct { children: []const TreeNode, index: usize };
+
+pub const TensorRangeRegistration = xet.TensorRangeRegistration;
 
 pub const TreeNode = struct {
     name: []const u8,
@@ -42,10 +46,6 @@ const RepoKey = struct {
 
     fn format(self: RepoKey, buffer: []u8) ![]u8 {
         return std.fmt.bufPrint(buffer, "{s}/{s}@{s}", .{ self.repo, self.model, self.rev });
-    }
-
-    fn allocFormat(self: RepoKey, allocator: std.mem.Allocator) ![]u8 {
-        return std.fmt.allocPrint(allocator, "{s}/{s}@{s}", .{ self.repo, self.model, self.rev });
     }
 };
 
@@ -102,6 +102,7 @@ pub const HF = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     authorization: std.http.Client.Request.Headers.Value,
+    xet: xet.State = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
@@ -114,8 +115,13 @@ pub const HF = struct {
             .base = .init(inner),
             .client = http_client,
             .authorization = if (hf_token) |token| blk: {
+                const trimmed_token = std.mem.trim(u8, token, " \t\n\r");
+                const authorization = try allocator.alloc(u8, "Bearer ".len + trimmed_token.len);
+                errdefer allocator.free(authorization);
+                const header = try std.fmt.bufPrint(authorization, "Bearer {s}", .{trimmed_token});
+                std.debug.assert(header.len == authorization.len);
                 break :blk .{
-                    .override = try std.fmt.allocPrint(allocator, "Bearer {s}", .{std.mem.trim(u8, token, " \t\n\r")}),
+                    .override = header,
                 };
             } else blk: {
                 break :blk .default;
@@ -145,7 +151,9 @@ pub const HF = struct {
 
         if (hf_token == null) log.warn("No Hugging Face authentication token found in environment or home config; proceeding without authentication.", .{});
 
-        return init(allocator, inner, http_client, hf_token);
+        var hf = try init(allocator, inner, http_client, hf_token);
+        hf.xet = xet.State.initFromEnv(environ_map);
+        return hf;
     }
 
     pub fn deinit(self: *HF) void {
@@ -172,6 +180,7 @@ pub const HF = struct {
         }
         self.trees.deinit(self.allocator);
         self.dir_read_states.deinit(self.allocator);
+        self.xet.deinit(self.allocator, self.base.inner);
 
         switch (self.authorization) {
             .default, .omit => {},
@@ -202,6 +211,22 @@ pub const HF = struct {
                 .fileRealPath = fileRealPath,
             }),
         };
+    }
+
+    pub fn registerTensorRange(self: *HF, file_uri: []const u8, offset: u64, len: u64) !void {
+        try self.xet.registerTensorRange(self.allocator, self.base.inner, file_uri, offset, len);
+    }
+
+    pub fn registerTensorRanges(self: *HF, ranges: []const TensorRangeRegistration) !void {
+        try self.xet.registerTensorRanges(self.allocator, self.base.inner, ranges);
+    }
+
+    pub fn registerTensorStore(self: *HF, store: anytype) !void {
+        try self.xet.registerTensorStore(self.allocator, self.base.inner, store);
+    }
+
+    pub fn registerTensorStores(self: *HF, stores: anytype) !void {
+        try self.xet.registerTensorStores(self.allocator, self.base.inner, stores);
     }
 
     fn openHandle(self: *HF) !struct { u32, *Handle } {
@@ -259,7 +284,7 @@ pub const HF = struct {
 
         if (self.trees.getPtr(cache_key_lookup)) |tree_ptr| return tree_ptr;
 
-        const cache_key = try key.allocFormat(self.allocator);
+        const cache_key = try self.allocator.dupe(u8, cache_key_lookup);
         errdefer self.allocator.free(cache_key);
 
         self.mutex.lockUncancelable(self.base.inner);
@@ -322,6 +347,7 @@ pub const HF = struct {
 
         var tree_root: std.ArrayList(TreeNode) = .empty;
         for (parsed.value) |item| {
+            try self.xet.putFileHash(self.allocator, self.base.inner, .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev }, item.path, item.xetHash);
             try insertTreeNode(self.allocator, &tree_root, item);
         }
 
@@ -698,19 +724,39 @@ pub const HF = struct {
     fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
         if (offset >= handle.size) return 0;
 
+        var total_bytes: u64 = 0;
+        for (data) |buf| {
+            total_bytes += @as(u64, buf.len);
+        }
+
+        const remaining = handle.size - offset;
+        const take = @min(remaining, total_bytes);
+        if (take == 0) return 0;
+
         var range_buf: [64]u8 = undefined;
         const range_header = blk: {
-            var total_bytes: u64 = 0;
-            for (data) |buf| {
-                total_bytes += @as(u64, buf.len);
-            }
-            const remaining = handle.size - offset;
-            const take = @min(remaining, total_bytes);
             const end = offset + take - 1;
             break :blk std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ offset, end }) catch unreachable;
         };
 
         const repo: Repo = try .parse(handle.uri);
+        const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev };
+
+        if (try self.xet.read(.{
+            .allocator = self.allocator,
+            .io = self.base.inner,
+            .client = self.client,
+            .authorization = self.authorization,
+            .repo = xet_repo,
+            .path = repo.path,
+            .file_uri = handle.uri,
+            .data = data,
+            .offset = offset,
+            .take = take,
+        })) |read| {
+            return read;
+        }
+
         var url_buffer: [8 * 1024]u8 = undefined;
         const url: []const u8 = try std.fmt.bufPrint(&url_buffer, API.LFS_FILE_URL_TEMPLATE, repo);
 
@@ -746,14 +792,24 @@ pub const HF = struct {
         };
 
         const reader = res.reader(&.{});
-
         if (content_range) |cr| {
             if (cr.start < offset) {
                 try reader.discardAll(offset - cr.start);
             }
         }
 
-        return try reader.readSliceShort(data[0]);
+        var total: usize = 0;
+        var bytes_left: usize = @intCast(take);
+        for (data) |buf| {
+            if (bytes_left == 0) break;
+            const dst = buf[0..@min(buf.len, bytes_left)];
+            if (dst.len == 0) continue;
+            const n = try reader.readSliceShort(dst);
+            total += n;
+            bytes_left -= n;
+            if (n != dst.len) break;
+        }
+        return total;
     }
 
     const ContentRange = struct {

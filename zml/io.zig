@@ -1071,8 +1071,9 @@ pub fn load(
     store: *const TensorStore,
     opts: LoadOpts,
 ) !Bufferized(ModelType) {
+    const tensor_count = meta.count(Tensor, model);
     var trace = try tracer.scope("zml.io.load", .{
-        .tensor_count = meta.count(Tensor, model),
+        .tensor_count = tensor_count,
     });
     defer trace.end();
 
@@ -1094,6 +1095,21 @@ pub fn load(
         pool_.deinit(dma_allocators[i].allocator());
     };
 
+    const LoadJob = struct {
+        order: usize,
+        buffer_index: usize,
+        tensor: *const Tensor,
+        file_uri: []const u8,
+        offset: u64,
+
+        fn lessThan(_: void, lhs: @This(), rhs: @This()) bool {
+            const file_order = std.mem.order(u8, lhs.file_uri, rhs.file_uri);
+            if (file_order != .eq) return file_order == .lt;
+            if (lhs.offset != rhs.offset) return lhs.offset < rhs.offset;
+            return lhs.order < rhs.order;
+        }
+    };
+
     const Ctx = struct {
         allocator: std.mem.Allocator,
         dma_allocators: []const mem.DmaAllocator,
@@ -1101,6 +1117,8 @@ pub fn load(
         io: std.Io,
         platform: *const Platform,
         buffers: []*Buffer,
+        jobs: []LoadJob,
+        job_count: usize = 0,
         shardings: []const Sharding,
         store: *const TensorStore,
         group: stdx.Io.LimitedGroup,
@@ -1109,7 +1127,8 @@ pub fn load(
     };
     var walk_ctx: Ctx = .{
         .platform = platform,
-        .buffers = try allocator.alloc(*Buffer, meta.count(Tensor, model)),
+        .buffers = try allocator.alloc(*Buffer, tensor_count),
+        .jobs = try allocator.alloc(LoadJob, tensor_count),
         .store = store,
         .allocator = allocator,
         .dma_allocators = dma_allocators,
@@ -1120,6 +1139,7 @@ pub fn load(
         .group = .init(opts.parallelism),
     };
     defer allocator.free(walk_ctx.buffers);
+    defer allocator.free(walk_ctx.jobs);
 
     defer if (opts.total_bytes) |total_bytes_ptr| {
         total_bytes_ptr.* = walk_ctx.total.load(.monotonic);
@@ -1133,49 +1153,63 @@ pub fn load(
 
     meta.forEachVisit(model, *const Tensor, struct {
         fn call(i: usize, tensor: *const Tensor, ctx: *Ctx) void {
-            ctx.group.concurrent(ctx.io, struct {
-                fn call(i_: usize, tensor_: *const Tensor, ctx_: *Ctx) !void {
-                    var reader = ctx_.store.getReaderById(tensor_.id, ctx_.io, &.{}) catch unreachable;
-                    defer reader.deinit();
-
-                    const shape = reader.tensor.shape;
-                    const sharding = Sharding.pickSharding(ctx_.shardings, shape, .explicit_axis_binding) orelse blk: {
-                        log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
-                        break :blk ctx_.platform.replicated_sharding;
-                    };
-
-                    var writer = MemoryWriter.init(
-                        ctx_.allocator,
-                        ctx_.io,
-                        ctx_.platform,
-                        ctx_.pinned_buffer_pools,
-                        ctx_.dma_allocators,
-                        shape,
-                        sharding,
-                        ctx_.buffers[i_],
-                    ) catch unreachable;
-                    defer writer.deinit(ctx_.allocator);
-
-                    const scale = 1024;
-
-                    if (ctx_.progress) |progress| {
-                        var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
-                        defer node.end();
-                        writer.setProgress(&node);
-                        defer writer.setProgress(null);
-                        var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
-                        const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
-                        progress_writer.interface.flush() catch unreachable;
-                        _ = ctx_.total.fetchAdd(total, .monotonic);
-                    } else {
-                        const total = reader.interface.streamRemaining(writer.interface()) catch unreachable;
-                        writer.interface().flush() catch unreachable;
-                        _ = ctx_.total.fetchAdd(total, .monotonic);
-                    }
-                }
-            }.call, .{ i, tensor, ctx }) catch unreachable;
+            const tensor_desc = ctx.store.getPtrFromId(tensor.id) orelse unreachable;
+            ctx.jobs[ctx.job_count] = .{
+                .order = ctx.job_count,
+                .buffer_index = i,
+                .tensor = tensor,
+                .file_uri = tensor_desc.file_uri,
+                .offset = tensor_desc.offset,
+            };
+            ctx.job_count += 1;
         }
     }.call, .{&walk_ctx});
+
+    std.mem.sort(LoadJob, walk_ctx.jobs[0..walk_ctx.job_count], {}, LoadJob.lessThan);
+
+    for (walk_ctx.jobs[0..walk_ctx.job_count]) |job| {
+        walk_ctx.group.concurrent(walk_ctx.io, struct {
+            fn call(job_: LoadJob, ctx_: *Ctx) !void {
+                var reader = ctx_.store.getReaderById(job_.tensor.id, ctx_.io, &.{}) catch unreachable;
+                defer reader.deinit();
+
+                const shape = reader.tensor.shape;
+                const sharding = Sharding.pickSharding(ctx_.shardings, shape, .explicit_axis_binding) orelse blk: {
+                    log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
+                    break :blk ctx_.platform.replicated_sharding;
+                };
+
+                var writer = MemoryWriter.init(
+                    ctx_.allocator,
+                    ctx_.io,
+                    ctx_.platform,
+                    ctx_.pinned_buffer_pools,
+                    ctx_.dma_allocators,
+                    shape,
+                    sharding,
+                    ctx_.buffers[job_.buffer_index],
+                ) catch unreachable;
+                defer writer.deinit(ctx_.allocator);
+
+                const scale = 1024;
+
+                if (ctx_.progress) |progress| {
+                    var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
+                    defer node.end();
+                    writer.setProgress(&node);
+                    defer writer.setProgress(null);
+                    var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
+                    const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
+                    progress_writer.interface.flush() catch unreachable;
+                    _ = ctx_.total.fetchAdd(total, .monotonic);
+                } else {
+                    const total = reader.interface.streamRemaining(writer.interface()) catch unreachable;
+                    writer.interface().flush() catch unreachable;
+                    _ = ctx_.total.fetchAdd(total, .monotonic);
+                }
+            }
+        }.call, .{ job, &walk_ctx }) catch unreachable;
+    }
     walk_ctx.group.await(io) catch unreachable;
 
     return bufferized;
