@@ -390,15 +390,14 @@ pub fn main(init: std.process.Init) !void {
     log.info("COMPARE ({d:.2} MiB): xet={d:.2}s ({d:.1} MiB/s)  lfs={d:.2}s ({d:.1} MiB/s)", .{
         tensor_mib, xet_wall_s, tensor_mib / xet_wall_s, lfs_wall_s, tensor_mib / lfs_wall_s,
     });
-    const to_ms = struct {
-        fn f(ns: u64) f64 {
-            return @as(f64, @floatFromInt(ns)) / 1e6;
-        }
-    }.f;
     const overhead_ns = if (chunkloop_ns > decomp_ns + write_ns) chunkloop_ns - decomp_ns - write_ns else 0;
     log.info("chunk-loop breakdown ({d} chunks):", .{n_chunks_total});
-    log.info("  total      = {d:.1} ms", .{to_ms(chunkloop_ns)});
-    log.info("  decompress = {d:.1} ms", .{to_ms(decomp_ns)});
-    log.info("  sink write = {d:.1} ms", .{to_ms(write_ns)});
-    log.info("  scan/other = {d:.1} ms", .{to_ms(overhead_ns)});
+    log.info("  total      = {d:.1} ms", .{nsToMs(chunkloop_ns)});
+    log.info("  decompress = {d:.1} ms", .{nsToMs(decomp_ns)});
+    log.info("  sink write = {d:.1} ms", .{nsToMs(write_ns)});
+    log.info("  scan/other = {d:.1} ms", .{nsToMs(overhead_ns)});
+}
+
+fn nsToMs(ns: u64) f64 {
+    return @as(f64, @floatFromInt(ns)) / 1e6;
 }
