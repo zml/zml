@@ -11,7 +11,10 @@ ONEAPI_VERSION = "2026.0"
 ONEAPI_TCM_VERSION = "1.5"
 ONEAPI_UMF_VERSION = "1.1"
 
+ONEAPI_CCL_LIB = "ccl/2022.0/lib"
 ONEAPI_COMPILER_LIB = "compiler/{}/lib".format(ONEAPI_VERSION)
+ONEAPI_MPI_LIB = "mpi/2021.18/lib"
+ONEAPI_MPI_LIBFABRIC_LIB = "mpi/2021.18/opt/mpi/libfabric/lib"
 ONEAPI_MKL_LIB = "mkl/{}/lib".format(ONEAPI_VERSION)
 ONEAPI_TCM_LIB = "tcm/{}/lib".format(ONEAPI_TCM_VERSION)
 ONEAPI_UMF_LIB = "umf/{}/lib".format(ONEAPI_UMF_VERSION)
@@ -40,6 +43,36 @@ filegroup(
 }
 
 _ONEAPI_PACKAGES = {
+    "intel-oneapi-ccl-2022.0": """
+filegroup(
+    name = "ccl_runtime",
+    srcs = glob(
+        ["{ONEAPI_CCL_LIB}/**"],
+        exclude = ["{ONEAPI_CCL_LIB}/libccl_legacy.so"],
+        allow_empty = False,
+    ),
+)
+filegroup(
+    name = "libccl_legacy_so",
+    srcs = ["{ONEAPI_CCL_LIB}/libccl_legacy.so"],
+)""".format(ONEAPI_CCL_LIB = ONEAPI_CCL_LIB),
+
+    "intel-oneapi-mpi-2021.18": """
+filegroup(
+    name = "mpi_runtime",
+    srcs = glob([
+        "{ONEAPI_MPI_LIB}/libmpi*.so*",
+        "{ONEAPI_MPI_LIB}/libmpicxx*.so*",
+        "{ONEAPI_MPI_LIB}/libmpifort*.so*",
+        "{ONEAPI_MPI_LIB}/mpi/libmpi_ze_hooks.so",
+        "{ONEAPI_MPI_LIBFABRIC_LIB}/libfabric.so*",
+        "{ONEAPI_MPI_LIBFABRIC_LIB}/prov/*.so",
+    ], allow_empty = False),
+)""".format(
+        ONEAPI_MPI_LIB = ONEAPI_MPI_LIB,
+        ONEAPI_MPI_LIBFABRIC_LIB = ONEAPI_MPI_LIBFABRIC_LIB,
+    ),
+
     "intel-oneapi-tcm-1.5": """
 filegroup(
     name = "hwloc",
@@ -94,13 +127,43 @@ filegroup(
     name = "mkl_sycl_blas",
     srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_blas.so.6"],
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
+
+    "intel-oneapi-mkl-sycl-dft-2026.0": """
+filegroup(
+    name = "mkl_sycl_dft",
+    srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_dft.so.6"],
+)""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
+
+    "intel-oneapi-mkl-sycl-lapack-2026.0": """
+filegroup(
+    name = "mkl_sycl_lapack",
+    srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_lapack.so.6"],
+)""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
+
+    "intel-oneapi-mkl-sycl-rng-2026.0": """
+filegroup(
+    name = "mkl_sycl_rng",
+    srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_rng.so.6"],
+)""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
+
+    "intel-oneapi-mkl-sycl-sparse-2026.0": """
+filegroup(
+    name = "mkl_sycl_sparse",
+    srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_sparse.so.6"],
+)""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
 }
 
 _ROOT_MODULE_DIRECT_DEPS = [
+    "intel-oneapi-ccl-2022.0",
     "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0",
     "intel-oneapi-compiler-shared-runtime-2026.0",
     "intel-oneapi-mkl-core-2026.0",
     "intel-oneapi-mkl-sycl-blas-2026.0",
+    "intel-oneapi-mkl-sycl-dft-2026.0",
+    "intel-oneapi-mkl-sycl-lapack-2026.0",
+    "intel-oneapi-mkl-sycl-rng-2026.0",
+    "intel-oneapi-mkl-sycl-sparse-2026.0",
+    "intel-oneapi-mpi-2021.18",
     "intel-oneapi-tcm-1.5",
     "intel-oneapi-umf-1.1",
     "libpjrt_oneapi",
