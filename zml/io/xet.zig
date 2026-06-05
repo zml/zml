@@ -131,7 +131,13 @@ pub const State = struct {
     pub const CasAuth = struct {
         url: []const u8,
         token: []const u8,
+        /// Unix seconds at which the HF-issued token expires.
+        exp: i64,
     };
+
+    /// Skew applied to the cached token's expiry: treat a token as expired
+    /// this many seconds before its real `exp` to avoid races with in-flight requests.
+    const token_skew_seconds: i64 = 30;
 
     allocator: std.mem.Allocator,
     http: *std.http.Client,
@@ -178,10 +184,23 @@ pub const State = struct {
 
     /// Returns the cached CAS endpoint + access token for the (repo, rev)
     /// pair (or fetches+caches on miss). Slices are owned by the client.
+    /// Refreshes the cached entry when it is within `token_skew_seconds` of expiry.
     pub fn casAuth(self: *State, repo: Repo) !CasAuth {
         var key_buf: [4096]u8 = undefined;
         const key = try std.fmt.bufPrint(&key_buf, "{s}/{s}@{s}", .{ repo.repo, repo.model, repo.rev });
-        if (self.cas_cache.get(key)) |c| return c;
+        var ts: std.posix.timespec = undefined;
+        _ = std.posix.system.clock_gettime(.REALTIME, &ts);
+        const now: i64 = @intCast(ts.sec);
+        if (self.cas_cache.getEntry(key)) |entry| {
+            if (now + token_skew_seconds < entry.value_ptr.exp) return entry.value_ptr.*;
+            // Token within skew window: refresh in place. Fetch first so a
+            // network failure leaves the (stale-but-allocated) entry untouched.
+            const fresh = try fetchCasToken(self.allocator, self.http, repo, self.hf_token);
+            self.allocator.free(entry.value_ptr.url);
+            self.allocator.free(entry.value_ptr.token);
+            entry.value_ptr.* = fresh;
+            return fresh;
+        }
 
         const owned_key = try self.allocator.dupe(u8, key);
         errdefer self.allocator.free(owned_key);
@@ -296,11 +315,13 @@ fn fetchCasToken(
     const parsed = try std.json.parseFromSlice(struct {
         accessToken: []const u8,
         casUrl: []const u8,
+        exp: i64,
     }, allocator, body, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     return .{
         .url = try allocator.dupe(u8, parsed.value.casUrl),
         .token = try allocator.dupe(u8, parsed.value.accessToken),
+        .exp = parsed.value.exp,
     };
 }
 
