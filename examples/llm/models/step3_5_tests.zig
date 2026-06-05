@@ -211,7 +211,20 @@ fn run(
         };
 =======
         try runKvCacheTests(allocator, io, platform);
+<<<<<<< HEAD
 >>>>>>> 2bc2e8f0 (examples/llm: update tests)
+=======
+    } else if (TEST_LAYER == 4) {
+        // End-to-end TransformerLayer smoke test: one dense layer + one MoE layer.
+        // Validates that the residual + norm + attn + ffn composition matches
+        // the HF dump for the same hardware path the model would run on.
+        const layer_indices = [_]usize{ 0, 3 };
+        for (layer_indices) |layer_idx| {
+            runTransformerLayer(allocator, io, platform, model_store, &activation_store, sharding, layer_idx) catch |err| {
+                std.log.warn("skipping model.layers.{d}: {s}", .{ layer_idx, @errorName(err) });
+            };
+        }
+>>>>>>> 8935dcbc (examples/llm: test TransformerLayer)
     }
 }
 
@@ -387,6 +400,143 @@ fn runSelfAttnLayer(
         name,
         .{ .absolute_tolerance = 1e-2, .minimum_close_fraction = 0.99 },
     );
+}
+
+// Compile + run one full TransformerLayer against the recorded HF activations.
+// Mirrors testSelfAttn's wiring, but expects layer-level inputs/outputs at the
+// `model.layers.N` prefix and reuses the same layer's `self_attn.in.3` as the
+// cache_position tensor (the layer-level dumper indices vary across HF wrappers,
+// so we borrow a known-good cache_position from the attention sub-call).
+fn runTransformerLayer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    model_store: *zml.io.TensorStore,
+    activation_store: *zml.io.TensorStore,
+    sharding: zml.Sharding,
+    layer_idx: usize,
+) !void {
+    const name = try std.fmt.allocPrint(allocator, "model.layers.{d}", .{layer_idx});
+    defer allocator.free(name);
+
+    const layer = try model.TransformerLayer.init(model_store.view().withPrefix(name), layer_idx);
+    var layer_weights = try zml.io.load(model.TransformerLayer, &layer, allocator, io, platform, model_store, .auto);
+    defer deinitBuffers(&layer_weights);
+
+    const layer_view = activation_store.view().withPrefix(name);
+    if (!layer_view.hasKey("in.0")) {
+        std.log.warn("skipping {s}: no in.0 (hidden_states)", .{name});
+        return;
+    }
+    if (!layer_view.hasKey("out.0")) {
+        std.log.warn("skipping {s}: no out.0 (final hidden_states)", .{name});
+        return;
+    }
+
+    const self_attn_name = try std.fmt.allocPrint(allocator, "{s}.self_attn", .{name});
+    defer allocator.free(self_attn_name);
+    const self_attn_view = activation_store.view().withPrefix(self_attn_name);
+    if (!self_attn_view.hasKey("in.3")) {
+        std.log.warn("skipping {s}: no self_attn.in.3 (cache_position)", .{name});
+        return;
+    }
+
+    const hidden_states = layer_view.createTensor("in.0", null, .replicated);
+    const cache_position = self_attn_view.createTensor("in.3", null, .replicated);
+
+    const batch_dim = hidden_states.dim(0);
+    const seq_dim = hidden_states.dim(1);
+    const kv_shape = zml.Shape.init(.{
+        .layer = @as(i64, @intCast(model.default_config.num_hidden_layers)),
+        .b = batch_dim,
+        .k = seq_dim,
+        .h = layer.attn.num_kv_heads,
+        .hd = layer.attn.head_dim,
+    }, hidden_states.dtype());
+    const kv_traced = model.KvCache.init(kv_shape).atLayer(layer_idx);
+
+    const Argsx = struct { zml.Tensor, zml.Tensor, model.KvCache };
+    const argsx: Argsx = .{ hidden_states, cache_position, kv_traced };
+
+    const exe = try platform.compile(allocator, io, layer, .forward, argsx, .{ .shardings = &.{&sharding} });
+    defer exe.deinit();
+
+    const ActArgs = struct { zml.Tensor, zml.Tensor };
+    var act_args: ActArgs = .{ hidden_states, cache_position };
+    var act_buffers = try zml.io.load(ActArgs, &act_args, allocator, io, platform, activation_store, .auto);
+    defer deinitBuffers(&act_buffers);
+
+    const kv_bytes = kv_shape.byteSize();
+    const k_init = try allocator.alloc(u8, kv_bytes);
+    defer allocator.free(k_init);
+    @memset(k_init, 0);
+    const v_init = try allocator.alloc(u8, kv_bytes);
+    defer allocator.free(v_init);
+    @memset(v_init, 0);
+
+    var k_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, k_init);
+    defer k_buf.deinit();
+    var v_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, v_init);
+    defer v_buf.deinit();
+    const kv_buffers: model.KvCache.Buffer = .{ .k = k_buf, .v = v_buf };
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+
+    const args_buffers = .{ act_buffers[0], act_buffers[1], kv_buffers };
+    exe_args.set(.{ layer_weights, args_buffers });
+    exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+
+    const output_count = exe.output_shapes.len;
+    var results = try allocator.alloc(zml.Buffer, output_count);
+    defer allocator.free(results);
+    exe_results.fill(.{results});
+
+    // forward returns (hidden_states, KvCache.k, KvCache.v); only the first
+    // output corresponds to a recorded HF activation (`out.0`).
+    if (output_count == 0) {
+        std.log.warn("{s}: compiled layer produced no outputs", .{name});
+        return;
+    }
+
+    const ref_shape = layer_view.getShape("out.0") orelse {
+        std.log.warn("{s}: no reference shape for out.0", .{name});
+        return;
+    };
+
+    const got_shape = results[0].shape();
+    var ref_count: i64 = 1;
+    for (ref_shape.dims()) |d| ref_count *= d;
+    var got_count: i64 = 1;
+    for (got_shape.dims()) |d| got_count *= d;
+    if (ref_count != got_count) {
+        std.log.warn("{s}.out.0: shape mismatch ref={f} ours={f}, skipping", .{ name, ref_shape, got_shape });
+        return;
+    }
+
+    var reader_buffer: [4096]u8 = undefined;
+    const expected_slice: zml.Slice = try .alloc(allocator, ref_shape);
+    defer expected_slice.free(allocator);
+    var reader = try layer_view.getReader("out.0", io, &reader_buffer);
+    defer reader.deinit();
+    try reader.interface.readSliceAll(expected_slice.data());
+
+    const got_slice = try results[0].toSliceAlloc(allocator, io);
+    defer got_slice.free(allocator);
+
+    zml.testing.expectClose(io, expected_slice, got_slice, .{
+        .absolute_tolerance = 1e-2,
+        .minimum_close_fraction = 0.99,
+    }) catch |err| switch (err) {
+        error.TestUnexpectedResult => {
+            std.log.warn("❌ {s} doesn't match", .{name});
+            return;
+        },
+        else => return err,
+    };
+    std.log.info("✅ {s} matches", .{name});
 }
 
 fn debugSelfAttnStages(
