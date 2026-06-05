@@ -208,8 +208,7 @@ pub const TransformerLayer = struct {
         const attn_delta, const updated_kv_cache = self.attn.forward(attn_input, token_index, kv_cache);
         const x1 = x0.add(attn_delta);
 
-        // FFN block. Ffn.forward already collapses MoE + share_expert and renames
-        // back to `.d` so the residual sum is unambiguous for both branches.
+        // FFN block
         const ffn_input = self.post_attention_layernorm.forward(x1, .d);
         const ffn_delta = self.ffn.forward(ffn_input);
 
@@ -1009,7 +1008,9 @@ pub const Moe = struct {
             moe_parameters,
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
-        return moe_output;
+        // Triton backend returns {b, token, out}; forwardLoop returns {b, s, dout}.
+        // Normalize so callers (Ffn.forward) don't need to know which backend ran.
+        return moe_output.rename(.{ .token = .s, .out = .dout });
     }
 
     fn forwardLoop(self: Moe, x: zml.Tensor) zml.Tensor {

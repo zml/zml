@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
     try run(allocator, io, platform, args.activations, sharding, &model_store);
 }
 
-const TEST_LAYER = 2;
+const TEST_LAYER = 4;
 
 fn run(
     allocator: std.mem.Allocator,
@@ -218,8 +218,8 @@ fn run(
         // End-to-end TransformerLayer smoke test: one dense layer + one MoE layer.
         // Validates that the residual + norm + attn + ffn composition matches
         // the HF dump for the same hardware path the model would run on.
-        const layer_indices = [_]usize{ 0, 3 };
-        for (layer_indices) |layer_idx| {
+        // const layer_indices = [_]usize{ 0, 1, 2, 3, 4, 5, 6 };
+        for (0..48) |layer_idx| {
             runTransformerLayer(allocator, io, platform, model_store, &activation_store, sharding, layer_idx) catch |err| {
                 std.log.warn("skipping model.layers.{d}: {s}", .{ layer_idx, @errorName(err) });
             };
@@ -402,11 +402,7 @@ fn runSelfAttnLayer(
     );
 }
 
-// Compile + run one full TransformerLayer against the recorded HF activations.
-// Mirrors testSelfAttn's wiring, but expects layer-level inputs/outputs at the
-// `model.layers.N` prefix and reuses the same layer's `self_attn.in.3` as the
-// cache_position tensor (the layer-level dumper indices vary across HF wrappers,
-// so we borrow a known-good cache_position from the attention sub-call).
+// full TransformerLayer test
 fn runTransformerLayer(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -441,11 +437,11 @@ fn runTransformerLayer(
         return;
     }
 
-    const hidden_states = layer_view.createTensor("in.0", null, .replicated);
+    const hidden_states = layer_view.createTensor("in.0", .{ .b, .s, .d }, .replicated);
     const cache_position = self_attn_view.createTensor("in.3", null, .replicated);
 
-    const batch_dim = hidden_states.dim(0);
-    const seq_dim = hidden_states.dim(1);
+    const batch_dim = hidden_states.dim(.b);
+    const seq_dim = hidden_states.dim(.s);
     const kv_shape = zml.Shape.init(.{
         .layer = @as(i64, @intCast(model.default_config.num_hidden_layers)),
         .b = batch_dim,
