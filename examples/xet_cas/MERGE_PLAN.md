@@ -53,7 +53,6 @@ byte cache.
 | [zml/io/xet.zig](../../zml/io/xet.zig) (~567 LoC) | Protocol primitives: `ReconstructionResponse`, `Term`, `FetchUrl`, `ChunkIterator`, `decompressChunk`, `xet.Client` (caches file_id and CAS auth per repo/path) |
 | [zml/io/lz4.zig](../../zml/io/lz4.zig) | Standalone LZ4 + `ChunkIterator` dependency |
 | [examples/xet_cas/test_file_to_device.zig](test_file_to_device.zig) (~524 LoC) | Main driver: all tensors of one file in a single batched pass |
-| [examples/xet_cas/test_tensor_to_device.zig](test_tensor_to_device.zig) | Older per-tensor driver |
 | [examples/xet_cas/scan_dedup.zig](scan_dedup.zig) | Dedup statistics scan |
 | [examples/xet_cas/util.zig](util.zig) | HTTP range GET + sha256 |
 
@@ -121,14 +120,18 @@ byte cache.
 ### Phase 0 — Lock the baseline (no merge, no code)
 
 - Record current SHA-256s and wall-clock for the regression workloads on
-  **both branches** so we can detect regressions cleanly later.
-- Workloads:
+  `oboulant/xet-merge` (= `oboulant/xet-reconstruction-cleanup` at the
+  branch point) so we can detect regressions cleanly later.
+- Workloads (run via `//examples/xet_cas:test_file_to_device`, which
+  SHA-verifies each tensor slot against a full LFS reference download):
   - `meta-llama/Meta-Llama-3-70B` `model-00030-of-00030.safetensors`
     (`lm_head` shard, low dedup).
   - `hugging-quants/Meta-Llama-3.1-70B-Instruct-AWQ-INT4` file containing
     `q_proj.qweight` (high dedup).
-- For `hugomano/xet`: rerun `bench/{A,B}.{lfs,xet}.log` measurements per
-  the baseline note.
+- No hugomano rerun: hugomano has no `test_file_to_device` equivalent
+  (its bench logs come from `examples/io/playground` against a different
+  workload), so an apples-to-apples comparison is not possible. Keep its
+  numbers as-is for context only.
 - Deliverable: a one-screen comparison table.
 
 ### Phase 1 — Compression-layer ports (oboulant ← hugomano)
