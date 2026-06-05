@@ -484,11 +484,12 @@ pub const CompressorState = struct {
 };
 
 pub const Cache = struct {
-    kv: KvCache,
-    indexer_kv: KvCache,
-    indexer_state: CompressorState,
+    sliding_window: KvCache,
+    // indexer_kv: KvCache,
+    // indexer_state: CompressorState,
 
     pub fn init(mdl: Model, config: Config, batch_size: u32, seqlen: u32) Cache {
+        _ = seqlen; // autofix
         // TODO: due to hybrid attention, kv shape is different. It should be:
         //   - Full attention: config.sliding_window
         //   - CSA: config.sliding_window + seqlen // 4
@@ -502,30 +503,30 @@ pub const Cache = struct {
         }, mdl.embeds.weight.dtype());
 
         // NOTE: indexer is only use by CSA layers (ratio == 4);
-        const indexer_kv_shape = kv_shape.set(.kv, @divFloor(seqlen, 4));
+        // const indexer_kv_shape = kv_shape.set(.kv, @divFloor(seqlen, 4));
         return .{ 
-            .kv = .init(kv_shape),
-            .indexer_kv = .init(indexer_kv_shape),
-            .indexer_state = .init(mdl, config, batch_size),
+            .sliding_window = .init(kv_shape),
+            // .indexer_kv = .init(indexer_kv_shape),
+            // .indexer_state = .init(mdl, config, batch_size),
         };
     }
 
     pub fn initBuffers(self: Cache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(Cache) {
         return .{
-            .kv = try self.kv.initBuffers(io, platform,  sharding),
-            .indexer_kv = try self.indexer_kv.initBuffers(io, platform,  sharding),
+            .sliding_window = try self.sliding_window.initBuffers(io, platform,  sharding),
+            // .indexer_kv = try self.indexer_kv.initBuffers(io, platform,  sharding),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Cache)) void {
-        KvCache.unloadBuffers(&self.kv);
-        KvCache.unloadBuffers(&self.indexer_kv);
+        KvCache.unloadBuffers(&self.sliding_window);
+        // KvCache.unloadBuffers(&self.indexer_kv);
     }
 
     pub fn reuseBuffer(self: Cache, other: Cache) Cache {
         return .{ 
-            .kv = self.kv.reuseBuffer(other.kv),
-            .indexer_kv = self.indexer_kv.reuseBuffer(other.indexer_kv),
+            .sliding_window = self.kv.reuseBuffer(other.kv),
+            // .indexer_kv = self.indexer_kv.reuseBuffer(other.indexer_kv),
         };
     }
 };
@@ -644,6 +645,12 @@ const Indexer = struct {
     }
 };
 
+const AttentionKind = enum {
+    full,
+    compress,
+    heavily_compress,
+};
+
 const Attention = struct {
     attn_sink: zml.Tensor,
     kv_norm: RmsNorm,
@@ -665,12 +672,20 @@ const Attention = struct {
     nope_head_dim: i64,
     o_groups: u32,
     o_lora_rank: u32,
+    kind: AttentionKind,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize) Attention {
         const block_size: usize = config.quantization_config.weight_block_size[0];
 
         stdx.debug.assert(layer_idx < config.compress_ratios.len, "expected layer indices ({}) to be lower than compress ratios ({})", .{layer_idx, config.compress_ratios.len});
         const compress_ratio= config.compress_ratios[layer_idx];
+
+        const kind: AttentionKind = switch(compress_ratio) {
+            0 => .full,
+            4 => .compress,
+            128 => .heavily_compress,
+            else => stdx.debug.assert(false, "{d} is an unexpected compression ratio. values should be either [full=0;csa=4;hca128]", .{compress_ratio}),
+        };
 
         const rope_opts: RopeOpts = .{
             .original_max_position_embeddings = if (compress_ratio == 0) 0 else config.rope_scaling.original_max_position_embeddings,
@@ -701,6 +716,7 @@ const Attention = struct {
             .nope_head_dim = config.head_dim - config.qk_rope_head_dim,
             .o_groups = config.o_groups,
             .o_lora_rank = config.o_lora_rank,
+            .kind = kind,
         };
     }
 
@@ -754,8 +770,8 @@ const Attention = struct {
                             .fmod(@floatFromInt(self.window_size)).convert(.u32);
 
         var new_cache = cache;
-        new_cache.kv = cache.kv.update(kv_gathered, idx, layer_idx);
-        kv = new_cache.kv.get(layer_idx);
+        new_cache.sliding_window = cache.sliding_window.update(kv_gathered, idx, layer_idx);
+        kv = new_cache.sliding_window.get(layer_idx);
 
         const topk = topk_window(self.window_size, x.dim(.batch), x.dim(.seq), start_pos).withTags(.{.batch, .seq, .topk});
 
@@ -900,7 +916,7 @@ const MoE = struct {
 
         y = y.add(self.shared_experts.forward(x, null));
 
-        return y;
+        return x;
     }
 };
 
@@ -1221,7 +1237,7 @@ pub const Model = struct {
     sampling_strategy: zml.nn.SamplingStrategy,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
-        const layers = try allocator.alloc(Layer, config.num_hidden_layers);
+        const layers = try allocator.alloc(Layer, 2);
 
         for (layers, 0..) |*layer, i| {
             const layer_store = store.withPrefix("layers").withLayer(i);

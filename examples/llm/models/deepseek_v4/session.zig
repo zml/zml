@@ -6,6 +6,8 @@ const attention = zml.attention.attention;
 const inference = @import("inference.zig");
 const model = @import("model.zig");
 
+const log = std.log.scoped(.deepseek);
+
 pub const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -110,9 +112,6 @@ pub const Session = struct {
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {
-        var decoder = try self.tokenizer.decoder();
-        defer decoder.deinit();
-
         var current_token_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, self.generated_token, .replicated);
         defer current_token_buffer.deinit();
 
@@ -123,6 +122,10 @@ pub const Session = struct {
         const think_end = self.tokenizer.tokenId("</think>") orelse return error.NoSuchToken;
 
         const eos_token: u32 = 1;
+
+        var decoder = try self.tokenizer.decoder();
+        defer decoder.deinit();
+
         generation: while (true) {
             const token_id = self.generated_token.items(u32)[0];
 
