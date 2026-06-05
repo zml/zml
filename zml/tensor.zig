@@ -4496,7 +4496,7 @@ pub const Tensor = struct {
                     }
                 }).body);
             },
-            .oneapi, .neuron => {},
+            .oneapi, .musa, .neuron => {},
         }
     }
 

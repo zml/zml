@@ -1,0 +1,34 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+cc_library(
+    name = "empty",
+    defines = ["ZML_RUNTIME_MUSA_DISABLED"],
+    tags = ["manual"],
+)
+
+cc_library(
+    name = "libpjrt_musa",
+    defines = ["ZML_RUNTIME_MUSA"],
+    tags = ["manual"],
+    deps = ["@libpjrt_musa"],
+)
+
+zig_library(
+    name = "musa",
+    import_name = "platforms/musa",
+    main = "musa.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//pjrt",
+        "//stdx",
+        "@rules_zig//zig/runfiles",
+    ] + select({
+        "//platforms:musa.enabled": [
+            ":libpjrt_musa",
+        ],
+        "//conditions:default": [":empty"],
+    }),
+)
