@@ -74,8 +74,8 @@ pub fn main(init: std.process.Init) !void {
         return error.MissingToken;
     };
 
-    var xet_client: xet.Client = .init(allocator, &http_client, hf_token);
-    defer xet_client.deinit();
+    var xet_state: xet.State = .init(allocator, &http_client, hf_token);
+    defer xet_state.deinit();
 
     var n_total: u32 = 0;
     var n_scanned: u32 = 0;
@@ -98,9 +98,9 @@ pub fn main(init: std.process.Init) !void {
             n_skipped += 1;
             continue;
         };
-        const repo: xet.Client.Repo = .{ .repo = hf_repo.repo, .model = hf_repo.model, .rev = hf_repo.rev, .path = hf_repo.path };
+        const repo: xet.State.Repo = .{ .repo = hf_repo.repo, .model = hf_repo.model, .rev = hf_repo.rev, .path = hf_repo.path };
 
-        const parsed = xet_client.reconstruct(repo, tensor.offset, tensor.offset + tensor.byteSize()) catch |e| {
+        const parsed = xet_state.reconstruct(repo, tensor.offset, tensor.offset + tensor.byteSize()) catch |e| {
             log.warn("skip {s}: reconstruction failed: {s}", .{ tensor.name, @errorName(e) });
             n_skipped += 1;
             continue;

@@ -210,7 +210,7 @@ pub fn main(init: std.process.Init) !void {
     // ── Derive Repo from file_uri (strip hf:// then parse) ────────────────────
     const hf_path = if (std.mem.startsWith(u8, tensor.file_uri, "hf://")) tensor.file_uri["hf://".len..] else tensor.file_uri;
     const hf_repo = try zml.io.VFS.HF.Repo.parse(hf_path);
-    const repo: xet.Client.Repo = .{ .repo = hf_repo.repo, .model = hf_repo.model, .rev = hf_repo.rev, .path = hf_repo.path };
+    const repo: xet.State.Repo = .{ .repo = hf_repo.repo, .model = hf_repo.model, .rev = hf_repo.rev, .path = hf_repo.path };
     log.info("Repo: {s}/{s}@{s} path={s}", .{ repo.repo, repo.model, repo.rev, repo.path });
 
     // ── HF auth (for the LFS oracle path) ─────────────────────────────────
@@ -222,10 +222,10 @@ pub fn main(init: std.process.Init) !void {
     const auth = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{std.mem.trim(u8, hf_token, " \t\n\r")}) catch return error.TokenTooLong;
 
     // ── CAS reconstruction for [tensor_offset, tensor_offset+size) ──────────
-    var xet_client: xet.Client = .init(allocator, &http_client, hf_token);
-    defer xet_client.deinit();
-    log.info("Xet file id: {s}", .{try xet_client.fileId(repo)});
-    const parsed = try xet_client.reconstruct(repo, tensor_offset, tensor_offset + tensor_size);
+    var xet_state: xet.State = .init(allocator, &http_client, hf_token);
+    defer xet_state.deinit();
+    log.info("Xet file id: {s}", .{try xet_state.fileId(repo)});
+    const parsed = try xet_state.reconstruct(repo, tensor_offset, tensor_offset + tensor_size);
     defer parsed.deinit();
     const resp = parsed.value;
 

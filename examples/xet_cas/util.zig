@@ -3,7 +3,7 @@
 // These are example-only testing utilities (HTTP range GET into a caller-
 // owned slot, LFS-oracle SHA-256 over a byte range, and SHA-256 of an
 // arbitrary std.Io.Reader). They are intentionally not promoted into the
-// library: production callers should drive xet.Client directly.
+// library: production callers should drive xet.State directly.
 
 const std = @import("std");
 const xet = @import("io").xet;
@@ -43,7 +43,7 @@ pub fn httpRangeGetIntoSlot(
 /// time spent waiting on the socket is reported via `out_net_ns`.
 pub fn sha256LfsRange(
     client: *std.http.Client,
-    repo: xet.Client.Repo,
+    repo: xet.State.Repo,
     auth: []const u8,
     range_start: u64,
     range_end_inclusive: u64,

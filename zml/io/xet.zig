@@ -114,13 +114,13 @@ pub fn decompressChunk(chunk: ChunkIterator.Chunk, dst: []u8) ![]u8 {
     }
 }
 
-// ── HF CAS Client ───────────────────────────────────────────────────────────
+// ── HF CAS State ────────────────────────────────────────────────────────────
 
-/// High-level Xet/HF CAS client. Holds the user's HF token and caches the
+/// Per-process Xet/HF CAS state. Holds the user's HF token and caches the
 /// per-file Xet id and per-(repo, rev) CAS access token so repeated
 /// `reconstruct` calls against the same model don't re-issue the handshake
 /// round-trips. Not thread-safe: serialize calls externally.
-pub const Client = struct {
+pub const State = struct {
     pub const Repo = struct {
         repo: []const u8,
         model: []const u8,
@@ -141,11 +141,11 @@ pub const Client = struct {
     file_id_cache: std.StringHashMapUnmanaged([]const u8) = .{},
     cas_cache: std.StringHashMapUnmanaged(CasAuth) = .{},
 
-    pub fn init(allocator: std.mem.Allocator, http: *std.http.Client, hf_token: []const u8) Client {
+    pub fn init(allocator: std.mem.Allocator, http: *std.http.Client, hf_token: []const u8) State {
         return .{ .allocator = allocator, .http = http, .hf_token = hf_token };
     }
 
-    pub fn deinit(self: *Client) void {
+    pub fn deinit(self: *State) void {
         var fit = self.file_id_cache.iterator();
         while (fit.next()) |e| {
             self.allocator.free(e.key_ptr.*);
@@ -163,7 +163,7 @@ pub const Client = struct {
 
     /// Returns the cached Xet file id for `repo` (or fetches+caches on miss).
     /// The returned slice is owned by the client and valid until `deinit`.
-    pub fn fileId(self: *Client, repo: Repo) ![]const u8 {
+    pub fn fileId(self: *State, repo: Repo) ![]const u8 {
         var key_buf: [4096]u8 = undefined;
         const key = try std.fmt.bufPrint(&key_buf, "{s}/{s}@{s}/{s}", .{ repo.repo, repo.model, repo.rev, repo.path });
         if (self.file_id_cache.get(key)) |fid| return fid;
@@ -178,7 +178,7 @@ pub const Client = struct {
 
     /// Returns the cached CAS endpoint + access token for the (repo, rev)
     /// pair (or fetches+caches on miss). Slices are owned by the client.
-    pub fn casAuth(self: *Client, repo: Repo) !CasAuth {
+    pub fn casAuth(self: *State, repo: Repo) !CasAuth {
         var key_buf: [4096]u8 = undefined;
         const key = try std.fmt.bufPrint(&key_buf, "{s}/{s}@{s}", .{ repo.repo, repo.model, repo.rev });
         if (self.cas_cache.get(key)) |c| return c;
@@ -198,7 +198,7 @@ pub const Client = struct {
     /// `[range_start, range_end_exclusive)`. Caller owns the returned
     /// `Parsed` and must call `.deinit()` when done.
     pub fn reconstruct(
-        self: *Client,
+        self: *State,
         repo: Repo,
         range_start: u64,
         range_end_exclusive: u64,
@@ -229,7 +229,7 @@ fn bearerAuth(hf_token: []const u8, buf: []u8) ![]u8 {
 fn fetchFileId(
     allocator: std.mem.Allocator,
     client: *std.http.Client,
-    repo: Client.Repo,
+    repo: State.Repo,
     hf_token: []const u8,
 ) ![]const u8 {
     var auth_buf: [1024]u8 = undefined;
@@ -265,9 +265,9 @@ fn fetchFileId(
 fn fetchCasToken(
     allocator: std.mem.Allocator,
     client: *std.http.Client,
-    repo: Client.Repo,
+    repo: State.Repo,
     hf_token: []const u8,
-) !Client.CasAuth {
+) !State.CasAuth {
     var auth_buf: [1024]u8 = undefined;
     const auth = try bearerAuth(hf_token, &auth_buf);
     var url_buf: [4096]u8 = undefined;

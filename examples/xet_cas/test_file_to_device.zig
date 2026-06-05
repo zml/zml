@@ -246,19 +246,19 @@ pub fn main(init: std.process.Init) !void {
     // ── Repo + auth ────────────────────────────────────────────────────────
     const hf_path = if (std.mem.startsWith(u8, file_uri, "hf://")) file_uri["hf://".len..] else file_uri;
     const hf_repo = try zml.io.VFS.HF.Repo.parse(hf_path);
-    const repo: xet.Client.Repo = .{ .repo = hf_repo.repo, .model = hf_repo.model, .rev = hf_repo.rev, .path = hf_repo.path };
+    const repo: xet.State.Repo = .{ .repo = hf_repo.repo, .model = hf_repo.model, .rev = hf_repo.rev, .path = hf_repo.path };
     const hf_token = try loadHfToken(allocator, init.io, init.environ_map);
     defer allocator.free(hf_token);
     var auth_buf: [1024]u8 = undefined;
     const auth = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{std.mem.trim(u8, hf_token, " \t\n\r")}) catch return error.TokenTooLong;
 
     // ── ONE reconstruction call for the whole file ────────────────────────
-    var xet_client: xet.Client = .init(allocator, &http_client, hf_token);
-    defer xet_client.deinit();
+    var xet_state: xet.State = .init(allocator, &http_client, hf_token);
+    defer xet_state.deinit();
     // Total xet wall: covers reconstruct RTT + plan build + worker fetch/decompress.
     const ts_xet_total: std.Io.Timestamp = .now(init.io, .awake);
     const ts_recon: std.Io.Timestamp = .now(init.io, .awake);
-    const parsed = try xet_client.reconstruct(repo, 0, file_size);
+    const parsed = try xet_state.reconstruct(repo, 0, file_size);
     defer parsed.deinit();
     const recon_ns: u64 = @intCast(ts_recon.untilNow(init.io, .awake).toNanoseconds());
     const resp = parsed.value;
@@ -468,7 +468,7 @@ pub fn main(init: std.process.Init) !void {
 
 fn lfsDownloadAll(
     client: *std.http.Client,
-    repo: xet.Client.Repo,
+    repo: xet.State.Repo,
     auth: []const u8,
     io: std.Io,
     out: []u8,
