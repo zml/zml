@@ -3,6 +3,8 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 const common = @import("../common.zig");
 
+const log = std.log.scoped(.step3_5flash);
+
 pub const Config = struct {
     architectures: []const []const u8 = &.{},
     model_type: []const u8,
@@ -90,8 +92,6 @@ pub const Config = struct {
     }
 };
 
-/// Per-layer attention flavor. Field names match `config.json`'s `layer_types` strings,
-/// so `std.json` can parse the array directly into `[]const AttnType`.
 pub const AttnType = enum {
     full_attention,
     sliding_attention,
@@ -102,29 +102,146 @@ pub const FfnType = enum {
     mlp,
 };
 
-// Options
-pub const Options = struct {
-    sampling_strategy: ?zml.nn.SamplingStrategy,
-    max_seq_len: u32,
-};
+pub const Options = Model.GenOptions;
 
-// TODO: Model struct. Do we need a LoadedModel?
-// model should create KV cache
 pub const Model = struct {
-    // finally config appears
+    pub const GenOptions = struct {
+        sampling_strategy: zml.nn.SamplingStrategy = .{},
+        max_seq_len: u32 = default_config.max_position_embeddings,
+    };
 
-    // init
+    text_model: TextModel,
+    lm_head: zml.nn.Linear,
+    gen_options: GenOptions,
 
-    // deinit
+    pub fn init(
+        allocator: std.mem.Allocator,
+        store: zml.io.TensorStore.View,
+        gen_options: GenOptions,
+    ) !Model {
+        return .{
+            .text_model = try .init(allocator, store.withPrefix("model")),
+            .lm_head = .init(
+                store.createTensor("lm_head.weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }),
+                null,
+                .d,
+            ),
+            .gen_options = gen_options,
+        };
+    }
 
-    // load
+    pub fn deinit(self: Model, allocator: std.mem.Allocator) void {
+        self.text_model.deinit(allocator);
+    }
 
-    // unload buffers
+    pub fn load(
+        self: *const Model,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        shardings: []const zml.Sharding,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(Model) {
+        progress.increaseEstimatedTotalItems(store.view().count());
+        const now: std.Io.Timestamp = .now(io, .awake);
+        var total_bytes: usize = 0;
+        defer {
+            const took = now.untilNow(io, .awake);
+            const bytes_per_sec: u64 = @intFromFloat(
+                @as(f64, @floatFromInt(total_bytes)) /
+                    (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s),
+            );
+            log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+        }
+        return zml.io.load(Model, self, allocator, io, platform, store, .{
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = progress,
+            .shardings = shardings,
+            .parallelism = 16,
+            .total_bytes = &total_bytes,
+        });
+    }
 
-    // forward
+    pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
+        TextModel.unloadBuffers(&self.text_model, allocator);
+        self.lm_head.weight.deinit();
+    }
+
+    pub fn forward(
+        self: Model,
+        tokens_: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: KvCache,
+        rng: zml.Tensor.Rng,
+    ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
+        const tokens = tokens_.withPartialTags(.{.s});
+        const hidden, const new_kv_cache = self.text_model.forward(tokens, token_index, kv_cache);
+        const next_tokens, const new_rng = self.sampleTokens(hidden, rng);
+        return .{ next_tokens.convert(tokens.dtype()).reuseBuffer(tokens), new_kv_cache, new_rng };
+    }
+
+    pub fn sampleTokens(self: Model, hidden: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
+        const logits = self.lm_head.forward(hidden.withPartialTags(.{.d})).rename(.{ .dout = .voc });
+        return zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, rng);
+    }
 };
 
-// TODO: buffers
+pub const TextModel = struct {
+    embed_tokens: zml.nn.TokenEmbedding,
+    layers: []TransformerLayer,
+    norm: RmsNorm,
+
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View) !TextModel {
+        const layers = try allocator.alloc(TransformerLayer, @intCast(default_config.num_hidden_layers));
+        errdefer allocator.free(layers);
+
+        for (layers, 0..) |*layer, i| {
+            layer.* = try .init(store.withPrefix("layers").withLayer(i), i);
+        }
+
+        return .{
+            .embed_tokens = .{
+                .weight = store.createTensor(
+                    "embed_tokens.weight",
+                    .{ .voc, .d },
+                    .{ .voc = .replicated, .d = .replicated },
+                ),
+            },
+            .layers = layers,
+            .norm = .init(store.withPrefix("norm"), 1e-5),
+        };
+    }
+
+    pub fn deinit(self: TextModel, allocator: std.mem.Allocator) void {
+        allocator.free(self.layers);
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(TextModel), allocator: std.mem.Allocator) void {
+        self.embed_tokens.weight.deinit();
+        for (self.layers) |*layer| TransformerLayer.unloadBuffers(layer);
+        allocator.free(self.layers);
+        RmsNorm.unloadBuffers(&self.norm);
+    }
+
+    pub fn forward(
+        self: TextModel,
+        tokens: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: KvCache,
+    ) struct { zml.Tensor, KvCache } {
+        var hidden = self.embed_tokens.forward(tokens);
+
+        var updated_kv_cache = kv_cache;
+        for (self.layers, 0..) |layer, i| {
+            hidden, updated_kv_cache = layer.forward(hidden, token_index, updated_kv_cache.atLayer(i));
+        }
+
+        hidden = self.norm.forward(hidden, .d);
+        return .{ hidden, updated_kv_cache.reuseBuffer(kv_cache) };
+    }
+};
 
 pub const TransformerLayer = struct {
     pub const Ffn = union(enum) {
@@ -330,7 +447,6 @@ pub const default_config: Config = .{
     .max_position_embeddings = 262144,
 };
 
-// TODO: Attention struct wrapping Attn and SwAttn
 pub const Attn = struct {
     layer_idx: usize,
     enable_sliding_window: bool,
@@ -930,8 +1046,6 @@ pub const Moe = struct {
     limit: ?f32,
 
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !Moe {
-        // init the up, gate, down tensors
-
         const up_proj_tensor = store.createTensor(
             "up_proj.weight",
             .{ .expert, .dout, .d },

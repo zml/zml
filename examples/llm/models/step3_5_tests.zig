@@ -52,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
     try run(allocator, io, platform, args.activations, sharding, &model_store);
 }
 
-const TEST_LAYER = 4;
+const TEST_LAYER = 5;
 
 fn run(
     allocator: std.mem.Allocator,
