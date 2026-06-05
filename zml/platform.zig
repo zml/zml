@@ -36,7 +36,7 @@ fn disableXlaLogs() void {
 
 fn validateDeviceCount(target: Target, num_devices: usize) !void {
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi => {
+        .cpu, .cuda, .musa, .rocm, .tpu, .neuron, .oneapi => {
             if (num_devices == 0) {
                 log.err("Platform {} requires at least 1 device, got {}", .{ target, num_devices });
                 return error.ZeroVisibleDevices;
@@ -89,7 +89,7 @@ pub const Memory = struct {
 
     pub fn isOfKind(self: Memory, kind_: Kind) bool {
         switch (self.platform.target) {
-            .cuda, .rocm, .oneapi, .tpu => {
+            .cuda, .musa, .rocm, .oneapi, .tpu => {
                 const zml_kind: Memory.Kind = switch (self.kind().len) {
                     "device".len => .device,
                     "pinned_host".len => .host_pinned,
@@ -212,7 +212,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi => device.id(),
+        .cuda, .musa, .rocm, .tpu, .cpu, .oneapi => device.id(),
     };
 }
 
@@ -347,6 +347,7 @@ pub const Platform = struct {
             .neuron,
             .rocm,
             .cuda,
+            .musa,
             .oneapi,
             .cpu,
         };
@@ -614,7 +615,7 @@ pub const Platform = struct {
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
             },
-            .cuda, .rocm, .neuron, .oneapi, .cpu => .{
+            .cuda, .musa, .rocm, .neuron, .oneapi, .cpu => .{
                 // If this is the default layout on the platform, there is no point calling PJRT
                 .tiled = .{
                     .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
@@ -646,6 +647,7 @@ pub const CreateOptions = struct {
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
     cuda: Cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     rocm: struct {} = .{},
+    musa: struct {} = .{},
     tpu: struct {} = .{},
     neuron: struct {} = .{},
     oneapi: struct {} = .{},
