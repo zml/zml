@@ -49,7 +49,7 @@ fn lessThan(_: void, lhs: RangeRegistration, rhs: RangeRegistration) bool {
     return lhs.offset < rhs.offset;
 }
 
-fn sameFile(a: []const u8, b: []const u8) bool {
+pub fn sameFile(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, trimScheme(a), trimScheme(b));
 }
 

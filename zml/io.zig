@@ -285,6 +285,85 @@ pub const ProgressWriter = struct {
     }
 };
 
+const DIRECT_STAGING_MIN_BYTES = 128 * 1024 * 1024;
+const DIRECT_STAGING_DMA_CHUNKS = 4;
+
+const DirectStagingWriter = struct {
+    downstream: *std.Io.Writer,
+    interface: std.Io.Writer,
+
+    fn init(allocator: std.mem.Allocator, downstream: *std.Io.Writer, capacity: usize) !DirectStagingWriter {
+        return .{
+            .downstream = downstream,
+            .interface = .{
+                .buffer = try allocator.alloc(u8, capacity),
+                .vtable = &.{
+                    .drain = drain,
+                    .flush = flush,
+                    .rebase = rebase,
+                },
+            },
+        };
+    }
+
+    fn deinit(self: *DirectStagingWriter, allocator: std.mem.Allocator) void {
+        if (self.interface.buffer.len > 0) {
+            allocator.free(self.interface.buffer);
+        }
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *DirectStagingWriter = @alignCast(@fieldParentPtr("interface", w));
+
+        try self.flushStaged();
+
+        for (data[0 .. data.len - 1]) |chunk| {
+            try self.downstream.writeAll(chunk);
+        }
+
+        const repeated = data[data.len - 1];
+        for (0..splat) |_| {
+            try self.downstream.writeAll(repeated);
+        }
+
+        return std.Io.Writer.countSplat(data, splat);
+    }
+
+    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const self: *DirectStagingWriter = @alignCast(@fieldParentPtr("interface", w));
+        try self.flushStaged();
+        try self.downstream.flush();
+    }
+
+    fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
+        const self: *DirectStagingWriter = @alignCast(@fieldParentPtr("interface", w));
+        if (preserve > w.end) return std.Io.Writer.Error.WriteFailed;
+        if (preserve + capacity > w.buffer.len) return std.Io.Writer.Error.WriteFailed;
+
+        const keep_start = w.end - preserve;
+        if (keep_start > 0) {
+            try self.downstream.writeAll(w.buffer[0..keep_start]);
+        }
+        if (preserve > 0) {
+            std.mem.copyForwards(u8, w.buffer[0..preserve], w.buffer[keep_start..w.end]);
+        }
+        w.end = preserve;
+    }
+
+    fn flushStaged(self: *DirectStagingWriter) std.Io.Writer.Error!void {
+        const staged = self.interface.buffered();
+        if (staged.len == 0) return;
+        try self.downstream.writeAll(staged);
+        self.interface.end = 0;
+    }
+
+    fn capacityFor(tensor_bytes: usize, dma_chunk_size: usize) usize {
+        if (tensor_bytes == 0) return 0;
+        const dma_window = dma_chunk_size * DIRECT_STAGING_DMA_CHUNKS;
+        return @min(tensor_bytes, @max(dma_window, DIRECT_STAGING_MIN_BYTES));
+    }
+};
+
 pub const MemoryWriter = union(enum) {
     direct: DirectMemoryWriter,
     buffered: BufferedMemoryWriter,
@@ -300,8 +379,8 @@ pub const MemoryWriter = union(enum) {
         buffer: *Buffer,
     ) !MemoryWriter {
         return switch (platform.target) {
-            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, shape, sharding, buffer) },
-            .rocm, .tpu, .neuron, .cpu => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
+            .cuda, .oneapi, .cpu  => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, shape, sharding, buffer) },
+            .rocm, .tpu, .neuron => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
         };
     }
 
@@ -1124,6 +1203,7 @@ pub fn load(
         group: stdx.Io.LimitedGroup,
         total: std.atomic.Value(usize) = .init(0),
         progress: ?*std.Progress.Node,
+        dma_chunk_size: usize,
     };
     var walk_ctx: Ctx = .{
         .platform = platform,
@@ -1137,6 +1217,7 @@ pub fn load(
         .shardings = opts.shardings,
         .progress = opts.progress,
         .group = .init(opts.parallelism),
+        .dma_chunk_size = opts.dma_chunk_size,
     };
     defer allocator.free(walk_ctx.buffers);
     defer allocator.free(walk_ctx.jobs);
@@ -1192,19 +1273,31 @@ pub fn load(
                 defer writer.deinit(ctx_.allocator);
 
                 const scale = 1024;
+                const final_writer = writer.interface();
+                const stage_capacity = switch (writer) {
+                    .direct => DirectStagingWriter.capacityFor(reader.tensor.shape.byteSize(), ctx_.dma_chunk_size),
+                    .buffered => 0,
+                };
+
+                var staging: ?DirectStagingWriter = if (stage_capacity > 0)
+                    DirectStagingWriter.init(ctx_.allocator, final_writer, stage_capacity) catch unreachable
+                else
+                    null;
+                defer if (staging) |*s| s.deinit(ctx_.allocator);
+                const stream_writer = if (staging) |*s| &s.interface else final_writer;
 
                 if (ctx_.progress) |progress| {
                     var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
                     defer node.end();
                     writer.setProgress(&node);
                     defer writer.setProgress(null);
-                    var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
+                    var progress_writer: ProgressWriter = .init(stream_writer, &node, .{ .scale = scale });
                     const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
                     progress_writer.interface.flush() catch unreachable;
                     _ = ctx_.total.fetchAdd(total, .monotonic);
                 } else {
-                    const total = reader.interface.streamRemaining(writer.interface()) catch unreachable;
-                    writer.interface().flush() catch unreachable;
+                    const total = reader.interface.streamRemaining(stream_writer) catch unreachable;
+                    stream_writer.flush() catch unreachable;
                     _ = ctx_.total.fetchAdd(total, .monotonic);
                 }
             }
