@@ -13,7 +13,7 @@ pub const Session = struct {
     model_buffers: *model.Buffers,
     compiled_model: *const inference.CompiledModel,
     seqlen: u32,
-    cache_buffers: zml.Bufferized(model.KVCache),
+    cache_buffers: zml.Bufferized(model.Cache),
     attention_metadata_buffers: zml.Bufferized(attention.Metadata),
     rng_buf: zml.Bufferized(zml.Tensor.Rng),
     generated_token: zml.Slice,
@@ -44,7 +44,7 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
-        model.KVCache.unloadBuffers(&self.cache_buffers);
+        model.Cache.unloadBuffers(&self.cache_buffers);
         attention.Metadata.deinitBuffer(&self.attention_metadata_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buf);
         self.generated_token.free(self.allocator);

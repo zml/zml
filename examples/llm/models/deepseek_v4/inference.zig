@@ -132,14 +132,15 @@ const KernelExe = struct {
 
         self.exe.call(exe_args, &results);
 
-        var tokens_buffer, var cache_buffer,  var rng_buffer = results.get(struct{
+        var tokens_buffer, const cache_buffer,  var rng_buffer = results.get(struct{
             zml.Buffer,
             zml.Bufferized(model.Cache),
             zml.Bufferized(zml.Tensor.Rng)
         });
+        _ = cache_buffer; // autofix
 
         updateBuffer(args.tokens_buf, &tokens_buffer);
-        updateBuffer(&args.cache_buffers.kv, &cache_buffer.kv);
+        // updateBuffer(&args.cache_buffers.kv, &cache_buffer.kv);
         updateBuffer(&args.rng_buf._state, &rng_buffer._state);
     }
 };
