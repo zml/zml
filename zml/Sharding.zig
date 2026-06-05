@@ -47,7 +47,7 @@ pub const Partitioner = union(enum) {
 
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal => .shardy,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal, .musa => .shardy,
         };
     }
 };
@@ -696,7 +696,7 @@ pub const PhysicalMesh = struct {
         return switch (self.target) {
             .tpu => &.{ .link_x, .link_y, .link_z },
             .neuron => &.{ .link, .link_x, .link_y, .link_z },
-            .cuda, .rocm => &.{.link},
+            .cuda, .rocm, .musa => &.{.link},
             .cpu, .metal => &.{.bus},
             .oneapi => &.{ .link, .bus },
         };
@@ -900,7 +900,7 @@ pub const PhysicalMesh = struct {
     pub fn auto(allocator: std.mem.Allocator, target: Target, platform_devices: []const PlatformDevice) !PhysicalMesh {
         const root = try switch (target) {
             .cpu => cpu(allocator, platform_devices),
-            .cuda, .rocm => gpu(allocator, platform_devices),
+            .cuda, .musa, .rocm => gpu(allocator, platform_devices),
             .tpu => tpu(allocator, platform_devices),
             .neuron => return neuron(allocator, platform_devices),
             .oneapi, .metal => cpu(allocator, platform_devices),

@@ -40,7 +40,7 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         return error.MissingDevices;
     }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .metal => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .musa => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
                 return error.InvalidDeviceCount;
@@ -95,7 +95,7 @@ pub const Memory = struct {
 
     pub fn isOfKind(self: Memory, kind_: Kind) bool {
         switch (self.platform.target) {
-            .cuda, .rocm, .oneapi, .tpu => {
+            .cuda, .musa, .rocm, .oneapi, .tpu => {
                 const zml_kind: Memory.Kind = switch (self.kind().len) {
                     "device".len => .device,
                     "pinned_host".len => .host_pinned,
@@ -218,7 +218,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal, .musa => device.id(),
     };
 }
 
@@ -353,6 +353,7 @@ pub const Platform = struct {
             .neuron,
             .rocm,
             .cuda,
+            .musa,
             .oneapi,
             .metal,
             .cpu,
@@ -621,7 +622,7 @@ pub const Platform = struct {
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
             },
-            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal => .{
+            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal, .musa => .{
                 // If this is the default layout on the platform, there is no point calling PJRT
                 .tiled = .{
                     .minor_to_major = constants.minorToMajor(@intCast(dims.len)),

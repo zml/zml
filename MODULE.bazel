@@ -186,6 +186,9 @@ use_repo(rocm, "amd-smi-lib", "hipblaslt", "libdrm-amdgpu-amdgpu1", "libdrm2-amd
 oneapi = use_extension("//platforms/oneapi:oneapi.bzl", "oneapi_packages")
 use_repo(oneapi, "libpjrt_oneapi")
 
+musa = use_extension("//platforms/musa:musa.bzl", "musa_packages")
+use_repo(musa, "libpjrt_musa")
+
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
 

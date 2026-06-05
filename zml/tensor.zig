@@ -4373,7 +4373,7 @@ pub const Tensor = struct {
     /// so it will slow down the program execution.
     pub fn print(input: Tensor, name: []const u8) void {
         switch (CompilationContext.current().platform.target) {
-            .cpu, .cuda, .rocm, .tpu, .metal => {
+            .cpu, .cuda, .rocm, .tpu, .metal, .musa => {
                 ops.manualComputation(input, {}, .{ .name = name }, (struct {
                     fn body(ctx_: anytype, _: std.mem.Allocator, sharded_input: Tensor, _: void) void {
                         ops.customCall("zml$print", sharded_input, {}, .{ .name = ctx_.name }, .{ .has_side_effect = true });
