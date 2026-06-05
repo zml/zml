@@ -8,6 +8,7 @@ zig_library(
         "lz4.zig",
         "vfs.zig",
         "xet.zig",
+        "xet_stats.zig",
     ],
     main = "io.zig",
     visibility = ["//visibility:public"],

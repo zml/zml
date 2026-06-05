@@ -16,6 +16,7 @@
 const std = @import("std");
 const zml = @import("zml");
 const xet = @import("io").xet;
+const xet_stats = @import("io").xet_stats;
 const util = @import("util.zig");
 
 const log = std.log.scoped(.test_file_to_device);
@@ -70,12 +71,7 @@ const Worker = struct {
     allocator: std.mem.Allocator,
     env: *std.process.Environ.Map,
     io: std.Io,
-    net_bytes: u64 = 0,
-    net_ns: u64 = 0,
-    decomp_ns: u64 = 0,
-    write_ns: u64 = 0,
-    chunkloop_ns: u64 = 0,
-    n_chunks_total: u64 = 0,
+    stats: *xet_stats.AtomicStats,
     err: ?anyerror = null,
 
     fn run(self: *Worker) void {
@@ -114,15 +110,14 @@ const Worker = struct {
 
                 const t0: std.Io.Timestamp = .now(self.io, .awake);
                 try util.httpRangeGetIntoSlot(&client, f.url, f.url_range_start, f.url_range_end, xb[0..f.byte_len]);
-                self.net_ns += @intCast(t0.untilNow(self.io, .awake).toNanoseconds());
-                self.net_bytes += f.byte_len;
+                self.stats.add("xorb_http_ns", @intCast(t0.untilNow(self.io, .awake).toNanoseconds()));
+                self.stats.add("xorb_bytes_read", f.byte_len);
 
                 var it: xet.ChunkIterator = .{ .data = xb[0..f.byte_len] };
                 var chunk_idx: u32 = f.chunk_start;
-                const ts_cl: std.Io.Timestamp = .now(self.io, .awake);
                 while (try it.next()) |chunk| : (chunk_idx += 1) {
                     if (chunk.uncompressed_size > MAX_CHUNK) return error.ChunkTooLarge;
-                    self.n_chunks_total += 1;
+                    self.stats.add("xorb_chunks", 1);
                     const cu: u32 = @intCast(chunk.uncompressed_size);
                     var decompressed = false;
                     for (self.plans) |*p| {
@@ -140,17 +135,14 @@ const Worker = struct {
                         if (!decompressed) {
                             const ts_d: std.Io.Timestamp = .now(self.io, .awake);
                             _ = try xet.decompressChunk(chunk, cb[0..chunk.uncompressed_size]);
-                            self.decomp_ns += @intCast(ts_d.untilNow(self.io, .awake).toNanoseconds());
+                            self.stats.add("xorb_decode_ns", @intCast(ts_d.untilNow(self.io, .awake).toNanoseconds()));
                             decompressed = true;
                         }
-                        const ts_w: std.Io.Timestamp = .now(self.io, .awake);
                         try self.sinks[p.tensor_idx].writeAt(slot_off, cb[src_off .. src_off + take]);
-                        self.write_ns += @intCast(ts_w.untilNow(self.io, .awake).toNanoseconds());
                         p.bytes_written += take;
                         p.bytes_consumed += src_off + take;
                     }
                 }
-                self.chunkloop_ns += @intCast(ts_cl.untilNow(self.io, .awake).toNanoseconds());
             }
         }
     }
@@ -385,6 +377,7 @@ pub fn main(init: std.process.Init) !void {
     log.info("plan build: {d} ms ({d} plans, {d} xorbs, {d} fetch ranges)", .{ plan_ns / std.time.ns_per_ms, n_plans, n_xorbs, all_fetches.items.len });
     log.info("spawning {d} worker(s) for {d} xorb(s)", .{ n_workers, n_xorbs });
     var counter: std.atomic.Value(u32) = .init(0);
+    var stats: xet_stats.AtomicStats = .{};
     const workers = try allocator.alloc(Worker, n_workers);
     defer allocator.free(workers);
     const threads = try allocator.alloc(std.Thread, n_workers);
@@ -404,6 +397,7 @@ pub fn main(init: std.process.Init) !void {
             .allocator = allocator,
             .env = init.environ_map,
             .io = init.io,
+            .stats = &stats,
         };
         t.* = try std.Thread.spawn(.{}, Worker.run, .{w});
         n_spawned += 1;
@@ -415,8 +409,8 @@ pub fn main(init: std.process.Init) !void {
     var net_bytes: u64 = 0;
     for (workers) |w| {
         if (w.err) |e| return e;
-        net_bytes += w.net_bytes;
     }
+    net_bytes = stats.snapshot().xorb_bytes_read;
     for (plans[0..n_plans]) |p| {
         if (p.bytes_written != p.wanted_len) {
             log.err("plan mismatch tensor_idx={d} written={d} expected={d}", .{ p.tensor_idx, p.bytes_written, p.wanted_len });
