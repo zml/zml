@@ -19,7 +19,7 @@ ZML is a production inference stack, purpose-built to decouple AI workloads from
 
 Any model, many hardwares, one codebase, peak performance.
 
-Compiled directly to NVIDIA, AMD, INTEL, TPU, Trainium for peak hardware performance on any accelerator. No rewriting.
+Compiled directly to NVIDIA, AMD, INTEL, TPU, MUSA, Trainium for peak hardware performance on any accelerator. No rewriting.
 
 It is built using the
 [Zig](https://ziglang.org) language, [MLIR](https://mlir.llvm.org), and [Bazel](https://bazel.build).
@@ -96,9 +96,15 @@ Append one or more platform flags when compiling or running:
 - NVIDIA CUDA: `--@zml//platforms:cuda=true`
 - AMD RoCM: `--@zml//platforms:rocm=true`
 - Intel OneAPI: `--@zml//platforms:oneapi=true`
+- Moore Threads MUSA S80: `--@zml//platforms:musa=true`
 - Google TPU: `--@zml//platforms:tpu=true`
 - AWS Trainium / Inferentia 2: `--@zml//platforms:neuron=true`
 - Disable CPU compilation: `--@zml//platforms:cpu=false`
+
+MUSA support currently targets Linux x86_64 S80 hosts using the rc3.1.1 SDK
+redist and requires the host MUSA driver to provide `libsrv_um_MUSA.so`. The v1
+PJRT integration can build and load the platform; compiled model execution is
+blocked until the MUSA XLA compiler lowering is implemented.
 
 Example on CUDA:
 

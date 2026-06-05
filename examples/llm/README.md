@@ -19,7 +19,14 @@ bazel run //examples/llm -- --model=hf://meta-llama/Llama-3.1-8B-Instruct
 bazel run //examples/llm --@zml//platforms:cuda=true -- --model=hf://meta-llama/Llama-3.1-8B-Instruct
 # ROCm
 bazel run //examples/llm --@zml//platforms:rocm=true -- --model=hf://meta-llama/Llama-3.1-8B-Instruct
+# MUSA S80
+bazel run //examples/llm --@zml//platforms:musa=true --@zml//platforms:cpu=false -- --model=hf://meta-llama/Llama-3.1-8B-Instruct
 ```
+
+MUSA support currently targets Linux x86_64 S80 hosts using the rc3.1.1 SDK
+redist and requires the host MUSA driver to provide `libsrv_um_MUSA.so`. The v1
+PJRT integration can build and load the platform; compiled model execution is
+blocked until the MUSA XLA compiler lowering is implemented.
 
 From a local directory:
 

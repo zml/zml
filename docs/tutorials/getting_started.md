@@ -105,11 +105,17 @@ following arguments to the command line when compiling or running a model:
 
 - NVIDIA CUDA: `--@zml//platforms:cuda=true`
 - AMD RoCM: `--@zml//platforms:rocm=true`
+- Moore Threads MUSA S80: `--@zml//platforms:musa=true`
 - Google TPU: `--@zml//platforms:tpu=true`
 - AWS Trainium/Inferentia 2: `--@zml//platforms:neuron=true`
 - **AVOID CPU:** `--@zml//platforms:cpu=false`
 
 The latter, avoiding compilation for CPU, cuts down compilation time.
+
+MUSA support currently targets Linux x86_64 S80 hosts using the rc3.1.1 SDK
+redist and requires the host MUSA driver to provide `libsrv_um_MUSA.so`. The v1
+PJRT integration can build and load the platform; compiled model execution is
+blocked until the MUSA XLA compiler lowering is implemented.
 
 
 So, to run the Llama model from above on your host sporting an NVIDIA GPU,

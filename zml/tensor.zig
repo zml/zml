@@ -4599,7 +4599,7 @@ pub const Tensor = struct {
                     }
                 }).body, .{ .input = input, .name = full_name }, {});
             },
-            .oneapi, .neuron => {},
+            .oneapi, .musa, .neuron => {},
         }
     }
 
