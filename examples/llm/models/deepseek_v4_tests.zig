@@ -254,39 +254,39 @@ pub fn run(
             );
         }
 
-        // if (mdl.layers[i].attn.indexer) |indexer| {
-        //     try ctx.testCompressorLayer(
-        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.compressor", .{i}),
-        //     .{ .batch, .seq, .d },
-        //     indexer.compressor,
-        //     model_buffers.layers[i].attn.compressor.?,
-        //     .{}
-        //     );
-        //
-        //     try ctx.testLayer(
-        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.indexer.weights_proj", .{i}),
-        //     .{ .batch, .seq, .d },
-        //     indexer.proj,
-        //     model_buffers.layers[i].attn.indexer.?.proj,
-        //     .{}
-        //     );
-        //
-        //     try ctx.testLayer(
-        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.indexer.wq_b", .{i}),
-        //     .{ .batch, .seq, .d },
-        //     indexer.wq_b,
-        //     model_buffers.layers[i].attn.indexer.?.wq_b,
-        //     .{}
-        //     );
-        //
-        //     try ctx.testIndexerLayer(
-        //     "layers.2.attn.indexer",
-        //     .{ .batch, .seq, .d },
-        //     indexer,
-        //     model_buffers.layers[i].attn.indexer.?,
-        //     .{},
-        //     );
-        // }
+        if (mdl.layers[i].attn.indexer) |indexer| {
+            // try ctx.testCompressorLayer(
+            // try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.indexer.compressor", .{i}),
+            // .{ .batch, .seq, .d },
+            // indexer.compressor,
+            // model_buffers.layers[i].attn.compressor.?,
+            // .{}
+            // );
+
+            // try ctx.testLayer(
+            // try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.indexer.weights_proj", .{i}),
+            // .{ .batch, .seq, .d },
+            // indexer.proj,
+            // model_buffers.layers[i].attn.indexer.?.proj,
+            // .{}
+            // );
+
+            // try ctx.testLayer(
+            // try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.indexer.wq_b", .{i}),
+            // .{ .batch, .seq, .d },
+            // indexer.wq_b,
+            // model_buffers.layers[i].attn.indexer.?.wq_b,
+            // .{}
+            // );
+
+            try ctx.testIndexerLayer(
+            "layers.2.attn.indexer",
+            .{ .batch, .seq, .d },
+            indexer,
+            model_buffers.layers[i].attn.indexer.?,
+            .{},
+            );
+        }
 
         try ctx.testLayer(
             try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn_norm", .{i}),
