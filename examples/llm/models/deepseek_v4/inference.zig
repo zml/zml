@@ -132,16 +132,15 @@ const KernelExe = struct {
 
         self.exe.call(exe_args, &results);
 
-        var tokens_buffer, const cache_buffer,  var rng_buffer = results.get(struct{
+        var tokens_buffer, var rng_buffer, var cache_buffer = results.get(struct{
             zml.Buffer,
+            zml.Bufferized(zml.Tensor.Rng),
             zml.Bufferized(model.Cache),
-            zml.Bufferized(zml.Tensor.Rng)
         });
-        _ = cache_buffer; // autofix
 
         updateBuffer(args.tokens_buf, &tokens_buffer);
-        // updateBuffer(&args.cache_buffers.kv, &cache_buffer.kv);
         updateBuffer(&args.rng_buf._state, &rng_buffer._state);
+        updateCacheBuffers(args.cache_buffers, &cache_buffer);
     }
 };
 
@@ -150,6 +149,10 @@ fn updateBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
         dst.deinit();
     }
     dst.* = src.*;
+}
+
+fn updateCacheBuffers(dst: *zml.Bufferized(model.Cache), src: *zml.Bufferized(model.Cache)) void {
+    updateBuffer(&dst.sliding_window.kv, &src.sliding_window.kv);
 }
 
 fn sameBufferHandle(lhs: zml.Buffer, rhs: zml.Buffer) bool {
