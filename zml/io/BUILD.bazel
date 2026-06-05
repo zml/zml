@@ -4,6 +4,7 @@ zig_library(
     name = "io",
     tags = ["manual"],
     srcs = [
+        "bg4.zig",
         "lz4.zig",
         "vfs.zig",
         "xet.zig",
@@ -20,6 +21,7 @@ zig_test(
     name = "test",
     main = "xet.zig",
     srcs = [
+        "bg4.zig",
         "lz4.zig",
     ],
     deps = ["//zml/io"],

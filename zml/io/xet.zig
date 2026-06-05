@@ -1,5 +1,6 @@
 const std = @import("std");
 const lz4 = @import("lz4.zig");
+const bg4 = @import("bg4.zig");
 
 const log = std.log.scoped(.@"zml/io/xet");
 
@@ -54,7 +55,7 @@ pub const ChunkIterator = struct {
 
         const compressed_size: u32 = @as(u32, h[1]) | (@as(u32, h[2]) << 8) | (@as(u32, h[3]) << 16);
         const compression_type = h[4];
-        if (compression_type > 3) return error.InvalidCompressionType;
+        if (compression_type > 2) return error.InvalidCompressionType;
         const uncompressed_size: u32 = @as(u32, h[5]) | (@as(u32, h[6]) << 8) | (@as(u32, h[7]) << 16);
 
         const data_start = self.pos + header_size;
@@ -76,41 +77,38 @@ pub const ChunkIterator = struct {
 
 // ── Chunk Decompression ─────────────────────────────────────────────────────
 
-/// Decompresses a single chunk into caller-provided buffers.
+/// Decompresses a single chunk into a caller-provided buffer.
 /// `dst` must be at least `chunk.uncompressed_size` bytes.
-/// `tmp` must be at least `chunk.uncompressed_size` bytes (used as intermediate
-/// buffer for types 2 and 3; ignored for types 0 and 1).
 /// Returns `dst[0..chunk.uncompressed_size]`.
-pub fn decompressChunk(chunk: ChunkIterator.Chunk, dst: []u8, tmp: []u8) ![]u8 {
+pub fn decompressChunk(chunk: ChunkIterator.Chunk, dst: []u8) ![]u8 {
     const usize_uncomp: usize = chunk.uncompressed_size;
     if (dst.len < usize_uncomp) return error.OutputTooSmall;
+    const out = dst[0..usize_uncomp];
 
     switch (chunk.compression_type) {
         0 => {
             // None: raw data, just copy.
             if (chunk.compressed_data.len != usize_uncomp) return error.SizeMismatch;
-            @memcpy(dst[0..usize_uncomp], chunk.compressed_data);
-            return dst[0..usize_uncomp];
+            @memcpy(out, chunk.compressed_data);
+            return out;
         },
         1 => {
             // LZ4 block/frame.
-            const n = lz4.decompress(chunk.compressed_data, dst) catch return error.CorruptedData;
-            if (n != usize_uncomp) return error.SizeMismatch;
-            return dst[0..n];
+            var src_reader: std.Io.Reader = .fixed(chunk.compressed_data);
+            var dst_writer: std.Io.Writer = .fixed(out);
+            var lz4_reader = lz4.BlockReader.init(&src_reader, chunk.compressed_size, usize_uncomp);
+            _ = lz4_reader.interface.streamRemaining(&dst_writer) catch return error.CorruptedData;
+            return out;
         },
         2 => {
-            // ByteGrouping4 + LZ4.
-            if (tmp.len < usize_uncomp) return error.OutputTooSmall;
-            const n = lz4.decompressBg4(chunk.compressed_data, dst, tmp) catch return error.CorruptedData;
-            if (n != usize_uncomp) return error.SizeMismatch;
-            return dst[0..n];
-        },
-        3 => {
-            // FullBitslice + LZ4.
-            if (tmp.len < usize_uncomp) return error.OutputTooSmall;
-            const n = lz4.decompressFbs(chunk.compressed_data, dst, tmp) catch return error.CorruptedData;
-            if (n != usize_uncomp) return error.SizeMismatch;
-            return dst[0..n];
+            // ByteGrouping4 + LZ4: LZ4 decompresses into dst in grouped layout,
+            // then DegroupWriter.flush() permutes in place.
+            var src_reader: std.Io.Reader = .fixed(chunk.compressed_data);
+            var grouped_writer = bg4.DegroupWriter.init(out);
+            var lz4_reader = lz4.BlockReader.init(&src_reader, chunk.compressed_size, usize_uncomp);
+            _ = lz4_reader.interface.streamRemaining(&grouped_writer.interface) catch return error.CorruptedData;
+            grouped_writer.interface.flush() catch return error.CorruptedData;
+            return out;
         },
         else => return error.InvalidCompressionType,
     }
@@ -434,8 +432,7 @@ test "decompressChunk: type 0 (None)" {
         .compressed_data = &data,
     };
     var dst: [4]u8 = undefined;
-    var tmp: [4]u8 = undefined;
-    const result = try decompressChunk(chunk, &dst, &tmp);
+    const result = try decompressChunk(chunk, &dst);
     try std.testing.expectEqualSlices(u8, &data, result);
 }
 
@@ -449,8 +446,7 @@ test "decompressChunk: type 0 size mismatch" {
         .compressed_data = &data,
     };
     var dst: [5]u8 = undefined;
-    var tmp: [5]u8 = undefined;
-    try std.testing.expectError(error.SizeMismatch, decompressChunk(chunk, &dst, &tmp));
+    try std.testing.expectError(error.SizeMismatch, decompressChunk(chunk, &dst));
 }
 
 test "decompressChunk: type 1 (LZ4)" {
@@ -465,8 +461,7 @@ test "decompressChunk: type 1 (LZ4)" {
         .compressed_data = &compressed,
     };
     var dst: [5]u8 = undefined;
-    var tmp: [5]u8 = undefined;
-    const result = try decompressChunk(chunk, &dst, &tmp);
+    const result = try decompressChunk(chunk, &dst);
     try std.testing.expectEqualStrings("Hello", result);
 }
 
@@ -488,41 +483,8 @@ test "decompressChunk: type 2 (BG4+LZ4)" {
         .compressed_data = &compressed,
     };
     var dst: [8]u8 = undefined;
-    var tmp: [8]u8 = undefined;
-    const result = try decompressChunk(chunk, &dst, &tmp);
+    const result = try decompressChunk(chunk, &dst);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 }, result);
-}
-
-test "decompressChunk: type 3 (FBS+LZ4)" {
-    // Take a known 4-byte original, apply forward bitslice, encode as LZ4 literals.
-    const original = [_]u8{ 0xA5, 0x3C, 0xF0, 0x0F };
-
-    // Compute forward bitslice (N=4):
-    var bitsliced: [4]u8 = .{ 0, 0, 0, 0 };
-    for (0..4) |orig_byte_idx| {
-        for (0..8) |orig_bit_idx| {
-            const k = orig_bit_idx * 4 + orig_byte_idx;
-            const out_byte_idx = k / 8;
-            const out_bit_idx = k % 8;
-            if (out_byte_idx >= 4) continue;
-            const bit: u8 = (original[orig_byte_idx] >> @intCast(orig_bit_idx)) & 1;
-            bitsliced[out_byte_idx] |= bit << @intCast(out_bit_idx);
-        }
-    }
-
-    // LZ4 all-literals: token = (4 << 4) = 0x40, then 4 bytes
-    const compressed = [_]u8{0x40} ++ bitsliced;
-    const chunk = ChunkIterator.Chunk{
-        .index = 0,
-        .compressed_size = compressed.len,
-        .uncompressed_size = 4,
-        .compression_type = 3,
-        .compressed_data = &compressed,
-    };
-    var dst: [4]u8 = undefined;
-    var tmp: [4]u8 = undefined;
-    const result = try decompressChunk(chunk, &dst, &tmp);
-    try std.testing.expectEqualSlices(u8, &original, result);
 }
 
 test "parse fetch_info: synthetic" {

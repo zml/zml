@@ -102,8 +102,6 @@ const Worker = struct {
         defer self.allocator.free(xb);
         const cb = try self.allocator.alloc(u8, MAX_CHUNK);
         defer self.allocator.free(cb);
-        const dt = try self.allocator.alloc(u8, MAX_CHUNK);
-        defer self.allocator.free(dt);
 
         while (true) {
             const next = self.counter.fetchAdd(1, .acq_rel);
@@ -134,7 +132,7 @@ const Worker = struct {
                     const slot_off: usize = p.dst_off + p.bytes_written;
                     if (!decompressed) {
                         const ts_d: std.Io.Timestamp = .now(self.io, .awake);
-                        _ = try xet.decompressChunk(chunk, cb[0..chunk.uncompressed_size], dt);
+                        _ = try xet.decompressChunk(chunk, cb[0..chunk.uncompressed_size]);
                         self.decomp_ns += @intCast(ts_d.untilNow(self.io, .awake).toNanoseconds());
                         decompressed = true;
                     }
