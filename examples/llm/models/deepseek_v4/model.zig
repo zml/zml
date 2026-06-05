@@ -194,7 +194,7 @@ const Compressor = struct {
     rope_head_dim: i64,
     nope_head_dim: i64,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize, rotate: bool, rope_opts: RopeOpts) ?Compressor {
+    pub fn init(store: zml.io.TensorStore.View, config: Config, head_dim: u32, layer_idx: usize, rotate: bool, rope_opts: RopeOpts) ?Compressor {
         if (layer_idx >= config.compress_ratios.len or config.compress_ratios[layer_idx] == 0) return null;
 
         const ratio = config.compress_ratios[layer_idx];
@@ -209,9 +209,9 @@ const Compressor = struct {
             .rotate = rotate,
             .overlap = (ratio == 4),
             .rope_opts = rope_opts,
-            .head_dim = config.head_dim,
+            .head_dim = head_dim,
             .rope_head_dim = config.qk_rope_head_dim,
-            .nope_head_dim = config.head_dim - config.qk_rope_head_dim,
+            .nope_head_dim = head_dim - config.qk_rope_head_dim,
         };
     }
 
@@ -246,11 +246,11 @@ const Compressor = struct {
         return zml.Tensor.concatenate(&.{left_padded, right_half}, 2);
     }
 
-    fn forwardPrefill(self: Compressor, x: zml.Tensor) struct { ?zml.Tensor, ?zml.Tensor, zml.Tensor } {
+    fn forwardPrefill(self: Compressor, x: zml.Tensor) struct { ?zml.Tensor, ?zml.Tensor } {
         const seqlen = x.dim(.seq);
 
         // Nothing to compress my friend
-        if (seqlen < self.ratio) return .{ null, null, zml.Tensor.scalar(@as(u32, 0), .u32) };
+        if (seqlen < self.ratio) return .{ null, null };
 
         const x32 = x.convert(.f32);
         var kv = self.wkv.forward(x32);
@@ -274,23 +274,22 @@ const Compressor = struct {
         }
 
         const pos_idx = zml.Tensor.arange(.{ .end = cutoff, .step = self.ratio}, .i64).withTags(.{.seq});
-        return .{ kv.mul(score.broad(kv.shape()).softmax(.r)).sum(.r).squeeze(.r), pos_idx, zml.Tensor.scalar(@as(u32, @intCast(cutoff)), .u32) };
+        return .{ kv.mul(score.broad(kv.shape()).softmax(.r)).sum(.r).squeeze(.r), pos_idx };
     }
 
-    fn forwardDecode(self: Compressor, x: zml.Tensor) struct { ?zml.Tensor, ?zml.Tensor, zml.Tensor } {
+    fn forwardDecode(self: Compressor, x: zml.Tensor) struct { ?zml.Tensor, ?zml.Tensor } {
         const x32 = x.convert(.f32);
         const kv = self.wkv.forward(x32);
         _ = kv; // autofix
         var score = self.wgate.forward(x32);
         score = score.add(self.ape.broad(score.shape()));
 
-        return .{ null, null, zml.Tensor.scalar(@as(u32, 0), .u32) };
+        return .{ null, null };
     }
 
     pub fn forward(self: Compressor, x: zml.Tensor, start_pos: i64) ?zml.Tensor {
         // shape(x) = [batch,seq,r]
-        const maybe_kv, const maybe_pos_idx, const cutoff = if (start_pos == 0) self.forwardPrefill(x) else self.forwardDecode(x);
-        _ = cutoff; // autofix
+        const maybe_kv, const maybe_pos_idx = if (start_pos == 0) self.forwardPrefill(x) else self.forwardDecode(x);
         if (maybe_kv == null) return null;
 
         var kv = maybe_kv.?.convert(x.dtype());
@@ -301,6 +300,36 @@ const Compressor = struct {
         if (self.rotate) {
             kv = hadamard_rotation(kv);
             // TODO: quantize to FP4?
+        }
+
+        return kv;
+    }
+
+    pub fn forward_stateless(self: Compressor, x: zml.Tensor) zml.Tensor {
+        // NOTE: it's the caller responsability to call the compressor with a seqlen divisible by self.ratio
+        const seqlen = x.dim(.seq);
+        stdx.debug.assert(@mod(seqlen, self.ratio) == 0, "expected an input with a seqlen ({}) divisible by the compression ratio ({}", .{ seqlen, self.ratio });
+
+        const x_32 = x.convert(.f32);
+
+        var kv = self.wkv.forward(x_32);
+        var score = self.wgate.forward(x_32);
+        score = score.add(self.ape.broad(score.shape()));
+
+        if (self.overlap) {
+            kv = self.overlap_transform(kv, 0);
+            score = self.overlap_transform(score, -std.math.inf(f32));
+        }
+
+        kv = kv.mul(score.broad(kv.shape()).softmax(1)).sum(1).squeeze(1);
+
+        const pos_idx = zml.Tensor.arange(.{ .end = seqlen, .step = self.ratio}, .i64).withTags(.{.seq});
+
+        kv = self.norm.forward(kv);
+        kv = apply_rope(kv, pos_idx, self.nope_head_dim, self.rope_head_dim, self.rope_opts);
+
+        if (self.rotate) { //< that should be the caller responsibility but we keep it testing purposes.
+            kv = hadamard_rotation(kv);
         }
 
         return kv;
@@ -393,7 +422,7 @@ fn hadamard_rotation(x: zml.Tensor) zml.Tensor {
     }
 
     const scale = zml.Tensor.scalar(n, x.dtype()).rsqrt();
-    return x.dot(H.withTags(.{ .a, .hd }), .hd).mul(scale);
+    return x.dot(H.withTags(.{ .a, .hd }), .hd).mul(scale).rename(.{ .a = .hd });
 }
 
 pub const KvCache = struct {
@@ -408,7 +437,7 @@ pub const KvCache = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(KvCache)) void {
-        self.k.deinit();
+        self.kv.deinit();
     }
 
     pub fn reuseBuffer(self: KvCache, other: KvCache) KvCache {
@@ -428,9 +457,36 @@ pub const KvCache = struct {
     }
 };
 
+pub const CompressorState = struct {
+    tokens: zml.Tensor,
+
+    pub fn init(mdl: Model, config: Config, batch_size: u32) CompressorState {
+        const shape: zml.Shape = .init(.{
+            .layer = config.num_hidden_layers,
+            .batch = batch_size,
+            .seq = 8,
+            .hd = config.head_dim,
+        }, mdl.embeds.weight.dtype());
+
+        return .{
+            .tokens = .fromShape(shape),
+        };
+    }
+
+    pub fn append(self: CompressorState, new_token: zml.Tensor, cache_index: zml.Tensor) CompressorState {
+        const kv_shape = self.kv.shape().drop(.layer);
+        const token_position = new_token;
+        const layer = cache_index.broad(token_position.shape());
+        return .{
+            .tokens = self.kv.scatterSlices(.{ .layer = layer, .kv = token_position }, new_token.transpose(kv_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(self.kv),
+        };
+    }
+};
+
 pub const Cache = struct {
     kv: KvCache,
-    indexed_kv: KvCache,
+    indexer_kv: KvCache,
+    indexer_state: CompressorState,
 
     pub fn init(mdl: Model, config: Config, batch_size: u32, seqlen: u32) Cache {
         // TODO: due to hybrid attention, kv shape is different. It should be:
@@ -445,32 +501,31 @@ pub const Cache = struct {
             .hd = config.head_dim,
         }, mdl.embeds.weight.dtype());
 
-        const indexer_compression_ratio = 4;
-        const indexer_size = config.sliding_window + @divFloor(seqlen, indexer_compression_ratio);
-        const indexer_shape = kv_shape.set(.kv, indexer_size);
-
+        // NOTE: indexer is only use by CSA layers (ratio == 4);
+        const indexer_kv_shape = kv_shape.set(.kv, @divFloor(seqlen, 4));
         return .{ 
             .kv = .init(kv_shape),
-            .indexed_kv = .init(indexer_shape),
+            .indexer_kv = .init(indexer_kv_shape),
+            .indexer_state = .init(mdl, config, batch_size),
         };
     }
 
     pub fn initBuffers(self: Cache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(Cache) {
         return .{
-            .kv = try self.kv.initBuffers(io, platform, self.indexed_kv.shape(), sharding, .{}),
-            .indexed_kv = try self.indexed_kv.initBuffers(io, platform, self.indexed_kv.shape(), sharding, .{}),
+            .kv = try self.kv.initBuffers(io, platform,  sharding),
+            .indexer_kv = try self.indexer_kv.initBuffers(io, platform,  sharding),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Cache)) void {
         KvCache.unloadBuffers(&self.kv);
-        KvCache.unloadBuffers(&self.indexed_kv);
+        KvCache.unloadBuffers(&self.indexer_kv);
     }
 
     pub fn reuseBuffer(self: Cache, other: Cache) Cache {
         return .{ 
             .kv = self.kv.reuseBuffer(other.kv),
-            .indexed_kv = self.indexed_kv.reuseBuffer(other.indexed_kv) 
+            .indexer_kv = self.indexer_kv.reuseBuffer(other.indexer_kv),
         };
     }
 };
@@ -491,12 +546,12 @@ const Indexer = struct {
     pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize, rope_opts: RopeOpts) ?Indexer {
         if (layer_idx >= config.compress_ratios.len or config.compress_ratios[layer_idx] != 4) return null;
 
-        const compressor: ?Compressor = .init(store, config, layer_idx, true, rope_opts);
+        const indexer_store = store.withPrefix("indexer");
+
+        const compressor: ?Compressor = .init(indexer_store, config, config.index_head_dim, layer_idx, true, rope_opts);
         stdx.debug.assert(compressor != null, "expected non null compressor from indexer", .{});
 
         const block_size = config.quantization_config.weight_block_size[0];
-
-        const indexer_store = store.withPrefix("indexer");
 
         return .{
             .proj = .init(indexer_store.createTensor("weights_proj.weight", .{.sq, .d}, .replicated), null, .d),
@@ -523,51 +578,59 @@ const Indexer = struct {
         self: Indexer,
         x: zml.Tensor,
         qr: zml.Tensor,
+        // tokens_idx_offset: zml.Tensor,
         start_pos: i64,
-        cache: KvCache,
-        cache_idx: zml.Tensor,
-    ) struct { zml.Tensor, KvCache } {
+        // cache: KvCache,
+        // cache_idx: zml.Tensor,
+    ) zml.Tensor {
         const pos_idx = zml.Tensor.arange(.{ .start = start_pos, .end = start_pos + x.dim(.seq) }, .f32).withTags(.{ .seq });
 
         var q = self.wq_b.forward(qr);
         q = q.splitAxis(-1, .{ .h = self.index_n_heads, .hd = .auto });
         q = apply_rope(q, pos_idx, self.nope_head_dim, self.rope_head_dim, self.rope_opts);
         q = hadamard_rotation(q);
+        q = q.rename(.{ .hd = .d });
 
         // TODO: FP4 quant q
         // NOTE: executed to update the kv cache
-        var new_cache = cache;
         const maybe_kv = self.compressor.forward(x, start_pos);
-        if (maybe_kv) |kv| {
-            const token_position = x;
-            new_cache = cache.update(kv, token_position, cache_idx);
-        }
+        // var new_cache = cache;
+        // const maybe_kv = self.compressor.forward(x, start_pos);
+        // if (maybe_kv) |kv| {
+        //     const token_position = b: {
+        //         const sh: zml.Shape = .init(.{ .seq = x.dim(.seq) }, .i64);
+        //         break :b zml.Tensor.iota(sh, .seq).convert(.u32).add(tokens_idx_offset.divByConst(self.ratio).broad(sh));
+        //     };
+        //     new_cache = cache.update(kv, token_position, cache_idx);
+        // }
 
-        const kv = new_cache.get(cache_idx);
+        const kv = maybe_kv orelse zml.Tensor.zeroes(.init(.{ .batch = 1, .kv = x.dim(.seq) }, q.dtype()));
+        // const kv = new_cache.get(cache_idx);
 
         var weights = self.proj.forward(x);
         weights = weights.mul(zml.Tensor.scalar(@as(f32, @floatFromInt(self.index_n_heads)), weights.dtype()).broad(weights.shape()).rsqrt().scale(self.softmax_scale));
 
-        var index_score = q.dot(kv, .d);
-        index_score = index_score.relu().mul(weights).sum(2).squeeze(2);
+        var index_score = q.dot(kv.rename(.{ .hd = .d, .seq = .t }), .d);
+        index_score = index_score.relu().mul(weights.appendAxes(.{ .t }).broad(index_score.shape())).sum(2).squeeze(2);
 
-        const offset = 0; //< TBD
+        const offset = 11; //< TBD
         const end_pos: u32 = @intCast(start_pos + x.dim(.seq));
-        const k =  @min(self.index_topk, @mod(end_pos, self.ratio));
+        const k =  @min(self.index_topk, @divFloor(end_pos, self.ratio));
 
         const seq = x.dim(.seq);
 
         const topk_idxs = blk: {
             if (start_pos == 0) {
-                const a = zml.Tensor.iota(.init(.{ seq, @divFloor(seq, self.ratio) }, .i64), 1).convert(.i64);
-                const b = zml.Tensor.arange(.{ .start = 1, .end = seq + 1 }, .i64).reshape(.{ seq, 1}).divByConst(self.ratio).broad(a.shape()).convert(.i64);
-                const mask = a.cmp(.GT,  b);
+                const a = zml.Tensor.iota(.init(.{ seq, @divFloor(seq, self.ratio) }, .i32), 1).convert(.i32);
+                const b = zml.Tensor.arange(.{ .start = 1, .end = seq + 1 }, .i32).reshape(.{ seq, 1}).divByConst(self.ratio).broad(a.shape()).convert(.i32);
+                const mask = a.cmp(.GE,  b).insertAxes(0, .{ .batch });
 
-                index_score.add(zml.Tensor.select(mask, zml.Tensor.scalar(-std.math.inf(f32), .f32).broad(mask), zml.Tensor.zeroes(index_score.shape())));
+                const selected = zml.Tensor.select(mask, zml.Tensor.scalar(-std.math.inf(f32), index_score.dtype()).broad(mask.shape()), zml.Tensor.zeroes(index_score.shape()));
+                index_score = index_score.add(selected);
 
                 var topk_idxs = index_score.topK(-1, k, .{}).indices;
 
-                const mask_ = topk_idxs.cmp(.GT, b);
+                const mask_ = topk_idxs.cmp(.GE, b.insertAxes(0, .{ .batch }));
                 topk_idxs = zml.Tensor.select(mask_, zml.Tensor.scalar(-1, topk_idxs.dtype()).broad(topk_idxs.shape()), topk_idxs.addConstant(offset));
                 break :blk topk_idxs;
             } else {
@@ -577,7 +640,7 @@ const Indexer = struct {
             }
         };
 
-        return topk_idxs;
+        return topk_idxs.convert(.i64);
     }
 };
 
@@ -626,7 +689,7 @@ const Attention = struct {
             .wkv = .init(store.withPrefix("wkv"), .{ .hd, .d }, block_size, .d),
             .wo_a = .init(store.withPrefix("wo_a"), .{ .hd, .d }, block_size, .d),
             .wo_b = .init(store.withPrefix("wo_b"), .{ .hd, .d }, block_size, .d),
-            .compressor = .init(store, config, layer_idx, false, rope_opts),
+            .compressor = .init(store, config, config.head_dim, layer_idx, false, rope_opts),
             .indexer = .init(store, config, layer_idx, rope_opts),
             .eps = config.rms_norm_eps,
             .rope_opts = rope_opts,
@@ -665,6 +728,7 @@ const Attention = struct {
         _ = attention_metadata; // autofix
         _ = attention_parameters; // autofix
         // shape(x) = [batch, seq, d]
+        const seqlen = x.dim(.seq);
         const start_pos: i64 = 0;
         const pos_idx = b: {
             const sh: zml.Shape = .init(.{ .seq = x.dim(.seq) }, .i64);
@@ -682,10 +746,15 @@ const Attention = struct {
         // shape(kv) = [batch, k, hd=512]
         var kv = self.kv_norm.forward(self.wkv.forward(x));
         kv = apply_rope(kv, pos_idx, self.nope_head_dim, self.rope_head_dim, self.rope_opts);
-        kv = kv.rename(.{ .seq = .k });
+        kv = kv.rename(.{ .seq = .kv });
+
+        const num_tokens = @min(seqlen, self.window_size);
+        const kv_gathered = kv.slice1d(.kv, .{ .start = kv.dim(.kv) - num_tokens  });
+        const idx = zml.Tensor.arange(.{ .start = start_pos + seqlen - num_tokens, .end = start_pos + seqlen, }, .f32).withTags(.{ .kv })
+                            .fmod(@floatFromInt(self.window_size)).convert(.u32);
 
         var new_cache = cache;
-        new_cache.kv = cache.kv.update(kv, tokens_idx_offset.fmod(self.window_size), layer_idx);
+        new_cache.kv = cache.kv.update(kv_gathered, idx, layer_idx);
         kv = new_cache.kv.get(layer_idx);
 
         const topk = topk_window(self.window_size, x.dim(.batch), x.dim(.seq), start_pos).withTags(.{.batch, .seq, .topk});
@@ -753,9 +822,9 @@ fn topk_window(window_size: i64, batch_size: i64, seqlen: i64, start_pos: i64) z
 // From: <https://github.com/tile-ai/tilelang/blob/4e873220313c7e4dbfa0538582bc32ac5c81b1eb/examples/deepseek_v4/sparse_attn_fwd_sm90.py#L162>
 pub fn sparse_attn(q: zml.Tensor, kv: zml.Tensor, attn_sink: zml.Tensor, topk: zml.Tensor, scale: ?f32) zml.Tensor {
     // q = [batch, q, h, hd], kv = [batch, k, hd], topk = [batch, seq, topk]
-    const selected_kv = kv.gather(.{ .k = topk }, .{}).rename(.{.seq = .q, .topk = .k}).convert(.f32);
+    const selected_kv = kv.gather(.{ .kv = topk }, .{}).rename(.{.seq = .q, .topk = .kv}).convert(.f32);
 
-    const dims = zml.nn.collectDims(.{ .h, .q, .k, .hd }, &.{ q, kv }, .strict) catch {
+    const dims = zml.nn.collectDims(.{ .h, .q, .kv, .hd }, &.{ q, kv }, .strict) catch {
         stdx.debug.panic("Inputs have incompatible shapes (q: {f}, kv: {f}, attn_mask: ).", .{q, kv});
     };
 
@@ -769,14 +838,14 @@ pub fn sparse_attn(q: zml.Tensor, kv: zml.Tensor, attn_sink: zml.Tensor, topk: z
     const sink = attn_sink.insertAxes(0, .{ .batch, .q }).insertAxes(.last, .{ .hd }).broad(sink_shape);
     const scores_sink = zml.Tensor.concatenate(&.{scores, sink.convert(scores.dtype())}, -1);
 
-    const attn_weights = scores_sink.convert(.f32).softmax(.k).convert(q_32.dtype());
+    const attn_weights = scores_sink.convert(.f32).softmax(.kv).convert(q_32.dtype());
     const attn_weights_non_sink = attn_weights.slice(&.{
         .{},
         .{},
         .{},
         .{ .end = topk.dim(.topk) },
     });
-    const attn = attn_weights_non_sink.dot(selected_kv, .k);
+    const attn = attn_weights_non_sink.dot(selected_kv, .kv);
     return attn.convert(.bf16);
 }
 
@@ -1245,9 +1314,7 @@ pub const Model = struct {
 
         const logits = self.lm_head.forward(hidden); //< [batch, voc]
 
-        log.info("logits: {f}", .{logits});
         const new_tokens, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, rng);
-        log.info("new_tokens: {f}", .{new_tokens});
         return .{ new_tokens.convert(tokens.dtype()), new_rng, cache_ };
     }
 };
