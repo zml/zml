@@ -110,65 +110,88 @@ pub const Options = struct {
 
 // TODO: Model struct. Do we need a LoadedModel?
 // model should create KV cache
-// pub const Model = struct {
-//     // finally config appears
+pub const Model = struct {
+    // finally config appears
 
-//     // init
+    // init
 
-//     // deinit
+    // deinit
 
-//     // load
+    // load
 
-//     // unload buffers
+    // unload buffers
 
-//     // forward
-// }
+    // forward
+};
 
 // TODO: buffers
 
-// TODO: Transformer Layer
 pub const TransformerLayer = struct {
     pub const Ffn = union(enum) {
+        /// Layers [0, 1, 2] are a single SwiGLU MLP
         mlp: Mlp,
-        moe: Moe,
+        /// Layers 3 - 48 are MoE layers, consisting of routed experts + a per-token shared expert
+        moe: struct {
+            experts: Moe,
+            shared: Mlp,
+        },
 
         pub fn forward(self: Ffn, x: zml.Tensor) zml.Tensor {
             return switch (self) {
-                .mlp => {
-
-                },
-                .moe => {
-                    
-                }
-            }
+                .mlp => |mlp| mlp.forward(x),
+                .moe => |m| m.experts.forward(x).rename(.{ .dout = .d }).add(m.shared.forward(x)),
+            };
         }
     };
 
     input_layernorm: RmsNorm,
     attn: Attn,
-    attention_type: AttnType,
     ffn: Ffn,
-    ffn_type: FfnType,
-    shared_expert: Moe,
     post_attention_layernorm: RmsNorm,
 
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !TransformerLayer {
         const is_moe = std.mem.indexOfScalar(u32, default_config.moe_layers_enum, @intCast(layer_idx)) != null;
         const attention_type = default_config.layer_types[layer_idx];
 
+        const shared_limit: f32 = if (layer_idx < default_config.swiglu_limits_shared.len)
+            default_config.swiglu_limits_shared[layer_idx]
+        else
+            0.0;
+
+        const ffn: Ffn = if (is_moe) .{
+            .moe = .{
+                .experts = try .init(store.withPrefix("moe"), layer_idx),
+                .shared = .init(store.withPrefix("share_expert"), shared_limit),
+            },
+        } else .{
+            .mlp = .init(store.withPrefix("mlp"), shared_limit),
+        };
+
         return .{
-            .input_layernorm = RmsNorm.init(store.withPrefix("input_layernorm")),
-            .attn = try Attn.init(store.withPrefix("self_attn"), layer_idx, attention_type),
-            .attention_type = attention_type,
-            .ffn = if (is_moe) .{ .moe = try .init(store.withPrefix("moe"), layer_idx), .ffn_type = .moe } else .{ .mlp = .init(store.withPrefix("mlp"), default_config.swiglu_limits[layer_idx]), .ffn_type = .mlp },
-            .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e5),
+            .input_layernorm = .init(store.withPrefix("input_layernorm"), 1e-5),
+            .attn = try .init(store.withPrefix("self_attn"), layer_idx, attention_type),
+            .ffn = ffn,
+            .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e-5),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer)) void {
         RmsNorm.unloadBuffers(&self.input_layernorm);
-        Attn.unloadBuffers(&self.self_attn);
-        Ffn.unloadBuffers(&self.ffn);
+        Attn.unloadBuffers(&self.attn);
+        switch (self.ffn) {
+            .mlp => |*mlp| {
+                mlp.up_proj.weight.deinit();
+                mlp.gate_proj.weight.deinit();
+                mlp.down_proj.weight.deinit();
+            },
+            .moe => |*m| {
+                Moe.deinit(&m.experts);
+                Router.unloadBuffers(&m.experts.router);
+                m.shared.up_proj.weight.deinit();
+                m.shared.gate_proj.weight.deinit();
+                m.shared.down_proj.weight.deinit();
+            },
+        }
         RmsNorm.unloadBuffers(&self.post_attention_layernorm);
     }
 
@@ -179,25 +202,18 @@ pub const TransformerLayer = struct {
         kv_cache: KvCache,
     ) struct { zml.Tensor, KvCache } {
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
-        // Attention block
-        const attn_input = self.input_layernorm.forward(x0);
+
+        // Attention block.
+        const attn_input = self.input_layernorm.forward(x0, .d);
         const attn_delta, const updated_kv_cache = self.attn.forward(attn_input, token_index, kv_cache);
-
-        // FFN block
         const x1 = x0.add(attn_delta);
-        const ffn_input = self.post_attention_layernorm.forward(x1);
 
-        // ffn_delta handles MoE and MLP case. Note that for MoE case, it is only finished when we add shared delta in branch below.
-        const ffn_delta = self.ffn.forward(ffn_input).rename(.{ .dout = .d });
+        // FFN block. Ffn.forward already collapses MoE + share_expert and renames
+        // back to `.d` so the residual sum is unambiguous for both branches.
+        const ffn_input = self.post_attention_layernorm.forward(x1, .d);
+        const ffn_delta = self.ffn.forward(ffn_input);
 
-        // Branch on whether it is MoE or MLP
-        if (self.ffn_type == .moe) {
-            const shared_expert_delta = self.shared_expert.forward(ffn_input).rename(.{ .dout = .d });
-            const moe_output = ffn_delta.add(shared_expert_delta);
-            return .{ x1.add(moe_output).reuseBuffer(x0), updated_kv_cache };
-        } else {
-            return .{ x1.add(ffn_delta).reuseBuffer(x0), updated_kv_cache };
-        }
+        return .{ x1.add(ffn_delta).reuseBuffer(x0), updated_kv_cache };
     }
 };
 
@@ -474,10 +490,7 @@ pub const Attn = struct {
         q = self.rotary_emb.applyRope(q, cos, sin);
         k = self.rotary_emb.applyRope(k, cos, sin);
 
-        // Scatter the new k/v slice into the persistent cache, then read the full
-        // history back so attention sees all prior tokens.
-        // scatterSlices wants a scalar start offset for the `.k` axis; the slice
-        // length comes from the update tensor itself.
+        // Scatter the new k/v slice into the persistent cache, then read the full history back so attention sees all prior tokens
         const cache_start = token_index.convert(.u32).slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0);
         const new_kv_cache = kv_cache.update(k, v, cache_start);
         const k_full = new_kv_cache.keys().convert(dtype);
@@ -787,8 +800,7 @@ pub const Mlp = struct {
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        // Add tags to input before providing to our layer.
-        const input = x.withTags(.{ .b, .s, .d });
+        const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
 
         var up_proj = self.up_proj.forward(input);
         var gate = self.gate_proj.forward(input);
