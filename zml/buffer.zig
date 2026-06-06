@@ -61,7 +61,15 @@ pub const Buffer = struct {
         }
     };
 
-    pub const FromOptions = struct { wait: bool = true, memory: Memory.Kind = .default };
+    pub const FromOptions = struct {
+        wait: bool = true,
+        memory: Memory.Kind = .default,
+        // When true, `data_` must point at PAGE-ALIGNED, IMMUTABLE host memory
+        // that OUTLIVES the buffer (e.g. mmap'd weight file pages). The backend
+        // aliases it with no copy (kImmutableZeroCopy). On unified-memory
+        // backends (Metal) this skips the ~6GB host->device weight copy.
+        zero_copy: bool = false,
+    };
 
     /// Frees the accelerator memory.
     /// Depending on the platform, the memory is typically not released to the OS
@@ -133,7 +141,7 @@ pub const Buffer = struct {
                 .dims = shard_dims,
                 .buffer_type = buffer_type,
                 .byte_strides = slice.byte_strides.constSlice(),
-                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                .host_buffer_semantics = if (opts.zero_copy) .ImmutableZeroCopy else .ImmutableUntilTransferCompletes,
             };
 
             const pjrt_buffer, const event = try platform.pjrt_client.bufferFromHostBuffer(platform.pjrt_api, args);

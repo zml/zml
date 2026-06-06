@@ -88,6 +88,16 @@ pub const LoadedModel = struct {
             .shardings = &shardings.all(),
             .parallelism = 16,
             .total_bytes = &total_bytes,
+            // Zero-copy mmap weight feed (Metal): OPT-IN via ZML_ZEROCOPY=1. It
+            // makes the weight load ~48x faster (611ms -> 13ms) by aliasing the
+            // mmap'd file pages instead of copying ~6GB into device buffers, BUT
+            // it regresses DECODE ~14% (67.4 -> 58 tok/s) because the GPU reads
+            // file-backed pages slower than allocated Shared buffers (which Apple
+            // places in GPU-optimal memory). Net loss for sustained inference
+            // (decode dominates); a win only for very short runs / fast startup.
+            .zero_copy = platform.target == .metal and
+                std.c.getenv("ZML_ZEROCOPY") != null and
+                std.mem.eql(u8, std.mem.span(std.c.getenv("ZML_ZEROCOPY").?), "1"),
         });
     }
 
