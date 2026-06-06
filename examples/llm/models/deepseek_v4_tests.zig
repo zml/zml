@@ -161,131 +161,10 @@ pub fn run(
             .{}
         );
 
-        // Attention
-        try ctx.testLayer(
-            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.wq_a", .{i}),
-        .{ .batch, .seq, .d },
-        mdl.layers[i].attn.wq_a,
-        model_buffers.layers[i].attn.wq_a,
-        dequant_opts,
-        );
-
-        try ctx.testLayer(
-            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.q_norm", .{i}),
-            .{ .batch, .seq, .q },
-            mdl.layers[i].attn.q_norm,
-            model_buffers.layers[i].attn.q_norm,
-            .{},
-        );
-
-        // Disable because the activation only captured a 1/4 of the activations due
-        // to Parallel operations.
-        // try ctx.testLayer(
-        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.wq_b", .{i}),
-        //     .{ .batch, .seq, .q },
-        //     mdl.layers[0].attn.wq_b,
-        //     model_buffers.layers[0].attn.wq_b,
-        //     dequant_opts,
-        // );
-
-        try ctx.testLayer(
-            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.wkv", .{i}),
-            .{ .batch, .seq, .d },
-            mdl.layers[i].attn.wkv,
-            model_buffers.layers[i].attn.wkv,
-            dequant_opts,
-        );
-
-        try ctx.testLayer(
-            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.kv_norm", .{i}),
-            .{ .batch, .seq, .hd },
-            mdl.layers[i].attn.kv_norm,
-            model_buffers.layers[i].attn.kv_norm,
-            .{},
-        );
-
-        // try ctx.testLayer(
-        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.wo_a", .{i}),
-        //     .{ .batch, .seq, .d },
-        //     mdl.layers[i].attn.wo_a,
-        //     model_buffers.layers[i].attn.wo_a,
-        //     dequant_opts
-        // );
-
-        // try ctx.testLayer(
-        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.wo_b", .{i}),
-        //     .{ .batch, .seq, .d },
-        //     mdl.layers[0].attn.wo_b,
-        //     model_buffers.layers[0].attn.wo_b,
-        //     dequant_opts
-        // );
-
-        if (mdl.layers[i].attn.compressor) |compressor| {
-            try ctx.testLayer(
-            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.compressor.wkv", .{i}),
-            .{ .batch, .seq, .d },
-            compressor.wkv,
-            model_buffers.layers[i].attn.compressor.?.wkv,
-            .{}
-            );
-
-            try ctx.testLayer(
-            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.compressor.wgate", .{i}),
-            .{ .batch, .seq, .d },
-            compressor.wgate,
-            model_buffers.layers[i].attn.compressor.?.wgate,
-            .{}
-            );
-
-            // try ctx.testLayer(
-            // try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.compressor.norm", .{i}),
-            // .{ .batch, .seq, .hd },
-            // compressor.norm,
-            // model_buffers.layers[i].attn.compressor.?.norm,
-            // .{}
-            // );
-
-            try ctx.testCompressorLayer(
-            try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.compressor", .{i}),
-            .{ .batch, .seq, .d },
-            compressor,
-            model_buffers.layers[i].attn.compressor.?,
-            .{},
-            );
-        }
-
-        if (mdl.layers[i].attn.indexer) |indexer| {
-            // try ctx.testCompressorLayer(
-            // try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.indexer.compressor", .{i}),
-            // .{ .batch, .seq, .d },
-            // indexer.compressor,
-            // model_buffers.layers[i].attn.compressor.?,
-            // .{}
-            // );
-
-            // try ctx.testLayer(
-            // try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.indexer.weights_proj", .{i}),
-            // .{ .batch, .seq, .d },
-            // indexer.proj,
-            // model_buffers.layers[i].attn.indexer.?.proj,
-            // .{}
-            // );
-
-            // try ctx.testLayer(
-            // try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.indexer.wq_b", .{i}),
-            // .{ .batch, .seq, .d },
-            // indexer.wq_b,
-            // model_buffers.layers[i].attn.indexer.?.wq_b,
-            // .{}
-            // );
-
-            try ctx.testIndexerLayer(
-            "layers.2.attn.indexer",
-            .{ .batch, .seq, .d },
-            indexer,
-            model_buffers.layers[i].attn.indexer.?,
-            .{},
-            );
+        switch(mdl.layers[i].attn) {
+            .full => |full_attn| try ctx.testAttentionLayer(arena_allocator, i, full_attn, model_buffers.layers[i].attn.full, dequant_opts),
+            .compress => |csa| try ctx.testCSALayer(arena_allocator, i, csa, model_buffers.layers[i].attn.compress, dequant_opts),
+            .heavily_compress => |hca| try ctx.testHCALayer(arena_allocator,  i,hca, model_buffers.layers[i].attn.heavily_compress, dequant_opts),
         }
 
         try ctx.testLayer(
@@ -362,10 +241,156 @@ const TestContext = struct {
     attention_parameters: attention.Parameters,
     sharding: zml.Sharding,
 
-    fn testLayerPrint(self: *TestContext, comptime name_fmt: []const u8, name_args: anytype, tagz: anytype, layer: anytype, layer_buffers: anytype, opts: zml.testing.CompareOpts) !void {
-        const name = try std.fmt.allocPrint(self.allocator, name_fmt, name_args);
-        defer self.allocator.free(name);
-        try self.testLayer(name, tagz, layer, layer_buffers, opts);
+    fn testAttentionLayer(
+        self: *TestContext,
+        allocator: std.mem.Allocator,
+        i: usize,
+        attn: model.Attention,
+        attn_buffer: zml.Bufferized(model.Attention),
+        opts: zml.testing.CompareOpts
+    ) !void {
+        try self.testLayer(
+            try std.fmt.allocPrint(allocator, "layers.{}.attn.wq_a", .{i}),
+        .{ .batch, .seq, .d },
+        attn.wq_a,
+        attn_buffer.wq_a,
+        opts,
+        );
+
+        try self.testLayer(
+            try std.fmt.allocPrint(allocator, "layers.{}.attn.q_norm", .{i}),
+            .{ .batch, .seq, .q },
+            attn.q_norm,
+            attn_buffer.q_norm,
+            .{},
+        );
+
+        // Disable because the activation only captured a 1/4 of the activations due
+        // to Parallel operations.
+        // try ctx.testLayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.attn.wq_b", .{i}),
+        //     .{ .batch, .seq, .q },
+        //     attn.wq_b,
+        //     attn_buffer.wq_b,
+        //     .{},
+        // );
+
+        try self.testLayer(
+            try std.fmt.allocPrint(allocator, "layers.{}.attn.wkv", .{i}),
+            .{ .batch, .seq, .d },
+            attn.wkv,
+            attn_buffer.wkv,
+            opts,
+        );
+
+        try self.testLayer(
+            try std.fmt.allocPrint(allocator, "layers.{}.attn.kv_norm", .{i}),
+            .{ .batch, .seq, .hd },
+            attn.kv_norm,
+            attn_buffer.kv_norm,
+            .{},
+        );
+
+        // try ctx.testLayer(
+        //     try std.fmt.allocPrint(allocator, "layers.{}.attn.wo_a", .{i}),
+        //     .{ .batch, .seq, .d },
+        //     attn.wo_a,
+        //     attn_buffer.wo_a,
+        //     .{}
+        // );
+
+        // try ctx.testLayer(
+        //     try std.fmt.allocPrint(allocator, "layers.{}.attn.wo_b", .{i}),
+        //     .{ .batch, .seq, .d },
+        //     attn.wo_b,
+        //     attn_buffer.wo_b,
+        //     .{}
+        // );
+
+        // try self.testAttentionLayer(
+        //     try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}),
+        //     .{ .batch, .seq, .d },
+        //     attn,
+        //     attn_buffer,
+        //     .init(mdl, config, 1, 2048),
+        //     .{}
+        // );
+    }
+
+    fn testCSALayer(self: *TestContext, allocator: std.mem.Allocator, layer_idx: usize, csa: model.CSA, csa_buffer: zml.Bufferized(model.CSA), opts: zml.testing.CompareOpts) !void {
+        try self.testAttentionLayer(allocator, layer_idx, csa.attn, csa_buffer.attn, opts);
+        try self.testCompressor(allocator, layer_idx, csa.compressor, csa_buffer.compressor);
+
+        // try self.testCompressorLayer(
+        // try std.fmt.allocPrint(allocator, "layers.{}.attn.indexer.compressor", .{layer_idx}),
+        // .{ .batch, .seq, .d },
+        // csa.indexer.compressor,
+        // csa_buffer.indexer.compressor,
+        // .{}
+        // );
+
+        // try self.testLayer(
+        // try std.fmt.allocPrint(allocator, "layers.{}.attn.indexer.weights_proj", .{layer_idx}),
+        // .{ .batch, .seq, .d },
+        // csa.indexer.proj,
+        // csa_buffer.indexer.proj,
+        // .{}
+        // );
+        //
+        // try self.testLayer(
+        // try std.fmt.allocPrint(allocator, "layers.{}.attn.indexer.wq_b", .{layer_idx}),
+        // .{ .batch, .seq, .d },
+        // csa.indexer.wq_b,
+        // csa.indexer.wq_b,
+        // .{}
+        // );
+
+        try self.testIndexerLayer(
+        try std.fmt.allocPrint(allocator, "layers.{}.attn.indexer", .{layer_idx}),
+        .{ .batch, .seq, .d },
+        csa.indexer,
+        csa_buffer.indexer,
+        .{},
+        );
+    }
+
+    fn testHCALayer(self: *TestContext, allocator: std.mem.Allocator, layer_idx: usize, hca: model.HCA, hca_buffer: zml.Bufferized(model.HCA), opts: zml.testing.CompareOpts) !void {
+        try self.testAttentionLayer(allocator, layer_idx, hca.attn, hca_buffer.attn, opts);
+        try self.testCompressor(allocator, layer_idx, hca.compressor, hca_buffer.compressor);
+    }
+
+    fn testCompressor(self: *TestContext, allocator: std.mem.Allocator, i: usize, compressor: model.Compressor, compressor_buffer: zml.Bufferized(model.Compressor)) !void {
+            try self.testLayer(
+            try std.fmt.allocPrint(allocator, "layers.{}.attn.compressor.wkv", .{i}),
+            .{ .batch, .seq, .d },
+            compressor.wkv,
+            compressor_buffer.wkv,
+            .{}
+            );
+
+            try self.testLayer(
+            try std.fmt.allocPrint(allocator, "layers.{}.attn.compressor.wgate", .{i}),
+            .{ .batch, .seq, .d },
+            compressor.wgate,
+            compressor_buffer.wgate,
+            .{}
+            );
+
+            try self.testLayer(
+            try std.fmt.allocPrint(allocator, "layers.{}.attn.compressor.norm", .{i}),
+            .{ .batch, .seq, .hd },
+            compressor.norm,
+            compressor_buffer.norm,
+            .{}
+            );
+
+            try self.testCompressorLayer(
+            try std.fmt.allocPrint(allocator, "layers.{}.attn.compressor", .{i}),
+            .{ .batch, .seq, .d },
+            compressor,
+            compressor_buffer,
+            .{},
+            );
     }
 
     fn testLayer(self: *TestContext, name: []const u8, tagz: anytype, layer: anytype, layer_buffers: anytype, opts: zml.testing.CompareOpts) !void {
@@ -489,7 +514,7 @@ const TestContext = struct {
         std.log.info("Layer {s} passed!", .{name});
     }
 
-    fn testAttentionLayer(self: *TestContext, name: []const u8, tagz: anytype, layer: anytype, layer_buffers: anytype, opts: zml.testing.CompareOpts) !void {
+    fn testAttention(self: *TestContext, name: []const u8, tagz: anytype, layer: anytype, layer_buffers: anytype, cache: model.Cache, opts: zml.testing.CompareOpts) !void {
         std.log.info("Testing layer: {s}", .{name});
 
         const in_key = try std.fmt.allocPrint(self.allocator, "{s}.in.0", .{name});
@@ -503,9 +528,8 @@ const TestContext = struct {
         var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
         defer out_buffer_expected.deinit();
 
-        const token_idx_offset = zml.Tensor.scalar(@as(u32, 0), .u32);
-        const layer_idx = zml.Tensor.scalar(@as(u32, 0), .u32);
-        const cache = model.KVCache.init(.init());
+        const token_idx_offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
+        const layer_idx: zml.Tensor = .init(.{ .batch = 1 }, .u32);
 
         const exe = try self.platform.compileFn(
             self.allocator,
@@ -524,6 +548,17 @@ const TestContext = struct {
         );
         defer exe.deinit();
 
+        const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
+        var token_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, .replicated);
+        defer token_idx_buffer.deinit();
+
+        const layer_idx_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
+        var layer_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, layer_idx_slice, .replicated);
+        defer layer_idx_buffer.deinit();
+
+        var cache_buffer= try cache.initBuffers(self.io, self.platform, self.sharding);
+        defer model.Cache.unloadBuffers(&cache_buffer);
+
         var attention_metadata_buffers = try self.attention_metadata.initBuffer(self.io, self.platform, self.sharding);
         defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
@@ -532,8 +567,9 @@ const TestContext = struct {
         args.set(.{
             layer_buffers,
             in_buffer,
-            // token_idx_buffer,
-            // cache_buffer,
+            token_idx_buffer,
+            layer_idx_buffer,
+            cache_buffer,
             attention_metadata_buffers,
         });
 
