@@ -77,6 +77,10 @@ pub const Args = struct {
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
     attention_metadata_buffers: *const zml.Bufferized(attention.Metadata),
+    // Index of the last real prompt token (num_tokens - 1). Only consumed by the
+    // PREFILL lm_head, which applies the output projection to that single position
+    // instead of all `seqlen` positions (the rest are never read). Ignored by decode.
+    last_token_index_buf: *zml.Buffer,
 };
 
 pub const CompiledModel = struct {
@@ -296,6 +300,7 @@ const ComposedKernelExe = struct {
     embed_tokens: zml.Exe,
     layer: zml.Exe,
     lm_head: zml.Exe,
+    phase: Phase,
 
     const EmbedTokens = struct {
         embed_tokens: zml.nn.TokenEmbedding,
@@ -332,6 +337,7 @@ const ComposedKernelExe = struct {
             .embed_tokens = embed_tokens,
             .layer = layer,
             .lm_head = lm_head,
+            .phase = phase,
         };
     }
 
@@ -420,7 +426,12 @@ const ComposedKernelExe = struct {
         args: Args,
         hidden_buf: *zml.Buffer,
     ) void {
-        exe_args.set(.{ hidden_buf, args.tokens_buf, args.rng_buffers });
+        // Prefill applies the lm_head to only the last real token (index given by
+        // last_token_index_buf); decode runs over its single position as before.
+        switch (self.phase) {
+            .prefill => exe_args.set(.{ hidden_buf, args.tokens_buf, args.rng_buffers, args.last_token_index_buf }),
+            .decode => exe_args.set(.{ hidden_buf, args.tokens_buf, args.rng_buffers }),
+        }
         self.lm_head.call(exe_args.*, results);
 
         var new_tokens, var new_rng = results.get(struct {
@@ -589,6 +600,44 @@ const ComposedKernelExe = struct {
         ).withPartitioning(.{ .d = .replicated }));
 
         const tokens: zml.Tensor = .init(.{ .s = seqlen }, .u32);
+
+        // PREFILL only needs the next token, i.e. the logits/argmax of the LAST real
+        // prompt position (session reads tokens[num_tokens-1]); the other `seqlen-1`
+        // positions are discarded. Running the lm_head over all of them is ~8% of
+        // prefill at seqlen 16k (a [16384,128256] matmul+argmax). Apply it to that one
+        // position instead — backend-agnostic, byte-identical greedy output. Decode is
+        // already single-position, so it keeps the plain LmHead.forward.
+        if (phase == .prefill) {
+            const PrefillLmHead = struct {
+                lm_head: model.LmHead,
+
+                pub fn forward(
+                    self: @This(),
+                    hidden_: zml.Tensor,
+                    tokens_: zml.Tensor,
+                    rng: zml.Tensor.Rng,
+                    last_index: zml.Tensor,
+                ) struct { zml.Tensor, zml.Tensor.Rng } {
+                    const toks = tokens_.withPartialTags(.{.s});
+                    const last_hidden = hidden_.withPartialTags(.{ .s, .d })
+                        .dynamicSlice(.{ .s = zml.Tensor.DynSlice{ .start = last_index, .len = 1 } });
+                    const last_tok = toks.dynamicSlice(.{ .s = zml.Tensor.DynSlice{ .start = last_index, .len = 1 } });
+
+                    const next_token, const new_rng = self.lm_head.forward(last_hidden, last_tok, rng);
+
+                    // Write the single predicted token back at last_index so the output
+                    // keeps the [seqlen] shape the runner/session expect.
+                    const out = toks.dynamicUpdateSlice(.{ .s = last_index }, next_token).reuseBuffer(tokens_);
+                    return .{ out, new_rng };
+                }
+            };
+
+            const last_index: zml.Tensor = .init(.{}, .u32);
+            return platform.compile(allocator, io, PrefillLmHead{ .lm_head = model.LmHead.init(llama_model) }, .forward, .{ hidden, tokens, parameters.rng, last_index }, .{
+                .shardings = &parameters.shardings.all(),
+                .program_name = phase.programName("llama", "lm_head"),
+            });
+        }
 
         return platform.compile(allocator, io, model.LmHead.init(llama_model), .forward, .{ hidden, tokens, parameters.rng }, .{
             .shardings = &parameters.shardings.all(),

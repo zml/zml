@@ -102,6 +102,7 @@ pub const Chat = struct {
                 });
                 try stdout.interface.flush();
             }
+            _ = if (profiler) |*p| try p.stop() else null;
             return;
         }
 
