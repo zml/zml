@@ -13,9 +13,11 @@ pub const Backend = enum {
     nki,
     cuda_fa2,
     cuda_fa3,
-    // Apple Metal fused flash-attention DECODE kernel (zml$flash_attn custom call,
-    // lowered to MetalFlashAttnThunk in the v2 backend). Opt-in via --backend=metal_fa;
-    // prefill (q>1) falls back to vanilla sdpa (the vec kernel is single-query).
+    // Apple Metal fused flash-attention kernel (zml$flash_attn custom call, lowered
+    // to MetalFlashAttnThunk in the v2 backend). Handles BOTH phases: a KV-parallel
+    // vec kernel for decode (q==1) and a simdgroup-matrix FA-2 kernel for prefill
+    // (q>1). Auto-selected on Metal — it beats vanilla sdpa at every context (low:
+    // ~67 vs ~64.6 tok/s; high: vanilla collapses O(N²) while this stays flat).
     metal_fa,
 
     pub fn auto(platform: *const zml.Platform) Backend {
@@ -33,6 +35,7 @@ pub const Backend = enum {
                 break :b .vanilla;
             },
             .neuron => .nki,
+            .metal => .metal_fa,
             .cpu, .rocm, .tpu, .oneapi => .vanilla,
         };
     }
