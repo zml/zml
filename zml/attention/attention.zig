@@ -158,15 +158,13 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
         .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
         .metal_fa => b: {
-            // Decode (single query, M=1): one fused flash-attention custom call
-            // (lowered to MetalFlashAttnThunk). Prefill (q>1) is not handled by the
-            // single-query vec kernel — fall back to the vanilla sdpa path.
-            if (q.dim(.q) != 1) {
-                const seq_len = k.dim(.k);
-                var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, q.dtype(), null);
-                attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()), token_index.reshape(.{ .coord = 1 }), .{});
-                break :b zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
-            }
+            // One fused flash-attention custom call (lowered to MetalFlashAttnThunk),
+            // for BOTH decode (q==1, the fa_vec kernel) and prefill (q>1, the
+            // simdgroup-matrix kernel_flash_attn_ext); the backend branches on the
+            // query length. Causality keys off token_index on-device: query row r
+            // attends keys kpos <= token_index + r (matches the vanilla gathered
+            // causal mask), so no mask operand is needed for either phase.
+            //
             // Force a canonical [heads, pos, head_dim] dim order so the custom-call
             // operands are row-major [n, pos, hd] as the thunk reads them (the HLO
             // is positional — tags are lost). ForceDefaultLayouts keeps them
