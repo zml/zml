@@ -85,6 +85,26 @@ pub const Chat = struct {
             try profiler.?.start();
         }
 
+        // Prefill micro-benchmark: ZML_PREFILL_BENCH=<reps> runs prefill repeatedly
+        // (rep 0 = cold/first-execute, rest = warm steady-state) and skips decode,
+        // so a seqlen sweep isolates prefill execution time. Backend-agnostic.
+        if (std.c.getenv("ZML_PREFILL_BENCH")) |reps_env| {
+            const reps: usize = std.fmt.parseInt(usize, std.mem.span(reps_env), 10) catch 4;
+            try self.tokens.appendSlice(self.allocator, prompt_tokens);
+            var i: usize = 0;
+            while (i < reps) : (i += 1) {
+                const t0: std.Io.Timestamp = .now(self.io, .awake);
+                try self.session.runPrefill(self.tokens.items);
+                const dt = t0.untilNow(self.io, .awake);
+                try stdout.interface.print("\x1b[35mprefill[{}]\x1b[0m {f} · {} prompt tokens · seqlen {} · {:.1}tok/s\n", .{
+                    i, dt, self.tokens.items.len, self.session.maxTokens(),
+                    tokensPerSecond(dt, self.tokens.items.len),
+                });
+                try stdout.interface.flush();
+            }
+            return;
+        }
+
         try self.runPrefill(prompt_tokens, &stdout.interface);
         try self.runDecodeTurn(&stdout.interface);
         _ = if (profiler) |*p| try p.stop() else null;
@@ -125,9 +145,17 @@ pub const Chat = struct {
         try stdout.flush();
 
         try self.tokens.appendSlice(self.allocator, prompt_tokens);
+        const prefill_start: std.Io.Timestamp = .now(self.io, .awake);
         try self.session.runPrefill(self.tokens.items);
+        const prefill_duration = prefill_start.untilNow(self.io, .awake);
 
         try stdout.writeAll("\r          \r");
+        try stdout.print("\x1b[35mprefill\x1b[0m \x1b[2m{f} · {} prompt tokens · seqlen {} · {:.1}tok/s\x1b[0m\n", .{
+            prefill_duration,
+            self.tokens.items.len,
+            self.session.maxTokens(),
+            tokensPerSecond(prefill_duration, self.tokens.items.len),
+        });
         try stdout.flush();
     }
 
