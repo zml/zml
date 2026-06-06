@@ -1072,14 +1072,6 @@ pub const LoadOpts = struct {
     dma_chunks: usize,
     dma_chunk_size: usize,
     total_bytes: ?*usize = null,
-    // Zero-copy weight feed: mmap each safetensors file and alias the tensor
-    // pages directly as device buffers (kImmutableZeroCopy), skipping the
-    // host->device copy. Only beneficial on unified-memory backends (Metal);
-    // elsewhere the backend falls back to the copy path (safe, but the mmap is
-    // wasted — gate to Metal at the call site). Single-device only (the tensor
-    // is fed whole). The mmaps are intentionally leaked (must outlive the
-    // buffers; reclaimed at process exit).
-    zero_copy: bool = false,
 };
 
 pub fn load(
@@ -1127,12 +1119,6 @@ pub fn load(
         group: stdx.Io.LimitedGroup,
         total: std.atomic.Value(usize) = .init(0),
         progress: ?*std.Progress.Node,
-        zero_copy: bool = false,
-        // file_uri -> mmap'd file bytes (lazily mmap'd, shared across the parallel
-        // walk via mmap_mu). Intentionally leaked: the pages must outlive the
-        // zero-copy buffers that alias them.
-        mmap_mu: std.Io.Mutex = .init,
-        mmaps: std.StringHashMapUnmanaged([]const u8) = .empty,
     };
     var walk_ctx: Ctx = .{
         .platform = platform,
@@ -1146,7 +1132,6 @@ pub fn load(
         .shardings = opts.shardings,
         .progress = opts.progress,
         .group = .init(opts.parallelism),
-        .zero_copy = opts.zero_copy,
     };
     defer allocator.free(walk_ctx.buffers);
 
@@ -1172,18 +1157,6 @@ pub fn load(
                         log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
                         break :blk ctx_.platform.replicated_sharding;
                     };
-
-                    // Zero-copy: alias the tensor's mmap'd file bytes directly as
-                    // a device buffer (no host->device copy). Single-shard (the
-                    // whole tensor); the backend page-aligns + faults on first read.
-                    if (ctx_.zero_copy) {
-                        const t = reader.tensor;
-                        const base = mmapFile(ctx_.allocator, ctx_.io, &ctx_.mmap_mu, &ctx_.mmaps, t.file_uri) catch unreachable;
-                        const data = base[t.offset .. t.offset + t.byteSize()];
-                        ctx_.buffers[i_].* = Buffer.from(ctx_.io, ctx_.platform, shape, sharding, data, .{ .zero_copy = true }) catch unreachable;
-                        _ = ctx_.total.fetchAdd(t.byteSize(), .monotonic);
-                        return;
-                    }
 
                     var writer = MemoryWriter.init(
                         ctx_.allocator,
@@ -1221,40 +1194,6 @@ pub fn load(
     walk_ctx.group.await(io) catch unreachable;
 
     return bufferized;
-}
-
-// mmap a safetensors file once (read-only, shared across the parallel walk) and
-// cache it by uri. The returned pages back zero-copy weight buffers, so they are
-// intentionally never munmap'd (must outlive the buffers; reclaimed at exit).
-fn mmapFile(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    mu: *std.Io.Mutex,
-    mmaps: *std.StringHashMapUnmanaged([]const u8),
-    file_uri: []const u8,
-) ![]const u8 {
-    mu.lockUncancelable(io);
-    defer mu.unlock(io);
-    if (mmaps.get(file_uri)) |m| return m;
-    // Size via the io abstraction (VFS-aware).
-    var iofile = try std.Io.Dir.openFile(.cwd(), io, file_uri, .{ .mode = .read_only });
-    const len: usize = @intCast(try iofile.length(io));
-    iofile.close(io);
-    // A REAL OS fd for mmap — the std.Io VFS File.handle is an internal index,
-    // not a posix fd (mmap'ing it returns EINVAL). The fd is intentionally
-    // leaked (std 0.16 posix has no close(); mmap holds the mapping regardless;
-    // one fd per safetensors file, reclaimed at process exit).
-    const path_z = try allocator.dupeZ(u8, file_uri);
-    defer allocator.free(path_z);
-    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{}, 0);
-    const m = try std.posix.mmap(null, len, .{ .READ = true }, .{ .TYPE = .PRIVATE }, fd, 0);
-    // The mmap + cache entry must outlive the buffers (whole program). Use the
-    // untracked page allocator so the deliberate leak doesn't trip the gpa's
-    // leak detector.
-    const ua = std.heap.page_allocator;
-    const key = try ua.dupe(u8, file_uri);
-    try mmaps.put(ua, key, m);
-    return m;
 }
 
 fn buildMesh2x2(
