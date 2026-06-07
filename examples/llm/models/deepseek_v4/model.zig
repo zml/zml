@@ -869,7 +869,6 @@ pub const Attention = struct {
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, Cache } {
-        _ = layer_idx; // autofix
         // shape(x) = [batch, seq, d]
         const start_pos: i64 = 0;
 
@@ -880,16 +879,17 @@ pub const Attention = struct {
             break :blk zml.Tensor.outer(pos_idx.convert(.f32), precomputed_freqs_cis);
         };
 
-        const q, const kv = self.q_kv(x, freqs_cis);
+        const q, var kv = self.q_kv(x, freqs_cis);
 
-        // const seqlen = x.dim(.seq);
-        // const num_tokens = @min(seqlen, self.window_size);
-        // const kv_gathered = kv.slice1d(.kv, .{ .start = kv.dim(.kv) - num_tokens  });
-        // const idx = zml.Tensor.arange(.{ .start = start_pos + seqlen - num_tokens, .end = start_pos + seqlen, }, .f32).withTags(.{ .kv })
-        //                     .fmod(@floatFromInt(self.window_size)).convert(.u32);
-        //
-        const new_cache = cache;
-        // new_cache.sliding_window = cache.sliding_window.update(kv_gathered, idx, layer_idx);
+        const seqlen = x.dim(.seq);
+        const num_tokens = @min(seqlen, self.window_size);
+        const kv_gathered = kv.slice1d(.kv, .{ .start = kv.dim(.kv) - num_tokens  });
+        const idx = zml.Tensor.arange(.{ .start = start_pos + seqlen - num_tokens, .end = start_pos + seqlen, }, .f32).withTags(.{ .kv })
+                            .fmod(@floatFromInt(self.window_size)).convert(.u32);
+
+        var new_cache = cache;
+        new_cache.sliding_window = cache.sliding_window.update(kv_gathered, idx, layer_idx);
+        // TODO: Enable
         // kv = new_cache.sliding_window.get(layer_idx);
 
         const topk = topk_window(self.window_size, x.dim(.batch), x.dim(.seq), start_pos).withTags(.{.batch, .seq, .topk});
