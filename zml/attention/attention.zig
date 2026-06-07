@@ -76,13 +76,31 @@ pub const Parameters = union(Backend) {
     }
 };
 
+pub const MetalFaMetadata = struct {
+    num_tokens: zml.Tensor,
+
+    pub fn init() MetalFaMetadata {
+        return .{ .num_tokens = .fromShape(.scalar(.u32)) };
+    }
+
+    pub fn initBuffer(self: MetalFaMetadata, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(MetalFaMetadata) {
+        _ = self;
+        _ = sharding;
+        return .{ .num_tokens = try zml.Buffer.scalar(io, platform, 1, .u32) };
+    }
+
+    pub fn deinitBuffer(self: *zml.Bufferized(MetalFaMetadata)) void {
+        self.num_tokens.deinit();
+    }
+};
+
 pub const Metadata = union(Backend) {
     vanilla: void,
     attnd: attnd.Metadata,
     nki: void,
     cuda_fa2: flashattn.fa2.Metadata,
     cuda_fa3: flashattn.fa3.Metadata,
-    metal_fa: void,
+    metal_fa: MetalFaMetadata,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
@@ -111,7 +129,7 @@ pub const Metadata = union(Backend) {
             .nki => .{ .nki = {} },
             .cuda_fa2 => |o| .{ .cuda_fa2 = flashattn.fa2.Metadata.init(o) },
             .cuda_fa3 => |o| .{ .cuda_fa3 = flashattn.fa3.Metadata.init(o) },
-            .metal_fa => .{ .metal_fa = {} },
+            .metal_fa => .{ .metal_fa = .init() },
         };
     }
 
@@ -122,7 +140,7 @@ pub const Metadata = union(Backend) {
             .nki => .{ .nki = {} },
             .cuda_fa2 => |v| .{ .cuda_fa2 = try v.initBuffer(io, platform, sharding) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = try v.initBuffer(io, platform, sharding) },
-            .metal_fa => .{ .metal_fa = {} },
+            .metal_fa => |v| .{ .metal_fa = try v.initBuffer(io, platform, sharding) },
         };
     }
 
@@ -133,7 +151,7 @@ pub const Metadata = union(Backend) {
             .nki => {},
             .cuda_fa2 => |*v| flashattn.fa2.Metadata.deinitBuffer(v),
             .cuda_fa3 => |*v| flashattn.fa3.Metadata.deinitBuffer(v),
-            .metal_fa => {},
+            .metal_fa => |*v| MetalFaMetadata.deinitBuffer(v),
         }
     }
 };
@@ -160,7 +178,12 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             const kc = k.transpose(.{ .h, .k, .hd });
             const vc = v.transpose(.{ .h, .k, .hd });
             const tok_i32 = token_index.convert(.i32);
-            const attn = zml.ops.customCall("zml$flash_attn", .{ qc, kc, vc, tok_i32 }, qc.shape(), .{}, .{ .has_side_effect = false });
+	    
+            const attn = if (q.dim(.q) > 1)
+                zml.ops.customCall("zml$flash_attn", .{ qc, kc, vc, tok_i32, metadata.metal_fa.num_tokens }, qc.shape(), .{}, .{ .has_side_effect = false })
+            else
+                zml.ops.customCall("zml$flash_attn", .{ qc, kc, vc, tok_i32 }, qc.shape(), .{}, .{ .has_side_effect = false });
+	    
             break :b attn.transpose(q.shape());
         },
     };
