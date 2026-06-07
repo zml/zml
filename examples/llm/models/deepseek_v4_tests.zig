@@ -75,7 +75,7 @@ fn testSparseAttn(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
 // └── topk_idxs [shape={1,512,256,i32} size=0.52MB]
     var kv_buffer = try loadBufferFromStore(allocator, io, platform, &activation_store, "KV", sharding);
     defer kv_buffer.deinit();
-    const kv_tensor = zml.Tensor.fromShape(kv_buffer.shape()).withTags(.{ .batch, .k, .hd});
+    const kv_tensor = zml.Tensor.fromShape(kv_buffer.shape()).withTags(.{ .batch, .kv, .hd});
 
     var q_buffer = try loadBufferFromStore(allocator, io, platform, &activation_store, "Q", sharding);
     defer q_buffer.deinit();
@@ -121,7 +121,6 @@ pub fn run(
     attention_metadata: attention.Metadata,
     attention_parameters: attention.Parameters,
 ) !void {
-    _ = config; // autofix
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
 
@@ -161,10 +160,12 @@ pub fn run(
             .{}
         );
 
+        const cache: model.Cache = .init(mdl, config, 1, 2048);
+
         switch(mdl.layers[i].attn) {
-            .full => |full_attn| try ctx.testAttentionLayer(arena_allocator, i, full_attn, model_buffers.layers[i].attn.full, dequant_opts),
-            .compress => |csa| try ctx.testCSALayer(arena_allocator, i, csa, model_buffers.layers[i].attn.compress, dequant_opts),
-            .heavily_compress => |hca| try ctx.testHCALayer(arena_allocator,  i,hca, model_buffers.layers[i].attn.heavily_compress, dequant_opts),
+            .full => |full_attn| try ctx.testAttentionLayer(arena_allocator, i, cache, full_attn, model_buffers.layers[i].attn.full, dequant_opts),
+            .compress => |csa| try ctx.testCSALayer(arena_allocator, i, cache, csa, model_buffers.layers[i].attn.compress, dequant_opts),
+            .heavily_compress => |hca| try ctx.testHCALayer(arena_allocator,  i, cache, hca, model_buffers.layers[i].attn.heavily_compress, dequant_opts),
         }
 
         try ctx.testLayer(
@@ -245,6 +246,7 @@ const TestContext = struct {
         self: *TestContext,
         allocator: std.mem.Allocator,
         i: usize,
+        cache: model.Cache,
         attn: model.Attention,
         attn_buffer: zml.Bufferized(model.Attention),
         opts: zml.testing.CompareOpts
@@ -307,18 +309,18 @@ const TestContext = struct {
         //     .{}
         // );
 
-        // try self.testAttentionLayer(
-        //     try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}),
-        //     .{ .batch, .seq, .d },
-        //     attn,
-        //     attn_buffer,
-        //     .init(mdl, config, 1, 2048),
-        //     .{}
-        // );
+        try self.testAttention(
+            try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}),
+            .{ .batch, .seq, .d },
+            attn,
+            attn_buffer,
+        cache,
+            .{}
+        );
     }
 
-    fn testCSALayer(self: *TestContext, allocator: std.mem.Allocator, layer_idx: usize, csa: model.CSA, csa_buffer: zml.Bufferized(model.CSA), opts: zml.testing.CompareOpts) !void {
-        try self.testAttentionLayer(allocator, layer_idx, csa.attn, csa_buffer.attn, opts);
+    fn testCSALayer(self: *TestContext, allocator: std.mem.Allocator, layer_idx: usize, cache: model.Cache, csa: model.CSA, csa_buffer: zml.Bufferized(model.CSA), opts: zml.testing.CompareOpts) !void {
+        try self.testAttentionLayer(allocator, layer_idx, cache, csa.attn, csa_buffer.attn, opts);
         try self.testCompressor(allocator, layer_idx, csa.compressor, csa_buffer.compressor);
 
         // try self.testCompressorLayer(
@@ -354,8 +356,8 @@ const TestContext = struct {
         );
     }
 
-    fn testHCALayer(self: *TestContext, allocator: std.mem.Allocator, layer_idx: usize, hca: model.HCA, hca_buffer: zml.Bufferized(model.HCA), opts: zml.testing.CompareOpts) !void {
-        try self.testAttentionLayer(allocator, layer_idx, hca.attn, hca_buffer.attn, opts);
+    fn testHCALayer(self: *TestContext, allocator: std.mem.Allocator, layer_idx: usize, cache: model.Cache, hca: model.HCA, hca_buffer: zml.Bufferized(model.HCA), opts: zml.testing.CompareOpts) !void {
+        try self.testAttentionLayer(allocator, layer_idx, cache, hca.attn, hca_buffer.attn, opts);
         try self.testCompressor(allocator, layer_idx, hca.compressor, hca_buffer.compressor);
     }
 
@@ -378,7 +380,7 @@ const TestContext = struct {
 
             try self.testLayer(
             try std.fmt.allocPrint(allocator, "layers.{}.attn.compressor.norm", .{i}),
-            .{ .batch, .seq, .hd },
+            .{ .batch, .seq, .d },
             compressor.norm,
             compressor_buffer.norm,
             .{}
