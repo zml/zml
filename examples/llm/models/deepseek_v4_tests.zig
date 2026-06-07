@@ -314,7 +314,7 @@ const TestContext = struct {
             .{ .batch, .seq, .d },
             attn,
             attn_buffer,
-        cache,
+            cache,
             .{}
         );
     }
