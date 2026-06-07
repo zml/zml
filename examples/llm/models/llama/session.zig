@@ -165,13 +165,20 @@ pub const Session = struct {
         var last_token_index_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.len - 1, .u32);
         defer last_token_index_buffer.deinit();
 
+        // metal_fa prefill reads num_tokens host-side to clamp the per-layer grids to
+        // the real prompt length (the rest of `seqlen` is padding). Decode uses the
+        // session's persistent metadata (num_tokens is unused there — single query).
+        var metal_fa_num_tokens_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.len, .u32);
+        defer metal_fa_num_tokens_buffer.deinit();
+
         const attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata) = switch (self.compiled_model.params.prefill_attention_parameters) {
             .attnd => .{ .attnd = .{
                 .conversation_id = try zml.Buffer.scalar(self.io, self.platform, self.conversation_id, .u64),
                 .layer_id = try zml.Buffer.scalar(self.io, self.platform, 0, .u16),
                 .num_tokens = try zml.Buffer.scalar(self.io, self.platform, all_tokens.len, .u32),
             } },
-            .vanilla, .cuda_fa2, .cuda_fa3, .nki, .metal_fa => self.attention_metadata_buffers,
+            .metal_fa => .{ .metal_fa = .{ .num_tokens = metal_fa_num_tokens_buffer } },
+            .vanilla, .cuda_fa2, .cuda_fa3, .nki => self.attention_metadata_buffers,
         };
 
         try self.compiled_model.prefill.run(.{
