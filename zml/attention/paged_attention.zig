@@ -4,6 +4,7 @@ const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
 const flashattn = @import("flashattn.zig");
+const metal = @import("metal_attention.zig");
 const tpu = @import("tpu_attention.zig");
 const triton = @import("triton_attention.zig");
 
@@ -14,6 +15,8 @@ pub const Backend = enum {
     cuda_fa3,
     triton,
     mosaic_tpu,
+    // Apple Metal tiled paged attention (zml$paged_attn -> MetalPagedAttnThunk).
+    metal,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
@@ -21,6 +24,7 @@ pub const Backend = enum {
             .rocm => .triton,
             .oneapi => .triton,
             .tpu => .mosaic_tpu,
+            .metal => .metal,
             else => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
     }
@@ -31,6 +35,7 @@ pub const Options = union(Backend) {
     cuda_fa3: flashattn.paged_fa3.Options,
     triton: triton.paged.Options,
     mosaic_tpu: tpu.mosaic_tpu.Options,
+    metal: metal.paged.Options,
 
     const Args = struct {
         backend: Backend,
@@ -109,6 +114,14 @@ pub const Options = union(Backend) {
                     .is_prefill = args.is_prefill,
                 },
             },
+            .metal => .{
+                .metal = .{
+                    .batch_size = args.batch_size,
+                    .max_num_pages = args.max_num_pages,
+                    .max_seqlen_q = args.max_seqlen_q,
+                    .is_prefill = args.is_prefill,
+                },
+            },
             .mosaic_tpu => .{
                 .mosaic_tpu = .{
                     .is_prefill = args.is_prefill,
@@ -142,6 +155,7 @@ pub const Parameters = union(Backend) {
     cuda_fa3: flashattn.paged_fa3.Parameters,
     triton: triton.paged.Parameters,
     mosaic_tpu: tpu.mosaic_tpu.Parameters,
+    metal: metal.paged.Parameters,
 
     pub fn init(options_: Options) Parameters {
         return switch (options_) {
@@ -149,6 +163,7 @@ pub const Parameters = union(Backend) {
             .cuda_fa3 => |cuda_fa3_options| .{ .cuda_fa3 = flashattn.paged_fa3.Parameters.init(cuda_fa3_options) },
             .triton => |triton_options| .{ .triton = triton.paged.Parameters.init(triton_options) },
             .mosaic_tpu => |mosaic_tpu_options| .{ .mosaic_tpu = tpu.mosaic_tpu.Parameters.init(mosaic_tpu_options) },
+            .metal => |metal_options| .{ .metal = metal.paged.Parameters.init(metal_options) },
         };
     }
 
@@ -158,6 +173,7 @@ pub const Parameters = union(Backend) {
             .cuda_fa3 => |v| .{ .cuda_fa3 = v.options() },
             .triton => |v| .{ .triton = v.options() },
             .mosaic_tpu => |v| .{ .mosaic_tpu = v.options() },
+            .metal => |v| .{ .metal = v.options() },
         };
     }
 
@@ -173,6 +189,7 @@ pub const Parameters = union(Backend) {
             .cuda_fa3 => |v| .{ .cuda_fa3 = v.onMemory(memory) },
             .triton => |v| .{ .triton = v.onMemory(memory) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = v.onMemory(memory) },
+            .metal => |v| .{ .metal = v.onMemory(memory) },
         };
     }
 
@@ -182,6 +199,7 @@ pub const Parameters = union(Backend) {
             .cuda_fa3 => |v| .{ .cuda_fa3 = v.toMemory(memory) },
             .triton => |v| .{ .triton = v.toMemory(memory) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = v.toMemory(memory) },
+            .metal => |v| .{ .metal = v.toMemory(memory) },
         };
     }
 };
@@ -217,6 +235,10 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
             .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
         },
         .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, q, kv_cache.dense, opts),
+        .metal => |metal_parameters| switch (kv_cache) {
+            .split => |split| metal.paged.pagedAttention(metal_parameters, q, split.k, split.v, opts),
+            .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+        },
     };
 }
 
