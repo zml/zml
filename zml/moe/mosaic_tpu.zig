@@ -294,7 +294,9 @@ pub fn fusedExpertsImpl(
     const b = hidden_states.dim(.b);
     const s = hidden_states.dim(.s);
     const hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
+    log.info("MoE canonicalizing inputs...", .{});
     const gate_up = try canonicalizeGateUp(w1, hidden.dim(.in));
+    log.info("MoE canonicalizing inputs...", .{});
     const down = try canonicalizeDown(w2, hidden.dim(.in), gate_up.dim(.out));
     const weights = topk_weights.reshape(.{ .token = b * s, .topk = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
     const ids = topk_ids.reshape(.{ .token = b * s, .topk = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
@@ -347,7 +349,10 @@ pub fn fusedExpertsImpl(
         gate_up_out = gate_up_out.add(bias_per_token);
     }
 
-    const activated = applyActivation(gate_up_out, opts.activation);
+    const activated = if (fused_gmm1_act != null)
+        gate_up_out.slice1d(.out, .{ .end = down.dim(.mid) })
+    else
+        applyActivation(gate_up_out, opts.activation);
 
     const aligned_activated = alignSortedRowsByGroup(activated, expert_ids_sorted, group_sizes, tile_m);
     var down_out = callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype(), .none)
