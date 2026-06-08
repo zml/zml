@@ -39,6 +39,12 @@ fn ceilDivPosI32(b: *mtt.Builder, x: mtt.Value, y: mtt.Value) mtt.Value {
 }
 
 pub const Cfg = struct {
+    pub const FuseAct = enum {
+        none,
+        silu,
+        gelu,
+    };
+
     size_m: i64,
     size_k: i64,
     size_n: i64,
@@ -52,9 +58,27 @@ pub const Cfg = struct {
     out_dtype: mtt.DType = .bf16,
     acc_dtype: mtt.DType = .f32,
     size_lhs_sublane: i64 = 8,
+    fuse_act: FuseAct = .none,
+
+    pub fn outSizeN(self: Cfg) i64 {
+        return switch (self.fuse_act) {
+            .none => self.size_n,
+            .silu, .gelu => @divExact(self.size_n, 2),
+        };
+    }
 
     pub fn alignedN(self: Cfg) i64 {
-        return alignTo(self.size_n, 128);
+        return switch (self.fuse_act) {
+            .none => alignTo(self.outSizeN(), 128),
+            .silu, .gelu => self.outSizeN(),
+        };
+    }
+
+    pub fn rhsTileN(self: Cfg) i64 {
+        return switch (self.fuse_act) {
+            .none => self.tile_n,
+            .silu, .gelu => self.tile_n * 2,
+        };
     }
 
     pub fn maxNumGm(self: Cfg) i64 {
@@ -72,8 +96,15 @@ fn validateConfig(cfg: Cfg) void {
     std.debug.assert(cfg.tile_n > 0);
     std.debug.assert(cfg.size_lhs_sublane > 0);
     std.debug.assert(@mod(cfg.size_m, cfg.size_lhs_sublane) == 0);
-    std.debug.assert(@mod(cfg.size_k, cfg.tile_k) == 0);
-    std.debug.assert(@mod(cfg.alignedN(), cfg.tile_n) == 0);
+    std.debug.assert(cdiv(cfg.size_k, cfg.tile_k) == 1);
+    std.debug.assert(@mod(cfg.tile_k, 128) == 0);
+    std.debug.assert(@mod(cfg.rhsTileN(), 128) == 0);
+    if (cfg.fuse_act != .none) {
+        std.debug.assert(@mod(cfg.size_n, 2) == 0);
+        std.debug.assert(cdiv(cfg.alignedN(), cfg.tile_n) == 1);
+    } else {
+        std.debug.assert(@mod(cfg.alignedN(), cfg.tile_n) == 0);
+    }
     std.debug.assert(cfg.acc_dtype == .f32);
 }
 
@@ -234,6 +265,48 @@ fn fillMetadata(b: *mtt.Builder, cfg: Cfg, a: anytype) mtt.Value {
 }
 
 fn matmulByMxuColumns(b: *mtt.Builder, cfg: Cfg, lhs: mtt.Value, rhs: mtt.Value, cols: i64) mtt.Value {
+    if (cfg.tile_k > cfg.size_k) {
+        std.debug.assert(cdiv(cfg.size_k, cfg.tile_k) == 1);
+        std.debug.assert(@mod(cols, 128) == 0);
+
+        const chunks = @divExact(cols, 128);
+        const parts = b.arena.allocator().alloc(mtt.Value, @intCast(chunks)) catch @panic("gmm_ep matmul parts OOM");
+        const tail_k = cfg.tile_k - cfg.size_k;
+        const lhs_valid = b.vectorExtractStridedSlice(lhs, &.{ 0, 0 }, &.{ cfg.tile_m, cfg.size_k }, &.{ 1, 1 });
+        const lhs_tail = b.vectorExtractStridedSlice(lhs, &.{ 0, cfg.size_k }, &.{ cfg.tile_m, tail_k }, &.{ 1, 1 });
+
+        var rev: i64 = 0;
+        while (rev < chunks) : (rev += 1) {
+            const chunk = chunks - 1 - rev;
+            const start_n = chunk * 128;
+            const rhs_valid = b.vectorExtractStridedSlice(rhs, &.{ 0, start_n }, &.{ cfg.size_k, 128 }, &.{ 1, 1 });
+            const rhs_tail = b.vectorExtractStridedSlice(rhs, &.{ cfg.size_k, start_n }, &.{ tail_k, 128 }, &.{ 1, 1 });
+            const zero = b.zeros(&.{ cfg.tile_m, 128 }, cfg.acc_dtype);
+            const tail_acc = b.matmulOpts(lhs_tail, rhs_tail, zero, .{
+                .dimension_numbers = b.dotDimensionNumbers(&.{1}, &.{0}, &.{0}, &.{1}, &.{ 0, 0, 1, 1 }, &.{}, &.{}),
+            });
+            parts[@intCast(chunk)] = b.matmulOpts(lhs_valid, rhs_valid, tail_acc, .{
+                .dimension_numbers = b.dotDimensionNumbers(&.{1}, &.{0}, &.{0}, &.{1}, &.{ 0, 0, 1, 1 }, &.{}, &.{}),
+            });
+        }
+
+        const max_concat_inputs = 16;
+        if (chunks <= max_concat_inputs) return b.concatenate(parts, 1);
+
+        const groups = cdiv(chunks, max_concat_inputs);
+        const group_parts = b.arena.allocator().alloc(mtt.Value, @intCast(groups)) catch @panic("gmm_ep matmul group parts OOM");
+        var group: i64 = 0;
+        while (group < groups) : (group += 1) {
+            const start = group * max_concat_inputs;
+            const end = @min(start + max_concat_inputs, chunks);
+            const start_usize: usize = @intCast(start);
+            const end_usize: usize = @intCast(end);
+            const group_slice = parts[start_usize..end_usize];
+            group_parts[@intCast(group)] = if (group_slice.len == 1) group_slice[0] else b.concatenate(group_slice, 1);
+        }
+        return b.concatenate(group_parts, 1);
+    }
+
     if (cols <= 128) {
         return b.matmulOpts(lhs, rhs, b.zeros(&.{ cfg.tile_m, cols }, cfg.acc_dtype), .{
             .dimension_numbers = b.dotDimensionNumbers(&.{1}, &.{0}, &.{0}, &.{1}, &.{ 0, 0, 1, 1 }, &.{}, &.{}),
@@ -271,6 +344,44 @@ fn matmulByMxuColumns(b: *mtt.Builder, cfg: Cfg, lhs: mtt.Value, rhs: mtt.Value,
     return b.concatenate(group_parts, 1);
 }
 
+fn geluApprox(b: *mtt.Builder, x: mtt.Value, shape: []const i64) mtt.Value {
+    const x2 = b.mulf(x, x);
+    const x3 = b.mulf(x2, x);
+    const cubic = b.mulf(x3, b.splat(@as(f32, 0.044715), shape, cfgAccDtype()));
+    const inner = b.mulf(b.addf(x, cubic), b.splat(@as(f32, 0.7978845608028654), shape, cfgAccDtype()));
+    return b.mulf(
+        b.mulf(x, b.splat(@as(f32, 0.5), shape, cfgAccDtype())),
+        b.addf(b.tanh(inner), b.splat(@as(f32, 1.0), shape, cfgAccDtype())),
+    );
+}
+
+fn cfgAccDtype() mtt.DType {
+    return .f32;
+}
+
+fn silu(b: *mtt.Builder, x: mtt.Value, shape: []const i64) mtt.Value {
+    const one = b.splat(@as(f32, 1.0), shape, cfgAccDtype());
+    const denom = b.addf(one, b.exp(b.negf(x)));
+    return b.divf(x, denom);
+}
+
+fn applyFuseAct(b: *mtt.Builder, cfg: Cfg, acc: mtt.Value) mtt.Value {
+    return switch (cfg.fuse_act) {
+        .none => acc,
+        .silu, .gelu => {
+            const shape = &.{ cfg.tile_m, cfg.tile_n };
+            const gate = b.vectorExtractStridedSlice(acc, &.{ 0, 0 }, shape, &.{ 1, 1 });
+            const up = b.vectorExtractStridedSlice(acc, &.{ 0, cfg.outSizeN() }, shape, &.{ 1, 1 });
+            const activated = switch (cfg.fuse_act) {
+                .silu => silu(b, gate, shape),
+                .gelu => geluApprox(b, gate, shape),
+                .none => unreachable,
+            };
+            return b.mulf(activated, up);
+        },
+    };
+}
+
 fn innerBody(
     b: *mtt.Builder,
     indices: []const mtt.Value,
@@ -284,17 +395,25 @@ fn innerBody(
 
     const lhs_shape = &.{ cdiv(cfg.tile_m, cfg.size_lhs_sublane), cfg.size_lhs_sublane, cfg.tile_k };
     const out_shape = &.{ cdiv(cfg.tile_m, cfg.size_lhs_sublane), cfg.size_lhs_sublane, cfg.tile_n };
+    const rhs_tile_n = cfg.rhsTileN();
 
     b.traceStart(10, "matmul_first_last");
     const lhs_ref = winRef(b, refs[0], lhs_shape);
     const lhs_ref_2d = b.memRefReshape(lhs_ref, &.{ cfg.tile_m, cfg.tile_k });
     const lhs = b.refLoad(lhs_ref_2d);
     const rhs_slot = b.toIndex(refs[1].slot.?);
-    const rhs = b.shapeCast(
-        b.vectorLoadShape(refs[1].buf.?, &.{ rhs_slot, b.cIndex(0), b.cIndex(0) }, &.{ 1, cfg.tile_k, cfg.tile_n }),
-        &.{ cfg.tile_k, cfg.tile_n },
+    var rhs = b.shapeCast(
+        b.vectorLoadShape(refs[1].buf.?, &.{ rhs_slot, b.cIndex(0), b.cIndex(0) }, &.{ 1, cfg.tile_k, rhs_tile_n }),
+        &.{ cfg.tile_k, rhs_tile_n },
     );
-    var acc = matmulByMxuColumns(b, cfg, lhs, rhs, cfg.tile_n);
+    const valid_k = @mod(cfg.size_k, cfg.tile_k);
+    if (valid_k != 0) {
+        const k_iota = b.iota(&.{ cfg.tile_k, rhs_tile_n }, .i32, &.{0});
+        const valid = b.splat(@as(i32, @intCast(valid_k)), &.{ cfg.tile_k, rhs_tile_n }, .i32);
+        rhs = b.select(b.cmpi(.slt, k_iota, valid), rhs, b.zeros(&.{ cfg.tile_k, rhs_tile_n }, cfg.rhs_dtype));
+    }
+    var acc = matmulByMxuColumns(b, cfg, lhs, rhs, rhs_tile_n);
+    acc = applyFuseAct(b, cfg, acc);
 
     const m_start = metaLoad(b, ctx.meta.m_offset, gm_id);
     const m_end = metaLoad(b, ctx.meta.m_offset, b.addi(gm_id, b.lift(@as(i32, 1))));
@@ -418,7 +537,7 @@ pub fn run(b: *mtt.Builder, cfg: Cfg) mtt.FinishError!void {
     const rhs_spec = pipeline.PipeSpec{
         .full_shape = &.{ cfg.size_group, cfg.size_k, cfg.size_n },
         .dtype = cfg.rhs_dtype,
-        .block_shape = &.{ .squeezed, .{ .blocked = cfg.tile_k }, .{ .blocked = cfg.tile_n } },
+        .block_shape = &.{ .squeezed, .{ .blocked = cfg.tile_k }, .{ .blocked = cfg.rhsTileN() } },
         .index_map = if (cdiv(cfg.alignedN(), cfg.tile_n) == 1 and cdiv(cfg.size_k, cfg.tile_k) == 1 and cfg.size_m > cfg.tile_m) rhsIndexMap1D else rhsIndexMap,
         .index_map_ctx = ctx,
         .buffer_count = 3,
