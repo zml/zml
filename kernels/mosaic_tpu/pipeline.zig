@@ -444,9 +444,16 @@ const BufferedRef = struct {
                         .scalar => |v| v,
                         .slice => @panic("emitPipeline: blocked dim must get a scalar index"),
                     };
-                    if (@mod(self.spec.full_shape[d], n) != 0) @panic("emitPipeline: non-dividing blocked dim unsupported");
                     base[d] = if (n == 1) idx else idx.mul(@as(i32, @intCast(n)));
-                    size[d] = null;
+                    const dim_size = self.spec.full_shape[d];
+                    if (@mod(dim_size, n) == 0) {
+                        size[d] = null;
+                    } else {
+                        const tiling: i64 = if (d == bs.len - 1) 128 else if (bs.len >= 2 and d == bs.len - 2) 8 else 1;
+                        const clamped = @min(n, dim_size);
+                        const sz_const = @divFloor(clamped + tiling - 1, tiling) * tiling;
+                        size[d] = b.emit(tpu.assume_multiple(b.ctx, b.lift(@as(i32, @intCast(sz_const))).inner, @as(i32, @intCast(tiling)), b.loc()));
+                    }
                 },
                 .bounded_slice => {
                     const sl = switch (bidx[d]) {
