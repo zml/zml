@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
+const xet = @import("xet.zig");
 
 const VFSBase = @import("base.zig").VFSBase;
 
@@ -79,10 +80,40 @@ pub const HF = struct {
     const Handle = struct {
         pub const Type = enum { file, directory };
 
+        /// Per-handle XET state. The `Repo` is re-derived from `Handle.uri`
+        /// on demand. `plan` is borrowed from `HF.xet_state.plan_cache` and
+        /// populated lazily on the first read. `ring` and the buffers are
+        /// heap-boxed so the union's max-arm size stays small.
+        pub const XetState = struct {
+            plan: ?*const xet.Plan = null,
+            ring: *xet.ChunkRing,
+            /// Scratch slot for one compressed chunk; passed as ring.get's `scratch`.
+            chunk_scratch: []u8,
+            /// Sequential-read cursor. Avoids re-walking from
+            /// `term.range.start` on every call when reads are contiguous.
+            /// `chunk_start_in_term` is the term-relative offset of the
+            /// chunk at `chunk_index`; `term_pos` is the term-relative
+            /// offset where the next byte will be read (may be mid-chunk).
+            cursor_valid: bool = false,
+            cursor_offset: u64 = 0,
+            cursor_term_index: usize = 0,
+            cursor_chunk_index: u32 = 0,
+            cursor_chunk_start_in_term: u64 = 0,
+            cursor_term_pos: u64 = 0,
+        };
+
+        /// Per-handle variant. `http` covers plain LFS files; `xet` is
+        /// selected when `dirOpenFile`'s `X-Xet-Hash` probe succeeds.
+        pub const State = union(enum) {
+            http: void,
+            xet: XetState,
+        };
+
         type: Type,
         uri: []const u8,
         pos: u64,
         size: u64,
+        state: State,
 
         pub fn init(allocator: std.mem.Allocator, handle_type: Type, uri: []const u8, size: u64) !Handle {
             return .{
@@ -90,11 +121,19 @@ pub const HF = struct {
                 .uri = try allocator.dupe(u8, uri),
                 .pos = 0,
                 .size = size,
+                .state = .{ .http = {} },
             };
         }
 
         pub fn deinit(self: *Handle, allocator: std.mem.Allocator) void {
             allocator.free(self.uri);
+            switch (self.state) {
+                .http => {},
+                .xet => |*xs| {
+                    allocator.destroy(xs.ring);
+                    allocator.free(xs.chunk_scratch);
+                },
+            }
         }
     };
 
@@ -102,6 +141,10 @@ pub const HF = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     authorization: std.http.Client.Request.Headers.Value,
+    /// Raw HF token (no "Bearer " prefix), owned by `HF`. Empty when the
+    /// caller is unauthenticated. Used by `xet_state`.
+    hf_token_raw: []const u8,
+    xet_state: xet.State,
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
@@ -109,17 +152,17 @@ pub const HF = struct {
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8) !HF {
+        const raw = if (hf_token) |t| try allocator.dupe(u8, std.mem.trim(u8, t, " \t\n\r")) else try allocator.dupe(u8, "");
+        errdefer allocator.free(raw);
         return .{
             .allocator = allocator,
             .base = .init(inner),
             .client = http_client,
-            .authorization = if (hf_token) |token| blk: {
-                break :blk .{
-                    .override = try std.fmt.allocPrint(allocator, "Bearer {s}", .{std.mem.trim(u8, token, " \t\n\r")}),
-                };
-            } else blk: {
-                break :blk .default;
-            },
+            .authorization = if (raw.len > 0) blk: {
+                break :blk .{ .override = try std.fmt.allocPrint(allocator, "Bearer {s}", .{raw}) };
+            } else .default,
+            .hf_token_raw = raw,
+            .xet_state = .init(allocator, http_client, raw),
         };
     }
 
@@ -177,6 +220,8 @@ pub const HF = struct {
             .default, .omit => {},
             .override => |t| self.allocator.free(t),
         }
+        self.xet_state.deinit();
+        self.allocator.free(self.hf_token_raw);
     }
 
     pub fn io(self: *HF) std.Io {
@@ -566,6 +611,17 @@ pub const HF = struct {
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, full_path, size) catch return std.Io.File.OpenError.Unexpected;
 
+        // XET probe: ask CAS for the file id. Success ⇒ XET-backed file, use
+        // the xet variant. Anything else (including `XetHashNotFound` for
+        // pure-LFS files and 401 when unauthenticated) ⇒ keep `.http`.
+        if (self.hf_token_raw.len > 0) {
+            const xet_repo: xet.State.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
+            if (self.xet_state.fileId(xet_repo)) |_| {
+                self.equipXetState(handle) catch return std.Io.File.OpenError.Unexpected;
+                log.info("XET-backed file detected: {s}", .{full_path});
+            } else |_| {}
+        }
+
         return .{ .handle = @intCast(idx), .flags = .{ .nonblocking = false } };
     }
 
@@ -697,7 +753,187 @@ pub const HF = struct {
 
     fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
         if (offset >= handle.size) return 0;
+        return switch (handle.state) {
+            .http => self.performReadHttp(handle, data, offset),
+            .xet => self.performReadXet(handle, data, offset),
+        };
+    }
 
+    fn equipXetState(self: *HF, handle: *Handle) !void {
+        const ring = try self.allocator.create(xet.ChunkRing);
+        errdefer self.allocator.destroy(ring);
+        ring.* = .init();
+        const scratch = try self.allocator.alloc(u8, xet.ChunkRing.chunk_max_bytes);
+        errdefer self.allocator.free(scratch);
+        handle.state = .{ .xet = .{
+            .ring = ring,
+            .chunk_scratch = scratch,
+        } };
+    }
+
+    const XetFetcherCtx = struct {
+        hf: *HF,
+        handle: *Handle,
+    };
+
+    fn xetFetch(ctx_raw: *anyopaque, xorb_hash: []const u8, chunk_index: u32, out: []u8) anyerror!usize {
+        const ctx: *XetFetcherCtx = @ptrCast(@alignCast(ctx_raw));
+        const xs = &ctx.handle.state.xet;
+        const plan = xs.plan orelse return error.PlanMissing;
+
+        const urls = plan.fetchFor(xorb_hash) orelse return error.NoFetchUrlsForXorb;
+        var picked: ?*const xet.FetchUrl = null;
+        for (urls) |*u| {
+            if (chunk_index >= u.range.start and chunk_index < u.range.end) {
+                picked = u;
+                break;
+            }
+        }
+        const fu = picked orelse return error.ChunkOutsideFetchUrls;
+
+        // url_range is inclusive on both ends (HTTP Range semantics).
+        const byte_len: usize = @intCast(fu.url_range.end - fu.url_range.start + 1);
+        const acq = try ctx.hf.xet_state.window_cache.acquire(ctx.hf.base.inner, xorb_hash, fu.url_range.start, fu.url_range.end, byte_len);
+        defer ctx.hf.xet_state.window_cache.release(ctx.hf.base.inner, acq.index);
+        if (!acq.hit) {
+            try httpRangeGetIntoSlot(ctx.hf.client, fu.url, fu.url_range.start, fu.url_range.end, acq.slice);
+            _ = ctx.hf.xet_state.bytes_fetched.fetchAdd(byte_len, .monotonic);
+        }
+
+        var it: xet.ChunkIterator = .{ .data = acq.slice };
+        var idx: u32 = @intCast(fu.range.start);
+        var bytes_offset: usize = 0;
+        while (idx < chunk_index) : (idx += 1) {
+            _ = (try it.next()) orelse return error.ChunkNotInWindow;
+            bytes_offset = it.pos;
+        }
+        const tail = acq.slice[bytes_offset..];
+        const n = @min(tail.len, out.len);
+        @memcpy(out[0..n], tail[0..n]);
+        return n;
+    }
+
+    fn performReadXet(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
+        if (data.len == 0 or data[0].len == 0) return 0;
+
+        var xs = &handle.state.xet;
+        const repo: Repo = try .parse(handle.uri);
+        const xet_repo: xet.State.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
+        if (xs.plan == null) {
+            xs.plan = try self.xet_state.getOrBuildPlan(xet_repo, handle.size);
+        }
+        const plan = xs.plan.?;
+
+        const remaining_in_file = handle.size - offset;
+        const dst_len: usize = @intCast(@min(@as(u64, data[0].len), remaining_in_file));
+        const dst = data[0][0..dst_len];
+        var written: usize = 0;
+
+        var ctx: XetFetcherCtx = .{ .hf = self, .handle = handle };
+        const fetcher: xet.ChunkRing.Fetcher = .{ .ctx = &ctx, .fetchFn = xetFetch };
+
+        // Sequential cursor reuse vs. fresh locate. Invariants:
+        // - `chunk_start_in_term`: byte offset of chunk `chunk_idx` within
+        //   the term (always at a chunk boundary).
+        // - `term_pos`: byte offset within the term of the next byte to
+        //   produce (in [chunk_start_in_term, chunk_start_in_term + cu]).
+        var term_index: usize = undefined;
+        var chunk_idx: u32 = undefined;
+        var chunk_start_in_term: u64 = undefined;
+        var term_pos: u64 = undefined;
+        if (xs.cursor_valid and xs.cursor_offset == offset) {
+            term_index = xs.cursor_term_index;
+            chunk_idx = xs.cursor_chunk_index;
+            chunk_start_in_term = xs.cursor_chunk_start_in_term;
+            term_pos = xs.cursor_term_pos;
+        } else {
+            const located = try plan.locate(offset);
+            term_index = located.term_index;
+            chunk_idx = @intCast(plan.response.terms[term_index].range.start);
+            chunk_start_in_term = 0;
+            term_pos = located.intra_term_offset;
+        }
+
+        while (written < dst.len) {
+            const term = plan.response.terms[term_index];
+            if (chunk_start_in_term >= term.unpacked_length) {
+                term_index += 1;
+                if (term_index >= plan.response.terms.len) break;
+                chunk_idx = @intCast(plan.response.terms[term_index].range.start);
+                chunk_start_in_term = 0;
+                term_pos = 0;
+                continue;
+            }
+
+            const cb = try xs.ring.get(term.hash, chunk_idx, fetcher, xs.chunk_scratch);
+            const cu: u64 = cb.len;
+
+            if (chunk_start_in_term + cu <= term_pos) {
+                // Whole-chunk skip (only happens when resuming after a fresh
+                // locate landed mid-term and term_pos > chunk end).
+                chunk_start_in_term += cu;
+                chunk_idx += 1;
+                continue;
+            }
+
+            const src_off: usize = @intCast(term_pos - chunk_start_in_term);
+            const avail: usize = cb.len - src_off;
+            const want: usize = dst.len - written;
+            const take = @min(avail, want);
+            @memcpy(dst[written .. written + take], cb[src_off .. src_off + take]);
+            written += take;
+            term_pos += take;
+            if (src_off + take == cu) {
+                chunk_start_in_term += cu;
+                chunk_idx += 1;
+            } else {
+                break;
+            }
+        }
+
+        xs.cursor_valid = true;
+        xs.cursor_offset = offset + written;
+        xs.cursor_term_index = term_index;
+        xs.cursor_chunk_index = chunk_idx;
+        xs.cursor_chunk_start_in_term = chunk_start_in_term;
+        xs.cursor_term_pos = term_pos;
+
+        return written;
+    }
+
+    fn httpRangeGetIntoSlot(client: *std.http.Client, url: []const u8, range_start: u64, range_end_inclusive: u64, slot: []u8) !void {
+        // Retry once on transient keep-alive connection close, which is
+        // common when the connection pool is shared across threads.
+        var attempt: u32 = 0;
+        while (true) : (attempt += 1) {
+            httpRangeGetIntoSlotOnce(client, url, range_start, range_end_inclusive, slot) catch |e| {
+                if (attempt == 0 and (e == error.HttpConnectionClosing or e == error.ConnectionResetByPeer or e == error.UnexpectedReadFailure)) continue;
+                return e;
+            };
+            return;
+        }
+    }
+
+    fn httpRangeGetIntoSlotOnce(client: *std.http.Client, url: []const u8, range_start: u64, range_end_inclusive: u64, slot: []u8) !void {
+        var range_buf: [64]u8 = undefined;
+        const range_header = std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ range_start, range_end_inclusive }) catch unreachable;
+        const uri: std.Uri = try .parse(url);
+        var req = try client.request(.GET, uri, .{
+            .headers = .{ .accept_encoding = .{ .override = "identity" } },
+            .extra_headers = &.{.{ .name = "Range", .value = range_header }},
+        });
+        defer req.deinit();
+        try req.sendBodiless();
+        var redirect_buffer: [8 * 1024]u8 = undefined;
+        var res = try req.receiveHead(&redirect_buffer);
+        if (res.head.status != .partial_content and res.head.status != .ok) {
+            log.err("XET window fetch failed: status={} url={s}", .{ res.head.status, url });
+            return error.HttpRequestFailed;
+        }
+        try res.reader(&.{}).readSliceAll(slot);
+    }
+
+    fn performReadHttp(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
         var range_buf: [64]u8 = undefined;
         const range_header = blk: {
             var total_bytes: u64 = 0;

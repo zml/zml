@@ -2,6 +2,9 @@
 //
 // Asks the HF CAS for ONE whole-file reconstruction, then computes:
 //   • file-level totals (terms, unique xorbs, unique chunks)
+//   • per-file chunk reuse: how many times each (xorb, chunk) position is
+//     cited by the reconstruction plan's terms (= byte-stream repetition
+//     within the file, independent of tensor accounting)
 //   • cross-tensor sharing (xorbs and (xorb, chunk) pairs referenced by ≥2
 //     tensors of the file)
 //   • bytes-on-wire comparison:
@@ -199,6 +202,27 @@ fn scanFile(
     var chunks_referenced_total: u64 = 0;
     const win_offset: u64 = resp.offset_into_first_range; // 0 when start==0
 
+    // ── Per-file chunk reuse (independent of tensors) ──────────────────────
+    // Count how many times each (xorb, chunk) position is cited by the
+    // reconstruction plan's terms. A count >1 means the chunk's bytes appear
+    // multiple times in the reconstructed file's byte stream.
+    var chunk_plan_refs = std.AutoHashMap(u64, u32).init(allocator);
+    defer chunk_plan_refs.deinit();
+    var plan_chunks_total: u64 = 0;
+    for (resp.terms, 0..) |t, i| {
+        const xi = term_xorb[i];
+        const cs: u32 = @intCast(t.range.start);
+        const ce: u32 = @intCast(t.range.end);
+        var ci: u32 = cs;
+        while (ci < ce) : (ci += 1) {
+            plan_chunks_total += 1;
+            const key: u64 = (@as(u64, xi) << 32) | ci;
+            const gop = try chunk_plan_refs.getOrPut(key);
+            if (!gop.found_existing) gop.value_ptr.* = 0;
+            gop.value_ptr.* += 1;
+        }
+    }
+
     for (tensors.items, 0..) |tn, ji| {
         const tidx: u16 = @intCast(ji);
         const win_start: u64 = win_offset + tn.offset;
@@ -313,8 +337,22 @@ fn scanFile(
     });
     log.info("  terms={d}  xorbs(unique)={d}", .{ resp.terms.len, n_xorbs });
     log.info("  chunks(refs)={d}  chunks(unique)={d}", .{ chunks_referenced_total, unique_chunks });
-    printHistogram("  chunks reuse:", &chunk_hist, unique_chunks);
-    printHistogram("  xorbs  reuse:", &xorb_hist, n_xorbs);
+
+    // Per-file chunk reuse histogram (across plan terms, regardless of tensors).
+    var chunk_plan_hist: std.AutoArrayHashMapUnmanaged(u32, u32) = .empty;
+    defer chunk_plan_hist.deinit(allocator);
+    var plan_unique_chunks: u32 = 0;
+    var cpr_it = chunk_plan_refs.valueIterator();
+    while (cpr_it.next()) |v| {
+        plan_unique_chunks += 1;
+        const gop = try chunk_plan_hist.getOrPut(allocator, v.*);
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        gop.value_ptr.* += 1;
+    }
+    log.info("  chunks plan(refs)={d}  plan(unique)={d}", .{ plan_chunks_total, plan_unique_chunks });
+    printHistogram("  chunks reuse (per file):  ", &chunk_plan_hist, plan_unique_chunks);
+    printHistogram("  chunks reuse (per tensor):", &chunk_hist, unique_chunks);
+    printHistogram("  xorbs  reuse (per tensor):", &xorb_hist, n_xorbs);
     log.info("  fetch bytes minimal (whole-file): {d:.2} MiB", .{mib(minimal_fetch_bytes)});
     log.info("  fetch bytes naive   (per-tensor): {d:.2} MiB", .{mib(naive_fetch_bytes)});
     const ratio_naive_to_min = ratio(naive_fetch_bytes, @max(minimal_fetch_bytes, 1));

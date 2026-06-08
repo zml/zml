@@ -21,6 +21,35 @@ zig_binary(
 )
 
 zig_binary(
+    name = "test_vfs_read",
+    srcs = ["util.zig"],
+    main = "test_vfs_read.zig",
+    deps = [
+        "//zml",
+        "//zml/io",
+    ],
+)
+
+zig_binary(
+    name = "test_vfs_parallel",
+    srcs = ["util.zig"],
+    main = "test_vfs_parallel.zig",
+    deps = [
+        "//zml",
+        "//zml/io",
+    ],
+)
+
+zig_binary(
+    name = "test_http_parallel",
+    main = "test_http_parallel.zig",
+    deps = [
+        "//zml",
+        "//zml/io",
+    ],
+)
+
+zig_binary(
     name = "scan_dedup",
     main = "scan_dedup.zig",
     deps = [

@@ -1,14 +1,18 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "vfs",
     srcs = [
         "base.zig",
+        "bg4.zig",
         "file.zig",
         "gcs.zig",
         "hf.zig",
         "http.zig",
+        "lz4.zig",
         "s3.zig",
+        "xet.zig",
+        "xet_stats.zig",
     ],
     main = "index.zig",
     tags = ["manual"],
@@ -16,4 +20,14 @@ zig_library(
     deps = [
         "//stdx",
     ],
+)
+
+zig_test(
+    name = "test",
+    main = "xet.zig",
+    srcs = [
+        "bg4.zig",
+        "lz4.zig",
+    ],
+    deps = ["//zml/io/vfs"],
 )
