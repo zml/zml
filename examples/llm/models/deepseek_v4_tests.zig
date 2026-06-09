@@ -493,8 +493,7 @@ const TestContext = struct {
         defer out_buffer_expected.deinit();
 
         const layer_idx: zml.Tensor = .init(.{ .batch = 1 }, .u32);
-        // const offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
-        const offset: u32 = 0;
+        const offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
 
         const exe = try self.platform.compileFn(
             self.allocator,
@@ -530,7 +529,7 @@ const TestContext = struct {
         args.set(.{
             layer_buffers,
             in_buffer,
-            // offset_idx_buffer,
+            offset_idx_buffer,
             state_buffer,
             layer_idx_buffer,
         });
@@ -639,10 +638,8 @@ const TestContext = struct {
         var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
         defer out_buffer_expected.deinit();
 
-        // const token_idx_offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
-        const token_idx_offset: u32 = 0;
+        const token_idx_offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
         const layer_idx: zml.Tensor = .init(.{}, .u32);
-        // const layer_idx = zml.Tensor.scalar(0, .u32);
 
         const exe = try self.platform.compileFn(
             self.allocator,
@@ -652,8 +649,8 @@ const TestContext = struct {
                 layer,
                 in_tensor,
                 in_1_tensor,
+                0,
                 token_idx_offset,
-                @intCast(in_tensor.dim(1)),
                 cache,
                 layer_idx,
             },
@@ -661,7 +658,7 @@ const TestContext = struct {
         });
         defer exe.deinit();
 
-        const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
+        const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(in_tensor.dim(.seq))}));
         var token_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, .replicated);
         defer token_idx_buffer.deinit();
 
@@ -678,7 +675,7 @@ const TestContext = struct {
             layer_buffers,
             in_buffer,
             in_1_buffer,
-            // token_idx_buffer,
+            token_idx_buffer,
             cache_buffer,
             layer_idx_buffer,
         });
