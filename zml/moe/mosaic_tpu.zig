@@ -349,13 +349,14 @@ pub fn fusedExpertsImpl(
         gate_up_out = gate_up_out.add(bias_per_token);
     }
 
-    const activated = if (fused_gmm1_act != null)
-        gate_up_out.slice1d(.out, .{ .end = down.dim(.mid) })
-    else
-        applyActivation(gate_up_out, opts.activation);
+    const activated = applyActivation(gate_up_out, opts.activation);
 
     const aligned_activated = alignSortedRowsByGroup(activated, expert_ids_sorted, group_sizes, tile_m);
-    var down_out = callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype(), .none)
+    log.info("down shape before gmm2: {f}", .{down.shape()});
+    var down_out = if (use_reference_moe) blk: {
+        const down_per_token = down.gather(.{ .expert = expert_ids_sorted }, .{});
+        break :blk activated.rename(.{ .out = .mid }).dot(down_per_token, .mid);
+    } else callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype(), .none)
         .gather(.{ .token = aligned_activated.positions.rename(.{ .token = .route }) }, .{})
         .rename(.{ .route = .token });
 
