@@ -1071,10 +1071,10 @@ pub fn load(
     store: *const TensorStore,
     opts: LoadOpts,
 ) !Bufferized(ModelType) {
-    var trace = try tracer.scope("zml.io.load", .{
+    var span = tracer.span("zml.io.load", .{
         .tensor_count = meta.count(Tensor, model),
     });
-    defer trace.end();
+    defer span.end();
 
     var bufferized = try mem.bufferize(allocator, ModelType, model);
 
