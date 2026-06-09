@@ -638,7 +638,8 @@ const TestContext = struct {
         var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
         defer out_buffer_expected.deinit();
 
-        const token_idx_offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
+        const offset: zml.Tensor = .init(.{}, .u32);
+        const pos_offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
         const layer_idx: zml.Tensor = .init(.{}, .u32);
 
         const exe = try self.platform.compileFn(
@@ -649,8 +650,8 @@ const TestContext = struct {
                 layer,
                 in_tensor,
                 in_1_tensor,
-                0,
-                token_idx_offset,
+                pos_offset,
+                offset,
                 cache,
                 layer_idx,
             },
@@ -658,9 +659,13 @@ const TestContext = struct {
         });
         defer exe.deinit();
 
-        const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(in_tensor.dim(.seq))}));
-        var token_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, .replicated);
-        defer token_idx_buffer.deinit();
+        const pos_idx_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
+        var pos_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, pos_idx_slice, .replicated);
+        defer pos_idx_buffer.deinit();
+
+        const offset_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(in_tensor.dim(.seq))}));
+        var offset_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, offset_slice, .replicated);
+        defer offset_buffer.deinit();
 
         const layer_idx_slice: zml.Slice = .init(zml.Shape.init(.{ }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
         var layer_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, layer_idx_slice, .replicated);
@@ -675,7 +680,8 @@ const TestContext = struct {
             layer_buffers,
             in_buffer,
             in_1_buffer,
-            token_idx_buffer,
+            pos_idx_buffer,
+            offset_buffer,
             cache_buffer,
             layer_idx_buffer,
         });
