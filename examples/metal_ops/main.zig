@@ -2055,6 +2055,24 @@ pub fn main(init: std.process.Init) !void {
     if (mm_is_mpsgraph)
         failures += checkMM(zml.floats.BFloat16, allocator, io, cpu, metal, "bf16NT", 96, 64, 48, true, 3e-2);
 
+    // GEMV-shaped NN matmuls route to the dedicated metalBLAS GEMV kernels via the
+    // decide()-driven path: M==1 → gemv_t (x·W, every dtype), thin M (2..16) low-
+    // precision → gemv_bt (one B stream feeds all rows). N>=16 & K>=64 clear the
+    // GEMV regime gates. metalBLAS only — MPSGraph handles these shapes its own way.
+    if (mm_is_metalblas) {
+        failures += checkMM(f32, allocator, io, cpu, metal, "gvT32", 1, 256, 64, false, 1e-4);
+        failures += checkMM(zml.floats.BFloat16, allocator, io, cpu, metal, "gvTbf", 1, 256, 512, false, 3e-2);
+        failures += checkMM(f16, allocator, io, cpu, metal, "gvT16", 1, 256, 512, false, 2e-2);
+        failures += checkMM(zml.floats.BFloat16, allocator, io, cpu, metal, "gvBt4", 4, 128, 512, false, 3e-2);
+        failures += checkMM(zml.floats.BFloat16, allocator, io, cpu, metal, "gvBt16", 16, 128, 512, false, 3e-2);
+        failures += checkMM(f16, allocator, io, cpu, metal, "gvBtF16", 8, 256, 256, false, 2e-2);
+        // gemv_nt: x · Wᵀ — the STANDARD decode/lm_head linear (weight [out,in]=[N,K],
+        // so trans_b), M==1. This is the path real decode projections take.
+        failures += checkMM(f32, allocator, io, cpu, metal, "gvNT32", 1, 256, 512, true, 1e-4);
+        failures += checkMM(zml.floats.BFloat16, allocator, io, cpu, metal, "gvNTbf", 1, 256, 512, true, 3e-2);
+        failures += checkMM(f16, allocator, io, cpu, metal, "gvNT16", 1, 256, 512, true, 2e-2);
+    }
+
     // Whole-graph execution (first multi-op module): y = x·W + bias. The add
     // consumes the dot's result, so this routes through the thunk-sequence graph
     // executable — MPSGraph matmul into an intermediate buffer, then an
