@@ -40,7 +40,6 @@ pub fn main(init: std.process.Init) !void {
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
 
-<<<<<<< HEAD
     // Tensor store is a ZML representation of tensors - i.e., parent.child.leaf
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
@@ -55,12 +54,6 @@ pub fn main(init: std.process.Init) !void {
 }
 
 pub fn run(
-=======
-    try run(allocator, io, platform, args.activations, &model_store);
-}
-
-fn run(
->>>>>>> ecff8505 (remove conflict markers)
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
@@ -75,13 +68,9 @@ fn run(
     var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer activation_store.deinit();
 
-<<<<<<< HEAD
     // Bottom-up test approach. See LFM for a top-down approach.
     std.log.info("RMS Norm:", .{});
     try runRmsNormSynthetic(allocator, io, platform, platform.replicated_sharding);
-=======
-    const mlp_layer_indices = [_]usize{ 0, 1, 2, 45, 46, 47 };
->>>>>>> ecff8505 (remove conflict markers)
 
     std.log.info("MLP:", .{});
     for (0..config.num_hidden_layers) |layer_idx| {
@@ -108,12 +97,8 @@ fn run(
     }
 
     std.log.info("MoE:", .{});
-<<<<<<< HEAD
     for (config.moe_layers_enum) |moe_idx| {
         const layer_idx: usize = @intCast(moe_idx);
-=======
-    for (3..45) |layer_idx| {
->>>>>>> ecff8505 (remove conflict markers)
         const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.moe", .{layer_idx});
         defer allocator.free(name);
 
@@ -147,7 +132,6 @@ fn run(
             std.log.warn("skipping {s}: {s}", .{ name, @errorName(err) });
         };
     }
-<<<<<<< HEAD
 
     std.log.info("Transformer layer:", .{});
     for (0..config.num_hidden_layers) |layer_idx| {
@@ -360,10 +344,6 @@ fn runFullTextModel(
     });
 }
 
-=======
-}
-
->>>>>>> ecff8505 (remove conflict markers)
 fn deinitBuffers(bufs: anytype) void {
     zml.meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
@@ -371,7 +351,6 @@ fn deinitBuffers(bufs: anytype) void {
         }
     }.cb, {}, bufs);
 }
-<<<<<<< HEAD
 
 // RmsNorm.forward takes a comptime axis, so wrap it to fix axis=.d for compilation.
 const RmsNormForD = struct {
@@ -479,5 +458,3 @@ fn compareSingleOutput(
     };
     std.log.info("ok {s}.{s} matches", .{ name, subkey });
 }
-=======
->>>>>>> ecff8505 (remove conflict markers)
