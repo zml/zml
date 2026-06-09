@@ -7,6 +7,7 @@ pub const Target = enum {
     oneapi,
     neuron,
     tpu,
+    tenstorrent,
 };
 
 pub const DeviceInfo = union(Target) {
@@ -15,6 +16,7 @@ pub const DeviceInfo = union(Target) {
     oneapi: DoubleBuffer(GpuInfo),
     neuron: DoubleBuffer(NeuronInfo),
     tpu: DoubleBuffer(TpuInfo),
+    tenstorrent: DoubleBuffer(TenstorrentInfo),
 
     pub fn isRemote(self: *const DeviceInfo) bool {
         switch (self.*) {
@@ -92,4 +94,47 @@ pub const TpuInfo = struct {
     util_percent: ?u64 = null,
     mem_used_bytes: ?u64 = null,
     mem_total_bytes: ?u64 = null,
+};
+
+pub const TenstorrentInfo = struct {
+    remote: bool = false,
+    name: ?[]const u8 = null,
+    driver_version: ?[]const u8 = null,
+
+    mem_total_bytes: ?u64 = null,
+
+    asic_location: ?u64 = null,
+
+    temperature: ?u64 = null,
+    temperature_max: ?u64 = null,
+    board_temperature: ?u64 = null,
+    dram_temperature: ?u64 = null,
+
+    power_mw: ?u64 = null,
+    power_limit_mw: ?u64 = null,
+
+    voltage_mv: ?u64 = null,
+    current_ma: ?u64 = null,
+
+    clock_ai_mhz: ?u64 = null,
+    clock_arc_mhz: ?u64 = null,
+    clock_axi_mhz: ?u64 = null,
+    clock_mem_mhz: ?u64 = null,
+
+    // sysfs provided
+    pcie_link_gen: ?u64 = null,
+    pcie_link_width: ?u64 = null,
+    pcie_bandwidth_mbps: ?u64 = null,
+
+    heartbeat: ?u64 = null,
+    therm_trip_count: ?u64 = null,
+    fan_rpm: ?u64 = null,
+
+    // Identity / firmware
+    board_serial: ?[]const u8 = null,
+    asic_id: ?[]const u8 = null,
+    fw_bundle_version: ?[]const u8 = null,
+    cm_fw_version: ?[]const u8 = null,
+    eth_fw_version: ?[]const u8 = null,
+    dm_app_version: ?[]const u8 = null,
 };

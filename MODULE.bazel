@@ -31,6 +31,7 @@ bazel_dep(name = "rules_zig", version = "0.15.1")
 
 bazel_dep(name = "tar.bzl", version = "0.9.0")
 bazel_dep(name = "llvm", version = "0.8.3")
+bazel_dep(name = "yaml-cpp", version = "0.8.0")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 bazel_dep(name = "grpc", version = "1.74.0")
 
@@ -179,6 +180,9 @@ use_repo(tpu, "libpjrt_tpu")
 
 neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron")
+
+tt_umd = use_extension("//bin/zml-smi/platforms/tenstorrent:tt_umd.bzl", "tt_umd_packages")
+use_repo(tt_umd, "asio", "fmt", "spdlog", "tt_logger", "tt_umd")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
 use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "mosaic_tpu", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg")

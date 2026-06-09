@@ -32,6 +32,16 @@ const device_metrics = .{
     .{ .field = "nc_collectives", .metric = "zml_device_neuron_collectives_bytes", .help = "Neuron core collectives memory in bytes" },
     .{ .field = "nc_notifications", .metric = "zml_device_neuron_notifications_bytes", .help = "Neuron core notifications memory in bytes" },
     .{ .field = "nc_uncategorized", .metric = "zml_device_neuron_uncategorized_bytes", .help = "Neuron core uncategorized memory in bytes" },
+    // Tenstorrent
+    .{ .field = "voltage_mv", .metric = "zml_device_voltage_volts", .help = "Core voltage in volts", .fmt = fmtMilliwattsAsWatts },
+    .{ .field = "current_ma", .metric = "zml_device_current_amps", .help = "Core current in amps", .fmt = fmtMilliwattsAsWatts },
+    .{ .field = "clock_ai_mhz", .metric = "zml_device_clock_ai_mhz", .help = "AI/compute clock frequency in MHz" },
+    .{ .field = "clock_arc_mhz", .metric = "zml_device_clock_arc_mhz", .help = "ARC clock frequency in MHz" },
+    .{ .field = "clock_axi_mhz", .metric = "zml_device_clock_axi_mhz", .help = "AXI clock frequency in MHz" },
+    .{ .field = "heartbeat", .metric = "zml_device_heartbeat", .help = "Firmware heartbeat counter" },
+    .{ .field = "pcie_link_gen", .metric = "zml_device_pcie_link_gen", .help = "PCIe link generation" },
+    .{ .field = "pcie_link_width", .metric = "zml_device_pcie_link_width", .help = "PCIe link width (lanes)" },
+    .{ .field = "pcie_bandwidth_mbps", .metric = "zml_device_pcie_bandwidth_mbps", .help = "PCIe theoretical bandwidth in MB/s" },
 };
 
 const host_metrics = .{

@@ -82,6 +82,6 @@ pub fn imageCellSize(img: vaxis.Image, target_rows: u16, cell_size: vxfw.Size) I
     const height_px = @as(u32, target_rows) * cell_h;
     const scale_f = @as(f64, @floatFromInt(height_px)) / @as(f64, @floatFromInt(img.height));
     const width_px: u32 = @intFromFloat(@as(f64, @floatFromInt(img.width)) * scale_f);
-    const img_cols: u16 = @intCast((width_px + cell_w - 1) / cell_w);
+    const img_cols: u16 = @intCast(@max(1, (width_px + cell_w / 2) / cell_w));
     return .{ .cols = img_cols, .rows = target_rows };
 }

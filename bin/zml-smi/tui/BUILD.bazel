@@ -2,8 +2,6 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "tui",
-    import_name = "zml-smi/tui",
-    main = "tui.zig",
     srcs = [
         "data.zig",
         "image_cache.zig",
@@ -15,6 +13,7 @@ zig_library(
         "pages/detail/detail_common.zig",
         "pages/detail/gpu_detail.zig",
         "pages/detail/neuron_detail.zig",
+        "pages/detail/tenstorrent_detail.zig",
         "pages/detail/tpu_detail.zig",
         "pages/overview.zig",
         "print.zig",
@@ -39,7 +38,10 @@ zig_library(
         "assets/neuron.png",
         "assets/nvidia.png",
         "assets/tpu.png",
+        "assets/tenstorrent.png",
     ],
+    import_name = "zml-smi/tui",
+    main = "tui.zig",
     visibility = ["//visibility:public"],
     deps = [
         "//bazel/stamp:zig",
