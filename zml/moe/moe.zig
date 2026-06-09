@@ -18,6 +18,7 @@ pub const Backend = enum {
     triton,
     mosaic_tpu,
     metal,
+    vanilla,
 
     pub fn auto(platform: *const zml.Platform, weights_dtype: zml.DataType) !Backend {
         return switch (platform.target) {
@@ -43,6 +44,7 @@ pub const Backend = enum {
             .triton => {},
             .mosaic_tpu => {},
             .metal => {},
+            .triton, .vanilla => {},
         };
     }
 
@@ -52,6 +54,7 @@ pub const Backend = enum {
             .triton => {},
             .mosaic_tpu => {},
             .metal => {},
+            .triton, .vanilla => {},
         };
     }
 };
@@ -60,11 +63,13 @@ pub const Parameters = union(Backend) {
     triton: triton.Parameters,
     mosaic_tpu: mosaic_tpu.Parameters,
     metal: metal.Parameters,
+    vanilla: vanilla.Parameters,
 
     pub const InitOptions = union(Backend) {
         triton: triton.Parameters.InitOptions,
         mosaic_tpu: mosaic_tpu.Parameters.InitOptions,
         metal: metal.Parameters.InitOptions,
+        vanilla: vanilla.Parameters.InitOptions,
 
         pub fn fromBackend(backend: Backend, num_experts_per_tok: ?u32, activation: ActivationMode) InitOptions {
             return switch (backend) {
@@ -92,6 +97,7 @@ pub const Parameters = union(Backend) {
                         .gelu => .gelu,
                     },
                 } },
+                .vanilla => .{ .vanilla = .{} },
             };
         }
     };
@@ -101,25 +107,49 @@ pub const Parameters = union(Backend) {
             .triton => |v| .{ .triton = triton.Parameters.init(v) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Parameters.init(v) },
             .metal => |v| .{ .metal = metal.Parameters.init(v) },
+            .vanilla => .{ .vanilla = .{} },
         };
     }
+};
+
+pub const vanilla = struct {
+    pub const Metadata = struct {
+        dummy: zml.Tensor,
+
+        pub const InitOptions = struct {};
+
+        pub fn init() vanilla.Metadata {
+            return .{ .dummy = .init(.{}, .u32) };
+        }
+
+        pub fn initBuffer(self: vanilla.Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(vanilla.Metadata) {
+            const replicated_sharding = platform.replicated_sharding;
+            return .{ .dummy = try zml.Buffer.uninitialized(io, platform, self.dummy.shape(), replicated_sharding, .{}) };
+        }
+    };
+    pub const Parameters = struct {
+        pub const InitOptions = struct {};
+    };
 };
 
 pub const Metadata = union(Backend) {
     triton: triton.Metadata,
     mosaic_tpu: mosaic_tpu.Metadata,
     metal: metal.Metadata,
+    vanilla: vanilla.Metadata,
 
     pub const InitOptions = union(Backend) {
         triton: triton.Metadata.InitOptions,
         mosaic_tpu: mosaic_tpu.Metadata.InitOptions,
         metal: metal.Metadata.InitOptions,
+        vanilla: vanilla.Metadata.InitOptions,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .triton => .{ .triton = .{} },
                 .mosaic_tpu => .{ .mosaic_tpu = .{} },
                 .metal => .{ .metal = .{} },
+                .vanilla => .{ .vanilla = .{} },
             };
         }
     };
@@ -129,6 +159,7 @@ pub const Metadata = union(Backend) {
             .triton => |v| .{ .triton = triton.Metadata.init(v) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Metadata.init(v) },
             .metal => |v| .{ .metal = metal.Metadata.init(v) },
+            .vanilla => .{ .vanilla = .init() },
         };
     }
 
@@ -137,6 +168,7 @@ pub const Metadata = union(Backend) {
             .triton => |metadata| .{ .triton = try metadata.initBuffer(io, platform) },
             .mosaic_tpu => |metadata| .{ .mosaic_tpu = try metadata.initBuffer(io, platform) },
             .metal => |metadata| .{ .metal = try metadata.initBuffer(io, platform) },
+            .vanilla => |metadata| .{ .vanilla = try metadata.initBuffer(io, platform) },
         };
     }
 
@@ -145,6 +177,7 @@ pub const Metadata = union(Backend) {
             .triton => |*metadata| triton.deinitBuffer(metadata),
             .mosaic_tpu => |*metadata| mosaic_tpu.deinitBuffer(metadata),
             .metal => |*metadata| metal.deinitBuffer(metadata),
+            .vanilla => {}, //|*metadata| vanilla.deinitBuffer(metadata),
         }
     }
 };
@@ -163,6 +196,7 @@ pub fn forwardMoe(
     parameters: Parameters,
 ) !zml.Tensor {
     return switch (parameters) {
+        .vanilla => input,
         .triton => b: {
             const triton_metadata = switch (metadata) {
                 .triton => |v| v,

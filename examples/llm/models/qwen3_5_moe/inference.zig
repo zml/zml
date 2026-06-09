@@ -476,5 +476,6 @@ fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, b
             },
         }),
         .mosaic_tpu, .metal => .init(.fromBackend(backend)),
+        else => std.debug.panic("NOPE", .{}),
     };
 }
