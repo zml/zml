@@ -1,8 +1,764 @@
+"""ZML paged-attention NKI kernels.
+
+Entrypoints:
+
+  paged_attention_decode_2d
+    Writes the current decode token into the paged K/V cache, then attends over
+    the updated cache. Each KV stream is shared across the GQA query heads that
+    reference that KV head.
+
+  paged_attention_2d
+    Attends over compact prefill/mixed query rows. query_start_len maps each
+    sequence to its live compact row span, so the kernel can skip empty spans
+    and mask only the tail rows of the final query tile.
+
+  paged_kv_cache_update
+    Copies compact K/V update rows into flattened cache slots. Invalid
+    slot_mapping rows are represented as out-of-range AP destinations and are
+    ignored by oob_mode=skip.
+
+Data ownership:
+  * block_table maps logical pages to physical cache pages.
+  * seq_lens defines which key positions are valid for each sequence.
+  * query_start_len defines the compact query-row schedule for prefill/mixed.
+  * slot_mapping defines cache write destinations, not attention order.
+  * The online softmax state is updated during K/V tile streaming, so no HBM
+    softmax scratch buffers are needed.
+"""
+
 import nki.isa as nisa
 import nki.language as nl
 import nki.typing as nt
 
 NEG_INF = -3.3895313892515355e38
+
+
+# Shared metadata and page-load helpers.
+
+
+def load_static_attention_metadata(
+    block_table,
+    seq_lens,
+    query_start_len,
+    batch_size,
+    max_num_pages,
+):
+    """Load prefill/mixed metadata that is reused across Q/K/V loops."""
+    block_table_sbuf = nl.ndarray(
+        (1, batch_size * max_num_pages), dtype=block_table.dtype, buffer=nl.sbuf
+    )
+    seq_lens_sbuf = nl.ndarray((1, batch_size), dtype=seq_lens.dtype, buffer=nl.sbuf)
+    query_start_len_sbuf = nl.ndarray(
+        (1, batch_size + 1), dtype=query_start_len.dtype, buffer=nl.sbuf
+    )
+    nisa.dma_copy(
+        dst=block_table_sbuf,
+        src=block_table.reshape((1, batch_size * max_num_pages))[
+            0:1, 0 : batch_size * max_num_pages
+        ],
+    )
+    nisa.dma_copy(
+        dst=seq_lens_sbuf,
+        src=seq_lens.reshape((1, batch_size))[0:1, 0:batch_size],
+    )
+    nisa.dma_copy(
+        dst=query_start_len_sbuf,
+        src=query_start_len.reshape((1, batch_size + 1))[0:1, 0 : batch_size + 1],
+    )
+    return block_table_sbuf, seq_lens_sbuf, query_start_len_sbuf
+
+
+def make_page_offsets(pages_per_k_tile, page_size):
+    """Build logical token starts for each page inside a K tile."""
+    page_offsets = nl.ndarray((1, pages_per_k_tile), dtype=nl.float32, buffer=nl.sbuf)
+    nisa.iota(
+        page_offsets,
+        [[1, pages_per_k_tile]],
+        channel_multiplier=page_size,
+    )
+    return page_offsets
+
+
+def choose_page_aligned_tile(max_num_pages, page_size, max_tile_tokens):
+    """Pick a K tile that covers an integer number of page-table entries.
+
+    The K stream advances by whole pages. Choosing the largest page-aligned tile
+    allowed by the caller reduces online-softmax iterations and keeps a simple
+    page loop for K and V loads.
+    """
+    pages_per_tile = min(max_num_pages, max_tile_tokens // page_size)
+    for candidate in range(pages_per_tile, 0, -1):
+        if max_num_pages % candidate == 0:
+            pages_per_tile = candidate
+            break
+    return pages_per_tile * page_size
+
+
+def build_k_tile_pages(
+    block_table_sbuf,
+    seq_len_f32,
+    seq_idx,
+    k_tile_idx,
+    page_offsets,
+    inactive_pages,
+    max_num_pages,
+    pages_per_k_tile,
+    k_tile_tokens,
+):
+    """Build active physical pages for one K tile.
+
+    The returned table is reused for both K and V loads. Inactive logical pages
+    are converted to -1 so AP loads can use oob_mode=skip without trusting that
+    padded block-table entries name valid physical pages.
+    """
+    physical_pages = nl.ndarray(
+        (1, pages_per_k_tile), dtype=block_table_sbuf.dtype, buffer=nl.sbuf
+    )
+    page_starts = nl.ndarray((1, pages_per_k_tile), dtype=nl.float32, buffer=nl.sbuf)
+    nisa.tensor_copy(
+        dst=physical_pages,
+        src=block_table_sbuf[
+            nl.ds(0, 1),
+            nl.ds(
+                seq_idx * max_num_pages + k_tile_idx * pages_per_k_tile,
+                pages_per_k_tile,
+            ),
+        ],
+    )
+    nisa.tensor_scalar(
+        dst=page_starts,
+        data=page_offsets,
+        op0=nl.add,
+        operand0=k_tile_idx * k_tile_tokens,
+    )
+    page_live = nl.greater(nl.broadcast_to(seq_len_f32, page_starts.shape), page_starts)
+    return nl.where(
+        page_live, physical_pages, inactive_pages, dtype=block_table_sbuf.dtype
+    )
+
+
+def load_k_tile(
+    k_cache,
+    physical_pages,
+    kv_head,
+    num_kv_heads,
+    d_head,
+    page_size,
+    pages_per_k_tile,
+    k_tile_tokens,
+):
+    """Load one page-contiguous K tile shared by all GQA query heads."""
+    k_sbuf = nl.ndarray((d_head, k_tile_tokens), dtype=k_cache.dtype, buffer=nl.sbuf)
+    k_page = nl.ndarray((page_size, d_head), dtype=k_cache.dtype, buffer=nl.sbuf)
+    k_page_f32 = nl.ndarray((page_size, d_head), dtype=nl.float32, buffer=nl.sbuf)
+    k_page_t = nl.ndarray((d_head, page_size), dtype=nl.float32, buffer=nl.psum)
+    nisa.memset(k_sbuf, 0.0)
+    for page_in_tile in nl.affine_range(pages_per_k_tile):
+        tile_offset = page_in_tile * page_size
+        physical_page = physical_pages[nl.ds(0, 1), nl.ds(page_in_tile, 1)]
+        nisa.dma_copy(
+            dst=k_page,
+            src=k_cache.ap(
+                pattern=[
+                    [num_kv_heads * d_head, page_size],
+                    [1, d_head],
+                ],
+                offset=kv_head * d_head,
+                scalar_offset=physical_page,
+                indirect_dim=0,
+            ),
+            dge_mode=nisa.dge_mode.swdge,
+            oob_mode=nisa.oob_mode.skip,
+        )
+        nisa.tensor_copy(dst=k_page_f32, src=k_page)
+        nisa.nc_transpose(dst=k_page_t, data=k_page_f32)
+        nisa.tensor_copy(
+            dst=k_sbuf[0:d_head, nl.ds(tile_offset, page_size)],
+            src=k_page_t,
+        )
+    return k_sbuf
+
+
+def load_v_subtile(
+    v_cache,
+    physical_pages,
+    kv_head,
+    v_subtile_idx,
+    num_kv_heads,
+    d_head,
+    page_size,
+    pages_per_v_tile,
+    v_tile_tokens,
+):
+    """Load one V subtile from the already-built K-tile page table."""
+    v_sbuf = nl.ndarray((v_tile_tokens, d_head), dtype=v_cache.dtype, buffer=nl.sbuf)
+    nisa.memset(v_sbuf, 0.0)
+    for page_in_tile in nl.affine_range(pages_per_v_tile):
+        page_idx = v_subtile_idx * pages_per_v_tile + page_in_tile
+        tile_offset = page_in_tile * page_size
+        physical_page = physical_pages[nl.ds(0, 1), nl.ds(page_idx, 1)]
+        nisa.dma_copy(
+            dst=v_sbuf[nl.ds(tile_offset, page_size), 0:d_head],
+            src=v_cache.ap(
+                pattern=[
+                    [num_kv_heads * d_head, page_size],
+                    [1, d_head],
+                ],
+                offset=kv_head * d_head,
+                scalar_offset=physical_page,
+                indirect_dim=0,
+            ),
+            dge_mode=nisa.dge_mode.swdge,
+            oob_mode=nisa.oob_mode.skip,
+        )
+    return v_sbuf
+
+
+# Decode helpers and entrypoint.
+
+
+def load_q_group(
+    q_grouped, seq_idx, kv_head, num_kv_heads, heads_per_kv, d_head, scale
+):
+    """Load all GQA query heads for one (sequence, KV head).
+
+    q is loaded as [heads_per_kv, d_head], transposed to
+    [d_head, heads_per_kv], then one K/V stream serves all GQA heads.
+    """
+    q_row = seq_idx * num_kv_heads + kv_head
+    q_sbuf = nl.load_transpose2d(
+        q_grouped[q_row, 0:heads_per_kv, 0:d_head],
+        dtype=q_grouped.dtype,
+    )
+    nisa.activation(dst=q_sbuf, op=nl.copy, data=q_sbuf, scale=scale)
+    return q_sbuf
+
+
+def update_decode_cache_inline(
+    k_cache,
+    v_cache,
+    new_k,
+    new_v,
+    slot_mapping,
+    num_tokens,
+    num_kv_heads,
+    d_head,
+    page_size,
+):
+    """Write decode K/V rows into the paged cache before attention reads it.
+
+    Decode attention includes the current token in its history. Writing the
+    cache row here preserves that ordering before the K/V stream is loaded.
+
+    Padded slot_mapping rows are allowed. The destination AP writes use
+    oob_mode=skip, so invalid sentinel slots become no-op cache writes.
+    """
+    k_cache_flat = k_cache.reshape((k_cache.shape[0] * page_size, num_kv_heads, d_head))
+    v_cache_flat = v_cache.reshape((v_cache.shape[0] * page_size, num_kv_heads, d_head))
+    slot_mapping_2d = slot_mapping.reshape((1, num_tokens))
+
+    for token_idx in nl.sequential_range(num_tokens):
+        slot_sbuf = nl.ndarray((1, 1), dtype=slot_mapping.dtype, buffer=nl.sbuf)
+        nisa.dma_copy(
+            dst=slot_sbuf,
+            src=slot_mapping_2d[nl.ds(0, 1), nl.ds(token_idx, 1)],
+        )
+
+        for kv_head in nl.affine_range(num_kv_heads):
+            k_sbuf = nl.ndarray((1, d_head), dtype=new_k.dtype, buffer=nl.sbuf)
+            v_sbuf = nl.ndarray((1, d_head), dtype=new_v.dtype, buffer=nl.sbuf)
+            nisa.dma_copy(
+                dst=k_sbuf,
+                src=new_k[nl.ds(token_idx, 1), kv_head, 0:d_head],
+            )
+            nisa.dma_copy(
+                dst=v_sbuf,
+                src=new_v[nl.ds(token_idx, 1), kv_head, 0:d_head],
+            )
+            nisa.dma_copy(
+                dst=k_cache_flat.ap(
+                    pattern=[[num_kv_heads * d_head, 1], [1, d_head]],
+                    offset=kv_head * d_head,
+                    scalar_offset=slot_sbuf,
+                    indirect_dim=0,
+                ),
+                src=k_sbuf,
+                dge_mode=nisa.dge_mode.swdge,
+                oob_mode=nisa.oob_mode.skip,
+            )
+            nisa.dma_copy(
+                dst=v_cache_flat.ap(
+                    pattern=[[num_kv_heads * d_head, 1], [1, d_head]],
+                    offset=kv_head * d_head,
+                    scalar_offset=slot_sbuf,
+                    indirect_dim=0,
+                ),
+                src=v_sbuf,
+                dge_mode=nisa.dge_mode.swdge,
+                oob_mode=nisa.oob_mode.skip,
+            )
+
+
+def compute_decode_kv_head_group(
+    q_grouped,
+    out_grouped,
+    k_cache,
+    v_cache,
+    block_table_sbuf,
+    seq_len_f32,
+    q_idx,
+    kv_head,
+    num_kv_heads,
+    heads_per_kv,
+    d_head,
+    page_size,
+    pages_per_k_tile,
+    pages_per_v_tile,
+    K_TILE,
+    V_TILE,
+    num_k_tiles,
+    v_tiles_per_k_tile,
+    page_offsets,
+    inactive_pages,
+    max_num_pages,
+    scale,
+    positions,
+):
+    """Compute one decode row for one KV head, sharing K/V across GQA heads.
+
+    The softmax state is kept in SBUF and updated once per K tile. K and V page
+    metadata is built once per K tile and reused by every V subtile.
+    """
+    q_sbuf = load_q_group(
+        q_grouped,
+        q_idx,
+        kv_head,
+        num_kv_heads,
+        heads_per_kv,
+        d_head,
+        scale,
+    )
+
+    qk_psum = nl.ndarray((heads_per_kv, K_TILE), dtype=nl.float32, buffer=nl.psum)
+    qk_sbuf = nl.ndarray((heads_per_kv, K_TILE), dtype=nl.float32, buffer=nl.sbuf)
+    masked_qk = nl.ndarray((heads_per_kv, K_TILE), dtype=nl.float32, buffer=nl.sbuf)
+    neg_tile = nl.full(
+        (heads_per_kv, K_TILE), NEG_INF, dtype=nl.float32, buffer=nl.sbuf
+    )
+    row_max = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    sum_row = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    running_out = nl.ndarray((heads_per_kv, d_head), dtype=nl.float32, buffer=nl.sbuf)
+    tile_max = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    tile_sum = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    new_row_max = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    old_max_delta = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    old_max_scale = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    scaled_sum_row = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    new_sum_row = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    scaled_running_out = nl.ndarray(
+        (heads_per_kv, d_head), dtype=nl.float32, buffer=nl.sbuf
+    )
+    exp_tile = nl.ndarray((heads_per_kv, K_TILE), dtype=nl.float32, buffer=nl.sbuf)
+    neg_new_row_max = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    exp_t_psum = nl.ndarray((V_TILE, heads_per_kv), dtype=nl.float32, buffer=nl.psum)
+    exp_t = nl.ndarray((V_TILE, heads_per_kv), dtype=v_cache.dtype, buffer=nl.sbuf)
+    attn_out_psum = nl.ndarray((heads_per_kv, d_head), dtype=nl.float32, buffer=nl.psum)
+    tile_out = nl.ndarray((heads_per_kv, d_head), dtype=nl.float32, buffer=nl.sbuf)
+    inverse_sum_row = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    attn_out_sbuf = nl.ndarray(
+        (heads_per_kv, d_head), dtype=out_grouped.dtype, buffer=nl.sbuf
+    )
+
+    nisa.memset(row_max, NEG_INF)
+    nisa.memset(sum_row, 0.0)
+    nisa.memset(running_out, 0.0)
+
+    for k_tile_idx in nl.sequential_range(num_k_tiles):
+        physical_pages = build_k_tile_pages(
+            block_table_sbuf,
+            seq_len_f32,
+            q_idx,
+            k_tile_idx,
+            page_offsets,
+            inactive_pages,
+            max_num_pages,
+            pages_per_k_tile,
+            K_TILE,
+        )
+        k_sbuf = load_k_tile(
+            k_cache,
+            physical_pages,
+            kv_head,
+            num_kv_heads,
+            d_head,
+            page_size,
+            pages_per_k_tile,
+            K_TILE,
+        )
+
+        nisa.memset(qk_psum, 0.0)
+        nisa.nc_matmul(dst=qk_psum, stationary=q_sbuf, moving=k_sbuf)
+        nisa.tensor_copy(dst=qk_sbuf, src=qk_psum)
+
+        nisa.iota(positions, [[1, K_TILE]], offset=k_tile_idx * K_TILE)
+        valid_seq = nl.less(
+            positions,
+            nl.broadcast_to(seq_len_f32, positions.shape),
+        )
+        masked_qk = nl.where(
+            nl.broadcast_to(valid_seq, masked_qk.shape),
+            qk_sbuf,
+            neg_tile,
+            dtype=nl.float32,
+        )
+        nisa.tensor_reduce(dst=tile_max, op=nl.maximum, data=masked_qk, axis=(1,))
+        nisa.tensor_tensor(
+            dst=new_row_max,
+            data1=row_max,
+            data2=tile_max,
+            op=nl.maximum,
+        )
+        nisa.tensor_scalar(
+            dst=old_max_delta,
+            data=row_max,
+            op0=nl.subtract,
+            operand0=new_row_max,
+        )
+        nisa.activation(dst=old_max_scale, op=nl.exp, data=old_max_delta)
+        nisa.tensor_scalar(
+            dst=neg_new_row_max,
+            data=new_row_max,
+            op0=nl.multiply,
+            operand0=-1.0,
+        )
+        nisa.activation(
+            dst=exp_tile,
+            op=nl.exp,
+            data=masked_qk,
+            bias=neg_new_row_max,
+            reduce_op=nl.add,
+            reduce_res=tile_sum,
+            reduce_cmd=nisa.reduce_cmd.reset_reduce,
+        )
+        nisa.tensor_scalar(
+            dst=scaled_sum_row,
+            data=sum_row,
+            op0=nl.multiply,
+            operand0=old_max_scale,
+        )
+        nisa.tensor_tensor(
+            dst=new_sum_row,
+            data1=scaled_sum_row,
+            data2=tile_sum,
+            op=nl.add,
+        )
+        nisa.tensor_scalar(
+            dst=scaled_running_out,
+            data=running_out,
+            op0=nl.multiply,
+            operand0=old_max_scale,
+        )
+
+        nisa.memset(attn_out_psum, 0.0)
+        for v_subtile_idx in nl.affine_range(v_tiles_per_k_tile):
+            v_start = v_subtile_idx * V_TILE
+            nisa.nc_transpose(
+                dst=exp_t_psum,
+                data=exp_tile[:, nl.ds(v_start, V_TILE)],
+            )
+            nisa.tensor_copy(dst=exp_t, src=exp_t_psum)
+            v_sbuf = load_v_subtile(
+                v_cache,
+                physical_pages,
+                kv_head,
+                v_subtile_idx,
+                num_kv_heads,
+                d_head,
+                page_size,
+                pages_per_v_tile,
+                V_TILE,
+            )
+            nisa.nc_matmul(dst=attn_out_psum, stationary=exp_t, moving=v_sbuf)
+        nisa.tensor_copy(dst=tile_out, src=attn_out_psum)
+        nisa.tensor_tensor(
+            dst=running_out,
+            data1=scaled_running_out,
+            data2=tile_out,
+            op=nl.add,
+        )
+        nisa.tensor_copy(dst=row_max, src=new_row_max)
+        nisa.tensor_copy(dst=sum_row, src=new_sum_row)
+
+    nisa.reciprocal(dst=inverse_sum_row, data=sum_row)
+    nisa.tensor_scalar(
+        dst=running_out,
+        data=running_out,
+        op0=nl.multiply,
+        operand0=inverse_sum_row,
+    )
+    nisa.tensor_copy(dst=attn_out_sbuf, src=running_out)
+    out_row = q_idx * num_kv_heads + kv_head
+    nisa.dma_copy(
+        dst=out_grouped[out_row, 0:heads_per_kv, 0:d_head],
+        src=attn_out_sbuf,
+    )
+
+
+def paged_attention_decode_2d(
+    q,
+    k_cache,
+    v_cache,
+    new_k,
+    new_v,
+    slot_mapping,
+    block_table,
+    seq_lens,
+    query_start_len,
+):
+    """Decode paged attention with shared GQA K/V loads.
+
+    The cache update runs first so the current decode row is visible in the
+    subsequent attention stream. The loop order is batch lane -> KV head; for
+    each KV head, one K/V tile stream feeds all query heads in its GQA group.
+    """
+    num_tokens = q.shape[0]
+    num_kv_heads = q.shape[1]
+    heads_per_kv = q.shape[2]
+    d_head = q.shape[3]
+    page_size = k_cache.shape[1]
+    max_num_pages = block_table.shape[1]
+    batch_size = block_table.shape[0]
+    scale = 1.0 / (d_head**0.5)
+    k_tile_tokens = nl.tile_size.gemm_moving_fmax
+
+    assert page_size == 16
+    assert heads_per_kv <= nl.tile_size.pmax
+    assert d_head == nl.tile_size.pmax
+    assert num_tokens == batch_size
+    assert k_cache.shape == v_cache.shape
+    assert new_k.shape == new_v.shape
+    assert new_k.shape[0] == num_tokens
+    assert new_k.shape[1] == num_kv_heads
+    assert new_k.shape[2] == d_head
+    assert k_cache.shape[2] == num_kv_heads
+    assert k_cache.shape[3] == d_head
+    assert seq_lens.shape[0] == batch_size
+    assert seq_lens.shape[1] == 1
+
+    _ = query_start_len
+    K_TILE = choose_page_aligned_tile(max_num_pages, page_size, k_tile_tokens)
+    V_TILE = min(nl.tile_size.pmax, K_TILE)
+    pages_per_k_tile = K_TILE // page_size
+    pages_per_v_tile = V_TILE // page_size
+    assert max_num_pages % pages_per_k_tile == 0
+    num_k_tiles = max_num_pages // pages_per_k_tile
+    v_tiles_per_k_tile = K_TILE // V_TILE
+
+    out = nl.ndarray(q.shape, dtype=q.dtype, buffer=nl.shared_hbm)
+    q_grouped = q.reshape((num_tokens * num_kv_heads, heads_per_kv, d_head))
+    out_grouped = out.reshape((num_tokens * num_kv_heads, heads_per_kv, d_head))
+
+    update_decode_cache_inline(
+        k_cache,
+        v_cache,
+        new_k,
+        new_v,
+        slot_mapping,
+        num_tokens,
+        num_kv_heads,
+        d_head,
+        page_size,
+    )
+
+    block_table_sbuf = nl.ndarray(
+        (1, batch_size * max_num_pages), dtype=block_table.dtype, buffer=nl.sbuf
+    )
+    seq_lens_sbuf = nl.ndarray((1, batch_size), dtype=seq_lens.dtype, buffer=nl.sbuf)
+    nisa.dma_copy(
+        dst=block_table_sbuf,
+        src=block_table.reshape((1, batch_size * max_num_pages))[
+            0:1, 0 : batch_size * max_num_pages
+        ],
+    )
+    nisa.dma_copy(
+        dst=seq_lens_sbuf,
+        src=seq_lens.reshape((1, batch_size))[0:1, 0:batch_size],
+    )
+    page_offsets = make_page_offsets(pages_per_k_tile, page_size)
+    inactive_pages = nl.full(
+        (1, pages_per_k_tile), -1, dtype=block_table.dtype, buffer=nl.sbuf
+    )
+    positions = nl.ndarray((1, K_TILE), dtype=nl.float32, buffer=nl.sbuf)
+
+    for q_idx in nl.sequential_range(num_tokens):
+        seq_len = seq_lens_sbuf[nl.ds(0, 1), nl.ds(q_idx, 1)]
+        seq_len_f32 = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
+        nisa.tensor_copy(dst=seq_len_f32, src=seq_len)
+
+        for kv_head in nl.sequential_range(num_kv_heads):
+            compute_decode_kv_head_group(
+                q_grouped,
+                out_grouped,
+                k_cache,
+                v_cache,
+                block_table_sbuf,
+                seq_len_f32,
+                q_idx,
+                kv_head,
+                num_kv_heads,
+                heads_per_kv,
+                d_head,
+                page_size,
+                pages_per_k_tile,
+                pages_per_v_tile,
+                K_TILE,
+                V_TILE,
+                num_k_tiles,
+                v_tiles_per_k_tile,
+                page_offsets,
+                inactive_pages,
+                max_num_pages,
+                scale,
+                positions,
+            )
+
+    return out
+
+
+def load_grouped_q_tile(
+    q_rows,
+    local_q_start,
+    kv_head,
+    all_heads_dim,
+    heads_per_kv,
+    q_per_head_tile,
+    q_group_tile,
+    d_head,
+    scale,
+):
+    """Load [heads_per_kv, q_per_head_tile] as one matmul partition tile.
+
+    Query rows are laid out as:
+      head_group 0 query rows, then head_group 1 query rows, ...
+
+    After transpose, the tile is [d_head, heads_per_kv * q_per_head_tile], so
+    one K/V stream can feed all query rows in the grouped tile.
+    """
+    q_loaded = nl.ndarray((q_group_tile, d_head), dtype=q_rows.dtype, buffer=nl.sbuf)
+    q_loaded_f32 = nl.ndarray((q_group_tile, d_head), dtype=nl.float32, buffer=nl.sbuf)
+    q_transposed = nl.ndarray((d_head, q_group_tile), dtype=nl.float32, buffer=nl.psum)
+    q_sbuf = nl.ndarray((d_head, q_group_tile), dtype=q_rows.dtype, buffer=nl.sbuf)
+    nisa.memset(q_loaded, 0.0)
+    for head_group in nl.affine_range(heads_per_kv):
+        group_offset = head_group * q_per_head_tile
+        head_offset = (kv_head * heads_per_kv + head_group) * d_head
+        nisa.dma_copy(
+            dst=q_loaded[nl.ds(group_offset, q_per_head_tile), 0:d_head],
+            src=q_rows.ap(
+                pattern=[[all_heads_dim, q_per_head_tile], [1, d_head]],
+                offset=head_offset,
+                scalar_offset=local_q_start,
+                indirect_dim=0,
+            ),
+            dge_mode=nisa.dge_mode.swdge,
+            oob_mode=nisa.oob_mode.skip,
+        )
+    nisa.tensor_copy(dst=q_loaded_f32, src=q_loaded)
+    nisa.nc_transpose(dst=q_transposed, data=q_loaded_f32)
+    nisa.tensor_copy(dst=q_sbuf, src=q_transposed)
+    nisa.activation(dst=q_sbuf, op=nl.copy, data=q_sbuf, scale=scale)
+    return q_sbuf
+
+
+def build_grouped_q_positions(
+    local_q_start,
+    context_tail,
+    heads_per_kv,
+    q_per_head_tile,
+    q_group_tile,
+):
+    """Build repeated absolute query positions for grouped GQA lanes."""
+    base_positions = nl.ndarray((q_per_head_tile, 1), dtype=nl.float32, buffer=nl.sbuf)
+    q_positions = nl.ndarray((q_group_tile, 1), dtype=nl.float32, buffer=nl.sbuf)
+    local_q_start_f32 = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
+    nisa.iota(base_positions, [[q_per_head_tile, 1]], channel_multiplier=1)
+    for head_group in nl.affine_range(heads_per_kv):
+        group_offset = head_group * q_per_head_tile
+        nisa.tensor_copy(
+            dst=q_positions[nl.ds(group_offset, q_per_head_tile), 0:1],
+            src=base_positions,
+        )
+    nisa.tensor_copy(dst=local_q_start_f32, src=local_q_start)
+    nisa.tensor_tensor(
+        dst=q_positions,
+        data1=q_positions,
+        data2=nl.broadcast_to(local_q_start_f32, q_positions.shape),
+        op=nl.add,
+    )
+    nisa.tensor_tensor(
+        dst=q_positions,
+        data1=q_positions,
+        data2=nl.broadcast_to(context_tail, q_positions.shape),
+        op=nl.add,
+    )
+    return q_positions
+
+
+def build_valid_q_lanes(
+    local_q_start,
+    q_end_seq,
+    heads_per_kv,
+    q_per_head_tile,
+    q_group_tile,
+):
+    """Mark only live compact-query rows inside the final ragged Q tile."""
+    base_positions = nl.ndarray((q_per_head_tile, 1), dtype=nl.float32, buffer=nl.sbuf)
+    q_rows = nl.ndarray((q_group_tile, 1), dtype=nl.float32, buffer=nl.sbuf)
+    local_q_start_f32 = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
+    q_end_f32 = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
+    nisa.iota(base_positions, [[q_per_head_tile, 1]], channel_multiplier=1)
+    for head_group in nl.affine_range(heads_per_kv):
+        group_offset = head_group * q_per_head_tile
+        nisa.tensor_copy(
+            dst=q_rows[nl.ds(group_offset, q_per_head_tile), 0:1],
+            src=base_positions,
+        )
+    nisa.tensor_copy(dst=local_q_start_f32, src=local_q_start)
+    nisa.tensor_copy(dst=q_end_f32, src=q_end_seq)
+    nisa.tensor_tensor(
+        dst=q_rows,
+        data1=q_rows,
+        data2=nl.broadcast_to(local_q_start_f32, q_rows.shape),
+        op=nl.add,
+    )
+    return nl.less(q_rows, nl.broadcast_to(q_end_f32, q_rows.shape))
+
+
+def store_grouped_output(
+    out_rows,
+    attn_out_sbuf,
+    local_q_start,
+    kv_head,
+    all_heads_dim,
+    heads_per_kv,
+    q_per_head_tile,
+    d_head,
+):
+    """Scatter grouped prefill output rows back to compact [token, head] layout."""
+    for head_group in nl.affine_range(heads_per_kv):
+        group_offset = head_group * q_per_head_tile
+        head_offset = (kv_head * heads_per_kv + head_group) * d_head
+        nisa.dma_copy(
+            dst=out_rows.ap(
+                pattern=[[all_heads_dim, q_per_head_tile], [1, d_head]],
+                offset=head_offset,
+                scalar_offset=local_q_start,
+                indirect_dim=0,
+            ),
+            src=attn_out_sbuf[nl.ds(group_offset, q_per_head_tile), 0:d_head],
+            dge_mode=nisa.dge_mode.swdge,
+            oob_mode=nisa.oob_mode.skip,
+        )
 
 
 def paged_attention_2d(
@@ -16,22 +772,16 @@ def paged_attention_2d(
     seq_lens,
     query_start_len,
 ):
-    """2D paged attention over split K/V pages using llmd/Triton metadata.
+    """Ragged prefill/mixed paged attention with GQA Q grouping.
 
-    Shapes:
-      q:               [num_tokens, num_kv_heads, heads_per_kv, head_dim]
-      k_cache/v_cache: [num_pages, page_size, num_kv_heads, head_dim]
-      new_k/new_v:     [num_tokens, num_kv_heads, head_dim]
-      slot_mapping:    [num_tokens] flattened cache slots, used by decode
-      block_table:     [batch_size, max_num_pages]
-      seq_lens:        [batch_size, 1]
-      query_start_len: [batch_size + 1, 1]
+    q is stored as compact rows, and K/V history is addressed by sequence via
+    block_table. query_start_len gives each sequence's live q-row interval. For
+    each sequence and KV head, the kernel walks that interval in grouped Q
+    tiles, streams physical K/V pages, applies the causal mask from absolute
+    query/key positions, and scatters the grouped result back to compact rows.
 
-    This NKI version supports batched decode (one query per batch row) and
-    fixed-block batched prefill where each batch row owns the same number of
-    compiled BLOCK_Q query blocks. It uses query_start_len/seq_lens-compatible
-    metadata and expects the custom call to receive the local manual-computation
-    shard.
+    Grouping places multiple GQA query heads in the same tile so they share the
+    same page metadata and K/V loads for a KV head.
     """
     num_tokens = q.shape[0]
     num_kv_heads = q.shape[1]
@@ -42,6 +792,10 @@ def paged_attention_2d(
     batch_size = block_table.shape[0]
     scale = 1.0 / (d_head**0.5)
 
+    assert page_size == 16
+    assert d_head == nl.tile_size.pmax
+    assert heads_per_kv <= nl.tile_size.pmax
+    assert nl.tile_size.pmax % heads_per_kv == 0
     assert q.shape[0] >= batch_size
     assert k_cache.shape == v_cache.shape
     assert new_k.shape == new_v.shape
@@ -50,195 +804,227 @@ def paged_attention_2d(
     assert new_k.shape[2] == d_head
     assert k_cache.shape[2] == num_kv_heads
     assert k_cache.shape[3] == d_head
+    assert seq_lens.shape[0] == batch_size
     assert seq_lens.shape[1] == 1
     assert query_start_len.shape[0] == batch_size + 1
     assert query_start_len.shape[1] == 1
-    assert page_size <= 128, "page_size must fit the NKI partition dimension"
+
+    K_TILE = choose_page_aligned_tile(
+        max_num_pages, page_size, nl.tile_size.gemm_moving_fmax
+    )
+    V_TILE = min(nl.tile_size.pmax, K_TILE)
+    q_per_head_tile = nl.tile_size.pmax // heads_per_kv
+    q_group_tile = q_per_head_tile * heads_per_kv
+    pages_per_k_tile = K_TILE // page_size
+    pages_per_v_tile = V_TILE // page_size
+    assert max_num_pages % pages_per_k_tile == 0
+    num_k_tiles = max_num_pages // pages_per_k_tile
+    v_tiles_per_k_tile = K_TILE // V_TILE
 
     out = nl.ndarray(q.shape, dtype=q.dtype, buffer=nl.shared_hbm)
+    all_heads_dim = num_kv_heads * heads_per_kv * d_head
+    q_rows = q.reshape((num_tokens, all_heads_dim))
+    out_rows = out.reshape((num_tokens, all_heads_dim))
 
-    block_table_sbuf = nl.load(block_table.reshape((1, batch_size * max_num_pages)))
-    seq_lens_sbuf = nl.load(seq_lens.reshape((1, batch_size)))
-
-    if num_tokens == batch_size:
-        k_cache_flat = k_cache.reshape(
-            (k_cache.shape[0] * page_size, num_kv_heads, d_head)
+    block_table_sbuf, seq_lens_sbuf, query_start_len_sbuf = (
+        load_static_attention_metadata(
+            block_table,
+            seq_lens,
+            query_start_len,
+            batch_size,
+            max_num_pages,
         )
-        v_cache_flat = v_cache.reshape(
-            (v_cache.shape[0] * page_size, num_kv_heads, d_head)
-        )
-        slot_mapping_2d = slot_mapping.reshape((1, num_tokens))
+    )
+    page_offsets = make_page_offsets(pages_per_k_tile, page_size)
+    inactive_pages = nl.full(
+        (1, pages_per_k_tile), -1, dtype=block_table.dtype, buffer=nl.sbuf
+    )
+    key_positions_f32 = nl.ndarray((1, K_TILE), dtype=nl.float32, buffer=nl.sbuf)
 
-        for token_idx in nl.sequential_range(batch_size):
-            slot_sbuf = nl.ndarray((1, 1), dtype=slot_mapping.dtype, buffer=nl.sbuf)
-            nisa.dma_copy(
-                dst=slot_sbuf,
-                src=slot_mapping_2d[0, nl.ds(token_idx, 1)],
+    for kv_head in nl.affine_range(num_kv_heads):
+        for seq_idx in nl.affine_range(batch_size):
+            q_start_seq = query_start_len_sbuf[nl.ds(0, 1), nl.ds(seq_idx, 1)]
+            q_end_seq = query_start_len_sbuf[nl.ds(0, 1), nl.ds(seq_idx + 1, 1)]
+            seq_len = seq_lens_sbuf[nl.ds(0, 1), nl.ds(seq_idx, 1)]
+
+            current_q_start = nl.ndarray((1, 1), dtype=nl.int32, buffer=nl.sbuf)
+            q_start_f32 = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
+            q_end_f32 = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
+            q_tokens_remaining = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
+            loop_one_i32 = nl.full((1, 1), 1, dtype=nl.int32, buffer=nl.sbuf)
+            loop_zero_i32 = nl.full((1, 1), 0, dtype=nl.int32, buffer=nl.sbuf)
+            loop_zero_f32 = nl.full((1, 1), 0.0, dtype=nl.float32, buffer=nl.sbuf)
+            nisa.tensor_copy(dst=current_q_start, src=q_start_seq)
+            nisa.tensor_copy(dst=q_start_f32, src=q_start_seq)
+            nisa.tensor_copy(dst=q_end_f32, src=q_end_seq)
+            nisa.tensor_scalar(
+                dst=q_tokens_remaining,
+                data=q_end_f32,
+                op0=nl.subtract,
+                operand0=q_start_f32,
             )
+            q_loop_live = nl.greater(q_tokens_remaining, loop_zero_f32)
+            q_loop_continue = nl.where(
+                q_loop_live, loop_one_i32, loop_zero_i32, dtype=nl.int32
+            )
+            q_loop_reg = nisa.register_alloc(None)
+            nisa.register_load(dst=q_loop_reg, src=q_loop_continue)
 
-            for kv_head in nl.affine_range(num_kv_heads):
-                k_sbuf = nl.ndarray((1, d_head), dtype=new_k.dtype, buffer=nl.sbuf)
-                v_sbuf = nl.ndarray((1, d_head), dtype=new_v.dtype, buffer=nl.sbuf)
-                nisa.dma_copy(
-                    dst=k_sbuf,
-                    src=new_k[nl.ds(token_idx, 1), kv_head, :],
-                )
-                nisa.dma_copy(
-                    dst=v_sbuf,
-                    src=new_v[nl.ds(token_idx, 1), kv_head, :],
-                )
-                nisa.dma_copy(
-                    dst=k_cache_flat.ap(
-                        pattern=[[num_kv_heads * d_head, 1], [1, d_head]],
-                        offset=kv_head * d_head,
-                        scalar_offset=slot_sbuf,
-                        indirect_dim=0,
-                    ),
-                    src=k_sbuf,
-                    dge_mode=nisa.dge_mode.swdge,
-                    oob_mode=nisa.oob_mode.skip,
-                )
-                nisa.dma_copy(
-                    dst=v_cache_flat.ap(
-                        pattern=[[num_kv_heads * d_head, 1], [1, d_head]],
-                        offset=kv_head * d_head,
-                        scalar_offset=slot_sbuf,
-                        indirect_dim=0,
-                    ),
-                    src=v_sbuf,
-                    dge_mode=nisa.dge_mode.swdge,
-                    oob_mode=nisa.oob_mode.skip,
-                )
+            while q_loop_reg:
+                local_q_start = nisa.register_alloc(None)
+                nisa.register_load(dst=local_q_start, src=current_q_start)
 
-        assert max_num_pages <= 128, (
-            "decode max_num_pages must fit the NKI partition dimension"
-        )
-
-        DECODE_TOKEN_TILE = 128
-        assert DECODE_TOKEN_TILE % page_size == 0, (
-            "decode page_size must divide DECODE_TOKEN_TILE"
-        )
-        pages_per_tile = DECODE_TOKEN_TILE // page_size
-        assert max_num_pages % pages_per_tile == 0, (
-            "decode max_num_pages must be a multiple of pages_per_tile"
-        )
-        tile_tokens = DECODE_TOKEN_TILE
-        num_page_tiles = max_num_pages // pages_per_tile
-
-        page_positions = nl.ndarray((1, tile_tokens), dtype=nl.float32, buffer=nl.sbuf)
-        seq_len_f32 = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
-        qk = nl.ndarray((heads_per_kv, tile_tokens), dtype=nl.float32, buffer=nl.psum)
-        qk_rounded = nl.ndarray(
-            (heads_per_kv, tile_tokens), dtype=q.dtype, buffer=nl.sbuf
-        )
-        masked_qk = nl.ndarray(
-            (heads_per_kv, tile_tokens), dtype=nl.float32, buffer=nl.sbuf
-        )
-        row_max = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
-        norm_tile = nl.ndarray(
-            (heads_per_kv, tile_tokens), dtype=nl.float32, buffer=nl.sbuf
-        )
-        exp_tile = nl.ndarray(
-            (heads_per_kv, tile_tokens), dtype=nl.float32, buffer=nl.sbuf
-        )
-        sum_row = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
-        inverse_sum_row = nl.ndarray(
-            (heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf
-        )
-        attn_out_psum = nl.ndarray(
-            (heads_per_kv, d_head), dtype=nl.float32, buffer=nl.psum
-        )
-        attn_out_sbuf = nl.ndarray(
-            (heads_per_kv, d_head), dtype=q.dtype, buffer=nl.sbuf
-        )
-        running_out = nl.ndarray(
-            (heads_per_kv, d_head), dtype=nl.float32, buffer=nl.sbuf
-        )
-        old_max_delta = nl.ndarray(
-            (heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf
-        )
-        old_max_scale = nl.ndarray(
-            (heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf
-        )
-        scaled_sum_row = nl.ndarray(
-            (heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf
-        )
-        scaled_running_out = nl.ndarray(
-            (heads_per_kv, d_head), dtype=nl.float32, buffer=nl.sbuf
-        )
-        tile_max = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
-        tile_sum = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
-        new_row_max = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
-        new_sum_row = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
-        pv_sbuf = nl.ndarray(
-            (heads_per_kv, d_head), dtype=nl.float32, buffer=nl.sbuf
-        )
-        neg_tile = nl.full(
-            (heads_per_kv, tile_tokens),
-            NEG_INF,
-            dtype=nl.float32,
-            buffer=nl.sbuf,
-        )
-
-        for q_idx in nl.sequential_range(num_tokens):
-            seq_idx = q_idx
-            seq_len = seq_lens_sbuf[0, seq_idx]
-
-            for kv_head in nl.sequential_range(num_kv_heads):
-                q_sbuf = nl.load_transpose2d(
-                    q[q_idx, kv_head, :, :],
-                    dtype=q.dtype,
-                )
-                q_scaled = nl.ndarray(
-                    (d_head, heads_per_kv), dtype=q.dtype, buffer=nl.sbuf
-                )
+                seq_len_f32 = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
+                context_tail = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
+                nisa.tensor_copy(dst=seq_len_f32, src=seq_len)
                 nisa.tensor_scalar(
-                    dst=q_scaled,
-                    data=q_sbuf,
-                    op0=nl.multiply,
-                    operand0=scale,
+                    dst=context_tail,
+                    data=seq_len_f32,
+                    op0=nl.subtract,
+                    operand0=q_end_f32,
                 )
 
+                q_sbuf = load_grouped_q_tile(
+                    q_rows,
+                    local_q_start,
+                    kv_head,
+                    all_heads_dim,
+                    heads_per_kv,
+                    q_per_head_tile,
+                    q_group_tile,
+                    d_head,
+                    scale,
+                )
+                q_positions_abs = build_grouped_q_positions(
+                    current_q_start,
+                    context_tail,
+                    heads_per_kv,
+                    q_per_head_tile,
+                    q_group_tile,
+                )
+                valid_q_row = build_valid_q_lanes(
+                    current_q_start,
+                    q_end_seq,
+                    heads_per_kv,
+                    q_per_head_tile,
+                    q_group_tile,
+                )
+
+                qk_psum = nl.ndarray(
+                    (q_group_tile, K_TILE), dtype=nl.float32, buffer=nl.psum
+                )
+                qk_sbuf = nl.ndarray(
+                    (q_group_tile, K_TILE), dtype=nl.float32, buffer=nl.sbuf
+                )
+                masked_qk = nl.ndarray(
+                    (q_group_tile, K_TILE), dtype=nl.float32, buffer=nl.sbuf
+                )
+                neg_tile = nl.full(
+                    (q_group_tile, K_TILE),
+                    NEG_INF,
+                    dtype=nl.float32,
+                    buffer=nl.sbuf,
+                )
+                row_max = nl.ndarray(
+                    (q_group_tile, 1), dtype=nl.float32, buffer=nl.sbuf
+                )
+                sum_row = nl.ndarray(
+                    (q_group_tile, 1), dtype=nl.float32, buffer=nl.sbuf
+                )
+                running_out = nl.ndarray(
+                    (q_group_tile, d_head), dtype=nl.float32, buffer=nl.sbuf
+                )
+                tile_max = nl.ndarray(
+                    (q_group_tile, 1), dtype=nl.float32, buffer=nl.sbuf
+                )
+                tile_sum = nl.ndarray(
+                    (q_group_tile, 1), dtype=nl.float32, buffer=nl.sbuf
+                )
+                new_row_max = nl.ndarray(
+                    (q_group_tile, 1), dtype=nl.float32, buffer=nl.sbuf
+                )
+                old_max_delta = nl.ndarray(
+                    (q_group_tile, 1), dtype=nl.float32, buffer=nl.sbuf
+                )
+                old_max_scale = nl.ndarray(
+                    (q_group_tile, 1), dtype=nl.float32, buffer=nl.sbuf
+                )
+                scaled_sum_row = nl.ndarray(
+                    (q_group_tile, 1), dtype=nl.float32, buffer=nl.sbuf
+                )
+                new_sum_row = nl.ndarray(
+                    (q_group_tile, 1), dtype=nl.float32, buffer=nl.sbuf
+                )
+                scaled_running_out = nl.ndarray(
+                    (q_group_tile, d_head), dtype=nl.float32, buffer=nl.sbuf
+                )
+                exp_tile = nl.ndarray(
+                    (q_group_tile, K_TILE), dtype=nl.float32, buffer=nl.sbuf
+                )
+                neg_new_row_max = nl.ndarray(
+                    (q_group_tile, 1), dtype=nl.float32, buffer=nl.sbuf
+                )
+                exp_t_psum = nl.ndarray(
+                    (V_TILE, q_group_tile), dtype=nl.float32, buffer=nl.psum
+                )
+                exp_t = nl.ndarray(
+                    (V_TILE, q_group_tile), dtype=v_cache.dtype, buffer=nl.sbuf
+                )
+                attn_out_psum = nl.ndarray(
+                    (q_group_tile, d_head), dtype=nl.float32, buffer=nl.psum
+                )
+                tile_out = nl.ndarray(
+                    (q_group_tile, d_head), dtype=nl.float32, buffer=nl.sbuf
+                )
+
+                one_row = nl.full(
+                    (q_group_tile, 1), 1.0, dtype=nl.float32, buffer=nl.sbuf
+                )
                 nisa.memset(row_max, NEG_INF)
+                row_max = nl.where(valid_q_row, row_max, one_row, dtype=nl.float32)
                 nisa.memset(sum_row, 0.0)
                 nisa.memset(running_out, 0.0)
-                for page_tile_idx in nl.sequential_range(num_page_tiles):
-                    page_start = page_tile_idx * tile_tokens
 
-                    nisa.iota(page_positions, [[1, tile_tokens]], offset=page_start)
-                    nisa.tensor_copy(dst=seq_len_f32, src=seq_len)
-                    k_sbuf = nl.ndarray(
-                        (d_head, tile_tokens), dtype=k_cache.dtype, buffer=nl.sbuf
+                for k_tile_idx in nl.sequential_range(num_k_tiles):
+                    physical_pages = build_k_tile_pages(
+                        block_table_sbuf,
+                        seq_len_f32,
+                        seq_idx,
+                        k_tile_idx,
+                        page_offsets,
+                        inactive_pages,
+                        max_num_pages,
+                        pages_per_k_tile,
+                        K_TILE,
                     )
-                    nisa.memset(k_sbuf, 0.0)
-                    for page_in_tile in nl.affine_range(pages_per_tile):
-                        logical_page_idx = page_tile_idx * pages_per_tile + page_in_tile
-                        tile_offset = page_in_tile * page_size
-                        physical_page = block_table_sbuf[
-                            0, nl.ds(seq_idx * max_num_pages + logical_page_idx, 1)
-                        ]
-                        nisa.dma_copy(
-                            k_sbuf[0:d_head, nl.ds(tile_offset, page_size)],
-                            k_cache.ap(
-                                pattern=[[1, d_head], [num_kv_heads * d_head, page_size]],
-                                offset=kv_head * d_head,
-                                scalar_offset=physical_page,
-                                indirect_dim=0,
-                            ),
-                            dge_mode=nisa.dge_mode.swdge,
-                            oob_mode=nisa.oob_mode.skip,
-                        )
-                    nisa.memset(qk, 0.0)
-                    nisa.nc_matmul(dst=qk, stationary=q_scaled, moving=k_sbuf)
-                    nisa.tensor_copy(dst=qk_rounded, src=qk)
+                    k_sbuf = load_k_tile(
+                        k_cache,
+                        physical_pages,
+                        kv_head,
+                        num_kv_heads,
+                        d_head,
+                        page_size,
+                        pages_per_k_tile,
+                        K_TILE,
+                    )
+                    nisa.memset(qk_psum, 0.0)
+                    nisa.nc_matmul(dst=qk_psum, stationary=q_sbuf, moving=k_sbuf)
+                    nisa.tensor_copy(dst=qk_sbuf, src=qk_psum)
 
-                    valid_seq = nl.less(
-                        page_positions,
-                        nl.broadcast_to(seq_len_f32, page_positions.shape),
+                    nisa.iota(
+                        key_positions_f32, [[1, K_TILE]], offset=k_tile_idx * K_TILE
+                    )
+                    causal_mask = nl.greater_equal(
+                        nl.broadcast_to(q_positions_abs, qk_sbuf.shape),
+                        nl.broadcast_to(key_positions_f32, qk_sbuf.shape),
+                    )
+                    combined_mask = nl.logical_and(
+                        causal_mask,
+                        nl.broadcast_to(valid_q_row, qk_sbuf.shape),
                     )
                     masked_qk = nl.where(
-                        nl.broadcast_to(valid_seq, masked_qk.shape),
-                        qk_rounded,
+                        combined_mask,
+                        qk_sbuf,
                         neg_tile,
                         dtype=nl.float32,
                     )
@@ -260,23 +1046,21 @@ def paged_attention_2d(
                         op0=nl.subtract,
                         operand0=new_row_max,
                     )
-                    nisa.activation(
-                        dst=old_max_scale,
-                        op=nl.exp,
-                        data=old_max_delta,
-                    )
+                    nisa.activation(dst=old_max_scale, op=nl.exp, data=old_max_delta)
                     nisa.tensor_scalar(
-                        dst=norm_tile,
-                        data=masked_qk,
-                        op0=nl.subtract,
-                        operand0=new_row_max,
+                        dst=neg_new_row_max,
+                        data=new_row_max,
+                        op0=nl.multiply,
+                        operand0=-1.0,
                     )
-                    nisa.activation(dst=exp_tile, op=nl.exp, data=norm_tile)
-                    nisa.tensor_reduce(
-                        dst=tile_sum,
-                        op=nl.add,
-                        data=exp_tile,
-                        axis=(1,),
+                    nisa.activation(
+                        dst=exp_tile,
+                        op=nl.exp,
+                        data=masked_qk,
+                        bias=neg_new_row_max,
+                        reduce_op=nl.add,
+                        reduce_res=tile_sum,
+                        reduce_cmd=nisa.reduce_cmd.reset_reduce,
                     )
                     nisa.tensor_scalar(
                         dst=scaled_sum_row,
@@ -296,427 +1080,98 @@ def paged_attention_2d(
                         op0=nl.multiply,
                         operand0=old_max_scale,
                     )
-
-                    prob_t_psum = nl.ndarray(
-                        (tile_tokens, heads_per_kv), dtype=nl.float32, buffer=nl.psum
-                    )
-                    prob_t = nl.ndarray(
-                        (tile_tokens, heads_per_kv), dtype=v_cache.dtype, buffer=nl.sbuf
-                    )
-                    nisa.nc_transpose(dst=prob_t_psum, data=exp_tile)
-                    nisa.tensor_copy(dst=prob_t, src=prob_t_psum)
-
-                    v_sbuf = nl.ndarray(
-                        (tile_tokens, d_head), dtype=v_cache.dtype, buffer=nl.sbuf
-                    )
-                    nisa.memset(v_sbuf, 0.0)
-                    for page_in_tile in nl.affine_range(pages_per_tile):
-                        logical_page_idx = page_tile_idx * pages_per_tile + page_in_tile
-                        tile_offset = page_in_tile * page_size
-                        physical_page = block_table_sbuf[
-                            0, nl.ds(seq_idx * max_num_pages + logical_page_idx, 1)
-                        ]
-                        nisa.dma_copy(
-                            v_sbuf[nl.ds(tile_offset, page_size), 0:d_head],
-                            v_cache.ap(
-                                pattern=[[num_kv_heads * d_head, page_size], [1, d_head]],
-                                offset=kv_head * d_head,
-                                scalar_offset=physical_page,
-                                indirect_dim=0,
-                            ),
-                            dge_mode=nisa.dge_mode.swdge,
-                            oob_mode=nisa.oob_mode.skip,
-                        )
                     nisa.memset(attn_out_psum, 0.0)
-                    nisa.nc_matmul(
-                        dst=attn_out_psum,
-                        stationary=prob_t,
-                        moving=v_sbuf,
-                    )
-                    nisa.tensor_copy(dst=pv_sbuf, src=attn_out_psum)
+                    for v_subtile_idx in nl.affine_range(v_tiles_per_k_tile):
+                        v_start = v_subtile_idx * V_TILE
+                        nisa.nc_transpose(
+                            dst=exp_t_psum,
+                            data=exp_tile[:, nl.ds(v_start, V_TILE)],
+                        )
+                        nisa.tensor_copy(dst=exp_t, src=exp_t_psum)
+                        v_sbuf = load_v_subtile(
+                            v_cache,
+                            physical_pages,
+                            kv_head,
+                            v_subtile_idx,
+                            num_kv_heads,
+                            d_head,
+                            page_size,
+                            pages_per_v_tile,
+                            V_TILE,
+                        )
+                        nisa.nc_matmul(
+                            dst=attn_out_psum, stationary=exp_t, moving=v_sbuf
+                        )
+                    nisa.tensor_copy(dst=tile_out, src=attn_out_psum)
                     nisa.tensor_tensor(
                         dst=running_out,
                         data1=scaled_running_out,
-                        data2=pv_sbuf,
+                        data2=tile_out,
                         op=nl.add,
                     )
                     nisa.tensor_copy(dst=row_max, src=new_row_max)
                     nisa.tensor_copy(dst=sum_row, src=new_sum_row)
 
-                nisa.reciprocal(dst=inverse_sum_row, data=sum_row)
+                inverse_sum_row = nl.ndarray(
+                    (q_group_tile, 1), dtype=nl.float32, buffer=nl.sbuf
+                )
+                one_row = nl.full(
+                    (q_group_tile, 1), 1.0, dtype=nl.float32, buffer=nl.sbuf
+                )
+                zero_out = nl.full(
+                    (q_group_tile, d_head), 0.0, dtype=nl.float32, buffer=nl.sbuf
+                )
+                safe_sum_row = nl.where(valid_q_row, sum_row, one_row, dtype=nl.float32)
+                safe_running_out = nl.where(
+                    nl.broadcast_to(valid_q_row, running_out.shape),
+                    running_out,
+                    zero_out,
+                    dtype=nl.float32,
+                )
+                nisa.reciprocal(dst=inverse_sum_row, data=safe_sum_row)
                 nisa.tensor_scalar(
-                    dst=running_out,
-                    data=running_out,
+                    dst=safe_running_out,
+                    data=safe_running_out,
                     op0=nl.multiply,
                     operand0=inverse_sum_row,
                 )
-                nisa.tensor_copy(dst=attn_out_sbuf, src=running_out)
-                nl.store(dst=out[q_idx, kv_head, :, :], value=attn_out_sbuf)
-    else:
-        BLOCK_Q = 128
-        assert num_tokens % BLOCK_Q == 0, (
-            f"prefill/mixed num_tokens ({num_tokens}) must be a multiple of BLOCK_Q ({BLOCK_Q})"
-        )
-        assert max_num_pages <= 128, (
-            "max_num_pages must fit the NKI partition dimension"
-        )
+                attn_out_sbuf = nl.ndarray(
+                    (q_group_tile, d_head), dtype=q.dtype, buffer=nl.sbuf
+                )
+                nisa.tensor_copy(dst=attn_out_sbuf, src=safe_running_out)
+                store_grouped_output(
+                    out_rows,
+                    attn_out_sbuf,
+                    local_q_start,
+                    kv_head,
+                    all_heads_dim,
+                    heads_per_kv,
+                    q_per_head_tile,
+                    d_head,
+                )
 
-        num_q_blocks = num_tokens // BLOCK_Q
-        query_start_len_sbuf = nl.load(query_start_len.reshape((1, batch_size + 1)))
-
-        for kv_head in nl.affine_range(num_kv_heads):
-            for head_group in nl.affine_range(heads_per_kv):
-                for q_block_idx in nl.affine_range(num_q_blocks):
-                    q_start = q_block_idx * BLOCK_Q
-                    q_sbuf = nl.ndarray(
-                        (d_head, BLOCK_Q), dtype=q.dtype, buffer=nl.sbuf
-                    )
-                    nisa.dma_transpose(
-                        q_sbuf,
-                        q[nl.ds(q_start, BLOCK_Q), kv_head, head_group, :],
-                    )
-                    q_scaled = nl.ndarray(
-                        (d_head, BLOCK_Q), dtype=q.dtype, buffer=nl.sbuf
-                    )
-                    nisa.tensor_scalar(
-                        dst=q_scaled,
-                        data=q_sbuf,
-                        op0=nl.multiply,
-                        operand0=scale,
-                    )
-
-                    block_out = nl.ndarray(
-                        (BLOCK_Q, d_head), dtype=nl.float32, buffer=nl.sbuf
-                    )
-                    block_out_next = nl.ndarray(
-                        (BLOCK_Q, d_head), dtype=nl.float32, buffer=nl.sbuf
-                    )
-                    neg_tile = nl.full(
-                        (BLOCK_Q, page_size),
-                        NEG_INF,
-                        dtype=nl.float32,
-                        buffer=nl.sbuf,
-                    )
-                    zero_row = nl.full(
-                        (BLOCK_Q, 1), 0.0, dtype=nl.float32, buffer=nl.sbuf
-                    )
-                    one_row = nl.full(
-                        (BLOCK_Q, 1), 1.0, dtype=nl.float32, buffer=nl.sbuf
-                    )
-                    zero_out = nl.full(
-                        (BLOCK_Q, d_head), 0.0, dtype=nl.float32, buffer=nl.sbuf
-                    )
-                    nisa.memset(block_out, 0.0)
-
-                    for seq_idx in nl.sequential_range(batch_size):
-                        q_start_seq = query_start_len_sbuf[0, nl.ds(seq_idx, 1)]
-                        q_end_seq = query_start_len_sbuf[0, nl.ds(seq_idx + 1, 1)]
-                        seq_len = seq_lens_sbuf[0, nl.ds(seq_idx, 1)]
-
-                        qk_psum = nl.ndarray(
-                            (BLOCK_Q, page_size), dtype=nl.float32, buffer=nl.psum
-                        )
-                        qk_rounded = nl.ndarray(
-                            (BLOCK_Q, page_size), dtype=q.dtype, buffer=nl.sbuf
-                        )
-                        masked_qk = nl.ndarray(
-                            (BLOCK_Q, page_size), dtype=nl.float32, buffer=nl.sbuf
-                        )
-                        row_max = nl.ndarray((BLOCK_Q, 1), dtype=nl.float32, buffer=nl.sbuf)
-                        sum_row = nl.ndarray((BLOCK_Q, 1), dtype=nl.float32, buffer=nl.sbuf)
-                        running_out = nl.ndarray(
-                            (BLOCK_Q, d_head), dtype=nl.float32, buffer=nl.sbuf
-                        )
-                        old_max_delta = nl.ndarray(
-                            (BLOCK_Q, 1), dtype=nl.float32, buffer=nl.sbuf
-                        )
-                        old_max_scale = nl.ndarray(
-                            (BLOCK_Q, 1), dtype=nl.float32, buffer=nl.sbuf
-                        )
-                        scaled_sum_row = nl.ndarray(
-                            (BLOCK_Q, 1), dtype=nl.float32, buffer=nl.sbuf
-                        )
-                        scaled_running_out = nl.ndarray(
-                            (BLOCK_Q, d_head), dtype=nl.float32, buffer=nl.sbuf
-                        )
-                        tile_max = nl.ndarray((BLOCK_Q, 1), dtype=nl.float32, buffer=nl.sbuf)
-                        tile_sum = nl.ndarray((BLOCK_Q, 1), dtype=nl.float32, buffer=nl.sbuf)
-                        new_row_max = nl.ndarray(
-                            (BLOCK_Q, 1), dtype=nl.float32, buffer=nl.sbuf
-                        )
-                        new_sum_row = nl.ndarray(
-                            (BLOCK_Q, 1), dtype=nl.float32, buffer=nl.sbuf
-                        )
-                        norm_tile = nl.ndarray(
-                            (BLOCK_Q, page_size), dtype=nl.float32, buffer=nl.sbuf
-                        )
-                        exp_tile = nl.ndarray(
-                            (BLOCK_Q, page_size), dtype=nl.float32, buffer=nl.sbuf
-                        )
-                        q_positions_f32 = nl.ndarray(
-                            (BLOCK_Q, page_size),
-                            dtype=nl.float32,
-                            buffer=nl.sbuf,
-                        )
-                        q_positions_abs = nl.ndarray(
-                            (BLOCK_Q, page_size),
-                            dtype=nl.float32,
-                            buffer=nl.sbuf,
-                        )
-                        combined_mask = nl.ndarray(
-                            (BLOCK_Q, page_size),
-                            dtype=seq_lens.dtype,
-                            buffer=nl.sbuf,
-                        )
-                        q_row_positions_f32 = nl.ndarray(
-                            (BLOCK_Q, 1),
-                            dtype=nl.float32,
-                            buffer=nl.sbuf,
-                        )
-                        key_positions_f32 = nl.ndarray(
-                            (BLOCK_Q, page_size),
-                            dtype=nl.float32,
-                            buffer=nl.sbuf,
-                        )
-                        context_tail_bcast = nl.ndarray(
-                            (BLOCK_Q, page_size),
-                            dtype=nl.float32,
-                            buffer=nl.sbuf,
-                        )
-                        attn_out_psum = nl.ndarray(
-                            (BLOCK_Q, d_head), dtype=nl.float32, buffer=nl.psum
-                        )
-                        pv_sbuf = nl.ndarray(
-                            (BLOCK_Q, d_head), dtype=nl.float32, buffer=nl.sbuf
-                        )
-                        prob_t_psum = nl.ndarray(
-                            (page_size, BLOCK_Q), dtype=nl.float32, buffer=nl.psum
-                        )
-                        prob_t = nl.ndarray(
-                            (page_size, BLOCK_Q), dtype=v_cache.dtype, buffer=nl.sbuf
-                        )
-                        v_sbuf = nl.ndarray(
-                            (page_size, d_head), dtype=v_cache.dtype, buffer=nl.sbuf
-                        )
-                        seq_len_f32 = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
-                        q_start_f32 = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
-                        q_end_f32 = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
-                        context_tail = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
-                        nisa.tensor_copy(dst=seq_len_f32, src=seq_len)
-                        nisa.tensor_copy(dst=q_start_f32, src=q_start_seq)
-                        nisa.tensor_copy(dst=q_end_f32, src=q_end_seq)
-                        nisa.iota(q_row_positions_f32, [[1, 1]], offset=q_start)
-                        valid_q_row = nl.logical_and(
-                            nl.greater_equal(
-                                q_row_positions_f32,
-                                nl.broadcast_to(q_start_f32, q_row_positions_f32.shape),
-                            ),
-                            nl.less(
-                                q_row_positions_f32,
-                                nl.broadcast_to(q_end_f32, q_row_positions_f32.shape),
-                            ),
-                        )
-                        nisa.tensor_scalar(
-                            dst=context_tail,
-                            data=seq_len_f32,
-                            op0=nl.subtract,
-                            operand0=q_end_f32,
-                        )
-                        nisa.iota(
-                            q_positions_f32,
-                            [[0, page_size]],
-                            offset=q_start,
-                            channel_multiplier=1,
-                        )
-                        context_tail_bcast = nl.broadcast_to(
-                            context_tail, context_tail_bcast.shape
-                        )
-                        nisa.tensor_tensor(
-                            dst=q_positions_abs,
-                            data1=q_positions_f32,
-                            data2=context_tail_bcast,
-                            op=nl.add,
-                        )
-
-                        nisa.memset(row_max, NEG_INF)
-                        row_max = nl.where(
-                            valid_q_row, row_max, zero_row, dtype=nl.float32
-                        )
-                        nisa.memset(sum_row, 0.0)
-                        nisa.memset(running_out, 0.0)
-
-                        for logical_page_idx in nl.affine_range(max_num_pages):
-                            page_start = logical_page_idx * page_size
-                            physical_page = block_table_sbuf[
-                                0, nl.ds(seq_idx * max_num_pages + logical_page_idx, 1)
-                            ]
-
-                            k_sbuf = nl.ndarray(
-                                (d_head, page_size), dtype=k_cache.dtype, buffer=nl.sbuf
-                            )
-                            nisa.memset(k_sbuf, 0.0)
-                            nisa.dma_copy(
-                                k_sbuf,
-                                k_cache.ap(
-                                    pattern=[
-                                        [1, d_head],
-                                        [num_kv_heads * d_head, page_size],
-                                    ],
-                                    offset=kv_head * d_head,
-                                    scalar_offset=physical_page,
-                                    indirect_dim=0,
-                                ),
-                                dge_mode=nisa.dge_mode.swdge,
-                                oob_mode=nisa.oob_mode.skip,
-                            )
-                            nisa.memset(qk_psum, 0.0)
-                            nisa.nc_matmul(
-                                dst=qk_psum,
-                                stationary=q_scaled,
-                                moving=k_sbuf,
-                            )
-                            nisa.tensor_copy(dst=qk_rounded, src=qk_psum)
-
-                            nisa.iota(
-                                key_positions_f32,
-                                [[1, page_size]],
-                                offset=page_start,
-                            )
-                            causal_mask = nl.greater_equal(
-                                q_positions_abs, key_positions_f32
-                            )
-                            combined_mask = nl.logical_and(
-                                causal_mask,
-                                nl.broadcast_to(valid_q_row, combined_mask.shape),
-                            )
-                            masked_qk = nl.where(
-                                combined_mask, qk_rounded, neg_tile, dtype=nl.float32
-                            )
-                            nisa.tensor_reduce(
-                                dst=tile_max,
-                                op=nl.maximum,
-                                data=masked_qk,
-                                axis=(1,),
-                            )
-                            nisa.tensor_tensor(
-                                dst=new_row_max,
-                                data1=row_max,
-                                data2=tile_max,
-                                op=nl.maximum,
-                            )
-                            nisa.tensor_scalar(
-                                dst=old_max_delta,
-                                data=row_max,
-                                op0=nl.subtract,
-                                operand0=new_row_max,
-                            )
-                            nisa.activation(
-                                dst=old_max_scale,
-                                op=nl.exp,
-                                data=old_max_delta,
-                            )
-                            nisa.tensor_scalar(
-                                dst=norm_tile,
-                                data=masked_qk,
-                                op0=nl.subtract,
-                                operand0=new_row_max,
-                            )
-                            nisa.activation(dst=exp_tile, op=nl.exp, data=norm_tile)
-                            nisa.tensor_reduce(
-                                dst=tile_sum,
-                                op=nl.add,
-                                data=exp_tile,
-                                axis=(1,),
-                            )
-                            nisa.tensor_scalar(
-                                dst=scaled_sum_row,
-                                data=sum_row,
-                                op0=nl.multiply,
-                                operand0=old_max_scale,
-                            )
-                            nisa.tensor_tensor(
-                                dst=new_sum_row,
-                                data1=scaled_sum_row,
-                                data2=tile_sum,
-                                op=nl.add,
-                            )
-                            nisa.tensor_scalar(
-                                dst=scaled_running_out,
-                                data=running_out,
-                                op0=nl.multiply,
-                                operand0=old_max_scale,
-                            )
-                            nisa.nc_transpose(dst=prob_t_psum, data=exp_tile)
-                            nisa.tensor_copy(dst=prob_t, src=prob_t_psum)
-
-                            nisa.memset(v_sbuf, 0.0)
-                            nisa.dma_copy(
-                                v_sbuf,
-                                v_cache.ap(
-                                    pattern=[
-                                        [num_kv_heads * d_head, page_size],
-                                        [1, d_head],
-                                    ],
-                                    offset=kv_head * d_head,
-                                    scalar_offset=physical_page,
-                                    indirect_dim=0,
-                                ),
-                                dge_mode=nisa.dge_mode.swdge,
-                                oob_mode=nisa.oob_mode.skip,
-                            )
-                            nisa.memset(attn_out_psum, 0.0)
-                            nisa.nc_matmul(
-                                dst=attn_out_psum,
-                                stationary=prob_t,
-                                moving=v_sbuf,
-                            )
-                            nisa.tensor_copy(dst=pv_sbuf, src=attn_out_psum)
-                            nisa.tensor_tensor(
-                                dst=running_out,
-                                data1=scaled_running_out,
-                                data2=pv_sbuf,
-                                op=nl.add,
-                            )
-                            nisa.tensor_copy(dst=row_max, src=new_row_max)
-                            nisa.tensor_copy(dst=sum_row, src=new_sum_row)
-
-                        safe_sum_row = nl.where(
-                            valid_q_row, sum_row, one_row, dtype=nl.float32
-                        )
-                        safe_running_out = nl.where(
-                            nl.broadcast_to(valid_q_row, running_out.shape),
-                            running_out,
-                            zero_out,
-                            dtype=nl.float32,
-                        )
-                        inverse_sum_row = nl.ndarray(
-                            (BLOCK_Q, 1), dtype=nl.float32, buffer=nl.sbuf
-                        )
-                        nisa.reciprocal(dst=inverse_sum_row, data=safe_sum_row)
-                        nisa.tensor_scalar(
-                            dst=safe_running_out,
-                            data=safe_running_out,
-                            op0=nl.multiply,
-                            operand0=inverse_sum_row,
-                        )
-                        block_out_next = nl.where(
-                            nl.broadcast_to(valid_q_row, block_out.shape),
-                            safe_running_out,
-                            block_out,
-                            dtype=nl.float32,
-                        )
-                        nisa.tensor_copy(dst=block_out, src=block_out_next)
-
-                    attn_out_sbuf = nl.ndarray(
-                        (BLOCK_Q, d_head), dtype=q.dtype, buffer=nl.sbuf
-                    )
-                    nisa.tensor_copy(dst=attn_out_sbuf, src=block_out)
-                    nl.store(
-                        dst=out[nl.ds(q_start, BLOCK_Q), kv_head, head_group, :],
-                        value=attn_out_sbuf,
-                    )
+                nisa.tensor_scalar(
+                    dst=current_q_start,
+                    data=current_q_start,
+                    op0=nl.add,
+                    operand0=q_per_head_tile,
+                )
+                nisa.tensor_scalar(
+                    dst=q_tokens_remaining,
+                    data=q_tokens_remaining,
+                    op0=nl.subtract,
+                    operand0=float(q_per_head_tile),
+                )
+                q_loop_live = nl.greater(q_tokens_remaining, loop_zero_f32)
+                q_loop_continue = nl.where(
+                    q_loop_live, loop_one_i32, loop_zero_i32, dtype=nl.int32
+                )
+                nisa.register_load(dst=q_loop_reg, src=q_loop_continue)
 
     return out
+
+
+# Standalone prefill cache-update entrypoint.
 
 
 def paged_kv_cache_update(
@@ -727,7 +1182,7 @@ def paged_kv_cache_update(
     slot_mapping,
     query_start_len,
 ):
-    """Update split paged K/V cache for live NeuronContext rows only.
+    """Scatter compact K/V update rows into the paged cache.
 
     Shapes:
       k_cache/v_cache: [num_pages, page_size, num_kv_heads, head_dim]
@@ -735,10 +1190,10 @@ def paged_kv_cache_update(
       slot_mapping:    [compiled_tokens]
       query_start_len: [batch_size + 1, 1]
 
-    Padded slot_mapping rows may contain maxInt(i32). The update path keeps
-    those rows inside the Neuron custom call and relies on AP destination
-    writes with oob_mode=skip, matching scatter-drop semantics without lowering
-    the update through HLO scatter/DGE.
+    Each update row is copied through a small SBUF tile and written to the
+    flattened cache slot named by slot_mapping. Padded rows use out-of-range
+    slot values, so the AP destination write becomes a no-op under
+    oob_mode=skip.
     """
     num_pages = k_cache.shape[0]
     page_size = k_cache.shape[1]

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import ml_dtypes
 import nki
+import nki.language as nl
 import numpy as np
 from python.runfiles import Runfiles
 
@@ -28,6 +29,45 @@ PREFILL_QUERY_BLOCK = 128
 ATOL = 1e-2
 RTOL = 1e-2
 MIN_CLOSE_FRACTION = 0.99
+
+
+def largest_divisor_at_most(value, limit):
+    divisor = min(value, limit)
+    if divisor <= 0:
+        raise ValueError("tile divisor limit must be positive")
+    while value % divisor != 0:
+        divisor -= 1
+    return divisor
+
+
+def paged_attention_tile_plan(
+    num_tokens,
+    batch_size,
+    max_num_pages,
+    page_size,
+    heads_per_kv,
+    query_lengths,
+    is_decode,
+):
+    if is_decode:
+        q_rows_per_tile = 1
+        q_partition_tile = heads_per_kv
+    else:
+        q_rows_per_tile = int(nl.tile_size.pmax) // heads_per_kv
+        q_partition_tile = q_rows_per_tile * heads_per_kv
+    k_tile_limit = int(nl.tile_size.gemm_moving_fmax)
+    pages_per_k_tile = largest_divisor_at_most(max_num_pages, k_tile_limit // page_size)
+    k_tile = pages_per_k_tile * page_size
+    pages_per_v_tile = largest_divisor_at_most(pages_per_k_tile, int(nl.tile_size.pmax) // page_size)
+    v_tile = pages_per_v_tile * page_size
+    k_tiles = max_num_pages // pages_per_k_tile
+    compiled_q_blocks = (num_tokens + q_rows_per_tile - 1) // q_rows_per_tile
+    if query_lengths is None:
+        live_q_per_seq = 1 if is_decode else num_tokens // batch_size
+        live_q_blocks = batch_size * ((live_q_per_seq + q_rows_per_tile - 1) // q_rows_per_tile)
+    else:
+        live_q_blocks = sum((query_len + q_rows_per_tile - 1) // q_rows_per_tile for query_len in query_lengths)
+    return q_rows_per_tile, q_partition_tile, compiled_q_blocks, live_q_blocks, k_tile, v_tile, k_tiles
 
 
 @dataclasses.dataclass(frozen=True)
@@ -64,6 +104,16 @@ def parse_args():
     parser.add_argument("--run", choices=RUN_CHOICES, default="both")
     parser.add_argument("--mode", choices=("verify", "benchmark"), default="verify")
     parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument(
+        "--max-token-count",
+        type=int,
+        default=None,
+        help=(
+            "Compiled query-token capacity for prefill/mixed. Defaults to "
+            "prompt-len * batch-size, matching LLMD-style padded capacity."
+        ),
+    )
+    parser.add_argument("--active-lanes", type=int, default=None)
     parser.add_argument("--prompt-len", type=int, default=128)
     parser.add_argument("--query-lengths", type=str, default="128,0")
     parser.add_argument("--seq-lens-per-seq", type=str, default="129,0")
@@ -138,18 +188,22 @@ def configure_runtime_environment(mode):
 def validate_args(args):
     if args.batch_size <= 0:
         raise ValueError("--batch-size must be positive")
+    if args.max_token_count is not None and args.max_token_count <= 0:
+        raise ValueError("--max-token-count must be positive")
     if args.num_heads <= 0 or args.num_kv_heads <= 0 or args.head_dim <= 0:
         raise ValueError("model dimensions must be positive")
     if args.num_heads % args.num_kv_heads != 0:
         raise ValueError("--num-heads must be divisible by --num-kv-heads")
-    if args.seq_len <= 0 or args.seq_len > 2048:
-        raise ValueError("initial 2D NKI harness supports 1 <= --seq-len <= 2048")
+    if args.seq_len <= 0:
+        raise ValueError("--seq-len must be positive")
+    if args.active_lanes is not None and not (0 < args.active_lanes <= args.batch_size):
+        raise ValueError("--active-lanes must be in 1..--batch-size")
     if args.page_size <= 0:
         raise ValueError("--page-size must be positive")
     if args.seq_len % args.page_size != 0:
         raise ValueError("--seq-len must be a multiple of --page-size")
-    if args.context_len <= 0:
-        raise ValueError("--context-len must be positive")
+    if args.context_len < 0:
+        raise ValueError("--context-len must be non-negative")
     if args.mode == "benchmark":
         if args.warmups < 0:
             raise ValueError("--warmups must be non-negative")
@@ -275,6 +329,32 @@ def make_metadata(args, current_seq_len, num_tokens, query_lengths=None, seq_len
     return block_table, seq_lens, query_start_len
 
 
+def validate_wide_q_tile_capacity(query_start_len, num_tokens, q_per_head_tile):
+    """Require enough compiled Q rows for wide AP Q load/store.
+
+    The NKI prefill/mixed fast path loads and stores q_per_head_tile rows at a
+    time for each GQA head group. That is the fast hardware shape; compact
+    ragged schedules must therefore be padded so the final live tile remains in
+    bounds even when a sequence has only a few live rows.
+    """
+    for batch_idx in range(query_start_len.shape[0] - 1):
+        q_start = int(query_start_len[batch_idx, 0])
+        q_end = int(query_start_len[batch_idx + 1, 0])
+        query_len = q_end - q_start
+        if query_len == 0:
+            continue
+        last_tile_start = q_start + ((query_len - 1) // q_per_head_tile) * q_per_head_tile
+        required_rows = last_tile_start + q_per_head_tile
+        if required_rows > num_tokens:
+            raise ValueError(
+                "wide Q-tile fast path needs padded compiled capacity: "
+                f"batch={batch_idx} q_start={q_start} query_len={query_len} "
+                f"q_per_head_tile={q_per_head_tile} requires {required_rows} rows, "
+                f"but compiled num_tokens is {num_tokens}. Increase --max-token-count "
+                "or use an explicitly safe row-granular debug kernel."
+            )
+
+
 def scatter_logical_kv_to_pages(k_logical, v_logical, block_table, page_size, total_pages):
     if k_logical.ndim == 3:
         k_logical = k_logical[None, :, :, :]
@@ -392,7 +472,9 @@ def timed_kernel(kernel, inputs, args):
         elapsed = time.perf_counter() - start
         return output, elapsed, 1
 
+    start = time.perf_counter()
     output = kernel(*inputs)
+    print(f"kernel_compile_and_first_run elapsed={(time.perf_counter() - start) * 1000.0:.3f}ms", flush=True)
     for _ in range(args.warmups):
         output = kernel(*inputs)
 
@@ -426,9 +508,10 @@ def run_attention_case(args, kernel, heads_per_kv, kind):
     elif kind == "mixed":
         if query_lengths is None:
             raise ValueError("--run=mixed requires --query-lengths")
-        num_tokens = round_up_to_prefill_block(sum(query_lengths))
+        num_tokens = args.max_token_count or (prompt_len * args.batch_size)
+        num_tokens = max(num_tokens, round_up_to_prefill_block(sum(query_lengths)))
     else:
-        num_tokens = prompt_len * args.batch_size
+        num_tokens = args.max_token_count or (prompt_len * args.batch_size)
 
     is_decode = kind == "decode"
     if not is_decode and num_tokens % PREFILL_QUERY_BLOCK != 0:
@@ -440,6 +523,8 @@ def run_attention_case(args, kernel, heads_per_kv, kind):
         raise ValueError("--prompt-len must be <= compiled tokens per batch row")
 
     metadata_query_lengths = query_lengths if kind == "mixed" else None
+    if kind == "decode" and args.active_lanes is not None:
+        metadata_query_lengths = [1 if idx < args.active_lanes else 0 for idx in range(args.batch_size)]
     if metadata_query_lengths is None and not is_decode:
         metadata_query_lengths = [prompt_len] * args.batch_size
     current_seq_len = max(seq_lens_per_seq) if seq_lens_per_seq is not None else args.context_len + prompt_len
@@ -450,6 +535,12 @@ def run_attention_case(args, kernel, heads_per_kv, kind):
         query_lengths=metadata_query_lengths,
         seq_lens_per_seq=seq_lens_per_seq,
     )
+    if not is_decode:
+        validate_wide_q_tile_capacity(
+            query_start_len,
+            num_tokens,
+            PREFILL_QUERY_BLOCK // heads_per_kv,
+        )
     total_pages = total_cache_pages(args, block_table.shape[1])
     k_logical = fill_bf16((args.batch_size, args.seq_len, args.num_kv_heads, args.head_dim), 0.02)
     v_logical = fill_bf16((args.batch_size, args.seq_len, args.num_kv_heads, args.head_dim), 0.03)
@@ -481,19 +572,38 @@ def run_attention_case(args, kernel, heads_per_kv, kind):
             slot_mapping[q_start + query_idx] = flattened_cache_slot(
                 block_table, batch_idx, token_pos, args.page_size
             )
-
     print(
         "paged_attention_contract "
         f"model={args.model} run={kind} mode={args.mode} batch_size={args.batch_size} "
         f"num_tokens={num_tokens} "
         f"context_len={args.context_len} prompt_len={prompt_len} seq_len={args.seq_len} "
         f"page_size={args.page_size} pages={total_pages} heads={args.num_heads} "
-        f"kv_heads={args.num_kv_heads} head_dim={args.head_dim} permute_pages={args.permute_pages}"
+        f"kv_heads={args.num_kv_heads} head_dim={args.head_dim} permute_pages={args.permute_pages}",
+        flush=True,
+    )
+    q_rows_per_tile, q_partition_tile, compiled_q_blocks, live_q_blocks, k_tile, v_tile, k_tiles = paged_attention_tile_plan(
+        num_tokens,
+        args.batch_size,
+        block_table.shape[1],
+        args.page_size,
+        heads_per_kv,
+        metadata_query_lengths,
+        is_decode,
+    )
+    print(
+        "paged_attention_loop_product "
+        f"q_rows_per_tile={q_rows_per_tile} q_partition_tile={q_partition_tile} "
+        f"live_q_blocks={live_q_blocks} compiled_q_blocks={compiled_q_blocks} "
+        f"k_tile={k_tile} v_tile={v_tile} "
+        f"k_tiles={k_tiles} kv_work_product={live_q_blocks * args.num_kv_heads} "
+        f"query_head_rows={live_q_blocks * args.num_heads}",
+        flush=True,
     )
     output, elapsed, timed_iterations = timed_kernel(
         kernel, (q, k_cache, v_cache, new_k, new_v, slot_mapping, block_table, seq_lens, query_start_len), args
     )
-    print_timing(f"kernel=paged_attention_2d label={kind}", elapsed, timed_iterations)
+    kernel_label = "paged_attention_decode_2d" if is_decode else "paged_attention_2d"
+    print_timing(f"kernel={kernel_label} label={kind}", elapsed, timed_iterations)
     if args.mode != "verify":
         return
 
@@ -654,7 +764,7 @@ def run_history_sensitivity(args, kernel, heads_per_kv):
         raise AssertionError("decode output did not change when only historical cache contents changed")
 
 
-def run_llmd_loop(args, kernel, heads_per_kv):
+def run_llmd_loop(args, prefill_kernel, decode_kernel, heads_per_kv):
     if args.batch_size != 1:
         raise ValueError("--run=llmd-loop currently expects --batch-size=1")
     prompt_len = prompt_length(args)
@@ -693,7 +803,7 @@ def run_llmd_loop(args, kernel, heads_per_kv):
     prefill_slot_mapping = np.zeros((prefill_tokens,), dtype=np.int32)
     prefill_k[:prompt_len] = k_logical[args.context_len : args.context_len + prompt_len, :, :]
     prefill_v[:prompt_len] = v_logical[args.context_len : args.context_len + prompt_len, :, :]
-    prefill_out = kernel(
+    prefill_out = prefill_kernel(
         q_prefill,
         k_cache,
         v_cache,
@@ -716,7 +826,7 @@ def run_llmd_loop(args, kernel, heads_per_kv):
         scatter_logical_token_to_page(
             k_cache, v_cache, k_logical, v_logical, block_table, args.page_size, token_pos
         )
-        output = kernel(
+        output = decode_kernel(
             q_decode,
             k_cache,
             v_cache,
@@ -750,15 +860,17 @@ def main():
         run_update_contract(args, module)
         return
 
-    kernel = nki.jit(module.paged_attention_2d)
+    prefill_kernel = nki.jit(module.paged_attention_2d)
+    decode_kernel = nki.jit(module.paged_attention_decode_2d)
     if args.run == "llmd-loop":
-        run_llmd_loop(args, kernel, heads_per_kv)
+        run_llmd_loop(args, prefill_kernel, decode_kernel, heads_per_kv)
     elif args.run == "history-sensitivity":
-        run_history_sensitivity(args, kernel, heads_per_kv)
+        run_history_sensitivity(args, decode_kernel, heads_per_kv)
     elif args.run == "both":
-        run_attention_case(args, kernel, heads_per_kv, "prefill")
-        run_attention_case(args, kernel, heads_per_kv, "decode")
+        run_attention_case(args, prefill_kernel, heads_per_kv, "prefill")
+        run_attention_case(args, decode_kernel, heads_per_kv, "decode")
     else:
+        kernel = decode_kernel if args.run == "decode" else prefill_kernel
         run_attention_case(args, kernel, heads_per_kv, args.run)
 
 

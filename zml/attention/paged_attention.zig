@@ -116,6 +116,7 @@ pub const Options = union(Backend) {
                 .nki = .init(.{
                     .batch_size = args.batch_size,
                     .max_num_pages = args.max_num_pages,
+                    .max_token_count = args.max_token_count,
                     .max_seqlen_q = args.max_seqlen_q,
                     .is_prefill = args.is_prefill,
                 }),
