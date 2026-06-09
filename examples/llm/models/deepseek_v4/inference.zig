@@ -82,7 +82,6 @@ fn compileKernel(
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const tokens_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
 
-    const offset: u32 = 0;
     const exe = try platform.compile(
         allocator,
         io,
@@ -91,7 +90,6 @@ fn compileKernel(
         .{
                 tokens,
                 tokens_idx_offset ,
-                offset,
                 opts.rng,
                 opts.cache,
                 opts.attention_metadata,
@@ -123,7 +121,6 @@ fn compileDecodeKernel(
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const tokens_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
 
-    const offset = opts.seqlen;
     const exe = try platform.compile(
         allocator,
         io,
@@ -132,7 +129,6 @@ fn compileDecodeKernel(
         .{
                 tokens,
                 tokens_idx_offset,
-                offset,
                 opts.rng,
                 opts.cache,
                 opts.attention_metadata,
@@ -156,7 +152,6 @@ pub const KernelArgs = struct {
     cache_buffers: *zml.Bufferized(model.Cache),
     attention_metadata_buffers: zml.Bufferized(attention.Metadata),
     moe_metadata_buffers: zml.Bufferized(zml.moe.Metadata),
-    offset: u32,
 };
 
 const KernelExe = struct {
@@ -174,7 +169,6 @@ const KernelExe = struct {
             args.model_buffers,
             args.tokens_buf,
             args.tokens_pos_buf,
-            args.offset,
             args.rng_buf,
             args.cache_buffers,
             args.attention_metadata_buffers,
