@@ -3,7 +3,7 @@ const std = @import("std");
 const zml = @import("zml");
 
 const common = @import("common.zig");
-const step3p5flash = @import("step3p5flash.zig");
+const step3p5flash = @import("step3_5flash.zig");
 const model = @import("step3_5flash/model.zig");
 
 pub const std_options: std.Options = .{
@@ -44,21 +44,13 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    // Create model lifetime
-    var repo_model = try step3p5flash.LoadedModel.init(allocator, io, repo, store.view(), .{});
-    defer repo_model.deinit(allocator);
-
     // Loading bar
     var progress = std.Progress.start(io, .{ .root_name = args.model });
-    const shardings: common.Shardings = try .init(platform);
-
-    // Create buffers for loading weights
-    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
-    defer repo_model.unloadBuffers(&model_buffers, allocator);
+    // const shardings: common.Shardings = try .init(platform);
 
     progress.end();
 
-    try run(allocator, io, platform, args.activations, repo_model.parsed_config.value, repo_model.inner, &model_buffers, &store, params.attention_metadata, params.attention_parameters);
+    try run(allocator, io, platform, args.activations, &store);
 }
 
 pub fn run(
@@ -66,11 +58,10 @@ pub fn run(
     io: std.Io,
     platform: *zml.Platform,
     activations_path: []const u8,
-    config: step3p5flash.Config,
-    mdl: step3p5flash.Model,
-    model_buffers: *step3p5flash.Buffers,
     model_store: *zml.io.TensorStore,
 ) !void {
+    const config = model.default_config;
+    const sharding = platform.replicated_sharding;
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
 
@@ -144,34 +135,13 @@ pub fn run(
 
     std.log.info("Transformer layer:", .{});
     for (0..config.num_hidden_layers) |layer_idx| {
-        const name = try std.fmt.allocPrint(allocator, "model.layers.{d}", .{layer_idx});
-        defer allocator.free(name);
-
-        const mlp = model.TransformerLayer.init(model_store.view().withPrefix(name), 0);
-
-        var mlp_weights = try zml.io.load(model.Mlp, &mlp, allocator, io, platform, model_store, .auto);
-        defer deinitBuffers(&mlp_weights);
-
-        const input_key = try std.fmt.allocPrint(allocator, "{s}.in.0", .{name});
-        defer allocator.free(input_key);
-        if (!activation_store.view().hasKey(input_key)) {
-            std.log.warn("skipping {s}: no activations recorded", .{name});
-            continue;
-        }
-
-        runTransformerLayer();
+        runTransformerLayer(allocator, io, platform, model_store, &activation_store, sharding, layer_idx) catch |err| {
+            std.log.warn("skipping model.layers.{d}: {s}", .{ layer_idx, @errorName(err) });
+        };
     }
 
     std.log.info("Full model:", .{});
-    try runFullTextModel(
-        allocator,
-        io,
-        platform,
-        mdl.text_model,
-        model_buffers.text_model,
-        &activation_store,
-        platform.replicated_sharding,
-    );
+    try runFullTextModel(allocator, io, platform, model_store, &activation_store, sharding);
 }
 
 fn runTransformerLayer(
@@ -199,7 +169,6 @@ fn runTransformerLayer(
         std.log.warn("skipping {s}: no out.0 (final hidden_states)", .{name});
         return;
     }
-=
     const self_attn_name = try std.fmt.allocPrint(allocator, "{s}.self_attn", .{name});
     defer allocator.free(self_attn_name);
     const self_attn_view = activation_store.view().withPrefix(self_attn_name);
@@ -293,8 +262,7 @@ fn runFullTextModel(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    text_model: model.TextModel,
-    text_buffers: zml.Bufferized(model.TextModel),
+    model_store: *zml.io.TensorStore,
     activation_store: *zml.io.TensorStore,
     sharding: zml.Sharding,
 ) !void {
@@ -303,6 +271,12 @@ fn runFullTextModel(
         std.log.warn("skipping full TextModel: missing in.0 / out.0", .{});
         return;
     }
+
+    var text_model = try model.TextModel.init(allocator, model_store.view().withPrefix("model"));
+    defer text_model.deinit(allocator);
+
+    var text_buffers = try zml.io.load(model.TextModel, &text_model, allocator, io, platform, model_store, .auto);
+    defer deinitBuffers(&text_buffers);
 
     // 1. Build trace-time tensors for compile.
     const tokens_t = model_view.createTensor("in.0", .{ .b, .s }, .replicated);

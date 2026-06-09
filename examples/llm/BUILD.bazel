@@ -30,9 +30,9 @@ zig_binary(
 )
 
 zig_binary(
-    name = "step3_5flash",
+    name = "step3_5_tests",
     srcs = glob(["**/*.zig"]),
-    main = "models/step3_5flash.zig",
+    main = "models/step3_5_tests.zig",
     deps = ["//zml"],
 )
 
