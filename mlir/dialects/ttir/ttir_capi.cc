@@ -2,6 +2,7 @@
 
 #include "mlir/CAPI/IR.h"
 #include "mlir/CAPI/Registration.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Types.h"
 
@@ -13,6 +14,32 @@ MLIR_DEFINE_CAPI_DIALECT_REGISTRATION(Triton, tt, mlir::triton::TritonDialect)
 
 using mlir::cast;
 using mlir::isa;
+
+namespace {
+
+template <typename T = mlir::triton::TensorDescType>
+auto getTensorDescType(mlir::RankedTensorType block_type, int)
+    -> decltype(T::get(block_type.getContext(), block_type)) {
+  return T::get(block_type.getContext(), block_type);
+}
+
+template <typename T = mlir::triton::TensorDescType>
+auto getTensorDescType(mlir::RankedTensorType block_type, long)
+    -> decltype(T::get(block_type.getShape(), block_type.getElementType(),
+                       block_type.getEncoding())) {
+  return T::get(block_type.getShape(), block_type.getElementType(),
+                block_type.getEncoding());
+}
+
+mlir::triton::TensorDescType getTensorDescType(llvm::ArrayRef<int64_t> shape,
+                                               mlir::Type element_type,
+                                               mlir::Attribute shared_layout) {
+  auto block_type =
+      mlir::RankedTensorType::get(shape, element_type, shared_layout);
+  return getTensorDescType(block_type, 0);
+}
+
+}  // namespace
 
 extern "C" {
 
@@ -39,11 +66,8 @@ MlirType mlirTritonTensorDescTypeGet(intptr_t rank, const int64_t* shape,
   if (!mlirAttributeIsNull(shared_layout)) {
     layout_attr = unwrap(shared_layout);
   }
-  // TensorDescType::get is a TypeBuilderWithInferredContext: the context is
-  // inferred from elementType. Signature: (shape, elementType, sharedLayout).
-  return wrap(mlir::triton::TensorDescType::get(
-      llvm::ArrayRef<int64_t>(shape, rank),
-      unwrap(element_type), layout_attr));
+  return wrap(getTensorDescType(llvm::ArrayRef<int64_t>(shape, rank),
+                                unwrap(element_type), layout_attr));
 }
 
 bool mlirTritonTypeIsATensorDesc(MlirType t) {

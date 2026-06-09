@@ -19,6 +19,7 @@ pub const Backend = enum {
         return switch (platform.target) {
             .cuda => .triton,
             .rocm => .triton,
+            .oneapi => .triton,
             .tpu => .mosaic_tpu,
             else => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
@@ -233,4 +234,20 @@ test "Backend.auto selects mosaic_tpu on TPU" {
     };
 
     try std.testing.expectEqual(Backend.mosaic_tpu, Backend.auto(&platform));
+}
+
+test "Backend.auto selects triton on oneAPI" {
+    const platform: zml.Platform = .{
+        .arena = undefined,
+        .target = .oneapi,
+        .pjrt_api = undefined,
+        .pjrt_client = undefined,
+        .devices = &.{},
+        .memories = &.{},
+        .physical_mesh = undefined,
+        .replicated_sharding = undefined,
+        .shardings = .empty,
+    };
+
+    try std.testing.expectEqual(Backend.triton, Backend.auto(&platform));
 }
