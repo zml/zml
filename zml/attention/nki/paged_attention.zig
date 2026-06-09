@@ -90,6 +90,8 @@ pub const Context = struct {
 pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, new_k: zml.Tensor, new_v: zml.Tensor, slot_mapping: ?zml.Tensor, opts: AttentionOptions) zml.Tensor {
     _ = context;
     _ = opts;
+    _ = new_k;
+    _ = new_v;
 
     if (parameters.options_.is_prefill) {
         const heads_per_kv: usize = @intCast(q.dim(.hg));
@@ -102,8 +104,6 @@ pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k
     const q_sharded = q.withPartitioning(.{ .b = .replicated, .hkv = .model, .hg = .replicated, .hd = .replicated });
     const k_cache_sharded = k_cache.withPartitioning(.{ .page = .replicated, .k_chunk = .replicated, .hkv = .model, .hd = .replicated });
     const v_cache_sharded = v_cache.withPartitioning(.{ .page = .replicated, .k_chunk = .replicated, .hkv = .model, .hd = .replicated });
-    const new_k_sharded = new_k.withPartitioning(.{ .b = .replicated, .hkv = .model, .hd = .replicated });
-    const new_v_sharded = new_v.withPartitioning(.{ .b = .replicated, .hkv = .model, .hd = .replicated });
 
     const seq_lens = parameters.seq_lens.insertAxes(.last, .{.one});
     const query_start_len = parameters.query_start_len.insertAxes(.last, .{.one});
@@ -113,9 +113,6 @@ pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k
             q_sharded,
             k_cache_sharded,
             v_cache_sharded,
-            new_k_sharded,
-            new_v_sharded,
-            (slot_mapping orelse parameters.query_start_len).withPartitioning(.{ .b = .replicated }),
             parameters.block_table.withPartitioning(.{ .b = .replicated, .p = .replicated }),
             seq_lens.withPartitioning(.{ .b = .replicated }),
             query_start_len.withPartitioning(.{ .b = .replicated }),
@@ -129,7 +126,7 @@ pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k
                 const name = if (is_prefill) "paged_attention_2d_trn1" else "paged_attention_decode_2d_trn1";
 
                 return zml.ops.neuronNki(
-                    .{ sharded_inputs[0], sharded_inputs[1], sharded_inputs[2], sharded_inputs[3], sharded_inputs[4], sharded_inputs[5], sharded_inputs[6], sharded_inputs[7], sharded_inputs[8] },
+                    .{ sharded_inputs[0], sharded_inputs[1], sharded_inputs[2], sharded_inputs[3], sharded_inputs[4], sharded_inputs[5] },
                     .{sharded_inputs[0].shape()},
                     .{
                         .name = name,
@@ -150,10 +147,6 @@ pub const KvCacheUpdate = struct {
 };
 
 pub fn updateKvCachePaged(parameters: Parameters, k_cache: zml.Tensor, v_cache: zml.Tensor, new_k: zml.Tensor, new_v: zml.Tensor, slot_mapping: zml.Tensor) KvCacheUpdate {
-    if (!parameters.options_.is_prefill) {
-        return .{ .k = k_cache, .v = v_cache };
-    }
-
     const k_cache_sharded = k_cache.withPartitioning(.{ .page = .replicated, .k_chunk = .replicated, .hkv = .model, .hd = .replicated });
     const v_cache_sharded = v_cache.withPartitioning(.{ .page = .replicated, .k_chunk = .replicated, .hkv = .model, .hd = .replicated });
     const new_k_sharded = new_k.withPartitioning(.{ .b = .replicated, .hkv = .model, .hd = .replicated });
@@ -180,6 +173,7 @@ pub fn updateKvCachePaged(parameters: Parameters, k_cache: zml.Tensor, v_cache: 
                         .entrypoint = "paged_kv_cache_update",
                         .source_path = paged_attention_source_path,
                         .compiler_target = parameters_.options_.compiler_target,
+                        .has_side_effect = true,
                         .output_operand_aliases = &.{
                             .{ .output_index = 0, .operand_index = 0 },
                             .{ .output_index = 1, .operand_index = 1 },
