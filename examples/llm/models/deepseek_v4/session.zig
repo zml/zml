@@ -108,7 +108,6 @@ pub const Session = struct {
             .cache_buffers = &self.cache_buffers,
             .attention_metadata_buffers = self.attention_metadata_buffers,
             .moe_metadata_buffers = self.moe_metadata_buffers,
-            .offset = @intCast(all_tokens.len),
         });
 
         try tokens_buf.toSlice(self.io, tokens_slice);
@@ -163,7 +162,6 @@ pub const Session = struct {
                 .cache_buffers = &self.cache_buffers,
                 .attention_metadata_buffers = self.attention_metadata_buffers,
                 .moe_metadata_buffers = self.moe_metadata_buffers,
-                .offset = @intCast(all_tokens.items.len),
             });
 
             try current_token_buffer.toSlice(self.io, self.generated_token);
