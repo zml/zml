@@ -140,14 +140,12 @@ pub fn main(init: std.process.Init) !void {
     // Load + resolve paths (Zig 0.16.0 treats relative paths as maybes, which breaks GPU)
     const weights_path_raw = args[1];
     const cwd = std.Io.Dir.cwd();
-<<<<<<< HEAD
     const absolute_path = try cwd.realPathFileAlloc(io, weights_path_raw, arena);
 
-<<<<<<< HEAD
-    const platform = try zml.Platform.auto(allocator, vfs_io, .{});
-    defer platform.deinit(allocator, vfs_io);
+    const platform = try zml.Platform.auto(allocator, io, .{});
+    defer platform.deinit(allocator, io);
 
-    var registry = try zml.safetensors.TensorRegistry.fromPath(allocator, vfs_io, absolute_path);
+    var registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, absolute_path);
     defer registry.deinit();
 
     // Find the max_layer and max_expert - via search highest indices in tensor names
