@@ -26,24 +26,66 @@ const log = std.log.scoped(.scan_file_dedup);
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
+const ChunkSet = std.bit_set.DynamicBitSetUnmanaged;
+
 const TensorEntry = struct {
     name: []const u8,
     offset: u64,
     size: u64,
 };
 
-const TxRange = struct {
-    tensor_idx: u16,
-    xorb_idx: u16,
-    chunk_start: u32,
-    chunk_end: u32, // exclusive
-};
-
 const XorbStats = struct {
     hash: []const u8,
     tensors: std.AutoArrayHashMapUnmanaged(u16, void) = .empty,
-    needed_chunk_start: u32 = std.math.maxInt(u32),
-    needed_chunk_end: u32 = 0, // exclusive
+    // Exact set of chunks of this xorb referenced by the file's reconstruction.
+    needed: ChunkSet = .{},
+};
+
+// Slim FetchUrl copy for cross-shard accounting. The original FetchUrl borrows
+// a URL slice from the parsed response, which is freed at the end of scanFile;
+// the aggregator only needs chunk ranges + byte sizes.
+const FetchSpan = struct {
+    chunk_start: u32,
+    chunk_end: u32, // exclusive
+    bytes: u64,
+};
+
+const GlobalXorb = struct {
+    fetch_spans: []const FetchSpan, // arena-owned
+    needed: ChunkSet = .{},
+    // Per-chunk count of how many shards reference this chunk of this xorb.
+    // Sized to `needed.bit_length`; gpa-owned (so it can be resized).
+    chunk_shard_counts: []u16 = &.{},
+    shards: u32 = 0,
+};
+
+const GlobalAgg = struct {
+    allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
+    xorbs: std.StringHashMap(GlobalXorb),
+    total_tensor_bytes: u64 = 0,
+    total_file_size: u64 = 0,
+    sum_per_shard_minimal: u64 = 0,
+    sum_per_shard_naive: u64 = 0,
+    shards_scanned: u32 = 0,
+
+    fn init(allocator: std.mem.Allocator) GlobalAgg {
+        return .{
+            .allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .xorbs = std.StringHashMap(GlobalXorb).init(allocator),
+        };
+    }
+
+    fn deinit(self: *GlobalAgg) void {
+        var it = self.xorbs.valueIterator();
+        while (it.next()) |v| {
+            v.needed.deinit(self.allocator);
+            self.allocator.free(v.chunk_shard_counts);
+        }
+        self.xorbs.deinit();
+        self.arena.deinit();
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -82,8 +124,15 @@ pub fn main(init: std.process.Init) !void {
     const io = vfs.io();
 
     log.info("Resolving model repo: {s}", .{model_arg});
+    // When a single shard is requested, build the registry from just that
+    // file. Using `fromRepo` would open every shard listed in the index
+    // (and probe each for XET), which is wasted work for a single-file scan.
     const repo_dir = try zml.safetensors.resolveModelRepo(io, model_arg);
-    var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo_dir);
+    var registry: zml.safetensors.TensorRegistry = if (file_arg.len != 0) blk: {
+        log.info("Loading single shard: {s} (in repo {s})", .{ file_arg, model_arg });
+        const shard_file = try repo_dir.openFile(io, file_arg, .{ .mode = .read_only });
+        break :blk try zml.safetensors.fetchRegistry(allocator, io, repo_dir, shard_file);
+    } else try zml.safetensors.TensorRegistry.fromRepo(allocator, io, repo_dir);
     defer registry.deinit();
 
     const hf_token = init.environ_map.get("HF_TOKEN") orelse {
@@ -113,11 +162,20 @@ pub fn main(init: std.process.Init) !void {
     }
     log.info("Scanning {d} file(s)", .{files.items.len});
 
+    // Cross-shard aggregator. Skipped for single-file scans where there is
+    // nothing to aggregate.
+    var maybe_agg: ?GlobalAgg = null;
+    if (files.items.len > 1) maybe_agg = .init(allocator);
+    defer if (maybe_agg != null) maybe_agg.?.deinit();
+    const agg_ptr: ?*GlobalAgg = if (maybe_agg != null) &maybe_agg.? else null;
+
     for (files.items) |file_uri| {
-        scanFile(allocator, &xet_state, &registry, file_uri) catch |e| {
+        scanFile(allocator, &xet_state, &registry, file_uri, agg_ptr) catch |e| {
             log.err("file {s}: {s}", .{ file_uri, @errorName(e) });
         };
     }
+
+    if (agg_ptr) |a| try printGlobalSummary(allocator, a);
 }
 
 fn scanFile(
@@ -125,6 +183,7 @@ fn scanFile(
     xet_state: *xet.State,
     registry: *const zml.safetensors.TensorRegistry,
     file_uri: []const u8,
+    agg: ?*GlobalAgg,
 ) !void {
     // ── Collect every tensor belonging to this file ────────────────────────
     var tensors = std.ArrayList(TensorEntry).empty;
@@ -165,11 +224,36 @@ fn scanFile(
     term_offs[0] = 0;
     for (resp.terms, 0..) |t, i| term_offs[i + 1] = term_offs[i] + t.unpacked_length;
 
+    // First pass: compute the highest chunk index seen per xorb (across terms
+    // and fetch_info), so each xorb's `needed` bitset can be sized correctly.
+    var xorb_chunk_count = std.StringHashMap(u32).init(allocator);
+    defer xorb_chunk_count.deinit();
+    for (resp.terms) |t| {
+        const ce: u32 = @intCast(t.range.end);
+        const gop = try xorb_chunk_count.getOrPut(t.hash);
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        if (ce > gop.value_ptr.*) gop.value_ptr.* = ce;
+    }
+    var fi_it = resp.fetch_info.map.iterator();
+    while (fi_it.next()) |e| {
+        var m: u32 = 0;
+        for (e.value_ptr.*) |f| {
+            const fe: u32 = @intCast(f.range.end);
+            if (fe > m) m = fe;
+        }
+        const gop = try xorb_chunk_count.getOrPut(e.key_ptr.*);
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        if (m > gop.value_ptr.*) gop.value_ptr.* = m;
+    }
+
     var xorb_idx_of = std.StringHashMap(u16).init(allocator);
     defer xorb_idx_of.deinit();
     var xorbs = std.ArrayList(XorbStats).empty;
     defer {
-        for (xorbs.items) |*x| x.tensors.deinit(allocator);
+        for (xorbs.items) |*x| {
+            x.tensors.deinit(allocator);
+            x.needed.deinit(allocator);
+        }
         xorbs.deinit(allocator);
     }
     const term_xorb = try allocator.alloc(u16, resp.terms.len);
@@ -179,7 +263,11 @@ fn scanFile(
         if (!gop.found_existing) {
             if (xorbs.items.len >= std.math.maxInt(u16)) return error.TooManyXorbs;
             gop.value_ptr.* = @intCast(xorbs.items.len);
-            try xorbs.append(allocator, .{ .hash = t.hash });
+            const max_chunk = xorb_chunk_count.get(t.hash) orelse 0;
+            try xorbs.append(allocator, .{
+                .hash = t.hash,
+                .needed = try ChunkSet.initEmpty(allocator, max_chunk),
+            });
         }
         term_xorb[i] = gop.value_ptr.*;
     }
@@ -194,12 +282,12 @@ fn scanFile(
         chunk_refs.deinit();
     }
 
-    // tx_ranges: per (tensor, xorb) the [chunk_start, chunk_end) range that
-    // tensor alone would have to fetch from that xorb. Used for naive bytes.
-    var tx_ranges = std.ArrayList(TxRange).empty;
-    defer tx_ranges.deinit(allocator);
+    // tx_local lives per tensor (see loop below): per-xorb bitset of chunks
+    // this tensor alone references. Used to compute naive (per-tensor) bytes
+    // exactly.
 
     var chunks_referenced_total: u64 = 0;
+    var naive_fetch_bytes: u64 = 0;
     const win_offset: u64 = resp.offset_into_first_range; // 0 when start==0
 
     // ── Per-file chunk reuse (independent of tensors) ──────────────────────
@@ -228,9 +316,12 @@ fn scanFile(
         const win_start: u64 = win_offset + tn.offset;
         const win_end: u64 = win_start + tn.size;
 
-        // tx_local: aggregate per-xorb chunk ranges for this tensor.
-        var tx_local: std.AutoArrayHashMapUnmanaged(u16, struct { s: u32, e: u32 }) = .empty;
-        defer tx_local.deinit(allocator);
+        // tx_local: per-xorb bitset of chunks this tensor alone references.
+        var tx_local: std.AutoArrayHashMapUnmanaged(u16, ChunkSet) = .empty;
+        defer {
+            for (tx_local.values()) |*bs| bs.deinit(allocator);
+            tx_local.deinit(allocator);
+        }
 
         var ti: usize = 0;
         // Skip leading terms that end before the window starts.
@@ -241,15 +332,32 @@ fn scanFile(
             const cs: u32 = @intCast(t.range.start);
             const ce: u32 = @intCast(t.range.end);
 
-            // Mark tensor on this xorb.
+            // Mark tensor on this xorb and union the term's chunks into the
+            // xorb's file-global needed-chunks bitset (the per-file plan
+            // genuinely needs every chunk of every term it cites, including
+            // bytes that are alignment padding rather than tensor payload).
             _ = try xorbs.items[xi].tensors.getOrPut(allocator, tidx);
-            // Record this xorb's globally-needed chunk range.
-            if (cs < xorbs.items[xi].needed_chunk_start) xorbs.items[xi].needed_chunk_start = cs;
-            if (ce > xorbs.items[xi].needed_chunk_end) xorbs.items[xi].needed_chunk_end = ce;
+            xorbs.items[xi].needed.setRangeValue(.{ .start = cs, .end = ce }, true);
 
-            // For each chunk in this term, record that tensor `tidx` referenced it.
-            var ci: u32 = cs;
-            while (ci < ce) : (ci += 1) {
+            // Clip the term to this tensor's byte window, then translate that
+            // sub-range into a sub-range of chunks. We don't have per-chunk
+            // byte sizes, so assume bytes are uniformly distributed across
+            // the term's chunks — accurate to a chunk near term ends.
+            const term_start = term_offs[ti];
+            const term_end = term_offs[ti + 1];
+            const overlap_start = @max(win_start, term_start);
+            const overlap_end = @min(win_end, term_end);
+            if (overlap_end <= overlap_start) continue;
+            const term_bytes = term_end - term_start;
+            const chunk_count: u64 = ce - cs;
+            if (term_bytes == 0 or chunk_count == 0) continue;
+            const a = overlap_start - term_start;
+            const b = overlap_end - term_start;
+            const tcs: u32 = cs + @as(u32, @intCast((a * chunk_count) / term_bytes));
+            const tce: u32 = cs + @as(u32, @intCast((b * chunk_count + term_bytes - 1) / term_bytes));
+
+            var ci: u32 = tcs;
+            while (ci < tce) : (ci += 1) {
                 chunks_referenced_total += 1;
                 const key: u64 = (@as(u64, xi) << 32) | ci;
                 const cr_gop = try chunk_refs.getOrPut(key);
@@ -257,53 +365,31 @@ fn scanFile(
                 _ = try cr_gop.value_ptr.getOrPut(allocator, tidx);
             }
 
-            // Update per-tensor per-xorb chunk range (for naive bytes).
+            // Update per-tensor per-xorb chunk bitset (for naive bytes).
             const gop = try tx_local.getOrPut(allocator, xi);
             if (!gop.found_existing) {
-                gop.value_ptr.* = .{ .s = cs, .e = ce };
-            } else {
-                if (cs < gop.value_ptr.s) gop.value_ptr.s = cs;
-                if (ce > gop.value_ptr.e) gop.value_ptr.e = ce;
+                gop.value_ptr.* = try ChunkSet.initEmpty(allocator, xorbs.items[xi].needed.bit_length);
             }
+            gop.value_ptr.setRangeValue(.{ .start = tcs, .end = tce }, true);
         }
 
-        // Flush per-tensor ranges.
-        var lit = tx_local.iterator();
-        while (lit.next()) |e| {
-            try tx_ranges.append(allocator, .{
-                .tensor_idx = tidx,
-                .xorb_idx = e.key_ptr.*,
-                .chunk_start = e.value_ptr.s,
-                .chunk_end = e.value_ptr.e,
-            });
+        // Naive (per-tensor) fetch bytes: for each xorb this tensor touches,
+        // sum FetchUrl spans that overlap at least one chunk in the bitset.
+        var nit = tx_local.iterator();
+        while (nit.next()) |e| {
+            const fetch_list = resp.fetch_info.map.get(xorbs.items[e.key_ptr.*].hash) orelse continue;
+            naive_fetch_bytes += fetchBytesForBits(fetch_list, e.value_ptr.*);
         }
     }
 
-    // ── Compute fetch bytes ────────────────────────────────────────────────
-    // Minimal (whole-file): union of FetchUrl byte spans covering the global
-    // needed chunk range of each unique xorb.
+    // ── Compute minimal (whole-file) fetch bytes ───────────────────────────
+    // For each unique xorb, sum FetchUrl spans that overlap at least one
+    // chunk in the xorb's file-global needed-chunks bitset.
     var minimal_fetch_bytes: u64 = 0;
     for (xorbs.items) |x| {
-        if (x.needed_chunk_end == 0) continue; // unused (shouldn't happen)
+        if (x.needed.count() == 0) continue;
         const fetch_list = resp.fetch_info.map.get(x.hash) orelse continue;
-        for (fetch_list) |f| {
-            if (f.range.end <= x.needed_chunk_start) continue;
-            if (f.range.start >= x.needed_chunk_end) continue;
-            minimal_fetch_bytes += f.url_range.end - f.url_range.start + 1;
-        }
-    }
-
-    // Naive (per-tensor): each tensor independently fetches its needed
-    // FetchUrl spans, with no cross-tensor sharing.
-    var naive_fetch_bytes: u64 = 0;
-    for (tx_ranges.items) |r| {
-        const x = xorbs.items[r.xorb_idx];
-        const fetch_list = resp.fetch_info.map.get(x.hash) orelse continue;
-        for (fetch_list) |f| {
-            if (f.range.end <= r.chunk_start) continue;
-            if (f.range.start >= r.chunk_end) continue;
-            naive_fetch_bytes += f.url_range.end - f.url_range.start + 1;
-        }
+        minimal_fetch_bytes += fetchBytesForBits(fetch_list, x.needed);
     }
 
     // ── Aggregate chunk/xorb sharing stats ─────────────────────────────────
@@ -360,6 +446,9 @@ fn scanFile(
     const ratio_min_to_tensor = ratio(minimal_fetch_bytes, @max(tensor_bytes_total, 1));
     log.info("  on-wire / tensor-bytes (minimal): {d:.3}", .{ratio_min_to_tensor});
     log.info("  on-wire / file-size    (minimal): {d:.3}", .{ratio(minimal_fetch_bytes, @max(file_size, 1))});
+
+    // ── Merge into cross-shard aggregator (if any) ────────────────────────
+    if (agg) |a| try mergeIntoAgg(a, xorbs.items, resp.fetch_info, tensor_bytes_total, file_size, minimal_fetch_bytes, naive_fetch_bytes);
 }
 
 fn mib(bytes: u64) f64 {
@@ -390,4 +479,150 @@ fn printHistogram(
         const count = hist.get(k).?;
         log.info("{s} {d}x -> {d}  ({d:.2}%)", .{ label, k, count, pct(count, total) });
     }
+}
+
+fn anySetInRange(bits: ChunkSet, start: usize, end_excl: usize) bool {
+    const clamped = @min(end_excl, bits.bit_length);
+    if (start >= clamped) return false;
+    var i = start;
+    while (i < clamped) : (i += 1) {
+        if (bits.isSet(i)) return true;
+    }
+    return false;
+}
+
+fn fetchBytesForBits(fetch_list: []const xet.FetchUrl, bits: ChunkSet) u64 {
+    var total: u64 = 0;
+    for (fetch_list) |f| {
+        if (anySetInRange(bits, @intCast(f.range.start), @intCast(f.range.end))) {
+            total += f.url_range.end - f.url_range.start + 1;
+        }
+    }
+    return total;
+}
+
+fn fetchBytesForSpans(spans: []const FetchSpan, bits: ChunkSet) u64 {
+    var total: u64 = 0;
+    for (spans) |s| {
+        if (anySetInRange(bits, s.chunk_start, s.chunk_end)) total += s.bytes;
+    }
+    return total;
+}
+
+fn mergeIntoAgg(
+    agg: *GlobalAgg,
+    xorbs: []const XorbStats,
+    fetch_info: anytype,
+    tensor_bytes: u64,
+    file_bytes: u64,
+    minimal_bytes: u64,
+    naive_bytes: u64,
+) !void {
+    agg.total_tensor_bytes += tensor_bytes;
+    agg.total_file_size += file_bytes;
+    agg.sum_per_shard_minimal += minimal_bytes;
+    agg.sum_per_shard_naive += naive_bytes;
+    agg.shards_scanned += 1;
+
+    const arena_alloc = agg.arena.allocator();
+
+    for (xorbs) |x| {
+        if (x.needed.bit_length == 0) continue;
+        if (agg.xorbs.getPtr(x.hash)) |existing| {
+            if (x.needed.bit_length > existing.needed.bit_length) {
+                try existing.needed.resize(agg.allocator, x.needed.bit_length, false);
+                const old = existing.chunk_shard_counts;
+                const new = try agg.allocator.alloc(u16, x.needed.bit_length);
+                @memcpy(new[0..old.len], old);
+                @memset(new[old.len..], 0);
+                agg.allocator.free(old);
+                existing.chunk_shard_counts = new;
+            }
+            var sit = x.needed.iterator(.{});
+            while (sit.next()) |i| {
+                existing.needed.set(i);
+                existing.chunk_shard_counts[i] += 1;
+            }
+            existing.shards += 1;
+        } else {
+            const fetch_list = fetch_info.map.get(x.hash) orelse continue;
+            const dup_hash = try arena_alloc.dupe(u8, x.hash);
+            const spans = try arena_alloc.alloc(FetchSpan, fetch_list.len);
+            for (fetch_list, spans) |f, *s| {
+                s.* = .{
+                    .chunk_start = @intCast(f.range.start),
+                    .chunk_end = @intCast(f.range.end),
+                    .bytes = f.url_range.end - f.url_range.start + 1,
+                };
+            }
+            var needed_copy = try ChunkSet.initEmpty(agg.allocator, x.needed.bit_length);
+            const counts = try agg.allocator.alloc(u16, x.needed.bit_length);
+            @memset(counts, 0);
+            var sit = x.needed.iterator(.{});
+            while (sit.next()) |i| {
+                needed_copy.set(i);
+                counts[i] = 1;
+            }
+            try agg.xorbs.put(dup_hash, .{
+                .fetch_spans = spans,
+                .needed = needed_copy,
+                .chunk_shard_counts = counts,
+                .shards = 1,
+            });
+        }
+    }
+}
+
+fn printGlobalSummary(allocator: std.mem.Allocator, agg: *GlobalAgg) !void {
+    var repo_minimal_fetch_bytes: u64 = 0;
+    var xorb_shard_hist: std.AutoArrayHashMapUnmanaged(u32, u32) = .empty;
+    defer xorb_shard_hist.deinit(allocator);
+    var chunk_shard_hist: std.AutoArrayHashMapUnmanaged(u32, u32) = .empty;
+    defer chunk_shard_hist.deinit(allocator);
+    var n_xorbs_global: u32 = 0;
+    var unique_chunks_global: u64 = 0;
+    var chunk_refs_global: u64 = 0;
+
+    var it = agg.xorbs.valueIterator();
+    while (it.next()) |x| {
+        n_xorbs_global += 1;
+        repo_minimal_fetch_bytes += fetchBytesForSpans(x.fetch_spans, x.needed);
+        const xs_gop = try xorb_shard_hist.getOrPut(allocator, x.shards);
+        if (!xs_gop.found_existing) xs_gop.value_ptr.* = 0;
+        xs_gop.value_ptr.* += 1;
+
+        for (x.chunk_shard_counts) |c| {
+            if (c == 0) continue;
+            unique_chunks_global += 1;
+            chunk_refs_global += c;
+            const cs_gop = try chunk_shard_hist.getOrPut(allocator, c);
+            if (!cs_gop.found_existing) cs_gop.value_ptr.* = 0;
+            cs_gop.value_ptr.* += 1;
+        }
+    }
+
+    log.info("══════════════════════════════════════════════════════════════════", .{});
+    log.info("REPO SUMMARY ({d} shards scanned)", .{agg.shards_scanned});
+    log.info("  tensor_bytes_total={d:.2} MiB  file_size_total={d:.2} MiB", .{
+        mib(agg.total_tensor_bytes), mib(agg.total_file_size),
+    });
+    log.info("  unique xorbs (global)={d}", .{n_xorbs_global});
+    printHistogram("  xorbs reuse (cross-shard):", &xorb_shard_hist, n_xorbs_global);
+    log.info("  chunks (refs across shards)={d}  chunks (unique global)={d}", .{
+        chunk_refs_global, unique_chunks_global,
+    });
+    const chunk_redundancy = ratio(chunk_refs_global, @max(unique_chunks_global, 1));
+    log.info("  chunks redundancy (refs / unique) = {d:.3}x", .{chunk_redundancy});
+    const u32_unique = std.math.cast(u32, unique_chunks_global) orelse std.math.maxInt(u32);
+    printHistogram("  chunks reuse (cross-shard):", &chunk_shard_hist, u32_unique);
+    log.info("  fetch bytes sum per-shard minimal: {d:.2} MiB", .{mib(agg.sum_per_shard_minimal)});
+    log.info("  fetch bytes global  minimal:       {d:.2} MiB", .{mib(repo_minimal_fetch_bytes)});
+    const ratio_amort = ratio(agg.sum_per_shard_minimal, @max(repo_minimal_fetch_bytes, 1));
+    log.info("  cross-shard amortization (per-shard-sum / global) = {d:.3}x", .{ratio_amort});
+    log.info("  on-wire / tensor-bytes (global minimal): {d:.3}", .{
+        ratio(repo_minimal_fetch_bytes, @max(agg.total_tensor_bytes, 1)),
+    });
+    log.info("  on-wire / file-size    (global minimal): {d:.3}", .{
+        ratio(repo_minimal_fetch_bytes, @max(agg.total_file_size, 1)),
+    });
 }
