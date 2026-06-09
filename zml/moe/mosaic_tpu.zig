@@ -266,19 +266,6 @@ fn gmmFuseAct(mode: ActivationMode) ?gmm_ep.Cfg.FuseAct {
     };
 }
 
-fn padGateUpForFusedGmm(gate_up: Tensor) Tensor {
-    const mid = @divExact(gate_up.dim(.out), 2);
-    const padded_mid = @divFloor(mid + 127, 128) * 128;
-    if (padded_mid == mid) return gate_up;
-
-    const gate = gate_up.slice1d(.out, .{ .end = mid });
-    const up = gate_up.slice1d(.out, .{ .start = mid, .end = gate_up.dim(.out) });
-    const pad_shape = gate.shape().setDim(.out, padded_mid - mid);
-    const gate_pad = Tensor.zeroes(pad_shape);
-    const up_pad = Tensor.zeroes(pad_shape);
-    return Tensor.concatenate(&.{ gate, gate_pad, up, up_pad }, .out);
-}
-
 fn applyActivation(x: Tensor, mode: ActivationMode) Tensor {
     const gate, const up = zml.nn.splitRealImg(x, .sequential);
     return switch (mode) {
@@ -357,9 +344,15 @@ pub fn fusedExpertsImpl(
 
     const tile_m: i64 = 8;
     const aligned_hidden = alignSortedRowsByGroup(hidden_sorted, expert_ids_sorted, group_sizes, tile_m);
-    const fused_gmm1_act = if (opts.w1_bias == null) gmmFuseAct(opts.activation) else null;
-    const gate_up_for_gmm1 = if (fused_gmm1_act != null) padGateUpForFusedGmm(gate_up) else gate_up;
-    var gate_up_out = callGmmEp(aligned_hidden.rows, gate_up_for_gmm1, aligned_hidden.group_sizes, hidden.dtype(), fused_gmm1_act orelse .none)
+    // const fused_gmm1_act = if (opts.w1_bias == null) gmmFuseAct(opts.activation) else null;
+    const gate_up_for_gmm1 = gate_up;
+    log.info("Gate up shape before gmm1: {f}, after padding for fused act: {f}", .{ gate_up.shape(), gate_up_for_gmm1.shape() });
+
+    const use_reference_moe = false;
+    var gate_up_out = if (use_reference_moe) blk: {
+        const gate_up_per_token = gate_up.gather(.{ .expert = expert_ids_sorted }, .{});
+        break :blk hidden_sorted.dot(gate_up_per_token, .in);
+    } else callGmmEp(aligned_hidden.rows, gate_up_for_gmm1, aligned_hidden.group_sizes, hidden.dtype(), .none)
         .gather(.{ .token = aligned_hidden.positions.rename(.{ .token = .route }) }, .{})
         .rename(.{ .route = .token });
     if (opts.w1_bias) |bias| {
@@ -367,13 +360,14 @@ pub fn fusedExpertsImpl(
         gate_up_out = gate_up_out.add(bias_per_token);
     }
 
-    const activated = if (fused_gmm1_act != null)
-        gate_up_out.slice1d(.out, .{ .end = down.dim(.mid) })
-    else
-        applyActivation(gate_up_out, opts.activation);
+    const activated = applyActivation(gate_up_out, opts.activation);
 
     const aligned_activated = alignSortedRowsByGroup(activated, expert_ids_sorted, group_sizes, tile_m);
-    var down_out = callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype(), .none)
+    log.info("down shape before gmm2: {f}", .{down.shape()});
+    var down_out = if (use_reference_moe) blk: {
+        const down_per_token = down.gather(.{ .expert = expert_ids_sorted }, .{});
+        break :blk activated.rename(.{ .out = .mid }).dot(down_per_token, .mid);
+    } else callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype(), .none)
         .gather(.{ .token = aligned_activated.positions.rename(.{ .token = .route }) }, .{})
         .rename(.{ .route = .token });
     if (opts.w2_bias) |bias| {
