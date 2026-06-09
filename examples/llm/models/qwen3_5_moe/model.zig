@@ -736,7 +736,7 @@ pub const Moe = struct {
             ),
             .gate_up_proj = gate_up_proj_tensor,
             .down_proj = down_proj_tensor,
-            .router = Router.init(store.withPrefix("gate"), config.text_config.num_experts_per_tok.?),
+            .router = Router.init(store.withPrefix("gate"), store, config.text_config.num_experts_per_tok.?),
         };
     }
 

@@ -63,7 +63,7 @@ pub fn run(
     _ = config; // autofix
     const model_sharding = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth }));
     const experts_sharding = try platform.registerSharding("experts", .mesh(.{ .experts = .high_bandwidth }));
-    const shardings: [2]*const zml.Sharding = .{ &model_sharding, &experts_sharding };
+    const shardings: [2]zml.Sharding = .{ model_sharding, experts_sharding };
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
 
@@ -152,17 +152,16 @@ fn runTransformerLayer(
     platform: *const zml.Platform,
     model_store: *zml.io.TensorStore,
     activation_store: *zml.io.TensorStore,
-    shardings: []const *const zml.Sharding,
+    shardings: []const zml.Sharding,
     layer_idx: usize,
 ) !void {
     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}", .{layer_idx});
     defer allocator.free(name);
 
     const layer = try model.TransformerLayer.init(model_store.view().withPrefix(name), layer_idx);
-    const load_shardings = [_]zml.Sharding{ shardings[0].*, shardings[1].* };
     var layer_weights = try zml.io.load(model.TransformerLayer, &layer, allocator, io, platform, model_store, .{
         .parallelism = 1,
-        .shardings = &load_shardings,
+        .shardings = shardings,
         .dma_chunks = 2,
         .dma_chunk_size = 4096,
     });
@@ -275,7 +274,7 @@ fn runFullTextModel(
     platform: *zml.Platform,
     model_store: *zml.io.TensorStore,
     activation_store: *zml.io.TensorStore,
-    shardings: []const *const zml.Sharding,
+    shardings: []const zml.Sharding,
 ) !void {
     const model_view = activation_store.view().withPrefix("model");
     if (!model_view.hasKey("in.0") or !model_view.hasKey("out.0")) {
@@ -286,10 +285,9 @@ fn runFullTextModel(
     var text_model = try model.TextModel.init(allocator, model_store.view().withPrefix("model"));
     defer text_model.deinit(allocator);
 
-    const load_shardings = [_]zml.Sharding{ shardings[0].*, shardings[1].* };
     var text_buffers = try zml.io.load(model.TextModel, &text_model, allocator, io, platform, model_store, .{
         .parallelism = 1,
-        .shardings = &load_shardings,
+        .shardings = shardings,
         .dma_chunks = 2,
         .dma_chunk_size = 4096,
     });
@@ -398,7 +396,7 @@ fn runRmsNormSynthetic(
     } };
     const x_t = zml.Tensor.fromShape(x_shape);
 
-    const exe = try platform.compileFn(allocator, io, RmsNormForD.forward, .{ wrapper_t, x_t }, .{ .shardings = &.{&sharding} });
+    const exe = try platform.compileFn(allocator, io, RmsNormForD.forward, .{ wrapper_t, x_t }, .{ .shardings = &.{sharding} });
     defer exe.deinit();
 
     const weight_data = [_]f32{ 0.0, 1.0, 0.0, -1.0 };
