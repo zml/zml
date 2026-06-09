@@ -17,6 +17,7 @@ pub const Session = struct {
     seqlen: u32,
     cache_buffers: zml.Bufferized(model.Cache),
     attention_metadata_buffers: zml.Bufferized(attention.Metadata),
+    moe_metadata_buffers: zml.Bufferized(zml.moe.Metadata),
     rng_buf: zml.Bufferized(zml.Tensor.Rng),
     generated_token: zml.Slice,
     tokenizer: zml.tokenizer.Tokenizer,
@@ -39,6 +40,7 @@ pub const Session = struct {
             .seqlen = compiled_model.params.seqlen,
             .cache_buffers = try compiled_model.params.cache.initBuffers(io, platform, compiled_model.params.shardings.model),
             .attention_metadata_buffers = try compiled_model.params.attention_metadata.initBuffer(io, platform, compiled_model.params.shardings.model),
+            .moe_metadata_buffers = try compiled_model.params.moe_metadata.initBuffer(io, platform),
             .rng_buf = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed),
             .generated_token = try .alloc(allocator, zml.Shape.init(.{ .batch = 1, .seq = 1 }, .u32)),
             .tokenizer = tokenizer,
@@ -105,6 +107,8 @@ pub const Session = struct {
             .rng_buf = &self.rng_buf,
             .cache_buffers = &self.cache_buffers,
             .attention_metadata_buffers = self.attention_metadata_buffers,
+            .moe_metadata_buffers = self.moe_metadata_buffers,
+            .offset = @intCast(all_tokens.len),
         });
 
         try tokens_buf.toSlice(self.io, tokens_slice);
@@ -158,6 +162,8 @@ pub const Session = struct {
                 .rng_buf = &self.rng_buf,
                 .cache_buffers = &self.cache_buffers,
                 .attention_metadata_buffers = self.attention_metadata_buffers,
+                .moe_metadata_buffers = self.moe_metadata_buffers,
+                .offset = @intCast(all_tokens.items.len),
             });
 
             try current_token_buffer.toSlice(self.io, self.generated_token);

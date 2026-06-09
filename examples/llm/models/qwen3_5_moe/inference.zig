@@ -476,5 +476,6 @@ fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, b
                 .w2_zero_bias_shape = w2_zero_bias_shape,
             },
         }),
+        else => std.debug.panic("NOPE", .{}),
     };
 }

@@ -16,9 +16,12 @@ pub const CompilationParameters = struct {
     shardings: common.Shardings,
     attention_metadata: attention.Metadata,
     attention_parameters: attention.Parameters,
+    moe_metadata: zml.moe.Metadata,
+    moe_parameters: zml.moe.Parameters,
 
-    pub fn init(seqlen: u32, config: model.Config, mdl: model.Model, shardings: common.Shardings, backend: attention.Backend) CompilationParameters {
+    pub fn init(seqlen: u32, config: model.Config, mdl: model.Model, shardings: common.Shardings, backend: attention.Backend, moe_backend: zml.moe.Backend) CompilationParameters {
         const batch_size = 1;
+
         return .{
             .batch_dim = batch_size,
             .seqlen = seqlen,
@@ -27,6 +30,8 @@ pub const CompilationParameters = struct {
             .shardings = shardings,
             .attention_metadata = .init(.fromBackend(backend, seqlen, config.num_attention_heads)),
             .attention_parameters = .init(.fromBackend(backend)),
+            .moe_metadata = .init(.fromBackend(moe_backend)),
+            .moe_parameters = .init(.fromBackend(moe_backend, null, .silu)),
         };
     }
 };
@@ -47,7 +52,7 @@ pub const CompiledModel = struct {
     ) !CompiledModel {
         return .{
             .prefill = try compileKernel(allocator, io, platform, mdl, seqlen, progress, opts),
-            .decode = try compileKernel(allocator, io, platform, mdl, 1, progress, opts),
+            .decode = try compileDecodeKernel(allocator, io, platform, mdl, 1, progress, opts),
             .params = opts,
         };
     }
@@ -68,15 +73,16 @@ fn compileKernel(
     opts: CompilationParameters,
 ) !KernelExe {
     progress.increaseEstimatedTotalItems(1);
-    var node = progress.start("Compiling kernel...", 1);
+    var node = progress.start("Compiling prefill kernel...", 1);
     defer node.end();
 
     const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Compiled kernel [{f}]", .{now.untilNow(io, .awake)});
+    defer log.info("Compiled prefill kernel [{f}]", .{now.untilNow(io, .awake)});
 
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const tokens_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
 
+    const offset: u32 = 0;
     const exe = try platform.compile(
         allocator,
         io,
@@ -85,10 +91,54 @@ fn compileKernel(
         .{
                 tokens,
                 tokens_idx_offset ,
+                offset,
                 opts.rng,
                 opts.cache,
                 opts.attention_metadata,
                 opts.attention_parameters,
+                opts.moe_metadata,
+                opts.moe_parameters,
+               },
+        .{ .shardings = &opts.shardings.all(), }
+    );
+    return .{ .exe = exe };
+}
+
+fn compileDecodeKernel(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    mdl: model.Model,
+    seqlen: u32,
+    progress: *std.Progress.Node,
+    opts: CompilationParameters,
+) !KernelExe {
+    progress.increaseEstimatedTotalItems(1);
+    var node = progress.start("Compiling decode kernel...", 1);
+    defer node.end();
+
+    const now: std.Io.Timestamp = .now(io, .awake);
+    defer log.info("Compiled decode kernel [{f}]", .{now.untilNow(io, .awake)});
+
+    const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
+    const tokens_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
+
+    const offset = opts.seqlen;
+    const exe = try platform.compile(
+        allocator,
+        io,
+        mdl,
+        .forward,
+        .{
+                tokens,
+                tokens_idx_offset,
+                offset,
+                opts.rng,
+                opts.cache,
+                opts.attention_metadata,
+                opts.attention_parameters,
+                opts.moe_metadata,
+                opts.moe_parameters,
                },
         .{ .shardings = &opts.shardings.all(), }
     );
@@ -105,6 +155,8 @@ pub const KernelArgs = struct {
     rng_buf: *zml.Bufferized(zml.Tensor.Rng),
     cache_buffers: *zml.Bufferized(model.Cache),
     attention_metadata_buffers: zml.Bufferized(attention.Metadata),
+    moe_metadata_buffers: zml.Bufferized(zml.moe.Metadata),
+    offset: u32,
 };
 
 const KernelExe = struct {
@@ -122,9 +174,11 @@ const KernelExe = struct {
             args.model_buffers,
             args.tokens_buf,
             args.tokens_pos_buf,
+            args.offset,
             args.rng_buf,
             args.cache_buffers,
             args.attention_metadata_buffers,
+            args.moe_metadata_buffers,
         });
 
         var results = try self.exe.results(args.allocator);
@@ -153,6 +207,13 @@ fn updateBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
 
 fn updateCacheBuffers(dst: *zml.Bufferized(model.Cache), src: *zml.Bufferized(model.Cache)) void {
     updateBuffer(&dst.sliding_window.kv, &src.sliding_window.kv);
+    updateBuffer(&dst.hca.state.kv_state, &src.hca.state.kv_state);
+    updateBuffer(&dst.hca.state.score_state, &src.hca.state.score_state);
+    updateBuffer(&dst.csa.state.kv_state, &src.csa.state.kv_state);
+    updateBuffer(&dst.csa.state.score_state, &src.csa.state.score_state);
+    updateBuffer(&dst.csa.indexer.state.kv_state, &src.csa.indexer.state.kv_state);
+    updateBuffer(&dst.csa.indexer.state.score_state, &src.csa.indexer.state.score_state);
+    updateBuffer(&dst.csa.indexer.kv.kv, &src.csa.indexer.kv.kv);
 }
 
 fn sameBufferHandle(lhs: zml.Buffer, rhs: zml.Buffer) bool {

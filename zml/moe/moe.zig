@@ -8,6 +8,7 @@ pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
 pub const Backend = enum {
     // Could select a more specific name like "triton_sm90_bf16"
     triton,
+    vanilla,
 
     pub fn auto(platform: *const zml.Platform, weights_dtype: zml.DataType) !Backend {
         return switch (platform.target) {
@@ -26,34 +27,37 @@ pub const Backend = enum {
                 }
                 break :b error.UnsupportedComputeCapability;
             },
-            else => error.UnimplementedMoEBackend,
+            else => .vanilla,
         };
     }
 
     pub fn load(backend: Backend, allocator: std.mem.Allocator) !void {
         _ = allocator;
         return switch (backend) {
-            .triton => {},
+            .triton, .vanilla => {},
         };
     }
 
     pub fn register(backend: Backend, platform: *zml.Platform) !void {
         _ = platform;
         return switch (backend) {
-            .triton => {},
+            .triton, .vanilla => {},
         };
     }
 };
 
 pub const Parameters = union(Backend) {
     triton: triton.Parameters,
+    vanilla: vanilla.Parameters,
 
     pub const InitOptions = union(Backend) {
         triton: triton.Parameters.InitOptions,
+        vanilla: vanilla.Parameters.InitOptions,
 
         pub fn fromBackend(backend: Backend, num_experts_per_tok: ?u32, activation: triton.Parameters.ActivationMode) InitOptions {
             return switch (backend) {
                 .triton => .{ .triton = .{ .num_experts_per_tok = num_experts_per_tok.?, .activation = activation } },
+                .vanilla => .{ .vanilla = .{}},
             };
         }
     };
@@ -61,19 +65,45 @@ pub const Parameters = union(Backend) {
     pub fn init(opts: InitOptions) Parameters {
         return switch (opts) {
             .triton => |v| .{ .triton = triton.Parameters.init(v) },
+            .vanilla => .{ .vanilla = .{} },
         };
     }
 };
 
+pub const vanilla = struct {
+    pub const Metadata = struct {
+        dummy: zml.Tensor,
+
+        pub const InitOptions = struct {};
+
+        pub fn init() vanilla.Metadata {
+            return .{ .dummy = .init(.{}, .u32) };
+        }
+
+        pub fn initBuffer(self: vanilla.Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(vanilla.Metadata) {
+            const replicated_sharding = platform.replicated_sharding;
+            return .{
+                .dummy = try zml.Buffer.uninitialized(io, platform, self.dummy.shape(), replicated_sharding, .{}) 
+            };
+        }
+    };
+    pub const Parameters = struct {
+        pub const InitOptions = struct {};
+    };
+};
+
 pub const Metadata = union(Backend) {
     triton: triton.Metadata,
+    vanilla: vanilla.Metadata,
 
     pub const InitOptions = union(Backend) {
         triton: triton.Metadata.InitOptions,
+        vanilla: vanilla.Metadata.InitOptions,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .triton => .{ .triton = .{} },
+                .vanilla => .{ .vanilla = .{}},
             };
         }
     };
@@ -81,18 +111,21 @@ pub const Metadata = union(Backend) {
     pub fn init(opts: InitOptions) Metadata {
         return switch (opts) {
             .triton => |v| .{ .triton = triton.Metadata.init(v) },
+            .vanilla => .{ .vanilla = .init() },
         };
     }
 
     pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
         return switch (self) {
             .triton => |metadata| .{ .triton = try metadata.initBuffer(io, platform) },
+            .vanilla => |metadata| .{ .vanilla = try metadata.initBuffer(io, platform) },
         };
     }
 
     pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
         switch (self.*) {
             .triton => |*metadata| triton.deinitBuffer(metadata),
+            .vanilla => {},//|*metadata| vanilla.deinitBuffer(metadata),
         }
     }
 };
@@ -111,9 +144,11 @@ pub fn forwardMoe(
     parameters: Parameters,
 ) !zml.Tensor {
     return switch (parameters) {
+        .vanilla => input,
         .triton => b: {
             const triton_metadata = switch (metadata) {
                 .triton => |v| v,
+                .vanilla => std.debug.panic("NOPE", .{}),
             };
 
             const expert_partition = weights_gate_up.shape().partition(.expert);
