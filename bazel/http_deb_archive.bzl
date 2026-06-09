@@ -41,6 +41,90 @@ def _downloaded_archive_name(rctx, source_urls):
         return ".downloaded." + basename
     return ".downloaded.archive"
 
+def _file_sha256(rctx, path):
+    sha256sum = rctx.which("sha256sum")
+    if sha256sum:
+        res = rctx.execute([sha256sum, path])
+        if res.return_code == 0:
+            return res.stdout.strip().split(" ")[0]
+
+    shasum = rctx.which("shasum")
+    if shasum:
+        res = rctx.execute([shasum, "-a", "256", path])
+        if res.return_code == 0:
+            return res.stdout.strip().split(" ")[0]
+
+    openssl = rctx.which("openssl")
+    if openssl:
+        res = rctx.execute([openssl, "dgst", "-sha256", path])
+        if res.return_code == 0:
+            return res.stdout.strip().split(" ")[-1]
+
+    fail("Could not compute SHA-256 for {}: sha256sum, shasum, and openssl are unavailable".format(path))
+
+def _external_downloader(rctx):
+    curl = rctx.which("curl")
+    if curl:
+        return struct(
+            name = "curl",
+            path = curl,
+            args = ["-fsSL", "--retry", "3", "-o"],
+        )
+
+    wget = rctx.which("wget")
+    if wget:
+        return struct(
+            name = "wget",
+            path = wget,
+            args = ["-q", "-O"],
+        )
+
+    return None
+
+def _download_archive_with_external_downloader(rctx, source_urls, archive):
+    if not rctx.attr.sha256:
+        fail("external_downloader_fallback requires sha256 to verify the downloaded archive")
+
+    downloader = _external_downloader(rctx)
+    if not downloader:
+        fail("Bazel downloader failed and external_downloader_fallback is enabled, but neither curl nor wget is available")
+
+    failures = []
+    for url in source_urls:
+        rctx.delete(archive)
+        res = rctx.execute([downloader.path] + downloader.args + [archive, url])
+        if res.return_code != 0:
+            failures.append("{} failed for {}:\n{}".format(downloader.name, url, res.stderr or res.stdout))
+            continue
+
+        actual_sha256 = _file_sha256(rctx, archive)
+        if actual_sha256 != rctx.attr.sha256:
+            rctx.delete(archive)
+            fail("Downloaded {} with SHA-256 {}, expected {}".format(url, actual_sha256, rctx.attr.sha256))
+
+        return struct(
+            success = True,
+            sha256 = actual_sha256,
+            integrity = "",
+        )
+
+    fail("Bazel downloader failed and {} fallback could not download any URL:\n{}".format(downloader.name, "\n".join(failures)))
+
+def _download_archive(rctx, source_urls, archive):
+    archive_info = rctx.download(
+        source_urls,
+        archive,
+        rctx.attr.sha256,
+        canonical_id = rctx.attr.canonical_id or get_default_canonical_id(rctx, source_urls),
+        auth = get_auth(rctx, source_urls),
+        integrity = rctx.attr.integrity,
+        allow_fail = rctx.attr.external_downloader_fallback,
+    )
+    if not rctx.attr.external_downloader_fallback or archive_info.success:
+        return archive_info
+
+    return _download_archive_with_external_downloader(rctx, source_urls, archive)
+
 def _placeholder_dir_from_exclude(pattern):
     if pattern.endswith("/*"):
         return pattern[:-2].strip("/")
@@ -151,14 +235,7 @@ def _http_deb_archive_impl(rctx):
         fail("Only one of build_file and build_file_content can be provided.")
 
     archive = _downloaded_archive_name(rctx, source_urls)
-    archive_info = rctx.download(
-        source_urls,
-        archive,
-        rctx.attr.sha256,
-        canonical_id = rctx.attr.canonical_id or get_default_canonical_id(rctx, source_urls),
-        auth = get_auth(rctx, source_urls),
-        integrity = rctx.attr.integrity,
-    )
+    archive_info = _download_archive(rctx, source_urls, archive)
 
     host_bsdtar = _host_bsdtar_label(rctx)
     res = rctx.execute([
@@ -244,6 +321,7 @@ _http_deb_archive_attrs = {
     "includes": attr.string_list(default = []),
     "excludes": attr.string_list(default = []),
     "bsdtar_extra_args": attr.string_list(default = []),
+    "external_downloader_fallback": attr.bool(default = False),
 }
 
 http_deb_archive = repository_rule(
