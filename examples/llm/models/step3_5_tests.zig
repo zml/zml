@@ -70,11 +70,7 @@ pub fn run(
     mdl: step3p5flash.Model,
     model_buffers: *step3p5flash.Buffers,
     model_store: *zml.io.TensorStore,
-    attention_metadata: zml.attention.attention.Metadata,
-    attention_parameters: zml.attention.attention.Parameters,
 ) !void {
-    _ = attention_metadata; // autofix
-    _ = attention_parameters; // autofix
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
 
