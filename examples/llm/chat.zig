@@ -106,6 +106,33 @@ pub const Chat = struct {
             return;
         }
 
+        // Decode micro-benchmark: ZML_DECODE_BENCH=<reps> prefills ONCE, then re-runs decode
+        // <reps> times from the same context (reset `tokens` back to the prompt — the prompt
+        // KV is reused, the decode KV is overwritten), all in ONE warm process. This is the
+        // in-process analog of llama-bench's tg reps: no per-sample model reload / GPU
+        // cooldown. Generated text still streams to stdout; the `decode[i]` line is the metric.
+        // rep 0 is the cold/first-execute warmup (a harness picks the best/warm rep).
+        if (std.c.getenv("ZML_DECODE_BENCH")) |reps_env| {
+            const reps: usize = std.fmt.parseInt(usize, std.mem.span(reps_env), 10) catch 4;
+            try self.tokens.appendSlice(self.allocator, prompt_tokens);
+            try self.session.runPrefill(self.tokens.items);
+            const prompt_len = self.tokens.items.len;
+            var i: usize = 0;
+            while (i < reps) : (i += 1) {
+                self.tokens.items.len = prompt_len; // reset to the prefilled context
+                const t0: std.Io.Timestamp = .now(self.io, .awake);
+                try self.session.runDecode(&self.tokens, &stdout.interface);
+                const dt = t0.untilNow(self.io, .awake);
+                const gen = self.tokens.items.len - prompt_len;
+                try stdout.interface.print("\n\x1b[36mdecode[{}]\x1b[0m {f} · {} gen tokens · ctx {} · seqlen {} · {:.1}tok/s\n", .{
+                    i, dt, gen, prompt_len, self.session.maxTokens(), tokensPerSecond(dt, gen),
+                });
+                try stdout.interface.flush();
+            }
+            _ = if (profiler) |*p| try p.stop() else null;
+            return;
+        }
+
         try self.runPrefill(prompt_tokens, &stdout.interface);
         try self.runDecodeTurn(&stdout.interface);
         _ = if (profiler) |*p| try p.stop() else null;
