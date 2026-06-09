@@ -124,12 +124,16 @@ pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k
         parameters,
         (struct {
             fn body(parameters_: Parameters, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
+                const is_prefill = parameters_.options_.is_prefill;
+                const entrypoint = if (is_prefill) "paged_attention_2d" else "paged_attention_decode_2d";
+                const name = if (is_prefill) "paged_attention_2d_trn1" else "paged_attention_decode_2d_trn1";
+
                 return zml.ops.neuronNki(
                     .{ sharded_inputs[0], sharded_inputs[1], sharded_inputs[2], sharded_inputs[3], sharded_inputs[4], sharded_inputs[5], sharded_inputs[6], sharded_inputs[7], sharded_inputs[8] },
                     .{sharded_inputs[0].shape()},
                     .{
-                        .name = if (parameters_.options_.is_prefill) "paged_attention_2d_trn1" else "paged_attention_decode_2d_trn1",
-                        .entrypoint = if (parameters_.options_.is_prefill) "paged_attention_2d" else "paged_attention_decode_2d",
+                        .name = name,
+                        .entrypoint = entrypoint,
                         .source_path = paged_attention_source_path,
                         .compiler_target = parameters_.options_.compiler_target,
                         .has_side_effect = true,

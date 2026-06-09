@@ -61,13 +61,25 @@ def paged_attention_tile_plan(
     pages_per_v_tile = largest_divisor_at_most(pages_per_k_tile, int(nl.tile_size.pmax) // page_size)
     v_tile = pages_per_v_tile * page_size
     k_tiles = max_num_pages // pages_per_k_tile
+    k_tiles_per_segment = largest_divisor_at_most(k_tiles, min(k_tiles, 4)) if is_decode else 1
+    k_segments = k_tiles // k_tiles_per_segment
     compiled_q_blocks = (num_tokens + q_rows_per_tile - 1) // q_rows_per_tile
     if query_lengths is None:
         live_q_per_seq = 1 if is_decode else num_tokens // batch_size
         live_q_blocks = batch_size * ((live_q_per_seq + q_rows_per_tile - 1) // q_rows_per_tile)
     else:
         live_q_blocks = sum((query_len + q_rows_per_tile - 1) // q_rows_per_tile for query_len in query_lengths)
-    return q_rows_per_tile, q_partition_tile, compiled_q_blocks, live_q_blocks, k_tile, v_tile, k_tiles
+    return (
+        q_rows_per_tile,
+        q_partition_tile,
+        compiled_q_blocks,
+        live_q_blocks,
+        k_tile,
+        v_tile,
+        k_tiles,
+        k_tiles_per_segment,
+        k_segments,
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -120,7 +132,7 @@ def parse_args():
     parser.add_argument("--context-len", type=int, default=1)
     parser.add_argument("--decode-steps", type=int, default=4)
     parser.add_argument("--seq-len", type=int, default=256)
-    parser.add_argument("--page-size", type=int, default=16)
+    parser.add_argument("--page-size", type=int, default=32)
     parser.add_argument("--num-heads", type=int, default=None)
     parser.add_argument("--num-kv-heads", type=int, default=None)
     parser.add_argument("--head-dim", type=int, default=None)
@@ -156,9 +168,9 @@ def install_model_spec(args, spec):
     args.head_dim = spec.head_dim
 
 
-def load_paged_attention_module():
+def load_paged_attention_module(module_name="zml_nki_paged_attention"):
     path = Path(__file__).with_name("paged_attention.py")
-    spec = importlib.util.spec_from_file_location("zml_nki_paged_attention", path)
+    spec = importlib.util.spec_from_file_location(module_name, path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"could not load {path}")
     module = importlib.util.module_from_spec(spec)
@@ -200,6 +212,8 @@ def validate_args(args):
         raise ValueError("--active-lanes must be in 1..--batch-size")
     if args.page_size <= 0:
         raise ValueError("--page-size must be positive")
+    if args.page_size not in (32, 64):
+        raise ValueError("--page-size must be 32 or 64 for the NKI paged-attention bench path")
     if args.seq_len % args.page_size != 0:
         raise ValueError("--seq-len must be a multiple of --page-size")
     if args.context_len < 0:
@@ -362,12 +376,16 @@ def scatter_logical_kv_to_pages(k_logical, v_logical, block_table, page_size, to
     _, _, num_kv_heads, head_dim = k_logical.shape
     k_cache = np.zeros((total_pages, page_size, num_kv_heads, head_dim), dtype=k_logical.dtype)
     v_cache = np.zeros_like(k_cache)
+    k_private = k_cache.reshape((total_pages, num_kv_heads, head_dim, page_size))
     for batch_idx in range(block_table.shape[0]):
         for logical_page in range(block_table.shape[1]):
             physical_page = block_table[batch_idx, logical_page]
             start = logical_page * page_size
             stop = start + page_size
-            k_cache[physical_page, :, :, :] = k_logical[batch_idx, start:stop, :, :]
+            k_private[physical_page, :, :, :] = np.transpose(
+                k_logical[batch_idx, start:stop, :, :],
+                (1, 2, 0),
+            )
             v_cache[physical_page, :, :, :] = v_logical[batch_idx, start:stop, :, :]
     return k_cache, v_cache
 
@@ -379,7 +397,8 @@ def scatter_logical_token_to_page(k_cache, v_cache, k_logical, v_logical, block_
     logical_page = token_pos // page_size
     page_offset = token_pos % page_size
     physical_page = block_table[0, logical_page]
-    k_cache[physical_page, page_offset, :, :] = k_logical[token_pos, :, :]
+    k_private = k_cache.reshape((k_cache.shape[0], k_cache.shape[2], k_cache.shape[3], page_size))
+    k_private[physical_page, :, :, page_offset] = k_logical[token_pos, :, :]
     v_cache[physical_page, page_offset, :, :] = v_logical[token_pos, :, :]
 
 
@@ -387,6 +406,17 @@ def flattened_cache_slot(block_table, batch_idx, token_pos, page_size):
     logical_page = token_pos // page_size
     page_offset = token_pos % page_size
     return int(block_table[batch_idx, logical_page]) * page_size + page_offset
+
+
+def private_k_flat_index(slot, num_kv_heads, head_dim, page_size, kv_head=0, hd_idx=0):
+    physical_page = slot // page_size
+    page_offset = slot % page_size
+    return ((physical_page * num_kv_heads + kv_head) * head_dim + hd_idx) * page_size + page_offset
+
+
+def read_private_k_scalar(k_cache, slot, num_kv_heads, head_dim, page_size, kv_head=0, hd_idx=0):
+    k_private_flat = k_cache.reshape(-1)
+    return float(k_private_flat[private_k_flat_index(slot, num_kv_heads, head_dim, page_size, kv_head, hd_idx)])
 
 
 def write_logical_token(k_logical, v_logical, token_pos, k_value, v_value):
@@ -465,23 +495,27 @@ def assert_close_scalar(label, expected, actual, tolerance=1e-3):
         raise AssertionError(f"{label}: expected {expected}, got {actual}")
 
 
+def launch_kernel(kernel, inputs):
+    return kernel(*inputs)
+
+
 def timed_kernel(kernel, inputs, args):
     if args.mode == "verify":
         start = time.perf_counter()
-        output = kernel(*inputs)
+        output = launch_kernel(kernel, inputs)
         elapsed = time.perf_counter() - start
         return output, elapsed, 1
 
     start = time.perf_counter()
-    output = kernel(*inputs)
+    output = launch_kernel(kernel, inputs)
     print(f"kernel_compile_and_first_run elapsed={(time.perf_counter() - start) * 1000.0:.3f}ms", flush=True)
     for _ in range(args.warmups):
-        output = kernel(*inputs)
+        output = launch_kernel(kernel, inputs)
 
     total = 0.0
     for _ in range(args.iterations):
         start = time.perf_counter()
-        output = kernel(*inputs)
+        output = launch_kernel(kernel, inputs)
         total += time.perf_counter() - start
     return output, total, args.iterations
 
@@ -581,7 +615,17 @@ def run_attention_case(args, kernel, heads_per_kv, kind):
         f"kv_heads={args.num_kv_heads} head_dim={args.head_dim} permute_pages={args.permute_pages}",
         flush=True,
     )
-    q_rows_per_tile, q_partition_tile, compiled_q_blocks, live_q_blocks, k_tile, v_tile, k_tiles = paged_attention_tile_plan(
+    (
+        q_rows_per_tile,
+        q_partition_tile,
+        compiled_q_blocks,
+        live_q_blocks,
+        k_tile,
+        v_tile,
+        k_tiles,
+        k_tiles_per_segment,
+        k_segments,
+    ) = paged_attention_tile_plan(
         num_tokens,
         args.batch_size,
         block_table.shape[1],
@@ -595,14 +639,17 @@ def run_attention_case(args, kernel, heads_per_kv, kind):
         f"q_rows_per_tile={q_rows_per_tile} q_partition_tile={q_partition_tile} "
         f"live_q_blocks={live_q_blocks} compiled_q_blocks={compiled_q_blocks} "
         f"k_tile={k_tile} v_tile={v_tile} "
+        f"k_tiles_per_segment={k_tiles_per_segment} k_segments={k_segments} "
         f"k_tiles={k_tiles} kv_work_product={live_q_blocks * args.num_kv_heads} "
         f"query_head_rows={live_q_blocks * args.num_heads}",
         flush=True,
     )
-    output, elapsed, timed_iterations = timed_kernel(
-        kernel, (q, k_cache, v_cache, new_k, new_v, slot_mapping, block_table, seq_lens, query_start_len), args
-    )
     kernel_label = "paged_attention_decode_2d" if is_decode else "paged_attention_2d"
+    output, elapsed, timed_iterations = timed_kernel(
+        kernel,
+        (q, k_cache, v_cache, new_k, new_v, slot_mapping, block_table, seq_lens, query_start_len),
+        args,
+    )
     print_timing(f"kernel={kernel_label} label={kind}", elapsed, timed_iterations)
     if args.mode != "verify":
         return
@@ -670,16 +717,26 @@ def run_update_contract(args, module):
     k_output, v_output = kernel(k_cache, v_cache, k_update, v_update, slot_mapping, query_start_len)
     print(f"paged_update elapsed={(time.perf_counter() - start) * 1000.0:.3f}ms")
 
-    k_flat = k_output.reshape((total_pages * args.page_size, elems_per_token))
     v_flat = v_output.reshape((total_pages * args.page_size, elems_per_token))
-    assert_close_scalar("paged_update first_slot_k", 0.01, float(k_flat[first_slot, 0]))
+    assert_close_scalar(
+        "paged_update first_slot_k",
+        0.01,
+        read_private_k_scalar(k_output, first_slot, args.num_kv_heads, args.head_dim, args.page_size),
+    )
     assert_close_scalar("paged_update first_slot_v", 0.02, float(v_flat[first_slot, 0]))
-    assert_close_scalar("paged_update second_slot_k", 0.02, float(k_flat[second_slot, 0]))
+    assert_close_scalar(
+        "paged_update second_slot_k",
+        0.02,
+        read_private_k_scalar(k_output, second_slot, args.num_kv_heads, args.head_dim, args.page_size),
+    )
     assert_close_scalar("paged_update second_slot_v", 0.04, float(v_flat[second_slot, 0]))
     assert_close_scalar(
         "paged_update inactive_slot_k",
-        expected_fill_bf16_value(inactive_slot * elems_per_token, 0.125),
-        float(k_flat[inactive_slot, 0]),
+        expected_fill_bf16_value(
+            private_k_flat_index(inactive_slot, args.num_kv_heads, args.head_dim, args.page_size),
+            0.125,
+        ),
+        read_private_k_scalar(k_output, inactive_slot, args.num_kv_heads, args.head_dim, args.page_size),
     )
     assert_close_scalar(
         "paged_update inactive_slot_v",
@@ -688,8 +745,11 @@ def run_update_contract(args, module):
     )
     assert_close_scalar(
         "paged_update preserved_slot_k",
-        expected_fill_bf16_value(preserved_slot * elems_per_token, 0.125),
-        float(k_flat[preserved_slot, 0]),
+        expected_fill_bf16_value(
+            private_k_flat_index(preserved_slot, args.num_kv_heads, args.head_dim, args.page_size),
+            0.125,
+        ),
+        read_private_k_scalar(k_output, preserved_slot, args.num_kv_heads, args.head_dim, args.page_size),
     )
     assert_close_scalar(
         "paged_update preserved_slot_v",
@@ -722,11 +782,18 @@ def run_cache_reuse_update(args, module):
     )
 
     print(f"cache_reuse_update_contract seq_len={args.seq_len} page_size={args.page_size}")
-    k_flat = k_output.reshape((total_pages * args.page_size, elems_per_token))
     v_flat = v_output.reshape((total_pages * args.page_size, elems_per_token))
-    assert_close_scalar("cache_reuse first_slot_k", expected_fill_bf16_value(0, 0.42), float(k_flat[first_slot, 0]))
+    assert_close_scalar(
+        "cache_reuse first_slot_k",
+        expected_fill_bf16_value(0, 0.42),
+        read_private_k_scalar(k_output, first_slot, args.num_kv_heads, args.head_dim, args.page_size),
+    )
     assert_close_scalar("cache_reuse first_slot_v", expected_fill_bf16_value(0, 0.52), float(v_flat[first_slot, 0]))
-    assert_close_scalar("cache_reuse second_slot_k", expected_fill_bf16_value(0, 0.73), float(k_flat[second_slot, 0]))
+    assert_close_scalar(
+        "cache_reuse second_slot_k",
+        expected_fill_bf16_value(0, 0.73),
+        read_private_k_scalar(k_output, second_slot, args.num_kv_heads, args.head_dim, args.page_size),
+    )
     assert_close_scalar("cache_reuse second_slot_v", expected_fill_bf16_value(0, 0.83), float(v_flat[second_slot, 0]))
 
 
