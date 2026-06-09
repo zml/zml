@@ -102,6 +102,40 @@ pub const FfnType = enum {
     mlp,
 };
 
+/// sharding - when .model mesh size exceeds the number of KV heads, replicate KV heads (by repeating along `.h`) such that each model-parallel shard owns at least one head.
+fn kvHeadsAreReplicated(axis_size: i64, model_partitions: i64) struct { bool, ?u32 } {
+    const is_replicated = axis_size > 0 and axis_size < model_partitions and @rem(model_partitions, axis_size) == 0;
+    const repeat_factor = if (is_replicated) @as(u32, @intCast(@divExact(model_partitions, axis_size))) else null;
+    return .{ is_replicated, repeat_factor };
+}
+
+fn partitionProjectedKv(tensor: zml.Tensor, replicate_kv_heads: bool, repeat_factor: ?u32) zml.Tensor {
+    return if (replicate_kv_heads)
+        tensor.repeat1d(.h, @as(u63, repeat_factor.?)).withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated })
+    else
+        tensor.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
+}
+
+fn partitionCachedKv(tensor: zml.Tensor, replicate_kv_heads: bool, repeat_factor: ?u32) zml.Tensor {
+    return if (replicate_kv_heads)
+        tensor.rename(.{ .s = .k }).repeat1d(.h, @as(u63, repeat_factor.?)).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated })
+    else
+        tensor.rename(.{ .s = .k }).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+}
+
+pub fn partitionKvCacheShape(kv_shape: zml.Shape, kv_heads: i64, model_partitions: i64) zml.Shape {
+    const is_replicated, const repeat_factor = kvHeadsAreReplicated(kv_heads, model_partitions);
+
+    if (is_replicated) {
+        const repeated_h = kv_shape.dim(.h) * @as(i64, @intCast(repeat_factor.?));
+        return kv_shape
+            .setDim(.h, repeated_h)
+            .withPartitioning(.{ .h = .model });
+    }
+
+    return kv_shape.withPartitioning(.{ .h = .model });
+}
+
 pub const Options = Model.GenOptions;
 
 pub const Model = struct {
@@ -122,7 +156,7 @@ pub const Model = struct {
         return .{
             .text_model = try .init(allocator, store.withPrefix("model")),
             .lm_head = .init(
-                store.createTensor("lm_head.weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }),
+                store.createTensor("lm_head.weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
                 null,
                 .d,
             ),
@@ -206,7 +240,7 @@ pub const TextModel = struct {
                 .weight = store.createTensor(
                     "embed_tokens.weight",
                     .{ .voc, .d },
-                    .{ .voc = .replicated, .d = .replicated },
+                    .{ .voc = .replicated, .d = .model },
                 ),
             },
             .layers = layers,
@@ -518,11 +552,11 @@ pub const Attn = struct {
             .q_size = num_q_heads * head_dim,
             .kv_size = num_kv_heads * head_dim,
             .scaling = 1.0 / @sqrt(@as(f32, @floatFromInt(head_dim))),
-            .q_proj = initProj(store.withPrefix("q_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
-            .k_proj = initProj(store.withPrefix("k_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
-            .v_proj = initProj(store.withPrefix("v_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
-            .o_proj = initProj(store.withPrefix("o_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
-            .g_proj = initProj(store.withPrefix("g_proj"), .{ .dout = .replicated, .d = .replicated }, .{ .dout = .replicated }),
+            .q_proj = initProj(store.withPrefix("q_proj"), .{ .dout = .model, .d = .replicated }, .{ .dout = .model }),
+            .k_proj = initProj(store.withPrefix("k_proj"), .{ .dout = .model, .d = .replicated }, .{ .dout = .model }),
+            .v_proj = initProj(store.withPrefix("v_proj"), .{ .dout = .model, .d = .replicated }, .{ .dout = .model }),
+            .o_proj = initProj(store.withPrefix("o_proj"), .{ .dout = .replicated, .d = .model }, .{ .dout = .replicated }),
+            .g_proj = initProj(store.withPrefix("g_proj"), .{ .dout = .model, .d = .replicated }, .{ .dout = .model }),
             // Step 3.5 doesn't expose rms_norm_eps in its config; HF reference uses 1e-5.
             .q_norm = .init(store.withPrefix("q_norm"), 1e-5),
             .k_norm = .init(store.withPrefix("k_norm"), 1e-5),
@@ -574,12 +608,20 @@ pub const Attn = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache,
     ) struct { zml.Tensor, KvCache } {
-        const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
-        var q, const gate = self.projectQAndGate(input);
+        const input_raw = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
+        const input = input_raw.withPartitioning(.{ .d = .replicated });
 
-        // PREFILL: x has .s=prompt_len, project initial KV
-        // DECODE: x has .s=1, retrieve rest from KV cache
-        var k, const v = self.projectKV(input);
+        const model_partitions = zml.module.CompilationContext.current().partitioning
+            .numPartitionsForLogicalAxis(self.q_proj.weight.shape(), .model) catch unreachable;
+        const replicate_kv_heads, const repeat_factor = kvHeadsAreReplicated(self.num_kv_heads, model_partitions);
+
+        var q, var gate = self.projectQAndGate(input);
+        var k, var v = self.projectKV(input);
+
+        q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
+        gate = gate.withPartitioning(.{ .s = .replicated, .h = .model });
+        k = partitionProjectedKv(k, replicate_kv_heads, repeat_factor);
+        v = partitionProjectedKv(v, replicate_kv_heads, repeat_factor);
 
         q = self.q_norm.forward(q, .hd);
         k = self.k_norm.forward(k, .hd);
@@ -591,16 +633,19 @@ pub const Attn = struct {
 
         const cos, const sin = self.rotary_emb.getCosAndSin(position_ids, dtype);
 
-        q = self.rotary_emb.applyRope(q, cos, sin);
-        k = self.rotary_emb.applyRope(k, cos, sin);
+        q = self.rotary_emb.applyRope(q, cos, sin)
+            .withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
+        k = partitionProjectedKv(self.rotary_emb.applyRope(k, cos, sin), replicate_kv_heads, repeat_factor);
 
         // Scatter the new k/v slice into the persistent cache, then read the full history back so attention sees all prior tokens
         const cache_start = token_index.convert(.u32).slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0);
         const new_kv_cache = kv_cache.update(k, v, cache_start);
-        const k_full = new_kv_cache.keys().convert(dtype);
-        const v_full = new_kv_cache.values().convert(dtype);
+        const k_full = new_kv_cache.keys().convert(dtype)
+            .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+        const v_full = new_kv_cache.values().convert(dtype)
+            .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
 
-        q = q.rename(.{ .s = .q });
+        q = q.rename(.{ .s = .q }).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
         // Take first element of cache_positions array to match zml.attention.attention signature
         const attn_start = token_index.slice1d(0, .{ .start = 0, .end = 1 });
@@ -612,7 +657,7 @@ pub const Attn = struct {
             attn_start,
             zml.attention.attention.Metadata.init(.fromBackend(.vanilla, input.dim(.s), self.num_q_heads)),
             zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
-        );
+        ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
         // Head-wise gate is {b, s, h}
         const gate_b = gate.sigmoid().rename(.{ .s = .q }).broad(attn_output.shape());
@@ -620,7 +665,7 @@ pub const Attn = struct {
 
         const projected_output = self.o_proj.forward(
             gated_attn.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s }),
-        );
+        ).withPartitioning(.{ .d = .replicated });
 
         return .{ projected_output, new_kv_cache };
     }
@@ -877,17 +922,17 @@ pub const Mlp = struct {
     pub fn init(store: zml.io.TensorStore.View, swiglu_limit: f32) Mlp {
         return .{
             .up_proj = .init(
-                store.createTensor("up_proj.weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }),
+                store.createTensor("up_proj.weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
                 null,
                 .d,
             ),
             .gate_proj = .init(
-                store.createTensor("gate_proj.weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .replicated }),
+                store.createTensor("gate_proj.weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
                 null,
                 .d,
             ),
             .down_proj = .init(
-                store.createTensor("down_proj.weight", .{ .d, .dout }, .{ .d = .replicated, .dout = .replicated }),
+                store.createTensor("down_proj.weight", .{ .d, .dout }, .{ .d = .replicated, .dout = .model }),
                 null,
                 .dout,
             ),
@@ -1030,19 +1075,19 @@ pub const Moe = struct {
         const up_proj_tensor = store.createTensor(
             "up_proj.weight",
             .{ .expert, .dout, .d },
-            .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
+            .{ .expert = .experts, .dout = .replicated, .d = .replicated },
         );
 
         const gate_proj_tensor = store.createTensor(
             "gate_proj.weight",
             .{ .expert, .dout, .d },
-            .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
+            .{ .expert = .experts, .dout = .replicated, .d = .replicated },
         );
 
         const down_proj_tensor = store.createTensor(
             "down_proj.weight",
             .{ .expert, .dout, .d },
-            .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
+            .{ .expert = .experts, .dout = .replicated, .d = .replicated },
         );
 
         const limit: ?f32 = blk: {
