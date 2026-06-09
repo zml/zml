@@ -251,7 +251,6 @@ const TestContext = struct {
         attn_buffer: zml.Bufferized(model.Attention),
         opts: zml.testing.CompareOpts
     ) !void {
-        _ = cache; // autofix
         try self.testLayer(
             try std.fmt.allocPrint(allocator, "layers.{}.attn.wq_a", .{i}),
         .{ .batch, .seq, .d },
@@ -310,14 +309,14 @@ const TestContext = struct {
         //     .{}
         // );
 
-        // try self.testAttention(
-        //     try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}),
-        //     .{ .batch, .seq, .d },
-        //     attn,
-        //     attn_buffer,
-        //     cache,
-        //     .{}
-        // );
+        try self.testAttention(
+            try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}),
+            .{ .batch, .seq, .d },
+            attn,
+            attn_buffer,
+            cache,
+            .{}
+        );
     }
 
     fn testCSALayer(self: *TestContext, allocator: std.mem.Allocator, layer_idx: usize, cache: model.Cache, csa: model.CSA, csa_buffer: zml.Bufferized(model.CSA), opts: zml.testing.CompareOpts) !void {
@@ -393,7 +392,7 @@ const TestContext = struct {
             .{ .batch, .seq, .d },
             compressor,
             compressor_buffer,
-                    .init(self.mdl, self.config, 1, self.config.compress_ratios[i], self.config.head_dim),
+                    .init(self.config, 1, self.config.compress_ratios[i], self.config.head_dim),
             .{},
             );
     }
@@ -561,8 +560,7 @@ const TestContext = struct {
         defer out_buffer_expected.deinit();
 
         const token_idx_offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
-        _ = token_idx_offset; // autofix
-        const layer_idx: zml.Tensor = .init(.{ .batch = 1 }, .u32);
+        const layer_idx: zml.Tensor = .init(.{ }, .u32);
 
         const exe = try self.platform.compileFn(
             self.allocator,
@@ -571,7 +569,7 @@ const TestContext = struct {
             .{ 
                 layer,
                 in_tensor,
-                0,
+                token_idx_offset,
                 layer_idx,
                 cache,
                 self.*.attention_metadata,
@@ -585,7 +583,7 @@ const TestContext = struct {
         var token_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, .replicated);
         defer token_idx_buffer.deinit();
 
-        const layer_idx_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
+        const layer_idx_slice: zml.Slice = .init(zml.Shape.init(.{ }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
         var layer_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, layer_idx_slice, .replicated);
         defer layer_idx_buffer.deinit();
 
@@ -600,7 +598,7 @@ const TestContext = struct {
         args.set(.{
             layer_buffers,
             in_buffer,
-            // 0,
+            token_idx_buffer,
             layer_idx_buffer,
             cache_buffer,
             attention_metadata_buffers,
