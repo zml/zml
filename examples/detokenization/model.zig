@@ -1,0 +1,247 @@
+const std = @import("std");
+const zml = @import("zml");
+const main = @import("main.zig");
+
+const log = std.log;
+
+pub const Model_handler = struct {
+    model: Model,
+    shardings: main.Shardings,
+    exes: ModelExes,
+    model_buffers: zml.Bufferized(Model),
+
+    pub fn init(zml_handler: *main.Zml_handler) !Model_handler {
+        std.log.info("Init store", .{});
+        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+        var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
+        defer registry.deinit();
+
+        var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
+        defer store.deinit();
+
+        std.log.info("Initialize model", .{});
+        const model: Model = .init(store.view());
+        const shardings: main.Shardings = try .init(zml_handler.platform);
+
+        std.log.info("Compile model", .{});
+        var exes = try compileModel(zml_handler, model, shardings);
+        errdefer exes.deinit(zml_handler.allocator);
+
+        std.log.info("Load model buffers", .{});
+        var progress = zml_handler.progress.start("Load model weights", store.registry.tensors.count());
+        defer progress.end();
+        const shardings_arr = shardings.all();
+        var model_buffers = try model.load(zml_handler, &store, &shardings_arr, &progress);
+        errdefer Model.unloadBuffers(&model_buffers);
+
+        return .{
+            .model = model,
+            .shardings = shardings,
+            .exes = exes,
+            .model_buffers = model_buffers,
+        };
+    }
+
+    pub fn compileModel(zml_handler: *main.Zml_handler, model: Model, shardings: main.Shardings) !ModelExes {
+        const shardings_arr = shardings.all();
+        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
+        const params: Model.SimilarityMatrixParams = .exec();
+        const similarity_matrix_exe = try zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .similarityMatrix,
+            .{params.row_start},
+            opts,
+        );
+        errdefer similarity_matrix_exe.deinit();
+
+        const similarity_matrix_args = try similarity_matrix_exe.args(zml_handler.allocator);
+        errdefer similarity_matrix_args.deinit(zml_handler.allocator);
+
+        const similarity_matrix_results = try similarity_matrix_exe.results(zml_handler.allocator);
+        errdefer similarity_matrix_results.deinit(zml_handler.allocator);
+
+        const get_lm_head_exe = try zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .get_lm_head,
+            .{},
+            opts,
+        );
+        errdefer get_lm_head_exe.deinit();
+
+        const get_lm_head_args = try get_lm_head_exe.args(zml_handler.allocator);
+        errdefer get_lm_head_args.deinit(zml_handler.allocator);
+
+        const get_lm_head_results = try get_lm_head_exe.results(zml_handler.allocator);
+        errdefer get_lm_head_results.deinit(zml_handler.allocator);
+
+        const get_lm_head_normalized_exe = try zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .get_lm_head_normalized,
+            .{},
+            opts,
+        );
+        errdefer get_lm_head_normalized_exe.deinit();
+
+        const get_lm_head_normalized_args = try get_lm_head_normalized_exe.args(zml_handler.allocator);
+        errdefer get_lm_head_normalized_args.deinit(zml_handler.allocator);
+
+        const get_lm_head_normalized_results = try get_lm_head_normalized_exe.results(zml_handler.allocator);
+
+        return .{
+            .similarity_matrix_exe = similarity_matrix_exe,
+            .similarity_matrix_args = similarity_matrix_args,
+            .similarity_matrix_results = similarity_matrix_results,
+            .get_lm_head_exe = get_lm_head_exe,
+            .get_lm_head_args = get_lm_head_args,
+            .get_lm_head_results = get_lm_head_results,
+            .get_lm_head_normalized_exe = get_lm_head_normalized_exe,
+            .get_lm_head_normalized_args = get_lm_head_normalized_args,
+            .get_lm_head_normalized_results = get_lm_head_normalized_results,
+        };
+    }
+
+    pub fn unloadBuffers(self: *Model_handler) void {
+        Model.unloadBuffers(&self.model_buffers);
+    }
+
+    pub fn deinit(self: *Model_handler, allocator: std.mem.Allocator) void {
+        self.exes.deinit(allocator);
+    }
+};
+
+pub const ModelExes = struct {
+    similarity_matrix_exe: zml.Exe,
+    similarity_matrix_args: zml.Exe.Arguments,
+    similarity_matrix_results: zml.Exe.Results,
+    get_lm_head_exe: zml.Exe,
+    get_lm_head_args: zml.Exe.Arguments,
+    get_lm_head_results: zml.Exe.Results,
+    get_lm_head_normalized_exe: zml.Exe,
+    get_lm_head_normalized_args: zml.Exe.Arguments,
+    get_lm_head_normalized_results: zml.Exe.Results,
+
+    pub fn deinit(self: ModelExes, allocator: std.mem.Allocator) void {
+        self.similarity_matrix_exe.deinit();
+        self.similarity_matrix_args.deinit(allocator);
+        self.similarity_matrix_results.deinit(allocator);
+        self.get_lm_head_exe.deinit();
+        self.get_lm_head_args.deinit(allocator);
+        self.get_lm_head_results.deinit(allocator);
+        self.get_lm_head_normalized_exe.deinit();
+        self.get_lm_head_normalized_args.deinit(allocator);
+        self.get_lm_head_normalized_results.deinit(allocator);
+    }
+};
+
+pub const Model = struct {
+    pub const row_batch_size: i64 = 512;
+    pub const row_k_neighbors: i64 = 256;
+
+    lm_head: zml.Tensor,
+
+    pub fn init(store: zml.io.TensorStore.View) Model {
+        const lm_head = blk: {
+            if (store.hasKey("lm_head.weight")) {
+                break :blk createLmHeadTensor(store, "lm_head");
+            }
+            if (store.hasKey("model.embed_tokens.weight")) {
+                break :blk createLmHeadTensor(store, "model.embed_tokens");
+            }
+            if (store.hasKey("model.language_model.embed_tokens.weight")) {
+                break :blk createLmHeadTensor(store, "model.language_model.embed_tokens");
+            }
+            break :blk createLmHeadTensor(store, "embed_tokens");
+        };
+
+        return .{ .lm_head = lm_head };
+    }
+
+    fn createLmHeadTensor(store: zml.io.TensorStore.View, prefix: []const u8) zml.Tensor {
+        return store.withPrefix(prefix).createTensor(
+            "weight",
+            .{ .voc, .d },
+            .{ .voc = .model, .d = .replicated },
+        );
+    }
+
+    pub fn load(
+        self: *const Model,
+        zml_handler: *main.Zml_handler,
+        store: *const zml.io.TensorStore,
+        shardings: []const zml.Sharding,
+        progress: ?*std.Progress.Node,
+    ) !zml.Bufferized(Model) {
+        var total_bytes: usize = 0;
+        const now: std.Io.Timestamp = .now(zml_handler.io, .awake);
+        defer {
+            const took = now.untilNow(zml_handler.io, .awake);
+            const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
+            log.info("Loaded model [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+        }
+
+        return zml.io.load(Model, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
+            .shardings = shardings,
+            .parallelism = 1,
+            .dma_chunks = 8,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = progress,
+            .total_bytes = &total_bytes,
+        });
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Model)) void {
+        self.lm_head.deinit();
+    }
+
+    pub fn shape(self: Model) zml.Shape {
+        return self.lm_head.shape();
+    }
+
+    pub fn get_lm_head(self: Model) zml.Tensor {
+        return self.lm_head.withTags(.{ .voc, .d }).convert(.f16);
+    }
+
+    pub fn get_lm_head_normalized(self: Model) zml.Tensor {
+        return normalizeRows(self.get_lm_head());
+    }
+
+    pub const SimilarityMatrixParams = struct {
+        row_start: zml.Tensor,
+
+        pub fn exec() SimilarityMatrixParams {
+            return .{ .row_start = .init(.{}, .u32) };
+        }
+    };
+
+    pub fn similarityMatrix(self: Model, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f16);
+        const normalized = normalizeRows(lm_head);
+
+        const rows = normalized
+            .dynamicSlice1d(normalized.axis(.voc), .{ .start = row_start, .len = row_batch_size })
+            .rename(.{ .voc = .row });
+        const cols = normalized.rename(.{ .voc = .col });
+
+        const similarity = rows.dot(cols, .d);
+        const row_ids = zml.Tensor.iota(similarity.shape(), .row).add(row_start.convert(.i32));
+        const col_ids = zml.Tensor.iota(similarity.shape(), .col);
+        const self_mask = row_ids.cmp(.EQ, col_ids);
+        const minus_one = zml.Tensor.scalar(-1.0, .f16).broad(similarity.shape());
+        const similarity_for_sort = self_mask.select(minus_one, similarity);
+        const nearest = similarity_for_sort.topK(.{ .nearest = .col }, row_k_neighbors, .{ .descending = true }).indices.convert(.u64);
+
+        return .{ similarity, nearest };
+    }
+
+    fn normalizeRows(lm_head: zml.Tensor) zml.Tensor {
+        const squared_norm = lm_head.mul(lm_head).sum(.d);
+        const inv_norm = squared_norm.rsqrt();
+        return lm_head.mul(inv_norm.broad(lm_head.shape()));
+    }
+};

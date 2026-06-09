@@ -1,0 +1,448 @@
+const std = @import("std");
+const log = std.log;
+const zml = @import("zml");
+const stdx = zml.stdx;
+const graph = @import("graph.zig");
+const model_ = @import("model.zig");
+
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
+
+pub const Zml_handler = struct {
+    allocator: std.mem.Allocator,
+    arena: *std.heap.ArenaAllocator,
+    platform: *zml.Platform,
+    uris: Uri_handler,
+    io: std.Io,
+    local_io: std.Io,
+    progress: std.Progress.Node,
+    args: Args,
+    timers: Timing_handler,
+    mem: MemoryChecker,
+
+    pub fn fromInit(init: std.process.Init, io: std.Io) !Zml_handler {
+        if (init.environ_map.get("BUILD_WORKING_DIRECTORY")) |build_working_directory| {
+            var working_dir = try std.Io.Dir.openDirAbsolute(init.io, build_working_directory, .{});
+            defer working_dir.close(init.io);
+            try std.process.setCurrentDir(init.io, working_dir);
+        }
+        const platform = try zml.Platform.auto(init.gpa, io, .{});
+        errdefer platform.deinit(init.gpa);
+
+        const args = stdx.flags.parse(init.minimal.args, Args);
+
+        return .{
+            .allocator = init.gpa,
+            .arena = init.arena,
+            .platform = platform,
+            .uris = .init(),
+            .io = io,
+            .local_io = init.io,
+            .progress = std.Progress.start(io, .{}),
+            .args = args,
+            .timers = .{},
+            .mem = .{ .platform = platform },
+        };
+    }
+
+    pub fn deinit(self: *Zml_handler) void {
+        self.progress.end();
+        self.platform.deinit(self.allocator, self.io);
+    }
+
+    pub fn tic(self: *Zml_handler, target: *Timing_handler.Field_timer) void {
+        target.init = std.Io.Timestamp.now(self.io, .awake);
+    }
+
+    pub fn toc(self: *Zml_handler, target: *Timing_handler.Field_timer) void {
+        const end = std.Io.Timestamp.now(self.io, .awake);
+        const start: std.Io.Timestamp = target.init;
+        const duration = std.Io.Timestamp.durationTo(start, end);
+        target.nanoseconds += duration.nanoseconds;
+    }
+};
+
+pub const Uri_handler = struct {
+    llama: []const u8,
+    qwen: []const u8,
+
+    pub fn init() Uri_handler {
+        return .{
+            .llama = "file://examples//detokenization//models//llama",
+            .qwen = "file://examples//detokenization//models//qwen",
+        };
+    }
+};
+
+pub const Shardings = struct {
+    model: zml.Sharding,
+    experts: zml.Sharding,
+
+    pub fn init(platform: *zml.Platform) !Shardings {
+        return .{
+            .model = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })),
+            .experts = try platform.registerSharding("experts", .mesh(.{ .experts = .high_bandwidth })),
+        };
+    }
+
+    pub fn all(self: Shardings) [2]zml.Sharding {
+        return .{ self.model, self.experts };
+    }
+};
+
+pub const Timing_handler = struct {
+    pub const Field_timer = struct {
+        nanoseconds: i96 = 0,
+        init: std.Io.Timestamp = std.Io.Timestamp.zero,
+    };
+
+    similarity_matrix: Field_timer = .{},
+    knn_graph: Field_timer = .{},
+    rkm_graph: Field_timer = .{},
+    k_means: Field_timer = .{},
+    nsw_extention: Field_timer = .{},
+    total: Field_timer = .{},
+
+    pub fn print(self: Timing_handler) void {
+        std.log.info("{d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s", .{
+            @as(f64, @floatFromInt(self.similarity_matrix.nanoseconds)) / 1e9,
+            @as(f64, @floatFromInt(self.knn_graph.nanoseconds)) / 1e9,
+            @as(f64, @floatFromInt(self.rkm_graph.nanoseconds)) / 1e9,
+            @as(f64, @floatFromInt(self.k_means.nanoseconds)) / 1e9,
+            @as(f64, @floatFromInt(self.nsw_extention.nanoseconds)) / 1e9,
+            @as(f64, @floatFromInt(self.total.nanoseconds)) / 1e9,
+        });
+    }
+};
+
+pub const MemoryChecker = struct {
+    platform: *zml.Platform,
+    bytes_before: i64 = 0,
+    bytes_after: i64 = 0,
+
+    pub fn start(self: *MemoryChecker, id: usize) void {
+        self.bytes_before = @intCast(self.platform.devices[id].memoryStats().bytes_in_use);
+    }
+
+    pub fn check(self: *MemoryChecker, id: usize) void {
+        self.bytes_after = @intCast(self.platform.devices[id].memoryStats().bytes_in_use);
+        const leaked = @abs(self.bytes_after - self.bytes_before);
+        if (leaked != 0) {
+            std.log.info("memory usage: before={d} after={d} leaked={d}", .{ self.bytes_before, self.bytes_after, leaked });
+        }
+    }
+};
+
+pub const SimilarityMatrix = struct {
+    data: zml.Slice,
+    nearest_neighbors: zml.Slice,
+    n: usize,
+    d: usize,
+    k: usize,
+
+    pub fn dist(self: *SimilarityMatrix, i: usize, j: usize) f16 {
+        if (i == j) return 1.0;
+        const row = @min(i, j);
+        const col = @max(i, j);
+        const offset = @divExact(row * (2 * self.n - row - 1), 2);
+        return self.data.items(f16)[offset + col - row - 1];
+    }
+
+    pub fn nearestNeighbor(self: *SimilarityMatrix, row: usize, pos: usize) usize {
+        return self.nearest_neighbors.items(usize)[row * self.k + pos];
+    }
+
+    pub fn deinit(self: *SimilarityMatrix, allocator: std.mem.Allocator) void {
+        self.data.free(allocator);
+        self.nearest_neighbors.free(allocator);
+    }
+};
+
+const Args = struct {
+    pub const help =
+        \\ Use detokenization [options]
+        \\
+    ;
+};
+
+pub fn printZmlLogo(io: std.Io) !void {
+    const LOGO =
+        \\
+        \\
+        \\ ███████╗███╗   ███╗██╗
+        \\ ╚══███╔╝████╗ ████║██║
+        \\   ███╔╝ ██╔████╔██║██║
+        \\  ███╔╝  ██║╚██╔╝██║██║  .ai
+        \\ ███████╗██║ ╚═╝ ██║███████╗
+        \\ ╚══════╝╚═╝     ╚═╝╚══════╝
+        \\
+        \\
+        \\
+    ;
+    var writer = std.Io.File.stdout().writer(io, &.{});
+    try writer.interface.writeAll(LOGO);
+    try writer.interface.flush();
+}
+
+pub fn main(init: std.process.Init) !void {
+    var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
+    defer http_client.deinit();
+
+    var vfs_file: zml.io.VFS.File = .init(init.gpa, init.io, .{});
+    defer vfs_file.deinit();
+
+    var hf_vfs: zml.io.VFS.HF = try .auto(init.gpa, init.io, &http_client, init.environ_map);
+    defer hf_vfs.deinit();
+
+    var vfs: zml.io.VFS = try .init(init.gpa, init.io);
+    defer vfs.deinit();
+
+    try vfs.register("file", vfs_file.io());
+    try vfs.register("hf", hf_vfs.io());
+
+    const io = vfs.io();
+
+    var zml_handler: Zml_handler = try .fromInit(init, io);
+    defer zml_handler.deinit();
+
+    try printZmlLogo(zml_handler.io);
+
+    zml_handler.tic(&zml_handler.timers.total);
+
+    try runTests(&zml_handler);
+
+    zml_handler.toc(&zml_handler.timers.total);
+
+    zml_handler.timers.print();
+}
+
+pub fn runTests(zml_handler: *Zml_handler) !void {
+    var model_handler = try model_.Model_handler.init(zml_handler);
+    defer model_handler.deinit(zml_handler.allocator);
+    defer model_handler.unloadBuffers();
+
+    var similarity_matrix = try computeSimilarityMatrix(zml_handler, &model_handler);
+    defer similarity_matrix.deinit(zml_handler.allocator);
+
+    try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix);
+
+    const lm_head = try getLmHead(zml_handler, &model_handler);
+    defer lm_head.free(zml_handler.allocator);
+
+    const lm_head_normalized = try getLmHeadNormalized(zml_handler, &model_handler);
+    defer lm_head_normalized.free(zml_handler.allocator);
+
+    const graph_params: graph.GraphParams = .{};
+    var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, graph_params);
+    defer g.deinit();
+
+    g.setRandomNeighbors();
+    g.setNearestNeighbors();
+    std.log.info("Nb nodes: {}", .{g.nbNodes()});
+    g.pruneNeighbors();
+    std.log.info("Nb nodes after pruning: {}", .{g.nbNodes()});
+    g.setNearestNeighborsLos();
+}
+
+pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !SimilarityMatrix {
+    std.log.info("Compute similarity matrix", .{});
+    zml_handler.tic(&zml_handler.timers.similarity_matrix);
+    const allocator = zml_handler.allocator;
+
+    const lm_head_shape = model_handler.model.shape();
+    const n: usize = @intCast(lm_head_shape.dim(.voc));
+    const d: usize = @intCast(lm_head_shape.dim(.d));
+    std.log.info("lm_head shape: {d} x {d}", .{ n, d });
+    const triangular_len: usize = @divExact(n * (n - 1), 2);
+    const batch_size: usize = @intCast(model_.Model.row_batch_size);
+    const k: usize = @intCast(model_.Model.row_k_neighbors);
+
+    const similarity_matrix_slice: zml.Slice = try .alloc(allocator, .init(.{ .data = triangular_len }, .f16));
+    errdefer similarity_matrix_slice.free(allocator);
+
+    const nearest_neighbors_slice: zml.Slice = try .alloc(allocator, .init(.{ .data = n * k }, .u64));
+    errdefer nearest_neighbors_slice.free(allocator);
+
+    const similarity_batch_slice: zml.Slice = try .alloc(allocator, .init(.{ .row = batch_size, .col = n }, .f16));
+    defer similarity_batch_slice.free(allocator);
+
+    const nearest_batch_slice: zml.Slice = try .alloc(allocator, .init(.{ .row = batch_size, .nearest = k }, .u64));
+    defer nearest_batch_slice.free(allocator);
+
+    var write_offset: usize = 0;
+    var row_start: usize = 0;
+    while (row_start < n) : (row_start += batch_size) {
+        std.log.info("batch {d}/{d}", .{ @divExact(row_start, batch_size) + 1, @divFloor(n, batch_size) + 1 });
+        const rows_to_copy = @min(batch_size, n - row_start);
+        const kernel_row_start = if (row_start + batch_size <= n) row_start else n - batch_size;
+
+        var row_start_buffer = try zml.Buffer.scalar(zml_handler.io, zml_handler.platform, @as(u32, @intCast(kernel_row_start)), .u32);
+        defer row_start_buffer.deinit();
+
+        model_handler.exes.similarity_matrix_args.set(.{ model_handler.model_buffers, row_start_buffer });
+        model_handler.exes.similarity_matrix_exe.call(model_handler.exes.similarity_matrix_args, &model_handler.exes.similarity_matrix_results);
+        var similarity_batch_buffer: zml.Buffer = undefined;
+        var nearest_batch_buffer: zml.Buffer = undefined;
+        model_handler.exes.similarity_matrix_results.fill(.{ &similarity_batch_buffer, &nearest_batch_buffer });
+        defer similarity_batch_buffer.deinit();
+        defer nearest_batch_buffer.deinit();
+
+        try similarity_batch_buffer.toSlice(zml_handler.io, similarity_batch_slice);
+        try nearest_batch_buffer.toSlice(zml_handler.io, nearest_batch_slice);
+
+        const batch_items = similarity_batch_slice.items(f16);
+        const output_items = similarity_matrix_slice.items(f16);
+        const nearest_batch_items = nearest_batch_slice.items(usize);
+        const nearest_items = nearest_neighbors_slice.items(usize);
+        for (0..rows_to_copy) |local_row| {
+            const global_row = row_start + local_row;
+            const kernel_local_row = global_row - kernel_row_start;
+            const len = n - global_row - 1;
+            const src_start = kernel_local_row * n + global_row + 1;
+            @memcpy(output_items[write_offset..][0..len], batch_items[src_start..][0..len]);
+            write_offset += len;
+            @memcpy(nearest_items[global_row * k ..][0..k], nearest_batch_items[kernel_local_row * k ..][0..k]);
+        }
+    }
+    std.debug.assert(write_offset == triangular_len);
+
+    zml_handler.toc(&zml_handler.timers.similarity_matrix);
+    return .{
+        .data = similarity_matrix_slice,
+        .nearest_neighbors = nearest_neighbors_slice,
+        .n = n,
+        .d = d,
+        .k = k,
+    };
+}
+
+pub fn getLmHead(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !zml.Slice {
+    model_handler.exes.get_lm_head_args.set(.{model_handler.model_buffers});
+    model_handler.exes.get_lm_head_exe.call(model_handler.exes.get_lm_head_args, &model_handler.exes.get_lm_head_results);
+    var lm_head_buffer = model_handler.exes.get_lm_head_results.get(zml.Buffer);
+    defer lm_head_buffer.deinit();
+    return lm_head_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+}
+
+pub fn getLmHeadNormalized(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !zml.Slice {
+    model_handler.exes.get_lm_head_normalized_args.set(.{model_handler.model_buffers});
+    model_handler.exes.get_lm_head_normalized_exe.call(model_handler.exes.get_lm_head_normalized_args, &model_handler.exes.get_lm_head_normalized_results);
+    var lm_head_normalized_buffer = model_handler.exes.get_lm_head_normalized_results.get(zml.Buffer);
+    defer lm_head_normalized_buffer.deinit();
+    return lm_head_normalized_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+}
+
+pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, similarity_matrix: *SimilarityMatrix) !void {
+    std.log.info("Test similarity matrix", .{});
+
+    const lm_head = try getLmHead(zml_handler, model_handler);
+    defer lm_head.free(zml_handler.allocator);
+
+    const n: usize = @intCast(lm_head.shape.dim(.voc));
+    const d: usize = @intCast(lm_head.shape.dim(.d));
+    std.debug.assert(n == similarity_matrix.n);
+    std.debug.assert(d == similarity_matrix.d);
+
+    var prng = std.Random.DefaultPrng.init(0);
+    const random = prng.random();
+    const lm_head_items = lm_head.items(f16);
+
+    var max_abs_diff: f32 = 0;
+    for (0..1000) |_| {
+        const i = random.uintLessThan(usize, n);
+        const j = random.uintLessThan(usize, n);
+
+        const u = lm_head_items[i * d ..][0..d];
+        const v = lm_head_items[j * d ..][0..d];
+
+        var dot: f32 = 0;
+        var u_norm2: f32 = 0;
+        var v_norm2: f32 = 0;
+        for (u, v) |u_value, v_value| {
+            const uf: f32 = @floatCast(u_value);
+            const vf: f32 = @floatCast(v_value);
+            dot += uf * vf;
+            u_norm2 += uf * uf;
+            v_norm2 += vf * vf;
+        }
+
+        const expected = dot / (@sqrt(u_norm2) * @sqrt(v_norm2));
+        const actual: f32 = @floatCast(similarity_matrix.dist(i, j));
+        const abs_diff = @abs(expected - actual);
+        max_abs_diff = @max(max_abs_diff, abs_diff);
+        std.log.err("rows=({d},{d}) expected={d} actual={d} diff={d}", .{ i, j, expected, actual, abs_diff });
+    }
+
+    std.log.info("Similarity matrix test passed: 1000 random pairs, max_abs_diff={d}", .{max_abs_diff});
+}
+
+pub fn getSlice(zml_handler: *Zml_handler, tensor_name: []const u8, dtype: anytype) !zml.Slice {
+    std.log.info("Getting slice {s}", .{tensor_name});
+
+    std.log.info("Init store", .{});
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+    var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
+    defer registry.deinit();
+    var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
+    defer store.deinit();
+
+    std.log.info("Init extractor", .{});
+    const model: TensorExtractor = .init(store.view(), tensor_name);
+    const shardings: Shardings = try .init(zml_handler.platform);
+    const shardings_arr = shardings.all();
+
+    std.log.info("Compile extract", .{});
+    const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
+    const extract_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward, .{}, opts);
+    defer extract_exe.deinit();
+
+    std.log.info("Load weights", .{});
+    var model_buffers = try model.load(zml_handler, &store, &shardings.all());
+    defer TensorExtractor.unloadBuffers(&model_buffers);
+
+    std.log.info("Init slice and buffer", .{});
+    const slice: zml.Slice = try .alloc(zml_handler.allocator, .init(model.shape(), dtype));
+    var buffer: zml.Buffer = try .fromSlice(zml_handler.io, zml_handler.platform, slice, shardings.all()[0]);
+    defer buffer.deinit();
+
+    var extract_args = try extract_exe.args(zml_handler.allocator);
+    defer extract_args.deinit(zml_handler.allocator);
+    var extract_results = try extract_exe.results(zml_handler.allocator);
+    defer extract_results.deinit(zml_handler.allocator);
+
+    std.log.info("Call extract", .{});
+    extract_args.set(.{model_buffers});
+    extract_exe.call(extract_args, &extract_results);
+    extract_results.fill(.{&buffer});
+
+    try buffer.toSlice(zml_handler.io, slice);
+    std.log.info("Return slice", .{});
+    return slice;
+}
+
+const TensorExtractor = struct {
+    tensor: zml.Tensor,
+    pub fn init(store: zml.io.TensorStore.View, tensor_name: []const u8) TensorExtractor {
+        return .{
+            .tensor = store.createTensor(tensor_name, .{ .voc, .d }, .{ .voc = .replicated, .d = .replicated }),
+        };
+    }
+    pub fn load(self: *const TensorExtractor, zml_handler: *Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.Sharding) !zml.Bufferized(TensorExtractor) {
+        return zml.io.load(TensorExtractor, self, zml_handler.arena.allocator(), zml_handler.io, zml_handler.platform, store, .{
+            .shardings = shardings,
+            .parallelism = 1,
+            .dma_chunks = 1,
+            .dma_chunk_size = 128 * 1024 * 1024,
+        });
+    }
+    pub fn unloadBuffers(self: *zml.Bufferized(TensorExtractor)) void {
+        self.tensor.deinit();
+    }
+    pub fn shape(self: TensorExtractor) zml.Shape {
+        return self.tensor.shape();
+    }
+    pub fn forward(self: TensorExtractor) zml.Tensor {
+        return self.tensor.convert(.f16);
+    }
+};

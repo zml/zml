@@ -15,6 +15,7 @@ zig-out/
 
 # Models
 *.safetensors
+*.json
 *.pb
 *.trace.json
 *.pt
