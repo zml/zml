@@ -691,13 +691,11 @@ const Indexer = struct {
         self: Indexer,
         x: zml.Tensor,
         qr: zml.Tensor,
-        start_pos: u32,
+        sp: zml.Tensor,
         offset: zml.Tensor,
         cache: IndexerCache,
         cache_idx: zml.Tensor,
     ) struct { zml.Tensor, IndexerCache } {
-        const sp = zml.Tensor.scalar(start_pos, .u32);
-
         const precomputed_freqs_cis = precompute_yarn(self.rope_head_dim, self.rope_opts).withTags(.{.hd});
         const freqs_cis = blk: {
             const sh = sp.shape().insert(.last, .{ .seq = x.dim(.seq) });
@@ -723,7 +721,7 @@ const Indexer = struct {
                 // TODO: apply `@mod`
                 const sh = sp.shape().insert(.last, .{ .seq = kv_rotated.dim(.kv) });
                 const pos_idx = zml.Tensor.iota(sh, .seq).convert(.u32).add(sp.convert(.u32).broad(sh)).broad(sh);
-                new_cache.kv = new_cache.kv.update(kv_rotated, pos_idx.withTags(.{ .kv }), cache_idx);
+                new_cache.kv = new_cache.kv.update(kv_rotated, pos_idx.rename(.{ .seq = .kv }), cache_idx);
             }
 
             const sh = sp.shape().insert(.last, .{ .seq = x.dim(.seq) });
