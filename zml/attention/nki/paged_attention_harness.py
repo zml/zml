@@ -47,6 +47,7 @@ def paged_attention_tile_plan(
     page_size,
     heads_per_kv,
     query_lengths,
+    live_seq_len,
     is_decode,
 ):
     if is_decode:
@@ -61,6 +62,7 @@ def paged_attention_tile_plan(
     pages_per_v_tile = largest_divisor_at_most(pages_per_k_tile, int(nl.tile_size.pmax) // page_size)
     v_tile = pages_per_v_tile * page_size
     k_tiles = max_num_pages // pages_per_k_tile
+    live_k_tiles = (live_seq_len + k_tile - 1) // k_tile
     k_tiles_per_segment = largest_divisor_at_most(k_tiles, min(k_tiles, 4)) if is_decode else 1
     k_segments = k_tiles // k_tiles_per_segment
     compiled_q_blocks = (num_tokens + q_rows_per_tile - 1) // q_rows_per_tile
@@ -77,6 +79,7 @@ def paged_attention_tile_plan(
         k_tile,
         v_tile,
         k_tiles,
+        live_k_tiles,
         k_tiles_per_segment,
         k_segments,
     )
@@ -390,18 +393,6 @@ def scatter_logical_kv_to_pages(k_logical, v_logical, block_table, page_size, to
     return k_cache, v_cache
 
 
-def scatter_logical_token_to_page(k_cache, v_cache, k_logical, v_logical, block_table, page_size, token_pos):
-    if k_logical.ndim == 4:
-        k_logical = k_logical[0]
-        v_logical = v_logical[0]
-    logical_page = token_pos // page_size
-    page_offset = token_pos % page_size
-    physical_page = block_table[0, logical_page]
-    k_private = k_cache.reshape((k_cache.shape[0], k_cache.shape[2], k_cache.shape[3], page_size))
-    k_private[physical_page, :, :, page_offset] = k_logical[token_pos, :, :]
-    v_cache[physical_page, page_offset, :, :] = v_logical[token_pos, :, :]
-
-
 def flattened_cache_slot(block_table, batch_idx, token_pos, page_size):
     logical_page = token_pos // page_size
     page_offset = token_pos % page_size
@@ -478,11 +469,12 @@ def assert_close(label, expected, actual, args, used_queries=None):
 
 def print_delta(label, previous, current):
     if previous is None:
-        return
+        return None
     delta = current.astype(np.float32) - previous.astype(np.float32)
     max_abs = float(np.nanmax(np.abs(delta)))
     l2 = float(np.linalg.norm(delta.reshape(-1)))
     print(f"{label} delta_from_previous max_abs={max_abs:.6g} l2={l2:.6g}")
+    return max_abs
 
 
 def expected_fill_bf16_value(flat_index, offset):
@@ -530,7 +522,7 @@ def print_timing(label, elapsed, iterations):
     )
 
 
-def run_attention_case(args, kernel, heads_per_kv, kind):
+def run_attention_case(args, update_kernel, kernel, heads_per_kv, kind):
     query_lengths = parse_int_list(args.query_lengths, "--query-lengths") if kind == "mixed" else None
     seq_lens_per_seq = parse_int_list(args.seq_lens_per_seq, "--seq-lens-per-seq") if kind == "mixed" else None
     prompt_len = prompt_length(args, query_lengths)
@@ -557,8 +549,13 @@ def run_attention_case(args, kernel, heads_per_kv, kind):
         raise ValueError("--prompt-len must be <= compiled tokens per batch row")
 
     metadata_query_lengths = query_lengths if kind == "mixed" else None
+    metadata_seq_lens = seq_lens_per_seq
     if kind == "decode" and args.active_lanes is not None:
         metadata_query_lengths = [1 if idx < args.active_lanes else 0 for idx in range(args.batch_size)]
+        metadata_seq_lens = [
+            args.context_len + 1 if idx < args.active_lanes else 0
+            for idx in range(args.batch_size)
+        ]
     if metadata_query_lengths is None and not is_decode:
         metadata_query_lengths = [prompt_len] * args.batch_size
     current_seq_len = max(seq_lens_per_seq) if seq_lens_per_seq is not None else args.context_len + prompt_len
@@ -567,7 +564,7 @@ def run_attention_case(args, kernel, heads_per_kv, kind):
         current_seq_len,
         num_tokens,
         query_lengths=metadata_query_lengths,
-        seq_lens_per_seq=seq_lens_per_seq,
+        seq_lens_per_seq=metadata_seq_lens,
     )
     if not is_decode:
         validate_wide_q_tile_capacity(
@@ -578,8 +575,26 @@ def run_attention_case(args, kernel, heads_per_kv, kind):
     total_pages = total_cache_pages(args, block_table.shape[1])
     k_logical = fill_bf16((args.batch_size, args.seq_len, args.num_kv_heads, args.head_dim), 0.02)
     v_logical = fill_bf16((args.batch_size, args.seq_len, args.num_kv_heads, args.head_dim), 0.03)
+    cache_k_logical = k_logical.copy()
+    cache_v_logical = v_logical.copy()
+    if is_decode:
+        for batch_idx in range(args.batch_size):
+            if metadata_query_lengths is None:
+                used_queries = 1
+                seq_len = current_seq_len
+            else:
+                q_start = int(query_start_len[batch_idx, 0])
+                used_queries = int(query_start_len[batch_idx + 1, 0]) - q_start
+                seq_len = int(seq_lens[batch_idx, 0])
+            if used_queries == 0:
+                continue
+            token_start = seq_len - used_queries
+            # Decode must rely on paged_kv_cache_update for these rows.
+            # Poison them in the input cache so the harness catches update bugs.
+            cache_k_logical[batch_idx, token_start:seq_len, :, :] = ml_dtypes.bfloat16(-0.625)
+            cache_v_logical[batch_idx, token_start:seq_len, :, :] = ml_dtypes.bfloat16(0.875)
     k_cache, v_cache = scatter_logical_kv_to_pages(
-        k_logical, v_logical, block_table, args.page_size, total_pages
+        cache_k_logical, cache_v_logical, block_table, args.page_size, total_pages
     )
     q = fill_bf16((num_tokens, args.num_kv_heads, heads_per_kv, args.head_dim), 0.01)
     if metadata_query_lengths is not None and sum(metadata_query_lengths) < num_tokens:
@@ -623,6 +638,7 @@ def run_attention_case(args, kernel, heads_per_kv, kind):
         k_tile,
         v_tile,
         k_tiles,
+        live_k_tiles,
         k_tiles_per_segment,
         k_segments,
     ) = paged_attention_tile_plan(
@@ -632,6 +648,7 @@ def run_attention_case(args, kernel, heads_per_kv, kind):
         args.page_size,
         heads_per_kv,
         metadata_query_lengths,
+        current_seq_len,
         is_decode,
     )
     print(
@@ -640,14 +657,24 @@ def run_attention_case(args, kernel, heads_per_kv, kind):
         f"live_q_blocks={live_q_blocks} compiled_q_blocks={compiled_q_blocks} "
         f"k_tile={k_tile} v_tile={v_tile} "
         f"k_tiles_per_segment={k_tiles_per_segment} k_segments={k_segments} "
-        f"k_tiles={k_tiles} kv_work_product={live_q_blocks * args.num_kv_heads} "
+        f"k_tiles={k_tiles} live_k_tiles={live_k_tiles} "
+        f"kv_work_product={live_q_blocks * args.num_kv_heads} "
         f"query_head_rows={live_q_blocks * args.num_heads}",
         flush=True,
     )
     kernel_label = "paged_attention_decode_2d" if is_decode else "paged_attention_2d"
+    if is_decode:
+        k_cache, v_cache = update_kernel(
+            k_cache,
+            v_cache,
+            new_k,
+            new_v,
+            slot_mapping,
+            query_start_len,
+        )
     output, elapsed, timed_iterations = timed_kernel(
         kernel,
-        (q, k_cache, v_cache, new_k, new_v, slot_mapping, block_table, seq_lens, query_start_len),
+        (q, k_cache, v_cache, block_table, seq_lens, query_start_len),
         args,
     )
     print_timing(f"kernel={kernel_label} label={kind}", elapsed, timed_iterations)
@@ -797,7 +824,7 @@ def run_cache_reuse_update(args, module):
     assert_close_scalar("cache_reuse second_slot_v", expected_fill_bf16_value(0, 0.83), float(v_flat[second_slot, 0]))
 
 
-def run_history_sensitivity(args, kernel, heads_per_kv):
+def run_history_sensitivity(args, update_kernel, kernel, heads_per_kv):
     prompt_len = prompt_length(args)
     seq_len = args.context_len + prompt_len
     if seq_len < 2:
@@ -821,8 +848,10 @@ def run_history_sensitivity(args, kernel, heads_per_kv):
         [flattened_cache_slot(block_table, 0, seq_len - 1, args.page_size)],
         dtype=np.int32,
     )
-    out_a = kernel(q, k_cache_a, v_cache_a, new_k, new_v, slot_mapping, block_table, seq_lens, query_start_len)
-    out_b = kernel(q, k_cache_b, v_cache_b, new_k, new_v, slot_mapping, block_table, seq_lens, query_start_len)
+    k_cache_a, v_cache_a = update_kernel(k_cache_a, v_cache_a, new_k, new_v, slot_mapping, query_start_len)
+    k_cache_b, v_cache_b = update_kernel(k_cache_b, v_cache_b, new_k, new_v, slot_mapping, query_start_len)
+    out_a = kernel(q, k_cache_a, v_cache_a, block_table, seq_lens, query_start_len)
+    out_b = kernel(q, k_cache_b, v_cache_b, block_table, seq_lens, query_start_len)
     delta = out_a.astype(np.float32) - out_b.astype(np.float32)
     max_abs = float(np.nanmax(np.abs(delta)))
     l2 = float(np.linalg.norm(delta.reshape(-1)))
@@ -831,86 +860,219 @@ def run_history_sensitivity(args, kernel, heads_per_kv):
         raise AssertionError("decode output did not change when only historical cache contents changed")
 
 
-def run_llmd_loop(args, prefill_kernel, decode_kernel, heads_per_kv):
-    if args.batch_size != 1:
-        raise ValueError("--run=llmd-loop currently expects --batch-size=1")
+def run_llmd_loop(args, update_kernel, prefill_kernel, decode_kernel, heads_per_kv):
+    active_lanes = args.active_lanes or 1
+    if active_lanes > args.batch_size:
+        raise ValueError("--active-lanes must be <= --batch-size")
     prompt_len = prompt_length(args)
     if args.context_len + prompt_len + args.decode_steps > args.seq_len:
         raise ValueError("--context-len + --prompt-len + --decode-steps must be <= --seq-len")
-    prefill_tokens = round_up_to_prefill_block(prompt_len)
+    prefill_tokens = round_up_to_prefill_block(prompt_len * active_lanes)
+    prefill_query_lengths = [
+        prompt_len if batch_idx < active_lanes else 0
+        for batch_idx in range(args.batch_size)
+    ]
+    prefill_seq_lens = [
+        args.context_len + prompt_len if batch_idx < active_lanes else 0
+        for batch_idx in range(args.batch_size)
+    ]
+    prefill_seq_len = args.context_len + prompt_len
 
-    block_table, _, _ = make_metadata(args, args.seq_len, 1)
+    block_table, seq_lens_prefill, prefill_query_start_len = make_metadata(
+        args,
+        prefill_seq_len,
+        prefill_tokens,
+        query_lengths=prefill_query_lengths,
+        seq_lens_per_seq=prefill_seq_lens,
+    )
     total_pages = total_cache_pages(args, block_table.shape[1])
-    k_logical = np.zeros((args.seq_len, args.num_kv_heads, args.head_dim), dtype=ml_dtypes.bfloat16)
+    k_logical = np.zeros(
+        (args.batch_size, args.seq_len, args.num_kv_heads, args.head_dim),
+        dtype=ml_dtypes.bfloat16,
+    )
     v_logical = np.zeros_like(k_logical)
     q_prefill = np.zeros((prefill_tokens, args.num_kv_heads, heads_per_kv, args.head_dim), dtype=ml_dtypes.bfloat16)
-    for token_pos in range(args.context_len):
-        _, k_tok, v_tok = synthetic_qkv_for_position(token_pos, args, heads_per_kv)
-        k_logical[token_pos : token_pos + 1, :, :] = k_tok
-        v_logical[token_pos : token_pos + 1, :, :] = v_tok
-    for query_idx in range(prompt_len):
-        token_pos = args.context_len + query_idx
-        q_tok, k_tok, v_tok = synthetic_qkv_for_position(token_pos, args, heads_per_kv)
-        q_prefill[query_idx : query_idx + 1, :, :, :] = q_tok
-        k_logical[token_pos : token_pos + 1, :, :] = k_tok
-        v_logical[token_pos : token_pos + 1, :, :] = v_tok
+    for batch_idx in range(active_lanes):
+        for token_pos in range(args.context_len):
+            _, k_tok, v_tok = synthetic_qkv_for_position(
+                token_pos + batch_idx * args.seq_len,
+                args,
+                heads_per_kv,
+            )
+            k_logical[batch_idx, token_pos : token_pos + 1, :, :] = k_tok
+            v_logical[batch_idx, token_pos : token_pos + 1, :, :] = v_tok
+        q_start = int(prefill_query_start_len[batch_idx, 0])
+        for query_idx in range(prompt_len):
+            token_pos = args.context_len + query_idx
+            q_tok, k_tok, v_tok = synthetic_qkv_for_position(
+                token_pos + batch_idx * args.seq_len,
+                args,
+                heads_per_kv,
+            )
+            q_prefill[q_start + query_idx : q_start + query_idx + 1, :, :, :] = q_tok
+            k_logical[batch_idx, token_pos : token_pos + 1, :, :] = k_tok
+            v_logical[batch_idx, token_pos : token_pos + 1, :, :] = v_tok
 
+    cache_k_logical = np.zeros_like(k_logical)
+    cache_v_logical = np.zeros_like(v_logical)
+    cache_k_logical[:, : args.context_len, :, :] = k_logical[:, : args.context_len, :, :]
+    cache_v_logical[:, : args.context_len, :, :] = v_logical[:, : args.context_len, :, :]
     k_cache, v_cache = scatter_logical_kv_to_pages(
-        k_logical, v_logical, block_table, args.page_size, total_pages
+        cache_k_logical, cache_v_logical, block_table, args.page_size, total_pages
     )
     print(
         "llmd_loop_contract "
-        f"model={args.model} context_len={args.context_len} "
+        f"model={args.model} batch_size={args.batch_size} active_lanes={active_lanes} "
+        f"context_len={args.context_len} "
         f"prompt_len={prompt_len} prefill_tokens={prefill_tokens} "
         f"decode_steps={args.decode_steps} seq_len={args.seq_len} page_size={args.page_size}"
     )
-    prefill_seq_len = args.context_len + prompt_len
     prefill_k = np.zeros((prefill_tokens, args.num_kv_heads, args.head_dim), dtype=ml_dtypes.bfloat16)
     prefill_v = np.zeros_like(prefill_k)
-    prefill_slot_mapping = np.zeros((prefill_tokens,), dtype=np.int32)
-    prefill_k[:prompt_len] = k_logical[args.context_len : args.context_len + prompt_len, :, :]
-    prefill_v[:prompt_len] = v_logical[args.context_len : args.context_len + prompt_len, :, :]
-    prefill_out = prefill_kernel(
-        q_prefill,
+    prefill_slot_mapping = np.full((prefill_tokens,), np.iinfo(np.int32).max, dtype=np.int32)
+    for batch_idx in range(active_lanes):
+        q_start = int(prefill_query_start_len[batch_idx, 0])
+        q_stop = int(prefill_query_start_len[batch_idx + 1, 0])
+        prefill_k[q_start:q_stop] = k_logical[
+            batch_idx,
+            args.context_len : args.context_len + prompt_len,
+            :,
+            :,
+        ]
+        prefill_v[q_start:q_stop] = v_logical[
+            batch_idx,
+            args.context_len : args.context_len + prompt_len,
+            :,
+            :,
+        ]
+        for query_idx, token_pos in enumerate(range(args.context_len, prefill_seq_len)):
+            prefill_slot_mapping[q_start + query_idx] = flattened_cache_slot(
+                block_table, batch_idx, token_pos, args.page_size
+            )
+    k_cache, v_cache = update_kernel(
         k_cache,
         v_cache,
         prefill_k,
         prefill_v,
         prefill_slot_mapping,
-        block_table,
-        np.array([[prefill_seq_len]], dtype=np.int32),
-        np.array([[0], [prompt_len]], dtype=np.int32),
+        prefill_query_start_len,
     )
-    prefill_expected = reference_attention(q_prefill, k_logical, v_logical, prefill_seq_len, prompt_len)
-    assert_close("llmd_prefill", prefill_expected, prefill_out, args, prompt_len)
+    prefill_out = prefill_kernel(
+        q_prefill,
+        k_cache,
+        v_cache,
+        block_table,
+        seq_lens_prefill,
+        prefill_query_start_len,
+    )
+    prefill_expected = np.zeros_like(q_prefill)
+    for batch_idx in range(active_lanes):
+        q_start = int(prefill_query_start_len[batch_idx, 0])
+        q_stop = int(prefill_query_start_len[batch_idx + 1, 0])
+        prefill_expected[q_start:q_stop] = reference_attention(
+            q_prefill[q_start:q_stop],
+            k_logical,
+            v_logical,
+            prefill_seq_len,
+            prompt_len,
+            batch_idx,
+        )
+        assert_close(
+            f"llmd_prefill batch={batch_idx}",
+            prefill_expected[q_start:q_stop],
+            prefill_out[q_start:q_stop],
+            args,
+            prompt_len,
+        )
+    assert_close("llmd_prefill", prefill_expected, prefill_out, args, int(prefill_query_start_len[-1, 0]))
 
     previous_output = None
     for step in range(args.decode_steps):
-        seq_len = args.context_len + prompt_len + step + 1
-        token_pos = seq_len - 1
-        q_decode, k_decode, v_decode = synthetic_qkv_for_position(token_pos, args, heads_per_kv)
-        write_logical_token(k_logical, v_logical, token_pos, k_decode, v_decode)
-        scatter_logical_token_to_page(
-            k_cache, v_cache, k_logical, v_logical, block_table, args.page_size, token_pos
+        q_decode = np.zeros(
+            (args.batch_size, args.num_kv_heads, heads_per_kv, args.head_dim),
+            dtype=ml_dtypes.bfloat16,
+        )
+        k_decode = np.zeros(
+            (args.batch_size, args.num_kv_heads, args.head_dim),
+            dtype=ml_dtypes.bfloat16,
+        )
+        v_decode = np.zeros_like(k_decode)
+        decode_slot_mapping = np.full((args.batch_size,), np.iinfo(np.int32).max, dtype=np.int32)
+        decode_query_start_len = np.zeros((args.batch_size + 1, 1), dtype=np.int32)
+        decode_seq_lens = np.zeros((args.batch_size, 1), dtype=np.int32)
+        for batch_idx in range(args.batch_size):
+            decode_query_start_len[batch_idx, 0] = min(batch_idx, active_lanes)
+        decode_query_start_len[args.batch_size, 0] = active_lanes
+
+        for batch_idx in range(active_lanes):
+            seq_len = args.context_len + prompt_len + step + 1
+            token_pos = seq_len - 1
+            q_tok, k_tok, v_tok = synthetic_qkv_for_position(
+                token_pos + batch_idx * args.seq_len,
+                args,
+                heads_per_kv,
+            )
+            q_decode[batch_idx : batch_idx + 1, :, :, :] = q_tok
+            k_decode[batch_idx : batch_idx + 1, :, :] = k_tok
+            v_decode[batch_idx : batch_idx + 1, :, :] = v_tok
+            write_logical_token(
+                k_logical[batch_idx],
+                v_logical[batch_idx],
+                token_pos,
+                k_tok,
+                v_tok,
+            )
+            decode_slot_mapping[batch_idx] = flattened_cache_slot(
+                block_table,
+                batch_idx,
+                token_pos,
+                args.page_size,
+            )
+            decode_seq_lens[batch_idx, 0] = seq_len
+
+        k_cache, v_cache = update_kernel(
+            k_cache,
+            v_cache,
+            k_decode,
+            v_decode,
+            decode_slot_mapping,
+            decode_query_start_len,
         )
         output = decode_kernel(
             q_decode,
             k_cache,
             v_cache,
-            k_decode,
-            v_decode,
-            np.array(
-                [flattened_cache_slot(block_table, 0, token_pos, args.page_size)],
-                dtype=np.int32,
-            ),
             block_table,
-            np.array([[seq_len]], dtype=np.int32),
-            np.array([[0], [1]], dtype=np.int32),
+            decode_seq_lens,
+            decode_query_start_len,
         )
-        expected = reference_attention(q_decode, k_logical, v_logical, seq_len, 1)
-        assert_close(f"llmd_decode_step={step}", expected, output, args, 1)
-        print_delta(f"llmd_decode_step={step}", previous_output, output[0])
-        previous_output = output[0].copy()
+        expected = np.zeros_like(q_decode)
+        for batch_idx in range(active_lanes):
+            seq_len = int(decode_seq_lens[batch_idx, 0])
+            expected[batch_idx : batch_idx + 1] = reference_attention(
+                q_decode[batch_idx : batch_idx + 1],
+                k_logical,
+                v_logical,
+                seq_len,
+                1,
+                batch_idx,
+            )
+            assert_close(
+                f"llmd_decode_step={step} batch={batch_idx}",
+                expected[batch_idx : batch_idx + 1],
+                output[batch_idx : batch_idx + 1],
+                args,
+                1,
+            )
+        assert_close(f"llmd_decode_step={step}", expected, output, args, active_lanes)
+        max_delta = print_delta(
+            f"llmd_decode_step={step}",
+            previous_output,
+            output[:active_lanes],
+        )
+        if max_delta == 0.0:
+            raise AssertionError(f"llmd_decode_step={step}: decode output repeated exactly")
+        previous_output = output[:active_lanes].copy()
 
 
 def main():
@@ -929,16 +1091,17 @@ def main():
 
     prefill_kernel = nki.jit(module.paged_attention_2d)
     decode_kernel = nki.jit(module.paged_attention_decode_2d)
+    update_kernel = nki.jit(module.paged_kv_cache_update)
     if args.run == "llmd-loop":
-        run_llmd_loop(args, prefill_kernel, decode_kernel, heads_per_kv)
+        run_llmd_loop(args, update_kernel, prefill_kernel, decode_kernel, heads_per_kv)
     elif args.run == "history-sensitivity":
-        run_history_sensitivity(args, decode_kernel, heads_per_kv)
+        run_history_sensitivity(args, update_kernel, decode_kernel, heads_per_kv)
     elif args.run == "both":
-        run_attention_case(args, prefill_kernel, heads_per_kv, "prefill")
-        run_attention_case(args, decode_kernel, heads_per_kv, "decode")
+        run_attention_case(args, update_kernel, prefill_kernel, heads_per_kv, "prefill")
+        run_attention_case(args, update_kernel, decode_kernel, heads_per_kv, "decode")
     else:
         kernel = decode_kernel if args.run == "decode" else prefill_kernel
-        run_attention_case(args, kernel, heads_per_kv, args.run)
+        run_attention_case(args, update_kernel, kernel, heads_per_kv, args.run)
 
 
 if __name__ == "__main__":
