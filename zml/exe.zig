@@ -306,22 +306,22 @@ pub const Exe = struct {
     };
 
     pub fn callOpts(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
-        var trace = tracer.scope("zml.exe.call", .{
+        var span = tracer.span("zml.exe.call", .{
             .wait = opts.wait,
             .arg_count = arguments.expected_shapes.len,
             .result_count = results_.expected_shapes.len,
-        }) catch unreachable;
-        defer trace.end();
+        });
+        defer span.end();
         return self.internalCall(io, arguments, results_, opts);
     }
 
     pub fn call(self: *const Exe, arguments: Arguments, results_: *Results) void {
-        var trace = tracer.scope("zml.exe.call", .{
+        var span = tracer.span("zml.exe.call", .{
             .wait = false,
             .arg_count = arguments.expected_shapes.len,
             .result_count = results_.expected_shapes.len,
-        }) catch unreachable;
-        defer trace.end();
+        });
+        defer span.end();
         return self.internalCall(null, arguments, results_, .{});
     }
 };
