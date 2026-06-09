@@ -1,0 +1,18 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "detokenization",
+    main = "main.zig",
+    srcs = [
+        "graph.zig",
+        "main.zig",
+        "model.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+        "//mlir",
+        "//mlir/dialects",
+    ],
+)
