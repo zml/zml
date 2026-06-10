@@ -267,7 +267,6 @@ fn applyActivation(x: Tensor, mode: ActivationMode) Tensor {
         .silu => gate.silu().mul(up),
         .gelu => gate.gelu().mul(up),
         .relu => x.relu().powByConst(2),
-        .gelu => gate.gelu().mul(up),
         .quick_gelu_plus_one => blk: {
             const gate_clamped = gate.minimum(Tensor.scalar(7, gate.dtype()).broad(gate.shape()));
             const up_clamped = up.clamp(
@@ -294,9 +293,7 @@ pub fn fusedExpertsImpl(
     const b = hidden_states.dim(.b);
     const s = hidden_states.dim(.s);
     const hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
-    log.info("MoE canonicalizing inputs...", .{});
     const gate_up = try canonicalizeGateUp(w1, hidden.dim(.in));
-    log.info("MoE canonicalizing inputs...", .{});
     const down = try canonicalizeDown(w2, hidden.dim(.in), gate_up.dim(.out));
     const weights = topk_weights.reshape(.{ .token = b * s, .topk = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
     const ids = topk_ids.reshape(.{ .token = b * s, .topk = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
@@ -352,11 +349,7 @@ pub fn fusedExpertsImpl(
     const activated = applyActivation(gate_up_out, opts.activation);
 
     const aligned_activated = alignSortedRowsByGroup(activated, expert_ids_sorted, group_sizes, tile_m);
-    log.info("down shape before gmm2: {f}", .{down.shape()});
-    var down_out = if (use_reference_moe) blk: {
-        const down_per_token = down.gather(.{ .expert = expert_ids_sorted }, .{});
-        break :blk activated.rename(.{ .out = .mid }).dot(down_per_token, .mid);
-    } else callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype(), .none)
+    var down_out = callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype(), .none)
         .gather(.{ .token = aligned_activated.positions.rename(.{ .token = .route }) }, .{})
         .rename(.{ .route = .token });
 

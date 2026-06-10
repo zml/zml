@@ -24,9 +24,4 @@ sh_binary(
     visibility = ["//visibility:public"],
 )
 
-zig_binary(
-    name = "gemma4_transpose",
-    main = "gemma4_transpose/main.zig",
-    visibility = ["//visibility:public"],
-    deps = ["//zml"],
-)
+
