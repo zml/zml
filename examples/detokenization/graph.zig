@@ -22,6 +22,7 @@ pub const Graph = struct {
         }
     };
 
+    zml_handler: *main.Zml_handler,
     allocator: std.mem.Allocator,
     io: std.Io,
     // dataset fields
@@ -72,6 +73,7 @@ pub const Graph = struct {
         errdefer allocator.free(scores);
 
         return .{
+            .zml_handler = zml_handler,
             .allocator = allocator,
             .io = zml_handler.io,
             .dim = matrix.d,
@@ -454,6 +456,7 @@ pub const Graph = struct {
     }
 
     pub fn pruneCandidates(self: *Graph, i: usize, candidates: []Candidate) void {
+        self.zml_handler.tic(&self.zml_handler.timers.prune_pool);
         // we assume candidates similarities is already set
         std.mem.sort(Candidate, candidates, {}, Candidate.beforeThan);
 
@@ -466,6 +469,7 @@ pub const Graph = struct {
             self.nb_neighbors[i] += 1;
             if (self.nb_neighbors[i] == self.params.k_max) break;
         }
+        self.zml_handler.toc(&self.zml_handler.timers.prune_pool);
     }
     
     // --------------------- LOS heuristic ---------------------- //
@@ -534,7 +538,9 @@ pub const Graph = struct {
                 }
                 // add new candidates: all nodes visited during the greedy search medoid -> current_node
                 // there might be intersection with the current neighbor, so we need a datastructure to filter those
+                self.zml_handler.tic(&self.zml_handler.timers.greedy_search);
                 const visited, const scores = self.vamanaSearchNode(current_node);
+                self.zml_handler.toc(&self.zml_handler.timers.greedy_search);
                 for (0..visited.len) |j| {
                     const candidate = visited[j];
                     if (is_candidate[candidate] or candidate == current_node) continue;

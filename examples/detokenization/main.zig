@@ -98,21 +98,20 @@ pub const Timing_handler = struct {
     };
 
     similarity_matrix: Field_timer = .{},
+    
     knn_graph: Field_timer = .{},
-    rkm_graph: Field_timer = .{},
-    k_means: Field_timer = .{},
-    nsw_extention: Field_timer = .{},
-    total: Field_timer = .{},
+    nsw_graph: Field_timer = .{},
+
+    greedy_search: Field_timer = .{},
+    prune_pool: Field_timer = .{},
 
     pub fn print(self: Timing_handler) void {
-        std.log.info("{d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s", .{
-            @as(f64, @floatFromInt(self.similarity_matrix.nanoseconds)) / 1e9,
-            @as(f64, @floatFromInt(self.knn_graph.nanoseconds)) / 1e9,
-            @as(f64, @floatFromInt(self.rkm_graph.nanoseconds)) / 1e9,
-            @as(f64, @floatFromInt(self.k_means.nanoseconds)) / 1e9,
-            @as(f64, @floatFromInt(self.nsw_extention.nanoseconds)) / 1e9,
-            @as(f64, @floatFromInt(self.total.nanoseconds)) / 1e9,
-        });
+        std.log.info("Sim matrix    : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.similarity_matrix.nanoseconds)) / 1e9 });
+        std.log.info("kNN graph ini : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.knn_graph.nanoseconds)) / 1e9 });
+        std.log.info("NSW graph ext : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.nsw_graph.nanoseconds)) / 1e9 });
+        std.log.info("Greedy search : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.greedy_search.nanoseconds)) / 1e9 });
+        std.log.info("Pruning pool  : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.prune_pool.nanoseconds)) / 1e9 });
+        
     }
 };
 
@@ -217,11 +216,7 @@ pub fn main(init: std.process.Init) !void {
 
     try printZmlLogo(zml_handler.io);
 
-    zml_handler.tic(&zml_handler.timers.total);
-
     try runTests(&zml_handler);
-
-    zml_handler.toc(&zml_handler.timers.total);
 
     zml_handler.timers.print();
 }
@@ -231,11 +226,13 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer model_handler.deinit(zml_handler.allocator);
     defer model_handler.unloadBuffers();
 
+    zml_handler.tic(&zml_handler.timers.similarity_matrix);
     var similarity_matrix = try computeSimilarityMatrix(zml_handler, &model_handler);
     defer similarity_matrix.deinit(zml_handler.allocator);
-
+    zml_handler.toc(&zml_handler.timers.similarity_matrix);
+    
     try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix);
-
+    
     std.log.info("Get lm_head", .{});
     const lm_head = try getLmHead(zml_handler, &model_handler);
     defer lm_head.free(zml_handler.allocator);
@@ -249,29 +246,22 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, graph_params);
     defer g.deinit();
 
-    const iters: usize = 1_000_000;
-    const start = std.Io.Timestamp.now(zml_handler.io, .awake);
-    
-    var sink: i128 = 0;
-    for (0..iters) |_| {
-        const now = std.Io.Timestamp.now(zml_handler.io, .awake);
-        sink +%= now.nanoseconds;
-    }
-    const end = std.Io.Timestamp.now(zml_handler.io, .awake);
-    const elapsed = std.Io.Timestamp.durationTo(start, end);
-    const ns_per_call = @as(f64, @floatFromInt(elapsed.nanoseconds)) / @as(f64, @floatFromInt(iters));
-    log.info("Timestamp.now cost: {d:.2} ns/call sink={d}", .{ ns_per_call, sink });
-
-    // NSW from exact kNN
+    zml_handler.tic(&zml_handler.timers.knn_graph);
     g.setNearestNeighbors();
-    g.extendToNsw();
+    zml_handler.toc(&zml_handler.timers.knn_graph);
+    
     std.log.info("Exact kNN : nb nodes: {d}", .{ g.nbNodes() });
+    
+    zml_handler.tic(&zml_handler.timers.nsw_graph);
+    g.extendToNsw();
+    zml_handler.toc(&zml_handler.timers.nsw_graph);
+    
+    std.log.info("NSW extension : nb nodes: {d}", .{ g.nbNodes() });
 
 }
 
 pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !SimilarityMatrix {
     std.log.info("Compute similarity matrix", .{});
-    zml_handler.tic(&zml_handler.timers.similarity_matrix);
     const allocator = zml_handler.allocator;
 
     const lm_head_shape = model_handler.model.shape();
@@ -331,7 +321,6 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_
     }
     std.debug.assert(write_offset == triangular_len);
 
-    zml_handler.toc(&zml_handler.timers.similarity_matrix);
     var matrix: SimilarityMatrix = .{
         .data = similarity_matrix_slice,
         .nearest_neighbors = nearest_neighbors_slice,
