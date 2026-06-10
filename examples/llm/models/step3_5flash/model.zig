@@ -1114,22 +1114,29 @@ pub const Moe = struct {
     limit: ?f32,
 
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !Moe {
+        // NOTE: experts are intentionally replicated (not sharded on the
+        // `.experts` mesh axis). When `expert` is partitioned, zml.moe.forwardMoe
+        // enters its manualComputation branch and emits a global allReduce that
+        // XLA SPMD rejects whenever the `.model` mesh axis is also non-trivial
+        // ("Cross-partition allreduce must be in (partial) manual partitioning mode").
+        // Replicating experts keeps the direct triton.fusedExpertsImpl path,
+        // which is still GPU-fast; cross-device expert parallelism is sacrificed.
         const up_proj_tensor = store.createTensor(
             "up_proj.weight",
             .{ .expert, .dout, .d },
-            .{ .expert = .experts, .dout = .replicated, .d = .replicated },
+            .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
         );
 
         const gate_proj_tensor = store.createTensor(
             "gate_proj.weight",
             .{ .expert, .dout, .d },
-            .{ .expert = .experts, .dout = .replicated, .d = .replicated },
+            .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
         );
 
         const down_proj_tensor = store.createTensor(
             "down_proj.weight",
             .{ .expert, .dout, .d },
-            .{ .expert = .experts, .dout = .replicated, .d = .replicated },
+            .{ .expert = .replicated, .dout = .replicated, .d = .replicated },
         );
 
         const limit: ?f32 = blk: {
