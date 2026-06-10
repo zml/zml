@@ -319,7 +319,7 @@ pub const Ffn = union(enum) {
     pub fn forward(self: Ffn, x: zml.Tensor) zml.Tensor {
         return switch (self) {
             .mlp => |mlp| mlp.forward(x),
-            .moe => |m| m.experts.forward(x).rename(.{ .dout = .d }).add(m.shared.forward(x)),
+            .moe => |m| m.experts.forward(x).add(m.shared.forward(x)),
         };
     }
 };
@@ -702,7 +702,7 @@ pub const Attn = struct {
 
         const projected_output = self.o_proj.forward(
             gated_attn.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s }),
-        ).withPartitioning(.{ .d = .replicated });
+        ).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
 
         return .{ projected_output, new_kv_cache };
     }
@@ -1201,9 +1201,10 @@ pub const Moe = struct {
             moe_parameters,
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
-        // Triton backend returns {b, token, out}; forwardLoop returns {b, s, dout}.
-        // Normalize so callers (Ffn.forward) don't need to know which backend ran.
-        return moe_output.rename(.{ .token = .s, .out = .dout });
+        // zml.moe.forwardMoe returns shape {.b, .s, .d} (see zml/moe/moe.zig
+        // body: `.withTags(.{ .b, .s, .d })`). forwardLoop is normalized below to
+        // also return {.b, .s, .d} so Ffn.forward is backend-agnostic.
+        return moe_output;
     }
 
     fn forwardLoop(self: Moe, x: zml.Tensor) zml.Tensor {
@@ -1242,7 +1243,7 @@ pub const Moe = struct {
             const contrib = weighted_sorted.slice1d(.topk, .single(@as(i64, @intCast(i))));
             acc = acc.add(contrib);
         }
-        return acc;
+        return acc.rename(.{ .dout = .d });
     }
 };
 
