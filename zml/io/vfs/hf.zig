@@ -904,10 +904,13 @@ pub const HF = struct {
     fn httpRangeGetIntoSlot(client: *std.http.Client, url: []const u8, range_start: u64, range_end_inclusive: u64, slot: []u8) !void {
         // Retry once on transient keep-alive connection close, which is
         // common when the connection pool is shared across threads.
+        // `TlsInitializationFailed` is std's opaque catchall for any failure
+        // during the TLS handshake (incl. EOF reading ServerHello on a stale
+        // pooled connection); treat it as transient too.
         var attempt: u32 = 0;
         while (true) : (attempt += 1) {
             httpRangeGetIntoSlotOnce(client, url, range_start, range_end_inclusive, slot) catch |e| {
-                if (attempt == 0 and (e == error.HttpConnectionClosing or e == error.ConnectionResetByPeer or e == error.UnexpectedReadFailure)) continue;
+                if (attempt == 0 and (e == error.HttpConnectionClosing or e == error.ConnectionResetByPeer or e == error.UnexpectedReadFailure or e == error.TlsInitializationFailed)) continue;
                 return e;
             };
             return;
