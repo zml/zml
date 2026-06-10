@@ -39,6 +39,8 @@ pub const Graph = struct {
     visited_nodes: []usize, // this is the buffer for visited nodes, no allocation
     nb_visited_nodes: usize, // this is the range in visited_nodes that are currently in use
     is_node_visited: []bool, // tells if each node in the graph has been visited. incrementally updated: reset to false from visited_nodes at end of search, init to false
+    is_node_expanded: []bool, // tells if a discovered node has already been expanded by Vamana search
+    search_candidates: []Candidate, // bounded Vamana search frontier
     scores: []f16, // scores for each visited node. unitialized, updated whenever visited_nodes is updated
 
     pub fn init(zml_handler: *main.Zml_handler, lm_head: zml.Slice, lm_head_normalized: zml.Slice, matrix: *main.SimilarityMatrix, params: GraphParams) !Graph {
@@ -59,6 +61,13 @@ pub const Graph = struct {
         errdefer allocator.free(is_node_visited);
         @memset(is_node_visited, false);
 
+        const is_node_expanded = try allocator.alloc(bool, matrix.n);
+        errdefer allocator.free(is_node_expanded);
+        @memset(is_node_expanded, false);
+
+        const search_candidates = try allocator.alloc(Candidate, params.search_budget + params.k_max);
+        errdefer allocator.free(search_candidates);
+
         const scores = try allocator.alloc(f16, params.search_budget);
         errdefer allocator.free(scores);
 
@@ -77,6 +86,8 @@ pub const Graph = struct {
             .visited_nodes = visited_nodes,
             .nb_visited_nodes = 0,
             .is_node_visited = is_node_visited,
+            .is_node_expanded = is_node_expanded,
+            .search_candidates = search_candidates,
             .scores = scores,
         };
     }
@@ -86,10 +97,10 @@ pub const Graph = struct {
         self.allocator.free(self.nb_neighbors);
         self.allocator.free(self.visited_nodes);
         self.allocator.free(self.is_node_visited);
+        self.allocator.free(self.is_node_expanded);
+        self.allocator.free(self.search_candidates);
         self.allocator.free(self.scores);
     }
-
-    // ------------------ High level functions ----------------- //
 
     pub fn getMedoid(allocator: std.mem.Allocator, lm_head_normalized: zml.Slice, n: usize, dim: usize) !usize {
         const rows = lm_head_normalized.constItems(f16);
@@ -133,6 +144,8 @@ pub const Graph = struct {
         }
         return best_row;
     }
+    
+    // ------------------- Search functions ------------------ //
 
     pub fn greedySearch(self: *Graph, q: []const f16) struct { []usize, []f16 } {
         self.nb_visited_nodes = 0;
@@ -216,6 +229,68 @@ pub const Graph = struct {
         return .{ self.visited_nodes[0..self.nb_visited_nodes], self.scores[0..self.nb_visited_nodes] };
     }
     
+    
+    pub fn vamanaSearch(self: *Graph, q: []const f16) struct { []usize, []f16 } {
+        self.nb_visited_nodes = 0;
+        var nb_search_candidates: usize = 0;
+
+        const start_score = self.scoreQueryNode(q, self.medoid);
+        self.addSearchCandidate(&nb_search_candidates, self.medoid, start_score);
+
+        while (self.nb_visited_nodes < self.params.search_budget) {
+            const candidate_index = self.nextUnexpandedSearchCandidate(self.search_candidates[0..nb_search_candidates]) orelse break;
+            const current_candidate = self.search_candidates[candidate_index];
+            const current_node = current_candidate.node;
+            self.addExpandedSearchCandidate(current_node, current_candidate.similarity);
+
+            const start_neigh = self.params.k_max * current_node;
+            const end_neigh = start_neigh + self.nb_neighbors[current_node];
+            for (start_neigh..end_neigh) |i| {
+                const neighbor = self.neighbors[i];
+                if (self.is_node_visited[neighbor]) continue;
+
+                const score = self.scoreQueryNode(q, neighbor);
+                self.addSearchCandidate(&nb_search_candidates, neighbor, score);
+            }
+            self.trimSearchCandidates(&nb_search_candidates);
+        }
+
+        self.clearVamanaSearch(nb_search_candidates);
+
+        return .{ self.visited_nodes[0..self.nb_visited_nodes], self.scores[0..self.nb_visited_nodes] };
+    }
+
+    pub fn vamanaSearchNode(self: *Graph, q: usize) struct { []usize, []f16 } {
+        self.nb_visited_nodes = 0;
+        var nb_search_candidates: usize = 0;
+
+        const start_score = self.similarity(self.medoid, q);
+        self.addSearchCandidate(&nb_search_candidates, self.medoid, start_score);
+
+        while (self.nb_visited_nodes < self.params.search_budget) {
+            const candidate_index = self.nextUnexpandedSearchCandidate(self.search_candidates[0..nb_search_candidates]) orelse break;
+            const current_candidate = self.search_candidates[candidate_index];
+            const current_node = current_candidate.node;
+            self.addExpandedSearchCandidate(current_node, current_candidate.similarity);
+
+            const start_neigh = self.params.k_max * current_node;
+            const end_neigh = start_neigh + self.nb_neighbors[current_node];
+            for (start_neigh..end_neigh) |i| {
+                const neighbor = self.neighbors[i];
+                if (self.is_node_visited[neighbor]) continue;
+
+                const score = self.similarity(neighbor, q);
+                self.addSearchCandidate(&nb_search_candidates, neighbor, score);
+            }
+            self.trimSearchCandidates(&nb_search_candidates);
+        }
+
+        self.clearVamanaSearch(nb_search_candidates);
+
+        return .{ self.visited_nodes[0..self.nb_visited_nodes], self.scores[0..self.nb_visited_nodes] };
+    }
+
+
     pub fn addVisitedNode(self: *Graph, node: usize, score: f16) void {
         std.debug.assert(self.nb_visited_nodes < self.params.search_budget);
         std.debug.assert(!self.is_node_visited[node]);
@@ -223,6 +298,62 @@ pub const Graph = struct {
         self.visited_nodes[self.nb_visited_nodes] = node;
         self.scores[self.nb_visited_nodes] = score;
         self.nb_visited_nodes += 1;
+    }
+
+    pub fn addSearchCandidate(self: *Graph, nb_search_candidates: *usize, node: usize, score: f16) void {
+        std.debug.assert(nb_search_candidates.* < self.search_candidates.len);
+        std.debug.assert(!self.is_node_visited[node]);
+        self.is_node_visited[node] = true;
+        self.is_node_expanded[node] = false;
+        self.search_candidates[nb_search_candidates.*] = .{ .node = node, .similarity = score };
+        nb_search_candidates.* += 1;
+    }
+
+    pub fn addExpandedSearchCandidate(self: *Graph, node: usize, score: f16) void {
+        std.debug.assert(self.nb_visited_nodes < self.params.search_budget);
+        std.debug.assert(self.is_node_visited[node]);
+        std.debug.assert(!self.is_node_expanded[node]);
+        self.is_node_expanded[node] = true;
+        self.visited_nodes[self.nb_visited_nodes] = node;
+        self.scores[self.nb_visited_nodes] = score;
+        self.nb_visited_nodes += 1;
+    }
+
+    pub fn trimSearchCandidates(self: *Graph, nb_search_candidates: *usize) void {
+        if (nb_search_candidates.* <= self.params.search_budget) return;
+
+        std.mem.sort(Candidate, self.search_candidates[0..nb_search_candidates.*], {}, Candidate.beforeThan);
+        for (self.params.search_budget..nb_search_candidates.*) |i| {
+            const node = self.search_candidates[i].node;
+            if (!self.is_node_expanded[node]) self.is_node_visited[node] = false;
+        }
+        nb_search_candidates.* = self.params.search_budget;
+    }
+
+    pub fn clearVamanaSearch(self: *Graph, nb_search_candidates: usize) void {
+        for (0..nb_search_candidates) |i| {
+            const node = self.search_candidates[i].node;
+            self.is_node_visited[node] = false;
+            self.is_node_expanded[node] = false;
+        }
+        for (0..self.nb_visited_nodes) |i| {
+            const node = self.visited_nodes[i];
+            self.is_node_visited[node] = false;
+            self.is_node_expanded[node] = false;
+        }
+    }
+
+    pub fn nextUnexpandedSearchCandidate(self: *const Graph, candidates: []const Candidate) ?usize {
+        var best_index: ?usize = null;
+        for (candidates, 0..) |candidate, i| {
+            if (self.is_node_expanded[candidate.node]) continue;
+            const best = best_index orelse {
+                best_index = i;
+                continue;
+            };
+            if (Candidate.beforeThan({}, candidate, candidates[best])) best_index = i;
+        }
+        return best_index;
     }
     
     pub fn scoreQueryNode(self: *const Graph, query: []const f16, node: usize) f16 {
@@ -306,25 +437,37 @@ pub const Graph = struct {
     pub fn pruneNeighbors(self: *Graph) void {
         log.info("Pruning neighbors LOS", .{});
         for (0..self.n) |i| {
-            self.pruneNodeNeighbors(i);
+            const start_neigh = self.params.k_max * i;
+            const end_neigh = start_neigh + self.nb_neighbors[i];
+            var nb_candidates: usize = 0;
+            var candidates = self.search_candidates;
+            for (start_neigh..end_neigh) |j| {
+                const candidate = self.neighbors[j];
+                candidates[nb_candidates] = .{ .node = candidate, .similarity = self.similarity(i, candidate) };
+                nb_candidates += 1;
+            }
+            self.pruneCandidates(i, candidates[0..nb_candidates]);
             if (i == 0 or (i + 1) % 5000 == 0 or i + 1 == self.n) {
                 log.info("Pruning neighbors LOS node {d}/{d}", .{ i + 1, self.n });
             }
         }
     }
 
-    pub fn pruneNodeNeighbors(self: *Graph, i: usize) void {
-        const start_neigh = self.params.k_max * i;
-        const end_neigh = start_neigh + self.nb_neighbors[i];
+    pub fn pruneCandidates(self: *Graph, i: usize, candidates: []Candidate) void {
+        // we assume candidates similarities is already set
+        std.mem.sort(Candidate, candidates, {}, Candidate.beforeThan);
+
+        // update current_node neighbors with LOS pruning of the candidates
+        const start_neigh = i * self.params.k_max;
         self.nb_neighbors[i] = 0;
-        for (start_neigh..end_neigh) |j| {
-            const candidate = self.neighbors[j];
-            if (!self.lineOfSight(i, candidate)) continue;
-            self.neighbors[start_neigh + self.nb_neighbors[i]] = candidate;
+        for (candidates) |candidate| {
+            if (!self.lineOfSight(i, candidate.node)) continue;
+            self.neighbors[start_neigh + self.nb_neighbors[i]] = candidate.node;
             self.nb_neighbors[i] += 1;
+            if (self.nb_neighbors[i] == self.params.k_max) break;
         }
     }
-
+    
     // --------------------- LOS heuristic ---------------------- //
 
     pub fn lineOfSight(self: *const Graph, base: usize, candidate: usize) bool {
@@ -338,7 +481,7 @@ pub const Graph = struct {
         for (start_neigh..end_neigh) |i| {
             const neighbor = self.neighbors[i];
             // for u and v norm 1 vectors, ||u - v||² = u² + v² - 2 <u,v> = 2 (1 - sim(u,v))
-            // a||n - c|| <= ||b - c|| => a²||n - c|| <= ||b - c||
+            // a||n - c|| <= ||b - c|| => a²||n - c||² <= ||b - c||²
             // 2a² (1 - sim(n,c)) <= 2 (1 - sim(b,c))
             // sim(n,c) >= 1 - (1 - sim(b,c)) / a²
             if (self.similarity(neighbor, candidate) >= threshold) return false;
@@ -363,11 +506,7 @@ pub const Graph = struct {
         const candidates = self.allocator.alloc(Candidate, self.params.k_max + self.params.search_budget) catch @panic("OOM");
         defer self.allocator.free(candidates);
 
-        const reverse_candidates = self.allocator.alloc(Candidate, self.params.k_max + 1) catch @panic("OOM");
-        defer self.allocator.free(reverse_candidates);
-
         const start = std.Io.Timestamp.now(self.io, .awake);
-        const total_iterations = self.params.vamana_passes * self.n;
 
         for (0..self.params.vamana_passes) |pass_i| {
             // random visit order
@@ -395,7 +534,7 @@ pub const Graph = struct {
                 }
                 // add new candidates: all nodes visited during the greedy search medoid -> current_node
                 // there might be intersection with the current neighbor, so we need a datastructure to filter those
-                const visited, const scores = self.greedySearchNode(current_node);
+                const visited, const scores = self.vamanaSearchNode(current_node);
                 for (0..visited.len) |j| {
                     const candidate = visited[j];
                     if (is_candidate[candidate] or candidate == current_node) continue;
@@ -404,26 +543,18 @@ pub const Graph = struct {
                     candidates[nb_candidates].similarity = scores[j];
                     nb_candidates += 1;
                 }
+                // clear candidates unicity util
+                for (0..nb_candidates) |j| is_candidate[candidates[j].node] = false;
 
-                // sort pool with decreasing similarity to candidate
-                std.mem.sort(Candidate, candidates[0..nb_candidates], {}, Candidate.beforeThan);
-
-                // update current_node neighbors with LOS pruning of the candidates
-                self.nb_neighbors[current_node] = 0;
-                for (0..nb_candidates) |j| {
-                    const candidate = candidates[j].node;
-                    if (!self.lineOfSight(current_node, candidate)) continue;
-                    self.neighbors[start_neigh + self.nb_neighbors[current_node]] = candidate;
-                    self.nb_neighbors[current_node] += 1;
-                    if (self.nb_neighbors[current_node] == self.params.k_max) break;
-                }
+                // forward prune on candidates
+                self.pruneCandidates(current_node, candidates[0..nb_candidates]);
                 
-                // from there, we insert current_node into each of its neighbors 
+                // from there, we insert current_node into each of its neighbors
                 end_neigh = start_neigh + self.nb_neighbors[current_node];
                 for (start_neigh..end_neigh) |j| {
                     const neighbor = self.neighbors[j];
                     
-                    // if neighbor -> current_node exists, a routing is already possible, skip
+                    // if neighbor -> current_node exists, skip
                     if (self.hasNeighbor(neighbor, current_node)) continue;
 
                     // if candidate still has room, add current_node to its neighbors
@@ -431,31 +562,42 @@ pub const Graph = struct {
                         self.addNeighbor(neighbor, current_node);
                         continue;
                     }
-                    
-                    // if neighbor is saturated, try to make room for current_node by pruning with LOS
-                    self.pruneNodeNeighbors(neighbor);
-                    if (self.nb_neighbors[neighbor] < self.params.k_max) {
-                        if (self.lineOfSight(neighbor, current_node)) self.addNeighbor(neighbor, current_node);
-                    }
-                }
-                // clear candidates pool
-                for (0..nb_candidates) |j| {
-                    is_candidate[candidates[j].node] = false;
-                }
 
-                if (i == 0 or (i + 1) % 1000 == 0 or i + 1 == self.n) {
-                    const now = std.Io.Timestamp.now(self.io, .awake);
-                    const elapsed_duration = std.Io.Timestamp.durationTo(start, now);
-                    const elapsed_seconds = @as(f64, @floatFromInt(elapsed_duration.nanoseconds)) / 1e9;
-                    const completed_iterations = pass_i * self.n + i + 1;
-                    const eta_seconds = elapsed_seconds * @as(f64, @floatFromInt(total_iterations - completed_iterations)) / @as(f64, @floatFromInt(completed_iterations));
-                    log.info(
-                        "NSW pass {d}/{d} node {d}/{d} elapsed={d:.2}s eta={d:.2}s",
-                        .{ pass_i + 1, self.params.vamana_passes, i + 1, self.n, elapsed_seconds, eta_seconds },
-                    );
+                    // reverse candidates : neighbor's neighbors + current_node
+                    nb_candidates = 0;
+                    const start_neigh_neigh = self.params.k_max * neighbor;
+                    const end_neigh_neigh = start_neigh_neigh + self.nb_neighbors[neighbor];
+                    
+                    for (start_neigh_neigh..end_neigh_neigh) |k| {
+                        const neigh_neigh = self.neighbors[k];
+                        // since neighbors are unique, no need to test if already candidate
+                        candidates[nb_candidates].node = neigh_neigh;
+                        candidates[nb_candidates].similarity = self.similarity(neighbor, neigh_neigh);
+                        nb_candidates += 1;
+                    }
+                    // we already tested that current_node is not a neighbor of neighbor
+                    candidates[nb_candidates].node = current_node;
+                    candidates[nb_candidates].similarity = self.similarity(neighbor, current_node);
+                    nb_candidates += 1;
+                    
+                    // reverse prune
+                    self.pruneCandidates(neighbor, candidates[0..nb_candidates]);
                 }
+                
+                if (i == 0 or (i + 1) % 1000 == 0 or i + 1 == self.n) self.logNsw(start, i);
             }
         }
+    }
+
+    pub fn logNsw(self: *Graph, start: std.Io.Timestamp, i: usize) void {
+        const now = std.Io.Timestamp.now(self.io, .awake);
+        const elapsed_duration = std.Io.Timestamp.durationTo(start, now);
+        const elapsed_seconds = @as(f64, @floatFromInt(elapsed_duration.nanoseconds)) / 1e9;
+        const eta_seconds = elapsed_seconds * @as(f64, @floatFromInt(self.n - i - 1)) / @as(f64, @floatFromInt(i + 1));
+        log.info(
+            "NSW node {d}/{d} elapsed={d:.2}s eta={d:.2}s",
+            .{ i + 1, self.n, elapsed_seconds, eta_seconds },
+        );
     }
 
     // ----------------------- NSW utils ------------------------ //

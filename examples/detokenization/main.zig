@@ -146,8 +146,7 @@ pub const SimilarityMatrix = struct {
         if (i == j) return 1.0; // TODO: can prob remove this
         const row = @min(i, j);
         const col = @max(i, j);
-        const pos = self.row_offsets[row] + col - row - 1;
-        return self.data.items(f16)[pos];
+        return self.data.constItems(f16)[self.row_offsets[row] + col - row - 1];
     }
 
     pub fn initOffsets(self: *SimilarityMatrix) void {
@@ -159,7 +158,7 @@ pub const SimilarityMatrix = struct {
     }
 
     pub fn nearestNeighbor(self: *SimilarityMatrix, row: usize, pos: usize) usize {
-        return self.nearest_neighbors.items(usize)[row * self.k + pos];
+        return self.nearest_neighbors.constItems(usize)[row * self.k + pos];
     }
 
     pub fn deinit(self: *SimilarityMatrix, allocator: std.mem.Allocator) void {
@@ -334,7 +333,7 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_
     std.debug.assert(write_offset == triangular_len);
 
     zml_handler.toc(&zml_handler.timers.similarity_matrix);
-    return .{
+    var matrix: SimilarityMatrix = .{
         .data = similarity_matrix_slice,
         .nearest_neighbors = nearest_neighbors_slice,
         .row_offsets = try allocator.alloc(usize, n),
@@ -342,6 +341,8 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_
         .d = d,
         .k = k,
     };
+    matrix.initOffsets();
+    return matrix;
 }
 
 pub fn getLmHead(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !zml.Slice {
