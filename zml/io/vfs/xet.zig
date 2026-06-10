@@ -1,22 +1,19 @@
-//! Dumb, stateless XET reader for the HF VFS, exposed as `std.Io.Reader`.
-//!
-//! `xet.FileRangeReader.init(...)` issues the CAS token + per-range reconstruction
-//! requests, then `interface.stream(writer, limit)` emits the file bytes
-//! incrementally, one xorb chunk at a time. Per-chunk LZ4 / BG4+LZ4
-//! decompression goes directly into the destination writer's writable
-//! slice (`writableSliceGreedy` + `advance`) — same pattern as
-//! `lz4.BlockReader`. An internal `chunk_buf` is only used for the very
-//! first chunk (when `offset_into_first_range` requires trimming the head)
-//! and for the very last chunk (when the writer doesn't have room for the
-//! full decoded size).
-//!
-//! No caches, no plans, no dedup.
-
 const std = @import("std");
 const lz4 = @import("lz4.zig");
 const bg4 = @import("bg4.zig");
 
 const log = std.log.scoped(.@"zml/io/vfs/xet");
+
+/// Block the calling worker thread for `ms` milliseconds via libc.
+/// We don't have a `std.Io` handle in here and `std.Thread.sleep` is gone
+/// in Zig 0.16; this is the most direct portable replacement.
+fn sleepMs(ms: u64) void {
+    const ts: std.posix.timespec = .{
+        .sec = @intCast(ms / 1000),
+        .nsec = @intCast((ms % 1000) * std.time.ns_per_ms),
+    };
+    _ = std.c.nanosleep(&ts, null);
+}
 
 // ── Repo / wire types ───────────────────────────────────────────────────────
 
@@ -52,45 +49,19 @@ const CasAuth = struct {
 
 // ── Chunk codec (xorb wire format) ──────────────────────────────────────────
 
-const ChunkIterator = struct {
-    data: []const u8,
-    pos: usize = 0,
+const chunk_header_size = 8;
 
-    const header_size = 8;
-
-    const Chunk = struct {
-        compressed_size: u32,
-        uncompressed_size: u32,
-        compression_type: u8,
-        compressed_data: []const u8,
-    };
-
-    fn next(self: *ChunkIterator) !?Chunk {
-        if (self.pos == self.data.len) return null;
-        if (self.data.len - self.pos < header_size) return error.TruncatedHeader;
-        const h = self.data[self.pos..][0..header_size];
-        if (h[0] != 0) return error.InvalidVersion;
-        const csize: u32 = @as(u32, h[1]) | (@as(u32, h[2]) << 8) | (@as(u32, h[3]) << 16);
-        const ctype = h[4];
-        if (ctype > 2) return error.InvalidCompressionType;
-        const usize_uncomp: u32 = @as(u32, h[5]) | (@as(u32, h[6]) << 8) | (@as(u32, h[7]) << 16);
-        const data_start = self.pos + header_size;
-        const data_end = data_start + csize;
-        if (data_end > self.data.len) return error.TruncatedData;
-        self.pos = data_end;
-        return .{
-            .compressed_size = csize,
-            .uncompressed_size = usize_uncomp,
-            .compression_type = ctype,
-            .compressed_data = self.data[data_start..data_end],
-        };
-    }
+const Chunk = struct {
+    compressed_size: u32,
+    uncompressed_size: u32,
+    compression_type: u8,
+    compressed_data: []const u8,
 };
 
 /// Decompresses `chunk` into `dst[0..chunk.uncompressed_size]`. `dst` must
 /// be at least that large. Composes via `lz4.BlockReader` / `bg4.DegroupWriter`
 /// over `std.Io.Reader` / `std.Io.Writer`.
-fn decompressChunk(chunk: ChunkIterator.Chunk, dst: []u8) ![]u8 {
+fn decompressChunk(chunk: Chunk, dst: []u8) ![]u8 {
     const n: usize = chunk.uncompressed_size;
     if (dst.len < n) return error.OutputTooSmall;
     const out = dst[0..n];
@@ -220,29 +191,6 @@ fn fetchReconstruction(
     });
 }
 
-fn httpRangeGet(
-    allocator: std.mem.Allocator,
-    client: *std.http.Client,
-    url: []const u8,
-    start: u64,
-    end_inclusive: u64,
-) ![]u8 {
-    const uri: std.Uri = try .parse(url);
-    var range_buf: [64]u8 = undefined;
-    const range = try std.fmt.bufPrint(&range_buf, "bytes={}-{}", .{ start, end_inclusive });
-    var req = try client.request(.GET, uri, .{
-        .headers = .{ .accept_encoding = .{ .override = "identity" } },
-        .extra_headers = &.{.{ .name = "Range", .value = range }},
-    });
-    defer req.deinit();
-    try req.sendBodiless();
-    var redirect_buffer: [8 * 1024]u8 = undefined;
-    var res = try req.receiveHead(&redirect_buffer);
-    if (res.head.status != .ok and res.head.status != .partial_content) return error.XorbFetchFailed;
-    const expected: usize = @intCast(end_inclusive - start + 1);
-    return try res.reader(&.{}).readAlloc(allocator, res.head.content_length orelse expected);
-}
-
 // ── FileRangeReader (std.Io.Reader implementation) ─────────────────────────
 
 /// Streams the bytes of the file range `[offset, offset+length)` of
@@ -265,15 +213,24 @@ pub const FileRangeReader = struct {
     skip_head: u64,
 
     term_idx: usize = 0,
-    /// `term.range.end` cached for the active term (0 when no term active).
-    term_range_end: u64 = 0,
+    /// Number of output chunks left to read from the current term (0 when no
+    /// term is active).
+    chunks_remaining_in_term: u64 = 0,
 
-    // Current xorb materialized in memory (allocated; freed on advance or
-    // deinit). `chunk_it` walks it; `next_chunk_index` is the wire-index of
-    // the chunk `chunk_it.next()` will return next.
-    xorb_bytes: ?[]u8 = null,
-    chunk_it: ChunkIterator = .{ .data = &.{} },
-    next_chunk_index: u64 = 0,
+    // Live HTTP state for the current xorb. `http_req` owns the connection;
+    // `http_reader` is `&http_req.reader.interface` (so http_req must stay at
+    // a stable address while http_reader is in use). Both null between terms.
+    http_req: ?std.http.Client.Request = null,
+    http_reader: ?*std.Io.Reader = null,
+
+    /// Body-reader scratch (used by stdlib for chunked-encoding/content-length
+    /// parsing). One per FileRangeReader; reused across terms.
+    xorb_transfer_buf: [16 * 1024]u8 = undefined,
+    /// One compressed chunk pulled off the xorb body. Xet caps chunks at
+    /// 64 KiB uncompressed; 128 KiB covers worst-case LZ4 inflation.
+    xorb_chunk_comp_buf: [128 * 1024]u8 = undefined,
+    /// Redirect-tracking scratch for receiveHead.
+    xorb_redirect_buf: [8 * 1024]u8 = undefined,
 
     /// Scratch for one decompressed chunk. Only used when the destination
     /// writer can't fit the chunk directly (head trim, tail clip, or a
@@ -320,18 +277,26 @@ pub const FileRangeReader = struct {
     }
 
     pub fn deinit(self: *FileRangeReader) void {
-        if (self.xorb_bytes) |b| self.allocator.free(b);
+        if (self.http_req) |*req| req.deinit();
         self.parsed.deinit();
     }
 
-    /// Advance to the next term (freeing the current xorb), download its
-    /// xorb byte window, reset the chunk iterator, and skip any chunks
-    /// before `term.range.start`. Returns `false` when no terms remain.
-    fn openNextTerm(self: *FileRangeReader) !bool {
-        if (self.xorb_bytes) |b| {
-            self.allocator.free(b);
-            self.xorb_bytes = null;
+    /// Tear down any in-flight HTTP request. Safe to call repeatedly.
+    fn closeXorb(self: *FileRangeReader) void {
+        if (self.http_req) |*req| {
+            req.deinit();
+            self.http_req = null;
+            self.http_reader = null;
         }
+    }
+
+    /// Advance to the next term: tear down the previous xorb request, issue
+    /// a fresh range GET for the new term's xorb window, then read+discard
+    /// chunks until the term's first chunk is at the head of the stream.
+    /// Returns `false` when no terms remain.
+    fn openNextTerm(self: *FileRangeReader) !bool {
+        self.closeXorb();
+
         const terms = self.parsed.value.terms;
         if (self.term_idx >= terms.len) return false;
         const term = terms[self.term_idx];
@@ -342,24 +307,98 @@ pub const FileRangeReader = struct {
             if (term.range.start >= u.range.start and term.range.end <= u.range.end) break u;
         } else return error.ChunkOutsideFetchUrls;
 
-        self.xorb_bytes = try httpRangeGet(self.allocator, self.client, fu.url, fu.url_range.start, fu.url_range.end);
-        self.chunk_it = .{ .data = self.xorb_bytes.? };
-        self.next_chunk_index = fu.range.start;
-        self.term_range_end = term.range.end;
-        while (self.next_chunk_index < term.range.start) : (self.next_chunk_index += 1) {
-            _ = (try self.chunk_it.next()) orelse return error.UnexpectedXorbEnd;
-        }
+        try self.openXorbBody(fu);
+        errdefer self.closeXorb();
+
+        var i: u64 = fu.range.start;
+        while (i < term.range.start) : (i += 1) try self.discardOneChunk();
+        self.chunks_remaining_in_term = term.range.end - term.range.start;
         return true;
+    }
+
+    /// Issue the xorb range GET with bounded retry on transient errors
+    /// (HTTP 5xx, 429, and connection-level failures from request /
+    /// sendBodiless / receiveHead). 4xx (other than 429) fails immediately.
+    fn openXorbBody(self: *FileRangeReader, fu: *const FetchUrl) !void {
+        const max_attempts: u32 = 4;
+        var backoff_ms: u64 = 250;
+        var attempt: u32 = 0;
+        while (true) : (attempt += 1) {
+            self.tryOpenXorbBody(fu) catch |err| {
+                self.closeXorb();
+                if (err == error.XorbFetchPermanent or attempt + 1 >= max_attempts) {
+                    log.err("xorb fetch failed after {d} attempt(s): {s} (url={s})", .{ attempt + 1, @errorName(err), fu.url });
+                    return error.XorbFetchFailed;
+                }
+                log.warn("xorb fetch attempt {d}/{d} failed: {s} — retrying in {d}ms", .{ attempt + 1, max_attempts, @errorName(err), backoff_ms });
+                sleepMs(backoff_ms);
+                backoff_ms *= 2;
+                continue;
+            };
+            return;
+        }
+    }
+
+    fn tryOpenXorbBody(self: *FileRangeReader, fu: *const FetchUrl) !void {
+        const uri: std.Uri = try .parse(fu.url);
+        var range_buf: [64]u8 = undefined;
+        const range = try std.fmt.bufPrint(&range_buf, "bytes={}-{}", .{ fu.url_range.start, fu.url_range.end });
+
+        self.http_req = try self.client.request(.GET, uri, .{
+            .headers = .{ .accept_encoding = .{ .override = "identity" } },
+            .extra_headers = &.{.{ .name = "Range", .value = range }},
+        });
+        try self.http_req.?.sendBodiless();
+        var res = try self.http_req.?.receiveHead(&self.xorb_redirect_buf);
+        if (res.head.status != .ok and res.head.status != .partial_content) {
+            const code = @intFromEnum(res.head.status);
+            if (code == 429 or (code >= 500 and code < 600)) {
+                log.warn("xorb HTTP {d} (transient)", .{code});
+                return error.XorbFetchTransient;
+            }
+            log.err("xorb HTTP {d} (permanent) from {s}", .{ code, fu.url });
+            return error.XorbFetchPermanent;
+        }
+        self.http_reader = res.reader(&self.xorb_transfer_buf);
+    }
+
+    /// Read one chunk header off the live HTTP body and discard `csize`
+    /// payload bytes. Used to skip chunks before `term.range.start`.
+    fn discardOneChunk(self: *FileRangeReader) !void {
+        var hdr: [chunk_header_size]u8 = undefined;
+        self.http_reader.?.readSliceAll(&hdr) catch return error.UnexpectedXorbEnd;
+        if (hdr[0] != 0) return error.InvalidVersion;
+        const csize: u32 = @as(u32, hdr[1]) | (@as(u32, hdr[2]) << 8) | (@as(u32, hdr[3]) << 16);
+        self.http_reader.?.discardAll(csize) catch return error.UnexpectedXorbEnd;
+    }
+
+    /// Read one full chunk (header + compressed payload) off the live HTTP
+    /// body into `xorb_chunk_comp_buf`.
+    fn readOneChunk(self: *FileRangeReader) !Chunk {
+        var hdr: [chunk_header_size]u8 = undefined;
+        self.http_reader.?.readSliceAll(&hdr) catch return error.UnexpectedXorbEnd;
+        if (hdr[0] != 0) return error.InvalidVersion;
+        const csize: u32 = @as(u32, hdr[1]) | (@as(u32, hdr[2]) << 8) | (@as(u32, hdr[3]) << 16);
+        const ctype = hdr[4];
+        if (ctype > 2) return error.InvalidCompressionType;
+        const usize_uncomp: u32 = @as(u32, hdr[5]) | (@as(u32, hdr[6]) << 8) | (@as(u32, hdr[7]) << 16);
+        if (csize > self.xorb_chunk_comp_buf.len) return error.ChunkTooLarge;
+        self.http_reader.?.readSliceAll(self.xorb_chunk_comp_buf[0..csize]) catch return error.UnexpectedXorbEnd;
+        return .{
+            .compressed_size = csize,
+            .uncompressed_size = usize_uncomp,
+            .compression_type = ctype,
+            .compressed_data = self.xorb_chunk_comp_buf[0..csize],
+        };
     }
 
     /// Pull the next chunk that contributes to the output (advancing
     /// terms as needed). Returns `null` at EOF.
-    fn nextOutputChunk(self: *FileRangeReader) !?ChunkIterator.Chunk {
+    fn nextOutputChunk(self: *FileRangeReader) !?Chunk {
         while (true) {
-            if (self.xorb_bytes != null and self.next_chunk_index < self.term_range_end) {
-                const chunk = (try self.chunk_it.next()) orelse return error.UnexpectedXorbEnd;
-                self.next_chunk_index += 1;
-                return chunk;
+            if (self.http_reader != null and self.chunks_remaining_in_term > 0) {
+                self.chunks_remaining_in_term -= 1;
+                return try self.readOneChunk();
             }
             if (!try self.openNextTerm()) return null;
         }
