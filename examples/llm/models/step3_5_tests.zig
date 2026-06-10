@@ -47,16 +47,15 @@ pub fn main(init: std.process.Init) !void {
     var repo_model = try step3p5flash.LoadedModel.init(allocator, io, repo, store.view());
     defer repo_model.deinit(allocator);
 
-    // Loading bar
+    // Loading bar (global; only one std.Progress.start per process)
     var progress = std.Progress.start(io, .{ .root_name = args.model });
+    defer progress.end();
     const shardings: common.Shardings = try .init(platform);
 
     var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
-    progress.end();
-
-    try run(allocator, io, platform, args.activations, &store);
+    try run(allocator, io, platform, args.activations, &store, shardings, &progress);
 }
 
 pub fn run(
@@ -65,12 +64,11 @@ pub fn run(
     platform: *zml.Platform,
     activations_path: []const u8,
     model_store: *zml.io.TensorStore,
+    shardings: common.Shardings,
+    progress: *std.Progress.Node,
 ) !void {
-    const config = model.default_config;
-    _ = config; // autofix
-    const model_sharding = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth }));
-    const experts_sharding = try platform.registerSharding("experts", .mesh(.{ .experts = .high_bandwidth }));
-    const shardings: [2]zml.Sharding = .{ model_sharding, experts_sharding };
+    // const config = model.default_config;
+    // _ = config; // autofix
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
 
@@ -150,7 +148,8 @@ pub fn run(
     // }
 
     std.log.info("Full model:", .{});
-    try runFullTextModel(allocator, io, platform, model_store, &activation_store, &shardings);
+    const sharding_list = shardings.all();
+    try runFullTextModel(allocator, io, platform, model_store, &activation_store, &sharding_list, progress);
 }
 
 fn runTransformerLayer(
@@ -282,6 +281,7 @@ fn runFullTextModel(
     model_store: *zml.io.TensorStore,
     activation_store: *zml.io.TensorStore,
     shardings: []const zml.Sharding,
+    progress: *std.Progress.Node,
 ) !void {
     const model_view = activation_store.view().withPrefix("model");
     if (!model_view.hasKey("in.0") or !model_view.hasKey("out.0")) {
@@ -292,11 +292,15 @@ fn runFullTextModel(
     var text_model = try model.TextModel.init(allocator, model_store.view().withPrefix("model"));
     defer text_model.deinit(allocator);
 
+    var load_progress = progress.start("Full model", model_store.view().withPrefix("model").count());
+    defer load_progress.end();
+
     var text_buffers = try zml.io.load(model.TextModel, &text_model, allocator, io, platform, model_store, .{
         .parallelism = 1,
         .shardings = shardings,
         .dma_chunks = 2,
         .dma_chunk_size = 4096,
+        .progress = &load_progress,
     });
     defer deinitBuffers(&text_buffers);
 
