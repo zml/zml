@@ -23,6 +23,7 @@ pub const Graph = struct {
     };
 
     allocator: std.mem.Allocator,
+    io: std.Io,
     // dataset fields
     dim: usize,
     lm_head: zml.Slice,
@@ -63,6 +64,7 @@ pub const Graph = struct {
 
         return .{
             .allocator = allocator,
+            .io = zml_handler.io,
             .dim = matrix.d,
             .lm_head = lm_head,
             .lm_head_normalized = lm_head_normalized,
@@ -263,7 +265,7 @@ pub const Graph = struct {
             for (0..self.nb_neighbors[i]) |j| {
                 is_selected[self.neighbors[start_neigh + j]] = false;
             }
-            if (i == 0 or (i + 1) % 1000 == 0 or i + 1 == self.n) {
+            if (i == 0 or (i + 1) % 10000 == 0 or i + 1 == self.n) {
                 log.info("Random neighbors node {d}/{d}", .{ i + 1, self.n });
             }
         }
@@ -277,7 +279,7 @@ pub const Graph = struct {
             for (0..self.params.k_max) |j| {
                 self.neighbors[start_neigh + j] = self.similarity_matrix.nearestNeighbor(i, j);
             }
-            if (i == 0 or (i + 1) % 1000 == 0 or i + 1 == self.n) {
+            if (i == 0 or (i + 1) % 10000 == 0 or i + 1 == self.n) {
                 log.info("Nearest neighbors node {d}/{d}", .{ i + 1, self.n });
             }
         }
@@ -295,7 +297,7 @@ pub const Graph = struct {
                 self.nb_neighbors[i] += 1;
                 if (self.nb_neighbors[i] == self.params.k_max) break;
             }
-            if (i == 0 or (i + 1) % 1000 == 0 or i + 1 == self.n) {
+            if (i == 0 or (i + 1) % 5000 == 0 or i + 1 == self.n) {
                 log.info("Nearest neighbors LOS node {d}/{d}", .{ i + 1, self.n });
             }
         }
@@ -313,7 +315,7 @@ pub const Graph = struct {
                 self.neighbors[start_neigh + self.nb_neighbors[i]] = candidate;
                 self.nb_neighbors[i] += 1;
             }
-            if (i == 0 or (i + 1) % 1000 == 0 or i + 1 == self.n) {
+            if (i == 0 or (i + 1) % 5000 == 0 or i + 1 == self.n) {
                 log.info("Pruning neighbors LOS node {d}/{d}", .{ i + 1, self.n });
             }
         }
@@ -326,12 +328,16 @@ pub const Graph = struct {
         // If any of base's neighbor is already close enough from candidate, then it's rejected,
         // as the routing base -> close_neighbor -> candidate is deemed sufficient
         // The "close enough" formula is alpha * dist(close_neighbor, candidate) <= dist(base, candidate)
-        const base_candidate_distance = self.distance(base, candidate);
+        const threshold = 1.0 - (1.0 - self.similarity(base, candidate)) / self.params.alpha;
         const start_neigh = self.params.k_max * base;
         const end_neigh = start_neigh + self.nb_neighbors[base];
         for (start_neigh..end_neigh) |i| {
             const neighbor = self.neighbors[i];
-            if (self.params.alpha * self.distance(neighbor, candidate) < base_candidate_distance) return false;
+            // for u and v norm 1 vectors, ||u - v|| = u² + v² - 2 <u,v> = 2 (1 - sim(u,v))
+            // a||n - c|| <= ||b - c|| 
+            // 2a (1 - sim(n,c)) <= 2 (1 - sim(b,c))
+            // sim(n,c) >= 1 - (1 - sim(b,c)) / a
+            if (self.similarity(neighbor, candidate) >= threshold) return false;
         }
         return true;
     }
@@ -355,6 +361,9 @@ pub const Graph = struct {
 
         const reverse_candidates = self.allocator.alloc(Candidate, self.params.k_max + 1) catch @panic("OOM");
         defer self.allocator.free(reverse_candidates);
+
+        const start = std.Io.Timestamp.now(self.io, .awake);
+        const total_iterations = self.params.vamana_passes * self.n;
 
         for (0..self.params.vamana_passes) |pass_i| {
             // random visit order
@@ -437,7 +446,15 @@ pub const Graph = struct {
                 }
 
                 if (i == 0 or (i + 1) % 1000 == 0 or i + 1 == self.n) {
-                    log.info("NSW pass {d}/{d} node {d}/{d}", .{ pass_i + 1, self.params.vamana_passes, i + 1, self.n });
+                    const now = std.Io.Timestamp.now(self.io, .awake);
+                    const elapsed_duration = std.Io.Timestamp.durationTo(start, now);
+                    const elapsed_seconds = @as(f64, @floatFromInt(elapsed_duration.nanoseconds)) / 1e9;
+                    const completed_iterations = pass_i * self.n + i + 1;
+                    const eta_seconds = elapsed_seconds * @as(f64, @floatFromInt(total_iterations - completed_iterations)) / @as(f64, @floatFromInt(completed_iterations));
+                    log.info(
+                        "NSW pass {d}/{d} node {d}/{d} elapsed={d:.2}s eta={d:.2}s",
+                        .{ pass_i + 1, self.params.vamana_passes, i + 1, self.n, elapsed_seconds, eta_seconds },
+                    );
                 }
             }
         }
@@ -476,7 +493,4 @@ pub const Graph = struct {
         return self.similarity_matrix.dist(a, b);
     }
 
-    pub fn distance(self: *const Graph, a: usize, b: usize) f16 {
-        return @sqrt(2.0 * (1.0 - self.similarity(a, b)));
-    }
 };
