@@ -249,25 +249,24 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, graph_params);
     defer g.deinit();
 
-    // NSW from pruned kNN
-    g.setNearestNeighbors();
-    g.pruneNeighbors();
-    std.log.info("Pruned kNN : nb nodes: {d}", .{ g.nbNodes() });
+    const iters: usize = 1_000_000;
+    const start = std.Io.Timestamp.now(zml_handler.io, .awake);
     
+    var sink: i128 = 0;
+    for (0..iters) |_| {
+        const now = std.Io.Timestamp.now(zml_handler.io, .awake);
+        sink +%= now.nanoseconds;
+    }
+    const end = std.Io.Timestamp.now(zml_handler.io, .awake);
+    const elapsed = std.Io.Timestamp.durationTo(start, end);
+    const ns_per_call = @as(f64, @floatFromInt(elapsed.nanoseconds)) / @as(f64, @floatFromInt(iters));
+    log.info("Timestamp.now cost: {d:.2} ns/call sink={d}", .{ ns_per_call, sink });
+
     // NSW from exact kNN
     g.setNearestNeighbors();
     g.extendToNsw();
     std.log.info("Exact kNN : nb nodes: {d}", .{ g.nbNodes() });
-    
-    // NSW from R graph
-    g.setRandomNeighbors();
-    g.extendToNsw();
-    std.log.info("Random R graph : nb nodes: {d}", .{ g.nbNodes() });
 
-    // NSW from exact los-kNN
-    g.setNearestNeighborsLos();
-    g.extendToNsw();
-    std.log.info("Exact los-kNN : nb nodes: {d}", .{ g.nbNodes() });
 }
 
 pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !SimilarityMatrix {
