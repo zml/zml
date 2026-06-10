@@ -137,16 +137,26 @@ pub const MemoryChecker = struct {
 pub const SimilarityMatrix = struct {
     data: zml.Slice,
     nearest_neighbors: zml.Slice,
+    row_offsets: []usize,
     n: usize,
     d: usize,
     k: usize,
 
     pub fn dist(self: *SimilarityMatrix, i: usize, j: usize) f16 {
-        if (i == j) return 1.0;
+        if (i == j) return 1.0; // TODO: can prob remove this
         const row = @min(i, j);
         const col = @max(i, j);
-        const offset = @divExact(row * (2 * self.n - row - 1), 2);
-        return self.data.items(f16)[offset + col - row - 1];
+        const pos = self.row_offsets[row] + col - row - 1;
+        return self.data.items(f16)[pos];
+    }
+
+    pub fn initOffsets(self: *SimilarityMatrix, alloc: std.mem.Allocator) void {
+        self.row_offsets = try alloc.alloc(usize, self.n) catch @panic("OOM");
+        var offset: usize = 0;
+        for (0..self.n) |row| {
+            self.row_offsets[row] = offset;
+            offset += self.n - row - 1;
+        }
     }
 
     pub fn nearestNeighbor(self: *SimilarityMatrix, row: usize, pos: usize) usize {
@@ -156,6 +166,7 @@ pub const SimilarityMatrix = struct {
     pub fn deinit(self: *SimilarityMatrix, allocator: std.mem.Allocator) void {
         self.data.free(allocator);
         self.nearest_neighbors.free(allocator);
+        allocator.free(self.row_offsets);
     }
 };
 
