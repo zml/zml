@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
+const xet = @import("xet.zig");
 
 const VFSBase = @import("base.zig").VFSBase;
 
@@ -83,6 +84,9 @@ pub const HF = struct {
         uri: []const u8,
         pos: u64,
         size: u64,
+        /// Set to the file's `X-Xet-Hash` when the resolve URL exposes one;
+        /// `null` for plain LFS files. Read in `performRead` to dispatch.
+        xet_file_id: ?[]const u8 = null,
 
         pub fn init(allocator: std.mem.Allocator, handle_type: Type, uri: []const u8, size: u64) !Handle {
             return .{
@@ -95,6 +99,7 @@ pub const HF = struct {
 
         pub fn deinit(self: *Handle, allocator: std.mem.Allocator) void {
             allocator.free(self.uri);
+            if (self.xet_file_id) |fid| allocator.free(fid);
         }
     };
 
@@ -102,6 +107,9 @@ pub const HF = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     authorization: std.http.Client.Request.Headers.Value,
+    /// Raw HF token (no "Bearer " prefix). Empty when unauthenticated.
+    /// Borrowed by the XET probe + read paths.
+    hf_token_raw: []const u8,
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
@@ -109,17 +117,16 @@ pub const HF = struct {
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8) !HF {
+        const raw = if (hf_token) |t| try allocator.dupe(u8, std.mem.trim(u8, t, " \t\n\r")) else try allocator.dupe(u8, "");
+        errdefer allocator.free(raw);
         return .{
             .allocator = allocator,
             .base = .init(inner),
             .client = http_client,
-            .authorization = if (hf_token) |token| blk: {
-                break :blk .{
-                    .override = try std.fmt.allocPrint(allocator, "Bearer {s}", .{std.mem.trim(u8, token, " \t\n\r")}),
-                };
-            } else blk: {
-                break :blk .default;
-            },
+            .authorization = if (raw.len > 0) blk: {
+                break :blk .{ .override = try std.fmt.allocPrint(allocator, "Bearer {s}", .{raw}) };
+            } else .default,
+            .hf_token_raw = raw,
         };
     }
 
@@ -177,6 +184,7 @@ pub const HF = struct {
             .default, .omit => {},
             .override => |t| self.allocator.free(t),
         }
+        self.allocator.free(self.hf_token_raw);
     }
 
     pub fn io(self: *HF) std.Io {
@@ -566,6 +574,17 @@ pub const HF = struct {
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, full_path, size) catch return std.Io.File.OpenError.Unexpected;
 
+        // XET probe: if the resolve URL exposes `X-Xet-Hash`, stash it on
+        // the handle. Any failure (no token, plain-LFS file, network) keeps
+        // the handle on the LFS path.
+        if (self.hf_token_raw.len > 0) {
+            const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
+            if (xet.fetchFileId(self.allocator, self.client, xet_repo, self.hf_token_raw)) |fid| {
+                handle.xet_file_id = fid;
+                log.info("XET-backed file: {s}", .{full_path});
+            } else |_| {}
+        }
+
         return .{ .handle = @intCast(idx), .flags = .{ .nonblocking = false } };
     }
 
@@ -697,6 +716,18 @@ pub const HF = struct {
 
     fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
         if (offset >= handle.size) return 0;
+
+        if (handle.xet_file_id) |fid| {
+            const repo: Repo = try .parse(handle.uri);
+            const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
+            const remaining = handle.size - offset;
+            const take: usize = @intCast(@min(@as(u64, data[0].len), remaining));
+            if (take == 0) return 0;
+            var xet_reader = try xet.FileRangeReader.init(self.allocator, self.client, self.hf_token_raw, xet_repo, fid, offset, take);
+            defer xet_reader.deinit();
+            var dst_w: std.Io.Writer = .fixed(data[0][0..take]);
+            return try xet_reader.interface.streamRemaining(&dst_w);
+        }
 
         var range_buf: [64]u8 = undefined;
         const range_header = blk: {
