@@ -1024,6 +1024,10 @@ pub const Tensor = struct {
         return binaryOp("remainder", dialects.stablehlo.remainder)(self, other);
     }
 
+    pub fn remainderConst(self: Tensor, b: anytype) Tensor {
+        return self.remainder(.scalar(b, self.dtype()));
+    }
+
     /// Returns a Tensor containing the element-wise addition of the input Tensor with a constant.
     pub fn addConstant(self: Tensor, b: anytype) Tensor {
         return self.add(.scalar(b, self.dtype()));
