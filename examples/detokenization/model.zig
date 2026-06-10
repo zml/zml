@@ -28,10 +28,8 @@ pub const Model_handler = struct {
         errdefer exes.deinit(zml_handler.allocator);
 
         std.log.info("Load model buffers", .{});
-        var progress = zml_handler.progress.start("Load model weights", store.registry.tensors.count());
-        defer progress.end();
         const shardings_arr = shardings.all();
-        var model_buffers = try model.load(zml_handler, &store, &shardings_arr, &progress);
+        var model_buffers = try model.load(zml_handler, &store, &shardings_arr);
         errdefer Model.unloadBuffers(&model_buffers);
 
         return .{
