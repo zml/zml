@@ -228,8 +228,27 @@ pub const Graph = struct {
 
         return .{ self.visited_nodes[0..self.nb_visited_nodes], self.scores[0..self.nb_visited_nodes] };
     }
-    
-    
+
+    pub fn scoreQueryNode(self: *const Graph, query: []const f16, node: usize) f16 {
+        const rows = self.lm_head_normalized.constItems(f16);
+        const row = rows[node * self.dim ..][0..self.dim];
+        var dot: f16 = 0;
+        for (0..self.dim) |i| {
+            dot += query[i] * row[i];
+        }
+        return dot;
+    }
+
+    pub fn addVisitedNode(self: *Graph, node: usize, score: f16) void {
+        std.debug.assert(self.nb_visited_nodes < self.params.search_budget);
+        std.debug.assert(!self.is_node_visited[node]);
+        self.is_node_visited[node] = true;
+        self.visited_nodes[self.nb_visited_nodes] = node;
+        self.scores[self.nb_visited_nodes] = score;
+        self.nb_visited_nodes += 1;
+    }
+
+
     pub fn vamanaSearch(self: *Graph, q: []const f16) struct { []usize, []f16 } {
         self.nb_visited_nodes = 0;
         var nb_search_candidates: usize = 0;
@@ -291,15 +310,6 @@ pub const Graph = struct {
     }
 
 
-    pub fn addVisitedNode(self: *Graph, node: usize, score: f16) void {
-        std.debug.assert(self.nb_visited_nodes < self.params.search_budget);
-        std.debug.assert(!self.is_node_visited[node]);
-        self.is_node_visited[node] = true;
-        self.visited_nodes[self.nb_visited_nodes] = node;
-        self.scores[self.nb_visited_nodes] = score;
-        self.nb_visited_nodes += 1;
-    }
-
     pub fn addSearchCandidate(self: *Graph, nb_search_candidates: *usize, node: usize, score: f16) void {
         std.debug.assert(nb_search_candidates.* < self.search_candidates.len);
         std.debug.assert(!self.is_node_visited[node]);
@@ -354,16 +364,6 @@ pub const Graph = struct {
             if (Candidate.beforeThan({}, candidate, candidates[best])) best_index = i;
         }
         return best_index;
-    }
-    
-    pub fn scoreQueryNode(self: *const Graph, query: []const f16, node: usize) f16 {
-        const rows = self.lm_head_normalized.constItems(f16);
-        const row = rows[node * self.dim ..][0..self.dim];
-        var dot: f16 = 0;
-        for (0..self.dim) |i| {
-            dot += query[i] * row[i];
-        }
-        return dot;
     }
 
     // ------------- Local neighborhood functions -------------- //
