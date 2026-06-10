@@ -24,7 +24,7 @@ pub const Config = struct {
 
     use_qk_norm: bool = false,
 
-    moe_layers_enum: []const u32 = &.{},
+    moe_layers_enum: MoeLayersEnum = .{},
     num_attention_heads: u32,
     num_attention_groups: u32,
     head_dim: u32,
@@ -64,7 +64,7 @@ pub const Config = struct {
     swiglu_limits_shared: []const f32 = &.{},
 
     zero_centered: bool = false,
-    max_position_embeddings: u32,
+    max_position_embeddings: u32 = 0,
 
     pub const AutoMap = struct {
         AutoConfig: []const u8,
@@ -85,6 +85,35 @@ pub const Config = struct {
         num_attention_groups: u32,
         head_dim: u32,
         true_head_dim: u32,
+    };
+
+    /// `moe_layers_enum` arrives either as a JSON array of u32 or as a comma-separated string.
+    pub const MoeLayersEnum = struct {
+        layers: []const u32 = &.{},
+
+        pub fn jsonParse(
+            allocator: std.mem.Allocator,
+            source: anytype,
+            options: std.json.ParseOptions,
+        ) !MoeLayersEnum {
+            if (try source.peekNextTokenType() == .array_begin) {
+                return .{ .layers = try std.json.innerParse([]const u32, allocator, source, options) };
+            }
+
+            const s = switch (try source.nextAlloc(allocator, options.allocate.?)) {
+                inline .string, .allocated_string => |v| v,
+                else => return error.UnexpectedToken,
+            };
+
+            var list: std.ArrayList(u32) = .empty;
+            errdefer list.deinit(allocator);
+            var it = std.mem.tokenizeScalar(u8, s, ',');
+            while (it.next()) |part| {
+                const n = std.fmt.parseInt(u32, std.mem.trim(u8, part, " \t"), 10) catch return error.UnexpectedToken;
+                try list.append(allocator, n);
+            }
+            return .{ .layers = try list.toOwnedSlice(allocator) };
+        }
     };
 
     pub fn numKeyValueHeads(self: Config) u32 {
@@ -301,7 +330,7 @@ pub const TransformerLayer = struct {
     post_attention_layernorm: RmsNorm,
 
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !TransformerLayer {
-        const is_moe = std.mem.indexOfScalar(u32, default_config.moe_layers_enum, @intCast(layer_idx)) != null;
+        const is_moe = std.mem.indexOfScalar(u32, default_config.moe_layers_enum.layers, @intCast(layer_idx)) != null;
 
         const shared_limit: f32 = if (layer_idx < default_config.swiglu_limits_shared.len)
             default_config.swiglu_limits_shared[layer_idx]
@@ -389,12 +418,12 @@ pub const default_config: Config = .{
     .vocab_size = 128896,
     .torch_dtype = "bfloat16",
     .use_qk_norm = true,
-    .moe_layers_enum = &.{
+    .moe_layers_enum = .{ .layers = &.{
         3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14,
         15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
         27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38,
         39, 40, 41, 42, 43, 44,
-    },
+    } },
     .num_attention_heads = 64,
     .num_attention_groups = 8,
     .head_dim = 128,
@@ -1214,20 +1243,18 @@ pub const LoadedModel = struct {
         io: std.Io,
         repo: std.Io.Dir,
         store: zml.io.TensorStore.View,
-        generation: common.GenerationOptions,
-    ) LoadedModel {
-        _ = store; // autofix
+        // generation: common.GenerationOptions,
+    ) !LoadedModel {
         const parsed_config = try common.parseConfig(Config, allocator, io, repo);
         errdefer parsed_config.deinit();
 
         const options: Options = .{
-            .sampling_strategy = generation.sampling_strategy,
+            // .sampling_strategy = generation.sampling_strategy,
             .max_seq_len = parsed_config.value.max_position_embeddings,
         };
-        _ = options; // autofix
 
         return .{
-            .inner = try .init(),
+            .inner = try .init(allocator, store, options),
             .parsed_config = parsed_config,
         };
     }
@@ -1270,8 +1297,9 @@ pub const LoadedModel = struct {
 
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         _ = self;
-        if (buffers.lm_head) |*lm_head| lm_head.weight.deinit();
-        Model.unloadBuffers(&buffers.replicated, allocator);
+        buffers.lm_head.weight.deinit();
+
+        Model.unloadBuffers(buffers, allocator);
     }
 
     // pub fn compile(

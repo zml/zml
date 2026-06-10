@@ -44,8 +44,15 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
+    var repo_model = try step3p5flash.LoadedModel.init(allocator, io, repo, store.view());
+    defer repo_model.deinit(allocator);
+
     // Loading bar
     var progress = std.Progress.start(io, .{ .root_name = args.model });
+    const shardings: common.Shardings = try .init(platform);
+
+    var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
+    defer repo_model.unloadBuffers(&model_buffers, allocator);
 
     progress.end();
 
