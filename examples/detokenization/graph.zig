@@ -5,10 +5,10 @@ const main = @import("main.zig");
 const log = std.log;
 
 pub const GraphParams = struct {
-    k_max: usize = 32,
-    search_budget: usize = 256,
+    k_max: usize = 16,
+    search_budget: usize = 128,
     alpha: f16 = 1.25,
-    vamana_passes: usize = 2,
+    vamana_passes: usize = 1,
 };
 
 pub const Graph = struct {
