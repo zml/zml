@@ -44,13 +44,14 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    var repo_model = try step3p5flash.LoadedModel.init(allocator, io, repo, store.view());
+    const shardings: common.Shardings = try .init(platform);
+
+    var repo_model = try step3p5flash.LoadedModel.init(allocator, io, repo, store.view(), shardings);
     defer repo_model.deinit(allocator);
 
-    // Loading bar (global; only one std.Progress.start per process)
+    // Loading bar (single global Progress, reused for the full-model load too)
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     defer progress.end();
-    const shardings: common.Shardings = try .init(platform);
 
     var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
@@ -164,7 +165,8 @@ fn runTransformerLayer(
     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}", .{layer_idx});
     defer allocator.free(name);
 
-    const layer = try model.TransformerLayer.init(model_store.view().withPrefix(name), layer_idx);
+    const model_partitions = shardings[0].numPartitionsForLogicalAxis(.model);
+    const layer = try model.TransformerLayer.init(model_store.view().withPrefix(name), layer_idx, model_partitions);
     var layer_weights = try zml.io.load(model.TransformerLayer, &layer, allocator, io, platform, model_store, .{
         .parallelism = 1,
         .shardings = shardings,
@@ -195,8 +197,6 @@ fn runTransformerLayer(
 
     const batch_dim = hidden_states.dim(.b);
     const seq_dim = hidden_states.dim(.s);
-    // How many physical partitions/devices are behind the logical .model axis
-    const model_partitions = shardings[0].numPartitionsForLogicalAxis(.model);
     const kv_shape_unsharded = zml.Shape.init(.{
         .layer = @as(i64, @intCast(model.default_config.num_hidden_layers)),
         .b = batch_dim,
@@ -289,24 +289,26 @@ fn runFullTextModel(
         return;
     }
 
-    var text_model = try model.TextModel.init(allocator, model_store.view().withPrefix("model"));
+    var text_model = try model.TextModel.init(allocator, model_store.view().withPrefix("model"), shardings[0].numPartitionsForLogicalAxis(.model));
     defer text_model.deinit(allocator);
 
-    var load_progress = progress.start("Full model", model_store.view().withPrefix("model").count());
-    defer load_progress.end();
+    var full_load_node = progress.start("Full model load", model_store.view().withPrefix("model").count());
+    defer full_load_node.end();
 
     var text_buffers = try zml.io.load(model.TextModel, &text_model, allocator, io, platform, model_store, .{
         .parallelism = 1,
         .shardings = shardings,
         .dma_chunks = 2,
         .dma_chunk_size = 4096,
-        .progress = &load_progress,
+        .progress = &full_load_node,
     });
     defer deinitBuffers(&text_buffers);
 
     // 1. Build trace-time tensors for compile.
     const tokens_t = model_view.createTensor("in.0", .{ .b, .s }, .replicated);
-    const token_index_t = zml.Tensor.fromShape(zml.Shape.init(.{}, .i32));
+    // token_index follows HF `cache_position` convention: rank-1 i32 of length S.
+    const seq_len = tokens_t.dim(.s);
+    const token_index_t = zml.Tensor.fromShape(zml.Shape.init(.{ .s = seq_len }, .i32));
 
     // 2. KV cache shape: (layer, b, k, h, hd).
     const attn0 = text_model.layers[0].attn;
@@ -333,12 +335,16 @@ fn runFullTextModel(
     );
     defer exe.deinit();
 
-    // 4. Build runtime buffers: tokens from store, token_index = 0, zeroed KV.
+    // 4. Build runtime buffers: tokens from store, cache_position = [0..S-1], zeroed KV.
     var token_args: struct { zml.Tensor } = .{tokens_t};
     var token_buffers = try zml.io.load(@TypeOf(token_args), &token_args, allocator, io, platform, activation_store, .auto);
     defer deinitBuffers(&token_buffers);
 
-    var token_index_buf: zml.Buffer = try .scalar(io, platform, 0, .i32);
+    const token_index_shape = zml.Shape.init(.{ .s = seq_len }, .i32);
+    const token_index_data = try allocator.alloc(i32, @intCast(seq_len));
+    defer allocator.free(token_index_data);
+    for (token_index_data, 0..) |*v, i| v.* = @intCast(i);
+    var token_index_buf: zml.Buffer = try .fromBytes(io, platform, token_index_shape, .replicated, std.mem.sliceAsBytes(token_index_data));
     defer token_index_buf.deinit();
 
     const kv_bytes = kv_shape.byteSize();
