@@ -181,9 +181,10 @@ pub const Model = struct {
         allocator: std.mem.Allocator,
         store: zml.io.TensorStore.View,
         gen_options: GenOptions,
+        model_partitions: i64,
     ) !Model {
         return .{
-            .text_model = try .init(allocator, store.withPrefix("model")),
+            .text_model = try .init(allocator, store.withPrefix("model"), model_partitions),
             .lm_head = .init(
                 store.createTensor("lm_head.weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
                 null,
@@ -256,12 +257,12 @@ pub const TextModel = struct {
     layers: []TransformerLayer,
     norm: RmsNorm,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View) !TextModel {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, model_partitions: i64) !TextModel {
         const layers = try allocator.alloc(TransformerLayer, @intCast(default_config.num_hidden_layers));
         errdefer allocator.free(layers);
 
         for (layers, 0..) |*layer, i| {
-            layer.* = try .init(store.withPrefix("layers").withLayer(i), i);
+            layer.* = try .init(store.withPrefix("layers").withLayer(i), i, model_partitions);
         }
 
         return .{
@@ -329,7 +330,7 @@ pub const TransformerLayer = struct {
     ffn: Ffn,
     post_attention_layernorm: RmsNorm,
 
-    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !TransformerLayer {
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, model_partitions: i64) !TransformerLayer {
         const is_moe = std.mem.indexOfScalar(u32, default_config.moe_layers_enum.layers, @intCast(layer_idx)) != null;
 
         const shared_limit: f32 = if (layer_idx < default_config.swiglu_limits_shared.len)
@@ -348,7 +349,7 @@ pub const TransformerLayer = struct {
 
         return .{
             .input_layernorm = .init(store.withPrefix("input_layernorm"), 1e-5),
-            .attn = try .init(store.withPrefix("self_attn"), layer_idx),
+            .attn = try .init(store.withPrefix("self_attn"), layer_idx, model_partitions),
             .ffn = ffn,
             .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e-5),
         };
@@ -512,6 +513,7 @@ pub const default_config: Config = .{
 pub const Attn = struct {
     layer_idx: usize,
     enable_sliding_window: bool,
+    model_partitions: i64,
 
     q_proj: zml.nn.Linear,
     k_proj: zml.nn.Linear,
@@ -542,7 +544,7 @@ pub const Attn = struct {
         );
     }
 
-    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !Attn {
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, model_partitions: i64) !Attn {
         // Layers past the configured count are MTP/speculative blocks and use the SWA shape.
         const kind: AttnType = default_config.layer_types[layer_idx];
 
@@ -574,6 +576,7 @@ pub const Attn = struct {
             .num_q_heads = num_q_heads,
             .num_kv_heads = num_kv_heads,
             .enable_sliding_window = !(kind == .full_attention),
+            .model_partitions = model_partitions,
             .head_dim = head_dim,
             .num_kv_groups = @divExact(num_q_heads, num_kv_heads),
             .rotary_dim = rotary_dim,
@@ -640,9 +643,7 @@ pub const Attn = struct {
         const input_raw = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
         const input = input_raw.withPartitioning(.{ .d = .replicated });
 
-        const model_partitions = zml.module.CompilationContext.current().partitioning
-            .numPartitionsForLogicalAxis(self.q_proj.weight.shape(), .model) catch unreachable;
-        const replicate_kv_heads, const repeat_factor = kvHeadsAreReplicated(self.num_kv_heads, model_partitions);
+        const replicate_kv_heads, const repeat_factor = kvHeadsAreReplicated(self.num_kv_heads, self.model_partitions);
 
         var q, var gate = self.projectQAndGate(input);
         var k, var v = self.projectKV(input);
@@ -657,8 +658,15 @@ pub const Attn = struct {
 
         const dtype = q.dtype();
 
-        // TODO: shift by token_index in decode
-        const position_ids = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
+        // Position ids must be absolute and not relative to current chunk.
+        // token_index is the cache_position vector; its first element is the
+        // absolute start, and positions = arange(S) + start.
+        const position_ids = blk: {
+            const base = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
+            const start = token_index.slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0).convert(.i64);
+            const offset = start.broad(base.shape());
+            break :blk base.add(offset);
+        };
 
         const cos, const sin = self.rotary_emb.getCosAndSin(position_ids, dtype);
 
@@ -750,7 +758,12 @@ pub const Attn = struct {
         const k_pre_rope_hf = k.transpose(.{ .b, .h, .s, .hd });
 
         const dtype = q.dtype();
-        const position_ids = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
+        const position_ids = blk: {
+            const base = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
+            const start = token_index.slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0).convert(.i64);
+            const offset = start.broad(base.shape());
+            break :blk base.add(offset);
+        };
         const cos_raw, const sin_raw = self.rotary_emb.getCosAndSin(position_ids, dtype);
         const cos = cos_raw.insertAxes(0, .{.b});
         const sin = sin_raw.insertAxes(0, .{.b});
@@ -1243,6 +1256,7 @@ pub const LoadedModel = struct {
         io: std.Io,
         repo: std.Io.Dir,
         store: zml.io.TensorStore.View,
+        shardings: common.Shardings,
         // generation: common.GenerationOptions,
     ) !LoadedModel {
         const parsed_config = try common.parseConfig(Config, allocator, io, repo);
@@ -1253,8 +1267,10 @@ pub const LoadedModel = struct {
             .max_seq_len = parsed_config.value.max_position_embeddings,
         };
 
+        const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
+
         return .{
-            .inner = try .init(allocator, store, options),
+            .inner = try .init(allocator, store, options, model_partitions),
             .parsed_config = parsed_config,
         };
     }
