@@ -527,10 +527,6 @@ pub const Attn = struct {
         };
     }
 
-<<<<<<< HEAD
-    // unloadBuffers
-=======
->>>>>>> 88deb96c (examples/llm: KV cache)
     pub fn unloadBuffers(self: *zml.Bufferized(Attn)) void {
         self.q_proj.weight.deinit();
         if (self.q_proj.bias) |*b| b.deinit();
@@ -546,12 +542,6 @@ pub const Attn = struct {
         RmsNorm.unloadBuffers(&self.k_norm);
     }
 
-<<<<<<< HEAD
-    // project Q, Gate
-    // Step 3.5 Flash keeps q and gate as separate projections (q_proj and g_proj). q_proj outputs num_q_heads * head_dim (= 12288 for layer 30).
-    // g_proj is a head-wise attention gate: one scalar per query head (dout = num_q_heads), broadcast over .hd and applied to the per-head attention output before merging heads.
-=======
->>>>>>> 88deb96c (examples/llm: KV cache)
     fn projectQAndGate(self: Attn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const q = self.q_proj.forward(x)
             .splitAxis(.dout, .{ .h = self.num_q_heads, .hd = self.head_dim });
@@ -593,11 +583,8 @@ pub const Attn = struct {
         k = self.k_norm.forward(k, .hd);
 
         const dtype = q.dtype();
-<<<<<<< HEAD
-=======
 
         // TODO: shift by token_index in decode
->>>>>>> 88deb96c (examples/llm: KV cache)
         const position_ids = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
 
         const cos, const sin = self.rotary_emb.getCosAndSin(position_ids, dtype);
@@ -660,20 +647,12 @@ pub const Attn = struct {
         out: zml.Tensor,
     };
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-    pub fn forwardStages(self: Attn, x: zml.Tensor, token_index: zml.Tensor) Stages {
-=======
-    pub fn forwardTemp(self: Attn, x: zml.Tensor, token_index: zml.Tensor) Stages {
->>>>>>> 88deb96c (examples/llm: KV cache)
-=======
     pub fn forwardTemp(
         self: Attn,
         x: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: KvCache,
     ) struct { Stages, KvCache } {
->>>>>>> 52f36010 (examples/llm: update temp forward for testing KV cache)
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
 
         const q_proj_raw = self.q_proj.forward(input);

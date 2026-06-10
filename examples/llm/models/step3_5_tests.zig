@@ -39,7 +39,6 @@ pub fn main(init: std.process.Init) !void {
     const args = zml.stdx.flags.parse(init.minimal.args, Args);
 
     const platform: *zml.Platform = try .auto(allocator, io, .{});
-    const sharding = try platform.registerSharding("tp_mesh", .mesh(.{ .model = .high_bandwidth }));
     defer platform.deinit(allocator, io);
 
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
@@ -49,17 +48,16 @@ pub fn main(init: std.process.Init) !void {
     var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry);
     defer model_store.deinit();
 
-    try run(allocator, io, platform, args.activations, sharding, &model_store);
+    try run(allocator, io, platform, args.activations, &model_store);
 }
 
-const TEST_LAYER = 5;
+const TEST_LAYER = 3;
 
 fn run(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
     activations_path: []const u8,
-    sharding: zml.Sharding,
     model_store: *zml.io.TensorStore,
 ) !void {
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
@@ -173,12 +171,11 @@ fn run(
     } else if (TEST_LAYER == 2) {
         try surveySelfAttnShapes(allocator, model_store, &activation_store);
         for (0..45) |layer_idx| {
-            runSelfAttnLayer(allocator, io, platform, model_store, &activation_store, sharding, layer_idx) catch |err| {
+            runSelfAttnLayer(allocator, io, platform, model_store, &activation_store, layer_idx) catch |err| {
                 std.log.warn("skipping model.layers.{d}.self_attn: {s}", .{ layer_idx, @errorName(err) });
             };
         }
     } else if (TEST_LAYER == 3) {
-<<<<<<< HEAD
         try surveySelfAttnShapes(allocator, model_store, &activation_store);
         for (0..45) |layer_idx| {
             debugSelfAttnStages(allocator, io, platform, model_store, &activation_store, layer_idx) catch |err| {
@@ -209,22 +206,6 @@ fn run(
         ) catch |err| {
             std.log.warn("skipping {s}: {s}", .{ name, @errorName(err) });
         };
-=======
-        try runKvCacheTests(allocator, io, platform);
-<<<<<<< HEAD
->>>>>>> 2bc2e8f0 (examples/llm: update tests)
-=======
-    } else if (TEST_LAYER == 4) {
-        // End-to-end TransformerLayer smoke test: one dense layer + one MoE layer.
-        // Validates that the residual + norm + attn + ffn composition matches
-        // the HF dump for the same hardware path the model would run on.
-        // const layer_indices = [_]usize{ 0, 1, 2, 3, 4, 5, 6 };
-        for (0..48) |layer_idx| {
-            runTransformerLayer(allocator, io, platform, model_store, &activation_store, sharding, layer_idx) catch |err| {
-                std.log.warn("skipping model.layers.{d}: {s}", .{ layer_idx, @errorName(err) });
-            };
-        }
->>>>>>> 8935dcbc (examples/llm: test TransformerLayer)
     }
 }
 
@@ -236,10 +217,9 @@ fn testSelfAttn(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
-    attn: model.Attn,
-    attn_weights: zml.Bufferized(model.Attn),
+    attn: model.SelfAttn,
+    attn_weights: zml.Bufferized(model.SelfAttn),
     activation_view: zml.io.TensorStore.View,
-    sharding: zml.Sharding,
     name: []const u8,
     opts: zml.testing.CompareOpts,
 ) !void {
@@ -257,54 +237,24 @@ fn testSelfAttn(
     const hidden_states = view.createTensor("in.0", null, .replicated);
     const cache_position = view.createTensor("in.3", null, .replicated);
 
-    // Build a KvCache sized to this prefill (batch / seq taken from hidden_states).
-    const batch_dim = hidden_states.dim(0);
-    const seq_dim = hidden_states.dim(1);
-    const kv_shape = zml.Shape.init(.{
-        .layer = @as(i64, @intCast(model.default_config.num_hidden_layers)),
-        .b = batch_dim,
-        .k = seq_dim,
-        .h = attn.num_kv_heads,
-        .hd = attn.head_dim,
-    }, hidden_states.dtype());
-    const kv_traced = model.KvCache.init(kv_shape).atLayer(attn.layer_idx);
+    const Argsx = struct { zml.Tensor, zml.Tensor };
+    var argsx: Argsx = .{ hidden_states, cache_position };
 
-    const Argsx = struct { zml.Tensor, zml.Tensor, model.KvCache };
-    const argsx: Argsx = .{ hidden_states, cache_position, kv_traced };
-
-    const exe = try platform.compile(allocator, io, attn, .forward, argsx, .{ .shardings = &.{&sharding} });
+    const exe = try platform.compile(allocator, io, attn, .forward, argsx, .{ .shardings = &.{} });
     defer exe.deinit();
 
-    // Load activation-backed inputs (KvCache is initialized to zero separately below).
-    const ActArgs = struct { zml.Tensor, zml.Tensor };
-    var act_args: ActArgs = .{ hidden_states, cache_position };
-    var act_buffers = try zml.io.load(ActArgs, &act_args, allocator, io, platform, activation_view.store, .auto);
+    var args_buffers = try zml.io.load(Argsx, &argsx, allocator, io, platform, activation_view.store, .auto);
     defer zml.meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
             b.deinit();
         }
-    }.cb, {}, &act_buffers);
-
-    const kv_bytes = kv_shape.byteSize();
-    const k_init = try allocator.alloc(u8, kv_bytes);
-    defer allocator.free(k_init);
-    @memset(k_init, 0);
-    const v_init = try allocator.alloc(u8, kv_bytes);
-    defer allocator.free(v_init);
-    @memset(v_init, 0);
-
-    var k_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, k_init);
-    defer k_buf.deinit();
-    var v_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, v_init);
-    defer v_buf.deinit();
-    const kv_buffers: model.KvCache.Buffer = .{ .k = k_buf, .v = v_buf };
+    }.cb, {}, &args_buffers);
 
     var exe_args = try exe.args(allocator);
     defer exe_args.deinit(allocator);
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
-    const args_buffers = .{ act_buffers[0], act_buffers[1], kv_buffers };
     exe_args.set(.{ attn_weights, args_buffers });
     exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
 
@@ -315,9 +265,7 @@ fn testSelfAttn(
 
     var reader_buffer: [4096]u8 = undefined;
     var failed = false;
-    // Our compiled outputs are (attn_out, kv_cache.k, kv_cache.v); the HF
-    // dumper records (attn_out, attn_weights). Only out.0 is comparable.
-    for (0..@min(1, output_count)) |i| {
+    for (0..output_count) |i| {
         var key_buf: [16]u8 = undefined;
         const subkey = try std.fmt.bufPrint(&key_buf, "out.{d}", .{i});
 
@@ -325,18 +273,6 @@ fn testSelfAttn(
             std.log.warn("{s}.{s}: no reference output", .{ name, subkey });
             continue;
         };
-
-        // Guard against the index spaces drifting again: if element counts
-        // disagree, we'd be reading garbage. Skip with a warning.
-        const got_shape = results[i].shape();
-        var ref_count: i64 = 1;
-        for (shape.dims()) |d| ref_count *= d;
-        var got_count: i64 = 1;
-        for (got_shape.dims()) |d| got_count *= d;
-        if (ref_count != got_count) {
-            std.log.warn("{s}.{s}: shape mismatch ref={f} ours={f}, skipping", .{ name, subkey, shape, got_shape });
-            continue;
-        }
 
         const expected_slice: zml.Slice = try .alloc(allocator, shape);
         defer expected_slice.free(allocator);
@@ -377,16 +313,14 @@ fn runSelfAttnLayer(
     platform: *const zml.Platform,
     model_store: *zml.io.TensorStore,
     activation_store: *zml.io.TensorStore,
-    sharding: zml.Sharding,
     layer_idx: usize,
 ) !void {
     const name = try std.fmt.allocPrint(allocator, "model.layers.{d}.self_attn", .{layer_idx});
     defer allocator.free(name);
 
-    const attention_type = model.default_config.layer_types[layer_idx];
-    const attn = try model.Attn.init(model_store.view().withPrefix(name), layer_idx, attention_type);
+    const attn = try model.SelfAttn.init(model_store.view().withPrefix(name), layer_idx);
 
-    var attn_weights = try zml.io.load(model.Attn, &attn, allocator, io, platform, model_store, .auto);
+    var attn_weights = try zml.io.load(model.SelfAttn, &attn, allocator, io, platform, model_store, .auto);
     defer deinitBuffers(&attn_weights);
 
     try testSelfAttn(
@@ -396,143 +330,9 @@ fn runSelfAttnLayer(
         attn,
         attn_weights,
         activation_store.view(),
-        sharding,
         name,
         .{ .absolute_tolerance = 1e-2, .minimum_close_fraction = 0.99 },
     );
-}
-
-// full TransformerLayer test
-fn runTransformerLayer(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    model_store: *zml.io.TensorStore,
-    activation_store: *zml.io.TensorStore,
-    sharding: zml.Sharding,
-    layer_idx: usize,
-) !void {
-    const name = try std.fmt.allocPrint(allocator, "model.layers.{d}", .{layer_idx});
-    defer allocator.free(name);
-
-    const layer = try model.TransformerLayer.init(model_store.view().withPrefix(name), layer_idx);
-    var layer_weights = try zml.io.load(model.TransformerLayer, &layer, allocator, io, platform, model_store, .auto);
-    defer deinitBuffers(&layer_weights);
-
-    const layer_view = activation_store.view().withPrefix(name);
-    if (!layer_view.hasKey("in.0")) {
-        std.log.warn("skipping {s}: no in.0 (hidden_states)", .{name});
-        return;
-    }
-    if (!layer_view.hasKey("out.0")) {
-        std.log.warn("skipping {s}: no out.0 (final hidden_states)", .{name});
-        return;
-    }
-
-    const self_attn_name = try std.fmt.allocPrint(allocator, "{s}.self_attn", .{name});
-    defer allocator.free(self_attn_name);
-    const self_attn_view = activation_store.view().withPrefix(self_attn_name);
-    if (!self_attn_view.hasKey("in.3")) {
-        std.log.warn("skipping {s}: no self_attn.in.3 (cache_position)", .{name});
-        return;
-    }
-
-    const hidden_states = layer_view.createTensor("in.0", .{ .b, .s, .d }, .replicated);
-    const cache_position = self_attn_view.createTensor("in.3", null, .replicated);
-
-    const batch_dim = hidden_states.dim(.b);
-    const seq_dim = hidden_states.dim(.s);
-    const kv_shape = zml.Shape.init(.{
-        .layer = @as(i64, @intCast(model.default_config.num_hidden_layers)),
-        .b = batch_dim,
-        .k = seq_dim,
-        .h = layer.attn.num_kv_heads,
-        .hd = layer.attn.head_dim,
-    }, hidden_states.dtype());
-    const kv_traced = model.KvCache.init(kv_shape).atLayer(layer_idx);
-
-    const Argsx = struct { zml.Tensor, zml.Tensor, model.KvCache };
-    const argsx: Argsx = .{ hidden_states, cache_position, kv_traced };
-
-    const exe = try platform.compile(allocator, io, layer, .forward, argsx, .{ .shardings = &.{&sharding} });
-    defer exe.deinit();
-
-    const ActArgs = struct { zml.Tensor, zml.Tensor };
-    var act_args: ActArgs = .{ hidden_states, cache_position };
-    var act_buffers = try zml.io.load(ActArgs, &act_args, allocator, io, platform, activation_store, .auto);
-    defer deinitBuffers(&act_buffers);
-
-    const kv_bytes = kv_shape.byteSize();
-    const k_init = try allocator.alloc(u8, kv_bytes);
-    defer allocator.free(k_init);
-    @memset(k_init, 0);
-    const v_init = try allocator.alloc(u8, kv_bytes);
-    defer allocator.free(v_init);
-    @memset(v_init, 0);
-
-    var k_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, k_init);
-    defer k_buf.deinit();
-    var v_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, v_init);
-    defer v_buf.deinit();
-    const kv_buffers: model.KvCache.Buffer = .{ .k = k_buf, .v = v_buf };
-
-    var exe_args = try exe.args(allocator);
-    defer exe_args.deinit(allocator);
-    var exe_results = try exe.results(allocator);
-    defer exe_results.deinit(allocator);
-
-    const args_buffers = .{ act_buffers[0], act_buffers[1], kv_buffers };
-    exe_args.set(.{ layer_weights, args_buffers });
-    exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
-
-    const output_count = exe.output_shapes.len;
-    var results = try allocator.alloc(zml.Buffer, output_count);
-    defer allocator.free(results);
-    exe_results.fill(.{results});
-
-    // forward returns (hidden_states, KvCache.k, KvCache.v); only the first
-    // output corresponds to a recorded HF activation (`out.0`).
-    if (output_count == 0) {
-        std.log.warn("{s}: compiled layer produced no outputs", .{name});
-        return;
-    }
-
-    const ref_shape = layer_view.getShape("out.0") orelse {
-        std.log.warn("{s}: no reference shape for out.0", .{name});
-        return;
-    };
-
-    const got_shape = results[0].shape();
-    var ref_count: i64 = 1;
-    for (ref_shape.dims()) |d| ref_count *= d;
-    var got_count: i64 = 1;
-    for (got_shape.dims()) |d| got_count *= d;
-    if (ref_count != got_count) {
-        std.log.warn("{s}.out.0: shape mismatch ref={f} ours={f}, skipping", .{ name, ref_shape, got_shape });
-        return;
-    }
-
-    var reader_buffer: [4096]u8 = undefined;
-    const expected_slice: zml.Slice = try .alloc(allocator, ref_shape);
-    defer expected_slice.free(allocator);
-    var reader = try layer_view.getReader("out.0", io, &reader_buffer);
-    defer reader.deinit();
-    try reader.interface.readSliceAll(expected_slice.data());
-
-    const got_slice = try results[0].toSliceAlloc(allocator, io);
-    defer got_slice.free(allocator);
-
-    zml.testing.expectClose(io, expected_slice, got_slice, .{
-        .absolute_tolerance = 1e-2,
-        .minimum_close_fraction = 0.99,
-    }) catch |err| switch (err) {
-        error.TestUnexpectedResult => {
-            std.log.warn("❌ {s} doesn't match", .{name});
-            return;
-        },
-        else => return err,
-    };
-    std.log.info("✅ {s} matches", .{name});
 }
 
 fn debugSelfAttnStages(
@@ -559,9 +359,8 @@ fn debugSelfAttnStages(
     }
 
     // 2. Build attention layer and load its weights.
-    const attention_type = model.default_config.layer_types[layer_idx];
-    const attn = try model.Attn.init(model_store.view().withPrefix(name), layer_idx, attention_type);
-    var attn_weights = try zml.io.load(model.Attn, &attn, allocator, io, platform, model_store, .auto);
+    const attn = try model.SelfAttn.init(model_store.view().withPrefix(name), layer_idx);
+    var attn_weights = try zml.io.load(model.SelfAttn, &attn, allocator, io, platform, model_store, .auto);
     defer deinitBuffers(&attn_weights);
 
     // 3. Wire the recorded inputs (in.0 = hidden_states, in.3 = cache_position).
@@ -569,67 +368,34 @@ fn debugSelfAttnStages(
     const hidden_states = view.createTensor("in.0", null, .replicated);
     const cache_position = view.createTensor("in.3", null, .replicated);
 
-    const batch_dim = hidden_states.dim(0);
-    const seq_dim = hidden_states.dim(1);
-    const kv_shape = zml.Shape.init(.{
-        .layer = @as(i64, @intCast(model.default_config.num_hidden_layers)),
-        .b = batch_dim,
-        .k = seq_dim,
-        .h = attn.num_kv_heads,
-        .hd = attn.head_dim,
-    }, hidden_states.dtype());
-    const kv_traced = model.KvCache.init(kv_shape).atLayer(attn.layer_idx);
-
-    const Argsx = struct { zml.Tensor, zml.Tensor, model.KvCache };
-    const argsx: Argsx = .{ hidden_states, cache_position, kv_traced };
+    const Argsx = struct { zml.Tensor, zml.Tensor };
+    var argsx: Argsx = .{ hidden_states, cache_position };
 
     const exe = try platform.compile(allocator, io, attn, .forwardTemp, argsx, .{ .shardings = &.{} });
     defer exe.deinit();
 
-    const ActArgs = struct { zml.Tensor, zml.Tensor };
-    var act_args: ActArgs = .{ hidden_states, cache_position };
-    var act_buffers = try zml.io.load(ActArgs, &act_args, allocator, io, platform, activation_store, .auto);
+    var args_buffers = try zml.io.load(Argsx, &argsx, allocator, io, platform, activation_store, .auto);
     defer zml.meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
             b.deinit();
         }
-    }.cb, {}, &act_buffers);
-
-    const kv_bytes = kv_shape.byteSize();
-    const k_init = try allocator.alloc(u8, kv_bytes);
-    defer allocator.free(k_init);
-    @memset(k_init, 0);
-    const v_init = try allocator.alloc(u8, kv_bytes);
-    defer allocator.free(v_init);
-    @memset(v_init, 0);
-
-    var k_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, k_init);
-    defer k_buf.deinit();
-    var v_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, v_init);
-    defer v_buf.deinit();
-    const kv_buffers: model.KvCache.Buffer = .{ .k = k_buf, .v = v_buf };
+    }.cb, {}, &args_buffers);
 
     var exe_args = try exe.args(allocator);
     defer exe_args.deinit(allocator);
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
-    const args_buffers = .{ act_buffers[0], act_buffers[1], kv_buffers };
     exe_args.set(.{ attn_weights, args_buffers });
     exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
 
-    var stages_buffers: zml.Bufferized(model.Attn.Stages) = undefined;
-    var new_kv_buffers: model.KvCache.Buffer = undefined;
-    exe_results.fill(.{ &stages_buffers, &new_kv_buffers });
+    var stages_buffers: zml.Bufferized(model.SelfAttn.Stages) = undefined;
+    exe_results.fill(.{&stages_buffers});
     defer zml.meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
             b.deinit();
         }
     }.cb, {}, &stages_buffers);
-    defer {
-        new_kv_buffers.k.deinit();
-        new_kv_buffers.v.deinit();
-    }
 
     // 4. For each stage, print our shape/stats and compare against the matching reference.
     const opts: zml.testing.CompareOpts = .{ .absolute_tolerance = 1e-2, .minimum_close_fraction = 0.99 };
@@ -655,7 +421,7 @@ fn debugSelfAttnStages(
         .{ .stage = "out", .refs = &.{"out.0"} },
     };
 
-    inline for (std.meta.fields(model.Attn.Stages)) |field| {
+    inline for (std.meta.fields(model.SelfAttn.Stages)) |field| {
         const stage_name = field.name;
         const buf_ptr: *zml.Buffer = &@field(stages_buffers, field.name);
 
