@@ -249,6 +249,11 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, graph_params);
     defer g.deinit();
 
+    // NSW from pruned kNN
+    g.setNearestNeighbors();
+    g.pruneNeighbors();
+    std.log.info("Pruned kNN : nb nodes: {d}", .{ g.nbNodes() });
+    
     // NSW from exact kNN
     g.setNearestNeighbors();
     g.extendToNsw();
@@ -258,11 +263,6 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     g.setRandomNeighbors();
     g.extendToNsw();
     std.log.info("Random R graph : nb nodes: {d}", .{ g.nbNodes() });
-
-    // NSW from pruned kNN
-    g.setNearestNeighbors();
-    g.pruneNeighbors();
-    std.log.info("Pruned kNN : nb nodes: {d}", .{ g.nbNodes() });
 
     // NSW from exact los-kNN
     g.setNearestNeighborsLos();
