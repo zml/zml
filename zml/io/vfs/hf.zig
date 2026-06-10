@@ -581,7 +581,7 @@ pub const HF = struct {
             const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
             if (xet.fetchFileId(self.allocator, self.client, xet_repo, self.hf_token_raw)) |fid| {
                 handle.xet_file_id = fid;
-                log.info("XET-backed file: {s}", .{full_path});
+                log.debug("XET-backed file: {s}", .{full_path});
             } else |_| {}
         }
 
