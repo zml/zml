@@ -49,14 +49,23 @@ pub fn main(init: std.process.Init) !void {
     var repo_model = try step3p5flash.LoadedModel.init(allocator, io, repo, store.view(), shardings);
     defer repo_model.deinit(allocator);
 
-    // Loading bar (single global Progress, reused for the full-model load too)
+    // Loading bar (single global Progress)
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     defer progress.end();
 
     var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
-    try run(allocator, io, platform, args.activations, &store, shardings, &progress);
+    try run(
+        allocator,
+        io,
+        platform,
+        args.activations,
+        &store,
+        shardings,
+        &repo_model.inner.text_model,
+        &model_buffers.text_model,
+    );
 }
 
 pub fn run(
@@ -66,8 +75,10 @@ pub fn run(
     activations_path: []const u8,
     model_store: *zml.io.TensorStore,
     shardings: common.Shardings,
-    progress: *std.Progress.Node,
+    text_model: *const model.TextModel,
+    text_buffers: *zml.Bufferized(model.TextModel),
 ) !void {
+    _ = model_store; // only used by the commented-out per-layer test paths
     // const config = model.default_config;
     // _ = config; // autofix
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
@@ -150,7 +161,7 @@ pub fn run(
 
     std.log.info("Full model:", .{});
     const sharding_list = shardings.all();
-    try runFullTextModel(allocator, io, platform, model_store, &activation_store, &sharding_list, progress);
+    try runFullTextModel(allocator, io, platform, &activation_store, &sharding_list, text_model, text_buffers);
 }
 
 fn runTransformerLayer(
@@ -278,31 +289,16 @@ fn runFullTextModel(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    model_store: *zml.io.TensorStore,
     activation_store: *zml.io.TensorStore,
     shardings: []const zml.Sharding,
-    progress: *std.Progress.Node,
+    text_model: *const model.TextModel,
+    text_buffers: *zml.Bufferized(model.TextModel),
 ) !void {
     const model_view = activation_store.view().withPrefix("model");
     if (!model_view.hasKey("in.0") or !model_view.hasKey("out.0")) {
         std.log.warn("skipping full TextModel: missing in.0 / out.0", .{});
         return;
     }
-
-    var text_model = try model.TextModel.init(allocator, model_store.view().withPrefix("model"), shardings[0].numPartitionsForLogicalAxis(.model));
-    defer text_model.deinit(allocator);
-
-    var full_load_node = progress.start("Full model load", model_store.view().withPrefix("model").count());
-    defer full_load_node.end();
-
-    var text_buffers = try zml.io.load(model.TextModel, &text_model, allocator, io, platform, model_store, .{
-        .parallelism = 1,
-        .shardings = shardings,
-        .dma_chunks = 2,
-        .dma_chunk_size = 4096,
-        .progress = &full_load_node,
-    });
-    defer deinitBuffers(&text_buffers);
 
     // 1. Build trace-time tensors for compile.
     const tokens_t = model_view.createTensor("in.0", .{ .b, .s }, .replicated);
@@ -328,7 +324,7 @@ fn runFullTextModel(
     const exe = try platform.compile(
         allocator,
         io,
-        text_model,
+        text_model.*,
         .forward,
         TraceArgs{ tokens_t, token_index_t, kv_traced },
         .{ .shardings = shardings },
@@ -365,7 +361,7 @@ fn runFullTextModel(
     defer exe_args.deinit(allocator);
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
-    exe_args.set(.{ text_buffers, .{ token_buffers[0], token_index_buf, kv_buffers } });
+    exe_args.set(.{ text_buffers.*, .{ token_buffers[0], token_index_buf, kv_buffers } });
     exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
 
     // 6. Pull results[0] (hidden), compare with looser tolerance (error compounds across 48 layers).
