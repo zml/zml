@@ -167,7 +167,7 @@ pub const Model = struct {
         );
     }
 
-    pub fn load(self: *Model, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore, shardings: []zml.Sharding) !zml.Bufferized(Model) {
+    pub fn load(self: *const Model, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.Sharding) !zml.Bufferized(Model) {
         var total_bytes: usize = 0;
         const now: std.Io.Timestamp = .now(zml_handler.io, .awake);
         defer {

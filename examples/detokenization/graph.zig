@@ -127,9 +127,7 @@ pub const Graph = struct {
         return best_row;
     }
 
-    pub fn greedySearch(self: *Graph, query: zml.Slice) struct { []usize, []f16 } {
-        const q = query.constItems(f16);
-
+    pub fn greedySearch(self: *Graph, q: []const f16) struct { []usize, []f16 } {
         self.nb_visited_nodes = 0;
         const start_score = self.scoreQueryNode(q, self.medoid);
         self.addVisitedNode(self.medoid, start_score);
@@ -169,12 +167,12 @@ pub const Graph = struct {
         return .{ self.visited_nodes[0..self.nb_visited_nodes], self.scores[0..self.nb_visited_nodes] };
     }
 
-    pub fn scoreQueryNode(self: *const Graph, query_items: []const f16, node: usize) f16 {
+    pub fn scoreQueryNode(self: *const Graph, query: []const f16, node: usize) f16 {
         const rows = self.lm_head_normalized.constItems(f16);
         const row = rows[node * self.dim ..][0..self.dim];
         var dot: f16 = 0;
         for (0..self.dim) |i| {
-            dot += query_items[i] * row[i];
+            dot += query[i] * row[i];
         }
         return dot;
     }
@@ -345,7 +343,7 @@ pub const Graph = struct {
                     markCandidate(candidate_flags, candidate_pool, &pool_count, self.neighbors[j]);
                 }
                 // add new candidates: all nodes visited during the greedy search medoid -> current_node
-                const query = self.lm_head_normalized.subSlice(.voc, @intCast(current_node), 1);
+                const query = self.lm_head_normalized.items(f16)[current_node * self.dim..][0..self.dim];
                 const visited, _ = self.greedySearch(query);
                 for (0..visited.len) |j| {
                     markCandidate(candidate_flags, candidate_pool, &pool_count, visited[j]);
