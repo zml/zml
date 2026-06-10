@@ -244,7 +244,7 @@ pub const Compressor = struct {
         x: zml.Tensor,
         state: CompressorState,
         layer_idx: zml.Tensor
-    ) struct { ?zml.Tensor, ?zml.Tensor, CompressorState } {
+    ) struct { zml.Tensor, zml.Tensor, CompressorState } {
         const x32 = x.convert(.f32);
         var kv = self.wkv.forward(x32);
         var score = self.wgate.forward(x32);
@@ -293,7 +293,7 @@ pub const Compressor = struct {
         offset: zml.Tensor,
         state: CompressorState,
         layer_idx: zml.Tensor
-    ) struct { ?zml.Tensor, ?zml.Tensor, CompressorState } {
+    ) struct { zml.Tensor, zml.Tensor, CompressorState } {
         const offset_mod = offset.convert(.f32).fmod(@floatFromInt(self.ratio)).convert(offset.dtype());
 
         const x32 = x.convert(.f32);
@@ -338,17 +338,14 @@ pub const Compressor = struct {
         offset: zml.Tensor,
         state: CompressorState,
         layer_idx: zml.Tensor
-    ) struct { ?zml.Tensor, CompressorState } {
+    ) struct { zml.Tensor, CompressorState } {
         // shape(x) = [batch,seq,r]
-        const maybe_kv, const maybe_pos_idx, const new_state = if (x.dim(.seq) > 1) self.forwardPrefill(x, state, layer_idx) else self.forwardDecode(x, offset, state, layer_idx);
-        if (maybe_kv == null) return .{ null, new_state };
+        var kv, const pos_idx, const new_state = if (x.dim(.seq) > 1) self.forwardPrefill(x, state, layer_idx) else self.forwardDecode(x, offset, state, layer_idx);
 
-        var kv = maybe_kv.?.convert(x.dtype());
+        const precomputed_freqs_cis = precompute_yarn(self.rope_head_dim, self.rope_opts);
+        const freqs_cis = zml.Tensor.outer(pos_idx.convert(.f32), precomputed_freqs_cis);
 
-        const precomputed_freqs_cis = precompute_yarn(self.rope_head_dim, self.rope_opts).withTags(.{.hd});
-        const freqs_cis = zml.Tensor.outer(maybe_pos_idx.?.convert(.f32), precomputed_freqs_cis);
-
-        kv = self.norm.forward(kv.rename(.{ .hd = .d }));
+        kv = self.norm.forward(kv.convert(x.dtype()).rename(.{ .hd = .d }));
         kv = apply_rope(kv.rename(.{ .d = .hd }), freqs_cis, self.nope_head_dim, self.rope_head_dim);
 
         return .{ kv, new_state };
@@ -390,7 +387,7 @@ fn precompute_yarn(dim: u32, opts: RopeOpts) zml.Tensor {
         freqs = freqs.divByConst(opts.factor).mul(ramp_factor).add(freqs.mul(smooth));
     }
 
-    return freqs;
+    return freqs.withTags(.{ .hd });
 }
 
 fn apply_yarn(x: zml.Tensor, inv_freq: zml.Tensor, reverse: bool) zml.Tensor {
@@ -421,7 +418,7 @@ fn apply_rope(x: zml.Tensor, freqs_cis: zml.Tensor, nope_dim: i64, rope_dim: i64
 
 // TODO: impl FWHT <https://en.wikipedia.org/wiki/Fast_Walsh%E2%80%93Hadamard_transform>
 fn hadamard_rotation(x: zml.Tensor) zml.Tensor {
-    const n = x.dim(-1);
+const n = x.dim(-1);
     stdx.debug.assert(@mod(n, 2) == 0, "expect last dimension to be a power of 2, got: {}", .{ n });
 
     var H = zml.Tensor.scalar(1, x.dtype()).reshape(.{ 1, 1 });
@@ -691,15 +688,15 @@ const Indexer = struct {
         self: Indexer,
         x: zml.Tensor,
         qr: zml.Tensor,
-        sp: zml.Tensor,
+        position: zml.Tensor,
         offset: zml.Tensor,
         cache: IndexerCache,
         cache_idx: zml.Tensor,
     ) struct { zml.Tensor, IndexerCache } {
-        const precomputed_freqs_cis = precompute_yarn(self.rope_head_dim, self.rope_opts).withTags(.{.hd});
+        const precomputed_freqs_cis = precompute_yarn(self.rope_head_dim, self.rope_opts);
         const freqs_cis = blk: {
-            const sh = sp.shape().insert(.last, .{ .seq = x.dim(.seq) });
-            const pos_idx = zml.Tensor.iota(sh, .seq).convert(.u32).add(sp.convert(.u32).broad(sh)).broad(sh);
+            const sh = position.shape().insert(.last, .{ .seq = x.dim(.seq) });
+            const pos_idx = zml.Tensor.iota(sh, .seq).convert(.u32).add(position.convert(.u32).broad(sh)).broad(sh);
             break :blk zml.Tensor.outer(pos_idx.convert(.f32), precomputed_freqs_cis);
         };
 
@@ -710,22 +707,21 @@ const Indexer = struct {
         q = q.rename(.{ .hd = .d });
         // TODO: FP4 quant q?
 
-        const maybe_kv, const new_state = self.compressor.forward(x, sp, cache.state, cache_idx);
-
         var new_cache = cache;
+
+        var kv, const new_state = self.compressor.forward(x, position, cache.state, cache_idx);
         new_cache.state = new_state;
+        kv = blk: {
+            kv = hadamard_rotation(kv).rename(.{ .seq = .kv });
+            new_cache.kv = new_cache.kv.update(kv, position.divByConst(self.ratio), cache_idx);
 
-        var kv = blk: {
-            if (maybe_kv) |kv_| {
-                const kv_rotated = hadamard_rotation(kv_).rename(.{ .seq = .kv });
-                // TODO: apply `@mod`
-                const sh = sp.shape().insert(.last, .{ .seq = kv_rotated.dim(.kv) });
-                const pos_idx = zml.Tensor.iota(sh, .seq).convert(.u32).add(sp.convert(.u32).broad(sh)).broad(sh);
-                new_cache.kv = new_cache.kv.update(kv_rotated, pos_idx.rename(.{ .seq = .kv }), cache_idx);
-            }
-
-            // TODO: slice to `offset // ratio`
             break :blk new_cache.kv.get(cache_idx).rename(.{ .kv = .seq });
+        };
+
+        const compressed_mask = blk: {
+            const kv_idx = zml.Tensor.arange(.{ .end = kv.dim(.seq) }, .u32);
+            const offset_idx = if (x.dim(.seq) > 1) zml.Tensor.scalar(x.dim(.seq), .u32) else position;
+            break :blk kv_idx.cmp(.LT, offset_idx.divByConst(self.ratio).broad(kv_idx.shape())).withTags(.{ .t }).insertAxes(0, .{ .batch, .seq });
         };
 
         var weights = self.proj.forward(x);
@@ -733,35 +729,32 @@ const Indexer = struct {
 
         var index_score = q.dot(kv.rename(.{ .hd = .d, .seq = .t }), .d);
         index_score = index_score.relu().mul(weights.appendAxes(.{ .t }).broad(index_score.shape())).sum(2).squeeze(2);
-
-        const start_pos = 0;
-        const seq = x.dim(.seq);
-        const end_pos: u32 = @intCast(start_pos + x.dim(.seq));
-        const k = @min(self.index_topk, @divFloor(end_pos, self.ratio));
+        index_score = zml.Tensor.select(compressed_mask.broad(index_score.shape()), index_score, zml.Tensor.constant(index_score.dtype().minValue()).broad(index_score.shape()));
 
         const topk_idxs = blk: {
+            const seqlen = x.dim(.seq);
             const offset_ = offset.insertAxes(.last, .{ .seq, .t }).convert(.i32);
-            if (x.dim(.seq) > 1) {
-                const a = zml.Tensor.iota(.init(.{ seq, @divFloor(seq, self.ratio) }, .i32), 1).convert(.i32);
-                const b = zml.Tensor.arange(.{ .start = 1, .end = seq + 1 }, .i32).reshape(.{ seq, 1}).divByConst(self.ratio).broad(a.shape()).convert(.i32);
+            if (seqlen > 1) {
+                const a = zml.Tensor.iota(.init(.{ seqlen, kv.dim(.seq) }, .i32), 1).convert(.i32);
+                const b = zml.Tensor.arange(.{ .start = 1, .end = seqlen + 1 }, .i32).reshape(.{ seqlen, 1}).divByConst(self.ratio).broad(a.shape()).convert(.i32);
                 const mask = a.cmp(.GE,  b).insertAxes(0, .{ .batch });
 
                 const selected = zml.Tensor.select(mask, zml.Tensor.scalar(-std.math.inf(f32), index_score.dtype()).broad(mask.shape()), zml.Tensor.zeroes(mask.shape().withDtype(index_score.dtype())));
                 index_score = index_score.add(selected.broad(index_score.shape()));
 
-                var topk_idxs = index_score.topK(-1, k, .{}).indices;
+                var topk_idxs = index_score.topK(-1, self.index_topk, .{}).indices;
 
                 const mask_ = topk_idxs.cmp(.GE, b.insertAxes(0, .{ .batch }));
                 topk_idxs = zml.Tensor.select(mask_, zml.Tensor.scalar(-1, topk_idxs.dtype()).broad(topk_idxs.shape()), topk_idxs.add(offset_.broad(topk_idxs.shape())));
                 break :blk topk_idxs;
             } else {
-                var topk_idxs = index_score.topK(-1, k, .{}).indices;
+                var topk_idxs = index_score.topK(-1, self.index_topk, .{}).indices;
                 topk_idxs = topk_idxs.add(offset_.broad(topk_idxs.shape()));
                 break :blk topk_idxs;
             }
         };
 
-        return .{ topk_idxs.convert(.i64), new_cache };
+        return .{ topk_idxs.convert(.i64).slice1d(.t, .{.end=2}), new_cache };
     }
 };
 
@@ -828,19 +821,17 @@ pub const CSA = struct {
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, Cache } {
-        const precomputed_freqs_cis = precompute_yarn(self.attn.rope_head_dim, self.attn.rope_opts).withTags(.{.hd});
+        const precomputed_freqs_cis = precompute_yarn(self.attn.rope_head_dim, self.attn.rope_opts);
         const freqs_cis = blk: {
             const sh = offset_idx.shape().insert(.last, .{ .seq = x.dim(.seq) });
             const pos_idx = zml.Tensor.iota(sh, .seq).convert(.u32).add(offset_idx.broad(sh));
             break :blk zml.Tensor.outer(pos_idx.convert(.f32), precomputed_freqs_cis);
         };
 
-        const q, var kv = self.attn.q_kv(x, freqs_cis);
+        const kv_compressed, const new_state = self.compressor.forward(x, offset_idx, cache.csa.state, layer_idx);
 
-        const maybe_kv_compressed, const new_state = self.compressor.forward(x, offset_idx, cache.csa.state, layer_idx);
-        if (maybe_kv_compressed) |kv_compressed| {
-            kv = zml.Tensor.concatenate(&.{kv, kv_compressed}, 1);
-        }
+        const q, var kv = self.attn.q_kv(x, freqs_cis);
+        kv = zml.Tensor.concatenate(&.{kv, kv_compressed}, .kv);
 
         const offset: u32 = if(x.dim(.seq) > 1) @intCast(kv.dim(.kv)) else self.attn.window_size;
 
@@ -894,19 +885,17 @@ pub const HCA = struct {
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, Cache } {
-        const precomputed_freqs_cis = precompute_yarn(self.attn.rope_head_dim, self.attn.rope_opts).withTags(.{.hd});
+        const precomputed_freqs_cis = precompute_yarn(self.attn.rope_head_dim, self.attn.rope_opts);
         const freqs_cis = blk: {
             const sh = offset_idx.shape().insert(.last, .{ .seq = x.dim(.seq) });
             const pos_idx = zml.Tensor.iota(sh, .seq).convert(.u32).add(offset_idx.broad(sh));
             break :blk zml.Tensor.outer(pos_idx.convert(.f32), precomputed_freqs_cis);
         };
 
-        const q, var kv = self.attn.q_kv(x, freqs_cis);
+        const kv_compressed, const new_state = self.compressor.forward(x, offset_idx, cache.hca.state, layer_idx);
 
-        const maybe_kv_compressed, const new_state = self.compressor.forward(x, offset_idx, cache.hca.state, layer_idx);
-        if (maybe_kv_compressed) |kv_compressed| {
-            kv = zml.Tensor.concatenate(&.{kv, kv_compressed}, .kv);
-        }
+        const q, var kv = self.attn.q_kv(x, freqs_cis);
+        kv = zml.Tensor.concatenate(&.{kv, kv_compressed}, .kv);
 
         var new_cache = cache;
         new_cache.hca.state = new_state;
@@ -1010,7 +999,7 @@ pub const Attention = struct {
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, Cache } {
         // shape(x) = [batch, seq, d]
-        const precomputed_freqs_cis = precompute_yarn(self.rope_head_dim, self.rope_opts).withTags(.{.hd});
+        const precomputed_freqs_cis = precompute_yarn(self.rope_head_dim, self.rope_opts);
         const freqs_cis = blk: {
             const sh = offset_idx.shape().insert(.last, .{ .seq = x.dim(.seq) });
             const pos_idx = zml.Tensor.iota(sh, .seq).convert(.u32).add(offset_idx.broad(sh));
@@ -1091,11 +1080,22 @@ fn topk_window2(x: zml.Tensor, seqlen: i64, window_size: i64) zml.Tensor {
         return matrix.insertAxes(0, .{.batch}).withTags(.{ .batch, .seq, .topk });
     } 
 
-    const base = zml.Tensor.arange(.{ .end = window_size}, .i64);
-    const res_pad = base.cmp(.LE, x);
-    _ = res_pad; // autofix
-    // var res_roll = base.add(x.convert(.f32).fmod(@floatFromInt(window_size).convert(.i64))).addConstant(1);
-    return base;
+    const x_64 = x.convert(.i64);
+    const pos_mod = x_64.divByConst(window_size);
+
+    const ids = zml.Tensor.iota(x_64.shape().insert(.last, .{.topk = window_size}), .topk).convert(.i64);
+    const matrix_wrap = ids.add(pos_mod.broad(ids.shape())).addConstant(1).divByConst(window_size);
+
+    const matrix_pad = zml.Tensor.select(
+    ids.cmp(.LE, x_64.broad(ids.shape())),
+    ids,
+    zml.Tensor.scalar(-1, .i64).broad(ids.shape())
+    );
+
+    const selected = x_64.insertAxes(.last, .{.topk}).broad(ids.shape()).cmp(.GE, zml.Tensor.scalar(window_size - 1, .i64).broad(ids.shape()));
+    var m = zml.Tensor.select(selected, matrix_wrap, matrix_pad);
+    m = m.insertAxes(.batch, .{.seq}).withTags(.{ .batch, .seq, .topk });
+    return m;
 }
 
 fn topk_window(window_size: i64, batch_size: i64, seqlen: i64, start_pos: i64) zml.Tensor {
@@ -1147,9 +1147,9 @@ fn compressed_topk(ratio: u32, batch_size: u32, seqlen: u32, offset: u32) zml.Te
             break :blk zml.Tensor.select(mask, zml.Tensor.scalar(-1, .i64).broad(matrix.shape()), matrix.addConstant(offset));
         } else {
             const base = zml.Tensor.arange(.{ .end = ratio}, .i64);
-            const matrix = base.addConstant(offset).insertAxes(0, .{.seq});
+            const matrix = base.addConstant(offset);
             const mask = matrix.cmp(.LT, base);
-            break :blk zml.Tensor.select(mask, matrix, zml.Tensor.scalar(-1, .i64).broad(matrix.shape()));
+            break :blk zml.Tensor.select(mask, matrix, zml.Tensor.scalar(-1, .i64).broad(matrix.shape())).insertAxes(0, .{.seq});
         }
     };
 
