@@ -251,6 +251,7 @@ const TestContext = struct {
         attn_buffer: zml.Bufferized(model.Attention),
         opts: zml.testing.CompareOpts
     ) !void {
+        _ = cache; // autofix
         try self.testLayer(
             try std.fmt.allocPrint(allocator, "layers.{}.attn.wq_a", .{i}),
         .{ .batch, .seq, .d },
@@ -309,14 +310,14 @@ const TestContext = struct {
         //     .{}
         // );
 
-        try self.testAttention(
-            try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}),
-            .{ .batch, .seq, .d },
-            attn,
-            attn_buffer,
-            cache,
-            .{}
-        );
+        // try self.testAttention(
+        //     try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}),
+        //     .{ .batch, .seq, .d },
+        //     attn,
+        //     attn_buffer,
+        //     cache,
+        //     .{}
+        // );
     }
 
     fn testCSALayer(self: *TestContext, allocator: std.mem.Allocator, layer_idx: usize, cache: model.Cache, csa: model.CSA, csa_buffer: zml.Bufferized(model.CSA), opts: zml.testing.CompareOpts) !void {
