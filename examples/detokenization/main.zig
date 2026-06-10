@@ -237,12 +237,25 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, graph_params);
     defer g.deinit();
 
+    // NSW from R graph
     g.setRandomNeighbors();
+    g.extendToNsw();
+    std.log.info("Random R graph : nb nodes: {d}", .{ g.nbNodes() });
+
+    // NSW from exact kNN
     g.setNearestNeighbors();
-    std.log.info("Nb nodes: {}", .{g.nbNodes()});
+    g.extendToNsw();
+    std.log.info("Exact kNN : nb nodes: {d}", .{ g.nbNodes() });
+
+    // NSW from pruned kNN
+    g.setNearestNeighbors();
     g.pruneNeighbors();
-    std.log.info("Nb nodes after pruning: {}", .{g.nbNodes()});
+    std.log.info("Pruned kNN : nb nodes: {d}", .{ g.nbNodes() });
+
+    // NSW from exact los-kNN
     g.setNearestNeighborsLos();
+    g.extendToNsw();
+    std.log.info("Exact los-kNN : nb nodes: {d}", .{ g.nbNodes() });
 }
 
 pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !SimilarityMatrix {

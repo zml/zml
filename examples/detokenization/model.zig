@@ -45,13 +45,12 @@ pub const Model_handler = struct {
     pub fn compileModel(zml_handler: *main.Zml_handler, model: Model, shardings: main.Shardings) !ModelExes {
         const shardings_arr = shardings.all();
         const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
-        const params: Model.SimilarityMatrixParams = .exec();
         const similarity_matrix_exe = try zml_handler.platform.compile(
             zml_handler.allocator,
             zml_handler.io,
             model,
             .similarityMatrix,
-            .{params.row_start},
+            .{ .init(.{}, .u32) },
             opts,
         );
         errdefer similarity_matrix_exe.deinit();
@@ -140,7 +139,7 @@ pub const ModelExes = struct {
 };
 
 pub const Model = struct {
-    pub const row_batch_size: i64 = 512;
+    pub const row_batch_size: i64 = 1024;
     pub const row_k_neighbors: i64 = 256;
 
     lm_head: zml.Tensor,
@@ -170,13 +169,7 @@ pub const Model = struct {
         );
     }
 
-    pub fn load(
-        self: *const Model,
-        zml_handler: *main.Zml_handler,
-        store: *const zml.io.TensorStore,
-        shardings: []const zml.Sharding,
-        progress: ?*std.Progress.Node,
-    ) !zml.Bufferized(Model) {
+    pub fn load(self: *Model, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore, shardings: []zml.Sharding) !zml.Bufferized(Model) {
         var total_bytes: usize = 0;
         const now: std.Io.Timestamp = .now(zml_handler.io, .awake);
         defer {
@@ -190,7 +183,7 @@ pub const Model = struct {
             .parallelism = 1,
             .dma_chunks = 8,
             .dma_chunk_size = 128 * zml.MiB,
-            .progress = progress,
+            .progress = null,
             .total_bytes = &total_bytes,
         });
     }
@@ -211,29 +204,22 @@ pub const Model = struct {
         return normalizeRows(self.get_lm_head());
     }
 
-    pub const SimilarityMatrixParams = struct {
-        row_start: zml.Tensor,
-
-        pub fn exec() SimilarityMatrixParams {
-            return .{ .row_start = .init(.{}, .u32) };
-        }
-    };
-
     pub fn similarityMatrix(self: Model, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f16);
+        const batch_slice: zml.Tensor.Slice = .{ .start = row_start, .len = row_batch_size };
         const normalized = normalizeRows(lm_head);
 
-        const rows = normalized
-            .dynamicSlice1d(normalized.axis(.voc), .{ .start = row_start, .len = row_batch_size })
-            .rename(.{ .voc = .row });
+        const rows = normalized.rename(.{ .voc = .row }).dynamicSlice1d(lm_head.axis(.voc), batch_slice);
         const cols = normalized.rename(.{ .voc = .col });
-
         const similarity = rows.dot(cols, .d);
+
+        // penalize self-similarity by setting -1.0 on the diagonal
         const row_ids = zml.Tensor.iota(similarity.shape(), .row).add(row_start.convert(.i32));
         const col_ids = zml.Tensor.iota(similarity.shape(), .col);
         const self_mask = row_ids.cmp(.EQ, col_ids);
         const minus_one = zml.Tensor.scalar(-1.0, .f16).broad(similarity.shape());
         const similarity_for_sort = self_mask.select(minus_one, similarity);
+        
         const nearest = similarity_for_sort.topK(.{ .nearest = .col }, row_k_neighbors, .{ .descending = true }).indices.convert(.u64);
 
         return .{ similarity, nearest };
