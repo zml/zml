@@ -206,7 +206,7 @@ pub const Model = struct {
 
     pub fn similarityMatrix(self: Model, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f16);
-        const batch_slice: zml.Tensor.Slice = .{ .start = row_start, .len = row_batch_size };
+        const batch_slice: zml.Tensor.DynSlice = .{ .start = row_start, .len = row_batch_size };
         const normalized = normalizeRows(lm_head);
 
         const rows = normalized.rename(.{ .voc = .row }).dynamicSlice1d(lm_head.axis(.voc), batch_slice);
