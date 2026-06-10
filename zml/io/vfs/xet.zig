@@ -15,8 +15,6 @@ fn sleepMs(ms: u64) void {
     _ = std.c.nanosleep(&ts, null);
 }
 
-// ── Repo / wire types ───────────────────────────────────────────────────────
-
 pub const Repo = struct {
     repo: []const u8,
     model: []const u8,
@@ -46,8 +44,6 @@ const CasAuth = struct {
     casUrl: []const u8,
     accessToken: []const u8,
 };
-
-// ── Chunk codec (xorb wire format) ──────────────────────────────────────────
 
 const chunk_header_size = 8;
 
