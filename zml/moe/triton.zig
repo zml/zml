@@ -59,6 +59,7 @@ pub const Parameters = struct {
     pub const ActivationMode = enum {
         silu,
         relu,
+        gelu,
     };
 
     pub const InitOptions = struct {
@@ -109,6 +110,17 @@ fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.S
     defer zero_slice.free(std.heap.c_allocator);
     @memset(zero_slice.data(), 0);
     return zml.Buffer.fromSlice(io, platform, zero_slice, sharding);
+}
+
+fn applyActivation(x: Tensor, mode: Parameters.ActivationMode) Tensor {
+    const mid = @divFloor(x.dim(.out), 2);
+    const gate = x.slice1d(.out, .{ .end = mid });
+    const up = x.slice1d(.out, .{ .start = mid });
+    return switch (mode) {
+        .silu => gate.silu().mul(up),
+        .relu => x.relu().powByConst(2),
+        .gelu => gate.gelu().mul(up),
+    };
 }
 
 // =============================================================================
@@ -212,13 +224,7 @@ pub fn fusedExpertsImpl(
         Shape.init(.{ .token = num_assignments, .out = gate_up.dim(.out) }, .bf16),
     );
 
-    const activated = switch (opts.activation) {
-        .silu => b: {
-            const gate, const up = zml.nn.splitRealImg(first_out, .sequential);
-            break :b gate.silu().mul(up);
-        },
-        .relu => first_out.relu().powByConst(2),
-    };
+    const activated = applyActivation(first_out, options.activation);
 
     var activated_quant = activated;
     a_scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);

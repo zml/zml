@@ -68,7 +68,6 @@ pub fn deinitBuffer(bufferized: *zml.Bufferized(Metadata)) void {
 }
 
 fn validateOptions(opts: Options) !void {
-    //if (opts.activation != .silu and opts.activation != .relu and opts.activation != .quick_gelu_plus_one) return error.UnsupportedActivation;
     if (opts.expert_map != null and opts.global_num_experts == -1) return error.InvalidShape;
     if (opts.w1_scale != null or opts.w2_scale != null) return error.UnsupportedQuantization;
 }
@@ -259,19 +258,15 @@ pub fn callGmmEp(
     return out.slice1d(.out, .{ .end = out_n });
 }
 
-fn gmmFuseAct(mode: ActivationMode) ?gmm_ep.Cfg.FuseAct {
-    return switch (mode) {
-        .gelu => .gelu,
-        .silu, .relu, .quick_gelu_plus_one => null,
-    };
-}
-
 fn applyActivation(x: Tensor, mode: ActivationMode) Tensor {
-    const gate, const up = zml.nn.splitRealImg(x, .sequential);
+    const mid = @divFloor(x.dim(.out), 2);
+    const gate = x.slice1d(.out, .{ .end = mid });
+    const up = x.slice1d(.out, .{ .start = mid });
+
     return switch (mode) {
         .silu => gate.silu().mul(up),
-        .relu => x.relu().powByConst(2),
         .gelu => gate.gelu().mul(up),
+        .relu => x.relu().powByConst(2),
         .quick_gelu_plus_one => blk: {
             const gate_clamped = gate.minimum(Tensor.scalar(7, gate.dtype()).broad(gate.shape()));
             const up_clamped = up.clamp(
@@ -298,15 +293,12 @@ pub fn fusedExpertsImpl(
     const b = hidden_states.dim(.b);
     const s = hidden_states.dim(.s);
     const hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
-    log.info("MoE canonicalizing inputs...", .{});
     const gate_up = try canonicalizeGateUp(w1, hidden.dim(.in));
-    log.info("MoE canonicalizing inputs...", .{});
     const down = try canonicalizeDown(w2, hidden.dim(.in), gate_up.dim(.out));
     const weights = topk_weights.reshape(.{ .token = b * s, .topk = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
     const ids = topk_ids.reshape(.{ .token = b * s, .topk = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
 
     const num_experts = if (opts.global_num_experts != -1) opts.global_num_experts else gate_up.dim(.expert);
-    try validateInputs(hidden, gate_up, down, weights, ids);
     if (opts.expert_map) |expert_map| {
         if (expert_map.dtype() != .i32) return error.UnsupportedType;
         if (expert_map.rank() != 1 or expert_map.dim(.expert) != num_experts) return error.InvalidShape;
@@ -329,6 +321,7 @@ pub fn fusedExpertsImpl(
     const hidden_sorted = if (opts.expert_map != null)
         permuteSmallBatch(hidden, sorted_route, ids.dim(.topk))
     else blk: {
+        // If not sharded, we can save the sort + gather by just repeating the hidden states for each expert and gathering with the sorted route
         const hidden_repeated = hidden.repeat1d(.token, @intCast(ids.dim(.topk))).rename(.{ .token = .route });
         break :blk hidden_repeated.gather(.{ .route = sorted_route }, .{}).rename(.{ .perm = .token });
     };
@@ -341,20 +334,13 @@ pub fn fusedExpertsImpl(
     );
 
     const group_sizes = histogramCounts(flat_ids_local, gate_up.dim(.expert));
-
-    const tile_m: i64 = 8;
+    const tile_m: i64 = 128;
     const aligned_hidden = alignSortedRowsByGroup(hidden_sorted, expert_ids_sorted, group_sizes, tile_m);
-    // const fused_gmm1_act = if (opts.w1_bias == null) gmmFuseAct(opts.activation) else null;
-    const gate_up_for_gmm1 = gate_up;
-    log.info("Gate up shape before gmm1: {f}, after padding for fused act: {f}", .{ gate_up.shape(), gate_up_for_gmm1.shape() });
 
-    const use_reference_moe = false;
-    var gate_up_out = if (use_reference_moe) blk: {
-        const gate_up_per_token = gate_up.gather(.{ .expert = expert_ids_sorted }, .{});
-        break :blk hidden_sorted.dot(gate_up_per_token, .in);
-    } else callGmmEp(aligned_hidden.rows, gate_up_for_gmm1, aligned_hidden.group_sizes, hidden.dtype(), .none)
+    var gate_up_out = callGmmEp(aligned_hidden.rows, gate_up, aligned_hidden.group_sizes, hidden.dtype(), .none)
         .gather(.{ .token = aligned_hidden.positions.rename(.{ .token = .route }) }, .{})
         .rename(.{ .route = .token });
+
     if (opts.w1_bias) |bias| {
         const bias_per_token = bias.withTags(.{ .expert, .out }).gather(.{ .expert = expert_ids_sorted }, .{});
         gate_up_out = gate_up_out.add(bias_per_token);
@@ -363,13 +349,10 @@ pub fn fusedExpertsImpl(
     const activated = applyActivation(gate_up_out, opts.activation);
 
     const aligned_activated = alignSortedRowsByGroup(activated, expert_ids_sorted, group_sizes, tile_m);
-    log.info("down shape before gmm2: {f}", .{down.shape()});
-    var down_out = if (use_reference_moe) blk: {
-        const down_per_token = down.gather(.{ .expert = expert_ids_sorted }, .{});
-        break :blk activated.rename(.{ .out = .mid }).dot(down_per_token, .mid);
-    } else callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype(), .none)
+    var down_out = callGmmEp(aligned_activated.rows, down, aligned_activated.group_sizes, hidden.dtype(), .none)
         .gather(.{ .token = aligned_activated.positions.rename(.{ .token = .route }) }, .{})
         .rename(.{ .route = .token });
+
     if (opts.w2_bias) |bias| {
         const bias_per_token = bias.withTags(.{ .expert, .out }).gather(.{ .expert = expert_ids_sorted }, .{});
         down_out = down_out.add(bias_per_token);

@@ -74,7 +74,7 @@ pub const Parameters = union(Backend) {
                     .activation = switch (activation) {
                         .silu => .silu,
                         .relu => .relu,
-                        .gelu => @panic("Not implemented"),
+                        .gelu => .gelu,
                     },
                 } },
                 .mosaic_tpu => .{ .mosaic_tpu = .{
