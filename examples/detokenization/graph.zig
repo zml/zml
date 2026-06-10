@@ -562,10 +562,7 @@ pub const Graph = struct {
                         self.addNeighbor(neighbor, current_node);
                         continue;
                     }
-
-                    // fail fast : check current_node isn't trivially pruned
-                    if (!self.lineOfSight(neighbor, current_node)) continue;
-
+                    
                     // reverse candidates : neighbor's neighbors + current_node
                     nb_candidates = 0;
                     const start_neigh_neigh = self.params.k_max * neighbor;
