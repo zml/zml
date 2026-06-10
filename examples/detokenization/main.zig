@@ -227,12 +227,15 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
 
     try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix);
 
+    std.log.info("Get lm_head", .{});
     const lm_head = try getLmHead(zml_handler, &model_handler);
     defer lm_head.free(zml_handler.allocator);
 
+    std.log.info("Get lm_head_normalized", .{});
     const lm_head_normalized = try getLmHeadNormalized(zml_handler, &model_handler);
     defer lm_head_normalized.free(zml_handler.allocator);
 
+    std.log.info("Init graph", .{});
     const graph_params: graph.GraphParams = .{};
     var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, graph_params);
     defer g.deinit();

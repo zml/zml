@@ -173,6 +173,47 @@ pub const Graph = struct {
         return .{ self.visited_nodes[0..self.nb_visited_nodes], self.scores[0..self.nb_visited_nodes] };
     }
 
+    pub fn greedySearchNode(self: *Graph, q: usize) struct { []usize, []f16 } {
+        self.nb_visited_nodes = 0;
+        const start_score = self.similarity(self.medoid, q);
+        self.addVisitedNode(self.medoid, start_score);
+
+        var current_node = self.medoid;
+        var current_score = start_score;
+        while (self.nb_visited_nodes < self.params.search_budget) {
+            var best_next_node = current_node;
+            var best_next_score = current_score;
+            var found_new_neighbor = false;
+
+            const start_neigh = self.params.k_max * current_node;
+            const end_neigh = start_neigh + self.nb_neighbors[current_node];
+            for (start_neigh..end_neigh) |i| {
+                const neighbor = self.neighbors[i];
+                if (self.nb_visited_nodes >= self.params.search_budget) break;
+                if (self.is_node_visited[neighbor]) continue;
+
+                const score = self.similarity(neighbor, q);
+                self.addVisitedNode(neighbor, score);
+                
+                found_new_neighbor = true;
+                if (score > best_next_score) {
+                    best_next_score = score;
+                    best_next_node = neighbor;
+                }
+            }
+
+            if (!found_new_neighbor or best_next_node == current_node) break;
+            current_node = best_next_node;
+            current_score = best_next_score;
+        }
+
+        for (0..self.nb_visited_nodes) |i| {
+            self.is_node_visited[self.visited_nodes[i]] = false;
+        }
+
+        return .{ self.visited_nodes[0..self.nb_visited_nodes], self.scores[0..self.nb_visited_nodes] };
+    }
+    
     pub fn addVisitedNode(self: *Graph, node: usize, score: f16) void {
         std.debug.assert(self.nb_visited_nodes < self.params.search_budget);
         std.debug.assert(!self.is_node_visited[node]);
@@ -341,8 +382,7 @@ pub const Graph = struct {
                 }
                 // add new candidates: all nodes visited during the greedy search medoid -> current_node
                 // there might be intersection with the current neighbor, so we need a datastructure to filter those
-                const query = self.lm_head_normalized.items(f16)[current_node * self.dim..][0..self.dim];
-                const visited, _ = self.greedySearch(query);
+                const visited, _ = self.greedySearchNode(current_node);
                 for (0..visited.len) |j| {
                     const candidate = visited[j];
                     if (is_candidate[candidate] or candidate == current_node) continue;
