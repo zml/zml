@@ -150,8 +150,7 @@ pub const SimilarityMatrix = struct {
         return self.data.items(f16)[pos];
     }
 
-    pub fn initOffsets(self: *SimilarityMatrix, alloc: std.mem.Allocator) void {
-        self.row_offsets = try alloc.alloc(usize, self.n) catch @panic("OOM");
+    pub fn initOffsets(self: *SimilarityMatrix) void {
         var offset: usize = 0;
         for (0..self.n) |row| {
             self.row_offsets[row] = offset;
@@ -338,6 +337,7 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_
     return .{
         .data = similarity_matrix_slice,
         .nearest_neighbors = nearest_neighbors_slice,
+        .row_offsets = try allocator.alloc(usize, n),
         .n = n,
         .d = d,
         .k = k,

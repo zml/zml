@@ -306,7 +306,7 @@ pub const Graph = struct {
     pub fn pruneNeighbors(self: *Graph) void {
         log.info("Pruning neighbors LOS", .{});
         for (0..self.n) |i| {
-            self.prundNodeNeighbor(i);
+            self.pruneNodeNeighbors(i);
             if (i == 0 or (i + 1) % 5000 == 0 or i + 1 == self.n) {
                 log.info("Pruning neighbors LOS node {d}/{d}", .{ i + 1, self.n });
             }
@@ -377,9 +377,9 @@ pub const Graph = struct {
                 std.mem.swap(usize, &order[nb_swap], &order[j]);
             }
             log.info("NSW pass {d}/{d}", .{ pass_i + 1, self.params.vamana_passes });
-            for (0..order.len) |pos_i| {
+            for (0..order.len) |i| {
                 // at this iteration, we will update current_node's neighbors and add current_node as a neighbor in candidate nodes
-                const current_node = order[pos_i];
+                const current_node = order[i];
                 var nb_candidates: usize = 0;
 
                 // candidates are initialized from current node's neighbors
@@ -390,7 +390,7 @@ pub const Graph = struct {
                     // since neighbors are unique, no need to test if already candidate
                     is_candidate[candidate] = true;
                     candidates[nb_candidates].node = candidate;
-                    candidates[nb_candidates].score = self.similarity(current_node, candidate);
+                    candidates[nb_candidates].similarity = self.similarity(current_node, candidate);
                     nb_candidates += 1;
                 }
                 // add new candidates: all nodes visited during the greedy search medoid -> current_node
@@ -401,7 +401,7 @@ pub const Graph = struct {
                     if (is_candidate[candidate] or candidate == current_node) continue;
                     is_candidate[candidate] = true;
                     candidates[nb_candidates].node = candidate;
-                    candidates[nb_candidates.score] = scores[j];
+                    candidates[nb_candidates].similarity = scores[j];
                     nb_candidates += 1;
                 }
 
@@ -440,7 +440,7 @@ pub const Graph = struct {
                 }
                 // clear candidates pool
                 for (0..nb_candidates) |j| {
-                    is_candidate[candidates[j]] = false;
+                    is_candidate[candidates[j].node] = false;
                 }
 
                 if (i == 0 or (i + 1) % 1000 == 0 or i + 1 == self.n) {
