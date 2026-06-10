@@ -59,6 +59,7 @@ pub const Parameters = struct {
     pub const ActivationMode = enum {
         silu,
         relu,
+        gelu,
     };
 
     pub const InitOptions = struct {
@@ -218,6 +219,10 @@ pub fn fusedExpertsImpl(
             break :b gate.silu().mul(up);
         },
         .relu => first_out.relu().powByConst(2),
+        .gelu => b: {
+            const gate, const up = zml.nn.splitRealImg(first_out, .sequential);
+            break :b gate.gelu().mul(up);
+        },
     };
 
     var activated_quant = activated;
@@ -637,7 +642,7 @@ fn fp8ActivationGroupSize(x: Tensor) i64 {
 
 fn validateOptions(opts: Options) !void {
     if (opts.inplace) return error.Unimplemented;
-    if (opts.activation != .silu and opts.activation != .relu) return error.UnsupportedActivation;
+    if (opts.activation != .silu and opts.activation != .relu and opts.activation != .gelu) return error.UnsupportedActivation;
     if (opts.apply_router_weight_on_input) return error.UnsupportedOption;
     if (opts.use_fp8_w8a8 or opts.use_int8_w8a8 or opts.use_int8_w8a16 or opts.use_int4_w4a16) return error.UnsupportedQuantization;
     if (opts.ocp_mx_scheme != null or opts.per_channel_quant) return error.UnsupportedOption;
