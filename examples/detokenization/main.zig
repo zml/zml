@@ -1,9 +1,13 @@
 const std = @import("std");
-const log = std.log;
 const zml = @import("zml");
+
 const stdx = zml.stdx;
+const log = std.log;
+
 const graph = @import("graph.zig");
 const model_ = @import("model.zig");
+const llm_ = @import("llm.zig");
+const inference = @import("inference.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -104,6 +108,9 @@ pub const Timing_handler = struct {
 
     greedy_search: Field_timer = .{},
     prune_pool: Field_timer = .{},
+
+    prefill: Field_timer = .{},
+    decode: Field_timer = .{},
 
     pub fn print(self: Timing_handler) void {
         std.log.info("Sim matrix    : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.similarity_matrix.nanoseconds)) / 1e9 });
@@ -216,10 +223,26 @@ pub fn main(init: std.process.Init) !void {
 
     try printZmlLogo(zml_handler.io);
 
-    try runTests(&zml_handler);
+    try runLlm(&zml_handler);
+    //try runTests(&zml_handler);
 
     zml_handler.timers.print();
 }
+
+
+pub fn runLlm(zml_handler: *Zml_handler) !void {
+    var llm = try llm_.Llm_handler.init(zml_handler);
+    defer llm.deinit(zml_handler.allocator);
+
+    const inspi_tokens = try inference.tokenizePrompt(zml_handler, llm.tokenizer);
+    defer zml_handler.allocator.free(inspi_tokens);
+
+    zml_handler.mem.start(0);
+    const inspi_result = try inference.generateText(zml_handler, &llm, inspi_tokens);
+    defer zml_handler.allocator.free(inspi_result);
+    zml_handler.mem.check(0);
+}
+
 
 pub fn runTests(zml_handler: *Zml_handler) !void {
     var model_handler = try model_.Model_handler.init(zml_handler);
@@ -257,6 +280,17 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     zml_handler.toc(&zml_handler.timers.nsw_graph);
     
     std.log.info("NSW extension : nb nodes: {d}", .{ g.nbNodes() });
+
+    var llm = try llm_.Llm_handler.init(zml_handler);
+    defer llm.deinit(zml_handler.allocator);
+
+    const inspi_tokens = try inference.tokenizePrompt(zml_handler, llm.tokenizer);
+    defer zml_handler.allocator.free(inspi_tokens);
+
+    zml_handler.mem.start(0);
+    const inspi_result = try inference.generateText(zml_handler, &llm, inspi_tokens);
+    defer zml_handler.allocator.free(inspi_result);
+    zml_handler.mem.check(0);
 
 }
 
@@ -462,3 +496,31 @@ const TensorExtractor = struct {
         return self.tensor.convert(.f16);
     }
 };
+
+
+
+pub fn printSafetensors(registry: zml.safetensors.TensorRegistry) !void {
+    const tensors: zml.safetensors.Tensors = registry.tensors;
+    const data = tensors.entries;
+    for (0..data.len) |i| {
+        const entry = data.get(i);
+        const tensor: zml.safetensors.Tensor = tensors.get(entry.key).?;
+        std.log.info("Tensor(name={s} shape={f} size={d})", .{
+            tensor.name,
+            tensor.shape,
+            tensor.byteSize(),
+        });
+    }
+}
+
+pub fn parseConfig(comptime T: type, allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.json.Parsed(T) {
+    const file = try dir.openFile(io, "config.json", .{});
+    defer file.close(io);
+
+    var buffer: [256]u8 = undefined;
+    var file_reader = file.reader(io, &buffer);
+    var reader: std.json.Reader = .init(allocator, &file_reader.interface);
+    defer reader.deinit();
+
+    return try std.json.parseFromTokenSource(T, allocator, &reader, .{ .ignore_unknown_fields = true });
+}
