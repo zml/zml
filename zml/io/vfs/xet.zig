@@ -225,7 +225,7 @@ fn httpRangeGetIntoSlice(
     end_inclusive: usize,
     dst: []u8,
 ) !void {
-    const max_attempts: u32 = 4;
+    const max_attempts: u32 = 6;
     var backoff_ms: u64 = 250;
     var attempt: u32 = 0;
     while (true) : (attempt += 1) {
@@ -243,6 +243,10 @@ fn httpRangeGetIntoSlice(
     }
 }
 
+/// Per-socket read deadline. CDN edges occasionally go silent mid-stream
+/// without sending FIN; without this, readv() would block forever.
+const xorb_socket_recv_timeout_s: i64 = 30;
+
 fn tryHttpRangeGetIntoSlice(
     client: *std.http.Client,
     url: []const u8,
@@ -259,13 +263,23 @@ fn tryHttpRangeGetIntoSlice(
         .extra_headers = &.{.{ .name = "Range", .value = range }},
     });
     defer req.deinit();
+
+    if (req.connection) |conn| {
+        const fd = conn.stream_reader.stream.socket.handle;
+        const tv: std.posix.timeval = .{ .sec = xorb_socket_recv_timeout_s, .usec = 0 };
+        std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
+    }
+
     try req.sendBodiless();
 
     var redirect_buf: [8 * 1024]u8 = undefined;
-    var res = try req.receiveHead(&redirect_buf);
+    var res = req.receiveHead(&redirect_buf) catch |err| {
+        log.warn("xorb receiveHead failed: {s}", .{@errorName(err)});
+        return error.XorbFetchTransient;
+    };
     if (res.head.status != .ok and res.head.status != .partial_content) {
         const code = @intFromEnum(res.head.status);
-        if (code == 429 or (code >= 500 and code < 600)) {
+        if (code == 408 or code == 425 or code == 429 or (code >= 500 and code < 600)) {
             log.warn("xorb HTTP {d} (transient)", .{code});
             return error.XorbFetchTransient;
         }
@@ -274,7 +288,10 @@ fn tryHttpRangeGetIntoSlice(
     }
     var transfer_buf: [16 * 1024]u8 = undefined;
     const reader = res.reader(&transfer_buf);
-    reader.readSliceAll(dst) catch return error.XorbFetchTransient;
+    reader.readSliceAll(dst) catch |err| {
+        log.warn("xorb body read failed: {s}", .{@errorName(err)});
+        return error.XorbFetchTransient;
+    };
 }
 
 // ── Range fetch (worker-based, fills dst synchronously) ────────────────────
@@ -395,15 +412,40 @@ fn fetchWorkerImpl(ctx: *FetchCtx, task: *FetchTask) !void {
     var it: ChunkIterator = .{ .data = body };
     var chunk_idx: usize = task.chunk_idx_start;
     while (try it.next()) |chunk| : (chunk_idx += 1) {
-        var decoded: []const u8 = &.{};
-        var have_decoded = false;
+        // Find applicable plans for this chunk.
+        var only_plan: ?*TermPlan = null;
+        var multiple_plans = false;
         for (task.term_plans.items) |*tp| {
             if (chunk_idx < tp.chunk_start or chunk_idx >= tp.chunk_end) continue;
             if (tp.bytes_written >= tp.wanted_len) continue;
-            if (!have_decoded) {
-                decoded = try decompressChunk(chunk, &scratch);
-                have_decoded = true;
+            if (only_plan != null) {
+                multiple_plans = true;
+                break;
             }
+            only_plan = tp;
+        }
+        if (only_plan == null) continue;
+
+        // Fast path: a single plan needs this chunk in full: decompress straight into dst,
+        // skipping the scratch+memcpy round-trip.
+        if (!multiple_plans) {
+            const tp = only_plan.?;
+            const needs_skip = chunk_idx == tp.chunk_start and tp.byte_skip != 0;
+            const remaining = tp.wanted_len - tp.bytes_written;
+            if (!needs_skip and chunk.uncompressed_size <= remaining) {
+                const slot = ctx.dst[tp.dst_off + tp.bytes_written ..][0..chunk.uncompressed_size];
+                _ = try decompressChunk(chunk, slot);
+                tp.bytes_written += chunk.uncompressed_size;
+                continue;
+            }
+        }
+
+        // Fallback: decode once into scratch, then fan out @memcpy to each overlapping plan
+        // (handles boundary byte_skip, partial-tail truncation, and multi-plan chunks).
+        const decoded = try decompressChunk(chunk, &scratch);
+        for (task.term_plans.items) |*tp| {
+            if (chunk_idx < tp.chunk_start or chunk_idx >= tp.chunk_end) continue;
+            if (tp.bytes_written >= tp.wanted_len) continue;
             const src_off: usize = if (chunk_idx == tp.chunk_start) tp.byte_skip else 0;
             const avail = decoded.len - src_off;
             const remaining = tp.wanted_len - tp.bytes_written;
