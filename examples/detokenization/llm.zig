@@ -468,6 +468,7 @@ pub const Llm = struct {
         }
         allocator.free(self.layers);
         RmsNorm.unloadBuffers(&self.norm);
+        self.lm_head.deinit();
     }
 
 
