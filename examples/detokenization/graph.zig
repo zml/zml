@@ -62,6 +62,7 @@ pub const Graph = struct {
         std.debug.assert(params.alpha >= 1.0);
         std.debug.assert(matrix.k >= params.k_max);
         std.debug.assert(params.L <= params.search_budget + params.k_max);
+        std.debug.assert(params.search_budget + params.k_max <= matrix.n);
         std.debug.assert(params.k_max < matrix.n);
 
         const allocator = zml_handler.allocator;
@@ -78,7 +79,7 @@ pub const Graph = struct {
         errdefer allocator.free(is_visited);
         @memset(is_visited, false);
 
-        const is_expanded = try allocator.alloc(bool, matrix.n);
+        const is_expanded = try allocator.alloc(bool, params.search_budget + params.k_max);
         errdefer allocator.free(is_expanded);
         @memset(is_expanded, false);
 
@@ -164,11 +165,11 @@ pub const Graph = struct {
 
         while (self.nb_visited < self.params.search_budget) {
             
-            // find best node of the frontier that has not been expanded yet
+            // find best node of the active pool that has not been expanded yet
             const node = self.popCandidate();
 
             // if all nodes in active pool have been expanded, terminate the search
-            if (!self.is_search_done) break;
+            if (self.is_search_done) break;
 
             // otherwise, expand search to best node neighbors
             const start_neigh = self.params.k_max * node;
@@ -190,11 +191,11 @@ pub const Graph = struct {
 
         while (self.nb_visited < self.params.search_budget) {
             
-            // find best node of the frontier that has not been expanded yet
+            // find best node of the active pool that has not been expanded yet
             const node = self.popCandidate();
 
             // if all nodes in active pool have been expanded, terminate the search
-            if (!self.is_search_done) break;
+            if (self.is_search_done) break;
 
             // otherwise, expand search to best node neighbors
             const start_neigh = self.params.k_max * node;
@@ -268,6 +269,7 @@ pub const Graph = struct {
     pub fn insert(self: *Graph, node: usize, sim: f16) void {
         std.debug.assert(!self.is_visited[node]);
         std.debug.assert(self.nb_visited > 0);
+        std.debug.assert(self.L > 0);
         
         self.is_visited[node] = true;
         // this is the lowest score of the active pool
@@ -280,6 +282,7 @@ pub const Graph = struct {
             // - active pool is not full: the end the pool is the end of the active pool
             self.visited[self.nb_visited] = .{ .node = node, .similarity = sim };
             self.L = @min(self.L + 1, self.params.L);
+            std.debug.assert(!self.is_expanded[self.nb_visited]);
         } else {
             // if the node is among best L nodes, there are two cases:
             // - the active pool is not full: we can do a reverse linear pass to
@@ -303,6 +306,7 @@ pub const Graph = struct {
                 i -= 1;
             }
             std.debug.assert(self.L < self.params.L);
+            std.debug.assert(i < self.params.L);
             self.visited[i] = .{ .node = node, .similarity = sim };
             self.is_expanded[i] = false;
             self.L += 1;
@@ -313,7 +317,7 @@ pub const Graph = struct {
     pub fn popCandidate(self: *Graph) usize {
         // find the best unexpanded candidate in the active pool
         // since the pool is kept sorted, return the first found
-        for (0..self.L) |i| {
+        for (0..self.L) |i| { // TODO: we can keep track of the first unexpanded node
             if (!self.is_expanded[i]) {
                 self.is_expanded[i] = true;
                 return self.visited[i].node;
@@ -452,7 +456,7 @@ pub const Graph = struct {
         defer self.allocator.free(is_candidate);
         @memset(is_candidate, false);
 
-        const candidates = self.allocator.alloc(Candidate, self.params.k_max + self.params.search_budget) catch @panic("OOM");
+        const candidates = self.allocator.alloc(Candidate, 2 * self.params.k_max + self.params.search_budget) catch @panic("OOM");
         defer self.allocator.free(candidates);
 
         const start = std.Io.Timestamp.now(self.io, .awake);
