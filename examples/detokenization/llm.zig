@@ -39,8 +39,7 @@ pub const Llm_handler = struct {
         std.log.info("LLM initialize model", .{});
         var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
         defer store.deinit();
-        const view = if (store.view().hasKey("model")) store.view().withPrefix("model") else store.view();
-        const model: Llm = try .init(zml_handler.allocator, view, config, generation_config);
+        const model: Llm = try .init(zml_handler.allocator, store.view(), config, generation_config);
         std.log.info("LLM initialized", .{});
 
         const options: Options = .{
@@ -436,12 +435,12 @@ pub const Llm = struct {
         const layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers);
         errdefer allocator.free(layers);
         for (layers, 0..) |*layer, i| {
-            layer.* = try .init(@intCast(i), store.withPrefix("layers").withLayer(i), config);
+            layer.* = try .init(@intCast(i), store.withPrefix("model.layers").withLayer(i), config);
         }
         return .{
-            .embed_tokens = .{ .weight = store.createTensor("embed_tokens.weight", .{ .voc, .d }, .replicated) },
+            .embed_tokens = .{ .weight = store.createTensor("model.embed_tokens.weight", .{ .voc, .d }, .replicated) },
             .layers = layers,
-            .norm = .init(store.withPrefix("norm"), config),
+            .norm = .init(store.withPrefix("model.norm"), config),
             .lm_head = store.createTensor("lm_head.weight", .{ .voc, .d }, .replicated),
             .sampling_strategy = generation_config.samplingStrategy(),
         };
