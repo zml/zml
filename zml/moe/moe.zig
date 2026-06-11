@@ -158,12 +158,9 @@ pub fn forwardMoe(
             const expert_partition = weights_gate_up.shape().partition(.expert);
 
             if (expert_partition.eql(.init(.experts))) {
-                const expert_partitions = zml.module.CompilationContext.current().partitioning.numPartitionsForLogicalAxis(
-                    weights_gate_up.shape(),
-                    .experts,
-                ) catch unreachable;
 
-                const global_num_experts = weights_down.shape().dim(.expert) * expert_partitions;
+
+                const global_num_experts = weights_down.dim(.expert);
 
                 const partial_output = zml.ops.manualComputation(
                     .{ input, topk_ids, topk_weights, weights_gate_up, weights_down },
@@ -242,12 +239,9 @@ pub fn forwardMoe(
             const expert_partition = weights_gate_up.shape().partition(.expert);
 
             if (expert_partition.eql(.init(.experts))) {
-                const expert_partitions = zml.module.CompilationContext.current().partitioning.numPartitionsForLogicalAxis(
-                    weights_gate_up.shape(),
-                    .experts,
-                ) catch unreachable;
 
-                const global_num_experts = weights_down.shape().dim(.expert) * expert_partitions;
+                const global_num_experts = weights_down.dim(.expert);
+                std.log.info("global num experts: {d}, local num experts: {d}", .{ global_num_experts, weights_down.shape().dim(.expert) });
 
                 const partial_output = zml.ops.manualComputation(
                     .{ input, topk_ids, topk_weights, weights_gate_up, weights_down },
