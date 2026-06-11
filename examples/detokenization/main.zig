@@ -226,8 +226,8 @@ pub fn main(init: std.process.Init) !void {
 
     try printZmlLogo(zml_handler.io);
 
-    try runLlm(&zml_handler);
-    //try runTests(&zml_handler);
+    //try runLlm(&zml_handler);
+    try runTests(&zml_handler);
 
     zml_handler.timers.print();
 }
