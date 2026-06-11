@@ -1131,6 +1131,7 @@ const MoE = struct {
     // up_scale: zml.Tensor,
     experts: []Expert,
     shared_experts: SharedExpert,
+    activation_threshold: f32,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, i: usize) !MoE {
         const experts = try allocator.alloc(Expert, config.n_routed_experts);
@@ -1151,6 +1152,7 @@ const MoE = struct {
             // .up = experts_store.createTensor("w3.weight", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
             // .up_scale = experts_store.createTensor("w3.scale", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
             .shared_experts = .init(store.withPrefix("shared_experts"), config),
+            .activation_threshold = config.swiglu_limit,
         };
     }
 
@@ -1170,7 +1172,7 @@ const MoE = struct {
         // self.down_scale.deinit();
         // self.up_scale.deinit();
         // self.up_scale.deinit();
-        Expert.unloadBuffers(&self.shared_experts);
+        SharedExpert.unloadBuffers(&self.shared_experts);
     }
 
     fn stackExpertTensor(experts: []const Expert, comptime linear_field: []const u8, comptime tensor_field: []const u8) zml.Tensor {
@@ -1248,7 +1250,7 @@ const MoE = struct {
                 w2_weight.gather(.{ .expert = expert_ids }, .{}),
                 w2_scale.gather(.{ .expert = expert_ids }, .{}),
                 self.experts[0].w1.act_block_size,
-                self.experts[0].activation_threshold,
+                self.activation_threshold,
             ).convert(.f32);
 
             y = y.add(routed);
@@ -1426,7 +1428,6 @@ const Expert = struct {
     w1: FP4Linear,
     w2: FP4Linear,
     w3: FP4Linear,
-    activation_threshold: f32,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) Expert {
         const block_size = config.quantization_config.weight_block_size[0];
@@ -1435,7 +1436,6 @@ const Expert = struct {
             .w1 = .init(store.withPrefix("w1"), .{ .dint, .d }, .{ .dint, .d_block }, block_size, .d),
             .w2 = .init(store.withPrefix("w2"), .{ .d, .dint }, .{ .d, .dint_block }, block_size, .dint),
             .w3 = .init(store.withPrefix("w3"), .{ .dint, .d }, .{ .dint, .d_block }, block_size, .d),
-            .activation_threshold = config.swiglu_limit,
         };
     }
 
@@ -1443,17 +1443,6 @@ const Expert = struct {
         FP4Linear.unloadBuffers(&self.w1);
         FP4Linear.unloadBuffers(&self.w2);
         FP4Linear.unloadBuffers(&self.w3);
-    }
-
-    pub fn forward(self: Expert, x: zml.Tensor, weights: zml.Tensor) zml.Tensor {
-        const threshold = zml.Tensor.scalar(self.activation_threshold, .f32);
-
-        const up = self.w3.forward(x).convert(.f32).clamp(threshold.negate(), threshold);
-        var gate = self.w1.forward(x).convert(.f32);
-        gate = zml.Tensor.select(gate.cmp(.GT, threshold), threshold, gate);
-
-        const x_ = gate.silu().mul(up).mul(weights.broad(up.shape()));
-        return self.w2.forward(x_.convert(x.dtype()));
     }
 };
 
