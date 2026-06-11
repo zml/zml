@@ -119,6 +119,17 @@ pub const Config = struct {
     pub fn numKeyValueHeads(self: Config) u32 {
         return self.num_attention_groups;
     }
+
+    /// Number of transformer layers executed in the standard forward pass.
+    /// `num_hidden_layers` counts both the real transformer layers and the
+    /// trailing multi-token-prediction (MTP) speculative layers. HF's
+    /// `Step3p5Model.forward` only runs the first `num_hidden_layers` layers
+    /// from the iter list, but the activation fixture (and standard inference)
+    /// is generated after dropping the MTP layers, so the effective count is
+    /// `num_hidden_layers - num_nextn_predict_layers`.
+    pub fn numMainLayers(self: Config) u32 {
+        return self.num_hidden_layers - self.num_nextn_predict_layers;
+    }
 };
 
 pub const AttnType = enum {
@@ -258,7 +269,15 @@ pub const TextModel = struct {
     norm: RmsNorm,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, model_partitions: i64) !TextModel {
-        const layers = try allocator.alloc(TransformerLayer, @intCast(default_config.num_hidden_layers));
+        // Allocate only the main transformer layers (drop MTP/speculative
+        // layers at the tail). HF Step3p5Model.forward iterates
+        // `self.layers[:num_hidden_layers]`, but the fixture generator sets
+        // `num_hidden_layers = num_hidden_layers - num_nextn_predict_layers`,
+        // matching the standard inference path. Running the MTP layers as
+        // ordinary transformer layers transforms the residual stream with
+        // weights that were trained for next-N prediction, producing garbage.
+        const num_main_layers = default_config.numMainLayers();
+        const layers = try allocator.alloc(TransformerLayer, @intCast(num_main_layers));
         errdefer allocator.free(layers);
 
         for (layers, 0..) |*layer, i| {
@@ -562,14 +581,31 @@ pub const Attn = struct {
         );
 
         const rope_idx = @min(layer_idx, default_config.rope_theta.len - 1);
+        const layer_theta = default_config.rope_theta[rope_idx];
+
+        // HF patched modeling: a layer gets the scaled rope ONLY if its
+        // `layer_types[idx]` is listed in `yarn_only_types`. For Step 3.5 Flash
+        // that's `["full_attention"]`, so sliding_attention layers (36/48)
+        // use plain unscaled RoPE. Using llama3 scaling for every layer was
+        // skewing inv_freq on 75% of layers and compounding into total drift.
+        const layer_type_name: []const u8 = switch (kind) {
+            .full_attention => "full_attention",
+            .sliding_attention => "sliding_attention",
+        };
+        const apply_yarn = blk: {
+            for (default_config.yarn_only_types) |t| {
+                if (std.mem.eql(u8, t, layer_type_name)) break :blk true;
+            }
+            break :blk false;
+        };
         const rs = default_config.rope_scaling;
-        const rope_scaling: zml.nn.RopeOpts.Scaling = .{ .llama3 = .{
+        const rope_scaling: zml.nn.RopeOpts.Scaling = if (apply_yarn) .{ .llama3 = .{
             .factor = rs.factor,
             .high_freq_factor = rs.high_freq_factor,
             .low_freq_factor = rs.low_freq_factor,
             .original_max_position_embeddings = rs.original_max_position_embeddings,
-            .rope_theta = default_config.rope_theta[rope_idx],
-        } };
+            .rope_theta = layer_theta,
+        } } else .{ .default = .{ .rope_theta = layer_theta } };
 
         return .{
             .layer_idx = layer_idx,
@@ -1018,12 +1054,18 @@ pub const RmsNorm = struct {
 
     /// L2 normalization of input tensor along the given axis.
     /// Step 3.5 Flash uses offset-style RMSNorm: the effective scale is `1 + weight`,
-    /// not just `weight`.
+    /// not just `weight`. Keep the entire pipeline in fp32 and only cast back to
+    /// the input dtype at the end — `weight` is typically near 0 and `1 + weight`
+    /// rounds to 1.0 in bf16 (epsilon ≈ 0.0078 at 1.0), wiping out the scale.
     pub fn forward(self: RmsNorm, input: zml.Tensor, comptime axis: anytype) zml.Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{axis});
-        const normalized = zml.nn.rmsNorm(x, axis, self.eps);
-        const scale = self.weight.convert(.f32).addConstant(1).convert(x.dtype()).withTags(.{axis});
-        return normalized.mul(scale.broad(normalized.shape()));
+        const ax = x.axis(axis);
+        const xf32 = x.convert(.f32);
+        const variance = xf32.mul(xf32).mean(ax);
+        const rsqrt = zml.Tensor.rsqrt(variance.addConstant(self.eps));
+        const normalized_f32 = xf32.mul(rsqrt.broad(xf32.shape()));
+        const scale_f32 = self.weight.convert(.f32).addConstant(1).withTags(.{axis});
+        return normalized_f32.mul(scale_f32.broad(normalized_f32.shape())).convert(x.dtype());
     }
 };
 
