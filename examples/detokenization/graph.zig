@@ -15,7 +15,7 @@ pub const GraphParams = struct {
 
 pub const Graph = struct {
 
-    const Candidate = struct {
+    pub const Candidate = struct {
         node: usize,
         similarity: f16,
 

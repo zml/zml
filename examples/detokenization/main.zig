@@ -118,6 +118,8 @@ pub const Timing_handler = struct {
         std.log.info("NSW graph ext : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.nsw_graph.nanoseconds)) / 1e9 });
         std.log.info("Greedy search : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.greedy_search.nanoseconds)) / 1e9 });
         std.log.info("Pruning pool  : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.prune_pool.nanoseconds)) / 1e9 });
+        std.log.info("LLM prefill   : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.prefill.nanoseconds)) / 1e9 });
+        std.log.info("LLM decode    : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.decode.nanoseconds)) / 1e9 });
         
     }
 };
@@ -200,6 +202,7 @@ pub fn printZmlLogo(io: std.Io) !void {
     try writer.interface.flush();
 }
 
+
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
     defer http_client.deinit();
@@ -242,7 +245,6 @@ pub fn runLlm(zml_handler: *Zml_handler) !void {
     defer zml_handler.allocator.free(inspi_result);
     zml_handler.mem.check(0);
 }
-
 
 pub fn runTests(zml_handler: *Zml_handler) !void {
     var model_handler = try model_.Model_handler.init(zml_handler);
@@ -288,11 +290,12 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer zml_handler.allocator.free(inspi_tokens);
 
     zml_handler.mem.start(0);
-    const inspi_result = try inference.generateText(zml_handler, &llm, inspi_tokens);
+    const inspi_result = try inference.generateTextGraph(zml_handler, &llm, g, inspi_tokens);
     defer zml_handler.allocator.free(inspi_result);
     zml_handler.mem.check(0);
 
 }
+
 
 pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !SimilarityMatrix {
     std.log.info("Compute similarity matrix", .{});
@@ -427,6 +430,7 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Mo
     std.log.info("Similarity matrix test passed: 1000 random pairs, max_abs_diff={d}", .{max_abs_diff});
 }
 
+
 pub fn getSlice(zml_handler: *Zml_handler, tensor_name: []const u8, dtype: anytype) !zml.Slice {
     std.log.info("Getting slice {s}", .{tensor_name});
 
@@ -496,7 +500,6 @@ const TensorExtractor = struct {
         return self.tensor.convert(.f16);
     }
 };
-
 
 
 pub fn printSafetensors(registry: zml.safetensors.TensorRegistry) !void {
