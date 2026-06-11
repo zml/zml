@@ -241,8 +241,6 @@ pub fn forwardMoe(
             if (expert_partition.eql(.init(.experts))) {
 
                 const global_num_experts = weights_down.dim(.expert);
-                std.log.info("global num experts: {d}, local num experts: {d}", .{ global_num_experts, weights_down.shape().dim(.expert) });
-
                 const partial_output = zml.ops.manualComputation(
                     .{ input, topk_ids, topk_weights, weights_gate_up, weights_down },
                     input.shape().withPartitioning(.{ .b = .replicated, .s = .replicated, .d = .replicated }),
