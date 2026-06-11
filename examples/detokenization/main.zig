@@ -290,7 +290,7 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer zml_handler.allocator.free(inspi_tokens);
 
     zml_handler.mem.start(0);
-    const inspi_result = try inference.generateTextGraph(zml_handler, &llm, g, inspi_tokens);
+    const inspi_result = try inference.generateTextGraph(zml_handler, &llm, &g, inspi_tokens);
     defer zml_handler.allocator.free(inspi_result);
     zml_handler.mem.check(0);
 
