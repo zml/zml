@@ -572,13 +572,22 @@ pub const IndexerCache = struct {
 pub const CSACache = struct {
     state: CompressorState,
     indexer: IndexerCache,
+    compressed_kv: KvCache,
 
     pub fn init(mdl: Model, config: Config, batch_size: u32, seqlen: u32) CSACache {
         const compression_ratio = 4;
 
+        const compressed_shape: zml.Shape = .init(.{
+            .layer = config.num_hidden_layers,
+            .batch = batch_size,
+            .kv = @divTrunc(seqlen, compression_ratio),
+            .hd = config.head_dim,
+        }, mdl.embeds.weight.dtype());
+
         return .{
             .state = .init(config, batch_size, compression_ratio, config.head_dim),
             .indexer = .init(mdl, config, batch_size, seqlen, compression_ratio),
+            .compressed_kv = .init(compressed_shape),
         };
     }
 
@@ -586,17 +595,20 @@ pub const CSACache = struct {
         return .{
             .state = try self.state.initBuffers(allocator, io, platform, sharding),
             .indexer = try self.indexer.initBuffers(allocator, io, platform, sharding),
+            .compressed_kv = try self.compressed_kv.initBuffers(io, platform, sharding),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(CSACache)) void {
         CompressorState.unloadBuffers(&self.state);
         IndexerCache.unloadBuffers(&self.indexer);
+        KvCache.unloadBuffers(&self.compressed_kv);
     }
 };
 
 pub const HCACache = struct {
     state: CompressorState,
+    compressed_kv: KvCache,
 
     pub fn init(
         mdl: Model,
@@ -604,22 +616,31 @@ pub const HCACache = struct {
         batch_size: u32,
         seqlen: u32,
     ) HCACache {
-        _ = mdl; // autofix
-        _ = seqlen; // autofix
         const compression_ratio = 128;
+
+        const compressed_shape: zml.Shape = .init(.{
+            .layer = config.num_hidden_layers,
+            .batch = batch_size,
+            .kv = @divTrunc(seqlen, compression_ratio),
+            .hd = config.head_dim,
+        }, mdl.embeds.weight.dtype());
+
         return .{
             .state = .init(config, batch_size, compression_ratio, config.head_dim),
+            .compressed_kv = .init(compressed_shape),
         };
     }
 
     pub fn initBuffers(self: HCACache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(HCACache) {
         return .{
             .state = try self.state.initBuffers(allocator, io, platform, sharding),
+            .compressed_kv = try self.compressed_kv.initBuffers(io, platform, sharding),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(HCACache)) void {
         CompressorState.unloadBuffers(&self.state);
+        KvCache.unloadBuffers(&self.compressed_kv);
     }
 };
 
@@ -897,48 +918,61 @@ pub const Attention = struct {
         idx = idx.withTags(.{.kv});
 
         var new_cache = cache;
+        new_cache.sliding_window = cache.sliding_window.update(kv_gathered, idx, layer_idx);
+        kv = new_cache.sliding_window.get(layer_idx);
 
         var topk = topk_window2(offset_idx, seqlen, self.window_size);
 
         switch (self.compression) {
-            .none => {
-                new_cache.sliding_window = cache.sliding_window.update(kv_gathered, idx, layer_idx);
-                kv = new_cache.sliding_window.get(layer_idx);
-            },
             .csa => |csa| {
-                const kv_compressed, const new_compressor_state = csa.compressor.forward(x, offset_idx, cache.csa.state, layer_idx);
+                var kv_compressed, const new_compressor_state = csa.compressor.forward(x, offset_idx, cache.csa.state, layer_idx);
+                kv_compressed = kv_compressed.rename(.{ .seq = .kv });
 
                 const compressed_offset: u32 = if (x.dim(.seq) > 1) @intCast(kv.dim(.kv)) else self.window_size;
                 const topk_indexed, const new_indexer_cache = csa.indexer.forward(x, qr.rename(.{ .q = .d }), offset_idx, zml.Tensor.scalar(compressed_offset, .u32), cache.csa.indexer, layer_idx);
 
+                const ids_shape = offset_idx.shape().insert(.last, .{ .kv = kv_compressed.dim(.kv) });
+                var compressed_kv_cache_ids = zml.Tensor.iota(ids_shape, .kv).convert(.u32);
+                compressed_kv_cache_ids = compressed_kv_cache_ids.add(offset_idx.broad(ids_shape)).remainderConst(csa.compressor.ratio);
+
                 new_cache.csa.state = new_compressor_state;
                 new_cache.csa.indexer = new_indexer_cache;
+                new_cache.csa.compressed_kv = new_cache.csa.compressed_kv.update(kv_compressed, compressed_kv_cache_ids, layer_idx);
+
+                kv_compressed = new_cache.csa.compressed_kv.get(layer_idx);
 
                 kv = zml.Tensor.concatenate(&.{ kv, kv_compressed }, .kv);
-                topk = zml.Tensor.concatenate(&.{
-                    topk,
-                    topk_indexed,
-                }, -1).withTags(.{ .batch, .seq, .topk });
+                topk = zml.Tensor.concatenate(&.{ topk, topk_indexed, }, -1);
             },
             .hca => |compressor| {
-                const kv_compressed, const new_compressor_state = compressor.forward(x, offset_idx, cache.csa.state, layer_idx);
-                new_cache.hca.state = new_compressor_state;
-                // new_cache.hca.kv = new_cache.hca.kv.update(kv, kv_cache_idx, layer_idx);
+                var kv_compressed, const new_compressor_state = compressor.forward(x, offset_idx, cache.hca.state, layer_idx);
+                kv_compressed = kv_compressed.rename(.{ .seq = .kv });
 
-                // TODO: update cache
+                const ids_shape = offset_idx.shape().insert(.last, .{ .kv = kv_compressed.dim(.kv) });
+                var compressed_kv_cache_ids = zml.Tensor.iota(ids_shape, .kv).convert(.u32);
+                compressed_kv_cache_ids = compressed_kv_cache_ids.add(offset_idx.broad(ids_shape)).remainderConst(compressor.ratio);
+
+                new_cache.hca.state = new_compressor_state;
+                new_cache.hca.compressed_kv = new_cache.hca.compressed_kv.update(kv_compressed, compressed_kv_cache_ids, layer_idx);
+
+                kv_compressed = new_cache.hca.compressed_kv.get(layer_idx);
 
                 const compressed_offset: u32 = if (x.dim(.seq) > 1) @intCast(kv.dim(.kv)) else self.window_size;
                 const topk_compressed = compressed_topk(compressor.ratio, @intCast(x.dim(.batch)), @intCast(seqlen), compressed_offset);
 
                 kv = zml.Tensor.concatenate(&.{ kv, kv_compressed }, .kv);
-                topk = zml.Tensor.concatenate(&.{ topk, topk_compressed }, -1).withTags(.{ .batch, .seq, .topk });
+                topk = zml.Tensor.concatenate(&.{ topk, topk_compressed }, -1);
             },
+            else => {},
         }
+
+        topk = topk.withTags(.{ .batch, .seq, .topk });
 
         var attn = sparse_attn(q, kv, self.attn_sink, topk, self.softmax_scale, attention_metadata, attention_parameters);
         attn = apply_reverse_rope(attn.rename(.{ .q = .seq }), freqs_cis, self.nope_head_dim, self.rope_head_dim);
         attn = attn.reshape(.{ .batch = attn.dim(0), .seq = attn.dim(1), .g = self.o_groups, .d = .auto });
 
+        // TODO: Rework to do it during load.
         const wo_a = dequantizeScaledBlocks(self.wo_a_weight, self.wo_a_scale, self.block_scale, .bf16)
             .splitAxis(.hd, .{ .g = self.o_groups, .r = .auto });
 
@@ -1264,7 +1298,6 @@ const Expert = struct {
     }
 
     pub fn forward(self: Expert, x: zml.Tensor, weights: ?zml.Tensor) zml.Tensor {
-        // FIX: close_fraction ~= 40%
         const threshold = zml.Tensor.scalar(self.activation_threshold, .f32);
 
         const up = self.w3.forward(x).convert(.f32).clamp(threshold.negate(), threshold);
@@ -1501,7 +1534,8 @@ pub const Model = struct {
     sampling_strategy: zml.nn.SamplingStrategy,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
-        const layers = try allocator.alloc(Layer, 4); // config.num_hidden_layers
+        const layers = try allocator.alloc(Layer, 2);
+        // const layers = try allocator.alloc(Layer, config.num_hidden_layers);
 
         for (layers, 0..) |*layer, i| {
             const layer_store = store.withPrefix("layers").withLayer(i);
