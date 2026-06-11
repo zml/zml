@@ -23,7 +23,7 @@ pub const Llm_handler = struct {
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
 
-        try main.printSafetensors(registry);
+        //try main.printSafetensors(registry);
 
         std.log.info("LLM parse config and safetensors", .{});
         const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
@@ -62,8 +62,12 @@ pub const Llm_handler = struct {
         const exes = try compileModel(zml_handler, model, options);
 
         std.log.info("LLM load buffers", .{});
-        const model_buffers = try model.load(zml_handler, &store);
+        var model_buffers = try model.load(zml_handler, &store);
+        errdefer Llm.unloadBuffers(&model_buffers, zml_handler.allocator);
         std.log.info("LLM model loaded", .{});
+
+        var kv_cache_buffers = try kv_cache.initBuffer(zml_handler.io, zml_handler.platform, .replicated);
+        errdefer KvCache.deinitBuffer(&kv_cache_buffers);
 
         return .{
             .model = model,
@@ -74,7 +78,7 @@ pub const Llm_handler = struct {
             .tokenizer = tokenizer,
             .exes = exes,
             .model_buffers = model_buffers,
-            .kv_cache_buffers = try kv_cache.initBuffer(zml_handler.io, zml_handler.platform, .replicated),
+            .kv_cache_buffers = kv_cache_buffers,
         };
     }
 
@@ -219,6 +223,7 @@ pub const Llm_handler = struct {
     }
 
     pub fn deinit(self: *Llm_handler, allocator: std.mem.Allocator) void {
+        self.unloadBuffers(allocator);
         self.model.deinit(allocator);
         self.config.deinit(allocator);
         self.generation_config.deinit(allocator);
@@ -227,6 +232,7 @@ pub const Llm_handler = struct {
     }
 
 };
+
 
 pub const TokenIds = stdx.json.Union(union(enum) {
     int: u32,
