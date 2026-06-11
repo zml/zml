@@ -7,6 +7,8 @@ const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
 
+const XET_INTRA_TENSOR_WORKERS: usize = 4;
+
 pub const API = struct {
     const TREE_URL_TEMPLATE = "https://huggingface.co/api/models/{[repo]s}/{[model]s}/tree/{[rev]s}/{[path]s}?expand=false&recursive=true&limit=1000";
     const LFS_FILE_URL_TEMPLATE = "https://huggingface.co/{[repo]s}/{[model]s}/resolve/{[rev]s}/{[path]s}";
@@ -720,13 +722,21 @@ pub const HF = struct {
         if (handle.xet_file_id) |fid| {
             const repo: Repo = try .parse(handle.uri);
             const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
-            const remaining = handle.size - offset;
-            const take: usize = @intCast(@min(@as(u64, data[0].len), remaining));
+            const remaining: usize = @intCast(handle.size - offset);
+            const take = @min(data[0].len, remaining);
             if (take == 0) return 0;
-            var xet_reader = try xet.FileRangeReader.init(self.allocator, self.client, self.hf_token_raw, xet_repo, fid, offset, take);
-            defer xet_reader.deinit();
-            var dst_w: std.Io.Writer = .fixed(data[0][0..take]);
-            return try xet_reader.interface.streamRemaining(&dst_w);
+            try xet.fetchRange(
+                self.allocator,
+                self.base.inner,
+                self.client,
+                self.hf_token_raw,
+                xet_repo,
+                fid,
+                offset,
+                data[0][0..take],
+                XET_INTRA_TENSOR_WORKERS,
+            );
+            return take;
         }
 
         var range_buf: [64]u8 = undefined;
