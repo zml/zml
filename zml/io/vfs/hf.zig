@@ -722,8 +722,8 @@ pub const HF = struct {
         if (handle.xet_file_id) |fid| {
             const repo: Repo = try .parse(handle.uri);
             const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
-            const remaining: usize = @intCast(handle.size - offset);
-            const take = @min(data[0].len, remaining);
+            const remaining = handle.size - offset;
+            const take: usize = @intCast(@min(remaining, @as(u64, data[0].len)));
             if (take == 0) return 0;
             try xet.fetchRange(
                 self.allocator,
