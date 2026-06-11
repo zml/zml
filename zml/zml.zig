@@ -28,6 +28,7 @@ pub const mem = @import("mem.zig");
 pub const Bufferized = mem.Bufferized;
 pub const meta = @import("meta.zig");
 pub const mlir = @import("mlirx.zig");
+pub const raw_mlir = @import("mlir");
 pub const module = @import("module.zig");
 pub const CompilationOptions = module.CompilationOptions;
 pub const moe = @import("moe/moe.zig");
