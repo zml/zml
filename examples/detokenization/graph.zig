@@ -33,10 +33,13 @@ pub const Graph = struct {
     lm_head_normalized: zml.Slice,
     similarity_matrix: *main.SimilarityMatrix,
     // graph fields
+    // TODO: we can use smaller integer types
     n: usize,
     params: GraphParams,
     neighbors: []usize,
     nb_neighbors: []usize,
+    // TODO: for NSW extension, we could store similarities relative to neighbors
+    // either in a separate array or as a Neighbor struct { .node, .similarity }
     // search fields
     medoid: usize,
     // the max number of candidates, each candidate is a scored node so
@@ -270,6 +273,7 @@ pub const Graph = struct {
         std.debug.assert(!self.is_visited[node]);
         std.debug.assert(self.nb_visited > 0);
         std.debug.assert(self.L > 0);
+        // TODO: is we split pool management into visited and active pool, we can simplify
         
         self.is_visited[node] = true;
         // this is the lowest score of the active pool
@@ -329,6 +333,9 @@ pub const Graph = struct {
     }
 
     pub fn cleanup(self: *Graph) void {
+        // TODO: if this is slow, we can use epoch based flags instead of booleans
+        // we can store it on one byte, like a bool, and clean it only each 256 epochs
+        // is_expanded can be left uncleaned, and initialized at insertion instead of this
         for (0..self.nb_visited) |i| {
             const node = self.visited[i].node;
             self.is_visited[node] = false;
@@ -405,6 +412,7 @@ pub const Graph = struct {
     }
 
     pub fn pruneCandidates(self: *Graph, i: usize, candidates: []Candidate) void {
+        // TODO: split reverse/forward prune timers
         self.zml_handler.tic(&self.zml_handler.timers.prune_pool);
         // we assume candidates similarities is already set
         std.mem.sort(Candidate, candidates, {}, Candidate.beforeThan);
@@ -413,6 +421,7 @@ pub const Graph = struct {
         const start_neigh = i * self.params.k_max;
         self.nb_neighbors[i] = 0;
         for (candidates) |candidate| {
+            // TODO: pass candidates to los, to avoid recomputing similarity
             if (!self.lineOfSight(i, candidate.node)) continue;
             self.neighbors[start_neigh + self.nb_neighbors[i]] = candidate.node;
             self.nb_neighbors[i] += 1;
@@ -423,6 +432,7 @@ pub const Graph = struct {
     
     // --------------------- LOS heuristic ---------------------- //
 
+    // TODO: inline manually inside pruneCandidates (recomputes similarity and neighbor range)
     pub fn lineOfSight(self: *const Graph, base: usize, candidate: usize) bool {
         // The LOS heuristic decides if a candidate node can be added to base's neighbors
         // If any of base's neighbor is already close enough from candidate, then it's rejected,
@@ -516,6 +526,11 @@ pub const Graph = struct {
                         self.addNeighbor(neighbor, current_node);
                         continue;
                     }
+
+                    // TODO: can add a fail fast heuristic
+                    // - if current_node is further than any neighbor
+                    // - if neighbor row is already pruned
+                    // in this case, no room will be made by pruning and current node will never be added
                     
                     // reverse candidates : neighbor's neighbors + current_node
                     nb_candidates = 0;
@@ -529,6 +544,8 @@ pub const Graph = struct {
                         candidates[nb_candidates].similarity = self.similarity(neighbor, neigh_neigh);
                         nb_candidates += 1;
                     }
+                    // TODO: if we maintain neighbors sorted by similarity, we can simply do a reverse linear pass
+                    // to insert current_node at the right position in candidates, and avoid the sort in pruneCandidates
                     // we already tested that current_node is not a neighbor of neighbor
                     candidates[nb_candidates].node = current_node;
                     candidates[nb_candidates].similarity = self.similarity(neighbor, current_node);

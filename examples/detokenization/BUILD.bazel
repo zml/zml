@@ -5,6 +5,8 @@ zig_binary(
     main = "main.zig",
     srcs = [
         "graph.zig",
+        "inference.zig",
+        "llm.zig",
         "main.zig",
         "model.zig",
     ],
