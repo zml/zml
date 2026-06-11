@@ -160,8 +160,7 @@ pub fn run(
     // }
 
     std.log.info("Full model:", .{});
-    const sharding_list = shardings.all();
-    try runFullTextModel(allocator, io, platform, &activation_store, &sharding_list, text_model, text_buffers);
+    try runFullTextModel(allocator, io, platform, &activation_store, shardings, text_model, text_buffers);
 }
 
 fn runTransformerLayer(
@@ -290,7 +289,7 @@ fn runFullTextModel(
     io: std.Io,
     platform: *zml.Platform,
     activation_store: *zml.io.TensorStore,
-    shardings: []const zml.Sharding,
+    shardings: common.Shardings,
     text_model: *const model.TextModel,
     text_buffers: *zml.Bufferized(model.TextModel),
 ) !void {
@@ -308,7 +307,7 @@ fn runFullTextModel(
 
     // 2. KV cache shape: (layer, b, k, h, hd).
     const attn0 = text_model.layers[0].attn;
-    const model_partitions = shardings[0].numPartitionsForLogicalAxis(.model);
+    const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
     const kv_shape_unsharded = zml.Shape.init(.{
         .layer = @as(i64, @intCast(model.default_config.num_hidden_layers)),
         .b = tokens_t.dim(.b),
@@ -327,7 +326,7 @@ fn runFullTextModel(
         text_model.*,
         .forward,
         TraceArgs{ tokens_t, token_index_t, kv_traced },
-        .{ .shardings = shardings },
+        .{ .shardings = &shardings.all() },
     );
     defer exe.deinit();
 
@@ -350,9 +349,9 @@ fn runFullTextModel(
     const v_init = try allocator.alloc(u8, kv_bytes);
     defer allocator.free(v_init);
     @memset(v_init, 0);
-    var k_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, k_init);
+    var k_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, shardings.model, k_init);
     defer k_buf.deinit();
-    var v_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, .replicated, v_init);
+    var v_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, shardings.model, v_init);
     defer v_buf.deinit();
     const kv_buffers: model.KvCache.Buffer = .{ .k = k_buf, .v = v_buf };
 

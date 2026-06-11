@@ -1155,10 +1155,12 @@ pub const Moe = struct {
     }
 
     pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
-        if (self.layer_idx >= 42 and self.layer_idx <= 44) {
-            return self.forwardLoop(x);
-        }
-        return self.forwardTriton(x);
+        return self.forwardLoop(x);
+
+        // if (self.layer_idx >= 42 and self.layer_idx <= 44) {
+        //     return self.forwardLoop(x);
+        // }
+        // return self.forwardTriton(x);
     }
 
     fn forwardTriton(self: Moe, x: zml.Tensor) zml.Tensor {
@@ -1314,8 +1316,6 @@ pub const LoadedModel = struct {
 
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         _ = self;
-        buffers.lm_head.weight.deinit();
-
         Model.unloadBuffers(buffers, allocator);
     }
 
