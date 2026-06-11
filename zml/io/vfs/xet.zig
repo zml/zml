@@ -1,4 +1,5 @@
 const std = @import("std");
+const stdx = @import("stdx");
 const lz4 = @import("lz4.zig");
 const bg4 = @import("bg4.zig");
 
@@ -24,18 +25,18 @@ pub const Repo = struct {
 
 const Term = struct {
     hash: []const u8,
-    unpacked_length: u64,
-    range: struct { start: u64, end: u64 },
+    unpacked_length: usize,
+    range: struct { start: usize, end: usize },
 };
 
 const FetchUrl = struct {
-    range: struct { start: u64, end: u64 },
+    range: struct { start: usize, end: usize },
     url: []const u8,
-    url_range: struct { start: u64, end: u64 },
+    url_range: struct { start: usize, end: usize },
 };
 
 const ReconstructionResponse = struct {
-    offset_into_first_range: u64,
+    offset_into_first_range: usize,
     terms: []const Term,
     fetch_info: std.json.ArrayHashMap([]const FetchUrl) = .{},
 };
@@ -187,273 +188,274 @@ fn fetchReconstruction(
     });
 }
 
-// ── FileRangeReader (std.Io.Reader implementation) ─────────────────────────
+// ── ChunkIterator ──────────────────────────────────────────────────────────
 
-/// Streams the bytes of the file range `[offset, offset+length)` of
-/// `(repo, file_id)` through the XET CAS. Drive it with
-/// `interface.streamRemaining(writer)` or any other `std.Io.Reader` consumer.
-///
-/// Internally walks the reconstruction response: a sequence of *terms*
-/// (each a sub-range of one xorb), each xorb materialized via a single
-/// HTTP range GET, then walked as a sequence of compressed *chunks*
-/// emitted one at a time into the destination writer.
-pub const FileRangeReader = struct {
-    allocator: std.mem.Allocator,
-    client: *std.http.Client,
-    parsed: std.json.Parsed(ReconstructionResponse),
+/// Walks a fully-buffered xorb body, yielding chunks one at a time.
+pub const ChunkIterator = struct {
+    data: []const u8,
+    pos: usize = 0,
 
-    /// Total unpacked bytes still to emit before EOF.
-    remaining: u64,
-    /// Bytes to drop from the head of the next decompressed chunk
-    /// (decreases as the first chunk is emitted).
-    skip_head: u64,
-
-    term_idx: usize = 0,
-    /// Number of output chunks left to read from the current term (0 when no
-    /// term is active).
-    chunks_remaining_in_term: u64 = 0,
-
-    // Live HTTP state for the current xorb. `http_req` owns the connection;
-    // `http_reader` is `&http_req.reader.interface` (so http_req must stay at
-    // a stable address while http_reader is in use). Both null between terms.
-    http_req: ?std.http.Client.Request = null,
-    http_reader: ?*std.Io.Reader = null,
-
-    /// Body-reader scratch (used by stdlib for chunked-encoding/content-length
-    /// parsing). One per FileRangeReader; reused across terms.
-    xorb_transfer_buf: [16 * 1024]u8 = undefined,
-    /// One compressed chunk pulled off the xorb body. Xet caps chunks at
-    /// 64 KiB uncompressed; 128 KiB covers worst-case LZ4 inflation.
-    xorb_chunk_comp_buf: [128 * 1024]u8 = undefined,
-    /// Redirect-tracking scratch for receiveHead.
-    xorb_redirect_buf: [8 * 1024]u8 = undefined,
-
-    /// Scratch for one decompressed chunk. Only used when the destination
-    /// writer can't fit the chunk directly (head trim, tail clip, or a
-    /// writer whose `writableSliceGreedy` is too small).
-    chunk_buf: [256 * 1024]u8 = undefined,
-    /// `chunk_buf[chunk_pos..chunk_end]` is the slice still pending emission.
-    chunk_pos: usize = 0,
-    chunk_end: usize = 0,
-
-    interface: std.Io.Reader,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        client: *std.http.Client,
-        hf_token: []const u8,
-        repo: Repo,
-        file_id: []const u8,
-        offset: u64,
-        length: u64,
-    ) !FileRangeReader {
-        const cas = try fetchCasAuth(allocator, client, repo, hf_token);
-        defer allocator.free(cas.url);
-        defer allocator.free(cas.token);
-
-        var cas_auth_buf: [4096]u8 = undefined;
-        const cas_auth = std.fmt.bufPrint(&cas_auth_buf, "Bearer {s}", .{cas.token}) catch return error.TokenTooLong;
-
-        const parsed = try fetchReconstruction(allocator, client, cas.url, cas_auth, file_id, offset, offset + length - 1);
-        errdefer parsed.deinit();
-
-        return .{
-            .allocator = allocator,
-            .client = client,
-            .parsed = parsed,
-            .remaining = length,
-            .skip_head = parsed.value.offset_into_first_range,
-            .interface = .{
-                .vtable = &.{ .stream = stream },
-                .buffer = &.{},
-                .seek = 0,
-                .end = 0,
-            },
-        };
-    }
-
-    pub fn deinit(self: *FileRangeReader) void {
-        if (self.http_req) |*req| req.deinit();
-        self.parsed.deinit();
-    }
-
-    /// Tear down any in-flight HTTP request. Safe to call repeatedly.
-    fn closeXorb(self: *FileRangeReader) void {
-        if (self.http_req) |*req| {
-            req.deinit();
-            self.http_req = null;
-            self.http_reader = null;
-        }
-    }
-
-    /// Advance to the next term: tear down the previous xorb request, issue
-    /// a fresh range GET for the new term's xorb window, then read+discard
-    /// chunks until the term's first chunk is at the head of the stream.
-    /// Returns `false` when no terms remain.
-    fn openNextTerm(self: *FileRangeReader) !bool {
-        self.closeXorb();
-
-        const terms = self.parsed.value.terms;
-        if (self.term_idx >= terms.len) return false;
-        const term = terms[self.term_idx];
-        self.term_idx += 1;
-
-        const fetch_urls = self.parsed.value.fetch_info.map.get(term.hash) orelse return error.NoFetchUrlsForXorb;
-        const fu = for (fetch_urls) |*u| {
-            if (term.range.start >= u.range.start and term.range.end <= u.range.end) break u;
-        } else return error.ChunkOutsideFetchUrls;
-
-        try self.openXorbBody(fu);
-        errdefer self.closeXorb();
-
-        var i: u64 = fu.range.start;
-        while (i < term.range.start) : (i += 1) try self.discardOneChunk();
-        self.chunks_remaining_in_term = term.range.end - term.range.start;
-        return true;
-    }
-
-    /// Issue the xorb range GET with bounded retry on transient errors
-    /// (HTTP 5xx, 429, and connection-level failures from request /
-    /// sendBodiless / receiveHead). 4xx (other than 429) fails immediately.
-    fn openXorbBody(self: *FileRangeReader, fu: *const FetchUrl) !void {
-        const max_attempts: u32 = 4;
-        var backoff_ms: u64 = 250;
-        var attempt: u32 = 0;
-        while (true) : (attempt += 1) {
-            self.tryOpenXorbBody(fu) catch |err| {
-                self.closeXorb();
-                if (err == error.XorbFetchPermanent or attempt + 1 >= max_attempts) {
-                    log.err("xorb fetch failed after {d} attempt(s): {s} (url={s})", .{ attempt + 1, @errorName(err), fu.url });
-                    return error.XorbFetchFailed;
-                }
-                log.warn("xorb fetch attempt {d}/{d} failed: {s} — retrying in {d}ms", .{ attempt + 1, max_attempts, @errorName(err), backoff_ms });
-                sleepMs(backoff_ms);
-                backoff_ms *= 2;
-                continue;
-            };
-            return;
-        }
-    }
-
-    fn tryOpenXorbBody(self: *FileRangeReader, fu: *const FetchUrl) !void {
-        const uri: std.Uri = try .parse(fu.url);
-        var range_buf: [64]u8 = undefined;
-        const range = try std.fmt.bufPrint(&range_buf, "bytes={}-{}", .{ fu.url_range.start, fu.url_range.end });
-
-        self.http_req = try self.client.request(.GET, uri, .{
-            .headers = .{ .accept_encoding = .{ .override = "identity" } },
-            .extra_headers = &.{.{ .name = "Range", .value = range }},
-        });
-        try self.http_req.?.sendBodiless();
-        var res = try self.http_req.?.receiveHead(&self.xorb_redirect_buf);
-        if (res.head.status != .ok and res.head.status != .partial_content) {
-            const code = @intFromEnum(res.head.status);
-            if (code == 429 or (code >= 500 and code < 600)) {
-                log.warn("xorb HTTP {d} (transient)", .{code});
-                return error.XorbFetchTransient;
-            }
-            log.err("xorb HTTP {d} (permanent) from {s}", .{ code, fu.url });
-            return error.XorbFetchPermanent;
-        }
-        self.http_reader = res.reader(&self.xorb_transfer_buf);
-    }
-
-    /// Read one chunk header off the live HTTP body and discard `csize`
-    /// payload bytes. Used to skip chunks before `term.range.start`.
-    fn discardOneChunk(self: *FileRangeReader) !void {
-        var hdr: [chunk_header_size]u8 = undefined;
-        self.http_reader.?.readSliceAll(&hdr) catch return error.UnexpectedXorbEnd;
-        if (hdr[0] != 0) return error.InvalidVersion;
-        const csize: u32 = @as(u32, hdr[1]) | (@as(u32, hdr[2]) << 8) | (@as(u32, hdr[3]) << 16);
-        self.http_reader.?.discardAll(csize) catch return error.UnexpectedXorbEnd;
-    }
-
-    /// Read one full chunk (header + compressed payload) off the live HTTP
-    /// body into `xorb_chunk_comp_buf`.
-    fn readOneChunk(self: *FileRangeReader) !Chunk {
-        var hdr: [chunk_header_size]u8 = undefined;
-        self.http_reader.?.readSliceAll(&hdr) catch return error.UnexpectedXorbEnd;
+    pub fn next(self: *ChunkIterator) !?Chunk {
+        if (self.pos >= self.data.len) return null;
+        if (self.pos + chunk_header_size > self.data.len) return error.TruncatedData;
+        const hdr = self.data[self.pos..][0..chunk_header_size];
         if (hdr[0] != 0) return error.InvalidVersion;
         const csize: u32 = @as(u32, hdr[1]) | (@as(u32, hdr[2]) << 8) | (@as(u32, hdr[3]) << 16);
         const ctype = hdr[4];
         if (ctype > 2) return error.InvalidCompressionType;
         const usize_uncomp: u32 = @as(u32, hdr[5]) | (@as(u32, hdr[6]) << 8) | (@as(u32, hdr[7]) << 16);
-        if (csize > self.xorb_chunk_comp_buf.len) return error.ChunkTooLarge;
-        self.http_reader.?.readSliceAll(self.xorb_chunk_comp_buf[0..csize]) catch return error.UnexpectedXorbEnd;
+        const body_start = self.pos + chunk_header_size;
+        if (body_start + csize > self.data.len) return error.TruncatedData;
+        self.pos = body_start + csize;
         return .{
             .compressed_size = csize,
             .uncompressed_size = usize_uncomp,
             .compression_type = ctype,
-            .compressed_data = self.xorb_chunk_comp_buf[0..csize],
+            .compressed_data = self.data[body_start..][0..csize],
         };
     }
+};
 
-    /// Pull the next chunk that contributes to the output (advancing
-    /// terms as needed). Returns `null` at EOF.
-    fn nextOutputChunk(self: *FileRangeReader) !?Chunk {
-        while (true) {
-            if (self.http_reader != null and self.chunks_remaining_in_term > 0) {
-                self.chunks_remaining_in_term -= 1;
-                return try self.readOneChunk();
+// ── HTTP range GET into a slice (with retry) ───────────────────────────────
+
+fn httpRangeGetIntoSlice(
+    client: *std.http.Client,
+    url: []const u8,
+    start: usize,
+    end_inclusive: usize,
+    dst: []u8,
+) !void {
+    const max_attempts: u32 = 4;
+    var backoff_ms: u64 = 250;
+    var attempt: u32 = 0;
+    while (true) : (attempt += 1) {
+        tryHttpRangeGetIntoSlice(client, url, start, end_inclusive, dst) catch |err| {
+            if (err == error.XorbFetchPermanent or attempt + 1 >= max_attempts) {
+                log.err("xorb fetch failed after {d} attempt(s): {s} (url={s})", .{ attempt + 1, @errorName(err), url });
+                return error.XorbFetchFailed;
             }
-            if (!try self.openNextTerm()) return null;
-        }
+            log.warn("xorb fetch attempt {d}/{d} failed: {s} — retrying in {d}ms", .{ attempt + 1, max_attempts, @errorName(err), backoff_ms });
+            sleepMs(backoff_ms);
+            backoff_ms *= 2;
+            continue;
+        };
+        return;
     }
+}
 
-    fn stream(reader: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const self: *FileRangeReader = @alignCast(@fieldParentPtr("interface", reader));
-        if (self.remaining == 0) return error.EndOfStream;
+fn tryHttpRangeGetIntoSlice(
+    client: *std.http.Client,
+    url: []const u8,
+    start: usize,
+    end_inclusive: usize,
+    dst: []u8,
+) !void {
+    const uri: std.Uri = try .parse(url);
+    var range_buf: [64]u8 = undefined;
+    const range = try std.fmt.bufPrint(&range_buf, "bytes={}-{}", .{ start, end_inclusive });
 
-        // 1. Drain any leftover bytes from `chunk_buf` from a previous call
-        //    (head-trimmed first chunk or partial last chunk).
-        if (self.chunk_pos < self.chunk_end) {
-            const avail = self.chunk_buf[self.chunk_pos..self.chunk_end];
-            const cap: usize = @intCast(@min(@as(u64, avail.len), @min(self.remaining, @intFromEnum(limit))));
-            const n = writer.write(avail[0..cap]) catch return error.WriteFailed;
-            if (n == 0) return error.WriteFailed;
-            self.chunk_pos += n;
-            self.remaining -= n;
-            return n;
+    var req = try client.request(.GET, uri, .{
+        .headers = .{ .accept_encoding = .{ .override = "identity" } },
+        .extra_headers = &.{.{ .name = "Range", .value = range }},
+    });
+    defer req.deinit();
+    try req.sendBodiless();
+
+    var redirect_buf: [8 * 1024]u8 = undefined;
+    var res = try req.receiveHead(&redirect_buf);
+    if (res.head.status != .ok and res.head.status != .partial_content) {
+        const code = @intFromEnum(res.head.status);
+        if (code == 429 or (code >= 500 and code < 600)) {
+            log.warn("xorb HTTP {d} (transient)", .{code});
+            return error.XorbFetchTransient;
         }
+        log.err("xorb HTTP {d} (permanent) from {s}", .{ code, url });
+        return error.XorbFetchPermanent;
+    }
+    var transfer_buf: [16 * 1024]u8 = undefined;
+    const reader = res.reader(&transfer_buf);
+    reader.readSliceAll(dst) catch return error.XorbFetchTransient;
+}
 
-        // 2. Pull the next chunk that contributes to the output.
-        const chunk = (self.nextOutputChunk() catch return error.ReadFailed) orelse return error.EndOfStream;
+// ── Range fetch (worker-based, fills dst synchronously) ────────────────────
 
-        // 3. Zero-copy fast path: no head trim, full chunk fits within the
-        //    remaining byte budget and the writer's contiguous writable
-        //    slot. Decompress straight into the writer's buffer.
-        const uncomp: usize = chunk.uncompressed_size;
-        if (self.skip_head == 0 and self.remaining >= uncomp and @intFromEnum(limit) >= uncomp) {
-            const slot = writer.writableSliceGreedy(uncomp) catch return error.WriteFailed;
-            if (slot.len >= uncomp) {
-                _ = decompressChunk(chunk, slot) catch return error.ReadFailed;
-                writer.advance(uncomp);
-                self.remaining -= uncomp;
-                return uncomp;
+/// One term's contribution to the output: a contiguous slice of `dst[]`
+/// produced by decompressing a chunk-range of one FetchUrl's body.
+const TermPlan = struct {
+    chunk_start: usize,
+    chunk_end: usize, // exclusive
+    byte_skip: usize, // bytes to drop inside the first contributing chunk
+    wanted_len: usize, // bytes to copy into dst
+    dst_off: usize, // absolute offset in caller's dst[]
+    bytes_written: usize = 0,
+};
+
+/// One HTTP body to download. All TermPlans share the same FetchUrl.
+const FetchTask = struct {
+    xorb_hash: []const u8,
+    url: []const u8,
+    url_range_start: usize,
+    url_range_end: usize, // inclusive
+    byte_len: usize,
+    chunk_idx_start: usize,
+    term_plans: std.ArrayList(TermPlan),
+};
+
+fn freeFetchTasks(allocator: std.mem.Allocator, tasks: *std.ArrayList(FetchTask)) void {
+    for (tasks.items) |*t| t.term_plans.deinit(allocator);
+    tasks.deinit(allocator);
+}
+
+/// Walk `resp.terms` once. For each term, find its single covering FetchUrl
+/// in `resp.fetch_info`, bucket a TermPlan under the matching FetchTask.
+fn buildFetchTasks(
+    allocator: std.mem.Allocator,
+    resp: ReconstructionResponse,
+    dst_len: usize,
+) !std.ArrayList(FetchTask) {
+    var tasks: std.ArrayList(FetchTask) = .empty;
+    errdefer freeFetchTasks(allocator, &tasks);
+
+    var dst_off: usize = 0;
+    var skip_head: usize = resp.offset_into_first_range;
+
+    for (resp.terms) |term| {
+        if (dst_off >= dst_len) break;
+        const avail = term.unpacked_length - skip_head;
+        const wanted = @min(avail, dst_len - dst_off);
+
+        const fus = resp.fetch_info.map.get(term.hash) orelse return error.NoFetchUrlsForXorb;
+        const fu = for (fus) |*u| {
+            if (term.range.start >= u.range.start and term.range.end <= u.range.end) break u;
+        } else return error.NoFetchUrlCoversTerm;
+
+        // Linear scan: N is small (tens or hundreds of terms per fetchRange call) and the
+        // cost is dwarfed by the HTTP round-trip per task.
+        var task_idx: usize = tasks.items.len;
+        for (tasks.items, 0..) |*t, i| {
+            if (t.url_range_start == fu.url_range.start and
+                t.url_range_end == fu.url_range.end and
+                std.mem.eql(u8, t.xorb_hash, term.hash))
+            {
+                task_idx = i;
+                break;
             }
-            // Writer can't take a contiguous slot big enough — fall through.
+        }
+        if (task_idx == tasks.items.len) {
+            try tasks.append(allocator, .{
+                .xorb_hash = term.hash,
+                .url = fu.url,
+                .url_range_start = fu.url_range.start,
+                .url_range_end = fu.url_range.end,
+                .byte_len = fu.url_range.end - fu.url_range.start + 1,
+                .chunk_idx_start = fu.range.start,
+                .term_plans = .empty,
+            });
         }
 
-        // 4. Fallback: decompress into the scratch `chunk_buf`, apply head
-        //    trim, then emit as much as fits in this call. Remainder stays
-        //    in `chunk_buf` for the next stream() call.
-        const decoded = decompressChunk(chunk, &self.chunk_buf) catch return error.ReadFailed;
-        var start: usize = 0;
-        if (self.skip_head > 0) {
-            const drop: usize = @intCast(@min(self.skip_head, @as(u64, decoded.len)));
-            self.skip_head -= drop;
-            start = drop;
-        }
-        self.chunk_pos = start;
-        self.chunk_end = decoded.len;
+        try tasks.items[task_idx].term_plans.append(allocator, .{
+            .chunk_start = term.range.start,
+            .chunk_end = term.range.end,
+            .byte_skip = skip_head,
+            .wanted_len = wanted,
+            .dst_off = dst_off,
+        });
 
-        const avail = self.chunk_buf[self.chunk_pos..self.chunk_end];
-        if (avail.len == 0) return 0; // entire chunk was head-trim — caller loops.
-        const cap: usize = @intCast(@min(@as(u64, avail.len), @min(self.remaining, @intFromEnum(limit))));
-        const n = writer.write(avail[0..cap]) catch return error.WriteFailed;
-        if (n == 0) return error.WriteFailed;
-        self.chunk_pos += n;
-        self.remaining -= n;
-        return n;
+        dst_off += wanted;
+        skip_head = 0;
+    }
+    return tasks;
+}
+
+const FetchCtx = struct {
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    client: *std.http.Client,
+    dst: []u8,
+    err_mutex: std.Io.Mutex = .init,
+    err: ?anyerror = null,
+
+    fn setError(self: *FetchCtx, e: anyerror) void {
+        self.err_mutex.lockUncancelable(self.io);
+        defer self.err_mutex.unlock(self.io);
+        if (self.err == null) self.err = e;
     }
 };
+
+fn fetchWorker(ctx: *FetchCtx, task: *FetchTask) void {
+    fetchWorkerImpl(ctx, task) catch |e| ctx.setError(e);
+}
+
+fn fetchWorkerImpl(ctx: *FetchCtx, task: *FetchTask) !void {
+    const body = try ctx.allocator.alloc(u8, task.byte_len);
+    defer ctx.allocator.free(body);
+    try httpRangeGetIntoSlice(ctx.client, task.url, task.url_range_start, task.url_range_end, body);
+
+    var scratch: [256 * 1024]u8 = undefined;
+    var it: ChunkIterator = .{ .data = body };
+    var chunk_idx: usize = task.chunk_idx_start;
+    while (try it.next()) |chunk| : (chunk_idx += 1) {
+        var decoded: []const u8 = &.{};
+        var have_decoded = false;
+        for (task.term_plans.items) |*tp| {
+            if (chunk_idx < tp.chunk_start or chunk_idx >= tp.chunk_end) continue;
+            if (tp.bytes_written >= tp.wanted_len) continue;
+            if (!have_decoded) {
+                decoded = try decompressChunk(chunk, &scratch);
+                have_decoded = true;
+            }
+            const src_off: usize = if (chunk_idx == tp.chunk_start) tp.byte_skip else 0;
+            const avail = decoded.len - src_off;
+            const remaining = tp.wanted_len - tp.bytes_written;
+            const take = @min(avail, remaining);
+            const dst_slice = ctx.dst[tp.dst_off + tp.bytes_written ..][0..take];
+            @memcpy(dst_slice, decoded[src_off..][0..take]);
+            tp.bytes_written += take;
+        }
+    }
+}
+
+/// Synchronously fill `dst[0..]` with `dst.len` bytes starting at file `offset`
+/// of the XET-backed file `(repo, file_id)`. Spawns up to `workers` concurrent
+/// HTTP fetches via `stdx.Io.LimitedGroup`; returns when every byte is written
+/// or any worker errors.
+pub fn fetchRange(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    client: *std.http.Client,
+    hf_token: []const u8,
+    repo: Repo,
+    file_id: []const u8,
+    offset: u64,
+    dst: []u8,
+    workers: usize,
+) !void {
+    if (dst.len == 0) return;
+
+    const cas = try fetchCasAuth(allocator, client, repo, hf_token);
+    defer allocator.free(cas.url);
+    defer allocator.free(cas.token);
+
+    var auth_buf: [4096]u8 = undefined;
+    const cas_auth = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{cas.token}) catch return error.TokenTooLong;
+
+    const parsed = try fetchReconstruction(allocator, client, cas.url, cas_auth, file_id, offset, offset + dst.len - 1);
+    defer parsed.deinit();
+
+    var tasks = try buildFetchTasks(allocator, parsed.value, dst.len);
+    defer freeFetchTasks(allocator, &tasks);
+
+    var ctx: FetchCtx = .{
+        .io = io,
+        .allocator = allocator,
+        .client = client,
+        .dst = dst,
+    };
+    var group: stdx.Io.LimitedGroup = .init(workers);
+    for (tasks.items) |*task| {
+        try group.concurrent(io, fetchWorker, .{ &ctx, task });
+    }
+    try group.await(io);
+
+    if (ctx.err) |e| return e;
+}
