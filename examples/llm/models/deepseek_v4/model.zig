@@ -104,17 +104,10 @@ pub const LinearF32 = struct {
     }
 };
 
-// fn dequantizeWeights(weight: zml.Tensor, scale: zml.Tensor, block_size: usize) zml.Tensor {
-//     const w = weight.splitAxis(0, .{ .auto, block_size }).splitAxis(-1, .{ .auto, block_size });
-//     const s= scale.insertAxes(1, .{.b}).insertAxes(.last, .{.d}).withTags(.{.a, .b, .c, .d});
-//     return w.convert(.bf16).mul(s.convert(.bf16).broad(w.shape())).reshape(weight.convert(.bf16).shape());
-// }
-
-// TODO: rewrite
-fn dequantizeWeights(weight: zml.Tensor, scale: zml.Tensor, block_size: usize) zml.Tensor {
+fn dequantizeScaledBlocks(weight: zml.Tensor, scale: zml.Tensor, block_size: usize, dtype: zml.DataType) zml.Tensor {
     // Reshape scale from [8, 32] -> [8, 1, 32, 1] to inject dummy block dimensions
     const scale_4d_shape = scale.shape().insert(1, .{1}).insert(.last, .{1});
-    const scale_4d = scale.convert(.bf16).reshape(scale_4d_shape);
+    const scale_4d = scale.convert(dtype).reshape(scale_4d_shape);
 
     // Broadcast along the block dimensions (block size = 128)
     // [8, 1, 32, 1] -> [8, 128, 32, 128]
@@ -126,10 +119,17 @@ fn dequantizeWeights(weight: zml.Tensor, scale: zml.Tensor, block_size: usize) z
     const scale_expanded = scale_broad.reshape(target_shape);
 
     // Element-wise multiplication completes the dequantization pipeline
-    return weight.convert(.bf16).mul(scale_expanded);
+    return weight.convert(dtype).mul(scale_expanded);
 }
 
-fn to_fp8(x: zml.Tensor, block_size: u32) struct { zml.Tensor, zml.Tensor } {
+fn fastRoundScale(scale: zml.Tensor) zml.Tensor {
+    // Matches kernel.py fast_round_scale(): 2 ** ceil(log2(scale)).
+    // DeepSeek V4 uses MXFP/UE8M0 activation scales for FP8 GEMMs.
+    const exponent = scale.log().divByConst(@log(2.0)).ceil();
+    return ones(scale.shape()).scale(2.0).pow(exponent);
+}
+
+fn to_fp8(x: zml.Tensor, block_size: u32, round_scale: bool) struct { zml.Tensor, zml.Tensor } {
     // x = [seq, d=4096]
     // block = 128
     stdx.debug.assert(@mod(x.dim(-1), block_size) == 0, "last dimension {} must be divisible by block_size={}", .{x.dim(-1), block_size});
@@ -146,14 +146,14 @@ fn to_fp8(x: zml.Tensor, block_size: u32) struct { zml.Tensor, zml.Tensor } {
     const fp8_max = zml.Tensor.constant(zml.DataType.f8e4m3fn.maxValue()).convert(x_blocked.dtype());
     const fp8_max_inv = ones(fp8_max.shape()).div(fp8_max);
 
-    const scale = max_block.mul(fp8_max_inv);
-    // scale.print("scale");
-    const x_fp8 = x_blocked.div(scale).clamp(fp8_min, fp8_max).reshape(x.shape());
-    // x_fp8.convert(.f8e4m3fn).print("x_fp8");
-    // const s = scale.convert(.f8e8m0).reshape(.{ scale.dim(0), scale.dim(1)});
-    // s.print("scale");
+    var scale = max_block.mul(fp8_max_inv);
+    if (round_scale) {
+        scale = fastRoundScale(scale);
+    }
 
-    return .{ x_fp8.convert(.f8e4m3fn), scale.convert(.f8e8m0).reshape(.{ scale.dim(0), scale.dim(1) }) };
+    const x_fp8 = x_blocked.div(scale).clamp(fp8_min, fp8_max).reshape(x.shape());
+
+    return .{ x_fp8.convert(.f8e4m3fn), scale.convert(.f8e8m0) };
 }
 
 const FP8Linear = struct {
@@ -176,8 +176,17 @@ const FP8Linear = struct {
         self.weight.deinit();
     }
 
+    fn dequantizeActivationF32(x_fp8: zml.Tensor, scale: zml.Tensor, block_size: usize, contract_tag: zml.Shape.Tag) zml.Tensor {
+        var x = x_fp8.splitAxis(contract_tag, .{ .kb = .auto, .bk = block_size }).convert(.f32);
+        x = x.mul(scale.convert(.f32).broad(x.shape()));
+        return x.reshape(x_fp8.shape().withDtype(.f32));
+    }
+
     pub fn forward(self: FP8Linear, x: zml.Tensor) zml.Tensor {
-        return x.dot(dequantizeWeights(self.weight, self.scale, self.block_size), self.tag);
+        const x_fp8, const x_scale = to_fp8(x, @intCast(self.block_size), true);
+        const x_dequant = dequantizeActivationF32(x_fp8, x_scale, self.block_size, self.tag);
+        const weight_dequant = dequantizeScaledBlocks(self.weight, self.scale, self.block_size, .f32);
+        return x_dequant.dot(weight_dequant, self.tag).convert(.bf16);
     }
 };
 

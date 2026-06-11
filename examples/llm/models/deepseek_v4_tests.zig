@@ -140,8 +140,8 @@ pub fn run(
         .mdl = mdl,
     };
 
-    // TODO: write why
     const dequant_opts: zml.testing.CompareOpts = .{.absolute_tolerance = 5e-2, .relative_tolerance = 2e-2 };
+    _ = dequant_opts; // autofix
 
     try ctx.testLayer("embed", .{ .batch, .seq }, mdl.embeds, model_buffers.embeds, .{});
     // try ctx.testLayer("head", .{ .batch, .seq, .hc, .d }, mdl.lm_head, model_buffers.lm_head, dequant_opts);
@@ -166,9 +166,9 @@ pub fn run(
         const cache: model.Cache = .init(mdl, config, 1, 2048);
 
         switch(mdl.layers[i].attn) {
-            .full => |full_attn| try ctx.testAttentionLayer(arena_allocator, i, cache, full_attn, model_buffers.layers[i].attn.full, dequant_opts),
-            .compress => |csa| try ctx.testCSALayer(arena_allocator, i, cache, csa, model_buffers.layers[i].attn.compress, dequant_opts),
-            .heavily_compress => |hca| try ctx.testHCALayer(arena_allocator,  i, cache, hca, model_buffers.layers[i].attn.heavily_compress, dequant_opts),
+            .full => |full_attn| try ctx.testAttentionLayer(arena_allocator, i, cache, full_attn, model_buffers.layers[i].attn.full, .{}),
+            .compress => |csa| try ctx.testCSALayer(arena_allocator, i, cache, csa, model_buffers.layers[i].attn.compress, .{}),
+            .heavily_compress => |hca| try ctx.testHCALayer(arena_allocator,  i, cache, hca, model_buffers.layers[i].attn.heavily_compress, .{}),
         }
 
         try ctx.testLayer(
@@ -180,20 +180,20 @@ pub fn run(
         );
 
         // MoE
-        // try ctx.testGateLayer(
-        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn_gate", .{i}),
-        //     .{ .seq, .d },
-        //     mdl.layers[i].ffn.gate,
-        //     model_buffers.layers[i].ffn.gate,
-        //     .{}
-        // );
+        try ctx.testGateLayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.gate", .{i}),
+            .{ .seq, .d },
+            mdl.layers[i].ffn.router,
+            model_buffers.layers[i].ffn.router,
+            .{}
+        );
         
         try ctx.testLayer(
             try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.shared_experts.w1", .{i}),
             .{ .seq, .d },
             mdl.layers[i].ffn.shared_experts.w1,
             model_buffers.layers[i].ffn.shared_experts.w1,
-            dequant_opts,
+            .{},
         );
 
         try ctx.testLayer(
@@ -201,7 +201,7 @@ pub fn run(
             .{ .seq, .dint },
             mdl.layers[i].ffn.shared_experts.w2,
             model_buffers.layers[i].ffn.shared_experts.w2,
-            dequant_opts,
+            .{},
         );
 
         try ctx.testLayer(
@@ -209,7 +209,7 @@ pub fn run(
             .{ .seq, .d },
             mdl.layers[i].ffn.shared_experts.w3,
             model_buffers.layers[i].ffn.shared_experts.w3,
-            dequant_opts,
+            .{},
         );
 
         try ctx.testExpertLayer(
@@ -217,7 +217,7 @@ pub fn run(
             .{ .seq, .d },
             mdl.layers[i].ffn.shared_experts,
             model_buffers.layers[i].ffn.shared_experts,
-            dequant_opts,
+            .{},
         );
 
         // TEST: MoE (complete)
@@ -252,12 +252,13 @@ const TestContext = struct {
         opts: zml.testing.CompareOpts
     ) !void {
         _ = cache; // autofix
+        _ = opts; // autofix
         try self.testLayer(
             try std.fmt.allocPrint(allocator, "layers.{}.attn.wq_a", .{i}),
         .{ .batch, .seq, .d },
         attn.wq_a,
         attn_buffer.wq_a,
-        opts,
+        .{},
         );
 
         try self.testLayer(
@@ -283,7 +284,7 @@ const TestContext = struct {
             .{ .batch, .seq, .d },
             attn.wkv,
             attn_buffer.wkv,
-            opts,
+            .{},
         );
 
         try self.testLayer(
@@ -294,7 +295,7 @@ const TestContext = struct {
             .{},
         );
 
-        // try ctx.testLayer(
+        // try self.testLayer(
         //     try std.fmt.allocPrint(allocator, "layers.{}.attn.wo_a", .{i}),
         //     .{ .batch, .seq, .d },
         //     attn.wo_a,
@@ -302,7 +303,7 @@ const TestContext = struct {
         //     .{}
         // );
 
-        // try ctx.testLayer(
+        // try self.testLayer(
         //     try std.fmt.allocPrint(allocator, "layers.{}.attn.wo_b", .{i}),
         //     .{ .batch, .seq, .d },
         //     attn.wo_b,
