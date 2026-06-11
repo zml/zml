@@ -723,7 +723,7 @@ pub const HF = struct {
             const repo: Repo = try .parse(handle.uri);
             const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
             const remaining = handle.size - offset;
-            const take: usize = @intCast(@min(remaining, @as(u64, data[0].len)));
+            const take: usize = @intCast(@min(remaining, data[0].len));
             if (take == 0) return 0;
             try xet.fetchRange(
                 self.allocator,
@@ -743,7 +743,7 @@ pub const HF = struct {
         const range_header = blk: {
             var total_bytes: u64 = 0;
             for (data) |buf| {
-                total_bytes += @as(u64, buf.len);
+                total_bytes += buf.len;
             }
             const remaining = handle.size - offset;
             const take = @min(remaining, total_bytes);
