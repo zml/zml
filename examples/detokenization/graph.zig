@@ -52,8 +52,18 @@ pub const Graph = struct {
     // for each candidate in visited, tells if it's neighbors have been
     // added to the pool (when true, the node had been dealt with)
     is_expanded: []bool,
+    is_search_done: bool,
     
     pub fn init(zml_handler: *main.Zml_handler, lm_head: zml.Slice, lm_head_normalized: zml.Slice, matrix: *main.SimilarityMatrix, params: GraphParams) !Graph {
+        std.debug.assert(matrix.n > 0);
+        std.debug.assert(params.k_max > 0);
+        std.debug.assert(params.L > 0);
+        std.debug.assert(params.search_budget > 0);
+        std.debug.assert(params.alpha >= 1.0);
+        std.debug.assert(matrix.k >= params.k_max);
+        std.debug.assert(params.L <= params.search_budget + params.k_max);
+        std.debug.assert(params.k_max < matrix.n);
+
         const allocator = zml_handler.allocator;
         const medoid = try getMedoid(allocator, lm_head_normalized, matrix.n, matrix.d);
 
@@ -91,6 +101,7 @@ pub const Graph = struct {
             .is_visited = is_visited,
             .nb_visited = 0,
             .is_expanded = is_expanded,
+            .is_search_done = false,
         };
     }
 
@@ -156,8 +167,8 @@ pub const Graph = struct {
             // find best node of the frontier that has not been expanded yet
             const node = self.popCandidate();
 
-            // if expansion is over, terminate the search
-            if (!self.expandNode(node)) break;
+            // if all nodes in active pool have been expanded, terminate the search
+            if (!self.is_search_done) break;
 
             // otherwise, expand search to best node neighbors
             const start_neigh = self.params.k_max * node;
@@ -169,10 +180,8 @@ pub const Graph = struct {
             }
         }
 
-        const result = self.visited[0..self.L];
         self.cleanup();
-
-        return result;
+        return self.visited[0..self.nb_visited];
     }
 
     pub fn greedySearch(self: *Graph, query: []const f16) []Candidate {
@@ -184,8 +193,8 @@ pub const Graph = struct {
             // find best node of the frontier that has not been expanded yet
             const node = self.popCandidate();
 
-            // if expansion is over, terminate the search
-            if (!self.expandNode(node)) break;
+            // if all nodes in active pool have been expanded, terminate the search
+            if (!self.is_search_done) break;
 
             // otherwise, expand search to best node neighbors
             const start_neigh = self.params.k_max * node;
@@ -196,11 +205,9 @@ pub const Graph = struct {
                 self.addCandidate(query, neighbor);
             }
         }
-
-        const result = self.visited[0..self.L];
+        
         self.cleanup();
-
-        return result;
+        return self.visited[0..self.nb_visited];
     }
 
     
@@ -226,6 +233,8 @@ pub const Graph = struct {
         self.is_visited[self.medoid] = true;
         self.visited[self.nb_visited] = .{ .node = self.medoid, .similarity = sim };
         self.nb_visited = 1;
+        self.L = 1;
+        self.is_search_done = false;
     }
     
     pub fn initSearch(self: *Graph, query: []const f16) void {
@@ -240,6 +249,8 @@ pub const Graph = struct {
         self.is_visited[self.medoid] = true;
         self.visited[self.nb_visited] = .{ .node = self.medoid, .similarity = sim };
         self.nb_visited = 1;
+        self.L = 1;
+        self.is_search_done = false;
     }
     
     pub fn addNodeCandidate(self: *Graph, query: usize, node: usize) void {
@@ -270,7 +281,7 @@ pub const Graph = struct {
             // - active pool is full: the new node is in the pool but not in the active pool
             // - active pool is not full: the end the pool is the end of the active pool
             self.visited[self.nb_visited] = .{ .node = node, .similarity = sim };
-            self.nb_visited += 1;
+            self.L = @min(self.L + 1, self.params.L);
         } else {
             // if the node is among best L nodes, there are two cases:
             // - the active pool is not full: we can do a reverse linear pass to
@@ -283,13 +294,12 @@ pub const Graph = struct {
             //   first case.
             if (self.L == self.params.L) {
                 // move worse pool element to the end of visited nodes
-                self.visited[self.nb_visited] = self.visited[self.L];
-                self.is_expanded[self.nb_visited] = self.is_expanded[self.L];
-                self.nb_visited += 1;
+                self.visited[self.nb_visited] = self.visited[self.L - 1];
+                self.is_expanded[self.nb_visited] = self.is_expanded[self.L - 1];
                 self.L -= 1;
             }
             var i = self.L;
-            while (i > 0 and sim < self.visited[i - 1].similarity) {
+            while (i > 0 and sim > self.visited[i - 1].similarity) {
                 self.visited[i] = self.visited[i - 1];
                 self.is_expanded[i] = self.is_expanded[i - 1];
                 i -= 1;
@@ -299,24 +309,21 @@ pub const Graph = struct {
             self.is_expanded[i] = false;
             self.L += 1;
         }
+        self.nb_visited += 1;
     }
 
     pub fn popCandidate(self: *Graph) usize {
         // find the best unexpanded candidate in the active pool
         // since the pool is kept sorted, return the first found
         for (0..self.L) |i| {
-            if (!self.is_expanded[i]) return self.visited[i].node;
+            if (!self.is_expanded[i]) {
+                self.is_expanded[i] = true;
+                return self.visited[i].node;
+            }
         }
-        // if all nodes of the pool are expanded, return first node
-        // since the result of pop is passed to expandNode,
-        // this will terminate because first node is expanded in tis case
+        self.is_search_done = true;
+        // return any visited node, the search is done
         return self.visited[0].node;
-    }
-
-    pub fn expandNode(self: *Graph, node: usize) bool {
-        if (self.is_expanded[node]) return false;
-        self.is_expanded[node] = true;
-        return true;
     }
 
     pub fn cleanup(self: *Graph) void {
@@ -325,8 +332,6 @@ pub const Graph = struct {
             self.is_visited[node] = false;
             self.is_expanded[i] = false;
         }
-        self.nb_visited = 0;
-        self.L = 0;
     }
     
     // ------------- Local neighborhood functions -------------- //
@@ -393,25 +398,6 @@ pub const Graph = struct {
             }
             if (i == 0 or (i + 1) % 5000 == 0 or i + 1 == self.n) {
                 log.info("Nearest neighbors LOS node {d}/{d}", .{ i + 1, self.n });
-            }
-        }
-    }
-
-    pub fn pruneNeighbors(self: *Graph) void {
-        log.info("Pruning neighbors LOS", .{});
-        for (0..self.n) |i| {
-            const start_neigh = self.params.k_max * i;
-            const end_neigh = start_neigh + self.nb_neighbors[i];
-            var nb_candidates: usize = 0;
-            var candidates = self.search_candidates;
-            for (start_neigh..end_neigh) |j| {
-                const candidate = self.neighbors[j];
-                candidates[nb_candidates] = .{ .node = candidate, .similarity = self.similarity(i, candidate) };
-                nb_candidates += 1;
-            }
-            self.pruneCandidates(i, candidates[0..nb_candidates]);
-            if (i == 0 or (i + 1) % 5000 == 0 or i + 1 == self.n) {
-                log.info("Pruning neighbors LOS node {d}/{d}", .{ i + 1, self.n });
             }
         }
     }

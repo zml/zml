@@ -137,7 +137,7 @@ pub const ModelExes = struct {
 };
 
 pub const Model = struct {
-    pub const row_batch_size: i64 = 1024;
+    pub const row_batch_size: i64 = 2048;
     pub const row_k_neighbors: i64 = 256;
 
     lm_head: zml.Tensor,
