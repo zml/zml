@@ -199,13 +199,13 @@ pub fn run(
         );
 
         // TEST: MoE (complete)
-        // try ctx.testMoELayer(
-        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn", .{i}),
-        //     .{ .batch, .seq, .d },
-        //     mdl.layers[0].ffn,
-        //     model_buffers.layers[0].ffn,
-        //     .{}
-        // );
+        try ctx.testMoELayer(
+            try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn", .{i}),
+            .{ .batch, .seq, .d },
+            mdl.layers[i].ffn,
+            model_buffers.layers[i].ffn,
+            .{}
+        );
     }
 }
 
@@ -713,12 +713,12 @@ const TestContext = struct {
         var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
         defer out_buffer_expected.deinit();
 
-        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, null }, .{ .shardings = &.{self.sharding} });
+        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor }, .{ .shardings = &.{self.sharding} });
         defer exe.deinit();
 
         var args = try exe.args(self.allocator);
         defer args.deinit(self.allocator);
-        args.set(.{ layer_buffers, in_buffer, null });
+        args.set(.{ layer_buffers, in_buffer });
 
         var res = try exe.results(self.allocator);
         defer res.deinit(self.allocator);
