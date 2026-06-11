@@ -25,8 +25,8 @@ pub fn tokenizePrompt(zml_handler: *Zml_handler, tokenizer: Tokenizer) ![]u32 {
     const im_end = tokenizer.tokenId("<|im_end|>") orelse return error.NoSuchToken;
     const newline = tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
 
-    const system_prompt = "# Instruction\nExpand the user's input into a more detailed and specific musical description:\n\n";
-    const user_prompt = "Who are you ?";
+    const system_prompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.";
+    const user_prompt = "Write a python script that computes the n-th prime number";
 
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 32);
     errdefer tokens.deinit(allocator);
@@ -39,6 +39,7 @@ pub fn tokenizePrompt(zml_handler: *Zml_handler, tokenizer: Tokenizer) ![]u32 {
     try appendEncoded(allocator, &encoder, &tokens, user_prompt);
     try tokens.appendSlice(allocator, &.{ im_end, newline, im_start });
     try appendEncoded(allocator, &encoder, &tokens, "assistant\n");
+    try appendEncoded(allocator, &encoder, &tokens, "<think>\n\n</think>\n\n");
 
     return tokens.toOwnedSlice(allocator);
 }
@@ -129,6 +130,7 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, prompt_to
     zml_handler.toc(&zml_handler.timers.prefill);
 
     std.log.info("5Hz run decode", .{});
+    const decode_start_ns = zml_handler.timers.decode.nanoseconds;
     zml_handler.tic(&zml_handler.timers.decode);
 
     const decode_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = 1 }, .u32));
@@ -187,7 +189,12 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, prompt_to
     try writer.writeAll(final_chunk);
     try writer.writeAll("\n");
     try writer.flush();
-    std.log.info("LLM done, generated {d} tokens", .{ num_tokens_generated });
     zml_handler.toc(&zml_handler.timers.decode);
+    const decode_ns = zml_handler.timers.decode.nanoseconds - decode_start_ns;
+    const tokens_per_second = if (decode_ns > 0)
+        @as(f64, @floatFromInt(num_tokens_generated)) / (@as(f64, @floatFromInt(decode_ns)) / std.time.ns_per_s)
+    else
+        0.0;
+    std.log.info("LLM done, generated {d} tokens ({d:.2} token/s)", .{ num_tokens_generated, tokens_per_second });
     return result.toOwnedSlice(allocator);
 }
