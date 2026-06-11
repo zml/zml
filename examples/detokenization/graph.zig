@@ -223,7 +223,6 @@ pub const Graph = struct {
 
     pub fn initNodeSearch(self: *Graph, query: usize) void {
         // at start, pool is empty
-        std.debug.assert(self.nb_visited == 0);
         std.debug.assert(!self.is_visited[self.medoid]);
 
         // score query against medoid
@@ -231,7 +230,7 @@ pub const Graph = struct {
 
         // medoid is the first and only visited node
         self.is_visited[self.medoid] = true;
-        self.visited[self.nb_visited] = .{ .node = self.medoid, .similarity = sim };
+        self.visited[0] = .{ .node = self.medoid, .similarity = sim };
         self.nb_visited = 1;
         self.L = 1;
         self.is_search_done = false;
@@ -239,7 +238,6 @@ pub const Graph = struct {
     
     pub fn initSearch(self: *Graph, query: []const f16) void {
         // at start, pool is empty
-        std.debug.assert(self.nb_visited == 0);
         std.debug.assert(!self.is_visited[self.medoid]);
 
         // score query against medoid
@@ -247,7 +245,7 @@ pub const Graph = struct {
 
         // medoid is the first and only visited node
         self.is_visited[self.medoid] = true;
-        self.visited[self.nb_visited] = .{ .node = self.medoid, .similarity = sim };
+        self.visited[0] = .{ .node = self.medoid, .similarity = sim };
         self.nb_visited = 1;
         self.L = 1;
         self.is_search_done = false;
