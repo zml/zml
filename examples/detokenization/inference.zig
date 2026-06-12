@@ -98,7 +98,7 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, prompt_to
         layer_index_buffers[i] = try zml.Buffer.fromSlice(io, platform, layer_index_slices[i], sharding);
     }
 
-    std.log.info("5Hz run prefill with seq_len/prompt_len of {d}/{d} tokens", .{ llm.options.seq_len, prompt_tok.len });
+    std.log.info("LLM run prefill with seq_len/prompt_len of {d}/{d} tokens", .{ llm.options.seq_len, prompt_tok.len });
     zml_handler.tic(&zml_handler.timers.prefill);
 
     var prefill_embed_buffer: zml.Buffer = undefined;
@@ -130,7 +130,7 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, prompt_to
     logit_buffer.deinit();
     zml_handler.toc(&zml_handler.timers.prefill);
 
-    std.log.info("5Hz run decode", .{});
+    std.log.info("LLM run decode", .{});
     const decode_start_ns = zml_handler.timers.decode.nanoseconds;
     zml_handler.tic(&zml_handler.timers.decode);
 
@@ -192,10 +192,7 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, prompt_to
     try writer.flush();
     zml_handler.toc(&zml_handler.timers.decode);
     const decode_ns = zml_handler.timers.decode.nanoseconds - decode_start_ns;
-    const tokens_per_second = if (decode_ns > 0)
-        @as(f64, @floatFromInt(num_tokens_generated)) / (@as(f64, @floatFromInt(decode_ns)) / std.time.ns_per_s)
-    else
-        0.0;
+    const tokens_per_second = @as(f64, @floatFromInt(num_tokens_generated)) / (@as(f64, @floatFromInt(decode_ns)) / std.time.ns_per_s);
     std.log.info("LLM done, generated {d} tokens ({d:.2} token/s)", .{ num_tokens_generated, tokens_per_second });
     return result.toOwnedSlice(allocator);
 }
@@ -215,14 +212,14 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
     var zero_buffer: zml.Buffer = try .fromSlice(io, platform, zero_slice, sharding);
     defer zero_buffer.deinit();
 
+    const embed_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = 1, .d = llm.options.hidden_size }, .f16));
+    defer embed_slice.free(allocator);
+
     const pred_slice: zml.Slice = try .alloc(allocator, .init(.{}, .u32));
     defer pred_slice.free(allocator);
     pred_slice.items(u32)[0] = @intCast(prompt_tok.len - 1);
     var pred_buffer: zml.Buffer = try .fromSlice(io, platform, pred_slice, sharding);
     defer pred_buffer.deinit();
-
-    var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
-    defer token_slice.free(allocator);
 
     const prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = llm.options.seq_len }, .u32));
     defer prefill_tokens_slice.free(allocator);
@@ -257,7 +254,7 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
     var prng = std.Random.DefaultPrng.init(0);
     const random = prng.random();
 
-    std.log.info("5Hz run graph prefill with seq_len/prompt_len of {d}/{d} tokens", .{ llm.options.seq_len, prompt_tok.len });
+    std.log.info("LLM run graph prefill with seq_len/prompt_len of {d}/{d} tokens", .{ llm.options.seq_len, prompt_tok.len });
     zml_handler.tic(&zml_handler.timers.prefill);
 
     var prefill_embed_buffer: zml.Buffer = undefined;
@@ -276,10 +273,15 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
     llm.exes.prefill_select_args.set(.{ llm.model_buffers, prefill_embed_buffer, pred_buffer });
     llm.exes.prefill_select_exe.call(llm.exes.prefill_select_args, &llm.exes.prefill_select_results);
     llm.exes.prefill_select_results.fill(.{ &one_embed_buffer });
-    token_slice.items(u32)[0] = try sampleTokenFromGraph(allocator, io, one_embed_buffer, norm_weight_slice, g, query, random, llm.config.rms_norm_eps);
+    llm.exes.graph_embed_args.set(.{ llm.model_buffers, one_embed_buffer });
+    llm.exes.graph_embed_exe.call(llm.exes.graph_embed_args, &llm.exes.graph_embed_results);
+    llm.exes.graph_embed_results.fill(.{ &one_embed_buffer });
+
+    try one_embed_buffer.toSlice(io, embed_slice);
+    var generated_token = try sampleTokenFromGraph(zml_handler, embed_slice, g, random, llm.generation_config.top_k);
     zml_handler.toc(&zml_handler.timers.prefill);
 
-    std.log.info("5Hz run graph decode", .{});
+    std.log.info("LLM run graph decode", .{});
     const decode_start_ns = zml_handler.timers.decode.nanoseconds;
     zml_handler.tic(&zml_handler.timers.decode);
 
@@ -296,7 +298,6 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
     defer allocator.free(decoder_out_buffer);
     generation: for (0..output_tokens_len + 1) |i| {
         num_tokens_generated += 1;
-        const generated_token = token_slice.items(u32)[0];
         const chunk = try tokenizer_decoder.feedOne(generated_token, decoder_out_buffer);
         try result.appendSlice(allocator, chunk);
         try writer.writeAll(chunk);
@@ -319,8 +320,11 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
             llm.exes.decode_layer_exe.call(llm.exes.decode_layer_args, &llm.exes.decode_layer_results);
             llm.exes.decode_layer_results.fill(.{ &decode_embed_buffer, &llm.kv_cache_buffers });
         }
-
-        token_slice.items(u32)[0] = try sampleTokenFromGraph(allocator, io, decode_embed_buffer, norm_weight_slice, g, query, random, llm.config.rms_norm_eps);
+        llm.exes.graph_embed_args.set(.{ llm.model_buffers, decode_embed_buffer });
+        llm.exes.graph_embed_exe.call(llm.exes.graph_embed_args, &llm.exes.graph_embed_results);
+        llm.exes.graph_embed_results.fill(.{ &decode_embed_buffer });
+        try decode_embed_buffer.toSlice(io, embed_slice);
+        generated_token = try sampleTokenFromGraph(zml_handler, embed_slice, g, random, llm.generation_config.top_k);
         decode_embed_buffer.deinit();
     }
     const final_chunk = try tokenizer_decoder.finalize(decoder_out_buffer);
@@ -330,76 +334,29 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
     try writer.flush();
     zml_handler.toc(&zml_handler.timers.decode);
     const decode_ns = zml_handler.timers.decode.nanoseconds - decode_start_ns;
-    const tokens_per_second = if (decode_ns > 0)
-        @as(f64, @floatFromInt(num_tokens_generated)) / (@as(f64, @floatFromInt(decode_ns)) / std.time.ns_per_s)
-    else
-        0.0;
+    const tokens_per_second = @as(f64, @floatFromInt(num_tokens_generated)) / (@as(f64, @floatFromInt(decode_ns)) / std.time.ns_per_s);
     std.log.info("LLM graph done, generated {d} tokens ({d:.2} token/s)", .{ num_tokens_generated, tokens_per_second });
     return result.toOwnedSlice(allocator);
 }
 
-fn sampleTokenFromGraph(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    embedding_buffer: zml.Buffer,
-    norm_weight_slice: zml.Slice,
-    g: *graph_.Graph,
-    query: []f16,
-    random: std.Random,
-    rms_norm_eps: f32,
-) !u32 {
-    var embedding_slice = try embedding_buffer.toSliceAlloc(allocator, io);
-    defer embedding_slice.free(allocator);
-    normalizeFinalEmbedding(embedding_slice, norm_weight_slice, query, rms_norm_eps);
-    const candidates = g.greedySearch(query);
-    return sampleCandidate(candidates, random);
-}
-
-fn normalizeFinalEmbedding(embedding_slice: zml.Slice, norm_weight_slice: zml.Slice, query: []f16, rms_norm_eps: f32) void {
-    const BFloat16 = zml.floats.BFloat16;
-    const embedding = embedding_slice.constItems(BFloat16);
-    const norm_weights = norm_weight_slice.constItems(BFloat16);
-    std.debug.assert(embedding.len == query.len);
-    std.debug.assert(norm_weights.len == query.len);
-
-    var variance: f32 = 0.0;
-    for (embedding) |value| {
-        const x = value.toF32();
-        variance += x * x;
-    }
-    variance /= @floatFromInt(query.len);
-    const inv_rms = 1.0 / @sqrt(variance + rms_norm_eps);
-
-    var norm2: f32 = 0.0;
-    for (embedding, norm_weights) |value, weight| {
-        const x = value.toF32() * inv_rms * weight.toF32();
-        norm2 += x * x;
-    }
-    const inv_norm = if (norm2 > 0.0) 1.0 / @sqrt(norm2) else 0.0;
-    for (embedding, norm_weights, query) |value, weight, *out| {
-        const x = value.toF32() * inv_rms * weight.toF32();
-        out.* = @floatCast(x * inv_norm);
-    }
-}
-
-fn sampleCandidate(candidates: []const graph_.Graph.Candidate, random: std.Random) u32 {
-    std.debug.assert(candidates.len > 0);
+pub fn sampleTokenFromGraph(_: *Zml_handler, embed_slice: zml.Slice, g: *graph_.Graph, random: std.Random, top_k: u32) !u32 {
+    const candidates = g.greedySearch(embed_slice.constItems(f16));
+    const nb_found = @min(g.L, top_k);
+    
     var max_score: f32 = -std.math.inf(f32);
-    for (candidates) |candidate| {
-        max_score = @max(max_score, @as(f32, @floatCast(candidate.similarity)));
+    for (0..nb_found) |i| {
+        max_score = @max(max_score, @as(f32, @floatCast(candidates[i].similarity)));
     }
-
     var total: f32 = 0.0;
-    for (candidates) |candidate| {
-        total += @exp(@as(f32, @floatCast(candidate.similarity)) - max_score);
+    for (0..nb_found) |i| {
+        total += @exp(@as(f32, @floatCast(candidates[i].similarity)) - max_score);
     }
-    if (total <= 0.0) return @intCast(candidates[0].node);
 
     const threshold = random.float(f32) * total;
     var cumulative: f32 = 0.0;
-    for (candidates) |candidate| {
-        cumulative += @exp(@as(f32, @floatCast(candidate.similarity)) - max_score);
-        if (cumulative >= threshold) return @intCast(candidate.node);
+    for (0..nb_found) |i| {
+        cumulative += @exp(@as(f32, @floatCast(candidates[i].similarity)) - max_score);
+        if (cumulative >= threshold) return @intCast(candidates[i].node);
     }
-    return @intCast(candidates[candidates.len - 1].node);
+    return @intCast(candidates[nb_found - 1].node);
 }
