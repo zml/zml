@@ -103,7 +103,7 @@ pub const Timing_handler = struct {
 
     similarity_matrix: Field_timer = .{},
     junk_rows: Field_timer = .{},
-    
+
     knn_graph: Field_timer = .{},
     nsw_graph: Field_timer = .{},
 
@@ -114,15 +114,14 @@ pub const Timing_handler = struct {
     decode: Field_timer = .{},
 
     pub fn print(self: Timing_handler) void {
-        std.log.info("Sim matrix    : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.similarity_matrix.nanoseconds)) / 1e9 });
-        std.log.info("Junk rows     : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.junk_rows.nanoseconds)) / 1e9 });
-        std.log.info("kNN graph ini : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.knn_graph.nanoseconds)) / 1e9 });
-        std.log.info("NSW graph ext : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.nsw_graph.nanoseconds)) / 1e9 });
-        std.log.info("Greedy search : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.greedy_search.nanoseconds)) / 1e9 });
-        std.log.info("Pruning pool  : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.prune_pool.nanoseconds)) / 1e9 });
-        std.log.info("LLM prefill   : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.prefill.nanoseconds)) / 1e9 });
-        std.log.info("LLM decode    : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.decode.nanoseconds)) / 1e9 });
-        
+        std.log.info("Sim matrix    : {d:>6.2}s", .{@as(f64, @floatFromInt(self.similarity_matrix.nanoseconds)) / 1e9});
+        std.log.info("Junk rows     : {d:>6.2}s", .{@as(f64, @floatFromInt(self.junk_rows.nanoseconds)) / 1e9});
+        std.log.info("kNN graph ini : {d:>6.2}s", .{@as(f64, @floatFromInt(self.knn_graph.nanoseconds)) / 1e9});
+        std.log.info("NSW graph ext : {d:>6.2}s", .{@as(f64, @floatFromInt(self.nsw_graph.nanoseconds)) / 1e9});
+        std.log.info("Greedy search : {d:>6.2}s", .{@as(f64, @floatFromInt(self.greedy_search.nanoseconds)) / 1e9});
+        std.log.info("Pruning pool  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.prune_pool.nanoseconds)) / 1e9});
+        std.log.info("LLM prefill   : {d:>6.2}s", .{@as(f64, @floatFromInt(self.prefill.nanoseconds)) / 1e9});
+        std.log.info("LLM decode    : {d:>6.2}s", .{@as(f64, @floatFromInt(self.decode.nanoseconds)) / 1e9});
     }
 };
 
@@ -204,7 +203,6 @@ pub fn printZmlLogo(io: std.Io) !void {
     try writer.interface.flush();
 }
 
-
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
     defer http_client.deinit();
@@ -234,7 +232,6 @@ pub fn main(init: std.process.Init) !void {
     zml_handler.timers.print();
 }
 
-
 pub fn runLlm(zml_handler: *Zml_handler) !void {
     var llm = try llm_.Llm_handler.init(zml_handler);
     defer llm.deinit(zml_handler.allocator);
@@ -257,9 +254,9 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     var similarity_matrix = try computeSimilarityMatrix(zml_handler, &model_handler);
     defer similarity_matrix.deinit(zml_handler.allocator);
     zml_handler.toc(&zml_handler.timers.similarity_matrix);
-    
+
     try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix);
-    
+
     std.log.info("Get lm_head", .{});
     const lm_head = try getLmHead(zml_handler, &model_handler);
     defer lm_head.free(zml_handler.allocator);
@@ -267,6 +264,10 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     std.log.info("Get lm_head_normalized", .{});
     const lm_head_normalized = try getLmHeadNormalized(zml_handler, &model_handler);
     defer lm_head_normalized.free(zml_handler.allocator);
+
+    std.log.info("Get lm_head row norms", .{});
+    const lm_head_row_norms = try getLmHeadRowNorms(zml_handler, &model_handler);
+    defer lm_head_row_norms.free(zml_handler.allocator);
 
     std.log.info("Get junk rows", .{});
     zml_handler.tic(&zml_handler.timers.junk_rows);
@@ -277,20 +278,20 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
 
     std.log.info("Init graph", .{});
     const graph_params: graph.GraphParams = .{};
-    var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, junk_rows, graph_params);
+    var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, graph_params);
     defer g.deinit();
 
     zml_handler.tic(&zml_handler.timers.knn_graph);
     g.setNearestNeighbors();
     zml_handler.toc(&zml_handler.timers.knn_graph);
-    
-    std.log.info("Exact kNN : nb edges: {d}", .{ g.nbEdges() });
-    
+
+    std.log.info("Exact kNN : nb edges: {d}", .{g.nbEdges()});
+
     zml_handler.tic(&zml_handler.timers.nsw_graph);
     g.extendToNsw();
     zml_handler.toc(&zml_handler.timers.nsw_graph);
-    
-    std.log.info("NSW extension : nb edges: {d}", .{ g.nbEdges() });
+
+    std.log.info("NSW extension : nb edges: {d}", .{g.nbEdges()});
 
     var llm = try llm_.Llm_handler.init(zml_handler);
     defer llm.deinit(zml_handler.allocator);
@@ -302,9 +303,7 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     const inspi_result = try inference.generateTextGraph(zml_handler, &llm, &g, inspi_tokens);
     defer zml_handler.allocator.free(inspi_result);
     zml_handler.mem.check(0);
-
 }
-
 
 pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !SimilarityMatrix {
     std.log.info("Compute similarity matrix", .{});
@@ -395,6 +394,14 @@ pub fn getLmHeadNormalized(zml_handler: *Zml_handler, model_handler: *model_.Mod
     return lm_head_normalized_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
 }
 
+pub fn getLmHeadRowNorms(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !zml.Slice {
+    model_handler.exes.get_lm_head_row_norms_args.set(.{model_handler.model_buffers});
+    model_handler.exes.get_lm_head_row_norms_exe.call(model_handler.exes.get_lm_head_row_norms_args, &model_handler.exes.get_lm_head_row_norms_results);
+    var lm_head_row_norms_buffer = model_handler.exes.get_lm_head_row_norms_results.get(zml.Buffer);
+    defer lm_head_row_norms_buffer.deinit();
+    return lm_head_row_norms_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+}
+
 pub fn getJunkRows(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) ![]usize {
     model_handler.exes.find_junk_rows_args.set(.{model_handler.model_buffers});
     model_handler.exes.find_junk_rows_exe.call(model_handler.exes.find_junk_rows_args, &model_handler.exes.find_junk_rows_results);
@@ -457,7 +464,6 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Mo
 
     std.log.info("Similarity matrix test passed: 1000 random pairs, max_abs_diff={d}", .{max_abs_diff});
 }
-
 
 pub fn getSlice(zml_handler: *Zml_handler, tensor_name: []const u8, dtype: anytype) !zml.Slice {
     std.log.info("Getting slice {s}", .{tensor_name});
@@ -528,7 +534,6 @@ const TensorExtractor = struct {
         return self.tensor.convert(.f16);
     }
 };
-
 
 pub fn printSafetensors(registry: zml.safetensors.TensorRegistry) !void {
     const tensors: zml.safetensors.Tensors = registry.tensors;

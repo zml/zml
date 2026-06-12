@@ -109,7 +109,7 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, prompt_to
 
     llm.exes.prefill_embed_args.set(.{ llm.model_buffers, prefill_tokens_buffer });
     llm.exes.prefill_embed_exe.call(llm.exes.prefill_embed_args, &llm.exes.prefill_embed_results);
-    llm.exes.prefill_embed_results.fill(.{ &prefill_embed_buffer });
+    llm.exes.prefill_embed_results.fill(.{&prefill_embed_buffer});
     for (0..llm.config.num_hidden_layers) |i| {
         llm.exes.prefill_layer_args.set(.{ llm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, llm.kv_cache_buffers, layer_index_buffers[i] });
         llm.exes.prefill_layer_exe.call(llm.exes.prefill_layer_args, &llm.exes.prefill_layer_results);
@@ -117,10 +117,10 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, prompt_to
     }
     llm.exes.prefill_select_args.set(.{ llm.model_buffers, prefill_embed_buffer, pred_buffer });
     llm.exes.prefill_select_exe.call(llm.exes.prefill_select_args, &llm.exes.prefill_select_results);
-    llm.exes.prefill_select_results.fill(.{ &one_embed_buffer });
+    llm.exes.prefill_select_results.fill(.{&one_embed_buffer});
     llm.exes.logits_args.set(.{ llm.model_buffers, one_embed_buffer });
     llm.exes.logits_exe.call(llm.exes.logits_args, &llm.exes.logits_results);
-    llm.exes.logits_results.fill(.{ &logit_buffer });
+    llm.exes.logits_results.fill(.{&logit_buffer});
     llm.exes.sample_args.set(.{ llm.model_buffers, logit_buffer, rng_buffers });
     llm.exes.sample_exe.call(llm.exes.sample_args, &llm.exes.sample_results);
     llm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
@@ -165,7 +165,7 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, prompt_to
         // call to generate the next token
         llm.exes.decode_embed_args.set(.{ llm.model_buffers, decode_token_buffer });
         llm.exes.decode_embed_exe.call(llm.exes.decode_embed_args, &llm.exes.decode_embed_results);
-        llm.exes.decode_embed_results.fill(.{ &decode_embed_buffer });
+        llm.exes.decode_embed_results.fill(.{&decode_embed_buffer});
         for (0..llm.config.num_hidden_layers) |ii| {
             llm.exes.decode_layer_args.set(.{ llm.model_buffers.layers[ii], decode_embed_buffer, pos_buffer, llm.kv_cache_buffers, layer_index_buffers[ii] });
             llm.exes.decode_layer_exe.call(llm.exes.decode_layer_args, &llm.exes.decode_layer_results);
@@ -173,7 +173,7 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, prompt_to
         }
         llm.exes.logits_args.set(.{ llm.model_buffers, decode_embed_buffer });
         llm.exes.logits_exe.call(llm.exes.logits_args, &llm.exes.logits_results);
-        llm.exes.logits_results.fill(.{ &logit_buffer });
+        llm.exes.logits_results.fill(.{&logit_buffer});
 
         llm.exes.sample_args.set(.{ llm.model_buffers, logit_buffer, rng_buffers });
         llm.exes.sample_exe.call(llm.exes.sample_args, &llm.exes.sample_results);
@@ -264,7 +264,7 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
 
     llm.exes.prefill_embed_args.set(.{ llm.model_buffers, prefill_tokens_buffer });
     llm.exes.prefill_embed_exe.call(llm.exes.prefill_embed_args, &llm.exes.prefill_embed_results);
-    llm.exes.prefill_embed_results.fill(.{ &prefill_embed_buffer });
+    llm.exes.prefill_embed_results.fill(.{&prefill_embed_buffer});
     for (0..llm.config.num_hidden_layers) |i| {
         llm.exes.prefill_layer_args.set(.{ llm.model_buffers.layers[i], prefill_embed_buffer, zero_buffer, llm.kv_cache_buffers, layer_index_buffers[i] });
         llm.exes.prefill_layer_exe.call(llm.exes.prefill_layer_args, &llm.exes.prefill_layer_results);
@@ -272,10 +272,10 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
     }
     llm.exes.prefill_select_args.set(.{ llm.model_buffers, prefill_embed_buffer, pred_buffer });
     llm.exes.prefill_select_exe.call(llm.exes.prefill_select_args, &llm.exes.prefill_select_results);
-    llm.exes.prefill_select_results.fill(.{ &one_embed_buffer });
+    llm.exes.prefill_select_results.fill(.{&one_embed_buffer});
     llm.exes.graph_embed_args.set(.{ llm.model_buffers, one_embed_buffer });
     llm.exes.graph_embed_exe.call(llm.exes.graph_embed_args, &llm.exes.graph_embed_results);
-    llm.exes.graph_embed_results.fill(.{ &one_embed_buffer });
+    llm.exes.graph_embed_results.fill(.{&one_embed_buffer});
 
     try one_embed_buffer.toSlice(io, embed_slice);
     var generated_token = try sampleTokenFromGraph(zml_handler, embed_slice, g, random, llm.generation_config.top_k);
@@ -314,7 +314,7 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
 
         llm.exes.decode_embed_args.set(.{ llm.model_buffers, decode_token_buffer });
         llm.exes.decode_embed_exe.call(llm.exes.decode_embed_args, &llm.exes.decode_embed_results);
-        llm.exes.decode_embed_results.fill(.{ &decode_embed_buffer });
+        llm.exes.decode_embed_results.fill(.{&decode_embed_buffer});
         for (0..llm.config.num_hidden_layers) |ii| {
             llm.exes.decode_layer_args.set(.{ llm.model_buffers.layers[ii], decode_embed_buffer, pos_buffer, llm.kv_cache_buffers, layer_index_buffers[ii] });
             llm.exes.decode_layer_exe.call(llm.exes.decode_layer_args, &llm.exes.decode_layer_results);
@@ -322,7 +322,7 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
         }
         llm.exes.graph_embed_args.set(.{ llm.model_buffers, decode_embed_buffer });
         llm.exes.graph_embed_exe.call(llm.exes.graph_embed_args, &llm.exes.graph_embed_results);
-        llm.exes.graph_embed_results.fill(.{ &decode_embed_buffer });
+        llm.exes.graph_embed_results.fill(.{&decode_embed_buffer});
         try decode_embed_buffer.toSlice(io, embed_slice);
         generated_token = try sampleTokenFromGraph(zml_handler, embed_slice, g, random, llm.generation_config.top_k);
         decode_embed_buffer.deinit();
@@ -342,20 +342,24 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
 pub fn sampleTokenFromGraph(_: *Zml_handler, embed_slice: zml.Slice, g: *graph_.Graph, random: std.Random, top_k: u32) !u32 {
     const candidates = g.greedySearch(embed_slice.constItems(f16));
     const nb_found = @min(g.L, top_k);
-    
+
+    const row_norms = g.lm_head_row_norms.constItems(f32);
     var max_score: f32 = -std.math.inf(f32);
     for (0..nb_found) |i| {
-        max_score = @max(max_score, @as(f32, @floatCast(candidates[i].similarity)));
+        const score = @as(f32, @floatCast(candidates[i].similarity)) * row_norms[candidates[i].node];
+        max_score = @max(max_score, score);
     }
     var total: f32 = 0.0;
     for (0..nb_found) |i| {
-        total += @exp(@as(f32, @floatCast(candidates[i].similarity)) - max_score);
+        const score = @as(f32, @floatCast(candidates[i].similarity)) * row_norms[candidates[i].node];
+        total += @exp(score - max_score);
     }
 
     const threshold = random.float(f32) * total;
     var cumulative: f32 = 0.0;
     for (0..nb_found) |i| {
-        cumulative += @exp(@as(f32, @floatCast(candidates[i].similarity)) - max_score);
+        const score = @as(f32, @floatCast(candidates[i].similarity)) * row_norms[candidates[i].node];
+        cumulative += @exp(score - max_score);
         if (cumulative >= threshold) return @intCast(candidates[i].node);
     }
     return @intCast(candidates[nb_found - 1].node);

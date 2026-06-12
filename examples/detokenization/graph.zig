@@ -14,7 +14,6 @@ pub const GraphParams = struct {
 };
 
 pub const Graph = struct {
-
     pub const Candidate = struct {
         node: usize,
         similarity: f16,
@@ -32,6 +31,7 @@ pub const Graph = struct {
     lm_head: zml.Slice,
     lm_head_normalized: zml.Slice,
     similarity_matrix: *main.SimilarityMatrix,
+    lm_head_row_norms: zml.Slice,
     // graph fields
     // TODO: we can use smaller integer types
     n: usize,
@@ -57,8 +57,8 @@ pub const Graph = struct {
     // added to the pool (when true, the node had been dealt with)
     is_expanded: []bool,
     is_search_done: bool,
-    
-    pub fn init(zml_handler: *main.Zml_handler, lm_head: zml.Slice, lm_head_normalized: zml.Slice, matrix: *main.SimilarityMatrix, junk_rows: []const usize, params: GraphParams) !Graph {
+
+    pub fn init(zml_handler: *main.Zml_handler, lm_head: zml.Slice, lm_head_normalized: zml.Slice, matrix: *main.SimilarityMatrix, lm_head_row_norms: zml.Slice, junk_rows: []const usize, params: GraphParams) !Graph {
         std.debug.assert(matrix.n > 0);
         std.debug.assert(params.k_max > 0);
         std.debug.assert(params.L > 0);
@@ -68,14 +68,15 @@ pub const Graph = struct {
         std.debug.assert(params.L <= params.search_budget + params.k_max);
         std.debug.assert(params.search_budget + params.k_max <= matrix.n);
         std.debug.assert(params.k_max < matrix.n);
+        std.debug.assert(lm_head_row_norms.constItems(f32).len == matrix.n);
 
         const allocator = zml_handler.allocator;
-        
+
         const is_junk = try allocator.alloc(bool, matrix.n);
         errdefer allocator.free(is_junk);
         @memset(is_junk, false);
         for (junk_rows) |row| is_junk[row] = true;
-        
+
         const medoid = try getMedoid(allocator, lm_head_normalized, matrix.n, matrix.d, is_junk);
 
         const neighbors = try allocator.alloc(usize, matrix.n * params.k_max);
@@ -106,6 +107,7 @@ pub const Graph = struct {
             .nb_neighbors = nb_neighbors,
             .is_junk = is_junk,
             .similarity_matrix = matrix,
+            .lm_head_row_norms = lm_head_row_norms,
             .medoid = medoid,
             .capacity = params.search_budget + params.k_max,
             .L = 0,
@@ -173,7 +175,7 @@ pub const Graph = struct {
         }
         return best_row;
     }
-    
+
     // ------------------- Search functions ------------------ //
 
     pub fn greedySearchNode(self: *Graph, query: usize) []Candidate {
@@ -182,7 +184,7 @@ pub const Graph = struct {
         self.initNodeSearch(query);
 
         while (self.nb_visited < self.params.search_budget) {
-            
+
             // find best node of the active pool that has not been expanded yet
             const node = self.popCandidate();
 
@@ -208,7 +210,7 @@ pub const Graph = struct {
         self.initSearch(query);
 
         while (self.nb_visited < self.params.search_budget) {
-            
+
             // find best node of the active pool that has not been expanded yet
             const node = self.popCandidate();
 
@@ -224,12 +226,11 @@ pub const Graph = struct {
                 self.addCandidate(query, neighbor);
             }
         }
-        
+
         self.cleanup();
         return self.visited[0..self.nb_visited];
     }
 
-    
     pub fn scoreQueryNode(self: *const Graph, query: []const f16, node: usize) f16 {
         std.debug.assert(!self.is_junk[node]);
         const rows = self.lm_head_normalized.constItems(f16);
@@ -255,7 +256,7 @@ pub const Graph = struct {
         self.L = 1;
         self.is_search_done = false;
     }
-    
+
     pub fn initSearch(self: *Graph, query: []const f16) void {
         // at start, pool is empty
         std.debug.assert(!self.is_visited[self.medoid]);
@@ -270,7 +271,7 @@ pub const Graph = struct {
         self.L = 1;
         self.is_search_done = false;
     }
-    
+
     pub fn addNodeCandidate(self: *Graph, query: usize, node: usize) void {
         std.debug.assert(!self.is_junk[node]);
         std.debug.assert(!self.is_visited[node]);
@@ -286,18 +287,18 @@ pub const Graph = struct {
         const sim = self.scoreQueryNode(query, node);
         self.insert(node, sim);
     }
-    
+
     pub fn insert(self: *Graph, node: usize, sim: f16) void {
         std.debug.assert(!self.is_junk[node]);
         std.debug.assert(!self.is_visited[node]);
         std.debug.assert(self.nb_visited > 0);
         std.debug.assert(self.L > 0);
         // TODO: is we split pool management into visited and active pool, we can simplify
-        
+
         self.is_visited[node] = true;
         // this is the lowest score of the active pool
         const worse_L_score = self.visited[self.L - 1].similarity;
-        
+
         if (worse_L_score > sim) {
             // if node has worse score, insert it directly at the end of the pool.
             // this handles both cases where
@@ -361,7 +362,7 @@ pub const Graph = struct {
             self.is_expanded[i] = false;
         }
     }
-    
+
     // ------------- Local neighborhood functions -------------- //
 
     pub fn setRandomNeighbors(self: *Graph) void {
@@ -456,7 +457,7 @@ pub const Graph = struct {
         }
         self.zml_handler.toc(&self.zml_handler.timers.prune_pool);
     }
-    
+
     // --------------------- LOS heuristic ---------------------- //
 
     // TODO: inline manually inside pruneCandidates (recomputes similarity and neighbor range)
@@ -540,12 +541,12 @@ pub const Graph = struct {
 
                 // forward prune on candidates
                 self.pruneCandidates(current_node, candidates[0..nb_candidates]);
-                
+
                 // from there, we insert current_node into each of its neighbors
                 end_neigh = start_neigh + self.nb_neighbors[current_node];
                 for (start_neigh..end_neigh) |j| {
                     const neighbor = self.neighbors[j];
-                    
+
                     // if neighbor -> current_node exists, skip
                     if (self.hasNeighbor(neighbor, current_node)) continue;
 
@@ -559,12 +560,12 @@ pub const Graph = struct {
                     // - if current_node is further than any neighbor
                     // - if neighbor row is already pruned
                     // in this case, no room will be made by pruning and current node will never be added
-                    
+
                     // reverse candidates : neighbor's neighbors + current_node
                     nb_candidates = 0;
                     const start_neigh_neigh = self.params.k_max * neighbor;
                     const end_neigh_neigh = start_neigh_neigh + self.nb_neighbors[neighbor];
-                    
+
                     for (start_neigh_neigh..end_neigh_neigh) |k| {
                         const neigh_neigh = self.neighbors[k];
                         // since neighbors are unique, no need to test if already candidate
@@ -578,11 +579,11 @@ pub const Graph = struct {
                     candidates[nb_candidates].node = current_node;
                     candidates[nb_candidates].similarity = self.similarity(neighbor, current_node);
                     nb_candidates += 1;
-                    
+
                     // reverse prune
                     self.pruneCandidates(neighbor, candidates[0..nb_candidates]);
                 }
-                
+
                 if (i == 0 or (i + 1) % 1000 == 0 or i + 1 == self.n) self.logNsw(start, i);
             }
         }
@@ -616,7 +617,7 @@ pub const Graph = struct {
         std.debug.assert(new_neighbor != node);
         std.debug.assert(!self.hasNeighbor(node, new_neighbor));
         std.debug.assert(self.nb_neighbors[node] < self.params.k_max);
-        
+
         self.neighbors[self.params.k_max * node + self.nb_neighbors[node]] = new_neighbor;
         self.nb_neighbors[node] += 1;
     }
@@ -634,5 +635,4 @@ pub const Graph = struct {
     pub fn similarity(self: *const Graph, a: usize, b: usize) f16 {
         return self.similarity_matrix.dist(a, b);
     }
-
 };
