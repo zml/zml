@@ -706,6 +706,9 @@ pub const Attn = struct {
 
         const cos, const sin = self.rotary_emb.getCosAndSin(position_ids, dtype);
 
+        std.log.debug("cos {f}", .{cos.shape()});
+        std.log.debug("sin {f}", .{sin.shape()});
+
         q = self.rotary_emb.applyRope(q, cos, sin)
             .withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
         k = partitionProjectedKv(self.rotary_emb.applyRope(k, cos, sin), replicate_kv_heads, repeat_factor);

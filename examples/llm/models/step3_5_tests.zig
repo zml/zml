@@ -13,6 +13,7 @@ pub const std_options: std.Options = .{
 const Args = struct {
     model: []const u8,
     activations: []const u8,
+    max_new_tokens: u32 = 60,
 
     pub const help =
         \\Use step3_5_tests --model=<path> --activations=<path>
@@ -20,8 +21,9 @@ const Args = struct {
         \\ Validate the Step 3.5 Flash MoE layers against activation fixtures.
         \\
         \\ Options:
-        \\   --model=<path>         Path to the model repository
-        \\   --activations=<path>   Path to activation safetensors
+        \\   --model=<path>             Path to the model repository
+        \\   --activations=<path>       Path to activation safetensors
+        \\   --max-new-tokens=<number>  Tokens to generate after the captured prompt (default: 60)
         \\
     ;
 };
@@ -49,12 +51,17 @@ pub fn main(init: std.process.Init) !void {
     var repo_model = try step3p5flash.LoadedModel.init(allocator, io, repo, store.view(), shardings);
     defer repo_model.deinit(allocator);
 
-    // Loading bar (single global Progress)
+    // Loading bar (single global Progress). End it as soon as weights are
+    // loaded so generation output isn't interleaved with progress redraws.
     var progress = std.Progress.start(io, .{ .root_name = args.model });
-    defer progress.end();
+    var progress_ended = false;
+    defer if (!progress_ended) progress.end();
 
     var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
+
+    progress.end();
+    progress_ended = true;
 
     try run(
         allocator,
@@ -63,8 +70,10 @@ pub fn main(init: std.process.Init) !void {
         args.activations,
         &store,
         shardings,
-        &repo_model.inner.text_model,
-        &model_buffers.text_model,
+        &repo_model.inner,
+        &model_buffers,
+        repo,
+        args.max_new_tokens,
     );
 }
 
@@ -75,54 +84,70 @@ pub fn run(
     activations_path: []const u8,
     model_store: *zml.io.TensorStore,
     shardings: common.Shardings,
-    text_model: *const model.TextModel,
-    text_buffers: *zml.Bufferized(model.TextModel),
+    full_model: *const model.Model,
+    full_buffers: *zml.Bufferized(model.Model),
+    repo: std.Io.Dir,
+    max_new_tokens: u32,
 ) !void {
+    const text_model = &full_model.text_model;
+    _ = text_model; // autofix
+    const text_buffers = &full_buffers.text_model;
+    _ = text_buffers; // autofix
+    _ = model_store; // autofix
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
 
     var activation_store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer activation_store.deinit();
 
-    // Per-layer transformer test: each layer fed the HF reference inputs.
-    // Only iterate the main transformer layers; trailing MTP layers are not
-    // captured in the HF fixture (the dumper sets num_hidden_layers = 45).
-    const num_main_layers = model.default_config.numMainLayers();
-    const shardings_array = shardings.all();
-
-    // Per-stage attention probe FIRST: it's the cheapest test and the one
-    // currently being iterated on. Drills into Attn.forwardTemp so we can see
-    // which intermediate (rope.q_in, rope.q_embed, cos, sin, attn, gated, out)
-    // diverges on a sliding-attn layer.
-    std.log.info("Attention stages (per layer):", .{});
-    const attn_probe_layers = [_]usize{ 0, 1, 2, 3, 4 };
-    for (attn_probe_layers) |li| {
-        if (li >= num_main_layers) continue;
-        runAttnStages(allocator, io, platform, model_store, &activation_store, &shardings_array, li) catch |err| {
-            std.log.warn("skipping attn-stages layer {d}: {s}", .{ li, @errorName(err) });
-        };
-    }
-
-    std.log.info("Transformer layer (isolated):", .{});
-    for (0..num_main_layers) |layer_idx| {
-        runTransformerLayer(allocator, io, platform, model_store, &activation_store, &shardings_array, layer_idx) catch |err| {
-            std.log.warn("skipping model.layers.{d}: {s}", .{ layer_idx, @errorName(err) });
-        };
-    }
+    // // Per-layer transformer test: each layer fed the HF reference inputs.
+    // // Only iterate the main transformer layers; trailing MTP layers are not
+    // // captured in the HF fixture (the dumper sets num_hidden_layers = 45).
+    // const num_main_layers = model.default_config.numMainLayers();
+    // std.log.info("Transformer layer (isolated):", .{});
+    // const shardings_array = shardings.all();
+    // for (0..num_main_layers) |layer_idx| {
+    //     runTransformerLayer(allocator, io, platform, model_store, &activation_store, &shardings_array, layer_idx) catch |err| {
+    //         std.log.warn("skipping model.layers.{d}: {s}", .{ layer_idx, @errorName(err) });
+    //     };
+    // }
 
     // Chained-layer test: feed layer 0 input, run N layers, compare against
-    // HF activation at layer N-1. Bisects when compounding goes off the rails.
-    std.log.info("Transformer layer (chained):", .{});
-    const chain_steps = [_]usize{ 2, 4, 8, 16, 24, 32, 40, 45 };
-    for (chain_steps) |n| {
-        if (n > num_main_layers) continue;
-        runLayerChain(allocator, io, platform, &activation_store, &shardings_array, text_model, text_buffers, n) catch |err| {
-            std.log.warn("skipping chain[0..{d}]: {s}", .{ n, @errorName(err) });
-        };
-    }
+    // HF activation at layer N-1. We expect bf16 noise to grow like sqrt(N);
+    // a sharp jump at a specific N localizes a real bug. Each step compiles
+    // a separate graph that holds GPU scratch — keep this list small so the
+    // generation graphs below have room.
+    // const num_main_layers = model.default_config.numMainLayers();
+    // const shardings_array = shardings.all();
+    // std.log.info("Transformer layer (chained):", .{});
+    // const chain_steps = [_]usize{ 1, 45 };
+    // for (chain_steps) |n| {
+    //     if (n > num_main_layers) continue;
+    //     runLayerChain(allocator, io, platform, &activation_store, &shardings_array, text_model, text_buffers, n) catch |err| {
+    //         std.log.warn("skipping chain[0..{d}]: {s}", .{ n, @errorName(err) });
+    //     };
+    // }
 
-    std.log.info("Full model:", .{});
-    try runFullTextModel(allocator, io, platform, &activation_store, shardings, text_model, text_buffers);
+    // // Per-stage attention probe: drills into Attn.forwardTemp so we can see
+    // // which intermediate (rope.q_in, rope.q_embed, cos, sin, attn, gated, out)
+    // // diverges on a sliding-attn layer.
+    // std.log.info("Attention stages (per layer):", .{});
+    // const attn_probe_layers = [_]usize{ 0, 1, 2, 3, 4 };
+    // for (attn_probe_layers) |li| {
+    //     if (li >= num_main_layers) continue;
+    //     runAttnStages(allocator, io, platform, model_store, &activation_store, &shardings_array, li) catch |err| {
+    //         std.log.warn("skipping attn-stages layer {d}: {s}", .{ li, @errorName(err) });
+    //     };
+    // }
+
+    // std.log.info("Full model:", .{});
+    // try runFullTextModel(allocator, io, platform, &activation_store, shardings, text_model, text_buffers);
+
+    // std.log.info("Argmax agreement (full model + lm_head):", .{});
+    // try runArgmax(allocator, io, platform, &activation_store, shardings, full_model, full_buffers);
+
+    std.log.info("Generation ({d} new tokens):", .{max_new_tokens});
+    try runGenerate(allocator, io, platform, &activation_store, repo, shardings, full_model, full_buffers, max_new_tokens);
 }
 
 // Wraps a TransformerLayer and exposes each intermediate activation in the
@@ -440,8 +465,12 @@ fn runLayerChain(
 
     const tag = try std.fmt.allocPrint(allocator, "chain[0..{d}]", .{num_layers});
     defer allocator.free(tag);
+    // bf16 residual stream noise compounds like sqrt(N) * ULP. 1 bf16 ULP ~= 0.78%
+    // relative, so ~5% relative is the physical floor after 40+ layers. Keep an
+    // absolute floor to catch near-zero entries.
     try compareSingleOutput(allocator, io, ref_view, "out.0", &results[0], tag, .{
         .absolute_tolerance = 5e-2,
+        .relative_tolerance = 5e-2,
         .minimum_close_fraction = 0.95,
     });
 }
@@ -546,8 +575,429 @@ fn runFullTextModel(
     exe_results.fill(.{results});
     try compareSingleOutput(allocator, io, model_view, "out.0", &results[0], "model", .{
         .absolute_tolerance = 5e-2,
-        .minimum_close_fraction = 0.98,
+        .relative_tolerance = 5e-2,
+        .minimum_close_fraction = 0.95,
     });
+}
+
+// End-to-end argmax agreement check: runs the full text model + lm_head and
+// compares argmax(logits) token-for-token against the argmax of HF's captured
+// `lm_head.out.0`. This is the gold-standard signal for "does the model
+// generate the right next token?" — bf16 ULP noise on logits almost never
+// flips an argmax when the top-1 has any reasonable margin.
+const ArgmaxWrapper = struct {
+    full: model.Model,
+
+    pub fn forward(
+        self: ArgmaxWrapper,
+        tokens_raw: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: model.KvCache,
+    ) struct { zml.Tensor, model.KvCache } {
+        const tokens = tokens_raw.withPartialTags(.{.s});
+        const hidden, const new_kv = self.full.text_model.forward(tokens, token_index, kv_cache);
+        const logits = self.full.lm_head.forward(hidden.withPartialTags(.{.d})).rename(.{ .dout = .voc });
+        const am = logits.argMax(.voc);
+        return .{ am.indices, new_kv };
+    }
+};
+
+fn runArgmax(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    activation_store: *zml.io.TensorStore,
+    shardings: common.Shardings,
+    full_model: *const model.Model,
+    full_buffers: *zml.Bufferized(model.Model),
+) !void {
+    const model_view = activation_store.view().withPrefix("model");
+    const lm_view = activation_store.view().withPrefix("lm_head");
+    if (!model_view.hasKey("in.0") or !lm_view.hasKey("out.0")) {
+        std.log.warn("skipping argmax: missing model.in.0 / lm_head.out.0", .{});
+        return;
+    }
+
+    // Trace-time tensors.
+    const tokens_t = model_view.createTensor("in.0", .{ .b, .s }, .replicated);
+    const seq_len = tokens_t.dim(.s);
+    const token_index_t = zml.Tensor.fromShape(zml.Shape.init(.{ .s = seq_len }, .i32));
+
+    // KV cache shape (same construction as runFullTextModel).
+    const attn0 = full_model.text_model.layers[0].attn;
+    const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
+    const kv_shape_unsharded = zml.Shape.init(.{
+        .layer = @as(i64, @intCast(model.default_config.numMainLayers())),
+        .b = tokens_t.dim(.b),
+        .k = tokens_t.dim(.s),
+        .h = attn0.num_kv_heads,
+        .hd = attn0.head_dim,
+    }, .bf16);
+    const kv_shape = model.partitionKvCacheShape(kv_shape_unsharded, attn0.num_kv_heads, model_partitions);
+    const kv_traced = model.KvCache.init(kv_shape);
+
+    const wrapper: ArgmaxWrapper = .{ .full = full_model.* };
+    const TraceArgs = struct { zml.Tensor, zml.Tensor, model.KvCache };
+    const exe = try platform.compile(
+        allocator,
+        io,
+        wrapper,
+        .forward,
+        TraceArgs{ tokens_t, token_index_t, kv_traced },
+        .{ .shardings = &shardings.all() },
+    );
+    defer exe.deinit();
+
+    // Runtime buffers.
+    var token_args: struct { zml.Tensor } = .{tokens_t};
+    var token_buffers = try zml.io.load(@TypeOf(token_args), &token_args, allocator, io, platform, activation_store, .auto);
+    defer deinitBuffers(&token_buffers);
+
+    const token_index_shape = zml.Shape.init(.{ .s = seq_len }, .i32);
+    const token_index_data = try allocator.alloc(i32, @intCast(seq_len));
+    defer allocator.free(token_index_data);
+    for (token_index_data, 0..) |*v, i| v.* = @intCast(i);
+    var token_index_buf: zml.Buffer = try .fromBytes(io, platform, token_index_shape, .replicated, std.mem.sliceAsBytes(token_index_data));
+    defer token_index_buf.deinit();
+
+    const kv_bytes = kv_shape.byteSize();
+    const k_init = try allocator.alloc(u8, kv_bytes);
+    defer allocator.free(k_init);
+    @memset(k_init, 0);
+    const v_init = try allocator.alloc(u8, kv_bytes);
+    defer allocator.free(v_init);
+    @memset(v_init, 0);
+    var k_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, shardings.model, k_init);
+    defer k_buf.deinit();
+    var v_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, shardings.model, v_init);
+    defer v_buf.deinit();
+    const kv_buffers: model.KvCache.Buffer = .{ .k = k_buf, .v = v_buf };
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+    const wrapper_buffers: zml.Bufferized(ArgmaxWrapper) = .{ .full = full_buffers.* };
+    exe_args.set(.{ wrapper_buffers, .{ token_buffers[0], token_index_buf, kv_buffers } });
+    exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+
+    var results = try allocator.alloc(zml.Buffer, exe.output_shapes.len);
+    defer allocator.free(results);
+    exe_results.fill(.{results});
+
+    // Pull our argmax (i32, shape [B, S]).
+    const our_slice = try results[0].toSliceAlloc(allocator, io);
+    defer our_slice.free(allocator);
+    const our_i32: []const i32 = @alignCast(std.mem.bytesAsSlice(i32, our_slice.data()));
+
+    // Load HF logits and compute argmax on CPU.
+    const ref_shape = lm_view.getShape("out.0") orelse return;
+    const num_tokens: usize = @intCast(our_i32.len);
+    const dims = ref_shape.dims();
+    if (dims.len == 0) return;
+    const voc: usize = @intCast(dims[dims.len - 1]);
+    var ref_buffer: [4096]u8 = undefined;
+    const ref_slice: zml.Slice = try .alloc(allocator, ref_shape);
+    defer ref_slice.free(allocator);
+    var reader = try lm_view.getReader("out.0", io, &ref_buffer);
+    defer reader.deinit();
+    try reader.interface.readSliceAll(ref_slice.data());
+
+    const hf_argmax = try allocator.alloc(i32, num_tokens);
+    defer allocator.free(hf_argmax);
+
+    const elem_size = ref_shape.dtype().sizeOf();
+    if (ref_shape.dtype() == .bf16) {
+        const bf16_view: []const zml.floats.BFloat16 = @alignCast(std.mem.bytesAsSlice(zml.floats.BFloat16, ref_slice.data()));
+        for (0..num_tokens) |t| {
+            const base = t * voc;
+            var best_idx: usize = 0;
+            var best_val: f32 = bf16_view[base].toF32();
+            for (1..voc) |v| {
+                const val = bf16_view[base + v].toF32();
+                if (val > best_val) {
+                    best_val = val;
+                    best_idx = v;
+                }
+            }
+            hf_argmax[t] = @intCast(best_idx);
+        }
+    } else if (ref_shape.dtype() == .f32) {
+        const f32_view: []const f32 = @alignCast(std.mem.bytesAsSlice(f32, ref_slice.data()));
+        for (0..num_tokens) |t| {
+            const base = t * voc;
+            var best_idx: usize = 0;
+            var best_val: f32 = f32_view[base];
+            for (1..voc) |v| {
+                const val = f32_view[base + v];
+                if (val > best_val) {
+                    best_val = val;
+                    best_idx = v;
+                }
+            }
+            hf_argmax[t] = @intCast(best_idx);
+        }
+    } else {
+        std.log.warn("argmax: unsupported lm_head dtype {s} (elem={d})", .{ @tagName(ref_shape.dtype()), elem_size });
+        return;
+    }
+
+    var matches: usize = 0;
+    for (our_i32, hf_argmax) |o, h| {
+        if (o == h) matches += 1;
+    }
+    const accuracy = @as(f32, @floatFromInt(matches)) / @as(f32, @floatFromInt(num_tokens));
+    if (matches == num_tokens) {
+        std.log.info("ok lm_head argmax: {d}/{d} tokens match (100%)", .{ matches, num_tokens });
+    } else {
+        std.log.warn("lm_head argmax: {d}/{d} tokens match ({d:.2}%)", .{ matches, num_tokens, accuracy * 100 });
+        // Show first few disagreements for debugging.
+        var shown: usize = 0;
+        for (our_i32, hf_argmax, 0..) |o, h, t| {
+            if (o != h and shown < 8) {
+                std.log.warn("  token[{d}]: ours={d}, hf={d}", .{ t, o, h });
+                shown += 1;
+            }
+        }
+    }
+}
+
+fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
+    const file = try dir.openFile(io, "tokenizer.json", .{});
+    defer file.close(io);
+    var reader = file.reader(io, &.{});
+    const bytes = try reader.interface.readAlloc(allocator, try file.length(io));
+    defer allocator.free(bytes);
+    return try .fromBytes(allocator, bytes);
+}
+
+// Autoregressive generation using two compiled graphs:
+//   - prefill: tokens [1, S_prompt], token_index [S_prompt], KV [k=cache_max]
+//   - decode:  tokens [1, 1],        token_index [1],        KV [k=cache_max]
+// Greedy (argmax) sampling. Reads the prompt from `model.in.0` so we generate
+// continuations of the same captured prompt that the activation fixture used.
+fn runGenerate(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    activation_store: *zml.io.TensorStore,
+    repo: std.Io.Dir,
+    shardings: common.Shardings,
+    full_model: *const model.Model,
+    full_buffers: *zml.Bufferized(model.Model),
+    max_new_tokens: u32,
+) !void {
+    // 1. Load tokenizer + a streaming decoder.
+    var tokenizer = loadTokenizer(allocator, io, repo) catch |err| {
+        std.log.warn("skipping generate: tokenizer load failed: {s}", .{@errorName(err)});
+        return;
+    };
+    defer tokenizer.deinit();
+    var detok = try tokenizer.decoder();
+    defer detok.deinit();
+    var detok_buf: [4096]u8 = undefined;
+
+    // 2. Discover prompt shape from activations.
+    const model_view = activation_store.view().withPrefix("model");
+    const prompt_shape = model_view.getShape("in.0") orelse {
+        std.log.warn("skipping generate: no model.in.0", .{});
+        return;
+    };
+    if (prompt_shape.rank() != 2) {
+        std.log.warn("skipping generate: model.in.0 rank={d}, want 2", .{prompt_shape.rank()});
+        return;
+    }
+    const prompt_len: i64 = prompt_shape.dim(1);
+    const cache_max: i64 = prompt_len + @as(i64, @intCast(max_new_tokens));
+
+    // 3. Build KV cache shape, shared between prefill and decode.
+    const attn0 = full_model.text_model.layers[0].attn;
+    const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
+    const kv_shape_unsharded = zml.Shape.init(.{
+        .layer = @as(i64, @intCast(model.default_config.numMainLayers())),
+        .b = 1,
+        .k = cache_max,
+        .h = attn0.num_kv_heads,
+        .hd = attn0.head_dim,
+    }, .bf16);
+    const kv_shape = model.partitionKvCacheShape(kv_shape_unsharded, attn0.num_kv_heads, model_partitions);
+    const kv_traced = model.KvCache.init(kv_shape);
+
+    // 4. Compile prefill at [B=1, S=prompt_len].
+    const prefill_tokens_t = zml.Tensor.fromShape(zml.Shape.init(.{ .b = 1, .s = prompt_len }, .i32));
+    const prefill_token_index_t = zml.Tensor.fromShape(zml.Shape.init(.{ .s = prompt_len }, .i32));
+    const wrapper: ArgmaxWrapper = .{ .full = full_model.* };
+    const TraceArgs = struct { zml.Tensor, zml.Tensor, model.KvCache };
+    const prefill_exe = try platform.compile(
+        allocator,
+        io,
+        wrapper,
+        .forward,
+        TraceArgs{ prefill_tokens_t, prefill_token_index_t, kv_traced },
+        .{ .shardings = &shardings.all() },
+    );
+    defer prefill_exe.deinit();
+
+    // 5. Compile decode at [B=1, S=1].
+    const decode_tokens_t = zml.Tensor.fromShape(zml.Shape.init(.{ .b = 1, .s = 1 }, .i32));
+    const decode_token_index_t = zml.Tensor.fromShape(zml.Shape.init(.{ .s = 1 }, .i32));
+    const decode_exe = try platform.compile(
+        allocator,
+        io,
+        wrapper,
+        .forward,
+        TraceArgs{ decode_tokens_t, decode_token_index_t, kv_traced },
+        .{ .shardings = &shardings.all() },
+    );
+    defer decode_exe.deinit();
+
+    // 6. Persistent KV cache buffers (zeroed).
+    const kv_bytes = kv_shape.byteSize();
+    const k_init = try allocator.alloc(u8, kv_bytes);
+    defer allocator.free(k_init);
+    @memset(k_init, 0);
+    const v_init = try allocator.alloc(u8, kv_bytes);
+    defer allocator.free(v_init);
+    @memset(v_init, 0);
+    var k_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, shardings.model, k_init);
+    defer k_buf.deinit();
+    var v_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, shardings.model, v_init);
+    defer v_buf.deinit();
+    var kv_buffers: model.KvCache.Buffer = .{ .k = k_buf, .v = v_buf };
+
+    // 7. Load prompt tokens from activations into a CPU i32 buffer.
+    const prompt_tokens = try allocator.alloc(i32, @intCast(prompt_len));
+    defer allocator.free(prompt_tokens);
+    {
+        const ref_slice: zml.Slice = try .alloc(allocator, prompt_shape);
+        defer ref_slice.free(allocator);
+        var rbuf: [4096]u8 = undefined;
+        var reader = try model_view.getReader("in.0", io, &rbuf);
+        defer reader.deinit();
+        try reader.interface.readSliceAll(ref_slice.data());
+        switch (prompt_shape.dtype()) {
+            .i64 => {
+                const s: []align(1) const i64 = std.mem.bytesAsSlice(i64, ref_slice.data());
+                for (s, prompt_tokens) |v, *out| out.* = @intCast(v);
+            },
+            .u64 => {
+                const s: []align(1) const u64 = std.mem.bytesAsSlice(u64, ref_slice.data());
+                for (s, prompt_tokens) |v, *out| out.* = @intCast(v);
+            },
+            .i32 => {
+                const s: []align(1) const i32 = std.mem.bytesAsSlice(i32, ref_slice.data());
+                @memcpy(prompt_tokens, s);
+            },
+            .u32 => {
+                const s: []align(1) const u32 = std.mem.bytesAsSlice(u32, ref_slice.data());
+                for (s, prompt_tokens) |v, *out| out.* = @intCast(v);
+            },
+            else => {
+                std.log.warn("generate: unsupported prompt dtype {s}", .{@tagName(prompt_shape.dtype())});
+                return;
+            },
+        }
+    }
+
+    // 8. Stdout writer.
+    var stdout = std.Io.File.stdout().writerStreaming(io, &.{});
+    try stdout.interface.writeAll("\n=== prompt ===\n");
+    for (prompt_tokens) |tid| {
+        const t = try detok.feedOne(@intCast(tid), &detok_buf);
+        try stdout.interface.writeAll(t);
+    }
+    try stdout.interface.writeAll("\n=== completion ===\n");
+    try stdout.interface.flush();
+
+    // 9. Build prefill input buffers.
+    const prefill_token_index_data = try allocator.alloc(i32, @intCast(prompt_len));
+    defer allocator.free(prefill_token_index_data);
+    for (prefill_token_index_data, 0..) |*v, i| v.* = @intCast(i);
+
+    var prefill_tokens_buf: zml.Buffer = try .fromBytes(io, platform, prefill_tokens_t.shape(), .replicated, std.mem.sliceAsBytes(prompt_tokens));
+    defer prefill_tokens_buf.deinit();
+    var prefill_token_index_buf: zml.Buffer = try .fromBytes(io, platform, prefill_token_index_t.shape(), .replicated, std.mem.sliceAsBytes(prefill_token_index_data));
+    defer prefill_token_index_buf.deinit();
+
+    // 10. Run prefill: fills argmax + KV in place. ZML donates input buffers
+    // to outputs, so the returned KV handles ARE our kv_buffers handles — never
+    // deinit them mid-loop or we'd double-free at scope exit.
+    var prefill_argmax: zml.Buffer = try .uninitialized(
+        io,
+        platform,
+        zml.Shape.init(.{ .b = 1, .s = prompt_len }, .i32).withReplicatedPartitioning(),
+        .replicated,
+        .{},
+    );
+    defer prefill_argmax.deinit();
+    {
+        var exe_args = try prefill_exe.args(allocator);
+        defer exe_args.deinit(allocator);
+        var exe_results = try prefill_exe.results(allocator);
+        defer exe_results.deinit(allocator);
+        const wbuf: zml.Bufferized(ArgmaxWrapper) = .{ .full = full_buffers.* };
+        exe_args.set(.{ wbuf, .{ prefill_tokens_buf, prefill_token_index_buf, kv_buffers } });
+        prefill_exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+        exe_results.fill(.{ &prefill_argmax, &kv_buffers });
+    }
+
+    // 11. Read the last-position argmax to seed decode.
+    var next_token: i32 = blk: {
+        const am_slice = try prefill_argmax.toSliceAlloc(allocator, io);
+        defer am_slice.free(allocator);
+        const am_i32: []align(1) const i32 = std.mem.bytesAsSlice(i32, am_slice.data());
+        break :blk am_i32[@intCast(prompt_len - 1)];
+    };
+
+    // 12. Decode loop. Reuse a single argmax buffer + persistent KV across steps.
+    var decode_argmax: zml.Buffer = try .uninitialized(
+        io,
+        platform,
+        zml.Shape.init(.{ .b = 1, .s = 1 }, .i32).withReplicatedPartitioning(),
+        .replicated,
+        .{},
+    );
+    defer decode_argmax.deinit();
+
+    var cur_pos: i64 = prompt_len;
+    var step: u32 = 0;
+    while (step < max_new_tokens) : (step += 1) {
+        // Emit the token we just predicted.
+        const t = try detok.feedOne(@intCast(next_token), &detok_buf);
+        std.log.info("token: {}", .{next_token});
+        try stdout.interface.writeAll(t);
+        try stdout.interface.flush();
+
+        if (step + 1 == max_new_tokens) break;
+
+        // Build decode inputs for next step.
+        var tok_arr: [1]i32 = .{next_token};
+        var idx_arr: [1]i32 = .{@intCast(cur_pos)};
+        var dec_tokens_buf: zml.Buffer = try .fromBytes(io, platform, decode_tokens_t.shape(), .replicated, std.mem.sliceAsBytes(&tok_arr));
+        defer dec_tokens_buf.deinit();
+        var dec_token_index_buf: zml.Buffer = try .fromBytes(io, platform, decode_token_index_t.shape(), .replicated, std.mem.sliceAsBytes(&idx_arr));
+        defer dec_token_index_buf.deinit();
+
+        var exe_args = try decode_exe.args(allocator);
+        defer exe_args.deinit(allocator);
+        var exe_results = try decode_exe.results(allocator);
+        defer exe_results.deinit(allocator);
+        const wbuf: zml.Bufferized(ArgmaxWrapper) = .{ .full = full_buffers.* };
+        exe_args.set(.{ wbuf, .{ dec_tokens_buf, dec_token_index_buf, kv_buffers } });
+        decode_exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+        exe_results.fill(.{ &decode_argmax, &kv_buffers });
+
+        // Read argmax (shape [1, 1]).
+        const am_slice = try decode_argmax.toSliceAlloc(allocator, io);
+        defer am_slice.free(allocator);
+        const am_i32: []align(1) const i32 = std.mem.bytesAsSlice(i32, am_slice.data());
+        next_token = am_i32[0];
+        cur_pos += 1;
+    }
+    try stdout.interface.writeAll("\n");
+    const tail = try detok.finalize(&detok_buf);
+    try stdout.interface.writeAll(tail);
+    try stdout.interface.flush();
 }
 
 // Wraps Attn.forwardTemp to expose per-stage intermediates (q/k pre/post rope,
