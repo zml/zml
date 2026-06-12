@@ -251,6 +251,7 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer model_handler.deinit(zml_handler.allocator);
     defer model_handler.unloadBuffers();
 
+    std.log.info("aaa", .{});
     try analyzeTopRows(zml_handler, &model_handler);
 
     zml_handler.tic(&zml_handler.timers.similarity_matrix);
