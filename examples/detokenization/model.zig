@@ -282,11 +282,15 @@ pub const Model = struct {
         return lm_head.mul(lm_head).sum(.d).squeeze(.d).sqrt();
     }
 
-    pub fn scoreTokens(self: Model, embedding: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+    pub fn scoreTokens(self: Model, embedding: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        const logits = lm_head.dot(embedding.withTags(.{ .s, .d }).convert(.f32), .d).squeeze(.s);
+        const normalized_lm_head = normalizeRows(lm_head);
+        const embedding_f32 = embedding.withTags(.{ .s, .d }).convert(.f32);
+        const logits = lm_head.dot(embedding_f32, .d).squeeze(.s);
+        const similarities = normalized_lm_head.dot(embedding_f32, .d).squeeze(.s);
         const sorted = logits.softmax(.voc).sort(.voc, .{ .descending = true });
-        return .{ sorted.values, sorted.indices };
+        const sorted_similarities = similarities.gather(.{ .voc = sorted.indices }, .{});
+        return .{ sorted.values, sorted.indices, sorted_similarities };
     }
 
     pub fn findJunkRows(self: Model) zml.Tensor {
