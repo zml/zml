@@ -250,7 +250,7 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, mode
     var norm_weight_slice = try llm.model_buffers.norm.weights.toSliceAlloc(allocator, io);
     defer norm_weight_slice.free(allocator);
     const hidden_size: usize = @intCast(llm.options.hidden_size);
-    const query = try allocator.alloc(f16, hidden_size);
+    const query = try allocator.alloc(f32, hidden_size);
     defer allocator.free(query);
     var prng = std.Random.DefaultPrng.init(0);
     const random = prng.random();
@@ -455,8 +455,7 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
 
 fn embeddingNorm(embed_slice: zml.Slice) f32 {
     var norm2: f32 = 0.0;
-    for (embed_slice.constItems(f16)) |v| {
-        const x: f32 = @floatCast(v);
+    for (embed_slice.constItems(f32)) |x| {
         norm2 += x * x;
     }
     return @sqrt(norm2);
