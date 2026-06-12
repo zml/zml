@@ -363,12 +363,17 @@ pub fn analyzeTopRows(zml_handler: *Zml_handler, model_handler: *model_.Model_ha
     const anti_junk_indices_slice = try anti_junk_indices_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
     defer anti_junk_indices_slice.free(zml_handler.allocator);
 
+    const lm_head_row_norms_slice = try getLmHeadRowNorms(zml_handler, model_handler);
+    defer lm_head_row_norms_slice.free(zml_handler.allocator);
+    const lm_head_row_norms = lm_head_row_norms_slice.constItems(f32);
+
     try printTopRowsSection(
         tokenizer,
         "Top 100 highest-norm lm_head rows",
         "row_norm",
         top_norm_indices_slice.constItems(u64),
         top_norm_values_slice.constItems(f32),
+        lm_head_row_norms,
     );
     try printTopRowsSection(
         tokenizer,
@@ -376,6 +381,7 @@ pub fn analyzeTopRows(zml_handler: *Zml_handler, model_handler: *model_.Model_ha
         "dot",
         top_dot_indices_slice.constItems(u64),
         top_dot_values_slice.constItems(f32),
+        lm_head_row_norms,
     );
     try printTopRowsSection(
         tokenizer,
@@ -383,6 +389,7 @@ pub fn analyzeTopRows(zml_handler: *Zml_handler, model_handler: *model_.Model_ha
         "dot",
         top_avg_dot_indices_slice.constItems(u64),
         top_avg_dot_values_slice.constItems(f32),
+        lm_head_row_norms,
     );
     try printTopRowsSection(
         tokenizer,
@@ -390,20 +397,32 @@ pub fn analyzeTopRows(zml_handler: *Zml_handler, model_handler: *model_.Model_ha
         "junk_dot",
         anti_junk_indices_slice.constItems(u64),
         anti_junk_values_slice.constItems(f32),
+        lm_head_row_norms,
     );
 }
 
-fn printTopRowsSection(tokenizer: zml.tokenizer.Tokenizer, title: []const u8, value_label: []const u8, indices: []const u64, values: []const f32) !void {
+fn printTopRowsSection(tokenizer: zml.tokenizer.Tokenizer, title: []const u8, value_label: []const u8, indices: []const u64, values: []const f32, row_norms: []const f32) !void {
     std.debug.assert(indices.len == values.len);
     log.info("{s}", .{title});
-    log.info("{s:>6}  {s:>10}  {s:>14}  {s}", .{ "rank", "token_id", value_label, "token" });
-    log.info("{s:>6}  {s:>10}  {s:>14}  {s}", .{ "------", "----------", "--------------", "-----" });
+    if (std.mem.eql(u8, value_label, "row_norm")) {
+        log.info("{s:>6}  {s:>10}  {s:>14}  {s}", .{ "rank", "token_id", value_label, "token" });
+        log.info("{s:>6}  {s:>10}  {s:>14}  {s}", .{ "------", "----------", "--------------", "-----" });
+    } else {
+        log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}  {s}", .{ "rank", "token_id", "row_norm", value_label, "token" });
+        log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}  {s}", .{ "------", "----------", "--------------", "--------------", "-----" });
+    }
     for (indices, values, 0..) |token_id, value, i| {
+        const token_index: usize = @intCast(token_id);
+        std.debug.assert(token_index < row_norms.len);
         var decoded_buf: [512]u8 = undefined;
         const decoded = try decodeToken(tokenizer, @intCast(token_id), &decoded_buf);
         var escaped_buf: [512]u8 = undefined;
         const escaped = escapeTokenText(decoded, &escaped_buf);
-        log.info("{d:>6}  {d:>10}  {d:>14.6}  {s}", .{ i + 1, token_id, value, escaped });
+        if (std.mem.eql(u8, value_label, "row_norm")) {
+            log.info("{d:>6}  {d:>10}  {d:>14.6}  {s}", .{ i + 1, token_id, value, escaped });
+        } else {
+            log.info("{d:>6}  {d:>10}  {d:>14.6}  {d:>14.6}  {s}", .{ i + 1, token_id, row_norms[token_index], value, escaped });
+        }
     }
 }
 
