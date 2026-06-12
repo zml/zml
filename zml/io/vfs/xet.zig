@@ -1,5 +1,4 @@
 const std = @import("std");
-const stdx = @import("stdx");
 const lz4 = @import("lz4.zig");
 const bg4 = @import("bg4.zig");
 
@@ -389,6 +388,8 @@ const FetchCtx = struct {
     allocator: std.mem.Allocator,
     client: *std.http.Client,
     dst: []u8,
+    task_queue: std.Io.Queue(*FetchTask),
+    body_cap: usize,
     err_mutex: std.Io.Mutex = .init,
     err: ?anyerror = null,
 
@@ -399,16 +400,24 @@ const FetchCtx = struct {
     }
 };
 
-fn fetchWorker(ctx: *FetchCtx, task: *FetchTask) void {
-    fetchWorkerImpl(ctx, task) catch |e| ctx.setError(e);
-}
-
-fn fetchWorkerImpl(ctx: *FetchCtx, task: *FetchTask) !void {
-    const body = try ctx.allocator.alloc(u8, task.byte_len);
-    defer ctx.allocator.free(body);
-    try httpRangeGetIntoSlice(ctx.client, task.url, task.url_range_start, task.url_range_end, body);
+fn fetchWorker(ctx: *FetchCtx) void {
+    const body_buf = ctx.allocator.alloc(u8, ctx.body_cap) catch |e| {
+        ctx.setError(e);
+        return;
+    };
+    defer ctx.allocator.free(body_buf);
 
     var scratch: [256 * 1024]u8 = undefined;
+    while (true) {
+        const task = ctx.task_queue.getOne(ctx.io) catch break;
+        if (ctx.err != null) break;
+        processTask(ctx, task, body_buf[0..task.byte_len], &scratch) catch |e| ctx.setError(e);
+    }
+}
+
+fn processTask(ctx: *FetchCtx, task: *FetchTask, body: []u8, scratch: *[256 * 1024]u8) !void {
+    try httpRangeGetIntoSlice(ctx.client, task.url, task.url_range_start, task.url_range_end, body);
+
     var it: ChunkIterator = .{ .data = body };
     var chunk_idx: usize = task.chunk_idx_start;
     while (try it.next()) |chunk| : (chunk_idx += 1) {
@@ -442,7 +451,7 @@ fn fetchWorkerImpl(ctx: *FetchCtx, task: *FetchTask) !void {
 
         // Fallback: decode once into scratch, then fan out @memcpy to each overlapping plan
         // (handles boundary byte_skip, partial-tail truncation, and multi-plan chunks).
-        const decoded = try decompressChunk(chunk, &scratch);
+        const decoded = try decompressChunk(chunk, scratch);
         for (task.term_plans.items) |*tp| {
             if (chunk_idx < tp.chunk_start or chunk_idx >= tp.chunk_end) continue;
             if (tp.bytes_written >= tp.wanted_len) continue;
@@ -458,9 +467,9 @@ fn fetchWorkerImpl(ctx: *FetchCtx, task: *FetchTask) !void {
 }
 
 /// Synchronously fill `dst[0..]` with `dst.len` bytes starting at file `offset`
-/// of the XET-backed file `(repo, file_id)`. Spawns up to `workers` concurrent
-/// HTTP fetches via `stdx.Io.LimitedGroup`; returns when every byte is written
-/// or any worker errors.
+/// of the XET-backed file `(repo, file_id)`. Spawns a fixed pool of up to
+/// `workers` fibers that drain a bounded `std.Io.Queue` of `FetchTask`
+/// pointers; returns when every byte is written or any worker errors.
 pub fn fetchRange(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -487,16 +496,35 @@ pub fn fetchRange(
     var tasks = try buildFetchTasks(allocator, parsed.value, dst.len);
     defer freeFetchTasks(allocator, &tasks);
 
+    if (tasks.items.len == 0) return;
+
+    var body_cap: usize = 0;
+    for (tasks.items) |*t| body_cap = @max(body_cap, t.byte_len);
+
+    const queue_buf = try allocator.alloc(*FetchTask, tasks.items.len);
+    defer allocator.free(queue_buf);
+
     var ctx: FetchCtx = .{
         .io = io,
         .allocator = allocator,
         .client = client,
         .dst = dst,
+        .task_queue = std.Io.Queue(*FetchTask).init(queue_buf),
+        .body_cap = body_cap,
     };
-    var group: stdx.Io.LimitedGroup = .init(workers);
-    for (tasks.items) |*task| {
-        try group.concurrent(io, fetchWorker, .{ &ctx, task });
-    }
+
+    const n_workers = @min(workers, tasks.items.len);
+    var group: std.Io.Group = .init;
+    errdefer group.cancel(io);
+    // `concurrent` (not `async`): we *need* workers on real threads so the
+    // producer fiber below isn't hijacked into running a worker that then
+    // blocks on the still-empty queue. `Group.async` falls back to inline
+    // execution past `async_limit` (= cpu_count - 1) and would deadlock.
+    for (0..n_workers) |_| try group.concurrent(io, fetchWorker, .{&ctx});
+
+    for (tasks.items) |*t| ctx.task_queue.putOneUncancelable(io, t) catch unreachable;
+    ctx.task_queue.close(io);
+
     try group.await(io);
 
     if (ctx.err) |e| return e;
