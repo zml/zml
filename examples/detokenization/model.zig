@@ -107,6 +107,22 @@ pub const Model_handler = struct {
         const get_lm_head_row_norms_results = try get_lm_head_row_norms_exe.results(zml_handler.allocator);
         errdefer get_lm_head_row_norms_results.deinit(zml_handler.allocator);
 
+        const score_exe = try zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .scoreTokens,
+            .{.init(.{ .s = 1, .d = model.shape().dim(.d) }, .f16)},
+            opts,
+        );
+        errdefer score_exe.deinit();
+
+        const score_args = try score_exe.args(zml_handler.allocator);
+        errdefer score_args.deinit(zml_handler.allocator);
+
+        const score_results = try score_exe.results(zml_handler.allocator);
+        errdefer score_results.deinit(zml_handler.allocator);
+
         const find_junk_rows_exe = try zml_handler.platform.compile(
             zml_handler.allocator,
             zml_handler.io,
@@ -135,6 +151,9 @@ pub const Model_handler = struct {
             .get_lm_head_row_norms_exe = get_lm_head_row_norms_exe,
             .get_lm_head_row_norms_args = get_lm_head_row_norms_args,
             .get_lm_head_row_norms_results = get_lm_head_row_norms_results,
+            .score_exe = score_exe,
+            .score_args = score_args,
+            .score_results = score_results,
             .find_junk_rows_exe = find_junk_rows_exe,
             .find_junk_rows_args = find_junk_rows_args,
             .find_junk_rows_results = find_junk_rows_results,
@@ -163,6 +182,9 @@ pub const ModelExes = struct {
     get_lm_head_row_norms_exe: zml.Exe,
     get_lm_head_row_norms_args: zml.Exe.Arguments,
     get_lm_head_row_norms_results: zml.Exe.Results,
+    score_exe: zml.Exe,
+    score_args: zml.Exe.Arguments,
+    score_results: zml.Exe.Results,
     find_junk_rows_exe: zml.Exe,
     find_junk_rows_args: zml.Exe.Arguments,
     find_junk_rows_results: zml.Exe.Results,
@@ -180,6 +202,9 @@ pub const ModelExes = struct {
         self.get_lm_head_row_norms_exe.deinit();
         self.get_lm_head_row_norms_args.deinit(allocator);
         self.get_lm_head_row_norms_results.deinit(allocator);
+        self.score_exe.deinit();
+        self.score_args.deinit(allocator);
+        self.score_results.deinit(allocator);
         self.find_junk_rows_exe.deinit();
         self.find_junk_rows_args.deinit(allocator);
         self.find_junk_rows_results.deinit(allocator);
@@ -255,6 +280,13 @@ pub const Model = struct {
     pub fn get_lm_head_row_norms(self: Model) zml.Tensor {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
         return lm_head.mul(lm_head).sum(.d).squeeze(.d).sqrt();
+    }
+
+    pub fn scoreTokens(self: Model, embedding: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
+        const logits = lm_head.dot(embedding.withTags(.{ .s, .d }).convert(.f32), .d).squeeze(.s);
+        const sorted = logits.softmax(.voc).sort(.voc, .{ .descending = true });
+        return .{ sorted.values, sorted.indices };
     }
 
     pub fn findJunkRows(self: Model) zml.Tensor {

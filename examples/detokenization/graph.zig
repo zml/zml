@@ -5,12 +5,12 @@ const main = @import("main.zig");
 const log = std.log;
 
 pub const GraphParams = struct {
-    k_max: usize = 64,
-    search_budget: usize = 4096,
+    k_max: usize = 16,
+    search_budget: usize = 512,
     alpha: f16 = 1.15,
     vamana_passes: usize = 2,
     top_k: usize = 16,
-    L: usize = 256,
+    L: usize = 128,
 };
 
 pub const Graph = struct {
@@ -202,12 +202,7 @@ pub const Graph = struct {
             // if all nodes in active pool have been expanded, terminate the search
             if (self.is_search_done) break;
 
-            // TODO: switch from atomic neighbor extention to incremental extension
-            // store nb_expanded_neighbors instead of a boolean flag, and expand only
-            // ne neighbor at a time. If a neighbor at a small position has much better
-            // similarity with query than the base node, we want to focus of this neighbor
-            // neighbors instead of the remaining neighbors of the base node. This can save
-            // a lot of distance computations.
+            // TODO: we can batch insert to avoid doing several revert insert passes
             const start_neigh = self.params.k_max * node;
             const end_neigh = start_neigh + self.nb_neighbors[node];
             for (start_neigh..end_neigh) |i| {
@@ -217,7 +212,7 @@ pub const Graph = struct {
             }
         }
         self.cleanup();
-        self.zml_handler.toc(&self.zml_handler.timers.prune_pool);
+        self.zml_handler.toc(&self.zml_handler.timers.greedy_search);
     }
 
     pub fn greedySearch(self: *Graph, query: []const f16) void {
@@ -232,7 +227,12 @@ pub const Graph = struct {
             // if all nodes in active pool have been expanded, terminate the search
             if (self.is_search_done) break;
 
-            // otherwise, expand search to best node neighbors
+            // TODO: switch from atomic neighbor extension to incremental extension
+            // store nb_expanded_neighbors instead of a boolean flag, and expand only
+            // ne neighbor at a time. If a neighbor at a small position has much better
+            // similarity with query than the base node, we want to focus of this neighbor
+            // neighbors instead of the remaining neighbors of the base node. This can save
+            // a lot of distance computations.
             const start_neigh = self.params.k_max * node;
             const end_neigh = start_neigh + self.nb_neighbors[node];
             for (start_neigh..end_neigh) |i| {
@@ -245,6 +245,7 @@ pub const Graph = struct {
         self.cleanup();
     }
 
+    
     pub fn scoreQueryNode(self: *const Graph, query: []const f16, node: usize) f16 {
         std.debug.assert(!self.is_junk[node]);
         const rows = self.lm_head_normalized.constItems(f16);
@@ -307,7 +308,8 @@ pub const Graph = struct {
         std.debug.assert(!self.is_visited[node]);
         std.debug.assert(self.nb_visited > 0);
         std.debug.assert(self.L > 0);
-        // TODO: is we split pool management into visited and active pool, we can simplify
+        // TODO: if we split pool management into visited and active pool, we can simplify
+        // TODO: if we split the active pool into expanded and unexpanded, we can improve
 
         self.is_visited[node] = true;
         // this is the lowest score of the active pool
@@ -355,7 +357,7 @@ pub const Graph = struct {
     pub fn popCandidate(self: *Graph) usize {
         // find the best unexpanded candidate in the active pool
         // since the pool is kept sorted, return the first found
-        for (0..self.L) |i| { // TODO: we can keep track of the first unexpanded node
+        for (0..self.L) |i| {
             if (!self.is_expanded[i]) {
                 self.is_expanded[i] = true;
                 return self.visited[i].node;

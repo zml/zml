@@ -10,6 +10,7 @@ const Zml_handler = main.Zml_handler;
 const main = @import("main.zig");
 const llm_ = @import("llm.zig");
 const graph_ = @import("graph.zig");
+const model_ = @import("model.zig");
 
 fn appendEncoded(allocator: std.mem.Allocator, encoder: *Tokenizer.Encoder, tokens: *std.ArrayList(u32), text: []const u8) !void {
     const encoded = try encoder.encodeAlloc(allocator, text);
@@ -197,7 +198,7 @@ pub fn generateText(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, prompt_to
     return result.toOwnedSlice(allocator);
 }
 
-pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *graph_.Graph, prompt_tok: []const u32) ![]u8 {
+pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, model_handler: *model_.Model_handler, g: *graph_.Graph, prompt_tok: []const u32) ![]u8 {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding: zml.Sharding = .replicated;
@@ -278,7 +279,7 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
     llm.exes.graph_embed_results.fill(.{&one_embed_buffer});
 
     try one_embed_buffer.toSlice(io, embed_slice);
-    var generated_token = try sampleTokenFromGraph(zml_handler, embed_slice, g, random, llm.generation_config.top_k);
+    var generated_token = try sampleTokenFromGraph(zml_handler, model_handler, embed_slice, g, random, llm.generation_config.top_k);
     zml_handler.toc(&zml_handler.timers.prefill);
 
     std.log.info("LLM run graph decode", .{});
@@ -324,7 +325,7 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
         llm.exes.graph_embed_exe.call(llm.exes.graph_embed_args, &llm.exes.graph_embed_results);
         llm.exes.graph_embed_results.fill(.{&decode_embed_buffer});
         try decode_embed_buffer.toSlice(io, embed_slice);
-        generated_token = try sampleTokenFromGraph(zml_handler, embed_slice, g, random, llm.generation_config.top_k);
+        generated_token = try sampleTokenFromGraph(zml_handler, model_handler, embed_slice, g, random, llm.generation_config.top_k);
         decode_embed_buffer.deinit();
     }
     const final_chunk = try tokenizer_decoder.finalize(decoder_out_buffer);
@@ -339,8 +340,11 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
     return result.toOwnedSlice(allocator);
 }
 
-pub fn sampleTokenFromGraph(_: *Zml_handler, embed_slice: zml.Slice, g: *graph_.Graph, random: std.Random, top_k: u32) !u32 {
+pub fn sampleTokenFromGraph(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, embed_slice: zml.Slice, g: *graph_.Graph, random: std.Random, top_k: u32) !u32 {
     g.greedySearch(embed_slice.constItems(f16));
+
+    try analyzeSamplings(zml_handler, model_handler, embed_slice, g);
+    
     const nb_found = @min(g.L, top_k);
 
     const row_norms = g.lm_head_row_norms.constItems(f32);
@@ -363,4 +367,95 @@ pub fn sampleTokenFromGraph(_: *Zml_handler, embed_slice: zml.Slice, g: *graph_.
         if (cumulative >= threshold) return @intCast(g.visited[i].node);
     }
     return @intCast(g.visited[nb_found - 1].node);
+}
+
+pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, embed_slice: zml.Slice, g: *graph_.Graph) !void {
+    const allocator = zml_handler.allocator;
+    const row_norms = g.lm_head_row_norms.constItems(f32);
+
+    var embed_buffer: zml.Buffer = try .fromSlice(zml_handler.io, zml_handler.platform, embed_slice, .replicated);
+    defer embed_buffer.deinit();
+
+    model_handler.exes.score_args.set(.{ model_handler.model_buffers, embed_buffer });
+    model_handler.exes.score_exe.call(model_handler.exes.score_args, &model_handler.exes.score_results);
+
+    var sorted_probas_buffer: zml.Buffer = undefined;
+    var sorted_indices_buffer: zml.Buffer = undefined;
+    model_handler.exes.score_results.fill(.{ &sorted_probas_buffer, &sorted_indices_buffer });
+    defer sorted_probas_buffer.deinit();
+    defer sorted_indices_buffer.deinit();
+
+    const sorted_probas_slice = try sorted_probas_buffer.toSliceAlloc(allocator, zml_handler.io);
+    defer sorted_probas_slice.free(allocator);
+    const sorted_indices_slice = try sorted_indices_buffer.toSliceAlloc(allocator, zml_handler.io);
+    defer sorted_indices_slice.free(allocator);
+
+    const sorted_probas = sorted_probas_slice.constItems(f32);
+    const sorted_indices = sorted_indices_slice.constItems(i32);
+    std.debug.assert(sorted_probas.len == sorted_indices.len);
+
+    const nb_real = @min(sorted_probas.len, 100);
+    log.info("Real sampling distribution (top {d})", .{nb_real});
+    printSamplingHeader();
+    for (0..nb_real) |i| {
+        const token_id: usize = @intCast(sorted_indices[i]);
+        printSamplingRow(i + 1, token_id, sorted_probas[i], row_norms[token_id]);
+    }
+
+    g.greedySearch(embed_slice.constItems(f16));
+    const nb_graph = g.L;
+    const entries = try allocator.alloc(SamplingEntry, nb_graph);
+    defer allocator.free(entries);
+
+    var max_score: f32 = -std.math.inf(f32);
+    for (0..nb_graph) |i| {
+        const node = g.visited[i].node;
+        const score = @as(f32, @floatCast(g.visited[i].similarity)) * row_norms[node];
+        max_score = @max(max_score, score);
+    }
+
+    var total: f32 = 0.0;
+    for (0..nb_graph) |i| {
+        const node = g.visited[i].node;
+        const score = @as(f32, @floatCast(g.visited[i].similarity)) * row_norms[node];
+        total += @exp(score - max_score);
+    }
+
+    for (0..nb_graph) |i| {
+        const node = g.visited[i].node;
+        const score = @as(f32, @floatCast(g.visited[i].similarity)) * row_norms[node];
+        entries[i] = .{
+            .token_id = node,
+            .proba = @exp(score - max_score) / total,
+            .row_norm = row_norms[node],
+        };
+    }
+    std.mem.sort(SamplingEntry, entries, {}, SamplingEntry.beforeThan);
+
+    const nb_printed_graph = @min(nb_graph, 100);
+    log.info("Graph sampling distribution over {d} visited nodes (top {d})", .{ nb_graph, nb_printed_graph });
+    printSamplingHeader();
+    for (0..nb_printed_graph) |i| {
+        const entry = entries[i];
+        printSamplingRow(i + 1, entry.token_id, entry.proba, entry.row_norm);
+    }
+}
+
+const SamplingEntry = struct {
+    token_id: usize,
+    proba: f32,
+    row_norm: f32,
+
+    fn beforeThan(_: void, lhs: SamplingEntry, rhs: SamplingEntry) bool {
+        return lhs.proba > rhs.proba or (lhs.proba == rhs.proba and lhs.token_id < rhs.token_id);
+    }
+};
+
+fn printSamplingHeader() void {
+    log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}", .{ "rank", "token_id", "proba", "row_norm" });
+    log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}", .{ "------", "----------", "--------------", "--------------" });
+}
+
+fn printSamplingRow(rank: usize, token_id: usize, proba: f32, row_norm: f32) void {
+    log.info("{d:>6}  {d:>10}  {d:>14.8}  {d:>14.6}", .{ rank, token_id, proba, row_norm });
 }
