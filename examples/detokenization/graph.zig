@@ -57,6 +57,10 @@ pub const Graph = struct {
     // added to the pool (when true, the node had been dealt with)
     is_expanded: []bool,
     is_search_done: bool,
+    // for each node of the graph, tells if neighbors have been obtained
+    // with the pruning heuristic. in this case no neighbor would be removed
+    // if we run the pruning again
+    are_neighbors_pruned: []bool,
 
     pub fn init(zml_handler: *main.Zml_handler, lm_head: zml.Slice, lm_head_normalized: zml.Slice, matrix: *main.SimilarityMatrix, lm_head_row_norms: zml.Slice, junk_rows: []const usize, params: GraphParams) !Graph {
         std.debug.assert(matrix.n > 0);
@@ -94,6 +98,10 @@ pub const Graph = struct {
         errdefer allocator.free(is_expanded);
         @memset(is_expanded, false);
 
+        const are_neighbors_pruned = try allocator.alloc(bool, matrix.n);
+        errdefer allocator.free(are_neighbors_pruned);
+        @memset(are_neighbors_pruned, false);
+
         return .{
             .zml_handler = zml_handler,
             .allocator = allocator,
@@ -116,6 +124,7 @@ pub const Graph = struct {
             .nb_visited = 0,
             .is_expanded = is_expanded,
             .is_search_done = false,
+            .are_neighbors_pruned = are_neighbors_pruned,
         };
     }
 
@@ -126,6 +135,7 @@ pub const Graph = struct {
         self.allocator.free(self.visited);
         self.allocator.free(self.is_visited);
         self.allocator.free(self.is_expanded);
+        self.allocator.free(self.are_neighbors_pruned);
     }
 
     pub fn getMedoid(allocator: std.mem.Allocator, lm_head_normalized: zml.Slice, n: usize, dim: usize, is_junk: []const bool) !usize {
@@ -178,7 +188,7 @@ pub const Graph = struct {
 
     // ------------------- Search functions ------------------ //
 
-    pub fn greedySearchNode(self: *Graph, query: usize) []Candidate {
+    pub fn greedySearchNode(self: *Graph, query: usize) void {
         std.debug.assert(!self.is_junk[query]);
         // initialize search at entry point
         self.initNodeSearch(query);
@@ -200,12 +210,10 @@ pub const Graph = struct {
                 self.addNodeCandidate(query, neighbor);
             }
         }
-
         self.cleanup();
-        return self.visited[0..self.nb_visited];
     }
 
-    pub fn greedySearch(self: *Graph, query: []const f16) []Candidate {
+    pub fn greedySearch(self: *Graph, query: []const f16) void {
         // initialize search at entry point
         self.initSearch(query);
 
@@ -228,7 +236,6 @@ pub const Graph = struct {
         }
 
         self.cleanup();
-        return self.visited[0..self.nb_visited];
     }
 
     pub fn scoreQueryNode(self: *const Graph, query: []const f16, node: usize) f16 {
@@ -369,31 +376,43 @@ pub const Graph = struct {
         log.info("Random neighbors", .{});
         var prng = std.Random.DefaultPrng.init(0);
         const random = prng.random();
+
+        const selected = self.allocator.alloc(Candidate, self.n) catch @panic("OOM");
+        defer self.allocator.free(selected);
+        
         const is_selected = self.allocator.alloc(bool, self.n) catch @panic("OOM");
         defer self.allocator.free(is_selected);
         @memset(is_selected, false);
 
+        var nb_selected: usize = 0;
+
         for (0..self.n) |i| {
             const start_neigh = self.params.k_max * i;
+            nb_selected = 0;
             self.nb_neighbors[i] = 0;
             if (self.is_junk[i]) continue;
             is_selected[i] = true;
-
+            
             // rejection method as k_max << n
-            while (self.nb_neighbors[i] < self.params.k_max) {
+            while (nb_selected < self.params.k_max) {
                 const candidate = random.uintLessThan(usize, self.n);
                 if (self.is_junk[candidate] or is_selected[candidate]) continue;
                 // add valid neighbor
                 is_selected[candidate] = true;
-                self.neighbors[start_neigh + self.nb_neighbors[i]] = candidate;
-                self.nb_neighbors[i] += 1;
+                selected[nb_selected] = .{ .node = candidate, .similarity = self.similarity(i, candidate)};
+                nb_selected += 1;
             }
 
-            // reset rejection utils
-            is_selected[i] = false;
-            for (0..self.nb_neighbors[i]) |j| {
-                is_selected[self.neighbors[start_neigh + j]] = false;
+            std.mem.sort(Candidate, selected[0..nb_selected], {}, Candidate.beforeThan);
+            
+            for (0..nb_selected) |j| {
+                const neigh = selected[j].node;
+                self.neighbors[start_neigh + j] = neigh;
+                is_selected[neigh] = false;
             }
+            self.nb_neighbors[i] = nb_selected;
+            is_selected[i] = false;
+
             if (i == 0 or (i + 1) % 10000 == 0 or i + 1 == self.n) {
                 log.info("Random neighbors node {d}/{d}", .{ i + 1, self.n });
             }
@@ -438,46 +457,42 @@ pub const Graph = struct {
         }
     }
 
-    pub fn pruneCandidates(self: *Graph, i: usize, candidates: []Candidate) void {
-        std.debug.assert(!self.is_junk[i]);
+    pub fn pruneCandidates(self: *Graph, base: usize, candidates: []Candidate) void {
+        std.debug.assert(!self.is_junk[base]);
         // TODO: split reverse/forward prune timers
         self.zml_handler.tic(&self.zml_handler.timers.prune_pool);
-        // we assume candidates similarities is already set
-        std.mem.sort(Candidate, candidates, {}, Candidate.beforeThan);
-
         // update current_node neighbors with LOS pruning of the candidates
-        const start_neigh = i * self.params.k_max;
-        self.nb_neighbors[i] = 0;
+        const start_neigh = base * self.params.k_max;
+        self.nb_neighbors[base] = 0;
+        var end_neigh = start_neigh;
+        const inv_alpha_squared = 1.0 / (self.params.alpha * self.params.alpha);
         for (candidates) |candidate| {
-            // TODO: pass candidates to los, to avoid recomputing similarity
-            if (!self.lineOfSight(i, candidate.node)) continue;
-            self.neighbors[start_neigh + self.nb_neighbors[i]] = candidate.node;
-            self.nb_neighbors[i] += 1;
-            if (self.nb_neighbors[i] == self.params.k_max) break;
+            // The LOS heuristic decides if a candidate node can be added to base's neighbors
+            // If any of base's neighbor is already close enough from candidate, then it's rejected,
+            // as the routing base -> close_neighbor -> candidate is deemed sufficient
+            // The "close enough" formula is alpha * dist(close_neighbor, candidate) <= dist(base, candidate)
+            const threshold = 1.0 - (1.0 - candidate.similarity) * inv_alpha_squared;
+            var pruned = false;
+            for (start_neigh..end_neigh) |i| {
+                const neighbor = self.neighbors[i];
+                // for u and v norm 1 vectors, ||u - v||² = u² + v² - 2 <u,v> = 2 (1 - sim(u,v))
+                // a||n - c|| <= ||b - c|| => a²||n - c||² <= ||b - c||²
+                // 2a² (1 - sim(n,c)) <= 2 (1 - sim(b,c))
+                // sim(n,c) >= 1 - (1 - sim(b,c)) / a²
+                if (self.similarity(neighbor, candidate.node) >= threshold) {
+                    pruned = true;
+                    break;
+                }
+            }
+            if (!pruned) {
+                self.neighbors[end_neigh] = candidate.node;
+                self.nb_neighbors[base] += 1;
+                end_neigh += 1;
+            }
+            if (self.nb_neighbors[base] == self.params.k_max) break;
         }
+        self.are_neighbors_pruned[base] = true;
         self.zml_handler.toc(&self.zml_handler.timers.prune_pool);
-    }
-
-    // --------------------- LOS heuristic ---------------------- //
-
-    // TODO: inline manually inside pruneCandidates (recomputes similarity and neighbor range)
-    pub fn lineOfSight(self: *const Graph, base: usize, candidate: usize) bool {
-        // The LOS heuristic decides if a candidate node can be added to base's neighbors
-        // If any of base's neighbor is already close enough from candidate, then it's rejected,
-        // as the routing base -> close_neighbor -> candidate is deemed sufficient
-        // The "close enough" formula is alpha * dist(close_neighbor, candidate) <= dist(base, candidate)
-        const threshold = 1.0 - (1.0 - self.similarity(base, candidate)) / (self.params.alpha * self.params.alpha);
-        const start_neigh = self.params.k_max * base;
-        const end_neigh = start_neigh + self.nb_neighbors[base];
-        for (start_neigh..end_neigh) |i| {
-            const neighbor = self.neighbors[i];
-            // for u and v norm 1 vectors, ||u - v||² = u² + v² - 2 <u,v> = 2 (1 - sim(u,v))
-            // a||n - c|| <= ||b - c|| => a²||n - c||² <= ||b - c||²
-            // 2a² (1 - sim(n,c)) <= 2 (1 - sim(b,c))
-            // sim(n,c) >= 1 - (1 - sim(b,c)) / a²
-            if (self.similarity(neighbor, candidate) >= threshold) return false;
-        }
-        return true;
     }
 
     // ------------------- NSW main function -------------------- //
@@ -489,10 +504,6 @@ pub const Graph = struct {
         const order = self.allocator.alloc(usize, self.n) catch @panic("OOM");
         defer self.allocator.free(order);
         for (0..order.len) |i| order[i] = i;
-
-        const is_candidate = self.allocator.alloc(bool, self.n) catch @panic("OOM");
-        defer self.allocator.free(is_candidate);
-        @memset(is_candidate, false);
 
         const candidates = self.allocator.alloc(Candidate, 2 * self.params.k_max + self.params.search_budget) catch @panic("OOM");
         defer self.allocator.free(candidates);
@@ -512,34 +523,51 @@ pub const Graph = struct {
             for (0..order.len) |i| {
                 // at this iteration, we will update current_node's neighbors and add current_node as a neighbor in candidate nodes
                 const current_node = order[i];
+                const start_neigh = self.params.k_max * current_node;
+                var end_neigh = start_neigh + self.nb_neighbors[current_node];
+                
                 if (self.is_junk[current_node]) continue;
                 var nb_candidates: usize = 0;
 
-                // candidates are initialized from current node's neighbors
-                const start_neigh = self.params.k_max * current_node;
-                var end_neigh = start_neigh + self.nb_neighbors[current_node];
-                for (start_neigh..end_neigh) |j| {
-                    const candidate = self.neighbors[j];
-                    // since neighbors are unique, no need to test if already candidate
-                    is_candidate[candidate] = true;
-                    candidates[nb_candidates].node = candidate;
-                    candidates[nb_candidates].similarity = self.similarity(current_node, candidate);
+                // the candidates are current_node's neighbors and the visited nodes
+                // since both lists are sorted and contain unique nodes, we can build
+                // the sorted list of candidates in one linear forward pass
+                self.greedySearchNode(current_node);
+                var pos_in_neighbors: usize = start_neigh;
+                var pos_in_visited: usize = 0;
+                while (pos_in_neighbors < end_neigh and pos_in_visited < self.nb_visited) {
+                    const neigh = self.neighbors[pos_in_neighbors];
+                    const visit = self.visited[pos_in_visited].node;
+                    const neigh_sim = self.similarity(neigh, current_node);
+                    const visit_sim = self.visited[pos_in_visited].similarity;
+                    if (neigh == visit) {
+                        // there is a duplicate: skip it in the visited pool and iterate
+                        candidates[nb_candidates] = .{ .node = neigh, .similarity = neigh_sim };
+                        pos_in_visited += 1;
+                        pos_in_neighbors += 1;
+                        nb_candidates += 1;
+                        continue;
+                    }
+                    if (neigh_sim > visit_sim) {
+                        candidates[nb_candidates] = .{ .node = neigh, .similarity = neigh_sim };
+                        pos_in_neighbors += 1;
+                    } else {
+                        candidates[nb_candidates] = .{ .node = visit, .similarity = visit_sim };
+                        pos_in_visited += 1;
+                    }
                     nb_candidates += 1;
                 }
-                // add new candidates: all nodes visited during the greedy search medoid -> current_node
-                // there might be intersection with the current neighbor, so we need a datastructure to filter those
-                self.zml_handler.tic(&self.zml_handler.timers.greedy_search);
-                const pool = self.greedySearchNode(current_node);
-                self.zml_handler.toc(&self.zml_handler.timers.greedy_search);
-                for (0..pool.len) |j| {
-                    const candidate = pool[j].node;
-                    if (is_candidate[candidate] or candidate == current_node) continue;
-                    is_candidate[candidate] = true;
-                    candidates[nb_candidates] = pool[j];
+                // from here one of the two positions has reached the end, add remaining element from other one
+                for (pos_in_neighbors..end_neigh) |j| {
+                    const neigh = self.neighbors[j];
+                    candidates[nb_candidates] = .{ .node = neigh, .similarity = self.similarity(neigh, current_node) };
                     nb_candidates += 1;
                 }
-                // clear candidates unicity util
-                for (0..nb_candidates) |j| is_candidate[candidates[j].node] = false;
+                for (pos_in_visited..self.nb_visited) |j| {
+                    const visit = self.visited[j].node;
+                    candidates[nb_candidates] = .{ .node = visit, .similarity = self.visited[j].similarity };
+                    nb_candidates += 1;
+                }
 
                 // forward prune on candidates
                 self.pruneCandidates(current_node, candidates[0..nb_candidates]);
@@ -548,26 +576,34 @@ pub const Graph = struct {
                 end_neigh = start_neigh + self.nb_neighbors[current_node];
                 for (start_neigh..end_neigh) |j| {
                     const neighbor = self.neighbors[j];
+                    const start_neigh_neigh = self.params.k_max * neighbor;
+                    const end_neigh_neigh = start_neigh_neigh + self.nb_neighbors[neighbor];
+                    const sim = self.similarity(neighbor, current_node);
 
                     // if neighbor -> current_node exists, skip
                     if (self.hasNeighbor(neighbor, current_node)) continue;
 
                     // if candidate still has room, add current_node to its neighbors
                     if (self.nb_neighbors[neighbor] < self.params.k_max) {
-                        self.addNeighbor(neighbor, current_node);
+                        // insert with reverse linear pass to keep neighbors sorted
+                        var inser_pos = end_neigh_neigh;
+                        while (inser_pos > start_neigh_neigh and sim > self.similarity(neighbor, self.neighbors[inser_pos - 1])) {
+                            self.neighbors[inser_pos] = self.neighbors[inser_pos - 1];
+                            inser_pos -= 1;
+                        }
+                        std.debug.assert(start_neigh_neigh <= inser_pos);
+                        self.neighbors[inser_pos] = current_node;
+                        self.nb_neighbors[neighbor] += 1;
                         continue;
                     }
 
-                    // TODO: can add a fail fast heuristic
-                    // - if current_node is further than any neighbor
-                    // - if neighbor row is already pruned
-                    // in this case, no room will be made by pruning and current node will never be added
+                    // If neighbor row is already pruned and if current_node is further than the worse neighbor,
+                    // then no room will be made by pruning and current node will never be added
+                    const worse_neighbor_sim = self.similarity(neighbor, self.neighbors[end_neigh_neigh - 1]);
+                    if (self.are_neighbors_pruned[neighbor] and worse_neighbor_sim > sim) continue;
 
                     // reverse candidates : neighbor's neighbors + current_node
                     nb_candidates = 0;
-                    const start_neigh_neigh = self.params.k_max * neighbor;
-                    const end_neigh_neigh = start_neigh_neigh + self.nb_neighbors[neighbor];
-
                     for (start_neigh_neigh..end_neigh_neigh) |k| {
                         const neigh_neigh = self.neighbors[k];
                         // since neighbors are unique, no need to test if already candidate
@@ -575,11 +611,13 @@ pub const Graph = struct {
                         candidates[nb_candidates].similarity = self.similarity(neighbor, neigh_neigh);
                         nb_candidates += 1;
                     }
-                    // TODO: if we maintain neighbors sorted by similarity, we can simply do a reverse linear pass
-                    // to insert current_node at the right position in candidates, and avoid the sort in pruneCandidates
-                    // we already tested that current_node is not a neighbor of neighbor
-                    candidates[nb_candidates].node = current_node;
-                    candidates[nb_candidates].similarity = self.similarity(neighbor, current_node);
+                    // since candidates are sorted, we can insert current_node at the right position
+                    var inser_pos = nb_candidates;
+                    while (inser_pos > 0 and sim > candidates[inser_pos - 1].similarity) {
+                        candidates[inser_pos] = candidates[inser_pos - 1];
+                        inser_pos -= 1;
+                    }
+                    candidates[inser_pos] = .{ .node = current_node, .similarity = sim };
                     nb_candidates += 1;
 
                     // reverse prune
@@ -613,16 +651,6 @@ pub const Graph = struct {
         return false;
     }
 
-    pub fn addNeighbor(self: *Graph, node: usize, new_neighbor: usize) void {
-        std.debug.assert(!self.is_junk[node]);
-        std.debug.assert(!self.is_junk[new_neighbor]);
-        std.debug.assert(new_neighbor != node);
-        std.debug.assert(!self.hasNeighbor(node, new_neighbor));
-        std.debug.assert(self.nb_neighbors[node] < self.params.k_max);
-
-        self.neighbors[self.params.k_max * node + self.nb_neighbors[node]] = new_neighbor;
-        self.nb_neighbors[node] += 1;
-    }
 
     // ---------------------- Syntax utils ----------------------- //
 
