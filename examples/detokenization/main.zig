@@ -325,6 +325,8 @@ pub fn analyzeTopRows(zml_handler: *Zml_handler, model_handler: *model_.Model_ha
     var top_dot_indices_buffer: zml.Buffer = undefined;
     var top_avg_dot_values_buffer: zml.Buffer = undefined;
     var top_avg_dot_indices_buffer: zml.Buffer = undefined;
+    var anti_junk_values_buffer: zml.Buffer = undefined;
+    var anti_junk_indices_buffer: zml.Buffer = undefined;
     model_handler.exes.analyze_top_rows_results.fill(.{
         &top_norm_values_buffer,
         &top_norm_indices_buffer,
@@ -332,6 +334,8 @@ pub fn analyzeTopRows(zml_handler: *Zml_handler, model_handler: *model_.Model_ha
         &top_dot_indices_buffer,
         &top_avg_dot_values_buffer,
         &top_avg_dot_indices_buffer,
+        &anti_junk_values_buffer,
+        &anti_junk_indices_buffer,
     });
     defer top_norm_values_buffer.deinit();
     defer top_norm_indices_buffer.deinit();
@@ -339,6 +343,8 @@ pub fn analyzeTopRows(zml_handler: *Zml_handler, model_handler: *model_.Model_ha
     defer top_dot_indices_buffer.deinit();
     defer top_avg_dot_values_buffer.deinit();
     defer top_avg_dot_indices_buffer.deinit();
+    defer anti_junk_values_buffer.deinit();
+    defer anti_junk_indices_buffer.deinit();
 
     const top_norm_values_slice = try top_norm_values_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
     defer top_norm_values_slice.free(zml_handler.allocator);
@@ -352,6 +358,10 @@ pub fn analyzeTopRows(zml_handler: *Zml_handler, model_handler: *model_.Model_ha
     defer top_avg_dot_values_slice.free(zml_handler.allocator);
     const top_avg_dot_indices_slice = try top_avg_dot_indices_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
     defer top_avg_dot_indices_slice.free(zml_handler.allocator);
+    const anti_junk_values_slice = try anti_junk_values_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer anti_junk_values_slice.free(zml_handler.allocator);
+    const anti_junk_indices_slice = try anti_junk_indices_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer anti_junk_indices_slice.free(zml_handler.allocator);
 
     try printTopRowsSection(
         tokenizer,
@@ -373,6 +383,13 @@ pub fn analyzeTopRows(zml_handler: *Zml_handler, model_handler: *model_.Model_ha
         "dot",
         top_avg_dot_indices_slice.constItems(u64),
         top_avg_dot_values_slice.constItems(f32),
+    );
+    try printTopRowsSection(
+        tokenizer,
+        "Top 100 smallest dot products with the junk direction",
+        "junk_dot",
+        anti_junk_indices_slice.constItems(u64),
+        anti_junk_values_slice.constItems(f32),
     );
 }
 
