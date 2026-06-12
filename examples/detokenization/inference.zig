@@ -279,7 +279,7 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, mode
     llm.exes.graph_embed_results.fill(.{&one_embed_buffer});
 
     try one_embed_buffer.toSlice(io, embed_slice);
-    var generated_token = try sampleTokenFromGraph(zml_handler, model_handler, embed_slice, g, random, llm.generation_config.top_k);
+    var generated_token = try sampleTokenFromGraph(zml_handler, model_handler, llm.tokenizer, embed_slice, g, random, llm.generation_config.top_k);
     zml_handler.toc(&zml_handler.timers.prefill);
 
     std.log.info("LLM run graph decode", .{});
@@ -293,17 +293,18 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, mode
     const output_tokens_len = llm.options.seq_len - prompt_tok.len - 1;
     var num_tokens_generated: usize = 0;
     var result: std.ArrayList(u8) = try .initCapacity(allocator, 0);
-    var stdout = std.Io.File.stdout().writer(io, &.{});
-    var writer: *std.Io.Writer = &stdout.interface;
+    //var stdout = std.Io.File.stdout().writer(io, &.{});
+    //var writer: *std.Io.Writer = &stdout.interface;
     const decoder_out_buffer = try allocator.alloc(u8, 1024);
     defer allocator.free(decoder_out_buffer);
     generation: for (0..output_tokens_len + 1) |i| {
         num_tokens_generated += 1;
         const chunk = try tokenizer_decoder.feedOne(generated_token, decoder_out_buffer);
         try result.appendSlice(allocator, chunk);
-        try writer.writeAll(chunk);
-        try writer.flush();
-        if (i == output_tokens_len) break :generation;
+        std.log.info("Generated {d}-th token {d}: {s}", .{ i, generated_token, chunk });
+        //try writer.writeAll(chunk);
+        //try writer.flush();
+        if (i == output_tokens_len or i >= 5) break :generation;
         if (llm.generation_config.isEosToken(generated_token)) break :generation;
         decode_tokens_slice.items(u32)[0] = generated_token;
         var decode_token_buffer: zml.Buffer = try .fromSlice(io, platform, decode_tokens_slice, sharding);
@@ -325,14 +326,14 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, mode
         llm.exes.graph_embed_exe.call(llm.exes.graph_embed_args, &llm.exes.graph_embed_results);
         llm.exes.graph_embed_results.fill(.{&decode_embed_buffer});
         try decode_embed_buffer.toSlice(io, embed_slice);
-        generated_token = try sampleTokenFromGraph(zml_handler, model_handler, embed_slice, g, random, llm.generation_config.top_k);
+        generated_token = try sampleTokenFromGraph(zml_handler, model_handler, llm.tokenizer, embed_slice, g, random, llm.generation_config.top_k);
         decode_embed_buffer.deinit();
     }
     const final_chunk = try tokenizer_decoder.finalize(decoder_out_buffer);
     try result.appendSlice(allocator, final_chunk);
-    try writer.writeAll(final_chunk);
-    try writer.writeAll("\n");
-    try writer.flush();
+    //try writer.writeAll(final_chunk);
+    //try writer.writeAll("\n");
+    //try writer.flush();
     zml_handler.toc(&zml_handler.timers.decode);
     const decode_ns = zml_handler.timers.decode.nanoseconds - decode_start_ns;
     const tokens_per_second = @as(f64, @floatFromInt(num_tokens_generated)) / (@as(f64, @floatFromInt(decode_ns)) / std.time.ns_per_s);
@@ -340,11 +341,11 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, mode
     return result.toOwnedSlice(allocator);
 }
 
-pub fn sampleTokenFromGraph(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, embed_slice: zml.Slice, g: *graph_.Graph, random: std.Random, top_k: u32) !u32 {
+pub fn sampleTokenFromGraph(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, tokenizer: Tokenizer, embed_slice: zml.Slice, g: *graph_.Graph, random: std.Random, top_k: u32) !u32 {
     g.greedySearch(embed_slice.constItems(f16));
 
-    try analyzeSamplings(zml_handler, model_handler, embed_slice, g);
-    
+    try analyzeSamplings(zml_handler, model_handler, tokenizer, embed_slice, g);
+
     const nb_found = @min(g.L, top_k);
 
     const row_norms = g.lm_head_row_norms.constItems(f32);
@@ -369,7 +370,8 @@ pub fn sampleTokenFromGraph(zml_handler: *Zml_handler, model_handler: *model_.Mo
     return @intCast(g.visited[nb_found - 1].node);
 }
 
-pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, embed_slice: zml.Slice, g: *graph_.Graph) !void {
+pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, tokenizer: Tokenizer, embed_slice: zml.Slice, g: *graph_.Graph) !void {
+    const nb_printed_max = 32;
     const allocator = zml_handler.allocator;
     const row_norms = g.lm_head_row_norms.constItems(f32);
 
@@ -394,12 +396,12 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
     const sorted_indices = sorted_indices_slice.constItems(i32);
     std.debug.assert(sorted_probas.len == sorted_indices.len);
 
-    const nb_real = @min(sorted_probas.len, 100);
+    const nb_real = @min(sorted_probas.len, nb_printed_max);
     log.info("Real sampling distribution (top {d})", .{nb_real});
     printSamplingHeader();
     for (0..nb_real) |i| {
         const token_id: usize = @intCast(sorted_indices[i]);
-        printSamplingRow(i + 1, token_id, sorted_probas[i], row_norms[token_id]);
+        try printSamplingRow(tokenizer, i + 1, token_id, sorted_probas[i], row_norms[token_id]);
     }
 
     g.greedySearch(embed_slice.constItems(f16));
@@ -432,12 +434,12 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
     }
     std.mem.sort(SamplingEntry, entries, {}, SamplingEntry.beforeThan);
 
-    const nb_printed_graph = @min(nb_graph, 100);
+    const nb_printed_graph = @min(nb_graph, nb_printed_max);
     log.info("Graph sampling distribution over {d} visited nodes (top {d})", .{ nb_graph, nb_printed_graph });
     printSamplingHeader();
     for (0..nb_printed_graph) |i| {
         const entry = entries[i];
-        printSamplingRow(i + 1, entry.token_id, entry.proba, entry.row_norm);
+        try printSamplingRow(tokenizer, i + 1, entry.token_id, entry.proba, entry.row_norm);
     }
 }
 
@@ -452,10 +454,46 @@ const SamplingEntry = struct {
 };
 
 fn printSamplingHeader() void {
-    log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}", .{ "rank", "token_id", "proba", "row_norm" });
-    log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}", .{ "------", "----------", "--------------", "--------------" });
+    log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}  {s}", .{ "rank", "token_id", "proba", "row_norm", "token" });
+    log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}  {s}", .{ "------", "----------", "--------------", "--------------", "-----" });
 }
 
-fn printSamplingRow(rank: usize, token_id: usize, proba: f32, row_norm: f32) void {
-    log.info("{d:>6}  {d:>10}  {d:>14.8}  {d:>14.6}", .{ rank, token_id, proba, row_norm });
+fn printSamplingRow(tokenizer: Tokenizer, rank: usize, token_id: usize, proba: f32, row_norm: f32) !void {
+    var decoded_buf: [512]u8 = undefined;
+    const decoded = try decodeToken(tokenizer, @intCast(token_id), &decoded_buf);
+    var escaped_buf: [512]u8 = undefined;
+    const escaped = escapeTokenText(decoded, &escaped_buf);
+    log.info("{d:>6}  {d:>10}  {d:>14.8}  {d:>14.6}  {s}", .{ rank, token_id, proba, row_norm, escaped });
+}
+
+fn decodeToken(tokenizer: Tokenizer, token_id: u32, out: []u8) ![]const u8 {
+    var decoder = try tokenizer.decoder();
+    defer decoder.deinit();
+
+    const chunk = try decoder.feedOne(token_id, out);
+    const final_chunk = try decoder.finalize(out[chunk.len..]);
+    return out[0 .. chunk.len + final_chunk.len];
+}
+
+fn escapeTokenText(text: []const u8, out: []u8) []const u8 {
+    var len: usize = 0;
+    for (text) |c| {
+        const replacement = switch (c) {
+            '\n' => "\\n",
+            '\r' => "\\r",
+            '\t' => "\\t",
+            '\\' => "\\\\",
+            else => null,
+        };
+        if (replacement) |rep| {
+            if (len + rep.len > out.len) break;
+            @memcpy(out[len..][0..rep.len], rep);
+            len += rep.len;
+        } else {
+            if (len + 1 > out.len) break;
+            out[len] = if (std.ascii.isControl(c)) '?' else c;
+            len += 1;
+        }
+    }
+    return out[0..len];
 }
