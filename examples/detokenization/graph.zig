@@ -246,6 +246,7 @@ pub const Graph = struct {
         self.cleanup();
     }
 
+    
     pub fn greedySearchWithLog(self: *Graph, query: []const f32, tokenizer: Tokenizer) !void {
         self.initSearch(query);
         errdefer self.cleanup();
@@ -322,6 +323,7 @@ pub const Graph = struct {
         return out[0..len];
     }
 
+    
     pub fn scoreQueryNode(self: *const Graph, query: []const f32, node: usize) f32 {
         std.debug.assert(!self.is_junk[node]);
         const rows = self.lm_head_normalized.constItems(f32);
@@ -552,6 +554,7 @@ pub const Graph = struct {
         var end_neigh = start_neigh;
         const inv_alpha_squared = 1.0 / (self.params.alpha * self.params.alpha);
         for (candidates) |candidate| {
+            std.debug.assert(candidate.node != base);
             // The LOS heuristic decides if a candidate node can be added to base's neighbors
             // If any of base's neighbor is already close enough from candidate, then it's rejected,
             // as the routing base -> close_neighbor -> candidate is deemed sufficient
@@ -618,8 +621,14 @@ pub const Graph = struct {
                 // since both lists are sorted and contain unique nodes, we can build
                 // the sorted list of candidates in one linear forward pass
                 self.greedySearchNode(current_node);
+                // only first L positions are sorted
+                std.mem.sort(Candidate, self.visited[self.L..self.nb_visited], {}, Candidate.beforeThan);
                 var pos_in_neighbors: usize = start_neigh;
                 var pos_in_visited: usize = 0;
+                // if current_node was visited during the search, skip it in the visited pool
+                // otherwise it will end up being a neighbor of itself
+                // if it's visited, it will always be the best visited node and be in first place
+                if (self.visited[0].node == current_node) pos_in_visited = 1;
                 while (pos_in_neighbors < end_neigh and pos_in_visited < self.nb_visited) {
                     const neigh = self.neighbors[pos_in_neighbors];
                     const visit = self.visited[pos_in_visited].node;
