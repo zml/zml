@@ -412,7 +412,7 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
         try printSamplingRow(tokenizer, i + 1, token_id, is_junk[token_id], sorted_probas[i], row_norms[token_id], sorted_similarities[i]);
     }
 
-    g.greedySearch(embed_slice.constItems(f32));
+    try g.greedySearchWithLog(embed_slice.constItems(f32), tokenizer);
     const nb_graph = g.L;
     const entries = try allocator.alloc(SamplingEntry, nb_graph);
     defer allocator.free(entries);
