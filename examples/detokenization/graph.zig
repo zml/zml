@@ -5,7 +5,7 @@ const main = @import("main.zig");
 const log = std.log;
 
 pub const GraphParams = struct {
-    k_max: usize = 32,
+    k_max: usize = 64,
     search_budget: usize = 4096,
     alpha: f16 = 1.15,
     vamana_passes: usize = 2,
@@ -189,6 +189,7 @@ pub const Graph = struct {
     // ------------------- Search functions ------------------ //
 
     pub fn greedySearchNode(self: *Graph, query: usize) void {
+        self.zml_handler.tic(&self.zml_handler.timers.greedy_search);
         std.debug.assert(!self.is_junk[query]);
         // initialize search at entry point
         self.initNodeSearch(query);
@@ -201,7 +202,12 @@ pub const Graph = struct {
             // if all nodes in active pool have been expanded, terminate the search
             if (self.is_search_done) break;
 
-            // otherwise, expand search to best node neighbors
+            // TODO: switch from atomic neighbor extention to incremental extension
+            // store nb_expanded_neighbors instead of a boolean flag, and expand only
+            // ne neighbor at a time. If a neighbor at a small position has much better
+            // similarity with query than the base node, we want to focus of this neighbor
+            // neighbors instead of the remaining neighbors of the base node. This can save
+            // a lot of distance computations.
             const start_neigh = self.params.k_max * node;
             const end_neigh = start_neigh + self.nb_neighbors[node];
             for (start_neigh..end_neigh) |i| {
@@ -211,6 +217,7 @@ pub const Graph = struct {
             }
         }
         self.cleanup();
+        self.zml_handler.toc(&self.zml_handler.timers.prune_pool);
     }
 
     pub fn greedySearch(self: *Graph, query: []const f16) void {
