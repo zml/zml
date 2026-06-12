@@ -7,7 +7,7 @@ const Tokenizer = zml.tokenizer.Tokenizer;
 
 pub const GraphParams = struct {
     k_max: usize = 16,
-    search_budget: usize = 512,
+    search_budget: usize = 8192,
     alpha: f32 = 1.15,
     vamana_passes: usize = 2,
     top_k: usize = 16,
