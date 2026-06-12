@@ -3,6 +3,7 @@ const zml = @import("zml");
 const main = @import("main.zig");
 
 const log = std.log;
+const Tokenizer = zml.tokenizer.Tokenizer;
 
 pub const GraphParams = struct {
     k_max: usize = 16,
@@ -245,7 +246,82 @@ pub const Graph = struct {
         self.cleanup();
     }
 
-    
+    pub fn greedySearchWithLog(self: *Graph, query: []const f32, tokenizer: Tokenizer) !void {
+        self.initSearch(query);
+        errdefer self.cleanup();
+
+        const row_norms = self.lm_head_row_norms.constItems(f32);
+        var iter: usize = 0;
+        log.info("Greedy search trace", .{});
+        log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}  {s:>10}  {s}", .{ "iter", "node", "similarity", "row_norm", "visited", "token" });
+        log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}  {s:>10}  {s}", .{ "------", "----------", "--------------", "--------------", "----------", "-----" });
+
+        while (self.nb_visited < self.params.search_budget) {
+            const node = self.popCandidate();
+            if (self.is_search_done) break;
+
+            try self.logGreedySearchNode(tokenizer, iter, node, self.candidateSimilarity(node), row_norms[node]);
+            iter += 1;
+
+            const start_neigh = self.params.k_max * node;
+            const end_neigh = start_neigh + self.nb_neighbors[node];
+            for (start_neigh..end_neigh) |i| {
+                const neighbor = self.neighbors[i];
+                if (self.is_visited[neighbor]) continue;
+                self.addCandidate(query, neighbor);
+            }
+        }
+
+        self.cleanup();
+    }
+
+    fn candidateSimilarity(self: *const Graph, node: usize) f32 {
+        for (self.visited[0..self.nb_visited]) |candidate| {
+            if (candidate.node == node) return candidate.similarity;
+        }
+        unreachable;
+    }
+
+    fn logGreedySearchNode(self: *const Graph, tokenizer: Tokenizer, iter: usize, node: usize, sim: f32, row_norm: f32) !void {
+        var decoded_buf: [512]u8 = undefined;
+        const decoded = try decodeToken(tokenizer, @intCast(node), &decoded_buf);
+        var escaped_buf: [512]u8 = undefined;
+        const escaped = escapeTokenText(decoded, &escaped_buf);
+        log.info("{d:>6}  {d:>10}  {d:>14.8}  {d:>14.6}  {d:>10}  {s}", .{ iter, node, sim, row_norm, self.nb_visited, escaped });
+    }
+
+    fn decodeToken(tokenizer: Tokenizer, token_id: u32, out: []u8) ![]const u8 {
+        var decoder = try tokenizer.decoder();
+        defer decoder.deinit();
+
+        const chunk = try decoder.feedOne(token_id, out);
+        const final_chunk = try decoder.finalize(out[chunk.len..]);
+        return out[0 .. chunk.len + final_chunk.len];
+    }
+
+    fn escapeTokenText(text: []const u8, out: []u8) []const u8 {
+        var len: usize = 0;
+        for (text) |c| {
+            const replacement = switch (c) {
+                '\n' => "\\n",
+                '\r' => "\\r",
+                '\t' => "\\t",
+                '\\' => "\\\\",
+                else => null,
+            };
+            if (replacement) |rep| {
+                if (len + rep.len > out.len) break;
+                @memcpy(out[len..][0..rep.len], rep);
+                len += rep.len;
+            } else {
+                if (len + 1 > out.len) break;
+                out[len] = if (std.ascii.isControl(c)) '?' else c;
+                len += 1;
+            }
+        }
+        return out[0..len];
+    }
+
     pub fn scoreQueryNode(self: *const Graph, query: []const f32, node: usize) f32 {
         std.debug.assert(!self.is_junk[node]);
         const rows = self.lm_head_normalized.constItems(f32);
@@ -388,7 +464,7 @@ pub const Graph = struct {
 
         const selected = self.allocator.alloc(Candidate, self.n) catch @panic("OOM");
         defer self.allocator.free(selected);
-        
+
         const is_selected = self.allocator.alloc(bool, self.n) catch @panic("OOM");
         defer self.allocator.free(is_selected);
         @memset(is_selected, false);
@@ -401,19 +477,19 @@ pub const Graph = struct {
             self.nb_neighbors[i] = 0;
             if (self.is_junk[i]) continue;
             is_selected[i] = true;
-            
+
             // rejection method as k_max << n
             while (nb_selected < self.params.k_max) {
                 const candidate = random.uintLessThan(usize, self.n);
                 if (self.is_junk[candidate] or is_selected[candidate]) continue;
                 // add valid neighbor
                 is_selected[candidate] = true;
-                selected[nb_selected] = .{ .node = candidate, .similarity = self.similarity(i, candidate)};
+                selected[nb_selected] = .{ .node = candidate, .similarity = self.similarity(i, candidate) };
                 nb_selected += 1;
             }
 
             std.mem.sort(Candidate, selected[0..nb_selected], {}, Candidate.beforeThan);
-            
+
             for (0..nb_selected) |j| {
                 const neigh = selected[j].node;
                 self.neighbors[start_neigh + j] = neigh;
@@ -534,7 +610,7 @@ pub const Graph = struct {
                 const current_node = order[i];
                 const start_neigh = self.params.k_max * current_node;
                 var end_neigh = start_neigh + self.nb_neighbors[current_node];
-                
+
                 if (self.is_junk[current_node]) continue;
                 var nb_candidates: usize = 0;
 
@@ -659,7 +735,6 @@ pub const Graph = struct {
         }
         return false;
     }
-
 
     // ---------------------- Syntax utils ----------------------- //
 
