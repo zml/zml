@@ -540,7 +540,7 @@ pub const Llm = struct {
     };
     
     pub fn graphEmbed(self: Llm, embed: zml.Tensor) zml.Tensor {
-        return self.norm.forward(embed).convert(.f32).reuseBuffer(embed);
+        return self.norm.forward(embed).convert(.f32);
     }
 
 
