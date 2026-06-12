@@ -289,7 +289,8 @@ pub const Model = struct {
         const logits = lm_head.dot(embedding_f32, .d).squeeze(.s);
         const similarities = normalized_lm_head.dot(embedding_f32, .d).squeeze(.s);
         const sorted = logits.softmax(.voc).sort(.voc, .{ .descending = true });
-        const sorted_similarities = similarities.gather(.{ .voc = sorted.indices }, .{});
+        const sorted_similarity_indices = sorted.indices.rename(.{ .voc = .rank });
+        const sorted_similarities = similarities.gather(.{ .voc = sorted_similarity_indices }, .{}).rename(.{ .rank = .voc });
         return .{ sorted.values, sorted.indices, sorted_similarities };
     }
 
