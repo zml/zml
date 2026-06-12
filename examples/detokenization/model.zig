@@ -112,7 +112,7 @@ pub const Model_handler = struct {
             zml_handler.io,
             model,
             .scoreTokens,
-            .{.init(.{ .s = 1, .d = model.shape().dim(.d) }, .f16)},
+            .{.init(.{ .s = 1, .d = model.shape().dim(.d) }, .f32)},
             opts,
         );
         errdefer score_exe.deinit();
@@ -285,9 +285,8 @@ pub const Model = struct {
     pub fn scoreTokens(self: Model, embedding: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
         const normalized_lm_head = normalizeRows(lm_head);
-        const embedding_f32 = embedding.withTags(.{ .s, .d }).convert(.f32);
-        const normalized_embedding = normalizeRows(embedding_f32);
-        const logits = lm_head.dot(embedding_f32, .d).squeeze(.s);
+        const normalized_embedding = normalizeRows(embedding);
+        const logits = lm_head.dot(embedding, .d).squeeze(.s);
         const similarities = normalized_lm_head.dot(normalized_embedding, .d).squeeze(.s);
         const sorted = logits.softmax(.voc).sort(.voc, .{ .descending = true });
         const sorted_similarity_indices = sorted.indices.rename(.{ .voc = .rank });
