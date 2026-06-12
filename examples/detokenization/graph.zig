@@ -7,7 +7,7 @@ const log = std.log;
 pub const GraphParams = struct {
     k_max: usize = 16,
     search_budget: usize = 512,
-    alpha: f16 = 1.15,
+    alpha: f32 = 1.15,
     vamana_passes: usize = 2,
     top_k: usize = 16,
     L: usize = 128,
@@ -16,7 +16,7 @@ pub const GraphParams = struct {
 pub const Graph = struct {
     pub const Candidate = struct {
         node: usize,
-        similarity: f16,
+        similarity: f32,
 
         fn beforeThan(_: void, lhs: Candidate, rhs: Candidate) bool {
             return lhs.similarity > rhs.similarity or (lhs.similarity == rhs.similarity and lhs.node < rhs.node);
@@ -139,7 +139,7 @@ pub const Graph = struct {
     }
 
     pub fn getMedoid(allocator: std.mem.Allocator, lm_head_normalized: zml.Slice, n: usize, dim: usize, is_junk: []const bool) !usize {
-        const rows = lm_head_normalized.constItems(f16);
+        const rows = lm_head_normalized.constItems(f32);
 
         // compute normalized average using f64 for accurate accumulation
         const average = try allocator.alloc(f64, dim);
@@ -162,21 +162,21 @@ pub const Graph = struct {
             norm2 += average[i] * average[i];
         }
         const inv_norm = 1.0 / @sqrt(norm2);
-        const average_f16 = try allocator.alloc(f16, dim);
-        defer allocator.free(average_f16);
+        const average_f32 = try allocator.alloc(f32, dim);
+        defer allocator.free(average_f32);
         for (0..dim) |i| {
-            average_f16[i] = @floatCast(average[i] * inv_norm);
+            average_f32[i] = @floatCast(average[i] * inv_norm);
         }
 
         // medoid is the row that is most similar to the average
         var best_row: usize = 0;
-        var best_similarity: f16 = -std.math.inf(f16);
+        var best_similarity: f32 = -std.math.inf(f32);
         for (0..n) |i| {
             if (is_junk[i]) continue;
             const row_i = rows[i * dim ..][0..dim];
-            var row_i_similarity: f16 = 0.0;
+            var row_i_similarity: f32 = 0.0;
             for (0..dim) |j| {
-                row_i_similarity += row_i[j] * average_f16[j];
+                row_i_similarity += row_i[j] * average_f32[j];
             }
             if (row_i_similarity > best_similarity) {
                 best_similarity = row_i_similarity;
@@ -215,7 +215,7 @@ pub const Graph = struct {
         self.zml_handler.toc(&self.zml_handler.timers.greedy_search);
     }
 
-    pub fn greedySearch(self: *Graph, query: []const f16) void {
+    pub fn greedySearch(self: *Graph, query: []const f32) void {
         // initialize search at entry point
         self.initSearch(query);
 
@@ -246,11 +246,11 @@ pub const Graph = struct {
     }
 
     
-    pub fn scoreQueryNode(self: *const Graph, query: []const f16, node: usize) f16 {
+    pub fn scoreQueryNode(self: *const Graph, query: []const f32, node: usize) f32 {
         std.debug.assert(!self.is_junk[node]);
-        const rows = self.lm_head_normalized.constItems(f16);
+        const rows = self.lm_head_normalized.constItems(f32);
         const row = rows[node * self.dim ..][0..self.dim];
-        var dot: f16 = 0;
+        var dot: f32 = 0;
         for (0..self.dim) |i| {
             dot += query[i] * row[i];
         }
@@ -272,7 +272,7 @@ pub const Graph = struct {
         self.is_search_done = false;
     }
 
-    pub fn initSearch(self: *Graph, query: []const f16) void {
+    pub fn initSearch(self: *Graph, query: []const f32) void {
         // at start, pool is empty
         std.debug.assert(!self.is_visited[self.medoid]);
 
@@ -295,7 +295,7 @@ pub const Graph = struct {
         self.insert(node, sim);
     }
 
-    pub fn addCandidate(self: *Graph, query: []const f16, node: usize) void {
+    pub fn addCandidate(self: *Graph, query: []const f32, node: usize) void {
         std.debug.assert(!self.is_junk[node]);
         std.debug.assert(!self.is_visited[node]);
         std.debug.assert(self.nb_visited > 0);
@@ -303,7 +303,7 @@ pub const Graph = struct {
         self.insert(node, sim);
     }
 
-    pub fn insert(self: *Graph, node: usize, sim: f16) void {
+    pub fn insert(self: *Graph, node: usize, sim: f32) void {
         std.debug.assert(!self.is_junk[node]);
         std.debug.assert(!self.is_visited[node]);
         std.debug.assert(self.nb_visited > 0);
@@ -671,7 +671,7 @@ pub const Graph = struct {
         return count;
     }
 
-    pub fn similarity(self: *const Graph, a: usize, b: usize) f16 {
+    pub fn similarity(self: *const Graph, a: usize, b: usize) f32 {
         return self.similarity_matrix.dist(a, b);
     }
 };
