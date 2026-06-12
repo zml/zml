@@ -375,6 +375,7 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
     const allocator = zml_handler.allocator;
     const row_norms = g.lm_head_row_norms.constItems(f32);
     const is_junk = g.is_junk;
+    const embedding_norm = embeddingNorm(embed_slice);
 
     var embed_buffer: zml.Buffer = try .fromSlice(zml_handler.io, zml_handler.platform, embed_slice, .replicated);
     defer embed_buffer.deinit();
@@ -438,7 +439,7 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
             .proba = @exp(score - max_score) / total,
             .is_junk = is_junk[node],
             .row_norm = row_norms[node],
-            .similarity = @floatCast(g.visited[i].similarity),
+            .similarity = @as(f32, @floatCast(g.visited[i].similarity)) / embedding_norm,
         };
     }
     std.mem.sort(SamplingEntry, entries, {}, SamplingEntry.beforeThan);
@@ -450,6 +451,15 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
         const entry = entries[i];
         try printSamplingRow(tokenizer, i + 1, entry.token_id, entry.is_junk, entry.proba, entry.row_norm, entry.similarity);
     }
+}
+
+fn embeddingNorm(embed_slice: zml.Slice) f32 {
+    var norm2: f32 = 0.0;
+    for (embed_slice.constItems(f16)) |v| {
+        const x: f32 = @floatCast(v);
+        norm2 += x * x;
+    }
+    return @sqrt(norm2);
 }
 
 const SamplingEntry = struct {
