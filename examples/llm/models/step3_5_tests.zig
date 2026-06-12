@@ -88,8 +88,22 @@ pub fn run(
     // Only iterate the main transformer layers; trailing MTP layers are not
     // captured in the HF fixture (the dumper sets num_hidden_layers = 45).
     const num_main_layers = model.default_config.numMainLayers();
-    std.log.info("Transformer layer (isolated):", .{});
     const shardings_array = shardings.all();
+
+    // Per-stage attention probe FIRST: it's the cheapest test and the one
+    // currently being iterated on. Drills into Attn.forwardTemp so we can see
+    // which intermediate (rope.q_in, rope.q_embed, cos, sin, attn, gated, out)
+    // diverges on a sliding-attn layer.
+    std.log.info("Attention stages (per layer):", .{});
+    const attn_probe_layers = [_]usize{ 0, 1, 2, 3, 4 };
+    for (attn_probe_layers) |li| {
+        if (li >= num_main_layers) continue;
+        runAttnStages(allocator, io, platform, model_store, &activation_store, &shardings_array, li) catch |err| {
+            std.log.warn("skipping attn-stages layer {d}: {s}", .{ li, @errorName(err) });
+        };
+    }
+
+    std.log.info("Transformer layer (isolated):", .{});
     for (0..num_main_layers) |layer_idx| {
         runTransformerLayer(allocator, io, platform, model_store, &activation_store, &shardings_array, layer_idx) catch |err| {
             std.log.warn("skipping model.layers.{d}: {s}", .{ layer_idx, @errorName(err) });
@@ -110,6 +124,69 @@ pub fn run(
     std.log.info("Full model:", .{});
     try runFullTextModel(allocator, io, platform, &activation_store, shardings, text_model, text_buffers);
 }
+
+// Wraps a TransformerLayer and exposes each intermediate activation in the
+// same order HF dumps them, so we can localize per-layer drift to a stage
+// rather than only inspecting the layer output.
+const DenseLayerStages = struct {
+    layer: model.TransformerLayer,
+
+    pub fn forward(
+        self: @This(),
+        x0: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: model.KvCache,
+    ) struct {
+        zml.Tensor, // input_layernorm.out.0
+        zml.Tensor, // self_attn.out.0  (o_proj output, pre-residual)
+        zml.Tensor, // post_attention_layernorm.out.0
+        zml.Tensor, // mlp.out.0
+        zml.Tensor, // layer .out.0 (final residual)
+        model.KvCache,
+    } {
+        const attn_input = self.layer.input_layernorm.forward(x0, .d);
+        const attn_delta, const new_kv = self.layer.attn.forward(attn_input, token_index, kv_cache);
+        const x1 = x0.add(attn_delta);
+        const ffn_input = self.layer.post_attention_layernorm.forward(x1, .d);
+        const ffn_delta = switch (self.layer.ffn) {
+            .mlp => |mlp| mlp.forward(ffn_input),
+            .moe => unreachable,
+        };
+        const final = x1.add(ffn_delta);
+        return .{ attn_input, attn_delta, ffn_input, ffn_delta, final, new_kv };
+    }
+};
+
+const MoeLayerStages = struct {
+    layer: model.TransformerLayer,
+
+    pub fn forward(
+        self: @This(),
+        x0: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: model.KvCache,
+    ) struct {
+        zml.Tensor, // input_layernorm.out.0
+        zml.Tensor, // self_attn.out.0
+        zml.Tensor, // post_attention_layernorm.out.0
+        zml.Tensor, // moe.out.0 (routed experts only)
+        zml.Tensor, // share_expert.out.0 (shared MLP)
+        zml.Tensor, // layer .out.0 (final residual)
+        model.KvCache,
+    } {
+        const attn_input = self.layer.input_layernorm.forward(x0, .d);
+        const attn_delta, const new_kv = self.layer.attn.forward(attn_input, token_index, kv_cache);
+        const x1 = x0.add(attn_delta);
+        const ffn_input = self.layer.post_attention_layernorm.forward(x1, .d);
+        const moe_out, const share_out = switch (self.layer.ffn) {
+            .mlp => unreachable,
+            .moe => |m| .{ m.experts.forward(ffn_input), m.shared.forward(ffn_input) },
+        };
+        const ffn_delta = moe_out.add(share_out);
+        const final = x1.add(ffn_delta);
+        return .{ attn_input, attn_delta, ffn_input, moe_out, share_out, final, new_kv };
+    }
+};
 
 fn runTransformerLayer(
     allocator: std.mem.Allocator,
@@ -168,8 +245,7 @@ fn runTransformerLayer(
     const TraceArgs = struct { zml.Tensor, zml.Tensor, model.KvCache };
     const trace_args: TraceArgs = .{ hidden_states, cache_position, kv_traced };
 
-    const exe = try platform.compile(allocator, io, layer, .forward, trace_args, .{ .shardings = shardings });
-    defer exe.deinit();
+    const is_moe = layer.ffn == .moe;
 
     const ActArgs = struct { zml.Tensor, zml.Tensor };
     var act_args: ActArgs = .{ hidden_states, cache_position };
@@ -190,31 +266,78 @@ fn runTransformerLayer(
     defer v_buf.deinit();
     const kv_buffers: model.KvCache.Buffer = .{ .k = k_buf, .v = v_buf };
 
-    var exe_args = try exe.args(allocator);
-    defer exe_args.deinit(allocator);
-    var exe_results = try exe.results(allocator);
-    defer exe_results.deinit(allocator);
-
-    const args_buffers = .{ act_buffers[0], act_buffers[1], kv_buffers };
-    exe_args.set(.{ layer_weights, args_buffers });
-    exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
-
-    const output_count = exe.output_shapes.len;
-    var results = try allocator.alloc(zml.Buffer, output_count);
-    defer allocator.free(results);
-    exe_results.fill(.{results});
-
-    if (output_count == 0) {
-        std.log.warn("{s}: compiled layer produced no outputs", .{name});
-        return;
-    }
-
-    // forward returns (hidden_states, KvCache.k, KvCache.v); only the first
-    // output corresponds to a recorded HF activation (`out.0`).
-    try compareSingleOutput(allocator, io, layer_view, "out.0", &results[0], name, .{
+    // Per-stage tolerances. Keep close_fraction strict for individual stages —
+    // each one is fed clean HF inputs, so genuine algorithmic drift will show
+    // up as a low close_fraction even when mean error is tiny. The full layer
+    // tolerance stays at 0.99 to match the previous report.
+    const stage_opts: zml.testing.CompareOpts = .{
         .absolute_tolerance = 1e-2,
         .minimum_close_fraction = 0.99,
-    });
+    };
+    const layer_opts: zml.testing.CompareOpts = .{
+        .absolute_tolerance = 1e-2,
+        .minimum_close_fraction = 0.99,
+    };
+
+    const input_norm_name = try std.fmt.allocPrint(allocator, "{s}.input_layernorm", .{name});
+    defer allocator.free(input_norm_name);
+    const post_norm_name = try std.fmt.allocPrint(allocator, "{s}.post_attention_layernorm", .{name});
+    defer allocator.free(post_norm_name);
+    const mlp_name = try std.fmt.allocPrint(allocator, "{s}.mlp", .{name});
+    defer allocator.free(mlp_name);
+    const moe_name = try std.fmt.allocPrint(allocator, "{s}.moe", .{name});
+    defer allocator.free(moe_name);
+    const share_name = try std.fmt.allocPrint(allocator, "{s}.share_expert", .{name});
+    defer allocator.free(share_name);
+
+    if (is_moe) {
+        const wrapper: MoeLayerStages = .{ .layer = layer };
+        const exe = try platform.compile(allocator, io, wrapper, .forward, trace_args, .{ .shardings = shardings });
+        defer exe.deinit();
+
+        var exe_args = try exe.args(allocator);
+        defer exe_args.deinit(allocator);
+        var exe_results = try exe.results(allocator);
+        defer exe_results.deinit(allocator);
+
+        const wrapper_buffers: zml.Bufferized(MoeLayerStages) = .{ .layer = layer_weights };
+        exe_args.set(.{ wrapper_buffers, .{ act_buffers[0], act_buffers[1], kv_buffers } });
+        exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+
+        var results = try allocator.alloc(zml.Buffer, exe.output_shapes.len);
+        defer allocator.free(results);
+        exe_results.fill(.{results});
+
+        try compareSingleOutput(allocator, io, layer_view.withPrefix("input_layernorm"), "out.0", &results[0], input_norm_name, stage_opts);
+        try compareSingleOutput(allocator, io, self_attn_view, "out.0", &results[1], self_attn_name, stage_opts);
+        try compareSingleOutput(allocator, io, layer_view.withPrefix("post_attention_layernorm"), "out.0", &results[2], post_norm_name, stage_opts);
+        try compareSingleOutput(allocator, io, layer_view.withPrefix("moe"), "out.0", &results[3], moe_name, stage_opts);
+        try compareSingleOutput(allocator, io, layer_view.withPrefix("share_expert"), "out.0", &results[4], share_name, stage_opts);
+        try compareSingleOutput(allocator, io, layer_view, "out.0", &results[5], name, layer_opts);
+    } else {
+        const wrapper: DenseLayerStages = .{ .layer = layer };
+        const exe = try platform.compile(allocator, io, wrapper, .forward, trace_args, .{ .shardings = shardings });
+        defer exe.deinit();
+
+        var exe_args = try exe.args(allocator);
+        defer exe_args.deinit(allocator);
+        var exe_results = try exe.results(allocator);
+        defer exe_results.deinit(allocator);
+
+        const wrapper_buffers: zml.Bufferized(DenseLayerStages) = .{ .layer = layer_weights };
+        exe_args.set(.{ wrapper_buffers, .{ act_buffers[0], act_buffers[1], kv_buffers } });
+        exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+
+        var results = try allocator.alloc(zml.Buffer, exe.output_shapes.len);
+        defer allocator.free(results);
+        exe_results.fill(.{results});
+
+        try compareSingleOutput(allocator, io, layer_view.withPrefix("input_layernorm"), "out.0", &results[0], input_norm_name, stage_opts);
+        try compareSingleOutput(allocator, io, self_attn_view, "out.0", &results[1], self_attn_name, stage_opts);
+        try compareSingleOutput(allocator, io, layer_view.withPrefix("post_attention_layernorm"), "out.0", &results[2], post_norm_name, stage_opts);
+        try compareSingleOutput(allocator, io, layer_view.withPrefix("mlp"), "out.0", &results[3], mlp_name, stage_opts);
+        try compareSingleOutput(allocator, io, layer_view, "out.0", &results[4], name, layer_opts);
+    }
 }
 
 const LayerChain = struct {
@@ -425,6 +548,150 @@ fn runFullTextModel(
         .absolute_tolerance = 5e-2,
         .minimum_close_fraction = 0.98,
     });
+}
+
+// Wraps Attn.forwardTemp to expose per-stage intermediates (q/k pre/post rope,
+// cos/sin, attention output, gated output, final o_proj) so we can pinpoint
+// which sub-step of self-attention is responsible for the divergence on
+// sliding-attention layers.
+const AttnStages = struct {
+    attn: model.Attn,
+
+    pub fn forward(
+        self: @This(),
+        x: zml.Tensor,
+        token_index: zml.Tensor,
+        kv_cache: model.KvCache,
+    ) struct {
+        zml.Tensor, // q_pre_rope_hf  -> self_attn.rope.q_in
+        zml.Tensor, // k_pre_rope_hf  -> self_attn.rope.k_in
+        zml.Tensor, // cos            -> self_attn.rope.cos
+        zml.Tensor, // sin            -> self_attn.rope.sin
+        zml.Tensor, // q_rope_hf      -> self_attn.rope.q_embed
+        zml.Tensor, // k_rope_hf      -> self_attn.rope.k_embed
+        zml.Tensor, // attn           -> self_attn.attn
+        zml.Tensor, // gated          -> self_attn.gated
+        zml.Tensor, // out            -> self_attn.out.0
+        model.KvCache,
+    } {
+        const stages, const new_kv = self.attn.forwardTemp(x, token_index, kv_cache);
+        return .{
+            stages.q_pre_rope_hf,
+            stages.k_pre_rope_hf,
+            stages.cos,
+            stages.sin,
+            stages.q_rope_hf,
+            stages.k_rope_hf,
+            stages.attn,
+            stages.gated,
+            stages.out,
+            new_kv,
+        };
+    }
+};
+
+fn runAttnStages(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    model_store: *zml.io.TensorStore,
+    activation_store: *zml.io.TensorStore,
+    shardings: []const zml.Sharding,
+    layer_idx: usize,
+) !void {
+    const name = try std.fmt.allocPrint(allocator, "model.layers.{d}", .{layer_idx});
+    defer allocator.free(name);
+    const self_attn_name = try std.fmt.allocPrint(allocator, "{s}.self_attn", .{name});
+    defer allocator.free(self_attn_name);
+    const rope_name = try std.fmt.allocPrint(allocator, "{s}.rope", .{self_attn_name});
+    defer allocator.free(rope_name);
+
+    const model_partitions = shardings[0].numPartitionsForLogicalAxis(.model);
+    const attn = try model.Attn.init(model_store.view().withPrefix(self_attn_name), layer_idx, model_partitions);
+    var attn_buffers = try zml.io.load(model.Attn, &attn, allocator, io, platform, model_store, .{
+        .parallelism = 1,
+        .shardings = shardings,
+        .dma_chunks = 2,
+        .dma_chunk_size = 4096,
+    });
+    defer deinitBuffers(&attn_buffers);
+
+    const attn_view = activation_store.view().withPrefix(self_attn_name);
+    if (!attn_view.hasKey("in.0") or !attn_view.hasKey("in.3")) {
+        std.log.warn("skipping {s}: missing in.0/in.3", .{self_attn_name});
+        return;
+    }
+
+    const hidden = attn_view.createTensor("in.0", .{ .b, .s, .d }, .replicated);
+    const cache_position = attn_view.createTensor("in.3", null, .replicated);
+
+    const batch_dim = hidden.dim(.b);
+    const seq_dim = hidden.dim(.s);
+    const kv_shape_unsharded = zml.Shape.init(.{
+        .layer = @as(i64, @intCast(model.default_config.numMainLayers())),
+        .b = batch_dim,
+        .k = seq_dim,
+        .h = attn.num_kv_heads,
+        .hd = attn.head_dim,
+    }, hidden.dtype());
+    const kv_shape = model.partitionKvCacheShape(kv_shape_unsharded, attn.num_kv_heads, model_partitions);
+    const kv_traced = model.KvCache.init(kv_shape).atLayer(layer_idx);
+
+    const TraceArgs = struct { zml.Tensor, zml.Tensor, model.KvCache };
+    const trace_args: TraceArgs = .{ hidden, cache_position, kv_traced };
+
+    const ActArgs = struct { zml.Tensor, zml.Tensor };
+    var act_args: ActArgs = .{ hidden, cache_position };
+    var act_buffers = try zml.io.load(ActArgs, &act_args, allocator, io, platform, activation_store, .auto);
+    defer deinitBuffers(&act_buffers);
+
+    const kv_bytes = kv_shape.byteSize();
+    const k_init = try allocator.alloc(u8, kv_bytes);
+    defer allocator.free(k_init);
+    @memset(k_init, 0);
+    const v_init = try allocator.alloc(u8, kv_bytes);
+    defer allocator.free(v_init);
+    @memset(v_init, 0);
+
+    var k_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, shardings[0], k_init);
+    defer k_buf.deinit();
+    var v_buf: zml.Buffer = try .fromBytes(io, platform, kv_shape, shardings[0], v_init);
+    defer v_buf.deinit();
+    const kv_buffers: model.KvCache.Buffer = .{ .k = k_buf, .v = v_buf };
+
+    const wrapper: AttnStages = .{ .attn = attn };
+    const exe = try platform.compile(allocator, io, wrapper, .forward, trace_args, .{ .shardings = shardings });
+    defer exe.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+
+    const wrapper_buffers: zml.Bufferized(AttnStages) = .{ .attn = attn_buffers };
+    exe_args.set(.{ wrapper_buffers, .{ act_buffers[0], act_buffers[1], kv_buffers } });
+    exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+
+    var results = try allocator.alloc(zml.Buffer, exe.output_shapes.len);
+    defer allocator.free(results);
+    exe_results.fill(.{results});
+
+    const opts: zml.testing.CompareOpts = .{
+        .absolute_tolerance = 1e-2,
+        .minimum_close_fraction = 0.99,
+    };
+
+    const rope_view = activation_store.view().withPrefix(rope_name);
+
+    try compareSingleOutput(allocator, io, rope_view, "q_in", &results[0], rope_name, opts);
+    try compareSingleOutput(allocator, io, rope_view, "k_in", &results[1], rope_name, opts);
+    try compareSingleOutput(allocator, io, rope_view, "cos", &results[2], rope_name, opts);
+    try compareSingleOutput(allocator, io, rope_view, "sin", &results[3], rope_name, opts);
+    try compareSingleOutput(allocator, io, rope_view, "q_embed", &results[4], rope_name, opts);
+    try compareSingleOutput(allocator, io, rope_view, "k_embed", &results[5], rope_name, opts);
+    try compareSingleOutput(allocator, io, attn_view, "attn", &results[6], self_attn_name, opts);
+    try compareSingleOutput(allocator, io, attn_view, "gated", &results[7], self_attn_name, opts);
+    try compareSingleOutput(allocator, io, attn_view, "out.0", &results[8], self_attn_name, opts);
 }
 
 fn deinitBuffers(bufs: anytype) void {
