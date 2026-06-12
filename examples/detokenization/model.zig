@@ -89,6 +89,22 @@ pub const Model_handler = struct {
         errdefer get_lm_head_normalized_args.deinit(zml_handler.allocator);
 
         const get_lm_head_normalized_results = try get_lm_head_normalized_exe.results(zml_handler.allocator);
+        errdefer get_lm_head_normalized_results.deinit(zml_handler.allocator);
+
+        const find_junk_rows_exe = try zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .findJunkRows,
+            .{},
+            opts,
+        );
+        errdefer find_junk_rows_exe.deinit();
+
+        const find_junk_rows_args = try find_junk_rows_exe.args(zml_handler.allocator);
+        errdefer find_junk_rows_args.deinit(zml_handler.allocator);
+
+        const find_junk_rows_results = try find_junk_rows_exe.results(zml_handler.allocator);
 
         return .{
             .similarity_matrix_exe = similarity_matrix_exe,
@@ -100,6 +116,9 @@ pub const Model_handler = struct {
             .get_lm_head_normalized_exe = get_lm_head_normalized_exe,
             .get_lm_head_normalized_args = get_lm_head_normalized_args,
             .get_lm_head_normalized_results = get_lm_head_normalized_results,
+            .find_junk_rows_exe = find_junk_rows_exe,
+            .find_junk_rows_args = find_junk_rows_args,
+            .find_junk_rows_results = find_junk_rows_results,
         };
     }
 
@@ -122,6 +141,9 @@ pub const ModelExes = struct {
     get_lm_head_normalized_exe: zml.Exe,
     get_lm_head_normalized_args: zml.Exe.Arguments,
     get_lm_head_normalized_results: zml.Exe.Results,
+    find_junk_rows_exe: zml.Exe,
+    find_junk_rows_args: zml.Exe.Arguments,
+    find_junk_rows_results: zml.Exe.Results,
 
     pub fn deinit(self: ModelExes, allocator: std.mem.Allocator) void {
         self.similarity_matrix_exe.deinit();
@@ -133,6 +155,9 @@ pub const ModelExes = struct {
         self.get_lm_head_normalized_exe.deinit();
         self.get_lm_head_normalized_args.deinit(allocator);
         self.get_lm_head_normalized_results.deinit(allocator);
+        self.find_junk_rows_exe.deinit();
+        self.find_junk_rows_args.deinit(allocator);
+        self.find_junk_rows_results.deinit(allocator);
     }
 };
 
@@ -202,6 +227,20 @@ pub const Model = struct {
         return normalizeRows(self.get_lm_head());
     }
 
+    pub fn findJunkRows(self: Model) zml.Tensor {
+        const junk_seed_rows = 100;
+        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
+        const row_norm2 = lm_head.mul(lm_head).sum(.d).squeeze(.d);
+        const smallest_norm_rows = row_norm2.topK(.{ .junk = .voc }, junk_seed_rows, .{ .descending = false });
+        const rows = lm_head.gather(.{ .voc = smallest_norm_rows.indices }, .{});
+        const junk_direction = normalizeVector(rows.mean(.junk).squeeze(.junk)).convert(.bf16);
+        const similarity = normalizeRows(lm_head).dot(junk_direction.convert(.f32), .d);
+        const is_junk = similarity.cmp(.GT, zml.Tensor.scalar(0.5, .f32));
+        const row_ids = zml.Tensor.iota(similarity.shape(), .voc).convert(.u64);
+        const sentinel = zml.Tensor.scalar(@as(u64, @intCast(lm_head.dim(.voc))), .u64);
+        return is_junk.select(row_ids, sentinel);
+    }
+
     pub fn similarityMatrix(self: Model, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f16);
         const batch_slice: zml.Tensor.DynSlice = .{ .start = row_start, .len = row_batch_size };
@@ -227,5 +266,11 @@ pub const Model = struct {
         const squared_norm = lm_head.mul(lm_head).sum(.d);
         const inv_norm = squared_norm.rsqrt();
         return lm_head.mul(inv_norm.broad(lm_head.shape()));
+    }
+
+    fn normalizeVector(vector: zml.Tensor) zml.Tensor {
+        const squared_norm = vector.mul(vector).sum(.d);
+        const inv_norm = squared_norm.rsqrt();
+        return vector.mul(inv_norm.broad(vector.shape()));
     }
 };
