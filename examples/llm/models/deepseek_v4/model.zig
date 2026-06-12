@@ -1224,9 +1224,11 @@ const MoE = struct {
         self: MoE,
         x: zml.Tensor,
         input_ids: zml.Tensor,
-        // moe_metadata: zml.moe.Metadata,
-        // moe_parameters: zml.moe.Parameters,
+        moe_metadata: zml.moe.Metadata,
+        moe_parameters: zml.moe.Parameters,
     ) zml.Tensor {
+        _ = moe_metadata; // autofix
+        _ = moe_parameters; // autofix
         const topk_weight, const topk_ids = self.router.forward(x, input_ids);
         const w1_weight = stackExpertTensor(self.experts, "w1", "weight");
         const w1_scale = stackExpertTensor(self.experts, "w1", "scale");
@@ -1834,8 +1836,14 @@ pub const LoadedModel = struct {
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
+        const config = self.parsed_config.value;
+
+        if (!std.mem.eql(u8, config.expert_dtype, "fp4")) {
+            return error.UnsupportedExpertType;
+        }
+
         const moe_backend: zml.moe.Backend = try .auto(platform, self.inner.layers[0].ffn.shared_experts.w1.weight.dtype());
-        const opts = inference.CompilationParameters.init(@intCast(seqlen), self.parsed_config.value, self.inner, shardings, backend, moe_backend);
+        const opts = inference.CompilationParameters.init(@intCast(seqlen), config, self.inner, shardings, backend, moe_backend);
         return try inference.CompiledModel.init(allocator, io, @constCast(platform), self.inner, @intCast(seqlen), progress, opts);
     }
 };
