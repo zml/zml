@@ -137,6 +137,22 @@ pub const Model_handler = struct {
         errdefer find_junk_rows_args.deinit(zml_handler.allocator);
 
         const find_junk_rows_results = try find_junk_rows_exe.results(zml_handler.allocator);
+        errdefer find_junk_rows_results.deinit(zml_handler.allocator);
+
+        const analyze_top_rows_exe = try zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .analyze_top_rows,
+            .{},
+            opts,
+        );
+        errdefer analyze_top_rows_exe.deinit();
+
+        const analyze_top_rows_args = try analyze_top_rows_exe.args(zml_handler.allocator);
+        errdefer analyze_top_rows_args.deinit(zml_handler.allocator);
+
+        const analyze_top_rows_results = try analyze_top_rows_exe.results(zml_handler.allocator);
 
         return .{
             .similarity_matrix_exe = similarity_matrix_exe,
@@ -157,6 +173,9 @@ pub const Model_handler = struct {
             .find_junk_rows_exe = find_junk_rows_exe,
             .find_junk_rows_args = find_junk_rows_args,
             .find_junk_rows_results = find_junk_rows_results,
+            .analyze_top_rows_exe = analyze_top_rows_exe,
+            .analyze_top_rows_args = analyze_top_rows_args,
+            .analyze_top_rows_results = analyze_top_rows_results,
         };
     }
 
@@ -188,6 +207,9 @@ pub const ModelExes = struct {
     find_junk_rows_exe: zml.Exe,
     find_junk_rows_args: zml.Exe.Arguments,
     find_junk_rows_results: zml.Exe.Results,
+    analyze_top_rows_exe: zml.Exe,
+    analyze_top_rows_args: zml.Exe.Arguments,
+    analyze_top_rows_results: zml.Exe.Results,
 
     pub fn deinit(self: ModelExes, allocator: std.mem.Allocator) void {
         self.similarity_matrix_exe.deinit();
@@ -208,12 +230,16 @@ pub const ModelExes = struct {
         self.find_junk_rows_exe.deinit();
         self.find_junk_rows_args.deinit(allocator);
         self.find_junk_rows_results.deinit(allocator);
+        self.analyze_top_rows_exe.deinit();
+        self.analyze_top_rows_args.deinit(allocator);
+        self.analyze_top_rows_results.deinit(allocator);
     }
 };
 
 pub const Model = struct {
     pub const row_batch_size: i64 = 2048;
     pub const row_k_neighbors: i64 = 256;
+    pub const top_rows_count: i64 = 100;
 
     lm_head: zml.Tensor,
 
@@ -292,6 +318,31 @@ pub const Model = struct {
         const sorted_similarity_indices = sorted.indices.rename(.{ .voc = .rank });
         const sorted_similarities = similarities.gather(.{ .voc = sorted_similarity_indices }, .{}).rename(.{ .rank = .voc });
         return .{ sorted.values, sorted.indices, sorted_similarities };
+    }
+
+    pub fn analyze_top_rows(self: Model) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
+        const row_norms = lm_head.mul(lm_head).sum(.d).squeeze(.d).sqrt();
+        const top_norm_rows = row_norms.topK(.{ .top_norm = .voc }, top_rows_count, .{ .descending = true });
+        const top_rows = lm_head.gather(.{ .voc = top_norm_rows.indices }, .{});
+
+        const zero = zml.Tensor.scalar(@as(u32, 0), .u32);
+        const highest_norm_row = top_rows.dynamicSlice1d(top_rows.axis(.top_norm), .{ .start = zero, .len = 1 }).squeeze(.top_norm);
+        const highest_norm_row_scores = lm_head.dot(highest_norm_row, .d);
+        const highest_norm_row_top = highest_norm_row_scores.topK(.{ .top_dot = .voc }, top_rows_count, .{ .descending = true });
+
+        const average_top_row = top_rows.mean(.top_norm).squeeze(.top_norm);
+        const average_top_row_scores = lm_head.dot(average_top_row, .d);
+        const average_top_row_top = average_top_row_scores.topK(.{ .top_avg_dot = .voc }, top_rows_count, .{ .descending = true });
+
+        return .{
+            top_norm_rows.values,
+            top_norm_rows.indices.convert(.u64),
+            highest_norm_row_top.values,
+            highest_norm_row_top.indices.convert(.u64),
+            average_top_row_top.values,
+            average_top_row_top.indices.convert(.u64),
+        };
     }
 
     pub fn findJunkRows(self: Model) zml.Tensor {
