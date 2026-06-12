@@ -726,27 +726,27 @@ pub const HF = struct {
         //     log.warn("Completed read for file {s} at offset {d} with length {d} in {f}", .{ handle.uri, offset, data[0].len, duration });
         // }
 
-        // if (handle.xet_file_id) |fid| {
-        //     const repo: Repo = try .parse(handle.uri);
-        //     const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
-        //     const remaining = handle.size - offset;
-        //     const take: usize = @intCast(@min(remaining, data[0].len));
-        //     if (take == 0) return 0;
-        //     log.warn("Performing XET read for {s} at offset {d} (take {d} bytes)", .{ handle.uri, offset, take });
-        //     try xet.fetchRange(
-        //         self.allocator,
-        //         self.base.inner,
-        //         self.client,
-        //         &self.cas_cache,
-        //         self.hf_token_raw,
-        //         xet_repo,
-        //         fid,
-        //         offset,
-        //         data[0][0..take],
-        //         XET_INTRA_TENSOR_WORKERS,
-        //     );
-        //     return take;
-        // }
+        if (handle.xet_file_id) |fid| {
+            const repo: Repo = try .parse(handle.uri);
+            const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
+            const remaining = handle.size - offset;
+            const take: usize = @intCast(@min(remaining, data[0].len));
+            if (take == 0) return 0;
+            log.warn("Performing XET read for {s} at offset {d} (take {d} bytes)", .{ handle.uri, offset, take });
+            try xet.fetchRange(
+                self.allocator,
+                self.base.inner,
+                self.client,
+                &self.cas_cache,
+                self.hf_token_raw,
+                xet_repo,
+                fid,
+                offset,
+                data[0][0..take],
+                XET_INTRA_TENSOR_WORKERS,
+            );
+            return take;
+        }
 
         var range_buf: [64]u8 = undefined;
         const range_header = blk: {
