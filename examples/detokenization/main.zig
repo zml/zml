@@ -282,7 +282,7 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer g.deinit();
 
     zml_handler.tic(&zml_handler.timers.knn_graph);
-    g.setNearestNeighbors();
+    g.setRandomNeighbors();
     zml_handler.toc(&zml_handler.timers.knn_graph);
 
     std.log.info("Exact kNN : nb edges: {d}", .{g.nbEdges()});
