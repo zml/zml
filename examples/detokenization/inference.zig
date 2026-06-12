@@ -340,27 +340,27 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, g: *
 }
 
 pub fn sampleTokenFromGraph(_: *Zml_handler, embed_slice: zml.Slice, g: *graph_.Graph, random: std.Random, top_k: u32) !u32 {
-    const candidates = g.greedySearch(embed_slice.constItems(f16));
+    g.greedySearch(embed_slice.constItems(f16));
     const nb_found = @min(g.L, top_k);
 
     const row_norms = g.lm_head_row_norms.constItems(f32);
     var max_score: f32 = -std.math.inf(f32);
     for (0..nb_found) |i| {
-        const score = @as(f32, @floatCast(candidates[i].similarity)) * row_norms[candidates[i].node];
+        const score = @as(f32, @floatCast(g.visited[i].similarity)) * row_norms[g.visited[i].node];
         max_score = @max(max_score, score);
     }
     var total: f32 = 0.0;
     for (0..nb_found) |i| {
-        const score = @as(f32, @floatCast(candidates[i].similarity)) * row_norms[candidates[i].node];
+        const score = @as(f32, @floatCast(g.visited[i].similarity)) * row_norms[g.visited[i].node];
         total += @exp(score - max_score);
     }
 
     const threshold = random.float(f32) * total;
     var cumulative: f32 = 0.0;
     for (0..nb_found) |i| {
-        const score = @as(f32, @floatCast(candidates[i].similarity)) * row_norms[candidates[i].node];
+        const score = @as(f32, @floatCast(g.visited[i].similarity)) * row_norms[g.visited[i].node];
         cumulative += @exp(score - max_score);
-        if (cumulative >= threshold) return @intCast(candidates[i].node);
+        if (cumulative >= threshold) return @intCast(g.visited[i].node);
     }
-    return @intCast(candidates[nb_found - 1].node);
+    return @intCast(g.visited[nb_found - 1].node);
 }
