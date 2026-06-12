@@ -1,0 +1,30 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+
+package(default_visibility = ["//zml:__pkg__"])
+
+filegroup(
+    name = "attention_kernel",
+    srcs = ["attention.py"],
+)
+
+filegroup(
+    name = "attention",
+    srcs = ["attention.zig"],
+)
+
+py_binary(
+    name = "attention_harness",
+    srcs = ["attention_harness.py"],
+    data = [
+        ":attention.py",
+        "@libpjrt_neuron//:sandbox",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@neuron_py_deps//ml_dtypes:pkg",
+        "@neuron_py_deps//neuronx_cc:pkg",
+        "@neuron_py_deps//nki:pkg",
+        "@neuron_py_deps//numpy:pkg",
+        "@rules_python//python/runfiles",
+    ],
+)

@@ -186,25 +186,12 @@ pub const Buffer = struct {
     pub const UnitializedOptions = struct { memory: Memory.Kind = .default };
 
     pub fn uninitialized(
-        io: std.Io,
+        _: std.Io,
         platform: *const Platform,
         sh: Shape,
         sharding: Sharding,
         opts: UnitializedOptions,
     ) !Buffer {
-        switch (platform.target) {
-            .neuron => {
-                const allocator = std.heap.smp_allocator;
-
-                // TODO: use the strides trick to avoid allocating so much memory
-                const host = try allocator.alloc(u8, sh.byteSize());
-                defer allocator.free(host);
-
-                return try Buffer.from(io, platform, sh, sharding, host, .{ .wait = true, .memory = opts.memory });
-            },
-            .cpu, .cuda, .rocm, .tpu, .oneapi => {},
-        }
-
         var res: Buffer = .{
             ._platform = platform,
             ._shape = sh,

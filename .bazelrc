@@ -150,3 +150,7 @@ run:nsys       --run_under=//tools:nsys
 
 run:rocprofv3  --@zml//platforms:rocm=true
 run:rocprofv3  --run_under=//tools:rocprofv3
+
+run:neuron-profile --@zml//platforms:neuron=true
+run:neuron-profile --@zml//platforms:cpu=false
+run:neuron-profile --run_under='//tools/neuron:profile /tmp/zml-neuron-profile'

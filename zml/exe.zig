@@ -287,6 +287,9 @@ pub const Exe = struct {
             .neuron => {
                 for (events_slice.?) |e| {
                     if (e) |ev| {
+                        if (opts.wait) {
+                            ev.await(self.platform.pjrt_api, io.?) catch unreachable;
+                        }
                         ev.deinit(self.platform.pjrt_api);
                     }
                 }

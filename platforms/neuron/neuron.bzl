@@ -13,8 +13,22 @@ package(default_visibility = ["//visibility:public"])
 """
 
 _UBUNTU_PACKAGES = {
-    "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
-    "libgomp1": packages.filegroup(name = "libgomp1", srcs = ["usr/lib/x86_64-linux-gnu/libgomp.so.1"]),
+    "libgcc_s1": {
+        "package": "libgcc-s1",
+        "build": packages.filegroup(name = "libgcc_s1", srcs = ["lib/x86_64-linux-gnu/libgcc_s.so.1"]),
+    },
+    "libgomp1": {
+        "package": "libgomp1",
+        "build": packages.filegroup(name = "libgomp1", srcs = ["usr/lib/x86_64-linux-gnu/libgomp.so.1"]),
+    },
+    "libstdcpp6": {
+        "package": "libstdc++6",
+        "build": packages.filegroup(name = "libstdcpp6", srcs = ["usr/lib/x86_64-linux-gnu/libstdc++.so.6"]),
+    },
+    "zlib1g": {
+        "package": "zlib1g",
+        "build": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
+    },
 }
 
 _NEURON_PACKAGES = {
@@ -57,6 +71,12 @@ _NEURON_PACKAGES = {
             srcs = ["lib/libnccom.so.2"],
         ),
     ]),
+    "aws-neuronx-tools": "\n".join([
+        packages.filegroup(
+            name = "neuron-explorer",
+            srcs = ["bin/neuron-explorer"],
+        ),
+    ]),
 }
 
 def _neuron_impl(mctx):
@@ -69,13 +89,13 @@ def _neuron_impl(mctx):
         build_file = ":libpjrt_neuron.BUILD.bazel",
     )
 
-    for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
-        pkg = loaded_packages[pkg_name]["amd64"]
+    for repo_name, package in _UBUNTU_PACKAGES.items():
+        pkg = loaded_packages[package["package"]]["amd64"]
         http_deb_archive(
-            name = pkg_name,
+            name = repo_name,
             urls = pkg["urls"],
             sha256 = pkg["sha256"],
-            build_file_content = _BUILD_FILE_PRELUDE + build_file_content,
+            build_file_content = _BUILD_FILE_PRELUDE + package["build"],
         )
 
     for pkg_name, build_file_content in _NEURON_PACKAGES.items():
@@ -93,7 +113,10 @@ def _neuron_impl(mctx):
         root_module_direct_deps = [
             "aws-neuronx-collectives",
             "aws-neuronx-runtime-lib",
+            "aws-neuronx-tools",
+            "libgcc_s1",
             "libgomp1",
+            "libstdcpp6",
             "libpjrt_neuron",
         ],
         root_module_direct_dev_deps = [],
