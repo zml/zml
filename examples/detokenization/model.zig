@@ -286,8 +286,9 @@ pub const Model = struct {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
         const normalized_lm_head = normalizeRows(lm_head);
         const embedding_f32 = embedding.withTags(.{ .s, .d }).convert(.f32);
+        const normalized_embedding = normalizeRows(embedding_f32);
         const logits = lm_head.dot(embedding_f32, .d).squeeze(.s);
-        const similarities = normalized_lm_head.dot(embedding_f32, .d).squeeze(.s);
+        const similarities = normalized_lm_head.dot(normalized_embedding, .d).squeeze(.s);
         const sorted = logits.softmax(.voc).sort(.voc, .{ .descending = true });
         const sorted_similarity_indices = sorted.indices.rename(.{ .voc = .rank });
         const sorted_similarities = similarities.gather(.{ .voc = sorted_similarity_indices }, .{}).rename(.{ .rank = .voc });
@@ -302,7 +303,7 @@ pub const Model = struct {
         const rows = lm_head.gather(.{ .voc = smallest_norm_rows.indices }, .{});
         const junk_direction = normalizeVector(rows.mean(.junk).squeeze(.junk)).convert(.bf16);
         const similarity = normalizeRows(lm_head).dot(junk_direction.convert(.f32), .d);
-        const is_junk = similarity.cmp(.GT, zml.Tensor.scalar(0.5, .f32));
+        const is_junk = similarity.cmp(.GT, zml.Tensor.scalar(0.75, .f32));
         const row_ids = zml.Tensor.iota(similarity.shape(), .voc).convert(.u64);
         const sentinel = zml.Tensor.scalar(@as(u64, @intCast(lm_head.dim(.voc))), .u64);
         return is_junk.select(row_ids, sentinel);
