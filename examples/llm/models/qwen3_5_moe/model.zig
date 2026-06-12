@@ -589,7 +589,7 @@ pub const SelfAttn = struct {
         k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
 
         const dtype = q.dtype();
-        const position_ids = zml.Tensor.arange(.{ .end = x.dim(.s) }, .i64)
+        const position_ids: zml.Tensor = .arange(.{ .end = x.dim(.s) }, .i64)
             .withTags(.{.s}).insertAxes(.s, .{.b}).broad(zml.Shape.init(.{ .b = x.dim(.b), .s = x.dim(.s) }, .i64))
             .add(token_index.convert(.i64).broad(zml.Shape.init(.{ .b = x.dim(.b), .s = x.dim(.s) }, .i64)));
 
@@ -1038,7 +1038,7 @@ pub const GatedDeltaNet = struct {
         var recurrent_value = value;
         var recurrent_beta = beta;
         if (!use_cached_state) {
-            const valid_mask = zml.Tensor.arange(.{ .end = x.dim(.s) }, .i64)
+            const valid_mask: zml.Tensor = .arange(.{ .end = x.dim(.s) }, .i64)
                 .withTags(.{.s})
                 .cmp(.LT, token_index.convert(.i64));
             recurrent_value = valid_mask.broad(value.shape()).select(recurrent_value, zml.Tensor.zeroes(recurrent_value.shape()));

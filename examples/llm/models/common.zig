@@ -47,22 +47,23 @@ pub const Shardings = struct {
     experts: zml.Sharding,
 
     pub fn init(platform: *zml.Platform) !Shardings {
-        if (platform.target == .tpu) {
-            var strategy_experts: zml.Sharding.Strategy = .parseBindings(.{ .experts = .link_x });
-            strategy_experts.addFold(.link_x, &.{ .link_x, .link_y });
-            var strategy_model: zml.Sharding.Strategy = .parseBindings(.{ .model = .link_x });
-            strategy_model.addFold(.link_x, &.{ .link_x, .link_y });
+        switch (platform.target) {
+            .tpu => {
+                var strategy_experts: zml.Sharding.Strategy = .parseBindings(.{ .experts = .link_x });
+                strategy_experts.addFold(.link_x, &.{ .link_x, .link_y });
+                var strategy_model: zml.Sharding.Strategy = .parseBindings(.{ .model = .link_x });
+                strategy_model.addFold(.link_x, &.{ .link_x, .link_y });
 
-            return .{
-                .model = try platform.registerShardingWithStrategy("model", .mesh(.{ .model = .high_bandwidth }), strategy_model),
-                .experts = try platform.registerShardingWithStrategy("experts", .mesh(.{ .experts = .high_bandwidth }), strategy_experts),
-            };
+                return .{
+                    .model = try platform.registerShardingWithStrategy("model", .mesh(.{ .model = .high_bandwidth }), strategy_model),
+                    .experts = try platform.registerShardingWithStrategy("experts", .mesh(.{ .experts = .high_bandwidth }), strategy_experts),
+                };
+            },
+            .cuda, .rocm, .oneapi, .neuron, .cpu => return .{
+                .model = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })),
+                .experts = try platform.registerSharding("experts", .mesh(.{ .experts = .high_bandwidth })),
+            },
         }
-
-        return .{
-            .model = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })),
-            .experts = try platform.registerSharding("experts", .mesh(.{ .experts = .high_bandwidth })),
-        };
     }
 
     pub fn all(self: Shardings) [2]zml.Sharding {
