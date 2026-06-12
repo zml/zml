@@ -82,7 +82,7 @@ pub const Graph = struct {
         @memset(is_junk, false);
         for (junk_rows) |row| is_junk[row] = true;
 
-        const medoid = try getMedoid(allocator, lm_head_normalized, matrix.n, matrix.d, is_junk);
+        const medoid = 220;//try getMedoid(allocator, lm_head_normalized, matrix.n, matrix.d, is_junk);
 
         const neighbors = try allocator.alloc(usize, matrix.n * params.k_max);
         errdefer allocator.free(neighbors);
