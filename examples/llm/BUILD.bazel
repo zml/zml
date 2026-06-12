@@ -29,6 +29,13 @@ zig_binary(
     deps = ["//zml"],
 )
 
+zig_binary(
+    name = "step3_5_tests",
+    srcs = glob(["**/*.zig"]),
+    main = "models/step3_5_tests.zig",
+    deps = ["//zml"],
+)
+
 build_test(
     name = "test",
     targets = [":llm"],
