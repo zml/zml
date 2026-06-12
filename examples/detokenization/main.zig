@@ -102,6 +102,7 @@ pub const Timing_handler = struct {
     };
 
     similarity_matrix: Field_timer = .{},
+    junk_rows: Field_timer = .{},
     
     knn_graph: Field_timer = .{},
     nsw_graph: Field_timer = .{},
@@ -114,6 +115,7 @@ pub const Timing_handler = struct {
 
     pub fn print(self: Timing_handler) void {
         std.log.info("Sim matrix    : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.similarity_matrix.nanoseconds)) / 1e9 });
+        std.log.info("Junk rows     : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.junk_rows.nanoseconds)) / 1e9 });
         std.log.info("kNN graph ini : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.knn_graph.nanoseconds)) / 1e9 });
         std.log.info("NSW graph ext : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.nsw_graph.nanoseconds)) / 1e9 });
         std.log.info("Greedy search : {d:>6.2}s", .{ @as(f64, @floatFromInt(self.greedy_search.nanoseconds)) / 1e9 });
@@ -266,22 +268,29 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     const lm_head_normalized = try getLmHeadNormalized(zml_handler, &model_handler);
     defer lm_head_normalized.free(zml_handler.allocator);
 
+    std.log.info("Get junk rows", .{});
+    zml_handler.tic(&zml_handler.timers.junk_rows);
+    const junk_rows = try getJunkRows(zml_handler, &model_handler);
+    defer zml_handler.allocator.free(junk_rows);
+    zml_handler.toc(&zml_handler.timers.junk_rows);
+    std.log.info("Found {d} junk rows", .{junk_rows.len});
+
     std.log.info("Init graph", .{});
     const graph_params: graph.GraphParams = .{};
-    var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, graph_params);
+    var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, junk_rows, graph_params);
     defer g.deinit();
 
     zml_handler.tic(&zml_handler.timers.knn_graph);
     g.setNearestNeighbors();
     zml_handler.toc(&zml_handler.timers.knn_graph);
     
-    std.log.info("Exact kNN : nb nodes: {d}", .{ g.nbNodes() });
+    std.log.info("Exact kNN : nb edges: {d}", .{ g.nbEdges() });
     
     zml_handler.tic(&zml_handler.timers.nsw_graph);
     g.extendToNsw();
     zml_handler.toc(&zml_handler.timers.nsw_graph);
     
-    std.log.info("NSW extension : nb nodes: {d}", .{ g.nbNodes() });
+    std.log.info("NSW extension : nb edges: {d}", .{ g.nbEdges() });
 
     var llm = try llm_.Llm_handler.init(zml_handler);
     defer llm.deinit(zml_handler.allocator);
@@ -384,6 +393,25 @@ pub fn getLmHeadNormalized(zml_handler: *Zml_handler, model_handler: *model_.Mod
     var lm_head_normalized_buffer = model_handler.exes.get_lm_head_normalized_results.get(zml.Buffer);
     defer lm_head_normalized_buffer.deinit();
     return lm_head_normalized_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+}
+
+pub fn getJunkRows(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) ![]usize {
+    model_handler.exes.find_junk_rows_args.set(.{model_handler.model_buffers});
+    model_handler.exes.find_junk_rows_exe.call(model_handler.exes.find_junk_rows_args, &model_handler.exes.find_junk_rows_results);
+    var junk_rows_buffer = model_handler.exes.find_junk_rows_results.get(zml.Buffer);
+    defer junk_rows_buffer.deinit();
+
+    var junk_rows_slice = try junk_rows_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer junk_rows_slice.free(zml_handler.allocator);
+
+    const sentinel: u64 = @intCast(model_handler.model.shape().dim(.voc));
+    var junk_rows: std.ArrayList(usize) = try .initCapacity(zml_handler.allocator, 0);
+    errdefer junk_rows.deinit(zml_handler.allocator);
+    for (junk_rows_slice.constItems(u64)) |row| {
+        if (row == sentinel) continue;
+        try junk_rows.append(zml_handler.allocator, @intCast(row));
+    }
+    return junk_rows.toOwnedSlice(zml_handler.allocator);
 }
 
 pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, similarity_matrix: *SimilarityMatrix) !void {
