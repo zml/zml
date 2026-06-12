@@ -200,6 +200,18 @@ def make_patched_attn_forward(modeling_module):
             gate_states = self.g_proj(hidden_states)
 
         cos, sin = self.rotary_emb(hidden_states, position_ids)
+        if prefix is not None and (
+            prefix.endswith("layers.0.self_attn")
+            or prefix.endswith("layers.1.self_attn")
+        ):
+            inv = getattr(self.rotary_emb, "inv_freq", None)
+            inv_preview = inv[:4].tolist() if inv is not None else None
+            print(
+                f"[activations] {prefix}: inv_freq[:4]={inv_preview} "
+                f"cos[0,1,:4]={cos[0,1,:4].float().tolist()} "
+                f"sin[0,1,:4]={sin[0,1,:4].float().tolist()}",
+                flush=True,
+            )
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if prefix is not None:
@@ -268,6 +280,25 @@ def main() -> int:
     from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
     from transformers.dynamic_module_utils import get_class_from_dynamic_module
     from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+
+    # Newer transformers renamed the `input_embeds` kwarg of `create_causal_mask`
+    # / `create_sliding_window_causal_mask` to `inputs_embeds` and dropped
+    # `cache_position`. The shipped modeling_step3p5.py still passes the old
+    # names. Wrap the masking utils to translate names and drop unknown kwargs.
+    import inspect as _inspect
+    from transformers import masking_utils as _mu
+    for _name in ("create_causal_mask", "create_sliding_window_causal_mask"):
+        _orig = getattr(_mu, _name, None)
+        if _orig is None:
+            continue
+        _accepted = set(_inspect.signature(_orig).parameters.keys())
+        def _make_compat(orig, accepted):
+            def _compat(**kw):
+                if "input_embeds" in kw and "inputs_embeds" not in kw:
+                    kw["inputs_embeds"] = kw.pop("input_embeds")
+                return orig(**{k: v for k, v in kw.items() if k in accepted})
+            return _compat
+        setattr(_mu, _name, _make_compat(_orig, _accepted))
 
     # The patched modeling.py uses rope_type="default" for sliding_attention
     # layers, but this version of transformers dropped the "default" entry from
@@ -384,10 +415,24 @@ def main() -> int:
     AttnCls = type(decoder_layers[0].self_attn)
     modeling_module = sys.modules[AttnCls.__module__]
 
+    # The dynamically-loaded modeling module did
+    # `from transformers.masking_utils import create_causal_mask` at import
+    # time, so it has a local reference to the original (un-patched) function.
+    # Replace those globals with our wrappers from _mu.
+    for _name in ("create_causal_mask", "create_sliding_window_causal_mask"):
+        if hasattr(modeling_module, _name):
+            setattr(modeling_module, _name, getattr(_mu, _name))
+
     # low_cpu_mem_usage=True initialized modules on the `meta` device, so the
     # non-persistent `inv_freq` buffer in every Step3p5RotaryEmbedding was
     # materialized as zeros. Since we also disabled _initialize_missing_keys,
     # HF never re-ran the rotary init. Recompute inv_freq per-layer now.
+    #
+    # NOTE: with device_map="auto" + low_cpu_mem_usage, plain attribute
+    # assignment (`rot.inv_freq = X`) sometimes doesn't survive accelerate's
+    # AlignDevicesHook. We use register_buffer explicitly and also push the
+    # value into the hook's tied dicts (weights_map / tied_params_map) when
+    # they exist.
     for layer_idx, layer in enumerate(decoder_layers):
         rot = getattr(layer.self_attn, "rotary_emb", None)
         if rot is None:
@@ -400,11 +445,38 @@ def main() -> int:
         prf = getattr(cfg, "partial_rotary_factors", None)
         if prf is not None:
             cfg.partial_rotary_factor = prf[layer_idx]
+            # llama3 init reads partial_rotary_factor from rope_parameters dict,
+            # not the cfg attribute, so push it explicitly so subsequent layers
+            # don't inherit a stale value via setdefault.
+            if cfg.rope_parameters is not None:
+                cfg.rope_parameters["partial_rotary_factor"] = prf[layer_idx]
+            if getattr(cfg, "rope_scaling", None) is not None:
+                cfg.rope_scaling["partial_rotary_factor"] = prf[layer_idx]
         device = rot.inv_freq.device if rot.inv_freq.device.type != "meta" else "cpu"
         inv_freq, scaling = rot.rope_init_fn(cfg, device)
-        rot.inv_freq = inv_freq.to(device)
-        rot.original_inv_freq = rot.inv_freq
+        new_inv_freq = inv_freq.to(device).contiguous()
+        # Always register as buffer so nn.Module's _buffers dict is updated,
+        # then also overwrite any accelerate-hook tied references.
+        rot.register_buffer("inv_freq", new_inv_freq, persistent=False)
+        rot.original_inv_freq = new_inv_freq
         rot.attention_scaling = scaling
+        hook = getattr(rot, "_hf_hook", None)
+        if hook is not None:
+            wm = getattr(hook, "weights_map", None)
+            if wm is not None and "inv_freq" in wm:
+                wm["inv_freq"] = new_inv_freq
+            tpm = getattr(hook, "tied_params_map", None)
+            if isinstance(tpm, dict):
+                for k, v in list(tpm.items()):
+                    if v is rot._buffers.get("inv_freq"):
+                        tpm[k] = new_inv_freq
+        if layer_idx < 2:
+            print(
+                f"[activations] layer {layer_idx} inv_freq[:4]={new_inv_freq[:4].tolist()} "
+                f"device={new_inv_freq.device} dtype={new_inv_freq.dtype} "
+                f"len={new_inv_freq.numel()} theta={scalar} prf={getattr(cfg,'partial_rotary_factor',None)}",
+                flush=True,
+            )
 
     moe_cls = None
     for layer in decoder_layers:

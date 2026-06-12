@@ -810,7 +810,10 @@ pub const Attn = struct {
         const q_rope_hf = q_rope.transpose(.{ .b, .h, .s, .hd });
         const k_rope_hf = k_rope.transpose(.{ .b, .h, .s, .hd });
 
-        const new_kv_cache = kv_cache.update(k_rope, v, token_index.convert(.u32));
+        const new_kv_cache = blk: {
+            const cache_start = token_index.convert(.u32).slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0);
+            break :blk kv_cache.update(k_rope, v, cache_start);
+        };
         const k_full = new_kv_cache.keys().convert(dtype);
         const v_full = new_kv_cache.values().convert(dtype);
 
