@@ -270,7 +270,7 @@ pub const Model = struct {
     }
 
     pub fn get_lm_head(self: Model) zml.Tensor {
-        return self.lm_head.withTags(.{ .voc, .d }).convert(.f16);
+        return self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
     }
 
     pub fn get_lm_head_normalized(self: Model) zml.Tensor {
@@ -301,8 +301,8 @@ pub const Model = struct {
         const row_norm2 = lm_head.mul(lm_head).sum(.d).squeeze(.d);
         const smallest_norm_rows = row_norm2.topK(.{ .junk = .voc }, junk_seed_rows, .{ .descending = false });
         const rows = lm_head.gather(.{ .voc = smallest_norm_rows.indices }, .{});
-        const junk_direction = normalizeVector(rows.mean(.junk).squeeze(.junk)).convert(.bf16);
-        const similarity = normalizeRows(lm_head).dot(junk_direction.convert(.f32), .d);
+        const junk_direction = normalizeVector(rows.mean(.junk).squeeze(.junk));
+        const similarity = normalizeRows(lm_head).dot(junk_direction, .d);
         const is_junk = similarity.cmp(.GT, zml.Tensor.scalar(0.75, .f32));
         const row_ids = zml.Tensor.iota(similarity.shape(), .voc).convert(.u64);
         const sentinel = zml.Tensor.scalar(@as(u64, @intCast(lm_head.dim(.voc))), .u64);
@@ -310,7 +310,7 @@ pub const Model = struct {
     }
 
     pub fn similarityMatrix(self: Model, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f16);
+        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
         const batch_slice: zml.Tensor.DynSlice = .{ .start = row_start, .len = row_batch_size };
         const normalized = normalizeRows(lm_head);
 
@@ -322,7 +322,7 @@ pub const Model = struct {
         const row_ids = zml.Tensor.iota(similarity.shape(), .row).add(row_start.convert(.i32));
         const col_ids = zml.Tensor.iota(similarity.shape(), .col);
         const self_mask = row_ids.cmp(.EQ, col_ids);
-        const minus_one = zml.Tensor.scalar(-1.0, .f16).broad(similarity.shape());
+        const minus_one = zml.Tensor.scalar(-1.0, .f32).broad(similarity.shape());
         const similarity_for_sort = self_mask.select(minus_one, similarity);
 
         const nearest = similarity_for_sort.topK(.{ .nearest = .col }, row_k_neighbors, .{ .descending = true }).indices.convert(.u64);

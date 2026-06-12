@@ -213,7 +213,7 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, mode
     var zero_buffer: zml.Buffer = try .fromSlice(io, platform, zero_slice, sharding);
     defer zero_buffer.deinit();
 
-    const embed_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = 1, .d = llm.options.hidden_size }, .f16));
+    const embed_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = 1, .d = llm.options.hidden_size }, .f32));
     defer embed_slice.free(allocator);
 
     const pred_slice: zml.Slice = try .alloc(allocator, .init(.{}, .u32));
@@ -342,7 +342,7 @@ pub fn generateTextGraph(zml_handler: *Zml_handler, llm: *llm_.Llm_handler, mode
 }
 
 pub fn sampleTokenFromGraph(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, tokenizer: Tokenizer, embed_slice: zml.Slice, g: *graph_.Graph, random: std.Random, top_k: u32) !u32 {
-    g.greedySearch(embed_slice.constItems(f16));
+    g.greedySearch(embed_slice.constItems(f32));
 
     try analyzeSamplings(zml_handler, model_handler, tokenizer, embed_slice, g);
 
@@ -351,19 +351,19 @@ pub fn sampleTokenFromGraph(zml_handler: *Zml_handler, model_handler: *model_.Mo
     const row_norms = g.lm_head_row_norms.constItems(f32);
     var max_score: f32 = -std.math.inf(f32);
     for (0..nb_found) |i| {
-        const score = @as(f32, @floatCast(g.visited[i].similarity)) * row_norms[g.visited[i].node];
+        const score = g.visited[i].similarity * row_norms[g.visited[i].node];
         max_score = @max(max_score, score);
     }
     var total: f32 = 0.0;
     for (0..nb_found) |i| {
-        const score = @as(f32, @floatCast(g.visited[i].similarity)) * row_norms[g.visited[i].node];
+        const score = g.visited[i].similarity * row_norms[g.visited[i].node];
         total += @exp(score - max_score);
     }
 
     const threshold = random.float(f32) * total;
     var cumulative: f32 = 0.0;
     for (0..nb_found) |i| {
-        const score = @as(f32, @floatCast(g.visited[i].similarity)) * row_norms[g.visited[i].node];
+        const score = g.visited[i].similarity * row_norms[g.visited[i].node];
         cumulative += @exp(score - max_score);
         if (cumulative >= threshold) return @intCast(g.visited[i].node);
     }
@@ -412,7 +412,7 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
         try printSamplingRow(tokenizer, i + 1, token_id, is_junk[token_id], sorted_probas[i], row_norms[token_id], sorted_similarities[i]);
     }
 
-    g.greedySearch(embed_slice.constItems(f16));
+    g.greedySearch(embed_slice.constItems(f32));
     const nb_graph = g.L;
     const entries = try allocator.alloc(SamplingEntry, nb_graph);
     defer allocator.free(entries);
@@ -420,26 +420,26 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
     var max_score: f32 = -std.math.inf(f32);
     for (0..nb_graph) |i| {
         const node = g.visited[i].node;
-        const score = @as(f32, @floatCast(g.visited[i].similarity)) * row_norms[node];
+        const score = g.visited[i].similarity * row_norms[node];
         max_score = @max(max_score, score);
     }
 
     var total: f32 = 0.0;
     for (0..nb_graph) |i| {
         const node = g.visited[i].node;
-        const score = @as(f32, @floatCast(g.visited[i].similarity)) * row_norms[node];
+        const score = g.visited[i].similarity * row_norms[node];
         total += @exp(score - max_score);
     }
 
     for (0..nb_graph) |i| {
         const node = g.visited[i].node;
-        const score = @as(f32, @floatCast(g.visited[i].similarity)) * row_norms[node];
+        const score = g.visited[i].similarity * row_norms[node];
         entries[i] = .{
             .token_id = node,
             .proba = @exp(score - max_score) / total,
             .is_junk = is_junk[node],
             .row_norm = row_norms[node],
-            .similarity = @as(f32, @floatCast(g.visited[i].similarity)) / embedding_norm,
+            .similarity = g.visited[i].similarity / embedding_norm,
         };
     }
     std.mem.sort(SamplingEntry, entries, {}, SamplingEntry.beforeThan);

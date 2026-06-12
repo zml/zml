@@ -151,11 +151,11 @@ pub const SimilarityMatrix = struct {
     d: usize,
     k: usize,
 
-    pub fn dist(self: *SimilarityMatrix, i: usize, j: usize) f16 {
+    pub fn dist(self: *SimilarityMatrix, i: usize, j: usize) f32 {
         if (i == j) return 1.0; // TODO: can prob remove this
         const row = @min(i, j);
         const col = @max(i, j);
-        return self.data.constItems(f16)[self.row_offsets[row] + col - row - 1];
+        return self.data.constItems(f32)[self.row_offsets[row] + col - row - 1];
     }
 
     pub fn initOffsets(self: *SimilarityMatrix) void {
@@ -319,13 +319,13 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_
     const batch_size: usize = @intCast(model_.Model.row_batch_size);
     const k: usize = @intCast(model_.Model.row_k_neighbors);
 
-    const similarity_matrix_slice: zml.Slice = try .alloc(allocator, .init(.{ .data = triangular_len }, .f16));
+    const similarity_matrix_slice: zml.Slice = try .alloc(allocator, .init(.{ .data = triangular_len }, .f32));
     errdefer similarity_matrix_slice.free(allocator);
 
     const nearest_neighbors_slice: zml.Slice = try .alloc(allocator, .init(.{ .data = n * k }, .u64));
     errdefer nearest_neighbors_slice.free(allocator);
 
-    const similarity_batch_slice: zml.Slice = try .alloc(allocator, .init(.{ .row = batch_size, .col = n }, .f16));
+    const similarity_batch_slice: zml.Slice = try .alloc(allocator, .init(.{ .row = batch_size, .col = n }, .f32));
     defer similarity_batch_slice.free(allocator);
 
     const nearest_batch_slice: zml.Slice = try .alloc(allocator, .init(.{ .row = batch_size, .nearest = k }, .u64));
@@ -352,8 +352,8 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_
         try similarity_batch_buffer.toSlice(zml_handler.io, similarity_batch_slice);
         try nearest_batch_buffer.toSlice(zml_handler.io, nearest_batch_slice);
 
-        const batch_items = similarity_batch_slice.items(f16);
-        const output_items = similarity_matrix_slice.items(f16);
+        const batch_items = similarity_batch_slice.items(f32);
+        const output_items = similarity_matrix_slice.items(f32);
         const nearest_batch_items = nearest_batch_slice.items(usize);
         const nearest_items = nearest_neighbors_slice.items(usize);
         for (0..rows_to_copy) |local_row| {
@@ -436,7 +436,7 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Mo
 
     var prng = std.Random.DefaultPrng.init(0);
     const random = prng.random();
-    const lm_head_items = lm_head.items(f16);
+    const lm_head_items = lm_head.items(f32);
 
     var max_abs_diff: f32 = 0;
     for (0..1000) |_| {
@@ -450,15 +450,13 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Mo
         var u_norm2: f32 = 0;
         var v_norm2: f32 = 0;
         for (u, v) |u_value, v_value| {
-            const uf: f32 = @floatCast(u_value);
-            const vf: f32 = @floatCast(v_value);
-            dot += uf * vf;
-            u_norm2 += uf * uf;
-            v_norm2 += vf * vf;
+            dot += u_value * v_value;
+            u_norm2 += u_value * u_value;
+            v_norm2 += v_value * v_value;
         }
 
         const expected = dot / (@sqrt(u_norm2) * @sqrt(v_norm2));
-        const actual: f32 = @floatCast(similarity_matrix.dist(i, j));
+        const actual = similarity_matrix.dist(i, j);
         const abs_diff = @abs(expected - actual);
         max_abs_diff = @max(max_abs_diff, abs_diff);
         std.log.err("rows=({d},{d}) expected={d} actual={d} diff={d}", .{ i, j, expected, actual, abs_diff });
