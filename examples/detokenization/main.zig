@@ -232,6 +232,7 @@ pub fn main(init: std.process.Init) !void {
     zml_handler.timers.print();
 }
 
+
 pub fn runLlm(zml_handler: *Zml_handler) !void {
     var llm = try llm_.Llm_handler.init(zml_handler);
     defer llm.deinit(zml_handler.allocator);
@@ -300,10 +301,11 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer zml_handler.allocator.free(inspi_tokens);
 
     zml_handler.mem.start(0);
-    const inspi_result = try inference.generateTextGraph(zml_handler, &llm, &g, inspi_tokens);
+    const inspi_result = try inference.generateTextGraph(zml_handler, &llm, &model_handler, &g, inspi_tokens);
     defer zml_handler.allocator.free(inspi_result);
     zml_handler.mem.check(0);
 }
+
 
 pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !SimilarityMatrix {
     std.log.info("Compute similarity matrix", .{});
@@ -465,6 +467,7 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Mo
     std.log.info("Similarity matrix test passed: 1000 random pairs, max_abs_diff={d}", .{max_abs_diff});
 }
 
+
 pub fn getSlice(zml_handler: *Zml_handler, tensor_name: []const u8, dtype: anytype) !zml.Slice {
     std.log.info("Getting slice {s}", .{tensor_name});
 
@@ -534,6 +537,7 @@ const TensorExtractor = struct {
         return self.tensor.convert(.f16);
     }
 };
+
 
 pub fn printSafetensors(registry: zml.safetensors.TensorRegistry) !void {
     const tensors: zml.safetensors.Tensors = registry.tensors;
