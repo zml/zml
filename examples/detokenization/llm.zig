@@ -137,7 +137,7 @@ pub const Llm_handler = struct {
         var decode_layer_future_awaited = false;
         errdefer if (!decode_layer_future_awaited) if (decode_layer_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
-        // compile select/logits/sample embedding
+        // compile select/logits/sample/graph embedding
         
         var prefill_select_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: Llm, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
@@ -169,6 +169,16 @@ pub const Llm_handler = struct {
         var sample_future_awaited = false;
         errdefer if (!sample_future_awaited) if (sample_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
+        var graph_embed_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: Llm, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
+                const params: Llm.GraphEmbedParams = .exec(options_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .graphEmbed, .{
+                        params.embed }, opts_);
+            }
+        }.call, .{ zml_handler, model, options, opts });
+        var graph_embed_future_awaited = false;
+        errdefer if (!graph_embed_future_awaited) if (graph_embed_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
         // wait all parallel compilations terminate
         
         const prefill_embed_exe = try prefill_embed_future.await(zml_handler.io);
@@ -192,6 +202,9 @@ pub const Llm_handler = struct {
         const sample_exe = try sample_future.await(zml_handler.io);
         sample_future_awaited = true;
 
+        const graph_embed_exe = try graph_embed_future.await(zml_handler.io);
+        graph_embed_future_awaited = true;
+
         return .{
             .prefill_embed_exe = prefill_embed_exe,
             .prefill_embed_args = try prefill_embed_exe.args(zml_handler.allocator),
@@ -214,6 +227,9 @@ pub const Llm_handler = struct {
             .sample_exe = sample_exe,
             .sample_args = try sample_exe.args(zml_handler.allocator),
             .sample_results = try sample_exe.results(zml_handler.allocator),
+            .graph_embed_exe = graph_embed_exe,
+            .graph_embed_args = try graph_embed_exe.args(zml_handler.allocator),
+            .graph_embed_results = try graph_embed_exe.results(zml_handler.allocator),
         };
     }
 
@@ -404,6 +420,10 @@ pub const LlmExes = struct {
     sample_args: zml.Exe.Arguments,
     sample_results: zml.Exe.Results,
 
+    graph_embed_exe: zml.Exe,
+    graph_embed_args: zml.Exe.Arguments,
+    graph_embed_results: zml.Exe.Results,
+
     pub fn deinit(self: LlmExes, allocator: std.mem.Allocator) void {
         self.prefill_embed_exe.deinit();
         self.prefill_embed_args.deinit(allocator);
@@ -426,6 +446,9 @@ pub const LlmExes = struct {
         self.sample_exe.deinit();
         self.sample_args.deinit(allocator);
         self.sample_results.deinit(allocator);
+        self.graph_embed_exe.deinit();
+        self.graph_embed_args.deinit(allocator);
+        self.graph_embed_results.deinit(allocator);
     }
 };
 
@@ -509,6 +532,18 @@ pub const Llm = struct {
     }
 
 
+    pub const GraphEmbedParams = struct {
+        embed: zml.Tensor,
+        pub fn exec(options: Options) GraphEmbedParams {
+            return .{ .embed = .init(.{ .s = 1, .d = options.hidden_size }, .bf16), };
+        }
+    };
+    
+    pub fn graphEmbed(self: Llm, embed: zml.Tensor) zml.Tensor {
+        return self.norm.forward(embed).convert(.f16).reuseBuffer(embed);
+    }
+
+
     pub const ComputeLogitsParams = struct {
         embeds: zml.Tensor,
         pub fn exec(options: Options) ComputeLogitsParams {
@@ -517,8 +552,8 @@ pub const Llm = struct {
     };
     
     pub fn computeLogits(self: Llm, embed: zml.Tensor) zml.Tensor {
-        const output = self.norm.forward(embed);
-        const logits = self.lm_head.withTags(.{ .voc, .d }).dot(output, .d).convert(.f32);
+        const normalized_embed = self.norm.forward(embed);
+        const logits = self.lm_head.withTags(.{ .voc, .d }).dot(normalized_embed, .d).convert(.f32);
         return logits.transpose(.{ .voc, .s });
     }
 
