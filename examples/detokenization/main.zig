@@ -251,6 +251,8 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer model_handler.deinit(zml_handler.allocator);
     defer model_handler.unloadBuffers();
 
+    try analyzeTopRows(zml_handler, &model_handler);
+
     zml_handler.tic(&zml_handler.timers.similarity_matrix);
     var similarity_matrix = try computeSimilarityMatrix(zml_handler, &model_handler);
     defer similarity_matrix.deinit(zml_handler.allocator);
@@ -306,6 +308,118 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     zml_handler.mem.check(0);
 }
 
+pub fn analyzeTopRows(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !void {
+    std.log.info("Analyze top lm_head rows", .{});
+
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+    var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
+    defer tokenizer.deinit();
+
+    model_handler.exes.analyze_top_rows_args.set(.{model_handler.model_buffers});
+    model_handler.exes.analyze_top_rows_exe.call(model_handler.exes.analyze_top_rows_args, &model_handler.exes.analyze_top_rows_results);
+
+    var top_norm_values_buffer: zml.Buffer = undefined;
+    var top_norm_indices_buffer: zml.Buffer = undefined;
+    var top_dot_values_buffer: zml.Buffer = undefined;
+    var top_dot_indices_buffer: zml.Buffer = undefined;
+    var top_avg_dot_values_buffer: zml.Buffer = undefined;
+    var top_avg_dot_indices_buffer: zml.Buffer = undefined;
+    model_handler.exes.analyze_top_rows_results.fill(.{
+        &top_norm_values_buffer,
+        &top_norm_indices_buffer,
+        &top_dot_values_buffer,
+        &top_dot_indices_buffer,
+        &top_avg_dot_values_buffer,
+        &top_avg_dot_indices_buffer,
+    });
+    defer top_norm_values_buffer.deinit();
+    defer top_norm_indices_buffer.deinit();
+    defer top_dot_values_buffer.deinit();
+    defer top_dot_indices_buffer.deinit();
+    defer top_avg_dot_values_buffer.deinit();
+    defer top_avg_dot_indices_buffer.deinit();
+
+    const top_norm_values_slice = try top_norm_values_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer top_norm_values_slice.free(zml_handler.allocator);
+    const top_norm_indices_slice = try top_norm_indices_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer top_norm_indices_slice.free(zml_handler.allocator);
+    const top_dot_values_slice = try top_dot_values_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer top_dot_values_slice.free(zml_handler.allocator);
+    const top_dot_indices_slice = try top_dot_indices_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer top_dot_indices_slice.free(zml_handler.allocator);
+    const top_avg_dot_values_slice = try top_avg_dot_values_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer top_avg_dot_values_slice.free(zml_handler.allocator);
+    const top_avg_dot_indices_slice = try top_avg_dot_indices_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer top_avg_dot_indices_slice.free(zml_handler.allocator);
+
+    try printTopRowsSection(
+        tokenizer,
+        "Top 100 highest-norm lm_head rows",
+        "row_norm",
+        top_norm_indices_slice.constItems(u64),
+        top_norm_values_slice.constItems(f32),
+    );
+    try printTopRowsSection(
+        tokenizer,
+        "Top 100 dot products with the highest-norm row",
+        "dot",
+        top_dot_indices_slice.constItems(u64),
+        top_dot_values_slice.constItems(f32),
+    );
+    try printTopRowsSection(
+        tokenizer,
+        "Top 100 dot products with the average of top 100 highest-norm rows",
+        "dot",
+        top_avg_dot_indices_slice.constItems(u64),
+        top_avg_dot_values_slice.constItems(f32),
+    );
+}
+
+fn printTopRowsSection(tokenizer: zml.tokenizer.Tokenizer, title: []const u8, value_label: []const u8, indices: []const u64, values: []const f32) !void {
+    std.debug.assert(indices.len == values.len);
+    log.info("{s}", .{title});
+    log.info("{s:>6}  {s:>10}  {s:>14}  {s}", .{ "rank", "token_id", value_label, "token" });
+    log.info("{s:>6}  {s:>10}  {s:>14}  {s}", .{ "------", "----------", "--------------", "-----" });
+    for (indices, values, 0..) |token_id, value, i| {
+        var decoded_buf: [512]u8 = undefined;
+        const decoded = try decodeToken(tokenizer, @intCast(token_id), &decoded_buf);
+        var escaped_buf: [512]u8 = undefined;
+        const escaped = escapeTokenText(decoded, &escaped_buf);
+        log.info("{d:>6}  {d:>10}  {d:>14.6}  {s}", .{ i + 1, token_id, value, escaped });
+    }
+}
+
+fn decodeToken(tokenizer: zml.tokenizer.Tokenizer, token_id: u32, out: []u8) ![]const u8 {
+    var decoder = try tokenizer.decoder();
+    defer decoder.deinit();
+
+    const chunk = try decoder.feedOne(token_id, out);
+    const final_chunk = try decoder.finalize(out[chunk.len..]);
+    return out[0 .. chunk.len + final_chunk.len];
+}
+
+fn escapeTokenText(text: []const u8, out: []u8) []const u8 {
+    var len: usize = 0;
+    for (text) |c| {
+        const replacement = switch (c) {
+            '\n' => "\\n",
+            '\r' => "\\r",
+            '\t' => "\\t",
+            '\\' => "\\\\",
+            else => null,
+        };
+        if (replacement) |rep| {
+            if (len + rep.len > out.len) break;
+            @memcpy(out[len..][0..rep.len], rep);
+            len += rep.len;
+        } else {
+            if (len + 1 > out.len) break;
+            out[len] = if (std.ascii.isControl(c)) '?' else c;
+            len += 1;
+        }
+    }
+    return out[0..len];
+}
 
 pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !SimilarityMatrix {
     std.log.info("Compute similarity matrix", .{});
