@@ -57,11 +57,11 @@ pub fn main(init: std.process.Init) !void {
     const moe_backend = try zml.moe.Backend.auto(platform, .f8e4m3fn);
     const params = deepseek.CompilationParameters.init(repo_model.parsed_config.value.max_position_embeddings, repo_model.parsed_config.value, repo_model.inner, shardings, backend, moe_backend);
 
-    // try testSparseAttn(allocator, io, platform, platform.replicated_sharding);
-    try run(allocator, io, platform, args.activations, repo_model.parsed_config.value, repo_model.inner, &model_buffers, params.attention_metadata, params.attention_parameters);
+    // try testSparseAttn(allocator, io, platform, platform.replicated_sharding, params.attention_metadata, params.attention_parameters);
+    try run(allocator, io, platform, args.activations, repo_model.parsed_config.value, repo_model.inner, &model_buffers, params.attention_metadata, params.attention_parameters, params.moe_metadata, params.moe_parameters);
 }
 
-fn testSparseAttn(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.Sharding) !void {
+fn testSparseAttn(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.Sharding, attention_metadata: attention.Metadata, attention_parameters: attention.Parameters) !void {
     var activations_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, "/Users/dmehala/models/sparse_attn.safetensors");
     defer activations_registry.deinit();
     log.info("Found {} activations", .{activations_registry.tensors.count()});
@@ -93,12 +93,15 @@ fn testSparseAttn(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
     var o_buffer = try loadBufferFromStore(allocator, io, platform, &activation_store, "o", sharding);
     defer o_buffer.deinit();
 
-    const exe = try platform.compileFn(allocator, io, deepseek.model.sparse_attn, .{ q_tensor, kv_tensor, sink_tensor, topk_tensor, null }, .{ .shardings = &.{sharding} });
+    const exe = try platform.compileFn(allocator, io, deepseek.model.sparse_attn, .{ q_tensor, kv_tensor, sink_tensor, topk_tensor, null, attention_metadata, attention_parameters }, .{ .shardings = &.{sharding} });
     defer exe.deinit();
+
+    var attention_metadata_buffers = try attention_metadata.initBuffer(io, platform, sharding);
+    defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
     var args = try exe.args(allocator);
     defer args.deinit(allocator);
-    args.set(.{ q_buffer, kv_buffer, sink_buffer, topk_buffer, null });
+    args.set(.{ q_buffer, kv_buffer, sink_buffer, topk_buffer, null, attention_metadata_buffers });
 
     var res = try exe.results(allocator);
     defer res.deinit(allocator);
@@ -121,6 +124,8 @@ pub fn run(
     model_buffers: *deepseek.Buffers,
     attention_metadata: attention.Metadata,
     attention_parameters: attention.Parameters,
+    moe_metadata: zml.moe.Metadata,
+    moe_parameters: zml.moe.Parameters,
 ) !void {
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
@@ -135,6 +140,8 @@ pub fn run(
         .activations_store = &activation_store,
         .attention_metadata = attention_metadata,
         .attention_parameters = attention_parameters,
+        .moe_metadata = moe_metadata,
+        .moe_parameters = moe_parameters,
         .sharding = platform.replicated_sharding,
         .config = config,
         .mdl = mdl,
@@ -144,7 +151,7 @@ pub fn run(
     _ = dequant_opts; // autofix
 
     try ctx.testLayer("embed", .{ .batch, .seq }, mdl.embeds, model_buffers.embeds, .{});
-    // try ctx.testLayer("head", .{ .batch, .seq, .hc, .d }, mdl.lm_head, model_buffers.lm_head, dequant_opts);
+    // try ctx.testLayer("head", .{ .batch, .seq, .hc, .d }, mdl.lm_head, model_buffers.lm_head, .{});
 
     const n = 3; //16;
     // const n = config.num_hidden_layers;
@@ -216,6 +223,8 @@ const TestContext = struct {
     activations_store: *zml.io.TensorStore,
     attention_metadata: attention.Metadata,
     attention_parameters: attention.Parameters,
+    moe_metadata: zml.moe.Metadata,
+    moe_parameters: zml.moe.Parameters,
     sharding: zml.Sharding,
     config: deepseek.Config,
     mdl: deepseek.Model,
@@ -680,12 +689,15 @@ const TestContext = struct {
         var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
         defer out_buffer_expected.deinit();
 
-        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, in_1_tensor }, .{ .shardings = &.{self.sharding} });
+        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, in_1_tensor, self.moe_metadata, self.moe_parameters }, .{ .shardings = &.{self.sharding} });
         defer exe.deinit();
+
+        var moe_metadata_buffers = try self.moe_metadata.initBuffer(self.io, self.platform);
+        defer zml.moe.Metadata.deinitBuffer(&moe_metadata_buffers);
 
         var args = try exe.args(self.allocator);
         defer args.deinit(self.allocator);
-        args.set(.{ layer_buffers, in_buffer, in_1_buffer });
+        args.set(.{ layer_buffers, in_buffer, in_1_buffer, moe_metadata_buffers });
 
         var res = try exe.results(self.allocator);
         defer res.deinit(self.allocator);
