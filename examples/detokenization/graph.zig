@@ -5,12 +5,12 @@ const main = @import("main.zig");
 const log = std.log;
 
 pub const GraphParams = struct {
-    k_max: usize = 16,
-    search_budget: usize = 512,
-    alpha: f16 = 1.25,
-    vamana_passes: usize = 1,
+    k_max: usize = 32,
+    search_budget: usize = 4096,
+    alpha: f16 = 1.15,
+    vamana_passes: usize = 2,
     top_k: usize = 16,
-    L: usize = 128,
+    L: usize = 256,
 };
 
 pub const Graph = struct {
@@ -498,8 +498,10 @@ pub const Graph = struct {
         defer self.allocator.free(candidates);
 
         const start = std.Io.Timestamp.now(self.io, .awake);
+        const alpha = self.params.alpha;
 
         for (0..self.params.vamana_passes) |pass_i| {
+            self.params.alpha = if (pass_i == 0) 1.0 else alpha;
             // random visit order
             var nb_swap = order.len - 1;
             while (nb_swap > 0) : (nb_swap -= 1) {
