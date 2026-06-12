@@ -320,7 +320,7 @@ pub const Model = struct {
         return .{ sorted.values, sorted.indices, sorted_similarities };
     }
 
-    pub fn analyze_top_rows(self: Model) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
+    pub fn analyze_top_rows(self: Model) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
         const row_norms = lm_head.mul(lm_head).sum(.d).squeeze(.d).sqrt();
         const top_norm_rows = row_norms.topK(.{ .top_norm = .voc }, top_rows_count, .{ .descending = true });
@@ -335,6 +335,12 @@ pub const Model = struct {
         const average_top_row_scores = lm_head.dot(average_top_row, .d);
         const average_top_row_top = average_top_row_scores.topK(.{ .top_avg_dot = .voc }, top_rows_count, .{ .descending = true });
 
+        const smallest_norm_rows = row_norms.topK(.{ .junk = .voc }, top_rows_count, .{ .descending = false });
+        const junk_rows = lm_head.gather(.{ .voc = smallest_norm_rows.indices }, .{});
+        const junk_direction = normalizeVector(junk_rows.mean(.junk).squeeze(.junk));
+        const junk_direction_scores = normalizeRows(lm_head).dot(junk_direction, .d);
+        const anti_junk_top = junk_direction_scores.topK(.{ .anti_junk = .voc }, top_rows_count, .{ .descending = false });
+
         return .{
             top_norm_rows.values,
             top_norm_rows.indices.convert(.u64),
@@ -342,6 +348,8 @@ pub const Model = struct {
             highest_norm_row_top.indices.convert(.u64),
             average_top_row_top.values,
             average_top_row_top.indices.convert(.u64),
+            anti_junk_top.values,
+            anti_junk_top.indices.convert(.u64),
         };
     }
 
