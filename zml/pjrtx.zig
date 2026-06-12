@@ -76,15 +76,23 @@ pub const CustomCallBuffer = struct {
         };
     }
 
+    // XLA:
+    //   Align to 64-bytes, to mimic tsl::Allocator::kAllocatorAlignment.
+    //
+    //   Preferred XLA:CPU alignment for buffers. XLA:CPU itself aligns intermediate
+    //   buffers to this boundary (slices inside the preallocated temp buffer).
+    // https://github.com/openxla/xla/blob/fa2b7cfd909e8ffd343da1b7c5c341ace5e53aaa/xla/backends/cpu/alignment.h#L4
+    pub const ALIGN = 64;
+
     // Assumes as host-side buffer
-    pub fn asHostSlice(self: CustomCallBuffer) []u8 {
-        const bytes: [*]u8 = @ptrCast(@alignCast(self.ptr));
+    pub fn asHostSlice(self: CustomCallBuffer) []align(ALIGN) u8 {
+        const bytes: [*]align(ALIGN) u8 = @ptrCast(@alignCast(self.ptr));
         return bytes[0..self.shape.byteSize()];
     }
 
     // Assumes as host-side buffer
-    pub fn asHostConstSlice(self: CustomCallBuffer) []const u8 {
-        const bytes: [*]const u8 = @ptrCast(@alignCast(self.ptr));
+    pub fn asHostConstSlice(self: CustomCallBuffer) []align(ALIGN) const u8 {
+        const bytes: [*]align(ALIGN) const u8 = @ptrCast(@alignCast(self.ptr));
         return bytes[0..self.shape.byteSize()];
     }
 
