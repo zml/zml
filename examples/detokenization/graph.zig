@@ -189,9 +189,7 @@ pub const Graph = struct {
 
     // ------------------- Search functions ------------------ //
 
-    pub fn greedySearchNode(self: *Graph, query: usize) void {
-        std.debug.assert(query % 2 == 0);
-        
+    pub fn greedySearchNode(self: *Graph, query: usize) void {        
         self.zml_handler.tic(&self.zml_handler.timers.greedy_search);
         std.debug.assert(!self.is_junk[query]);
         // initialize search at entry point
