@@ -121,6 +121,54 @@ pub fn fetchFileId(
     return error.XetHashNotFound;
 }
 
+/// CAS auth (URL + bearer token) cached across `fetchRange` calls. HF rate-limits
+/// `/xet-read-token/*` aggressively (3000 req / 5 min per IP); without caching, a
+/// bulk-weight load on a fast box exhausts the quota mid-download.
+pub const CasAuthCache = struct {
+    mutex: std.Io.Mutex = .init,
+    url: ?[]u8 = null,
+    token: ?[]u8 = null,
+    expires_at: std.Io.Timestamp = .zero,
+
+    /// Conservative TTL: HF's xet-read tokens are valid much longer, but we don't
+    /// parse the expiry. 4 min keeps us well clear of any reasonable lifetime while
+    /// still amortizing the round-trip over many fetches.
+    const ttl: std.Io.Duration = .fromSeconds(4 * 60);
+
+    pub fn deinit(self: *CasAuthCache, allocator: std.mem.Allocator) void {
+        if (self.url) |u| allocator.free(u);
+        if (self.token) |t| allocator.free(t);
+        self.* = .{};
+    }
+
+    /// Returns owned copies of (url, token). Caller frees both.
+    fn get(
+        self: *CasAuthCache,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        client: *std.http.Client,
+        repo: Repo,
+        hf_token: []const u8,
+    ) !struct { url: []u8, token: []u8 } {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        const now: std.Io.Timestamp = .now(io, .real);
+        if (self.url == null or now.toSeconds() >= self.expires_at.toSeconds()) {
+            const fresh = try fetchCasAuth(allocator, client, repo, hf_token);
+            if (self.url) |u| allocator.free(u);
+            if (self.token) |t| allocator.free(t);
+            self.url = fresh.url;
+            self.token = fresh.token;
+            self.expires_at = now.addDuration(ttl);
+        }
+        return .{
+            .url = try allocator.dupe(u8, self.url.?),
+            .token = try allocator.dupe(u8, self.token.?),
+        };
+    }
+};
+
 fn fetchCasAuth(
     allocator: std.mem.Allocator,
     client: *std.http.Client,
@@ -474,6 +522,7 @@ pub fn fetchRange(
     allocator: std.mem.Allocator,
     io: std.Io,
     client: *std.http.Client,
+    cas_cache: *CasAuthCache,
     hf_token: []const u8,
     repo: Repo,
     file_id: []const u8,
@@ -483,7 +532,7 @@ pub fn fetchRange(
 ) !void {
     if (dst.len == 0) return;
 
-    const cas = try fetchCasAuth(allocator, client, repo, hf_token);
+    const cas = try cas_cache.get(allocator, io, client, repo, hf_token);
     defer allocator.free(cas.url);
     defer allocator.free(cas.token);
 
@@ -504,6 +553,20 @@ pub fn fetchRange(
     const queue_buf = try allocator.alloc(*FetchTask, tasks.items.len);
     defer allocator.free(queue_buf);
 
+    const n_workers = @min(workers, tasks.items.len);
+    const scratch_bytes: usize = 256 * 1024;
+    const per_worker = body_cap + scratch_bytes;
+    log.debug("fetchRange: dst={d} KiB, tasks={d}, workers={d}, body_cap={d} KiB, scratch={d} KiB, per_worker={d} KiB, total={d} MiB (queue={d} B)", .{
+        dst.len / 1024,
+        tasks.items.len,
+        n_workers,
+        body_cap / 1024,
+        scratch_bytes / 1024,
+        per_worker / 1024,
+        (n_workers * per_worker) / (1024 * 1024),
+        queue_buf.len * @sizeOf(*FetchTask),
+    });
+
     var ctx: FetchCtx = .{
         .io = io,
         .allocator = allocator,
@@ -513,7 +576,6 @@ pub fn fetchRange(
         .body_cap = body_cap,
     };
 
-    const n_workers = @min(workers, tasks.items.len);
     var group: std.Io.Group = .init;
     errdefer group.cancel(io);
     // `concurrent` (not `async`): we *need* workers on real threads so the

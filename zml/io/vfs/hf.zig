@@ -117,6 +117,7 @@ pub const HF = struct {
     base: VFSBase,
     trees: std.StringHashMapUnmanaged(std.ArrayList(TreeNode)) = .{},
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
+    cas_cache: xet.CasAuthCache = .{},
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8) !HF {
         const raw = if (hf_token) |t| try allocator.dupe(u8, std.mem.trim(u8, t, " \t\n\r")) else try allocator.dupe(u8, "");
@@ -187,6 +188,7 @@ pub const HF = struct {
             .override => |t| self.allocator.free(t),
         }
         self.allocator.free(self.hf_token_raw);
+        self.cas_cache.deinit(self.allocator);
     }
 
     pub fn io(self: *HF) std.Io {
@@ -467,7 +469,7 @@ pub const HF = struct {
     }
 
     fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
@@ -490,7 +492,7 @@ pub const HF = struct {
     }
 
     fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.OpenError.SystemResources;
@@ -506,7 +508,7 @@ pub const HF = struct {
     }
 
     fn dirStat(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.Dir.Stat {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getDirHandle(dir);
 
         return .{
@@ -523,7 +525,7 @@ pub const HF = struct {
     }
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.StatFileError.SystemResources;
@@ -549,7 +551,7 @@ pub const HF = struct {
     }
 
     fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.AccessError.SystemResources;
@@ -564,7 +566,7 @@ pub const HF = struct {
     }
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
@@ -591,14 +593,14 @@ pub const HF = struct {
     }
 
     fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         for (dirs) |d| {
             self.closeHandle(@intCast(d.handle)) catch {};
         }
     }
 
     fn dirRead(userdata: ?*anyopaque, reader: *std.Io.Dir.Reader, entries: []std.Io.Dir.Entry) std.Io.Dir.Reader.Error!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         if (reader.state == .finished) return 0;
 
@@ -643,20 +645,20 @@ pub const HF = struct {
     }
 
     fn dirRealPath(userdata: ?*anyopaque, dir: std.Io.Dir, out_buffer: []u8) std.Io.Dir.RealPathError!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getDirHandle(dir);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.Dir.RealPathError.SystemResources;
         return path.len;
     }
 
     fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8, out_buffer: []u8) std.Io.Dir.RealPathFileError!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const real_path = self.resolvePath(dir, path_name, out_buffer) catch return std.Io.Dir.RealPathFileError.NameTooLong;
         return real_path.len;
     }
 
     fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
 
         return .{
@@ -673,19 +675,19 @@ pub const HF = struct {
     }
 
     fn fileLength(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.LengthError!u64 {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         return self.getFileHandle(file).size;
     }
 
     fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         for (files) |file| {
             self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
     }
 
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         return self.performRead(handle, data, offset) catch |err| {
             log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
@@ -694,7 +696,7 @@ pub const HF = struct {
     }
 
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
 
         handle.pos = if (relative_offset >= 0)
@@ -704,13 +706,13 @@ pub const HF = struct {
     }
 
     fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         handle.pos = absolute_offset;
     }
 
     fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.Io.File.RealPathError!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.File.RealPathError.SystemResources;
         return path.len;
@@ -718,26 +720,33 @@ pub const HF = struct {
 
     fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
         if (offset >= handle.size) return 0;
+        // const start = std.Io.Timestamp.now(self.base.inner, .awake);
+        // defer {
+        //     const duration = start.untilNow(self.base.inner, .awake);
+        //     log.warn("Completed read for file {s} at offset {d} with length {d} in {f}", .{ handle.uri, offset, data[0].len, duration });
+        // }
 
-        if (handle.xet_file_id) |fid| {
-            const repo: Repo = try .parse(handle.uri);
-            const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
-            const remaining = handle.size - offset;
-            const take: usize = @intCast(@min(remaining, data[0].len));
-            if (take == 0) return 0;
-            try xet.fetchRange(
-                self.allocator,
-                self.base.inner,
-                self.client,
-                self.hf_token_raw,
-                xet_repo,
-                fid,
-                offset,
-                data[0][0..take],
-                XET_INTRA_TENSOR_WORKERS,
-            );
-            return take;
-        }
+        // if (handle.xet_file_id) |fid| {
+        //     const repo: Repo = try .parse(handle.uri);
+        //     const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
+        //     const remaining = handle.size - offset;
+        //     const take: usize = @intCast(@min(remaining, data[0].len));
+        //     if (take == 0) return 0;
+        //     log.warn("Performing XET read for {s} at offset {d} (take {d} bytes)", .{ handle.uri, offset, take });
+        //     try xet.fetchRange(
+        //         self.allocator,
+        //         self.base.inner,
+        //         self.client,
+        //         &self.cas_cache,
+        //         self.hf_token_raw,
+        //         xet_repo,
+        //         fid,
+        //         offset,
+        //         data[0][0..take],
+        //         XET_INTRA_TENSOR_WORKERS,
+        //     );
+        //     return take;
+        // }
 
         var range_buf: [64]u8 = undefined;
         const range_header = blk: {
