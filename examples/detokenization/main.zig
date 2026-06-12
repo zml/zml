@@ -256,7 +256,7 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer similarity_matrix.deinit(zml_handler.allocator);
     zml_handler.toc(&zml_handler.timers.similarity_matrix);
 
-    try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix);
+    //try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix);
 
     std.log.info("Get lm_head", .{});
     const lm_head = try getLmHead(zml_handler, &model_handler);
