@@ -12,6 +12,7 @@ pub const Metadatas = std.StringArrayHashMapUnmanaged(Metadata);
 const log = std.log.scoped(.@"zml/safetensors");
 
 const BYTES_HEADER = 8;
+const MAX_STREAM_CHUNK_BYTES = 64 * 1024 * 1024;
 
 pub const FileType = enum {
     index,
@@ -134,7 +135,7 @@ pub const TensorReader = struct {
             return error.EndOfStream;
         }
 
-        const combined_limit = limit.min(.limited64(self.remaining));
+        const combined_limit = limit.min(.limited64(@min(self.remaining, MAX_STREAM_CHUNK_BYTES)));
         const n = try self.file_reader.interface.stream(w, combined_limit);
         self.remaining -= n;
         return n;
@@ -146,7 +147,7 @@ pub const TensorReader = struct {
             return error.EndOfStream;
         }
 
-        const combined_limit = limit.min(.limited64(self.remaining));
+        const combined_limit = limit.min(.limited64(@min(self.remaining, MAX_STREAM_CHUNK_BYTES)));
         const n = try self.file_reader.interface.discard(combined_limit);
         self.remaining -= n;
         return n;
