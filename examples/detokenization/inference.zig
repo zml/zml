@@ -374,6 +374,7 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
     const nb_printed_max = 32;
     const allocator = zml_handler.allocator;
     const row_norms = g.lm_head_row_norms.constItems(f32);
+    const is_junk = g.is_junk;
 
     var embed_buffer: zml.Buffer = try .fromSlice(zml_handler.io, zml_handler.platform, embed_slice, .replicated);
     defer embed_buffer.deinit();
@@ -383,25 +384,31 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
 
     var sorted_probas_buffer: zml.Buffer = undefined;
     var sorted_indices_buffer: zml.Buffer = undefined;
-    model_handler.exes.score_results.fill(.{ &sorted_probas_buffer, &sorted_indices_buffer });
+    var sorted_similarities_buffer: zml.Buffer = undefined;
+    model_handler.exes.score_results.fill(.{ &sorted_probas_buffer, &sorted_indices_buffer, &sorted_similarities_buffer });
     defer sorted_probas_buffer.deinit();
     defer sorted_indices_buffer.deinit();
+    defer sorted_similarities_buffer.deinit();
 
     const sorted_probas_slice = try sorted_probas_buffer.toSliceAlloc(allocator, zml_handler.io);
     defer sorted_probas_slice.free(allocator);
     const sorted_indices_slice = try sorted_indices_buffer.toSliceAlloc(allocator, zml_handler.io);
     defer sorted_indices_slice.free(allocator);
+    const sorted_similarities_slice = try sorted_similarities_buffer.toSliceAlloc(allocator, zml_handler.io);
+    defer sorted_similarities_slice.free(allocator);
 
     const sorted_probas = sorted_probas_slice.constItems(f32);
     const sorted_indices = sorted_indices_slice.constItems(i32);
+    const sorted_similarities = sorted_similarities_slice.constItems(f32);
     std.debug.assert(sorted_probas.len == sorted_indices.len);
+    std.debug.assert(sorted_probas.len == sorted_similarities.len);
 
     const nb_real = @min(sorted_probas.len, nb_printed_max);
     log.info("Real sampling distribution (top {d})", .{nb_real});
     printSamplingHeader();
     for (0..nb_real) |i| {
         const token_id: usize = @intCast(sorted_indices[i]);
-        try printSamplingRow(tokenizer, i + 1, token_id, sorted_probas[i], row_norms[token_id]);
+        try printSamplingRow(tokenizer, i + 1, token_id, is_junk[token_id], sorted_probas[i], row_norms[token_id], sorted_similarities[i]);
     }
 
     g.greedySearch(embed_slice.constItems(f16));
@@ -429,7 +436,9 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
         entries[i] = .{
             .token_id = node,
             .proba = @exp(score - max_score) / total,
+            .is_junk = is_junk[node],
             .row_norm = row_norms[node],
+            .similarity = @floatCast(g.visited[i].similarity),
         };
     }
     std.mem.sort(SamplingEntry, entries, {}, SamplingEntry.beforeThan);
@@ -439,14 +448,16 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
     printSamplingHeader();
     for (0..nb_printed_graph) |i| {
         const entry = entries[i];
-        try printSamplingRow(tokenizer, i + 1, entry.token_id, entry.proba, entry.row_norm);
+        try printSamplingRow(tokenizer, i + 1, entry.token_id, entry.is_junk, entry.proba, entry.row_norm, entry.similarity);
     }
 }
 
 const SamplingEntry = struct {
     token_id: usize,
+    is_junk: bool,
     proba: f32,
     row_norm: f32,
+    similarity: f32,
 
     fn beforeThan(_: void, lhs: SamplingEntry, rhs: SamplingEntry) bool {
         return lhs.proba > rhs.proba or (lhs.proba == rhs.proba and lhs.token_id < rhs.token_id);
@@ -454,16 +465,16 @@ const SamplingEntry = struct {
 };
 
 fn printSamplingHeader() void {
-    log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}  {s}", .{ "rank", "token_id", "proba", "row_norm", "token" });
-    log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}  {s}", .{ "------", "----------", "--------------", "--------------", "-----" });
+    log.info("{s:>6}  {s:>10}  {s:>7}  {s:>14}  {s:>14}  {s:>14}  {s}", .{ "rank", "token_id", "is_junk", "proba", "row_norm", "similarity", "token" });
+    log.info("{s:>6}  {s:>10}  {s:>7}  {s:>14}  {s:>14}  {s:>14}  {s}", .{ "------", "----------", "-------", "--------------", "--------------", "--------------", "-----" });
 }
 
-fn printSamplingRow(tokenizer: Tokenizer, rank: usize, token_id: usize, proba: f32, row_norm: f32) !void {
+fn printSamplingRow(tokenizer: Tokenizer, rank: usize, token_id: usize, is_junk: bool, proba: f32, row_norm: f32, similarity: f32) !void {
     var decoded_buf: [512]u8 = undefined;
     const decoded = try decodeToken(tokenizer, @intCast(token_id), &decoded_buf);
     var escaped_buf: [512]u8 = undefined;
     const escaped = escapeTokenText(decoded, &escaped_buf);
-    log.info("{d:>6}  {d:>10}  {d:>14.8}  {d:>14.6}  {s}", .{ rank, token_id, proba, row_norm, escaped });
+    log.info("{d:>6}  {d:>10}  {d:>7}  {d:>14.8}  {d:>14.6}  {d:>14.8}  {s}", .{ rank, token_id, @intFromBool(is_junk), proba, row_norm, similarity, escaped });
 }
 
 fn decodeToken(tokenizer: Tokenizer, token_id: u32, out: []u8) ![]const u8 {
