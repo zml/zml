@@ -1227,6 +1227,8 @@ const MoE = struct {
         moe_metadata: zml.moe.Metadata,
         moe_parameters: zml.moe.Parameters,
     ) zml.Tensor {
+        stdx.debug.assert(x.shape().hasTags(.{ .batch, .seq, .d }), "expect input tokens to has tags (.batch, .seq, .d) but got {f}", .{x.shape()});
+        stdx.debug.assert(input_ids.shape().hasTags(.{ .batch, .seq, }), "expect input tokens to has tags (.batch, .seq) but got {f}", .{input_ids.shape()});
         _ = moe_metadata; // autofix
         _ = moe_parameters; // autofix
         const topk_weight, const topk_ids = self.router.forward(x, input_ids);
@@ -1679,6 +1681,10 @@ const TokenEmbedding = struct {
 
     pub fn unloadBuffers(self: *zml.Bufferized(TokenEmbedding)) void {
         self.embeds.weight.deinit();
+    }
+
+    pub fn forwardTest(self: TokenEmbedding, tokens: zml.Tensor) zml.Tensor {
+        return self.embeds.forward(tokens); //< [batch, seq, d]
     }
 
     pub fn forward(self: TokenEmbedding, tokens: zml.Tensor) zml.Tensor {
