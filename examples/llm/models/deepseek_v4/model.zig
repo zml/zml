@@ -548,7 +548,7 @@ pub const IndexerCache = struct {
             .batch = batch_size,
             .kv = @divFloor(seqlen, compression_ratio),
             .hd = config.index_head_dim,
-        }, mdl.embeds.weight.dtype());
+        }, mdl.embeds.embeds.weight.dtype());
 
         return .{
             .kv = .init(indexer_shape),
@@ -582,7 +582,7 @@ pub const CSACache = struct {
             .batch = batch_size,
             .kv = @divTrunc(seqlen, compression_ratio),
             .hd = config.head_dim,
-        }, mdl.embeds.weight.dtype());
+        }, mdl.embeds.embeds.weight.dtype());
 
         return .{
             .state = .init(config, batch_size, compression_ratio, config.head_dim),
@@ -623,7 +623,7 @@ pub const HCACache = struct {
             .batch = batch_size,
             .kv = @divTrunc(seqlen, compression_ratio),
             .hd = config.head_dim,
-        }, mdl.embeds.weight.dtype());
+        }, mdl.embeds.embeds.weight.dtype());
 
         return .{
             .state = .init(config, batch_size, compression_ratio, config.head_dim),
@@ -655,7 +655,7 @@ pub const Cache = struct {
             .batch = batch_size,
             .kv = config.sliding_window,
             .hd = config.head_dim,
-        }, mdl.embeds.weight.dtype());
+        }, mdl.embeds.embeds.weight.dtype());
 
         return .{
             .sliding_window = .init(kv_shape),
@@ -1448,7 +1448,7 @@ const Expert = struct {
     }
 };
 
-const Layer = struct {
+pub const Layer = struct {
     const SinkhornOpts = struct {
         scale: zml.Tensor,
         func: zml.nn.Linear,
@@ -1595,7 +1595,7 @@ const Layer = struct {
         attention_parameters: zml.attention.attention.Parameters,
         moe_metadata: zml.moe.Metadata,
         moe_parameters: zml.moe.Parameters,
-    ) struct { zml.Tensor, Cache } {
+    ) struct { zml.Tensor, Cache, zml.Tensor } {
         // x: [batch, seq, hc, d]
         var x_, const post, const comb = self.hc_pre(x, self.hc_attn);
         x_ = self.attn_norm.forward(x_);
@@ -1607,7 +1607,7 @@ const Layer = struct {
         x_2 = self.ffn.forward(x_2, tokens, moe_metadata, moe_parameters);
         x_2 = hc_post(x_2.rename(.{ .d = .hd }), x_, post_2, comb_2);
 
-        return .{ x_2, cache_ };
+        return .{ x_2, cache_, layer_idx.addConstant(1) };
     }
 };
 
@@ -1618,8 +1618,9 @@ const LmHead = struct {
     hc_fn: zml.nn.Linear,
     hc_scale: zml.Tensor,
     hc_eps: f32,
+    sampling_strategy: zml.nn.SamplingStrategy,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) LmHead {
+    pub fn init(store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) LmHead {
         return .{
             .norm = .init(
                 store.createTensor("norm.weight", .{.d}, .replicated),
@@ -1631,6 +1632,7 @@ const LmHead = struct {
             .hc_fn = .init(store.createTensor("hc_head_fn", .{ .hc, .d }, .replicated), null, .d),
             .hc_scale = store.createTensor("hc_head_scale", .{.batch}, .replicated),
             .hc_eps = config.hc_eps,
+            .sampling_strategy = generation.sampling_strategy,
         };
     }
 
@@ -1649,8 +1651,10 @@ const LmHead = struct {
         return x.convert(.f32).mul(pre.broad(x.shape())).sum(.hc).squeeze(.hc).convert(x.dtype());
     }
 
-    pub fn forward(self: LmHead, x: zml.Tensor) zml.Tensor {
-        return self.voc_proj.forward(self.norm.forward(self.hc_head(x)).convert(.f32)); //.choose1d(.seq, x.dim(.seq) - 1);
+    pub fn forward(self: LmHead, x: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
+        const logits = self.voc_proj.forward(self.norm.forward(self.hc_head(x)).convert(.f32)); //.choose1d(.seq, x.dim(.seq) - 1);
+        const new_tokens, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, rng);
+        return .{ new_tokens, new_rng };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(LmHead)) void {
@@ -1662,12 +1666,35 @@ const LmHead = struct {
     }
 };
 
-pub const Model = struct {
+const TokenEmbedding = struct {
     embeds: zml.nn.TokenEmbedding,
+    hc_mult: u32,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Config) TokenEmbedding {
+        return .{
+            .embeds = .{ .weight = store.createTensor("weight", .{ .voc, .d }, .replicated) },
+            .hc_mult = config.hc_mult,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(TokenEmbedding)) void {
+        self.embeds.weight.deinit();
+    }
+
+    pub fn forward(self: TokenEmbedding, tokens: zml.Tensor) zml.Tensor {
+        stdx.debug.assert(tokens.shape().hasTags(.{
+            .batch,
+            .seq,
+        }), "expect input tokens to has tags (.batch, .seq) but got {f}", .{tokens.shape()});
+        const hidden = self.embeds.forward(tokens); //< [batch, seq, d]
+        return hidden.insertAxes(.d, .{.hc}).repeat1d(.hc, @intCast(self.hc_mult)); //< [batch, seq, hc, d]
+    }
+};
+
+pub const Model = struct {
+    embeds: TokenEmbedding,
     layers: []Layer,
     lm_head: LmHead,
-    hc_mult: u32,
-    sampling_strategy: zml.nn.SamplingStrategy,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
         const layers = try allocator.alloc(Layer, 3);
@@ -1679,13 +1706,9 @@ pub const Model = struct {
         }
 
         return .{
-            .embeds = .{
-                .weight = store.createTensor("embed.weight", .{ .voc, .d }, .replicated),
-            },
+            .embeds = .init(store.withPrefix("embed"), config),
             .layers = layers,
-            .lm_head = .init(store, config),
-            .hc_mult = config.hc_mult,
-            .sampling_strategy = generation.sampling_strategy,
+            .lm_head = .init(store, config, generation),
         };
     }
 
@@ -1730,7 +1753,7 @@ pub const Model = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
-        self.embeds.weight.deinit();
+        TokenEmbedding.unloadBuffers(&self.embeds);
 
         for (self.layers) |*layer| {
             Layer.unloadBuffers(layer, allocator);
@@ -1751,19 +1774,13 @@ pub const Model = struct {
         moe_metadata: zml.moe.Metadata,
         moe_parameters: zml.moe.Parameters,
     ) struct { zml.Tensor, zml.Tensor.Rng, Cache } {
-        stdx.debug.assert(tokens.shape().hasTags(.{
-            .batch,
-            .seq,
-        }), "expect input tokens to has tags (.batch, .seq) but got {f}", .{tokens.shape()});
-
-        var hidden = self.embeds.forward(tokens); //< [batch, seq, d]
-        hidden = hidden.insertAxes(.d, .{.hc}).repeat1d(.hc, @intCast(self.hc_mult)); //< [batch, seq, hc, d]
+        var hidden = self.embeds.forward(tokens); //< [batch, seq, hc, d]
 
         var cache_ = cache;
         var layer_idx = zml.Tensor.scalar(@as(u32, 0), .u32);
 
         for (self.layers) |layer| {
-            hidden, cache_ = layer.forward(
+            hidden, cache_, layer_idx = layer.forward(
                 hidden,
                 tokens,
                 tokens_idx_offset,
@@ -1774,12 +1791,9 @@ pub const Model = struct {
                 moe_metadata,
                 moe_parameters,
             ); //< [batch, seq, d]
-            layer_idx = layer_idx.addConstant(1);
         }
 
-        const logits = self.lm_head.forward(hidden); //< [batch, voc]
-
-        const new_tokens, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, rng);
+        const new_tokens, const new_rng = self.lm_head.forward(hidden, rng); //< [batch, voc]
         return .{ new_tokens.convert(tokens.dtype()), new_rng, cache_ };
     }
 };
