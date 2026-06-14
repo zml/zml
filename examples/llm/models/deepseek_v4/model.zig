@@ -333,12 +333,8 @@ pub const Compressor = struct {
             }, .seq);
         }
 
-        kv = kv.mul(score.broad(kv.shape()).softmax(.seq)).sum(.seq);
-        kv = kv.dynamicSlice(.seq, .{ .start = offset_mod, .len = 1 });
-
-        // NOTE: Maybe we need to handle the edge case when `offset = 1`?
-        const pos_idx = offset.addConstant(1).subConstant(self.ratio).withTags(.{.seq});
-        return .{ kv, pos_idx.convert(.i64), new_state };
+        const pos_idx = offset.convert(.i64).addConstant(1).subConstant(@as(i64, @intCast(self.ratio))).withTags(.{.seq});
+        return .{ kv.mul(score.broad(kv.shape()).softmax(.seq)).sum(.seq), pos_idx.convert(.i64), new_state };
     }
 
     pub fn forward(self: Compressor, x: zml.Tensor, offset: zml.Tensor, state: CompressorState, layer_idx: zml.Tensor) struct { zml.Tensor, CompressorState } {
@@ -756,14 +752,14 @@ const Indexer = struct {
         new_cache.state = new_state;
         kv = blk: {
             kv = hadamard_rotation(kv).rename(.{ .seq = .kv });
-            new_cache.kv = new_cache.kv.update(kv, position.divByConst(self.ratio), cache_idx);
+            new_cache.kv = new_cache.kv.update(kv, compressedCacheIds(position, self.ratio, kv.dim(.kv)), cache_idx);
 
             break :blk new_cache.kv.get(cache_idx).rename(.{ .kv = .seq });
         };
 
         const compressed_mask = blk: {
             const kv_idx = zml.Tensor.arange(.{ .end = kv.dim(.seq) }, .u32);
-            const offset_idx = if (x.dim(.seq) > 1) zml.Tensor.scalar(x.dim(.seq), .u32) else position;
+            const offset_idx = if (x.dim(.seq) > 1) zml.Tensor.scalar(x.dim(.seq), .u32) else position.addConstant(1);
             break :blk kv_idx.cmp(.LT, offset_idx.divByConst(self.ratio).broad(kv_idx.shape())).withTags(.{.t}).insertAxes(0, .{ .batch, .seq });
         };
 
@@ -792,7 +788,9 @@ const Indexer = struct {
                 break :blk topk_idxs;
             } else {
                 var topk_idxs = index_score.topK(-1, self.index_topk, .{}).indices;
-                topk_idxs = topk_idxs.add(offset_.broad(topk_idxs.shape()));
+                const valid_count = position.addConstant(1).divByConst(self.ratio).insertAxes(.last, .{ .seq, .t }).convert(topk_idxs.dtype());
+                const mask_ = topk_idxs.cmp(.GE, valid_count.broad(topk_idxs.shape()));
+                topk_idxs = zml.Tensor.select(mask_, zml.Tensor.scalar(-1, topk_idxs.dtype()).broad(topk_idxs.shape()), topk_idxs.add(offset_.broad(topk_idxs.shape())));
                 break :blk topk_idxs;
             }
         };
@@ -931,16 +929,12 @@ pub const Attention = struct {
                 var kv_compressed, const new_compressor_state = csa.compressor.forward(x, offset_idx, cache.csa.state, layer_idx);
                 kv_compressed = kv_compressed.rename(.{ .seq = .kv });
 
-                const ids_shape = offset_idx.shape().insert(.last, .{ .kv = kv_compressed.dim(.kv) });
-                var compressed_kv_cache_ids = zml.Tensor.iota(ids_shape, .kv).convert(.u32);
-                compressed_kv_cache_ids = compressed_kv_cache_ids.add(offset_idx.broad(ids_shape)).remainderConst(csa.compressor.ratio);
-
                 const compressed_offset: u32 = if (x.dim(.seq) > 1) @intCast(kv.dim(.kv)) else self.window_size;
                 const topk_indexed, const new_indexer_cache = csa.indexer.forward(x, qr.rename(.{ .q = .d }), offset_idx, zml.Tensor.scalar(compressed_offset, .u32), cache.csa.indexer, layer_idx);
 
                 new_cache.csa.state = new_compressor_state;
                 new_cache.csa.indexer = new_indexer_cache;
-                new_cache.csa.compressed_kv = new_cache.csa.compressed_kv.update(kv_compressed, compressed_kv_cache_ids, layer_idx);
+                new_cache.csa.compressed_kv = new_cache.csa.compressed_kv.update(kv_compressed, compressedCacheIds(offset_idx, csa.compressor.ratio, kv_compressed.dim(.kv)), layer_idx);
 
                 kv_compressed = new_cache.csa.compressed_kv.get(layer_idx);
 
@@ -951,17 +945,13 @@ pub const Attention = struct {
                 var kv_compressed, const new_compressor_state = compressor.forward(x, offset_idx, cache.hca.state, layer_idx);
                 kv_compressed = kv_compressed.rename(.{ .seq = .kv });
 
-                const ids_shape = offset_idx.shape().insert(.last, .{ .kv = kv_compressed.dim(.kv) });
-                var compressed_kv_cache_ids = zml.Tensor.iota(ids_shape, .kv).convert(.u32);
-                compressed_kv_cache_ids = compressed_kv_cache_ids.add(offset_idx.broad(ids_shape)).remainderConst(compressor.ratio);
-
                 new_cache.hca.state = new_compressor_state;
-                new_cache.hca.compressed_kv = new_cache.hca.compressed_kv.update(kv_compressed, compressed_kv_cache_ids, layer_idx);
+                new_cache.hca.compressed_kv = new_cache.hca.compressed_kv.update(kv_compressed, compressedCacheIds(offset_idx, compressor.ratio, kv_compressed.dim(.kv)), layer_idx);
 
                 kv_compressed = new_cache.hca.compressed_kv.get(layer_idx);
 
                 const compressed_offset: u32 = if (x.dim(.seq) > 1) @intCast(kv.dim(.kv)) else self.window_size;
-                const topk_compressed = compressed_topk(compressor.ratio, @intCast(x.dim(.batch)), @intCast(seqlen), compressed_offset);
+                const topk_compressed = compressed_topk(compressor.ratio, @intCast(x.dim(.batch)), @intCast(seqlen), offset_idx, compressed_offset, @intCast(kv_compressed.dim(.kv)));
 
                 kv = zml.Tensor.concatenate(&.{ kv, kv_compressed }, .kv);
                 topk = zml.Tensor.concatenate(&.{ topk, topk_compressed }, -1);
@@ -988,6 +978,13 @@ pub const Attention = struct {
 
 fn ones(s: zml.Shape) zml.Tensor {
     return zml.Tensor.constant(s.dtype().one()).broad(s);
+}
+
+fn compressedCacheIds(offset: zml.Tensor, ratio: u32, kv_len: i64) zml.Tensor {
+    const ids_shape = offset.shape().insert(.last, .{ .kv = kv_len });
+    var ids = zml.Tensor.iota(ids_shape, .kv).convert(.u32);
+    ids = ids.add(offset.divByConst(ratio).broad(ids_shape));
+    return ids;
 }
 
 fn topk_window2(x: zml.Tensor, seqlen: i64, window_size: i64) zml.Tensor {
@@ -1063,22 +1060,22 @@ fn topk_window(window_size: i64, batch_size: i64, seqlen: i64, start_pos: i64) z
     return matrix.insertAxes(0, .{.batch}).reshape(.{ .batch = batch_size, .seq = matrix.dim(0), .topk = matrix.dim(1) });
 }
 
-fn compressed_topk(ratio: u32, batch_size: u32, seqlen: u32, offset: u32) zml.Tensor {
-    const matrix = blk: {
-        if (seqlen > 1) {
-            const matrix = zml.Tensor.iota(.init(.{ seqlen, @divFloor(seqlen, ratio) }, .i64), 1).convert(.i64);
-            const b = zml.Tensor.arange(.{ .start = 1, .end = seqlen + 1 }, .i64).reshape(.{ seqlen, 1 }).divByConst(ratio);
-            const mask = matrix.cmp(.GE, b.broad(matrix.shape()));
-            break :blk zml.Tensor.select(mask, zml.Tensor.scalar(-1, .i64).broad(matrix.shape()), matrix.addConstant(offset));
-        } else {
-            const base = zml.Tensor.arange(.{ .end = ratio }, .i64);
-            const matrix = base.addConstant(offset);
-            const mask = matrix.cmp(.LT, base);
-            break :blk zml.Tensor.select(mask, matrix, zml.Tensor.scalar(-1, .i64).broad(matrix.shape())).insertAxes(0, .{.seq});
-        }
-    };
-
-    return matrix.insertAxes(0, .{.batch}).reshape(.{ .batch = batch_size, .seq = matrix.dim(0), .topk = matrix.dim(1) });
+fn compressed_topk(ratio: u32, batch_size: u32, seqlen: u32, start_pos: zml.Tensor, offset: u32, max_compressed: u32) zml.Tensor {
+    if (seqlen > 1) {
+        const matrix = zml.Tensor.iota(.init(.{ seqlen, @divFloor(seqlen, ratio) }, .i64), 1).convert(.i64);
+        const b = zml.Tensor.arange(.{ .start = 1, .end = seqlen + 1 }, .i64).reshape(.{ seqlen, 1 }).divByConst(ratio);
+        const mask = matrix.cmp(.GE, b.broad(matrix.shape()));
+        const masked = zml.Tensor.select(mask, zml.Tensor.scalar(-1, .i64).broad(matrix.shape()), matrix.addConstant(offset));
+        return masked.insertAxes(0, .{.batch}).reshape(.{ .batch = batch_size, .seq = masked.dim(0), .topk = masked.dim(1) });
+    } else {
+        const shape = start_pos.shape().insert(.last, .{ .topk = max_compressed });
+        const base = zml.Tensor.iota(shape, .topk).convert(.u32);
+        const valid_count = start_pos.addConstant(1).divByConst(ratio).insertAxes(.last, .{.topk}).broad(shape);
+        const valid = base.cmp(.LT, valid_count);
+        const matrix = base.addConstant(offset).convert(.i64);
+        const masked = zml.Tensor.select(valid, matrix, zml.Tensor.scalar(-1, .i64).broad(matrix.shape()));
+        return masked.insertAxes(.batch, .{.seq}).withTags(.{ .batch, .seq, .topk });
+    }
 }
 
 // From: <https://github.com/tile-ai/tilelang/blob/4e873220313c7e4dbfa0538582bc32ac5c81b1eb/examples/deepseek_v4/sparse_attn_fwd_sm90.py#L162>
