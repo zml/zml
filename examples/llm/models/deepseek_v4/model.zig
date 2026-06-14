@@ -339,7 +339,7 @@ pub const Compressor = struct {
 
     pub fn forward(self: Compressor, x: zml.Tensor, offset: zml.Tensor, state: CompressorState, layer_idx: zml.Tensor) struct { zml.Tensor, CompressorState } {
         // shape(x) = [batch,seq,r]
-        var kv, const pos_idx, const new_state = if (x.dim(.seq) > 1) self.forwardPrefill(x, state, layer_idx) else self.forwardDecode(x, offset, state, layer_idx);
+        var kv, const pos_idx, const new_state = if (x.dim(.seq) > self.ratio) self.forwardPrefill(x, state, layer_idx) else self.forwardDecode(x, offset, state, layer_idx);
 
         const precomputed_freqs_cis = precompute_yarn(self.rope_head_dim, self.rope_opts);
         const freqs_cis = zml.Tensor.outer(pos_idx.convert(.f32), precomputed_freqs_cis);
@@ -1707,7 +1707,7 @@ pub const Model = struct {
     lm_head: LmHead,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
-        const layers = try allocator.alloc(Layer, 3);
+        const layers = try allocator.alloc(Layer, 10);
         // const layers = try allocator.alloc(Layer, config.num_hidden_layers);
 
         for (layers, 0..) |*layer, i| {
@@ -1743,11 +1743,12 @@ pub const Model = struct {
         defer {
             const took = now.untilNow(io, .awake);
             const took_ns: usize = @max(1, @as(usize, @intCast(took.toNanoseconds())));
-            log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{
-                total_bytes,
-                took,
-                total_bytes * std.time.ns_per_s / took_ns,
-            });
+            _ = took_ns; // autofix
+            // log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{
+            //     total_bytes,
+            //     took,
+            //     total_bytes * std.time.ns_per_s / took_ns,
+            // });
         }
 
         //progress.increaseEstimatedTotalItems(store.view().count());
