@@ -939,7 +939,10 @@ pub const Attention = struct {
                 kv_compressed = new_cache.csa.compressed_kv.get(layer_idx);
 
                 kv = zml.Tensor.concatenate(&.{ kv, kv_compressed }, .kv);
-                topk = zml.Tensor.concatenate(&.{ topk, topk_indexed, }, -1);
+                topk = zml.Tensor.concatenate(&.{
+                    topk,
+                    topk_indexed,
+                }, -1);
             },
             .hca => |compressor| {
                 var kv_compressed, const new_compressor_state = compressor.forward(x, offset_idx, cache.hca.state, layer_idx);
@@ -1219,7 +1222,6 @@ const MoE = struct {
         return FP4Linear.forwardWith(w2_weight, w2_scale, hidden.convert(x.dtype()), block_size, 32, zml.Shape.toTag(.dout));
     }
 
-
     pub fn forward(
         self: MoE,
         x: zml.Tensor,
@@ -1228,7 +1230,10 @@ const MoE = struct {
         moe_parameters: zml.moe.Parameters,
     ) zml.Tensor {
         stdx.debug.assert(x.shape().hasTags(.{ .batch, .seq, .d }), "expect input tokens to has tags (.batch, .seq, .d) but got {f}", .{x.shape()});
-        stdx.debug.assert(input_ids.shape().hasTags(.{ .batch, .seq, }), "expect input tokens to has tags (.batch, .seq) but got {f}", .{input_ids.shape()});
+        stdx.debug.assert(input_ids.shape().hasTags(.{
+            .batch,
+            .seq,
+        }), "expect input tokens to has tags (.batch, .seq) but got {f}", .{input_ids.shape()});
         _ = moe_metadata; // autofix
         _ = moe_parameters; // autofix
         const topk_weight, const topk_ids = self.router.forward(x, input_ids);
@@ -1534,19 +1539,19 @@ pub const Layer = struct {
 
         const base_pre = opts.base.slice1d(0, .{ .end = mult });
         const base_post = opts.base.slice1d(0, .{ .start = mult, .end = 2 * mult });
-        const base_comb = opts.base.slice1d(0, .{ .start = 2 * mult }).splitAxis(-1, .{ mult, .auto });
+        const base_comb = opts.base.slice1d(0, .{ .start = 2 * mult }).splitAxis(-1, .{ .hc_in = mult, .hc = .auto });
 
         const pre = pre_mix.mul(opts.scale.choose1d(0, 0)).add(base_pre.broad(pre_mix.shape())).sigmoid().addConstant(eps);
         const post = post_mix.mul(opts.scale.choose1d(0, 1)).add(base_post.broad(post_mix.shape())).sigmoid().scale(2);
 
-        var comb = comb_mix.splitAxis(-1, .{ mult, .auto });
+        var comb = comb_mix.splitAxis(-1, .{ .hc_in = mult, .hc = .auto });
         comb = comb.mul(opts.scale.choose1d(0, 2)).add(base_comb.insertAxes(0, .{ .batch, .seq }).broad(comb.shape()));
-        comb = comb.softmax(-1).addConstant(eps);
-        comb = comb.div(comb.sum(-2).addConstant(eps));
+        comb = comb.softmax(.hc).addConstant(eps);
+        comb = comb.div(comb.sum(.hc_in).addConstant(eps));
 
         for (1..n) |_| {
-            comb = comb.div(comb.sum(-1).addConstant(eps));
-            comb = comb.div(comb.sum(-2).addConstant(eps));
+            comb = comb.div(comb.sum(.hc).addConstant(eps));
+            comb = comb.div(comb.sum(.hc_in).addConstant(eps));
         }
 
         return .{ pre, post, comb };
@@ -1570,18 +1575,18 @@ pub const Layer = struct {
 
     fn hc_post(x: zml.Tensor, residual: zml.Tensor, post: zml.Tensor, comb: zml.Tensor) zml.Tensor {
         // x: [b,s,d], residual: [b,s,hc,d], post: [b,s,hc], comb: [b,s,hc,hc], y: [b,s,hc,d]
-        const p = post.appendAxes(.{.hd});
-        const x_ = x.insertAxes(.hd, .{.hc}).convert(.f32);
+        const p = post.appendAxes(.{.d});
+        const x_ = x.insertAxes(.d, .{.hc}).convert(.f32);
 
         const s: zml.Shape = x_.shape().set(.hc, p.dim(.hc));
         const m = x_.broad(s).mul(p.broad(s));
 
-        const r_32 = residual.insertAxes(.hc, .{.hc2}).convert(.f32);
+        const r_32 = residual.rename(.{ .hc = .hc_in }).insertAxes(.d, .{.hc}).convert(.f32);
         const c = comb.appendAxes(.{.d}); //withTags(.{ .batch, .seq, .hc, .d });
         const s2 = c.shape().set(.d, r_32.dim(.d));
-        const m2 = r_32.broad(s2).mul(c.broad(s2)).sum(2).squeeze(2).withTags(.{ .batch, .seq, .hc, .dd });
+        const m2 = r_32.broad(s2).mul(c.broad(s2)).sum(.hc_in).squeeze(.hc_in);
 
-        const f = m.add(m2).rename(.{ .hd = .d });
+        const f = m.add(m2);
         return f.convert(x.dtype());
     }
 
@@ -1601,12 +1606,12 @@ pub const Layer = struct {
         var x_, const post, const comb = self.hc_pre(x, self.hc_attn);
         x_ = self.attn_norm.forward(x_);
         x_, const cache_ = self.attn.forward(x_, tokens_idx_offset, layer_idx, cache, attention_metadata, attention_parameters);
-        x_ = hc_post(x_, x, post, comb);
+        x_ = hc_post(x_.rename(.{ .hd = .d }), x, post, comb);
 
         var x_2, const post_2, const comb_2 = self.hc_pre(x_, self.hc_ffn);
         x_2 = self.ffn_norm.forward(x_2);
         x_2 = self.ffn.forward(x_2, tokens, moe_metadata, moe_parameters);
-        x_2 = hc_post(x_2.rename(.{ .d = .hd }), x_, post_2, comb_2);
+        x_2 = hc_post(x_2, x_, post_2, comb_2);
 
         return .{ x_2, cache_, layer_idx.addConstant(1) };
     }
