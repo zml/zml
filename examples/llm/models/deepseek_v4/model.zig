@@ -264,7 +264,7 @@ pub const Compressor = struct {
             var score_slice = score.slice1d(.seq, .{ .start = cutoff - self.ratio, .end = cutoff });
             score_slice = score_slice.add(self.ape.insertAxes(0, .{.batch}).broad(score_slice.shape()));
 
-            new_state = state.update(kv_slice, score_slice, zml.Tensor.arange(.{ .end = self.ratio }, .u32).withTags(.{.seq}), layer_idx);
+            new_state = new_state.update(kv_slice, score_slice, zml.Tensor.arange(.{ .end = self.ratio }, .u32).withTags(.{.seq}), layer_idx);
         }
 
         if (remainder > 0) {
@@ -277,7 +277,7 @@ pub const Compressor = struct {
             const ape_split = self.ape.slice1d(0, .{ .end = remainder }).insertAxes(0, .{.batch});
 
             const state_offset = if (self.overlap) self.ratio else 0;
-            new_state = state.update(kv_split[1], score_split[1].add(ape_split), zml.Tensor.arange(.{ .start = state_offset, .end = state_offset + remainder }, .u32).withTags(.{.seq}), layer_idx);
+            new_state = new_state.update(kv_split[1], score_split[1].add(ape_split), zml.Tensor.arange(.{ .start = state_offset, .end = state_offset + remainder }, .u32).withTags(.{.seq}), layer_idx);
         }
 
         kv = kv.splitAxis(.seq, .{ .seq = .auto, .r = self.ratio });
@@ -795,7 +795,7 @@ const Indexer = struct {
             }
         };
 
-        return .{ topk_idxs.convert(.i64).slice1d(.t, .{ .end = 2 }), new_cache };
+        return .{ topk_idxs.convert(.i64), new_cache };
     }
 };
 
