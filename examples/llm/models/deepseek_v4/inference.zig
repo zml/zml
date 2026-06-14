@@ -385,7 +385,7 @@ pub const ComposedKernelExe = struct {
         return results.get(zml.Buffer);
     }
 
-    fn runLayer(self: *const ComposedKernelExe, args: KernelArgs, layer_buffer: zml.Bufferized(model.Layer), hidden_buffer: *zml.Buffer, layer_idx_buffer: *zml.Buffer, cache_idx_buffer: zml.Buffer) !struct { zml.Buffer, zml.Bufferized(model.Cache), zml.Buffer } {
+    fn runLayer(self: *const ComposedKernelExe, args: KernelArgs, layer_buffer: zml.Bufferized(model.Layer), hidden_buffer: *zml.Buffer, cache_idx_buffer: zml.Buffer) !struct { zml.Buffer, zml.Bufferized(model.Cache), zml.Buffer } {
         var exe_args = try self.attn_layer.args(args.allocator);
         defer exe_args.deinit(args.allocator);
 
@@ -394,9 +394,8 @@ pub const ComposedKernelExe = struct {
             hidden_buffer,
             args.tokens_buf,
             args.tokens_pos_buf,
-            layer_idx_buffer,
-            args.cache_buffers,
             &cache_idx_buffer,
+            args.cache_buffers,
             args.attention_metadata_buffers,
             args.moe_metadata_buffers,
         });

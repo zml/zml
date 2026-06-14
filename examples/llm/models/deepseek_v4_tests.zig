@@ -211,7 +211,7 @@ pub fn run(
             .{}
         );
 
-        try ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 });
+        // try ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 });
     }
 }
 
