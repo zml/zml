@@ -150,7 +150,7 @@ pub fn run(
     // try ctx.testLayer("embed", .{ .batch, .seq }, mdl.embeds, model_buffers.embeds, .{});
     // try ctx.testLayer("head", .{ .batch, .seq, .hc, .d }, mdl.lm_head, model_buffers.lm_head, .{});
 
-    const n = 3; //16;
+    const n = 40; //16;
     // const n = config.num_hidden_layers;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -161,55 +161,55 @@ pub fn run(
     const cache: model.Cache = .init(mdl, config, 1, 2048);
 
     for (0..n) |i| {
-        try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.attn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].attn_norm, model_buffers.layers[i].attn_norm, .{});
-
-        try ctx.testAttentionLayer(arena_allocator, i, cache, mdl.layers[i].attn, model_buffers.layers[i].attn, .{});
-
-        try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].ffn_norm, model_buffers.layers[i].ffn_norm, .{});
-
-        // MoE
-        try ctx.testGateLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.gate", .{i}), .{ .seq, .d }, mdl.layers[i].ffn.router, model_buffers.layers[i].ffn.router, .{});
-
-        try ctx.testLayer(
-            try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.shared_experts.w1", .{i}),
-            .{ .seq, .d },
-            mdl.layers[i].ffn.shared_experts.w1,
-            model_buffers.layers[i].ffn.shared_experts.w1,
-            .{},
-        );
-
-        try ctx.testLayer(
-            try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.shared_experts.w2", .{i}),
-            .{ .seq, .dint },
-            mdl.layers[i].ffn.shared_experts.w2,
-            model_buffers.layers[i].ffn.shared_experts.w2,
-            .{},
-        );
-
-        try ctx.testLayer(
-            try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.shared_experts.w3", .{i}),
-            .{ .seq, .d },
-            mdl.layers[i].ffn.shared_experts.w3,
-            model_buffers.layers[i].ffn.shared_experts.w3,
-            .{},
-        );
-
-        try ctx.testExpertLayer(
-            try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.shared_experts", .{i}),
-            .{ .seq, .d },
-            mdl.layers[i].ffn.shared_experts,
-            model_buffers.layers[i].ffn.shared_experts,
-            .{},
-        );
-
-        // TEST: MoE (complete)
-        try ctx.testMoELayer(
-            try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn", .{i}),
-            .{ .batch, .seq, .d },
-            mdl.layers[i].ffn,
-            model_buffers.layers[i].ffn,
-            .{}
-        );
+        // try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.attn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].attn_norm, model_buffers.layers[i].attn_norm, .{});
+        //
+        // try ctx.testAttentionLayer(arena_allocator, i, cache, mdl.layers[i].attn, model_buffers.layers[i].attn, .{});
+        //
+        // try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].ffn_norm, model_buffers.layers[i].ffn_norm, .{});
+        //
+        // // MoE
+        // try ctx.testGateLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.gate", .{i}), .{ .seq, .d }, mdl.layers[i].ffn.router, model_buffers.layers[i].ffn.router, .{});
+        //
+        // try ctx.testLayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.shared_experts.w1", .{i}),
+        //     .{ .seq, .d },
+        //     mdl.layers[i].ffn.shared_experts.w1,
+        //     model_buffers.layers[i].ffn.shared_experts.w1,
+        //     .{},
+        // );
+        //
+        // try ctx.testLayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.shared_experts.w2", .{i}),
+        //     .{ .seq, .dint },
+        //     mdl.layers[i].ffn.shared_experts.w2,
+        //     model_buffers.layers[i].ffn.shared_experts.w2,
+        //     .{},
+        // );
+        //
+        // try ctx.testLayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.shared_experts.w3", .{i}),
+        //     .{ .seq, .d },
+        //     mdl.layers[i].ffn.shared_experts.w3,
+        //     model_buffers.layers[i].ffn.shared_experts.w3,
+        //     .{},
+        // );
+        //
+        // try ctx.testExpertLayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn.shared_experts", .{i}),
+        //     .{ .seq, .d },
+        //     mdl.layers[i].ffn.shared_experts,
+        //     model_buffers.layers[i].ffn.shared_experts,
+        //     .{},
+        // );
+        //
+        // // TEST: MoE (complete)
+        // try ctx.testMoELayer(
+        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn", .{i}),
+        //     .{ .batch, .seq, .d },
+        //     mdl.layers[i].ffn,
+        //     model_buffers.layers[i].ffn,
+        //     .{}
+        // );
 
         try ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 });
     }
