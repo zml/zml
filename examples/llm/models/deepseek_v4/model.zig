@@ -333,9 +333,12 @@ pub const Compressor = struct {
             }, .seq);
         }
 
+        kv = kv.mul(score.broad(kv.shape()).softmax(.seq)).sum(.seq);
+        kv = kv.dynamicSlice(.seq, .{ .start = offset_mod, .len = 1 });
+
         // NOTE: Maybe we need to handle the edge case when `offset = 1`?
         const pos_idx = offset.addConstant(1).subConstant(self.ratio).withTags(.{.seq});
-        return .{ kv.mul(score.broad(kv.shape()).softmax(.seq)).sum(.seq), pos_idx.convert(.i64), new_state };
+        return .{ kv, pos_idx.convert(.i64), new_state };
     }
 
     pub fn forward(self: Compressor, x: zml.Tensor, offset: zml.Tensor, state: CompressorState, layer_idx: zml.Tensor) struct { zml.Tensor, CompressorState } {
@@ -919,7 +922,7 @@ pub const Attention = struct {
 
         var new_cache = cache;
         new_cache.sliding_window = cache.sliding_window.update(kv_gathered, idx, layer_idx);
-        kv = new_cache.sliding_window.get(layer_idx);
+        kv = if (x.dim(.seq) > 1) kv else new_cache.sliding_window.get(layer_idx);
 
         var topk = topk_window2(offset_idx, seqlen, self.window_size);
 
@@ -928,12 +931,12 @@ pub const Attention = struct {
                 var kv_compressed, const new_compressor_state = csa.compressor.forward(x, offset_idx, cache.csa.state, layer_idx);
                 kv_compressed = kv_compressed.rename(.{ .seq = .kv });
 
-                const compressed_offset: u32 = if (x.dim(.seq) > 1) @intCast(kv.dim(.kv)) else self.window_size;
-                const topk_indexed, const new_indexer_cache = csa.indexer.forward(x, qr.rename(.{ .q = .d }), offset_idx, zml.Tensor.scalar(compressed_offset, .u32), cache.csa.indexer, layer_idx);
-
                 const ids_shape = offset_idx.shape().insert(.last, .{ .kv = kv_compressed.dim(.kv) });
                 var compressed_kv_cache_ids = zml.Tensor.iota(ids_shape, .kv).convert(.u32);
                 compressed_kv_cache_ids = compressed_kv_cache_ids.add(offset_idx.broad(ids_shape)).remainderConst(csa.compressor.ratio);
+
+                const compressed_offset: u32 = if (x.dim(.seq) > 1) @intCast(kv.dim(.kv)) else self.window_size;
+                const topk_indexed, const new_indexer_cache = csa.indexer.forward(x, qr.rename(.{ .q = .d }), offset_idx, zml.Tensor.scalar(compressed_offset, .u32), cache.csa.indexer, layer_idx);
 
                 new_cache.csa.state = new_compressor_state;
                 new_cache.csa.indexer = new_indexer_cache;
@@ -1011,10 +1014,10 @@ fn topk_window2(x: zml.Tensor, seqlen: i64, window_size: i64) zml.Tensor {
     }
 
     const x_64 = x.convert(.i64);
-    const pos_mod = x_64.divByConst(window_size);
+    const pos_mod = x_64.remainderConst(window_size);
 
     const ids = zml.Tensor.iota(x_64.shape().insert(.last, .{ .topk = window_size }), .topk).convert(.i64);
-    const matrix_wrap = ids.add(pos_mod.broad(ids.shape())).addConstant(1).divByConst(window_size);
+    const matrix_wrap = ids.add(pos_mod.broad(ids.shape())).addConstant(1).remainderConst(window_size);
 
     const matrix_pad = zml.Tensor.select(ids.cmp(.LE, x_64.broad(ids.shape())), ids, zml.Tensor.scalar(-1, .i64).broad(ids.shape()));
 
@@ -1335,7 +1338,6 @@ const Gate = struct {
         const scores = softplus(self.proj.forward(x.convert(.f32)), 20.0).sqrt();
 
         const indices = switch (self.kind) {
-            // TODO: remove `renameTag`?
             .bias => |bias| scores.add(bias.broad(scores.shape())).topK(-1, self.k, .{}).indices.renameTag(.expert, .eid).convert(.i64),
             .tid2eid => |tid2eid| tid2eid.gather(.{ .tid = input_ids }, .{}),
         };
@@ -1387,7 +1389,7 @@ const FP4Linear = struct {
     scale: zml.Tensor,
     weight: zml.Tensor,
     act_block_size: usize,
-    weight_block_size: usize = 32,
+    weight_block_size: usize,
     tag: zml.Shape.Tag,
 
     pub fn init(store: zml.io.TensorStore.View, tagz: anytype, scale_tagz: anytype, act_block_size: usize, proj_tag: anytype) FP4Linear {
