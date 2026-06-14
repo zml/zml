@@ -211,7 +211,7 @@ pub fn run(
             .{}
         );
 
-        try ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 });
+        try ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 });
     }
 }
 
@@ -373,7 +373,7 @@ const TestContext = struct {
         std.log.info("Layer {s} passed!", .{name});
     }
 
-    fn testLayerLayer(self: *TestContext, name: []const u8, tagz: anytype, layer: anytype, layer_buffers: anytype, cache: model.Cache, opts: zml.testing.CompareOpts) !void {
+    fn testLayerLayer(self: *TestContext, name: []const u8, tagz: anytype, i: u32, layer: anytype, layer_buffers: anytype, cache: model.Cache, opts: zml.testing.CompareOpts) !void {
         std.log.info("Testing layer: {s}", .{name});
 
         const in_key = try std.fmt.allocPrint(self.allocator, "{s}.in.0", .{name});
@@ -414,7 +414,7 @@ const TestContext = struct {
         var offset_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, offset_idx_slice, .replicated);
         defer offset_idx_buffer.deinit();
 
-        const layer_idx_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
+        const layer_idx_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{i}));
         var layer_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, layer_idx_slice, .replicated);
         defer layer_idx_buffer.deinit();
 
