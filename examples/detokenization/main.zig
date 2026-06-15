@@ -70,11 +70,13 @@ pub const Zml_handler = struct {
 pub const Uri_handler = struct {
     llama: []const u8,
     qwen: []const u8,
+    checkpoint: []const u8,
 
     pub fn init() Uri_handler {
         return .{
             .llama = "file://examples//detokenization//models//llama",
             .qwen = "file://examples//detokenization//models//qwen",
+            .checkpoint = "file://examples//detokenization//checkpoints",
         };
     }
 };
@@ -152,22 +154,33 @@ pub const SimilarityMatrix = struct {
     k: usize,
 
     pub fn dist(self: *SimilarityMatrix, i: usize, j: usize) f32 {
-        if (i == j) return 1.0; // TODO: can prob remove this
         const row = @min(i, j);
         const col = @max(i, j);
-        return self.data.constItems(f32)[self.row_offsets[row] + col - row - 1];
+        const index = self.row_offsets[row] + col - row;
+        return switch (self.data.dtype()) {
+            .f16 => @floatCast(self.data.constItems(f16)[index]),
+            .f32 => self.data.constItems(f32)[index],
+            else => unreachable,
+        };
     }
 
     pub fn initOffsets(self: *SimilarityMatrix) void {
         var offset: usize = 0;
         for (0..self.n) |row| {
             self.row_offsets[row] = offset;
-            offset += self.n - row - 1;
+            offset += self.n - row;
         }
     }
 
     pub fn nearestNeighbor(self: *SimilarityMatrix, row: usize, pos: usize) usize {
-        return self.nearest_neighbors.constItems(usize)[row * self.k + pos];
+        const index = row * self.k + pos;
+        return switch (self.nearest_neighbors.dtype()) {
+            .i32 => @intCast(self.nearest_neighbors.constItems(i32)[index]),
+            .u32 => @intCast(self.nearest_neighbors.constItems(u32)[index]),
+            .i64 => @intCast(self.nearest_neighbors.constItems(i64)[index]),
+            .u64 => @intCast(self.nearest_neighbors.constItems(u64)[index]),
+            else => unreachable,
+        };
     }
 
     pub fn deinit(self: *SimilarityMatrix, allocator: std.mem.Allocator) void {
@@ -251,15 +264,14 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer model_handler.deinit(zml_handler.allocator);
     defer model_handler.unloadBuffers();
 
-    std.log.info("aaa", .{});
     try analyzeTopRows(zml_handler, &model_handler);
 
     zml_handler.tic(&zml_handler.timers.similarity_matrix);
-    var similarity_matrix = try computeSimilarityMatrix(zml_handler, &model_handler);
+    var similarity_matrix = try loadSimilarityMatrix(zml_handler, &model_handler, true);
     defer similarity_matrix.deinit(zml_handler.allocator);
     zml_handler.toc(&zml_handler.timers.similarity_matrix);
 
-    //try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix);
+    try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix, true);
 
     std.log.info("Get lm_head", .{});
     const lm_head = try getLmHead(zml_handler, &model_handler);
@@ -280,13 +292,17 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     zml_handler.toc(&zml_handler.timers.junk_rows);
     std.log.info("Found {d} junk rows", .{junk_rows.len});
 
+    std.log.info("Get medoid", .{});
+    const medoid = try getMedoid(zml_handler, &model_handler);
+    std.log.info("Medoid: {d}", .{medoid});
+
     std.log.info("Init graph", .{});
     const graph_params: graph.GraphParams = .{};
-    var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, graph_params);
+    var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, medoid, graph_params);
     defer g.deinit();
 
     zml_handler.tic(&zml_handler.timers.knn_graph);
-    g.setRandomNeighbors();
+    g.setNearestNeighbors();
     zml_handler.toc(&zml_handler.timers.knn_graph);
 
     std.log.info("Exact kNN : nb edges: {d}", .{g.nbEdges()});
@@ -308,6 +324,7 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer zml_handler.allocator.free(inspi_result);
     zml_handler.mem.check(0);
 }
+
 
 pub fn analyzeTopRows(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !void {
     std.log.info("Analyze top lm_head rows", .{});
@@ -401,7 +418,7 @@ pub fn analyzeTopRows(zml_handler: *Zml_handler, model_handler: *model_.Model_ha
     );
 }
 
-fn printTopRowsSection(tokenizer: zml.tokenizer.Tokenizer, title: []const u8, value_label: []const u8, indices: []const u64, values: []const f32, row_norms: []const f32) !void {
+pub fn printTopRowsSection(tokenizer: zml.tokenizer.Tokenizer, title: []const u8, value_label: []const u8, indices: []const u64, values: []const f32, row_norms: []const f32) !void {
     std.debug.assert(indices.len == values.len);
     log.info("{s}", .{title});
     if (std.mem.eql(u8, value_label, "row_norm")) {
@@ -426,7 +443,7 @@ fn printTopRowsSection(tokenizer: zml.tokenizer.Tokenizer, title: []const u8, va
     }
 }
 
-fn decodeToken(tokenizer: zml.tokenizer.Tokenizer, token_id: u32, out: []u8) ![]const u8 {
+pub fn decodeToken(tokenizer: zml.tokenizer.Tokenizer, token_id: u32, out: []u8) ![]const u8 {
     var decoder = try tokenizer.decoder();
     defer decoder.deinit();
 
@@ -435,7 +452,7 @@ fn decodeToken(tokenizer: zml.tokenizer.Tokenizer, token_id: u32, out: []u8) ![]
     return out[0 .. chunk.len + final_chunk.len];
 }
 
-fn escapeTokenText(text: []const u8, out: []u8) []const u8 {
+pub fn escapeTokenText(text: []const u8, out: []u8) []const u8 {
     var len: usize = 0;
     for (text) |c| {
         const replacement = switch (c) {
@@ -458,6 +475,45 @@ fn escapeTokenText(text: []const u8, out: []u8) []const u8 {
     return out[0..len];
 }
 
+
+pub fn loadSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, normalized_rows: bool) !SimilarityMatrix {
+    const allocator = zml_handler.allocator;
+    const suffix = if (normalized_rows) "norm" else "raw";
+    const matrix_path = try std.fmt.allocPrint(allocator, "{s}/qwen_dist_mat_{s}.safetensors", .{ zml_handler.uris.checkpoint, suffix });
+    defer allocator.free(matrix_path);
+    const nearest_path = try std.fmt.allocPrint(allocator, "{s}/qwen_256_nn.safetensors", .{zml_handler.uris.checkpoint});
+    defer allocator.free(nearest_path);
+
+    std.log.info("Load similarity matrix from {s}", .{matrix_path});
+    const data = try loadSafetensorSlice(zml_handler, matrix_path, "data");
+    errdefer data.free(allocator);
+
+    std.log.info("Load nearest neighbors from {s}", .{nearest_path});
+    const nearest_neighbors = try loadSafetensorSlice(zml_handler, nearest_path, "indices");
+    errdefer nearest_neighbors.free(allocator);
+
+    const lm_head_shape = model_handler.model.shape();
+    const n: usize = @intCast(lm_head_shape.dim(.voc));
+    const d: usize = @intCast(lm_head_shape.dim(.d));
+    std.debug.assert(nearest_neighbors.shape.rank() == 2);
+    std.debug.assert(@as(usize, @intCast(nearest_neighbors.shape.dims()[0])) == n);
+    const k: usize = @intCast(nearest_neighbors.shape.dims()[1]);
+
+    const expected_data_len = @divExact(n * (n + 1), 2);
+    std.debug.assert(data.shape.count() == expected_data_len);
+
+    var matrix: SimilarityMatrix = .{
+        .data = data,
+        .nearest_neighbors = nearest_neighbors,
+        .row_offsets = try allocator.alloc(usize, n),
+        .n = n,
+        .d = d,
+        .k = k,
+    };
+    matrix.initOffsets();
+    return matrix;
+}
+
 pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !SimilarityMatrix {
     std.log.info("Compute similarity matrix", .{});
     const allocator = zml_handler.allocator;
@@ -466,8 +522,9 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_
     const n: usize = @intCast(lm_head_shape.dim(.voc));
     const d: usize = @intCast(lm_head_shape.dim(.d));
     std.log.info("lm_head shape: {d} x {d}", .{ n, d });
-    const triangular_len: usize = @divExact(n * (n - 1), 2);
+    const triangular_len: usize = @divExact(n * (n + 1), 2);
     const batch_size: usize = @intCast(model_.Model.row_batch_size);
+    const batch_count = std.math.divCeil(usize, n, batch_size) catch unreachable;
     const k: usize = @intCast(model_.Model.row_k_neighbors);
 
     const similarity_matrix_slice: zml.Slice = try .alloc(allocator, .init(.{ .data = triangular_len }, .f32));
@@ -485,7 +542,7 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_
     var write_offset: usize = 0;
     var row_start: usize = 0;
     while (row_start < n) : (row_start += batch_size) {
-        std.log.info("batch {d}/{d}", .{ @divExact(row_start, batch_size) + 1, @divFloor(n, batch_size) + 1 });
+        std.log.info("batch {d}/{d}", .{ @divExact(row_start, batch_size) + 1, batch_count });
         const rows_to_copy = @min(batch_size, n - row_start);
         const kernel_row_start = if (row_start + batch_size <= n) row_start else n - batch_size;
 
@@ -505,13 +562,14 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_
 
         const batch_items = similarity_batch_slice.items(f32);
         const output_items = similarity_matrix_slice.items(f32);
-        const nearest_batch_items = nearest_batch_slice.items(usize);
-        const nearest_items = nearest_neighbors_slice.items(usize);
+        const nearest_batch_items = nearest_batch_slice.items(u64);
+        const nearest_items = nearest_neighbors_slice.items(u64);
         for (0..rows_to_copy) |local_row| {
             const global_row = row_start + local_row;
             const kernel_local_row = global_row - kernel_row_start;
-            const len = n - global_row - 1;
-            const src_start = kernel_local_row * n + global_row + 1;
+            // Copy the diagonal-included upper triangular row: cols global_row..n.
+            const len = n - global_row;
+            const src_start = kernel_local_row * n + global_row;
             @memcpy(output_items[write_offset..][0..len], batch_items[src_start..][0..len]);
             write_offset += len;
             @memcpy(nearest_items[global_row * k ..][0..k], nearest_batch_items[kernel_local_row * k ..][0..k]);
@@ -530,6 +588,98 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_
     matrix.initOffsets();
     return matrix;
 }
+
+pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, similarity_matrix: *SimilarityMatrix, normalized_rows: bool) !void {
+    std.log.info("Test similarity matrix", .{});
+
+    const lm_head = try getLmHead(zml_handler, model_handler);
+    defer lm_head.free(zml_handler.allocator);
+
+    const n: usize = @intCast(lm_head.shape.dim(.voc));
+    const d: usize = @intCast(lm_head.shape.dim(.d));
+    std.debug.assert(n == similarity_matrix.n);
+    std.debug.assert(d == similarity_matrix.d);
+
+    var prng = std.Random.DefaultPrng.init(0);
+    const random = prng.random();
+    const lm_head_items = lm_head.items(f32);
+
+    var max_abs_diff: f32 = 0;
+    var max_rel_diff: f32 = 0;
+    for (0..1000) |_| {
+        const i = random.uintLessThan(usize, n);
+        const j = random.uintLessThan(usize, n);
+
+        const expected = lmHeadDot(lm_head_items, d, i, j, normalized_rows);
+        const actual = similarity_matrix.dist(i, j);
+        const abs_diff = @abs(expected - actual);
+        const rel_diff = abs_diff / @max(@abs(expected), 1e-6);
+        max_abs_diff = @max(max_abs_diff, abs_diff);
+        max_rel_diff = @max(max_rel_diff, rel_diff);
+    }
+
+    std.log.info("Similarity matrix values test passed: 1000 random pairs, max_abs_diff={d}, max_rel_diff={d}", .{ max_abs_diff, max_rel_diff });
+
+    const candidates = try zml_handler.allocator.alloc(MatrixCandidate, n - 1);
+    defer zml_handler.allocator.free(candidates);
+    var knn_mismatches: usize = 0;
+    for (0..100) |_| {
+        const row = random.uintLessThan(usize, n);
+        var nb_candidates: usize = 0;
+        for (0..n) |col| {
+            if (col == row) continue;
+            candidates[nb_candidates] = .{ .node = col, .similarity = similarity_matrix.dist(row, col) };
+            nb_candidates += 1;
+        }
+        std.mem.sort(MatrixCandidate, candidates[0..nb_candidates], {}, MatrixCandidate.beforeThan);
+        for (0..similarity_matrix.k) |pos| {
+            const expected = candidates[pos].node;
+            const actual = similarity_matrix.nearestNeighbor(row, pos);
+            if (actual != expected) {
+                knn_mismatches += 1;
+                if (knn_mismatches <= 10) {
+                    std.log.err("kNN mismatch row={d} pos={d} expected={d} actual={d} expected_sim={d} actual_sim={d}", .{
+                        row,
+                        pos,
+                        expected,
+                        actual,
+                        candidates[pos].similarity,
+                        similarity_matrix.dist(row, actual),
+                    });
+                }
+            }
+        }
+    }
+    if (knn_mismatches != 0) return error.KnnMismatch;
+    std.log.info("Similarity matrix kNN test passed: 100 random rows, k={d}", .{similarity_matrix.k});
+}
+
+const MatrixCandidate = struct {
+    node: usize,
+    similarity: f32,
+
+    fn beforeThan(_: void, lhs: MatrixCandidate, rhs: MatrixCandidate) bool {
+        return lhs.similarity > rhs.similarity or (lhs.similarity == rhs.similarity and lhs.node < rhs.node);
+    }
+};
+
+fn lmHeadDot(lm_head_items: []const f32, d: usize, i: usize, j: usize, normalized_rows: bool) f32 {
+    const u = lm_head_items[i * d ..][0..d];
+    const v = lm_head_items[j * d ..][0..d];
+    var dot: f32 = 0;
+    var u_norm2: f32 = 0;
+    var v_norm2: f32 = 0;
+    for (u, v) |u_value, v_value| {
+        dot += u_value * v_value;
+        u_norm2 += u_value * u_value;
+        v_norm2 += v_value * v_value;
+    }
+    if (normalized_rows) {
+        dot /= (@sqrt(u_norm2) * @sqrt(v_norm2));
+    }
+    return dot;
+}
+
 
 pub fn getLmHead(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !zml.Slice {
     model_handler.exes.get_lm_head_args.set(.{model_handler.model_buffers});
@@ -555,6 +705,17 @@ pub fn getLmHeadRowNorms(zml_handler: *Zml_handler, model_handler: *model_.Model
     return lm_head_row_norms_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
 }
 
+pub fn getMedoid(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !usize {
+    model_handler.exes.get_medoid_args.set(.{model_handler.model_buffers});
+    model_handler.exes.get_medoid_exe.call(model_handler.exes.get_medoid_args, &model_handler.exes.get_medoid_results);
+    var medoid_buffer = model_handler.exes.get_medoid_results.get(zml.Buffer);
+    defer medoid_buffer.deinit();
+
+    const medoid_slice = try medoid_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer medoid_slice.free(zml_handler.allocator);
+    return @intCast(medoid_slice.constItems(u64)[0]);
+}
+
 pub fn getJunkRows(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) ![]usize {
     model_handler.exes.find_junk_rows_args.set(.{model_handler.model_buffers});
     model_handler.exes.find_junk_rows_exe.call(model_handler.exes.find_junk_rows_args, &model_handler.exes.find_junk_rows_results);
@@ -574,48 +735,21 @@ pub fn getJunkRows(zml_handler: *Zml_handler, model_handler: *model_.Model_handl
     return junk_rows.toOwnedSlice(zml_handler.allocator);
 }
 
-pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, similarity_matrix: *SimilarityMatrix) !void {
-    std.log.info("Test similarity matrix", .{});
 
-    const lm_head = try getLmHead(zml_handler, model_handler);
-    defer lm_head.free(zml_handler.allocator);
+pub fn loadSafetensorSlice(zml_handler: *Zml_handler, path: []const u8, tensor_name: []const u8) !zml.Slice {
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, path);
+    defer registry.deinit();
 
-    const n: usize = @intCast(lm_head.shape.dim(.voc));
-    const d: usize = @intCast(lm_head.shape.dim(.d));
-    std.debug.assert(n == similarity_matrix.n);
-    std.debug.assert(d == similarity_matrix.d);
+    const tensor = registry.tensors.get(tensor_name) orelse return error.TensorNotFound;
+    const slice = try zml.Slice.alloc(zml_handler.allocator, tensor.shape);
+    errdefer slice.free(zml_handler.allocator);
 
-    var prng = std.Random.DefaultPrng.init(0);
-    const random = prng.random();
-    const lm_head_items = lm_head.items(f32);
-
-    var max_abs_diff: f32 = 0;
-    for (0..1000) |_| {
-        const i = random.uintLessThan(usize, n);
-        const j = random.uintLessThan(usize, n);
-
-        const u = lm_head_items[i * d ..][0..d];
-        const v = lm_head_items[j * d ..][0..d];
-
-        var dot: f32 = 0;
-        var u_norm2: f32 = 0;
-        var v_norm2: f32 = 0;
-        for (u, v) |u_value, v_value| {
-            dot += u_value * v_value;
-            u_norm2 += u_value * u_value;
-            v_norm2 += v_value * v_value;
-        }
-
-        const expected = dot / (@sqrt(u_norm2) * @sqrt(v_norm2));
-        const actual = similarity_matrix.dist(i, j);
-        const abs_diff = @abs(expected - actual);
-        max_abs_diff = @max(max_abs_diff, abs_diff);
-        std.log.err("rows=({d},{d}) expected={d} actual={d} diff={d}", .{ i, j, expected, actual, abs_diff });
-    }
-
-    std.log.info("Similarity matrix test passed: 1000 random pairs, max_abs_diff={d}", .{max_abs_diff});
+    var io_buffer: [8 * 1024]u8 = undefined;
+    var reader = try registry.reader(zml_handler.io, tensor_name, &io_buffer);
+    defer reader.deinit();
+    _ = try reader.interface.readSliceAll(slice.data());
+    return slice;
 }
-
 
 pub fn getSlice(zml_handler: *Zml_handler, tensor_name: []const u8, dtype: anytype) !zml.Slice {
     std.log.info("Getting slice {s}", .{tensor_name});
