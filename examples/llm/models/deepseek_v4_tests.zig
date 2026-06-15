@@ -397,14 +397,19 @@ const TestContext = struct {
         defer out_buffer_expected.deinit();
 
         const offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
+        const actual_seqlen: zml.Tensor = .init(.{}, .u32);
         const layer_idx: zml.Tensor = .init(.{}, .u32);
 
-        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, in_tensor_1, offset, layer_idx, cache, self.attention_metadata, self.attention_parameters, self.moe_metadata, self.moe_parameters }, .{ .shardings = &self.sharding.all() });
+        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, in_tensor_1, offset, actual_seqlen, layer_idx, cache, self.attention_metadata, self.attention_parameters, self.moe_metadata, self.moe_parameters }, .{ .shardings = &self.sharding.all() });
         defer exe.deinit();
 
         const offset_idx_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
         var offset_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, offset_idx_slice, .replicated);
         defer offset_idx_buffer.deinit();
+
+        const actual_seqlen_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(in_tensor.dim(.seq))}));
+        var actual_seqlen_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seqlen_slice, .replicated);
+        defer actual_seqlen_buffer.deinit();
 
         const layer_idx_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{i}));
         var layer_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, layer_idx_slice, .replicated);
@@ -421,7 +426,7 @@ const TestContext = struct {
 
         var args = try exe.args(self.allocator);
         defer args.deinit(self.allocator);
-        args.set(.{ layer_buffers, in_buffer, in_buffer_1, offset_idx_buffer, layer_idx_buffer, cache_buffer, attention_metadata_buffers, moe_metadata_buffers });
+        args.set(.{ layer_buffers, in_buffer, in_buffer_1, offset_idx_buffer, actual_seqlen_buffer, layer_idx_buffer, cache_buffer, attention_metadata_buffers, moe_metadata_buffers });
 
         var res = try exe.results(self.allocator);
         defer res.deinit(self.allocator);
@@ -455,11 +460,13 @@ const TestContext = struct {
 
         const layer_idx: zml.Tensor = .init(.{ .batch = 1 }, .u32);
         const offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
+        const actual_seqlen: zml.Tensor = .init(.{}, .u32);
 
         const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{
             layer,
             in_tensor,
             offset,
+            actual_seqlen,
             state,
             layer_idx,
         }, .{ .shardings = &.{self.sharding} });
@@ -475,6 +482,10 @@ const TestContext = struct {
         var offset_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, offset_idx_slice, .replicated);
         defer offset_idx_buffer.deinit();
 
+        const actual_seqlen_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(in_tensor.dim(.seq))}));
+        var actual_seqlen_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seqlen_slice, .replicated);
+        defer actual_seqlen_buffer.deinit();
+
         const layer_idx_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
         var layer_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, layer_idx_slice, .replicated);
         defer layer_idx_buffer.deinit();
@@ -485,6 +496,7 @@ const TestContext = struct {
             layer_buffers,
             in_buffer,
             offset_idx_buffer,
+            actual_seqlen_buffer,
             state_buffer,
             layer_idx_buffer,
         });
@@ -516,12 +528,14 @@ const TestContext = struct {
         defer out_buffer_expected.deinit();
 
         const token_idx_offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
+        const actual_seqlen: zml.Tensor = .init(.{}, .u32);
         const layer_idx: zml.Tensor = .init(.{}, .u32);
 
         const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{
             layer,
             in_tensor,
             token_idx_offset,
+            actual_seqlen,
             layer_idx,
             cache,
             self.*.attention_metadata,
@@ -532,6 +546,10 @@ const TestContext = struct {
         const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
         var token_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, .replicated);
         defer token_idx_buffer.deinit();
+
+        const actual_seqlen_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(in_tensor.dim(.seq))}));
+        var actual_seqlen_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seqlen_slice, .replicated);
+        defer actual_seqlen_buffer.deinit();
 
         const layer_idx_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
         var layer_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, layer_idx_slice, .replicated);
@@ -549,6 +567,7 @@ const TestContext = struct {
             layer_buffers,
             in_buffer,
             token_idx_buffer,
+            actual_seqlen_buffer,
             layer_idx_buffer,
             cache_buffer,
             attention_metadata_buffers,
@@ -588,6 +607,7 @@ const TestContext = struct {
 
         const offset: zml.Tensor = .init(.{}, .u32);
         const pos_offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
+        const actual_seqlen: zml.Tensor = .init(.{}, .u32);
         const layer_idx: zml.Tensor = .init(.{}, .u32);
 
         const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{
@@ -595,6 +615,7 @@ const TestContext = struct {
             in_tensor,
             in_1_tensor,
             pos_offset,
+            actual_seqlen,
             offset,
             cache,
             layer_idx,
@@ -606,6 +627,10 @@ const TestContext = struct {
         const pos_idx_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
         var pos_idx_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, pos_idx_slice, .replicated);
         defer pos_idx_buffer.deinit();
+
+        const actual_seqlen_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(in_tensor.dim(.seq))}));
+        var actual_seqlen_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seqlen_slice, .replicated);
+        defer actual_seqlen_buffer.deinit();
 
         const offset_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(in_tensor.dim(.seq))}));
         var offset_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, offset_slice, .replicated);
@@ -625,6 +650,7 @@ const TestContext = struct {
             in_buffer,
             in_1_buffer,
             pos_idx_buffer,
+            actual_seqlen_buffer,
             offset_buffer,
             cache_buffer,
             layer_idx_buffer,
