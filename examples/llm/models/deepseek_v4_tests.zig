@@ -159,7 +159,10 @@ pub fn run(
     const arena_allocator = arena.allocator();
 
     const cache: model.Cache = .init(mdl, config, 1, 2048);
+    // try ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{3}), .{ .batch, .seq, .hc, .d }, @intCast(3), mdl.layers[3], model_buffers.layers[3], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 });
 
+    // const j = 4;
+    // try ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{j}), .{ .batch, .seq, .hc, .d }, @intCast(j), mdl.layers[j], model_buffers.layers[j], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 });
     for (0..n) |i| {
         // try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.attn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].attn_norm, model_buffers.layers[i].attn_norm, .{});
         //
@@ -211,7 +214,7 @@ pub fn run(
         //     .{}
         // );
 
-        try ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 });
+        ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 }) catch log.err("layer {} did not passed", .{i});
     }
 }
 
@@ -386,7 +389,7 @@ const TestContext = struct {
         defer self.allocator.free(in_key_1);
         var in_buffer_1 = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key_1, self.sharding.model);
         defer in_buffer_1.deinit();
-        const in_tensor_1 = zml.Tensor.fromShape(in_buffer_1.shape()).withTags(.{.batch, .seq});
+        const in_tensor_1 = zml.Tensor.fromShape(in_buffer_1.shape()).withTags(.{ .batch, .seq });
 
         const out_key = try std.fmt.allocPrint(self.allocator, "{s}.out.0", .{name});
         defer self.allocator.free(out_key);
@@ -396,18 +399,7 @@ const TestContext = struct {
         const offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
         const layer_idx: zml.Tensor = .init(.{}, .u32);
 
-        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{
-            layer,
-            in_tensor,
-            in_tensor_1,
-            offset,
-            layer_idx,
-            cache,
-            self.attention_metadata,
-            self.attention_parameters,
-            self.moe_metadata,
-            self.moe_parameters
-        }, .{ .shardings = &self.sharding.all() });
+        const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, in_tensor, in_tensor_1, offset, layer_idx, cache, self.attention_metadata, self.attention_parameters, self.moe_metadata, self.moe_parameters }, .{ .shardings = &self.sharding.all() });
         defer exe.deinit();
 
         const offset_idx_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
