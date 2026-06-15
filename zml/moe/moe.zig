@@ -162,7 +162,7 @@ pub fn forwardMoe(
 
                 const partial_output = zml.ops.manualComputation(
                     .{ input, topk_ids, topk_weights, weights_gate_up, weights_down },
-                    input.shape().withPartitioning(.{ .b = .replicated, .s = .replicated, .d = .replicated }),
+                    input.shape(),
                     .{
                         .activation = parameters.triton.activation,
                         .global_num_experts = global_num_experts,
@@ -240,7 +240,7 @@ pub fn forwardMoe(
                 const global_num_experts = weights_down.dim(.expert);
                 const partial_output = zml.ops.manualComputation(
                     .{ input, topk_ids, topk_weights, weights_gate_up, weights_down },
-                    input.shape().withPartitioning(.{ .b = .replicated, .s = .replicated, .d = .replicated }),
+                    input.shape(),
                     .{
                         .activation = parameters.mosaic_tpu.activation,
                         .global_num_experts = global_num_experts,
