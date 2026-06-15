@@ -209,13 +209,17 @@ fn updateBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
 
 fn updateCacheBuffers(dst: *zml.Bufferized(model.Cache), src: *zml.Bufferized(model.Cache)) void {
     updateBuffer(&dst.sliding_window.kv, &src.sliding_window.kv);
+
     updateBuffer(&dst.hca.state.kv_state, &src.hca.state.kv_state);
     updateBuffer(&dst.hca.state.score_state, &src.hca.state.score_state);
+    updateBuffer(&dst.hca.compressed_kv.kv, &src.hca.compressed_kv.kv);
+
     updateBuffer(&dst.csa.state.kv_state, &src.csa.state.kv_state);
     updateBuffer(&dst.csa.state.score_state, &src.csa.state.score_state);
     updateBuffer(&dst.csa.indexer.state.kv_state, &src.csa.indexer.state.kv_state);
     updateBuffer(&dst.csa.indexer.state.score_state, &src.csa.indexer.state.score_state);
     updateBuffer(&dst.csa.indexer.kv.kv, &src.csa.indexer.kv.kv);
+    updateBuffer(&dst.csa.compressed_kv.kv, &src.csa.compressed_kv.kv);
 }
 
 fn sameBufferHandle(lhs: zml.Buffer, rhs: zml.Buffer) bool {
