@@ -218,9 +218,9 @@ pub const Compressor = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Compressor)) void {
-        RmsNorm.unloadBuffers(self.norm);
-        LinearF32.unloadBuffers(self.wgate);
-        LinearF32.unloadBuffers(self.wkv);
+        RmsNorm.unloadBuffers(&self.norm);
+        LinearF32.unloadBuffers(&self.wgate);
+        LinearF32.unloadBuffers(&self.wkv);
         self.ape.deinit();
     }
 
@@ -895,14 +895,10 @@ pub const Attention = struct {
 
         switch (self.compression) {
             .csa => |*csa| {
-                _ = csa; // autofix
-                // Compressor.unloadBuffers(csa.*.compressor);
-                // Indexer.unloadBuffers(csa.*.indexer);
+                Compressor.unloadBuffers(&csa.*.compressor);
+                Indexer.unloadBuffers(&csa.*.indexer);
             },
-            .hca => |*compressor| {
-                _ = compressor; // autofix
-                // Compressor.unloadBuffers(compressor);
-            },
+            .hca => |*compressor| Compressor.unloadBuffers(compressor),
             else => {},
         }
     }
@@ -1051,44 +1047,8 @@ fn topk_window2(x: zml.Tensor, seqlen: i64, window_size: i64) zml.Tensor {
 
     const selected = x_64.insertAxes(.last, .{.topk}).broad(ids.shape()).cmp(.GE, zml.Tensor.scalar(window_size - 1, .i64).broad(ids.shape()));
     var m = zml.Tensor.select(selected, matrix_wrap, matrix_pad);
-    m = m.insertAxes(.batch, .{.seq}).withTags(.{ .batch, .seq, .topk });
+    m = m.insertAxes(.topk, .{.seq});
     return m;
-}
-
-fn topk_window(window_size: i64, batch_size: i64, seqlen: i64, start_pos: i64) zml.Tensor {
-    const matrix = blk: {
-        if (start_pos >= window_size - 1) {
-            const cutoff = @mod(start_pos, window_size);
-            break :blk zml.Tensor.concatenate(&.{
-                zml.Tensor.arange(.{ .start = cutoff + 1, .end = window_size }, .i64),
-                zml.Tensor.arange(.{ .end = cutoff + 1 }, .i64),
-            }, 0).insertAxes(0, .{.seq});
-        } else if (start_pos > 0) {
-            const base = zml.Tensor.arange(.{ .end = start_pos + 1 }, .i64);
-            const pad = zml.Tensor.scalar(-1, .i64).repeat(&.{@intCast(window_size - start_pos - 1)});
-            break :blk zml.Tensor.concatenate(&.{ base, pad }, 0).insertAxes(0, .{.seq});
-        } else {
-            const base = zml.Tensor.arange(.{ .end = seqlen }, .i64).reshape(.{ seqlen, 1 });
-            const v = base.subConstant(window_size).addConstant(1);
-
-            const base_clamped = zml.Tensor.select(
-                v.cmp(.LT, zml.Tensor.zeroes(v.shape())),
-                zml.Tensor.zeroes(v.shape()),
-                v,
-            );
-
-            const cols = @min(seqlen, window_size);
-            const row_indices = zml.Tensor.arange(.{ .end = cols }, .i64).reshape(.{ 1, cols });
-            const matrix_shape: zml.Shape = .init(.{ seqlen, cols }, .i64);
-            var matrix = base_clamped.broad(matrix_shape).add(row_indices.broad(matrix_shape));
-
-            matrix = zml.Tensor.select(matrix.cmp(.GT, base.broad(matrix_shape)), zml.Tensor.scalar(-1, .i64).broad(matrix_shape), matrix);
-
-            break :blk matrix;
-        }
-    };
-
-    return matrix.insertAxes(0, .{.batch}).reshape(.{ .batch = batch_size, .seq = matrix.dim(0), .topk = matrix.dim(1) });
 }
 
 fn compressed_topk(ratio: u32, batch_size: u32, seqlen: u32, start_pos: zml.Tensor, offset: u32, max_compressed: u32) zml.Tensor {
@@ -1162,9 +1122,7 @@ const MoE = struct {
     block_size: u32,
     activation_threshold: f32,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, i: usize) !MoE {
-        _ = allocator; // autofix
-
+    pub fn init(store: zml.io.TensorStore.View, config: Config, i: usize) !MoE {
         const experts_store = store.withPrefix("experts");
         _ = experts_store; // autofix
 
@@ -1180,13 +1138,7 @@ const MoE = struct {
         };
     }
 
-    pub fn deinit(self: MoE, allocator: std.mem.Allocator) void {
-        _ = self; // autofix
-        _ = allocator; // autofix
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(MoE), allocator: std.mem.Allocator) void {
-        _ = allocator; // autofix
+    pub fn unloadBuffers(self: *zml.Bufferized(MoE)) void {
         Gate.unloadBuffers(&self.router);
         // self.gate_up.deinit();
         // self.gate_up_scale.deinit();
@@ -1418,7 +1370,7 @@ pub const Layer = struct {
     hc_mult: u32,
     hc_sinkhorn_iters: u32,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, layer_idx: usize) !Layer {
+    pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize) !Layer {
         stdx.debug.assert(layer_idx < config.compress_ratios.len, "expected layer indices ({}) to be lower than compress ratios ({})", .{ layer_idx, config.compress_ratios.len });
 
         const compression_ratio = config.compress_ratios[layer_idx];
@@ -1447,7 +1399,7 @@ pub const Layer = struct {
             .attn_norm = .init(store.createTensor("attn_norm.weight", .{.d}, .replicated), config.rms_norm_eps, .d),
             .ffn_norm = .init(store.createTensor("ffn_norm.weight", .{.d}, .replicated), config.rms_norm_eps, .d),
             .attn = .init(store.withPrefix("attn"), config, kind, rope_opts),
-            .ffn = try .init(allocator, store.withPrefix("ffn"), config, layer_idx),
+            .ffn = try .init(store.withPrefix("ffn"), config, layer_idx),
             .norm_eps = config.rms_norm_eps,
             .hc_eps = config.hc_eps,
             .hc_mult = config.hc_mult,
@@ -1465,7 +1417,7 @@ pub const Layer = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Layer), allocator: std.mem.Allocator) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(Layer)) void {
         self.attn_norm.weight.deinit();
         self.ffn_norm.weight.deinit();
         self.hc_attn.base.deinit();
@@ -1475,7 +1427,7 @@ pub const Layer = struct {
         self.hc_ffn.func.weight.deinit();
         self.hc_ffn.scale.deinit();
         Attention.unloadBuffers(&self.attn);
-        MoE.unloadBuffers(&self.ffn, allocator);
+        MoE.unloadBuffers(&self.ffn);
     }
 
     // TODO: maybe implement mHC-lite: <https://arxiv.org/html/2601.05732v1>?
@@ -1661,7 +1613,7 @@ pub const Model = struct {
 
         for (layers, 0..) |*layer, i| {
             const layer_store = store.withPrefix("layers").withLayer(i);
-            layer.* = try .init(allocator, layer_store, config, i);
+            layer.* = try .init(layer_store, config, i);
         }
 
         return .{
@@ -1672,9 +1624,6 @@ pub const Model = struct {
     }
 
     pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
-        for (self.layers) |*layer| {
-            layer.*.ffn.deinit(allocator);
-        }
         allocator.free(self.layers);
     }
 
@@ -1716,7 +1665,7 @@ pub const Model = struct {
         TokenEmbedding.unloadBuffers(&self.embeds);
 
         for (self.layers) |*layer| {
-            Layer.unloadBuffers(layer, allocator);
+            Layer.unloadBuffers(layer);
         }
         allocator.free(self.layers);
 
