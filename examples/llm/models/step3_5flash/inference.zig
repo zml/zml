@@ -24,7 +24,7 @@ pub const CompilationParameters = struct {
         shardings: common.Shardings,
     ) CompilationParameters {
         const dtype = mdl.text_model.embed_tokens.weight.dtype();
-        const num_layers: i64 = @intCast(config.numMainLayers());
+        const num_layers: i64 = @intCast(mdl.text_model.layers.len);
         const num_kv_heads: i64 = @intCast(config.num_attention_groups);
         const head_dim: i64 = @intCast(config.head_dim);
         const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
