@@ -27,16 +27,12 @@ pub fn tokenizePrompt(zml_handler: *Zml_handler, tokenizer: Tokenizer) ![]u32 {
     const im_end = tokenizer.tokenId("<|im_end|>") orelse return error.NoSuchToken;
     const newline = tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
 
-    const system_prompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.";
     const user_prompt = "Write a python script that computes the n-th prime number";
 
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 32);
     errdefer tokens.deinit(allocator);
 
     try tokens.append(allocator, im_start);
-    try appendEncoded(allocator, &encoder, &tokens, "system\n");
-    try appendEncoded(allocator, &encoder, &tokens, system_prompt);
-    try tokens.appendSlice(allocator, &.{ im_end, newline, im_start });
     try appendEncoded(allocator, &encoder, &tokens, "user\n");
     try appendEncoded(allocator, &encoder, &tokens, user_prompt);
     try tokens.appendSlice(allocator, &.{ im_end, newline, im_start });

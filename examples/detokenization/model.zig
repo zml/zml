@@ -107,6 +107,22 @@ pub const Model_handler = struct {
         const get_lm_head_row_norms_results = try get_lm_head_row_norms_exe.results(zml_handler.allocator);
         errdefer get_lm_head_row_norms_results.deinit(zml_handler.allocator);
 
+        const get_medoid_exe = try zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .getMedoid,
+            .{},
+            opts,
+        );
+        errdefer get_medoid_exe.deinit();
+
+        const get_medoid_args = try get_medoid_exe.args(zml_handler.allocator);
+        errdefer get_medoid_args.deinit(zml_handler.allocator);
+
+        const get_medoid_results = try get_medoid_exe.results(zml_handler.allocator);
+        errdefer get_medoid_results.deinit(zml_handler.allocator);
+
         const score_exe = try zml_handler.platform.compile(
             zml_handler.allocator,
             zml_handler.io,
@@ -167,6 +183,9 @@ pub const Model_handler = struct {
             .get_lm_head_row_norms_exe = get_lm_head_row_norms_exe,
             .get_lm_head_row_norms_args = get_lm_head_row_norms_args,
             .get_lm_head_row_norms_results = get_lm_head_row_norms_results,
+            .get_medoid_exe = get_medoid_exe,
+            .get_medoid_args = get_medoid_args,
+            .get_medoid_results = get_medoid_results,
             .score_exe = score_exe,
             .score_args = score_args,
             .score_results = score_results,
@@ -201,6 +220,9 @@ pub const ModelExes = struct {
     get_lm_head_row_norms_exe: zml.Exe,
     get_lm_head_row_norms_args: zml.Exe.Arguments,
     get_lm_head_row_norms_results: zml.Exe.Results,
+    get_medoid_exe: zml.Exe,
+    get_medoid_args: zml.Exe.Arguments,
+    get_medoid_results: zml.Exe.Results,
     score_exe: zml.Exe,
     score_args: zml.Exe.Arguments,
     score_results: zml.Exe.Results,
@@ -224,6 +246,9 @@ pub const ModelExes = struct {
         self.get_lm_head_row_norms_exe.deinit();
         self.get_lm_head_row_norms_args.deinit(allocator);
         self.get_lm_head_row_norms_results.deinit(allocator);
+        self.get_medoid_exe.deinit();
+        self.get_medoid_args.deinit(allocator);
+        self.get_medoid_results.deinit(allocator);
         self.score_exe.deinit();
         self.score_args.deinit(allocator);
         self.score_results.deinit(allocator);
@@ -306,6 +331,27 @@ pub const Model = struct {
     pub fn get_lm_head_row_norms(self: Model) zml.Tensor {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
         return lm_head.mul(lm_head).sum(.d).squeeze(.d).sqrt();
+    }
+
+    pub fn getMedoid(self: Model) zml.Tensor {
+        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
+        const normalized_lm_head = normalizeRows(lm_head);
+
+        const row_norm2 = lm_head.mul(lm_head).sum(.d).squeeze(.d);
+        const smallest_norm_rows = row_norm2.topK(.{ .junk = .voc }, 100, .{ .descending = false });
+        const rows = lm_head.gather(.{ .voc = smallest_norm_rows.indices }, .{});
+        const junk_direction = normalizeVector(rows.mean(.junk).squeeze(.junk));
+        const junk_similarity = normalized_lm_head.dot(junk_direction, .d);
+        const is_junk = junk_similarity.cmp(.GT, zml.Tensor.scalar(0.75, .f32));
+
+        const not_junk = is_junk.select(zml.Tensor.scalar(0.0, .f32), zml.Tensor.scalar(1.0, .f32));
+        const row_sum = normalized_lm_head.mul(not_junk.broad(normalized_lm_head.shape())).sum(.voc).squeeze(.voc);
+        const row_count = not_junk.sum(.voc).squeeze(.voc);
+        const average = normalizeVector(row_sum.div(row_count));
+        const similarities = normalized_lm_head.dot(average, .d);
+        const minus_inf = zml.Tensor.scalar(-std.math.inf(f32), .f32).broad(similarities.shape());
+        const masked_similarities = is_junk.select(minus_inf, similarities);
+        return masked_similarities.argMax(.voc).indices.squeeze(.voc).convert(.u64);
     }
 
     pub fn scoreTokens(self: Model, embedding: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {

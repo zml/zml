@@ -63,7 +63,7 @@ pub const Graph = struct {
     // if we run the pruning again
     are_neighbors_pruned: []bool,
 
-    pub fn init(zml_handler: *main.Zml_handler, lm_head: zml.Slice, lm_head_normalized: zml.Slice, matrix: *main.SimilarityMatrix, lm_head_row_norms: zml.Slice, junk_rows: []const usize, params: GraphParams) !Graph {
+    pub fn init(zml_handler: *main.Zml_handler, lm_head: zml.Slice, lm_head_normalized: zml.Slice, matrix: *main.SimilarityMatrix, lm_head_row_norms: zml.Slice, junk_rows: []const usize, medoid: usize, params: GraphParams) !Graph {
         std.debug.assert(matrix.n > 0);
         std.debug.assert(params.k_max > 0);
         std.debug.assert(params.L > 0);
@@ -82,7 +82,8 @@ pub const Graph = struct {
         @memset(is_junk, false);
         for (junk_rows) |row| is_junk[row] = true;
 
-        const medoid = 220;//try getMedoid(allocator, lm_head_normalized, matrix.n, matrix.d, is_junk);
+        std.debug.assert(medoid < matrix.n);
+        std.debug.assert(!is_junk[medoid]);
 
         const neighbors = try allocator.alloc(usize, matrix.n * params.k_max);
         errdefer allocator.free(neighbors);
@@ -139,57 +140,9 @@ pub const Graph = struct {
         self.allocator.free(self.are_neighbors_pruned);
     }
 
-    pub fn getMedoid(allocator: std.mem.Allocator, lm_head_normalized: zml.Slice, n: usize, dim: usize, is_junk: []const bool) !usize {
-        const rows = lm_head_normalized.constItems(f32);
-
-        // compute normalized average using f64 for accurate accumulation
-        const average = try allocator.alloc(f64, dim);
-        defer allocator.free(average);
-        @memset(average, 0.0);
-        var nb_rows: usize = 0;
-        for (0..n) |i| {
-            if (is_junk[i]) continue;
-            nb_rows += 1;
-            const row_i = rows[i * dim ..][0..dim];
-            for (0..dim) |j| {
-                average[j] += @floatCast(row_i[j]);
-            }
-        }
-        std.debug.assert(nb_rows > 0);
-        const inv_n = 1.0 / @as(f64, @floatFromInt(nb_rows));
-        var norm2: f64 = 0.0;
-        for (0..dim) |i| {
-            average[i] *= inv_n;
-            norm2 += average[i] * average[i];
-        }
-        const inv_norm = 1.0 / @sqrt(norm2);
-        const average_f32 = try allocator.alloc(f32, dim);
-        defer allocator.free(average_f32);
-        for (0..dim) |i| {
-            average_f32[i] = @floatCast(average[i] * inv_norm);
-        }
-
-        // medoid is the row that is most similar to the average
-        var best_row: usize = 0;
-        var best_similarity: f32 = -std.math.inf(f32);
-        for (0..n) |i| {
-            if (is_junk[i]) continue;
-            const row_i = rows[i * dim ..][0..dim];
-            var row_i_similarity: f32 = 0.0;
-            for (0..dim) |j| {
-                row_i_similarity += row_i[j] * average_f32[j];
-            }
-            if (row_i_similarity > best_similarity) {
-                best_similarity = row_i_similarity;
-                best_row = i;
-            }
-        }
-        return best_row;
-    }
-
     // ------------------- Search functions ------------------ //
 
-    pub fn greedySearchNode(self: *Graph, query: usize) void {        
+    pub fn greedySearchNode(self: *Graph, query: usize) void {
         self.zml_handler.tic(&self.zml_handler.timers.greedy_search);
         std.debug.assert(!self.is_junk[query]);
         // initialize search at entry point
@@ -387,7 +340,8 @@ pub const Graph = struct {
         std.debug.assert(self.nb_visited > 0);
         std.debug.assert(self.L > 0);
         // TODO: if we split pool management into visited and active pool, we can simplify
-        // TODO: if we split the active pool into expanded and unexpanded, we can improve
+        // TODO: if we split the active pool into expanded and unexpanded, we can improve:
+        // popCandidate becomes O(1) as it simply read first position in unexpanded pool
 
         self.is_visited[node] = true;
         // this is the lowest score of the active pool
