@@ -960,7 +960,7 @@ pub const Attention = struct {
 
                 new_cache.csa.state = new_compressor_state;
                 new_cache.csa.indexer = new_indexer_cache;
-                new_cache.csa.compressed_kv = new_cache.csa.compressed_kv.update(kv_compressed, compressedCacheIds(offset_idx, csa.compressor.ratio, kv_compressed.dim(.kv)), layer_idx);
+                // new_cache.csa.compressed_kv = new_cache.csa.compressed_kv.update(kv_compressed, compressedCacheIds(offset_idx, csa.compressor.ratio, kv_compressed.dim(.kv)), layer_idx);
 
                 kv_compressed = new_cache.csa.compressed_kv.get(layer_idx);
 
@@ -975,7 +975,7 @@ pub const Attention = struct {
                 kv_compressed = kv_compressed.rename(.{ .seq = .kv });
 
                 new_cache.hca.state = new_compressor_state;
-                new_cache.hca.compressed_kv = new_cache.hca.compressed_kv.update(kv_compressed, compressedCacheIds(offset_idx, compressor.ratio, kv_compressed.dim(.kv)), layer_idx);
+                // new_cache.hca.compressed_kv = new_cache.hca.compressed_kv.update(kv_compressed, compressedCacheIds(offset_idx, compressor.ratio, kv_compressed.dim(.kv)), layer_idx);
 
                 kv_compressed = new_cache.hca.compressed_kv.get(layer_idx);
 
@@ -1152,33 +1152,25 @@ pub fn sparse_attn(
 
 const MoE = struct {
     router: Gate,
-    // gate_up: zml.Tensor,
-    // gate_up_scale: zml.Tensor,
-    // down: zml.Tensor,
-    // down_scale: zml.Tensor,
-    // experts: []Expert,
+    gate_up: zml.Tensor,
+    gate_up_scale: zml.Tensor,
+    down: zml.Tensor,
+    down_scale: zml.Tensor,
     shared_experts: SharedExpert,
     block_size: u32,
     activation_threshold: f32,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, i: usize) !MoE {
         _ = allocator; // autofix
-        // const experts = try allocator.alloc(Expert, config.n_routed_experts);
 
         const experts_store = store.withPrefix("experts");
-        _ = experts_store; // autofix
-        // for (experts, 0..) |*expert, expert_idx| {
-        //     const experts_store = store.withPrefix("experts").withLayer(expert_idx);
-        //     expert.* = .init(experts_store, config);
-        // }
 
         return .{
             .router = .init(store.withPrefix("gate"), config, i),
-            // .experts = experts,
-            // .gate_up = experts_store.createTensor("w13.weight", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
-            // .gate_up_scale = experts_store.createTensor("w13.scale", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
-            // .down = experts_store.createTensor("w2.weight", .{ .expert, .d, .dout }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
-            // .down_scale = experts_store.createTensor("w2.scale", .{ .expert, .d, .dout }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
+            .gate_up = experts_store.createTensor("w13.weight", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
+            .gate_up_scale = experts_store.createTensor("w13.scale", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
+            .down = experts_store.createTensor("w2.weight", .{ .expert, .d, .dout }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
+            .down_scale = experts_store.createTensor("w2.scale", .{ .expert, .d, .dout }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
             .shared_experts = .init(store.withPrefix("shared_experts"), config),
             .block_size = @intCast(config.quantization_config.weight_block_size[0]),
             .activation_threshold = config.swiglu_limit,
@@ -1188,42 +1180,16 @@ const MoE = struct {
     pub fn deinit(self: MoE, allocator: std.mem.Allocator) void {
         _ = self; // autofix
         _ = allocator; // autofix
-        // allocator.free(self.experts);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(MoE), allocator: std.mem.Allocator) void {
         _ = allocator; // autofix
         Gate.unloadBuffers(&self.router);
-        // for (self.experts) |*expert| {
-        //     Expert.unloadBuffers(expert);
-        // }
-        // allocator.free(self.experts);
-        // self.gate_up.deinit();
-        // self.gate_up_scale.deinit();
-        // self.down.deinit();
-        // self.down_scale.deinit();
+        self.gate_up.deinit();
+        self.gate_up_scale.deinit();
+        self.down.deinit();
+        self.down_scale.deinit();
         SharedExpert.unloadBuffers(&self.shared_experts);
-    }
-
-    fn stackExpertTensor(experts: []const Expert, comptime linear_field: []const u8, comptime tensor_field: []const u8) zml.Tensor {
-        stdx.debug.assert(experts.len <= 1024, "MoE StableHLO stack supports up to 1024 experts, got {}", .{experts.len});
-
-        var chunks: [32]zml.Tensor = undefined;
-        var chunk_count: usize = 0;
-        var start: usize = 0;
-        while (start < experts.len) {
-            const end = @min(start + 32, experts.len);
-            var tensors: [32]zml.Tensor = undefined;
-            for (experts[start..end], 0..) |expert, i| {
-                tensors[i] = @field(@field(expert, linear_field), tensor_field);
-            }
-
-            chunks[chunk_count] = zml.Tensor.stack(tensors[0 .. end - start], 0, .expert);
-            chunk_count += 1;
-            start = end;
-        }
-
-        return zml.Tensor.concatenate(chunks[0..chunk_count], .expert);
     }
 
     fn forwardRoutedExpert(
@@ -1264,60 +1230,28 @@ const MoE = struct {
         _ = moe_metadata; // autofix
         _ = moe_parameters; // autofix
         const topk_weight, const topk_ids = self.router.forward(x, input_ids);
-        _ = topk_ids; // autofix
-        _ = topk_weight; // autofix
-        // const w1_weight = stackExpertTensor(self.experts, "w1", "weight");
-        // const w1_scale = stackExpertTensor(self.experts, "w1", "scale");
-        // const w2_weight = stackExpertTensor(self.experts, "w2", "weight");
-        // const w2_scale = stackExpertTensor(self.experts, "w2", "scale");
-        // const w3_weight = stackExpertTensor(self.experts, "w3", "weight");
-        // const w3_scale = stackExpertTensor(self.experts, "w3", "scale");
-        // const gate_up_weight = zml.Tensor.concatenate(&.{ w1_weight, w3_weight }, .dint);
-        // const gate_up_scale = zml.Tensor.concatenate(&.{ w1_scale, w3_scale }, .dint);
 
         var y = zml.Tensor.zeroes(x.shape().withDtype(.f32));
-        //
-        // for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
-        //     const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
-        //     const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
-        //     const routed = forwardRoutedExpert(
-        //         x,
-        //         weight,
-        //         self.gate_up.gather(.{ .expert = expert_ids }, .{}),
-        //         self.gate_up_scale.gather(.{ .expert = expert_ids }, .{}),
-        //         self.down.gather(.{ .expert = expert_ids }, .{}),
-        //         self.down_scale.gather(.{ .expert = expert_ids }, .{}),
-        //         self.block_size,
-        //         self.activation_threshold,
-        //     ).convert(.f32);
-        //
-        //     y = y.add(routed);
-        // }
-        //
-        // y = y.add(self.shared_experts.forward(x).convert(.f32));
-        return y.convert(x.dtype());
 
-        // const gate_up  = zml.Tensor.concatenate(&.{self.up, self.gate}, .dout);
-        // _ = gate_up; // autofix
-        // const gate_up_scale = zml.Tensor.concatenate(&.{self.up_scale, self.gate_scale}, .dout);
-        // _ = gate_up_scale; // autofix
-        // var y = zml.moe.forwardMoe(
-        //     x,
-        //     topk_ids,
-        //     topk_weight,
-        //     gate_up,
-        //     gate_up_scale,
-        //     null,
-        //     self.down,
-        //     self.down_scale,
-        //     null,
-        //     moe_metadata,
-        //     moe_parameters,
-        // ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
-        //
-        // y = y.add(self.shared_experts.forward(x, null));
-        //
-        // return y;
+        for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
+            const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
+            const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
+            const routed = forwardRoutedExpert(
+                x,
+                weight,
+                self.gate_up.gather(.{ .expert = expert_ids }, .{}),
+                self.gate_up_scale.gather(.{ .expert = expert_ids }, .{}),
+                self.down.gather(.{ .expert = expert_ids }, .{}),
+                self.down_scale.gather(.{ .expert = expert_ids }, .{}),
+                self.block_size,
+                self.activation_threshold,
+            ).convert(.f32);
+
+            y = y.add(routed);
+        }
+
+        y = y.add(self.shared_experts.forward(x).convert(.f32));
+        return y.convert(x.dtype());
     }
 };
 
@@ -1458,28 +1392,6 @@ const FP4Linear = struct {
 
     pub fn forward(self: FP4Linear, x: zml.Tensor) zml.Tensor {
         return forwardWith(self.weight, self.scale, x, self.act_block_size, self.weight_block_size, self.tag);
-    }
-};
-
-const Expert = struct {
-    w1: FP4Linear,
-    w2: FP4Linear,
-    w3: FP4Linear,
-
-    pub fn init(store: zml.io.TensorStore.View, config: Config) Expert {
-        const block_size = config.quantization_config.weight_block_size[0];
-
-        return .{
-            .w1 = .init(store.withPrefix("w1"), .{ .dint, .d }, .{ .dint, .d_block }, block_size, .d),
-            .w2 = .init(store.withPrefix("w2"), .{ .d, .dint }, .{ .d, .dint_block }, block_size, .dint),
-            .w3 = .init(store.withPrefix("w3"), .{ .dint, .d }, .{ .dint, .d_block }, block_size, .d),
-        };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Expert)) void {
-        FP4Linear.unloadBuffers(&self.w1);
-        FP4Linear.unloadBuffers(&self.w2);
-        FP4Linear.unloadBuffers(&self.w3);
     }
 };
 
@@ -1738,8 +1650,8 @@ pub const Model = struct {
     lm_head: LmHead,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
-        const layers = try allocator.alloc(Layer, 4);
-        // const layers = try allocator.alloc(Layer, config.num_hidden_layers);
+        // const layers = try allocator.alloc(Layer, 4);
+        const layers = try allocator.alloc(Layer, config.num_hidden_layers);
 
         for (layers, 0..) |*layer, i| {
             const layer_store = store.withPrefix("layers").withLayer(i);
