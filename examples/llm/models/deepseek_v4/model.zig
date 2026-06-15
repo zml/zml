@@ -712,12 +712,13 @@ const Indexer = struct {
 
         return .{
             .proj = .init(store.createTensor("weights_proj.weight", .{ .sq, .d }, .{ .sq = .model, .d = .replicated }), null, .d),
-            .wq_b = .{
-                .scale = store.createTensor("wq_b.scale", null, .replicated),
-                .weight = store.createTensor("wq_b.weight", .{ .hd, .d }, .{ .hd = .model, .d = .replicated }),
-                .block_size = block_size,
-                .tag = zml.Shape.toTag(.d),
-            },
+            .wq_b = .init(store.withPrefix("wq_b"), .{ .hd, .d }, block_size, .d),
+            // .wq_b = .{
+            //     .scale = store.createTensor("wq_b.scale", null, .replicated),
+            //     .weight = store.createTensor("wq_b.weight", .{ .hd, .d }, .{ .hd = .model, .d = .replicated }),
+            //     .block_size = block_size,
+            //     .tag = zml.Shape.toTag(.d),
+            // },
             .compressor = .init(store.withPrefix("compressor"), config, config.index_head_dim, compression_ratio, rope_opts),
             .index_head_dim = config.index_head_dim,
             .index_n_heads = config.index_n_heads,
@@ -850,21 +851,23 @@ pub const Attention = struct {
             .kv_norm = .init(store.createTensor("kv_norm.weight", .{.hd}, .replicated), config.rms_norm_eps, .hd),
             .q_norm = .init(store.createTensor("q_norm.weight", .{.q}, .replicated), config.rms_norm_eps, .q),
             .wq_a = .init(store.withPrefix("wq_a"), .{ .q, .d }, block_size, .d),
-            .wq_b = .{
-                .scale = store.createTensor("wq_b.scale", null, .replicated),
-                .weight = store.createTensor("wq_b.weight", .{ .hd, .q }, .{ .hd = .model, .q = .replicated }),
-                .block_size = block_size,
-                .tag = zml.Shape.toTag(.q),
-            },
+            .wq_b = .init(store.withPrefix("wq_b"), .{ .hd, .q }, block_size, .q),
+            // .wq_b = .{
+            //     .scale = store.createTensor("wq_b.scale", null, .replicated),
+            //     .weight = store.createTensor("wq_b.weight", .{ .hd, .q }, .{ .hd = .model, .q = .replicated }),
+            //     .block_size = block_size,
+            //     .tag = zml.Shape.toTag(.q),
+            // },
             .wkv = .init(store.withPrefix("wkv"), .{ .hd, .d }, block_size, .d),
             .wo_a_weight = store.createTensor("wo_a.weight", .{ .hd, .d }, .{ .hd = .model, .d = .replicated }),
             .wo_a_scale = store.createTensor("wo_a.scale", null, .replicated),
-            .wo_b = .{
-                .scale = store.createTensor("wo_b.scale", null, .replicated),
-                .weight = store.createTensor("wo_b.weight", .{ .hd, .d }, .{ .hd = .model, .d = .replicated }),
-                .block_size = block_size,
-                .tag = zml.Shape.toTag(.d),
-            },
+            .wo_b = .init(store.withPrefix("wo_b"), .{ .hd, .d }, block_size, .d),
+            // .wo_b = .{
+            //     .scale = store.createTensor("wo_b.scale", null, .replicated),
+            //     .weight = store.createTensor("wo_b.weight", .{ .hd, .d }, .{ .hd = .model, .d = .replicated }),
+            //     .block_size = block_size,
+            //     .tag = zml.Shape.toTag(.d),
+            // },
             .eps = config.rms_norm_eps,
             .rope_opts = rope_opts,
             .window_size = config.sliding_window,
@@ -1149,10 +1152,10 @@ pub fn sparse_attn(
 
 const MoE = struct {
     router: Gate,
-    gate_up: zml.Tensor,
-    gate_up_scale: zml.Tensor,
-    down: zml.Tensor,
-    down_scale: zml.Tensor,
+    // gate_up: zml.Tensor,
+    // gate_up_scale: zml.Tensor,
+    // down: zml.Tensor,
+    // down_scale: zml.Tensor,
     // experts: []Expert,
     shared_experts: SharedExpert,
     block_size: u32,
@@ -1163,6 +1166,7 @@ const MoE = struct {
         // const experts = try allocator.alloc(Expert, config.n_routed_experts);
 
         const experts_store = store.withPrefix("experts");
+        _ = experts_store; // autofix
         // for (experts, 0..) |*expert, expert_idx| {
         //     const experts_store = store.withPrefix("experts").withLayer(expert_idx);
         //     expert.* = .init(experts_store, config);
@@ -1171,10 +1175,10 @@ const MoE = struct {
         return .{
             .router = .init(store.withPrefix("gate"), config, i),
             // .experts = experts,
-            .gate_up = experts_store.createTensor("w13.weight", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
-            .gate_up_scale = experts_store.createTensor("w13.scale", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
-            .down = experts_store.createTensor("w2.weight", .{ .expert, .d, .dout }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
-            .down_scale = experts_store.createTensor("w2.scale", .{ .expert, .d, .dout }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
+            // .gate_up = experts_store.createTensor("w13.weight", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
+            // .gate_up_scale = experts_store.createTensor("w13.scale", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
+            // .down = experts_store.createTensor("w2.weight", .{ .expert, .d, .dout }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
+            // .down_scale = experts_store.createTensor("w2.scale", .{ .expert, .d, .dout }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
             .shared_experts = .init(store.withPrefix("shared_experts"), config),
             .block_size = @intCast(config.quantization_config.weight_block_size[0]),
             .activation_threshold = config.swiglu_limit,
@@ -1194,10 +1198,10 @@ const MoE = struct {
         //     Expert.unloadBuffers(expert);
         // }
         // allocator.free(self.experts);
-        self.gate_up.deinit();
-        self.gate_up_scale.deinit();
-        self.down.deinit();
-        self.down_scale.deinit();
+        // self.gate_up.deinit();
+        // self.gate_up_scale.deinit();
+        // self.down.deinit();
+        // self.down_scale.deinit();
         SharedExpert.unloadBuffers(&self.shared_experts);
     }
 
@@ -1260,6 +1264,8 @@ const MoE = struct {
         _ = moe_metadata; // autofix
         _ = moe_parameters; // autofix
         const topk_weight, const topk_ids = self.router.forward(x, input_ids);
+        _ = topk_ids; // autofix
+        _ = topk_weight; // autofix
         // const w1_weight = stackExpertTensor(self.experts, "w1", "weight");
         // const w1_scale = stackExpertTensor(self.experts, "w1", "scale");
         // const w2_weight = stackExpertTensor(self.experts, "w2", "weight");
@@ -1270,25 +1276,25 @@ const MoE = struct {
         // const gate_up_scale = zml.Tensor.concatenate(&.{ w1_scale, w3_scale }, .dint);
 
         var y = zml.Tensor.zeroes(x.shape().withDtype(.f32));
-
-        for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
-            const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
-            const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
-            const routed = forwardRoutedExpert(
-                x,
-                weight,
-                self.gate_up.gather(.{ .expert = expert_ids }, .{}),
-                self.gate_up_scale.gather(.{ .expert = expert_ids }, .{}),
-                self.down.gather(.{ .expert = expert_ids }, .{}),
-                self.down_scale.gather(.{ .expert = expert_ids }, .{}),
-                self.block_size,
-                self.activation_threshold,
-            ).convert(.f32);
-
-            y = y.add(routed);
-        }
-
-        y = y.add(self.shared_experts.forward(x).convert(.f32));
+        //
+        // for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
+        //     const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
+        //     const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
+        //     const routed = forwardRoutedExpert(
+        //         x,
+        //         weight,
+        //         self.gate_up.gather(.{ .expert = expert_ids }, .{}),
+        //         self.gate_up_scale.gather(.{ .expert = expert_ids }, .{}),
+        //         self.down.gather(.{ .expert = expert_ids }, .{}),
+        //         self.down_scale.gather(.{ .expert = expert_ids }, .{}),
+        //         self.block_size,
+        //         self.activation_threshold,
+        //     ).convert(.f32);
+        //
+        //     y = y.add(routed);
+        // }
+        //
+        // y = y.add(self.shared_experts.forward(x).convert(.f32));
         return y.convert(x.dtype());
 
         // const gate_up  = zml.Tensor.concatenate(&.{self.up, self.gate}, .dout);
@@ -1685,7 +1691,7 @@ const LmHead = struct {
     pub fn forward(self: LmHead, x: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
         const logits = self.voc_proj.forward(self.norm.forward(self.hc_head(x)).convert(.f32)); //.choose1d(.seq, x.dim(.seq) - 1);
         const new_tokens, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, rng);
-        return .{ new_tokens, new_rng };
+        return .{ new_tokens.convert(.u32), new_rng };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(LmHead)) void {
@@ -1732,8 +1738,8 @@ pub const Model = struct {
     lm_head: LmHead,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
-        // const layers = try allocator.alloc(Layer, 15);
-        const layers = try allocator.alloc(Layer, config.num_hidden_layers);
+        const layers = try allocator.alloc(Layer, 4);
+        // const layers = try allocator.alloc(Layer, config.num_hidden_layers);
 
         for (layers, 0..) |*layer, i| {
             const layer_store = store.withPrefix("layers").withLayer(i);
