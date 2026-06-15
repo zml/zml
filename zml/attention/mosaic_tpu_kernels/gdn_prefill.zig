@@ -72,12 +72,13 @@ const Value = mtt.Value;
 /// `@setEvalBranchQuota`); it doesn't change the runtime kernel — only one
 /// arm fires per `Cfg.num_v_heads`.
 const SUPPORTED_N_V = .{
-    @as(i64, 2),   // smallest GQA test config
+    @as(i64, 2), // smallest GQA test config
     @as(i64, 4),
     @as(i64, 8),
-    @as(i64, 16),  // Qwen3.5-2B (n_kq=16, no GQA)
-    @as(i64, 32),  // Qwen3.5-9B (n_kq=16, GQA repeat=2)
-    @as(i64, 64),  // larger GDN models
+    @as(i64, 16), // Qwen3.5-2B (n_kq=16, no GQA)
+    @as(i64, 32), // Qwen3.5-9B (n_kq=16, GQA repeat=2)
+    @as(i64, 48), // Qwen3.5-9B
+    @as(i64, 64), // larger GDN models
     @as(i64, 128), // P4 baseline / 30B-class configs
 };
 
@@ -1301,7 +1302,7 @@ fn innerKernel(b: *mtt.Builder, grid_indices: []const Value, refs: []const Pipel
                     //   (flat), truncf 256, shape_cast 256→1x256 (back to 1×N for store).
                     //   The destination memref slice + squeeze is emitted PER iter (not
                     //   hoisted) — JAX's `pl.store` per-token lowering produces this inline.
-                    const out_flat_2d = k.shapeCast(out_tok_gated_native, &.{ ctx.n_v * ctx.d_v });
+                    const out_flat_2d = k.shapeCast(out_tok_gated_native, &.{ctx.n_v * ctx.d_v});
                     const out_flat_dt = out_flat_2d.to(ctx.dtype);
                     const out_slice_t = k.memRefSlice(out_pre_w_tr.buf.?, &.{ out_pre_w_tr.slot.?, c0i, c0i }, &.{ 1, ctx.bt, ctx.n_v * ctx.d_v }, &.{});
                     const out_squeeze_t = k.memRefSqueeze(out_slice_t, &.{ ctx.bt, ctx.n_v * ctx.d_v });
@@ -1997,9 +1998,9 @@ pub const Kernel = zml.kernel.mosaic_tpu.Kernel(Cfg, .{
     // to `recurrent_state` via `input_output_aliases`.
     .name = "recurrent_scan",
     .inputs = &.{
-        "mixed_qkv", "recurrent_state", "state_indices", "has_initial_state",
-        "a_padded", "b_padded", "a_log", "dt_bias", "schedule_table",
-        "decode_tokens_arr", "total_blocks_arr",
+        "mixed_qkv",      "recurrent_state",   "state_indices",    "has_initial_state",
+        "a_padded",       "b_padded",          "a_log",            "dt_bias",
+        "schedule_table", "decode_tokens_arr", "total_blocks_arr",
     },
     .outputs = &.{ "recurrent_state_out", "output" },
     .run = run,
