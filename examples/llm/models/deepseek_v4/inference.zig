@@ -41,10 +41,10 @@ pub const CompilationParameters = struct {
 };
 
 pub const CompiledModel = struct {
-    // prefill: KernelExe,
-    // decode: KernelExe,
-    prefill: ComposedKernelExe,
-    decode: ComposedKernelExe,
+    prefill: KernelExe,
+    decode: KernelExe,
+    // prefill: ComposedKernelExe,
+    // decode: ComposedKernelExe,
     params: CompilationParameters,
 
     pub fn init(
@@ -57,10 +57,10 @@ pub const CompiledModel = struct {
         opts: CompilationParameters,
     ) !CompiledModel {
         return .{
-            // .prefill = try compileKernel(allocator, io, platform, mdl, seqlen, progress, opts),
-            // .decode = try compileDecodeKernel(allocator, io, platform, mdl, 1, progress, opts),
-            .prefill = try .init(allocator, io, platform, mdl, seqlen, progress, .prefill, opts),
-            .decode = try .init(allocator, io, platform, mdl, 1, progress, .decode, opts),
+            .prefill = try compileKernel(allocator, io, platform, mdl, seqlen, progress, opts),
+            .decode = try compileDecodeKernel(allocator, io, platform, mdl, 1, progress, opts),
+            // .prefill = try .init(allocator, io, platform, mdl, seqlen, progress, .prefill, opts),
+            // .decode = try .init(allocator, io, platform, mdl, 1, progress, .decode, opts),
             .params = opts,
         };
     }
@@ -92,23 +92,21 @@ fn compileKernel(
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const tokens_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
 
-    const exe = try platform.compile(
-        allocator,
-        io,
-        mdl,
-        .forward,
-        .{
-                tokens,
-                tokens_idx_offset ,
-                opts.rng,
-                opts.cache,
-                opts.attention_metadata,
-                opts.attention_parameters,
-                opts.moe_metadata,
-                opts.moe_parameters,
-               },
-        .{ .shardings = &opts.shardings.all(), }
-    );
+    const actual_seqlen: zml.Tensor = .init(.{}, .u32);
+
+    const exe = try platform.compile(allocator, io, mdl, .forward, .{
+        tokens,
+        tokens_idx_offset,
+        actual_seqlen,
+        opts.rng,
+        opts.cache,
+        opts.attention_metadata,
+        opts.attention_parameters,
+        opts.moe_metadata,
+        opts.moe_parameters,
+    }, .{
+        .shardings = &opts.shardings.all(),
+    });
     return .{ .exe = exe };
 }
 
@@ -131,23 +129,21 @@ fn compileDecodeKernel(
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const tokens_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
 
-    const exe = try platform.compile(
-        allocator,
-        io,
-        mdl,
-        .forward,
-        .{
-                tokens,
-                tokens_idx_offset,
-                opts.rng,
-                opts.cache,
-                opts.attention_metadata,
-                opts.attention_parameters,
-                opts.moe_metadata,
-                opts.moe_parameters,
-               },
-        .{ .shardings = &opts.shardings.all(), }
-    );
+    const actual_seqlen: zml.Tensor = .init(.{}, .u32);
+
+    const exe = try platform.compile(allocator, io, mdl, .forward, .{
+        tokens,
+        tokens_idx_offset,
+        actual_seqlen,
+        opts.rng,
+        opts.cache,
+        opts.attention_metadata,
+        opts.attention_parameters,
+        opts.moe_metadata,
+        opts.moe_parameters,
+    }, .{
+        .shardings = &opts.shardings.all(),
+    });
     return .{ .exe = exe };
 }
 
@@ -158,6 +154,7 @@ pub const KernelArgs = struct {
     model_buffers: *model.Buffers,
     tokens_buf: *zml.Buffer,
     tokens_pos_buf: *zml.Buffer,
+    seqlen_buf: *zml.Buffer,
     rng_buf: *zml.Bufferized(zml.Tensor.Rng),
     cache_buffers: *zml.Bufferized(model.Cache),
     attention_metadata_buffers: zml.Bufferized(attention.Metadata),
@@ -179,6 +176,7 @@ const KernelExe = struct {
             args.model_buffers,
             args.tokens_buf,
             args.tokens_pos_buf,
+            args.seqlen_buf,
             args.rng_buf,
             args.cache_buffers,
             args.attention_metadata_buffers,
@@ -190,7 +188,7 @@ const KernelExe = struct {
 
         self.exe.call(exe_args, &results);
 
-        var tokens_buffer, var rng_buffer, var cache_buffer = results.get(struct{
+        var tokens_buffer, var rng_buffer, var cache_buffer = results.get(struct {
             zml.Buffer,
             zml.Bufferized(zml.Tensor.Rng),
             zml.Bufferized(model.Cache),
@@ -224,7 +222,7 @@ fn sameBufferHandle(lhs: zml.Buffer, rhs: zml.Buffer) bool {
     if (lhs._shards.len != rhs._shards.len) return false;
 
     for (lhs._shards.constSlice(), rhs._shards.constSlice()) |lhs_shards, rhs_shards| {
-        if(lhs_shards != rhs_shards) return false;
+        if (lhs_shards != rhs_shards) return false;
     }
 
     return true;
@@ -247,19 +245,37 @@ pub const ComposedKernelExe = struct {
         phase: common.Phase,
         opts: CompilationParameters,
     ) !ComposedKernelExe {
-        const embed_tokens = try ComposedKernelExe.compileEmbedTokens(allocator, io, platform, mdl,  seqlen, progress, phase, opts,);
+        const embed_tokens = try ComposedKernelExe.compileEmbedTokens(
+            allocator,
+            io,
+            platform,
+            mdl,
+            seqlen,
+            progress,
+            phase,
+            opts,
+        );
         errdefer embed_tokens.deinit();
 
-        const attn_layer = try ComposedKernelExe.compileAttnLayer(allocator, io, platform, mdl,  seqlen, progress, phase, opts);
+        const attn_layer = try ComposedKernelExe.compileAttnLayer(allocator, io, platform, mdl, seqlen, progress, phase, opts);
         errdefer attn_layer.deinit();
 
-        const csa_attn_layer = try ComposedKernelExe.compileCSAAttnLayer(allocator, io, platform, mdl,  seqlen, progress, phase, opts);
+        const csa_attn_layer = try ComposedKernelExe.compileCSAAttnLayer(allocator, io, platform, mdl, seqlen, progress, phase, opts);
         errdefer attn_layer.deinit();
 
-        const hca_attn_layer = try ComposedKernelExe.compileHCAAttnLayer(allocator, io, platform, mdl,  seqlen, progress, phase, opts);
+        const hca_attn_layer = try ComposedKernelExe.compileHCAAttnLayer(allocator, io, platform, mdl, seqlen, progress, phase, opts);
         errdefer attn_layer.deinit();
 
-        const lm_head = try ComposedKernelExe.compileLmHead(allocator, io, platform, mdl,  seqlen, progress, phase,opts,);
+        const lm_head = try ComposedKernelExe.compileLmHead(
+            allocator,
+            io,
+            platform,
+            mdl,
+            seqlen,
+            progress,
+            phase,
+            opts,
+        );
         errdefer lm_head.deinit();
 
         return .{
@@ -320,7 +336,7 @@ pub const ComposedKernelExe = struct {
         const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .hc = opts.hc_mult, .d = opts.hidden_dim }, mdl.embeds.embeds.weight.dtype());
         const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
         const token_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
-        const layer_idx: zml.Tensor = .init(.{ }, .u32);
+        const layer_idx: zml.Tensor = .init(.{}, .u32);
 
         const from: std.Io.Timestamp = .now(io, .awake);
         defer phase.logCompileDone(log, "attention", io, from);
@@ -357,7 +373,7 @@ pub const ComposedKernelExe = struct {
         const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .hc = opts.hc_mult, .d = opts.hidden_dim }, mdl.embeds.embeds.weight.dtype());
         const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
         const token_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
-        const layer_idx: zml.Tensor = .init(.{ }, .u32);
+        const layer_idx: zml.Tensor = .init(.{}, .u32);
 
         const from: std.Io.Timestamp = .now(io, .awake);
         defer phase.logCompileDone(log, "CSA attention", io, from);
@@ -394,7 +410,7 @@ pub const ComposedKernelExe = struct {
         const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .hc = opts.hc_mult, .d = opts.hidden_dim }, mdl.embeds.embeds.weight.dtype());
         const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
         const token_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
-        const layer_idx: zml.Tensor = .init(.{ }, .u32);
+        const layer_idx: zml.Tensor = .init(.{}, .u32);
 
         const from: std.Io.Timestamp = .now(io, .awake);
         defer phase.logCompileDone(log, "HCA attention", io, from);
@@ -508,11 +524,7 @@ pub const ComposedKernelExe = struct {
         var exe_args = try self.lm_head.args(args.allocator);
         defer exe_args.deinit(args.allocator);
 
-        exe_args.set(.{
-            args.model_buffers.lm_head,
-            hidden_buffer,
-            rng_buffer
-        });
+        exe_args.set(.{ args.model_buffers.lm_head, hidden_buffer, rng_buffer });
 
         var results = try self.lm_head.results(args.allocator);
         defer results.deinit(args.allocator);
