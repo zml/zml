@@ -233,6 +233,8 @@ fn sameBufferHandle(lhs: zml.Buffer, rhs: zml.Buffer) bool {
 pub const ComposedKernelExe = struct {
     embed_tokens: zml.Exe,
     attn_layer: zml.Exe,
+    csa_attn_layer: zml.Exe,
+    hca_attn_layer: zml.Exe,
     lm_head: zml.Exe,
 
     fn init(
@@ -251,12 +253,20 @@ pub const ComposedKernelExe = struct {
         const attn_layer = try ComposedKernelExe.compileAttnLayer(allocator, io, platform, mdl,  seqlen, progress, phase, opts);
         errdefer attn_layer.deinit();
 
+        const csa_attn_layer = try ComposedKernelExe.compileCSAAttnLayer(allocator, io, platform, mdl,  seqlen, progress, phase, opts);
+        errdefer attn_layer.deinit();
+
+        const hca_attn_layer = try ComposedKernelExe.compileHCAAttnLayer(allocator, io, platform, mdl,  seqlen, progress, phase, opts);
+        errdefer attn_layer.deinit();
+
         const lm_head = try ComposedKernelExe.compileLmHead(allocator, io, platform, mdl,  seqlen, progress, phase,opts,);
         errdefer lm_head.deinit();
 
         return .{
             .embed_tokens = embed_tokens,
             .attn_layer = attn_layer,
+            .csa_attn_layer = csa_attn_layer,
+            .hca_attn_layer = hca_attn_layer,
             .lm_head = lm_head,
         };
     }
@@ -264,6 +274,8 @@ pub const ComposedKernelExe = struct {
     fn deinit(self: ComposedKernelExe) void {
         self.embed_tokens.deinit();
         self.attn_layer.deinit();
+        self.csa_attn_layer.deinit();
+        self.hca_attn_layer.deinit();
         self.lm_head.deinit();
     }
 
@@ -328,6 +340,80 @@ pub const ComposedKernelExe = struct {
         });
     }
 
+    fn compileCSAAttnLayer(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *zml.Platform,
+        mdl: model.Model,
+        seqlen: u32,
+        progress: *std.Progress.Node,
+        phase: common.Phase,
+        opts: CompilationParameters,
+    ) !zml.Exe {
+        progress.increaseEstimatedTotalItems(1);
+        var node = progress.start(phase.startMessage("CSA attention"), 1);
+        defer node.end();
+
+        const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .hc = opts.hc_mult, .d = opts.hidden_dim }, mdl.embeds.embeds.weight.dtype());
+        const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
+        const token_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
+        const layer_idx: zml.Tensor = .init(.{ }, .u32);
+
+        const from: std.Io.Timestamp = .now(io, .awake);
+        defer phase.logCompileDone(log, "CSA attention", io, from);
+
+        return platform.compile(allocator, io, mdl.layers[2], .forward, .{
+            hidden,
+            tokens,
+            token_idx_offset,
+            layer_idx,
+            opts.cache,
+            opts.attention_metadata,
+            opts.attention_parameters,
+            opts.moe_metadata,
+            opts.moe_parameters,
+        }, .{
+            .shardings = &opts.shardings.all(),
+        });
+    }
+
+    fn compileHCAAttnLayer(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *zml.Platform,
+        mdl: model.Model,
+        seqlen: u32,
+        progress: *std.Progress.Node,
+        phase: common.Phase,
+        opts: CompilationParameters,
+    ) !zml.Exe {
+        progress.increaseEstimatedTotalItems(1);
+        var node = progress.start(phase.startMessage("HCA attention"), 1);
+        defer node.end();
+
+        const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .hc = opts.hc_mult, .d = opts.hidden_dim }, mdl.embeds.embeds.weight.dtype());
+        const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
+        const token_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
+        const layer_idx: zml.Tensor = .init(.{ }, .u32);
+
+        const from: std.Io.Timestamp = .now(io, .awake);
+        defer phase.logCompileDone(log, "HCA attention", io, from);
+
+        return platform.compile(allocator, io, mdl.layers[3], .forward, .{
+            hidden,
+            tokens,
+            token_idx_offset,
+            layer_idx,
+            opts.cache,
+            opts.attention_metadata,
+            opts.attention_parameters,
+            opts.moe_metadata,
+            opts.moe_parameters,
+        }, .{
+            .shardings = &opts.shardings.all(),
+        });
+    }
+
     fn compileLmHead(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -360,7 +446,12 @@ pub const ComposedKernelExe = struct {
         defer hidden_buffer.deinit();
 
         for (args.model_buffers.layers) |layer_buffer| {
-            var new_hidden_buffer, var new_cache_buffer, var new_cache_index_buffer = try self.runLayer(args, layer_buffer, &hidden_buffer, cache_index_buffer);
+            const exe = switch (layer_buffer.attn.compression) {
+                .none => &self.attn_layer,
+                .csa => &self.csa_attn_layer,
+                .hca => &self.hca_attn_layer,
+            };
+            var new_hidden_buffer, var new_cache_buffer, var new_cache_index_buffer = try self.runLayer(exe, args, layer_buffer, &hidden_buffer, cache_index_buffer);
             updateBuffer(&hidden_buffer, &new_hidden_buffer);
             updateBuffer(&cache_index_buffer, &new_cache_index_buffer);
             updateCacheBuffers(args.cache_buffers, &new_cache_buffer);
@@ -385,8 +476,9 @@ pub const ComposedKernelExe = struct {
         return results.get(zml.Buffer);
     }
 
-    fn runLayer(self: *const ComposedKernelExe, args: KernelArgs, layer_buffer: zml.Bufferized(model.Layer), hidden_buffer: *zml.Buffer, cache_idx_buffer: zml.Buffer) !struct { zml.Buffer, zml.Bufferized(model.Cache), zml.Buffer } {
-        var exe_args = try self.attn_layer.args(args.allocator);
+    fn runLayer(self: *const ComposedKernelExe, exe: *const zml.Exe, args: KernelArgs, layer_buffer: zml.Bufferized(model.Layer), hidden_buffer: *zml.Buffer, cache_idx_buffer: zml.Buffer) !struct { zml.Buffer, zml.Bufferized(model.Cache), zml.Buffer } {
+        _ = self; // autofix
+        var exe_args = try exe.args(args.allocator);
         defer exe_args.deinit(args.allocator);
 
         exe_args.set(.{
@@ -400,10 +492,10 @@ pub const ComposedKernelExe = struct {
             args.moe_metadata_buffers,
         });
 
-        var results = try self.attn_layer.results(args.allocator);
+        var results = try exe.results(args.allocator);
         defer results.deinit(args.allocator);
 
-        self.attn_layer.call(exe_args, &results);
+        exe.call(exe_args, &results);
 
         return results.get(struct {
             zml.Buffer,
