@@ -121,7 +121,6 @@ pub const Config = struct {
         return self.num_attention_groups;
     }
 
-    /// Number of transformer layers executed in the standard forward pass.
     pub fn numMainLayers(self: Config) u32 {
         return self.num_hidden_layers - self.num_nextn_predict_layers;
     }
@@ -317,7 +316,7 @@ pub const TextModel = struct {
 pub const Ffn = union(enum) {
     /// Layers [0, 1, 2] are a single SwiGLU MLP
     mlp: Mlp,
-    /// Layers 3 - 48 are MoE layers, consisting of routed experts + a per-token shared expert
+    /// Layers 3 - 45 are MoE layers, consisting of routed experts + a per-token shared expert. Remaining layers are MTP
     moe: struct {
         experts: Moe,
         shared: Mlp,
@@ -678,8 +677,7 @@ pub const Attn = struct {
 
         const dtype = q.dtype();
 
-        // Position ids must be absolute and not relative to current chunk. token_index is the cache_position vector; its first element is the
-        // absolute start, and positions = arange(S) + start.
+        // Position ids must be absolute and not relative to current chunk. token_index is the cache_position vector; its first element is the absolute start, and positions = arange(S) + start.
         const position_ids = blk: {
             const base = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
             const start = token_index.slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0).convert(.i64);
@@ -693,7 +691,6 @@ pub const Attn = struct {
             .withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
         k = partitionProjectedKv(self.rotary_emb.applyRope(k, cos, sin), replicate_kv_heads, repeat_factor);
 
-        // Scatter the new k/v slice into the persistent cache, then read the full history back so attention sees all prior tokens
         const cache_start = token_index.convert(.u32).slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0);
         const new_kv_cache = kv_cache.update(k, v, cache_start);
         const k_full = new_kv_cache.keys().convert(dtype)
@@ -726,6 +723,7 @@ pub const Attn = struct {
         return .{ projected_output, new_kv_cache };
     }
 
+    // TODO: candidate for removal
     pub const Stages = struct {
         q_proj: zml.Tensor,
         k_proj: zml.Tensor,
@@ -733,19 +731,15 @@ pub const Attn = struct {
         g_proj: zml.Tensor,
         q_norm: zml.Tensor,
         k_norm: zml.Tensor,
-        // q/k pre-rope in [b,h,s,hd] layout (rope.q_in, rope.k_in)
         q_pre_rope_hf: zml.Tensor,
         k_pre_rope_hf: zml.Tensor,
-        // cos/sin in HF layout [1,s,hd]
         cos: zml.Tensor,
         sin: zml.Tensor,
-        // post-rope, HF layout [b,h,s,hd] (rope.q_embed, rope.k_embed)
         q_rope_hf: zml.Tensor,
         k_rope_hf: zml.Tensor,
         attn: zml.Tensor,
         gate_sig: zml.Tensor,
         gated: zml.Tensor,
-        // input to o_proj: merged head output [b,s,h*hd]
         o_proj_in: zml.Tensor,
         out: zml.Tensor,
     };
@@ -856,7 +850,7 @@ pub const TextRotaryEmbedding = struct {
         };
     }
 
-    /// Expects `position_ids` tagged `{.b, .s}` and returns cos/sin tagged `{.b, .s, .hd}`
+    /// Expects position_ids to be tagged {.b, .s} and returns cos and sin tagged {.b, .s, .hd}
     pub fn getCosAndSin(self: TextRotaryEmbedding, position_ids: zml.Tensor, dtype: zml.DataType) struct { zml.Tensor, zml.Tensor } {
         const opts: zml.nn.RopeOpts = .{ .scaling = self.scaling };
         const inv_freq = zml.nn.invFreq(self.rotary_dim, opts).withTags(.{.hd});
@@ -876,7 +870,7 @@ pub const TextRotaryEmbedding = struct {
         return zml.Tensor.concatenate(&.{ x2.negate(), x1 }, .hd);
     }
 
-    /// Expects `q`/`k` tagged `{.b, .s, .h, .hd}` and `cos`/`sin` tagged `{.b, .s, .hd}`.
+    /// Expects q and k to be tagged {.b, .s, .h, .hd} and cos and sin to be tagged {.b, .s, .hd}
     pub fn applyRope(
         self: TextRotaryEmbedding,
         x: zml.Tensor,
@@ -947,8 +941,7 @@ pub const KvCache = struct {
         const k_shape = kv.k.shape().drop(.layer);
         const layer: zml.Tensor = .scalar(kv.layer_index orelse @panic("forgot to call atLayer"), .u32);
 
-        // KV cache uses .k instead of .s, so change here so caller doesn't need to be aware of this naming scheme.
-        // Accept callers that already provide .k (e.g. synthetic tests).
+        // KV cache uses .k instead of .s, so we change here so caller doesn't need to be aware of this naming scheme.
         const k_renamed = if (new_k.shape().hasTag(.s) != null) new_k.rename(.{ .s = .k }) else new_k;
         const v_renamed = if (new_v.shape().hasTag(.s) != null) new_v.rename(.{ .s = .k }) else new_v;
         const k_in = k_renamed.convert(kv.k.dtype()).transpose(k_shape);
@@ -983,9 +976,9 @@ pub const KvCache = struct {
 };
 
 pub const Mlp = struct {
-    up_proj: zml.nn.Linear, // (dim -> hidden_dim)
-    gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
-    down_proj: zml.nn.Linear, // (hidden_dim -> dim)
+    up_proj: zml.nn.Linear,
+    gate_proj: zml.nn.Linear,
+    down_proj: zml.nn.Linear,
     limit: f32,
 
     pub fn init(store: zml.io.TensorStore.View, swiglu_limit: f32) Mlp {
@@ -1027,7 +1020,6 @@ pub const Mlp = struct {
     }
 };
 
-// RmsNorm
 pub const RmsNorm = struct {
     weight: zml.Tensor,
     eps: f32,
@@ -1062,10 +1054,6 @@ pub const Router = struct {
     num_experts_per_tok: u32,
     routed_scaling_factor: f32,
 
-    // k = num_experts_per_tok
-    // `store` is the view at the parent `...moe` prefix; HF layout is:
-    //   <prefix>.gate.weight
-    //   <prefix>.router_bias   (optional)
     pub fn init(
         store: zml.io.TensorStore.View,
         num_experts_per_tok: u32,
@@ -1090,7 +1078,6 @@ pub const Router = struct {
 
     /// Returns (topk weights, topk indices) with shapes {.b, .s, .topk}.
     pub fn forward(self: Router, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        // Match HF reference: always run gate matmul + sigmoid in fp32.
         const tagged = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
         const input = tagged.convert(.f32);
 
@@ -1100,25 +1087,17 @@ pub const Router = struct {
             .d,
         );
 
-        // calculate raw logits
         const logits = gate_f32.forward(input);
 
-        // calculate scores of how strongly a token matches an expert
         const expert_scores = logits.sigmoid();
-
-        // add bias to influence how experts are distributed
         const expert_scores_with_bias = expert_scores.add(self.router_bias.convert(.f32).broad(expert_scores.shape()));
 
         // with N=288 total experts, pick top_k (k=8)
         const topk = expert_scores_with_bias.topK(.{ .topk = .expert }, self.num_experts_per_tok, .{});
         const topk_ids = topk.indices.convert(.i32);
 
-        // Gather from UNBIASED probs — bias is only used to pick indices.
         const router_scores = expert_scores.gather(.{ .expert = topk_ids }, .{});
 
-        // Renormalize so the topk weights sum to 1. Scaling by
-        // routed_scaling_factor happens in the caller (Moe.forward), matching
-        // the HF reference where `route()` returns unscaled weights.
         const denom = router_scores.sum(.topk).addConstant(1e-20);
         const normalized = router_scores.div(denom);
 
@@ -1126,7 +1105,6 @@ pub const Router = struct {
     }
 };
 
-// Moe
 pub const Moe = struct {
     up_proj: zml.Tensor,
     gate_proj: zml.Tensor,
@@ -1180,10 +1158,6 @@ pub const Moe = struct {
         return self.forwardLoop(x);
 
         // TODO: open issue re: Louis' forward Moe kernel
-        // if (self.layer_idx >= 42 and self.layer_idx <= 44) {
-        //     return self.forwardLoop(x);
-        // }
-        // return self.forwardTriton(x);
     }
 
     fn forwardTriton(self: Moe, x: zml.Tensor) zml.Tensor {
@@ -1202,16 +1176,7 @@ pub const Moe = struct {
         const moe_metadata = zml.moe.Metadata.init(.{ .triton = .{} });
         const moe_parameters = zml.moe.Parameters.init(.{ .triton = .{ .num_experts_per_tok = self.router.num_experts_per_tok, .activation = .silu } });
 
-        // in Moe.forward, before forwardMoe
-        topk_ids.print("zml_topk_ids");
-
-        topk_ids.print("zml_topk_ids"); // → check min/max ≥ 256
-        scaled.print("zml_topk_weights"); // → compare to Python routing_weights
-        input.print("zml_moe_input"); // → compare to layer 42 in.0 fixture
-
-        // get all expert outputs as tensor via fused triton kernel instead of Python loop
-        // NOTE: swiglu limit not considered. may have to edit
-
+        // NOTE: swiglu limit not considered. Must edit
         const moe_output = zml.moe.forwardMoe(
             input,
             topk_ids_tensor,
@@ -1226,9 +1191,7 @@ pub const Moe = struct {
             moe_parameters,
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
-        // zml.moe.forwardMoe returns shape {.b, .s, .d} (see zml/moe/moe.zig
-        // body: `.withTags(.{ .b, .s, .d })`). forwardLoop is normalized below to
-        // also return {.b, .s, .d} so Ffn.forward is backend-agnostic.
+        // zml.moe.forwardMoe returns shape {.b, .s, .d}
         return moe_output;
     }
 
@@ -1272,7 +1235,6 @@ pub const Moe = struct {
     }
 };
 
-// LoadedModel
 pub const LoadedModel = struct {
     inner: Model,
     parsed_config: std.json.Parsed(Config),
@@ -1356,5 +1318,4 @@ pub const LoadedModel = struct {
     }
 };
 
-// Buffers
 pub const Buffers = zml.Bufferized(Model);

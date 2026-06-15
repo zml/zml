@@ -81,7 +81,6 @@ pub fn main(init: std.process.Init) !void {
 
     progress.end();
 
-    // Optional prompt: encode now so we can fail fast before touching the device loop.
     var tokenizer: ?zml.tokenizer.Tokenizer = null;
     defer if (tokenizer) |*t| t.deinit();
     var prompt_tokens: []const u32 = &.{};
@@ -124,8 +123,6 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml
 }
 
 /// Pure-decode loop: optionally walks the prompt through the single-step exe
-/// (one token at a time, since the exe is compiled at s=1), then continues
-/// free-running decode. No EOS handling.
 fn runDecode(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -138,16 +135,16 @@ fn runDecode(
     max_new_tokens: u32,
     stdout: *std.Io.Writer,
 ) !void {
-    // KV cache is updated in-place via reuseBuffer.
+    // KV cache is updated in-place via reuseBuffer
     var kv_cache_buffers = try compiled.params.kv_cache.initBuffer(allocator, io, platform, compiled.params.shardings.model);
     defer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
-    // RNG state for the sampler.
+    // RNG state for the sampler
     const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
     var rng_buffers = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
-    // Current token buffer: shape {.b=1, .s=1}. Same buffer is both input and output every step
+    // Current token buffer: shape {.b=1, .s=1}.=
     var current_token: u32 = if (prompt_tokens.len > 0) prompt_tokens[0] else start_token;
     var current_token_buffer = try zml.Buffer.fromBytes(
         io,
@@ -167,7 +164,7 @@ fn runDecode(
     defer if (detok) |*d| d.deinit();
     var detok_buf: [4096]u8 = undefined;
 
-    // Step 3.5 Flash advertises three terminator ids in config.json
+    // three terminator ids in config.json
     const eos_tokens = [_]u32{ 1, 2, 128007 };
 
     const total_steps: u32 = @intCast(prompt_tokens.len + max_new_tokens);
