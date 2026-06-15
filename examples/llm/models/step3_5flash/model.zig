@@ -2,6 +2,7 @@ const std = @import("std");
 const zml = @import("zml");
 const stdx = zml.stdx;
 const common = @import("../common.zig");
+const inference = @import("inference.zig");
 
 const log = std.log.scoped(.step3_5flash);
 
@@ -1364,19 +1365,19 @@ pub const LoadedModel = struct {
         Model.unloadBuffers(buffers, allocator);
     }
 
-    // pub fn compile(
-    //     self: *const LoadedModel,
-    //     allocator: std.mem.Allocator,
-    //     io: std.Io,
-    //     platform: *const zml.Platform,
-    //     backend: zml.attention.Backend,
-    //     shardings: common.Shardings,
-    //     seqlen: usize,
-    //     progress: *std.Progress.Node,
-    // ) !inference.CompiledModel {
-    //     const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, shardings);
-    //     return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
-    // }
+    pub fn compile(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        backend: zml.attention.attention.Backend,
+        shardings: common.Shardings,
+        seqlen: usize,
+        progress: *std.Progress.Node,
+    ) !LoadedModel {
+        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, shardings);
+        return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
+    }
 };
 
 // Buffers
