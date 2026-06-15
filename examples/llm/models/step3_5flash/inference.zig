@@ -7,8 +7,6 @@ const model = @import("model.zig");
 
 const log = std.log.scoped(.step3_5flash);
 
-/// Symbolic shapes / sharding choices used to compile the model.
-/// Held on the side so the runtime loop can build matching device buffers.
 pub const CompilationParameters = struct {
     decode_tokens: zml.Tensor,
     token_index: zml.Tensor,
@@ -52,8 +50,6 @@ pub const CompilationParameters = struct {
 
 pub const CompilationOptions = CompilationParameters;
 
-/// Single fat exe: traces the whole `Model.forward` (embed → 45 layers → norm → lm_head → sample).
-/// One platform.compile up front, then one exe.call per generated token.
 pub const CompiledModel = struct {
     loaded_model: *const model.LoadedModel,
     exe: zml.Exe,
