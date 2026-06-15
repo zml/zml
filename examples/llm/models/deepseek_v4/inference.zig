@@ -340,6 +340,7 @@ pub const ComposedKernelExe = struct {
         const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .hc = opts.hc_mult, .d = opts.hidden_dim }, mdl.embeds.embeds.weight.dtype());
         const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
         const token_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
+        const actual_seqlen: zml.Tensor = .init(.{}, .u32);
         const layer_idx: zml.Tensor = .init(.{}, .u32);
 
         const from: std.Io.Timestamp = .now(io, .awake);
@@ -349,6 +350,7 @@ pub const ComposedKernelExe = struct {
             hidden,
             tokens,
             token_idx_offset,
+            actual_seqlen,
             layer_idx,
             opts.cache,
             opts.attention_metadata,
@@ -377,6 +379,7 @@ pub const ComposedKernelExe = struct {
         const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .hc = opts.hc_mult, .d = opts.hidden_dim }, mdl.embeds.embeds.weight.dtype());
         const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
         const token_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
+        const actual_seqlen: zml.Tensor = .init(.{}, .u32);
         const layer_idx: zml.Tensor = .init(.{}, .u32);
 
         const from: std.Io.Timestamp = .now(io, .awake);
@@ -386,6 +389,7 @@ pub const ComposedKernelExe = struct {
             hidden,
             tokens,
             token_idx_offset,
+            actual_seqlen,
             layer_idx,
             opts.cache,
             opts.attention_metadata,
@@ -414,6 +418,7 @@ pub const ComposedKernelExe = struct {
         const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .hc = opts.hc_mult, .d = opts.hidden_dim }, mdl.embeds.embeds.weight.dtype());
         const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
         const token_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
+        const actual_seqlen: zml.Tensor = .init(.{}, .u32);
         const layer_idx: zml.Tensor = .init(.{}, .u32);
 
         const from: std.Io.Timestamp = .now(io, .awake);
@@ -423,6 +428,7 @@ pub const ComposedKernelExe = struct {
             hidden,
             tokens,
             token_idx_offset,
+            actual_seqlen,
             layer_idx,
             opts.cache,
             opts.attention_metadata,
@@ -506,6 +512,7 @@ pub const ComposedKernelExe = struct {
             hidden_buffer,
             args.tokens_buf,
             args.tokens_pos_buf,
+            args.seqlen_buf,
             &cache_idx_buffer,
             args.cache_buffers,
             args.attention_metadata_buffers,
