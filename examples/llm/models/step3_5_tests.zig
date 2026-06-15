@@ -15,11 +15,13 @@ const log = std.log.scoped(.step3_5_tests);
 
 const Args = struct {
     model: []const u8,
+    prompt: ?[]const u8 = null,
     activations: []const u8 = "",
     generate: bool = false,
     seqlen: u32 = 64,
     start_token: u32 = 1,
     max_new_tokens: u32 = 32,
+    topk: u32 = 1,
 
     pub const help =
         \\Use step3_5_tests --model=<path> [--generate] [--seqlen=N] ...
@@ -28,11 +30,13 @@ const Args = struct {
         \\
         \\ Options:
         \\   --model=<path>            Path to the model repository (safetensors + config.json)
+        \\   --prompt=<text>           Optional prompt fed one token at a time before decode
         \\   --activations=<path>      (optional, unused for now) activations fixture path
         \\   --generate                Run the decode loop instead of returning early
         \\   --seqlen=<u32>            Compiled KV-cache length (default 64)
-        \\   --start-token=<u32>       Token id seeded into the decoder (default 1)
+        \\   --start-token=<u32>       Token id seeded into the decoder when no --prompt (default 1)
         \\   --max-new-tokens=<u32>    Number of tokens to generate (default 32)
+        \\   --topk=<u32>              Top-k sampling cutoff (default 1 = greedy)
         \\
     ;
 };
@@ -58,13 +62,16 @@ pub fn main(init: std.process.Init) !void {
     var repo_model = try step3p5flash.LoadedModel.init(allocator, io, repo, store.view(), shardings);
     defer repo_model.deinit(allocator);
 
+    repo_model.inner.gen_options.sampling_strategy.topk = args.topk;
+
     var progress = std.Progress.start(io, .{ .root_name = args.model });
-    defer progress.end();
+    errdefer progress.end();
 
     var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
     if (!args.generate) {
+        progress.end();
         log.info("non-generate mode not implemented; pass --generate", .{});
         return;
     }
@@ -72,25 +79,67 @@ pub fn main(init: std.process.Init) !void {
     var compiled = try repo_model.compile(allocator, io, platform, shardings, args.seqlen, &progress);
     defer compiled.deinit();
 
+    progress.end();
+
+    // Optional prompt: encode now so we can fail fast before touching the device loop.
+    var tokenizer: ?zml.tokenizer.Tokenizer = null;
+    defer if (tokenizer) |*t| t.deinit();
+    var prompt_tokens: []const u32 = &.{};
+    defer if (prompt_tokens.len > 0) allocator.free(prompt_tokens);
+    if (args.prompt) |prompt_text| {
+        tokenizer = try loadTokenizer(allocator, io, repo);
+        var encoder = try tokenizer.?.encoder();
+        defer encoder.deinit();
+        prompt_tokens = try encoder.encodeAlloc(allocator, prompt_text);
+        if (prompt_tokens.len + args.max_new_tokens > args.seqlen) {
+            log.warn("prompt ({d}) + max_new_tokens ({d}) > seqlen ({d}); raise --seqlen", .{ prompt_tokens.len, args.max_new_tokens, args.seqlen });
+            return;
+        }
+    }
+
     var stdout_writer = std.Io.File.stdout().writerStreaming(io, &.{});
     const stdout: *std.Io.Writer = &stdout_writer.interface;
 
-    try runDecode(allocator, io, platform, &compiled, &model_buffers, args.start_token, args.max_new_tokens, stdout);
+    try runDecode(
+        allocator,
+        io,
+        platform,
+        &compiled,
+        &model_buffers,
+        tokenizer,
+        prompt_tokens,
+        args.start_token,
+        args.max_new_tokens,
+        stdout,
+    );
 }
 
-/// Pure-decode loop: seeds with one token, calls the single Model.forward exe without prefill, tokenizer, EOS, for testing
+fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
+    const file = try dir.openFile(io, "tokenizer.json", .{});
+    defer file.close(io);
+    var reader = file.reader(io, &.{});
+    const bytes = try reader.interface.readAlloc(allocator, try file.length(io));
+    defer allocator.free(bytes);
+    return try .fromBytes(allocator, bytes);
+}
+
+/// Pure-decode loop: optionally walks the prompt through the single-step exe
+/// (one token at a time, since the exe is compiled at s=1), then continues
+/// free-running decode. No EOS handling.
 fn runDecode(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
     compiled: *const inference.CompiledModel,
     model_buffers: *model.Buffers,
+    tokenizer: ?zml.tokenizer.Tokenizer,
+    prompt_tokens: []const u32,
     start_token: u32,
     max_new_tokens: u32,
     stdout: *std.Io.Writer,
 ) !void {
     // KV cache is updated in-place via reuseBuffer.
-    var kv_cache_buffers = try compiled.params.kv_cache.initBuffer(io, platform, compiled.params.shardings.model);
+    var kv_cache_buffers = try compiled.params.kv_cache.initBuffer(allocator, io, platform, compiled.params.shardings.model);
     defer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
     // RNG state for the sampler.
@@ -99,7 +148,7 @@ fn runDecode(
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
     // Current token buffer: shape {.b=1, .s=1}. Same buffer is both input and output every step
-    var current_token: u32 = start_token;
+    var current_token: u32 = if (prompt_tokens.len > 0) prompt_tokens[0] else start_token;
     var current_token_buffer = try zml.Buffer.fromBytes(
         io,
         platform,
@@ -114,8 +163,23 @@ fn runDecode(
     var exe_results = try compiled.exe.results(allocator);
     defer exe_results.deinit(allocator);
 
+    var detok: ?zml.tokenizer.Tokenizer.Decoder = if (tokenizer) |t| try t.decoder() else null;
+    defer if (detok) |*d| d.deinit();
+    var detok_buf: [4096]u8 = undefined;
+
+    // Step 3.5 Flash advertises three terminator ids in config.json:
+    // <|endoftext|>=1, <|im_end|>=2, <|eot_id|>=128007. Stopping on any of
+    // them matches HF's `model.generate` behaviour. Only enforced once we're
+    // past the prompt so a prompt token (e.g. start_token=1) doesn't end the
+    // run immediately.
+    const eos_tokens = [_]u32{ 1, 2, 128007 };
+
+    // The exe always runs and produces a "next token" prediction. While walking
+    // the prompt we overwrite that prediction with the next prompt token before
+    // the following step.
+    const total_steps: u32 = @intCast(prompt_tokens.len + max_new_tokens);
     var step: u32 = 0;
-    while (step < max_new_tokens) : (step += 1) {
+    while (step < total_steps) : (step += 1) {
         if (step >= compiled.params.seqlen) break;
 
         var index_value: u32 = step;
@@ -142,11 +206,43 @@ fn runDecode(
             &rng_buffers,
         });
 
-        const next_token = try current_token_buffer.getValue(u32, io);
-        try stdout.print("{d} ", .{next_token});
-        try stdout.flush();
+        const predicted = try current_token_buffer.getValue(u32, io);
+
+        const next_step = step + 1;
+        const in_prompt = next_step < prompt_tokens.len;
+        const emit_token: u32 = if (in_prompt) prompt_tokens[next_step] else predicted;
+
+        if (!in_prompt) {
+            if (std.mem.indexOfScalar(u32, &eos_tokens, predicted) != null) break;
+
+            if (detok) |*d| {
+                const text = try d.feedOne(predicted, &detok_buf);
+                try stdout.writeAll(text);
+            } else {
+                try stdout.print("{d} ", .{predicted});
+            }
+            try stdout.flush();
+        }
+
+        // If we're still inside the prompt, overwrite the device buffer with
+        // the real next prompt token so the next step conditions on it.
+        if (in_prompt) {
+            current_token = emit_token;
+            current_token_buffer.deinit();
+            current_token_buffer = try zml.Buffer.fromBytes(
+                io,
+                platform,
+                .init(.{ .b = 1, .s = 1 }, .u32),
+                .replicated,
+                std.mem.asBytes(&current_token),
+            );
+        }
     }
 
+    if (detok) |*d| {
+        const tail = try d.finalize(&detok_buf);
+        try stdout.writeAll(tail);
+    }
     try stdout.writeAll("\n");
     try stdout.flush();
 }

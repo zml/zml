@@ -924,10 +924,17 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
+    /// Zero-initialized so that masked-out positions in the attention cannot hold NaN bit patterns.
+    pub fn initBuffer(kv: KvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
+        const k_bytes = try allocator.alloc(u8, kv.k.shape().byteSize());
+        defer allocator.free(k_bytes);
+        @memset(k_bytes, 0);
+        const v_bytes = try allocator.alloc(u8, kv.v.shape().byteSize());
+        defer allocator.free(v_bytes);
+        @memset(v_bytes, 0);
         return .{
-            .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), sharding, .{}),
-            .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), sharding, .{}),
+            .k = try zml.Buffer.fromBytes(io, platform, kv.k.shape(), sharding, k_bytes),
+            .v = try zml.Buffer.fromBytes(io, platform, kv.v.shape(), sharding, v_bytes),
         };
     }
 
