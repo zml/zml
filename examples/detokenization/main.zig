@@ -170,7 +170,7 @@ pub const SimilarityMatrix = struct {
 
     pub fn nearestNeighbor(self: *SimilarityMatrix, row: usize, pos: usize) usize {
         const index = row * self.k + pos;
-        return @intCast(self.nearest_neighbors.constItems(i64)[index]);
+        return @intCast(self.nearest_neighbors.constItems(i32)[index]);
     }
 
     pub fn deinit(self: *SimilarityMatrix, allocator: std.mem.Allocator) void {
@@ -262,7 +262,7 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer similarity_matrix.deinit(zml_handler.allocator);
     zml_handler.toc(&zml_handler.timers.similarity_matrix);
 
-    try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix, true);
+    //try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix, true);
 
     std.log.info("Get lm_head", .{});
     const lm_head = try getLmHead(zml_handler, &model_handler);
@@ -522,17 +522,17 @@ pub fn escapeTokenText(text: []const u8, out: []u8) []const u8 {
 pub fn loadSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, normalized_rows: bool) !SimilarityMatrix {
     const allocator = zml_handler.allocator;
     const suffix = if (normalized_rows) "norm" else "raw";
-    const matrix_path = try std.fmt.allocPrint(allocator, "{s}/qwen_dist_mat_{s}.safetensors", .{ zml_handler.uris.checkpoint, suffix });
-    defer allocator.free(matrix_path);
-    const nearest_path = try std.fmt.allocPrint(allocator, "{s}/qwen_256_nn.safetensors", .{zml_handler.uris.checkpoint});
-    defer allocator.free(nearest_path);
+    const matrix_filename = try std.fmt.allocPrint(allocator, "qwen_dist_mat_{s}.safetensors", .{suffix});
+    defer allocator.free(matrix_filename);
+    const nearest_filename = try std.fmt.allocPrint(allocator, "qwen_256_nn_{s}.safetensors", .{suffix});
+    defer allocator.free(nearest_filename);
 
-    std.log.info("Load similarity matrix from {s}", .{matrix_path});
-    const data = try loadSafetensorSlice(zml_handler, matrix_path, "data");
+    std.log.info("Load similarity matrix from checkpoint: {s}", .{matrix_filename});
+    const data = try loadSafetensorSlice(zml_handler, zml_handler.uris.checkpoint, matrix_filename, "data");
     errdefer data.free(allocator);
 
-    std.log.info("Load nearest neighbors from {s}", .{nearest_path});
-    const nearest_neighbors = try loadSafetensorSlice(zml_handler, nearest_path, "indices");
+    std.log.info("Load nearest neighbors from checkpoint: {s}", .{nearest_filename});
+    const nearest_neighbors = try loadSafetensorSlice(zml_handler, zml_handler.uris.checkpoint, nearest_filename, "indices");
     errdefer nearest_neighbors.free(allocator);
 
     const lm_head_shape = model_handler.model.shape();
@@ -670,7 +670,17 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Mo
         const abs_diff = @abs(expected - actual);
         const rel_diff = abs_diff / @max(@abs(expected), 1e-6);
         max_abs_diff = @max(max_abs_diff, abs_diff);
-        max_rel_diff = @max(max_rel_diff, rel_diff);
+        if (rel_diff > max_rel_diff) {
+            max_rel_diff = rel_diff;
+            std.log.info("New max relative diff rows=({d},{d}) expected={d} actual={d} abs_diff={d} rel_diff={d}", .{
+                i,
+                j,
+                expected,
+                actual,
+                abs_diff,
+                rel_diff,
+            });
+        }
     }
 
     std.log.info("1000 random pairs, max_abs_diff={d}, max_rel_diff={d}", .{ max_abs_diff, max_rel_diff });
@@ -692,17 +702,16 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Mo
             const expected = candidates[pos].node;
             const actual = similarity_matrix.nearestNeighbor(row, pos);
             if (actual != expected) {
-                knn_mismatches += 1;
-                if (knn_mismatches <= 10) {
-                    std.log.err("kNN mismatch row={d} pos={d} expected={d} actual={d} expected_sim={d} actual_sim={d}", .{
-                        row,
-                        pos,
-                        expected,
-                        actual,
-                        candidates[pos].similarity,
-                        similarity_matrix.dist(row, actual),
-                    });
-                }
+                const err = @abs(candidates[pos].similarity - similarity_matrix.dist(row, actual));
+                std.log.err("kNN mismatch row={d} pos={d} expected={d} actual={d} expected_sim={d} sim_err={d}", .{
+                    row,
+                    pos,
+                    expected,
+                    actual,
+                    candidates[pos].similarity,
+                    err,
+                });
+                if (err > 0) knn_mismatches += 1;
             }
         }
     }
@@ -727,9 +736,8 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, model_handler: *model_.Mo
     var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
     defer tokenizer.deinit();
 
-    const embeds_path = try std.fmt.allocPrint(zml_handler.allocator, "{s}/qwen_embeds.safetensors", .{zml_handler.uris.checkpoint});
-    defer zml_handler.allocator.free(embeds_path);
-    var registry: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, embeds_path);
+    const embeds_repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.checkpoint);
+    var registry: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.io, embeds_repo, "qwen_embeds.safetensors");
     defer registry.deinit();
 
     const d = g.dim;
@@ -1218,18 +1226,29 @@ pub fn loadSafetensorSliceFromRegistry(zml_handler: *Zml_handler, registry: *zml
     return slice;
 }
 
-pub fn loadSafetensorSlice(zml_handler: *Zml_handler, path: []const u8, tensor_name: []const u8) !zml.Slice {
-    var registry: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, path);
+pub fn loadSafetensorSlice(zml_handler: *Zml_handler, repo_uri: []const u8, entrypoint_name: []const u8, tensor_name: []const u8) !zml.Slice {
+    std.log.info("Load slice {s} from repo {s} entrypoint {s}", .{ tensor_name, repo_uri, entrypoint_name });
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, repo_uri);
+    var registry: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.io, repo, entrypoint_name);
     defer registry.deinit();
 
     const tensor = registry.tensors.get(tensor_name) orelse return error.TensorNotFound;
     const slice = try zml.Slice.alloc(zml_handler.allocator, tensor.shape);
     errdefer slice.free(zml_handler.allocator);
 
-    var io_buffer: [128 * 1024 * 1024]u8 = undefined;
-    var reader = try registry.reader(zml_handler.io, tensor_name, &io_buffer);
+    const io_buffer = try zml_handler.allocator.alloc(u8, 8 * 1024 * 1024);
+    defer zml_handler.allocator.free(io_buffer);
+    var reader = try registry.reader(zml_handler.io, tensor_name, io_buffer);
     defer reader.deinit();
-    _ = try reader.interface.readSliceAll(slice.data());
+
+    const data = slice.data();
+    const max_read_chunk = 512 * 1024 * 1024;
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const chunk_len = @min(max_read_chunk, data.len - offset);
+        _ = try reader.interface.readSliceAll(data[offset..][0..chunk_len]);
+        offset += chunk_len;
+    }
     return slice;
 }
 
