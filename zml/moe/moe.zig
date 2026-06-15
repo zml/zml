@@ -172,7 +172,7 @@ pub fn forwardMoe(
                         .bias_down = bias_down,
                     },
                     (struct {
-                        fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_shape: zml.Shape) zml.Tensor {
+                        fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
                             const local_num_experts = sharded_inputs[3].dim(.expert);
                             const partition_id = zml.ops.partitionId().convert(.i32);
                             const expert_start = partition_id.scale(local_num_experts).convert(.i32);
@@ -203,7 +203,6 @@ pub fn forwardMoe(
                                     .w2_bias = ctx.bias_down,
                                 },
                             ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
-                            _ = output_shape;
                             return local_output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d });
                         }
                     }).body,
@@ -250,7 +249,7 @@ pub fn forwardMoe(
                         .bias_down = bias_down,
                     },
                     (struct {
-                        fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_shape: zml.Shape) zml.Tensor {
+                        fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
                             const local_num_experts = sharded_inputs[3].dim(.expert);
                             const partition_id = zml.ops.partitionId().convert(.i32);
                             const expert_start = partition_id.scale(local_num_experts).convert(.i32);
@@ -279,7 +278,6 @@ pub fn forwardMoe(
                                     .w2_bias = ctx.bias_down,
                                 },
                             ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
-                            _ = output_shape;
                             return local_output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d });
                         }
                     }).body,
