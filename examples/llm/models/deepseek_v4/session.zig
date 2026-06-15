@@ -54,7 +54,6 @@ pub const Session = struct {
         self.generated_token.free(self.allocator);
     }
 
-
     pub fn tokenizePrompt(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
         var encoder = try self.tokenizer.encoder();
         defer encoder.deinit();
@@ -97,6 +96,10 @@ pub const Session = struct {
         var tokens_pos_buf: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, .replicated);
         defer tokens_pos_buf.deinit();
 
+        const seqlen_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(all_tokens.len)}));
+        var seqlen_buf: zml.Buffer = try .fromSlice(self.io, self.platform, seqlen_slice, .replicated);
+        defer seqlen_buf.deinit();
+
         try self.compiled_model.prefill.run(.{
             .allocator = self.allocator,
             .io = self.io,
@@ -104,6 +107,7 @@ pub const Session = struct {
             .model_buffers = self.model_buffers,
             .tokens_buf = &tokens_buf,
             .tokens_pos_buf = &tokens_pos_buf,
+            .seqlen_buf = &seqlen_buf,
             .rng_buf = &self.rng_buf,
             .cache_buffers = &self.cache_buffers,
             .attention_metadata_buffers = self.attention_metadata_buffers,
@@ -120,6 +124,10 @@ pub const Session = struct {
 
         const out_tokens_buffer: []u8 = try self.allocator.alloc(u8, 1024);
         defer self.allocator.free(out_tokens_buffer);
+
+        const seqlen_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
+        var seqlen_buf: zml.Buffer = try .fromSlice(self.io, self.platform, seqlen_slice, .replicated);
+        defer seqlen_buf.deinit();
 
         const think_start = self.tokenizer.tokenId("<think>") orelse return error.NoSuchToken;
         const think_end = self.tokenizer.tokenId("</think>") orelse return error.NoSuchToken;
@@ -158,6 +166,7 @@ pub const Session = struct {
                 .model_buffers = self.model_buffers,
                 .tokens_buf = &current_token_buffer,
                 .tokens_pos_buf = &token_pos_buffer,
+                .seqlen_buf = &seqlen_buf,
                 .rng_buf = &self.rng_buf,
                 .cache_buffers = &self.cache_buffers,
                 .attention_metadata_buffers = self.attention_metadata_buffers,

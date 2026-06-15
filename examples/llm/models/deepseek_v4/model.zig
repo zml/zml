@@ -911,11 +911,13 @@ pub const Attention = struct {
         self: Attention,
         x: zml.Tensor,
         offset_idx: zml.Tensor,
+        actual_seqlen: zml.Tensor,
         layer_idx: zml.Tensor,
         cache: Cache,
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, Cache } {
+        _ = actual_seqlen; // autofix
         // shape(x) = [batch, seq, d]
         const precomputed_freqs_cis = precompute_yarn(self.rope_head_dim, self.rope_opts);
         const freqs_cis = blk: {
@@ -1152,10 +1154,10 @@ pub fn sparse_attn(
 
 const MoE = struct {
     router: Gate,
-    gate_up: zml.Tensor,
-    gate_up_scale: zml.Tensor,
-    down: zml.Tensor,
-    down_scale: zml.Tensor,
+    // gate_up: zml.Tensor,
+    // gate_up_scale: zml.Tensor,
+    // down: zml.Tensor,
+    // down_scale: zml.Tensor,
     shared_experts: SharedExpert,
     block_size: u32,
     activation_threshold: f32,
@@ -1164,13 +1166,14 @@ const MoE = struct {
         _ = allocator; // autofix
 
         const experts_store = store.withPrefix("experts");
+        _ = experts_store; // autofix
 
         return .{
             .router = .init(store.withPrefix("gate"), config, i),
-            .gate_up = experts_store.createTensor("w13.weight", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
-            .gate_up_scale = experts_store.createTensor("w13.scale", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
-            .down = experts_store.createTensor("w2.weight", .{ .expert, .d, .dout }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
-            .down_scale = experts_store.createTensor("w2.scale", .{ .expert, .d, .dout }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
+            // .gate_up = experts_store.createTensor("w13.weight", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
+            // .gate_up_scale = experts_store.createTensor("w13.scale", .{ .expert, .dout, .d }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
+            // .down = experts_store.createTensor("w2.weight", .{ .expert, .d, .dout }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
+            // .down_scale = experts_store.createTensor("w2.scale", .{ .expert, .d, .dout }, .{ .expert = .experts, .dout = .replicated, .d = .replicated }),
             .shared_experts = .init(store.withPrefix("shared_experts"), config),
             .block_size = @intCast(config.quantization_config.weight_block_size[0]),
             .activation_threshold = config.swiglu_limit,
@@ -1185,10 +1188,10 @@ const MoE = struct {
     pub fn unloadBuffers(self: *zml.Bufferized(MoE), allocator: std.mem.Allocator) void {
         _ = allocator; // autofix
         Gate.unloadBuffers(&self.router);
-        self.gate_up.deinit();
-        self.gate_up_scale.deinit();
-        self.down.deinit();
-        self.down_scale.deinit();
+        // self.gate_up.deinit();
+        // self.gate_up_scale.deinit();
+        // self.down.deinit();
+        // self.down_scale.deinit();
         SharedExpert.unloadBuffers(&self.shared_experts);
     }
 
@@ -1230,25 +1233,27 @@ const MoE = struct {
         _ = moe_metadata; // autofix
         _ = moe_parameters; // autofix
         const topk_weight, const topk_ids = self.router.forward(x, input_ids);
+        _ = topk_ids; // autofix
+        _ = topk_weight; // autofix
 
         var y = zml.Tensor.zeroes(x.shape().withDtype(.f32));
 
-        for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
-            const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
-            const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
-            const routed = forwardRoutedExpert(
-                x,
-                weight,
-                self.gate_up.gather(.{ .expert = expert_ids }, .{}),
-                self.gate_up_scale.gather(.{ .expert = expert_ids }, .{}),
-                self.down.gather(.{ .expert = expert_ids }, .{}),
-                self.down_scale.gather(.{ .expert = expert_ids }, .{}),
-                self.block_size,
-                self.activation_threshold,
-            ).convert(.f32);
-
-            y = y.add(routed);
-        }
+        // for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
+        //     const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
+        //     const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
+        //     const routed = forwardRoutedExpert(
+        //         x,
+        //         weight,
+        //         self.gate_up.gather(.{ .expert = expert_ids }, .{}),
+        //         self.gate_up_scale.gather(.{ .expert = expert_ids }, .{}),
+        //         self.down.gather(.{ .expert = expert_ids }, .{}),
+        //         self.down_scale.gather(.{ .expert = expert_ids }, .{}),
+        //         self.block_size,
+        //         self.activation_threshold,
+        //     ).convert(.f32);
+        //
+        //     y = y.add(routed);
+        // }
 
         y = y.add(self.shared_experts.forward(x).convert(.f32));
         return y.convert(x.dtype());
@@ -1538,6 +1543,7 @@ pub const Layer = struct {
         x: zml.Tensor,
         tokens: zml.Tensor,
         tokens_idx_offset: zml.Tensor,
+        seqlen: zml.Tensor,
         layer_idx: zml.Tensor,
         cache: Cache,
         attention_metadata: zml.attention.attention.Metadata,
@@ -1548,7 +1554,7 @@ pub const Layer = struct {
         // x: [batch, seq, hc, d]
         var x_, const post, const comb = self.hc_pre(x, self.hc_attn);
         x_ = self.attn_norm.forward(x_);
-        x_, const cache_ = self.attn.forward(x_, tokens_idx_offset, layer_idx, cache, attention_metadata, attention_parameters);
+        x_, const cache_ = self.attn.forward(x_, tokens_idx_offset, seqlen, layer_idx, cache, attention_metadata, attention_parameters);
         x_ = hc_post(x_, x, post, comb);
 
         var x_2, const post_2, const comb_2 = self.hc_pre(x_, self.hc_ffn);
@@ -1650,8 +1656,8 @@ pub const Model = struct {
     lm_head: LmHead,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
-        // const layers = try allocator.alloc(Layer, 4);
-        const layers = try allocator.alloc(Layer, config.num_hidden_layers);
+        const layers = try allocator.alloc(Layer, 10);
+        // const layers = try allocator.alloc(Layer, config.num_hidden_layers);
 
         for (layers, 0..) |*layer, i| {
             const layer_store = store.withPrefix("layers").withLayer(i);
@@ -1721,6 +1727,7 @@ pub const Model = struct {
         self: Model,
         tokens: zml.Tensor,
         tokens_idx_offset: zml.Tensor,
+        seqlen: zml.Tensor,
         rng: zml.Tensor.Rng,
         cache: Cache,
         attention_metadata: zml.attention.attention.Metadata,
@@ -1738,6 +1745,7 @@ pub const Model = struct {
                 hidden,
                 tokens,
                 tokens_idx_offset,
+                seqlen,
                 layer_idx,
                 cache_,
                 attention_metadata,
