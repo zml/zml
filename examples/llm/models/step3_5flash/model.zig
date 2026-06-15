@@ -122,12 +122,6 @@ pub const Config = struct {
     }
 
     /// Number of transformer layers executed in the standard forward pass.
-    /// `num_hidden_layers` counts both the real transformer layers and the
-    /// trailing multi-token-prediction (MTP) speculative layers. HF's
-    /// `Step3p5Model.forward` only runs the first `num_hidden_layers` layers
-    /// from the iter list, but the activation fixture (and standard inference)
-    /// is generated after dropping the MTP layers, so the effective count is
-    /// `num_hidden_layers - num_nextn_predict_layers`.
     pub fn numMainLayers(self: Config) u32 {
         return self.num_hidden_layers - self.num_nextn_predict_layers;
     }
@@ -584,11 +578,7 @@ pub const Attn = struct {
         const rope_idx = @min(layer_idx, default_config.rope_theta.len - 1);
         const layer_theta = default_config.rope_theta[rope_idx];
 
-        // HF patched modeling: a layer gets the scaled rope ONLY if its
-        // `layer_types[idx]` is listed in `yarn_only_types`. For Step 3.5 Flash
-        // that's `["full_attention"]`, so sliding_attention layers (36/48)
-        // use plain unscaled RoPE. Using llama3 scaling for every layer was
-        // skewing inv_freq on 75% of layers and compounding into total drift.
+        // HF patched modeling: a layer gets the scaled rope ONLY if its layer_types[idx] is listed in `yarn_only_types`
         const layer_type_name: []const u8 = switch (kind) {
             .full_attention => "full_attention",
             .sliding_attention => "sliding_attention",
@@ -695,8 +685,7 @@ pub const Attn = struct {
 
         const dtype = q.dtype();
 
-        // Position ids must be absolute and not relative to current chunk.
-        // token_index is the cache_position vector; its first element is the
+        // Position ids must be absolute and not relative to current chunk. token_index is the cache_position vector; its first element is the
         // absolute start, and positions = arange(S) + start.
         const position_ids = blk: {
             const base = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
@@ -751,7 +740,7 @@ pub const Attn = struct {
         g_proj: zml.Tensor,
         q_norm: zml.Tensor,
         k_norm: zml.Tensor,
-        // HF dumper records q/k pre-rope in [b,h,s,hd] layout (rope.q_in, rope.k_in)
+        // q/k pre-rope in [b,h,s,hd] layout (rope.q_in, rope.k_in)
         q_pre_rope_hf: zml.Tensor,
         k_pre_rope_hf: zml.Tensor,
         // cos/sin in HF layout [1,s,hd]
@@ -998,7 +987,6 @@ pub const Mlp = struct {
     up_proj: zml.nn.Linear, // (dim -> hidden_dim)
     gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
     down_proj: zml.nn.Linear, // (hidden_dim -> dim)
-    /// `0` means no clamp (matches the sentinel used in `config.swiglu_limits`).
     limit: f32,
 
     pub fn init(store: zml.io.TensorStore.View, swiglu_limit: f32) Mlp {
@@ -1056,11 +1044,7 @@ pub const RmsNorm = struct {
         self.weight.deinit();
     }
 
-    /// L2 normalization of input tensor along the given axis.
-    /// Step 3.5 Flash uses offset-style RMSNorm: the effective scale is `1 + weight`,
-    /// not just `weight`. Keep the entire pipeline in fp32 and only cast back to
-    /// the input dtype at the end — `weight` is typically near 0 and `1 + weight`
-    /// rounds to 1.0 in bf16 (epsilon ≈ 0.0078 at 1.0), wiping out the scale.
+    /// L2 normalization of input tensor along the given axis
     pub fn forward(self: RmsNorm, input: zml.Tensor, comptime axis: anytype) zml.Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{axis});
         const ax = x.axis(axis);
@@ -1106,13 +1090,6 @@ pub const Router = struct {
     }
 
     /// Returns (topk weights, topk indices) with shapes {.b, .s, .topk}.
-    /// Matches `Step3p5MoEMLP.router_bias_func`:
-    ///   logits = x @ W^T
-    ///   probs  = sigmoid(logits)        (in fp32)
-    ///   biased = probs + router_bias    (only used to choose indices)
-    ///   ids    = topk(biased)
-    ///   wts    = gather(probs, ids)     (from UNBIASED probs)
-    ///   if renormalize: wts /= sum(wts) + 1e-20
     pub fn forward(self: Router, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         // Match HF reference: always run gate matmul + sigmoid in fp32.
         const tagged = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
@@ -1203,6 +1180,7 @@ pub const Moe = struct {
     pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
         return self.forwardLoop(x);
 
+        // TODO: open issue re: Louis' forward Moe kernel
         // if (self.layer_idx >= 42 and self.layer_idx <= 44) {
         //     return self.forwardLoop(x);
         // }
@@ -1370,12 +1348,11 @@ pub const LoadedModel = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
-        backend: zml.attention.attention.Backend,
         shardings: common.Shardings,
         seqlen: usize,
         progress: *std.Progress.Node,
-    ) !LoadedModel {
-        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, shardings);
+    ) !inference.CompiledModel {
+        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), shardings);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
 };
