@@ -157,11 +157,7 @@ pub const SimilarityMatrix = struct {
         const row = @min(i, j);
         const col = @max(i, j);
         const index = self.row_offsets[row] + col - row;
-        return switch (self.data.dtype()) {
-            .f16 => @floatCast(self.data.constItems(f16)[index]),
-            .f32 => self.data.constItems(f32)[index],
-            else => unreachable,
-        };
+        return self.data.constItems(f32)[index];
     }
 
     pub fn initOffsets(self: *SimilarityMatrix) void {
@@ -174,13 +170,7 @@ pub const SimilarityMatrix = struct {
 
     pub fn nearestNeighbor(self: *SimilarityMatrix, row: usize, pos: usize) usize {
         const index = row * self.k + pos;
-        return switch (self.nearest_neighbors.dtype()) {
-            .i32 => @intCast(self.nearest_neighbors.constItems(i32)[index]),
-            .u32 => @intCast(self.nearest_neighbors.constItems(u32)[index]),
-            .i64 => @intCast(self.nearest_neighbors.constItems(i64)[index]),
-            .u64 => @intCast(self.nearest_neighbors.constItems(u64)[index]),
-            else => unreachable,
-        };
+        return @intCast(self.nearest_neighbors.constItems(i64)[index]);
     }
 
     pub fn deinit(self: *SimilarityMatrix, allocator: std.mem.Allocator) void {
@@ -264,9 +254,10 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer model_handler.deinit(zml_handler.allocator);
     defer model_handler.unloadBuffers();
 
-    try analyzeTopRows(zml_handler, &model_handler);
+    //try analyzeTopRows(zml_handler, &model_handler);
 
     zml_handler.tic(&zml_handler.timers.similarity_matrix);
+    //var similarity_matrix = try computeSimilarityMatrix(zml_handler, &model_handler; true);
     var similarity_matrix = try loadSimilarityMatrix(zml_handler, &model_handler, true);
     defer similarity_matrix.deinit(zml_handler.allocator);
     zml_handler.toc(&zml_handler.timers.similarity_matrix);
@@ -293,7 +284,7 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     std.log.info("Found {d} junk rows", .{junk_rows.len});
 
     std.log.info("Get medoid", .{});
-    const medoid = try getMedoid(zml_handler, &model_handler);
+    const medoid = try getMedoid(zml_handler, &model_handler, junk_rows);
     std.log.info("Medoid: {d}", .{medoid});
 
     std.log.info("Init graph", .{});
@@ -311,6 +302,58 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     g.extendToNsw();
     zml_handler.toc(&zml_handler.timers.nsw_graph);
 
+    std.log.info("NSW extension : nb edges: {d}", .{g.nbEdges()});
+    g.testNswExtention();
+
+    try testEmbedGraphSearch(zml_handler, &model_handler, &g, false);
+}
+
+pub fn run(zml_handler: *Zml_handler) !void {
+    var model_handler = try model_.Model_handler.init(zml_handler);
+    defer model_handler.deinit(zml_handler.allocator);
+    defer model_handler.unloadBuffers();
+
+    zml_handler.tic(&zml_handler.timers.similarity_matrix);
+    var similarity_matrix = try computeSimilarityMatrix(zml_handler, &model_handler);
+    defer similarity_matrix.deinit(zml_handler.allocator);
+    zml_handler.toc(&zml_handler.timers.similarity_matrix);
+
+    std.log.info("Get lm_head", .{});
+    const lm_head = try getLmHead(zml_handler, &model_handler);
+    defer lm_head.free(zml_handler.allocator);
+
+    std.log.info("Get lm_head_normalized", .{});
+    const lm_head_normalized = try getLmHeadNormalized(zml_handler, &model_handler);
+    defer lm_head_normalized.free(zml_handler.allocator);
+
+    std.log.info("Get lm_head row norms", .{});
+    const lm_head_row_norms = try getLmHeadRowNorms(zml_handler, &model_handler);
+    defer lm_head_row_norms.free(zml_handler.allocator);
+
+    std.log.info("Get junk rows", .{});
+    zml_handler.tic(&zml_handler.timers.junk_rows);
+    const junk_rows = try getJunkRows(zml_handler, &model_handler);
+    defer zml_handler.allocator.free(junk_rows);
+    zml_handler.toc(&zml_handler.timers.junk_rows);
+    std.log.info("Found {d} junk rows", .{junk_rows.len});
+
+    std.log.info("Get medoid", .{});
+    const medoid = try getMedoid(zml_handler, &model_handler, junk_rows);
+    std.log.info("Medoid: {d}", .{medoid});
+
+    std.log.info("Init graph", .{});
+    const graph_params: graph.GraphParams = .{};
+    var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, medoid, graph_params);
+    defer g.deinit();
+
+    zml_handler.tic(&zml_handler.timers.knn_graph);
+    g.setNearestNeighbors();
+    zml_handler.toc(&zml_handler.timers.knn_graph);
+    std.log.info("Exact kNN : nb edges: {d}", .{g.nbEdges()});
+
+    zml_handler.tic(&zml_handler.timers.nsw_graph);
+    g.extendToNsw();
+    zml_handler.toc(&zml_handler.timers.nsw_graph);
     std.log.info("NSW extension : nb edges: {d}", .{g.nbEdges()});
 
     var llm = try llm_.Llm_handler.init(zml_handler);
@@ -609,8 +652,20 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Mo
     for (0..1000) |_| {
         const i = random.uintLessThan(usize, n);
         const j = random.uintLessThan(usize, n);
-
-        const expected = lmHeadDot(lm_head_items, d, i, j, normalized_rows);
+        const u = lm_head_items[i * d ..][0..d];
+        const v = lm_head_items[j * d ..][0..d];
+        var dot: f32 = 0;
+        var u_norm2: f32 = 0;
+        var v_norm2: f32 = 0;
+        for (u, v) |u_value, v_value| {
+            dot += u_value * v_value;
+            u_norm2 += u_value * u_value;
+            v_norm2 += v_value * v_value;
+        }
+        if (normalized_rows) {
+            dot /= (@sqrt(u_norm2) * @sqrt(v_norm2));
+        }
+        const expected = dot;
         const actual = similarity_matrix.dist(i, j);
         const abs_diff = @abs(expected - actual);
         const rel_diff = abs_diff / @max(@abs(expected), 1e-6);
@@ -618,8 +673,9 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Mo
         max_rel_diff = @max(max_rel_diff, rel_diff);
     }
 
-    std.log.info("Similarity matrix values test passed: 1000 random pairs, max_abs_diff={d}, max_rel_diff={d}", .{ max_abs_diff, max_rel_diff });
-
+    std.log.info("1000 random pairs, max_abs_diff={d}, max_rel_diff={d}", .{ max_abs_diff, max_rel_diff });
+    std.log.info("Test kNN", .{});
+    
     const candidates = try zml_handler.allocator.alloc(MatrixCandidate, n - 1);
     defer zml_handler.allocator.free(candidates);
     var knn_mismatches: usize = 0;
@@ -663,21 +719,289 @@ const MatrixCandidate = struct {
     }
 };
 
-fn lmHeadDot(lm_head_items: []const f32, d: usize, i: usize, j: usize, normalized_rows: bool) f32 {
-    const u = lm_head_items[i * d ..][0..d];
-    const v = lm_head_items[j * d ..][0..d];
-    var dot: f32 = 0;
-    var u_norm2: f32 = 0;
-    var v_norm2: f32 = 0;
-    for (u, v) |u_value, v_value| {
-        dot += u_value * v_value;
-        u_norm2 += u_value * u_value;
-        v_norm2 += v_value * v_value;
+pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, g: *graph.Graph, log_each_search: bool) !void {
+    const top_k = 16;
+    std.log.info("Test embed graph search", .{});
+
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+    var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
+    defer tokenizer.deinit();
+
+    const embeds_path = try std.fmt.allocPrint(zml_handler.allocator, "{s}/qwen_embeds.safetensors", .{zml_handler.uris.checkpoint});
+    defer zml_handler.allocator.free(embeds_path);
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, embeds_path);
+    defer registry.deinit();
+
+    const d = g.dim;
+    const vocab_size = g.n;
+    const embed_slice = try zml.Slice.alloc(zml_handler.allocator, .init(.{ .s = 1, .d = d }, .f32));
+    defer embed_slice.free(zml_handler.allocator);
+    const embed_items = embed_slice.items(f32);
+
+    const prob_by_token = try zml_handler.allocator.alloc(f32, vocab_size);
+    defer zml_handler.allocator.free(prob_by_token);
+
+    var total_count: usize = 0;
+    var found_top1_count: usize = 0;
+    var graph_first_is_top1_count: usize = 0;
+    var total_real_top16_mass: f64 = 0.0;
+    var total_graph_top16_mass: f64 = 0.0;
+    var total_mass_ratio: f64 = 0.0;
+    var min_mass_ratio: f64 = std.math.inf(f64);
+    var max_mass_ratio: f64 = 0.0;
+    var total_visited: usize = 0;
+    var min_visited: usize = std.math.maxInt(usize);
+    var max_visited: usize = 0;
+
+    var registry_it = registry.iterator();
+    while (registry_it.next()) |entry| {
+        const task_name = entry.key_ptr.*;
+        const task_embeds = try loadSafetensorSliceFromRegistry(zml_handler, &registry, task_name);
+        defer task_embeds.free(zml_handler.allocator);
+        if (task_embeds.dtype() != .f32) return error.UnsupportedEmbeddingDtype;
+
+        const embed_count = embeddingCount(task_embeds, d) orelse return error.InvalidEmbeddingShape;
+        std.log.info("Test embed graph search task={s} embeddings={d} shape={f}", .{ task_name, embed_count, task_embeds.shape });
+        for (0..embed_count) |embed_index| {
+            copyEmbedding(task_embeds, d, embed_index, embed_items);
+
+            var embed_buffer = try zml.Buffer.fromSlice(zml_handler.io, zml_handler.platform, embed_slice, .replicated);
+            defer embed_buffer.deinit();
+
+            model_handler.exes.score_args.set(.{ model_handler.model_buffers, embed_buffer });
+            model_handler.exes.score_exe.call(model_handler.exes.score_args, &model_handler.exes.score_results);
+
+            var sorted_probas_buffer: zml.Buffer = undefined;
+            var sorted_indices_buffer: zml.Buffer = undefined;
+            var sorted_similarities_buffer: zml.Buffer = undefined;
+            model_handler.exes.score_results.fill(.{ &sorted_probas_buffer, &sorted_indices_buffer, &sorted_similarities_buffer });
+            defer sorted_probas_buffer.deinit();
+            defer sorted_indices_buffer.deinit();
+            defer sorted_similarities_buffer.deinit();
+
+            const sorted_probas_slice = try sorted_probas_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+            defer sorted_probas_slice.free(zml_handler.allocator);
+            const sorted_indices_slice = try sorted_indices_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+            defer sorted_indices_slice.free(zml_handler.allocator);
+            const sorted_similarities_slice = try sorted_similarities_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+            defer sorted_similarities_slice.free(zml_handler.allocator);
+
+            const sorted_probas = sorted_probas_slice.constItems(f32);
+            const sorted_indices = sorted_indices_slice.constItems(i32);
+            const sorted_similarities = sorted_similarities_slice.constItems(f32);
+            std.debug.assert(sorted_probas.len == vocab_size);
+            std.debug.assert(sorted_indices.len == vocab_size);
+            std.debug.assert(sorted_similarities.len == vocab_size);
+
+            for (sorted_indices, sorted_probas) |token_id, proba| {
+                prob_by_token[@intCast(token_id)] = proba;
+            }
+
+            if (log_each_search) {
+                std.log.info("Embed graph search task={s} index={d}", .{ task_name, embed_index });
+                try g.greedySearchWithLog(embed_items, tokenizer);
+            } else {
+                g.greedySearch(embed_items);
+            }
+
+            const nb_visited = g.nb_visited;
+            total_visited += nb_visited;
+            min_visited = @min(min_visited, nb_visited);
+            max_visited = @max(max_visited, nb_visited);
+
+            const real_top1: usize = @intCast(sorted_indices[0]);
+            const graph_top_count = @min(g.L, top_k);
+            var real_top16_mass: f64 = 0.0;
+            for (0..@min(top_k, sorted_probas.len)) |i| {
+                real_top16_mass += sorted_probas[i];
+            }
+            var graph_top16_mass: f64 = 0.0;
+            var found_top1 = false;
+            for (0..graph_top_count) |i| {
+                const node = g.visited[i].node;
+                graph_top16_mass += prob_by_token[node];
+                if (node == real_top1) found_top1 = true;
+            }
+            if (found_top1) found_top1_count += 1;
+            if (g.L > 0 and g.visited[0].node == real_top1) graph_first_is_top1_count += 1;
+            const mass_ratio = graph_top16_mass / real_top16_mass;
+            total_real_top16_mass += real_top16_mass;
+            total_graph_top16_mass += graph_top16_mass;
+            total_mass_ratio += mass_ratio;
+            min_mass_ratio = @min(min_mass_ratio, mass_ratio);
+            max_mass_ratio = @max(max_mass_ratio, mass_ratio);
+            total_count += 1;
+
+            if (log_each_search) {
+                try logEmbedGraphSampling(tokenizer, embed_items, g, sorted_probas, sorted_indices, sorted_similarities, prob_by_token, top_k);
+                std.log.info("Embed graph search stats task={s} index={d} real_top16_mass={d:.8} graph_top16_mass={d:.8} ratio={d:.8} found_top1={}", .{
+                    task_name,
+                    embed_index,
+                    real_top16_mass,
+                    graph_top16_mass,
+                    mass_ratio,
+                    found_top1,
+                });
+            }
+        }
     }
-    if (normalized_rows) {
-        dot /= (@sqrt(u_norm2) * @sqrt(v_norm2));
+
+    const inv_total = if (total_count == 0) 0.0 else 1.0 / @as(f64, @floatFromInt(total_count));
+    std.log.info(
+        "Embed graph search: total={d} found_top1_in_graph_top16={d}/{d} ({d:.4}%) graph_first_is_top1={d}/{d} ({d:.4}%)",
+        .{
+            total_count,
+            found_top1_count,
+            total_count,
+            100.0 * @as(f64, @floatFromInt(found_top1_count)) * inv_total,
+            graph_first_is_top1_count,
+            total_count,
+            100.0 * @as(f64, @floatFromInt(graph_first_is_top1_count)) * inv_total,
+        },
+    );
+    std.log.info(
+        "Embed graph search top16 mass: real_avg={d:.8} graph_avg={d:.8} ratio_min={d:.8} ratio_max={d:.8} ratio_avg={d:.8}",
+        .{
+            total_real_top16_mass * inv_total,
+            total_graph_top16_mass * inv_total,
+            if (total_count == 0) 0.0 else min_mass_ratio,
+            max_mass_ratio,
+            total_mass_ratio * inv_total,
+        },
+    );
+    std.log.info(
+        "Embed graph search nb_visited: min={d} max={d} avg={d:.2}",
+        .{
+            if (total_count == 0) 0 else min_visited,
+            max_visited,
+            @as(f64, @floatFromInt(total_visited)) * inv_total,
+        },
+    );
+}
+
+
+fn embeddingCount(embeds: zml.Slice, d: usize) ?usize {
+    const dims = embeds.shape.dims();
+    return switch (embeds.shape.rank()) {
+        1 => if (@as(usize, @intCast(dims[0])) == d) 1 else null,
+        2 => if (@as(usize, @intCast(dims[0])) == d) @intCast(dims[1]) else if (@as(usize, @intCast(dims[1])) == d) @intCast(dims[0]) else null,
+        else => null,
+    };
+}
+
+fn copyEmbedding(embeds: zml.Slice, d: usize, embed_index: usize, out: []f32) void {
+    std.debug.assert(out.len == d);
+    const dims = embeds.shape.dims();
+    const items = embeds.constItems(f32);
+    switch (embeds.shape.rank()) {
+        1 => @memcpy(out, items[0..d]),
+        2 => {
+            if (@as(usize, @intCast(dims[0])) == d) {
+                const embed_count: usize = @intCast(dims[1]);
+                std.debug.assert(embed_index < embed_count);
+                for (0..d) |i| out[i] = items[i * embed_count + embed_index];
+            } else {
+                std.debug.assert(@as(usize, @intCast(dims[1])) == d);
+                const start = embed_index * d;
+                @memcpy(out, items[start..][0..d]);
+            }
+        },
+        else => unreachable,
     }
-    return dot;
+}
+
+fn logEmbedGraphSampling(tokenizer: zml.tokenizer.Tokenizer, embedding: []const f32, g: *graph.Graph, sorted_probas: []const f32, sorted_indices: []const i32, sorted_similarities: []const f32, prob_by_token: []const f32, top_k: usize) !void {
+    const row_norms = g.lm_head_row_norms.constItems(f32);
+    const nb_real = @min(sorted_probas.len, top_k);
+    std.log.info("Real sampling distribution (top {d})", .{nb_real});
+    printEmbedSamplingHeader();
+    for (0..nb_real) |i| {
+        const token_id: usize = @intCast(sorted_indices[i]);
+        try printEmbedSamplingRow(tokenizer, i + 1, token_id, g.is_junk[token_id], sorted_probas[i], row_norms[token_id], sorted_similarities[i]);
+    }
+
+    const embedding_norm = embeddingNorm(embedding);
+    const nb_graph = @min(g.L, top_k);
+    std.log.info("Graph sampling distribution over {d} visited nodes (top {d}, full probabilities)", .{ g.L, nb_graph });
+    printEmbedSamplingHeader();
+    for (0..nb_graph) |i| {
+        const token_id = g.visited[i].node;
+        try printEmbedSamplingRow(tokenizer, i + 1, token_id, g.is_junk[token_id], prob_by_token[token_id], row_norms[token_id], g.visited[i].similarity / embedding_norm);
+    }
+}
+
+fn printEmbedSamplingHeader() void {
+    std.log.info("{s:>6}  {s:>10}  {s:>7}  {s:>14}  {s:>14}  {s:>14}  {s}", .{ "rank", "token_id", "is_junk", "proba", "row_norm", "similarity", "token" });
+    std.log.info("{s:>6}  {s:>10}  {s:>7}  {s:>14}  {s:>14}  {s:>14}  {s}", .{ "------", "----------", "-------", "--------------", "--------------", "--------------", "-----" });
+}
+
+fn printEmbedSamplingRow(tokenizer: zml.tokenizer.Tokenizer, rank: usize, token_id: usize, is_junk: bool, proba: f32, row_norm: f32, similarity: f32) !void {
+    var decoded_buf: [512]u8 = undefined;
+    const decoded = try decodeToken(tokenizer, @intCast(token_id), &decoded_buf);
+    var escaped_buf: [512]u8 = undefined;
+    const escaped = escapeTokenText(decoded, &escaped_buf);
+    std.log.info("{d:>6}  {d:>10}  {d:>7}  {d:>14.8}  {d:>14.6}  {d:>14.8}  {s}", .{ rank, token_id, @intFromBool(is_junk), proba, row_norm, similarity, escaped });
+}
+
+fn embeddingNorm(embedding: []const f32) f32 {
+    var norm2: f32 = 0.0;
+    for (embedding) |x| norm2 += x * x;
+    return @sqrt(norm2);
+}
+
+pub fn testTokenGraphSearch(lm_head: zml.Slice, g: *graph.Graph) void {
+    std.log.info("Test token graph search", .{});
+    const n: usize = @intCast(lm_head.shape.dim(.voc));
+    const d: usize = @intCast(lm_head.shape.dim(.d));
+    std.debug.assert(n == g.n);
+    std.debug.assert(d == g.dim);
+
+    const rows = lm_head.constItems(f32);
+    var exact_first_count: usize = 0;
+    var non_junk_count: usize = 0;
+    var junk_count: usize = 0;
+    var total_visited: usize = 0;
+    var min_visited: usize = std.math.maxInt(usize);
+    var max_visited: usize = 0;
+
+    for (0..n) |row_id| {
+        const query = rows[row_id * d ..][0..d];
+        g.greedySearch(query);
+        const nb_visited = g.nb_visited;
+        total_visited += nb_visited;
+        min_visited = @min(min_visited, nb_visited);
+        max_visited = @max(max_visited, nb_visited);
+
+        if (g.is_junk[row_id]) {
+            junk_count += 1;
+        } else {
+            non_junk_count += 1;
+            if (g.L > 0 and g.visited[0].node == row_id) {
+                exact_first_count += 1;
+            }
+        }
+
+        if (row_id == 0 or (row_id + 1) % 10000 == 0 or row_id + 1 == n) {
+            std.log.info("Token graph search row {d}/{d}", .{ row_id + 1, n });
+        }
+    }
+
+    const avg_visited = @as(f64, @floatFromInt(total_visited)) / @as(f64, @floatFromInt(n));
+    const exact_rate = if (non_junk_count == 0) 0.0 else @as(f64, @floatFromInt(exact_first_count)) / @as(f64, @floatFromInt(non_junk_count));
+    std.log.info(
+        "Token graph search: total={d} non_junk={d} junk={d} exact_first={d}/{d} ({d:.4}%) nb_visited min={d} max={d} avg={d:.2}",
+        .{
+            n,
+            non_junk_count,
+            junk_count,
+            exact_first_count,
+            non_junk_count,
+            100.0 * exact_rate,
+            min_visited,
+            max_visited,
+            avg_visited,
+        },
+    );
 }
 
 
@@ -705,8 +1029,20 @@ pub fn getLmHeadRowNorms(zml_handler: *Zml_handler, model_handler: *model_.Model
     return lm_head_row_norms_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
 }
 
-pub fn getMedoid(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !usize {
-    model_handler.exes.get_medoid_args.set(.{model_handler.model_buffers});
+pub fn getMedoid(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, junk_rows: []const usize) !usize {
+    const n: usize = @intCast(model_handler.model.shape().dim(.voc));
+    const sentinel: u64 = @intCast(n);
+    const junk_rows_slice = try zml.Slice.alloc(zml_handler.allocator, .init(.{ .junk = n }, .u64));
+    defer junk_rows_slice.free(zml_handler.allocator);
+    @memset(junk_rows_slice.items(u64), sentinel);
+    for (junk_rows, 0..) |row, i| {
+        junk_rows_slice.items(u64)[i] = @intCast(row);
+    }
+
+    var junk_rows_buffer = try zml.Buffer.fromSlice(zml_handler.io, zml_handler.platform, junk_rows_slice, .replicated);
+    defer junk_rows_buffer.deinit();
+
+    model_handler.exes.get_medoid_args.set(.{ model_handler.model_buffers, junk_rows_buffer });
     model_handler.exes.get_medoid_exe.call(model_handler.exes.get_medoid_args, &model_handler.exes.get_medoid_results);
     var medoid_buffer = model_handler.exes.get_medoid_results.get(zml.Buffer);
     defer medoid_buffer.deinit();
@@ -735,6 +1071,152 @@ pub fn getJunkRows(zml_handler: *Zml_handler, model_handler: *model_.Model_handl
     return junk_rows.toOwnedSlice(zml_handler.allocator);
 }
 
+pub fn getExcludedRows(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) ![]usize {
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+    var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
+    defer tokenizer.deinit();
+
+    const vocab_size: usize = @intCast(model_handler.model.shape().dim(.voc));
+    var excluded_rows: std.ArrayList(usize) = try .initCapacity(zml_handler.allocator, 0);
+    errdefer excluded_rows.deinit(zml_handler.allocator);
+
+    var decoded_buf: [1024]u8 = undefined;
+    var discarded_count: usize = 0;
+    var empty_count: usize = 0;
+    for (0..vocab_size) |token_id| {
+        const decoded = decodeToken(tokenizer, @intCast(token_id), &decoded_buf) catch continue;
+        if (decoded.len == 0) {
+            empty_count += 1;
+            continue;
+        }
+        if (shouldExcludeDecodedToken(decoded)) {
+            try excluded_rows.append(zml_handler.allocator, token_id);
+            discarded_count += 1;
+        }
+    }
+
+    std.log.info("Excluded vocabulary rows: discarded={d} empty={d} kept={d} total={d}", .{
+        discarded_count,
+        empty_count,
+        vocab_size - discarded_count,
+        vocab_size,
+    });
+    return excluded_rows.toOwnedSlice(zml_handler.allocator);
+}
+
+fn shouldExcludeDecodedToken(text: []const u8) bool {
+    var view = std.unicode.Utf8View.init(text) catch return false;
+    var it = view.iterator();
+    var has_non_space = false;
+    while (it.nextCodepoint()) |codepoint| {
+        if (isUnicodeWhitespace(codepoint)) continue;
+        has_non_space = true;
+        if (!codepointInExcludedRanges(codepoint)) return false;
+    }
+    return has_non_space;
+}
+
+fn codepointInExcludedRanges(codepoint: u21) bool {
+    for (excluded_unicode_ranges) |range| {
+        if (range.start <= codepoint and codepoint <= range.end) return true;
+    }
+    return false;
+}
+
+fn isUnicodeWhitespace(codepoint: u21) bool {
+    return switch (codepoint) {
+        0x0009...0x000D,
+        0x0020,
+        0x0085,
+        0x00A0,
+        0x1680,
+        0x2000...0x200A,
+        0x2028,
+        0x2029,
+        0x202F,
+        0x205F,
+        0x3000,
+        => true,
+        else => false,
+    };
+}
+
+const UnicodeRange = struct {
+    start: u21,
+    end: u21,
+};
+
+const excluded_unicode_ranges = [_]UnicodeRange{
+    .{ .start = 0x3400, .end = 0x4DBF },
+    .{ .start = 0x4E00, .end = 0x9FFF },
+    .{ .start = 0x20000, .end = 0x2A6DF },
+    .{ .start = 0x2A700, .end = 0x2B73F },
+    .{ .start = 0x2B740, .end = 0x2B81F },
+    .{ .start = 0x2B820, .end = 0x2CEAF },
+    .{ .start = 0x2CEB0, .end = 0x2EBEF },
+    .{ .start = 0x30000, .end = 0x3134F },
+    .{ .start = 0xF900, .end = 0xFAFF },
+    .{ .start = 0x3040, .end = 0x309F },
+    .{ .start = 0x30A0, .end = 0x30FF },
+    .{ .start = 0x31F0, .end = 0x31FF },
+    .{ .start = 0xFF66, .end = 0xFF9F },
+    .{ .start = 0x1100, .end = 0x11FF },
+    .{ .start = 0x3130, .end = 0x318F },
+    .{ .start = 0xAC00, .end = 0xD7AF },
+    .{ .start = 0xA960, .end = 0xA97F },
+    .{ .start = 0xD7B0, .end = 0xD7FF },
+    .{ .start = 0x0400, .end = 0x052F },
+    .{ .start = 0x1C80, .end = 0x1C8F },
+    .{ .start = 0x2DE0, .end = 0x2DFF },
+    .{ .start = 0xA640, .end = 0xA69F },
+    .{ .start = 0x0600, .end = 0x06FF },
+    .{ .start = 0x0750, .end = 0x077F },
+    .{ .start = 0x0870, .end = 0x089F },
+    .{ .start = 0x08A0, .end = 0x08FF },
+    .{ .start = 0xFB50, .end = 0xFDFF },
+    .{ .start = 0xFE70, .end = 0xFEFF },
+    .{ .start = 0x0590, .end = 0x05FF },
+    .{ .start = 0x0900, .end = 0x097F },
+    .{ .start = 0xA8E0, .end = 0xA8FF },
+    .{ .start = 0x0980, .end = 0x09FF },
+    .{ .start = 0x0A00, .end = 0x0A7F },
+    .{ .start = 0x0A80, .end = 0x0AFF },
+    .{ .start = 0x0B80, .end = 0x0BFF },
+    .{ .start = 0x0C00, .end = 0x0C7F },
+    .{ .start = 0x0C80, .end = 0x0CFF },
+    .{ .start = 0x0D00, .end = 0x0D7F },
+    .{ .start = 0x0D80, .end = 0x0DFF },
+    .{ .start = 0x0E00, .end = 0x0E7F },
+    .{ .start = 0x0E80, .end = 0x0EFF },
+    .{ .start = 0x1780, .end = 0x17FF },
+    .{ .start = 0x19E0, .end = 0x19FF },
+    .{ .start = 0x1000, .end = 0x109F },
+    .{ .start = 0xA9E0, .end = 0xA9FF },
+    .{ .start = 0xAA60, .end = 0xAA7F },
+    .{ .start = 0x0F00, .end = 0x0FFF },
+    .{ .start = 0x1800, .end = 0x18AF },
+    .{ .start = 0x0530, .end = 0x058F },
+    .{ .start = 0x10A0, .end = 0x10FF },
+    .{ .start = 0x1C90, .end = 0x1CBF },
+    .{ .start = 0x2D00, .end = 0x2D2F },
+    .{ .start = 0x1200, .end = 0x137F },
+    .{ .start = 0x1380, .end = 0x139F },
+    .{ .start = 0x2D80, .end = 0x2DDF },
+    .{ .start = 0xAB00, .end = 0xAB2F },
+};
+
+
+pub fn loadSafetensorSliceFromRegistry(zml_handler: *Zml_handler, registry: *zml.safetensors.TensorRegistry, tensor_name: []const u8) !zml.Slice {
+    const tensor = registry.tensors.get(tensor_name) orelse return error.TensorNotFound;
+    const slice = try zml.Slice.alloc(zml_handler.allocator, tensor.shape);
+    errdefer slice.free(zml_handler.allocator);
+
+    var io_buffer: [8 * 1024]u8 = undefined;
+    var reader = try registry.reader(zml_handler.io, tensor_name, &io_buffer);
+    defer reader.deinit();
+    _ = try reader.interface.readSliceAll(slice.data());
+    return slice;
+}
 
 pub fn loadSafetensorSlice(zml_handler: *Zml_handler, path: []const u8, tensor_name: []const u8) !zml.Slice {
     var registry: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, path);
@@ -744,7 +1226,7 @@ pub fn loadSafetensorSlice(zml_handler: *Zml_handler, path: []const u8, tensor_n
     const slice = try zml.Slice.alloc(zml_handler.allocator, tensor.shape);
     errdefer slice.free(zml_handler.allocator);
 
-    var io_buffer: [8 * 1024]u8 = undefined;
+    var io_buffer: [128 * 1024 * 1024]u8 = undefined;
     var reader = try registry.reader(zml_handler.io, tensor_name, &io_buffer);
     defer reader.deinit();
     _ = try reader.interface.readSliceAll(slice.data());

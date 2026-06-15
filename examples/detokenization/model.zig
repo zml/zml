@@ -112,7 +112,7 @@ pub const Model_handler = struct {
             zml_handler.io,
             model,
             .getMedoid,
-            .{},
+            .{.init(.{ .junk = model.shape().dim(.voc) }, .u64)},
             opts,
         );
         errdefer get_medoid_exe.deinit();
@@ -333,24 +333,20 @@ pub const Model = struct {
         return lm_head.mul(lm_head).sum(.d).squeeze(.d).sqrt();
     }
 
-    pub fn getMedoid(self: Model) zml.Tensor {
+    pub fn getMedoid(self: Model, junk_rows: zml.Tensor) zml.Tensor {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
         const normalized_lm_head = normalizeRows(lm_head);
 
-        const row_norm2 = lm_head.mul(lm_head).sum(.d).squeeze(.d);
-        const smallest_norm_rows = row_norm2.topK(.{ .junk = .voc }, 100, .{ .descending = false });
-        const rows = lm_head.gather(.{ .voc = smallest_norm_rows.indices }, .{});
-        const junk_direction = normalizeVector(rows.mean(.junk).squeeze(.junk));
-        const junk_similarity = normalized_lm_head.dot(junk_direction, .d);
-        const is_junk = junk_similarity.cmp(.GT, zml.Tensor.scalar(0.75, .f32));
-
-        const not_junk = is_junk.select(zml.Tensor.scalar(0.0, .f32), zml.Tensor.scalar(1.0, .f32));
+        const row_ids = zml.Tensor.iota(.init(.{ .voc = lm_head.dim(.voc), .junk = junk_rows.dim(.junk) }, .u64), .voc).convert(.u64);
+        const junk_hits = row_ids.cmp(.EQ, junk_rows.broad(row_ids.shape())).convert(.u32).sum(.junk).squeeze(.junk);
+        const junk_mask = junk_hits.cmp(.GT, zml.Tensor.scalar(@as(u32, 0), .u32));
+        const not_junk = junk_mask.select(zml.Tensor.scalar(0.0, .f32), zml.Tensor.scalar(1.0, .f32));
         const row_sum = normalized_lm_head.mul(not_junk.broad(normalized_lm_head.shape())).sum(.voc).squeeze(.voc);
         const row_count = not_junk.sum(.voc).squeeze(.voc);
         const average = normalizeVector(row_sum.div(row_count));
         const similarities = normalized_lm_head.dot(average, .d);
         const minus_inf = zml.Tensor.scalar(-std.math.inf(f32), .f32).broad(similarities.shape());
-        const masked_similarities = is_junk.select(minus_inf, similarities);
+        const masked_similarities = junk_mask.select(minus_inf, similarities);
         return masked_similarities.argMax(.voc).indices.squeeze(.voc).convert(.u64);
     }
 

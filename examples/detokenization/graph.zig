@@ -677,6 +677,47 @@ pub const Graph = struct {
         }
     }
 
+    pub fn testNswExtention(self: *Graph) void {
+        log.info("Test NSW extension", .{});
+        var exact_first_count: usize = 0;
+        var valid_count: usize = 0;
+        var total_visited: usize = 0;
+        var min_visited: usize = std.math.maxInt(usize);
+        var max_visited: usize = 0;
+
+        for (0..self.n) |node| {
+            if (self.is_junk[node]) continue;
+            valid_count += 1;
+            self.greedySearchNode(node);
+            const nb_visited = self.nb_visited;
+            total_visited += nb_visited;
+            min_visited = @min(min_visited, nb_visited);
+            max_visited = @max(max_visited, nb_visited);
+            if (self.L > 0 and self.visited[0].node == node) {
+                exact_first_count += 1;
+            }
+
+            if (valid_count == 1 or valid_count % 10000 == 0) {
+                log.info("NSW extension test node {d}/{d}", .{ node + 1, self.n });
+            }
+        }
+
+        const avg_visited = @as(f64, @floatFromInt(total_visited)) / @as(f64, @floatFromInt(valid_count));
+        const exact_rate = @as(f64, @floatFromInt(exact_first_count)) / @as(f64, @floatFromInt(valid_count));
+        log.info(
+            "NSW extension test: valid={d} exact_first={d}/{d} ({d:.4}%) nb_visited min={d} max={d} avg={d:.2}",
+            .{
+                valid_count,
+                exact_first_count,
+                valid_count,
+                100.0 * exact_rate,
+                if (valid_count == 0) 0 else min_visited,
+                max_visited,
+                avg_visited,
+            },
+        );
+    }
+
     pub fn logNsw(self: *Graph, start: std.Io.Timestamp, i: usize) void {
         const now = std.Io.Timestamp.now(self.io, .awake);
         const elapsed_duration = std.Io.Timestamp.durationTo(start, now);
