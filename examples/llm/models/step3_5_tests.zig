@@ -167,16 +167,9 @@ fn runDecode(
     defer if (detok) |*d| d.deinit();
     var detok_buf: [4096]u8 = undefined;
 
-    // Step 3.5 Flash advertises three terminator ids in config.json:
-    // <|endoftext|>=1, <|im_end|>=2, <|eot_id|>=128007. Stopping on any of
-    // them matches HF's `model.generate` behaviour. Only enforced once we're
-    // past the prompt so a prompt token (e.g. start_token=1) doesn't end the
-    // run immediately.
+    // Step 3.5 Flash advertises three terminator ids in config.json
     const eos_tokens = [_]u32{ 1, 2, 128007 };
 
-    // The exe always runs and produces a "next token" prediction. While walking
-    // the prompt we overwrite that prediction with the next prompt token before
-    // the following step.
     const total_steps: u32 = @intCast(prompt_tokens.len + max_new_tokens);
     var step: u32 = 0;
     while (step < total_steps) : (step += 1) {
@@ -224,8 +217,6 @@ fn runDecode(
             try stdout.flush();
         }
 
-        // If we're still inside the prompt, overwrite the device buffer with
-        // the real next prompt token so the next step conditions on it.
         if (in_prompt) {
             current_token = emit_token;
             current_token_buffer.deinit();

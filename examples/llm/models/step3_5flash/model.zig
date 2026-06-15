@@ -264,13 +264,6 @@ pub const TextModel = struct {
     norm: RmsNorm,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, model_partitions: i64) !TextModel {
-        // Allocate only the main transformer layers (drop MTP/speculative
-        // layers at the tail). HF Step3p5Model.forward iterates
-        // `self.layers[:num_hidden_layers]`, but the fixture generator sets
-        // `num_hidden_layers = num_hidden_layers - num_nextn_predict_layers`,
-        // matching the standard inference path. Running the MTP layers as
-        // ordinary transformer layers transforms the residual stream with
-        // weights that were trained for next-N prediction, producing garbage.
         const num_main_layers = default_config.numMainLayers();
         const layers = try allocator.alloc(TransformerLayer, @intCast(num_main_layers));
         errdefer allocator.free(layers);
@@ -908,7 +901,6 @@ pub const TextRotaryEmbedding = struct {
     }
 };
 
-// TODO: KV Cache
 pub const KvCache = struct {
     k: zml.Tensor,
     v: zml.Tensor,
