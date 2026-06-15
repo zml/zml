@@ -3,6 +3,7 @@ const zml = @import("../zml.zig");
 const stdx = zml.stdx;
 pub const triton = @import("triton.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
+pub const fused_moe_tpu = @import("fused_moe_tpu.zig");
 
 pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
 
@@ -16,6 +17,7 @@ pub const Backend = enum {
     // Could select a more specific name like "triton_sm90_bf16"
     triton,
     mosaic_tpu,
+    fused_moe,
 
     pub fn auto(platform: *const zml.Platform, weights_dtype: zml.DataType) !Backend {
         return switch (platform.target) {
@@ -47,6 +49,7 @@ pub const Backend = enum {
         return switch (backend) {
             .triton => {},
             .mosaic_tpu => {},
+            .fused_moe => {},
         };
     }
 
@@ -55,6 +58,7 @@ pub const Backend = enum {
         return switch (backend) {
             .triton => {},
             .mosaic_tpu => {},
+            .fused_moe => {},
         };
     }
 };
@@ -62,10 +66,12 @@ pub const Backend = enum {
 pub const Parameters = union(Backend) {
     triton: triton.Parameters,
     mosaic_tpu: mosaic_tpu.Parameters,
+    fused_moe: fused_moe_tpu.Parameters,
 
     pub const InitOptions = union(Backend) {
         triton: triton.Parameters.InitOptions,
         mosaic_tpu: mosaic_tpu.Parameters.InitOptions,
+        fused_moe: fused_moe_tpu.Parameters.InitOptions,
 
         pub fn fromBackend(backend: Backend, num_experts_per_tok: ?u32, activation: ActivationMode) InitOptions {
             return switch (backend) {
@@ -85,6 +91,14 @@ pub const Parameters = union(Backend) {
                         .gelu => .gelu,
                     },
                 } },
+                .fused_moe => .{ .fused_moe = .{
+                    .num_experts_per_tok = num_experts_per_tok.?,
+                    .activation = switch (activation) {
+                        .silu => .silu,
+                        .relu => .relu,
+                        .gelu => .gelu,
+                    },
+                } },
             };
         }
     };
@@ -93,6 +107,7 @@ pub const Parameters = union(Backend) {
         return switch (opts) {
             .triton => |v| .{ .triton = triton.Parameters.init(v) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Parameters.init(v) },
+            .fused_moe => |v| .{ .fused_moe = fused_moe_tpu.Parameters.init(v) },
         };
     }
 };
@@ -100,15 +115,18 @@ pub const Parameters = union(Backend) {
 pub const Metadata = union(Backend) {
     triton: triton.Metadata,
     mosaic_tpu: mosaic_tpu.Metadata,
+    fused_moe: fused_moe_tpu.Metadata,
 
     pub const InitOptions = union(Backend) {
         triton: triton.Metadata.InitOptions,
         mosaic_tpu: mosaic_tpu.Metadata.InitOptions,
+        fused_moe: fused_moe_tpu.Metadata.InitOptions,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .triton => .{ .triton = .{} },
                 .mosaic_tpu => .{ .mosaic_tpu = .{} },
+                .fused_moe => .{ .fused_moe = .{} },
             };
         }
     };
@@ -117,6 +135,7 @@ pub const Metadata = union(Backend) {
         return switch (opts) {
             .triton => |v| .{ .triton = triton.Metadata.init(v) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Metadata.init(v) },
+            .fused_moe => |v| .{ .fused_moe = fused_moe_tpu.Metadata.init(v) },
         };
     }
 
@@ -124,6 +143,7 @@ pub const Metadata = union(Backend) {
         return switch (self) {
             .triton => |metadata| .{ .triton = try metadata.initBuffer(io, platform) },
             .mosaic_tpu => |metadata| .{ .mosaic_tpu = try metadata.initBuffer(io, platform) },
+            .fused_moe => |metadata| .{ .fused_moe = try metadata.initBuffer(io, platform) },
         };
     }
 
@@ -131,6 +151,7 @@ pub const Metadata = union(Backend) {
         switch (self.*) {
             .triton => |*metadata| triton.deinitBuffer(metadata),
             .mosaic_tpu => |*metadata| mosaic_tpu.deinitBuffer(metadata),
+            .fused_moe => |*metadata| fused_moe_tpu.deinitBuffer(metadata),
         }
     }
 };
@@ -304,5 +325,68 @@ pub fn forwardMoe(
                 },
             );
         },
+        .fused_moe => {
+            return forwardMoe(
+                input,
+                topk_ids,
+                topk_weights,
+                weights_gate_up,
+                scales_gate_up,
+                bias_gate_up,
+                weights_down,
+                scales_down,
+                bias_down,
+                .{ .mosaic_tpu = .{} },
+                .{ .mosaic_tpu = .{
+                    .num_experts_per_tok = parameters.fused_moe.num_experts_per_tok,
+                    .activation = switch (parameters.fused_moe.activation) {
+                        .silu => .silu,
+                        .relu => .relu,
+                        .gelu => .gelu,
+                        .quick_gelu_plus_one => .quick_gelu_plus_one,
+                    },
+                } },
+            );
+        },
     };
+}
+
+pub fn forwardFusedMoe(
+    input: zml.Tensor,
+    router_logits: zml.Tensor,
+    weights_gate_up: zml.Tensor,
+    weights_down: zml.Tensor,
+    metadata: Metadata,
+    parameters: Parameters,
+) !zml.Tensor {
+    const tpu_metadata: fused_moe_tpu.Metadata = switch (metadata) {
+        .fused_moe => |v| v,
+        .mosaic_tpu => fused_moe_tpu.Metadata.init(.{}),
+        else => return error.InvalidMetadata,
+    };
+    const tpu_parameters: fused_moe_tpu.Options = switch (parameters) {
+        .fused_moe => |v| .{
+            .activation = v.activation,
+            .num_experts_per_tok = v.num_experts_per_tok,
+        },
+        .mosaic_tpu => |v| .{
+            .activation = switch (v.activation) {
+                .silu => .silu,
+                .relu => .relu,
+                .gelu => .gelu,
+                .quick_gelu_plus_one => .quick_gelu_plus_one,
+            },
+            .num_experts_per_tok = v.num_experts_per_tok,
+        },
+        else => return error.InvalidBackend,
+    };
+
+    return fused_moe_tpu.forward(
+        input,
+        router_logits,
+        weights_gate_up,
+        weights_down,
+        tpu_metadata,
+        tpu_parameters,
+    );
 }

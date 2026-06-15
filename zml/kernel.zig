@@ -276,6 +276,57 @@ pub const mosaic_tpu = struct {
         };
     }
 
+    pub const RawCallExtras = struct {
+        vmem_limit_bytes: ?i64 = null,
+        disable_bounds_checks: ?bool = null,
+        disable_semaphore_checks: ?bool = null,
+        has_communication: ?bool = null,
+        additional_attributes: []const mlir.NamedAttribute = &.{},
+        dynamic_grid_bounds: []const Tensor = &.{},
+    };
+
+    pub fn callRaw(
+        ir: [:0]const u8,
+        inputs: []const Tensor,
+        outputs: []const Shape,
+        extras: RawCallExtras,
+    ) []Tensor {
+        const cur = CompilationContext.current();
+        const allocator = cur.arena.allocator();
+
+        const backend_config = buildBackendConfig(cur.allocator, ir, .{
+            .vmem_limit_bytes = extras.vmem_limit_bytes,
+            .disable_bounds_checks = extras.disable_bounds_checks,
+            .disable_semaphore_checks = extras.disable_semaphore_checks,
+            .has_communication = extras.has_communication,
+        }) catch |err|
+            std.debug.panic("zml.kernel.mosaic_tpu.callRaw: backend_config build failed: {}", .{err});
+        defer cur.allocator.free(backend_config);
+
+        const values = allocator.alloc(*const mlir.Value, inputs.len) catch unreachable;
+        for (inputs, 0..) |input, i| values[i] = input.value();
+
+        const res_types = allocator.alloc(*const mlir.Type, outputs.len) catch unreachable;
+        for (outputs, 0..) |output, i| {
+            res_types[i] = mlirx.Type.rankedTensor(cur.mlir_ctx, output);
+        }
+
+        const op = callTpuCustomCall(.{
+            .inputs = values,
+            .result_types = res_types,
+            .backend_config = backend_config,
+            .aliases = &.{},
+            .dynamic_grid_bounds = extras.dynamic_grid_bounds,
+            .additional_attributes = extras.additional_attributes,
+        });
+
+        const results = allocator.alloc(Tensor, outputs.len) catch unreachable;
+        for (outputs, 0..) |output, i| {
+            results[i] = Tensor._result(output, op.result(i));
+        }
+        return results;
+    }
+
     const CustomCallConfig = struct {
         body: []const u8,
         has_communication: ?bool = null,
