@@ -400,7 +400,7 @@ pub const ComposedKernelExe = struct {
             args.moe_metadata_buffers,
         });
 
-        var results = try self.embed_tokens.results(args.allocator);
+        var results = try self.attn_layer.results(args.allocator);
         defer results.deinit(args.allocator);
 
         self.attn_layer.call(exe_args, &results);
