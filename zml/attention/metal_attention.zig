@@ -7,16 +7,6 @@ const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
 
 const log = std.log.scoped(.@"zml/attention/metal");
 
-// Apple Metal PAGED attention backend: emits the `zml$paged_attn` custom call,
-// lowered to MetalPagedAttnThunk in the v2 Metal backend. The kernel is
-// vllm-metal's `pagedattention_tiled.metal` (FA-2 style, tiled, prefill+decode in
-// one), vendored VERBATIM into the XLA fork. The paged sibling of the `.metal_fa`
-// (contiguous) flash-attention backend in attention.zig.
-//
-// Reuses the existing paged plumbing (block table / paged split KV cache / page
-// manager) unchanged — this is just one more arm of paged_attention.Backend,
-// mirroring `triton.paged` for Options/Parameters and `.metal_fa` for the
-// custom-call emission.
 pub const paged = struct {
     pub const Options = struct {
         batch_size: usize,
@@ -79,24 +69,7 @@ pub const paged = struct {
         }
     };
 
-    // Emit zml$paged_attn. The custom-call operand contract (positional — tags are
-    // lost in HLO, so we force row-major dim order to match what the thunk reads;
-    // ForceDefaultLayouts keeps them row-major):
-    //   q             [total_q_tokens, num_heads, head_dim]   (pack hkv*hg -> h)
-    //   k_cache       [num_blocks, block_size, num_kv_heads, head_dim]
-    //   v_cache       [num_blocks, block_size, num_kv_heads, head_dim]
-    //   block_table   [num_seqs, max_num_blocks_per_seq]  i32
-    //   seq_lens      [num_seqs]                           i32 (TOTAL KV len/seq)
-    //   query_start_len [num_seqs + 1]                     i32 (cumulative q lens)
-    //   -> out        [total_q_tokens, num_heads, head_dim]
-    //
-    // q arrives {.b, .hkv, .hg, .hd}; the kernel's head->kv-head map is
-    // head_idx / (num_heads/num_kv_heads), i.e. kv-head-major, which is exactly
-    // merge(.{ .h = .{ .hkv, .hg } }) (hkv outer, hg inner). The KV cache pages are
-    // {.page, .k_chunk, .hkv, .hd} == the layout above. Scale defaults to
-    // 1/sqrt(head_dim) in the thunk (TODO: thread opts.scale / sliding_window).
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-        _ = opts;
         const num_kv_heads = q.dim(.hkv);
 
         const qh = q.merge(.{ .h = .{ .hkv, .hg } }).transpose(.{ .b, .h, .hd });
@@ -107,7 +80,11 @@ pub const paged = struct {
             "zml$paged_attn",
             .{ qh, kc, vc, parameters.block_table, parameters.seq_lens, parameters.query_start_len },
             qh.shape(),
-            .{},
+            .{
+                .is_causal = opts.is_causal,
+                .sliding_window = opts.sliding_window,
+                .scale = opts.scale,
+            },
             .{ .has_side_effect = false },
         );
 
