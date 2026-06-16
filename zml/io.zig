@@ -611,14 +611,13 @@ const DispatchSpans = struct {
                 writer_index,
             );
         }
-        sortPlacementSpans(placement_spans, placement_span_order.items);
 
         var spans: std.ArrayList(DispatchSpan) = .empty;
         errdefer spans.deinit(allocator);
         var mirror_writers: std.ArrayList(usize) = .empty;
         errdefer mirror_writers.deinit(allocator);
 
-        try compactPlacementSpans(allocator, placement_spans, placement_span_order.items, shape.byteSize(), &spans, &mirror_writers);
+        try deduplicateByRange(allocator, placement_spans, placement_span_order.items, shape.byteSize(), &spans, &mirror_writers);
 
         const spans_ = try spans.toOwnedSlice(allocator);
         errdefer allocator.free(spans_);
@@ -637,8 +636,18 @@ const DispatchSpans = struct {
         allocator.free(self.mirror_writers);
     }
 
-    fn sortPlacementSpans(placement_spans: PlacementSpans, placement_span_order: []usize) void {
+    fn deduplicateByRange(
+        allocator: std.mem.Allocator,
+        placement_spans: PlacementSpans,
+        placement_span_order: []usize,
+        total_bytes: usize,
+        spans: *std.ArrayList(DispatchSpan),
+        mirror_writers: *std.ArrayList(usize),
+    ) !void {
         const placement = placement_spans.slice();
+        const starts = placement.items(.start);
+        const lens = placement.items(.len);
+        const writer_indices = placement.items(.writer_index);
 
         const SortContext = struct {
             starts: []const usize,
@@ -653,24 +662,10 @@ const DispatchSpans = struct {
         };
 
         std.mem.sort(usize, placement_span_order, SortContext{
-            .starts = placement.items(.start),
-            .lens = placement.items(.len),
-            .writer_indices = placement.items(.writer_index),
+            .starts = starts,
+            .lens = lens,
+            .writer_indices = writer_indices,
         }, SortContext.lessThan);
-    }
-
-    fn compactPlacementSpans(
-        allocator: std.mem.Allocator,
-        placement_spans: PlacementSpans,
-        placement_span_order: []const usize,
-        total_bytes: usize,
-        spans: *std.ArrayList(DispatchSpan),
-        mirror_writers: *std.ArrayList(usize),
-    ) !void {
-        const placement = placement_spans.slice();
-        const starts = placement.items(.start);
-        const lens = placement.items(.len);
-        const writer_indices = placement.items(.writer_index);
 
         var i: usize = 0;
         var cursor: usize = 0;
@@ -796,7 +791,7 @@ pub const DirectMemoryWriter = struct {
     dispatch_spans: DispatchSpans,
     span_index: usize = 0,
     byte_cursor: usize = 0,
-    chunk_size: usize,
+    dma_chunk_size: usize,
     shard_progress: ?[]ShardProgress = null,
     interface: std.Io.Writer,
 
@@ -847,7 +842,7 @@ pub const DirectMemoryWriter = struct {
             .allocator = allocator,
             .shard_writers = shard_writers,
             .dispatch_spans = dispatch_spans,
-            .chunk_size = dma_chunk_size,
+            .dma_chunk_size = dma_chunk_size,
             .interface = .{
                 .buffer = first_writer.interface.buffer[0..first_window],
                 .end = 0,
@@ -912,12 +907,13 @@ pub const DirectMemoryWriter = struct {
     fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
         const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
 
-        try self.commitWindow();
-        if (self.span_index < self.dispatch_spans.spans.len) return std.Io.Writer.Error.WriteFailed;
+        // Commit the active public window if one remains
+        if (self.span_index < self.dispatch_spans.spans.len) {
+            try self.commitWindow();
+        }
 
         for (self.shard_writers, 0..) |*shard_writer, i| {
             try shard_writer.interface.flush();
-            if (shard_writer.offset != shard_writer.total) return std.Io.Writer.Error.WriteFailed;
             if (self.shard_progress) |states| {
                 states[i].set(shard_writer.total);
             }
@@ -936,17 +932,18 @@ pub const DirectMemoryWriter = struct {
         if (self.interface.buffer.len - self.interface.end < capacity) return std.Io.Writer.Error.WriteFailed;
     }
 
+    // `interface.buffer` is a clipped alias of the active primary shard DMA
+    // buffer. Reader writes advance only `DirectMemoryWriter.interface.end`;
+    // this function commits that new byte range to the owning shard writer.
+    //
+    // After committing, the same bytes are copied to mirror writers, pending
+    // DMA buffers are submitted at physical boundaries, and the public window
+    // is rotated to the next dispatch span. The boundary order matters:
+    // submit a full shard buffer first, then enforce the logical DMA chunk
+    // fence across all shards, then advance the dispatch span / EOF state.
     fn commitWindow(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        if (self.span_index >= self.dispatch_spans.spans.len) {
-            self.interface.buffer = &.{};
-            self.interface.end = 0;
-            return;
-        }
-
-        const span = self.dispatch_spans.spans[self.span_index];
-        const shard_writer = &self.shard_writers[span.primary_writer];
-
-        if (self.interface.end < shard_writer.interface.end) return std.Io.Writer.Error.WriteFailed;
+        const active_span = self.dispatch_spans.spans[self.span_index];
+        const shard_writer = &self.shard_writers[active_span.primary_writer];
 
         if (self.interface.end > shard_writer.interface.end) {
             const chunk = self.interface.buffer[shard_writer.interface.end..self.interface.end];
@@ -954,9 +951,9 @@ pub const DirectMemoryWriter = struct {
             shard_writer.interface.end = self.interface.end;
             self.byte_cursor += chunk.len;
 
-            if (span.mirror_writer_len != 0) {
-                const mirror_writer_end = span.mirror_writer_start + span.mirror_writer_len;
-                for (self.dispatch_spans.mirror_writers[span.mirror_writer_start..mirror_writer_end]) |mirror_writer_index| {
+            if (active_span.mirror_writer_len != 0) {
+                const mirror_writer_end = active_span.mirror_writer_start + active_span.mirror_writer_len;
+                for (self.dispatch_spans.mirror_writers[active_span.mirror_writer_start..mirror_writer_end]) |mirror_writer_index| {
                     const mirror_writer = &self.shard_writers[mirror_writer_index];
                     try mirror_writer.interface.writeAll(chunk);
                     if (self.shard_progress) |states| {
@@ -966,19 +963,15 @@ pub const DirectMemoryWriter = struct {
             }
 
             if (self.shard_progress) |states| {
-                states[span.primary_writer].set(states[span.primary_writer].completed + chunk.len);
+                states[active_span.primary_writer].set(states[active_span.primary_writer].completed + chunk.len);
             }
 
-            const span_complete = self.byte_cursor == span.end;
-            const chunk_complete = @mod(self.byte_cursor, self.chunk_size) == 0;
+            const span_complete = self.byte_cursor == active_span.end;
+            const chunk_complete = @mod(self.byte_cursor, self.dma_chunk_size) == 0;
             const shard_full = shard_writer.interface.end == shard_writer.interface.buffer.len;
 
             if (shard_full) {
                 try shard_writer.interface.flush();
-            }
-
-            if (span_complete) {
-                self.span_index += 1;
             }
 
             if (chunk_complete) {
@@ -986,12 +979,15 @@ pub const DirectMemoryWriter = struct {
                     try writer.interface.flush();
                 }
             }
-        }
 
-        if (self.span_index >= self.dispatch_spans.spans.len) {
-            self.interface.buffer = &.{};
-            self.interface.end = 0;
-            return;
+            if (span_complete) {
+                self.span_index += 1;
+                if (self.span_index >= self.dispatch_spans.spans.len) {
+                    self.interface.buffer = &.{};
+                    self.interface.end = 0;
+                    return;
+                }
+            }
         }
 
         const next_span = self.dispatch_spans.spans[self.span_index];
@@ -999,7 +995,7 @@ pub const DirectMemoryWriter = struct {
 
         const span_remaining = next_span.end - self.byte_cursor;
         const buffer_remaining = next_writer.interface.buffer.len - next_writer.interface.end;
-        const chunk_remaining = self.chunk_size - @mod(self.byte_cursor, self.chunk_size);
+        const chunk_remaining = self.dma_chunk_size - @mod(self.byte_cursor, self.dma_chunk_size);
         const visible_remaining = @min(span_remaining, @min(chunk_remaining, buffer_remaining));
         const visible_len = next_writer.interface.end + visible_remaining;
 
