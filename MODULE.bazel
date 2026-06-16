@@ -24,15 +24,17 @@ bazel_dep(name = "rules_cc", version = "0.2.18")
 bazel_dep(name = "rules_distroless", version = "0.6.2")
 bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.7")
+bazel_dep(name = "rules_pkg", version = "1.0.1")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.9.0")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.15.1")
-
 bazel_dep(name = "tar.bzl", version = "0.9.0")
 bazel_dep(name = "llvm", version = "0.8.3")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 bazel_dep(name = "grpc", version = "1.74.0")
+bazel_dep(name = "zlib", version = "1.3.2")
+bazel_dep(name = "zstd", version = "1.5.6", repo_name = "net_zstd")
 
 # Added to support bazel 9+ since an old version is pulled by GRPC
 # TODO: remove when GRPC is updated to v1.80+
@@ -187,6 +189,24 @@ xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(
     xla,
     "com_github_grpc_grpc",
+    "cuda_cccl",
+    "cuda_cublas",
+    "cuda_cudart",
+    "cuda_cudnn",
+    "cuda_cufft",
+    "cuda_cupti",
+    "cuda_curand",
+    "cuda_cusolver",
+    "cuda_cusparse",
+    "cuda_driver",
+    "cuda_nccl",
+    "cuda_nvcc",
+    "cuda_nvdisasm",
+    "cuda_nvjitlink",
+    "cuda_nvml",
+    "cuda_nvprune",
+    "cuda_nvtx",
+    "cuda_nvvm",
     "eigen_archive",
     "farmhash_archive",
     "farmhash_gpu_archive",
@@ -201,6 +221,7 @@ use_repo(
     "ml_dtypes_py",
     "python_version_repo",
     "rules_ml_toolchain",
+    "nvidia_nvshmem",
     "shardy",
     "snappy",
     "stablehlo",
@@ -211,8 +232,8 @@ use_repo(
 )
 
 llvm = use_extension("//third_party/xla:llvm.bzl", "llvm")
-llvm.configure()
-use_repo(llvm, "llvm-project")
+llvm.configure(targets = ["X86"])
+use_repo(llvm, "llvm-project", "llvm_zlib", "llvm_zstd")
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 apt.install(

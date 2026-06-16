@@ -16,6 +16,77 @@ always_if_false = lambda if_true, if_false = []: if_false
 always_false = lambda *args, **kwargs: False
 """
 
+_DUMMY_CUDA_REPO_FILES = {
+    "BUILD.bazel": """\
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "bin/nvcc",
+    "bin/nvdisasm",
+    "version.bzl",
+])
+
+[
+    filegroup(
+        name = target,
+        srcs = [],
+    )
+    for target in [
+        "bin2c",
+        "cccl",
+        "cublas",
+        "cublasLt",
+        "cuda_driver",
+        "cudart",
+        "cudnn",
+        "cufft",
+        "cupti",
+        "curand",
+        "cusolver",
+        "cusparse",
+        "fatbinary",
+        "forward_compatibility",
+        "headers",
+        "nccl",
+        "nvidia_driver",
+        "nvjitlink",
+        "nvlink",
+        "nvml",
+        "nvprune",
+        "nvtx",
+        "nvvm",
+        "ptxas",
+        "static",
+    ]
+]
+""",
+    "bin/nvcc": "",
+    "bin/nvdisasm": "",
+    "version.bzl": "VERSION = \"0\"\n",
+}
+
+_DUMMY_CUDA_REPOS = [
+    "cuda_cccl",
+    "cuda_cublas",
+    "cuda_cudart",
+    "cuda_cudnn",
+    "cuda_cufft",
+    "cuda_cupti",
+    "cuda_curand",
+    "cuda_cusolver",
+    "cuda_cusparse",
+    "cuda_driver",
+    "cuda_nccl",
+    "cuda_nvcc",
+    "cuda_nvdisasm",
+    "cuda_nvjitlink",
+    "cuda_nvml",
+    "cuda_nvprune",
+    "cuda_nvtx",
+    "cuda_nvvm",
+    "nvidia_nvshmem",
+]
+
 def _simple_files_impl(rctx):
     rctx.file("BUILD.bazel", "")
     for f, content in rctx.attr.files.items():
@@ -29,6 +100,9 @@ simple_files = repository_rule(
 )
 
 def _dummy_repos(mctx):
+    for repo_name in _DUMMY_CUDA_REPOS:
+        simple_files(name = repo_name, files = _DUMMY_CUDA_REPO_FILES)
+
     simple_files(name = "local_config_cuda", files = {
         "BUILD.bazel": """\
 package(default_visibility = ["//visibility:public"])

@@ -11,7 +11,15 @@ cc_library(
     deps = [
         "@llvm-project//mlir:CAPIIR",
         "@triton//:TritonDialects",
-    ],
+    ] + select({
+        "//platforms:oneapi.enabled": [
+            "@triton//:TritonGENIR",
+            "@triton//:TritonIntelAnalysis",
+            "@triton//:TritonIntelGPUTransformUtils",
+            "@triton//:TritonIntelGPUIR",
+        ],
+        "//conditions:default": [],
+    }),
     # MLIR_DEFINE_CAPI_DIALECT_REGISTRATION expands to a global static
     # initializer that the linker would otherwise dead-strip.
     alwayslink = True,

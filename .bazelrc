@@ -127,6 +127,12 @@ common:release  --@rules_zig//zig/settings:mode=release_safe
 common:native   --copt=-march=native
 common:native   --@rules_zig//zig/settings:zigopt=-mcpu=native
 
+# Build against the hermetic oneAPI/SYCL toolchain when an XLA override is used.
+common:sycl_hermetic --repo_env=TF_NEED_SYCL=1
+common:sycl_hermetic --repo_env=SYCL_BUILD_HERMETIC=1
+common:sycl_hermetic --repo_env=ONEAPI_VERSION=2026.0
+common:sycl_hermetic --repo_env=OS=ubuntu_24.04
+
 # Remote execution and caching with BuildBuddy
 common:remote   --bes_results_url=https://app.buildbuddy.io/invocation/
 common:remote   --bes_backend=grpcs://remote.buildbuddy.io
