@@ -107,6 +107,22 @@ pub const Model_handler = struct {
         const get_lm_head_row_norms_results = try get_lm_head_row_norms_exe.results(zml_handler.allocator);
         errdefer get_lm_head_row_norms_results.deinit(zml_handler.allocator);
 
+        const rotated_lm_head_exe = try zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .rotatedLmHead,
+            .{.init(.{ .d = model.shape().dim(.d), .eig = model.shape().dim(.d) }, .f32)},
+            opts,
+        );
+        errdefer rotated_lm_head_exe.deinit();
+
+        const rotated_lm_head_args = try rotated_lm_head_exe.args(zml_handler.allocator);
+        errdefer rotated_lm_head_args.deinit(zml_handler.allocator);
+
+        const rotated_lm_head_results = try rotated_lm_head_exe.results(zml_handler.allocator);
+        errdefer rotated_lm_head_results.deinit(zml_handler.allocator);
+
         const get_medoid_exe = try zml_handler.platform.compile(
             zml_handler.allocator,
             zml_handler.io,
@@ -199,6 +215,9 @@ pub const Model_handler = struct {
             .get_lm_head_row_norms_exe = get_lm_head_row_norms_exe,
             .get_lm_head_row_norms_args = get_lm_head_row_norms_args,
             .get_lm_head_row_norms_results = get_lm_head_row_norms_results,
+            .rotated_lm_head_exe = rotated_lm_head_exe,
+            .rotated_lm_head_args = rotated_lm_head_args,
+            .rotated_lm_head_results = rotated_lm_head_results,
             .get_medoid_exe = get_medoid_exe,
             .get_medoid_args = get_medoid_args,
             .get_medoid_results = get_medoid_results,
@@ -239,6 +258,9 @@ pub const ModelExes = struct {
     get_lm_head_row_norms_exe: zml.Exe,
     get_lm_head_row_norms_args: zml.Exe.Arguments,
     get_lm_head_row_norms_results: zml.Exe.Results,
+    rotated_lm_head_exe: zml.Exe,
+    rotated_lm_head_args: zml.Exe.Arguments,
+    rotated_lm_head_results: zml.Exe.Results,
     get_medoid_exe: zml.Exe,
     get_medoid_args: zml.Exe.Arguments,
     get_medoid_results: zml.Exe.Results,
@@ -268,6 +290,9 @@ pub const ModelExes = struct {
         self.get_lm_head_row_norms_exe.deinit();
         self.get_lm_head_row_norms_args.deinit(allocator);
         self.get_lm_head_row_norms_results.deinit(allocator);
+        self.rotated_lm_head_exe.deinit();
+        self.rotated_lm_head_args.deinit(allocator);
+        self.rotated_lm_head_results.deinit(allocator);
         self.get_medoid_exe.deinit();
         self.get_medoid_args.deinit(allocator);
         self.get_medoid_results.deinit(allocator);
@@ -356,6 +381,13 @@ pub const Model = struct {
     pub fn get_lm_head_row_norms(self: Model) zml.Tensor {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
         return lm_head.mul(lm_head).sum(.d).squeeze(.d).sqrt();
+    }
+
+    pub fn rotatedLmHead(self: Model, u: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
+        const u_rot = u.withTags(.{ .d, .eig }).convert(.f32);
+        const m = lm_head.dot(u_rot, .d).rename(.{ .eig = .d });
+        return .{ m, m.transpose(.{ .d, .voc }) };
     }
 
     pub fn sortByFirstRow(self: Model) zml.Tensor {
