@@ -11,7 +11,7 @@ pub const GraphParams = struct {
     alpha: f32 = 1.15,
     vamana_passes: usize = 2,
     top_k: usize = 16,
-    L: usize = 128,
+    L: usize = 256,
 };
 
 pub const Graph = struct {
@@ -69,7 +69,6 @@ pub const Graph = struct {
         std.debug.assert(params.L > 0);
         std.debug.assert(params.search_budget > 0);
         std.debug.assert(params.alpha >= 1.0);
-        std.debug.assert(matrix.k >= params.k_max);
         std.debug.assert(params.L <= params.search_budget + params.k_max);
         std.debug.assert(params.search_budget + params.k_max <= matrix.n);
         std.debug.assert(params.k_max < matrix.n);
@@ -128,6 +127,88 @@ pub const Graph = struct {
             .is_search_done = false,
             .are_neighbors_pruned = are_neighbors_pruned,
         };
+    }
+
+    pub fn fromFile(zml_handler: *main.Zml_handler, lm_head: zml.Slice, lm_head_normalized: zml.Slice, matrix: *main.SimilarityMatrix, lm_head_row_norms: zml.Slice, entrypoint_name: []const u8, params: GraphParams) !Graph {
+        const allocator = zml_handler.allocator;
+        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.checkpoint);
+        var registry: zml.safetensors.TensorRegistry = try .fromRepoFile(allocator, zml_handler.io, repo, entrypoint_name);
+        defer registry.deinit();
+
+        const n_slice = try main.loadSafetensorSliceFromRegistry(zml_handler, &registry, "n");
+        defer n_slice.free(allocator);
+        const original_n_slice = try main.loadSafetensorSliceFromRegistry(zml_handler, &registry, "original_n");
+        defer original_n_slice.free(allocator);
+        const medoid_slice = try main.loadSafetensorSliceFromRegistry(zml_handler, &registry, "medoid");
+        defer medoid_slice.free(allocator);
+        const edges_slice = try main.loadSafetensorSliceFromRegistry(zml_handler, &registry, "edges");
+        defer edges_slice.free(allocator);
+        const node_to_token_slice = try main.loadSafetensorSliceFromRegistry(zml_handler, &registry, "node_to_token");
+        defer node_to_token_slice.free(allocator);
+        const junk_indices_slice = try main.loadSafetensorSliceFromRegistry(zml_handler, &registry, "junk_indices");
+        defer junk_indices_slice.free(allocator);
+
+        const graph_n: usize = @intCast(n_slice.constItems(i32)[0]);
+        const original_n: usize = @intCast(original_n_slice.constItems(i32)[0]);
+        const medoid_node: usize = @intCast(medoid_slice.constItems(i32)[0]);
+        std.debug.assert(original_n == matrix.n);
+        std.debug.assert(lm_head_row_norms.constItems(f32).len == original_n);
+        std.debug.assert(medoid_node < graph_n);
+
+        const node_to_token = node_to_token_slice.constItems(i32);
+        std.debug.assert(node_to_token.len == graph_n);
+        const medoid_token: usize = @intCast(node_to_token[medoid_node]);
+
+        const junk_indices_i32 = junk_indices_slice.constItems(i32);
+        const junk_rows = try allocator.alloc(usize, junk_indices_i32.len);
+        defer allocator.free(junk_rows);
+        for (junk_indices_i32, junk_rows) |junk_index, *junk_row| {
+            junk_row.* = @intCast(junk_index);
+        }
+
+        const edges = edges_slice.constItems(i32);
+        std.debug.assert(edges.len % 2 == 0);
+        const edge_count = edges.len / 2;
+        const degree_counts = try allocator.alloc(usize, original_n);
+        defer allocator.free(degree_counts);
+        @memset(degree_counts, 0);
+        for (0..edge_count) |edge_id| {
+            const left_node: usize = @intCast(edges[2 * edge_id]);
+            std.debug.assert(left_node < graph_n);
+            const left_token: usize = @intCast(node_to_token[left_node]);
+            degree_counts[left_token] += 1;
+        }
+
+        var graph_params = params;
+        for (degree_counts) |degree| {
+            graph_params.k_max = @max(graph_params.k_max, degree);
+        }
+
+        var graph = try Graph.init(zml_handler, lm_head, lm_head_normalized, matrix, lm_head_row_norms, junk_rows, medoid_token, graph_params);
+        errdefer graph.deinit();
+
+        for (0..edge_count) |edge_id| {
+            const left_node: usize = @intCast(edges[2 * edge_id]);
+            const right_node: usize = @intCast(edges[2 * edge_id + 1]);
+            std.debug.assert(left_node < graph_n);
+            std.debug.assert(right_node < graph_n);
+            const left_token: usize = @intCast(node_to_token[left_node]);
+            const right_token: usize = @intCast(node_to_token[right_node]);
+            const pos = left_token * graph.params.k_max + graph.nb_neighbors[left_token];
+            graph.neighbors[pos] = right_token;
+            graph.nb_neighbors[left_token] += 1;
+        }
+
+        log.info("Loaded graph from {s}: nodes={d}/{d} edges={d} medoid_node={d} medoid_token={d} k_max={d}", .{
+            entrypoint_name,
+            graph_n,
+            original_n,
+            edge_count,
+            medoid_node,
+            medoid_token,
+            graph.params.k_max,
+        });
+        return graph;
     }
 
     pub fn deinit(self: *Graph) void {
@@ -698,7 +779,8 @@ pub const Graph = struct {
             }
 
             if (valid_count == 1 or valid_count % 10000 == 0) {
-                log.info("NSW extension test node {d}/{d}", .{ node + 1, self.n });
+                const exact_rate = @as(f64, @floatFromInt(exact_first_count)) / @as(f64, @floatFromInt(valid_count));
+                log.info("NSW extension test node {d}/{d}, success rate {d:.4}%", .{ node + 1, self.n, 100.0 * exact_rate });
             }
         }
 
@@ -740,6 +822,196 @@ pub const Graph = struct {
         return false;
     }
 
+    // ---------------------- MRT functions ---------------------- //
+
+    pub fn makeMrt(self: *Graph, order: []const usize) !void {
+        std.debug.assert(order.len == self.n);
+        std.debug.assert(!self.is_junk[0]);
+        for (1..self.n) |node| {
+            if (self.is_junk[node]) continue;
+            const p = self.monotonicSearch(0, node);
+            if (self.nb_neighbors[p] == self.params.k_max) {
+                log.info("Reached max neighbors for node {d} after inserting {d} edges", .{ p, node });
+                continue;
+            }
+            self.neighbors[self.params.k_max * p + self.nb_neighbors[p]] = node;
+            self.nb_neighbors[p] += 1;
+            if (node % 10000 == 0) log.info("Inserted node {d}", .{node});
+        }
+
+        const parents = try self.allocator.alloc(usize, self.n);
+        @memset(parents, self.n);
+        defer self.allocator.free(parents);
+        const ranks = try self.allocator.alloc(usize, self.n);
+        @memset(ranks, 0);
+        defer self.allocator.free(ranks);
+        const costs = try self.allocator.alloc(usize, self.n);
+        @memset(costs, 0);
+        defer self.allocator.free(costs);
+        const nb_descendants = try self.allocator.alloc(usize, self.n);
+        @memset(nb_descendants, 0);
+        defer self.allocator.free(nb_descendants);
+        
+        const nodes_by_rank = try self.allocator.alloc(usize, self.n);
+        @memset(nodes_by_rank, 0);
+        defer self.allocator.free(nodes_by_rank);
+        const nodes_by_cost = try self.allocator.alloc(usize, self.n);
+        @memset(nodes_by_cost, 0);
+        defer self.allocator.free(nodes_by_cost);
+        const nodes_by_degree = try self.allocator.alloc(usize, self.n);
+        @memset(nodes_by_degree, 0);
+        defer self.allocator.free(nodes_by_degree);
+        
+        var max_degree: usize = 0;
+        var max_rank: usize = 0;
+        var total_rank: usize = 0;
+        var max_cost: usize = 0;
+        var total_cost: usize = 0;
+        for (0..self.n) |node| {
+            if (self.is_junk[node]) continue;
+            max_degree = @max(max_degree, self.nb_neighbors[node]);
+            max_rank = @max(max_rank, ranks[node]);
+            total_rank += ranks[node];
+            max_cost = @max(max_cost, costs[node]);
+            total_cost += costs[node];
+            nodes_by_rank[ranks[node]] += 1;
+            nodes_by_cost[costs[node]] += 1;
+            nodes_by_degree[self.nb_neighbors[node]] += 1;
+            const start_neigh = self.params.k_max * node;
+            const end_neigh = start_neigh + self.nb_neighbors[node];
+            for (start_neigh..end_neigh) |neigh_slot| {
+                const neigh_node = self.neighbors[neigh_slot];
+                std.debug.assert(ranks[neigh_node] == 0);
+                ranks[neigh_node] = ranks[node] + 1;
+                costs[neigh_node] = costs[node] + self.nb_neighbors[node];
+                parents[neigh_node] = node;
+            }
+        }
+        for (0..self.n) |rev| {
+            const node = self.n - 1 - rev;
+            if (self.is_junk[node] or node == 0) continue;
+            nb_descendants[parents[node]] += 1 + nb_descendants[node];
+        }
+        const avg_rank = @as(f64, @floatFromInt(total_rank)) / @as(f64, @floatFromInt(self.n));
+        const avg_cost = @as(f64, @floatFromInt(total_cost)) / @as(f64, @floatFromInt(self.n));
+        log.info("Max degree: {d}", .{max_degree});
+        log.info("Max rank: {d}, avg rank: {d:.2}", .{ max_rank, avg_rank });
+        log.info("Max cost: {d}, avg cost: {d:.2}", .{ max_cost, avg_cost });
+
+        log.info("", .{});
+        log.info("Nodes by degree: {d}", .{max_degree});
+        for (0..self.n) |deg| {
+            if (nodes_by_degree[deg] > 0) {
+                log.info("{d} nodes of degree {d}", .{nodes_by_degree[deg], deg});
+            }
+        }
+        log.info("", .{});
+        log.info("Nodes by rank: {d}", .{max_rank});
+        for (0..self.n) |rank| {
+            if (nodes_by_rank[rank] > 0) {
+                log.info("{d} nodes of rank {d}", .{nodes_by_rank[rank], rank});
+            }
+        }
+        log.info("", .{});
+        log.info("Nodes by cost: {d}", .{max_cost});
+        for (0..self.n) |cost| {
+            if (nodes_by_cost[cost] > 0) {
+                log.info("{d} nodes of cost {d}", .{nodes_by_cost[cost], cost});
+            }
+        }
+        log.info("", .{});
+        log.info("Top of the tree", .{});
+        for (0..3) |rank| {
+            for (0..self.n) |node| {
+                if (self.is_junk[node]) continue;
+                if (ranks[node] == rank) {
+                    std.log.info("Node {d} has rank {d} degree {d} and nb_descendants {d}", .{node, rank, self.nb_neighbors[node], nb_descendants[node]});
+                }
+            }
+        }
+        log.info("", .{});
+        log.info("Biggest hub", .{});
+        for (0..self.n) |node| {
+            if (self.is_junk[node]) continue;
+            if (self.nb_neighbors[node] == max_degree) {
+                std.log.info("Node {d} has rank {d} degree {d} and nb_descendants {d}", .{node, ranks[node], self.nb_neighbors[node], nb_descendants[node]});
+                var parent = node;
+                while (true) {
+                    parent = parents[parent];
+                    std.log.info("Parent {d} has rank {d} degree {d} and nb_descendants {d}", .{parent, ranks[parent], self.nb_neighbors[parent], nb_descendants[parent]});
+                    if (parent == 0) break;
+                }
+                break;
+            }
+        }
+        
+    }
+
+    pub fn monotonicSearch(self: *Graph, start: usize, target: usize) usize {
+        std.debug.assert(!self.is_junk[start]);
+        std.debug.assert(!self.is_junk[target]);
+        var best_sim = self.similarity(start, target);
+        var best_node = start;
+        while (true) {
+            if (self.nb_neighbors[best_node] == 0) break;
+            const start_neigh = self.params.k_max * best_node;
+            const end_neigh = start_neigh + self.nb_neighbors[best_node];
+            var best_neigh_node = self.neighbors[start_neigh];
+            var best_neigh_sim = self.similarity(best_neigh_node, target);
+            for (start_neigh + 1..end_neigh) |neigh_slot| {
+                const neigh_node = self.neighbors[neigh_slot];
+                const sim = self.similarity(neigh_node, target);
+                if (sim > best_neigh_sim) {
+                    best_neigh_sim = sim;
+                    best_neigh_node = neigh_node;
+                }
+            }
+            if (best_sim > best_neigh_sim) break;
+            best_sim = best_neigh_sim;
+            best_node = best_neigh_node;
+        }
+        return best_node;
+    }
+
+    pub fn monotonicTrailSearch(self: *Graph, start: usize, target: usize) usize {
+        std.debug.assert(!self.is_junk[start]);
+        std.debug.assert(!self.is_junk[target]);
+        var best_sim = self.similarity(start, target);
+        var best_node = start;
+        self.visited[0] = .{ .node = best_node, .similarity = best_sim };
+        self.nb_visited = 1;
+        while (true) {
+            if (self.nb_neighbors[best_node] == 0) break;
+            const start_neigh = self.params.k_max * best_node;
+            const end_neigh = start_neigh + self.nb_neighbors[best_node];
+            var best_neigh_node = self.neighbors[start_neigh];
+            var best_neigh_sim = self.similarity(best_neigh_node, target);
+            for (start_neigh + 1..end_neigh) |neigh_slot| {
+                const neigh_node = self.neighbors[neigh_slot];
+                const sim = self.similarity(neigh_node, target);
+                if (sim > best_neigh_sim) {
+                    best_neigh_sim = sim;
+                    best_neigh_node = neigh_node;
+                }
+            }
+            if (best_sim > best_neigh_sim) break;
+            best_sim = best_neigh_sim;
+            best_node = best_neigh_node;
+            self.visited[self.nb_visited] = .{ .node = best_node, .similarity = best_sim };
+            self.nb_visited += 1;
+        }
+        var best_ancestor: usize = 0;
+        var min_neighbors = self.nb_neighbors[0];
+        for (1..self.nb_visited) |i| {
+            const node = self.visited[i].node;
+            if (self.nb_neighbors[node] <= min_neighbors) {
+                best_ancestor = i;
+                min_neighbors = self.nb_neighbors[node];
+            }
+        }
+        return best_ancestor;
+    }
+    
     // ---------------------- Syntax utils ----------------------- //
 
     pub fn nbEdges(self: *const Graph) usize {

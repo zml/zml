@@ -123,6 +123,22 @@ pub const Model_handler = struct {
         const get_medoid_results = try get_medoid_exe.results(zml_handler.allocator);
         errdefer get_medoid_results.deinit(zml_handler.allocator);
 
+        const sort_by_first_row_exe = try zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .sortByFirstRow,
+            .{},
+            opts,
+        );
+        errdefer sort_by_first_row_exe.deinit();
+
+        const sort_by_first_row_args = try sort_by_first_row_exe.args(zml_handler.allocator);
+        errdefer sort_by_first_row_args.deinit(zml_handler.allocator);
+
+        const sort_by_first_row_results = try sort_by_first_row_exe.results(zml_handler.allocator);
+        errdefer sort_by_first_row_results.deinit(zml_handler.allocator);
+
         const score_exe = try zml_handler.platform.compile(
             zml_handler.allocator,
             zml_handler.io,
@@ -186,6 +202,9 @@ pub const Model_handler = struct {
             .get_medoid_exe = get_medoid_exe,
             .get_medoid_args = get_medoid_args,
             .get_medoid_results = get_medoid_results,
+            .sort_by_first_row_exe = sort_by_first_row_exe,
+            .sort_by_first_row_args = sort_by_first_row_args,
+            .sort_by_first_row_results = sort_by_first_row_results,
             .score_exe = score_exe,
             .score_args = score_args,
             .score_results = score_results,
@@ -223,6 +242,9 @@ pub const ModelExes = struct {
     get_medoid_exe: zml.Exe,
     get_medoid_args: zml.Exe.Arguments,
     get_medoid_results: zml.Exe.Results,
+    sort_by_first_row_exe: zml.Exe,
+    sort_by_first_row_args: zml.Exe.Arguments,
+    sort_by_first_row_results: zml.Exe.Results,
     score_exe: zml.Exe,
     score_args: zml.Exe.Arguments,
     score_results: zml.Exe.Results,
@@ -249,6 +271,9 @@ pub const ModelExes = struct {
         self.get_medoid_exe.deinit();
         self.get_medoid_args.deinit(allocator);
         self.get_medoid_results.deinit(allocator);
+        self.sort_by_first_row_exe.deinit();
+        self.sort_by_first_row_args.deinit(allocator);
+        self.sort_by_first_row_results.deinit(allocator);
         self.score_exe.deinit();
         self.score_args.deinit(allocator);
         self.score_results.deinit(allocator);
@@ -333,6 +358,14 @@ pub const Model = struct {
         return lm_head.mul(lm_head).sum(.d).squeeze(.d).sqrt();
     }
 
+    pub fn sortByFirstRow(self: Model) zml.Tensor {
+        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
+        const zero = zml.Tensor.scalar(@as(u32, 0), .u32);
+        const first_row = lm_head.dynamicSlice1d(lm_head.axis(.voc), .{ .start = zero, .len = 1 }).squeeze(.voc);
+        const scores = lm_head.dot(first_row, .d);
+        return scores.sort(.voc, .{ .descending = false }).indices.convert(.u64);
+    }
+
     pub fn getMedoid(self: Model, junk_rows: zml.Tensor) zml.Tensor {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
         const normalized_lm_head = normalizeRows(lm_head);
@@ -403,7 +436,7 @@ pub const Model = struct {
         const rows = lm_head.gather(.{ .voc = smallest_norm_rows.indices }, .{});
         const junk_direction = normalizeVector(rows.mean(.junk).squeeze(.junk));
         const similarity = normalizeRows(lm_head).dot(junk_direction, .d);
-        const is_junk = similarity.cmp(.GT, zml.Tensor.scalar(0.5, .f32));
+        const is_junk = similarity.cmp(.GT, zml.Tensor.scalar(0.75, .f32));
         const row_ids = zml.Tensor.iota(similarity.shape(), .voc).convert(.u64);
         const sentinel = zml.Tensor.scalar(@as(u64, @intCast(lm_head.dim(.voc))), .u64);
         return is_junk.select(row_ids, sentinel);

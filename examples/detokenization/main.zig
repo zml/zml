@@ -284,26 +284,38 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     std.log.info("Found {d} junk rows", .{junk_rows.len});
 
     std.log.info("Get medoid", .{});
-    const medoid = try getMedoid(zml_handler, &model_handler, junk_rows);
+    const medoid = 0;//try getMedoid(zml_handler, &model_handler, junk_rows);
     std.log.info("Medoid: {d}", .{medoid});
 
+    std.log.info("Get MRT insertion order", .{});
+    const mrt_order = try getMrtOrder(zml_handler, &model_handler);
+    defer zml_handler.allocator.free(mrt_order);
+
+    std.log.info("Init MRT", .{});
+    const mrt_params: graph.GraphParams = .{ .k_max = 1024 };
+    var mrt: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, medoid, mrt_params);
+    defer mrt.deinit();
+    //try mrt.makeMrt(mrt_order);
+    std.log.info("Exact MRT : nb edges: {d}", .{mrt.nbEdges()});
+    
     std.log.info("Init graph", .{});
     const graph_params: graph.GraphParams = .{};
-    var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, medoid, graph_params);
+    //var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, medoid, graph_params);
+    var g: graph.Graph = try .fromFile(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, "nsw-knn-16.safetensors", graph_params);
     defer g.deinit();
 
     zml_handler.tic(&zml_handler.timers.knn_graph);
-    g.setNearestNeighbors();
+    //g.setNearestNeighbors();
     zml_handler.toc(&zml_handler.timers.knn_graph);
 
     std.log.info("Exact kNN : nb edges: {d}", .{g.nbEdges()});
 
     zml_handler.tic(&zml_handler.timers.nsw_graph);
-    g.extendToNsw();
+    //g.extendToNsw();
     zml_handler.toc(&zml_handler.timers.nsw_graph);
 
     std.log.info("NSW extension : nb edges: {d}", .{g.nbEdges()});
-    g.testNswExtention();
+    //g.testNswExtention();
 
     try testEmbedGraphSearch(zml_handler, &model_handler, &g, false);
 }
@@ -766,7 +778,6 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, model_handler: *model_.Mo
         const task_name = entry.key_ptr.*;
         const task_embeds = try loadSafetensorSliceFromRegistry(zml_handler, &registry, task_name);
         defer task_embeds.free(zml_handler.allocator);
-        if (task_embeds.dtype() != .f32) return error.UnsupportedEmbeddingDtype;
 
         const embed_count = embeddingCount(task_embeds, d) orelse return error.InvalidEmbeddingShape;
         std.log.info("Test embed graph search task={s} embeddings={d} shape={f}", .{ task_name, embed_count, task_embeds.shape });
@@ -900,22 +911,47 @@ fn embeddingCount(embeds: zml.Slice, d: usize) ?usize {
 fn copyEmbedding(embeds: zml.Slice, d: usize, embed_index: usize, out: []f32) void {
     std.debug.assert(out.len == d);
     const dims = embeds.shape.dims();
-    const items = embeds.constItems(f32);
-    switch (embeds.shape.rank()) {
-        1 => @memcpy(out, items[0..d]),
+    const rank = embeds.shape.rank();
+    const dim_is_first = switch (rank) {
+        1 => true,
+        2 => @as(usize, @intCast(dims[0])) == d,
+        else => unreachable,
+    };
+    const embed_count: usize = switch (rank) {
+        1 => 1,
+        2 => if (dim_is_first) @intCast(dims[1]) else @intCast(dims[0]),
+        else => unreachable,
+    };
+    std.debug.assert(embed_index < embed_count);
+
+    switch (embeds.dtype()) {
+        .f32 => copyEmbeddingTyped(f32, embeds.constItems(f32), rank, dim_is_first, d, embed_count, embed_index, out),
+        .bf16 => copyEmbeddingTyped(zml.floats.BFloat16, embeds.constItems(zml.floats.BFloat16), rank, dim_is_first, d, embed_count, embed_index, out),
+        .f16 => copyEmbeddingTyped(f16, embeds.constItems(f16), rank, dim_is_first, d, embed_count, embed_index, out),
+        else => unreachable,
+    }
+}
+
+fn copyEmbeddingTyped(comptime T: type, items: []const T, rank: u4, dim_is_first: bool, d: usize, embed_count: usize, embed_index: usize, out: []f32) void {
+    switch (rank) {
+        1 => {
+            for (0..d) |i| out[i] = scalarToF32(items[i]);
+        },
         2 => {
-            if (@as(usize, @intCast(dims[0])) == d) {
-                const embed_count: usize = @intCast(dims[1]);
-                std.debug.assert(embed_index < embed_count);
-                for (0..d) |i| out[i] = items[i * embed_count + embed_index];
+            if (dim_is_first) {
+                for (0..d) |i| out[i] = scalarToF32(items[i * embed_count + embed_index]);
             } else {
-                std.debug.assert(@as(usize, @intCast(dims[1])) == d);
                 const start = embed_index * d;
-                @memcpy(out, items[start..][0..d]);
+                for (0..d) |i| out[i] = scalarToF32(items[start + i]);
             }
         },
         else => unreachable,
     }
+}
+
+fn scalarToF32(value: anytype) f32 {
+    const T = @TypeOf(value);
+    return if (T == zml.floats.BFloat16) value.toF32() else @floatCast(value);
 }
 
 fn logEmbedGraphSampling(tokenizer: zml.tokenizer.Tokenizer, embedding: []const f32, g: *graph.Graph, sorted_probas: []const f32, sorted_indices: []const i32, sorted_similarities: []const f32, prob_by_token: []const f32, top_k: usize) !void {
@@ -1035,6 +1071,23 @@ pub fn getLmHeadRowNorms(zml_handler: *Zml_handler, model_handler: *model_.Model
     var lm_head_row_norms_buffer = model_handler.exes.get_lm_head_row_norms_results.get(zml.Buffer);
     defer lm_head_row_norms_buffer.deinit();
     return lm_head_row_norms_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+}
+
+pub fn getMrtOrder(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) ![]usize {
+    model_handler.exes.sort_by_first_row_args.set(.{model_handler.model_buffers});
+    model_handler.exes.sort_by_first_row_exe.call(model_handler.exes.sort_by_first_row_args, &model_handler.exes.sort_by_first_row_results);
+    var order_buffer = model_handler.exes.sort_by_first_row_results.get(zml.Buffer);
+    defer order_buffer.deinit();
+
+    const order_slice = try order_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer order_slice.free(zml_handler.allocator);
+    const order_items = order_slice.constItems(u64);
+    const order = try zml_handler.allocator.alloc(usize, order_items.len);
+    errdefer zml_handler.allocator.free(order);
+    for (order_items, order) |src, *dst| {
+        dst.* = @intCast(src);
+    }
+    return order;
 }
 
 pub fn getMedoid(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, junk_rows: []const usize) !usize {
@@ -1219,11 +1272,22 @@ pub fn loadSafetensorSliceFromRegistry(zml_handler: *Zml_handler, registry: *zml
     const slice = try zml.Slice.alloc(zml_handler.allocator, tensor.shape);
     errdefer slice.free(zml_handler.allocator);
 
-    var io_buffer: [8 * 1024]u8 = undefined;
-    var reader = try registry.reader(zml_handler.io, tensor_name, &io_buffer);
+    const io_buffer = try zml_handler.allocator.alloc(u8, 8 * 1024 * 1024);
+    defer zml_handler.allocator.free(io_buffer);
+    var reader = try registry.reader(zml_handler.io, tensor_name, io_buffer);
     defer reader.deinit();
-    _ = try reader.interface.readSliceAll(slice.data());
+    try readSliceDataChunked(&reader.interface, slice.data());
     return slice;
+}
+
+fn readSliceDataChunked(reader: *std.Io.Reader, data: []u8) !void {
+    const max_read_chunk = 512 * 1024 * 1024;
+    var offset: usize = 0;
+    while (offset < data.len) {
+        const chunk_len = @min(max_read_chunk, data.len - offset);
+        _ = try reader.readSliceAll(data[offset..][0..chunk_len]);
+        offset += chunk_len;
+    }
 }
 
 pub fn loadSafetensorSlice(zml_handler: *Zml_handler, repo_uri: []const u8, entrypoint_name: []const u8, tensor_name: []const u8) !zml.Slice {
@@ -1241,14 +1305,7 @@ pub fn loadSafetensorSlice(zml_handler: *Zml_handler, repo_uri: []const u8, entr
     var reader = try registry.reader(zml_handler.io, tensor_name, io_buffer);
     defer reader.deinit();
 
-    const data = slice.data();
-    const max_read_chunk = 512 * 1024 * 1024;
-    var offset: usize = 0;
-    while (offset < data.len) {
-        const chunk_len = @min(max_read_chunk, data.len - offset);
-        _ = try reader.interface.readSliceAll(data[offset..][0..chunk_len]);
-        offset += chunk_len;
-    }
+    try readSliceDataChunked(&reader.interface, slice.data());
     return slice;
 }
 
