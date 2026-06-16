@@ -295,7 +295,7 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     const mrt_params: graph.GraphParams = .{ .k_max = 1024 };
     var mrt: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, medoid, mrt_params);
     defer mrt.deinit();
-    //try mrt.makeMrt(mrt_order);
+    try mrt.makeMrt(mrt_order);
     std.log.info("Exact MRT : nb edges: {d}", .{mrt.nbEdges()});
     
     std.log.info("Init graph", .{});
@@ -317,7 +317,7 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     std.log.info("NSW extension : nb edges: {d}", .{g.nbEdges()});
     //g.testNswExtention();
 
-    try testEmbedGraphSearch(zml_handler, &model_handler, &g, false);
+    try testEmbedGraphSearch(zml_handler, &model_handler, &mrt, false);
 }
 
 pub fn run(zml_handler: *Zml_handler) !void {
