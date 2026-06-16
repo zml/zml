@@ -7,6 +7,7 @@ const log = std.log;
 const graph = @import("graph.zig");
 const model_ = @import("model.zig");
 const llm_ = @import("llm.zig");
+const svd_ = @import("svd.zig");
 const inference = @import("inference.zig");
 
 pub const std_options: std.Options = .{
@@ -235,7 +236,6 @@ pub fn main(init: std.process.Init) !void {
     zml_handler.timers.print();
 }
 
-
 pub fn runLlm(zml_handler: *Zml_handler) !void {
     var llm = try llm_.Llm_handler.init(zml_handler);
     defer llm.deinit(zml_handler.allocator);
@@ -254,6 +254,25 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer model_handler.deinit(zml_handler.allocator);
     defer model_handler.unloadBuffers();
 
+    std.log.info("Compute SVD", .{});
+    const u_rot, const diag = try loadSvd(zml_handler, &model_handler);
+    defer u_rot.free(zml_handler.allocator);
+    defer diag.free(zml_handler.allocator);
+    for (diag.constItems(f64)) |s| {
+        std.log.info("singular value: {d}", .{@sqrt(s)});
+    }
+    
+    std.log.info("Get lm_head_rotated", .{});
+    const lm_head_rotated, const lm_head_rotated_tr = try getLmHeadRotated(zml_handler, &model_handler, u_rot);
+    defer lm_head_rotated.free(zml_handler.allocator);
+    defer lm_head_rotated_tr.free(zml_handler.allocator);
+
+    std.log.info("Init SVD sampler", .{});
+    var svd_sampler: svd_.SvdSampler = try .init(zml_handler.allocator, lm_head_rotated, lm_head_rotated_tr);
+    defer svd_sampler.deinit();
+
+    try testTokenSvdSearch(lm_head_rotated, &svd_sampler);
+    
     //try analyzeTopRows(zml_handler, &model_handler);
 
     zml_handler.tic(&zml_handler.timers.similarity_matrix);
@@ -284,7 +303,7 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     std.log.info("Found {d} junk rows", .{junk_rows.len});
 
     std.log.info("Get medoid", .{});
-    const medoid = 0;//try getMedoid(zml_handler, &model_handler, junk_rows);
+    const medoid = 0; //try getMedoid(zml_handler, &model_handler, junk_rows);
     std.log.info("Medoid: {d}", .{medoid});
 
     std.log.info("Get MRT insertion order", .{});
@@ -297,7 +316,7 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer mrt.deinit();
     try mrt.makeMrt(mrt_order);
     std.log.info("Exact MRT : nb edges: {d}", .{mrt.nbEdges()});
-    
+
     std.log.info("Init graph", .{});
     const graph_params: graph.GraphParams = .{};
     //var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, medoid, graph_params);
@@ -569,6 +588,47 @@ pub fn loadSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Mo
     return matrix;
 }
 
+pub fn loadSvd(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !struct { zml.Slice, zml.Slice } {
+    const allocator = zml_handler.allocator;
+    const filename = "qwen_svd.safetensors";
+    std.log.info("Load SVD from checkpoint: {s}", .{filename});
+
+    const u = try loadSafetensorSlice(zml_handler, zml_handler.uris.checkpoint, filename, "U");
+    defer u.free(allocator);
+
+    const diag = try loadSafetensorSlice(zml_handler, zml_handler.uris.checkpoint, filename, "diag");
+    defer diag.free(allocator);
+
+    const d: usize = @intCast(model_handler.model.shape().dim(.d));
+    std.debug.assert(u.dtype() == .f32);
+    std.debug.assert(diag.dtype() == .f64);
+    std.debug.assert(u.shape.rank() == 1 or u.shape.rank() == 2);
+    std.debug.assert(diag.shape.rank() == 1);
+    std.debug.assert(u.shape.count() == d * d);
+    std.debug.assert(diag.shape.count() == d);
+
+    const reversed_u = try zml.Slice.alloc(allocator, u.shape);
+    errdefer reversed_u.free(allocator);
+    const reversed_diag = try zml.Slice.alloc(allocator, diag.shape);
+    errdefer reversed_diag.free(allocator);
+
+    const u_items = u.constItems(f32);
+    const reversed_u_items = reversed_u.items(f32);
+    for (0..d) |row| {
+        for (0..d) |col| {
+            reversed_u_items[row * d + col] = u_items[row * d + (d - 1 - col)];
+        }
+    }
+
+    const diag_items = diag.constItems(f64);
+    const reversed_diag_items = reversed_diag.items(f64);
+    for (0..d) |i| {
+        reversed_diag_items[i] = diag_items[d - 1 - i];
+    }
+
+    return .{ reversed_u, reversed_diag };
+}
+
 pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !SimilarityMatrix {
     std.log.info("Compute similarity matrix", .{});
     const allocator = zml_handler.allocator;
@@ -644,6 +704,15 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_
     return matrix;
 }
 
+const MatrixCandidate = struct {
+    node: usize,
+    similarity: f32,
+
+    fn beforeThan(_: void, lhs: MatrixCandidate, rhs: MatrixCandidate) bool {
+        return lhs.similarity > rhs.similarity or (lhs.similarity == rhs.similarity and lhs.node < rhs.node);
+    }
+};
+
 pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, similarity_matrix: *SimilarityMatrix, normalized_rows: bool) !void {
     std.log.info("Test similarity matrix", .{});
 
@@ -697,6 +766,8 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Mo
 
     std.log.info("1000 random pairs, max_abs_diff={d}, max_rel_diff={d}", .{ max_abs_diff, max_rel_diff });
     std.log.info("Test kNN", .{});
+
+    
     
     const candidates = try zml_handler.allocator.alloc(MatrixCandidate, n - 1);
     defer zml_handler.allocator.free(candidates);
@@ -731,14 +802,103 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *model_.Mo
     std.log.info("Similarity matrix kNN test passed: 100 random rows, k={d}", .{similarity_matrix.k});
 }
 
-const MatrixCandidate = struct {
-    node: usize,
-    similarity: f32,
 
-    fn beforeThan(_: void, lhs: MatrixCandidate, rhs: MatrixCandidate) bool {
-        return lhs.similarity > rhs.similarity or (lhs.similarity == rhs.similarity and lhs.node < rhs.node);
+pub fn getLmHead(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !zml.Slice {
+    model_handler.exes.get_lm_head_args.set(.{model_handler.model_buffers});
+    model_handler.exes.get_lm_head_exe.call(model_handler.exes.get_lm_head_args, &model_handler.exes.get_lm_head_results);
+    var lm_head_buffer = model_handler.exes.get_lm_head_results.get(zml.Buffer);
+    defer lm_head_buffer.deinit();
+    return lm_head_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+}
+
+pub fn getLmHeadNormalized(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !zml.Slice {
+    model_handler.exes.get_lm_head_normalized_args.set(.{model_handler.model_buffers});
+    model_handler.exes.get_lm_head_normalized_exe.call(model_handler.exes.get_lm_head_normalized_args, &model_handler.exes.get_lm_head_normalized_results);
+    var lm_head_normalized_buffer = model_handler.exes.get_lm_head_normalized_results.get(zml.Buffer);
+    defer lm_head_normalized_buffer.deinit();
+    return lm_head_normalized_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+}
+
+pub fn getLmHeadRotated(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, rotation: zml.Slice) !struct { zml.Slice, zml.Slice } {
+    var rot_buffer = try zml.Buffer.fromSlice(zml_handler.io, zml_handler.platform, rotation, .replicated);
+    defer rot_buffer.deinit();
+    model_handler.exes.rotated_lm_head_args.set(.{model_handler.model_buffers, rot_buffer});
+    model_handler.exes.rotated_lm_head_exe.call(model_handler.exes.rotated_lm_head_args, &model_handler.exes.rotated_lm_head_results);
+    var buff1: zml.Buffer = undefined;
+    var buff2: zml.Buffer = undefined;
+    defer buff1.deinit();
+    defer buff2.deinit();
+    model_handler.exes.rotated_lm_head_results.fill(.{ &buff1, &buff2 });
+    return .{ try buff1.toSliceAlloc(zml_handler.allocator, zml_handler.io), try buff2.toSliceAlloc(zml_handler.allocator, zml_handler.io) };
+}
+
+pub fn getLmHeadRowNorms(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !zml.Slice {
+    model_handler.exes.get_lm_head_row_norms_args.set(.{model_handler.model_buffers});
+    model_handler.exes.get_lm_head_row_norms_exe.call(model_handler.exes.get_lm_head_row_norms_args, &model_handler.exes.get_lm_head_row_norms_results);
+    var lm_head_row_norms_buffer = model_handler.exes.get_lm_head_row_norms_results.get(zml.Buffer);
+    defer lm_head_row_norms_buffer.deinit();
+    return lm_head_row_norms_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+}
+
+pub fn getMrtOrder(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) ![]usize {
+    model_handler.exes.sort_by_first_row_args.set(.{model_handler.model_buffers});
+    model_handler.exes.sort_by_first_row_exe.call(model_handler.exes.sort_by_first_row_args, &model_handler.exes.sort_by_first_row_results);
+    var order_buffer = model_handler.exes.sort_by_first_row_results.get(zml.Buffer);
+    defer order_buffer.deinit();
+
+    const order_slice = try order_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer order_slice.free(zml_handler.allocator);
+    const order_items = order_slice.constItems(u64);
+    const order = try zml_handler.allocator.alloc(usize, order_items.len);
+    errdefer zml_handler.allocator.free(order);
+    for (order_items, order) |src, *dst| {
+        dst.* = @intCast(src);
     }
-};
+    return order;
+}
+
+pub fn getMedoid(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, junk_rows: []const usize) !usize {
+    const n: usize = @intCast(model_handler.model.shape().dim(.voc));
+    const sentinel: u64 = @intCast(n);
+    const junk_rows_slice = try zml.Slice.alloc(zml_handler.allocator, .init(.{ .junk = n }, .u64));
+    defer junk_rows_slice.free(zml_handler.allocator);
+    @memset(junk_rows_slice.items(u64), sentinel);
+    for (junk_rows, 0..) |row, i| {
+        junk_rows_slice.items(u64)[i] = @intCast(row);
+    }
+
+    var junk_rows_buffer = try zml.Buffer.fromSlice(zml_handler.io, zml_handler.platform, junk_rows_slice, .replicated);
+    defer junk_rows_buffer.deinit();
+
+    model_handler.exes.get_medoid_args.set(.{ model_handler.model_buffers, junk_rows_buffer });
+    model_handler.exes.get_medoid_exe.call(model_handler.exes.get_medoid_args, &model_handler.exes.get_medoid_results);
+    var medoid_buffer = model_handler.exes.get_medoid_results.get(zml.Buffer);
+    defer medoid_buffer.deinit();
+
+    const medoid_slice = try medoid_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer medoid_slice.free(zml_handler.allocator);
+    return @intCast(medoid_slice.constItems(u64)[0]);
+}
+
+pub fn getJunkRows(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) ![]usize {
+    model_handler.exes.find_junk_rows_args.set(.{model_handler.model_buffers});
+    model_handler.exes.find_junk_rows_exe.call(model_handler.exes.find_junk_rows_args, &model_handler.exes.find_junk_rows_results);
+    var junk_rows_buffer = model_handler.exes.find_junk_rows_results.get(zml.Buffer);
+    defer junk_rows_buffer.deinit();
+
+    var junk_rows_slice = try junk_rows_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer junk_rows_slice.free(zml_handler.allocator);
+
+    const sentinel: u64 = @intCast(model_handler.model.shape().dim(.voc));
+    var junk_rows: std.ArrayList(usize) = try .initCapacity(zml_handler.allocator, 0);
+    errdefer junk_rows.deinit(zml_handler.allocator);
+    for (junk_rows_slice.constItems(u64)) |row| {
+        if (row == sentinel) continue;
+        try junk_rows.append(zml_handler.allocator, @intCast(row));
+    }
+    return junk_rows.toOwnedSlice(zml_handler.allocator);
+}
+
 
 pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, g: *graph.Graph, log_each_search: bool) !void {
     const top_k = 16;
@@ -898,7 +1058,6 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, model_handler: *model_.Mo
     );
 }
 
-
 fn embeddingCount(embeds: zml.Slice, d: usize) ?usize {
     const dims = embeds.shape.dims();
     return switch (embeds.shape.rank()) {
@@ -993,6 +1152,7 @@ fn embeddingNorm(embedding: []const f32) f32 {
     return @sqrt(norm2);
 }
 
+
 pub fn testTokenGraphSearch(lm_head: zml.Slice, g: *graph.Graph) void {
     std.log.info("Test token graph search", .{});
     const n: usize = @intCast(lm_head.shape.dim(.voc));
@@ -1048,89 +1208,24 @@ pub fn testTokenGraphSearch(lm_head: zml.Slice, g: *graph.Graph) void {
     );
 }
 
+pub fn testTokenSvdSearch(lm_head: zml.Slice, svd: *svd_.SvdSampler) !void {
+    std.log.info("Test token SVD search", .{});
+    const n: usize = @intCast(lm_head.shape.dim(.voc));
+    const d: usize = @intCast(lm_head.shape.dim(.d));
 
-pub fn getLmHead(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !zml.Slice {
-    model_handler.exes.get_lm_head_args.set(.{model_handler.model_buffers});
-    model_handler.exes.get_lm_head_exe.call(model_handler.exes.get_lm_head_args, &model_handler.exes.get_lm_head_results);
-    var lm_head_buffer = model_handler.exes.get_lm_head_results.get(zml.Buffer);
-    defer lm_head_buffer.deinit();
-    return lm_head_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
-}
-
-pub fn getLmHeadNormalized(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !zml.Slice {
-    model_handler.exes.get_lm_head_normalized_args.set(.{model_handler.model_buffers});
-    model_handler.exes.get_lm_head_normalized_exe.call(model_handler.exes.get_lm_head_normalized_args, &model_handler.exes.get_lm_head_normalized_results);
-    var lm_head_normalized_buffer = model_handler.exes.get_lm_head_normalized_results.get(zml.Buffer);
-    defer lm_head_normalized_buffer.deinit();
-    return lm_head_normalized_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
-}
-
-pub fn getLmHeadRowNorms(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) !zml.Slice {
-    model_handler.exes.get_lm_head_row_norms_args.set(.{model_handler.model_buffers});
-    model_handler.exes.get_lm_head_row_norms_exe.call(model_handler.exes.get_lm_head_row_norms_args, &model_handler.exes.get_lm_head_row_norms_results);
-    var lm_head_row_norms_buffer = model_handler.exes.get_lm_head_row_norms_results.get(zml.Buffer);
-    defer lm_head_row_norms_buffer.deinit();
-    return lm_head_row_norms_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
-}
-
-pub fn getMrtOrder(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) ![]usize {
-    model_handler.exes.sort_by_first_row_args.set(.{model_handler.model_buffers});
-    model_handler.exes.sort_by_first_row_exe.call(model_handler.exes.sort_by_first_row_args, &model_handler.exes.sort_by_first_row_results);
-    var order_buffer = model_handler.exes.sort_by_first_row_results.get(zml.Buffer);
-    defer order_buffer.deinit();
-
-    const order_slice = try order_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
-    defer order_slice.free(zml_handler.allocator);
-    const order_items = order_slice.constItems(u64);
-    const order = try zml_handler.allocator.alloc(usize, order_items.len);
-    errdefer zml_handler.allocator.free(order);
-    for (order_items, order) |src, *dst| {
-        dst.* = @intCast(src);
+    const rows = lm_head.constItems(f32);
+    var rand = std.Random.DefaultPrng.init(1);
+    const rng = std.Random.Xoshiro256.random(&rand);
+    
+    for (0..n) |row_id| {
+        const query = rows[row_id * d ..][0..d];
+        const safe_tok = try svd.sampleSafe(query, rng);
+        const unsafe_tok = try svd.sampleUnsafe(query, rng);
+        
+        std.log.info("SVD sample: query = {d} safe={d} unsafe={d}", .{ row_id, safe_tok, unsafe_tok });
     }
-    return order;
 }
 
-pub fn getMedoid(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, junk_rows: []const usize) !usize {
-    const n: usize = @intCast(model_handler.model.shape().dim(.voc));
-    const sentinel: u64 = @intCast(n);
-    const junk_rows_slice = try zml.Slice.alloc(zml_handler.allocator, .init(.{ .junk = n }, .u64));
-    defer junk_rows_slice.free(zml_handler.allocator);
-    @memset(junk_rows_slice.items(u64), sentinel);
-    for (junk_rows, 0..) |row, i| {
-        junk_rows_slice.items(u64)[i] = @intCast(row);
-    }
-
-    var junk_rows_buffer = try zml.Buffer.fromSlice(zml_handler.io, zml_handler.platform, junk_rows_slice, .replicated);
-    defer junk_rows_buffer.deinit();
-
-    model_handler.exes.get_medoid_args.set(.{ model_handler.model_buffers, junk_rows_buffer });
-    model_handler.exes.get_medoid_exe.call(model_handler.exes.get_medoid_args, &model_handler.exes.get_medoid_results);
-    var medoid_buffer = model_handler.exes.get_medoid_results.get(zml.Buffer);
-    defer medoid_buffer.deinit();
-
-    const medoid_slice = try medoid_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
-    defer medoid_slice.free(zml_handler.allocator);
-    return @intCast(medoid_slice.constItems(u64)[0]);
-}
-
-pub fn getJunkRows(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) ![]usize {
-    model_handler.exes.find_junk_rows_args.set(.{model_handler.model_buffers});
-    model_handler.exes.find_junk_rows_exe.call(model_handler.exes.find_junk_rows_args, &model_handler.exes.find_junk_rows_results);
-    var junk_rows_buffer = model_handler.exes.find_junk_rows_results.get(zml.Buffer);
-    defer junk_rows_buffer.deinit();
-
-    var junk_rows_slice = try junk_rows_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
-    defer junk_rows_slice.free(zml_handler.allocator);
-
-    const sentinel: u64 = @intCast(model_handler.model.shape().dim(.voc));
-    var junk_rows: std.ArrayList(usize) = try .initCapacity(zml_handler.allocator, 0);
-    errdefer junk_rows.deinit(zml_handler.allocator);
-    for (junk_rows_slice.constItems(u64)) |row| {
-        if (row == sentinel) continue;
-        try junk_rows.append(zml_handler.allocator, @intCast(row));
-    }
-    return junk_rows.toOwnedSlice(zml_handler.allocator);
-}
 
 pub fn getExcludedRows(zml_handler: *Zml_handler, model_handler: *model_.Model_handler) ![]usize {
     const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
@@ -1378,7 +1473,6 @@ const TensorExtractor = struct {
         return self.tensor.convert(.f16);
     }
 };
-
 
 pub fn printSafetensors(registry: zml.safetensors.TensorRegistry) !void {
     const tensors: zml.safetensors.Tensors = registry.tensors;
