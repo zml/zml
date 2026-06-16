@@ -69,9 +69,13 @@ zig_library(
     name = "zml",
     tags = ["manual"],
     data = [
-        "//zml/attention/nki:attention_kernel",
         "moe/triton_kernels/config.json",
-    ],
+    ] + select({
+        "//platforms:neuron.enabled": [
+            "//zml/attention/nki:attention_kernel",
+        ],
+        "//conditions:default": [],
+    }),
     srcs = [
         "attention.zig",
         "attention/attention.zig",
