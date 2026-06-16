@@ -144,7 +144,7 @@ fn scoreAndTopK1(b: *mtt.Builder, cfg: Cfg, gating: mtt.Value) TopKInfo {
     // logit buffers.
     const active_scores = b.vectorExtractStridedSlice(scored, &.{ 0, 0 }, &.{ bt, cfg.num_experts }, &.{ 1, 1 });
     const max_logits = b.multiReduction(.maximumf, active_scores, b.full(&.{bt}, -std.math.inf(f32), .f32), &.{1});
-    const indices = b.reduceIndex(active_scores, .max, 1);
+    const indices = b.reduceIndex(active_scores, .arg_max, 1);
     const logits = b.broadcastTo(b.shapeCast(max_logits, &.{ bt, 1 }), &.{ bt, padded_top_k });
     const idx_bc = b.broadcastTo(b.shapeCast(indices, &.{ bt, 1 }), &.{ bt, padded_top_k });
     const k_iota = b.iota(&.{ bt, padded_top_k }, .i32, &.{1});
@@ -210,7 +210,7 @@ fn scoreAndTopK(b: *mtt.Builder, cfg: Cfg, gating: mtt.Value) TopKInfo {
             if (cfg.renormalize_topk_logits) logits_sum = b.addf(logits_sum, max_bc);
 
             const index_scores = b.vectorExtractStridedSlice(input, &.{ 0, 0 }, &.{ bt, cfg.num_experts }, &.{ 1, 1 });
-            const indices = b.reduceIndex(index_scores, .max, 1);
+            const indices = b.reduceIndex(index_scores, .arg_max, 1);
             const indices_bc = b.broadcastTo(b.shapeCast(indices, &.{ bt, 1 }), &.{ bt, padded_top_k });
             const k_match = b.cmpi(.eq, padded_k_iota, b.splat(@as(i32, @intCast(k_id_usize)), &.{ bt, padded_top_k }, .i32));
             routing = b.select(k_match, indices_bc, routing);

@@ -361,7 +361,6 @@ pub fn forwardFusedMoe(
 ) !zml.Tensor {
     const tpu_metadata: fused_moe_tpu.Metadata = switch (metadata) {
         .fused_moe => |v| v,
-        .mosaic_tpu => fused_moe_tpu.Metadata.init(.{}),
         else => return error.InvalidMetadata,
     };
     const tpu_parameters: fused_moe_tpu.Options = switch (parameters) {

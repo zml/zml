@@ -180,6 +180,19 @@ zig_library(
     ],
 )
 
+zig_library(
+    name = "mosaic_tpu_kernel_emit_zml_shim",
+    tags = ["manual"],
+    main = "moe/mosaic_tpu_kernel_emit_zml_shim.zig",
+    import_name = "zml",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//kernels/mosaic_tpu:mosaic_tpu_builder",
+        "//mlir",
+        "//mlir/dialects",
+    ],
+)
+
 zig_binary(
     name = "fused_moe_tpu_emit",
     srcs = [
@@ -189,7 +202,7 @@ zig_binary(
     main = "moe/fused_moe_tpu_emit.zig",
     visibility = ["//visibility:public"],
     deps = [
-        ":zml",
+        ":mosaic_tpu_kernel_emit_zml_shim",
         "//kernels/mosaic_tpu:mosaic_tpu_builder",
         "//mlir",
         "//mlir/dialects",

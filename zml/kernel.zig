@@ -330,6 +330,7 @@ pub const mosaic_tpu = struct {
     const CustomCallConfig = struct {
         body: []const u8,
         has_communication: ?bool = null,
+        collective_id: ?[]const u8 = null,
         serialization_format: i64 = 1,
         needs_layout_passes: bool = true,
         shape_invariant_numerics: bool = false,
@@ -344,6 +345,12 @@ pub const mosaic_tpu = struct {
     };
 
     const BackendConfig = struct {
+        const BarrierConfig = struct {
+            barrier_type: []const u8 = "CUSTOM",
+            id: []const u8 = "0",
+        };
+
+        barrier_config: ?BarrierConfig = null,
         custom_call_config: CustomCallConfig,
         scoped_memory_configs: ?[]const ScopedMemoryConfig = null,
     };
@@ -365,6 +372,7 @@ pub const mosaic_tpu = struct {
 
         const module = try mlir.Module.parse(ctx, ir);
         defer module.deinit();
+        const communication = tpu_dialect.analyzePotentialCommunication(module.operation());
 
         tpu_dialect.registerMosaicSerdePass();
         const prev_allow_unregistered = ctx.allowUnregisteredDialects();
@@ -373,7 +381,10 @@ pub const mosaic_tpu = struct {
 
         const pm = mlir.PassManager.init(ctx);
         defer pm.deinit();
-        try pm.asOpPassManager().addPipeline("mosaic-serde{serialize=true}");
+        const opm = pm.asOpPassManager();
+        inline for (.{ "canonicalize", "cse", "canonicalize", "mosaic-serde{serialize=true}" }) |pass| {
+            try opm.addPipeline(pass);
+        }
         try pm.runOnOp(module.operation());
 
         const Encoder = std.base64.standard.Encoder;
@@ -386,10 +397,13 @@ pub const mosaic_tpu = struct {
         };
         defer allocator.free(b64);
 
+        const has_communication = opts.has_communication orelse if (communication.has_communication) true else null;
         const config = BackendConfig{
+            .barrier_config = if (communication.has_custom_barrier) .{} else null,
             .custom_call_config = .{
                 .body = b64,
-                .has_communication = opts.has_communication,
+                .has_communication = has_communication,
+                .collective_id = if (has_communication orelse false) "0" else null,
                 .disable_bounds_checks = opts.disable_bounds_checks,
                 .disable_semaphore_checks = opts.disable_semaphore_checks,
             },

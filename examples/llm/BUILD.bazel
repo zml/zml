@@ -7,6 +7,9 @@ load("@tar.bzl//tar:tar.bzl", "tar")
 
 zig_binary(
     name = "llm",
+    data = [
+        "//zml:fused_moe_tpu_emit",
+    ],
     srcs = glob(["**/*.zig"]),
     main = "main.zig",
     visibility = ["//visibility:public"],

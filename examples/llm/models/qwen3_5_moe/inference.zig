@@ -34,8 +34,8 @@ pub const CompilationParameters = struct {
         return .{
             .kv_cache = .init(config, 1, seqlen, dtype, .f32, model_partitions),
             .rng = .init(),
-            .prefill_moe_metadata = initMoeMetadata(mdl, @intCast(seqlen), 1, moe_backend),
-            .decode_moe_metadata = initMoeMetadata(mdl, 1, 1, moe_backend),
+            .prefill_moe_metadata = initMoeMetadata(mdl, @intCast(seqlen), 1, moe_backend, shardings),
+            .decode_moe_metadata = initMoeMetadata(mdl, 1, 1, moe_backend, shardings),
             .moe_parameters = .init(.fromBackend(moe_backend, config.text_config.num_experts_per_tok, zml.moe.ActivationMode.silu)),
             .seqlen = seqlen,
             .shardings = shardings,
@@ -423,7 +423,7 @@ fn compileModel(
     };
 }
 
-fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, backend: zml.moe.Backend) zml.moe.Metadata {
+fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, backend: zml.moe.Backend, shardings: common.Shardings) zml.moe.Metadata {
     if (qwen_model.config.text_config.num_experts_per_tok == null) {
         return .init(.fromBackend(backend));
     }
@@ -435,6 +435,25 @@ fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, b
 
     const num_experts_per_tok = qwen_model.config.text_config.num_experts_per_tok.?;
     const num_experts = qwen_model.config.text_config.num_experts.?;
+
+    if (backend == .fused_moe) {
+        if (token_len == 1) return .init(.fromBackend(backend));
+
+        const total_tokens = @as(i64, @intCast(token_len)) * @as(i64, @intCast(batch_size));
+        const ep_size = shardings.experts.numPartitionsForLogicalAxis(.experts);
+        const hidden_dtype = qwen_model.text_model.embed_tokens.weight.dtype();
+        return .init(.{
+            .fused_moe = .{
+                .scratch_shape = zml.moe.fused_moe_tpu.scratchShape(
+                    total_tokens,
+                    qwen_model.config.text_config.hidden_size,
+                    num_experts,
+                    ep_size,
+                    hidden_dtype,
+                ),
+            },
+        });
+    }
 
     for (qwen_model.text_model.layers) |layer| {
         const gate_up_shape = zml.Shape.init(.{
@@ -477,5 +496,6 @@ fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, b
             },
         }),
         .mosaic_tpu => .init(.fromBackend(backend)),
+        .fused_moe => unreachable,
     };
 }

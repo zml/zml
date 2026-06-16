@@ -17,6 +17,21 @@ pub fn registerMosaicSerdePass() void {
     c.mlirTpuRegisterMosaicSerdePass();
 }
 
+pub const CommunicationAnalysis = struct {
+    has_communication: bool,
+    has_custom_barrier: bool,
+};
+
+pub fn analyzePotentialCommunication(op: *mlir.Operation) CommunicationAnalysis {
+    var has_communication = false;
+    var has_custom_barrier = false;
+    c.mlirTPUAnalyzePotentialCommunication(op.ptr(), &has_communication, &has_custom_barrier);
+    return .{
+        .has_communication = has_communication,
+        .has_custom_barrier = has_custom_barrier,
+    };
+}
+
 // =============================================================================
 // Types — !tpu.semaphore, !tpu.dma_semaphore, !tpu.float8_exmy<...>
 // =============================================================================
@@ -65,6 +80,8 @@ pub const ReductionKind = enum {
     sum,
     max,
     min,
+    arg_max,
+    arg_min,
     @"and",
     @"or",
     xor,

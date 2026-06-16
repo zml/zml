@@ -162,7 +162,16 @@ pub const LoadedModel = struct {
         _ = backend;
         const moe_dtype = self.inner.text_model.layers[0].moe.gate_up_proj.dtype();
         log.info("Moe dtype : {}", .{moe_dtype});
-        const moe_backend = try zml.moe.Backend.auto(platform, moe_dtype);
+        const moe_backend_override = if (std.c.getenv("ZML_QWEN_MOE_BACKEND")) |override| std.mem.span(override) else null;
+        const moe_backend: zml.moe.Backend = if (moe_backend_override) |override| blk: {
+            if (std.mem.eql(u8, override, "fused_moe")) break :blk .fused_moe;
+            if (std.mem.eql(u8, override, "mosaic_tpu")) break :blk .mosaic_tpu;
+            stdx.debug.panic("unsupported ZML_QWEN_MOE_BACKEND={s}", .{override});
+        } else if (platform.target == .tpu)
+            .fused_moe
+        else
+            try zml.moe.Backend.auto(platform, moe_dtype);
+        log.info("Moe backend : {}", .{moe_backend});
         const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), moe_backend, shardings);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
@@ -697,8 +706,12 @@ const Router = struct {
         if (self.router.bias) |*bias| bias.deinit();
     }
 
+    pub fn forwardScores(self: Router, x: Tensor) Tensor {
+        return self.router.forward(x).convert(.f32);
+    }
+
     pub fn forward(self: Router, x: Tensor) struct { Tensor, Tensor } {
-        const router_logits = self.router.forward(x).convert(.f32);
+        const router_logits = self.forwardScores(x);
         const routing = router_logits.topK(.{ .top_expert = .expert }, self.num_experts_per_tok, .{});
         const topk_ids = routing.indices.convert(.i32);
         const router_scores = routing.values.softmax(.top_expert);
@@ -746,21 +759,60 @@ pub const Moe = struct {
     }
 
     pub fn forward(self: Moe, x: Tensor, moe_metadata: zml.moe.Metadata, moe_parameters: zml.moe.Parameters) Tensor {
-        const routing_scores, const topk_ids = self.router.forward(x);
+        const moe_output = switch (moe_parameters) {
+            .fused_moe => |fused_parameters| blk: {
+                if (x.dim(.s) == 1) {
+                    const routing_scores, const topk_ids = self.router.forward(x);
+                    break :blk zml.moe.forwardMoe(
+                        x,
+                        topk_ids,
+                        routing_scores,
+                        self.gate_up_proj,
+                        null,
+                        null,
+                        self.down_proj,
+                        null,
+                        null,
+                        .{ .mosaic_tpu = .{} },
+                        .{ .mosaic_tpu = .{
+                            .num_experts_per_tok = fused_parameters.num_experts_per_tok,
+                            .activation = switch (fused_parameters.activation) {
+                                .silu => .silu,
+                                .relu => .relu,
+                                .gelu => .gelu,
+                                .quick_gelu_plus_one => .quick_gelu_plus_one,
+                            },
+                        } },
+                    ) catch |err| stdx.debug.panic("decode moe fallback failed: {}", .{err});
+                }
 
-        const moe_output = zml.moe.forwardMoe(
-            x,
-            topk_ids,
-            routing_scores,
-            self.gate_up_proj,
-            null,
-            null,
-            self.down_proj,
-            null,
-            null,
-            moe_metadata,
-            moe_parameters,
-        ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+                const router_logits = self.router.forwardScores(x);
+                break :blk zml.moe.forwardFusedMoe(
+                    x,
+                    router_logits,
+                    self.gate_up_proj,
+                    self.down_proj,
+                    moe_metadata,
+                    moe_parameters,
+                ) catch |err| stdx.debug.panic("fused moe backend failed: {}", .{err});
+            },
+            else => blk: {
+                const routing_scores, const topk_ids = self.router.forward(x);
+                break :blk zml.moe.forwardMoe(
+                    x,
+                    topk_ids,
+                    routing_scores,
+                    self.gate_up_proj,
+                    null,
+                    null,
+                    self.down_proj,
+                    null,
+                    null,
+                    moe_metadata,
+                    moe_parameters,
+                ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+            },
+        };
 
         const shared_gate = self.shared_expert_gate.forward(x).sigmoid().broad(x.shape());
         const shared = self.shared_expert.forward(x).rename(.{ .dout = .d }).mul(shared_gate).withPartitioning(.{

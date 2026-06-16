@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 
@@ -54,23 +55,27 @@ pub const Parameters = struct {
 };
 
 pub const Metadata = struct {
-    pub const InitOptions = struct {};
+    scratch: ?Tensor,
+
+    pub const InitOptions = struct {
+        scratch_shape: ?zml.Shape = null,
+    };
 
     pub fn init(opts: InitOptions) Metadata {
-        _ = opts;
-        return .{};
+        return .{
+            .scratch = if (opts.scratch_shape) |scratch_shape| .fromShape(scratch_shape) else null,
+        };
     }
 
     pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
-        _ = self;
-        _ = io;
-        _ = platform;
-        return {};
+        return .{
+            .scratch = if (self.scratch) |scratch| try zml.Buffer.uninitialized(io, platform, scratch.shape(), .replicated, .{}) else null,
+        };
     }
 };
 
 pub fn deinitBuffer(bufferized: *zml.Bufferized(Metadata)) void {
-    _ = bufferized;
+    if (bufferized.scratch) |*scratch| scratch.deinit();
 }
 
 fn warningTranspose(flag: *std.atomic.Value(bool), projection_name: []const u8, expected_shape: []const u8) void {
@@ -106,6 +111,14 @@ fn alignTo(x: i64, y: i64) i64 {
     return @divFloor(x + y - 1, y) * y;
 }
 
+fn minInt(a: i64, b: i64) i64 {
+    return if (a < b) a else b;
+}
+
+fn maxInt(a: i64, b: i64) i64 {
+    return if (a > b) a else b;
+}
+
 fn cfgDType(dtype: zml.DataType) mtt.DType {
     return switch (zml.kernel.mosaic_tpu.from(dtype)) {
         .bf16 => .bf16,
@@ -113,6 +126,42 @@ fn cfgDType(dtype: zml.DataType) mtt.DType {
         .f32 => .f32,
         else => stdx.debug.panic("fused_moe_tpu expects bf16/f16/f32 tensors, got {}", .{dtype}),
     };
+}
+
+fn tokenPacking(dtype: zml.DataType) i64 {
+    return switch (zml.kernel.mosaic_tpu.from(dtype)) {
+        .bf16, .f16 => 2,
+        .f32, .i32 => 1,
+        .i8 => 4,
+        else => 1,
+    };
+}
+
+fn tokenBlockSize(local_num_tokens: i64) i64 {
+    if (local_num_tokens >= 32 and @rem(local_num_tokens, 32) == 0) return 32;
+    if (local_num_tokens >= 16 and @rem(local_num_tokens, 16) == 0) return 16;
+    return 8;
+}
+
+pub fn scratchShape(num_tokens: i64, hidden_size: i64, num_experts: i64, ep_size: i64, dtype: zml.DataType) zml.Shape {
+    if (ep_size <= 0) stdx.debug.panic("fused_moe_tpu scratch ep_size must be positive, got {d}", .{ep_size});
+
+    const min_tokens = ep_size * 8;
+    const padded_tokens = alignTo(@max(num_tokens, min_tokens), ep_size * 8);
+    const local_padded_tokens = @divExact(padded_tokens, ep_size);
+    const scratch_pack = tokenPacking(dtype);
+
+    return zml.Shape.init(.{
+        .expert = num_experts,
+        .bt = tokenBlockSize(local_padded_tokens),
+        .pack = scratch_pack,
+        .hidden = @divExact(hidden_size, scratch_pack),
+    }, dtype).withPartitioning(.{
+        .expert = .replicated,
+        .bt = .replicated,
+        .pack = .replicated,
+        .hidden = .replicated,
+    });
 }
 
 const Cfg = struct {
@@ -177,11 +226,14 @@ fn fusedCfg(
     const hidden_size = tokens.dim(.d);
     const intermediate_size = w2.dim(.mid);
     const top_k: i64 = @intCast(opts.num_experts_per_tok);
-    const num_tokens = tokens.dim(.token);
+    const local_num_tokens = tokens.dim(.token);
+    const num_tokens = local_num_tokens * ep_size;
 
-    const bt: i64 = if (num_tokens <= 32) 8 else if (num_tokens <= 128) 32 else 64;
-    const btc: i64 = if (bt <= 8) 8 else if (bt <= 32) 16 else 32;
-    const bf: i64 = if (@rem(intermediate_size, 384) == 0) 384 else 256;
+    const bt = tokenBlockSize(local_num_tokens);
+    const btc = minInt(bt, 32);
+    const bf: i64 = if (@rem(intermediate_size, 512) == 0) 512 else 256;
+    const bd1: i64 = if (@rem(hidden_size, 512) == 0) 512 else 256;
+    const bd2: i64 = if (@rem(hidden_size, 512) == 0) 512 else 256;
 
     return .{
         .num_tokens = num_tokens,
@@ -197,26 +249,28 @@ fn fusedCfg(
         .scoring_fn = .softmax,
         .bt = bt,
         .bf = bf,
-        .bd1 = 256,
-        .bd2 = 256,
+        .bd1 = bd1,
+        .bd2 = bd2,
         .btc = btc,
-        .bfc = bf,
-        .bd1c = 256,
-        .bd2c = 256,
+        .bfc = minInt(bf, 256),
+        .bd1c = minInt(bd1, 256),
+        .bd2c = minInt(bd2, 256),
     };
 }
 
-fn boolArg(value: bool) []const u8 {
+fn boolArg(value: bool) [:0]const u8 {
     return if (value) "1" else "0";
 }
 
-fn intArg(allocator: std.mem.Allocator, value: i64) []const u8 {
-    return std.fmt.allocPrint(allocator, "{d}", .{value}) catch @panic("fused_moe_tpu int arg OOM");
+fn intArg(allocator: std.mem.Allocator, value: i64) [:0]const u8 {
+    const tmp = std.fmt.allocPrint(allocator, "{d}", .{value}) catch @panic("fused_moe_tpu int arg OOM");
+    defer allocator.free(tmp);
+    return allocator.dupeZ(u8, tmp) catch @panic("fused_moe_tpu int arg OOM");
 }
 
-fn emitterPath(allocator: std.mem.Allocator) ![]const u8 {
+fn emitterPath(allocator: std.mem.Allocator) ![:0]const u8 {
     const runfiles = bazel.runfiles(bazel_builtin.current_repository) catch
-        return try allocator.dupe(u8, "/home/gcpuser/new_backend/zml/bazel-bin/zml/fused_moe_tpu_emit");
+        return try allocator.dupeZ(u8, "/home/gcpuser/new-backend/zml/bazel-bin/zml/fused_moe_tpu_emit");
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = runfiles.rlocation("zml/zml/fused_moe_tpu_emit", &path_buf) catch null orelse
@@ -225,8 +279,133 @@ fn emitterPath(allocator: std.mem.Allocator) ![]const u8 {
             return err;
         };
 
-    const resolved = path orelse "/home/gcpuser/new_backend/zml/bazel-bin/zml/fused_moe_tpu_emit";
-    return try allocator.dupe(u8, resolved);
+    const resolved = path orelse "/home/gcpuser/new-backend/zml/bazel-bin/zml/fused_moe_tpu_emit";
+    return try allocator.dupeZ(u8, resolved);
+}
+
+const EmitterRunResult = struct {
+    stdout: []u8,
+    stderr: []u8,
+    term: std.process.Child.Term,
+};
+
+fn closeLinuxFd(fd: i32) void {
+    _ = std.os.linux.close(fd);
+}
+
+fn linuxPipe() ![2]i32 {
+    var fds: [2]i32 = undefined;
+    const rc = std.os.linux.pipe(&fds);
+    return switch (std.posix.errno(rc)) {
+        .SUCCESS => fds,
+        .MFILE => error.ProcessFdQuotaExceeded,
+        .NFILE => error.SystemFdQuotaExceeded,
+        .NOMEM => error.SystemResources,
+        else => error.Unexpected,
+    };
+}
+
+fn readLinuxPipe(allocator: std.mem.Allocator, fd: i32) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var buf: [16 * 1024]u8 = undefined;
+    while (true) {
+        const rc = std.os.linux.read(fd, buf[0..].ptr, buf.len);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => {
+                const n: usize = @intCast(rc);
+                if (n == 0) break;
+                try out.appendSlice(allocator, buf[0..n]);
+            },
+            .INTR => continue,
+            else => return error.EmitterReadFailed,
+        }
+    }
+
+    return try out.toOwnedSlice(allocator);
+}
+
+fn waitLinuxPid(pid: std.os.linux.pid_t) !std.process.Child.Term {
+    var status: u32 = 0;
+    while (true) {
+        const rc = std.os.linux.waitpid(pid, &status, 0);
+        switch (std.posix.errno(rc)) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => return error.EmitterWaitFailed,
+        }
+    }
+
+    if ((status & 0x7f) == 0) return .{ .exited = @intCast((status >> 8) & 0xff) };
+    return .{ .unknown = status };
+}
+
+fn runEmitterLinux(allocator: std.mem.Allocator, argv: []const [:0]const u8) !EmitterRunResult {
+    var argv_buf = try allocator.allocSentinel(?[*:0]const u8, argv.len, null);
+    defer allocator.free(argv_buf);
+    for (argv, 0..) |arg, i| argv_buf[i] = arg.ptr;
+    const empty_env = [_:null]?[*:0]const u8{};
+
+    const stdout_pipe = try linuxPipe();
+    errdefer closeLinuxFd(stdout_pipe[0]);
+    errdefer closeLinuxFd(stdout_pipe[1]);
+
+    const stderr_pipe = try linuxPipe();
+    errdefer closeLinuxFd(stderr_pipe[0]);
+    errdefer closeLinuxFd(stderr_pipe[1]);
+
+    const fork_rc = std.os.linux.fork();
+    switch (std.posix.errno(fork_rc)) {
+        .SUCCESS => {},
+        .AGAIN => return error.SystemResources,
+        .NOMEM => return error.SystemResources,
+        else => return error.Unexpected,
+    }
+
+    const pid: std.os.linux.pid_t = @intCast(fork_rc);
+    if (pid == 0) {
+        closeLinuxFd(stdout_pipe[0]);
+        closeLinuxFd(stderr_pipe[0]);
+        if (std.posix.errno(std.os.linux.dup2(stdout_pipe[1], std.posix.STDOUT_FILENO)) != .SUCCESS) std.os.linux.exit(127);
+        if (std.posix.errno(std.os.linux.dup2(stderr_pipe[1], std.posix.STDERR_FILENO)) != .SUCCESS) std.os.linux.exit(127);
+        closeLinuxFd(stdout_pipe[1]);
+        closeLinuxFd(stderr_pipe[1]);
+        _ = std.os.linux.execve(argv_buf[0].?, argv_buf.ptr, &empty_env);
+        std.os.linux.exit(127);
+    }
+
+    closeLinuxFd(stdout_pipe[1]);
+    closeLinuxFd(stderr_pipe[1]);
+
+    const stdout = try readLinuxPipe(allocator, stdout_pipe[0]);
+    errdefer allocator.free(stdout);
+    closeLinuxFd(stdout_pipe[0]);
+
+    const stderr = try readLinuxPipe(allocator, stderr_pipe[0]);
+    errdefer allocator.free(stderr);
+    closeLinuxFd(stderr_pipe[0]);
+
+    return .{
+        .stdout = stdout,
+        .stderr = stderr,
+        .term = try waitLinuxPid(pid),
+    };
+}
+
+fn runEmitter(allocator: std.mem.Allocator, io: std.Io, argv: []const [:0]const u8) !EmitterRunResult {
+    if (builtin.os.tag == .linux) return runEmitterLinux(allocator, argv);
+
+    const result = try std.process.run(allocator, io, .{
+        .argv = argv,
+        .stdout_limit = .unlimited,
+        .stderr_limit = .limited(16 * 1024),
+    });
+    return .{
+        .stdout = result.stdout,
+        .stderr = result.stderr,
+        .term = result.term,
+    };
 }
 
 fn emitExternal(allocator: std.mem.Allocator, io: std.Io, cfg: Cfg) ![:0]const u8 {
@@ -238,19 +417,14 @@ fn emitExternal(allocator: std.mem.Allocator, io: std.Io, cfg: Cfg) ![:0]const u
     }
 
     const emitter = try emitterPath(allocator);
-    const argv = [_][]const u8{
-        emitter,
+    defer allocator.free(emitter);
+    const int_args = [_][:0]const u8{
         intArg(allocator, cfg.num_tokens),
         intArg(allocator, cfg.hidden_size),
         intArg(allocator, cfg.intermediate_size),
         intArg(allocator, cfg.num_experts),
         intArg(allocator, cfg.top_k),
         intArg(allocator, cfg.ep_size),
-        @tagName(cfg.token_dtype),
-        @tagName(cfg.weight_dtype),
-        boolArg(cfg.renormalize_topk_logits),
-        @tagName(cfg.act_fn),
-        @tagName(cfg.scoring_fn),
         intArg(allocator, cfg.bt),
         intArg(allocator, cfg.bf),
         intArg(allocator, cfg.bd1),
@@ -260,12 +434,34 @@ fn emitExternal(allocator: std.mem.Allocator, io: std.Io, cfg: Cfg) ![:0]const u
         intArg(allocator, cfg.bd1c),
         intArg(allocator, cfg.bd2c),
     };
+    defer {
+        for (int_args) |arg_value| allocator.free(arg_value);
+    }
+
+    const argv = [_][:0]const u8{
+        emitter,
+        int_args[0],
+        int_args[1],
+        int_args[2],
+        int_args[3],
+        int_args[4],
+        int_args[5],
+        @tagName(cfg.token_dtype),
+        @tagName(cfg.weight_dtype),
+        boolArg(cfg.renormalize_topk_logits),
+        @tagName(cfg.act_fn),
+        @tagName(cfg.scoring_fn),
+        int_args[6],
+        int_args[7],
+        int_args[8],
+        int_args[9],
+        int_args[10],
+        int_args[11],
+        int_args[12],
+        int_args[13],
+    };
     const process_allocator = std.heap.c_allocator;
-    const result = try std.process.run(process_allocator, io, .{
-        .argv = &argv,
-        .stdout_limit = .unlimited,
-        .stderr_limit = .limited(16 * 1024),
-    });
+    const result = try runEmitter(process_allocator, io, &argv);
     defer process_allocator.free(result.stdout);
     defer process_allocator.free(result.stderr);
 
@@ -291,7 +487,6 @@ pub fn forward(
     metadata: Metadata,
     opts: Options,
 ) !Tensor {
-    _ = metadata;
     if (hidden_states.dtype() != w1.dtype() or hidden_states.dtype() != w2.dtype()) return error.UnsupportedType;
 
     const b = hidden_states.dim(.b);
@@ -325,9 +520,18 @@ pub fn forward(
 
     const output_shape = zml.Shape.init(.{ .token = padded_tokens, .d = hidden.dim(.d) }, hidden.dtype())
         .withPartitioning(.{ .token = .experts, .d = .replicated });
+    const metadata_scratch = metadata.scratch orelse return error.InvalidMetadata;
+    const expected_scratch_shape = scratchShape(padded_tokens, hidden.dim(.d), router_logits.dim(.expert), ep_size, hidden.dtype());
+    if (!metadata_scratch.shape().eql(expected_scratch_shape)) return error.InvalidShape;
+    const scratch = metadata_scratch.withPartitioning(.{
+        .expert = .replicated,
+        .bt = .replicated,
+        .pack = .replicated,
+        .hidden = .replicated,
+    });
 
     const output = zml.ops.manualComputation(
-        .{ padded_hidden, w1_kernel, w2_kernel, padded_logits },
+        .{ padded_hidden, w1_kernel, w2_kernel, padded_logits, scratch },
         output_shape,
         .{ .opts = opts, .ep_size = ep_size },
         (struct {
@@ -341,12 +545,6 @@ pub fn forward(
                     body_context.opts,
                     body_context.ep_size,
                 );
-                const scratch = zml.Tensor.zeroes(.init(.{
-                    .expert = cfg.num_experts,
-                    .bt = cfg.bt,
-                    .pack = cfg.tokenPacking(),
-                    .hidden = @divExact(cfg.hidden_size, cfg.tokenPacking()),
-                }, sharded_inputs[0].dtype()));
                 const tokens_hbm = sharded_inputs[0].reshape(.{
                     .token = local_tokens,
                     .pack = cfg.tokenPacking(),
@@ -359,7 +557,7 @@ pub fn forward(
                 defer allocator.free(ir);
                 return zml.kernel.mosaic_tpu.callRaw(
                     ir,
-                    &.{ tokens_hbm, sharded_inputs[1], sharded_inputs[2], sharded_inputs[3], scratch },
+                    &.{ tokens_hbm, sharded_inputs[1], sharded_inputs[2], sharded_inputs[3], sharded_inputs[4] },
                     &.{local_output_shape},
                     .{ .has_communication = true },
                 )[0];
