@@ -33,6 +33,14 @@ pub fn numPartitionsForLogicalAxis(sharding: Sharding, logical_axis: anytype) i6
     return sharding.data.numPartitionsForLogicalAxis(logical_axis);
 }
 
+pub fn repeatedDimShardable(sharding: Sharding, dim: i64, logical_axis: anytype) i64 {
+    const partitions = sharding.numPartitionsForLogicalAxis(logical_axis);
+    if (partitions <= 1 or @mod(dim, partitions) == 0) return dim;
+
+    const gcd = std.math.gcd(@as(u64, @intCast(dim)), @as(u64, @intCast(partitions)));
+    return @intCast(@divExact(@as(u64, @intCast(dim)), gcd) * @as(u64, @intCast(partitions)));
+}
+
 pub fn devicesInCanonicalOrder(sharding: Sharding) []const Device {
     return sharding.data.physical.devices_in_canonical_order;
 }
