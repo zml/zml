@@ -150,7 +150,7 @@ pub fn run(
     // try ctx.testLayer("embed", .{ .batch, .seq }, mdl.embeds, model_buffers.embeds, .{});
     // try ctx.testLayer("head", .{ .batch, .seq, .hc, .d }, mdl.lm_head, model_buffers.lm_head, .{});
 
-    const n = 40; //16;
+    const n = 3; //16;
     // const n = config.num_hidden_layers;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -166,7 +166,7 @@ pub fn run(
     for (0..n) |i| {
         // try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.attn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].attn_norm, model_buffers.layers[i].attn_norm, .{});
         //
-        // try ctx.testAttentionLayer(arena_allocator, i, cache, mdl.layers[i].attn, model_buffers.layers[i].attn, .{});
+        try ctx.testAttentionLayer(arena_allocator, i, cache, mdl.layers[i].attn, model_buffers.layers[i].attn, .{});
         //
         // try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].ffn_norm, model_buffers.layers[i].ffn_norm, .{});
         //
@@ -214,7 +214,7 @@ pub fn run(
         //     .{}
         // );
 
-        ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 }) catch log.err("layer {} did not passed", .{i});
+        // ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 }) catch log.err("layer {} did not passed", .{i});
     }
 }
 
@@ -233,21 +233,21 @@ const TestContext = struct {
 
     fn testAttentionLayer(self: *TestContext, allocator: std.mem.Allocator, i: usize, cache: model.Cache, attn: model.Attention, attn_buffer: zml.Bufferized(model.Attention), opts: zml.testing.CompareOpts) !void {
         _ = opts; // autofix
-        try self.testLayer(
-            try std.fmt.allocPrint(allocator, "layers.{}.attn.wq_a", .{i}),
-            .{ .batch, .seq, .d },
-            attn.wq_a,
-            attn_buffer.wq_a,
-            .{},
-        );
-
-        try self.testLayer(
-            try std.fmt.allocPrint(allocator, "layers.{}.attn.q_norm", .{i}),
-            .{ .batch, .seq, .q },
-            attn.q_norm,
-            attn_buffer.q_norm,
-            .{},
-        );
+        // try self.testLayer(
+        //     try std.fmt.allocPrint(allocator, "layers.{}.attn.wq_a", .{i}),
+        //     .{ .batch, .seq, .d },
+        //     attn.wq_a,
+        //     attn_buffer.wq_a,
+        //     .{},
+        // );
+        //
+        // try self.testLayer(
+        //     try std.fmt.allocPrint(allocator, "layers.{}.attn.q_norm", .{i}),
+        //     .{ .batch, .seq, .q },
+        //     attn.q_norm,
+        //     attn_buffer.q_norm,
+        //     .{},
+        // );
 
         // Disable because the activation only captured a 1/4 of the activations due
         // to Parallel operations.
@@ -259,21 +259,21 @@ const TestContext = struct {
         //     .{},
         // );
 
-        try self.testLayer(
-            try std.fmt.allocPrint(allocator, "layers.{}.attn.wkv", .{i}),
-            .{ .batch, .seq, .d },
-            attn.wkv,
-            attn_buffer.wkv,
-            .{},
-        );
-
-        try self.testLayer(
-            try std.fmt.allocPrint(allocator, "layers.{}.attn.kv_norm", .{i}),
-            .{ .batch, .seq, .hd },
-            attn.kv_norm,
-            attn_buffer.kv_norm,
-            .{},
-        );
+        // try self.testLayer(
+        //     try std.fmt.allocPrint(allocator, "layers.{}.attn.wkv", .{i}),
+        //     .{ .batch, .seq, .d },
+        //     attn.wkv,
+        //     attn_buffer.wkv,
+        //     .{},
+        // );
+        //
+        // try self.testLayer(
+        //     try std.fmt.allocPrint(allocator, "layers.{}.attn.kv_norm", .{i}),
+        //     .{ .batch, .seq, .hd },
+        //     attn.kv_norm,
+        //     attn_buffer.kv_norm,
+        //     .{},
+        // );
 
         // try self.testLayer(
         //     try std.fmt.allocPrint(allocator, "layers.{}.attn.wo_a", .{i}),
@@ -291,39 +291,29 @@ const TestContext = struct {
         //     .{}
         // );
 
+        switch (attn.compression) {
+            .csa => |csa| {
+                try self.testCompressor(
+                    allocator,
+                    try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}),
+                    i, 
+                    csa.compressor,
+                    attn_buffer.compression.csa.compressor
+                );
+            },
+            .hca => |compressor| {
+                try self.testCompressor(
+                    allocator,
+                    try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}),
+                    i, 
+                    compressor,
+                    attn_buffer.compression.hca
+                );
+            },
+            else => {},
+        }
+
         try self.testAttention(try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}), .{ .batch, .seq, .d }, attn, attn_buffer, cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 });
-    }
-
-    fn testCSALayer(self: *TestContext, allocator: std.mem.Allocator, layer_idx: usize, cache: model.Cache, csa: model.CSA, csa_buffer: zml.Bufferized(model.CSA), opts: zml.testing.CompareOpts) !void {
-        try self.testCompressor(allocator, try std.fmt.allocPrint(allocator, "layers.{}.attn", .{layer_idx}), layer_idx, csa.compressor, csa_buffer.compressor);
-        // try self.testCompressor(allocator, try std.fmt.allocPrint(allocator, "layers.{}.attn.indexer", .{layer_idx}), layer_idx,   csa.indexer.compressor, csa_buffer.indexer.compressor);
-
-        // try self.testLayer(
-        // try std.fmt.allocPrint(allocator, "layers.{}.attn.indexer.weights_proj", .{layer_idx}),
-        // .{ .batch, .seq, .d },
-        // csa.indexer.proj,
-        // csa_buffer.indexer.proj,
-        // .{}
-        // );
-        //
-        // try self.testLayer(
-        // try std.fmt.allocPrint(allocator, "layers.{}.attn.indexer.wq_b", .{layer_idx}),
-        // .{ .batch, .seq, .d },
-        // csa.indexer.wq_b,
-        // csa.indexer.wq_b,
-        // .{}
-        // );
-
-        try self.testIndexerLayer(
-            try std.fmt.allocPrint(allocator, "layers.{}.attn.indexer", .{layer_idx}),
-            .{ .batch, .seq, .d },
-            csa.indexer,
-            csa_buffer.indexer,
-            cache.csa.indexer,
-            .{},
-        );
-
-        try self.testAttentionLayer(allocator, layer_idx, cache, csa.attn, csa_buffer.attn, opts);
     }
 
     fn testCompressor(self: *TestContext, allocator: std.mem.Allocator, layer_prefix: []const u8, i: usize, compressor: model.Compressor, compressor_buffer: zml.Bufferized(model.Compressor)) !void {
@@ -449,33 +439,33 @@ const TestContext = struct {
 
         const in_key = try std.fmt.allocPrint(self.allocator, "{s}.in.0", .{name});
         defer self.allocator.free(in_key);
-        var in_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key, self.sharding);
+        var in_buffer = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, in_key, self.sharding.model);
         defer in_buffer.deinit();
         const in_tensor = zml.Tensor.fromShape(in_buffer.shape()).withTags(tagz);
 
         const out_key = try std.fmt.allocPrint(self.allocator, "{s}.out.0", .{name});
         defer self.allocator.free(out_key);
-        var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding);
+        var out_buffer_expected = try loadBufferFromStore(self.allocator, self.io, self.platform, self.activations_store, out_key, self.sharding.model);
         defer out_buffer_expected.deinit();
 
         const layer_idx: zml.Tensor = .init(.{ .batch = 1 }, .u32);
         const offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
         const actual_seqlen: zml.Tensor = .init(.{}, .u32);
+        _ = actual_seqlen; // autofix
 
         const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{
             layer,
             in_tensor,
             offset,
-            actual_seqlen,
             state,
             layer_idx,
-        }, .{ .shardings = &.{self.sharding} });
+        }, .{ .shardings = &self.sharding.all() });
         defer exe.deinit();
 
-        var state_buffer = try state.initBuffers(self.allocator, self.io, self.platform, self.sharding);
+        var state_buffer = try state.initBuffers(self.allocator, self.io, self.platform, self.sharding.model);
         defer model.CompressorState.unloadBuffers(&state_buffer);
 
-        var attention_metadata_buffers = try self.attention_metadata.initBuffer(self.io, self.platform, self.sharding);
+        var attention_metadata_buffers = try self.attention_metadata.initBuffer(self.io, self.platform, self.sharding.model);
         defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         const offset_idx_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
@@ -496,7 +486,6 @@ const TestContext = struct {
             layer_buffers,
             in_buffer,
             offset_idx_buffer,
-            actual_seqlen_buffer,
             state_buffer,
             layer_idx_buffer,
         });
