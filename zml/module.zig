@@ -209,11 +209,13 @@ pub fn compile(
     var st_io: std.Io.Threaded = .init_single_threaded;
     defer st_io.deinit();
 
-    var trace = try tracer.scope("zml.module.compile", .{
+    const span_name = try tracer.formatSpanName(allocator, "zml.module.compile", .{
         .program_name = opts.program_name,
         .arg_count = args.len,
     });
-    defer trace.end();
+    defer allocator.free(span_name);
+    var span = tracer.Span.start(span_name);
+    defer span.end();
 
     var compilation_context: CompilationContext = .init(allocator, st_io.io(), platform, opts);
     defer compilation_context.deinit();

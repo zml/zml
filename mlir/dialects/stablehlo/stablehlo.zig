@@ -862,6 +862,14 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
     });
 }
 
+pub fn optimizationBarrier(ctx: *mlir.Context, inputs: []const *const mlir.Value, result_types: []const *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.optimization_barrier", .{
+        .operands = .{ .flat = inputs },
+        .results = .{ .flat = result_types },
+        .location = location,
+    });
+}
+
 pub fn createBuffer(ctx: *mlir.Context, value: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
     return custom_call(ctx, &.{}, &.{value}, .{
         .call_target_name = "CreateBuffer",

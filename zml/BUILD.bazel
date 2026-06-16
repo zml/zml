@@ -70,18 +70,26 @@ zig_library(
     tags = ["manual"],
     data = [
         "moe/triton_kernels/config.json",
-    ],
+    ] + select({
+        "//platforms:neuron.enabled": [
+            "//zml/attention/nki:attention_kernel",
+        ],
+        "//conditions:default": [],
+    }),
     srcs = [
         "attention.zig",
         "attention/attention.zig",
         "attention/attnd.zig",
         "attention/flashattn.zig",
         "attention/mosaic_tpu_kernels/ragged_attention.zig",
+        "//zml/attention/nki:attention",
         "attention/paged_attention.zig",
         "attention/tpu_attention.zig",
         "attention/triton_attention.zig",
         "attention/triton_kernels/unified_attention.zig",
         "moe/moe.zig",
+        "moe/mosaic_tpu.zig",
+        "moe/mosaic_tpu_kernels/gmm_ep.zig",
         "moe/triton.zig",
         "moe/triton_kernels/triton_kernels.zig",
         "kernel.zig",
@@ -139,7 +147,8 @@ zig_library(
         ":profiling_traceme_lib",
     ] + select({
         "//platforms:neuron.enabled": [
-            "//platforms/neuron/topology",
+            "//platforms/neuron:nki_kernel",
+            "//platforms/neuron:topology",
         ],
         "//conditions:default": [],
     }) + select({

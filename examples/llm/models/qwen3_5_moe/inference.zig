@@ -36,7 +36,7 @@ pub const CompilationParameters = struct {
             .rng = .init(),
             .prefill_moe_metadata = initMoeMetadata(mdl, @intCast(seqlen), 1, moe_backend),
             .decode_moe_metadata = initMoeMetadata(mdl, 1, 1, moe_backend),
-            .moe_parameters = .init(.fromBackend(moe_backend, config.text_config.num_experts_per_tok, zml.moe.triton.Parameters.ActivationMode.silu)),
+            .moe_parameters = .init(.fromBackend(moe_backend, config.text_config.num_experts_per_tok, zml.moe.ActivationMode.silu)),
             .seqlen = seqlen,
             .shardings = shardings,
             .xla_dump_to = "/home/ubuntu/xla_dump",
@@ -476,5 +476,6 @@ fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, b
                 .w2_zero_bias_shape = w2_zero_bias_shape,
             },
         }),
+        .mosaic_tpu => .init(.fromBackend(backend)),
     };
 }

@@ -266,6 +266,55 @@ That means:
 - ZML still records local host `TraceMe` scopes
 - ROCTx ranges from `zml.tracer.scope(...)` stay visible as device annotations
 
+## Neuron Profiling
+
+Use `--config=neuron-profile` with the command you already run. The wrapper
+prints the profile directory when the program exits.
+
+```bash
+NEURON_RT_VISIBLE_CORES=0,1 \
+bazel run --config=neuron-profile //examples/llm -- \
+    --model=/path/to/model \
+    --prompt="Explain mixture-of-experts routing in one paragraph." \
+    --seqlen=128 \
+    --backend=nki \
+    --topk=1
+```
+
+The default profile root is `/tmp/zml-neuron-profile`. Each run contains:
+
+```text
+/tmp/zml-neuron-profile/<run>/
+  compile/
+  execution/
+```
+
+Start the Neuron Explorer server in one terminal:
+
+```bash
+bazel run //tools/neuron:server
+```
+
+Open <http://127.0.0.1:3001>. When working through SSH, forward ports `3001`
+and `3002`.
+
+With the server running, ingest the run from another terminal:
+
+```bash
+bazel run //tools/neuron:ingest -- /tmp/zml-neuron-profile/<run>
+```
+
+Create a quick summary from one run when you want a file artifact:
+
+```bash
+bazel run //tools/neuron:summary-json -- /tmp/zml-neuron-profile/<run>
+bazel run //tools/neuron:summary-txt -- /tmp/zml-neuron-profile/<run>
+bazel run //tools/neuron:summary-perfetto -- /tmp/zml-neuron-profile/<run>
+```
+
+Each summary command writes beside the run and prints the output path:
+`summary.json`, `summary.txt`, or `summary.pftrace`.
+
 ## macOS Instruments
 
 On macOS, `zml.tracer.scope(...)` emits `os_signpost` intervals. These show up
@@ -314,8 +363,9 @@ which keeps large traces much more manageable than the old in-memory path.
 
 ## Troubleshooting
 
-- If you run under `--config=nsys` or `--config=rocprofv3`, PJRT profiling is
-  skipped on purpose because the wrappers set `SKIP_PJRT_PROFILER=true`.
+- If you run under `--config=nsys`, `--config=rocprofv3`, or
+  `--config=neuron-profile`, PJRT profiling is skipped on purpose because the
+  wrappers set `SKIP_PJRT_PROFILER=true`.
 - If you do not see device annotations, first check whether you are on a
   supported platform:
   - CUDA/Linux for NVTX

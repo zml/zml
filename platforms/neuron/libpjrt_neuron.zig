@@ -2,6 +2,7 @@ const std = @import("std");
 
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
+const neuron = @import("neuron.zig");
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 
@@ -38,11 +39,14 @@ pub export fn zmlxneuron_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaqu
 }
 
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-fn setupNeuronEnv(io: std.Io) !void {
-    var buf: [256]u8 = undefined;
+
+fn setupNeuronEnv(io: std.Io, sandbox_path: []const u8) !void {
+    const scratchpad_page_size = "1024";
+
+    var root_comm_buf: [256]u8 = undefined;
     _ = setenv(
         "NEURON_RT_ROOT_COMM_ID",
-        try std.fmt.bufPrintZ(&buf, "127.0.0.1:{d}", .{try findFreeTcpPort(io)}),
+        try std.fmt.bufPrintZ(&root_comm_buf, "127.0.0.1:{d}", .{try findFreeTcpPort(io)}),
         1,
     );
     _ = setenv(
@@ -53,86 +57,50 @@ fn setupNeuronEnv(io: std.Io) !void {
         }),
         1,
     );
-    _ = setenv(
-        "NEURON_RT_STOCHASTIC_ROUNDING_EN",
-        "1",
-        1,
+    _ = setenv("NEURON_RT_LOG_LEVEL", "error", 0);
+    _ = setenv("NEURON_RT_DISABLE_EXECUTION_BARRIER", "1", 0);
+    _ = setenv("NEURON_RT_STOCHASTIC_ROUNDING_EN", "1", 1);
+    _ = setenv("NEURON_RT_ASYNC_EXEC_MAX_INFLIGHT_REQUESTS", "3", 0);
+    _ = setenv("NEURON_SCRATCHPAD_PAGE_SIZE", scratchpad_page_size, 0);
+
+    var bin_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const bin_path = try stdx.Io.Dir.path.bufJoin(&bin_path_buf, &.{ sandbox_path, "bin" });
+
+    const old_path = if (std.c.getenv("PATH")) |path| std.mem.span(path) else "";
+    var new_path_buf: [std.posix.PATH_MAX:0]u8 = undefined;
+    const new_path = if (old_path.len == 0)
+        try std.fmt.bufPrintZ(&new_path_buf, "{s}", .{bin_path})
+    else
+        try std.fmt.bufPrintZ(&new_path_buf, "{s}:{s}", .{ bin_path, old_path });
+    if (setenv("PATH", new_path.ptr, 1) != 0) return error.SetEnvFailed;
+
+    if (std.c.getenv("NEURON_CC_FLAGS") != null) return;
+
+    const log_level = if (std.c.getenv("NEURON_RT_LOG_LEVEL")) |level| std.mem.span(level) else "error";
+
+    var flags_buf: [512:0]u8 = undefined;
+    const instance = try neuron.instance();
+    const target = @tagName(instance.compilerTarget());
+    const flags = try std.fmt.bufPrintZ(
+        &flags_buf,
+        "--target={s} " ++
+            "--optlevel=1 " ++
+            "--model-type=transformer " ++
+            "--enable-fast-loading-neuron-binaries " ++
+            "--enable-fast-context-switch " ++
+            "--hbm-scratchpad-page-size={s} " ++
+            "--verbose {s} " ++
+            "--logfile-verbose {s} " ++
+            "--logfile=./log-neuron-cc.txt",
+        .{
+            target,
+            scratchpad_page_size,
+            log_level,
+            log_level,
+        },
     );
-}
 
-fn pyStatusCheck(status: c.PyStatus) void {
-    if (c.PyStatus_Exception(status) != 0) {
-        if (c.PyStatus_IsExit(status) != 0) {
-            std.process.exit(@intCast(status.exitcode));
-        }
-        c.Py_ExitStatusException(status);
-    }
-}
-
-fn toPosixPathW(file_path: []const u8) error{ InvalidUtf8, NameTooLong, CodepointTooLarge }![std.posix.PATH_MAX - 1:0]c.wchar_t {
-    var view = std.unicode.Utf8View.init(file_path) catch return error.InvalidUtf8;
-    var it = view.iterator();
-
-    var path_with_null: [std.posix.PATH_MAX - 1:0]c.wchar_t = undefined;
-    var len: usize = 0;
-    while (it.nextCodepoint()) |cp| {
-        if (len + 1 >= path_with_null.len) return error.NameTooLong;
-        path_with_null[len] = std.math.cast(c.wchar_t, cp) orelse return error.CodepointTooLarge;
-        len += 1;
-    }
-    path_with_null[len] = 0;
-    return path_with_null;
-}
-
-// redefine it because for some reason PyThreadState can't be sized
-extern fn PyEval_SaveThread() *anyopaque;
-
-fn setupPythonEnv(sandbox_path: []const u8) !void {
-    const Static = struct {
-        var py_config: c.PyConfig = undefined;
-    };
-
-    {
-        var preconfig: c.PyPreConfig = undefined;
-        c.PyPreConfig_InitIsolatedConfig(&preconfig);
-        preconfig.utf8_mode = 1;
-        pyStatusCheck(c.Py_PreInitialize(&preconfig));
-    }
-
-    c.PyConfig_InitIsolatedConfig(&Static.py_config);
-
-    Static.py_config.module_search_paths_set = 1;
-    Static.py_config.optimization_level = 2;
-    Static.py_config.write_bytecode = 0;
-
-    {
-        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const home = try std.fmt.bufPrintZ(&buf, "{f}{d}.{d}", .{
-            std.Io.Dir.path.fmtJoin(&.{
-                sandbox_path,
-                "lib",
-                "python",
-            }),
-            c.PY_MAJOR_VERSION,
-            c.PY_MINOR_VERSION,
-        });
-        pyStatusCheck(c.PyConfig_SetBytesString(&Static.py_config, &Static.py_config.home, home));
-        pyStatusCheck(c.PyWideStringList_Append(&Static.py_config.module_search_paths, &try toPosixPathW(home)));
-    }
-
-    {
-        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const site_packages = try stdx.Io.Dir.path.bufJoin(&buf, &.{
-            sandbox_path,
-            "site-packages",
-        });
-        pyStatusCheck(c.PyWideStringList_Append(&Static.py_config.module_search_paths, &try toPosixPathW(site_packages)));
-    }
-
-    pyStatusCheck(c.Py_InitializeFromConfig(&Static.py_config));
-
-    // release the GIL
-    _ = PyEval_SaveThread();
+    _ = setenv("NEURON_CC_FLAGS", flags.ptr, 0);
 }
 
 // Duplicates a PJRT Api object while being careful about struct size differences
@@ -162,8 +130,7 @@ fn getPjrtApi() !*c.PJRT_Api {
         "..",
     });
 
-    try setupNeuronEnv(io);
-    try setupPythonEnv(sandbox_path);
+    try setupNeuronEnv(io, sandbox_path);
 
     Static.inner = blk: {
         const GetPjrtApi_inner = GetPjrtApi_blk: {
