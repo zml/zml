@@ -3,6 +3,7 @@ const std = @import("std");
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const pjrt = @import("pjrt");
+const platforms = @import("platforms");
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
@@ -696,6 +697,108 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
     return outputs_;
 }
 
+pub const NeuronNkiOps = struct {
+    name: []const u8,
+    entrypoint: []const u8,
+    source_path: []const u8,
+    compiler_target: []const u8,
+    has_side_effect: bool = false,
+    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
+};
+
+/// Generate an MLIR call for a Neuron NKI kernel.
+///
+/// This API is Neuron-only: the source is compiled to an
+/// `AwsNeuronCustomNativeKernel` backend config while emitting the graph.
+pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs.len]Tensor {
+    const ctx = CompilationContext.current();
+    switch (ctx.platform.target) {
+        .neuron => {},
+        .cpu, .cuda, .rocm, .tpu, .oneapi => {
+            stdx.debug.panic("neuronNki is only available on Neuron, got {s}", .{@tagName(ctx.platform.target)});
+        },
+    }
+    if (comptime !platforms.isEnabled(.neuron)) unreachable;
+    const nki_kernel = @import("platforms/neuron/nki_kernel");
+
+    const mlir_ctx = ctx.mlir_ctx;
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    var values: [inputs.len]*const mlir.Value = undefined;
+    inline for (0..inputs.len) |i| {
+        values[i] = inputs[i].value();
+    }
+
+    var res_types: [outputs.len]*const mlir.Type = undefined;
+    inline for (outputs, 0..) |output, i| {
+        res_types[i] = mlirx.Type.rankedTensor(mlir_ctx, output);
+    }
+
+    var operands_layouts: [inputs.len][]const usize = undefined;
+    inline for (inputs, 0..) |input, i| {
+        operands_layouts[i] = allocator.dupe(usize, toUsize(constants.minorToMajor(input.rank())).constSlice()) catch unreachable;
+    }
+
+    var results_layouts: [outputs.len][]const usize = undefined;
+    inline for (outputs, 0..) |output, i| {
+        results_layouts[i] = allocator.dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
+    }
+
+    var input_signatures: [inputs.len]nki_kernel.TensorSignature = undefined;
+    inline for (inputs, 0..) |input, i| {
+        input_signatures[i] = .{
+            .dtype = @tagName(input.dtype()),
+            .dims = input.dims(),
+        };
+    }
+    var output_signatures: [outputs.len]nki_kernel.TensorSignature = undefined;
+    inline for (outputs, 0..) |output, i| {
+        output_signatures[i] = .{
+            .dtype = @tagName(output.dtype()),
+            .dims = output.dims(),
+        };
+    }
+
+    const compiled_backend_config = nki_kernel.compileNkiKernel(ctx.allocator, ctx.io, .{
+        .name = opts.name,
+        .entrypoint = opts.entrypoint,
+        .source_path = opts.source_path,
+        .compiler_target = opts.compiler_target,
+        .inputs = &input_signatures,
+        .outputs = &output_signatures,
+    }) catch |err| {
+        stdx.debug.panic("failed to compile Neuron NKI kernel: {}", .{err});
+    };
+    defer ctx.allocator.free(compiled_backend_config);
+
+    const op = dialects.stablehlo.custom_call(
+        mlir_ctx,
+        &values,
+        &res_types,
+        .{
+            .call_target_name = "AwsNeuronCustomNativeKernel",
+            .has_side_effect = opts.has_side_effect,
+            .operand_layouts = &operands_layouts,
+            .result_layouts = &results_layouts,
+            .output_operand_aliases = opts.output_operand_aliases,
+            .additional_attributes = &.{
+                .named(mlir_ctx, "backend_config", .string(mlir_ctx, compiled_backend_config)),
+            },
+        },
+        .unknown(mlir_ctx),
+    ).appendTo(ctx.currentScope().block);
+
+    var outputs_: [outputs.len]Tensor = undefined;
+    inline for (outputs, 0..) |output, i| {
+        outputs_[i] = Tensor._result(output, op.result(i));
+    }
+
+    return outputs_;
+}
+
 test "triton" {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
@@ -855,6 +958,9 @@ pub fn scatter(
         return .{self.dynamicUpdateSlice(index_tensors, update)};
     }
 
+    var updates_values: [inputs.len]*const mlir.Value = undefined;
+    LoweringCompatibility.preserveScatterDropSemantics(indices_per_axis.slice(), updates, opts, &updates_values);
+
     // TODO: ideally we should catch all possible scatter errors and provide nice error messages.
     var config = scatterConfig(self.shape(), update.shape(), indices_per_axis, indices_axes);
     const indices = scatterPrepareIndices(&config, self.shape(), update.shape(), &indices_per_axis, &indices_axes);
@@ -865,9 +971,6 @@ pub fn scatter(
     inline for (0..inputs.len) |i| {
         input_values[i] = inputs[i].value();
     }
-
-    var updates_values: [inputs.len]*const mlir.Value = undefined;
-    inline for (0..updates.len) |i| updates_values[i] = updates[i].value();
 
     const op = dialects.stablehlo.scatter(
         mlir_ctx,
@@ -1100,15 +1203,19 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
             stdx.debug.assert(a == idx_axes[i - 1] + 1, "gather expects 'idx_axes' to be sequential. But {any} aren't sequential in {f}", .{ idx_axes, self });
         }
     }
-    var indices_shape = idx_per_axis[0].shape();
-    for (idx_per_axis[1..]) |idx| {
+    var indices_per_axis, _ = Shape.parseStruct(Tensor, idx_per_axis);
+
+    var indices_shape = indices_per_axis.get(0).shape();
+    for (indices_per_axis.constSlice()[1..]) |idx| {
         if (idx.rank() > indices_shape.rank()) {
             indices_shape = idx.shape();
         }
     }
-    for (idx_per_axis) |idx| {
+    for (indices_per_axis.slice()) |*idx| {
         stdx.debug.assert(idx.shape().canBroadcastTo(indices_shape), "gather indices can't be broadcasted together {any}", .{idx_per_axis});
+        idx.* = idx.broad(indices_shape);
     }
+    LoweringCompatibility.preserveGatherFillSemantics(indices_per_axis.slice());
 
     var idx_batch_axes: Shape.DimsArray = .empty;
 
@@ -1160,7 +1267,12 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
     // Sometimes the backend recognize this pattern, but not always.
     // So let us handle that.
     if (indices_shape.count() == 1 and idx_axes.len == 1) {
-        return self.dynamicSlice1d(idx_axes[0], .{ .start = idx_per_axis[0].asScalar(), .len = 1 }).reshape(res_shape);
+        return self
+            .dynamicSlice1d(idx_axes[0], .{ .start = indices_per_axis.get(0).asScalar(), .len = 1 })
+            // Keep downstream resharding after the slice. SPMD engines like Neuron otherwise
+            // may hoist an all-gather before the slice and materialize the full tensor.
+            .optimizationBarrier()
+            .reshape(res_shape);
     }
 
     var slice_dims: Shape.DimsArray = .empty;
@@ -1173,7 +1285,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
     }
 
     // TODO: try changing .last by other axis and see the perf impact.
-    const indices = Tensor.stack(idx_per_axis, .last, .coord);
+    const indices = Tensor.stack(indices_per_axis.constSlice(), .last, .coord);
     // scoped_log.debug("gather --> {} {any}", .{ res_shape, res_kind.constSlice() });
     const gather_op = dialects.stablehlo.gather(
         mlir_ctx,
@@ -1196,6 +1308,117 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
     stdx.debug.assert(mlir_shape.eql(res_shape), "gather expects that batching indices appear in the same order in 'self' and 'indices', got: self={f}, indices={f}. You should transpose one or the other.", .{ self, indices });
     return Tensor._result(res_shape, gather_op.result(0));
 }
+
+/// Backend lowering compatibility shims live here so public tensor/model code
+/// can keep expressing StableHLO semantics directly.
+/// Each rewrite should
+/// preserve the source operation's semantics while avoiding a backend compiler
+/// or runtime path that currently mishandles that legal StableHLO.
+/// Fill/drop indexed ops use max-value integer sentinels for inactive lanes;
+/// those lanes must not issue indirect memory accesses after lowering.
+pub const LoweringCompatibility = struct {
+    /// Keep scalar integer broadcasts as scalar broadcasts until StableHLO broadcast emission.
+    ///
+    /// Some backend compilers fold rank-0 integer scalars into full-rank dense
+    /// splats too early, which can perturb later indexed-update lowering. A
+    /// scalar optimization barrier preserves the source-level broadcast shape.
+    pub fn preserveIntegerScalarBroadcast(self: Tensor, output_shape: Shape) ?Tensor {
+        switch (CompilationContext.current().platform.target) {
+            .neuron => {},
+            .cpu, .cuda, .rocm, .tpu, .oneapi => return null,
+        }
+
+        if (self.rank() != 0 or output_shape.rank() == 0 or !self.dtype().isInteger()) return null;
+        return self.optimizationBarrier().broadcast(output_shape, &.{});
+    }
+
+    /// Preserve gather fill semantics before backend indirect-memory lowering.
+    ///
+    /// Frontends represent inactive gather rows by passing an out-of-bounds
+    /// integer sentinel together with fill semantics. StableHLO says those rows
+    /// should produce the fill value, so the sentinel lane is not a real memory
+    /// access. Some backend lowerings still route every lane through a gather/DGE
+    /// path before applying fill behavior, so sanitize inactive lanes early while
+    /// keeping the active rows unchanged. Related upstream Neuron report:
+    /// https://github.com/aws-neuron/aws-neuron-sdk/issues/1335.
+    pub fn preserveGatherFillSemantics(indices: []Tensor) void {
+        switch (CompilationContext.current().platform.target) {
+            .neuron => {},
+            .cpu, .cuda, .rocm, .tpu, .oneapi => return,
+        }
+
+        const active_lanes = activeLanesForFillDropIndices(indices) orelse return;
+        replaceInactiveIndirectIndices(indices, active_lanes);
+    }
+
+    /// Preserve scatter drop semantics before backend indirect-memory lowering.
+    /// Same as above but for scatter drop semantics.
+    pub fn preserveScatterDropSemantics(indices: []Tensor, updates: anytype, opts: Tensor.ScatterOpts, update_values: *[updates.len]*const mlir.Value) void {
+        const active_lanes: ?Tensor = switch (CompilationContext.current().platform.target) {
+            .neuron => if (opts.update_fn == Tensor.ScatterOpts.increment) activeLanesForFillDropIndices(indices) else null,
+            .cpu, .cuda, .rocm, .tpu, .oneapi => null,
+        };
+
+        if (active_lanes) |active| replaceInactiveIndirectIndices(indices, active);
+
+        inline for (updates, 0..) |update, i| {
+            const update_tensor = if (active_lanes) |active| blk: {
+                const mask = active.broad(update.shape().withDtype(.bool));
+                const zero = Tensor.constant(update.dtype().zero()).broad(update.shape());
+                break :blk mask.select(update, zero);
+            } else update;
+            update_values[i] = update_tensor.value();
+        }
+    }
+
+    /// Builds the lane mask used by fill/drop compatibility rewrites.
+    ///
+    /// For normal index widths, the max representable value is the inactive
+    /// sentinel. For 64-bit indices, the affected lowering path narrows to the
+    /// i32 indirect-index domain, so only values that remain valid after that
+    /// narrowing are considered active. When multiple index tensors form a
+    /// coordinate, a lane is active only if every component is active.
+    fn activeLanesForFillDropIndices(indices: []const Tensor) ?Tensor {
+        var active: ?Tensor = null;
+        for (indices) |idx| {
+            if (!idx.dtype().isInteger()) continue;
+
+            const idx_active = switch (idx.dtype()) {
+                .i64 => blk: {
+                    const zero = Tensor.scalar(@as(i64, 0), .i64).broad(idx.shape());
+                    const max_i32 = Tensor.scalar(@as(i64, std.math.maxInt(i32)), .i64).broad(idx.shape());
+                    break :blk idx.cmp(.GE, zero).logical(.AND, idx.cmp(.LE, max_i32));
+                },
+                .u64 => blk: {
+                    const max_i32 = Tensor.scalar(@as(u64, std.math.maxInt(i32)), .u64).broad(idx.shape());
+                    break :blk idx.cmp(.LE, max_i32);
+                },
+                inline .i2, .i4, .i8, .i16, .i32, .u2, .u4, .u8, .u16, .u32 => blk: {
+                    const sentinel = Tensor.constant(idx.dtype().maxValue()).broad(idx.shape());
+                    break :blk idx.cmp(.NE, sentinel);
+                },
+                .bool, .f4e2m1, .f8e3m4, .f8e4m3, .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2, .f8e5m2fnuz, .f8e8m0, .bf16, .f16, .f32, .f64, .c64, .c128 => unreachable,
+            };
+            active = if (active) |current| current.logical(.AND, idx_active) else idx_active;
+        }
+        return active;
+    }
+
+    /// Replaces inactive sentinel indices with a safe index before indirect lowering.
+    ///
+    /// The replacement index is intentionally zero: it is always in-bounds for
+    /// non-empty operands and the corresponding scatter update is masked away by
+    /// the caller. This keeps the lowered indirect operation from touching the
+    /// sentinel address while preserving fill/drop semantics at the tensor level.
+    fn replaceInactiveIndirectIndices(indices: []Tensor, active_lanes: Tensor) void {
+        for (indices) |*idx| {
+            if (!idx.dtype().isInteger()) continue;
+
+            const safe_index = Tensor.constant(idx.dtype().zero()).broad(idx.shape());
+            idx.* = active_lanes.select(idx.*, safe_index);
+        }
+    }
+};
 
 pub fn _collectAxes(T: type, bounded_array: stdx.BoundedArray(T, constants.MAX_RANK), value: T) stdx.BoundedArray(i64, constants.MAX_RANK) {
     var res: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
@@ -1597,11 +1820,12 @@ fn manualComputationInternal(
                 global_values[i] = shard_to_full.result(0);
             }
 
-            const barrier = mlir.Operation.make(ctx.mlir_ctx, "stablehlo.optimization_barrier", .{
-                .operands = .{ .flat = global_values },
-                .results = .{ .flat = global_types },
-                .location = .unknown(ctx.mlir_ctx),
-            }).appendTo(ctx.currentScope().block);
+            const barrier = dialects.stablehlo.optimizationBarrier(
+                ctx.mlir_ctx,
+                global_values,
+                global_types,
+                .unknown(ctx.mlir_ctx),
+            ).appendTo(ctx.currentScope().block);
 
             const outputs_ = allocator.alloc(Tensor, outputs.len) catch unreachable;
             for (outputs, 0..) |output_shape, i| {

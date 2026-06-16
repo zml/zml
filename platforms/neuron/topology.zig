@@ -1,11 +1,10 @@
 const std = @import("std");
 
-const c = @import("c");
+const neuron = @import("platforms/neuron");
 
 // References:
-// - NRT exposes `nrt_instance_info.family` and `.size`, which map to the
-//   https://github.com/aws-neuron/aws-neuron-sdk/blob/master/src/libnrt/include/nrt/nrt.h
-//   Neuron instance families and sizes documented here:
+// - `neuron.Instance` exposes the NRT instance family and size used below.
+// - Neuron instance families and sizes are documented here:
 //   https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/index.html
 // - Inf1:
 //   https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/inf1-arch.html
@@ -18,109 +17,8 @@ const c = @import("c");
 // - Trn3:
 //   https://awsdocs-neuron.readthedocs-hosted.com/en/latest/about-neuron/arch/neuron-hardware/trn3-arch.html
 //
-// The same instance-architecture pages are also the basis for:
-// - `InterChipTopology`, including the 2D torus and ring-over-torus fabrics.
-// - `Instance.coresPerChip()`, using documented NeuronCore counts per chip generation:
-//   Inferentia v1 = 4, Inferentia2 / Trainium v1 = 2, Trainium2 / Trainium3 = 8.
-pub const Family = enum(u32) {
-    unknown = 0,
-    inf1 = 1,
-    trn1 = 2,
-    trn1n = 3,
-    inf2 = 4,
-    trn2 = 5,
-    trn2n = 6,
-    inf2e = 7,
-    trn2p = 8,
-    trn2u = 9,
-    trn2e = 10,
-    trn2eu = 11,
-    trn2ac = 12,
-    trn2uac = 13,
-    trn3 = 14,
-    _,
-};
-
-pub const Size = enum(u32) {
-    xl1 = 0,
-    xl2 = 1,
-    xl4 = 2,
-    xl6 = 3,
-    xl8 = 4,
-    xl24 = 5,
-    xl32 = 6,
-    xl48 = 7,
-    xl3 = 8,
-    unknown = 9,
-    _,
-};
-
-pub const Instance = struct {
-    family: Family,
-    size: Size,
-
-    pub fn current() !Instance {
-        var info = std.mem.zeroes(c.struct_nrt_instance_info);
-        info.family = @intFromEnum(Family.unknown);
-        info.size = @intFromEnum(Size.unknown);
-
-        if (c.nrt_get_instance_info(&info, @sizeOf(c.struct_nrt_instance_info)) != c.NRT_SUCCESS) {
-            return error.Unavailable;
-        }
-
-        return .{
-            .family = @enumFromInt(info.family),
-            .size = @enumFromInt(info.size),
-        };
-    }
-
-    pub fn coresPerChip(self: Instance) !usize {
-        return switch (self.family) {
-            .inf1 => 4,
-            .trn1, .trn1n, .inf2, .inf2e => 2,
-            .trn2, .trn2n, .trn2p, .trn2u, .trn2e, .trn2eu, .trn2ac, .trn2uac, .trn3 => 8,
-            else => error.Unavailable,
-        };
-    }
-
-    pub fn interChipTopology(self: Instance, chip_count: usize) InterChipTopology {
-        if (chip_count == 1) return .none;
-
-        // References for chip-count and fabric-shape inference:
-        // - Inf1 instance sizes and 1/4/16-chip layouts
-        // - Inf2 instance sizes and 1/6/12-chip layouts
-        // - Trn1 / Trn1n 16-chip 2D torus
-        // - Trn2 16-chip torus and Trn2 UltraServer 64-chip ring-over-torus
-        // - Trn3 all-to-all / point-to-point scale-up
-        return switch (self.family) {
-            .inf1 => switch (chip_count) {
-                4 => .{ .linear = 4 },
-                else => .{ .ring = chip_count },
-            },
-            .inf2, .inf2e => switch (chip_count) {
-                6 => .{ .torus2d = .{ .x = 3, .y = 2 } },
-                12 => .{ .torus2d = .{ .x = 4, .y = 3 } },
-                else => switch (self.size) {
-                    .xl24 => .{ .torus2d = .{ .x = 3, .y = 2 } },
-                    .xl48 => .{ .torus2d = .{ .x = 4, .y = 3 } },
-                    else => .{ .ring = chip_count },
-                },
-            },
-            .trn1, .trn1n => switch (chip_count) {
-                16 => .{ .torus2d = .{ .x = 4, .y = 4 } },
-                else => .{ .ring = chip_count },
-            },
-            .trn2, .trn2n, .trn2p, .trn2u, .trn2e, .trn2eu, .trn2ac, .trn2uac => switch (chip_count) {
-                16 => .{ .torus2d = .{ .x = 4, .y = 4 } },
-                64 => .{ .torus2d_ring = .{ .x = 4, .y = 4, .z = 4 } },
-                else => .{ .ring = chip_count },
-            },
-            .trn3 => .{ .point_to_point = chip_count },
-            else => .{ .ring = chip_count },
-        };
-    }
-};
-
+// The same instance-architecture pages are also the basis for the inter-chip
+// topology inference below, including 2D torus and ring-over-torus fabrics.
 pub const InterChipTopology = union(enum) {
     none: void,
     linear: usize,
@@ -165,7 +63,7 @@ pub const Placement = struct {
 };
 
 pub const VisibleMesh = struct {
-    instance: Instance,
+    instance: neuron.Instance,
     chips: usize,
     cores_per_chip: usize,
     inter_chip_topology: InterChipTopology,
@@ -207,7 +105,7 @@ pub const VisibleMesh = struct {
 pub fn visibleMeshFromNcIds(allocator: std.mem.Allocator, nc_ids: []const usize) !VisibleMesh {
     if (nc_ids.len == 0) return error.InvalidDeviceTopology;
 
-    const instance = try Instance.current();
+    const instance = try neuron.instance();
     const physical_cores_per_chip = try instance.coresPerChip();
     const placements = try allocator.alloc(Placement, nc_ids.len);
     errdefer allocator.free(placements);
@@ -232,7 +130,7 @@ pub fn visibleMeshFromNcIds(allocator: std.mem.Allocator, nc_ids: []const usize)
     const last_chip = placements[placements.len - 1].chip;
     const selected_chip_count = last_chip - first_chip + 1;
     const selected_cores_per_chip = try std.math.divExact(usize, placements.len, selected_chip_count);
-    const inter_chip_topology = instance.interChipTopology(selected_chip_count);
+    const inter_chip_topology = interChipTopology(instance, selected_chip_count);
 
     var res: VisibleMesh = .{
         .instance = instance,
@@ -267,6 +165,43 @@ pub fn visibleMeshFromNcIds(allocator: std.mem.Allocator, nc_ids: []const usize)
     }
 
     return res;
+}
+
+pub fn interChipTopology(instance: neuron.Instance, chip_count: usize) InterChipTopology {
+    if (chip_count == 1) return .none;
+
+    // References for chip-count and fabric-shape inference:
+    // - Inf1 instance sizes and 1/4/16-chip layouts
+    // - Inf2 instance sizes and 1/6/12-chip layouts
+    // - Trn1 / Trn1n 16-chip 2D torus
+    // - Trn2 16-chip torus and Trn2 UltraServer 64-chip ring-over-torus
+    // - Trn3 all-to-all / point-to-point scale-up
+    return switch (instance.family) {
+        .inf1 => switch (chip_count) {
+            4 => .{ .linear = 4 },
+            else => .{ .ring = chip_count },
+        },
+        .inf2, .inf2e => switch (chip_count) {
+            6 => .{ .torus2d = .{ .x = 3, .y = 2 } },
+            12 => .{ .torus2d = .{ .x = 4, .y = 3 } },
+            else => switch (instance.size) {
+                .xl24 => .{ .torus2d = .{ .x = 3, .y = 2 } },
+                .xl48 => .{ .torus2d = .{ .x = 4, .y = 3 } },
+                else => .{ .ring = chip_count },
+            },
+        },
+        .trn1, .trn1n => switch (chip_count) {
+            16 => .{ .torus2d = .{ .x = 4, .y = 4 } },
+            else => .{ .ring = chip_count },
+        },
+        .trn2, .trn2n, .trn2p, .trn2u, .trn2e, .trn2eu, .trn2ac, .trn2uac => switch (chip_count) {
+            16 => .{ .torus2d = .{ .x = 4, .y = 4 } },
+            64 => .{ .torus2d_ring = .{ .x = 4, .y = 4, .z = 4 } },
+            else => .{ .ring = chip_count },
+        },
+        .trn3, .trn3pds98 => .{ .point_to_point = chip_count },
+        .unknown => .{ .ring = chip_count },
+    };
 }
 
 pub fn chipOf(nc_id: usize, physical_cores_per_chip: usize) usize {

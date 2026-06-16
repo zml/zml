@@ -16,36 +16,84 @@ select_file(
 
 patchelf(
     name = "libneuronpjrt_so",
-    set_rpath = "$ORIGIN",
     src = ":libneuronpjrt_so_orig",
+    set_rpath = "$ORIGIN",
     soname = "libneuronpjrt.so",
 )
 
 patchelf(
     name = "libpjrt_neuron_so",
-    set_rpath = "$ORIGIN",
     src = "@zml//platforms/neuron:libpjrt_neuron",
+    set_rpath = "$ORIGIN",
     soname = "libpjrt_neuron.so",
 )
 
+patchelf(
+    name = "neuron_explorer",
+    src = "@aws-neuronx-tools//:neuron-explorer",
+    add_needed = ["libpjrt_neuron.so"],
+    set_rpath = "$ORIGIN/../lib",
+)
+
+# This is a compiler-enabled sandbox. Python stays packaged because AWS exposes
+# neuronx-cc and NKI compilation through Python entrypoints; ZML wraps those as
+# native ELF launchers in bin/ so the image does not need shell scripts or host
+# Python. Keep AWS compiler/runtime payloads intact and only trim Python
+# files that are not part of Neuron compilation.
 copy_to_directory(
     name = "sandbox",
     srcs = [
         ":libneuronpjrt_so",
+        ":libneuronxla_files",
         ":libpjrt_neuron_so",
-        "@zml//platforms/neuron:neuronx-cc_files",
-        "@zml//platforms/neuron:libneuronxla",
-        "@rules_python//python:current_py_toolchain",
-        "@aws-neuronx-runtime-lib//:libnrt.patchelf",
-        "@aws-neuronx-runtime-lib//:libncfw.patchelf",
-        "@aws-neuronx-runtime-lib//:libnrtucode_extisa",
+        ":neuron_explorer",
         "@aws-neuronx-collectives//:libnccom",
-        "@zlib1g",
+        "@aws-neuronx-runtime-lib//:libncfw.patchelf",
+        "@aws-neuronx-runtime-lib//:libnrt.patchelf",
+        "@aws-neuronx-runtime-lib//:libnrtucode_extisa",
+        "@libgcc_s1",
         "@libgomp1",
+        "@libstdcpp6",
+        "@rules_python//python:current_py_toolchain",
+        "@zlib1g",
+        "@zml//platforms/neuron:neuronx-cc_files",
+        "@zml//platforms/neuron:neuronx_cc_shim.py",
+        "@zml//platforms/neuron:nki-cc_files",
+        "@zml//platforms/neuron:nki_kernel_compiler.py",
+    ],
+    add_directory_to_runfiles = False,
+    allow_overwrites = True,
+    exclude_srcs_patterns = [
+        "**/__pycache__/**",
+        "**/*.pyc",
+        "**/tests/**",
+        "lib/libtcl*.so*",
+        "lib/libtk*.so*",
+        "lib/python*/idlelib/**",
+        "lib/python*/tkinter/**",
+        "lib/python*/turtledemo/**",
+        "lib/python*/ensurepip/**",
+        # "**/include/**",
+        "**/_solib_*/**",
+    ],
+    hardlink = "on",
+    include_external_repositories = ["**"],
+    include_srcs_patterns = [
+        "platforms/neuron/neuronx-cc",
+        "platforms/neuron/neuronx_cc_shim.py",
+        "platforms/neuron/nki-cc",
+        "platforms/neuron/nki_kernel_compiler.py",
+        "neuron_explorer/**",
+        "**/lib**",
+        "lib/python*/**",
+        "site-packages/**",
     ],
     replace_prefixes = {
         "platforms/neuron/neuronx-cc": "bin/neuronx-cc",
-        "platforms/neuron/libneuronxla.so": "site-packages/libneuronxla.so",
+        "platforms/neuron/neuronx_cc_shim.py": "bin/python-shims/neuronx-cc",
+        "platforms/neuron/nki-cc": "bin/nki-cc",
+        "platforms/neuron/nki_kernel_compiler.py": "site-packages/nki_kernel_compiler.py",
+        "neuron_explorer": "bin",
         "libneuronpjrt_so": "lib",
         "libpjrt_neuron_so": "lib",
         "libnrt.patchelf": "lib",
@@ -55,28 +103,15 @@ copy_to_directory(
         "usr/lib/x86_64-linux-gnu": "lib",
         "opt/neuron": "lib",
     },
-    exclude_srcs_patterns = [
-        "**/tests/**",
-        # "**/include/**",
-        "**/_solib_*/**",
+    visibility = [
+        "@zml//tools/neuron:__pkg__",
+        "@zml//zml:__pkg__",
+        "@zml//zml/attention/nki:__pkg__",
     ],
-    include_srcs_patterns = [
-        "platforms/neuron/neuronx-cc",
-        "**/lib**",
-        "lib/python*/**",
-        "site-packages/**",
-    ],
-    allow_overwrites = True,
-    add_directory_to_runfiles = False,
-    include_external_repositories = ["**"],
-    hardlink = "on",
 )
 
 cc_library(
     name = "libnrt_headers",
-    deps = [
-        "@aws-neuronx-runtime-lib//:libnrt_headers",
-    ],
     linkopts = [
         # Defer function call resolution until the function is called
         # (lazy loading) rather than at load time.
@@ -88,6 +123,9 @@ cc_library(
         "-Wl,-z,lazy",
     ],
     visibility = ["@zml//platforms/neuron:__subpackages__"],
+    deps = [
+        "@aws-neuronx-runtime-lib//:libnrt_headers",
+    ],
 )
 
 cc_library(

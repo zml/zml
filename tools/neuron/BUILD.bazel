@@ -1,0 +1,49 @@
+sh_binary(
+    name = "profile",
+    srcs = ["profile.sh"],
+    data = ["@libpjrt_neuron//:sandbox"],
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "server",
+    srcs = ["server.sh"],
+    args = [
+        "/tmp/zml-neuron-explorer",
+        "3001",
+    ],
+    data = ["@libpjrt_neuron//:sandbox"],
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "ingest",
+    srcs = ["ingest.sh"],
+    args = [
+        "/tmp/zml-neuron-explorer",
+        "/tmp/zml-neuron-profile",
+    ],
+    data = ["@libpjrt_neuron//:sandbox"],
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "summary-txt",
+    srcs = ["summary.sh"],
+    data = ["@libpjrt_neuron//:sandbox"],
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "summary-json",
+    srcs = ["summary.sh"],
+    data = ["@libpjrt_neuron//:sandbox"],
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "summary-perfetto",
+    srcs = ["summary.sh"],
+    data = ["@libpjrt_neuron//:sandbox"],
+    visibility = ["//visibility:public"],
+)
