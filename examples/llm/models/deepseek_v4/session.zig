@@ -137,6 +137,9 @@ pub const Session = struct {
         var decoder = try self.tokenizer.decoder();
         defer decoder.deinit();
 
+        // const buffer = try self.allocator.alloc(u8, 1);
+        // const stdin = std.Io.File.stdin();
+        // var reader = stdin.reader(self.io, buffer);
         generation: while (true) {
             const token_id = self.generated_token.items(u32)[0];
 
@@ -174,6 +177,7 @@ pub const Session = struct {
             });
 
             try current_token_buffer.toSlice(self.io, self.generated_token);
+            // _ = reader.interface.takeByte() catch unreachable;
         }
 
         try stdout.writeAll(try decoder.finalize(out_tokens_buffer));
