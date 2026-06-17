@@ -160,7 +160,7 @@ pub fn forwardMoe(
             if (expert_partition.eql(.init(.experts))) {
                 const global_num_experts = weights_down.dim(.expert);
 
-                const partial_output = zml.ops.manualComputation(
+                break :b zml.ops.manualComputation(
                     .{ input, topk_ids, topk_weights, weights_gate_up, weights_down },
                     input.shape(),
                     .{
@@ -203,11 +203,13 @@ pub fn forwardMoe(
                                     .w2_bias = ctx.bias_down,
                                 },
                             ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
-                            return local_output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d });
+                            return zml.ops.allReduce(
+                                local_output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d }),
+                                zml.Tensor.add,
+                            );
                         }
                     }).body,
                 );
-                break :b zml.ops.allReduce(partial_output, zml.Tensor.add);
             }
 
             break :b try triton.fusedExpertsImpl(
@@ -237,7 +239,7 @@ pub fn forwardMoe(
 
             if (expert_partition.eql(.init(.experts))) {
                 const global_num_experts = weights_down.dim(.expert);
-                const partial_output = zml.ops.manualComputation(
+                break :b zml.ops.manualComputation(
                     .{ input, topk_ids, topk_weights, weights_gate_up, weights_down },
                     input.shape(),
                     .{
@@ -278,11 +280,13 @@ pub fn forwardMoe(
                                     .w2_bias = ctx.bias_down,
                                 },
                             ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
-                            return local_output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d });
+                            return zml.ops.allReduce(
+                                local_output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d }),
+                                zml.Tensor.add,
+                            );
                         }
                     }).body,
                 );
-                break :b zml.ops.allReduce(partial_output, zml.Tensor.add);
             }
 
             break :b try mosaic_tpu.fusedExpertsImpl(

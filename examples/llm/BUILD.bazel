@@ -33,6 +33,7 @@ zig_binary(
     name = "step3_5_tests",
     srcs = glob(["**/*.zig"]),
     main = "models/step3_5_tests.zig",
+    visibility = ["//visibility:public"],
     deps = ["//zml"],
 )
 
