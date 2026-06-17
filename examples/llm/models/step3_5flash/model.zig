@@ -1106,22 +1106,15 @@ pub const Router = struct {
 };
 
 pub const Moe = struct {
-    up_proj: zml.Tensor,
-    gate_proj: zml.Tensor,
+    gate_up_proj: zml.Tensor,
     down_proj: zml.Tensor,
     router: Router,
     layer_idx: usize,
     limit: ?f32,
 
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !Moe {
-        const up_proj_tensor = store.createTensor(
-            "up_proj.weight",
-            .{ .expert, .dout, .d },
-            .{ .expert = .experts, .dout = .replicated, .d = .replicated },
-        );
-
-        const gate_proj_tensor = store.createTensor(
-            "gate_proj.weight",
+        const gate_up_proj_tensor = store.createTensor(
+            "gate_up_proj.weight",
             .{ .expert, .dout, .d },
             .{ .expert = .experts, .dout = .replicated, .d = .replicated },
         );
@@ -1139,8 +1132,7 @@ pub const Moe = struct {
         };
 
         return .{
-            .up_proj = up_proj_tensor,
-            .gate_proj = gate_proj_tensor,
+            .gate_up_proj = gate_up_proj_tensor,
             .down_proj = down_proj_tensor,
             .router = .init(store, default_config.moe_top_k, default_config.moe_router_scaling_factor),
             .layer_idx = layer_idx,
@@ -1149,13 +1141,12 @@ pub const Moe = struct {
     }
 
     pub fn deinit(self: *zml.Bufferized(Moe)) void {
-        self.up_proj.deinit();
-        self.gate_proj.deinit();
+        self.gate_up_proj.deinit();
         self.down_proj.deinit();
     }
 
     pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
-        return self.forwardLoop(x);
+        return self.forwardTriton(x);
 
         // TODO: open issue re: Louis' forward Moe kernel
     }
@@ -1169,7 +1160,7 @@ pub const Moe = struct {
         const topk_ids_tensor = topk_ids.rename(.{ .topk = .top_expert });
         const scaled_tensor = scaled.rename(.{ .topk = .top_expert });
 
-        const gate_up_proj = zml.Tensor.concatenate(&.{ self.gate_proj, self.up_proj }, .dout).rename(.{ .dout = .out, .d = .in });
+        const gate_up_proj = self.gate_up_proj.rename(.{ .dout = .out, .d = .in });
         const down_proj = self.down_proj.rename(.{ .dout = .out, .d = .in });
 
         // TODO: hardcoded zml.moe.metadata, zml.moe.parameters
@@ -1202,8 +1193,10 @@ pub const Moe = struct {
         const routing_scaled = routing_scores.scale(self.router.routed_scaling_factor);
 
         const x_f32 = input.convert(.f32);
-        const gate_w = self.gate_proj.convert(.f32);
-        const up_w = self.up_proj.convert(.f32);
+        const gate_up_w = self.gate_up_proj.convert(.f32);
+        const mid = @divFloor(gate_up_w.dim(.dout), 2);
+        const gate_w = gate_up_w.slice1d(.dout, .{ .end = mid });
+        const up_w = gate_up_w.slice1d(.dout, .{ .start = mid });
         const down_w = self.down_proj.convert(.f32);
 
         const gate_all = x_f32.dot(gate_w, .d);
