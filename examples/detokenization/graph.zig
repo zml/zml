@@ -1,9 +1,13 @@
 const std = @import("std");
 const zml = @import("zml");
 const main = @import("main.zig");
+const algebra = @import("algebra.zig");
+const save_load = @import("saveload.zig");
 
 const log = std.log;
 const Tokenizer = zml.tokenizer.Tokenizer;
+const SimilarityMatrix = algebra.SimilarityMatrix;
+const Zml_handler = main.Zml_handler;
 
 pub const GraphParams = struct {
     k_max: usize = 16,
@@ -24,14 +28,14 @@ pub const Graph = struct {
         }
     };
 
-    zml_handler: *main.Zml_handler,
+    zml_handler: *Zml_handler,
     allocator: std.mem.Allocator,
     io: std.Io,
     // dataset fields
     dim: usize,
     lm_head: zml.Slice,
     lm_head_normalized: zml.Slice,
-    similarity_matrix: *main.SimilarityMatrix,
+    similarity_matrix: *SimilarityMatrix,
     lm_head_row_norms: zml.Slice,
     // graph fields
     // TODO: we can use smaller integer types
@@ -63,7 +67,7 @@ pub const Graph = struct {
     // if we run the pruning again
     are_neighbors_pruned: []bool,
 
-    pub fn init(zml_handler: *main.Zml_handler, lm_head: zml.Slice, lm_head_normalized: zml.Slice, matrix: *main.SimilarityMatrix, lm_head_row_norms: zml.Slice, junk_rows: []const usize, medoid: usize, params: GraphParams) !Graph {
+    pub fn init(zml_handler: *Zml_handler, lm_head: zml.Slice, lm_head_normalized: zml.Slice, matrix: *SimilarityMatrix, lm_head_row_norms: zml.Slice, junk_rows: []const usize, medoid: usize, params: GraphParams) !Graph {
         std.debug.assert(matrix.n > 0);
         std.debug.assert(params.k_max > 0);
         std.debug.assert(params.L > 0);
@@ -129,23 +133,23 @@ pub const Graph = struct {
         };
     }
 
-    pub fn fromFile(zml_handler: *main.Zml_handler, lm_head: zml.Slice, lm_head_normalized: zml.Slice, matrix: *main.SimilarityMatrix, lm_head_row_norms: zml.Slice, entrypoint_name: []const u8, params: GraphParams) !Graph {
+    pub fn fromFile(zml_handler: *Zml_handler, lm_head: zml.Slice, lm_head_normalized: zml.Slice, matrix: *SimilarityMatrix, lm_head_row_norms: zml.Slice, entrypoint_name: []const u8, params: GraphParams) !Graph {
         const allocator = zml_handler.allocator;
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.checkpoint);
         var registry: zml.safetensors.TensorRegistry = try .fromRepoFile(allocator, zml_handler.io, repo, entrypoint_name);
         defer registry.deinit();
 
-        const n_slice = try main.loadSafetensorSliceFromRegistry(zml_handler, &registry, "n");
+        const n_slice = try save_load.loadSafetensorSliceFromRegistry(zml_handler, &registry, "n");
         defer n_slice.free(allocator);
-        const original_n_slice = try main.loadSafetensorSliceFromRegistry(zml_handler, &registry, "original_n");
+        const original_n_slice = try save_load.loadSafetensorSliceFromRegistry(zml_handler, &registry, "original_n");
         defer original_n_slice.free(allocator);
-        const medoid_slice = try main.loadSafetensorSliceFromRegistry(zml_handler, &registry, "medoid");
+        const medoid_slice = try save_load.loadSafetensorSliceFromRegistry(zml_handler, &registry, "medoid");
         defer medoid_slice.free(allocator);
-        const edges_slice = try main.loadSafetensorSliceFromRegistry(zml_handler, &registry, "edges");
+        const edges_slice = try save_load.loadSafetensorSliceFromRegistry(zml_handler, &registry, "edges");
         defer edges_slice.free(allocator);
-        const node_to_token_slice = try main.loadSafetensorSliceFromRegistry(zml_handler, &registry, "node_to_token");
+        const node_to_token_slice = try save_load.loadSafetensorSliceFromRegistry(zml_handler, &registry, "node_to_token");
         defer node_to_token_slice.free(allocator);
-        const junk_indices_slice = try main.loadSafetensorSliceFromRegistry(zml_handler, &registry, "junk_indices");
+        const junk_indices_slice = try save_load.loadSafetensorSliceFromRegistry(zml_handler, &registry, "junk_indices");
         defer junk_indices_slice.free(allocator);
 
         const graph_n: usize = @intCast(n_slice.constItems(i32)[0]);
