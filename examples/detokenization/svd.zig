@@ -10,15 +10,17 @@ const main = @import("main.zig");
 // We note v = vocab_size
 // 
 // Given a lm_head matrix H of dimensions [v, d], the SVD decomposition
-// of H is H = U * S * V^T, where U and V are rotation matrices of sizes
+// of H is H = V * S * U^T, where U and V are rotation matrices of sizes
 // [d, d] and [v, v] respectively, and S is diagonal.
 // 
-// By forming G = H^T * H, which is a [d, d] symmetric positive definite matrix,
-// the eigendecomposition of G is G = U * S^2 * U^T.
-// The singular values are then the square roots of the eigen values,
-// and the SVD basis is U.
+// By forming G = H^T * H, a [d, d] symmetric positive definite matrix,
+// and computing its eigendecomposition, the singular values are then
+// square roots of the eigen values, and the SVD basis the disgonalization
+// matrix.
+// This works because G = H^T * H = (U * S * V^T) * (V * S * U^T) = U * S^2 * U^T.
 // 
 // We note M = H * U the representation of the lm_head in the SVD basis.
+// In this basis, we should see that the magnitude of cooddinates decreases.
 // 
 // Given an embedding x in R^d, the logits we need for sampling are H * x
 // the i-th logit is logit(i) = Hi * i where Hi is the i-th row of H
@@ -61,7 +63,7 @@ const main = @import("main.zig");
 //         Compute approximate logits for k
 //         Compute best lower bound on max logit: L = max_i logit_approx(i, k) - Err(i, k)
 //         For each i:
-//             If logit_approx(i, k) + Err(i, k) <= L -  then prune token i
+//             If logit_approx(i, k) + Err(i, k) <= L - threshold, then prune token i
 //     Compute real logits for all remaining tokens
 //     Sample with softmax using the real logits
 // 
