@@ -156,6 +156,32 @@ fn to_fp8(x: zml.Tensor, block_size: u32, round_scale: bool) struct { zml.Tensor
     return .{ x_fp8.convert(.f8e4m3fn), scale.convert(.f8e8m0) };
 }
 
+fn fp4ActQuant(x: zml.Tensor, block_size: u32) zml.Tensor {
+    stdx.debug.assert(@mod(x.dim(-1), block_size) == 0, "last dimension {} must be divisible by block_size={}", .{ x.dim(-1), block_size });
+
+    const x_blocked = x.splitAxis(-1, .{ .n = .auto, .m = block_size }).convert(.f32);
+    const min_value = zml.Tensor.scalar(6.0 * std.math.pow(f32, 2.0, -126), x_blocked.dtype());
+
+    var max_block = x_blocked.abs().max(-1);
+    max_block = zml.Tensor.select(max_block.cmp(.LT, min_value), min_value, max_block);
+
+    const fp4_min = zml.Tensor.constant(zml.DataType.f4e2m1.minValue()).convert(x_blocked.dtype());
+    const fp4_max = zml.Tensor.constant(zml.DataType.f4e2m1.maxValue()).convert(x_blocked.dtype());
+    const fp4_max_inv = ones(fp4_max.shape()).div(fp4_max);
+
+    const scale = fastRoundScale(max_block.mul(fp4_max_inv));
+    const x_fp4 = x_blocked
+        .div(scale.broad(x_blocked.shape()))
+        .clamp(fp4_min, fp4_max)
+        .convert(.f4e2m1)
+        .convert(.f32);
+
+    return x_fp4
+        .mul(scale.broad(x_fp4.shape()))
+        .reshape(x.shape().withDtype(.f32))
+        .convert(x.dtype());
+}
+
 const FP8Linear = struct {
     scale: zml.Tensor,
     weight: zml.Tensor,
@@ -712,13 +738,13 @@ const Indexer = struct {
 
         return .{
             .proj = .init(store.createTensor("weights_proj.weight", .{ .sq, .d }, .{ .sq = .model, .d = .replicated }), null, .d),
-            .wq_b = .init(store.withPrefix("wq_b"), .{ .hd, .d }, block_size, .d),
-            // .wq_b = .{
-            //     .scale = store.createTensor("wq_b.scale", null, .replicated),
-            //     .weight = store.createTensor("wq_b.weight", .{ .hd, .d }, .{ .hd = .model, .d = .replicated }),
-            //     .block_size = block_size,
-            //     .tag = zml.Shape.toTag(.d),
-            // },
+            // .wq_b = .init(store.withPrefix("wq_b"), .{ .hd, .d }, block_size, .d),
+            .wq_b = .{
+                .scale = store.createTensor("wq_b.scale", null, .replicated),
+                .weight = store.createTensor("wq_b.weight", .{ .hd, .d }, .{ .hd = .model, .d = .replicated }),
+                .block_size = block_size,
+                .tag = zml.Shape.toTag(.d),
+            },
             .compressor = .init(store.withPrefix("compressor"), config, config.index_head_dim, compression_ratio, rope_opts),
             .index_head_dim = config.index_head_dim,
             .index_n_heads = config.index_n_heads,
@@ -757,8 +783,8 @@ const Indexer = struct {
         q = q.splitAxis(-1, .{ .h = self.index_n_heads, .hd = .auto });
         q = apply_rope(q, freqs_cis, self.nope_head_dim, self.rope_head_dim);
         q = hadamard_rotation(q);
+        q = fp4ActQuant(q, 32);
         q = q.rename(.{ .hd = .d });
-        // TODO: FP4 quant q?
 
         var new_cache = cache;
 
@@ -766,6 +792,7 @@ const Indexer = struct {
         new_cache.state = new_state;
         kv = blk: {
             kv = hadamard_rotation(kv).rename(.{ .seq = .kv });
+            kv = fp4ActQuant(kv, 32);
             new_cache.kv = new_cache.kv.update(kv, compressedCacheIds(position, self.ratio, kv.dim(.kv)), cache_idx);
 
             break :blk new_cache.kv.get(cache_idx).rename(.{ .kv = .seq });
@@ -851,23 +878,23 @@ pub const Attention = struct {
             .kv_norm = .init(store.createTensor("kv_norm.weight", .{.hd}, .replicated), config.rms_norm_eps, .hd),
             .q_norm = .init(store.createTensor("q_norm.weight", .{.q}, .replicated), config.rms_norm_eps, .q),
             .wq_a = .init(store.withPrefix("wq_a"), .{ .q, .d }, block_size, .d),
-            .wq_b = .init(store.withPrefix("wq_b"), .{ .hd, .q }, block_size, .q),
-            // .wq_b = .{
-            //     .scale = store.createTensor("wq_b.scale", null, .replicated),
-            //     .weight = store.createTensor("wq_b.weight", .{ .hd, .q }, .{ .hd = .model, .q = .replicated }),
-            //     .block_size = block_size,
-            //     .tag = zml.Shape.toTag(.q),
-            // },
+            // .wq_b = .init(store.withPrefix("wq_b"), .{ .hd, .q }, block_size, .q),
+            .wq_b = .{
+                .scale = store.createTensor("wq_b.scale", null, .replicated),
+                .weight = store.createTensor("wq_b.weight", .{ .hd, .q }, .{ .hd = .model, .q = .replicated }),
+                .block_size = block_size,
+                .tag = zml.Shape.toTag(.q),
+            },
             .wkv = .init(store.withPrefix("wkv"), .{ .hd, .d }, block_size, .d),
             .wo_a_weight = store.createTensor("wo_a.weight", .{ .hd, .d }, .{ .hd = .model, .d = .replicated }),
             .wo_a_scale = store.createTensor("wo_a.scale", null, .replicated),
-            .wo_b = .init(store.withPrefix("wo_b"), .{ .hd, .d }, block_size, .d),
-            // .wo_b = .{
-            //     .scale = store.createTensor("wo_b.scale", null, .replicated),
-            //     .weight = store.createTensor("wo_b.weight", .{ .hd, .d }, .{ .hd = .model, .d = .replicated }),
-            //     .block_size = block_size,
-            //     .tag = zml.Shape.toTag(.d),
-            // },
+            // .wo_b = .init(store.withPrefix("wo_b"), .{ .hd, .d }, block_size, .d),
+            .wo_b = .{
+                .scale = store.createTensor("wo_b.scale", null, .replicated),
+                .weight = store.createTensor("wo_b.weight", .{ .hd, .d }, .{ .hd = .model, .d = .replicated }),
+                .block_size = block_size,
+                .tag = zml.Shape.toTag(.d),
+            },
             .eps = config.rms_norm_eps,
             .rope_opts = rope_opts,
             .window_size = config.sliding_window,
