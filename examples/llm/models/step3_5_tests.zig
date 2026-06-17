@@ -4,7 +4,7 @@ const zml = @import("zml");
 
 const common = @import("common.zig");
 const inference = @import("step3_5flash/inference.zig");
-const step3p5flash = @import("step3_5flash.zig");
+const step3_5flash = @import("step3_5flash.zig");
 const model = @import("step3_5flash/model.zig");
 
 pub const std_options: std.Options = .{
@@ -58,11 +58,10 @@ pub fn main(init: std.process.Init) !void {
     defer store.deinit();
 
     const shardings: common.Shardings = try .init(platform);
+    const generation: common.GenerationOptions = .{ .sampling_strategy = .{ .topk = args.topk } };
 
-    var repo_model = try step3p5flash.LoadedModel.init(allocator, io, repo, store.view(), shardings);
+    var repo_model = try step3_5flash.LoadedModel.init(allocator, io, repo, store.view(), generation, shardings);
     defer repo_model.deinit(allocator);
-
-    repo_model.inner.gen_options.sampling_strategy.topk = args.topk;
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     errdefer progress.end();
@@ -76,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var compiled = try repo_model.compile(allocator, io, platform, shardings, args.seqlen, &progress);
+    var compiled = try repo_model.compile(allocator, io, platform, .auto(platform), shardings, args.seqlen, &progress);
     defer compiled.deinit();
 
     progress.end();
@@ -155,10 +154,8 @@ fn runDecode(
     );
     defer current_token_buffer.deinit();
 
-    var exe_args = try compiled.exe.args(allocator);
-    defer exe_args.deinit(allocator);
-    var exe_results = try compiled.exe.results(allocator);
-    defer exe_results.deinit(allocator);
+    var decode_runner = try compiled.decode.initRunner(allocator, io, platform, model_buffers);
+    defer decode_runner.deinit(allocator);
 
     var detok: ?zml.tokenizer.Tokenizer.Decoder = if (tokenizer) |t| try t.decoder() else null;
     defer if (detok) |*d| d.deinit();
@@ -182,18 +179,15 @@ fn runDecode(
         );
         defer token_index_buffer.deinit();
 
-        exe_args.set(.{
-            model_buffers.*,
-            current_token_buffer,
-            token_index_buffer,
-            kv_cache_buffers,
-            rng_buffers,
-        });
-        compiled.exe.call(exe_args, &exe_results);
-        exe_results.fill(.{
-            &current_token_buffer,
-            &kv_cache_buffers,
-            &rng_buffers,
+        try decode_runner.run(.{
+            .allocator = allocator,
+            .io = io,
+            .platform = platform,
+            .model_buffers = model_buffers,
+            .tokens_buf = &current_token_buffer,
+            .token_index_buf = &token_index_buffer,
+            .kv_cache_buffers = &kv_cache_buffers,
+            .rng_buffers = &rng_buffers,
         });
 
         const predicted = try current_token_buffer.getValue(u32, io);

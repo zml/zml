@@ -9,6 +9,13 @@ const log = std.log.scoped(.step3_5flash);
 pub const Config = struct {
     architectures: []const []const u8 = &.{},
     model_type: []const u8,
+    bos_token_id: ?u32 = null,
+    eos_token_id: ?stdx.json.Union(union(enum) {
+        int: u32,
+        ints: []u32,
+    }) = null,
+    im_start_token_id: ?u32 = null,
+    im_end_token_id: ?u32 = null,
 
     auto_map: ?AutoMap = null,
 
@@ -180,11 +187,13 @@ pub const Model = struct {
 
     text_model: TextModel,
     lm_head: zml.nn.Linear,
+    config: Config,
     gen_options: GenOptions,
 
     pub fn init(
         allocator: std.mem.Allocator,
         store: zml.io.TensorStore.View,
+        config: Config,
         gen_options: GenOptions,
         model_partitions: i64,
     ) !Model {
@@ -195,6 +204,7 @@ pub const Model = struct {
                 null,
                 .d,
             ),
+            .config = config,
             .gen_options = gen_options,
         };
     }
@@ -252,8 +262,37 @@ pub const Model = struct {
     }
 
     pub fn sampleTokens(self: Model, hidden: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
-        const logits = self.lm_head.forward(hidden.withPartialTags(.{.d})).rename(.{ .dout = .voc });
-        return zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, rng);
+        const next_tokens, const new_rng, _ = self.sampler().sampleTokens(hidden, rng, null);
+        return .{ next_tokens, new_rng };
+    }
+
+    pub fn sampler(self: Model) Sampler {
+        return .{
+            .norm = self.text_model.norm,
+            .lm_head = self.lm_head,
+            .gen_options = self.gen_options,
+        };
+    }
+};
+
+pub const Sampler = struct {
+    norm: RmsNorm,
+    lm_head: zml.nn.Linear,
+    gen_options: Model.GenOptions,
+
+    pub fn sampleTokens(
+        self: Sampler,
+        hidden: zml.Tensor,
+        rng: zml.Tensor.Rng,
+        token_index: ?zml.Tensor,
+    ) struct { zml.Tensor, zml.Tensor.Rng, ?zml.Tensor } {
+        const x = self.norm.forward(hidden, .d);
+        const logits = self.lm_head.forward(x.withPartialTags(.{.d})).rename(.{ .dout = .voc });
+        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, rng);
+        if (token_index) |idx| {
+            return .{ next_tokens.convert(.u32), new_rng, idx.addConstant(1) };
+        }
+        return .{ next_tokens.convert(.u32), new_rng, null };
     }
 };
 
@@ -308,7 +347,6 @@ pub const TextModel = struct {
             hidden, updated_kv_cache = layer.forward(hidden, token_index, updated_kv_cache.atLayer(i));
         }
 
-        hidden = self.norm.forward(hidden, .d);
         return .{ hidden, updated_kv_cache.reuseBuffer(kv_cache) };
     }
 };
@@ -898,7 +936,7 @@ pub const TextRotaryEmbedding = struct {
 pub const KvCache = struct {
     k: zml.Tensor,
     v: zml.Tensor,
-    layer_index: ?u32,
+    layer_index: zml.Tensor,
 
     pub const Buffer = zml.Bufferized(KvCache);
 
@@ -906,7 +944,7 @@ pub const KvCache = struct {
         return .{
             .k = .fromShape(kv_shape),
             .v = .fromShape(kv_shape),
-            .layer_index = null,
+            .layer_index = .init(.{}, .u32),
         };
     }
 
@@ -921,25 +959,27 @@ pub const KvCache = struct {
         return .{
             .k = try zml.Buffer.fromBytes(io, platform, kv.k.shape(), sharding, k_bytes),
             .v = try zml.Buffer.fromBytes(io, platform, kv.v.shape(), sharding, v_bytes),
+            .layer_index = try zml.Buffer.scalar(io, platform, @as(u32, 0), .u32),
         };
     }
 
     pub fn deinitBuffer(kv: *Buffer) void {
         kv.k.deinit();
         kv.v.deinit();
+        kv.layer_index.deinit();
     }
 
     pub fn keys(kv: KvCache) zml.Tensor {
-        return kv.k.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
+        return kv.k.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = kv.layer_index, .len = 1 } }).squeeze(.layer);
     }
 
     pub fn values(kv: KvCache) zml.Tensor {
-        return kv.v.slice1d(.layer, .single(kv.layer_index orelse @panic("forgot to call atLayer")));
+        return kv.v.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = kv.layer_index, .len = 1 } }).squeeze(.layer);
     }
 
     pub fn update(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: ?zml.Tensor) KvCache {
         const k_shape = kv.k.shape().drop(.layer);
-        const layer: zml.Tensor = .scalar(kv.layer_index orelse @panic("forgot to call atLayer"), .u32);
+        var layer = kv.layer_index;
 
         // KV cache uses .k instead of .s, so we change here so caller doesn't need to be aware of this naming scheme.
         const k_renamed = if (new_k.shape().hasTag(.s) != null) new_k.rename(.{ .s = .k }) else new_k;
@@ -947,10 +987,13 @@ pub const KvCache = struct {
         const k_in = k_renamed.convert(kv.k.dtype()).transpose(k_shape);
         const v_in = v_renamed.convert(kv.v.dtype()).transpose(k_shape);
 
-        return if (token_index) |idx| .{
-            .k = kv.k.scatterSlices(.{ .layer = layer, .k = idx }, k_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
-            .v = kv.v.scatterSlices(.{ .layer = layer, .k = idx }, v_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
-            .layer_index = kv.layer_index,
+        return if (token_index) |idx| blk: {
+            layer = layer.broad(idx.shape());
+            break :blk .{
+                .k = kv.k.scatterSlices(.{ .layer = layer, .k = idx }, k_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
+                .v = kv.v.scatterSlices(.{ .layer = layer, .k = idx }, v_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
+                .layer_index = kv.layer_index,
+            };
         } else .{
             .k = kv.k.scatterSlices(.{ .layer = layer }, k_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
             .v = kv.v.scatterSlices(.{ .layer = layer }, v_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
@@ -962,7 +1005,7 @@ pub const KvCache = struct {
         return .{
             .k = kv.k,
             .v = kv.v,
-            .layer_index = @intCast(layer_index),
+            .layer_index = .scalar(layer_index, .u32),
         };
     }
 
@@ -970,7 +1013,7 @@ pub const KvCache = struct {
         return .{
             .k = kv.k.reuseBuffer(other.k),
             .v = kv.v.reuseBuffer(other.v),
-            .layer_index = null,
+            .layer_index = kv.layer_index.reuseBuffer(other.layer_index),
         };
     }
 };
@@ -1147,8 +1190,6 @@ pub const Moe = struct {
 
     pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
         return self.forwardTriton(x);
-
-        // TODO: open issue re: Louis' forward Moe kernel
     }
 
     fn forwardTriton(self: Moe, x: zml.Tensor) zml.Tensor {
@@ -1229,6 +1270,12 @@ pub const Moe = struct {
 };
 
 pub const LoadedModel = struct {
+    pub const SpecialTokens = struct {
+        im_start_token_id: u32,
+        im_end_token_id: u32,
+        eos_token_id: u32,
+    };
+
     inner: Model,
     parsed_config: std.json.Parsed(Config),
 
@@ -1237,21 +1284,21 @@ pub const LoadedModel = struct {
         io: std.Io,
         repo: std.Io.Dir,
         store: zml.io.TensorStore.View,
+        generation: common.GenerationOptions,
         shardings: common.Shardings,
-        // generation: common.GenerationOptions,
     ) !LoadedModel {
         const parsed_config = try common.parseConfig(Config, allocator, io, repo);
         errdefer parsed_config.deinit();
 
         const options: Options = .{
-            // .sampling_strategy = generation.sampling_strategy,
+            .sampling_strategy = generation.sampling_strategy,
             .max_seq_len = parsed_config.value.max_position_embeddings,
         };
 
         const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
 
         return .{
-            .inner = try .init(allocator, store, options, model_partitions),
+            .inner = try .init(allocator, store, parsed_config.value, options, model_partitions),
             .parsed_config = parsed_config,
         };
     }
@@ -1259,6 +1306,20 @@ pub const LoadedModel = struct {
     pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
         self.inner.deinit(allocator);
         self.parsed_config.deinit();
+    }
+
+    pub fn specialTokens(self: *const LoadedModel, tokenizer: zml.tokenizer.Tokenizer) !SpecialTokens {
+        const im_start = self.parsed_config.value.im_start_token_id orelse tokenizer.tokenId("<|im_start|>") orelse return error.NoSuchToken;
+        const im_end = self.parsed_config.value.im_end_token_id orelse tokenizer.tokenId("<|im_end|>") orelse return error.NoSuchToken;
+        const eos = if (self.parsed_config.value.eos_token_id) |eos_token_id| switch (eos_token_id.value) {
+            .int => |id| id,
+            .ints => |ids| if (ids.len > 0) ids[0] else im_end,
+        } else tokenizer.tokenId("<|endoftext|>") orelse im_end;
+        return .{
+            .im_start_token_id = im_start,
+            .im_end_token_id = im_end,
+            .eos_token_id = eos,
+        };
     }
 
     pub fn loadBuffers(
@@ -1302,10 +1363,12 @@ pub const LoadedModel = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
+        backend: zml.attention.attention.Backend,
         shardings: common.Shardings,
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
+        _ = backend;
         const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), shardings);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }

@@ -357,8 +357,7 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
     else
         num_assignments + num_experts * (block_size_m - 1);
     const max_num_m_blocks = std.math.divCeil(i64, max_num_tokens_padded, block_size_m) catch unreachable;
-    const warp_size: i64 = 32;
-    const padded_num_experts = (std.math.divCeil(i64, num_experts, warp_size) catch unreachable) * warp_size;
+    const padded_num_experts: i64 = @intCast(std.math.ceilPowerOfTwo(u64, @intCast(num_experts)) catch unreachable);
     const sort_block_size: i64 = 256;
     const sort_grid_x: i64 = @min(std.math.divCeil(i64, num_assignments, sort_block_size) catch unreachable, 65535);
 

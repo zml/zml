@@ -14,3 +14,6 @@ pub const Model = model.Model;
 pub const LoadedModel = model.LoadedModel;
 // TODO: remove
 pub const default_config = model.default_config;
+
+pub const session = @import("step3_5flash/session.zig");
+pub const Session = session.Session;

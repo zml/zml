@@ -113,11 +113,11 @@ pub fn main(init: std.process.Init) !void {
         },
     };
 
-    var model = try models.LoadedModel.load(allocator, io, repo, store.view(), generation);
-    defer model.deinit(allocator);
-
     // Defines how the model's tensors are sharded across the available devices.
     const shardings: models.Shardings = try .init(platform);
+
+    var model = try models.LoadedModel.load(allocator, io, repo, store.view(), generation, shardings);
+    defer model.deinit(allocator);
 
     //
     // Load the model and compile it
