@@ -46,6 +46,7 @@ const CasAuth = struct {
 };
 
 const chunk_header_size = 8;
+const max_xorb_body_size = 64 * 1024 * 1024;
 
 const Chunk = struct {
     compressed_size: u32,
@@ -431,40 +432,140 @@ fn buildFetchTasks(
     return tasks;
 }
 
-const FetchCtx = struct {
-    io: std.Io,
+pub const FetchPool = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     client: *std.http.Client,
-    dst: []u8,
-    task_queue: std.Io.Queue(*FetchTask),
-    body_cap: usize,
-    err_mutex: std.Io.Mutex = .init,
-    err: ?anyerror = null,
+    workers: []Worker,
+    group: std.Io.Group,
+    job_queue: std.Io.Queue(*Job),
+    queue_buf: []*Job,
 
-    fn setError(self: *FetchCtx, e: anyerror) void {
-        self.err_mutex.lockUncancelable(self.io);
-        defer self.err_mutex.unlock(self.io);
-        if (self.err == null) self.err = e;
+    pub const Options = struct {
+        workers: usize,
+        queue_capacity: usize,
+        body_size: usize = max_xorb_body_size,
+        scratch_size: usize = 256 * 1024, // 2x the largest chunk size in practice (128 KiB) - Encountered a few chunks >128 KiB in the wild, so this is a safe upper bound.
+    };
+
+    const Worker = struct {
+        body: []u8,
+        scratch: []u8,
+    };
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        client: *std.http.Client,
+        opts: Options,
+    ) !*FetchPool {
+        const workers = try allocator.alloc(Worker, opts.workers);
+        errdefer allocator.free(workers);
+
+        var made: usize = 0;
+        errdefer for (workers[0..made]) |*w| {
+            allocator.free(w.body);
+            allocator.free(w.scratch);
+        };
+        for (workers) |*w| {
+            const body = try allocator.alloc(u8, opts.body_size);
+            errdefer allocator.free(body);
+            const scratch = try allocator.alloc(u8, opts.scratch_size);
+            errdefer allocator.free(scratch);
+            w.* = .{ .body = body, .scratch = scratch };
+            made += 1;
+        }
+
+        const queue_buf = try allocator.alloc(*Job, opts.queue_capacity);
+        errdefer allocator.free(queue_buf);
+
+        const self = try allocator.create(FetchPool);
+        errdefer allocator.destroy(self);
+        self.* = .{
+            .allocator = allocator,
+            .io = io,
+            .client = client,
+            .workers = workers,
+            .group = .init,
+            .job_queue = std.Io.Queue(*Job).init(queue_buf),
+            .queue_buf = queue_buf,
+        };
+        errdefer self.group.cancel(io);
+        for (workers) |*w| try self.group.concurrent(io, fetchWorker, .{ self, w });
+        return self;
+    }
+
+    pub fn deinit(self: *FetchPool) void {
+        self.job_queue.close(self.io);
+        self.group.await(self.io) catch {};
+        for (self.workers) |*w| {
+            self.allocator.free(w.body);
+            self.allocator.free(w.scratch);
+        }
+        self.allocator.free(self.workers);
+        self.allocator.free(self.queue_buf);
+        self.allocator.destroy(self);
     }
 };
 
-fn fetchWorker(ctx: *FetchCtx) void {
-    const body_buf = ctx.allocator.alloc(u8, ctx.body_cap) catch |e| {
-        ctx.setError(e);
-        return;
-    };
-    defer ctx.allocator.free(body_buf);
+pub const Batch = struct {
+    dst: []u8,
+    pending: usize,
+    err: ?anyerror = null,
+    mutex: std.Io.Mutex = .init,
+    cond: std.Io.Condition = .init,
 
-    var scratch: [256 * 1024]u8 = undefined;
+    fn finishOne(self: *Batch, io: std.Io, e: ?anyerror) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        if (e) |x| if (self.err == null) {
+            self.err = x;
+        };
+        self.pending -= 1;
+        if (self.pending == 0) self.cond.signal(io);
+    }
+
+    fn wait(self: *Batch, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        while (self.pending != 0) self.cond.wait(io, &self.mutex) catch {};
+    }
+};
+
+const Job = struct {
+    task: *FetchTask,
+    batch: *Batch,
+};
+
+fn fetchWorker(pool: *FetchPool, w: *FetchPool.Worker) void {
     while (true) {
-        const task = ctx.task_queue.getOne(ctx.io) catch break;
-        if (ctx.err != null) break;
-        processTask(ctx, task, body_buf[0..task.byte_len], &scratch) catch |e| ctx.setError(e);
+        const job = pool.job_queue.getOne(pool.io) catch break;
+        if (job.batch.err != null) {
+            job.batch.finishOne(pool.io, null);
+            continue;
+        }
+        const err = processJob(pool, w, job);
+        job.batch.finishOne(pool.io, err);
     }
 }
 
-fn processTask(ctx: *FetchCtx, task: *FetchTask, body: []u8, scratch: *[256 * 1024]u8) !void {
-    try httpRangeGetIntoSlice(ctx.client, task.url, task.url_range_start, task.url_range_end, body);
+fn processJob(pool: *FetchPool, w: *FetchPool.Worker, job: *Job) ?anyerror {
+    const task = job.task;
+    if (task.byte_len > w.body.len) return error.XorbTooLarge;
+    // log.warn("fetching {d} bytes from {s} (range={d}-{d})", .{ task.byte_len, task.url, task.url_range_start, task.url_range_end });
+    const body = w.body[0..task.byte_len];
+    runTask(pool.client, task, job.batch.dst, body, w.scratch) catch |e| return e;
+    return null;
+}
+
+fn runTask(
+    client: *std.http.Client,
+    task: *FetchTask,
+    dst: []u8,
+    body: []u8,
+    scratch: []u8,
+) !void {
+    try httpRangeGetIntoSlice(client, task.url, task.url_range_start, task.url_range_end, body);
 
     var it: ChunkIterator = .{ .data = body };
     var chunk_idx: usize = task.chunk_idx_start;
@@ -490,7 +591,7 @@ fn processTask(ctx: *FetchCtx, task: *FetchTask, body: []u8, scratch: *[256 * 10
             const needs_skip = chunk_idx == tp.chunk_start and tp.byte_skip != 0;
             const remaining = tp.wanted_len - tp.bytes_written;
             if (!needs_skip and chunk.uncompressed_size <= remaining) {
-                const slot = ctx.dst[tp.dst_off + tp.bytes_written ..][0..chunk.uncompressed_size];
+                const slot = dst[tp.dst_off + tp.bytes_written ..][0..chunk.uncompressed_size];
                 _ = try decompressChunk(chunk, slot);
                 tp.bytes_written += chunk.uncompressed_size;
                 continue;
@@ -507,7 +608,7 @@ fn processTask(ctx: *FetchCtx, task: *FetchTask, body: []u8, scratch: *[256 * 10
             const avail = decoded.len - src_off;
             const remaining = tp.wanted_len - tp.bytes_written;
             const take = @min(avail, remaining);
-            const dst_slice = ctx.dst[tp.dst_off + tp.bytes_written ..][0..take];
+            const dst_slice = dst[tp.dst_off + tp.bytes_written ..][0..take];
             @memcpy(dst_slice, decoded[src_off..][0..take]);
             tp.bytes_written += take;
         }
@@ -515,79 +616,43 @@ fn processTask(ctx: *FetchCtx, task: *FetchTask, body: []u8, scratch: *[256 * 10
 }
 
 /// Synchronously fill `dst[0..]` with `dst.len` bytes starting at file `offset`
-/// of the XET-backed file `(repo, file_id)`. Spawns a fixed pool of up to
-/// `workers` fibers that drain a bounded `std.Io.Queue` of `FetchTask`
-/// pointers; returns when every byte is written or any worker errors.
+/// of the XET-backed file `(repo, file_id)`. Submits one `Job` per HTTP range
+/// to the long-lived `pool`; returns when every job in the batch completes
+/// (or any worker errors).
 pub fn fetchRange(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    client: *std.http.Client,
+    pool: *FetchPool,
     cas_cache: *CasAuthCache,
     hf_token: []const u8,
     repo: Repo,
     file_id: []const u8,
     offset: u64,
     dst: []u8,
-    workers: usize,
 ) !void {
     if (dst.len == 0) return;
 
-    const cas = try cas_cache.get(allocator, io, client, repo, hf_token);
-    defer allocator.free(cas.url);
-    defer allocator.free(cas.token);
+    const cas = try cas_cache.get(pool.allocator, pool.io, pool.client, repo, hf_token);
+    defer pool.allocator.free(cas.url);
+    defer pool.allocator.free(cas.token);
 
     var auth_buf: [4096]u8 = undefined;
     const cas_auth = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{cas.token}) catch return error.TokenTooLong;
 
-    const parsed = try fetchReconstruction(allocator, client, cas.url, cas_auth, file_id, offset, offset + dst.len - 1);
+    const parsed = try fetchReconstruction(pool.allocator, pool.client, cas.url, cas_auth, file_id, offset, offset + dst.len - 1);
     defer parsed.deinit();
 
-    var tasks = try buildFetchTasks(allocator, parsed.value, dst.len);
-    defer freeFetchTasks(allocator, &tasks);
+    var tasks = try buildFetchTasks(pool.allocator, parsed.value, dst.len);
+    defer freeFetchTasks(pool.allocator, &tasks);
 
     if (tasks.items.len == 0) return;
 
-    var body_cap: usize = 0;
-    for (tasks.items) |*t| body_cap = @max(body_cap, t.byte_len);
+    const jobs = try pool.allocator.alloc(Job, tasks.items.len);
+    defer pool.allocator.free(jobs);
 
-    const queue_buf = try allocator.alloc(*FetchTask, tasks.items.len);
-    defer allocator.free(queue_buf);
+    //Create the batch and assign each task to a job. The batch will track how many jobs are pending and will wait for all of them to finish.
+    var batch: Batch = .{ .dst = dst, .pending = tasks.items.len };
+    for (jobs, tasks.items) |*j, *t| j.* = .{ .task = t, .batch = &batch };
 
-    const n_workers = @min(workers, tasks.items.len);
-    const scratch_bytes: usize = 256 * 1024;
-    const per_worker = body_cap + scratch_bytes;
-    log.debug("fetchRange: dst={d} KiB, tasks={d}, workers={d}, body_cap={d} KiB, scratch={d} KiB, per_worker={d} KiB, total={d} MiB (queue={d} B)", .{
-        dst.len / 1024,
-        tasks.items.len,
-        n_workers,
-        body_cap / 1024,
-        scratch_bytes / 1024,
-        per_worker / 1024,
-        (n_workers * per_worker) / (1024 * 1024),
-        queue_buf.len * @sizeOf(*FetchTask),
-    });
-
-    var ctx: FetchCtx = .{
-        .io = io,
-        .allocator = allocator,
-        .client = client,
-        .dst = dst,
-        .task_queue = std.Io.Queue(*FetchTask).init(queue_buf),
-        .body_cap = body_cap,
-    };
-
-    var group: std.Io.Group = .init;
-    errdefer group.cancel(io);
-    // `concurrent` (not `async`): we *need* workers on real threads so the
-    // producer fiber below isn't hijacked into running a worker that then
-    // blocks on the still-empty queue. `Group.async` falls back to inline
-    // execution past `async_limit` (= cpu_count - 1) and would deadlock.
-    for (0..n_workers) |_| try group.concurrent(io, fetchWorker, .{&ctx});
-
-    for (tasks.items) |*t| ctx.task_queue.putOneUncancelable(io, t) catch unreachable;
-    ctx.task_queue.close(io);
-
-    try group.await(io);
-
-    if (ctx.err) |e| return e;
+    for (jobs) |*j| try pool.job_queue.putOne(pool.io, j);
+    batch.wait(pool.io);
+    if (batch.err) |e| return e;
 }
