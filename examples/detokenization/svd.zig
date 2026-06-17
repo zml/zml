@@ -1,6 +1,8 @@
 const std = @import("std");
 const zml = @import("zml");
 const main = @import("main.zig");
+const tokens = @import("tokens.zig");
+const Tokenizer = zml.tokenizer.Tokenizer;
 
 // This class will be used to implement a cascading style sampler based on the
 // orthogonal basis obtained from the SVD decomposition of the lm_head matrix,
@@ -16,8 +18,8 @@ const main = @import("main.zig");
 // By forming G = H^T * H, a [d, d] symmetric positive definite matrix,
 // and computing its eigendecomposition, the singular values are then
 // square roots of the eigen values, and the SVD basis the disgonalization
-// matrix.
-// This works because G = H^T * H = (U * S * V^T) * (V * S * U^T) = U * S^2 * U^T.
+// matrix. This works because:
+//      G = H^T * H = (U * S * V^T) * (V * S * U^T) = U * S^2 * U^T.
 // 
 // We note M = H * U the representation of the lm_head in the SVD basis.
 // In this basis, we should see that the magnitude of cooddinates decreases.
@@ -29,45 +31,50 @@ const main = @import("main.zig");
 //              = (Hi * U) * (U^T * x)
 //              = Mi * y,
 // where y is the expression of x in the SVD basis: y = U^T * x.
-// this means that the logit computation can be performed naively in the SVD basis.
+// this means that the logit computation can be performed in the SVD basis.
 // 
 // The diagonal matrix S has the property that singular values appear
 // in descending order along the diagonal. This means in the SVD basis,
-// the coordinates are of decreasing contribution to the logit. This property
+// the coordinates are of decreasing magnitude. This property
 // is what we will exploit to devise the token sampling strategy.
 // 
 // We define a set of checkpoints C = { 1, 8, 64, 256 }.
 // Given an already rotated embedding vector y to sample from,
 // we have that logit(i) = sum_j Mi_j * y_j
-// For any k in C, we have that logit(i) = sum_{j <= k} Mi_j * y_j + sum_{j > k} Mi_j * y_j
+// For any k in C, logit(i) = sum_{j <= k} Mi_j * y_j + sum_{j > k} Mi_j * y_j
 // For any k, this defines an approximation of the logits:
 //     logit(i) ≈ sum_{j <= k} Mi_j * y_j = logit_approx(i, k)
+// 
 // With Cauchy-Schwarz inequality, we can bound the error of the approximation:
 //     |logit(i) - logit_approx(i, k)| = |sum_{j > k} Mi_j * y_j|
 //                                     <= ||Mi||_{>k} * ||y||_{>k} = Err(i, k)
-// Where ||.||_{>k} is the L2 norm of the vector when ignoring the first k coordinates.
+// Where ||.||_{>k} is the L2 norm when ignoring the first k coordinates.
 // This gives an upper bound on the real logit for each token i:
 //     logit(i) <= logit_approx(i, k) + Err(i, k)
 // If i_max is the index of the token with the largest approximate logit, then:
 //     logit(i_max) >= logit_approx(i_max, k) - Err(i_max, k)
 // This means that for any k, we have a lower bound on the larget final logit.
+// 
 // This allows us to prune tokens based on a logit threshold value.
 // If logit(i) <= logit(j) + a then exp(logit(i)) <= exp(a) * exp(logit(j)),
 // meaning that token i has a probability lower than exp(a) times that of token j.
 // If we decide to use exp(a) = 0,5 as a pruning threshold, we can prune tokens
 // with logit(i) <= logit(j) - ln(2) = logit(j) - 0,693 for any i and j.
-// We generalize by havind a variable threshold = -ln(2) = -0,693 by default but might change later.
+// We generalize by havind a variable threshold (= -ln(2) = -0,693 by default).
+// 
 // The sampling algorithm is then:
 //     Compute the ||y||_{>k} values for all k
 //     For k in C:
 //         Compute approximate logits for k
-//         Compute best lower bound on max logit: L = max_i logit_approx(i, k) - Err(i, k)
+//             logit_approx(i, k) = sum_{j <= k} Mi_j * y_j
+//         Compute best lower bound on max logit:
+//             L = max_i { logit_approx(i, k) - Err(i, k) }
 //         For each i:
 //             If logit_approx(i, k) + Err(i, k) <= L - threshold, then prune token i
 //     Compute real logits for all remaining tokens
 //     Sample with softmax using the real logits
 // 
-// The ||Mi||_{>k} values for all checkpoints can be precomputed as they remain constant.
+// The ||Mi||_{>k} values for all checkpoints can be precomputed as they are constant.
 // 
 // This first version is the "safe" version, as the CS inequality is deterministic.
 // In real world scenarios, the tail of >k coordinates never exactly align with the
@@ -78,11 +85,21 @@ const main = @import("main.zig");
 // With Z = 5, the success probability of that bound is ≈ 99.99997%
 
 pub const SvdSampler = struct {
-    pub const default_checkpoints = [_]usize{ 1, 8, 64, 256 };
+    pub const default_checkpoints = [_]usize{ 1, 8, 64, 256, 1024 };
 
     const BoundMode = enum {
         safe,
         unsafe,
+    };
+
+    const SamplingCandidate = struct {
+        token: usize,
+        logit: f32,
+        weight: f32,
+
+        fn beforeThan(_: void, lhs: SamplingCandidate, rhs: SamplingCandidate) bool {
+            return lhs.logit > rhs.logit;
+        }
     };
 
     allocator: std.mem.Allocator,
@@ -93,12 +110,17 @@ pub const SvdSampler = struct {
     checkpoints: []usize,
     row_tail_norms: []f32,
     approx_logits: []f32,
+    checkpoint_approx_logits: []f32,
     exact_logits: []f32,
+    sampling_candidates: []SamplingCandidate,
     active: []bool,
+    top_k: usize = 20,
+    temp: f32 = 0.6,
     prune_threshold_logit: f32 = -0.693,
     unsafe_z_score: f32 = 5.0,
+    tokenizer: Tokenizer,
 
-    pub fn init(allocator: std.mem.Allocator, m: zml.Slice, m_t: zml.Slice) !SvdSampler {
+    pub fn init(allocator: std.mem.Allocator, m: zml.Slice, m_t: zml.Slice, tokenizer: Tokenizer) !SvdSampler {
         if (m.dtype() != .f32 or m_t.dtype() != .f32) return error.UnsupportedDType;
         if (m.shape.rank() != 2 or m_t.shape.rank() != 2) return error.InvalidShape;
 
@@ -118,8 +140,14 @@ pub const SvdSampler = struct {
         const approx_logits = try allocator.alloc(f32, vocab_size);
         errdefer allocator.free(approx_logits);
 
+        const checkpoint_approx_logits = try allocator.alloc(f32, checkpoints.len * vocab_size);
+        errdefer allocator.free(checkpoint_approx_logits);
+
         const exact_logits = try allocator.alloc(f32, vocab_size);
         errdefer allocator.free(exact_logits);
+
+        const sampling_candidates = try allocator.alloc(SamplingCandidate, vocab_size);
+        errdefer allocator.free(sampling_candidates);
 
         const active = try allocator.alloc(bool, vocab_size);
         errdefer allocator.free(active);
@@ -133,8 +161,11 @@ pub const SvdSampler = struct {
             .checkpoints = checkpoints,
             .row_tail_norms = row_tail_norms,
             .approx_logits = approx_logits,
+            .checkpoint_approx_logits = checkpoint_approx_logits,
             .exact_logits = exact_logits,
+            .sampling_candidates = sampling_candidates,
             .active = active,
+            .tokenizer = tokenizer,
         };
         sampler.precomputeRowTailNorms();
         return sampler;
@@ -144,16 +175,54 @@ pub const SvdSampler = struct {
         self.allocator.free(self.checkpoints);
         self.allocator.free(self.row_tail_norms);
         self.allocator.free(self.approx_logits);
+        self.allocator.free(self.checkpoint_approx_logits);
         self.allocator.free(self.exact_logits);
+        self.allocator.free(self.sampling_candidates);
         self.allocator.free(self.active);
     }
 
+    pub fn setSamplingParams(self: *SvdSampler, temperature: f32, top_k: usize, top_p: f32) void {
+        self.temperature = temperature;
+        self.top_k = top_k;
+        self.top_p = top_p;
+    }
+
     pub fn sampleSafe(self: *SvdSampler, y: []const f32, random: std.Random) !u32 {
+        std.log.info("##### sampleSafe", .{});
         return self.sample(y, random, .safe);
     }
 
     pub fn sampleUnsafe(self: *SvdSampler, y: []const f32, random: std.Random) !u32 {
+        std.log.info("##### sampleUnsafe", .{});
         return self.sample(y, random, .unsafe);
+    }
+
+    pub fn sampleFull(self: *SvdSampler, y: []const f32, random: std.Random) !u32 {
+        std.log.info("##### sampleFull", .{});
+        @memset(self.active, true);
+        @memset(self.exact_logits, 0.0);
+        const token = self.sampleExact(y, random);
+        return token;
+    }
+
+    pub fn sampleTruncated(self: *SvdSampler, y: []const f32, random: std.Random, n: usize) !u32 {
+        std.log.info("##### sampleTruncated {d}", .{n});
+        if (y.len != self.d) return error.InvalidEmbeddingShape;
+        const m_t_items = self.m_t.constItems(f32);
+        var candidate_count: usize = 0;
+        for (0..self.vocab_size) |token| {
+            var logit: f32 = 0.0;
+            for (0..n) |coord| {
+                logit += m_t_items[coord * self.vocab_size + token] * y[coord];
+            }
+            self.sampling_candidates[candidate_count] = .{
+                .token = token,
+                .logit = logit / self.temp,
+                .weight = 0.0,
+            };
+            candidate_count += 1;
+        }
+        return self.sampleCandidates(random, candidate_count);
     }
 
 
@@ -182,10 +251,13 @@ pub const SvdSampler = struct {
     fn sample(self: *SvdSampler, y: []const f32, random: std.Random, mode: BoundMode) !u32 {
         if (y.len != self.d) return error.InvalidEmbeddingShape;
 
+        const y_norm = tailNorm(y, 0);
+
         @memset(self.approx_logits, 0.0);
         @memset(self.active, true);
         var active_count = self.vocab_size;
         var previous_checkpoint: usize = 0;
+        var processed_checkpoint_count: usize = 0;
 
         const m_t_items = self.m_t.constItems(f32);
         for (self.checkpoints, 0..) |checkpoint, checkpoint_index| {
@@ -194,18 +266,19 @@ pub const SvdSampler = struct {
             for (previous_checkpoint..checkpoint) |coord| {
                 const coord_values = m_t_items[coord * self.vocab_size ..][0..self.vocab_size];
                 for (0..self.vocab_size) |token| {
-                    if (!self.active[token]) continue;
                     self.approx_logits[token] += coord_values[token] * y[coord];
                 }
             }
             previous_checkpoint = checkpoint;
+            @memcpy(self.checkpointApproxLogits(checkpoint_index), self.approx_logits);
+            processed_checkpoint_count = checkpoint_index + 1;
 
             // we can improve this by computing it in one pass at start
             const y_tail_norm = tailNorm(y, checkpoint);
             
             const row_tail_norms = self.rowTailNorms(checkpoint_index);
             const best_lower_bound = self.bestLowerBound(row_tail_norms, y_tail_norm, checkpoint, mode);
-            const prune_limit = best_lower_bound + self.prune_threshold_logit;
+            const prune_limit = best_lower_bound + self.prune_threshold_logit / y_norm;
 
             for (0..self.vocab_size) |token| {
                 if (!self.active[token]) continue;
@@ -221,7 +294,44 @@ pub const SvdSampler = struct {
         }
 
         std.log.info("    full sampling, active_count: {d}", .{active_count});
-        return self.sampleExact(y, random);
+        const token = try self.sampleExact(y, random);
+        self.logCheckpointApproxRanks(token, processed_checkpoint_count, y);
+        return token;
+    }
+
+    fn checkpointApproxLogits(self: *SvdSampler, checkpoint_index: usize) []f32 {
+        const start = checkpoint_index * self.vocab_size;
+        return self.checkpoint_approx_logits[start..][0..self.vocab_size];
+    }
+
+    fn logCheckpointApproxRanks(self: *SvdSampler, final_token: u32, checkpoint_count: usize, y: []const f32) void {
+        const final_token_index: usize = @intCast(final_token);
+        std.log.info("{s:>16}  {s:>16}  {s:>16}  {s:>16}", .{ "checkpoint", "max approx logit", "tok approx logit", "pos in approx" });
+        for (0..checkpoint_count) |checkpoint_index| {
+            const logits = self.checkpointApproxLogits(checkpoint_index);
+            const final_token_logit = logits[final_token_index];
+            var highest_logit = -std.math.inf(f32);
+            var final_token_pos: usize = 1;
+            for (logits, 0..) |logit, token| {
+                highest_logit = @max(highest_logit, logit);
+                if (logit > final_token_logit or (logit == final_token_logit and token < final_token_index)) {
+                    final_token_pos += 1;
+                }
+            }
+            std.log.info("{d:>16}  {d:>16}  {d:>16}  {d:>16}", .{ self.checkpoints[checkpoint_index], highest_logit, final_token_logit, final_token_pos });
+        }
+
+        const final_token_logit = self.exactLogit(final_token_index, y);
+        var highest_logit = -std.math.inf(f32);
+        var final_token_pos: usize = 1;
+        for (0..self.vocab_size) |token| {
+            const logit = self.exactLogit(token, y);
+            highest_logit = @max(highest_logit, logit);
+            if (logit > final_token_logit or (logit == final_token_logit and token < final_token_index)) {
+                final_token_pos += 1;
+            }
+        }
+        std.log.info("{d:>16}  {d:>16}  {d:>16}  {d:>16}", .{ self.d, highest_logit, final_token_logit, final_token_pos });
     }
 
     fn bestLowerBound(self: *SvdSampler, row_tail_norms: []const f32, y_tail_norm: f32, checkpoint: usize, mode: BoundMode) f32 {
@@ -244,41 +354,57 @@ pub const SvdSampler = struct {
         return cs_err;
     }
 
-    fn sampleExact(self: *SvdSampler, y: []const f32, random: std.Random) u32 {
-        var max_logit = -std.math.inf(f32);
-        var best_token: usize = 0;
-        var best_logit = -std.math.inf(f32);
-
+    fn sampleExact(self: *SvdSampler, y: []const f32, random: std.Random) !u32 {
+        var candidate_count: usize = 0;
         for (0..self.vocab_size) |token| {
             if (!self.active[token]) continue;
             const logit = self.exactLogit(token, y);
-            self.exact_logits[token] = logit;
-            if (logit > max_logit) max_logit = logit;
-            if (logit > best_logit) {
-                best_logit = logit;
-                best_token = token;
-            }
+            self.exact_logits[token] = logit / self.temp;
+            self.sampling_candidates[candidate_count] = .{
+                .token = token,
+                .logit = self.exact_logits[token],
+                .weight = 0.0,
+            };
+            candidate_count += 1;
         }
+        return self.sampleCandidates(random, candidate_count);
+    }
 
+    fn sampleCandidates(self: *SvdSampler, random: std.Random, candidate_count: usize) !u32 {
+        if (candidate_count == 0) return error.EmptySamplingCandidates;
+        const candidates = self.sampling_candidates[0..candidate_count];
+        std.mem.sort(SamplingCandidate, candidates, {}, SamplingCandidate.beforeThan);
+
+        const cutoff_count = @min(self.top_k, candidate_count);
+        const max_logit = candidates[0].logit;
         var total: f32 = 0.0;
-        for (0..self.vocab_size) |token| {
-            if (!self.active[token]) continue;
-            total += @exp(self.exact_logits[token] - max_logit);
+        for (candidates[0..cutoff_count]) |*candidate| {
+            candidate.weight = @exp(candidate.logit - max_logit);
+            total += candidate.weight;
         }
-        if (!std.math.isFinite(total) or total <= 0.0) return @intCast(best_token);
+        if (!std.math.isFinite(total)) return @intCast(candidates[0].token);
 
+        std.log.info("Proba distrib for sampling", .{});
+        for (candidates[0..cutoff_count]) |*candidate| {
+            const proba = candidate.weight / total;
+            if (proba < 1e-6) break;
+            const token_str = try tokens.tokenString(self.tokenizer, candidate.token, self.allocator);
+            defer self.allocator.free(token_str);
+            std.log.info("cand: {d:>5}, proba: {d:>11}, token: {s}", .{ candidate.token, proba, token_str });
+        }
+        
         const threshold = random.float(f32) * total;
         var cumulative: f32 = 0.0;
-        for (0..self.vocab_size) |token| {
-            if (!self.active[token]) continue;
-            cumulative += @exp(self.exact_logits[token] - max_logit);
-            if (cumulative >= threshold) return @intCast(token);
+        for (candidates[0..cutoff_count]) |candidate| {
+            cumulative += candidate.weight;
+            if (cumulative >= threshold) return @intCast(candidate.token);
         }
-        return @intCast(best_token);
+        std.debug.assert(false);
+        return @intCast(candidates[0].token);
     }
 
     fn exactLogit(self: *SvdSampler, token: usize, y: []const f32) f32 {
-        // TODO: we already computed the dot product for biggest checkpoint, can start from there
+        // TODO: if we already computed the dot product for biggest checkpoint, can start from there
         const m_items = self.m.constItems(f32);
         const row = m_items[token * self.d ..][0..self.d];
         var logit: f32 = 0.0;

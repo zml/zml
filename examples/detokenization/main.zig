@@ -224,23 +224,32 @@ pub fn runTests(zml_handler: *Zml_handler) !void {
     defer model_handler.unloadBuffers();
 
     std.log.info("Compute SVD", .{});
-    const u_tr, const diag = try algebra.loadSvd(zml_handler, &model_handler);
-    defer u_tr.free(zml_handler.allocator);
+    const u, const diag = try algebra.loadSvd(zml_handler, &model_handler);
+    defer u.free(zml_handler.allocator);
     defer diag.free(zml_handler.allocator);
-    for (diag.constItems(f64)) |s| {
+    for (diag.constItems(f64), 0..) |s, i| {
+        if (i > 15) {
+            std.log.info("...", .{});
+            break;
+        }
         std.log.info("singular value: {d}", .{@sqrt(s)});
     }
     
     std.log.info("Get lm_head_rotated", .{});
-    const lm_head_rotated, const lm_head_rotated_tr = try algebra.getLmHeadRotated(zml_handler, &model_handler, u_tr);
+    const lm_head_rotated, const lm_head_rotated_tr = try algebra.getLmHeadRotated(zml_handler, &model_handler, u);
     defer lm_head_rotated.free(zml_handler.allocator);
     defer lm_head_rotated_tr.free(zml_handler.allocator);
 
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+    var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
+    defer tokenizer.deinit();
+    
     std.log.info("Init SVD sampler", .{});
-    var svd_sampler: svd_.SvdSampler = try .init(zml_handler.allocator, lm_head_rotated, lm_head_rotated_tr);
+    var svd_sampler: svd_.SvdSampler = try .init(zml_handler.allocator, lm_head_rotated, lm_head_rotated_tr, tokenizer);
     defer svd_sampler.deinit();
 
-    try testTokenSvdSearch(lm_head_rotated, &svd_sampler);
+    //try testTokenSvdSearch(zml_handler, lm_head_rotated, &svd_sampler);
+    try testEmbedSvdSearch(zml_handler, &svd_sampler, u);
     
     //try analyzeTopRows(zml_handler, &model_handler);
 
@@ -424,21 +433,22 @@ pub fn testTokenGraphSearch(lm_head: zml.Slice, g: *graph.Graph) void {
     );
 }
 
-pub fn testTokenSvdSearch(lm_head: zml.Slice, svd: *svd_.SvdSampler) !void {
+pub fn testTokenSvdSearch(_: *Zml_handler, lm_head_rot: zml.Slice, svd: *svd_.SvdSampler) !void {
     std.log.info("Test token SVD search", .{});
-    const n: usize = @intCast(lm_head.shape.dim(.voc));
-    const d: usize = @intCast(lm_head.shape.dim(.d));
+    const n: usize = @intCast(lm_head_rot.shape.dim(.voc));
+    const d: usize = @intCast(lm_head_rot.shape.dim(.d));
 
-    const rows = lm_head.constItems(f32);
+    const rows = lm_head_rot.constItems(f32);
     var rand = std.Random.DefaultPrng.init(1);
     const rng = std.Random.Xoshiro256.random(&rand);
-    
+
     for (0..n) |row_id| {
         const query = rows[row_id * d ..][0..d];
-        const safe_tok = try svd.sampleSafe(query, rng);
+        const real_tok = try svd.sampleFull(query, rng);
+        const safe_tok = 99;//try svd.sampleSafe(query, rng);
         const unsafe_tok = try svd.sampleUnsafe(query, rng);
         
-        std.log.info("SVD sample: query = {d} safe={d} unsafe={d}", .{ row_id, safe_tok, unsafe_tok });
+        std.log.info("SVD sample: query={d} real={d} safe={d} unsafe={d}", .{ row_id, real_tok, safe_tok, unsafe_tok });
     }
 }
 
@@ -601,6 +611,53 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, model_handler: *model_.Mo
     );
 }
 
+pub fn testEmbedSvdSearch(zml_handler: *Zml_handler, svd: *svd_.SvdSampler, u: zml.Slice) !void {
+    std.log.info("Test embed SVD search", .{});
+    const d = svd.d;
+    std.debug.assert(u.dtype() == .f32);
+    std.debug.assert(u.shape.count() == d * d);
+
+    const embeds_repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.checkpoint);
+    var registry: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.io, embeds_repo, "qwen_embeds.safetensors");
+    defer registry.deinit();
+
+    const embed = try zml_handler.allocator.alloc(f32, d);
+    defer zml_handler.allocator.free(embed);
+    const rot_embed = try zml_handler.allocator.alloc(f32, d);
+    defer zml_handler.allocator.free(rot_embed);
+
+    var rand = std.Random.DefaultPrng.init(1);
+    const rng = std.Random.Xoshiro256.random(&rand);
+
+    var total_count: usize = 0;
+    var registry_it = registry.iterator();
+    while (registry_it.next()) |entry| {
+        const task_name = entry.key_ptr.*;
+        const task_embeds = try save_load.loadSafetensorSliceFromRegistry(zml_handler, &registry, task_name);
+        defer task_embeds.free(zml_handler.allocator);
+
+        const embed_count = embeddingCount(task_embeds, d) orelse return error.InvalidEmbeddingShape;
+        std.log.info("Test embed SVD search task={s} embeddings={d} shape={f}", .{ task_name, embed_count, task_embeds.shape });
+        for (0..embed_count) |embed_index| {
+            copyEmbedding(task_embeds, d, embed_index, embed);
+            rotateEmbedding(u, embed, rot_embed);
+            std.log.info("\n\n\n", .{});
+            std.log.info("#################", .{});
+            std.log.info("#### new emb ####", .{});
+            std.log.info("#################", .{});
+            const real_tok = try svd.sampleFull(rot_embed, rng);
+            const safe_tok = 99; //try svd.sampleSafe(rot_embed, rng);
+            const unsafe_tok = try svd.sampleUnsafe(rot_embed, rng);
+            const trunc_tok = 99;//try svd.sampleTruncated(rot_embed, rng, 256);
+
+            std.log.info("SVD embed sample: task={s} index={d} real={d} safe={d} unsafe={d} trunc={d}", .{ task_name, embed_index, real_tok, safe_tok, unsafe_tok, trunc_tok });
+            total_count += 1;
+        }
+    }
+    std.log.info("Embed SVD search: total={d}", .{total_count});
+}
+
+
 fn embeddingCount(embeds: zml.Slice, d: usize) ?usize {
     const dims = embeds.shape.dims();
     return switch (embeds.shape.rank()) {
@@ -631,6 +688,21 @@ fn copyEmbedding(embeds: zml.Slice, d: usize, embed_index: usize, out: []f32) vo
         .bf16 => copyEmbeddingTyped(zml.floats.BFloat16, embeds.constItems(zml.floats.BFloat16), rank, dim_is_first, d, embed_count, embed_index, out),
         .f16 => copyEmbeddingTyped(f16, embeds.constItems(f16), rank, dim_is_first, d, embed_count, embed_index, out),
         else => unreachable,
+    }
+}
+
+fn rotateEmbedding(u: zml.Slice, embed: []const f32, rot_embed: []f32) void {
+    const d = embed.len;
+    std.debug.assert(rot_embed.len == d);
+    std.debug.assert(u.shape.count() == d * d);
+
+    const u_items = u.constItems(f32);
+    for (0..d) |col| {
+        var value: f32 = 0.0;
+        for (0..d) |row| {
+            value += u_items[row * d + col] * embed[row];
+        }
+        rot_embed[col] = value;
     }
 }
 

@@ -278,8 +278,8 @@ pub fn getLmHeadNormalized(zml_handler: *Zml_handler, model_handler: *Model_hand
     return lm_head_normalized_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
 }
 
-pub fn getLmHeadRotated(zml_handler: *Zml_handler, model_handler: *Model_handler, rotation_tr: zml.Slice) !struct { zml.Slice, zml.Slice } {
-    var rot_buffer = try zml.Buffer.fromSlice(zml_handler.io, zml_handler.platform, rotation_tr, .replicated);
+pub fn getLmHeadRotated(zml_handler: *Zml_handler, model_handler: *Model_handler, rotation: zml.Slice) !struct { zml.Slice, zml.Slice } {
+    var rot_buffer = try zml.Buffer.fromSlice(zml_handler.io, zml_handler.platform, rotation, .replicated);
     defer rot_buffer.deinit();
     model_handler.exes.rotated_lm_head_args.set(.{model_handler.model_buffers, rot_buffer});
     model_handler.exes.rotated_lm_head_exe.call(model_handler.exes.rotated_lm_head_args, &model_handler.exes.rotated_lm_head_results);
@@ -397,7 +397,39 @@ pub fn loadSvd(zml_handler: *Zml_handler, model_handler: *Model_handler) !struct
         reversed_diag_items[i] = diag_items[d - 1 - i];
     }
 
+    //testRotationMatrix(reversed_u);
+
     return .{ reversed_u, reversed_diag };
+}
+
+pub fn testRotationMatrix(matrix: zml.Slice) void {
+    std.debug.assert(matrix.dtype() == .f32);
+    std.debug.assert(matrix.shape.rank() == 1 or matrix.shape.rank() == 2);
+
+    const n_float = @sqrt(@as(f64, @floatFromInt(matrix.shape.count())));
+    const n: usize = @intFromFloat(n_float);
+    std.debug.assert(n * n == matrix.shape.count());
+
+    std.log.info("Testing rotation matrix, flops needed: {d}", .{n * n * n});
+
+    const items = matrix.constItems(f32);
+    var max_diag_error: f32 = 0;
+    var max_off_diag_error: f32 = 0;
+    for (0..n) |row| {
+        for (0..n) |col| {
+            var dot: f32 = 0;
+            for (0..n) |k| {
+                dot += items[row * n + k] * items[col * n + k];
+            }
+            if (row == col) {
+                max_diag_error = @max(max_diag_error, @abs(dot - 1));
+            } else {
+                max_off_diag_error = @max(max_off_diag_error, @abs(dot));
+            }
+        }
+    }
+
+    std.log.info("Rotation matrix test: max_diag_error={d}, max_off_diag_error={d}", .{ max_diag_error, max_off_diag_error });
 }
 
 
