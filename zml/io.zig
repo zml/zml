@@ -1254,20 +1254,20 @@ pub fn load(
 
                         const stream_start = std.Io.Timestamp.now(ctx_.io, .awake);
                         const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
-                        log.warn("Streamed tensor {s} ({Bi:.2}) in {f}", .{ reader.tensor.name, total, stream_start.untilNow(ctx_.io, .awake) });
+                        log.debug("Streamed tensor {s} ({Bi:.2}) in {f}", .{ reader.tensor.name, total, stream_start.untilNow(ctx_.io, .awake) });
 
                         const flush_start = std.Io.Timestamp.now(ctx_.io, .awake);
                         progress_writer.interface.flush() catch unreachable;
-                        log.warn("Flushed tensor writer for {s} in {f}", .{ reader.tensor.name, flush_start.untilNow(ctx_.io, .awake) });
+                        log.debug("Flushed tensor writer for {s} in {f}", .{ reader.tensor.name, flush_start.untilNow(ctx_.io, .awake) });
                         _ = ctx_.total.fetchAdd(total, .monotonic);
                     } else {
                         const stream_start = std.Io.Timestamp.now(ctx_.io, .awake);
                         const total = reader.interface.streamRemaining(writer.interface()) catch unreachable;
-                        log.warn("Streamed tensor {s} ({Bi:.2}) in {f}", .{ reader.tensor.name, total, stream_start.untilNow(ctx_.io, .awake) });
+                        log.debug("Streamed tensor {s} ({Bi:.2}) in {f}", .{ reader.tensor.name, total, stream_start.untilNow(ctx_.io, .awake) });
 
                         const flush_start = std.Io.Timestamp.now(ctx_.io, .awake);
                         writer.interface().flush() catch unreachable;
-                        log.warn("Flushed tensor writer for {s} in {f}", .{ reader.tensor.name, flush_start.untilNow(ctx_.io, .awake) });
+                        log.debug("Flushed tensor writer for {s} in {f}", .{ reader.tensor.name, flush_start.untilNow(ctx_.io, .awake) });
                         _ = ctx_.total.fetchAdd(total, .monotonic);
                     }
                 }

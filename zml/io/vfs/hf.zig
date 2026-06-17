@@ -7,7 +7,7 @@ const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
 
-const XET_INTRA_TENSOR_WORKERS: usize = 4;
+const XET_INTRA_TENSOR_WORKERS: usize = 16;
 
 pub const API = struct {
     const TREE_URL_TEMPLATE = "https://huggingface.co/api/models/{[repo]s}/{[model]s}/tree/{[rev]s}/{[path]s}?expand=false&recursive=true&limit=1000";
@@ -118,10 +118,15 @@ pub const HF = struct {
     trees: std.StringHashMapUnmanaged(std.ArrayList(TreeNode)) = .{},
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
     cas_cache: xet.CasAuthCache = .{},
+    fetch_pool: *xet.FetchPool,
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8) !HF {
         const raw = if (hf_token) |t| try allocator.dupe(u8, std.mem.trim(u8, t, " \t\n\r")) else try allocator.dupe(u8, "");
         errdefer allocator.free(raw);
+        const pool = try xet.FetchPool.init(allocator, inner, http_client, .{
+            .workers = XET_INTRA_TENSOR_WORKERS,
+            .queue_capacity = XET_INTRA_TENSOR_WORKERS * 4,
+        });
         return .{
             .allocator = allocator,
             .base = .init(inner),
@@ -130,6 +135,7 @@ pub const HF = struct {
                 break :blk .{ .override = try std.fmt.allocPrint(allocator, "Bearer {s}", .{raw}) };
             } else .default,
             .hf_token_raw = raw,
+            .fetch_pool = pool,
         };
     }
 
@@ -159,6 +165,7 @@ pub const HF = struct {
     }
 
     pub fn deinit(self: *HF) void {
+        self.fetch_pool.deinit();
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -732,18 +739,15 @@ pub const HF = struct {
             const remaining = handle.size - offset;
             const take: usize = @intCast(@min(remaining, data[0].len));
             if (take == 0) return 0;
-            log.warn("Performing XET read for {s} at offset {d} (take {d} bytes)", .{ handle.uri, offset, take });
+            log.debug("Performing XET read for {s} at offset {d} (take {d} bytes)", .{ handle.uri, offset, take });
             try xet.fetchRange(
-                self.allocator,
-                self.base.inner,
-                self.client,
+                self.fetch_pool,
                 &self.cas_cache,
                 self.hf_token_raw,
                 xet_repo,
                 fid,
                 offset,
                 data[0][0..take],
-                XET_INTRA_TENSOR_WORKERS,
             );
             return take;
         }
