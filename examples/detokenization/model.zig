@@ -383,9 +383,9 @@ pub const Model = struct {
         return lm_head.mul(lm_head).sum(.d).squeeze(.d).sqrt();
     }
 
-    pub fn rotatedLmHead(self: Model, u_tr: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+    pub fn rotatedLmHead(self: Model, u: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        const u_rot = u_tr.withTags(.{ .d, .eig }).transpose(.{ .eig, .d }).withTags(.{ .d, .eig }).convert(.f32);
+        const u_rot = u.withTags(.{ .d, .eig }).convert(.f32);
         const m = lm_head.dot(u_rot, .d).rename(.{ .eig = .d });
         return .{ m, m.transpose(.{ .d, .voc }) };
     }

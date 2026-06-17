@@ -11,6 +11,7 @@ const main = @import("main.zig");
 const llm_ = @import("llm.zig");
 const graph_ = @import("graph.zig");
 const model_ = @import("model.zig");
+const tokens_ = @import("tokens.zig");
 
 fn appendEncoded(allocator: std.mem.Allocator, encoder: *Tokenizer.Encoder, tokens: *std.ArrayList(u32), text: []const u8) !void {
     const encoded = try encoder.encodeAlloc(allocator, text);
@@ -475,41 +476,7 @@ fn printSamplingHeader() void {
 }
 
 fn printSamplingRow(tokenizer: Tokenizer, rank: usize, token_id: usize, is_junk: bool, proba: f32, row_norm: f32, similarity: f32) !void {
-    var decoded_buf: [512]u8 = undefined;
-    const decoded = try decodeToken(tokenizer, @intCast(token_id), &decoded_buf);
-    var escaped_buf: [512]u8 = undefined;
-    const escaped = escapeTokenText(decoded, &escaped_buf);
-    log.info("{d:>6}  {d:>10}  {d:>7}  {d:>14.8}  {d:>14.6}  {d:>14.8}  {s}", .{ rank, token_id, @intFromBool(is_junk), proba, row_norm, similarity, escaped });
-}
-
-fn decodeToken(tokenizer: Tokenizer, token_id: u32, out: []u8) ![]const u8 {
-    var decoder = try tokenizer.decoder();
-    defer decoder.deinit();
-
-    const chunk = try decoder.feedOne(token_id, out);
-    const final_chunk = try decoder.finalize(out[chunk.len..]);
-    return out[0 .. chunk.len + final_chunk.len];
-}
-
-fn escapeTokenText(text: []const u8, out: []u8) []const u8 {
-    var len: usize = 0;
-    for (text) |c| {
-        const replacement = switch (c) {
-            '\n' => "\\n",
-            '\r' => "\\r",
-            '\t' => "\\t",
-            '\\' => "\\\\",
-            else => null,
-        };
-        if (replacement) |rep| {
-            if (len + rep.len > out.len) break;
-            @memcpy(out[len..][0..rep.len], rep);
-            len += rep.len;
-        } else {
-            if (len + 1 > out.len) break;
-            out[len] = if (std.ascii.isControl(c)) '?' else c;
-            len += 1;
-        }
-    }
-    return out[0..len];
+    const token_str = try tokens_.tokenString(tokenizer, @intCast(token_id), std.heap.smp_allocator);
+    defer std.heap.smp_allocator.free(token_str);
+    log.info("{d:>6}  {d:>10}  {d:>7}  {d:>14.8}  {d:>14.6}  {d:>14.8}  {s}", .{ rank, token_id, @intFromBool(is_junk), proba, row_norm, similarity, token_str });
 }

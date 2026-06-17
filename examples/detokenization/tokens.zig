@@ -2,15 +2,21 @@ const std = @import("std");
 const zml = @import("zml");
 
 const main = @import("main.zig");
-const graph = @import("graph.zig");
 const model_ = @import("model.zig");
 const llm_ = @import("llm.zig");
-const svd_ = @import("svd.zig");
-const inference = @import("inference.zig");
 
 const Zml_handler = main.Zml_handler;
 const Model_handler = model_.Model_handler;
 const Tokenizer = zml.tokenizer.Tokenizer;
+
+pub fn tokenString(tokenizer: Tokenizer, token_id: anytype, allocator: std.mem.Allocator) ![]const u8 {
+    const id: u32 = @intCast(token_id);
+    var decoded_buf: [1024]u8 = undefined;
+    const decoded = try decodeToken(tokenizer, id, &decoded_buf);
+    var escaped_buf: [1024]u8 = undefined;
+    const escaped = escapeTokenText(decoded, &escaped_buf);
+    return allocator.dupe(u8, escaped);
+}
 
 
 pub fn decodeToken(tokenizer: zml.tokenizer.Tokenizer, token_id: u32, out: []u8) ![]const u8 {
