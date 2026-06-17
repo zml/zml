@@ -48,6 +48,7 @@ pub const KernelUnifiedAttention2dPtr = struct {
         fp8_min: f32 = FP8_E4M3_MIN,
         fp8_max: f32 = FP8_E4M3_MAX,
         all_decode: bool = false,
+        is_causal: bool = true,
     };
 
     pub const Kernel = tri.Kernel(Config, .{
@@ -178,6 +179,7 @@ pub const KernelUnifiedAttention3dPtr = struct {
         block_m: i64,
         num_segments_per_seq: i64,
         all_decode: bool = false,
+        is_causal: bool = true,
     };
 
     pub const Kernel = tri.Kernel(Config, .{
@@ -547,10 +549,14 @@ fn kernelUnifiedAttention2d(
     else
         qq_bias_ptr.splatTo(&.{BLOCK_M});
 
-    // max_seq_prefix_len = context_len + q_block_local_idx*BLOCK_Q + (BLOCK_M-1)/NQ_PER_KV + 1
+    // In causal mode, each query block only scans keys up to the last query
+    // represented in this block. In non-causal mode, scan the whole sequence
+    // so draft rows can attend to all rows written for the same sequence.
     const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
-    const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
-    const max_seq_prefix_len = max_prefix_raw.minimum(seq_len);
+    const max_seq_prefix_len = if (config.is_causal) b: {
+        const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
+        break :b max_prefix_raw.minimum(seq_len);
+    } else seq_len;
 
     const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
 
@@ -559,12 +565,14 @@ fn kernelUnifiedAttention2d(
     var tile_end: Value = num_tiles;
     if (SLIDING_WINDOW > 0) {
         const qpos_lo = q_local_bq;
-        const qpos_hi_raw = qpos_lo.add(pad_term - 1);
-        const qpos_hi = qpos_hi_raw.minimum(cur_batch_query_len.sub(1));
         const first_allowed_key = context_len.add(qpos_lo).sub(@as(i32, @intCast(SLIDING_WINDOW - 1)));
-        const last_allowed_key = context_len.add(qpos_hi);
         tile_start = first_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).maximum(0);
-        tile_end = last_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).add(1).minimum(num_tiles);
+        if (config.is_causal) {
+            const qpos_hi_raw = qpos_lo.add(pad_term - 1);
+            const qpos_hi = qpos_hi_raw.minimum(cur_batch_query_len.sub(1));
+            const last_allowed_key = context_len.add(qpos_hi);
+            tile_end = last_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).add(1).minimum(num_tiles);
+        }
     }
 
     const kv_cache_mod: ttir.CacheModifier =
@@ -626,11 +634,13 @@ fn kernelUnifiedAttention2d(
             S = applySoftcap(k, S, softcap).mul(RCP_LN2);
         }
 
-        // seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
         const ql_2d_i32 = query_pos.expandDims(1);
         const so_2d = seq_offset.expandDims(0);
-        const rhs = ql_2d_i32.add(context_len).add(1);
-        const seq_mask = so_2d.lt(rhs);
+        const seq_mask = if (config.is_causal) b: {
+            // seq_offset[None, :] < context_len + query_pos[:, None] + 1
+            const rhs = ql_2d_i32.add(context_len).add(1);
+            break :b so_2d.lt(rhs);
+        } else k.broadcastTo(tile_mask.expandDims(0), &.{ BLOCK_M, TILE_SIZE });
 
         // S = tl.where(qmask_1 & qmask_0 & seq_mask, S, -inf)
         const qm0_2d = query_mask_0.expandDims(1);
@@ -857,8 +867,10 @@ fn kernelUnifiedAttention3d(
         qq_bias_ptr.splatTo(&.{BLOCK_M});
 
     const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
-    const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
-    const max_seq_prefix_len = max_prefix_raw.minimum(seq_len);
+    const max_seq_prefix_len = if (config.is_causal) b: {
+        const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
+        break :b max_prefix_raw.minimum(seq_len);
+    } else seq_len;
     const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
 
     const segm_tile_lo = segm_idx.mul(tiles_per_segment);
@@ -913,11 +925,13 @@ fn kernelUnifiedAttention3d(
         });
         const V = dequantKv(V_load, v_scale, isFp8(config.kv_dtype), config.q_dtype);
 
-        // seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
         const ql_2d_i32 = query_pos.expandDims(1);
         const so_2d = seq_offset.expandDims(0);
-        const rhs = context_len.add(ql_2d_i32).add(1);
-        const seq_mask = so_2d.lt(rhs);
+        const seq_mask = if (config.is_causal) b: {
+            // seq_offset[None, :] < context_len + query_pos[:, None] + 1
+            const rhs = context_len.add(ql_2d_i32).add(1);
+            break :b so_2d.lt(rhs);
+        } else k.broadcastTo(tile_mask.expandDims(0), &.{ BLOCK_M, TILE_SIZE });
 
         const acc_zero = k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32);
         const qk = k.dot(Q, K, acc_zero);

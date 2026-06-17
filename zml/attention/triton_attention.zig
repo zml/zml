@@ -293,7 +293,6 @@ pub const paged = struct {
     }
 
     pub fn pagedAttention2d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
-        _ = opts;
         const config = select2dConfig(paged_attention_opts);
 
         const kernel_config: kernels.KernelUnifiedAttention2dPtr.Config = .{
@@ -315,6 +314,7 @@ pub const paged = struct {
             .block_m = @intCast(config.block_m),
             .use_fp8 = false,
             .all_decode = paged_attention_opts.all_decode,
+            .is_causal = opts.is_causal,
         };
         log.debug("pagedAttention2d config: {any}", .{kernel_config});
 
@@ -379,8 +379,6 @@ pub const paged = struct {
     }
 
     pub fn pagedAttention3d(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
-        _ = opts;
-
         const config = select3dConfig(paged_attention_opts);
 
         const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim));
@@ -402,6 +400,7 @@ pub const paged = struct {
             .block_m = @intCast(config.attention.block_m),
             .num_segments_per_seq = @intCast(config.attention.num_segments_per_seq),
             .all_decode = paged_attention_opts.all_decode,
+            .is_causal = opts.is_causal,
         };
         log.debug("pagedAttention3d attention config: {any}", .{attn_kernel_config});
 
