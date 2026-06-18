@@ -296,6 +296,7 @@ pub const Sampler = struct {
     }
 };
 
+// The equivalent of a struct called "Step3p5Flash"
 pub const TextModel = struct {
     embed_tokens: zml.nn.TokenEmbedding,
     layers: []TransformerLayer,
@@ -339,12 +340,21 @@ pub const TextModel = struct {
         tokens: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: KvCache,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
         var hidden = self.embed_tokens.forward(tokens);
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
-            hidden, updated_kv_cache = layer.forward(hidden, token_index, updated_kv_cache.atLayer(i));
+            hidden, updated_kv_cache = layer.forward(
+                layer,
+                hidden,
+                token_index,
+                updated_kv_cache.atLayer(i),
+                attention_metadata,
+                attention_parameters,
+            );
         }
 
         return .{ hidden, updated_kv_cache.reuseBuffer(kv_cache) };
@@ -424,12 +434,20 @@ pub const TransformerLayer = struct {
         x0: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: KvCache,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
 
         // Attention block.
         const attn_input = self.input_layernorm.forward(x0, .d);
-        const attn_delta, const updated_kv_cache = self.attn.forward(attn_input, token_index, kv_cache);
+        const attn_delta, const updated_kv_cache = self.attn.forward(
+            attn_input,
+            token_index,
+            kv_cache,
+            attention_metadata,
+            attention_parameters,
+        );
         const x1 = x0.add(attn_delta);
 
         // FFN block
@@ -696,6 +714,8 @@ pub const Attn = struct {
         x: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: KvCache,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
         const input_raw = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
         const input = input_raw.withPartitioning(.{ .d = .replicated });
@@ -746,8 +766,8 @@ pub const Attn = struct {
             k_full,
             v_full,
             attn_start,
-            zml.attention.attention.Metadata.init(.fromBackend(.vanilla, input.dim(.s), self.num_q_heads)),
-            zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
+            zml.attention.attention.Metadata.init(attention_metadata),
+            zml.attention.attention.Parameters.init(attention_parameters),
         ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
         // Head-wise gate is {b, s, h}
@@ -840,8 +860,8 @@ pub const Attn = struct {
             k_full,
             v_full,
             attn_start,
-            zml.attention.attention.Metadata.init(.fromBackend(.vanilla, input.dim(.s), self.num_q_heads)),
-            zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
+            zml.attention.attention.Metadata.init(.fromBackend(.cuda_fa2, input.dim(.s), self.num_q_heads)),
+            zml.attention.attention.Parameters.init(.fromBackend(.cuda_fa2)),
         );
 
         const gate_sig = gate.sigmoid().rename(.{ .s = .q });
@@ -1189,6 +1209,9 @@ pub const Moe = struct {
     }
 
     pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
+        if (self.layer_idx >= 43 and self.layer_idx <= 44) {
+            return self.forwardLoop(x);
+        }
         return self.forwardTriton(x);
     }
 
@@ -1369,7 +1392,7 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
         _ = backend;
-        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), shardings);
+        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), .cuda_fa2, shardings);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
 };
