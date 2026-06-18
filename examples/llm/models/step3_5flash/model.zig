@@ -766,8 +766,8 @@ pub const Attn = struct {
             k_full,
             v_full,
             attn_start,
-            zml.attention.attention.Metadata.init(attention_metadata),
-            zml.attention.attention.Parameters.init(attention_parameters),
+            attention_metadata,
+            attention_parameters,
         ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
         // Head-wise gate is {b, s, h}
@@ -1392,7 +1392,7 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
         _ = backend;
-        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), .cuda_fa2, shardings);
+        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), .vanilla, shardings);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
 };
