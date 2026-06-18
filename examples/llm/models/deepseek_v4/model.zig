@@ -1111,24 +1111,22 @@ pub const Attention = struct {
         const is_prefill = x.dim(.seq) > 1;
 
         var new_cache = cache;
-        // new_cache.sliding_window.kv.print("[before] kv cache");
-        // new_cache.sliding_window = blk: {
-        //     if (is_prefill) {
-        //         // TODO: Add support when `actual_seqlen > self.window_size`
-        //         const ids_dtype = actual_seqlen.dtype();
-        //
-        //         const start = zml.Tensor.scalar(0, ids_dtype);
-        //         const kv_gathered = kv.dynamicSlice(.{ .kv = zml.Tensor.DynSlice{ .start = start, .len = self.window_size }});
-        //
-        //         const pos_ids = zml.Tensor.arange(.{ .end = self.window_size }, ids_dtype).withTags(.{.kv});
-        //         break :blk new_cache.sliding_window.update(kv_gathered, pos_ids, layer_idx);
-        //     } else {
-        //         var pos_ids = zml.Tensor.iota(offset_idx.shape().insert(.last, .{ .kv = x.dim(.seq) }), .kv).convert(.u32);
-        //         pos_ids = pos_ids.add(offset_idx.broad(pos_ids.shape())).remainderConst(self.window_size);
-        //         break :blk new_cache.sliding_window.update(kv, pos_ids, layer_idx);
-        //     }
-        // };
-        // new_cache.sliding_window.kv.print("[after] kv cache");
+        new_cache.sliding_window = blk: {
+            if (is_prefill) {
+                // TODO: Add support when `actual_seqlen > self.window_size`
+                const ids_dtype = actual_seqlen.dtype();
+
+                const start = zml.Tensor.scalar(0, ids_dtype);
+                const kv_gathered = kv.dynamicSlice(.{ .kv = zml.Tensor.DynSlice{ .start = start, .len = self.window_size }});
+
+                const pos_ids = zml.Tensor.arange(.{ .end = self.window_size }, ids_dtype).withTags(.{.kv});
+                break :blk new_cache.sliding_window.update(kv_gathered, pos_ids, layer_idx);
+            } else {
+                var pos_ids = zml.Tensor.iota(offset_idx.shape().insert(.last, .{ .kv = x.dim(.seq) }), .kv).convert(.u32);
+                pos_ids = pos_ids.add(offset_idx.broad(pos_ids.shape())).remainderConst(self.window_size);
+                break :blk new_cache.sliding_window.update(kv, pos_ids, layer_idx);
+            }
+        };
 
         // NOTE: during prefill attend on the full kv while during decode attend on the sliding window.
         kv = if (is_prefill) kv else new_cache.sliding_window.get(layer_idx);
