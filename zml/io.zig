@@ -301,9 +301,8 @@ pub const MemoryWriter = union(enum) {
         buffer: *Buffer,
         staging_buffer_size: usize,
     ) !MemoryWriter {
-        _ = staging_buffer_size;
         return switch (platform.target) {
-            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer) },
+            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, staging_buffer_size) },
             .rocm, .tpu, .neuron, .cpu => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
         };
     }
