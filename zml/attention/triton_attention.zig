@@ -5,7 +5,7 @@ const stdx = @import("stdx");
 const zml = @import("../zml.zig");
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
 
-const kernels = @import("triton_kernels/unified_attention.zig");
+const kernels = @import("triton_kernels.zig");
 const tri = zml.kernel.triton;
 
 const log = std.log.scoped(.@"zml/attention/triton");
