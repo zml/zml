@@ -1375,16 +1375,19 @@ const MoE = struct {
 
         var y = zml.Tensor.zeroes(x.shape().withDtype(.f32));
 
+        const weight_dtype = self.gate_up.dtype();
+        const scale_dtype = self.gate_up_scale.dtype();
+
         for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
             const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
             const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
             const routed = forwardRoutedExpert(
                 x,
                 weight,
-                self.gate_up.gather(.{ .expert = expert_ids }, .{}),
-                self.gate_up_scale.gather(.{ .expert = expert_ids }, .{}),
-                self.down.gather(.{ .expert = expert_ids }, .{}),
-                self.down_scale.gather(.{ .expert = expert_ids }, .{}),
+                self.gate_up.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
+                self.gate_up_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
+                self.down.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
+                self.down_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
                 self.block_size,
                 self.activation_threshold,
             ).convert(.f32);
@@ -1954,7 +1957,8 @@ pub const LoadedModel = struct {
             return error.UnsupportedExpertType;
         }
 
-        const moe_backend: zml.moe.Backend = try .auto(platform, self.inner.layers[0].ffn.shared_experts.w1.weight.dtype());
+        //const moe_backend: zml.moe.Backend = try .auto(platform, self.inner.layers[0].ffn.shared_experts.w1.weight.dtype());
+        const moe_backend: zml.moe.Backend = .vanilla;
         const opts = inference.CompilationParameters.init(@intCast(seqlen), config, self.inner, shardings, backend, moe_backend);
         return try inference.CompiledModel.init(allocator, io, @constCast(platform), self.inner, @intCast(seqlen), progress, opts);
     }
