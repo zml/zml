@@ -727,11 +727,12 @@ pub const HF = struct {
 
     fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
         if (offset >= handle.size) return 0;
-        // const start = std.Io.Timestamp.now(self.base.inner, .awake);
-        // defer {
-        //     const duration = start.untilNow(self.base.inner, .awake);
-        //     log.warn("Completed read for file {s} at offset {d} with length {d} in {f}", .{ handle.uri, offset, data[0].len, duration });
-        // }
+
+        const start = std.Io.Timestamp.now(self.base.inner, .awake);
+        defer {
+            const duration = start.untilNow(self.base.inner, .awake);
+            log.warn("Completed read for file {s} at offset {d} with length {d} in {f}", .{ handle.uri, offset, data[0].len, duration });
+        }
 
         if (handle.xet_file_id) |fid| {
             const repo: Repo = try .parse(handle.uri);
