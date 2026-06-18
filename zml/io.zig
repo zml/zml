@@ -299,10 +299,9 @@ pub const MemoryWriter = union(enum) {
         shape: Shape,
         sharding: Sharding,
         buffer: *Buffer,
-        staging_buffer_size: usize,
     ) !MemoryWriter {
         return switch (platform.target) {
-            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, staging_buffer_size) },
+            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer) },
             .rocm, .tpu, .neuron, .cpu => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
         };
     }
@@ -808,9 +807,7 @@ pub const DirectMemoryWriter = struct {
         shape: Shape,
         sharding: Sharding,
         buffer: *Buffer,
-        staging_buffer_size: usize,
     ) !DirectMemoryWriter {
-        _ = staging_buffer_size;
         const ordered_devices = sharding.devicesInCanonicalOrder();
         var shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
         errdefer allocator.free(shard_writers);
@@ -1168,7 +1165,6 @@ pub fn load(
                         shape,
                         sharding,
                         ctx_.buffers[i_],
-                        ctx_.dma_chunk_size,
                     ) catch unreachable;
                     defer writer.deinit(ctx_.allocator);
 
@@ -1345,7 +1341,6 @@ const DirectMemoryWriterDeviceTest = struct {
             shape,
             sharding,
             &written_buffer,
-            pool_chunk_size,
         );
         defer writer.deinit();
         defer written_buffer.deinit();
