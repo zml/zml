@@ -605,14 +605,7 @@ const DispatchSpans = struct {
         const byte_strides = shape.computeByteStrides();
 
         for (ordered_devices, 0..) |device, writer_index| {
-            try appendShardPlacementSpans(
-                allocator,
-                &placement_spans,
-                shape,
-                placement.slices(device.coords).constSlice(),
-                byte_strides.constSlice(),
-                writer_index,
-            );
+            appendShardPlacementSpans(&placement_spans, shape, placement.slices(device.coords).constSlice(), byte_strides.constSlice(), writer_index);
         }
 
         std.debug.assert(placement_spans.items.len == placement_span_count);
@@ -687,14 +680,8 @@ const DispatchSpans = struct {
         if (cursor != total_bytes) return error.NonContiguousShardPlacement;
     }
 
-    fn appendPlacementSpan(
-        allocator: std.mem.Allocator,
-        placement_spans: *std.ArrayList(PlacementSpan),
-        writer_index: usize,
-        start: usize,
-        len: usize,
-    ) !void {
-        try placement_spans.append(allocator, .{
+    fn appendPlacementSpan(placement_spans: *std.ArrayList(PlacementSpan), writer_index: usize, start: usize, len: usize) void {
+        placement_spans.appendAssumeCapacity(.{
             .writer_index = writer_index,
             .start = start,
             .len = len,
@@ -703,23 +690,21 @@ const DispatchSpans = struct {
     }
 
     fn appendShardPlacementSpans(
-        allocator: std.mem.Allocator,
         placement_spans: *std.ArrayList(PlacementSpan),
         shape: Shape,
         slices: []const Placement.Slice1d,
         byte_strides: []const i64,
         writer_index: usize,
-    ) !void {
+    ) void {
         if (shape.rank() == 0) {
-            try appendPlacementSpan(allocator, placement_spans, writer_index, 0, shape.byteSize());
+            appendPlacementSpan(placement_spans, writer_index, 0, shape.byteSize());
             return;
         }
 
-        try appendShardAxisPlacementSpans(allocator, placement_spans, slices, byte_strides, writer_index, 0, contiguousSliceAxis(shape, slices), 0);
+        appendShardAxisPlacementSpans(placement_spans, slices, byte_strides, writer_index, 0, contiguousSliceAxis(shape, slices), 0);
     }
 
     fn appendShardAxisPlacementSpans(
-        allocator: std.mem.Allocator,
         placement_spans: *std.ArrayList(PlacementSpan),
         slices: []const Placement.Slice1d,
         byte_strides: []const i64,
@@ -727,21 +712,21 @@ const DispatchSpans = struct {
         axis: usize,
         contiguous_axis: usize,
         base_start: i64,
-    ) !void {
+    ) void {
         const slice = slices[axis];
         if (slice.size == 0) return;
 
         if (axis == contiguous_axis) {
             const span_start: usize = @intCast(base_start + slice.start * byte_strides[axis]);
             const span_len: usize = @intCast(slice.size * byte_strides[axis]);
-            try appendPlacementSpan(allocator, placement_spans, writer_index, span_start, span_len);
+            appendPlacementSpan(placement_spans, writer_index, span_start, span_len);
             return;
         }
 
         var i: i64 = 0;
         while (i < slice.size) : (i += 1) {
             const child_start = base_start + (slice.start + i) * byte_strides[axis];
-            try appendShardAxisPlacementSpans(allocator, placement_spans, slices, byte_strides, writer_index, axis + 1, contiguous_axis, child_start);
+            appendShardAxisPlacementSpans(placement_spans, slices, byte_strides, writer_index, axis + 1, contiguous_axis, child_start);
         }
     }
 
