@@ -59,10 +59,10 @@ pub const CompilationParameters = struct {
 
 pub const CompilationOptions = CompilationParameters;
 
-// const LayerKind = struct {
-//     attn: model.AttnType,
-//     ffn: model.FfnType,
-// };
+const LayerKind = struct {
+    attn: model.AttnType,
+    ffn: model.FfnType,
+};
 
 pub const Args = struct {
     allocator: std.mem.Allocator,
@@ -303,12 +303,14 @@ pub const KernelExe = struct {
 };
 
 const ComposedKernelExe = struct {
+    allocator: std.mem.Allocator,
     embed_tokens: zml.Exe,
     full_mlp_layer: ?zml.Exe,
     sliding_mlp_layer: ?zml.Exe,
     full_moe_layer: ?zml.Exe,
     sliding_moe_layer: ?zml.Exe,
     sampler: zml.Exe,
+    layer_kinds: []const LayerKind,
     phase: Phase,
 
     const EmbedTokens = struct {
@@ -338,22 +340,23 @@ const ComposedKernelExe = struct {
         const layer_kinds = try layerKinds(allocator, step3p5_model.config, step3p5_model.text_model.layers.len);
         errdefer allocator.free(layer_kinds);
 
-        const full_mlp_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .full_attention, .ffn = .mlp }, "full_mlp_layer", progress);
+        const full_mlp_layer = try maybeCompileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .full_attention, .ffn = .mlp }, "full_mlp_layer", layer_kinds, progress);
         errdefer if (full_mlp_layer) |exe| exe.deinit();
 
-        const sliding_mlp_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .sliding_attention, .ffn = .mlp }, "sliding_mlp_layer", progress);
+        const sliding_mlp_layer = try maybeCompileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .sliding_attention, .ffn = .mlp }, "sliding_mlp_layer", layer_kinds, progress);
         errdefer if (sliding_mlp_layer) |exe| exe.deinit();
 
-        const full_moe_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .full_attention, .ffn = .moe }, "full_moe_layer", progress);
+        const full_moe_layer = try maybeCompileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .full_attention, .ffn = .moe }, "full_moe_layer", layer_kinds, progress);
         errdefer if (full_moe_layer) |exe| exe.deinit();
 
-        const sliding_moe_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .sliding_attention, .ffn = .moe }, "sliding_moe_layer", progress);
+        const sliding_moe_layer = try maybeCompileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .sliding_attention, .ffn = .moe }, "sliding_moe_layer", layer_kinds, progress);
         errdefer if (sliding_moe_layer) |exe| exe.deinit();
 
         const sampler = try compileSampler(allocator, io, platform, step3p5_model, parameters, seqlen, phase, progress);
         errdefer sampler.deinit();
 
         return .{
+            .allocator = allocator,
             .embed_tokens = embed_tokens,
             .full_mlp_layer = full_mlp_layer,
             .sliding_mlp_layer = sliding_mlp_layer,
@@ -435,8 +438,136 @@ const ComposedKernelExe = struct {
         self.layerExe(layer_kind).call(exe_args.*, results);
 
         var new_hidden, var new_cache = results.get(struct { zml.Buffer, zml.Bufferized(model.KvCache) });
-        _ = new_cache; // autofix
-        _ = new_hidden; // autofix
+        replaceBuffer(hidden_buf, &new_hidden);
+        replaceBuffer(&args.kv_cache_buffers.k, &new_cache.k);
+        replaceBuffer(&args.kv_cache_buffers.v, &new_cache.v);
+        releaseBuffer(layer_index_buf.*, &new_cache.layer_index);
+    }
+
+    fn runSampler(
+        self: *const ComposedKernelExe,
+        exe_args: *zml.exe.Exe.Arguments,
+        results: *zml.exe.Exe.Results,
+        args: Args,
+        hidden_buf: *zml.Buffer,
+    ) void {
+        switch (self.phase) {
+            .prefill => self.runPrefillSampler(exe_args, results, args, hidden_buf),
+            .decode => self.runDecodeSampler(exe_args, results, args, hidden_buf),
+        }
+    }
+
+    fn runPrefillSampler(
+        self: *const ComposedKernelExe,
+        exe_args: *zml.exe.Exe.Arguments,
+        results: *zml.exe.Exe.Results,
+        args: Args,
+        hidden_buf: *zml.Buffer,
+    ) void {
+        exe_args.set(.{ hidden_buf, args.rng_buffers, null });
+        self.sampler.call(exe_args.*, results);
+
+        var new_tokens, var new_rng = results.get(struct { zml.Buffer, zml.Bufferized(zml.Tensor.Rng) });
+        replaceBuffer(args.tokens_buf, &new_tokens);
+        replaceBuffer(&args.rng_buffers._state, &new_rng._state);
+    }
+
+    fn runDecodeSampler(
+        self: *const ComposedKernelExe,
+        exe_args: *zml.exe.Exe.Arguments,
+        results: *zml.exe.Exe.Results,
+        args: Args,
+        hidden_buf: *zml.Buffer,
+    ) void {
+        exe_args.set(.{ hidden_buf, args.rng_buffers, args.token_index_buf });
+        self.sampler.call(exe_args.*, results);
+
+        var new_tokens, var new_rng, var new_token_index = results.get(struct { zml.Buffer, zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
+        replaceBuffer(args.tokens_buf, &new_tokens);
+        replaceBuffer(&args.rng_buffers._state, &new_rng._state);
+        replaceBuffer(args.token_index_buf, &new_token_index);
+    }
+
+    fn embedTokensBuffers(model_buffers: *const model.Buffers) zml.Bufferized(EmbedTokens) {
+        return .{ .embed_tokens = model_buffers.text_model.embed_tokens };
+    }
+
+    fn samplerBuffers(model_buffers: *const model.Buffers) zml.Bufferized(model.Sampler) {
+        return .{
+            .norm = model_buffers.text_model.norm,
+            .lm_head = model_buffers.lm_head,
+        };
+    }
+
+    fn replaceBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
+        if (!sameBufferHandle(dst.*, src.*)) dst.deinit();
+        dst.* = src.*;
+    }
+
+    fn releaseBuffer(expected: zml.Buffer, actual: *zml.Buffer) void {
+        if (!sameBufferHandle(expected, actual.*)) actual.deinit();
+    }
+
+    fn sameBufferHandle(a: zml.Buffer, b: zml.Buffer) bool {
+        if (a._shards.len != b._shards.len) return false;
+        for (a._shards.constSlice(), b._shards.constSlice()) |a_shard, b_shard| {
+            if (a_shard != b_shard) return false;
+        }
+        return true;
+    }
+
+    fn layerExe(self: *const ComposedKernelExe, kind: LayerKind) zml.Exe {
+        return switch (kind.attn) {
+            .full_attention => switch (kind.ffn) {
+                .mlp => self.full_mlp_layer orelse unreachable,
+                .moe => self.full_moe_layer orelse unreachable,
+            },
+            .sliding_attention => switch (kind.ffn) {
+                .mlp => self.sliding_mlp_layer orelse unreachable,
+                .moe => self.sliding_moe_layer orelse unreachable,
+            },
+        };
+    }
+
+    fn maybeCompileLayer(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        step3p5_model: model.Model,
+        parameters: CompilationOptions,
+        seqlen: usize,
+        phase: Phase,
+        target: LayerKind,
+        comptime component: []const u8,
+        kinds: []const LayerKind,
+        progress: *std.Progress.Node,
+    ) !?zml.Exe {
+        const index = findFirstLayerKind(kinds, target) orelse return null;
+        return try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, index, phase, component, progress);
+    }
+
+    fn compileEmbedTokens(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        embed_tokens: zml.nn.TokenEmbedding,
+        parameters: CompilationOptions,
+        seqlen: usize,
+        phase: Phase,
+        progress: *std.Progress.Node,
+    ) !zml.Exe {
+        progress.increaseEstimatedTotalItems(1);
+        var node = progress.start(phase.startMessage("embed tokens"), 1);
+        defer node.end();
+
+        const from: std.Io.Timestamp = .now(io, .awake);
+        defer phase.logCompileDone(log, "embed tokens", io, from);
+
+        const tokens: zml.Tensor = .init(.{ .b = 1, .s = seqlen }, .u32);
+        return platform.compile(allocator, io, EmbedTokens{ .embed_tokens = embed_tokens }, .forward, .{tokens}, .{
+            .shardings = &parameters.shardings.all(),
+            .program_name = phase.programName("step3_5flash", "embed_tokens"),
+        });
     }
 
     fn compileLayer(
@@ -465,21 +596,84 @@ const ComposedKernelExe = struct {
             .layer_index = zml.Tensor.init(.{}, .u32),
         };
 
-        const attention_parameters = switch (phase) {
-            .prefill => parameters.prefill_attention_parameters,
-            .decode => parameters.decode_attention_parameters,
-        };
-
         return platform.compile(
             allocator,
             io,
             step3p5_model.text_model.layers[layer_index],
             .forward,
-            .{ hidden_tensor, parameters.token_index, layer_cache, parameters.attention_metadata, attention_parameters },
+            .{ hidden_tensor, parameters.token_index, layer_cache, parameters.attention_metadata, parameters.decode_attention_parameters },
             .{
                 .shardings = &parameters.shardings.all(),
                 .program_name = phase.programName("step3_5flash", component),
             },
         );
+    }
+
+    fn compileSampler(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        step3p5_model: model.Model,
+        parameters: CompilationOptions,
+        seqlen: usize,
+        phase: Phase,
+        progress: *std.Progress.Node,
+    ) !zml.Exe {
+        progress.increaseEstimatedTotalItems(1);
+        var node = progress.start(phase.startMessage("sampler"), 1);
+        defer node.end();
+
+        const from: std.Io.Timestamp = .now(io, .awake);
+        defer phase.logCompileDone(log, "sampler", io, from);
+
+        const token_index: ?zml.Tensor = switch (phase) {
+            .prefill => null,
+            .decode => parameters.token_index,
+        };
+
+        return platform.compile(
+            allocator,
+            io,
+            step3p5_model.sampler(),
+            .sampleTokens,
+            .{ hidden(step3p5_model, seqlen), parameters.rng, token_index },
+            .{
+                .shardings = &parameters.shardings.all(),
+                .program_name = phase.programName("step3_5flash", "sampler"),
+            },
+        );
+    }
+
+    fn hidden(step3p5_model: model.Model, seqlen: usize) zml.Tensor {
+        return .fromShape(zml.Shape.init(
+            .{ .b = 1, .s = seqlen, .d = step3p5_model.config.hidden_size },
+            step3p5_model.text_model.embed_tokens.weight.dtype(),
+        ).withPartitioning(.{
+            .b = .replicated,
+            .s = .replicated,
+            .d = .replicated,
+        }));
+    }
+
+    fn layerKinds(allocator: std.mem.Allocator, config: model.Config, num_layers: usize) ![]LayerKind {
+        const kinds = try allocator.alloc(LayerKind, num_layers);
+        for (kinds, 0..) |*kind, index| {
+            kind.* = .{
+                .attn = config.layer_types[index],
+                .ffn = ffnType(config, index),
+            };
+        }
+        return kinds;
+    }
+
+    fn ffnType(config: model.Config, layer_index: usize) model.FfnType {
+        return if (std.mem.indexOfScalar(u32, config.moe_layers_enum.layers, @intCast(layer_index)) != null) .moe else .mlp;
+    }
+
+    fn findFirstLayerKind(kinds: []const LayerKind, target: LayerKind) ?usize {
+        for (kinds, 0..) |kind, index| {
+            if (kind.attn == target.attn and kind.ffn == target.ffn) return index;
+        }
+        return null;
     }
 };
