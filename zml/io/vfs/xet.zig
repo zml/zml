@@ -85,8 +85,6 @@ fn decompressChunk(chunk: Chunk, dst: []u8) ![]u8 {
     return out;
 }
 
-// ── HTTP helpers ────────────────────────────────────────────────────────────
-
 fn bearerAuth(token: []const u8, buf: []u8) ![]u8 {
     return std.fmt.bufPrint(buf, "Bearer {s}", .{std.mem.trim(u8, token, " \t\n\r")}) catch error.TokenTooLong;
 }
@@ -123,18 +121,14 @@ pub fn fetchFileId(
 }
 
 /// CAS auth (URL + bearer token) cached across `fetchRange` calls. HF rate-limits
-/// `/xet-read-token/*` aggressively (3000 req / 5 min per IP); without caching, a
-/// bulk-weight load on a fast box exhausts the quota mid-download.
+/// `/xet-read-token/*` aggressively, without caching, quota is exhausted easily
 pub const CasAuthCache = struct {
     mutex: std.Io.Mutex = .init,
     url: ?[]u8 = null,
     token: ?[]u8 = null,
     expires_at: std.Io.Timestamp = .zero,
 
-    /// Conservative TTL: HF's xet-read tokens are valid much longer, but we don't
-    /// parse the expiry. 4 min keeps us well clear of any reasonable lifetime while
-    /// still amortizing the round-trip over many fetches.
-    const ttl: std.Io.Duration = .fromSeconds(4 * 60);
+    const ttl: std.Io.Duration = .fromSeconds(4 * 60); // 4 min
 
     pub fn deinit(self: *CasAuthCache, allocator: std.mem.Allocator) void {
         if (self.url) |u| allocator.free(u);
@@ -236,10 +230,8 @@ fn fetchReconstruction(
     });
 }
 
-// ── ChunkIterator ──────────────────────────────────────────────────────────
-
 /// Walks a fully-buffered xorb body, yielding chunks one at a time.
-pub const ChunkIterator = struct {
+const ChunkIterator = struct {
     data: []const u8,
     pos: usize = 0,
 
@@ -263,8 +255,6 @@ pub const ChunkIterator = struct {
         };
     }
 };
-
-// ── HTTP range GET into a slice (with retry) ───────────────────────────────
 
 fn httpRangeGetIntoSlice(
     client: *std.http.Client,
@@ -341,8 +331,6 @@ fn tryHttpRangeGetIntoSlice(
         return error.XorbFetchTransient;
     };
 }
-
-// ── Range fetch (worker-based, fills dst synchronously) ────────────────────
 
 /// One term's contribution to the output: a contiguous slice of `dst[]`
 /// produced by decompressing a chunk-range of one FetchUrl's body.
@@ -508,7 +496,7 @@ pub const FetchPool = struct {
     }
 };
 
-pub const Batch = struct {
+const Batch = struct {
     dst: []u8,
     pending: usize,
     err: ?anyerror = null,
@@ -552,7 +540,6 @@ fn fetchWorker(pool: *FetchPool, w: *FetchPool.Worker) void {
 fn processJob(pool: *FetchPool, w: *FetchPool.Worker, job: *Job) ?anyerror {
     const task = job.task;
     if (task.byte_len > w.body.len) return error.XorbTooLarge;
-    // log.warn("fetching {d} bytes from {s} (range={d}-{d})", .{ task.byte_len, task.url, task.url_range_start, task.url_range_end });
     const body = w.body[0..task.byte_len];
     runTask(pool.client, task, job.batch.dst, body, w.scratch) catch |e| return e;
     return null;

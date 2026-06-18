@@ -288,7 +288,6 @@ pub const ProgressWriter = struct {
 pub const MemoryWriter = union(enum) {
     direct: DirectMemoryWriter,
     buffered: BufferedMemoryWriter,
-    discarding: DiscardingMemoryWriter,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -302,7 +301,7 @@ pub const MemoryWriter = union(enum) {
         buffer: *Buffer,
         staging_buffer_size: usize,
     ) !MemoryWriter {
-        _ = staging_buffer_size; // autofix
+        _ = staging_buffer_size;
         return switch (platform.target) {
             .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer) },
             .rocm, .tpu, .neuron, .cpu => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
@@ -313,7 +312,6 @@ pub const MemoryWriter = union(enum) {
         return switch (self.*) {
             .direct => &self.direct.interface,
             .buffered => &self.buffered.interface,
-            .discarding => &self.discarding.interface,
         };
     }
 
@@ -321,7 +319,6 @@ pub const MemoryWriter = union(enum) {
         switch (self.*) {
             .direct => self.direct.deinit(),
             .buffered => self.buffered.deinit(allocator),
-            .discarding => self.discarding.deinit(allocator),
         }
     }
 
@@ -329,114 +326,9 @@ pub const MemoryWriter = union(enum) {
         switch (self.*) {
             .direct => self.direct.setProgress(progress),
             .buffered => {},
-            .discarding => {},
         }
     }
 };
-
-pub const DiscardingMemoryWriter = struct {
-    interface: std.Io.Writer,
-    total: usize = 0,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        platform: *const Platform,
-        shape: Shape,
-        sharding: Sharding,
-        buffer: *Buffer,
-        buffer_size: usize,
-    ) !DiscardingMemoryWriter {
-        buffer.* = .{
-            ._platform = platform,
-            ._shape = shape,
-            ._sharding = sharding.resolve(platform),
-            ._shards = .empty,
-        };
-        const selected_buffer_size = if (std.c.getenv("ZML_DISCARD_LOAD_WRITER_FULL_TENSOR") != null)
-            shape.byteSize()
-        else
-            buffer_size;
-        log.warn("DiscardingMemoryWriter buffer size: {Bi:.2}", .{selected_buffer_size});
-
-        return .{
-            .interface = .{
-                .buffer = try allocator.alloc(u8, selected_buffer_size),
-                .end = 0,
-                .vtable = &.{
-                    .drain = drain,
-                    .flush = flush,
-                    .rebase = rebase,
-                },
-            },
-        };
-    }
-
-    pub fn deinit(self: *DiscardingMemoryWriter, allocator: std.mem.Allocator) void {
-        allocator.free(self.interface.buffer);
-    }
-
-    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const self: *DiscardingMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
-        var buffered = w.end;
-        w.end = 0;
-
-        var written: usize = 0;
-        for (data) |chunk| {
-            written += chunk.len;
-        }
-        if (data.len > 0 and splat > 1) {
-            written += data[data.len - 1].len * (splat - 1);
-        }
-
-        buffered += written;
-        self.total += buffered;
-        return written;
-    }
-
-    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
-        const self: *DiscardingMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
-        self.total += w.end;
-        log.warn("DiscardingMemoryWriter discarded {Bi:.2}", .{self.total});
-        w.end = 0;
-    }
-
-    fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
-        if (w.buffer.len - w.end >= capacity) return;
-        if (preserve > w.end) return std.Io.Writer.Error.WriteFailed;
-        if (capacity > w.buffer.len - preserve) return std.Io.Writer.Error.WriteFailed;
-
-        const self: *DiscardingMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
-        const discard_len = w.end - preserve;
-        self.total += discard_len;
-        if (preserve > 0) {
-            @memmove(w.buffer[0..preserve], w.buffer[discard_len..][0..preserve]);
-        }
-        w.end = preserve;
-    }
-};
-
-test "DiscardingMemoryWriter: drain returns only newly supplied bytes" {
-    var buffer: [4]u8 = undefined;
-    var writer: DiscardingMemoryWriter = .{
-        .interface = .{
-            .buffer = &buffer,
-            .end = 0,
-            .vtable = &.{
-                .drain = DiscardingMemoryWriter.drain,
-                .flush = DiscardingMemoryWriter.flush,
-                .rebase = DiscardingMemoryWriter.rebase,
-            },
-        },
-    };
-
-    try writer.interface.writeAll("abc");
-    const data: []const []const u8 = &.{"def"};
-    const consumed = try writer.interface.vtable.drain(&writer.interface, data, 1);
-
-    try std.testing.expectEqual(@as(usize, 3), consumed);
-    try std.testing.expectEqual(@as(usize, 6), writer.total);
-    try std.testing.expectEqual(@as(usize, 0), writer.interface.end);
-}
 
 pub const BufferedMemoryWriter = struct {
     io: std.Io,
@@ -919,7 +811,7 @@ pub const DirectMemoryWriter = struct {
         buffer: *Buffer,
         staging_buffer_size: usize,
     ) !DirectMemoryWriter {
-        _ = staging_buffer_size; // autofix
+        _ = staging_buffer_size;
         const ordered_devices = sharding.devicesInCanonicalOrder();
         var shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
         errdefer allocator.free(shard_writers);
