@@ -584,27 +584,30 @@ const DispatchSpans = struct {
         writer_index: usize,
         start: usize,
         len: usize,
+        order: usize,
     };
-
-    const PlacementSpans = std.MultiArrayList(PlacementSpan);
 
     spans: []DispatchSpan,
     mirror_writers: []usize,
 
     fn init(allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) !DispatchSpans {
-        var placement_spans: PlacementSpans = .empty;
-        defer placement_spans.deinit(allocator);
-        var placement_span_order: std.ArrayList(usize) = .empty;
-        defer placement_span_order.deinit(allocator);
-
         const placement = try sharding.placement(shape);
+        const ordered_devices = sharding.devicesInCanonicalOrder();
+
+        var placement_span_count: usize = 0;
+        for (ordered_devices) |device| {
+            placement_span_count += placementSpanCount(shape, placement.slices(device.coords).constSlice());
+        }
+
+        var placement_spans: std.ArrayList(PlacementSpan) = try .initCapacity(allocator, placement_span_count);
+        defer placement_spans.deinit(allocator);
+
         const byte_strides = shape.computeByteStrides();
 
-        for (sharding.devicesInCanonicalOrder(), 0..) |device, writer_index| {
+        for (ordered_devices, 0..) |device, writer_index| {
             try appendShardPlacementSpans(
                 allocator,
                 &placement_spans,
-                &placement_span_order,
                 shape,
                 placement.slices(device.coords).constSlice(),
                 byte_strides.constSlice(),
@@ -612,12 +615,15 @@ const DispatchSpans = struct {
             );
         }
 
-        var spans: std.ArrayList(DispatchSpan) = .empty;
+        std.debug.assert(placement_spans.items.len == placement_span_count);
+
+        var spans: std.ArrayList(DispatchSpan) = try .initCapacity(allocator, placement_spans.items.len);
         errdefer spans.deinit(allocator);
-        var mirror_writers: std.ArrayList(usize) = .empty;
+
+        var mirror_writers: std.ArrayList(usize) = try .initCapacity(allocator, placement_spans.items.len);
         errdefer mirror_writers.deinit(allocator);
 
-        try deduplicateByRange(allocator, placement_spans, placement_span_order.items, shape.byteSize(), &spans, &mirror_writers);
+        try deduplicateByRange(allocator, placement_spans.items, shape.byteSize(), &spans, &mirror_writers);
 
         const spans_ = try spans.toOwnedSlice(allocator);
         errdefer allocator.free(spans_);
@@ -638,59 +644,43 @@ const DispatchSpans = struct {
 
     fn deduplicateByRange(
         allocator: std.mem.Allocator,
-        placement_spans: PlacementSpans,
-        placement_span_order: []usize,
+        placement_spans: []PlacementSpan,
         total_bytes: usize,
         spans: *std.ArrayList(DispatchSpan),
         mirror_writers: *std.ArrayList(usize),
     ) !void {
-        const placement = placement_spans.slice();
-        const starts = placement.items(.start);
-        const lens = placement.items(.len);
-        const writer_indices = placement.items(.writer_index);
-
         const SortContext = struct {
-            starts: []const usize,
-            lens: []const usize,
-            writer_indices: []const usize,
-
-            fn lessThan(ctx: @This(), lhs_index: usize, rhs_index: usize) bool {
-                if (ctx.starts[lhs_index] != ctx.starts[rhs_index]) return ctx.starts[lhs_index] < ctx.starts[rhs_index];
-                if (ctx.lens[lhs_index] != ctx.lens[rhs_index]) return ctx.lens[lhs_index] < ctx.lens[rhs_index];
-                return ctx.writer_indices[lhs_index] < ctx.writer_indices[rhs_index];
+            fn lessThan(_: void, lhs: PlacementSpan, rhs: PlacementSpan) bool {
+                if (lhs.start != rhs.start) return lhs.start < rhs.start;
+                if (lhs.len != rhs.len) return lhs.len < rhs.len;
+                return lhs.order < rhs.order;
             }
         };
 
-        std.mem.sort(usize, placement_span_order, SortContext{
-            .starts = starts,
-            .lens = lens,
-            .writer_indices = writer_indices,
-        }, SortContext.lessThan);
+        std.mem.sort(PlacementSpan, placement_spans, {}, SortContext.lessThan);
 
         var i: usize = 0;
         var cursor: usize = 0;
-        while (i < placement_span_order.len) {
-            const first_index = placement_span_order[i];
-            const first_start = starts[first_index];
-            const first_len = lens[first_index];
-            if (first_start != cursor) return error.NonContiguousShardPlacement;
+        while (i < placement_spans.len) {
+            const span = placement_spans[i];
+            if (span.start != cursor) return error.NonContiguousShardPlacement;
 
             const mirror_writer_start = mirror_writers.items.len;
             var j = i + 1;
-            while (j < placement_span_order.len) : (j += 1) {
-                const mirror_index = placement_span_order[j];
-                if (starts[mirror_index] != first_start or lens[mirror_index] != first_len) break;
-                try mirror_writers.append(allocator, writer_indices[mirror_index]);
+            while (j < placement_spans.len) : (j += 1) {
+                const mirror = placement_spans[j];
+                if (mirror.start != span.start or mirror.len != span.len) break;
+                try mirror_writers.append(allocator, mirror.writer_index);
             }
 
             try spans.append(allocator, .{
-                .start = first_start,
-                .end = first_start + first_len,
-                .primary_writer = writer_indices[first_index],
+                .start = span.start,
+                .end = span.start + span.len,
+                .primary_writer = span.writer_index,
                 .mirror_writer_start = mirror_writer_start,
                 .mirror_writer_len = j - i - 1,
             });
-            cursor += first_len;
+            cursor += span.len;
             i = j;
         }
 
@@ -699,37 +689,38 @@ const DispatchSpans = struct {
 
     fn appendPlacementSpan(
         allocator: std.mem.Allocator,
-        placement_spans: *PlacementSpans,
-        placement_span_order: *std.ArrayList(usize),
+        placement_spans: *std.ArrayList(PlacementSpan),
         writer_index: usize,
         start: usize,
         len: usize,
     ) !void {
-        try placement_spans.append(allocator, .{ .writer_index = writer_index, .start = start, .len = len });
-        try placement_span_order.append(allocator, placement_spans.len - 1);
+        try placement_spans.append(allocator, .{
+            .writer_index = writer_index,
+            .start = start,
+            .len = len,
+            .order = placement_spans.items.len,
+        });
     }
 
     fn appendShardPlacementSpans(
         allocator: std.mem.Allocator,
-        placement_spans: *PlacementSpans,
-        placement_span_order: *std.ArrayList(usize),
+        placement_spans: *std.ArrayList(PlacementSpan),
         shape: Shape,
         slices: []const Placement.Slice1d,
         byte_strides: []const i64,
         writer_index: usize,
     ) !void {
         if (shape.rank() == 0) {
-            try appendPlacementSpan(allocator, placement_spans, placement_span_order, writer_index, 0, shape.byteSize());
+            try appendPlacementSpan(allocator, placement_spans, writer_index, 0, shape.byteSize());
             return;
         }
 
-        try appendShardAxisPlacementSpans(allocator, placement_spans, placement_span_order, slices, byte_strides, writer_index, 0, contiguousSliceAxis(shape, slices), 0);
+        try appendShardAxisPlacementSpans(allocator, placement_spans, slices, byte_strides, writer_index, 0, contiguousSliceAxis(shape, slices), 0);
     }
 
     fn appendShardAxisPlacementSpans(
         allocator: std.mem.Allocator,
-        placement_spans: *PlacementSpans,
-        placement_span_order: *std.ArrayList(usize),
+        placement_spans: *std.ArrayList(PlacementSpan),
         slices: []const Placement.Slice1d,
         byte_strides: []const i64,
         writer_index: usize,
@@ -743,15 +734,26 @@ const DispatchSpans = struct {
         if (axis == contiguous_axis) {
             const span_start: usize = @intCast(base_start + slice.start * byte_strides[axis]);
             const span_len: usize = @intCast(slice.size * byte_strides[axis]);
-            try appendPlacementSpan(allocator, placement_spans, placement_span_order, writer_index, span_start, span_len);
+            try appendPlacementSpan(allocator, placement_spans, writer_index, span_start, span_len);
             return;
         }
 
         var i: i64 = 0;
         while (i < slice.size) : (i += 1) {
             const child_start = base_start + (slice.start + i) * byte_strides[axis];
-            try appendShardAxisPlacementSpans(allocator, placement_spans, placement_span_order, slices, byte_strides, writer_index, axis + 1, contiguous_axis, child_start);
+            try appendShardAxisPlacementSpans(allocator, placement_spans, slices, byte_strides, writer_index, axis + 1, contiguous_axis, child_start);
         }
+    }
+
+    fn placementSpanCount(shape: Shape, slices: []const Placement.Slice1d) usize {
+        if (shape.rank() == 0) return 1;
+
+        const contiguous_axis = contiguousSliceAxis(shape, slices);
+        var count: usize = 1;
+        for (slices[0..contiguous_axis]) |slice| {
+            count *= @intCast(slice.size);
+        }
+        return count;
     }
 
     fn contiguousSliceAxis(shape: Shape, slices: []const Placement.Slice1d) usize {
@@ -783,14 +785,29 @@ const DispatchSpans = struct {
 //          v
 //     PJRT AsyncHostToDeviceTransferManager
 //
+// The public writer never owns a host staging buffer: it exposes a visible
+// prefix of a real shard DMA buffer. The visible prefix may extend beyond the
+// current dispatch span to coalesce reader requests, but `commitWindow` must
+// scatter those bytes before submitting or rotating the active buffer. The
+// first active-primary segment is zero-copy; crossed spans and mirrors treat
+// the active buffer as scratch and copy into their own shard writers.
+//
 // `byte_cursor` is the global tensor position. Shard writer `interface.end` is
 // local to the current shard DMA buffer.
 pub const DirectMemoryWriter = struct {
     allocator: std.mem.Allocator,
     shard_writers: []DirectShardWriter,
+    // Global stream-order spans produced from placement; this is the routing table for committed bytes.
     dispatch_spans: DispatchSpans,
+    // Current entry in `dispatch_spans.spans`; advances whenever `byte_cursor` reaches that span end.
     span_index: usize = 0,
+    // Global tensor byte offset already scattered into shard writers.
     byte_cursor: usize = 0,
+    // Shard writer whose DMA buffer is currently exposed as `interface.buffer`.
+    active_writer_index: usize,
+    // Start offset of new reader bytes inside the active shard writer buffer.
+    window_start: usize,
+    // Logical maximum public alias window before forcing a cross-shard flush fence.
     dma_chunk_size: usize,
     shard_progress: ?[]ShardProgress = null,
     interface: std.Io.Writer,
@@ -836,12 +853,14 @@ pub const DirectMemoryWriter = struct {
 
         const first_span = dispatch_spans.spans[0];
         const first_writer = &shard_writers[first_span.primary_writer];
-        const first_window = @min(first_span.end - first_span.start, @min(dma_chunk_size, first_writer.interface.buffer.len));
+        const first_window = @min(dma_chunk_size, first_writer.interface.buffer.len);
 
         return .{
             .allocator = allocator,
             .shard_writers = shard_writers,
             .dispatch_spans = dispatch_spans,
+            .active_writer_index = first_span.primary_writer,
+            .window_start = first_writer.interface.end,
             .dma_chunk_size = dma_chunk_size,
             .interface = .{
                 .buffer = first_writer.interface.buffer[0..first_window],
@@ -934,73 +953,120 @@ pub const DirectMemoryWriter = struct {
 
     // `interface.buffer` is a clipped alias of the active primary shard DMA
     // buffer. Reader writes advance only `DirectMemoryWriter.interface.end`;
-    // this function commits that new byte range to the owning shard writer.
+    // this function scatters that visible range through dispatch spans.
     //
-    // After committing, the same bytes are copied to mirror writers, pending
-    // DMA buffers are submitted at physical boundaries, and the public window
-    // is rotated to the next dispatch span. The boundary order matters:
-    // submit a full shard buffer first, then enforce the logical DMA chunk
-    // fence across all shards, then advance the dispatch span / EOF state.
+    // The leading segment for `active_writer_index` is already in the right
+    // DMA buffer and is committed by advancing that shard writer. Later spans
+    // use the same bytes as scratch and are copied before any full buffers are
+    // submitted or the public alias is rotated.
     fn commitWindow(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        const active_span = self.dispatch_spans.spans[self.span_index];
-        const shard_writer = &self.shard_writers[active_span.primary_writer];
+        // All dispatch spans are consumed; no shard DMA buffer remains valid to
+        // expose as the public alias until flush marks the writer as failing.
+        if (self.span_index >= self.dispatch_spans.spans.len) {
+            self.interface.buffer = &.{};
+            self.interface.end = 0;
+            return;
+        }
 
-        if (self.interface.end > shard_writer.interface.end) {
-            const chunk = self.interface.buffer[shard_writer.interface.end..self.interface.end];
+        // Only bytes after `window_start` are new reader writes. Bytes before
+        // it may already be pending in the active shard writer.
+        const source = self.interface.buffer[self.window_start..self.interface.end];
+        if (source.len == 0) return;
 
-            shard_writer.interface.end = self.interface.end;
-            self.byte_cursor += chunk.len;
+        // The visible alias window may cross many dispatch spans. Walk the
+        // global cursor and route each subrange to its primary and mirrors.
+        var consumed: usize = 0;
+        while (consumed < source.len) {
+            if (self.span_index >= self.dispatch_spans.spans.len) return std.Io.Writer.Error.WriteFailed;
 
-            if (active_span.mirror_writer_len != 0) {
-                const mirror_writer_end = active_span.mirror_writer_start + active_span.mirror_writer_len;
-                for (self.dispatch_spans.mirror_writers[active_span.mirror_writer_start..mirror_writer_end]) |mirror_writer_index| {
-                    const mirror_writer = &self.shard_writers[mirror_writer_index];
-                    try mirror_writer.interface.writeAll(chunk);
-                    if (self.shard_progress) |states| {
-                        states[mirror_writer_index].set(states[mirror_writer_index].completed + chunk.len);
-                    }
+            const span = self.dispatch_spans.spans[self.span_index];
+            if (self.byte_cursor < span.start or self.byte_cursor >= span.end) return std.Io.Writer.Error.WriteFailed;
+
+            const n = @min(source.len - consumed, span.end - self.byte_cursor);
+            const chunk = source[consumed..][0..n];
+
+            // The first span in the active alias is already in the primary DMA
+            // buffer. Later ranges use the active buffer as scratch and must be
+            // copied into their real destination writer.
+            if (span.primary_writer == self.active_writer_index and consumed == 0) {
+                self.shard_writers[span.primary_writer].interface.end += n;
+            } else {
+                const primary_writer = &self.shard_writers[span.primary_writer];
+                if (span.primary_writer == self.active_writer_index) {
+                    @memmove(primary_writer.interface.buffer[primary_writer.interface.end..][0..n], chunk);
+                    primary_writer.interface.end += n;
+                } else {
+                    try primary_writer.interface.writeAll(chunk);
                 }
             }
-
             if (self.shard_progress) |states| {
-                states[active_span.primary_writer].set(states[active_span.primary_writer].completed + chunk.len);
+                states[span.primary_writer].set(states[span.primary_writer].completed + n);
             }
 
-            const span_complete = self.byte_cursor == active_span.end;
-            const chunk_complete = @mod(self.byte_cursor, self.dma_chunk_size) == 0;
-            const shard_full = shard_writer.interface.end == shard_writer.interface.buffer.len;
-
-            if (shard_full) {
-                try shard_writer.interface.flush();
-            }
-
-            if (chunk_complete) {
-                for (self.shard_writers) |*writer| {
-                    try writer.interface.flush();
+            const mirror_writer_end = span.mirror_writer_start + span.mirror_writer_len;
+            for (self.dispatch_spans.mirror_writers[span.mirror_writer_start..mirror_writer_end]) |mirror_writer_index| {
+                const mirror_writer = &self.shard_writers[mirror_writer_index];
+                if (mirror_writer_index == self.active_writer_index) {
+                    @memmove(mirror_writer.interface.buffer[mirror_writer.interface.end..][0..n], chunk);
+                    mirror_writer.interface.end += n;
+                } else {
+                    try mirror_writer.interface.writeAll(chunk);
+                }
+                if (self.shard_progress) |states| {
+                    states[mirror_writer_index].set(states[mirror_writer_index].completed + n);
                 }
             }
 
-            if (span_complete) {
+            self.byte_cursor += n;
+            consumed += n;
+            if (self.byte_cursor == span.end) {
                 self.span_index += 1;
-                if (self.span_index >= self.dispatch_spans.spans.len) {
-                    self.interface.buffer = &.{};
-                    self.interface.end = 0;
-                    return;
-                }
             }
         }
 
+        // All scratch copies are complete now, so full DMA buffers may be
+        // submitted without invalidating bytes still needed for scatter.
+        for (self.shard_writers) |*writer| {
+            if (writer.interface.end == writer.interface.buffer.len) {
+                try writer.interface.flush();
+            }
+        }
+
+        if (@mod(self.byte_cursor, self.dma_chunk_size) == 0) {
+            for (self.shard_writers) |*writer| {
+                try writer.interface.flush();
+            }
+        }
+
+        // The last committed window may finish the tensor exactly. Leave an
+        // empty public window so any further writes fail through std.Io.
+        if (self.span_index >= self.dispatch_spans.spans.len) {
+            self.interface.buffer = &.{};
+            self.interface.end = 0;
+            return;
+        }
+
+        // Rotate the public alias to the primary writer for the next stream
+        // span. `window_start` preserves that writer's already-buffered prefix
+        // so only newly advanced bytes are scattered on the next commit.
         const next_span = self.dispatch_spans.spans[self.span_index];
         const next_writer = &self.shard_writers[next_span.primary_writer];
+        self.active_writer_index = next_span.primary_writer;
+        self.window_start = next_writer.interface.end;
 
-        const span_remaining = next_span.end - self.byte_cursor;
-        const buffer_remaining = next_writer.interface.buffer.len - next_writer.interface.end;
-        const chunk_remaining = self.dma_chunk_size - @mod(self.byte_cursor, self.dma_chunk_size);
-        const visible_remaining = @min(span_remaining, @min(chunk_remaining, buffer_remaining));
-        const visible_len = next_writer.interface.end + visible_remaining;
+        // Publish the next public alias. Its backing memory is the next primary
+        // shard buffer, but the visible length is allowed to coalesce across
+        // upcoming spans until a buffer or tensor boundary.
+        const total = self.dispatch_spans.spans[self.dispatch_spans.spans.len - 1].end;
+        const buffer_remaining = next_writer.interface.buffer.len - self.window_start;
+        const chunk_offset = @mod(self.byte_cursor, self.dma_chunk_size);
+        const chunk_remaining = if (chunk_offset == 0) self.dma_chunk_size else self.dma_chunk_size - chunk_offset;
+        const tensor_remaining = total - self.byte_cursor;
+        const visible_remaining = @min(buffer_remaining, @min(chunk_remaining, tensor_remaining));
+        if (visible_remaining == 0) return std.Io.Writer.Error.WriteFailed;
 
-        self.interface.buffer = next_writer.interface.buffer[0..visible_len];
-        self.interface.end = next_writer.interface.end;
+        self.interface.buffer = next_writer.interface.buffer[0 .. self.window_start + visible_remaining];
+        self.interface.end = self.window_start;
     }
 };
 
