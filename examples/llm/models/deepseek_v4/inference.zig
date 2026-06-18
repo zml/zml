@@ -41,10 +41,10 @@ pub const CompilationParameters = struct {
 };
 
 pub const CompiledModel = struct {
-    prefill: KernelExe,
-    decode: KernelExe,
-    // prefill: ComposedKernelExe,
-    // decode: ComposedKernelExe,
+    // prefill: KernelExe,
+    // decode: KernelExe,
+    prefill: ComposedKernelExe,
+    decode: ComposedKernelExe,
     params: CompilationParameters,
 
     pub fn init(
@@ -57,10 +57,10 @@ pub const CompiledModel = struct {
         opts: CompilationParameters,
     ) !CompiledModel {
         return .{
-            .prefill = try compileKernel(allocator, io, platform, mdl, seqlen, progress, opts),
-            .decode = try compileDecodeKernel(allocator, io, platform, mdl, 1, progress, opts),
-            // .prefill = try .init(allocator, io, platform, mdl, seqlen, progress, .prefill, opts),
-            // .decode = try .init(allocator, io, platform, mdl, 1, progress, .decode, opts),
+            // .prefill = try compileKernel(allocator, io, platform, mdl, seqlen, progress, opts),
+            // .decode = try compileDecodeKernel(allocator, io, platform, mdl, 1, progress, opts),
+            .prefill = try .init(allocator, io, platform, mdl, seqlen, progress, .prefill, opts),
+            .decode = try .init(allocator, io, platform, mdl, 1, progress, .decode, opts),
             .params = opts,
         };
     }
@@ -68,8 +68,6 @@ pub const CompiledModel = struct {
     pub fn deinit(self: *CompiledModel) void {
         self.prefill.deinit();
         self.decode.deinit();
-        // self.prefill_composed.deinit();
-        // self.decode_composed.deinit();
     }
 };
 
@@ -236,6 +234,7 @@ pub const ComposedKernelExe = struct {
     embed_tokens: zml.Exe,
     attn_layer: zml.Exe,
     csa_attn_layer: zml.Exe,
+    csa2_attn_layer: zml.Exe,
     hca_attn_layer: zml.Exe,
     lm_head: zml.Exe,
 
@@ -267,6 +266,9 @@ pub const ComposedKernelExe = struct {
         const csa_attn_layer = try ComposedKernelExe.compileCSAAttnLayer(allocator, io, platform, mdl, seqlen, progress, phase, opts);
         errdefer attn_layer.deinit();
 
+        const csa2_attn_layer = try ComposedKernelExe.compileCSA2AttnLayer(allocator, io, platform, mdl, seqlen, progress, phase, opts);
+        errdefer attn_layer.deinit();
+
         const hca_attn_layer = try ComposedKernelExe.compileHCAAttnLayer(allocator, io, platform, mdl, seqlen, progress, phase, opts);
         errdefer attn_layer.deinit();
 
@@ -286,6 +288,7 @@ pub const ComposedKernelExe = struct {
             .embed_tokens = embed_tokens,
             .attn_layer = attn_layer,
             .csa_attn_layer = csa_attn_layer,
+            .csa2_attn_layer = csa2_attn_layer,
             .hca_attn_layer = hca_attn_layer,
             .lm_head = lm_head,
         };
@@ -295,6 +298,7 @@ pub const ComposedKernelExe = struct {
         self.embed_tokens.deinit();
         self.attn_layer.deinit();
         self.csa_attn_layer.deinit();
+        self.csa2_attn_layer.deinit();
         self.hca_attn_layer.deinit();
         self.lm_head.deinit();
     }
@@ -401,6 +405,45 @@ pub const ComposedKernelExe = struct {
         });
     }
 
+    fn compileCSA2AttnLayer(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *zml.Platform,
+        mdl: model.Model,
+        seqlen: u32,
+        progress: *std.Progress.Node,
+        phase: common.Phase,
+        opts: CompilationParameters,
+    ) !zml.Exe {
+        progress.increaseEstimatedTotalItems(1);
+        var node = progress.start(phase.startMessage("CSA attention"), 1);
+        defer node.end();
+
+        const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .hc = opts.hc_mult, .d = opts.hidden_dim }, mdl.embeds.embeds.weight.dtype());
+        const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
+        const token_idx_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
+        const actual_seqlen: zml.Tensor = .init(.{}, .u32);
+        const layer_idx: zml.Tensor = .init(.{}, .u32);
+
+        const from: std.Io.Timestamp = .now(io, .awake);
+        defer phase.logCompileDone(log, "CSA attention", io, from);
+
+        return platform.compile(allocator, io, mdl.layers[4], .forward, .{
+            hidden,
+            tokens,
+            token_idx_offset,
+            actual_seqlen,
+            layer_idx,
+            opts.cache,
+            opts.attention_metadata,
+            opts.attention_parameters,
+            opts.moe_metadata,
+            opts.moe_parameters,
+        }, .{
+            .shardings = &opts.shardings.all(),
+        });
+    }
+
     fn compileHCAAttnLayer(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -471,10 +514,10 @@ pub const ComposedKernelExe = struct {
         var hidden_buffer = try self.runEmbeds(args);
         defer hidden_buffer.deinit();
 
-        for (args.model_buffers.layers) |layer_buffer| {
+        for (args.model_buffers.layers, 0..) |layer_buffer, i| {
             const exe = switch (layer_buffer.attn.compression) {
                 .none => &self.attn_layer,
-                .csa => &self.csa_attn_layer,
+                .csa => if(i == 2) &self.csa_attn_layer else &self.csa2_attn_layer,
                 .hca => &self.hca_attn_layer,
             };
             var new_hidden_buffer, var new_cache_buffer, var new_cache_index_buffer = try self.runLayer(exe, args, layer_buffer, &hidden_buffer, cache_index_buffer);
