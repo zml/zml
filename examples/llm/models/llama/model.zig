@@ -173,11 +173,11 @@ pub const Model = struct {
         }
 
         return zml.io.load(Model, self, allocator, io, platform, store, .{
-            .dma_chunks = 32,
+            .dma_chunks = 16,
             .dma_chunk_size = 128 * zml.MiB,
             .progress = progress,
             .shardings = shardings,
-            .parallelism = 16,
+            .parallelism = 8,
             .total_bytes = &total_bytes,
         });
     }
