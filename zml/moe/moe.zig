@@ -1,9 +1,9 @@
 const std = @import("std");
+
 const zml = @import("../zml.zig");
 const stdx = zml.stdx;
-pub const triton = @import("triton.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
-
+pub const triton = @import("triton.zig");
 pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
 
 pub const ActivationMode = enum {
@@ -33,6 +33,10 @@ pub const Backend = enum {
                     break :b error.UnsupportedComputeCapability;
                 }
                 break :b error.UnsupportedComputeCapability;
+            },
+            .rocm => switch (weights_dtype) {
+                .bf16, .f16, .f32 => .triton,
+                else => error.UnsupportedDataType,
             },
             .tpu => switch (weights_dtype) {
                 .bf16, .f16, .f32 => .mosaic_tpu,
