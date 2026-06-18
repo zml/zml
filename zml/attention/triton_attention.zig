@@ -502,3 +502,32 @@ pub const paged = struct {
         return output.output;
     }
 };
+
+pub const flashattn = struct {
+    pub const Parameters = struct {
+        pub const InitOptions = struct {};
+
+        pub fn init(opts: InitOptions) Parameters {
+            _ = opts;
+            return .{};
+        }
+    };
+
+    pub const Metadata = struct {
+        pub const InitOptions = struct {};
+
+        pub fn init(opts: InitOptions) Metadata {
+            _ = opts;
+            return .{};
+        }
+    };
+
+    pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
+        _ = k;
+        _ = v;
+        _ = token_index;
+        _ = metadata;
+        _ = parameters;
+        return q;
+    }
+};
