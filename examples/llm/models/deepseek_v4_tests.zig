@@ -150,7 +150,7 @@ pub fn run(
     // try ctx.testLayer("embed", .{ .batch, .seq }, mdl.embeds, model_buffers.embeds, .{});
     // try ctx.testLayer("head", .{ .batch, .seq, .hc, .d }, mdl.lm_head, model_buffers.lm_head, .{});
 
-    const n = 3; //16;
+    const n = 10; //16;
     // const n = config.num_hidden_layers;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -166,7 +166,7 @@ pub fn run(
     for (0..n) |i| {
         // try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.attn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].attn_norm, model_buffers.layers[i].attn_norm, .{});
         //
-        try ctx.testAttentionLayer(arena_allocator, i, cache, mdl.layers[i].attn, model_buffers.layers[i].attn, .{});
+        // try ctx.testAttentionLayer(arena_allocator, i, cache, mdl.layers[i].attn, model_buffers.layers[i].attn, .{});
         //
         // try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].ffn_norm, model_buffers.layers[i].ffn_norm, .{});
         //
@@ -214,7 +214,7 @@ pub fn run(
         //     .{}
         // );
 
-        // ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 }) catch log.err("layer {} did not passed", .{i});
+        ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 }) catch log.err("layer {} did not passed", .{i});
     }
 }
 
@@ -296,19 +296,21 @@ const TestContext = struct {
                 try self.testCompressor(
                     allocator,
                     try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}),
-                    i, 
+                    i,
                     csa.compressor,
-                    attn_buffer.compression.csa.compressor
+                    attn_buffer.compression.csa.compressor,
+                );
+                try self.testIndexerLayer(
+                    try std.fmt.allocPrint(allocator, "layers.{}.attn.indexer", .{i}),
+                    .{ .batch, .seq, .d },
+                    csa.indexer,
+                    attn_buffer.compression.csa.indexer,
+                cache.csa.indexer,
+                .{},
                 );
             },
             .hca => |compressor| {
-                try self.testCompressor(
-                    allocator,
-                    try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}),
-                    i, 
-                    compressor,
-                    attn_buffer.compression.hca
-                );
+                try self.testCompressor(allocator, try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}), i, compressor.compressor, attn_buffer.compression.hca.compressor);
             },
             else => {},
         }
@@ -451,11 +453,11 @@ const TestContext = struct {
         const layer_idx: zml.Tensor = .init(.{ .batch = 1 }, .u32);
         const offset: zml.Tensor = .init(.{ .batch = 1 }, .u32);
         const actual_seqlen: zml.Tensor = .init(.{}, .u32);
-        _ = actual_seqlen; // autofix
 
         const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{
             layer,
             in_tensor,
+            actual_seqlen,
             offset,
             state,
             layer_idx,
@@ -485,6 +487,7 @@ const TestContext = struct {
         args.set(.{
             layer_buffers,
             in_buffer,
+            actual_seqlen_buffer,
             offset_idx_buffer,
             state_buffer,
             layer_idx_buffer,
@@ -603,8 +606,8 @@ const TestContext = struct {
             layer,
             in_tensor,
             in_1_tensor,
-            pos_offset,
             actual_seqlen,
+            pos_offset,
             offset,
             cache,
             layer_idx,
@@ -638,8 +641,8 @@ const TestContext = struct {
             layer_buffers,
             in_buffer,
             in_1_buffer,
-            pos_idx_buffer,
             actual_seqlen_buffer,
+            pos_idx_buffer,
             offset_buffer,
             cache_buffer,
             layer_idx_buffer,
