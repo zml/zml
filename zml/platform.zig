@@ -8,12 +8,12 @@ pub const Target = platforms.Platform;
 const stdx = @import("stdx");
 
 const attention = @import("attention.zig");
+const constants = @import("constants.zig");
 const Exe = @import("exe.zig").Exe;
 const pjrtx = @import("pjrtx.zig");
 const profiler_ = @import("profiling/profiler.zig");
 const Sharding = @import("Sharding.zig");
 const zml = @import("zml.zig");
-const constants = @import("constants.zig");
 
 const log = std.log.scoped(.zml);
 
@@ -644,8 +644,7 @@ pub const CreateOptions = struct {
     // bump memory fraction from XLA defaults of 75% to 90%.
     // Even on a 8GB GPU it should leave enough space for the Cuda driver
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
-    cuda: Cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
-    rocm: struct {} = .{},
+    xla_gpu: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     tpu: struct {} = .{},
     neuron: struct {} = .{},
     oneapi: struct {} = .{},
@@ -658,7 +657,7 @@ pub const CreateOptions = struct {
         }
     };
 
-    pub const Cuda = struct {
+    pub const XlaGpu = struct {
         allocator: Allocator = .{ .bfc = .{} },
         // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
         // visible_devices: []const i64 = &.{},
@@ -682,7 +681,7 @@ pub const CreateOptions = struct {
             };
         };
 
-        fn writeNamedValues(self: Cuda, values: *std.ArrayList(pjrt.NamedValue)) void {
+        fn writeNamedValues(self: XlaGpu, values: *std.ArrayList(pjrt.NamedValue)) void {
             switch (self.allocator) {
                 .platform => {
                     values.appendAssumeCapacity(.init(.string, "allocator", "platform"));
@@ -710,7 +709,7 @@ pub const CreateOptions = struct {
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
-            .cuda => self.cuda.writeNamedValues(&values),
+            .cuda, .rocm => self.xla_gpu.writeNamedValues(&values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
