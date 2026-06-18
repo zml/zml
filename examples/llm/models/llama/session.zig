@@ -148,7 +148,7 @@ pub const Session = struct {
                 .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32),
             } },
             .metal_fa => .{ .metal_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
-            .vanilla, .cuda_fa2, .cuda_fa3, .nki => try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model),
+            .vanilla, .cuda_fa2, .cuda_fa3, .nki, .triton => try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model),
         };
         defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
