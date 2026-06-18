@@ -89,16 +89,9 @@ pub const MhaFwd = struct {
     });
 
     fn run(b: *Builder, cfg: Config) tri.FinishError!void {
-        // First harness sweep matches the Python defaults. The disabled paths
-        // need separate side-by-side ports because they change control-flow and
-        // loop-carried values.
         std.debug.assert(!cfg.PRELOAD_V);
         std.debug.assert(cfg.BLOCK_DMODEL_PE == 0);
-        std.debug.assert(!cfg.IS_FP8);
-        std.debug.assert(!cfg.VARLEN);
         std.debug.assert(cfg.USE_INT64_STRIDES);
-        std.debug.assert(!cfg.ENABLE_SINK);
-        std.debug.assert(cfg.SLIDING_WINDOW == 0);
 
         const a = try b.declareArgs(.{
             .q_ptr = .{ .ptr = cfg.q_dtype },
@@ -178,9 +171,9 @@ pub const MhaFwd = struct {
         const stride_vh = stride_vh_in.to(.i64);
         const stride_vn = stride_vn_in.to(.i64);
         const stride_vk = stride_vk_in.to(.i64);
-        _ = stride_descale_q_z_in;
-        _ = stride_descale_k_z_in;
-        _ = stride_descale_v_z_in;
+        const stride_descale_q_z = if (cfg.IS_FP8) stride_descale_q_z_in.to(.i64) else stride_descale_q_z_in;
+        const stride_descale_k_z = if (cfg.IS_FP8) stride_descale_k_z_in.to(.i64) else stride_descale_k_z_in;
+        const stride_descale_v_z = if (cfg.IS_FP8) stride_descale_v_z_in.to(.i64) else stride_descale_v_z_in;
         const stride_oz = stride_oz_in.to(.i64);
         const stride_oh = stride_oh_in.to(.i64);
         const stride_om = stride_om_in.to(.i64);
@@ -196,9 +189,13 @@ pub const MhaFwd = struct {
             a.q_ptr,
             a.k_ptr,
             a.v_ptr,
+            a.descale_q_ptr,
+            a.descale_k_ptr,
+            a.descale_v_ptr,
             a.out_ptr,
             a.alibi_slopes_ptr,
             a.softmax_lse_ptr,
+            a.sink_ptr,
             stride_qz,
             stride_qh,
             stride_qm,
@@ -211,6 +208,9 @@ pub const MhaFwd = struct {
             stride_vh,
             stride_vn,
             stride_vk,
+            stride_descale_q_z,
+            stride_descale_k_z,
+            stride_descale_v_z,
             stride_oz,
             stride_oh,
             stride_om,
@@ -221,6 +221,8 @@ pub const MhaFwd = struct {
             stride_lse_h,
             stride_lse_m,
             sm_scale,
+            a.cu_seqlens_q,
+            a.cu_seqlens_k,
             cfg,
         );
     }
@@ -259,7 +261,7 @@ fn loadK(
     ptrs: Value,
     start_n: Value,
     offs_n: Value,
-    seqlen_k: i32,
+    seqlen_k: anytype,
     cfg: MhaFwd.Config,
     comptime mask_steps: bool,
 ) Value {
@@ -278,7 +280,7 @@ fn loadV(
     ptrs: Value,
     start_n: Value,
     offs_n: Value,
-    seqlen_k: i32,
+    seqlen_k: anytype,
     cfg: MhaFwd.Config,
     comptime mask_steps: bool,
 ) Value {
@@ -295,8 +297,8 @@ fn loadV(
 fn computeAlibiBlock(
     b: *Builder,
     alibi_slope: Value,
-    seqlen_q: i32,
-    seqlen_k: i32,
+    seqlen_q: anytype,
+    seqlen_k: anytype,
     offs_m: Value,
     offs_n: Value,
 ) Value {
@@ -305,6 +307,29 @@ fn computeAlibiBlock(
         .sub(seqlen_q)
         .sub(offs_n.expandDims(0));
     return alibi_slope.mul(-1.0).mul(b.abs(relative_pos_block).to(.f32));
+}
+
+fn computeNExtraTokens(b: *Builder, seqlen_k: Value, block_n: i32) Value {
+    var too_short = b.openIfElse(seqlen_k.lt(block_n), .{b.scalarTy(.i32)});
+    {
+        too_short.yieldThen(.{b.liftAs(block_n, .i32).sub(seqlen_k)});
+    }
+    {
+        const rem = seqlen_k.rem(block_n);
+        var has_rem = b.openIfElse(rem.ne(0), .{b.scalarTy(.i32)});
+        {
+            has_rem.yieldThen(.{rem});
+        }
+        {
+            has_rem.yieldElse(.{b.liftAs(0, .i32)});
+        }
+        too_short.yieldElse(.{has_rem.results[0]});
+    }
+    return too_short.results[0];
+}
+
+fn addVarlenScalarOffset(base: Value, start: Value, stride: Value, cfg: MhaFwd.Config) Value {
+    return if (cfg.VARLEN) base.add(start.to(.i64).mul(stride)) else base;
 }
 
 fn attnFwdInner(
@@ -318,12 +343,16 @@ fn attnFwdInner(
     stride_kn: Value,
     stride_vk: Value,
     start_m: Value,
-    seqlen_k: i32,
-    seqlen_q: i32,
+    seqlen_k: anytype,
+    seqlen_q: anytype,
     block_min: Value,
     block_max: Value,
     offs_n_causal: Value,
+    n_extra_tokens: anytype,
     alibi_slope: Value,
+    descale_q: Value,
+    descale_k: Value,
+    descale_v: Value,
     sm_scale: Value,
     offs_m: Value,
     offs_n: Value,
@@ -351,22 +380,37 @@ fn attnFwdInner(
 
         const k = loadK(b, k_ptrs, start_n, offs_n, seqlen_k, cfg, mask_steps);
 
-        var mask = b.full(&.{ cfg.BLOCK_M, cfg.BLOCK_N }, 1, .i1);
-        if (mask_steps and @mod(cfg.SEQLEN_K, cfg.BLOCK_N) != 0) {
-            const bound_cond = start_n.add(BLOCK_N_I32).eq(block_max);
-            const size_n = start_n.add(offs_n).expandDims(0);
+        var mask = if (mask_steps)
+            b.full(&.{ 1, cfg.BLOCK_N }, 1, .i1)
+        else
+            b.full(&.{ cfg.BLOCK_M, cfg.BLOCK_N }, 1, .i1);
+        if (mask_steps and (cfg.VARLEN or @mod(cfg.SEQLEN_K, cfg.BLOCK_N) != 0 or cfg.SEQLEN_K < cfg.BLOCK_N)) {
+            var bound_cond = start_n.add(BLOCK_N_I32).eq(block_max);
+            if (cfg.VARLEN) {
+                bound_cond = bound_cond.bitAnd(n_extra_tokens.ne(0));
+            }
+            const size_n = start_n.splatTo(&.{ 1, cfg.BLOCK_N }).add(offs_n.expandDims(0));
             const mask_partial = size_n.lt(seqlen_k);
             mask = b.where(bound_cond, mask_partial, mask);
         }
 
         const qk_scale = sm_scale.mul(RCP_LN2);
         var qk = b.dot(q, k, b.zeros(&.{ cfg.BLOCK_M, cfg.BLOCK_N }, .f32));
-        qk = qk.mul(qk_scale);
+        qk = if (cfg.IS_FP8)
+            qk.mul(qk_scale.mul(descale_q).mul(descale_k))
+        else
+            qk.mul(qk_scale);
 
         if (is_causal) {
             const causal_boundary = start_n.add(offs_n_causal);
             const causal_mask = offs_m.expandDims(1).ge(causal_boundary.expandDims(0));
             mask = mask.bitAnd(causal_mask);
+        }
+        if (cfg.SLIDING_WINDOW > 0) {
+            const k_pos = start_n.add(b.arange(0, cfg.BLOCK_N, .i32));
+            const q_adj = offs_m.add(seqlen_k).sub(seqlen_q);
+            const window_mask = k_pos.expandDims(0).ge(q_adj.expandDims(1).sub(@as(i32, @intCast(cfg.SLIDING_WINDOW))));
+            mask = mask.bitAnd(window_mask);
         }
 
         qk = b.where(mask, qk, b.full(&.{ cfg.BLOCK_M, cfg.BLOCK_N }, -std.math.inf(f32), .f32));
@@ -377,16 +421,35 @@ fn attnFwdInner(
         qk = qk.add(alibi_block.mul(RCP_LN2));
 
         const m_ij = m_i.maximum(b.maxOpts(qk, .{ .axis = 1 }));
-        const p = b.exp2(qk.sub(m_ij.expandDims(1)));
+        var p = b.exp2(qk.sub(m_ij.expandDims(1)));
+        if (cfg.SLIDING_WINDOW > 0) {
+            p = b.where(mask, p, b.zeros(&.{ cfg.BLOCK_M, cfg.BLOCK_N }, .f32));
+        }
         const l_ij = b.sumOpts(p, .{ .axis = 1 });
 
-        const alpha = b.exp2(m_i.sub(m_ij));
+        var alpha = b.exp2(m_i.sub(m_ij));
+        if (cfg.SLIDING_WINDOW > 0) {
+            alpha = b.where(m_i.eq(m_ij), b.full(&.{cfg.BLOCK_M}, 1.0, .f32), alpha);
+        }
         acc = acc.mul(alpha.expandDims(1));
         l_i = l_i.mul(alpha).add(l_ij);
         m_i = m_ij;
 
         const v = loadV(b, v_ptrs, start_n, offs_n, seqlen_k, cfg, mask_steps);
-        acc = b.dot(p.to(cfg.kv_dtype), v, acc);
+        if (cfg.IS_FP8) {
+            var p_amax = b.max(p.abs());
+            p_amax = b.where(p_amax.le(1e-9), b.liftAs(1e-9, .f32), p_amax);
+            const scale_p = b.liftAs(cfg.FP8_MAX, .f32).div(p_amax);
+            const descale_p = p_amax.div(cfg.FP8_MAX);
+            const scaled = b.dot(
+                p.mul(scale_p).to(cfg.kv_dtype),
+                v,
+                b.zeros(&.{ cfg.BLOCK_M, cfg.BLOCK_DMODEL_POW2 }, .f32),
+            );
+            acc = acc.add(scaled.mul(descale_p).mul(descale_v));
+        } else {
+            acc = b.dot(p.to(cfg.kv_dtype), v, acc);
+        }
 
         const new_k_ptrs = k_ptrs.addPtr(stride_kn.mul(BLOCK_N_I32));
         const new_v_ptrs = v_ptrs.addPtr(stride_vk.mul(BLOCK_N_I32));
@@ -402,9 +465,13 @@ fn mhaFwd(
     q_ptr: Value,
     k_ptr: Value,
     v_ptr: Value,
+    descale_q_ptr: Value,
+    descale_k_ptr: Value,
+    descale_v_ptr: Value,
     out_ptr: Value,
     alibi_slopes_ptr: Value,
     softmax_lse_ptr: Value,
+    sink_ptr: Value,
     stride_qz: Value,
     stride_qh: Value,
     stride_qm: Value,
@@ -417,6 +484,9 @@ fn mhaFwd(
     stride_vh: Value,
     stride_vn: Value,
     stride_vk: Value,
+    stride_descale_q_z: Value,
+    stride_descale_k_z: Value,
+    stride_descale_v_z: Value,
     stride_oz: Value,
     stride_oh: Value,
     stride_om: Value,
@@ -427,6 +497,8 @@ fn mhaFwd(
     stride_lse_h: Value,
     stride_lse_m: Value,
     sm_scale: Value,
+    cu_seqlens_q: Value,
+    cu_seqlens_k: Value,
     cfg: MhaFwd.Config,
 ) void {
     const NUM_BLOCKS: i64 = ceilDivComptime(cfg.SEQLEN_Q, cfg.BLOCK_M);
@@ -461,31 +533,77 @@ fn mhaFwd(
     b.assume(stride_vh.ge(0));
     b.assume(stride_vn.ge(0));
     b.assume(stride_vk.ge(0));
+    if (cfg.IS_FP8) {
+        b.assume(stride_descale_q_z.ge(0));
+        b.assume(stride_descale_k_z.ge(0));
+        b.assume(stride_descale_v_z.ge(0));
+        b.assume(stride_oz.ge(0));
+        b.assume(stride_oh.ge(0));
+        b.assume(stride_om.ge(0));
+        b.assume(stride_on.ge(0));
+        b.assume(stride_alibi_z.ge(0));
+        b.assume(stride_alibi_h.ge(0));
+    }
     b.assume(stride_lse_z.ge(0));
     b.assume(stride_lse_h.ge(0));
     b.assume(stride_lse_m.ge(0));
 
-    var n_blocks = b.liftAs(ceilDivComptime(cfg.SEQLEN_K, cfg.BLOCK_N), .i32);
+    const cu_seqlens_q_start: Value = if (cfg.VARLEN)
+        b.load(cu_seqlens_q.addPtr(off_z))
+    else
+        b.liftAs(0, .i32);
+    const seqlen_q: Value = if (cfg.VARLEN) blk: {
+        const cu_seqlens_q_end = b.load(cu_seqlens_q.addPtr(off_z.add(1)));
+        break :blk cu_seqlens_q_end.sub(cu_seqlens_q_start);
+    } else b.liftAs(SEQLEN_Q_I32, .i32);
+
+    if (cfg.VARLEN) {
+        var ret = b.openReturnIf(start_m.mul(BLOCK_M_I32).gt(seqlen_q));
+        ret.inline_return = true;
+        {
+            ret.yieldReturn(.{});
+        }
+    }
+
+    const cu_seqlens_k_start: Value = if (cfg.VARLEN)
+        b.load(cu_seqlens_k.addPtr(off_z))
+    else
+        b.liftAs(0, .i32);
+    const seqlen_k: Value = if (cfg.VARLEN) blk: {
+        const cu_seqlens_k_end = b.load(cu_seqlens_k.addPtr(off_z.add(1)));
+        break :blk cu_seqlens_k_end.sub(cu_seqlens_k_start);
+    } else b.liftAs(SEQLEN_K_I32, .i32);
+
+    var n_blocks = if (cfg.VARLEN)
+        seqlen_k.cdiv(BLOCK_N_I32)
+    else
+        b.liftAs(ceilDivComptime(cfg.SEQLEN_K, cfg.BLOCK_N), .i32);
 
     if (cfg.IS_CAUSAL) {
-        const n_blocks_seqlen = start_m.add(1).mul(BLOCK_M_I32).add(SEQLEN_K_I32).sub(SEQLEN_Q_I32).cdiv(BLOCK_N_I32);
+        const n_blocks_seqlen = if (cfg.VARLEN)
+            start_m.add(1).mul(BLOCK_M_I32).add(seqlen_k).sub(seqlen_q).cdiv(BLOCK_N_I32)
+        else
+            start_m.add(1).mul(BLOCK_M_I32).add(SEQLEN_K_I32).sub(SEQLEN_Q_I32).cdiv(BLOCK_N_I32);
         n_blocks = n_blocks.minimum(n_blocks_seqlen);
 
         var ret = b.openReturnIf(n_blocks.le(0));
         ret.inline_return = true;
         {
-            const offs_out = off_z.mul(stride_oz)
-                .add(off_q_head.mul(stride_oh))
+            var offs_out_base = off_z.mul(stride_oz)
+                .add(off_q_head.mul(stride_oh));
+            offs_out_base = addVarlenScalarOffset(offs_out_base, cu_seqlens_q_start, stride_om, cfg);
+            const offs_out = offs_out_base
                 .add(offs_m.expandDims(1).mul(stride_om))
                 .add(offs_d.expandDims(0).mul(stride_on));
             const acc = b.zeros(&.{ cfg.BLOCK_M, cfg.BLOCK_DMODEL_POW2 }, cfg.out_dtype);
-            const out_mask = offs_m.expandDims(1).lt(SEQLEN_Q_I32)
+            const out_mask = offs_m.expandDims(1).lt(seqlen_q)
                 .bitAnd(offs_d.expandDims(0).lt(BLOCK_DMODEL_I32));
             b.storeOpts(out_ptr.addPtr(offs_out), acc, .{ .mask = out_mask });
 
-            const offs_lse = off_z.mul(stride_lse_z)
-                .add(off_q_head.mul(stride_lse_h))
-                .add(offs_m.mul(stride_lse_m));
+            var offs_lse_base = off_z.mul(stride_lse_z)
+                .add(off_q_head.mul(stride_lse_h));
+            offs_lse_base = addVarlenScalarOffset(offs_lse_base, cu_seqlens_q_start, stride_lse_m, cfg);
+            const offs_lse = offs_lse_base.add(offs_m.mul(stride_lse_m));
             const lse_mask = offs_m.lt(SEQLEN_Q_I32);
             const lse = b.full(&.{cfg.BLOCK_M}, 0.0, .f32);
             b.storeOpts(softmax_lse_ptr.addPtr(offs_lse), lse, .{ .mask = lse_mask });
@@ -500,20 +618,23 @@ fn mhaFwd(
     const kh_off = off_k_head.mul(stride_kh);
     const vh_off = off_k_head.mul(stride_vh);
 
-    const q_offs = off_z.mul(stride_qz)
-        .add(qh_off)
+    var q_base = off_z.mul(stride_qz).add(qh_off);
+    q_base = addVarlenScalarOffset(q_base, cu_seqlens_q_start, stride_qm, cfg);
+    const q_offs = q_base
         .add(offs_m.expandDims(1).mul(stride_qm))
         .add(offs_d.expandDims(0).mul(stride_qk));
     const q_ptrs = q_ptr.addPtr(q_offs);
 
-    const k_offs = off_z.mul(stride_kz)
-        .add(kh_off)
+    var k_base = off_z.mul(stride_kz).add(kh_off);
+    k_base = addVarlenScalarOffset(k_base, cu_seqlens_k_start, stride_kn, cfg);
+    const k_offs = k_base
         .add(offs_d.expandDims(1).mul(stride_kk))
         .add(offs_n.expandDims(0).mul(stride_kn));
     const k_ptrs = k_ptr.addPtr(k_offs);
 
-    const v_offs = off_z.mul(stride_vz)
-        .add(vh_off)
+    var v_base = off_z.mul(stride_vz).add(vh_off);
+    v_base = addVarlenScalarOffset(v_base, cu_seqlens_k_start, stride_vn, cfg);
+    const v_offs = v_base
         .add(offs_n.expandDims(1).mul(stride_vn))
         .add(offs_d.expandDims(0).mul(stride_vk));
     const v_ptrs = v_ptr.addPtr(v_offs);
@@ -521,15 +642,17 @@ fn mhaFwd(
     const alibi_offs = off_z.mul(stride_alibi_z).add(off_q_head.mul(stride_alibi_h));
     const alibi_slope = b.load(alibi_slopes_ptr.addPtr(alibi_offs));
 
-    const m_i_value = -std.math.inf(f32);
-    const m_i = b.full(&.{cfg.BLOCK_M}, m_i_value, .f32);
+    const m_i = if (cfg.ENABLE_SINK)
+        b.load(sink_ptr.addPtr(off_q_head)).to(.f32).mul(RCP_LN2).splatTo(&.{cfg.BLOCK_M})
+    else
+        b.full(&.{cfg.BLOCK_M}, -std.math.inf(f32), .f32);
     const l_i = b.full(&.{cfg.BLOCK_M}, 1.0, .f32);
     const acc = b.zeros(&.{ cfg.BLOCK_M, cfg.BLOCK_DMODEL_POW2 }, .f32);
 
     const q_mask = if (cfg.BLOCK_DMODEL == cfg.BLOCK_DMODEL_POW2)
-        offs_m.expandDims(1).lt(SEQLEN_Q_I32)
+        offs_m.expandDims(1).lt(seqlen_q)
     else
-        offs_m.expandDims(1).lt(SEQLEN_Q_I32).bitAnd(offs_d.expandDims(0).lt(BLOCK_DMODEL_I32));
+        offs_m.expandDims(1).lt(seqlen_q).bitAnd(offs_d.expandDims(0).lt(BLOCK_DMODEL_I32));
 
     const q_cache_mod: ttir.CacheModifier = if (cfg.BLOCK_M >= cfg.NUM_Q_HEADS) .cg else .none;
     const q = b.loadOpts(q_ptrs, .{
@@ -537,24 +660,84 @@ fn mhaFwd(
         .other = b.zeros(&.{ cfg.BLOCK_M, cfg.BLOCK_DMODEL_POW2 }, cfg.q_dtype),
         .cache_modifier = q_cache_mod,
     });
-    const n_extra_tokens: i64 = if (cfg.SEQLEN_K < cfg.BLOCK_N)
-        cfg.BLOCK_N - cfg.SEQLEN_K
-    else if (@mod(cfg.SEQLEN_K, cfg.BLOCK_N) != 0)
-        @mod(cfg.SEQLEN_K, cfg.BLOCK_N)
+    const descale_q = if (cfg.IS_FP8)
+        b.load(descale_q_ptr.addPtr(off_z.mul(stride_descale_q_z).add(off_q_head)))
     else
-        0;
-    const padded_block_k = n_extra_tokens != 0;
-    const is_modulo_mn = !padded_block_k and (@mod(cfg.SEQLEN_Q, cfg.BLOCK_M) == 0);
+        sm_scale;
+    const descale_k = if (cfg.IS_FP8)
+        b.load(descale_k_ptr.addPtr(off_z.mul(stride_descale_k_z).add(off_k_head)))
+    else
+        sm_scale;
+    const descale_v = if (cfg.IS_FP8)
+        b.load(descale_v_ptr.addPtr(off_z.mul(stride_descale_v_z).add(off_k_head)))
+    else
+        sm_scale;
 
-    var masked_blocks: Value = if (cfg.IS_CAUSAL)
-        b.liftAs(@divTrunc(cfg.BLOCK_M, cfg.BLOCK_N) + @intFromBool(!is_modulo_mn), .i32)
+    const n_extra_tokens = if (cfg.VARLEN)
+        computeNExtraTokens(b, seqlen_k, BLOCK_N_I32)
     else
-        b.liftAs(@intFromBool(padded_block_k), .i32);
-    const visible_blocks = n_blocks;
+        b.liftAs(
+            if (cfg.SEQLEN_K < cfg.BLOCK_N)
+                cfg.BLOCK_N - cfg.SEQLEN_K
+            else if (@mod(cfg.SEQLEN_K, cfg.BLOCK_N) != 0)
+                @mod(cfg.SEQLEN_K, cfg.BLOCK_N)
+            else
+                0,
+            .i32,
+        );
+
+    var block_min = b.liftAs(0, .i32);
+    var k_ptrs_loop = k_ptrs;
+    var v_ptrs_loop = v_ptrs;
+    const visible_blocks = if (cfg.SLIDING_WINDOW > 0) blk: {
+        const window_start_n = start_m.mul(BLOCK_M_I32)
+            .add(seqlen_k)
+            .sub(seqlen_q)
+            .sub(@as(i32, @intCast(cfg.SLIDING_WINDOW)));
+        const skipped_blocks = window_start_n.maximum(0).div(BLOCK_N_I32).minimum(n_blocks);
+        block_min = skipped_blocks.mul(BLOCK_N_I32);
+        var skip_if = b.openIfElse(skipped_blocks.gt(0), .{ k_ptrs.type_(), v_ptrs.type_() });
+        {
+            const skipped = skipped_blocks.mul(BLOCK_N_I32);
+            skip_if.yieldThen(.{
+                k_ptrs.addPtr(skipped.to(.i64).mul(stride_kn)),
+                v_ptrs.addPtr(skipped.to(.i64).mul(stride_vn)),
+            });
+        }
+        {
+            skip_if.yieldElse(.{ k_ptrs, v_ptrs });
+        }
+        k_ptrs_loop = skip_if.results[0];
+        v_ptrs_loop = skip_if.results[1];
+        break :blk n_blocks.sub(skipped_blocks);
+    } else n_blocks;
+
+    const masked_blocks_base: Value = if (cfg.VARLEN) blk: {
+        if (cfg.IS_CAUSAL) {
+            const is_modulo_mn = n_extra_tokens.eq(0).bitAnd(seqlen_q.rem(BLOCK_M_I32).eq(0));
+            const not_is_modulo_mn = b.xori(is_modulo_mn, b.liftAs(1, .i1));
+            break :blk b.liftAs(@divTrunc(cfg.BLOCK_M, cfg.BLOCK_N), .i32).add(not_is_modulo_mn.to(.i32));
+        }
+        break :blk n_extra_tokens.ne(0).to(.i32);
+    } else blk: {
+        const n_extra_tokens_static: i64 = if (cfg.SEQLEN_K < cfg.BLOCK_N)
+            cfg.BLOCK_N - cfg.SEQLEN_K
+        else if (@mod(cfg.SEQLEN_K, cfg.BLOCK_N) != 0)
+            @mod(cfg.SEQLEN_K, cfg.BLOCK_N)
+        else
+            0;
+        const padded_block_k = n_extra_tokens_static != 0;
+        const is_modulo_mn = !padded_block_k and (@mod(cfg.SEQLEN_Q, cfg.BLOCK_M) == 0);
+        break :blk if (cfg.IS_CAUSAL)
+            b.liftAs(@divTrunc(cfg.BLOCK_M, cfg.BLOCK_N) + @intFromBool(!is_modulo_mn), .i32)
+        else
+            b.liftAs(@intFromBool(padded_block_k), .i32);
+    };
+
+    var masked_blocks: Value = masked_blocks_base;
     masked_blocks = masked_blocks.minimum(visible_blocks);
     const n_full_blocks = visible_blocks.sub(masked_blocks);
 
-    const block_min = b.liftAs(0, .i32);
     const all_block_max = n_blocks.mul(BLOCK_N_I32);
 
     var full_if = b.openIfElse(n_full_blocks.gt(0), .{
@@ -572,17 +755,21 @@ fn mhaFwd(
             l_i,
             m_i,
             q,
-            k_ptrs,
-            v_ptrs,
+            k_ptrs_loop,
+            v_ptrs_loop,
             stride_kn,
             stride_vn,
             start_m,
-            SEQLEN_K_I32,
-            SEQLEN_Q_I32,
+            seqlen_k,
+            seqlen_q,
             block_min,
             full_block_max,
             b.liftAs(0, .i32),
+            n_extra_tokens,
             alibi_slope,
+            descale_q,
+            descale_k,
+            descale_v,
             sm_scale,
             offs_m,
             offs_n,
@@ -596,20 +783,25 @@ fn mhaFwd(
         full_if.yieldElse(.{ m_i, l_i, acc, block_min, all_block_max });
     }
 
-    const offs_n_causal = if (cfg.IS_CAUSAL)
-        offs_n.add(SEQLEN_Q_I32 - SEQLEN_K_I32)
-    else
-        b.liftAs(0, .i32);
-
     var masked_if = b.openIfElse(masked_blocks.gt(0), .{
         b.tensorTy(&.{cfg.BLOCK_M}, .f32),
         b.tensorTy(&.{cfg.BLOCK_M}, .f32),
         b.tensorTy(&.{ cfg.BLOCK_M, cfg.BLOCK_DMODEL_POW2 }, .f32),
     });
     {
+        const offs_n_causal = if (cfg.IS_CAUSAL)
+            offs_n.add(seqlen_q.sub(seqlen_k))
+        else
+            b.liftAs(0, .i32);
         const skipped = n_full_blocks.mul(BLOCK_N_I32);
-        const k_ptrs_masked = k_ptr.addPtr(k_offs.add(skipped.to(.i64).mul(stride_kn)));
-        const v_ptrs_masked = v_ptr.addPtr(v_offs.add(skipped.to(.i64).mul(stride_vn)));
+        const k_ptrs_masked = if (cfg.SLIDING_WINDOW > 0)
+            k_ptrs_loop.addPtr(skipped.to(.i64).mul(stride_kn))
+        else
+            k_ptr.addPtr(k_offs.add(skipped.to(.i64).mul(stride_kn)));
+        const v_ptrs_masked = if (cfg.SLIDING_WINDOW > 0)
+            v_ptrs_loop.addPtr(skipped.to(.i64).mul(stride_vn))
+        else
+            v_ptr.addPtr(v_offs.add(skipped.to(.i64).mul(stride_vn)));
         const masked = if (cfg.IS_CAUSAL)
             attnFwdInner(
                 b,
@@ -622,12 +814,16 @@ fn mhaFwd(
                 stride_kn,
                 stride_vn,
                 start_m,
-                SEQLEN_K_I32,
-                SEQLEN_Q_I32,
+                seqlen_k,
+                seqlen_q,
                 full_if.results[3],
                 full_if.results[4],
                 offs_n_causal,
+                n_extra_tokens,
                 alibi_slope,
+                descale_q,
+                descale_k,
+                descale_v,
                 sm_scale,
                 offs_m,
                 offs_n,
@@ -647,12 +843,16 @@ fn mhaFwd(
                 stride_kn,
                 stride_vn,
                 start_m,
-                SEQLEN_K_I32,
-                SEQLEN_Q_I32,
+                seqlen_k,
+                seqlen_q,
                 full_if.results[3],
                 full_if.results[4],
-                offs_n_causal,
+                b.liftAs(0, .i32),
+                n_extra_tokens,
                 alibi_slope,
+                descale_q,
+                descale_k,
+                descale_v,
                 sm_scale,
                 offs_m,
                 offs_n,
@@ -675,15 +875,17 @@ fn mhaFwd(
 
     const end_m_idx = start_m.add(1).mul(BLOCK_M_I32);
     const start_m_idx = start_m.mul(BLOCK_M_I32);
-    const causal_start_idx: i32 = @intCast(cfg.SEQLEN_Q - cfg.SEQLEN_K);
+    const causal_start_idx = if (cfg.VARLEN)
+        seqlen_q.sub(seqlen_k)
+    else
+        b.liftAs(@as(i32, @intCast(cfg.SEQLEN_Q - cfg.SEQLEN_K)), .i32);
     if (cfg.IS_CAUSAL) {
-        const causal_start = b.liftAs(causal_start_idx, .i32);
-        const cleanup_cond = causal_start.gt(start_m_idx).bitAnd(causal_start.lt(end_m_idx));
+        const cleanup_cond = causal_start_idx.gt(start_m_idx).bitAnd(causal_start_idx.lt(end_m_idx));
         var cleanup_if = b.openIfElse(cleanup_cond, .{
             b.tensorTy(&.{ cfg.BLOCK_M, cfg.BLOCK_DMODEL_POW2 }, .f32),
         });
         {
-            const out_mask_boundary = b.splat(causal_start, &.{cfg.BLOCK_DMODEL_POW2});
+            const out_mask_boundary = b.splat(causal_start_idx, &.{cfg.BLOCK_DMODEL_POW2});
             const mask_m_offsets = start_m_idx.add(b.arange(0, cfg.BLOCK_M, .i32));
             const out_ptrs_mask = mask_m_offsets.expandDims(1).ge(out_mask_boundary.expandDims(0));
             cleanup_if.yieldThen(.{
@@ -700,16 +902,18 @@ fn mhaFwd(
         acc_final = cleanup_if.results[0];
     }
 
+    const overflow_size = end_m_idx.sub(seqlen_q);
+
     var softmax_lse = m_final.add(b.log2(l_final)).mul(LN2);
     if (cfg.IS_CAUSAL) {
         const lse_causal_mask = start_m_idx.add(b.arange(0, cfg.BLOCK_M, .i32)).lt(causal_start_idx);
         softmax_lse = b.where(lse_causal_mask, b.zeros(&.{cfg.BLOCK_M}, .f32), softmax_lse);
     }
 
-    const overflow_size = end_m_idx.sub(SEQLEN_Q_I32);
-    const offs_lse = off_z.mul(stride_lse_z)
-        .add(off_q_head.mul(stride_lse_h))
-        .add(offs_m.mul(stride_lse_m));
+    var offs_lse_base = off_z.mul(stride_lse_z)
+        .add(off_q_head.mul(stride_lse_h));
+    offs_lse_base = addVarlenScalarOffset(offs_lse_base, cu_seqlens_q_start, stride_lse_m, cfg);
+    const offs_lse = offs_lse_base.add(offs_m.mul(stride_lse_m));
     var lse_if = b.openIfElse(overflow_size.gt(0), .{});
     {
         const boundary = b.splat(BLOCK_M_I32, &.{cfg.BLOCK_M}).sub(overflow_size);
@@ -724,8 +928,10 @@ fn mhaFwd(
         lse_if.yieldElse(.{});
     }
 
-    const offs_out = off_z.mul(stride_oz)
-        .add(off_q_head.mul(stride_oh))
+    var offs_out_base = off_z.mul(stride_oz)
+        .add(off_q_head.mul(stride_oh));
+    offs_out_base = addVarlenScalarOffset(offs_out_base, cu_seqlens_q_start, stride_om, cfg);
+    const offs_out = offs_out_base
         .add(offs_m.expandDims(1).mul(stride_om))
         .add(offs_d.expandDims(0).mul(stride_on));
     const out_mask_init = b.full(&.{ cfg.BLOCK_M, 1 }, 1, .i1);
@@ -733,7 +939,7 @@ fn mhaFwd(
         b.tensorTy(&.{ cfg.BLOCK_M, 1 }, .i1),
     });
     {
-        out_mask_if.yieldThen(.{out_mask_init.bitAnd(offs_m.expandDims(1).lt(SEQLEN_Q_I32))});
+        out_mask_if.yieldThen(.{out_mask_init.bitAnd(offs_m.expandDims(1).lt(seqlen_q))});
     }
     {
         out_mask_if.yieldElse(.{out_mask_init});
