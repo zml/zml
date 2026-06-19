@@ -387,7 +387,7 @@
   "moduleExtensions": {
     "@@aspect_rules_py+//py:extensions.bzl%py_tools": {
       "general": {
-        "bzlTransitiveDigest": "GLVIk55uU2jb460gpL1FFbE/tBFqzMxRfta5QXYfjQo=",
+        "bzlTransitiveDigest": "pI39mvkEpRkqO9fPgwuZp2cFsNe/MqGRNr3gPBzTHaQ=",
         "usagesDigest": "9BiP3ASHlGl4doGhzXJwK17taNzv/q6x/IZ4Hb6LxNY=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -1076,7 +1076,7 @@
     },
     "@@rules_kotlin+//src/main/starlark/core/repositories:bzlmod_setup.bzl%rules_kotlin_extensions": {
       "general": {
-        "bzlTransitiveDigest": "AEsQvKwdstptzt98AO1bJYfoWpPUn2upx53ra6o/Rc8=",
+        "bzlTransitiveDigest": "oA0OoCaohRv2x/x61/6mFy+2a9+GiuUKGAXLGcQy+hQ=",
         "usagesDigest": "QI2z8ZUR+mqtbwsf2fLqYdJAkPOHdOV+tF2yVAUgRzw=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -1140,7 +1140,7 @@
     },
     "@@rules_oci+//oci:extensions.bzl%oci": {
       "general": {
-        "bzlTransitiveDigest": "7oR14uSSRXhIDozspnn5ya0JWJlnqcG+JmT5yO1BsLw=",
+        "bzlTransitiveDigest": "Q7DvSdepUOK0DnFJtYmquDXHZCcR2DoLM9LbkrHSCKQ=",
         "usagesDigest": "JLbamplho20rviuebatMGqnQnaoj32ewCzLuRVusGoU=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -1434,7 +1434,7 @@
     },
     "@@rules_python+//python/uv:uv.bzl%uv": {
       "general": {
-        "bzlTransitiveDigest": "LM8+g04lV+afYP67YcE7wenTJMrNqvF5u/ZnOctwctY=",
+        "bzlTransitiveDigest": "IzGWfoGARM6X2a4AM7BN5gheLtDsFeP9Fra2qTod+mA=",
         "usagesDigest": "Ucfum/vsVnlkhtglTERDLTj+bBeG7dcpbV9h0LP9HOQ=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
@@ -1765,7 +1765,7 @@
     },
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
-        "bzlTransitiveDigest": "u7Psh7szBG3+lbRmEeBBbWlZRHJWhWtxQo/wtRqvnTg=",
+        "bzlTransitiveDigest": "VGLOg2kVw+STO9R5OrQnLFbv7Vl5TPdtIebIs324IpU=",
         "usagesDigest": "4xBoe2eIScx2QI0jVieHWXdflezUUDIApwMqS+SWGbw=",
         "recordedFileInputs": {
           "@@//bazel/zig_index.json": "2e3b4b83f1add5d3ca12fd05797c04c38af21d86c7fc7c1a9b356560141a4797",
@@ -2094,7 +2094,7 @@
     },
     "@@rules_zig+//zig/zls:extensions.bzl%zls": {
       "general": {
-        "bzlTransitiveDigest": "8ZwSSF/7dE4rb0W0cZqil2SfGF1bPK04LTv1/zjtkTM=",
+        "bzlTransitiveDigest": "ZuceGxE17jROQ+kQkaPqIcK7gMKGb56I97Aq1/Dubdc=",
         "usagesDigest": "b/ERjMTWazfa8VFWuTc0PTtQQzLDuloWSHlzXj6Zb5w=",
         "recordedFileInputs": {
           "@@rules_zig+//zig/zls/private/versions.json": "127803289dfd79b5255db5f74be1d9a2f790f03292d6147009af702d888aba69"

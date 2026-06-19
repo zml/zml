@@ -27,6 +27,12 @@ fn hasOneApiDevices(io: std.Io) bool {
     return false;
 }
 
+fn setupOneAPIEnv() void {
+    _ = c.setenv("CCL_LOG_LEVEL", c.getenv("CCL_LOG_LEVEL") orelse "error", 1);
+    _ = c.setenv("CCL_ATL_TRANSPORT", c.getenv("CCL_ATL_TRANSPORT") orelse "ofi", 1);
+    _ = c.setenv("CCL_TOPO_P2P_ACCESS", c.getenv("CCL_ATL_TRANSPORT") orelse "1", 1);
+}
+
 pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     if (comptime !isEnabled()) {
         return error.Unavailable;
@@ -47,6 +53,8 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         log.err("Failed to find sandbox path for oneAPI runtime", .{});
         return error.FileNotFound;
     };
+
+    setupOneAPIEnv();
 
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
