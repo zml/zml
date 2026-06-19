@@ -412,7 +412,6 @@ fn buildFetchTasks(
 
 pub const FetchPool = struct {
     allocator: std.mem.Allocator,
-    // io: std.Io,
     client: *std.http.Client,
     workers: []Worker,
     group: std.Io.Group,
@@ -461,7 +460,6 @@ pub const FetchPool = struct {
         errdefer allocator.destroy(self);
         self.* = .{
             .allocator = allocator,
-            // .io = io,
             .client = client,
             .workers = workers,
             .group = .init,
@@ -616,7 +614,7 @@ pub fn fetchRange(
     defer pool.allocator.free(cas.token);
 
     var auth_buf: [4096]u8 = undefined;
-    const cas_auth = std.fmt.bufPrint(&auth_buf, "Bearer {s}", .{cas.token}) catch return error.TokenTooLong;
+    const cas_auth = try bearerAuth(cas.token, &auth_buf);
 
     const parsed = try fetchReconstruction(pool.allocator, pool.client, cas.url, cas_auth, file_id, offset, offset + dst.len - 1);
     defer parsed.deinit();
