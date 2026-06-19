@@ -668,6 +668,20 @@ pub const paged = struct {
 };
 
 pub const flashattn = struct {
+    fn scalarI64(value: i64) zml.Tensor {
+        return zml.Tensor.constant(zml.DataType.i64.constant(value));
+    }
+
+    fn strideFor(t: zml.Tensor, comptime tag: @EnumLiteral()) i64 {
+        const strides = t.shape().computeElementStrides().constSlice();
+        if (t.shape().hasTag(tag)) |axis| return strides[axis];
+        return 0;
+    }
+
+    fn blockSizeM(seqlen_q: i64) i64 {
+        return if (seqlen_q == 1) 16 else 64;
+    }
+
     pub const Parameters = struct {
         pub const InitOptions = struct {};
 
@@ -687,11 +701,121 @@ pub const flashattn = struct {
     };
 
     pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
-        _ = k;
-        _ = v;
-        _ = token_index;
         _ = metadata;
         _ = parameters;
-        return q;
+
+        stdx.debug.assert(q.shape().hasTags(.{ .q, .h, .hd }), "triton.flashattn expects q to have tags .q, .h, .hd, got {f}", .{q.shape()});
+        stdx.debug.assert(k.shape().hasTags(.{ .k, .h, .hd }), "triton.flashattn expects k to have tags .k, .h, .hd, got {f}", .{k.shape()});
+        stdx.debug.assert(v.shape().hasTags(.{ .k, .h, .hd }), "triton.flashattn expects v to have tags .k, .h, .hd, got {f}", .{v.shape()});
+        stdx.debug.assert(q.shape().hasTag(.b) == null or q.dim(.b) == 1, "triton.flashattn only supports batch size 1, got {f}", .{q.shape()});
+        stdx.debug.assert(k.shape().hasTag(.b) == null or k.dim(.b) == 1, "triton.flashattn only supports batch size 1, got {f}", .{k.shape()});
+        stdx.debug.assert(v.shape().hasTag(.b) == null or v.dim(.b) == 1, "triton.flashattn only supports batch size 1, got {f}", .{v.shape()});
+
+        const q_sharded = q.withPartitioning(.{ .h = .model });
+        const k_sharded = k.withPartitioning(.{ .h = .model });
+        const v_sharded = v.withPartitioning(.{ .h = .model });
+
+        const seqlen_q = q_sharded.dim(.q);
+        const seqlen_k = k_sharded.dim(.k);
+        const num_q_heads = q_sharded.dim(.h);
+        const num_kv_heads = k_sharded.dim(.h);
+        const head_dim = q_sharded.dim(.hd);
+        const head_dim_pow2: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(head_dim)));
+        const block_m = blockSizeM(seqlen_q);
+        const block_n: i64 = 64;
+        const num_m_blocks = std.math.divCeil(i64, seqlen_q, block_m) catch unreachable;
+
+        const seqused_k = token_index.addConstant(seqlen_q).reshape(.{1});
+        const zero = zml.Tensor.constant(token_index.dtype().zero()).reshape(.{1});
+        const cu_seqlens_k = zml.Tensor.concatenate(&.{ zero, seqused_k }, 0)
+            .convert(.i32)
+            .withPartitioning(.{ ._0 = .replicated });
+        const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, @intCast(seqlen_q) }))
+            .withPartitioning(.{ ._0 = .replicated });
+
+        const softmax_lse = zml.Tensor.uninitialized(zml.Shape.init(.{
+            .h = num_q_heads,
+            .q = seqlen_q,
+        }, .f32).withPartitioning(.{ .h = .model }));
+        const alibi_slopes = zml.Tensor.zeroes(zml.Shape.init(.{ .h = num_q_heads }, .f32).withPartitioning(.{ .h = .model }));
+        const dummy = zml.Tensor.constant(zml.DataType.f32.zero());
+
+        const sm_scale: f32 = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(head_dim))));
+        const sm_scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(sm_scale));
+        const kernel_config: kernels.MhaFwd.Config = .{
+            .q_dtype = toDType(q_sharded.dtype()),
+            .kv_dtype = toDType(k_sharded.dtype()),
+            .out_dtype = toDType(q_sharded.dtype()),
+            .SEQLEN_Q = seqlen_q,
+            .SEQLEN_K = seqlen_k,
+            .IS_CAUSAL = true,
+            .NUM_Q_HEADS = num_q_heads,
+            .NUM_K_HEADS = num_kv_heads,
+            .PRELOAD_V = false,
+            .BLOCK_M = block_m,
+            .BLOCK_N = block_n,
+            .BLOCK_DMODEL = head_dim,
+            .BLOCK_DMODEL_POW2 = head_dim_pow2,
+            .BLOCK_DMODEL_PE = 0,
+            .IS_FP8 = false,
+            .VARLEN = true,
+            .BATCH = 1,
+            .NUM_XCD = 8,
+            .USE_INT64_STRIDES = true,
+            .ENABLE_SINK = false,
+            .SLIDING_WINDOW = 0,
+            .HEAD_STRIDE_ALIGNED_8 = @mod(strideFor(q_sharded, .h), 8) == 0,
+        };
+        log.debug("flashattn config: {any}", .{kernel_config});
+
+        const output = kernels.MhaFwd.Kernel.call(
+            .{
+                .q_ptr = q_sharded,
+                .k_ptr = k_sharded,
+                .v_ptr = v_sharded,
+                .descale_q_ptr = dummy,
+                .descale_k_ptr = dummy,
+                .descale_v_ptr = dummy,
+                .alibi_slopes_ptr = alibi_slopes,
+                .softmax_lse_ptr = softmax_lse,
+                .sink_ptr = dummy,
+                .stride_qz_in_ptr = scalarI64(strideFor(q_sharded, .b)),
+                .stride_qh_in_ptr = scalarI64(strideFor(q_sharded, .h)),
+                .stride_qm_in_ptr = scalarI64(strideFor(q_sharded, .q)),
+                .stride_qk_in_ptr = scalarI64(strideFor(q_sharded, .hd)),
+                .stride_kz_in_ptr = scalarI64(strideFor(k_sharded, .b)),
+                .stride_kh_in_ptr = scalarI64(strideFor(k_sharded, .h)),
+                .stride_kn_in_ptr = scalarI64(strideFor(k_sharded, .k)),
+                .stride_kk_in_ptr = scalarI64(strideFor(k_sharded, .hd)),
+                .stride_vz_in_ptr = scalarI64(strideFor(v_sharded, .b)),
+                .stride_vh_in_ptr = scalarI64(strideFor(v_sharded, .h)),
+                .stride_vn_in_ptr = scalarI64(strideFor(v_sharded, .k)),
+                .stride_vk_in_ptr = scalarI64(strideFor(v_sharded, .hd)),
+                .stride_descale_q_z_in_ptr = scalarI64(0),
+                .stride_descale_k_z_in_ptr = scalarI64(0),
+                .stride_descale_v_z_in_ptr = scalarI64(0),
+                .stride_oz_in_ptr = scalarI64(strideFor(q_sharded, .b)),
+                .stride_oh_in_ptr = scalarI64(strideFor(q_sharded, .h)),
+                .stride_om_in_ptr = scalarI64(strideFor(q_sharded, .q)),
+                .stride_on_in_ptr = scalarI64(strideFor(q_sharded, .hd)),
+                .stride_alibi_z_in_ptr = scalarI64(0),
+                .stride_alibi_h_in_ptr = scalarI64(strideFor(alibi_slopes, .h)),
+                .stride_lse_z_in_ptr = scalarI64(0),
+                .stride_lse_h_in_ptr = scalarI64(strideFor(softmax_lse, .h)),
+                .stride_lse_m_in_ptr = scalarI64(strideFor(softmax_lse, .q)),
+                .sm_scale_ptr = sm_scale_ptr,
+                .cu_seqlens_q = cu_seqlens_q,
+                .cu_seqlens_k = cu_seqlens_k,
+            },
+            .{ .out = q_sharded.shape() },
+            .{
+                .cfg = kernel_config,
+                .grid = .{ @intCast(num_m_blocks * num_q_heads), 1, 1 },
+                .num_stages = 1,
+                .num_warps = 4,
+            },
+        );
+
+        return output.out;
     }
 };
