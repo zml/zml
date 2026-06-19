@@ -538,6 +538,7 @@ const ComposedKernelExe = struct {
         return .{
             .norm = model_buffers.text_model.norm,
             .lm_head = model_buffers.lm_head,
+            .embed_tokens = model_buffers.text_model.embed_tokens,
         };
     }
 
