@@ -23,19 +23,43 @@ const Tensor = @import("tensor.zig").Tensor;
 const log = std.log.scoped(.@"zml/io");
 
 pub const TensorStore = struct {
+    /// Describes a fused weight: the ordered source descriptors plus the
+    /// round-robin interleave plan used to lay them out along axis 0 at load.
+    /// Each `interleave_rows[i]` is how many axis-0 rows of source `i` are
+    /// written per round; the loader emits `rounds` rounds. With one row-block
+    /// per source the layout is a plain concat (q‖k‖v); with KV-group blocks it
+    /// is group-major ([Q heads│K│V] per kv-group), which makes a contiguous
+    /// axis-0 (`.dout = .model`) tensor-parallel shard land on whole kv-groups.
+    pub const FusedSource = struct {
+        descs: []const *safetensors.Tensor,
+        interleave_rows: []const i64,
+        rounds: i64,
+    };
+
     registry: *safetensors.TensorRegistry,
     id_map: std.AutoHashMapUnmanaged(usize, *safetensors.Tensor),
+    // Maps a tensor id to its fused source plan (see FusedSource). Lets a model
+    // declare a fused weight (e.g. QKV) backed by several safetensors entries,
+    // so the concat happens once at load instead of every forward.
+    fused_map: std.AutoHashMapUnmanaged(usize, FusedSource) = .empty,
     allocator: std.mem.Allocator,
 
     pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry) TensorStore {
         return .{
             .registry = registry,
             .id_map = .empty,
+            .fused_map = .empty,
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *TensorStore) void {
+        var it = self.fused_map.valueIterator();
+        while (it.next()) |fused| {
+            self.allocator.free(fused.descs);
+            self.allocator.free(fused.interleave_rows);
+        }
+        self.fused_map.deinit(self.allocator);
         self.id_map.deinit(self.allocator);
     }
 
@@ -69,6 +93,18 @@ pub const TensorStore = struct {
         const tensor_desc = self.id_map.get(id) orelse return error.NotFound;
 
         return safetensors.TensorReader.init(io, tensor_desc.*, buffer, .{});
+    }
+
+    fn bindIdToFused(self: *TensorStore, descs: []const *safetensors.Tensor, interleave_rows: []const i64, rounds: i64, id: usize) !void {
+        const owned_descs = try self.allocator.dupe(*safetensors.Tensor, descs);
+        errdefer self.allocator.free(owned_descs);
+        const owned_rows = try self.allocator.dupe(i64, interleave_rows);
+        errdefer self.allocator.free(owned_rows);
+        try self.fused_map.put(self.allocator, id, .{ .descs = owned_descs, .interleave_rows = owned_rows, .rounds = rounds });
+    }
+
+    pub fn getFusedById(self: *const TensorStore, id: usize) ?FusedSource {
+        return self.fused_map.get(id);
     }
 
     pub fn view(self: *TensorStore) View {
@@ -168,6 +204,59 @@ pub const TensorStore = struct {
 
         pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
             return self.maybeCreateTensor(subkey, tagz, partitioning).?;
+        }
+
+        /// Creates a single tensor whose buffer is the interleaved concatenation
+        /// (along axis 0) of several source weights, loaded once at load time.
+        /// `subkeys` are resolved against the current prefix, in order. The fused
+        /// shape is the shared trailing shape with axis 0 = sum of the sources'
+        /// axis-0 dims. Intended for fused projections (e.g. QKV) so the concat
+        /// is paid once at load, not in every forward step.
+        ///
+        /// `interleave_rows` gives the round-robin block size (in axis-0 rows)
+        /// per source: the loader writes `interleave_rows[i]` rows of source `i`,
+        /// for each source, then repeats for `rounds = dim0(i) / interleave_rows[i]`
+        /// rounds (which must agree across sources). A single block per source
+        /// (`interleave_rows[i] == dim0(i)`) is a plain concat; KV-group-sized
+        /// blocks produce a group-major layout so that a contiguous axis-0 tensor
+        /// shard (`.dout = .model`) lands on whole kv-groups — required for
+        /// correctness under tensor parallelism, and a no-op (head-identical
+        /// reordering) on a single device.
+        pub fn createFusedTensor(self: View, subkeys: []const []const u8, tagz: anytype, partitioning: anytype, interleave_rows: []const i64) Tensor {
+            stdx.debug.assert(subkeys.len >= 1 and subkeys.len <= 16, "createFusedTensor expects 1..16 subkeys, got {d}", .{subkeys.len});
+            stdx.debug.assert(interleave_rows.len == subkeys.len, "createFusedTensor expects one interleave_rows entry per subkey ({d} vs {d})", .{ interleave_rows.len, subkeys.len });
+            var descs: [16]*safetensors.Tensor = undefined;
+            var fused_dim0: i64 = 0;
+            var fused_shape: Shape = undefined;
+            var rounds: i64 = 0;
+            for (subkeys, 0..) |subkey, idx| {
+                var buffer: [256]u8 = undefined;
+                const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+                const ptr = self.store.getPtrFromKey(key) orelse stdx.debug.panic("createFusedTensor: key {s} not found", .{key});
+                descs[idx] = ptr;
+                if (idx == 0) fused_shape = ptr.shape;
+                const dim0 = ptr.shape.dim(0);
+                const block = interleave_rows[idx];
+                stdx.debug.assert(block > 0 and @rem(dim0, block) == 0, "createFusedTensor: source {s} dim0 {d} not divisible by interleave block {d}", .{ subkey, dim0, block });
+                const src_rounds = @divExact(dim0, block);
+                if (idx == 0) rounds = src_rounds;
+                stdx.debug.assert(src_rounds == rounds, "createFusedTensor: inconsistent interleave rounds ({d} vs {d}) for source {s}", .{ src_rounds, rounds, subkey });
+                fused_dim0 += dim0;
+            }
+            fused_shape = fused_shape.setDim(0, fused_dim0);
+            fused_shape = fused_shape.withTags(tagz);
+
+            switch (@typeInfo(@TypeOf(partitioning))) {
+                .enum_literal => switch (partitioning) {
+                    .replicated => fused_shape = fused_shape.withReplicatedPartitioning(),
+                    else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
+                },
+                else => fused_shape = fused_shape.withPartitioning(partitioning),
+            }
+
+            const tensor: Tensor = .fromShape(fused_shape);
+            self.store.bindIdToFused(descs[0..subkeys.len], interleave_rows, rounds, tensor.id) catch unreachable;
+            return tensor;
         }
 
         pub fn getShape(self: View, subkey: []const u8) ?Shape {
@@ -1146,6 +1235,47 @@ pub fn load(
         fn call(i: usize, tensor: *const Tensor, ctx: *Ctx) void {
             ctx.group.concurrent(ctx.io, struct {
                 fn call(i_: usize, tensor_: *const Tensor, ctx_: *Ctx) !void {
+                    // Fused weight: stream the source descriptors into one buffer
+                    // in round-robin row-blocks (the interleave plan), so the rows
+                    // land in the fused tensor's layout. MemoryWriter accumulates
+                    // across streamRemaining calls and shards by cumulative byte
+                    // position, so a group-major interleave makes a contiguous
+                    // axis-0 shard land on whole kv-groups (correct under TP).
+                    if (ctx_.store.getFusedById(tensor_.id)) |fused| {
+                        const fused_shape = tensor_.shape();
+                        const fused_sharding = Sharding.pickSharding(ctx_.shardings, fused_shape, .explicit_axis_binding) orelse ctx_.platform.replicated_sharding;
+                        var fused_writer = MemoryWriter.init(
+                            ctx_.allocator,
+                            ctx_.io,
+                            ctx_.platform,
+                            ctx_.pinned_buffer_pools,
+                            ctx_.dma_allocators,
+                            ctx_.dma_chunk_size,
+                            fused_shape,
+                            fused_sharding,
+                            ctx_.buffers[i_],
+                        ) catch unreachable;
+                        defer fused_writer.deinit(ctx_.allocator);
+                        var round: i64 = 0;
+                        while (round < fused.rounds) : (round += 1) {
+                            for (fused.descs, fused.interleave_rows) |desc, block| {
+                                // Sub-descriptor for this round's rows of the source:
+                                // [round*block, (round+1)*block) along axis 0.
+                                const full = desc.*;
+                                const dim0: u64 = @intCast(full.shape.dim(0));
+                                const row_bytes = full.byteSize() / dim0;
+                                var sub = full;
+                                sub.shape = full.shape.setDim(0, block);
+                                sub.offset = full.offset + @as(u64, @intCast(round * block)) * row_bytes;
+                                var src_reader = safetensors.TensorReader.init(ctx_.io, sub, &.{}, .{}) catch unreachable;
+                                defer src_reader.deinit();
+                                const part = src_reader.interface.streamRemaining(fused_writer.interface()) catch unreachable;
+                                _ = ctx_.total.fetchAdd(part, .monotonic);
+                            }
+                        }
+                        fused_writer.interface().flush() catch unreachable;
+                        return;
+                    }
                     var reader = ctx_.store.getReaderById(tensor_.id, ctx_.io, &.{}) catch unreachable;
                     defer reader.deinit();
 

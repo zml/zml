@@ -65,6 +65,8 @@ pub const ReductionKind = enum {
     sum,
     max,
     min,
+    arg_max,
+    arg_min,
     @"and",
     @"or",
     xor,
