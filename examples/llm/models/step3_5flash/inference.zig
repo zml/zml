@@ -337,20 +337,23 @@ const ComposedKernelExe = struct {
         const embed_tokens = try compileEmbedTokens(allocator, io, platform, step3p5_model.text_model.embed_tokens, parameters, seqlen, phase, progress);
         errdefer embed_tokens.deinit();
 
-        const layer_kinds = try layerKinds(allocator, step3p5_model.config, step3p5_model.text_model.layers.len);
-        errdefer allocator.free(layer_kinds);
-
-        const full_mlp_layer = try maybeCompileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .full_attention, .ffn = .mlp }, "full_mlp_layer", layer_kinds, progress);
+        const full_mlp_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .full_attention, .ffn = .mlp }, "full_mlp_layer", progress);
         errdefer if (full_mlp_layer) |exe| exe.deinit();
 
-        const sliding_mlp_layer = try maybeCompileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .sliding_attention, .ffn = .mlp }, "sliding_mlp_layer", layer_kinds, progress);
+        const sliding_mlp_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .sliding_attention, .ffn = .mlp }, "sliding_mlp_layer", progress);
         errdefer if (sliding_mlp_layer) |exe| exe.deinit();
 
-        const full_moe_layer = try maybeCompileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .full_attention, .ffn = .moe }, "full_moe_layer", layer_kinds, progress);
+        const full_moe_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .full_attention, .ffn = .moe }, "full_moe_layer", progress);
         errdefer if (full_moe_layer) |exe| exe.deinit();
 
-        const sliding_moe_layer = try maybeCompileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .sliding_attention, .ffn = .moe }, "sliding_moe_layer", layer_kinds, progress);
+        const sliding_moe_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .sliding_attention, .ffn = .moe }, "sliding_moe_layer", progress);
         errdefer if (sliding_moe_layer) |exe| exe.deinit();
+
+        const full_moe_with_limit_layer = compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .full_attention, .ffn = .moe }, progress);
+        errdefer if (full_moe_with_limit_layer) |exe| exe.deinit();
+
+        const full_moe_with_limit_shared_layer = compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, phase, .{ .attn = .full_attention, .ffn = .moe }, progress);
+        errdefer if (full_moe_with_limit_shared_layer) |exe| exe.deinit();
 
         const sampler = try compileSampler(allocator, io, platform, step3p5_model, parameters, seqlen, phase, progress);
         errdefer sampler.deinit();
@@ -362,8 +365,9 @@ const ComposedKernelExe = struct {
             .sliding_mlp_layer = sliding_mlp_layer,
             .full_moe_layer = full_moe_layer,
             .sliding_moe_layer = sliding_moe_layer,
+            .full_moe_with_limit_layer = full_moe_with_limit_layer,
+            .full_moe_with_limit_shared_layer = full_moe_with_limit_shared_layer,
             .sampler = sampler,
-            .layer_kinds = layer_kinds,
             .phase = phase,
         };
     }
@@ -529,23 +533,6 @@ const ComposedKernelExe = struct {
         };
     }
 
-    fn maybeCompileLayer(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        step3p5_model: model.Model,
-        parameters: CompilationOptions,
-        seqlen: usize,
-        phase: Phase,
-        target: LayerKind,
-        comptime component: []const u8,
-        kinds: []const LayerKind,
-        progress: *std.Progress.Node,
-    ) !?zml.Exe {
-        const index = findFirstLayerKind(kinds, target) orelse return null;
-        return try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, index, phase, component, progress);
-    }
-
     fn compileEmbedTokens(
         allocator: std.mem.Allocator,
         io: std.Io,
@@ -577,7 +564,6 @@ const ComposedKernelExe = struct {
         step3p5_model: model.Model,
         parameters: CompilationOptions,
         seqlen: usize,
-        layer_index: usize,
         phase: Phase,
         comptime component: []const u8,
         progress: *std.Progress.Node,
@@ -599,7 +585,7 @@ const ComposedKernelExe = struct {
         return platform.compile(
             allocator,
             io,
-            step3p5_model.text_model.layers[layer_index],
+            step3p5_model, // why is it like this
             .forward,
             .{ hidden_tensor, parameters.token_index, layer_cache, parameters.attention_metadata, parameters.decode_attention_parameters },
             .{
@@ -653,27 +639,5 @@ const ComposedKernelExe = struct {
             .s = .replicated,
             .d = .replicated,
         }));
-    }
-
-    fn layerKinds(allocator: std.mem.Allocator, config: model.Config, num_layers: usize) ![]LayerKind {
-        const kinds = try allocator.alloc(LayerKind, num_layers);
-        for (kinds, 0..) |*kind, index| {
-            kind.* = .{
-                .attn = config.layer_types[index],
-                .ffn = ffnType(config, index),
-            };
-        }
-        return kinds;
-    }
-
-    fn ffnType(config: model.Config, layer_index: usize) model.FfnType {
-        return if (std.mem.indexOfScalar(u32, config.moe_layers_enum.layers, @intCast(layer_index)) != null) .moe else .mlp;
-    }
-
-    fn findFirstLayerKind(kinds: []const LayerKind, target: LayerKind) ?usize {
-        for (kinds, 0..) |kind, index| {
-            if (kind.attn == target.attn and kind.ffn == target.ffn) return index;
-        }
-        return null;
     }
 };
