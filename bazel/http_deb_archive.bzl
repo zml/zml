@@ -244,6 +244,7 @@ _http_deb_archive_attrs = {
     "includes": attr.string_list(default = []),
     "excludes": attr.string_list(default = []),
     "bsdtar_extra_args": attr.string_list(default = []),
+    "external_downloader_fallback": attr.bool(default = False),
 }
 
 http_deb_archive = repository_rule(

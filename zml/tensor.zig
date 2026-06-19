@@ -189,8 +189,8 @@ pub const Tensor = struct {
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .oneapi => return self,
-            .cuda, .rocm, .tpu => {},
+            .cpu, .neuron => return self,
+            .cuda, .rocm, .tpu, .oneapi => {},
         }
 
         const frontend_attributes: *const mlir.Attribute = .dict(ctx.mlir_ctx, &.{
@@ -224,8 +224,8 @@ pub const Tensor = struct {
     pub fn onMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .oneapi => return self,
-            .cuda, .rocm, .tpu => {},
+            .cpu, .neuron => return self,
+            .cuda, .rocm, .tpu, .oneapi => {},
         }
 
         if (ctx.currentScope().id_to_argument.get(self.id) == null) {
