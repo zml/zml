@@ -74,13 +74,15 @@ pub const TensorReader = struct {
     io: std.Io,
     interface: std.Io.Reader,
 
+    pub const InitOpts = struct {
+        alignment: ?std.mem.Alignment = null,
+    };
+
     pub fn init(
         io: std.Io,
         tensor: Tensor,
         buffer: []u8,
-        opts: struct {
-            alignment: ?std.mem.Alignment = null,
-        },
+        opts: InitOpts,
     ) !TensorReader {
         const file = try std.Io.Dir.openFile(.cwd(), io, tensor.file_uri, .{ .mode = .read_only });
         errdefer file.close(io);
@@ -225,6 +227,10 @@ pub const Tensor = struct {
 
     pub fn byteSize(self: Tensor) u64 {
         return self.shape.byteSize();
+    }
+
+    pub fn reader(self: Tensor, io: std.Io, buffer: []u8, opts: TensorReader.InitOpts) !TensorReader {
+        return TensorReader.init(io, self, buffer, opts);
     }
 
     pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
