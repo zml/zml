@@ -1,20 +1,17 @@
 const std = @import("std");
 
+const bazel = @import("bazel");
+const bazel_builtin = @import("bazel_builtin");
 const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
 const DataType = zml.DataType;
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const bazel = @import("bazel");
-const bazel_builtin = @import("bazel_builtin");
-
 const tri = zml.kernel.triton;
 const DType = tri.DType;
-
-const kernels = @import("triton_kernels/triton_kernels.zig");
-
 const toDType = tri.from;
+const kernels = @import("triton_kernels/triton_kernels.zig");
 
 const log = std.log.scoped(.moe_triton);
 
@@ -643,7 +640,6 @@ fn fp8ActivationGroupSize(x: Tensor) i64 {
 
 fn validateOptions(opts: Options) !void {
     if (opts.inplace) return error.Unimplemented;
-    if (opts.activation != .silu and opts.activation != .relu) return error.UnsupportedActivation;
     if (opts.apply_router_weight_on_input) return error.UnsupportedOption;
     if (opts.use_fp8_w8a8 or opts.use_int8_w8a8 or opts.use_int8_w8a16 or opts.use_int4_w4a16) return error.UnsupportedQuantization;
     if (opts.ocp_mx_scheme != null or opts.per_channel_quant) return error.UnsupportedOption;
