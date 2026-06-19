@@ -329,6 +329,7 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
     const ModelBufferized = Bufferized(Model);
 
     if (ModelBufferized == Buffer) {
+        bufferized_._shards = .empty;
         return;
     }
 
