@@ -6,16 +6,22 @@ const zml = @import("../zml.zig");
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
 
 const kernels = @import("triton_kernels/unified_attention.zig");
+const kernels_oneapi = @import("triton_kernels/unified_attention_oneapi.zig");
 const tri = zml.kernel.triton;
 
 const log = std.log.scoped(.@"zml/attention/triton");
 
 const toDType = tri.from;
 
+fn isOneapiTarget() bool {
+    return zml.module.CompilationContext.current().platform.target == .oneapi;
+}
+
 fn use2dKernel(head_size: usize, sliding_window: usize, all_decode: bool, max_seqlen_q: usize, max_seqlen_k: usize, target_num_prgms: usize, num_2d_prgms: usize) bool {
     _ = head_size;
-    _ = all_decode;
     _ = max_seqlen_q;
+    // Intel decode spills the 2D whole-sequence kernel; force the 3D split-K path.
+    if (all_decode and isOneapiTarget()) return false;
     return sliding_window > 0 or max_seqlen_k <= 512 or num_2d_prgms > target_num_prgms;
 }
 
@@ -82,7 +88,8 @@ pub const Config3D = struct {
 
 fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     var reduce_num_warps: usize = 2;
-    const attn_warps: usize = 2;
+    // Intel decode needs more warps to spread the work and avoid register spill.
+    const attn_warps: usize = if (options.all_decode and isOneapiTarget()) 8 else 2;
     const tile_size = options.block_size;
 
     //const MAX_SEGMENTS: usize = @min(128, std.math.divCeil(usize, max_seqlen_k, tile_size));
@@ -241,7 +248,11 @@ pub const paged = struct {
                     const num_heads: usize = @intCast(q_.dim(.hkv) * q_.dim(.hg));
                     const num_kv_heads: usize = @intCast(k_cache_.dim(.hkv));
                     const num_queries_per_kv: usize = num_heads / num_kv_heads;
-                    const block_m: usize = if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
+                    // Intel decode: pack exactly one GQA group per tile (block_q == 1) so the
+                    // single decode query token doesn't carry masked-out fp32 acc lanes.
+                    const block_m: usize = if (!ctx_.options.is_prefill and isOneapiTarget())
+                        num_queries_per_kv
+                    else if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
                     const block_q: usize = block_m / num_queries_per_kv;
                     const num_tokens: usize = @intCast(q_.dim(.b));
                     const num_seqs: usize = @intCast(parameters_.block_table.dim(.b));
@@ -281,6 +292,8 @@ pub const paged = struct {
                     );
                     const output = if (use_2d_kernel)
                         pagedAttention2d(parameters_, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts)
+                    else if (isOneapiTarget())
+                        pagedAttention3dOneapi(parameters_, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts)
                     else
                         pagedAttention3d(parameters_, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts);
 
@@ -437,6 +450,150 @@ pub const paged = struct {
 
         const attn_grid: [3]i32 = .{ @intCast(config.attention.total_q_blocks), @intCast(paged_attention_opts.num_kv_heads), @intCast(config.attention.num_segments_per_seq) };
         const attn_output = kernels.KernelUnifiedAttention3dPtr.Kernel.call(
+            .{
+                .query_ptr = q,
+                .key_cache_ptr = k_cache,
+                .value_cache_ptr = v_cache,
+                .sink_ptr = dummy,
+                .block_tables_ptr = parameters.block_table,
+                .seq_lens_ptr = parameters.seq_lens,
+                .alibi_slopes_ptr = dummy,
+                .qq_bias_ptr = dummy,
+                .scale_ptr = scale_ptr,
+                .k_scale_ptr = dummy,
+                .v_scale_ptr = dummy,
+                .softcap_ptr = dummy,
+                .block_table_stride_ptr = block_table_strides_ptr,
+                .query_stride_0_ptr = q_strides_0_ptr,
+                .query_stride_1_ptr = q_strides_1_ptr,
+                .qq_bias_stride_0_ptr = dummy,
+                .stride_k_cache_0_ptr = k_strides_0_ptr,
+                .stride_k_cache_1_ptr = k_strides_1_ptr,
+                .stride_k_cache_2_ptr = k_strides_2_ptr,
+                .stride_v_cache_0_ptr = v_strides_0_ptr,
+                .stride_v_cache_1_ptr = v_strides_1_ptr,
+                .stride_v_cache_2_ptr = v_strides_2_ptr,
+                .query_start_len_ptr = parameters.query_start_len,
+                .num_seqs_ptr = num_seqs_ptr,
+            },
+            .{
+                .segm_output = zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, config.attention.num_segments_per_seq, std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim) }, .f32),
+                .segm_max = zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, config.attention.num_segments_per_seq }, .f32),
+                .segm_expsum = zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, config.attention.num_segments_per_seq }, .f32),
+            },
+            .{
+                .cfg = attn_kernel_config,
+                .grid = attn_grid,
+                .num_stages = @intCast(config.attention.num_stages),
+                .num_warps = @intCast(config.attention.num_warps),
+            },
+        );
+
+        const output = kernels.ReduceSegmentsPtr.Kernel.call(
+            .{
+                .segm_output_ptr = attn_output.segm_output,
+                .segm_max_ptr = attn_output.segm_max,
+                .segm_expsum_ptr = attn_output.segm_expsum,
+                .seq_lens_ptr = parameters.seq_lens,
+                .num_seqs_ptr = num_seqs_ptr,
+                .out_scale_inv_ptr = dummy,
+                .output_stride_0_ptr = q_strides_0_ptr,
+                .output_stride_1_ptr = q_strides_1_ptr,
+                .block_table_stride_ptr = block_table_strides_ptr,
+                .query_start_len_ptr = parameters.query_start_len,
+            },
+            .{ .output = q.shape() },
+            .{
+                .cfg = reduce_kernel_config,
+                .grid = .{ @intCast(paged_attention_opts.num_tokens), @intCast(paged_attention_opts.num_heads), 1 },
+                .num_stages = @intCast(config.reduce.num_stages),
+                .num_warps = @intCast(config.reduce.num_warps),
+            },
+        );
+
+        return output.output;
+    }
+
+    /// oneAPI/Intel specialization of pagedAttention3d: routes the attention pass to
+    /// the SIMD16-tuned kernel (compile-time KV strides, cached loads, same-page fast
+    /// path) while reusing the shared segment-reduce kernel. See unified_attention_oneapi.zig.
+    pub fn pagedAttention3dOneapi(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
+        _ = opts;
+
+        const config = select3dConfig(paged_attention_opts);
+
+        const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim));
+
+        const k_cache_shape_c = k_cache.shape();
+        const k_strides_c = k_cache_shape_c.computeElementStrides().constSlice();
+        const v_cache_shape_c = v_cache.shape();
+        const v_strides_c = v_cache_shape_c.computeElementStrides().constSlice();
+
+        const attn_kernel_config: kernels_oneapi.KernelUnifiedAttention3dPtr.Config = .{
+            .q_dtype = toDType(q.dtype()),
+            .kv_dtype = toDType(k_cache.dtype()),
+            .num_query_heads = @intCast(paged_attention_opts.num_heads),
+            .num_queries_per_kv = @intCast(paged_attention_opts.numQueriesPerKv()),
+            .block_size = @intCast(paged_attention_opts.block_size),
+            .tile_size = @intCast(config.attention.tile_size),
+            .head_size = @intCast(paged_attention_opts.head_dim),
+            .head_size_padded = head_size_padded,
+            .use_alibi_slopes = false,
+            .use_qq_bias = false,
+            .use_softcap = false,
+            .use_sinks = false,
+            .sliding_window = @intCast(paged_attention_opts.sliding_window),
+            .block_q = @intCast(config.attention.block_q),
+            .block_m = @intCast(config.attention.block_m),
+            .num_segments_per_seq = @intCast(config.attention.num_segments_per_seq),
+            .all_decode = paged_attention_opts.all_decode,
+            .stride_k_cache_0 = @intCast(k_strides_c[k_cache_shape_c.axis(.page)]),
+            .stride_k_cache_1 = @intCast(k_strides_c[k_cache_shape_c.axis(.k_chunk)]),
+            .stride_k_cache_2 = @intCast(k_strides_c[k_cache_shape_c.axis(.hkv)]),
+            .stride_v_cache_0 = @intCast(v_strides_c[v_cache_shape_c.axis(.page)]),
+            .stride_v_cache_1 = @intCast(v_strides_c[v_cache_shape_c.axis(.k_chunk)]),
+            .stride_v_cache_2 = @intCast(v_strides_c[v_cache_shape_c.axis(.hkv)]),
+            // Intel: keep KV loads cached (.none); the streaming .cg hint lowers to
+            // fully-uncached here and defeats the L2 prefetcher.
+            .kv_cache_modifier = .none,
+        };
+        log.debug("pagedAttention3dOneapi attention config: {any}", .{attn_kernel_config});
+
+        const reduce_kernel_config: kernels.ReduceSegmentsPtr.Config = .{
+            .o_dtype = toDType(q.dtype()),
+            .num_query_heads = @intCast(paged_attention_opts.num_heads),
+            .tile_size = @intCast(config.reduce.tile_size),
+            .head_size = @intCast(paged_attention_opts.head_dim),
+            .head_size_padded = head_size_padded,
+            .block_q = @intCast(config.reduce.block_q),
+            .num_segments_per_seq = @intCast(config.reduce.num_segments_per_seq),
+            .use_fp8 = false,
+        };
+        log.debug("pagedAttention3d reduce config: {any}", .{reduce_kernel_config});
+
+        const dummy = zml.Tensor.constant(zml.DataType.i8.zero());
+        const block_table_strides = parameters.block_table.shape().computeElementStrides().constSlice();
+        const block_table_strides_ptr = zml.Tensor.constant(zml.DataType.i64.constant(block_table_strides[0]));
+        const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
+        const q_strides = q_shape.computeElementStrides().constSlice();
+        const q_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(q_strides[0]));
+        const q_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(q_strides[1]));
+        const k_cache_shape = k_cache.shape();
+        const k_strides = k_cache_shape.computeElementStrides().constSlice();
+        const k_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[k_cache_shape.axis(.page)]));
+        const k_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[k_cache_shape.axis(.k_chunk)]));
+        const k_strides_2_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[k_cache_shape.axis(.hkv)]));
+        const v_cache_shape = v_cache.shape();
+        const v_strides = v_cache_shape.computeElementStrides().constSlice();
+        const v_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[v_cache_shape.axis(.page)]));
+        const v_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[v_cache_shape.axis(.k_chunk)]));
+        const v_strides_2_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[v_cache_shape.axis(.hkv)]));
+        const num_seqs_ptr = zml.Tensor.constant(zml.DataType.i32.constant(parameters.block_table.dim(0)));
+        const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
+        const scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(scale));
+
+        const attn_grid: [3]i32 = .{ @intCast(config.attention.total_q_blocks), @intCast(paged_attention_opts.num_kv_heads), @intCast(config.attention.num_segments_per_seq) };
+        const attn_output = kernels_oneapi.KernelUnifiedAttention3dPtr.Kernel.call(
             .{
                 .query_ptr = q,
                 .key_cache_ptr = k_cache,
