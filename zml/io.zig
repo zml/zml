@@ -1176,23 +1176,12 @@ pub fn load(
                         writer.setProgress(&node);
                         defer writer.setProgress(null);
                         var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
-
-                        const stream_start = std.Io.Timestamp.now(ctx_.io, .awake);
                         const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
-                        log.debug("Streamed tensor {s} ({Bi:.2}) in {f}", .{ reader.tensor.name, total, stream_start.untilNow(ctx_.io, .awake) });
-
-                        const flush_start = std.Io.Timestamp.now(ctx_.io, .awake);
                         progress_writer.interface.flush() catch unreachable;
-                        log.debug("Flushed tensor writer for {s} in {f}", .{ reader.tensor.name, flush_start.untilNow(ctx_.io, .awake) });
                         _ = ctx_.total.fetchAdd(total, .monotonic);
                     } else {
-                        const stream_start = std.Io.Timestamp.now(ctx_.io, .awake);
                         const total = reader.interface.streamRemaining(writer.interface()) catch unreachable;
-                        log.debug("Streamed tensor {s} ({Bi:.2}) in {f}", .{ reader.tensor.name, total, stream_start.untilNow(ctx_.io, .awake) });
-
-                        const flush_start = std.Io.Timestamp.now(ctx_.io, .awake);
                         writer.interface().flush() catch unreachable;
-                        log.debug("Flushed tensor writer for {s} in {f}", .{ reader.tensor.name, flush_start.untilNow(ctx_.io, .awake) });
                         _ = ctx_.total.fetchAdd(total, .monotonic);
                     }
                 }
@@ -1260,7 +1249,6 @@ const DirectMemoryWriterDeviceTest = struct {
     const WriteMode = enum {
         stream_remaining,
         writable_slice_greedy,
-        fallback_reader_greedy,
     };
 
     pub const Scenario = struct {
@@ -1273,7 +1261,6 @@ const DirectMemoryWriterDeviceTest = struct {
         writable_slice_min_len: usize = 128,
         pool_chunks: usize = 4,
         pool_chunk_size: usize = 1 << 20,
-        expected_writer_buffer_len: ?usize = null,
     };
 
     allocator: std.mem.Allocator,
@@ -1292,7 +1279,6 @@ const DirectMemoryWriterDeviceTest = struct {
             scenario.writable_slice_min_len,
             scenario.pool_chunks,
             scenario.pool_chunk_size,
-            scenario.expected_writer_buffer_len,
         );
     }
 
@@ -1305,7 +1291,6 @@ const DirectMemoryWriterDeviceTest = struct {
         writable_slice_min_len: usize,
         pool_chunks: usize,
         pool_chunk_size: usize,
-        expected_writer_buffer_len: ?usize,
     ) !void {
         const slice = try Slice.alloc(self.allocator, shape);
         defer slice.free(self.allocator);
@@ -1345,10 +1330,6 @@ const DirectMemoryWriterDeviceTest = struct {
         defer writer.deinit();
         defer written_buffer.deinit();
 
-        if (expected_writer_buffer_len) |expected| {
-            try std.testing.expectEqual(expected, writer.interface.buffer.len);
-        }
-
         switch (write_mode) {
             .stream_remaining => {
                 var reader: std.Io.Reader = .fixed(slice.constData());
@@ -1366,47 +1347,6 @@ const DirectMemoryWriterDeviceTest = struct {
                     writer.interface.advance(to_write);
                     offset += to_write;
                 }
-            },
-            .fallback_reader_greedy => {
-                const FallbackReader = struct {
-                    data: []const u8,
-                    offset: usize = 0,
-                    first_window_len: ?usize = null,
-                    interface: std.Io.Reader,
-
-                    fn init(data: []const u8) @This() {
-                        return .{
-                            .data = data,
-                            .interface = .{
-                                .buffer = &.{},
-                                .seek = 0,
-                                .end = 0,
-                                .vtable = &.{
-                                    .stream = stream,
-                                },
-                            },
-                        };
-                    }
-
-                    fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-                        const self_: *@This() = @alignCast(@fieldParentPtr("interface", r));
-                        if (self_.offset == self_.data.len) return error.EndOfStream;
-
-                        const dest = limit.slice(try w.writableSliceGreedy(1));
-                        if (self_.first_window_len == null) self_.first_window_len = dest.len;
-
-                        const n = @min(dest.len, self_.data.len - self_.offset);
-                        @memcpy(dest[0..n], self_.data[self_.offset..][0..n]);
-                        w.advance(n);
-                        self_.offset += n;
-                        return n;
-                    }
-                };
-
-                var reader: FallbackReader = .init(slice.constData());
-                const streamed = try reader.interface.streamRemaining(&writer.interface);
-                try std.testing.expectEqual(slice.constData().len, streamed);
-                try std.testing.expectEqual(expected_writer_buffer_len orelse pool_chunk_size, reader.first_window_len.?);
             },
         }
 
@@ -1520,49 +1460,6 @@ test "DirectMemoryWriter: writableSliceGreedy with mirrored shards" {
         .write_mode = .writable_slice_greedy,
         .writable_slice_min_len = 64,
         .pool_chunk_size = 1024,
-    });
-}
-
-test "DirectMemoryWriter: exposes coalescing buffer instead of shard segment" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "model_auto_coalesced_writer_buffer",
-        .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
-            .cpu = .{ .device_count = 4 },
-        },
-        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .model }),
-        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
-        .strategy = .parseBindings(.{ .model = .link_x }),
-        .pool_chunk_size = 64 * 1024,
-        .expected_writer_buffer_len = 16 * 1024,
-    });
-}
-
-test "DirectMemoryWriter: fallback reader sees coalesced writable window" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "model_auto_fallback_reader_coalesced",
-        .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
-            .cpu = .{ .device_count = 4 },
-        },
-        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .model }),
-        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
-        .strategy = .parseBindings(.{ .model = .link_x }),
-        .write_mode = .fallback_reader_greedy,
-        .pool_chunk_size = 64 * 1024,
-        .expected_writer_buffer_len = 16 * 1024,
     });
 }
 
