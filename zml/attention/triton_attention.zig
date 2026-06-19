@@ -12,10 +12,14 @@ const log = std.log.scoped(.@"zml/attention/triton");
 
 const toDType = tri.from;
 
+fn isOneapiTarget() bool {
+    return zml.module.CompilationContext.current().platform.target == .oneapi;
+}
+
 fn use2dKernel(head_size: usize, sliding_window: usize, all_decode: bool, max_seqlen_q: usize, max_seqlen_k: usize, target_num_prgms: usize, num_2d_prgms: usize) bool {
     _ = head_size;
-    _ = all_decode;
     _ = max_seqlen_q;
+    if (all_decode and isOneapiTarget()) return false;
     return sliding_window > 0 or max_seqlen_k <= 512 or num_2d_prgms > target_num_prgms;
 }
 
@@ -82,7 +86,7 @@ pub const Config3D = struct {
 
 fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     var reduce_num_warps: usize = 2;
-    const attn_warps: usize = 2;
+    const attn_warps: usize = if (options.all_decode and isOneapiTarget()) 8 else 2;
     const tile_size = options.block_size;
 
     //const MAX_SEGMENTS: usize = @min(128, std.math.divCeil(usize, max_seqlen_k, tile_size));
@@ -241,7 +245,9 @@ pub const paged = struct {
                     const num_heads: usize = @intCast(q_.dim(.hkv) * q_.dim(.hg));
                     const num_kv_heads: usize = @intCast(k_cache_.dim(.hkv));
                     const num_queries_per_kv: usize = num_heads / num_kv_heads;
-                    const block_m: usize = if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
+                    const block_m: usize = if (!ctx_.options.is_prefill and isOneapiTarget())
+                        num_queries_per_kv
+                    else if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
                     const block_q: usize = block_m / num_queries_per_kv;
                     const num_tokens: usize = @intCast(q_.dim(.b));
                     const num_seqs: usize = @intCast(parameters_.block_table.dim(.b));
@@ -325,14 +331,16 @@ pub const paged = struct {
         const q_strides = q_shape.computeElementStrides().constSlice();
         const q_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(q_strides[0]));
         const q_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(q_strides[1]));
-        const k_strides = k_cache.shape().computeElementStrides().constSlice();
-        const k_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[0]));
-        const k_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[1]));
-        const k_strides_2_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[2]));
-        const v_strides = v_cache.shape().computeElementStrides().constSlice();
-        const v_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[0]));
-        const v_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[1]));
-        const v_strides_2_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[2]));
+        const k_cache_shape = k_cache.shape();
+        const k_strides = k_cache_shape.computeElementStrides().constSlice();
+        const k_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[k_cache_shape.axis(.page)]));
+        const k_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[k_cache_shape.axis(.k_chunk)]));
+        const k_strides_2_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[k_cache_shape.axis(.hkv)]));
+        const v_cache_shape = v_cache.shape();
+        const v_strides = v_cache_shape.computeElementStrides().constSlice();
+        const v_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[v_cache_shape.axis(.page)]));
+        const v_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[v_cache_shape.axis(.k_chunk)]));
+        const v_strides_2_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[v_cache_shape.axis(.hkv)]));
         const num_seqs_ptr = zml.Tensor.constant(zml.DataType.i32.constant(parameters.block_table.dim(0)));
         const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(scale));
@@ -384,6 +392,12 @@ pub const paged = struct {
         const config = select3dConfig(paged_attention_opts);
 
         const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim));
+
+        const k_cache_shape_c = k_cache.shape();
+        const k_strides_c = k_cache_shape_c.computeElementStrides().constSlice();
+        const v_cache_shape_c = v_cache.shape();
+        const v_strides_c = v_cache_shape_c.computeElementStrides().constSlice();
+
         const attn_kernel_config: kernels.KernelUnifiedAttention3dPtr.Config = .{
             .q_dtype = toDType(q.dtype()),
             .kv_dtype = toDType(k_cache.dtype()),
@@ -402,6 +416,13 @@ pub const paged = struct {
             .block_m = @intCast(config.attention.block_m),
             .num_segments_per_seq = @intCast(config.attention.num_segments_per_seq),
             .all_decode = paged_attention_opts.all_decode,
+            .stride_k_cache_0 = @intCast(k_strides_c[k_cache_shape_c.axis(.page)]),
+            .stride_k_cache_1 = @intCast(k_strides_c[k_cache_shape_c.axis(.k_chunk)]),
+            .stride_k_cache_2 = @intCast(k_strides_c[k_cache_shape_c.axis(.hkv)]),
+            .stride_v_cache_0 = @intCast(v_strides_c[v_cache_shape_c.axis(.page)]),
+            .stride_v_cache_1 = @intCast(v_strides_c[v_cache_shape_c.axis(.k_chunk)]),
+            .stride_v_cache_2 = @intCast(v_strides_c[v_cache_shape_c.axis(.hkv)]),
+            .kv_cache_modifier = if (paged_attention_opts.all_decode and !isOneapiTarget()) .cg else .none,
         };
         log.debug("pagedAttention3d attention config: {any}", .{attn_kernel_config});
 
@@ -424,14 +445,16 @@ pub const paged = struct {
         const q_strides = q_shape.computeElementStrides().constSlice();
         const q_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(q_strides[0]));
         const q_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(q_strides[1]));
-        const k_strides = k_cache.shape().computeElementStrides().constSlice();
-        const k_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[0]));
-        const k_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[1]));
-        const k_strides_2_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[2]));
-        const v_strides = v_cache.shape().computeElementStrides().constSlice();
-        const v_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[0]));
-        const v_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[1]));
-        const v_strides_2_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[2]));
+        const k_cache_shape = k_cache.shape();
+        const k_strides = k_cache_shape.computeElementStrides().constSlice();
+        const k_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[k_cache_shape.axis(.page)]));
+        const k_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[k_cache_shape.axis(.k_chunk)]));
+        const k_strides_2_ptr = zml.Tensor.constant(zml.DataType.i64.constant(k_strides[k_cache_shape.axis(.hkv)]));
+        const v_cache_shape = v_cache.shape();
+        const v_strides = v_cache_shape.computeElementStrides().constSlice();
+        const v_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[v_cache_shape.axis(.page)]));
+        const v_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[v_cache_shape.axis(.k_chunk)]));
+        const v_strides_2_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[v_cache_shape.axis(.hkv)]));
         const num_seqs_ptr = zml.Tensor.constant(zml.DataType.i32.constant(parameters.block_table.dim(0)));
         const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(scale));
