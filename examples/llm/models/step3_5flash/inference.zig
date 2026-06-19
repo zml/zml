@@ -552,8 +552,8 @@ const ComposedKernelExe = struct {
         });
     }
 
-    const AttnKind = enum { sliding, full };
-    const FfnKind = enum { dense, moe };
+    const AttnKind = enum(u1) { sliding, full };
+    const FfnKind = enum(u1) { dense, moe };
     const FfnInfo = struct {
         kind: FfnKind,
         swiglu_limit: ?f32 = null,
@@ -561,47 +561,75 @@ const ComposedKernelExe = struct {
     };
 
     fn inferLayerExe(self: *const ComposedKernelExe, step3p5_model: *const model.Model, layer_index: usize) !zml.Exe {
-        _ = self; // autofix
         const layer = step3p5_model.text_model.layers[layer_index];
 
-        const attention_kind: AttnKind = if (layer.attn.enable_sliding_window)
+        const attn_kind: AttnKind = if (layer.attn.enable_sliding_window)
             .sliding
         else
             .full;
-        _ = attention_kind; // autofix
 
-        const ffn_info: FfnInfo = switch (layer.ffn) {
-            .mlp => |mlp| .{
-                .kind = .dense,
-                .swiglu_limit = mlp.limit,
-                .shared_limit = null,
-            },
-            .moe => |moe| .{
-                .kind = .moe,
-                .swiglu_limit = moe.experts.limit,
-                .shared_limit = moe.shared.limit,
-            },
+        const ffn_kind: FfnKind = switch (layer.ffn) {
+            .mlp => .dense,
+            .moe => .moe,
         };
-        _ = ffn_info; // autofix
 
-        // // config lives under parameters.config
-        // const key = packed struct {
-        //     ffn_info: FfnInfo = ffn_info,
-        //     attention_kin: AttnKind = attention_kind,
-        //     swiglu_limit: ?u32 = ffn_info.swiglu_limit,
-        //     shared_limit: ?u32 = ffn_info.shared_limit,
-        // };
+        const has_swiglu_limit: bool = layer.ffn.moe.experts.limit != 0;
+        const has_shared_limit: bool = layer.ffn.moe.shared.limit != 0;
 
-        // return switch (key) {
-        //     .{ .dense, .full_attention, false, false } => &self.dense_full_layer,
-        //     .{ .dense, .sliding_attention, false, false } => &self.dense_sliding_layer,
-        //     .{ .moe, .full_attention, false, false } => &self.moe_full_layer,
-        //     .{ .moe, .sliding_attention, false, false } => &self.moe_sliding_layer,
-        //     .{ .moe, .sliding_attention, true, false } => &self.moe_sliding_layer_with_limit,
-        //     .{ .moe, .sliding_attention, true, true } => &self.moe_sliding_shared_layer_with_limit,
-        // };
+        const Key = packed struct(u4) {
+            ffn_kind: FfnKind,
+            attn_kind: AttnKind,
+            has_swiglu_limit: bool,
+            has_shared_limit: bool,
+        };
 
-        return undefined;
+        // config lives under parameters.config
+        const key: Key = .{
+            .ffn_kind = ffn_kind,
+            .attn_kind = attn_kind,
+            .has_swiglu_limit = has_swiglu_limit,
+            .has_shared_limit = has_shared_limit,
+        };
+
+        return switch (key) {
+            .{
+                .ffn_kind = .dense,
+                .attn_kind = .full,
+                .has_swiglu_limit = false,
+                .has_shared_limit = false,
+            } => self.dense_full_layer,
+            .{
+                .ffn_kind = .dense,
+                .attn_kind = .sliding,
+                .has_swiglu_limit = false,
+                .has_shared_limit = false,
+            } => self.dense_sliding_layer,
+            .{
+                .ffn_kind = .moe,
+                .attn_kind = .full,
+                .has_swiglu_limit = false,
+                .has_shared_limit = false,
+            } => self.moe_full_layer,
+            .{
+                .ffn_kind = .moe,
+                .attn_kind = .sliding,
+                .has_swiglu_limit = false,
+                .has_shared_limit = false,
+            } => self.moe_sliding_layer,
+            .{
+                .ffn_kind = .moe,
+                .attn_kind = .sliding,
+                .has_swiglu_limit = true,
+                .has_shared_limit = false,
+            } => self.moe_sliding_layer_with_limit,
+            .{
+                .ffn_kind = .moe,
+                .attn_kind = .sliding,
+                .has_swiglu_limit = true,
+                .has_shared_limit = true,
+            } => self.moe_sliding_shared_layer_with_limit,
+            else => unreachable,
+        };
     }
 
     fn compileLayer(
