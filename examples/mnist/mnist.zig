@@ -43,11 +43,16 @@ const Mnist = struct {
         platform: *const zml.Platform,
         store: *const zml.io.TensorStore,
     ) !zml.Bufferized(Mnist) {
-        return zml.io.load(Mnist, self, allocator, io, platform, store, .{
-            .parallelism = 1,
-            .dma_chunks = 1,
-            .dma_chunk_size = 16 * 1024 * 1024,
-        });
+        var buffers = try zml.mem.bufferize(allocator, Mnist, self);
+        errdefer unloadBuffers(&buffers);
+
+        var loader: zml.io.Loader = try .init(allocator, platform, .auto);
+        errdefer loader.deinit();
+
+        loader.auto(io, Mnist, self, &buffers, store, &.{}, .{});
+        try loader.await(io);
+
+        return buffers;
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mnist)) void {

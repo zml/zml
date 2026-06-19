@@ -200,21 +200,27 @@ pub fn main(init: std.process.Init) !void {
             defer progress.end();
 
             const now: std.Io.Timestamp = .now(io, .awake);
-            var total_bytes: usize = 0;
+
+            var buffers = try zml.mem.bufferize(allocator, AllTensorsModel, &model);
             defer {
-                const took = now.untilNow(io, .awake);
-                const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-                log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+                for (buffers.tensors) |*b| b.deinit();
+                allocator.free(buffers.tensors);
             }
 
-            _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, &store, .{
-                .shardings = &.{sharded_sharding},
+            var loader: zml.io.Loader = try .init(allocator, platform, .{
                 .parallelism = 8,
                 .dma_chunks = 16,
                 .dma_chunk_size = 64 * zml.MiB,
-                .progress = &progress,
-                .total_bytes = &total_bytes,
             });
+            defer loader.deinit();
+
+            loader.auto(io, AllTensorsModel, &model, &buffers, &store, &.{sharded_sharding}, .{ .progress = &progress });
+            try loader.await(io);
+
+            const took = now.untilNow(io, .awake);
+            const total_bytes = loader.bytes_loaded.raw;
+            const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
+            log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         },
     }
 }
