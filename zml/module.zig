@@ -455,7 +455,9 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) void {
             const mlir_type = mlirx.Type.rankedTensor(ctx_.compilation_context.mlir_ctx, tensor.shape());
             _ = ctx_.compilation_context.currentScope().block.addArgument(mlir_type, .unknown(ctx_.compilation_context.mlir_ctx));
-            ctx_.compilation_context.currentScope().id_to_argument.put(ctx_.compilation_context.currentScope().arena.allocator(), tensor.id, ctx_.current_argument_id) catch unreachable;
+            const gop = ctx_.compilation_context.currentScope().id_to_argument.getOrPut(ctx_.compilation_context.currentScope().arena.allocator(), tensor.id) catch unreachable;
+            if (gop.found_existing) std.debug.panic("Tensor with id {} has already been used once as an argument", .{tensor.id});
+            gop.value_ptr.* = ctx_.current_argument_id;
             ctx_.current_argument_id += 1;
         }
     }.cb, &context, &args);
