@@ -92,7 +92,7 @@ filegroup(
 )
 filegroup(
     name = "sycl_runtime",
-    srcs = glob(["{ONEAPI_COMPILER_LIB}/*.spv"], allow_empty = True) + [
+    srcs = glob(["{ONEAPI_COMPILER_LIB}/*.spv"]) + [
         "{ONEAPI_COMPILER_LIB}/libur_adapter_level_zero.so.0",
         "{ONEAPI_COMPILER_LIB}/libur_adapter_level_zero_v2.so.0",
         "{ONEAPI_COMPILER_LIB}/libur_adapter_opencl.so.0",
@@ -103,7 +103,7 @@ filegroup(
     "intel-oneapi-compiler-shared-runtime-2026.0": """
 filegroup(
     name = "compiler_runtime",
-    srcs = glob(["{ONEAPI_COMPILER_LIB}/libOpenCL.so*"], allow_empty = True) + [
+    srcs = glob(["{ONEAPI_COMPILER_LIB}/libOpenCL.so*"]) + [
         "{ONEAPI_COMPILER_LIB}/libimf.so",
         "{ONEAPI_COMPILER_LIB}/libintlc.so.5",
         "{ONEAPI_COMPILER_LIB}/libirc.so",
