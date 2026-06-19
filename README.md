@@ -19,7 +19,7 @@ ZML is a production inference stack, purpose-built to decouple AI workloads from
 
 Any model, many hardwares, one codebase, peak performance.
 
-Compiled directly to NVIDIA, AMD, TPU, Trainium for peak hardware performance on any accelerator. No rewriting.
+Compiled directly to NVIDIA, AMD, INTEL, TPU, Trainium for peak hardware performance on any accelerator. No rewriting.
 
 It is built using the
 [Zig](https://ziglang.org) language, [MLIR](https://mlir.llvm.org), and [Bazel](https://bazel.build).
@@ -109,6 +109,12 @@ Example on ROCm:
 
 ```bash
 bazel run //examples/llm --@zml//platforms:rocm=true -- --model=hf://meta-llama/Llama-3.2-1B-Instruct --prompt="Write a haiku about Zig"
+```
+
+Example on Intel OneAPI:
+
+```bash
+bazel run //examples/llm --@zml//platforms:cpu=false --@zml//platforms:oneapi=true -- --model=hf://meta-llama/Llama-3.2-1B-Instruct --prompt="Write a haiku about Zig"
 ```
 
 ## Run Tests
