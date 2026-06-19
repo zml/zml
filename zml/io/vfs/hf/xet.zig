@@ -4,17 +4,6 @@ const bg4 = @import("bg4.zig");
 
 const log = std.log.scoped(.@"zml/io/vfs/xet");
 
-/// Block the calling worker thread for `ms` milliseconds via libc.
-/// We don't have a `std.Io` handle in here and `std.Thread.sleep` is gone
-/// in Zig 0.16; this is the most direct portable replacement.
-fn sleepMs(ms: u64) void {
-    const ts: std.posix.timespec = .{
-        .sec = @intCast(ms / 1000),
-        .nsec = @intCast((ms % 1000) * std.time.ns_per_ms),
-    };
-    _ = std.c.nanosleep(&ts, null);
-}
-
 pub const Repo = struct {
     repo: []const u8,
     model: []const u8,
@@ -257,6 +246,7 @@ const ChunkIterator = struct {
 };
 
 fn httpRangeGetIntoSlice(
+    io: std.Io,
     client: *std.http.Client,
     url: []const u8,
     start: usize,
@@ -264,7 +254,7 @@ fn httpRangeGetIntoSlice(
     dst: []u8,
 ) !void {
     const max_attempts: u32 = 6;
-    var backoff_ms: u64 = 250;
+    var backoff_ms: i64 = 250;
     var attempt: u32 = 0;
     while (true) : (attempt += 1) {
         tryHttpRangeGetIntoSlice(client, url, start, end_inclusive, dst) catch |err| {
@@ -273,7 +263,7 @@ fn httpRangeGetIntoSlice(
                 return error.XorbFetchFailed;
             }
             log.warn("xorb fetch attempt {d}/{d} failed: {s} — retrying in {d}ms", .{ attempt + 1, max_attempts, @errorName(err), backoff_ms });
-            sleepMs(backoff_ms);
+            io.sleep(.fromMilliseconds(backoff_ms), .awake) catch {};
             backoff_ms *= 2;
             continue;
         };
@@ -422,7 +412,7 @@ fn buildFetchTasks(
 
 pub const FetchPool = struct {
     allocator: std.mem.Allocator,
-    io: std.Io,
+    // io: std.Io,
     client: *std.http.Client,
     workers: []Worker,
     group: std.Io.Group,
@@ -471,7 +461,7 @@ pub const FetchPool = struct {
         errdefer allocator.destroy(self);
         self.* = .{
             .allocator = allocator,
-            .io = io,
+            // .io = io,
             .client = client,
             .workers = workers,
             .group = .init,
@@ -479,13 +469,13 @@ pub const FetchPool = struct {
             .queue_buf = queue_buf,
         };
         errdefer self.group.cancel(io);
-        for (workers) |*w| try self.group.concurrent(io, fetchWorker, .{ self, w });
+        for (workers) |*w| try self.group.concurrent(io, fetchWorker, .{ self, io, w });
         return self;
     }
 
-    pub fn deinit(self: *FetchPool) void {
-        self.job_queue.close(self.io);
-        self.group.await(self.io) catch {};
+    pub fn deinit(self: *FetchPool, io: std.Io) void {
+        self.job_queue.close(io);
+        self.group.await(io) catch {};
         for (self.workers) |*w| {
             self.allocator.free(w.body);
             self.allocator.free(w.scratch);
@@ -499,6 +489,7 @@ pub const FetchPool = struct {
 const Batch = struct {
     dst: []u8,
     pending: usize,
+    failed: std.atomic.Value(bool) = .init(false),
     err: ?anyerror = null,
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
@@ -508,6 +499,7 @@ const Batch = struct {
         defer self.mutex.unlock(io);
         if (e) |x| if (self.err == null) {
             self.err = x;
+            self.failed.store(true, .release);
         };
         self.pending -= 1;
         if (self.pending == 0) self.cond.signal(io);
@@ -525,34 +517,35 @@ const Job = struct {
     batch: *Batch,
 };
 
-fn fetchWorker(pool: *FetchPool, w: *FetchPool.Worker) void {
+fn fetchWorker(pool: *FetchPool, io: std.Io, w: *FetchPool.Worker) void {
     while (true) {
-        const job = pool.job_queue.getOne(pool.io) catch break;
-        if (job.batch.err != null) {
-            job.batch.finishOne(pool.io, null);
+        const job = pool.job_queue.getOne(io) catch break;
+        if (job.batch.failed.load(.acquire)) {
+            job.batch.finishOne(io, null);
             continue;
         }
-        const err = processJob(pool, w, job);
-        job.batch.finishOne(pool.io, err);
+        const err = processJob(pool, io, w, job);
+        job.batch.finishOne(io, err);
     }
 }
 
-fn processJob(pool: *FetchPool, w: *FetchPool.Worker, job: *Job) ?anyerror {
+fn processJob(pool: *FetchPool, io: std.Io, w: *FetchPool.Worker, job: *Job) ?anyerror {
     const task = job.task;
     if (task.byte_len > w.body.len) return error.XorbTooLarge;
     const body = w.body[0..task.byte_len];
-    runTask(pool.client, task, job.batch.dst, body, w.scratch) catch |e| return e;
+    runTask(io, pool.client, task, job.batch.dst, body, w.scratch) catch |e| return e;
     return null;
 }
 
 fn runTask(
+    io: std.Io,
     client: *std.http.Client,
     task: *FetchTask,
     dst: []u8,
     body: []u8,
     scratch: []u8,
 ) !void {
-    try httpRangeGetIntoSlice(client, task.url, task.url_range_start, task.url_range_end, body);
+    try httpRangeGetIntoSlice(io, client, task.url, task.url_range_start, task.url_range_end, body);
 
     var it: ChunkIterator = .{ .data = body };
     var chunk_idx: usize = task.chunk_idx_start;
@@ -607,6 +600,7 @@ fn runTask(
 /// to the long-lived `pool`; returns when every job in the batch completes
 /// (or any worker errors).
 pub fn fetchRange(
+    io: std.Io,
     pool: *FetchPool,
     cas_cache: *CasAuthCache,
     hf_token: []const u8,
@@ -617,7 +611,7 @@ pub fn fetchRange(
 ) !void {
     if (dst.len == 0) return;
 
-    const cas = try cas_cache.get(pool.allocator, pool.io, pool.client, repo, hf_token);
+    const cas = try cas_cache.get(pool.allocator, io, pool.client, repo, hf_token);
     defer pool.allocator.free(cas.url);
     defer pool.allocator.free(cas.token);
 
@@ -639,7 +633,7 @@ pub fn fetchRange(
     var batch: Batch = .{ .dst = dst, .pending = tasks.items.len };
     for (jobs, tasks.items) |*j, *t| j.* = .{ .task = t, .batch = &batch };
 
-    for (jobs) |*j| try pool.job_queue.putOne(pool.io, j);
-    batch.wait(pool.io);
+    for (jobs) |*j| try pool.job_queue.putOne(io, j);
+    batch.wait(io);
     if (batch.err) |e| return e;
 }

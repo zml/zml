@@ -165,7 +165,7 @@ pub const HF = struct {
     }
 
     pub fn deinit(self: *HF) void {
-        self.fetch_pool.deinit();
+        self.fetch_pool.deinit(self.base.inner);
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -742,6 +742,7 @@ pub const HF = struct {
             if (take == 0) return 0;
             log.debug("Performing XET read for {s} at offset {d} (take {d} bytes)", .{ handle.uri, offset, take });
             try xet.fetchRange(
+                self.base.inner,
                 self.fetch_pool,
                 &self.cas_cache,
                 self.hf_token_raw,
