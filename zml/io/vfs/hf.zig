@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
-const xet = @import("xet.zig");
+const xet = @import("hf/xet.zig");
 
 const VFSBase = @import("base.zig").VFSBase;
 
