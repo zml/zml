@@ -194,7 +194,6 @@ def _oneapi_impl(mctx):
             urls = pkg["urls"],
             sha256 = pkg["sha256"],
             strip_prefix = _ONEAPI_STRIP_PREFIX,
-            external_downloader_fallback = True,
             build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
         )
 
