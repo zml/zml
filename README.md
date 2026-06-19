@@ -95,6 +95,7 @@ Append one or more platform flags when compiling or running:
 
 - NVIDIA CUDA: `--@zml//platforms:cuda=true`
 - AMD RoCM: `--@zml//platforms:rocm=true`
+- Intel OneAPI: `--@zml//platforms:oneapi=true`
 - Google TPU: `--@zml//platforms:tpu=true`
 - AWS Trainium / Inferentia 2: `--@zml//platforms:neuron=true`
 - Disable CPU compilation: `--@zml//platforms:cpu=false`
