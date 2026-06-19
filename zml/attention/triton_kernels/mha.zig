@@ -42,9 +42,6 @@ pub const MhaFwd = struct {
 
     pub const Kernel = tri.Kernel(Config, .{
         .name = "mha",
-        // The reference Python signature has output pointers interleaved with
-        // inputs. Keep this kernel emit-only at the declarative layer; the
-        // harness wires XLA manually with aliased output operands.
         .inputs = &.{
             "q_ptr",
             "k_ptr",
@@ -52,7 +49,6 @@ pub const MhaFwd = struct {
             "descale_q_ptr",
             "descale_k_ptr",
             "descale_v_ptr",
-            "out_ptr",
             "alibi_slopes_ptr",
             "softmax_lse_ptr",
             "sink_ptr",
@@ -84,7 +80,7 @@ pub const MhaFwd = struct {
             "cu_seqlens_q",
             "cu_seqlens_k",
         },
-        .outputs = &.{},
+        .outputs = &.{"out"},
         .run = run,
     });
 
@@ -100,7 +96,6 @@ pub const MhaFwd = struct {
             .descale_q_ptr = .{ .ptr = .f32 },
             .descale_k_ptr = .{ .ptr = .f32 },
             .descale_v_ptr = .{ .ptr = .f32 },
-            .out_ptr = .{ .ptr = cfg.out_dtype },
             .alibi_slopes_ptr = .{ .ptr = .f32 },
             .softmax_lse_ptr = .{ .ptr = .f32 },
             .sink_ptr = .{ .ptr = .f32 },
@@ -131,6 +126,7 @@ pub const MhaFwd = struct {
             .sm_scale_ptr = .{ .ptr = .f32 },
             .cu_seqlens_q = .{ .ptr = .i32 },
             .cu_seqlens_k = .{ .ptr = .i32 },
+            .out_ptr = .{ .ptr = cfg.out_dtype },
         });
 
         const stride_qz_in = b.load(a.stride_qz_in_ptr);
@@ -950,5 +946,4 @@ fn mhaFwd(
     }
     const op = acc_final.to(cfg.out_dtype);
     b.storeOpts(out_ptr.addPtr(offs_out), op, .{ .mask = out_mask });
-
 }
