@@ -127,6 +127,7 @@ pub const HF = struct {
             .workers = XET_INTRA_TENSOR_WORKERS,
             .queue_capacity = XET_INTRA_TENSOR_WORKERS * 4,
         });
+        errdefer pool.deinit(inner);
         return .{
             .allocator = allocator,
             .base = .init(inner),
