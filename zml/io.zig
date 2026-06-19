@@ -19,7 +19,6 @@ const Sharding = @import("Sharding.zig");
 const Placement = Sharding.Placement;
 const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
-const CompilationContext = @import("module.zig").CompilationContext;
 
 const log = std.log.scoped(.@"zml/io");
 
@@ -1211,83 +1210,6 @@ pub const Loader = struct {
         dma_chunk_size: usize,
     };
 
-    pub const Transform = struct {
-        loader: *Loader,
-        arena: std.heap.ArenaAllocator,
-        contexts: std.ArrayList(Context) = .empty,
-        inputs: std.ArrayList(Buffer) = .empty,
-        outputs: std.ArrayList(*Buffer) = .empty,
-
-        pub const Func = *const fn (inputs: []const Tensor, outputs: []Tensor) void;
-
-        pub const Context = struct {
-            func: Func,
-            input_count: usize,
-            output_count: usize,
-        };
-
-        pub fn init(allocator: std.mem.Allocator, loader: *Loader) !Transform {
-            var arena: std.heap.ArenaAllocator = .init(allocator);
-            errdefer arena.deinit();
-            return .{ .loader = loader, .arena = arena };
-        }
-
-        pub fn deinit(self: Transform) void {
-            self.arena.deinit();
-        }
-
-        pub fn end(self: *Transform) void {
-            std.log.info("Ending transform with {} transforms", .{self.contexts.items.len});
-            for (self.contexts.items, 0..) |func, i| {
-                std.log.info("func {} has {} inputs and {} outputs", .{ i, func.input_count, func.output_count });
-            }
-
-            var inputs = self.arena.allocator().alloc(Tensor, self.inputs.items.len) catch unreachable;
-            for (self.inputs.items, 0..) |*buffer, i| {
-                inputs[i] = .fromShape(buffer.shape());
-            }
-
-            const LocalContext = struct {
-                contexts: []const Context,
-                output_count: usize,
-            };
-
-            var context: LocalContext = .{ .contexts = self.contexts.items, .output_count = self.outputs.items.len };
-
-            var exe = self.loader.platform.compileFn(self.arena.allocator(), self.loader.io, struct {
-                pub fn call(opaque_ctx: *anyopaque, inputs_: []const Tensor) []Tensor {
-                    const ctx: *LocalContext = @ptrCast(@alignCast(opaque_ctx));
-                    const outputs = CompilationContext.current().arena.allocator().alloc(Tensor, ctx.output_count) catch unreachable;
-
-                    var input_offset: usize = 0;
-                    var output_offset: usize = 0;
-                    for (ctx.contexts) |func| {
-                        const func_inputs = inputs_[input_offset..][0..func.input_count];
-                        const func_outputs = outputs[output_offset..][0..func.output_count];
-                        func.func(func_inputs, func_outputs);
-                        input_offset += func.input_count;
-                        output_offset += func.output_count;
-                    }
-
-                    return outputs;
-                }
-            }.call, .{ &context, inputs }, .{}) catch unreachable;
-            defer exe.deinit();
-
-            var args = exe.args(self.arena.allocator()) catch unreachable;
-            var results = exe.results(self.arena.allocator()) catch unreachable;
-            args.set(.{self.inputs});
-            exe.callOpts(self.loader.io, args, &results, .{ .wait = true });
-            results.fill(.{self.outputs.items});
-        }
-
-        pub fn addTransform(self: *Transform, func: Func, inputs: []const Buffer, outputs: []const *Buffer) !void {
-            try self.inputs.appendSlice(self.arena.allocator(), inputs);
-            try self.outputs.appendSlice(self.arena.allocator(), outputs);
-            try self.contexts.append(self.arena.allocator(), .{ .func = func, .input_count = inputs.len, .output_count = outputs.len });
-        }
-    };
-
     pub fn init(allocator: std.mem.Allocator, platform: *const Platform, opts: Opts) !Loader {
         const pool_count = platform.devices.len;
         const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
@@ -1489,10 +1411,6 @@ pub const Loader = struct {
             },
             .custom => @panic("Custom binding can't be loaded automatically"),
         }
-    }
-
-    pub fn startTransform(self: *Loader) !Transform {
-        return Transform.init(self.allocator, self);
     }
 };
 
