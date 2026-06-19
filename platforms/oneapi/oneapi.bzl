@@ -47,14 +47,9 @@ _ONEAPI_PACKAGES = {
 filegroup(
     name = "ccl_runtime",
     srcs = glob(
-        ["{ONEAPI_CCL_LIB}/**"],
+        include = ["{ONEAPI_CCL_LIB}/**"],
         exclude = ["{ONEAPI_CCL_LIB}/libccl_legacy.so"],
-        allow_empty = False,
     ),
-)
-filegroup(
-    name = "libccl_legacy_so",
-    srcs = ["{ONEAPI_CCL_LIB}/libccl_legacy.so"],
 )""".format(ONEAPI_CCL_LIB = ONEAPI_CCL_LIB),
 
     "intel-oneapi-mpi-2021.18": """
@@ -67,7 +62,7 @@ filegroup(
         "{ONEAPI_MPI_LIB}/mpi/libmpi_ze_hooks.so",
         "{ONEAPI_MPI_LIBFABRIC_LIB}/libfabric.so*",
         "{ONEAPI_MPI_LIBFABRIC_LIB}/prov/*.so",
-    ], allow_empty = False),
+    ]),
 )""".format(
         ONEAPI_MPI_LIB = ONEAPI_MPI_LIB,
         ONEAPI_MPI_LIBFABRIC_LIB = ONEAPI_MPI_LIBFABRIC_LIB,

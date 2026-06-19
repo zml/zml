@@ -41,7 +41,6 @@ copy_to_directory(
     srcs = [
         ":libpjrt_oneapi_so",
         ":libsycl_so",
-        ":libccl_legacy_so",
         "@intel-oneapi-ccl-2022.0//:ccl_runtime",
         "@intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0//:sycl_runtime",
         "@intel-oneapi-compiler-shared-runtime-2026.0//:compiler_runtime",
@@ -62,7 +61,6 @@ copy_to_directory(
     hardlink = "auto",
     include_external_repositories = ["**"],
     replace_prefixes = {
-        "libccl_legacy_so": "lib",
         "libpjrt_oneapi_so": "lib",
         "libsycl_so": "lib",
         ONEAPI_CCL_LIB: "lib",
