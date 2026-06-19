@@ -171,13 +171,20 @@ pub const KernelUnifiedAttention3dPtr = struct {
         use_sinks: bool,
         sliding_window: i64,
 
+        stride_k_cache_0: i64 = 0,
+        stride_k_cache_1: i64 = 0,
+        stride_k_cache_2: i64 = 0,
         stride_k_cache_3: i64 = 1,
+        stride_v_cache_0: i64 = 0,
+        stride_v_cache_1: i64 = 0,
+        stride_v_cache_2: i64 = 0,
         stride_v_cache_3: i64 = 1,
 
         block_q: i64,
         block_m: i64,
         num_segments_per_seq: i64,
         all_decode: bool = false,
+        kv_cache_modifier: ttir.CacheModifier = .none,
     };
 
     pub const Kernel = tri.Kernel(Config, .{
@@ -232,12 +239,12 @@ pub const KernelUnifiedAttention3dPtr = struct {
         const query_stride_0 = b.load(a.query_stride_0_ptr);
         const query_stride_1 = b.load(a.query_stride_1_ptr);
         const qq_bias_stride_0 = b.load(a.qq_bias_stride_0_ptr);
-        const stride_k_cache_0 = b.load(a.stride_k_cache_0_ptr);
-        const stride_k_cache_1 = b.load(a.stride_k_cache_1_ptr);
-        const stride_k_cache_2 = b.load(a.stride_k_cache_2_ptr);
-        const stride_v_cache_0 = b.load(a.stride_v_cache_0_ptr);
-        const stride_v_cache_1 = b.load(a.stride_v_cache_1_ptr);
-        const stride_v_cache_2 = b.load(a.stride_v_cache_2_ptr);
+        const stride_k_cache_0 = b.liftAs(cfg.stride_k_cache_0, .i64);
+        const stride_k_cache_1 = b.liftAs(cfg.stride_k_cache_1, .i64);
+        const stride_k_cache_2 = b.liftAs(cfg.stride_k_cache_2, .i64);
+        const stride_v_cache_0 = b.liftAs(cfg.stride_v_cache_0, .i64);
+        const stride_v_cache_1 = b.liftAs(cfg.stride_v_cache_1, .i64);
+        const stride_v_cache_2 = b.liftAs(cfg.stride_v_cache_2, .i64);
         const num_seqs = b.load(a.num_seqs_ptr);
 
         kernelUnifiedAttention3d(
@@ -864,8 +871,7 @@ fn kernelUnifiedAttention3d(
     const segm_tile_lo = segm_idx.mul(tiles_per_segment);
     const segm_tile_hi = segm_idx.add(1).mul(tiles_per_segment).minimum(num_tiles);
 
-    const kv_cache_mod: ttir.CacheModifier =
-        if (config.all_decode) .cg else .none;
+    const kv_cache_mod: ttir.CacheModifier = config.kv_cache_modifier;
 
     var loop = k.openFor(segm_tile_lo, segm_tile_hi, 1, .{ m_init, l_init, acc_init });
     {
@@ -877,40 +883,63 @@ fn kernelUnifiedAttention3d(
         const seq_offset = j.mul(@as(i32, @intCast(TILE_SIZE))).add(offs_t);
         const tile_mask: Value = seq_offset.lt(max_seq_prefix_len);
 
-        const physical_block_idx = k.load(
-            block_tables_ptr.addPtr(block_table_offset).addPtr(seq_offset.div(@as(i32, @intCast(BLOCK_SIZE)))),
-        ).to(.i64);
+        const same_block = TILE_SIZE == BLOCK_SIZE;
+        const in_block_offs: Value = if (same_block) offs_t else seq_offset.rem(@as(i32, @intCast(BLOCK_SIZE)));
+        const physical_block_idx: Value = if (same_block)
+            k.load(block_tables_ptr.addPtr(block_table_offset).addPtr(j)).to(.i64).splatTo(&.{TILE_SIZE})
+        else
+            k.load(
+                block_tables_ptr.addPtr(block_table_offset).addPtr(seq_offset.div(@as(i32, @intCast(BLOCK_SIZE)))),
+            ).to(.i64);
 
         const v_offset = k.expandDims(physical_block_idx, 1).mul(stride_v_cache_0)
             .add(kv_head_idx.to(.i64).mul(stride_v_cache_2))
             .add(k.expandDims(offs_d, 0).mul(config.stride_v_cache_3))
-            .add(k.expandDims(seq_offset.rem(@as(i32, @intCast(BLOCK_SIZE))), 1).mul(stride_v_cache_1));
+            .add(k.expandDims(in_block_offs, 1).mul(stride_v_cache_1));
 
         const k_offset = k.expandDims(physical_block_idx, 0).mul(stride_k_cache_0)
             .add(kv_head_idx.to(.i64).mul(stride_k_cache_2))
             .add(k.expandDims(offs_d, 1).mul(config.stride_k_cache_3))
-            .add(k.expandDims(seq_offset.rem(@as(i32, @intCast(BLOCK_SIZE))), 0).mul(stride_k_cache_1));
+            .add(k.expandDims(in_block_offs, 0).mul(stride_k_cache_1));
 
-        const k_mask_partial: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
-            k.expandDims(dim_mask, 1).bitAnd(k.expandDims(tile_mask, 0))
-        else
-            k.expandDims(tile_mask, 0);
-        const K_load = k.loadOpts(key_cache_ptr.addPtr(k_offset), .{
-            .mask = k.broadcastTo(k_mask_partial, &.{ HEAD_SIZE_PADDED, TILE_SIZE }),
-            .other = k.zeros(&.{ HEAD_SIZE_PADDED, TILE_SIZE }, config.kv_dtype),
-            .cache_modifier = kv_cache_mod,
-        });
+        const block_io_loads = same_block and HEAD_SIZE_PADDED == HEAD_SIZE;
+
+        const K_load = if (block_io_loads)
+            k.loadOpts(key_cache_ptr.addPtr(k_offset), .{ .cache_modifier = kv_cache_mod })
+        else kb: {
+            const k_mask_partial: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
+                k.expandDims(dim_mask, 1).bitAnd(k.expandDims(tile_mask, 0))
+            else
+                k.expandDims(tile_mask, 0);
+            break :kb k.loadOpts(key_cache_ptr.addPtr(k_offset), .{
+                .mask = k.broadcastTo(k_mask_partial, &.{ HEAD_SIZE_PADDED, TILE_SIZE }),
+                .other = k.zeros(&.{ HEAD_SIZE_PADDED, TILE_SIZE }, config.kv_dtype),
+                .cache_modifier = kv_cache_mod,
+            });
+        };
         const K = dequantKv(K_load, k_scale, isFp8(config.kv_dtype), config.q_dtype);
 
-        const v_mask_partial: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
-            k.expandDims(tile_mask, 1).bitAnd(k.expandDims(dim_mask, 0))
+        const V_raw = if (block_io_loads)
+            k.loadOpts(value_cache_ptr.addPtr(v_offset), .{ .cache_modifier = kv_cache_mod })
+        else vb: {
+            const v_mask_partial: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
+                k.expandDims(tile_mask, 1).bitAnd(k.expandDims(dim_mask, 0))
+            else
+                k.expandDims(tile_mask, 1);
+            break :vb k.loadOpts(value_cache_ptr.addPtr(v_offset), .{
+                .mask = k.broadcastTo(v_mask_partial, &.{ TILE_SIZE, HEAD_SIZE_PADDED }),
+                .other = k.zeros(&.{ TILE_SIZE, HEAD_SIZE_PADDED }, config.kv_dtype),
+                .cache_modifier = kv_cache_mod,
+            });
+        };
+        const V_load = if (block_io_loads)
+            k.where(
+                k.broadcastTo(k.expandDims(tile_mask, 1), &.{ TILE_SIZE, HEAD_SIZE_PADDED }),
+                V_raw,
+                k.zeros(&.{ TILE_SIZE, HEAD_SIZE_PADDED }, config.kv_dtype),
+            )
         else
-            k.expandDims(tile_mask, 1);
-        const V_load = k.loadOpts(value_cache_ptr.addPtr(v_offset), .{
-            .mask = k.broadcastTo(v_mask_partial, &.{ TILE_SIZE, HEAD_SIZE_PADDED }),
-            .other = k.zeros(&.{ TILE_SIZE, HEAD_SIZE_PADDED }, config.kv_dtype),
-            .cache_modifier = kv_cache_mod,
-        });
+            V_raw;
         const V = dequantKv(V_load, v_scale, isFp8(config.kv_dtype), config.q_dtype);
 
         // seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
