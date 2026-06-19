@@ -432,7 +432,7 @@ pub const Shape = struct {
         stdx.debug.compileError("axes expects an int-tuple or a tuple of enum literal, got {}", .{T});
     }
 
-    fn axisFromInt(self: Shape, a: isize) u3 {
+    pub fn axisFromInt(self: Shape, a: isize) u3 {
         const rk: i8 = self.rank();
         if (a < -rk or a > rk) {
             stdx.debug.panic("Tensor {f} doesn't have dimension: {d}", .{ self, a });
@@ -822,7 +822,7 @@ pub const Shape = struct {
             return res;
         }
 
-        stdx.debug.compileError("Expected a tuple of enum literals eg: .{ .a, .b, .c } got: {any}", .{@TypeOf(tagz)});
+        stdx.debug.compileError("Expected a tuple of enum literals eg: .{{ .a, .b, .c }} got: {any}", .{@TypeOf(tagz)});
     }
 
     test withTags {
