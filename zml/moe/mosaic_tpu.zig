@@ -225,6 +225,7 @@ pub fn callGmmEp(
     };
     const aligned_k = @divFloor(k + 127, 128) * 128;
     const aligned_n = if (fuse_act == .none) @divFloor(out_n + 127, 128) * 128 else out_n;
+    // const tile_n = if (fuse_act == .none) 128 else out_n;
     const cfg: gmm_ep.Cfg = .{
         .size_m = lhs.dim(.token),
         .size_k = k,
@@ -252,7 +253,12 @@ pub fn callGmmEp(
         .{
             .out = zml.Shape.init(.{ .token = lhs.dim(.token), .out = aligned_n }, out_dtype),
         },
-        .{ .cfg = cfg },
+        .{
+            .cfg = cfg,
+            .extras = .{
+                .vmem_limit_bytes = 32 * 1024 * 1024,
+            },
+        },
     ).out;
 
     return out.slice1d(.out, .{ .end = out_n });
