@@ -1113,13 +1113,14 @@ pub const Attention = struct {
         var new_cache = cache;
         new_cache.sliding_window = blk: {
             if (is_prefill) {
+                const n_tokens = @min(self.window_size, x.dim(.seq));
                 // TODO: Add support when `actual_seqlen > self.window_size`
                 const ids_dtype = actual_seqlen.dtype();
 
                 const start = zml.Tensor.scalar(0, ids_dtype);
-                const kv_gathered = kv.dynamicSlice(.{ .kv = zml.Tensor.DynSlice{ .start = start, .len = self.window_size }});
+                const kv_gathered = kv.dynamicSlice(.{ .kv = zml.Tensor.DynSlice{ .start = start, .len = n_tokens }});
 
-                const pos_ids = zml.Tensor.arange(.{ .end = self.window_size }, ids_dtype).withTags(.{.kv});
+                const pos_ids = zml.Tensor.arange(.{ .end = n_tokens }, ids_dtype).withTags(.{.kv});
                 break :blk new_cache.sliding_window.update(kv_gathered, pos_ids, layer_idx);
             } else {
                 var pos_ids = zml.Tensor.iota(offset_idx.shape().insert(.last, .{ .kv = x.dim(.seq) }), .kv).convert(.u32);
@@ -1370,28 +1371,32 @@ const MoE = struct {
         _ = moe_metadata; // autofix
         _ = moe_parameters; // autofix
         const topk_weight, const topk_ids = self.router.forward(x, input_ids);
+        _ = topk_ids; // autofix
+        _ = topk_weight; // autofix
 
         var y = zml.Tensor.zeroes(x.shape().withDtype(.f32));
 
         const weight_dtype = self.gate_up.dtype();
+        _ = weight_dtype; // autofix
         const scale_dtype = self.gate_up_scale.dtype();
+        _ = scale_dtype; // autofix
 
-        for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
-            const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
-            const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
-            const routed = forwardRoutedExpert(
-                x,
-                weight,
-                self.gate_up.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
-                self.gate_up_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
-                self.down.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
-                self.down_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
-                self.block_size,
-                self.activation_threshold,
-            ).convert(.f32);
-
-            y = y.add(routed);
-        }
+        // for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
+        //     const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
+        //     const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
+        //     const routed = forwardRoutedExpert(
+        //         x,
+        //         weight,
+        //         self.gate_up.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
+        //         self.gate_up_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
+        //         self.down.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
+        //         self.down_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
+        //         self.block_size,
+        //         self.activation_threshold,
+        //     ).convert(.f32);
+        //
+        //     y = y.add(routed);
+        // }
 
         y = y.add(self.shared_experts.forward(x).convert(.f32));
         return y.convert(x.dtype());
@@ -1796,8 +1801,8 @@ pub const Model = struct {
     lm_head: LmHead,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
-        // const layers = try allocator.alloc(Layer, 5);
-        const layers = try allocator.alloc(Layer, config.num_hidden_layers);
+        const layers = try allocator.alloc(Layer, 5);
+        // const layers = try allocator.alloc(Layer, config.num_hidden_layers);
 
         for (layers, 0..) |*layer, i| {
             const layer_store = store.withPrefix("layers").withLayer(i);
