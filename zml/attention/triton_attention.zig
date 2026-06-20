@@ -578,9 +578,8 @@ pub const flashattn = struct {
                     const zero = zml.Tensor.constant(token_index_.dtype().zero()).reshape(.{1});
                     const cu_seqlens_k = zml.Tensor.concatenate(&.{ zero, seqused_k }, 0)
                         .convert(.i32);
-                        
+
                     const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, @intCast(seqlen_q) }));
-                        
 
                     const softmax_lse = zml.Tensor.uninitialized(zml.Shape.init(.{
                         .h = num_q_heads,
