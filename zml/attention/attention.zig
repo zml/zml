@@ -19,22 +19,22 @@ pub const Backend = enum {
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
-            //.cuda => b: {
-            //    const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
+            .cuda => b: {
+                const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
 
-            //    if (zml.platform.cuda.tryGetComputeCapabilities(platform, first_device)) |cc| {
-            //        break :b if (std.mem.eql(u8, cc, "9.0"))
-            //            .cuda_fa3
-            //        else
-            //            .cuda_fa2;
-            //    }
+                if (zml.platform.cuda.tryGetComputeCapabilities(platform, first_device)) |cc| {
+                    break :b if (std.mem.eql(u8, cc, "9.0"))
+                        .cuda_fa3
+                    else
+                        .cuda_fa2;
+                }
 
-            //    break :b .vanilla;
-            //},
+                break :b .vanilla;
+            },
             .neuron => .nki,
             .metal => .metal_fa,
             .cpu, .tpu, .oneapi => .vanilla,
-            .cuda, .rocm => .triton,
+            .rocm => .triton,
         };
     }
 };
