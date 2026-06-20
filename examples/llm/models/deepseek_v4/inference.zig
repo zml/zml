@@ -324,6 +324,7 @@ pub const ComposedKernelExe = struct {
 
         return platform.compile(allocator, io, mdl.embeds, .forward, .{tokens}, .{
             .shardings = &opts.shardings.all(),
+            .program_name = phase.programName("deepseek_v4", "embeddings"),
         });
     }
 
@@ -363,6 +364,7 @@ pub const ComposedKernelExe = struct {
             opts.moe_parameters,
         }, .{
             .shardings = &opts.shardings.all(),
+            .program_name = phase.programName("deepseek_v4", "full_attn"),
         });
     }
 
@@ -402,6 +404,7 @@ pub const ComposedKernelExe = struct {
             opts.moe_parameters,
         }, .{
             .shardings = &opts.shardings.all(),
+            .program_name = phase.programName("deepseek_v4", "csa_attn"),
         });
     }
 
@@ -441,6 +444,7 @@ pub const ComposedKernelExe = struct {
             opts.moe_parameters,
         }, .{
             .shardings = &opts.shardings.all(),
+            .program_name = phase.programName("deepseek_v4", "csa2_attn"),
         });
     }
 
@@ -480,6 +484,7 @@ pub const ComposedKernelExe = struct {
             opts.moe_parameters,
         }, .{
             .shardings = &opts.shardings.all(),
+            .program_name = phase.programName("deepseek_v4", "hca_attn"),
         });
     }
 
@@ -504,6 +509,7 @@ pub const ComposedKernelExe = struct {
 
         return platform.compile(allocator, io, mdl.lm_head, .forward, .{ hidden, opts.rng }, .{
             .shardings = &opts.shardings.all(),
+            .program_name = phase.programName("deepseek_v4", "lm_head"),
         });
     }
 
