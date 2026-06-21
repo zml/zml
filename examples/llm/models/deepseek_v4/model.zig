@@ -4,6 +4,7 @@ const stdx = zml.stdx;
 const zml = @import("zml");
 const common = @import("../common.zig");
 const inference = @import("inference.zig");
+const attention = @import("sparse_mla.zig");
 
 const log = std.log.scoped(.deepseek_v4);
 
@@ -1152,7 +1153,12 @@ pub const Attention = struct {
             },
         }
 
-        var attn = sparse_attn(q, kv, self.attn_sink, topk, self.softmax_scale, attention_metadata, attention_parameters);
+        var attn = attention.sparseAttentionMLA(q, kv, self.attn_sink, topk, self.softmax_scale, attention_metadata, attention_parameters);
+        // attn2.print("[kernel] attn");
+        //
+        // var attn = sparse_attn(q, kv, self.attn_sink, topk, self.softmax_scale, attention_metadata, attention_parameters);
+        log.info("attn: {f}", .{attn});
+        // attn.print("[kernel] attn");
         attn = apply_reverse_rope(attn.rename(.{ .q = .seq }), freqs_cis, self.nope_head_dim, self.rope_head_dim);
         attn = attn.reshape(.{ .batch = attn.dim(0), .seq = attn.dim(1), .g = self.o_groups, .d = .auto });
 
@@ -1268,6 +1274,9 @@ pub fn sparse_attn(
 ) zml.Tensor {
     _ = attention_metadata; // autofix
     _ = attention_parameters; // autofix
+    log.info("q: {f}", .{q});
+    log.info("kv: {f}", .{kv});
+    log.info("topk: {f}", .{topk});
     // q = [batch, q, h, hd], kv = [batch, k, hd], topk = [batch, seq, topk]
     const mask = topk.cmp(.GE, zml.Tensor.zeroes(topk.shape())).insertAxes(.topk, .{.h});
 
@@ -1371,32 +1380,28 @@ const MoE = struct {
         _ = moe_metadata; // autofix
         _ = moe_parameters; // autofix
         const topk_weight, const topk_ids = self.router.forward(x, input_ids);
-        _ = topk_ids; // autofix
-        _ = topk_weight; // autofix
 
         var y = zml.Tensor.zeroes(x.shape().withDtype(.f32));
 
         const weight_dtype = self.gate_up.dtype();
-        _ = weight_dtype; // autofix
         const scale_dtype = self.gate_up_scale.dtype();
-        _ = scale_dtype; // autofix
 
-        // for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
-        //     const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
-        //     const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
-        //     const routed = forwardRoutedExpert(
-        //         x,
-        //         weight,
-        //         self.gate_up.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
-        //         self.gate_up_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
-        //         self.down.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
-        //         self.down_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
-        //         self.block_size,
-        //         self.activation_threshold,
-        //     ).convert(.f32);
-        //
-        //     y = y.add(routed);
-        // }
+        for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
+            const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
+            const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
+            const routed = forwardRoutedExpert(
+                x,
+                weight,
+                self.gate_up.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
+                self.gate_up_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
+                self.down.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
+                self.down_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
+                self.block_size,
+                self.activation_threshold,
+            ).convert(.f32);
+
+            y = y.add(routed);
+        }
 
         y = y.add(self.shared_experts.forward(x).convert(.f32));
         return y.convert(x.dtype());
@@ -1801,7 +1806,7 @@ pub const Model = struct {
     lm_head: LmHead,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
-        const layers = try allocator.alloc(Layer, 5);
+        const layers = try allocator.alloc(Layer, 1);
         // const layers = try allocator.alloc(Layer, config.num_hidden_layers);
 
         for (layers, 0..) |*layer, i| {
