@@ -189,7 +189,7 @@ pub const Tensor = struct {
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron => return self,
+            .cpu, .neuron, .metal => return self,
             .cuda, .rocm, .tpu, .oneapi => {},
         }
 
@@ -224,7 +224,7 @@ pub const Tensor = struct {
     pub fn onMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron => return self,
+            .cpu, .neuron, .metal => return self,
             .cuda, .rocm, .tpu, .oneapi => {},
         }
 
@@ -3282,7 +3282,7 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi => blk: {
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
                 sorted.values = sorted.values.slice1d(a, .{ .end = k });
                 sorted.indices = sorted.indices.slice1d(a, .{ .end = k });
