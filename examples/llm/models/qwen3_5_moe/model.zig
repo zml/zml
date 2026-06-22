@@ -50,10 +50,8 @@ pub const RopeParameters = struct {
 fn partitionProjectedKv(kv: zml.Tensor, kv_head_sharding: zml.Sharding.DimSharding) zml.Tensor {
     return switch (kv_head_sharding) {
         .sharded => |heads| blk: {
-            if (heads.factor != 1) {
-                kv = kv.stutter1d(kv.axis(.h), heads.factor);
-            }
-            break :blk kv.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
+            const sharded_kv = if (heads.factor != 1) kv.stutter1d(kv.axis(.h), heads.factor) else kv;
+            break :blk sharded_kv.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
         },
         .replicated => kv.withPartitioning(.{ .s = .replicated, .h = .replicated, .hd = .replicated }),
     };
