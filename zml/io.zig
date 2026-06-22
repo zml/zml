@@ -109,7 +109,7 @@ pub const TensorStore = struct {
 
         pub fn withPrefix(self: *const View, prefix_: []const u8) View {
             var buffer: [256]u8 = undefined;
-            const new_prefix = std.fmt.bufPrint(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ }) catch unreachable;
+            const new_prefix = makeKey(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ });
 
             return .{
                 .store = self.store,
@@ -120,7 +120,7 @@ pub const TensorStore = struct {
 
         pub fn withLayer(self: *const View, index: usize) View {
             var buffer: [256]u8 = undefined;
-            const new_prefix = std.fmt.bufPrint(&buffer, "{s}{d}.", .{ self.prefix() orelse "", index }) catch unreachable;
+            const new_prefix = makeKey(&buffer, "{s}{d}.", .{ self.prefix() orelse "", index });
 
             return .{
                 .store = self.store,
@@ -135,7 +135,7 @@ pub const TensorStore = struct {
 
         pub fn hasKey(self: *const View, subkey: []const u8) bool {
             var buffer: [256]u8 = undefined;
-            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             return for (self.store.registry.tensors.keys()) |k| {
                 if (std.mem.startsWith(u8, k, key)) break true;
             } else false;
@@ -185,7 +185,7 @@ pub const TensorStore = struct {
             return switch (request) {
                 .direct => |direct| b: {
                     var buffer: [256]u8 = undefined;
-                    const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", direct }) catch unreachable;
+                    const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", direct });
 
                     const ptr = self.store.getPtrFromKey(key) orelse return null;
 
@@ -194,7 +194,7 @@ pub const TensorStore = struct {
                     result_shape = applyPartitioning(result_shape, partitioning);
 
                     const tensor: Tensor = .fromShape(result_shape);
-                    self.store.putBindingNoClobber(tensor.id, .{ .direct = ptr }) catch unreachable;
+                    self.store.putBindingNoClobber(tensor.id, .{ .direct = ptr }) catch |e| break :b e;
 
                     break :b tensor;
                 },
@@ -202,11 +202,11 @@ pub const TensorStore = struct {
                     var buffer: [256]u8 = undefined;
                     const arena = self.store.arena.allocator();
 
-                    const tensors = arena.alloc(*safetensors.Tensor, concatenate.keys.len) catch unreachable;
+                    const tensors = arena.alloc(*safetensors.Tensor, concatenate.keys.len) catch |e| break :b e;
                     errdefer arena.free(tensors);
 
                     for (concatenate.keys, 0..) |subkey, i| {
-                        const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+                        const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
                         tensors[i] = self.store.getPtrFromKey(key) orelse return null;
                     }
 
@@ -220,7 +220,7 @@ pub const TensorStore = struct {
 
                     const tensor: Tensor = .fromShape(result_shape);
 
-                    self.store.putBindingNoClobber(tensor.id, .{ .concatenate = .{ .tensors = tensors, .axis = concatenate.axis } }) catch unreachable;
+                    self.store.putBindingNoClobber(tensor.id, .{ .concatenate = .{ .tensors = tensors, .axis = concatenate.axis } }) catch |e| break :b e;
 
                     break :b tensor;
                 },
@@ -228,15 +228,15 @@ pub const TensorStore = struct {
                     var buffer: [256]u8 = undefined;
                     const arena = self.store.arena.allocator();
 
-                    const tensors = arena.alloc(*safetensors.Tensor, custom.keys.len) catch unreachable;
+                    const tensors = arena.alloc(*safetensors.Tensor, custom.keys.len) catch |e| break :b e;
                     errdefer arena.free(tensors);
 
                     for (custom.keys, 0..) |subkey, i| {
-                        const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+                        const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
                         tensors[i] = self.store.getPtrFromKey(key) orelse return null;
                     }
 
-                    const shapes = arena.alloc(Shape, custom.keys.len) catch unreachable;
+                    const shapes = arena.alloc(Shape, custom.keys.len) catch |e| break :b e;
                     errdefer arena.free(shapes);
                     for (tensors, shapes) |t, *s| {
                         s.* = t.shape;
@@ -249,16 +249,16 @@ pub const TensorStore = struct {
 
                     const tensor: Tensor = .fromShape(result_shape);
 
-                    self.store.putBindingNoClobber(tensor.id, .{ .custom = .{ .tensors = tensors } }) catch unreachable;
+                    self.store.putBindingNoClobber(tensor.id, .{ .custom = .{ .tensors = tensors } }) catch |e| break :b e;
 
                     break :b tensor;
                 },
-            };
+            } catch |e| std.debug.panic("Not handling {} error", .{e});
         }
 
         pub fn getShape(self: View, subkey: []const u8) ?Shape {
             var buffer: [256]u8 = undefined;
-            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             const entry_ptr = self.store.getPtrFromKey(key) orelse return null;
             return entry_ptr.shape;
         }
@@ -268,7 +268,7 @@ pub const TensorStore = struct {
             const key = if (opts.no_prefix)
                 subkey
             else b: {
-                break :b std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+                break :b makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             };
             const entry_ptr = self.store.getPtrFromKey(key) orelse return null;
             return entry_ptr.shape;
@@ -276,7 +276,7 @@ pub const TensorStore = struct {
 
         pub fn getReader(self: View, subkey: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
             var key_buffer: [256]u8 = undefined;
-            const key = std.fmt.bufPrint(&key_buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            const key = makeKey(&key_buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             return self.store.getReader(key, io, buffer);
         }
 
@@ -291,6 +291,12 @@ pub const TensorStore = struct {
                 }
             }
             return count_;
+        }
+
+        fn makeKey(buffer: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
+            const key = std.fmt.bufPrint(buffer, fmt, args) catch
+                std.debug.panic("Expected key to be less than {} characters", .{buffer.len});
+            return key;
         }
     };
 };
@@ -392,18 +398,18 @@ pub const Loader = struct {
     pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) void {
         self.group.async(io, struct {
             fn call(self_: *Loader, io_: std.Io, model_: *const T, buffers_: *Bufferized(T), store_: *const TensorStore, shardings_: []const Sharding, opts_: AutoOpts) void {
-                self_.loadInner(io_, T, model_, buffers_, store_, shardings_, opts_) catch unreachable;
+                self_.loadInner(io_, T, model_, buffers_, store_, shardings_, opts_);
             }
         }.call, .{ self, io, model, buffers, store, shardings, opts });
     }
 
-    fn loadInner(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) !void {
+    fn loadInner(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) void {
         const tensor_count = meta.count(Tensor, model);
 
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
 
-        const flattened_buffers = try arena.allocator().alloc(*Buffer, tensor_count);
+        const flattened_buffers = arena.allocator().alloc(*Buffer, tensor_count) catch @panic("Errors can't be handled in `loadInner`");
         meta.forEachVisit(buffers, *Buffer, struct {
             fn call(i: usize, buffer: *Buffer, flattened_buffers_: []*Buffer) void {
                 flattened_buffers_[i] = buffer;
@@ -436,6 +442,13 @@ pub const Loader = struct {
     }
 
     fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) void {
+        self.defaultCallbackInner(io, tensor, buffer, store, shardings, opts) catch |e| {
+            log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
+            unreachable;
+        };
+    }
+
+    fn defaultCallbackInner(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) !void {
         const binding = store.getBindingById(tensor.id) orelse {
             std.log.warn("Failed to get binding for tensor with id: {}", .{tensor.id});
             return;
@@ -443,7 +456,7 @@ pub const Loader = struct {
 
         switch (binding) {
             .direct => |direct| {
-                var reader = direct.reader(io, &.{}, .{}) catch unreachable;
+                var reader = try direct.reader(io, &.{}, .{});
                 defer reader.deinit();
 
                 const shape = tensor.shape();
@@ -452,7 +465,7 @@ pub const Loader = struct {
                     break :blk self.platform.replicated_sharding;
                 };
 
-                var writer = MemoryWriter.init(
+                var writer = try MemoryWriter.init(
                     self.allocator,
                     io,
                     self.platform,
@@ -462,7 +475,7 @@ pub const Loader = struct {
                     shape,
                     sharding,
                     buffer,
-                ) catch unreachable;
+                );
                 defer writer.deinit(self.allocator);
 
                 const scale = 1024;
@@ -473,12 +486,12 @@ pub const Loader = struct {
                     writer.setProgress(&node);
                     defer writer.setProgress(null);
                     var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
-                    const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
-                    progress_writer.interface.flush() catch unreachable;
+                    const total = try reader.interface.streamRemaining(&progress_writer.interface);
+                    try progress_writer.interface.flush();
                     _ = self.bytes_loaded.fetchAdd(total, .monotonic);
                 } else {
-                    const total = reader.interface.streamRemaining(writer.interface()) catch unreachable;
-                    writer.interface().flush() catch unreachable;
+                    const total = try reader.interface.streamRemaining(writer.interface());
+                    try writer.interface().flush();
                     _ = self.bytes_loaded.fetchAdd(total, .monotonic);
                 }
             },
@@ -492,7 +505,7 @@ pub const Loader = struct {
                         break :blk self.platform.replicated_sharding;
                     };
 
-                    var writer = MemoryWriter.init(
+                    var writer = try MemoryWriter.init(
                         self.allocator,
                         io,
                         self.platform,
@@ -502,7 +515,7 @@ pub const Loader = struct {
                         shape,
                         sharding,
                         buffer,
-                    ) catch unreachable;
+                    );
                     defer writer.deinit(self.allocator);
 
                     const scale = 1024;
@@ -529,20 +542,20 @@ pub const Loader = struct {
 
                         var total: usize = 0;
                         for (concatenate.tensors) |t| {
-                            var reader = t.reader(io, &.{}, .{}) catch unreachable;
+                            var reader = try t.reader(io, &.{}, .{});
                             defer reader.deinit();
-                            total += reader.interface.streamRemaining(writer.interface()) catch unreachable;
+                            total += try reader.interface.streamRemaining(writer.interface());
                         }
-                        progress_writer.interface.flush() catch unreachable;
+                        try progress_writer.interface.flush();
                         _ = self.bytes_loaded.fetchAdd(total, .monotonic);
                     } else {
                         var total: usize = 0;
                         for (concatenate.tensors) |t| {
-                            var reader = t.reader(io, &.{}, .{}) catch unreachable;
+                            var reader = try t.reader(io, &.{}, .{});
                             defer reader.deinit();
-                            total += reader.interface.streamRemaining(writer.interface()) catch unreachable;
+                            total += try reader.interface.streamRemaining(writer.interface());
                         }
-                        writer.interface().flush() catch unreachable;
+                        try writer.interface().flush();
                         _ = self.bytes_loaded.fetchAdd(total, .monotonic);
                     }
                 } else @panic("Non-major concatenation is not supported yet");
