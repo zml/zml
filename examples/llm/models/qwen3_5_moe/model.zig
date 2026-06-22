@@ -136,11 +136,8 @@ pub const LoadedModel = struct {
         try loader.await(io);
 
         const took = now.untilNow(io, .awake);
-        const total_bytes = loader.bytes_loaded.raw;
-        const bytes_per_sec: u64 = @intFromFloat(
-            @as(f64, @floatFromInt(total_bytes)) /
-                (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s),
-        );
+        const total_bytes: u64 = loader.bytes_loaded.raw;
+        const bytes_per_sec: u64 = total_bytes * std.time.ns_per_s / @as(u64, @intCast(took.nanoseconds));
         log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
 
         return buffers;
@@ -228,11 +225,8 @@ pub const Model = struct {
         try loader.await(io);
 
         const took = now.untilNow(io, .awake);
-        const total_bytes = loader.bytes_loaded.raw;
-        const bytes_per_sec: u64 = @intFromFloat(
-            @as(f64, @floatFromInt(total_bytes)) /
-                (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s),
-        );
+        const total_bytes: u64 = loader.bytes_loaded.raw;
+        const bytes_per_sec: u64 = total_bytes * std.time.ns_per_s / @as(u64, @intCast(took.nanoseconds));
         log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
 
         return buffers;
