@@ -1154,11 +1154,6 @@ pub const Attention = struct {
         }
 
         var attn = attention.sparseAttentionMLA(q, kv, self.attn_sink, topk, self.softmax_scale, attention_metadata, attention_parameters);
-        // attn2.print("[kernel] attn");
-        //
-        // var attn = sparse_attn(q, kv, self.attn_sink, topk, self.softmax_scale, attention_metadata, attention_parameters);
-        log.info("attn: {f}", .{attn});
-        // attn.print("[kernel] attn");
         attn = apply_reverse_rope(attn.rename(.{ .q = .seq }), freqs_cis, self.nope_head_dim, self.rope_head_dim);
         attn = attn.reshape(.{ .batch = attn.dim(0), .seq = attn.dim(1), .g = self.o_groups, .d = .auto });
 
@@ -1260,52 +1255,6 @@ fn compressed_topk2(ratio: u32, actual_seqlen: zml.Tensor, seqlen: u32, offset_i
     );
 
     return masked;
-}
-
-// From: <https://github.com/tile-ai/tilelang/blob/4e873220313c7e4dbfa0538582bc32ac5c81b1eb/examples/deepseek_v4/sparse_attn_fwd_sm90.py#L162>
-pub fn sparse_attn(
-    q: zml.Tensor,
-    kv: zml.Tensor,
-    attn_sink: zml.Tensor,
-    topk: zml.Tensor,
-    scale: ?f32,
-    attention_metadata: zml.attention.attention.Metadata,
-    attention_parameters: zml.attention.attention.Parameters,
-) zml.Tensor {
-    _ = attention_metadata; // autofix
-    _ = attention_parameters; // autofix
-    log.info("q: {f}", .{q});
-    log.info("kv: {f}", .{kv});
-    log.info("topk: {f}", .{topk});
-    // q = [batch, q, h, hd], kv = [batch, k, hd], topk = [batch, seq, topk]
-    const mask = topk.cmp(.GE, zml.Tensor.zeroes(topk.shape())).insertAxes(.topk, .{.h});
-
-    const selected_kv = kv.gather(.{ .kv = topk }, .{}).rename(.{ .seq = .q, .topk = .kv }).convert(.f32);
-
-    const dims = zml.nn.collectDims(.{ .h, .q, .kv, .hd }, &.{ q, kv }, .strict) catch {
-        stdx.debug.panic("Inputs have incompatible shapes (q: {f}, kv: {f}, attn_mask: ).", .{ q, kv });
-    };
-
-    const sqrt_head_dim = if (scale) |m| m else 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
-    const head_scaling = zml.Tensor.scalar(sqrt_head_dim, selected_kv.dtype());
-
-    const q_32 = q.convert(.f32);
-    var scores = q_32.dot(selected_kv, .hd).mul(head_scaling);
-    scores = zml.Tensor.select(mask.broad(scores.shape()), scores, zml.Tensor.constant(scores.dtype().minValue()));
-
-    const sink_shape = q.shape().set(.hd, 1);
-    const sink = attn_sink.insertAxes(0, .{ .batch, .q }).insertAxes(.last, .{.hd}).broad(sink_shape);
-    const scores_sink = zml.Tensor.concatenate(&.{ scores, sink.convert(scores.dtype()) }, -1);
-
-    const attn_weights = scores_sink.convert(.f32).softmax(.kv).convert(q_32.dtype());
-    const attn_weights_non_sink = attn_weights.slice(&.{
-        .{},
-        .{},
-        .{},
-        .{ .end = topk.dim(.topk) },
-    });
-    const attn = attn_weights_non_sink.dot(selected_kv, .kv);
-    return attn.convert(.bf16);
 }
 
 const MoE = struct {
@@ -1806,7 +1755,7 @@ pub const Model = struct {
     lm_head: LmHead,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
-        const layers = try allocator.alloc(Layer, 1);
+        const layers = try allocator.alloc(Layer, 5);
         // const layers = try allocator.alloc(Layer, config.num_hidden_layers);
 
         for (layers, 0..) |*layer, i| {

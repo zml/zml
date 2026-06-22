@@ -5,19 +5,54 @@ const zml = @import("zml");
 
 const kernel = @import("sparse_mla_kernel.zig");
 
-const log = std.log.scoped(.deepseek);
+const log = std.log.scoped(.deepseek_v4);
 
-pub fn sparseAttentionMLA(
+// From: <https://github.com/tile-ai/tilelang/blob/4e873220313c7e4dbfa0538582bc32ac5c81b1eb/examples/deepseek_v4/sparse_attn_fwd_sm90.py#L162>
+fn vanillaSparseAttention(
     q: zml.Tensor,
     kv: zml.Tensor,
     attn_sink: zml.Tensor,
     topk: zml.Tensor,
     scale: ?f32,
-    attention_metadata: zml.attention.attention.Metadata,
-    attention_parameters: zml.attention.attention.Parameters,
 ) zml.Tensor {
-    _ = attention_metadata; // autofix
-    _ = attention_parameters; // autofix
+    // q = [batch, q, h, hd], kv = [batch, k, hd], topk = [batch, seq, topk]
+    const mask = topk.cmp(.GE, zml.Tensor.zeroes(topk.shape())).insertAxes(.topk, .{.h});
+
+    const selected_kv = kv.gather(.{ .kv = topk }, .{}).rename(.{ .seq = .q, .topk = .kv }).convert(.f32);
+
+    const dims = zml.nn.collectDims(.{ .h, .q, .kv, .hd }, &.{ q, kv }, .strict) catch {
+        stdx.debug.panic("Inputs have incompatible shapes (q: {f}, kv: {f}, attn_mask: ).", .{ q, kv });
+    };
+
+    const sqrt_head_dim = if (scale) |m| m else 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
+    const head_scaling = zml.Tensor.scalar(sqrt_head_dim, selected_kv.dtype());
+
+    const q_32 = q.convert(.f32);
+    var scores = q_32.dot(selected_kv, .hd).mul(head_scaling);
+    scores = zml.Tensor.select(mask.broad(scores.shape()), scores, zml.Tensor.constant(scores.dtype().minValue()));
+
+    const sink_shape = q.shape().set(.hd, 1);
+    const sink = attn_sink.insertAxes(0, .{ .batch, .q }).insertAxes(.last, .{.hd}).broad(sink_shape);
+    const scores_sink = zml.Tensor.concatenate(&.{ scores, sink.convert(scores.dtype()) }, -1);
+
+    const attn_weights = scores_sink.convert(.f32).softmax(.kv).convert(q_32.dtype());
+    const attn_weights_non_sink = attn_weights.slice(&.{
+        .{},
+        .{},
+        .{},
+        .{ .end = topk.dim(.topk) },
+    });
+    const attn = attn_weights_non_sink.dot(selected_kv, .kv);
+    return attn.convert(.bf16);
+}
+
+pub fn tritonSparseAttention(
+    q: zml.Tensor,
+    kv: zml.Tensor,
+    attn_sink: zml.Tensor,
+    topk: zml.Tensor,
+    scale: ?f32,
+) zml.Tensor {
     // q: [batch, q, h=64, hd=512], kv: [batch, kv, hd=512], topk: [batch, seq, topk=128]
     // stdx.debug.assert();
 
@@ -88,6 +123,23 @@ pub fn sparseAttentionMLA(
     });
 
     return out.out.reshape(q.shape());
+}
+
+pub fn sparseAttentionMLA(
+    q: zml.Tensor,
+    kv: zml.Tensor,
+    attn_sink: zml.Tensor,
+    topk: zml.Tensor,
+    scale: ?f32,
+    metadata: zml.attention.attention.Metadata,
+    parameters: zml.attention.attention.Parameters,
+) zml.Tensor {
+    _ = metadata; // autofix
+    return switch (parameters) {
+        .vanilla => vanillaSparseAttention(q, kv, attn_sink, topk, scale), 
+        .attnd => @panic("Must be initialized manually"),
+        else => tritonSparseAttention(q, kv, attn_sink, topk, scale),
+    };
 }
 
 fn stride(v: i64) zml.Tensor {
