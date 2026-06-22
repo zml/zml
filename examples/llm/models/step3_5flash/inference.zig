@@ -309,7 +309,7 @@ const ComposedKernelExe = struct {
     moe_full_layer: zml.Exe,
     moe_sliding_layer: zml.Exe,
     moe_sliding_layer_with_limit: zml.Exe,
-    moe_sliding_shared_layer_with_limit: zml.Exe,
+    moe_full_shared_layer_with_limit: zml.Exe,
     sampler: zml.Exe,
     phase: Phase,
     mdl: *const model.Model,
@@ -347,17 +347,17 @@ const ComposedKernelExe = struct {
         const dense_sliding_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 1, phase, progress);
         // errdefer if (dense_sliding_layer) |exe| exe.deinit();
 
-        const moe_full_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 3, phase, progress);
+        const moe_full_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 4, phase, progress);
         // errdefer if (moe_full_layer) |exe| exe.deinit();
 
-        const moe_sliding_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 4, phase, progress);
+        const moe_sliding_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 3, phase, progress);
         // errdefer if (moe_sliding_layer) |exe| exe.deinit();
 
-        const moe_sliding_layer_with_limit = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 42, phase, progress);
+        const moe_sliding_layer_with_limit = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 43, phase, progress);
         // errdefer if (moe_sliding_layer_with_limit) |exe| exe.deinit();
 
-        const moe_sliding_shared_layer_with_limit = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 43, phase, progress);
-        // errdefer if (moe_sliding_shared_layer_with_limit) |exe| exe.deinit();
+        const moe_full_shared_layer_with_limit = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 44, phase, progress);
+        // errdefer if (moe_full_shared_layer_with_limit) |exe| exe.deinit();
 
         const sampler = try compileSampler(allocator, io, platform, step3p5_model, parameters, seqlen, phase, progress);
         errdefer sampler.deinit();
@@ -370,7 +370,7 @@ const ComposedKernelExe = struct {
             .moe_full_layer = moe_full_layer,
             .moe_sliding_layer = moe_sliding_layer,
             .moe_sliding_layer_with_limit = moe_sliding_layer_with_limit,
-            .moe_sliding_shared_layer_with_limit = moe_sliding_shared_layer_with_limit,
+            .moe_full_shared_layer_with_limit = moe_full_shared_layer_with_limit,
             .sampler = sampler,
             .phase = phase,
             .mdl = &step3p5_model,
@@ -385,7 +385,7 @@ const ComposedKernelExe = struct {
         self.moe_full_layer.deinit();
         self.moe_sliding_layer.deinit();
         self.moe_sliding_layer_with_limit.deinit();
-        self.moe_sliding_shared_layer_with_limit.deinit();
+        self.moe_full_shared_layer_with_limit.deinit();
         self.sampler.deinit();
     }
 
@@ -568,13 +568,18 @@ const ComposedKernelExe = struct {
         else
             .full;
 
+        var has_swiglu_limit: bool = false;
+        var has_shared_limit: bool = false;
+
         const ffn_kind: FfnKind = switch (layer.ffn) {
             .mlp => .dense,
             .moe => .moe,
         };
 
-        const has_swiglu_limit: bool = layer.ffn.moe.experts.limit != 0;
-        const has_shared_limit: bool = layer.ffn.moe.shared.limit != 0;
+        if (ffn_kind == .moe) {
+            has_swiglu_limit = layer.ffn.moe.experts.limit != null;
+            has_shared_limit = layer.ffn.moe.shared.limit != 0;
+        }
 
         const Key = packed struct(u4) {
             ffn_kind: FfnKind,
@@ -624,10 +629,10 @@ const ComposedKernelExe = struct {
             } => self.moe_sliding_layer_with_limit,
             .{
                 .ffn_kind = .moe,
-                .attn_kind = .sliding,
+                .attn_kind = .full,
                 .has_swiglu_limit = true,
                 .has_shared_limit = true,
-            } => self.moe_sliding_shared_layer_with_limit,
+            } => self.moe_full_shared_layer_with_limit,
             else => unreachable,
         };
     }
