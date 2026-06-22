@@ -681,25 +681,56 @@ pub const CreateOptions = struct {
             };
         };
 
-        fn writeNamedValues(self: XlaGpu, values: *std.ArrayList(pjrt.NamedValue)) void {
-            switch (self.allocator) {
-                .platform => {
-                    values.appendAssumeCapacity(.init(.string, "allocator", "platform"));
-                },
-                .bfc, .async => |opt| {
-                    values.appendAssumeCapacity(.init(.string, "allocator", switch (self.allocator) {
-                        .bfc => "bfc",
-                        .async => "cuda_async",
-                        .platform => unreachable,
-                    }));
-                    values.appendAssumeCapacity(.init(.bool, "preallocate", opt.preallocate));
-                    if (opt.memory_fraction > 0) {
-                        values.appendAssumeCapacity(.init(.float, "memory_fraction", opt.memory_fraction));
+        fn writeNamedValues(self: XlaGpu, values: *std.ArrayList(pjrt.NamedValue), is_rocm: bool) void {
+            var allocator_type: []const u8 = "bfc";
+            const env_allocator = std.c.getenv("XLA_PYTHON_CLIENT_ALLOCATOR") orelse std.c.getenv("XLA_CLIENT_ALLOCATOR");
+            if (env_allocator) |env_val_c| {
+                const env_val = std.mem.span(env_val_c);
+                if (std.mem.eql(u8, env_val, "platform")) {
+                    allocator_type = "platform";
+                } else if (std.mem.eql(u8, env_val, "bfc")) {
+                    allocator_type = "bfc";
+                } else {
+                    allocator_type = env_val;
+                }
+            } else {
+                allocator_type = switch (self.allocator) {
+                    .platform => "platform",
+                    .bfc => "bfc",
+                    .async => if (is_rocm) "bfc" else "cuda_async",
+                };
+            }
+
+            values.appendAssumeCapacity(.init(.string, "allocator", allocator_type));
+
+            if (!std.mem.eql(u8, allocator_type, "platform")) {
+                const env_preallocate = std.c.getenv("XLA_PYTHON_CLIENT_PREALLOCATE") orelse std.c.getenv("XLA_CLIENT_PREALLOCATE");
+                if (env_preallocate == null) {
+                    const preallocate = switch (self.allocator) {
+                        .bfc, .async => |opt| opt.preallocate,
+                        .platform => true,
+                    };
+                    values.appendAssumeCapacity(.init(.bool, "preallocate", preallocate));
+                }
+
+                const env_mem_fraction = std.c.getenv("XLA_PYTHON_CLIENT_MEM_FRACTION") orelse std.c.getenv("XLA_CLIENT_MEM_FRACTION");
+                if (env_mem_fraction == null) {
+                    const memory_fraction = switch (self.allocator) {
+                        .bfc, .async => |opt| opt.memory_fraction,
+                        .platform => 0.90,
+                    };
+                    if (memory_fraction > 0) {
+                        values.appendAssumeCapacity(.init(.float, "memory_fraction", memory_fraction));
                     }
-                    if (opt.collective_memory_size_mb > 0) {
-                        values.appendAssumeCapacity(.init(.int64, "collective_memory_size", opt.collective_memory_size_mb * 1024 * 1024));
-                    }
-                },
+                }
+
+                const collective_memory_size_mb: i64 = switch (self.allocator) {
+                    .bfc, .async => |opt| opt.collective_memory_size_mb,
+                    .platform => 0,
+                };
+                if (collective_memory_size_mb > 0) {
+                    values.appendAssumeCapacity(.init(.int64, "collective_memory_size", collective_memory_size_mb * 1024 * 1024));
+                }
             }
         }
     };
@@ -709,7 +740,8 @@ pub const CreateOptions = struct {
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
-            .cuda, .rocm => self.xla_gpu.writeNamedValues(&values),
+            .cuda => self.xla_gpu.writeNamedValues(&values, false),
+            .rocm => self.xla_gpu.writeNamedValues(&values, true),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
@@ -846,5 +878,81 @@ test "platform defaultMemoryLayout is boring" {
                 .tile_dims_sizes = &.{},
             },
         });
+    }
+}
+
+test "CreateOptions.toNamedValues allocator config" {
+    // 1. Test defaults (no environment variables set)
+    {
+        const opts = CreateOptions{};
+        var buf: [16]pjrt.NamedValue = undefined;
+
+        // CUDA Defaults
+        const cuda_vals = opts.toNamedValues(.cuda, &buf);
+        try std.testing.expect(cuda_vals.len >= 3);
+        try std.testing.expectEqualStrings("allocator", cuda_vals[0].name());
+        try std.testing.expectEqualStrings("bfc", cuda_vals[0].value().string);
+        try std.testing.expectEqualStrings("preallocate", cuda_vals[1].name());
+        try std.testing.expect(cuda_vals[1].value().bool);
+        try std.testing.expectEqualStrings("memory_fraction", cuda_vals[2].name());
+        try std.testing.expectEqual(@as(f32, 0.90), cuda_vals[2].value().float);
+
+        // ROCm Defaults
+        const rocm_vals = opts.toNamedValues(.rocm, &buf);
+        try std.testing.expect(rocm_vals.len >= 3);
+        try std.testing.expectEqualStrings("allocator", rocm_vals[0].name());
+        try std.testing.expectEqualStrings("bfc", rocm_vals[0].value().string);
+        try std.testing.expectEqualStrings("preallocate", rocm_vals[1].name());
+        try std.testing.expect(rocm_vals[1].value().bool);
+        try std.testing.expectEqualStrings("memory_fraction", rocm_vals[2].name());
+        try std.testing.expectEqual(@as(f32, 0.90), rocm_vals[2].value().float);
+    }
+
+    // 2. ROCm async fallback
+    {
+        var opts = CreateOptions{};
+        opts.xla_gpu = .{ .allocator = .{ .async = .{} } };
+        var buf: [16]pjrt.NamedValue = undefined;
+
+        // CUDA should use cuda_async
+        const cuda_vals = opts.toNamedValues(.cuda, &buf);
+        try std.testing.expectEqualStrings("cuda_async", cuda_vals[0].value().string);
+
+        // ROCm should fall back to bfc
+        const rocm_vals = opts.toNamedValues(.rocm, &buf);
+        try std.testing.expectEqualStrings("bfc", rocm_vals[0].value().string);
+    }
+
+    // 3. Env var allocator override to platform
+    {
+        _ = c.setenv("XLA_CLIENT_ALLOCATOR", "platform", 1);
+        defer _ = c.unsetenv("XLA_CLIENT_ALLOCATOR");
+
+        const opts = CreateOptions{};
+        var buf: [16]pjrt.NamedValue = undefined;
+
+        const vals = opts.toNamedValues(.cuda, &buf);
+        try std.testing.expectEqual(@as(usize, 1), vals.len);
+        try std.testing.expectEqualStrings("allocator", vals[0].name());
+        try std.testing.expectEqualStrings("platform", vals[0].value().string);
+    }
+
+    // 4. Env var preallocate/mem fraction bypass
+    {
+        _ = c.setenv("XLA_CLIENT_PREALLOCATE", "false", 1);
+        _ = c.setenv("XLA_CLIENT_MEM_FRACTION", "0.50", 1);
+        defer {
+            _ = c.unsetenv("XLA_CLIENT_PREALLOCATE");
+            _ = c.unsetenv("XLA_CLIENT_MEM_FRACTION");
+        }
+
+        const opts = CreateOptions{};
+        var buf: [16]pjrt.NamedValue = undefined;
+
+        const vals = opts.toNamedValues(.cuda, &buf);
+        // Should only contain the allocator type (since preallocate & mem_fraction are bypassed)
+        try std.testing.expectEqual(@as(usize, 1), vals.len);
+        try std.testing.expectEqualStrings("allocator", vals[0].name());
+        try std.testing.expectEqualStrings("bfc", vals[0].value().string);
     }
 }
