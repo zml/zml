@@ -328,22 +328,6 @@ pub const Binding = union(Binding.Type) {
     },
 };
 
-pub const LoadOpts = struct {
-    pub const auto: LoadOpts = .{
-        .parallelism = 1,
-        .shardings = &.{},
-        .dma_chunks = 2,
-        .dma_chunk_size = 4096,
-    };
-
-    parallelism: usize,
-    shardings: []const Sharding = &.{},
-    progress: ?*std.Progress.Node = null,
-    dma_chunks: usize,
-    dma_chunk_size: usize,
-    total_bytes: ?*usize = null,
-};
-
 pub const Loader = struct {
     allocator: std.mem.Allocator,
     platform: *const Platform,
@@ -354,7 +338,7 @@ pub const Loader = struct {
     bytes_loaded: std.atomic.Value(usize) = .init(0),
 
     pub const Opts = struct {
-        pub const auto: Opts = .{
+        pub const default: Opts = .{
             .parallelism = 1,
             .dma_chunks = 2,
             .dma_chunk_size = 4096,
