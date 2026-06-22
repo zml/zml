@@ -43,7 +43,7 @@ pub const TensorStore = struct {
         self.arena.deinit();
     }
 
-    fn addBinding(self: *TensorStore, id: usize, binding: Binding) !void {
+    fn putBindingNoClobber(self: *TensorStore, id: usize, binding: Binding) std.mem.Allocator.Error!void {
         const gop = try self.id_to_binding.getOrPut(self.allocator, id);
         if (gop.found_existing) {
             stdx.debug.panic("Id {} already has an associated binding", .{id});
@@ -142,7 +142,7 @@ pub const TensorStore = struct {
         }
 
         pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
-            return self.maybeCreateBinding(.{ .direct = subkey }, tagz, partitioning) catch unreachable;
+            return self.maybeCreateBinding(.{ .direct = subkey }, tagz, partitioning);
         }
 
         pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
@@ -181,7 +181,7 @@ pub const TensorStore = struct {
             return shape;
         }
 
-        pub fn maybeCreateBinding(self: View, request: Binding.Request, tagz: anytype, partitioning: anytype) !?Tensor {
+        pub fn maybeCreateBinding(self: View, request: Binding.Request, tagz: anytype, partitioning: anytype) ?Tensor {
             return switch (request) {
                 .direct => |direct| b: {
                     var buffer: [256]u8 = undefined;
@@ -194,7 +194,7 @@ pub const TensorStore = struct {
                     result_shape = applyPartitioning(result_shape, partitioning);
 
                     const tensor: Tensor = .fromShape(result_shape);
-                    try self.store.addBinding(tensor.id, .{ .direct = ptr });
+                    self.store.putBindingNoClobber(tensor.id, .{ .direct = ptr }) catch unreachable;
 
                     break :b tensor;
                 },
@@ -202,7 +202,7 @@ pub const TensorStore = struct {
                     var buffer: [256]u8 = undefined;
                     const arena = self.store.arena.allocator();
 
-                    const tensors = try arena.alloc(*safetensors.Tensor, concatenate.keys.len);
+                    const tensors = arena.alloc(*safetensors.Tensor, concatenate.keys.len) catch unreachable;
                     errdefer arena.free(tensors);
 
                     for (concatenate.keys, 0..) |subkey, i| {
@@ -220,7 +220,7 @@ pub const TensorStore = struct {
 
                     const tensor: Tensor = .fromShape(result_shape);
 
-                    try self.store.addBinding(tensor.id, .{ .concatenate = .{ .tensors = tensors, .axis = concatenate.axis } });
+                    self.store.putBindingNoClobber(tensor.id, .{ .concatenate = .{ .tensors = tensors, .axis = concatenate.axis } }) catch unreachable;
 
                     break :b tensor;
                 },
@@ -228,7 +228,7 @@ pub const TensorStore = struct {
                     var buffer: [256]u8 = undefined;
                     const arena = self.store.arena.allocator();
 
-                    const tensors = try arena.alloc(*safetensors.Tensor, custom.keys.len);
+                    const tensors = arena.alloc(*safetensors.Tensor, custom.keys.len) catch unreachable;
                     errdefer arena.free(tensors);
 
                     for (custom.keys, 0..) |subkey, i| {
@@ -236,7 +236,7 @@ pub const TensorStore = struct {
                         tensors[i] = self.store.getPtrFromKey(key) orelse return null;
                     }
 
-                    const shapes = try arena.alloc(Shape, custom.keys.len);
+                    const shapes = arena.alloc(Shape, custom.keys.len) catch unreachable;
                     errdefer arena.free(shapes);
                     for (tensors, shapes) |t, *s| {
                         s.* = t.shape;
@@ -249,7 +249,7 @@ pub const TensorStore = struct {
 
                     const tensor: Tensor = .fromShape(result_shape);
 
-                    try self.store.addBinding(tensor.id, .{ .custom = .{ .tensors = tensors } });
+                    self.store.putBindingNoClobber(tensor.id, .{ .custom = .{ .tensors = tensors } }) catch unreachable;
 
                     break :b tensor;
                 },
