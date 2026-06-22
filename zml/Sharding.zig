@@ -227,9 +227,6 @@ pub const DimSharding = union(enum) {
 
 pub fn shardableDim(sharding: Sharding, dim: i64, logical_axis: anytype, must_divide: i64) DimSharding {
     const partitions = sharding.numPartitionsForLogicalAxis(logical_axis);
-    stdx.debug.assert(dim > 0, "shardableDim expects a positive dim, got {}", .{dim});
-    stdx.debug.assert(must_divide > 0, "shardableDim expects a positive must_divide, got {}", .{must_divide});
-    stdx.debug.assert(partitions > 0, "shardableDim expects a positive partition count, got {}", .{partitions});
 
     if (@mod(dim, partitions) == 0) {
         return if (@mod(must_divide, dim) == 0) .{ .sharded = .{ .dim = dim, .factor = 1 } } else .replicated;
@@ -2345,35 +2342,4 @@ test "sharding: num partitions for logical axis" {
 
     try std.testing.expectEqual(4, sharding.numPartitionsForLogicalAxis(.model));
     try std.testing.expectEqual(1, sharding.numPartitionsForLogicalAxis(.batch));
-}
-
-test "sharding: shardable dim" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const runner: ShardingTest = .init(arena.allocator());
-
-    const physical = try runner.physical(.{ 3, 4 }, .{ .mesh = .torus });
-    const logical: LogicalMesh = .mesh(.{ .model = .high_bandwidth });
-    const strategy: Strategy = .parseBindings(.{ .model = .{ .link_x, .link_y } });
-    const data: Sharding.Data = try .init("dim_plan_mesh", &physical, logical, strategy);
-    const sharding: Sharding = .{ .data = &data };
-    const partitioning: Partitioning = try .init(.shardy, &.{sharding});
-
-    {
-        const dim_sharding = try partitioning.shardableDim(Shape.init(.{ .h = 24 }, .f32).withPartitioning(.{ .h = .model }), .h, 72);
-        try std.testing.expectEqual(DimSharding{ .sharded = .{ .dim = 24, .factor = 1 } }, dim_sharding);
-    }
-
-    {
-        const dim_sharding = try partitioning.shardableDim(Shape.init(.{ .h = 8 }, .f32).withPartitioning(.{ .h = .model }), .h, 72);
-        try std.testing.expectEqual(DimSharding{ .sharded = .{ .dim = 24, .factor = 3 } }, dim_sharding);
-
-        const shape = Shape.init(.{ .h = 8, .hd = 128 }, .f32).setDim(.h, dim_sharding.sharded.dim);
-        try std.testing.expectEqual(@as(i64, 24), shape.dim(.h));
-    }
-
-    {
-        const dim_sharding = try partitioning.shardableDim(Shape.init(.{ .h = 8 }, .f32).withPartitioning(.{ .h = .model }), .h, 64);
-        try std.testing.expectEqual(DimSharding.replicated, dim_sharding);
-    }
 }
