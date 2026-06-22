@@ -565,13 +565,16 @@ fn kernelUnifiedAttention2d(
     var tile_end: Value = num_tiles;
     if (SLIDING_WINDOW > 0) {
         const qpos_lo = q_local_bq;
-        const first_allowed_key = context_len.add(qpos_lo).sub(@as(i32, @intCast(SLIDING_WINDOW - 1)));
-        tile_start = first_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).maximum(0);
         if (config.is_causal) {
             const qpos_hi_raw = qpos_lo.add(pad_term - 1);
             const qpos_hi = qpos_hi_raw.minimum(cur_batch_query_len.sub(1));
+            const first_allowed_key = context_len.add(qpos_lo).sub(@as(i32, @intCast(SLIDING_WINDOW - 1)));
             const last_allowed_key = context_len.add(qpos_hi);
+            tile_start = first_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).maximum(0);
             tile_end = last_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).add(1).minimum(num_tiles);
+        } else {
+            const first_allowed_key = context_len.add(qpos_lo).sub(@as(i32, @intCast(SLIDING_WINDOW - 1)));
+            tile_start = first_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).maximum(0);
         }
     }
 
