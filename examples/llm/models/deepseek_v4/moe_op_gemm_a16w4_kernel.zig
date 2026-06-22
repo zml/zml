@@ -2,12 +2,8 @@
 
 const std = @import("std");
 
-const dialects = @import("mlir/dialects");
-const cf = dialects.cf;
 const harness = @import("harness");
-const mlir = @import("mlir");
 const zml = @import("zml");
-const ttir = dialects.ttir;
 const tri = zml.kernel.triton;
 const ops = zml.ops;
 const Tensor = zml.Tensor;
@@ -42,14 +38,6 @@ pub const Cfg = struct {
     W_CACHE_MODIFIER: enum { none, cg, ca } = .none,
     UPCAST_INDICES: bool = false,
 };
-
-fn cacheModifier(cfg: Cfg) ttir.CacheModifier {
-    return switch (cfg.W_CACHE_MODIFIER) {
-        .none => .none,
-        .cg => .cg,
-        .ca => .ca,
-    };
-}
 
 fn pidGrid(pid: Value, num_pid_m: Value, num_pid_n: Value, group_size_m: i32) struct { Value, Value } {
     if (group_size_m == 1) {
@@ -123,35 +111,7 @@ fn swiglu(
 }
 
 fn returnIfTritonOrder(b: *tri.Builder, cond: Value) void {
-    const current = b.currentBlock();
-    const region = current.parentRegion();
-    const cont_block = mlir.Block.init(&.{}, &.{});
-    region.appendOwnedBlock(cont_block);
-
-    const ret_block = b.exit_block orelse blk: {
-        const rb = mlir.Block.init(&.{}, &.{});
-        const ret_operands: [0]*const mlir.Value = .{};
-        _ = ttir.return_(b.ctx, &ret_operands, b.loc()).appendTo(rb);
-        b.exit_block = rb;
-        break :blk rb;
-    };
-
-    _ = cf.cond_br(
-        b.ctx,
-        cond.inner,
-        ret_block,
-        &.{},
-        cont_block,
-        &.{},
-        null,
-        b.loc(),
-    ).appendTo(current);
-
-    if (b.block_stack.items.len == 0) {
-        b.pushBlock(cont_block);
-    } else {
-        b.block_stack.items[b.block_stack.items.len - 1] = cont_block;
-    }
+    b.returnIfOpts(cond, .{}, .{ .inline_return = true });
 }
 
 pub const Kernel = tri.Kernel(Cfg, .{
@@ -387,9 +347,17 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         const acc_in = loop.carried[3];
 
         const x = b.load(x_ptrs);
-        const w = b.loadOpts(w_ptrs, .{ .cache_modifier = cacheModifier(cfg) });
+        const w = b.loadOpts(w_ptrs, .{ .cache_modifier = switch (cfg.W_CACHE_MODIFIER) {
+            .none => .none,
+            .cg => .cg,
+            .ca => .ca,
+        } });
 
-        const w_scales_loaded = b.loadOpts(w_mx_scale_ptrs, .{ .cache_modifier = cacheModifier(cfg) });
+        const w_scales_loaded = b.loadOpts(w_mx_scale_ptrs, .{ .cache_modifier = switch (cfg.W_CACHE_MODIFIER) {
+            .none => .none,
+            .cg => .cg,
+            .ca => .ca,
+        } });
         const w_scales = if (cfg.SWIZZLE_MX_SCALE == .cdna4_scale)
             unswizzleMxScaleCdna4(b, w_scales_loaded, cfg.BLOCK_N, MX_SCALE_BLOCK_K)
         else
@@ -421,11 +389,19 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         const w = b.loadOpts(w_ptrs, .{
             .mask = b.broadcastTo(b.expandDims(mask_w_k, 1), &.{ PACKED_BLOCK_K_W, cfg.BLOCK_N }),
             .other = b.zeros(&.{ PACKED_BLOCK_K_W, cfg.BLOCK_N }, cfg.w_dtype),
-            .cache_modifier = cacheModifier(cfg),
+            .cache_modifier = switch (cfg.W_CACHE_MODIFIER) {
+                .none => .none,
+                .cg => .cg,
+                .ca => .ca,
+            },
         });
 
         const w_scales = if (cfg.SWIZZLE_MX_SCALE == .cdna4_scale) blk: {
-            const loaded = b.loadOpts(w_mx_scale_ptrs, .{ .cache_modifier = cacheModifier(cfg) });
+            const loaded = b.loadOpts(w_mx_scale_ptrs, .{ .cache_modifier = switch (cfg.W_CACHE_MODIFIER) {
+                .none => .none,
+                .cg => .cg,
+                .ca => .ca,
+            } });
             break :blk unswizzleMxScaleCdna4(b, loaded, cfg.BLOCK_N, MX_SCALE_BLOCK_K);
         } else b.loadOpts(w_mx_scale_ptrs, .{
             .mask = b.broadcastTo(b.expandDims(mask_w_k_scale, 0), &.{ cfg.BLOCK_N, MX_SCALE_BLOCK_K }),
@@ -444,14 +420,22 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         const bias = if (cfg.SPLIT_K == 1) b.loadOpts(BPtrs, .{
             .mask = mask_n,
             .other = b.zeros(&.{cfg.BLOCK_N}, cfg.b_dtype),
-            .cache_modifier = cacheModifier(cfg),
+            .cache_modifier = switch (cfg.W_CACHE_MODIFIER) {
+                .none => .none,
+                .cg => .cg,
+                .ca => .ca,
+            },
         }).to(.f32) else blk: {
             var if_bias = b.openIfElse(pid_k.eq(0), .{b.tensorTy(&.{cfg.BLOCK_N}, .f32)});
             {
                 const loaded = b.loadOpts(BPtrs, .{
                     .mask = mask_n,
                     .other = b.zeros(&.{cfg.BLOCK_N}, cfg.b_dtype),
-                    .cache_modifier = cacheModifier(cfg),
+                    .cache_modifier = switch (cfg.W_CACHE_MODIFIER) {
+                        .none => .none,
+                        .cg => .cg,
+                        .ca => .ca,
+                    },
                 }).to(.f32);
                 if_bias.yieldThen(.{loaded});
             }

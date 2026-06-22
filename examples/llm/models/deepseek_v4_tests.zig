@@ -150,7 +150,7 @@ pub fn run(
     // try ctx.testLayer("embed", .{ .batch, .seq }, mdl.embeds, model_buffers.embeds, .{});
     // try ctx.testLayer("head", .{ .batch, .seq, .hc, .d }, mdl.lm_head, model_buffers.lm_head, .{});
 
-    const n =  mdl.layers.len;
+    const n = mdl.layers.len;
     // const n = config.num_hidden_layers;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -159,6 +159,7 @@ pub fn run(
     const arena_allocator = arena.allocator();
 
     const cache: model.Cache = .init(mdl, config, 1, 2048);
+    _ = cache; // autofix
     // try ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{3}), .{ .batch, .seq, .hc, .d }, @intCast(3), mdl.layers[3], model_buffers.layers[3], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 });
 
     // const j = 4;
@@ -166,7 +167,7 @@ pub fn run(
     for (0..n) |i| {
         // try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.attn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].attn_norm, model_buffers.layers[i].attn_norm, .{});
         //
-        try ctx.testAttentionLayer(arena_allocator, i, cache, mdl.layers[i].attn, model_buffers.layers[i].attn, .{});
+        // try ctx.testAttentionLayer(arena_allocator, i, cache, mdl.layers[i].attn, model_buffers.layers[i].attn, .{});
         //
         // try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].ffn_norm, model_buffers.layers[i].ffn_norm, .{});
         //
@@ -205,14 +206,8 @@ pub fn run(
         //     .{},
         // );
         //
-        // // TEST: MoE (complete)
-        // try ctx.testMoELayer(
-        //     try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn", .{i}),
-        //     .{ .batch, .seq, .d },
-        //     mdl.layers[i].ffn,
-        //     model_buffers.layers[i].ffn,
-        //     .{}
-        // );
+        // TEST: MoE (complete)
+        try ctx.testMoELayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].ffn, model_buffers.layers[i].ffn, .{});
 
         // ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 }) catch log.err("layer {} did not passed", .{i});
     }
@@ -305,8 +300,8 @@ const TestContext = struct {
                     .{ .batch, .seq, .d },
                     csa.indexer,
                     attn_buffer.compression.csa.indexer,
-                cache.csa.indexer,
-                .{},
+                    cache.csa.indexer,
+                    .{},
                 );
             },
             .hca => |compressor| {
