@@ -189,7 +189,7 @@ fn prepareRouting(topk_ids: zml.Tensor, topk_weights: zml.Tensor, num_experts: i
     };
 
     const grid_m = blk: {
-        if (num_routes <= num_experts) return num_routes;
+        if (num_routes <= num_experts) break :blk num_routes;
         break :blk (std.math.divCeil(i64, @max(num_routes - num_experts + 1, 0), block_m) catch unreachable) + num_experts - 1;
     };
 
