@@ -523,7 +523,7 @@ pub const ComposedKernelExe = struct {
         for (args.model_buffers.layers, 0..) |layer_buffer, i| {
             const exe = switch (layer_buffer.attn.compression) {
                 .none => &self.attn_layer,
-                .csa => if(i == 2) &self.csa_attn_layer else &self.csa2_attn_layer,
+                .csa => if (i == 2) &self.csa_attn_layer else &self.csa2_attn_layer,
                 .hca => &self.hca_attn_layer,
             };
             var new_hidden_buffer, var new_cache_buffer, var new_cache_index_buffer = try self.runLayer(exe, args, layer_buffer, &hidden_buffer, cache_index_buffer);

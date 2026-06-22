@@ -5,6 +5,7 @@ const zml = @import("zml");
 const common = @import("../common.zig");
 const inference = @import("inference.zig");
 const attention = @import("sparse_mla.zig");
+const moe_ops = @import("moe.zig");
 
 const log = std.log.scoped(.deepseek_v4);
 
@@ -1119,7 +1120,7 @@ pub const Attention = struct {
                 const ids_dtype = actual_seqlen.dtype();
 
                 const start = zml.Tensor.scalar(0, ids_dtype);
-                const kv_gathered = kv.dynamicSlice(.{ .kv = zml.Tensor.DynSlice{ .start = start, .len = n_tokens }});
+                const kv_gathered = kv.dynamicSlice(.{ .kv = zml.Tensor.DynSlice{ .start = start, .len = n_tokens } });
 
                 const pos_ids = zml.Tensor.arange(.{ .end = n_tokens }, ids_dtype).withTags(.{.kv});
                 break :blk new_cache.sliding_window.update(kv_gathered, pos_ids, layer_idx);
@@ -1326,34 +1327,63 @@ const MoE = struct {
             .batch,
             .seq,
         }), "expect input tokens to has tags (.batch, .seq) but got {f}", .{input_ids.shape()});
-        _ = moe_metadata; // autofix
-        _ = moe_parameters; // autofix
+        _ = moe_metadata; // local A16W4 path builds its routing metadata from top-k tensors.
         const topk_weight, const topk_ids = self.router.forward(x, input_ids);
 
-        var y = zml.Tensor.zeroes(x.shape().withDtype(.f32));
+        return switch (moe_parameters) {
+            .triton => {
+                var routed = moe_ops.forwardMoe(
+                    x,
+                    topk_ids,
+                    topk_weight,
+                    self.gate_up,
+                    self.gate_up_scale,
+                    null,
+                    self.down,
+                    self.down_scale,
+                    null,
+                    self.activation_threshold,
+                    moe_parameters,
+                ) catch |err| stdx.debug.panic("A16W4 MoE failed: {}", .{err});
+                routed = routed.convert(.f32).add(self.shared_experts.forward(x).convert(.f32));
+                return routed.convert(x.dtype());
+            },
+            .vanilla => {
+                var y = zml.Tensor.zeroes(x.shape().withDtype(.f32));
 
-        const weight_dtype = self.gate_up.dtype();
-        const scale_dtype = self.gate_up_scale.dtype();
+                const weight_dtype = self.gate_up.dtype();
+                const scale_dtype = self.gate_up_scale.dtype();
 
-        for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
-            const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
-            const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
-            const routed = forwardRoutedExpert(
-                x,
-                weight,
-                self.gate_up.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
-                self.gate_up_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
-                self.down.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
-                self.down_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
-                self.block_size,
-                self.activation_threshold,
-            ).convert(.f32);
+                // log.info("x: {f}", .{x});
+                // log.info("topk_weight: {f}", .{topk_weight});
+                // log.info("topk_ids: {f}", .{topk_ids});
+                // log.info("gate_up_weight: {f}", .{self.gate_up});
+                // log.info("gate_up_scale: {f}", .{self.gate_up_scale});
+                // log.info("down_weight: {f}", .{self.down});
+                // log.info("down_scale: {f}", .{self.down_scale});
 
-            y = y.add(routed);
-        }
+                for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
+                    const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
+                    const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
+                    const routed = forwardRoutedExpert(
+                        x,
+                        weight,
+                        self.gate_up.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
+                        self.gate_up_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
+                        self.down.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
+                        self.down_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
+                        self.block_size,
+                        self.activation_threshold,
+                    ).convert(.f32);
 
-        y = y.add(self.shared_experts.forward(x).convert(.f32));
-        return y.convert(x.dtype());
+                    y = y.add(routed);
+                }
+
+                y = y.add(self.shared_experts.forward(x).convert(.f32));
+                // log.info("y = {f}", .{y});
+                return y.convert(x.dtype());
+            },
+        };
     }
 };
 
@@ -1755,7 +1785,7 @@ pub const Model = struct {
     lm_head: LmHead,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
-        const layers = try allocator.alloc(Layer, 5);
+        const layers = try allocator.alloc(Layer, 2);
         // const layers = try allocator.alloc(Layer, config.num_hidden_layers);
 
         for (layers, 0..) |*layer, i| {

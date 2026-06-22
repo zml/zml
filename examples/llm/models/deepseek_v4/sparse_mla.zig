@@ -1,9 +1,9 @@
 const std = @import("std");
-const stdx = zml.stdx;
 
 const zml = @import("zml");
-
 const kernel = @import("sparse_mla_kernel.zig");
+
+const stdx = zml.stdx;
 
 const log = std.log.scoped(.deepseek_v4);
 
