@@ -1303,12 +1303,11 @@ const MoE = struct {
         activation_threshold: f32,
     ) zml.Tensor {
         const threshold = zml.Tensor.scalar(activation_threshold, .f32);
-        const hidden_dim = @divExact(gate_up_weight.dim(.dout), 2);
 
         const gate_up = FP4Linear.forwardWith(gate_up_weight, gate_up_scale, x, block_size, 32, zml.Shape.toTag(.d)).convert(.f32);
-        var gate = gate_up.slice1d(.dout, .{ .end = hidden_dim });
+        var gate = gate_up.slice1d(.dout, .{ .start = 0, .step = 2 });
         gate = zml.Tensor.select(gate.cmp(.GT, threshold), threshold, gate);
-        const up = gate_up.slice1d(.dout, .{ .start = hidden_dim }).clamp(threshold.negate(), threshold);
+        const up = gate_up.slice1d(.dout, .{ .start = 1, .step = 2 }).clamp(threshold.negate(), threshold);
 
         var hidden = gate.silu().mul(up);
         hidden = hidden.mul(weight.appendAxes(.{.dout}).broad(hidden.shape()));
