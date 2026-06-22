@@ -53,8 +53,8 @@ pub fn main(init: std.process.Init) !void {
     progress.end();
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
-    const backend = attention.Backend.auto(platform);
-    const moe_backend = try zml.moe.Backend.auto(platform, .f8e4m3fn);
+    const backend = .vanilla;// attention.Backend.auto(platform);
+    const moe_backend = .triton;//try zml.moe.Backend.auto(platform, .f8e4m3fn);
     const params = deepseek.CompilationParameters.init(repo_model.parsed_config.value.max_position_embeddings, repo_model.parsed_config.value, repo_model.inner, shardings, backend, moe_backend);
 
     // try testSparseAttn(allocator, io, platform, platform.replicated_sharding, params.attention_metadata, params.attention_parameters);
@@ -159,7 +159,6 @@ pub fn run(
     const arena_allocator = arena.allocator();
 
     const cache: model.Cache = .init(mdl, config, 1, 2048);
-    _ = cache; // autofix
     // try ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{3}), .{ .batch, .seq, .hc, .d }, @intCast(3), mdl.layers[3], model_buffers.layers[3], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 });
 
     // const j = 4;
@@ -167,7 +166,7 @@ pub fn run(
     for (0..n) |i| {
         // try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.attn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].attn_norm, model_buffers.layers[i].attn_norm, .{});
         //
-        // try ctx.testAttentionLayer(arena_allocator, i, cache, mdl.layers[i].attn, model_buffers.layers[i].attn, .{});
+        try ctx.testAttentionLayer(arena_allocator, i, cache, mdl.layers[i].attn, model_buffers.layers[i].attn, .{});
         //
         // try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].ffn_norm, model_buffers.layers[i].ffn_norm, .{});
         //
@@ -207,7 +206,7 @@ pub fn run(
         // );
         //
         // TEST: MoE (complete)
-        try ctx.testMoELayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].ffn, model_buffers.layers[i].ffn, .{});
+        // try ctx.testMoELayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].ffn, model_buffers.layers[i].ffn, .{});
 
         // ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 }) catch log.err("layer {} did not passed", .{i});
     }
