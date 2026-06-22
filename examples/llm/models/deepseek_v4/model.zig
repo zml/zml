@@ -941,7 +941,7 @@ const CSACompressor = struct {
         var kv_compressed, const new_compressor_state = self.compressor.forward(x, seqlen, offset, cache.state, cache_idx);
 
         const is_prefill = x.dim(.seq) > 1;
-        const compressed_offset: u32 = if (is_prefill) @intCast(kv_compressed.dim(.kv)) else window_size;
+        const compressed_offset: u32 = if (is_prefill) @intCast(x.dim(.seq)) else window_size;
         const topk_indexed, const new_indexer_cache = self.indexer.forward(
             x,
             qr.rename(.{ .q = .d }),
@@ -992,7 +992,7 @@ const HCACompressor = struct {
         kv_compressed = new_cache.compressed_kv.get(cache_idx);
 
         const is_prefill = x.dim(.seq) > 1;
-        const compressed_offset: u32 = if (is_prefill) @intCast(kv_compressed.dim(.kv)) else window_size;
+        const compressed_offset: u32 = if (is_prefill) @intCast(x.dim(.seq)) else window_size;
         const topk_compressed = compressed_topk2(self.compressor.ratio, seqlen, @intCast(x.dim(.seq)), offset, compressed_offset, @intCast(kv_compressed.dim(.kv)), is_prefill);
 
         return .{ kv_compressed, topk_compressed, new_cache.reuseBuffer(cache) };
@@ -1090,6 +1090,7 @@ pub const Attention = struct {
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, Cache } {
+        _ = attention_parameters;
         // shape(x) = [batch, seq, d]
         const precomputed_freqs_cis = precompute_yarn(self.rope_head_dim, self.rope_opts);
         const freqs_cis = blk: {
@@ -1154,7 +1155,7 @@ pub const Attention = struct {
             },
         }
 
-        var attn = attention.sparseAttentionMLA(q, kv, self.attn_sink, topk, self.softmax_scale, attention_metadata, attention_parameters);
+        var attn = attention.sparseAttentionMLA(q, kv, self.attn_sink, topk, self.softmax_scale, attention_metadata, .cuda_fa2);
         attn = apply_reverse_rope(attn.rename(.{ .q = .seq }), freqs_cis, self.nope_head_dim, self.rope_head_dim);
         attn = attn.reshape(.{ .batch = attn.dim(0), .seq = attn.dim(1), .g = self.o_groups, .d = .auto });
 
@@ -1775,7 +1776,7 @@ pub const Model = struct {
     lm_head: LmHead,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
-        const layers = try allocator.alloc(Layer, 2);
+        const layers = try allocator.alloc(Layer, 5);
         // const layers = try allocator.alloc(Layer, config.num_hidden_layers);
 
         for (layers, 0..) |*layer, i| {

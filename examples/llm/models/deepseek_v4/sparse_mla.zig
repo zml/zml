@@ -56,6 +56,7 @@ pub fn tritonSparseAttention(
     // q: [batch, q, h=64, hd=512], kv: [batch, kv, hd=512], topk: [batch, seq, topk=128]
     // stdx.debug.assert();
 
+    log.info("[kernel] sparse attn", .{});
     const q_final = q.merge(.{ .q = .{ .batch, .q } });
     const kv_final = kv.merge(.{ .kv = .{ .batch, .kv } }).insertAxes(.hd, .{.kv_hd});
     const topk_final = topk.merge(.{ .seq = .{ .batch, .seq } }).insertAxes(.topk, .{.kv_hd}).convert(.i32);
