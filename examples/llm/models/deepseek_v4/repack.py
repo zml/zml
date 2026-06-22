@@ -11,9 +11,11 @@ This script rewrites them as stacked tensors and, by default, fuses w1/w3:
 
     layers.0.ffn.experts.w13.scale
 
-with expert id as the leading dimension. w1 and w3 are concatenated along the
-output/intermediate dimension. Non-expert tensors are copied through unchanged,
-and a new `model.safetensors.index.json` is written for the output.
+with expert id as the leading dimension. w1 and w3 are interleaved along the
+output/intermediate dimension as w1[0], w3[0], w1[1], w3[1], ... so fused
+SwiGLU kernels can split paired columns locally. Non-expert tensors are copied
+through unchanged, and a new `model.safetensors.index.json` is written for the
+output.
 """
 
 from __future__ import annotations
@@ -161,9 +163,8 @@ def merge_fused_pair(
         *left_first.shape[1:],
     )
     fused = torch.empty(fused_shape, dtype=left_first.dtype, device=left_first.device)
-    split = left_first.shape[0]
-    fused[0, :split].copy_(left_first)
-    fused[0, split:].copy_(right_first)
+    fused[0, 0::2].copy_(left_first)
+    fused[0, 1::2].copy_(right_first)
 
     for expert_id in range(1, len(left_keys)):
         left = reader.get_tensor(left_keys[expert_id])
@@ -178,8 +179,8 @@ def merge_fused_pair(
                 f"Dtype mismatch while building {output_name} expert {expert_id}: "
                 f"left={left.dtype}, right={right.dtype}"
             )
-        fused[expert_id, :split].copy_(left)
-        fused[expert_id, split:].copy_(right)
+        fused[expert_id, 0::2].copy_(left)
+        fused[expert_id, 1::2].copy_(right)
 
     if verbose:
         print(f"  {output_name}: {tuple(fused.shape)} {fused.dtype}")
@@ -349,7 +350,7 @@ def parse_args() -> argparse.Namespace:
         "--fuse-w1-w3",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Fuse routed expert w1 and w3 into one tensor along the output dimension.",
+        help="Fuse routed expert w1 and w3 into one interleaved tensor along the output dimension.",
     )
     parser.add_argument(
         "--fused-name",
