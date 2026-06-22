@@ -35,7 +35,7 @@ pub const CompilationParameters = struct {
             .attention_metadata = .init(.fromBackend(backend, seqlen, config.num_attention_heads)),
             .attention_parameters = .init(.fromBackend(backend)),
             .moe_metadata = .init(.fromBackend(moe_backend)),
-            .moe_parameters = .init(.fromBackend(moe_backend, null, .silu)),
+            .moe_parameters = .init(.fromBackend(moe_backend, config.num_experts_per_tok, .silu)),
         };
     }
 };
