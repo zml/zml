@@ -1979,17 +1979,18 @@ pub const Tensor = struct {
     ///
     /// * stutter1d([0, 1, 2, 3], -1, 2) = [0, 0, 1, 1, 2, 2, 3, 3]
     /// This is equivalent to repeat(ax+1) unless ax is the last axis.
-    pub fn stutter1d(self: Tensor, axis_: i8, n_rep: u63) Tensor {
+    pub fn stutter1d(self: Tensor, axis_: i8, n_rep: u32) Tensor {
+        stdx.debug.assert(n_rep > 0, "stutter1d expects a positive repeat count, got {}", .{n_rep});
         const a = self.axis(axis_);
         const broadshape = self._shape.insert(a + 1, .{n_rep});
-        const res_shape = self._shape.setDim(a, self.dim(a) * n_rep);
+        const res_shape = self._shape.setDim(a, self.dim(a) * @as(i64, n_rep));
 
         const stutter_dims = Shape.range(self.rank() + 1, self.dtype()).remove(a + 1);
         return self.broadcast(broadshape, stutter_dims.dims()).reshape(res_shape);
     }
 
     /// Repeats in line each value along the given axes.
-    pub fn stutter(self: Tensor, n_reps: []const u63) Tensor {
+    pub fn stutter(self: Tensor, n_reps: []const u32) Tensor {
         // TODO: this should support the tagged syntax: x.repeat(.{ .a = 3, .b = 2});
         stdx.debug.assert(n_reps.len == self.rank(), "stutter expects tensor rank and 'n_reps' length to be equal, got {} and {}", .{ self.rank(), n_reps.len });
 
