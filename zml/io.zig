@@ -389,15 +389,15 @@ pub const Loader = struct {
         progress: ?*std.Progress.Node = null,
     };
 
-    pub fn auto(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) void {
+    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) void {
         self.group.async(io, struct {
             fn call(self_: *Loader, io_: std.Io, model_: *const T, buffers_: *Bufferized(T), store_: *const TensorStore, shardings_: []const Sharding, opts_: AutoOpts) void {
-                self_.autoInner(io_, T, model_, buffers_, store_, shardings_, opts_) catch unreachable;
+                self_.loadInner(io_, T, model_, buffers_, store_, shardings_, opts_) catch unreachable;
             }
         }.call, .{ self, io, model, buffers, store, shardings, opts });
     }
 
-    fn autoInner(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) !void {
+    fn loadInner(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) !void {
         const tensor_count = meta.count(Tensor, model);
 
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
@@ -430,12 +430,12 @@ pub const Loader = struct {
 
         meta.forEachVisit(model, *const Tensor, struct {
             fn call(i: usize, tensor: *const Tensor, ctx_: *Ctx) void {
-                ctx_.self.group.async(ctx_.io, autoCallback, .{ ctx_.self, ctx_.io, tensor, ctx_.buffers[i], ctx_.store, ctx_.shardings, ctx_.opts });
+                ctx_.self.group.async(ctx_.io, defaultCallback, .{ ctx_.self, ctx_.io, tensor, ctx_.buffers[i], ctx_.store, ctx_.shardings, ctx_.opts });
             }
         }.call, .{&ctx});
     }
 
-    fn autoCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) void {
+    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) void {
         const binding = store.getBindingById(tensor.id) orelse {
             std.log.warn("Failed to get binding for tensor with id: {}", .{tensor.id});
             return;
