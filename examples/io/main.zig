@@ -214,7 +214,7 @@ pub fn main(init: std.process.Init) !void {
             });
             defer loader.deinit();
 
-            loader.auto(io, AllTensorsModel, &model, &buffers, &store, &.{sharded_sharding}, .{ .progress = &progress });
+            loader.load(io, AllTensorsModel, &model, &buffers, &store, &.{sharded_sharding}, .{ .progress = &progress });
             try loader.await(io);
 
             const took = now.untilNow(io, .awake);
