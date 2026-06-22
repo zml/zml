@@ -43,71 +43,67 @@ pub fn forwardMoe(
     activation_limit: f32,
     parameters: zml.moe.Parameters,
 ) !zml.Tensor {
+    _ = parameters; // autofix
     stdx.debug.assert(input.shape().hasTags(.{ .batch, .seq, .d }), "expected MoE input tags (.batch, .seq, .d), got {f}", .{input.shape()});
     stdx.debug.assert(topk_ids.shape().hasTags(.{ .batch, .seq, .eid }), "expected topk id tags (.batch, .seq, .eid), got {f}", .{topk_ids.shape()});
     stdx.debug.assert(topk_weights.shape().hasTags(.{ .batch, .seq, .eid }), "expected topk weight tags (.batch, .seq, .eid), got {f}", .{topk_weights.shape()});
-
-    switch (parameters) {
-        .triton => {},
-        .vanilla => return error.UnsupportedBackend,
-    }
+    stdx.debug.assert(bias_gate_up == null and bias_down == null, "partitioned A16W4 MoE bias is not wired yet", .{});
 
     const expert_partition = weights_gate_up.shape().partition(.expert);
-    if (expert_partition.eql(.init(.experts))) {
-        stdx.debug.assert(bias_gate_up == null and bias_down == null, "partitioned A16W4 MoE bias is not wired yet", .{});
-        const gate_up_scale = scales_gate_up orelse stdx.debug.panic("A16W4 MoE GEMM requires gate/up scales", .{});
-        const down_scale = scales_down orelse stdx.debug.panic("A16W4 MoE GEMM requires down scales", .{});
-
-        const partial_output = zml.ops.manualComputation(
-            .{ input, topk_ids, topk_weights, weights_gate_up, gate_up_scale, weights_down, down_scale },
-            input.shape().withPartitioning(.{ .batch = .replicated, .seq = .replicated, .d = .replicated }),
-            .{ .activation_limit = activation_limit },
-            (struct {
-                fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_shape: zml.Shape) zml.Tensor {
-                    const local_num_experts = sharded_inputs[3].dim(.expert);
-                    const partition_id = zml.ops.partitionId().convert(.i32);
-                    const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                    const local_topk_ids, const local_topk_weights = localizeRouting(
-                        sharded_inputs[1],
-                        sharded_inputs[2],
-                        expert_start,
-                        local_num_experts,
-                    );
-
-                    const output = forwardMoeLocal(
-                        sharded_inputs[0],
-                        local_topk_ids,
-                        local_topk_weights,
-                        sharded_inputs[3],
-                        sharded_inputs[4],
-                        null,
-                        sharded_inputs[5],
-                        sharded_inputs[6],
-                        null,
-                        ctx.activation_limit,
-                    );
-
-                    stdx.debug.assert(output.shape().eql(output_shape), "partitioned MoE body returned {f}, expected {f}", .{ output.shape(), output_shape });
-                    return output;
-                }
-            }).body,
+    if (!expert_partition.eql(.init(.experts))) {
+        return forwardMoeLocal(
+            input,
+            topk_ids,
+            topk_weights,
+            weights_gate_up,
+            scales_gate_up,
+            bias_gate_up,
+            weights_down,
+            scales_down,
+            bias_down,
+            activation_limit,
         );
-
-        return zml.ops.allReduce(partial_output, zml.Tensor.add);
     }
 
-    return forwardMoeLocal(
-        input,
-        topk_ids,
-        topk_weights,
-        weights_gate_up,
-        scales_gate_up,
-        bias_gate_up,
-        weights_down,
-        scales_down,
-        bias_down,
-        activation_limit,
+    const gate_up_scale = scales_gate_up orelse stdx.debug.panic("A16W4 MoE GEMM requires gate/up scales", .{});
+    const down_scale = scales_down orelse stdx.debug.panic("A16W4 MoE GEMM requires down scales", .{});
+
+    const partial_output = zml.ops.manualComputation(
+        .{ input, topk_ids, topk_weights, weights_gate_up, gate_up_scale, weights_down, down_scale },
+        input.shape().withPartitioning(.{ .batch = .replicated, .seq = .replicated, .d = .replicated }),
+        .{ .activation_limit = activation_limit },
+        (struct {
+            fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_shape: zml.Shape) zml.Tensor {
+                const local_num_experts = sharded_inputs[3].dim(.expert);
+                const partition_id = zml.ops.partitionId().convert(.i32);
+                const expert_start = partition_id.scale(local_num_experts).convert(.i32);
+                const local_topk_ids, const local_topk_weights = localizeRouting(
+                    sharded_inputs[1],
+                    sharded_inputs[2],
+                    expert_start,
+                    local_num_experts,
+                );
+
+                const output = forwardMoeLocal(
+                    sharded_inputs[0],
+                    local_topk_ids,
+                    local_topk_weights,
+                    sharded_inputs[3],
+                    sharded_inputs[4],
+                    null,
+                    sharded_inputs[5],
+                    sharded_inputs[6],
+                    null,
+                    ctx.activation_limit,
+                );
+
+                stdx.debug.assert(output.shape().eql(output_shape), "partitioned MoE body returned {f}, expected {f}", .{ output.shape(), output_shape });
+                return output;
+            }
+        }).body,
     );
+
+    return zml.ops.allReduce(partial_output, zml.Tensor.add);
 }
 
 fn localizeRouting(
