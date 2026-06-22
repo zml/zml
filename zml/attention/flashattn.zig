@@ -185,6 +185,30 @@ pub const fa2 = struct {
             .num_heads = attributes.num_heads,
         };
 
+        std.debug.print("fa2_mha_varlen_fwd q={f} k={f} v={f} o={f} lse={f} lse_accum={f} out_accum={f} max_q={d} max_k={d} num_heads={d}\n", .{
+            input.q.shape,
+            input.k.shape,
+            input.v.shape,
+            output.o.shape,
+            input.softmax_lse.shape,
+            input.softmax_lse_accum.shape,
+            input.out_accum.shape,
+            attributes.max_seqlen_q,
+            attributes.max_seqlen_k,
+            attributes.num_heads,
+        });
+
+        if (input.q.shape.rank() != 3) return zml.pjrt.ffi.Error.create(call_frame.api, .invalid_argument, "fa2 q must be rank 3");
+        if (input.k.shape.rank() != 3) return zml.pjrt.ffi.Error.create(call_frame.api, .invalid_argument, "fa2 k must be rank 3");
+        if (input.v.shape.rank() != 3) return zml.pjrt.ffi.Error.create(call_frame.api, .invalid_argument, "fa2 v must be rank 3");
+        if (output.o.shape.rank() != 3) return zml.pjrt.ffi.Error.create(call_frame.api, .invalid_argument, "fa2 output must be rank 3");
+        if (input.softmax_lse.shape.rank() != 2) return zml.pjrt.ffi.Error.create(call_frame.api, .invalid_argument, "fa2 softmax_lse must be rank 2");
+        if (input.q.shape.dim(1) != attributes.num_heads) return zml.pjrt.ffi.Error.create(call_frame.api, .invalid_argument, "fa2 q head count does not match params.num_heads");
+        if (output.o.shape.dim(0) != input.q.shape.dim(0) or output.o.shape.dim(1) != input.q.shape.dim(1) or output.o.shape.dim(2) != input.q.shape.dim(2)) return zml.pjrt.ffi.Error.create(call_frame.api, .invalid_argument, "fa2 output shape must match q shape");
+        if (input.k.shape.dim(0) != input.v.shape.dim(0) or input.k.shape.dim(1) != input.v.shape.dim(1) or input.k.shape.dim(2) != input.v.shape.dim(2)) return zml.pjrt.ffi.Error.create(call_frame.api, .invalid_argument, "fa2 k and v shapes must match");
+        if (input.k.shape.dim(2) != input.q.shape.dim(2)) return zml.pjrt.ffi.Error.create(call_frame.api, .invalid_argument, "fa2 k head dim must match q head dim");
+        if (input.softmax_lse.shape.dim(0) != attributes.num_heads or input.softmax_lse.shape.dim(1) != input.q.shape.dim(0)) return zml.pjrt.ffi.Error.create(call_frame.api, .invalid_argument, "fa2 softmax_lse must be num_heads x total_q");
+
         const stream = call_frame.api.stream(call_frame.ctx);
 
         flashattn.fa2_mha_varlen_fwd(
@@ -234,8 +258,8 @@ pub const fa2 = struct {
 
         pub fn init(opts: InitOptions) Metadata {
             return .{
-                .softmax_lse = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 1 }, .f32)
-                    .withTags(.{ .s, .h, .dummy })
+                .softmax_lse = .fromShape(zml.Shape.init(.{ opts.num_heads, opts.seqlen }, .f32)
+                    .withTags(.{ .h, .s })
                     .withPartitioning(.{ .h = .model })),
 
                 .softmax_lse_accum = .fromShape(zml.Shape.init(.{ 1, opts.num_heads, 128 }, .f32)

@@ -252,14 +252,14 @@ pub const KernelExe = struct {
         pub fn run(self: *Runner, args: Args) !void {
             var hidden_buf: zml.Buffer = b: {
                 self.embed_args.set(.{args.tokens_buf});
-                self.exe.embed_tokens.call(self.embed_args, &self.embed_results);
+                self.exe.embed_tokens.callOpts(args.io, self.embed_args, &self.embed_results, .{ .wait = true });
                 break :b self.embed_results.get(zml.Buffer);
             };
             defer hidden_buf.deinit();
 
             for (self.layers.args, self.layers.results, self.layers.layer_indices, 0..) |*exe_args, *results, *layer_index_buf, i| {
                 const layerExe = try self.exe.inferLayerExe(self.exe.mdl, i);
-                ComposedKernelExe.runLayer(exe_args, results, &layerExe, args, &hidden_buf, layer_index_buf);
+                ComposedKernelExe.runLayer(exe_args, results, &layerExe, args, &hidden_buf, layer_index_buf, i);
             }
 
             self.exe.runSampler(&self.sampler_args, &self.sampler_results, args, &hidden_buf);
@@ -399,7 +399,7 @@ const ComposedKernelExe = struct {
             defer results.deinit(args.allocator);
 
             exe_args.set(.{args.tokens_buf});
-            self.embed_tokens.call(exe_args, &results);
+            self.embed_tokens.callOpts(args.io, exe_args, &results, .{ .wait = true });
             break :b results.get(zml.Buffer);
         };
         defer hidden_buf.deinit();
@@ -417,7 +417,7 @@ const ComposedKernelExe = struct {
             var layer_index_buf = try zml.Buffer.scalar(args.io, args.platform, @as(u32, @intCast(i)), .u32);
             defer layer_index_buf.deinit();
 
-            ComposedKernelExe.runLayer(&exe_args, &results, &layerExe, args, &hidden_buf, &layer_index_buf);
+            ComposedKernelExe.runLayer(&exe_args, &results, &layerExe, args, &hidden_buf, &layer_index_buf, i);
         }
 
         {
@@ -439,7 +439,9 @@ const ComposedKernelExe = struct {
         args: Args,
         hidden_buf: *zml.Buffer,
         layer_index_buf: *zml.Buffer,
+        layer_index: usize,
     ) void {
+        std.debug.print("step3_5flash executing layer {d}\n", .{layer_index});
         const layer_cache: zml.Bufferized(model.KvCache) = .{
             .k = args.kv_cache_buffers.k,
             .v = args.kv_cache_buffers.v,
@@ -447,7 +449,7 @@ const ComposedKernelExe = struct {
         };
         exe_args.set(.{ hidden_buf, args.token_index_buf, layer_cache });
 
-        layer_exe.call(exe_args.*, exe_results);
+        layer_exe.callOpts(args.io, exe_args.*, exe_results, .{ .wait = true });
 
         var new_hidden, var new_cache = exe_results.get(struct { zml.Buffer, zml.Bufferized(model.KvCache) });
         replaceBuffer(hidden_buf, &new_hidden);

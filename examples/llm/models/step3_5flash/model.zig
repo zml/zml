@@ -770,15 +770,15 @@ pub const Attn = struct {
             attention_parameters,
         ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
-        // Head-wise gate is {b, s, h}
-        const gate_b = gate.sigmoid().rename(.{ .s = .q }).broad(attn_output.shape());
+        // Flash attention squeezes the singleton batch axis from its output.
+        const gate_b = gate.sigmoid().squeeze(.b).rename(.{ .s = .q }).broad(attn_output.shape());
         const gated_attn = attn_output.mul(gate_b);
 
         const projected_output = self.o_proj.forward(
             gated_attn.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s }),
         ).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
 
-        return .{ projected_output, new_kv_cache };
+        return .{ projected_output.broad(input.shape()), new_kv_cache };
     }
 
     // TODO: candidate for removal
@@ -864,7 +864,7 @@ pub const Attn = struct {
             zml.attention.attention.Parameters.init(.fromBackend(.cuda_fa2)),
         );
 
-        const gate_sig = gate.sigmoid().rename(.{ .s = .q });
+        const gate_sig = gate.sigmoid().squeeze(.b).rename(.{ .s = .q });
         const gated = attn_output.mul(gate_sig.broad(attn_output.shape()));
 
         const o_proj_in = gated.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
@@ -1392,7 +1392,7 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
         _ = backend;
-        const params = inference.CompilationParameters.init(&self.inner, self.parsed_config.value, @intCast(seqlen), .vanilla, shardings);
+        const params = inference.CompilationParameters.init(&self.inner, self.parsed_config.value, @intCast(seqlen), .cuda_fa2, shardings);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
 };
