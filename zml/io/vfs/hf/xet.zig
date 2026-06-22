@@ -494,13 +494,14 @@ const Batch = struct {
 
     fn finishOne(self: *Batch, io: std.Io, e: ?anyerror) void {
         self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
         if (e) |x| if (self.err == null) {
             self.err = x;
             self.failed.store(true, .release);
         };
         self.pending -= 1;
-        if (self.pending == 0) self.cond.signal(io);
+        const done = self.pending == 0;
+        self.mutex.unlock(io);
+        if (done) self.cond.signal(io);
     }
 
     fn wait(self: *Batch, io: std.Io) void {
