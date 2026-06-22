@@ -642,7 +642,7 @@ pub const CreateOptions = struct {
     cpu: Cpu = .{ .device_count = 4 },
 
     // bump memory fraction from XLA defaults of 75% to 90%.
-    // Even on a 8GB GPU it should leave enough space for the Cuda driver
+    // Even on a 8GB GPU it should leave enough space for the platform driver/runtime.
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
     xla_gpu: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     tpu: struct {} = .{},
@@ -709,7 +709,7 @@ pub const CreateOptions = struct {
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
-            .cuda, .rocm => self.xla_gpu.writeNamedValues(&values),
+            .cuda, .rocm, .oneapi => self.xla_gpu.writeNamedValues(&values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
