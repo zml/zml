@@ -322,6 +322,22 @@ pub const fa2 = struct {
             q = q.splitAxis(.h, .{ .h = num_heads_k, .ngroups = ngroups }).transpose(.{ .tot, .ngroups, .h, .hd }).merge(.{ .tot = .{ .tot, .ngroups } });
         }
 
+        var softmax_lse = metadata.softmax_lse;
+        var softmax_lse_accum = metadata.softmax_lse_accum;
+        var out_accum = metadata.out_accum;
+        if (seqlenq_ngroups_swapped) {
+            softmax_lse = softmax_lse.reshape(.{ .h = num_heads_k, .s = original_tot * ngroups });
+            softmax_lse_accum = softmax_lse_accum.slice1d(.h, .{ .start = 0, .end = num_heads_k });
+            out_accum = out_accum.reshape(.{ .s = original_tot * ngroups, .h = num_heads_k, .hd = head_size });
+        }
+
+        const max_seqlen_q_call: i32 = if (seqlenq_ngroups_swapped) @intCast(q.dim(.tot)) else max_seqlen_q;
+        const cu_seqlens_q_call = if (seqlenq_ngroups_swapped)
+            zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q_call }))
+                .withPartitioning(.{ ._0 = .replicated })
+        else
+            cu_seqlens_q;
+
         const q_sharded = q.withPartitioning(.{ .h = .model });
         var o = zml.ops.customCall(
             custom_call_name,
@@ -329,11 +345,11 @@ pub const fa2 = struct {
                 q_sharded,
                 k,
                 v,
-                cu_seqlens_q,
+                cu_seqlens_q_call,
                 cu_seqlens_k.withTags(.{.i}).withPartitioning(.{ .i = .replicated }),
-                metadata.softmax_lse.withPartitioning(.{ .h = .model }),
-                metadata.softmax_lse_accum.withPartitioning(.{ .h = .model }),
-                metadata.out_accum.withPartitioning(.{ .h = .model }),
+                softmax_lse.withPartitioning(.{ .h = .model }),
+                softmax_lse_accum.withPartitioning(.{ .h = .model }),
+                out_accum.withPartitioning(.{ .h = .model }),
             },
             .{q_sharded.shape()},
             .{
@@ -341,10 +357,10 @@ pub const fa2 = struct {
                     const head_dim = q.shape().dim(2);
                     break :b 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
                 },
-                .is_causal = true,
+                .is_causal = !seqlenq_ngroups_swapped,
                 .window_size_left = @as(i32, -1),
                 .window_size_right = @as(i32, -1),
-                .max_seqlen_q = max_seqlen_q,
+                .max_seqlen_q = max_seqlen_q_call,
                 .max_seqlen_k = max_seqlen_k,
                 .num_heads = @as(i32, @intCast(q.dim(.h))),
             },

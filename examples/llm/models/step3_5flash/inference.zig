@@ -222,7 +222,7 @@ pub const KernelExe = struct {
             var embed_results = try exe.embed_tokens.results(allocator);
             errdefer embed_results.deinit(allocator);
 
-            var layers = try Layers.init(allocator, io, platform, exe, exe.mdl, model_buffers);
+            var layers = try Layers.init(allocator, io, platform, exe, &exe.mdl, model_buffers);
             errdefer layers.deinit(allocator);
 
             var sampler_args = try exe.sampler.args(allocator);
@@ -259,7 +259,7 @@ pub const KernelExe = struct {
             defer hidden_buf.deinit();
 
             for (self.layers.args, self.layers.results, self.layers.layer_indices, 0..) |*exe_args, *results, *layer_index_buf, i| {
-                const layerExe = try self.exe.inferLayerExe(self.exe.mdl, i);
+                const layerExe = try self.exe.inferLayerExe(&self.exe.mdl, i);
                 ComposedKernelExe.runLayer(exe_args, results, &layerExe, args, &hidden_buf, layer_index_buf, i);
             }
 
@@ -313,7 +313,7 @@ const ComposedKernelExe = struct {
     moe_full_shared_layer_with_limit: zml.Exe,
     sampler: zml.Exe,
     phase: Phase,
-    mdl: *const model.Model,
+    mdl: model.Model,
     params: CompilationParameters,
 
     const EmbedTokens = struct {
@@ -374,7 +374,7 @@ const ComposedKernelExe = struct {
             .moe_full_shared_layer_with_limit = moe_full_shared_layer_with_limit,
             .sampler = sampler,
             .phase = phase,
-            .mdl = &step3p5_model,
+            .mdl = step3p5_model,
             .params = parameters,
         };
     }
@@ -406,7 +406,7 @@ const ComposedKernelExe = struct {
         defer hidden_buf.deinit();
 
         for (args.model_buffers.text_model.layers, 0..) |layer_bufs, i| {
-            const layerExe = try self.inferLayerExe(self.mdl, i);
+            const layerExe = try self.inferLayerExe(&self.mdl, i);
 
             var exe_args = try layerExe.args(args.allocator);
             defer exe_args.deinit(args.allocator);
