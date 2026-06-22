@@ -68,6 +68,7 @@ pub const Args = struct {
     token_index_buf: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
+    attention_metadata_buffers: []const zml.Bufferized(zml.attention.attention.Metadata),
 };
 
 pub const CompiledModel = struct {
@@ -441,14 +442,12 @@ const ComposedKernelExe = struct {
         layer_index_buf: *zml.Buffer,
         layer_index: usize,
     ) void {
-        std.debug.print("step3_5flash executing layer {d}\n", .{layer_index});
         const layer_cache: zml.Bufferized(model.KvCache) = .{
             .k = args.kv_cache_buffers.k,
             .v = args.kv_cache_buffers.v,
             .layer_index = layer_index_buf.*,
         };
-        exe_args.set(.{ hidden_buf, args.token_index_buf, layer_cache });
-
+        exe_args.set(.{ hidden_buf, args.token_index_buf, layer_cache, &args.attention_metadata_buffers[layer_index] });
         layer_exe.callOpts(args.io, exe_args.*, exe_results, .{ .wait = true });
 
         var new_hidden, var new_cache = exe_results.get(struct { zml.Buffer, zml.Bufferized(model.KvCache) });

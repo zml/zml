@@ -2003,6 +2003,10 @@ pub fn CustomCall(
         /// Request XLA host-compute offload for this custom call on accelerator backends.
         /// Input/Output buffers will automatically be moved d2h/h2d without the need for an explicit `.toMemory(...)`.
         compute_on_host: bool = false,
+        /// Explicit FFI platform registration name. Defaults to the PJRT platform name.
+        platform_name: ?[]const u8 = null,
+        /// Whether XLA may execute this call from a CUDA command buffer.
+        command_buffer_compatible: bool = true,
     },
 ) type {
     return struct {
@@ -2014,10 +2018,10 @@ pub fn CustomCall(
         pub fn register(platform: *const Platform) !void {
             try platform.registerFfi(.{
                 .name = params.name,
-                .platform_name = if (params.compute_on_host) "Host" else null,
+                .platform_name = if (params.platform_name) |platform_name| platform_name else if (params.compute_on_host) "Host" else null,
                 .handler = @This().handler,
                 .traits = .{
-                    .command_buffer_compatible = true,
+                    .command_buffer_compatible = params.command_buffer_compatible,
                 },
             });
         }
