@@ -1,12 +1,11 @@
 const std = @import("std");
 
+const mtt = @import("kernels/mosaic_tpu/builder");
 const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
 const Tensor = zml.Tensor;
-
 pub const gmm_ep = @import("mosaic_tpu_kernels/gmm_ep.zig");
-const mtt = @import("kernels/mosaic_tpu/builder");
 
 const log = std.log.scoped(.moe_mosaic_tpu);
 
@@ -225,7 +224,7 @@ pub fn callGmmEp(
     };
     const aligned_k = @divFloor(k + 127, 128) * 128;
     const aligned_n = if (fuse_act == .none) @divFloor(out_n + 127, 128) * 128 else out_n;
-    // const tile_n = if (fuse_act == .none) 128 else out_n;
+
     const cfg: gmm_ep.Cfg = .{
         .size_m = lhs.dim(.token),
         .size_k = k,
@@ -256,6 +255,7 @@ pub fn callGmmEp(
         .{
             .cfg = cfg,
             .extras = .{
+                // todo leverage tpu api like this https://github.com/openxla/tokamax/blob/f65135e85acd7571531be91d4d3241e1929421f0/tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_tgmm_kernel.py#L692
                 .vmem_limit_bytes = 32 * 1024 * 1024,
             },
         },

@@ -536,8 +536,7 @@ pub const SelfAttn = struct {
         return .{ k, v };
     }
 
-    fn partitionProjectedKv(tensor: zml.Tensor, kv_head_sharding: zml.Sharding.DimSharding) zml.Tensor {
-        var kv = tensor;
+    fn partitionProjectedKv(kv: zml.Tensor, kv_head_sharding: zml.Sharding.DimSharding) zml.Tensor {
         return switch (kv_head_sharding) {
             .sharded => |heads| blk: {
                 if (heads.factor != 1) {
