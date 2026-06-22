@@ -1354,14 +1354,6 @@ const MoE = struct {
                 const weight_dtype = self.gate_up.dtype();
                 const scale_dtype = self.gate_up_scale.dtype();
 
-                // log.info("x: {f}", .{x});
-                // log.info("topk_weight: {f}", .{topk_weight});
-                // log.info("topk_ids: {f}", .{topk_ids});
-                // log.info("gate_up_weight: {f}", .{self.gate_up});
-                // log.info("gate_up_scale: {f}", .{self.gate_up_scale});
-                // log.info("down_weight: {f}", .{self.down});
-                // log.info("down_scale: {f}", .{self.down_scale});
-
                 for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
                     const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
                     const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
@@ -1380,7 +1372,6 @@ const MoE = struct {
                 }
 
                 y = y.add(self.shared_experts.forward(x).convert(.f32));
-                // log.info("y = {f}", .{y});
                 return y.convert(x.dtype());
             },
         };
