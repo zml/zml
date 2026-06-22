@@ -544,7 +544,7 @@ pub const Loader = struct {
                         for (concatenate.tensors) |t| {
                             var reader = try t.reader(io, &.{}, .{});
                             defer reader.deinit();
-                            total += try reader.interface.streamRemaining(writer.interface());
+                            total += try reader.interface.streamRemaining(&progress_writer.interface);
                         }
                         try progress_writer.interface.flush();
                         _ = self.bytes_loaded.fetchAdd(total, .monotonic);
