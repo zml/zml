@@ -666,12 +666,20 @@ const ComposedKernelExe = struct {
             .prefill => parameters.prefill_attention_parameters,
             .decode => parameters.decode_attention_parameters,
         };
+        const layer = step3p5_model.text_model.layers[layer_index];
+        const attention_metadata: zml.attention.attention.Metadata = switch (attention_parameters) {
+            .vanilla => parameters.attention_metadata,
+            .attnd => parameters.attention_metadata,
+            .nki => parameters.attention_metadata,
+            .cuda_fa2 => .init(.fromBackend(.cuda_fa2, @intCast(seqlen), layer.attn.num_q_heads)),
+            .cuda_fa3 => .init(.fromBackend(.cuda_fa3, @intCast(seqlen), layer.attn.num_q_heads)),
+        };
 
         return platform.compile(allocator, io, step3p5_model.text_model.layers[layer_index], .forward, .{
             hidden_tensor,
             parameters.token_index,
             layer_cache,
-            parameters.attention_metadata,
+            attention_metadata,
             attention_parameters,
         }, .{
             .shardings = &parameters.shardings.all(),
