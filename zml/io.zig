@@ -24,7 +24,7 @@ const log = std.log.scoped(.@"zml/io");
 
 pub const TensorStore = struct {
     registry: *safetensors.TensorRegistry,
-    id_map: std.AutoHashMapUnmanaged(usize, Binding),
+    id_to_binding: std.AutoHashMapUnmanaged(usize, Binding),
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
@@ -32,23 +32,23 @@ pub const TensorStore = struct {
         const arena: std.heap.ArenaAllocator = .init(allocator);
         return .{
             .registry = registry,
-            .id_map = .empty,
+            .id_to_binding = .empty,
             .allocator = allocator,
             .arena = arena,
         };
     }
 
     pub fn deinit(self: *TensorStore) void {
-        self.id_map.deinit(self.allocator);
+        self.id_to_binding.deinit(self.allocator);
         self.arena.deinit();
     }
 
     fn addBinding(self: *TensorStore, id: usize, binding: Binding) !void {
-        const gop = try self.id_map.getOrPut(self.allocator, id);
+        const gop = try self.id_to_binding.getOrPut(self.allocator, id);
         if (gop.found_existing) {
             stdx.debug.panic("Id {} already has an associated binding", .{id});
         }
-        errdefer self.id_map.removeByPtr(gop.key_ptr);
+        errdefer self.id_to_binding.removeByPtr(gop.key_ptr);
 
         gop.value_ptr.* = binding;
     }
@@ -59,7 +59,7 @@ pub const TensorStore = struct {
     }
 
     fn getPtrFromId(self: *const TensorStore, id: usize) ?*safetensors.Tensor {
-        const binding = self.id_map.get(id) orelse return null;
+        const binding = self.id_to_binding.get(id) orelse return null;
         stdx.debug.assert(binding == .direct, "Expect binding to be .direct for id {}, got {}", .{ id, @as(Binding.Type, binding) });
         return binding.direct;
     }
@@ -69,14 +69,14 @@ pub const TensorStore = struct {
     }
 
     pub fn getReaderById(self: *const TensorStore, id: usize, io: std.Io, buffer: []u8) !safetensors.TensorReader {
-        const binding = self.id_map.get(id) orelse return error.NotFound;
+        const binding = self.id_to_binding.get(id) orelse return error.NotFound;
         stdx.debug.assert(binding == .direct, "Expect binding to be .direct for id {}, got {}", .{ id, @as(Binding.Type, binding) });
 
         return binding.direct.reader(io, buffer, .{});
     }
 
     pub fn getBindingById(self: *const TensorStore, id: usize) ?Binding {
-        return self.id_map.get(id);
+        return self.id_to_binding.get(id);
     }
 
     pub fn view(self: *TensorStore) View {
