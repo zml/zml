@@ -68,21 +68,26 @@ pub fn forwardMoe(
     const gate_up_scale = scales_gate_up orelse stdx.debug.panic("A16W4 MoE GEMM requires gate/up scales", .{});
     const down_scale = scales_down orelse stdx.debug.panic("A16W4 MoE GEMM requires down scales", .{});
 
-    const partial_output = zml.ops.manualComputation(
+    const output = zml.ops.manualComputation(
         .{ input, topk_ids, topk_weights, weights_gate_up, gate_up_scale, weights_down, down_scale },
         input.shape().withPartitioning(.{ .batch = .replicated, .seq = .replicated, .d = .replicated }),
         .{ .activation_limit = activation_limit },
         (struct {
-            fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output_shape: zml.Shape) zml.Tensor {
+            fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
                 const local_num_experts = sharded_inputs[3].dim(.expert);
                 const partition_id = zml.ops.partitionId().convert(.i32);
                 const expert_start = partition_id.scale(local_num_experts).convert(.i32);
-                const local_topk_ids, const local_topk_weights = localizeRouting(
-                    sharded_inputs[1],
-                    sharded_inputs[2],
-                    expert_start,
-                    local_num_experts,
-                );
+
+                const local_topk_ids, const local_topk_weights = blk: {
+                    const local_ids = sharded_inputs[1].convert(.i32).sub(expert_start);
+                    const in_range = local_ids.cmp(.GE, zml.Tensor.scalar(0, .i32))
+                        .logical(.AND, local_ids.cmp(.LT, zml.Tensor.scalar(local_num_experts, .i32)));
+
+                    break :blk .{
+                        in_range.select(local_ids, zml.Tensor.scalar(0, .i32)),
+                        in_range.select(sharded_inputs[2], zml.Tensor.scalar(0, sharded_inputs[2].dtype())),
+                    };
+                };
 
                 const output = forwardMoeLocal(
                     sharded_inputs[0],
@@ -97,29 +102,13 @@ pub fn forwardMoe(
                     ctx.activation_limit,
                 );
 
-                stdx.debug.assert(output.shape().eql(output_shape), "partitioned MoE body returned {f}, expected {f}", .{ output.shape(), output_shape });
-                return output;
+                const out_reshaped = output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .batch, .seq, .d });
+                return zml.ops.allReduce(out_reshaped, zml.Tensor.add);
             }
         }).body,
     );
 
-    return zml.ops.allReduce(partial_output, zml.Tensor.add);
-}
-
-fn localizeRouting(
-    topk_ids: zml.Tensor,
-    topk_weights: zml.Tensor,
-    expert_start: zml.Tensor,
-    local_num_experts: i64,
-) struct { zml.Tensor, zml.Tensor } {
-    const local_ids = topk_ids.convert(.i32).sub(expert_start);
-    const in_range = local_ids.cmp(.GE, zml.Tensor.scalar(0, .i32))
-        .logical(.AND, local_ids.cmp(.LT, zml.Tensor.scalar(local_num_experts, .i32)));
-
-    return .{
-        in_range.select(local_ids, zml.Tensor.scalar(0, .i32)),
-        in_range.select(topk_weights, zml.Tensor.scalar(0, topk_weights.dtype())),
-    };
+    return output;
 }
 
 fn forwardMoeLocal(
@@ -192,8 +181,17 @@ fn prepareRouting(topk_ids: zml.Tensor, topk_weights: zml.Tensor, num_experts: i
     const num_tokens = topk_ids.dim(.seq);
     const topk = topk_ids.dim(.eid);
     const num_routes = num_tokens * topk;
-    const block_m = routingBlockM(num_routes, num_experts);
-    const grid_m = routingBlocks(num_routes, num_experts, block_m);
+
+    const block_m = blk: {
+        const tokens_per_expert = @max(@divFloor(num_routes, num_experts), 1);
+        const power = std.math.ceilPowerOfTwoAssert(usize, @intCast(tokens_per_expert));
+        break :blk @min(@max(@as(i64, @intCast(power)), 16), 128);
+    };
+
+    const grid_m = blk: {
+        if (num_routes <= num_experts) return num_routes;
+        break :blk (std.math.divCeil(i64, @max(num_routes - num_experts + 1, 0), block_m) catch unreachable) + num_experts - 1;
+    };
 
     const sorted = topk_ids.flatten().withTags(.{.route}).sort(.route, .{});
     const sorted_ids = sorted.values.withTags(.{.route}).convert(.i32);
@@ -208,12 +206,16 @@ fn prepareRouting(topk_ids: zml.Tensor, topk_weights: zml.Tensor, num_experts: i
     const route_expert_shape: zml.Shape = .init(.{ .route = num_routes, .expert = num_experts }, .i32);
     const ids_by_expert = sorted_ids.insertAxes(.last, .{.expert}).broad(route_expert_shape);
     const expert_ids = experts.insertAxes(0, .{.route}).broad(route_expert_shape);
+
     const hist = ids_by_expert.cmp(.EQ, expert_ids)
         .convert(.i32)
         .sum(.route)
         .squeeze(.route)
         .withTags(.{.expert});
+
     const offsets = hist.cumulativeSum(.expert).sub(hist).withTags(.{.expert});
+
+    const expert_data = buildExpertBlockMap(hist, num_routes, grid_m, block_m);
 
     return .{
         .num_tokens = num_tokens,
@@ -225,7 +227,7 @@ fn prepareRouting(topk_ids: zml.Tensor, topk_weights: zml.Tensor, num_experts: i
         .sorted_weights = sorted_weights,
         .hist = hist,
         .offsets = offsets,
-        .expt_data = buildExpertBlockMap(hist, num_routes, grid_m, block_m),
+        .expt_data = expert_data,
     };
 }
 
@@ -349,17 +351,6 @@ fn runGemm(
     ).Y;
 
     return y;
-}
-
-fn routingBlockM(num_routes: i64, num_experts: i64) i64 {
-    const tokens_per_expert = @max(@divFloor(num_routes, num_experts), 1);
-    const power = std.math.ceilPowerOfTwoAssert(usize, @intCast(tokens_per_expert));
-    return @min(@max(@as(i64, @intCast(power)), 16), 128);
-}
-
-fn routingBlocks(num_routes: i64, num_experts: i64, block_m: i64) i64 {
-    if (num_routes <= num_experts) return num_routes;
-    return (std.math.divCeil(i64, @max(num_routes - num_experts + 1, 0), block_m) catch unreachable) + num_experts - 1;
 }
 
 fn kernelNWarps(block_m: i64, n: i64, grid_m: i64) struct { i64, i64 } {
