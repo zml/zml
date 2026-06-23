@@ -28,7 +28,10 @@ const Cfg = struct {
     topk_count: i64 = 32,
     block_m: i64 = 16,
     rope_rank: i64 = 64,
+    qk_lora_rank: i64 = 512,
     kv_lora_rank: i64 = 512,
+    rope_offset: i64 = 512,
+    value_rank: i64 = 512,
     tile_size: i64 = 16,
     use_attn_sink: bool = false,
     all_decode: bool = false,
@@ -191,7 +194,10 @@ fn kernelUnifiedAttentionSparseMla2d(
     const BLOCK_M: i64 = config.block_m;
     const BLOCK_SIZE: i64 = config.block_size;
     const ROPE_RANK: i64 = config.rope_rank;
+    const QK_LORA_RANK: i64 = config.qk_lora_rank;
     const KV_LORA_RANK: i64 = config.kv_lora_rank;
+    const ROPE_OFFSET: i64 = config.rope_offset;
+    const VALUE_RANK: i64 = config.value_rank;
     const TILE_SIZE: i64 = config.tile_size;
     const NUM_QUERIES_PER_KV: i64 = config.num_queries_per_kv;
     const NUM_QUERY_HEADS: i64 = config.num_query_heads;
@@ -213,7 +219,8 @@ fn kernelUnifiedAttentionSparseMla2d(
 
     const offs_m = k.arange(0, BLOCK_M, .i32).add(head_ind.mul(@as(i32, @intCast(BLOCK_M))));
     const offs_lora = k.arange(0, KV_LORA_RANK, .i32);
-    const offs_rope = k.arange(KV_LORA_RANK, KV_LORA_RANK + ROPE_RANK, .i32);
+    const offs_rope = k.arange(ROPE_OFFSET, ROPE_OFFSET + ROPE_RANK, .i32);
+    const offs_value = k.arange(0, VALUE_RANK, .i32);
     const offs_t = k.arange(0, TILE_SIZE, .i32);
 
     const query_pos = q_block_local_idx.add(offs_m.div(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
@@ -235,15 +242,16 @@ fn kernelUnifiedAttentionSparseMla2d(
     });
 
     const q_lora_offset = qo0_2d.add(qo1_2d).add(offs_lora.expandDims(0));
+    const q_lora_mask = q_mask.bitAnd(offs_lora.lt(@as(i32, @intCast(QK_LORA_RANK))).expandDims(0));
     const Q_lora = k.loadOpts(query_ptr.addPtr(q_lora_offset), .{
-        .mask = q_mask,
+        .mask = q_lora_mask,
         .other = k.zeros(&.{ BLOCK_M, KV_LORA_RANK }, config.q_dtype),
         .cache_modifier = if (config.all_decode or BLOCK_M >= NUM_QUERY_HEADS) .cg else .none,
     });
 
     const m_init = k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32);
     const l_init = k.full(&.{BLOCK_M}, 1.0, .f32);
-    const acc_init = k.zeros(&.{ BLOCK_M, KV_LORA_RANK }, .f32);
+    const acc_init = k.zeros(&.{ BLOCK_M, VALUE_RANK }, .f32);
 
     var loop = k.openFor(0, NUM_TILES, 1, .{ m_init, l_init, acc_init });
     {
@@ -286,8 +294,9 @@ fn kernelUnifiedAttentionSparseMla2d(
         const k_lora_dim_offsets = offs_lora.expandDims(1).mul(@as(i32, @intCast(config.stride_k_cache_3)));
         const k_lora_dim_ptrs = k.broadcastTo(key_block_ptrs, &.{ KV_LORA_RANK, TILE_SIZE })
             .addPtr(k.broadcastTo(k_lora_dim_offsets, &.{ KV_LORA_RANK, TILE_SIZE }));
+        const k_lora_mask = valid_t.expandDims(0).bitAnd(offs_lora.lt(@as(i32, @intCast(QK_LORA_RANK))).expandDims(1));
         const K_lora = k.loadOpts(k_lora_dim_ptrs.addPtr(k.broadcastTo(key_slot_offsets, &.{ KV_LORA_RANK, TILE_SIZE })), .{
-            .mask = valid_t.expandDims(0),
+            .mask = k_lora_mask,
             .other = k.zeros(&.{ KV_LORA_RANK, TILE_SIZE }, config.kv_dtype),
             .cache_modifier = if (config.all_decode) .cg else .none,
         });
@@ -315,10 +324,10 @@ fn kernelUnifiedAttentionSparseMla2d(
         const v_slot_offsets = slot_v.mul(stride_v_cache_1);
         const v_base_offsets = v_block_offsets.add(v_slot_offsets);
         const v_base_ptrs = v_base_ptr.addPtr(v_base_offsets);
-        const v_lora_dim_offsets = offs_lora.expandDims(0).mul(@as(i32, @intCast(config.stride_v_cache_3)));
-        const V_lora = k.loadOpts(k.broadcastTo(v_base_ptrs, &.{ TILE_SIZE, KV_LORA_RANK }).addPtr(k.broadcastTo(v_lora_dim_offsets, &.{ TILE_SIZE, KV_LORA_RANK })), .{
+        const v_lora_dim_offsets = offs_value.expandDims(0).mul(@as(i32, @intCast(config.stride_v_cache_3)));
+        const V_lora = k.loadOpts(k.broadcastTo(v_base_ptrs, &.{ TILE_SIZE, VALUE_RANK }).addPtr(k.broadcastTo(v_lora_dim_offsets, &.{ TILE_SIZE, VALUE_RANK })), .{
             .mask = valid_t.expandDims(1),
-            .other = k.zeros(&.{ TILE_SIZE, KV_LORA_RANK }, config.kv_dtype),
+            .other = k.zeros(&.{ TILE_SIZE, VALUE_RANK }, config.kv_dtype),
             .cache_modifier = if (config.all_decode) .cg else .none,
         });
 
@@ -351,11 +360,11 @@ fn kernelUnifiedAttentionSparseMla2d(
     }
 
     const one_over_L = k.full(&.{ BLOCK_M, 1 }, 1.0, .f32).div(L.expandDims(1));
-    acc = acc.mul(k.broadcastTo(one_over_L, &.{ BLOCK_M, KV_LORA_RANK }));
+    acc = acc.mul(k.broadcastTo(one_over_L, &.{ BLOCK_M, VALUE_RANK }));
 
     const output_offs_lora = query_offset_0.expandDims(1).mul(output_stride_0)
         .add(query_offset_1.expandDims(1).mul(output_stride_1))
-        .add(offs_lora.expandDims(0));
+        .add(offs_value.expandDims(0));
     k.storeOpts(
         output_ptr.addPtr(output_offs_lora),
         acc.to(config.o_dtype),
