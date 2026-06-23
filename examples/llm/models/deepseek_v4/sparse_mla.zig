@@ -54,62 +54,28 @@ pub fn tritonSparseAttention(
     scale: ?f32,
 ) zml.Tensor {
     // q: [batch, q, h, hd], kv: [batch, kv, hd], topk: [batch, seq, topk]
-    const rope_rank: i64 = 64;
+    const rope_rank: i64 = 0;
     const batch = q.dim(.batch);
     const q_len = q.dim(.q);
     const q_final = q.merge(.{ .q = .{ .batch, .q } });
     const q_dim = q_final.dim(.hd);
     const q_heads = q_final.dim(.h);
 
-    const kv_lora_rank = q_dim;
-    const kv_lora_rank_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(kv_lora_rank)));
-    const pad_rank = kv_lora_rank_padded - kv_lora_rank;
     stdx.debug.assert(kv.dim(.hd) == q_dim, "expected q and kv head dims to match, got q={} kv={}", .{ q_dim, kv.dim(.hd) });
     stdx.debug.assert(topk.dim(.seq) == q_len, "expected topk seq dim ({}) to match q dim ({})", .{ topk.dim(.seq), q_len });
 
-    const q_for_kernel = if (pad_rank > 0)
-        zml.Tensor.concatenate(&.{
-            q_final,
-            zml.Tensor.zeroes(.init(.{ .q = q_final.dim(.q), .h = q_heads, .hd = pad_rank }, q.dtype())),
-            zml.Tensor.zeroes(.init(.{ .q = q_final.dim(.q), .h = q_heads, .hd = rope_rank }, q.dtype())),
-        }, .hd)
-    else
-        zml.Tensor.concatenate(&.{
-            q_final,
-            zml.Tensor.zeroes(.init(.{ .q = q_final.dim(.q), .h = q_heads, .hd = rope_rank }, q.dtype())),
-        }, .hd);
-
     const kv_final = kv.merge(.{ .kv = .{ .batch, .kv } });
-    const kv_for_kernel = if (pad_rank > 0)
-        zml.Tensor.concatenate(&.{
-            kv_final,
-            zml.Tensor.zeroes(.init(.{ .kv = kv_final.dim(.kv), .hd = pad_rank }, kv.dtype())),
-            zml.Tensor.zeroes(.init(.{ .kv = kv_final.dim(.kv), .hd = rope_rank }, kv.dtype())),
-        }, .hd)
-    else
-        zml.Tensor.concatenate(&.{
-            kv_final,
-            zml.Tensor.zeroes(.init(.{ .kv = kv_final.dim(.kv), .hd = rope_rank }, kv.dtype())),
-        }, .hd);
-    const value_for_kernel = if (pad_rank > 0)
-        zml.Tensor.concatenate(&.{
-            kv_final,
-            zml.Tensor.zeroes(.init(.{ .kv = kv_final.dim(.kv), .hd = pad_rank }, kv.dtype())),
-        }, .hd)
-    else
-        kv_final;
-
-    const key_cache = kv_for_kernel.reshape(.{
+    const key_cache = kv_final.reshape(.{
         .page = kv_final.dim(.kv),
         .k_chunk = 1,
         .hkv = 1,
-        .hd = kv_lora_rank_padded + rope_rank,
+        .hd = q_dim,
     });
-    const value_cache = value_for_kernel.reshape(.{
+    const value_cache = kv_final.reshape(.{
         .page = kv_final.dim(.kv),
         .k_chunk = 1,
         .hkv = 1,
-        .hd = kv_lora_rank_padded,
+        .hd = q_dim,
     });
 
     const topk_i64 = topk.convert(.i64);
@@ -126,8 +92,8 @@ pub fn tritonSparseAttention(
     const block_m: i64 = @min(q_heads, 16);
     stdx.debug.assert(@mod(q_heads, block_m) == 0, "expected q heads ({}) to be divisible by block_m ({})", .{ q_heads, block_m });
 
-    const q_strides = q_for_kernel.shape().computeElementStrides().constSlice();
-    const out_shape: zml.Shape = .init(.{ .q = q_final.dim(.q), .h = q_heads, .hd = kv_lora_rank_padded }, q.dtype());
+    const q_strides = q_final.shape().computeElementStrides().constSlice();
+    const out_shape: zml.Shape = .init(.{ .q = q_final.dim(.q), .h = q_heads, .hd = q_dim }, q.dtype());
     const out_strides = out_shape.computeElementStrides().constSlice();
     const k_strides = key_cache.shape().computeElementStrides().constSlice();
     const v_strides = value_cache.shape().computeElementStrides().constSlice();
@@ -140,7 +106,7 @@ pub fn tritonSparseAttention(
     };
 
     const out = kernel.Kernel.call(.{
-        .query_ptr = q_for_kernel,
+        .query_ptr = q_final,
         .key_cache_ptr = key_cache,
         .value_cache_ptr = value_cache,
         .attn_sink_ptr = attn_sink,
@@ -165,17 +131,17 @@ pub fn tritonSparseAttention(
         .output = out_shape,
     }, .{
         .cfg = .{
-            .q_dtype = zml.kernel.triton.from(q_for_kernel.dtype()),
+            .q_dtype = zml.kernel.triton.from(q_final.dtype()),
             .kv_dtype = zml.kernel.triton.from(kv_final.dtype()),
             .sink_dtype = zml.kernel.triton.from(attn_sink.dtype()),
-            .o_dtype = zml.kernel.triton.from(q_for_kernel.dtype()),
+            .o_dtype = zml.kernel.triton.from(q_final.dtype()),
             .num_query_heads = q_heads,
             .num_queries_per_kv = q_heads,
             .block_size = 1,
             .topk_count = topk_final.dim(.topk),
             .block_m = block_m,
             .rope_rank = rope_rank,
-            .kv_lora_rank = kv_lora_rank_padded,
+            .kv_lora_rank = q_dim,
             .tile_size = @min(topk_final.dim(.topk), 16),
             .use_attn_sink = true,
             .all_decode = q_len == 1,
@@ -185,7 +151,7 @@ pub fn tritonSparseAttention(
         .num_stages = @intCast(opts.num_stages),
     });
 
-    return out.output.slice1d(.hd, .{ .end = q_dim }).reshape(q.shape());
+    return out.output.reshape(q.shape());
 }
 
 pub fn sparseAttentionMLA(
