@@ -12,13 +12,14 @@ const CliArgs = struct {
         \\last two dimensions transposed by a compiled ZML executable.
         \\
         \\Usage:
-        \\  gemma4_transpose --input=/path/gemma4-26b-a4b --output=/path/gemma4-26b-a4b-transposed [--overwrite]
+        \\  gemma4_transpose --input=/path/gemma4-26b-a4b --output=/path/gemma4-26b-a4b-transposed [--overwrite] [--parallelism=2]
         \\
     ;
 
     input: []const u8 = "",
     output: []const u8 = "",
     overwrite: bool = false,
+    parallelism: usize = 2,
 };
 
 const TensorEntry = struct {
@@ -35,13 +36,17 @@ const Converter = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    compiled: std.AutoHashMapUnmanaged(ShapeKey, zml.Exe) = .empty,
-    transformed: usize = 0,
-    copied_tensors: usize = 0,
+    compiled: std.AutoHashMapUnmanaged(ShapeKey, *zml.Exe) = .empty,
+    compiled_mutex: std.Io.Mutex = .init,
+    transformed: std.atomic.Value(usize) = .init(0),
+    copied_tensors: std.atomic.Value(usize) = .init(0),
 
     fn deinit(self: *Converter) void {
         var it = self.compiled.valueIterator();
-        while (it.next()) |exe| exe.deinit();
+        while (it.next()) |exe| {
+            exe.*.deinit();
+            self.allocator.destroy(exe.*);
+        }
         self.compiled.deinit(self.allocator);
     }
 
@@ -53,29 +58,18 @@ const Converter = struct {
         std.mem.swap(i64, &output_dims_buf[input_shape.len - 1], &output_dims_buf[input_shape.len - 2]);
 
         const input_zml_shape = zml.Shape.init(input_shape, dtype);
-        const key = ShapeKey.init(input_shape, dtype);
-        const gop = try self.compiled.getOrPut(self.allocator, key);
-        if (!gop.found_existing) {
-            const t = zml.Tensor.fromShape(input_zml_shape);
-            gop.value_ptr.* = try self.platform.compileFn(
-                self.allocator,
-                self.io,
-                transposeLastTwo,
-                .{t},
-                .{ .program_name = "gemma4_moe_weight_transpose" },
-            );
-        }
+        const exe = try self.getOrCompile(input_zml_shape, ShapeKey.init(input_shape, dtype));
 
         var input_buffer = try zml.Buffer.fromBytes(self.io, self.platform, input_zml_shape, .replicated, bytes);
         defer input_buffer.deinit();
 
-        var args = try gop.value_ptr.args(self.allocator);
+        var args = try exe.args(self.allocator);
         defer args.deinit(self.allocator);
-        var results = try gop.value_ptr.results(self.allocator);
+        var results = try exe.results(self.allocator);
         defer results.deinit(self.allocator);
 
         args.set(.{input_buffer});
-        gop.value_ptr.call(args, &results);
+        exe.call(args, &results);
 
         var output_buffer = results.get(zml.Buffer);
         defer output_buffer.deinit();
@@ -89,6 +83,28 @@ const Converter = struct {
         const expected_output_shape = zml.Shape.init(output_dims_buf[0..input_shape.len], dtype);
         std.debug.assert(result.len == expected_output_shape.byteSize());
         return result;
+    }
+
+    fn getOrCompile(self: *Converter, input_zml_shape: zml.Shape, key: ShapeKey) !*zml.Exe {
+        try self.compiled_mutex.lock(self.io);
+        defer self.compiled_mutex.unlock(self.io);
+
+        const gop = try self.compiled.getOrPut(self.allocator, key);
+        if (!gop.found_existing) {
+            const t = zml.Tensor.fromShape(input_zml_shape);
+            const exe = try self.allocator.create(zml.Exe);
+            errdefer self.allocator.destroy(exe);
+            exe.* = try self.platform.compileFn(
+                self.allocator,
+                self.io,
+                transposeLastTwo,
+                .{t},
+                .{ .program_name = "gemma4_moe_weight_transpose" },
+            );
+            gop.value_ptr.* = exe;
+        }
+
+        return gop.value_ptr.*;
     }
 };
 
@@ -121,8 +137,10 @@ pub fn transposeLastTwo(x: zml.Tensor) zml.Tensor {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-    const io = init.io;
     const args: CliArgs = stdx.flags.parse(init.minimal.args, CliArgs);
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
 
     if (args.input.len == 0 or args.output.len == 0) {
         log.err("missing --input or --output\n{s}", .{CliArgs.help});
@@ -146,9 +164,12 @@ pub fn main(init: std.process.Init) !void {
 
     try prepareOutput(io, args.output, args.overwrite);
     try copyNonSafetensors(allocator, io, args.input, args.output);
-    try rewriteSafetensorsTree(&converter, args.input, args.output);
+    try rewriteSafetensorsTree(&converter, args.input, args.output, @max(args.parallelism, 1));
 
-    log.info("done: transposed {d} tensors, copied {d} tensors", .{ converter.transformed, converter.copied_tensors });
+    log.info("done: transposed {d} tensors, copied {d} tensors", .{
+        converter.transformed.load(.monotonic),
+        converter.copied_tensors.load(.monotonic),
+    });
 }
 
 fn prepareOutput(io: std.Io, output: []const u8, overwrite: bool) !void {
@@ -199,53 +220,91 @@ fn copyNonSafetensorsInner(allocator: std.mem.Allocator, io: std.Io, input_dir: 
     }
 }
 
-fn rewriteSafetensorsTree(converter: *Converter, input_root: []const u8, output_root: []const u8) !void {
+fn rewriteSafetensorsTree(converter: *Converter, input_root: []const u8, output_root: []const u8, parallelism: usize) !void {
     var input_dir = try std.Io.Dir.openDir(.cwd(), converter.io, input_root, .{ .iterate = true });
     defer input_dir.close(converter.io);
 
-    try rewriteSafetensorsTreeInner(converter, input_dir, input_root, output_root, "");
+    var paths: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (paths.items) |path| converter.allocator.free(path);
+        paths.deinit(converter.allocator);
+    }
+
+    try collectSafetensors(converter.allocator, converter.io, input_dir, "", &paths);
+
+    var group: stdx.Io.LimitedGroup = .init(parallelism);
+    for (paths.items) |entry_rel| {
+        try group.concurrent(converter.io, rewriteSafetensorsPath, .{ converter, input_root, output_root, entry_rel });
+    }
+    try group.await(converter.io);
 }
 
-fn rewriteSafetensorsTreeInner(
-    converter: *Converter,
+fn collectSafetensors(
+    allocator: std.mem.Allocator,
+    io: std.Io,
     input_dir: std.Io.Dir,
-    input_root: []const u8,
-    output_root: []const u8,
     rel: []const u8,
+    paths: *std.ArrayList([]const u8),
 ) !void {
     var it = input_dir.iterate();
-    while (try it.next(converter.io)) |entry| {
+    while (try it.next(io)) |entry| {
         const entry_rel = if (rel.len == 0)
-            try converter.allocator.dupe(u8, entry.name)
+            try allocator.dupe(u8, entry.name)
         else
-            try std.Io.Dir.path.join(converter.allocator, &.{ rel, entry.name });
-        defer converter.allocator.free(entry_rel);
+            try std.Io.Dir.path.join(allocator, &.{ rel, entry.name });
+        errdefer allocator.free(entry_rel);
 
         switch (entry.kind) {
             .directory => {
-                var child = try input_dir.openDir(converter.io, entry.name, .{ .iterate = true });
-                defer child.close(converter.io);
-                try rewriteSafetensorsTreeInner(converter, child, input_root, output_root, entry_rel);
+                var child = try input_dir.openDir(io, entry.name, .{ .iterate = true });
+                defer child.close(io);
+                try collectSafetensors(allocator, io, child, entry_rel, paths);
+                allocator.free(entry_rel);
             },
             .file => {
-                if (!std.mem.endsWith(u8, entry.name, ".safetensors")) continue;
-                const out_path = try std.Io.Dir.path.join(converter.allocator, &.{ output_root, entry_rel });
-                defer converter.allocator.free(out_path);
-                if (std.fs.path.dirname(out_path)) |parent| _ = try std.Io.Dir.cwd().createDirPath(converter.io, parent);
-                log.info("rewriting {s}", .{entry_rel});
-                try rewriteSafetensorsFile(converter, input_dir, entry.name, out_path);
+                if (std.mem.endsWith(u8, entry.name, ".safetensors")) {
+                    try paths.append(allocator, entry_rel);
+                } else {
+                    allocator.free(entry_rel);
+                }
             },
-            else => {},
+            else => allocator.free(entry_rel),
         }
     }
 }
 
-fn rewriteSafetensorsFile(converter: *Converter, input_dir: std.Io.Dir, input_name: []const u8, output_path: []const u8) !void {
+fn rewriteSafetensorsPath(
+    converter: *Converter,
+    input_root: []const u8,
+    output_root: []const u8,
+    entry_rel: []const u8,
+) void {
+    rewriteSafetensorsPathInner(converter, input_root, output_root, entry_rel) catch |err| {
+        std.debug.panic("failed to rewrite {s}: {}", .{ entry_rel, err });
+    };
+}
+
+fn rewriteSafetensorsPathInner(
+    converter: *Converter,
+    input_root: []const u8,
+    output_root: []const u8,
+    entry_rel: []const u8,
+) !void {
+    const input_path = try std.Io.Dir.path.join(converter.allocator, &.{ input_root, entry_rel });
+    defer converter.allocator.free(input_path);
+    const out_path = try std.Io.Dir.path.join(converter.allocator, &.{ output_root, entry_rel });
+    defer converter.allocator.free(out_path);
+    if (std.fs.path.dirname(out_path)) |parent| _ = try std.Io.Dir.cwd().createDirPath(converter.io, parent);
+    log.info("rewriting {s}", .{entry_rel});
+    try rewriteSafetensorsFile(converter, input_path, out_path);
+}
+
+fn rewriteSafetensorsFile(converter: *Converter, input_path: []const u8, output_path: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(converter.allocator);
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var input = try input_dir.openFile(converter.io, input_name, .{ .mode = .read_only });
+    var input = try std.Io.Dir.openFile(.cwd(), converter.io, input_path, .{ .mode = .read_only });
     defer input.close(converter.io);
 
     var header_len_buf: [SafetensorsHeaderBytes]u8 = undefined;
@@ -320,11 +379,11 @@ fn rewriteSafetensorsFile(converter: *Converter, input_dir: std.Io.Dir, input_na
             const transposed = try converter.transposeBytes(entry.dtype, entry.shape, raw);
             defer converter.allocator.free(transposed);
             try output_writer.interface.writeAll(transposed);
-            converter.transformed += 1;
+            _ = converter.transformed.fetchAdd(1, .monotonic);
             log.info("  transposed {s}: {any} -> {any}", .{ entry.name, entry.shape, transposedShapeScratch(entry.shape) });
         } else {
             try copyRange(converter.io, input, &output_writer.interface, abs_offset, bytes_len, scratch);
-            converter.copied_tensors += 1;
+            _ = converter.copied_tensors.fetchAdd(1, .monotonic);
         }
     }
     try output_writer.interface.flush();
