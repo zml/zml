@@ -296,6 +296,11 @@ pub const Compressor = struct {
         var new_state = state;
 
         const score_inf = zml.Tensor.constant(score.dtype().minValue());
+        const ratio_dim: i64 = @intCast(self.ratio);
+        const state_seq = @max(ratio_dim, @divTrunc(x.dim(.seq) + ratio_dim - 1, ratio_dim) * ratio_dim);
+        const state_pad = state_seq - x.dim(.seq);
+        const kv_state = if (state_pad == 0) kv else kv.pad(0, .{ .seq = zml.Tensor.Pad{ .high = state_pad } });
+        const score_state = if (state_pad == 0) score else score.pad(0, .{ .seq = zml.Tensor.Pad{ .high = state_pad } });
 
         if (self.overlap) {
             var cutoff_last_block = cutoff.subConstant(self.ratio);
@@ -305,8 +310,8 @@ pub const Compressor = struct {
                 cutoff_last_block,
             );
 
-            var kv_last_compressed = kv.dynamicSlice1d(kv.axis(.seq), .{ .start = cutoff_last_block, .len = self.ratio });
-            var score_last_compressed = score.dynamicSlice1d(kv.axis(.seq), .{ .start = cutoff_last_block, .len = self.ratio });
+            var kv_last_compressed = kv_state.dynamicSlice1d(kv_state.axis(.seq), .{ .start = cutoff_last_block, .len = self.ratio });
+            var score_last_compressed = score_state.dynamicSlice1d(score_state.axis(.seq), .{ .start = cutoff_last_block, .len = self.ratio });
             score_last_compressed = score_last_compressed.add(ape.broad(score_last_compressed.shape()));
 
             var mask = cutoff.cmp(.GE, .scalar(self.ratio, cutoff.dtype()));
@@ -319,12 +324,11 @@ pub const Compressor = struct {
             new_state = new_state.update(kv_last_compressed, score_last_compressed, zml.Tensor.arange(.{ .end = self.ratio }, .u32).withTags(.{.seq}), state_idx);
         }
 
-        // TODO: fix if cutoff if cutoff + ratio > x.dim(.seq);
         var valid_uncompressible = zml.Tensor.arange(.{ .end = self.ratio }, .u32).cmp(.LT, remainder);
         valid_uncompressible = valid_uncompressible.insertAxes(0, .{.batch}).insertAxes(.last, .{.hd});
 
-        var kv_uncompressible = kv.dynamicSlice1d(kv.axis(.seq), .{ .start = cutoff, .len = self.ratio });
-        var score_uncompressible = score.dynamicSlice1d(kv.axis(.seq), .{ .start = cutoff, .len = self.ratio });
+        var kv_uncompressible = kv_state.dynamicSlice1d(kv_state.axis(.seq), .{ .start = cutoff, .len = self.ratio });
+        var score_uncompressible = score_state.dynamicSlice1d(score_state.axis(.seq), .{ .start = cutoff, .len = self.ratio });
         score_uncompressible = score_uncompressible.add(ape.broad(score_uncompressible.shape()));
 
         kv_uncompressible = zml.Tensor.select(valid_uncompressible.broad(kv_uncompressible.shape()), kv_uncompressible, .zeroes(kv_uncompressible.shape()));
@@ -338,6 +342,13 @@ pub const Compressor = struct {
         new_state = new_state.update(kv_uncompressible, score_uncompressible, uncompressible_cache_ids, state_idx);
 
         const end = @divTrunc(x.dim(.seq), self.ratio) * self.ratio;
+        if (end == 0) {
+            return .{
+                zml.Tensor.zeroes(kv.shape().set(.seq, 0)),
+                zml.Tensor.arange(.{ .end = 0, .step = self.ratio }, .i64).withTags(.{.seq}),
+                new_state.reuseBuffer(state),
+            };
+        }
 
         kv = kv.slice1d(.seq, .{ .end = end });
         score = score.slice1d(.seq, .{ .end = end });
@@ -422,6 +433,9 @@ pub const Compressor = struct {
     ) struct { zml.Tensor, CompressorState } {
         const is_prefill = x.dim(.seq) > 1;
         var kv, const pos_idx, const new_state = if (is_prefill) self.forwardPrefill(x.convert(.f32), seqlen, state, state_idx) else self.forwardDecode(x.convert(.f32), offset, state, state_idx);
+        if (kv.dim(.seq) == 0) {
+            return .{ zml.Tensor.zeroes(kv.shape().withDtype(x.dtype())).rename(.{ .seq = .kv }), new_state.reuseBuffer(state) };
+        }
 
         const precomputed_freqs_cis = precompute_yarn(self.rope_head_dim, self.rope_opts);
         const freqs_cis = zml.Tensor.outer(pos_idx.convert(.f32), precomputed_freqs_cis);
@@ -1776,8 +1790,8 @@ pub const Model = struct {
     lm_head: LmHead,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation: common.GenerationOptions) !Model {
-        const layers = try allocator.alloc(Layer, 5);
-        // const layers = try allocator.alloc(Layer, config.num_hidden_layers);
+        //const layers = try allocator.alloc(Layer, 2);
+        const layers = try allocator.alloc(Layer, config.num_hidden_layers);
 
         for (layers, 0..) |*layer, i| {
             const layer_store = store.withPrefix("layers").withLayer(i);
