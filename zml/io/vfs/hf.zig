@@ -7,7 +7,8 @@ const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
 
-const XET_INTRA_TENSOR_WORKERS: usize = 16;
+const default_xet_workers: usize = 4;
+const default_xet_queue_capacity_multiplier: usize = 4;
 
 pub const API = struct {
     const TREE_URL_TEMPLATE = "https://huggingface.co/api/models/{[repo]s}/{[model]s}/tree/{[rev]s}/{[path]s}?expand=false&recursive=true&limit=1000";
@@ -120,12 +121,31 @@ pub const HF = struct {
     cas_cache: xet.CasAuthCache = .{},
     fetch_pool: *xet.FetchPool,
 
+    const XetOptions = struct {
+        workers: usize = default_xet_workers,
+        queue_capacity: ?usize = null,
+
+        fn resolvedQueueCapacity(self: XetOptions) usize {
+            return self.queue_capacity orelse self.workers * default_xet_queue_capacity_multiplier;
+        }
+    };
+
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8) !HF {
+        return initWithXetOptions(allocator, inner, http_client, hf_token, .{});
+    }
+
+    fn initWithXetOptions(
+        allocator: std.mem.Allocator,
+        inner: std.Io,
+        http_client: *std.http.Client,
+        hf_token: ?[]const u8,
+        xet_opts: XetOptions,
+    ) !HF {
         const raw = if (hf_token) |t| try allocator.dupe(u8, std.mem.trim(u8, t, " \t\n\r")) else try allocator.dupe(u8, "");
         errdefer allocator.free(raw);
         const pool = try xet.FetchPool.init(allocator, inner, http_client, .{
-            .workers = XET_INTRA_TENSOR_WORKERS,
-            .queue_capacity = XET_INTRA_TENSOR_WORKERS * 4,
+            .workers = xet_opts.workers,
+            .queue_capacity = xet_opts.resolvedQueueCapacity(),
         });
         errdefer pool.deinit(inner);
         return .{
@@ -162,7 +182,27 @@ pub const HF = struct {
 
         if (hf_token == null) log.warn("No Hugging Face authentication token found in environment or home config; proceeding without authentication.", .{});
 
-        return init(allocator, inner, http_client, hf_token);
+        return initWithXetOptions(allocator, inner, http_client, hf_token, xetOptionsFromEnv(environ_map));
+    }
+
+    fn xetOptionsFromEnv(environ_map: *std.process.Environ.Map) XetOptions {
+        var opts: XetOptions = .{};
+        opts.workers = parsePositiveEnv(usize, environ_map, "XET_INTRA_TENSOR_WORKERS") orelse opts.workers;
+        opts.queue_capacity = parsePositiveEnv(usize, environ_map, "XET_QUEUE_CAPACITY") orelse opts.queue_capacity;
+        return opts;
+    }
+
+    fn parsePositiveEnv(comptime T: type, environ_map: *std.process.Environ.Map, name: []const u8) ?T {
+        const raw = environ_map.get(name) orelse return null;
+        const value = std.fmt.parseUnsigned(T, raw, 10) catch |err| {
+            log.warn("Ignoring invalid {s}={s}: {s}", .{ name, raw, @errorName(err) });
+            return null;
+        };
+        if (value == 0) {
+            log.warn("Ignoring invalid {s}=0; value must be positive", .{name});
+            return null;
+        }
+        return value;
     }
 
     pub fn deinit(self: *HF) void {
