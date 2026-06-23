@@ -178,12 +178,12 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             const kc = k.transpose(.{ .h, .k, .hd });
             const vc = v.transpose(.{ .h, .k, .hd });
             const tok_i32 = token_index.convert(.i32);
-	    
+
             const attn = if (q.dim(.q) > 1)
                 zml.ops.customCall("zml$flash_attn", .{ qc, kc, vc, tok_i32, metadata.metal_fa.num_tokens }, qc.shape(), .{}, .{ .has_side_effect = false })
             else
                 zml.ops.customCall("zml$flash_attn", .{ qc, kc, vc, tok_i32 }, qc.shape(), .{}, .{ .has_side_effect = false });
-	    
+
             break :b attn.transpose(q.shape());
         },
     };

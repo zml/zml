@@ -40,11 +40,11 @@ pub const paged = struct {
 
         pub fn allocationSize(self: Parameters) usize {
             var allocation_size: usize = 0;
-	    
+
             allocation_size += self.block_table.byteSize();
             allocation_size += self.seq_lens.byteSize();
             allocation_size += self.query_start_len.byteSize();
-	    
+
             return allocation_size;
         }
 
