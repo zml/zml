@@ -54,13 +54,18 @@ pub fn tritonSparseAttention(
     scale: ?f32,
 ) zml.Tensor {
     // q: [batch, q, h, hd], kv: [batch, kv, hd], topk: [batch, seq, topk]
-    const rope_rank: i64 = 0;
+    const rope_rank: i64 = 64;
     const batch = q.dim(.batch);
     const q_len = q.dim(.q);
     const q_final = q.merge(.{ .q = .{ .batch, .q } });
     const q_dim = q_final.dim(.hd);
     const q_heads = q_final.dim(.h);
+    const nope_rank = q_dim - rope_rank;
+    const kernel_lora_rank: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(nope_rank)));
 
+    stdx.debug.assert(q_dim > rope_rank, "expected q head dim ({}) to include a rope tail of {}", .{ q_dim, rope_rank });
+    stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(kernel_lora_rank))), "expected kernel lora rank ({}) to be a power of two", .{kernel_lora_rank});
+    stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(q_dim))), "expected value rank ({}) to be a power of two", .{q_dim});
     stdx.debug.assert(kv.dim(.hd) == q_dim, "expected q and kv head dims to match, got q={} kv={}", .{ q_dim, kv.dim(.hd) });
     stdx.debug.assert(topk.dim(.seq) == q_len, "expected topk seq dim ({}) to match q dim ({})", .{ topk.dim(.seq), q_len });
 
@@ -141,7 +146,10 @@ pub fn tritonSparseAttention(
             .topk_count = topk_final.dim(.topk),
             .block_m = block_m,
             .rope_rank = rope_rank,
-            .kv_lora_rank = q_dim,
+            .qk_lora_rank = nope_rank,
+            .kv_lora_rank = kernel_lora_rank,
+            .rope_offset = nope_rank,
+            .value_rank = q_dim,
             .tile_size = @min(topk_final.dim(.topk), 16),
             .use_attn_sink = true,
             .all_decode = q_len == 1,
