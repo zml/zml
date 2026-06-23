@@ -291,7 +291,11 @@ pub const fa2 = struct {
         }
     };
 
-    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, _: Parameters) zml.Tensor {
+    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
+        return attentionWithOpts(q_, k_, v_, token_index, metadata, parameters, .{});
+    }
+
+    pub fn attentionWithOpts(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, _: Parameters, opts: AttentionOptions) zml.Tensor {
         stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa2.attention support for batch size != 1 is not supported yet.", .{});
         const seqused_k = token_index.addConstant(q_.dim(.q)).reshape(.{1});
         // TODO(Corendos): replace with cumsum
@@ -317,7 +321,7 @@ pub const fa2 = struct {
         const num_heads_k = k_.dim(.h);
         const head_size = q_.dim(.hd);
         const ngroups = @divExact(num_heads, num_heads_k);
-        const seqlenq_ngroups_swapped = max_seqlen_q == 1 and num_heads > num_heads_k and @mod(head_size, 8) == 0;
+        const seqlenq_ngroups_swapped = max_seqlen_q == 1 and num_heads > num_heads_k and @mod(head_size, 8) == 0 and opts.sliding_window < 0;
         if (seqlenq_ngroups_swapped) {
             q = q.splitAxis(.h, .{ .h = num_heads_k, .ngroups = ngroups }).transpose(.{ .tot, .ngroups, .h, .hd }).merge(.{ .tot = .{ .tot, .ngroups } });
         }
@@ -353,12 +357,12 @@ pub const fa2 = struct {
             },
             .{q_sharded.shape()},
             .{
-                .softmax_scale = b: {
+                .softmax_scale = opts.scale orelse b: {
                     const head_dim = q.shape().dim(2);
                     break :b 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
                 },
                 .is_causal = !seqlenq_ngroups_swapped,
-                .window_size_left = @as(i32, -1),
+                .window_size_left = opts.sliding_window,
                 .window_size_right = @as(i32, -1),
                 .max_seqlen_q = max_seqlen_q_call,
                 .max_seqlen_k = max_seqlen_k,

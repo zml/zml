@@ -761,14 +761,28 @@ pub const Attn = struct {
         // Take first element of cache_positions array to match zml.attention.attention signature
         const attn_start = token_index.slice1d(0, .{ .start = 0, .end = 1 });
 
-        const attn_output = zml.attention.attention.attention(
-            q,
-            k_full,
-            v_full,
-            attn_start,
-            attention_metadata,
-            attention_parameters,
-        ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
+        const attn_output = switch (attention_parameters) {
+            .cuda_fa2 => |cuda_fa2_parameters| zml.attention.flashattn.fa2.attentionWithOpts(
+                q,
+                k_full,
+                v_full,
+                attn_start,
+                attention_metadata.cuda_fa2,
+                cuda_fa2_parameters,
+                .{
+                    .sliding_window = if (self.enable_sliding_window) @intCast(default_config.sliding_window) else -1,
+                    .scale = self.scaling,
+                },
+            ),
+            else => zml.attention.attention.attention(
+                q,
+                k_full,
+                v_full,
+                attn_start,
+                attention_metadata,
+                attention_parameters,
+            ),
+        }.withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
         // Flash attention squeezes the singleton batch axis from its output.
         const gate_b = gate.sigmoid().squeeze(.b).rename(.{ .s = .q }).broad(attn_output.shape());
@@ -855,13 +869,19 @@ pub const Attn = struct {
         const q_for_attn = q_rope.rename(.{ .s = .q });
 
         const attn_start = token_index.slice1d(0, .{ .start = 0, .end = 1 });
-        const attn_output = zml.attention.attention.attention(
+        const attn_metadata = zml.attention.attention.Metadata.init(.fromBackend(.cuda_fa2, input.dim(.s), self.num_q_heads));
+        const attn_parameters = zml.attention.attention.Parameters.init(.fromBackend(.cuda_fa2));
+        const attn_output = zml.attention.flashattn.fa2.attentionWithOpts(
             q_for_attn,
             k_full,
             v_full,
             attn_start,
-            zml.attention.attention.Metadata.init(.fromBackend(.cuda_fa2, input.dim(.s), self.num_q_heads)),
-            zml.attention.attention.Parameters.init(.fromBackend(.cuda_fa2)),
+            attn_metadata.cuda_fa2,
+            attn_parameters.cuda_fa2,
+            .{
+                .sliding_window = if (self.enable_sliding_window) @intCast(default_config.sliding_window) else -1,
+                .scale = self.scaling,
+            },
         );
 
         const gate_sig = gate.sigmoid().squeeze(.b).rename(.{ .s = .q });
