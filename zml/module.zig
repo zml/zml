@@ -50,6 +50,7 @@ pub const CompilationOptions = struct {
     // Debugging options
     program_name: []const u8 = "zml",
     xla_dump_to: ?[]const u8 = null,
+    xla_dump_hlo_as_text: bool = true,
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
     xla_dump_emitter_re: ?[]const u8 = null,
@@ -96,6 +97,7 @@ pub const CompilationContext = struct {
 
     scopes: stdx.BoundedArray(Scope, 16) = .empty,
     manual_computation_depth: usize = 0,
+    synthetic_symbol_id: usize = 0,
 
     channel_id: i64 = 0,
 
@@ -187,6 +189,11 @@ pub const CompilationContext = struct {
     pub fn nextChannelId(self: *CompilationContext) i64 {
         self.channel_id += 1;
         return self.channel_id;
+    }
+
+    pub fn nextSyntheticSymbolId(self: *CompilationContext) usize {
+        self.synthetic_symbol_id += 1;
+        return self.synthetic_symbol_id;
     }
 };
 
@@ -656,6 +663,9 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
         if (opts.xla_dump_to) |xla_dump_to| {
             try setXlaOverrideFlag(overrides_map, "xla_dump_to", xla_dump_to, upb_arena);
             try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_as_proto", true, upb_arena);
+            if (opts.xla_dump_hlo_as_text) {
+                try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_as_text", true, upb_arena);
+            }
             if (opts.xla_dump_fusion_visualization) {
                 try setXlaOverrideFlag(overrides_map, "xla_dump_fusion_visualization", true, upb_arena);
             }

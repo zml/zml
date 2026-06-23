@@ -2340,8 +2340,132 @@ fn toUsize(values: anytype) stdx.BoundedArray(usize, constants.MAX_RANK) {
 }
 
 pub fn scaled_dot(lhs: Tensor, rhs: Tensor, lhs_scale: Tensor, rhs_scale: Tensor, args: anytype) Tensor {
-    const real_lhs = lhs.convert(.bf16).mul(lhs_scale.convert(.bf16));
-    const real_rhs = rhs.convert(.bf16).mul(rhs_scale.convert(.bf16));
+    const ctx = CompilationContext.current();
+    const contracting_tag = Shape.toTag(args);
+    const rank = lhs.rank();
 
-    return real_lhs.dot(real_rhs, args).convert(.bf16);
+    stdx.debug.assert(rank == 2 or rank == 3, "scaled_dot expects rank 2 or 3 inputs, got {f}", .{lhs.shape()});
+    stdx.debug.assert(rhs.rank() == rank, "scaled_dot expects lhs/rhs ranks to match, got {f} and {f}", .{ lhs.shape(), rhs.shape() });
+    stdx.debug.assert(lhs.dtype() == .f8e4m3fn and rhs.dtype() == .f8e4m3fn, "scaled_dot expects f8e4m3fn inputs, got {} and {}", .{ lhs.dtype(), rhs.dtype() });
+    stdx.debug.assert(lhs_scale.dtype() == .f8e8m0 and rhs_scale.dtype() == .f8e8m0, "scaled_dot expects f8e8m0 scales, got {} and {}", .{ lhs_scale.dtype(), rhs_scale.dtype() });
+
+    const batch_dims = rank - 2;
+    const lhs_m_axis = batch_dims;
+    const rhs_n_axis = batch_dims;
+    const lhs_k_axis = rank - 1;
+    const rhs_k_axis = rank - 1;
+
+    stdx.debug.assert(lhs.shape().tag(lhs_k_axis) == contracting_tag, "scaled_dot expects lhs contracting axis .{s} to be last, got {f}", .{ contracting_tag, lhs.shape() });
+    stdx.debug.assert(rhs.shape().tag(rhs_k_axis) == contracting_tag, "scaled_dot expects rhs contracting axis .{s} to be last, got {f}", .{ contracting_tag, rhs.shape() });
+    stdx.debug.assert(lhs.dim(lhs_k_axis) == rhs.dim(rhs_k_axis), "scaled_dot expects matching contracting dimensions, got {d} and {d}", .{ lhs.dim(lhs_k_axis), rhs.dim(rhs_k_axis) });
+    stdx.debug.assert(@mod(lhs.dim(lhs_k_axis), 32) == 0, "scaled_dot expects contracting dimension divisible by 32, got {d}", .{lhs.dim(lhs_k_axis)});
+    stdx.debug.assert(lhs_scale.rank() == rank and rhs_scale.rank() == rank, "scaled_dot expects scales to have the same rank as their values, got {f}, {f}, {f}, {f}", .{ lhs.shape(), lhs_scale.shape(), rhs.shape(), rhs_scale.shape() });
+
+    for (0..batch_dims) |ax| {
+        stdx.debug.assert(lhs.dim(ax) == rhs.dim(ax), "scaled_dot expects matching batch dimension {d}, got {d} and {d}", .{ ax, lhs.dim(ax), rhs.dim(ax) });
+        stdx.debug.assert(lhs_scale.dim(ax) == lhs.dim(ax), "scaled_dot lhs scale batch dimension {d} mismatch, got {f} for {f}", .{ ax, lhs_scale.shape(), lhs.shape() });
+        stdx.debug.assert(rhs_scale.dim(ax) == rhs.dim(ax), "scaled_dot rhs scale batch dimension {d} mismatch, got {f} for {f}", .{ ax, rhs_scale.shape(), rhs.shape() });
+    }
+
+    const block_count = @divExact(lhs.dim(lhs_k_axis), 32);
+    stdx.debug.assert(lhs_scale.dim(lhs_m_axis) == lhs.dim(lhs_m_axis) and lhs_scale.dim(lhs_k_axis) == block_count, "scaled_dot lhs scale shape must match lhs with K/32 blocks, got {f} for {f}", .{ lhs_scale.shape(), lhs.shape() });
+    stdx.debug.assert(rhs_scale.dim(rhs_n_axis) == rhs.dim(rhs_n_axis) and rhs_scale.dim(rhs_k_axis) == block_count, "scaled_dot rhs scale shape must match rhs with K/32 blocks, got {f} for {f}", .{ rhs_scale.shape(), rhs.shape() });
+
+    var output_shape: Shape = .{ ._dtype = .bf16 };
+    for (0..batch_dims) |ax| {
+        output_shape = output_shape.appendDim(lhs.dim(ax), lhs.shape().tag(ax));
+    }
+    output_shape = output_shape.appendDim(lhs.dim(lhs_m_axis), lhs.shape().tag(lhs_m_axis));
+    output_shape = output_shape.appendDim(rhs.dim(rhs_n_axis), rhs.shape().tag(rhs_n_axis));
+
+    const result_type = mlirx.Type.rankedTensor(ctx.mlir_ctx, output_shape);
+    const inputs = [_]*const mlir.Value{ lhs.value(), rhs.value(), lhs_scale.value(), rhs_scale.value() };
+    const input_types = [_]*const mlir.Type{ lhs.value().type_(), rhs.value().type_(), lhs_scale.value().type_(), rhs_scale.value().type_() };
+    const decomposition = appendScaledDotDecomposition(ctx, &input_types, result_type);
+
+    const op = mlir.Operation.make(ctx.mlir_ctx, "stablehlo.composite", .{
+        .operands = .{ .flat = &inputs },
+        .results = .{ .flat = &.{result_type} },
+        .attributes = &.{
+            .named(ctx.mlir_ctx, "name", .string(ctx.mlir_ctx, "xla.scaled_dot")),
+            .named(ctx.mlir_ctx, "composite_attributes", scaledDotCompositeAttributes(ctx.mlir_ctx, rank)),
+            .named(ctx.mlir_ctx, "decomposition", .flatSymbolRef(ctx.mlir_ctx, decomposition)),
+            .named(ctx.mlir_ctx, "version", .int(ctx.mlir_ctx, .i32, 1)),
+        },
+        .location = .unknown(ctx.mlir_ctx),
+    }).appendTo(ctx.currentScope().block);
+
+    return Tensor._result(output_shape, op.result(0));
+}
+
+fn scaledDotCompositeAttributes(mlir_ctx: *mlir.Context, rank: usize) *const mlir.Attribute {
+    const batch_dims = rank - 2;
+    const lhs_k_axis: i64 = @intCast(rank - 1);
+    const rhs_k_axis: i64 = @intCast(rank - 1);
+
+    var lhs_contracting: stdx.BoundedArray(*const mlir.Attribute, constants.MAX_RANK) = .empty;
+    lhs_contracting.appendAssumeCapacity(.int(mlir_ctx, .i64, lhs_k_axis));
+    var rhs_contracting: stdx.BoundedArray(*const mlir.Attribute, constants.MAX_RANK) = .empty;
+    rhs_contracting.appendAssumeCapacity(.int(mlir_ctx, .i64, rhs_k_axis));
+    const contracting = [_]*const mlir.Attribute{
+        .array(mlir_ctx, lhs_contracting.constSlice()),
+        .array(mlir_ctx, rhs_contracting.constSlice()),
+    };
+
+    var lhs_batch: stdx.BoundedArray(*const mlir.Attribute, constants.MAX_RANK) = .empty;
+    var rhs_batch: stdx.BoundedArray(*const mlir.Attribute, constants.MAX_RANK) = .empty;
+    for (0..batch_dims) |ax| {
+        const batch_axis: i64 = @intCast(ax);
+        lhs_batch.appendAssumeCapacity(.int(mlir_ctx, .i64, batch_axis));
+        rhs_batch.appendAssumeCapacity(.int(mlir_ctx, .i64, batch_axis));
+    }
+    const batch = [_]*const mlir.Attribute{
+        .array(mlir_ctx, lhs_batch.constSlice()),
+        .array(mlir_ctx, rhs_batch.constSlice()),
+    };
+
+    const dimension_numbers = [_]*const mlir.Attribute{
+        .array(mlir_ctx, &contracting),
+        .array(mlir_ctx, &batch),
+    };
+
+    return .dict(mlir_ctx, &.{
+        .named(mlir_ctx, "dimension_numbers", .array(mlir_ctx, &dimension_numbers)),
+    });
+}
+
+fn appendScaledDotDecomposition(
+    ctx: *CompilationContext,
+    input_types: []const *const mlir.Type,
+    result_type: *const mlir.Type,
+) []const u8 {
+    const symbol = std.fmt.allocPrint(
+        ctx.arena.allocator(),
+        "__zml_xla_scaled_dot_decomposition_{d}",
+        .{ctx.nextSyntheticSymbolId()},
+    ) catch @panic("OOM");
+    const loc = mlir.Location.unknown(ctx.mlir_ctx);
+    const block_locs: [4]*const mlir.Location = @splat(loc);
+    const block = mlir.Block.init(input_types, &block_locs);
+
+    const bf16 = mlirx.Type.fromDType(ctx.mlir_ctx, .bf16);
+    const zero_bytes = [_]u8{ 0, 0 };
+    const zero = dialects.stablehlo.constant(ctx.mlir_ctx, &.{}, bf16, &zero_bytes, loc)
+        .appendTo(block);
+    const broadcast = dialects.stablehlo.broadcast_in_dim(ctx.mlir_ctx, zero.result(0), &.{}, result_type, loc)
+        .appendTo(block);
+    _ = dialects.func.returns(ctx.mlir_ctx, &.{broadcast.result(0)}, loc).appendTo(block);
+
+    const func_op = dialects.func.func(ctx.mlir_ctx, .{
+        .name = symbol,
+        .args = input_types,
+        .results = &.{result_type},
+        .block = block,
+        .location = loc,
+        .visibility = .private,
+        .verify = false,
+    });
+    _ = func_op.appendTo(ctx.module.body());
+
+    return symbol;
 }
