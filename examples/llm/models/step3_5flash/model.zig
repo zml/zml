@@ -761,13 +761,24 @@ pub const Attn = struct {
         // Take first element of cache_positions array to match zml.attention.attention signature
         const attn_start = token_index.slice1d(0, .{ .start = 0, .end = 1 });
 
+        // conditionally add sliding window to attention_parameters
+        const layer_attention_parameters: zml.attention.attention.Parameters = switch (attention_parameters) {
+            .cuda_fa2 => |p| .{ .cuda_fa2 = .{
+                .sliding_window = if (self.enable_sliding_window)
+                    @as(i32, @intCast(default_config.sliding_window))
+                else
+                    p.sliding_window,
+            } },
+            else => attention_parameters,
+        };
+
         const attn_output = zml.attention.attention.attention(
             q,
             k_full,
             v_full,
             attn_start,
             attention_metadata,
-            attention_parameters,
+            layer_attention_parameters,
         ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
         // Head-wise gate is {b, s, h}
