@@ -18,6 +18,7 @@ const Value = tri.Value;
 const Cfg = struct {
     q_dtype: DType = .bf16,
     kv_dtype: DType = .bf16,
+    sink_dtype: DType = .f32,
     o_dtype: DType = .bf16,
     num_query_heads: i64 = 32,
     num_queries_per_kv: i64 = 32,
@@ -29,6 +30,7 @@ const Cfg = struct {
     rope_rank: i64 = 64,
     kv_lora_rank: i64 = 512,
     tile_size: i64 = 16,
+    use_attn_sink: bool = false,
     all_decode: bool = false,
 };
 
@@ -38,6 +40,7 @@ pub const Kernel = tri.Kernel(Cfg, .{
         "query_ptr",
         "key_cache_ptr",
         "value_cache_ptr",
+        "attn_sink_ptr",
         "block_tables_ptr",
         "topk_indices_ptr",
         "seq_lens_ptr",
@@ -65,6 +68,7 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         .query_ptr = .{ .ptr = cfg.q_dtype },
         .key_cache_ptr = .{ .ptr = cfg.kv_dtype },
         .value_cache_ptr = .{ .ptr = cfg.kv_dtype },
+        .attn_sink_ptr = .{ .ptr = cfg.sink_dtype },
         .block_tables_ptr = .{ .ptr = .i32 },
         .topk_indices_ptr = .{ .ptr = .i32 },
         .seq_lens_ptr = .{ .ptr = .i32 },
@@ -102,6 +106,7 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         a.query_ptr,
         a.key_cache_ptr,
         a.value_cache_ptr,
+        a.attn_sink_ptr,
         a.topk_indices_ptr,
         scale,
         query_stride_0,
@@ -167,6 +172,7 @@ fn kernelUnifiedAttentionSparseMla2d(
     query_ptr: Value,
     key_cache_ptr: Value,
     value_cache_ptr: Value,
+    attn_sink_ptr: Value,
     topk_indices_ptr: Value,
     scale: Value,
     query_stride_0: Value,
@@ -321,8 +327,28 @@ fn kernelUnifiedAttentionSparseMla2d(
         loop.yield(.{ m_j, new_L, new_acc });
     }
 
-    const L = loop.results[1];
+    const M = loop.results[0];
+    var L = loop.results[1];
     var acc = loop.results[2];
+
+    if (config.use_attn_sink) {
+        const sink_mask = query_mask_0.bitAnd(query_mask_1);
+        const sink_logits = k.loadOpts(attn_sink_ptr.addPtr(query_offset_1), .{
+            .mask = sink_mask,
+            .other = k.zeros(&.{BLOCK_M}, config.sink_dtype),
+        }).to(.f32);
+        const sink_score = k.where(
+            sink_mask,
+            sink_logits,
+            k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32),
+        );
+        const n_m = M.maximum(sink_score);
+        const alpha = k.exp(M.sub(n_m));
+        const sink_p = k.exp(sink_score.sub(n_m));
+
+        acc = acc.mul(alpha.expandDims(1));
+        L = L.mul(alpha).add(sink_p);
+    }
 
     const one_over_L = k.full(&.{ BLOCK_M, 1 }, 1.0, .f32).div(L.expandDims(1));
     acc = acc.mul(k.broadcastTo(one_over_L, &.{ BLOCK_M, KV_LORA_RANK }));
@@ -357,18 +383,34 @@ pub fn setActiveTtir(ir: [:0]const u8) void {
 }
 
 pub fn forward(
-    query: Tensor, key_cache: Tensor, value_cache: Tensor,
-    block_tables: Tensor, topk_indices: Tensor, seq_lens: Tensor, scale: Tensor,
-    bt_stride: Tensor, q_s0: Tensor, q_s1: Tensor, o_s0: Tensor, o_s1: Tensor,
-    k_s0: Tensor, k_s1: Tensor, k_s2: Tensor, v_s0: Tensor, v_s1: Tensor, v_s2: Tensor,
-    qsl: Tensor, num_seqs: Tensor, _: Tensor,
+    query: Tensor,
+    key_cache: Tensor,
+    value_cache: Tensor,
+    attn_sink: Tensor,
+    block_tables: Tensor,
+    topk_indices: Tensor,
+    seq_lens: Tensor,
+    scale: Tensor,
+    bt_stride: Tensor,
+    q_s0: Tensor,
+    q_s1: Tensor,
+    o_s0: Tensor,
+    o_s1: Tensor,
+    k_s0: Tensor,
+    k_s1: Tensor,
+    k_s2: Tensor,
+    v_s0: Tensor,
+    v_s1: Tensor,
+    v_s2: Tensor,
+    qsl: Tensor,
+    num_seqs: Tensor,
+    _: Tensor,
 ) Tensor {
     return ops.triton(
         .{
-            query, key_cache, value_cache, block_tables, topk_indices, seq_lens, scale,
-            bt_stride, q_s0, q_s1, o_s0, o_s1,
-            k_s0, k_s1, k_s2, v_s0, v_s1, v_s2,
-            qsl, num_seqs,
+            query,     key_cache, value_cache, attn_sink, block_tables, topk_indices, seq_lens, scale,
+            bt_stride, q_s0,      q_s1,        o_s0,      o_s1,         k_s0,         k_s1,     k_s2,
+            v_s0,      v_s1,      v_s2,        qsl,       num_seqs,
         },
         .{Shape.init(.{MAX_O_BUF}, .bf16)},
         .{
@@ -389,14 +431,17 @@ pub fn args() std.meta.ArgsTuple(@TypeOf(forward)) {
     }.t;
     return .{
         // query, key_cache, value_cache.
-        ten1d(.bf16, MAX_Q_BUF), ten1d(.bf16, MAX_K_BUF), ten1d(.bf16, MAX_V_BUF),
+        ten1d(.bf16, MAX_Q_BUF),     ten1d(.bf16, MAX_K_BUF),                ten1d(.bf16, MAX_V_BUF), ten1d(.f32, MAX_NUM_QUERY_HEADS),
         // block_tables, topk_indices, seq_lens, scale.
-        ten1d(.i32, MAX_NUM_BLOCKS), ten1d(.i32, MAX_NUM_TOKENS * MAX_TOPK), ten1d(.i32, 1), ten1d(.f32, 1),
+        ten1d(.i32, MAX_NUM_BLOCKS), ten1d(.i32, MAX_NUM_TOKENS * MAX_TOPK), ten1d(.i32, 1),          ten1d(.f32, 1),
         // block_table_stride, query/output strides.
-        ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1),
+        ten1d(.i64, 1),              ten1d(.i64, 1),                         ten1d(.i64, 1),          ten1d(.i64, 1),
+        ten1d(.i64, 1),
         // key/value cache strides.
-        ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1),
+                     ten1d(.i64, 1),                         ten1d(.i64, 1),          ten1d(.i64, 1),
+        ten1d(.i64, 1),              ten1d(.i64, 1),                         ten1d(.i64, 1),
         // query_start_len, num_seqs, output placeholder.
-        ten1d(.i32, 2), ten1d(.i32, 1), ten1d(.bf16, MAX_O_BUF),
+                 ten1d(.i32, 2),
+        ten1d(.i32, 1),              ten1d(.bf16, MAX_O_BUF),
     };
 }

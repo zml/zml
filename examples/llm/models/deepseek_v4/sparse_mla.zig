@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const zml = @import("zml");
-const kernel = @import("sparse_mla_kernel.zig");
+const kernel = @import("unified_sparse_mla.zig");
 
 const stdx = zml.stdx;
 
@@ -53,77 +53,139 @@ pub fn tritonSparseAttention(
     topk: zml.Tensor,
     scale: ?f32,
 ) zml.Tensor {
-    // q: [batch, q, h=64, hd=512], kv: [batch, kv, hd=512], topk: [batch, seq, topk=128]
-    // stdx.debug.assert();
-
-    log.info("[kernel] sparse attn", .{});
+    // q: [batch, q, h, hd], kv: [batch, kv, hd], topk: [batch, seq, topk]
+    const rope_rank: i64 = 64;
+    const batch = q.dim(.batch);
+    const q_len = q.dim(.q);
     const q_final = q.merge(.{ .q = .{ .batch, .q } });
-    const kv_final = kv.merge(.{ .kv = .{ .batch, .kv } }).insertAxes(.hd, .{.kv_hd});
-    const topk_final = topk.merge(.{ .seq = .{ .batch, .seq } }).insertAxes(.topk, .{.kv_hd}).convert(.i32);
-    const sink_final = attn_sink.convert(q.dtype());
-
-    const q_heads = q_final.dim(.h);
     const q_dim = q_final.dim(.hd);
-    const kv_heads = kv_final.dim(.kv_hd);
-    const kv_dim = kv_final.dim(.hd);
+    const q_heads = q_final.dim(.h);
 
-    const seqlen = q_final.dim(.q);
+    const kv_lora_rank = q_dim;
+    const kv_lora_rank_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(kv_lora_rank)));
+    const pad_rank = kv_lora_rank_padded - kv_lora_rank;
+    stdx.debug.assert(kv.dim(.hd) == q_dim, "expected q and kv head dims to match, got q={} kv={}", .{ q_dim, kv.dim(.hd) });
+    stdx.debug.assert(topk.dim(.seq) == q_len, "expected topk seq dim ({}) to match q dim ({})", .{ topk.dim(.seq), q_len });
 
-    const out_shape: zml.Shape = .init(.{ .q = seqlen, .h = q_heads, .hd = kv_dim }, q.dtype());
-    const softmax_shape: zml.Shape = .init(.{ seqlen, q_heads }, .f32);
-    const max_logits_shape: zml.Shape = .init(.{ seqlen, q_heads }, .f32);
+    const q_for_kernel = if (pad_rank > 0)
+        zml.Tensor.concatenate(&.{
+            q_final,
+            zml.Tensor.zeroes(.init(.{ .q = q_final.dim(.q), .h = q_heads, .hd = pad_rank }, q.dtype())),
+            zml.Tensor.zeroes(.init(.{ .q = q_final.dim(.q), .h = q_heads, .hd = rope_rank }, q.dtype())),
+        }, .hd)
+    else
+        zml.Tensor.concatenate(&.{
+            q_final,
+            zml.Tensor.zeroes(.init(.{ .q = q_final.dim(.q), .h = q_heads, .hd = rope_rank }, q.dtype())),
+        }, .hd);
 
-    const kv_group = @divExact(q_heads, kv_heads);
+    const kv_final = kv.merge(.{ .kv = .{ .batch, .kv } });
+    const kv_for_kernel = if (pad_rank > 0)
+        zml.Tensor.concatenate(&.{
+            kv_final,
+            zml.Tensor.zeroes(.init(.{ .kv = kv_final.dim(.kv), .hd = pad_rank }, kv.dtype())),
+            zml.Tensor.zeroes(.init(.{ .kv = kv_final.dim(.kv), .hd = rope_rank }, kv.dtype())),
+        }, .hd)
+    else
+        zml.Tensor.concatenate(&.{
+            kv_final,
+            zml.Tensor.zeroes(.init(.{ .kv = kv_final.dim(.kv), .hd = rope_rank }, kv.dtype())),
+        }, .hd);
+    const value_for_kernel = if (pad_rank > 0)
+        zml.Tensor.concatenate(&.{
+            kv_final,
+            zml.Tensor.zeroes(.init(.{ .kv = kv_final.dim(.kv), .hd = pad_rank }, kv.dtype())),
+        }, .hd)
+    else
+        kv_final;
 
-    const cfg: kernel.Cfg = .{
-        .use_attn_sink = true,
-        .kv_group_num = @intCast(kv_group),
-        .index_topk = @intCast(topk_final.dim(.topk)),
-        .sink_dtype = zml.kernel.triton.from(sink_final.dtype()),
-    };
+    const key_cache = kv_for_kernel.reshape(.{
+        .page = kv_final.dim(.kv),
+        .k_chunk = 1,
+        .hkv = 1,
+        .hd = kv_lora_rank_padded + rope_rank,
+    });
+    const value_cache = value_for_kernel.reshape(.{
+        .page = kv_final.dim(.kv),
+        .k_chunk = 1,
+        .hkv = 1,
+        .hd = kv_lora_rank_padded,
+    });
+
+    const topk_i64 = topk.convert(.i64);
+    const batch_offsets = zml.Tensor.iota(topk_i64.shape(), .batch)
+        .convert(.i64)
+        .mul(zml.Tensor.scalar(kv.dim(.kv), .i64).broad(topk_i64.shape()));
+    const valid_topk = topk_i64.cmp(.GE, zml.Tensor.scalar(0, .i64).broad(topk_i64.shape()));
+    const topk_final = zml.Tensor.select(
+        valid_topk,
+        topk_i64.add(batch_offsets),
+        zml.Tensor.scalar(-1, .i64).broad(topk_i64.shape()),
+    ).merge(.{ .q = .{ .batch, .seq } }).convert(.i32);
+
+    const block_m: i64 = @min(q_heads, 16);
+    stdx.debug.assert(@mod(q_heads, block_m) == 0, "expected q heads ({}) to be divisible by block_m ({})", .{ q_heads, block_m });
+
+    const q_strides = q_for_kernel.shape().computeElementStrides().constSlice();
+    const out_shape: zml.Shape = .init(.{ .q = q_final.dim(.q), .h = q_heads, .hd = kv_lora_rank_padded }, q.dtype());
+    const out_strides = out_shape.computeElementStrides().constSlice();
+    const k_strides = key_cache.shape().computeElementStrides().constSlice();
+    const v_strides = value_cache.shape().computeElementStrides().constSlice();
+
+    const sm_scale = scale orelse 1.0 / std.math.sqrt(@as(f32, @floatFromInt(q_dim)));
 
     const opts: Options = .{
         .num_warps = 4,
-        .num_stages = 3,
+        .num_stages = 2,
     };
 
-    const grid_h = std.math.divCeil(i64, q_heads, @min(16, kv_group)) catch unreachable;
-
     const out = kernel.Kernel.call(.{
-        .q_buffer = q_final,
-        .k_buffer = kv_final,
-        .v_buffer = kv_final,
-        .sink_ptr = sink_final,
-        .indices_ptr = topk_final,
-        .seq_q_ptr = zml.Tensor.constant(.{ .i64 = q_final.dim(.q) }).reshape(.{1}),
-        .seq_kv_ptr = zml.Tensor.constant(.{ .i64 = kv_final.dim(.kv) }).reshape(.{1}),
-        .h_q_ptr = zml.Tensor.constant(.{ .i64 = q_final.dim(.h) }).reshape(.{1}),
-        .dim_qk_ptr = zml.Tensor.constant(.{ .i64 = q.dim(.hd) }).reshape(.{1}),
-        .dim_v_ptr = zml.Tensor.constant(.{ .i64 = kv.dim(.hd) }).reshape(.{1}),
-        .stride_q_token_ptr = stride(q_heads * q_dim),
-        .stride_q_head_ptr = stride(q_dim),
-        .stride_k_token_ptr = stride(kv_heads * kv_dim),
-        .stride_k_head_ptr = stride(kv_dim),
-        .stride_v_token_ptr = stride(kv_heads * kv_dim),
-        .stride_v_head_ptr = stride(kv_dim),
-        .stride_out_token_ptr = stride(q_heads * kv_dim),
-        .stride_out_head_ptr = stride(kv_dim),
-        .stride_lse_ptr = stride(q_heads),
-        .stride_indices_token_ptr = stride(topk_final.dim(.kv_hd) * topk_final.dim(.topk)),
-        .stride_indices_head_ptr = stride(topk.dim(.topk)),
-        .sm_scale_ptr = zml.Tensor.constant(.{ .f32 = scale.? * std.math.log2e }).reshape(.{1}),
+        .query_ptr = q_for_kernel,
+        .key_cache_ptr = key_cache,
+        .value_cache_ptr = value_cache,
+        .attn_sink_ptr = attn_sink,
+        .block_tables_ptr = zml.Tensor.constant(zml.DataType.i32.zero()).reshape(.{1}),
+        .topk_indices_ptr = topk_final,
+        .seq_lens_ptr = zml.Tensor.constant(.{ .i32 = @as(i32, @intCast(kv.dim(.kv))) }).broad(.init(.{ .batch = batch }, .i32)),
+        .scale_ptr = zml.Tensor.constant(.{ .f32 = sm_scale }).reshape(.{1}),
+        .block_table_stride_ptr = stride(1),
+        .query_stride_0_ptr = stride(q_strides[0]),
+        .query_stride_1_ptr = stride(q_strides[1]),
+        .output_stride_0_ptr = stride(out_strides[0]),
+        .output_stride_1_ptr = stride(out_strides[1]),
+        .stride_k_cache_0_ptr = stride(k_strides[0]),
+        .stride_k_cache_1_ptr = stride(k_strides[1]),
+        .stride_k_cache_2_ptr = stride(k_strides[2]),
+        .stride_v_cache_0_ptr = stride(v_strides[0]),
+        .stride_v_cache_1_ptr = stride(v_strides[1]),
+        .stride_v_cache_2_ptr = stride(v_strides[2]),
+        .query_start_len_ptr = zml.Tensor.arange(.{ .end = batch + 1 }, .i32).mul(zml.Tensor.scalar(q_len, .i32)),
+        .num_seqs_ptr = zml.Tensor.constant(.{ .i32 = @as(i32, @intCast(batch)) }).reshape(.{1}),
     }, .{
-        .out = out_shape,
-        .softmax_lse = softmax_shape,
-        .max_logits = max_logits_shape,
+        .output = out_shape,
     }, .{
-        .cfg = cfg,
-        .grid = .{ @intCast(seqlen), @intCast(grid_h), 1 },
+        .cfg = .{
+            .q_dtype = zml.kernel.triton.from(q_for_kernel.dtype()),
+            .kv_dtype = zml.kernel.triton.from(kv_final.dtype()),
+            .sink_dtype = zml.kernel.triton.from(attn_sink.dtype()),
+            .o_dtype = zml.kernel.triton.from(q_for_kernel.dtype()),
+            .num_query_heads = q_heads,
+            .num_queries_per_kv = q_heads,
+            .block_size = 1,
+            .topk_count = topk_final.dim(.topk),
+            .block_m = block_m,
+            .rope_rank = rope_rank,
+            .kv_lora_rank = kv_lora_rank_padded,
+            .tile_size = @min(topk_final.dim(.topk), 16),
+            .use_attn_sink = true,
+            .all_decode = q_len == 1,
+        },
+        .grid = .{ @intCast(q_final.dim(.q) * @divExact(q_heads, block_m)), 1, 1 },
         .num_warps = @intCast(opts.num_warps),
         .num_stages = @intCast(opts.num_stages),
     });
 
-    return out.out.reshape(q.shape());
+    return out.output.slice1d(.hd, .{ .end = q_dim }).reshape(q.shape());
 }
 
 pub fn sparseAttentionMLA(
@@ -137,7 +199,7 @@ pub fn sparseAttentionMLA(
 ) zml.Tensor {
     _ = metadata; // autofix
     return switch (parameters) {
-        .vanilla => vanillaSparseAttention(q, kv, attn_sink, topk, scale), 
+        .vanilla => vanillaSparseAttention(q, kv, attn_sink, topk, scale),
         .attnd => @panic("Must be initialized manually"),
         else => tritonSparseAttention(q, kv, attn_sink, topk, scale),
     };

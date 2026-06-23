@@ -54,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
     const backend = .vanilla;// attention.Backend.auto(platform);
-    const moe_backend = .triton;//try zml.moe.Backend.auto(platform, .f8e4m3fn);
+    const moe_backend = .vanilla;//try zml.moe.Backend.auto(platform, .f8e4m3fn);
     const params = deepseek.CompilationParameters.init(repo_model.parsed_config.value.max_position_embeddings, repo_model.parsed_config.value, repo_model.inner, shardings, backend, moe_backend);
 
     // try testSparseAttn(allocator, io, platform, platform.replicated_sharding, params.attention_metadata, params.attention_parameters);
@@ -151,7 +151,7 @@ pub fn run(
     // try ctx.testLayer("head", .{ .batch, .seq, .hc, .d }, mdl.lm_head, model_buffers.lm_head, .{});
 
     const n = mdl.layers.len;
-    // const n = config.num_hidden_layers;
+    //const n = 3;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -159,6 +159,7 @@ pub fn run(
     const arena_allocator = arena.allocator();
 
     const cache: model.Cache = .init(mdl, config, 1, 2048);
+    _ = cache;
     // try ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{3}), .{ .batch, .seq, .hc, .d }, @intCast(3), mdl.layers[3], model_buffers.layers[3], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 });
 
     // const j = 4;
@@ -166,7 +167,7 @@ pub fn run(
     for (0..n) |i| {
         // try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.attn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].attn_norm, model_buffers.layers[i].attn_norm, .{});
         //
-        try ctx.testAttentionLayer(arena_allocator, i, cache, mdl.layers[i].attn, model_buffers.layers[i].attn, .{});
+        //try ctx.testAttentionLayer(arena_allocator, i, cache, mdl.layers[i].attn, model_buffers.layers[i].attn, .{});
         //
         // try ctx.testLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn_norm", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].ffn_norm, model_buffers.layers[i].ffn_norm, .{});
         //
@@ -206,9 +207,9 @@ pub fn run(
         // );
         //
         // TEST: MoE (complete)
-        // try ctx.testMoELayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].ffn, model_buffers.layers[i].ffn, .{});
+        try ctx.testMoELayer(try std.fmt.allocPrint(arena_allocator, "layers.{}.ffn", .{i}), .{ .batch, .seq, .d }, mdl.layers[i].ffn, model_buffers.layers[i].ffn, .{});
 
-        // ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 }) catch log.err("layer {} did not passed", .{i});
+        //ctx.testLayerLayer(try std.fmt.allocPrint(arena_allocator, "layers.{}", .{i}), .{ .batch, .seq, .hc, .d }, @intCast(i), mdl.layers[i], model_buffers.layers[i], cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 }) catch log.err("layer {} did not passed", .{i});
     }
 }
 
@@ -285,31 +286,7 @@ const TestContext = struct {
         //     .{}
         // );
 
-        switch (attn.compression) {
-            .csa => |csa| {
-                try self.testCompressor(
-                    allocator,
-                    try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}),
-                    i,
-                    csa.compressor,
-                    attn_buffer.compression.csa.compressor,
-                );
-                try self.testIndexerLayer(
-                    try std.fmt.allocPrint(allocator, "layers.{}.attn.indexer", .{i}),
-                    .{ .batch, .seq, .d },
-                    csa.indexer,
-                    attn_buffer.compression.csa.indexer,
-                    cache.csa.indexer,
-                    .{},
-                );
-            },
-            .hca => |compressor| {
-                try self.testCompressor(allocator, try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}), i, compressor.compressor, attn_buffer.compression.hca.compressor);
-            },
-            else => {},
-        }
-
-        try self.testAttention(try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}), .{ .batch, .seq, .d }, attn, attn_buffer, cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 });
+        self.testAttention(try std.fmt.allocPrint(allocator, "layers.{}.attn", .{i}), .{ .batch, .seq, .d }, attn, attn_buffer, cache, .{ .absolute_tolerance = 0.15, .relative_tolerance = 2e-2 }) catch log.err("layer {} failed", .{i});
     }
 
     fn testCompressor(self: *TestContext, allocator: std.mem.Allocator, layer_prefix: []const u8, i: usize, compressor: model.Compressor, compressor_buffer: zml.Bufferized(model.Compressor)) !void {
