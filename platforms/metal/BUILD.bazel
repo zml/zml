@@ -17,12 +17,17 @@ copy_to_directory(
 
 copy_to_directory(
     name = "metal_toolchain",
-    srcs = ["@metal_toolchain//:toolchain_runtime"],
+    srcs = [
+        "@metal_toolchain//:metal_compile_tools",
+        "@metal_toolchain//:metal_compile_runtime",
+    ],
     out = "metal_toolchain",
     replace_prefixes = {
-        "Metal.xctoolchain/usr/bin": ".",
+        "Metal.xctoolchain/usr/metal/32023": ".",
     },
     include_external_repositories = ["**"],
+    exec_compatible_with = ["@platforms//os:macos"],
+    target_compatible_with = ["@platforms//os:macos"],
 )
 
 cc_library(

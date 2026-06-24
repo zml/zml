@@ -197,6 +197,7 @@ http_aea_archive(
     urls = [
         "https://updates.cdn-apple.com/2025/mobileassets/022-20354/192ADD28-31EE-43C8-972D-E5BED5FB1845/com_apple_MobileAsset_MetalToolchain/637B0E26-E00A-488B-BA3B-CB50A8ECFD74.aar",
     ],
+    build_file = "//platforms/metal:metal_toolchain.BUILD.bazel",
 )
 
 metal = use_extension("//platforms/metal:metal.bzl", "metal_packages")

@@ -15,11 +15,11 @@ pub fn isEnabled() bool {
 
 fn setMetalToolchainEnv(r: anytype) !void {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const bindir = try r.rlocation("zml/platforms/metal/metal_toolchain_bin", &buf) orelse
+    const root = try r.rlocation("zml/platforms/metal/metal_toolchain", &buf) orelse
         return error.ToolchainNotInRunfiles;
-    
+
     var bindir_z: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    _ = c.setenv("METAL_TOOLCHAIN", try stdx.Io.Dir.path.bufJoinZ(&bindir_z, &.{bindir}), 0);
+    _ = c.setenv("METAL_TOOLCHAIN", try stdx.Io.Dir.path.bufJoinZ(&bindir_z, &.{ root, "bin" }), 0);
 }
 
 pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {

@@ -363,3 +363,20 @@ filegroup(
     name = "tracepoint_runtime_metallibs",
     srcs = glob(["Metal.xctoolchain/usr/metal/*/lib/clang/*/lib/darwin/*.metallib"]),
 )
+
+filegroup(
+    name = "metal_compile_tools",
+    srcs = [
+        "Metal.xctoolchain/usr/metal/32023/bin/metal",
+        "Metal.xctoolchain/usr/metal/32023/bin/air-opt",
+        "Metal.xctoolchain/usr/metal/32023/bin/air-as",
+        "Metal.xctoolchain/usr/metal/32023/bin/metallib",
+    ],
+)
+
+filegroup(
+    name = "metal_compile_runtime",
+    srcs = glob([
+        "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/**",
+    ]),
+)

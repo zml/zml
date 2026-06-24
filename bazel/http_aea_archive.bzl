@@ -9,7 +9,7 @@ def _fail_result(step, result):
             result.stderr,
         ))
 
-def _execute(rctx, step, argv, quiet = False):
+def _execute(rctx, step, argv, quiet = True):
     result = rctx.execute([str(arg) for arg in argv], quiet = quiet)
     _fail_result(step, result)
     return result
@@ -97,7 +97,7 @@ def _http_aea_archive_impl(rctx):
     ])
     rctx.delete("AssetData")
 
-    rctx.template("BUILD.bazel", rctx.attr._build_file)
+    rctx.template("BUILD.bazel", rctx.attr.build_file)
 
     return None
 
@@ -112,9 +112,8 @@ http_aea_archive = repository_rule(
         "canonical_id": attr.string(),
         "netrc": attr.string(),
         "auth_patterns": attr.string_dict(),
-        "_build_file": attr.label(
+        "build_file": attr.label(
             allow_single_file = True,
-            default = Label("//bazel:metal_toolchain.BUILD.bazel"),
         ),
         "_sevenzip": attr.label(
             allow_single_file = True,
