@@ -192,10 +192,9 @@ pub const Model = struct {
         store: zml.io.TensorStore.View,
         config: Config,
         gen_options: GenOptions,
-        model_partitions: i64,
     ) !Model {
         return .{
-            .text_model = try .init(allocator, store.withPrefix("model"), model_partitions, config),
+            .text_model = try .init(allocator, store.withPrefix("model"), config),
             .lm_head = .init(
                 store.createTensor("lm_head.weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
                 null,
@@ -299,13 +298,13 @@ pub const TextModel = struct {
     layers: []TransformerLayer,
     norm: RmsNorm,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, model_partitions: i64, config: Config) !TextModel {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !TextModel {
         const num_main_layers = config.numMainLayers();
         const layers = try allocator.alloc(TransformerLayer, @intCast(num_main_layers));
         errdefer allocator.free(layers);
 
         for (layers, 0..) |*layer, i| {
-            layer.* = try .init(store.withPrefix("layers").withLayer(i), i, model_partitions, config);
+            layer.* = try .init(store.withPrefix("layers").withLayer(i), i, config);
         }
 
         return .{
@@ -381,7 +380,7 @@ pub const TransformerLayer = struct {
     ffn: Ffn,
     post_attention_layernorm: RmsNorm,
 
-    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, model_partitions: i64, config: Config) !TransformerLayer {
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, config: Config) !TransformerLayer {
         const is_moe = std.mem.indexOfScalar(u32, config.moe_layers_enum.layers, @intCast(layer_idx)) != null;
 
         const shared_limit: f32 = if (layer_idx < config.swiglu_limits_shared.len)
@@ -400,7 +399,7 @@ pub const TransformerLayer = struct {
 
         return .{
             .input_layernorm = .init(store.withPrefix("input_layernorm"), 1e-5),
-            .attn = try .init(store.withPrefix("self_attn"), layer_idx, model_partitions, config),
+            .attn = try .init(store.withPrefix("self_attn"), layer_idx, config),
             .ffn = ffn,
             .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e-5),
         };
@@ -458,7 +457,6 @@ pub const TransformerLayer = struct {
 pub const Attn = struct {
     layer_idx: usize,
     enable_sliding_window: bool,
-    model_partitions: i64,
 
     q_proj: zml.nn.Linear,
     k_proj: zml.nn.Linear,
@@ -491,7 +489,7 @@ pub const Attn = struct {
         );
     }
 
-    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, model_partitions: i64, config: Config) !Attn {
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, config: Config) !Attn {
         // Layers past the configured count are MTP/speculative blocks and use the SWA shape.
         const kind: AttnType = config.layer_types[layer_idx];
 
@@ -536,7 +534,6 @@ pub const Attn = struct {
             .num_q_heads = num_q_heads,
             .num_kv_heads = num_kv_heads,
             .enable_sliding_window = !(kind == .full_attention),
-            .model_partitions = model_partitions,
             .head_dim = head_dim,
             .num_kv_groups = @divExact(num_q_heads, num_kv_heads),
             .rotary_dim = rotary_dim,
@@ -606,7 +603,9 @@ pub const Attn = struct {
         const input_raw = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
         const input = input_raw.withPartitioning(.{ .d = .replicated });
 
-        const replicate_kv_heads, const repeat_factor = kvHeadsAreReplicated(self.num_kv_heads, self.model_partitions);
+        const model_partitions = zml.module.CompilationContext.current().partitioning.numPartitionsForLogicalAxis(self.q_proj.weight.shape(), .model) catch unreachable;
+
+        const replicate_kv_heads, const repeat_factor = kvHeadsAreReplicated(self.num_kv_heads, model_partitions);
 
         var q, var gate = self.projectQAndGate(input);
         var k, var v = self.projectKV(input);
@@ -1207,6 +1206,7 @@ pub const LoadedModel = struct {
         generation: common.GenerationOptions,
         shardings: common.Shardings,
     ) !LoadedModel {
+        _ = shardings; // autofix
         const parsed_config = try common.parseConfig(Config, allocator, io, repo);
         errdefer parsed_config.deinit();
 
@@ -1215,10 +1215,8 @@ pub const LoadedModel = struct {
             .max_seq_len = parsed_config.value.max_position_embeddings,
         };
 
-        const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
-
         return .{
-            .inner = try .init(allocator, store, parsed_config.value, options, model_partitions),
+            .inner = try .init(allocator, store, parsed_config.value, options),
             .parsed_config = parsed_config,
         };
     }
