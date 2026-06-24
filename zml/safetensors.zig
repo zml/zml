@@ -128,13 +128,17 @@ pub const TensorReader = struct {
         self.file.close(self.io);
     }
 
+    // Limit single reads to 1GB to avoid issues on macOS where pread returns
+    // INT_MAX when the requested size is larger than 2GB
+    const max_single_read_bytes: u64 = 1 << 30;
+
     fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const self: *TensorReader = @fieldParentPtr("interface", r);
         if (self.remaining == 0) {
             return error.EndOfStream;
         }
 
-        const combined_limit = limit.min(.limited64(self.remaining));
+        const combined_limit = limit.min(.limited64(self.remaining)).min(.limited64(max_single_read_bytes));
         const n = try self.file_reader.interface.stream(w, combined_limit);
         self.remaining -= n;
         return n;
@@ -158,7 +162,7 @@ pub const TensorReader = struct {
             return error.EndOfStream;
         }
 
-        const requested_bytes = limit.minInt64(self.remaining);
+        const requested_bytes = @min(limit.minInt64(self.remaining), max_single_read_bytes);
 
         if (self.padding_remaining > 0) {
             _ = try self.file_reader.interface.discard(.limited64(self.padding_remaining));
