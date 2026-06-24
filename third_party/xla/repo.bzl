@@ -4,5 +4,5 @@ def repo():
     git_repository(
         name = "xla",
         remote = "https://github.com/openxla/xla.git",
-        commit = "47f005bb8150a13cb0217c2d7daf108bcdca34cc",
+        commit = "6d7284490a942e5be5a771ded9181f9c602fd692",
     )
