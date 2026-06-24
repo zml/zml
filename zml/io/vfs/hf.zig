@@ -8,7 +8,7 @@ const log = std.log.scoped(.@"zml/io/vfs/hf");
 
 const ParallelRead = struct {
     const Pool = struct {
-        pub const InitOptions = struct {
+        pub const InitOpts = struct {
             chunk_size: usize = 10 * 1024 * 1024,
             num_workers: usize = 16,
             queue_capacity: usize = 64,
@@ -20,7 +20,7 @@ const ParallelRead = struct {
         client: *std.http.Client,
         chunk_size: usize,
 
-        fn init(self: *Pool, allocator: std.mem.Allocator, io: std.Io, client: *std.http.Client, opts: InitOptions) !void {
+        fn init(self: *Pool, allocator: std.mem.Allocator, io: std.Io, client: *std.http.Client, opts: InitOpts) !void {
             stdx.debug.assert(opts.num_workers > 0, "Pool must have at least one worker", .{});
             stdx.debug.assert(opts.chunk_size > 0, "Pool must have a positive download chunk size", .{});
             stdx.debug.assert(opts.queue_capacity > 0, "Pool must have a positive queue capacity", .{});
@@ -234,7 +234,7 @@ const RepoKey = struct {
 
 pub const HF = struct {
     pub const InitOpts = struct {
-        read_pool: ParallelRead.Pool.InitOptions = .{},
+        read_pool: ParallelRead.Pool.InitOpts = .{},
     };
 
     pub const Repo = struct {
