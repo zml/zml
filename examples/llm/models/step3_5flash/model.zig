@@ -14,9 +14,6 @@ pub const Config = struct {
         int: u32,
         ints: []u32,
     }) = null,
-    im_start_token_id: ?u32 = null,
-    im_end_token_id: ?u32 = null,
-
     auto_map: ?AutoMap = null,
 
     rope_scaling: RopeScaling,
@@ -1232,12 +1229,12 @@ pub const LoadedModel = struct {
     }
 
     pub fn specialTokens(self: *const LoadedModel, tokenizer: zml.tokenizer.Tokenizer) !SpecialTokens {
-        const im_start = self.parsed_config.value.im_start_token_id orelse tokenizer.tokenId("<|im_start|>") orelse return error.NoSuchToken;
-        const im_end = self.parsed_config.value.im_end_token_id orelse tokenizer.tokenId("<|im_end|>") orelse return error.NoSuchToken;
-        const eos = if (self.parsed_config.value.eos_token_id) |eos_token_id| switch (eos_token_id.value) {
+        const im_start = tokenizer.tokenId("<|im_start|>") orelse return error.NoSuchToken;
+        const im_end = tokenizer.tokenId("<|im_end|>") orelse return error.NoSuchToken;
+        const eos = tokenizer.tokenId("<|endoftext|>") orelse if (self.parsed_config.value.eos_token_id) |e| switch (e.value) {
             .int => |id| id,
-            .ints => |ids| if (ids.len > 0) ids[0] else im_end,
-        } else tokenizer.tokenId("<|endoftext|>") orelse im_end;
+            .ints => |ids| ids[0],
+        } else im_end;
         return .{
             .im_start_token_id = im_start,
             .im_end_token_id = im_end,
