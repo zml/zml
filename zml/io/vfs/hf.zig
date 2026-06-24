@@ -855,7 +855,7 @@ pub const HF = struct {
     fn downloadWorker(pool: *DownloadPool, io_: std.Io, worker_id: usize) void {
         while (true) {
             const job = pool.job_queue.getOne(io_) catch break;
-            log.warn("HF download worker {d:0>2} processing {s} bytes={d}-{d}, length={d}", .{
+            log.debug("HF download worker {d:0>2} processing {s} bytes={d}-{d}, length={d}", .{
                 worker_id,
                 job.uri,
                 job.file_offset,
