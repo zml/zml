@@ -180,6 +180,9 @@ use_repo(tpu, "libpjrt_tpu")
 neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "aws-neuronx-tools", "libgcc_s1", "libgomp1", "libpjrt_neuron", "libstdcpp6")
 
+metal = use_extension("//platforms/metal:metal.bzl", "metal_packages")
+use_repo(metal, "libpjrt_metal")
+
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
 use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "mosaic_tpu", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg")
 
