@@ -180,15 +180,15 @@ pub fn partitionKvCacheShape(kv_shape: zml.Shape, kv_heads: i64, model_partition
 pub const Options = Model.GenOptions;
 
 pub const Model = struct {
-    pub const GenOptions = struct {
-        sampling_strategy: zml.nn.SamplingStrategy = .{},
-        max_seq_len: u32 = default_config.max_position_embeddings,
-    };
-
     text_model: TextModel,
     lm_head: zml.nn.Linear,
     config: Config,
     gen_options: GenOptions,
+
+    pub const GenOptions = struct {
+        sampling_strategy: zml.nn.SamplingStrategy = .{},
+        max_seq_len: u32,
+    };
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -198,7 +198,7 @@ pub const Model = struct {
         model_partitions: i64,
     ) !Model {
         return .{
-            .text_model = try .init(allocator, store.withPrefix("model"), model_partitions),
+            .text_model = try .init(allocator, store.withPrefix("model"), model_partitions, config),
             .lm_head = .init(
                 store.createTensor("lm_head.weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
                 null,
@@ -302,13 +302,13 @@ pub const TextModel = struct {
     layers: []TransformerLayer,
     norm: RmsNorm,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, model_partitions: i64) !TextModel {
-        const num_main_layers = default_config.numMainLayers();
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, model_partitions: i64, config: Config) !TextModel {
+        const num_main_layers = config.numMainLayers();
         const layers = try allocator.alloc(TransformerLayer, @intCast(num_main_layers));
         errdefer allocator.free(layers);
 
         for (layers, 0..) |*layer, i| {
-            layer.* = try .init(store.withPrefix("layers").withLayer(i), i, model_partitions);
+            layer.* = try .init(store.withPrefix("layers").withLayer(i), i, model_partitions, config);
         }
 
         return .{
@@ -384,17 +384,17 @@ pub const TransformerLayer = struct {
     ffn: Ffn,
     post_attention_layernorm: RmsNorm,
 
-    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, model_partitions: i64) !TransformerLayer {
-        const is_moe = std.mem.indexOfScalar(u32, default_config.moe_layers_enum.layers, @intCast(layer_idx)) != null;
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, model_partitions: i64, config: Config) !TransformerLayer {
+        const is_moe = std.mem.indexOfScalar(u32, config.moe_layers_enum.layers, @intCast(layer_idx)) != null;
 
-        const shared_limit: f32 = if (layer_idx < default_config.swiglu_limits_shared.len)
-            default_config.swiglu_limits_shared[layer_idx]
+        const shared_limit: f32 = if (layer_idx < config.swiglu_limits_shared.len)
+            config.swiglu_limits_shared[layer_idx]
         else
             0.0;
 
         const ffn: Ffn = if (is_moe) .{
             .moe = .{
-                .experts = try .init(store.withPrefix("moe"), layer_idx),
+                .experts = try .init(store.withPrefix("moe"), layer_idx, config),
                 .shared = .init(store.withPrefix("share_expert"), shared_limit),
             },
         } else .{
@@ -403,7 +403,7 @@ pub const TransformerLayer = struct {
 
         return .{
             .input_layernorm = .init(store.withPrefix("input_layernorm"), 1e-5),
-            .attn = try .init(store.withPrefix("self_attn"), layer_idx, model_partitions),
+            .attn = try .init(store.withPrefix("self_attn"), layer_idx, model_partitions, config),
             .ffn = ffn,
             .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), 1e-5),
         };
@@ -458,120 +458,6 @@ pub const TransformerLayer = struct {
     }
 };
 
-/// Temporary deep copy of `config.json` for Step 3.5 Flash. TODO: run config through Model struct and remove this deep copy
-pub const default_config: Config = .{
-    .architectures = &.{"Step3p5ForCausalLM"},
-    .model_type = "step3p5",
-    .auto_map = .{
-        .AutoConfig = "configuration_step3p5.Step3p5Config",
-        .AutoModelForCausalLM = "modeling_step3p5.Step3p5ForCausalLM",
-    },
-    .rope_scaling = .{
-        .rope_type = "llama3",
-        .factor = 2.0,
-        .original_max_position_embeddings = 131072,
-        .low_freq_factor = 1.0,
-        .high_freq_factor = 32.0,
-    },
-    .yarn_only_types = &.{"full_attention"},
-    .hidden_size = 4096,
-    .intermediate_size = 11264,
-    .num_hidden_layers = 48,
-    .max_seq_len = 262144,
-    .vocab_size = 128896,
-    .torch_dtype = "bfloat16",
-    .use_qk_norm = true,
-    .moe_layers_enum = .{ .layers = &.{
-        3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14,
-        15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
-        27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38,
-        39, 40, 41, 42, 43, 44,
-    } },
-    .num_attention_heads = 64,
-    .num_attention_groups = 8,
-    .head_dim = 128,
-    .use_moe = true,
-    .moe_num_experts = 288,
-    .moe_top_k = 8,
-    .moe_intermediate_size = 1280,
-    .share_expert_dim = 1280,
-    .moe_layer_offset = 0,
-    .moe_every_n_layer = 1,
-    .norm_expert_weight = true,
-    .moe_router_activation = "sigmoid",
-    .moe_router_scaling_factor = 3.0,
-    .att_impl_type = "GQA",
-    .tie_word_embeddings = false,
-    .rope_theta = &.{
-        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
-        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
-        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
-        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
-        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
-        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
-        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
-        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
-        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
-        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
-        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
-        5_000_000.0, 10_000.0, 10_000.0, 10_000.0,
-    },
-    .use_head_wise_attn_gate = true,
-    .sliding_window = 512,
-    .use_moe_router_bias = true,
-    .need_fp32_gate = true,
-    .sink = false,
-    .layer_types = &.{
-        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
-        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
-        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
-        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
-        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
-        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
-        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
-        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
-        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
-        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
-        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
-        .full_attention, .sliding_attention, .sliding_attention, .sliding_attention,
-    },
-    .use_rope_layers = &.{},
-    .num_nextn_predict_layers = 3,
-    .partial_rotary_factors = &.{
-        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
-        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
-        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
-        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
-        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
-        0.5, 1.0, 1.0, 1.0, 0.5, 1.0, 1.0, 1.0,
-    },
-    .attention_other_setting = .{
-        .attention_type = "sliding_attention",
-        .num_attention_heads = 96,
-        .num_attention_groups = 8,
-        .head_dim = 128,
-        .true_head_dim = 128,
-    },
-    .swiglu_limits = &.{
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 7.0, 7.0, 0.0, 0.0, 0.0,
-    },
-    .swiglu_limits_shared = &.{
-        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 0.0,  0.0, 0.0, 0.0,
-        0.0, 0.0, 0.0, 0.0, 16.0, 0.0, 0.0, 0.0,
-    },
-    .zero_centered = true,
-    .max_position_embeddings = 262144,
-};
-
 pub const Attn = struct {
     layer_idx: usize,
     enable_sliding_window: bool,
@@ -598,6 +484,8 @@ pub const Attn = struct {
     rotary_dim: i64,
     rotary_emb: TextRotaryEmbedding,
 
+    config: Config,
+
     fn initProj(store: zml.io.TensorStore.View, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
         return .init(
             store.createTensor("weight", .{ .dout, .d }, partitions),
@@ -606,25 +494,25 @@ pub const Attn = struct {
         );
     }
 
-    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, model_partitions: i64) !Attn {
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, model_partitions: i64, config: Config) !Attn {
         // Layers past the configured count are MTP/speculative blocks and use the SWA shape.
-        const kind: AttnType = default_config.layer_types[layer_idx];
+        const kind: AttnType = config.layer_types[layer_idx];
 
         const num_q_heads: i64 = @intCast(if (kind == .full_attention)
-            default_config.num_attention_heads
+            config.num_attention_heads
         else
-            (default_config.attention_other_setting orelse unreachable).num_attention_heads);
+            (config.attention_other_setting orelse unreachable).num_attention_heads);
 
-        const num_kv_heads: i64 = @intCast(default_config.num_attention_groups);
-        const head_dim: i64 = @intCast(default_config.head_dim);
+        const num_kv_heads: i64 = @intCast(config.num_attention_groups);
+        const head_dim: i64 = @intCast(config.head_dim);
 
-        const rotary_idx = @min(layer_idx, default_config.partial_rotary_factors.len - 1);
+        const rotary_idx = @min(layer_idx, config.partial_rotary_factors.len - 1);
         const rotary_dim: i64 = @intFromFloat(
-            default_config.partial_rotary_factors[rotary_idx] * @as(f32, @floatFromInt(default_config.head_dim)),
+            config.partial_rotary_factors[rotary_idx] * @as(f32, @floatFromInt(config.head_dim)),
         );
 
-        const rope_idx = @min(layer_idx, default_config.rope_theta.len - 1);
-        const layer_theta = default_config.rope_theta[rope_idx];
+        const rope_idx = @min(layer_idx, config.rope_theta.len - 1);
+        const layer_theta = config.rope_theta[rope_idx];
 
         // HF patched modeling: a layer gets the scaled rope ONLY if its layer_types[idx] is listed in `yarn_only_types`
         const layer_type_name: []const u8 = switch (kind) {
@@ -632,12 +520,12 @@ pub const Attn = struct {
             .sliding_attention => "sliding_attention",
         };
         const apply_yarn = blk: {
-            for (default_config.yarn_only_types) |t| {
+            for (config.yarn_only_types) |t| {
                 if (std.mem.eql(u8, t, layer_type_name)) break :blk true;
             }
             break :blk false;
         };
-        const rs = default_config.rope_scaling;
+        const rs = config.rope_scaling;
         const rope_scaling: zml.nn.RopeOpts.Scaling = if (apply_yarn) .{ .llama3 = .{
             .factor = rs.factor,
             .high_freq_factor = rs.high_freq_factor,
@@ -667,6 +555,7 @@ pub const Attn = struct {
             // Step 3.5 doesn't expose rms_norm_eps in its config; HF reference uses 1e-5.
             .q_norm = .init(store.withPrefix("q_norm"), 1e-5),
             .k_norm = .init(store.withPrefix("k_norm"), 1e-5),
+            .config = config,
         };
     }
 
@@ -765,7 +654,7 @@ pub const Attn = struct {
         const layer_attention_parameters: zml.attention.attention.Parameters = switch (attention_parameters) {
             .cuda_fa2 => |p| .{ .cuda_fa2 = .{
                 .sliding_window = if (self.enable_sliding_window)
-                    @as(i32, @intCast(default_config.sliding_window))
+                    @as(i32, @intCast(self.config.sliding_window))
                 else
                     p.sliding_window,
             } },
@@ -1186,7 +1075,7 @@ pub const Moe = struct {
     layer_idx: usize,
     limit: ?f32,
 
-    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize) !Moe {
+    pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, config: Config) !Moe {
         const gate_up_proj_tensor = store.createTensor(
             "gate_up_proj.weight",
             .{ .expert, .dout, .d },
@@ -1200,15 +1089,15 @@ pub const Moe = struct {
         );
 
         const limit: ?f32 = blk: {
-            if (layer_idx >= default_config.swiglu_limits.len) break :blk null;
-            const v = default_config.swiglu_limits[layer_idx];
+            if (layer_idx >= config.swiglu_limits.len) break :blk null;
+            const v = config.swiglu_limits[layer_idx];
             break :blk if (v == 0) null else v;
         };
 
         return .{
             .gate_up_proj = gate_up_proj_tensor,
             .down_proj = down_proj_tensor,
-            .router = .init(store, default_config.moe_top_k, default_config.moe_router_scaling_factor),
+            .router = .init(store, config.moe_top_k, config.moe_router_scaling_factor),
             .layer_idx = layer_idx,
             .limit = limit,
         };
