@@ -278,7 +278,6 @@ pub const KernelExe = struct {
     ) !KernelExe {
         return .{
             .composed = try .init(allocator, io, platform, step3p5_model, parameters, seqlen, phase, progress),
-            // .model = step3p5_model,
         };
     }
 

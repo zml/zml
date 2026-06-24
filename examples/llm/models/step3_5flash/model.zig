@@ -140,7 +140,6 @@ pub const FfnType = enum {
     mlp,
 };
 
-/// sharding - when .model mesh size exceeds the number of KV heads, replicate KV heads (by repeating along `.h`) such that each model-parallel shard owns at least one head.
 fn kvHeadsAreReplicated(axis_size: i64, model_partitions: i64) struct { bool, ?u32 } {
     const is_replicated = axis_size > 0 and axis_size < model_partitions and @rem(model_partitions, axis_size) == 0;
     const repeat_factor = if (is_replicated) @as(u32, @intCast(@divExact(model_partitions, axis_size))) else null;
@@ -292,7 +291,6 @@ pub const Sampler = struct {
     }
 };
 
-// The equivalent of a struct called "Step3p5Flash"
 pub const TextModel = struct {
     embed_tokens: zml.nn.TokenEmbedding,
     layers: []TransformerLayer,
@@ -358,9 +356,9 @@ pub const TextModel = struct {
 };
 
 pub const Ffn = union(enum) {
-    /// Layers [0, 1, 2] are a single SwiGLU MLP
-    mlp: Mlp,
+    /// Layers 0, 1, 2 are dense MLP
     /// Layers 3 - 45 are MoE layers, consisting of routed experts + a per-token shared expert. Remaining layers are MTP
+    mlp: Mlp,
     moe: struct {
         experts: Moe,
         shared: Mlp,
@@ -435,7 +433,6 @@ pub const TransformerLayer = struct {
     ) struct { zml.Tensor, KvCache } {
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
 
-        // Attention block.
         const attn_input = self.input_layernorm.forward(x0, .d);
         const attn_delta, const updated_kv_cache = self.attn.forward(
             attn_input,
@@ -446,7 +443,6 @@ pub const TransformerLayer = struct {
         );
         const x1 = x0.add(attn_delta);
 
-        // FFN block
         const ffn_input = self.post_attention_layernorm.forward(x1, .d);
         const ffn_delta = self.ffn.forward(ffn_input);
 
@@ -490,7 +486,7 @@ pub const Attn = struct {
     }
 
     pub fn init(store: zml.io.TensorStore.View, layer_idx: usize, config: Config) !Attn {
-        // Layers past the configured count are MTP/speculative blocks and use the SWA shape.
+        // Layers past the configured count are MTP, which we don't support in this runtime
         const kind: AttnType = config.layer_types[layer_idx];
 
         const num_q_heads: i64 = @intCast(if (kind == .full_attention)
@@ -620,7 +616,7 @@ pub const Attn = struct {
 
         const dtype = q.dtype();
 
-        // Position ids must be absolute and not relative to current chunk. token_index is the cache_position vector; its first element is the absolute start, and positions = arange(S) + start.
+        // Position ids must be absolute and not relative to current chunk
         const position_ids = blk: {
             const base = zml.Tensor.arange(.{ .end = input.dim(.s) }, .i64).withTags(.{.s});
             const start = token_index.slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0).convert(.i64);
@@ -643,10 +639,10 @@ pub const Attn = struct {
 
         q = q.rename(.{ .s = .q }).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
-        // Take first element of cache_positions array to match zml.attention.attention signature
+        // Cache_positions array, and zml.attention.attention expects tensor
         const attn_start = token_index.slice1d(0, .{ .start = 0, .end = 1 });
 
-        // conditionally add sliding window to attention_parameters
+        // Conditionally add sliding window to attention_parameters
         const layer_attention_parameters: zml.attention.attention.Parameters = switch (attention_parameters) {
             .cuda_fa2 => |p| .{ .cuda_fa2 = .{
                 .sliding_window = if (self.enable_sliding_window)
@@ -666,7 +662,6 @@ pub const Attn = struct {
             layer_attention_parameters,
         ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
-        // Head-wise gate is {b, s, h}
         const gate_b = gate.sigmoid().rename(.{ .s = .q }).broad(attn_output.shape());
         const gated_attn = attn_output.mul(gate_b);
 
@@ -833,7 +828,6 @@ pub const TextRotaryEmbedding = struct {
     ) zml.Tensor {
         const x_rot = x.slice1d(.hd, .{ .start = 0, .end = self.rotary_dim });
 
-        // Insert head axis so cos/sin broadcast over .h.
         const cos_b = cos.insertAxes(.hd, .{.h}).broad(x_rot.shape());
         const sin_b = sin.insertAxes(.hd, .{.h}).broad(x_rot.shape());
 
@@ -897,7 +891,7 @@ pub const KvCache = struct {
         const k_shape = kv.k.shape().drop(.layer);
         var layer = kv.layer_index;
 
-        // KV cache uses .k instead of .s, so we change here so caller doesn't need to be aware of this naming scheme.
+        // KV cache uses .k instead of .s. Rename to keep the KV cache naming scheme internal
         const k_renamed = if (new_k.shape().hasTag(.s) != null) new_k.rename(.{ .s = .k }) else new_k;
         const v_renamed = if (new_v.shape().hasTag(.s) != null) new_v.rename(.{ .s = .k }) else new_v;
         const k_in = k_renamed.convert(kv.k.dtype()).transpose(k_shape);
@@ -1008,7 +1002,7 @@ pub const RmsNorm = struct {
 };
 
 pub const Router = struct {
-    gate: zml.nn.Linear, // no bias inside the Linear; router_bias is applied post-sigmoid
+    gate: zml.nn.Linear,
     router_bias: zml.Tensor,
     num_experts_per_tok: u32,
     routed_scaling_factor: f32,
@@ -1105,6 +1099,7 @@ pub const Moe = struct {
     }
 
     pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
+        // There is a SwiGLU limit applied to layers 43 and 44, which is not supported by the Triton kernel
         if (self.layer_idx >= 43 and self.layer_idx <= 44) {
             return self.forwardLoop(x);
         }
@@ -1113,7 +1108,7 @@ pub const Moe = struct {
 
     fn forwardTriton(self: Moe, x: zml.Tensor) zml.Tensor {
         const input = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
-        // collect topk weights and indices (renormalized, unscaled)
+
         const routing_scores, const topk_ids = self.router.forward(input);
         const scaled = routing_scores.scale(self.router.routed_scaling_factor);
 
@@ -1127,7 +1122,6 @@ pub const Moe = struct {
         const moe_metadata = zml.moe.Metadata.init(.{ .triton = .{} });
         const moe_parameters = zml.moe.Parameters.init(.{ .triton = .{ .num_experts_per_tok = self.router.num_experts_per_tok, .activation = .silu } });
 
-        // NOTE: swiglu limit not considered. Must edit
         const moe_output = zml.moe.forwardMoe(
             input,
             topk_ids_tensor,
@@ -1142,7 +1136,6 @@ pub const Moe = struct {
             moe_parameters,
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
-        // zml.moe.forwardMoe returns shape {.b, .s, .d}
         return moe_output;
     }
 
@@ -1204,9 +1197,7 @@ pub const LoadedModel = struct {
         repo: std.Io.Dir,
         store: zml.io.TensorStore.View,
         generation: common.GenerationOptions,
-        shardings: common.Shardings,
     ) !LoadedModel {
-        _ = shardings; // autofix
         const parsed_config = try common.parseConfig(Config, allocator, io, repo);
         errdefer parsed_config.deinit();
 
