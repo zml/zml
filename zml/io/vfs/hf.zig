@@ -20,16 +20,13 @@ const ParallelRead = struct {
         client: *std.http.Client,
         chunk_size: usize,
 
-        fn init(allocator: std.mem.Allocator, io: std.Io, client: *std.http.Client, opts: InitOptions) !*Pool {
+        fn init(self: *Pool, allocator: std.mem.Allocator, io: std.Io, client: *std.http.Client, opts: InitOptions) !void {
             stdx.debug.assert(opts.num_workers > 0, "Pool must have at least one worker", .{});
             stdx.debug.assert(opts.chunk_size > 0, "Pool must have a positive download chunk size", .{});
             stdx.debug.assert(opts.queue_capacity > 0, "Pool must have a positive queue capacity", .{});
 
             const queue_buf = try allocator.alloc(Job, opts.queue_capacity);
             errdefer allocator.free(queue_buf);
-
-            const self = try allocator.create(Pool);
-            errdefer allocator.destroy(self);
 
             self.* = .{
                 .client = client,
@@ -42,8 +39,6 @@ const ParallelRead = struct {
             for (0..opts.num_workers) |_| {
                 try self.group.concurrent(io, worker, .{ self, io });
             }
-
-            return self;
         }
 
         fn deinit(self: *Pool, allocator: std.mem.Allocator, io: std.Io) void {
@@ -51,7 +46,6 @@ const ParallelRead = struct {
             self.group.cancel(io);
 
             allocator.free(self.queue_buf);
-            allocator.destroy(self);
         }
 
         fn worker(pool: *Pool, io: std.Io) std.Io.Cancelable!void {
@@ -75,7 +69,7 @@ const ParallelRead = struct {
             if (previous == 1) io.futexWake(u32, &batch.pending.raw, 1);
         }
 
-        fn wait(batch: *Batch, io: std.Io) void {
+        fn waitUncancelable(batch: *Batch, io: std.Io) void {
             while (true) {
                 const pending = batch.pending.load(.acquire);
                 if (pending == 0) return;
@@ -287,6 +281,12 @@ pub const HF = struct {
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8, opts: InitOpts) !HF {
+        const read_pool = try allocator.create(ParallelRead.Pool);
+        errdefer allocator.destroy(read_pool);
+
+        try read_pool.init(allocator, inner, http_client, opts.read_pool);
+        errdefer read_pool.deinit(allocator, inner);
+
         var self: HF = .{
             .allocator = allocator,
             .base = .init(inner),
@@ -298,7 +298,7 @@ pub const HF = struct {
             } else blk: {
                 break :blk .default;
             },
-            .read_pool = try .init(allocator, inner, http_client, opts.read_pool),
+            .read_pool = read_pool,
         };
         errdefer switch (self.authorization) {
             .default, .omit => {},
@@ -335,6 +335,7 @@ pub const HF = struct {
 
     pub fn deinit(self: *HF) void {
         self.read_pool.deinit(self.allocator, self.base.inner);
+        self.allocator.destroy(self.read_pool);
 
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
@@ -921,13 +922,9 @@ pub const HF = struct {
             job.result = &job.err;
         }
 
-        const queued = try self.read_pool.job_queue.put(self.base.inner, jobs, jobs.len);
-        for (jobs[queued..]) |*job| {
-            job.err = error.Canceled;
-            batch.finishOne(self.base.inner);
-        }
+        try self.read_pool.job_queue.putAll(self.base.inner, jobs);
+        batch.waitUncancelable(self.base.inner);
 
-        batch.wait(self.base.inner);
         for (jobs) |job| {
             if (job.err) |err| return err;
         }
