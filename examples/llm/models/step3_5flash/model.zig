@@ -243,7 +243,7 @@ pub const LoadedModel = struct {
                 @as(f64, @floatFromInt(total_bytes)) /
                     (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s),
             );
-            std.log.scoped(.step3p5flash).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+            std.log.scoped(.step3_5flash).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         }
 
         return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
@@ -271,7 +271,7 @@ pub const LoadedModel = struct {
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
-        const params = inference.CompilationParameters.init(&self.inner, self.parsed_config.value, @intCast(seqlen), backend, .triton, shardings);
+        const params = inference.CompilationParameters.init(&self.inner, self.parsed_config.value, @intCast(seqlen), backend, shardings);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
 };
