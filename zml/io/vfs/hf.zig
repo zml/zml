@@ -51,8 +51,12 @@ const ParallelRead = struct {
         fn worker(pool: *Pool, io: std.Io) std.Io.Cancelable!void {
             while (true) {
                 const job = pool.job_queue.getOne(io) catch break;
-                job.result.* = job.perform(pool.client);
-                job.batch.finishOne(io);
+
+                if (!job.batch.failed()) {
+                    if (job.perform(pool.client)) |err| job.batch.fail(err);
+                }
+
+                job.batch.completeOne(io);
             }
         }
     };
@@ -62,8 +66,22 @@ const ParallelRead = struct {
         url: []const u8,
         authorization: std.http.Client.Request.Headers.Value,
         pending: std.atomic.Value(u32),
+        err: std.atomic.Value(u16) = .init(0),
 
-        fn finishOne(batch: *Batch, io: std.Io) void {
+        fn failed(batch: *Batch) bool {
+            return batch.err.load(.acquire) != 0;
+        }
+
+        fn fail(batch: *Batch, err: anyerror) void {
+            _ = batch.err.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
+        }
+
+        fn firstError(batch: *Batch) ?anyerror {
+            const err = batch.err.load(.acquire);
+            return if (err == 0) null else @errorFromInt(err);
+        }
+
+        fn completeOne(batch: *Batch, io: std.Io) void {
             const previous = batch.pending.fetchSub(1, .release);
             std.debug.assert(previous > 0);
             if (previous == 1) io.futexWake(u32, &batch.pending.raw, 1);
@@ -84,8 +102,6 @@ const ParallelRead = struct {
         chunk_offset: usize,
         chunk_len: usize,
         batch: *Batch,
-        err: ?anyerror = null,
-        result: *?anyerror,
 
         fn perform(job: Job, client: *std.http.Client) ?anyerror {
             var range_buf: [64]u8 = undefined;
@@ -917,17 +933,12 @@ pub const HF = struct {
                 .chunk_offset = chunk_offset,
                 .chunk_len = @min(self.read_pool.chunk_size, read_size - chunk_offset),
                 .batch = &batch,
-                .result = undefined,
             };
-            job.result = &job.err;
         }
 
         try self.read_pool.job_queue.putAll(self.base.inner, jobs);
         batch.waitUncancelable(self.base.inner);
-
-        for (jobs) |job| {
-            if (job.err) |err| return err;
-        }
+        if (batch.firstError()) |err| return err;
 
         return read_size;
     }
