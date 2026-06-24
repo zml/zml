@@ -294,7 +294,8 @@ pub const TensorRegistry = struct {
         if (std.mem.endsWith(u8, path, ".safetensors.index.json") or
             std.mem.endsWith(u8, path, ".safetensors"))
         {
-            return try fetchRegistry(allocator, io, repo, try repo.openFile(io, path, .{ .mode = .read_only }));
+            const filename = std.fs.path.basename(path);
+            return try fetchRegistry(allocator, io, repo, try repo.openFile(io, filename, .{ .mode = .read_only }));
         } else {
             const entrypoint = try resolveModelEntrypoint(io, repo);
             return try fetchRegistry(allocator, io, repo, entrypoint);

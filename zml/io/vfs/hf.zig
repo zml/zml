@@ -1,10 +1,14 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
+const xet = @import("hf/xet.zig");
 
 const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
+
+const default_xet_workers: usize = 4;
+const default_xet_queue_capacity_multiplier: usize = 4;
 
 pub const API = struct {
     const TREE_URL_TEMPLATE = "https://huggingface.co/api/models/{[repo]s}/{[model]s}/tree/{[rev]s}/{[path]s}?expand=false&recursive=true&limit=1000";
@@ -83,6 +87,9 @@ pub const HF = struct {
         uri: []const u8,
         pos: u64,
         size: u64,
+        /// Set to the file's `X-Xet-Hash` when the resolve URL exposes one;
+        /// `null` for plain LFS files. Read in `performRead` to dispatch.
+        xet_file_id: ?[]const u8 = null,
 
         pub fn init(allocator: std.mem.Allocator, handle_type: Type, uri: []const u8, size: u64) !Handle {
             return .{
@@ -95,6 +102,7 @@ pub const HF = struct {
 
         pub fn deinit(self: *Handle, allocator: std.mem.Allocator) void {
             allocator.free(self.uri);
+            if (self.xet_file_id) |fid| allocator.free(fid);
         }
     };
 
@@ -102,24 +110,53 @@ pub const HF = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     authorization: std.http.Client.Request.Headers.Value,
+    /// Raw HF token (no "Bearer " prefix). Empty when unauthenticated.
+    /// Borrowed by the XET probe + read paths.
+    hf_token_raw: []const u8,
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
     trees: std.StringHashMapUnmanaged(std.ArrayList(TreeNode)) = .{},
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
+    cas_cache: xet.CasAuthCache = .{},
+    fetch_pool: *xet.FetchPool,
+
+    const XetOptions = struct {
+        workers: usize = default_xet_workers,
+        queue_capacity: ?usize = null,
+
+        fn resolvedQueueCapacity(self: XetOptions) usize {
+            return self.queue_capacity orelse self.workers * default_xet_queue_capacity_multiplier;
+        }
+    };
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8) !HF {
+        return initWithXetOptions(allocator, inner, http_client, hf_token, .{});
+    }
+
+    fn initWithXetOptions(
+        allocator: std.mem.Allocator,
+        inner: std.Io,
+        http_client: *std.http.Client,
+        hf_token: ?[]const u8,
+        xet_opts: XetOptions,
+    ) !HF {
+        const raw = if (hf_token) |t| try allocator.dupe(u8, std.mem.trim(u8, t, " \t\n\r")) else try allocator.dupe(u8, "");
+        errdefer allocator.free(raw);
+        const pool = try xet.FetchPool.init(allocator, inner, http_client, .{
+            .workers = xet_opts.workers,
+            .queue_capacity = xet_opts.resolvedQueueCapacity(),
+        });
+        errdefer pool.deinit(inner);
         return .{
             .allocator = allocator,
             .base = .init(inner),
             .client = http_client,
-            .authorization = if (hf_token) |token| blk: {
-                break :blk .{
-                    .override = try std.fmt.allocPrint(allocator, "Bearer {s}", .{std.mem.trim(u8, token, " \t\n\r")}),
-                };
-            } else blk: {
-                break :blk .default;
-            },
+            .authorization = if (raw.len > 0) blk: {
+                break :blk .{ .override = try std.fmt.allocPrint(allocator, "Bearer {s}", .{raw}) };
+            } else .default,
+            .hf_token_raw = raw,
+            .fetch_pool = pool,
         };
     }
 
@@ -145,10 +182,31 @@ pub const HF = struct {
 
         if (hf_token == null) log.warn("No Hugging Face authentication token found in environment or home config; proceeding without authentication.", .{});
 
-        return init(allocator, inner, http_client, hf_token);
+        return initWithXetOptions(allocator, inner, http_client, hf_token, xetOptionsFromEnv(environ_map));
+    }
+
+    fn xetOptionsFromEnv(environ_map: *std.process.Environ.Map) XetOptions {
+        var opts: XetOptions = .{};
+        opts.workers = parsePositiveEnv(usize, environ_map, "XET_INTRA_TENSOR_WORKERS") orelse opts.workers;
+        opts.queue_capacity = parsePositiveEnv(usize, environ_map, "XET_QUEUE_CAPACITY") orelse opts.queue_capacity;
+        return opts;
+    }
+
+    fn parsePositiveEnv(comptime T: type, environ_map: *std.process.Environ.Map, name: []const u8) ?T {
+        const raw = environ_map.get(name) orelse return null;
+        const value = std.fmt.parseUnsigned(T, raw, 10) catch |err| {
+            log.warn("Ignoring invalid {s}={s}: {s}", .{ name, raw, @errorName(err) });
+            return null;
+        };
+        if (value == 0) {
+            log.warn("Ignoring invalid {s}=0; value must be positive", .{name});
+            return null;
+        }
+        return value;
     }
 
     pub fn deinit(self: *HF) void {
+        self.fetch_pool.deinit(self.base.inner);
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -177,6 +235,8 @@ pub const HF = struct {
             .default, .omit => {},
             .override => |t| self.allocator.free(t),
         }
+        self.allocator.free(self.hf_token_raw);
+        self.cas_cache.deinit(self.allocator);
     }
 
     pub fn io(self: *HF) std.Io {
@@ -457,7 +517,7 @@ pub const HF = struct {
     }
 
     fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
@@ -480,7 +540,7 @@ pub const HF = struct {
     }
 
     fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.OpenError.SystemResources;
@@ -496,7 +556,7 @@ pub const HF = struct {
     }
 
     fn dirStat(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.Dir.Stat {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getDirHandle(dir);
 
         return .{
@@ -513,7 +573,7 @@ pub const HF = struct {
     }
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.StatFileError.SystemResources;
@@ -539,7 +599,7 @@ pub const HF = struct {
     }
 
     fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.AccessError.SystemResources;
@@ -554,7 +614,7 @@ pub const HF = struct {
     }
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
@@ -566,18 +626,29 @@ pub const HF = struct {
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, full_path, size) catch return std.Io.File.OpenError.Unexpected;
 
+        // XET probe: if the resolve URL exposes `X-Xet-Hash`, stash it on
+        // the handle. Any failure (no token, plain-LFS file, network) keeps
+        // the handle on the LFS path.
+        if (self.hf_token_raw.len > 0) {
+            const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
+            if (xet.fetchFileId(self.allocator, self.client, xet_repo, self.hf_token_raw)) |fid| {
+                handle.xet_file_id = fid;
+                log.debug("XET-backed file: {s}", .{full_path});
+            } else |_| {}
+        }
+
         return .{ .handle = @intCast(idx), .flags = .{ .nonblocking = false } };
     }
 
     fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         for (dirs) |d| {
             self.closeHandle(@intCast(d.handle)) catch {};
         }
     }
 
     fn dirRead(userdata: ?*anyopaque, reader: *std.Io.Dir.Reader, entries: []std.Io.Dir.Entry) std.Io.Dir.Reader.Error!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         if (reader.state == .finished) return 0;
 
@@ -622,20 +693,20 @@ pub const HF = struct {
     }
 
     fn dirRealPath(userdata: ?*anyopaque, dir: std.Io.Dir, out_buffer: []u8) std.Io.Dir.RealPathError!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getDirHandle(dir);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.Dir.RealPathError.SystemResources;
         return path.len;
     }
 
     fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8, out_buffer: []u8) std.Io.Dir.RealPathFileError!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const real_path = self.resolvePath(dir, path_name, out_buffer) catch return std.Io.Dir.RealPathFileError.NameTooLong;
         return real_path.len;
     }
 
     fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
 
         return .{
@@ -652,19 +723,19 @@ pub const HF = struct {
     }
 
     fn fileLength(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.LengthError!u64 {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         return self.getFileHandle(file).size;
     }
 
     fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         for (files) |file| {
             self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
     }
 
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         return self.performRead(handle, data, offset) catch |err| {
             log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
@@ -673,7 +744,7 @@ pub const HF = struct {
     }
 
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
 
         handle.pos = if (relative_offset >= 0)
@@ -683,13 +754,13 @@ pub const HF = struct {
     }
 
     fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         handle.pos = absolute_offset;
     }
 
     fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.Io.File.RealPathError!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.File.RealPathError.SystemResources;
         return path.len;
@@ -698,11 +769,37 @@ pub const HF = struct {
     fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
         if (offset >= handle.size) return 0;
 
+        const start = std.Io.Timestamp.now(self.base.inner, .awake);
+        defer {
+            const duration = start.untilNow(self.base.inner, .awake);
+            log.warn("Completed read for file {s} at offset {d} with length {d} in {f}", .{ handle.uri, offset, data[0].len, duration });
+        }
+
+        if (handle.xet_file_id) |fid| {
+            const repo: Repo = try .parse(handle.uri);
+            const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
+            const remaining = handle.size - offset;
+            const take: usize = @intCast(@min(remaining, data[0].len));
+            if (take == 0) return 0;
+            log.debug("Performing XET read for {s} at offset {d} (take {d} bytes)", .{ handle.uri, offset, take });
+            try xet.fetchRange(
+                self.base.inner,
+                self.fetch_pool,
+                &self.cas_cache,
+                self.hf_token_raw,
+                xet_repo,
+                fid,
+                offset,
+                data[0][0..take],
+            );
+            return take;
+        }
+
         var range_buf: [64]u8 = undefined;
         const range_header = blk: {
             var total_bytes: u64 = 0;
             for (data) |buf| {
-                total_bytes += @as(u64, buf.len);
+                total_bytes += buf.len;
             }
             const remaining = handle.size - offset;
             const take = @min(remaining, total_bytes);
