@@ -180,6 +180,25 @@ use_repo(tpu, "libpjrt_tpu")
 neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "aws-neuronx-tools", "libgcc_s1", "libgomp1", "libpjrt_neuron", "libstdcpp6")
 
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+    name = "sevenzip_macos",
+    build_file_content = """exports_files(["7zz"])""",
+    sha256 = "26aa75bc262bb10bf0805617b95569c3035c2c590a99f7db55c7e9607b2685e0",
+    urls = ["https://www.7-zip.org/a/7z2501-mac.tar.xz"],
+)
+
+http_aea_archive = use_repo_rule("//bazel:http_aea_archive.bzl", "http_aea_archive")
+http_aea_archive(
+    name = "metal_toolchain",
+    archive_decryption_key = "v7VbaT39JmQPp5p4N3HoVPAKcZ5vyhY+nnjMRD79z5E=",
+    canonical_id = "com.apple.MobileAsset.MetalToolchain-17B54",
+    sha256 = "84f1cec3984878294777349e794f7bff0407e501a728bd600dc8605fa36abf6f",
+    urls = [
+        "https://updates.cdn-apple.com/2025/mobileassets/022-20354/192ADD28-31EE-43C8-972D-E5BED5FB1845/com_apple_MobileAsset_MetalToolchain/637B0E26-E00A-488B-BA3B-CB50A8ECFD74.aar",
+    ],
+)
+
 metal = use_extension("//platforms/metal:metal.bzl", "metal_packages")
 use_repo(metal, "libpjrt_metal")
 

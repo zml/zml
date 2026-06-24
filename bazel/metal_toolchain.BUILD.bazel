@@ -1,0 +1,365 @@
+package(default_visibility = ["//visibility:public"])
+
+# Static BUILD file for the 17B54 MetalToolchain asset.
+
+filegroup(
+    name = "toolchain_runtime",
+    srcs = glob(["Metal.xctoolchain/**"]),
+)
+
+exports_files([
+    "Metal.xctoolchain/ToolchainInfo.plist",
+    "Metal.xctoolchain/usr/bin/air-ar",
+    "Metal.xctoolchain/usr/bin/air-arch",
+    "Metal.xctoolchain/usr/bin/air-as",
+    "Metal.xctoolchain/usr/bin/air-binary-perf",
+    "Metal.xctoolchain/usr/bin/air-config",
+    "Metal.xctoolchain/usr/bin/air-dsymutil",
+    "Metal.xctoolchain/usr/bin/air-libtool",
+    "Metal.xctoolchain/usr/bin/air-link",
+    "Metal.xctoolchain/usr/bin/air-lipo",
+    "Metal.xctoolchain/usr/bin/air-lld",
+    "Metal.xctoolchain/usr/bin/air-nm",
+    "Metal.xctoolchain/usr/bin/air-nt",
+    "Metal.xctoolchain/usr/bin/air-objcopy",
+    "Metal.xctoolchain/usr/bin/air-objdump",
+    "Metal.xctoolchain/usr/bin/air-opt",
+    "Metal.xctoolchain/usr/bin/air-pack",
+    "Metal.xctoolchain/usr/bin/air-package",
+    "Metal.xctoolchain/usr/bin/air-ranlib",
+    "Metal.xctoolchain/usr/bin/air-readobj",
+    "Metal.xctoolchain/usr/bin/air-size",
+    "Metal.xctoolchain/usr/bin/air-strip",
+    "Metal.xctoolchain/usr/bin/air-tt",
+    "Metal.xctoolchain/usr/bin/air-vtool",
+    "Metal.xctoolchain/usr/bin/amdgpu-nt",
+    "Metal.xctoolchain/usr/bin/applegpu-nt",
+    "Metal.xctoolchain/usr/bin/intelgpu-nt",
+    "Metal.xctoolchain/usr/bin/metal",
+    "Metal.xctoolchain/usr/bin/metal-ar",
+    "Metal.xctoolchain/usr/bin/metal-arch",
+    "Metal.xctoolchain/usr/bin/metal-as",
+    "Metal.xctoolchain/usr/bin/metal-binary-perf",
+    "Metal.xctoolchain/usr/bin/metal-config",
+    "Metal.xctoolchain/usr/bin/metal-dsymutil",
+    "Metal.xctoolchain/usr/bin/metal-libtool",
+    "Metal.xctoolchain/usr/bin/metal-link",
+    "Metal.xctoolchain/usr/bin/metal-lipo",
+    "Metal.xctoolchain/usr/bin/metal-lld",
+    "Metal.xctoolchain/usr/bin/metal-nm",
+    "Metal.xctoolchain/usr/bin/metal-nt",
+    "Metal.xctoolchain/usr/bin/metal-objcopy",
+    "Metal.xctoolchain/usr/bin/metal-objdump",
+    "Metal.xctoolchain/usr/bin/metal-opt",
+    "Metal.xctoolchain/usr/bin/metal-pack",
+    "Metal.xctoolchain/usr/bin/metal-package",
+    "Metal.xctoolchain/usr/bin/metal-ranlib",
+    "Metal.xctoolchain/usr/bin/metal-readobj",
+    "Metal.xctoolchain/usr/bin/metal-size",
+    "Metal.xctoolchain/usr/bin/metal-source",
+    "Metal.xctoolchain/usr/bin/metal-strip",
+    "Metal.xctoolchain/usr/bin/metal-tt",
+    "Metal.xctoolchain/usr/bin/metal-vtool",
+    "Metal.xctoolchain/usr/bin/metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/AMDShared.bundle/Contents/PlugIns/libAMDIL902.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/AMDShared.bundle/Contents/PlugIns/libGCNASM.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/AMDShared.bundle/Contents/PlugIns/libSC.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/amd_13/AMDShared.bundle/Contents/PlugIns/libAMDIL902.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/amd_13/AMDShared.bundle/Contents/PlugIns/libGCNASM.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/amd_13/AMDShared.bundle/Contents/PlugIns/libSC.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/amd_13/libAMDNTPlugin.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_ios.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_iosmac.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_iossim.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_osx.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_tvos.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_tvossim.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_watchos.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_watchossim.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_xros.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/clang/32023.830/lib/darwin/libtracepoint_rt_xrossim.metallib",
+    "Metal.xctoolchain/usr/metal/32023/lib/libAMDNTPlugin.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/libMTLIGCCompilerPlugin.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/libMTLPasses.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/libapplegpu-nt.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/libapplegpu23-nt.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/libapplegpu24-nt.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/libapplegpuG9G12-nt.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/libigc.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/metalfe/libmetal.dylib",
+    "Metal.xctoolchain/usr/metal/32023/lib/runtime.gpuencode.split",
+    "Metal.xctoolchain/usr/metal/32023/lib/runtime.igc64.split",
+    "Metal.xctoolchain/usr/metal/32023/lib/wrapper-nt.dylib",
+])
+
+alias(name = "toolchain_info", actual = "Metal.xctoolchain/ToolchainInfo.plist")
+
+alias(
+    name = "air-ar",
+    actual = "Metal.xctoolchain/usr/bin/air-ar",
+)
+
+alias(
+    name = "air-arch",
+    actual = "Metal.xctoolchain/usr/bin/air-arch",
+)
+
+alias(
+    name = "air-as",
+    actual = "Metal.xctoolchain/usr/bin/air-as",
+)
+
+alias(
+    name = "air-binary-perf",
+    actual = "Metal.xctoolchain/usr/bin/air-binary-perf",
+)
+
+alias(
+    name = "air-config",
+    actual = "Metal.xctoolchain/usr/bin/air-config",
+)
+
+alias(
+    name = "air-dsymutil",
+    actual = "Metal.xctoolchain/usr/bin/air-dsymutil",
+)
+
+alias(
+    name = "air-libtool",
+    actual = "Metal.xctoolchain/usr/bin/air-libtool",
+)
+
+alias(
+    name = "air-link",
+    actual = "Metal.xctoolchain/usr/bin/air-link",
+)
+
+alias(
+    name = "air-lipo",
+    actual = "Metal.xctoolchain/usr/bin/air-lipo",
+)
+
+alias(
+    name = "air-lld",
+    actual = "Metal.xctoolchain/usr/bin/air-lld",
+)
+
+alias(
+    name = "air-nm",
+    actual = "Metal.xctoolchain/usr/bin/air-nm",
+)
+
+alias(
+    name = "air-nt",
+    actual = "Metal.xctoolchain/usr/bin/air-nt",
+)
+
+alias(
+    name = "air-objcopy",
+    actual = "Metal.xctoolchain/usr/bin/air-objcopy",
+)
+
+alias(
+    name = "air-objdump",
+    actual = "Metal.xctoolchain/usr/bin/air-objdump",
+)
+
+alias(
+    name = "air-opt",
+    actual = "Metal.xctoolchain/usr/bin/air-opt",
+)
+
+alias(
+    name = "air-pack",
+    actual = "Metal.xctoolchain/usr/bin/air-pack",
+)
+
+alias(
+    name = "air-package",
+    actual = "Metal.xctoolchain/usr/bin/air-package",
+)
+
+alias(
+    name = "air-ranlib",
+    actual = "Metal.xctoolchain/usr/bin/air-ranlib",
+)
+
+alias(
+    name = "air-readobj",
+    actual = "Metal.xctoolchain/usr/bin/air-readobj",
+)
+
+alias(
+    name = "air-size",
+    actual = "Metal.xctoolchain/usr/bin/air-size",
+)
+
+alias(
+    name = "air-strip",
+    actual = "Metal.xctoolchain/usr/bin/air-strip",
+)
+
+alias(
+    name = "air-tt",
+    actual = "Metal.xctoolchain/usr/bin/air-tt",
+)
+
+alias(
+    name = "air-vtool",
+    actual = "Metal.xctoolchain/usr/bin/air-vtool",
+)
+
+alias(
+    name = "amdgpu-nt",
+    actual = "Metal.xctoolchain/usr/bin/amdgpu-nt",
+)
+
+alias(
+    name = "applegpu-nt",
+    actual = "Metal.xctoolchain/usr/bin/applegpu-nt",
+)
+
+alias(
+    name = "intelgpu-nt",
+    actual = "Metal.xctoolchain/usr/bin/intelgpu-nt",
+)
+
+alias(
+    name = "metal",
+    actual = "Metal.xctoolchain/usr/bin/metal",
+)
+
+alias(
+    name = "metal-ar",
+    actual = "Metal.xctoolchain/usr/bin/metal-ar",
+)
+
+alias(
+    name = "metal-arch",
+    actual = "Metal.xctoolchain/usr/bin/metal-arch",
+)
+
+alias(
+    name = "metal-as",
+    actual = "Metal.xctoolchain/usr/bin/metal-as",
+)
+
+alias(
+    name = "metal-binary-perf",
+    actual = "Metal.xctoolchain/usr/bin/metal-binary-perf",
+)
+
+alias(
+    name = "metal-config",
+    actual = "Metal.xctoolchain/usr/bin/metal-config",
+)
+
+alias(
+    name = "metal-dsymutil",
+    actual = "Metal.xctoolchain/usr/bin/metal-dsymutil",
+)
+
+alias(
+    name = "metal-libtool",
+    actual = "Metal.xctoolchain/usr/bin/metal-libtool",
+)
+
+alias(
+    name = "metal-link",
+    actual = "Metal.xctoolchain/usr/bin/metal-link",
+)
+
+alias(
+    name = "metal-lipo",
+    actual = "Metal.xctoolchain/usr/bin/metal-lipo",
+)
+
+alias(
+    name = "metal-lld",
+    actual = "Metal.xctoolchain/usr/bin/metal-lld",
+)
+
+alias(
+    name = "metal-nm",
+    actual = "Metal.xctoolchain/usr/bin/metal-nm",
+)
+
+alias(
+    name = "metal-nt",
+    actual = "Metal.xctoolchain/usr/bin/metal-nt",
+)
+
+alias(
+    name = "metal-objcopy",
+    actual = "Metal.xctoolchain/usr/bin/metal-objcopy",
+)
+
+alias(
+    name = "metal-objdump",
+    actual = "Metal.xctoolchain/usr/bin/metal-objdump",
+)
+
+alias(
+    name = "metal-opt",
+    actual = "Metal.xctoolchain/usr/bin/metal-opt",
+)
+
+alias(
+    name = "metal-pack",
+    actual = "Metal.xctoolchain/usr/bin/metal-pack",
+)
+
+alias(
+    name = "metal-package",
+    actual = "Metal.xctoolchain/usr/bin/metal-package",
+)
+
+alias(
+    name = "metal-ranlib",
+    actual = "Metal.xctoolchain/usr/bin/metal-ranlib",
+)
+
+alias(
+    name = "metal-readobj",
+    actual = "Metal.xctoolchain/usr/bin/metal-readobj",
+)
+
+alias(
+    name = "metal-size",
+    actual = "Metal.xctoolchain/usr/bin/metal-size",
+)
+
+alias(
+    name = "metal-source",
+    actual = "Metal.xctoolchain/usr/bin/metal-source",
+)
+
+alias(
+    name = "metal-strip",
+    actual = "Metal.xctoolchain/usr/bin/metal-strip",
+)
+
+alias(
+    name = "metal-tt",
+    actual = "Metal.xctoolchain/usr/bin/metal-tt",
+)
+
+alias(
+    name = "metal-vtool",
+    actual = "Metal.xctoolchain/usr/bin/metal-vtool",
+)
+
+alias(
+    name = "metallib",
+    actual = "Metal.xctoolchain/usr/bin/metallib",
+)
+
+filegroup(
+    name = "metal_headers",
+    srcs = glob(["Metal.xctoolchain/usr/metal/*/lib/clang/*/include/**/*.h"]),
+)
+
+filegroup(
+    name = "tracepoint_runtime_metallibs",
+    srcs = glob(["Metal.xctoolchain/usr/metal/*/lib/clang/*/lib/darwin/*.metallib"]),
+)

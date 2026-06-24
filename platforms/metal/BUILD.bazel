@@ -15,9 +15,22 @@ copy_to_directory(
     include_external_repositories = ["**"],
 )
 
+copy_to_directory(
+    name = "metal_toolchain",
+    srcs = ["@metal_toolchain//:toolchain_runtime"],
+    out = "metal_toolchain",
+    replace_prefixes = {
+        "Metal.xctoolchain/usr/bin": ".",
+    },
+    include_external_repositories = ["**"],
+)
+
 cc_library(
     name = "libpjrt_metal",
-    data = [":sandbox"],
+    data = [
+        ":sandbox",
+        ":metal_toolchain",
+    ],
     defines = ["ZML_RUNTIME_METAL"],
     tags = ["manual"],
 )
