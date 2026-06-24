@@ -41,6 +41,7 @@ pub const LoadedModel = union(ModelType) {
         generation: GenerationOptions,
         shardings: Shardings,
     ) !LoadedModel {
+        _ = shardings; // autofix
         const model_type = try detectModelType(allocator, io, repo);
         log.info("Detected model type: {}", .{model_type});
 
@@ -49,7 +50,7 @@ pub const LoadedModel = union(ModelType) {
             .llama => .{ .llama = try llama.LoadedModel.init(allocator, io, repo, store, generation) },
             .qwen3_5 => .{ .qwen3_5 = try qwen3_5.LoadedModel.init(allocator, io, repo, store, generation) },
             .qwen3_5_moe => .{ .qwen3_5_moe = try qwen3_5_moe.LoadedModel.init(allocator, io, repo, store, generation) },
-            .step3_5flash => .{ .step3_5flash = try step3_5flash.LoadedModel.init(allocator, io, repo, store, generation, shardings) },
+            .step3_5flash => .{ .step3_5flash = try step3_5flash.LoadedModel.init(allocator, io, repo, store, generation) },
         };
     }
 
