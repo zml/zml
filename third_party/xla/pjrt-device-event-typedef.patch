@@ -1,0 +1,14 @@
+diff --git a/xla/pjrt/c/pjrt_c_api_device_event.h b/xla/pjrt/c/pjrt_c_api_device_event.h
+index 5d33c05cf7..5f1dbbf6f1 100644
+--- a/xla/pjrt/c/pjrt_c_api_device_event.h
++++ b/xla/pjrt/c/pjrt_c_api_device_event.h
+@@ -64,7 +64,7 @@ PJRT_DEFINE_STRUCT_TRAITS(PJRT_DeviceEvent_FunctionTable,
+ 
+ // A PJRT_DeviceEvent is a pair of pointers containing both type information
+ // and the actual opaque device event object. See: xla::PjRtDeviceEventRef.
+-struct PJRT_DeviceEvent {
++typedef struct PJRT_DeviceEvent {
+   const struct PJRT_DeviceEvent_FunctionTable* vtable;
+   void* device_event;
+-};
++} PJRT_DeviceEvent;
