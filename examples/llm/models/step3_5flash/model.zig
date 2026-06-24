@@ -175,6 +175,109 @@ pub fn partitionKvCacheShape(kv_shape: zml.Shape, kv_heads: i64, model_partition
 
 pub const Options = Model.GenOptions;
 
+pub const LoadedModel = struct {
+    pub const SpecialTokens = struct {
+        im_start_token_id: u32,
+        im_end_token_id: u32,
+        eos_token_id: u32,
+    };
+
+    inner: Model,
+    parsed_config: std.json.Parsed(Config),
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        repo: std.Io.Dir,
+        store: zml.io.TensorStore.View,
+        generation: common.GenerationOptions,
+    ) !LoadedModel {
+        const parsed_config = try common.parseConfig(Config, allocator, io, repo);
+        errdefer parsed_config.deinit();
+
+        const options: Options = .{
+            .sampling_strategy = generation.sampling_strategy,
+            .max_seq_len = parsed_config.value.max_position_embeddings,
+        };
+
+        return .{
+            .inner = try .init(allocator, store, parsed_config.value, options),
+            .parsed_config = parsed_config,
+        };
+    }
+
+    pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
+        self.inner.deinit(allocator);
+        self.parsed_config.deinit();
+    }
+
+    pub fn specialTokens(self: *const LoadedModel, tokenizer: zml.tokenizer.Tokenizer) !SpecialTokens {
+        const im_start = tokenizer.tokenId("<|im_start|>") orelse return error.NoSuchToken;
+        const im_end = tokenizer.tokenId("<|im_end|>") orelse return error.NoSuchToken;
+        const eos = tokenizer.tokenId("<|endoftext|>") orelse if (self.parsed_config.value.eos_token_id) |e| switch (e.value) {
+            .int => |id| id,
+            .ints => |ids| ids[0],
+        } else im_end;
+        return .{
+            .im_start_token_id = im_start,
+            .im_end_token_id = im_end,
+            .eos_token_id = eos,
+        };
+    }
+
+    pub fn loadBuffers(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        progress: *std.Progress.Node,
+        shardings: common.Shardings,
+    ) !Buffers {
+        progress.increaseEstimatedTotalItems(store.view().count());
+        const now: std.Io.Timestamp = .now(io, .awake);
+        var total_bytes: usize = 0;
+        defer {
+            const took = now.untilNow(io, .awake);
+            const bytes_per_sec: u64 = @intFromFloat(
+                @as(f64, @floatFromInt(total_bytes)) /
+                    (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s),
+            );
+            std.log.scoped(.step3p5flash).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+        }
+
+        return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = progress,
+            .shardings = &shardings.all(),
+            .parallelism = 16,
+            .total_bytes = &total_bytes,
+        });
+    }
+
+    pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
+        _ = self;
+        Model.unloadBuffers(buffers, allocator);
+    }
+
+    pub fn compile(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        backend: zml.attention.attention.Backend,
+        shardings: common.Shardings,
+        seqlen: usize,
+        progress: *std.Progress.Node,
+    ) !inference.CompiledModel {
+        const params = inference.CompilationParameters.init(&self.inner, self.parsed_config.value, @intCast(seqlen), backend, .triton, shardings);
+        return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
+    }
+};
+
+pub const Buffers = zml.Bufferized(Model);
+
 pub const Model = struct {
     text_model: TextModel,
     lm_head: zml.nn.Linear,
@@ -1180,106 +1283,3 @@ pub const Moe = struct {
         return acc.rename(.{ .dout = .d });
     }
 };
-
-pub const LoadedModel = struct {
-    pub const SpecialTokens = struct {
-        im_start_token_id: u32,
-        im_end_token_id: u32,
-        eos_token_id: u32,
-    };
-
-    inner: Model,
-    parsed_config: std.json.Parsed(Config),
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        repo: std.Io.Dir,
-        store: zml.io.TensorStore.View,
-        generation: common.GenerationOptions,
-    ) !LoadedModel {
-        const parsed_config = try common.parseConfig(Config, allocator, io, repo);
-        errdefer parsed_config.deinit();
-
-        const options: Options = .{
-            .sampling_strategy = generation.sampling_strategy,
-            .max_seq_len = parsed_config.value.max_position_embeddings,
-        };
-
-        return .{
-            .inner = try .init(allocator, store, parsed_config.value, options),
-            .parsed_config = parsed_config,
-        };
-    }
-
-    pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
-        self.inner.deinit(allocator);
-        self.parsed_config.deinit();
-    }
-
-    pub fn specialTokens(self: *const LoadedModel, tokenizer: zml.tokenizer.Tokenizer) !SpecialTokens {
-        const im_start = tokenizer.tokenId("<|im_start|>") orelse return error.NoSuchToken;
-        const im_end = tokenizer.tokenId("<|im_end|>") orelse return error.NoSuchToken;
-        const eos = tokenizer.tokenId("<|endoftext|>") orelse if (self.parsed_config.value.eos_token_id) |e| switch (e.value) {
-            .int => |id| id,
-            .ints => |ids| ids[0],
-        } else im_end;
-        return .{
-            .im_start_token_id = im_start,
-            .im_end_token_id = im_end,
-            .eos_token_id = eos,
-        };
-    }
-
-    pub fn loadBuffers(
-        self: *const LoadedModel,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *zml.io.TensorStore,
-        progress: *std.Progress.Node,
-        shardings: common.Shardings,
-    ) !Buffers {
-        progress.increaseEstimatedTotalItems(store.view().count());
-        const now: std.Io.Timestamp = .now(io, .awake);
-        var total_bytes: usize = 0;
-        defer {
-            const took = now.untilNow(io, .awake);
-            const bytes_per_sec: u64 = @intFromFloat(
-                @as(f64, @floatFromInt(total_bytes)) /
-                    (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s),
-            );
-            std.log.scoped(.step3p5flash).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
-        }
-
-        return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 128 * zml.MiB,
-            .progress = progress,
-            .shardings = &shardings.all(),
-            .parallelism = 16,
-            .total_bytes = &total_bytes,
-        });
-    }
-
-    pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
-        _ = self;
-        Model.unloadBuffers(buffers, allocator);
-    }
-
-    pub fn compile(
-        self: *const LoadedModel,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        backend: zml.attention.attention.Backend,
-        shardings: common.Shardings,
-        seqlen: usize,
-        progress: *std.Progress.Node,
-    ) !inference.CompiledModel {
-        const params = inference.CompilationParameters.init(&self.inner, self.parsed_config.value, @intCast(seqlen), backend, .triton, shardings);
-        return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
-    }
-};
-
-pub const Buffers = zml.Bufferized(Model);
