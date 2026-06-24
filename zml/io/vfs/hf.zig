@@ -116,9 +116,9 @@ pub const HF = struct {
         queue_buf: []*Job,
 
         fn init(allocator: std.mem.Allocator, io_: std.Io, client: *std.http.Client, opts: InitOpts) !*DownloadPool {
-            if (opts.workers == 0 or opts.download_chunk_size == 0 or opts.queue_capacity == 0) {
-                return error.InvalidDownloadPoolOptions;
-            }
+            stdx.debug.assert(opts.workers > 0, "DownloadPool must have at least one worker", .{});
+            stdx.debug.assert(opts.download_chunk_size > 0, "DownloadPool must have a positive download chunk size", .{});
+            stdx.debug.assert(opts.queue_capacity > 0, "DownloadPool must have a positive queue capacity", .{});
 
             const queue_buf = try allocator.alloc(*Job, opts.queue_capacity);
             errdefer allocator.free(queue_buf);
