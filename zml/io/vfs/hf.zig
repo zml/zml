@@ -6,9 +6,178 @@ const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
 
-const default_download_chunk_size = 10 * 1024 * 1024;
-const default_workers = 16;
-const default_queue_capacity = 64;
+const ParallelRead = struct {
+    const Pool = struct {
+        pub const InitOptions = struct {
+            chunk_size: usize = 10 * 1024 * 1024,
+            num_workers: usize = 16,
+            queue_capacity: usize = 64,
+        };
+
+        group: std.Io.Group = .init,
+        job_queue: std.Io.Queue(Job),
+        queue_buf: []Job,
+        client: *std.http.Client,
+        chunk_size: usize,
+
+        fn init(allocator: std.mem.Allocator, io: std.Io, client: *std.http.Client, opts: InitOptions) !*Pool {
+            stdx.debug.assert(opts.num_workers > 0, "Pool must have at least one worker", .{});
+            stdx.debug.assert(opts.chunk_size > 0, "Pool must have a positive download chunk size", .{});
+            stdx.debug.assert(opts.queue_capacity > 0, "Pool must have a positive queue capacity", .{});
+
+            const queue_buf = try allocator.alloc(Job, opts.queue_capacity);
+            errdefer allocator.free(queue_buf);
+
+            const self = try allocator.create(Pool);
+            errdefer allocator.destroy(self);
+
+            self.* = .{
+                .client = client,
+                .chunk_size = opts.chunk_size,
+                .job_queue = .init(queue_buf),
+                .queue_buf = queue_buf,
+            };
+            errdefer self.group.cancel(io);
+
+            for (0..opts.num_workers) |_| {
+                try self.group.concurrent(io, worker, .{ self, io });
+            }
+
+            return self;
+        }
+
+        fn deinit(self: *Pool, allocator: std.mem.Allocator, io: std.Io) void {
+            self.job_queue.close(io);
+            self.group.cancel(io);
+
+            allocator.free(self.queue_buf);
+            allocator.destroy(self);
+        }
+
+        fn worker(pool: *Pool, io: std.Io) std.Io.Cancelable!void {
+            while (true) {
+                const job = pool.job_queue.getOne(io) catch break;
+                job.result.* = job.perform(pool.client);
+                job.batch.finishOne(io);
+            }
+        }
+    };
+
+    const Batch = struct {
+        uri: std.Uri,
+        url: []const u8,
+        authorization: std.http.Client.Request.Headers.Value,
+        pending: std.atomic.Value(u32),
+
+        fn finishOne(batch: *Batch, io: std.Io) void {
+            const previous = batch.pending.fetchSub(1, .release);
+            std.debug.assert(previous > 0);
+            if (previous == 1) io.futexWake(u32, &batch.pending.raw, 1);
+        }
+
+        fn wait(batch: *Batch, io: std.Io) void {
+            while (true) {
+                const pending = batch.pending.load(.acquire);
+                if (pending == 0) return;
+                io.futexWaitUncancelable(u32, &batch.pending.raw, pending);
+            }
+        }
+    };
+
+    pub const Job = struct {
+        data: []const []u8,
+        file_offset: u64,
+        chunk_offset: usize,
+        chunk_len: usize,
+        batch: *Batch,
+        err: ?anyerror = null,
+        result: *?anyerror,
+
+        fn perform(job: Job, client: *std.http.Client) ?anyerror {
+            var range_buf: [64]u8 = undefined;
+            const range_header = std.fmt.bufPrint(
+                &range_buf,
+                "bytes={d}-{d}",
+                .{ job.file_offset, job.file_offset + @as(u64, @intCast(job.chunk_len - 1)) },
+            ) catch unreachable;
+
+            var req = client.request(.GET, job.batch.uri, .{
+                .headers = .{
+                    .accept_encoding = .{ .override = "identity" },
+                    .authorization = job.batch.authorization,
+                },
+                .extra_headers = &.{.{ .name = "Range", .value = range_header }},
+            }) catch |err| return err;
+            defer req.deinit();
+
+            req.sendBodiless() catch |err| return err;
+
+            var redirect_buffer: [8 * 1024]u8 = undefined;
+            var res = req.receiveHead(&redirect_buffer) catch |err| return err;
+
+            if (res.head.status != .partial_content and res.head.status != .ok) {
+                log.err("Failed to perform read for {s}", .{job.batch.url});
+                log.err("{s}", .{res.head.bytes});
+                return error.RequestFailed;
+            }
+
+            const content_range = blk: {
+                var it = res.head.iterateHeaders();
+                while (it.next()) |header| {
+                    if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
+                        break :blk parseContentRange(header.value);
+                    }
+                }
+                break :blk null;
+            };
+
+            const reader = res.reader(&.{});
+
+            if (content_range) |cr| {
+                if (cr.start > job.file_offset) return error.InvalidContentRange;
+                if (cr.start < job.file_offset) {
+                    reader.discardAll(job.file_offset - cr.start) catch |err| return err;
+                }
+            }
+
+            var remaining = job.chunk_len;
+            var skip = job.chunk_offset;
+
+            for (job.data) |buf| {
+                if (skip >= buf.len) {
+                    skip -= buf.len;
+                    continue;
+                }
+
+                const destination = buf[skip..][0..@min(remaining, buf.len - skip)];
+                reader.readSliceAll(destination) catch |err| return err;
+                remaining -= destination.len;
+                if (remaining == 0) break;
+                skip = 0;
+            }
+
+            return null;
+        }
+    };
+
+    const ContentRange = struct {
+        start: u64,
+        end: u64,
+        total: u64,
+    };
+
+    fn parseContentRange(value: []const u8) ?ContentRange {
+        const space = std.mem.indexOfScalar(u8, value, ' ') orelse return null;
+        const dash = std.mem.indexOfScalar(u8, value, '-') orelse return null;
+        const slash = std.mem.indexOfScalar(u8, value, '/') orelse return null;
+
+        return .{
+            .start = std.fmt.parseInt(u64, value[space + 1 .. dash], 10) catch return null,
+            .end = std.fmt.parseInt(u64, value[dash + 1 .. slash], 10) catch return null,
+            .total = std.fmt.parseInt(u64, value[slash + 1 ..], 10) catch return null,
+        };
+    }
+};
 
 pub const API = struct {
     const TREE_URL_TEMPLATE = "https://huggingface.co/api/models/{[repo]s}/{[model]s}/tree/{[rev]s}/{[path]s}?expand=false&recursive=true&limit=1000";
@@ -55,9 +224,7 @@ const RepoKey = struct {
 
 pub const HF = struct {
     pub const InitOpts = struct {
-        download_chunk_size: usize = default_download_chunk_size,
-        workers: usize = default_workers,
-        queue_capacity: usize = default_queue_capacity,
+        read_pool: ParallelRead.Pool.InitOptions = .{},
     };
 
     pub const Repo = struct {
@@ -108,107 +275,22 @@ pub const HF = struct {
         }
     };
 
-    const DownloadPool = struct {
-        allocator: std.mem.Allocator,
-        client: *std.http.Client,
-        group: std.Io.Group = .init,
-        job_queue: std.Io.Queue(*Job),
-        queue_buf: []*Job,
-
-        fn init(allocator: std.mem.Allocator, io_: std.Io, client: *std.http.Client, opts: InitOpts) !*DownloadPool {
-            stdx.debug.assert(opts.workers > 0, "DownloadPool must have at least one worker", .{});
-            stdx.debug.assert(opts.download_chunk_size > 0, "DownloadPool must have a positive download chunk size", .{});
-            stdx.debug.assert(opts.queue_capacity > 0, "DownloadPool must have a positive queue capacity", .{});
-
-            const queue_buf = try allocator.alloc(*Job, opts.queue_capacity);
-            errdefer allocator.free(queue_buf);
-
-            const self = try allocator.create(DownloadPool);
-            errdefer allocator.destroy(self);
-
-            self.* = .{
-                .allocator = allocator,
-                .client = client,
-                .job_queue = .init(queue_buf),
-                .queue_buf = queue_buf,
-            };
-            errdefer self.group.cancel(io_);
-
-            for (0..opts.workers) |worker_id| {
-                try self.group.concurrent(io_, downloadWorker, .{ self, io_, worker_id });
-            }
-
-            return self;
-        }
-
-        fn deinit(self: *DownloadPool, io_: std.Io) void {
-            self.job_queue.close(io_);
-            self.group.await(io_) catch {};
-            self.allocator.free(self.queue_buf);
-            self.allocator.destroy(self);
-        }
-    };
-
-    const Batch = struct {
-        pending: usize,
-        failed: std.atomic.Value(bool) = .init(false),
-        err: ?anyerror = null,
-        mutex: std.Io.Mutex = .init,
-        cond: std.Io.Condition = .init,
-
-        fn finishOne(self: *Batch, io_: std.Io, err: ?anyerror) void {
-            self.mutex.lockUncancelable(io_);
-            if (err) |e| if (self.err == null) {
-                self.err = e;
-                self.failed.store(true, .release);
-            };
-            self.pending -= 1;
-            const done = self.pending == 0;
-            self.mutex.unlock(io_);
-            if (done) self.cond.signal(io_);
-        }
-
-        fn wait(self: *Batch, io_: std.Io) void {
-            self.mutex.lockUncancelable(io_);
-            defer self.mutex.unlock(io_);
-            while (self.pending != 0) {
-                self.cond.wait(io_, &self.mutex) catch {};
-            }
-        }
-    };
-
-    const Job = struct {
-        uri: []const u8,
-        authorization: std.http.Client.Request.Headers.Value,
-        data: []const []u8,
-        file_offset: u64,
-        dst_offset: usize,
-        len: usize,
-        batch: *Batch,
-    };
-
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     authorization: std.http.Client.Request.Headers.Value,
-    download_chunk_size: usize,
-    download_pool: *DownloadPool,
+    read_pool: *ParallelRead.Pool,
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
     trees: std.StringHashMapUnmanaged(std.ArrayList(TreeNode)) = .{},
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
 
-    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8) !HF {
-        return initWithOpts(allocator, inner, http_client, hf_token, .{});
-    }
-
-    pub fn initWithOpts(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8, opts: InitOpts) !HF {
+    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8, opts: InitOpts) !HF {
         var self: HF = .{
             .allocator = allocator,
             .base = .init(inner),
             .client = http_client,
-            .download_chunk_size = opts.download_chunk_size,
             .authorization = if (hf_token) |token| blk: {
                 break :blk .{
                     .override = try std.fmt.allocPrint(allocator, "Bearer {s}", .{std.mem.trim(u8, token, " \t\n\r")}),
@@ -216,21 +298,17 @@ pub const HF = struct {
             } else blk: {
                 break :blk .default;
             },
-            .download_pool = undefined,
+            .read_pool = try .init(allocator, inner, http_client, opts.read_pool),
         };
         errdefer switch (self.authorization) {
             .default, .omit => {},
             .override => |t| self.allocator.free(t),
         };
-        self.download_pool = try .init(allocator, inner, http_client, opts);
+
         return self;
     }
 
     pub fn auto(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, environ_map: *std.process.Environ.Map) !HF {
-        return autoWithOpts(allocator, inner, http_client, environ_map, .{});
-    }
-
-    pub fn autoWithOpts(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, environ_map: *std.process.Environ.Map, opts: InitOpts) !HF {
         const hf_token = if (environ_map.get("HF_TOKEN")) |token| blk: {
             break :blk try allocator.dupe(u8, token);
         } else blk: {
@@ -252,11 +330,12 @@ pub const HF = struct {
 
         if (hf_token == null) log.warn("No Hugging Face authentication token found in environment or home config; proceeding without authentication.", .{});
 
-        return initWithOpts(allocator, inner, http_client, hf_token, opts);
+        return init(allocator, inner, http_client, hf_token, .{});
     }
 
     pub fn deinit(self: *HF) void {
-        self.download_pool.deinit(self.base.inner);
+        self.read_pool.deinit(self.allocator, self.base.inner);
+
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -806,169 +885,53 @@ pub const HF = struct {
     fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
         if (offset >= handle.size) return 0;
 
-        const take = clampedReadLen(data, handle.size - offset);
-        if (take == 0) return 0;
+        var read_size: usize = 0;
+        for (data) |buf| read_size += buf.len;
+        read_size = @intCast(@min(handle.size - offset, read_size));
+        if (read_size == 0) return 0;
 
-        const job_count = jobCountForRead(take, self.download_chunk_size);
-        const jobs = try self.allocator.alloc(Job, job_count);
+        const job_count = std.math.divCeil(usize, read_size, self.read_pool.chunk_size) catch unreachable;
+
+        const jobs = try self.allocator.alloc(ParallelRead.Job, job_count);
         defer self.allocator.free(jobs);
+        const pending: u32 = std.math.cast(u32, job_count) orelse return error.SystemResources;
 
-        var batch: Batch = .{ .pending = job_count };
+        const repo: Repo = try .parse(handle.uri);
+        var url_buffer: [8 * 1024]u8 = undefined;
+        const url = try std.fmt.bufPrint(&url_buffer, API.LFS_FILE_URL_TEMPLATE, repo);
+        const uri: std.Uri = try .parse(url);
+
+        var batch: ParallelRead.Batch = .{
+            .uri = uri,
+            .url = url,
+            .authorization = self.authorization,
+            .pending = .init(pending),
+        };
+
         for (jobs, 0..) |*job, i| {
-            const dst_offset = i * self.download_chunk_size;
+            const chunk_offset = i * self.read_pool.chunk_size;
             job.* = .{
-                .uri = handle.uri,
-                .authorization = self.authorization,
                 .data = data,
-                .file_offset = offset + dst_offset,
-                .dst_offset = dst_offset,
-                .len = @min(self.download_chunk_size, take - dst_offset),
+                .file_offset = offset + @as(u64, @intCast(chunk_offset)),
+                .chunk_offset = chunk_offset,
+                .chunk_len = @min(self.read_pool.chunk_size, read_size - chunk_offset),
                 .batch = &batch,
+                .result = undefined,
             };
+            job.result = &job.err;
         }
 
-        for (jobs, 0..) |*job, i| {
-            self.download_pool.job_queue.putOne(self.base.inner, job) catch |err| {
-                for (jobs[i..]) |_| batch.finishOne(self.base.inner, err);
-                batch.wait(self.base.inner);
-                if (batch.err) |e| return e;
-                return err;
-            };
+        const queued = try self.read_pool.job_queue.put(self.base.inner, jobs, jobs.len);
+        for (jobs[queued..]) |*job| {
+            job.err = error.Canceled;
+            batch.finishOne(self.base.inner);
         }
 
         batch.wait(self.base.inner);
-        if (batch.err) |err| return err;
-        return take;
-    }
-
-    fn clampedReadLen(data: []const []u8, remaining: u64) usize {
-        var total: usize = 0;
-        for (data) |buf| total += buf.len;
-        return @intCast(@min(remaining, total));
-    }
-
-    fn jobCountForRead(len: usize, chunk_size: usize) usize {
-        if (len == 0) return 0;
-        return std.math.divCeil(usize, len, chunk_size) catch unreachable;
-    }
-
-    fn downloadWorker(pool: *DownloadPool, io_: std.Io, worker_id: usize) void {
-        while (true) {
-            const job = pool.job_queue.getOne(io_) catch break;
-            log.debug("HF download worker {d:0>2} processing {s} bytes={d}-{d}, length={d}", .{
-                worker_id,
-                job.uri,
-                job.file_offset,
-                job.file_offset + job.len - 1,
-                job.len,
-            });
-            if (job.batch.failed.load(.acquire)) {
-                job.batch.finishOne(io_, null);
-                continue;
-            }
-            const err = performJob(pool, job);
-            job.batch.finishOne(io_, err);
-        }
-    }
-
-    fn performJob(pool: *DownloadPool, job: *Job) ?anyerror {
-        downloadRange(pool.client, job) catch |err| return err;
-        return null;
-    }
-
-    fn downloadRange(client: *std.http.Client, job: *Job) !void {
-        const repo: Repo = try .parse(job.uri);
-        var url_buffer: [8 * 1024]u8 = undefined;
-        const url: []const u8 = try std.fmt.bufPrint(&url_buffer, API.LFS_FILE_URL_TEMPLATE, repo);
-        const uri: std.Uri = try .parse(url);
-
-        var range_buf: [64]u8 = undefined;
-        const range_header = std.fmt.bufPrint(
-            &range_buf,
-            "bytes={d}-{d}",
-            .{ job.file_offset, job.file_offset + job.len - 1 },
-        ) catch unreachable;
-
-        var req = try client.request(.GET, uri, .{
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
-                .authorization = job.authorization,
-            },
-            .extra_headers = &.{.{ .name = "Range", .value = range_header }},
-        });
-        defer req.deinit();
-
-        try req.sendBodiless();
-
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        var res = try req.receiveHead(&redirect_buffer);
-
-        if (res.head.status != .partial_content and res.head.status != .ok) {
-            log.err("Failed to perform read for {s}", .{url});
-            log.err("{s}", .{res.head.bytes});
-            return error.RequestFailed;
+        for (jobs) |job| {
+            if (job.err) |err| return err;
         }
 
-        const content_range = blk: {
-            var it = res.head.iterateHeaders();
-            while (it.next()) |header| {
-                if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                    break :blk parseContentRange(header.value);
-                }
-            }
-            break :blk null;
-        };
-
-        const reader = res.reader(&.{});
-
-        if (content_range) |cr| {
-            if (cr.start > job.file_offset) return error.InvalidContentRange;
-            if (cr.start < job.file_offset) {
-                try reader.discardAll(job.file_offset - cr.start);
-            }
-        }
-
-        try readJobIntoDest(reader, job.data, job.dst_offset, job.len);
-    }
-
-    fn readJobIntoDest(reader: *std.Io.Reader, data: []const []u8, dst_offset: usize, len: usize) !void {
-        var remaining = len;
-        var cursor = dst_offset;
-        while (remaining > 0) {
-            const dst = destSlice(data, cursor, remaining) orelse return error.ShortBuffer;
-            try reader.readSliceAll(dst);
-            cursor += dst.len;
-            remaining -= dst.len;
-        }
-    }
-
-    fn destSlice(data: []const []u8, dst_offset: usize, max_len: usize) ?[]u8 {
-        var cursor = dst_offset;
-        for (data) |buf| {
-            if (cursor >= buf.len) {
-                cursor -= buf.len;
-                continue;
-            }
-            return buf[cursor..][0..@min(max_len, buf.len - cursor)];
-        }
-        return null;
-    }
-
-    const ContentRange = struct {
-        start: u64,
-        end: u64,
-        total: u64,
-    };
-
-    fn parseContentRange(value: []const u8) ?ContentRange {
-        const space = std.mem.indexOfScalar(u8, value, ' ') orelse return null;
-        const dash = std.mem.indexOfScalar(u8, value, '-') orelse return null;
-        const slash = std.mem.indexOfScalar(u8, value, '/') orelse return null;
-
-        return .{
-            .start = std.fmt.parseInt(u64, value[space + 1 .. dash], 10) catch return null,
-            .end = std.fmt.parseInt(u64, value[dash + 1 .. slash], 10) catch return null,
-            .total = std.fmt.parseInt(u64, value[slash + 1 ..], 10) catch return null,
-        };
+        return read_size;
     }
 };
