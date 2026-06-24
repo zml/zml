@@ -11,7 +11,7 @@ bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "libbacktrace", version = "1.0.0-20250926-7939218")
 bazel_dep(name = "patchelf", version = "0.18.0.bcr.1")
 bazel_dep(name = "pcre2", version = "10.45")
-bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "protobuf", version = "33.6", repo_name = "com_google_protobuf")
 single_version_override(
     module_name = "protobuf",
@@ -20,7 +20,7 @@ single_version_override(
 
 bazel_dep(name = "pybind11_bazel", version = "3.0.1")
 bazel_dep(name = "re2", version = "2025-11-05", repo_name = "com_googlesource_code_re2")
-bazel_dep(name = "rules_cc", version = "0.2.18")
+bazel_dep(name = "rules_cc", version = "0.2.19")
 bazel_dep(name = "rules_distroless", version = "0.6.2")
 bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.7")
@@ -28,9 +28,10 @@ bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.9.0")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.15.1")
-
-bazel_dep(name = "tar.bzl", version = "0.9.0")
-bazel_dep(name = "llvm", version = "0.8.3")
+bazel_dep(name = "tar.bzl", version = "0.10.4")
+bazel_dep(name = "llvm", version = "0.8.9")
+bazel_dep(name = "zlib-ng", version = "2.3.3", repo_name = "llvm_zlib")
+bazel_dep(name = "zstd", version = "1.5.7.bcr.1", repo_name = "llvm_zstd")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 bazel_dep(name = "grpc", version = "1.74.0")
 
