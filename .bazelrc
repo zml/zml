@@ -39,7 +39,8 @@ common          --compilation_mode=dbg
 # Various cc options
 common          --experimental_cc_shared_library
 common          --incompatible_use_cc_configure_from_rules_cc
-common          --incompatible_autoload_externally=+@rules_cc,+@rules_python
+common          --incompatible_autoload_externally=+@rules_cc,+@rules_python,+@rules_shell
+common          --noincompatible_disable_autoloads_in_main_repo
 
 common          --experimental_platform_in_output_dir
 
