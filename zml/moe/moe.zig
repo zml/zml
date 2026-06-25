@@ -19,22 +19,7 @@ pub const Backend = enum {
 
     pub fn auto(platform: *const zml.Platform, weights_dtype: zml.DataType) !Backend {
         return switch (platform.target) {
-            .cuda => b: {
-                const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
-                if (zml.platform.cuda.tryGetComputeCapabilities(platform, first_device)) |cc| {
-                    if (std.mem.eql(u8, cc, "9.0") or
-                        std.mem.eql(u8, cc, "10.0"))
-                    {
-                        break :b switch (weights_dtype) {
-                            .bf16, .f16, .f8e4m3fn => .triton,
-                            else => error.UnsupportedDataType,
-                        };
-                    }
-                    break :b error.UnsupportedComputeCapability;
-                }
-                break :b error.UnsupportedComputeCapability;
-            },
-            .rocm => switch (weights_dtype) {
+            .cuda, .rocm => switch (weights_dtype) {
                 .bf16, .f16, .f32 => .triton,
                 else => error.UnsupportedDataType,
             },
