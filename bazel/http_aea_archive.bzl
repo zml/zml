@@ -1,4 +1,4 @@
-"""Repository rule for macOS Apple Encrypted Archive Metal toolchain assets."""
+"""Repository rule for macOS Apple Encrypted Archive."""
 
 def _fail_result(step, result):
     if result.return_code != 0:
@@ -87,14 +87,14 @@ def _http_aea_archive_impl(rctx):
 
     dmg = _single_restore_dmg(rctx)
 
-    _execute(rctx, "7z extract Metal.xctoolchain", [
+    extract_args = [
         rctx.path(rctx.attr._sevenzip),
         "x",
         "-y",
         dmg,
-        "Metal.xctoolchain/*",
-        "-o%s" % rctx.path("."),
-    ])
+    ]
+    extract_args.extend(rctx.attr.includes)
+    _execute(rctx, "7z extract dmg", extract_args)
     rctx.delete("AssetData")
 
     rctx.template("BUILD.bazel", rctx.attr.build_file)
@@ -115,10 +115,14 @@ http_aea_archive = repository_rule(
         "build_file": attr.label(
             allow_single_file = True,
         ),
+        "includes": attr.string_list(
+            default = [],
+            doc = "Patterns to pass to 7z for selective extraction from the DMG. If empty, extracts everything.",
+        ),
         "_sevenzip": attr.label(
             allow_single_file = True,
             default = Label("@sevenzip_macos//:7zz"),
         ),
     },
-    doc = "Downloads a macOS AEA-wrapped AppleArchive asset and exposes its Metal.xctoolchain.",
+    doc = "Downloads and extracts a macOS AEA-wrapped AppleArchive asset",
 )
