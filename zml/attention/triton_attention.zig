@@ -17,11 +17,20 @@ fn isOneapiTarget() bool {
     return zml.module.CompilationContext.current().platform.target == .oneapi;
 }
 
+fn forceDecode3dKernel() bool {
+    const value = std.c.getenv("ZML_TRITON_ATTENTION_FORCE_DECODE_3D") orelse return false;
+    const value_slice = std.mem.span(value);
+    return !(std.mem.eql(u8, value_slice, "0") or std.ascii.eqlIgnoreCase(value_slice, "false"));
+}
+
 fn use2dKernel(head_size: usize, sliding_window: usize, all_decode: bool, max_seqlen_q: usize, max_seqlen_k: usize, target_num_prgms: usize, num_2d_prgms: usize) bool {
-    _ = head_size;
     _ = max_seqlen_q;
+    if (all_decode and forceDecode3dKernel()) return false;
     // Intel decode spills the 2D whole-sequence kernel; force the 3D split-K path.
     if (all_decode and isOneapiTarget()) return false;
+    // Large-head sliding-window decode under-utilizes the 2D whole-sequence kernel on CUDA.
+    // Split-K 3D scheduling is faster for Gemma4/H100 (head_size=256, one query token).
+    if (all_decode and sliding_window > 0 and head_size >= 256) return false;
     return sliding_window > 0 or max_seqlen_k <= 512 or num_2d_prgms > target_num_prgms;
 }
 
