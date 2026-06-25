@@ -3,6 +3,8 @@ const zml = @import("zml");
 const main = @import("main.zig");
 const algebra = @import("algebra.zig");
 const save_load = @import("saveload.zig");
+const llm = @import("llm.zig");
+const tokens = @import("tokens.zig");
 
 const log = std.log;
 const Tokenizer = zml.tokenizer.Tokenizer;
@@ -224,7 +226,7 @@ pub const Graph = struct {
         self.allocator.free(self.is_expanded);
         self.allocator.free(self.are_neighbors_pruned);
     }
-
+    
     // ------------------- Search functions ------------------ //
 
     pub fn greedySearchNode(self: *Graph, query: usize) void {
@@ -1015,7 +1017,83 @@ pub const Graph = struct {
         }
         return best_ancestor;
     }
-    
+
+    // ------------------- Hierarchy functions ------------------- //
+
+    pub fn coarsify(self: *Graph, zml_handler: *Zml_handler, alpha: f32) ![]usize {
+        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+        var tokenizer = try llm.Llm_handler.loadTokenizer(zml_handler, repo);
+        defer tokenizer.deinit();
+        var decoded_buf: [512]u8 = undefined;
+        var escaped_buf: [512]u8 = undefined;
+                
+        std.log.info("\n###########", .{});
+        std.log.info("Coarsifying with alpha={d}", .{alpha});
+        // boolean array telling is each node is kept in the graph after coarsification
+        const is_active = try self.allocator.alloc(bool, self.n);
+        defer self.allocator.free(is_active);
+        @memset(is_active, true);
+        for (0..self.n) |i| {
+            if (self.is_junk[i]) is_active[i] = false;
+        }
+        // integer array mapping each node to its active parent index in the coarsified graph
+        const active_parent = try self.allocator.alloc(usize, self.n);
+        @memset(active_parent, self.n);
+
+        // heap of nodes in the current group
+        const node_heap = try self.allocator.alloc(usize, self.n);
+        defer self.allocator.free(node_heap);
+        // tells if a nodes is in the heap
+        const is_node_in_heap = try self.allocator.alloc(bool, self.n);
+        defer self.allocator.free(is_node_in_heap);
+        @memset(is_node_in_heap, false);
+
+        var nb_groups: usize = 0;
+        var nb_alone: usize = 0;
+
+        var nb_nodes_in_heap: usize = 0;
+        // visit all nodes in order
+        for (0..self.n) |group_center| {
+            if (!is_active[group_center]) continue;
+            // init the heap with current node
+            node_heap[0] = group_center;
+            is_node_in_heap[group_center] = true;
+            nb_nodes_in_heap = 1;
+            // expand the heap with all neighbors that are below the threshold
+            var heap_pos: usize = 0;
+            while (heap_pos < nb_nodes_in_heap) {
+                const node = node_heap[heap_pos];
+                for (0..self.similarity_matrix.k) |neigh_pos| {
+                    const neigh = self.similarity_matrix.nearestNeighbor(node, neigh_pos);
+                    if (self.is_junk[neigh] or !is_active[neigh] or is_node_in_heap[neigh]) continue;
+                    if (self.similarity(group_center, neigh) < alpha) continue;
+                    node_heap[nb_nodes_in_heap] = neigh;
+                    is_node_in_heap[neigh] = true;
+                    nb_nodes_in_heap += 1;
+                }
+                heap_pos += 1;
+            }
+            // the group is formed
+            nb_groups += 1;
+            if (nb_nodes_in_heap == 1) nb_alone += 1;
+            const print = nb_nodes_in_heap > 999999;
+            if (print) std.log.info("Node {d} has a group of size {d}", .{ group_center, nb_nodes_in_heap });
+            for (0..nb_nodes_in_heap) |pos_in_heap| {
+                const node = node_heap[pos_in_heap];
+                is_node_in_heap[node] = false;
+                is_active[node] = false;
+                active_parent[node] = group_center;
+                if (print) {
+                    const decoded = try tokens.decodeToken(tokenizer, @intCast(node), &decoded_buf);
+                    const escaped = tokens.escapeTokenText(decoded, &escaped_buf);
+                    std.log.info("     node {d:>6} sim {d:.3} tok: {s}", .{ node, self.similarity(group_center, node), escaped });
+                }
+            }
+        }
+        std.log.info("Found {d} groups and {d} alone nodes", .{ nb_groups, nb_alone });
+        return active_parent;
+    }
+
     // ---------------------- Syntax utils ----------------------- //
 
     pub fn nbEdges(self: *const Graph) usize {
