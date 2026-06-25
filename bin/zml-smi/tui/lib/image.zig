@@ -30,7 +30,7 @@ pub fn draw(self: *const Image, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surf
     const height_px = @as(u32, target_rows) * cell_h;
     const scale_f = @as(f64, @floatFromInt(height_px)) / @as(f64, @floatFromInt(self.image.height));
     const width_px: u32 = @intFromFloat(@as(f64, @floatFromInt(self.image.width)) * scale_f);
-    const cols: u16 = @intCast((width_px + cell_w - 1) / cell_w);
+    const cols: u16 = @intCast(@max(1, (width_px + cell_w / 2) / cell_w));
 
     const size: vxfw.Size = .{ .width = cols, .height = target_rows };
     var surf = try vxfw.Surface.init(ctx.arena, ui.widget(self), size);

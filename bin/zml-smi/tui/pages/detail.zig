@@ -7,6 +7,7 @@ const ProcessTable = @import("../widgets/process_table.zig");
 const gpu_detail = @import("detail/gpu_detail.zig");
 const neuron_detail = @import("detail/neuron_detail.zig");
 const tpu_detail = @import("detail/tpu_detail.zig");
+const tenstorrent_detail = @import("detail/tenstorrent_detail.zig");
 
 const Detail = @This();
 
@@ -24,5 +25,6 @@ pub fn draw(self: *const Detail, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
         .cuda, .rocm, .oneapi => |*sv| try gpu_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
         .neuron => |*sv| try neuron_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
         .tpu => |*sv| try tpu_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
+        .tenstorrent => |*sv| try tenstorrent_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
     };
 }

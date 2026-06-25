@@ -44,6 +44,7 @@ copy_to_directory(
         "@llvm//platforms/config:linux_x86_64": [
             ":libncfw.stripped",
             ":libnrt.stripped",
+            "//bin/zml-smi/platforms/tenstorrent:libtt_umd.so",
             "//platforms/rocm:zmlxrocm",
             "@amd-smi-lib//:libamd_smi",
             "@libdrm-amdgpu-amdgpu1",
@@ -60,6 +61,7 @@ copy_to_directory(
         "platforms/rocm": "lib",
         "libnrt.so.1": "lib/libnrt.so.1",
         "libncfw.so.2": "lib/libncfw.so.2",
+        "platforms/tenstorrent": "lib",
     },
 )
 
@@ -78,18 +80,18 @@ run_binary(
 
 zig_binary(
     name = "zml-smi",
-    visibility = ["//visibility:public"],
     data = [":sandbox"],
     main = "main.zig",
+    visibility = ["//visibility:public"],
     deps = [
+        "//bin/zml-smi/api",
         "//bin/zml-smi/collector",
         "//bin/zml-smi/csv",
-        "//bin/zml-smi/json",
-        "//bin/zml-smi/api",
-        "//bin/zml-smi/prometheus",
-        "//bin/zml-smi/utils:sysfs",
         "//bin/zml-smi/info",
+        "//bin/zml-smi/json",
+        "//bin/zml-smi/prometheus",
         "//bin/zml-smi/tui",
+        "//bin/zml-smi/utils:sysfs",
         "//stdx",
         "@libvaxis//:vaxis",
         "@rules_zig//zig/runfiles",
@@ -99,9 +101,10 @@ zig_binary(
     }) + select({
         "@llvm//platforms/config:linux_x86_64": [
             "//bin/zml-smi/platforms/amdsmi",
-            "//bin/zml-smi/platforms/oneapi",
             "//bin/zml-smi/platforms/neuron",
             "//bin/zml-smi/platforms/nvml",
+            "//bin/zml-smi/platforms/oneapi",
+            "//bin/zml-smi/platforms/tenstorrent",
             "//bin/zml-smi/platforms/tpu",
             "//platforms/neuron:libnrt_headers",
         ],
@@ -170,8 +173,8 @@ _RELEASE_PLATFORMS = [
 [platform_transition_filegroup(
     name = "zml-smi-" + os + "-" + arch,
     srcs = [":archive_" + os + "_" + arch],
-    target_platform = "//platforms:" + os + "_" + arch,
     tags = ["manual"],
+    target_platform = "//platforms:" + os + "_" + arch,
 ) for os, arch in _RELEASE_PLATFORMS]
 
 [hashes(
@@ -197,6 +200,7 @@ oci_image(
     name = "image_",
     base = "@distroless_cc_debian12",
     entrypoint = ["/zml-smi/zml-smi"],
+    tags = ["manual"],
     target_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:x86_64",
@@ -204,7 +208,6 @@ oci_image(
     tars = [
         ":archive_linux_amd64",
     ],
-    tags = ["manual"],
 )
 
 platform_transition_filegroup(
