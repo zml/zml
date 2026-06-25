@@ -15,9 +15,9 @@ def repo():
             "//third_party/iree:tokenizer-only.patch",
             "//third_party/iree:fix-gemma4-encode.patch",
             "//third_party/iree:fix-added-token-matching.patch",
+            "//third_party/iree:futex-public-api-header.patch",
         ],
         patch_args = ["-p1"],
     )
 
     #new_local_repository(name = "flashattn", build_file="//:third_party/flashattn/BUILD.bazel", path="/home/corendos/flashattn/")
-
