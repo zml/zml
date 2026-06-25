@@ -9,13 +9,6 @@ cc_library(
 )
 
 copy_to_directory(
-    name = "sandbox",
-    srcs = ["@libpjrt_metal"],
-    out = "sandbox/lib",
-    include_external_repositories = ["**"],
-)
-
-copy_to_directory(
     name = "metal_toolchain",
     srcs = [
         "@metal_toolchain//:metal_compile_tools",
@@ -32,12 +25,10 @@ copy_to_directory(
 
 cc_library(
     name = "libpjrt_metal",
-    data = [
-        ":sandbox",
-        ":metal_toolchain",
-    ],
+    data = [":metal_toolchain"],
     defines = ["ZML_RUNTIME_METAL"],
     tags = ["manual"],
+    deps = ["@libpjrt_metal"],
 )
 
 zig_library(
