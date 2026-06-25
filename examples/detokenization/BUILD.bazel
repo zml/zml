@@ -13,6 +13,7 @@ zig_binary(
         "tokens.zig",
         "algebra.zig",
         "saveload.zig",
+        "sampling.zig",
     ],
     visibility = ["//visibility:public"],
     deps = [

@@ -12,6 +12,7 @@ const inference = @import("inference.zig");
 const algebra = @import("algebra.zig");
 const save_load = @import("saveload.zig");
 const tokens = @import("tokens.zig");
+const sampling = @import("sampling.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -200,7 +201,7 @@ pub fn main(init: std.process.Init) !void {
     try printZmlLogo(zml_handler.io);
 
     //try runLlm(&zml_handler);
-    try runTests(&zml_handler);
+    try runTestsGraph(&zml_handler);
 
     zml_handler.timers.print();
 }
@@ -216,105 +217,6 @@ pub fn runLlm(zml_handler: *Zml_handler) !void {
     const inspi_result = try inference.generateText(zml_handler, &llm, inspi_tokens);
     defer zml_handler.allocator.free(inspi_result);
     zml_handler.mem.check(0);
-}
-
-pub fn runTests(zml_handler: *Zml_handler) !void {
-    var model_handler = try model_.Model_handler.init(zml_handler);
-    defer model_handler.deinit(zml_handler.allocator);
-    defer model_handler.unloadBuffers();
-
-    std.log.info("Compute SVD", .{});
-    const u, const diag = try algebra.loadSvd(zml_handler, &model_handler);
-    defer u.free(zml_handler.allocator);
-    defer diag.free(zml_handler.allocator);
-    for (diag.constItems(f64), 0..) |s, i| {
-        if (i > 15) {
-            std.log.info("...", .{});
-            break;
-        }
-        std.log.info("singular value: {d}", .{@sqrt(s)});
-    }
-    
-    std.log.info("Get lm_head_rotated", .{});
-    const lm_head_rotated, const lm_head_rotated_tr = try algebra.getLmHeadRotated(zml_handler, &model_handler, u);
-    defer lm_head_rotated.free(zml_handler.allocator);
-    defer lm_head_rotated_tr.free(zml_handler.allocator);
-
-    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
-    var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
-    defer tokenizer.deinit();
-    
-    std.log.info("Init SVD sampler", .{});
-    var svd_sampler: svd_.SvdSampler = try .init(zml_handler.allocator, lm_head_rotated, lm_head_rotated_tr, tokenizer);
-    defer svd_sampler.deinit();
-
-    //try testTokenSvdSearch(zml_handler, lm_head_rotated, &svd_sampler);
-    try testEmbedSvdSearch(zml_handler, &svd_sampler, u);
-    
-    //try analyzeTopRows(zml_handler, &model_handler);
-
-    zml_handler.tic(&zml_handler.timers.similarity_matrix);
-    //var similarity_matrix = try computeSimilarityMatrix(zml_handler, &model_handler; true);
-    var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, &model_handler, true);
-    defer similarity_matrix.deinit(zml_handler.allocator);
-    zml_handler.toc(&zml_handler.timers.similarity_matrix);
-
-    //try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix, true);
-
-    std.log.info("Get lm_head", .{});
-    const lm_head = try algebra.getLmHead(zml_handler, &model_handler);
-    defer lm_head.free(zml_handler.allocator);
-
-    std.log.info("Get lm_head_normalized", .{});
-    const lm_head_normalized = try algebra.getLmHeadNormalized(zml_handler, &model_handler);
-    defer lm_head_normalized.free(zml_handler.allocator);
-
-    std.log.info("Get lm_head row norms", .{});
-    const lm_head_row_norms = try algebra.getLmHeadRowNorms(zml_handler, &model_handler);
-    defer lm_head_row_norms.free(zml_handler.allocator);
-
-    std.log.info("Get junk rows", .{});
-    zml_handler.tic(&zml_handler.timers.junk_rows);
-    const junk_rows = try algebra.getJunkRows(zml_handler, &model_handler);
-    defer zml_handler.allocator.free(junk_rows);
-    zml_handler.toc(&zml_handler.timers.junk_rows);
-    std.log.info("Found {d} junk rows", .{junk_rows.len});
-
-    std.log.info("Get medoid", .{});
-    const medoid = 0; //try getMedoid(zml_handler, &model_handler, junk_rows);
-    std.log.info("Medoid: {d}", .{medoid});
-
-    std.log.info("Get MRT insertion order", .{});
-    const mrt_order = try algebra.getMrtOrder(zml_handler, &model_handler);
-    defer zml_handler.allocator.free(mrt_order);
-
-    std.log.info("Init MRT", .{});
-    const mrt_params: graph.GraphParams = .{ .k_max = 1024 };
-    var mrt: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, medoid, mrt_params);
-    defer mrt.deinit();
-    try mrt.makeMrt(mrt_order);
-    std.log.info("Exact MRT : nb edges: {d}", .{mrt.nbEdges()});
-
-    std.log.info("Init graph", .{});
-    const graph_params: graph.GraphParams = .{};
-    //var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, medoid, graph_params);
-    var g: graph.Graph = try .fromFile(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, "nsw-knn-16.safetensors", graph_params);
-    defer g.deinit();
-
-    zml_handler.tic(&zml_handler.timers.knn_graph);
-    //g.setNearestNeighbors();
-    zml_handler.toc(&zml_handler.timers.knn_graph);
-
-    std.log.info("Exact kNN : nb edges: {d}", .{g.nbEdges()});
-
-    zml_handler.tic(&zml_handler.timers.nsw_graph);
-    //g.extendToNsw();
-    zml_handler.toc(&zml_handler.timers.nsw_graph);
-
-    std.log.info("NSW extension : nb edges: {d}", .{g.nbEdges()});
-    //g.testNswExtention();
-
-    try testEmbedGraphSearch(zml_handler, &model_handler, &mrt, false);
 }
 
 pub fn run(zml_handler: *Zml_handler) !void {
@@ -375,6 +277,171 @@ pub fn run(zml_handler: *Zml_handler) !void {
     const inspi_result = try inference.generateTextGraph(zml_handler, &llm, &model_handler, &g, inspi_tokens);
     defer zml_handler.allocator.free(inspi_result);
     zml_handler.mem.check(0);
+}
+
+
+pub fn runTestsSvd(zml_handler: *Zml_handler) !void {
+    var model_handler = try model_.Model_handler.init(zml_handler);
+    defer model_handler.deinit(zml_handler.allocator);
+    defer model_handler.unloadBuffers();
+
+    std.log.info("Compute SVD", .{});
+    const u, const diag = try algebra.loadSvd(zml_handler, &model_handler);
+    defer u.free(zml_handler.allocator);
+    defer diag.free(zml_handler.allocator);
+    for (diag.constItems(f64), 0..) |s, i| {
+        if (i > 15) {
+            std.log.info("...", .{});
+            break;
+        }
+        std.log.info("singular value: {d}", .{@sqrt(s)});
+    }
+    
+    std.log.info("Get lm_head_rotated", .{});
+    const lm_head_rotated, const lm_head_rotated_tr = try algebra.getLmHeadRotated(zml_handler, &model_handler, u);
+    defer lm_head_rotated.free(zml_handler.allocator);
+    defer lm_head_rotated_tr.free(zml_handler.allocator);
+
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+    var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
+    defer tokenizer.deinit();
+    
+    std.log.info("Init SVD sampler", .{});
+    var svd_sampler: svd_.SvdSampler = try .init(zml_handler.allocator, lm_head_rotated, lm_head_rotated_tr, tokenizer, false);
+    defer svd_sampler.deinit();
+
+    //try testTokenSvdSearch(zml_handler, lm_head_rotated, &svd_sampler);
+    try testEmbedSvdSearch(zml_handler, &svd_sampler, u);
+}
+
+pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
+    var model_handler = try model_.Model_handler.init(zml_handler);
+    defer model_handler.deinit(zml_handler.allocator);
+    defer model_handler.unloadBuffers();
+
+    zml_handler.tic(&zml_handler.timers.similarity_matrix);
+    //var similarity_matrix = try computeSimilarityMatrix(zml_handler, &model_handler; true);
+    var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, &model_handler, true);
+    defer similarity_matrix.deinit(zml_handler.allocator);
+    zml_handler.toc(&zml_handler.timers.similarity_matrix);
+
+    //try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix, true);
+
+    std.log.info("Get lm_head", .{});
+    const lm_head = try algebra.getLmHead(zml_handler, &model_handler);
+    defer lm_head.free(zml_handler.allocator);
+
+    std.log.info("Get lm_head_normalized", .{});
+    const lm_head_normalized = try algebra.getLmHeadNormalized(zml_handler, &model_handler);
+    defer lm_head_normalized.free(zml_handler.allocator);
+
+    std.log.info("Get lm_head row norms", .{});
+    const lm_head_row_norms = try algebra.getLmHeadRowNorms(zml_handler, &model_handler);
+    defer lm_head_row_norms.free(zml_handler.allocator);
+
+    std.log.info("Get junk rows", .{});
+    zml_handler.tic(&zml_handler.timers.junk_rows);
+    const junk_rows = try algebra.getJunkRows(zml_handler, &model_handler);
+    defer zml_handler.allocator.free(junk_rows);
+    zml_handler.toc(&zml_handler.timers.junk_rows);
+    std.log.info("Found {d} junk rows", .{junk_rows.len});
+
+    std.log.info("Get medoid", .{});
+    const medoid = 0; //try getMedoid(zml_handler, &model_handler, junk_rows);
+    std.log.info("Medoid: {d}", .{medoid});
+
+    std.log.info("Init sampler", .{});
+    var sampler: sampling.Sampler = try .init(zml_handler, lm_head);
+    defer sampling.Sampler.deinit(&sampler);
+    
+    std.log.info("Init graph", .{});
+    const graph_params: graph.GraphParams = .{};
+    var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, medoid, graph_params);
+    //var g: graph.Graph = try .fromFile(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, "nsw-knn-16.safetensors", graph_params);
+    defer g.deinit();
+    
+    const active_parents_05 = try g.coarsify(zml_handler, 0.5);
+    defer zml_handler.allocator.free(active_parents_05);
+    try testEmbedCoarseSearch(zml_handler, &sampler, active_parents_05);
+    
+    const active_parents_04 = try g.coarsify(zml_handler, 0.6);
+    defer zml_handler.allocator.free(active_parents_04);
+    try testEmbedCoarseSearch(zml_handler, &sampler, active_parents_04);
+    
+    const active_parents_03 = try g.coarsify(zml_handler, 0.7);
+    defer zml_handler.allocator.free(active_parents_03);
+    try testEmbedCoarseSearch(zml_handler, &sampler, active_parents_03);
+    
+    const active_parents_02 = try g.coarsify(zml_handler, 0.8);
+    defer zml_handler.allocator.free(active_parents_02);
+    try testEmbedCoarseSearch(zml_handler, &sampler, active_parents_02);
+    
+    const active_parents_01 = try g.coarsify(zml_handler, 0.9);
+    defer zml_handler.allocator.free(active_parents_01);
+    try testEmbedCoarseSearch(zml_handler, &sampler, active_parents_01);
+
+    zml_handler.tic(&zml_handler.timers.knn_graph);
+    //g.setNearestNeighbors();
+    zml_handler.toc(&zml_handler.timers.knn_graph);
+
+    std.log.info("Exact kNN : nb edges: {d}", .{g.nbEdges()});
+
+    zml_handler.tic(&zml_handler.timers.nsw_graph);
+    //g.extendToNsw();
+    zml_handler.toc(&zml_handler.timers.nsw_graph);
+
+    std.log.info("NSW extension : nb edges: {d}", .{g.nbEdges()});
+    //g.testNswExtention();
+
+    //try testEmbedGraphSearch(zml_handler, &model_handler, &mrt, false);
+}
+
+pub fn runTestsMrt(zml_handler: *Zml_handler) !void {
+    var model_handler = try model_.Model_handler.init(zml_handler);
+    defer model_handler.deinit(zml_handler.allocator);
+    defer model_handler.unloadBuffers();
+
+    zml_handler.tic(&zml_handler.timers.similarity_matrix);
+    //var similarity_matrix = try computeSimilarityMatrix(zml_handler, &model_handler; true);
+    var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, &model_handler, true);
+    defer similarity_matrix.deinit(zml_handler.allocator);
+    zml_handler.toc(&zml_handler.timers.similarity_matrix);
+
+    //try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix, true);
+
+    std.log.info("Get lm_head", .{});
+    const lm_head = try algebra.getLmHead(zml_handler, &model_handler);
+    defer lm_head.free(zml_handler.allocator);
+
+    std.log.info("Get lm_head_normalized", .{});
+    const lm_head_normalized = try algebra.getLmHeadNormalized(zml_handler, &model_handler);
+    defer lm_head_normalized.free(zml_handler.allocator);
+
+    std.log.info("Get lm_head row norms", .{});
+    const lm_head_row_norms = try algebra.getLmHeadRowNorms(zml_handler, &model_handler);
+    defer lm_head_row_norms.free(zml_handler.allocator);
+
+    std.log.info("Get junk rows", .{});
+    zml_handler.tic(&zml_handler.timers.junk_rows);
+    const junk_rows = try algebra.getJunkRows(zml_handler, &model_handler);
+    defer zml_handler.allocator.free(junk_rows);
+    zml_handler.toc(&zml_handler.timers.junk_rows);
+    std.log.info("Found {d} junk rows", .{junk_rows.len});
+
+    std.log.info("Get medoid", .{});
+    const medoid = 0; //try getMedoid(zml_handler, &model_handler, junk_rows);
+    std.log.info("Medoid: {d}", .{medoid});
+
+    std.log.info("Get MRT insertion order", .{});
+    const mrt_order = try algebra.getMrtOrder(zml_handler, &model_handler);
+    defer zml_handler.allocator.free(mrt_order);
+
+    std.log.info("Init MRT", .{});
+    const mrt_params: graph.GraphParams = .{ .k_max = 1024 };
+    var mrt: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, medoid, mrt_params);
+    defer mrt.deinit();
+    try mrt.makeMrt(mrt_order);
+    std.log.info("Exact MRT : nb edges: {d}", .{mrt.nbEdges()});
 }
 
 
@@ -641,7 +708,7 @@ pub fn testEmbedSvdSearch(zml_handler: *Zml_handler, svd: *svd_.SvdSampler, u: z
         for (0..embed_count) |embed_index| {
             copyEmbedding(task_embeds, d, embed_index, embed);
             rotateEmbedding(u, embed, rot_embed);
-            std.log.info("\n\n\n", .{});
+            std.log.info("\n", .{});
             std.log.info("#################", .{});
             std.log.info("#### new emb ####", .{});
             std.log.info("#################", .{});
@@ -655,6 +722,38 @@ pub fn testEmbedSvdSearch(zml_handler: *Zml_handler, svd: *svd_.SvdSampler, u: z
         }
     }
     std.log.info("Embed SVD search: total={d}", .{total_count});
+}
+
+pub fn testEmbedCoarseSearch(zml_handler: *Zml_handler, sampler: *sampling.Sampler, active_parent: []usize) !void {
+    std.log.info("\n###############", .{});
+    std.log.info("Test embed coarse search", .{});
+
+    const embeds_repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.checkpoint);
+    var registry: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.io, embeds_repo, "qwen_embeds.safetensors");
+    defer registry.deinit();
+
+    const d = sampler.d;
+    const embed = try zml_handler.allocator.alloc(f32, d);
+    defer zml_handler.allocator.free(embed);
+
+    var registry_it = registry.iterator();
+    while (registry_it.next()) |entry| {
+        const task_name = entry.key_ptr.*;
+        const task_embeds = try save_load.loadSafetensorSliceFromRegistry(zml_handler, &registry, task_name);
+        defer task_embeds.free(zml_handler.allocator);
+        const embed_count = embeddingCount(task_embeds, d) orelse return error.InvalidEmbeddingShape;
+        std.log.info("Test coarse search task={s} embeddings={d} shape={f}", .{ task_name, embed_count, task_embeds.shape });
+        for (0..embed_count) |embed_index| {
+            copyEmbedding(task_embeds, d, embed_index, embed);
+            std.log.info("\n", .{});
+            std.log.info("#################", .{});
+            std.log.info("#### new emb ####", .{});
+            std.log.info("#################", .{});
+            try sampler.sample(embed, active_parent);
+            try sampler.sampleCoarse(embed, active_parent);
+            if (embed_index > 0) break;
+        }
+    }
 }
 
 

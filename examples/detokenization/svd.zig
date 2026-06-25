@@ -100,6 +100,10 @@ pub const SvdSampler = struct {
         fn beforeThan(_: void, lhs: SamplingCandidate, rhs: SamplingCandidate) bool {
             return lhs.logit > rhs.logit;
         }
+
+        fn absDecreasing(_: void, lhs: SamplingCandidate, rhs: SamplingCandidate) bool {
+            return @abs(lhs.logit) > @abs(rhs.logit);
+        }
     };
 
     allocator: std.mem.Allocator,
@@ -109,6 +113,7 @@ pub const SvdSampler = struct {
     d: usize,
     checkpoints: []usize,
     row_tail_norms: []f32,
+    row_norms: []f32,
     approx_logits: []f32,
     checkpoint_approx_logits: []f32,
     exact_logits: []f32,
@@ -119,8 +124,10 @@ pub const SvdSampler = struct {
     prune_threshold_logit: f32 = -0.693,
     unsafe_z_score: f32 = 5.0,
     tokenizer: Tokenizer,
+    use_svd: bool = true,
+    order: []usize,
 
-    pub fn init(allocator: std.mem.Allocator, m: zml.Slice, m_t: zml.Slice, tokenizer: Tokenizer) !SvdSampler {
+    pub fn init(allocator: std.mem.Allocator, m: zml.Slice, m_t: zml.Slice, tokenizer: Tokenizer, use_svd: bool) !SvdSampler {
         if (m.dtype() != .f32 or m_t.dtype() != .f32) return error.UnsupportedDType;
         if (m.shape.rank() != 2 or m_t.shape.rank() != 2) return error.InvalidShape;
 
@@ -133,6 +140,9 @@ pub const SvdSampler = struct {
 
         const checkpoints = try allocator.dupe(usize, default_checkpoints[0..default_checkpoints.len]);
         errdefer allocator.free(checkpoints);
+
+        const row_norms = try allocator.alloc(f32, vocab_size);
+        errdefer allocator.free(row_norms);
 
         const row_tail_norms = try allocator.alloc(f32, checkpoints.len * vocab_size);
         errdefer allocator.free(row_tail_norms);
@@ -152,6 +162,9 @@ pub const SvdSampler = struct {
         const active = try allocator.alloc(bool, vocab_size);
         errdefer allocator.free(active);
 
+        const order = try allocator.alloc(usize, d);
+        errdefer allocator.free(order);
+
         var sampler: SvdSampler = .{
             .allocator = allocator,
             .m = m,
@@ -159,6 +172,7 @@ pub const SvdSampler = struct {
             .vocab_size = vocab_size,
             .d = d,
             .checkpoints = checkpoints,
+            .row_norms = row_norms,
             .row_tail_norms = row_tail_norms,
             .approx_logits = approx_logits,
             .checkpoint_approx_logits = checkpoint_approx_logits,
@@ -166,7 +180,10 @@ pub const SvdSampler = struct {
             .sampling_candidates = sampling_candidates,
             .active = active,
             .tokenizer = tokenizer,
+            .use_svd = use_svd,
+            .order = order,
         };
+        sampler.computeRowNorms();
         sampler.precomputeRowTailNorms();
         return sampler;
     }
@@ -187,6 +204,7 @@ pub const SvdSampler = struct {
         self.top_p = top_p;
     }
 
+    
     pub fn sampleSafe(self: *SvdSampler, y: []const f32, random: std.Random) !u32 {
         std.log.info("##### sampleSafe", .{});
         return self.sample(y, random, .safe);
@@ -226,6 +244,19 @@ pub const SvdSampler = struct {
     }
 
 
+    fn computeRowNorms(self: *SvdSampler) void {
+        const m_items = self.m.constItems(f32);
+        for (0..self.vocab_size) |token| {
+            const row = m_items[token * self.d ..][0..self.d];
+            var sum_sq: f64 = 0.0;
+            for (row) |value| {
+                const value_f64: f64 = @floatCast(value);
+                sum_sq += value_f64 * value_f64;
+            }
+            self.row_norms[token] = @floatCast(@sqrt(sum_sq));
+        }
+    }
+    
     fn precomputeRowTailNorms(self: *SvdSampler) void {
         const m_items = self.m.constItems(f32);
         for (self.checkpoints, 0..) |checkpoint, checkpoint_index| {
@@ -251,19 +282,34 @@ pub const SvdSampler = struct {
     fn sample(self: *SvdSampler, y: []const f32, random: std.Random, mode: BoundMode) !u32 {
         if (y.len != self.d) return error.InvalidEmbeddingShape;
 
-        const y_norm = tailNorm(y, 0);
+        var tot_y_abs: f32 = 0.0;
+        for (y, 0..) |value, coord| {
+            tot_y_abs += @abs(value);
+            self.sampling_candidates[coord] = .{ .token = coord, .logit = value, .weight = 0.0 };
+        }
+        std.mem.sort(SamplingCandidate, self.sampling_candidates[0..self.d], {}, SamplingCandidate.absDecreasing);
+        for (0..self.d) |i| {
+            self.order[i] = self.sampling_candidates[i].token;
+        }
+        std.log.info("    min  |y| = {d:.4}, max |y| = {d:.4}", .{ @abs(y[self.order[self.d-1]]), @abs(y[self.order[0]])});
+        std.log.info("    mean |y| = {d:.4}, med |y| = {d:.4}", .{ tot_y_abs / @as(f32, @floatFromInt(self.d)), @abs(y[self.order[@divExact(self.d, 2)]])});
+        std.log.info("    p01  |y| = {d:.4}, p05 |y| = {d:.4}", .{ @abs(y[self.order[@divFloor(self.d, 100)]]), @abs(y[self.order[@divFloor(self.d, 20)]])});
 
         @memset(self.approx_logits, 0.0);
         @memset(self.active, true);
         var active_count = self.vocab_size;
         var previous_checkpoint: usize = 0;
         var processed_checkpoint_count: usize = 0;
-
+        var total_flops: usize = 0;
+        
         const m_t_items = self.m_t.constItems(f32);
         for (self.checkpoints, 0..) |checkpoint, checkpoint_index| {
-            std.log.info("    checkpoint: {d}, active_count: {d}", .{checkpoint_index, active_count});
+            const checkpoint_flops = (checkpoint - previous_checkpoint) * active_count;
+            total_flops += checkpoint_flops;
+            std.log.info("    checkpoint: {d}({d:>4}), active_count: {d:>6}, flops: {d}", .{checkpoint_index, checkpoint, active_count, checkpoint_flops});
             // increment logit computation from previous checkpoint to current checkpoint
-            for (previous_checkpoint..checkpoint) |coord| {
+            for (previous_checkpoint..checkpoint) |coord_pos| {
+                const coord = self.order[coord_pos];
                 const coord_values = m_t_items[coord * self.vocab_size ..][0..self.vocab_size];
                 for (0..self.vocab_size) |token| {
                     self.approx_logits[token] += coord_values[token] * y[coord];
@@ -274,15 +320,19 @@ pub const SvdSampler = struct {
             processed_checkpoint_count = checkpoint_index + 1;
 
             // we can improve this by computing it in one pass at start
-            const y_tail_norm = tailNorm(y, checkpoint);
+            const y_tail_norm = if (self.use_svd) tailNorm(y, checkpoint) else tailNormOrder(self, y, checkpoint);
             
             const row_tail_norms = self.rowTailNorms(checkpoint_index);
             const best_lower_bound = self.bestLowerBound(row_tail_norms, y_tail_norm, checkpoint, mode);
-            const prune_limit = best_lower_bound + self.prune_threshold_logit / y_norm;
+            const prune_limit = best_lower_bound + self.prune_threshold_logit;
 
+            const float_dim: f32 = @floatFromInt(self.d);
+            const float_checkpoint: f32 = @floatFromInt(checkpoint);
+            const tail_factor: f32 = 1.0 - float_checkpoint / float_dim;
             for (0..self.vocab_size) |token| {
                 if (!self.active[token]) continue;
-                const err = self.errorBound(row_tail_norms[token], y_tail_norm, checkpoint, mode);
+                const row_tail_norm = if (self.use_svd) row_tail_norms[token] else self.row_norms[token] * tail_factor;
+                const err = self.errorBound(row_tail_norm, y_tail_norm, checkpoint, mode);
                 const upper_bound = self.approx_logits[token] + err;
                 if (upper_bound <= prune_limit) {
                     self.active[token] = false;
@@ -293,6 +343,7 @@ pub const SvdSampler = struct {
             if (active_count == 1) break;
         }
 
+        std.log.info("    total flops: {d}, max_flops: {d}, {d:.2}%", .{total_flops, self.vocab_size * self.d, 100.0 * @as(f32, @floatFromInt(total_flops)) / @as(f32, @floatFromInt(self.vocab_size * self.d))});
         std.log.info("    full sampling, active_count: {d}", .{active_count});
         const token = try self.sampleExact(y, random);
         self.logCheckpointApproxRanks(token, processed_checkpoint_count, y);
@@ -336,9 +387,13 @@ pub const SvdSampler = struct {
 
     fn bestLowerBound(self: *SvdSampler, row_tail_norms: []const f32, y_tail_norm: f32, checkpoint: usize, mode: BoundMode) f32 {
         var best = -std.math.inf(f32);
+        const float_dim: f32 = @floatFromInt(self.d);
+        const float_checkpoint: f32 = @floatFromInt(checkpoint);
+        const tail_factor: f32 = 1.0 - float_checkpoint / float_dim;
         for (0..self.vocab_size) |token| {
             if (!self.active[token]) continue;
-            const err = self.errorBound(row_tail_norms[token], y_tail_norm, checkpoint, mode);
+            const row_tail_norm = if (self.use_svd) row_tail_norms[token] else self.row_norms[token] * tail_factor;
+            const err = self.errorBound(row_tail_norm, y_tail_norm, checkpoint, mode);
             best = @max(best, self.approx_logits[token] - err);
         }
         return best;
@@ -418,6 +473,15 @@ pub const SvdSampler = struct {
         var sum_sq: f32 = 0.0;
         for (y[checkpoint..]) |value| {
             sum_sq += value * value;
+        }
+        return @sqrt(sum_sq);
+    }
+
+    fn tailNormOrder(self: *SvdSampler, y: []const f32, checkpoint: usize) f32 {
+        var sum_sq: f32 = 0.0;
+        for (checkpoint..self.d) |coord_pos| {
+            const coord = self.order[coord_pos];
+            sum_sq += y[coord] * y[coord];
         }
         return @sqrt(sum_sq);
     }
