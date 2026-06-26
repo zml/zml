@@ -255,11 +255,10 @@ pub const GCS = struct {
 
     pub const InitError = error{
         InvalidCredentialJson,
-        RequestFailed,
         Unexpected,
-    } || std.mem.Allocator.Error;
+    } || std.mem.Allocator.Error || std.Io.ConcurrentError;
 
-    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, args: InitArgs) !GCS {
+    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, args: InitArgs) InitError!GCS {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         errdefer arena.deinit();
 
