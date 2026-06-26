@@ -59,6 +59,22 @@ pub const Model_handler = struct {
         const similarity_matrix_results = try similarity_matrix_exe.results(zml_handler.allocator);
         errdefer similarity_matrix_results.deinit(zml_handler.allocator);
 
+        const similarity_matrix_normalized_exe = try zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .similarityMatrixNormalized,
+            .{.init(.{}, .u32)},
+            opts,
+        );
+        errdefer similarity_matrix_normalized_exe.deinit();
+
+        const similarity_matrix_normalized_args = try similarity_matrix_normalized_exe.args(zml_handler.allocator);
+        errdefer similarity_matrix_normalized_args.deinit(zml_handler.allocator);
+
+        const similarity_matrix_normalized_results = try similarity_matrix_normalized_exe.results(zml_handler.allocator);
+        errdefer similarity_matrix_normalized_results.deinit(zml_handler.allocator);
+
         const get_lm_head_exe = try zml_handler.platform.compile(
             zml_handler.allocator,
             zml_handler.io,
@@ -171,6 +187,22 @@ pub const Model_handler = struct {
         const score_results = try score_exe.results(zml_handler.allocator);
         errdefer score_results.deinit(zml_handler.allocator);
 
+        const top1_exe = try zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .top1Token,
+            .{.init(.{ .s = 1, .d = model.shape().dim(.d) }, .f32)},
+            opts,
+        );
+        errdefer top1_exe.deinit();
+
+        const top1_args = try top1_exe.args(zml_handler.allocator);
+        errdefer top1_args.deinit(zml_handler.allocator);
+
+        const top1_results = try top1_exe.results(zml_handler.allocator);
+        errdefer top1_results.deinit(zml_handler.allocator);
+
         const find_junk_rows_exe = try zml_handler.platform.compile(
             zml_handler.allocator,
             zml_handler.io,
@@ -206,6 +238,9 @@ pub const Model_handler = struct {
             .similarity_matrix_exe = similarity_matrix_exe,
             .similarity_matrix_args = similarity_matrix_args,
             .similarity_matrix_results = similarity_matrix_results,
+            .similarity_matrix_normalized_exe = similarity_matrix_normalized_exe,
+            .similarity_matrix_normalized_args = similarity_matrix_normalized_args,
+            .similarity_matrix_normalized_results = similarity_matrix_normalized_results,
             .get_lm_head_exe = get_lm_head_exe,
             .get_lm_head_args = get_lm_head_args,
             .get_lm_head_results = get_lm_head_results,
@@ -227,6 +262,9 @@ pub const Model_handler = struct {
             .score_exe = score_exe,
             .score_args = score_args,
             .score_results = score_results,
+            .top1_exe = top1_exe,
+            .top1_args = top1_args,
+            .top1_results = top1_results,
             .find_junk_rows_exe = find_junk_rows_exe,
             .find_junk_rows_args = find_junk_rows_args,
             .find_junk_rows_results = find_junk_rows_results,
@@ -249,6 +287,9 @@ pub const ModelExes = struct {
     similarity_matrix_exe: zml.Exe,
     similarity_matrix_args: zml.Exe.Arguments,
     similarity_matrix_results: zml.Exe.Results,
+    similarity_matrix_normalized_exe: zml.Exe,
+    similarity_matrix_normalized_args: zml.Exe.Arguments,
+    similarity_matrix_normalized_results: zml.Exe.Results,
     get_lm_head_exe: zml.Exe,
     get_lm_head_args: zml.Exe.Arguments,
     get_lm_head_results: zml.Exe.Results,
@@ -270,6 +311,9 @@ pub const ModelExes = struct {
     score_exe: zml.Exe,
     score_args: zml.Exe.Arguments,
     score_results: zml.Exe.Results,
+    top1_exe: zml.Exe,
+    top1_args: zml.Exe.Arguments,
+    top1_results: zml.Exe.Results,
     find_junk_rows_exe: zml.Exe,
     find_junk_rows_args: zml.Exe.Arguments,
     find_junk_rows_results: zml.Exe.Results,
@@ -281,6 +325,9 @@ pub const ModelExes = struct {
         self.similarity_matrix_exe.deinit();
         self.similarity_matrix_args.deinit(allocator);
         self.similarity_matrix_results.deinit(allocator);
+        self.similarity_matrix_normalized_exe.deinit();
+        self.similarity_matrix_normalized_args.deinit(allocator);
+        self.similarity_matrix_normalized_results.deinit(allocator);
         self.get_lm_head_exe.deinit();
         self.get_lm_head_args.deinit(allocator);
         self.get_lm_head_results.deinit(allocator);
@@ -302,6 +349,9 @@ pub const ModelExes = struct {
         self.score_exe.deinit();
         self.score_args.deinit(allocator);
         self.score_results.deinit(allocator);
+        self.top1_exe.deinit();
+        self.top1_args.deinit(allocator);
+        self.top1_results.deinit(allocator);
         self.find_junk_rows_exe.deinit();
         self.find_junk_rows_args.deinit(allocator);
         self.find_junk_rows_results.deinit(allocator);
@@ -312,7 +362,7 @@ pub const ModelExes = struct {
 };
 
 pub const Model = struct {
-    pub const row_batch_size: i64 = 2048;
+    pub const row_batch_size: i64 = 512;
     pub const row_k_neighbors: i64 = 256;
     pub const top_rows_count: i64 = 100;
 
@@ -371,11 +421,13 @@ pub const Model = struct {
     }
 
     pub fn get_lm_head(self: Model) zml.Tensor {
-        return self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
+        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
+        return centerRows(lm_head);
     }
 
     pub fn get_lm_head_normalized(self: Model) zml.Tensor {
-        return normalizeRows(self.get_lm_head());
+        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
+        return centerRows(normalizeRows(centerRows(lm_head)));
     }
 
     pub fn get_lm_head_row_norms(self: Model) zml.Tensor {
@@ -418,13 +470,18 @@ pub const Model = struct {
     pub fn scoreTokens(self: Model, embedding: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
         const normalized_lm_head = normalizeRows(lm_head);
-        const normalized_embedding = normalizeRows(embedding);
         const logits = lm_head.dot(embedding, .d).squeeze(.s);
-        const similarities = normalized_lm_head.dot(normalized_embedding, .d).squeeze(.s);
+        const similarities = normalized_lm_head.dot(embedding, .d).squeeze(.s);
         const sorted = logits.softmax(.voc).sort(.voc, .{ .descending = true });
         const sorted_similarity_indices = sorted.indices.rename(.{ .voc = .rank });
         const sorted_similarities = similarities.gather(.{ .voc = sorted_similarity_indices }, .{}).rename(.{ .rank = .voc });
         return .{ sorted.values, sorted.indices, sorted_similarities };
+    }
+
+    pub fn top1Token(self: Model, embedding: zml.Tensor) zml.Tensor {
+        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
+        const scores = lm_head.dot(embedding, .d).squeeze(.s);
+        return scores.argMax(.voc).indices.convert(.u32);
     }
 
     pub fn analyze_top_rows(self: Model) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
@@ -476,19 +533,27 @@ pub const Model = struct {
 
     pub fn similarityMatrix(self: Model, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        const batch_slice: zml.Tensor.DynSlice = .{ .start = row_start, .len = row_batch_size };
-        const normalized = normalizeRows(lm_head);
+        return similarityMatrixForRows(centerRows(lm_head), row_start);
+    }
 
-        const rows = normalized.rename(.{ .voc = .row }).dynamicSlice1d(lm_head.axis(.voc), batch_slice);
-        const cols = normalized.rename(.{ .voc = .col });
+    pub fn similarityMatrixNormalized(self: Model, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
+        return similarityMatrixForRows(centerRows(normalizeRows(centerRows(lm_head))), row_start);
+    }
+
+    fn similarityMatrixForRows(lm_head: zml.Tensor, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        const batch_slice: zml.Tensor.DynSlice = .{ .start = row_start, .len = row_batch_size };
+
+        const rows = lm_head.rename(.{ .voc = .row }).dynamicSlice1d(lm_head.axis(.voc), batch_slice);
+        const cols = lm_head.rename(.{ .voc = .col });
         const similarity = rows.dot(cols, .d);
 
-        // penalize self-similarity by setting -1.0 on the diagonal
+        // Exclude self-similarity from nearest-neighbor sorting.
         const row_ids = zml.Tensor.iota(similarity.shape(), .row).add(row_start.convert(.i32));
         const col_ids = zml.Tensor.iota(similarity.shape(), .col);
         const self_mask = row_ids.cmp(.EQ, col_ids);
-        const minus_one = zml.Tensor.scalar(-1.0, .f32).broad(similarity.shape());
-        const similarity_for_sort = self_mask.select(minus_one, similarity);
+        const minus_inf = zml.Tensor.scalar(-std.math.inf(f32), .f32).broad(similarity.shape());
+        const similarity_for_sort = self_mask.select(minus_inf, similarity);
 
         const nearest = similarity_for_sort.topK(.{ .nearest = .col }, row_k_neighbors, .{ .descending = true }).indices.convert(.u64);
 
@@ -499,6 +564,11 @@ pub const Model = struct {
         const squared_norm = lm_head.mul(lm_head).sum(.d);
         const inv_norm = squared_norm.rsqrt();
         return lm_head.mul(inv_norm.broad(lm_head.shape()));
+    }
+
+    fn centerRows(lm_head: zml.Tensor) zml.Tensor {
+        const row_average = lm_head.mean(.voc).squeeze(.voc);
+        return lm_head.sub(row_average.broad(lm_head.shape()));
     }
 
     fn normalizeVector(vector: zml.Tensor) zml.Tensor {
