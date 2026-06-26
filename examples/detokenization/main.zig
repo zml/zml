@@ -352,7 +352,7 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
         norm += value * value;
     }
     norm = @sqrt(norm);
-    std.log.info("Lm_head centering translation norm: {f}", .{norm});
+    std.log.info("Lm_head centering translation norm: {d}", .{norm});
     
 
     std.log.info("Get lm_head_normalized", .{});
