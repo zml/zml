@@ -5,6 +5,7 @@ copy_file(
     name = "libpjrt_metal.dylib",
     src = "libpjrt_c_api_gpu_plugin.dylib",
     out = "lib/libpjrt_c_api_gpu_plugin.dylib",
+    allow_symlink = True,
 )
 
 copy_to_directory(
@@ -13,8 +14,6 @@ copy_to_directory(
         ":libpjrt_metal.dylib",
     ],
     add_directory_to_runfiles = False,
-    allow_overwrites = True,
-    hardlink = "auto",
     include_external_repositories = ["**"],
 )
 
