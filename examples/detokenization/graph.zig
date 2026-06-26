@@ -16,7 +16,7 @@ pub const GraphParams = struct {
     k_max: usize = 64,
     search_budget: usize = 1024,
     alpha: f32 = 1.3,
-    vamana_passes: usize = 2,
+    vamana_passes: usize = 3,
     top_k: usize = 16,
     L: usize = 256,
 };
