@@ -690,7 +690,7 @@ pub const Graph = struct {
                 // the candidates are current_node's neighbors and the visited nodes
                 // since both lists are sorted and contain unique nodes, we can build
                 // the sorted list of candidates in one linear forward pass
-                self.greedySearchNode(current_node);
+                self.greedySearchNodeLazy(current_node);
                 if (self.visited[0].node == current_node) {
                     // if current_node was found, we could decide the connectedness is ok
                     // and continue. this reduces the pressure on nb_neighbors for each node,

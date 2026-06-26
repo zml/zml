@@ -504,7 +504,7 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *graph.Graph) !void {
         for (0..n) |embed_index| {
             const embed = embed_slice.constItems(f32)[embed_index * d..(embed_index + 1) * d];
             
-            g.greedySearch(embed);
+            g.greedySearchLazy(embed);
 
             const nb_visited = g.nb_visited;
             total_visited += nb_visited;
