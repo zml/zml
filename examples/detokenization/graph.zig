@@ -638,7 +638,7 @@ pub const Graph = struct {
                     break;
                 }
             }
-            if (!pruned) {
+            if (!pruned or candidates.len <= self.params.k_max) {
                 self.neighbors[end_neigh] = candidate.node;
                 self.nb_neighbors[base] += 1;
                 end_neigh += 1;
