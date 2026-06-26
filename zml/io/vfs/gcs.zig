@@ -129,6 +129,7 @@ pub const GCS = struct {
             backend: *GCS,
             uri: std.Uri,
             path: []const u8,
+            authorization: std.http.Client.Request.Headers.Value,
         };
 
         const Job = struct {
@@ -146,16 +147,13 @@ pub const GCS = struct {
                     .{ job.file_offset, job.file_offset + @as(u64, @intCast(job.chunk_len - 1)) },
                 ) catch unreachable;
 
-                var authorization_buf: ["Bearer ".len + OAuthToken.Size]u8 = undefined;
-                const authorization = job.batch.backend.getOrRefreshTokenInto(&authorization_buf) catch |err| return err;
-
                 var req = client.request(
                     .GET,
                     job.batch.uri,
                     .{
                         .headers = .{
                             .accept_encoding = .{ .override = "identity" },
-                            .authorization = authorization,
+                            .authorization = job.batch.authorization,
                         },
                         .extra_headers = &.{.{ .name = "Range", .value = range_header }},
                     },
@@ -191,14 +189,12 @@ pub const GCS = struct {
     };
 
     const Token = struct {
-        const ExpirySkewSeconds = 60;
-
         header: []u8,
         expires_at: std.Io.Timestamp,
 
         fn expired(self: *const Token, io_: std.Io) bool {
             const now: std.Io.Timestamp = .now(io_, .real);
-            return now.addDuration(.fromSeconds(ExpirySkewSeconds)).toSeconds() >= self.expires_at.toSeconds();
+            return now.toSeconds() >= self.expires_at.toSeconds();
         }
     };
 
@@ -233,7 +229,6 @@ pub const GCS = struct {
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
     mutex: std.Io.Mutex = .init,
-    token_mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     config: Config,
     token: Token,
@@ -449,18 +444,15 @@ pub const GCS = struct {
         };
     }
 
-    fn getOrRefreshTokenInto(self: *GCS, out_buffer: []u8) !std.http.Client.Request.Headers.Value {
+    fn getOrRefreshToken(self: *GCS) !std.http.Client.Request.Headers.Value {
         if (self.config.credentials == null) {
             return .omit;
         }
 
-        self.token_mutex.lockUncancelable(self.base.inner);
-        defer self.token_mutex.unlock(self.base.inner);
-
         if (self.token.expired(self.base.inner)) {
             try self.refreshToken();
         }
-        return .{ .override = try std.fmt.bufPrint(out_buffer, "{s}", .{self.token.header}) };
+        return .{ .override = self.token.header };
     }
 
     pub fn deinit(self: *GCS) void {
@@ -959,12 +951,11 @@ pub const GCS = struct {
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = try self.resolvePath(dir, sub_path, &path_buffer);
         const uri = self.gcsUri(path);
-        var authorization_buf: ["Bearer ".len + OAuthToken.Size]u8 = undefined;
         var req = try self.client.request(.HEAD, uri, .{
             .redirect_behavior = .not_allowed,
             .headers = .{
                 .accept_encoding = .{ .override = "identity" },
-                .authorization = try self.getOrRefreshTokenInto(&authorization_buf),
+                .authorization = try self.getOrRefreshToken(),
             },
             .extra_headers = &.{},
         });
@@ -1004,6 +995,7 @@ pub const GCS = struct {
             .backend = self,
             .uri = uri,
             .path = handle.uri,
+            .authorization = try self.getOrRefreshToken(),
         };
 
         for (jobs, 0..) |*job, i| {
