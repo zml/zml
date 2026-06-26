@@ -331,7 +331,7 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     try g.testNswExtention(&sampler);
 
     zml_handler.tic(&zml_handler.timers.graph_search_tot);
-    try testEmbedGraphSearch(zml_handler, &g);
+    try testEmbedGraphSearch(zml_handler, &g, &sampler);
     zml_handler.toc(&zml_handler.timers.graph_search_tot);
 }
 
@@ -461,7 +461,7 @@ pub fn testTokenSvdSearch(_: *Zml_handler, lm_head_rot: zml.Slice, svd: *svd_.Sv
 }
 
 
-pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *graph.Graph) !void {
+pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *graph.Graph, sampler: *sampling.Sampler) !void {
     std.log.info("Test embed graph search", .{});
 
     var total_count: usize = 0;
@@ -514,7 +514,12 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *graph.Graph) !void {
             for (0..g.L) |i| {
                 if (g.visited[i].node == top1[embed_index]) found_top1 = true;
             }
-            if (found_top1) found_top1_count += 1;
+            if (found_top1) {
+                found_top1_count += 1;
+            } else {
+                std.log.info("Missed top1, id {d} str {s}", .{ top1[embed_index], try tokens.tokenString(sampler.tokenizer, top1[embed_index], sampler.allocator) });
+                std.log.info("Found instead {d} str {s}", .{ g.visited[0].node, try tokens.tokenString(sampler.tokenizer, g.visited[0].node, sampler.allocator) });
+            }
         }
     }
 
