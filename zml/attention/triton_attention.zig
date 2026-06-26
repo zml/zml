@@ -20,8 +20,6 @@ fn isOneapiTarget() bool {
 fn use2dKernel(all_decode: bool, batch_size: usize, num_kv_heads: usize) bool {
     // Intel decode spills the 2D whole-sequence kernel; force the 3D split-K path.
     if (all_decode and isOneapiTarget()) return false;
-
-    // Match vLLM's Triton attention policy on CUDA:
     // prefill uses 2D; decode uses 3D until the batch is large enough to
     // provide at least 128 2D launch programs across KV heads.
     if (all_decode) {
@@ -104,7 +102,6 @@ fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     num_segments = std.math.ceilPowerOfTwoAssert(usize, num_segments);
     num_segments = @min(num_segments, 128);
     if (options.all_decode and !isOneapiTarget()) {
-        // Match vLLM's Triton decode path
         // Keep the number of segments small to then limit reduce cost
         // Didn't change the computation of Intel decode at the momment
         // Need to be tested
