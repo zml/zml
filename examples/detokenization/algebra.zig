@@ -185,8 +185,9 @@ const MatrixCandidate = struct {
 pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *Model_handler, similarity_matrix: *SimilarityMatrix, normalized_rows: bool) !void {
     std.log.info("Test similarity matrix", .{});
 
-    const lm_head = try getLmHead(zml_handler, model_handler);
+    const lm_head, const lm_head_translation = try getLmHead(zml_handler, model_handler);
     defer lm_head.free(zml_handler.allocator);
+    defer lm_head_translation.free(zml_handler.allocator);
 
     const n: usize = @intCast(lm_head.shape.dim(.voc));
     const d: usize = @intCast(lm_head.shape.dim(.d));
@@ -269,20 +270,38 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *Model_han
     std.log.info("Similarity matrix kNN test passed: 100 random rows, k={d}", .{similarity_matrix.k});
 }
 
-pub fn getLmHead(zml_handler: *Zml_handler, model_handler: *Model_handler) !zml.Slice {
+pub fn getLmHead(zml_handler: *Zml_handler, model_handler: *Model_handler) !struct { zml.Slice, zml.Slice } {
     model_handler.exes.get_lm_head_args.set(.{model_handler.model_buffers});
     model_handler.exes.get_lm_head_exe.call(model_handler.exes.get_lm_head_args, &model_handler.exes.get_lm_head_results);
-    var lm_head_buffer = model_handler.exes.get_lm_head_results.get(zml.Buffer);
+    var lm_head_buffer: zml.Buffer = undefined;
+    var translation_buffer: zml.Buffer = undefined;
+    model_handler.exes.get_lm_head_results.fill(.{ &lm_head_buffer, &translation_buffer });
     defer lm_head_buffer.deinit();
-    return lm_head_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer translation_buffer.deinit();
+    const lm_head = try lm_head_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    errdefer lm_head.free(zml_handler.allocator);
+    const translation = try translation_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    return .{
+        lm_head,
+        translation,
+    };
 }
 
-pub fn getLmHeadNormalized(zml_handler: *Zml_handler, model_handler: *Model_handler) !zml.Slice {
+pub fn getLmHeadNormalized(zml_handler: *Zml_handler, model_handler: *Model_handler) !struct { zml.Slice, zml.Slice } {
     model_handler.exes.get_lm_head_normalized_args.set(.{model_handler.model_buffers});
     model_handler.exes.get_lm_head_normalized_exe.call(model_handler.exes.get_lm_head_normalized_args, &model_handler.exes.get_lm_head_normalized_results);
-    var lm_head_normalized_buffer = model_handler.exes.get_lm_head_normalized_results.get(zml.Buffer);
+    var lm_head_normalized_buffer: zml.Buffer = undefined;
+    var translation_buffer: zml.Buffer = undefined;
+    model_handler.exes.get_lm_head_normalized_results.fill(.{ &lm_head_normalized_buffer, &translation_buffer });
     defer lm_head_normalized_buffer.deinit();
-    return lm_head_normalized_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    defer translation_buffer.deinit();
+    const lm_head_normalized = try lm_head_normalized_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    errdefer lm_head_normalized.free(zml_handler.allocator);
+    const translation = try translation_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    return .{
+        lm_head_normalized,
+        translation,
+    };
 }
 
 pub fn getLmHeadRotated(zml_handler: *Zml_handler, model_handler: *Model_handler, rotation: zml.Slice) !struct { zml.Slice, zml.Slice } {

@@ -420,14 +420,18 @@ pub const Model = struct {
         return self.lm_head.shape();
     }
 
-    pub fn get_lm_head(self: Model) zml.Tensor {
+    pub fn get_lm_head(self: Model) struct { zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        return centerRows(lm_head);
+        const centered, const translation = centerRows(lm_head);
+        return .{ centered, translation };
     }
 
-    pub fn get_lm_head_normalized(self: Model) zml.Tensor {
+    pub fn get_lm_head_normalized(self: Model) struct { zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        return centerRows(normalizeRows(centerRows(lm_head)));
+        const centered, _ = centerRows(lm_head);
+        const normalized = normalizeRows(centered);
+        const recentered, const translation = centerRows(normalized);
+        return .{ recentered, translation };
     }
 
     pub fn get_lm_head_row_norms(self: Model) zml.Tensor {
@@ -533,12 +537,16 @@ pub const Model = struct {
 
     pub fn similarityMatrix(self: Model, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        return similarityMatrixForRows(centerRows(lm_head), row_start);
+        const centered, _ = centerRows(lm_head);
+        return similarityMatrixForRows(centered, row_start);
     }
 
     pub fn similarityMatrixNormalized(self: Model, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        return similarityMatrixForRows(centerRows(normalizeRows(centerRows(lm_head))), row_start);
+        const centered, _ = centerRows(lm_head);
+        const normalized = normalizeRows(centered);
+        const recentered, _ = centerRows(normalized);
+        return similarityMatrixForRows(recentered, row_start);
     }
 
     fn similarityMatrixForRows(lm_head: zml.Tensor, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
@@ -566,9 +574,9 @@ pub const Model = struct {
         return lm_head.mul(inv_norm.broad(lm_head.shape()));
     }
 
-    fn centerRows(lm_head: zml.Tensor) zml.Tensor {
+    fn centerRows(lm_head: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const row_average = lm_head.mean(.voc).squeeze(.voc);
-        return lm_head.sub(row_average.broad(lm_head.shape()));
+        return .{ lm_head.sub(row_average.broad(lm_head.shape())), row_average };
     }
 
     fn normalizeVector(vector: zml.Tensor) zml.Tensor {
