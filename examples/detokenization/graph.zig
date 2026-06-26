@@ -812,7 +812,7 @@ pub const Graph = struct {
         std.log.info("nb tic toc: {}", .{self.zml_handler.nb_tictoc});
     }
 
-    pub fn testNswExtention(self: *Graph, _: *sampling.Sampler) void {
+    pub fn testNswExtention(self: *Graph, sampler: *sampling.Sampler) !void {
         log.info("Test NSW extension", .{});
         var exact_first_count: usize = 0;
         var valid_count: usize = 0;
@@ -828,11 +828,16 @@ pub const Graph = struct {
             total_visited += nb_visited;
             min_visited = @min(min_visited, nb_visited);
             max_visited = @max(max_visited, nb_visited);
+            var found = false;
             for (0..self.L) |i| {
                 if (self.visited[i].node == node) {
                     exact_first_count += 1;
+                    found = true;
                     break;
                 }
+            }
+            if (!found) {
+                std.log.info("Token {d} not found {s}", .{node, try tokens.tokenString(sampler.tokenizer, node, self.allocator)});
             }
 
             if (valid_count == 1 or valid_count % 10000 == 0) {
