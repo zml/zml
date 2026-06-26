@@ -11,7 +11,7 @@ const ParallelRead = struct {
     const Pool = parallel_read.Pool(Job);
 
     const Batch = struct {
-        core: parallel_read.Batch,
+        executor: parallel_read.BatchExecutor,
         uri: std.Uri,
         url: []const u8,
         authorization: std.http.Client.Request.Headers.Value,
@@ -800,7 +800,7 @@ pub const HF = struct {
         const uri: std.Uri = try .parse(url);
 
         var batch: ParallelRead.Batch = .{
-            .core = .{ .pending = .init(pending) },
+            .executor = .{ .pending = .init(pending) },
             .uri = uri,
             .url = url,
             .authorization = self.authorization,
@@ -818,8 +818,8 @@ pub const HF = struct {
         }
 
         try self.read_pool.job_queue.putAll(self.base.inner, jobs);
-        batch.core.waitUncancelable(self.base.inner);
-        if (batch.core.firstError()) |err| return err;
+        batch.executor.waitUncancelable(self.base.inner);
+        if (batch.executor.firstError()) |err| return err;
 
         return read_size;
     }

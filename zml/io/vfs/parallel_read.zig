@@ -8,30 +8,30 @@ pub const InitOpts = struct {
     queue_capacity: usize = 64,
 };
 
-pub const Batch = struct {
+pub const BatchExecutor = struct {
     pending: std.atomic.Value(u32),
     err: std.atomic.Value(u16) = .init(0),
 
-    pub fn failed(batch: *Batch) bool {
+    pub fn failed(batch: *BatchExecutor) bool {
         return batch.err.load(.acquire) != 0;
     }
 
-    pub fn fail(batch: *Batch, err: anyerror) void {
+    pub fn fail(batch: *BatchExecutor, err: anyerror) void {
         _ = batch.err.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
     }
 
-    pub fn firstError(batch: *Batch) ?anyerror {
+    pub fn firstError(batch: *BatchExecutor) ?anyerror {
         const err = batch.err.load(.acquire);
         return if (err == 0) null else @errorFromInt(err);
     }
 
-    pub fn completeOne(batch: *Batch, io: std.Io) void {
+    pub fn completeOne(batch: *BatchExecutor, io: std.Io) void {
         const previous = batch.pending.fetchSub(1, .release);
         std.debug.assert(previous > 0);
         if (previous == 1) io.futexWake(u32, &batch.pending.raw, 1);
     }
 
-    pub fn waitUncancelable(batch: *Batch, io: std.Io) void {
+    pub fn waitUncancelable(batch: *BatchExecutor, io: std.Io) void {
         while (true) {
             const pending = batch.pending.load(.acquire);
             if (pending == 0) return;
@@ -82,11 +82,11 @@ pub fn Pool(comptime Job: type) type {
             while (true) {
                 const job = pool.job_queue.getOne(io) catch break;
 
-                if (!job.batch.core.failed()) {
-                    if (job.perform(pool.client)) |err| job.batch.core.fail(err);
+                if (!job.batch.executor.failed()) {
+                    if (job.perform(pool.client)) |err| job.batch.executor.fail(err);
                 }
 
-                job.batch.core.completeOne(io);
+                job.batch.executor.completeOne(io);
             }
         }
     };

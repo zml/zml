@@ -125,7 +125,7 @@ pub const GCS = struct {
         const Pool = parallel_read.Pool(Job);
 
         const Batch = struct {
-            core: parallel_read.Batch,
+            executor: parallel_read.BatchExecutor,
             backend: *GCS,
             uri: std.Uri,
             path: []const u8,
@@ -1001,7 +1001,7 @@ pub const GCS = struct {
         const pending: u32 = std.math.cast(u32, job_count) orelse return error.SystemResources;
 
         var batch: ParallelRead.Batch = .{
-            .core = .{ .pending = .init(pending) },
+            .executor = .{ .pending = .init(pending) },
             .backend = self,
             .uri = uri,
             .path = handle.uri,
@@ -1019,8 +1019,8 @@ pub const GCS = struct {
         }
 
         try self.read_pool.job_queue.putAll(self.base.inner, jobs);
-        batch.core.waitUncancelable(self.base.inner);
-        if (batch.core.firstError()) |err| return err;
+        batch.executor.waitUncancelable(self.base.inner);
+        if (batch.executor.firstError()) |err| return err;
 
         return read_size;
     }
