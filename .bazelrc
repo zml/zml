@@ -117,6 +117,10 @@ common:remote   --nobuild_runfile_links
 common:remote   --remote_timeout=3600
 common:remote   --noexperimental_throttle_remote_action_building
 common:remote   --remote_cache_compression
+# Re-runs actions instead of failing on transient lost remote/disk cache inputs.
+common:remote   --rewind_lost_inputs
+# Falls back to local downloads if the remote asset downloader is unavailable.
+common:remote   --experimental_remote_downloader_local_fallback
 common:remote   --grpc_keepalive_time=30s
 common:remote   --jobs=2000
 common:remote   --extra_execution_platforms=@zml//:rbe_platform
