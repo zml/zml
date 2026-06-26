@@ -41,8 +41,6 @@ common          --experimental_cc_shared_library
 common          --incompatible_use_cc_configure_from_rules_cc
 common          --incompatible_autoload_externally=+@rules_cc,+@rules_python,+@rules_shell,+@rules_java
 
-common          --experimental_platform_in_output_dir
-
 # Faster sandbox speeds
 build           --experimental_inmemory_sandbox_stashes
 
