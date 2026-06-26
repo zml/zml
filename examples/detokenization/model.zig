@@ -422,7 +422,8 @@ pub const Model = struct {
 
     pub fn get_lm_head(self: Model) zml.Tensor {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        return centerRows(lm_head);
+        return lm_head;
+        //return centerRows(lm_head);
     }
 
     pub fn get_lm_head_normalized(self: Model) zml.Tensor {
@@ -533,7 +534,7 @@ pub const Model = struct {
 
     pub fn similarityMatrix(self: Model, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        const centered = centerRows(lm_head);
+        const centered = lm_head;//centerRows(lm_head);
         return similarityMatrixForRows(centered, row_start);
     }
 
