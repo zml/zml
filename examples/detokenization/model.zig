@@ -362,7 +362,7 @@ pub const ModelExes = struct {
 };
 
 pub const Model = struct {
-    pub const row_batch_size: i64 = 2048;
+    pub const row_batch_size: i64 = 8192;
     pub const row_k_neighbors: i64 = 256;
     pub const top_rows_count: i64 = 100;
 
