@@ -192,6 +192,7 @@ pub fn printZmlLogo(io: std.Io) !void {
     try writer.interface.flush();
 }
 
+
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
     defer http_client.deinit();
@@ -220,6 +221,7 @@ pub fn main(init: std.process.Init) !void {
 
     zml_handler.timers.print();
 }
+
 
 pub fn runLlm(zml_handler: *Zml_handler) !void {
     var llm = try llm_.Llm_handler.init(zml_handler);
@@ -293,6 +295,7 @@ pub fn run(zml_handler: *Zml_handler) !void {
     defer zml_handler.allocator.free(inspi_result);
     zml_handler.mem.check(0);
 }
+
 
 pub fn runTestsSvd(zml_handler: *Zml_handler) !void {
     var model_handler = try model_.Model_handler.init(zml_handler);
@@ -443,6 +446,7 @@ pub fn runTestsMrt(zml_handler: *Zml_handler) !void {
     std.log.info("Exact MRT : nb edges: {d}", .{mrt.nbEdges()});
 }
 
+
 pub fn testTokenGraphSearch(lm_head: zml.Slice, g: *graph.Graph) void {
     std.log.info("Test token graph search", .{});
     const n: usize = @intCast(lm_head.shape.dim(.voc));
@@ -516,6 +520,7 @@ pub fn testTokenSvdSearch(_: *Zml_handler, lm_head_rot: zml.Slice, svd: *svd_.Sv
         std.log.info("SVD sample: query={d} real={d} safe={d} unsafe={d}", .{ row_id, real_tok, safe_tok, unsafe_tok });
     }
 }
+
 
 pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *graph.Graph) !void {
     std.log.info("Test embed graph search", .{});
@@ -642,6 +647,7 @@ pub fn testEmbedCoarseSearch(zml_handler: *Zml_handler, sampler: *sampling.Sampl
         }
     }
 }
+
 
 fn rotateEmbedding(u: zml.Slice, embed: []const f32, rot_embed: []f32) void {
     const d = embed.len;

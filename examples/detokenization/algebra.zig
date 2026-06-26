@@ -39,7 +39,7 @@ pub const SimilarityMatrix = struct {
 
     pub fn nearestNeighbor(self: *SimilarityMatrix, row: usize, pos: usize) usize {
         const index = row * self.k + pos;
-        return @intCast(self.nearest_neighbors.constItems(i32)[index]);
+        return @intCast(self.nearest_neighbors.constItems(u64)[index]);
     }
 
     pub fn deinit(self: *SimilarityMatrix, allocator: std.mem.Allocator) void {
