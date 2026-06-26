@@ -3,97 +3,18 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const VFSBase = @import("base.zig").VFSBase;
+const parallel_read = @import("parallel_read.zig");
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
 
 const ParallelRead = struct {
-    const Pool = struct {
-        pub const InitOpts = struct {
-            chunk_size: usize = 10 * 1024 * 1024,
-            num_workers: usize = 16,
-            queue_capacity: usize = 64,
-        };
-
-        group: std.Io.Group = .init,
-        job_queue: std.Io.Queue(Job),
-        queue_buf: []Job,
-        client: *std.http.Client,
-        chunk_size: usize,
-
-        fn init(self: *Pool, allocator: std.mem.Allocator, io: std.Io, client: *std.http.Client, opts: InitOpts) !void {
-            stdx.debug.assert(opts.num_workers > 0, "Pool must have at least one worker", .{});
-            stdx.debug.assert(opts.chunk_size > 0, "Pool must have a positive download chunk size", .{});
-            stdx.debug.assert(opts.queue_capacity > 0, "Pool must have a positive queue capacity", .{});
-
-            const queue_buf = try allocator.alloc(Job, opts.queue_capacity);
-            errdefer allocator.free(queue_buf);
-
-            self.* = .{
-                .client = client,
-                .chunk_size = opts.chunk_size,
-                .job_queue = .init(queue_buf),
-                .queue_buf = queue_buf,
-            };
-            errdefer self.group.cancel(io);
-
-            for (0..opts.num_workers) |_| {
-                try self.group.concurrent(io, worker, .{ self, io });
-            }
-        }
-
-        fn deinit(self: *Pool, allocator: std.mem.Allocator, io: std.Io) void {
-            self.job_queue.close(io);
-            self.group.cancel(io);
-
-            allocator.free(self.queue_buf);
-        }
-
-        fn worker(pool: *Pool, io: std.Io) std.Io.Cancelable!void {
-            while (true) {
-                const job = pool.job_queue.getOne(io) catch break;
-
-                if (!job.batch.failed()) {
-                    if (job.perform(pool.client)) |err| job.batch.fail(err);
-                }
-
-                job.batch.completeOne(io);
-            }
-        }
-    };
+    const Pool = parallel_read.Pool(Job);
 
     const Batch = struct {
+        core: parallel_read.Batch,
         uri: std.Uri,
         url: []const u8,
         authorization: std.http.Client.Request.Headers.Value,
-        pending: std.atomic.Value(u32),
-        err: std.atomic.Value(u16) = .init(0),
-
-        fn failed(batch: *Batch) bool {
-            return batch.err.load(.acquire) != 0;
-        }
-
-        fn fail(batch: *Batch, err: anyerror) void {
-            _ = batch.err.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
-        }
-
-        fn firstError(batch: *Batch) ?anyerror {
-            const err = batch.err.load(.acquire);
-            return if (err == 0) null else @errorFromInt(err);
-        }
-
-        fn completeOne(batch: *Batch, io: std.Io) void {
-            const previous = batch.pending.fetchSub(1, .release);
-            std.debug.assert(previous > 0);
-            if (previous == 1) io.futexWake(u32, &batch.pending.raw, 1);
-        }
-
-        fn waitUncancelable(batch: *Batch, io: std.Io) void {
-            while (true) {
-                const pending = batch.pending.load(.acquire);
-                if (pending == 0) return;
-                io.futexWaitUncancelable(u32, &batch.pending.raw, pending);
-            }
-        }
     };
 
     pub const Job = struct {
@@ -103,7 +24,7 @@ const ParallelRead = struct {
         chunk_len: usize,
         batch: *Batch,
 
-        fn perform(job: Job, client: *std.http.Client) ?anyerror {
+        pub fn perform(job: Job, client: *std.http.Client) ?anyerror {
             var range_buf: [64]u8 = undefined;
             const range_header = std.fmt.bufPrint(
                 &range_buf,
@@ -135,58 +56,18 @@ const ParallelRead = struct {
                 var it = res.head.iterateHeaders();
                 while (it.next()) |header| {
                     if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                        break :blk parseContentRange(header.value);
+                        break :blk parallel_read.parseContentRange(header.value);
                     }
                 }
                 break :blk null;
             };
 
             const reader = res.reader(&.{});
-
-            if (content_range) |cr| {
-                if (cr.start > job.file_offset) return error.InvalidContentRange;
-                if (cr.start < job.file_offset) {
-                    reader.discardAll(job.file_offset - cr.start) catch |err| return err;
-                }
-            }
-
-            var remaining = job.chunk_len;
-            var skip = job.chunk_offset;
-
-            for (job.data) |buf| {
-                if (skip >= buf.len) {
-                    skip -= buf.len;
-                    continue;
-                }
-
-                const destination = buf[skip..][0..@min(remaining, buf.len - skip)];
-                reader.readSliceAll(destination) catch |err| return err;
-                remaining -= destination.len;
-                if (remaining == 0) break;
-                skip = 0;
-            }
+            parallel_read.readChunk(reader, content_range, job.file_offset, job.data, job.chunk_offset, job.chunk_len) catch |err| return err;
 
             return null;
         }
     };
-
-    const ContentRange = struct {
-        start: u64,
-        end: u64,
-        total: u64,
-    };
-
-    fn parseContentRange(value: []const u8) ?ContentRange {
-        const space = std.mem.indexOfScalar(u8, value, ' ') orelse return null;
-        const dash = std.mem.indexOfScalar(u8, value, '-') orelse return null;
-        const slash = std.mem.indexOfScalar(u8, value, '/') orelse return null;
-
-        return .{
-            .start = std.fmt.parseInt(u64, value[space + 1 .. dash], 10) catch return null,
-            .end = std.fmt.parseInt(u64, value[dash + 1 .. slash], 10) catch return null,
-            .total = std.fmt.parseInt(u64, value[slash + 1 ..], 10) catch return null,
-        };
-    }
 };
 
 pub const API = struct {
@@ -234,7 +115,7 @@ const RepoKey = struct {
 
 pub const HF = struct {
     pub const InitOpts = struct {
-        read_pool: ParallelRead.Pool.InitOpts = .{},
+        read_pool: parallel_read.InitOpts = .{},
     };
 
     pub const Repo = struct {
@@ -919,10 +800,10 @@ pub const HF = struct {
         const uri: std.Uri = try .parse(url);
 
         var batch: ParallelRead.Batch = .{
+            .core = .{ .pending = .init(pending) },
             .uri = uri,
             .url = url,
             .authorization = self.authorization,
-            .pending = .init(pending),
         };
 
         for (jobs, 0..) |*job, i| {
@@ -937,8 +818,8 @@ pub const HF = struct {
         }
 
         try self.read_pool.job_queue.putAll(self.base.inner, jobs);
-        batch.waitUncancelable(self.base.inner);
-        if (batch.firstError()) |err| return err;
+        batch.core.waitUncancelable(self.base.inner);
+        if (batch.core.firstError()) |err| return err;
 
         return read_size;
     }

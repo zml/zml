@@ -8,6 +8,7 @@ zig_library(
         "gcs.zig",
         "hf.zig",
         "http.zig",
+        "parallel_read.zig",
         "s3.zig",
     ],
     main = "index.zig",
