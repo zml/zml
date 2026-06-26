@@ -17,12 +17,17 @@ fn isOneapiTarget() bool {
     return zml.module.CompilationContext.current().platform.target == .oneapi;
 }
 
-fn use2dKernel(head_size: usize, sliding_window: usize, all_decode: bool, max_seqlen_q: usize, max_seqlen_k: usize, target_num_prgms: usize, num_2d_prgms: usize) bool {
-    _ = head_size;
-    _ = max_seqlen_q;
+fn use2dKernel(all_decode: bool, batch_size: usize, num_kv_heads: usize) bool {
     // Intel decode spills the 2D whole-sequence kernel; force the 3D split-K path.
     if (all_decode and isOneapiTarget()) return false;
-    return sliding_window > 0 or max_seqlen_k <= 512 or num_2d_prgms > target_num_prgms;
+    // prefill uses 2D; decode uses 3D until the batch is large enough to
+    // provide at least 128 2D launch programs across KV heads.
+    if (all_decode) {
+        const seq_threshold_3d = @divFloor(128, num_kv_heads);
+        return batch_size > seq_threshold_3d;
+    }
+
+    return true;
 }
 
 pub const Config2D = struct {
@@ -96,6 +101,12 @@ fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     var num_segments = std.math.divCeil(usize, options.target_num_prgms, options.num_2d_prgms) catch unreachable;
     num_segments = std.math.ceilPowerOfTwoAssert(usize, num_segments);
     num_segments = @min(num_segments, 128);
+    if (options.all_decode and !isOneapiTarget()) {
+        // Keep the number of segments small to then limit reduce cost
+        // Didn't change the computation of Intel decode at the momment
+        // Need to be tested
+        num_segments = @min(num_segments, 16);
+    }
     const min_segments: usize = if (tile_size <= 16) 16 else 8;
     num_segments = @max(num_segments, min_segments);
     if (num_segments == min_segments) {
@@ -282,13 +293,9 @@ pub const paged = struct {
                     };
 
                     const use_2d_kernel = use2dKernel(
-                        paged_attention_opts.head_dim,
-                        paged_attention_opts.sliding_window,
                         paged_attention_opts.all_decode,
-                        paged_attention_opts.max_seqlen_q,
-                        paged_attention_opts.maxSeqLenK(),
-                        paged_attention_opts.target_num_prgms,
-                        paged_attention_opts.num_2d_prgms,
+                        paged_attention_opts.batch_size,
+                        paged_attention_opts.num_kv_heads,
                     );
                     const output = if (use_2d_kernel)
                         pagedAttention2d(parameters_, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts)
