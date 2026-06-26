@@ -44,7 +44,7 @@ pub fn loadSafetensorSlice(zml_handler: *Zml_handler, repo_uri: []const u8, entr
     const slice = try zml.Slice.alloc(zml_handler.allocator, tensor.shape);
     errdefer slice.free(zml_handler.allocator);
 
-    const io_buffer = try zml_handler.allocator.alloc(u8, 8 * 1024 * 1024);
+    const io_buffer = try zml_handler.allocator.alloc(u8, 128 * 1024 * 1024);
     defer zml_handler.allocator.free(io_buffer);
     var reader = try registry.reader(zml_handler.io, tensor_name, io_buffer);
     defer reader.deinit();
@@ -54,33 +54,30 @@ pub fn loadSafetensorSlice(zml_handler: *Zml_handler, repo_uri: []const u8, entr
 }
 
 
-pub fn getSlice(zml_handler: *Zml_handler, tensor_name: []const u8, dtype: anytype) !zml.Slice {
-    std.log.info("Getting slice {s}", .{tensor_name});
+pub fn getSlice(zml_handler: *Zml_handler, file_name: []const u8, tensor_name: []const u8, dtype: zml.dtype.DataType, transpose: bool) !zml.Slice {
+    //std.log.info("Getting slice {s}", .{tensor_name});
 
-    std.log.info("Init store", .{});
-    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
-    var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
+    //std.log.info("Init store", .{});
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.checkpoint);
+    var registry: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.io, repo, file_name);
     defer registry.deinit();
     var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
     defer store.deinit();
 
-    std.log.info("Init extractor", .{});
-    const model: TensorExtractor = .init(store.view(), tensor_name);
-    const shardings: main.Shardings = try .init(zml_handler.platform);
-    const shardings_arr = shardings.all();
+    //std.log.info("Init extractor", .{});
+    const model: TensorExtractor = .init(store.view(), tensor_name, transpose);
 
-    std.log.info("Compile extract", .{});
-    const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
-    const extract_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward, .{ dtype }, opts);
+    //std.log.info("Compile extract", .{});
+    const extract_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward, .{ dtype }, .{});
     defer extract_exe.deinit();
 
-    std.log.info("Load weights", .{});
-    var model_buffers = try model.load(zml_handler, &store, &shardings.all());
+    //std.log.info("Load weights", .{});
+    var model_buffers = try model.load(zml_handler, &store);
     defer TensorExtractor.unloadBuffers(&model_buffers);
 
-    std.log.info("Init slice and buffer", .{});
-    const slice: zml.Slice = try .alloc(zml_handler.allocator, .init(model.shape(), dtype));
-    var buffer: zml.Buffer = try .fromSlice(zml_handler.io, zml_handler.platform, slice, shardings.all()[0]);
+    //std.log.info("Init slice and buffer", .{});
+    const slice: zml.Slice = try .alloc(zml_handler.allocator, .init(model.shape(dtype), dtype));
+    var buffer: zml.Buffer = try .fromSlice(zml_handler.io, zml_handler.platform, slice, .replicated);
     defer buffer.deinit();
 
     var extract_args = try extract_exe.args(zml_handler.allocator);
@@ -88,27 +85,28 @@ pub fn getSlice(zml_handler: *Zml_handler, tensor_name: []const u8, dtype: anyty
     var extract_results = try extract_exe.results(zml_handler.allocator);
     defer extract_results.deinit(zml_handler.allocator);
 
-    std.log.info("Call extract", .{});
+    //std.log.info("Call extract", .{});
     extract_args.set(.{model_buffers});
     extract_exe.call(extract_args, &extract_results);
     extract_results.fill(.{&buffer});
 
     try buffer.toSlice(zml_handler.io, slice);
-    std.log.info("Return slice", .{});
+    //std.log.info("Return slice", .{});
     return slice;
 }
 
 const TensorExtractor = struct {
     tensor: zml.Tensor,
-    pub fn init(store: zml.io.TensorStore.View, tensor_name: []const u8) TensorExtractor {
+    transpose: bool,
+    pub fn init(store: zml.io.TensorStore.View, tensor_name: []const u8, transpose: bool) TensorExtractor {
         return .{
-            .tensor = store.createTensor(tensor_name, .{ .voc, .d }, .{ .voc = .replicated, .d = .replicated }),
+            .tensor = store.createTensor(tensor_name, .{ .d, .n }, .{ .d = .replicated, .n = .replicated }),
+            .transpose = transpose,
         };
     }
-    pub fn load(self: *const TensorExtractor, zml_handler: *Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.Sharding) !zml.Bufferized(TensorExtractor) {
+    pub fn load(self: *const TensorExtractor, zml_handler: *Zml_handler, store: *zml.io.TensorStore) !zml.Bufferized(TensorExtractor) {
         return zml.io.load(TensorExtractor, self, zml_handler.arena.allocator(), zml_handler.io, zml_handler.platform, store, .{
-            .shardings = shardings,
-            .parallelism = 1,
+            .parallelism = 16,
             .dma_chunks = 1,
             .dma_chunk_size = 128 * 1024 * 1024,
         });
@@ -116,11 +114,11 @@ const TensorExtractor = struct {
     pub fn unloadBuffers(self: *zml.Bufferized(TensorExtractor)) void {
         self.tensor.deinit();
     }
-    pub fn shape(self: TensorExtractor) zml.Shape {
-        return self.tensor.shape();
+    pub fn shape(self: TensorExtractor, dtype: zml.dtype.DataType) zml.Shape {
+        return if (self.transpose) zml.Shape.init(.{ .n = self.tensor.shape().dim(1), .d = self.tensor.shape().dim(0) }, dtype) else self.tensor.shape();
     }
-    pub fn forward(self: TensorExtractor, dtype: anytype) zml.Tensor {
-        return self.tensor.convert(dtype);
+    pub fn forward(self: TensorExtractor, dtype: zml.dtype.DataType) zml.Tensor {
+        return if (self.transpose) self.tensor.transpose(.{ .n, .d }).convert(dtype) else self.tensor.convert(dtype);
     }
 };
 

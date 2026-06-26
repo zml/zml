@@ -15,17 +15,18 @@ const Model_handler = model_.Model_handler;
 
 pub const SimilarityMatrix = struct {
     data: zml.Slice,
+    data_f32: []const f32,
     nearest_neighbors: zml.Slice,
     row_offsets: []usize,
     n: usize,
     d: usize,
     k: usize,
 
-    pub fn dist(self: *SimilarityMatrix, i: usize, j: usize) f32 {
+    pub inline fn dist(self: *SimilarityMatrix, i: usize, j: usize) f32 {
         const row = @min(i, j);
         const col = @max(i, j);
         const index = self.row_offsets[row] + col - row;
-        return self.data.constItems(f32)[index];
+        return self.data_f32[index];
     }
 
     pub fn initOffsets(self: *SimilarityMatrix) void {
@@ -48,9 +49,8 @@ pub const SimilarityMatrix = struct {
     }
 };
 
-
-pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *Model_handler) !SimilarityMatrix {
-    std.log.info("Compute similarity matrix", .{});
+pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *Model_handler, normalize: bool) !SimilarityMatrix {
+    std.log.info("Compute similarity matrix ({s})", .{if (normalize) "normalized" else "raw"});
     const allocator = zml_handler.allocator;
 
     const lm_head_shape = model_handler.model.shape();
@@ -84,11 +84,20 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *Model_
         var row_start_buffer = try zml.Buffer.scalar(zml_handler.io, zml_handler.platform, @as(u32, @intCast(kernel_row_start)), .u32);
         defer row_start_buffer.deinit();
 
-        model_handler.exes.similarity_matrix_args.set(.{ model_handler.model_buffers, row_start_buffer });
-        model_handler.exes.similarity_matrix_exe.call(model_handler.exes.similarity_matrix_args, &model_handler.exes.similarity_matrix_results);
+        if (normalize) {
+            model_handler.exes.similarity_matrix_normalized_args.set(.{ model_handler.model_buffers, row_start_buffer });
+            model_handler.exes.similarity_matrix_normalized_exe.call(model_handler.exes.similarity_matrix_normalized_args, &model_handler.exes.similarity_matrix_normalized_results);
+        } else {
+            model_handler.exes.similarity_matrix_args.set(.{ model_handler.model_buffers, row_start_buffer });
+            model_handler.exes.similarity_matrix_exe.call(model_handler.exes.similarity_matrix_args, &model_handler.exes.similarity_matrix_results);
+        }
         var similarity_batch_buffer: zml.Buffer = undefined;
         var nearest_batch_buffer: zml.Buffer = undefined;
-        model_handler.exes.similarity_matrix_results.fill(.{ &similarity_batch_buffer, &nearest_batch_buffer });
+        if (normalize) {
+            model_handler.exes.similarity_matrix_normalized_results.fill(.{ &similarity_batch_buffer, &nearest_batch_buffer });
+        } else {
+            model_handler.exes.similarity_matrix_results.fill(.{ &similarity_batch_buffer, &nearest_batch_buffer });
+        }
         defer similarity_batch_buffer.deinit();
         defer nearest_batch_buffer.deinit();
 
@@ -114,6 +123,7 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *Model_
 
     var matrix: SimilarityMatrix = .{
         .data = similarity_matrix_slice,
+        .data_f32 = similarity_matrix_slice.constItems(f32),
         .nearest_neighbors = nearest_neighbors_slice,
         .row_offsets = try allocator.alloc(usize, n),
         .n = n,
@@ -152,6 +162,7 @@ pub fn loadSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *Model_han
 
     var matrix: SimilarityMatrix = .{
         .data = data,
+        .data_f32 = data.constItems(f32),
         .nearest_neighbors = nearest_neighbors,
         .row_offsets = try allocator.alloc(usize, n),
         .n = n,
@@ -161,7 +172,6 @@ pub fn loadSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *Model_han
     matrix.initOffsets();
     return matrix;
 }
-
 
 const MatrixCandidate = struct {
     node: usize,
@@ -226,8 +236,6 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *Model_han
     std.log.info("1000 random pairs, max_abs_diff={d}, max_rel_diff={d}", .{ max_abs_diff, max_rel_diff });
     std.log.info("Test kNN", .{});
 
-    
-    
     const candidates = try zml_handler.allocator.alloc(MatrixCandidate, n - 1);
     defer zml_handler.allocator.free(candidates);
     var knn_mismatches: usize = 0;
@@ -261,7 +269,6 @@ pub fn testSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *Model_han
     std.log.info("Similarity matrix kNN test passed: 100 random rows, k={d}", .{similarity_matrix.k});
 }
 
-
 pub fn getLmHead(zml_handler: *Zml_handler, model_handler: *Model_handler) !zml.Slice {
     model_handler.exes.get_lm_head_args.set(.{model_handler.model_buffers});
     model_handler.exes.get_lm_head_exe.call(model_handler.exes.get_lm_head_args, &model_handler.exes.get_lm_head_results);
@@ -281,7 +288,7 @@ pub fn getLmHeadNormalized(zml_handler: *Zml_handler, model_handler: *Model_hand
 pub fn getLmHeadRotated(zml_handler: *Zml_handler, model_handler: *Model_handler, rotation: zml.Slice) !struct { zml.Slice, zml.Slice } {
     var rot_buffer = try zml.Buffer.fromSlice(zml_handler.io, zml_handler.platform, rotation, .replicated);
     defer rot_buffer.deinit();
-    model_handler.exes.rotated_lm_head_args.set(.{model_handler.model_buffers, rot_buffer});
+    model_handler.exes.rotated_lm_head_args.set(.{ model_handler.model_buffers, rot_buffer });
     model_handler.exes.rotated_lm_head_exe.call(model_handler.exes.rotated_lm_head_args, &model_handler.exes.rotated_lm_head_results);
     var buff1: zml.Buffer = undefined;
     var buff2: zml.Buffer = undefined;
@@ -298,7 +305,6 @@ pub fn getLmHeadRowNorms(zml_handler: *Zml_handler, model_handler: *Model_handle
     defer lm_head_row_norms_buffer.deinit();
     return lm_head_row_norms_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
 }
-
 
 pub fn getMrtOrder(zml_handler: *Zml_handler, model_handler: *Model_handler) ![]usize {
     model_handler.exes.sort_by_first_row_args.set(.{model_handler.model_buffers});
@@ -431,7 +437,6 @@ pub fn testRotationMatrix(matrix: zml.Slice) void {
 
     std.log.info("Rotation matrix test: max_diag_error={d}, max_off_diag_error={d}", .{ max_diag_error, max_off_diag_error });
 }
-
 
 pub fn analyzeTopRows(zml_handler: *Zml_handler, model_handler: *Model_handler) !void {
     std.log.info("Analyze top lm_head rows", .{});
