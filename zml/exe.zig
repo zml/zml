@@ -67,6 +67,29 @@ pub const Exe = struct {
         self.arena.deinit();
     }
 
+    pub fn clone(self: *const Exe, allocator: std.mem.Allocator) !Exe {
+        const executable = try self.exe.executable(self.platform.pjrt_api);
+        defer executable.deinit(self.platform.pjrt_api);
+
+        var serialized = try executable.serialize(self.platform.pjrt_api);
+        defer serialized.deinit();
+
+        const loaded_executable = try self.platform.pjrt_client.deserializeAndLoad(self.platform.pjrt_api, serialized.bytes);
+        errdefer loaded_executable.deinit(self.platform.pjrt_api);
+
+        return Exe.init(
+            allocator,
+            self.platform,
+            loaded_executable,
+            self.num_devices,
+            self.num_partitions,
+            self.input_shapes,
+            self.output_shapes,
+            self.input_shardings,
+            self.output_shardings,
+        );
+    }
+
     pub fn args(self: *const Exe, allocator: std.mem.Allocator) !Arguments {
         return Arguments.init(allocator, self.input_shapes, self.input_shardings, self.num_devices);
     }
