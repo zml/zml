@@ -567,13 +567,11 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *graph.Graph, lm_head_
 
         std.log.info("Test embed graph search task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
         for (0..n) |embed_index| {
-            const embed = zml.Slice.init(.init(.{ .s = 1, .d = d }, .f32), embed_slice.constItems(u8)[4 * embed_index * d .. 4 * (embed_index + 1) * d]);
-            const top1_token = top1[embed_index];
-            const embed_items = embed.constItems(f32);
-            for (query, embed_items, translation) |*dst, value, shift| {
-                dst.* = value - shift;
-            }
 
+            for (0..d) |i| {
+                query[i] = embed_slice.constItems(f32)[4 * embed_index * d + i] - translation[i];
+            }
+            
             g.greedySearch(query);
 
             const nb_visited = g.nb_visited;
@@ -584,7 +582,7 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *graph.Graph, lm_head_
             total_count += 1;
             var found_top1 = false;
             for (0..g.L) |i| {
-                if (g.visited[i].node == top1_token) found_top1 = true;
+                if (g.visited[i].node == top1[embed_index]) found_top1 = true;
             }
             if (found_top1) found_top1_count += 1;
         }
