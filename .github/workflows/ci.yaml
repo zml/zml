@@ -87,6 +87,10 @@ jobs:
             ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common --config=remote' || '' }}
             ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
             ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common:remote --remote_download_outputs=minimal' || '' }}
+            # CI cold runners can reuse reproducible external repo contents from BuildBuddy.
+            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'startup --experimental_remote_repo_contents_cache' || '' }}
+            # CI remote builds can dedupe large LLVM/Zig/XLA/container blobs when BuildBuddy supports chunking.
+            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common:remote --experimental_remote_cache_chunking' || '' }}
             ${{ matrix.self_hosted && 'common --disk_cache=/home/actions/.cache/bazel-disk' || '' }}
 
       - run: bazel mod graph
