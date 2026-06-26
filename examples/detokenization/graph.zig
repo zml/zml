@@ -701,11 +701,11 @@ pub const Graph = struct {
                     //continue;
                 }
                 // only first L positions are sorted
-                //std.mem.sort(Candidate, self.visited[self.L..self.nb_visited], {}, Candidate.beforeThan);
+                std.mem.sort(Candidate, self.visited[self.L..self.nb_visited], {}, Candidate.beforeThan);
                 var pos_in_neighbors: usize = start_neigh;
                 var pos_in_visited: usize = 0;
                 
-                while (pos_in_neighbors < end_neigh and pos_in_visited < self.L) { // pos_in_visited < self.nb_visited
+                while (pos_in_neighbors < end_neigh and pos_in_visited < self.nb_visited) { // pos_in_visited < self.L
                     // if current_node was visited during the search, skip it in the visited pool
                     // otherwise it will end up being a neighbor of itself
                     // note that on the not metric case, if current_node was visited,
