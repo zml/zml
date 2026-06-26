@@ -323,12 +323,10 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     zml_handler.tic(&zml_handler.timers.knn_graph);
     g.setNearestNeighbors(32);
     zml_handler.toc(&zml_handler.timers.knn_graph);
-    std.log.info("Exact kNN : nb edges: {d}", .{g.nbEdges()});
 
     zml_handler.tic(&zml_handler.timers.nsw_graph);
     try g.extendToNsw();
     zml_handler.toc(&zml_handler.timers.nsw_graph);
-    std.log.info("NSW extension : nb edges: {d}", .{g.nbEdges()});
 
     g.testNswExtention();
 

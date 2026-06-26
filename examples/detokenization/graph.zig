@@ -15,7 +15,7 @@ const Field_timer = main.Timing_handler.Field_timer;
 pub const GraphParams = struct {
     k_max: usize = 64,
     search_budget: usize = 1024,
-    alpha: f32 = 1.25,
+    alpha: f32 = 1.2,
     vamana_passes: usize = 2,
     top_k: usize = 16,
     L: usize = 256,
@@ -574,6 +574,7 @@ pub const Graph = struct {
                 log.info("Nearest neighbors node {d}/{d}", .{ i + 1, self.n });
             }
         }
+        std.log.info("Exact kNN : nb edges: {d}", .{self.nbEdges()});
     }
 
     
@@ -804,6 +805,7 @@ pub const Graph = struct {
 
                 if (i == 0 or (i + 1) % 1000 == 0 or i + 1 == self.n) self.logNsw(start, i);
             }
+            std.log.info("NSW extension pass {d} done, nb edges: {d}", .{ pass_i + 1, self.nbEdges() });
         }
         std.log.info("sim_access: {}", .{self.sim_access});
         std.log.info("nb tic toc: {}", .{self.zml_handler.nb_tictoc});
