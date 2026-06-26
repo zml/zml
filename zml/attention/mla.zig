@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const zml = @import("zml");
-const kernel = @import("unified_sparse_mla.zig");
+const kernel = @import("triton_kernels/unified_sparse_mla.zig");
 
 const stdx = zml.stdx;
 
@@ -377,7 +377,7 @@ pub fn sparseAttention(q: zml.Tensor, kv: zml.Tensor, topk: zml.Tensor, paramete
     };
 }
 
-const paged = struct {
+pub const paged = struct {
     pub const Parameters = union(Backend) {
         triton: Triton.paged.Parameters,
     };
