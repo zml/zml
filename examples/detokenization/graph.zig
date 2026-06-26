@@ -5,6 +5,7 @@ const algebra = @import("algebra.zig");
 const save_load = @import("saveload.zig");
 const llm = @import("llm.zig");
 const tokens = @import("tokens.zig");
+const sampling = @import("sampling.zig");
 
 const log = std.log;
 const Tokenizer = zml.tokenizer.Tokenizer;
@@ -15,8 +16,8 @@ const Field_timer = main.Timing_handler.Field_timer;
 pub const GraphParams = struct {
     k_max: usize = 64,
     search_budget: usize = 1024,
-    alpha: f32 = 1.3,
-    vamana_passes: usize = 3,
+    alpha: f32 = 1.25,
+    vamana_passes: usize = 2,
     top_k: usize = 16,
     L: usize = 256,
 };
@@ -811,7 +812,7 @@ pub const Graph = struct {
         std.log.info("nb tic toc: {}", .{self.zml_handler.nb_tictoc});
     }
 
-    pub fn testNswExtention(self: *Graph) void {
+    pub fn testNswExtention(self: *Graph, _: *sampling.Sampler) void {
         log.info("Test NSW extension", .{});
         var exact_first_count: usize = 0;
         var valid_count: usize = 0;
@@ -827,8 +828,11 @@ pub const Graph = struct {
             total_visited += nb_visited;
             min_visited = @min(min_visited, nb_visited);
             max_visited = @max(max_visited, nb_visited);
-            if (self.L > 0 and self.visited[0].node == node) {
-                exact_first_count += 1;
+            for (0..self.L) |i| {
+                if (self.visited[i].node == node) {
+                    exact_first_count += 1;
+                    break;
+                }
             }
 
             if (valid_count == 1 or valid_count % 10000 == 0) {
