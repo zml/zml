@@ -9,17 +9,26 @@ cc_library(
 )
 
 copy_to_directory(
-    name = "sandbox",
-    srcs = ["@libpjrt_metal"],
-    out = "sandbox/lib",
+    name = "metal_toolchain",
+    srcs = [
+        "@metal_toolchain//:metal_compile_tools",
+        "@metal_toolchain//:metal_compile_runtime",
+    ],
+    out = "metal_toolchain",
+    replace_prefixes = {
+        "Metal.xctoolchain/usr/metal/32023": ".",
+    },
     include_external_repositories = ["**"],
+    exec_compatible_with = ["@platforms//os:macos"],
+    target_compatible_with = ["@platforms//os:macos"],
 )
 
 cc_library(
     name = "libpjrt_metal",
-    data = [":sandbox"],
+    data = [":metal_toolchain"],
     defines = ["ZML_RUNTIME_METAL"],
     tags = ["manual"],
+    deps = ["@libpjrt_metal"],
 )
 
 zig_library(
