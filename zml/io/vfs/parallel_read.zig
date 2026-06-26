@@ -119,7 +119,7 @@ pub fn readSize(file_size: u64, offset: u64, data: []const []u8) usize {
 }
 
 pub fn readChunk(
-    reader: anytype,
+    reader: *std.Io.Reader,
     content_range: ?ContentRange,
     file_offset: u64,
     data: []const []u8,
