@@ -238,7 +238,7 @@ pub const GCS = struct {
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
     base: VFSBase,
 
-    pub const InitArgs = struct {
+    pub const InitOpts = struct {
         credentials: ?union(enum) {
             json: *std.Io.Reader,
             metadata_server: void,
@@ -253,18 +253,18 @@ pub const GCS = struct {
         Unexpected,
     } || std.mem.Allocator.Error || std.Io.ConcurrentError;
 
-    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, args: InitArgs) InitError!GCS {
+    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, opts: InitOpts) InitError!GCS {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         errdefer arena.deinit();
 
         const read_pool = try allocator.create(ParallelRead.Pool);
         errdefer allocator.destroy(read_pool);
 
-        try read_pool.init(allocator, inner, http_client, args.read_pool);
+        try read_pool.init(allocator, inner, http_client, opts.read_pool);
         errdefer read_pool.deinit(allocator, inner);
 
         const config: Config = .{
-            .credentials = if (args.credentials) |creds| switch (creds) {
+            .credentials = if (opts.credentials) |creds| switch (creds) {
                 .json => |reader| blk: {
                     var json_reader: std.json.Reader = .init(allocator, reader);
                     defer json_reader.deinit();
@@ -278,8 +278,8 @@ pub const GCS = struct {
                 },
                 .metadata_server => .{ .metadata_server = {} },
             } else null,
-            .endpoint_uri = std.Uri.parse(try arena.allocator().dupe(u8, args.endpoint_url)) catch return InitError.Unexpected,
-            .region = try arena.allocator().dupe(u8, args.region),
+            .endpoint_uri = std.Uri.parse(try arena.allocator().dupe(u8, opts.endpoint_url)) catch return InitError.Unexpected,
+            .region = try arena.allocator().dupe(u8, opts.region),
         };
 
         const token: Token = .{

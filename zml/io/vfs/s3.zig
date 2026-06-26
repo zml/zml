@@ -275,15 +275,6 @@ pub const S3 = struct {
         inner: std.Io,
         http_client: *std.http.Client,
         config: Config,
-    ) !S3 {
-        return initWithOpts(allocator, inner, http_client, config, .{});
-    }
-
-    pub fn initWithOpts(
-        allocator: std.mem.Allocator,
-        inner: std.Io,
-        http_client: *std.http.Client,
-        config: Config,
         opts: InitOpts,
     ) !S3 {
         const read_pool = try allocator.create(ParallelRead.Pool);
@@ -344,7 +335,7 @@ pub const S3 = struct {
             log.warn("{s}", .{writer.buffered()});
         }
 
-        return initWithOpts(allocator, inner, http_client, .{
+        return init(allocator, inner, http_client, .{
             .access_key = access_key,
             .secret_key = secret_key,
             .endpoint_url = endpoint,
