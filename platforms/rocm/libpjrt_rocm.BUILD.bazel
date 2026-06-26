@@ -1,6 +1,7 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_list_flag")
 load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
@@ -51,20 +52,21 @@ run_binary(
 copy_to_directory(
     name = "sandbox",
     srcs = [
+        ":amdgpu_ids",
         ":libpjrt_rocm_so",
         "@comgr//:amd_comgr",
         "@hip-runtime-amd//:amdhip",
         "@hip-runtime-amd//:hiprtc",
-        "@hipblaslt//:hipblaslt",
+        "@hipblaslt",
         "@hipblaslt//:rocroller",
         "@hipfft",
         "@hipsolver",
         "@hsa-amd-aqlprofile//:hsa-amd-aqlprofile",
         "@hsa-rocr//:hsa-runtime",
-        "@libdrm-amdgpu-amdgpu1",
-        ":amdgpu_ids",
-        "@libdrm2-amdgpu",
         "@libbz2-1.0",
+        "@libdrm-amdgpu-amdgpu1",
+        "@libdrm2-amdgpu",
+        "@libdw1",
         "@libelf1",
         "@liblzma5",
         "@libnuma1",
@@ -72,27 +74,28 @@ copy_to_directory(
         "@libzstd1",
         "@miopen-hip//:MIOpen",
         "@rccl",
-        "@rocblas//:rocblas",
+        "@rocblas",
         "@rocblas//:runfiles",
         "@rocfft",
         "@rocm-core",
         "@rocm-device-libs//:runfiles",
         "@rocm-smi-lib//:rocm_smi",
         "@rocprofiler-register",
-        "@rocprofiler-sdk//:rocprofv3_tool",
         "@rocprofiler-sdk-rocpd//:rocprofiler-sdk-rocpd",
         "@rocprofiler-sdk-roctx//:rocprofiler-sdk-roctx",
-        "@rocsparse",
+        "@rocprofiler-sdk//:rocprofv3_tool",
         "@rocsolver",
+        "@rocsparse",
         "@roctracer",
         "@roctracer//:roctx",
         "@zlib1g",
-        "@libdw1",
         "@zml//platforms/rocm:zmlxrocm",
     ] + select({
         ":_hipblaslt": ["@hipblaslt//:runfiles"],
         "//conditions:default": [],
     }),
+    add_directory_to_runfiles = True,
+    include_external_repositories = ["**"],
     replace_prefixes = {
         "MIOpen": "lib",
         "amdhip": "lib",
@@ -123,8 +126,6 @@ copy_to_directory(
         "platforms/rocm": "lib",
         "usr/lib/x86_64-linux-gnu": "lib",
     },
-    add_directory_to_runfiles = True,
-    include_external_repositories = ["**"],
     visibility = ["//visibility:public"],
 )
 
