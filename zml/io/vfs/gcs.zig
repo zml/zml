@@ -988,7 +988,7 @@ pub const GCS = struct {
         const job_count = std.math.divCeil(usize, read_size, self.read_pool.chunk_size) catch unreachable;
         const jobs = try self.allocator.alloc(ParallelRead.Job, job_count);
         defer self.allocator.free(jobs);
-        const pending: u32 = std.math.cast(u32, job_count) orelse return error.SystemResources;
+        const pending: u32 = @intCast(job_count);
 
         var batch: ParallelRead.Batch = .{
             .executor = .{ .pending = .init(pending) },

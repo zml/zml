@@ -792,7 +792,7 @@ pub const HF = struct {
 
         const jobs = try self.allocator.alloc(ParallelRead.Job, job_count);
         defer self.allocator.free(jobs);
-        const pending: u32 = std.math.cast(u32, job_count) orelse return error.SystemResources;
+        const pending: u32 = @intCast(job_count);
 
         const repo: Repo = try .parse(handle.uri);
         var url_buffer: [8 * 1024]u8 = undefined;
