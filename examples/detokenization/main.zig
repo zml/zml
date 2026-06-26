@@ -347,6 +347,13 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     const lm_head, const lm_head_translation = try algebra.getLmHead(zml_handler, &model_handler);
     defer lm_head.free(zml_handler.allocator);
     defer lm_head_translation.free(zml_handler.allocator);
+    var norm: f32 = 0.0;
+    for (lm_head_translation.constItems(f32)) |value| {
+        norm += value * value;
+    }
+    norm = @sqrt(norm);
+    std.log.info("Lm_head centering translation norm: {f}", .{norm});
+    
 
     std.log.info("Get lm_head_normalized", .{});
     const lm_head_normalized, const lm_head_normalized_translation = try algebra.getLmHeadNormalized(zml_handler, &model_handler);
@@ -569,7 +576,7 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *graph.Graph, lm_head_
         for (0..n) |embed_index| {
 
             for (0..d) |i| {
-                query[i] = embed_slice.constItems(f32)[4 * embed_index * d + i] - translation[i];
+                query[i] = embed_slice.constItems(f32)[embed_index * d + i] - translation[i];
             }
             
             g.greedySearch(query);
