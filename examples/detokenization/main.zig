@@ -328,7 +328,7 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     try g.extendToNsw();
     zml_handler.toc(&zml_handler.timers.nsw_graph);
 
-    g.testNswExtention(&sampler);
+    try g.testNswExtention(&sampler);
 
     zml_handler.tic(&zml_handler.timers.graph_search_tot);
     try testEmbedGraphSearch(zml_handler, &g);
