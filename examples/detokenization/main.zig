@@ -13,6 +13,7 @@ const algebra = @import("algebra.zig");
 const save_load = @import("saveload.zig");
 const tokens = @import("tokens.zig");
 const sampling = @import("sampling.zig");
+const quantized = @import("quantized.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -128,6 +129,10 @@ pub const Timing_handler = struct {
     embed_search: Field_timer = .{},
     embed_dot: Field_timer = .{},
 
+    quant_search: Field_timer = .{},
+    quant_dot: Field_timer = .{},
+    quant_walsh: Field_timer = .{},
+
     prefill: Field_timer = .{},
     decode: Field_timer = .{},
 
@@ -143,6 +148,9 @@ pub const Timing_handler = struct {
         std.log.info("Graph search  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.graph_search_tot.nanoseconds)) / 1e9});
         std.log.info("Embed search  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.embed_search.nanoseconds)) / 1e9});
         std.log.info("Embed dot     : {d:>6.2}s", .{@as(f64, @floatFromInt(self.embed_dot.nanoseconds)) / 1e9});
+        std.log.info("Quant search  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_search.nanoseconds)) / 1e9});
+        std.log.info("Quant dot     : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_dot.nanoseconds)) / 1e9});
+        std.log.info("Quant walsh   : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_walsh.nanoseconds)) / 1e9});
         std.log.info("LLM prefill   : {d:>6.2}s", .{@as(f64, @floatFromInt(self.prefill.nanoseconds)) / 1e9});
         std.log.info("LLM decode    : {d:>6.2}s", .{@as(f64, @floatFromInt(self.decode.nanoseconds)) / 1e9});
     }
@@ -192,6 +200,7 @@ pub fn printZmlLogo(io: std.Io) !void {
     try writer.interface.flush();
 }
 
+
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
     defer http_client.deinit();
@@ -216,7 +225,8 @@ pub fn main(init: std.process.Init) !void {
     try printZmlLogo(zml_handler.io);
 
     //try runLlm(&zml_handler);
-    try runTestsGraph(&zml_handler);
+    //try runTestsGraph(&zml_handler);
+    try runTestsQuantized(&zml_handler);
 
     zml_handler.timers.print();
 }
@@ -233,6 +243,7 @@ pub fn runLlm(zml_handler: *Zml_handler) !void {
     defer zml_handler.allocator.free(inspi_result);
     zml_handler.mem.check(0);
 }
+
 
 pub fn runTestsSvd(zml_handler: *Zml_handler) !void {
     var model_handler = try model_.Model_handler.init(zml_handler);
@@ -334,7 +345,7 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
 
     //g.consolidateNswNearest();
     //g.consolidateNswPrune();
-    
+
     try g.testNswExtention(&sampler);
     //try g.testNwsExtensionSparse();
 
@@ -392,6 +403,28 @@ pub fn runTestsMrt(zml_handler: *Zml_handler) !void {
     try mrt.makeMrt(mrt_order);
     std.log.info("Exact MRT : nb edges: {d}", .{mrt.nbEdges()});
 }
+
+pub fn runTestsQuantized(zml_handler: *Zml_handler) !void {
+    var model_handler = try model_.Model_handler.init(zml_handler);
+    defer model_handler.deinit(zml_handler.allocator);
+    defer model_handler.unloadBuffers();
+
+    std.log.info("Get lm_head", .{});
+    const lm_head = try algebra.getLmHead(zml_handler, &model_handler);
+    defer lm_head.free(zml_handler.allocator);
+
+    std.log.info("Init Quantizer", .{});
+    var quantizer = try quantized.Quantized.init(zml_handler, lm_head);
+    defer quantizer.deinit();
+
+    try quantizer.quantizeLmHead();
+    try quantizer.sliceLmHead();
+    try quantizer.testQuantizeSlice();
+    try quantizer.testWalshHadamardRoundtrip();
+
+    try testEmbedQuantizedSearch(zml_handler, &quantizer);
+}
+
 
 pub fn testTokenGraphSearch(lm_head: zml.Slice, g: *graph.Graph) void {
     std.log.info("Test token graph search", .{});
@@ -466,6 +499,7 @@ pub fn testTokenSvdSearch(_: *Zml_handler, lm_head_rot: zml.Slice, svd: *svd_.Sv
         std.log.info("SVD sample: query={d} real={d} safe={d} unsafe={d}", .{ row_id, real_tok, safe_tok, unsafe_tok });
     }
 }
+
 
 pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *graph.Graph, sampler: *sampling.Sampler) !void {
     std.log.info("Test embed graph search", .{});
@@ -612,6 +646,72 @@ pub fn testEmbedCoarseSearch(zml_handler: *Zml_handler, sampler: *sampling.Sampl
         }
     }
 }
+
+pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *quantized.Quantized) !void {
+    std.log.info("Test embed Quantized search", .{});
+
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+    var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
+    defer tokenizer.deinit();
+
+    var total_count: usize = 0;
+    var found_top1_count: usize = 0;
+    var missing_top16_count: usize = 0;
+
+    const tasks_id = [5]u8{ 0, 1, 2, 3, 4 };
+
+    for (tasks_id) |task_id| {
+        const task = switch (task_id) {
+            0 => "coding",
+            1 => "history",
+            2 => "math",
+            3 => "story",
+            4 => "translate",
+            else => return error.InvalidTask,
+        };
+        const top1 = switch (task_id) {
+            0 => codingTop1(),
+            1 => historyTop1(),
+            2 => mathTop1(),
+            3 => storyTop1(),
+            4 => translateTop1(),
+            else => return error.InvalidTask,
+        };
+
+        const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds.safetensors", task, .f32, true);
+        defer embed_slice.free(zml_handler.allocator);
+
+        const n: usize = @intCast(embed_slice.shape.dims()[0]);
+        const d: usize = @intCast(embed_slice.shape.dims()[1]);
+        std.debug.assert(d == quantizer.d);
+
+        std.log.info("Test quantized graph search task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
+        for (0..n) |embed_index| {
+            const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
+            zml_handler.tic(&zml_handler.timers.quant_search);
+            const top16 = try quantizer.sampleSlice(embed);
+            zml_handler.toc(&zml_handler.timers.quant_search);
+            total_count += 1;
+            var found_top1 = false;
+            for (top16) |tok| {
+                if (tok == top1[embed_index]) {
+                    found_top1 = true;
+                    break;
+                }
+            }
+            if (found_top1) {
+                found_top1_count += 1;
+            } else {
+                missing_top16_count += 1;
+                //try quantizer.logSampling(embed, &tokenizer);
+            }
+        }
+    }
+
+    const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) / @as(f64, @floatFromInt(total_count));
+    std.log.info("Embed quantized search: total={d} found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ total_count, found_top1_count, percent_found, missing_top16_count });
+}
+
 
 fn rotateEmbedding(u: zml.Slice, embed: []const f32, rot_embed: []f32) void {
     const d = embed.len;

@@ -16,7 +16,7 @@ const Field_timer = main.Timing_handler.Field_timer;
 pub const GraphParams = struct {
     k_max: usize = 256,
     search_budget: usize = 2048,
-    alpha: f32 = 1.5,
+    alpha: f32 = 1.25,
     vamana_passes: usize = 2,
     top_k: usize = 16,
     L: usize = 256,
@@ -823,7 +823,7 @@ pub const Graph = struct {
                 const neighbor = self.neighbors[i];
                 candidates[i - start_neigh] = .{ .node = neighbor, .similarity = self.similarity(node, neighbor) };
             }
-            self.pruneCandidates(node, candidates, &self.zml_handler.timers.prune_pool_fwd);
+            self.pruneCandidates2(node, candidates, &self.zml_handler.timers.prune_pool_fwd);
         }
         std.log.info("Final edges: {d}", .{self.nbEdges()});
         self.params.alpha = alpha_checkpoint;
@@ -942,7 +942,7 @@ pub const Graph = struct {
             // this means the flags are_neighbors_pruned is invalidated
             @memset(self.are_neighbors_pruned, false);
             // random visit order
-            var nb_swap = order.len - 1;
+            var nb_swap: usize = 0;//order.len - 1;
             while (nb_swap > 0) : (nb_swap -= 1) {
                 const j = random.uintLessThan(usize, nb_swap + 1);
                 std.mem.swap(usize, &order[nb_swap], &order[j]);
