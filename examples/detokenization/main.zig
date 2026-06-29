@@ -322,7 +322,7 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     g.setNearestNeighbors(256);
     zml_handler.toc(&zml_handler.timers.knn_graph);
 
-    try g.pruneNeighbors(1.0);
+    try g.pruneNeighbors(1.5);
 
     zml_handler.tic(&zml_handler.timers.nsw_graph);
     try g.extendToNsw();
