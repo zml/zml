@@ -16,7 +16,7 @@ const Field_timer = main.Timing_handler.Field_timer;
 pub const GraphParams = struct {
     k_max: usize = 256,
     search_budget: usize = 2048,
-    alpha: f32 = 1.25,
+    alpha: f32 = 1.5,
     vamana_passes: usize = 2,
     top_k: usize = 16,
     L: usize = 256,
@@ -937,7 +937,7 @@ pub const Graph = struct {
         self.setEntryPoints();
 
         for (0..self.params.vamana_passes) |pass_i| {
-            self.params.alpha = if (pass_i == 0) 1.0 else alpha;
+            self.params.alpha = if (pass_i == 0) 1.25 else alpha;
             // when pass_i > 0, we increase alpha from 1.0 to the params.alpha value
             // this means the flags are_neighbors_pruned is invalidated
             @memset(self.are_neighbors_pruned, false);
