@@ -735,10 +735,6 @@ pub const Attn = struct {
 
         const cache_start = token_index.convert(.u32).slice1d(0, .{ .start = 0, .end = 1 }).squeeze(0);
         const new_kv_cache = kv_cache.update(k, v, cache_start);
-        const k_full = new_kv_cache.keys().convert(dtype)
-            .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
-        const v_full = new_kv_cache.values().convert(dtype)
-            .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
 
         q = q.rename(.{ .s = .q }).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
@@ -756,11 +752,42 @@ pub const Attn = struct {
             else => attention_parameters,
         };
 
+        // During decode, slice K/V to the sliding window to reduce memory traffic.
+        // During prefill, use the full cache and let attention_parameters.sliding_window do masking.
+        const attn_k, const attn_v, const effective_attn_start = if (self.enable_sliding_window and input.dim(.s) == 1) blk: {
+            const window_len: i64 = @intCast(self.config.sliding_window);
+
+            // window_start = max(0, T + 1 - window_len) with T = attn_start[0]
+            const window_start = attn_start.convert(.i64)
+                .squeeze(0)
+                .addConstant(1 - window_len)
+                .maximum(zml.Tensor.scalar(@as(i64, 0), .i64))
+                .convert(.u32);
+            const k_slice = new_kv_cache.keys().convert(dtype)
+                .dynamicSlice(.{ .k = zml.Tensor.DynSlice{ .start = window_start, .len = window_len } })
+                .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+            const v_slice = new_kv_cache.values().convert(dtype)
+                .dynamicSlice(.{ .k = zml.Tensor.DynSlice{ .start = window_start, .len = window_len } })
+                .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+
+            // effective_attn_start = min(T + 1, window_len)
+            const window_attn_start = attn_start
+                .addConstant(1)
+                .minimum(zml.Tensor.scalar(@as(u32, @intCast(window_len)), .u32).broad(attn_start.shape()));
+            break :blk .{ k_slice, v_slice, window_attn_start };
+        } else .{
+            new_kv_cache.keys().convert(dtype)
+                .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated }),
+            new_kv_cache.values().convert(dtype)
+                .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated }),
+            attn_start,
+        };
+
         const attn_output = zml.attention.attention.attention(
             q,
-            k_full,
-            v_full,
-            attn_start,
+            attn_k,
+            attn_v,
+            effective_attn_start,
             attention_metadata,
             layer_attention_parameters,
         ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
