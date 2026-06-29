@@ -5,7 +5,7 @@ const zml = @import("zml");
 const common = @import("../common.zig");
 const model = @import("model.zig");
 
-const log = std.log.scoped(.step3_5flash);
+const log = std.log.scoped(.step3p5);
 const Phase = common.Phase;
 
 pub const CompilationParameters = struct {
@@ -547,7 +547,7 @@ const ComposedKernelExe = struct {
         const tokens: zml.Tensor = .init(.{ .b = 1, .s = seqlen }, .u32);
         return platform.compile(allocator, io, EmbedTokens{ .embed_tokens = embed_tokens }, .forward, .{tokens}, .{
             .shardings = &parameters.shardings.all(),
-            .program_name = phase.programName("step3_5flash", "embed_tokens"),
+            .program_name = phase.programName("step3p5", "embed_tokens"),
         });
     }
 
@@ -733,7 +733,7 @@ const ComposedKernelExe = struct {
             attention_parameters,
         }, .{
             .shardings = &parameters.shardings.all(),
-            // .program_name = phase.programName("step3_5flash", component),
+            // .program_name = phase.programName("step3p5", component),
         });
     }
 
@@ -767,7 +767,7 @@ const ComposedKernelExe = struct {
             .{ hidden(step3p5_model, seqlen), parameters.rng, token_index },
             .{
                 .shardings = &parameters.shardings.all(),
-                .program_name = phase.programName("step3_5flash", "sampler"),
+                .program_name = phase.programName("step3p5", "sampler"),
             },
         );
     }

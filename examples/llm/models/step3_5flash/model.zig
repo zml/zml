@@ -4,7 +4,7 @@ const stdx = zml.stdx;
 const common = @import("../common.zig");
 const inference = @import("inference.zig");
 
-const log = std.log.scoped(.step3_5flash);
+const log = std.log.scoped(.step3p5);
 
 pub const Config = struct {
     architectures: []const []const u8 = &.{},
@@ -243,7 +243,7 @@ pub const LoadedModel = struct {
                 @as(f64, @floatFromInt(total_bytes)) /
                     (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s),
             );
-            std.log.scoped(.step3p5flash).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+            std.log.scoped(.step3p5).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         }
 
         return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{

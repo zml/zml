@@ -10,7 +10,7 @@ pub const lfm2 = @import("models/lfm2.zig");
 pub const llama = @import("models/llama.zig");
 pub const qwen3_5 = @import("models/qwen3_5.zig");
 pub const qwen3_5_moe = @import("models/qwen3_5_moe.zig");
-pub const step3_5flash = @import("models/step3_5flash.zig");
+pub const step3p5 = @import("models/step3_5flash.zig");
 
 const log = std.log.scoped(.llm);
 
@@ -19,7 +19,7 @@ pub const ModelType = enum {
     llama,
     qwen3_5,
     qwen3_5_moe,
-    step3_5flash,
+    step3p5,
 };
 
 const RawConfig = struct {
@@ -31,7 +31,7 @@ pub const LoadedModel = union(ModelType) {
     llama: llama.LoadedModel,
     qwen3_5: qwen3_5.LoadedModel,
     qwen3_5_moe: qwen3_5_moe.LoadedModel,
-    step3_5flash: step3_5flash.LoadedModel,
+    step3p5: step3p5.LoadedModel,
 
     pub fn load(
         allocator: std.mem.Allocator,
@@ -50,7 +50,7 @@ pub const LoadedModel = union(ModelType) {
             .llama => .{ .llama = try llama.LoadedModel.init(allocator, io, repo, store, generation) },
             .qwen3_5 => .{ .qwen3_5 = try qwen3_5.LoadedModel.init(allocator, io, repo, store, generation) },
             .qwen3_5_moe => .{ .qwen3_5_moe = try qwen3_5_moe.LoadedModel.init(allocator, io, repo, store, generation) },
-            .step3_5flash => .{ .step3_5flash = try step3_5flash.LoadedModel.init(allocator, io, repo, store, generation) },
+            .step3p5 => .{ .step3p5 = try step3p5.LoadedModel.init(allocator, io, repo, store, generation) },
         };
     }
 
@@ -66,7 +66,7 @@ pub const LoadedModel = union(ModelType) {
             .llama => |*m| .{ .llama = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
             .qwen3_5 => |*m| .{ .qwen3_5 = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
             .qwen3_5_moe => |*m| .{ .qwen3_5_moe = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
-            .step3_5flash => |*m| .{ .step3_5flash = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
+            .step3p5 => |*m| .{ .step3p5 = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
         };
     }
 
@@ -88,8 +88,8 @@ pub const LoadedModel = union(ModelType) {
                 .qwen3_5_moe => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
                 else => unreachable,
             },
-            .step3_5flash => |*loaded_model| switch (buffers.*) {
-                .step3_5flash => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
+            .step3p5 => |*loaded_model| switch (buffers.*) {
+                .step3p5 => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
                 else => unreachable,
             },
         }
@@ -142,7 +142,7 @@ pub const LoadedModel = union(ModelType) {
                 seqlen,
                 progress,
             ) },
-            .step3_5flash => |*m| .{ .step3_5flash = try m.compile(
+            .step3p5 => |*m| .{ .step3p5 = try m.compile(
                 allocator,
                 io,
                 platform,
@@ -165,7 +165,7 @@ pub const CompiledModel = struct {
         llama: llama.inference.CompiledModel,
         qwen3_5: qwen3_5.inference.CompiledModel,
         qwen3_5_moe: qwen3_5_moe.inference.CompiledModel,
-        step3_5flash: step3_5flash.inference.CompiledModel,
+        step3p5: step3p5.inference.CompiledModel,
     };
 
     inner: Inner,
@@ -177,7 +177,7 @@ pub const CompiledModel = struct {
             .llama => |*b| b.deinit(),
             .qwen3_5 => |*b| b.deinit(),
             .qwen3_5_moe => |*b| b.deinit(),
-            .step3_5flash => |*b| b.deinit(),
+            .step3p5 => |*b| b.deinit(),
         }
     }
 
@@ -234,14 +234,14 @@ pub const CompiledModel = struct {
                 ) },
                 .seqlen = self.seqlen,
             },
-            .step3_5flash => |*compiled| .{
-                .inner = .{ .step3_5flash = try step3_5flash.Session.init(
+            .step3p5 => |*compiled| .{
+                .inner = .{ .step3p5 = try step3p5.Session.init(
                     allocator,
                     io,
                     platform,
                     tokenizer,
                     compiled,
-                    &model_buffers.step3_5flash,
+                    &model_buffers.step3p5,
                 ) },
                 .seqlen = self.seqlen,
             },
@@ -254,7 +254,7 @@ pub const Buffers = union(ModelType) {
     llama: llama.Buffers,
     qwen3_5: qwen3_5.Buffers,
     qwen3_5_moe: qwen3_5_moe.Buffers,
-    step3_5flash: step3_5flash.Buffers,
+    step3p5: step3p5.Buffers,
 };
 
 pub const Session = struct {
@@ -263,7 +263,7 @@ pub const Session = struct {
         llama: llama.Session,
         qwen3_5: qwen3_5.Session,
         qwen3_5_moe: qwen3_5_moe.Session,
-        step3_5flash: step3_5flash.Session,
+        step3p5: step3p5.Session,
     };
 
     inner: Inner,
@@ -307,7 +307,7 @@ pub const Session = struct {
 pub fn detectModelType(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir) !ModelType {
     const parsed = try parseConfig(RawConfig, allocator, io, repo);
     defer parsed.deinit();
-    if (std.mem.eql(u8, parsed.value.model_type, "step3p5")) return .step3_5flash;
+    if (std.mem.eql(u8, parsed.value.model_type, "step3p5")) return .step3p5;
     if (std.meta.stringToEnum(ModelType, parsed.value.model_type)) |model_type| return model_type;
     return error.UnknownModelType;
 }

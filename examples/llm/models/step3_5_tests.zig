@@ -4,7 +4,7 @@ const zml = @import("zml");
 
 const common = @import("common.zig");
 const inference = @import("step3_5flash/inference.zig");
-const step3_5flash = @import("step3_5flash.zig");
+const step3p5 = @import("step3_5flash.zig");
 const model = @import("step3_5flash/model.zig");
 
 pub const std_options: std.Options = .{
@@ -60,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
     const shardings: common.Shardings = try .init(platform);
     const generation: common.GenerationOptions = .{ .sampling_strategy = .{ .topk = args.topk } };
 
-    var repo_model = try step3_5flash.LoadedModel.init(allocator, io, repo, store.view(), generation, shardings);
+    var repo_model = try step3p5.LoadedModel.init(allocator, io, repo, store.view(), generation);
     defer repo_model.deinit(allocator);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
