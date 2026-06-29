@@ -827,6 +827,7 @@ pub const Graph = struct {
         }
         std.log.info("Final edges: {d}", .{self.nbEdges()});
         self.params.alpha = alpha_checkpoint;
+        try self.logDegreeCounts("Nodes by out-degree", self.nb_neighbors, self.params.k_max);
     }
     
     pub fn pruneCandidates(self: *Graph, base: usize, candidates: []Candidate, timer: *Field_timer) void {
