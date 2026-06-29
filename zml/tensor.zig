@@ -3511,10 +3511,9 @@ pub const Tensor = struct {
         for (split_sizes) |n| split_sum += n;
         stdx.debug.assert(split_sum == d, "split expects sum of 'split_sizes' values and axis dimension to be equal, got {} and {}", .{ split_sum, d });
 
-        var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
-        defer arena.deinit();
+        const allocator = CompilationContext.current().arena.allocator();
 
-        const res = arena.allocator().alloc(Tensor, split_sizes.len) catch @panic("OOM");
+        const res = allocator.alloc(Tensor, split_sizes.len) catch @panic("OOM");
 
         var start: i64 = 0;
         for (split_sizes, 0..) |n, i| {
@@ -3522,6 +3521,50 @@ pub const Tensor = struct {
             start += n;
         }
         return res;
+    }
+
+    test split {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            pub fn _split(x: Tensor, axis_: i8, split_sizes: []const i64) []Tensor {
+                return x.split(axis_, split_sizes);
+            }
+        };
+
+        inline for (.{
+            .{ [3]f32{ 0, 1, 2 }, Shape.init(.{3}, .f32), 0, [3]i64{ 1, 1, 1 }, &.{ [1]f32{0}, [1]f32{1}, [1]f32{2} } },
+            .{ [10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, Shape.init(.{10}, .f32), 0, [2]i64{ 1, 9 }, &.{ [1]f32{0}, [9]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 } } },
+            .{ [4][3]f32{ .{ 0, 1, 2 }, .{ 3, 4, 5 }, .{ 6, 7, 8 }, .{ 9, 10, 11 } }, Shape.init(.{ 4, 3 }, .f32), 0, [2]i64{ 1, 3 }, &.{ [1][3]f32{.{ 0, 1, 2 }}, [3][3]f32{ .{ 3, 4, 5 }, .{ 6, 7, 8 }, .{ 9, 10, 11 } } } },
+            .{ [2][6]f32{ .{ 0, 1, 2, 3, 4, 5 }, .{ 6, 7, 8, 9, 10, 11 } }, Shape.init(.{ 2, 6 }, .f32), 1, [2]i64{ 2, 4 }, &.{ [2][2]f32{ .{ 0, 1 }, .{ 6, 7 } }, [2][4]f32{ .{ 2, 3, 4, 5 }, .{ 8, 9, 10, 11 } } } },
+        }) |testcase| {
+            const x_data, const x_shape, const ax, const args, const expectation = testcase;
+            const x: Tensor = .fromShape(x_shape);
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._split, .{ x, ax, &args }, platform, .{});
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_data));
+            defer x_buffer.deinit();
+
+            var exe_args = try exe.args(std.testing.allocator);
+            defer exe_args.deinit(std.testing.allocator);
+            exe_args.set(.{x_buffer});
+
+            var results = try exe.results(std.testing.allocator);
+            defer results.deinit(std.testing.allocator);
+            exe.callOpts(std.testing.io, exe_args, &results, .{ .wait = true });
+
+            const res = try std.testing.allocator.alloc(zml.Buffer, expectation.len);
+            defer std.testing.allocator.free(res);
+            results.fill(res);
+            defer for (res) |*buffer| buffer.deinit();
+
+            inline for (expectation, 0..) |expected, i| {
+                try std.testing.expectEqual(expected, try res[i].getValue(@TypeOf(expected), std.testing.io));
+            }
+        }
     }
 
     /// Slices the input Tensor along a specific axis, with a start offset known at runtime.
