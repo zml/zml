@@ -338,24 +338,24 @@ const ComposedKernelExe = struct {
         const embed_tokens = try compileEmbedTokens(allocator, io, platform, step3p5_model.text_model.embed_tokens, parameters, seqlen, phase, progress);
         errdefer embed_tokens.deinit();
 
-        // We compile constants and parameters into layer executables. We require an example for each layer kind.
-        // For now, I have collected the indices of said examples.
-        const dense_full_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 0, phase, progress);
+        const example_layers = try findExampleLayerIndices(&step3p5_model);
+
+        const dense_full_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_layers.dense_full_layer, phase, progress);
         // errdefer if (dense_full_layer) |exe| exe.deinit();
 
-        const dense_sliding_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 1, phase, progress);
+        const dense_sliding_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_layers.dense_sliding_layer, phase, progress);
         // errdefer if (dense_sliding_layer) |exe| exe.deinit();
 
-        const moe_full_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 4, phase, progress);
+        const moe_full_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_layers.moe_full_layer, phase, progress);
         // errdefer if (moe_full_layer) |exe| exe.deinit();
 
-        const moe_sliding_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 3, phase, progress);
+        const moe_sliding_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_layers.moe_sliding_layer, phase, progress);
         // errdefer if (moe_sliding_layer) |exe| exe.deinit();
 
-        const moe_sliding_layer_with_limit = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 43, phase, progress);
+        const moe_sliding_layer_with_limit = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_layers.moe_sliding_layer_with_limit, phase, progress);
         // errdefer if (moe_sliding_layer_with_limit) |exe| exe.deinit();
 
-        const moe_full_shared_layer_with_limit = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, 44, phase, progress);
+        const moe_full_shared_layer_with_limit = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_layers.moe_full_shared_layer_with_limit, phase, progress);
         // errdefer if (moe_full_shared_layer_with_limit) |exe| exe.deinit();
 
         const sampler = try compileSampler(allocator, io, platform, step3p5_model, parameters, seqlen, phase, progress);
@@ -553,15 +553,77 @@ const ComposedKernelExe = struct {
 
     const AttnKind = enum(u1) { sliding, full };
     const FfnKind = enum(u1) { dense, moe };
+    const Key = packed struct(u4) {
+        ffn_kind: FfnKind,
+        attn_kind: AttnKind,
+        has_swiglu_limit: bool,
+        has_shared_limit: bool,
+    };
+
     const FfnInfo = struct {
         kind: FfnKind,
         swiglu_limit: ?f32 = null,
         shared_limit: ?f32 = null,
     };
 
-    fn inferLayerExe(self: *const ComposedKernelExe, step3p5_model: *const model.Model, layer_index: usize) !zml.Exe {
-        const layer = step3p5_model.text_model.layers[layer_index];
+    const ExampleLayerIndices = struct {
+        dense_full_layer: usize,
+        dense_sliding_layer: usize,
+        moe_full_layer: usize,
+        moe_sliding_layer: usize,
+        moe_sliding_layer_with_limit: usize,
+        moe_full_shared_layer_with_limit: usize,
+    };
 
+    fn findExampleLayerIndices(step3p5_model: *const model.Model) !ExampleLayerIndices {
+        return .{
+            .dense_full_layer = try findFirstLayerIndex(step3p5_model, .{
+                .ffn_kind = .dense,
+                .attn_kind = .full,
+                .has_swiglu_limit = false,
+                .has_shared_limit = false,
+            }),
+            .dense_sliding_layer = try findFirstLayerIndex(step3p5_model, .{
+                .ffn_kind = .dense,
+                .attn_kind = .sliding,
+                .has_swiglu_limit = false,
+                .has_shared_limit = false,
+            }),
+            .moe_full_layer = try findFirstLayerIndex(step3p5_model, .{
+                .ffn_kind = .moe,
+                .attn_kind = .full,
+                .has_swiglu_limit = false,
+                .has_shared_limit = false,
+            }),
+            .moe_sliding_layer = try findFirstLayerIndex(step3p5_model, .{
+                .ffn_kind = .moe,
+                .attn_kind = .sliding,
+                .has_swiglu_limit = false,
+                .has_shared_limit = false,
+            }),
+            .moe_sliding_layer_with_limit = try findFirstLayerIndex(step3p5_model, .{
+                .ffn_kind = .moe,
+                .attn_kind = .sliding,
+                .has_swiglu_limit = true,
+                .has_shared_limit = false,
+            }),
+            .moe_full_shared_layer_with_limit = try findFirstLayerIndex(step3p5_model, .{
+                .ffn_kind = .moe,
+                .attn_kind = .full,
+                .has_swiglu_limit = true,
+                .has_shared_limit = true,
+            }),
+        };
+    }
+
+    fn findFirstLayerIndex(step3p5_model: *const model.Model, expected: Key) !usize {
+        for (step3p5_model.text_model.layers, 0..) |layer, i| {
+            if (std.meta.eql(layerExeKey(layer), expected)) return i;
+        }
+        return error.MissingLayerExample;
+    }
+
+    fn layerExeKey(layer: model.TransformerLayer) Key {
         const attn_kind: AttnKind = if (layer.attn.enable_sliding_window)
             .sliding
         else
@@ -580,20 +642,17 @@ const ComposedKernelExe = struct {
             has_shared_limit = layer.ffn.moe.shared.limit != 0;
         }
 
-        const Key = packed struct(u4) {
-            ffn_kind: FfnKind,
-            attn_kind: AttnKind,
-            has_swiglu_limit: bool,
-            has_shared_limit: bool,
-        };
-
-        // config lives under parameters.config
-        const key: Key = .{
+        return .{
             .ffn_kind = ffn_kind,
             .attn_kind = attn_kind,
             .has_swiglu_limit = has_swiglu_limit,
             .has_shared_limit = has_shared_limit,
         };
+    }
+
+    fn inferLayerExe(self: *const ComposedKernelExe, step3p5_model: *const model.Model, layer_index: usize) !zml.Exe {
+        const layer = step3p5_model.text_model.layers[layer_index];
+        const key = layerExeKey(layer);
 
         return switch (key) {
             .{
