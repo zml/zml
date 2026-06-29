@@ -391,7 +391,7 @@ pub const Graph = struct {
         const rows = self.lm_head.constItems(f32);
         const row = rows[node * self.dim ..][0..self.dim];
 
-        const simd_len = 16;
+        const simd_len = 32;
         std.debug.assert(self.dim % simd_len == 0);
         const Vec = @Vector(simd_len, f32);
         var acc: Vec = @splat(0);
