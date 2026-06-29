@@ -1162,10 +1162,23 @@ pub const Graph = struct {
     }
 
     pub fn setEntryPoints(self: *Graph) void {
-        const aux = [_]usize{0, 703, 1731, 4494, 5824, 15365, 20703, 38301, 41295, 87980};
         self.medoids[0] = self.medoid;
         for (1..self.params.nb_entry_points) |i| {
-            self.medoids[i] = aux[i];
+            var next_entry: usize = 0;
+            var next_min_max: f32 = 1e20;
+            for (0..self.n) |node| {
+                if (self.is_junk[node]) continue;
+                var max_sim = self.similarity(self.medoids[0], node);
+                for (1..i) |j| {
+                    max_sim = @max(max_sim, self.similarity(self.medoids[j], node));
+                }
+                if (max_sim < next_min_max) {
+                    next_entry = node;
+                    next_min_max = max_sim;
+                }
+            }
+            std.log.info("Next entry point {d} with min-max {d}", .{ i, next_min_max });
+            self.medoids[i] = next_entry;
         }
     }
 
