@@ -20,7 +20,7 @@ pub const GraphParams = struct {
     vamana_passes: usize = 2,
     top_k: usize = 16,
     L: usize = 256,
-    nb_entry_points: usize = 1,
+    nb_entry_points: usize = 10,
 };
 
 pub const Graph = struct {
@@ -1153,9 +1153,10 @@ pub const Graph = struct {
     }
 
     pub fn setEntryPoints(self: *Graph) void {
+        const aux = [_]usize{0, 703, 1731, 4494, 5824, 15365, 20703, 38301, 41295, 87980};
         self.medoids[0] = self.medoid;
         for (1..self.params.nb_entry_points) |i| {
-            self.medoids[i] = 10000 * i;
+            self.medoids[i] = aux[i];
         }
     }
 
