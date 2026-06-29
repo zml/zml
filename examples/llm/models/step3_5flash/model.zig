@@ -271,7 +271,7 @@ pub const LoadedModel = struct {
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
-        const params = inference.CompilationParameters.init(&self.inner, self.parsed_config.value, @intCast(seqlen), backend, .triton, shardings);
+        const params = inference.CompilationParameters.init(&self.inner, self.parsed_config.value, @intCast(seqlen), backend, shardings);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
 };
