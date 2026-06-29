@@ -26,9 +26,16 @@ common          --@rules_python//python/config_settings:bootstrap_impl=script
 # We don't to check the built files in the sandbox or repositories
 common          --experimental_check_output_files=false
 
-# Mount the zig cache into the sandboxes
-build:macos     --sandbox_add_mount_pair=/var/tmp
+# Expose Zig's shared cache directories to sandboxed actions when the
+# selected sandbox implementation supports host path mounts.
+#
+# These flags are consumed by linux-sandbox, and by Bazel's Docker sandbox.
+# They are ignored by processwrapper-sandbox and macOS sandbox-exec, which use
+# a symlinked execroot rather than bind mounts.
 build:linux     --sandbox_add_mount_pair=/tmp
+build:linux     --sandbox_writable_path=/tmp
+build:linux     --sandbox_add_mount_pair=/var/tmp
+build:linux     --sandbox_writable_path=/var/tmp
 
 # Ensure workers are sandboxed
 build           --worker_sandboxing
