@@ -303,12 +303,12 @@ pub const KernelExe = struct {
 const ComposedKernelExe = struct {
     allocator: std.mem.Allocator,
     embed_tokens: zml.Exe,
-    dense_full_layer: zml.Exe,
-    dense_sliding_layer: zml.Exe,
-    moe_full_layer: zml.Exe,
-    moe_sliding_layer: zml.Exe,
-    moe_sliding_layer_with_limit: zml.Exe,
-    moe_full_shared_layer_with_limit: zml.Exe,
+    dense_full_layer: ?zml.Exe,
+    dense_sliding_layer: ?zml.Exe,
+    moe_full_layer: ?zml.Exe,
+    moe_sliding_layer: ?zml.Exe,
+    moe_sliding_layer_with_limit: ?zml.Exe,
+    moe_full_shared_layer_with_limit: ?zml.Exe,
     sampler: zml.Exe,
     phase: Phase,
     mdl: *const model.Model,
@@ -338,25 +338,41 @@ const ComposedKernelExe = struct {
         const embed_tokens = try compileEmbedTokens(allocator, io, platform, step3p5_model.text_model.embed_tokens, parameters, seqlen, phase, progress);
         errdefer embed_tokens.deinit();
 
-        const example_layers = try findExampleLayerIndices(&step3p5_model);
+        const dense_full_layer = if (findFirstLayerIndex(&step3p5_model, .{ .ffn_kind = .dense, .attn_kind = .full, .has_swiglu_limit = false, .has_shared_limit = false })) |example_index|
+            try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_index, phase, progress)
+        else
+            null;
+        errdefer if (dense_full_layer) |exe| exe.deinit();
 
-        const dense_full_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_layers.dense_full_layer, phase, progress);
-        // errdefer if (dense_full_layer) |exe| exe.deinit();
+        const dense_sliding_layer = if (findFirstLayerIndex(&step3p5_model, .{ .ffn_kind = .dense, .attn_kind = .sliding, .has_swiglu_limit = false, .has_shared_limit = false })) |example_index|
+            try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_index, phase, progress)
+        else
+            null;
+        errdefer if (dense_sliding_layer) |exe| exe.deinit();
 
-        const dense_sliding_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_layers.dense_sliding_layer, phase, progress);
-        // errdefer if (dense_sliding_layer) |exe| exe.deinit();
+        const moe_full_layer = if (findFirstLayerIndex(&step3p5_model, .{ .ffn_kind = .moe, .attn_kind = .full, .has_swiglu_limit = false, .has_shared_limit = false })) |example_index|
+            try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_index, phase, progress)
+        else
+            null;
+        errdefer if (moe_full_layer) |exe| exe.deinit();
 
-        const moe_full_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_layers.moe_full_layer, phase, progress);
-        // errdefer if (moe_full_layer) |exe| exe.deinit();
+        const moe_sliding_layer = if (findFirstLayerIndex(&step3p5_model, .{ .ffn_kind = .moe, .attn_kind = .sliding, .has_swiglu_limit = false, .has_shared_limit = false })) |example_index|
+            try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_index, phase, progress)
+        else
+            null;
+        errdefer if (moe_sliding_layer) |exe| exe.deinit();
 
-        const moe_sliding_layer = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_layers.moe_sliding_layer, phase, progress);
-        // errdefer if (moe_sliding_layer) |exe| exe.deinit();
+        const moe_sliding_layer_with_limit = if (findFirstLayerIndex(&step3p5_model, .{ .ffn_kind = .moe, .attn_kind = .sliding, .has_swiglu_limit = true, .has_shared_limit = false })) |example_index|
+            try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_index, phase, progress)
+        else
+            null;
+        errdefer if (moe_sliding_layer_with_limit) |exe| exe.deinit();
 
-        const moe_sliding_layer_with_limit = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_layers.moe_sliding_layer_with_limit, phase, progress);
-        // errdefer if (moe_sliding_layer_with_limit) |exe| exe.deinit();
-
-        const moe_full_shared_layer_with_limit = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_layers.moe_full_shared_layer_with_limit, phase, progress);
-        // errdefer if (moe_full_shared_layer_with_limit) |exe| exe.deinit();
+        const moe_full_shared_layer_with_limit = if (findFirstLayerIndex(&step3p5_model, .{ .ffn_kind = .moe, .attn_kind = .full, .has_swiglu_limit = true, .has_shared_limit = true })) |example_index|
+            try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_index, phase, progress)
+        else
+            null;
+        errdefer if (moe_full_shared_layer_with_limit) |exe| exe.deinit();
 
         const sampler = try compileSampler(allocator, io, platform, step3p5_model, parameters, seqlen, phase, progress);
         errdefer sampler.deinit();
@@ -379,12 +395,12 @@ const ComposedKernelExe = struct {
 
     fn deinit(self: ComposedKernelExe) void {
         self.embed_tokens.deinit();
-        self.dense_full_layer.deinit();
-        self.dense_sliding_layer.deinit();
-        self.moe_full_layer.deinit();
-        self.moe_sliding_layer.deinit();
-        self.moe_sliding_layer_with_limit.deinit();
-        self.moe_full_shared_layer_with_limit.deinit();
+        if (self.dense_full_layer) |exe| exe.deinit();
+        if (self.dense_sliding_layer) |exe| exe.deinit();
+        if (self.moe_full_layer) |exe| exe.deinit();
+        if (self.moe_sliding_layer) |exe| exe.deinit();
+        if (self.moe_sliding_layer_with_limit) |exe| exe.deinit();
+        if (self.moe_full_shared_layer_with_limit) |exe| exe.deinit();
         self.sampler.deinit();
     }
 
@@ -560,67 +576,11 @@ const ComposedKernelExe = struct {
         has_shared_limit: bool,
     };
 
-    const FfnInfo = struct {
-        kind: FfnKind,
-        swiglu_limit: ?f32 = null,
-        shared_limit: ?f32 = null,
-    };
-
-    const ExampleLayerIndices = struct {
-        dense_full_layer: usize,
-        dense_sliding_layer: usize,
-        moe_full_layer: usize,
-        moe_sliding_layer: usize,
-        moe_sliding_layer_with_limit: usize,
-        moe_full_shared_layer_with_limit: usize,
-    };
-
-    fn findExampleLayerIndices(step3p5_model: *const model.Model) !ExampleLayerIndices {
-        return .{
-            .dense_full_layer = try findFirstLayerIndex(step3p5_model, .{
-                .ffn_kind = .dense,
-                .attn_kind = .full,
-                .has_swiglu_limit = false,
-                .has_shared_limit = false,
-            }),
-            .dense_sliding_layer = try findFirstLayerIndex(step3p5_model, .{
-                .ffn_kind = .dense,
-                .attn_kind = .sliding,
-                .has_swiglu_limit = false,
-                .has_shared_limit = false,
-            }),
-            .moe_full_layer = try findFirstLayerIndex(step3p5_model, .{
-                .ffn_kind = .moe,
-                .attn_kind = .full,
-                .has_swiglu_limit = false,
-                .has_shared_limit = false,
-            }),
-            .moe_sliding_layer = try findFirstLayerIndex(step3p5_model, .{
-                .ffn_kind = .moe,
-                .attn_kind = .sliding,
-                .has_swiglu_limit = false,
-                .has_shared_limit = false,
-            }),
-            .moe_sliding_layer_with_limit = try findFirstLayerIndex(step3p5_model, .{
-                .ffn_kind = .moe,
-                .attn_kind = .sliding,
-                .has_swiglu_limit = true,
-                .has_shared_limit = false,
-            }),
-            .moe_full_shared_layer_with_limit = try findFirstLayerIndex(step3p5_model, .{
-                .ffn_kind = .moe,
-                .attn_kind = .full,
-                .has_swiglu_limit = true,
-                .has_shared_limit = true,
-            }),
-        };
-    }
-
-    fn findFirstLayerIndex(step3p5_model: *const model.Model, expected: Key) !usize {
+    fn findFirstLayerIndex(step3p5_model: *const model.Model, expected: Key) ?usize {
         for (step3p5_model.text_model.layers, 0..) |layer, i| {
             if (std.meta.eql(layerExeKey(layer), expected)) return i;
         }
-        return error.MissingLayerExample;
+        return null;
     }
 
     fn layerExeKey(layer: model.TransformerLayer) Key {
@@ -629,24 +589,19 @@ const ComposedKernelExe = struct {
         else
             .full;
 
-        var has_swiglu_limit: bool = false;
-        var has_shared_limit: bool = false;
-
-        const ffn_kind: FfnKind = switch (layer.ffn) {
-            .mlp => .dense,
-            .moe => .moe,
-        };
-
-        if (ffn_kind == .moe) {
-            has_swiglu_limit = layer.ffn.moe.experts.limit != null;
-            has_shared_limit = layer.ffn.moe.shared.limit != 0;
-        }
-
-        return .{
-            .ffn_kind = ffn_kind,
-            .attn_kind = attn_kind,
-            .has_swiglu_limit = has_swiglu_limit,
-            .has_shared_limit = has_shared_limit,
+        return switch (layer.ffn) {
+            .mlp => .{
+                .ffn_kind = .dense,
+                .attn_kind = attn_kind,
+                .has_swiglu_limit = false,
+                .has_shared_limit = false,
+            },
+            .moe => |moe| .{
+                .ffn_kind = .moe,
+                .attn_kind = attn_kind,
+                .has_swiglu_limit = moe.experts.limit != null,
+                .has_shared_limit = moe.shared.limit != 0,
+            },
         };
     }
 
@@ -660,37 +615,37 @@ const ComposedKernelExe = struct {
                 .attn_kind = .full,
                 .has_swiglu_limit = false,
                 .has_shared_limit = false,
-            } => self.dense_full_layer,
+            } => self.dense_full_layer.?,
             .{
                 .ffn_kind = .dense,
                 .attn_kind = .sliding,
                 .has_swiglu_limit = false,
                 .has_shared_limit = false,
-            } => self.dense_sliding_layer,
+            } => self.dense_sliding_layer.?,
             .{
                 .ffn_kind = .moe,
                 .attn_kind = .full,
                 .has_swiglu_limit = false,
                 .has_shared_limit = false,
-            } => self.moe_full_layer,
+            } => self.moe_full_layer.?,
             .{
                 .ffn_kind = .moe,
                 .attn_kind = .sliding,
                 .has_swiglu_limit = false,
                 .has_shared_limit = false,
-            } => self.moe_sliding_layer,
+            } => self.moe_sliding_layer.?,
             .{
                 .ffn_kind = .moe,
                 .attn_kind = .sliding,
                 .has_swiglu_limit = true,
                 .has_shared_limit = false,
-            } => self.moe_sliding_layer_with_limit,
+            } => self.moe_sliding_layer_with_limit.?,
             .{
                 .ffn_kind = .moe,
                 .attn_kind = .full,
                 .has_swiglu_limit = true,
                 .has_shared_limit = true,
-            } => self.moe_full_shared_layer_with_limit,
+            } => self.moe_full_shared_layer_with_limit.?,
             else => unreachable,
         };
     }
