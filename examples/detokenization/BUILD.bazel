@@ -9,6 +9,7 @@ zig_binary(
         "llm.zig",
         "main.zig",
         "model.zig",
+        "quantized.zig",
         "svd.zig",
         "tokens.zig",
         "algebra.zig",
