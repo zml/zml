@@ -41,6 +41,7 @@ pub fn loadSafetensorSlice(zml_handler: *Zml_handler, repo_uri: []const u8, entr
     defer registry.deinit();
 
     const tensor = registry.tensors.get(tensor_name) orelse return error.TensorNotFound;
+    std.log.info("Tensor shape: {any}", .{tensor.shape.dtype()});
     const slice = try zml.Slice.alloc(zml_handler.allocator, tensor.shape);
     errdefer slice.free(zml_handler.allocator);
 

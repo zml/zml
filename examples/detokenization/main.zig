@@ -192,7 +192,6 @@ pub fn printZmlLogo(io: std.Io) !void {
     try writer.interface.flush();
 }
 
-
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
     defer http_client.deinit();
@@ -235,7 +234,6 @@ pub fn runLlm(zml_handler: *Zml_handler) !void {
     zml_handler.mem.check(0);
 }
 
-
 pub fn runTestsSvd(zml_handler: *Zml_handler) !void {
     var model_handler = try model_.Model_handler.init(zml_handler);
     defer model_handler.deinit(zml_handler.allocator);
@@ -276,8 +274,8 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     defer model_handler.unloadBuffers();
 
     zml_handler.tic(&zml_handler.timers.similarity_matrix);
-    var similarity_matrix = try algebra.computeSimilarityMatrix(zml_handler, &model_handler, false);
-    //var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, &model_handler, false);
+    //var similarity_matrix = try algebra.computeSimilarityMatrix(zml_handler, &model_handler, false);
+    var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, &model_handler, false);
     defer similarity_matrix.deinit(zml_handler.allocator);
     zml_handler.toc(&zml_handler.timers.similarity_matrix);
 
@@ -311,7 +309,7 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     defer sampling.Sampler.deinit(&sampler);
 
     std.log.info("Init graph", .{});
-    const graph_params: graph.GraphParams = .{ .k_max = 64 };
+    const graph_params: graph.GraphParams = .{};
     var g: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, medoid, graph_params);
     //var g: graph.Graph = try .fromFile(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, "nsw-knn-16.safetensors", graph_params);
     defer g.deinit();
@@ -326,9 +324,17 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
 
     zml_handler.tic(&zml_handler.timers.nsw_graph);
     try g.extendToNsw();
+    try g.extendNswSparseQueries();
     zml_handler.toc(&zml_handler.timers.nsw_graph);
 
-    try g.testNswExtention(&sampler);
+    //try g.testNswExtention(&sampler);
+    //try g.testNwsExtensionSparse();
+
+    g.consolidateNswNearest();
+    //g.consolidateNswPrune();
+    
+    //try g.testNswExtention(&sampler);
+    //try g.testNwsExtensionSparse();
 
     zml_handler.tic(&zml_handler.timers.graph_search_tot);
     try testEmbedGraphSearch(zml_handler, &g, &sampler);
@@ -384,7 +390,6 @@ pub fn runTestsMrt(zml_handler: *Zml_handler) !void {
     try mrt.makeMrt(mrt_order);
     std.log.info("Exact MRT : nb edges: {d}", .{mrt.nbEdges()});
 }
-
 
 pub fn testTokenGraphSearch(lm_head: zml.Slice, g: *graph.Graph) void {
     std.log.info("Test token graph search", .{});
@@ -460,12 +465,13 @@ pub fn testTokenSvdSearch(_: *Zml_handler, lm_head_rot: zml.Slice, svd: *svd_.Sv
     }
 }
 
-
 pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *graph.Graph, sampler: *sampling.Sampler) !void {
     std.log.info("Test embed graph search", .{});
 
     var total_count: usize = 0;
     var found_top1_count: usize = 0;
+    var missed_top1_nsw_extension_missed_count: usize = 0;
+    var missed_top1_in_visited_tail_count: usize = 0;
 
     var total_visited: usize = 0;
     var min_visited: usize = std.math.maxInt(usize);
@@ -500,9 +506,9 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *graph.Graph, sampler:
 
         std.log.info("Test embed graph search task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
         for (0..n) |embed_index| {
-            const embed = embed_slice.constItems(f32)[embed_index * d..(embed_index + 1) * d];
-            
-            g.greedySearchLazy(embed);
+            const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
+
+            g.greedySearch(embed);
 
             const nb_visited = g.nb_visited;
             total_visited += nb_visited;
@@ -510,15 +516,24 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *graph.Graph, sampler:
             max_visited = @max(max_visited, nb_visited);
 
             total_count += 1;
+            const top1_token = top1[embed_index];
             var found_top1 = false;
             for (0..g.L) |i| {
-                if (g.visited[i].node == top1[embed_index]) found_top1 = true;
+                if (g.visited[i].node == top1_token) found_top1 = true;
             }
             if (found_top1) {
                 found_top1_count += 1;
             } else {
-                std.log.info("Missed top1, id {d} str {s}", .{ top1[embed_index], try tokens.tokenString(sampler.tokenizer, top1[embed_index], sampler.allocator) });
-                std.log.info("Found instead {d} str {s}", .{ g.visited[0].node, try tokens.tokenString(sampler.tokenizer, g.visited[0].node, sampler.allocator) });
+                if (g.nsw_extension_search_missed[top1_token]) missed_top1_nsw_extension_missed_count += 1;
+                for (g.L..g.nb_visited) |i| {
+                    if (g.visited[i].node == top1_token) {
+                        missed_top1_in_visited_tail_count += 1;
+                        break;
+                    }
+                }
+                _ = sampler;
+                //std.log.info("Missed top1, id {d} str {s}", .{ top1[embed_index], try tokens.tokenString(sampler.tokenizer, top1[embed_index], sampler.allocator) });
+                //std.log.info("Found instead {d} str {s}", .{ g.visited[0].node, try tokens.tokenString(sampler.tokenizer, g.visited[0].node, sampler.allocator) });
             }
         }
     }
@@ -526,6 +541,10 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *graph.Graph, sampler:
     const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) / @as(f64, @floatFromInt(total_count));
     const average_visit = @as(f64, @floatFromInt(total_visited)) / @as(f64, @floatFromInt(total_count));
     std.log.info("Embed graph search: total={d} found_top1={d} ({d:.4}%)", .{ total_count, found_top1_count, percent_found });
+    std.log.info(
+        "Embed graph search misses: nsw_extension_missed={d} visited_tail={d}",
+        .{ missed_top1_nsw_extension_missed_count, missed_top1_in_visited_tail_count },
+    );
     std.log.info("Embed graph search nb_visited: min={d} max={d} avg={d:.2}", .{ min_visited, max_visited, average_visit });
 }
 
@@ -591,7 +610,6 @@ pub fn testEmbedCoarseSearch(zml_handler: *Zml_handler, sampler: *sampling.Sampl
         }
     }
 }
-
 
 fn rotateEmbedding(u: zml.Slice, embed: []const f32, rot_embed: []f32) void {
     const d = embed.len;

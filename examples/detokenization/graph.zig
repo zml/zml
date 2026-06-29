@@ -15,11 +15,12 @@ const Field_timer = main.Timing_handler.Field_timer;
 
 pub const GraphParams = struct {
     k_max: usize = 64,
-    search_budget: usize = 1024,
-    alpha: f32 = 1.25,
+    search_budget: usize = 2048,
+    alpha: f32 = 1.75,
     vamana_passes: usize = 2,
     top_k: usize = 16,
     L: usize = 256,
+    nb_entry_points: usize = 1,
 };
 
 pub const Graph = struct {
@@ -35,6 +36,11 @@ pub const Graph = struct {
     pub const LazyExpansion = struct {
         node: usize,
         neighbor: usize,
+    };
+
+    pub const SparseQuery = struct {
+        coord: usize,
+        sign: f32,
     };
 
     zml_handler: *Zml_handler,
@@ -57,6 +63,7 @@ pub const Graph = struct {
     // either in a separate array or as a Neighbor struct { .node, .similarity }
     // search fields
     medoid: usize,
+    medoids: []usize,
     // the max number of candidates, each candidate is a scored node so
     // this can be set as the max_budget + k_max
     capacity: usize,
@@ -78,6 +85,9 @@ pub const Graph = struct {
     // with the pruning heuristic. in this case no neighbor would be removed
     // if we run the pruning again
     are_neighbors_pruned: []bool,
+    // for each node, tells if the node was not found by greedy node search
+    // during the last call to testNswExtention
+    nsw_extension_search_missed: []bool,
     // utils
     sim_access: usize = 0,
 
@@ -125,6 +135,14 @@ pub const Graph = struct {
         errdefer allocator.free(are_neighbors_pruned);
         @memset(are_neighbors_pruned, false);
 
+        const nsw_extension_search_missed = try allocator.alloc(bool, matrix.n);
+        errdefer allocator.free(nsw_extension_search_missed);
+        @memset(nsw_extension_search_missed, false);
+
+        const medoids = try allocator.alloc(usize, params.nb_entry_points);
+        errdefer allocator.free(medoids);
+        @memset(medoids, matrix.n);
+
         return .{
             .zml_handler = zml_handler,
             .allocator = allocator,
@@ -140,6 +158,7 @@ pub const Graph = struct {
             .similarity_matrix = matrix,
             .lm_head_row_norms = lm_head_row_norms,
             .medoid = medoid,
+            .medoids = medoids,
             .capacity = params.search_budget + params.k_max,
             .L = 0,
             .visited = try allocator.alloc(Candidate, params.search_budget + params.k_max),
@@ -149,6 +168,7 @@ pub const Graph = struct {
             .nb_expanded_neighbors = nb_expanded_neighbors,
             .is_search_done = false,
             .are_neighbors_pruned = are_neighbors_pruned,
+            .nsw_extension_search_missed = nsw_extension_search_missed,
         };
     }
 
@@ -243,6 +263,8 @@ pub const Graph = struct {
         self.allocator.free(self.is_expanded);
         self.allocator.free(self.nb_expanded_neighbors);
         self.allocator.free(self.are_neighbors_pruned);
+        self.allocator.free(self.nsw_extension_search_missed);
+        self.allocator.free(self.medoids);
     }
 
     // ------------------- Search functions ------------------ //
@@ -338,7 +360,31 @@ pub const Graph = struct {
         self.zml_handler.toc(&self.zml_handler.timers.embed_search);
     }
 
-    
+    pub fn greedySearchSparse(self: *Graph, query: SparseQuery) void {
+        self.zml_handler.tic(&self.zml_handler.timers.embed_search);
+        self.initSparseSearch(query);
+
+        while (self.nb_visited < self.params.search_budget) {
+
+            // find best node of the active pool that has not been expanded yet
+            const node = self.popCandidate();
+
+            // if all nodes in active pool have been expanded, terminate the search
+            if (self.is_search_done) break;
+
+            const start_neigh = self.params.k_max * node;
+            const end_neigh = start_neigh + self.nb_neighbors[node];
+            for (start_neigh..end_neigh) |i| {
+                const neighbor = self.neighbors[i];
+                if (self.is_visited[neighbor]) continue;
+                self.addSparseCandidate(query, neighbor);
+            }
+        }
+
+        self.cleanup();
+        self.zml_handler.toc(&self.zml_handler.timers.embed_search);
+    }
+
     pub fn scoreQueryNode(self: *const Graph, query: []const f32, node: usize) f32 {
         self.zml_handler.tic(&self.zml_handler.timers.embed_dot);
         std.debug.assert(!self.is_junk[node]);
@@ -361,16 +407,24 @@ pub const Graph = struct {
         return dot;
     }
 
+    pub fn scoreSparseQueryNode(self: *const Graph, query: SparseQuery, node: usize) f32 {
+        std.debug.assert(query.coord < self.dim);
+        std.debug.assert(query.sign == 1.0 or query.sign == -1.0);
+        std.debug.assert(!self.is_junk[node]);
+
+        const rows = self.lm_head.constItems(f32);
+        return query.sign * rows[node * self.dim + query.coord];
+    }
+
     pub fn initNodeSearch(self: *Graph, query: usize) void {
         // at start, pool is empty
         std.debug.assert(!self.is_visited[self.medoid]);
 
-        // score query against medoid
-        const sim = self.similarity(self.medoid, query);
+        const entry_point, const entry_sim = self.selectNodeEntryPoint(query);
 
         // medoid is the first and only visited node
-        self.is_visited[self.medoid] = true;
-        self.visited[0] = .{ .node = self.medoid, .similarity = sim };
+        self.is_visited[entry_point] = true;
+        self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
         self.nb_expanded_neighbors[0] = 0;
         self.nb_visited = 1;
         self.L = 1;
@@ -381,16 +435,81 @@ pub const Graph = struct {
         // at start, pool is empty
         std.debug.assert(!self.is_visited[self.medoid]);
 
-        // score query against medoid
-        const sim = self.scoreQueryNode(query, self.medoid);
+        const entry_point, const entry_sim = self.selectQueryEntryPoint(query);
 
         // medoid is the first and only visited node
-        self.is_visited[self.medoid] = true;
-        self.visited[0] = .{ .node = self.medoid, .similarity = sim };
+        self.is_visited[entry_point] = true;
+        self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
         self.nb_expanded_neighbors[0] = 0;
         self.nb_visited = 1;
         self.L = 1;
         self.is_search_done = false;
+    }
+
+    pub fn initSparseSearch(self: *Graph, query: SparseQuery) void {
+        // at start, pool is empty
+        std.debug.assert(!self.is_visited[self.medoid]);
+
+        const entry_point, const entry_sim = self.selectSparseEntryPoint(query);
+
+        // medoid is the first and only visited node
+        self.is_visited[entry_point] = true;
+        self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
+        self.nb_expanded_neighbors[0] = 0;
+        self.nb_visited = 1;
+        self.L = 1;
+        self.is_search_done = false;
+    }
+
+    fn selectNodeEntryPoint(self: *Graph, query: usize) struct { usize, f32 } {
+        var entry_point = self.medoid;
+        var entry_sim = self.similarity(self.medoid, query);
+
+        for (1..self.params.nb_entry_points) |i| {
+            const node = self.medoids[i];
+            std.debug.assert(node < self.n);
+            std.debug.assert(!self.is_visited[node]);
+            const sim = self.similarity(node, query);
+            if (sim > entry_sim) {
+                entry_point = node;
+                entry_sim = sim;
+            }
+        }
+        return .{ entry_point, entry_sim };
+    }
+
+    fn selectQueryEntryPoint(self: *Graph, query: []const f32) struct { usize, f32 } {
+        var entry_point = self.medoid;
+        var entry_sim = self.scoreQueryNode(query, self.medoid);
+
+        for (1..self.params.nb_entry_points) |i| {
+            const node = self.medoids[i];
+            std.debug.assert(node < self.n);
+            std.debug.assert(!self.is_visited[node]);
+            const sim = self.scoreQueryNode(query, node);
+            if (sim > entry_sim) {
+                entry_point = node;
+                entry_sim = sim;
+            }
+        }
+        return .{ entry_point, entry_sim };
+    }
+
+    fn selectSparseEntryPoint(self: *Graph, query: SparseQuery) struct { usize, f32 } {
+        var entry_point = self.medoid;
+        var entry_sim = self.scoreSparseQueryNode(query, self.medoid);
+
+        for (1..self.params.nb_entry_points) |i| {
+            const node = self.medoids[i];
+            std.debug.assert(node < self.n);
+            std.debug.assert(!self.is_visited[node]);
+            const sim = self.scoreSparseQueryNode(query, node);
+            if (sim > entry_sim) {
+                entry_point = node;
+                entry_sim = sim;
+            }
+        }
+        return .{ entry_point, entry_sim };
     }
 
     pub fn addNodeCandidate(self: *Graph, query: usize, node: usize) void {
@@ -398,6 +517,14 @@ pub const Graph = struct {
         std.debug.assert(!self.is_visited[node]);
         std.debug.assert(self.nb_visited > 0);
         const sim = self.similarity(node, query);
+        self.insert(node, sim);
+    }
+
+    pub fn addSparseCandidate(self: *Graph, query: SparseQuery, node: usize) void {
+        std.debug.assert(!self.is_junk[node]);
+        std.debug.assert(!self.is_visited[node]);
+        std.debug.assert(self.nb_visited > 0);
+        const sim = self.scoreSparseQueryNode(query, node);
         self.insert(node, sim);
     }
 
@@ -578,7 +705,100 @@ pub const Graph = struct {
         std.log.info("Exact kNN : nb edges: {d}", .{self.nbEdges()});
     }
 
-    
+    fn sortNodeNeighbors(self: *Graph, node: usize, scratch: []Candidate) void {
+        std.debug.assert(scratch.len >= self.nb_neighbors[node]);
+
+        const start_neigh = self.params.k_max * node;
+        for (0..self.nb_neighbors[node]) |i| {
+            const neighbor = self.neighbors[start_neigh + i];
+            scratch[i] = .{ .node = neighbor, .similarity = self.similarity(node, neighbor) };
+        }
+        std.mem.sort(Candidate, scratch[0..self.nb_neighbors[node]], {}, Candidate.beforeThan);
+        for (0..self.nb_neighbors[node]) |i| {
+            self.neighbors[start_neigh + i] = scratch[i].node;
+        }
+    }
+
+    fn insertNeighborSorted(self: *Graph, node: usize, candidate: usize) void {
+        std.debug.assert(node != candidate);
+        std.debug.assert(self.nb_neighbors[node] < self.params.k_max);
+
+        const start_neigh = self.params.k_max * node;
+        const end_neigh = start_neigh + self.nb_neighbors[node];
+        const sim = self.similarity(node, candidate);
+        var insert_pos = end_neigh;
+        while (insert_pos > start_neigh and sim > self.similarity(node, self.neighbors[insert_pos - 1])) {
+            self.neighbors[insert_pos] = self.neighbors[insert_pos - 1];
+            insert_pos -= 1;
+        }
+        self.neighbors[insert_pos] = candidate;
+        self.nb_neighbors[node] += 1;
+    }
+
+    fn isPrunedByCurrentNeighbors(self: *Graph, node: usize, candidate: usize) bool {
+        std.debug.assert(node != candidate);
+
+        const base_sim = self.similarity(node, candidate);
+        const alpha = if (base_sim > 0.0) self.params.alpha else 1.0 / self.params.alpha;
+        const start_neigh = self.params.k_max * node;
+        const end_neigh = start_neigh + self.nb_neighbors[node];
+        for (start_neigh..end_neigh) |i| {
+            const neighbor = self.neighbors[i];
+            if (self.similarity(neighbor, candidate) >= alpha * base_sim) return true;
+        }
+        return false;
+    }
+
+    pub fn consolidateNswNearest(self: *Graph) void {
+        log.info("Consolidate NSW with nearest neighbors", .{});
+
+        const scratch = self.allocator.alloc(Candidate, self.params.k_max) catch @panic("OOM");
+        defer self.allocator.free(scratch);
+
+        for (0..self.n) |node| {
+            if (self.is_junk[node]) continue;
+            self.sortNodeNeighbors(node, scratch);
+
+            for (0..self.similarity_matrix.k) |neigh_pos| {
+                if (self.nb_neighbors[node] == self.params.k_max) break;
+                const candidate = self.similarity_matrix.nearestNeighbor(node, neigh_pos);
+                if (candidate == node or self.is_junk[candidate] or self.hasNeighbor(node, candidate)) continue;
+                self.insertNeighborSorted(node, candidate);
+            }
+            std.debug.assert(self.nb_neighbors[node] == self.params.k_max);
+
+            if (node == 0 or (node + 1) % 10000 == 0 or node + 1 == self.n) {
+                log.info("Consolidate nearest node {d}/{d}", .{ node + 1, self.n });
+            }
+        }
+        std.log.info("Consolidated nearest NSW: nb edges: {d}", .{self.nbEdges()});
+    }
+
+    pub fn consolidateNswPrune(self: *Graph) void {
+        log.info("Consolidate NSW with pruned nearest neighbors", .{});
+
+        const scratch = self.allocator.alloc(Candidate, self.params.k_max) catch @panic("OOM");
+        defer self.allocator.free(scratch);
+
+        for (0..self.n) |node| {
+            if (self.is_junk[node]) continue;
+            self.sortNodeNeighbors(node, scratch);
+
+            for (0..self.similarity_matrix.k) |neigh_pos| {
+                if (self.nb_neighbors[node] == self.params.k_max) break;
+                const candidate = self.similarity_matrix.nearestNeighbor(node, neigh_pos);
+                if (candidate == node or self.is_junk[candidate] or self.hasNeighbor(node, candidate)) continue;
+                if (self.isPrunedByCurrentNeighbors(node, candidate)) continue;
+                self.insertNeighborSorted(node, candidate);
+            }
+
+            if (node == 0 or (node + 1) % 10000 == 0 or node + 1 == self.n) {
+                log.info("Consolidate pruned node {d}/{d}", .{ node + 1, self.n });
+            }
+        }
+        std.log.info("Consolidated pruned NSW: nb edges: {d}", .{self.nbEdges()});
+    }
+
     pub fn pruneCandidates(self: *Graph, base: usize, candidates: []Candidate, timer: *Field_timer) void {
         std.debug.assert(!self.is_junk[base]);
         self.zml_handler.tic(timer);
@@ -638,7 +858,7 @@ pub const Graph = struct {
                     break;
                 }
             }
-            if (!pruned or candidates.len <= self.params.k_max) {
+            if (!pruned) {
                 self.neighbors[end_neigh] = candidate.node;
                 self.nb_neighbors[base] += 1;
                 end_neigh += 1;
@@ -648,7 +868,23 @@ pub const Graph = struct {
         self.are_neighbors_pruned[base] = true;
         self.zml_handler.toc(timer);
     }
-    
+
+    fn bestSparseQueryNode(self: *Graph, query: SparseQuery) usize {
+        var best_node: usize = self.n;
+        var best_score: f32 = -std.math.inf(f32);
+
+        for (0..self.n) |node| {
+            if (self.is_junk[node]) continue;
+            const score = self.scoreSparseQueryNode(query, node);
+            if (score > best_score) {
+                best_score = score;
+                best_node = node;
+            }
+        }
+        std.debug.assert(best_node < self.n);
+        return best_node;
+    }
+
     // ------------------- NSW main function -------------------- //
 
     pub fn extendToNsw(self: *Graph) !void {
@@ -666,6 +902,8 @@ pub const Graph = struct {
         const alpha = self.params.alpha;
         self.sim_access = 0;
         self.zml_handler.nb_tictoc = 0;
+
+        self.setEntryPoints();
 
         for (0..self.params.vamana_passes) |pass_i| {
             self.params.alpha = if (pass_i == 0) 1.0 else alpha;
@@ -692,7 +930,7 @@ pub const Graph = struct {
                 // the candidates are current_node's neighbors and the visited nodes
                 // since both lists are sorted and contain unique nodes, we can build
                 // the sorted list of candidates in one linear forward pass
-                self.greedySearchNodeLazy(current_node);
+                self.greedySearchNode(current_node);
                 if (self.visited[0].node == current_node) {
                     // if current_node was found, we could decide the connectedness is ok
                     // and continue. this reduces the pressure on nb_neighbors for each node,
@@ -700,12 +938,14 @@ pub const Graph = struct {
                     // but for now it degrades query search (eg: 84% -> 76% success).
                     //continue;
                 }
+                //const nb_search_cand: usize = self.nb_visited;
+                const nb_search_cand: usize = self.L;
                 // only first L positions are sorted
-                std.mem.sort(Candidate, self.visited[self.L..self.nb_visited], {}, Candidate.beforeThan);
+                if (nb_search_cand > self.L) std.mem.sort(Candidate, self.visited[self.L..nb_search_cand], {}, Candidate.beforeThan);
                 var pos_in_neighbors: usize = start_neigh;
                 var pos_in_visited: usize = 0;
-                
-                while (pos_in_neighbors < end_neigh and pos_in_visited < self.nb_visited) { // pos_in_visited < self.L
+
+                while (pos_in_neighbors < end_neigh and pos_in_visited < nb_search_cand) {
                     // if current_node was visited during the search, skip it in the visited pool
                     // otherwise it will end up being a neighbor of itself
                     // note that on the not metric case, if current_node was visited,
@@ -741,7 +981,7 @@ pub const Graph = struct {
                     candidates[nb_candidates] = .{ .node = neigh, .similarity = self.similarity(neigh, current_node) };
                     nb_candidates += 1;
                 }
-                for (pos_in_visited..self.nb_visited) |j| {
+                for (pos_in_visited..nb_search_cand) |j| {
                     if (self.visited[j].node == current_node) continue;
                     const visit = self.visited[j].node;
                     candidates[nb_candidates] = .{ .node = visit, .similarity = self.visited[j].similarity };
@@ -812,24 +1052,191 @@ pub const Graph = struct {
         std.log.info("nb tic toc: {}", .{self.zml_handler.nb_tictoc});
     }
 
+    pub fn extendNswSparseQueries(self: *Graph) !void {
+        try self.benchSimilarity();
+
+        const candidates = self.allocator.alloc(Candidate, self.params.k_max + self.params.search_budget) catch @panic("OOM");
+        defer self.allocator.free(candidates);
+
+        const alpha = self.params.alpha;
+        self.sim_access = 0;
+        self.zml_handler.nb_tictoc = 0;
+
+        self.setEntryPoints();
+
+        for (0..self.params.vamana_passes) |pass_i| {
+            self.params.alpha = if (pass_i == 0) 1.0 else alpha;
+            @memset(self.are_neighbors_pruned, false);
+
+            log.info("NSW sparse-query pass {d}/{d}", .{ pass_i + 1, self.params.vamana_passes });
+            const start = std.Io.Timestamp.now(self.io, .awake);
+            const nb_sparse_queries = 2 * self.dim;
+            for (0..nb_sparse_queries) |query_i| {
+                const sparse_query: SparseQuery = .{
+                    .coord = query_i / 2,
+                    .sign = if (query_i % 2 == 0) 1.0 else -1.0,
+                };
+                const current_node = self.bestSparseQueryNode(sparse_query);
+                const start_neigh = self.params.k_max * current_node;
+                var end_neigh = start_neigh + self.nb_neighbors[current_node];
+
+                self.greedySearchSparse(sparse_query);
+
+                var nb_candidates: usize = 0;
+                for (start_neigh..end_neigh) |j| {
+                    const neigh = self.neighbors[j];
+                    candidates[nb_candidates] = .{ .node = neigh, .similarity = self.similarity(current_node, neigh) };
+                    nb_candidates += 1;
+                }
+                for (0..self.L) |j| {
+                    const visit = self.visited[j].node;
+                    if (visit == current_node or self.hasNeighbor(current_node, visit)) continue;
+                    candidates[nb_candidates] = .{ .node = visit, .similarity = self.similarity(current_node, visit) };
+                    nb_candidates += 1;
+                }
+                std.mem.sort(Candidate, candidates[0..nb_candidates], {}, Candidate.beforeThan);
+
+                self.pruneCandidates2(current_node, candidates[0..nb_candidates], &self.zml_handler.timers.prune_pool_fwd);
+
+                end_neigh = start_neigh + self.nb_neighbors[current_node];
+                for (start_neigh..end_neigh) |j| {
+                    const neighbor = self.neighbors[j];
+                    const start_neigh_neigh = self.params.k_max * neighbor;
+                    const end_neigh_neigh = start_neigh_neigh + self.nb_neighbors[neighbor];
+                    const sim = self.similarity(neighbor, current_node);
+
+                    if (self.hasNeighbor(neighbor, current_node)) continue;
+
+                    if (self.nb_neighbors[neighbor] < self.params.k_max) {
+                        var insert_pos = end_neigh_neigh;
+                        while (insert_pos > start_neigh_neigh and sim > self.similarity(neighbor, self.neighbors[insert_pos - 1])) {
+                            self.neighbors[insert_pos] = self.neighbors[insert_pos - 1];
+                            insert_pos -= 1;
+                        }
+                        self.neighbors[insert_pos] = current_node;
+                        self.nb_neighbors[neighbor] += 1;
+                        continue;
+                    }
+
+                    nb_candidates = 0;
+                    for (start_neigh_neigh..end_neigh_neigh) |k| {
+                        const neigh_neigh = self.neighbors[k];
+                        candidates[nb_candidates] = .{ .node = neigh_neigh, .similarity = self.similarity(neighbor, neigh_neigh) };
+                        nb_candidates += 1;
+                    }
+                    var insert_pos = nb_candidates;
+                    while (insert_pos > 0 and sim > candidates[insert_pos - 1].similarity) {
+                        candidates[insert_pos] = candidates[insert_pos - 1];
+                        insert_pos -= 1;
+                    }
+                    candidates[insert_pos] = .{ .node = current_node, .similarity = sim };
+                    nb_candidates += 1;
+
+                    self.pruneCandidates2(neighbor, candidates[0..nb_candidates], &self.zml_handler.timers.prune_pool_bwd);
+                }
+
+                if (query_i == 0 or (query_i + 1) % 128 == 0 or query_i + 1 == nb_sparse_queries) {
+                    const now = std.Io.Timestamp.now(self.io, .awake);
+                    const elapsed_duration = std.Io.Timestamp.durationTo(start, now);
+                    const elapsed_seconds = @as(f64, @floatFromInt(elapsed_duration.nanoseconds)) / 1e9;
+                    const eta_seconds = elapsed_seconds * @as(f64, @floatFromInt(nb_sparse_queries - query_i - 1)) / @as(f64, @floatFromInt(query_i + 1));
+                    log.info(
+                        "NSW sparse query {d}/{d} elapsed={d:.2}s eta={d:.2}s",
+                        .{ query_i + 1, nb_sparse_queries, elapsed_seconds, eta_seconds },
+                    );
+                }
+            }
+            std.log.info("NSW sparse-query pass {d} done, nb edges: {d}", .{ pass_i + 1, self.nbEdges() });
+        }
+        std.log.info("sim_access: {}", .{self.sim_access});
+        std.log.info("nb tic toc: {}", .{self.zml_handler.nb_tictoc});
+    }
+
+    pub fn setEntryPoints(self: *Graph) void {
+        self.medoids[0] = self.medoid;
+        for (1..self.params.nb_entry_points) |i| {
+            self.medoids[i] = 10000 * i;
+        }
+    }
+
     pub fn testNswExtention(self: *Graph, sampler: *sampling.Sampler) !void {
+        self.setEntryPoints();
         log.info("Test NSW extension", .{});
+        @memset(self.nsw_extension_search_missed, false);
+
+        const in_degrees = try self.allocator.alloc(usize, self.n);
+        defer self.allocator.free(in_degrees);
+        @memset(in_degrees, 0);
+
+        for (0..self.n) |node| {
+            if (self.is_junk[node]) continue;
+            const start_neigh = self.params.k_max * node;
+            const end_neigh = start_neigh + self.nb_neighbors[node];
+            for (start_neigh..end_neigh) |neigh| {
+                in_degrees[self.neighbors[neigh]] += 1;
+            }
+        }
+        var min_in_degree = self.n;
+        var max_in_degree: usize = 0;
+        for (0..self.n) |node| {
+            if (self.is_junk[node]) continue;
+            min_in_degree = @min(min_in_degree, in_degrees[node]);
+            max_in_degree = @max(max_in_degree, in_degrees[node]);
+        }
+        log.info("Min in-degree: {}", .{min_in_degree});
+        log.info("Max in-degree: {}", .{max_in_degree});
+
+        //try self.logDegreeCounts("Nodes by in-degree", in_degrees, max_in_degree);
+        for (0..self.n) |node| {
+            if (self.is_junk[node] or in_degrees[node] <= 2000) continue;
+            const token_str = try tokens.tokenString(sampler.tokenizer, @as(u32, @intCast(node)), self.allocator);
+            log.info("Node {d} has in-degree {d}, token: {s}", .{ node, in_degrees[node], token_str });
+            self.allocator.free(token_str);
+        }
+        //try self.logDegreeCounts("Nodes by out-degree", self.nb_neighbors, self.params.k_max);
+
+        const hop_dist = try self.getHopDistance();
+        defer self.allocator.free(hop_dist);
+        var max_hops: usize = 0;
+        for (hop_dist) |hops| {
+            if (hops > max_hops) max_hops = hops;
+        }
+        log.info("Max hops: {}", .{max_hops});
+        for (0..2) |hops| {
+            for (0..self.n) |i| {
+                if (hop_dist[i] == hops) {
+                    std.log.info("Node {d} needs {d} hops, out-degree: {d}, tok: {s}", .{ i, hops, self.nb_neighbors[i], try tokens.tokenString(sampler.tokenizer, i, self.allocator) });
+                }
+            }
+        }
+        //try self.logDegreeCounts("Nodes by min-hops", hop_dist, max_hops);
+
         var exact_first_count: usize = 0;
         var valid_count: usize = 0;
         var total_visited: usize = 0;
         var min_visited: usize = std.math.maxInt(usize);
         var max_visited: usize = 0;
+        const entry_point_counts = try self.allocator.alloc(usize, self.params.nb_entry_points);
+        defer self.allocator.free(entry_point_counts);
+        @memset(entry_point_counts, 0);
 
         for (0..self.n) |node| {
             if (self.is_junk[node]) continue;
             valid_count += 1;
+            const entry_point, _ = self.selectNodeEntryPoint(node);
+            for (self.medoids[0..self.params.nb_entry_points], 0..) |medoid, entry_i| {
+                if (medoid == entry_point) {
+                    entry_point_counts[entry_i] += 1;
+                    break;
+                }
+            }
             self.greedySearchNode(node);
             const nb_visited = self.nb_visited;
             total_visited += nb_visited;
             min_visited = @min(min_visited, nb_visited);
             max_visited = @max(max_visited, nb_visited);
             var found = false;
-            for (0..self.L) |i| {
+            for (0..self.nb_visited) |i| {
                 if (self.visited[i].node == node) {
                     exact_first_count += 1;
                     found = true;
@@ -837,7 +1244,8 @@ pub const Graph = struct {
                 }
             }
             if (!found) {
-                std.log.info("Token {d} not found {s}", .{node, try tokens.tokenString(sampler.tokenizer, node, self.allocator)});
+                self.nsw_extension_search_missed[node] = true;
+                //std.log.info("Token {d}, in-degree {d}, hop distance {d}, not found {s}", .{node, in_degrees[node], hop_dist[node], try tokens.tokenString(sampler.tokenizer, node, self.allocator)});
             }
 
             if (valid_count == 1 or valid_count % 10000 == 0) {
@@ -848,6 +1256,11 @@ pub const Graph = struct {
 
         const avg_visited = @as(f64, @floatFromInt(total_visited)) / @as(f64, @floatFromInt(valid_count));
         const exact_rate = @as(f64, @floatFromInt(exact_first_count)) / @as(f64, @floatFromInt(valid_count));
+        log.info("NSW extension entry-point starts", .{});
+        for (entry_point_counts, 0..) |count, entry_i| {
+            if (count == 0) continue;
+            log.info("entry {d} node {d}: {d} searches", .{ entry_i, self.medoids[entry_i], count });
+        }
         log.info(
             "NSW extension test: valid={d} exact_first={d}/{d} ({d:.4}%) nb_visited min={d} max={d} avg={d:.2}",
             .{
@@ -858,6 +1271,86 @@ pub const Graph = struct {
                 if (valid_count == 0) 0 else min_visited,
                 max_visited,
                 avg_visited,
+            },
+        );
+    }
+
+    pub fn testNwsExtensionSparse(self: *Graph) !void {
+        log.info("Test NSW extension sparse queries", .{});
+
+        const rows = self.lm_head.constItems(f32);
+        const query = try self.allocator.alloc(f32, self.dim);
+        defer self.allocator.free(query);
+        @memset(query, 0.0);
+
+        var total_count: usize = 0;
+        var found_count: usize = 0;
+        var total_visited: usize = 0;
+        var min_visited: usize = std.math.maxInt(usize);
+        var max_visited: usize = 0;
+
+        for (0..self.dim) |coord| {
+            var best_positive_node: usize = self.n;
+            var best_positive_value: f32 = -std.math.inf(f32);
+            var best_negative_node: usize = self.n;
+            var best_negative_value: f32 = std.math.inf(f32);
+
+            for (0..self.n) |node| {
+                if (self.is_junk[node]) continue;
+                const value = rows[node * self.dim + coord];
+                if (value > best_positive_value) {
+                    best_positive_value = value;
+                    best_positive_node = node;
+                }
+                if (value < best_negative_value) {
+                    best_negative_value = value;
+                    best_negative_node = node;
+                }
+            }
+            std.debug.assert(best_positive_node < self.n);
+            std.debug.assert(best_negative_node < self.n);
+
+            query[coord] = 1.0;
+            self.greedySearch(query);
+            total_count += 1;
+            total_visited += self.nb_visited;
+            min_visited = @min(min_visited, self.nb_visited);
+            max_visited = @max(max_visited, self.nb_visited);
+            for (0..self.nb_visited) |i| {
+                if (self.visited[i].node == best_positive_node) {
+                    found_count += 1;
+                    break;
+                }
+            }
+
+            query[coord] = -1.0;
+            self.greedySearch(query);
+            total_count += 1;
+            total_visited += self.nb_visited;
+            min_visited = @min(min_visited, self.nb_visited);
+            max_visited = @max(max_visited, self.nb_visited);
+            for (0..self.nb_visited) |i| {
+                if (self.visited[i].node == best_negative_node) {
+                    found_count += 1;
+                    break;
+                }
+            }
+
+            query[coord] = 0.0;
+        }
+
+        const found_rate = 100.0 * @as(f64, @floatFromInt(found_count)) / @as(f64, @floatFromInt(total_count));
+        const average_visit = @as(f64, @floatFromInt(total_visited)) / @as(f64, @floatFromInt(total_count));
+        log.info(
+            "NSW extension sparse test: total={d} found={d}/{d} ({d:.4}%) nb_visited min={d} max={d} avg={d:.2}",
+            .{
+                total_count,
+                found_count,
+                total_count,
+                found_rate,
+                if (total_count == 0) 0 else min_visited,
+                max_visited,
+                average_visit,
             },
         );
     }
@@ -874,6 +1367,23 @@ pub const Graph = struct {
     }
 
     // ----------------------- NSW utils ------------------------ //
+
+    fn logDegreeCounts(self: *Graph, title: []const u8, degrees: []const usize, max_degree: usize) !void {
+        const counts = try self.allocator.alloc(usize, max_degree + 1);
+        defer self.allocator.free(counts);
+        @memset(counts, 0);
+
+        for (0..self.n) |node| {
+            if (self.is_junk[node]) continue;
+            counts[degrees[node]] += 1;
+        }
+
+        log.info("{s}", .{title});
+        for (counts, 0..) |count, degree| {
+            if (count == 0) continue;
+            log.info("{d} nodes of degree {d}", .{ count, degree });
+        }
+    }
 
     pub fn hasNeighbor(self: *const Graph, node: usize, candidate: usize) bool {
         const start_neigh = self.params.k_max * node;
@@ -1075,15 +1585,20 @@ pub const Graph = struct {
 
     // ------------------- Hierarchy functions ------------------- //
 
-    pub fn getHopDistance(self: *Graph, start: usize) ![]usize {
+    pub fn getHopDistance(self: *Graph) ![]usize {
         const hop_dist = try self.allocator.alloc(usize, self.n);
         errdefer self.allocator.free(hop_dist);
         @memset(hop_dist, self.n);
-        hop_dist[start] = 0;
 
         var queue: std.ArrayList(usize) = try .initCapacity(self.allocator, 0);
         defer queue.deinit(self.allocator);
-        try queue.append(self.allocator, start);
+
+        for (self.medoids[0..self.params.nb_entry_points]) |entry_point| {
+            std.debug.assert(entry_point < self.n);
+            if (hop_dist[entry_point] == 0) continue;
+            hop_dist[entry_point] = 0;
+            try queue.append(self.allocator, entry_point);
+        }
 
         var queue_head: usize = 0;
         while (queue_head < queue.items.len) {
@@ -1099,20 +1614,6 @@ pub const Graph = struct {
                 }
             }
         }
-
-        var max_hops: usize = 0;
-        for (hop_dist) |hops| {
-            if (hops > max_hops) max_hops = hops;
-        }
-        for (0..max_hops) |hops| {
-            for (0..self.n) |i| {
-                if (hop_dist[i] == hops) {
-                    //std.log.info("Node {d} needs {d} hops, tok: {s}", .{i, hops, try tokens.tokenString(sampler.tokenizer, i, zml_handler.allocator)});
-                    break;
-                }
-            }
-        }
-
         return hop_dist;
     }
 
