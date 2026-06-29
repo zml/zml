@@ -319,8 +319,10 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     //try testEmbedCoarseSearch(zml_handler, &sampler, active_parents);
 
     zml_handler.tic(&zml_handler.timers.knn_graph);
-    g.setNearestNeighbors(64);
+    g.setNearestNeighbors(256);
     zml_handler.toc(&zml_handler.timers.knn_graph);
+
+    try g.pruneNeighbors(1.0);
 
     zml_handler.tic(&zml_handler.timers.nsw_graph);
     try g.extendToNsw();

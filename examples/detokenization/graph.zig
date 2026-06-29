@@ -14,13 +14,13 @@ const Zml_handler = main.Zml_handler;
 const Field_timer = main.Timing_handler.Field_timer;
 
 pub const GraphParams = struct {
-    k_max: usize = 64,
+    k_max: usize = 256,
     search_budget: usize = 2048,
     alpha: f32 = 1.25,
     vamana_passes: usize = 2,
     top_k: usize = 16,
     L: usize = 256,
-    nb_entry_points: usize = 10,
+    nb_entry_points: usize = 1,
 };
 
 pub const Graph = struct {
@@ -808,6 +808,27 @@ pub const Graph = struct {
         std.log.info("Consolidated pruned NSW: nb edges: {d}", .{self.nbEdges()});
     }
 
+    pub fn pruneNeighbors(self: *Graph, alpha: f32) !void {
+        log.info("Pruning neighbors with alpha={d}", .{alpha});
+        std.log.info("Initial edges: {d}", .{self.nbEdges()});
+        const alpha_checkpoint = self.params.alpha;
+        self.params.alpha = alpha;
+        const candidates = self.allocator.alloc(Candidate, self.params.k_max) catch @panic("OOM");
+        defer self.allocator.free(candidates);
+        for (0..self.n) |node| {
+            if (self.is_junk[node]) continue;
+            const start_neigh = node * self.params.k_max;
+            const end_neigh = start_neigh + self.nb_neighbors[node];
+            for (start_neigh..end_neigh) |i| {
+                const neighbor = self.neighbors[i];
+                candidates[i - start_neigh] = .{ .node = neighbor, .similarity = self.similarity(node, neighbor) };
+            }
+            self.pruneCandidates(node, candidates, &self.zml_handler.timers.prune_pool_fwd);
+        }
+        std.log.info("Final edges: {d}", .{self.nbEdges()});
+        self.params.alpha = alpha_checkpoint;
+    }
+    
     pub fn pruneCandidates(self: *Graph, base: usize, candidates: []Candidate, timer: *Field_timer) void {
         std.debug.assert(!self.is_junk[base]);
         self.zml_handler.tic(timer);
