@@ -324,16 +324,16 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
 
     zml_handler.tic(&zml_handler.timers.nsw_graph);
     try g.extendToNsw();
-    try g.extendNswSparseQueries();
+    //try g.extendNswSparseQueries();
     zml_handler.toc(&zml_handler.timers.nsw_graph);
 
     //try g.testNswExtention(&sampler);
     //try g.testNwsExtensionSparse();
 
-    g.consolidateNswNearest();
+    //g.consolidateNswNearest();
     //g.consolidateNswPrune();
     
-    //try g.testNswExtention(&sampler);
+    try g.testNswExtention(&sampler);
     //try g.testNwsExtensionSparse();
 
     zml_handler.tic(&zml_handler.timers.graph_search_tot);
