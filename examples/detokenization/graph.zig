@@ -1186,14 +1186,14 @@ pub const Graph = struct {
         log.info("Min in-degree: {}", .{min_in_degree});
         log.info("Max in-degree: {}", .{max_in_degree});
 
-        //try self.logDegreeCounts("Nodes by in-degree", in_degrees, max_in_degree);
+        try self.logDegreeCounts("Nodes by in-degree", in_degrees, max_in_degree);
         for (0..self.n) |node| {
             if (self.is_junk[node] or in_degrees[node] <= 2000) continue;
             const token_str = try tokens.tokenString(sampler.tokenizer, @as(u32, @intCast(node)), self.allocator);
             log.info("Node {d} has in-degree {d}, token: {s}", .{ node, in_degrees[node], token_str });
             self.allocator.free(token_str);
         }
-        //try self.logDegreeCounts("Nodes by out-degree", self.nb_neighbors, self.params.k_max);
+        try self.logDegreeCounts("Nodes by out-degree", self.nb_neighbors, self.params.k_max);
 
         const hop_dist = try self.getHopDistance();
         defer self.allocator.free(hop_dist);
@@ -1209,7 +1209,7 @@ pub const Graph = struct {
                 }
             }
         }
-        //try self.logDegreeCounts("Nodes by min-hops", hop_dist, max_hops);
+        try self.logDegreeCounts("Nodes by min-hops", hop_dist, max_hops);
 
         var exact_first_count: usize = 0;
         var valid_count: usize = 0;
@@ -1245,7 +1245,7 @@ pub const Graph = struct {
             }
             if (!found) {
                 self.nsw_extension_search_missed[node] = true;
-                //std.log.info("Token {d}, in-degree {d}, hop distance {d}, not found {s}", .{node, in_degrees[node], hop_dist[node], try tokens.tokenString(sampler.tokenizer, node, self.allocator)});
+                std.log.info("Token {d}, in-degree {d}, hop distance {d}, not found {s}", .{node, in_degrees[node], hop_dist[node], try tokens.tokenString(sampler.tokenizer, node, self.allocator)});
             }
 
             if (valid_count == 1 or valid_count % 10000 == 0) {
