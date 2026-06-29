@@ -464,30 +464,39 @@ pub const Graph = struct {
     fn selectNodeEntryPoint(self: *Graph, query: usize) struct { usize, f32 } {
         var entry_point = self.medoid;
         var entry_sim = self.similarity(self.medoid, query);
+        var entry_scale = self.lm_head_row_norms.constItems(f32)[self.medoid] * self.lm_head_row_norms.constItems(f32)[query];
 
         for (1..self.params.nb_entry_points) |i| {
             const node = self.medoids[i];
             std.debug.assert(node < self.n);
             std.debug.assert(!self.is_visited[node]);
             const sim = self.similarity(node, query);
-            if (sim > entry_sim) {
+            const scale = self.lm_head_row_norms.constItems(f32)[node] * self.lm_head_row_norms.constItems(f32)[query];
+            if (sim / scale > entry_sim / scale) {
                 entry_point = node;
                 entry_sim = sim;
+                entry_scale = scale;
             }
         }
         return .{ entry_point, entry_sim };
     }
 
     fn selectQueryEntryPoint(self: *Graph, query: []const f32) struct { usize, f32 } {
+        var query_norm: f32 = 0;
+        for (query) |q| query_norm += q * q;
+        query_norm = @sqrt(query_norm);
+        
         var entry_point = self.medoid;
         var entry_sim = self.scoreQueryNode(query, self.medoid);
+        const entry_scale = self.lm_head_row_norms.constItems(f32)[self.medoid] * query_norm;
 
         for (1..self.params.nb_entry_points) |i| {
             const node = self.medoids[i];
             std.debug.assert(node < self.n);
             std.debug.assert(!self.is_visited[node]);
             const sim = self.scoreQueryNode(query, node);
-            if (sim > entry_sim) {
+            const scale = self.lm_head_row_norms.constItems(f32)[node] * query_norm;
+            if (sim / scale > entry_sim / entry_scale) {
                 entry_point = node;
                 entry_sim = sim;
             }
