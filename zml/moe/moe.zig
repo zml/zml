@@ -2,6 +2,7 @@ const std = @import("std");
 
 const zml = @import("../zml.zig");
 const stdx = zml.stdx;
+pub const metal = @import("metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
 pub const triton = @import("triton.zig");
 pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
@@ -16,6 +17,7 @@ pub const Backend = enum {
     // Could select a more specific name like "triton_sm90_bf16"
     triton,
     mosaic_tpu,
+    metal,
 
     pub fn auto(platform: *const zml.Platform, weights_dtype: zml.DataType) !Backend {
         return switch (platform.target) {
@@ -27,6 +29,10 @@ pub const Backend = enum {
                 .bf16, .f16, .f32 => .mosaic_tpu,
                 else => error.UnsupportedDataType,
             },
+            .metal => switch (weights_dtype) {
+                .bf16, .f16, .f32 => .metal,
+                else => error.UnsupportedDataType,
+            },
             else => error.UnimplementedMoEBackend,
         };
     }
@@ -36,6 +42,7 @@ pub const Backend = enum {
         return switch (backend) {
             .triton => {},
             .mosaic_tpu => {},
+            .metal => {},
         };
     }
 
@@ -44,6 +51,7 @@ pub const Backend = enum {
         return switch (backend) {
             .triton => {},
             .mosaic_tpu => {},
+            .metal => {},
         };
     }
 };
@@ -51,10 +59,12 @@ pub const Backend = enum {
 pub const Parameters = union(Backend) {
     triton: triton.Parameters,
     mosaic_tpu: mosaic_tpu.Parameters,
+    metal: metal.Parameters,
 
     pub const InitOptions = union(Backend) {
         triton: triton.Parameters.InitOptions,
         mosaic_tpu: mosaic_tpu.Parameters.InitOptions,
+        metal: metal.Parameters.InitOptions,
 
         pub fn fromBackend(backend: Backend, num_experts_per_tok: ?u32, activation: ActivationMode) InitOptions {
             return switch (backend) {
@@ -74,6 +84,14 @@ pub const Parameters = union(Backend) {
                         .gelu => .gelu,
                     },
                 } },
+                .metal => .{ .metal = .{
+                    .num_experts_per_tok = num_experts_per_tok.?,
+                    .activation = switch (activation) {
+                        .silu => .silu,
+                        .relu => .relu,
+                        .gelu => .gelu,
+                    },
+                } },
             };
         }
     };
@@ -82,6 +100,7 @@ pub const Parameters = union(Backend) {
         return switch (opts) {
             .triton => |v| .{ .triton = triton.Parameters.init(v) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Parameters.init(v) },
+            .metal => |v| .{ .metal = metal.Parameters.init(v) },
         };
     }
 };
@@ -89,15 +108,18 @@ pub const Parameters = union(Backend) {
 pub const Metadata = union(Backend) {
     triton: triton.Metadata,
     mosaic_tpu: mosaic_tpu.Metadata,
+    metal: metal.Metadata,
 
     pub const InitOptions = union(Backend) {
         triton: triton.Metadata.InitOptions,
         mosaic_tpu: mosaic_tpu.Metadata.InitOptions,
+        metal: metal.Metadata.InitOptions,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .triton => .{ .triton = .{} },
                 .mosaic_tpu => .{ .mosaic_tpu = .{} },
+                .metal => .{ .metal = .{} },
             };
         }
     };
@@ -106,6 +128,7 @@ pub const Metadata = union(Backend) {
         return switch (opts) {
             .triton => |v| .{ .triton = triton.Metadata.init(v) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Metadata.init(v) },
+            .metal => |v| .{ .metal = metal.Metadata.init(v) },
         };
     }
 
@@ -113,6 +136,7 @@ pub const Metadata = union(Backend) {
         return switch (self) {
             .triton => |metadata| .{ .triton = try metadata.initBuffer(io, platform) },
             .mosaic_tpu => |metadata| .{ .mosaic_tpu = try metadata.initBuffer(io, platform) },
+            .metal => |metadata| .{ .metal = try metadata.initBuffer(io, platform) },
         };
     }
 
@@ -120,6 +144,7 @@ pub const Metadata = union(Backend) {
         switch (self.*) {
             .triton => |*metadata| triton.deinitBuffer(metadata),
             .mosaic_tpu => |*metadata| mosaic_tpu.deinitBuffer(metadata),
+            .metal => |*metadata| metal.deinitBuffer(metadata),
         }
     }
 };
@@ -283,6 +308,29 @@ pub fn forwardMoe(
                 tpu_metadata,
                 .{
                     .activation = parameters.mosaic_tpu.activation,
+                    .global_num_experts = weights_gate_up.dim(.expert),
+                    .w1_scale = scales_gate_up,
+                    .w2_scale = scales_down,
+                    .w1_bias = bias_gate_up,
+                    .w2_bias = bias_down,
+                },
+            );
+        },
+        .metal => b: {
+            const metal_metadata = switch (metadata) {
+                .metal => |v| v,
+                else => return error.InvalidMetadata,
+            };
+
+            break :b try metal.fusedExpertsImpl(
+                input,
+                weights_gate_up,
+                weights_down,
+                topk_weights,
+                topk_ids,
+                metal_metadata,
+                .{
+                    .activation = parameters.metal.activation,
                     .global_num_experts = weights_gate_up.dim(.expert),
                     .w1_scale = scales_gate_up,
                     .w2_scale = scales_down,

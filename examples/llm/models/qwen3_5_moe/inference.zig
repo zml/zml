@@ -475,6 +475,6 @@ fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, b
                 .w2_zero_bias_shape = w2_zero_bias_shape,
             },
         }),
-        .mosaic_tpu => .init(.fromBackend(backend)),
+        .mosaic_tpu, .metal => .init(.fromBackend(backend)),
     };
 }
