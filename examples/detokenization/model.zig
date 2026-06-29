@@ -560,7 +560,7 @@ pub const Model = struct {
         const minus_inf = zml.Tensor.scalar(-std.math.inf(f32), .f32).broad(similarity.shape());
         const similarity_for_sort = self_mask.select(minus_inf, similarity);
 
-        const nearest = similarity_for_sort.topK(.{ .nearest = .col }, row_k_neighbors, .{ .descending = true }).indices.convert(.u64);
+        const nearest = similarity_for_sort.topK(.{ .nearest = .col }, row_k_neighbors, .{ .descending = true }).indices.convert(.i32);
 
         return .{ similarity, nearest };
     }
