@@ -1209,6 +1209,13 @@ pub const Graph = struct {
                 }
             }
         }
+        for (6..8) |hops| {
+            for (0..self.n) |i| {
+                if (hop_dist[i] == hops) {
+                    std.log.info("Node {d} needs {d} hops, out-degree: {d}, tok: {s}", .{ i, hops, self.nb_neighbors[i], try tokens.tokenString(sampler.tokenizer, i, self.allocator) });
+                }
+            }
+        }
         try self.logDegreeCounts("Nodes by min-hops", hop_dist, max_hops);
 
         var exact_first_count: usize = 0;
@@ -1245,7 +1252,7 @@ pub const Graph = struct {
             }
             if (!found) {
                 self.nsw_extension_search_missed[node] = true;
-                std.log.info("Token {d}, in-degree {d}, hop distance {d}, not found {s}", .{node, in_degrees[node], hop_dist[node], try tokens.tokenString(sampler.tokenizer, node, self.allocator)});
+                std.log.info("Token {d}, in-degree {d}, out-degree {d}, hop distance {d}, not found {s}", .{node, in_degrees[node], self.nb_neighbors[node], hop_dist[node], try tokens.tokenString(sampler.tokenizer, node, self.allocator)});
             }
 
             if (valid_count == 1 or valid_count % 10000 == 0) {
