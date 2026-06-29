@@ -215,6 +215,8 @@ pub const fa2 = struct {
     });
 
     pub const Parameters = struct {
+        sliding_window: i32 = -1,
+
         pub const InitOptions = struct {};
 
         pub fn init(_: InitOptions) fa2.Parameters {
@@ -263,7 +265,7 @@ pub const fa2 = struct {
         }
     };
 
-    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, _: Parameters) zml.Tensor {
+    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
         const ctx = CompilationContext.current();
 
         stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa2.attention support for batch size != 1 is not supported yet.", .{});
@@ -291,7 +293,7 @@ pub const fa2 = struct {
         const num_heads_k = k_.dim(.h);
         const head_size = q_.dim(.hd);
         const ngroups = @divExact(num_heads, num_heads_k);
-        const seqlenq_ngroups_swapped = max_seqlen_q == 1 and num_heads > num_heads_k and @mod(head_size, 8) == 0;
+        const seqlenq_ngroups_swapped = max_seqlen_q == 1 and num_heads > num_heads_k and @mod(head_size, 8) == 0 and parameters.sliding_window < 0;
         if (seqlenq_ngroups_swapped) {
             q = q.splitAxis(.h, .{ .h = num_heads_k, .ngroups = ngroups }).transpose(.{ .tot, .ngroups, .h, .hd }).merge(.{ .tot = .{ .tot, .ngroups } });
         }
@@ -319,7 +321,7 @@ pub const fa2 = struct {
                     break :b 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
                 },
                 .is_causal = true,
-                .window_size_left = @as(i32, -1),
+                .window_size_left = parameters.sliding_window,
                 .window_size_right = @as(i32, -1),
                 .max_seqlen_q = max_seqlen_q,
                 .max_seqlen_k = max_seqlen_k,
