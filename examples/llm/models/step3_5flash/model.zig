@@ -783,14 +783,21 @@ pub const Attn = struct {
             attn_start,
         };
 
-        const attn_output = zml.attention.attention.attention(
-            q,
-            attn_k,
-            attn_v,
+        // fa3 asserts b==1 and re-inserts its own batch axis; strip .b on input and restore on output.
+        const drop_b = layer_attention_parameters == .cuda_fa3;
+        const q_in = if (drop_b) q.squeeze(.b) else q;
+        const k_in = if (drop_b) attn_k.squeeze(.b) else attn_k;
+        const v_in = if (drop_b) attn_v.squeeze(.b) else attn_v;
+        const attn_raw = zml.attention.attention.attention(
+            q_in,
+            k_in,
+            v_in,
             effective_attn_start,
             attention_metadata,
             layer_attention_parameters,
-        ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
+        );
+        const attn_output = (if (drop_b) attn_raw.insertAxes(0, .{.b}) else attn_raw)
+            .withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
         const gate_b = gate.sigmoid().rename(.{ .s = .q }).broad(attn_output.shape());
         const gated_attn = attn_output.mul(gate_b);
