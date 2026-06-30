@@ -24,31 +24,33 @@ const log = std.log.scoped(.@"zml/io");
 
 pub const TensorStore = struct {
     registry: *safetensors.TensorRegistry,
-    id_map: std.AutoHashMapUnmanaged(usize, *safetensors.Tensor),
+    id_to_binding: std.AutoHashMapUnmanaged(usize, Binding),
     allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
 
     pub fn fromRegistry(allocator: std.mem.Allocator, registry: *safetensors.TensorRegistry) TensorStore {
+        const arena: std.heap.ArenaAllocator = .init(allocator);
         return .{
             .registry = registry,
-            .id_map = .empty,
+            .id_to_binding = .empty,
             .allocator = allocator,
+            .arena = arena,
         };
     }
 
     pub fn deinit(self: *TensorStore) void {
-        self.id_map.deinit(self.allocator);
+        self.id_to_binding.deinit(self.allocator);
+        self.arena.deinit();
     }
 
-    fn bindIdToKey(self: *TensorStore, key: []const u8, id: usize) !void {
-        const tensor_desc_ptr = self.registry.tensors.getPtr(key).?;
-
-        const gop = try self.id_map.getOrPut(self.allocator, id);
+    fn putBindingNoClobber(self: *TensorStore, id: usize, binding: Binding) std.mem.Allocator.Error!void {
+        const gop = try self.id_to_binding.getOrPut(self.allocator, id);
         if (gop.found_existing) {
-            stdx.debug.panic("Key {s} already has an associated tensor (id: {})", .{ key, gop.key_ptr.* });
+            stdx.debug.panic("Id {} already has an associated binding", .{id});
         }
-        errdefer self.id_map.removeByPtr(gop.key_ptr);
+        errdefer self.id_to_binding.removeByPtr(gop.key_ptr);
 
-        gop.value_ptr.* = tensor_desc_ptr;
+        gop.value_ptr.* = binding;
     }
 
     fn getPtrFromKey(self: *const TensorStore, key: []const u8) ?*safetensors.Tensor {
@@ -57,8 +59,9 @@ pub const TensorStore = struct {
     }
 
     fn getPtrFromId(self: *const TensorStore, id: usize) ?*safetensors.Tensor {
-        const tensor_desc_ptr = self.id_map.get(id) orelse return null;
-        return tensor_desc_ptr;
+        const binding = self.id_to_binding.get(id) orelse return null;
+        stdx.debug.assert(binding == .direct, "Expect binding to be .direct for id {}, got {}", .{ id, @as(Binding.Type, binding) });
+        return binding.direct;
     }
 
     pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
@@ -66,9 +69,14 @@ pub const TensorStore = struct {
     }
 
     pub fn getReaderById(self: *const TensorStore, id: usize, io: std.Io, buffer: []u8) !safetensors.TensorReader {
-        const tensor_desc = self.id_map.get(id) orelse return error.NotFound;
+        const binding = self.id_to_binding.get(id) orelse return error.NotFound;
+        stdx.debug.assert(binding == .direct, "Expect binding to be .direct for id {}, got {}", .{ id, @as(Binding.Type, binding) });
 
-        return safetensors.TensorReader.init(io, tensor_desc.*, buffer, .{});
+        return binding.direct.reader(io, buffer, .{});
+    }
+
+    pub fn getBindingById(self: *const TensorStore, id: usize) ?Binding {
+        return self.id_to_binding.get(id);
     }
 
     pub fn view(self: *TensorStore) View {
@@ -101,7 +109,7 @@ pub const TensorStore = struct {
 
         pub fn withPrefix(self: *const View, prefix_: []const u8) View {
             var buffer: [256]u8 = undefined;
-            const new_prefix = std.fmt.bufPrint(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ }) catch unreachable;
+            const new_prefix = makeKey(&buffer, "{s}{s}.", .{ self.prefix() orelse "", prefix_ });
 
             return .{
                 .store = self.store,
@@ -112,7 +120,7 @@ pub const TensorStore = struct {
 
         pub fn withLayer(self: *const View, index: usize) View {
             var buffer: [256]u8 = undefined;
-            const new_prefix = std.fmt.bufPrint(&buffer, "{s}{d}.", .{ self.prefix() orelse "", index }) catch unreachable;
+            const new_prefix = makeKey(&buffer, "{s}{d}.", .{ self.prefix() orelse "", index });
 
             return .{
                 .store = self.store,
@@ -127,25 +135,35 @@ pub const TensorStore = struct {
 
         pub fn hasKey(self: *const View, subkey: []const u8) bool {
             var buffer: [256]u8 = undefined;
-            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             return for (self.store.registry.tensors.keys()) |k| {
                 if (std.mem.startsWith(u8, k, key)) break true;
             } else false;
         }
 
         pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
-            var buffer: [256]u8 = undefined;
-            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            return self.maybeCreateBinding(.{ .direct = subkey }, tagz, partitioning);
+        }
 
-            const ptr = self.store.getPtrFromKey(key) orelse return null;
+        pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
+            return self.maybeCreateTensor(subkey, tagz, partitioning).?;
+        }
+
+        fn applyTags(shape_: Shape, tagz: anytype) Shape {
+            var shape = shape_;
             if (@TypeOf(tagz) != @TypeOf(null)) {
                 switch (@typeInfo(@TypeOf(tagz))) {
                     .optional => if (tagz) |t| {
-                        ptr.shape = ptr.shape.withTags(t);
+                        shape = shape.withTags(t);
                     },
-                    else => ptr.shape = ptr.shape.withTags(tagz),
+                    else => shape = shape.withTags(tagz),
                 }
             }
+            return shape;
+        }
+
+        fn applyPartitioning(shape_: Shape, partitioning: anytype) Shape {
+            var shape = shape_;
 
             if (@TypeOf(partitioning) == @TypeOf(null)) {
                 @compileError("TensorStore.View.createTensor partitioning cannot be null; pass .replicated or an explicit partitioning");
@@ -154,25 +172,93 @@ pub const TensorStore = struct {
             switch (@typeInfo(@TypeOf(partitioning))) {
                 .optional => @compileError("TensorStore.View.createTensor partitioning cannot be optional; pass .replicated or an explicit partitioning"),
                 .enum_literal => switch (partitioning) {
-                    .replicated => ptr.shape = ptr.shape.withReplicatedPartitioning(),
+                    .replicated => shape = shape.withReplicatedPartitioning(),
                     else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
                 },
-                else => ptr.shape = ptr.shape.withPartitioning(partitioning),
+                else => shape = shape.withPartitioning(partitioning),
             }
 
-            const tensor: Tensor = .fromShape(ptr.shape);
-            self.store.bindIdToKey(key, tensor.id) catch unreachable;
-
-            return tensor;
+            return shape;
         }
 
-        pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
-            return self.maybeCreateTensor(subkey, tagz, partitioning).?;
+        pub fn maybeCreateBinding(self: View, request: Binding.Request, tagz: anytype, partitioning: anytype) ?Tensor {
+            return switch (request) {
+                .direct => |direct| b: {
+                    var buffer: [256]u8 = undefined;
+                    const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", direct });
+
+                    const ptr = self.store.getPtrFromKey(key) orelse return null;
+
+                    var result_shape = ptr.shape;
+                    result_shape = applyTags(result_shape, tagz);
+                    result_shape = applyPartitioning(result_shape, partitioning);
+
+                    const tensor: Tensor = .fromShape(result_shape);
+                    self.store.putBindingNoClobber(tensor.id, .{ .direct = ptr }) catch |e| break :b e;
+
+                    break :b tensor;
+                },
+                .concatenate => |concatenate| b: {
+                    var buffer: [256]u8 = undefined;
+                    const arena = self.store.arena.allocator();
+
+                    const tensors = arena.alloc(*safetensors.Tensor, concatenate.keys.len) catch |e| break :b e;
+                    errdefer arena.free(tensors);
+
+                    for (concatenate.keys, 0..) |subkey, i| {
+                        const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
+                        tensors[i] = self.store.getPtrFromKey(key) orelse return null;
+                    }
+
+                    var result_shape = tensors[0].shape;
+                    for (tensors[1..]) |tensor| {
+                        result_shape = result_shape.setDim(concatenate.axis, result_shape.dim(concatenate.axis) + tensor.shape.dim(concatenate.axis));
+                    }
+
+                    result_shape = applyTags(result_shape, tagz);
+                    result_shape = applyPartitioning(result_shape, partitioning);
+
+                    const tensor: Tensor = .fromShape(result_shape);
+
+                    self.store.putBindingNoClobber(tensor.id, .{ .concatenate = .{ .tensors = tensors, .axis = concatenate.axis } }) catch |e| break :b e;
+
+                    break :b tensor;
+                },
+                .custom => |custom| b: {
+                    var buffer: [256]u8 = undefined;
+                    const arena = self.store.arena.allocator();
+
+                    const tensors = arena.alloc(*safetensors.Tensor, custom.keys.len) catch |e| break :b e;
+                    errdefer arena.free(tensors);
+
+                    for (custom.keys, 0..) |subkey, i| {
+                        const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
+                        tensors[i] = self.store.getPtrFromKey(key) orelse return null;
+                    }
+
+                    const shapes = arena.alloc(Shape, custom.keys.len) catch |e| break :b e;
+                    errdefer arena.free(shapes);
+                    for (tensors, shapes) |t, *s| {
+                        s.* = t.shape;
+                    }
+
+                    var result_shape = custom.computeShapeCallback(shapes);
+
+                    result_shape = applyTags(result_shape, tagz);
+                    result_shape = applyPartitioning(result_shape, partitioning);
+
+                    const tensor: Tensor = .fromShape(result_shape);
+
+                    self.store.putBindingNoClobber(tensor.id, .{ .custom = .{ .tensors = tensors } }) catch |e| break :b e;
+
+                    break :b tensor;
+                },
+            } catch |e| std.debug.panic("Not handling {} error", .{e});
         }
 
         pub fn getShape(self: View, subkey: []const u8) ?Shape {
             var buffer: [256]u8 = undefined;
-            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             const entry_ptr = self.store.getPtrFromKey(key) orelse return null;
             return entry_ptr.shape;
         }
@@ -182,7 +268,7 @@ pub const TensorStore = struct {
             const key = if (opts.no_prefix)
                 subkey
             else b: {
-                break :b std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+                break :b makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             };
             const entry_ptr = self.store.getPtrFromKey(key) orelse return null;
             return entry_ptr.shape;
@@ -190,7 +276,7 @@ pub const TensorStore = struct {
 
         pub fn getReader(self: View, subkey: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
             var key_buffer: [256]u8 = undefined;
-            const key = std.fmt.bufPrint(&key_buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            const key = makeKey(&key_buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             return self.store.getReader(key, io, buffer);
         }
 
@@ -206,7 +292,277 @@ pub const TensorStore = struct {
             }
             return count_;
         }
+
+        fn makeKey(buffer: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
+            const key = std.fmt.bufPrint(buffer, fmt, args) catch
+                std.debug.panic("Expected key to be less than {} characters", .{buffer.len});
+            return key;
+        }
     };
+};
+
+/// Binding represents a mapping from a tensor to the sources that are required to construct it from the store.
+pub const Binding = union(Binding.Type) {
+    pub const Type = enum {
+        /// Direct mapping to a tensor in the store.
+        direct,
+        /// Concatenation of multiple tensors along a specified axis.
+        concatenate,
+        /// Custom mapping that allows for arbitrary tensor construction logic.
+        custom,
+    };
+
+    pub const Request = union(Type) {
+        direct: []const u8,
+        concatenate: struct {
+            keys: []const []const u8,
+            axis: i64,
+        },
+        custom: struct {
+            keys: []const []const u8,
+            computeShapeCallback: *const fn (shapes: []const Shape) Shape,
+        },
+    };
+
+    direct: *const safetensors.Tensor,
+    concatenate: struct {
+        tensors: []const *safetensors.Tensor,
+        axis: i64,
+    },
+    custom: struct {
+        tensors: []const *safetensors.Tensor,
+    },
+};
+
+pub const Loader = struct {
+    allocator: std.mem.Allocator,
+    platform: *const Platform,
+    dma_allocators: []const mem.DmaAllocator,
+    dma_chunk_size: usize,
+    pinned_buffer_pools: []mem.DynamicBufferPool,
+    group: stdx.Io.LimitedGroup,
+    bytes_loaded: std.atomic.Value(usize) = .init(0),
+
+    pub const Opts = struct {
+        pub const default: Opts = .{
+            .parallelism = 1,
+            .dma_chunks = 2,
+            .dma_chunk_size = 4096,
+        };
+        parallelism: usize,
+        dma_chunks: usize,
+        dma_chunk_size: usize,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, platform: *const Platform, opts: Opts) !Loader {
+        const pool_count = platform.devices.len;
+        const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
+        errdefer allocator.free(dma_allocators);
+        for (platform.devices, 0..) |*device, i| {
+            dma_allocators[i] = .init(allocator, device);
+        }
+
+        const buffer_pools = try allocator.alloc(mem.DynamicBufferPool, pool_count);
+        errdefer allocator.free(buffer_pools);
+        for (buffer_pools) |*pool_| {
+            pool_.* = .init(opts.dma_chunks, opts.dma_chunk_size);
+        }
+        errdefer for (buffer_pools, 0..) |*pool_, i| {
+            pool_.deinit(dma_allocators[i].allocator());
+        };
+
+        return .{
+            .allocator = allocator,
+            .platform = platform,
+            .dma_allocators = dma_allocators,
+            .dma_chunk_size = opts.dma_chunk_size,
+            .pinned_buffer_pools = buffer_pools,
+            .group = .init(opts.parallelism),
+        };
+    }
+
+    pub fn deinit(self: Loader) void {
+        for (self.pinned_buffer_pools, 0..) |*pool, i| pool.deinit(self.dma_allocators[i].allocator());
+        self.allocator.free(self.pinned_buffer_pools);
+        self.allocator.free(self.dma_allocators);
+    }
+
+    pub fn await(self: *Loader, io: std.Io) std.Io.Cancelable!void {
+        return self.group.await(io);
+    }
+
+    pub const AutoOpts = struct {
+        progress: ?*std.Progress.Node = null,
+    };
+
+    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) void {
+        self.group.async(io, struct {
+            fn call(self_: *Loader, io_: std.Io, model_: *const T, buffers_: *Bufferized(T), store_: *const TensorStore, shardings_: []const Sharding, opts_: AutoOpts) void {
+                self_.loadInner(io_, T, model_, buffers_, store_, shardings_, opts_);
+            }
+        }.call, .{ self, io, model, buffers, store, shardings, opts });
+    }
+
+    fn loadInner(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) void {
+        const tensor_count = meta.count(Tensor, model);
+
+        var arena: std.heap.ArenaAllocator = .init(self.allocator);
+        defer arena.deinit();
+
+        const flattened_buffers = arena.allocator().alloc(*Buffer, tensor_count) catch @panic("Errors can't be handled in `loadInner`");
+        meta.forEachVisit(buffers, *Buffer, struct {
+            fn call(i: usize, buffer: *Buffer, flattened_buffers_: []*Buffer) void {
+                flattened_buffers_[i] = buffer;
+            }
+        }.call, .{flattened_buffers});
+
+        const Ctx = struct {
+            self: *Loader,
+            io: std.Io,
+            store: *const TensorStore,
+            shardings: []const Sharding,
+            buffers: []*Buffer,
+            opts: AutoOpts,
+        };
+
+        var ctx: Ctx = .{
+            .self = self,
+            .io = io,
+            .store = store,
+            .shardings = shardings,
+            .buffers = flattened_buffers,
+            .opts = opts,
+        };
+
+        meta.forEachVisit(model, *const Tensor, struct {
+            fn call(i: usize, tensor: *const Tensor, ctx_: *Ctx) void {
+                ctx_.self.group.async(ctx_.io, defaultCallback, .{ ctx_.self, ctx_.io, tensor, ctx_.buffers[i], ctx_.store, ctx_.shardings, ctx_.opts });
+            }
+        }.call, .{&ctx});
+    }
+
+    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) void {
+        self.defaultCallbackInner(io, tensor, buffer, store, shardings, opts) catch |e| {
+            log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
+            unreachable;
+        };
+    }
+
+    fn defaultCallbackInner(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) !void {
+        const binding = store.getBindingById(tensor.id) orelse {
+            std.log.warn("Failed to get binding for tensor with id: {}", .{tensor.id});
+            return;
+        };
+
+        switch (binding) {
+            .direct => |direct| {
+                var reader = try direct.reader(io, &.{}, .{});
+                defer reader.deinit();
+
+                const shape = tensor.shape();
+                const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
+                    log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
+                    break :blk self.platform.replicated_sharding;
+                };
+
+                var writer = try MemoryWriter.init(
+                    self.allocator,
+                    io,
+                    self.platform,
+                    self.pinned_buffer_pools,
+                    self.dma_allocators,
+                    self.dma_chunk_size,
+                    shape,
+                    sharding,
+                    buffer,
+                );
+                defer writer.deinit(self.allocator);
+
+                const scale = 1024;
+
+                if (opts.progress) |progress| {
+                    var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
+                    defer node.end();
+                    writer.setProgress(&node);
+                    defer writer.setProgress(null);
+                    var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
+                    const total = try reader.interface.streamRemaining(&progress_writer.interface);
+                    try progress_writer.interface.flush();
+                    _ = self.bytes_loaded.fetchAdd(total, .monotonic);
+                } else {
+                    const total = try reader.interface.streamRemaining(writer.interface());
+                    try writer.interface().flush();
+                    _ = self.bytes_loaded.fetchAdd(total, .monotonic);
+                }
+            },
+            .concatenate => |concatenate| {
+                if (concatenate.axis < 0) @panic("Negative axis are not supported yet");
+
+                if (concatenate.axis == 0) {
+                    const shape = tensor.shape();
+                    const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
+                        log.debug("No sharding strategy found for tensor with shape {f}, using replicated sharding", .{shape});
+                        break :blk self.platform.replicated_sharding;
+                    };
+
+                    var writer = try MemoryWriter.init(
+                        self.allocator,
+                        io,
+                        self.platform,
+                        self.pinned_buffer_pools,
+                        self.dma_allocators,
+                        self.dma_chunk_size,
+                        shape,
+                        sharding,
+                        buffer,
+                    );
+                    defer writer.deinit(self.allocator);
+
+                    const scale = 1024;
+
+                    const Formatter = struct {
+                        tensors: []const *safetensors.Tensor,
+                        pub fn format(
+                            self_: @This(),
+                            writer_: *std.Io.Writer,
+                        ) std.Io.Writer.Error!void {
+                            for (self_.tensors, 0..) |tensor_, i| {
+                                if (i > 0) try writer_.writeAll(", ");
+                                try writer_.writeAll(tensor_.name);
+                            }
+                        }
+                    };
+
+                    if (opts.progress) |progress| {
+                        var node = progress.startFmt(tensor.shape().byteSize() / scale, "Concat {f}", .{Formatter{ .tensors = concatenate.tensors }});
+                        defer node.end();
+                        writer.setProgress(&node);
+                        defer writer.setProgress(null);
+                        var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
+
+                        var total: usize = 0;
+                        for (concatenate.tensors) |t| {
+                            var reader = try t.reader(io, &.{}, .{});
+                            defer reader.deinit();
+                            total += try reader.interface.streamRemaining(&progress_writer.interface);
+                        }
+                        try progress_writer.interface.flush();
+                        _ = self.bytes_loaded.fetchAdd(total, .monotonic);
+                    } else {
+                        var total: usize = 0;
+                        for (concatenate.tensors) |t| {
+                            var reader = try t.reader(io, &.{}, .{});
+                            defer reader.deinit();
+                            total += try reader.interface.streamRemaining(writer.interface());
+                        }
+                        try writer.interface().flush();
+                        _ = self.bytes_loaded.fetchAdd(total, .monotonic);
+                    }
+                } else @panic("Non-major concatenation is not supported yet");
+            },
+            .custom => @panic("Custom binding can't be loaded automatically"),
+        }
+    }
 };
 
 pub const ProgressWriter = struct {
@@ -1054,144 +1410,6 @@ pub const DirectMemoryWriter = struct {
         self.interface.end = self.window_start;
     }
 };
-
-pub const LoadOpts = struct {
-    pub const auto: LoadOpts = .{
-        .parallelism = 1,
-        .shardings = &.{},
-        .dma_chunks = 2,
-        .dma_chunk_size = 4096,
-    };
-
-    parallelism: usize,
-    shardings: []const Sharding = &.{},
-    progress: ?*std.Progress.Node = null,
-    dma_chunks: usize,
-    dma_chunk_size: usize,
-    total_bytes: ?*usize = null,
-};
-
-pub fn load(
-    comptime ModelType: type,
-    model: *const ModelType,
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const Platform,
-    store: *const TensorStore,
-    opts: LoadOpts,
-) !Bufferized(ModelType) {
-    var span = tracer.span("zml.io.load", .{
-        .tensor_count = meta.count(Tensor, model),
-    });
-    defer span.end();
-
-    var bufferized = try mem.bufferize(allocator, ModelType, model);
-
-    const pool_count = platform.devices.len;
-    const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
-    defer allocator.free(dma_allocators);
-    for (platform.devices, 0..) |*device, i| {
-        dma_allocators[i] = .init(allocator, device);
-    }
-
-    const buffer_pools = try allocator.alloc(mem.DynamicBufferPool, pool_count);
-    defer allocator.free(buffer_pools);
-    for (buffer_pools) |*pool_| {
-        pool_.* = .init(opts.dma_chunks, opts.dma_chunk_size);
-    }
-    defer for (buffer_pools, 0..) |*pool_, i| {
-        pool_.deinit(dma_allocators[i].allocator());
-    };
-
-    const Ctx = struct {
-        allocator: std.mem.Allocator,
-        dma_allocators: []const mem.DmaAllocator,
-        dma_chunk_size: usize,
-        pinned_buffer_pools: []mem.DynamicBufferPool,
-        io: std.Io,
-        platform: *const Platform,
-        buffers: []*Buffer,
-        shardings: []const Sharding,
-        store: *const TensorStore,
-        group: stdx.Io.LimitedGroup,
-        total: std.atomic.Value(usize) = .init(0),
-        progress: ?*std.Progress.Node,
-    };
-    var walk_ctx: Ctx = .{
-        .platform = platform,
-        .buffers = try allocator.alloc(*Buffer, meta.count(Tensor, model)),
-        .store = store,
-        .allocator = allocator,
-        .dma_allocators = dma_allocators,
-        .dma_chunk_size = opts.dma_chunk_size,
-        .pinned_buffer_pools = buffer_pools,
-        .io = io,
-        .shardings = opts.shardings,
-        .progress = opts.progress,
-        .group = .init(opts.parallelism),
-    };
-    defer allocator.free(walk_ctx.buffers);
-
-    defer if (opts.total_bytes) |total_bytes_ptr| {
-        total_bytes_ptr.* = walk_ctx.total.load(.monotonic);
-    };
-
-    meta.forEachVisit(&bufferized, *Buffer, struct {
-        fn call(i: usize, buffer: *Buffer, ctx: *Ctx) void {
-            ctx.buffers[i] = buffer;
-        }
-    }.call, .{&walk_ctx});
-
-    meta.forEachVisit(model, *const Tensor, struct {
-        fn call(i: usize, tensor: *const Tensor, ctx: *Ctx) void {
-            ctx.group.concurrent(ctx.io, struct {
-                fn call(i_: usize, tensor_: *const Tensor, ctx_: *Ctx) !void {
-                    var reader = ctx_.store.getReaderById(tensor_.id, ctx_.io, &.{}) catch unreachable;
-                    defer reader.deinit();
-
-                    const shape = reader.tensor.shape;
-                    const sharding = Sharding.pickSharding(ctx_.shardings, shape, .explicit_axis_binding) orelse blk: {
-                        log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
-                        break :blk ctx_.platform.replicated_sharding;
-                    };
-
-                    var writer = MemoryWriter.init(
-                        ctx_.allocator,
-                        ctx_.io,
-                        ctx_.platform,
-                        ctx_.pinned_buffer_pools,
-                        ctx_.dma_allocators,
-                        ctx_.dma_chunk_size,
-                        shape,
-                        sharding,
-                        ctx_.buffers[i_],
-                    ) catch unreachable;
-                    defer writer.deinit(ctx_.allocator);
-
-                    const scale = 1024;
-
-                    if (ctx_.progress) |progress| {
-                        var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
-                        defer node.end();
-                        writer.setProgress(&node);
-                        defer writer.setProgress(null);
-                        var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
-                        const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
-                        progress_writer.interface.flush() catch unreachable;
-                        _ = ctx_.total.fetchAdd(total, .monotonic);
-                    } else {
-                        const total = reader.interface.streamRemaining(writer.interface()) catch unreachable;
-                        writer.interface().flush() catch unreachable;
-                        _ = ctx_.total.fetchAdd(total, .monotonic);
-                    }
-                }
-            }.call, .{ i, tensor, ctx }) catch unreachable;
-        }
-    }.call, .{&walk_ctx});
-    walk_ctx.group.await(io) catch unreachable;
-
-    return bufferized;
-}
 
 fn buildMesh2x2(
     allocator: std.mem.Allocator,
