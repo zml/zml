@@ -3,8 +3,8 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 pub const InitOpts = struct {
-    chunk_size: usize = 10 * 1024 * 1024,
-    num_workers: usize = 16,
+    chunk_size: usize = 16 * 1024 * 1024,
+    num_workers: usize = 32,
     queue_capacity: usize = 64,
 };
 
