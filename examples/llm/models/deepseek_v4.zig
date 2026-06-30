@@ -9,3 +9,4 @@ pub const Model = model.Model;
 pub const LoadedModel = model.LoadedModel;
 pub const session = @import("deepseek_v4/session.zig");
 pub const Session = session.Session;
+pub const encoding = @import("deepseek_v4/encoding.zig");
