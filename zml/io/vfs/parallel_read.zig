@@ -5,7 +5,7 @@ const stdx = @import("stdx");
 pub const InitOpts = struct {
     chunk_size: usize = 16 * 1024 * 1024,
     num_workers: usize = 32,
-    queue_capacity: usize = 64,
+    queue_capacity: usize = 128,
 };
 
 pub const BatchExecutor = struct {
