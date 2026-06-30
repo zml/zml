@@ -1,7 +1,7 @@
 load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
 load("@tar.bzl//tar:tar.bzl", "tar")
 
@@ -10,7 +10,10 @@ zig_binary(
     srcs = glob(["**/*.zig"]),
     main = "main.zig",
     visibility = ["//visibility:public"],
-    deps = ["//zml", "@linenoise"],
+    deps = [
+        "//zml",
+        "@linenoise",
+    ],
 )
 
 zig_binary(
@@ -37,6 +40,14 @@ zig_binary(
     deps = ["//zml"],
 )
 
+zig_test(
+    name = "deepseek_v4_encoding_test",
+    size = "small",
+    srcs = ["models/deepseek_v4/encoding.zig"],
+    extra_srcs = glob(["models/deepseek_v4/encoding/tests/*"]),
+    main = "models/deepseek_v4/encoding_tests.zig",
+)
+
 build_test(
     name = "test",
     targets = [":llm"],
@@ -45,7 +56,7 @@ build_test(
 mtree_spec(
     name = "mtree",
     srcs = [":llm"],
-    tags = ["manual"]
+    tags = ["manual"],
 )
 
 tar(
@@ -60,19 +71,19 @@ tar(
     ],
     compress = "zstd",
     mtree = ":mtree",
-    tags = ["manual"]
+    tags = ["manual"],
 )
 
 oci_image(
     name = "image_",
     base = "@distroless_cc_debian12",
     entrypoint = ["./{}/llm".format(package_name())],
+    tags = ["manual"],
     target_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:x86_64",
     ],
     tars = [":archive"],
-    tags = ["manual"]
 )
 
 platform_transition_filegroup(
@@ -97,17 +108,16 @@ oci_push(
     tags = ["manual"],
 )
 
-
 oci_image(
     name = "image_debug_",
     base = "@debian_12",
     entrypoint = ["./examples/llm/llm"],
+    tags = ["manual"],
     target_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:x86_64",
     ],
     tars = [":archive"],
-    tags = ["manual"],
 )
 
 platform_transition_filegroup(

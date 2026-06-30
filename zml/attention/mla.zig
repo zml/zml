@@ -1,6 +1,8 @@
 const std = @import("std");
 
-const zml = @import("zml");
+const zml = @import("../zml.zig");
+const paged_attn = @import("paged_attention.zig");
+const triton_attn = @import("triton_attention.zig");
 const kernel = @import("triton_kernels/unified_sparse_mla.zig");
 
 const stdx = zml.stdx;
@@ -216,52 +218,59 @@ const Triton = struct {
             }
         };
 
-        fn topkToPhysical(parameters: Self.Parameters, topk: zml.Tensor, block_size: i64) zml.Tensor {
+        fn tokenToSequence(query_start_len: zml.Tensor, query_count: i64) zml.Tensor {
+            const sequence_count = query_start_len.dim(.b) - 1;
+            const starts = query_start_len.slice1d(.b, .{ .end = sequence_count }).rename(.{ .b = .seq });
+            const ends = query_start_len.slice1d(.b, .{ .start = 1 }).rename(.{ .b = .seq });
+            const query_x_sequence_shape = zml.Shape.init(.{ .q = query_count, .seq = sequence_count }, .i32);
+            const query = zml.Tensor.iota(query_x_sequence_shape, .q).convert(.i32);
+            const in_range = query.cmp(.GE, starts.broad(query_x_sequence_shape)).convert(.i32)
+                .mul(query.cmp(.LT, ends.broad(query_x_sequence_shape)).convert(.i32))
+                .cmp(.NE, zml.Tensor.zeroes(query_x_sequence_shape));
+            const sequence = zml.Tensor.iota(query_x_sequence_shape, .seq).convert(.i32);
+            return zml.Tensor.select(in_range, sequence, zml.Tensor.zeroes(query_x_sequence_shape)).sum(.seq).squeeze(.seq);
+        }
+
+        fn topkToPhysical(parameters: triton_attn.paged.Parameters, topk: zml.Tensor, tokens_pos: zml.Tensor, block_size: i64) zml.Tensor {
             const topk_i32 = topk.convert(.i32);
             const topk_shape = topk_i32.shape();
 
-            stdx.debug.assert(
-                topk_shape.hasTag(.batch) != null or topk_shape.hasTag(.b) != null,
-                "paged MLA topk must keep a batch axis so logical token ids can be resolved through the block table, got {f}",
-                .{topk_shape},
-            );
+            stdx.debug.assert(topk_shape.hasTags(.{ .q, .topk }), "paged MLA topk must have .q and .topk axes, got {f}", .{topk_shape});
+            stdx.debug.assert(tokens_pos.shape().hasTags(.{.q}), "paged MLA token positions must have a .q axis, got {f}", .{tokens_pos.shape()});
+
+            const query_to_sequence = tokenToSequence(parameters.query_start_len, topk_i32.dim(.q));
+            const sequence_ends = parameters.query_start_len.slice1d(.b, .{ .start = 1 }).rename(.{ .b = .seq });
+            const last_query = sequence_ends.gather(.{ .seq = query_to_sequence }, .{}).subConstant(1);
+            const last_token_pos = tokens_pos
+                .gather(.{ .q = last_query.rename(.{ .q = .lookup }) }, .{})
+                .rename(.{ .lookup = .q })
+                .convert(.i32);
+            const seq_lens = parameters.seq_lens.rename(.{ .b = .seq }).gather(.{ .seq = query_to_sequence }, .{});
+            const first_visible_token = last_token_pos.addConstant(1).sub(seq_lens);
+            const relative_topk = topk_i32.sub(first_visible_token.broad(topk_shape));
 
             const block_size_scalar = zml.Tensor.scalar(@as(i32, @intCast(block_size)), .i32).broad(topk_shape);
             const zero = zml.Tensor.zeroes(topk_shape);
-            const valid_nonnegative = topk_i32.cmp(.GE, zero);
-
-            const seq_lens = if (topk_shape.hasTag(.batch) != null)
-                parameters.seq_lens.rename(.{ .b = .batch })
-            else
-                parameters.seq_lens;
-            var seq_lens_broad = seq_lens;
-            if (topk_shape.hasTag(.seq) != null) {
-                seq_lens_broad = seq_lens_broad.insertAxes(.last, .{.seq});
-            } else if (topk_shape.hasTag(.q) != null) {
-                seq_lens_broad = seq_lens_broad.insertAxes(.last, .{.q});
-            }
-            seq_lens_broad = seq_lens_broad.insertAxes(.last, .{.topk}).broad(topk_shape);
-            const valid_in_sequence = topk_i32.cmp(.LT, seq_lens_broad);
+            const valid_nonnegative = relative_topk.cmp(.GE, zero);
+            const valid_in_sequence = relative_topk.cmp(.LT, seq_lens.broad(topk_shape));
             const valid_topk = valid_nonnegative.logical(.AND, valid_in_sequence);
 
-            const safe_topk = zml.Tensor.select(valid_topk, topk_i32, zero);
+            const safe_topk = zml.Tensor.select(valid_topk, relative_topk, zero);
             const logical_block = safe_topk.div(block_size_scalar);
             const slot = safe_topk.remainder(block_size_scalar);
 
-            const block_table = if (topk_shape.hasTag(.batch) != null)
-                parameters.block_table.rename(.{ .b = .batch })
-            else
-                parameters.block_table;
-            const physical_block = block_table.gather(.{ .p = logical_block }, .{});
+            const sequence = query_to_sequence.broad(topk_shape);
+            const block_table = parameters.block_table.rename(.{ .b = .seq });
+            const physical_block = block_table.gather(.{ .seq = sequence, .p = logical_block }, .{});
             const physical_topk = physical_block.mul(block_size_scalar).add(slot);
 
             return zml.Tensor.select(valid_topk, physical_topk, zml.Tensor.scalar(-1, .i32).broad(topk_shape));
         }
 
-        pub fn sparseAttention(q: zml.Tensor, kv_cache: zml.Tensor, topk: zml.Tensor, parameters: Self.Parameters, opts: AttentionOptions) zml.Tensor {
-            // q: [b, h, hd]
+        pub fn sparseAttention(q: zml.Tensor, kv_cache: zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, parameters: triton_attn.paged.Parameters, opts: AttentionOptions) zml.Tensor {
+            // q: [q, h, hd]
             // kv_cache: [page, k_chunk, hkv=1, hd]
-            // topk: [b, topk] logical token ids, with -1 for padding.
+            // topk: [q, topk] absolute logical token ids, with -1 for padding.
             const rope_rank = opts.rope_rank;
             const q_dim = q.dim(.hd);
             const q_heads = q.dim(.h);
@@ -277,7 +286,7 @@ const Triton = struct {
             stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(q_dim))), "expected value rank ({}) to be a power of two", .{q_dim});
             stdx.debug.assert(kv_cache.dim(.hd) == q_dim, "expected q and kv cache head dims to match, got q={} kv={}", .{ q_dim, kv_cache.dim(.hd) });
 
-            const topk_final = topkToPhysical(parameters, topk, block_size);
+            const topk_final = topkToPhysical(parameters, topk, tokens_pos, block_size);
             stdx.debug.assert(topk_final.dim(.q) == q.dim(.q), "expected topk q dim ({}) to match q dim ({})", .{ topk_final.dim(.q), q.dim(.q) });
 
             const block_m: i64 = @min(q_heads, 16);
@@ -336,8 +345,8 @@ const Triton = struct {
                     .all_decode = !parameters.options_.is_prefill,
                 },
                 .grid = .{ @intCast(q.dim(.q) * @divExact(q_heads, block_m)), 1, 1 },
-                .num_warps = @intCast(parameters.num_warps),
-                .num_stages = @intCast(parameters.num_stages),
+                .num_warps = 4,
+                .num_stages = 2,
             });
 
             return out.output.reshape(q.shape());
@@ -383,9 +392,57 @@ pub const paged = struct {
     };
 };
 
-pub fn pagedSparseAttention(q: zml.Tensor, kv: zml.Tensor, topk: zml.Tensor, parameters: paged.Parameters, opts: AttentionOptions) zml.Tensor {
+fn raggedVanillaSparseAttention(q: zml.Tensor, kv: zml.Tensor, topk: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+    const mask = topk.cmp(.GE, zml.Tensor.zeroes(topk.shape())).insertAxes(.topk, .{.h});
+    const selected_kv = kv.gather(.{ .kv = topk }, .{}).rename(.{ .b = .q, .topk = .kv }).convert(.f32);
+
+    const dims = zml.nn.collectDims(.{ .h, .q, .kv, .hd }, &.{ q, kv }, .strict) catch {
+        stdx.debug.panic("Inputs have incompatible shapes (q: {f}, kv: {f}).", .{ q, kv });
+    };
+
+    const sqrt_head_dim = opts.scale orelse 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
+    const q_32 = q.convert(.f32);
+    var scores = q_32.dot(selected_kv, .hd).scale(sqrt_head_dim);
+    scores = zml.Tensor.select(mask.broad(scores.shape()), scores, zml.Tensor.constant(scores.dtype().minValue()));
+
+    const attn_sink = opts.sink orelse stdx.debug.panic("ragged MLA attention requires an attention sink", .{});
+    const sink_shape = q.shape().set(.hd, 1);
+    const sink = attn_sink.insertAxes(0, .{.q}).insertAxes(.last, .{.hd}).broad(sink_shape);
+    const scores_sink = zml.Tensor.concatenate(&.{ scores, sink.convert(scores.dtype()) }, .kv);
+
+    const attn_weights = scores_sink.softmax(.kv);
+    const attn_weights_non_sink = attn_weights.slice(&.{
+        .{},
+        .{},
+        .{ .end = topk.dim(.topk) },
+    });
+    return attn_weights_non_sink.dot(selected_kv, .kv).convert(q.dtype());
+}
+
+pub fn pagedSparseAttention(
+    q: zml.Tensor,
+    kv: zml.Tensor,
+    kv_cache: paged_attn.KvCache,
+    topk: zml.Tensor,
+    tokens_pos: zml.Tensor,
+    parameters: paged_attn.Parameters,
+    opts: AttentionOptions,
+) zml.Tensor {
     return switch (parameters) {
-       .triton => |params| Triton.paged.sparseAttention(q, kv, topk, params, opts),
-        else => @panic("paged sparse attention is only supported for triton backend"),
+        .triton => |params| blk: {
+            const paged_kv = switch (kv_cache) {
+                .split => |split| split.k,
+                .dense => stdx.debug.panic("paged MLA requires a split KV cache", .{}),
+            };
+            break :blk Triton.paged.sparseAttention(
+                q,
+                paged_kv,
+                topk.rename(.{ .b = .q }),
+                tokens_pos.rename(.{ .b = .q }),
+                params,
+                opts,
+            );
+        },
+        else => raggedVanillaSparseAttention(q, kv, topk, opts),
     };
 }

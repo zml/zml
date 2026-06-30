@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const zml = @import("zml");
+const zml = @import("../../zml.zig");
 const ops = zml.ops;
 const tri = zml.kernel.triton;
 const Builder = tri.Builder;
@@ -361,4 +361,3 @@ fn kernelUnifiedAttentionSparseMla2d(
         .{ .mask = q_mask },
     );
 }
-
