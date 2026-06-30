@@ -211,7 +211,7 @@ pub fn main(init: std.process.Init) !void {
                 .shardings = &.{sharded_sharding},
                 .parallelism = 8,
                 .dma_chunks = 16,
-                .dma_chunk_size = 64 * zml.MiB,
+                .dma_chunk_size = 256 * zml.MiB,
                 .progress = &progress,
                 .total_bytes = &total_bytes,
             });
