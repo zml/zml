@@ -138,6 +138,9 @@ fn runDecode(
     var kv_cache_buffers = try compiled.params.kv_cache.initBuffer(allocator, io, platform, compiled.params.shardings.model);
     defer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
+    var attention_metadata_buffers = try compiled.params.attention_metadata.initBuffer(io, platform, compiled.params.shardings.model);
+    defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+
     // RNG state for the sampler
     const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
     var rng_buffers = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed);
@@ -188,6 +191,7 @@ fn runDecode(
             .token_index_buf = &token_index_buffer,
             .kv_cache_buffers = &kv_cache_buffers,
             .rng_buffers = &rng_buffers,
+            .attention_metadata_buffers = &attention_metadata_buffers,
         });
 
         const predicted = try current_token_buffer.getValue(u32, io);

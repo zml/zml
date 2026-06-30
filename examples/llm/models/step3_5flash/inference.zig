@@ -32,6 +32,10 @@ pub const CompilationParameters = struct {
         const num_kv_heads: i64 = @intCast(config.num_attention_groups);
         const head_dim: i64 = @intCast(config.head_dim);
         const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
+        const max_attention_heads = if (config.attention_other_setting) |other|
+            @max(config.num_attention_heads, other.num_attention_heads)
+        else
+            config.num_attention_heads;
 
         const raw_kv_shape = zml.Shape.init(.{
             .layer = num_layers,
@@ -48,7 +52,7 @@ pub const CompilationParameters = struct {
             .token_index = .init(.{ .s = 1 }, .u32),
             .kv_cache = .init(kv_shape),
             .rng = .init(),
-            .attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
+            .attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), @intCast(max_attention_heads))),
             .prefill_attention_parameters = .init(.fromBackend(backend)),
             .decode_attention_parameters = .init(.fromBackend(backend)),
             .seqlen = seqlen,
