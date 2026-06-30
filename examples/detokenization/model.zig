@@ -6,7 +6,6 @@ const log = std.log;
 
 pub const Model_handler = struct {
     model: Model,
-    shardings: main.Shardings,
     exes: ModelExes,
     model_buffers: zml.Bufferized(Model),
 
@@ -21,28 +20,24 @@ pub const Model_handler = struct {
 
         std.log.info("Initialize model", .{});
         const model: Model = .init(store.view());
-        const shardings: main.Shardings = try .init(zml_handler.platform);
 
         std.log.info("Compile model", .{});
-        var exes = try compileModel(zml_handler, model, shardings);
+        var exes = try compileModel(zml_handler, model);
         errdefer exes.deinit(zml_handler.allocator);
 
         std.log.info("Load model buffers", .{});
-        const shardings_arr = shardings.all();
-        var model_buffers = try model.load(zml_handler, &store, &shardings_arr);
+        var model_buffers = try model.load(zml_handler, &store);
         errdefer Model.unloadBuffers(&model_buffers);
 
         return .{
             .model = model,
-            .shardings = shardings,
             .exes = exes,
             .model_buffers = model_buffers,
         };
     }
 
-    pub fn compileModel(zml_handler: *main.Zml_handler, model: Model, shardings: main.Shardings) !ModelExes {
-        const shardings_arr = shardings.all();
-        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
+    pub fn compileModel(zml_handler: *main.Zml_handler, model: Model) !ModelExes {
+        const opts: zml.module.CompilationOptions = .{};
         const similarity_matrix_exe = try zml_handler.platform.compile(
             zml_handler.allocator,
             zml_handler.io,
@@ -91,6 +86,22 @@ pub const Model_handler = struct {
         const get_lm_head_results = try get_lm_head_exe.results(zml_handler.allocator);
         errdefer get_lm_head_results.deinit(zml_handler.allocator);
 
+        const get_lm_head_transposed_exe = try zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .get_lm_head_transposed,
+            .{},
+            opts,
+        );
+        errdefer get_lm_head_transposed_exe.deinit();
+
+        const get_lm_head_transposed_args = try get_lm_head_transposed_exe.args(zml_handler.allocator);
+        errdefer get_lm_head_transposed_args.deinit(zml_handler.allocator);
+
+        const get_lm_head_transposed_results = try get_lm_head_transposed_exe.results(zml_handler.allocator);
+        errdefer get_lm_head_transposed_results.deinit(zml_handler.allocator);
+        
         const get_lm_head_normalized_exe = try zml_handler.platform.compile(
             zml_handler.allocator,
             zml_handler.io,
@@ -244,6 +255,9 @@ pub const Model_handler = struct {
             .get_lm_head_exe = get_lm_head_exe,
             .get_lm_head_args = get_lm_head_args,
             .get_lm_head_results = get_lm_head_results,
+            .get_lm_head_transposed_exe = get_lm_head_transposed_exe,
+            .get_lm_head_transposed_args = get_lm_head_transposed_args,
+            .get_lm_head_transposed_results = get_lm_head_transposed_results,
             .get_lm_head_normalized_exe = get_lm_head_normalized_exe,
             .get_lm_head_normalized_args = get_lm_head_normalized_args,
             .get_lm_head_normalized_results = get_lm_head_normalized_results,
@@ -296,6 +310,9 @@ pub const ModelExes = struct {
     get_lm_head_normalized_exe: zml.Exe,
     get_lm_head_normalized_args: zml.Exe.Arguments,
     get_lm_head_normalized_results: zml.Exe.Results,
+    get_lm_head_transposed_exe: zml.Exe,
+    get_lm_head_transposed_args: zml.Exe.Arguments,
+    get_lm_head_transposed_results: zml.Exe.Results,    
     get_lm_head_row_norms_exe: zml.Exe,
     get_lm_head_row_norms_args: zml.Exe.Arguments,
     get_lm_head_row_norms_results: zml.Exe.Results,
@@ -331,6 +348,9 @@ pub const ModelExes = struct {
         self.get_lm_head_exe.deinit();
         self.get_lm_head_args.deinit(allocator);
         self.get_lm_head_results.deinit(allocator);
+        self.get_lm_head_transposed_exe.deinit();
+        self.get_lm_head_transposed_args.deinit(allocator);
+        self.get_lm_head_transposed_results.deinit(allocator);
         self.get_lm_head_normalized_exe.deinit();
         self.get_lm_head_normalized_args.deinit(allocator);
         self.get_lm_head_normalized_results.deinit(allocator);
@@ -389,11 +409,11 @@ pub const Model = struct {
         return store.withPrefix(prefix).createTensor(
             "weight",
             .{ .voc, .d },
-            .{ .voc = .model, .d = .replicated },
+            .{ .voc = .replicated, .d = .replicated },
         );
     }
 
-    pub fn load(self: *const Model, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.Sharding) !zml.Bufferized(Model) {
+    pub fn load(self: *const Model, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore) !zml.Bufferized(Model) {
         var total_bytes: usize = 0;
         const now: std.Io.Timestamp = .now(zml_handler.io, .awake);
         defer {
@@ -403,7 +423,6 @@ pub const Model = struct {
         }
 
         return zml.io.load(Model, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
-            .shardings = shardings,
             .parallelism = 1,
             .dma_chunks = 8,
             .dma_chunk_size = 128 * zml.MiB,
@@ -424,6 +443,11 @@ pub const Model = struct {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
         return lm_head;
         //return centerRows(lm_head);
+    }
+
+    pub fn get_lm_head_transposed(self: Model) zml.Tensor {
+        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
+        return lm_head.transpose(.{ .d, .voc });
     }
 
     pub fn get_lm_head_normalized(self: Model) zml.Tensor {

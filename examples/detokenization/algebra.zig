@@ -281,6 +281,17 @@ pub fn getLmHead(zml_handler: *Zml_handler, model_handler: *Model_handler) !zml.
     return lm_head;
 }
 
+pub fn getLmHeadTransposed(zml_handler: *Zml_handler, model_handler: *Model_handler) !zml.Slice {
+    model_handler.exes.get_lm_head_transposed_args.set(.{model_handler.model_buffers});
+    model_handler.exes.get_lm_head_transposed_exe.call(model_handler.exes.get_lm_head_transposed_args, &model_handler.exes.get_lm_head_transposed_results);
+    var lm_head_transposed_buffer: zml.Buffer = undefined;
+    model_handler.exes.get_lm_head_transposed_results.fill(.{ &lm_head_transposed_buffer });
+    defer lm_head_transposed_buffer.deinit();
+    const lm_head_transposed = try lm_head_transposed_buffer.toSliceAlloc(zml_handler.allocator, zml_handler.io);
+    errdefer lm_head_transposed.free(zml_handler.allocator);
+    return lm_head_transposed;
+}
+
 pub fn getLmHeadNormalized(zml_handler: *Zml_handler, model_handler: *Model_handler) !zml.Slice {
     model_handler.exes.get_lm_head_normalized_args.set(.{model_handler.model_buffers});
     model_handler.exes.get_lm_head_normalized_exe.call(model_handler.exes.get_lm_head_normalized_args, &model_handler.exes.get_lm_head_normalized_results);
