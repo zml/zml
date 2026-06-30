@@ -83,7 +83,7 @@ pub const LoadedModel = struct {
 
         return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
             .dma_chunks = 32,
-            .dma_chunk_size = 128 * zml.MiB,
+            .dma_chunk_size = 256 * zml.MiB,
             .progress = progress,
             .shardings = &shardings.all(),
             .parallelism = 16,
@@ -174,7 +174,7 @@ pub const Model = struct {
 
         return zml.io.load(Model, self, allocator, io, platform, store, .{
             .dma_chunks = 32,
-            .dma_chunk_size = 128 * zml.MiB,
+            .dma_chunk_size = 256 * zml.MiB,
             .progress = progress,
             .shardings = shardings,
             .parallelism = 16,
