@@ -106,6 +106,7 @@ pub const SvdSampler = struct {
         }
     };
 
+    zml_handler: *main.Zml_handler,
     allocator: std.mem.Allocator,
     m: zml.Slice,
     m_t: zml.Slice,
@@ -118,6 +119,7 @@ pub const SvdSampler = struct {
     checkpoint_approx_logits: []f32,
     exact_logits: []f32,
     sampling_candidates: []SamplingCandidate,
+    top256_candidates: []SamplingCandidate,
     active: []bool,
     top_k: usize = 20,
     temp: f32 = 0.6,
@@ -127,10 +129,12 @@ pub const SvdSampler = struct {
     use_svd: bool = true,
     order: []usize,
 
-    pub fn init(allocator: std.mem.Allocator, m: zml.Slice, m_t: zml.Slice, tokenizer: Tokenizer, use_svd: bool) !SvdSampler {
+    pub fn init(zml_handler: *main.Zml_handler, m: zml.Slice, m_t: zml.Slice, tokenizer: Tokenizer, use_svd: bool) !SvdSampler {
         if (m.dtype() != .f32 or m_t.dtype() != .f32) return error.UnsupportedDType;
         if (m.shape.rank() != 2 or m_t.shape.rank() != 2) return error.InvalidShape;
 
+        const allocator = zml_handler.allocator;
+        
         const m_dims = m.shape.dims();
         const m_t_dims = m_t.shape.dims();
         const vocab_size: usize = @intCast(m_dims[0]);
@@ -159,6 +163,9 @@ pub const SvdSampler = struct {
         const sampling_candidates = try allocator.alloc(SamplingCandidate, vocab_size);
         errdefer allocator.free(sampling_candidates);
 
+        const top256_candidates = try allocator.alloc(SamplingCandidate, 256);
+        errdefer allocator.free(top256_candidates);
+
         const active = try allocator.alloc(bool, vocab_size);
         errdefer allocator.free(active);
 
@@ -166,6 +173,7 @@ pub const SvdSampler = struct {
         errdefer allocator.free(order);
 
         var sampler: SvdSampler = .{
+            .zml_handler = zml_handler,
             .allocator = allocator,
             .m = m,
             .m_t = m_t,
@@ -178,6 +186,7 @@ pub const SvdSampler = struct {
             .checkpoint_approx_logits = checkpoint_approx_logits,
             .exact_logits = exact_logits,
             .sampling_candidates = sampling_candidates,
+            .top256_candidates = top256_candidates,
             .active = active,
             .tokenizer = tokenizer,
             .use_svd = use_svd,
@@ -202,6 +211,92 @@ pub const SvdSampler = struct {
         self.temperature = temperature;
         self.top_k = top_k;
         self.top_p = top_p;
+    }
+
+
+    pub fn sampleFast(self: *SvdSampler, y: []const f32) !void {
+        var tot_y_abs: f32 = 0.0;
+        for (y, 0..) |value, coord| {
+            tot_y_abs += @abs(value);
+            self.sampling_candidates[coord] = .{ .token = coord, .logit = value, .weight = 0.0 };
+        }
+        std.mem.sort(SamplingCandidate, self.sampling_candidates[0..self.d], {}, SamplingCandidate.absDecreasing);
+        for (0..self.d) |i| {
+            self.order[i] = self.sampling_candidates[i].token;
+        }
+        
+        // compute approximate logits using the 256 largest magnitude coordinates of the query
+        self.zml_handler.tic(&self.zml_handler.timers.svd_sparse_256);
+        @memset(self.approx_logits, 0.0);
+        const m_t_items = self.m_t.constItems(f32);
+        for (0..256) |i| {
+            const coord = self.order[i];
+            const y_value = y[coord];
+            const coord_values = m_t_items[coord * self.vocab_size ..][0..self.vocab_size];
+
+            const simd_len = 32;
+            const Vec = @Vector(simd_len, f32);
+            const y_vec: Vec = @splat(y_value);
+
+            var token: usize = 0;
+            while (token + simd_len <= self.vocab_size) : (token += simd_len) {
+                const coord_vec: Vec = coord_values[token..][0..simd_len].*;
+                var logits_vec: Vec = self.approx_logits[token..][0..simd_len].*;
+                logits_vec = @mulAdd(Vec, coord_vec, y_vec, logits_vec);
+                self.approx_logits[token..][0..simd_len].* = logits_vec;
+            }
+            while (token < self.vocab_size) : (token += 1) {
+                self.approx_logits[token] += coord_values[token] * y_value;
+            }
+        }
+        
+        self.zml_handler.toc(&self.zml_handler.timers.svd_sparse_256);
+
+        // find the 256 highest approx logits candidates
+        self.zml_handler.tic(&self.zml_handler.timers.svd_top_256);
+        for (0..256) |tok| {
+            self.sampling_candidates[tok] = .{ .token = tok, .logit = self.approx_logits[tok], .weight = 0.0 };
+        }
+        const top_approx = self.sampling_candidates[0..256];
+        std.mem.sort(SamplingCandidate, top_approx, {}, SamplingCandidate.beforeThan);
+        for (256..self.vocab_size) |tok| {
+            const logit = self.approx_logits[tok];
+            if (logit <= top_approx[255].logit) continue;
+
+            var insert_pos: usize = 255;
+            while (insert_pos > 0 and logit > top_approx[insert_pos - 1].logit) {
+                top_approx[insert_pos] = top_approx[insert_pos - 1];
+                insert_pos -= 1;
+            }
+            top_approx[insert_pos] = .{ .token = tok, .logit = logit, .weight = 0.0 };
+        }
+        self.zml_handler.toc(&self.zml_handler.timers.svd_top_256);
+        
+        // compute their exact logits
+        self.zml_handler.tic(&self.zml_handler.timers.svd_dense_256);
+        for (0..256) |tok_pos| {
+            const tok = top_approx[tok_pos].token;
+            self.top256_candidates[tok_pos] = .{ .token = tok, .logit = self.logitFast(y, tok), .weight = 1.0 };
+        }
+        self.zml_handler.toc(&self.zml_handler.timers.svd_dense_256);
+    }
+
+    pub fn logitFast(self: *SvdSampler, query: []const f32, tok: usize) f32 {
+        const rows = self.m.constItems(f32);
+        const row = rows[tok * self.d ..][0..self.d];
+
+        const simd_len = 32;
+        std.debug.assert(self.d % simd_len == 0);
+        const Vec = @Vector(simd_len, f32);
+        var acc: Vec = @splat(0);
+
+        var i: usize = 0;
+        while (i + simd_len <= self.d) : (i += simd_len) {
+            const query_vec: Vec = query[i..][0..simd_len].*;
+            const row_vec: Vec = row[i..][0..simd_len].*;
+            acc = @mulAdd(Vec, query_vec, row_vec, acc);
+        }
+        return @reduce(.Add, acc);
     }
 
     

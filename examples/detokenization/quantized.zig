@@ -5,21 +5,10 @@ const tokens = @import("tokens.zig");
 
 const Tokenizer = zml.tokenizer.Tokenizer;
 
-pub const comptime_walsh_hadamard_k: comptime_int = 12;
-pub const comptime_walsh_hadamard_dim: comptime_int = 1 << comptime_walsh_hadamard_k;
 pub const comptime_sliced_quant_bits: comptime_int = 3;
 pub const comptime_sliced_quant_scale: comptime_int = (1 << comptime_sliced_quant_bits) - 1;
 pub const comptime_sliced_nb_bits: comptime_int = comptime_sliced_quant_bits + 1;
 pub const comptime_sliced_quant_scale_f32: f32 = @floatFromInt(comptime_sliced_quant_scale);
-
-comptime {
-    if (comptime_walsh_hadamard_k < 1) {
-        @compileError("comptime_walsh_hadamard_k must be positive");
-    }
-    if (comptime_sliced_quant_bits < 1 or comptime_sliced_quant_bits > 7) {
-        @compileError("comptime_sliced_quant_bits must be between 1 and 7");
-    }
-}
 
 pub const Logit = struct {
     index: usize,
@@ -44,21 +33,13 @@ pub const Logit = struct {
 };
 
 pub const top_k_sliced: usize = 16;
-
+ 
 pub const U4096 = struct {
     words: [32]u128 = [_]u128{0} ** 32,
 
     pub fn set(self: *U4096, bit: usize) void {
         std.debug.assert(bit < 4096);
         self.words[bit / 128] |= @as(u128, 1) << @as(u7, @intCast(bit % 128));
-    }
-
-    pub fn popAnd(a: *const U4096, b: *const U4096) u32 {
-        var count: u32 = 0;
-        inline for (0..32) |i| {
-            count += @intCast(@popCount(a.words[i] & b.words[i]));
-        }
-        return count;
     }
 };
 
@@ -73,13 +54,14 @@ pub const vector_U4096 = struct {
                 var partial: u32 = 0;
                 inline for (0..comptime_sliced_nb_bits) |a_bit| {
                     const count: u32 = @intCast(@popCount(a.bits[a_bit].words[word_i] & b_word));
-                    partial += count << @as(u5, @intCast(a_bit));
+                    partial += count << @as(u8, @intCast(a_bit));
                 }
-                total += partial << @as(u5, @intCast(b_bit));
+                total += partial << @as(u8, @intCast(b_bit));
             }
         }
         return total;
     }
+
 };
 
 pub const Quantized = struct {
@@ -105,11 +87,12 @@ pub const Quantized = struct {
         const dims = lm_head.shape.dims();
         const vocab_size: usize = @intCast(dims[0]);
         const d: usize = @intCast(dims[1]);
-        std.debug.assert(d == comptime_walsh_hadamard_dim);
+        std.debug.assert(d == 4096);
 
         const f32_buffer = try allocator.alloc(f32, d);
         const lm_head_quantized = try allocator.alloc(i8, d * vocab_size);
         const lm_head_sliced = try allocator.alloc(vector_U4096, vocab_size);
+        
         const row_offset = try allocator.alloc(i32, vocab_size);
         const row_scale = try allocator.alloc(f32, vocab_size);
         const row_scale_sliced = try allocator.alloc(f32, vocab_size);
@@ -141,6 +124,7 @@ pub const Quantized = struct {
         self.allocator.free(self.i8_buffer);
     }
 
+    
     pub inline fn quantizeValue(value: f32, max_abs: f32) i8 {
         return quantizeValueScaled(value, max_abs, 127.0);
     }
@@ -184,13 +168,77 @@ pub const Quantized = struct {
         self.zml_handler.toc(&self.zml_handler.timers.quant_walsh);
     }
 
+    fn l2Error(a: []const f32, b: []const f32) f32 {
+        std.debug.assert(a.len == b.len);
+        var squared_error: f32 = 0.0;
+        for (a, b) |x, y| {
+            const diff = x - y;
+            squared_error += diff * diff;
+        }
+        return @sqrt(squared_error);
+    }
+
+    pub fn testWalshHadamardRoundtrip(self: *Quantized) !void {
+        std.log.info("Test Walsh-Hadamard roundtrip", .{});
+
+        var prng = std.Random.DefaultPrng.init(2);
+        const random = prng.random();
+
+        const original = try self.allocator.alloc(f32, self.d);
+        defer self.allocator.free(original);
+        const reference = try self.allocator.alloc(f32, self.d);
+        defer self.allocator.free(reference);
+        const transformed = try self.allocator.alloc(f32, self.d);
+        defer self.allocator.free(transformed);
+
+        var total_error: f64 = 0.0;
+        var max_error: f32 = 0.0;
+        var count: usize = 0;
+
+        for (0..1000) |_| {
+            for (original) |*value| {
+                value.* = 2.0 * random.float(f32) - 1.0;
+            }
+            @memcpy(reference, original);
+            try self.walshHadamard(original, 12);
+            @memcpy(transformed, self.f32_buffer);
+            try self.walshHadamard(transformed, 12);
+
+            const err = l2Error(reference, self.f32_buffer);
+            total_error += @as(f64, err);
+            max_error = @max(max_error, err);
+            count += 1;
+        }
+
+        for (0..1000) |_| {
+            const row = random.uintLessThan(usize, self.vocab_size);
+            const original_row = self.lm_head[row * self.d .. (row + 1) * self.d];
+            @memcpy(original, original_row);
+            @memcpy(reference, original);
+            try self.walshHadamard(original, 12);
+            @memcpy(transformed, self.f32_buffer);
+            try self.walshHadamard(transformed, 12);
+
+            const err = l2Error(reference, self.f32_buffer);
+            total_error += @as(f64, err);
+            max_error = @max(max_error, err);
+            count += 1;
+        }
+
+        const avg_error = total_error / @as(f64, @floatFromInt(count));
+        std.log.info(
+            "Walsh-Hadamard roundtrip: vectors={d} avg_l2_error={d:.8} max_l2_error={d:.8}",
+            .{ count, avg_error, max_error },
+        );
+    }
+    
     pub fn quantizeVector(self: *Quantized, query: []const f32) !f32 {
         return self.quantizeVectorScaled(query, 127.0, self.i8_buffer);
     }
 
     pub fn quantizeVectorScaled(self: *Quantized, query: []const f32, scale: f32, out: []i8) !f32 {
         std.debug.assert(out.len == self.d);
-        try self.walshHadamard(query, comptime_walsh_hadamard_k);
+        try self.walshHadamard(query, 12);
         var norm: f32 = 0.0;
         var max_abs: f32 = 0;
         for (self.f32_buffer) |val| {
@@ -219,6 +267,7 @@ pub const Quantized = struct {
         }
     }
 
+    
     pub fn sample(self: *Quantized, query: []const f32) !usize {
         const query_scale = try self.quantizeVector(query);
         var best_row: usize = 0;
@@ -259,6 +308,7 @@ pub const Quantized = struct {
         return res;
     }
 
+    
     pub fn realLogit(_: *Quantized, query: []const f32, row: []const f32) f32 {
         const simd_len = 16;
         const Vec = @Vector(simd_len, f32);
@@ -349,6 +399,7 @@ pub const Quantized = struct {
         }
     }
 
+    
     pub fn sliceVectorBits(row: []const i8) !vector_U4096 {
         var sliced: vector_U4096 = .{};
         for (row, 0..) |value, coord| {
@@ -378,10 +429,13 @@ pub const Quantized = struct {
         }
     }
 
-    pub fn slicedDot(self: *Quantized, query_sliced: *const vector_U4096, query_offset: i32, row: usize) i32 {
+    pub inline fn slicedDot(self: *Quantized, query_sliced: *const vector_U4096, query_offset: i32, row: usize) i32 {
+        //self.zml_handler.tic(&self.zml_handler.timers.quant_slice_dot);
         const constant_offset: i32 = comptime_sliced_quant_scale * comptime_sliced_quant_scale * @as(i32, @intCast(self.d));
         const shifted_score = vector_U4096.dot(query_sliced, &self.lm_head_sliced[row]);
-        return @as(i32, @intCast(shifted_score)) - query_offset - self.row_offset[row] - constant_offset;
+        const res = @as(i32, @intCast(shifted_score)) - query_offset - self.row_offset[row] - constant_offset;
+        //self.zml_handler.toc(&self.zml_handler.timers.quant_slice_dot);
+        return res;
     }
 
     pub fn sampleSlice(self: *Quantized, query: []const f32) ![top_k_sliced]usize {
@@ -454,67 +508,4 @@ pub const Quantized = struct {
         std.log.info("Quantized bit slicing test passed: 1000 random row pairs", .{});
     }
 
-    fn l2Error(a: []const f32, b: []const f32) f32 {
-        std.debug.assert(a.len == b.len);
-        var squared_error: f32 = 0.0;
-        for (a, b) |x, y| {
-            const diff = x - y;
-            squared_error += diff * diff;
-        }
-        return @sqrt(squared_error);
-    }
-
-    pub fn testWalshHadamardRoundtrip(self: *Quantized) !void {
-        std.log.info("Test Walsh-Hadamard roundtrip", .{});
-
-        var prng = std.Random.DefaultPrng.init(2);
-        const random = prng.random();
-
-        const original = try self.allocator.alloc(f32, self.d);
-        defer self.allocator.free(original);
-        const reference = try self.allocator.alloc(f32, self.d);
-        defer self.allocator.free(reference);
-        const transformed = try self.allocator.alloc(f32, self.d);
-        defer self.allocator.free(transformed);
-
-        var total_error: f64 = 0.0;
-        var max_error: f32 = 0.0;
-        var count: usize = 0;
-
-        for (0..1000) |_| {
-            for (original) |*value| {
-                value.* = 2.0 * random.float(f32) - 1.0;
-            }
-            @memcpy(reference, original);
-            try self.walshHadamard(original, comptime_walsh_hadamard_k);
-            @memcpy(transformed, self.f32_buffer);
-            try self.walshHadamard(transformed, comptime_walsh_hadamard_k);
-
-            const err = l2Error(reference, self.f32_buffer);
-            total_error += @as(f64, err);
-            max_error = @max(max_error, err);
-            count += 1;
-        }
-
-        for (0..1000) |_| {
-            const row = random.uintLessThan(usize, self.vocab_size);
-            const original_row = self.lm_head[row * self.d .. (row + 1) * self.d];
-            @memcpy(original, original_row);
-            @memcpy(reference, original);
-            try self.walshHadamard(original, comptime_walsh_hadamard_k);
-            @memcpy(transformed, self.f32_buffer);
-            try self.walshHadamard(transformed, comptime_walsh_hadamard_k);
-
-            const err = l2Error(reference, self.f32_buffer);
-            total_error += @as(f64, err);
-            max_error = @max(max_error, err);
-            count += 1;
-        }
-
-        const avg_error = total_error / @as(f64, @floatFromInt(count));
-        std.log.info(
-            "Walsh-Hadamard roundtrip: vectors={d} avg_l2_error={d:.8} max_l2_error={d:.8}",
-            .{ count, avg_error, max_error },
-        );
-    }
 };

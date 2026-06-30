@@ -16,7 +16,7 @@ pub fn loadSafetensorSliceFromRegistry(zml_handler: *Zml_handler, registry: *zml
     const slice = try zml.Slice.alloc(zml_handler.allocator, tensor.shape);
     errdefer slice.free(zml_handler.allocator);
 
-    const io_buffer = try zml_handler.allocator.alloc(u8, 8 * 1024 * 1024);
+    const io_buffer = try zml_handler.allocator.alloc(u8, 128 * 1024 * 1024);
     defer zml_handler.allocator.free(io_buffer);
     var reader = try registry.reader(zml_handler.io, tensor_name, io_buffer);
     defer reader.deinit();
