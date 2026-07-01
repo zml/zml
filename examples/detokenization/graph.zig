@@ -18,7 +18,7 @@ pub const GraphParams = struct {
     alpha: f32 = 1.0,
     vamana_passes: usize = 2,
     top_k: usize = 16,
-    L: usize = 128,
+    L: usize = 512,
     graph_type: GraphType = .Mips,
 };
 
