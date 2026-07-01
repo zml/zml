@@ -29,124 +29,95 @@ pub const Metric = struct {
 pub const Visualizer = struct {
     metrics: std.ArrayList(Metric),
     allocator: std.mem.Allocator,
-    url: []const u8,
+    client: std.http.Client,
+    content: std.ArrayList(u8) = .empty,
 
-    pub fn init(allocator: std.mem.Allocator, url: []const u8) Visualizer {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) Visualizer {
         return .{
             .metrics = .empty,
             .allocator = allocator,
-            .url = url,
+            .client = std.http.Client{ .allocator = allocator, .io = io },
         };
     }
 
-    pub fn deinit(self: *Visualizer, allocator: std.mem.Allocator) void {
-        self.metrics.deinit(allocator);
+    pub fn deinit(self: *Visualizer) void {
+        self.metrics.deinit(self.allocator);
+        self.client.deinit();
     }
 
-    pub fn fetch_metrics(self: *Visualizer, url: []const u8) ![]u8 {
-        var host = try std.ArrayList(u8).initCapacity(self.allocator, 64);
-        var port: u16 = 80;
-        var path = try std.ArrayList(u8).initCapacity(self.allocator, 64);
+    pub fn fetchMetrics(
+        self: *Visualizer,
+        url: []const u8,
+    ) ![]const u8 {
+        var req = try std.http.Client.request(&self.client, .GET, try std.Uri.parse(url), .{ .keep_alive = false });
+        defer req.deinit();
 
-        if (std.mem.indexOf(u8, url, "://")) |start| {
-            const start_idx = start + 3;
-            var parts = std.mem.splitSequence(u8, url[start_idx..], "/");
-            const domain_part = parts.next() orelse return error.InvalidUrl;
+        try req.sendBodiless();
+        var response = try req.receiveHead(&.{});
 
-            if (std.mem.indexOf(u8, domain_part, ":")) |_| {
-                var d_parts = std.mem.splitSequence(u8, domain_part, ":");
-                try host.appendSlice(self.allocator, std.mem.trim(u8, " ", d_parts.next().?));
-                if (d_parts.next()) |p| {
-                    port = try std.fmt.parseInt(u16, std.mem.trim(u8, " ", p), 10);
-                }
-            } else {
-                try host.appendSlice(self.allocator, domain_part);
-            }
+        // Collect response body
+        var body: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &self.content);
+        defer body.deinit();
 
-            if (parts.next()) |p| {
-                try path.appendSlice(self.allocator, p);
-            }
-        } else {
-            try host.appendSlice(self.allocator, url);
-        }
-
-        const address = try std.net.Address.parseIp(host.items);
-
-        var stream = try std.net.tcp.Stream.init(address, port);
-        try stream.connect();
-        defer stream.deinit();
-
-        const request = std.fmt.allocPrint(self.allocator, "GET {s}{s} HTTP/1.1\r\nHost: {s}\r\nConnection: close\r\n\r\n", .{ host.items, path.items, host.items });
-        defer self.allocator.free(request);
-
-        try stream.writeAll(request);
-
-        var buffer: [4096]u8 = undefined;
-        var content = std.ArrayList(u8).initCapacity(self.allocator, 4096);
-        defer content.deinit(self.allocator) catch {};
-
-        while (true) {
-            const bytes_read = try stream.read(&buffer);
-            if (bytes_read == 0) break;
-            try content.appendSlice(&buffer[0..bytes_read]);
-        }
-
-        // Very basic HTTP response parsing (split by \r\n\r\n)
-        const parts = std.mem.splitSequence(u8, content.items, "\r\n\r\n");
-        if (parts.next()) |header| {
-            const body_parts = std.mem.splitSequence(u8, header, "\r\n\r\n");
-            _ = body_parts; // autofix
-            if (parts.next()) |body| {
-                _ = content.deinit(self.allocator) catch {};
-                _ = path.deinit(self.allocator) catch {};
-                _ = host.deinit(self.allocator) catch {};
-                return body;
-            }
-
-            _ = content.deinit(self.allocator) catch {};
-            _ = path.deinit(self.allocator) catch {};
-            _ = host.deinit(self.allocator) catch {};
-            return content.items;
-        }
+        const reader = response.reader(&.{});
+        _ = try reader.stream(&body.writer, .limited(64 * 1024));
+        self.content = body.toArrayList();
+        return self.content.items;
     }
 
-    pub fn parse_prometheus_metrics(self: *Visualizer, content: []const u8) !void {
-        var lines = std.mem.splitSequence(u8, content, "\n");
+    pub fn parsePrometheusMetrics(self: *Visualizer, content: []const u8) !void {
+        var lines = std.mem.splitScalar(u8, content, '\n');
 
-        var current_type: MetricType = .gauge;
+        var current_type: ?MetricType = null;
 
         while (lines.next()) |line| {
-            if (std.mem.ltrie(u8, line)) |char| {
-                if (char == '#') {
-                    if (std.mem.contains(u8, line, "TYPE")) {
-                        var parts = std.mem.splitSequence(u8, line, "|");
-                        const type_str = parts.next() orelse continue;
-                        const trimmed_type = std.mem.trim(u8, " TYPE ", type_str);
-                        current_type = switch (trimmed_type.len) {
-                            "counter".len => .counter,
-                            "histogram".len => .histogram,
-                            else => .gauge,
-                        };
+            // Skip empty lines
+            if (line.len == 0) continue;
+
+            // Handle comments and TYPE declarations
+            if (line[0] == '#') {
+                if (std.mem.indexOfScalar(u8, line, 'T')) |t_pos| {
+                    if (std.mem.eql(u8, line[t_pos..], "TYPE ")) {
+                        const rest = line[t_pos + 5 ..];
+                        var parts = std.mem.splitScalar(u8, rest, ' ');
+                        _ = parts.next(); // skip metric name
+                        const type_str = parts.next() orelse "unknown";
+
+                        // String comparison for switch
+                        if (std.mem.eql(u8, type_str, "counter")) {
+                            current_type = .counter;
+                        } else if (std.mem.eql(u8, type_str, "histogram")) {
+                            current_type = .histogram;
+                        } else if (std.mem.eql(u8, type_str, "gauge")) {
+                            current_type = .gauge;
+                        } else {
+                            std.log.warn("Unknown type: {s}", .{type_str});
+                            current_type = null;
+                        }
                     }
-                    continue;
                 }
+                continue;
             }
 
-            const space_pos = std.mem.lastIndexOf(u8, line, " ") orelse continue;
-            const name = line[0..space_pos];
-            const value_str = line[space_pos + 1 ..];
+            if (current_type == null) continue;
 
-            const mut_name = std.mem.trim(u8, " ", name);
-            const trimmed_value = std.mem.trim(u8, " ", value_str);
+            // Parse metric line: name [labels] value
+            const last_space = std.mem.findScalarLast(u8, line, ' ') orelse continue;
 
-            const value = try std.fmt.parseFloat(f64, trimmed_value);
+            const value_str = line[last_space + 1 ..];
+            const trimmed_value = std.mem.trim(u8, value_str, " \n\r\t");
 
-            try self.metrics.append(.{
-                .name = mut_name,
-                .m_type = current_type,
+            const name_with_labels = line[0..last_space];
+            const trimmed_name = std.mem.trimEnd(u8, name_with_labels, " ");
+            // std.log.warn("Line {s}: {s}", .{ name_with_labels, trimmed_value });
+
+            const value = std.fmt.parseFloat(f64, trimmed_value) catch continue;
+            self.metrics.append(self.allocator, .{
+                .name = trimmed_name,
+                .m_type = current_type.?,
                 .value = value,
-                .label = mut_name,
-            });
+                .label = trimmed_name,
+            }) catch continue;
         }
     }
 
@@ -155,27 +126,33 @@ pub const Visualizer = struct {
         var row: i17 = 0;
 
         for (self.metrics.items) |m| {
-            if (m.m_type == .gauge or m.m_type == .counter) {
-                const gauge_val = @as(u8, @intCast(@as(u32, @floor(m.value)) % 101));
-                const gauge: Gauge = .{
-                    .value = gauge_val,
-                    .label = m.label,
-                    .suffix = m.suffix,
-                    .label_reserve = 0,
-                    .suffix_reserve = 0,
-                };
-                const gauge_surf = try gauge.draw(ui.fixedSize(ctx, ctx.max.width orelse 40, 1));
-                try sb.add(row, 0, gauge_surf);
-                row += 1;
-                if (row < 100) row += 1;
-            } else if (m.m_type == .histogram) {
-                const braille: BrailleChart = .{
-                    .values = m.history,
-                    .height = m.chart_height,
-                };
-                const braille_surf = try braille.draw(ui.fixedSize(ctx, (ctx.max.width orelse 40) - 20, m.chart_height));
-                try sb.add(row, 0, braille_surf);
-                row += @as(i17, @intCast(m.chart_height));
+            switch (m.m_type) {
+                .gauge => {
+                    const gauge_val = @as(u8, @intCast(@as(u32, @floor(m.value)) % 101));
+                    const gauge: Gauge = .{
+                        .value = gauge_val,
+                        .label = m.label,
+                        .suffix = m.suffix,
+                        .label_reserve = 0,
+                        .suffix_reserve = 0,
+                    };
+                    const gauge_surf = try gauge.draw(ui.fixedSize(ctx, ctx.max.width orelse 40, 1));
+                    try sb.add(row, 0, gauge_surf);
+                    row += 1;
+                    if (row < 100) row += 1;
+                },
+                .histogram => {
+                    const braille: BrailleChart = .{
+                        .values = m.history,
+                        .height = m.chart_height,
+                    };
+                    const braille_surf = try braille.draw(ui.fixedSize(ctx, (ctx.max.width orelse 40) - 20, m.chart_height));
+                    try sb.add(row, 0, braille_surf);
+                    row += @as(i17, @intCast(m.chart_height));
+                },
+                .counter => {
+                    // TODO
+                },
             }
         }
 
@@ -183,7 +160,7 @@ pub const Visualizer = struct {
     }
 
     fn drawContent(self: *Visualizer, ctx: vxfw.DrawContext) !vxfw.Surface {
-        _ = self; // autofix
+        _ = self;
         return try ui.drawRichLine(ctx, &.{
             .{ .text = "Prometheus Metrics", .style = theme.label_style },
         }, ctx.max.width orelse 40);
@@ -192,23 +169,21 @@ pub const Visualizer = struct {
 
 const Model = struct {
     visualizer: Visualizer,
-    ctx: *vxfw.EventContext,
 
     pub fn handleEvent(self: *Model, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
-        _ = ctx; // autofix
         switch (event) {
             .init => {
                 try self.updateMetrics();
-                try self.ctx.tick(1000, ui.widget(self));
+                try ctx.tick(1000, ui.widget(self));
             },
             .tick => {
                 self.updateMetrics() catch {};
-                self.ctx.redraw = true;
-                try self.ctx.tick(1000, ui.widget(self));
+                ctx.redraw = true;
+                try ctx.tick(1000, ui.widget(self));
             },
             .key_press => |key| {
                 if (key.matches('q', .{})) {
-                    self.ctx.quit = true;
+                    ctx.quit = true;
                 }
             },
             else => {},
@@ -220,8 +195,8 @@ const Model = struct {
     }
 
     pub fn updateMetrics(self: *Model) !void {
-        const content = try self.visualizer.fetch_metrics("http://gh200:8001/metrics");
-        try self.visualizer.parse_prometheus_metrics(content);
+        const content = try self.visualizer.fetchMetrics("http://gh200:8001/metrics");
+        try self.visualizer.parsePrometheusMetrics(content);
     }
 };
 
@@ -231,14 +206,10 @@ pub fn main(init: std.process.Init) !void {
     var app = try vxfw.App.init(allocator, init.io);
     defer app.deinit();
 
-    var visualizer = Visualizer.init(allocator, "http://gh200:8001/metrics");
-    defer visualizer.deinit(allocator);
+    var visualizer = Visualizer.init(allocator, init.io);
+    defer visualizer.deinit();
 
-    var model = Model{
-        .visualizer = visualizer,
-        .ctx = undefined, // set by app.run
-    };
+    var model = Model{ .visualizer = visualizer };
 
-    // Custom run loop to pass context
     try app.run(ui.widget(&model), .{});
 }
