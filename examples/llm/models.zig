@@ -41,10 +41,11 @@ pub const LoadedModel = union(ModelType) {
         log.info("Detected model type: {}", .{model_type});
 
         return switch (model_type) {
-            .lfm2 => .{ .lfm2 = try lfm2.LoadedModel.init(allocator, io, repo, store, generation) },
-            .llama => .{ .llama = try llama.LoadedModel.init(allocator, io, repo, store, generation) },
-            .qwen3_5 => .{ .qwen3_5 = try qwen3_5.LoadedModel.init(allocator, io, repo, store, generation) },
-            .qwen3_5_moe => .{ .qwen3_5_moe = try qwen3_5_moe.LoadedModel.init(allocator, io, repo, store, generation) },
+            inline else => |t| @unionInit(
+                LoadedModel,
+                @tagName(t),
+                try .init(allocator, io, repo, store, generation),
+            ),
         };
     }
 
@@ -56,31 +57,17 @@ pub const LoadedModel = union(ModelType) {
 
     pub fn loadBuffers(self: *LoadedModel, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node, shardings: Shardings) !Buffers {
         return switch (self.*) {
-            .lfm2 => |*m| .{ .lfm2 = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
-            .llama => |*m| .{ .llama = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
-            .qwen3_5 => |*m| .{ .qwen3_5 = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
-            .qwen3_5_moe => |*m| .{ .qwen3_5_moe = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
+            inline else => |*m, t| @unionInit(
+                Buffers,
+                @tagName(t),
+                try m.loadBuffers(allocator, io, platform, store, progress, shardings),
+            ),
         };
     }
 
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         switch (self.*) {
-            .lfm2 => |*loaded_model| switch (buffers.*) {
-                .lfm2 => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
-                else => unreachable,
-            },
-            .llama => |*loaded_model| switch (buffers.*) {
-                .llama => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
-                else => unreachable,
-            },
-            .qwen3_5 => |*loaded_model| switch (buffers.*) {
-                .qwen3_5 => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
-                else => unreachable,
-            },
-            .qwen3_5_moe => |*loaded_model| switch (buffers.*) {
-                .qwen3_5_moe => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
-                else => unreachable,
-            },
+            inline else => |*loaded, t| loaded.unloadBuffers(&@field(buffers, @tagName(t)), allocator),
         }
     }
 
@@ -95,47 +82,13 @@ pub const LoadedModel = union(ModelType) {
         progress: *std.Progress.Node,
     ) !CompiledModel {
         const inner: CompiledModel.Inner = switch (self.*) {
-            .lfm2 => |*m| .{ .lfm2 = try m.compile(
-                allocator,
-                io,
-                platform,
-                backend,
-                shardings,
-                seqlen,
-                progress,
-            ) },
-            .llama => |*m| .{ .llama = try m.compile(
-                allocator,
-                io,
-                platform,
-                backend,
-                shardings,
-                seqlen,
-                progress,
-            ) },
-            .qwen3_5 => |*m| .{ .qwen3_5 = try m.compile(
-                allocator,
-                io,
-                platform,
-                backend,
-                shardings,
-                seqlen,
-                progress,
-            ) },
-            .qwen3_5_moe => |*m| .{ .qwen3_5_moe = try m.compile(
-                allocator,
-                io,
-                platform,
-                backend,
-                shardings,
-                seqlen,
-                progress,
-            ) },
+            inline else => |*m, t| @unionInit(
+                CompiledModel.Inner,
+                @tagName(t),
+                try m.compile(allocator, io, platform, backend, shardings, seqlen, progress),
+            ),
         };
-        return .{
-            .inner = inner,
-            .seqlen = @intCast(seqlen),
-        };
+        return .{ .inner = inner, .seqlen = @intCast(seqlen) };
     }
 };
 
@@ -152,10 +105,7 @@ pub const CompiledModel = struct {
 
     pub fn deinit(self: *CompiledModel) void {
         switch (self.inner) {
-            .lfm2 => |*b| b.deinit(),
-            .llama => |*b| b.deinit(),
-            .qwen3_5 => |*b| b.deinit(),
-            .qwen3_5_moe => |*b| b.deinit(),
+            inline else => |*b| b.deinit(),
         }
     }
 
@@ -168,48 +118,12 @@ pub const CompiledModel = struct {
         tokenizer: zml.tokenizer.Tokenizer,
     ) !Session {
         return switch (self.inner) {
-            .lfm2 => |*compiled| .{
-                .inner = .{ .lfm2 = try lfm2.Session.init(
-                    allocator,
-                    io,
-                    platform,
-                    tokenizer,
-                    compiled,
-                    &model_buffers.lfm2,
-                ) },
-                .seqlen = self.seqlen,
-            },
-            .llama => |*compiled| .{
-                .inner = .{ .llama = try llama.Session.init(
-                    allocator,
-                    io,
-                    platform,
-                    tokenizer,
-                    compiled,
-                    &model_buffers.llama,
-                ) },
-                .seqlen = self.seqlen,
-            },
-            .qwen3_5 => |*compiled| .{
-                .inner = .{ .qwen3_5 = try qwen3_5.Session.init(
-                    allocator,
-                    io,
-                    platform,
-                    tokenizer,
-                    compiled,
-                    &model_buffers.qwen3_5,
-                ) },
-                .seqlen = self.seqlen,
-            },
-            .qwen3_5_moe => |*compiled| .{
-                .inner = .{ .qwen3_5_moe = try qwen3_5_moe.Session.init(
-                    allocator,
-                    io,
-                    platform,
-                    tokenizer,
-                    compiled,
-                    &model_buffers.qwen3_5_moe,
-                ) },
+            inline else => |*compiled, t| .{
+                .inner = @unionInit(
+                    Session.Inner,
+                    @tagName(t),
+                    try .init(allocator, io, platform, tokenizer, compiled, &@field(model_buffers, @tagName(t))),
+                ),
                 .seqlen = self.seqlen,
             },
         };
