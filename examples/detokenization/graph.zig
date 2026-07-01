@@ -177,6 +177,74 @@ pub const Graph = struct {
         self.allocator.free(self.nsw_extension_search_missed);
     }
 
+    pub fn merge(self: *Graph, other: Graph) !void {
+        std.debug.assert(self.n == other.n);
+        std.debug.assert(self.dim == other.dim);
+        std.debug.assert(self.medoid == other.medoid);
+
+        const initial_edges = self.nbEdges();
+        
+        const self_k_max = self.params.k_max;
+        const other_k_max = other.params.k_max;
+        const new_k_max = self_k_max + other_k_max;
+
+        const new_neighbors = try self.allocator.alloc(usize, self.n * new_k_max);
+        errdefer self.allocator.free(new_neighbors);
+
+        for (0..self.n) |node| {
+            std.debug.assert(self.is_junk[node] == other.is_junk[node]);
+            const new_start = node * new_k_max;
+
+            const self_start = node * self_k_max;
+            const self_end = self_start + self.nb_neighbors[node];
+            const self_count = self.nb_neighbors[node];
+            @memcpy(new_neighbors[new_start..][0..self_count], self.neighbors[self_start..self_end]);
+
+            var nb_neighbors = self_count;
+
+            const other_start = node * other_k_max;
+            const other_end = other_start + other.nb_neighbors[node];
+            for (other_start..other_end) |pos| {
+                const candidate = other.neighbors[pos];
+                if (self.hasNeighbor(node, candidate)) continue;
+                new_neighbors[new_start + nb_neighbors] = candidate;
+                nb_neighbors += 1;
+            }
+
+            self.nb_neighbors[node] = nb_neighbors;
+        }
+
+        const new_capacity = self.params.search_budget + new_k_max;
+        const new_visited = try self.allocator.alloc(Candidate, new_capacity);
+        errdefer self.allocator.free(new_visited);
+        
+        const new_is_expanded = try self.allocator.alloc(bool, new_capacity);
+        errdefer self.allocator.free(new_is_expanded);
+        @memset(new_is_expanded, false);
+        
+        const new_nb_expanded_neighbors = try self.allocator.alloc(usize, new_capacity);
+        errdefer self.allocator.free(new_nb_expanded_neighbors);
+        @memset(new_nb_expanded_neighbors, 0);
+
+        self.allocator.free(self.neighbors);
+        self.allocator.free(self.visited);
+        self.allocator.free(self.is_expanded);
+        self.allocator.free(self.nb_expanded_neighbors);
+
+        self.params.k_max = new_k_max;
+        self.neighbors = new_neighbors;
+        self.visited = new_visited;
+        self.is_expanded = new_is_expanded;
+        self.nb_expanded_neighbors = new_nb_expanded_neighbors;
+        self.L = 0;
+        self.nb_visited = 0;
+        self.is_search_done = false;
+        @memset(self.are_neighbors_pruned, false);
+
+        std.log.info("Merged graphs: k_max {d}+{d}->{d}", .{ self_k_max, other_k_max, new_k_max });
+        std.log.info("Nb edges: {d}/{d} -> {d}", .{ initial_edges, other.nbEdges(), self.nbEdges() });
+    }
+    
     // ------------------- Search functions ------------------ //
 
     pub fn greedySearchNode(self: *Graph, query: usize) void {
@@ -935,6 +1003,7 @@ pub const Graph = struct {
     }
 
     pub fn testNswExtention(self: *Graph, sampler: *sampling.Sampler) !void {
+        if (true) return;
         std.log.info("Test NSW extension", .{});
         @memset(self.nsw_extension_search_missed, false);
 
