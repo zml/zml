@@ -295,7 +295,9 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     std.log.info("Init sampler", .{});
     var sampler: sampling.Sampler = try .init(zml_handler, lm_head);
     defer sampling.Sampler.deinit(&sampler);
-    
+
+
+
     var g_angular = try buildGraphAngular(zml_handler, &model_handler, &sampler);
     defer g_angular.deinit();
 
@@ -303,11 +305,90 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     defer g_mips.deinit();
 
     zml_handler.tic(&zml_handler.timers.graph_search_tot);
-    try testEmbedGraphSearch(zml_handler, &g_angular, null, &sampler);
-    try testEmbedGraphSearch(zml_handler, &g_mips, null, &sampler);
-    try testEmbedGraphSearch(zml_handler, &g_mips, &g_angular, &sampler);
     try testEmbedDualGraphSearch(zml_handler, &model_handler, &g_angular, &g_mips, &sampler);
+
+    var g_mrt = try buildGraphMrt(zml_handler, &model_handler, &sampler);
+    defer g_mrt.deinit();
+    
+    var g_knn = try buildGraphKnn(zml_handler, &model_handler, &sampler);
+    defer g_knn.deinit();
+
+    try testEmbedGraphSearch(zml_handler, &g_knn, null, &sampler, "KNN");
+    try testEmbedGraphSearch(zml_handler, &g_mrt, null, &sampler, "MRT");
+    try testEmbedGraphSearch(zml_handler, &g_angular, null, &sampler, "Angular");
+    try testEmbedGraphSearch(zml_handler, &g_mips, null, &sampler, "MIPS");
+    try testEmbedGraphSearch(zml_handler, &g_mips, &g_angular, &sampler, "MIPS and Angular");
+    
     zml_handler.toc(&zml_handler.timers.graph_search_tot);
+}
+
+pub fn buildGraphMrt(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, sampler: *sampling.Sampler) !graph.Graph {
+    zml_handler.tic(&zml_handler.timers.similarity_matrix);
+    //var similarity_matrix = try algebra.computeSimilarityMatrix(zml_handler, &model_handler, false);
+    var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, model_handler, true);
+    defer similarity_matrix.deinit(zml_handler.allocator);
+    zml_handler.toc(&zml_handler.timers.similarity_matrix);
+
+    std.log.info("Get lm_head_normalized", .{});
+    const lm_head = try algebra.getLmHeadNormalized(zml_handler, model_handler);
+    defer lm_head.free(zml_handler.allocator);
+
+    std.log.info("Get junk rows", .{});
+    zml_handler.tic(&zml_handler.timers.junk_rows);
+    const junk_rows = try algebra.getJunkRows(zml_handler, model_handler);
+    defer zml_handler.allocator.free(junk_rows);
+    zml_handler.toc(&zml_handler.timers.junk_rows);
+    std.log.info("Found {d} junk rows", .{junk_rows.len});
+
+    std.log.info("Get medoid", .{});
+    const medoid = 0; //try getMedoid(zml_handler, model_handler, junk_rows);
+    std.log.info("Medoid: {d}", .{medoid});
+
+    std.log.info("Init graph", .{});
+    const graph_params: graph.GraphParams = .{ .graph_type = .Angular, .k_max = 1024 };
+    var g: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, graph_params);
+
+    zml_handler.tic(&zml_handler.timers.knn_graph);
+    try g.makeMrt();
+    try g.testNswExtention(sampler);
+    zml_handler.toc(&zml_handler.timers.knn_graph);
+
+    return g;
+}
+
+
+pub fn buildGraphKnn(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, sampler: *sampling.Sampler) !graph.Graph {
+    zml_handler.tic(&zml_handler.timers.similarity_matrix);
+    //var similarity_matrix = try algebra.computeSimilarityMatrix(zml_handler, &model_handler, false);
+    var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, model_handler, true);
+    defer similarity_matrix.deinit(zml_handler.allocator);
+    zml_handler.toc(&zml_handler.timers.similarity_matrix);
+
+    std.log.info("Get lm_head_normalized", .{});
+    const lm_head = try algebra.getLmHeadNormalized(zml_handler, model_handler);
+    defer lm_head.free(zml_handler.allocator);
+
+    std.log.info("Get junk rows", .{});
+    zml_handler.tic(&zml_handler.timers.junk_rows);
+    const junk_rows = try algebra.getJunkRows(zml_handler, model_handler);
+    defer zml_handler.allocator.free(junk_rows);
+    zml_handler.toc(&zml_handler.timers.junk_rows);
+    std.log.info("Found {d} junk rows", .{junk_rows.len});
+
+    std.log.info("Get medoid", .{});
+    const medoid = 0; //try getMedoid(zml_handler, model_handler, junk_rows);
+    std.log.info("Medoid: {d}", .{medoid});
+
+    std.log.info("Init graph", .{});
+    const graph_params: graph.GraphParams = .{ .graph_type = .Angular };
+    var g: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, graph_params);
+
+    zml_handler.tic(&zml_handler.timers.knn_graph);
+    g.consolidateNswPrune();
+    try g.testNswExtention(sampler);
+    zml_handler.toc(&zml_handler.timers.knn_graph);
+
+    return g;
 }
 
 pub fn buildGraphAngular(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, sampler: *sampling.Sampler) !graph.Graph {
@@ -541,8 +622,8 @@ pub fn testTokenSvdSearch(_: *Zml_handler, lm_head_rot: zml.Slice, svd: *svd_.Sv
 }
 
 
-pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g1: *graph.Graph, g2: ?*graph.Graph, sampler: *sampling.Sampler) !void {
-    std.log.info("Test embed graph search", .{});
+pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g1: *graph.Graph, g2: ?*graph.Graph, sampler: *sampling.Sampler, s: []const u8) !void {
+    std.log.info("Test embed graph search with graph = {s}", .{ s });
 
     var total_count: usize = 0;
     var found_top1_count: usize = 0;
@@ -623,7 +704,7 @@ pub fn testEmbedDualGraphSearch(zml_handler: *Zml_handler, model_handler: *model
     defer lm_head_row_norms.free(zml_handler.allocator);
     const row_norms = lm_head_row_norms.constItems(f32);
     
-    std.log.info("Test embed graph search", .{});
+    std.log.info("Test embed dual graph search", .{});
 
     var total_count: usize = 0;
     var found_top1_count: usize = 0;
