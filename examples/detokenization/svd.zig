@@ -106,6 +106,19 @@ pub const SvdSampler = struct {
         }
     };
 
+    const IntSamplingCandidate = struct {
+        token: usize,
+        logit: i32,
+
+        fn beforeThan(_: void, lhs: IntSamplingCandidate, rhs: IntSamplingCandidate) bool {
+            return lhs.logit > rhs.logit;
+        }
+
+        fn absDecreasing(_: void, lhs: IntSamplingCandidate, rhs: IntSamplingCandidate) bool {
+            return @abs(lhs.logit) > @abs(rhs.logit);
+        }
+    };
+
     zml_handler: *main.Zml_handler,
     allocator: std.mem.Allocator,
     m: zml.Slice,
@@ -130,17 +143,11 @@ pub const SvdSampler = struct {
     order: []usize,
 
     pub fn init(zml_handler: *main.Zml_handler, m: zml.Slice, m_t: zml.Slice, tokenizer: Tokenizer, use_svd: bool) !SvdSampler {
-        if (m.dtype() != .f32 or m_t.dtype() != .f32) return error.UnsupportedDType;
-        if (m.shape.rank() != 2 or m_t.shape.rank() != 2) return error.InvalidShape;
-
         const allocator = zml_handler.allocator;
         
         const m_dims = m.shape.dims();
-        const m_t_dims = m_t.shape.dims();
         const vocab_size: usize = @intCast(m_dims[0]);
         const d: usize = @intCast(m_dims[1]);
-        if (vocab_size == 0 or d == 0) return error.InvalidShape;
-        if (@as(usize, @intCast(m_t_dims[0])) != d or @as(usize, @intCast(m_t_dims[1])) != vocab_size) return error.InvalidShape;
 
         const checkpoints = try allocator.dupe(usize, default_checkpoints[0..default_checkpoints.len]);
         errdefer allocator.free(checkpoints);
@@ -150,7 +157,7 @@ pub const SvdSampler = struct {
 
         const row_tail_norms = try allocator.alloc(f32, checkpoints.len * vocab_size);
         errdefer allocator.free(row_tail_norms);
-
+        
         const approx_logits = try allocator.alloc(f32, vocab_size);
         errdefer allocator.free(approx_logits);
 
@@ -204,7 +211,10 @@ pub const SvdSampler = struct {
         self.allocator.free(self.checkpoint_approx_logits);
         self.allocator.free(self.exact_logits);
         self.allocator.free(self.sampling_candidates);
+        self.allocator.free(self.top256_candidates);
         self.allocator.free(self.active);
+        self.allocator.free(self.row_norms);
+        self.allocator.free(self.order);
     }
 
     pub fn setSamplingParams(self: *SvdSampler, temperature: f32, top_k: usize, top_p: f32) void {
@@ -215,27 +225,21 @@ pub const SvdSampler = struct {
 
 
     pub fn sampleFast(self: *SvdSampler, y: []const f32) !void {
-        var tot_y_abs: f32 = 0.0;
         for (y, 0..) |value, coord| {
-            tot_y_abs += @abs(value);
             self.sampling_candidates[coord] = .{ .token = coord, .logit = value, .weight = 0.0 };
         }
         std.mem.sort(SamplingCandidate, self.sampling_candidates[0..self.d], {}, SamplingCandidate.absDecreasing);
-        for (0..self.d) |i| {
-            self.order[i] = self.sampling_candidates[i].token;
-        }
         
         // compute approximate logits using the 256 largest magnitude coordinates of the query
         self.zml_handler.tic(&self.zml_handler.timers.svd_sparse_256);
         @memset(self.approx_logits, 0.0);
         const m_t_items = self.m_t.constItems(f32);
+        const simd_len = 32;
+        const Vec = @Vector(simd_len, f32);
         for (0..256) |i| {
-            const coord = self.order[i];
+            const coord = self.sampling_candidates[i].token;
             const y_value = y[coord];
             const coord_values = m_t_items[coord * self.vocab_size ..][0..self.vocab_size];
-
-            const simd_len = 32;
-            const Vec = @Vector(simd_len, f32);
             const y_vec: Vec = @splat(y_value);
 
             var token: usize = 0;
@@ -249,7 +253,6 @@ pub const SvdSampler = struct {
                 self.approx_logits[token] += coord_values[token] * y_value;
             }
         }
-        
         self.zml_handler.toc(&self.zml_handler.timers.svd_sparse_256);
 
         // find the 256 highest approx logits candidates
