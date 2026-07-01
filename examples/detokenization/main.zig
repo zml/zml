@@ -382,7 +382,7 @@ pub fn buildAngularGraphs(zml_handler: *Zml_handler, model_handler: *model_.Mode
     std.log.info("Init NSW graph", .{});
     const nsw_params: graph.GraphParams = .{ .graph_type = .Angular };
     var g_nsw: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, nsw_params);
-    g_nsw.consolidateNearestPrune();
+    //g_nsw.consolidateNearestPrune();
     try g_nsw.extendToNsw();
     try g_nsw.testNswExtention(sampler);
     try g_nsw.fixNswExtention();
@@ -419,7 +419,7 @@ pub fn buildMipsGraphs(zml_handler: *Zml_handler, model_handler: *model_.Model_h
     const graph_params: graph.GraphParams = .{ .graph_type = .Mips };
     var g: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, graph_params);
     
-    g.consolidateNearestPrune();
+    //g.consolidateNearestPrune();
     try g.extendToNsw();
     try g.testNswExtention(sampler);
     try g.fixNswExtention();
