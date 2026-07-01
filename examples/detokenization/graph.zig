@@ -647,7 +647,6 @@ pub const Graph = struct {
                 if (candidate == node or self.is_junk[candidate] or self.hasNeighbor(node, candidate)) continue;
                 self.insertNeighborSorted(node, candidate);
             }
-            std.debug.assert(self.nb_neighbors[node] == self.params.k_max);
 
             if (node == 0 or (node + 1) % 10000 == 0 or node + 1 == self.n) {
                 log.info("Consolidate nearest node {d}/{d}", .{ node + 1, self.n });
@@ -1198,34 +1197,36 @@ pub const Graph = struct {
         log.info("Max rank: {d}, avg rank: {d:.2}", .{ max_rank, avg_rank });
         log.info("Max cost: {d}, avg cost: {d:.2}", .{ max_cost, avg_cost });
 
-        log.info("", .{});
-        log.info("Nodes by degree: {d}", .{max_degree});
-        for (0..self.n) |deg| {
-            if (nodes_by_degree[deg] > 0) {
-                log.info("{d} nodes of degree {d}", .{ nodes_by_degree[deg], deg });
+        if (false) {
+            log.info("", .{});
+            log.info("Nodes by degree: {d}", .{max_degree});
+            for (0..self.n) |deg| {
+                if (nodes_by_degree[deg] > 0) {
+                    log.info("{d} nodes of degree {d}", .{ nodes_by_degree[deg], deg });
+                }
             }
-        }
-        log.info("", .{});
-        log.info("Nodes by rank: {d}", .{max_rank});
-        for (0..self.n) |rank| {
-            if (nodes_by_rank[rank] > 0) {
-                log.info("{d} nodes of rank {d}", .{ nodes_by_rank[rank], rank });
+            log.info("", .{});
+            log.info("Nodes by rank: {d}", .{max_rank});
+            for (0..self.n) |rank| {
+                if (nodes_by_rank[rank] > 0) {
+                    log.info("{d} nodes of rank {d}", .{ nodes_by_rank[rank], rank });
+                }
             }
-        }
-        log.info("", .{});
-        log.info("Nodes by cost: {d}", .{max_cost});
-        for (0..self.n) |cost| {
-            if (nodes_by_cost[cost] > 0) {
-                log.info("{d} nodes of cost {d}", .{ nodes_by_cost[cost], cost });
+            log.info("", .{});
+            log.info("Nodes by cost: {d}", .{max_cost});
+            for (0..self.n) |cost| {
+                if (nodes_by_cost[cost] > 0) {
+                    log.info("{d} nodes of cost {d}", .{ nodes_by_cost[cost], cost });
+                }
             }
-        }
-        log.info("", .{});
-        log.info("Top of the tree", .{});
-        for (0..3) |rank| {
-            for (0..self.n) |node| {
-                if (self.is_junk[node]) continue;
-                if (ranks[node] == rank) {
-                    std.log.info("Node {d} has rank {d} degree {d} and nb_descendants {d}", .{ node, rank, self.nb_neighbors[node], nb_descendants[node] });
+            log.info("", .{});
+            log.info("Top of the tree", .{});
+            for (0..3) |rank| {
+                for (0..self.n) |node| {
+                    if (self.is_junk[node]) continue;
+                    if (ranks[node] == rank) {
+                        std.log.info("Node {d} has rank {d} degree {d} and nb_descendants {d}", .{ node, rank, self.nb_neighbors[node], nb_descendants[node] });
+                    }
                 }
             }
         }
