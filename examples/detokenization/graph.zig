@@ -14,11 +14,11 @@ const Field_timer = main.Timing_handler.Field_timer;
 
 pub const GraphParams = struct {
     k_max: usize = 32,
-    search_budget: usize = 4096,
+    search_budget: usize = 2048,
     alpha: f32 = 1.0,
     vamana_passes: usize = 2,
     top_k: usize = 16,
-    L: usize = 256,
+    L: usize = 128,
     graph_type: GraphType = .Mips,
 };
 
@@ -272,17 +272,10 @@ pub const Graph = struct {
 
     pub fn greedySearch(self: *Graph, query: []const f32) void {
         self.zml_handler.tic(&self.zml_handler.timers.embed_search);
-        // initialize search at entry point
         self.initSearch(query);
-
         while (self.nb_visited < self.params.search_budget) {
-
-            // find best node of the active pool that has not been expanded yet
             const node = self.popCandidate();
-
-            // if all nodes in active pool have been expanded, terminate the search
             if (self.is_search_done) break;
-
             const start_neigh = self.params.k_max * node;
             const end_neigh = start_neigh + self.nb_neighbors[node];
             for (start_neigh..end_neigh) |i| {
@@ -291,22 +284,15 @@ pub const Graph = struct {
                 self.addCandidate(query, neighbor);
             }
         }
-
         self.cleanup();
         self.zml_handler.toc(&self.zml_handler.timers.embed_search);
     }
 
     pub fn greedySearchWS(self: *Graph, query: []const f32) void {
         self.zml_handler.tic(&self.zml_handler.timers.embed_search);
-
         while (self.nb_visited < self.params.search_budget) {
-
-            // find best node of the active pool that has not been expanded yet
             const node = self.popCandidate();
-
-            // if all nodes in active pool have been expanded, terminate the search
             if (self.is_search_done) break;
-
             const start_neigh = self.params.k_max * node;
             const end_neigh = start_neigh + self.nb_neighbors[node];
             for (start_neigh..end_neigh) |i| {
@@ -315,7 +301,6 @@ pub const Graph = struct {
                 self.addCandidate(query, neighbor);
             }
         }
-
         self.cleanup();
         self.zml_handler.toc(&self.zml_handler.timers.embed_search);
     }
@@ -325,16 +310,11 @@ pub const Graph = struct {
         self.zml_handler.tic(&self.zml_handler.timers.greedy_search);
         std.debug.assert(!self.is_junk[query]);
         self.initNodeSearch(query);
-
         while (self.nb_visited < self.params.search_budget) {
-            if (self.visited[0].node == query) break;
-
             const expansion = self.popCandidateLazy();
             if (self.is_search_done) break;
-
             self.addNodeCandidate(query, expansion.neighbor);
         }
-
         self.cleanup();
         self.zml_handler.toc(&self.zml_handler.timers.greedy_search);
     }
@@ -342,28 +322,22 @@ pub const Graph = struct {
     pub fn greedySearchLazy(self: *Graph, query: []const f32) void {
         self.zml_handler.tic(&self.zml_handler.timers.embed_search);
         self.initSearch(query);
-
         while (self.nb_visited < self.params.search_budget) {
             const expansion = self.popCandidateLazy();
             if (self.is_search_done) break;
-
             self.addCandidate(query, expansion.neighbor);
         }
-
         self.cleanup();
         self.zml_handler.toc(&self.zml_handler.timers.embed_search);
     }
 
     pub fn greedySearchLazyWS(self: *Graph, query: []const f32) void {
         self.zml_handler.tic(&self.zml_handler.timers.embed_search);
-
         while (self.nb_visited < self.params.search_budget) {
             const expansion = self.popCandidateLazy();
             if (self.is_search_done) break;
-
             self.addCandidate(query, expansion.neighbor);
         }
-
         self.cleanup();
         self.zml_handler.toc(&self.zml_handler.timers.embed_search);
     }
