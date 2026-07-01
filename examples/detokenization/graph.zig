@@ -15,7 +15,7 @@ const Field_timer = main.Timing_handler.Field_timer;
 
 pub const GraphParams = struct {
     k_max: usize = 32,
-    search_budget: usize = 4096,
+    search_budget: usize = 1024,
     alpha: f32 = 1.0,
     vamana_passes: usize = 1,
     top_k: usize = 16,
@@ -375,7 +375,7 @@ pub const Graph = struct {
     
     
     fn selectNodeEntryPoint(self: *Graph, query: usize) struct { usize, f32 } {
-        if (false) {
+        if (true) {
             const entry_point = self.medoid;
             const entry_sim = self.similarity(query, entry_point);
             std.debug.assert(entry_point < self.n);
@@ -586,6 +586,7 @@ pub const Graph = struct {
         std.log.info("Exact kNN : nb edges: {d}", .{self.nbEdges()});
     }
 
+    
     fn sortNodeNeighbors(self: *Graph, node: usize, scratch: []Candidate) void {
         std.debug.assert(scratch.len >= self.nb_neighbors[node]);
 
@@ -630,6 +631,7 @@ pub const Graph = struct {
         return false;
     }
 
+    
     pub fn consolidateNswNearest(self: *Graph) void {
         log.info("Consolidate NSW with nearest neighbors", .{});
 
@@ -1125,9 +1127,7 @@ pub const Graph = struct {
 
     // ---------------------- MRT functions ---------------------- //
 
-    pub fn makeMrt(self: *Graph, order: []const usize) !void {
-        std.debug.assert(order.len == self.n);
-        std.debug.assert(!self.is_junk[0]);
+    pub fn makeMrt(self: *Graph) !void {
         for (1..self.n) |node| {
             if (self.is_junk[node]) continue;
             const p = self.monotonicSearch(0, node);
