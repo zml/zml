@@ -338,7 +338,7 @@ pub const Graph = struct {
 
     
     fn selectNodeEntryPoint(self: *Graph, query: usize, pass: usize) struct { usize, f32 } {
-        if (pass == 0) {
+        if (pass == 99) {
             // first pass: mostly randomized
             const entry_id = query % self.params.nb_entry_points;
             const entry_point = self.medoids[entry_id];
@@ -1060,7 +1060,7 @@ pub const Graph = struct {
             if (hops > max_hops) max_hops = hops;
         }
         log.info("Max hops: {}", .{max_hops});
-        for (0..2) |hops| {
+        for (2..2) |hops| {
             for (0..self.n) |i| {
                 if (hop_dist[i] == hops) {
                     std.log.info("Node {d} needs {d} hops, out-degree: {d}, tok: {s}", .{ i, hops, self.nb_neighbors[i], try tokens.tokenString(sampler.tokenizer, i, self.allocator) });
@@ -1074,7 +1074,7 @@ pub const Graph = struct {
                 }
             }
         }
-        try self.logDegreeCounts("Nodes by min-hops", hop_dist, max_hops);
+        //try self.logDegreeCounts("Nodes by min-hops", hop_dist, max_hops);
 
         var exact_first_count: usize = 0;
         var valid_count: usize = 0;
