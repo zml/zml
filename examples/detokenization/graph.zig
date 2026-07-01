@@ -259,7 +259,7 @@ pub const Graph = struct {
             const node = self.popCandidate();
 
             // if we found the query node, terminate the search
-            if (node == query) break;
+            //if (node == query) break;
 
             // if all nodes in active pool have been expanded, terminate the search
             if (self.is_search_done) break;
@@ -862,7 +862,7 @@ pub const Graph = struct {
                 // the candidates are current_node's neighbors and the visited nodes
                 // since both lists are sorted and contain unique nodes, we can build
                 // the sorted list of candidates in one linear forward pass
-                self.greedySearchNodeLazy(current_node);
+                self.greedySearchNode(current_node);
                 if (self.visited[0].node == current_node) {
                     // if current_node was found, we could decide the connectedness is ok
                     // and continue. this reduces the pressure on nb_neighbors for each node,

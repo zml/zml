@@ -327,9 +327,9 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     defer g_mips.deinit();
 
     zml_handler.tic(&zml_handler.timers.graph_search_tot);
-    try testEmbedGraphSearch(zml_handler, &g_knn, null, &sampler, "KNN");
-    try testEmbedGraphSearch(zml_handler, &g_knnp, null, &sampler, "KNNP");
-    try testEmbedGraphSearch(zml_handler, &g_mrt, null, &sampler, "MRT");
+    //try testEmbedGraphSearch(zml_handler, &g_knn, null, &sampler, "KNN");
+    //try testEmbedGraphSearch(zml_handler, &g_knnp, null, &sampler, "KNNP");
+    //try testEmbedGraphSearch(zml_handler, &g_mrt, null, &sampler, "MRT");
     try testEmbedGraphSearch(zml_handler, &g_angu, null, &sampler, "Angular");
     try testEmbedGraphSearch(zml_handler, &g_mips, null, &sampler, "MIPS");
     try testEmbedGraphSearch(zml_handler, &g_mips, &g_angu, &sampler, "MIPS and Angular");
@@ -552,8 +552,8 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g1: *graph.Graph, g2: ?*g
         for (0..n) |embed_index| {
             const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
 
-            g1.greedySearchLazy(embed);
-            if (g2) |g| g.greedySearchLazy(embed);
+            g1.greedySearch(embed);
+            if (g2) |g| g.greedySearch(embed);
 
             const nb_visited = g1.nb_visited;
             total_visited += nb_visited;
@@ -632,13 +632,13 @@ pub fn testEmbedDualGraphSearch(zml_handler: *Zml_handler, model_handler: *model
         for (0..n) |embed_index| {
             const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
 
-            g_angu.greedySearchLazy(embed);
+            g_angu.greedySearch(embed);
 
             for (0..g_angu.L) |i| {
                 g_angu.visited[i].similarity *= row_norms[g_angu.visited[i].node];
             }
             g_mips.initSearchPool(g_angu.visited[0..g_angu.L]);
-            g_mips.greedySearchLazyWS(embed);
+            g_mips.greedySearchWS(embed);
 
             const nb_visited = g_angu.nb_visited + g_mips.nb_visited;
             total_visited += nb_visited;
