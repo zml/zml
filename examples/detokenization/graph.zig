@@ -81,6 +81,7 @@ pub const Graph = struct {
     nsw_extension_search_missed: []bool,
     // utils
     sim_access: usize = 0,
+    pass: usize = 0,
 
     pub fn init(zml_handler: *Zml_handler, lm_head: zml.Slice, matrix: *SimilarityMatrix, junk_rows: []const usize, medoid: usize, params: GraphParams) !Graph {
         std.debug.assert(matrix.n > 0);
@@ -458,13 +459,23 @@ pub const Graph = struct {
             std.debug.assert(!self.is_visited[entry_point]);
             return .{ entry_point, entry_sim };
         } else {
-            var entry_point = (query + @divFloor(self.n, 2)) % self.n;
-            while (self.is_junk[entry_point]) {
-                const next = (entry_point + 5411) % self.n;
-                entry_point = next;
+            if (self.pass == 0) {
+                var entry_point = (query + @divFloor(self.n, 2)) % self.n;
+                while (self.is_junk[entry_point]) {
+                    const next = (entry_point + 5411) % self.n;
+                    entry_point = next;
+                }
+                const entry_sim = self.similarity(query, entry_point);
+                return .{ entry_point, entry_sim };
+            } else {
+                var entry_point = (query + @divFloor(self.n, 3)) % self.n;
+                while (self.is_junk[entry_point]) {
+                    const next = (entry_point + 541) % self.n;
+                    entry_point = next;
+                }
+                const entry_sim = self.similarity(query, entry_point);
+                return .{ entry_point, entry_sim };
             }
-            const entry_sim = self.similarity(query, entry_point);
-            return .{ entry_point, entry_sim };
         }
     }
 
@@ -839,6 +850,7 @@ pub const Graph = struct {
         self.zml_handler.nb_tictoc = 0;
 
         for (0..self.params.vamana_passes) |pass_i| {
+            self.pass = pass_i;
             // when pass_i > 0, we increase alpha from 1.0 to the params.alpha value
             // this means the flags are_neighbors_pruned is invalidated
             @memset(self.are_neighbors_pruned, false);
