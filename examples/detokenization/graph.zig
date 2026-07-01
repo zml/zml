@@ -44,11 +44,6 @@ pub const Graph = struct {
         neighbor: usize,
     };
 
-    pub const SparseQuery = struct {
-        coord: usize,
-        sign: f32,
-    };
-
     zml_handler: *Zml_handler,
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -65,7 +60,6 @@ pub const Graph = struct {
     is_junk: []bool,
     medoid: usize,
     medoids: []usize,
-    entry_medians: []f32,
     // the max number of candidates, each candidate is a scored node so
     // this can be set as the max_budget + k_max
     capacity: usize,
@@ -76,7 +70,7 @@ pub const Graph = struct {
     visited: []Candidate,
     is_visited: []bool,
     nb_visited: usize,
-    // for each candidate in visited, tells if it's neighbors have been
+    // for each candidate in visited, tells if its neighbors have been
     // added to the pool (when true, the node had been dealt with)
     is_expanded: []bool,
     // for each candidate in visited, tells how many neighbors have been
@@ -150,9 +144,6 @@ pub const Graph = struct {
         const medoids = try allocator.alloc(usize, params.nb_entry_points);
         errdefer allocator.free(medoids);
         @memset(medoids, matrix.n);
-        const entry_medians = try allocator.alloc(f32, params.nb_entry_points);
-        errdefer allocator.free(entry_medians);
-        @memset(entry_medians, 0.0);
 
         const visited = try allocator.alloc(Candidate, params.search_budget + params.k_max);
         errdefer allocator.free(visited);
@@ -171,7 +162,6 @@ pub const Graph = struct {
             .similarity_matrix = matrix,
             .medoid = medoid,
             .medoids = medoids,
-            .entry_medians = entry_medians,
             .capacity = params.search_budget + params.k_max,
             .L = 0,
             .visited = visited,
@@ -197,7 +187,6 @@ pub const Graph = struct {
         self.allocator.free(self.are_neighbors_pruned);
         self.allocator.free(self.nsw_extension_search_missed);
         self.allocator.free(self.medoids);
-        self.allocator.free(self.entry_medians);
     }
 
     // ------------------- Search functions ------------------ //
@@ -293,31 +282,6 @@ pub const Graph = struct {
         self.zml_handler.toc(&self.zml_handler.timers.embed_search);
     }
 
-    pub fn greedySearchSparse(self: *Graph, query: SparseQuery) void {
-        self.zml_handler.tic(&self.zml_handler.timers.embed_search);
-        self.initSparseSearch(query);
-
-        while (self.nb_visited < self.params.search_budget) {
-
-            // find best node of the active pool that has not been expanded yet
-            const node = self.popCandidate();
-
-            // if all nodes in active pool have been expanded, terminate the search
-            if (self.is_search_done) break;
-
-            const start_neigh = self.params.k_max * node;
-            const end_neigh = start_neigh + self.nb_neighbors[node];
-            for (start_neigh..end_neigh) |i| {
-                const neighbor = self.neighbors[i];
-                if (self.is_visited[neighbor]) continue;
-                self.addSparseCandidate(query, neighbor);
-            }
-        }
-
-        self.cleanup();
-        self.zml_handler.toc(&self.zml_handler.timers.embed_search);
-    }
-
     
     pub fn scoreQueryNode(self: *const Graph, query: []const f32, node: usize) f32 {
         self.zml_handler.tic(&self.zml_handler.timers.embed_dot);
@@ -339,15 +303,6 @@ pub const Graph = struct {
         const dot = @reduce(.Add, acc);
         self.zml_handler.toc(&self.zml_handler.timers.embed_dot);
         return dot;
-    }
-
-    pub fn scoreSparseQueryNode(self: *const Graph, query: SparseQuery, node: usize) f32 {
-        std.debug.assert(query.coord < self.dim);
-        std.debug.assert(query.sign == 1.0 or query.sign == -1.0);
-        std.debug.assert(!self.is_junk[node]);
-
-        const rows = self.lm_head;
-        return query.sign * rows[node * self.dim + query.coord];
     }
 
     
@@ -381,73 +336,6 @@ pub const Graph = struct {
         self.is_search_done = false;
     }
 
-    pub fn initSparseSearch(self: *Graph, query: SparseQuery) void {
-        // at start, pool is empty
-        std.debug.assert(!self.is_visited[self.medoid]);
-
-        const entry_point, const entry_sim = self.selectSparseEntryPoint(query);
-
-        // medoid is the first and only visited node
-        self.is_visited[entry_point] = true;
-        self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
-        self.nb_expanded_neighbors[0] = 0;
-        self.nb_visited = 1;
-        self.L = 1;
-        self.is_search_done = false;
-    }
-
-    
-    fn nbEntryHyperplanes(self: *const Graph) usize {
-        std.debug.assert(self.params.nb_entry_points > 0);
-        std.debug.assert((self.params.nb_entry_points & (self.params.nb_entry_points - 1)) == 0);
-
-        var nb_buckets = self.params.nb_entry_points;
-        var k: usize = 0;
-        while (nb_buckets > 1) : (nb_buckets >>= 1) {
-            k += 1;
-        }
-        std.debug.assert(k <= self.dim);
-        std.debug.assert(k < @bitSizeOf(usize));
-        return k;
-    }
-
-    fn bucketForRow(self: *const Graph, row: []const f32, k: usize) usize {
-        std.debug.assert(row.len >= k);
-
-        var bucket: usize = 0;
-        for (0..k) |coord| {
-            if (row[coord] > self.entry_medians[coord]) {
-                bucket |= @as(usize, 1) << @as(std.math.Log2Int(usize), @intCast(coord));
-            }
-        }
-        return bucket;
-    }
-
-    fn bucketForNode(self: *const Graph, node: usize) usize {
-        std.debug.assert(node < self.n);
-        const k = self.nbEntryHyperplanes();
-        const rows = self.lm_head;
-        const row = rows[node * self.dim ..][0..self.dim];
-        return self.bucketForRow(row, k);
-    }
-
-    fn bucketForQuery(self: *const Graph, query: []const f32) usize {
-        const k = self.nbEntryHyperplanes();
-        return self.bucketForRow(query, k);
-    }
-
-    fn bucketForSparseQuery(self: *const Graph, query: SparseQuery) usize {
-        const k = self.nbEntryHyperplanes();
-        var bucket: usize = 0;
-        for (0..k) |coord| {
-            const value: f32 = if (coord == query.coord) query.sign else 0.0;
-            if (value > self.entry_medians[coord]) {
-                bucket |= @as(usize, 1) << @as(std.math.Log2Int(usize), @intCast(coord));
-            }
-        }
-        return bucket;
-    }
-
     
     fn selectNodeEntryPoint(self: *Graph, query: usize, pass: usize) struct { usize, f32 } {
         if (pass == 0) {
@@ -458,16 +346,7 @@ pub const Graph = struct {
             std.debug.assert(entry_point < self.n);
             std.debug.assert(!self.is_visited[entry_point]);
             return .{ entry_point, entry_sim };
-        } else if (pass == 1) {
-            // second pass: bucket-based
-            const bucket = self.bucketForNode(query);
-            const entry_point = self.medoids[bucket];
-            std.debug.assert(entry_point < self.n);
-            std.debug.assert(!self.is_visited[entry_point]);
-            const entry_sim = self.similarity(entry_point, query);
-            return .{ entry_point, entry_sim };
-        } else if (pass == 2) {
-            // third pass: similarity based selection of entry point
+        } else {
             var entry_point = self.medoids[0];
             var entry_sim = self.similarity(query, entry_point);
             std.debug.assert(entry_point < self.n);
@@ -481,13 +360,6 @@ pub const Graph = struct {
                     entry_sim = sim;
                 }
             }
-            return .{ entry_point, entry_sim };
-        } else {
-            const entry_id = 0;
-            const entry_point = self.medoids[entry_id];
-            const entry_sim = self.similarity(query, entry_point);
-            std.debug.assert(entry_point < self.n);
-            std.debug.assert(!self.is_visited[entry_point]);
             return .{ entry_point, entry_sim };
         }
     }
@@ -510,29 +382,12 @@ pub const Graph = struct {
         return .{ entry_point, entry_sim };
     }
 
-    fn selectSparseEntryPoint(self: *Graph, query: SparseQuery) struct { usize, f32 } {
-        const bucket = self.bucketForSparseQuery(query);
-        const entry_point = self.medoids[bucket];
-        std.debug.assert(entry_point < self.n);
-        std.debug.assert(!self.is_visited[entry_point]);
-        const entry_sim = self.scoreSparseQueryNode(query, entry_point);
-        return .{ entry_point, entry_sim };
-    }
-
     
     pub fn addNodeCandidate(self: *Graph, query: usize, node: usize) void {
         std.debug.assert(!self.is_junk[node]);
         std.debug.assert(!self.is_visited[node]);
         std.debug.assert(self.nb_visited > 0);
         const sim = self.similarity(node, query);
-        self.insert(node, sim);
-    }
-
-    pub fn addSparseCandidate(self: *Graph, query: SparseQuery, node: usize) void {
-        std.debug.assert(!self.is_junk[node]);
-        std.debug.assert(!self.is_visited[node]);
-        std.debug.assert(self.nb_visited > 0);
-        const sim = self.scoreSparseQueryNode(query, node);
         self.insert(node, sim);
     }
 
@@ -806,22 +661,6 @@ pub const Graph = struct {
         }
         std.log.info("Consolidated pruned NSW: nb edges: {d}", .{self.nbEdges()});
     }
-
-    fn bestSparseQueryNode(self: *Graph, query: SparseQuery) usize {
-        var best_node: usize = self.n;
-        var best_score: f32 = -std.math.inf(f32);
-
-        for (0..self.n) |node| {
-            if (self.is_junk[node]) continue;
-            const score = self.scoreSparseQueryNode(query, node);
-            if (score > best_score) {
-                best_score = score;
-                best_node = node;
-            }
-        }
-        std.debug.assert(best_node < self.n);
-        return best_node;
-    }
     
     pub fn pruneNeighbors(self: *Graph, alpha: f32) !void {
         log.info("Pruning neighbors with alpha={d}", .{alpha});
@@ -1090,106 +929,6 @@ pub const Graph = struct {
         std.log.info("nb tic toc: {}", .{self.zml_handler.nb_tictoc});
     }
 
-    pub fn extendNswSparseQueries(self: *Graph) !void {
-        try self.benchSimilarity();
-
-        const candidates = self.allocator.alloc(Candidate, self.params.k_max + self.params.search_budget) catch @panic("OOM");
-        defer self.allocator.free(candidates);
-
-        const alpha = self.params.alpha;
-        self.sim_access = 0;
-        self.zml_handler.nb_tictoc = 0;
-
-        self.setEntryPoints();
-
-        for (0..self.params.vamana_passes) |pass_i| {
-            self.params.alpha = if (pass_i == 0) 1.0 else alpha;
-            @memset(self.are_neighbors_pruned, false);
-
-            log.info("NSW sparse-query pass {d}/{d}", .{ pass_i + 1, self.params.vamana_passes });
-            const start = std.Io.Timestamp.now(self.io, .awake);
-            const nb_sparse_queries = 2 * self.dim;
-            for (0..nb_sparse_queries) |query_i| {
-                const sparse_query: SparseQuery = .{
-                    .coord = query_i / 2,
-                    .sign = if (query_i % 2 == 0) 1.0 else -1.0,
-                };
-                const current_node = self.bestSparseQueryNode(sparse_query);
-                const start_neigh = self.params.k_max * current_node;
-                var end_neigh = start_neigh + self.nb_neighbors[current_node];
-
-                self.greedySearchSparse(sparse_query);
-
-                var nb_candidates: usize = 0;
-                for (start_neigh..end_neigh) |j| {
-                    const neigh = self.neighbors[j];
-                    candidates[nb_candidates] = .{ .node = neigh, .similarity = self.similarity(current_node, neigh) };
-                    nb_candidates += 1;
-                }
-                for (0..self.L) |j| {
-                    const visit = self.visited[j].node;
-                    if (visit == current_node or self.hasNeighbor(current_node, visit)) continue;
-                    candidates[nb_candidates] = .{ .node = visit, .similarity = self.similarity(current_node, visit) };
-                    nb_candidates += 1;
-                }
-                std.mem.sort(Candidate, candidates[0..nb_candidates], {}, Candidate.beforeThan);
-
-                self.pruneCandidates(current_node, candidates[0..nb_candidates], &self.zml_handler.timers.prune_pool_fwd);
-
-                end_neigh = start_neigh + self.nb_neighbors[current_node];
-                for (start_neigh..end_neigh) |j| {
-                    const neighbor = self.neighbors[j];
-                    const start_neigh_neigh = self.params.k_max * neighbor;
-                    const end_neigh_neigh = start_neigh_neigh + self.nb_neighbors[neighbor];
-                    const sim = self.similarity(neighbor, current_node);
-
-                    if (self.hasNeighbor(neighbor, current_node)) continue;
-
-                    if (self.nb_neighbors[neighbor] < self.params.k_max) {
-                        var insert_pos = end_neigh_neigh;
-                        while (insert_pos > start_neigh_neigh and sim > self.similarity(neighbor, self.neighbors[insert_pos - 1])) {
-                            self.neighbors[insert_pos] = self.neighbors[insert_pos - 1];
-                            insert_pos -= 1;
-                        }
-                        self.neighbors[insert_pos] = current_node;
-                        self.nb_neighbors[neighbor] += 1;
-                        continue;
-                    }
-
-                    nb_candidates = 0;
-                    for (start_neigh_neigh..end_neigh_neigh) |k| {
-                        const neigh_neigh = self.neighbors[k];
-                        candidates[nb_candidates] = .{ .node = neigh_neigh, .similarity = self.similarity(neighbor, neigh_neigh) };
-                        nb_candidates += 1;
-                    }
-                    var insert_pos = nb_candidates;
-                    while (insert_pos > 0 and sim > candidates[insert_pos - 1].similarity) {
-                        candidates[insert_pos] = candidates[insert_pos - 1];
-                        insert_pos -= 1;
-                    }
-                    candidates[insert_pos] = .{ .node = current_node, .similarity = sim };
-                    nb_candidates += 1;
-
-                    self.pruneCandidates(neighbor, candidates[0..nb_candidates], &self.zml_handler.timers.prune_pool_bwd);
-                }
-
-                if (query_i == 0 or (query_i + 1) % 128 == 0 or query_i + 1 == nb_sparse_queries) {
-                    const now = std.Io.Timestamp.now(self.io, .awake);
-                    const elapsed_duration = std.Io.Timestamp.durationTo(start, now);
-                    const elapsed_seconds = @as(f64, @floatFromInt(elapsed_duration.nanoseconds)) / 1e9;
-                    const eta_seconds = elapsed_seconds * @as(f64, @floatFromInt(nb_sparse_queries - query_i - 1)) / @as(f64, @floatFromInt(query_i + 1));
-                    log.info(
-                        "NSW sparse query {d}/{d} elapsed={d:.2}s eta={d:.2}s",
-                        .{ query_i + 1, nb_sparse_queries, elapsed_seconds, eta_seconds },
-                    );
-                }
-            }
-            std.log.info("NSW sparse-query pass {d} done, nb edges: {d}", .{ pass_i + 1, self.nbEdges() });
-        }
-        std.log.info("sim_access: {}", .{self.sim_access});
-        std.log.info("nb tic toc: {}", .{self.zml_handler.nb_tictoc});
-    }
-
     pub fn fixNswExtention(self: *Graph, ) !void {
         log.info("Fix NSW extension", .{});
         const in_degrees = try self.allocator.alloc(usize, self.n);
@@ -1397,86 +1136,6 @@ pub const Graph = struct {
                 if (valid_count == 0) 0 else min_visited,
                 max_visited,
                 avg_visited,
-            },
-        );
-    }
-
-    pub fn testNwsExtensionSparse(self: *Graph) !void {
-        log.info("Test NSW extension sparse queries", .{});
-
-        const rows = self.lm_head;
-        const query = try self.allocator.alloc(f32, self.dim);
-        defer self.allocator.free(query);
-        @memset(query, 0.0);
-
-        var total_count: usize = 0;
-        var found_count: usize = 0;
-        var total_visited: usize = 0;
-        var min_visited: usize = std.math.maxInt(usize);
-        var max_visited: usize = 0;
-
-        for (0..self.dim) |coord| {
-            var best_positive_node: usize = self.n;
-            var best_positive_value: f32 = -std.math.inf(f32);
-            var best_negative_node: usize = self.n;
-            var best_negative_value: f32 = std.math.inf(f32);
-
-            for (0..self.n) |node| {
-                if (self.is_junk[node]) continue;
-                const value = rows[node * self.dim + coord];
-                if (value > best_positive_value) {
-                    best_positive_value = value;
-                    best_positive_node = node;
-                }
-                if (value < best_negative_value) {
-                    best_negative_value = value;
-                    best_negative_node = node;
-                }
-            }
-            std.debug.assert(best_positive_node < self.n);
-            std.debug.assert(best_negative_node < self.n);
-
-            query[coord] = 1.0;
-            self.greedySearch(query);
-            total_count += 1;
-            total_visited += self.nb_visited;
-            min_visited = @min(min_visited, self.nb_visited);
-            max_visited = @max(max_visited, self.nb_visited);
-            for (0..self.nb_visited) |i| {
-                if (self.visited[i].node == best_positive_node) {
-                    found_count += 1;
-                    break;
-                }
-            }
-
-            query[coord] = -1.0;
-            self.greedySearch(query);
-            total_count += 1;
-            total_visited += self.nb_visited;
-            min_visited = @min(min_visited, self.nb_visited);
-            max_visited = @max(max_visited, self.nb_visited);
-            for (0..self.nb_visited) |i| {
-                if (self.visited[i].node == best_negative_node) {
-                    found_count += 1;
-                    break;
-                }
-            }
-
-            query[coord] = 0.0;
-        }
-
-        const found_rate = 100.0 * @as(f64, @floatFromInt(found_count)) / @as(f64, @floatFromInt(total_count));
-        const average_visit = @as(f64, @floatFromInt(total_visited)) / @as(f64, @floatFromInt(total_count));
-        log.info(
-            "NSW extension sparse test: total={d} found={d}/{d} ({d:.4}%) nb_visited min={d} max={d} avg={d:.2}",
-            .{
-                total_count,
-                found_count,
-                total_count,
-                found_rate,
-                if (total_count == 0) 0 else min_visited,
-                max_visited,
-                average_visit,
             },
         );
     }
@@ -1741,80 +1400,6 @@ pub const Graph = struct {
             }
         }
         return hop_dist;
-    }
-
-    pub fn coarsify(self: *Graph, zml_handler: *Zml_handler, alpha: f32) ![]usize {
-        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
-        var tokenizer = try llm.Llm_handler.loadTokenizer(zml_handler, repo);
-        defer tokenizer.deinit();
-        var decoded_buf: [512]u8 = undefined;
-        var escaped_buf: [512]u8 = undefined;
-
-        std.log.info("\n###########", .{});
-        std.log.info("Coarsifying with alpha={d}", .{alpha});
-        // boolean array telling is each node is kept in the graph after coarsification
-        const is_active = try self.allocator.alloc(bool, self.n);
-        defer self.allocator.free(is_active);
-        @memset(is_active, true);
-        for (0..self.n) |i| {
-            if (self.is_junk[i]) is_active[i] = false;
-        }
-        // integer array mapping each node to its active parent index in the coarsified graph
-        const active_parent = try self.allocator.alloc(usize, self.n);
-        @memset(active_parent, self.n);
-
-        // heap of nodes in the current group
-        const node_heap = try self.allocator.alloc(usize, self.n);
-        defer self.allocator.free(node_heap);
-        // tells if a nodes is in the heap
-        const is_node_in_heap = try self.allocator.alloc(bool, self.n);
-        defer self.allocator.free(is_node_in_heap);
-        @memset(is_node_in_heap, false);
-
-        var nb_groups: usize = 0;
-        var nb_alone: usize = 0;
-
-        var nb_nodes_in_heap: usize = 0;
-        // visit all nodes in order
-        for (0..self.n) |group_center| {
-            if (!is_active[group_center]) continue;
-            // init the heap with current node
-            node_heap[0] = group_center;
-            is_node_in_heap[group_center] = true;
-            nb_nodes_in_heap = 1;
-            // expand the heap with all neighbors that are below the threshold
-            var heap_pos: usize = 0;
-            while (heap_pos < nb_nodes_in_heap) {
-                const node = node_heap[heap_pos];
-                for (0..self.similarity_matrix.k) |neigh_pos| {
-                    const neigh = self.similarity_matrix.nearestNeighbor(node, neigh_pos);
-                    if (self.is_junk[neigh] or !is_active[neigh] or is_node_in_heap[neigh]) continue;
-                    if (self.similarity(group_center, neigh) < alpha) continue;
-                    node_heap[nb_nodes_in_heap] = neigh;
-                    is_node_in_heap[neigh] = true;
-                    nb_nodes_in_heap += 1;
-                }
-                heap_pos += 1;
-            }
-            // the group is formed
-            nb_groups += 1;
-            if (nb_nodes_in_heap == 1) nb_alone += 1;
-            const print = nb_nodes_in_heap > 999999;
-            if (print) std.log.info("Node {d} has a group of size {d}", .{ group_center, nb_nodes_in_heap });
-            for (0..nb_nodes_in_heap) |pos_in_heap| {
-                const node = node_heap[pos_in_heap];
-                is_node_in_heap[node] = false;
-                is_active[node] = false;
-                active_parent[node] = group_center;
-                if (print) {
-                    const decoded = try tokens.decodeToken(tokenizer, @intCast(node), &decoded_buf);
-                    const escaped = tokens.escapeTokenText(decoded, &escaped_buf);
-                    std.log.info("     node {d:>6} sim {d:.3} tok: {s}", .{ node, self.similarity(group_center, node), escaped });
-                }
-            }
-        }
-        std.log.info("Found {d} groups and {d} alone nodes", .{ nb_groups, nb_alone });
-        return active_parent;
     }
 
     // ---------------------- Syntax utils ----------------------- //
