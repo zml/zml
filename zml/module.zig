@@ -20,6 +20,7 @@ const Sharding = @import("Sharding.zig");
 const Partitioning = Sharding.Partitioning;
 const Tensor = @import("tensor.zig").Tensor;
 
+const zml_module = @This();
 const log = std.log.scoped(.@"zml/module");
 
 var mlir_global_init_mutex: std.Io.Mutex = .init;
@@ -189,6 +190,20 @@ pub const CompilationContext = struct {
         return self.channel_id;
     }
 };
+
+pub fn Compiler(comptime func: anytype) type {
+    return struct {
+        pub fn compile(
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            platform: *const Platform,
+            opts: CompilationOptions,
+            args: std.meta.ArgsTuple(@TypeOf(func)),
+        ) !Exe {
+            return zml_module.compile(allocator, io, func, args, platform, opts);
+        }
+    };
+}
 
 pub fn compile(
     allocator: std.mem.Allocator,
