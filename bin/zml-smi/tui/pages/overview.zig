@@ -11,6 +11,7 @@ const DeviceCard = @import("../widgets/device_card.zig");
 const Logo = @import("../widgets/logo.zig");
 const InfoLines = @import("../widgets/info_lines.zig");
 const ProcessTable = @import("../widgets/process_table.zig");
+const Selection = @import("../selection.zig").Selection;
 
 const Overview = @This();
 
@@ -24,9 +25,10 @@ state: *const data.SystemState,
 device_cards: []DeviceCard = &.{},
 process_table: ?*ProcessTable = null, // maybe null if we decide not to print the process table in print mode
 viewing_device: *?u16 = undefined,
+selection: *Selection = undefined,
 use_braille: bool = false,
 
-pub fn init(allocator: std.mem.Allocator, state: *const data.SystemState, process_table: ?*ProcessTable, viewing_device: *?u16) !Overview {
+pub fn init(allocator: std.mem.Allocator, state: *const data.SystemState, process_table: ?*ProcessTable, viewing_device: *?u16, selection: *Selection) !Overview {
     const count = state.deviceCount();
     const cards = try allocator.alloc(DeviceCard, count);
     for (cards, 0..) |*card, i| {
@@ -40,6 +42,7 @@ pub fn init(allocator: std.mem.Allocator, state: *const data.SystemState, proces
         .device_cards = cards,
         .process_table = process_table,
         .viewing_device = viewing_device,
+        .selection = selection,
     };
 }
 
@@ -92,12 +95,11 @@ pub fn draw(self: *Overview, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw
     row += @intCast(banner_surf.size.height + 1);
 
     // ── Device Grid ─────────────────────────────────────────
-    for (self.device_cards) |*card| {
-        card.use_braille = self.use_braille;
-        card.viewing_device = self.viewing_device;
-    }
     const card_widgets = try ctx.arena.alloc(vxfw.Widget, self.device_cards.len);
     for (self.device_cards, card_widgets) |*card, *cw| {
+        card.use_braille = self.use_braille;
+        card.viewing_device = self.viewing_device;
+        card.selection = self.selection;
         cw.* = ui.widget(card);
     }
     const device_grid: ColumnLayout = .{
