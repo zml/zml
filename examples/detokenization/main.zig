@@ -360,32 +360,33 @@ pub fn buildAngularGraphs(zml_handler: *Zml_handler, model_handler: *model_.Mode
     std.log.info("Medoid: {d}", .{medoid});
 
     std.log.info("Init MRT graph", .{});
-    const mrt_params: graph.GraphParams = .{ .graph_type = .Angular, .k_max = 512 };
+    const mrt_params: graph.GraphParams = .{ .graph_type = .Angular, .k_max = 1024 };
     var g_mrt: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, mrt_params);
     try g_mrt.makeMrt();
+    try g_mrt.testMrt();
     try g_mrt.testNswExtention(sampler);
     
     std.log.info("Init KNN-pruned graph", .{});
     const knn_params: graph.GraphParams = .{ .graph_type = .Angular };
     var g_knnp: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, knn_params);
-    g_knnp.consolidateNswPrune();
+    g_knnp.consolidateNearestPrune();
     try g_knnp.testNswExtention(sampler);
 
     std.log.info("Init KNN graph", .{});
     var g_knn: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, knn_params);
-    g_knn.consolidateNswPrune();
-    g_knn.consolidateNswNearest();
+    g_knn.consolidateNearestPrune();
+    g_knn.consolidateNearest();
     try g_knn.testNswExtention(sampler);
 
     std.log.info("Init NSW graph", .{});
     const nsw_params: graph.GraphParams = .{ .graph_type = .Angular };
     var g_nsw: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, nsw_params);
-    g_nsw.setNearestNeighbors(32);
+    g_nsw.consolidateNearest();
     try g_nsw.extendToNsw();
     try g_nsw.testNswExtention(sampler);
     try g_nsw.fixNswExtention();
     try g_nsw.testNswExtention(sampler);
-    g_nsw.consolidateNswPrune();
+    g_nsw.consolidateNearestPrune();
     try g_nsw.testNswExtention(sampler);
 
     return .{ g_mrt, g_knnp, g_knn, g_nsw };
@@ -418,7 +419,7 @@ pub fn buildMipsGraphs(zml_handler: *Zml_handler, model_handler: *model_.Model_h
     var g: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, graph_params);
     
     zml_handler.tic(&zml_handler.timers.knn_graph);
-    g.setNearestNeighbors(32);
+    g.consolidateNearest();
     zml_handler.toc(&zml_handler.timers.knn_graph);
 
     zml_handler.tic(&zml_handler.timers.nsw_graph);
@@ -426,7 +427,7 @@ pub fn buildMipsGraphs(zml_handler: *Zml_handler, model_handler: *model_.Model_h
     try g.testNswExtention(sampler);
     try g.fixNswExtention();
     try g.testNswExtention(sampler);
-    g.consolidateNswPrune();
+    g.consolidateNearestPrune();
     try g.testNswExtention(sampler);
     zml_handler.toc(&zml_handler.timers.nsw_graph);
 
