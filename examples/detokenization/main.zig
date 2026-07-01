@@ -552,8 +552,8 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g1: *graph.Graph, g2: ?*g
         for (0..n) |embed_index| {
             const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
 
-            g1.greedySearch(embed);
-            if (g2) |g| g.greedySearch(embed);
+            g1.greedySearchLazy(embed);
+            if (g2) |g| g.greedySearchLazy(embed);
 
             const nb_visited = g1.nb_visited;
             total_visited += nb_visited;
@@ -632,13 +632,13 @@ pub fn testEmbedDualGraphSearch(zml_handler: *Zml_handler, model_handler: *model
         for (0..n) |embed_index| {
             const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
 
-            g_angu.greedySearch(embed);
+            g_angu.greedySearchLazy(embed);
 
             for (0..g_angu.L) |i| {
                 g_angu.visited[i].similarity *= row_norms[g_angu.visited[i].node];
             }
             g_mips.initSearchPool(g_angu.visited[0..g_angu.L]);
-            g_mips.greedySearchWS(embed);
+            g_mips.greedySearchLazyWS(embed);
 
             const nb_visited = g_angu.nb_visited + g_mips.nb_visited;
             total_visited += nb_visited;
