@@ -306,6 +306,7 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     try testEmbedGraphSearch(zml_handler, &g_angular, null, &sampler);
     try testEmbedGraphSearch(zml_handler, &g_mips, null, &sampler);
     try testEmbedGraphSearch(zml_handler, &g_mips, &g_angular, &sampler);
+    try testEmbedDualGraphSearch(zml_handler, &model_handler, &g_angular, &g_mips, &sampler);
     zml_handler.toc(&zml_handler.timers.graph_search_tot);
 }
 
@@ -615,6 +616,88 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g1: *graph.Graph, g2: ?*g
     std.log.info("Embed graph search: total={d} found_top1={d} ({d:.4}%)", .{ total_count, found_top1_count, percent_found });
     std.log.info("Embed graph search nb_visited: min={d} max={d} avg={d:.2}", .{ min_visited, max_visited, average_visit });
 }
+
+pub fn testEmbedDualGraphSearch(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, g_angu: *graph.Graph, g_mips: *graph.Graph, sampler: *sampling.Sampler) !void {
+    std.log.info("Get lm_head norms", .{});
+    const lm_head_row_norms = try algebra.getLmHeadRowNorms(zml_handler, model_handler);
+    defer lm_head_row_norms.free(zml_handler.allocator);
+    const row_norms = lm_head_row_norms.constItems(f32);
+    
+    std.log.info("Test embed graph search", .{});
+
+    var total_count: usize = 0;
+    var found_top1_count: usize = 0;
+
+    var total_visited: usize = 0;
+    var min_visited: usize = std.math.maxInt(usize);
+    var max_visited: usize = 0;
+
+    const tasks_id = [5]u8{ 0, 1, 2, 3, 4 };
+
+    for (tasks_id) |task_id| {
+        const task = switch (task_id) {
+            0 => "coding",
+            1 => "history",
+            2 => "math",
+            3 => "story",
+            4 => "translate",
+            else => return error.InvalidTask,
+        };
+        const top1 = switch (task_id) {
+            0 => codingTop1(),
+            1 => historyTop1(),
+            2 => mathTop1(),
+            3 => storyTop1(),
+            4 => translateTop1(),
+            else => return error.InvalidTask,
+        };
+
+        const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds.safetensors", task, .f32, true);
+        defer embed_slice.free(zml_handler.allocator);
+
+        const n: usize = @intCast(embed_slice.shape.dims()[0]);
+        const d: usize = @intCast(embed_slice.shape.dims()[1]);
+        std.debug.assert(d == g_angu.dim);
+
+        std.log.info("Test embed graph search task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
+        for (0..n) |embed_index| {
+            const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
+
+            g_angu.greedySearch(embed);
+
+            for (0..g_angu.L) |i| {
+                g_angu.visited[i].similarity *= row_norms[g_angu.visited[i].node];
+            }
+            g_mips.initSearchPool(g_angu.visited[0..g_angu.L]);
+            g_mips.greedySearch(embed);
+
+            const nb_visited = g_angu.nb_visited + g_mips.nb_visited;
+            total_visited += nb_visited;
+            min_visited = @min(min_visited, nb_visited);
+            max_visited = @max(max_visited, nb_visited);
+
+            total_count += 1;
+            const top1_token = top1[embed_index];
+            var found_top1 = false;
+            for (0..g_mips.L) |i| {
+                if (g_mips.visited[i].node == top1_token) found_top1 = true;
+            }
+            if (found_top1) {
+                found_top1_count += 1;
+            } else {
+                _ = sampler;
+                //std.log.info("Missed top1, id {d} str {s}", .{ top1[embed_index], try tokens.tokenString(sampler.tokenizer, top1[embed_index], sampler.allocator) });
+                //std.log.info("Found instead {d} str {s}", .{ g.visited[0].node, try tokens.tokenString(sampler.tokenizer, g.visited[0].node, sampler.allocator) });
+            }
+        }
+    }
+
+    const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) / @as(f64, @floatFromInt(total_count));
+    const average_visit = @as(f64, @floatFromInt(total_visited)) / @as(f64, @floatFromInt(total_count));
+    std.log.info("Embed graph search: total={d} found_top1={d} ({d:.4}%)", .{ total_count, found_top1_count, percent_found });
+    std.log.info("Embed graph search nb_visited: min={d} max={d} avg={d:.2}", .{ min_visited, max_visited, average_visit });
+}
+
 
 pub fn testEmbedSvdSearch(zml_handler: *Zml_handler, svd: *svd_.SvdSampler) !void {
     std.log.info("Test SVD sampling", .{});
