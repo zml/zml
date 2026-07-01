@@ -327,9 +327,9 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     defer g_mips.deinit();
 
     zml_handler.tic(&zml_handler.timers.graph_search_tot);
-    //try testEmbedGraphSearch(zml_handler, &g_knn, null, &sampler, "KNN");
+    try testEmbedGraphSearch(zml_handler, &g_knn, null, &sampler, "KNN");
     try testEmbedGraphSearch(zml_handler, &g_knnp, null, &sampler, "KNNP");
-    //try testEmbedGraphSearch(zml_handler, &g_mrt, null, &sampler, "MRT");
+    try testEmbedGraphSearch(zml_handler, &g_mrt, null, &sampler, "MRT");
     try testEmbedGraphSearch(zml_handler, &g_angu, null, &sampler, "Angular");
     try testEmbedGraphSearch(zml_handler, &g_mips, null, &sampler, "MIPS");
     try testEmbedGraphSearch(zml_handler, &g_mips, &g_angu, &sampler, "MIPS and Angular");

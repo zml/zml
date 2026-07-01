@@ -14,7 +14,7 @@ const Field_timer = main.Timing_handler.Field_timer;
 
 pub const GraphParams = struct {
     k_max: usize = 32,
-    search_budget: usize = 1024,
+    search_budget: usize = 2048,
     alpha: f32 = 1.0,
     vamana_passes: usize = 2,
     top_k: usize = 16,
@@ -254,9 +254,6 @@ pub const Graph = struct {
             // find best node of the active pool that has not been expanded yet
             const node = self.popCandidate();
 
-            // if we found the query node, terminate the search
-            //if (node == query) break;
-
             // if all nodes in active pool have been expanded, terminate the search
             if (self.is_search_done) break;
 
@@ -334,8 +331,6 @@ pub const Graph = struct {
 
             const expansion = self.popCandidateLazy();
             if (self.is_search_done) break;
-
-            if (expansion.node == query) break;
 
             self.addNodeCandidate(query, expansion.neighbor);
         }
@@ -473,7 +468,7 @@ pub const Graph = struct {
     }
 
     
-    pub fn addNodeCandidate(self: *Graph, query: usize, node: usize) void {
+    pub inline fn addNodeCandidate(self: *Graph, query: usize, node: usize) void {
         std.debug.assert(!self.is_junk[node]);
         std.debug.assert(!self.is_visited[node]);
         std.debug.assert(self.nb_visited > 0);
@@ -481,7 +476,7 @@ pub const Graph = struct {
         self.insert(node, sim);
     }
 
-    pub fn addCandidate(self: *Graph, query: []const f32, node: usize) void {
+    pub inline fn addCandidate(self: *Graph, query: []const f32, node: usize) void {
         std.debug.assert(!self.is_junk[node]);
         std.debug.assert(!self.is_visited[node]);
         std.debug.assert(self.nb_visited > 0);
@@ -489,7 +484,7 @@ pub const Graph = struct {
         self.insert(node, sim);
     }
 
-    pub fn insert(self: *Graph, node: usize, sim: f32) void {
+    pub inline fn insert(self: *Graph, node: usize, sim: f32) void {
         self.zml_handler.tic(&self.zml_handler.timers.insert_node);
 
         std.debug.assert(!self.is_junk[node]);
@@ -548,7 +543,7 @@ pub const Graph = struct {
         self.zml_handler.toc(&self.zml_handler.timers.insert_node);
     }
 
-    pub fn popCandidate(self: *Graph) usize {
+    pub inline fn popCandidate(self: *Graph) usize {
         // find the best unexpanded candidate in the active pool
         // since the pool is kept sorted, return the first found
         for (0..self.L) |i| {
@@ -562,7 +557,7 @@ pub const Graph = struct {
         return self.visited[0].node;
     }
 
-    pub fn popCandidateLazy(self: *Graph) LazyExpansion {
+    pub inline fn popCandidateLazy(self: *Graph) LazyExpansion {
         // find the best candidate in the active pool with remaining neighbors
         // since the pool is kept sorted, return the first found
         for (0..self.L) |i| {
@@ -579,7 +574,7 @@ pub const Graph = struct {
         return .{ .node = self.visited[0].node, .neighbor = self.visited[0].node };
     }
 
-    pub fn cleanup(self: *Graph) void {
+    pub inline fn cleanup(self: *Graph) void {
         for (0..self.nb_visited) |i| {
             const node = self.visited[i].node;
             self.is_visited[node] = false;
@@ -974,7 +969,6 @@ pub const Graph = struct {
                 if (i == 0 or (i + 1) % 1000 == 0 or i + 1 == self.n) self.logNsw(start, i);
             }
             std.log.info("NSW extension pass {d} done, nb edges: {d}", .{ pass_i + 1, self.nbEdges() });
-            self.params.alpha += 0.05;
         }
         std.log.info("sim_access: {}", .{self.sim_access});
         std.log.info("nb tic toc: {}", .{self.zml_handler.nb_tictoc});
