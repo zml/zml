@@ -14,7 +14,7 @@ const Field_timer = main.Timing_handler.Field_timer;
 
 pub const GraphParams = struct {
     k_max: usize = 32,
-    search_budget: usize = 2048,
+    search_budget: usize = 4096,
     alpha: f32 = 1.0,
     vamana_passes: usize = 2,
     top_k: usize = 16,
