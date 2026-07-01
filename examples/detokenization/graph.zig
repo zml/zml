@@ -355,11 +355,10 @@ pub const Graph = struct {
     }
 
     pub fn initSearchPool(self: *Graph, pool: []const Candidate) void {
-        std.debug.assert(self.nb_visited == 0);
-        std.debug.assert(self.L == 0);
-        
         const entry_point = pool[0].node;
         const entry_sim = pool[0].similarity;
+
+        std.debug.assert(!self.is_visited[entry_point]);
         
         self.is_visited[entry_point] = true;
         self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
