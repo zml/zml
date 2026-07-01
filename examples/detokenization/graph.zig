@@ -16,7 +16,7 @@ pub const GraphParams = struct {
     k_max: usize = 32,
     search_budget: usize = 1024,
     alpha: f32 = 1.0,
-    vamana_passes: usize = 1,
+    vamana_passes: usize = 2,
     top_k: usize = 16,
     L: usize = 256,
     nb_entry_points: usize = 1,
@@ -978,7 +978,7 @@ pub const Graph = struct {
                 if (i == 0 or (i + 1) % 1000 == 0 or i + 1 == self.n) self.logNsw(start, i);
             }
             std.log.info("NSW extension pass {d} done, nb edges: {d}", .{ pass_i + 1, self.nbEdges() });
-            self.params.alpha += 0.25;
+            //self.params.alpha += 0.25;
         }
         std.log.info("sim_access: {}", .{self.sim_access});
         std.log.info("nb tic toc: {}", .{self.zml_handler.nb_tictoc});
