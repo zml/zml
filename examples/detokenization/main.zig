@@ -365,9 +365,7 @@ pub fn buildAngularGraphs(zml_handler: *Zml_handler, model_handler: *model_.Mode
     try g_mrt.makeMrt();
     try g_mrt.testMrt();
     try g_mrt.testNswExtention(sampler);
-
     g_mrt.consolidateNearestPrune();
-    try testEmbedGraphSearch(zml_handler, &g_mrt, null, sampler, "MRT");
     
     std.log.info("Init KNN-pruned graph", .{});
     const knn_params: graph.GraphParams = .{ .graph_type = .Angular };
@@ -590,7 +588,6 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g1: *graph.Graph, g2: ?*g
 }
 
 pub fn testEmbedDualGraphSearch(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, g_angu: *graph.Graph, g_mips: *graph.Graph, sampler: *sampling.Sampler) !void {
-    std.log.info("Get lm_head norms", .{});
     const lm_head_row_norms = try algebra.getLmHeadRowNorms(zml_handler, model_handler);
     defer lm_head_row_norms.free(zml_handler.allocator);
     const row_norms = lm_head_row_norms.constItems(f32);
