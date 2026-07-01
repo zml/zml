@@ -669,7 +669,7 @@ pub fn testEmbedDualGraphSearch(zml_handler: *Zml_handler, model_handler: *model
                 g_angu.visited[i].similarity *= row_norms[g_angu.visited[i].node];
             }
             g_mips.initSearchPool(g_angu.visited[0..g_angu.L]);
-            g_mips.greedySearch(embed);
+            g_mips.greedySearchWS(embed);
 
             const nb_visited = g_angu.nb_visited + g_mips.nb_visited;
             total_visited += nb_visited;
@@ -837,7 +837,7 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *quantized
                 found_top1_count += 1;
             } else {
                 missing_top16_count += 1;
-                //try quantizer.logSampling(embed, &tokenizer);
+                try quantizer.logSampling(embed, &tokenizer);
             }
         }
     }
