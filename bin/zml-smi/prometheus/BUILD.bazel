@@ -3,9 +3,7 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 zig_binary(
     name = "prometheus",
     main = "main.zig",
-    srcs = [
-        "server.zig",
-    ],
+    srcs = [],
     visibility = ["//visibility:public"],
     deps = [
         "//bin/zml-smi/utils:double_buffer",
