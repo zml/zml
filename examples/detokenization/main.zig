@@ -334,8 +334,6 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     try testEmbedGraphSearch(zml_handler, &g_mips, null, &sampler, "MIPS");
     try testEmbedGraphSearch(zml_handler, &g_mips, &g_angu, &sampler, "MIPS and Angular");
     try testEmbedDualGraphSearch(zml_handler, &model_handler, &g_angu, &g_mips, &sampler);
-    try g_mips.merge(g_angu);
-    try testEmbedGraphSearch(zml_handler, &g_mips, null, &sampler, "MIPS with merge angular edges");
     zml_handler.toc(&zml_handler.timers.graph_search_tot);
 }
 

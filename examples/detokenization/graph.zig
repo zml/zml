@@ -856,8 +856,8 @@ pub const Graph = struct {
                     // but for now it degrades query search (eg: 84% -> 76% success).
                     //continue;
                 }
-                //const nb_search_cand: usize = self.nb_visited;
-                const nb_search_cand: usize = self.L;
+                const nb_search_cand: usize = self.nb_visited;
+                //const nb_search_cand: usize = self.L;
                 // only first L positions are sorted
                 if (nb_search_cand > self.L) std.mem.sort(Candidate, self.visited[self.L..nb_search_cand], {}, Candidate.beforeThan);
                 var pos_in_neighbors: usize = start_neigh;
