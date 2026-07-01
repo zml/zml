@@ -373,7 +373,7 @@ pub const Graph = struct {
             }
             return .{ entry_point, entry_sim };
         } else {
-            const entry_point = (query + @divFloor(self.n, 2)) % self.n;
+            var entry_point = (query + @divFloor(self.n, 2)) % self.n;
             while (self.is_junk[entry_point]) {
                 const next = (entry_point + 5411) % self.n;
                 entry_point = next;
