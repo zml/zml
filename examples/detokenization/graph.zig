@@ -15,11 +15,10 @@ const Field_timer = main.Timing_handler.Field_timer;
 pub const GraphParams = struct {
     k_max: usize = 32,
     search_budget: usize = 1024,
-    alpha: f32 = 1.0,
-    vamana_passes: usize = 3,
+    alpha: f32 = 0.95,
+    vamana_passes: usize = 2,
     top_k: usize = 16,
     L: usize = 256,
-    nb_entry_points: usize = 1,
     graph_type: GraphType = .Mips,
 };
 
@@ -87,12 +86,9 @@ pub const Graph = struct {
         std.debug.assert(params.k_max > 0);
         std.debug.assert(params.L > 0);
         std.debug.assert(params.search_budget > 0);
-        std.debug.assert(params.alpha >= 1.0);
         std.debug.assert(params.L <= params.search_budget + params.k_max);
         std.debug.assert(params.search_budget + params.k_max <= matrix.n);
         std.debug.assert(params.k_max < matrix.n);
-        std.debug.assert(params.nb_entry_points > 0);
-        std.debug.assert((params.nb_entry_points & (params.nb_entry_points - 1)) == 0);
 
         const allocator = zml_handler.allocator;
 
