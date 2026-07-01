@@ -257,6 +257,27 @@ pub fn runLlm(zml_handler: *Zml_handler) !void {
 }
 
 
+pub fn runTestsQuantized(zml_handler: *Zml_handler) !void {
+    var model_handler = try model_.Model_handler.init(zml_handler);
+    defer model_handler.deinit(zml_handler.allocator);
+    defer model_handler.unloadBuffers();
+
+    std.log.info("Get lm_head", .{});
+    const lm_head = try algebra.getLmHead(zml_handler, &model_handler);
+    defer lm_head.free(zml_handler.allocator);
+
+    std.log.info("Init Quantizer", .{});
+    var quantizer = try quantized.Quantized.init(zml_handler, lm_head);
+    defer quantizer.deinit();
+
+    try quantizer.quantizeLmHead();
+    try quantizer.sliceLmHead();
+    try quantizer.testQuantizeSlice();
+    try quantizer.testWalshHadamardRoundtrip();
+
+    try testEmbedQuantizedSearch(zml_handler, &quantizer);
+}
+
 pub fn runTestsSvd(zml_handler: *Zml_handler) !void {
     var model_handler = try model_.Model_handler.init(zml_handler);
     defer model_handler.deinit(zml_handler.allocator);
@@ -296,33 +317,27 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     var sampler: sampling.Sampler = try .init(zml_handler, lm_head);
     defer sampling.Sampler.deinit(&sampler);
 
+    var g_mrt, var g_knnp, var g_knn, var g_angu = try buildAngularGraphs(zml_handler, &model_handler, &sampler);
+    defer g_mrt.deinit();
+    defer g_knnp.deinit();
+    defer g_knn.deinit();
+    defer g_angu.deinit();
 
-
-    var g_angular = try buildGraphAngular(zml_handler, &model_handler, &sampler);
-    defer g_angular.deinit();
-
-    var g_mips = try buildGraphMips(zml_handler, &model_handler, &sampler);
+    var g_mips = try buildMipsGraphs(zml_handler, &model_handler, &sampler);
     defer g_mips.deinit();
 
     zml_handler.tic(&zml_handler.timers.graph_search_tot);
-    try testEmbedDualGraphSearch(zml_handler, &model_handler, &g_angular, &g_mips, &sampler);
-
-    var g_mrt = try buildGraphMrt(zml_handler, &model_handler, &sampler);
-    defer g_mrt.deinit();
-    
-    var g_knn = try buildGraphKnn(zml_handler, &model_handler, &sampler);
-    defer g_knn.deinit();
-
     try testEmbedGraphSearch(zml_handler, &g_knn, null, &sampler, "KNN");
+    try testEmbedGraphSearch(zml_handler, &g_knnp, null, &sampler, "KNNP");
     try testEmbedGraphSearch(zml_handler, &g_mrt, null, &sampler, "MRT");
-    try testEmbedGraphSearch(zml_handler, &g_angular, null, &sampler, "Angular");
+    try testEmbedGraphSearch(zml_handler, &g_angu, null, &sampler, "Angular");
     try testEmbedGraphSearch(zml_handler, &g_mips, null, &sampler, "MIPS");
-    try testEmbedGraphSearch(zml_handler, &g_mips, &g_angular, &sampler, "MIPS and Angular");
-    
+    try testEmbedGraphSearch(zml_handler, &g_mips, &g_angu, &sampler, "MIPS and Angular");
+    try testEmbedDualGraphSearch(zml_handler, &model_handler, &g_angu, &g_mips, &sampler);
     zml_handler.toc(&zml_handler.timers.graph_search_tot);
 }
 
-pub fn buildGraphMrt(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, sampler: *sampling.Sampler) !graph.Graph {
+pub fn buildAngularGraphs(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, sampler: *sampling.Sampler) !struct { graph.Graph, graph.Graph, graph.Graph, graph.Graph } {
     zml_handler.tic(&zml_handler.timers.similarity_matrix);
     //var similarity_matrix = try algebra.computeSimilarityMatrix(zml_handler, &model_handler, false);
     var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, model_handler, true);
@@ -344,96 +359,39 @@ pub fn buildGraphMrt(zml_handler: *Zml_handler, model_handler: *model_.Model_han
     const medoid = 0; //try getMedoid(zml_handler, model_handler, junk_rows);
     std.log.info("Medoid: {d}", .{medoid});
 
-    std.log.info("Init graph", .{});
-    const graph_params: graph.GraphParams = .{ .graph_type = .Angular, .k_max = 1024 };
-    var g: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, graph_params);
+    std.log.info("Init MRT graph", .{});
+    const mrt_params: graph.GraphParams = .{ .graph_type = .Angular, .k_max = 512 };
+    var g_mrt: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, mrt_params);
+    try g_mrt.makeMrt();
+    try g_mrt.testNswExtention(sampler);
+    
+    std.log.info("Init KNN-pruned graph", .{});
+    const knn_params: graph.GraphParams = .{ .graph_type = .Angular };
+    var g_knnp: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, knn_params);
+    g_knnp.consolidateNswPrune();
+    try g_knnp.testNswExtention(sampler);
 
-    zml_handler.tic(&zml_handler.timers.knn_graph);
-    try g.makeMrt();
-    try g.testNswExtention(sampler);
-    zml_handler.toc(&zml_handler.timers.knn_graph);
+    std.log.info("Init KNN graph", .{});
+    var g_knn: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, knn_params);
+    g_knn.consolidateNswPrune();
+    g_knn.consolidateNswNearest();
+    try g_knn.testNswExtention(sampler);
 
-    return g;
+    std.log.info("Init NSW graph", .{});
+    const nsw_params: graph.GraphParams = .{ .graph_type = .Angular };
+    var g_nsw: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, nsw_params);
+    g_nsw.setNearestNeighbors(32);
+    try g_nsw.extendToNsw();
+    try g_nsw.testNswExtention(sampler);
+    try g_nsw.fixNswExtention();
+    try g_nsw.testNswExtention(sampler);
+    g_nsw.consolidateNswPrune();
+    try g_nsw.testNswExtention(sampler);
+
+    return .{ g_mrt, g_knnp, g_knn, g_nsw };
 }
 
-
-pub fn buildGraphKnn(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, sampler: *sampling.Sampler) !graph.Graph {
-    zml_handler.tic(&zml_handler.timers.similarity_matrix);
-    //var similarity_matrix = try algebra.computeSimilarityMatrix(zml_handler, &model_handler, false);
-    var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, model_handler, true);
-    defer similarity_matrix.deinit(zml_handler.allocator);
-    zml_handler.toc(&zml_handler.timers.similarity_matrix);
-
-    std.log.info("Get lm_head_normalized", .{});
-    const lm_head = try algebra.getLmHeadNormalized(zml_handler, model_handler);
-    defer lm_head.free(zml_handler.allocator);
-
-    std.log.info("Get junk rows", .{});
-    zml_handler.tic(&zml_handler.timers.junk_rows);
-    const junk_rows = try algebra.getJunkRows(zml_handler, model_handler);
-    defer zml_handler.allocator.free(junk_rows);
-    zml_handler.toc(&zml_handler.timers.junk_rows);
-    std.log.info("Found {d} junk rows", .{junk_rows.len});
-
-    std.log.info("Get medoid", .{});
-    const medoid = 0; //try getMedoid(zml_handler, model_handler, junk_rows);
-    std.log.info("Medoid: {d}", .{medoid});
-
-    std.log.info("Init graph", .{});
-    const graph_params: graph.GraphParams = .{ .graph_type = .Angular };
-    var g: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, graph_params);
-
-    zml_handler.tic(&zml_handler.timers.knn_graph);
-    g.consolidateNswPrune();
-    try g.testNswExtention(sampler);
-    zml_handler.toc(&zml_handler.timers.knn_graph);
-
-    return g;
-}
-
-pub fn buildGraphAngular(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, sampler: *sampling.Sampler) !graph.Graph {
-    zml_handler.tic(&zml_handler.timers.similarity_matrix);
-    //var similarity_matrix = try algebra.computeSimilarityMatrix(zml_handler, &model_handler, false);
-    var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, model_handler, true);
-    defer similarity_matrix.deinit(zml_handler.allocator);
-    zml_handler.toc(&zml_handler.timers.similarity_matrix);
-
-    std.log.info("Get lm_head_normalized", .{});
-    const lm_head = try algebra.getLmHeadNormalized(zml_handler, model_handler);
-    defer lm_head.free(zml_handler.allocator);
-
-    std.log.info("Get junk rows", .{});
-    zml_handler.tic(&zml_handler.timers.junk_rows);
-    const junk_rows = try algebra.getJunkRows(zml_handler, model_handler);
-    defer zml_handler.allocator.free(junk_rows);
-    zml_handler.toc(&zml_handler.timers.junk_rows);
-    std.log.info("Found {d} junk rows", .{junk_rows.len});
-
-    std.log.info("Get medoid", .{});
-    const medoid = 0; //try getMedoid(zml_handler, model_handler, junk_rows);
-    std.log.info("Medoid: {d}", .{medoid});
-
-    std.log.info("Init graph", .{});
-    const graph_params: graph.GraphParams = .{ .graph_type = .Angular };
-    var g: graph.Graph = try .init(zml_handler, lm_head, &similarity_matrix, junk_rows, medoid, graph_params);
-
-    zml_handler.tic(&zml_handler.timers.knn_graph);
-    g.setNearestNeighbors(32);
-    zml_handler.toc(&zml_handler.timers.knn_graph);
-
-    zml_handler.tic(&zml_handler.timers.nsw_graph);
-    try g.extendToNsw();
-    try g.testNswExtention(sampler);
-    try g.fixNswExtention();
-    try g.testNswExtention(sampler);
-    g.consolidateNswPrune();
-    try g.testNswExtention(sampler);
-    zml_handler.toc(&zml_handler.timers.nsw_graph);
-
-    return g;
-}
-
-pub fn buildGraphMips(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, sampler: *sampling.Sampler) !graph.Graph {
+pub fn buildMipsGraphs(zml_handler: *Zml_handler, model_handler: *model_.Model_handler, sampler: *sampling.Sampler) !graph.Graph {
     zml_handler.tic(&zml_handler.timers.similarity_matrix);
     //var similarity_matrix = try algebra.computeSimilarityMatrix(zml_handler, model_handler, false);
     var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, model_handler, false);
@@ -473,77 +431,6 @@ pub fn buildGraphMips(zml_handler: *Zml_handler, model_handler: *model_.Model_ha
     zml_handler.toc(&zml_handler.timers.nsw_graph);
 
     return g;
-}
-
-pub fn runTestsMrt(zml_handler: *Zml_handler) !void {
-    var model_handler = try model_.Model_handler.init(zml_handler);
-    defer model_handler.deinit(zml_handler.allocator);
-    defer model_handler.unloadBuffers();
-
-    zml_handler.tic(&zml_handler.timers.similarity_matrix);
-    //var similarity_matrix = try algebra.computeSimilarityMatrix(zml_handler, &model_handler, true);
-    var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, &model_handler, true);
-    defer similarity_matrix.deinit(zml_handler.allocator);
-    zml_handler.toc(&zml_handler.timers.similarity_matrix);
-
-    //try testSimilarityMatrix(zml_handler, &model_handler, &similarity_matrix, true);
-
-    std.log.info("Get lm_head", .{});
-    const lm_head, const lm_head_translation = try algebra.getLmHead(zml_handler, &model_handler);
-    defer lm_head.free(zml_handler.allocator);
-    defer lm_head_translation.free(zml_handler.allocator);
-
-    std.log.info("Get lm_head_normalized", .{});
-    const lm_head_normalized, const lm_head_normalized_translation = try algebra.getLmHeadNormalized(zml_handler, &model_handler);
-    defer lm_head_normalized.free(zml_handler.allocator);
-    defer lm_head_normalized_translation.free(zml_handler.allocator);
-
-    std.log.info("Get lm_head row norms", .{});
-    const lm_head_row_norms = try algebra.getLmHeadRowNorms(zml_handler, &model_handler);
-    defer lm_head_row_norms.free(zml_handler.allocator);
-
-    std.log.info("Get junk rows", .{});
-    zml_handler.tic(&zml_handler.timers.junk_rows);
-    const junk_rows = try algebra.getJunkRows(zml_handler, &model_handler);
-    defer zml_handler.allocator.free(junk_rows);
-    zml_handler.toc(&zml_handler.timers.junk_rows);
-    std.log.info("Found {d} junk rows", .{junk_rows.len});
-
-    std.log.info("Get medoid", .{});
-    const medoid = 0; //try getMedoid(zml_handler, &model_handler, junk_rows);
-    std.log.info("Medoid: {d}", .{medoid});
-
-    std.log.info("Get MRT insertion order", .{});
-    const mrt_order = try algebra.getMrtOrder(zml_handler, &model_handler);
-    defer zml_handler.allocator.free(mrt_order);
-
-    std.log.info("Init MRT", .{});
-    const mrt_params: graph.GraphParams = .{ .k_max = 1024 };
-    var mrt: graph.Graph = try .init(zml_handler, lm_head, lm_head_normalized, &similarity_matrix, lm_head_row_norms, junk_rows, medoid, mrt_params);
-    defer mrt.deinit();
-    try mrt.makeMrt(mrt_order);
-    std.log.info("Exact MRT : nb edges: {d}", .{mrt.nbEdges()});
-}
-
-pub fn runTestsQuantized(zml_handler: *Zml_handler) !void {
-    var model_handler = try model_.Model_handler.init(zml_handler);
-    defer model_handler.deinit(zml_handler.allocator);
-    defer model_handler.unloadBuffers();
-
-    std.log.info("Get lm_head", .{});
-    const lm_head = try algebra.getLmHead(zml_handler, &model_handler);
-    defer lm_head.free(zml_handler.allocator);
-
-    std.log.info("Init Quantizer", .{});
-    var quantizer = try quantized.Quantized.init(zml_handler, lm_head);
-    defer quantizer.deinit();
-
-    try quantizer.quantizeLmHead();
-    try quantizer.sliceLmHead();
-    try quantizer.testQuantizeSlice();
-    try quantizer.testWalshHadamardRoundtrip();
-
-    try testEmbedQuantizedSearch(zml_handler, &quantizer);
 }
 
 
