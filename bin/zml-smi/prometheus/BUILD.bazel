@@ -1,4 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 zig_binary(
     name = "prometheus",
@@ -7,6 +7,17 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = [
         "//bin/zml-smi/utils:double_buffer",
+        "//bin/zml-smi/tui",
+        "@libvaxis//:vaxis",
+    ],
+)
+
+zig_test(
+    name = "test",
+    main = "main.zig",
+    srcs = [],
+    visibility = ["//visibility:public"],
+    deps = [
         "//bin/zml-smi/tui",
         "@libvaxis//:vaxis",
     ],

@@ -213,3 +213,35 @@ pub fn main(init: std.process.Init) !void {
 
     try app.run(ui.widget(&model), .{});
 }
+
+// Unit test to parse metrics
+test "parse counter metrics" {
+    const content =
+        \\# TYPE http_requests_count counter
+        \\http_requests_count{path="/v1/chat/completions", method="POST", code="ok"} 242
+        \\http_requests_count{path="/v1/chat/completions", method="OPTIONS", code="not_found"} 20
+        \\http_requests_count{path="/", method="GET", code="not_found"} 1
+        \\
+    ;
+
+    var vis = Visualizer{
+        .metrics = .empty,
+        .allocator = std.testing.allocator,
+        .client = undefined,
+    };
+    defer vis.deinit();
+
+    try vis.parsePrometheusMetrics(content);
+
+    const metrics = vis.metrics;
+    try std.testing.expectEqual(@as(usize, 3), metrics.items.len);
+    try std.testing.expectEqualStrings("http_requests_count{path=\"/v1/chat/completions\", method=\"POST\", code=\"ok\"}", metrics.items[0].name);
+    try std.testing.expectEqual(@as(f64, 242), metrics.items[0].value);
+    try std.testing.expectEqual(MetricType.counter, metrics.items[0].m_type);
+
+    try std.testing.expectEqualStrings("http_requests_count{path=\"/v1/chat/completions\", method=\"OPTIONS\", code=\"not_found\"}", metrics.items[1].name);
+    try std.testing.expectEqual(@as(f64, 20), metrics.items[1].value);
+
+    try std.testing.expectEqualStrings("http_requests_count{path=\"/\", method=\"GET\", code=\"not_found\"}", metrics.items[2].name);
+    try std.testing.expectEqual(@as(f64, 1), metrics.items[2].value);
+}
