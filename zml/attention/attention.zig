@@ -86,7 +86,7 @@ pub const MetalFaMetadata = struct {
     pub fn initBuffer(self: MetalFaMetadata, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(MetalFaMetadata) {
         _ = self;
         _ = sharding;
-        return .{ .num_tokens = try zml.Buffer.scalar(io, platform, 1, .u32) };
+        return .{ .num_tokens = try zml.Buffer.scalar(io, platform, 0, .u32) };
     }
 
     pub fn deinitBuffer(self: *zml.Bufferized(MetalFaMetadata)) void {
