@@ -367,7 +367,7 @@ pub fn buildAngularGraphs(zml_handler: *Zml_handler, model_handler: *model_.Mode
     try g_mrt.testNswExtention(sampler);
 
     g_mrt.consolidateNearestPrune();
-    try testEmbedGraphSearch(zml_handler, &g_mrt, null, null, "MRT");
+    try testEmbedGraphSearch(zml_handler, &g_mrt, null, sampler, "MRT");
     
     std.log.info("Init KNN-pruned graph", .{});
     const knn_params: graph.GraphParams = .{ .graph_type = .Angular };
