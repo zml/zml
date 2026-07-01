@@ -221,3 +221,14 @@ oci_load(
     repo_tags = ["zmlai/zml-smi:latest"],
     tags = ["manual"],
 )
+
+zig_binary(
+    name = "prometheus",
+    visibility = ["//visibility:public"],
+    main = "main.zig",
+    deps = [
+        "//bin/zml-smi/tui",
+        "@libvaxis//:vaxis",
+        "@rules_zig//zig/runfiles",
+    ],
+)

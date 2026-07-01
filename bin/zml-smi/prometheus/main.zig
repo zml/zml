@@ -29,52 +29,48 @@ pub const Metric = struct {
 pub const Visualizer = struct {
     metrics: std.ArrayList(Metric),
     allocator: std.mem.Allocator,
+    url: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator) Visualizer {
+    pub fn init(allocator: std.mem.Allocator, url: []const u8) Visualizer {
         return .{
-            .metrics = std.ArrayList(Metric).init(allocator),
+            .metrics = .empty,
             .allocator = allocator,
+            .url = url,
         };
     }
 
-    pub fn deinit(self: *Visualizer) void {
-        self.metrics.deinit();
+    pub fn deinit(self: *Visualizer, allocator: std.mem.Allocator) void {
+        self.metrics.deinit(allocator);
     }
 
     pub fn fetch_metrics(self: *Visualizer, url: []const u8) ![]u8 {
-        var host = std.ArrayList(u8).init(self.allocator);
-        defer host.deinit();
+        var host = try std.ArrayList(u8).initCapacity(self.allocator, 64);
+        var port: u16 = 80;
+        var path = try std.ArrayList(u8).initCapacity(self.allocator, 64);
 
-        var port = 80;
-        var path = std.ArrayList(u8).init(self.allocator);
-        defer path.deinit();
-
-        if (std.mem.indexOf(u8, url, "://") != null) {
-            const start = std.mem.indexOf(u8, url, "://") + 3;
-            var parts = std.mem.splitSequence(u8, url[start..], "/");
+        if (std.mem.indexOf(u8, url, "://")) |start| {
+            const start_idx = start + 3;
+            var parts = std.mem.splitSequence(u8, url[start_idx..], "/");
             const domain_part = parts.next() orelse return error.InvalidUrl;
 
             if (std.mem.indexOf(u8, domain_part, ":")) |_| {
                 var d_parts = std.mem.splitSequence(u8, domain_part, ":");
-                host.appendSlice(d_parts.next().?.trim(u8, " "));
+                try host.appendSlice(self.allocator, std.mem.trim(u8, " ", d_parts.next().?));
                 if (d_parts.next()) |p| {
-                    port = try std.fmt.parseInt(u16, p.trim(u8, " "));
+                    port = try std.fmt.parseInt(u16, std.mem.trim(u8, " ", p), 10);
                 }
             } else {
-                host.appendSlice(domain_part);
+                try host.appendSlice(self.allocator, domain_part);
             }
 
             if (parts.next()) |p| {
-                path.appendSlice(p);
+                try path.appendSlice(self.allocator, p);
             }
         } else {
-            host.appendSlice(url);
+            try host.appendSlice(self.allocator, url);
         }
 
-        const address = std.net.Address.parseIp(host.items) catch |e| {
-            _ = e; // autofix
-            return error.InvalidAddress;
-        };
+        const address = try std.net.Address.parseIp(host.items);
 
         var stream = try std.net.tcp.Stream.init(address, port);
         try stream.connect();
@@ -86,8 +82,8 @@ pub const Visualizer = struct {
         try stream.writeAll(request);
 
         var buffer: [4096]u8 = undefined;
-        var content = std.ArrayList(u8).init(self.allocator);
-        defer content.deinit();
+        var content = std.ArrayList(u8).initCapacity(self.allocator, 4096);
+        defer content.deinit(self.allocator) catch {};
 
         while (true) {
             const bytes_read = try stream.read(&buffer);
@@ -99,12 +95,19 @@ pub const Visualizer = struct {
         const parts = std.mem.splitSequence(u8, content.items, "\r\n\r\n");
         if (parts.next()) |header| {
             const body_parts = std.mem.splitSequence(u8, header, "\r\n\r\n");
-            if (body_parts.next()) |body| {
+            _ = body_parts; // autofix
+            if (parts.next()) |body| {
+                _ = content.deinit(self.allocator) catch {};
+                _ = path.deinit(self.allocator) catch {};
+                _ = host.deinit(self.allocator) catch {};
                 return body;
             }
-        }
 
-        return content.items;
+            _ = content.deinit(self.allocator) catch {};
+            _ = path.deinit(self.allocator) catch {};
+            _ = host.deinit(self.allocator) catch {};
+            return content.items;
+        }
     }
 
     pub fn parse_prometheus_metrics(self: *Visualizer, content: []const u8) !void {
@@ -129,9 +132,9 @@ pub const Visualizer = struct {
                 }
             }
 
-            var parts = std.mem.splitSequence(u8, line, "|");
-            const name = parts.next() orelse continue;
-            const value_str = parts.next() orelse continue;
+            const space_pos = std.mem.lastIndexOf(u8, line, " ") orelse continue;
+            const name = line[0..space_pos];
+            const value_str = line[space_pos + 1 ..];
 
             const mut_name = std.mem.trim(u8, " ", name);
             const trimmed_value = std.mem.trim(u8, " ", value_str);
@@ -151,9 +154,9 @@ pub const Visualizer = struct {
         var sb = compose.surfaceBuilder(ctx.arena);
         var row: i17 = 0;
 
-        for (self.metrics) |m| {
+        for (self.metrics.items) |m| {
             if (m.m_type == .gauge or m.m_type == .counter) {
-                const gauge_val = @as(u8, @intCast(@as(u32, m.value) % 101));
+                const gauge_val = @as(u8, @intCast(@as(u32, @floor(m.value)) % 101));
                 const gauge: Gauge = .{
                     .value = gauge_val,
                     .label = m.label,
@@ -186,3 +189,56 @@ pub const Visualizer = struct {
         }, ctx.max.width orelse 40);
     }
 };
+
+const Model = struct {
+    visualizer: Visualizer,
+    ctx: *vxfw.EventContext,
+
+    pub fn handleEvent(self: *Model, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
+        _ = ctx; // autofix
+        switch (event) {
+            .init => {
+                try self.updateMetrics();
+                try self.ctx.tick(1000, ui.widget(self));
+            },
+            .tick => {
+                self.updateMetrics() catch {};
+                self.ctx.redraw = true;
+                try self.ctx.tick(1000, ui.widget(self));
+            },
+            .key_press => |key| {
+                if (key.matches('q', .{})) {
+                    self.ctx.quit = true;
+                }
+            },
+            else => {},
+        }
+    }
+
+    pub fn draw(self: *Model, ctx: vxfw.DrawContext) !vxfw.Surface {
+        return try self.visualizer.draw(ctx);
+    }
+
+    pub fn updateMetrics(self: *Model) !void {
+        const content = try self.visualizer.fetch_metrics("http://gh200:8001/metrics");
+        try self.visualizer.parse_prometheus_metrics(content);
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+
+    var app = try vxfw.App.init(allocator, init.io);
+    defer app.deinit();
+
+    var visualizer = Visualizer.init(allocator, "http://gh200:8001/metrics");
+    defer visualizer.deinit(allocator);
+
+    var model = Model{
+        .visualizer = visualizer,
+        .ctx = undefined, // set by app.run
+    };
+
+    // Custom run loop to pass context
+    try app.run(ui.widget(&model), .{});
+}
