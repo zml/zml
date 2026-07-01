@@ -336,6 +336,25 @@ pub const Graph = struct {
         self.is_search_done = false;
     }
 
+    pub fn initSearchPool(self: *Graph, pool: []const Candidate) void {
+        std.debug.assert(self.nb_visited == 0);
+        std.debug.assert(self.L == 0);
+        
+        const entry_point = pool[0].node;
+        const entry_sim = pool[0].similarity;
+        
+        self.is_visited[entry_point] = true;
+        self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
+        self.nb_expanded_neighbors[0] = 0;
+        self.nb_visited = 1;
+        self.L = 1;
+        self.is_search_done = false;
+
+        for (1..pool.len) |i| {
+            self.insert(pool[i].node, pool[i].similarity);
+        }
+    }
+    
     
     fn selectNodeEntryPoint(self: *Graph, query: usize) struct { usize, f32 } {
         if (false) {
@@ -355,6 +374,10 @@ pub const Graph = struct {
             return .{ entry_point, entry_sim };
         } else {
             const entry_point = (query + @divFloor(self.n, 2)) % self.n;
+            while (self.is_junk[entry_point]) {
+                const next = (entry_point + 5411) % self.n;
+                entry_point = next;
+            }
             const entry_sim = self.similarity(query, entry_point);
             return .{ entry_point, entry_sim };
         }
