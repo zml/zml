@@ -505,11 +505,12 @@ pub fn testTokenSvdSearch(_: *Zml_handler, lm_head_rot: zml.Slice, svd: *svd_.Sv
 }
 
 
-pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g1: *graph.Graph, g2: ?*graph.Graph, sampler: *sampling.Sampler, s: []const u8) !void {
+pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g1: *graph.Graph, g2: ?*graph.Graph, _: *sampling.Sampler, s: []const u8) !void {
     std.log.info("Test embed graph search with graph = {s}", .{ s });
 
     var total_count: usize = 0;
     var found_top1_count: usize = 0;
+    var found_top1_count_full: usize = 0;
 
     var total_visited: usize = 0;
     var min_visited: usize = std.math.maxInt(usize);
@@ -557,27 +558,30 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g1: *graph.Graph, g2: ?*g
             total_count += 1;
             const top1_token = top1[embed_index];
             var found_top1 = false;
+            var found_top1_full = false;
             for (0..g1.L) |i| {
                 if (g1.visited[i].node == top1_token) found_top1 = true;
+            }
+            for (0..g1.nb_visited) |i| {
+                if (g1.visited[i].node == top1_token) found_top1_full = true;
             }
             if (g2) |g| {
                 for (0..g.L) |i| {
                     if (g.visited[i].node == top1_token) found_top1 = true;
                 }
+                for (0..g.nb_visited) |i| {
+                    if (g.visited[i].node == top1_token) found_top1_full = true;
+                }
             }
-            if (found_top1) {
-                found_top1_count += 1;
-            } else {
-                _ = sampler;
-                //std.log.info("Missed top1, id {d} str {s}", .{ top1[embed_index], try tokens.tokenString(sampler.tokenizer, top1[embed_index], sampler.allocator) });
-                //std.log.info("Found instead {d} str {s}", .{ g.visited[0].node, try tokens.tokenString(sampler.tokenizer, g.visited[0].node, sampler.allocator) });
-            }
+            if (found_top1) found_top1_count += 1;
+            if (found_top1_full) found_top1_count_full += 1;
         }
     }
 
     const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) / @as(f64, @floatFromInt(total_count));
     const average_visit = @as(f64, @floatFromInt(total_visited)) / @as(f64, @floatFromInt(total_count));
     std.log.info("Embed graph search: total={d} found_top1={d} ({d:.4}%)", .{ total_count, found_top1_count, percent_found });
+    std.log.info("Full count: {d}", .{found_top1_count_full});
     std.log.info("Embed graph search nb_visited: min={d} max={d} avg={d:.2}", .{ min_visited, max_visited, average_visit });
 }
 
