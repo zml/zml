@@ -437,7 +437,7 @@ pub const Graph = struct {
     
     
     fn selectNodeEntryPoint(self: *Graph, query: usize) struct { usize, f32 } {
-        if (true) {
+        if (false) {
             const entry_point = self.medoid;
             const entry_sim = self.similarity(query, entry_point);
             std.debug.assert(entry_point < self.n);
