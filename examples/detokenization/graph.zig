@@ -363,6 +363,20 @@ pub const Graph = struct {
         self.zml_handler.toc(&self.zml_handler.timers.embed_search);
     }
 
+    pub fn greedySearchLazyWS(self: *Graph, query: []const f32) void {
+        self.zml_handler.tic(&self.zml_handler.timers.embed_search);
+
+        while (self.nb_visited < self.params.search_budget) {
+            const expansion = self.popCandidateLazy();
+            if (self.is_search_done) break;
+
+            self.addCandidate(query, expansion.neighbor);
+        }
+
+        self.cleanup();
+        self.zml_handler.toc(&self.zml_handler.timers.embed_search);
+    }
+
     
     pub fn scoreQueryNode(self: *const Graph, query: []const f32, node: usize) f32 {
         self.zml_handler.tic(&self.zml_handler.timers.embed_dot);
@@ -848,7 +862,7 @@ pub const Graph = struct {
                 // the candidates are current_node's neighbors and the visited nodes
                 // since both lists are sorted and contain unique nodes, we can build
                 // the sorted list of candidates in one linear forward pass
-                self.greedySearchNode(current_node);
+                self.greedySearchNodeLazy(current_node);
                 if (self.visited[0].node == current_node) {
                     // if current_node was found, we could decide the connectedness is ok
                     // and continue. this reduces the pressure on nb_neighbors for each node,
@@ -856,8 +870,7 @@ pub const Graph = struct {
                     // but for now it degrades query search (eg: 84% -> 76% success).
                     //continue;
                 }
-                const nb_search_cand: usize = self.nb_visited;
-                //const nb_search_cand: usize = self.L;
+                const nb_search_cand: usize = self.L;
                 // only first L positions are sorted
                 if (nb_search_cand > self.L) std.mem.sort(Candidate, self.visited[self.L..nb_search_cand], {}, Candidate.beforeThan);
                 var pos_in_neighbors: usize = start_neigh;
