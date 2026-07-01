@@ -59,7 +59,6 @@ pub const Graph = struct {
     nb_neighbors: []usize,
     is_junk: []bool,
     medoid: usize,
-    medoids: []usize,
     // the max number of candidates, each candidate is a scored node so
     // this can be set as the max_budget + k_max
     capacity: usize,
@@ -141,10 +140,6 @@ pub const Graph = struct {
         errdefer allocator.free(nsw_extension_search_missed);
         @memset(nsw_extension_search_missed, false);
 
-        const medoids = try allocator.alloc(usize, params.nb_entry_points);
-        errdefer allocator.free(medoids);
-        @memset(medoids, matrix.n);
-
         const visited = try allocator.alloc(Candidate, params.search_budget + params.k_max);
         errdefer allocator.free(visited);
 
@@ -161,7 +156,6 @@ pub const Graph = struct {
             .is_junk = is_junk,
             .similarity_matrix = matrix,
             .medoid = medoid,
-            .medoids = medoids,
             .capacity = params.search_budget + params.k_max,
             .L = 0,
             .visited = visited,
@@ -186,7 +180,6 @@ pub const Graph = struct {
         self.allocator.free(self.nb_expanded_neighbors);
         self.allocator.free(self.are_neighbors_pruned);
         self.allocator.free(self.nsw_extension_search_missed);
-        self.allocator.free(self.medoids);
     }
 
     // ------------------- Search functions ------------------ //
@@ -247,6 +240,31 @@ pub const Graph = struct {
         self.zml_handler.toc(&self.zml_handler.timers.embed_search);
     }
 
+    pub fn greedySearchWS(self: *Graph, query: []const f32) void {
+        self.zml_handler.tic(&self.zml_handler.timers.embed_search);
+
+        while (self.nb_visited < self.params.search_budget) {
+
+            // find best node of the active pool that has not been expanded yet
+            const node = self.popCandidate();
+
+            // if all nodes in active pool have been expanded, terminate the search
+            if (self.is_search_done) break;
+
+            const start_neigh = self.params.k_max * node;
+            const end_neigh = start_neigh + self.nb_neighbors[node];
+            for (start_neigh..end_neigh) |i| {
+                const neighbor = self.neighbors[i];
+                if (self.is_visited[neighbor]) continue;
+                self.addCandidate(query, neighbor);
+            }
+        }
+
+        self.cleanup();
+        self.zml_handler.toc(&self.zml_handler.timers.embed_search);
+    }
+
+    
     pub fn greedySearchNodeLazy(self: *Graph, query: usize) void {
         self.zml_handler.tic(&self.zml_handler.timers.greedy_search);
         std.debug.assert(!self.is_junk[query]);
@@ -358,19 +376,10 @@ pub const Graph = struct {
     
     fn selectNodeEntryPoint(self: *Graph, query: usize) struct { usize, f32 } {
         if (false) {
-            var entry_point = self.medoids[0];
-            var entry_sim = self.similarity(query, entry_point);
+            const entry_point = self.medoid;
+            const entry_sim = self.similarity(query, entry_point);
             std.debug.assert(entry_point < self.n);
             std.debug.assert(!self.is_visited[entry_point]);
-            for (self.medoids[1..self.params.nb_entry_points]) |node| {
-                std.debug.assert(node < self.n);
-                std.debug.assert(!self.is_visited[node]);
-                const sim = self.similarity(query, node);
-                if (sim > entry_sim) {
-                    entry_point = node;
-                    entry_sim = sim;
-                }
-            }
             return .{ entry_point, entry_sim };
         } else {
             var entry_point = (query + @divFloor(self.n, 2)) % self.n;
@@ -384,20 +393,10 @@ pub const Graph = struct {
     }
 
     fn selectQueryEntryPoint(self: *Graph, query: []const f32) struct { usize, f32 } {
-        var entry_point = self.medoids[0];
+        const entry_point = self.medoid;
+        const entry_sim = self.scoreQueryNode(query, entry_point);
         std.debug.assert(entry_point < self.n);
         std.debug.assert(!self.is_visited[entry_point]);
-        var entry_sim = self.scoreQueryNode(query, entry_point);
-
-        for (self.medoids[1..self.params.nb_entry_points]) |node| {
-            std.debug.assert(node < self.n);
-            std.debug.assert(!self.is_visited[node]);
-            const sim = self.scoreQueryNode(query, node);
-            if (sim > entry_sim) {
-                entry_point = node;
-                entry_sim = sim;
-            }
-        }
         return .{ entry_point, entry_sim };
     }
 
@@ -1323,12 +1322,8 @@ pub const Graph = struct {
         var queue: std.ArrayList(usize) = try .initCapacity(self.allocator, 0);
         defer queue.deinit(self.allocator);
 
-        for (self.medoids[0..self.params.nb_entry_points]) |entry_point| {
-            std.debug.assert(entry_point < self.n);
-            if (hop_dist[entry_point] == 0) continue;
-            hop_dist[entry_point] = 0;
-            try queue.append(self.allocator, entry_point);
-        }
+        hop_dist[self.medoid] = 0;
+        try queue.append(self.allocator, self.medoid);
 
         var queue_head: usize = 0;
         while (queue_head < queue.items.len) {
