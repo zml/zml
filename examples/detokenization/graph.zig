@@ -191,11 +191,11 @@ pub const Graph = struct {
 
     // ------------------- Search functions ------------------ //
 
-    pub fn greedySearchNode(self: *Graph, query: usize, pass: usize) void {
+    pub fn greedySearchNode(self: *Graph, query: usize) void {
         self.zml_handler.tic(&self.zml_handler.timers.greedy_search);
         std.debug.assert(!self.is_junk[query]);
         // initialize search at entry point
-        self.initNodeSearch(query, pass);
+        self.initNodeSearch(query);
 
         while (self.nb_visited < self.params.search_budget) {
 
@@ -306,11 +306,11 @@ pub const Graph = struct {
     }
 
     
-    pub fn initNodeSearch(self: *Graph, query: usize, pass: usize) void {
+    pub fn initNodeSearch(self: *Graph, query: usize) void {
         // at start, pool is empty
         std.debug.assert(!self.is_visited[self.medoid]);
 
-        const entry_point, const entry_sim = self.selectNodeEntryPoint(query, pass);
+        const entry_point, const entry_sim = self.selectNodeEntryPoint(query);
 
         // medoid is the first and only visited node
         self.is_visited[entry_point] = true;
@@ -337,16 +337,8 @@ pub const Graph = struct {
     }
 
     
-    fn selectNodeEntryPoint(self: *Graph, query: usize, pass: usize) struct { usize, f32 } {
-        if (pass == 99) {
-            // first pass: mostly randomized
-            const entry_id = query % self.params.nb_entry_points;
-            const entry_point = self.medoids[entry_id];
-            const entry_sim = self.similarity(query, entry_point);
-            std.debug.assert(entry_point < self.n);
-            std.debug.assert(!self.is_visited[entry_point]);
-            return .{ entry_point, entry_sim };
-        } else {
+    fn selectNodeEntryPoint(self: *Graph, query: usize) struct { usize, f32 } {
+        if (false) {
             var entry_point = self.medoids[0];
             var entry_sim = self.similarity(query, entry_point);
             std.debug.assert(entry_point < self.n);
@@ -360,6 +352,10 @@ pub const Graph = struct {
                     entry_sim = sim;
                 }
             }
+            return .{ entry_point, entry_sim };
+        } else {
+            const entry_point = (query + @divFloor(self.n, 2)) % self.n;
+            const entry_sim = self.similarity(query, entry_point);
             return .{ entry_point, entry_sim };
         }
     }
@@ -780,8 +776,6 @@ pub const Graph = struct {
         self.sim_access = 0;
         self.zml_handler.nb_tictoc = 0;
 
-        self.setEntryPoints();
-
         for (0..self.params.vamana_passes) |pass_i| {
             // when pass_i > 0, we increase alpha from 1.0 to the params.alpha value
             // this means the flags are_neighbors_pruned is invalidated
@@ -806,7 +800,7 @@ pub const Graph = struct {
                 // the candidates are current_node's neighbors and the visited nodes
                 // since both lists are sorted and contain unique nodes, we can build
                 // the sorted list of candidates in one linear forward pass
-                self.greedySearchNode(current_node, pass_i);
+                self.greedySearchNode(current_node);
                 if (self.visited[0].node == current_node) {
                     // if current_node was found, we could decide the connectedness is ok
                     // and continue. this reduces the pressure on nb_neighbors for each node,
@@ -959,66 +953,8 @@ pub const Graph = struct {
             }
         }
     }
-    
-    fn increasingF32(_: void, lhs: f32, rhs: f32) bool {
-        return lhs < rhs;
-    }
-
-    pub fn setEntryPoints(self: *Graph) void {
-        self.medoids[0] = 0;
-        if (false) {
-            const k = self.nbEntryHyperplanes();
-            const rows = self.lm_head;
-            const row_norms = self.lm_head_row_norms.constItems(f32);
-    
-            const values = self.allocator.alloc(f32, self.n) catch @panic("OOM");
-            defer self.allocator.free(values);
-    
-            for (0..k) |coord| {
-                for (0..self.n) |node| {
-                    values[node] = rows[node * self.dim + coord];
-                }
-                std.mem.sort(f32, values, {}, increasingF32);
-                if (self.n % 2 == 0) {
-                    const hi = self.n / 2;
-                    self.entry_medians[coord] = 0.5 * (values[hi - 1] + values[hi]);
-                } else {
-                    self.entry_medians[coord] = values[self.n / 2];
-                }
-                log.info("entry hyperplane coord {d}: median={d:.8}", .{ coord, self.entry_medians[coord] });
-            }
-    
-            @memset(self.medoids, self.medoid);
-            const best_norms = self.allocator.alloc(f32, self.params.nb_entry_points) catch @panic("OOM");
-            defer self.allocator.free(best_norms);
-            const bucket_counts = self.allocator.alloc(usize, self.params.nb_entry_points) catch @panic("OOM");
-            defer self.allocator.free(bucket_counts);
-            @memset(bucket_counts, 0);
-            for (best_norms) |*best_norm| best_norm.* = -std.math.inf(f32);
-    
-            for (0..self.n) |node| {
-                if (self.is_junk[node]) continue;
-                const row = rows[node * self.dim ..][0..self.dim];
-                const bucket = self.bucketForRow(row, k);
-                bucket_counts[bucket] += 1;
-                if (row_norms[node] > best_norms[bucket]) {
-                    best_norms[bucket] = row_norms[node];
-                    self.medoids[bucket] = node;
-                }
-            }
-    
-            var empty_buckets: usize = 0;
-            for (self.medoids[0..self.params.nb_entry_points], 0..) |entry_point, bucket| {
-                std.debug.assert(entry_point < self.n);
-                std.debug.assert(!self.is_junk[entry_point]);
-                if (bucket_counts[bucket] == 0) empty_buckets += 1;
-            }
-            log.info("Entry points from {d} median hyperplanes: buckets={d} empty={d}", .{ k, self.params.nb_entry_points, empty_buckets });
-        }
-    }
 
     pub fn testNswExtention(self: *Graph, sampler: *sampling.Sampler) !void {
-        self.setEntryPoints();
         log.info("Test NSW extension", .{});
         @memset(self.nsw_extension_search_missed, false);
 
@@ -1081,21 +1017,11 @@ pub const Graph = struct {
         var total_visited: usize = 0;
         var min_visited: usize = std.math.maxInt(usize);
         var max_visited: usize = 0;
-        const entry_point_counts = try self.allocator.alloc(usize, self.params.nb_entry_points);
-        defer self.allocator.free(entry_point_counts);
-        @memset(entry_point_counts, 0);
 
         for (0..self.n) |node| {
             if (self.is_junk[node]) continue;
             valid_count += 1;
-            const entry_point, _ = self.selectNodeEntryPoint(node, 2);
-            for (self.medoids[0..self.params.nb_entry_points], 0..) |medoid, entry_i| {
-                if (medoid == entry_point) {
-                    entry_point_counts[entry_i] += 1;
-                    break;
-                }
-            }
-            self.greedySearchNode(node, 2);
+            self.greedySearchNode(node);
             const nb_visited = self.nb_visited;
             total_visited += nb_visited;
             min_visited = @min(min_visited, nb_visited);
@@ -1122,10 +1048,6 @@ pub const Graph = struct {
         const avg_visited = @as(f64, @floatFromInt(total_visited)) / @as(f64, @floatFromInt(valid_count));
         const exact_rate = @as(f64, @floatFromInt(exact_first_count)) / @as(f64, @floatFromInt(valid_count));
         log.info("NSW extension entry-point starts", .{});
-        for (entry_point_counts, 0..) |count, entry_i| {
-            if (count == 0) continue;
-            log.info("entry {d} node {d}: {d} searches", .{ entry_i, self.medoids[entry_i], count });
-        }
         log.info(
             "NSW extension test: valid={d} exact_first={d}/{d} ({d:.4}%) nb_visited min={d} max={d} avg={d:.2}",
             .{
