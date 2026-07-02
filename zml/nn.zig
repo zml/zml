@@ -1677,7 +1677,7 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
     var x = full_topk.values.rename(.{ .voc = .topk });
     // mask values above the dynamic top_k
     x = Tensor.iota(x.shape(), .topk).cmp(.GE, opts.top_k).select(min_inf, x);
-    x = x.mul(opts.temperature);
+    x = x.mul(opts.temperature.convert(x.dtype()));
 
     // if there are high values in x, softmax can overflow and will create nans in full probs
     // this propagate to probs_sum and probs_max.
@@ -1685,8 +1685,8 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
     const probs_sum = probs.cumulativeSum(.topk);
     const probs_max = probs.slice1d(.topk, .{ .start = 0, .end = 1 });
 
-    const top_p = opts.top_p.broad(x.shape());
-    const min_p = probs_max.mul(opts.min_p).broad(x.shape());
+    const top_p = opts.top_p.convert(x.dtype()).broad(x.shape());
+    const min_p = probs_max.mul(opts.min_p.convert(x.dtype())).broad(x.shape());
 
     // * if first candidate has very high prob, then probs_sum is always greater than top_p and candidate is full false
     // * if first candidate score is even bigger, the probs become Nan because of the softmax,
