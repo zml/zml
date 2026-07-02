@@ -16,6 +16,7 @@ pub const BucketData = struct {
 buckets: []const BucketData,
 bar_height: u16 = 5,
 show_values: bool = true,
+label: ?[]const u8 = null,
 
 pub fn draw(self: *const BarChart, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const max_w = ctx.max.width orelse 40;
@@ -25,9 +26,33 @@ pub fn draw(self: *const BarChart, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     const num_bars: u16 = @min((max_w / chars_per_bar), @as(u16, @intCast(self.buckets.len))); // Each bar needs ~5 chars minimum
     const used_width: u16 = @min(max_w, chars_per_bar * num_bars);
 
-    var surface = try vxfw.Surface.init(ctx.arena, ui.widget(self), .{ .width = used_width, .height = self.bar_height + 2 }); // +2 for axis and labels
+    // Always allocate space for label for simplicity
+    const total_height: u16 = self.bar_height + 3; // +3 for axis, values, and label
+    var surface = try vxfw.Surface.init(ctx.arena, ui.widget(self), .{ .width = used_width, .height = total_height });
     try self.renderTo(ctx.arena, ctx, &surface, 0, 0, used_width);
+
+    // Draw label if present
+    if (self.label) |label_text| {
+        writeStr(&surface, 0, total_height - 1, label_text, theme.dim_style);
+    }
+
     return surface;
+}
+
+/// Write a string to the surface
+fn writeStr(surface: *vxfw.Surface, col: u16, row: u16, text: []const u8, style: vaxis.Cell.Style) void {
+    var c = col;
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        const end = @min(i + len, text.len);
+        surface.writeCell(c, row, .{
+            .char = .{ .grapheme = text[i..end], .width = 1 },
+            .style = style,
+        });
+        c += 1;
+        i = end;
+    }
 }
 
 /// Render bar chart data into an existing surface at the given offset.
@@ -92,9 +117,10 @@ pub fn renderTo(self: *const BarChart, arena: std.mem.Allocator, ctx: vxfw.DrawC
             const value_str = try std.fmt.allocPrint(arena, "{d}%", .{bucket.percentage});
             const value_w = @as(u16, @intCast(ctx.stringWidth(value_str)));
             const value_pos = bar_col + @as(u16, @intCast(bar_width / 2 - value_w / 2));
+            const value_row: u16 = row_offset + chart_height + 1;
             for (0..value_w) |col_idx| {
                 const ch_str = value_str[col_idx .. col_idx + 1];
-                surface.writeCell(value_pos + @as(u16, @intCast(col_idx)), row_offset + chart_height + 1, .{
+                surface.writeCell(value_pos + @as(u16, @intCast(col_idx)), value_row, .{
                     .char = .{ .grapheme = ch_str, .width = 1 },
                     .style = theme.dim_style,
                 });

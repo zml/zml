@@ -182,10 +182,11 @@ pub const Model = struct {
                         .buckets = bars,
                         .bar_height = m.chart_height,
                         .show_values = true,
+                        .label = m.name,
                     };
-                    const bar_surf = try bar_chart.draw(tui.ui.fixedSize(ctx, (ctx.max.width orelse 40), m.chart_height + 2));
+                    const bar_surf = try bar_chart.draw(tui.ui.fixedSize(ctx, (ctx.max.width orelse 40), m.chart_height + 3));
                     try sb.add(row, 0, bar_surf);
-                    row += @as(i17, @intCast(m.chart_height + 2));
+                    row += @as(i17, @intCast(m.chart_height + 3));
                 },
                 .counter => |counter| {
                     // TODO: display counter
