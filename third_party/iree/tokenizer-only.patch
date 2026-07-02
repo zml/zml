@@ -1,8 +1,7 @@
 diff --git a/build_tools/bazel/build_defs.oss.bzl b/build_tools/bazel/build_defs.oss.bzl
-index 090c87f860..ed1ab94fd0 100644
 --- a/build_tools/bazel/build_defs.oss.bzl
 +++ b/build_tools/bazel/build_defs.oss.bzl
-@@ -4,23 +4,33 @@
+@@ -4,24 +4,35 @@
  # See https://llvm.org/LICENSE.txt for license information.
  # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
  
@@ -11,12 +10,14 @@ index 090c87f860..ed1ab94fd0 100644
  
  # All load statements must come first in Starlark.
  load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
+-load("@rules_shell//shell:sh_test.bzl", "sh_test")
 -load(
 -    "//build_tools/bazel:iree_cc_fuzz.bzl",
 -    _iree_cc_fuzz = "iree_cc_fuzz",
 -    _iree_compiler_cc_fuzz = "iree_compiler_cc_fuzz",
 -    _iree_runtime_cc_fuzz = "iree_runtime_cc_fuzz",
 -)
++# load("@rules_shell//shell:sh_test.bzl", "sh_test")
 +# load(
 +#     "//build_tools/bazel:iree_cc_fuzz.bzl",
 +#     _iree_cc_fuzz = "iree_cc_fuzz",
@@ -40,6 +41,7 @@ index 090c87f860..ed1ab94fd0 100644
 +gentbl_cc_library = generic_pass
 +gentbl_filegroup = generic_pass
 +td_library = generic_pass
++sh_test = generic_pass
 +iree_runtime_cc_fuzz = generic_pass
 +iree_compiler_cc_fuzz = generic_pass
 +iree_cc_fuzz = generic_pass
