@@ -570,7 +570,7 @@ const Vanilla = struct {
         const weight_dtype = gate_up.dtype();
         const scale_dtype = gate_up_scale.dtype();
 
-        const num_active_experts: u32 = topk_ids.dim(.topk);
+        const num_active_experts = topk_ids.dim(.eid);
 
         for (0..@as(usize, @intCast(num_active_experts))) |route_idx| {
             const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
@@ -959,6 +959,7 @@ pub fn forwardMoe_fp4(
     metadata: Metadata,
     parameters: zml.moe.Parameters,
 ) !zml.Tensor {
+    _ = metadata; // autofix
     stdx.debug.assert(input.shape().hasTags(.{ .b, .d }), "expected MoE input tags (.b, .d), got {f}", .{input.shape()});
     stdx.debug.assert(topk_ids.shape().hasTags(.{ .b, .eid }), "expected topk id tags (.b, .eid), got {f}", .{topk_ids.shape()});
     stdx.debug.assert(topk_weights.shape().hasTags(.{ .b, .eid }), "expected topk weight tags (.b, .eid), got {f}", .{topk_weights.shape()});
@@ -970,7 +971,19 @@ pub fn forwardMoe_fp4(
     const block_size = 128;
 
     return switch (parameters) {
-        .vanilla => Vanilla.forwardMoe_fp4(
+        .triton => Triton.forwardMoe_fp4(
+            input,
+            topk_ids,
+            topk_weights,
+            weights_gate_up,
+            scales_gate_up_,
+            bias_gate_up,
+            weights_down,
+            scales_down_,
+            bias_down,
+            activation_limit,
+        ),
+        else => Vanilla.forwardMoe_fp4(
             input,
             weights_gate_up,
             scales_gate_up_,
@@ -981,7 +994,5 @@ pub fn forwardMoe_fp4(
             block_size,
             activation_limit,
         ),
-        .triton => Triton.forwardMoe_fp4(),
-        else => error.UnsupportedBackend,
     };
 }
