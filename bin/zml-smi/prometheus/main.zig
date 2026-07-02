@@ -79,12 +79,35 @@ pub const Metric = struct {
     };
 };
 
+const ScrollState = struct {
+    row: i17 = 0,
+    col: i17 = 0,
+
+    pub fn reset(self: *ScrollState) void {
+        self.row = 0;
+        self.col = 0;
+    }
+
+    pub fn scrollBy(self: *ScrollState, dr: i17, dc: i17) void {
+        self.row = @max(0, self.row + dr);
+        self.col = @max(0, self.col + dc);
+    }
+
+    pub fn clamp(self: *ScrollState, content_h: u16, viewport_h: u16, content_w: u16, viewport_w: u16) void {
+        const max_row: i17 = @max(0, @as(i17, content_h) - @as(i17, viewport_h));
+        const max_col: i17 = @max(0, @as(i17, content_w) - @as(i17, viewport_w));
+        self.row = std.math.clamp(self.row, 0, max_row);
+        self.col = std.math.clamp(self.col, 0, max_col);
+    }
+};
+
 pub const Model = struct {
     allocator: std.mem.Allocator,
     metrics: Metrics,
     url: []const u8,
     client: std.http.Client,
     content: std.ArrayList(u8) = .empty,
+    scroll: ScrollState = .{},
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, url: []const u8) !Model {
         return .{
@@ -115,7 +138,31 @@ pub const Model = struct {
             .key_press => |key| {
                 if (key.matches('q', .{})) {
                     ctx.quit = true;
+                } else if (key.matches(vaxis.Key.down, .{})) {
+                    self.scroll.scrollBy(1, 0);
+                    ctx.redraw = true;
+                } else if (key.matches(vaxis.Key.up, .{})) {
+                    self.scroll.scrollBy(-1, 0);
+                    ctx.redraw = true;
+                } else if (key.matches(vaxis.Key.right, .{})) {
+                    self.scroll.scrollBy(0, 1);
+                    ctx.redraw = true;
+                } else if (key.matches(vaxis.Key.left, .{})) {
+                    self.scroll.scrollBy(0, -1);
+                    ctx.redraw = true;
+                } else {
+                    return;
                 }
+            },
+            .mouse => |mouse| {
+                switch (mouse.button) {
+                    .wheel_up => self.scroll.scrollBy(-3, 0),
+                    .wheel_down => self.scroll.scrollBy(3, 0),
+                    .wheel_left => self.scroll.scrollBy(0, 3),
+                    .wheel_right => self.scroll.scrollBy(0, -3),
+                    else => return,
+                }
+                ctx.redraw = true;
             },
             else => {},
         }
@@ -197,10 +244,30 @@ pub const Model = struct {
             }
         }
 
-        return sb.finish(
-            .{ .width = ctx.max.width orelse 40, .height = @max(row, 1) },
+        // Calculate content height for scroll clamping
+        const content_height = @max(row, 1);
+        const screen = ctx.max.size();
+        const viewport_height = screen.height - 1; // Reserve 1 row for title
+        self.scroll.clamp(content_height, viewport_height, 0, 0);
+
+        // Apply scroll offset to all content by using a negative position
+        var scrolled_sb = tui.compose.surfaceBuilder(ctx.arena);
+        try scrolled_sb.add(-self.scroll.row, 0, sb.finish(
+            .{ .width = screen.width, .height = content_height },
             tui.ui.drawWidget(self, drawContent),
+        ));
+
+        // Add the title at the top (not scrolled)
+        const title_surf = try tui.ui.drawRichLine(
+            ctx,
+            &.{
+                .{ .text = "Prometheus Metrics (Scroll: arrow keys/mouse wheel, Quit: q)", .style = tui.theme.label_style },
+            },
+            screen.width,
         );
+        try scrolled_sb.addZ(0, 0, title_surf, 1);
+
+        return scrolled_sb.finish(screen, tui.ui.widget(self));
     }
 
     fn drawContent(_: *Model, ctx: vxfw.DrawContext) !vxfw.Surface {
