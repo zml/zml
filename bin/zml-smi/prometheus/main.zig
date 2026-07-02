@@ -30,10 +30,28 @@ pub const Metric = struct {
 
     pub const Histogram = struct {
         bucket_counts: []u64,
-        bucket_upper_bound: []u64,
+        bucket_upper_bounds: []i64,
         bucket_counts_u8: []u8,
-        bucket_total_count: u64,
-        bucket_total_sum: i64,
+        total_count: u64,
+        total_sum: i64,
+
+        pub const empty: Histogram = .{ .bucket_counts = &.{}, .bucket_upper_bounds = &.{}, .bucket_counts_u8 = &.{}, .total_count = 0, .total_sum = 0 };
+
+        pub fn updateBucketCountU8(hist: *Histogram) void {
+            const total_count = hist.total_count;
+            var prev: u64 = 0;
+            for (hist.bucket_counts_u8, hist.bucket_counts) |*count_u8, count| {
+                count_u8.* = @intCast(@divFloor(100 * (count - prev), total_count));
+                prev = count;
+            }
+        }
+
+        pub fn deinit(hist: *Histogram, allocator: std.mem.Allocator) void {
+            allocator.free(hist.bucket_counts);
+            allocator.free(hist.bucket_upper_bounds);
+            allocator.free(hist.bucket_counts_u8);
+            hist.* = .empty;
+        }
     };
 
     pub const Gauge = struct {
@@ -186,8 +204,12 @@ pub const Metrics = struct {
     }
 
     pub fn deinit(self: *Metrics) void {
-        for (self.metrics.values()) |m| {
+        for (self.metrics.values()) |*m| {
             self.allocator.free(m.name);
+            switch (m.value) {
+                .histogram => |*h| h.deinit(self.allocator),
+                .counter, .gauge => {},
+            }
         }
         self.metrics.deinit(self.allocator);
     }
@@ -282,16 +304,127 @@ pub const Metrics = struct {
     }
 
     pub fn parseHistograms(self: *Metrics, reader: *std.Io.Reader, name: []const u8) !void {
-        _ = self;
+        const State = enum { first, bucket, count, sum };
+        var state: State = .first;
+        var bucket_counts: std.ArrayList(u64) = undefined;
+        var bucket_counts_u8: []u8 = undefined;
+        var bucket_upper_bounds: std.ArrayList(i64) = undefined;
+        var histogram_count: u64 = 0;
+        var histogram: *Metric.Histogram = undefined;
+
         lines: while (true) {
             const first = reader.peek(1) catch return;
             if (first[0] == '#') return;
 
             const line = (try reader.takeDelimiter('\n')) orelse return;
+
+            std.log.warn("state: {}, line: {s}", .{ state, line });
             std.debug.assert(std.mem.eql(u8, name, line[0..name.len]));
 
-            continue :lines;
+            const first_label = std.mem.findScalar(u8, line, '{') orelse return error.InvalidInput;
+            const histogram_metric_stream = line[name.len + 1 .. first_label];
+            state: switch (state) {
+                .first => {
+                    std.debug.assert(std.mem.eql(u8, histogram_metric_stream, "bucket"));
+                    const name_with_labels = parseBucketName(self.allocator, line) catch |err| switch (err) {
+                        error.InvalidInput => continue :lines,
+                        error.OutOfMemory => |e| return e,
+                    };
+
+                    const entry = try self.metrics.getOrPut(self.allocator, name_with_labels);
+                    found: switch (entry.found_existing) {
+                        true => {
+                            if (entry.value_ptr.value != .histogram) continue :found false;
+                            self.allocator.free(name_with_labels);
+                            histogram = &entry.value_ptr.value.histogram;
+                            bucket_counts = .initBuffer(histogram.bucket_counts);
+                            bucket_upper_bounds = .initBuffer(histogram.bucket_upper_bounds);
+                            histogram_count = 0;
+                            bucket_counts_u8 = histogram.bucket_counts_u8;
+                        },
+                        false => {
+                            entry.value_ptr.* = .{
+                                .value = .{ .histogram = .empty },
+                                .name = name_with_labels,
+                            };
+                            histogram = &entry.value_ptr.value.histogram;
+                            entry.key_ptr.* = name_with_labels;
+                            bucket_counts = .empty;
+                            bucket_upper_bounds = .empty;
+                            histogram_count = 0;
+                            bucket_counts_u8 = "";
+                        },
+                    }
+
+                    const upper, const cnt = try parseBucketData(line);
+                    try bucket_upper_bounds.append(self.allocator, upper);
+                    try bucket_counts.append(self.allocator, cnt);
+
+                    state = .bucket;
+                },
+                .bucket => {
+                    if (std.mem.eql(u8, histogram_metric_stream, "count")) continue :state .count;
+
+                    std.debug.assert(std.mem.eql(u8, histogram_metric_stream, "bucket"));
+                    const upper, const cnt = try parseBucketData(line);
+                    try bucket_upper_bounds.append(self.allocator, upper);
+                    try bucket_counts.append(self.allocator, cnt);
+
+                    state = .bucket;
+                },
+                .count => {
+                    std.debug.assert(std.mem.eql(u8, histogram_metric_stream, "count"));
+                    const last_space = std.mem.findScalarLast(u8, line, ' ') orelse continue :lines;
+                    const value_str = line[last_space + 1 ..];
+                    histogram_count = std.fmt.parseInt(u64, value_str, 10) catch continue :lines;
+
+                    state = .sum;
+                },
+                .sum => {
+                    std.debug.assert(std.mem.eql(u8, histogram_metric_stream, "sum"));
+                    if (bucket_counts_u8.len != bucket_counts.items.len) {
+                        self.allocator.free(bucket_counts_u8);
+                        bucket_counts_u8 = try self.allocator.alloc(u8, bucket_counts.items.len);
+                    }
+                    histogram.* = .{
+                        .bucket_counts = try bucket_counts.toOwnedSlice(self.allocator),
+                        .bucket_upper_bounds = try bucket_upper_bounds.toOwnedSlice(self.allocator),
+                        .bucket_counts_u8 = bucket_counts_u8,
+                        .total_count = histogram_count,
+                        .total_sum = 0,
+                    };
+
+                    histogram.updateBucketCountU8();
+                    std.log.warn("Finished histogram: {}", .{histogram});
+                    state = .first;
+                },
+            }
         }
+    }
+
+    fn parseBucketName(allocator: std.mem.Allocator, line: []const u8) error{ InvalidInput, OutOfMemory }![]const u8 {
+        const bucket = std.mem.find(u8, line, "_bucket{") orelse return error.InvalidInput;
+        const last_label = std.mem.findLast(u8, line, ",le=\"") orelse return error.InvalidInput;
+
+        return try std.mem.join(allocator, "", &.{ line[0..bucket], line[bucket + "_bucket".len .. last_label], "}" });
+    }
+
+    fn parseBucketData(line: []const u8) error{InvalidInput}!struct { i64, u64 } {
+        const le_start = std.mem.findLast(u8, line, ",le=\"") orelse return error.InvalidInput;
+        const rest = line[le_start + ",le=\"".len ..];
+        const le_end = std.mem.findScalar(u8, rest, '"') orelse return error.InvalidInput;
+        const le_str = rest[0..le_end];
+
+        const upper_bound = if (std.mem.eql(u8, le_str, "+Inf"))
+            std.math.maxInt(i64)
+        else
+            std.fmt.parseInt(i64, le_str, 10) catch return error.InvalidInput;
+
+        const last_space = std.mem.findScalarLast(u8, line, ' ') orelse return error.InvalidInput;
+        const count_str = std.mem.trim(u8, line[last_space + 1 ..], " \n\r\t");
+        const count = std.fmt.parseInt(u64, count_str, 10) catch return error.InvalidInput;
+
+        return .{ upper_bound, count };
     }
 };
 
