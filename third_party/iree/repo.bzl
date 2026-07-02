@@ -1,4 +1,5 @@
 load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
+load("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
 
 def repo():
     git_repository(
@@ -16,8 +17,10 @@ def repo():
             "//third_party/iree:fix-gemma4-encode.patch",
             "//third_party/iree:fix-added-token-matching.patch",
             "//third_party/iree:futex-public-api-header.patch",
+            "//third_party/iree:match-hf-tokenizer.patch",
         ],
         patch_args = ["-p1"],
     )
 
-    #new_local_repository(name = "flashattn", build_file="//:third_party/flashattn/BUILD.bazel", path="/home/corendos/flashattn/")
+    # Use this if you want to use a local copy of IREE instead of the git repository. Make sure to update the path to point to your local IREE checkout.
+    #new_local_repository(name = "iree", build_file="//:third_party/iree/BUILD.bazel", path="/home/corendos/iree/")
