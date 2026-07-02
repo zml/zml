@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const zml = @import("zml");
+const attention = zml.attention.attention;
 
 const inference = @import("inference.zig");
 const model = @import("model.zig");
@@ -161,17 +162,19 @@ pub const Session = struct {
         var prefill_tokens_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, prefill_tokens_slice, .replicated);
         defer prefill_tokens_buffer.deinit();
 
-        var num_tokens_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.len, .u32);
-        defer num_tokens_buffer.deinit();
-
-        const attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata) = switch (self.compiled_model.params.prefill_attention_parameters) {
+        var attention_metadata_buffers: zml.Bufferized(attention.Metadata) = switch (self.compiled_model.params.prefill_attention_parameters) {
             .attnd => .{ .attnd = .{
-                .conversation_id = try zml.Buffer.scalar(self.io, self.platform, self.conversation_id, .u64),
-                .layer_id = try zml.Buffer.scalar(self.io, self.platform, 0, .u16),
-                .num_tokens = try zml.Buffer.scalar(self.io, self.platform, all_tokens.len, .u32),
+                .conversation_id = try .scalar(self.io, self.platform, self.conversation_id, .u64),
+                .layer_id = try .scalar(self.io, self.platform, 0, .u16),
+                .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32),
             } },
-            .metal_fa => .{ .metal_fa = .{ .num_tokens = num_tokens_buffer } },
+            .metal_fa => .{ .metal_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
             .vanilla, .cuda_fa2, .cuda_fa3, .nki => self.attention_metadata_buffers,
+        };
+
+        defer switch (self.compiled_model.params.prefill_attention_parameters) {
+            .attnd, .metal_fa => attention.Metadata.deinitBuffer(&attention_metadata_buffers),
+            .vanilla, .cuda_fa2, .cuda_fa3, .nki => {},
         };
 
         try self.compiled_model.prefill.run(.{

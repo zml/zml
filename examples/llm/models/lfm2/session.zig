@@ -120,11 +120,14 @@ pub const Session = struct {
         var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice, .replicated);
         defer actual_seq_len_buf.deinit();
 
-        var num_tokens_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.len, .u32);
-        defer num_tokens_buffer.deinit();
-        const attention_metadata_buffers: zml.Bufferized(attention.Metadata) = switch (self.attention_metadata_buffers) {
-            .metal_fa => .{ .metal_fa = .{ .num_tokens = num_tokens_buffer } },
+        var attention_metadata_buffers: zml.Bufferized(attention.Metadata) = switch (self.attention_metadata_buffers) {
+            .metal_fa => .{ .metal_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
             else => self.attention_metadata_buffers,
+        };
+
+        defer switch (attention_metadata_buffers) {
+            .metal_fa => attention.Metadata.deinitBuffer(&attention_metadata_buffers),
+            else => {},
         };
 
         try self.compiled_model.prefill.run(.{
