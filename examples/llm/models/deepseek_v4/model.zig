@@ -5,7 +5,6 @@ const zml = @import("zml");
 const common = @import("../common.zig");
 const inference = @import("inference.zig");
 const attention = @import("sparse_mla.zig");
-const moe_ops = @import("moe.zig");
 
 const log = std.log.scoped(.deepseek_v4);
 
@@ -1307,28 +1306,6 @@ const MoE = struct {
         SharedExpert.unloadBuffers(&self.shared_experts);
     }
 
-    fn forwardRoutedExpert(
-        x: zml.Tensor,
-        weight: zml.Tensor,
-        gate_up_weight: zml.Tensor,
-        gate_up_scale: zml.Tensor,
-        w2_weight: zml.Tensor,
-        w2_scale: zml.Tensor,
-        block_size: usize,
-        activation_threshold: f32,
-    ) zml.Tensor {
-        const threshold = zml.Tensor.scalar(activation_threshold, .f32);
-
-        const gate_up = FP4Linear.forwardWith(gate_up_weight, gate_up_scale, x, block_size, 32, zml.Shape.toTag(.d)).convert(.f32);
-        var gate = gate_up.slice1d(.dout, .{ .start = 0, .step = 2 });
-        gate = zml.Tensor.select(gate.cmp(.GT, threshold), threshold, gate);
-        const up = gate_up.slice1d(.dout, .{ .start = 1, .step = 2 }).clamp(threshold.negate(), threshold);
-
-        var hidden = gate.silu().mul(up);
-        hidden = hidden.mul(weight.appendAxes(.{.dout}).broad(hidden.shape()));
-        return FP4Linear.forwardWith(w2_weight, w2_scale, hidden.convert(x.dtype()), block_size, 32, zml.Shape.toTag(.dout));
-    }
-
     pub fn forward(
         self: MoE,
         x: zml.Tensor,
@@ -1341,54 +1318,28 @@ const MoE = struct {
             .batch,
             .seq,
         }), "expect input tokens to has tags (.batch, .seq) but got {f}", .{input_ids.shape()});
-        _ = moe_metadata; // local A16W4 path builds its routing metadata from top-k tensors.
         const topk_weight, const topk_ids = self.router.forward(x, input_ids);
 
-        return switch (moe_parameters) {
-            .triton => {
-                var routed = moe_ops.forwardMoe(
-                    x,
-                    topk_ids,
-                    topk_weight,
-                    self.gate_up,
-                    self.gate_up_scale,
-                    null,
-                    self.down,
-                    self.down_scale,
-                    null,
-                    self.activation_threshold,
-                    moe_parameters,
-                ) catch |err| stdx.debug.panic("A16W4 MoE failed: {}", .{err});
-                routed = routed.convert(.f32).add(self.shared_experts.forward(x).convert(.f32));
-                return routed.convert(x.dtype());
-            },
-            .vanilla => {
-                var y = zml.Tensor.zeroes(x.shape().withDtype(.f32));
+        const moe_input = x.merge(.{ .b = .{ .batch, .seq } });
 
-                const weight_dtype = self.gate_up.dtype();
-                const scale_dtype = self.gate_up_scale.dtype();
+        var routed = zml.moe.forwardMoe_fp4(
+            moe_input,
+            topk_ids,
+            topk_weight,
+            self.gate_up,
+            self.gate_up_scale,
+            null,
+            self.down,
+            self.down_scale,
+            null,
+            self.activation_threshold,
+            moe_metadata,
+            moe_parameters,
+        ) catch |err| stdx.debug.panic("A16W4 MoE failed: {}", .{err});
 
-                for (0..@as(usize, @intCast(self.router.k))) |route_idx| {
-                    const expert_ids = topk_ids.choose1d(.eid, @intCast(route_idx));
-                    const weight = topk_weight.choose1d(.eid, @intCast(route_idx));
-                    const routed = forwardRoutedExpert(
-                        x,
-                        weight,
-                        self.gate_up.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
-                        self.gate_up_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
-                        self.down.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(weight_dtype),
-                        self.down_scale.convert(.bf16).gather(.{ .expert = expert_ids }, .{}).convert(scale_dtype),
-                        self.block_size,
-                        self.activation_threshold,
-                    ).convert(.f32);
-
-                    y = y.add(routed);
-                }
-
-                y = y.add(self.shared_experts.forward(x).convert(.f32));
-                return y.convert(x.dtype());
-            },
-        };
+        routed = routed.reshape(x.shape());
+        routed = routed.convert(.f32).add(self.shared_experts.forward(x).convert(.f32));
+        return routed.convert(x.dtype());
     }
 };
 
@@ -1484,51 +1435,6 @@ const SharedExpert = struct {
 
         const x_ = gate.silu().mul(up);
         return self.w2.forward(x_.convert(x.dtype()));
-    }
-};
-
-const FP4Linear = struct {
-    scale: zml.Tensor,
-    weight: zml.Tensor,
-    act_block_size: usize,
-    weight_block_size: usize,
-    tag: zml.Shape.Tag,
-
-    pub fn init(store: zml.io.TensorStore.View, tagz: anytype, scale_tagz: anytype, act_block_size: usize, proj_tag: anytype) FP4Linear {
-        return .{
-            .scale = store.createTensor("scale", null, .replicated).withTags(scale_tagz),
-            .weight = store.createTensor("weight", tagz, .replicated),
-            .act_block_size = act_block_size,
-            .tag = zml.Shape.toTag(proj_tag),
-        };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(FP4Linear)) void {
-        self.scale.deinit();
-        self.weight.deinit();
-    }
-
-    fn dequantizePackedWeightF32(weight_: zml.Tensor, scale: zml.Tensor, weight_block_size: usize) zml.Tensor {
-        const logical_weight_shape = weight_.shape().set(-1, weight_.dim(-1) * 2);
-        const weight = weight_.bitCast(.f4e2m1).reshape(logical_weight_shape).convert(.f32);
-
-        const scale_shape = scale.shape();
-        const scale_3d = scale.convert(.f32).reshape(scale_shape.insert(.last, .{1}));
-        const scale_broad = scale_3d.broad(scale_shape.insert(.last, .{weight_block_size}));
-        const scale_expanded = scale_broad.reshape(logical_weight_shape);
-
-        return weight.mul(scale_expanded);
-    }
-
-    fn forwardWith(weight: zml.Tensor, scale: zml.Tensor, x: zml.Tensor, act_block_size: usize, weight_block_size: usize, contract_tag: zml.Shape.Tag) zml.Tensor {
-        const x_fp8, const x_scale = to_fp8(x, @intCast(act_block_size), true);
-        const x_dequant = FP8Linear.dequantizeActivationF32(x_fp8, x_scale, act_block_size, contract_tag);
-        const weight_dequant = dequantizePackedWeightF32(weight, scale, weight_block_size);
-        return x_dequant.dot(weight_dequant, contract_tag).convert(.bf16);
-    }
-
-    pub fn forward(self: FP4Linear, x: zml.Tensor) zml.Tensor {
-        return forwardWith(self.weight, self.scale, x, self.act_block_size, self.weight_block_size, self.tag);
     }
 };
 
