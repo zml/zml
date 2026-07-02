@@ -98,6 +98,7 @@ zig_library(
         "moe/mosaic_tpu.zig",
         "moe/mosaic_tpu_kernels/gmm_ep.zig",
         "moe/triton.zig",
+        "moe/triton_kernels/a16w4_kernel.zig",
         "moe/triton_kernels/triton_kernels.zig",
         "nn.zig",
         "ops.zig",
