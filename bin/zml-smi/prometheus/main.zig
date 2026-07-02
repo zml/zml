@@ -185,9 +185,10 @@ pub const Model = struct {
                         .show_bounds = true,
                         .label = m.name,
                     };
-                    const bar_surf = try bar_chart.draw(tui.ui.fixedSize(ctx, (ctx.max.width orelse 40), m.chart_height + 3));
+                    const bar_chart_height = bar_chart.height();
+                    const bar_surf = try bar_chart.draw(tui.ui.fixedSize(ctx, (ctx.max.width orelse 40), bar_chart_height));
                     try sb.add(row, 0, bar_surf);
-                    row += @as(i17, @intCast(m.chart_height + 3));
+                    row += @intCast(bar_chart_height);
                 },
                 .counter => |counter| {
                     // TODO: display counter
