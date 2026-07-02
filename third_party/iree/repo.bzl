@@ -5,7 +5,7 @@ def repo():
     git_repository(
         name = "iree",
         remote = "https://github.com/iree-org/iree.git",
-        commit = "71af3a5e41a8e265330bc693194c708cf6df4724",
+        commit = "4d4e97d00f099a21f38eeff26f82a6d9e3643a11",
         sparse_checkout_patterns = [
             "runtime/src/**",
             "build_tools/bazel/**",
@@ -14,9 +14,7 @@ def repo():
         ],
         patches = [
             "//third_party/iree:tokenizer-only.patch",
-            "//third_party/iree:fix-gemma4-encode.patch",
             "//third_party/iree:fix-added-token-matching.patch",
-            "//third_party/iree:futex-public-api-header.patch",
             "//third_party/iree:match-hf-tokenizer.patch",
         ],
         patch_args = ["-p1"],
