@@ -257,8 +257,14 @@ pub const Model = struct {
                     row += @intCast(bar_chart_height);
                 },
                 .counter => |counter| {
-                    // TODO: display counter
-                    _ = counter;
+                    const counter_text = try std.fmt.allocPrint(ctx.arena, "{s}: {d}", .{ m.name, counter.current });
+                    const counter_surf = try tui.ui.drawRichLine(
+                        ctx,
+                        &.{.{ .text = counter_text, .style = tui.theme.value_style }},
+                        ctx.max.width orelse 40,
+                    );
+                    try sb.add(row, 0, counter_surf);
+                    row += 1;
                 },
             }
         }
@@ -545,7 +551,7 @@ test "parse counter metrics" {
     defer data.deinit();
 
     var content_reader: std.Io.Reader = .fixed(content);
-    try data.parsePrometheusMetrics(&content_reader);
+    try data.parsePrometheusMetrics(&content_reader, null);
 
     const metrics = data.metrics;
     try std.testing.expectEqual(3, metrics.count());
@@ -609,7 +615,7 @@ test "parse histogram" {
     var data: Metrics = try .init(std.testing.allocator);
     defer data.deinit();
     var content_reader: std.Io.Reader = .fixed(content);
-    try data.parsePrometheusMetrics(&content_reader);
+    try data.parsePrometheusMetrics(&content_reader, null);
 
     const metrics = data.metrics;
     try std.testing.expectEqual(1, metrics.count());
@@ -734,7 +740,7 @@ test "parse several histograms" {
     var data: Metrics = try .init(std.testing.allocator);
     defer data.deinit();
     var content_reader: std.Io.Reader = .fixed(content);
-    try data.parsePrometheusMetrics(&content_reader);
+    try data.parsePrometheusMetrics(&content_reader, null);
 
     const metrics = data.metrics;
     try std.testing.expectEqual(3, metrics.count());
