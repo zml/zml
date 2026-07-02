@@ -5,12 +5,23 @@ const tui = @import("zml-smi/tui");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 
+const log = std.log.scoped(.prometheus);
+
+pub const std_options: std.Options = .{
+    .log_level = .info,
+    .log_scope_levels = &.{
+        .{ .scope = .prometheus, .level = .info },
+    },
+};
+
 pub fn main(init: std.process.Init) !void {
+    var model: Model = try .init(init.gpa, init.io, "http://gh200:8001/metrics");
+    defer model.deinit();
+
+    try model.updateMetrics();
+
     var app = try vaxis.vxfw.App.init(init.gpa, init.io);
     defer app.deinit();
-
-    var model: Model = try .init(init.gpa, init.io);
-    defer model.deinit();
 
     try app.run(tui.ui.widget(&model), .{});
 }
@@ -82,12 +93,14 @@ pub const Metric = struct {
 pub const Model = struct {
     allocator: std.mem.Allocator,
     metrics: Metrics,
+    url: []const u8,
     client: std.http.Client,
     content: std.ArrayList(u8) = .empty,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Model {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, url: []const u8) !Model {
         return .{
             .allocator = allocator,
+            .url = url,
             .metrics = try .init(allocator),
             .client = .{ .allocator = allocator, .io = io },
         };
@@ -95,6 +108,7 @@ pub const Model = struct {
 
     pub fn deinit(self: *Model) void {
         self.client.deinit();
+        self.content.deinit(self.allocator);
         self.metrics.deinit();
     }
 
@@ -119,7 +133,7 @@ pub const Model = struct {
     }
 
     pub fn updateMetrics(self: *Model) !void {
-        const content = try self.fetchMetrics("http://gh200:8001/metrics");
+        const content = try self.fetchMetrics(self.url);
         var reader: std.Io.Reader = .fixed(content);
         try self.metrics.parsePrometheusMetrics(&reader);
     }
@@ -128,17 +142,16 @@ pub const Model = struct {
         self: *Model,
         url: []const u8,
     ) ![]const u8 {
-        var req = try std.http.Client.request(&self.client, .GET, try std.Uri.parse(url), .{ .keep_alive = false });
-        defer req.deinit();
-
-        try req.sendBodiless();
-        var response = try req.receiveHead(&.{});
-
         var body: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &self.content);
         defer body.deinit();
 
-        const reader = response.reader(&.{});
-        _ = try reader.stream(&body.writer, .limited(64 * 1024));
+        _ = try self.client.fetch(.{
+            .location = .{ .url = url },
+            .method = .GET,
+            .extra_headers = &.{},
+            .response_writer = &body.writer,
+        });
+
         self.content = body.toArrayList();
         return self.content.items;
     }
@@ -152,8 +165,8 @@ pub const Model = struct {
                 .gauge => |g| {
                     const gauge: tui.Gauge = .{
                         .value = g.asPercentage(),
-                        .label = m.label,
-                        .suffix = m.suffix,
+                        .label = m.name,
+                        .suffix = "",
                         .label_reserve = 0,
                         .suffix_reserve = 0,
                     };
@@ -234,7 +247,7 @@ pub const Metrics = struct {
                     } else if (std.mem.eql(u8, type_str, "gauge")) {
                         try self.parseGauges(reader, name);
                     } else {
-                        std.log.warn("Unknown type: {s}", .{type_str});
+                        log.warn("Unknown type: {s}", .{type_str});
                     }
                 }
             }
@@ -317,8 +330,9 @@ pub const Metrics = struct {
             if (first[0] == '#') return;
 
             const line = (try reader.takeDelimiter('\n')) orelse return;
+            if (line.len == 0) continue :lines;
 
-            std.log.warn("state: {}, line: {s}", .{ state, line });
+            // log.warn("state: {}, line: {s}", .{ state, line });
             std.debug.assert(std.mem.eql(u8, name, line[0..name.len]));
 
             const first_label = std.mem.findScalar(u8, line, '{') orelse return error.InvalidInput;
@@ -332,6 +346,7 @@ pub const Metrics = struct {
                     };
 
                     const entry = try self.metrics.getOrPut(self.allocator, name_with_labels);
+                    log.debug("Starting histogram: {s}", .{name_with_labels});
                     found: switch (entry.found_existing) {
                         true => {
                             if (entry.value_ptr.value != .histogram) continue :found false;
@@ -355,18 +370,16 @@ pub const Metrics = struct {
                             bucket_counts_u8 = "";
                         },
                     }
-
-                    const upper, const cnt = try parseBucketData(line);
-                    try bucket_upper_bounds.append(self.allocator, upper);
-                    try bucket_counts.append(self.allocator, cnt);
-
-                    state = .bucket;
+                    continue :state .bucket;
                 },
                 .bucket => {
                     if (std.mem.eql(u8, histogram_metric_stream, "count")) continue :state .count;
 
                     std.debug.assert(std.mem.eql(u8, histogram_metric_stream, "bucket"));
-                    const upper, const cnt = try parseBucketData(line);
+                    const upper, const cnt = parseBucketData(line) catch {
+                        log.warn("Invalid line: {s}", .{line});
+                        continue :lines;
+                    };
                     try bucket_upper_bounds.append(self.allocator, upper);
                     try bucket_counts.append(self.allocator, cnt);
 
@@ -395,7 +408,7 @@ pub const Metrics = struct {
                     };
 
                     histogram.updateBucketCountU8();
-                    std.log.warn("Finished histogram: {}", .{histogram});
+                    log.debug("Finished histogram: {}", .{histogram});
                     state = .first;
                 },
             }
@@ -514,4 +527,129 @@ test "parse histogram" {
     ) orelse return error.NotFound;
     try std.testing.expectEqual(33, token_itl.value.histogram.bucket_counts.len);
     try std.testing.expectEqual(12121, token_itl.value.histogram.bucket_counts[8]);
+}
+
+test "parse several histograms" {
+    const content =
+        \\# HELP http_requests_latency http_requests latency handled by the server.
+        \\# TYPE http_requests_latency histogram
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="1"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="2"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="3"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="4"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="5"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="6"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="7"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="8"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="11"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="16"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="22"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="30"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="41"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="56"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="76"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="104"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="143"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="195"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="265"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="362"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="494"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="674"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="919"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="1254"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="1710"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="2332"} 0
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="3180"} 1
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="4337"} 2
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="5914"} 5
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="8066"} 19
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="10999"} 46
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="15000"} 89
+        \\http_requests_latency_bucket{path="/v1/chat/completions",method="POST",le="+Inf"} 334
+        \\http_requests_latency_count{path="/v1/chat/completions",method="POST"} 334
+        \\http_requests_latency_sum{path="/v1/chat/completions",method="POST"} 10710957
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="1"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="2"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="3"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="4"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="5"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="6"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="7"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="8"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="11"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="16"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="22"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="30"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="41"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="56"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="76"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="104"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="143"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="195"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="265"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="362"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="494"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="674"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="919"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="1254"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="1710"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="2332"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="3180"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="4337"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="5914"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="8066"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="10999"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="15000"} 115
+        \\http_requests_latency_bucket{path="/metrics",method="GET",le="+Inf"} 115
+        \\http_requests_latency_count{path="/metrics",method="GET"} 115
+        \\http_requests_latency_sum{path="/metrics",method="GET"} 0
+        \\http_requests_latency_bucket{path="/health",method="GET",le="1"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="2"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="3"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="4"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="5"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="6"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="7"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="8"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="11"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="16"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="22"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="30"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="41"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="56"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="76"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="104"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="143"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="195"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="265"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="362"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="494"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="674"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="919"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="1254"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="1710"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="2332"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="3180"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="4337"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="5914"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="8066"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="10999"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="15000"} 1
+        \\http_requests_latency_bucket{path="/health",method="GET",le="+Inf"} 1
+        \\http_requests_latency_count{path="/health",method="GET"} 1
+        \\http_requests_latency_sum{path="/health",method="GET"} 0
+    ;
+
+    var data: Metrics = try .init(std.testing.allocator);
+    defer data.deinit();
+    var content_reader: std.Io.Reader = .fixed(content);
+    try data.parsePrometheusMetrics(&content_reader);
+
+    const metrics = data.metrics;
+    try std.testing.expectEqual(3, metrics.count());
+    const health = metrics.get(
+        \\http_requests_latency{path="/health",method="GET"}
+    ) orelse return error.NotFound;
+    try std.testing.expectEqual(33, health.value.histogram.bucket_counts.len);
+    try std.testing.expectEqual(1, health.value.histogram.total_count);
 }
