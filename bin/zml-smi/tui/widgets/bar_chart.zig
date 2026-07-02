@@ -1,8 +1,10 @@
 const std = @import("std");
+
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
-const theme = @import("../theme.zig");
+
 const ui = @import("../lib/ui.zig");
+const theme = @import("../theme.zig");
 
 const BarChart = @This();
 
@@ -16,6 +18,7 @@ pub const BucketData = struct {
 buckets: []const BucketData,
 bar_height: u16 = 5,
 show_values: bool = true,
+show_bounds: bool = true,
 label: ?[]const u8 = null,
 
 pub fn draw(self: *const BarChart, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -55,6 +58,24 @@ fn writeStr(surface: *vxfw.Surface, col: u16, row: u16, text: []const u8, style:
     }
 }
 
+/// Format a number with K/M/G/T/P suffixes for powers of 1024
+fn formatBound(arena: std.mem.Allocator, value: i64) std.mem.Allocator.Error![]const u8 {
+    const units = [_][]const u8{
+        "", "K", "M", "G", "T", "P", "H",
+    };
+
+    var i: u8 = 0;
+    var current: i64 = value;
+
+    while (current >= 1000 and i < units.len) : (i += 1) {
+        current = @divFloor(current, 1000);
+    }
+
+    const result = try std.fmt.allocPrint(arena, "{d}{s}", .{ current, units[i] });
+    std.debug.assert(result.len <= 5);
+    return result;
+}
+
 /// Render bar chart data into an existing surface at the given offset.
 pub fn renderTo(self: *const BarChart, arena: std.mem.Allocator, ctx: vxfw.DrawContext, surface: *vxfw.Surface, col_offset: u16, row_offset: u16, w: u16) std.mem.Allocator.Error!void {
     const bar_width: u16 = 4; // Fixed width for each bar
@@ -85,6 +106,9 @@ pub fn renderTo(self: *const BarChart, arena: std.mem.Allocator, ctx: vxfw.DrawC
 
         if (bucket.percentage == 0) continue;
 
+        // Skip display of the last bucket (typically has arbitrary large upper bound)
+        const is_last_bucket = bucket_idx == self.buckets.len - 1;
+
         // Calculate filled height and empty height
         const filled_height = if (max_percentage > 0) @as(u16, @intCast(bucket.percentage * @as(u32, chart_height) / @as(u32, max_percentage))) else 0;
         const empty_height = chart_height - filled_height;
@@ -100,10 +124,10 @@ pub fn renderTo(self: *const BarChart, arena: std.mem.Allocator, ctx: vxfw.DrawC
             }
         }
 
-        // Draw filled part
+        // Draw filled part (from bottom up)
         const color = theme.colorForPercent(bucket.percentage);
-        for (filled_height..chart_height) |row| {
-            const row_pos = row_offset + @as(u16, @intCast(row));
+        for (0..filled_height) |row| {
+            const row_pos = row_offset + @as(u16, @intCast(chart_height - 1 - row));
             for (0..bar_width) |bar_col_idx| {
                 surface.writeCell(bar_col + @as(u16, @intCast(bar_col_idx)), row_pos, .{
                     .char = .{ .grapheme = "█", .width = 1 },
@@ -112,7 +136,7 @@ pub fn renderTo(self: *const BarChart, arena: std.mem.Allocator, ctx: vxfw.DrawC
             }
         }
 
-        // Show value labels if enabled
+        // Show value and bound labels (stacked)
         if (self.show_values) {
             const value_str = try std.fmt.allocPrint(arena, "{d}%", .{bucket.percentage});
             const value_w = @as(u16, @intCast(ctx.stringWidth(value_str)));
@@ -121,6 +145,24 @@ pub fn renderTo(self: *const BarChart, arena: std.mem.Allocator, ctx: vxfw.DrawC
             for (0..value_w) |col_idx| {
                 const ch_str = value_str[col_idx .. col_idx + 1];
                 surface.writeCell(value_pos + @as(u16, @intCast(col_idx)), value_row, .{
+                    .char = .{ .grapheme = ch_str, .width = 1 },
+                    .style = theme.dim_style,
+                });
+            }
+        }
+
+        if (self.show_bounds and !is_last_bucket) {
+            const bound_str = try formatBound(arena, bucket.upper_bound);
+            const bound_w = @as(u16, @intCast(ctx.stringWidth(bound_str)));
+            const bound_pos = if (bound_w < bar_width)
+                bar_col + @as(u16, @intCast(bar_width / 2 - bound_w / 2))
+            else
+                bar_col;
+            const bound_row: u16 = row_offset + chart_height + 2;
+
+            for (0..bound_w) |col_idx| {
+                const ch_str = bound_str[col_idx .. col_idx + 1];
+                surface.writeCell(bound_pos + @as(u16, @intCast(col_idx)), bound_row, .{
                     .char = .{ .grapheme = ch_str, .width = 1 },
                     .style = theme.dim_style,
                 });

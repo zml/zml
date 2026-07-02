@@ -182,6 +182,7 @@ pub const Model = struct {
                         .buckets = bars,
                         .bar_height = m.chart_height,
                         .show_values = true,
+                        .show_bounds = true,
                         .label = m.name,
                     };
                     const bar_surf = try bar_chart.draw(tui.ui.fixedSize(ctx, (ctx.max.width orelse 40), m.chart_height + 3));
