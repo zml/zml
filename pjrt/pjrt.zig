@@ -99,7 +99,6 @@ pub const Api = struct {
     pub fn loadFrom(library: [:0]const u8) !*const Api {
         const basename = std.Io.Dir.path.basename(library);
         log.info("Loading: {s}...", .{basename});
-        defer log.info("Loaded: {s}", .{basename});
 
         var lib: std.DynLib = switch (builtin.os.tag) {
             .linux, .macos => blk: {
@@ -124,16 +123,21 @@ pub const Api = struct {
             },
         };
 
-        return fromDynLib(&lib);
+        const api = fromDynLib(&lib) catch |err| {
+            log.err("Unable to load PJRT API from plugin: {s}: {}", .{ library, err });
+            return err;
+        };
+        log.info("Loaded: {s}", .{basename});
+        return api;
     }
 
     pub fn fromDynLib(lib: *std.DynLib) !*const Api {
         const DynGetPjrtApi = lib.lookup(*const fn () callconv(.c) *const Api, "GetPjrtApi") orelse {
-            std.debug.panic("Unable to find GetPjrtApi symbol in library", .{});
+            return error.MissingGetPjrtApi;
         };
 
         const api = DynGetPjrtApi();
-        _ = api.call(.PJRT_Plugin_Initialize, .{}) catch unreachable;
+        _ = try api.call(.PJRT_Plugin_Initialize, .{});
 
         return api;
     }
