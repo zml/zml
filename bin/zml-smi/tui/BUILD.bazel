@@ -20,6 +20,7 @@ zig_library(
         "print.zig",
         "theme.zig",
         "top.zig",
+        "widgets/bar_chart.zig",
         "widgets/braille_chart.zig",
         "widgets/chart.zig",
         "widgets/column_layout.zig",

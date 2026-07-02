@@ -4,6 +4,7 @@ pub const ui = @import("lib/ui.zig");
 pub const print = @import("print.zig");
 pub const theme = @import("theme.zig");
 pub const top = @import("top.zig");
+pub const BarChart = @import("widgets/bar_chart.zig");
 pub const BrailleChart = @import("widgets/braille_chart.zig");
 pub const Gauge = @import("widgets/gauge.zig");
 pub const TitledBorder = @import("widgets/titled_border.zig");

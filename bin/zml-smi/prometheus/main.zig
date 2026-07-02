@@ -42,25 +42,14 @@ pub const Metric = struct {
     pub const Histogram = struct {
         bucket_counts: []u64,
         bucket_upper_bounds: []i64,
-        bucket_counts_u8: []u8,
         total_count: u64,
         total_sum: i64,
 
-        pub const empty: Histogram = .{ .bucket_counts = &.{}, .bucket_upper_bounds = &.{}, .bucket_counts_u8 = &.{}, .total_count = 0, .total_sum = 0 };
-
-        pub fn updateBucketCountU8(hist: *Histogram) void {
-            const total_count = hist.total_count;
-            var prev: u64 = 0;
-            for (hist.bucket_counts_u8, hist.bucket_counts) |*count_u8, count| {
-                count_u8.* = @intCast(@divFloor(100 * (count - prev), total_count));
-                prev = count;
-            }
-        }
+        pub const empty: Histogram = .{ .bucket_counts = &.{}, .bucket_upper_bounds = &.{}, .total_count = 0, .total_sum = 0 };
 
         pub fn deinit(hist: *Histogram, allocator: std.mem.Allocator) void {
             allocator.free(hist.bucket_counts);
             allocator.free(hist.bucket_upper_bounds);
-            allocator.free(hist.bucket_counts_u8);
             hist.* = .empty;
         }
     };
@@ -163,6 +152,7 @@ pub const Model = struct {
         for (self.metrics.metrics.values()) |m| {
             switch (m.value) {
                 .gauge => |g| {
+                    if (g.max - g.min == 1) continue;
                     const gauge: tui.Gauge = .{
                         .value = g.asPercentage(),
                         .label = m.name,
@@ -176,13 +166,26 @@ pub const Model = struct {
                     if (row < 100) row += 1;
                 },
                 .histogram => |hist| {
-                    const braille: tui.BrailleChart = .{
-                        .values = hist.bucket_counts_u8,
-                        .height = m.chart_height,
+                    // Create bar chart data from histogram buckets
+                    const bars = try ctx.arena.alloc(tui.BarChart.BucketData, hist.bucket_counts.len);
+                    const total_count = hist.total_count;
+                    var prev: u64 = 0;
+                    for (bars, hist.bucket_counts, hist.bucket_upper_bounds) |*bar, count, upper_bound| {
+                        bar.* = .{
+                            .percentage = @intCast(@divFloor(100 * (count - prev), total_count)),
+                            .upper_bound = upper_bound,
+                        };
+                        prev = count;
+                    }
+
+                    const bar_chart: tui.BarChart = .{
+                        .buckets = bars,
+                        .bar_height = m.chart_height,
+                        .show_values = true,
                     };
-                    const braille_surf = try braille.draw(tui.ui.fixedSize(ctx, (ctx.max.width orelse 40) - 20, m.chart_height));
-                    try sb.add(row, 0, braille_surf);
-                    row += @as(i17, @intCast(m.chart_height));
+                    const bar_surf = try bar_chart.draw(tui.ui.fixedSize(ctx, (ctx.max.width orelse 40), m.chart_height + 2));
+                    try sb.add(row, 0, bar_surf);
+                    row += @as(i17, @intCast(m.chart_height + 2));
                 },
                 .counter => |counter| {
                     // TODO: display counter
@@ -320,7 +323,6 @@ pub const Metrics = struct {
         const State = enum { first, bucket, count, sum };
         var state: State = .first;
         var bucket_counts: std.ArrayList(u64) = undefined;
-        var bucket_counts_u8: []u8 = undefined;
         var bucket_upper_bounds: std.ArrayList(i64) = undefined;
         var histogram_count: u64 = 0;
         var histogram: *Metric.Histogram = undefined;
@@ -355,7 +357,6 @@ pub const Metrics = struct {
                             bucket_counts = .initBuffer(histogram.bucket_counts);
                             bucket_upper_bounds = .initBuffer(histogram.bucket_upper_bounds);
                             histogram_count = 0;
-                            bucket_counts_u8 = histogram.bucket_counts_u8;
                         },
                         false => {
                             entry.value_ptr.* = .{
@@ -367,7 +368,6 @@ pub const Metrics = struct {
                             bucket_counts = .empty;
                             bucket_upper_bounds = .empty;
                             histogram_count = 0;
-                            bucket_counts_u8 = "";
                         },
                     }
                     continue :state .bucket;
@@ -395,19 +395,13 @@ pub const Metrics = struct {
                 },
                 .sum => {
                     std.debug.assert(std.mem.eql(u8, histogram_metric_stream, "sum"));
-                    if (bucket_counts_u8.len != bucket_counts.items.len) {
-                        self.allocator.free(bucket_counts_u8);
-                        bucket_counts_u8 = try self.allocator.alloc(u8, bucket_counts.items.len);
-                    }
                     histogram.* = .{
                         .bucket_counts = try bucket_counts.toOwnedSlice(self.allocator),
                         .bucket_upper_bounds = try bucket_upper_bounds.toOwnedSlice(self.allocator),
-                        .bucket_counts_u8 = bucket_counts_u8,
                         .total_count = histogram_count,
                         .total_sum = 0,
                     };
 
-                    histogram.updateBucketCountU8();
                     log.debug("Finished histogram: {}", .{histogram});
                     state = .first;
                 },
