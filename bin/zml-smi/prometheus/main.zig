@@ -1,6 +1,7 @@
 const std = @import("std");
 const OoM = std.mem.Allocator.Error;
 
+const stdx = @import("stdx");
 const tui = @import("zml-smi/tui");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -14,8 +15,24 @@ pub const std_options: std.Options = .{
     },
 };
 
+const Args = struct {
+    server: []const u8 = "http://gh200:8001/metrics",
+    filter: ?[]const u8 = null,
+
+    pub const help =
+        \\ prometheus [--server=<url>] [--filter=<text>]
+        \\
+        \\ Display Prometheus metrics.
+        \\
+        \\ Flags:
+        \\ --server=<url>  prometheus server URL (default: http://gh200:8001/metrics)
+        \\ --filter=<text>  only show metrics containing this text
+    ;
+};
+
 pub fn main(init: std.process.Init) !void {
-    var model: Model = try .init(init.gpa, init.io, "http://gh200:8001/metrics");
+    const args = stdx.flags.parse(init.minimal.args, Args);
+    var model: Model = try .init(init.gpa, init.io, args.server, args.filter);
     defer model.deinit();
 
     try model.updateMetrics();
@@ -104,15 +121,17 @@ const ScrollState = struct {
 pub const Model = struct {
     allocator: std.mem.Allocator,
     metrics: Metrics,
-    url: []const u8,
+    server_url: []const u8,
+    filter: ?[]const u8 = null,
     client: std.http.Client,
     content: std.ArrayList(u8) = .empty,
     scroll: ScrollState = .{},
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, url: []const u8) !Model {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, url: []const u8, filter: ?[]const u8) !Model {
         return .{
             .allocator = allocator,
-            .url = url,
+            .server_url = url,
+            .filter = filter,
             .metrics = try .init(allocator),
             .client = .{ .allocator = allocator, .io = io },
         };
@@ -169,9 +188,9 @@ pub const Model = struct {
     }
 
     pub fn updateMetrics(self: *Model) !void {
-        const content = try self.fetchMetrics(self.url);
+        const content = try self.fetchMetrics(self.server_url);
         var reader: std.Io.Reader = .fixed(content);
-        try self.metrics.parsePrometheusMetrics(&reader);
+        try self.metrics.parsePrometheusMetrics(&reader, self.filter);
     }
 
     pub fn fetchMetrics(
@@ -300,10 +319,18 @@ pub const Metrics = struct {
         self.metrics.deinit(self.allocator);
     }
 
-    pub fn parsePrometheusMetrics(self: *Metrics, reader: *std.Io.Reader) !void {
+    pub fn parsePrometheusMetrics(self: *Metrics, reader: *std.Io.Reader, filter: ?[]const u8) !void {
         while (try reader.takeDelimiter('\n')) |line| {
             // Skip empty lines
             if (line.len == 0) continue;
+
+            // Skip if filter is applied and line doesn't contain the filter text
+            if (filter) |f| {
+                if (std.mem.indexOf(u8, line, f) == null) {
+                    // Filter doesn't match, skip this line
+                    continue;
+                }
+            }
 
             // Handle comments and TYPE declarations
             if (line[0] == '#') {

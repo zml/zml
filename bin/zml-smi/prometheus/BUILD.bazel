@@ -8,6 +8,7 @@ zig_binary(
     deps = [
         "//bin/zml-smi/utils:double_buffer",
         "//bin/zml-smi/tui",
+        "//stdx",
         "@libvaxis//:vaxis",
     ],
 )
