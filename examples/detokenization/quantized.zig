@@ -731,7 +731,7 @@ pub const Quantized = struct {
     }
     
     
-    pub fn dotQjlAsymmetric2(self: *Quantized, row: usize, query_lut: []const f32, query_total_sum: f32) f32 {
+    pub fn dotQjlAsymmetric1(self: *Quantized, row: usize, query_lut: []const f32, query_total_sum: f32) f32 {
         const row_quantized = &self.lm_head_qjl[row];
         const row_qjl_scale = self.qjl_row_scale[row];
 
@@ -749,15 +749,9 @@ pub const Quantized = struct {
         return row_qjl_scale * (2.0 * positive_sum - query_total_sum);
     }
 
-    pub fn dotQjlAsymmetric(self: *Quantized, row: usize, query_lut: []const f32, query_total_sum: f32) f32 {
+    pub fn dotQjlAsymmetric2(self: *Quantized, row: usize, query_lut: []const f32, query_total_sum: f32) f32 {
         const row_quantized = &self.lm_head_qjl[row];
         const row_qjl_scale = self.qjl_row_scale[row];
-    
-        // Optional but highly recommended if iterating in a tight loop over rows:
-        // Prefetch the NEXT vector in the dataset to hide RAM/L3 latency.
-        // if (row + 1 < self.lm_head_qjl.len) {
-        //     @prefetch(&self.lm_head_qjl[row + 1], .{ .rw = .read, .locality = 3, .cache = .data });
-        // }
     
         const row_bytes = std.mem.asBytes(&row_quantized.words)[0..512];
         
@@ -793,6 +787,56 @@ pub const Quantized = struct {
         const positive_sum = @reduce(.Add, acc_vec);
         return row_qjl_scale * (2.0 * positive_sum - query_total_sum);
     }
+
+    pub fn dotQjlAsymmetric3(self: *Quantized, row: usize, query_lut: []const f32, query_total_sum: f32) f32 {
+        const row_quantized = &self.lm_head_qjl[row];
+        const row_qjl_scale = self.qjl_row_scale[row];
+
+        std.debug.assert(query_lut.len >= 512 * 256);
+
+        const row_bytes = std.mem.asBytes(&row_quantized.words)[0..512];
+
+        const Vec8 = @Vector(8, f32);
+        var acc_vec: Vec8 = @splat(0.0);
+
+        for (0..64) |chunk_i| {
+            const i = chunk_i * 8;
+
+            const b0 = row_bytes[i];
+            const b1 = row_bytes[i + 1];
+            const b2 = row_bytes[i + 2];
+            const b3 = row_bytes[i + 3];
+            const b4 = row_bytes[i + 4];
+            const b5 = row_bytes[i + 5];
+            const b6 = row_bytes[i + 6];
+            const b7 = row_bytes[i + 7];
+
+            const lut_i0 = (i) * 256 + @as(usize, b0);
+            const lut_i1 = (i + 1) * 256 + @as(usize, b1);
+            const lut_i2 = (i + 2) * 256 + @as(usize, b2);
+            const lut_i3 = (i + 3) * 256 + @as(usize, b3);
+            const lut_i4 = (i + 4) * 256 + @as(usize, b4);
+            const lut_i5 = (i + 5) * 256 + @as(usize, b5);
+            const lut_i6 = (i + 6) * 256 + @as(usize, b6);
+            const lut_i7 = (i + 7) * 256 + @as(usize, b7);
+
+            const loaded_values: Vec8 = .{
+                query_lut[lut_i0],
+                query_lut[lut_i1],
+                query_lut[lut_i2],
+                query_lut[lut_i3],
+                query_lut[lut_i4],
+                query_lut[lut_i5],
+                query_lut[lut_i6],
+                query_lut[lut_i7],
+            };
+
+            acc_vec += loaded_values;
+        }
+
+        const positive_sum = @reduce(.Add, acc_vec);
+        return row_qjl_scale * (2.0 * positive_sum - query_total_sum);
+    }
     
     pub fn precomputeQjlAsymmetricLut(self: *Quantized, rotated_query: []const f32) f32 {
         std.debug.assert(rotated_query.len >= 4096);
@@ -825,7 +869,7 @@ pub const Quantized = struct {
         var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
         var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
         for (0..self.vocab_size) |i| {
-            const score = self.dotQjlAsymmetric(i, self.qjl_query_lut, query_total_sum);
+            const score = self.dotQjlAsymmetric3(i, self.qjl_query_lut, query_total_sum);
             if (score > top_scores[top_k_sliced - 1]) {
                 var insert_pos = top_k_sliced - 1;
                 while (insert_pos > 0 and score > top_scores[insert_pos - 1]) {
