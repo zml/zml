@@ -24,6 +24,11 @@ pub const GraphParams = struct {
     graph_type: GraphType = .Mips,
 };
 
+// TODO: prefetch data in dense neighbors loop
+// TODO: is we only ever use first L candidates, simply cap visited at L to simplify
+//       this also simplifies a lot the use of search_budget, as it can vary
+// TODO: 
+
 pub const GraphType = enum {
     Angular,
     Mips,
