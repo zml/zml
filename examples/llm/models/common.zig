@@ -49,10 +49,14 @@ pub const Shardings = struct {
     pub fn init(platform: *zml.Platform) !Shardings {
         switch (platform.target) {
             .tpu => {
+                const has_link_y = platform.physical_mesh.hasAxis(.link_y);
+
                 var strategy_experts: zml.Sharding.Strategy = .parseBindings(.{ .experts = .link_x });
-                strategy_experts.addFold(.link_x, &.{ .link_x, .link_y });
                 var strategy_model: zml.Sharding.Strategy = .parseBindings(.{ .model = .link_x });
-                strategy_model.addFold(.link_x, &.{ .link_x, .link_y });
+                if (has_link_y) {
+                    strategy_experts.addFold(.link_x, &.{ .link_x, .link_y });
+                    strategy_model.addFold(.link_x, &.{ .link_x, .link_y });
+                }
 
                 return .{
                     .model = try platform.registerShardingWithStrategy("model", .mesh(.{ .model = .high_bandwidth }), strategy_model),
