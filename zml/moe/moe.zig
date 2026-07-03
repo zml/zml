@@ -387,6 +387,7 @@ const Routing = struct {
     grid_m: i64,
     sorted_route_ids: zml.Tensor,
     sorted_weights: zml.Tensor,
+    active_routes: zml.Tensor,
     hist: zml.Tensor,
     offsets: zml.Tensor,
     expt_data: zml.Tensor,
@@ -638,7 +639,9 @@ const Triton = struct {
                             .logical(.AND, local_ids.cmp(.LT, zml.Tensor.scalar(local_num_experts, .i32)));
 
                         break :blk .{
-                            in_range.select(local_ids, zml.Tensor.scalar(0, .i32)),
+                            // Keep the static route shape, but use one-past-the-end as
+                            // a sentinel so local routing excludes non-local entries.
+                            in_range.select(local_ids, zml.Tensor.scalar(local_num_experts, .i32)),
                             in_range.select(sharded_inputs[2], zml.Tensor.scalar(0, sharded_inputs[2].dtype())),
                         };
                     };
@@ -720,11 +723,16 @@ const Triton = struct {
             },
         );
 
+        const active_routed = blk: {
+            const mask = routing.active_routes.broad(routed.shape().withDtype(.bool));
+            break :blk mask.select(routed, zml.Tensor.zeroes(routed.shape()));
+        };
+
         const token_ids = routing.sorted_route_ids.divByConst(routing.topk).withTags(.{.route});
         const output_flat_shape: zml.Shape = .init(.{ .token = routing.num_tokens, .d = input.dim(.d) }, .f32);
         const output_flat = zml.Tensor.zeroes(output_flat_shape).scatterSlices(
             .{ .token = token_ids },
-            routed.convert(.f32),
+            active_routed.convert(.f32),
             .{},
         );
 
@@ -747,9 +755,14 @@ const Triton = struct {
             break :blk (std.math.divCeil(i64, @max(num_routes - num_experts + 1, 0), block_m) catch unreachable) + num_experts - 1;
         };
 
-        const sorted = topk_ids.flatten().withTags(.{.route}).sort(.route, .{});
+        const route_ids = topk_ids.convert(.i32);
+        const valid_route_ids = route_ids.cmp(.GE, zml.Tensor.scalar(0, .i32))
+            .logical(.AND, route_ids.cmp(.LT, zml.Tensor.scalar(num_experts, .i32)));
+        const routable_ids = valid_route_ids.select(route_ids, zml.Tensor.scalar(num_experts, .i32));
+        const sorted = routable_ids.flatten().withTags(.{.route}).sort(.route, .{});
         const sorted_ids = sorted.values.withTags(.{.route}).convert(.i32);
         const sorted_route_ids = sorted.indices.withTags(.{.route}).convert(.i32);
+        const active_routes = sorted_ids.cmp(.LT, zml.Tensor.scalar(num_experts, .i32));
 
         const sorted_weights = topk_weights.flatten().withTags(.{.route})
             .gather(.{ .route = sorted_route_ids.rename(.{ .route = .sorted_route }) }, .{})
@@ -779,6 +792,7 @@ const Triton = struct {
             .grid_m = grid_m,
             .sorted_route_ids = sorted_route_ids,
             .sorted_weights = sorted_weights,
+            .active_routes = active_routes,
             .hist = hist,
             .offsets = offsets,
             .expt_data = expert_data,
