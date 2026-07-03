@@ -687,7 +687,7 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *quantized
         for (0..n) |embed_index| {
             const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
             zml_handler.tic(&zml_handler.timers.quant_search);
-            const top16 = try quantizer.sampleDense(embed);
+            const top16 = try quantizer.sampleQjlSymmetric(embed);
             zml_handler.toc(&zml_handler.timers.quant_search);
             total_count += 1;
             var found_top1 = false;
