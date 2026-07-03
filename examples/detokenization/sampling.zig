@@ -5,9 +5,11 @@ const main = @import("main.zig");
 const model_ = @import("model.zig");
 const llm_ = @import("llm.zig");
 const tokens = @import("tokens.zig");
+const algebra = @import("algebra.zig");
 
 const Zml_handler = main.Zml_handler;
 const Tokenizer = zml.tokenizer.Tokenizer;
+const LmHeadMatrix = algebra.LmHeadMatrix;
 
 pub const Sampler = struct {
     const SamplingCandidate = struct {
@@ -22,16 +24,16 @@ pub const Sampler = struct {
 
     allocator: std.mem.Allocator,
     tokenizer: Tokenizer,
-    lm_head: zml.Slice,
+    lm_head: *LmHeadMatrix,
     d: usize,
     vocab_size: usize,
     sampling_candidates: []SamplingCandidate,
     nb_candidates: usize,
     top_k: usize,
 
-    pub fn init(zml_handler: *Zml_handler, lm_head: zml.Slice) !Sampler {
-        const v: usize = @intCast(lm_head.shape.dim(0));
-        const d: usize = @intCast(lm_head.shape.dim(1));
+    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix) !Sampler {
+        const v: usize = lm_head.n;
+        const d: usize = lm_head.d;
 
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
         const tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
@@ -87,7 +89,7 @@ pub const Sampler = struct {
 
     
     pub fn computeLogit(self: *Sampler, token: usize, y: []const f32) f32 {
-        const row = self.lm_head.constItems(f32)[token * self.d ..][0..self.d];
+        const row = self.lm_head.data[token * self.d ..][0..self.d];
         var dot: f32 = 0.0;
         var norm2: f32 = 0.0;
         for (row, y) |weight, value| {

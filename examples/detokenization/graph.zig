@@ -1,5 +1,6 @@
 const std = @import("std");
 const zml = @import("zml");
+
 const main = @import("main.zig");
 const algebra = @import("algebra.zig");
 const save_load = @import("saveload.zig");
@@ -9,16 +10,17 @@ const sampling = @import("sampling.zig");
 
 const Tokenizer = zml.tokenizer.Tokenizer;
 const SimilarityMatrix = algebra.SimilarityMatrix;
+const LmHeadMatrix = algebra.LmHeadMatrix;
 const Zml_handler = main.Zml_handler;
 const Field_timer = main.Timing_handler.Field_timer;
 
 pub const GraphParams = struct {
-    k_max: usize = 32,
+    k_max: usize = 32,//64
     search_budget: usize = 2048,
     alpha: f32 = 1.0,
     vamana_passes: usize = 2,
     top_k: usize = 16,
-    L: usize = 512,
+    L: usize = 256,
     graph_type: GraphType = .Mips,
 };
 
@@ -47,15 +49,14 @@ pub const Graph = struct {
     io: std.Io,
     // dataset fields
     dim: usize,
-    lm_head: []f32,
     similarity_matrix: *SimilarityMatrix,
+    lm_head: *LmHeadMatrix,
     // graph fields
     // TODO: we can use smaller integer types
     n: usize,
     params: GraphParams,
     neighbors: []usize,
     nb_neighbors: []usize,
-    is_junk: []bool,
     medoid: usize,
     // the active number of candidates, the pool is kept sorted in the
     // range 0..L : this is the active pool
@@ -71,17 +72,13 @@ pub const Graph = struct {
     // explored by lazy search
     nb_expanded_neighbors: []usize,
     is_search_done: bool,
-    // for each node of the graph, tells if neighbors have been obtained
-    // with the pruning heuristic. in this case no neighbor would be removed
-    // if we run the pruning again
-    are_neighbors_pruned: []bool,
     // for each node, tells if the node was not found by greedy node search
     // during the last call to testNswExtention
     nsw_extension_search_missed: []bool,
     // utils
     sim_access: usize = 0,
 
-    pub fn init(zml_handler: *Zml_handler, lm_head: zml.Slice, matrix: *SimilarityMatrix, junk_rows: []const usize, medoid: usize, params: GraphParams) !Graph {
+    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, matrix: *SimilarityMatrix, params: GraphParams) !Graph {
         std.debug.assert(matrix.n > 0);
         std.debug.assert(params.k_max > 0);
         std.debug.assert(params.L > 0);
@@ -91,19 +88,6 @@ pub const Graph = struct {
         std.debug.assert(params.k_max < matrix.n);
 
         const allocator = zml_handler.allocator;
-
-        const lm_head_items = lm_head.constItems(f32);
-        std.debug.assert(lm_head_items.len == matrix.n * matrix.d);
-        const lm_head_data = try allocator.dupe(f32, lm_head_items);
-        errdefer allocator.free(lm_head_data);
-
-        const is_junk = try allocator.alloc(bool, matrix.n);
-        errdefer allocator.free(is_junk);
-        @memset(is_junk, false);
-        for (junk_rows) |row| is_junk[row] = true;
-
-        std.debug.assert(medoid < matrix.n);
-        std.debug.assert(!is_junk[medoid]);
 
         const neighbors = try allocator.alloc(usize, matrix.n * params.k_max);
         errdefer allocator.free(neighbors);
@@ -124,10 +108,6 @@ pub const Graph = struct {
         errdefer allocator.free(nb_expanded_neighbors);
         @memset(nb_expanded_neighbors, 0);
 
-        const are_neighbors_pruned = try allocator.alloc(bool, matrix.n);
-        errdefer allocator.free(are_neighbors_pruned);
-        @memset(are_neighbors_pruned, false);
-
         const nsw_extension_search_missed = try allocator.alloc(bool, matrix.n);
         errdefer allocator.free(nsw_extension_search_missed);
         @memset(nsw_extension_search_missed, false);
@@ -139,15 +119,14 @@ pub const Graph = struct {
             .zml_handler = zml_handler,
             .allocator = allocator,
             .io = zml_handler.io,
-            .dim = matrix.d,
-            .lm_head = lm_head_data,
+            .dim = lm_head.d,
+            .lm_head = lm_head,
             .n = matrix.n,
             .params = params,
             .neighbors = neighbors,
             .nb_neighbors = nb_neighbors,
-            .is_junk = is_junk,
             .similarity_matrix = matrix,
-            .medoid = medoid,
+            .medoid = 0,
             .L = 0,
             .visited = visited,
             .is_visited = is_visited,
@@ -155,21 +134,17 @@ pub const Graph = struct {
             .is_expanded = is_expanded,
             .nb_expanded_neighbors = nb_expanded_neighbors,
             .is_search_done = false,
-            .are_neighbors_pruned = are_neighbors_pruned,
             .nsw_extension_search_missed = nsw_extension_search_missed,
         };
     }
 
     pub fn deinit(self: *Graph) void {
-        self.allocator.free(self.lm_head);
         self.allocator.free(self.neighbors);
         self.allocator.free(self.nb_neighbors);
-        self.allocator.free(self.is_junk);
         self.allocator.free(self.visited);
         self.allocator.free(self.is_visited);
         self.allocator.free(self.is_expanded);
         self.allocator.free(self.nb_expanded_neighbors);
-        self.allocator.free(self.are_neighbors_pruned);
         self.allocator.free(self.nsw_extension_search_missed);
     }
 
@@ -188,7 +163,6 @@ pub const Graph = struct {
         errdefer self.allocator.free(new_neighbors);
 
         for (0..self.n) |node| {
-            std.debug.assert(self.is_junk[node] == other.is_junk[node]);
             const new_start = node * new_k_max;
 
             const self_start = node * self_k_max;
@@ -235,7 +209,6 @@ pub const Graph = struct {
         self.L = 0;
         self.nb_visited = 0;
         self.is_search_done = false;
-        @memset(self.are_neighbors_pruned, false);
 
         std.log.info("Merged graphs: k_max {d}+{d}->{d}", .{ self_k_max, other_k_max, new_k_max });
         std.log.info("Nb edges: {d}/{d} -> {d}", .{ initial_edges, other.nbEdges(), self.nbEdges() });
@@ -245,7 +218,7 @@ pub const Graph = struct {
 
     pub fn greedySearchNode(self: *Graph, query: usize) void {
         self.zml_handler.tic(&self.zml_handler.timers.greedy_search);
-        std.debug.assert(!self.is_junk[query]);
+        std.debug.assert(!self.lm_head.is_junk[query]);
         // initialize search at entry point
         self.initNodeSearch(query);
 
@@ -308,7 +281,7 @@ pub const Graph = struct {
     
     pub fn greedySearchNodeLazy(self: *Graph, query: usize) void {
         self.zml_handler.tic(&self.zml_handler.timers.greedy_search);
-        std.debug.assert(!self.is_junk[query]);
+        std.debug.assert(!self.lm_head.is_junk[query]);
         self.initNodeSearch(query);
         while (self.nb_visited < self.params.search_budget) {
             const expansion = self.popCandidateLazy();
@@ -344,9 +317,9 @@ pub const Graph = struct {
 
     
     pub fn scoreQueryNode(self: *const Graph, query: []const f32, node: usize) f32 {
-        self.zml_handler.tic(&self.zml_handler.timers.embed_dot);
-        std.debug.assert(!self.is_junk[node]);
-        const rows = self.lm_head;
+        //self.zml_handler.tic(&self.zml_handler.timers.embed_dot);
+        std.debug.assert(!self.lm_head.is_junk[node]);
+        const rows = self.lm_head.data;
         const row = rows[node * self.dim ..][0..self.dim];
 
         const simd_len = 32;
@@ -361,12 +334,13 @@ pub const Graph = struct {
             acc = @mulAdd(Vec, query_vec, row_vec, acc);
         }
         const dot = @reduce(.Add, acc);
-        self.zml_handler.toc(&self.zml_handler.timers.embed_dot);
-        return dot;
+        const scale = if (self.params.graph_type == .Mips) 1.0 else self.lm_head.row_norms[node];
+        //self.zml_handler.toc(&self.zml_handler.timers.embed_dot);
+        return dot / scale;
     }
 
     
-    pub fn initNodeSearch(self: *Graph, query: usize) void {
+    pub inline fn initNodeSearch(self: *Graph, query: usize) void {
         // at start, pool is empty
         std.debug.assert(!self.is_visited[self.medoid]);
 
@@ -381,7 +355,7 @@ pub const Graph = struct {
         self.is_search_done = false;
     }
 
-    pub fn initSearch(self: *Graph, query: []const f32) void {
+    pub inline fn initSearch(self: *Graph, query: []const f32) void {
         // at start, pool is empty
         std.debug.assert(!self.is_visited[self.medoid]);
 
@@ -396,7 +370,7 @@ pub const Graph = struct {
         self.is_search_done = false;
     }
 
-    pub fn initSearchPool(self: *Graph, pool: []const Candidate) void {
+    pub inline fn initSearchPool(self: *Graph, pool: []const Candidate) void {
         const entry_point = pool[0].node;
         const entry_sim = pool[0].similarity;
 
@@ -415,25 +389,17 @@ pub const Graph = struct {
     }
     
     
-    fn selectNodeEntryPoint(self: *Graph, query: usize) struct { usize, f32 } {
-        if (false) {
-            const entry_point = self.medoid;
-            const entry_sim = self.similarity(query, entry_point);
-            std.debug.assert(entry_point < self.n);
-            std.debug.assert(!self.is_visited[entry_point]);
-            return .{ entry_point, entry_sim };
-        } else {
-            var entry_point = (query + @divFloor(self.n, 2)) % self.n;
-            while (self.is_junk[entry_point]) {
-                const next = (entry_point + 5411) % self.n;
-                entry_point = next;
-            }
-            const entry_sim = self.similarity(query, entry_point);
-            return .{ entry_point, entry_sim };
+    pub inline fn selectNodeEntryPoint(self: *Graph, query: usize) struct { usize, f32 } {
+        var entry_point = (query + @divFloor(self.n, 2)) % self.n;
+        while (self.lm_head.is_junk[entry_point]) {
+            const next = (entry_point + 5411) % self.n;
+            entry_point = next;
         }
+        const entry_sim = self.similarity(query, entry_point);
+        return .{ entry_point, entry_sim };
     }
 
-    fn selectQueryEntryPoint(self: *Graph, query: []const f32) struct { usize, f32 } {
+    pub inline fn selectQueryEntryPoint(self: *Graph, query: []const f32) struct { usize, f32 } {
         const entry_point = self.medoid;
         const entry_sim = self.scoreQueryNode(query, entry_point);
         std.debug.assert(entry_point < self.n);
@@ -443,7 +409,7 @@ pub const Graph = struct {
 
     
     pub inline fn addNodeCandidate(self: *Graph, query: usize, node: usize) void {
-        std.debug.assert(!self.is_junk[node]);
+        std.debug.assert(!self.lm_head.is_junk[node]);
         std.debug.assert(!self.is_visited[node]);
         std.debug.assert(self.nb_visited > 0);
         const sim = self.similarity(node, query);
@@ -451,7 +417,7 @@ pub const Graph = struct {
     }
 
     pub inline fn addCandidate(self: *Graph, query: []const f32, node: usize) void {
-        std.debug.assert(!self.is_junk[node]);
+        std.debug.assert(!self.lm_head.is_junk[node]);
         std.debug.assert(!self.is_visited[node]);
         std.debug.assert(self.nb_visited > 0);
         const sim = self.scoreQueryNode(query, node);
@@ -459,9 +425,9 @@ pub const Graph = struct {
     }
 
     pub inline fn insert(self: *Graph, node: usize, sim: f32) void {
-        self.zml_handler.tic(&self.zml_handler.timers.insert_node);
+        //self.zml_handler.tic(&self.zml_handler.timers.insert_node);
 
-        std.debug.assert(!self.is_junk[node]);
+        std.debug.assert(!self.lm_head.is_junk[node]);
         std.debug.assert(!self.is_visited[node]);
         std.debug.assert(self.nb_visited > 0);
         std.debug.assert(self.L > 0);
@@ -514,7 +480,7 @@ pub const Graph = struct {
             self.L += 1;
         }
         self.nb_visited += 1;
-        self.zml_handler.toc(&self.zml_handler.timers.insert_node);
+        //self.zml_handler.toc(&self.zml_handler.timers.insert_node);
     }
 
     pub inline fn popCandidate(self: *Graph) usize {
@@ -577,13 +543,13 @@ pub const Graph = struct {
             const start_neigh = self.params.k_max * i;
             nb_selected = 0;
             self.nb_neighbors[i] = 0;
-            if (self.is_junk[i]) continue;
+            if (self.lm_head.is_junk[i]) continue;
             is_selected[i] = true;
 
             // rejection method as k_max << n
             while (nb_selected < self.params.k_max) {
                 const candidate = random.uintLessThan(usize, self.n);
-                if (self.is_junk[candidate] or is_selected[candidate]) continue;
+                if (self.lm_head.is_junk[candidate] or is_selected[candidate]) continue;
                 // add valid neighbor
                 is_selected[candidate] = true;
                 selected[nb_selected] = .{ .node = candidate, .similarity = self.similarity(i, candidate) };
@@ -618,14 +584,14 @@ pub const Graph = struct {
         var nb_newly_saturated: usize = 0;
 
         for (0..self.n) |node| {
-            if (self.is_junk[node]) continue;
+            if (self.lm_head.is_junk[node]) continue;
             nb_valid += 1;
             if (self.nb_neighbors[node] == self.params.k_max) nb_saturated += 1;
             
             for (0..self.similarity_matrix.k) |neigh_pos| {
                 if (self.nb_neighbors[node] == self.params.k_max) break;
                 const candidate = self.similarity_matrix.nearestNeighbor(node, neigh_pos);
-                if (candidate == node or self.is_junk[candidate] or self.hasNeighbor(node, candidate)) continue;
+                if (candidate == node or self.lm_head.is_junk[candidate] or self.hasNeighbor(node, candidate)) continue;
                 self.insertNeighbor(node, candidate);
             }
             if (self.nb_neighbors[node] == self.params.k_max) nb_newly_saturated += 1;
@@ -650,14 +616,14 @@ pub const Graph = struct {
         var nb_newly_saturated: usize = 0;
 
         for (0..self.n) |node| {
-            if (self.is_junk[node]) continue;
+            if (self.lm_head.is_junk[node]) continue;
             nb_valid += 1;
             if (self.nb_neighbors[node] == self.params.k_max) nb_saturated += 1;
 
             for (0..self.similarity_matrix.k) |neigh_pos| {
                 if (self.nb_neighbors[node] == self.params.k_max) break;
                 const candidate = self.similarity_matrix.nearestNeighbor(node, neigh_pos);
-                if (candidate == node or self.is_junk[candidate] or self.hasNeighbor(node, candidate)) continue;
+                if (candidate == node or self.lm_head.is_junk[candidate] or self.hasNeighbor(node, candidate)) continue;
                 if (self.isPrunedByCurrentNeighbors(node, candidate)) continue;
                 self.insertNeighbor(node, candidate);
             }
@@ -696,7 +662,7 @@ pub const Graph = struct {
     }
     
     pub fn pruneAngular(self: *Graph, base: usize, candidates: []Candidate, timer: *Field_timer) void {
-        std.debug.assert(!self.is_junk[base]);
+        std.debug.assert(!self.lm_head.is_junk[base]);
         self.zml_handler.tic(timer);
         // update current_node neighbors with LOS pruning of the candidates
         const start_neigh = base * self.params.k_max;
@@ -729,12 +695,11 @@ pub const Graph = struct {
             }
             if (self.nb_neighbors[base] == self.params.k_max) break;
         }
-        self.are_neighbors_pruned[base] = true;
         self.zml_handler.toc(timer);
     }
 
     pub fn pruneMips(self: *Graph, base: usize, candidates: []Candidate, timer: *Field_timer) void {
-        std.debug.assert(!self.is_junk[base]);
+        std.debug.assert(!self.lm_head.is_junk[base]);
         self.zml_handler.tic(timer);
         // update current_node neighbors with LOS pruning of the candidates
         const start_neigh = base * self.params.k_max;
@@ -761,7 +726,6 @@ pub const Graph = struct {
             }
             if (self.nb_neighbors[base] == self.params.k_max) break;
         }
-        self.are_neighbors_pruned[base] = true;
         self.zml_handler.toc(timer);
     }
 
@@ -804,9 +768,6 @@ pub const Graph = struct {
         self.zml_handler.nb_tictoc = 0;
         
         for (0..self.params.vamana_passes) |pass_i| {
-            // when pass_i > 0, we increase alpha from 1.0 to the params.alpha value
-            // this means the flags are_neighbors_pruned is invalidated
-            @memset(self.are_neighbors_pruned, false);
             // random visit order
             var nb_swap: usize = order.len - 1;
             while (nb_swap > 0) : (nb_swap -= 1) {
@@ -821,7 +782,7 @@ pub const Graph = struct {
                 const start_neigh = self.params.k_max * current_node;
                 var end_neigh = start_neigh + self.nb_neighbors[current_node];
 
-                if (self.is_junk[current_node]) continue;
+                if (self.lm_head.is_junk[current_node]) continue;
                 var nb_candidates: usize = 0;
 
                 // the candidates are current_node's neighbors and the visited nodes
@@ -912,12 +873,6 @@ pub const Graph = struct {
                         continue;
                     }
 
-                    // If neighbor row is already pruned and if current_node is further than the worse neighbor,
-                    // then no room will be made by pruning and current node will never be added
-                    // TODO: this heuristic is not exact, as commenting it changes the behavior. investigate.
-                    //const worse_neighbor_sim = self.similarity(neighbor, self.neighbors[end_neigh_neigh - 1]);
-                    //if (self.are_neighbors_pruned[neighbor] and worse_neighbor_sim > sim) continue;
-
                     // reverse candidates : neighbor's neighbors + current_node
                     nb_candidates = 0;
                     for (start_neigh_neigh..end_neigh_neigh) |k| {
@@ -955,7 +910,7 @@ pub const Graph = struct {
         @memset(in_degrees, 0);
 
         for (0..self.n) |node| {
-            if (self.is_junk[node]) continue;
+            if (self.lm_head.is_junk[node]) continue;
             const start_neigh = self.params.k_max * node;
             const end_neigh = start_neigh + self.nb_neighbors[node];
             for (start_neigh..end_neigh) |neigh| {
@@ -964,12 +919,12 @@ pub const Graph = struct {
         }
 
         for (0..self.n) |node| {
-            if (self.is_junk[node]) continue;
+            if (self.lm_head.is_junk[node]) continue;
             if (in_degrees[node] < 8) {
                 for (0..self.similarity_matrix.k) |k| {
                     const neigh = self.similarity_matrix.nearestNeighbor(node, k);
                     if (self.nb_neighbors[neigh] == self.params.k_max) continue;
-                    if (self.is_junk[neigh]) continue;
+                    if (self.lm_head.is_junk[neigh]) continue;
                     self.neighbors[neigh * self.params.k_max + self.nb_neighbors[neigh]] = node;
                     self.nb_neighbors[neigh] += 1;
                     in_degrees[node] += 1;
@@ -989,7 +944,7 @@ pub const Graph = struct {
         @memset(in_degrees, 0);
 
         for (0..self.n) |node| {
-            if (self.is_junk[node]) continue;
+            if (self.lm_head.is_junk[node]) continue;
             const start_neigh = self.params.k_max * node;
             const end_neigh = start_neigh + self.nb_neighbors[node];
             for (start_neigh..end_neigh) |neigh| {
@@ -999,7 +954,7 @@ pub const Graph = struct {
         var min_in_degree = self.n;
         var max_in_degree: usize = 0;
         for (0..self.n) |node| {
-            if (self.is_junk[node]) continue;
+            if (self.lm_head.is_junk[node]) continue;
             min_in_degree = @min(min_in_degree, in_degrees[node]);
             max_in_degree = @max(max_in_degree, in_degrees[node]);
         }
@@ -1008,7 +963,7 @@ pub const Graph = struct {
 
         //try self.logDegreeCounts("Nodes by in-degree", in_degrees, max_in_degree);
         for (0..self.n) |node| {
-            if (self.is_junk[node] or in_degrees[node] <= 2000) continue;
+            if (self.lm_head.is_junk[node] or in_degrees[node] <= 2000) continue;
             const token_str = try tokens.tokenString(sampler.tokenizer, @as(u32, @intCast(node)), self.allocator);
             std.log.info("Node {d} has in-degree {d}, token: {s}", .{ node, in_degrees[node], token_str });
             self.allocator.free(token_str);
@@ -1045,7 +1000,7 @@ pub const Graph = struct {
         var max_visited: usize = 0;
 
         for (0..self.n) |node| {
-            if (self.is_junk[node]) continue;
+            if (self.lm_head.is_junk[node]) continue;
             valid_count += 1;
             self.greedySearchNode(node);
             const nb_visited = self.nb_visited;
@@ -1107,7 +1062,7 @@ pub const Graph = struct {
         @memset(counts, 0);
 
         for (0..self.n) |node| {
-            if (self.is_junk[node]) continue;
+            if (self.lm_head.is_junk[node]) continue;
             counts[degrees[node]] += 1;
         }
 
@@ -1125,221 +1080,6 @@ pub const Graph = struct {
             if (self.neighbors[i] == candidate) return true;
         }
         return false;
-    }
-
-    // ---------------------- MRT functions ---------------------- //
-
-    pub fn makeMrt(self: *Graph) !void {
-        std.log.info("Making MRT graph", .{});
-        for (0..5) |pass| {
-            std.log.info("Pass: {d}", .{pass});
-            for (1..self.n) |node| {
-                if (self.is_junk[node]) continue;
-                const p = self.monotonicSearch(node);
-                if (p == node) continue;
-                std.debug.assert(self.nb_neighbors[p] < self.params.k_max);
-                self.neighbors[self.params.k_max * p + self.nb_neighbors[p]] = node;
-                self.nb_neighbors[p] += 1;
-                if (node % 10000 == 0) std.log.info("Inserted node {d}", .{node});
-            }
-            var max_degree: usize = 0;
-            for (0..self.n) |node| {
-                max_degree = @max(max_degree, self.nb_neighbors[node]);
-            }
-            std.log.info("Max degree: {d}", .{max_degree});
-            std.log.info("Nb edges: {d}", .{self.nbEdges()});
-        }
-    }
-
-    pub fn logMrt(self: *Graph) void {
-        const parents = try self.allocator.alloc(usize, self.n);
-        @memset(parents, self.n);
-        defer self.allocator.free(parents);
-        const ranks = try self.allocator.alloc(usize, self.n);
-        @memset(ranks, 0);
-        defer self.allocator.free(ranks);
-        const costs = try self.allocator.alloc(usize, self.n);
-        @memset(costs, 0);
-        defer self.allocator.free(costs);
-        const nb_descendants = try self.allocator.alloc(usize, self.n);
-        @memset(nb_descendants, 0);
-        defer self.allocator.free(nb_descendants);
-
-        const nodes_by_rank = try self.allocator.alloc(usize, self.n);
-        @memset(nodes_by_rank, 0);
-        defer self.allocator.free(nodes_by_rank);
-        const nodes_by_cost = try self.allocator.alloc(usize, self.n);
-        @memset(nodes_by_cost, 0);
-        defer self.allocator.free(nodes_by_cost);
-        const nodes_by_degree = try self.allocator.alloc(usize, self.n);
-        @memset(nodes_by_degree, 0);
-        defer self.allocator.free(nodes_by_degree);
-
-        var max_degree: usize = 0;
-        var max_rank: usize = 0;
-        var total_rank: usize = 0;
-        var max_cost: usize = 0;
-        var total_cost: usize = 0;
-        for (0..self.n) |node| {
-            if (self.is_junk[node]) continue;
-            max_degree = @max(max_degree, self.nb_neighbors[node]);
-            max_rank = @max(max_rank, ranks[node]);
-            total_rank += ranks[node];
-            max_cost = @max(max_cost, costs[node]);
-            total_cost += costs[node];
-            nodes_by_rank[ranks[node]] += 1;
-            nodes_by_cost[costs[node]] += 1;
-            nodes_by_degree[self.nb_neighbors[node]] += 1;
-            const start_neigh = self.params.k_max * node;
-            const end_neigh = start_neigh + self.nb_neighbors[node];
-            for (start_neigh..end_neigh) |neigh_slot| {
-                const neigh_node = self.neighbors[neigh_slot];
-                std.debug.assert(ranks[neigh_node] == 0);
-                ranks[neigh_node] = ranks[node] + 1;
-                costs[neigh_node] = costs[node] + self.nb_neighbors[node];
-                parents[neigh_node] = node;
-            }
-        }
-        for (0..self.n) |rev| {
-            const node = self.n - 1 - rev;
-            if (self.is_junk[node] or node == 0) continue;
-            nb_descendants[parents[node]] += 1 + nb_descendants[node];
-        }
-        const avg_rank = @as(f64, @floatFromInt(total_rank)) / @as(f64, @floatFromInt(self.n));
-        const avg_cost = @as(f64, @floatFromInt(total_cost)) / @as(f64, @floatFromInt(self.n));
-        std.log.info("Max degree: {d}", .{max_degree});
-        std.log.info("Max rank: {d}, avg rank: {d:.2}", .{ max_rank, avg_rank });
-        std.log.info("Max cost: {d}, avg cost: {d:.2}", .{ max_cost, avg_cost });
-
-        if (false) {
-            std.log.info("", .{});
-            std.log.info("Nodes by degree: {d}", .{max_degree});
-            for (0..self.n) |deg| {
-                if (nodes_by_degree[deg] > 0) {
-                    std.log.info("{d} nodes of degree {d}", .{ nodes_by_degree[deg], deg });
-                }
-            }
-            std.log.info("", .{});
-            std.log.info("Nodes by rank: {d}", .{max_rank});
-            for (0..self.n) |rank| {
-                if (nodes_by_rank[rank] > 0) {
-                    std.log.info("{d} nodes of rank {d}", .{ nodes_by_rank[rank], rank });
-                }
-            }
-            std.log.info("", .{});
-            std.log.info("Nodes by cost: {d}", .{max_cost});
-            for (0..self.n) |cost| {
-                if (nodes_by_cost[cost] > 0) {
-                    std.log.info("{d} nodes of cost {d}", .{ nodes_by_cost[cost], cost });
-                }
-            }
-            std.log.info("", .{});
-            std.log.info("Top of the tree", .{});
-            for (0..3) |rank| {
-                for (0..self.n) |node| {
-                    if (self.is_junk[node]) continue;
-                    if (ranks[node] == rank) {
-                        std.log.info("Node {d} has rank {d} degree {d} and nb_descendants {d}", .{ node, rank, self.nb_neighbors[node], nb_descendants[node] });
-                    }
-                }
-            }
-        }
-        std.log.info("", .{});
-        std.log.info("Biggest hub", .{});
-        for (0..self.n) |node| {
-            if (self.is_junk[node]) continue;
-            if (self.nb_neighbors[node] == max_degree) {
-                std.log.info("Node {d} has rank {d} degree {d} and nb_descendants {d}", .{ node, ranks[node], self.nb_neighbors[node], nb_descendants[node] });
-                var parent = node;
-                while (true) {
-                    parent = parents[parent];
-                    std.log.info("Parent {d} has rank {d} degree {d} and nb_descendants {d}", .{ parent, ranks[parent], self.nb_neighbors[parent], nb_descendants[parent] });
-                    if (parent == 0) break;
-                }
-                break;
-            }
-        }
-    }
-    
-    pub fn testMrt(self: *Graph) !void {
-        std.log.info("Testing MRT graph", .{});
-        var valid: usize = 0;
-        var found: usize = 0;
-        for (0..self.n) |node| {
-            if (self.is_junk[node]) continue;
-            valid += 1;
-            const p = self.monotonicSearch(node);
-            if (p == node) found += 1;
-            if (node % 10000 == 0) std.log.info("Tested {d}/{d} nodes", .{node, self.n});
-        }
-        std.log.info("Found {d}/{d} valid nodes {d}%", .{found, valid, @divFloor(found * 100, valid)});
-    }
-
-    pub fn monotonicSearch(self: *Graph, target: usize) usize {
-        const start = self.medoid;
-        std.debug.assert(!self.is_junk[start]);
-        std.debug.assert(!self.is_junk[target]);
-        var best_sim = self.similarity(start, target);
-        var best_node = start;
-        while (true) {
-            if (self.nb_neighbors[best_node] == 0) break;
-            const start_neigh = self.params.k_max * best_node;
-            const end_neigh = start_neigh + self.nb_neighbors[best_node];
-            var best_neigh_node = self.neighbors[start_neigh];
-            var best_neigh_sim = self.similarity(best_neigh_node, target);
-            for (start_neigh + 1..end_neigh) |neigh_slot| {
-                const neigh_node = self.neighbors[neigh_slot];
-                const neigh_sim = self.similarity(neigh_node, target);
-                if (neigh_sim > best_neigh_sim) {
-                    best_neigh_sim = neigh_sim;
-                    best_neigh_node = neigh_node;
-                }
-            }
-            if (best_sim > best_neigh_sim) break;
-            best_sim = best_neigh_sim;
-            best_node = best_neigh_node;
-        }
-        return best_node;
-    }
-
-    pub fn monotonicTrailSearch(self: *Graph, target: usize) usize {
-        const start = self.medoid;
-        std.debug.assert(!self.is_junk[start]);
-        std.debug.assert(!self.is_junk[target]);
-        var best_sim = self.similarity(start, target);
-        var best_node = start;
-        self.visited[0] = .{ .node = best_node, .similarity = best_sim };
-        self.nb_visited = 1;
-        while (true) {
-            if (self.nb_neighbors[best_node] == 0) break;
-            const start_neigh = self.params.k_max * best_node;
-            const end_neigh = start_neigh + self.nb_neighbors[best_node];
-            var best_neigh_node = self.neighbors[start_neigh];
-            var best_neigh_sim = self.similarity(best_neigh_node, target);
-            for (start_neigh + 1..end_neigh) |neigh_slot| {
-                const neigh_node = self.neighbors[neigh_slot];
-                const sim = self.similarity(neigh_node, target);
-                if (sim > best_neigh_sim) {
-                    best_neigh_sim = sim;
-                    best_neigh_node = neigh_node;
-                }
-            }
-            if (best_sim > best_neigh_sim) break;
-            best_sim = best_neigh_sim;
-            best_node = best_neigh_node;
-            self.visited[self.nb_visited] = .{ .node = best_node, .similarity = best_sim };
-            self.nb_visited += 1;
-        }
-        var best_ancestor: usize = 0;
-        var min_neighbors = self.nb_neighbors[0];
-        for (1..self.nb_visited) |i| {
-            const node = self.visited[i].node;
-            if (self.nb_neighbors[node] <= min_neighbors) {
-                best_ancestor = i;
-                min_neighbors = self.nb_neighbors[node];
-            }
-        }
-        return best_ancestor;
     }
 
     // ------------------- Hierarchy functions ------------------- //
@@ -1383,7 +1123,7 @@ pub const Graph = struct {
     }
 
     pub inline fn similarity(self: *Graph, a: usize, b: usize) f32 {
-        self.sim_access += 1;
+        //self.sim_access += 1;
         return self.similarity_matrix.dist(a, b);
     }
 

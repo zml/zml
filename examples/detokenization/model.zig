@@ -70,70 +70,6 @@ pub const Model_handler = struct {
         const similarity_matrix_normalized_results = try similarity_matrix_normalized_exe.results(zml_handler.allocator);
         errdefer similarity_matrix_normalized_results.deinit(zml_handler.allocator);
 
-        const get_lm_head_exe = try zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .get_lm_head,
-            .{},
-            opts,
-        );
-        errdefer get_lm_head_exe.deinit();
-
-        const get_lm_head_args = try get_lm_head_exe.args(zml_handler.allocator);
-        errdefer get_lm_head_args.deinit(zml_handler.allocator);
-
-        const get_lm_head_results = try get_lm_head_exe.results(zml_handler.allocator);
-        errdefer get_lm_head_results.deinit(zml_handler.allocator);
-
-        const get_lm_head_transposed_exe = try zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .get_lm_head_transposed,
-            .{},
-            opts,
-        );
-        errdefer get_lm_head_transposed_exe.deinit();
-
-        const get_lm_head_transposed_args = try get_lm_head_transposed_exe.args(zml_handler.allocator);
-        errdefer get_lm_head_transposed_args.deinit(zml_handler.allocator);
-
-        const get_lm_head_transposed_results = try get_lm_head_transposed_exe.results(zml_handler.allocator);
-        errdefer get_lm_head_transposed_results.deinit(zml_handler.allocator);
-        
-        const get_lm_head_normalized_exe = try zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .get_lm_head_normalized,
-            .{},
-            opts,
-        );
-        errdefer get_lm_head_normalized_exe.deinit();
-
-        const get_lm_head_normalized_args = try get_lm_head_normalized_exe.args(zml_handler.allocator);
-        errdefer get_lm_head_normalized_args.deinit(zml_handler.allocator);
-
-        const get_lm_head_normalized_results = try get_lm_head_normalized_exe.results(zml_handler.allocator);
-        errdefer get_lm_head_normalized_results.deinit(zml_handler.allocator);
-
-        const get_lm_head_row_norms_exe = try zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .get_lm_head_row_norms,
-            .{},
-            opts,
-        );
-        errdefer get_lm_head_row_norms_exe.deinit();
-
-        const get_lm_head_row_norms_args = try get_lm_head_row_norms_exe.args(zml_handler.allocator);
-        errdefer get_lm_head_row_norms_args.deinit(zml_handler.allocator);
-
-        const get_lm_head_row_norms_results = try get_lm_head_row_norms_exe.results(zml_handler.allocator);
-        errdefer get_lm_head_row_norms_results.deinit(zml_handler.allocator);
-
         const rotated_lm_head_exe = try zml_handler.platform.compile(
             zml_handler.allocator,
             zml_handler.io,
@@ -149,22 +85,6 @@ pub const Model_handler = struct {
 
         const rotated_lm_head_results = try rotated_lm_head_exe.results(zml_handler.allocator);
         errdefer rotated_lm_head_results.deinit(zml_handler.allocator);
-
-        const get_medoid_exe = try zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .getMedoid,
-            .{.init(.{ .junk = model.shape().dim(.voc) }, .u64)},
-            opts,
-        );
-        errdefer get_medoid_exe.deinit();
-
-        const get_medoid_args = try get_medoid_exe.args(zml_handler.allocator);
-        errdefer get_medoid_args.deinit(zml_handler.allocator);
-
-        const get_medoid_results = try get_medoid_exe.results(zml_handler.allocator);
-        errdefer get_medoid_results.deinit(zml_handler.allocator);
 
         const sort_by_first_row_exe = try zml_handler.platform.compile(
             zml_handler.allocator,
@@ -214,37 +134,6 @@ pub const Model_handler = struct {
         const top1_results = try top1_exe.results(zml_handler.allocator);
         errdefer top1_results.deinit(zml_handler.allocator);
 
-        const find_junk_rows_exe = try zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .findJunkRows,
-            .{},
-            opts,
-        );
-        errdefer find_junk_rows_exe.deinit();
-
-        const find_junk_rows_args = try find_junk_rows_exe.args(zml_handler.allocator);
-        errdefer find_junk_rows_args.deinit(zml_handler.allocator);
-
-        const find_junk_rows_results = try find_junk_rows_exe.results(zml_handler.allocator);
-        errdefer find_junk_rows_results.deinit(zml_handler.allocator);
-
-        const analyze_top_rows_exe = try zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .analyze_top_rows,
-            .{},
-            opts,
-        );
-        errdefer analyze_top_rows_exe.deinit();
-
-        const analyze_top_rows_args = try analyze_top_rows_exe.args(zml_handler.allocator);
-        errdefer analyze_top_rows_args.deinit(zml_handler.allocator);
-
-        const analyze_top_rows_results = try analyze_top_rows_exe.results(zml_handler.allocator);
-
         return .{
             .similarity_matrix_exe = similarity_matrix_exe,
             .similarity_matrix_args = similarity_matrix_args,
@@ -252,24 +141,9 @@ pub const Model_handler = struct {
             .similarity_matrix_normalized_exe = similarity_matrix_normalized_exe,
             .similarity_matrix_normalized_args = similarity_matrix_normalized_args,
             .similarity_matrix_normalized_results = similarity_matrix_normalized_results,
-            .get_lm_head_exe = get_lm_head_exe,
-            .get_lm_head_args = get_lm_head_args,
-            .get_lm_head_results = get_lm_head_results,
-            .get_lm_head_transposed_exe = get_lm_head_transposed_exe,
-            .get_lm_head_transposed_args = get_lm_head_transposed_args,
-            .get_lm_head_transposed_results = get_lm_head_transposed_results,
-            .get_lm_head_normalized_exe = get_lm_head_normalized_exe,
-            .get_lm_head_normalized_args = get_lm_head_normalized_args,
-            .get_lm_head_normalized_results = get_lm_head_normalized_results,
-            .get_lm_head_row_norms_exe = get_lm_head_row_norms_exe,
-            .get_lm_head_row_norms_args = get_lm_head_row_norms_args,
-            .get_lm_head_row_norms_results = get_lm_head_row_norms_results,
             .rotated_lm_head_exe = rotated_lm_head_exe,
             .rotated_lm_head_args = rotated_lm_head_args,
             .rotated_lm_head_results = rotated_lm_head_results,
-            .get_medoid_exe = get_medoid_exe,
-            .get_medoid_args = get_medoid_args,
-            .get_medoid_results = get_medoid_results,
             .sort_by_first_row_exe = sort_by_first_row_exe,
             .sort_by_first_row_args = sort_by_first_row_args,
             .sort_by_first_row_results = sort_by_first_row_results,
@@ -279,12 +153,6 @@ pub const Model_handler = struct {
             .top1_exe = top1_exe,
             .top1_args = top1_args,
             .top1_results = top1_results,
-            .find_junk_rows_exe = find_junk_rows_exe,
-            .find_junk_rows_args = find_junk_rows_args,
-            .find_junk_rows_results = find_junk_rows_results,
-            .analyze_top_rows_exe = analyze_top_rows_exe,
-            .analyze_top_rows_args = analyze_top_rows_args,
-            .analyze_top_rows_results = analyze_top_rows_results,
         };
     }
 
@@ -301,42 +169,26 @@ pub const ModelExes = struct {
     similarity_matrix_exe: zml.Exe,
     similarity_matrix_args: zml.Exe.Arguments,
     similarity_matrix_results: zml.Exe.Results,
+    
     similarity_matrix_normalized_exe: zml.Exe,
     similarity_matrix_normalized_args: zml.Exe.Arguments,
     similarity_matrix_normalized_results: zml.Exe.Results,
-    get_lm_head_exe: zml.Exe,
-    get_lm_head_args: zml.Exe.Arguments,
-    get_lm_head_results: zml.Exe.Results,
-    get_lm_head_normalized_exe: zml.Exe,
-    get_lm_head_normalized_args: zml.Exe.Arguments,
-    get_lm_head_normalized_results: zml.Exe.Results,
-    get_lm_head_transposed_exe: zml.Exe,
-    get_lm_head_transposed_args: zml.Exe.Arguments,
-    get_lm_head_transposed_results: zml.Exe.Results,    
-    get_lm_head_row_norms_exe: zml.Exe,
-    get_lm_head_row_norms_args: zml.Exe.Arguments,
-    get_lm_head_row_norms_results: zml.Exe.Results,
+    
     rotated_lm_head_exe: zml.Exe,
     rotated_lm_head_args: zml.Exe.Arguments,
     rotated_lm_head_results: zml.Exe.Results,
-    get_medoid_exe: zml.Exe,
-    get_medoid_args: zml.Exe.Arguments,
-    get_medoid_results: zml.Exe.Results,
+    
     sort_by_first_row_exe: zml.Exe,
     sort_by_first_row_args: zml.Exe.Arguments,
     sort_by_first_row_results: zml.Exe.Results,
+    
     score_exe: zml.Exe,
     score_args: zml.Exe.Arguments,
     score_results: zml.Exe.Results,
+    
     top1_exe: zml.Exe,
     top1_args: zml.Exe.Arguments,
     top1_results: zml.Exe.Results,
-    find_junk_rows_exe: zml.Exe,
-    find_junk_rows_args: zml.Exe.Arguments,
-    find_junk_rows_results: zml.Exe.Results,
-    analyze_top_rows_exe: zml.Exe,
-    analyze_top_rows_args: zml.Exe.Arguments,
-    analyze_top_rows_results: zml.Exe.Results,
 
     pub fn deinit(self: ModelExes, allocator: std.mem.Allocator) void {
         self.similarity_matrix_exe.deinit();
@@ -345,24 +197,9 @@ pub const ModelExes = struct {
         self.similarity_matrix_normalized_exe.deinit();
         self.similarity_matrix_normalized_args.deinit(allocator);
         self.similarity_matrix_normalized_results.deinit(allocator);
-        self.get_lm_head_exe.deinit();
-        self.get_lm_head_args.deinit(allocator);
-        self.get_lm_head_results.deinit(allocator);
-        self.get_lm_head_transposed_exe.deinit();
-        self.get_lm_head_transposed_args.deinit(allocator);
-        self.get_lm_head_transposed_results.deinit(allocator);
-        self.get_lm_head_normalized_exe.deinit();
-        self.get_lm_head_normalized_args.deinit(allocator);
-        self.get_lm_head_normalized_results.deinit(allocator);
-        self.get_lm_head_row_norms_exe.deinit();
-        self.get_lm_head_row_norms_args.deinit(allocator);
-        self.get_lm_head_row_norms_results.deinit(allocator);
         self.rotated_lm_head_exe.deinit();
         self.rotated_lm_head_args.deinit(allocator);
         self.rotated_lm_head_results.deinit(allocator);
-        self.get_medoid_exe.deinit();
-        self.get_medoid_args.deinit(allocator);
-        self.get_medoid_results.deinit(allocator);
         self.sort_by_first_row_exe.deinit();
         self.sort_by_first_row_args.deinit(allocator);
         self.sort_by_first_row_results.deinit(allocator);
@@ -372,12 +209,6 @@ pub const ModelExes = struct {
         self.top1_exe.deinit();
         self.top1_args.deinit(allocator);
         self.top1_results.deinit(allocator);
-        self.find_junk_rows_exe.deinit();
-        self.find_junk_rows_args.deinit(allocator);
-        self.find_junk_rows_results.deinit(allocator);
-        self.analyze_top_rows_exe.deinit();
-        self.analyze_top_rows_args.deinit(allocator);
-        self.analyze_top_rows_results.deinit(allocator);
     }
 };
 
@@ -439,28 +270,6 @@ pub const Model = struct {
         return self.lm_head.shape();
     }
 
-    pub fn get_lm_head(self: Model) zml.Tensor {
-        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        return lm_head;
-        //return centerRows(lm_head);
-    }
-
-    pub fn get_lm_head_transposed(self: Model) zml.Tensor {
-        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        return lm_head.transpose(.{ .d, .voc });
-    }
-
-    pub fn get_lm_head_normalized(self: Model) zml.Tensor {
-        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        return normalizeRows(lm_head);
-        //return normalizeRows(centerRows(lm_head));
-    }
-
-    pub fn get_lm_head_row_norms(self: Model) zml.Tensor {
-        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        return lm_head.mul(lm_head).sum(.d).squeeze(.d).sqrt();
-    }
-
     pub fn rotatedLmHead(self: Model, u: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
         const u_rot = u.withTags(.{ .d, .eig }).convert(.f32);
@@ -474,23 +283,6 @@ pub const Model = struct {
         const first_row = lm_head.dynamicSlice1d(lm_head.axis(.voc), .{ .start = zero, .len = 1 }).squeeze(.voc);
         const scores = lm_head.dot(first_row, .d);
         return scores.sort(.voc, .{ .descending = false }).indices.convert(.u64);
-    }
-
-    pub fn getMedoid(self: Model, junk_rows: zml.Tensor) zml.Tensor {
-        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        const normalized_lm_head = normalizeRows(lm_head);
-
-        const row_ids = zml.Tensor.iota(.init(.{ .voc = lm_head.dim(.voc), .junk = junk_rows.dim(.junk) }, .u64), .voc).convert(.u64);
-        const junk_hits = row_ids.cmp(.EQ, junk_rows.broad(row_ids.shape())).convert(.u32).sum(.junk).squeeze(.junk);
-        const junk_mask = junk_hits.cmp(.GT, zml.Tensor.scalar(@as(u32, 0), .u32));
-        const not_junk = junk_mask.select(zml.Tensor.scalar(0.0, .f32), zml.Tensor.scalar(1.0, .f32));
-        const row_sum = normalized_lm_head.mul(not_junk.broad(normalized_lm_head.shape())).sum(.voc).squeeze(.voc);
-        const row_count = not_junk.sum(.voc).squeeze(.voc);
-        const average = normalizeVector(row_sum.div(row_count));
-        const similarities = normalized_lm_head.dot(average, .d);
-        const minus_inf = zml.Tensor.scalar(-std.math.inf(f32), .f32).broad(similarities.shape());
-        const masked_similarities = junk_mask.select(minus_inf, similarities);
-        return masked_similarities.argMax(.voc).indices.squeeze(.voc).convert(.u64);
     }
 
     pub fn scoreTokens(self: Model, embedding: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
@@ -510,63 +302,15 @@ pub const Model = struct {
         return scores.argMax(.voc).indices.convert(.u32);
     }
 
-    pub fn analyze_top_rows(self: Model) struct { zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor, zml.Tensor } {
-        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        const row_norms = lm_head.mul(lm_head).sum(.d).squeeze(.d).sqrt();
-        const top_norm_rows = row_norms.topK(.{ .top_norm = .voc }, top_rows_count, .{ .descending = true });
-        const top_rows = lm_head.gather(.{ .voc = top_norm_rows.indices }, .{});
-
-        const zero = zml.Tensor.scalar(@as(u32, 0), .u32);
-        const highest_norm_row = top_rows.dynamicSlice1d(top_rows.axis(.top_norm), .{ .start = zero, .len = 1 }).squeeze(.top_norm);
-        const highest_norm_row_scores = lm_head.dot(highest_norm_row, .d);
-        const highest_norm_row_top = highest_norm_row_scores.topK(.{ .top_dot = .voc }, top_rows_count, .{ .descending = true });
-
-        const average_top_row = top_rows.mean(.top_norm).squeeze(.top_norm);
-        const average_top_row_scores = lm_head.dot(average_top_row, .d);
-        const average_top_row_top = average_top_row_scores.topK(.{ .top_avg_dot = .voc }, top_rows_count, .{ .descending = true });
-
-        const smallest_norm_rows = row_norms.topK(.{ .junk = .voc }, top_rows_count, .{ .descending = false });
-        const junk_rows = lm_head.gather(.{ .voc = smallest_norm_rows.indices }, .{});
-        const junk_direction = normalizeVector(junk_rows.mean(.junk).squeeze(.junk));
-        const junk_direction_scores = normalizeRows(lm_head).dot(junk_direction, .d);
-        const anti_junk_top = junk_direction_scores.topK(.{ .anti_junk = .voc }, top_rows_count, .{ .descending = false });
-
-        return .{
-            top_norm_rows.values,
-            top_norm_rows.indices.convert(.u64),
-            highest_norm_row_top.values,
-            highest_norm_row_top.indices.convert(.u64),
-            average_top_row_top.values,
-            average_top_row_top.indices.convert(.u64),
-            anti_junk_top.values,
-            anti_junk_top.indices.convert(.u64),
-        };
-    }
-
-    pub fn findJunkRows(self: Model) zml.Tensor {
-        const junk_seed_rows = 100;
-        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        const row_norm2 = lm_head.mul(lm_head).sum(.d).squeeze(.d);
-        const smallest_norm_rows = row_norm2.topK(.{ .junk = .voc }, junk_seed_rows, .{ .descending = false });
-        const rows = lm_head.gather(.{ .voc = smallest_norm_rows.indices }, .{});
-        const junk_direction = normalizeVector(rows.mean(.junk).squeeze(.junk));
-        const similarity = normalizeRows(lm_head).dot(junk_direction, .d);
-        const is_junk = similarity.cmp(.GT, zml.Tensor.scalar(0.75, .f32));
-        const row_ids = zml.Tensor.iota(similarity.shape(), .voc).convert(.u64);
-        const sentinel = zml.Tensor.scalar(@as(u64, @intCast(lm_head.dim(.voc))), .u64);
-        return is_junk.select(row_ids, sentinel);
-    }
-
+    
     pub fn similarityMatrix(self: Model, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        const centered = lm_head;//centerRows(lm_head);
-        return similarityMatrixForRows(centered, row_start);
+        const lm_head = self.lm_head.withTags(.{ .voc, .d });
+        return similarityMatrixForRows(lm_head, row_start);
     }
 
     pub fn similarityMatrixNormalized(self: Model, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        const centered = centerRows(lm_head);
-        const normalized = normalizeRows(centered);
+        const lm_head = self.lm_head.withTags(.{ .voc, .d });
+        const normalized = normalizeRows(lm_head);
         return similarityMatrixForRows(normalized, row_start);
     }
 
@@ -581,7 +325,7 @@ pub const Model = struct {
         const row_ids = zml.Tensor.iota(similarity.shape(), .row).add(row_start.convert(.i32));
         const col_ids = zml.Tensor.iota(similarity.shape(), .col);
         const self_mask = row_ids.cmp(.EQ, col_ids);
-        const minus_inf = zml.Tensor.scalar(-std.math.inf(f32), .f32).broad(similarity.shape());
+        const minus_inf = zml.Tensor.scalar(-std.math.inf(f32), .bf16).broad(similarity.shape());
         const similarity_for_sort = self_mask.select(minus_inf, similarity);
 
         const nearest = similarity_for_sort.topK(.{ .nearest = .col }, row_k_neighbors, .{ .descending = true }).indices.convert(.i32);
@@ -595,14 +339,4 @@ pub const Model = struct {
         return lm_head.mul(inv_norm.broad(lm_head.shape()));
     }
 
-    fn centerRows(lm_head: zml.Tensor) zml.Tensor {
-        const row_average = lm_head.mean(.voc).squeeze(.voc);
-        return lm_head.sub(row_average.broad(lm_head.shape()));
-    }
-
-    fn normalizeVector(vector: zml.Tensor) zml.Tensor {
-        const squared_norm = vector.mul(vector).sum(.d);
-        const inv_norm = squared_norm.rsqrt();
-        return vector.mul(inv_norm.broad(vector.shape()));
-    }
 };
