@@ -18,6 +18,7 @@ const quantized = @import("quantized.zig");
 const LmHeadMatrix = algebra.LmHeadMatrix;
 const Graph = graph.Graph;
 const Sampler = sampling.Sampler;
+const Quantized = quantized.Quantized;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -131,6 +132,8 @@ pub const Timing_handler = struct {
     graph_search_tot: Field_timer = .{},
     nb_detokenize: usize = 0,
 
+    embed_search_q: Field_timer = .{},
+    embed_dot_q: Field_timer = .{},
     embed_search: Field_timer = .{},
     embed_dot: Field_timer = .{},
 
@@ -242,9 +245,10 @@ pub fn main(init: std.process.Init) !void {
     try printZmlLogo(zml_handler.io);
 
     //try runLlm(&zml_handler);
-    try runTestsGraph(&zml_handler);
+    //try runTestsGraph(&zml_handler);
     //try runTestsQuantized(&zml_handler);
     //try runTestsSvd(&zml_handler);
+    try runTestsQuantizedGraph(&zml_handler);
 
     zml_handler.timers.print();
 }
@@ -420,6 +424,42 @@ pub fn buildMipsGraphs(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, sample
     zml_handler.toc(&zml_handler.timers.nsw_graph);
 
     return .{ g_knn, g_nsw };
+}
+
+pub fn runTestsQuantizedGraph(zml_handler: *Zml_handler) !void {
+    std.log.info("********** Get lm_head", .{});
+    var lm_head = try algebra.getLmHead(zml_handler);
+    defer LmHeadMatrix.deinit(&lm_head, zml_handler.allocator);
+
+    std.log.info("********** Init sampler", .{});
+    var sampler: Sampler = try .init(zml_handler, &lm_head);
+    defer Sampler.deinit(&sampler);
+
+    std.log.info("********** Init similarity matrix", .{});
+    zml_handler.tic(&zml_handler.timers.similarity_matrix);
+    //var similarity_matrix = try algebra.computeSimilarityMatrix(zml_handler, &model_handler, false);
+    var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, true);
+    defer similarity_matrix.deinit(zml_handler.allocator);
+    zml_handler.toc(&zml_handler.timers.similarity_matrix);
+
+    std.log.info("********** Init NSW-angular graph", .{});
+    zml_handler.tic(&zml_handler.timers.nsw_graph);
+    var g_nsw: Graph = try .init(zml_handler, &lm_head, &similarity_matrix, .{ .graph_type = .Mips });
+    g_nsw.consolidateNearestPrune();
+    try g_nsw.extendToNsw();
+    try g_nsw.testNswExtention(&sampler);
+    try g_nsw.fixNswExtention();
+    try g_nsw.testNswExtention(&sampler);
+    g_nsw.consolidateNearestPrune();
+    try g_nsw.testNswExtention(&sampler);
+    zml_handler.toc(&zml_handler.timers.nsw_graph);
+
+    std.log.info("********** Init Quantizer", .{});
+    var quantizer = try Quantized.init(zml_handler, &lm_head);
+    defer quantizer.deinit();
+    try quantizer.quantizeQjlLmHead();
+
+    try testEmbedGraphQuantizedSearch(zml_handler, &g_nsw, &quantizer);
 }
 
 
@@ -645,7 +685,7 @@ pub fn testEmbedSvdSearch(zml_handler: *Zml_handler, svd: *svd_.SvdSampler) !voi
     std.log.info("Embed SVD sample: total={d} found_top1={d} ({d:.4}%)", .{ total_count, found_top1_count, percent_found });
 }
 
-pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *quantized.Quantized) !void {
+pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized) !void {
     std.log.info("Test embed Quantized search", .{});
 
     const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
@@ -708,6 +748,67 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *quantized
 
     const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) / @as(f64, @floatFromInt(total_count));
     std.log.info("Embed quantized search: total={d} found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ total_count, found_top1_count, percent_found, missing_top16_count });
+}
+
+pub fn testEmbedGraphQuantizedSearch(zml_handler: *Zml_handler, g: *Graph, quantizer: *Quantized) !void {
+    std.log.info("Test embed GraphQuantized search", .{});
+
+    var total_count: usize = 0;
+    var found_top1_count: usize = 0;
+
+    const tasks_id = [5]u8{ 0, 1, 2, 3, 4 };
+
+    for (tasks_id) |task_id| {
+        const task = switch (task_id) {
+            0 => "coding",
+            1 => "history",
+            2 => "math",
+            3 => "story",
+            4 => "translate",
+            else => return error.InvalidTask,
+        };
+        const top1 = switch (task_id) {
+            0 => codingTop1(),
+            1 => historyTop1(),
+            2 => mathTop1(),
+            3 => storyTop1(),
+            4 => translateTop1(),
+            else => return error.InvalidTask,
+        };
+
+        const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds.safetensors", task, .f32, true);
+        defer embed_slice.free(zml_handler.allocator);
+
+        const n: usize = @intCast(embed_slice.shape.dims()[0]);
+        const d: usize = @intCast(embed_slice.shape.dims()[1]);
+        std.debug.assert(d == quantizer.d);
+
+        std.log.info("Test quantized graph search task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
+        zml_handler.tic(&zml_handler.timers.graph_search_tot);
+        for (0..n) |embed_index| {
+            const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
+
+            zml_handler.timers.nb_detokenize += 1;
+
+            g.params.search_budget = 2048;
+            try g.greedySearchQuantized1x2(embed, quantizer);
+
+            g.params.search_budget = 512;
+            g.quantizedCrossover(embed);
+
+            total_count += 1;
+            const top1_token = top1[embed_index];
+            var found_top1 = false;
+            for (0..g.L) |i| {
+                if (g.visited[i].node == top1_token) found_top1 = true;
+            }
+            if (found_top1) found_top1_count += 1;
+        }
+        zml_handler.toc(&zml_handler.timers.graph_search_tot);
+    }
+
+    const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) / @as(f64, @floatFromInt(total_count));
+    std.log.info("Embed quantized search: total={d} found_top1={d} ({d:.4}%)", .{ total_count, found_top1_count, percent_found });
 }
 
 

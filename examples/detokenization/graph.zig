@@ -7,12 +7,14 @@ const save_load = @import("saveload.zig");
 const llm = @import("llm.zig");
 const tokens = @import("tokens.zig");
 const sampling = @import("sampling.zig");
+const quantized_ = @import("quantized.zig");
 
 const Tokenizer = zml.tokenizer.Tokenizer;
 const SimilarityMatrix = algebra.SimilarityMatrix;
 const LmHeadMatrix = algebra.LmHeadMatrix;
 const Zml_handler = main.Zml_handler;
 const Field_timer = main.Timing_handler.Field_timer;
+const Quantized = quantized_.Quantized;
 
 pub const GraphParams = struct {
     k_max: usize = 32,//64
@@ -27,7 +29,7 @@ pub const GraphParams = struct {
 // TODO: prefetch data in dense neighbors loop
 // TODO: is we only ever use first L candidates, simply cap visited at L to simplify
 //       this also simplifies a lot the use of search_budget, as it can vary
-// TODO: 
+// TODO: graph layout, smaller integer types, batch insert, batch neighbors computations
 
 pub const GraphType = enum {
     Angular,
@@ -57,7 +59,6 @@ pub const Graph = struct {
     similarity_matrix: *SimilarityMatrix,
     lm_head: *LmHeadMatrix,
     // graph fields
-    // TODO: we can use smaller integer types
     n: usize,
     params: GraphParams,
     neighbors: []usize,
@@ -235,7 +236,6 @@ pub const Graph = struct {
             // if all nodes in active pool have been expanded, terminate the search
             if (self.is_search_done) break;
 
-            // TODO: we can batch insert to avoid doing several revert insert passes
             const start_neigh = self.params.k_max * node;
             const end_neigh = start_neigh + self.nb_neighbors[node];
             for (start_neigh..end_neigh) |i| {
@@ -266,6 +266,86 @@ pub const Graph = struct {
         self.zml_handler.toc(&self.zml_handler.timers.embed_search);
     }
 
+    pub fn greedySearchQuantized1x1(self: *Graph, query: []const f32, quantized: *Quantized) !void {
+        self.zml_handler.tic(&self.zml_handler.timers.embed_search_q);
+        std.debug.assert(!self.is_visited[self.medoid]);
+
+        const quantized_query, _, const query_L2_norm = try quantized.quantizeQjlVector(query);
+        
+        const entry_point = self.medoid;
+        const entry_sim = quantized.dotQjlSymmetric(entry_point, quantized_query, query_L2_norm);
+        std.debug.assert(entry_point < self.n);
+        std.debug.assert(!self.is_visited[entry_point]);
+
+        self.is_visited[entry_point] = true;
+        self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
+        self.nb_expanded_neighbors[0] = 0;
+        self.nb_visited = 1;
+        self.L = 1;
+        self.is_search_done = false;
+        
+        while (self.nb_visited < self.params.search_budget) {
+            const node = self.popCandidate();
+            if (self.is_search_done) break;
+            const start_neigh = self.params.k_max * node;
+            const end_neigh = start_neigh + self.nb_neighbors[node];
+            for (start_neigh..end_neigh) |i| {
+                const neighbor = self.neighbors[i];
+                if (self.is_visited[neighbor]) continue;
+                std.debug.assert(!self.lm_head.is_junk[neighbor]);
+                std.debug.assert(!self.is_visited[neighbor]);
+                std.debug.assert(self.nb_visited > 0);
+                const sim = quantized.dotQjlSymmetric(neighbor, quantized_query, query_L2_norm);
+                self.insert(neighbor, sim);
+            }
+        }
+        self.cleanup();
+        self.zml_handler.toc(&self.zml_handler.timers.embed_search_q);
+    }
+
+    pub fn greedySearchQuantized1x2(self: *Graph, query: []const f32, quantized: *Quantized) !void {
+        self.zml_handler.tic(&self.zml_handler.timers.embed_search_q);
+        std.debug.assert(!self.is_visited[self.medoid]);
+
+        try quantized.walshHadamardSimd(query, 12);
+        var norm: f32 = 0.0;
+        for (quantized.f32_buffer) |v| {
+            norm += v * v;
+        }
+        norm = @sqrt(norm);
+        const query_msb, const query_lsb = quantized.quantize2Bits(norm);
+        
+        const entry_point = self.medoid;
+        const entry_sim = quantized.dotQjlAsymmetric2Bits(entry_point, &query_msb, &query_lsb, norm);
+        std.debug.assert(entry_point < self.n);
+        std.debug.assert(!self.is_visited[entry_point]);
+
+        self.is_visited[entry_point] = true;
+        self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
+        self.nb_expanded_neighbors[0] = 0;
+        self.nb_visited = 1;
+        self.L = 1;
+        self.is_search_done = false;
+        
+        while (self.nb_visited < self.params.search_budget) {
+            const node = self.popCandidate();
+            if (self.is_search_done) break;
+            const start_neigh = self.params.k_max * node;
+            const end_neigh = start_neigh + self.nb_neighbors[node];
+            for (start_neigh..end_neigh) |i| {
+                const neighbor = self.neighbors[i];
+                if (self.is_visited[neighbor]) continue;
+                std.debug.assert(!self.lm_head.is_junk[neighbor]);
+                std.debug.assert(!self.is_visited[neighbor]);
+                std.debug.assert(self.nb_visited > 0);
+                const sim = quantized.dotQjlAsymmetric2Bits(neighbor, &query_msb, &query_lsb, norm);
+                self.insert(neighbor, sim);
+            }
+        }
+        self.cleanup();
+        self.zml_handler.toc(&self.zml_handler.timers.embed_search_q);
+    }
+    
     pub fn greedySearchWS(self: *Graph, query: []const f32) void {
         self.zml_handler.tic(&self.zml_handler.timers.embed_search);
         while (self.nb_visited < self.params.search_budget) {
@@ -281,6 +361,19 @@ pub const Graph = struct {
         }
         self.cleanup();
         self.zml_handler.toc(&self.zml_handler.timers.embed_search);
+    }
+
+    pub fn quantizedCrossover(self: *Graph, query: []const f32) void {
+        const crossover_candidates: usize = 16;
+        for (0..crossover_candidates) |i| {
+            const node = self.visited[i].node;
+            self.visited[i].similarity = self.scoreQueryNode(query, node);
+            self.is_visited[node] = true;
+        }
+        std.mem.sort(Candidate, self.visited[0..crossover_candidates], {}, Candidate.beforeThan);
+        self.nb_visited = crossover_candidates;
+        self.is_search_done = false;
+        self.greedySearchWS(query);
     }
 
     
