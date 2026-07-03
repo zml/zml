@@ -121,7 +121,7 @@ common:alldebug --strategy=local
 common:release  --compilation_mode=opt
 common:release  --copt=-Ofast
 common:release  --strip=always
-common:release  --@rules_zig//zig/settings:mode=release_safe
+common:release  --@rules_zig//zig/settings:mode=release_fast
 
 # --config=native builds everything optimized for the local CPU
 common:native   --copt=-march=native
