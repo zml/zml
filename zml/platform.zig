@@ -35,14 +35,20 @@ fn disableXlaLogs() void {
 }
 
 fn validateDeviceCount(target: Target, num_devices: usize) !void {
+    if (num_devices == 0) {
+        log.err("The selected platform requires at least 1 device, got {}", .{num_devices});
+        return error.MissingDevices;
+    }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi, .metal => {
-            if (num_devices == 0) {
-                log.err("Platform {} requires at least 1 device, got {}", .{ target, num_devices });
-                return error.ZeroVisibleDevices;
-            }
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
+                return error.InvalidDeviceCount;
+            }
+        },
+        .oneapi => {
+            if (num_devices > 2) {
+                log.err("Platform Intel is limited to a maximum of 2 devices, got {}", .{num_devices});
                 return error.InvalidDeviceCount;
             }
         },

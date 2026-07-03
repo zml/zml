@@ -29,8 +29,8 @@ fn hasOneApiDevices(io: std.Io) bool {
 
 fn setupOneAPIEnv() void {
     _ = c.setenv("CCL_LOG_LEVEL", c.getenv("CCL_LOG_LEVEL") orelse "error", 1);
-    _ = c.setenv("CCL_ATL_TRANSPORT", c.getenv("CCL_ATL_TRANSPORT") orelse "ofi", 1);
-    _ = c.setenv("CCL_TOPO_P2P_ACCESS", c.getenv("CCL_ATL_TRANSPORT") orelse "1", 1);
+    _ = c.setenv("CCL_ATL_TRANSPORT", "ofi", 1);
+    _ = c.setenv("FI_PROVIDER", "shm", 1);
 }
 
 pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
