@@ -797,38 +797,26 @@ pub const Quantized = struct {
         const row_bytes = std.mem.asBytes(&row_quantized.words)[0..512];
 
         const Vec8 = @Vector(8, f32);
+        const Vec8U8 = @Vector(8, u8);
+        const Vec8Usize = @Vector(8, usize);
+        const lut_offsets: Vec8Usize = .{ 0 * 256, 1 * 256, 2 * 256, 3 * 256, 4 * 256, 5 * 256, 6 * 256, 7 * 256 };
         var acc_vec: Vec8 = @splat(0.0);
 
         for (0..64) |chunk_i| {
             const i = chunk_i * 8;
 
-            const b0 = row_bytes[i];
-            const b1 = row_bytes[i + 1];
-            const b2 = row_bytes[i + 2];
-            const b3 = row_bytes[i + 3];
-            const b4 = row_bytes[i + 4];
-            const b5 = row_bytes[i + 5];
-            const b6 = row_bytes[i + 6];
-            const b7 = row_bytes[i + 7];
-
-            const lut_i0 = (i) * 256 + @as(usize, b0);
-            const lut_i1 = (i + 1) * 256 + @as(usize, b1);
-            const lut_i2 = (i + 2) * 256 + @as(usize, b2);
-            const lut_i3 = (i + 3) * 256 + @as(usize, b3);
-            const lut_i4 = (i + 4) * 256 + @as(usize, b4);
-            const lut_i5 = (i + 5) * 256 + @as(usize, b5);
-            const lut_i6 = (i + 6) * 256 + @as(usize, b6);
-            const lut_i7 = (i + 7) * 256 + @as(usize, b7);
+            const bytes: Vec8U8 = row_bytes[i..][0..8].*;
+            const lut_indices: Vec8Usize = @as(Vec8Usize, @splat(i * 256)) + lut_offsets + @as(Vec8Usize, @intCast(bytes));
 
             const loaded_values: Vec8 = .{
-                query_lut[lut_i0],
-                query_lut[lut_i1],
-                query_lut[lut_i2],
-                query_lut[lut_i3],
-                query_lut[lut_i4],
-                query_lut[lut_i5],
-                query_lut[lut_i6],
-                query_lut[lut_i7],
+                query_lut[lut_indices[0]],
+                query_lut[lut_indices[1]],
+                query_lut[lut_indices[2]],
+                query_lut[lut_indices[3]],
+                query_lut[lut_indices[4]],
+                query_lut[lut_indices[5]],
+                query_lut[lut_indices[6]],
+                query_lut[lut_indices[7]],
             };
 
             acc_vec += loaded_values;
