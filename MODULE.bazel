@@ -2,7 +2,16 @@ module(
     name = "zml",
 )
 
-bazel_dep(name = "abseil-cpp", version = "20250814.1", repo_name = "com_google_absl")
+bazel_dep(name = "abseil-cpp", version = "20260526.0", repo_name = "com_google_absl")
+# Work around abseil-cpp#2071 until the BCR release includes the Clang BMI2 fix.
+single_version_override(
+    module_name = "abseil-cpp",
+    patch_strip = 1,
+    patches = [
+        "//:third_party/abseil-cpp/bmi2intrin.patch",
+    ],
+    version = "20260526.0",
+)
 bazel_dep(name = "bazel_lib", version = "3.2.2")
 bazel_dep(name = "aspect_rules_py", version = "1.8.4")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
