@@ -658,7 +658,7 @@ pub const Quantized = struct {
         std.log.info("Quantizing QJL lm_head", .{});
         const data = self.lm_head.data;
         for (0..self.vocab_size) |i| {
-            const quantized_row, const row_scale = try self.quantizeQjlVector(data[i * self.d .. (i + 1) * self.d]);
+            const quantized_row, const row_scale, _ = try self.quantizeQjlVector(data[i * self.d .. (i + 1) * self.d]);
             self.lm_head_qjl[i] = quantized_row;
             self.qjl_row_scale[i] = row_scale;
         }
@@ -666,17 +666,20 @@ pub const Quantized = struct {
         self.qjl_dim_shift = @intCast(self.d);
     }
 
-    pub fn quantizeQjlVector(self: *Quantized, vector: []const f32) !struct { U4096, f32 } {
+    pub fn quantizeQjlVector(self: *Quantized, vector: []const f32) !struct { U4096, f32, f32 } {
         try self.walshHadamardSimd(vector, 12);
         var l1_norm: f32 = 0.0;
+        var l2_norm: f32 = 0.0;
         for (self.f32_buffer) |coef| {
             l1_norm += @abs(coef);
+            l2_norm += coef * coef;
         }
+        l2_norm = @sqrt(l2_norm);
         var quantized_vector: U4096 = .{};
         for (0..self.d) |i| {
             if (self.f32_buffer[i] > 0) quantized_vector.set(i);
         }
-        return .{ quantized_vector, l1_norm / @as(f32, @floatFromInt(self.d)) };
+        return .{ quantized_vector, l1_norm / @as(f32, @floatFromInt(self.d)), l2_norm };
     }
 
     pub fn dotQjlSymmetric(self: *Quantized, row: usize, query_quantized: U4096, query_l2_norm: f32) f32 {
@@ -752,27 +755,23 @@ pub const Quantized = struct {
     pub fn dotQjlAsymmetricSimd(self: *Quantized, row: usize, query_lut: []const f32, query_total_sum: f32) f32 {
         const row_quantized = &self.lm_head_qjl[row];
         const row_qjl_scale = self.qjl_row_scale[row];
-    
         const row_bytes = std.mem.asBytes(&row_quantized.words)[0..512];
         
         const Vec4 = @Vector(4, f32);
         var acc_vec: Vec4 = @splat(0.0);
     
-        // 2. Unroll the loop by 4 (512 is perfectly divisible by 4)
         var i: usize = 0;
         while (i < 512) : (i += 4) {
             const b0 = row_bytes[i];
             const b1 = row_bytes[i + 1];
             const b2 = row_bytes[i + 2];
             const b3 = row_bytes[i + 3];
-    
+            
             const lut_i0 = (i) * 256 + @as(usize, b0);
             const lut_i1 = (i + 1) * 256 + @as(usize, b1);
             const lut_i2 = (i + 2) * 256 + @as(usize, b2);
             const lut_i3 = (i + 3) * 256 + @as(usize, b3);
     
-            // 1. Scalar loads (utilizing the CPU's multiple load ports)
-            // 2. Packed into a SIMD vector natively by Zig
             const loaded_values: Vec4 = .{
                 query_lut[lut_i0],
                 query_lut[lut_i1],
@@ -780,7 +779,6 @@ pub const Quantized = struct {
                 query_lut[lut_i3],
             };
     
-            // 3. A single SIMD instruction (vaddps) to add all 4 at once
             acc_vec += loaded_values;
         }
     
@@ -834,6 +832,125 @@ pub const Quantized = struct {
         return top_rows;
     }
 
+    
+    pub fn dotQjlAsymmetric2Bits(self: *Quantized, row: usize, query_msb: *const [512]u8, query_lsb: *const [512]u8, norm: f32) f32 {
+        const row_bytes = std.mem.asBytes(&self.lm_head_qjl[row].words);
+        const scale = self.qjl_row_scale[row] * norm;
+        
+        // These constants are calculated globally based on the codebook
+        const alpha: f32 = 0.9815;
+        const beta: f32 = 0.5285;
+        const D: f32 = 4096.0;
+        const C: f32 = D * (alpha + beta);
+    
+        // Cast the 512-byte arrays to 64-element arrays of u64 to process 64 bits at once
+        const row_u128: *const [32]u128 = @ptrCast(@alignCast(row_bytes));
+        const msb_u128: *const [32]u128 = @ptrCast(@alignCast(query_msb));
+        const lsb_u128: *const [32]u128 = @ptrCast(@alignCast(query_lsb));
+    
+        var mismatches_msb: u32 = 0;
+        var mismatches_lsb: u32 = 0;
+    
+        for (0..32) |i| {
+            const v = row_u128[i];
+            mismatches_msb += @popCount(msb_u128[i] ^ v);
+            mismatches_lsb += @popCount(lsb_u128[i] ^ v);
+        }
+    
+        const h_m: f32 = @floatFromInt(mismatches_msb);
+        const h_l: f32 = @floatFromInt(mismatches_lsb);
+    
+        return scale * (C - (2.0 * alpha * h_m) - (2.0 * beta * h_l));
+    }
+
+    pub fn quantize2Bits(self: *Quantized, norm: f32) struct { [512]u8, [512]u8 } {
+        var msb: [512]u8 = undefined;
+        var lsb: [512]u8 = undefined;
+        
+        // Scale the threshold for 4096 dimensions (1 / sqrt(4096) = 1/64)
+        const unscaled_threshold: f32 = (1.51 + 0.453) / 2.0; // 0.9815
+        const threshold: f32 = norm * unscaled_threshold / 64.0; 
+        
+        const Vec8f = @Vector(8, f32);
+        const Vec8u = @Vector(8, u32);
+        const Vec8b = @Vector(8, bool);
+        
+        // Used to map a vector of booleans into a single packed byte
+        const bit_values: Vec8u = .{ 1, 2, 4, 8, 16, 32, 64, 128 };
+        const zeros_u32: Vec8u = @splat(0);
+        const zeros_f32: Vec8f = @splat(0.0);
+        const true_vec: Vec8b = @splat(true);
+        const false_vec: Vec8b = @splat(false);
+        
+        const t_vec: Vec8f = @splat(threshold);
+        const neg_t_vec: Vec8f = @splat(-threshold);
+    
+        // Standard loop (processes 8 dimensions per iteration)
+        for (0..512) |byte_i| {
+            const float_idx = byte_i * 8;
+            const floats: Vec8f = self.f32_buffer[float_idx..][0..8].*;
+            
+            // ---------------------------------------------------------
+            // MSB Logic: 1 if x > 0, else 0
+            // ---------------------------------------------------------
+            const m_mask = floats > zeros_f32;
+            
+            // ---------------------------------------------------------
+            // LSB Logic: 
+            // If x > 0,  LSB = 1 if x > T
+            // If x <= 0, LSB = 1 if x > -T
+            // ---------------------------------------------------------
+            const gt_t = floats > t_vec;
+            const le_zero = floats <= zeros_f32;
+            const gt_neg_t = floats > neg_t_vec;
+            
+            // Branchless composition of the LSB condition using SIMD selects
+            const in_middle_negative = @select(bool, le_zero, gt_neg_t, false_vec);
+            const l_mask = @select(bool, gt_t, true_vec, in_middle_negative);
+            
+            // ---------------------------------------------------------
+            // SIMD Bit Packing
+            // ---------------------------------------------------------
+            // This takes the boolean mask, maps true->bit_value and false->0, 
+            // and horizontally sums them into a single integer.
+            const m_packed = @reduce(.Add, @select(u32, m_mask, bit_values, zeros_u32));
+            const l_packed = @reduce(.Add, @select(u32, l_mask, bit_values, zeros_u32));
+            
+            msb[byte_i] = @intCast(m_packed);
+            lsb[byte_i] = @intCast(l_packed);
+        }
+        
+        return .{ msb, lsb };
+    }
+
+    pub fn sampleQjlAsymmetric2Bits(self: *Quantized, query: []const f32) ![top_k_sliced]usize {
+        try self.walshHadamardSimd(query, 12);
+        var norm: f32 = 0.0;
+        for (self.f32_buffer) |v| {
+            norm += v * v;
+        }
+        norm = @sqrt(norm);
+        const query_msb, const query_lsb = self.quantize2Bits(norm);
+        
+        var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
+        var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
+        for (0..self.vocab_size) |i| {
+            const score = self.dotQjlAsymmetric2Bits(i, &query_msb, &query_lsb, norm);
+            if (score > top_scores[top_k_sliced - 1]) {
+                var insert_pos = top_k_sliced - 1;
+                while (insert_pos > 0 and score > top_scores[insert_pos - 1]) {
+                    top_scores[insert_pos] = top_scores[insert_pos - 1];
+                    top_rows[insert_pos] = top_rows[insert_pos - 1];
+                    insert_pos -= 1;
+                }
+                top_scores[insert_pos] = score;
+                top_rows[insert_pos] = i;
+            }
+        }
+        return top_rows;
+    }
+
+    
     
     pub fn sampleDense(self: *Quantized, query: []const f32) ![top_k_sliced]usize {
         var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
