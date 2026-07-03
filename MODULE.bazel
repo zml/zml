@@ -2,7 +2,16 @@ module(
     name = "zml",
 )
 
-bazel_dep(name = "abseil-cpp", version = "20250814.1", repo_name = "com_google_absl")
+bazel_dep(name = "abseil-cpp", version = "20260526.0", repo_name = "com_google_absl")
+# Work around abseil-cpp#2071 until the BCR release includes the Clang BMI2 fix.
+single_version_override(
+    module_name = "abseil-cpp",
+    patch_strip = 1,
+    patches = [
+        "//:third_party/abseil-cpp/bmi2intrin.patch",
+    ],
+    version = "20260526.0",
+)
 bazel_dep(name = "bazel_lib", version = "3.2.2")
 bazel_dep(name = "aspect_rules_py", version = "1.8.4")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
@@ -12,11 +21,7 @@ bazel_dep(name = "libbacktrace", version = "1.0.0-20250926-7939218")
 bazel_dep(name = "patchelf", version = "0.18.0.bcr.1")
 bazel_dep(name = "pcre2", version = "10.45")
 bazel_dep(name = "platforms", version = "1.1.0")
-bazel_dep(name = "protobuf", version = "33.6", repo_name = "com_google_protobuf")
-single_version_override(
-    module_name = "protobuf",
-    version = "33.6",  # important, until grpc-cpp is fixed
-)
+bazel_dep(name = "protobuf", version = "35.0", repo_name = "com_google_protobuf")
 
 bazel_dep(name = "pybind11_bazel", version = "3.0.1")
 bazel_dep(name = "re2", version = "2025-11-05", repo_name = "com_googlesource_code_re2")
@@ -33,17 +38,23 @@ bazel_dep(name = "llvm", version = "0.8.9")
 bazel_dep(name = "zlib-ng", version = "2.3.3", repo_name = "llvm_zlib")
 bazel_dep(name = "zstd", version = "1.5.7.bcr.1", repo_name = "llvm_zstd")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
-bazel_dep(name = "grpc", version = "1.74.0")
+bazel_dep(name = "grpc", version = "1.80.0")
+single_version_override(
+    module_name = "grpc",
+    patch_strip = 1,
+    patches = [
+        "//:third_party/grpc/protobuf-35-upb-load.patch",
+        "//:third_party/grpc/grpc++_unsecure-visibility.patch",
+    ],
+    version = "1.80.0",
+)
+single_version_override(
+    module_name = "envoy_api",
+    version = "0.0.0-20250128-4de3c74",
+)
 
-# Added to support bazel 9+ since an old version is pulled by GRPC
-# TODO: remove when GRPC is updated to v1.80+
+# Added to support bazel 9+ since an old version is pulled by GRPC.
 bazel_dep(name = "rules_foreign_cc", version = "0.15.1")
-
-# Same as rules_foreign_cc
-bazel_dep(name = "rules_go", version = "0.60.0")
-
-# Same as rules_foreign_cc
-bazel_dep(name = "jsoncpp", version = "1.9.6.bcr.2", repo_name = "jsoncpp_git")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1", dev_dependency = True)
 
@@ -280,9 +291,4 @@ use_repo(
     "debian_12_linux_amd64",
     "distroless_cc_debian12",
     "distroless_cc_debian12_linux_amd64",
-)
-
-single_version_override(
-    module_name = "grpc-java",
-    version = "1.74.0",
 )
