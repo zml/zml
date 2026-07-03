@@ -733,7 +733,7 @@ const Triton = struct {
 
     fn prepareRouting(topk_ids: zml.Tensor, topk_weights: zml.Tensor, num_experts: i64) Routing {
         const topk = topk_ids.dim(.eid);
-        const num_tokens = topk_ids.dim(.seq);
+        const num_tokens = topk_ids.dim(.b);
         const num_routes = num_tokens * topk;
 
         const block_m = blk: {
