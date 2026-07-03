@@ -731,7 +731,7 @@ pub const Quantized = struct {
     }
     
     
-    pub fn dotQjlAsymmetric1(self: *Quantized, row: usize, query_lut: []const f32, query_total_sum: f32) f32 {
+    pub fn dotQjlAsymmetric(self: *Quantized, row: usize, query_lut: []const f32, query_total_sum: f32) f32 {
         const row_quantized = &self.lm_head_qjl[row];
         const row_qjl_scale = self.qjl_row_scale[row];
 
@@ -749,7 +749,7 @@ pub const Quantized = struct {
         return row_qjl_scale * (2.0 * positive_sum - query_total_sum);
     }
 
-    pub fn dotQjlAsymmetric2(self: *Quantized, row: usize, query_lut: []const f32, query_total_sum: f32) f32 {
+    pub fn dotQjlAsymmetricSimd(self: *Quantized, row: usize, query_lut: []const f32, query_total_sum: f32) f32 {
         const row_quantized = &self.lm_head_qjl[row];
         const row_qjl_scale = self.qjl_row_scale[row];
     
@@ -787,44 +787,6 @@ pub const Quantized = struct {
         const positive_sum = @reduce(.Add, acc_vec);
         return row_qjl_scale * (2.0 * positive_sum - query_total_sum);
     }
-
-    pub fn dotQjlAsymmetric3(self: *Quantized, row: usize, query_lut: []const f32, query_total_sum: f32) f32 {
-        const row_quantized = &self.lm_head_qjl[row];
-        const row_qjl_scale = self.qjl_row_scale[row];
-
-        std.debug.assert(query_lut.len >= 512 * 256);
-
-        const row_bytes = std.mem.asBytes(&row_quantized.words)[0..512];
-
-        const Vec8 = @Vector(8, f32);
-        const Vec8U8 = @Vector(8, u8);
-        const Vec8Usize = @Vector(8, usize);
-        const lut_offsets: Vec8Usize = .{ 0 * 256, 1 * 256, 2 * 256, 3 * 256, 4 * 256, 5 * 256, 6 * 256, 7 * 256 };
-        var acc_vec: Vec8 = @splat(0.0);
-
-        for (0..64) |chunk_i| {
-            const i = chunk_i * 8;
-
-            const bytes: Vec8U8 = row_bytes[i..][0..8].*;
-            const lut_indices: Vec8Usize = @as(Vec8Usize, @splat(i * 256)) + lut_offsets + @as(Vec8Usize, @intCast(bytes));
-
-            const loaded_values: Vec8 = .{
-                query_lut[lut_indices[0]],
-                query_lut[lut_indices[1]],
-                query_lut[lut_indices[2]],
-                query_lut[lut_indices[3]],
-                query_lut[lut_indices[4]],
-                query_lut[lut_indices[5]],
-                query_lut[lut_indices[6]],
-                query_lut[lut_indices[7]],
-            };
-
-            acc_vec += loaded_values;
-        }
-
-        const positive_sum = @reduce(.Add, acc_vec);
-        return row_qjl_scale * (2.0 * positive_sum - query_total_sum);
-    }
     
     pub fn precomputeQjlAsymmetricLut(self: *Quantized, rotated_query: []const f32) f32 {
         std.debug.assert(rotated_query.len >= 4096);
@@ -857,7 +819,7 @@ pub const Quantized = struct {
         var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
         var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
         for (0..self.vocab_size) |i| {
-            const score = self.dotQjlAsymmetric3(i, self.qjl_query_lut, query_total_sum);
+            const score = self.dotQjlAsymmetricSimd(i, self.qjl_query_lut, query_total_sum);
             if (score > top_scores[top_k_sliced - 1]) {
                 var insert_pos = top_k_sliced - 1;
                 while (insert_pos > 0 and score > top_scores[insert_pos - 1]) {
