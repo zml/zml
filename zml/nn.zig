@@ -550,6 +550,27 @@ test "RopeOpts.Scaling parses proportional" {
     }
 }
 
+test "RopeOpts.Scaling parses yarn partial rotary factor" {
+    const json =
+        \\{
+        \\  "rope_type": "yarn",
+        \\  "factor": 32.0,
+        \\  "original_max_position_embeddings": 4096,
+        \\  "partial_rotary_factor": 0.5
+        \\}
+    ;
+    var value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer value.deinit();
+
+    const scaling = try RopeOpts.Scaling.jsonParseFromValue(std.testing.allocator, value.value, .{});
+    switch (scaling) {
+        .yarn => |y| {
+            try std.testing.expectApproxEqRel(0.5, y.partial_rotary_factor, 1e-6);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
 test "RopeOpts.Scaling parses default rope type" {
     const json =
         \\{
