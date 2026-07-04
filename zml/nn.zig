@@ -177,6 +177,7 @@ pub const RopeOpts = struct {
             factor: ?f32 = null,
             mscale: ?f32 = null,
             mscale_all_dim: ?f32 = null,
+            partial_rotary_factor: f32 = 1.0,
             truncate: bool = true,
             original_max_position_embeddings: u32,
             rope_theta: f32 = 10000,
@@ -472,6 +473,27 @@ test "RopeOpts.Scaling parses proportional" {
         .proportional => |p| {
             try std.testing.expectApproxEqRel(0.25, p.partial_rotary_factor, 1e-6);
             try std.testing.expectApproxEqRel(1_000_000, p.rope_theta, 1e-6);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "RopeOpts.Scaling parses yarn partial rotary factor" {
+    const json =
+        \\{
+        \\  "rope_type": "yarn",
+        \\  "factor": 32.0,
+        \\  "original_max_position_embeddings": 4096,
+        \\  "partial_rotary_factor": 0.5
+        \\}
+    ;
+    var value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer value.deinit();
+
+    const scaling = try RopeOpts.Scaling.jsonParseFromValue(std.testing.allocator, value.value, .{});
+    switch (scaling) {
+        .yarn => |y| {
+            try std.testing.expectApproxEqRel(0.5, y.partial_rotary_factor, 1e-6);
         },
         else => try std.testing.expect(false),
     }
