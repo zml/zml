@@ -45,8 +45,14 @@ pub fn Union(comptime T: type) type {
                 switch (field.type) {
                     bool => if (source == .bool) return .{ .value = @unionInit(T, field.name, source.bool) },
                     []const u8 => switch (source) {
-                        .string => |v| return .{ .value = @unionInit(T, field.name, v) },
-                        .number_string => |v| return .{ .value = @unionInit(T, field.name, v) },
+                        .string => |v| {
+                            const dupe = try allocator.dupe(u8, v);
+                            return .{ .value = @unionInit(T, field.name, dupe) };
+                        },
+                        .number_string => |v| {
+                            const dupe = try allocator.dupe(u8, v);
+                            return .{ .value = @unionInit(T, field.name, dupe) };
+                        },
                         else => {},
                     },
                     else => switch (@typeInfo(field.type)) {
@@ -237,6 +243,32 @@ test "union" {
 
     const null_value = try std.json.parseFromSliceLeaky(std.json.Value, allocator, "null", .{});
     try std.testing.expectError(error.UnknownField, Union(Answer).jsonParseFromValue(allocator, null_value, .{}));
+}
+
+test "strings in union can be freed" {
+    const Answer = union(enum) {
+        string: []const u8,
+        number: u32,
+    };
+    const Struct = struct {
+        answer1: Union(Answer),
+        answer2: Union(Answer),
+    };
+    const struct_json =
+        \\{"answer1":"I'm 29","answer2": 1e29}
+    ;
+    var parsed_value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, struct_json, .{ .parse_numbers = false });
+    defer parsed_value.deinit();
+
+    const parsed = try std.json.parseFromValueLeaky(Struct, std.testing.allocator, parsed_value.value, .{});
+
+    try std.testing.expect(parsed.answer1.value == .string);
+    try std.testing.expectEqualStrings("I'm 29", parsed.answer1.value.string);
+    std.testing.allocator.free(parsed.answer1.value.string);
+
+    try std.testing.expect(parsed.answer2.value == .string);
+    try std.testing.expectEqualStrings("1e29", parsed.answer2.value.string);
+    std.testing.allocator.free(parsed.answer2.value.string);
 }
 
 test "tagged union" {
