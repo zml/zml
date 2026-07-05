@@ -21,28 +21,28 @@ Append platform flags when relevant, for example `--@zml//platforms:cuda=true`, 
 ## Zabel Acceptance Target
 
 Use `//examples/llm` as the Zabel acceptance build target. Use
-`deps(//examples/llm)` as the exact query, cquery, and aquery expression; do
-not compare only `//examples/llm` for those commands.
+`deps(//examples/llm) except //examples/llm` as the exact query, cquery, and
+aquery expression.
 
 Build the pinned `@bazel//src:bazel` executable from `/Users/dzbarsky/zabel`
 and run the Bazel oracle commands from this repository:
 
 ```bash
 <pinned-bazel> --output_base=<zml-bazel-output-base> query \
-  'deps(//examples/llm)'
+  'deps(//examples/llm) except //examples/llm'
 
 <pinned-bazel> --output_base=<zml-bazel-output-base> cquery \
   --config=remote \
   --platforms=//platforms:linux_amd64 \
   --@zml//platforms:cuda=true \
-  'deps(//examples/llm)'
+  'deps(//examples/llm) except //examples/llm'
 
 <pinned-bazel> --output_base=<zml-bazel-output-base> aquery \
   --config=remote \
   --platforms=//platforms:linux_amd64 \
   --@zml//platforms:cuda=true \
   --output=text \
-  'deps(//examples/llm)'
+  'deps(//examples/llm) except //examples/llm'
 
 <pinned-bazel> --output_base=<zml-bazel-output-base> build \
   --config=remote \
