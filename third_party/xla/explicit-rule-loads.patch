@@ -1,0 +1,23 @@
+diff --git a/third_party/farmhash/farmhash_gpu.BUILD b/third_party/farmhash/farmhash_gpu.BUILD
+--- a/third_party/farmhash/farmhash_gpu.BUILD
++++ b/third_party/farmhash/farmhash_gpu.BUILD
+@@ -3,0 +4,2 @@
++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++
+diff --git a/third_party/py/ml_dtypes/ml_dtypes.BUILD b/third_party/py/ml_dtypes/ml_dtypes.BUILD
+--- a/third_party/py/ml_dtypes/ml_dtypes.BUILD
++++ b/third_party/py/ml_dtypes/ml_dtypes.BUILD
+@@ -3,0 +4,2 @@
++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++load("@rules_python//python:py_library.bzl", "py_library")
+diff --git a/third_party/hwloc/hwloc.BUILD b/third_party/hwloc/hwloc.BUILD
+--- a/third_party/hwloc/hwloc.BUILD
++++ b/third_party/hwloc/hwloc.BUILD
+@@ -4,0 +5,2 @@
++load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
++load("@rules_cc//cc:cc_library.bzl", "cc_library")
+diff --git a/third_party/tsl/BUILD.bazel b/third_party/tsl/BUILD.bazel
+--- a/third_party/tsl/BUILD.bazel
++++ b/third_party/tsl/BUILD.bazel
+@@ -1,0 +1 @@
++load("@rules_cc//cc:cc_library.bzl", "cc_library")
