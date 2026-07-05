@@ -48,3 +48,37 @@ diff --git a/build_tools/bazel/build_defs.oss.bzl b/build_tools/bazel/build_defs
  
  def defaulting_select(selector):
      """Pass through to select() with special semantics when converting to CMake.
+diff --git a/runtime/src/iree/base/tracing/BUILD.bazel b/runtime/src/iree/base/tracing/BUILD.bazel
+--- a/runtime/src/iree/base/tracing/BUILD.bazel
++++ b/runtime/src/iree/base/tracing/BUILD.bazel
+@@ -26 +25,0 @@
+-        "tracy",
+@@ -37,7 +35,0 @@
+-config_setting(
+-    name = "_tracy_enable",
+-    flag_values = {
+-        ":tracing_provider": "tracy",
+-    },
+-)
+-
+@@ -52 +43,0 @@
+-        ":_tracy_enable": ":tracy",
+@@ -74,18 +64,0 @@
+-
+-#===------------------------------------------------------------------------===#
+-# Tracy
+-#===------------------------------------------------------------------------===#
+-
+-iree_runtime_cc_library(
+-    name = "tracy",
+-    srcs = ["tracy.cc"],
+-    hdrs = ["tracy.h"],
+-    defines = [
+-        "IREE_TRACING_PROVIDER_H=\\\"iree/base/tracing/tracy.h\\\"",
+-        "IREE_TRACING_MODE=2",
+-    ],
+-    deps = [
+-        "//runtime/src/iree/base:core_headers",
+-        "@tracy_client//:runtime",
+-    ],
+-)
