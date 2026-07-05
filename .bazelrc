@@ -77,6 +77,7 @@ common          --workspace_status_command=./tools/workspace_status.sh
 common          --@rules_cc//cc/toolchains/args/archiver_flags:use_libtool_on_macos=false
 common          --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 common          --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
+common          --xcode_version_config=//:disable_xcode
 
 # Required for protobuf upb on Linux
 common:linux    --copt=-fPIC
