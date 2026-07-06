@@ -235,10 +235,11 @@ pub const Model = struct {
                     // Create bar chart data from histogram buckets
                     const bars = try ctx.arena.alloc(tui.BarChart.BucketData, hist.bucket_counts.len);
                     const total_count = hist.total_count;
+                    if (total_count == 0) continue;
                     var prev: u64 = 0;
                     for (bars, hist.bucket_counts, hist.bucket_upper_bounds) |*bar, count, upper_bound| {
                         bar.* = .{
-                            .percentage = @intCast(@divFloor(100 * (count - prev), total_count)),
+                            .percentage = @intCast(@divFloor(100 * (count -| prev), total_count)),
                             .upper_bound = upper_bound,
                         };
                         prev = count;
@@ -290,7 +291,7 @@ pub const Model = struct {
             },
             screen.width,
         );
-        try scrolled_sb.addZ(0, 0, title_surf, 1);
+        try scrolled_sb.addZ(@intCast(screen.height - 1), 0, title_surf, 1);
 
         return scrolled_sb.finish(screen, tui.ui.widget(self));
     }
