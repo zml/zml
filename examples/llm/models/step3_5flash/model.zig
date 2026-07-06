@@ -752,10 +752,13 @@ pub const Attn = struct {
             else => attention_parameters,
         };
 
+        const cached_k = new_kv_cache.keys().convert(dtype);
+        const cached_v = new_kv_cache.values().convert(dtype);
+
         // During decode, slice K/V to the sliding window to reduce memory traffic.
         // During prefill, use the full cache and let attention_parameters.sliding_window do masking.
         const attn_k, const attn_v, const effective_attn_start = if (self.enable_sliding_window and input.dim(.s) == 1) blk: {
-            const window_len: i64 = @intCast(self.config.sliding_window);
+            const window_len: i64 = @min(@as(i64, @intCast(self.config.sliding_window)), cached_k.dim(.k));
 
             // window_start = max(0, T + 1 - window_len) with T = attn_start[0]
             const window_start = attn_start.convert(.i64)
@@ -763,10 +766,10 @@ pub const Attn = struct {
                 .addConstant(1 - window_len)
                 .maximum(zml.Tensor.scalar(@as(i64, 0), .i64))
                 .convert(.u32);
-            const k_slice = new_kv_cache.keys().convert(dtype)
+            const k_slice = cached_k
                 .dynamicSlice(.{ .k = zml.Tensor.DynSlice{ .start = window_start, .len = window_len } })
                 .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
-            const v_slice = new_kv_cache.values().convert(dtype)
+            const v_slice = cached_v
                 .dynamicSlice(.{ .k = zml.Tensor.DynSlice{ .start = window_start, .len = window_len } })
                 .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
 
@@ -776,10 +779,8 @@ pub const Attn = struct {
                 .minimum(zml.Tensor.scalar(@as(u32, @intCast(window_len)), .u32).broad(attn_start.shape()));
             break :blk .{ k_slice, v_slice, window_attn_start };
         } else .{
-            new_kv_cache.keys().convert(dtype)
-                .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated }),
-            new_kv_cache.values().convert(dtype)
-                .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated }),
+            cached_k.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated }),
+            cached_v.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated }),
             attn_start,
         };
 
