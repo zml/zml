@@ -217,15 +217,8 @@ pub fn forwardMoe(
                                     .w2_bias = ctx.bias_down,
                                 },
                             ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
-<<<<<<< HEAD
-                            return zml.ops.allReduce(
-                                local_output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d }),
-                                zml.Tensor.add,
-                            );
-=======
                             const local_reshaped = local_output.reshape(sharded_inputs[0].shape().dims()).withTags(.{ .b, .s, .d });
                             return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
->>>>>>> master
                         }
                     }).body,
                 );
