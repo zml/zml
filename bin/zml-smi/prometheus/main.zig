@@ -219,7 +219,7 @@ pub const Model = struct {
             switch (m.value) {
                 .gauge => |g| {
                     if (g.max - g.min == 1) continue;
-                    const label_line = try std.fmt.allocPrint(ctx.arena, "{s} {d:4}", .{ m.name, g.current });
+                    const label_line = try std.fmt.allocPrint(ctx.arena, "{s}: {d:4}", .{ m.name, g.current });
                     const gauge: tui.Gauge = .{
                         .value = g.asPercentage(),
                         .label = label_line,
@@ -246,12 +246,13 @@ pub const Model = struct {
                         prev = count;
                     }
 
+                    const total_line = try std.fmt.allocPrint(ctx.arena, "{s}: {d:6}", .{ m.name, total_count });
                     const bar_chart: tui.BarChart = .{
                         .buckets = bars,
                         .bar_height = m.chart_height,
                         .show_values = true,
                         .show_bounds = true,
-                        .label = m.name,
+                        .label = total_line,
                     };
                     const bar_chart_height = bar_chart.height();
                     const bar_surf = try bar_chart.draw(tui.ui.fixedSize(ctx, (ctx.max.width orelse 40), bar_chart_height));
