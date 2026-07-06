@@ -219,9 +219,10 @@ pub const Model = struct {
             switch (m.value) {
                 .gauge => |g| {
                     if (g.max - g.min == 1) continue;
+                    const label_line = try std.fmt.allocPrint(ctx.arena, "{s} {d:4}", .{ m.name, g.current });
                     const gauge: tui.Gauge = .{
                         .value = g.asPercentage(),
-                        .label = m.name,
+                        .label = label_line,
                         .suffix = "",
                         .label_reserve = 0,
                         .suffix_reserve = 0,
