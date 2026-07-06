@@ -13,6 +13,7 @@ def _argv() -> list[str]:
         trailing_args = user_args
     return [
         sys.argv[0],
+        "server",
         "--logdir",
         logdir,
         "--max_concurrent_worker_requests",
