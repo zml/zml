@@ -1,6 +1,10 @@
 import sys
 
-from xprof.server import main as xprof_main
+try:
+    from xprof.cli import xprof_cli
+except ImportError:
+    xprof_cli = None
+    from xprof.server import main as xprof_server_main
 
 
 def _argv() -> list[str]:
@@ -26,4 +30,6 @@ def _argv() -> list[str]:
 
 if __name__ == "__main__":
     sys.argv = _argv()
-    raise SystemExit(xprof_main())
+    if xprof_cli is not None:
+        raise SystemExit(xprof_cli.main(sys.argv))
+    raise SystemExit(xprof_server_main())
