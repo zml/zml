@@ -8,6 +8,15 @@ const model = @import("model.zig");
 const log = std.log.scoped(.step3p5);
 const Phase = common.Phase;
 
+fn syncKernelTimingsEnabled() bool {
+    const value = std.c.getenv("ZML_LLM_SYNC_KERNELS") orelse return false;
+    const flag = std.mem.span(value);
+    return flag.len != 0 and
+        !std.mem.eql(u8, flag, "0") and
+        !std.mem.eql(u8, flag, "false") and
+        !std.mem.eql(u8, flag, "off");
+}
+
 pub const CompilationParameters = struct {
     prefill_tokens: zml.Tensor,
     decode_tokens: zml.Tensor,
@@ -253,14 +262,16 @@ pub const KernelExe = struct {
         pub fn run(self: *Runner, args: Args) !void {
             var hidden_buf: zml.Buffer = b: {
                 self.embed_args.set(.{args.tokens_buf});
-                self.exe.embed_tokens.call(self.embed_args, &self.embed_results);
+                var label_buf: [64]u8 = undefined;
+                const label = std.fmt.bufPrint(&label_buf, "{s} embed tokens", .{@tagName(self.exe.phase)}) catch unreachable;
+                self.exe.callKernel(args.io, label, &self.exe.embed_tokens, &self.embed_args, &self.embed_results);
                 break :b self.embed_results.get(zml.Buffer);
             };
             defer hidden_buf.deinit();
 
             for (self.layers.args, self.layers.results, self.layers.layer_indices, 0..) |*exe_args, *results, *layer_index_buf, i| {
                 const layerExe = try self.exe.inferLayerExe(self.exe.mdl, i);
-                ComposedKernelExe.runLayer(exe_args, results, &layerExe, args, &hidden_buf, layer_index_buf);
+                self.exe.runLayer(exe_args, results, &layerExe, args, &hidden_buf, layer_index_buf, i);
             }
 
             self.exe.runSampler(&self.sampler_args, &self.sampler_results, args, &hidden_buf);
@@ -415,7 +426,9 @@ const ComposedKernelExe = struct {
             defer results.deinit(args.allocator);
 
             exe_args.set(.{args.tokens_buf});
-            self.embed_tokens.call(exe_args, &results);
+            var label_buf: [64]u8 = undefined;
+            const label = std.fmt.bufPrint(&label_buf, "{s} embed tokens", .{@tagName(self.phase)}) catch unreachable;
+            self.callKernel(args.io, label, &self.embed_tokens, &exe_args, &results);
             break :b results.get(zml.Buffer);
         };
         defer hidden_buf.deinit();
@@ -433,7 +446,7 @@ const ComposedKernelExe = struct {
             var layer_index_buf = try zml.Buffer.scalar(args.io, args.platform, @as(u32, @intCast(i)), .u32);
             defer layer_index_buf.deinit();
 
-            ComposedKernelExe.runLayer(&exe_args, &results, &layerExe, args, &hidden_buf, &layer_index_buf);
+            self.runLayer(&exe_args, &results, &layerExe, args, &hidden_buf, &layer_index_buf, i);
         }
 
         {
@@ -449,12 +462,14 @@ const ComposedKernelExe = struct {
     }
 
     fn runLayer(
+        self: *const ComposedKernelExe,
         exe_args: *zml.exe.Exe.Arguments,
         exe_results: *zml.exe.Exe.Results,
         layer_exe: *const zml.Exe,
         args: Args,
         hidden_buf: *zml.Buffer,
         layer_index_buf: *zml.Buffer,
+        layer_index: usize,
     ) void {
         const layer_cache: zml.Bufferized(model.KvCache) = .{
             .k = args.kv_cache_buffers.k,
@@ -463,13 +478,35 @@ const ComposedKernelExe = struct {
         };
         exe_args.set(.{ hidden_buf, args.token_index_buf, layer_cache, args.attention_metadata_buffers });
 
-        layer_exe.call(exe_args.*, exe_results);
+        var label_buf: [64]u8 = undefined;
+        const label = std.fmt.bufPrint(&label_buf, "{s} layer {d}", .{ @tagName(self.phase), layer_index }) catch unreachable;
+        self.callKernel(args.io, label, layer_exe, exe_args, exe_results);
 
         var new_hidden, var new_cache = exe_results.get(struct { zml.Buffer, zml.Bufferized(model.KvCache) });
         replaceBuffer(hidden_buf, &new_hidden);
         replaceBuffer(&args.kv_cache_buffers.k, &new_cache.k);
         replaceBuffer(&args.kv_cache_buffers.v, &new_cache.v);
         releaseBuffer(layer_index_buf.*, &new_cache.layer_index);
+    }
+
+    fn callKernel(
+        self: *const ComposedKernelExe,
+        io: std.Io,
+        label: []const u8,
+        exe: *const zml.Exe,
+        exe_args: *const zml.exe.Exe.Arguments,
+        results: *zml.exe.Exe.Results,
+    ) void {
+        _ = self;
+        if (!syncKernelTimingsEnabled()) {
+            exe.call(exe_args.*, results);
+            return;
+        }
+
+        const start: std.Io.Timestamp = .now(io, .awake);
+        log.info("Running {s}...", .{label});
+        exe.callOpts(io, exe_args.*, results, .{ .wait = true });
+        log.info("Finished {s} [{f}]", .{ label, start.untilNow(io, .awake) });
     }
 
     fn runSampler(
@@ -493,7 +530,7 @@ const ComposedKernelExe = struct {
         hidden_buf: *zml.Buffer,
     ) void {
         exe_args.set(.{ hidden_buf, args.rng_buffers, null });
-        self.sampler.call(exe_args.*, results);
+        self.callKernel(args.io, "prefill sampler", &self.sampler, exe_args, results);
 
         var new_tokens, var new_rng = results.get(struct { zml.Buffer, zml.Bufferized(zml.Tensor.Rng) });
         replaceBuffer(args.tokens_buf, &new_tokens);
@@ -508,7 +545,7 @@ const ComposedKernelExe = struct {
         hidden_buf: *zml.Buffer,
     ) void {
         exe_args.set(.{ hidden_buf, args.rng_buffers, args.token_index_buf });
-        self.sampler.call(exe_args.*, results);
+        self.callKernel(args.io, "decode sampler", &self.sampler, exe_args, results);
 
         var new_tokens, var new_rng, var new_token_index = results.get(struct { zml.Buffer, zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
         replaceBuffer(args.tokens_buf, &new_tokens);
