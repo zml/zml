@@ -1,20 +1,17 @@
 const std = @import("std");
 
+const bazel = @import("bazel");
+const bazel_builtin = @import("bazel_builtin");
 const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
 const DataType = zml.DataType;
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
-const bazel = @import("bazel");
-const bazel_builtin = @import("bazel_builtin");
-
 const tri = zml.kernel.triton;
 const DType = tri.DType;
-
-const kernels = @import("triton_kernels/triton_kernels.zig");
-
 const toDType = tri.from;
+const kernels = @import("triton_kernels/triton_kernels.zig");
 
 const log = std.log.scoped(.moe_triton);
 
@@ -170,7 +167,7 @@ pub fn fusedExpertsImpl(
         num_assignments + num_experts * (block_size_m - 1);
 
     const sorted_token_ids, const expert_ids_global, const num_tokens_post_padded = if (naive_block_assignment) blk: {
-        log.info("Using naive block assignment for MoE kernels. Num assignments: {d}, Num experts: {d}", .{ num_assignments, num_experts });
+        log.debug("Using naive block assignment for MoE kernels. Num assignments: {d}, Num experts: {d}", .{ num_assignments, num_experts });
         const naive_sorted_ids = Tensor.zeroes(Shape.init(.{ .g = 1 }, .i32));
         const naive_expert_ids = ids.reshape(.{ .g = num_assignments });
         const naive_num_tokens_post_padded = Tensor.constant(.{ .i32 = @as(i32, @intCast(max_num_tokens_padded)) }).reshape(.{1});
@@ -347,7 +344,7 @@ fn callFusedMoe(
 }
 
 fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct { Tensor, Tensor, Tensor } {
-    log.info("Using triton kernels to sort and align tokens to experts with block size {d}", .{block_size_m});
+    log.debug("Using triton kernels to sort and align tokens to experts with block size {d}", .{block_size_m});
     const topk_ids_ = topk_ids.withTags(.{ .token, .topk }).convert(.i32);
     const num_tokens = topk_ids_.dim(.token);
     const topk = topk_ids_.dim(.topk);
@@ -642,7 +639,6 @@ fn fp8ActivationGroupSize(x: Tensor) i64 {
 
 fn validateOptions(opts: Options) !void {
     if (opts.inplace) return error.Unimplemented;
-    if (opts.activation != .silu and opts.activation != .relu) return error.UnsupportedActivation;
     if (opts.apply_router_weight_on_input) return error.UnsupportedOption;
     if (opts.use_fp8_w8a8 or opts.use_int8_w8a8 or opts.use_int8_w8a16 or opts.use_int4_w4a16) return error.UnsupportedQuantization;
     if (opts.ocp_mx_scheme != null or opts.per_channel_quant) return error.UnsupportedOption;

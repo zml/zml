@@ -1,8 +1,6 @@
 const std = @import("std");
 
 const zml = @import("zml");
-const CompilationContext = zml.module.CompilationContext;
-
 const stdx = zml.stdx;
 
 const common = @import("../common.zig");
@@ -49,34 +47,27 @@ pub const RopeParameters = struct {
     rope_theta: f32,
 };
 
-fn kvHeadRepeatFactor(axis_size: i64, model_partitions: i64) ?u32 {
-    if (axis_size <= 0 or axis_size >= model_partitions or @rem(model_partitions, axis_size) != 0) return null;
-    return @intCast(@divExact(model_partitions, axis_size));
+fn partitionProjectedKv(kv: zml.Tensor, kv_head_sharding: zml.Sharding.DimSharding) zml.Tensor {
+    return switch (kv_head_sharding) {
+        .sharded => |heads| blk: {
+            const sharded_kv = if (heads.factor != 1) kv.stutter1d(kv.axis(.h), heads.factor) else kv;
+            break :blk sharded_kv.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
+        },
+        .replicated => kv.withPartitioning(.{ .s = .replicated, .h = .replicated, .hd = .replicated }),
+    };
 }
 
-fn partitionProjectedKv(tensor: zml.Tensor, repeat_factor: ?u32) zml.Tensor {
-    return if (repeat_factor) |factor|
-        tensor.stutter1d(tensor.axis(.h), @as(u63, factor)).withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated })
-    else
-        tensor.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
-}
-
-fn partitionCachedKv(tensor: zml.Tensor, repeat_factor: ?u32) zml.Tensor {
-    return if (repeat_factor) |factor|
-        tensor.rename(.{ .s = .k }).stutter1d(tensor.axis(.h), @as(u63, factor)).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated })
-    else
-        tensor.rename(.{ .s = .k }).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
-}
-
-fn partitionKvCacheShape(kv_shape: zml.Shape, kv_heads: i64, model_partitions: i64) zml.Shape {
-    if (kvHeadRepeatFactor(kv_heads, model_partitions)) |repeat_factor| {
-        const repeated_h = kv_shape.dim(.h) * @as(i64, @intCast(repeat_factor));
-        return kv_shape
-            .setDim(.h, repeated_h)
-            .withPartitioning(.{ .h = .model });
-    }
-
-    return kv_shape.withPartitioning(.{ .h = .model });
+fn partitionCachedKv(tensor: zml.Tensor, kv_head_sharding: zml.Sharding.DimSharding) zml.Tensor {
+    var kv = tensor.rename(.{ .s = .k });
+    return switch (kv_head_sharding) {
+        .sharded => |heads| blk: {
+            if (heads.factor != 1) {
+                kv = kv.stutter1d(kv.axis(.h), heads.factor);
+            }
+            break :blk kv.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+        },
+        .replicated => kv.withPartitioning(.{ .k = .replicated, .h = .replicated, .hd = .replicated }),
+    };
 }
 
 pub const LoadedModel = struct {
@@ -133,7 +124,7 @@ pub const LoadedModel = struct {
         const all_shardings = shardings.all();
         var buffers = try zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
             .dma_chunks = 32,
-            .dma_chunk_size = 128 * zml.MiB,
+            .dma_chunk_size = 256 * zml.MiB,
             .progress = progress,
             .shardings = &all_shardings,
             .parallelism = 16,
@@ -218,7 +209,7 @@ pub const Model = struct {
         }
         return zml.io.load(Model, self, allocator, io, platform, store, .{
             .dma_chunks = 32,
-            .dma_chunk_size = 128 * zml.MiB,
+            .dma_chunk_size = 256 * zml.MiB,
             .progress = progress,
             .shardings = shardings,
             .parallelism = 16,
@@ -575,16 +566,19 @@ pub const SelfAttn = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache.SelfAttnCache,
     ) struct { zml.Tensor, KvCache.SelfAttnCache } {
-        const model_partitions = zml.module.CompilationContext.current().partitioning.numPartitionsForLogicalAxis(self.q_proj.weight.shape(), .model) catch unreachable;
-        const repeat_factor = kvHeadRepeatFactor(self.num_kv_heads, model_partitions);
         const x_qkv = x.withPartitioning(.{ .d = .replicated });
-
         var q, var gate = self.projectQAndGate(x_qkv);
         var k, var v = self.projectKV(x_qkv);
+        const kv_head_sharding = zml.module.CompilationContext.current().partitioning.shardableDim(
+            k.shape().withPartitioning(.{ .h = .model }),
+            .h,
+            q.dim(.h),
+        ) catch unreachable;
+
         q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
         gate = gate.withPartitioning(.{ .s = .replicated, .d_out_proj = .model });
-        k = partitionProjectedKv(k, repeat_factor);
-        v = partitionProjectedKv(v, repeat_factor);
+        k = partitionProjectedKv(k, kv_head_sharding);
+        v = partitionProjectedKv(v, kv_head_sharding);
         q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
         k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
 
@@ -597,15 +591,15 @@ pub const SelfAttn = struct {
         q = self.rotary_embed.applyRope(q, cos, sin);
         k = self.rotary_embed.applyRope(k, cos, sin);
         q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
-        k = partitionProjectedKv(k, null);
-        v = partitionProjectedKv(v, null);
+        k = partitionProjectedKv(k, kv_head_sharding);
+        v = partitionProjectedKv(v, kv_head_sharding);
 
         const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
         q = q.rename(.{ .s = .q }).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
-        k = partitionCachedKv(k, repeat_factor);
-        v = partitionCachedKv(v, repeat_factor);
+        k = partitionCachedKv(k, kv_head_sharding);
+        v = partitionCachedKv(v, kv_head_sharding);
 
         const attn_output = zml.attention.attention.attention(
             q,
@@ -872,7 +866,7 @@ pub const GatedDeltaNet = struct {
 
     num_k_heads: i64,
     num_v_heads: i64,
-    qk_head_repetition: i64,
+    qk_head_repetition: u32,
     head_k_dim: i64,
     head_v_dim: i64,
     conv_kernel_size: i64,
@@ -882,8 +876,8 @@ pub const GatedDeltaNet = struct {
     }
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) GatedDeltaNet {
-        const qk_head_repetition =
-            @divExact(config.text_config.linear_num_value_heads, config.text_config.linear_num_key_heads);
+        const qk_head_repetition: u32 =
+            @intCast(@divExact(config.text_config.linear_num_value_heads, config.text_config.linear_num_key_heads));
         return .{
             .in_proj_qkv = initProj(store.withPrefix("in_proj_qkv"), .{ .dout = .model, .d = .replicated }),
             .in_proj_qkv_scale = null,
@@ -1051,8 +1045,8 @@ pub const GatedDeltaNet = struct {
             g = setPaddingToZero(g, valid_mask.broad(g.shape()));
         }
 
-        const query_for_rule = if (self.qk_head_repetition == 1) query else query.stutter1d(@intCast(query.axis(.kh)), @intCast(self.qk_head_repetition));
-        const key_for_rule = if (self.qk_head_repetition == 1) key else key.stutter1d(@intCast(key.axis(.kh)), @intCast(self.qk_head_repetition));
+        const query_for_rule = if (self.qk_head_repetition == 1) query else query.stutter1d(query.axis(.kh), self.qk_head_repetition);
+        const key_for_rule = if (self.qk_head_repetition == 1) key else key.stutter1d(key.axis(.kh), self.qk_head_repetition);
 
         const core_attn_out, const last_recurrent_state = recurrentGatedDeltaRule(
             query_for_rule,
@@ -1136,7 +1130,7 @@ pub const KvCache = struct {
         v: zml.Tensor,
         layer_index: zml.Tensor,
 
-        pub fn init(config: Config, batch_dim: i64, max_seq_len: i64, dtype: zml.DataType, model_partitions: i64) SelfAttnCache {
+        pub fn init(config: Config, batch_dim: i64, max_seq_len: i64, dtype: zml.DataType, model_sharding: zml.Sharding) SelfAttnCache {
             const num_self_attn_layers = countLayers(config.text_config.layer_types, .full_attention);
             const kv_shape = zml.Shape.init(.{
                 .b = batch_dim,
@@ -1145,7 +1139,11 @@ pub const KvCache = struct {
                 .h = config.text_config.num_key_value_heads,
                 .hd = config.text_config.head_dim,
             }, dtype);
-            const sharded_kv_shape = partitionKvCacheShape(kv_shape, config.text_config.num_key_value_heads, model_partitions);
+            const kv_head_sharding = model_sharding.shardableDim(kv_shape.dim(.h), .model, config.text_config.num_attention_heads);
+            const sharded_kv_shape = switch (kv_head_sharding) {
+                .sharded => |heads| kv_shape.setDim(.h, heads.dim).withPartitioning(.{ .h = .model }),
+                .replicated => kv_shape.withPartitioning(.{ .h = .replicated }),
+            };
             return .{
                 .k = .fromShape(sharded_kv_shape),
                 .v = .fromShape(sharded_kv_shape),
@@ -1325,11 +1323,11 @@ pub const KvCache = struct {
         max_seq_len: i64,
         cache_dtype: zml.DataType,
         recurrent_dtype: zml.DataType,
-        model_partitions: i64,
+        model_sharding: zml.Sharding,
     ) KvCache {
         return .{
             .layer_types = config.text_config.layer_types,
-            .self_attn = SelfAttnCache.init(config, batch_dim, max_seq_len, cache_dtype, model_partitions),
+            .self_attn = SelfAttnCache.init(config, batch_dim, max_seq_len, cache_dtype, model_sharding),
             .gated_delta_net = GatedDeltaNetCache.init(config, batch_dim, cache_dtype, recurrent_dtype),
         };
     }

@@ -4,9 +4,9 @@ def _tpu_impl(mctx):
     # https://storage.googleapis.com/jax-releases/libtpu_releases.html
     http_archive(
         name = "libpjrt_tpu",
-        url = "https://files.pythonhosted.org/packages/42/7f/cc3ad9e9b866c701e90e6d8d4e332557fefb1f3ad1bebd9914ff09778691/libtpu-0.0.40-cp314-cp314t-manylinux_2_31_x86_64.whl",
+        url = "https://storage.googleapis.com/libtpu-nightly-releases/wheels/libtpu/libtpu-0.0.42.dev20260613+nightly-cp314-cp314t-manylinux_2_31_x86_64.whl",
         type = "zip",
-        sha256 = "a1d01214bffe5a0910057014eaa17ed838eebc780e1538b4bd118684908ea120",
+        sha256 = "1d0bbb1608154bda6944902abd6f56f956638539d7503db4894927e21a41baed",
         build_file = "libpjrt_tpu.BUILD.bazel",
     )
     return mctx.extension_metadata(

@@ -99,7 +99,6 @@ pub const Api = struct {
     pub fn loadFrom(library: [:0]const u8) !*const Api {
         const basename = std.Io.Dir.path.basename(library);
         log.info("Loading: {s}...", .{basename});
-        defer log.info("Loaded: {s}", .{basename});
 
         var lib: std.DynLib = switch (builtin.os.tag) {
             .linux, .macos => blk: {
@@ -124,16 +123,21 @@ pub const Api = struct {
             },
         };
 
-        return fromDynLib(&lib);
+        const api = fromDynLib(&lib) catch |err| {
+            log.err("Unable to load PJRT API from plugin: {s}: {}", .{ library, err });
+            return err;
+        };
+        log.info("Loaded: {s}", .{basename});
+        return api;
     }
 
     pub fn fromDynLib(lib: *std.DynLib) !*const Api {
         const DynGetPjrtApi = lib.lookup(*const fn () callconv(.c) *const Api, "GetPjrtApi") orelse {
-            std.debug.panic("Unable to find GetPjrtApi symbol in library", .{});
+            return error.MissingGetPjrtApi;
         };
 
         const api = DynGetPjrtApi();
-        _ = api.call(.PJRT_Plugin_Initialize, .{}) catch unreachable;
+        _ = try api.call(.PJRT_Plugin_Initialize, .{});
 
         return api;
     }
@@ -345,22 +349,24 @@ pub const ErrorCode = enum(c.PJRT_Error_Code) {
 };
 
 pub const Error = opaque {
+    const inner = InnerMixin(c.PJRT_Error).inner;
+
     pub fn deinit(self: *Error, api: *const Api) void {
         _ = api.call(.PJRT_Error_Destroy, .{
-            .@"error" = @ptrCast(self),
+            .@"error" = self.inner(),
         }) catch unreachable;
     }
 
     pub fn getCode(self: *Error, api: *const Api) ErrorCode {
         const ret = api.call(.PJRT_Error_GetCode, .{
-            .@"error" = @ptrCast(self),
+            .@"error" = self.inner(),
         }) catch unreachable;
         return @enumFromInt(ret.code);
     }
 
     pub fn getMessage(self: *Error, api: *const Api) []const u8 {
         const ret = api.call(.PJRT_Error_Message, .{
-            .@"error" = @ptrCast(self),
+            .@"error" = self.inner(),
         }) catch unreachable;
         return ret.message[0..ret.message_size];
     }
@@ -492,7 +498,7 @@ pub const Client = opaque {
             .device_layout = @ptrCast(@constCast(&args.layout.toCStruct())),
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
             .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
-            .memory = if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null,
+            .memory = if (args.dst == .memory) args.dst.memory.inner() else null,
         });
 
         return .{
@@ -578,7 +584,7 @@ pub const Client = opaque {
             .num_shape_specs = args.shape_specs.len,
             .device_layouts = if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts)) else null,
             .num_device_layouts = if (args.device_layouts) |layouts| layouts.len else 0,
-            .memory = @ptrCast(@constCast(args.memory)),
+            .memory = args.memory.inner(),
         });
         return @ptrCast(ret.transfer_manager.?);
     }
@@ -659,7 +665,7 @@ pub const Client = opaque {
             .shape_element_type = @intFromEnum(args.element_type),
             .shape_layout = @ptrCast(&layout),
             .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
-            .memory = if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null,
+            .memory = if (args.dst == .memory) args.dst.memory.inner() else null,
         });
         return @ptrCast(ret.buffer.?);
     }
@@ -1272,7 +1278,7 @@ pub const Buffer = opaque {
     pub fn copyToMemory(self: *const Buffer, api: *const Api, dst_memory: *const Memory) ApiError!*Buffer {
         const ret = try api.call(.PJRT_Buffer_CopyToMemory, .{
             .buffer = self.inner(),
-            .dst_memory = @ptrCast(@constCast(dst_memory)),
+            .dst_memory = dst_memory.inner(),
         });
         return @ptrCast(ret.dst_buffer);
     }

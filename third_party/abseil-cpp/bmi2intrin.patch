@@ -1,0 +1,13 @@
+diff --git a/absl/container/internal/raw_hash_set.h b/absl/container/internal/raw_hash_set.h
+index 0d05ad7..85ed32d 100644
+--- a/absl/container/internal/raw_hash_set.h
++++ b/absl/container/internal/raw_hash_set.h
+@@ -226,7 +226,7 @@ static_assert(std::numeric_limits<double>::is_iec559,
+ #endif
+ 
+ #ifdef __BMI2__
+-#include <bmi2intrin.h>
++#include <immintrin.h>
+ #endif  // __BMI2__
+ 
+ #if defined(__SSE2__) || defined(__aarch64__) || \

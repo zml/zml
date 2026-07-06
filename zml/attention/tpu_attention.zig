@@ -240,13 +240,12 @@ pub const mosaic_tpu = struct {
             .q_dtype = cfgDtype(q_shape.dtype()),
             .kv_dtype = cfgDtype(kv_pages_shape.dtype()),
             .sm_scale = opts.scale orelse @floatCast(1.0 / @sqrt(logical_head_dim)),
+            .is_causal = opts.is_causal,
             .sliding_window = if (opts.sliding_window < 0) null else @intCast(opts.sliding_window),
         };
     }
 
     pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, kv_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-        stdx.debug.assert(opts.is_causal, "mosaic_tpu ragged paged attention currently only supports causal attention", .{});
-
         const prepared = prepareInputs(parameters, q, kv_cache);
 
         const q_out = zml.ops.manualComputation(
@@ -328,9 +327,13 @@ test "mosaic_tpu cfg uses kernel head dim and logical scale" {
 
     const cfg = mosaic_tpu.buildCfg(prepared_inputs, parameters, .{});
     try std.testing.expectEqual(@as(i64, 128), cfg.head_dim);
+    try std.testing.expect(cfg.is_causal);
     try std.testing.expectApproxEqAbs(
         @as(f32, 1.0 / @sqrt(@as(f32, 64.0))),
         cfg.sm_scale,
         0.000001,
     );
+
+    const non_causal_cfg = mosaic_tpu.buildCfg(prepared_inputs, parameters, .{ .is_causal = false });
+    try std.testing.expect(!non_causal_cfg.is_causal);
 }

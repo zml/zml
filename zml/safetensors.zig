@@ -74,13 +74,15 @@ pub const TensorReader = struct {
     io: std.Io,
     interface: std.Io.Reader,
 
+    pub const InitOpts = struct {
+        alignment: ?std.mem.Alignment = null,
+    };
+
     pub fn init(
         io: std.Io,
         tensor: Tensor,
         buffer: []u8,
-        opts: struct {
-            alignment: ?std.mem.Alignment = null,
-        },
+        opts: InitOpts,
     ) !TensorReader {
         const file = try std.Io.Dir.openFile(.cwd(), io, tensor.file_uri, .{ .mode = .read_only });
         errdefer file.close(io);
@@ -126,13 +128,17 @@ pub const TensorReader = struct {
         self.file.close(self.io);
     }
 
+    // Limit single reads to 1GB to avoid issues on macOS where pread returns
+    // INT_MAX when the requested size is larger than 2GB
+    const max_single_read_bytes: u64 = 1 << 30;
+
     fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const self: *TensorReader = @fieldParentPtr("interface", r);
         if (self.remaining == 0) {
             return error.EndOfStream;
         }
 
-        const combined_limit = limit.min(.limited64(self.remaining));
+        const combined_limit = limit.min(.limited64(self.remaining)).min(.limited64(max_single_read_bytes));
         const n = try self.file_reader.interface.stream(w, combined_limit);
         self.remaining -= n;
         return n;
@@ -156,7 +162,7 @@ pub const TensorReader = struct {
             return error.EndOfStream;
         }
 
-        const requested_bytes = limit.minInt64(self.remaining);
+        const requested_bytes = @min(limit.minInt64(self.remaining), max_single_read_bytes);
 
         if (self.padding_remaining > 0) {
             _ = try self.file_reader.interface.discard(.limited64(self.padding_remaining));
@@ -225,6 +231,10 @@ pub const Tensor = struct {
 
     pub fn byteSize(self: Tensor) u64 {
         return self.shape.byteSize();
+    }
+
+    pub fn reader(self: Tensor, io: std.Io, buffer: []u8, opts: TensorReader.InitOpts) !TensorReader {
+        return TensorReader.init(io, self, buffer, opts);
     }
 
     pub fn format(self: Tensor, writer: *std.Io.Writer) !void {

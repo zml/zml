@@ -323,7 +323,11 @@ pub const Tokenizer = struct {
                 };
 
                 out.advance(produced * @sizeOf(u32));
-                break;
+                if (!c.iree_tokenizer_encode_state_has_pending(self.state)) break;
+                if (produced == 0) {
+                    min_tokens *= 2;
+                    std.debug.assert(min_tokens < 1 << 20);
+                }
             }
         }
 
