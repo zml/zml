@@ -42,23 +42,23 @@ Built `//examples/io:playground` with Zig 0.16.0 + `libxet_capi` from xet-core's
 
 - `xet_capi.zig` compiles and `libxet_capi.a` links into the real ZML binary,
   and `hf.zig` reaches it.
-- `playground cp hf://.../model-00001-of-00004.safetensors file://…`
-  reconstructed the full 4.98 GB file (exact size) through the integrated path.
-  Throughput on that (worst-case, sequential 16 MB reads) `cp` pattern:
+- `playground load hf://.../model-00001-of-00004.safetensors` (a real model
+  weight load: parallel positional reads through `zml.io.TensorStore`) loaded
+  the 4.63 GiB shard's weights:
 
-  | mode | MB/s |
-  |------|------|
-  | lazy `readRange` (this integration) | ~36 |
-  | eager download-to-cache | ~228 |
-  | current `resolve` range-GET (baseline) | ~23 |
-  | raw parallel xet download (no `cp` loop) | ~1070 |
+  | load path | throughput |
+  |-----------|-----------|
+  | **lazy XET reads (this integration)** | **~348 MB/s** |
+  | `resolve` range-GET (baseline, `HF_XET_DISABLE=1`) | ~158 MB/s |
 
-  Lazy reconstructs a fresh range per 16 MB read, so a sequential full-file copy
-  pays per-read reconstruction overhead; its win is partial/random reads (a few
-  tensors out of a shard) where it avoids pulling the whole file, which is the
-  point of keeping the lazy model. Eager wins for full-file copies. A real model
-  load (parallel positional reads) sits between these, not on the `cp` worst
-  case.
+  So XET is ~2.2x the current path for a real load, where reads are parallel and
+  the chunk cache helps. (`HF_XET_DISABLE=1` forces the resolve fallback.)
+
+- On the degenerate `cp` pattern (serial 16 MB reads), lazy per-read
+  reconstruction instead loses to a bulk copy: ~36 MB/s lazy vs ~228 eager
+  (download-to-cache) vs ~23 resolve. Raw parallel xet download (no read loop)
+  is ~1070 MB/s. Lazy's win is parallel/partial reads, not serial full-file
+  copies.
 
 ## Known issues / follow-ups
 

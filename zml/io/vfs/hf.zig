@@ -852,6 +852,7 @@ pub const HF = struct {
     /// Open a XET-backed file for range reads via xet-core. Returns an error
     /// for non-XET files, so the caller falls back to the resolve range path.
     fn openXet(self: *HF, handle: *Handle) !xet.RemoteFile {
+        if (std.c.getenv("HF_XET_DISABLE") != null) return error.XetDisabled;
         const token = switch (self.authorization) {
             .override => |v| if (std.mem.startsWith(u8, v, "Bearer ")) v["Bearer ".len..] else v,
             else => return error.NoHfToken,
