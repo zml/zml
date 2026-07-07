@@ -105,8 +105,9 @@ pub fn renderTo(self: *const BarChart, arena: std.mem.Allocator, ctx: vxfw.DrawC
     const bar_spacing: u16 = 1; // Space between bars
     // const chars_per_bar: u16 = bar_width + bar_spacing;
 
-    const bar_height = self.bar_height;
-    var max_percentage: u8 = 0;
+    const bar_height: u16 = self.bar_height;
+    const bar_area: u16 = bar_width * bar_height;
+    var max_percentage: u16 = 0;
     if (self.buckets.len > 0) {
         for (self.buckets) |bucket| {
             max_percentage = @max(max_percentage, bucket.percentage);
@@ -132,6 +133,15 @@ pub fn renderTo(self: *const BarChart, arena: std.mem.Allocator, ctx: vxfw.DrawC
         });
     }
 
+    // Clean the entire bar chart area from previous renders to prevent scrolling artifacts
+    // Clear bar area, value area, and bounds area
+    const max_row = if (self.show_values and !self.show_bounds) row_values else row_bounds;
+    for (0..size.width) |col| {
+        for (row_top_of_bar..max_row) |row| {
+            writeAscii(surface, @as(u16, @intCast(col)), @as(u16, @intCast(row)), empty_bar, theme.dim_style);
+        }
+    }
+
     // Draw bars
     var bar_col: u16 = 0;
     var bucket_idx: u16 = 0;
@@ -141,20 +151,27 @@ pub fn renderTo(self: *const BarChart, arena: std.mem.Allocator, ctx: vxfw.DrawC
         if (bucket.percentage == 0) continue;
         defer bar_col += bar_width + bar_spacing;
 
-        // Calculate filled height and empty height
-        const filled_height = if (max_percentage > 0) @as(u16, @intCast(bucket.percentage * @as(u32, bar_height) / @as(u32, max_percentage))) else 0;
-        const empty_height = bar_height - filled_height;
+        // Calculate filled height and remainder
+        const bucket_area: u16 = bucket.percentage * bar_area / max_percentage;
+        const full_rows = bucket_area / bar_width;
+        const remainder: u8 = @intCast(bucket_area % bar_width);
+        const empty_height = bar_height - (if (remainder == 0) full_rows else full_rows + 1);
 
-        // Draw empty part (if any)
-        for (0..empty_height) |empty_row| {
-            writeAscii(surface, bar_col, @intCast(row_top_of_bar + empty_row), empty_bar, theme.dim_style);
+        const color = theme.colorForPercent(bucket.percentage);
+        var row_idx: u16 = row_top_of_bar + empty_height;
+        // Draw the middle partial row (split into 4 columns based on remainder)
+        // The partial row sits at the boundary between empty rows (top) and full rows (bottom)
+        if (remainder > 0) {
+            surface.writeCell(bar_col, row_idx, .{
+                .char = .{ .grapheme = "████"[0 .. remainder * "█".len], .width = remainder },
+                .style = .{ .fg = color, .bg = .default },
+            });
+            row_idx += 1;
         }
 
-        // Draw filled part (from bottom up)
-        const color = theme.colorForPercent(bucket.percentage);
-        for (empty_height..bar_height) |filled_row| {
-            // writeStr(surface, bar_col, row_pos, full_bar, .{ .fg = color, .bg = .default });
-            surface.writeCell(bar_col, @intCast(row_top_of_bar + filled_row), .{
+        // Draw fully filled rows (█) from the row after partial row to the bottom
+        for (row_idx..row_idx + full_rows) |row_idx_usize| {
+            surface.writeCell(bar_col, @intCast(row_idx_usize), .{
                 .char = .{ .grapheme = "████", .width = 4 },
                 .style = .{ .fg = color, .bg = .default },
             });
