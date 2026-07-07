@@ -87,8 +87,13 @@ fn formatBound(arena: std.mem.Allocator, value: f64) std.mem.Allocator.Error![]c
         current = @divFloor(current, 1000);
     }
 
-    const result = try std.fmt.allocPrint(arena, "{d:.3}{s}", .{ current, units[i] });
-    std.debug.assert(result.len <= 5);
+    var result: []const u8 = try std.fmt.allocPrint(arena, "{d:.3}", .{current});
+    result = std.mem.trim(u8, result, "0");
+    result = std.mem.trimEnd(u8, result, ".");
+    if (units[i].len > 0) {
+        result = result[0..@min(4, result.len)];
+        result = try std.fmt.allocPrint(arena, "{s}{s}", .{ std.mem.trim(u8, result, "0"), units[i] });
+    }
     return result;
 }
 
