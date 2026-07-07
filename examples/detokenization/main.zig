@@ -34,7 +34,6 @@ pub const Zml_handler = struct {
     progress: std.Progress.Node,
     args: Args,
     timers: Timing_handler,
-    nb_tictoc: usize = 0,
     mem: MemoryChecker,
 
     pub fn fromInit(init: std.process.Init, io: std.Io) !Zml_handler {
@@ -68,12 +67,10 @@ pub const Zml_handler = struct {
     }
 
     pub fn tic(self: *Zml_handler, target: *Timing_handler.Field_timer) void {
-        self.nb_tictoc += 1;
         target.init = std.Io.Timestamp.now(self.io, .awake);
     }
 
     pub fn toc(self: *Zml_handler, target: *Timing_handler.Field_timer) void {
-        self.nb_tictoc += 1;
         const end = std.Io.Timestamp.now(self.io, .awake);
         const start: std.Io.Timestamp = target.init;
         const duration = std.Io.Timestamp.durationTo(start, end);
@@ -139,6 +136,7 @@ pub const Timing_handler = struct {
 
     quant_search: Field_timer = .{},
     quant_dot: Field_timer = .{},
+    quant_vec: Field_timer = .{},
     quant_slice_dot: Field_timer = .{},
     quant_walsh: Field_timer = .{},
 
@@ -164,7 +162,9 @@ pub const Timing_handler = struct {
         std.log.info("Embed search  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.embed_search.nanoseconds)) / 1e9});
         std.log.info("Embed dot     : {d:>6.2}s", .{@as(f64, @floatFromInt(self.embed_dot.nanoseconds)) / 1e9});
         std.log.info("Quant search  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_search.nanoseconds)) / 1e9});
+        std.log.info("ms per search : {d:>6.2}ms", .{@as(f64, @floatFromInt(self.quant_search.nanoseconds)) / (1e6 * @as(f64, @floatFromInt(self.nb_detokenize)))});
         std.log.info("Quant dot     : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_dot.nanoseconds)) / 1e9});
+        std.log.info("Quant vec     : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_vec.nanoseconds)) / 1e9});
         std.log.info("Bit slice dot : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_slice_dot.nanoseconds)) / 1e9});
         std.log.info("Quant walsh   : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_walsh.nanoseconds)) / 1e9});
         std.log.info("SVD sample    : {d:>6.2}s", .{@as(f64, @floatFromInt(self.svd_sample.nanoseconds)) / 1e9});
@@ -247,8 +247,8 @@ pub fn main(init: std.process.Init) !void {
     //try runLlm(&zml_handler);
     //try runTestsGraph(&zml_handler);
     //try runTestsQuantized(&zml_handler);
-    //try runTestsSvd(&zml_handler);
-    try runTestsQuantizedGraph(&zml_handler);
+    try runTestsSvd(&zml_handler);
+    //try runTestsQuantizedGraph(&zml_handler);
 
     zml_handler.timers.print();
 }
@@ -286,29 +286,23 @@ pub fn runTestsQuantized(zml_handler: *Zml_handler) !void {
     //try quantizer.testWalshHadamardRoundtrip();
 
     try quantizer.quantizeQjlLmHead();
+    try quantizer.quantizeQjlLmHead2Bits();
+    //try quantizer.testQjlReconstructionError();
 
     try testEmbedQuantizedSearch(zml_handler, &quantizer);
 }
 
 pub fn runTestsSvd(zml_handler: *Zml_handler) !void {
-    var model_handler = try model_.Model_handler.init(zml_handler);
-    defer model_handler.deinit(zml_handler.allocator);
-    defer model_handler.unloadBuffers();
-
     const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
     var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
     defer tokenizer.deinit();
 
     std.log.info("Get lm_head", .{});
-    const lm_head = try algebra.getLmHead(zml_handler, &model_handler);
-    defer lm_head.free(zml_handler.allocator);
-
-    std.log.info("Get lm_head_transposed", .{});
-    const lm_head_transposed = try algebra.getLmHeadTransposed(zml_handler, &model_handler);
-    defer lm_head_transposed.free(zml_handler.allocator);
+    var lm_head = try algebra.getLmHead(zml_handler);
+    defer LmHeadMatrix.deinit(&lm_head, zml_handler.allocator);
 
     std.log.info("Init SVD sampler", .{});
-    var svd_sampler: svd_.SvdSampler = try .init(zml_handler, lm_head, lm_head_transposed, tokenizer, false);
+    var svd_sampler: svd_.SvdSampler = try .init(zml_handler, &lm_head, tokenizer, false);
     defer svd_sampler.deinit();
 
     zml_handler.tic(&zml_handler.timers.svd_sample);
@@ -443,23 +437,28 @@ pub fn runTestsQuantizedGraph(zml_handler: *Zml_handler) !void {
     zml_handler.toc(&zml_handler.timers.similarity_matrix);
 
     std.log.info("********** Init NSW-angular graph", .{});
+    var g_nsw: Graph = try .init(zml_handler, &lm_head, &similarity_matrix, .{ .graph_type = .Angular });
+    g_nsw.consolidateNearestPrune();
     zml_handler.tic(&zml_handler.timers.nsw_graph);
-    var g_nsw: Graph = try .init(zml_handler, &lm_head, &similarity_matrix, .{ .graph_type = .Mips });
-    g_nsw.consolidateNearestPrune();
     try g_nsw.extendToNsw();
-    try g_nsw.testNswExtention(&sampler);
+    zml_handler.toc(&zml_handler.timers.nsw_graph);
     try g_nsw.fixNswExtention();
-    try g_nsw.testNswExtention(&sampler);
     g_nsw.consolidateNearestPrune();
     try g_nsw.testNswExtention(&sampler);
-    zml_handler.toc(&zml_handler.timers.nsw_graph);
 
     std.log.info("********** Init Quantizer", .{});
     var quantizer = try Quantized.init(zml_handler, &lm_head);
     defer quantizer.deinit();
-    try quantizer.quantizeQjlLmHead();
+    //try quantizer.quantizeQjlLmHead();
+    
+    //try g_nsw.extendNswRandom(&quantizer);
 
-    try testEmbedGraphQuantizedSearch(zml_handler, &g_nsw, &quantizer);
+    try testEmbedGraphSearch(zml_handler, &g_nsw, &sampler, "NSW angular");
+    //try testEmbedGraphQuantizedSearch(zml_handler, &g_nsw, &quantizer);
+    //try testEmbedGraphSearchFullTopK(zml_handler, &g_nsw, &quantizer);
+
+    //try g_nsw.extendNswRandom(&quantizer);
+    //try testEmbedGraphQuantizedSearch(zml_handler, &g_nsw, &quantizer);
 }
 
 
@@ -468,7 +467,6 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *Graph, _: *Sampler, s
 
     var total_count: usize = 0;
     var found_top1_count: usize = 0;
-    var found_top1_count_full: usize = 0;
 
     var total_visited: usize = 0;
     var min_visited: usize = std.math.maxInt(usize);
@@ -507,9 +505,9 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *Graph, _: *Sampler, s
             const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
 
             zml_handler.timers.nb_detokenize += 1;
-            g.greedySearch(embed);
+            g.greedySearchPrefetch(embed);
 
-            const nb_visited = g.nb_visited;
+            const nb_visited = g.nb_scored;
             total_visited += nb_visited;
             min_visited = @min(min_visited, nb_visited);
             max_visited = @max(max_visited, nb_visited);
@@ -517,15 +515,10 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *Graph, _: *Sampler, s
             total_count += 1;
             const top1_token = top1[embed_index];
             var found_top1 = false;
-            var found_top1_full = false;
             for (0..g.L) |i| {
                 if (g.visited[i].node == top1_token) found_top1 = true;
             }
-            for (0..g.nb_visited) |i| {
-                if (g.visited[i].node == top1_token) found_top1_full = true;
-            }
             if (found_top1) found_top1_count += 1;
-            if (found_top1_full) found_top1_count_full += 1;
         }
         zml_handler.toc(&zml_handler.timers.graph_search_tot);
     }
@@ -533,8 +526,159 @@ pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *Graph, _: *Sampler, s
     const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) / @as(f64, @floatFromInt(total_count));
     const average_visit = @as(f64, @floatFromInt(total_visited)) / @as(f64, @floatFromInt(total_count));
     std.log.info("Embed graph search: total={d} found_top1={d} ({d:.4}%)", .{ total_count, found_top1_count, percent_found });
-    std.log.info("Full count: {d}", .{found_top1_count_full});
     std.log.info("Embed graph search nb_visited: min={d} max={d} avg={d:.2}", .{ min_visited, max_visited, average_visit });
+}
+
+fn logTop16MissDetails(tokenizer: zml.tokenizer.Tokenizer, g: *Graph, quantizer: *Quantized, embed: []const f32, dense_sample: quantized.DenseSample, found_top16_count: usize, found_mass: f32) !void {
+    std.log.info("Low graph overlap with real top-16: found={d}/16 retained_mass={d:.6}", .{ found_top16_count, found_mass });
+    std.log.info("Real dense top-16", .{});
+    std.log.info("{s:>4} {s:>10} {s:>14} {s:>14} {s:>14}  {s}", .{ "rank", "token", "proba", "logit", "row_norm", "text" });
+    std.log.info("{s:>4} {s:>10} {s:>14} {s:>14} {s:>14}  {s}", .{ "----", "----------", "--------------", "--------------", "--------------", "----" });
+    for (dense_sample.rows, dense_sample.probas, dense_sample.logits, 0..) |token, proba, logit, rank| {
+        const token_str = try tokens.tokenString(tokenizer, token, g.allocator);
+        defer g.allocator.free(token_str);
+        std.log.info("{d:>4} {d:>10} {d:>14.8} {d:>14.6} {d:>14.6}  {s}", .{ rank + 1, token, proba, logit, quantizer.lm_head.row_norms[token], token_str });
+    }
+
+    std.log.info("Graph top-16", .{});
+    std.log.info("{s:>4} {s:>10} {s:>14} {s:>14} {s:>14}  {s}", .{ "rank", "token", "proba", "logit", "row_norm", "text" });
+    std.log.info("{s:>4} {s:>10} {s:>14} {s:>14} {s:>14}  {s}", .{ "----", "----------", "--------------", "--------------", "--------------", "----" });
+    const graph_top = @min(g.L, quantized.top_k_sliced);
+    for (0..graph_top) |rank| {
+        const token = g.visited[rank].node;
+        const token_i: usize = @intCast(token);
+        const row = quantizer.lm_head.data[token_i * quantizer.d .. (token_i + 1) * quantizer.d];
+        const logit = quantizer.realLogit(embed, row);
+        const proba = dense_sample.probaFromLogit(logit);
+        const token_str = try tokens.tokenString(tokenizer, token, g.allocator);
+        defer g.allocator.free(token_str);
+        std.log.info("{d:>4} {d:>10} {d:>14.8} {d:>14.6} {d:>14.6}  {s}", .{ rank + 1, token, proba, logit, quantizer.lm_head.row_norms[token_i], token_str });
+    }
+}
+
+pub fn testEmbedGraphSearchFullTopK(zml_handler: *Zml_handler, g: *Graph, quantizer: *Quantized) !void {
+    const top_p: f32 = 0.9;
+    const allocator = zml_handler.allocator;
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+    var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
+    defer tokenizer.deinit();
+
+    var total_count: usize = 0;
+    var total_found_mass: f64 = 0.0;
+    var worst_found_mass: f32 = std.math.inf(f32);
+    var total_top_p_found: usize = 0;
+    var worst_top_p_found: usize = std.math.maxInt(usize);
+    var total_top_p_size: usize = 0;
+    var max_top_p_size: usize = 0;
+    var found_top1_count: usize = 0;
+    var found_top1_top2_count: usize = 0;
+    var found_top1_top2_top3_count: usize = 0;
+    var total_best_found_at: u64 = 0;
+    var min_best_found_at: u32 = std.math.maxInt(u32);
+    var max_best_found_at: u32 = 0;
+
+    const tasks_id = [5]u8{ 0, 1, 2, 3, 4 };
+
+    for (tasks_id) |task_id| {
+        const task = switch (task_id) {
+            0 => "coding",
+            1 => "history",
+            2 => "math",
+            3 => "story",
+            4 => "translate",
+            else => return error.InvalidTask,
+        };
+
+        const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds.safetensors", task, .f32, true);
+        defer embed_slice.free(allocator);
+
+        const n: usize = @intCast(embed_slice.shape.dims()[0]);
+        const d: usize = @intCast(embed_slice.shape.dims()[1]);
+        std.debug.assert(d == g.dim);
+        std.debug.assert(d == quantizer.d);
+
+        std.log.info("Test embed graph full top-k task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
+        zml_handler.tic(&zml_handler.timers.graph_search_tot);
+        for (0..n) |embed_index| {
+            const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
+
+            zml_handler.timers.nb_detokenize += 1;
+            g.greedySearchPrefetch(embed, 0);
+            
+            const best_found_at = g.visited_at[g.visited[0].node];
+            total_best_found_at += @intCast(best_found_at);
+            min_best_found_at = @min(min_best_found_at, best_found_at);
+            max_best_found_at = @max(max_best_found_at, best_found_at);
+
+            const dense_sample = quantizer.sampleDense(embed);
+
+            var found_mass: f32 = 0.0;
+            var top_p_size: usize = 0;
+            var top_p_found: usize = 0;
+            var top_p_mass: f32 = 0.0;
+            var found_real_top: [3]bool = .{ false, false, false };
+            var found_top16_count: usize = 0;
+            for (dense_sample.probas, dense_sample.rows, 0..) |proba, token, rank| {
+                var found = false;
+                for (0..g.L) |candidate_i| {
+                    if (g.visited[candidate_i].node == token) {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (rank < found_real_top.len) found_real_top[rank] = found;
+                if (found) {
+                    found_top16_count += 1;
+                    found_mass += proba;
+                }
+                if (top_p_mass < top_p) {
+                    top_p_mass += proba;
+                    top_p_size = rank + 1;
+                    if (found) top_p_found += 1;
+                }
+            }
+            if (found_top16_count == 0 or found_mass < 0.5) {
+                try logTop16MissDetails(tokenizer, g, quantizer, embed, dense_sample, found_top16_count, found_mass);
+            }
+
+            total_count += 1;
+            total_found_mass += @as(f64, @floatCast(found_mass));
+            worst_found_mass = @min(worst_found_mass, found_mass);
+            total_top_p_found += top_p_found;
+            worst_top_p_found = @min(worst_top_p_found, top_p_found);
+            total_top_p_size += top_p_size;
+            max_top_p_size = @max(max_top_p_size, top_p_size);
+            if (found_real_top[0]) found_top1_count += 1;
+            if (top_p_size < 2 or (found_real_top[0] and found_real_top[1])) found_top1_top2_count += 1;
+            if (top_p_size < 3 or (found_real_top[0] and found_real_top[1] and found_real_top[2])) found_top1_top2_top3_count += 1;
+        }
+        zml_handler.toc(&zml_handler.timers.graph_search_tot);
+    }
+
+    const avg_found_mass = total_found_mass / @as(f64, @floatFromInt(total_count));
+    const avg_top_p_found = @as(f64, @floatFromInt(total_top_p_found)) / @as(f64, @floatFromInt(total_count));
+    const avg_top_p_size = @as(f64, @floatFromInt(total_top_p_size)) / @as(f64, @floatFromInt(total_count));
+    const found_top1_percent = 100.0 * @as(f64, @floatFromInt(found_top1_count)) / @as(f64, @floatFromInt(total_count));
+    const found_top2_percent = 100.0 * @as(f64, @floatFromInt(found_top1_top2_count)) / @as(f64, @floatFromInt(total_count));
+    const found_top3_percent = 100.0 * @as(f64, @floatFromInt(found_top1_top2_top3_count)) / @as(f64, @floatFromInt(total_count));
+    const avg_best_found_at = @as(f64, @floatFromInt(total_best_found_at)) / @as(f64, @floatFromInt(total_count));
+    std.log.info("Embed graph full top16: total={d}", .{total_count});
+    std.log.info("Real top-16 probability mass retained by graph search: avg={d:.6} worst={d:.6}", .{ avg_found_mass, worst_found_mass });
+    std.log.info("Top-p ({d}) average size={d:.2}, max size={d}", .{ top_p, avg_top_p_size, max_top_p_size });
+    std.log.info("Graph found in top-p ({d}): avg={d:.2} worst={d}", .{ top_p, avg_top_p_found, worst_top_p_found });
+    std.log.info("Graph final best found_at: min={d} max={d} avg={d:.2}", .{ min_best_found_at, max_best_found_at, avg_best_found_at });
+    std.log.info("Graph found dense top prefixes: top1={d}/{d} ({d:.4}%), top1+top2={d}/{d} ({d:.4}%), top1+top2+top3={d}/{d} ({d:.4}%)", .{
+        found_top1_count,
+        total_count,
+        found_top1_percent,
+        found_top1_top2_count,
+        total_count,
+        found_top2_percent,
+        found_top1_top2_top3_count,
+        total_count,
+        found_top3_percent,
+    });
 }
 
 pub fn testEmbedDualGraphSearch(zml_handler: *Zml_handler, g1: *Graph, g2: *Graph, sampler: *Sampler, s: []const u8) !void {
@@ -595,7 +739,7 @@ pub fn testEmbedDualGraphSearch(zml_handler: *Zml_handler, g1: *Graph, g2: *Grap
             g2.initSearchPool(g1.visited[0..g1.L]);
             g2.greedySearchWS(embed);
 
-            const nb_visited = g1.nb_visited + g2.nb_visited;
+            const nb_visited = g1.nb_scored + g2.nb_scored;
             total_visited += nb_visited;
             min_visited = @min(min_visited, nb_visited);
             max_visited = @max(max_visited, nb_visited);
@@ -631,6 +775,13 @@ pub fn testEmbedSvdSearch(zml_handler: *Zml_handler, svd: *svd_.SvdSampler) !voi
 
     var total_count: usize = 0;
     var found_top1_count: usize = 0;
+    var missing_top16_count: usize = 0;
+    var total_phase2_scored: usize = 0;
+    var total_dense_scored: usize = 0;
+    var min_phase2_scored: usize = std.math.maxInt(usize);
+    var min_dense_scored: usize = std.math.maxInt(usize);
+    var max_phase2_scored: usize = 0;
+    var max_dense_scored: usize = 0;
 
     const tasks_id = [5]u8{ 0, 1, 2, 3, 4 };
 
@@ -657,18 +808,26 @@ pub fn testEmbedSvdSearch(zml_handler: *Zml_handler, svd: *svd_.SvdSampler) !voi
 
         const n: usize = @intCast(embed_slice.shape.dims()[0]);
         const d: usize = @intCast(embed_slice.shape.dims()[1]);
+        std.debug.assert(d == svd.d);
 
         std.log.info("Test SVD sample task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
         for (0..n) |embed_index| {
             const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
 
-            try svd.sampleFast(embed);
+            const sample = try svd.sampleFastMultiPhase(embed);
 
             total_count += 1;
+            total_phase2_scored += sample.nb_phase2_scored;
+            total_dense_scored += sample.nb_dense_scored;
+            min_phase2_scored = @min(min_phase2_scored, sample.nb_phase2_scored);
+            min_dense_scored = @min(min_dense_scored, sample.nb_dense_scored);
+            max_phase2_scored = @max(max_phase2_scored, sample.nb_phase2_scored);
+            max_dense_scored = @max(max_dense_scored, sample.nb_dense_scored);
+
             const top1_token = top1[embed_index];
             var found_top1 = false;
-            for (0..256) |i| {
-                if (svd.top256_candidates[i].token == top1_token) {
+            for (sample.rows) |tok| {
+                if (tok == top1_token) {
                     found_top1 = true;
                     break;
                 }
@@ -676,13 +835,20 @@ pub fn testEmbedSvdSearch(zml_handler: *Zml_handler, svd: *svd_.SvdSampler) !voi
             if (found_top1) {
                 found_top1_count += 1;
             } else {
+                missing_top16_count += 1;
                 //std.log.info("Missed top1, id {d} str {s}", .{ top1[embed_index], try tokens.tokenString(sampler.tokenizer, top1[embed_index], sampler.allocator) });
                 //std.log.info("Found instead {d} str {s}", .{ g.visited[0].node, try tokens.tokenString(sampler.tokenizer, g.visited[0].node, sampler.allocator) });
             }
         }
     }
-    const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) / @as(f64, @floatFromInt(total_count));
-    std.log.info("Embed SVD sample: total={d} found_top1={d} ({d:.4}%)", .{ total_count, found_top1_count, percent_found });
+    const inv_total = 1.0 / @as(f64, @floatFromInt(total_count));
+    const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) * inv_total;
+    const avg_phase2_scored = @as(f64, @floatFromInt(total_phase2_scored)) * inv_total;
+    const avg_dense_scored = @as(f64, @floatFromInt(total_dense_scored)) * inv_total;
+    std.log.info("Embed SVD sample: total={d}", .{total_count});
+    std.log.info("SVD found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_count, percent_found, missing_top16_count });
+    std.log.info("SVD phase2 sparse scored rows: min={d} max={d} avg={d:.2}", .{ min_phase2_scored, max_phase2_scored, avg_phase2_scored });
+    std.log.info("SVD dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored, max_dense_scored, avg_dense_scored });
 }
 
 pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized) !void {
@@ -693,8 +859,24 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
     defer tokenizer.deinit();
 
     var total_count: usize = 0;
-    var found_top1_count: usize = 0;
-    var missing_top16_count: usize = 0;
+    var found_top1_1bit_count: usize = 0;
+    var found_top1_2bits_count: usize = 0;
+    var found_top1_3phases_count: usize = 0;
+    var missing_top16_1bit_count: usize = 0;
+    var missing_top16_2bits_count: usize = 0;
+    var missing_top16_3phases_count: usize = 0;
+    var total_dense_scored_1bit: usize = 0;
+    var total_dense_scored_2bits: usize = 0;
+    var total_dense_scored_3phases: usize = 0;
+    var total_2bit_scored_3phases: usize = 0;
+    var min_dense_scored_1bit: usize = std.math.maxInt(usize);
+    var min_dense_scored_2bits: usize = std.math.maxInt(usize);
+    var min_dense_scored_3phases: usize = std.math.maxInt(usize);
+    var min_2bit_scored_3phases: usize = std.math.maxInt(usize);
+    var max_dense_scored_1bit: usize = 0;
+    var max_dense_scored_2bits: usize = 0;
+    var max_dense_scored_3phases: usize = 0;
+    var max_2bit_scored_3phases: usize = 0;
 
     const tasks_id = [5]u8{ 0, 1, 2, 3, 4 };
 
@@ -726,35 +908,112 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
         std.log.info("Test quantized graph search task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
         for (0..n) |embed_index| {
             const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
+            const top1_token = top1[embed_index];
+            
             zml_handler.tic(&zml_handler.timers.quant_search);
-            const top16 = try quantizer.sampleQjlAsymmetric(embed);
+            
+            const sample_1bit = try quantizer.sample2Phase1Bit(embed);
+            const sample_2bits = try quantizer.sample2Phase2Bits(embed);
+            const sample_3phases = try quantizer.sample3Phases(embed);
+
             zml_handler.toc(&zml_handler.timers.quant_search);
+
+            if (sample_1bit.nb_scored > 93340) {
+                try quantizer.sample2Phase1BitLog(embed, &tokenizer);
+                try quantizer.sample2Phase2BitsLog(embed, &tokenizer);
+                //return;
+            }
+            if (sample_2bits.nb_scored > 63) {
+                std.log.info("Needed {d} re scores", .{sample_2bits.nb_scored});
+                //try quantizer.sample2Phase1BitLog(embed, &tokenizer);
+                //try quantizer.sample2Phase2BitsLog(embed, &tokenizer);
+                //return;
+            }
+
+            zml_handler.timers.nb_detokenize += 1;
             total_count += 1;
-            var found_top1 = false;
-            for (top16) |tok| {
-                if (tok == top1[embed_index]) {
-                    found_top1 = true;
+            total_dense_scored_1bit += sample_1bit.nb_scored;
+            total_dense_scored_2bits += sample_2bits.nb_scored;
+            total_dense_scored_3phases += sample_3phases.nb_scored;
+            total_2bit_scored_3phases += sample_3phases.nb_2bit_scored;
+            min_dense_scored_1bit = @min(min_dense_scored_1bit, sample_1bit.nb_scored);
+            min_dense_scored_2bits = @min(min_dense_scored_2bits, sample_2bits.nb_scored);
+            min_dense_scored_3phases = @min(min_dense_scored_3phases, sample_3phases.nb_scored);
+            min_2bit_scored_3phases = @min(min_2bit_scored_3phases, sample_3phases.nb_2bit_scored);
+            max_dense_scored_1bit = @max(max_dense_scored_1bit, sample_1bit.nb_scored);
+            max_dense_scored_2bits = @max(max_dense_scored_2bits, sample_2bits.nb_scored);
+            max_dense_scored_3phases = @max(max_dense_scored_3phases, sample_3phases.nb_scored);
+            max_2bit_scored_3phases = @max(max_2bit_scored_3phases, sample_3phases.nb_2bit_scored);
+
+            var found_top1_1bit = false;
+            for (sample_1bit.rows) |tok| {
+                if (tok == top1_token) {
+                    found_top1_1bit = true;
                     break;
                 }
             }
-            if (found_top1) {
-                found_top1_count += 1;
+            if (found_top1_1bit) {
+                found_top1_1bit_count += 1;
             } else {
-                missing_top16_count += 1;
-                //try quantizer.logSampling(embed, &tokenizer, false, false, true);
+                missing_top16_1bit_count += 1;
+            }
+
+            var found_top1_2bits = false;
+            for (sample_2bits.rows) |tok| {
+                if (tok == top1_token) {
+                    found_top1_2bits = true;
+                    break;
+                }
+            }
+            if (found_top1_2bits) {
+                found_top1_2bits_count += 1;
+            } else {
+                //try quantizer.sample2Phase2BitsLog(embed, &tokenizer);
+                missing_top16_2bits_count += 1;
+            }
+
+            var found_top1_3phases = false;
+            for (sample_3phases.rows) |tok| {
+                if (tok == top1_token) {
+                    found_top1_3phases = true;
+                    break;
+                }
+            }
+            if (found_top1_3phases) {
+                found_top1_3phases_count += 1;
+            } else {
+                missing_top16_3phases_count += 1;
             }
         }
     }
 
-    const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) / @as(f64, @floatFromInt(total_count));
-    std.log.info("Embed quantized search: total={d} found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ total_count, found_top1_count, percent_found, missing_top16_count });
+    const inv_total = 1.0 / @as(f64, @floatFromInt(total_count));
+    const percent_found_1bit = 100.0 * @as(f64, @floatFromInt(found_top1_1bit_count)) * inv_total;
+    const percent_found_2bits = 100.0 * @as(f64, @floatFromInt(found_top1_2bits_count)) * inv_total;
+    const percent_found_3phases = 100.0 * @as(f64, @floatFromInt(found_top1_3phases_count)) * inv_total;
+    const avg_dense_scored_1bit = @as(f64, @floatFromInt(total_dense_scored_1bit)) * inv_total;
+    const avg_dense_scored_2bits = @as(f64, @floatFromInt(total_dense_scored_2bits)) * inv_total;
+    const avg_dense_scored_3phases = @as(f64, @floatFromInt(total_dense_scored_3phases)) * inv_total;
+    const avg_2bit_scored_3phases = @as(f64, @floatFromInt(total_2bit_scored_3phases)) * inv_total;
+    std.log.info("Embed quantized search: total={d}", .{total_count});
+    std.log.info("1-bit found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_1bit_count, percent_found_1bit, missing_top16_1bit_count });
+    std.log.info("2-bit found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_2bits_count, percent_found_2bits, missing_top16_2bits_count });
+    std.log.info("3-phase found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_3phases_count, percent_found_3phases, missing_top16_3phases_count });
+    std.log.info("1-bit dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored_1bit, max_dense_scored_1bit, avg_dense_scored_1bit });
+    std.log.info("2-bit dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored_2bits, max_dense_scored_2bits, avg_dense_scored_2bits });
+    std.log.info("3-phase 2-bit approx scored rows: min={d} max={d} avg={d:.2}", .{ min_2bit_scored_3phases, max_2bit_scored_3phases, avg_2bit_scored_3phases });
+    std.log.info("3-phase dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored_3phases, max_dense_scored_3phases, avg_dense_scored_3phases });
 }
 
 pub fn testEmbedGraphQuantizedSearch(zml_handler: *Zml_handler, g: *Graph, quantizer: *Quantized) !void {
     std.log.info("Test embed GraphQuantized search", .{});
 
     var total_count: usize = 0;
-    var found_top1_count: usize = 0;
+    var found_top1: [4]usize = [_]usize{0} ** 4;
+    var found_top1_acc: [4]usize = [_]usize{0} ** 4;
+    var total_visited: usize = 0;
+    var min_visited: usize = std.math.maxInt(usize);
+    var max_visited: usize = 0;
 
     const tasks_id = [5]u8{ 0, 1, 2, 3, 4 };
 
@@ -789,26 +1048,51 @@ pub fn testEmbedGraphQuantizedSearch(zml_handler: *Zml_handler, g: *Graph, quant
             const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
 
             zml_handler.timers.nb_detokenize += 1;
-
-            g.params.search_budget = 2048;
-            try g.greedySearchQuantized1x2(embed, quantizer);
-
-            g.params.search_budget = 512;
-            g.quantizedCrossover(embed);
-
-            total_count += 1;
             const top1_token = top1[embed_index];
-            var found_top1 = false;
-            for (0..g.L) |i| {
-                if (g.visited[i].node == top1_token) found_top1 = true;
+            var scored: usize = 0;
+            var found_acc = false;
+            for (0..4) |start| {
+                const entry_point: u32 = @as(u32, @intCast(start)) * (g.n / 4);
+                g.greedySearchPrefetch(embed, entry_point);
+                scored += g.nb_scored;
+                var found = false;
+                for (0..g.L) |i| {
+                    if (g.visited[i].node == top1_token) {
+                        found = true;
+                        break;
+                    }
+                }
+                found_acc |= found;
+                if (found) found_top1[start] += 1;
+                if (found_acc) found_top1_acc[start] += 1;
             }
-            if (found_top1) found_top1_count += 1;
+
+            const nb_visited = scored;
+            total_visited += nb_visited;
+            min_visited = @min(min_visited, nb_visited);
+            max_visited = @max(max_visited, nb_visited);
+            total_count += 1;
+            
+            //g.params.search_budget = 2048;
+            //try g.greedySearchQuantized2x2(embed, quantizer);
+
+            //g.params.search_budget = 1024;
+            //g.quantizedCrossover(embed);
         }
         zml_handler.toc(&zml_handler.timers.graph_search_tot);
     }
 
-    const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) / @as(f64, @floatFromInt(total_count));
-    std.log.info("Embed quantized search: total={d} found_top1={d} ({d:.4}%)", .{ total_count, found_top1_count, percent_found });
+    const average_visit = @as(f64, @floatFromInt(total_visited)) / @as(f64, @floatFromInt(total_count));
+    std.log.info("Embed quantized search: total={d}", .{ total_count });
+    for (0..4) |start| {
+        const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1[start])) / @as(f64, @floatFromInt(total_count));
+        std.log.info("Pass {d} found_top1={d} ({d:.4}%)", .{ start, found_top1[start], percent_found });
+    }
+    for (0..4) |start| {
+        const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_acc[start])) / @as(f64, @floatFromInt(total_count));
+        std.log.info("Pass up to {d} found_top1_acc={d} ({d:.4}%)", .{ start, found_top1_acc[start], percent_found });
+    }
+    std.log.info("Embed graph search nb_visited: min={d} max={d} avg={d:.2}", .{ min_visited, max_visited, average_visit });
 }
 
 

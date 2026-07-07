@@ -382,31 +382,25 @@ pub fn analyzeSamplings(zml_handler: *Zml_handler, model_handler: *model_.Model_
 
     var sorted_probas_buffer: zml.Buffer = undefined;
     var sorted_indices_buffer: zml.Buffer = undefined;
-    var sorted_similarities_buffer: zml.Buffer = undefined;
-    model_handler.exes.score_results.fill(.{ &sorted_probas_buffer, &sorted_indices_buffer, &sorted_similarities_buffer });
+    model_handler.exes.score_results.fill(.{ &sorted_probas_buffer, &sorted_indices_buffer });
     defer sorted_probas_buffer.deinit();
     defer sorted_indices_buffer.deinit();
-    defer sorted_similarities_buffer.deinit();
 
     const sorted_probas_slice = try sorted_probas_buffer.toSliceAlloc(allocator, zml_handler.io);
     defer sorted_probas_slice.free(allocator);
     const sorted_indices_slice = try sorted_indices_buffer.toSliceAlloc(allocator, zml_handler.io);
     defer sorted_indices_slice.free(allocator);
-    const sorted_similarities_slice = try sorted_similarities_buffer.toSliceAlloc(allocator, zml_handler.io);
-    defer sorted_similarities_slice.free(allocator);
 
     const sorted_probas = sorted_probas_slice.constItems(f32);
-    const sorted_indices = sorted_indices_slice.constItems(i32);
-    const sorted_similarities = sorted_similarities_slice.constItems(f32);
+    const sorted_indices = sorted_indices_slice.constItems(u32);
     std.debug.assert(sorted_probas.len == sorted_indices.len);
-    std.debug.assert(sorted_probas.len == sorted_similarities.len);
 
     const nb_real = @min(sorted_probas.len, nb_printed_max);
     log.info("Real sampling distribution (top {d})", .{nb_real});
     printSamplingHeader();
     for (0..nb_real) |i| {
         const token_id: usize = @intCast(sorted_indices[i]);
-        try printSamplingRow(tokenizer, i + 1, token_id, is_junk[token_id], sorted_probas[i], row_norms[token_id], sorted_similarities[i]);
+        try printSamplingRow(tokenizer, i + 1, token_id, is_junk[token_id], sorted_probas[i], row_norms[token_id], 0.0);
     }
 
     try g.greedySearchWithLog(embed_slice.constItems(f32), tokenizer);

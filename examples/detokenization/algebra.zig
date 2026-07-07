@@ -15,7 +15,8 @@ const Model_handler = model_.Model_handler;
 
 
 pub const SimilarityMatrix = struct {
-    data: []const zml.floats.BFloat16,
+    data: []zml.floats.BFloat16,
+    data_i8: []i8,
     nearest_neighbors: []const i32,
     row_offsets: []usize,
     n: usize,
@@ -26,6 +27,7 @@ pub const SimilarityMatrix = struct {
         const col = @max(i, j);
         const index = self.row_offsets[row] + col - row;
         return self.data[index].toF32();
+        //return @as(f32, @floatFromInt(self.data_i8[index])) / 127.0;
     }
 
     pub fn initOffsets(self: *SimilarityMatrix) void {
@@ -39,6 +41,83 @@ pub const SimilarityMatrix = struct {
     pub fn nearestNeighbor(self: *SimilarityMatrix, row: usize, pos: usize) usize {
         const index = row * self.k + pos;
         return @intCast(self.nearest_neighbors[index]);
+    }
+
+    pub fn showDistribution(self: *SimilarityMatrix, k: usize) void {
+        std.debug.assert(k < @bitSizeOf(usize));
+        const bucket_count = @as(usize, 1) << @intCast(k);
+        const allocator = std.heap.page_allocator;
+        const buckets = allocator.alloc(u64, bucket_count) catch @panic("OOM");
+        defer allocator.free(buckets);
+        @memset(buckets, 0);
+
+        var below: u64 = 0;
+        var above: u64 = 0;
+        var min_value: f32 = std.math.inf(f32);
+        var max_value: f32 = -std.math.inf(f32);
+
+        for (self.data) |value_bf16| {
+            const value = value_bf16.toF32();
+            min_value = @min(min_value, value);
+            max_value = @max(max_value, value);
+
+            if (value < -1.0) {
+                below += 1;
+                continue;
+            }
+            if (value > 1.0) {
+                above += 1;
+                continue;
+            }
+
+            const scaled = (value + 1.0) * 0.5 * @as(f32, @floatFromInt(bucket_count));
+            var bucket: usize = @intFromFloat(scaled);
+            if (bucket == bucket_count) bucket = bucket_count - 1;
+            buckets[bucket] += 1;
+        }
+
+        var max_bucket_count: u64 = 0;
+        var in_range_count: u64 = 0;
+        for (buckets) |count| {
+            max_bucket_count = @max(max_bucket_count, count);
+            in_range_count += count;
+        }
+
+        const total_count: u64 = @intCast(self.data.len);
+        std.log.info("SimilarityMatrix distribution over [-1, 1]: buckets=2^{d}={d}, values={d}", .{ k, bucket_count, total_count });
+        std.log.info("min={d:.6}, max={d:.6}, below=-1: {d}, above=1: {d}", .{ min_value, max_value, below, above });
+
+        const bucket_width = 2.0 / @as(f32, @floatFromInt(bucket_count));
+        const bar_width: u64 = 48;
+        for (buckets, 0..) |count, bucket_i| {
+            const lower = -1.0 + @as(f32, @floatFromInt(bucket_i)) * bucket_width;
+            const upper = lower + bucket_width;
+            const percent = if (in_range_count == 0)
+                0.0
+            else
+                100.0 * @as(f64, @floatFromInt(count)) / @as(f64, @floatFromInt(in_range_count));
+            const bar_len: usize = if (max_bucket_count == 0)
+                0
+            else
+                @intCast((count * bar_width) / max_bucket_count);
+
+            var bar: [48]u8 = undefined;
+            @memset(&bar, ' ');
+            @memset(bar[0..bar_len], '#');
+            std.log.info("[{d:>8.5}, {d:>8.5}) {d:>12} {d:>7.3}% |{s}|", .{ lower, upper, count, percent, bar[0..] });
+        }
+    }
+
+    pub fn integerCrossover(self: *SimilarityMatrix) void {
+        std.log.warn("SimilarityMatrix.integerCrossover", .{});
+        std.debug.assert(self.data_i8.len == self.data.len);
+
+        for (self.data, 0..) |value_bf16, i| {
+            const value = std.math.clamp(value_bf16.toF32(), -1.0, 1.0);
+            const rounded = @round(value * 127.0);
+            const quantized: i32 = @intFromFloat(rounded);
+            self.data_i8[i] = @intCast(quantized);
+        }
     }
 
     pub fn deinit(self: *SimilarityMatrix, allocator: std.mem.Allocator) void {
@@ -137,8 +216,10 @@ pub fn computeSimilarityMatrix(zml_handler: *Zml_handler, model_handler: *Model_
     }
     std.debug.assert(write_offset == triangular_len);
 
+    const matrix_data = similarity_matrix_slice.items(zml.floats.BFloat16);
     var matrix: SimilarityMatrix = .{
-        .data = similarity_matrix_slice.constItems(zml.floats.BFloat16),
+        .data = matrix_data,
+        .data_i8 = @as([*]i8, @ptrCast(matrix_data.ptr))[0..matrix_data.len],
         .nearest_neighbors = nearest_neighbors_slice.constItems(i32),
         .row_offsets = try allocator.alloc(usize, n),
         .n = n,
@@ -169,8 +250,10 @@ pub fn loadSimilarityMatrix(zml_handler: *Zml_handler, normalize: bool) !Similar
     const n: usize = @intCast(nearest_neighbors.shape.dims()[0]);
     const k: usize = @intCast(nearest_neighbors.shape.dims()[1]);
 
+    const matrix_data = data.items(zml.floats.BFloat16);
     var matrix: SimilarityMatrix = .{
-        .data = data.constItems(zml.floats.BFloat16),
+        .data = matrix_data,
+        .data_i8 = @as([*]i8, @ptrCast(matrix_data.ptr))[0..matrix_data.len],
         .nearest_neighbors = nearest_neighbors.constItems(i32),
         .row_offsets = try allocator.alloc(usize, n),
         .n = n,
