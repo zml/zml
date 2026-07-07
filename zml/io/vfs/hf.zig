@@ -154,8 +154,8 @@ pub const HF = struct {
         size: u64,
         /// Set once we have decided whether this file is XET-backed.
         xet_tried: bool = false,
-        /// Path to the file materialized locally by xet-core, if XET-backed.
-        xet_path: ?[]const u8 = null,
+        /// Live xet-core session for range reads, if the file is XET-backed.
+        xet: ?xet.RemoteFile = null,
 
         pub fn init(allocator: std.mem.Allocator, handle_type: Type, uri: []const u8, size: u64) !Handle {
             return .{
@@ -168,7 +168,7 @@ pub const HF = struct {
 
         pub fn deinit(self: *Handle, allocator: std.mem.Allocator) void {
             allocator.free(self.uri);
-            if (self.xet_path) |p| allocator.free(p);
+            if (self.xet) |*remote| remote.deinit(allocator);
         }
     };
 
@@ -794,20 +794,23 @@ pub const HF = struct {
         read_size = @intCast(@min(handle.size - offset, read_size));
         if (read_size == 0) return 0;
 
-        // XET-backed files: on first access, reconstruct the whole file once via
-        // xet-core (C-API) into a local cache, then serve reads from it. This
-        // gets client-side dedup + the on-disk chunk cache instead of the plain
-        // resolve range-GET path below.
+        // XET-backed files: reconstruct the requested range on demand through
+        // xet-core (C-API), which fetches only the covering xorbs and serves
+        // repeated/overlapping ranges from its chunk cache. Non-XET files fall
+        // through to the plain resolve range-GET path below.
         if (!handle.xet_tried) {
             handle.xet_tried = true;
-            self.materializeXet(handle) catch |err| {
+            handle.xet = self.openXet(handle) catch |err| blk: {
                 log.info("xet: falling back to resolve for {s}: {any}", .{ handle.uri, err });
+                break :blk null;
             };
         }
-        if (handle.xet_path) |local| {
-            var file = std.Io.Dir.openFileAbsolute(self.base.inner, local, .{}) catch return error.XetLocalOpenFailed;
-            defer file.close(self.base.inner);
-            return try file.readPositional(self.base.inner, data, offset);
+        if (handle.xet) |*remote| {
+            const want = @min(data[0].len, read_size);
+            return remote.readRange(offset, offset + want, data[0][0..want]) catch |err| {
+                log.err("xet range read failed for {s} at {d}: {any}", .{ handle.uri, offset, err });
+                return error.XetReadFailed;
+            };
         }
 
         const job_count = std.math.divCeil(usize, read_size, self.read_pool.chunk_size) catch unreachable;
@@ -846,10 +849,9 @@ pub const HF = struct {
         return read_size;
     }
 
-    /// Reconstruct a XET-backed file to a local cache path via xet-core.
-    /// Returns an error (and leaves `handle.xet_path` null) for non-XET files,
-    /// so the caller falls back to the resolve range-GET path.
-    fn materializeXet(self: *HF, handle: *Handle) !void {
+    /// Open a XET-backed file for range reads via xet-core. Returns an error
+    /// for non-XET files, so the caller falls back to the resolve range path.
+    fn openXet(self: *HF, handle: *Handle) !xet.RemoteFile {
         const token = switch (self.authorization) {
             .override => |v| if (std.mem.startsWith(u8, v, "Bearer ")) v["Bearer ".len..] else v,
             else => return error.NoHfToken,
@@ -859,10 +861,6 @@ pub const HF = struct {
         const repo_id = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ repo.repo, repo.model });
         defer self.allocator.free(repo_id);
 
-        const path = try std.fmt.allocPrintSentinel(self.allocator, "/tmp/zml-xet-{x}", .{std.hash.Wyhash.hash(0, handle.uri)}, 0);
-        errdefer self.allocator.free(path);
-
-        try xet.downloadFile(self.allocator, self.base.inner, "model", repo_id, repo.rev, repo.path, token, path);
-        handle.xet_path = path;
+        return xet.openRemote(self.allocator, self.base.inner, "model", repo_id, repo.rev, repo.path, token);
     }
 };

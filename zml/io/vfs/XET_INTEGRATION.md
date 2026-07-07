@@ -24,15 +24,16 @@ cache; xet-core already has all of it. On an m6i.2xlarge, cold download of
 - `xet_capi.zig`: `extern` declarations of the `hf_xet.h` C ABI (Session +
   downloadToPath). Symbols are declared inline, so only linking `libxet_capi.a`
   is needed, no header include path.
-- `xet.zig`: high-level `downloadFile()`.
-- `hf.zig`: `performRead` detects XET-backed files on first access and
-  reconstructs the whole file once into a local cache via the C-API, then serves
-  reads from that local file; non-XET files fall back to the existing `resolve`
-  range-GET path. So `hf://` XET files download transparently through the C-API.
+- `xet.zig`: `openRemote` -> `RemoteFile.readRange` (lazy range reads) and
+  `downloadFile` (eager whole-file).
+- `hf.zig`: `performRead` detects XET-backed files on first access and, for
+  those, reconstructs each requested byte range on demand through the C-API
+  stream API (`readRange`), which fetches only the covering xorbs and serves
+  overlapping/repeated ranges from the chunk cache. Non-XET files fall back to
+  the existing `resolve` range-GET path. So `hf://` XET files go through
+  xet-core transparently, keeping ZML's lazy positional-read model.
 
-Whole-file `download_to_path` means the read path is **eager**: the first read of
-a shard pulls the whole shard (download-to-cache), unlike the previous lazy
-positional-read behaviour. Set `HF_XET_HIGH_PERFORMANCE=1` for peak concurrency.
+Set `HF_XET_HIGH_PERFORMANCE=1` for peak concurrency.
 
 ## Verification (built + run in ZML's Bazel build)
 
@@ -42,11 +43,22 @@ Built `//examples/io:playground` with Zig 0.16.0 + `libxet_capi` from xet-core's
 - `xet_capi.zig` compiles and `libxet_capi.a` links into the real ZML binary,
   and `hf.zig` reaches it.
 - `playground cp hf://.../model-00001-of-00004.safetensors file://…`
-  reconstructed the full 4.98 GB file (exact size) through the integrated path at
-  **~228 MB/s**, vs **~23 MB/s** for the current lazy `resolve` path on the same
-  `cp` access pattern (~10x). The 228 (below the ~1070 raw) is the cost of the
-  download-to-cache disk round-trip (write to `/tmp`, copy out); pointing the
-  cache at tmpfs closes most of that gap.
+  reconstructed the full 4.98 GB file (exact size) through the integrated path.
+  Throughput on that (worst-case, sequential 16 MB reads) `cp` pattern:
+
+  | mode | MB/s |
+  |------|------|
+  | lazy `readRange` (this integration) | ~36 |
+  | eager download-to-cache | ~228 |
+  | current `resolve` range-GET (baseline) | ~23 |
+  | raw parallel xet download (no `cp` loop) | ~1070 |
+
+  Lazy reconstructs a fresh range per 16 MB read, so a sequential full-file copy
+  pays per-read reconstruction overhead; its win is partial/random reads (a few
+  tensors out of a shard) where it avoids pulling the whole file, which is the
+  point of keeping the lazy model. Eager wins for full-file copies. A real model
+  load (parallel positional reads) sits between these, not on the `cp` worst
+  case.
 
 ## Known issues / follow-ups
 
