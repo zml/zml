@@ -1,7 +1,7 @@
 //! Zig binding over xet-core's C-API (`xet_capi`, ABI from `hf_xet.h`).
 //!
 //! Drives the mature Rust xet client (adaptive concurrency, streaming,
-//! decompress-once, on-disk chunk cache, BLAKE3 verification) instead of
+//! decompress-once, on-disk chunk cache) instead of
 //! reimplementing the protocol in Zig. Reconstruction runs at the same
 //! throughput as the official `hf-xet` client.
 //!

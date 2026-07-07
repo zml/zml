@@ -3,7 +3,7 @@
 //! Rather than reimplementing the XET protocol in Zig, this drives the mature
 //! xet-core client via `xet_capi.zig`. You get the same throughput as the
 //! official `hf-xet` client (adaptive concurrency, streaming, decompress-once,
-//! on-disk chunk cache, BLAKE3 verification).
+//! on-disk chunk cache).
 //!
 //! `openRemote` resolves a repo file to a reusable `RemoteFile` whose
 //! `readRange` reconstructs arbitrary byte ranges on demand. This is what
