@@ -100,6 +100,10 @@ pub const Session = struct {
         var prefill_token_index_buffer = try zml.Buffer.fromSlice(self.io, self.platform, prefill_token_index_slice, replicated_sharding);
         defer prefill_token_index_buffer.deinit();
 
+        const params = self.compiled_model.params;
+        var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model);
+        defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+
         try self.compiled_model.prefill.run(.{
             .allocator = self.allocator,
             .io = self.io,
@@ -109,6 +113,7 @@ pub const Session = struct {
             .token_index_buf = &prefill_token_index_buffer,
             .kv_cache_buffers = &self.kv_cache_buffers,
             .rng_buffers = &self.rng_buffers,
+            .attention_metadata_buffers = &attention_metadata_buffers,
         });
 
         try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
@@ -133,6 +138,10 @@ pub const Session = struct {
         );
         var token_index_buffer = try zml.Buffer.fromSlice(self.io, self.platform, token_index_slice, replicated_sharding);
         defer token_index_buffer.deinit();
+
+        const params = self.compiled_model.params;
+        var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model);
+        defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         generation: while (true) {
             const token_id = self.generated_token_slice.items(u32)[0];
@@ -160,6 +169,7 @@ pub const Session = struct {
                 .token_index_buf = &token_index_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
+                .attention_metadata_buffers = &attention_metadata_buffers,
             });
 
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);

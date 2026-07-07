@@ -116,6 +116,7 @@ pub const Args = struct {
     token_index_buf: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
+    attention_metadata_buffers: *const zml.Bufferized(zml.attention.attention.Metadata),
 };
 
 pub const CompiledModel = struct {
