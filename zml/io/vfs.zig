@@ -137,6 +137,20 @@ pub const VFS = struct {
     }
 
     fn lookupDir(self: *VFS, dir: std.Io.Dir, sub_path: ?[]const u8) !struct { ?usize, std.Io.Dir, std.Io } {
+        // A scheme-qualified path (e.g. "hf://owner/model/file") is absolute: it
+        // is resolved from the scheme's root regardless of `dir`. Without this,
+        // opening such a path relative to an already-open dir of the same
+        // backend double-prefixes the dir's path.
+        if (sub_path) |sp| {
+            if (std.mem.indexOf(u8, sp, "://") != null) {
+                const uri = std.Uri.parse(sp) catch return error.VFSNotRegistered;
+                const backend_idx: usize = for (self.backends.entries.items(.key), 0..) |s, idx| {
+                    if (std.mem.eql(u8, uri.scheme, s)) break idx;
+                } else return error.VFSNotRegistered;
+                return .{ backend_idx, std.Io.Dir.cwd(), self.getBackend(backend_idx) };
+            }
+        }
+
         if (std.meta.eql(dir, std.Io.Dir.cwd())) {
             if (sub_path == null) return .{ null, dir, self.base.inner };
             if (std.fs.path.isAbsolutePosix(sub_path.?)) return .{ null, dir, self.base.inner };
