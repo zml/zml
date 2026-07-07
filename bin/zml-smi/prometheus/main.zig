@@ -58,7 +58,7 @@ pub const Metric = struct {
 
     pub const Histogram = struct {
         bucket_counts: []u64,
-        bucket_upper_bounds: []i64,
+        bucket_upper_bounds: []f64,
         total_count: u64,
         total_sum: i64,
 
@@ -246,7 +246,8 @@ pub const Model = struct {
                         prev = count;
                     }
 
-                    const total_line = try std.fmt.allocPrint(ctx.arena, "{s}: {d:6}", .{ m.name, total_count });
+                    const avg = @as(f64, @floatFromInt(hist.total_sum)) / @as(f64, @floatFromInt(total_count));
+                    const total_line = try std.fmt.allocPrint(ctx.arena, "{s}: count={d:6}, avg={d:.6}", .{ m.name, total_count, avg });
                     const bar_chart: tui.BarChart = .{
                         .buckets = bars,
                         .bar_height = m.chart_height,
@@ -429,7 +430,7 @@ pub const Metrics = struct {
         const State = enum { first, bucket, count, sum };
         var state: State = .first;
         var bucket_counts: std.ArrayList(u64) = undefined;
-        var bucket_upper_bounds: std.ArrayList(i64) = undefined;
+        var bucket_upper_bounds: std.ArrayList(f64) = undefined;
         var histogram_count: u64 = 0;
         var histogram: *Metric.Histogram = undefined;
 
@@ -522,16 +523,16 @@ pub const Metrics = struct {
         return try std.mem.join(allocator, "", &.{ line[0..bucket], line[bucket + "_bucket".len .. last_label], "}" });
     }
 
-    fn parseBucketData(line: []const u8) error{InvalidInput}!struct { i64, u64 } {
+    fn parseBucketData(line: []const u8) error{InvalidInput}!struct { f64, u64 } {
         const le_start = std.mem.findLast(u8, line, ",le=\"") orelse return error.InvalidInput;
         const rest = line[le_start + ",le=\"".len ..];
         const le_end = std.mem.findScalar(u8, rest, '"') orelse return error.InvalidInput;
         const le_str = rest[0..le_end];
 
         const upper_bound = if (std.mem.eql(u8, le_str, "+Inf"))
-            std.math.maxInt(i64)
+            std.math.inf(f64)
         else
-            std.fmt.parseInt(i64, le_str, 10) catch return error.InvalidInput;
+            std.fmt.parseFloat(f64, le_str) catch return error.InvalidInput;
 
         const last_space = std.mem.findScalarLast(u8, line, ' ') orelse return error.InvalidInput;
         const count_str = std.mem.trim(u8, line[last_space + 1 ..], " \n\r\t");

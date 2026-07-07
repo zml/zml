@@ -10,7 +10,7 @@ const BarChart = @This();
 
 // Define the bucket data structure for bar chart
 pub const BucketData = struct {
-    upper_bound: i64,
+    upper_bound: f64,
     percentage: u8,
 };
 
@@ -75,19 +75,19 @@ fn writeAscii(surface: *vxfw.Surface, col: u16, row: u16, text: []const u8, styl
 }
 
 /// Format a number with K/M/G/T/P suffixes for powers of 1024
-fn formatBound(arena: std.mem.Allocator, value: i64) std.mem.Allocator.Error![]const u8 {
+fn formatBound(arena: std.mem.Allocator, value: f64) std.mem.Allocator.Error![]const u8 {
     const units = [_][]const u8{
         "", "K", "M", "G", "T", "P", "H",
     };
 
     var i: u8 = 0;
-    var current: i64 = value;
+    var current: f64 = value;
 
     while (current >= 1000 and i < units.len) : (i += 1) {
         current = @divFloor(current, 1000);
     }
 
-    const result = try std.fmt.allocPrint(arena, "{d}{s}", .{ current, units[i] });
+    const result = try std.fmt.allocPrint(arena, "{d:.3}{s}", .{ current, units[i] });
     std.debug.assert(result.len <= 5);
     return result;
 }
