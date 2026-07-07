@@ -14,7 +14,8 @@ not. Benchmark on an m6i.2xlarge (us-east-1), cold download of
 
 | Path | Throughput |
 |------|-----------|
-| xet-core (Rust) via C-API / hf-xet, `HF_XET_HIGH_PERFORMANCE=1` | ~1030 MB/s |
+| **this binding: Zig -> C-API -> xet-core, `HF_XET_HIGH_PERFORMANCE=1`** | **~1070 MB/s** |
+| hf-xet (Python, same Rust core), high perf | ~1030 MB/s |
 | ZML `parallel_read.zig` (plain parallel HTTPS, 32 workers) | ~1000 MB/s |
 | xet-core default concurrency | ~640 MB/s |
 | a from-scratch Zig XET reimplementation (jedisct1/zig-xet) | ~386 MB/s |
@@ -43,11 +44,12 @@ concurrency/buffers.
 Built with Zig 0.16.0 (this repo's pin) + `libxet_capi` built from the xet-core
 `assaf/c-api` branch.
 
-- `xet_hub.zig` + `xet_capi.zig` + `xet.zig`: compiled, and `xet.downloadFile`
-  ran end-to-end against `huggingface.co`, reconstructing a full 1.16 GB
-  XET-backed file to disk (exact size match).
-- Throughput ceiling (~1 GB/s) established via `hf-xet` (identical Rust core) on
-  the EC2 box above; the C-API runs the same code (FFI overhead negligible).
+- `xet.downloadFile` ran end-to-end (Zig -> C-API -> xet-core) against
+  `huggingface.co`, reconstructing full XET-backed files to disk (exact size
+  match): a 1.16 GB file locally and the 4.98 GB file on the EC2 box above.
+- On that box it measured **~1070 MB/s** in high-performance mode, matching
+  `hf-xet` (same Rust core) and ZML's own HTTP downloader: the FFI overhead is
+  within noise.
 
 ## Building / wiring the C-API lib in Bazel
 
