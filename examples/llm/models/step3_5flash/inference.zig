@@ -50,6 +50,10 @@ pub const CompilationParameters = struct {
         const num_layers: i64 = @intCast(mdl.text_model.layers.len);
         const num_kv_heads: i64 = @intCast(config.num_attention_groups);
         const head_dim: i64 = @intCast(config.head_dim);
+        const metadata_num_heads: i64 = @intCast(if (config.attention_other_setting) |other|
+            @max(config.num_attention_heads, other.num_attention_heads)
+        else
+            config.num_attention_heads);
         const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
 
         const raw_kv_shape = zml.Shape.init(.{
@@ -67,8 +71,8 @@ pub const CompilationParameters = struct {
             .token_index = .init(.{ .s = 1 }, .u32),
             .kv_cache = .init(kv_shape),
             .rng = .init(),
-            .prefill_attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
-            .decode_attention_metadata = .init(.fromBackend(backend, 1, @intCast(config.num_attention_heads))),
+            .prefill_attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), metadata_num_heads)),
+            .decode_attention_metadata = .init(.fromBackend(backend, 1, metadata_num_heads)),
             .prefill_attention_parameters = .init(.fromBackend(backend)),
             .decode_attention_parameters = initDecodeAttentionParameters(backend, seqlen),
             .seqlen = seqlen,

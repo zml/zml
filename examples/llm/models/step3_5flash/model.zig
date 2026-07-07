@@ -126,7 +126,7 @@ pub const Config = struct {
     }
 
     pub fn numMainLayers(self: Config) u32 {
-        return self.num_hidden_layers;
+        return self.num_hidden_layers - self.num_nextn_predict_layers;
     }
 };
 

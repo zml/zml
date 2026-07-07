@@ -148,6 +148,13 @@ pub const Session = struct {
         var current_token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.generated_token_slice, replicated_sharding);
         defer current_token_buffer.deinit();
 
+        const token_index_slice: zml.Slice = .init(
+            zml.Shape.init(.{ .s = 1 }, .u32),
+            std.mem.sliceAsBytes(&[_]u32{@intCast(all_tokens.items.len)}),
+        );
+        var token_index_buffer = try zml.Buffer.fromSlice(self.io, self.platform, token_index_slice, replicated_sharding);
+        defer token_index_buffer.deinit();
+
         const params = self.compiled_model.params;
         var attention_metadata_buffers = try params.decode_attention_metadata.initBuffer(self.io, self.platform, params.shardings.model);
         defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
@@ -175,7 +182,7 @@ pub const Session = struct {
                 .platform = self.platform,
                 .model_buffers = self.model_buffers,
                 .tokens_buf = &current_token_buffer,
-                .token_index_buf = &self.token_index_buffers[all_tokens.items.len],
+                .token_index_buf = &token_index_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
                 .attention_metadata_buffers = &attention_metadata_buffers,
