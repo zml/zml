@@ -216,6 +216,7 @@ pub const Model = struct {
     pub const row_batch_size: i64 = 4096;
     pub const row_k_neighbors: i64 = 256;
     pub const top_rows_count: i64 = 100;
+    pub const score_top_k: i64 = 16;
 
     lm_head: zml.Tensor,
 
@@ -285,15 +286,14 @@ pub const Model = struct {
         return scores.sort(.voc, .{ .descending = false }).indices.convert(.u64);
     }
 
-    pub fn scoreTokens(self: Model, embedding: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
+    pub fn scoreTokens(self: Model, embedding: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d }).convert(.f32);
-        const normalized_lm_head = normalizeRows(lm_head);
         const logits = lm_head.dot(embedding, .d).squeeze(.s);
-        const similarities = normalized_lm_head.dot(embedding, .d).squeeze(.s);
         const sorted = logits.softmax(.voc).sort(.voc, .{ .descending = true });
-        const sorted_similarity_indices = sorted.indices.rename(.{ .voc = .rank });
-        const sorted_similarities = similarities.gather(.{ .voc = sorted_similarity_indices }, .{}).rename(.{ .rank = .voc });
-        return .{ sorted.values, sorted.indices, sorted_similarities };
+        const zero = zml.Tensor.scalar(@as(u32, 0), .u32);
+        const top_probas = sorted.values.dynamicSlice1d(sorted.values.axis(.voc), .{ .start = zero, .len = score_top_k }).rename(.{ .voc = .rank });
+        const top_indices = sorted.indices.dynamicSlice1d(sorted.indices.axis(.voc), .{ .start = zero, .len = score_top_k }).rename(.{ .voc = .rank }).convert(.u32);
+        return .{ top_probas, top_indices };
     }
 
     pub fn top1Token(self: Model, embedding: zml.Tensor) zml.Tensor {
