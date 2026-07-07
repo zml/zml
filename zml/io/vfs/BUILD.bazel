@@ -10,11 +10,18 @@ zig_library(
         "http.zig",
         "parallel_read.zig",
         "s3.zig",
+        "xet.zig",
+        "xet_core.zig",
     ],
     main = "index.zig",
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         "//stdx",
+        # Native XET download support (see xet.zig / xet_core.zig).
+        # `@xet` is the jedisct1/zig-xet package; declare it as a zig repo in
+        # MODULE.bazel alongside its `lz4` / `ultracdc` zon deps (add their
+        # content hashes to bazel/zig_index.json), then `use_repo(..., "xet")`.
+        "@xet//:xet",
     ],
 )
