@@ -1,56 +1,73 @@
-# Native XET download for ZML
+# Native XET download for ZML (via xet-core C-API)
 
-Adds a VFS provider that reads HuggingFace files through the XET content-addressed
-storage (CAS) protocol, instead of the `resolve/` byte-range path in `hf.zig`.
+Downloads HuggingFace XET-backed files by driving the mature **xet-core** (Rust)
+client through its C-API, instead of reimplementing the XET protocol in Zig.
 
-## Why
+## Why the C-API and not a Zig reimplementation
 
-For XET-backed repos, `hf.zig` downloads the fully reconstructed object through
-HF's `resolve/` compatibility bridge (server-side reconstruction, no client-side
-dedup, re-fetched every run). Talking to the CAS directly enables chunk-level
-deduplication and, with a shared chunk cache, reuse of overlapping content across
-files and revisions (e.g. iterating on quantizations of the same base model).
+XET-backed files reconstruct client-side (fetch compressed chunks from the CAS,
+LZ4/BG4 decompress, reassemble). Getting that fast needs adaptive concurrency,
+bounded streaming, decompress-once scheduling, connection pooling and an on-disk
+chunk cache. xet-core already has all of it; a young Zig reimplementation does
+not. Benchmark on an m6i.2xlarge (us-east-1), cold download of
+`model-00001-of-00004.safetensors` (4.98 GB) from a Llama-3.1-8B repo:
+
+| Path | Throughput |
+|------|-----------|
+| xet-core (Rust) via C-API / hf-xet, `HF_XET_HIGH_PERFORMANCE=1` | ~1030 MB/s |
+| ZML `parallel_read.zig` (plain parallel HTTPS, 32 workers) | ~1000 MB/s |
+| xet-core default concurrency | ~640 MB/s |
+| a from-scratch Zig XET reimplementation (jedisct1/zig-xet) | ~386 MB/s |
+
+The C-API matches ZML's own HTTP downloader at line rate **and** adds BLAKE3
+verification + the on-disk chunk cache (cross-file / cross-revision dedup),
+which plain HTTP has no equivalent of. Both were network-bound at ~1 GB/s here.
 
 ## Files
 
-- `xet_core.zig` - token exchange (`requestReadToken`), `Session` (CAS client +
-  reconstructor) with `readRange` / `downloadToWriter`, and `listXetFiles`.
-  Delegates the protocol (chunk reconstruction, LZ4/BG4, BLAKE3) to the
-  `jedisct1/zig-xet` package.
-- `xet.zig` - repo-scoped VFS provider (`Xet`), mirrors `http.zig` handle
-  bookkeeping; `fileReadPositional` reconstructs only the requested byte range.
-- Registered in `index.zig` (`Xet`, `xet_core`).
+- `xet_hub.zig`  : HF Hub HTTPS/JSON (pure Zig) — CAS read-token exchange and
+  XET file listing (path -> hash + size).
+- `xet_capi.zig` : Zig binding over `hf_xet.h` (`@cImport`). `Session` wraps a
+  xet-core download group; `downloadToPath` reconstructs a whole file.
+- `xet.zig`      : high-level `downloadFile(...)` tying the two together, plus
+  re-exports. Registered as `xet` in `index.zig`.
 
-Everything is driven by `std.Io`, matching ZML's async substrate, so the parallel
-fetcher shares the same concurrency model as the rest of `zml/io`.
+The C-API is whole-file oriented (`xet_file_download_group_download_to_path`),
+so the integration model is **download-to-cache**: materialize a repo file
+locally, then open it through the normal filesystem, exactly like
+`huggingface_hub` + `hf-xet`. Set `HF_XET_HIGH_PERFORMANCE=1` for peak
+concurrency/buffers.
 
 ## Verification status
 
-Built with Zig 0.16.0 (the version this repo pins).
+Built with Zig 0.16.0 (this repo's pin) + `libxet_capi` built from the xet-core
+`assaf/c-api` branch.
 
-- `xet_core.zig`: compiled AND run end-to-end against `huggingface.co` -
-  listed XET files, exchanged the token, and reconstructed a 1 MiB range of a
-  4.68 GB XET-backed GGUF (magic bytes `GGUF` confirmed) in ~1.3 s.
-- `xet.zig`: compiled against the real `base.zig` + `stdx`, so every VFS vtable
-  override signature is validated against `std.Io.VTable`.
+- `xet_hub.zig` + `xet_capi.zig` + `xet.zig`: compiled, and `xet.downloadFile`
+  ran end-to-end against `huggingface.co`, reconstructing a full 1.16 GB
+  XET-backed file to disk (exact size match).
+- Throughput ceiling (~1 GB/s) established via `hf-xet` (identical Rust core) on
+  the EC2 box above; the C-API runs the same code (FFI overhead negligible).
 
-## Remaining: Bazel dependency wiring
+## Building / wiring the C-API lib in Bazel
 
-`vfs/BUILD.bazel` now depends on `@xet//:xet`. That external repo still has to be
-declared, matching how other vendored Zig deps (e.g. `libvaxis`) are wired via the
-`non_module_deps` extension in `MODULE.bazel`:
+`vfs/BUILD.bazel` depends on `:xet_capi_import` (a `cc_import`). Produce the lib:
 
-- Declare `zig-xet` and its two zon deps as repos:
-  - `xet`: https://github.com/jedisct1/zig-xet (release 0.2.5), import name `xet`
-  - `lz4`: https://github.com/jedisct1/zig-lz4/archive/refs/tags/0.1.4.tar.gz
-    (zon hash `lz4-0.1.4-fUqx0T2RAgCcxwjGQ-TAq2XC8ENcyrAWsQjgjcZfe75d`)
-  - `ultracdc`: https://github.com/jedisct1/zig-ultracdc/archive/refs/tags/0.1.6.tar.gz
-    (zon hash `ultracdc-0.1.6-vd07qWxWAAD8eep8mIHR-7p7IPeEdLhIQnoiwyHtKzsV`)
-- Add their content hashes to `bazel/zig_index.json`.
-- `use_repo(non_module_deps, ..., "xet")`.
+```
+# in a checkout of xet-core (assaf/c-api branch)
+cargo build --release -p xet_capi
+#   -> xet_capi/include/hf_xet.h
+#   -> target/release/libxet_capi.a   (also .dylib)
+```
 
-Note: `zig-xet` targets `minimum_zig_version = 0.16.0-dev.2903`; its own
-`build.zig` (example/test run steps) uses `run_cmd.addPassthruArgs()`, removed in
-the 0.16.0 release. Building only the `xet` library module (as ZML does) does not
-hit that path, but the upstream `build.zig` should be updated for 0.16.0 if its
-examples are built.
+Then expose it as an external repo `@xet_capi` (prebuilt per platform, or via
+rules_rust building the crate), providing `:hf_xet_h` and `:libxet_capi.a`.
+Extra link deps the Rust staticlib needs:
+
+- Linux: `-lpthread -ldl -lm`
+- macOS: `-framework Security -framework CoreFoundation -framework SystemConfiguration`
+
+Note: `libxet_capi.a` is large (pulls tokio/reqwest); cross-compile it for each
+ZML target. This Rust build dependency is the one real cost of this approach
+(the reason a pure-Zig reimplementation is otherwise attractive despite being
+slower).
