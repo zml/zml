@@ -95,23 +95,24 @@ pub fn requestReadToken(
     return .{ .access_token = access_token, .cas_url = cas_url, .exp = exp.integer };
 }
 
-pub const FileEntry = struct {
-    path: []const u8,
+pub const XetFile = struct {
     size: u64,
-    /// 64-char hex XET hash, NUL-terminated for direct C-API use.
+    /// 64-char hex XET hash, NUL-terminated for direct C-API use. Caller owns it.
     hash_hexz: [:0]const u8,
 };
 
-/// List the XET-backed files of a repo (non-XET files are skipped).
-/// Caller owns the returned slice and each entry's `path` / `hash_hexz`.
-pub fn listXetFiles(
+/// Resolve `filepath` to its XET hash + size from the repo tree. Returns
+/// `error.FileNotXetBacked` if the file is absent or not XET-backed. Caller
+/// owns the returned `hash_hexz`.
+pub fn findXetFile(
     allocator: std.mem.Allocator,
     client: *std.http.Client,
     repo_type: []const u8,
     repo_id: []const u8,
     revision: []const u8,
+    filepath: []const u8,
     auth: Auth,
-) ![]FileEntry {
+) !XetFile {
     const url = try std.fmt.allocPrint(
         allocator,
         "https://huggingface.co/api/{s}s/{s}/tree/{s}?recursive=true",
@@ -122,27 +123,14 @@ pub fn listXetFiles(
     const parsed = try getJson(allocator, client, url, auth, 8 * 1024 * 1024);
     defer parsed.deinit();
 
-    var entries: std.ArrayList(FileEntry) = .empty;
-    errdefer {
-        for (entries.items) |e| {
-            allocator.free(e.path);
-            allocator.free(e.hash_hexz);
-        }
-        entries.deinit(allocator);
-    }
-
     for (parsed.value.array.items) |item| {
         const obj = item.object;
-        const xet = obj.get("xetHash") orelse continue;
         const path = obj.get("path") orelse continue;
+        const xet = obj.get("xetHash") orelse continue;
         const size = obj.get("size") orelse continue;
-        if (xet != .string or path != .string or size != .integer) continue;
-        try entries.append(allocator, .{
-            .path = try allocator.dupe(u8, path.string),
-            .size = @intCast(size.integer),
-            .hash_hexz = try allocator.dupeZ(u8, xet.string),
-        });
+        if (path != .string or xet != .string or size != .integer) continue;
+        if (!std.mem.eql(u8, path.string, filepath)) continue;
+        return .{ .size = @intCast(size.integer), .hash_hexz = try allocator.dupeZ(u8, xet.string) };
     }
-
-    return entries.toOwnedSlice(allocator);
+    return error.FileNotXetBacked;
 }
