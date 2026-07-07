@@ -8,6 +8,24 @@ const model = @import("model.zig");
 const log = std.log.scoped(.step3_5flash);
 const Phase = common.Phase;
 
+fn initDecodeAttentionParameters(
+    backend: zml.attention.attention.Backend,
+    seqlen: u32,
+) zml.attention.attention.Parameters {
+    var params = zml.attention.attention.Parameters.init(.fromBackend(backend));
+
+    // FA2's single-token GQA path rewrites q into grouped KV-head layout when
+    // sliding_window is negative. Use a finite full-cache window for decode so
+    // full-attention layers keep normal query-head layout, while sliding layers
+    // still override this with the model's sliding window in Attn.forward().
+    switch (params) {
+        .cuda_fa2 => |*p| p.sliding_window = @intCast(seqlen),
+        else => {},
+    }
+
+    return params;
+}
+
 pub const CompilationParameters = struct {
     prefill_tokens: zml.Tensor,
     decode_tokens: zml.Tensor,
@@ -52,7 +70,7 @@ pub const CompilationParameters = struct {
             .prefill_attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
             .decode_attention_metadata = .init(.fromBackend(backend, 1, @intCast(config.num_attention_heads))),
             .prefill_attention_parameters = .init(.fromBackend(backend)),
-            .decode_attention_parameters = .init(.fromBackend(backend)),
+            .decode_attention_parameters = initDecodeAttentionParameters(backend, seqlen),
             .seqlen = seqlen,
             .shardings = shardings,
         };
@@ -315,7 +333,7 @@ pub const KernelExe = struct {
 
             for (self.layers.args, self.layers.results, self.layers.layer_indices, 0..) |*exe_args, *results, *layer_index_buf, i| {
                 const layer = self.exe.mdl.text_model.layers[i];
-                logKey("run", self.exe.phase, i, keyFor(layer));
+                // logKey("run", self.exe.phase, i, keyFor(layer));
                 const layer_exe = self.exe.layerExe(layer);
                 ComposedKernelExe.runLayer(exe_args, results, &layer_exe, args, &hidden_buf, layer_index_buf);
             }
