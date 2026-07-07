@@ -14,7 +14,8 @@ pub const CompilationParameters = struct {
     token_index: zml.Tensor,
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
-    attention_metadata: zml.attention.attention.Metadata,
+    prefill_attention_metadata: zml.attention.attention.Metadata,
+    decode_attention_metadata: zml.attention.attention.Metadata,
     prefill_attention_parameters: zml.attention.attention.Parameters,
     decode_attention_parameters: zml.attention.attention.Parameters,
     seqlen: u32,
@@ -48,7 +49,8 @@ pub const CompilationParameters = struct {
             .token_index = .init(.{ .s = 1 }, .u32),
             .kv_cache = .init(kv_shape),
             .rng = .init(),
-            .attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
+            .prefill_attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
+            .decode_attention_metadata = .init(.fromBackend(backend, 1, @intCast(config.num_attention_heads))),
             .prefill_attention_parameters = .init(.fromBackend(backend)),
             .decode_attention_parameters = .init(.fromBackend(backend)),
             .seqlen = seqlen,
@@ -103,6 +105,11 @@ fn logKey(comptime action: []const u8, phase: Phase, layer_index: usize, key: Ke
             key.has_shared_limit,
         },
     );
+}
+
+fn syncLayerCalls() bool {
+    const value = std.c.getenv("ZML_LLM_SYNC_LAYERS") orelse return false;
+    return value[0] != 0 and value[0] != '0';
 }
 
 pub const CompilationOptions = CompilationParameters;
@@ -487,9 +494,13 @@ const ComposedKernelExe = struct {
             .v = args.kv_cache_buffers.v,
             .layer_index = layer_index_buf.*,
         };
-        exe_args.set(.{ hidden_buf, args.token_index_buf, layer_cache });
+        exe_args.set(.{ hidden_buf, args.token_index_buf, layer_cache, args.attention_metadata_buffers });
 
-        layer_exe.call(exe_args.*, exe_results);
+        if (syncLayerCalls()) {
+            layer_exe.callOpts(args.io, exe_args.*, exe_results, .{ .wait = true });
+        } else {
+            layer_exe.call(exe_args.*, exe_results);
+        }
 
         var new_hidden, var new_cache = exe_results.get(struct { zml.Buffer, zml.Bufferized(model.KvCache) });
         replaceBuffer(hidden_buf, &new_hidden);
@@ -623,16 +634,16 @@ const ComposedKernelExe = struct {
             .layer_index = zml.Tensor.init(.{}, .u32),
         };
 
-        const attention_parameters = switch (phase) {
-            .prefill => parameters.prefill_attention_parameters,
-            .decode => parameters.decode_attention_parameters,
+        const attention_metadata, const attention_parameters = switch (phase) {
+            .prefill => .{ parameters.prefill_attention_metadata, parameters.prefill_attention_parameters },
+            .decode => .{ parameters.decode_attention_metadata, parameters.decode_attention_parameters },
         };
 
         return platform.compile(allocator, io, step3p5_model.text_model.layers[layer_index], .forward, .{
             hidden_tensor,
             parameters.token_index,
             layer_cache,
-            parameters.attention_metadata,
+            attention_metadata,
             attention_parameters,
         }, .{
             .shardings = &parameters.shardings.all(),
