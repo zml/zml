@@ -32,8 +32,10 @@ pub const CompilationParameters = struct {
     token_index: zml.Tensor,
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
-    prefill_attention_metadata: zml.attention.attention.Metadata,
-    decode_attention_metadata: zml.attention.attention.Metadata,
+    prefill_full_attention_metadata: zml.attention.attention.Metadata,
+    prefill_sliding_attention_metadata: zml.attention.attention.Metadata,
+    decode_full_attention_metadata: zml.attention.attention.Metadata,
+    decode_sliding_attention_metadata: zml.attention.attention.Metadata,
     prefill_attention_parameters: zml.attention.attention.Parameters,
     decode_attention_parameters: zml.attention.attention.Parameters,
     seqlen: u32,
@@ -50,8 +52,9 @@ pub const CompilationParameters = struct {
         const num_layers: i64 = @intCast(mdl.text_model.layers.len);
         const num_kv_heads: i64 = @intCast(config.num_attention_groups);
         const head_dim: i64 = @intCast(config.head_dim);
-        const metadata_num_heads: i64 = @intCast(if (config.attention_other_setting) |other|
-            @max(config.num_attention_heads, other.num_attention_heads)
+        const full_attention_heads: i64 = @intCast(config.num_attention_heads);
+        const sliding_attention_heads: i64 = @intCast(if (config.attention_other_setting) |other|
+            other.num_attention_heads
         else
             config.num_attention_heads);
         const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
@@ -71,8 +74,10 @@ pub const CompilationParameters = struct {
             .token_index = .init(.{ .s = 1 }, .u32),
             .kv_cache = .init(kv_shape),
             .rng = .init(),
-            .prefill_attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), metadata_num_heads)),
-            .decode_attention_metadata = .init(.fromBackend(backend, 1, metadata_num_heads)),
+            .prefill_full_attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), full_attention_heads)),
+            .prefill_sliding_attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), sliding_attention_heads)),
+            .decode_full_attention_metadata = .init(.fromBackend(backend, 1, full_attention_heads)),
+            .decode_sliding_attention_metadata = .init(.fromBackend(backend, 1, sliding_attention_heads)),
             .prefill_attention_parameters = .init(.fromBackend(backend)),
             .decode_attention_parameters = initDecodeAttentionParameters(backend, seqlen),
             .seqlen = seqlen,
@@ -145,7 +150,8 @@ pub const Args = struct {
     token_index_buf: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
-    attention_metadata_buffers: *const zml.Bufferized(zml.attention.attention.Metadata),
+    full_attention_metadata_buffers: *const zml.Bufferized(zml.attention.attention.Metadata),
+    sliding_attention_metadata_buffers: *const zml.Bufferized(zml.attention.attention.Metadata),
 };
 
 pub const CompiledModel = struct {
@@ -218,7 +224,6 @@ pub const KernelExe = struct {
                 io: std.Io,
                 platform: *const zml.Platform,
                 exe: *const ComposedKernelExe,
-                mdl: *const model.Model,
                 model_buffers: *model.Buffers,
             ) !Layers {
                 const args = try allocator.alloc(zml.exe.Exe.Arguments, model_buffers.text_model.layers.len);
@@ -253,7 +258,7 @@ pub const KernelExe = struct {
                 }
 
                 for (model_buffers.text_model.layers, 0..) |layer_bufs, i| {
-                    const layer_exe = exe.layerExe(mdl.text_model.layers[i]);
+                    const layer_exe = exe.layerExe(i);
 
                     args[i] = try layer_exe.args(allocator);
                     args[i].bake(layer_bufs);
@@ -299,7 +304,7 @@ pub const KernelExe = struct {
             var embed_results = try exe.embed_tokens.results(allocator);
             errdefer embed_results.deinit(allocator);
 
-            var layers = try Layers.init(allocator, io, platform, exe, exe.mdl, model_buffers);
+            var layers = try Layers.init(allocator, io, platform, exe, model_buffers);
             errdefer layers.deinit(allocator);
 
             var sampler_args = try exe.sampler.args(allocator);
@@ -338,8 +343,8 @@ pub const KernelExe = struct {
             for (self.layers.args, self.layers.results, self.layers.layer_indices, 0..) |*exe_args, *results, *layer_index_buf, i| {
                 const layer = self.exe.mdl.text_model.layers[i];
                 // logKey("run", self.exe.phase, i, keyFor(layer));
-                const layer_exe = self.exe.layerExe(layer);
-                ComposedKernelExe.runLayer(exe_args, results, &layer_exe, args, &hidden_buf, layer_index_buf);
+                const layer_exe = self.exe.layerExe(i);
+                ComposedKernelExe.runLayer(exe_args, results, keyFor(layer), &layer_exe, args, &hidden_buf, layer_index_buf);
             }
 
             self.exe.runSampler(&self.sampler_args, &self.sampler_results, args, &hidden_buf);
@@ -383,10 +388,10 @@ pub const KernelExe = struct {
 const ComposedKernelExe = struct {
     allocator: std.mem.Allocator,
     embed_tokens: zml.Exe,
-    layer_exes: [16]?zml.Exe,
+    layer_exes: []zml.Exe,
     sampler: zml.Exe,
     phase: Phase,
-    mdl: *const model.Model,
+    mdl: model.Model,
     params: CompilationParameters,
 
     const EmbedTokens = struct {
@@ -413,26 +418,20 @@ const ComposedKernelExe = struct {
         const embed_tokens = try compileEmbedTokens(allocator, io, platform, step3p5_model.text_model.embed_tokens, parameters, seqlen, phase, progress);
         errdefer embed_tokens.deinit();
 
-        // Find one example layer per Key actually present in the model, then compile an executable for that kind. We use 6/16 possible kinds, and the rest are unreachable.
-        log.info("{s} layer key census: layers={}", .{ @tagName(phase), step3p5_model.text_model.layers.len });
-        var example_indices: [16]?usize = @splat(null);
-        for (step3p5_model.text_model.layers, 0..) |layer, i| {
-            const key = keyFor(layer);
-            logKey("model", phase, i, key);
-            const slot = &example_indices[key.index()];
-            if (slot.* == null) slot.* = i;
-        }
+        log.info("{s} compiling per-layer executables: layers={}", .{ @tagName(phase), step3p5_model.text_model.layers.len });
+        const layer_exes = try allocator.alloc(zml.Exe, step3p5_model.text_model.layers.len);
+        errdefer allocator.free(layer_exes);
 
-        var layer_exes: [16]?zml.Exe = @splat(null);
+        var initialized_layer_exes: usize = 0;
         errdefer {
-            for (layer_exes) |maybe_exe| {
-                if (maybe_exe) |exe| exe.deinit();
+            for (layer_exes[0..initialized_layer_exes]) |exe| {
+                exe.deinit();
             }
         }
-        for (example_indices, 0..) |maybe_idx, slot| {
-            const idx = maybe_idx orelse continue;
-            logKey("compile example", phase, idx, keyFor(step3p5_model.text_model.layers[idx]));
-            layer_exes[slot] = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, idx, phase, progress);
+        for (step3p5_model.text_model.layers, 0..) |layer, i| {
+            logKey("compile layer", phase, i, keyFor(layer));
+            layer_exes[i] = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, i, phase, progress);
+            initialized_layer_exes = i + 1;
         }
 
         const sampler = try compileSampler(allocator, io, platform, step3p5_model, parameters, seqlen, phase, progress);
@@ -444,16 +443,17 @@ const ComposedKernelExe = struct {
             .layer_exes = layer_exes,
             .sampler = sampler,
             .phase = phase,
-            .mdl = &step3p5_model,
+            .mdl = step3p5_model,
             .params = parameters,
         };
     }
 
     fn deinit(self: ComposedKernelExe) void {
         self.embed_tokens.deinit();
-        for (self.layer_exes) |maybe_exe| {
-            if (maybe_exe) |exe| exe.deinit();
+        for (self.layer_exes) |exe| {
+            exe.deinit();
         }
+        self.allocator.free(self.layer_exes);
         self.sampler.deinit();
     }
 
@@ -475,7 +475,7 @@ const ComposedKernelExe = struct {
         for (args.model_buffers.text_model.layers, 0..) |layer_bufs, i| {
             const layer = self.mdl.text_model.layers[i];
             logKey("run", self.phase, i, keyFor(layer));
-            const layer_exe = self.layerExe(layer);
+            const layer_exe = self.layerExe(i);
 
             var exe_args = try layer_exe.args(args.allocator);
             defer exe_args.deinit(args.allocator);
@@ -487,7 +487,7 @@ const ComposedKernelExe = struct {
             var layer_index_buf = try zml.Buffer.scalar(args.io, args.platform, @as(u32, @intCast(i)), .u32);
             defer layer_index_buf.deinit();
 
-            ComposedKernelExe.runLayer(&exe_args, &results, &layer_exe, args, &hidden_buf, &layer_index_buf);
+            ComposedKernelExe.runLayer(&exe_args, &results, keyFor(layer), &layer_exe, args, &hidden_buf, &layer_index_buf);
         }
 
         {
@@ -505,6 +505,7 @@ const ComposedKernelExe = struct {
     fn runLayer(
         exe_args: *zml.exe.Exe.Arguments,
         exe_results: *zml.exe.Exe.Results,
+        key: Key,
         layer_exe: *const zml.Exe,
         args: Args,
         hidden_buf: *zml.Buffer,
@@ -515,7 +516,11 @@ const ComposedKernelExe = struct {
             .v = args.kv_cache_buffers.v,
             .layer_index = layer_index_buf.*,
         };
-        exe_args.set(.{ hidden_buf, args.token_index_buf, layer_cache, args.attention_metadata_buffers });
+        const attention_metadata_buffers = if (key.attn_kind == .sliding)
+            args.sliding_attention_metadata_buffers
+        else
+            args.full_attention_metadata_buffers;
+        exe_args.set(.{ hidden_buf, args.token_index_buf, layer_cache, attention_metadata_buffers });
 
         if (syncLayerCalls()) {
             layer_exe.callOpts(args.io, exe_args.*, exe_results, .{ .wait = true });
@@ -626,8 +631,8 @@ const ComposedKernelExe = struct {
         });
     }
 
-    fn layerExe(self: *const ComposedKernelExe, layer: model.TransformerLayer) zml.Exe {
-        return self.layer_exes[keyFor(layer).index()].?;
+    fn layerExe(self: *const ComposedKernelExe, layer_index: usize) zml.Exe {
+        return self.layer_exes[layer_index];
     }
 
     fn compileLayer(
@@ -655,9 +660,16 @@ const ComposedKernelExe = struct {
             .layer_index = zml.Tensor.init(.{}, .u32),
         };
 
+        const layer = step3p5_model.text_model.layers[layer_index];
         const attention_metadata, const attention_parameters = switch (phase) {
-            .prefill => .{ parameters.prefill_attention_metadata, parameters.prefill_attention_parameters },
-            .decode => .{ parameters.decode_attention_metadata, parameters.decode_attention_parameters },
+            .prefill => .{
+                if (layer.attn.enable_sliding_window) parameters.prefill_sliding_attention_metadata else parameters.prefill_full_attention_metadata,
+                parameters.prefill_attention_parameters,
+            },
+            .decode => .{
+                if (layer.attn.enable_sliding_window) parameters.decode_sliding_attention_metadata else parameters.decode_full_attention_metadata,
+                parameters.decode_attention_parameters,
+            },
         };
 
         return platform.compile(allocator, io, step3p5_model.text_model.layers[layer_index], .forward, .{

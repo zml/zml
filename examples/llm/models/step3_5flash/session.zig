@@ -117,8 +117,11 @@ pub const Session = struct {
         defer prefill_tokens_buffer.deinit();
 
         const params = self.compiled_model.params;
-        var attention_metadata_buffers = try params.prefill_attention_metadata.initBuffer(self.io, self.platform, params.shardings.model);
-        defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+        var full_attention_metadata_buffers = try params.prefill_full_attention_metadata.initBuffer(self.io, self.platform, params.shardings.model);
+        defer zml.attention.attention.Metadata.deinitBuffer(&full_attention_metadata_buffers);
+
+        var sliding_attention_metadata_buffers = try params.prefill_sliding_attention_metadata.initBuffer(self.io, self.platform, params.shardings.model);
+        defer zml.attention.attention.Metadata.deinitBuffer(&sliding_attention_metadata_buffers);
 
         try self.compiled_model.prefill.run(.{
             .allocator = self.allocator,
@@ -129,7 +132,8 @@ pub const Session = struct {
             .token_index_buf = &self.token_index_buffers[0],
             .kv_cache_buffers = &self.kv_cache_buffers,
             .rng_buffers = &self.rng_buffers,
-            .attention_metadata_buffers = &attention_metadata_buffers,
+            .full_attention_metadata_buffers = &full_attention_metadata_buffers,
+            .sliding_attention_metadata_buffers = &sliding_attention_metadata_buffers,
         });
 
         try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
@@ -156,8 +160,11 @@ pub const Session = struct {
         defer token_index_buffer.deinit();
 
         const params = self.compiled_model.params;
-        var attention_metadata_buffers = try params.decode_attention_metadata.initBuffer(self.io, self.platform, params.shardings.model);
-        defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+        var full_attention_metadata_buffers = try params.decode_full_attention_metadata.initBuffer(self.io, self.platform, params.shardings.model);
+        defer zml.attention.attention.Metadata.deinitBuffer(&full_attention_metadata_buffers);
+
+        var sliding_attention_metadata_buffers = try params.decode_sliding_attention_metadata.initBuffer(self.io, self.platform, params.shardings.model);
+        defer zml.attention.attention.Metadata.deinitBuffer(&sliding_attention_metadata_buffers);
 
         generation: while (true) {
             const token_id = self.generated_token_slice.items(u32)[0];
@@ -185,7 +192,8 @@ pub const Session = struct {
                 .token_index_buf = &token_index_buffer,
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buffers = &self.rng_buffers,
-                .attention_metadata_buffers = &attention_metadata_buffers,
+                .full_attention_metadata_buffers = &full_attention_metadata_buffers,
+                .sliding_attention_metadata_buffers = &sliding_attention_metadata_buffers,
             });
 
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);

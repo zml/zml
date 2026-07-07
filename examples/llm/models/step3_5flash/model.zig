@@ -1128,11 +1128,10 @@ pub const Moe = struct {
     }
 
     pub fn forward(self: Moe, x: zml.Tensor) zml.Tensor {
-        // There is a SwiGLU limit applied to layers 43 and 44, which is not supported by the Triton kernel
-        if (self.layer_idx >= 43 and self.layer_idx <= 44) {
-            return self.forwardLoop(x);
-        }
-        return self.forwardTriton(x);
+        // Keep Step 3.5 on the explicit path until the packed MoE kernel is
+        // verified against the reference. A small expert math mismatch here
+        // produces coherent-looking but repetitive decode across all attention backends.
+        return self.forwardLoop(x);
     }
 
     fn forwardTriton(self: Moe, x: zml.Tensor) zml.Tensor {
