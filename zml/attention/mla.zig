@@ -259,10 +259,10 @@ const Triton = struct {
             const logical_block = safe_topk.div(block_size_scalar);
             const slot = safe_topk.remainder(block_size_scalar);
 
-            const block_table_stride = zml.Tensor.scalar(@as(i32, @intCast(parameters.block_table.dim(.p))), .i32).broad(topk_shape);
-            const flattened_block_index = query_to_sequence.broad(topk_shape).mul(block_table_stride).add(logical_block);
-            const flattened_block_table = parameters.block_table.merge(.{ .block = .{ .b, .p } });
-            const physical_block = flattened_block_table.gather(.{ .block = flattened_block_index }, .{});
+            const sequence = query_to_sequence.broad(topk_shape);
+            const block_table = parameters.block_table.rename(.{ .b = .seq });
+            const physical_block = block_table.gather(.{ .seq = sequence, .p = logical_block }, .{});
+
             const physical_topk = physical_block.mul(block_size_scalar).add(slot);
 
             return zml.Tensor.select(valid_topk, physical_topk, zml.Tensor.scalar(-1, .i32).broad(topk_shape));
