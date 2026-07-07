@@ -509,6 +509,7 @@ pub fn visit(comptime callback: anytype, ctx: FnParam(callback, 0), v: anytype) 
                     .@"union" => switch (v.*) {
                         inline else => |*v_field| if (can_error) try visit(callback, ctx, v_field) else visit(callback, ctx, v_field),
                     },
+                    .pointer => if (can_error) try visit(callback, ctx, v.*) else visit(callback, ctx, v.*),
                     else => stdx.debug.compileError("zml.meta.visit({any}) doesn't support visiting pointer type {any}", .{ @TypeOf(callback), ChildTypeV }),
                 },
                 .slice => {

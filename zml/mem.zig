@@ -23,7 +23,7 @@ pub const DmaAllocator = union(enum) {
         return switch (device.platform.target) {
             .cuda => .{ .dmam = .init(parent, device.platform) },
             .oneapi, .tpu => .{ .uib = .init(device.memory(.host_pinned).?) },
-            .rocm, .cpu, .neuron => .{ .passthrough = parent },
+            .rocm, .cpu, .neuron, .metal => .{ .passthrough = parent },
         };
     }
 
@@ -329,6 +329,7 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
     const ModelBufferized = Bufferized(Model);
 
     if (ModelBufferized == Buffer) {
+        bufferized_._shards = .empty;
         return;
     }
 

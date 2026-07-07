@@ -1,0 +1,51 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+cc_library(
+    name = "empty",
+    defines = ["ZML_RUNTIME_METAL_DISABLED"],
+    tags = ["manual"],
+)
+
+copy_to_directory(
+    name = "metal_toolchain",
+    srcs = [
+        "@metal_toolchain//:metal_compile_tools",
+        "@metal_toolchain//:metal_compile_runtime",
+    ],
+    out = "metal_toolchain",
+    replace_prefixes = {
+        "Metal.xctoolchain/usr/metal/32023": ".",
+    },
+    include_external_repositories = ["**"],
+    exec_compatible_with = ["@platforms//os:macos"],
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
+cc_library(
+    name = "libpjrt_metal",
+    data = [":metal_toolchain"],
+    defines = ["ZML_RUNTIME_METAL"],
+    tags = ["manual"],
+    deps = ["@libpjrt_metal"],
+)
+
+zig_library(
+    name = "metal",
+    import_name = "platforms/metal",
+    main = "metal.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+    ] + select({
+        "//platforms:metal.enabled": [
+            ":libpjrt_metal",
+            "//bazel",
+            "//stdx",
+            "@rules_zig//zig/runfiles",
+        ],
+        "//conditions:default": [":empty"],
+    }),
+)

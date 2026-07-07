@@ -15,7 +15,6 @@ pub const Session = struct {
     config: *const model.Config,
     seqlen: u32,
     cache_buffers: zml.Bufferized(model.Cache),
-    attention_metadata_buffers: zml.Bufferized(attention.Metadata),
     rng_buf: zml.Bufferized(zml.Tensor.Rng),
     generated_token_slice: zml.Slice,
     think_start: ?u32,
@@ -41,7 +40,6 @@ pub const Session = struct {
             .config = &compiled_model.loaded_model.parsed_config.value,
             .seqlen = compiled_model.params.seqlen,
             .cache_buffers = try compiled_model.params.cache.initBuffers(allocator, io, platform, compiled_model.params.shardings.model),
-            .attention_metadata_buffers = try compiled_model.params.attention_metadata.initBuffer(io, platform, compiled_model.params.shardings.model),
             .rng_buf = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed),
             .generated_token_slice = try .alloc(allocator, zml.Shape.init(.{ .batch = 1, .seq = 1 }, .u32)),
             .think_start = tokenizer.tokenId("<think>") orelse unreachable,
@@ -51,7 +49,6 @@ pub const Session = struct {
 
     pub fn deinit(self: *Session) void {
         model.Cache.unloadBuffers(&self.cache_buffers);
-        attention.Metadata.deinitBuffer(&self.attention_metadata_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buf);
         self.generated_token_slice.free(self.allocator);
     }
@@ -120,6 +117,13 @@ pub const Session = struct {
         var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice, .replicated);
         defer actual_seq_len_buf.deinit();
 
+        const params = self.compiled_model.params;
+        var attention_metadata_buffers: zml.Bufferized(attention.Metadata) = switch (params.attention_metadata) {
+            .metal_fa => .{ .metal_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
+            else => try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model),
+        };
+        defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+
         try self.compiled_model.prefill.run(.{
             .allocator = self.allocator,
             .io = self.io,
@@ -130,7 +134,7 @@ pub const Session = struct {
             .actual_seq_len_buf = &actual_seq_len_buf,
             .rng_buf = &self.rng_buf,
             .cache_buffers = &self.cache_buffers,
-            .attention_metadata_buffers = self.attention_metadata_buffers,
+            .attention_metadata_buffers = attention_metadata_buffers,
         });
 
         try tokens_buf.toSlice(self.io, tokens_slice);
@@ -150,6 +154,11 @@ pub const Session = struct {
 
         const out_tokens_buffer: []u8 = try self.allocator.alloc(u8, 1024);
         defer self.allocator.free(out_tokens_buffer);
+
+        const params = self.compiled_model.params;
+        var attention_metadata_buffers = try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model);
+        defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+
         generation: while (true) {
             const token_id = self.generated_token_slice.items(u32)[0];
 
@@ -182,7 +191,7 @@ pub const Session = struct {
                 .actual_seq_len_buf = &actual_seq_len_buf,
                 .rng_buf = &self.rng_buf,
                 .cache_buffers = &self.cache_buffers,
-                .attention_metadata_buffers = self.attention_metadata_buffers,
+                .attention_metadata_buffers = attention_metadata_buffers,
             });
 
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);

@@ -32,9 +32,12 @@ pub const Cfg = struct {
     k_scale: ?f32 = null,
     v_scale: ?f32 = null,
 
-    /// Sliding-window mask added on top of the causal mask: any `(row, col)`
-    /// with `row - sliding_window >= col` is masked out. Mirrors
-    /// `kernel.py:391-393`.
+    /// Whether to mask keys beyond the current query row.
+    is_causal: bool = true,
+
+    /// Sliding-window mask added on top of the validity/causal mask: any
+    /// `(row, col)` with `row - sliding_window >= col` is masked out. Mirrors
+    /// `kernel.py:391-393` in causal mode.
     sliding_window: ?i64 = null,
     vmem_limit_bytes: ?i64 = null,
 
@@ -395,11 +398,16 @@ fn flashAttention(
         k.broadcastTo(kv_len_start, &.{ flash_q, flash_k }),
         k.iota(&.{ flash_q, flash_k }, .i32, &.{1}),
     );
-    var causal_mask = k.cmpi(.slt, row_ids, col_ids);
+    var score_mask = if (cfg.is_causal)
+        k.cmpi(.slt, row_ids, col_ids)
+    else
+        // `row_ids < row_ids` is an all-false mask with the same bool shape
+        // as the causal mask; sliding-window masking can still be OR-ed below.
+        k.cmpi(.slt, row_ids, row_ids);
     if (cfg.sliding_window) |sw| {
         const sw_splat = k.splat(@as(i32, @intCast(sw)), &.{ flash_q, flash_k }, .i32);
         const window_mask = k.cmpi(.sge, k.subi(row_ids, sw_splat), col_ids);
-        causal_mask = k.ori(causal_mask, window_mask);
+        score_mask = k.ori(score_mask, window_mask);
     }
     if (cfg.soft_cap) |sc| {
         const sc_splat = k.splat(sc, &.{ flash_q, flash_k }, .f32);
@@ -407,7 +415,7 @@ fn flashAttention(
     }
     const qk_masked = k.addf(
         qk,
-        k.select(causal_mask, k.splat(cfg.mask_value, &.{ flash_q, flash_k }, .f32), k.zeros(&.{ flash_q, flash_k }, .f32)),
+        k.select(score_mask, k.splat(cfg.mask_value, &.{ flash_q, flash_k }, .f32), k.zeros(&.{ flash_q, flash_k }, .f32)),
     );
 
     // jnp.max → maximumf (NaN-propagating).

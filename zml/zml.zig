@@ -30,6 +30,7 @@ pub const meta = @import("meta.zig");
 pub const mlir = @import("mlirx.zig");
 pub const module = @import("module.zig");
 pub const CompilationOptions = module.CompilationOptions;
+pub const Compiler = module.Compiler;
 pub const moe = @import("moe/moe.zig");
 pub const nn = @import("nn.zig");
 pub const ops = @import("ops.zig");

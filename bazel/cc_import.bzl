@@ -1,4 +1,4 @@
-load("@bazel_tools//tools/build_defs/cc:cc_import.bzl", _cc_import = "cc_import")
+load("@rules_cc//cc:defs.bzl", "cc_library", _cc_import = "cc_import")
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
 load(":patchelf.bzl", "patchelf")
 
@@ -71,7 +71,7 @@ def cc_import(
         interface_library = interface_library,
         visibility = visibility,
     )
-    native.cc_library(
+    cc_library(
         name = name,
         data = data,
         deps = deps + [name + ".cc_import"],

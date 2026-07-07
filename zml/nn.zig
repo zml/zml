@@ -1676,8 +1676,10 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
     // After the topk, we don't have .voc indices, anymore, only topk.
     var x = full_topk.values.rename(.{ .voc = .topk });
     // mask values above the dynamic top_k
-    x = Tensor.iota(x.shape(), .topk).cmp(.GE, opts.top_k).select(min_inf, x);
-    x = x.mul(opts.temperature);
+    const top_k = opts.top_k.broad(x.shape());
+    x = Tensor.iota(x.shape(), .topk).cmp(.GE, top_k).select(min_inf, x);
+    const temperature = opts.temperature.convert(x.dtype()).broad(x.shape());
+    x = x.div(temperature);
 
     // if there are high values in x, softmax can overflow and will create nans in full probs
     // this propagate to probs_sum and probs_max.
@@ -1685,8 +1687,8 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
     const probs_sum = probs.cumulativeSum(.topk);
     const probs_max = probs.slice1d(.topk, .{ .start = 0, .end = 1 });
 
-    const top_p = opts.top_p.broad(x.shape());
-    const min_p = probs_max.mul(opts.min_p).broad(x.shape());
+    const top_p = opts.top_p.convert(x.dtype()).broad(x.shape());
+    const min_p = opts.min_p.convert(x.dtype()).broad(probs_max.shape()).mul(probs_max).broad(x.shape());
 
     // * if first candidate has very high prob, then probs_sum is always greater than top_p and candidate is full false
     // * if first candidate score is even bigger, the probs become Nan because of the softmax,
@@ -1720,7 +1722,7 @@ test sampleTokensDynamic {
         // top_k == logits.len -> just sort the input
         .{ .{ .top_k = 4 }, [_]f32{ @log(4.0), @log(3.0), @log(2.0), @log(1.0) } },
         .{ .{ .top_k = 2 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
-        .{ .{ .top_k = 2, .temperature = 0.1 }, [_]f32{ @log(4.0) * 0.1, @log(3.0) * 0.1, ___, ___ } },
+        .{ .{ .top_k = 2, .temperature = 0.1 }, [_]f32{ @log(4.0) / 0.1, @log(3.0) / 0.1, ___, ___ } },
         // top_k == logits.len and small top_p  -> make sure at least one is returned
         .{ .{ .top_k = 4, .top_p = 0.1 }, [_]f32{ @log(4.0), ___, ___, ___ } },
         .{ .{ .top_k = 4, .top_p = 0.701 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
