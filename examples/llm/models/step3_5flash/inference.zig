@@ -8,13 +8,32 @@ const model = @import("model.zig");
 const log = std.log.scoped(.step3p5);
 const Phase = common.Phase;
 
+fn initDecodeAttentionParameters(
+    backend: zml.attention.attention.Backend,
+    seqlen: u32,
+) zml.attention.attention.Parameters {
+    var params = zml.attention.attention.Parameters.init(.fromBackend(backend));
+
+    // FA2's single-token GQA path rewrites q into grouped KV-head layout when
+    // sliding_window is negative. Use a finite full-cache window for decode so
+    // full-attention layers keep normal query-head layout, while sliding layers
+    // still override this with the model's sliding window in Attn.forward().
+    switch (params) {
+        .cuda_fa2 => |*p| p.sliding_window = @intCast(seqlen),
+        else => {},
+    }
+
+    return params;
+}
+
 pub const CompilationParameters = struct {
     prefill_tokens: zml.Tensor,
     decode_tokens: zml.Tensor,
     token_index: zml.Tensor,
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
-    attention_metadata: zml.attention.attention.Metadata,
+    prefill_attention_metadata: zml.attention.attention.Metadata,
+    decode_attention_metadata: zml.attention.attention.Metadata,
     prefill_attention_parameters: zml.attention.attention.Parameters,
     decode_attention_parameters: zml.attention.attention.Parameters,
     seqlen: u32,
@@ -48,14 +67,68 @@ pub const CompilationParameters = struct {
             .token_index = .init(.{ .s = 1 }, .u32),
             .kv_cache = .init(kv_shape),
             .rng = .init(),
-            .attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
+            .prefill_attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
+            .decode_attention_metadata = .init(.fromBackend(backend, 1, @intCast(config.num_attention_heads))),
             .prefill_attention_parameters = .init(.fromBackend(backend)),
-            .decode_attention_parameters = .init(.fromBackend(backend)),
+            .decode_attention_parameters = initDecodeAttentionParameters(backend, seqlen),
             .seqlen = seqlen,
             .shardings = shardings,
         };
     }
 };
+
+const AttnKind = enum(u1) { sliding, full };
+const FfnKind = enum(u1) { dense, moe };
+
+const Key = packed struct(u4) {
+    ffn_kind: FfnKind,
+    attn_kind: AttnKind,
+    has_swiglu_limit: bool,
+    has_shared_limit: bool,
+
+    fn index(self: Key) u4 {
+        return @bitCast(self);
+    }
+};
+
+fn keyFor(layer: model.TransformerLayer) Key {
+    const attn_kind: AttnKind = if (layer.attn.enable_sliding_window) .sliding else .full;
+    return switch (layer.ffn) {
+        .mlp => |mlp| .{
+            .ffn_kind = .dense,
+            .attn_kind = attn_kind,
+            .has_swiglu_limit = mlp.limit != 0,
+            .has_shared_limit = false,
+        },
+        .moe => |moe| .{
+            .ffn_kind = .moe,
+            .attn_kind = attn_kind,
+            .has_swiglu_limit = moe.experts.limit != null,
+            .has_shared_limit = moe.shared.limit != 0,
+        },
+    };
+}
+
+fn logKey(comptime action: []const u8, phase: Phase, layer_index: usize, key: Key) void {
+    log.info(
+        "{s} {s} layer={} key={} ffn={s} attn={s} swiglu_limit={} shared_limit={}",
+        .{
+            action,
+            @tagName(phase),
+            layer_index,
+            key.index(),
+            @tagName(key.ffn_kind),
+            @tagName(key.attn_kind),
+            key.has_swiglu_limit,
+            key.has_shared_limit,
+        },
+    );
+}
+
+fn syncLayerCalls() bool {
+    const value = std.c.getenv("ZML_LLM_SYNC_LAYERS") orelse return false;
+    return value[0] != 0 and value[0] != '0';
+}
 
 pub const CompilationOptions = CompilationParameters;
 
@@ -176,13 +249,13 @@ pub const KernelExe = struct {
                 }
 
                 for (model_buffers.text_model.layers, 0..) |layer_bufs, i| {
-                    const layerExe = try exe.inferLayerExe(mdl, i);
+                    const layer_exe = exe.layerExe(mdl.text_model.layers[i]);
 
-                    args[i] = try layerExe.args(allocator);
+                    args[i] = try layer_exe.args(allocator);
                     args[i].bake(layer_bufs);
                     initialized_args = i + 1;
 
-                    results[i] = try layerExe.results(allocator);
+                    results[i] = try layer_exe.results(allocator);
                     initialized_results = i + 1;
 
                     layer_indices[i] = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(i)), .u32);
@@ -259,8 +332,10 @@ pub const KernelExe = struct {
             defer hidden_buf.deinit();
 
             for (self.layers.args, self.layers.results, self.layers.layer_indices, 0..) |*exe_args, *results, *layer_index_buf, i| {
-                const layerExe = try self.exe.inferLayerExe(self.exe.mdl, i);
-                ComposedKernelExe.runLayer(exe_args, results, &layerExe, args, &hidden_buf, layer_index_buf);
+                const layer = self.exe.mdl.text_model.layers[i];
+                // logKey("run", self.exe.phase, i, keyFor(layer));
+                const layer_exe = self.exe.layerExe(layer);
+                ComposedKernelExe.runLayer(exe_args, results, &layer_exe, args, &hidden_buf, layer_index_buf);
             }
 
             self.exe.runSampler(&self.sampler_args, &self.sampler_results, args, &hidden_buf);
@@ -304,12 +379,7 @@ pub const KernelExe = struct {
 const ComposedKernelExe = struct {
     allocator: std.mem.Allocator,
     embed_tokens: zml.Exe,
-    dense_full_layer: ?zml.Exe,
-    dense_sliding_layer: ?zml.Exe,
-    moe_full_layer: ?zml.Exe,
-    moe_sliding_layer: ?zml.Exe,
-    moe_sliding_layer_with_limit: ?zml.Exe,
-    moe_full_shared_layer_with_limit: ?zml.Exe,
+    layer_exes: [16]?zml.Exe,
     sampler: zml.Exe,
     phase: Phase,
     mdl: *const model.Model,
@@ -339,41 +409,27 @@ const ComposedKernelExe = struct {
         const embed_tokens = try compileEmbedTokens(allocator, io, platform, step3p5_model.text_model.embed_tokens, parameters, seqlen, phase, progress);
         errdefer embed_tokens.deinit();
 
-        const dense_full_layer = if (findFirstLayerIndex(&step3p5_model, .{ .ffn_kind = .dense, .attn_kind = .full, .has_swiglu_limit = false, .has_shared_limit = false })) |example_index|
-            try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_index, phase, progress)
-        else
-            null;
-        errdefer if (dense_full_layer) |exe| exe.deinit();
+        // Find one example layer per Key actually present in the model, then compile an executable for that kind. We use 6/16 possible kinds, and the rest are unreachable.
+        log.info("{s} layer key census: layers={}", .{ @tagName(phase), step3p5_model.text_model.layers.len });
+        var example_indices: [16]?usize = @splat(null);
+        for (step3p5_model.text_model.layers, 0..) |layer, i| {
+            const key = keyFor(layer);
+            logKey("model", phase, i, key);
+            const slot = &example_indices[key.index()];
+            if (slot.* == null) slot.* = i;
+        }
 
-        const dense_sliding_layer = if (findFirstLayerIndex(&step3p5_model, .{ .ffn_kind = .dense, .attn_kind = .sliding, .has_swiglu_limit = false, .has_shared_limit = false })) |example_index|
-            try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_index, phase, progress)
-        else
-            null;
-        errdefer if (dense_sliding_layer) |exe| exe.deinit();
-
-        const moe_full_layer = if (findFirstLayerIndex(&step3p5_model, .{ .ffn_kind = .moe, .attn_kind = .full, .has_swiglu_limit = false, .has_shared_limit = false })) |example_index|
-            try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_index, phase, progress)
-        else
-            null;
-        errdefer if (moe_full_layer) |exe| exe.deinit();
-
-        const moe_sliding_layer = if (findFirstLayerIndex(&step3p5_model, .{ .ffn_kind = .moe, .attn_kind = .sliding, .has_swiglu_limit = false, .has_shared_limit = false })) |example_index|
-            try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_index, phase, progress)
-        else
-            null;
-        errdefer if (moe_sliding_layer) |exe| exe.deinit();
-
-        const moe_sliding_layer_with_limit = if (findFirstLayerIndex(&step3p5_model, .{ .ffn_kind = .moe, .attn_kind = .sliding, .has_swiglu_limit = true, .has_shared_limit = false })) |example_index|
-            try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_index, phase, progress)
-        else
-            null;
-        errdefer if (moe_sliding_layer_with_limit) |exe| exe.deinit();
-
-        const moe_full_shared_layer_with_limit = if (findFirstLayerIndex(&step3p5_model, .{ .ffn_kind = .moe, .attn_kind = .full, .has_swiglu_limit = true, .has_shared_limit = true })) |example_index|
-            try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, example_index, phase, progress)
-        else
-            null;
-        errdefer if (moe_full_shared_layer_with_limit) |exe| exe.deinit();
+        var layer_exes: [16]?zml.Exe = @splat(null);
+        errdefer {
+            for (layer_exes) |maybe_exe| {
+                if (maybe_exe) |exe| exe.deinit();
+            }
+        }
+        for (example_indices, 0..) |maybe_idx, slot| {
+            const idx = maybe_idx orelse continue;
+            logKey("compile example", phase, idx, keyFor(step3p5_model.text_model.layers[idx]));
+            layer_exes[slot] = try compileLayer(allocator, io, platform, step3p5_model, parameters, seqlen, idx, phase, progress);
+        }
 
         const sampler = try compileSampler(allocator, io, platform, step3p5_model, parameters, seqlen, phase, progress);
         errdefer sampler.deinit();
@@ -381,12 +437,7 @@ const ComposedKernelExe = struct {
         return .{
             .allocator = allocator,
             .embed_tokens = embed_tokens,
-            .dense_full_layer = dense_full_layer,
-            .dense_sliding_layer = dense_sliding_layer,
-            .moe_full_layer = moe_full_layer,
-            .moe_sliding_layer = moe_sliding_layer,
-            .moe_sliding_layer_with_limit = moe_sliding_layer_with_limit,
-            .moe_full_shared_layer_with_limit = moe_full_shared_layer_with_limit,
+            .layer_exes = layer_exes,
             .sampler = sampler,
             .phase = phase,
             .mdl = &step3p5_model,
@@ -396,12 +447,9 @@ const ComposedKernelExe = struct {
 
     fn deinit(self: ComposedKernelExe) void {
         self.embed_tokens.deinit();
-        if (self.dense_full_layer) |exe| exe.deinit();
-        if (self.dense_sliding_layer) |exe| exe.deinit();
-        if (self.moe_full_layer) |exe| exe.deinit();
-        if (self.moe_sliding_layer) |exe| exe.deinit();
-        if (self.moe_sliding_layer_with_limit) |exe| exe.deinit();
-        if (self.moe_full_shared_layer_with_limit) |exe| exe.deinit();
+        for (self.layer_exes) |maybe_exe| {
+            if (maybe_exe) |exe| exe.deinit();
+        }
         self.sampler.deinit();
     }
 
@@ -421,19 +469,21 @@ const ComposedKernelExe = struct {
         defer hidden_buf.deinit();
 
         for (args.model_buffers.text_model.layers, 0..) |layer_bufs, i| {
-            const layerExe = try self.inferLayerExe(self.mdl, i);
+            const layer = self.mdl.text_model.layers[i];
+            logKey("run", self.phase, i, keyFor(layer));
+            const layer_exe = self.layerExe(layer);
 
-            var exe_args = try layerExe.args(args.allocator);
+            var exe_args = try layer_exe.args(args.allocator);
             defer exe_args.deinit(args.allocator);
             exe_args.bake(layer_bufs);
 
-            var results = try layerExe.results(args.allocator);
+            var results = try layer_exe.results(args.allocator);
             defer results.deinit(args.allocator);
 
             var layer_index_buf = try zml.Buffer.scalar(args.io, args.platform, @as(u32, @intCast(i)), .u32);
             defer layer_index_buf.deinit();
 
-            ComposedKernelExe.runLayer(&exe_args, &results, &layerExe, args, &hidden_buf, &layer_index_buf);
+            ComposedKernelExe.runLayer(&exe_args, &results, &layer_exe, args, &hidden_buf, &layer_index_buf);
         }
 
         {
@@ -463,7 +513,11 @@ const ComposedKernelExe = struct {
         };
         exe_args.set(.{ hidden_buf, args.token_index_buf, layer_cache, args.attention_metadata_buffers });
 
-        layer_exe.call(exe_args.*, exe_results);
+        if (syncLayerCalls()) {
+            layer_exe.callOpts(args.io, exe_args.*, exe_results, .{ .wait = true });
+        } else {
+            layer_exe.call(exe_args.*, exe_results);
+        }
 
         var new_hidden, var new_cache = exe_results.get(struct { zml.Buffer, zml.Bufferized(model.KvCache) });
         replaceBuffer(hidden_buf, &new_hidden);
@@ -568,87 +622,8 @@ const ComposedKernelExe = struct {
         });
     }
 
-    const AttnKind = enum(u1) { sliding, full };
-    const FfnKind = enum(u1) { dense, moe };
-    const Key = packed struct(u4) {
-        ffn_kind: FfnKind,
-        attn_kind: AttnKind,
-        has_swiglu_limit: bool,
-        has_shared_limit: bool,
-    };
-
-    fn findFirstLayerIndex(step3p5_model: *const model.Model, expected: Key) ?usize {
-        for (step3p5_model.text_model.layers, 0..) |layer, i| {
-            if (std.meta.eql(layerExeKey(layer), expected)) return i;
-        }
-        return null;
-    }
-
-    fn layerExeKey(layer: model.TransformerLayer) Key {
-        const attn_kind: AttnKind = if (layer.attn.enable_sliding_window)
-            .sliding
-        else
-            .full;
-
-        return switch (layer.ffn) {
-            .mlp => .{
-                .ffn_kind = .dense,
-                .attn_kind = attn_kind,
-                .has_swiglu_limit = false,
-                .has_shared_limit = false,
-            },
-            .moe => |moe| .{
-                .ffn_kind = .moe,
-                .attn_kind = attn_kind,
-                .has_swiglu_limit = moe.experts.limit != null,
-                .has_shared_limit = moe.shared.limit != 0,
-            },
-        };
-    }
-
-    fn inferLayerExe(self: *const ComposedKernelExe, step3p5_model: *const model.Model, layer_index: usize) !zml.Exe {
-        const layer = step3p5_model.text_model.layers[layer_index];
-        const key = layerExeKey(layer);
-
-        return switch (key) {
-            .{
-                .ffn_kind = .dense,
-                .attn_kind = .full,
-                .has_swiglu_limit = false,
-                .has_shared_limit = false,
-            } => self.dense_full_layer.?,
-            .{
-                .ffn_kind = .dense,
-                .attn_kind = .sliding,
-                .has_swiglu_limit = false,
-                .has_shared_limit = false,
-            } => self.dense_sliding_layer.?,
-            .{
-                .ffn_kind = .moe,
-                .attn_kind = .full,
-                .has_swiglu_limit = false,
-                .has_shared_limit = false,
-            } => self.moe_full_layer.?,
-            .{
-                .ffn_kind = .moe,
-                .attn_kind = .sliding,
-                .has_swiglu_limit = false,
-                .has_shared_limit = false,
-            } => self.moe_sliding_layer.?,
-            .{
-                .ffn_kind = .moe,
-                .attn_kind = .sliding,
-                .has_swiglu_limit = true,
-                .has_shared_limit = false,
-            } => self.moe_sliding_layer_with_limit.?,
-            .{
-                .ffn_kind = .moe,
-                .attn_kind = .full,
-                .has_swiglu_limit = true,
-                .has_shared_limit = true,
-            } => self.moe_full_shared_layer_with_limit.?,
-            else => unreachable,
-        };
+    fn layerExe(self: *const ComposedKernelExe, layer: model.TransformerLayer) zml.Exe {
+        return self.layer_exes[keyFor(layer).index()].?;
     }
 
     fn compileLayer(
@@ -676,16 +651,16 @@ const ComposedKernelExe = struct {
             .layer_index = zml.Tensor.init(.{}, .u32),
         };
 
-        const attention_parameters = switch (phase) {
-            .prefill => parameters.prefill_attention_parameters,
-            .decode => parameters.decode_attention_parameters,
+        const attention_metadata, const attention_parameters = switch (phase) {
+            .prefill => .{ parameters.prefill_attention_metadata, parameters.prefill_attention_parameters },
+            .decode => .{ parameters.decode_attention_metadata, parameters.decode_attention_parameters },
         };
 
         return platform.compile(allocator, io, step3p5_model.text_model.layers[layer_index], .forward, .{
             hidden_tensor,
             parameters.token_index,
             layer_cache,
-            parameters.attention_metadata,
+            attention_metadata,
             attention_parameters,
         }, .{
             .shardings = &parameters.shardings.all(),

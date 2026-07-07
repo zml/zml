@@ -261,8 +261,9 @@ pub const paged = struct {
                     const num_queries_per_kv: usize = num_heads / num_kv_heads;
                     // Intel decode: pack exactly one GQA group per tile (block_q == 1) so the
                     // single decode query token doesn't carry masked-out fp32 acc lanes.
+                    // oneAPI decode keeps one GQA group per tile, padded to a power of two so tt.make_range emits legal Triton IR.
                     const block_m: usize = if (!ctx_.options.is_prefill and isOneapiTarget())
-                        num_queries_per_kv
+                        std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv)
                     else if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
                     const block_q: usize = block_m / num_queries_per_kv;
                     const num_tokens: usize = @intCast(q_.dim(.b));
