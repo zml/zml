@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const stdx = @import("stdx");
 const vfs = @import("vfs");
 
 const log = std.log.scoped(.@"zml/io/vfs");
@@ -12,7 +13,6 @@ pub const VFS = struct {
     pub const GCS = vfs.GCS;
     const VFSBase = vfs.VFSBase;
 
-    const Handles = std.ArrayList(Handle);
     const ClosedHandles = std.ArrayList(u32);
 
     const CWD_HANDLE: u32 = 0;
@@ -23,7 +23,7 @@ pub const VFS = struct {
     mutex: std.Io.Mutex = .init,
 
     backends: std.StringArrayHashMapUnmanaged(std.Io) = .empty,
-    handles: Handles = .empty,
+    handles: stdx.SegmentedList(Handle, 128) = .{},
     closed_handles: ClosedHandles = .empty,
 
     base: VFSBase,
@@ -31,7 +31,7 @@ pub const VFS = struct {
     pub fn init(allocator: std.mem.Allocator, base_io: std.Io) !VFS {
         const base = VFSBase.init(base_io);
 
-        var handles: Handles = .empty;
+        var handles: @FieldType(@This(), "handles") = .{};
         try handles.append(allocator, .{ .handle = CWD_HANDLE, .backend_idx = null });
         try handles.append(allocator, .{ .handle = std.posix.STDIN_FILENO, .backend_idx = null });
         try handles.append(allocator, .{ .handle = std.posix.STDOUT_FILENO, .backend_idx = null });
@@ -98,9 +98,9 @@ pub const VFS = struct {
         defer self.mutex.unlock(self.base.inner);
 
         if (self.closed_handles.pop()) |idx| {
-            return .{ idx, &self.handles.items[idx] };
+            return .{ idx, self.handles.at(idx) };
         }
-        return .{ @intCast(self.handles.items.len), try self.handles.addOne(self.allocator) };
+        return .{ @intCast(self.handles.len), try self.handles.addOne(self.allocator) };
     }
 
     fn closeHandle(self: *VFS, idx: u32) !void {
@@ -114,7 +114,7 @@ pub const VFS = struct {
 
     fn getFileHandle(self: *VFS, file: std.Io.File) struct { *Handle, std.Io } {
         self.mutex.lockUncancelable(self.base.inner);
-        const handle = &self.handles.items[@intCast(file.handle)];
+        const handle = self.handles.at(@intCast(file.handle));
         self.mutex.unlock(self.base.inner);
 
         return .{ handle, self.getBackend(handle.backend_idx) };
@@ -124,8 +124,8 @@ pub const VFS = struct {
         self.mutex.lockUncancelable(self.base.inner);
         defer self.mutex.unlock(self.base.inner);
 
-        if (std.meta.eql(dir, std.Io.Dir.cwd())) return &self.handles.items[CWD_HANDLE];
-        return &self.handles.items[@intCast(dir.handle)];
+        if (std.meta.eql(dir, std.Io.Dir.cwd())) return self.handles.at(CWD_HANDLE);
+        return self.handles.at(@intCast(dir.handle));
     }
 
     fn getScheme(self: *VFS, backend_idx: ?usize) ?[]const u8 {
