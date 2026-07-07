@@ -82,7 +82,7 @@ pub const Session = struct {
 
         while (true) {
             switch (c.xet_op_poll(op)) {
-                c.XetPollState_XetPollReady => break,
+                c.XetPollState_XetPollReady => return,
                 c.XetPollState_XetPollError => {
                     var e: ?*c.XetError = null;
                     _ = c.xet_op_take_error(op, &e);
@@ -93,11 +93,6 @@ pub const Session = struct {
                     _ = std.c.nanosleep(&ts, null);
                 },
             }
-        }
-
-        var report: ?*c.XetDownloadGroupReportHandle = null;
-        if (c.xet_op_take_download_report(op, &report, &err) == c.XetStatus_XetOk) {
-            if (report) |r| c.xet_download_group_report_free(r);
         }
     }
 };

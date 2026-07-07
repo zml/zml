@@ -19,11 +19,8 @@ const std = @import("std");
 pub const hub = @import("xet_hub.zig");
 pub const capi = @import("xet_capi.zig");
 
-pub const ReadToken = hub.ReadToken;
 pub const FileEntry = hub.FileEntry;
 pub const Session = capi.Session;
-pub const requestReadToken = hub.requestReadToken;
-pub const listXetFiles = hub.listXetFiles;
 
 const log = std.log.scoped(.@"zml/io/vfs/xet");
 
@@ -41,7 +38,14 @@ pub fn downloadFile(
     hf_token: []const u8,
     dest_path: [:0]const u8,
 ) !void {
-    const files = try hub.listXetFiles(allocator, io, repo_type, repo_id, revision, hf_token);
+    var client = std.http.Client{ .allocator = allocator, .io = io };
+    defer client.deinit();
+
+    const auth_value = try std.fmt.allocPrint(allocator, "Bearer {s}", .{hf_token});
+    defer allocator.free(auth_value);
+    const auth: hub.Auth = .{ .override = auth_value };
+
+    const files = try hub.listXetFiles(allocator, &client, repo_type, repo_id, revision, auth);
     defer {
         for (files) |f| {
             allocator.free(f.path);
@@ -52,7 +56,7 @@ pub fn downloadFile(
 
     var chosen: ?FileEntry = null;
     for (files) |f| {
-        if (std.mem.eql(u8, f.path, filepath) or std.mem.endsWith(u8, f.path, filepath)) {
+        if (std.mem.eql(u8, f.path, filepath)) {
             chosen = f;
             break;
         }
@@ -62,15 +66,10 @@ pub fn downloadFile(
         return error.FileNotXetBacked;
     };
 
-    const token = try hub.requestReadToken(allocator, io, repo_type, repo_id, revision, hf_token);
+    const token = try hub.requestReadToken(allocator, &client, repo_type, repo_id, revision, auth);
     defer token.deinit(allocator);
 
-    const cas_z = try allocator.dupeZ(u8, token.cas_url);
-    defer allocator.free(cas_z);
-    const tok_z = try allocator.dupeZ(u8, token.access_token);
-    defer allocator.free(tok_z);
-
-    var session = try Session.init(cas_z, tok_z, token.exp);
+    var session = try Session.init(token.cas_url, token.access_token, token.exp);
     defer session.deinit();
 
     try session.downloadToPath(file.hash_hexz, file.size, dest_path);

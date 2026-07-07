@@ -30,8 +30,9 @@ which plain HTTP has no equivalent of. Both were network-bound at ~1 GB/s here.
   XET file listing (path -> hash + size).
 - `xet_capi.zig` : Zig binding over `hf_xet.h` (`@cImport`). `Session` wraps a
   xet-core download group; `downloadToPath` reconstructs a whole file.
-- `xet.zig`      : high-level `downloadFile(...)` tying the two together, plus
-  re-exports. Registered as `xet` in `index.zig`.
+- `xet.zig`      : high-level `downloadFile(...)` tying the two together.
+  Exposed as the `xet` namespace in `index.zig` (a helper module, not yet a
+  `std.Io` VFS provider like `hf.zig` — see Limitations).
 
 The C-API is whole-file oriented (`xet_file_download_group_download_to_path`),
 so the integration model is **download-to-cache**: materialize a repo file
@@ -50,6 +51,30 @@ Built with Zig 0.16.0 (this repo's pin) + `libxet_capi` built from the xet-core
 - On that box it measured **~1070 MB/s** in high-performance mode, matching
   `hf-xet` (same Rust core) and ZML's own HTTP downloader: the FFI overhead is
   within noise.
+
+## Limitations / follow-ups
+
+This is a proof of concept focused on showing xet-core-via-C-API reaches full
+throughput from Zig. Known gaps, in rough priority order:
+
+- **Not a VFS provider.** `downloadFile` is a standalone helper, not a `std.Io`
+  vtable like `hf.zig`, so `hf://` XET files do not download transparently. The
+  natural home is `hf.zig` `dirOpenFile`/`performRead`: when a tree entry has
+  `xetHash`, materialize the file to a cache dir via the C-API, then serve
+  reads from the local file. The real tension to decide: the C-API is
+  whole-file (eager), while ZML's read path is lazy/positional.
+- **Per-file session.** Each `downloadFile` mints a token and a fresh
+  `Session`/download-group. The C-API's `FileDownloadGroup` is meant to batch
+  many files through one session (shared cache/dedup); a repo-scoped handle
+  that lists+tokens once and downloads N files would be the right shape.
+- **Whole-tree metadata fetch.** `listXetFiles` GETs the full recursive tree to
+  find one file's hash+size. A single `HEAD` on the resolve URL returning
+  `X-Xet-Hash` + `X-Linked-Size` is cheaper (note: CloudFront strips
+  `X-Xet-Hash` on cache hits unless an hf-xet `User-Agent` + cache-bust is sent).
+- **Blocking poll + coarse errors.** `downloadToPath` busy-polls the op with a
+  1 ms `nanosleep` (the C-API exposes no blocking wait), and `capiError`
+  collapses every `XetStatus` into one error, so no auth-refresh/retry logic is
+  possible yet.
 
 ## Building / wiring the C-API lib in Bazel
 

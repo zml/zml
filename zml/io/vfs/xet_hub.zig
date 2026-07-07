@@ -7,11 +7,16 @@
 //!   - `listXetFiles`: enumerate a repo's XET-backed files with their hash+size.
 //!
 //! The actual chunk reconstruction is done by xet-core through the C-API (see
-//! `xet_capi.zig`); this module only does plain HTTPS + JSON.
+//! `xet_capi.zig`); this module only does plain HTTPS + JSON. Both calls share
+//! a caller-owned `std.http.Client` (connection reuse), like the other VFS
+//! backends in this directory.
 
 const std = @import("std");
 
 const log = std.log.scoped(.@"zml/io/vfs/xet_hub");
+
+/// A bearer-token authorization value, e.g. `.{ .override = "Bearer <token>" }`.
+pub const Auth = std.http.Client.Request.Headers.Value;
 
 fn readBody(response: *std.http.Client.Response, allocator: std.mem.Allocator, max: usize) ![]u8 {
     var transfer_buffer: [16 * 1024]u8 = undefined;
@@ -21,9 +26,35 @@ fn readBody(response: *std.http.Client.Response, allocator: std.mem.Allocator, m
     return reader.allocRemaining(allocator, std.Io.Limit.limited(max));
 }
 
+/// GET `url` with bearer auth and parse the response body as JSON. Caller owns
+/// the returned parse tree (`defer parsed.deinit()`).
+fn getJson(
+    allocator: std.mem.Allocator,
+    client: *std.http.Client,
+    url: []const u8,
+    auth: Auth,
+    max_body: usize,
+) !std.json.Parsed(std.json.Value) {
+    const uri = try std.Uri.parse(url);
+    var req = try client.request(.GET, uri, .{ .headers = .{ .authorization = auth } });
+    defer req.deinit();
+    try req.sendBodiless();
+
+    var redirect_buffer: [8 * 1024]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buffer);
+    if (response.head.status != .ok) {
+        log.err("{s} -> {s}", .{ url, @tagName(response.head.status) });
+        return error.XetHubRequestFailed;
+    }
+
+    const body = try readBody(&response, allocator, max_body);
+    defer allocator.free(body);
+    return std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+}
+
 pub const ReadToken = struct {
-    access_token: []const u8,
-    cas_url: []const u8,
+    access_token: [:0]const u8,
+    cas_url: [:0]const u8,
     exp: i64,
 
     pub fn deinit(self: ReadToken, allocator: std.mem.Allocator) void {
@@ -36,11 +67,11 @@ pub const ReadToken = struct {
 /// `https://huggingface.co/api/{repo_type}s/{repo_id}/xet-read-token/{rev}`.
 pub fn requestReadToken(
     allocator: std.mem.Allocator,
-    io: std.Io,
+    client: *std.http.Client,
     repo_type: []const u8,
     repo_id: []const u8,
     revision: []const u8,
-    hf_token: []const u8,
+    auth: Auth,
 ) !ReadToken {
     const url = try std.fmt.allocPrint(
         allocator,
@@ -49,35 +80,19 @@ pub fn requestReadToken(
     );
     defer allocator.free(url);
 
-    var client = std.http.Client{ .allocator = allocator, .io = io };
-    defer client.deinit();
-
-    const auth = try std.fmt.allocPrint(allocator, "Bearer {s}", .{hf_token});
-    defer allocator.free(auth);
-    const extra = [_]std.http.Header{.{ .name = "Authorization", .value = auth }};
-
-    const uri = try std.Uri.parse(url);
-    var req = try client.request(.GET, uri, .{ .extra_headers = &extra });
-    defer req.deinit();
-    try req.sendBodiless();
-    var response = try req.receiveHead(&.{});
-    if (response.head.status != .ok) {
-        log.err("xet-read-token failed: {s}", .{@tagName(response.head.status)});
-        return error.XetAuthFailed;
-    }
-
-    const body = try readBody(&response, allocator, 16 * 1024);
-    defer allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    const parsed = try getJson(allocator, client, url, auth, 16 * 1024);
     defer parsed.deinit();
-    const root = parsed.value.object;
 
-    return .{
-        .access_token = try allocator.dupe(u8, (root.get("accessToken") orelse return error.XetTokenMalformed).string),
-        .cas_url = try allocator.dupe(u8, (root.get("casUrl") orelse return error.XetTokenMalformed).string),
-        .exp = (root.get("exp") orelse return error.XetTokenMalformed).integer,
-    };
+    const root = parsed.value.object;
+    const access = root.get("accessToken") orelse return error.XetTokenMalformed;
+    const cas = root.get("casUrl") orelse return error.XetTokenMalformed;
+    const exp = root.get("exp") orelse return error.XetTokenMalformed;
+    if (access != .string or cas != .string or exp != .integer) return error.XetTokenMalformed;
+
+    const access_token = try allocator.dupeZ(u8, access.string);
+    errdefer allocator.free(access_token);
+    const cas_url = try allocator.dupeZ(u8, cas.string);
+    return .{ .access_token = access_token, .cas_url = cas_url, .exp = exp.integer };
 }
 
 pub const FileEntry = struct {
@@ -91,11 +106,11 @@ pub const FileEntry = struct {
 /// Caller owns the returned slice and each entry's `path` / `hash_hexz`.
 pub fn listXetFiles(
     allocator: std.mem.Allocator,
-    io: std.Io,
+    client: *std.http.Client,
     repo_type: []const u8,
     repo_id: []const u8,
     revision: []const u8,
-    hf_token: []const u8,
+    auth: Auth,
 ) ![]FileEntry {
     const url = try std.fmt.allocPrint(
         allocator,
@@ -104,24 +119,7 @@ pub fn listXetFiles(
     );
     defer allocator.free(url);
 
-    var client = std.http.Client{ .allocator = allocator, .io = io };
-    defer client.deinit();
-
-    const auth = try std.fmt.allocPrint(allocator, "Bearer {s}", .{hf_token});
-    defer allocator.free(auth);
-    const extra = [_]std.http.Header{.{ .name = "Authorization", .value = auth }};
-
-    const uri = try std.Uri.parse(url);
-    var req = try client.request(.GET, uri, .{ .extra_headers = &extra });
-    defer req.deinit();
-    try req.sendBodiless();
-    var response = try req.receiveHead(&.{});
-    if (response.head.status != .ok) return error.TreeRequestFailed;
-
-    const body = try readBody(&response, allocator, 8 * 1024 * 1024);
-    defer allocator.free(body);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    const parsed = try getJson(allocator, client, url, auth, 8 * 1024 * 1024);
     defer parsed.deinit();
 
     var entries: std.ArrayList(FileEntry) = .empty;
@@ -136,10 +134,12 @@ pub fn listXetFiles(
     for (parsed.value.array.items) |item| {
         const obj = item.object;
         const xet = obj.get("xetHash") orelse continue;
-        if (xet != .string) continue;
+        const path = obj.get("path") orelse continue;
+        const size = obj.get("size") orelse continue;
+        if (xet != .string or path != .string or size != .integer) continue;
         try entries.append(allocator, .{
-            .path = try allocator.dupe(u8, (obj.get("path") orelse continue).string),
-            .size = @intCast((obj.get("size") orelse continue).integer),
+            .path = try allocator.dupe(u8, path.string),
+            .size = @intCast(size.integer),
             .hash_hexz = try allocator.dupeZ(u8, xet.string),
         });
     }
