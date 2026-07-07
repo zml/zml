@@ -1,15 +1,14 @@
+load("@rules_cc//cc:defs.bzl", "cc_import")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
-# xet-core C-API: the Rust `xet_capi` crate built as a static lib + its cbindgen
-# header. Produce it from the xet-core `assaf/c-api` branch with
-# `cargo build --release -p xet_capi`, then vendor/point at:
-#   - include/hf_xet.h              -> hdrs (include path for @cImport)
-#   - target/release/libxet_capi.a  -> staticlib
-# On Linux also link: -lpthread -ldl -lm. On macOS: -framework Security
-# -framework CoreFoundation -framework SystemConfiguration. See XET_INTEGRATION.md.
+# xet-core C-API static lib, produced by `cargo build --release -p xet_capi` on
+# the xet-core assaf/c-api branch (PR huggingface/xet-core#881). `xet_capi.zig`
+# declares the C symbols `extern`, so only the static lib is needed for linking;
+# no header include path has to be threaded through the build. Expose it as an
+# external repo `@xet_capi` (prebuilt per platform, or via rules_rust).
+# Extra link deps the Rust staticlib needs: Linux -lpthread -ldl -lm.
 cc_import(
     name = "xet_capi_import",
-    hdrs = ["@xet_capi//:hf_xet_h"],
     static_library = "@xet_capi//:libxet_capi.a",
     visibility = ["//visibility:private"],
 )
@@ -31,9 +30,10 @@ zig_library(
     main = "index.zig",
     tags = ["manual"],
     visibility = ["//visibility:public"],
-    # xet.zig -> xet_capi.zig @cImports "hf_xet.h" and links libxet_capi.a.
-    cdeps = [":xet_capi_import"],
+    # hf.zig routes XET-backed files through xet.zig -> xet_capi.zig, which links
+    # libxet_capi.a.
     deps = [
+        ":xet_capi_import",
         "//stdx",
     ],
 )

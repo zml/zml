@@ -4,6 +4,7 @@ const stdx = @import("stdx");
 
 const VFSBase = @import("base.zig").VFSBase;
 const parallel_read = @import("parallel_read.zig");
+const xet = @import("xet.zig");
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
 
@@ -151,6 +152,10 @@ pub const HF = struct {
         uri: []const u8,
         pos: u64,
         size: u64,
+        /// Set once we have decided whether this file is XET-backed.
+        xet_tried: bool = false,
+        /// Path to the file materialized locally by xet-core, if XET-backed.
+        xet_path: ?[]const u8 = null,
 
         pub fn init(allocator: std.mem.Allocator, handle_type: Type, uri: []const u8, size: u64) !Handle {
             return .{
@@ -163,6 +168,7 @@ pub const HF = struct {
 
         pub fn deinit(self: *Handle, allocator: std.mem.Allocator) void {
             allocator.free(self.uri);
+            if (self.xet_path) |p| allocator.free(p);
         }
     };
 
@@ -788,6 +794,22 @@ pub const HF = struct {
         read_size = @intCast(@min(handle.size - offset, read_size));
         if (read_size == 0) return 0;
 
+        // XET-backed files: on first access, reconstruct the whole file once via
+        // xet-core (C-API) into a local cache, then serve reads from it. This
+        // gets client-side dedup + the on-disk chunk cache instead of the plain
+        // resolve range-GET path below.
+        if (!handle.xet_tried) {
+            handle.xet_tried = true;
+            self.materializeXet(handle) catch |err| {
+                log.info("xet: falling back to resolve for {s}: {any}", .{ handle.uri, err });
+            };
+        }
+        if (handle.xet_path) |local| {
+            var file = std.Io.Dir.openFileAbsolute(self.base.inner, local, .{}) catch return error.XetLocalOpenFailed;
+            defer file.close(self.base.inner);
+            return try file.readPositional(self.base.inner, data, offset);
+        }
+
         const job_count = std.math.divCeil(usize, read_size, self.read_pool.chunk_size) catch unreachable;
 
         const jobs = try self.allocator.alloc(ParallelRead.Job, job_count);
@@ -822,5 +844,25 @@ pub const HF = struct {
         if (batch.executor.firstError()) |err| return err;
 
         return read_size;
+    }
+
+    /// Reconstruct a XET-backed file to a local cache path via xet-core.
+    /// Returns an error (and leaves `handle.xet_path` null) for non-XET files,
+    /// so the caller falls back to the resolve range-GET path.
+    fn materializeXet(self: *HF, handle: *Handle) !void {
+        const token = switch (self.authorization) {
+            .override => |v| if (std.mem.startsWith(u8, v, "Bearer ")) v["Bearer ".len..] else v,
+            else => return error.NoHfToken,
+        };
+        const repo = try Repo.parse(handle.uri);
+
+        const repo_id = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ repo.repo, repo.model });
+        defer self.allocator.free(repo_id);
+
+        const path = try std.fmt.allocPrintSentinel(self.allocator, "/tmp/zml-xet-{x}", .{std.hash.Wyhash.hash(0, handle.uri)}, 0);
+        errdefer self.allocator.free(path);
+
+        try xet.downloadFile(self.allocator, self.base.inner, "model", repo_id, repo.rev, repo.path, token, path);
+        handle.xet_path = path;
     }
 };
