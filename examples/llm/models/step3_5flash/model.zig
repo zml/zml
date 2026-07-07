@@ -126,7 +126,7 @@ pub const Config = struct {
     }
 
     pub fn numMainLayers(self: Config) u32 {
-        return self.num_hidden_layers - self.num_nextn_predict_layers;
+        return self.num_hidden_layers;
     }
 };
 
@@ -783,11 +783,15 @@ pub const Attn = struct {
             attn_start,
         };
 
-        // fa3 asserts b==1 and re-inserts its own batch axis; strip .b on input and restore on output.
-        const drop_b = layer_attention_parameters == .cuda_fa3;
-        const q_in = if (drop_b) q.squeeze(.b) else q;
-        const k_in = if (drop_b) attn_k.squeeze(.b) else attn_k;
-        const v_in = if (drop_b) attn_v.squeeze(.b) else attn_v;
+        // FA2 and FA3 return unbatched output for b=1; FA3 also expects unbatched inputs.
+        const fa3_input = layer_attention_parameters == .cuda_fa3;
+        const attention_drops_b = switch (layer_attention_parameters) {
+            .cuda_fa2, .cuda_fa3 => true,
+            else => false,
+        };
+        const q_in = if (fa3_input) q.squeeze(.b) else q;
+        const k_in = if (fa3_input) attn_k.squeeze(.b) else attn_k;
+        const v_in = if (fa3_input) attn_v.squeeze(.b) else attn_v;
         const attn_raw = zml.attention.attention.attention(
             q_in,
             k_in,
@@ -796,7 +800,7 @@ pub const Attn = struct {
             attention_metadata,
             layer_attention_parameters,
         );
-        const attn_output = (if (drop_b) attn_raw.insertAxes(0, .{.b}) else attn_raw)
+        const attn_output = (if (attention_drops_b) attn_raw.insertAxes(0, .{.b}) else attn_raw)
             .withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
         const gate_b = gate.sigmoid().rename(.{ .s = .q }).broad(attn_output.shape());
