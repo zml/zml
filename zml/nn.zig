@@ -1171,9 +1171,6 @@ pub const SdpaOpts = struct {
     attn_mask: ?Tensor = null,
     scale: ?Tensor = null,
     softmax_bias: ?Tensor = null,
-    allow_cudnn: bool = true,
-    // TODO: put a callback instead of all this field,
-    // so that
 };
 
 /// Scaled dot product attention.
@@ -1199,11 +1196,6 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     stdx.debug.assert(k.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "k is missing tags {{.h, .k, .hd}}", err_args);
     stdx.debug.assert(v.shape().hasTags(.{ .h, .k, .hd }), err_template ++ "v is missing tags {{.h, .k, .hd}}", err_args);
 
-    // TODO(Corentin): Re-enable that
-    //if (opts.allow_cudnn and cuda.canUseCudnnSdpa(q.shape()) and opts.softmax_bias == null) {
-    //    return cuda.sdpa(q, k, v, opts);
-    //}
-
     // Handle different numbers of head by splitting q heads.
     // This is a bit error prone in the sense that it depends of the layout of q heads.
     // This is the Llama convention though.
@@ -1218,7 +1210,6 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     k = k.mul(head_scaling.convert(k.dtype()));
 
     var attn_weights = q.dot(k, .hd);
-    // log.debug("attn_weights : {f}, attn_mask : {?f}", .{ attn_weights, attn_mask });
     if (attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
     attn_weights = attn_weights.convert(.f32);
     attn_weights = if (opts.softmax_bias) |softmax_bias| attn: {
