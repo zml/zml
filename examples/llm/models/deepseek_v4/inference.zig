@@ -248,41 +248,178 @@ pub const ComposedKernelExe = struct {
         phase: common.Phase,
         opts: CompilationParameters,
     ) !ComposedKernelExe {
-        const embed_tokens = try ComposedKernelExe.compileEmbedTokens(
-            allocator,
-            io,
-            platform,
-            mdl,
-            seqlen,
-            progress,
-            phase,
-            opts,
-        );
-        errdefer embed_tokens.deinit();
+        const embed_tokens, const attn_layer, const csa_attn_layer, const csa2_attn_layer, const hca_attn_layer, const lm_head = b: {
+            var embed_compile_fut = io.async(struct {
+                fn call(
+                    allocator_: std.mem.Allocator,
+                    io_: std.Io,
+                    platform_: *zml.Platform,
+                    mdl_: model.Model,
+                    seqlen_: u32,
+                    progress_: *std.Progress.Node,
+                    phase_: common.Phase,
+                    opts_: CompilationParameters,
+                ) !zml.Exe {
+                    return ComposedKernelExe.compileEmbedTokens(
+                        allocator_,
+                        io_,
+                        platform_,
+                        mdl_,
+                        seqlen_,
+                        progress_,
+                        phase_,
+                        opts_,
+                    );
+                }
+            }.call, .{ allocator, io, platform, mdl, seqlen, progress, phase, opts });
+            errdefer if (embed_compile_fut.cancel(io)) |exe| {
+                exe.deinit();
+            } else |_| {};
 
-        const attn_layer = try ComposedKernelExe.compileAttnLayer(allocator, io, platform, mdl, seqlen, progress, phase, opts);
-        errdefer attn_layer.deinit();
+            var attn_compile_fut = io.async(struct {
+                fn call(
+                    allocator_: std.mem.Allocator,
+                    io_: std.Io,
+                    platform_: *zml.Platform,
+                    mdl_: model.Model,
+                    seqlen_: u32,
+                    progress_: *std.Progress.Node,
+                    phase_: common.Phase,
+                    opts_: CompilationParameters,
+                ) !zml.Exe {
+                    return ComposedKernelExe.compileAttnLayer(
+                        allocator_,
+                        io_,
+                        platform_,
+                        mdl_,
+                        seqlen_,
+                        progress_,
+                        phase_,
+                        opts_,
+                    );
+                }
+            }.call, .{ allocator, io, platform, mdl, seqlen, progress, phase, opts });
+            errdefer if (attn_compile_fut.cancel(io)) |exe| {
+                exe.deinit();
+            } else |_| {};
 
-        const csa_attn_layer = try ComposedKernelExe.compileCSAAttnLayer(allocator, io, platform, mdl, seqlen, progress, phase, opts);
-        errdefer attn_layer.deinit();
+            var csa_attn_compile_fut = io.async(struct {
+                fn call(
+                    allocator_: std.mem.Allocator,
+                    io_: std.Io,
+                    platform_: *zml.Platform,
+                    mdl_: model.Model,
+                    seqlen_: u32,
+                    progress_: *std.Progress.Node,
+                    phase_: common.Phase,
+                    opts_: CompilationParameters,
+                ) !zml.Exe {
+                    return ComposedKernelExe.compileCSAAttnLayer(
+                        allocator_,
+                        io_,
+                        platform_,
+                        mdl_,
+                        seqlen_,
+                        progress_,
+                        phase_,
+                        opts_,
+                    );
+                }
+            }.call, .{ allocator, io, platform, mdl, seqlen, progress, phase, opts });
+            errdefer if (csa_attn_compile_fut.cancel(io)) |exe| {
+                exe.deinit();
+            } else |_| {};
 
-        const csa2_attn_layer = try ComposedKernelExe.compileCSA2AttnLayer(allocator, io, platform, mdl, seqlen, progress, phase, opts);
-        errdefer attn_layer.deinit();
+            var csa2_attn_compile_fut = io.async(struct {
+                fn call(
+                    allocator_: std.mem.Allocator,
+                    io_: std.Io,
+                    platform_: *zml.Platform,
+                    mdl_: model.Model,
+                    seqlen_: u32,
+                    progress_: *std.Progress.Node,
+                    phase_: common.Phase,
+                    opts_: CompilationParameters,
+                ) !zml.Exe {
+                    return ComposedKernelExe.compileCSA2AttnLayer(
+                        allocator_,
+                        io_,
+                        platform_,
+                        mdl_,
+                        seqlen_,
+                        progress_,
+                        phase_,
+                        opts_,
+                    );
+                }
+            }.call, .{ allocator, io, platform, mdl, seqlen, progress, phase, opts });
+            errdefer if (csa2_attn_compile_fut.cancel(io)) |exe| {
+                exe.deinit();
+            } else |_| {};
 
-        const hca_attn_layer = try ComposedKernelExe.compileHCAAttnLayer(allocator, io, platform, mdl, seqlen, progress, phase, opts);
-        errdefer attn_layer.deinit();
+            var hca_attn_compile_fut = io.async(struct {
+                fn call(
+                    allocator_: std.mem.Allocator,
+                    io_: std.Io,
+                    platform_: *zml.Platform,
+                    mdl_: model.Model,
+                    seqlen_: u32,
+                    progress_: *std.Progress.Node,
+                    phase_: common.Phase,
+                    opts_: CompilationParameters,
+                ) !zml.Exe {
+                    return ComposedKernelExe.compileHCAAttnLayer(
+                        allocator_,
+                        io_,
+                        platform_,
+                        mdl_,
+                        seqlen_,
+                        progress_,
+                        phase_,
+                        opts_,
+                    );
+                }
+            }.call, .{ allocator, io, platform, mdl, seqlen, progress, phase, opts });
+            errdefer if (hca_attn_compile_fut.cancel(io)) |exe| {
+                exe.deinit();
+            } else |_| {};
 
-        const lm_head = try ComposedKernelExe.compileLmHead(
-            allocator,
-            io,
-            platform,
-            mdl,
-            seqlen,
-            progress,
-            phase,
-            opts,
-        );
-        errdefer lm_head.deinit();
+            var lm_head_compile_fut = io.async(struct {
+                fn call(
+                    allocator_: std.mem.Allocator,
+                    io_: std.Io,
+                    platform_: *zml.Platform,
+                    mdl_: model.Model,
+                    seqlen_: u32,
+                    progress_: *std.Progress.Node,
+                    phase_: common.Phase,
+                    opts_: CompilationParameters,
+                ) !zml.Exe {
+                    return ComposedKernelExe.compileHCAAttnLayer(
+                        allocator_,
+                        io_,
+                        platform_,
+                        mdl_,
+                        seqlen_,
+                        progress_,
+                        phase_,
+                        opts_,
+                    );
+                }
+            }.call, .{ allocator, io, platform, mdl, seqlen, progress, phase, opts });
+            errdefer if (lm_head_compile_fut.cancel(io)) |exe| {
+                exe.deinit();
+            } else |_| {};
+
+            break :b .{
+                embed_compile_fut.await(io) catch return error.Unexpected,
+                attn_compile_fut.await(io) catch return error.Unexpected,
+                csa_attn_compile_fut.await(io) catch return error.Unexpected,
+                csa2_attn_compile_fut.await(io) catch return error.Unexpected,
+                hca_attn_compile_fut.await(io) catch return error.Unexpected,
+                lm_head_compile_fut.await(io) catch return error.Unexpected,
+            };
+        };
 
         return .{
             .embed_tokens = embed_tokens,
