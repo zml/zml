@@ -63,6 +63,27 @@ pub const Logit = struct {
 };
 
 pub const top_k_sliced: usize = 16;
+pub const default_syntax_token_id_threshold: usize = 2048;
+pub const qjl_micro_coord_count: usize = 1024;
+pub const qjl_micro_u128_word_count: usize = qjl_micro_coord_count / 128;
+pub const qjl_half_coord_count: usize = 2 * qjl_micro_coord_count;
+pub const qjl_half_to_full_coord_count: usize = 4096 - qjl_half_coord_count;
+pub const qjl_half_to_full_u128_word_count: usize = qjl_half_to_full_coord_count / 128;
+
+fn makeQjlSignDotLut(comptime coord_count: usize) [coord_count + 1]f32 {
+    @setEvalBranchQuota(8192);
+    var lut: [coord_count + 1]f32 = undefined;
+    for (0..(coord_count + 1)) |mismatch_count| {
+        const dot: i32 = @as(i32, @intCast(coord_count)) - 2 * @as(i32, @intCast(mismatch_count));
+        const w = @as(f32, @floatFromInt(dot)) / @as(f32, @floatFromInt(coord_count));
+        lut[mismatch_count] = @sin(@as(f32, @floatCast(0.5 * std.math.pi)) * w);
+    }
+    return lut;
+}
+
+const qjl_micro_sign_dot_lut = makeQjlSignDotLut(qjl_micro_coord_count);
+const qjl_half_sign_dot_lut = makeQjlSignDotLut(qjl_half_coord_count);
+const qjl_full_sign_dot_lut = makeQjlSignDotLut(4096);
 
 pub const DenseSample = struct {
     rows: [top_k_sliced]usize,
@@ -79,7 +100,18 @@ pub const DenseSample = struct {
 pub const TwoPhaseSample = struct {
     rows: [top_k_sliced]usize,
     nb_scored: usize,
+    nb_1bit_scored: usize = 0,
+    nb_half_1bit_scored: usize = 0,
     nb_2bit_scored: usize = 0,
+};
+
+pub const SyntaxOracleSample = struct {
+    correct: bool,
+    safe: bool,
+    predicted_syntax: bool,
+    top1_is_syntax: bool,
+    top1: usize,
+    cos_theta: f32,
 };
 
 pub const U4096 = struct {
@@ -117,7 +149,6 @@ pub const vector_U4096 = struct {
         }
         return total;
     }
-
 };
 
 pub const Quantized = struct {
@@ -134,16 +165,31 @@ pub const Quantized = struct {
     row_scale_sliced: []f32,
     f32_buffer: []f32,
     dense_logits: []f32,
+    partial_logits: []f32,
+    active_rows: []u32,
     i8_buffer: []i8,
+
+    syntax_cluster_ids: []u32,
+    syntax_cluster_mask: []bool,
+    semantic_cluster_ids: []u32,
+    syntax_center: []f32,
+    syntax_cluster_len: usize = 0,
+    semantic_cluster_len: usize = 0,
+    syntax_tau: f32 = std.math.nan(f32),
+    syntax_anchor_id: u32 = 0,
+    syntax_worst_semantic_id: u32 = 0,
 
     lm_head_sliced: []vector_U4096,
     row_offset: []i32,
 
     lm_head_qjl: []U4096,
+    qjl_micro_rows: [][qjl_micro_u128_word_count]u128,
+    qjl_micro_to_half_rows: [][qjl_micro_u128_word_count]u128,
+    qjl_half_to_full_rows: [][qjl_half_to_full_u128_word_count]u128,
+    qjl_micro_mismatches: []u16,
     qjl_row_scale: []f32,
     qjl_query_lut: []f32,
     qjl_inv_dim: f32 = 0.0,
-    qjl_dim_shift: i32 = 0,
 
     lm_head_qjl_2bits: [][64]u128,
     qjl_row_scale_2bits: []f32,
@@ -159,6 +205,14 @@ pub const Quantized = struct {
 
         const f32_buffer = try allocator.alloc(f32, d);
         const dense_logits = try allocator.alloc(f32, vocab_size);
+        const partial_logits = try allocator.alloc(f32, vocab_size);
+        const active_rows = try allocator.alloc(u32, vocab_size);
+        const syntax_cluster_ids = try allocator.alloc(u32, vocab_size);
+        const syntax_cluster_mask = try allocator.alloc(bool, vocab_size);
+        const semantic_cluster_ids = try allocator.alloc(u32, vocab_size);
+        const syntax_center = try allocator.alloc(f32, d);
+        @memset(syntax_cluster_mask, false);
+        @memset(syntax_center, 0.0);
         const lm_head_quantized = try allocator.alloc(i8, d * vocab_size);
         const lm_head_sliced = try allocator.alloc(vector_U4096, vocab_size);
 
@@ -168,6 +222,10 @@ pub const Quantized = struct {
         const i8_buffer = try allocator.alloc(i8, d);
 
         const lm_head_qjl = try allocator.alloc(U4096, vocab_size);
+        const qjl_micro_rows = try allocator.alloc([qjl_micro_u128_word_count]u128, vocab_size);
+        const qjl_micro_to_half_rows = try allocator.alloc([qjl_micro_u128_word_count]u128, vocab_size);
+        const qjl_half_to_full_rows = try allocator.alloc([qjl_half_to_full_u128_word_count]u128, vocab_size);
+        const qjl_micro_mismatches = try allocator.alloc(u16, vocab_size);
         const qjl_row_scale = try allocator.alloc(f32, vocab_size);
         const qjl_query_lut = try allocator.alloc(f32, 512 * 256);
         const lm_head_qjl_2bits = try allocator.alloc([64]u128, vocab_size);
@@ -184,11 +242,21 @@ pub const Quantized = struct {
             .row_scale_sliced = row_scale_sliced,
             .f32_buffer = f32_buffer,
             .dense_logits = dense_logits,
+            .partial_logits = partial_logits,
+            .active_rows = active_rows,
+            .syntax_cluster_ids = syntax_cluster_ids,
+            .syntax_cluster_mask = syntax_cluster_mask,
+            .semantic_cluster_ids = semantic_cluster_ids,
+            .syntax_center = syntax_center,
             .lm_head_quantized = lm_head_quantized,
             .lm_head_sliced = lm_head_sliced,
             .row_offset = row_offset,
             .i8_buffer = i8_buffer,
             .lm_head_qjl = lm_head_qjl,
+            .qjl_micro_rows = qjl_micro_rows,
+            .qjl_micro_to_half_rows = qjl_micro_to_half_rows,
+            .qjl_half_to_full_rows = qjl_half_to_full_rows,
+            .qjl_micro_mismatches = qjl_micro_mismatches,
             .qjl_row_scale = qjl_row_scale,
             .qjl_query_lut = qjl_query_lut,
             .lm_head_qjl_2bits = lm_head_qjl_2bits,
@@ -201,17 +269,26 @@ pub const Quantized = struct {
         self.allocator.free(self.row_scale_sliced);
         self.allocator.free(self.f32_buffer);
         self.allocator.free(self.dense_logits);
+        self.allocator.free(self.partial_logits);
+        self.allocator.free(self.active_rows);
+        self.allocator.free(self.syntax_cluster_ids);
+        self.allocator.free(self.syntax_cluster_mask);
+        self.allocator.free(self.semantic_cluster_ids);
+        self.allocator.free(self.syntax_center);
         self.allocator.free(self.lm_head_quantized);
         self.allocator.free(self.lm_head_sliced);
         self.allocator.free(self.row_offset);
         self.allocator.free(self.i8_buffer);
         self.allocator.free(self.lm_head_qjl);
+        self.allocator.free(self.qjl_micro_rows);
+        self.allocator.free(self.qjl_micro_to_half_rows);
+        self.allocator.free(self.qjl_half_to_full_rows);
+        self.allocator.free(self.qjl_micro_mismatches);
         self.allocator.free(self.qjl_row_scale);
         self.allocator.free(self.qjl_query_lut);
         self.allocator.free(self.lm_head_qjl_2bits);
         self.allocator.free(self.qjl_row_scale_2bits);
     }
-
 
     pub inline fn quantizeValue(value: f32, max_abs: f32) i8 {
         return quantizeValueScaled(value, max_abs, 127.0);
@@ -226,7 +303,6 @@ pub const Quantized = struct {
     pub inline fn dequantizeValue(value: i8) f32 {
         return @as(f32, @floatFromInt(value));
     }
-
 
     pub fn walshHadamard(self: *Quantized, v: []const f32, comptime k: comptime_int) !void {
         self.zml_handler.tic(&self.zml_handler.timers.quant_walsh);
@@ -298,7 +374,6 @@ pub const Quantized = struct {
         }
         self.zml_handler.toc(&self.zml_handler.timers.quant_walsh);
     }
-
 
     fn l2Error(a: []const f32, b: []const f32) f32 {
         std.debug.assert(a.len == b.len);
@@ -400,12 +475,12 @@ pub const Quantized = struct {
         }
     }
 
-
     pub fn sample(self: *Quantized, query: []const f32) !usize {
         const query_scale = try self.quantizeVector(query);
         var best_row: usize = 0;
         var best_score: f32 = -1e20;
         for (0..self.vocab_size) |i| {
+            if (self.lm_head.is_junk[i]) continue;
             const quantized_row = self.lm_head_quantized[i * self.d .. (i + 1) * self.d];
             const score = quantizedDot(self, self.i8_buffer, quantized_row);
             var score_f32 = @as(f32, @floatFromInt(score));
@@ -440,7 +515,6 @@ pub const Quantized = struct {
         self.zml_handler.toc(&self.zml_handler.timers.quant_dot);
         return res;
     }
-
 
     pub fn realLogit(_: *Quantized, query: []const f32, row: []const f32) f32 {
         const simd_len = 16;
@@ -602,7 +676,6 @@ pub const Quantized = struct {
         }
     }
 
-
     pub fn sliceVectorBits(row: []const i8) !vector_U4096 {
         var sliced: vector_U4096 = .{};
         for (row, 0..) |value, coord| {
@@ -654,6 +727,7 @@ pub const Quantized = struct {
         var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
         var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
         for (0..self.vocab_size) |i| {
+            if (self.lm_head.is_junk[i]) continue;
             const score = self.slicedDot(&query_sliced, query_offset, i);
             var score_f32 = @as(f32, @floatFromInt(score));
             score_f32 *= query_scale;
@@ -712,15 +786,65 @@ pub const Quantized = struct {
         std.log.info("Quantized bit slicing test passed: 1000 random row pairs", .{});
     }
 
+    inline fn qjlSliceU128Words(
+        comptime start_coord: usize,
+        comptime coord_count: usize,
+        quantized: *const U4096,
+    ) *const [coord_count / 128]u128 {
+        if (coord_count % 128 != 0) {
+            @compileError("QJL slice length must contain a whole number of u128 words");
+        }
+        if (start_coord % 128 != 0) {
+            @compileError("QJL slice start must be u128-aligned");
+        }
+        if (start_coord + coord_count > 4096) {
+            @compileError("QJL slice is out of bounds");
+        }
+
+        const start_word = start_coord / 128;
+        return quantized.words[start_word..][0 .. coord_count / 128];
+    }
+
+    inline fn qjlMicroWords(quantized: *const U4096) *const [qjl_micro_u128_word_count]u128 {
+        return qjlSliceU128Words(0, qjl_micro_coord_count, quantized);
+    }
+
+    inline fn qjlMicroToHalfWords(quantized: *const U4096) *const [qjl_micro_u128_word_count]u128 {
+        return qjlSliceU128Words(qjl_micro_coord_count, qjl_micro_coord_count, quantized);
+    }
+
+    inline fn qjlHalfToFullWords(quantized: *const U4096) *const [qjl_half_to_full_u128_word_count]u128 {
+        return qjlSliceU128Words(qjl_half_coord_count, qjl_half_to_full_coord_count, quantized);
+    }
+
+    inline fn qjlMismatchU128Loaded(
+        comptime word_count: usize,
+        row_words: *const [word_count]u128,
+        query_vec: @Vector(word_count, u128),
+    ) u16 {
+        const Words = @Vector(word_count, u128);
+        const Counts = @Vector(word_count, u16);
+        const row_vec: Words = row_words.*;
+        const mismatches: Counts = @intCast(@popCount(row_vec ^ query_vec));
+        return @reduce(.Add, mismatches);
+    }
+
+    inline fn qjlMismatchU128(comptime word_count: usize, row_words: *const [word_count]u128, query_words: *const [word_count]u128) u16 {
+        const Words = @Vector(word_count, u128);
+        const query_vec: Words = query_words.*;
+        return qjlMismatchU128Loaded(word_count, row_words, query_vec);
+    }
 
     pub fn quantizeQjlLmHead(self: *Quantized) !void {
         std.log.info("Quantizing QJL lm_head", .{});
         self.qjl_inv_dim = 1.0 / @as(f32, @floatFromInt(self.d));
-        self.qjl_dim_shift = @intCast(self.d);
         const data = self.lm_head.data;
         for (0..self.vocab_size) |i| {
             const quantized_row, const row_scale, _ = try self.quantizeQjlVector(data[i * self.d .. (i + 1) * self.d]);
             self.lm_head_qjl[i] = quantized_row;
+            self.qjl_micro_rows[i] = qjlMicroWords(&quantized_row).*;
+            self.qjl_micro_to_half_rows[i] = qjlMicroToHalfWords(&quantized_row).*;
+            self.qjl_half_to_full_rows[i] = qjlHalfToFullWords(&quantized_row).*;
             self.qjl_row_scale[i] = row_scale;
         }
     }
@@ -754,30 +878,61 @@ pub const Quantized = struct {
         }
         try self.walshHadamardSimd(self.f32_buffer[0..self.d], 12);
     }
-    
-    pub fn dotQjlSymmetric(self: *Quantized, row: usize, query_quantized: U4096, query_l2_norm: f32) f32 {
-        const row_quantized = &self.lm_head_qjl[row];
-        const row_l2_norm = self.lm_head.row_norms[row];
 
+    pub fn dotQjlSymmetric(self: *Quantized, row: usize, query_quantized: U4096, query_l2_norm: f32) f32 {
         // dot(u,v) approx = ||u|| * ||v|| * sin(pi/2 * dot(q(u), q(v)) / d)
         // dot(q(u), q(v)) = d - 2 * bit_mismatches,
         // XOR returns 1 where bits differ, 0 where they match
-        const Vec32x128 = @Vector(32, u128);
-        const Vec32x16 = @Vector(32, u16);
-        const query_vec: Vec32x128 = query_quantized.words[0..32].*;
-        const row_vec: Vec32x128 = row_quantized.words[0..32].*;
-        const mismatches: Vec32x16 = @intCast(@popCount(query_vec ^ row_vec));
-        const mismatch_count: i32 = @intCast(@reduce(.Add, mismatches));
-        const dot = self.qjl_dim_shift - 2 * mismatch_count;
+        var mismatch_count: u16 = 0;
+        mismatch_count += qjlMismatchU128(qjl_micro_u128_word_count, &self.qjl_micro_rows[row], qjlMicroWords(&query_quantized));
+        mismatch_count += qjlMismatchU128(qjl_micro_u128_word_count, &self.qjl_micro_to_half_rows[row], qjlMicroToHalfWords(&query_quantized));
+        mismatch_count += qjlMismatchU128(qjl_half_to_full_u128_word_count, &self.qjl_half_to_full_rows[row], qjlHalfToFullWords(&query_quantized));
+        return self.dotQjlSymmetricFromMismatchCount(row, query_l2_norm, mismatch_count);
+    }
 
-        // sin(pi/2 w) is approx = y * (0.775 + 0.225 |y|)
-        // with y = w * (2.0 - |w|)
-        const w = @as(f32, @floatFromInt(dot)) * self.qjl_inv_dim;
-        std.debug.assert(-1.0 <= w and w <= 1.0);
-        const y = w * (2.0 - @abs(w));
-        const sin_approx = y * (0.775 + 0.225 * @abs(y));
+    inline fn dotQjlSymmetricFromMismatchCount(self: *Quantized, row: usize, query_l2_norm: f32, mismatch_count: u16) f32 {
+        const row_l2_norm = self.lm_head.row_norms[row];
+        return query_l2_norm * row_l2_norm * qjlSignDotCoeff(mismatch_count, 4096);
+    }
 
-        return query_l2_norm * row_l2_norm * sin_approx;
+    pub inline fn dotQjlSymmetricWithPrefix(
+        self: *Quantized,
+        row: usize,
+        query_quantized: U4096,
+        query_l2_norm: f32,
+        prefix_mismatches: u16,
+        comptime prefix_coord_count: usize,
+    ) f32 {
+        if (prefix_coord_count % 128 != 0) {
+            @compileError("QJL prefix coordinate count must be a multiple of 128 to reuse u128 prefix popcounts");
+        }
+
+        var mismatch_count: u16 = prefix_mismatches;
+        if (prefix_coord_count == 0) {
+            mismatch_count += qjlMismatchU128(qjl_micro_u128_word_count, &self.qjl_micro_rows[row], qjlMicroWords(&query_quantized));
+            mismatch_count += qjlMismatchU128(qjl_micro_u128_word_count, &self.qjl_micro_to_half_rows[row], qjlMicroToHalfWords(&query_quantized));
+            mismatch_count += qjlMismatchU128(qjl_half_to_full_u128_word_count, &self.qjl_half_to_full_rows[row], qjlHalfToFullWords(&query_quantized));
+        } else if (prefix_coord_count == qjl_micro_coord_count) {
+            mismatch_count += qjlMismatchU128(qjl_micro_u128_word_count, &self.qjl_micro_to_half_rows[row], qjlMicroToHalfWords(&query_quantized));
+            mismatch_count += qjlMismatchU128(qjl_half_to_full_u128_word_count, &self.qjl_half_to_full_rows[row], qjlHalfToFullWords(&query_quantized));
+        } else if (prefix_coord_count == qjl_half_coord_count) {
+            mismatch_count += qjlMismatchU128(qjl_half_to_full_u128_word_count, &self.qjl_half_to_full_rows[row], qjlHalfToFullWords(&query_quantized));
+        } else {
+            @compileError("unsupported QJL prefix coordinate count");
+        }
+        return self.dotQjlSymmetricFromMismatchCount(row, query_l2_norm, mismatch_count);
+    }
+
+    pub inline fn dotQjlSymmetricWithHalfPrefix(
+        self: *Quantized,
+        row: usize,
+        query_quantized: U4096,
+        query_l2_norm: f32,
+        half_mismatches: u16,
+    ) f32 {
+        var mismatch_count = half_mismatches;
+        mismatch_count += qjlMismatchU128(qjl_half_to_full_u128_word_count, &self.qjl_half_to_full_rows[row], qjlHalfToFullWords(&query_quantized));
+        return self.dotQjlSymmetricFromMismatchCount(row, query_l2_norm, mismatch_count);
     }
 
     pub fn sampleQjlSymmetric(self: *Quantized, query: []const f32) ![top_k_sliced]usize {
@@ -791,6 +946,7 @@ pub const Quantized = struct {
         var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
         var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
         for (0..self.vocab_size) |i| {
+            if (self.lm_head.is_junk[i]) continue;
             const score = self.dotQjlSymmetric(i, quantized_query, query_l2_norm);
             if (score > top_scores[top_k_sliced - 1]) {
                 var insert_pos = top_k_sliced - 1;
@@ -805,8 +961,7 @@ pub const Quantized = struct {
         }
         return top_rows;
     }
-    
-    
+
     pub fn dotQjlAsymmetric(self: *Quantized, row: usize, query_lut: []const f32, query_total_sum: f32) f32 {
         const row_quantized = &self.lm_head_qjl[row];
         const row_qjl_scale = self.qjl_row_scale[row];
@@ -829,36 +984,36 @@ pub const Quantized = struct {
         const row_quantized = &self.lm_head_qjl[row];
         const row_qjl_scale = self.qjl_row_scale[row];
         const row_bytes = std.mem.asBytes(&row_quantized.words)[0..512];
-        
+
         const Vec4 = @Vector(4, f32);
         var acc_vec: Vec4 = @splat(0.0);
-    
+
         var i: usize = 0;
         while (i < 512) : (i += 4) {
             const b0 = row_bytes[i];
             const b1 = row_bytes[i + 1];
             const b2 = row_bytes[i + 2];
             const b3 = row_bytes[i + 3];
-            
+
             const lut_i0 = (i) * 256 + @as(usize, b0);
             const lut_i1 = (i + 1) * 256 + @as(usize, b1);
             const lut_i2 = (i + 2) * 256 + @as(usize, b2);
             const lut_i3 = (i + 3) * 256 + @as(usize, b3);
-    
+
             const loaded_values: Vec4 = .{
                 query_lut[lut_i0],
                 query_lut[lut_i1],
                 query_lut[lut_i2],
                 query_lut[lut_i3],
             };
-    
+
             acc_vec += loaded_values;
         }
-    
+
         const positive_sum = @reduce(.Add, acc_vec);
         return row_qjl_scale * (2.0 * positive_sum - query_total_sum);
     }
-    
+
     pub fn precomputeQjlAsymmetricLut(self: *Quantized, rotated_query: []const f32) f32 {
         std.debug.assert(rotated_query.len >= 4096);
         std.debug.assert(self.qjl_query_lut.len >= 512 * 256);
@@ -867,7 +1022,7 @@ pub const Quantized = struct {
         for (0..512) |block_i| {
             const coord = 8 * block_i;
             const values = rotated_query[coord..][0..8];
-            const lut = self.qjl_query_lut[block_i * 256..][0..256];
+            const lut = self.qjl_query_lut[block_i * 256 ..][0..256];
 
             lut[0] = 0.0;
             for (values) |value| {
@@ -890,6 +1045,7 @@ pub const Quantized = struct {
         var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
         var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
         for (0..self.vocab_size) |i| {
+            if (self.lm_head.is_junk[i]) continue;
             const score = self.dotQjlAsymmetricSimd(i, self.qjl_query_lut, query_total_sum);
             if (score > top_scores[top_k_sliced - 1]) {
                 var insert_pos = top_k_sliced - 1;
@@ -905,11 +1061,10 @@ pub const Quantized = struct {
         return top_rows;
     }
 
-    
     pub fn dotQjlAsymmetric2Bits(self: *Quantized, row: usize, query_msb: *const [512]u8, query_lsb: *const [512]u8, query_scale: f32) f32 {
         const row_bytes = std.mem.asBytes(&self.lm_head_qjl[row].words);
         const scale = self.qjl_row_scale[row] * query_scale;
-        
+
         // The codebook for 2 bits is -1.51, -0.453, +0.453, +1.51, divided by sqrt(d)
         // A quantized value is then represented as q_i = alpha * sign(msb_i) + beta * sign(lsb_i)
         // alpha = (1.51 + 0.453) / 2 = 0.9815
@@ -918,84 +1073,84 @@ pub const Quantized = struct {
         const beta: f32 = 0.5285;
         const D: f32 = 4096.0;
         const C: f32 = D * (alpha + beta);
-    
+
         // Cast the 512-byte arrays to 64-element arrays of u64 to process 64 bits at once
         const row_u128: *const [32]u128 = @ptrCast(@alignCast(row_bytes));
         const msb_u128: *const [32]u128 = @ptrCast(@alignCast(query_msb));
         const lsb_u128: *const [32]u128 = @ptrCast(@alignCast(query_lsb));
-    
+
         var mismatches_msb: u32 = 0;
         var mismatches_lsb: u32 = 0;
-    
+
         for (0..32) |i| {
             const v = row_u128[i];
             mismatches_msb += @popCount(msb_u128[i] ^ v);
             mismatches_lsb += @popCount(lsb_u128[i] ^ v);
         }
-    
+
         const h_m: f32 = @floatFromInt(mismatches_msb);
         const h_l: f32 = @floatFromInt(mismatches_lsb);
-    
+
         return scale * (C - (2.0 * alpha * h_m) - (2.0 * beta * h_l));
     }
 
     pub fn quantize2BitsAsymmatric(self: *Quantized, norm: f32) struct { [512]u8, [512]u8 } {
         var msb: [512]u8 = undefined;
         var lsb: [512]u8 = undefined;
-        
+
         // Scale the threshold for 4096 dimensions (1 / sqrt(4096) = 1/64)
         const unscaled_threshold: f32 = (1.51 + 0.453) / 2.0; // 0.9815
-        const threshold: f32 = norm * unscaled_threshold / 64.0; 
-        
+        const threshold: f32 = norm * unscaled_threshold / 64.0;
+
         const Vec8f = @Vector(8, f32);
         const Vec8u = @Vector(8, u32);
         const Vec8b = @Vector(8, bool);
-        
+
         // Used to map a vector of booleans into a single packed byte
         const bit_values: Vec8u = .{ 1, 2, 4, 8, 16, 32, 64, 128 };
         const zeros_u32: Vec8u = @splat(0);
         const zeros_f32: Vec8f = @splat(0.0);
         const true_vec: Vec8b = @splat(true);
         const false_vec: Vec8b = @splat(false);
-        
+
         const t_vec: Vec8f = @splat(threshold);
         const neg_t_vec: Vec8f = @splat(-threshold);
-    
+
         // Standard loop (processes 8 dimensions per iteration)
         for (0..512) |byte_i| {
             const float_idx = byte_i * 8;
             const floats: Vec8f = self.f32_buffer[float_idx..][0..8].*;
-            
+
             // ---------------------------------------------------------
             // MSB Logic: 1 if x > 0, else 0
             // ---------------------------------------------------------
             const m_mask = floats > zeros_f32;
-            
+
             // ---------------------------------------------------------
-            // LSB Logic: 
+            // LSB Logic:
             // If x > 0,  LSB = 1 if x > T
             // If x <= 0, LSB = 1 if x > -T
             // ---------------------------------------------------------
             const gt_t = floats > t_vec;
             const le_zero = floats <= zeros_f32;
             const gt_neg_t = floats > neg_t_vec;
-            
+
             // Branchless composition of the LSB condition using SIMD selects
             const in_middle_negative = @select(bool, le_zero, gt_neg_t, false_vec);
             const l_mask = @select(bool, gt_t, true_vec, in_middle_negative);
-            
+
             // ---------------------------------------------------------
             // SIMD Bit Packing
             // ---------------------------------------------------------
-            // This takes the boolean mask, maps true->bit_value and false->0, 
+            // This takes the boolean mask, maps true->bit_value and false->0,
             // and horizontally sums them into a single integer.
             const m_packed = @reduce(.Add, @select(u32, m_mask, bit_values, zeros_u32));
             const l_packed = @reduce(.Add, @select(u32, l_mask, bit_values, zeros_u32));
-            
+
             msb[byte_i] = @intCast(m_packed);
             lsb[byte_i] = @intCast(l_packed);
         }
-        
+
         return .{ msb, lsb };
     }
 
@@ -1010,10 +1165,11 @@ pub const Quantized = struct {
         norm = @sqrt(norm);
         const query_msb, const query_lsb = self.quantize2BitsAsymmetric(norm);
         const query_scale = scaleFactor2BitsAsymmetric(self.f32_buffer[0..4096], &query_msb, &query_lsb);
-        
+
         var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
         var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
         for (0..self.vocab_size) |i| {
+            if (self.lm_head.is_junk[i]) continue;
             const score = self.dotQjlAsymmetric2Bits(i, &query_msb, &query_lsb, query_scale);
             if (score > top_scores[top_k_sliced - 1]) {
                 var insert_pos = top_k_sliced - 1;
@@ -1029,72 +1185,71 @@ pub const Quantized = struct {
         return top_rows;
     }
 
-
     pub fn quantize2BitsSymmetric(self: *Quantized, norm: f32) struct { [32]u128, [32]u128 } {
         var msb_words: [32]u128 = undefined;
         var lsb_words: [32]u128 = undefined;
         const msb = std.mem.asBytes(&msb_words);
         const lsb = std.mem.asBytes(&lsb_words);
-        
+
         // Bits are assigned with the rounded Lloyd codebook
         // [-1.5, -0.5, +0.5, +1.5], whose magnitude threshold is 1.0.
         // The stored/dot-product representation is doubled to [-3, -1, +1, +3]
         // so the hot path stays integer; the fitted scale factors absorb this 2x.
         const unscaled_threshold: f32 = 1.0;
         const threshold: f32 = norm * unscaled_threshold / 64.0;
-        
+
         const Vec8f = @Vector(8, f32);
         const Vec8u = @Vector(8, u32);
         const Vec8b = @Vector(8, bool);
-        
+
         // Used to map a vector of booleans into a single packed byte
         const bit_values: Vec8u = .{ 1, 2, 4, 8, 16, 32, 64, 128 };
         const zeros_u32: Vec8u = @splat(0);
         const zeros_f32: Vec8f = @splat(0.0);
         const true_vec: Vec8b = @splat(true);
         const false_vec: Vec8b = @splat(false);
-        
+
         const t_vec: Vec8f = @splat(threshold);
         const neg_t_vec: Vec8f = @splat(-threshold);
-    
+
         // Standard loop (processes 8 dimensions per iteration)
         for (0..512) |byte_i| {
             const float_idx = byte_i * 8;
             const floats: Vec8f = self.f32_buffer[float_idx..][0..8].*;
-            
+
             // ---------------------------------------------------------
             // MSB Logic: 1 if x > 0, else 0
             // ---------------------------------------------------------
             const m_mask = floats > zeros_f32;
-            
+
             // ---------------------------------------------------------
-            // LSB Logic: 
+            // LSB Logic:
             // If x > 0,  LSB = 1 if x > T
             // If x <= 0, LSB = 1 if x > -T
             // ---------------------------------------------------------
             const gt_t = floats > t_vec;
             const le_zero = floats <= zeros_f32;
             const gt_neg_t = floats > neg_t_vec;
-            
+
             // Branchless composition of the LSB condition using SIMD selects
             const in_middle_negative = @select(bool, le_zero, gt_neg_t, false_vec);
             const l_mask = @select(bool, gt_t, true_vec, in_middle_negative);
-            
+
             // ---------------------------------------------------------
             // SIMD Bit Packing
             // ---------------------------------------------------------
-            // This takes the boolean mask, maps true->bit_value and false->0, 
+            // This takes the boolean mask, maps true->bit_value and false->0,
             // and horizontally sums them into a single integer.
             const m_packed = @reduce(.Add, @select(u32, m_mask, bit_values, zeros_u32));
             const l_packed = @reduce(.Add, @select(u32, l_mask, bit_values, zeros_u32));
-            
+
             msb[byte_i] = @intCast(m_packed);
             lsb[byte_i] = @intCast(l_packed);
         }
-        
+
         return .{ msb_words, lsb_words };
     }
-    
+
     fn scaleFactor2BitsWeighted(
         rot_v: *const [4096]f32,
         quant_v_msb: anytype,
@@ -1163,29 +1318,29 @@ pub const Quantized = struct {
             self.qjl_row_scale_2bits[i] = scaleFactor2BitsSymmetric(self.f32_buffer[0..4096], &msb, &lsb);
         }
     }
-    
+
     pub inline fn dotSymmetric2Bit(q_msb: *const [32]u128, q_lsb: *const [32]u128, row_msb: *const [32]u128, row_lsb: *const [32]u128) i32 {
         var h_mm: u16 = 0;
         var h_ml: u16 = 0;
         var h_lm: u16 = 0;
         var h_ll: u16 = 0;
-    
+
         for (0..32) |i| {
             const qm = q_msb[i];
             const ql = q_lsb[i];
             const vm = row_msb[i];
             const vl = row_lsb[i];
-    
+
             h_mm += @popCount(qm ^ vm);
             h_ml += @popCount(qm ^ vl);
             h_lm += @popCount(ql ^ vm);
             h_ll += @popCount(ql ^ vl);
         }
-    
+
         const term_mm: i32 = @as(i32, @intCast(h_mm)) << 3;
         const term_cross: i32 = @as(i32, @intCast(h_ml + h_lm)) << 2;
         const term_ll: i32 = @as(i32, @intCast(h_ll)) << 1;
-    
+
         return 36864 - term_mm - term_cross - term_ll;
     }
 
@@ -1212,6 +1367,7 @@ pub const Quantized = struct {
         var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
         var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
         for (0..self.vocab_size) |i| {
+            if (self.lm_head.is_junk[i]) continue;
             const dot: f32 = @floatFromInt(self.dotQjlSymmetric2Bits(i, &query_msb, &query_lsb));
             const score = query_scale * self.qjl_row_scale_2bits[i] * dot;
             if (score > top_scores[top_k_sliced - 1]) {
@@ -1228,7 +1384,6 @@ pub const Quantized = struct {
         return top_rows;
     }
 
-    
     pub fn testQjlReconstructionError(self: *Quantized) !void {
         const RowErrors = struct {
             abs_1bit: f32,
@@ -1345,15 +1500,226 @@ pub const Quantized = struct {
         std.log.info("1-bit abs min={d:.6} max={d:.6} rel min={d:.6} max={d:.6}", .{ min_abs_1bit, max_abs_1bit, min_rel_1bit, max_rel_1bit });
         std.log.info("2-bit abs min={d:.6} max={d:.6} rel min={d:.6} max={d:.6}", .{ min_abs_2bits, max_abs_2bits, min_rel_2bits, max_rel_2bits });
     }
-    
-    
+
+    inline fn dotRowF64(row: []const f32, vec: []const f64) f64 {
+        var dot: f64 = 0.0;
+        for (row, vec) |row_value, vec_value| {
+            dot += @as(f64, row_value) * vec_value;
+        }
+        return dot;
+    }
+
+    inline fn dotRowF32(row: []const f32, vec: []const f32) f64 {
+        var dot: f64 = 0.0;
+        for (row, vec) |row_value, vec_value| {
+            dot += @as(f64, row_value) * @as(f64, vec_value);
+        }
+        return dot;
+    }
+
+    pub fn precomputePhase(self: *Quantized) !void {
+        try self.precomputePhaseFiltered(default_syntax_token_id_threshold);
+    }
+
+    pub fn precomputePhaseFiltered(self: *Quantized, syntax_token_id_threshold: usize) !void {
+        std.log.info("Precompute syntax oracle token_id_threshold={d}", .{syntax_token_id_threshold});
+        const center_f64 = try self.allocator.alloc(f64, self.d);
+        defer self.allocator.free(center_f64);
+
+        @memset(center_f64, 0.0);
+        @memset(self.syntax_center, 0.0);
+        @memset(self.syntax_cluster_mask, false);
+        self.syntax_cluster_len = 0;
+        self.semantic_cluster_len = 0;
+        self.syntax_tau = std.math.nan(f32);
+        self.syntax_anchor_id = 0;
+        self.syntax_worst_semantic_id = 0;
+
+        var skipped_junk: usize = 0;
+        for (0..self.vocab_size) |token_id| {
+            if (self.lm_head.is_junk[token_id]) {
+                skipped_junk += 1;
+                continue;
+            }
+
+            const row = self.lm_head.data[token_id * self.d ..][0..self.d];
+            if (token_id >= syntax_token_id_threshold) {
+                self.semantic_cluster_ids[self.semantic_cluster_len] = @intCast(token_id);
+                self.semantic_cluster_len += 1;
+                continue;
+            }
+
+            if (self.syntax_cluster_len == 0) {
+                self.syntax_cluster_ids[0] = @intCast(token_id);
+                self.syntax_cluster_mask[token_id] = true;
+                self.syntax_cluster_len = 1;
+                for (row, center_f64) |value, *center_value| {
+                    center_value.* = @floatCast(value);
+                }
+                continue;
+            }
+
+            const dot_to_center = dotRowF64(row, center_f64);
+            if (dot_to_center > 0.0) {
+                self.syntax_cluster_ids[self.syntax_cluster_len] = @intCast(token_id);
+                self.syntax_cluster_mask[token_id] = true;
+                self.syntax_cluster_len += 1;
+
+                const inv_count = 1.0 / @as(f64, @floatFromInt(self.syntax_cluster_len));
+                for (row, center_f64) |value, *center_value| {
+                    center_value.* += (@as(f64, value) - center_value.*) * inv_count;
+                }
+            } else {
+                self.semantic_cluster_ids[self.semantic_cluster_len] = @intCast(token_id);
+                self.semantic_cluster_len += 1;
+            }
+        }
+
+        if (self.syntax_cluster_len == 0) return error.SyntaxOracleEmptySyntaxCluster;
+
+        var center_norm2: f64 = 0.0;
+        for (center_f64) |value| {
+            center_norm2 += value * value;
+        }
+        if (center_norm2 == 0.0) return error.SyntaxOracleZeroCenter;
+
+        const center_norm = @sqrt(center_norm2);
+        for (center_f64, self.syntax_center) |value, *dst| {
+            dst.* = @floatCast(value / center_norm);
+        }
+
+        var max_alignment = -std.math.inf(f64);
+        var anchor_id: usize = @intCast(self.syntax_cluster_ids[0]);
+        for (self.syntax_cluster_ids[0..self.syntax_cluster_len]) |token_u32| {
+            const token_id: usize = @intCast(token_u32);
+            const row_norm = @as(f64, self.lm_head.row_norms[token_id]);
+            if (row_norm <= 0.0) continue;
+
+            const row = self.lm_head.data[token_id * self.d ..][0..self.d];
+            const alignment = dotRowF32(row, self.syntax_center) / row_norm;
+            if (alignment > max_alignment) {
+                max_alignment = alignment;
+                anchor_id = token_id;
+            }
+        }
+
+        const anchor = self.lm_head.data[anchor_id * self.d ..][0..self.d];
+        const anchor_norm = @as(f64, self.lm_head.row_norms[anchor_id]);
+        const anchor_parallel = dotRowF32(anchor, self.syntax_center);
+        const anchor_orthogonal2 = @max(0.0, anchor_norm * anchor_norm - anchor_parallel * anchor_parallel);
+        const anchor_orthogonal = @sqrt(anchor_orthogonal2);
+
+        const right_angle: f64 = 0.5 * std.math.pi;
+        var min_theta: f64 = right_angle;
+        var worst_case_semantic_token: usize = 0;
+        for (self.semantic_cluster_ids[0..self.semantic_cluster_len]) |token_u32| {
+            const token_id: usize = @intCast(token_u32);
+            const row_norm = @as(f64, self.lm_head.row_norms[token_id]);
+            if (row_norm <= 0.0) continue;
+
+            const row = self.lm_head.data[token_id * self.d ..][0..self.d];
+            const parallel = dotRowF32(row, self.syntax_center);
+            const orthogonal2 = @max(0.0, row_norm * row_norm - parallel * parallel);
+            const orthogonal = @sqrt(orthogonal2);
+
+            const numerator = anchor_parallel - parallel;
+            const denominator = anchor_orthogonal + orthogonal;
+            const theta = if (numerator <= 0.0)
+                0.0
+            else if (denominator <= 0.0)
+                right_angle
+            else
+                std.math.atan(numerator / denominator);
+
+            if (theta < min_theta) {
+                min_theta = theta;
+                worst_case_semantic_token = token_id;
+            }
+        }
+
+        self.syntax_tau = @floatCast(@cos(min_theta));
+        self.syntax_anchor_id = @intCast(anchor_id);
+        self.syntax_worst_semantic_id = @intCast(worst_case_semantic_token);
+
+        std.log.info(
+            "syntax oracle: syntax={d} semantic={d} junk={d} tau={d:.8} theta={d:.6} anchor={d} anchor_alignment={d:.6} worst_semantic={d}",
+            .{
+                self.syntax_cluster_len,
+                self.semantic_cluster_len,
+                skipped_junk,
+                self.syntax_tau,
+                min_theta,
+                anchor_id,
+                max_alignment,
+                worst_case_semantic_token,
+            },
+        );
+        if (self.syntax_tau > 0.99) {
+            std.log.warn("syntax oracle tau is very high; worst semantic token may sit on the syntax boundary", .{});
+        }
+    }
+
+    pub fn precompute_phase(self: *Quantized) !void {
+        try self.precomputePhase();
+    }
+
+    pub fn precompute_phase_filtered(self: *Quantized, syntax_token_id_threshold: usize) !void {
+        try self.precomputePhaseFiltered(syntax_token_id_threshold);
+    }
+
+    pub fn syntaxOracleCosTheta(self: *Quantized, query: []const f32) f32 {
+        std.debug.assert(self.syntax_cluster_len > 0);
+        std.debug.assert(query.len == self.d);
+
+        var dot: f64 = 0.0;
+        var norm2: f64 = 0.0;
+        for (query, self.syntax_center) |query_value, center_value| {
+            dot += @as(f64, query_value) * @as(f64, center_value);
+            norm2 += @as(f64, query_value) * @as(f64, query_value);
+        }
+        if (norm2 == 0.0) return 0.0;
+        return @floatCast(dot / @sqrt(norm2));
+    }
+
+    pub fn syntaxOraclePredictsSyntax(self: *Quantized, query: []const f32) bool {
+        return self.syntaxOracleCosTheta(query) > self.syntax_tau;
+    }
+
+    pub fn sampleSyntaxOracleDetailed(self: *Quantized, query: []const f32) SyntaxOracleSample {
+        const cos_theta = self.syntaxOracleCosTheta(query);
+        const predicted_syntax = cos_theta > self.syntax_tau;
+        const dense = self.sampleDense(query);
+        const top1 = dense.rows[0];
+        const top1_is_syntax = self.syntax_cluster_mask[top1];
+        return .{
+            .correct = predicted_syntax == top1_is_syntax,
+            .safe = !predicted_syntax or top1_is_syntax,
+            .predicted_syntax = predicted_syntax,
+            .top1_is_syntax = top1_is_syntax,
+            .top1 = top1,
+            .cos_theta = cos_theta,
+        };
+    }
+
+    pub fn sampleSyntaxOracle(self: *Quantized, query: []const f32) bool {
+        return self.sampleSyntaxOracleDetailed(query).correct;
+    }
+
+    pub fn sample_token(self: *Quantized, query: []const f32) bool {
+        return self.sampleSyntaxOracle(query);
+    }
+
     pub fn sampleDense(self: *Quantized, query: []const f32) DenseSample {
         var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
         var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
 
         var i: usize = 0;
         while (i < self.vocab_size) : (i += 1) {
-            const score = self.realLogit(query, self.lm_head.data[i * self.d..(i + 1) * self.d]);
+            if (self.lm_head.is_junk[i]) {
+                self.dense_logits[i] = -std.math.floatMax(f32);
+                continue;
+            }
+            const score = self.realLogit(query, self.lm_head.data[i * self.d .. (i + 1) * self.d]);
             self.dense_logits[i] = score;
 
             if (score > top_scores[top_k_sliced - 1]) {
@@ -1403,7 +1769,6 @@ pub const Quantized = struct {
         return .{ .rows = top_rows, .logits = top_scores, .probas = top_probas, .max_logit = max_score, .total_exp = total };
     }
 
-    
     fn log2PhaseRows(self: *Quantized, label: []const u8, title: []const u8, logits: []const Logit, count: usize, tokenizer: *Tokenizer) !void {
         std.log.info("{s} {s}:", .{ label, title });
         std.log.info("{s:>4} {s:>10} {s:>14} {s:>14} {s:>14} {s:>14}  {s}", .{ "rank", "token", "approx", "lower", "upper", "real", "text" });
@@ -1528,10 +1893,10 @@ pub const Quantized = struct {
         try self.log2PhaseBounds("2-bit", logits, tokenizer);
     }
 
-    inline fn insertTop16(row: usize, score: f32, rows: *[top_k_sliced]usize, scores: *[top_k_sliced]f32) void {
-        if (score <= scores[top_k_sliced - 1]) return;
+    inline fn insertTopK(comptime k: usize, row: usize, score: f32, rows: *[k]usize, scores: *[k]f32) void {
+        if (score <= scores[k - 1]) return;
 
-        var insert_pos = top_k_sliced - 1;
+        var insert_pos = k - 1;
         while (insert_pos > 0 and score > scores[insert_pos - 1]) {
             scores[insert_pos] = scores[insert_pos - 1];
             rows[insert_pos] = rows[insert_pos - 1];
@@ -1541,17 +1906,12 @@ pub const Quantized = struct {
         rows[insert_pos] = row;
     }
 
-    inline fn insertTop8(row: usize, score: f32, rows: *[8]usize, scores: *[8]f32) void {
-        if (score <= scores[7]) return;
+    inline fn insertTop16(row: usize, score: f32, rows: *[top_k_sliced]usize, scores: *[top_k_sliced]f32) void {
+        insertTopK(top_k_sliced, row, score, rows, scores);
+    }
 
-        var insert_pos: usize = 7;
-        while (insert_pos > 0 and score > scores[insert_pos - 1]) {
-            scores[insert_pos] = scores[insert_pos - 1];
-            rows[insert_pos] = rows[insert_pos - 1];
-            insert_pos -= 1;
-        }
-        scores[insert_pos] = score;
-        rows[insert_pos] = row;
+    inline fn insertTop8(row: usize, score: f32, rows: *[8]usize, scores: *[8]f32) void {
+        insertTopK(8, row, score, rows, scores);
     }
 
     inline fn inTop16(row: usize, rows: *const [top_k_sliced]usize) bool {
@@ -1572,6 +1932,7 @@ pub const Quantized = struct {
         const err_const: f32 = 0.92;
         var best_lower_bound: f32 = -std.math.inf(f32);
 
+        // Phase 1: score every row with the 1-bit QJL approximation and store an upper bound.
         var i: usize = 0;
         while (i < self.vocab_size) : (i += 1) {
             const approx = self.dotQjlSymmetric(i, quantized_query, query_l2_norm);
@@ -1587,6 +1948,7 @@ pub const Quantized = struct {
         var nb_scored: usize = 0;
         var prune_threshold = best_lower_bound;
 
+        // Phase 2a: exact-score the approximate top16 to tighten the pruning threshold.
         i = 0;
         while (i < top_k_sliced) : (i += 1) {
             const row_i = approx_rows[i];
@@ -1598,6 +1960,7 @@ pub const Quantized = struct {
             self.dense_logits[row_i] = -std.math.inf(f32);
         }
 
+        // Phase 2b: exact-score only rows whose 1-bit upper bound can still beat the threshold.
         i = 0;
         while (i < self.vocab_size) : (i += 1) {
             if (self.dense_logits[i] < prune_threshold) continue;
@@ -1629,6 +1992,7 @@ pub const Quantized = struct {
         const err_const: f32 = 0.49;
         var best_lower_bound: f32 = -std.math.inf(f32);
 
+        // Phase 1: score every row with the 2-bit QJL approximation and store an upper bound.
         var i: usize = 0;
         while (i < self.vocab_size) : (i += 1) {
             const dot: f32 = @floatFromInt(self.dotQjlSymmetric2Bits(i, &query_msb, &query_lsb));
@@ -1645,6 +2009,7 @@ pub const Quantized = struct {
         var nb_scored: usize = 0;
         var prune_threshold = best_lower_bound;
 
+        // Phase 2a: exact-score the approximate top16 to tighten the pruning threshold.
         i = 0;
         while (i < top_k_sliced) : (i += 1) {
             const row_i = approx_rows[i];
@@ -1656,6 +2021,7 @@ pub const Quantized = struct {
             self.dense_logits[row_i] = -std.math.inf(f32);
         }
 
+        // Phase 2b: exact-score only rows whose 2-bit upper bound can still beat the threshold.
         i = 0;
         while (i < self.vocab_size) : (i += 1) {
             if (self.dense_logits[i] < prune_threshold) continue;
@@ -1674,12 +2040,15 @@ pub const Quantized = struct {
         var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
         var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
 
+        if (true) return .{ .rows = top_rows, .nb_scored = 0, .nb_2bit_scored = 0 };
+
         const quantized_query, _, const query_l2_norm = try self.quantizeQjlVector(query);
         const z_score: f32 = 5.0;
         const err_const_1bit: f32 = 0.92;
         const err_const_2bits: f32 = 0.49;
         var best_lower_bound: f32 = -std.math.inf(f32);
 
+        // Phase 1: score all rows with full 1-bit QJL and keep only loose upper bounds.
         var i: usize = 0;
         while (i < self.vocab_size) : (i += 1) {
             const approx = self.dotQjlSymmetric(i, quantized_query, query_l2_norm);
@@ -1690,6 +2059,7 @@ pub const Quantized = struct {
         }
 
         var nb_scored: usize = 0;
+        // Phase 1b: exact-score the 1-bit top8 to raise the global lower bound.
         i = 0;
         while (i < 8) : (i += 1) {
             if (phase1_scores[i] == -std.math.inf(f32)) break;
@@ -1708,6 +2078,7 @@ pub const Quantized = struct {
         var phase2_scores: [8]f32 = [_]f32{-std.math.inf(f32)} ** 8;
         var nb_2bit_scored: usize = 0;
 
+        // Phase 2: rescore rows surviving the 1-bit bound with the tighter 2-bit QJL approximation.
         i = 0;
         while (i < self.vocab_size) : (i += 1) {
             if (self.dense_logits[i] < best_lower_bound) {
@@ -1724,6 +2095,7 @@ pub const Quantized = struct {
             insertTop8(i, approx, &phase2_rows, &phase2_scores);
         }
 
+        // Phase 2b: exact-score the 2-bit top8 to tighten the final dense threshold.
         i = 0;
         while (i < 8) : (i += 1) {
             if (phase2_scores[i] == -std.math.inf(f32)) break;
@@ -1736,6 +2108,7 @@ pub const Quantized = struct {
             self.dense_logits[row_i] = -std.math.inf(f32);
         }
 
+        // Phase 3: exact-score the remaining rows whose 2-bit upper bound still survives.
         i = 0;
         while (i < self.vocab_size) : (i += 1) {
             if (self.dense_logits[i] < best_lower_bound) continue;
@@ -1747,5 +2120,667 @@ pub const Quantized = struct {
         }
 
         return .{ .rows = top_rows, .nb_scored = nb_scored, .nb_2bit_scored = nb_2bit_scored };
+    }
+
+    pub fn sample4Phases(self: *Quantized, query: []const f32) !TwoPhaseSample {
+        std.debug.assert(query.len == self.d);
+        const prefix_coord_count = 4;
+
+        var prefix_coords: [prefix_coord_count]usize = [_]usize{0} ** prefix_coord_count;
+        var prefix_scores: [prefix_coord_count]f32 = [_]f32{-std.math.inf(f32)} ** prefix_coord_count;
+        var phase1_rows: [8]usize = [_]usize{0} ** 8;
+        var phase1_scores: [8]f32 = [_]f32{-std.math.inf(f32)} ** 8;
+        var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
+        var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
+
+        if (true) return .{ .rows = top_rows, .nb_scored = 0, .nb_2bit_scored = 0 };
+
+        var coord: usize = 0;
+        // Phase 0a: find the largest raw query coordinates for exact prefix scoring.
+        while (coord < self.d) : (coord += 1) {
+            insertTopK(prefix_coord_count, coord, @abs(query[coord]), &prefix_coords, &prefix_scores);
+        }
+
+        @memset(self.partial_logits, 0.0);
+        const simd_len = 16;
+        const Vec = @Vector(simd_len, f32);
+
+        var prefix_i: usize = 0;
+        // Phase 0b: compute the exact lm_head dot contribution from the raw coordinate prefix.
+        while (prefix_i < prefix_coord_count) : (prefix_i += 1) {
+            if (prefix_scores[prefix_i] == -std.math.inf(f32)) break;
+            const query_coord = prefix_coords[prefix_i];
+            const query_value = query[query_coord];
+            const coord_values = self.lm_head.data_t[query_coord * self.vocab_size ..][0..self.vocab_size];
+            const query_vec: Vec = @splat(query_value);
+
+            var row_i: usize = 0;
+            while (row_i + simd_len <= self.vocab_size) : (row_i += simd_len) {
+                const coord_vec: Vec = coord_values[row_i..][0..simd_len].*;
+                var logits_vec: Vec = self.partial_logits[row_i..][0..simd_len].*;
+                logits_vec = @mulAdd(Vec, coord_vec, query_vec, logits_vec);
+                self.partial_logits[row_i..][0..simd_len].* = logits_vec;
+            }
+            while (row_i < self.vocab_size) : (row_i += 1) {
+                self.partial_logits[row_i] += coord_values[row_i] * query_value;
+            }
+        }
+
+        // Phase 0c: zero the exact prefix coordinates before quantizing the residual query.
+        @memcpy(self.f32_buffer[0..self.d], query);
+        prefix_i = 0;
+        while (prefix_i < prefix_coord_count) : (prefix_i += 1) {
+            if (prefix_scores[prefix_i] == -std.math.inf(f32)) break;
+            self.f32_buffer[prefix_coords[prefix_i]] = 0.0;
+        }
+
+        const quantized_query, _, const query_l2_norm = try self.quantizeQjlVector(self.f32_buffer[0..self.d]);
+        const z_score: f32 = 5.0;
+        const err_const_1bit: f32 = 0.92;
+        const err_const_2bits: f32 = 0.49;
+        var best_lower_bound: f32 = -std.math.inf(f32);
+
+        // Phase 1: score all rows as exact prefix plus full 1-bit QJL residual bounds.
+        var i: usize = 0;
+        while (i < self.vocab_size) : (i += 1) {
+            const approx = self.partial_logits[i] + self.dotQjlSymmetric(i, quantized_query, query_l2_norm);
+            const err = z_score * err_const_1bit * query_l2_norm * self.lm_head.row_norms[i] * self.d_inv_norm;
+            self.dense_logits[i] = approx + err;
+            best_lower_bound = @max(best_lower_bound, approx - err);
+            insertTop8(i, approx, &phase1_rows, &phase1_scores);
+        }
+
+        var nb_scored: usize = 0;
+        // Phase 1b: exact-score the 1-bit top8 to tighten the lower bound.
+        i = 0;
+        while (i < 8) : (i += 1) {
+            if (phase1_scores[i] == -std.math.inf(f32)) break;
+            const row_i = phase1_rows[i];
+            const row = self.lm_head.data[row_i * self.d .. (row_i + 1) * self.d];
+            const real = self.realLogit(query, row);
+            nb_scored += 1;
+            best_lower_bound = @max(best_lower_bound, real);
+            insertTop16(row_i, real, &top_rows, &top_scores);
+            self.dense_logits[row_i] = -std.math.inf(f32);
+        }
+
+        // Phase 1c: compact rows whose 1-bit upper bound survives into the 2-bit phase.
+        var active_count: usize = 0;
+        i = 0;
+        while (i < self.vocab_size) : (i += 1) {
+            if (self.dense_logits[i] < best_lower_bound) {
+                self.dense_logits[i] = -std.math.inf(f32);
+                continue;
+            }
+            self.active_rows[active_count] = @intCast(i);
+            active_count += 1;
+        }
+
+        const query_msb, const query_lsb = self.quantize2BitsSymmetric(query_l2_norm);
+        const query_scale = scaleFactor2BitsSymmetric(self.f32_buffer[0..4096], &query_msb, &query_lsb);
+        var phase2_rows: [8]usize = [_]usize{0} ** 8;
+        var phase2_scores: [8]f32 = [_]f32{-std.math.inf(f32)} ** 8;
+        var nb_2bit_scored: usize = 0;
+
+        // Phase 2: rescore surviving rows as exact prefix plus 2-bit QJL residual bounds.
+        i = 0;
+        while (i < active_count) : (i += 1) {
+            const row_i: usize = @intCast(self.active_rows[i]);
+            nb_2bit_scored += 1;
+            const dot: f32 = @floatFromInt(self.dotQjlSymmetric2Bits(row_i, &query_msb, &query_lsb));
+            const approx = self.partial_logits[row_i] + query_scale * self.qjl_row_scale_2bits[row_i] * dot;
+            const err = z_score * err_const_2bits * query_l2_norm * self.lm_head.row_norms[row_i] * self.d_inv_norm;
+            self.dense_logits[row_i] = approx + err;
+            best_lower_bound = @max(best_lower_bound, approx - err);
+            insertTop8(row_i, approx, &phase2_rows, &phase2_scores);
+        }
+
+        // Phase 2b: exact-score the 2-bit top8 to tighten the final dense threshold.
+        i = 0;
+        while (i < 8) : (i += 1) {
+            if (phase2_scores[i] == -std.math.inf(f32)) break;
+            const row_i = phase2_rows[i];
+            const row = self.lm_head.data[row_i * self.d .. (row_i + 1) * self.d];
+            const real = self.realLogit(query, row);
+            nb_scored += 1;
+            best_lower_bound = @max(best_lower_bound, real);
+            insertTop16(row_i, real, &top_rows, &top_scores);
+            self.dense_logits[row_i] = -std.math.inf(f32);
+        }
+
+        // Phase 3: exact-score remaining rows whose 2-bit upper bound still survives.
+        i = 0;
+        while (i < active_count) : (i += 1) {
+            const row_i: usize = @intCast(self.active_rows[i]);
+            if (self.dense_logits[row_i] < best_lower_bound) continue;
+            const row = self.lm_head.data[row_i * self.d .. (row_i + 1) * self.d];
+            const real = self.realLogit(query, row);
+            nb_scored += 1;
+            best_lower_bound = @max(best_lower_bound, real);
+            insertTop16(row_i, real, &top_rows, &top_scores);
+        }
+
+        return .{ .rows = top_rows, .nb_scored = nb_scored, .nb_2bit_scored = nb_2bit_scored };
+    }
+
+    inline fn qjlSignDotCoeff(mismatch_count: u16, comptime coord_count: usize) f32 {
+        const mismatch_i: usize = @intCast(mismatch_count);
+        std.debug.assert(mismatch_i <= coord_count);
+        return switch (coord_count) {
+            qjl_micro_coord_count => qjl_micro_sign_dot_lut[mismatch_i],
+            qjl_half_coord_count => qjl_half_sign_dot_lut[mismatch_i],
+            4096 => qjl_full_sign_dot_lut[mismatch_i],
+            else => @compileError("unsupported QJL sign-dot LUT size"),
+        };
+    }
+
+    inline fn qjlPartialSignDot(query_l2_norm: f32, row_norm: f32, mismatch_count: u16, comptime coord_count: usize) f32 {
+        return query_l2_norm * row_norm * qjlSignDotCoeff(mismatch_count, coord_count);
+    }
+
+    inline fn resetTopK(comptime k: usize, rows: *[k]usize, scores: *[k]f32) void {
+        rows.* = [_]usize{0} ** k;
+        scores.* = [_]f32{-std.math.inf(f32)} ** k;
+    }
+
+    inline fn exactScorePhaseTopK(
+        comptime k: usize,
+        self: *Quantized,
+        query: []const f32,
+        phase_rows: *const [k]usize,
+        phase_scores: *const [k]f32,
+        top_rows: *[top_k_sliced]usize,
+        top_scores: *[top_k_sliced]f32,
+        best_lower_bound: *f32,
+        nb_scored: *usize,
+    ) void {
+        self.zml_handler.tic(&self.zml_handler.timers.quant_5p_dense_top8);
+        defer self.zml_handler.toc(&self.zml_handler.timers.quant_5p_dense_top8);
+        for (0..k) |top_i| {
+            if (phase_scores[top_i] == -std.math.inf(f32)) break;
+            const row_i = phase_rows[top_i];
+            if (self.lm_head.is_junk[row_i]) continue;
+            if (self.dense_logits[row_i] == -std.math.inf(f32)) continue;
+            const row = self.lm_head.data[row_i * self.d ..][0..self.d];
+            const real = self.realLogit(query, row);
+            nb_scored.* += 1;
+            best_lower_bound.* = @max(best_lower_bound.*, real);
+            insertTop16(row_i, real, top_rows, top_scores);
+            self.dense_logits[row_i] = -std.math.inf(f32);
+        }
+    }
+
+    pub fn sample5PhasesOptimized(self: *Quantized, query: []const f32) !TwoPhaseSample {
+        std.debug.assert(query.len == self.d);
+        const prefix_coord_count = 12;
+        const phase_exact_top_k = 16;
+        const vocab_size = self.vocab_size;
+        const d = self.d;
+        const lm_head = self.lm_head;
+        const lm_data_t = lm_head.data_t;
+        const row_norms = lm_head.row_norms;
+        const partial_logits = self.partial_logits;
+        const dense_logits = self.dense_logits;
+        const active_rows = self.active_rows;
+        const qjl_micro_rows = self.qjl_micro_rows;
+        const qjl_micro_to_half_rows = self.qjl_micro_to_half_rows;
+        const qjl_micro_mismatches = self.qjl_micro_mismatches;
+
+        var prefix_coords: [prefix_coord_count]usize = [_]usize{0} ** prefix_coord_count;
+        var prefix_scores: [prefix_coord_count]f32 = [_]f32{-std.math.inf(f32)} ** prefix_coord_count;
+        var phase_rows: [phase_exact_top_k]usize = [_]usize{0} ** phase_exact_top_k;
+        var phase_scores: [phase_exact_top_k]f32 = [_]f32{-std.math.inf(f32)} ** phase_exact_top_k;
+        var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
+        var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
+
+        // Phase 0a: find the largest raw query coordinates for exact prefix scoring.
+        //self.zml_handler.tic(&self.zml_handler.timers.quant_5p_prefix_top);
+        for (0..d) |coord| {
+            insertTopK(prefix_coord_count, coord, @abs(query[coord]), &prefix_coords, &prefix_scores);
+        }
+        //self.zml_handler.toc(&self.zml_handler.timers.quant_5p_prefix_top);
+
+        // Phase 0b: compute the exact lm_head dot contribution from the raw coordinate prefix.
+        //self.zml_handler.tic(&self.zml_handler.timers.quant_5p_prefix_dot);
+        @memset(partial_logits, 0.0);
+        const simd_len = 16;
+        const Vec = @Vector(simd_len, f32);
+        for (0..prefix_coord_count) |prefix_i| {
+            if (prefix_scores[prefix_i] == -std.math.inf(f32)) break;
+            const query_coord = prefix_coords[prefix_i];
+            const query_value = query[query_coord];
+            const coord_values = lm_data_t[query_coord * vocab_size ..][0..vocab_size];
+            const query_vec: Vec = @splat(query_value);
+
+            var row_i: usize = 0;
+            while (row_i + simd_len <= vocab_size) : (row_i += simd_len) {
+                const coord_vec: Vec = coord_values[row_i..][0..simd_len].*;
+                var logits_vec: Vec = partial_logits[row_i..][0..simd_len].*;
+                logits_vec = @mulAdd(Vec, coord_vec, query_vec, logits_vec);
+                partial_logits[row_i..][0..simd_len].* = logits_vec;
+            }
+            while (row_i < vocab_size) : (row_i += 1) {
+                partial_logits[row_i] += coord_values[row_i] * query_value;
+            }
+        }
+        //self.zml_handler.toc(&self.zml_handler.timers.quant_5p_prefix_dot);
+
+        // Phase 0c: zero the exact prefix coordinates before quantizing the residual query.
+        //self.zml_handler.tic(&self.zml_handler.timers.quant_5p_quantize);
+        @memcpy(self.f32_buffer[0..d], query);
+        for (0..prefix_coord_count) |prefix_i| {
+            if (prefix_scores[prefix_i] == -std.math.inf(f32)) break;
+            self.f32_buffer[prefix_coords[prefix_i]] = 0.0;
+        }
+
+        const quantized_query, _, const query_l2_norm = try self.quantizeQjlVector(self.f32_buffer[0..d]);
+        //self.zml_handler.toc(&self.zml_handler.timers.quant_5p_quantize);
+        const z_score: f32 = 5.0;
+        const err_const_1bit: f32 = 0.92;
+        const err_const_2bits: f32 = 0.49;
+        const qjl_micro_err_scale: f32 = @sqrt(@as(f32, @floatFromInt(d)) / @as(f32, @floatFromInt(qjl_micro_coord_count)));
+        const qjl_half_err_scale: f32 = @sqrt(@as(f32, @floatFromInt(d)) / @as(f32, @floatFromInt(qjl_half_coord_count)));
+        const base_err_scale_1bit = z_score * err_const_1bit * query_l2_norm * self.d_inv_norm;
+        const err_scale_micro = base_err_scale_1bit * qjl_micro_err_scale;
+        const err_scale_half = base_err_scale_1bit * qjl_half_err_scale;
+        const err_scale_2bits = z_score * err_const_2bits * query_l2_norm * self.d_inv_norm;
+        var best_lower_bound: f32 = -std.math.inf(f32);
+
+        // Phase 0.5: score the first 1024 rotated sign bits with widened 1-bit bounds.
+        //self.zml_handler.tic(&self.zml_handler.timers.quant_5p_micro);
+        resetTopK(phase_exact_top_k, &phase_rows, &phase_scores);
+        const query_micro_words = qjlMicroWords(&quantized_query);
+        const query_micro_vec: @Vector(qjl_micro_u128_word_count, u128) = query_micro_words.*;
+        for (0..vocab_size) |row_i| {
+            if (lm_head.is_junk[row_i]) {
+                dense_logits[row_i] = -std.math.inf(f32);
+                continue;
+            }
+            const row_norm = row_norms[row_i];
+
+            const row_words = &qjl_micro_rows[row_i];
+            var mismatch_count_u16: u16 = 0;
+            mismatch_count_u16 += qjlMismatchU128Loaded(qjl_micro_u128_word_count, row_words, query_micro_vec);
+            qjl_micro_mismatches[row_i] = mismatch_count_u16;
+
+            const approx = partial_logits[row_i] + qjlPartialSignDot(query_l2_norm, row_norm, mismatch_count_u16, qjl_micro_coord_count);
+            const err = err_scale_micro * row_norm;
+            dense_logits[row_i] = approx + err;
+            best_lower_bound = @max(best_lower_bound, approx - err);
+            insertTopK(phase_exact_top_k, row_i, approx, &phase_rows, &phase_scores);
+        }
+        //self.zml_handler.toc(&self.zml_handler.timers.quant_5p_micro);
+
+        var nb_scored: usize = 0;
+        exactScorePhaseTopK(phase_exact_top_k, self, query, &phase_rows, &phase_scores, &top_rows, &top_scores, &best_lower_bound, &nb_scored);
+
+        // Phase 0.5 prune: compact rows whose micro upper bound survives.
+        //self.zml_handler.tic(&self.zml_handler.timers.quant_5p_prune);
+        var active_count: usize = 0;
+        for (0..vocab_size) |row_i| {
+            active_rows[active_count] = @intCast(row_i);
+            active_count += @intFromBool(dense_logits[row_i] >= best_lower_bound);
+        }
+        //self.zml_handler.toc(&self.zml_handler.timers.quant_5p_prune);
+
+        // Phase 0.75: score the next 1024 QJL bits, reusing the micro mismatch counts.
+        //self.zml_handler.tic(&self.zml_handler.timers.quant_5p_half);
+        resetTopK(phase_exact_top_k, &phase_rows, &phase_scores);
+        const query_micro_to_half_words = qjlMicroToHalfWords(&quantized_query);
+        const query_micro_to_half_vec: @Vector(qjl_micro_u128_word_count, u128) = query_micro_to_half_words.*;
+        var nb_half_1bit_scored: usize = 0;
+        for (active_rows[0..active_count]) |row_u32| {
+            const row_i: usize = @intCast(row_u32);
+            nb_half_1bit_scored += 1;
+
+            const row_words = &qjl_micro_to_half_rows[row_i];
+            var mismatch_count_u16: u16 = qjl_micro_mismatches[row_i];
+            mismatch_count_u16 += qjlMismatchU128Loaded(qjl_micro_u128_word_count, row_words, query_micro_to_half_vec);
+            qjl_micro_mismatches[row_i] = mismatch_count_u16;
+
+            const row_norm = row_norms[row_i];
+            const approx = partial_logits[row_i] + qjlPartialSignDot(query_l2_norm, row_norm, mismatch_count_u16, qjl_half_coord_count);
+            const err = err_scale_half * row_norm;
+            dense_logits[row_i] = approx + err;
+            best_lower_bound = @max(best_lower_bound, approx - err);
+            insertTopK(phase_exact_top_k, row_i, approx, &phase_rows, &phase_scores);
+        }
+        //self.zml_handler.toc(&self.zml_handler.timers.quant_5p_half);
+
+        exactScorePhaseTopK(phase_exact_top_k, self, query, &phase_rows, &phase_scores, &top_rows, &top_scores, &best_lower_bound, &nb_scored);
+
+        // Phase 0.75 prune: compact rows whose half-dot upper bound survives.
+        //self.zml_handler.tic(&self.zml_handler.timers.quant_5p_prune);
+        var next_active_count: usize = 0;
+        for (active_rows[0..active_count]) |row_u32| {
+            const row_i: usize = @intCast(row_u32);
+            active_rows[next_active_count] = row_u32;
+            next_active_count += @intFromBool(dense_logits[row_i] >= best_lower_bound);
+        }
+        active_count = next_active_count;
+        //self.zml_handler.toc(&self.zml_handler.timers.quant_5p_prune);
+
+        // Phase 1: rescore survivors with full 1-bit QJL, reusing the first 2048-bit popcount.
+        //self.zml_handler.tic(&self.zml_handler.timers.quant_5p_full_1bit);
+        resetTopK(phase_exact_top_k, &phase_rows, &phase_scores);
+        var nb_1bit_scored: usize = 0;
+        const query_half_to_full_words = qjlHalfToFullWords(&quantized_query);
+        const query_half_to_full_vec: @Vector(qjl_half_to_full_u128_word_count, u128) = query_half_to_full_words.*;
+        for (active_rows[0..active_count]) |row_u32| {
+            const row_i: usize = @intCast(row_u32);
+            nb_1bit_scored += 1;
+            var mismatch_count_u16 = qjl_micro_mismatches[row_i];
+            mismatch_count_u16 += qjlMismatchU128Loaded(
+                qjl_half_to_full_u128_word_count,
+                &self.qjl_half_to_full_rows[row_i],
+                query_half_to_full_vec,
+            );
+            const approx = partial_logits[row_i] + self.dotQjlSymmetricFromMismatchCount(row_i, query_l2_norm, mismatch_count_u16);
+            const err = base_err_scale_1bit * row_norms[row_i];
+            dense_logits[row_i] = approx + err;
+            best_lower_bound = @max(best_lower_bound, approx - err);
+            insertTopK(phase_exact_top_k, row_i, approx, &phase_rows, &phase_scores);
+        }
+        //self.zml_handler.toc(&self.zml_handler.timers.quant_5p_full_1bit);
+
+        exactScorePhaseTopK(phase_exact_top_k, self, query, &phase_rows, &phase_scores, &top_rows, &top_scores, &best_lower_bound, &nb_scored);
+
+        // Phase 1 prune: compact rows whose full 1-bit upper bound survives into 2-bit scoring.
+        //self.zml_handler.tic(&self.zml_handler.timers.quant_5p_prune);
+        next_active_count = 0;
+        for (active_rows[0..active_count]) |row_u32| {
+            const row_i: usize = @intCast(row_u32);
+            active_rows[next_active_count] = row_u32;
+            next_active_count += @intFromBool(dense_logits[row_i] >= best_lower_bound);
+        }
+        active_count = next_active_count;
+        //self.zml_handler.toc(&self.zml_handler.timers.quant_5p_prune);
+
+        // Phase 2: score survivors with the tighter 2-bit QJL residual approximation.
+        //self.zml_handler.tic(&self.zml_handler.timers.quant_5p_2bit);
+        const query_msb, const query_lsb = self.quantize2BitsSymmetric(query_l2_norm);
+        const query_scale = scaleFactor2BitsSymmetric(self.f32_buffer[0..4096], &query_msb, &query_lsb);
+        resetTopK(phase_exact_top_k, &phase_rows, &phase_scores);
+        var nb_2bit_scored: usize = 0;
+        for (active_rows[0..active_count]) |row_u32| {
+            const row_i: usize = @intCast(row_u32);
+            nb_2bit_scored += 1;
+            const dot: f32 = @floatFromInt(self.dotQjlSymmetric2Bits(row_i, &query_msb, &query_lsb));
+            const approx = partial_logits[row_i] + query_scale * self.qjl_row_scale_2bits[row_i] * dot;
+            const err = err_scale_2bits * row_norms[row_i];
+            dense_logits[row_i] = approx + err;
+            best_lower_bound = @max(best_lower_bound, approx - err);
+            insertTopK(phase_exact_top_k, row_i, approx, &phase_rows, &phase_scores);
+        }
+        //self.zml_handler.toc(&self.zml_handler.timers.quant_5p_2bit);
+
+        exactScorePhaseTopK(phase_exact_top_k, self, query, &phase_rows, &phase_scores, &top_rows, &top_scores, &best_lower_bound, &nb_scored);
+
+        // Phase 3: exact-score remaining rows whose 2-bit upper bound still survives.
+        //self.zml_handler.tic(&self.zml_handler.timers.quant_5p_dense_final);
+        for (active_rows[0..active_count]) |row_u32| {
+            const row_i: usize = @intCast(row_u32);
+            if (dense_logits[row_i] < best_lower_bound) continue;
+            const row = lm_head.data[row_i * d ..][0..d];
+            const real = self.realLogit(query, row);
+            nb_scored += 1;
+            best_lower_bound = @max(best_lower_bound, real);
+            insertTop16(row_i, real, &top_rows, &top_scores);
+        }
+        //self.zml_handler.toc(&self.zml_handler.timers.quant_5p_dense_final);
+
+        return .{
+            .rows = top_rows,
+            .nb_scored = nb_scored,
+            .nb_1bit_scored = nb_1bit_scored,
+            .nb_half_1bit_scored = nb_half_1bit_scored,
+            .nb_2bit_scored = nb_2bit_scored,
+        };
+    }
+
+    pub fn sample5PhasesBaseline(self: *Quantized, query: []const f32, comptime phase_exact_top_k: usize) !TwoPhaseSample {
+        std.debug.assert(query.len == self.d);
+        std.debug.assert(phase_exact_top_k > 0);
+        const prefix_coord_count = 4;
+
+        var prefix_coords: [prefix_coord_count]usize = [_]usize{0} ** prefix_coord_count;
+        var prefix_scores: [prefix_coord_count]f32 = [_]f32{-std.math.inf(f32)} ** prefix_coord_count;
+        var phase05_rows: [phase_exact_top_k]usize = [_]usize{0} ** phase_exact_top_k;
+        var phase05_scores: [phase_exact_top_k]f32 = [_]f32{-std.math.inf(f32)} ** phase_exact_top_k;
+        var phase075_rows: [phase_exact_top_k]usize = [_]usize{0} ** phase_exact_top_k;
+        var phase075_scores: [phase_exact_top_k]f32 = [_]f32{-std.math.inf(f32)} ** phase_exact_top_k;
+        var phase1_rows: [phase_exact_top_k]usize = [_]usize{0} ** phase_exact_top_k;
+        var phase1_scores: [phase_exact_top_k]f32 = [_]f32{-std.math.inf(f32)} ** phase_exact_top_k;
+        var phase2_rows: [phase_exact_top_k]usize = [_]usize{0} ** phase_exact_top_k;
+        var phase2_scores: [phase_exact_top_k]f32 = [_]f32{-std.math.inf(f32)} ** phase_exact_top_k;
+        var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
+        var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
+
+        var coord: usize = 0;
+        // Phase 0a: find the largest raw query coordinates for exact prefix scoring.
+        while (coord < self.d) : (coord += 1) {
+            insertTopK(prefix_coord_count, coord, @abs(query[coord]), &prefix_coords, &prefix_scores);
+        }
+
+        @memset(self.partial_logits, 0.0);
+        const simd_len = 16;
+        const Vec = @Vector(simd_len, f32);
+
+        var prefix_i: usize = 0;
+        // Phase 0b: compute the exact lm_head dot contribution from the raw coordinate prefix.
+        while (prefix_i < prefix_coord_count) : (prefix_i += 1) {
+            if (prefix_scores[prefix_i] == -std.math.inf(f32)) break;
+            const query_coord = prefix_coords[prefix_i];
+            const query_value = query[query_coord];
+            const coord_values = self.lm_head.data_t[query_coord * self.vocab_size ..][0..self.vocab_size];
+            const query_vec: Vec = @splat(query_value);
+
+            var row_i: usize = 0;
+            while (row_i + simd_len <= self.vocab_size) : (row_i += simd_len) {
+                const coord_vec: Vec = coord_values[row_i..][0..simd_len].*;
+                var logits_vec: Vec = self.partial_logits[row_i..][0..simd_len].*;
+                logits_vec = @mulAdd(Vec, coord_vec, query_vec, logits_vec);
+                self.partial_logits[row_i..][0..simd_len].* = logits_vec;
+            }
+            while (row_i < self.vocab_size) : (row_i += 1) {
+                self.partial_logits[row_i] += coord_values[row_i] * query_value;
+            }
+        }
+
+        // Phase 0c: zero the exact prefix coordinates before quantizing the residual query.
+        @memcpy(self.f32_buffer[0..self.d], query);
+        prefix_i = 0;
+        while (prefix_i < prefix_coord_count) : (prefix_i += 1) {
+            if (prefix_scores[prefix_i] == -std.math.inf(f32)) break;
+            self.f32_buffer[prefix_coords[prefix_i]] = 0.0;
+        }
+
+        const quantized_query, _, const query_l2_norm = try self.quantizeQjlVector(self.f32_buffer[0..self.d]);
+        const z_score: f32 = 5.0;
+        const err_const_1bit: f32 = 0.92;
+        const err_const_2bits: f32 = 0.49;
+        const qjl_micro_err_scale: f32 = @sqrt(@as(f32, @floatFromInt(self.d)) / @as(f32, @floatFromInt(qjl_micro_coord_count)));
+        const qjl_half_err_scale: f32 = @sqrt(@as(f32, @floatFromInt(self.d)) / @as(f32, @floatFromInt(qjl_half_coord_count)));
+        var best_lower_bound: f32 = -std.math.inf(f32);
+
+        // Phase 0.5a: take the first rotated residual sign bits; no rotated top-k selection.
+        const query_micro_words = qjlMicroWords(&quantized_query);
+
+        var i: usize = 0;
+        // Phase 0.5b: score the precomputed first-bit QJL subslice and use its widened bound.
+        while (i < self.vocab_size) : (i += 1) {
+            if (self.lm_head.is_junk[i]) {
+                self.dense_logits[i] = -std.math.inf(f32);
+                continue;
+            }
+            const row_words = &self.qjl_micro_rows[i];
+            var mismatch_count_u16: u16 = 0;
+            mismatch_count_u16 += qjlMismatchU128(qjl_micro_u128_word_count, row_words, query_micro_words);
+            self.qjl_micro_mismatches[i] = mismatch_count_u16;
+            const row_norm = self.lm_head.row_norms[i];
+            const approx = self.partial_logits[i] + qjlPartialSignDot(query_l2_norm, row_norm, mismatch_count_u16, qjl_micro_coord_count);
+            const err = z_score * err_const_1bit * qjl_micro_err_scale * query_l2_norm * row_norm * self.d_inv_norm;
+            self.dense_logits[i] = approx + err;
+            best_lower_bound = @max(best_lower_bound, approx - err);
+            insertTopK(phase_exact_top_k, i, approx, &phase05_rows, &phase05_scores);
+        }
+
+        var nb_scored: usize = 0;
+        // Phase 0.5c: exact-score the micro-estimator top-k to raise the lower bound early.
+        i = 0;
+        while (i < phase_exact_top_k) : (i += 1) {
+            if (phase05_scores[i] == -std.math.inf(f32)) break;
+            const row_i = phase05_rows[i];
+            const row = self.lm_head.data[row_i * self.d .. (row_i + 1) * self.d];
+            const real = self.realLogit(query, row);
+            nb_scored += 1;
+            best_lower_bound = @max(best_lower_bound, real);
+            insertTop16(row_i, real, &top_rows, &top_scores);
+            self.dense_logits[row_i] = -std.math.inf(f32);
+        }
+
+        // Phase 0.5d: compact rows whose micro upper bound survives into full 1-bit scoring.
+        var active_count: usize = 0;
+        i = 0;
+        while (i < self.vocab_size) : (i += 1) {
+            if (self.dense_logits[i] < best_lower_bound) {
+                self.dense_logits[i] = -std.math.inf(f32);
+                continue;
+            }
+            self.active_rows[active_count] = @intCast(i);
+            active_count += 1;
+        }
+
+        // Phase 0.75a: score the next 1024 QJL bits, reusing the phase 0.5 mismatch count.
+        const query_micro_to_half_words = qjlMicroToHalfWords(&quantized_query);
+        var nb_half_1bit_scored: usize = 0;
+        i = 0;
+        while (i < active_count) : (i += 1) {
+            const row_i: usize = @intCast(self.active_rows[i]);
+            nb_half_1bit_scored += 1;
+
+            const row_words = &self.qjl_micro_to_half_rows[row_i];
+            var mismatch_count_u16: u16 = self.qjl_micro_mismatches[row_i];
+            mismatch_count_u16 += qjlMismatchU128(qjl_micro_u128_word_count, row_words, query_micro_to_half_words);
+            self.qjl_micro_mismatches[row_i] = mismatch_count_u16;
+
+            const row_norm = self.lm_head.row_norms[row_i];
+            const approx = self.partial_logits[row_i] + qjlPartialSignDot(query_l2_norm, row_norm, mismatch_count_u16, qjl_half_coord_count);
+            const err = z_score * err_const_1bit * qjl_half_err_scale * query_l2_norm * row_norm * self.d_inv_norm;
+            self.dense_logits[row_i] = approx + err;
+            best_lower_bound = @max(best_lower_bound, approx - err);
+            insertTopK(phase_exact_top_k, row_i, approx, &phase075_rows, &phase075_scores);
+        }
+
+        // Phase 0.75b: exact-score the half-dot top-k to tighten the lower bound.
+        i = 0;
+        while (i < phase_exact_top_k) : (i += 1) {
+            if (phase075_scores[i] == -std.math.inf(f32)) break;
+            const row_i = phase075_rows[i];
+            const row = self.lm_head.data[row_i * self.d .. (row_i + 1) * self.d];
+            const real = self.realLogit(query, row);
+            nb_scored += 1;
+            best_lower_bound = @max(best_lower_bound, real);
+            insertTop16(row_i, real, &top_rows, &top_scores);
+            self.dense_logits[row_i] = -std.math.inf(f32);
+        }
+
+        // Phase 0.75c: compact rows whose half-dot upper bound survives into full 1-bit scoring.
+        var half_active_count: usize = 0;
+        i = 0;
+        while (i < active_count) : (i += 1) {
+            const row_i: usize = @intCast(self.active_rows[i]);
+            if (self.dense_logits[row_i] < best_lower_bound) {
+                self.dense_logits[row_i] = -std.math.inf(f32);
+                continue;
+            }
+            self.active_rows[half_active_count] = @intCast(row_i);
+            half_active_count += 1;
+        }
+        active_count = half_active_count;
+
+        var nb_1bit_scored: usize = 0;
+        // Phase 1: rescore surviving rows with full 1-bit QJL, reusing the half-dot popcounts.
+        i = 0;
+        while (i < active_count) : (i += 1) {
+            const row_i: usize = @intCast(self.active_rows[i]);
+            nb_1bit_scored += 1;
+            const approx = self.partial_logits[row_i] + self.dotQjlSymmetricWithPrefix(row_i, quantized_query, query_l2_norm, self.qjl_micro_mismatches[row_i], qjl_half_coord_count);
+            const err = z_score * err_const_1bit * query_l2_norm * self.lm_head.row_norms[row_i] * self.d_inv_norm;
+            self.dense_logits[row_i] = approx + err;
+            best_lower_bound = @max(best_lower_bound, approx - err);
+            insertTopK(phase_exact_top_k, row_i, approx, &phase1_rows, &phase1_scores);
+        }
+
+        // Phase 1b: exact-score the full 1-bit top-k to tighten the lower bound.
+        i = 0;
+        while (i < phase_exact_top_k) : (i += 1) {
+            if (phase1_scores[i] == -std.math.inf(f32)) break;
+            const row_i = phase1_rows[i];
+            const row = self.lm_head.data[row_i * self.d .. (row_i + 1) * self.d];
+            const real = self.realLogit(query, row);
+            nb_scored += 1;
+            best_lower_bound = @max(best_lower_bound, real);
+            insertTop16(row_i, real, &top_rows, &top_scores);
+            self.dense_logits[row_i] = -std.math.inf(f32);
+        }
+
+        // Phase 1c: compact rows whose full 1-bit upper bound survives into 2-bit scoring.
+        var next_active_count: usize = 0;
+        i = 0;
+        while (i < active_count) : (i += 1) {
+            const row_i: usize = @intCast(self.active_rows[i]);
+            if (self.dense_logits[row_i] < best_lower_bound) {
+                self.dense_logits[row_i] = -std.math.inf(f32);
+                continue;
+            }
+            self.active_rows[next_active_count] = @intCast(row_i);
+            next_active_count += 1;
+        }
+        active_count = next_active_count;
+
+        const query_msb, const query_lsb = self.quantize2BitsSymmetric(query_l2_norm);
+        const query_scale = scaleFactor2BitsSymmetric(self.f32_buffer[0..4096], &query_msb, &query_lsb);
+        var nb_2bit_scored: usize = 0;
+
+        // Phase 2: rescore surviving rows with the tighter 2-bit QJL residual approximation.
+        i = 0;
+        while (i < active_count) : (i += 1) {
+            const row_i: usize = @intCast(self.active_rows[i]);
+            nb_2bit_scored += 1;
+            const dot: f32 = @floatFromInt(self.dotQjlSymmetric2Bits(row_i, &query_msb, &query_lsb));
+            const approx = self.partial_logits[row_i] + query_scale * self.qjl_row_scale_2bits[row_i] * dot;
+            const err = z_score * err_const_2bits * query_l2_norm * self.lm_head.row_norms[row_i] * self.d_inv_norm;
+            self.dense_logits[row_i] = approx + err;
+            best_lower_bound = @max(best_lower_bound, approx - err);
+            insertTopK(phase_exact_top_k, row_i, approx, &phase2_rows, &phase2_scores);
+        }
+
+        // Phase 2b: exact-score the 2-bit top-k to tighten the final dense threshold.
+        i = 0;
+        while (i < phase_exact_top_k) : (i += 1) {
+            if (phase2_scores[i] == -std.math.inf(f32)) break;
+            const row_i = phase2_rows[i];
+            const row = self.lm_head.data[row_i * self.d .. (row_i + 1) * self.d];
+            const real = self.realLogit(query, row);
+            nb_scored += 1;
+            best_lower_bound = @max(best_lower_bound, real);
+            insertTop16(row_i, real, &top_rows, &top_scores);
+            self.dense_logits[row_i] = -std.math.inf(f32);
+        }
+
+        // Phase 3: exact-score remaining rows whose 2-bit upper bound still survives.
+        i = 0;
+        while (i < active_count) : (i += 1) {
+            const row_i: usize = @intCast(self.active_rows[i]);
+            if (self.dense_logits[row_i] < best_lower_bound) continue;
+            const row = self.lm_head.data[row_i * self.d .. (row_i + 1) * self.d];
+            const real = self.realLogit(query, row);
+            nb_scored += 1;
+            best_lower_bound = @max(best_lower_bound, real);
+            insertTop16(row_i, real, &top_rows, &top_scores);
+        }
+
+        return .{ .rows = top_rows, .nb_scored = nb_scored, .nb_1bit_scored = nb_1bit_scored, .nb_half_1bit_scored = nb_half_1bit_scored, .nb_2bit_scored = nb_2bit_scored };
     }
 };

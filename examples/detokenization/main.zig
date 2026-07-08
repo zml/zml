@@ -139,6 +139,16 @@ pub const Timing_handler = struct {
     quant_vec: Field_timer = .{},
     quant_slice_dot: Field_timer = .{},
     quant_walsh: Field_timer = .{},
+    quant_5p_prefix_top: Field_timer = .{},
+    quant_5p_prefix_dot: Field_timer = .{},
+    quant_5p_quantize: Field_timer = .{},
+    quant_5p_micro: Field_timer = .{},
+    quant_5p_prune: Field_timer = .{},
+    quant_5p_half: Field_timer = .{},
+    quant_5p_full_1bit: Field_timer = .{},
+    quant_5p_2bit: Field_timer = .{},
+    quant_5p_dense_top8: Field_timer = .{},
+    quant_5p_dense_final: Field_timer = .{},
 
     svd_sample: Field_timer = .{},
     svd_sparse_256: Field_timer = .{},
@@ -167,7 +177,18 @@ pub const Timing_handler = struct {
         std.log.info("Quant vec     : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_vec.nanoseconds)) / 1e9});
         std.log.info("Bit slice dot : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_slice_dot.nanoseconds)) / 1e9});
         std.log.info("Quant walsh   : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_walsh.nanoseconds)) / 1e9});
+        std.log.info("5p prefix top : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_prefix_top.nanoseconds)) / 1e9});
+        std.log.info("5p prefix dot : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_prefix_dot.nanoseconds)) / 1e9});
+        std.log.info("5p quantize   : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_quantize.nanoseconds)) / 1e9});
+        std.log.info("5p micro 1bit : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_micro.nanoseconds)) / 1e9});
+        std.log.info("5p prune      : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_prune.nanoseconds)) / 1e9});
+        std.log.info("5p half 1bit  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_half.nanoseconds)) / 1e9});
+        std.log.info("5p full 1bit  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_full_1bit.nanoseconds)) / 1e9});
+        std.log.info("5p 2bit       : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_2bit.nanoseconds)) / 1e9});
+        std.log.info("5p dense topK : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_dense_top8.nanoseconds)) / 1e9});
+        std.log.info("5p dense fin  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_dense_final.nanoseconds)) / 1e9});
         std.log.info("SVD sample    : {d:>6.2}s", .{@as(f64, @floatFromInt(self.svd_sample.nanoseconds)) / 1e9});
+        std.log.info("ms per sample : {d:>6.2}ms", .{@as(f64, @floatFromInt(self.svd_sample.nanoseconds)) / (1e6 * @as(f64, @floatFromInt(self.nb_detokenize)))});
         std.log.info("SVD sparse    : {d:>6.2}s", .{@as(f64, @floatFromInt(self.svd_sparse_256.nanoseconds)) / 1e9});
         std.log.info("SVD top 256   : {d:>6.2}s", .{@as(f64, @floatFromInt(self.svd_top_256.nanoseconds)) / 1e9});
         std.log.info("SVD dense 256 : {d:>6.2}s", .{@as(f64, @floatFromInt(self.svd_dense_256.nanoseconds)) / 1e9});
@@ -220,7 +241,6 @@ pub fn printZmlLogo(io: std.Io) !void {
     try writer.interface.flush();
 }
 
-
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
     defer http_client.deinit();
@@ -246,8 +266,8 @@ pub fn main(init: std.process.Init) !void {
 
     //try runLlm(&zml_handler);
     //try runTestsGraph(&zml_handler);
-    //try runTestsQuantized(&zml_handler);
-    try runTestsSvd(&zml_handler);
+    try runTestsQuantized(&zml_handler);
+    //try runTestsSvd(&zml_handler);
     //try runTestsQuantizedGraph(&zml_handler);
 
     zml_handler.timers.print();
@@ -265,7 +285,6 @@ pub fn runLlm(zml_handler: *Zml_handler) !void {
     defer zml_handler.allocator.free(inspi_result);
     zml_handler.mem.check(0);
 }
-
 
 pub fn runTestsQuantized(zml_handler: *Zml_handler) !void {
     var model_handler = try model_.Model_handler.init(zml_handler);
@@ -288,6 +307,7 @@ pub fn runTestsQuantized(zml_handler: *Zml_handler) !void {
     try quantizer.quantizeQjlLmHead();
     try quantizer.quantizeQjlLmHead2Bits();
     //try quantizer.testQjlReconstructionError();
+    try quantizer.precomputePhaseFiltered(1000);
 
     try testEmbedQuantizedSearch(zml_handler, &quantizer);
 }
@@ -305,9 +325,7 @@ pub fn runTestsSvd(zml_handler: *Zml_handler) !void {
     var svd_sampler: svd_.SvdSampler = try .init(zml_handler, &lm_head, tokenizer, false);
     defer svd_sampler.deinit();
 
-    zml_handler.tic(&zml_handler.timers.svd_sample);
     try testEmbedSvdSearch(zml_handler, &svd_sampler);
-    zml_handler.toc(&zml_handler.timers.svd_sample);
 }
 
 pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
@@ -326,10 +344,10 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     var g_knn_mips, var g_nsw_mips = try buildMipsGraphs(zml_handler, &lm_head, &sampler);
     defer g_knn_mips.deinit();
     defer g_nsw_mips.deinit();
-    
+
     try testEmbedGraphSearch(zml_handler, &g_knn_angu, &sampler, "KNN-angular");
     try testEmbedGraphSearch(zml_handler, &g_knn_mips, &sampler, "KNN-mips");
-    
+
     try testEmbedGraphSearch(zml_handler, &g_nsw_angu, &sampler, "NSW-angular");
     try testEmbedGraphSearch(zml_handler, &g_nsw_mips, &sampler, "NSW-mips");
 
@@ -450,7 +468,7 @@ pub fn runTestsQuantizedGraph(zml_handler: *Zml_handler) !void {
     var quantizer = try Quantized.init(zml_handler, &lm_head);
     defer quantizer.deinit();
     //try quantizer.quantizeQjlLmHead();
-    
+
     //try g_nsw.extendNswRandom(&quantizer);
 
     try testEmbedGraphSearch(zml_handler, &g_nsw, &sampler, "NSW angular");
@@ -461,9 +479,8 @@ pub fn runTestsQuantizedGraph(zml_handler: *Zml_handler) !void {
     //try testEmbedGraphQuantizedSearch(zml_handler, &g_nsw, &quantizer);
 }
 
-
 pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *Graph, _: *Sampler, s: []const u8) !void {
-    std.log.info("\n********** Test embed graph search with graph = {s}", .{ s });
+    std.log.info("\n********** Test embed graph search with graph = {s}", .{s});
 
     var total_count: usize = 0;
     var found_top1_count: usize = 0;
@@ -604,7 +621,7 @@ pub fn testEmbedGraphSearchFullTopK(zml_handler: *Zml_handler, g: *Graph, quanti
 
             zml_handler.timers.nb_detokenize += 1;
             g.greedySearchPrefetch(embed, 0);
-            
+
             const best_found_at = g.visited_at[g.visited[0].node];
             total_best_found_at += @intCast(best_found_at);
             min_best_found_at = @min(min_best_found_at, best_found_at);
@@ -682,7 +699,7 @@ pub fn testEmbedGraphSearchFullTopK(zml_handler: *Zml_handler, g: *Graph, quanti
 }
 
 pub fn testEmbedDualGraphSearch(zml_handler: *Zml_handler, g1: *Graph, g2: *Graph, sampler: *Sampler, s: []const u8) !void {
-    std.log.info("\n********** Test embed dual graph search {s}", .{ s });
+    std.log.info("\n********** Test embed dual graph search {s}", .{s});
 
     var total_count: usize = 0;
     var found_top1_count: usize = 0;
@@ -724,7 +741,7 @@ pub fn testEmbedDualGraphSearch(zml_handler: *Zml_handler, g1: *Graph, g2: *Grap
             const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
 
             zml_handler.timers.nb_detokenize += 1;
-            
+
             g1.greedySearch(embed);
 
             if (g1.params.graph_type == .Angular) {
@@ -814,7 +831,10 @@ pub fn testEmbedSvdSearch(zml_handler: *Zml_handler, svd: *svd_.SvdSampler) !voi
         for (0..n) |embed_index| {
             const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
 
+            zml_handler.timers.nb_detokenize += 1;
+            zml_handler.tic(&zml_handler.timers.svd_sample);
             const sample = try svd.sampleFastMultiPhase(embed);
+            zml_handler.toc(&zml_handler.timers.svd_sample);
 
             total_count += 1;
             total_phase2_scored += sample.nb_phase2_scored;
@@ -862,21 +882,47 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
     var found_top1_1bit_count: usize = 0;
     var found_top1_2bits_count: usize = 0;
     var found_top1_3phases_count: usize = 0;
+    var found_top1_4phases_count: usize = 0;
+    var found_top1_5phases_count: usize = 0;
+    var syntax_oracle_pred_syntax_top1_syntax_count: usize = 0;
+    var syntax_oracle_pred_syntax_top1_outside_count: usize = 0;
+    var syntax_oracle_pred_full_top1_syntax_count: usize = 0;
+    var syntax_oracle_pred_full_top1_outside_count: usize = 0;
     var missing_top16_1bit_count: usize = 0;
     var missing_top16_2bits_count: usize = 0;
     var missing_top16_3phases_count: usize = 0;
+    var missing_top16_4phases_count: usize = 0;
+    var missing_top16_5phases_count: usize = 0;
     var total_dense_scored_1bit: usize = 0;
     var total_dense_scored_2bits: usize = 0;
     var total_dense_scored_3phases: usize = 0;
+    var total_dense_scored_4phases: usize = 0;
+    var total_dense_scored_5phases: usize = 0;
+    var total_1bit_scored_5phases: usize = 0;
+    var total_half_1bit_scored_5phases: usize = 0;
     var total_2bit_scored_3phases: usize = 0;
+    var total_2bit_scored_4phases: usize = 0;
+    var total_2bit_scored_5phases: usize = 0;
     var min_dense_scored_1bit: usize = std.math.maxInt(usize);
     var min_dense_scored_2bits: usize = std.math.maxInt(usize);
     var min_dense_scored_3phases: usize = std.math.maxInt(usize);
+    var min_dense_scored_4phases: usize = std.math.maxInt(usize);
+    var min_dense_scored_5phases: usize = std.math.maxInt(usize);
+    var min_1bit_scored_5phases: usize = std.math.maxInt(usize);
+    var min_half_1bit_scored_5phases: usize = std.math.maxInt(usize);
     var min_2bit_scored_3phases: usize = std.math.maxInt(usize);
+    var min_2bit_scored_4phases: usize = std.math.maxInt(usize);
+    var min_2bit_scored_5phases: usize = std.math.maxInt(usize);
     var max_dense_scored_1bit: usize = 0;
     var max_dense_scored_2bits: usize = 0;
     var max_dense_scored_3phases: usize = 0;
+    var max_dense_scored_4phases: usize = 0;
+    var max_dense_scored_5phases: usize = 0;
+    var max_1bit_scored_5phases: usize = 0;
+    var max_half_1bit_scored_5phases: usize = 0;
     var max_2bit_scored_3phases: usize = 0;
+    var max_2bit_scored_4phases: usize = 0;
+    var max_2bit_scored_5phases: usize = 0;
 
     const tasks_id = [5]u8{ 0, 1, 2, 3, 4 };
 
@@ -909,14 +955,17 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
         for (0..n) |embed_index| {
             const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
             const top1_token = top1[embed_index];
-            
-            zml_handler.tic(&zml_handler.timers.quant_search);
-            
+
             const sample_1bit = try quantizer.sample2Phase1Bit(embed);
             const sample_2bits = try quantizer.sample2Phase2Bits(embed);
             const sample_3phases = try quantizer.sample3Phases(embed);
+            const sample_4phases = try quantizer.sample4Phases(embed);
 
+            zml_handler.tic(&zml_handler.timers.quant_search);
+            const sample_5phases = try quantizer.sample5PhasesOptimized(embed);
             zml_handler.toc(&zml_handler.timers.quant_search);
+
+            const syntax_oracle = quantizer.sampleSyntaxOracleDetailed(embed);
 
             if (sample_1bit.nb_scored > 93340) {
                 try quantizer.sample2Phase1BitLog(embed, &tokenizer);
@@ -932,18 +981,46 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
 
             zml_handler.timers.nb_detokenize += 1;
             total_count += 1;
+            if (syntax_oracle.predicted_syntax and syntax_oracle.top1_is_syntax) {
+                syntax_oracle_pred_syntax_top1_syntax_count += 1;
+            } else if (syntax_oracle.predicted_syntax and !syntax_oracle.top1_is_syntax) {
+                syntax_oracle_pred_syntax_top1_outside_count += 1;
+            } else if (!syntax_oracle.predicted_syntax and syntax_oracle.top1_is_syntax) {
+                syntax_oracle_pred_full_top1_syntax_count += 1;
+            } else {
+                syntax_oracle_pred_full_top1_outside_count += 1;
+            }
+
             total_dense_scored_1bit += sample_1bit.nb_scored;
             total_dense_scored_2bits += sample_2bits.nb_scored;
             total_dense_scored_3phases += sample_3phases.nb_scored;
+            total_dense_scored_4phases += sample_4phases.nb_scored;
+            total_dense_scored_5phases += sample_5phases.nb_scored;
+            total_1bit_scored_5phases += sample_5phases.nb_1bit_scored;
+            total_half_1bit_scored_5phases += sample_5phases.nb_half_1bit_scored;
             total_2bit_scored_3phases += sample_3phases.nb_2bit_scored;
+            total_2bit_scored_4phases += sample_4phases.nb_2bit_scored;
+            total_2bit_scored_5phases += sample_5phases.nb_2bit_scored;
             min_dense_scored_1bit = @min(min_dense_scored_1bit, sample_1bit.nb_scored);
             min_dense_scored_2bits = @min(min_dense_scored_2bits, sample_2bits.nb_scored);
             min_dense_scored_3phases = @min(min_dense_scored_3phases, sample_3phases.nb_scored);
+            min_dense_scored_4phases = @min(min_dense_scored_4phases, sample_4phases.nb_scored);
+            min_dense_scored_5phases = @min(min_dense_scored_5phases, sample_5phases.nb_scored);
+            min_1bit_scored_5phases = @min(min_1bit_scored_5phases, sample_5phases.nb_1bit_scored);
+            min_half_1bit_scored_5phases = @min(min_half_1bit_scored_5phases, sample_5phases.nb_half_1bit_scored);
             min_2bit_scored_3phases = @min(min_2bit_scored_3phases, sample_3phases.nb_2bit_scored);
+            min_2bit_scored_4phases = @min(min_2bit_scored_4phases, sample_4phases.nb_2bit_scored);
+            min_2bit_scored_5phases = @min(min_2bit_scored_5phases, sample_5phases.nb_2bit_scored);
             max_dense_scored_1bit = @max(max_dense_scored_1bit, sample_1bit.nb_scored);
             max_dense_scored_2bits = @max(max_dense_scored_2bits, sample_2bits.nb_scored);
             max_dense_scored_3phases = @max(max_dense_scored_3phases, sample_3phases.nb_scored);
+            max_dense_scored_4phases = @max(max_dense_scored_4phases, sample_4phases.nb_scored);
+            max_dense_scored_5phases = @max(max_dense_scored_5phases, sample_5phases.nb_scored);
+            max_1bit_scored_5phases = @max(max_1bit_scored_5phases, sample_5phases.nb_1bit_scored);
+            max_half_1bit_scored_5phases = @max(max_half_1bit_scored_5phases, sample_5phases.nb_half_1bit_scored);
             max_2bit_scored_3phases = @max(max_2bit_scored_3phases, sample_3phases.nb_2bit_scored);
+            max_2bit_scored_4phases = @max(max_2bit_scored_4phases, sample_4phases.nb_2bit_scored);
+            max_2bit_scored_5phases = @max(max_2bit_scored_5phases, sample_5phases.nb_2bit_scored);
 
             var found_top1_1bit = false;
             for (sample_1bit.rows) |tok| {
@@ -984,6 +1061,32 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
             } else {
                 missing_top16_3phases_count += 1;
             }
+
+            var found_top1_4phases = false;
+            for (sample_4phases.rows) |tok| {
+                if (tok == top1_token) {
+                    found_top1_4phases = true;
+                    break;
+                }
+            }
+            if (found_top1_4phases) {
+                found_top1_4phases_count += 1;
+            } else {
+                missing_top16_4phases_count += 1;
+            }
+
+            var found_top1_5phases = false;
+            for (sample_5phases.rows) |tok| {
+                if (tok == top1_token) {
+                    found_top1_5phases = true;
+                    break;
+                }
+            }
+            if (found_top1_5phases) {
+                found_top1_5phases_count += 1;
+            } else {
+                missing_top16_5phases_count += 1;
+            }
         }
     }
 
@@ -991,18 +1094,42 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
     const percent_found_1bit = 100.0 * @as(f64, @floatFromInt(found_top1_1bit_count)) * inv_total;
     const percent_found_2bits = 100.0 * @as(f64, @floatFromInt(found_top1_2bits_count)) * inv_total;
     const percent_found_3phases = 100.0 * @as(f64, @floatFromInt(found_top1_3phases_count)) * inv_total;
+    const percent_found_4phases = 100.0 * @as(f64, @floatFromInt(found_top1_4phases_count)) * inv_total;
+    const percent_found_5phases = 100.0 * @as(f64, @floatFromInt(found_top1_5phases_count)) * inv_total;
+    const percent_syntax_oracle_pred_syntax_top1_syntax = 100.0 * @as(f64, @floatFromInt(syntax_oracle_pred_syntax_top1_syntax_count)) * inv_total;
+    const percent_syntax_oracle_pred_syntax_top1_outside = 100.0 * @as(f64, @floatFromInt(syntax_oracle_pred_syntax_top1_outside_count)) * inv_total;
+    const percent_syntax_oracle_pred_full_top1_syntax = 100.0 * @as(f64, @floatFromInt(syntax_oracle_pred_full_top1_syntax_count)) * inv_total;
+    const percent_syntax_oracle_pred_full_top1_outside = 100.0 * @as(f64, @floatFromInt(syntax_oracle_pred_full_top1_outside_count)) * inv_total;
     const avg_dense_scored_1bit = @as(f64, @floatFromInt(total_dense_scored_1bit)) * inv_total;
     const avg_dense_scored_2bits = @as(f64, @floatFromInt(total_dense_scored_2bits)) * inv_total;
     const avg_dense_scored_3phases = @as(f64, @floatFromInt(total_dense_scored_3phases)) * inv_total;
+    const avg_dense_scored_4phases = @as(f64, @floatFromInt(total_dense_scored_4phases)) * inv_total;
+    const avg_dense_scored_5phases = @as(f64, @floatFromInt(total_dense_scored_5phases)) * inv_total;
+    const avg_1bit_scored_5phases = @as(f64, @floatFromInt(total_1bit_scored_5phases)) * inv_total;
+    const avg_half_1bit_scored_5phases = @as(f64, @floatFromInt(total_half_1bit_scored_5phases)) * inv_total;
     const avg_2bit_scored_3phases = @as(f64, @floatFromInt(total_2bit_scored_3phases)) * inv_total;
+    const avg_2bit_scored_4phases = @as(f64, @floatFromInt(total_2bit_scored_4phases)) * inv_total;
+    const avg_2bit_scored_5phases = @as(f64, @floatFromInt(total_2bit_scored_5phases)) * inv_total;
     std.log.info("Embed quantized search: total={d}", .{total_count});
     std.log.info("1-bit found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_1bit_count, percent_found_1bit, missing_top16_1bit_count });
     std.log.info("2-bit found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_2bits_count, percent_found_2bits, missing_top16_2bits_count });
     std.log.info("3-phase found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_3phases_count, percent_found_3phases, missing_top16_3phases_count });
+    std.log.info("4-phase found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_4phases_count, percent_found_4phases, missing_top16_4phases_count });
+    std.log.info("5-phase found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_5phases_count, percent_found_5phases, missing_top16_5phases_count });
+    std.log.info("syntax oracle predicted=syntax top1=syntax  : {d} ({d:.4}%)", .{ syntax_oracle_pred_syntax_top1_syntax_count, percent_syntax_oracle_pred_syntax_top1_syntax });
+    std.log.info("syntax oracle predicted=syntax top1=outside : {d} ({d:.4}%)", .{ syntax_oracle_pred_syntax_top1_outside_count, percent_syntax_oracle_pred_syntax_top1_outside });
+    std.log.info("syntax oracle predicted=full   top1=syntax  : {d} ({d:.4}%)", .{ syntax_oracle_pred_full_top1_syntax_count, percent_syntax_oracle_pred_full_top1_syntax });
+    std.log.info("syntax oracle predicted=full   top1=outside : {d} ({d:.4}%)", .{ syntax_oracle_pred_full_top1_outside_count, percent_syntax_oracle_pred_full_top1_outside });
     std.log.info("1-bit dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored_1bit, max_dense_scored_1bit, avg_dense_scored_1bit });
     std.log.info("2-bit dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored_2bits, max_dense_scored_2bits, avg_dense_scored_2bits });
     std.log.info("3-phase 2-bit approx scored rows: min={d} max={d} avg={d:.2}", .{ min_2bit_scored_3phases, max_2bit_scored_3phases, avg_2bit_scored_3phases });
     std.log.info("3-phase dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored_3phases, max_dense_scored_3phases, avg_dense_scored_3phases });
+    std.log.info("4-phase 2-bit approx scored rows: min={d} max={d} avg={d:.2}", .{ min_2bit_scored_4phases, max_2bit_scored_4phases, avg_2bit_scored_4phases });
+    std.log.info("4-phase dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored_4phases, max_dense_scored_4phases, avg_dense_scored_4phases });
+    std.log.info("5-phase half 1-bit approx scored rows: min={d} max={d} avg={d:.2}", .{ min_half_1bit_scored_5phases, max_half_1bit_scored_5phases, avg_half_1bit_scored_5phases });
+    std.log.info("5-phase full 1-bit approx scored rows: min={d} max={d} avg={d:.2}", .{ min_1bit_scored_5phases, max_1bit_scored_5phases, avg_1bit_scored_5phases });
+    std.log.info("5-phase 2-bit approx scored rows: min={d} max={d} avg={d:.2}", .{ min_2bit_scored_5phases, max_2bit_scored_5phases, avg_2bit_scored_5phases });
+    std.log.info("5-phase dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored_5phases, max_dense_scored_5phases, avg_dense_scored_5phases });
 }
 
 pub fn testEmbedGraphQuantizedSearch(zml_handler: *Zml_handler, g: *Graph, quantizer: *Quantized) !void {
@@ -1072,7 +1199,7 @@ pub fn testEmbedGraphQuantizedSearch(zml_handler: *Zml_handler, g: *Graph, quant
             min_visited = @min(min_visited, nb_visited);
             max_visited = @max(max_visited, nb_visited);
             total_count += 1;
-            
+
             //g.params.search_budget = 2048;
             //try g.greedySearchQuantized2x2(embed, quantizer);
 
@@ -1083,7 +1210,7 @@ pub fn testEmbedGraphQuantizedSearch(zml_handler: *Zml_handler, g: *Graph, quant
     }
 
     const average_visit = @as(f64, @floatFromInt(total_visited)) / @as(f64, @floatFromInt(total_count));
-    std.log.info("Embed quantized search: total={d}", .{ total_count });
+    std.log.info("Embed quantized search: total={d}", .{total_count});
     for (0..4) |start| {
         const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1[start])) / @as(f64, @floatFromInt(total_count));
         std.log.info("Pass {d} found_top1={d} ({d:.4}%)", .{ start, found_top1[start], percent_found });
@@ -1094,7 +1221,6 @@ pub fn testEmbedGraphQuantizedSearch(zml_handler: *Zml_handler, g: *Graph, quant
     }
     std.log.info("Embed graph search nb_visited: min={d} max={d} avg={d:.2}", .{ min_visited, max_visited, average_visit });
 }
-
 
 fn rotateEmbedding(u: zml.Slice, embed: []const f32, rot_embed: []f32) void {
     const d = embed.len;
