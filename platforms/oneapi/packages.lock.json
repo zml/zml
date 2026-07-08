@@ -223,13 +223,13 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libze1_1.8.12-1_amd64",
+			"key": "libze1_1.21.9.0-1136~22.04_amd64",
 			"name": "libze1",
-			"sha256": "403b3e3821a3e2dfdc8e6392300350943de2f66d1ada1dc551f8d5ac175ef944",
+			"sha256": "900ee378e0797bc7943c7a9fdb650031a986bccff8744203574a66ac2d00b35f",
 			"urls": [
-				"https://deb.debian.org/debian/pool/main/l/level-zero/libze1_1.8.12-1_amd64.deb"
+				"https://repositories.intel.com/gpu/ubuntu/pool/unified/l/level-zero-loader/libze1_1.21.9.0-1136~22.04_amd64.deb"
 			],
-			"version": "1.8.12-1"
+			"version": "1.21.9.0-1136~22.04"
 		},
 		{
 			"arch": "amd64",
