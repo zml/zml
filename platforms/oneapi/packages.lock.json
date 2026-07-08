@@ -135,6 +135,17 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
+			"key": "libze1_1.16.1-1build1_amd64",
+			"name": "libze1",
+			"sha256": "1b6f94fa36fe35ff960bcbcc1ef61bbd6f617855bf61d961c8b9e398cb92a2e3",
+			"urls": [
+				"https://archive.ubuntu.com/ubuntu/pool/universe/l/level-zero/libze1_1.16.1-1build1_amd64.deb"
+			],
+			"version": "1.16.1-1build1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
 			"key": "zlib1g_1-1.3.dfsg-3.1ubuntu2.1_amd64",
 			"name": "zlib1g",
 			"sha256": "7074b6a2f6367a10d280c00a1cb02e74277709180bab4f2491a2f355ab2d6c20",

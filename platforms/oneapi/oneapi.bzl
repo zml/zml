@@ -35,6 +35,11 @@ def _read_packages(mctx, labels):
     return ret
 
 _UBUNTU_PACKAGES = {
+    "libze1": """
+filegroup(
+    name = "libze1",
+    srcs = glob(["lib/x86_64-linux-gnu/libze_loader.so.1*"]),
+)""",
     "zlib1g": """
 filegroup(
     name = "zlib1g",
@@ -161,6 +166,7 @@ _ROOT_MODULE_DIRECT_DEPS = [
     "intel-oneapi-mpi-2021.18",
     "intel-oneapi-tcm-1.5",
     "intel-oneapi-umf-1.1",
+    "libze1",
     "libpjrt_oneapi",
     "zlib1g",
 ]

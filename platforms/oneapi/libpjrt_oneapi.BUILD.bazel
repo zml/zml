@@ -53,6 +53,7 @@ copy_to_directory(
         "@intel-oneapi-mpi-2021.18//:mpi_runtime",
         "@intel-oneapi-tcm-1.5//:hwloc",
         "@intel-oneapi-umf-1.1//:umf",
+        "@libze1",
         "@zlib1g",
         "@zml//platforms/oneapi:zmlxoneapi",
     ],

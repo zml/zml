@@ -5,6 +5,7 @@ const stdx = @import("stdx");
 pub export fn zmlxoneapi_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaque {
     const replacements: std.StaticStringMap([:0]const u8) = .initComptime(.{
         .{ "libOpenCL.so", "libOpenCL.so.1" },
+        .{ "libze_loader.so", "libze_loader.so.1" },
         .{ "libumf.so", "libumf.so.1" },
         .{ "libur_loader.so", "libur_loader.so.0" },
         .{ "libur_adapter_level_zero.so", "libur_adapter_level_zero.so.0" },
