@@ -33,24 +33,51 @@ pub const RemoteFile = struct {
     }
 };
 
-/// Open a XET-backed repo file for lazy range reads, reusing the caller's HTTP
-/// client and authorization. Returns `error.FileNotXetBacked` (with nothing to
-/// clean up) if the file is not XET-backed, so callers can fall back.
-pub fn openRemote(
+/// Repo-tree and read-token helpers, re-exported so callers (e.g. `hf.zig`) can
+/// fetch each once per repo and cache them instead of per file.
+pub const XetTree = hub.XetTree;
+pub const XetFile = hub.XetFile;
+pub const ReadToken = hub.ReadToken;
+pub const Auth = hub.Auth;
+
+pub fn fetchTree(
     allocator: std.mem.Allocator,
     client: *std.http.Client,
     auth: hub.Auth,
     repo_type: []const u8,
     repo_id: []const u8,
     revision: []const u8,
-    filepath: []const u8,
-) !RemoteFile {
-    const file = try hub.findXetFile(allocator, client, repo_type, repo_id, revision, filepath, auth);
-    errdefer allocator.free(file.hash_hexz);
+) !XetTree {
+    return hub.fetchXetTree(allocator, client, repo_type, repo_id, revision, auth);
+}
 
-    const token = try hub.requestReadToken(allocator, client, repo_type, repo_id, revision, auth);
-    defer token.deinit(allocator); // C-API only borrows these during init
+pub fn freeTree(allocator: std.mem.Allocator, tree: *XetTree) void {
+    hub.freeXetTree(allocator, tree);
+}
+
+pub fn fetchToken(
+    allocator: std.mem.Allocator,
+    client: *std.http.Client,
+    auth: hub.Auth,
+    repo_type: []const u8,
+    repo_id: []const u8,
+    revision: []const u8,
+) !ReadToken {
+    return hub.requestReadToken(allocator, client, repo_type, repo_id, revision, auth);
+}
+
+/// Open a XET-backed file for lazy range reads from an already-resolved
+/// hash/size and a (cached) read token. `hash_hexz` is copied; the caller keeps
+/// ownership of `token` (the C-API only borrows it during `Session.init`).
+pub fn openWith(
+    allocator: std.mem.Allocator,
+    hash_hexz: [:0]const u8,
+    size: u64,
+    token: hub.ReadToken,
+) !RemoteFile {
+    const hash = try allocator.dupeZ(u8, hash_hexz);
+    errdefer allocator.free(hash);
 
     const session = try capi.Session.init(token.cas_url, token.access_token, token.exp);
-    return .{ .session = session, .hash = file.hash_hexz, .size = file.size };
+    return .{ .session = session, .hash = hash, .size = size };
 }

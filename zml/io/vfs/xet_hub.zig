@@ -101,18 +101,20 @@ pub const XetFile = struct {
     hash_hexz: [:0]const u8,
 };
 
-/// Resolve `filepath` to its XET hash + size from the repo tree. Returns
-/// `error.FileNotXetBacked` if the file is absent or not XET-backed. Caller
-/// owns the returned `hash_hexz`.
-pub fn findXetFile(
+/// A whole repo tree indexed by repo-relative path, so a multi-file model needs
+/// a single tree fetch instead of one per file. Only XET-backed files appear.
+pub const XetTree = std.StringHashMapUnmanaged(XetFile);
+
+/// Fetch the repo tree once and index every XET-backed file by its path. Caller
+/// owns the returned map; free it with `freeXetTree`.
+pub fn fetchXetTree(
     allocator: std.mem.Allocator,
     client: *std.http.Client,
     repo_type: []const u8,
     repo_id: []const u8,
     revision: []const u8,
-    filepath: []const u8,
     auth: Auth,
-) !XetFile {
+) !XetTree {
     const url = try std.fmt.allocPrint(
         allocator,
         "https://huggingface.co/api/{s}s/{s}/tree/{s}?recursive=true",
@@ -123,14 +125,35 @@ pub fn findXetFile(
     const parsed = try getJson(allocator, client, url, auth, 8 * 1024 * 1024);
     defer parsed.deinit();
 
+    var tree: XetTree = .{};
+    errdefer freeXetTree(allocator, &tree);
+
     for (parsed.value.array.items) |item| {
         const obj = item.object;
         const path = obj.get("path") orelse continue;
         const xet = obj.get("xetHash") orelse continue;
         const size = obj.get("size") orelse continue;
         if (path != .string or xet != .string or size != .integer) continue;
-        if (!std.mem.eql(u8, path.string, filepath)) continue;
-        return .{ .size = @intCast(size.integer), .hash_hexz = try allocator.dupeZ(u8, xet.string) };
+
+        const key = try allocator.dupe(u8, path.string);
+        const hash = allocator.dupeZ(u8, xet.string) catch |err| {
+            allocator.free(key);
+            return err;
+        };
+        tree.put(allocator, key, .{ .size = @intCast(size.integer), .hash_hexz = hash }) catch |err| {
+            allocator.free(key);
+            allocator.free(hash);
+            return err;
+        };
     }
-    return error.FileNotXetBacked;
+    return tree;
+}
+
+pub fn freeXetTree(allocator: std.mem.Allocator, tree: *XetTree) void {
+    var it = tree.iterator();
+    while (it.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+        allocator.free(entry.value_ptr.hash_hexz);
+    }
+    tree.deinit(allocator);
 }

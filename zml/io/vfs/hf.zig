@@ -182,6 +182,12 @@ pub const HF = struct {
     base: VFSBase,
     trees: std.StringHashMapUnmanaged(std.ArrayList(TreeNode)) = .{},
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
+    /// Per-repo XET caches, keyed by "repo_id@rev". The repo tree and read token
+    /// are each fetched once and reused across all files, instead of once per
+    /// file (which rate-limits the Hub API into `too_many_requests`). Guarded by
+    /// `mutex`.
+    xet_trees: std.StringHashMapUnmanaged(xet.XetTree) = .{},
+    xet_tokens: std.StringHashMapUnmanaged(xet.ReadToken) = .{},
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8, opts: InitOpts) !HF {
         const read_pool = try allocator.create(ParallelRead.Pool);
@@ -263,6 +269,20 @@ pub const HF = struct {
         }
         self.trees.deinit(self.allocator);
         self.dir_read_states.deinit(self.allocator);
+
+        var xt = self.xet_trees.iterator();
+        while (xt.next()) |entry| {
+            xet.freeTree(self.allocator, entry.value_ptr);
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.xet_trees.deinit(self.allocator);
+
+        var tok = self.xet_tokens.iterator();
+        while (tok.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.xet_tokens.deinit(self.allocator);
 
         switch (self.authorization) {
             .default, .omit => {},
@@ -857,7 +877,50 @@ pub const HF = struct {
         const repo_id = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ repo.repo, repo.model });
         defer self.allocator.free(repo_id);
 
-        // Reuse HF's pooled HTTP client and already-formatted auth header.
-        return xet.openRemote(self.allocator, self.client, self.authorization, "model", repo_id, repo.rev, repo.path);
+        // Fetch the repo tree and read token once per repo (cached under mutex),
+        // not once per file, which otherwise rate-limits the Hub API into
+        // too_many_requests and forces every file onto the resolve fallback.
+        self.mutex.lockUncancelable(self.base.inner);
+        defer self.mutex.unlock(self.base.inner);
+
+        const tree = try self.getOrFetchXetTree(repo_id, repo.rev);
+        const file = tree.get(repo.path) orelse return error.FileNotXetBacked;
+        const token = try self.getOrFetchXetToken(repo_id, repo.rev);
+
+        // Session.init is local (no network) and copies the hash, so building it
+        // under the lock is cheap and keeps the cached token pointer valid.
+        return xet.openWith(self.allocator, file.hash_hexz, file.size, token.*);
+    }
+
+    /// The repo's XET tree, fetched once and cached. Caller must hold `mutex`.
+    fn getOrFetchXetTree(self: *HF, repo_id: []const u8, rev: []const u8) !*const xet.XetTree {
+        var key_buf: [1024]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "{s}@{s}", .{ repo_id, rev }) catch return error.NameTooLong;
+        if (self.xet_trees.getPtr(key)) |cached| return cached;
+
+        var tree = try xet.fetchTree(self.allocator, self.client, self.authorization, "model", repo_id, rev);
+        errdefer xet.freeTree(self.allocator, &tree);
+
+        const owned_key = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(owned_key);
+
+        try self.xet_trees.put(self.allocator, owned_key, tree);
+        return self.xet_trees.getPtr(owned_key).?;
+    }
+
+    /// The repo's XET read token, fetched once and cached. Caller must hold `mutex`.
+    fn getOrFetchXetToken(self: *HF, repo_id: []const u8, rev: []const u8) !*const xet.ReadToken {
+        var key_buf: [1024]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "{s}@{s}", .{ repo_id, rev }) catch return error.NameTooLong;
+        if (self.xet_tokens.getPtr(key)) |cached| return cached;
+
+        const token = try xet.fetchToken(self.allocator, self.client, self.authorization, "model", repo_id, rev);
+        errdefer token.deinit(self.allocator);
+
+        const owned_key = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(owned_key);
+
+        try self.xet_tokens.put(self.allocator, owned_key, token);
+        return self.xet_tokens.getPtr(owned_key).?;
     }
 };
