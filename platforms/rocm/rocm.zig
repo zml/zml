@@ -14,6 +14,13 @@ pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_ROCM");
 }
 
+fn sandboxRunfilePath() []const u8 {
+    return if (@hasDecl(c, "ZML_RUNTIME_ROCM_HRX"))
+        "libpjrt_rocm_hrx/sandbox"
+    else
+        "libpjrt_rocm/sandbox";
+}
+
 fn hasRocmDevices(io: std.Io) bool {
     inline for (&.{ "/dev/kfd", "/dev/dri" }) |path| {
         std.Io.Dir.accessAbsolute(io, path, .{ .read = true }) catch return false;
@@ -41,7 +48,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     const r = try bazel.runfiles(bazel_builtin.current_repository);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = try r.rlocation("libpjrt_rocm/sandbox", &path_buf) orelse {
+    const sandbox_path = try r.rlocation(sandboxRunfilePath(), &path_buf) orelse {
         log.err("Failed to find sandbox path for ROCm runtime", .{});
         return error.FileNotFound;
     };

@@ -275,13 +275,20 @@ def _rocm_impl(mctx):
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-04-30T17-13-00Z/pjrt-rocm_linux-amd64.tar.gz",
-        sha256 = "e543e48f902656598234b5ffc05196dde84a87106be21ada126c7323572f792b",
+        url = "https://files.pythonhosted.org/packages/4b/7b/04673b3e351fe02c9380b05740f185a10903b9d9fe222df314391c79e71c/jax_rocm7_pjrt-0.10.2-py3-none-manylinux_2_27_x86_64.whl",
+        sha256 = "2e61678a00bfb72a616c555f1acabccc7cd8e64bb36b90b09d6f991c426b24f0",
+    )
+
+    http_archive(
+        name = "libpjrt_rocm_hrx",
+        build_file = "libpjrt_rocm_hrx.BUILD.bazel",
+        url = "file:///home/hugo/zml/.local_pjrt_rocm/pjrt-rocm_linux-amd64.tar.gz",
+        sha256 = "dccd3a58d7d048eac3131f1d2c89edc4dbaee25341de1f6eff2b1258e5e786b1",
     )
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = ["amd-smi-lib", "libpjrt_rocm", "libdrm2-amdgpu", "libdrm-amdgpu-amdgpu1", "hipblaslt", "rocblas", "rocprofiler-sdk", "rocprofiler-sdk-roctx"],
+        root_module_direct_deps = ["amd-smi-lib", "libpjrt_rocm", "libpjrt_rocm_hrx", "libdrm2-amdgpu", "libdrm-amdgpu-amdgpu1", "hipblaslt", "rocblas", "rocprofiler-sdk", "rocprofiler-sdk-roctx"],
         root_module_direct_dev_deps = [],
     )
 
