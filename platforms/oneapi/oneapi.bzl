@@ -35,6 +35,53 @@ def _read_packages(mctx, labels):
     return ret
 
 _UBUNTU_PACKAGES = {
+    "libigdgmm12": """
+filegroup(
+    name = "libigdgmm12",
+    srcs = glob(["lib/x86_64-linux-gnu/libigdgmm.so.12*"]),
+)""",
+    "libigc2": """
+genrule(
+    name = "libigc_so_2",
+    srcs = ["lib/x86_64-linux-gnu/libigc.so.2.11.12+0"],
+    outs = ["lib/x86_64-linux-gnu/libigc.so.2"],
+    cmd = "cp $< $@",
+)
+genrule(
+    name = "libiga64_so_2",
+    srcs = ["lib/x86_64-linux-gnu/libiga64.so.2.11.12+0"],
+    outs = ["lib/x86_64-linux-gnu/libiga64.so.2"],
+    cmd = "cp $< $@",
+)
+filegroup(
+    name = "libigc2",
+    srcs = [
+        ":libiga64_so_2",
+        ":libigc_so_2",
+        "lib/x86_64-linux-gnu/libiga64.so.2.11.12+0",
+        "lib/x86_64-linux-gnu/libigc.so.2.11.12+0",
+    ],
+)""",
+    "libigdfcl2": """
+genrule(
+    name = "libigdfcl_so_2",
+    srcs = ["lib/x86_64-linux-gnu/libigdfcl.so.2.11.12+0"],
+    outs = ["lib/x86_64-linux-gnu/libigdfcl.so.2"],
+    cmd = "cp $< $@",
+)
+filegroup(
+    name = "libigdfcl2",
+    srcs = [
+        ":libigdfcl_so_2",
+        "lib/x86_64-linux-gnu/libigdfcl.so.2.11.12+0",
+        "lib/x86_64-linux-gnu/libopencl-clang.so.15",
+    ],
+)""",
+    "libze-intel-gpu1": """
+filegroup(
+    name = "libze_intel_gpu",
+    srcs = glob(["lib/x86_64-linux-gnu/libze_intel_gpu.so.1*"]),
+)""",
     "libze1": """
 filegroup(
     name = "libze1",
@@ -56,7 +103,6 @@ filegroup(
         exclude = ["{ONEAPI_CCL_LIB}/libccl_legacy.so"],
     ),
 )""".format(ONEAPI_CCL_LIB = ONEAPI_CCL_LIB),
-
     "intel-oneapi-mpi-2021.18": """
 filegroup(
     name = "mpi_runtime",
@@ -72,19 +118,16 @@ filegroup(
         ONEAPI_MPI_LIB = ONEAPI_MPI_LIB,
         ONEAPI_MPI_LIBFABRIC_LIB = ONEAPI_MPI_LIBFABRIC_LIB,
     ),
-
     "intel-oneapi-tcm-1.5": """
 filegroup(
     name = "hwloc",
     srcs = ["{ONEAPI_TCM_LIB}/libhwloc.so.15"],
 )""".format(ONEAPI_TCM_LIB = ONEAPI_TCM_LIB),
-
     "intel-oneapi-umf-1.1": """
 filegroup(
     name = "umf",
     srcs = ["{ONEAPI_UMF_LIB}/libumf.so.1"],
 )""".format(ONEAPI_UMF_LIB = ONEAPI_UMF_LIB),
-
     "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0": """
 filegroup(
     name = "libsycl_so",
@@ -99,7 +142,6 @@ filegroup(
         "{ONEAPI_COMPILER_LIB}/libur_loader.so.0",
     ],
 )""".format(ONEAPI_COMPILER_LIB = ONEAPI_COMPILER_LIB),
-
     "intel-oneapi-compiler-shared-runtime-2026.0": """
 filegroup(
     name = "compiler_runtime",
@@ -111,7 +153,6 @@ filegroup(
         "{ONEAPI_COMPILER_LIB}/libsvml.so",
     ],
 )""".format(ONEAPI_COMPILER_LIB = ONEAPI_COMPILER_LIB),
-
     "intel-oneapi-mkl-core-2026.0": """
 filegroup(
     name = "mkl_core_runtime",
@@ -121,31 +162,26 @@ filegroup(
         "{ONEAPI_MKL_LIB}/libmkl_sequential.so.3",
     ],
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
-
     "intel-oneapi-mkl-sycl-blas-2026.0": """
 filegroup(
     name = "mkl_sycl_blas",
     srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_blas.so.6"],
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
-
     "intel-oneapi-mkl-sycl-dft-2026.0": """
 filegroup(
     name = "mkl_sycl_dft",
     srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_dft.so.6"],
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
-
     "intel-oneapi-mkl-sycl-lapack-2026.0": """
 filegroup(
     name = "mkl_sycl_lapack",
     srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_lapack.so.6"],
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
-
     "intel-oneapi-mkl-sycl-rng-2026.0": """
 filegroup(
     name = "mkl_sycl_rng",
     srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_rng.so.6"],
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
-
     "intel-oneapi-mkl-sycl-sparse-2026.0": """
 filegroup(
     name = "mkl_sycl_sparse",
@@ -166,6 +202,10 @@ _ROOT_MODULE_DIRECT_DEPS = [
     "intel-oneapi-mpi-2021.18",
     "intel-oneapi-tcm-1.5",
     "intel-oneapi-umf-1.1",
+    "libigdgmm12",
+    "libigc2",
+    "libigdfcl2",
+    "libze-intel-gpu1",
     "libze1",
     "libpjrt_oneapi",
     "zlib1g",
