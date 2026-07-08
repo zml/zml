@@ -240,7 +240,7 @@ fn kernelUnifiedAttentionSparseMla2d(
     });
 
     const m_init = k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32);
-    const l_init = k.full(&.{BLOCK_M}, 1.0, .f32);
+    const l_init = k.full(&.{BLOCK_M}, 0.0, .f32);
     const acc_init = k.zeros(&.{ BLOCK_M, VALUE_RANK }, .f32);
 
     var loop = k.openFor(0, NUM_TILES, 1, .{ m_init, l_init, acc_init });

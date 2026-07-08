@@ -231,7 +231,7 @@ const Triton = struct {
             return zml.Tensor.select(in_range, sequence, zml.Tensor.zeroes(query_x_sequence_shape)).sum(.seq).squeeze(.seq);
         }
 
-        fn topkToPhysical(parameters: triton_attn.paged.Parameters, topk: zml.Tensor, tokens_pos: zml.Tensor, block_size: i64) zml.Tensor {
+        fn topkToPhysical(parameters: anytype, topk: zml.Tensor, tokens_pos: zml.Tensor, block_size: i64) zml.Tensor {
             const topk_i32 = topk.convert(.i32);
             const topk_shape = topk_i32.shape();
 
@@ -466,6 +466,40 @@ fn raggedVanillaSparseAttention(q: zml.Tensor, kv: zml.Tensor, topk: zml.Tensor,
     return attn_weights_non_sink.dot(selected_kv, .kv).convert(q.dtype());
 }
 
+fn flattenPagedKvCache(cache: paged_attn.KvCache) struct { zml.Tensor, i64 } {
+    const key_cache = switch (cache) {
+        .split => |split| split.k,
+        .dense => stdx.debug.panic("paged MLA requires a split KV cache", .{}),
+    };
+
+    stdx.debug.assert(key_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "expected paged MLA KV cache to have tags .page, .k_chunk, .hkv, .hd, got {f}", .{key_cache.shape()});
+    stdx.debug.assert(key_cache.dim(.hkv) == 1, "paged MLA expects one latent KV head, got {}", .{key_cache.dim(.hkv)});
+
+    const slot_count = key_cache.dim(.page) * key_cache.dim(.k_chunk);
+    const flat_cache = key_cache.merge(.{ .slot = .{ .page, .k_chunk } });
+    const physical_slot = zml.Tensor.iota(.init(.{ .kv = slot_count }, .i32), .kv);
+    return .{ flat_cache.gather(.{ .slot = physical_slot }, .{}).squeeze(.hkv), key_cache.dim(.k_chunk) };
+}
+
+fn vanillaPagedSparseAttention(
+    q: zml.Tensor,
+    kv_cache: paged_attn.KvCache,
+    topk: zml.Tensor,
+    tokens_pos: zml.Tensor,
+    parameters: anytype,
+    opts: AttentionOptions,
+) zml.Tensor {
+    const flat_cache, const block_size = flattenPagedKvCache(kv_cache);
+    const physical_topk = Triton.paged.topkToPhysical(
+        parameters,
+        topk.rename(.{ .b = .q }),
+        tokens_pos.rename(.{ .b = .q }),
+        block_size,
+    ).rename(.{ .q = .b });
+
+    return raggedVanillaSparseAttention(q, flat_cache, physical_topk, opts);
+}
+
 pub fn pagedSparseAttention(
     q: zml.Tensor,
     kv: zml.Tensor,
@@ -475,6 +509,7 @@ pub fn pagedSparseAttention(
     parameters: paged_attn.Parameters,
     opts: AttentionOptions,
 ) zml.Tensor {
+    _ = kv;
     return switch (parameters) {
         .triton => |params| blk: {
             const paged_kv = switch (kv_cache) {
@@ -490,6 +525,7 @@ pub fn pagedSparseAttention(
                 opts,
             );
         },
-        else => raggedVanillaSparseAttention(q, kv, topk, opts),
+        .metal => |params| vanillaPagedSparseAttention(q, kv_cache, topk, tokens_pos, params, opts),
+        else => stdx.debug.panic("paged MLA is only implemented for the Triton backend and the vanilla Metal fallback, got {s}", .{@tagName(std.meta.activeTag(parameters))}),
     };
 }
