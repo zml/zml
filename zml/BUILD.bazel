@@ -4,31 +4,30 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 upb_c_proto_library(
     name = "xla_data_upb",
-    deps = ["@xla//xla:xla_data_proto"],
     tags = ["manual"],
+    deps = ["@xla//xla:xla_data_proto"],
 )
 
 upb_c_proto_library(
     name = "xla_compile_options_upb",
-    deps = ["@xla//xla/pjrt/proto:compile_options_proto"],
     tags = ["manual"],
+    deps = ["@xla//xla/pjrt/proto:compile_options_proto"],
 )
 
 upb_c_proto_library(
     name = "profiler_options",
-    deps = ["@tsl//tsl/profiler/protobuf:profiler_options_proto"],
     tags = ["manual"],
+    deps = ["@tsl//tsl/profiler/protobuf:profiler_options_proto"],
 )
 
 cc_library(
     name = "posix",
-    tags = ["manual"],
     hdrs = ["posix.h"],
+    tags = ["manual"],
 )
 
 cc_library(
     name = "profiling_traceme_lib",
-    tags = ["manual"],
     srcs = ["profiling/traceme_lib.cc"],
     hdrs = ["profiling/traceme.h"],
     defines = select({
@@ -42,6 +41,7 @@ cc_library(
         "//platforms:rocm.enabled": ["-ldl"],
         "//conditions:default": [],
     }),
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         "//ffi:cc",
@@ -67,47 +67,39 @@ cc_library(
 
 zig_library(
     name = "zml",
-    tags = ["manual"],
-    data = [
-        "moe/triton_kernels/config.json",
-    ] + select({
-        "//platforms:neuron.enabled": [
-            "//zml/attention/nki:attention_kernel",
-        ],
-        "//conditions:default": [],
-    }),
     srcs = [
+        "Sharding.zig",
         "attention.zig",
         "attention/attention.zig",
         "attention/attnd.zig",
         "attention/flashattn.zig",
         "attention/metal_attention.zig",
         "attention/mosaic_tpu_kernels/ragged_attention.zig",
-        "//zml/attention/nki:attention",
         "attention/paged_attention.zig",
         "attention/tpu_attention.zig",
         "attention/triton_attention.zig",
+        "attention/triton_kernels.zig",
+        "attention/triton_kernels/mha.zig",
         "attention/triton_kernels/unified_attention.zig",
         "attention/triton_kernels/unified_attention_oneapi.zig",
-        "moe/metal.zig",
-        "moe/moe.zig",
-        "moe/mosaic_tpu.zig",
-        "moe/mosaic_tpu_kernels/gmm_ep.zig",
-        "moe/triton.zig",
-        "moe/triton_kernels/triton_kernels.zig",
-        "kernel.zig",
         "buffer.zig",
         "constants.zig",
         "dtype.zig",
         "exe.zig",
         "floats.zig",
         "io.zig",
+        "kernel.zig",
         "mem.zig",
         "meta.zig",
         "mlirx.zig",
         "module.zig",
+        "moe/metal.zig",
+        "moe/moe.zig",
+        "moe/mosaic_tpu.zig",
+        "moe/mosaic_tpu_kernels/gmm_ep.zig",
+        "moe/triton.zig",
+        "moe/triton_kernels/triton_kernels.zig",
         "nn.zig",
-        "Sharding.zig",
         "ops.zig",
         "pjrtx.zig",
         "platform.zig",
@@ -119,8 +111,18 @@ zig_library(
         "tensor.zig",
         "testing.zig",
         "zml.zig",
+        "//zml/attention/nki:attention",
     ],
+    data = [
+        "moe/triton_kernels/config.json",
+    ] + select({
+        "//platforms:neuron.enabled": [
+            "//zml/attention/nki:attention_kernel",
+        ],
+        "//conditions:default": [],
+    }),
     main = "zml.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     zigopts = [
         "-lc",
@@ -128,11 +130,12 @@ zig_library(
     ],
     deps = [
         ":posix",
+        ":profiler_options",
+        ":profiling_traceme_lib",
         ":xla_compile_options_upb",
         ":xla_data_upb",
         "//bazel",
         "//ffi:zig",
-        ":profiler_options",
         "//kernels/mosaic_tpu:mosaic_tpu_builder",
         "//kernels/triton:triton_builder",
         "//mlir",
@@ -147,7 +150,6 @@ zig_library(
         "//zml/io",
         "//zml/tokenizer",
         "@rules_zig//zig/runfiles",
-        ":profiling_traceme_lib",
     ] + select({
         "//platforms:neuron.enabled": [
             "//platforms/neuron:nki_kernel",
@@ -164,16 +166,15 @@ zig_library(
 
 zig_library(
     name = "moe_mosaic_tpu_gmm_ep",
-    tags = ["manual"],
-    main = "moe/mosaic_tpu_kernels/gmm_ep.zig",
     import_name = "zml/moe/mosaic_tpu_kernels/gmm_ep",
+    main = "moe/mosaic_tpu_kernels/gmm_ep.zig",
+    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         ":zml",
         "//kernels/mosaic_tpu:mosaic_tpu_builder",
     ],
 )
-
 
 zig_test(
     name = "test",
