@@ -41,7 +41,7 @@ const Args = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-    printZmlLogo(init.io) catch unreachable;
+    printZmlLogo(init.io, init.environ_map) catch unreachable;
 
     // `bazel run` executes binaries from Bazel's runfiles tree by default.
     // If available, switch back to the shell's original working directory.
@@ -145,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
     //
     // We're ready to go! Let's start a chat...
     //
-    try printZmlLogo(io);
+    try printZmlLogo(io, init.environ_map);
 
     const interactive = args.prompt == null;
     const prompt = if (args.prompt) |prompt| b: {
@@ -195,7 +195,7 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, prog
     return try .fromBytes(allocator, bytes);
 }
 
-pub fn printZmlLogo(io: std.Io) !void {
+pub fn printZmlLogo(io: std.Io, environ_map: *const std.process.Environ.Map) !void {
     const colors = zml.logo.Colors;
     const logo_rows = [_]zml.logo.Row{
         .{ .color = colors.cyan, .shine = colors.shine_cyan, .text = " ███████╗███╗   ███╗██╗\n" },
@@ -206,10 +206,11 @@ pub fn printZmlLogo(io: std.Io) !void {
         .{ .color = colors.pink, .shine = colors.shine_pink, .text = " ╚══════╝╚═╝     ╚═╝╚══════╝\n" },
     };
 
+    const write_options: zml.logo.WriteOptions = .{ .color = zml.logo.stdoutSupportsColor(io, environ_map) };
     var writer = std.Io.File.stdout().writerStreaming(io, &.{});
     try writer.interface.writeAll("\n\n");
     inline for (logo_rows) |row| {
-        try zml.logo.writeRow(&writer.interface, row);
+        try zml.logo.writeRow(&writer.interface, row, write_options);
     }
     try writer.interface.writeAll("\n\n\n");
     try writer.interface.flush();

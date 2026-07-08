@@ -20,7 +20,27 @@ pub const Row = struct {
     text: []const u8,
 };
 
-pub fn writeRow(writer: *std.Io.Writer, row: Row) !void {
+pub const WriteOptions = struct {
+    color: bool = true,
+};
+
+pub fn stdoutSupportsColor(io: std.Io, environ_map: ?*const std.process.Environ.Map) bool {
+    if (environ_map) |env| {
+        if (env.contains("NO_COLOR")) return false;
+        if (env.get("TERM")) |term| {
+            if (std.mem.eql(u8, term, "dumb")) return false;
+        }
+    }
+
+    return std.Io.File.stdout().supportsAnsiEscapeCodes(io) catch false;
+}
+
+pub fn writeRow(writer: *std.Io.Writer, row: Row, options: WriteOptions) !void {
+    if (!options.color) {
+        try writer.writeAll(row.text);
+        return;
+    }
+
     var view: std.unicode.Utf8View = .initUnchecked(row.text);
     var iter = view.iterator();
     var is_shiny = false;
