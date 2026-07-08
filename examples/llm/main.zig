@@ -196,17 +196,18 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, prog
 }
 
 pub fn printZmlLogo(io: std.Io, environ_map: *const std.process.Environ.Map) !void {
-    const colors = zml.logo.Colors;
     const logo_rows = [_]zml.logo.Row{
-        .{ .color = colors.cyan, .shine = colors.shine_cyan, .text = " ███████╗███╗   ███╗██╗\n" },
-        .{ .color = colors.sky, .shine = colors.shine_sky, .text = " ╚══███╔╝████╗ ████║██║\n" },
-        .{ .color = colors.blue, .shine = colors.shine_blue, .text = "   ███╔╝ ██╔████╔██║██║\n" },
-        .{ .color = colors.violet, .shine = colors.shine_violet, .text = "  ███╔╝  ██║╚██╔╝██║██║  .ai\n" },
-        .{ .color = colors.pink, .shine = colors.shine_pink, .text = " ███████╗██║ ╚═╝ ██║███████╗\n" },
-        .{ .color = colors.pink, .shine = colors.shine_pink, .text = " ╚══════╝╚═╝     ╚═╝╚══════╝\n" },
+        .{ .color = .cyan, .shine = .shine_cyan, .text = " ███████╗███╗   ███╗██╗\n" },
+        .{ .color = .sky, .shine = .shine_sky, .text = " ╚══███╔╝████╗ ████║██║\n" },
+        .{ .color = .blue, .shine = .shine_blue, .text = "   ███╔╝ ██╔████╔██║██║\n" },
+        .{ .color = .violet, .shine = .shine_violet, .text = "  ███╔╝  ██║╚██╔╝██║██║  .ai\n" },
+        .{ .color = .pink, .shine = .shine_pink, .text = " ███████╗██║ ╚═╝ ██║███████╗\n" },
+        .{ .color = .pink, .shine = .shine_pink, .text = " ╚══════╝╚═╝     ╚═╝╚══════╝\n" },
     };
 
-    const write_options: zml.logo.WriteOptions = .{ .color = zml.logo.stdoutSupportsColor(io, environ_map) };
+    const write_options: zml.logo.WriteOptions = .{
+        .color_support = zml.logo.detectColorSupport(io, environ_map),
+    };
     var writer = std.Io.File.stdout().writerStreaming(io, &.{});
     try writer.interface.writeAll("\n\n");
     inline for (logo_rows) |row| {
