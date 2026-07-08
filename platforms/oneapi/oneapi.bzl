@@ -34,7 +34,30 @@ def _read_packages(mctx, labels):
             ret.setdefault(pkg["name"], {})[pkg["arch"]] = pkg
     return ret
 
+_ROOT_PACKAGES = {
+    "libnl-3-200": """
+filegroup(
+    name = "libnl_3",
+    srcs = glob(["lib/x86_64-linux-gnu/libnl-3.so.200*"]),
+)""",
+    "libnl-genl-3-200": """
+filegroup(
+    name = "libnl_genl_3",
+    srcs = glob(["lib/x86_64-linux-gnu/libnl-genl-3.so.200*"]),
+)""",
+}
+
 _UBUNTU_PACKAGES = {
+    "libnl-route-3-200": """
+filegroup(
+    name = "libnl_route_3",
+    srcs = glob(["lib/x86_64-linux-gnu/libnl-route-3.so.200*"]),
+)""",
+    "libnuma1": """
+filegroup(
+    name = "libnuma1",
+    srcs = glob(["lib/x86_64-linux-gnu/libnuma.so.1*"]),
+)""",
     "libigdgmm12": """
 filegroup(
     name = "libigdgmm12",
@@ -202,6 +225,10 @@ _ROOT_MODULE_DIRECT_DEPS = [
     "intel-oneapi-mpi-2021.18",
     "intel-oneapi-tcm-1.5",
     "intel-oneapi-umf-1.1",
+    "libnl-3-200",
+    "libnl-genl-3-200",
+    "libnl-route-3-200",
+    "libnuma1",
     "libigdgmm12",
     "libigc2",
     "libigdfcl2",
@@ -222,6 +249,15 @@ def _oneapi_impl(mctx):
         sha256 = PJRT_ONEAPI_ARTIFACT_SHA256,
         url = PJRT_ONEAPI_ARTIFACT_URL,
     )
+
+    for pkg_name, build_file_content in _ROOT_PACKAGES.items():
+        pkg = loaded_packages[pkg_name]["amd64"]
+        http_deb_archive(
+            name = pkg_name,
+            urls = pkg["urls"],
+            sha256 = pkg["sha256"],
+            build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
+        )
 
     for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
         pkg = loaded_packages[pkg_name]["amd64"]

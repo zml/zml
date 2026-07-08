@@ -135,6 +135,50 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
+			"key": "libnl-3-200_3.5.0-0.1_amd64",
+			"name": "libnl-3-200",
+			"sha256": "4cd689b817d3e6453aa8f6d91d77d35db36dfc4507ab11e780adaabdc4e0bc35",
+			"urls": [
+				"https://archive.ubuntu.com/ubuntu/pool/main/libn/libnl3/libnl-3-200_3.5.0-0.1_amd64.deb"
+			],
+			"version": "3.5.0-0.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libnl-genl-3-200_3.5.0-0.1_amd64",
+			"name": "libnl-genl-3-200",
+			"sha256": "3f73295eee7b9ef208f7272fdb604415778156e4597a25d600563967c15958ea",
+			"urls": [
+				"https://archive.ubuntu.com/ubuntu/pool/main/libn/libnl3/libnl-genl-3-200_3.5.0-0.1_amd64.deb"
+			],
+			"version": "3.5.0-0.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libnl-route-3-200_3.5.0-0.1_amd64",
+			"name": "libnl-route-3-200",
+			"sha256": "781291056f30ff840fa99c7c23731836355852889c87f2d530a910e5b4e33abe",
+			"urls": [
+				"https://archive.ubuntu.com/ubuntu/pool/main/libn/libnl3/libnl-route-3-200_3.5.0-0.1_amd64.deb"
+			],
+			"version": "3.5.0-0.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libnuma1_2.0.14-3ubuntu2_amd64",
+			"name": "libnuma1",
+			"sha256": "0721c89001fbbd1ada23e89da5d60e762763c1a7b3dc814a2e9a518480a8043d",
+			"urls": [
+				"https://archive.ubuntu.com/ubuntu/pool/main/n/numactl/libnuma1_2.0.14-3ubuntu2_amd64.deb"
+			],
+			"version": "2.0.14-3ubuntu2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
 			"key": "libigdgmm12_22.7.2-1135~22.04_amd64",
 			"name": "libigdgmm12",
 			"sha256": "c8b3dfbc044735e9502fd4b8e9560f9118afd49755f8caa4d173b0a84044638d",
