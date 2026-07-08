@@ -242,15 +242,9 @@ const Triton = struct {
             const q_heads = q.dim(.h);
             const nope_rank = q_dim - rope_rank;
             const kernel_lora_rank: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, @intCast(nope_rank)));
-            const block_size = kv_cache.dim(.k_chunk);
-
-            stdx.debug.assert(q.shape().hasTags(.{ .q, .h, .hd }), "expected q to have tags .q, .h, .hd after flattening, got {f}", .{q.shape()});
-            stdx.debug.assert(kv_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "expected paged MLA KV cache to have tags .page, .k_chunk, .hkv, .hd, got {f}", .{kv_cache.shape()});
-            stdx.debug.assert(kv_cache.dim(.hkv) == 1, "paged MLA kernel expects a single latent KV head, got {}", .{kv_cache.dim(.hkv)});
-            stdx.debug.assert(q_dim > rope_rank, "expected q head dim ({}) to include a rope tail of {}", .{ q_dim, rope_rank });
             stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(kernel_lora_rank))), "expected kernel lora rank ({}) to be a power of two", .{kernel_lora_rank});
-            stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(q_dim))), "expected value rank ({}) to be a power of two", .{q_dim});
-            stdx.debug.assert(kv_cache.dim(.hd) == q_dim, "expected q and kv cache head dims to match, got q={} kv={}", .{ q_dim, kv_cache.dim(.hd) });
+
+            const block_size = kv_cache.dim(.k_chunk);
 
             const topk_final = topkToPhysical(parameters, topk, tokens_pos, block_size);
             stdx.debug.assert(topk_final.dim(.q) == q.dim(.q), "expected topk q dim ({}) to match q dim ({})", .{ topk_final.dim(.q), q.dim(.q) });
@@ -320,12 +314,20 @@ const Triton = struct {
 
         pub fn sparseAttention(q: zml.Tensor, kv_cache: zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, parameters: triton_attn.paged.Parameters, opts: AttentionOptions) zml.Tensor {
             const sink = opts.sink orelse stdx.debug.panic("paged MLA requires an attention sink", .{});
+            const kv_final = kv_cache.insertAxes(.hd, .{ .hkv = 1 });
+
+            stdx.debug.assert(q.shape().hasTags(.{ .q, .h, .hd }), "expected q to have tags .q, .h, .hd after flattening, got {f}", .{q.shape()});
+            stdx.debug.assert(kv_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "expected paged MLA KV cache to have tags .page, .k_chunk, .hkv, .hd, got {f}", .{kv_cache.shape()});
+            stdx.debug.assert(q.dim(.hd) > opts.rope_rank, "expected q head dim ({}) to include a rope tail of {}", .{ q.dim(.hd), opts.rope_rank });
+            stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(q.dim(.hd)))), "expected value rank ({}) to be a power of two", .{q.dim(.hd)});
+            stdx.debug.assert(kv_cache.dim(.hd) == q.dim(.hd), "expected q and kv cache head dims to match, got q={} kv={}", .{ q.dim(.hd), kv_cache.dim(.hd) });
+
             // The global cache may repeat its single latent head to make .hkv shardable.
             // Build the kernel from local shards, where MLA still has exactly one KV head.
             return zml.ops.manualComputation(
                 .{
                     q,
-                    kv_cache,
+                    kv_final,
                     topk,
                     tokens_pos,
                     parameters.block_table,
