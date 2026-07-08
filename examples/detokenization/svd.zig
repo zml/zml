@@ -6,10 +6,10 @@ const tokens = @import("tokens.zig");
 const Tokenizer = zml.tokenizer.Tokenizer;
 const LmHeadMatrix = algebra.LmHeadMatrix;
 
-pub const svd_top_k: usize = 16;
+pub const top_k: usize = 16;
 
 pub const MultiPhaseSample = struct {
-    rows: [svd_top_k]usize,
+    rows: [top_k]usize,
     nb_dense_scored: usize,
     nb_phase2_scored: usize,
 };
@@ -51,16 +51,21 @@ pub const SvdSampler = struct {
 
     zml_handler: *main.Zml_handler,
     allocator: std.mem.Allocator,
+    lm_head: *LmHeadMatrix,
     m: []const f32,
     m_t: []const f32,
+    rademacher: []f32,
+    row_means: []f32,
     vocab_size: usize,
     d: usize,
     checkpoints: []usize,
-    row_tail_norms: []f32,
+    column_variance: []f32,
     row_norms: []f32,
+    row_tail_norms: []f32,
     approx_logits: []f32,
     checkpoint_approx_logits: []f32,
     exact_logits: []f32,
+    query_centered: []f32,
     sampling_candidates: []SamplingCandidate,
     top256_candidates: []SamplingCandidate,
     active: []bool,
@@ -81,12 +86,78 @@ pub const SvdSampler = struct {
         const checkpoints = try allocator.dupe(usize, default_checkpoints[0..default_checkpoints.len]);
         errdefer allocator.free(checkpoints);
 
+        const rademacher = try allocator.alloc(f32, d);
+        errdefer allocator.free(rademacher);
+        var prng = std.Random.DefaultPrng.init(0);
+        const random = prng.random();
+        var coord_i: usize = 0;
+        while (coord_i < d) : (coord_i += 1) {
+            rademacher[coord_i] = if (random.boolean()) 1.0 else -1.0;
+        }
+
+        const row_means = try allocator.alloc(f32, vocab_size);
+        errdefer allocator.free(row_means);
+        var row_i: usize = 0;
+        while (row_i < vocab_size) : (row_i += 1) {
+            const row = lm_head.data[row_i * d ..][0..d];
+            var sum: f64 = 0.0;
+            coord_i = 0;
+            while (coord_i < d) : (coord_i += 1) {
+                sum += @floatCast(rademacher[coord_i] * row[coord_i]);
+            }
+            row_means[row_i] = @floatCast(sum / @as(f64, @floatFromInt(d)));
+        }
+
         const row_norms = try allocator.alloc(f32, vocab_size);
         errdefer allocator.free(row_norms);
+        const column_variance = try allocator.alloc(f32, d);
+        errdefer allocator.free(column_variance);
+        row_i = 0;
+        while (row_i < vocab_size) : (row_i += 1) {
+            const row = lm_head.data[row_i * d ..][0..d];
+            const row_mean = row_means[row_i];
+            var norm2: f64 = 0.0;
+            coord_i = 0;
+            while (coord_i < d) : (coord_i += 1) {
+                const centered_f32 = rademacher[coord_i] * row[coord_i] - row_mean;
+                const centered: f64 = @floatCast(centered_f32);
+                norm2 += centered * centered;
+            }
+            row_norms[row_i] = @floatCast(@sqrt(norm2));
+        }
+
+        const column_variance_acc = try allocator.alloc(f64, d);
+        defer allocator.free(column_variance_acc);
+        @memset(column_variance_acc, 0.0);
+        var variance_row_count: usize = 0;
+        row_i = 0;
+        while (row_i < vocab_size) : (row_i += 1) {
+            const row_norm = row_norms[row_i];
+            if (row_norm == 0.0) continue;
+            const row = lm_head.data[row_i * d ..][0..d];
+            const row_mean = row_means[row_i];
+            const inv_row_norm = 1.0 / @as(f64, @floatCast(row_norm));
+            coord_i = 0;
+            while (coord_i < d) : (coord_i += 1) {
+                const centered: f64 = @floatCast(rademacher[coord_i] * row[coord_i] - row_mean);
+                const normalized = centered * inv_row_norm;
+                column_variance_acc[coord_i] += normalized * normalized;
+            }
+            variance_row_count += 1;
+        }
+        if (variance_row_count == 0) {
+            @memset(column_variance, 1.0);
+        } else {
+            const variance_scale = @as(f64, @floatFromInt(d)) / @as(f64, @floatFromInt(variance_row_count));
+            coord_i = 0;
+            while (coord_i < d) : (coord_i += 1) {
+                column_variance[coord_i] = @floatCast(column_variance_acc[coord_i] * variance_scale);
+            }
+        }
 
         const row_tail_norms = try allocator.alloc(f32, checkpoints.len * vocab_size);
         errdefer allocator.free(row_tail_norms);
-        
+
         const approx_logits = try allocator.alloc(f32, vocab_size);
         errdefer allocator.free(approx_logits);
 
@@ -95,6 +166,9 @@ pub const SvdSampler = struct {
 
         const exact_logits = try allocator.alloc(f32, vocab_size);
         errdefer allocator.free(exact_logits);
+
+        const query_centered = try allocator.alloc(f32, d);
+        errdefer allocator.free(query_centered);
 
         const sampling_candidates = try allocator.alloc(SamplingCandidate, vocab_size);
         errdefer allocator.free(sampling_candidates);
@@ -111,16 +185,21 @@ pub const SvdSampler = struct {
         var sampler: SvdSampler = .{
             .zml_handler = zml_handler,
             .allocator = allocator,
+            .lm_head = lm_head,
             .m = lm_head.data,
             .m_t = lm_head.data_t,
+            .rademacher = rademacher,
+            .row_means = row_means,
             .vocab_size = vocab_size,
             .d = d,
             .checkpoints = checkpoints,
+            .column_variance = column_variance,
             .row_norms = row_norms,
             .row_tail_norms = row_tail_norms,
             .approx_logits = approx_logits,
             .checkpoint_approx_logits = checkpoint_approx_logits,
             .exact_logits = exact_logits,
+            .query_centered = query_centered,
             .sampling_candidates = sampling_candidates,
             .top256_candidates = top256_candidates,
             .active = active,
@@ -128,28 +207,31 @@ pub const SvdSampler = struct {
             .use_svd = use_svd,
             .order = order,
         };
-        sampler.computeRowNorms();
         sampler.precomputeRowTailNorms();
         return sampler;
     }
 
     pub fn deinit(self: *SvdSampler) void {
         self.allocator.free(self.checkpoints);
+        self.allocator.free(self.column_variance);
+        self.allocator.free(self.row_norms);
         self.allocator.free(self.row_tail_norms);
         self.allocator.free(self.approx_logits);
         self.allocator.free(self.checkpoint_approx_logits);
         self.allocator.free(self.exact_logits);
+        self.allocator.free(self.query_centered);
         self.allocator.free(self.sampling_candidates);
         self.allocator.free(self.top256_candidates);
         self.allocator.free(self.active);
-        self.allocator.free(self.row_norms);
+        self.allocator.free(self.rademacher);
+        self.allocator.free(self.row_means);
         self.allocator.free(self.order);
     }
 
-    pub fn setSamplingParams(self: *SvdSampler, temperature: f32, top_k: usize, top_p: f32) void {
-        _ = top_p;
+    pub fn setSamplingParams(self: *SvdSampler, temperature: f32, topK: usize, topP: f32) void {
+        _ = topP;
         self.temp = temperature;
-        self.top_k = top_k;
+        self.top_k = topK;
     }
 
 
@@ -158,7 +240,7 @@ pub const SvdSampler = struct {
             self.sampling_candidates[coord] = .{ .token = coord, .logit = value, .weight = 0.0 };
         }
         std.mem.sort(SamplingCandidate, self.sampling_candidates[0..self.d], {}, SamplingCandidate.absDecreasing);
-        
+
         // compute approximate logits using the 256 largest magnitude coordinates of the query
         self.zml_handler.tic(&self.zml_handler.timers.svd_sparse_256);
         @memset(self.approx_logits, 0.0);
@@ -203,7 +285,7 @@ pub const SvdSampler = struct {
             top_approx[insert_pos] = .{ .token = tok, .logit = logit, .weight = 0.0 };
         }
         self.zml_handler.toc(&self.zml_handler.timers.svd_top_256);
-        
+
         // compute their exact logits
         self.zml_handler.tic(&self.zml_handler.timers.svd_dense_256);
         for (0..256) |tok_pos| {
@@ -213,10 +295,10 @@ pub const SvdSampler = struct {
         self.zml_handler.toc(&self.zml_handler.timers.svd_dense_256);
     }
 
-    inline fn insertTop16(row: usize, score: f32, rows: *[svd_top_k]usize, scores: *[svd_top_k]f32) void {
-        if (score <= scores[svd_top_k - 1]) return;
+    inline fn insertTop16(row: usize, score: f32, rows: *[top_k]usize, scores: *[top_k]f32) void {
+        if (score <= scores[top_k - 1]) return;
 
-        var insert_pos = svd_top_k - 1;
+        var insert_pos = top_k - 1;
         while (insert_pos > 0 and score > scores[insert_pos - 1]) {
             scores[insert_pos] = scores[insert_pos - 1];
             rows[insert_pos] = rows[insert_pos - 1];
@@ -231,14 +313,26 @@ pub const SvdSampler = struct {
 
         const phase1_dim = @min(@as(usize, 64), self.d);
         const phase2_dim = @min(@as(usize, 256), self.d);
-        const z_score: f32 = 5.0;
+        const row_z_score: f32 = 12.0;
+        //const global_z_score: f32 = 7.5;
         const inv_sqrt_d = 1.0 / @sqrt(@as(f32, @floatFromInt(self.d)));
-        const inv_d = 1.0 / @as(f32, @floatFromInt(self.d));
 
-        var query_norm2: f32 = 0.0;
+        var query_sum: f64 = 0.0;
         var coord: usize = 0;
         while (coord < self.d) : (coord += 1) {
-            const value = y[coord];
+            query_sum += @floatCast(self.rademacher[coord] * y[coord]);
+        }
+        const query_center: f32 = @floatCast(query_sum / @as(f64, @floatFromInt(self.d)));
+        const mean_correction_scale = @as(f32, @floatFromInt(self.d)) * query_center;
+        const query = self.query_centered;
+
+        // sort based on centered query absolute values, this has a fast decay
+        var query_norm2: f32 = 0.0;
+        // Preparation: sign-flip, center, and sort query coordinates by absolute value.
+        coord = 0;
+        while (coord < self.d) : (coord += 1) {
+            const value = self.rademacher[coord] * y[coord] - query_center;
+            query[coord] = value;
             query_norm2 += value * value;
             self.sampling_candidates[coord] = .{ .token = coord, .logit = value, .weight = 0.0 };
         }
@@ -248,72 +342,77 @@ pub const SvdSampler = struct {
             self.order[coord] = self.sampling_candidates[coord].token;
         }
 
-        var tail64_norm2 = query_norm2;
-        coord = 0;
-        while (coord < phase1_dim) : (coord += 1) {
-            const value = y[self.order[coord]];
-            tail64_norm2 -= value * value;
-        }
-        tail64_norm2 = @max(tail64_norm2, 0.0);
-
-        var tail256_norm2 = tail64_norm2;
+        // query residual norm when removing the 64 highest abs value coords
+        var tail64_norm2: f32 = 0.0;
         coord = phase1_dim;
-        while (coord < phase2_dim) : (coord += 1) {
-            const value = y[self.order[coord]];
-            tail256_norm2 -= value * value;
+        while (coord < self.d) : (coord += 1) {
+            const query_coord = self.order[coord];
+            const value = query[query_coord];
+            tail64_norm2 += value * value * self.column_variance[query_coord];
         }
-        tail256_norm2 = @max(tail256_norm2, 0.0);
+
+        // query residual norm when removing the 256 highest abs value coords
+        var tail256_norm2: f32 = 0.0;
+        coord = phase2_dim;
+        while (coord < self.d) : (coord += 1) {
+            const query_coord = self.order[coord];
+            const value = query[query_coord];
+            tail256_norm2 += value * value * self.column_variance[query_coord];
+        }
 
         const query_tail64_norm = @sqrt(tail64_norm2);
         const query_tail256_norm = @sqrt(tail256_norm2);
-        const row_tail64_factor = @as(f32, @floatFromInt(self.d - phase1_dim)) * inv_d;
-        const row_tail256_factor = @as(f32, @floatFromInt(self.d - phase2_dim)) * inv_d;
+        const row_tail64_factor: f32 = 1.0;
+        const row_tail256_factor: f32 = 1.0;
 
-        var top_rows: [svd_top_k]usize = [_]usize{0} ** svd_top_k;
-        var top_scores: [svd_top_k]f32 = [_]f32{-std.math.inf(f32)} ** svd_top_k;
-        var phase_rows: [svd_top_k]usize = [_]usize{0} ** svd_top_k;
-        var phase_scores: [svd_top_k]f32 = [_]f32{-std.math.inf(f32)} ** svd_top_k;
+        var top_rows: [top_k]usize = [_]usize{0} ** top_k;
+        var top_scores: [top_k]f32 = [_]f32{-std.math.inf(f32)} ** top_k;
+        var phase_rows: [top_k]usize = [_]usize{0} ** top_k;
+        var phase_scores: [top_k]f32 = [_]f32{-std.math.inf(f32)} ** top_k;
 
-        self.zml_handler.tic(&self.zml_handler.timers.svd_sparse_256);
         @memset(self.approx_logits, 0.0);
         const m_t_items = self.m_t;
         const simd_len = 32;
         const Vec = @Vector(simd_len, f32);
 
+        // Phase 1a: compute sparse approximate logits from the 64 largest query coordinates.
         coord = 0;
         while (coord < phase1_dim) : (coord += 1) {
             const query_coord = self.order[coord];
-            const y_value = y[query_coord];
+            const y_value = query[query_coord];
             const coord_values = m_t_items[query_coord * self.vocab_size ..][0..self.vocab_size];
             const y_vec: Vec = @splat(y_value);
+            const sign_vec: Vec = @splat(self.rademacher[query_coord]);
 
             var token: usize = 0;
             while (token + simd_len <= self.vocab_size) : (token += simd_len) {
-                const coord_vec: Vec = coord_values[token..][0..simd_len].*;
+                const coord_values_vec: Vec = coord_values[token..][0..simd_len].*;
+                const row_means_vec: Vec = self.row_means[token..][0..simd_len].*;
+                const coord_vec = sign_vec * coord_values_vec - row_means_vec;
                 var logits_vec: Vec = self.approx_logits[token..][0..simd_len].*;
                 logits_vec = @mulAdd(Vec, coord_vec, y_vec, logits_vec);
                 self.approx_logits[token..][0..simd_len].* = logits_vec;
             }
             while (token < self.vocab_size) : (token += 1) {
-                self.approx_logits[token] += coord_values[token] * y_value;
+                self.approx_logits[token] += (self.rademacher[query_coord] * coord_values[token] - self.row_means[token]) * y_value;
             }
         }
-        self.zml_handler.toc(&self.zml_handler.timers.svd_sparse_256);
 
+        // Phase 1b: attach tail-error upper bounds and collect the sparse top16.
         var best_lower_bound: f32 = -std.math.inf(f32);
         var token: usize = 0;
         while (token < self.vocab_size) : (token += 1) {
-            const approx = self.approx_logits[token];
-            const err = z_score * row_tail64_factor * self.row_norms[token] * query_tail64_norm * inv_sqrt_d;
-            self.exact_logits[token] = approx + err;
-            best_lower_bound = @max(best_lower_bound, approx - err);
+            const approx = self.approx_logits[token] + mean_correction_scale * self.row_means[token];
+            const err_scale = row_tail64_factor * self.row_norms[token] * query_tail64_norm * inv_sqrt_d;
+            self.exact_logits[token] = approx + row_z_score * err_scale;
+            //best_lower_bound = @max(best_lower_bound, approx - global_z_score * err_scale);
             insertTop16(token, approx, &phase_rows, &phase_scores);
         }
 
-        self.zml_handler.tic(&self.zml_handler.timers.svd_dense_256);
+        // Phase 1c: exact-score the phase-1 top16 to establish a real lower bound.
         var nb_dense_scored: usize = 0;
         var i: usize = 0;
-        while (i < svd_top_k) : (i += 1) {
+        while (i < top_k) : (i += 1) {
             const row_i = phase_rows[i];
             const real = self.logitFast(y, row_i);
             nb_dense_scored += 1;
@@ -321,8 +420,10 @@ pub const SvdSampler = struct {
             insertTop16(row_i, real, &top_rows, &top_scores);
             self.exact_logits[row_i] = -std.math.inf(f32);
         }
-        self.zml_handler.toc(&self.zml_handler.timers.svd_dense_256);
 
+        // Phase 1d: compact candidates whose phase-1 upper bound survives.
+        // Collect next phase candidates by scanning token ids in ascending order.
+        // Phase 2 then streams coord_values[row_i] forward through memory.
         var active_count: usize = 0;
         token = 0;
         while (token < self.vocab_size) : (token += 1) {
@@ -331,37 +432,36 @@ pub const SvdSampler = struct {
             active_count += 1;
         }
 
-        self.zml_handler.tic(&self.zml_handler.timers.svd_sparse_256);
+        // Phase 2a: extend surviving approximate logits from 64 to 256 coordinates.
         coord = phase1_dim;
         while (coord < phase2_dim) : (coord += 1) {
             const query_coord = self.order[coord];
-            const y_value = y[query_coord];
+            const y_value = query[query_coord];
             const coord_values = m_t_items[query_coord * self.vocab_size ..][0..self.vocab_size];
 
             i = 0;
             while (i < active_count) : (i += 1) {
                 const row_i = self.sampling_candidates[i].token;
-                self.approx_logits[row_i] += coord_values[row_i] * y_value;
+                self.approx_logits[row_i] += (self.rademacher[query_coord] * coord_values[row_i] - self.row_means[row_i]) * y_value;
             }
         }
-        self.zml_handler.toc(&self.zml_handler.timers.svd_sparse_256);
 
-        phase_rows = [_]usize{0} ** svd_top_k;
-        phase_scores = [_]f32{-std.math.inf(f32)} ** svd_top_k;
-
+        // Phase 2b: attach tighter 256-coordinate upper bounds and collect the sparse top16.
+        phase_rows = [_]usize{0} ** top_k;
+        phase_scores = [_]f32{-std.math.inf(f32)} ** top_k;
         i = 0;
         while (i < active_count) : (i += 1) {
             const row_i = self.sampling_candidates[i].token;
-            const approx = self.approx_logits[row_i];
-            const err = z_score * row_tail256_factor * self.row_norms[row_i] * query_tail256_norm * inv_sqrt_d;
-            self.exact_logits[row_i] = approx + err;
-            best_lower_bound = @max(best_lower_bound, approx - err);
+            const approx = self.approx_logits[row_i] + mean_correction_scale * self.row_means[row_i];
+            const err_scale = row_tail256_factor * self.row_norms[row_i] * query_tail256_norm * inv_sqrt_d;
+            self.exact_logits[row_i] = approx + row_z_score * err_scale;
+            //best_lower_bound = @max(best_lower_bound, approx - global_z_score * err_scale);
             insertTop16(row_i, approx, &phase_rows, &phase_scores);
         }
 
-        self.zml_handler.tic(&self.zml_handler.timers.svd_dense_256);
+        // Phase 2c: exact-score the phase-2 top16 to tighten the lower bound.
         i = 0;
-        while (i < svd_top_k) : (i += 1) {
+        while (i < top_k) : (i += 1) {
             if (phase_scores[i] == -std.math.inf(f32)) break;
             const row_i = phase_rows[i];
             const real = self.logitFast(y, row_i);
@@ -371,6 +471,7 @@ pub const SvdSampler = struct {
             self.exact_logits[row_i] = -std.math.inf(f32);
         }
 
+        // Phase 3: exact-score all remaining candidates whose phase-2 upper bound survives.
         i = 0;
         while (i < active_count) : (i += 1) {
             const row_i = self.sampling_candidates[i].token;
@@ -380,7 +481,6 @@ pub const SvdSampler = struct {
             best_lower_bound = @max(best_lower_bound, real);
             insertTop16(row_i, real, &top_rows, &top_scores);
         }
-        self.zml_handler.toc(&self.zml_handler.timers.svd_dense_256);
 
         return .{ .rows = top_rows, .nb_dense_scored = nb_dense_scored, .nb_phase2_scored = active_count };
     }
@@ -403,7 +503,7 @@ pub const SvdSampler = struct {
         return @reduce(.Add, acc);
     }
 
-    
+
     pub fn sampleSafe(self: *SvdSampler, y: []const f32, random: std.Random) !u32 {
         std.log.info("##### sampleSafe", .{});
         return self.sample(y, random, .safe);
@@ -443,28 +543,16 @@ pub const SvdSampler = struct {
     }
 
 
-    fn computeRowNorms(self: *SvdSampler) void {
-        const m_items = self.m;
-        for (0..self.vocab_size) |token| {
-            const row = m_items[token * self.d ..][0..self.d];
-            var sum_sq: f64 = 0.0;
-            for (row) |value| {
-                const value_f64: f64 = @floatCast(value);
-                sum_sq += value_f64 * value_f64;
-            }
-            self.row_norms[token] = @floatCast(@sqrt(sum_sq));
-        }
-    }
-    
     fn precomputeRowTailNorms(self: *SvdSampler) void {
         const m_items = self.m;
         for (self.checkpoints, 0..) |checkpoint, checkpoint_index| {
             const checkpoint_tail_norms = self.rowTailNorms(checkpoint_index);
             for (0..self.vocab_size) |token| {
                 const row = m_items[token * self.d ..][0..self.d];
+                const row_mean = self.row_means[token];
                 var sum_sq: f64 = 0.0;
-                for (row[checkpoint..]) |value| {
-                    const value_f64: f64 = @floatCast(value);
+                for (row[checkpoint..], self.rademacher[checkpoint..]) |value, sign| {
+                    const value_f64: f64 = @floatCast(sign * value - row_mean);
                     sum_sq += value_f64 * value_f64;
                 }
                 checkpoint_tail_norms[token] = @floatCast(@sqrt(sum_sq));
@@ -477,7 +565,7 @@ pub const SvdSampler = struct {
         return self.row_tail_norms[start..][0..self.vocab_size];
     }
 
-    
+
     fn sample(self: *SvdSampler, y: []const f32, random: std.Random, mode: BoundMode) !u32 {
         if (y.len != self.d) return error.InvalidEmbeddingShape;
 
@@ -500,7 +588,7 @@ pub const SvdSampler = struct {
         var previous_checkpoint: usize = 0;
         var processed_checkpoint_count: usize = 0;
         var total_flops: usize = 0;
-        
+
         const m_t_items = self.m_t;
         for (self.checkpoints, 0..) |checkpoint, checkpoint_index| {
             const checkpoint_flops = (checkpoint - previous_checkpoint) * active_count;
@@ -520,7 +608,7 @@ pub const SvdSampler = struct {
 
             // we can improve this by computing it in one pass at start
             const y_tail_norm = if (self.use_svd) tailNorm(y, checkpoint) else tailNormOrder(self, y, checkpoint);
-            
+
             const row_tail_norms = self.rowTailNorms(checkpoint_index);
             const best_lower_bound = self.bestLowerBound(row_tail_norms, y_tail_norm, checkpoint, mode);
             const prune_limit = best_lower_bound + self.prune_threshold_logit;
@@ -646,7 +734,7 @@ pub const SvdSampler = struct {
             defer self.allocator.free(token_str);
             std.log.info("cand: {d:>5}, proba: {d:>11}, token: {s}", .{ candidate.token, proba, token_str });
         }
-        
+
         const threshold = random.float(f32) * total;
         var cumulative: f32 = 0.0;
         for (candidates[0..cutoff_count]) |candidate| {
