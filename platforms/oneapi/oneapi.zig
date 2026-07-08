@@ -27,10 +27,11 @@ fn hasOneApiDevices(io: std.Io) bool {
     return false;
 }
 
-fn setupOneAPIEnv() void {
+fn setupOneAPIEnv(driver_path: [:0]const u8) void {
     _ = c.setenv("CCL_LOG_LEVEL", c.getenv("CCL_LOG_LEVEL") orelse "error", 1);
     _ = c.setenv("CCL_ATL_TRANSPORT", "ofi", 1);
     _ = c.setenv("FI_PROVIDER", "shm", 1);
+    _ = c.setenv("ZE_ENABLE_ALT_DRIVERS", driver_path, 0);
 }
 
 pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
@@ -54,7 +55,9 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         return error.FileNotFound;
     };
 
-    setupOneAPIEnv();
+    var driver_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const driver_path = try stdx.Io.Dir.path.bufJoinZ(&driver_path_buf, &.{ sandbox_path, "lib", "libze_intel_gpu.so.1" });
+    setupOneAPIEnv(driver_path);
 
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;

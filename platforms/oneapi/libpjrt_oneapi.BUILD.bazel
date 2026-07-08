@@ -27,9 +27,16 @@ patchelf(
 
 patchelf(
     name = "libze_intel_gpu_so",
-    src = "@libze-intel-gpu1//:lib/x86_64-linux-gnu/libze_intel_gpu.so.1.6.33578",
+    src = "@libze-intel-gpu1//:libze_intel_gpu_so",
     set_rpath = "$ORIGIN",
     soname = "libze_intel_gpu.so.1",
+)
+
+patchelf(
+    name = "libigdfcl_so_2",
+    src = "@libigdfcl2//:libigdfcl_so_2",
+    set_rpath = "$ORIGIN",
+    soname = "libigdfcl.so.2",
 )
 
 ONEAPI_VERSION = "2026.0"
@@ -55,6 +62,7 @@ ONEAPI_UMF_LIB = "umf/{}/lib".format(ONEAPI_UMF_VERSION)
 copy_to_directory(
     name = "sandbox",
     srcs = [
+        ":libigdfcl_so_2",
         ":libpjrt_oneapi_so",
         ":libsycl_so",
         ":libze_intel_gpu_so",
@@ -86,6 +94,7 @@ copy_to_directory(
     hardlink = "auto",
     include_external_repositories = ["**"],
     replace_prefixes = {
+        "libigdfcl_so_2": "lib",
         "libpjrt_oneapi_so": "lib",
         "libsycl_so": "lib",
         ONEAPI_CCL_LIB: "lib",

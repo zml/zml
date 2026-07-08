@@ -66,41 +66,45 @@ filegroup(
     "libigc2": """
 genrule(
     name = "libigc_so_2",
-    srcs = ["lib/x86_64-linux-gnu/libigc.so.2.11.12+0"],
+    srcs = glob(["lib/x86_64-linux-gnu/libigc.so.2.*"]),
     outs = ["lib/x86_64-linux-gnu/libigc.so.2"],
-    cmd = "cp $< $@",
+    cmd = "cp $(SRCS) $@",
 )
 genrule(
     name = "libiga64_so_2",
-    srcs = ["lib/x86_64-linux-gnu/libiga64.so.2.11.12+0"],
+    srcs = glob(["lib/x86_64-linux-gnu/libiga64.so.2.*"]),
     outs = ["lib/x86_64-linux-gnu/libiga64.so.2"],
-    cmd = "cp $< $@",
+    cmd = "cp $(SRCS) $@",
 )
 filegroup(
     name = "libigc2",
     srcs = [
         ":libiga64_so_2",
         ":libigc_so_2",
-        "lib/x86_64-linux-gnu/libiga64.so.2.11.12+0",
-        "lib/x86_64-linux-gnu/libigc.so.2.11.12+0",
-    ],
+    ] + glob([
+        "lib/x86_64-linux-gnu/libiga64.so.2.*",
+        "lib/x86_64-linux-gnu/libigc.so.2.*",
+    ]),
 )""",
     "libigdfcl2": """
 genrule(
     name = "libigdfcl_so_2",
-    srcs = ["lib/x86_64-linux-gnu/libigdfcl.so.2.11.12+0"],
+    srcs = glob(["lib/x86_64-linux-gnu/libigdfcl.so.2.*"]),
     outs = ["lib/x86_64-linux-gnu/libigdfcl.so.2"],
-    cmd = "cp $< $@",
+    cmd = "cp $(SRCS) $@",
 )
 filegroup(
     name = "libigdfcl2",
-    srcs = [
-        ":libigdfcl_so_2",
-        "lib/x86_64-linux-gnu/libigdfcl.so.2.11.12+0",
-        "lib/x86_64-linux-gnu/libopencl-clang.so.15",
-    ],
+    srcs = glob([
+        "lib/x86_64-linux-gnu/libigdfcl.so.2.*",
+        "lib/x86_64-linux-gnu/libopencl-clang.so.*",
+    ]),
 )""",
     "libze-intel-gpu1": """
+filegroup(
+    name = "libze_intel_gpu_so",
+    srcs = glob(["lib/x86_64-linux-gnu/libze_intel_gpu.so.1.*"]),
+)
 filegroup(
     name = "libze_intel_gpu",
     srcs = glob(["lib/x86_64-linux-gnu/libze_intel_gpu.so.1*"]),
