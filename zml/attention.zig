@@ -4,6 +4,7 @@ pub const attnd = @import("attention/attnd.zig");
 pub const flashattn = @import("attention/flashattn.zig");
 pub const metal = @import("attention/metal_attention.zig");
 pub const nki = @import("attention/nki/attention.zig");
+pub const mla = @import("attention/multi_latent_attention.zig");
 pub const paged_attention = @import("attention/paged_attention.zig");
 pub const tpu = @import("attention/tpu_attention.zig");
 pub const triton = @import("attention/triton_attention.zig");
