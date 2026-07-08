@@ -25,6 +25,13 @@ patchelf(
     set_rpath = "$ORIGIN",
 )
 
+patchelf(
+    name = "libze_intel_gpu_so",
+    src = "@libze-intel-gpu1//:lib/x86_64-linux-gnu/libze_intel_gpu.so.1.6.33578",
+    set_rpath = "$ORIGIN",
+    soname = "libze_intel_gpu.so.1",
+)
+
 ONEAPI_VERSION = "2026.0"
 
 ONEAPI_CCL_LIB = "ccl/2022.0/lib"
@@ -50,6 +57,7 @@ copy_to_directory(
     srcs = [
         ":libpjrt_oneapi_so",
         ":libsycl_so",
+        ":libze_intel_gpu_so",
         "@intel-oneapi-ccl-2022.0//:ccl_runtime",
         "@intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0//:sycl_runtime",
         "@intel-oneapi-compiler-shared-runtime-2026.0//:compiler_runtime",
@@ -69,7 +77,6 @@ copy_to_directory(
         "@libnl-genl-3-200//:libnl_genl_3",
         "@libnl-route-3-200//:libnl_route_3",
         "@libnuma1",
-        "@libze-intel-gpu1//:libze_intel_gpu",
         "@libze1",
         "@zlib1g",
         "@zml//platforms/oneapi:zmlxoneapi",
@@ -89,6 +96,7 @@ copy_to_directory(
         ONEAPI_TCM_LIB: "lib",
         ONEAPI_UMF_LIB: "lib",
         "lib/x86_64-linux-gnu": "lib",
+        "libze_intel_gpu_so": "lib",
         "platforms/oneapi/libzmlxoneapi": "lib/libzmlxoneapi",
     },
     root_paths = ["."],
