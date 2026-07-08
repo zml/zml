@@ -572,8 +572,15 @@ pub const Platform = struct {
 
     /// Create a Sharding based on the given logical mesh and the default strategy.
     /// Memory is owned by the platform, making it safe to copy around.
-    pub fn registerSharding(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh) !Sharding {
-        return platform.registerShardingWithStrategy(name, logical, .suggest(logical, &platform.physical_mesh));
+    pub fn registerSharding(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh) error{OutOfMemory}!Sharding {
+        return platform.registerShardingWithStrategy(
+            name,
+            logical,
+            .suggest(logical, &platform.physical_mesh),
+        ) catch |err| switch (err) {
+            error.InvalidPhysicalMesh, error.InvalidStrategy, error.InvalidPhysicalAxis => unreachable,
+            error.OutOfMemory => |e| return e,
+        };
     }
 
     /// Create a Sharding based on the given logical mesh and a strategy.

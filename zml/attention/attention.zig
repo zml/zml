@@ -6,8 +6,6 @@ const flashattn = @import("flashattn.zig");
 const metal = @import("metal_attention.zig");
 const nki = @import("nki/attention.zig");
 
-const Attention = @This();
-
 pub const Backend = enum {
     vanilla,
     attnd,
@@ -33,6 +31,22 @@ pub const Backend = enum {
             .neuron => .nki,
             .metal => .metal_fa,
             .cpu, .rocm, .tpu, .oneapi => .vanilla,
+        };
+    }
+
+    pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
+        return switch (backend) {
+            .vanilla => true,
+            .attnd => true, // attnd runs over network
+            .nki => platform.target == .neuron,
+            .metal_fa => platform.target == .metal,
+            .cuda_fa2 => platform.target == .cuda,
+            .cuda_fa3 => {
+                if (platform.target != .cuda) return false;
+                const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
+                const cc = zml.platform.cuda.tryGetComputeCapabilities(platform, first_device) orelse return false;
+                return std.mem.eql(u8, cc, "9.0");
+            },
         };
     }
 };
@@ -166,4 +180,129 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
         .metal_fa => metal.attention(q, k, v, token_index, metadata.metal_fa),
     };
+}
+
+test "attention: q=1,h=64,kh=8" {
+    // TODO: using > 1 device on CUDA crashes
+    // TODO: batchsize not supported by fa2 bindings
+    try testAttention(
+        .init(.{ .q = 1, .h = 64, .hd = 64 }, .bf16),
+        .init(.{ .k = 64, .h = 8, .hd = 64 }, .bf16),
+        &.{63},
+    );
+}
+
+test "attention: q=1,h=8,kh=8" {
+    try testAttention(
+        .init(.{ .q = 1, .h = 8, .hd = 64 }, .bf16),
+        .init(.{ .k = 64, .h = 8, .hd = 64 }, .bf16),
+        &.{62},
+    );
+    try testAttention(
+        .init(.{ .q = 1, .h = 8, .hd = 64 }, .bf16),
+        .init(.{ .k = 64, .h = 8, .hd = 64 }, .bf16),
+        &.{63},
+    );
+}
+
+test "attention: q=8,h=64,kh=8" {
+    try testAttention(
+        .init(.{ .q = 8, .h = 64, .hd = 64 }, .bf16),
+        .init(.{ .k = 64, .h = 8, .hd = 64 }, .bf16),
+        &.{56},
+    );
+}
+
+pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []const u32) !void {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+
+    const platform = zml.testing.env();
+
+    var arena_state: std.heap.ArenaAllocator = .init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const token_index_shape: zml.Shape = if (q_shape.hasTag(.b)) |_| b: {
+        std.debug.assert(token_index_h.len == q_shape.dim(.b));
+        break :b .init(.{ .b = q_shape.dim(.b) }, .u32);
+    } else .init(.{}, .u32);
+
+    const max_k_idx: i64 = k_shape.dim(.k) - 1;
+    const max_q_idx: i64 = q_shape.dim(.q) - 1;
+    for (token_index_h) |index| {
+        // Check for out of bound reads
+        std.debug.assert(index + max_q_idx <= max_k_idx);
+    }
+
+    const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor } = .{
+        .q = .fromShape(q_shape),
+        .k = .fromShape(k_shape),
+        .v = .fromShape(k_shape),
+        .token_index = .init(.{}, .u32),
+    };
+
+    const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{ .mean = 0, .stddev = 1 } }, .{});
+    defer rng_q.deinit();
+    const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{ .mean = 0, .stddev = 1 } }, .{});
+    defer rng_k.deinit();
+
+    const q = try zml.testing.autoCall(allocator, io, &rng_q, zml.Tensor.Rng.normal, {});
+    const k = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
+    const v = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
+    const token_index = try zml.Buffer.fromBytes(io, platform, token_index_shape, .replicated, @ptrCast(token_index_h));
+
+    const shardings = platform.shardings.values();
+    const vanilla_exe = try platform.compileFn(allocator, io, attention, .{ tensors.q, tensors.k, tensors.v, tensors.token_index, .vanilla, .vanilla }, .{
+        .program_name = "attention_vanilla",
+        .shardings = shardings,
+    });
+    defer vanilla_exe.deinit();
+
+    const vanilla_d = try zml.testing.autoCall(allocator, io, &vanilla_exe, attention, .{ q, k, v, token_index, .vanilla });
+    try vanilla_d.await(io);
+    const vanilla_h: zml.Slice = try vanilla_d.toSliceAlloc(allocator, io);
+    defer vanilla_h.free(allocator);
+
+    for (std.enums.values(Backend)) |backend| {
+        switch (backend) {
+            .attnd, .vanilla => continue,
+            else => if (!backend.isAvailable(platform)) continue,
+        }
+
+        const metadata: Metadata = .init(.fromBackend(backend, 64, 8));
+        const parameters: Parameters = .init(.fromBackend(backend));
+        const exe = try platform.compileFn(
+            allocator,
+            io,
+            attention,
+            .{ tensors.q, tensors.k, tensors.v, tensors.token_index, metadata, parameters },
+            .{
+                .program_name = try std.fmt.allocPrint(arena, "attention_{t}", .{backend}),
+                .shardings = shardings,
+            },
+        );
+        defer exe.deinit();
+
+        var metadata_d = try metadata.initBuffer(io, platform, platform.shardings.get("model").?);
+        defer Metadata.deinitBuffer(&metadata_d);
+
+        var output_d = try zml.testing.autoCall(allocator, io, &exe, attention, .{ q, k, v, token_index, metadata_d });
+        defer output_d.deinit();
+        try output_d.await(io);
+        const output_h = try output_d.toSliceAlloc(allocator, io);
+        defer output_h.free(allocator);
+
+        errdefer std.log.err(
+            \\ Attention test failed, {0t} output doesn't match reference.
+            \\ - reference: {1d}
+            \\ - {0t}: {2d}
+        , .{ backend, vanilla_h, output_h });
+        try zml.testing.expectClose(io, vanilla_h, output_h, .{
+            .absolute_tolerance = 5e-3,
+            .relative_tolerance = 1e-2,
+            .epsilon_relative = 1e-3,
+            .minimum_close_fraction = 0.99,
+        });
+    }
 }
