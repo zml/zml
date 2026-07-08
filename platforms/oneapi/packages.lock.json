@@ -135,13 +135,13 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libze1_1.16.1-1build1_amd64",
+			"key": "libze1_1.8.12-1_amd64",
 			"name": "libze1",
-			"sha256": "1b6f94fa36fe35ff960bcbcc1ef61bbd6f617855bf61d961c8b9e398cb92a2e3",
+			"sha256": "403b3e3821a3e2dfdc8e6392300350943de2f66d1ada1dc551f8d5ac175ef944",
 			"urls": [
-				"https://archive.ubuntu.com/ubuntu/pool/universe/l/level-zero/libze1_1.16.1-1build1_amd64.deb"
+				"https://deb.debian.org/debian/pool/main/l/level-zero/libze1_1.8.12-1_amd64.deb"
 			],
-			"version": "1.16.1-1build1"
+			"version": "1.8.12-1"
 		},
 		{
 			"arch": "amd64",

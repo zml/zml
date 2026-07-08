@@ -38,7 +38,7 @@ _UBUNTU_PACKAGES = {
     "libze1": """
 filegroup(
     name = "libze1",
-    srcs = glob(["lib/x86_64-linux-gnu/libze_loader.so.1*"]),
+    srcs = glob(["lib/x86_64-linux-gnu/libze*.so.1*"]),
 )""",
     "zlib1g": """
 filegroup(
