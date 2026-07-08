@@ -25,22 +25,63 @@ patchelf(
     set_rpath = "$ORIGIN",
 )
 
+patchelf(
+    name = "libze_intel_gpu_so",
+    src = "@libze-intel-gpu1//:libze_intel_gpu_so",
+    set_rpath = "$ORIGIN",
+    soname = "libze_intel_gpu.so.1",
+)
+
+patchelf(
+    name = "libigc_so_2",
+    src = "@libigc2//:libigc_so_2",
+    set_rpath = "$ORIGIN",
+    soname = "libigc.so.2",
+)
+
+patchelf(
+    name = "libiga64_so_2",
+    src = "@libigc2//:libiga64_so_2",
+    set_rpath = "$ORIGIN",
+    soname = "libiga64.so.2",
+)
+
+patchelf(
+    name = "libigdfcl_so_2",
+    src = "@libigdfcl2//:libigdfcl_so_2",
+    set_rpath = "$ORIGIN",
+    soname = "libigdfcl.so.2",
+)
+
 ONEAPI_VERSION = "2026.0"
+
 ONEAPI_CCL_LIB = "ccl/2022.0/lib"
+
 ONEAPI_MPI_LIB = "mpi/2021.18/lib"
+
 ONEAPI_MPI_LIBFABRIC_LIB = "mpi/2021.18/opt/mpi/libfabric/lib"
+
 ONEAPI_TCM_VERSION = "1.5"
+
 ONEAPI_UMF_VERSION = "1.1"
+
 ONEAPI_COMPILER_LIB = "compiler/{}/lib".format(ONEAPI_VERSION)
+
 ONEAPI_MKL_LIB = "mkl/{}/lib".format(ONEAPI_VERSION)
+
 ONEAPI_TCM_LIB = "tcm/{}/lib".format(ONEAPI_TCM_VERSION)
+
 ONEAPI_UMF_LIB = "umf/{}/lib".format(ONEAPI_UMF_VERSION)
 
 copy_to_directory(
     name = "sandbox",
     srcs = [
+        ":libiga64_so_2",
+        ":libigdfcl_so_2",
+        ":libigc_so_2",
         ":libpjrt_oneapi_so",
         ":libsycl_so",
+        ":libze_intel_gpu_so",
         "@intel-oneapi-ccl-2022.0//:ccl_runtime",
         "@intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0//:sycl_runtime",
         "@intel-oneapi-compiler-shared-runtime-2026.0//:compiler_runtime",
@@ -53,6 +94,13 @@ copy_to_directory(
         "@intel-oneapi-mpi-2021.18//:mpi_runtime",
         "@intel-oneapi-tcm-1.5//:hwloc",
         "@intel-oneapi-umf-1.1//:umf",
+        "@libigdfcl2//:libopencl_clang",
+        "@libigdgmm12",
+        "@libnl-3-200//:libnl_3",
+        "@libnl-genl-3-200//:libnl_genl_3",
+        "@libnl-route-3-200//:libnl_route_3",
+        "@libnuma1",
+        "@libze1",
         "@zlib1g",
         "@zml//platforms/oneapi:zmlxoneapi",
     ],
@@ -61,6 +109,9 @@ copy_to_directory(
     hardlink = "auto",
     include_external_repositories = ["**"],
     replace_prefixes = {
+        "libiga64_so_2": "lib",
+        "libigdfcl_so_2": "lib",
+        "libigc_so_2": "lib",
         "libpjrt_oneapi_so": "lib",
         "libsycl_so": "lib",
         ONEAPI_CCL_LIB: "lib",
@@ -71,6 +122,7 @@ copy_to_directory(
         ONEAPI_TCM_LIB: "lib",
         ONEAPI_UMF_LIB: "lib",
         "lib/x86_64-linux-gnu": "lib",
+        "libze_intel_gpu_so": "lib",
         "platforms/oneapi/libzmlxoneapi": "lib/libzmlxoneapi",
     },
     root_paths = ["."],

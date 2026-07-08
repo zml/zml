@@ -135,6 +135,105 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
+			"key": "libnl-3-200_3.5.0-0.1_amd64",
+			"name": "libnl-3-200",
+			"sha256": "4cd689b817d3e6453aa8f6d91d77d35db36dfc4507ab11e780adaabdc4e0bc35",
+			"urls": [
+				"https://archive.ubuntu.com/ubuntu/pool/main/libn/libnl3/libnl-3-200_3.5.0-0.1_amd64.deb"
+			],
+			"version": "3.5.0-0.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libnl-genl-3-200_3.5.0-0.1_amd64",
+			"name": "libnl-genl-3-200",
+			"sha256": "3f73295eee7b9ef208f7272fdb604415778156e4597a25d600563967c15958ea",
+			"urls": [
+				"https://archive.ubuntu.com/ubuntu/pool/main/libn/libnl3/libnl-genl-3-200_3.5.0-0.1_amd64.deb"
+			],
+			"version": "3.5.0-0.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libnl-route-3-200_3.5.0-0.1_amd64",
+			"name": "libnl-route-3-200",
+			"sha256": "781291056f30ff840fa99c7c23731836355852889c87f2d530a910e5b4e33abe",
+			"urls": [
+				"https://archive.ubuntu.com/ubuntu/pool/main/libn/libnl3/libnl-route-3-200_3.5.0-0.1_amd64.deb"
+			],
+			"version": "3.5.0-0.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libnuma1_2.0.14-3ubuntu2_amd64",
+			"name": "libnuma1",
+			"sha256": "0721c89001fbbd1ada23e89da5d60e762763c1a7b3dc814a2e9a518480a8043d",
+			"urls": [
+				"https://archive.ubuntu.com/ubuntu/pool/main/n/numactl/libnuma1_2.0.14-3ubuntu2_amd64.deb"
+			],
+			"version": "2.0.14-3ubuntu2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libigdgmm12_22.10.0-1~24.04~ppa1_amd64",
+			"name": "libigdgmm12",
+			"sha256": "63fe9e124c3394193226c6cb8398dcabdc9306b5a10f63668118f7c799f5d792",
+			"urls": [
+				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-gmmlib/libigdgmm12_22.10.0-1~24.04~ppa1_amd64.deb"
+			],
+			"version": "22.10.0-1~24.04~ppa1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libigc2_2.36.3-2~24.04_amd64",
+			"name": "libigc2",
+			"sha256": "c11dd6e083d1010c50bbc33cabf5b614e64df53b61d349955e97efdababb85bf",
+			"urls": [
+				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-graphics-compiler/libigc2_2.36.3-2~24.04_amd64.deb"
+			],
+			"version": "2.36.3-2~24.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libigdfcl2_2.36.3-2~24.04_amd64",
+			"name": "libigdfcl2",
+			"sha256": "019c4d2802b03d5e1ddad888543e6b7b6003a46a14ccf2e16a2320e8923ad007",
+			"urls": [
+				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-graphics-compiler/libigdfcl2_2.36.3-2~24.04_amd64.deb"
+			],
+			"version": "2.36.3-2~24.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libze-intel-gpu1_26.22.38646.6-1~24.04~ppa1_amd64",
+			"name": "libze-intel-gpu1",
+			"sha256": "5d0903aae7ac4f94f43ae7d282a394bc988a0da12f813d92533dea1650eb91ff",
+			"urls": [
+				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-compute-runtime/libze-intel-gpu1_26.22.38646.6-1~24.04~ppa1_amd64.deb"
+			],
+			"version": "26.22.38646.6-1~24.04~ppa1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libze1_1.28.6-1~24.04~ppa1_amd64",
+			"name": "libze1",
+			"sha256": "ca4aec5982d46f92875659e74e459372f24c9d8add2810556c1c7e71531e1ec0",
+			"urls": [
+				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/l/level-zero-loader/libze1_1.28.6-1~24.04~ppa1_amd64.deb"
+			],
+			"version": "1.28.6-1~24.04~ppa1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
 			"key": "zlib1g_1-1.3.dfsg-3.1ubuntu2.1_amd64",
 			"name": "zlib1g",
 			"sha256": "7074b6a2f6367a10d280c00a1cb02e74277709180bab4f2491a2f355ab2d6c20",
