@@ -758,6 +758,7 @@ fn stringToDtype(safetensor_type: []const u8) !DataType {
         .{ "BF16", .bf16 },
         .{ "F8_E8M0", .f8e8m0 },
         .{ "F8_E4M3", .f8e4m3fn },
+        .{ "F8_E8M0", .f8e8m0 },
         .{ "F4_E2M1", .f4e2m1 },
         .{ "I64", .i64 },
         .{ "I32", .i32 },
