@@ -41,6 +41,7 @@ const Args = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
+    printZmlLogo(init.io) catch unreachable;
 
     // `bazel run` executes binaries from Bazel's runfiles tree by default.
     // If available, switch back to the shell's original working directory.
@@ -195,20 +196,64 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, prog
 }
 
 pub fn printZmlLogo(io: std.Io) !void {
-    const LOGO =
-        \\
-        \\
-        \\ ███████╗███╗   ███╗██╗
-        \\ ╚══███╔╝████╗ ████║██║
-        \\   ███╔╝ ██╔████╔██║██║
-        \\  ███╔╝  ██║╚██╔╝██║██║  .ai
-        \\ ███████╗██║ ╚═╝ ██║███████╗
-        \\ ╚══════╝╚═╝     ╚═╝╚══════╝
-        \\
-        \\
-        \\
-    ;
+    const RESET = "\x1b[0m";
+    const CYAN = "\x1b[38;2;0;255;255m";
+    const SKY = "\x1b[38;2;0;221;255m";
+    const BLUE = "\x1b[38;2;135;143;255m";
+    const VIOLET = "\x1b[38;2;215;90;219m";
+    const PINK = "\x1b[38;2;242;48;174m";
+    const SHINE_CYAN = "\x1b[1;38;2;140;255;255m";
+    const SHINE_SKY = "\x1b[1;38;2;128;244;255m";
+    const SHINE_BLUE = "\x1b[1;38;2;205;210;255m";
+    const SHINE_VIOLET = "\x1b[1;38;2;255;170;255m";
+    const SHINE_PINK = "\x1b[1;38;2;255;150;220m";
+    const logo_rows = [_]struct {
+        color: []const u8,
+        shine: []const u8,
+        text: []const u8,
+    }{
+        .{ .color = CYAN, .shine = SHINE_CYAN, .text = " ███████╗███╗   ███╗██╗\n" },
+        .{ .color = SKY, .shine = SHINE_SKY, .text = " ╚══███╔╝████╗ ████║██║\n" },
+        .{ .color = BLUE, .shine = SHINE_BLUE, .text = "   ███╔╝ ██╔████╔██║██║\n" },
+        .{ .color = VIOLET, .shine = SHINE_VIOLET, .text = "  ███╔╝  ██║╚██╔╝██║██║  .ai\n" },
+        .{ .color = PINK, .shine = SHINE_PINK, .text = " ███████╗██║ ╚═╝ ██║███████╗\n" },
+        .{ .color = PINK, .shine = SHINE_PINK, .text = " ╚══════╝╚═╝     ╚═╝╚══════╝\n" },
+    };
+
     var writer = std.Io.File.stdout().writerStreaming(io, &.{});
-    try writer.interface.writeAll(LOGO);
+    try writer.interface.writeAll("\n\n");
+    inline for (logo_rows) |row| {
+        try writeLogoRow(&writer.interface, row.color, row.shine, RESET, row.text);
+    }
+    try writer.interface.writeAll("\n\n\n");
     try writer.interface.flush();
+}
+
+fn writeLogoRow(writer: *std.Io.Writer, color: []const u8, shine: []const u8, reset: []const u8, text: []const u8) !void {
+    var view: std.unicode.Utf8View = .initUnchecked(text);
+    var iter = view.iterator();
+    var is_shiny = false;
+
+    try writer.writeAll(color);
+    while (iter.nextCodepointSlice()) |codepoint| {
+        const should_shine = isLogoShineGlyph(codepoint);
+        if (should_shine != is_shiny) {
+            try writer.writeAll(if (should_shine) shine else color);
+            is_shiny = should_shine;
+        }
+        try writer.writeAll(codepoint);
+    }
+    try writer.writeAll(reset);
+}
+
+fn isLogoShineGlyph(codepoint: []const u8) bool {
+    return std.mem.eql(u8, codepoint, "╔") or
+        std.mem.eql(u8, codepoint, "╗") or
+        std.mem.eql(u8, codepoint, "╚") or
+        std.mem.eql(u8, codepoint, "╝") or
+        std.mem.eql(u8, codepoint, "═") or
+        std.mem.eql(u8, codepoint, "║") or
+        std.mem.eql(u8, codepoint, ".") or
+        std.mem.eql(u8, codepoint, "a") or
+        std.mem.eql(u8, codepoint, "i");
 }
