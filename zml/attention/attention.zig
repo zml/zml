@@ -157,7 +157,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
             // then slice into it, but XLA is able to optimize this correctly.
             attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()), token_index.reshape(.{ .coord = 1 }), .{});
-            const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
+            const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
             break :b attn_output;
         },
         .attnd => attnd.causalAttention(q, k, v, token_index, metadata.attnd, parameters.attnd),
