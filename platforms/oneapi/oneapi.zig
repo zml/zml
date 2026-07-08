@@ -13,24 +13,26 @@ pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_ONEAPI");
 }
 
-fn hasOneApiDevices(io: std.Io) bool {
-    var dir = std.Io.Dir.openDirAbsolute(io, "/dev/dri", .{ .iterate = true }) catch return false;
+fn countOneApiDevices(io: std.Io) usize {
+    var dir = std.Io.Dir.openDirAbsolute(io, "/dev/dri", .{ .iterate = true }) catch return 0;
     defer dir.close(io);
 
+    var count: usize = 0;
     var it = dir.iterate();
     while (it.next(io) catch null) |entry| {
         if (std.mem.startsWith(u8, entry.name, "renderD")) {
-            return true;
+            count += 1;
         }
     }
 
-    return false;
+    return count;
 }
 
-fn setupOneAPIEnv(driver_path: [:0]const u8) void {
+fn setupOneAPIEnv(driver_path: [:0]const u8, device_count: usize) void {
     _ = c.setenv("CCL_LOG_LEVEL", c.getenv("CCL_LOG_LEVEL") orelse "error", 1);
     _ = c.setenv("CCL_ATL_TRANSPORT", "ofi", 1);
     _ = c.setenv("FI_PROVIDER", "shm", 1);
+    _ = c.setenv("ONEAPI_DEVICE_SELECTOR", if (device_count > 1) "level_zero:0,1" else "level_zero:0", 0);
     _ = c.setenv("ZE_ENABLE_ALT_DRIVERS", driver_path, 0);
 }
 
@@ -43,7 +45,8 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    if (!hasOneApiDevices(io)) {
+    const device_count = countOneApiDevices(io);
+    if (device_count == 0) {
         return error.Unavailable;
     }
 
@@ -57,7 +60,7 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
 
     var driver_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const driver_path = try stdx.Io.Dir.path.bufJoinZ(&driver_path_buf, &.{ sandbox_path, "lib", "libze_intel_gpu.so.1" });
-    setupOneAPIEnv(driver_path);
+    setupOneAPIEnv(driver_path, device_count);
 
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
