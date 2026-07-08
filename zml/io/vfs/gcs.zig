@@ -3,8 +3,8 @@ const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 
-const VFSBase = @import("base.zig").VFSBase;
 const parallel_read = @import("parallel_read.zig");
+const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/io/vfs/gcs");
 
@@ -125,7 +125,7 @@ pub const GCS = struct {
         const Pool = parallel_read.Pool(Job);
 
         const Batch = struct {
-            executor: parallel_read.BatchExecutor,
+            state: parallel_read.BatchState,
             backend: *GCS,
             uri: std.Uri,
             path: []const u8,
@@ -139,7 +139,7 @@ pub const GCS = struct {
             chunk_len: usize,
             batch: *Batch,
 
-            pub fn perform(job: Job, client: *std.http.Client) ?anyerror {
+            pub fn perform(job: Job, client: *std.http.Client) anyerror!parallel_read.Status {
                 var range_buf: [64]u8 = undefined;
                 const range_header = std.fmt.bufPrint(
                     &range_buf,
@@ -157,17 +157,76 @@ pub const GCS = struct {
                         },
                         .extra_headers = &.{.{ .name = "Range", .value = range_header }},
                     },
-                ) catch |err| return err;
+                ) catch |err| {
+                    switch (err) {
+                        // transient connect failures
+                        error.ConnectionRefused,
+                        error.ConnectionResetByPeer,
+                        error.HostUnreachable,
+                        error.NetworkUnreachable,
+                        error.NetworkDown,
+                        error.Timeout,
+                        error.NameServerFailure,
+                        => {
+                            log.warn("Failed to connect: {}", .{err});
+                            return .retry();
+                        },
+                        else => {
+                            log.err("Failed to connect: {}", .{err});
+                            return err;
+                        },
+                    }
+                };
                 defer req.deinit();
 
-                req.sendBodiless() catch |err| return err;
+                req.sendBodiless() catch |err| switch (err) {
+                    error.WriteFailed => {
+                        log.warn("Failed to send headers: {}", .{err});
+                        return .retry();
+                    },
+                };
 
                 var redirect_buffer: [8 * 1024]u8 = undefined;
-                var res = req.receiveHead(&redirect_buffer) catch |err| return err;
+                var res = req.receiveHead(&redirect_buffer) catch |err| {
+                    switch (err) {
+                        // stale keep-alive / peer closed while waiting for response head
+                        error.HttpConnectionClosing,
+                        error.HttpRequestTruncated,
+
+                        // transport read/write failure; retry on a fresh connection
+                        error.ReadFailed,
+                        error.WriteFailed,
+
+                        // transient connect failures
+                        error.ConnectionRefused,
+                        error.ConnectionResetByPeer,
+                        error.HostUnreachable,
+                        error.NetworkUnreachable,
+                        error.NetworkDown,
+                        error.Timeout,
+                        error.NameServerFailure,
+                        => {
+                            log.warn("Failed to receive headers: {}", .{err});
+                            return .retry();
+                        },
+
+                        else => {
+                            log.err("Failed to receive headers: {}", .{err});
+                            return err;
+                        },
+                    }
+                };
 
                 if (res.head.status != .partial_content and res.head.status != .ok) {
-                    log.err("Failed to read {s}: {s}", .{ job.batch.path, res.head.bytes });
-                    return error.RequestFailed;
+                    const status: parallel_read.Status = switch (res.head.status) {
+                        .request_timeout, .too_many_requests => .retry(),
+                        else => if (res.head.status.class() == .server_error) .retry() else {
+                            log.err("Failed to read {s}: {s}", .{ job.batch.path, res.head.bytes });
+                            return error.RequestFailed;
+                        },
+                    };
+                    log.warn("Failed to read {s}: {s}", .{ job.batch.path, res.head.bytes });
+                    return status;
                 }
 
                 const content_range = blk: {
@@ -181,9 +240,22 @@ pub const GCS = struct {
                 };
 
                 const reader = res.reader(&.{});
-                parallel_read.readChunk(reader, content_range, job.file_offset, job.data, job.chunk_offset, job.chunk_len) catch |err| return err;
+                parallel_read.readChunk(reader, content_range, job.file_offset, job.data, job.chunk_offset, job.chunk_len) catch |err| {
+                    switch (err) {
+                        error.EndOfStream,
+                        error.ReadFailed,
+                        => {
+                            log.warn("Failed to read from response: {}", .{err});
+                            return .retry();
+                        },
+                        else => {
+                            log.err("Failed to read from response: {}", .{err});
+                            return err;
+                        },
+                    }
+                };
 
-                return null;
+                return .success;
             }
         };
     };
@@ -991,7 +1063,7 @@ pub const GCS = struct {
         const pending: u32 = @intCast(job_count);
 
         var batch: ParallelRead.Batch = .{
-            .executor = .{ .pending = .init(pending) },
+            .state = .{ .pending = .init(pending) },
             .backend = self,
             .uri = uri,
             .path = handle.uri,
@@ -1010,8 +1082,8 @@ pub const GCS = struct {
         }
 
         try self.read_pool.job_queue.putAll(self.base.inner, jobs);
-        batch.executor.waitUncancelable(self.base.inner);
-        if (batch.executor.firstError()) |err| return err;
+        batch.state.waitUncancelable(self.base.inner);
+        if (batch.state.anyError()) |err| return err;
 
         return read_size;
     }
