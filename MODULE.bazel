@@ -266,6 +266,13 @@ apt.install(
 use_repo(apt, "apt_rocm")
 
 apt.install(
+    name = "apt_oneapi",
+    lock = "//platforms/oneapi:packages.lock.json",
+    manifest = "//platforms/oneapi:packages.yaml",
+)
+use_repo(apt, "apt_oneapi")
+
+apt.install(
     name = "apt_neuron",
     lock = "//platforms/neuron:packages.lock.json",
     manifest = "//platforms/neuron:packages.yaml",

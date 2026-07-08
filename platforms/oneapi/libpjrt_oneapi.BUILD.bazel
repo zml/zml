@@ -15,13 +15,13 @@ patchelf(
 
 patchelf(
     name = "libsycl_so",
-    src = "@intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0//:libsycl_so",
+    src = "@intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1//:libsycl_so",
     set_rpath = "$ORIGIN",
 )
 
 patchelf(
     name = "libccl_legacy_so",
-    src = "@intel-oneapi-ccl-2022.0//:libccl_legacy_so",
+    src = "@intel-oneapi-ccl-2022.1//:libccl_legacy_so",
     set_rpath = "$ORIGIN",
 )
 
@@ -53,9 +53,9 @@ patchelf(
     soname = "libigdfcl.so.2",
 )
 
-ONEAPI_VERSION = "2026.0"
+ONEAPI_VERSION = "2026.1"
 
-ONEAPI_CCL_LIB = "ccl/2022.0/lib"
+ONEAPI_CCL_LIB = "ccl/2022.1/lib"
 
 ONEAPI_MPI_LIB = "mpi/2021.18/lib"
 
@@ -82,15 +82,15 @@ copy_to_directory(
         ":libpjrt_oneapi_so",
         ":libsycl_so",
         ":libze_intel_gpu_so",
-        "@intel-oneapi-ccl-2022.0//:ccl_runtime",
-        "@intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0//:sycl_runtime",
-        "@intel-oneapi-compiler-shared-runtime-2026.0//:compiler_runtime",
-        "@intel-oneapi-mkl-core-2026.0//:mkl_core_runtime",
-        "@intel-oneapi-mkl-sycl-blas-2026.0//:mkl_sycl_blas",
-        "@intel-oneapi-mkl-sycl-dft-2026.0//:mkl_sycl_dft",
-        "@intel-oneapi-mkl-sycl-lapack-2026.0//:mkl_sycl_lapack",
-        "@intel-oneapi-mkl-sycl-rng-2026.0//:mkl_sycl_rng",
-        "@intel-oneapi-mkl-sycl-sparse-2026.0//:mkl_sycl_sparse",
+        "@intel-oneapi-ccl-2022.1//:ccl_runtime",
+        "@intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1//:sycl_runtime",
+        "@intel-oneapi-compiler-shared-runtime-2026.1//:compiler_runtime",
+        "@intel-oneapi-mkl-core-2026.1//:mkl_core_runtime",
+        "@intel-oneapi-mkl-sycl-blas-2026.1//:mkl_sycl_blas",
+        "@intel-oneapi-mkl-sycl-dft-2026.1//:mkl_sycl_dft",
+        "@intel-oneapi-mkl-sycl-lapack-2026.1//:mkl_sycl_lapack",
+        "@intel-oneapi-mkl-sycl-rng-2026.1//:mkl_sycl_rng",
+        "@intel-oneapi-mkl-sycl-sparse-2026.1//:mkl_sycl_sparse",
         "@intel-oneapi-mpi-2021.18//:mpi_runtime",
         "@intel-oneapi-tcm-1.5//:hwloc",
         "@intel-oneapi-umf-1.1//:umf",
