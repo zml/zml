@@ -38,12 +38,12 @@ _ROOT_PACKAGES = {
     "libnl-3-200": """
 filegroup(
     name = "libnl_3",
-    srcs = glob(["lib/x86_64-linux-gnu/libnl-3.so.200*"]),
+    srcs = ["lib/x86_64-linux-gnu/libnl-3.so.200"],
 )""",
     "libnl-genl-3-200": """
 filegroup(
     name = "libnl_genl_3",
-    srcs = glob(["lib/x86_64-linux-gnu/libnl-genl-3.so.200*"]),
+    srcs = ["lib/x86_64-linux-gnu/libnl-genl-3.so.200"],
 )""",
 }
 
@@ -51,68 +51,67 @@ _UBUNTU_PACKAGES = {
     "libnl-route-3-200": """
 filegroup(
     name = "libnl_route_3",
-    srcs = glob(["lib/x86_64-linux-gnu/libnl-route-3.so.200*"]),
+    srcs = ["lib/x86_64-linux-gnu/libnl-route-3.so.200"],
 )""",
     "libnuma1": """
 filegroup(
     name = "libnuma1",
-    srcs = glob(["lib/x86_64-linux-gnu/libnuma.so.1*"]),
+    srcs = ["lib/x86_64-linux-gnu/libnuma.so.1"],
 )""",
     "libigdgmm12": """
 filegroup(
     name = "libigdgmm12",
-    srcs = glob(["lib/x86_64-linux-gnu/libigdgmm.so.12*"]),
+    srcs = ["lib/x86_64-linux-gnu/libigdgmm.so.12"],
 )""",
     "libigc2": """
-genrule(
+filegroup(
     name = "libigc_so_2",
-    srcs = glob(["lib/x86_64-linux-gnu/libigc.so.2.*"]),
-    outs = ["lib/x86_64-linux-gnu/libigc.so.2"],
-    cmd = "cp $(SRCS) $@",
+    srcs = ["lib/x86_64-linux-gnu/libigc.so.2.36.3+0"],
 )
-genrule(
+filegroup(
     name = "libiga64_so_2",
-    srcs = glob(["lib/x86_64-linux-gnu/libiga64.so.2.*"]),
-    outs = ["lib/x86_64-linux-gnu/libiga64.so.2"],
-    cmd = "cp $(SRCS) $@",
+    srcs = ["lib/x86_64-linux-gnu/libiga64.so.2.36.3+0"],
 )
 filegroup(
     name = "libigc2",
     srcs = [
         ":libiga64_so_2",
         ":libigc_so_2",
-    ] + glob([
-        "lib/x86_64-linux-gnu/libiga64.so.2.*",
-        "lib/x86_64-linux-gnu/libigc.so.2.*",
-    ]),
+    ],
 )""",
     "libigdfcl2": """
-genrule(
+filegroup(
     name = "libigdfcl_so_2",
-    srcs = glob(["lib/x86_64-linux-gnu/libigdfcl.so.2.*"]),
-    outs = ["lib/x86_64-linux-gnu/libigdfcl.so.2"],
-    cmd = "cp $(SRCS) $@",
+    srcs = ["lib/x86_64-linux-gnu/libigdfcl.so.2.36.3+0"],
+)
+filegroup(
+    name = "libopencl_clang",
+    srcs = ["lib/x86_64-linux-gnu/libopencl-clang.so.16"],
 )
 filegroup(
     name = "libigdfcl2",
-    srcs = glob([
-        "lib/x86_64-linux-gnu/libigdfcl.so.2.*",
-        "lib/x86_64-linux-gnu/libopencl-clang.so.*",
-    ]),
+    srcs = [
+        ":libigdfcl_so_2",
+        ":libopencl_clang",
+    ],
 )""",
     "libze-intel-gpu1": """
 filegroup(
     name = "libze_intel_gpu_so",
-    srcs = glob(["lib/x86_64-linux-gnu/libze_intel_gpu.so.1.*"]),
+    srcs = ["lib/x86_64-linux-gnu/libze_intel_gpu.so.1"],
 )
 filegroup(
     name = "libze_intel_gpu",
-    srcs = glob(["lib/x86_64-linux-gnu/libze_intel_gpu.so.1*"]),
+    srcs = ["lib/x86_64-linux-gnu/libze_intel_gpu.so.1"],
 )""",
     "libze1": """
 filegroup(
     name = "libze1",
-    srcs = glob(["lib/x86_64-linux-gnu/libze*.so.1*"]),
+    srcs = [
+        "lib/x86_64-linux-gnu/libze_loader.so.1",
+        "lib/x86_64-linux-gnu/libze_tracing_layer.so.1",
+        "lib/x86_64-linux-gnu/libze_validation_layer.so.1",
+    ],
 )""",
     "zlib1g": """
 filegroup(
@@ -125,22 +124,67 @@ _ONEAPI_PACKAGES = {
     "intel-oneapi-ccl-2022.0": """
 filegroup(
     name = "ccl_runtime",
-    srcs = glob(
-        include = ["{ONEAPI_CCL_LIB}/**"],
-        exclude = ["{ONEAPI_CCL_LIB}/libccl_legacy.so"],
-    ),
+    srcs = [
+        "{ONEAPI_CCL_LIB}/ccl/cpu/lib/libccl.so",
+        "{ONEAPI_CCL_LIB}/ccl/cpu/lib/libccl.so.1",
+        "{ONEAPI_CCL_LIB}/ccl/cpu/lib/libccl.so.1.0",
+        "{ONEAPI_CCL_LIB}/ccl/cpu/lib/libccl_openmp.so",
+        "{ONEAPI_CCL_LIB}/ccl/cpu/lib/libccl_openmp.so.0",
+        "{ONEAPI_CCL_LIB}/ccl/cpu/lib/libccl_openmp.so.0.1",
+        "{ONEAPI_CCL_LIB}/ccl/kernels/kernels.spv",
+        "{ONEAPI_CCL_LIB}/libccl.so",
+        "{ONEAPI_CCL_LIB}/libccl.so.1",
+        "{ONEAPI_CCL_LIB}/libccl.so.1.0",
+        "{ONEAPI_CCL_LIB}/libccl.so.2",
+        "{ONEAPI_CCL_LIB}/libccl.so.2.0",
+        "{ONEAPI_CCL_LIB}/libccl_legacy_cpu.so",
+        "{ONEAPI_CCL_LIB}/libccl_openmp.so",
+        "{ONEAPI_CCL_LIB}/libccl_openmp.so.0",
+        "{ONEAPI_CCL_LIB}/libccl_openmp.so.0.1",
+    ],
 )""".format(ONEAPI_CCL_LIB = ONEAPI_CCL_LIB),
     "intel-oneapi-mpi-2021.18": """
 filegroup(
     name = "mpi_runtime",
-    srcs = glob([
-        "{ONEAPI_MPI_LIB}/libmpi*.so*",
-        "{ONEAPI_MPI_LIB}/libmpicxx*.so*",
-        "{ONEAPI_MPI_LIB}/libmpifort*.so*",
+    srcs = [
+        "{ONEAPI_MPI_LIB}/libmpi.so",
+        "{ONEAPI_MPI_LIB}/libmpi.so.12",
+        "{ONEAPI_MPI_LIB}/libmpi.so.12.0",
+        "{ONEAPI_MPI_LIB}/libmpi.so.12.0.0",
+        "{ONEAPI_MPI_LIB}/libmpi_abi.so",
+        "{ONEAPI_MPI_LIB}/libmpi_abi.so.1",
+        "{ONEAPI_MPI_LIB}/libmpi_abi.so.1.0",
+        "{ONEAPI_MPI_LIB}/libmpi_ilp64.so",
+        "{ONEAPI_MPI_LIB}/libmpi_ilp64.so.4",
+        "{ONEAPI_MPI_LIB}/libmpi_ilp64.so.4.1",
+        "{ONEAPI_MPI_LIB}/libmpi_shm_heap_proxy.so",
+        "{ONEAPI_MPI_LIB}/libmpicxx.so",
+        "{ONEAPI_MPI_LIB}/libmpicxx.so.12",
+        "{ONEAPI_MPI_LIB}/libmpicxx.so.12.0",
+        "{ONEAPI_MPI_LIB}/libmpicxx.so.12.0.0",
+        "{ONEAPI_MPI_LIB}/libmpifort.so",
+        "{ONEAPI_MPI_LIB}/libmpifort.so.12",
+        "{ONEAPI_MPI_LIB}/libmpifort.so.12.0",
+        "{ONEAPI_MPI_LIB}/libmpifort.so.12.0.0",
+        "{ONEAPI_MPI_LIB}/libmpifort_abi.so",
+        "{ONEAPI_MPI_LIB}/libmpifort_abi.so.1",
+        "{ONEAPI_MPI_LIB}/libmpifort_abi.so.1.0",
+        "{ONEAPI_MPI_LIB}/libmpijava.so",
+        "{ONEAPI_MPI_LIB}/libmpijava.so.1",
+        "{ONEAPI_MPI_LIB}/libmpijava.so.1.0",
         "{ONEAPI_MPI_LIB}/mpi/libmpi_ze_hooks.so",
-        "{ONEAPI_MPI_LIBFABRIC_LIB}/libfabric.so*",
-        "{ONEAPI_MPI_LIBFABRIC_LIB}/prov/*.so",
-    ]),
+        "{ONEAPI_MPI_LIBFABRIC_LIB}/libfabric.so",
+        "{ONEAPI_MPI_LIBFABRIC_LIB}/libfabric.so.1",
+        "{ONEAPI_MPI_LIBFABRIC_LIB}/prov/libefa-fi.so",
+        "{ONEAPI_MPI_LIBFABRIC_LIB}/prov/libmlx-fi.so",
+        "{ONEAPI_MPI_LIBFABRIC_LIB}/prov/libpsm3-fi.so",
+        "{ONEAPI_MPI_LIBFABRIC_LIB}/prov/libpsmx2-fi.so",
+        "{ONEAPI_MPI_LIBFABRIC_LIB}/prov/librxm-fi.so",
+        "{ONEAPI_MPI_LIBFABRIC_LIB}/prov/libshm-fi.so",
+        "{ONEAPI_MPI_LIBFABRIC_LIB}/prov/libtcp-fi.so",
+        "{ONEAPI_MPI_LIBFABRIC_LIB}/prov/libverbs-1.1-fi.so",
+        "{ONEAPI_MPI_LIBFABRIC_LIB}/prov/libverbs-1.12-fi.so",
+    ],
 )""".format(
         ONEAPI_MPI_LIB = ONEAPI_MPI_LIB,
         ONEAPI_MPI_LIBFABRIC_LIB = ONEAPI_MPI_LIBFABRIC_LIB,
@@ -162,7 +206,7 @@ filegroup(
 )
 filegroup(
     name = "sycl_runtime",
-    srcs = glob(["{ONEAPI_COMPILER_LIB}/*.spv"]) + [
+    srcs = [
         "{ONEAPI_COMPILER_LIB}/libur_adapter_level_zero.so.0",
         "{ONEAPI_COMPILER_LIB}/libur_adapter_level_zero_v2.so.0",
         "{ONEAPI_COMPILER_LIB}/libur_adapter_opencl.so.0",
@@ -172,7 +216,10 @@ filegroup(
     "intel-oneapi-compiler-shared-runtime-2026.0": """
 filegroup(
     name = "compiler_runtime",
-    srcs = glob(["{ONEAPI_COMPILER_LIB}/libOpenCL.so*"]) + [
+    srcs = [
+        "{ONEAPI_COMPILER_LIB}/libOpenCL.so",
+        "{ONEAPI_COMPILER_LIB}/libOpenCL.so.1",
+        "{ONEAPI_COMPILER_LIB}/libOpenCL.so.1.0.0",
         "{ONEAPI_COMPILER_LIB}/libimf.so",
         "{ONEAPI_COMPILER_LIB}/libintlc.so.5",
         "{ONEAPI_COMPILER_LIB}/libirc.so",

@@ -33,6 +33,20 @@ patchelf(
 )
 
 patchelf(
+    name = "libigc_so_2",
+    src = "@libigc2//:libigc_so_2",
+    set_rpath = "$ORIGIN",
+    soname = "libigc.so.2",
+)
+
+patchelf(
+    name = "libiga64_so_2",
+    src = "@libigc2//:libiga64_so_2",
+    set_rpath = "$ORIGIN",
+    soname = "libiga64.so.2",
+)
+
+patchelf(
     name = "libigdfcl_so_2",
     src = "@libigdfcl2//:libigdfcl_so_2",
     set_rpath = "$ORIGIN",
@@ -62,7 +76,9 @@ ONEAPI_UMF_LIB = "umf/{}/lib".format(ONEAPI_UMF_VERSION)
 copy_to_directory(
     name = "sandbox",
     srcs = [
+        ":libiga64_so_2",
         ":libigdfcl_so_2",
+        ":libigc_so_2",
         ":libpjrt_oneapi_so",
         ":libsycl_so",
         ":libze_intel_gpu_so",
@@ -78,8 +94,7 @@ copy_to_directory(
         "@intel-oneapi-mpi-2021.18//:mpi_runtime",
         "@intel-oneapi-tcm-1.5//:hwloc",
         "@intel-oneapi-umf-1.1//:umf",
-        "@libigc2",
-        "@libigdfcl2",
+        "@libigdfcl2//:libopencl_clang",
         "@libigdgmm12",
         "@libnl-3-200//:libnl_3",
         "@libnl-genl-3-200//:libnl_genl_3",
@@ -94,7 +109,9 @@ copy_to_directory(
     hardlink = "auto",
     include_external_repositories = ["**"],
     replace_prefixes = {
+        "libiga64_so_2": "lib",
         "libigdfcl_so_2": "lib",
+        "libigc_so_2": "lib",
         "libpjrt_oneapi_so": "lib",
         "libsycl_so": "lib",
         ONEAPI_CCL_LIB: "lib",
