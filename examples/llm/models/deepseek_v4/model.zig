@@ -1104,6 +1104,7 @@ pub const Attention = struct {
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, Cache } {
+        _ = attention_metadata; // autofix
         _ = attention_parameters;
         // shape(x) = [batch, seq, d]
         const precomputed_freqs_cis = precompute_yarn(self.rope_head_dim, self.rope_opts);
@@ -1388,6 +1389,7 @@ const MoE = struct {
                 y = y.add(self.shared_experts.forward(x).convert(.f32));
                 return y.convert(x.dtype());
             },
+            else => @panic("NOPE"),
         };
     }
 };
