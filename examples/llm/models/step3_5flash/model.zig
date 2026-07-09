@@ -446,30 +446,29 @@ pub const TextModel = struct {
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
-            const layer_cache = updated_kv_cache.atLayer(i);
-            switch (layer_cache.cache) {
-                .full => |cache| {
-                    const result = layer.forward(
-                        hidden,
-                        token_index,
-                        cache,
-                        attention_metadata,
-                        attention_parameters,
-                    );
-                    hidden = result[0];
-                    updated_kv_cache.full = result[1].reuseBuffer(updated_kv_cache.full);
-                },
-                .sliding => |cache| {
-                    const result = layer.forward(
-                        hidden,
-                        token_index,
-                        cache,
-                        attention_metadata,
-                        attention_parameters,
-                    );
-                    hidden = result[0];
-                    updated_kv_cache.sliding = result[1].reuseBuffer(updated_kv_cache.sliding);
-                },
+            const dense_layer_index: u32 = @intCast(updated_kv_cache.denseLayerIndex(i));
+            const layer_index = zml.Tensor.scalar(dense_layer_index, .u32);
+
+            if (layer.attn.enable_sliding_window) {
+                const result = layer.forward(
+                    hidden,
+                    token_index,
+                    updated_kv_cache.sliding.withLayerIndex(layer_index),
+                    attention_metadata,
+                    attention_parameters,
+                );
+                hidden = result[0];
+                updated_kv_cache.sliding = result[1].reuseBuffer(updated_kv_cache.sliding);
+            } else {
+                const result = layer.forward(
+                    hidden,
+                    token_index,
+                    updated_kv_cache.full.withLayerIndex(layer_index),
+                    attention_metadata,
+                    attention_parameters,
+                );
+                hidden = result[0];
+                updated_kv_cache.full = result[1].reuseBuffer(updated_kv_cache.full);
             }
         }
 
@@ -940,11 +939,11 @@ pub const KvCache = struct {
             };
         }
 
-        pub fn atLayer(kv: AttentionCache, layer_index: usize) AttentionCache {
+        pub fn withLayerIndex(kv: AttentionCache, layer_index: zml.Tensor) AttentionCache {
             return .{
                 .k = kv.k,
                 .v = kv.v,
-                .layer_index = .scalar(layer_index, .u32),
+                .layer_index = layer_index,
             };
         }
 
@@ -975,34 +974,6 @@ pub const KvCache = struct {
     pub fn deinitBuffer(kv: *Buffer) void {
         AttentionCache.deinitBuffer(&kv.full);
         AttentionCache.deinitBuffer(&kv.sliding);
-    }
-
-    pub const LayerView = struct {
-        parent: KvCache,
-        cache: union(enum) {
-            full: AttentionCache,
-            sliding: AttentionCache,
-        },
-    };
-
-    pub fn atLayer(kv: KvCache, layer_index: usize) LayerView {
-        return switch (denseIndex(kv.layer_types, layer_index)) {
-            .full_attention => |idx| .{
-                .parent = kv,
-                .cache = .{ .full = kv.full.atLayer(idx.layer_dense_index) },
-            },
-            .sliding_attention => |idx| .{
-                .parent = kv,
-                .cache = .{ .sliding = kv.sliding.atLayer(idx.layer_dense_index) },
-            },
-        };
-    }
-
-    pub fn cacheAtLayer(kv: KvCache, layer_index: usize) AttentionCache {
-        return switch (kv.atLayer(layer_index).cache) {
-            .full => |cache| cache,
-            .sliding => |cache| cache,
-        };
     }
 
     pub fn denseLayerIndex(kv: KvCache, layer_index: usize) usize {

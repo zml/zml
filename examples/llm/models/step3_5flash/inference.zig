@@ -661,14 +661,24 @@ const ComposedKernelExe = struct {
         // defer phase.logCompileDone(log, component, io, from);
 
         const hidden_tensor = hidden(step3p5_model, seqlen);
-        const layer_cache: model.KvCache.AttentionCache = parameters.kv_cache.cacheAtLayer(layer_index);
+        const layer = step3p5_model.text_model.layers[layer_index];
+        const layer_index_tensor = zml.Tensor.init(.{}, .u32);
+        const layer_cache: model.KvCache.AttentionCache = if (layer.attn.enable_sliding_window) .{
+            .k = parameters.kv_cache.sliding.k,
+            .v = parameters.kv_cache.sliding.v,
+            .layer_index = layer_index_tensor,
+        } else .{
+            .k = parameters.kv_cache.full.k,
+            .v = parameters.kv_cache.full.v,
+            .layer_index = layer_index_tensor,
+        };
 
         const attention_metadata, const attention_parameters = switch (phase) {
             .prefill => .{ parameters.prefill_attention_metadata, parameters.prefill_attention_parameters },
             .decode => .{ parameters.decode_attention_metadata, parameters.decode_attention_parameters },
         };
 
-        return platform.compile(allocator, io, step3p5_model.text_model.layers[layer_index], .forward, .{
+        return platform.compile(allocator, io, layer, .forward, .{
             hidden_tensor,
             parameters.token_index,
             layer_cache,
