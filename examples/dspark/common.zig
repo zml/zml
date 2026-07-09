@@ -113,7 +113,7 @@ pub fn parseConfig(comptime T: type, allocator: std.mem.Allocator, io: std.Io, d
     return try std.json.parseFromTokenSource(T, allocator, &reader, .{ .ignore_unknown_fields = true });
 }
 
-fn zeroBuffer(
+pub fn zeroBuffer(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
