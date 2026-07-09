@@ -41,11 +41,11 @@ pub const LoadedModel = union(ModelType) {
         generation: GenerationOptions,
         shardings: Shardings,
     ) !LoadedModel {
-        _ = shardings; // autofix
         const model_type = try detectModelType(allocator, io, repo);
         log.info("Detected model type: {}", .{model_type});
 
         return switch (model_type) {
+            .step3_5flash => .{ .step3_5flash = try step3_5flash.LoadedModel.init(allocator, io, repo, store, generation, shardings) },
             inline else => |t| @unionInit(
                 LoadedModel,
                 @tagName(t),
