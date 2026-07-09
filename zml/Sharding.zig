@@ -1,5 +1,6 @@
 //! Explain how to split a buffer across different devices.
 const std = @import("std");
+const builtin = @import("builtin");
 
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
@@ -12,7 +13,6 @@ const PlatformDevice = @import("platform.zig").Device;
 const Shape = @import("shape.zig").Shape;
 const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
-const builtin = @import("builtin");
 
 const Sharding = @This();
 
@@ -47,7 +47,7 @@ pub const Partitioner = union(enum) {
 
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron => .shardy,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal => .shardy,
         };
     }
 };
@@ -115,6 +115,15 @@ pub const Partitioning = struct {
     pub fn numPartitionsForLogicalAxis(self: Partitioning, shape: Shape, logical_axis: anytype) !i64 {
         const sharding = try self.selectSharding(shape);
         return sharding.data.numPartitionsForLogicalAxis(logical_axis);
+    }
+
+    pub fn shardableDim(self: Partitioning, shape: Shape, axis: anytype, must_divide: i64) !DimSharding {
+        const ax = shape.axis(axis);
+        const spec = shape.partition(ax);
+        if (spec != .axis) return .replicated;
+
+        const sharding = try self.selectSharding(shape);
+        return sharding.shardableDim(shape.dim(ax), spec.axis, must_divide);
     }
 
     pub fn sdyPerValueShardingAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, shapes: []const Shape) !*const mlir.Attribute {
@@ -206,6 +215,31 @@ fn shapeHasAxisPartition(shape: Shape) bool {
         if (shape.partition(ax) == .axis) return true;
     }
     return false;
+}
+
+pub const DimSharding = union(enum) {
+    sharded: struct {
+        dim: i64,
+        factor: u32,
+    },
+    replicated,
+};
+
+pub fn shardableDim(sharding: Sharding, dim: i64, logical_axis: anytype, must_divide: i64) DimSharding {
+    const partitions = sharding.numPartitionsForLogicalAxis(logical_axis);
+
+    if (@mod(dim, partitions) == 0) {
+        return if (@mod(must_divide, dim) == 0) .{ .sharded = .{ .dim = dim, .factor = 1 } } else .replicated;
+    }
+
+    const gcd: i64 = @intCast(std.math.gcd(@as(u64, @intCast(dim)), @as(u64, @intCast(partitions))));
+    const repeat_factor: u32 = @intCast(@divExact(partitions, gcd));
+    const materialized_dim = std.math.mul(i64, dim, @as(i64, repeat_factor)) catch return .replicated;
+    if (@mod(must_divide, materialized_dim) == 0) {
+        return .{ .sharded = .{ .dim = materialized_dim, .factor = repeat_factor } };
+    } else {
+        return .replicated;
+    }
 }
 
 /// Device as part of a PhysicalMesh.
@@ -663,7 +697,7 @@ pub const PhysicalMesh = struct {
             .tpu => &.{ .link_x, .link_y, .link_z },
             .neuron => &.{ .link, .link_x, .link_y, .link_z },
             .cuda, .rocm => &.{.link},
-            .cpu => &.{.bus},
+            .cpu, .metal => &.{.bus},
             .oneapi => &.{ .link, .bus },
         };
     }
@@ -869,7 +903,7 @@ pub const PhysicalMesh = struct {
             .cuda, .rocm => gpu(allocator, platform_devices),
             .tpu => tpu(allocator, platform_devices),
             .neuron => return neuron(allocator, platform_devices),
-            .oneapi => cpu(allocator, platform_devices),
+            .oneapi, .metal => cpu(allocator, platform_devices),
         };
         errdefer freeNode(allocator, root);
 

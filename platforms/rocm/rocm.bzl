@@ -5,6 +5,8 @@ load("//platforms:packages.bzl", "packages")
 
 _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 """
 
 _ROCM_STRIP_PREFIX = "./opt/rocm-7.2.2"

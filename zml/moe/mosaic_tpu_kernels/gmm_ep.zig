@@ -290,6 +290,8 @@ fn matmulByMxuColumns(b: *mtt.Builder, cfg: Cfg, lhs: mtt.Value, rhs: mtt.Value,
             });
         }
 
+        if (chunks == 1) return parts[0];
+
         const max_concat_inputs = 16;
         if (chunks <= max_concat_inputs) return b.concatenate(parts, 1);
 
@@ -326,6 +328,8 @@ fn matmulByMxuColumns(b: *mtt.Builder, cfg: Cfg, lhs: mtt.Value, rhs: mtt.Value,
             .dimension_numbers = b.dotDimensionNumbers(&.{1}, &.{0}, &.{0}, &.{1}, &.{ 0, 0, 1, 1 }, &.{}, &.{}),
         });
     }
+
+    if (chunks == 1) return parts[0];
 
     const max_concat_inputs = 16;
     if (chunks <= max_concat_inputs) return b.concatenate(parts, 1);

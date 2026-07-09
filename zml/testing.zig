@@ -15,7 +15,7 @@ pub fn env() *const Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
     if (_platform == null) {
         _platform = Platform.auto(std.heap.c_allocator, std.testing.io, .{
-            .cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.85 } } },
+            .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.85 } } },
         }) catch unreachable;
     }
 

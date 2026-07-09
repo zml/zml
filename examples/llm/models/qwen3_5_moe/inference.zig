@@ -30,9 +30,8 @@ pub const CompilationParameters = struct {
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, moe_backend: zml.moe.Backend, shardings: common.Shardings) CompilationParameters {
         const dtype = mdl.text_model.embed_tokens.weight.dtype();
-        const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
         return .{
-            .kv_cache = .init(config, 1, seqlen, dtype, .f32, model_partitions),
+            .kv_cache = .init(config, 1, seqlen, dtype, .f32, shardings.model),
             .rng = .init(),
             .prefill_moe_metadata = initMoeMetadata(mdl, @intCast(seqlen), 1, moe_backend),
             .decode_moe_metadata = initMoeMetadata(mdl, 1, 1, moe_backend),
@@ -476,6 +475,6 @@ fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, b
                 .w2_zero_bias_shape = w2_zero_bias_shape,
             },
         }),
-        .mosaic_tpu => .init(.fromBackend(backend)),
+        .mosaic_tpu, .metal => .init(.fromBackend(backend)),
     };
 }

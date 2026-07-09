@@ -189,8 +189,8 @@ pub const Tensor = struct {
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .oneapi => return self,
-            .cuda, .rocm, .tpu => {},
+            .cpu, .neuron, .metal => return self,
+            .cuda, .rocm, .tpu, .oneapi => {},
         }
 
         const frontend_attributes: *const mlir.Attribute = .dict(ctx.mlir_ctx, &.{
@@ -224,8 +224,8 @@ pub const Tensor = struct {
     pub fn onMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
-            .cpu, .neuron, .oneapi => return self,
-            .cuda, .rocm, .tpu => {},
+            .cpu, .neuron, .metal => return self,
+            .cuda, .rocm, .tpu, .oneapi => {},
         }
 
         if (ctx.currentScope().id_to_argument.get(self.id) == null) {
@@ -1979,17 +1979,18 @@ pub const Tensor = struct {
     ///
     /// * stutter1d([0, 1, 2, 3], -1, 2) = [0, 0, 1, 1, 2, 2, 3, 3]
     /// This is equivalent to repeat(ax+1) unless ax is the last axis.
-    pub fn stutter1d(self: Tensor, axis_: i8, n_rep: u63) Tensor {
+    pub fn stutter1d(self: Tensor, axis_: i8, n_rep: u32) Tensor {
+        stdx.debug.assert(n_rep > 0, "stutter1d expects a positive repeat count, got {}", .{n_rep});
         const a = self.axis(axis_);
         const broadshape = self._shape.insert(a + 1, .{n_rep});
-        const res_shape = self._shape.setDim(a, self.dim(a) * n_rep);
+        const res_shape = self._shape.setDim(a, self.dim(a) * @as(i64, n_rep));
 
         const stutter_dims = Shape.range(self.rank() + 1, self.dtype()).remove(a + 1);
         return self.broadcast(broadshape, stutter_dims.dims()).reshape(res_shape);
     }
 
     /// Repeats in line each value along the given axes.
-    pub fn stutter(self: Tensor, n_reps: []const u63) Tensor {
+    pub fn stutter(self: Tensor, n_reps: []const u32) Tensor {
         // TODO: this should support the tagged syntax: x.repeat(.{ .a = 3, .b = 2});
         stdx.debug.assert(n_reps.len == self.rank(), "stutter expects tensor rank and 'n_reps' length to be equal, got {} and {}", .{ self.rank(), n_reps.len });
 
@@ -3282,7 +3283,7 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi => blk: {
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
                 sorted.values = sorted.values.slice1d(a, .{ .end = k });
                 sorted.indices = sorted.indices.slice1d(a, .{ .end = k });
@@ -3510,10 +3511,9 @@ pub const Tensor = struct {
         for (split_sizes) |n| split_sum += n;
         stdx.debug.assert(split_sum == d, "split expects sum of 'split_sizes' values and axis dimension to be equal, got {} and {}", .{ split_sum, d });
 
-        var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
-        defer arena.deinit();
+        const allocator = CompilationContext.current().arena.allocator();
 
-        const res = arena.allocator().alloc(Tensor, split_sizes.len) catch @panic("OOM");
+        const res = allocator.alloc(Tensor, split_sizes.len) catch @panic("OOM");
 
         var start: i64 = 0;
         for (split_sizes, 0..) |n, i| {
@@ -3521,6 +3521,50 @@ pub const Tensor = struct {
             start += n;
         }
         return res;
+    }
+
+    test split {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            pub fn _split(x: Tensor, axis_: i8, split_sizes: []const i64) []Tensor {
+                return x.split(axis_, split_sizes);
+            }
+        };
+
+        inline for (.{
+            .{ [3]f32{ 0, 1, 2 }, Shape.init(.{3}, .f32), 0, [3]i64{ 1, 1, 1 }, &.{ [1]f32{0}, [1]f32{1}, [1]f32{2} } },
+            .{ [10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, Shape.init(.{10}, .f32), 0, [2]i64{ 1, 9 }, &.{ [1]f32{0}, [9]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9 } } },
+            .{ [4][3]f32{ .{ 0, 1, 2 }, .{ 3, 4, 5 }, .{ 6, 7, 8 }, .{ 9, 10, 11 } }, Shape.init(.{ 4, 3 }, .f32), 0, [2]i64{ 1, 3 }, &.{ [1][3]f32{.{ 0, 1, 2 }}, [3][3]f32{ .{ 3, 4, 5 }, .{ 6, 7, 8 }, .{ 9, 10, 11 } } } },
+            .{ [2][6]f32{ .{ 0, 1, 2, 3, 4, 5 }, .{ 6, 7, 8, 9, 10, 11 } }, Shape.init(.{ 2, 6 }, .f32), 1, [2]i64{ 2, 4 }, &.{ [2][2]f32{ .{ 0, 1 }, .{ 6, 7 } }, [2][4]f32{ .{ 2, 3, 4, 5 }, .{ 8, 9, 10, 11 } } } },
+        }) |testcase| {
+            const x_data, const x_shape, const ax, const args, const expectation = testcase;
+            const x: Tensor = .fromShape(x_shape);
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._split, .{ x, ax, &args }, platform, .{});
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_data));
+            defer x_buffer.deinit();
+
+            var exe_args = try exe.args(std.testing.allocator);
+            defer exe_args.deinit(std.testing.allocator);
+            exe_args.set(.{x_buffer});
+
+            var results = try exe.results(std.testing.allocator);
+            defer results.deinit(std.testing.allocator);
+            exe.callOpts(std.testing.io, exe_args, &results, .{ .wait = true });
+
+            const res = try std.testing.allocator.alloc(zml.Buffer, expectation.len);
+            defer std.testing.allocator.free(res);
+            results.fill(res);
+            defer for (res) |*buffer| buffer.deinit();
+
+            inline for (expectation, 0..) |expected, i| {
+                try std.testing.expectEqual(expected, try res[i].getValue(@TypeOf(expected), std.testing.io));
+            }
+        }
     }
 
     /// Slices the input Tensor along a specific axis, with a start offset known at runtime.
@@ -4294,7 +4338,7 @@ pub const Tensor = struct {
     /// so it will slow down the program execution.
     pub fn print(input: Tensor, name: []const u8) void {
         switch (CompilationContext.current().platform.target) {
-            .cpu, .cuda, .rocm, .tpu => {
+            .cpu, .cuda, .rocm, .tpu, .metal => {
                 ops.manualComputation(input, {}, .{ .name = name }, (struct {
                     fn body(ctx_: anytype, _: std.mem.Allocator, sharded_input: Tensor, _: void) void {
                         ops.customCall("zml$print", sharded_input, {}, .{ .name = ctx_.name }, .{ .has_side_effect = true });

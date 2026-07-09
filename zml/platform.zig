@@ -8,12 +8,12 @@ pub const Target = platforms.Platform;
 const stdx = @import("stdx");
 
 const attention = @import("attention.zig");
+const constants = @import("constants.zig");
 const Exe = @import("exe.zig").Exe;
 const pjrtx = @import("pjrtx.zig");
 const profiler_ = @import("profiling/profiler.zig");
 const Sharding = @import("Sharding.zig");
 const zml = @import("zml.zig");
-const constants = @import("constants.zig");
 
 const log = std.log.scoped(.zml);
 
@@ -35,14 +35,20 @@ fn disableXlaLogs() void {
 }
 
 fn validateDeviceCount(target: Target, num_devices: usize) !void {
+    if (num_devices == 0) {
+        log.err("The selected platform requires at least 1 device, got {}", .{num_devices});
+        return error.MissingDevices;
+    }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .oneapi => {
-            if (num_devices == 0) {
-                log.err("Platform {} requires at least 1 device, got {}", .{ target, num_devices });
-                return error.ZeroVisibleDevices;
-            }
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
+                return error.InvalidDeviceCount;
+            }
+        },
+        .oneapi => {
+            if (num_devices > 2) {
+                log.err("Platform Intel is limited to a maximum of 2 devices, got {}", .{num_devices});
                 return error.InvalidDeviceCount;
             }
         },
@@ -98,7 +104,7 @@ pub const Memory = struct {
                 };
                 return zml_kind == kind_;
             },
-            .cpu, .neuron => return true,
+            .cpu, .neuron, .metal => return true,
         }
     }
 
@@ -212,7 +218,7 @@ pub const Device = struct {
 fn platformDeviceSortId(target: Target, device: Device) usize {
     return switch (target) {
         .neuron => @intCast(device.localHardwareId()),
-        .cuda, .rocm, .tpu, .cpu, .oneapi => device.id(),
+        .cuda, .rocm, .tpu, .cpu, .oneapi, .metal => device.id(),
     };
 }
 
@@ -348,6 +354,7 @@ pub const Platform = struct {
             .rocm,
             .cuda,
             .oneapi,
+            .metal,
             .cpu,
         };
         return for (ordered_targets) |target| {
@@ -614,7 +621,7 @@ pub const Platform = struct {
                 const default = platform.pjrt_client.defaultMemoryLayout(platform.pjrt_api, element_type, dims) catch @panic("Failed to get default memory layout");
                 return default.toMemoryLayout();
             },
-            .cuda, .rocm, .neuron, .oneapi, .cpu => .{
+            .cuda, .rocm, .neuron, .oneapi, .cpu, .metal => .{
                 // If this is the default layout on the platform, there is no point calling PJRT
                 .tiled = .{
                     .minor_to_major = constants.minorToMajor(@intCast(dims.len)),
@@ -642,13 +649,13 @@ pub const CreateOptions = struct {
     cpu: Cpu = .{ .device_count = 4 },
 
     // bump memory fraction from XLA defaults of 75% to 90%.
-    // Even on a 8GB GPU it should leave enough space for the Cuda driver
+    // Even on a 8GB GPU it should leave enough space for the platform driver/runtime.
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
-    cuda: Cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
-    rocm: struct {} = .{},
+    xla_gpu: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
     tpu: struct {} = .{},
     neuron: struct {} = .{},
     oneapi: struct {} = .{},
+    metal: struct {} = .{},
 
     pub const Cpu = struct {
         device_count: u32,
@@ -658,7 +665,7 @@ pub const CreateOptions = struct {
         }
     };
 
-    pub const Cuda = struct {
+    pub const XlaGpu = struct {
         allocator: Allocator = .{ .bfc = .{} },
         // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
         // visible_devices: []const i64 = &.{},
@@ -682,7 +689,7 @@ pub const CreateOptions = struct {
             };
         };
 
-        fn writeNamedValues(self: Cuda, values: *std.ArrayList(pjrt.NamedValue)) void {
+        fn writeNamedValues(self: XlaGpu, values: *std.ArrayList(pjrt.NamedValue)) void {
             switch (self.allocator) {
                 .platform => {
                     values.appendAssumeCapacity(.init(.string, "allocator", "platform"));
@@ -710,7 +717,7 @@ pub const CreateOptions = struct {
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
-            .cuda => self.cuda.writeNamedValues(&values),
+            .cuda, .rocm, .oneapi, .metal => self.xla_gpu.writeNamedValues(&values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));

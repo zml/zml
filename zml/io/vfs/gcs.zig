@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const stdx = @import("stdx");
 
 const VFSBase = @import("base.zig").VFSBase;
+const parallel_read = @import("parallel_read.zig");
 
 const log = std.log.scoped(.@"zml/io/vfs/gcs");
 
@@ -120,6 +121,73 @@ const Credentials = union(enum) {
 const ReadState = struct { index: usize, objects: [][]const u8 };
 
 pub const GCS = struct {
+    const ParallelRead = struct {
+        const Pool = parallel_read.Pool(Job);
+
+        const Batch = struct {
+            executor: parallel_read.BatchExecutor,
+            backend: *GCS,
+            uri: std.Uri,
+            path: []const u8,
+            authorization: std.http.Client.Request.Headers.Value,
+        };
+
+        const Job = struct {
+            data: []const []u8,
+            file_offset: u64,
+            chunk_offset: usize,
+            chunk_len: usize,
+            batch: *Batch,
+
+            pub fn perform(job: Job, client: *std.http.Client) ?anyerror {
+                var range_buf: [64]u8 = undefined;
+                const range_header = std.fmt.bufPrint(
+                    &range_buf,
+                    "bytes={d}-{d}",
+                    .{ job.file_offset, job.file_offset + @as(u64, @intCast(job.chunk_len - 1)) },
+                ) catch unreachable;
+
+                var req = client.request(
+                    .GET,
+                    job.batch.uri,
+                    .{
+                        .headers = .{
+                            .accept_encoding = .{ .override = "identity" },
+                            .authorization = job.batch.authorization,
+                        },
+                        .extra_headers = &.{.{ .name = "Range", .value = range_header }},
+                    },
+                ) catch |err| return err;
+                defer req.deinit();
+
+                req.sendBodiless() catch |err| return err;
+
+                var redirect_buffer: [8 * 1024]u8 = undefined;
+                var res = req.receiveHead(&redirect_buffer) catch |err| return err;
+
+                if (res.head.status != .partial_content and res.head.status != .ok) {
+                    log.err("Failed to read {s}: {s}", .{ job.batch.path, res.head.bytes });
+                    return error.RequestFailed;
+                }
+
+                const content_range = blk: {
+                    var it = res.head.iterateHeaders();
+                    while (it.next()) |header| {
+                        if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
+                            break :blk parallel_read.parseContentRange(header.value);
+                        }
+                    }
+                    break :blk null;
+                };
+
+                const reader = res.reader(&.{});
+                parallel_read.readChunk(reader, content_range, job.file_offset, job.data, job.chunk_offset, job.chunk_len) catch |err| return err;
+
+                return null;
+            }
+        };
+    };
+
     const Token = struct {
         header: []u8,
         expires_at: std.Io.Timestamp,
@@ -164,32 +232,39 @@ pub const GCS = struct {
     client: *std.http.Client,
     config: Config,
     token: Token,
+    read_pool: *ParallelRead.Pool,
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
     base: VFSBase,
 
-    pub const InitArgs = struct {
+    pub const InitOpts = struct {
         credentials: ?union(enum) {
             json: *std.Io.Reader,
             metadata_server: void,
         } = null,
         endpoint_url: []const u8 = "https://storage.googleapis.com",
         region: []const u8 = "auto",
+        read_pool: parallel_read.InitOpts = .{},
     };
 
     pub const InitError = error{
         InvalidCredentialJson,
-        RequestFailed,
         Unexpected,
-    } || std.mem.Allocator.Error;
+    } || std.mem.Allocator.Error || std.Io.ConcurrentError;
 
-    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, args: InitArgs) InitError!GCS {
+    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, opts: InitOpts) InitError!GCS {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         errdefer arena.deinit();
 
+        const read_pool = try allocator.create(ParallelRead.Pool);
+        errdefer allocator.destroy(read_pool);
+
+        try read_pool.init(allocator, inner, http_client, opts.read_pool);
+        errdefer read_pool.deinit(allocator, inner);
+
         const config: Config = .{
-            .credentials = if (args.credentials) |creds| switch (creds) {
+            .credentials = if (opts.credentials) |creds| switch (creds) {
                 .json => |reader| blk: {
                     var json_reader: std.json.Reader = .init(allocator, reader);
                     defer json_reader.deinit();
@@ -203,8 +278,8 @@ pub const GCS = struct {
                 },
                 .metadata_server => .{ .metadata_server = {} },
             } else null,
-            .endpoint_uri = std.Uri.parse(try arena.allocator().dupe(u8, args.endpoint_url)) catch return InitError.Unexpected,
-            .region = try arena.allocator().dupe(u8, args.region),
+            .endpoint_uri = std.Uri.parse(try arena.allocator().dupe(u8, opts.endpoint_url)) catch return InitError.Unexpected,
+            .region = try arena.allocator().dupe(u8, opts.region),
         };
 
         const token: Token = .{
@@ -219,6 +294,7 @@ pub const GCS = struct {
             .client = http_client,
             .config = config,
             .token = token,
+            .read_pool = read_pool,
         };
     }
 
@@ -372,6 +448,7 @@ pub const GCS = struct {
         if (self.config.credentials == null) {
             return .omit;
         }
+
         if (self.token.expired(self.base.inner)) {
             try self.refreshToken();
         }
@@ -379,6 +456,9 @@ pub const GCS = struct {
     }
 
     pub fn deinit(self: *GCS) void {
+        self.read_pool.deinit(self.allocator, self.base.inner);
+        self.allocator.destroy(self.read_pool);
+
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -901,80 +981,38 @@ pub const GCS = struct {
     }
 
     fn performRead(self: *GCS, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        if (offset >= handle.size) return 0;
-
-        var range_buf: [64]u8 = undefined;
-        const range_header = blk: {
-            var total_bytes: u64 = 0;
-            for (data) |buf| {
-                total_bytes += @as(u64, buf.len);
-            }
-            const remaining = handle.size - offset;
-            const take = @min(remaining, total_bytes);
-            const end = offset + take - 1;
-            break :blk std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ offset, end }) catch unreachable;
-        };
+        const read_size = parallel_read.readSize(handle.size, offset, data);
+        if (read_size == 0) return 0;
 
         const uri = self.gcsUri(handle.uri);
-        var req = try self.client.request(
-            .GET,
-            uri,
-            .{
-                .headers = .{
-                    .accept_encoding = .{ .override = "identity" },
-                    .authorization = try self.getOrRefreshToken(),
-                },
-                .extra_headers = &.{.{ .name = "Range", .value = range_header }},
-            },
-        );
-        defer req.deinit();
+        const job_count = std.math.divCeil(usize, read_size, self.read_pool.chunk_size) catch unreachable;
+        const jobs = try self.allocator.alloc(ParallelRead.Job, job_count);
+        defer self.allocator.free(jobs);
+        const pending: u32 = @intCast(job_count);
 
-        try req.sendBodiless();
-
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        var res = try req.receiveHead(&redirect_buffer);
-
-        if (res.head.status != .partial_content and res.head.status != .ok) {
-            log.err("Failed to read {s}: {s}", .{ handle.uri, res.head.bytes });
-            return error.RequestFailed;
-        }
-
-        const content_range = blk: {
-            var it = res.head.iterateHeaders();
-            while (it.next()) |header| {
-                if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                    break :blk parseContentRange(header.value);
-                }
-            }
-            break :blk null;
+        var batch: ParallelRead.Batch = .{
+            .executor = .{ .pending = .init(pending) },
+            .backend = self,
+            .uri = uri,
+            .path = handle.uri,
+            .authorization = try self.getOrRefreshToken(),
         };
 
-        const reader = res.reader(&.{});
-
-        if (content_range) |cr| {
-            if (cr.start < offset) {
-                try reader.discardAll(offset - cr.start);
-            }
+        for (jobs, 0..) |*job, i| {
+            const chunk_offset = i * self.read_pool.chunk_size;
+            job.* = .{
+                .data = data,
+                .file_offset = offset + @as(u64, @intCast(chunk_offset)),
+                .chunk_offset = chunk_offset,
+                .chunk_len = @min(self.read_pool.chunk_size, read_size - chunk_offset),
+                .batch = &batch,
+            };
         }
 
-        return try reader.readSliceShort(data[0]);
-    }
+        try self.read_pool.job_queue.putAll(self.base.inner, jobs);
+        batch.executor.waitUncancelable(self.base.inner);
+        if (batch.executor.firstError()) |err| return err;
 
-    const ContentRange = struct {
-        start: u64,
-        end: u64,
-        total: u64,
-    };
-
-    fn parseContentRange(value: []const u8) ?ContentRange {
-        const space = std.mem.indexOfScalar(u8, value, ' ') orelse return null;
-        const dash = std.mem.indexOfScalar(u8, value, '-') orelse return null;
-        const slash = std.mem.indexOfScalar(u8, value, '/') orelse return null;
-
-        return .{
-            .start = std.fmt.parseInt(u64, value[space + 1 .. dash], 10) catch return null,
-            .end = std.fmt.parseInt(u64, value[dash + 1 .. slash], 10) catch return null,
-            .total = std.fmt.parseInt(u64, value[slash + 1 ..], 10) catch return null,
-        };
+        return read_size;
     }
 };

@@ -3,6 +3,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const VFSBase = @import("base.zig").VFSBase;
+const parallel_read = @import("parallel_read.zig");
 
 const log = std.log.scoped(.@"zml/io/vfs/s3");
 
@@ -140,6 +141,95 @@ pub const AwsSigV4 = struct {
 const ReadState = struct { index: usize, objects: [][]const u8 };
 
 pub const S3 = struct {
+    const ParallelRead = struct {
+        const Pool = parallel_read.Pool(Job);
+
+        const Batch = struct {
+            executor: parallel_read.BatchExecutor,
+            backend: *S3,
+            uri: std.Uri,
+            url: []const u8,
+        };
+
+        const Job = struct {
+            data: []const []u8,
+            file_offset: u64,
+            chunk_offset: usize,
+            chunk_len: usize,
+            batch: *Batch,
+
+            pub fn perform(job: Job, client: *std.http.Client) ?anyerror {
+                var range_buf: [64]u8 = undefined;
+                const range_header = std.fmt.bufPrint(
+                    &range_buf,
+                    "bytes={d}-{d}",
+                    .{ job.file_offset, job.file_offset + @as(u64, @intCast(job.chunk_len - 1)) },
+                ) catch unreachable;
+
+                var timestamp_buf: [16]u8 = undefined;
+                const timestamp = job.batch.backend.getTimestamp(&timestamp_buf) catch |err| return err;
+
+                const signer: AwsSigV4 = .{
+                    .access_key = job.batch.backend.config.access_key,
+                    .secret_key = job.batch.backend.config.secret_key,
+                    .region = job.batch.backend.config.region,
+                    .service = job.batch.backend.config.auth_service,
+                };
+
+                var authorization_buffer: [512]u8 = undefined;
+                const authorization = signer.generateAuthHeader(
+                    &authorization_buffer,
+                    .GET,
+                    job.batch.uri,
+                    timestamp,
+                    &.{.{ .name = "Range", .value = range_header }},
+                ) catch |err| return err;
+
+                var req = client.request(.GET, job.batch.uri, .{
+                    .headers = .{
+                        .accept_encoding = .{ .override = "identity" },
+                        .authorization = if (authorization) |auth| .{ .override = auth } else .omit,
+                    },
+                    .extra_headers = &.{
+                        .{ .name = "x-amz-date", .value = timestamp },
+                        .{ .name = "x-amz-content-sha256", .value = AwsSigV4.UNSIGNED_PAYLOAD },
+                        .{ .name = "Range", .value = range_header },
+                    },
+                }) catch |err| return err;
+                defer req.deinit();
+
+                req.sendBodiless() catch |err| return err;
+
+                var redirect_buffer: [8 * 1024]u8 = undefined;
+                var res = req.receiveHead(&redirect_buffer) catch |err| return err;
+
+                if (res.head.status != .partial_content and res.head.status != .ok) {
+                    log.err("Failed to read {s}: {s}", .{ job.batch.url, res.head.bytes });
+                    return error.RequestFailed;
+                }
+
+                const content_range = blk: {
+                    var it = res.head.iterateHeaders();
+                    while (it.next()) |header| {
+                        if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
+                            break :blk parallel_read.parseContentRange(header.value);
+                        }
+                    }
+                    break :blk null;
+                };
+
+                const reader = res.reader(&.{});
+                parallel_read.readChunk(reader, content_range, job.file_offset, job.data, job.chunk_offset, job.chunk_len) catch |err| return err;
+
+                return null;
+            }
+        };
+    };
+
+    pub const InitOpts = struct {
+        read_pool: parallel_read.InitOpts = .{},
+    };
+
     pub const Config = struct {
         access_key: ?[]const u8 = null,
         secret_key: ?[]const u8 = null,
@@ -174,6 +264,7 @@ pub const S3 = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     config: Config,
+    read_pool: *ParallelRead.Pool,
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
@@ -184,11 +275,19 @@ pub const S3 = struct {
         inner: std.Io,
         http_client: *std.http.Client,
         config: Config,
+        opts: InitOpts,
     ) !S3 {
+        const read_pool = try allocator.create(ParallelRead.Pool);
+        errdefer allocator.destroy(read_pool);
+
+        try read_pool.init(allocator, inner, http_client, opts.read_pool);
+        errdefer read_pool.deinit(allocator, inner);
+
         return .{
             .allocator = allocator,
             .base = .init(inner),
             .client = http_client,
+            .read_pool = read_pool,
             .config = .{
                 .access_key = if (config.access_key) |k| try allocator.dupe(u8, k) else null,
                 .secret_key = if (config.secret_key) |k| try allocator.dupe(u8, k) else null,
@@ -241,10 +340,13 @@ pub const S3 = struct {
             .secret_key = secret_key,
             .endpoint_url = endpoint,
             .region = region,
-        });
+        }, .{});
     }
 
     pub fn deinit(self: *S3) void {
+        self.read_pool.deinit(self.allocator, self.base.inner);
+        self.allocator.destroy(self.read_pool);
+
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -765,95 +867,40 @@ pub const S3 = struct {
     }
 
     fn performRead(self: *S3, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        if (offset >= handle.size) return 0;
+        const read_size = parallel_read.readSize(handle.size, offset, data);
+        if (read_size == 0) return 0;
 
         var url_buf: [8 * 1024]u8 = undefined;
         const url = try self.s3Url(handle.uri, &url_buf);
-
         const uri = std.Uri.parse(url) catch return error.BadPathName;
 
-        var range_buf: [64]u8 = undefined;
-        const range_header = blk: {
-            var total_bytes: u64 = 0;
-            for (data) |buf| {
-                total_bytes += @as(u64, buf.len);
-            }
-            const remaining = handle.size - offset;
-            const take = @min(remaining, total_bytes);
-            const end = offset + take - 1;
-            break :blk std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ offset, end }) catch unreachable;
+        const job_count = std.math.divCeil(usize, read_size, self.read_pool.chunk_size) catch unreachable;
+        const jobs = try self.allocator.alloc(ParallelRead.Job, job_count);
+        defer self.allocator.free(jobs);
+        const pending: u32 = @intCast(job_count);
+
+        var batch: ParallelRead.Batch = .{
+            .executor = .{ .pending = .init(pending) },
+            .backend = self,
+            .uri = uri,
+            .url = url,
         };
 
-        var timestamp_buf: [16]u8 = undefined;
-        const timestamp = try self.getTimestamp(&timestamp_buf);
-
-        const signer: AwsSigV4 = .{
-            .access_key = self.config.access_key,
-            .secret_key = self.config.secret_key,
-            .region = self.config.region,
-            .service = self.config.auth_service,
-        };
-
-        var authorization_buffer: [512]u8 = undefined;
-        const authorization = try signer.generateAuthHeader(&authorization_buffer, .GET, uri, timestamp, &.{});
-
-        var req = try self.client.request(.GET, uri, .{ .headers = .{
-            .accept_encoding = .{ .override = "identity" },
-            .authorization = if (authorization) |auth| .{ .override = auth } else .omit,
-        }, .extra_headers = &.{
-            .{ .name = "x-amz-date", .value = timestamp },
-            .{ .name = "x-amz-content-sha256", .value = AwsSigV4.UNSIGNED_PAYLOAD },
-            .{ .name = "Range", .value = range_header },
-        } });
-        defer req.deinit();
-
-        try req.sendBodiless();
-
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        var res = try req.receiveHead(&redirect_buffer);
-
-        if (res.head.status != .partial_content and res.head.status != .ok) {
-            log.err("Failed to read {s}: {s}", .{ handle.uri, res.head.bytes });
-            return error.RequestFailed;
+        for (jobs, 0..) |*job, i| {
+            const chunk_offset = i * self.read_pool.chunk_size;
+            job.* = .{
+                .data = data,
+                .file_offset = offset + @as(u64, @intCast(chunk_offset)),
+                .chunk_offset = chunk_offset,
+                .chunk_len = @min(self.read_pool.chunk_size, read_size - chunk_offset),
+                .batch = &batch,
+            };
         }
 
-        const content_range = blk: {
-            var it = res.head.iterateHeaders();
-            while (it.next()) |header| {
-                if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                    break :blk parseContentRange(header.value);
-                }
-            }
-            break :blk null;
-        };
+        try self.read_pool.job_queue.putAll(self.base.inner, jobs);
+        batch.executor.waitUncancelable(self.base.inner);
+        if (batch.executor.firstError()) |err| return err;
 
-        const reader = res.reader(&.{});
-
-        if (content_range) |cr| {
-            if (cr.start < offset) {
-                try reader.discardAll(offset - cr.start);
-            }
-        }
-
-        return try reader.readSliceShort(data[0]);
-    }
-
-    const ContentRange = struct {
-        start: u64,
-        end: u64,
-        total: u64,
-    };
-
-    fn parseContentRange(value: []const u8) ?ContentRange {
-        // Format: "bytes start-end/total"
-        const space = std.mem.indexOfScalar(u8, value, ' ') orelse return null;
-        const dash = std.mem.indexOfScalar(u8, value, '-') orelse return null;
-        const slash = std.mem.indexOfScalar(u8, value, '/') orelse return null;
-
-        return .{
-            .start = std.fmt.parseInt(u64, value[space + 1 .. dash], 10) catch return null,
-            .end = std.fmt.parseInt(u64, value[dash + 1 .. slash], 10) catch return null,
-            .total = std.fmt.parseInt(u64, value[slash + 1 ..], 10) catch return null,
-        };
+        return read_size;
     }
 };

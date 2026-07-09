@@ -8,6 +8,7 @@ PLATFORMS = {
     "tpu": False,
     "neuron": False,
     "oneapi": False,
+    "metal": False,
 }
 
 [
@@ -28,13 +29,29 @@ config_setting(
     visibility = ["//visibility:public"],
 )
 
+config_setting(
+    name = "metal.enabled",
+    constraint_values = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:macos",
+    ],
+    flag_values = {":metal": "True"},
+    visibility = ["//visibility:public"],
+)
+
 [
     config_setting(
         name = "{}.enabled".format(runtime),
         flag_values = {":{}".format(runtime): "True"},
         visibility = ["//visibility:public"],
     )
-    for runtime in ["cpu", "cuda", "tpu", "neuron", "oneapi"]
+    for runtime in [
+        "cpu",
+        "cuda",
+        "tpu",
+        "neuron",
+        "oneapi",
+    ]
 ]
 
 zig_library(
@@ -59,6 +76,7 @@ platform(
     ],
     flags = [
         "--force_pic=true",  # required for protobuf upb on Linux
+        "--cpu=x86_64",
     ],
     visibility = ["//visibility:public"],
 )

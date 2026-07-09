@@ -1,7 +1,7 @@
-load("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
 def repo():
-    new_git_repository(
+    git_repository(
         name = "libvaxis",
         remote = "https://github.com/rockorager/libvaxis.git",
         commit = "a3ae1d53feeeeaeb6218de3d38837559811acae4",
