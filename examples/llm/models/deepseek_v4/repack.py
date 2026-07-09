@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -261,7 +262,22 @@ def convert_shard(
             output_weight_map[output_name] = shard
 
     bytes_written = sum(tensor_nbytes(tensor) for tensor in output_tensors.values())
-    save_file(output_tensors, output_path, metadata=metadata)
+    if input_path == output_path:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{output_path.name}.",
+            suffix=".tmp",
+            dir=output_path.parent,
+        )
+        os.close(fd)
+        tmp_path = Path(tmp_name)
+        try:
+            save_file(output_tensors, tmp_path, metadata=metadata)
+            os.replace(tmp_path, output_path)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+    else:
+        save_file(output_tensors, output_path, metadata=metadata)
     return output_weight_map, inferred_experts, bytes_written
 
 
@@ -284,6 +300,8 @@ def process_shard(
     torch.set_num_threads(torch_threads)
     groups = collect_expert_groups(keys)
     if not groups:
+        if input_dir / shard == output_dir / shard:
+            return shard, {key: shard for key in keys}, 0, "kept"
         return shard, copy_shard(input_dir, output_dir, shard, keys), 0, "copied"
 
     shard_weight_map, _, shard_size = convert_shard(
@@ -300,12 +318,32 @@ def process_shard(
 
 
 def copy_sidecar_files(input_dir: Path, output_dir: Path) -> None:
+    if input_dir == output_dir:
+        return
     skip_names = {"model.safetensors.index.json"}
     skip_suffixes = {".safetensors"}
     for path in input_dir.iterdir():
         if not path.is_file() or path.name in skip_names or path.suffix in skip_suffixes:
             continue
         shutil.copy2(path, output_dir / path.name)
+
+
+def write_index(index_path: Path, index: dict[str, Any]) -> None:
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{index_path.name}.",
+        suffix=".tmp",
+        dir=index_path.parent,
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(index, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp_path, index_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def parse_args() -> argparse.Namespace:
@@ -321,8 +359,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        required=True,
-        help="Directory for the rewritten checkpoint.",
+        default=None,
+        help="Directory for the rewritten checkpoint. Required unless --in-place is set.",
+    )
+    parser.add_argument(
+        "--in-place",
+        action="store_true",
+        help="Rewrite the checkpoint directly under --input-dir.",
     )
     parser.add_argument(
         "--num-experts",
@@ -382,9 +425,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     input_dir = args.input_dir.resolve()
-    output_dir = args.output_dir.resolve()
-    if input_dir == output_dir and not args.dry_run:
-        raise ValueError("Refusing to write in-place. Choose a different --output-dir.")
+    if args.in_place:
+        if args.output_dir is not None and args.output_dir.resolve() != input_dir:
+            raise ValueError(
+                "--in-place writes to --input-dir; omit --output-dir or use the same path."
+            )
+        output_dir = input_dir
+    else:
+        if args.output_dir is None:
+            raise ValueError("--output-dir is required unless --in-place is set.")
+        output_dir = args.output_dir.resolve()
+        if input_dir == output_dir and not args.dry_run:
+            raise ValueError("Refusing to write in-place. Pass --in-place to modify --input-dir.")
     if args.workers < 1:
         raise ValueError("--workers must be >= 1")
     if args.torch_threads < 1:
@@ -400,7 +452,13 @@ def main() -> None:
         with config_path.open("r", encoding="utf-8") as f:
             num_experts = json.load(f).get("n_routed_experts")
 
-    if output_dir.exists() and any(output_dir.iterdir()) and not args.overwrite and not args.dry_run:
+    if (
+        output_dir.exists()
+        and any(output_dir.iterdir())
+        and not args.overwrite
+        and not args.dry_run
+        and not args.in_place
+    ):
         raise FileExistsError(
             f"Output directory is not empty: {output_dir}. Pass --overwrite to reuse it."
         )
@@ -414,9 +472,10 @@ def main() -> None:
         f"({num_experts or 'inferred'} experts each)."
     )
     if not args.dry_run:
+        unchanged_action = "keeping" if args.in_place else "copying"
         print(
             f"Processing {expert_shards} rewrite shards with {args.workers} workers "
-            f"and copying {len(shards) - expert_shards} shards unchanged."
+            f"and {unchanged_action} {len(shards) - expert_shards} shards unchanged."
         )
 
     if args.dry_run:
@@ -468,14 +527,15 @@ def main() -> None:
     new_index["metadata"] = dict(new_index.get("metadata") or {})
     if "total_size" not in new_index["metadata"]:
         new_index["metadata"]["total_size"] = total_size
-    with (output_dir / "model.safetensors.index.json").open("w", encoding="utf-8") as f:
-        json.dump(new_index, f, indent=2, sort_keys=True)
-        f.write("\n")
+    write_index(output_dir / "model.safetensors.index.json", new_index)
 
     if args.copy_sidecars:
         copy_sidecar_files(input_dir, output_dir)
 
-    print(f"Done. Wrote merged checkpoint to {output_dir}")
+    if args.in_place:
+        print(f"Done. Rewrote merged checkpoint in place at {output_dir}")
+    else:
+        print(f"Done. Wrote merged checkpoint to {output_dir}")
 
 
 if __name__ == "__main__":
