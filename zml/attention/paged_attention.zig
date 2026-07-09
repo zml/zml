@@ -284,6 +284,7 @@ test pagedAttention {
     const batch_size = 8;
     const num_pages = 64;
     const page_size = 16;
+    const max_num_pages = 16;
     const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, token_index: zml.Tensor } = .{
         .q = .init(.{ .b = 8, .hkv = 2, .hg = 4, .hd = 32 }, .f32),
         .k = .init(.{ .b = 8, .hkv = 2, .k = 16, .hd = 32 }, .f32),
@@ -307,7 +308,7 @@ test pagedAttention {
         .is_prefill = true,
         .batch_size = batch_size,
         .seq_len = 64,
-        .max_num_pages = 16,
+        .max_num_pages = max_num_pages,
         .max_token_count = 16 * page_size,
         .num_heads = 8,
         .num_kv_heads = 2,
@@ -331,37 +332,38 @@ test pagedAttention {
     const triton_exe = try platform.compileFn(allocator, io, pagedAttention, .{ triton_parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, attn_opts }, .{ .program_name = "paged_attention_triton" });
     defer triton_exe.deinit();
 
+    const num_prefill = 1;
+    const num_decode = batch_size - num_prefill;
+    const block_table: [batch_size][max_num_pages]i32 = .{
+        // prefilling pages 9-10
+        .{ 0, 1, 2, 3, 4, 9, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+        // generation
+        .{ 0, 1, 2, 3, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+        .{ 0, 1, 2, 3, 4, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1 },
+        .{ 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63 },
+        .{ 0, 1, 2, 3, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+        .{ 0, 1, 2, 3, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+        .{ 0, 1, 2, 3, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+        @splat(-1),
+    };
+
+    const seq_lens: [batch_size]i32 = .{
+        4 * page_size,
+        4 * page_size + 3,
+        7 * page_size + 11,
+        15 * page_size + 9,
+        4 * page_size + 3,
+        4 * page_size + 3,
+        4 * page_size + 3,
+        4 * page_size + 3,
+    };
+
+    const query_start_len: [batch_size + 1]i32 = .{ 0, 32, 33, 34, 35, 36, 37, 37, 37 };
+
     const triton_parameters_d: zml.Bufferized(Parameters) = .{ .triton = .{
-        .block_table = try .fromBytes(io, platform, triton_parameters.triton.block_table.shape(), .replicated, @ptrCast(&[batch_size][16]i32{
-            .{ 0, 1, 2, 3, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
-            .{ 0, 1, 2, 3, 4, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1 },
-            .{ 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63 },
-            .{ 0, 1, 2, 3, 4, 9, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
-            .{ 0, 1, 2, 3, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
-            .{ 0, 1, 2, 3, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
-            .{ 0, 1, 2, 3, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
-            .{ 0, 1, 2, 3, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
-        })),
-        .seq_lens = try .fromBytes(io, platform, triton_parameters.triton.seq_lens.shape(), .replicated, @ptrCast(&[batch_size]i32{
-            4 * page_size + 3,
-            7 * page_size + 11,
-            15 * page_size + 9,
-            4 * page_size,
-            4 * page_size + 3,
-            4 * page_size + 3,
-            4 * page_size + 3,
-            4 * page_size + 3,
-        })),
-        .query_start_len = try .fromBytes(io, platform, triton_parameters.triton.query_start_len.shape(), .replicated, @ptrCast(&[batch_size]i32{
-            1,
-            1,
-            1,
-            32,
-            1,
-            1,
-            1,
-            1,
-        })),
+        .block_table = try .fromBytes(io, platform, triton_parameters.triton.block_table.shape(), .replicated, @ptrCast(&block_table)),
+        .seq_lens = try .fromBytes(io, platform, triton_parameters.triton.seq_lens.shape(), .replicated, @ptrCast(&seq_lens)),
+        .query_start_len = try .fromBytes(io, platform, triton_parameters.triton.query_start_len.shape(), .replicated, @ptrCast(&query_start_len)),
     } };
 
     const triton_d = try zml.testing.autoCall(allocator, io, &triton_exe, pagedAttention, .{ triton_parameters_d, q, undefined, undefined, kv_cache_d });
@@ -388,9 +390,40 @@ test pagedAttention {
         defer exe.deinit();
 
         const parameters_d: zml.Bufferized(Parameters) = switch (backend) {
-            // No materializer implemented for cuda fa2/fa3
-            .cuda_fa2, .cuda_fa3 => return error.SkipZigTest,
             .triton => unreachable,
+            // No materializer implemented for cuda fa3
+            .cuda_fa3 => return error.SkipZigTest,
+            .cuda_fa2 => cuda_fa2: {
+                var block_table_prefill: @TypeOf(block_table) = @splat(@splat(-1));
+                @memcpy(block_table_prefill[0..num_prefill], block_table[0..num_prefill]);
+                var block_table_decode: @TypeOf(block_table) = @splat(@splat(-1));
+                @memcpy(block_table_decode[0..num_decode], block_table[num_prefill..]);
+
+                var seq_lens_prefill: @TypeOf(seq_lens) = @splat(0);
+                @memcpy(seq_lens_prefill[0..num_prefill], seq_lens[0..num_prefill]);
+                var seq_lens_decode: @TypeOf(seq_lens) = @splat(0);
+                @memcpy(seq_lens_decode[0..num_decode], seq_lens[num_prefill..]);
+
+                var seqused_k_prefill: @TypeOf(query_start_len) = @splat(query_start_len[num_prefill]);
+                @memcpy(seqused_k_prefill[0..num_prefill], query_start_len[0..num_prefill]);
+                var seqused_k_decode: @TypeOf(query_start_len) = @splat(query_start_len[batch_size - 1]);
+                @memcpy(seqused_k_decode[0 .. num_decode + 1], query_start_len[num_prefill..]);
+
+                const prefill_token_count = query_start_len[num_prefill];
+                for (&seqused_k_decode) |*q_start| q_start.* -= prefill_token_count;
+
+                break :cuda_fa2 .{ .cuda_fa2 = .{ .mixed = .{
+                    .block_table_prefill = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.block_table_prefill.shape(), .replicated, @ptrCast(&block_table_prefill)),
+                    .cu_seqlens_q_prefill = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.cu_seqlens_q_prefill.shape(), .replicated, @ptrCast(&seq_lens_prefill)),
+                    .seqused_k_prefill = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.seqused_k_prefill.shape(), .replicated, @ptrCast(&seqused_k_prefill)),
+
+                    .block_table_decode = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.block_table_decode.shape(), .replicated, @ptrCast(&block_table_decode)),
+                    .cu_seqlens_q_decode = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.cu_seqlens_q_decode.shape(), .replicated, @ptrCast(&seq_lens_decode)),
+                    .seqused_k_decode = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.seqused_k_decode.shape(), .replicated, @ptrCast(&seqused_k_decode)),
+
+                    .metadata = .{ .decode_offset = try .scalar(io, platform, prefill_token_count, .i32) },
+                } } };
+            },
             .metal => .{ .metal = .{
                 .block_table = triton_parameters_d.triton.block_table,
                 .seq_lens = triton_parameters_d.triton.seq_lens,
