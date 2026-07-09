@@ -24,7 +24,7 @@ const Args = struct {
         \\ Options:
         \\   --model=<path>         Path to the model repository
         \\   --activations=<path>   Path to activation safetensors
-        \\   --backend=<text>       Attention backend to use
+        \\   --backend=<text>       Attention backend to use (default: vanilla, cuda_fa2, cuda_fa3)
         \\   --layer=<u32>          Optional transformer layer index to test
         \\   --only=<name>          Optional exact activation prefix to test
         \\   --include-gpu-only     Run fused MoE checks even on non-GPU platforms
@@ -56,7 +56,12 @@ pub fn main(init: std.process.Init) !void {
     defer parsed_config.deinit();
 
     const shardings: common.Shardings = try .init(platform);
-    const backend = args.backend orelse attention.Backend.auto(platform);
+    var single_backend: [1]attention.Backend = undefined;
+    const backends: []const attention.Backend = if (args.backend) |backend| blk: {
+        single_backend[0] = backend;
+        break :blk single_backend[0..];
+    } else &.{ .vanilla, .cuda_fa2, .cuda_fa3 };
+
     var ctx: TestContext = .{
         .allocator = allocator,
         .io = io,
@@ -66,12 +71,16 @@ pub fn main(init: std.process.Init) !void {
         .config = parsed_config.value,
         .shardings = shardings,
         .all_shardings = shardings.all(),
-        .backend = backend,
+        .backend = .vanilla,
         .selected_layer = args.layer,
         .only = args.only,
         .include_gpu_only = args.include_gpu_only,
     };
-    try ctx.run();
+    for (backends) |backend| {
+        ctx.backend = backend;
+        ctx.tested = 0;
+        try ctx.run();
+    }
 }
 
 const RmsNormLayer = struct {
@@ -98,7 +107,7 @@ const TestContext = struct {
     tested: usize = 0,
 
     fn run(self: *TestContext) !void {
-        std.log.info("Step 3.5 black-box layer tests:", .{});
+        std.log.info("Step 3.5 black-box layer tests: backend={s}", .{@tagName(self.backend)});
         for (0..@as(usize, @intCast(self.config.numMainLayers()))) |layer_idx| {
             if (self.selected_layer) |selected| {
                 if (layer_idx != selected) continue;
