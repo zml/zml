@@ -187,7 +187,7 @@ fn padTargetHidden(target_hidden_: zml.Tensor, hidden_len: i64) zml.Tensor {
     const target_hidden = target_hidden_.withPartialTags(.{ .s, .d });
     if (target_hidden.dim(.s) == hidden_len) return target_hidden;
 
-    stdx.debug.assert(target_hidden.dim(.s) < hidden_len, "target hidden length {} exceeds DFlash block size {}", .{ target_hidden.dim(.s), hidden_len });
+    stdx.debug.assert(target_hidden.dim(.s) < hidden_len, "target hidden length {} exceeds DSpark block size {}", .{ target_hidden.dim(.s), hidden_len });
     const padding = zml.Tensor.constant(target_hidden.dtype().zero()).broad(.init(.{
         .s = hidden_len - target_hidden.dim(.s),
         .d = target_hidden.dim(.d),

@@ -536,7 +536,7 @@ pub const SelfAttn = struct {
     }
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) !SelfAttn {
-        var rope_scaling = config.rope_scaling orelse .{ .default = .{} };
+        var rope_scaling = config.rope_scaling orelse @as(zml.nn.RopeOpts.Scaling, .{ .default = .{} });
         rope_scaling.setRopeTheta(config.ropeTheta());
         return .{
             .q_proj = initProj(store.withPrefix("q_proj"), .{ .dout = .model }, .{ .dout = .model }, config.attention_bias),
