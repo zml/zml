@@ -312,57 +312,20 @@ const Triton = struct {
             return out.output.reshape(q.shape());
         }
 
-        pub fn sparseAttention(q: zml.Tensor, kv_cache: zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, parameters: triton_attn.paged.Parameters, opts: AttentionOptions) zml.Tensor {
-            const sink = opts.sink orelse stdx.debug.panic("paged MLA requires an attention sink", .{});
-            const kv_final = kv_cache.insertAxes(.hd, .{ .hkv = 1 });
-
+        pub fn sparseAttention(q: zml.Tensor, kv: zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, parameters: triton_attn.paged.Parameters, opts: AttentionOptions) zml.Tensor {
             stdx.debug.assert(q.shape().hasTags(.{ .q, .h, .hd }), "expected q to have tags .q, .h, .hd after flattening, got {f}", .{q.shape()});
-            stdx.debug.assert(kv_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "expected paged MLA KV cache to have tags .page, .k_chunk, .hkv, .hd, got {f}", .{kv_cache.shape()});
+            stdx.debug.assert(kv.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "expected paged MLA KV cache to have tags .page, .k_chunk, .hkv, .hd, got {f}", .{kv.shape()});
             stdx.debug.assert(q.dim(.hd) > opts.rope_rank, "expected q head dim ({}) to include a rope tail of {}", .{ q.dim(.hd), opts.rope_rank });
             stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(q.dim(.hd)))), "expected value rank ({}) to be a power of two", .{q.dim(.hd)});
-            stdx.debug.assert(kv_cache.dim(.hd) == q.dim(.hd), "expected q and kv cache head dims to match, got q={} kv={}", .{ q.dim(.hd), kv_cache.dim(.hd) });
+            stdx.debug.assert(kv.dim(.hd) == q.dim(.hd), "expected q and kv cache head dims to match, got q={} kv={}", .{ q.dim(.hd), kv.dim(.hd) });
 
-            // The global cache may repeat its single latent head to make .hkv shardable.
-            // Build the kernel from local shards, where MLA still has exactly one KV head.
-            return zml.ops.manualComputation(
-                .{
-                    q,
-                    kv_final,
-                    topk,
-                    tokens_pos,
-                    parameters.block_table,
-                    parameters.seq_lens,
-                    parameters.query_start_len,
-                    sink.withPartitioning(.{ .h = .model }),
-                },
-                q.shape(),
-                .{
-                    .options = parameters.options_,
-                    .rope_rank = opts.rope_rank,
-                    .scale = opts.scale,
-                },
-                (struct {
-                    fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
-                        const sharded_parameters: triton_attn.paged.Parameters = .{
-                            .block_table = sharded_inputs[4],
-                            .seq_lens = sharded_inputs[5],
-                            .query_start_len = sharded_inputs[6],
-                            .options_ = ctx.options,
-                        };
-                        return Self.sparseAttentionShard(
-                            sharded_inputs[0],
-                            sharded_inputs[1],
-                            sharded_inputs[2],
-                            sharded_inputs[3],
-                            sharded_parameters,
-                            .{
-                                .rope_rank = ctx.rope_rank,
-                                .sink = sharded_inputs[7],
-                                .scale = ctx.scale,
-                            },
-                        );
-                    }
-                }).body,
+            return sparseAttentionShard(
+                q,
+                kv,
+                topk,
+                tokens_pos,
+                parameters,
+                opts,
             );
         }
     };

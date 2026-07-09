@@ -951,18 +951,18 @@ pub fn forwardMoe_fp4(
     const block_size = 128;
 
     return switch (parameters) {
-        .triton => Triton.forwardMoe_fp4(
-            input,
-            topk_ids,
-            topk_weights,
-            weights_gate_up,
-            scales_gate_up_,
-            bias_gate_up,
-            weights_down,
-            scales_down_,
-            bias_down,
-            activation_limit,
-        ),
+        // .triton => Triton.forwardMoe_fp4(
+        //     input,
+        //     topk_ids,
+        //     topk_weights,
+        //     weights_gate_up,
+        //     scales_gate_up_,
+        //     bias_gate_up,
+        //     weights_down,
+        //     scales_down_,
+        //     bias_down,
+        //     activation_limit,
+        // ),
         else => Vanilla.forwardMoe_fp4(
             input,
             weights_gate_up,
