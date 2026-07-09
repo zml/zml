@@ -2341,10 +2341,15 @@ pub const Tensor = struct {
         // Note: if you code below, make sure to update Shape.canBroadcastTo.
         stdx.debug.assert(self._shape.canBroadcastTo(other), "Can't broadcast {f} to {f}", .{ self, other });
 
+        if (ops.LoweringCompatibility.preserveIntegerScalarBroadcast(self, other)) |rewritten| return rewritten;
+
+        if (shouldUseTaggedBroadcast(self._shape, other)) {
+            const axes_ = self.broadcastAxesForTags(other);
+            return self.broadcast(other, axes_.constSlice());
+        }
+
         // Already the right shape
         if (std.mem.eql(i64, self.dims(), other.dims())) return self;
-
-        if (ops.LoweringCompatibility.preserveIntegerScalarBroadcast(self, other)) |rewritten| return rewritten;
 
         // Non ambiguous broadcasting
         // TODO: broad is error prone because of this:
@@ -2359,6 +2364,54 @@ pub const Tensor = struct {
             axes_.appendAssumeCapacity(@intCast(other.axis(t)));
         }
         return self.broadcast(other, axes_.constSlice());
+    }
+
+    fn shouldUseTaggedBroadcast(self_shape: Shape, other: Shape) bool {
+        return self_shape.rank() != 0 and self_shape.isFullyTagged() and other.isFullyTagged();
+    }
+
+    fn broadcastAxesForTags(self: Tensor, other: Shape) stdx.BoundedArray(i64, constants.MAX_RANK) {
+        var axes_: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
+        for (self._shape.tags()) |t| {
+            axes_.appendAssumeCapacity(@intCast(other.axis(t)));
+        }
+        return axes_;
+    }
+
+    test "Tensor.broad does not route rank-0 scalars through tagged broadcast" {
+        const batch_len = 8;
+        const scalar_shape = Shape.init(.{}, .i32);
+        const tagged = Shape.init(.{ .a = batch_len }, .i32);
+
+        try std.testing.expect(!shouldUseTaggedBroadcast(scalar_shape, tagged));
+    }
+
+    test "Tensor.broad maps fully tagged axes by tag" {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            const batch_len = 8;
+            const singleton_len = 1;
+            const hidden_len = 16;
+
+            pub fn _fwd(x: Tensor) Tensor {
+                const target = Shape.init(.{ .k = hidden_len, .a = batch_len }, .f32);
+                const res = x.broad(target);
+                std.debug.assert(res.shape().eql(target));
+                return res;
+            }
+        };
+
+        var exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            Local._fwd,
+            .{Tensor.init(.{ .a = Local.singleton_len, .k = Local.hidden_len }, .f32)},
+            platform,
+            .{},
+        );
+        defer exe.deinit();
     }
 
     pub fn optimizationBarrier(self: Tensor) Tensor {
