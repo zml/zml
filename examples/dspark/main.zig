@@ -12,6 +12,7 @@ pub const std_options: std.Options = .{
 const log = std.log.scoped(.dspark);
 
 const default_prompt = "The capital of France is";
+const qwen3_tokenizer_repo = "hf://Qwen/Qwen3-4B";
 
 const Args = struct {
     model: []const u8,
@@ -310,7 +311,7 @@ fn initProject(init: std.process.Init, model_path: []const u8) !*Project {
     project.store = .fromRegistry(allocator, &project.registry);
     errdefer project.store.deinit();
 
-    project.tokenizer = try loadTokenizer(allocator, project.io, project.repo);
+    project.tokenizer = try loadTokenizer(allocator, project.io, project.repo, project.parsed_config.value);
     errdefer project.tokenizer.deinit();
 
     project.shardings = try .init(project.platform);
@@ -373,7 +374,19 @@ fn initMoeMetadata(model: dspark.DeepSeekModel, token_len: u32, backend: zml.moe
     };
 }
 
-fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
+fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, config: dspark.Config) !zml.tokenizer.Tokenizer {
+    return loadTokenizerFromDir(allocator, io, dir) catch |err| switch (err) {
+        error.FileNotFound => {
+            if (!config.isQwen3()) return err;
+            log.info("tokenizer.json not found in draft repo; falling back to {s}", .{qwen3_tokenizer_repo});
+            const tokenizer_repo = try zml.safetensors.resolveModelRepo(io, qwen3_tokenizer_repo);
+            return loadTokenizerFromDir(allocator, io, tokenizer_repo);
+        },
+        else => return err,
+    };
+}
+
+fn loadTokenizerFromDir(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
     const file = try dir.openFile(io, "tokenizer.json", .{});
     defer file.close(io);
     var reader = file.reader(io, &.{});
