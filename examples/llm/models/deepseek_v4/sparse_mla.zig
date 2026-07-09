@@ -168,11 +168,9 @@ pub fn sparseAttentionMLA(
     attn_sink: zml.Tensor,
     topk: zml.Tensor,
     scale: ?f32,
-    metadata: zml.attention.attention.Metadata,
-    parameters: zml.attention.attention.Parameters,
+    backend: zml.attention.attention.Backend,
 ) zml.Tensor {
-    _ = metadata; // autofix
-    return switch (parameters) {
+    return switch (backend) {
         .vanilla => vanillaSparseAttention(q, kv, attn_sink, topk, scale),
         .attnd => @panic("Must be initialized manually"),
         else => tritonSparseAttention(q, kv, attn_sink, topk, scale),

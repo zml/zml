@@ -395,7 +395,7 @@ pub const ComposedKernelExe = struct {
                     phase_: common.Phase,
                     opts_: CompilationParameters,
                 ) !zml.Exe {
-                    return ComposedKernelExe.compileHCAAttnLayer(
+                    return ComposedKernelExe.compileLmHead(
                         allocator_,
                         io_,
                         platform_,

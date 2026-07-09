@@ -1169,7 +1169,7 @@ pub const Attention = struct {
             },
         }
 
-        var attn = attention.sparseAttentionMLA(q, kv, self.attn_sink, topk, self.softmax_scale, attention_metadata, .cuda_fa2);
+        var attn = attention.sparseAttentionMLA(q, kv, self.attn_sink, topk, self.softmax_scale, .cuda_fa2);
         attn = apply_reverse_rope(attn.rename(.{ .q = .seq }), freqs_cis, self.nope_head_dim, self.rope_head_dim);
         attn = attn.reshape(.{ .batch = attn.dim(0), .seq = attn.dim(1), .g = self.o_groups, .d = .auto });
 
