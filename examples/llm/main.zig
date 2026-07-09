@@ -144,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
     //
     // We're ready to go! Let's start a chat...
     //
-    try printZmlLogo(io);
+    try printZmlLogo(io, init.environ_map);
 
     const interactive = args.prompt == null;
     const prompt = if (args.prompt) |prompt| b: {
@@ -194,21 +194,14 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, prog
     return try .fromBytes(allocator, bytes);
 }
 
-pub fn printZmlLogo(io: std.Io) !void {
-    const LOGO =
-        \\
-        \\
-        \\ ███████╗███╗   ███╗██╗
-        \\ ╚══███╔╝████╗ ████║██║
-        \\   ███╔╝ ██╔████╔██║██║
-        \\  ███╔╝  ██║╚██╔╝██║██║  .ai
-        \\ ███████╗██║ ╚═╝ ██║███████╗
-        \\ ╚══════╝╚═╝     ╚═╝╚══════╝
-        \\
-        \\
-        \\
-    ;
-    var writer = std.Io.File.stdout().writerStreaming(io, &.{});
-    try writer.interface.writeAll(LOGO);
+pub fn printZmlLogo(io: std.Io, environ_map: *const std.process.Environ.Map) !void {
+    const stdout = std.Io.File.stdout();
+    const logo_options: zml.logo.Options = .{
+        .color_support = zml.logo.detectColorSupport(io, stdout, environ_map),
+    };
+    var writer = stdout.writerStreaming(io, &.{});
+    try writer.interface.writeAll("\n\n");
+    try zml.logo.writeZmlArt(&writer.interface, logo_options);
+    try writer.interface.writeAll("\n\n\n");
     try writer.interface.flush();
 }

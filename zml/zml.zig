@@ -24,6 +24,7 @@ pub const Exe = exe.Exe;
 pub const floats = @import("floats.zig");
 pub const io = @import("io.zig");
 pub const kernel = @import("kernel.zig");
+pub const logo = @import("logo.zig");
 pub const mem = @import("mem.zig");
 pub const Bufferized = mem.Bufferized;
 pub const meta = @import("meta.zig");
