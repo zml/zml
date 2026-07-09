@@ -224,7 +224,7 @@ const TestContext = struct {
         var token_index_buffer = try zml.Buffer.fromSlice(self.io, self.platform, .init(zml.Shape.init(.{ .s = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0})), .replicated);
         defer token_index_buffer.deinit();
         var kv_cache_buffers = try kv_cache.initBuffer(self.allocator, self.io, self.platform, self.shardings.model);
-        defer model.KvCache.deinitBuffer(&kv_cache_buffers);
+        defer model.KvCache.AttentionCache.deinitBuffer(&kv_cache_buffers);
         var metadata_buffers = try metadata.initBuffer(self.io, self.platform, self.shardings.model);
         defer attention.Metadata.deinitBuffer(&metadata_buffers);
 
@@ -236,7 +236,7 @@ const TestContext = struct {
         defer results.deinit(self.allocator);
         exe.callOpts(self.io, args, &results, .{ .wait = true });
 
-        var actual, var updated_kv_cache = results.get(struct { zml.Buffer, zml.Bufferized(model.KvCache) });
+        var actual, var updated_kv_cache = results.get(struct { zml.Buffer, zml.Bufferized(model.KvCache.AttentionCache) });
         defer releaseKvCacheBuffers(kv_cache_buffers, &updated_kv_cache);
         defer releaseBuffer(input, &actual);
 
@@ -247,7 +247,7 @@ const TestContext = struct {
         self.tested += 1;
     }
 
-    fn kvCacheFor(self: *TestContext, input: zml.Tensor) model.KvCache {
+    fn kvCacheFor(self: *TestContext, input: zml.Tensor) model.KvCache.AttentionCache {
         const raw_shape = zml.Shape.init(.{
             .layer = 1,
             .b = input.dim(.b),
@@ -256,7 +256,7 @@ const TestContext = struct {
             .hd = @as(i64, @intCast(self.config.head_dim)),
         }, input.dtype());
         const partitions = self.shardings.model.numPartitionsForLogicalAxis(.model);
-        return .init(model.partitionKvCacheShape(raw_shape, @intCast(self.config.num_attention_groups), partitions));
+        return model.KvCache.AttentionCache.init(model.partitionKvCacheShape(raw_shape, @intCast(self.config.num_attention_groups), partitions));
     }
 
     fn attentionMetadata(self: *TestContext, seqlen: i64) attention.Metadata {
@@ -329,7 +329,7 @@ fn deinitBuffers(bufs: anytype) void {
     }.cb, {}, bufs);
 }
 
-fn releaseKvCacheBuffers(expected: zml.Bufferized(model.KvCache), actual: *zml.Bufferized(model.KvCache)) void {
+fn releaseKvCacheBuffers(expected: zml.Bufferized(model.KvCache.AttentionCache), actual: *zml.Bufferized(model.KvCache.AttentionCache)) void {
     releaseBuffer(expected.k, &actual.k);
     releaseBuffer(expected.v, &actual.v);
     releaseBuffer(expected.layer_index, &actual.layer_index);

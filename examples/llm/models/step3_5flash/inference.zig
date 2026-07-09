@@ -64,12 +64,13 @@ pub const CompilationParameters = struct {
             .hd = head_dim,
         }, dtype);
         const kv_shape = model.partitionKvCacheShape(raw_kv_shape, num_kv_heads, model_partitions);
+        const layer_types = config.layer_types[0..@as(usize, @intCast(config.numMainLayers()))];
 
         return .{
             .prefill_tokens = .init(.{ .b = 1, .s = seqlen }, .u32),
             .decode_tokens = .init(.{ .b = 1, .s = 1 }, .u32),
             .token_index = .init(.{ .s = 1 }, .u32),
-            .kv_cache = .init(kv_shape),
+            .kv_cache = .init(layer_types, kv_shape),
             .rng = .init(),
             .prefill_attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), metadata_num_heads)),
             .decode_attention_metadata = .init(.fromBackend(backend, 1, metadata_num_heads)),
@@ -262,7 +263,7 @@ pub const KernelExe = struct {
                     results[i] = try layer_exe.results(allocator);
                     initialized_results = i + 1;
 
-                    layer_indices[i] = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(i)), .u32);
+                    layer_indices[i] = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(exe.params.kv_cache.denseLayerIndex(i))), .u32);
                     initialized_layer_indices = i + 1;
                 }
 
@@ -339,7 +340,7 @@ pub const KernelExe = struct {
                 const layer = self.exe.mdl.text_model.layers[i];
                 // logKey("run", self.exe.phase, i, keyFor(layer));
                 const layer_exe = self.exe.layerExe(layer);
-                ComposedKernelExe.runLayer(exe_args, results, &layer_exe, args, &hidden_buf, layer_index_buf);
+                ComposedKernelExe.runLayer(exe_args, results, &layer_exe, layer, args, &hidden_buf, layer_index_buf);
             }
 
             self.exe.runSampler(&self.sampler_args, &self.sampler_results, args, &hidden_buf);
@@ -484,10 +485,11 @@ const ComposedKernelExe = struct {
             var results = try layer_exe.results(args.allocator);
             defer results.deinit(args.allocator);
 
-            var layer_index_buf = try zml.Buffer.scalar(args.io, args.platform, @as(u32, @intCast(i)), .u32);
+            const dense_layer_index = self.params.kv_cache.denseLayerIndex(i);
+            var layer_index_buf = try zml.Buffer.scalar(args.io, args.platform, @as(u32, @intCast(dense_layer_index)), .u32);
             defer layer_index_buf.deinit();
 
-            ComposedKernelExe.runLayer(&exe_args, &results, &layer_exe, args, &hidden_buf, &layer_index_buf);
+            ComposedKernelExe.runLayer(&exe_args, &results, &layer_exe, layer, args, &hidden_buf, &layer_index_buf);
         }
 
         {
@@ -506,13 +508,18 @@ const ComposedKernelExe = struct {
         exe_args: *zml.exe.Exe.Arguments,
         exe_results: *zml.exe.Exe.Results,
         layer_exe: *const zml.Exe,
+        layer: model.TransformerLayer,
         args: Args,
         hidden_buf: *zml.Buffer,
         layer_index_buf: *zml.Buffer,
     ) void {
-        const layer_cache: zml.Bufferized(model.KvCache) = .{
-            .k = args.kv_cache_buffers.k,
-            .v = args.kv_cache_buffers.v,
+        const layer_cache: zml.Bufferized(model.KvCache.AttentionCache) = if (layer.attn.enable_sliding_window) .{
+            .k = args.kv_cache_buffers.sliding.k,
+            .v = args.kv_cache_buffers.sliding.v,
+            .layer_index = layer_index_buf.*,
+        } else .{
+            .k = args.kv_cache_buffers.full.k,
+            .v = args.kv_cache_buffers.full.v,
             .layer_index = layer_index_buf.*,
         };
         exe_args.set(.{ hidden_buf, args.token_index_buf, layer_cache, args.attention_metadata_buffers });
@@ -523,10 +530,15 @@ const ComposedKernelExe = struct {
             layer_exe.call(exe_args.*, exe_results);
         }
 
-        var new_hidden, var new_cache = exe_results.get(struct { zml.Buffer, zml.Bufferized(model.KvCache) });
+        var new_hidden, var new_cache = exe_results.get(struct { zml.Buffer, zml.Bufferized(model.KvCache.AttentionCache) });
         replaceBuffer(hidden_buf, &new_hidden);
-        replaceBuffer(&args.kv_cache_buffers.k, &new_cache.k);
-        replaceBuffer(&args.kv_cache_buffers.v, &new_cache.v);
+        if (layer.attn.enable_sliding_window) {
+            replaceBuffer(&args.kv_cache_buffers.sliding.k, &new_cache.k);
+            replaceBuffer(&args.kv_cache_buffers.sliding.v, &new_cache.v);
+        } else {
+            replaceBuffer(&args.kv_cache_buffers.full.k, &new_cache.k);
+            replaceBuffer(&args.kv_cache_buffers.full.v, &new_cache.v);
+        }
         releaseBuffer(layer_index_buf.*, &new_cache.layer_index);
     }
 
@@ -649,11 +661,7 @@ const ComposedKernelExe = struct {
         // defer phase.logCompileDone(log, component, io, from);
 
         const hidden_tensor = hidden(step3p5_model, seqlen);
-        const layer_cache: model.KvCache = .{
-            .k = parameters.kv_cache.k,
-            .v = parameters.kv_cache.v,
-            .layer_index = zml.Tensor.init(.{}, .u32),
-        };
+        const layer_cache: model.KvCache.AttentionCache = parameters.kv_cache.cacheAtLayer(layer_index);
 
         const attention_metadata, const attention_parameters = switch (phase) {
             .prefill => .{ parameters.prefill_attention_metadata, parameters.prefill_attention_parameters },

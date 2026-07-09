@@ -352,9 +352,11 @@ pub const Model = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache,
         rng: zml.Tensor.Rng,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
-        const hidden, const new_kv_cache = self.text_model.forward(tokens, token_index, kv_cache);
+        const hidden, const new_kv_cache = self.text_model.forward(tokens, token_index, kv_cache, attention_metadata, attention_parameters);
         const next_tokens, const new_rng = self.sampleTokens(hidden, rng);
         return .{ next_tokens.convert(tokens.dtype()).reuseBuffer(tokens), new_kv_cache, new_rng };
     }
@@ -444,14 +446,31 @@ pub const TextModel = struct {
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
-            hidden, updated_kv_cache = layer.forward(
-                layer,
-                hidden,
-                token_index,
-                updated_kv_cache.atLayer(i),
-                attention_metadata,
-                attention_parameters,
-            );
+            const layer_cache = updated_kv_cache.atLayer(i);
+            switch (layer_cache.cache) {
+                .full => |cache| {
+                    const result = layer.forward(
+                        hidden,
+                        token_index,
+                        cache,
+                        attention_metadata,
+                        attention_parameters,
+                    );
+                    hidden = result[0];
+                    updated_kv_cache.full = result[1].reuseBuffer(updated_kv_cache.full);
+                },
+                .sliding => |cache| {
+                    const result = layer.forward(
+                        hidden,
+                        token_index,
+                        cache,
+                        attention_metadata,
+                        attention_parameters,
+                    );
+                    hidden = result[0];
+                    updated_kv_cache.sliding = result[1].reuseBuffer(updated_kv_cache.sliding);
+                },
+            }
         }
 
         return .{ hidden, updated_kv_cache.reuseBuffer(kv_cache) };
@@ -530,10 +549,10 @@ pub const TransformerLayer = struct {
         self: TransformerLayer,
         x0: zml.Tensor,
         token_index: zml.Tensor,
-        kv_cache: KvCache,
+        kv_cache: KvCache.AttentionCache,
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
-    ) struct { zml.Tensor, KvCache } {
+    ) struct { zml.Tensor, KvCache.AttentionCache } {
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
 
         const attn_input = self.input_layernorm.forward(x0, .d);
@@ -695,10 +714,10 @@ pub const Attn = struct {
         self: Attn,
         x: zml.Tensor,
         token_index: zml.Tensor,
-        kv_cache: KvCache,
+        kv_cache: KvCache.AttentionCache,
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
-    ) struct { zml.Tensor, KvCache } {
+    ) struct { zml.Tensor, KvCache.AttentionCache } {
         const input_raw = if (x.shape().isFullyTagged()) x else x.withTags(.{ .b, .s, .d });
         const input = input_raw.withPartitioning(.{ .d = .replicated });
 
@@ -752,37 +771,11 @@ pub const Attn = struct {
             else => attention_parameters,
         };
 
-        const cached_k = new_kv_cache.keys().convert(dtype);
-        const cached_v = new_kv_cache.values().convert(dtype);
-
-        // During decode, slice K/V to the sliding window to reduce memory traffic.
-        // During prefill, use the full cache and let attention_parameters.sliding_window do masking.
-        const attn_k, const attn_v, const effective_attn_start = if (self.enable_sliding_window and input.dim(.s) == 1) blk: {
-            const window_len: i64 = @min(@as(i64, @intCast(self.config.sliding_window)), cached_k.dim(.k));
-
-            // window_start = max(0, T + 1 - window_len) with T = attn_start[0]
-            const window_start = attn_start.convert(.i64)
-                .squeeze(0)
-                .addConstant(1 - window_len)
-                .maximum(zml.Tensor.scalar(@as(i64, 0), .i64))
-                .convert(.u32);
-            const k_slice = cached_k
-                .dynamicSlice(.{ .k = zml.Tensor.DynSlice{ .start = window_start, .len = window_len } })
-                .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
-            const v_slice = cached_v
-                .dynamicSlice(.{ .k = zml.Tensor.DynSlice{ .start = window_start, .len = window_len } })
-                .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
-
-            // effective_attn_start = min(T + 1, window_len)
-            const window_attn_start = attn_start
-                .addConstant(1)
-                .minimum(zml.Tensor.scalar(@as(u32, @intCast(window_len)), .u32).broad(attn_start.shape()));
-            break :blk .{ k_slice, v_slice, window_attn_start };
-        } else .{
-            cached_k.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated }),
-            cached_v.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated }),
-            attn_start,
-        };
+        const attn_k = new_kv_cache.keys().convert(dtype)
+            .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+        const attn_v = new_kv_cache.values().convert(dtype)
+            .withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+        const effective_attn_start = attn_start;
 
         // FA2 and FA3 return unbatched output for b=1; FA3 also expects unbatched inputs.
         const fa3_input = layer_attention_parameters == .cuda_fa3;
@@ -873,90 +866,181 @@ pub const TextRotaryEmbedding = struct {
 };
 
 pub const KvCache = struct {
-    k: zml.Tensor,
-    v: zml.Tensor,
-    layer_index: zml.Tensor,
+    layer_types: []const AttnType,
+    full: AttentionCache,
+    sliding: AttentionCache,
 
     pub const Buffer = zml.Bufferized(KvCache);
 
-    pub fn init(kv_shape: zml.Shape) KvCache {
+    pub const AttentionCache = struct {
+        k: zml.Tensor,
+        v: zml.Tensor,
+        layer_index: zml.Tensor,
+
+        pub const Buffer = zml.Bufferized(AttentionCache);
+
+        pub fn init(kv_shape: zml.Shape) AttentionCache {
+            return .{
+                .k = .fromShape(kv_shape),
+                .v = .fromShape(kv_shape),
+                .layer_index = .init(.{}, .u32),
+            };
+        }
+
+        /// Zero-initialized so that masked-out positions in the attention cannot hold NaN bit patterns.
+        pub fn initBuffer(kv: AttentionCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !AttentionCache.Buffer {
+            const k_bytes = try allocator.alloc(u8, kv.k.shape().byteSize());
+            defer allocator.free(k_bytes);
+            @memset(k_bytes, 0);
+            const v_bytes = try allocator.alloc(u8, kv.v.shape().byteSize());
+            defer allocator.free(v_bytes);
+            @memset(v_bytes, 0);
+            return .{
+                .k = try zml.Buffer.fromBytes(io, platform, kv.k.shape(), sharding, k_bytes),
+                .v = try zml.Buffer.fromBytes(io, platform, kv.v.shape(), sharding, v_bytes),
+                .layer_index = try zml.Buffer.scalar(io, platform, @as(u32, 0), .u32),
+            };
+        }
+
+        pub fn deinitBuffer(kv: *AttentionCache.Buffer) void {
+            kv.k.deinit();
+            kv.v.deinit();
+            kv.layer_index.deinit();
+        }
+
+        pub fn keys(kv: AttentionCache) zml.Tensor {
+            return kv.k.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = kv.layer_index, .len = 1 } }).squeeze(.layer);
+        }
+
+        pub fn values(kv: AttentionCache) zml.Tensor {
+            return kv.v.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = kv.layer_index, .len = 1 } }).squeeze(.layer);
+        }
+
+        pub fn update(kv: AttentionCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: ?zml.Tensor) AttentionCache {
+            const k_shape = kv.k.shape().drop(.layer);
+            var layer = kv.layer_index;
+
+            // KV cache uses .k instead of .s. Rename to keep the KV cache naming scheme internal
+            const k_renamed = if (new_k.shape().hasTag(.s) != null) new_k.rename(.{ .s = .k }) else new_k;
+            const v_renamed = if (new_v.shape().hasTag(.s) != null) new_v.rename(.{ .s = .k }) else new_v;
+            const k_in = k_renamed.convert(kv.k.dtype()).transpose(k_shape);
+            const v_in = v_renamed.convert(kv.v.dtype()).transpose(k_shape);
+
+            return if (token_index) |idx| blk: {
+                layer = layer.broad(idx.shape());
+                break :blk .{
+                    .k = kv.k.scatterSlices(.{ .layer = layer, .k = idx }, k_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
+                    .v = kv.v.scatterSlices(.{ .layer = layer, .k = idx }, v_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
+                    .layer_index = kv.layer_index,
+                };
+            } else .{
+                .k = kv.k.scatterSlices(.{ .layer = layer }, k_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
+                .v = kv.v.scatterSlices(.{ .layer = layer }, v_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
+                .layer_index = kv.layer_index,
+            };
+        }
+
+        pub fn atLayer(kv: AttentionCache, layer_index: usize) AttentionCache {
+            return .{
+                .k = kv.k,
+                .v = kv.v,
+                .layer_index = .scalar(layer_index, .u32),
+            };
+        }
+
+        pub fn reuseBuffer(kv: AttentionCache, other: AttentionCache) AttentionCache {
+            return .{
+                .k = kv.k.reuseBuffer(other.k),
+                .v = kv.v.reuseBuffer(other.v),
+                .layer_index = kv.layer_index.reuseBuffer(other.layer_index),
+            };
+        }
+    };
+
+    pub fn init(layer_types: []const AttnType, kv_shape: zml.Shape) KvCache {
         return .{
-            .k = .fromShape(kv_shape),
-            .v = .fromShape(kv_shape),
-            .layer_index = .init(.{}, .u32),
+            .layer_types = layer_types,
+            .full = .init(kv_shape.setDim(.layer, countLayers(layer_types, .full_attention))),
+            .sliding = .init(kv_shape.setDim(.layer, countLayers(layer_types, .sliding_attention))),
         };
     }
 
-    /// Zero-initialized so that masked-out positions in the attention cannot hold NaN bit patterns.
     pub fn initBuffer(kv: KvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
-        const k_bytes = try allocator.alloc(u8, kv.k.shape().byteSize());
-        defer allocator.free(k_bytes);
-        @memset(k_bytes, 0);
-        const v_bytes = try allocator.alloc(u8, kv.v.shape().byteSize());
-        defer allocator.free(v_bytes);
-        @memset(v_bytes, 0);
         return .{
-            .k = try zml.Buffer.fromBytes(io, platform, kv.k.shape(), sharding, k_bytes),
-            .v = try zml.Buffer.fromBytes(io, platform, kv.v.shape(), sharding, v_bytes),
-            .layer_index = try zml.Buffer.scalar(io, platform, @as(u32, 0), .u32),
+            .full = try kv.full.initBuffer(allocator, io, platform, sharding),
+            .sliding = try kv.sliding.initBuffer(allocator, io, platform, sharding),
         };
     }
 
     pub fn deinitBuffer(kv: *Buffer) void {
-        kv.k.deinit();
-        kv.v.deinit();
-        kv.layer_index.deinit();
+        AttentionCache.deinitBuffer(&kv.full);
+        AttentionCache.deinitBuffer(&kv.sliding);
     }
 
-    pub fn keys(kv: KvCache) zml.Tensor {
-        return kv.k.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = kv.layer_index, .len = 1 } }).squeeze(.layer);
-    }
+    pub const LayerView = struct {
+        parent: KvCache,
+        cache: union(enum) {
+            full: AttentionCache,
+            sliding: AttentionCache,
+        },
+    };
 
-    pub fn values(kv: KvCache) zml.Tensor {
-        return kv.v.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = kv.layer_index, .len = 1 } }).squeeze(.layer);
-    }
-
-    pub fn update(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: ?zml.Tensor) KvCache {
-        const k_shape = kv.k.shape().drop(.layer);
-        var layer = kv.layer_index;
-
-        // KV cache uses .k instead of .s. Rename to keep the KV cache naming scheme internal
-        const k_renamed = if (new_k.shape().hasTag(.s) != null) new_k.rename(.{ .s = .k }) else new_k;
-        const v_renamed = if (new_v.shape().hasTag(.s) != null) new_v.rename(.{ .s = .k }) else new_v;
-        const k_in = k_renamed.convert(kv.k.dtype()).transpose(k_shape);
-        const v_in = v_renamed.convert(kv.v.dtype()).transpose(k_shape);
-
-        return if (token_index) |idx| blk: {
-            layer = layer.broad(idx.shape());
-            break :blk .{
-                .k = kv.k.scatterSlices(.{ .layer = layer, .k = idx }, k_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
-                .v = kv.v.scatterSlices(.{ .layer = layer, .k = idx }, v_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
-                .layer_index = kv.layer_index,
-            };
-        } else .{
-            .k = kv.k.scatterSlices(.{ .layer = layer }, k_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
-            .v = kv.v.scatterSlices(.{ .layer = layer }, v_in, .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
-            .layer_index = kv.layer_index,
+    pub fn atLayer(kv: KvCache, layer_index: usize) LayerView {
+        return switch (denseIndex(kv.layer_types, layer_index)) {
+            .full_attention => |idx| .{
+                .parent = kv,
+                .cache = .{ .full = kv.full.atLayer(idx.layer_dense_index) },
+            },
+            .sliding_attention => |idx| .{
+                .parent = kv,
+                .cache = .{ .sliding = kv.sliding.atLayer(idx.layer_dense_index) },
+            },
         };
     }
 
-    pub fn atLayer(kv: KvCache, layer_index: usize) KvCache {
-        return .{
-            .k = kv.k,
-            .v = kv.v,
-            .layer_index = .scalar(layer_index, .u32),
+    pub fn cacheAtLayer(kv: KvCache, layer_index: usize) AttentionCache {
+        return switch (kv.atLayer(layer_index).cache) {
+            .full => |cache| cache,
+            .sliding => |cache| cache,
+        };
+    }
+
+    pub fn denseLayerIndex(kv: KvCache, layer_index: usize) usize {
+        return switch (denseIndex(kv.layer_types, layer_index)) {
+            inline else => |idx| idx.layer_dense_index,
         };
     }
 
     pub fn reuseBuffer(kv: KvCache, other: KvCache) KvCache {
         return .{
-            .k = kv.k.reuseBuffer(other.k),
-            .v = kv.v.reuseBuffer(other.v),
-            .layer_index = kv.layer_index.reuseBuffer(other.layer_index),
+            .layer_types = kv.layer_types,
+            .full = kv.full.reuseBuffer(other.full),
+            .sliding = kv.sliding.reuseBuffer(other.sliding),
+        };
+    }
+
+    fn countLayers(layer_types: []const AttnType, layer_type: AttnType) i64 {
+        return @intCast(std.mem.countScalar(AttnType, layer_types, layer_type));
+    }
+
+    fn denseIndex(layer_types: []const AttnType, layer_index: usize) union(enum) {
+        full_attention: struct { layer_dense_index: usize },
+        sliding_attention: struct { layer_dense_index: usize },
+    } {
+        var full_layer_index: usize = 0;
+        var sliding_layer_index: usize = 0;
+        for (layer_types[0..layer_index]) |layer_type| {
+            switch (layer_type) {
+                .full_attention => full_layer_index += 1,
+                .sliding_attention => sliding_layer_index += 1,
+            }
+        }
+        return switch (layer_types[layer_index]) {
+            .full_attention => .{ .full_attention = .{ .layer_dense_index = full_layer_index } },
+            .sliding_attention => .{ .sliding_attention = .{ .layer_dense_index = sliding_layer_index } },
         };
     }
 };
-
 pub const Mlp = struct {
     up_proj: zml.nn.Linear,
     gate_proj: zml.nn.Linear,
