@@ -1,0 +1,5 @@
+exports_files([
+    "aws-lc-sys-prebuilt.patch",
+    "repo.bzl",
+    "xet_core.bazel",
+])

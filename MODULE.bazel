@@ -3,6 +3,7 @@ module(
 )
 
 bazel_dep(name = "abseil-cpp", version = "20260526.0", repo_name = "com_google_absl")
+
 # Work around abseil-cpp#2071 until the BCR release includes the Clang BMI2 fix.
 single_version_override(
     module_name = "abseil-cpp",
@@ -12,8 +13,10 @@ single_version_override(
     ],
     version = "20260526.0",
 )
+
 bazel_dep(name = "bazel_lib", version = "3.2.2")
 bazel_dep(name = "aspect_rules_py", version = "1.8.4")
+bazel_dep(name = "aws-lc", version = "1.67.0")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 
 ## Needed by iree
@@ -22,7 +25,6 @@ bazel_dep(name = "patchelf", version = "0.18.0.bcr.1")
 bazel_dep(name = "pcre2", version = "10.45")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "protobuf", version = "35.0", repo_name = "com_google_protobuf")
-
 bazel_dep(name = "pybind11_bazel", version = "3.0.1")
 bazel_dep(name = "re2", version = "2025-11-05", repo_name = "com_googlesource_code_re2")
 bazel_dep(name = "rules_cc", version = "0.2.19")
@@ -31,6 +33,7 @@ bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.7")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.9.0")
+bazel_dep(name = "rules_rs", version = "0.0.95")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.15.1")
 bazel_dep(name = "tar.bzl", version = "0.10.4")
@@ -48,6 +51,7 @@ single_version_override(
     ],
     version = "1.80.0",
 )
+
 single_version_override(
     module_name = "envoy_api",
     version = "0.0.0-20250128-4de3c74",
@@ -124,6 +128,20 @@ register_toolchains("@zls_toolchains//:all")
 
 ###
 
+### Rust toolchain
+rules_rust = use_extension("@rules_rs//rs:rules_rust.bzl", "rules_rust")
+use_repo(rules_rust, "rules_rust")
+
+rust_toolchains = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
+rust_toolchains.toolchain(
+    edition = "2024",
+    version = "1.92.0",
+)
+use_repo(rust_toolchains, "default_rust_toolchains")
+
+register_toolchains("@default_rust_toolchains//:all")
+###
+
 ### LLVM Bootstrapped toolchains
 register_toolchains("@llvm//toolchain:all")
 ###
@@ -193,6 +211,7 @@ neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "aws-neuronx-tools", "libgcc_s1", "libgomp1", "libpjrt_neuron", "libstdcpp6")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
 http_archive(
     name = "sevenzip_macos",
     build_file_content = """exports_files(["7zz"])""",
@@ -201,23 +220,58 @@ http_archive(
 )
 
 http_aea_archive = use_repo_rule("//bazel:http_aea_archive.bzl", "http_aea_archive")
+
 http_aea_archive(
     name = "metal_toolchain",
     archive_decryption_key = "v7VbaT39JmQPp5p4N3HoVPAKcZ5vyhY+nnjMRD79z5E=",
+    build_file = "//platforms/metal:metal_toolchain.BUILD.bazel",
     canonical_id = "com.apple.MobileAsset.MetalToolchain-17B54",
+    includes = ["Metal.xctoolchain/*"],
     sha256 = "84f1cec3984878294777349e794f7bff0407e501a728bd600dc8605fa36abf6f",
     urls = [
         "https://updates.cdn-apple.com/2025/mobileassets/022-20354/192ADD28-31EE-43C8-972D-E5BED5FB1845/com_apple_MobileAsset_MetalToolchain/637B0E26-E00A-488B-BA3B-CB50A8ECFD74.aar",
     ],
-    build_file = "//platforms/metal:metal_toolchain.BUILD.bazel",
-    includes = ["Metal.xctoolchain/*"],
 )
 
 metal = use_extension("//platforms/metal:metal.bzl", "metal_packages")
 use_repo(metal, "libpjrt_metal")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "mosaic_tpu", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg")
+use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "mosaic_tpu", "org_swig_swig", "stb", "translate-c", "uucode", "xet_core", "xla", "zigimg")
+
+crate = use_extension("@rules_rs//rs:extensions.bzl", "crate")
+crate.annotation(
+    allow_build_script_to_detect_nonhermetic_paths = True,
+    build_script_data = [
+        "@aws-lc//:crypto",
+        "@aws-lc//:ssl",
+    ],
+    build_script_env = {
+        "AWS_LC_SYS_PREBUILT_CRYPTO": "$(rootpaths @aws-lc//:crypto)",
+        "AWS_LC_SYS_PREBUILT_SSL": "$(rootpaths @aws-lc//:ssl)",
+    },
+    crate = "aws-lc-sys",
+    patch_args = ["-p1"],
+    patches = ["//third_party/xet_core:aws-lc-sys-prebuilt.patch"],
+    deps = [
+        "@aws-lc//:crypto",
+        "@aws-lc//:ssl",
+    ],
+)
+crate.from_cargo(
+    name = "xet_core_crates",
+    cargo_lock = "@xet_core//:Cargo.lock",
+    cargo_toml = "@xet_core//:Cargo.toml",
+    platform_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+    ],
+)
+use_repo(crate, "xet_core_crates")
+
+inject_repo(crate, "aws-lc")
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(

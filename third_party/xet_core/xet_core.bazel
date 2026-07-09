@@ -1,0 +1,134 @@
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_static_library.bzl", "rust_static_library")
+load("@xet_core_crates//:defs.bzl", "aliases", "all_crate_deps")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library(
+    name = "xet_runtime",
+    srcs = glob(["xet_runtime/src/**/*.rs"]),
+    aliases = {
+        label: alias
+        for label, alias in aliases(package_name = "xet_runtime").items()
+        if not label.startswith("//")
+    },
+    crate_features = ["default"],
+    crate_root = "xet_runtime/src/lib.rs",
+    edition = "2024",
+    version = "1.5.2",
+    deps = all_crate_deps(
+        normal = True,
+        package_name = "xet_runtime",
+        cargo_only = True,
+    ),
+)
+
+rust_library(
+    name = "xet_core_structures",
+    srcs = glob(["xet_core_structures/src/**/*.rs"]),
+    aliases = {
+        label: alias
+        for label, alias in aliases(package_name = "xet_core_structures").items()
+        if not label.startswith("//")
+    },
+    crate_features = ["default"],
+    crate_root = "xet_core_structures/src/lib.rs",
+    edition = "2024",
+    version = "1.5.2",
+    deps = all_crate_deps(
+        normal = True,
+        package_name = "xet_core_structures",
+        cargo_only = True,
+    ) + [
+        ":xet_runtime",
+    ],
+)
+
+rust_library(
+    name = "xet_client",
+    srcs = glob(["xet_client/src/**/*.rs"]),
+    aliases = {
+        label: alias
+        for label, alias in aliases(package_name = "xet_client").items()
+        if not label.startswith("//")
+    },
+    crate_root = "xet_client/src/lib.rs",
+    edition = "2024",
+    version = "1.5.2",
+    deps = all_crate_deps(
+        normal = True,
+        package_name = "xet_client",
+        cargo_only = True,
+    ) + [
+        ":xet_core_structures",
+        ":xet_runtime",
+    ],
+)
+
+rust_library(
+    name = "xet_data",
+    srcs = glob(["xet_data/src/**/*.rs"]),
+    aliases = {
+        label: alias
+        for label, alias in aliases(package_name = "xet_data").items()
+        if not label.startswith("//")
+    },
+    crate_root = "xet_data/src/lib.rs",
+    edition = "2024",
+    version = "1.5.2",
+    deps = all_crate_deps(
+        normal = True,
+        package_name = "xet_data",
+        cargo_only = True,
+    ) + [
+        ":xet_client",
+        ":xet_core_structures",
+        ":xet_runtime",
+    ],
+)
+
+rust_library(
+    name = "xet_pkg",
+    srcs = glob(["xet_pkg/src/**/*.rs"]),
+    aliases = {
+        label: alias
+        for label, alias in aliases(package_name = "xet_pkg").items()
+        if not label.startswith("//")
+    },
+    crate_name = "xet",
+    crate_root = "xet_pkg/src/lib.rs",
+    edition = "2024",
+    version = "1.5.2",
+    deps = all_crate_deps(
+        normal = True,
+        package_name = "xet_pkg",
+        cargo_only = True,
+    ) + [
+        ":xet_client",
+        ":xet_core_structures",
+        ":xet_data",
+        ":xet_runtime",
+    ],
+)
+
+rust_static_library(
+    name = "libxet_capi",
+    srcs = glob(["xet_capi/src/**/*.rs"]),
+    aliases = {
+        label: alias
+        for label, alias in aliases(package_name = "xet_capi").items()
+        if not label.startswith("//")
+    },
+    crate_name = "xet_capi",
+    crate_root = "xet_capi/src/lib.rs",
+    edition = "2024",
+    version = "1.5.2",
+    deps = all_crate_deps(
+        normal = True,
+        package_name = "xet_capi",
+        cargo_only = True,
+    ) + [
+        ":xet_pkg",
+        ":xet_runtime",
+    ],
+)

@@ -11,6 +11,7 @@ load("//third_party/org_swig_swig:repo.bzl", org_swig_swig = "repo")
 load("//third_party/stb:repo.bzl", stb = "repo")
 load("//third_party/translate-c:repo.bzl", translate_c = "repo")
 load("//third_party/uucode:repo.bzl", uucode = "repo")
+load("//third_party/xet_core:repo.bzl", xet_core = "repo")
 load("//third_party/xla:repo.bzl", xla = "repo")
 load("//third_party/zigimg:repo.bzl", zigimg = "repo")
 
@@ -30,6 +31,7 @@ def _non_module_deps_impl(mctx):
     libvaxis()
     mosaic_tpu()
     iree()
+    xet_core()
 
     return mctx.extension_metadata(
         reproducible = True,
