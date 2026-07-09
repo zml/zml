@@ -269,6 +269,7 @@ apt.install(
     name = "apt_oneapi",
     lock = "//platforms/oneapi:packages.lock.json",
     manifest = "//platforms/oneapi:packages.yaml",
+    resolve_transitive = False,
 )
 use_repo(apt, "apt_oneapi")
 

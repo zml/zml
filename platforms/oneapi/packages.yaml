@@ -5,7 +5,19 @@ version: 1
 
 sources:
   - channel: all main
-    url: https://apt.repos.intel.com/oneapi
+    # mkdir -p platforms/oneapi/apt-sanitized/dists/all/main/binary-amd64
+    # curl -fsSL https://apt.repos.intel.com/oneapi/dists/all/main/binary-amd64/Packages.gz \
+    #   | gzip -dc \
+    #   | sed 's/(=2025.1.0-387)/(= 2025.1.0-387)/g' \
+    #   > platforms/oneapi/apt-sanitized/dists/all/main/binary-amd64/Packages
+    # Intel's live oneAPI Packages repository package index contain malformed 
+    # version constraints for some package so bazel can not parse it corectly.
+    # I cloned it fix it and add it as "sanitized" version until they fix it.
+    # Once intel have a clean package index the usage of "file://" can be removed
+    # url: https://apt.repos.intel.com/oneapi
+    urls:
+      - file:///home/kevin/zml/platforms/oneapi/apt-sanitized
+      - https://apt.repos.intel.com/oneapi
   - channel: noble main
     url: https://archive.ubuntu.com/ubuntu
   - channel: noble-security main

@@ -7,6 +7,7 @@
 			"name": "intel-oneapi-ccl-2022.1",
 			"sha256": "3569a089879b6b7358c5afb496ae782754715c8ace5137e00797e6b111fb4cc5",
 			"urls": [
+				"file:///home/kevin/zml/platforms/oneapi/apt-sanitized/pool/main/intel-oneapi-ccl-2022.1-2022.1.0-142_amd64.deb",
 				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-ccl-2022.1-2022.1.0-142_amd64.deb"
 			],
 			"version": "2022.1.0-142"
@@ -18,6 +19,7 @@
 			"name": "intel-oneapi-mpi-2021.18",
 			"sha256": "0eed61a43588fcaec64c7b09f6bd809c5227008e501d0e1231488fbd21eac51b",
 			"urls": [
+				"file:///home/kevin/zml/platforms/oneapi/apt-sanitized/pool/main/intel-oneapi-mpi-2021.18-2021.18.0-745_amd64.deb",
 				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mpi-2021.18-2021.18.0-745_amd64.deb"
 			],
 			"version": "2021.18.0-745"
@@ -29,6 +31,7 @@
 			"name": "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1",
 			"sha256": "f557b04243b6bb2087646b9d9eee94026bf1abc80b188dcfa3e3b689e292d95e",
 			"urls": [
+				"file:///home/kevin/zml/platforms/oneapi/apt-sanitized/pool/main/intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1-2026.1.0-235_amd64.deb",
 				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1-2026.1.0-235_amd64.deb"
 			],
 			"version": "2026.1.0-235"
@@ -40,6 +43,7 @@
 			"name": "intel-oneapi-compiler-shared-runtime-2026.1",
 			"sha256": "b5a077f78f192f93bba608f5497d7c138f77ec211a9d86356696a0ca68d3bf5d",
 			"urls": [
+				"file:///home/kevin/zml/platforms/oneapi/apt-sanitized/pool/main/intel-oneapi-compiler-shared-runtime-2026.1-2026.1.0-235_amd64.deb",
 				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-compiler-shared-runtime-2026.1-2026.1.0-235_amd64.deb"
 			],
 			"version": "2026.1.0-235"
@@ -51,6 +55,7 @@
 			"name": "intel-oneapi-mkl-core-2026.1",
 			"sha256": "3b230c02fc0ac44f8f71062c20cd883b37c6c1e00940dc0a7f13b02d9c47bd93",
 			"urls": [
+				"file:///home/kevin/zml/platforms/oneapi/apt-sanitized/pool/main/intel-oneapi-mkl-core-2026.1-2026.1.0-236_amd64.deb",
 				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-core-2026.1-2026.1.0-236_amd64.deb"
 			],
 			"version": "2026.1.0-236"
@@ -62,6 +67,7 @@
 			"name": "intel-oneapi-mkl-sycl-blas-2026.1",
 			"sha256": "9668d51a7cf68ae4b8944a8cdaa24f6d4ef72604c048f68fd8603b2b792bd783",
 			"urls": [
+				"file:///home/kevin/zml/platforms/oneapi/apt-sanitized/pool/main/intel-oneapi-mkl-sycl-blas-2026.1-2026.1.0-236_amd64.deb",
 				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-blas-2026.1-2026.1.0-236_amd64.deb"
 			],
 			"version": "2026.1.0-236"
@@ -73,6 +79,7 @@
 			"name": "intel-oneapi-mkl-sycl-dft-2026.1",
 			"sha256": "31862dd325a31ccacc1e5e9c93140f4c8bd8a0353e0b3658e2b87e329e58d373",
 			"urls": [
+				"file:///home/kevin/zml/platforms/oneapi/apt-sanitized/pool/main/intel-oneapi-mkl-sycl-dft-2026.1-2026.1.0-236_amd64.deb",
 				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-dft-2026.1-2026.1.0-236_amd64.deb"
 			],
 			"version": "2026.1.0-236"
@@ -84,6 +91,7 @@
 			"name": "intel-oneapi-mkl-sycl-lapack-2026.1",
 			"sha256": "f701832f5e49b29731c15a27a094122bebe6a1fbd90ddf14c431b7923b8fd921",
 			"urls": [
+				"file:///home/kevin/zml/platforms/oneapi/apt-sanitized/pool/main/intel-oneapi-mkl-sycl-lapack-2026.1-2026.1.0-236_amd64.deb",
 				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-lapack-2026.1-2026.1.0-236_amd64.deb"
 			],
 			"version": "2026.1.0-236"
@@ -95,6 +103,7 @@
 			"name": "intel-oneapi-mkl-sycl-rng-2026.1",
 			"sha256": "b0748e152f2042dedd1d21c784fb2a8b551c573b7e7ed0361ada2423deb275bf",
 			"urls": [
+				"file:///home/kevin/zml/platforms/oneapi/apt-sanitized/pool/main/intel-oneapi-mkl-sycl-rng-2026.1-2026.1.0-236_amd64.deb",
 				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-rng-2026.1-2026.1.0-236_amd64.deb"
 			],
 			"version": "2026.1.0-236"
@@ -106,6 +115,7 @@
 			"name": "intel-oneapi-mkl-sycl-sparse-2026.1",
 			"sha256": "6a499dc1c5f049ad522a5288151ff0c93f535b8e8ab34edcd773785338e07d45",
 			"urls": [
+				"file:///home/kevin/zml/platforms/oneapi/apt-sanitized/pool/main/intel-oneapi-mkl-sycl-sparse-2026.1-2026.1.0-236_amd64.deb",
 				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-sparse-2026.1-2026.1.0-236_amd64.deb"
 			],
 			"version": "2026.1.0-236"
@@ -117,6 +127,7 @@
 			"name": "intel-oneapi-tcm-1.5",
 			"sha256": "7122ed7748d54342b24f0a2838a64f24b54e430ac4d06b2961a8eefee4ffb089",
 			"urls": [
+				"file:///home/kevin/zml/platforms/oneapi/apt-sanitized/pool/main/intel-oneapi-tcm-1.5-1.5.0-489_amd64.deb",
 				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-tcm-1.5-1.5.0-489_amd64.deb"
 			],
 			"version": "1.5.0-489"
@@ -128,6 +139,7 @@
 			"name": "intel-oneapi-umf-1.1",
 			"sha256": "8705a997042c76f67228b4135184754e1cd3f8f68b6629bcb261c1d5b958ce78",
 			"urls": [
+				"file:///home/kevin/zml/platforms/oneapi/apt-sanitized/pool/main/intel-oneapi-umf-1.1-1.1.0-340_amd64.deb",
 				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-umf-1.1-1.1.0-340_amd64.deb"
 			],
 			"version": "1.1.0-340"
