@@ -1,0 +1,21 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+zig_library(
+    name = "dspark_model",
+    main = "dspark_model.zig",
+    srcs = ["common.zig"],
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_binary(
+    name = "dspark",
+    srcs = [
+        "common.zig",
+        "dspark_model.zig",
+        "main.zig",
+    ],
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
