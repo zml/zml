@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const zml = @import("zml");
+const attention = zml.attention.attention;
 
 const common = @import("common.zig");
 const model = @import("step3_5flash/model.zig");
@@ -10,15 +11,23 @@ pub const std_options: std.Options = .{ .log_level = .info };
 const Args = struct {
     model: []const u8,
     activations: []const u8,
+    backend: ?attention.Backend = null,
+    layer: ?u32 = null,
+    only: ?[]const u8 = null,
+    include_gpu_only: bool = false,
 
     pub const help =
-        \\Use step3_5_tests --model=<path> --activations=<path>
+        \\Use step3_5_tests --model=<path> --activations=<path> [options]
         \\
         \\ Validate Step 3.5 Flash layers against activation fixtures.
         \\
         \\ Options:
         \\   --model=<path>         Path to the model repository
         \\   --activations=<path>   Path to activation safetensors
+        \\   --backend=<text>       Attention backend to use
+        \\   --layer=<u32>          Optional transformer layer index to test
+        \\   --only=<name>          Optional exact activation prefix to test
+        \\   --include-gpu-only     Run fused MoE checks even on non-GPU platforms
         \\
     ;
 };
@@ -47,6 +56,7 @@ pub fn main(init: std.process.Init) !void {
     defer parsed_config.deinit();
 
     const shardings: common.Shardings = try .init(platform);
+    const backend = args.backend orelse attention.Backend.auto(platform);
     var ctx: TestContext = .{
         .allocator = allocator,
         .io = io,
@@ -56,6 +66,10 @@ pub fn main(init: std.process.Init) !void {
         .config = parsed_config.value,
         .shardings = shardings,
         .all_shardings = shardings.all(),
+        .backend = backend,
+        .selected_layer = args.layer,
+        .only = args.only,
+        .include_gpu_only = args.include_gpu_only,
     };
     try ctx.run();
 }
@@ -77,11 +91,23 @@ const TestContext = struct {
     config: model.Config,
     shardings: common.Shardings,
     all_shardings: [2]zml.Sharding,
+    backend: attention.Backend,
+    selected_layer: ?u32,
+    only: ?[]const u8,
+    include_gpu_only: bool,
+    tested: usize = 0,
 
     fn run(self: *TestContext) !void {
         std.log.info("Step 3.5 black-box layer tests:", .{});
         for (0..@as(usize, @intCast(self.config.numMainLayers()))) |layer_idx| {
+            if (self.selected_layer) |selected| {
+                if (layer_idx != selected) continue;
+            }
             try self.testLayer(layer_idx);
+        }
+
+        if (self.tested == 0) {
+            std.log.warn("no Step 3.5 fixtures matched the selected filters", .{});
         }
     }
 
@@ -89,7 +115,11 @@ const TestContext = struct {
         const layer_name = try std.fmt.allocPrint(self.allocator, "model.layers.{d}", .{layer_idx});
         defer self.allocator.free(layer_name);
         const layer = try model.TransformerLayer.init(self.model_store.view().withPrefix(layer_name), layer_idx, self.config);
-        try self.testKvForward(layer_name, layer, .{ .absolute_tolerance = 2e-2, .minimum_close_fraction = 0.99 });
+        if (self.layerUsesGpuOnlyMoe(layer_idx)) {
+            self.skipGpuOnly(layer_name);
+        } else {
+            try self.testKvForward(layer_name, layer, .{ .absolute_tolerance = 2e-2, .minimum_close_fraction = 0.99 });
+        }
 
         const attn_name = try std.fmt.allocPrint(self.allocator, "model.layers.{d}.self_attn", .{layer_idx});
         defer self.allocator.free(attn_name);
@@ -108,7 +138,11 @@ const TestContext = struct {
         if (self.isMoeLayer(layer_idx)) {
             const moe_name = try std.fmt.allocPrint(self.allocator, "model.layers.{d}.moe", .{layer_idx});
             defer self.allocator.free(moe_name);
-            try self.testForward(moe_name, try model.Moe.init(self.model_store.view().withPrefix(moe_name), layer_idx, self.config), .{ .absolute_tolerance = 1e-2, .minimum_close_fraction = 0.99 });
+            if (self.layerUsesGpuOnlyMoe(layer_idx)) {
+                self.skipGpuOnly(moe_name);
+            } else {
+                try self.testForward(moe_name, try model.Moe.init(self.model_store.view().withPrefix(moe_name), layer_idx, self.config), .{ .absolute_tolerance = 1e-2, .minimum_close_fraction = 0.99 });
+            }
 
             const shared_name = try std.fmt.allocPrint(self.allocator, "model.layers.{d}.share_expert", .{layer_idx});
             defer self.allocator.free(shared_name);
@@ -120,11 +154,21 @@ const TestContext = struct {
         }
     }
 
+    fn loadOpts(self: *TestContext) zml.io.LoadOpts {
+        return .{
+            .parallelism = 1,
+            .shardings = &self.all_shardings,
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+        };
+    }
+
     fn testForward(self: *TestContext, name: []const u8, layer: anytype, opts: zml.testing.CompareOpts) !void {
+        if (!self.shouldRun(name)) return;
         if (!self.hasFixture(name)) return self.skip(name);
         std.log.info("Testing layer: {s}", .{name});
 
-        var layer_buffers = try zml.io.load(@TypeOf(layer), &layer, self.allocator, self.io, self.platform, self.model_store, .auto);
+        var layer_buffers = try zml.io.load(@TypeOf(layer), &layer, self.allocator, self.io, self.platform, self.model_store, self.loadOpts());
         defer deinitBuffers(&layer_buffers);
 
         const view = self.activation_store.view().withPrefix(name);
@@ -142,7 +186,7 @@ const TestContext = struct {
 
         var results = try exe.results(self.allocator);
         defer results.deinit(self.allocator);
-        exe.call(args, &results);
+        exe.callOpts(self.io, args, &results, .{ .wait = true });
 
         var actual = results.get(zml.Buffer);
         defer releaseBuffer(input, &actual);
@@ -151,13 +195,15 @@ const TestContext = struct {
             error.TestUnexpectedResult => return,
             else => return err,
         };
+        self.tested += 1;
     }
 
     fn testKvForward(self: *TestContext, name: []const u8, layer: anytype, opts: zml.testing.CompareOpts) !void {
+        if (!self.shouldRun(name)) return;
         if (!self.hasFixture(name)) return self.skip(name);
         std.log.info("Testing layer: {s}", .{name});
 
-        var layer_buffers = try zml.io.load(@TypeOf(layer), &layer, self.allocator, self.io, self.platform, self.model_store, .auto);
+        var layer_buffers = try zml.io.load(@TypeOf(layer), &layer, self.allocator, self.io, self.platform, self.model_store, self.loadOpts());
         defer deinitBuffers(&layer_buffers);
 
         const view = self.activation_store.view().withPrefix(name);
@@ -170,7 +216,7 @@ const TestContext = struct {
         const token_index: zml.Tensor = .init(.{ .s = 1 }, .u32);
         const kv_cache = self.kvCacheFor(input_tensor);
         const metadata = self.attentionMetadata(input_tensor.dim(.s));
-        const parameters: zml.attention.attention.Parameters = .init(.fromBackend(zml.attention.attention.Backend.auto(self.platform)));
+        const parameters: attention.Parameters = .init(.fromBackend(self.backend));
 
         const exe = try self.platform.compileFn(self.allocator, self.io, @TypeOf(layer).forward, .{ layer, input_tensor, token_index, kv_cache, metadata, parameters }, .{ .shardings = &self.all_shardings });
         defer exe.deinit();
@@ -180,7 +226,7 @@ const TestContext = struct {
         var kv_cache_buffers = try kv_cache.initBuffer(self.allocator, self.io, self.platform, self.shardings.model);
         defer model.KvCache.deinitBuffer(&kv_cache_buffers);
         var metadata_buffers = try metadata.initBuffer(self.io, self.platform, self.shardings.model);
-        defer zml.attention.attention.Metadata.deinitBuffer(&metadata_buffers);
+        defer attention.Metadata.deinitBuffer(&metadata_buffers);
 
         var args = try exe.args(self.allocator);
         defer args.deinit(self.allocator);
@@ -188,7 +234,7 @@ const TestContext = struct {
 
         var results = try exe.results(self.allocator);
         defer results.deinit(self.allocator);
-        exe.call(args, &results);
+        exe.callOpts(self.io, args, &results, .{ .wait = true });
 
         var actual, var updated_kv_cache = results.get(struct { zml.Buffer, zml.Bufferized(model.KvCache) });
         defer releaseKvCacheBuffers(kv_cache_buffers, &updated_kv_cache);
@@ -198,6 +244,7 @@ const TestContext = struct {
             error.TestUnexpectedResult => return,
             else => return err,
         };
+        self.tested += 1;
     }
 
     fn kvCacheFor(self: *TestContext, input: zml.Tensor) model.KvCache {
@@ -212,12 +259,12 @@ const TestContext = struct {
         return .init(model.partitionKvCacheShape(raw_shape, @intCast(self.config.num_attention_groups), partitions));
     }
 
-    fn attentionMetadata(self: *TestContext, seqlen: i64) zml.attention.attention.Metadata {
+    fn attentionMetadata(self: *TestContext, seqlen: i64) attention.Metadata {
         const num_heads: i64 = @intCast(if (self.config.attention_other_setting) |other|
             @max(self.config.num_attention_heads, other.num_attention_heads)
         else
             self.config.num_attention_heads);
-        return .init(.fromBackend(zml.attention.attention.Backend.auto(self.platform), seqlen, num_heads));
+        return .init(.fromBackend(self.backend, seqlen, num_heads));
     }
 
     fn hasFixture(self: *TestContext, name: []const u8) bool {
@@ -225,11 +272,35 @@ const TestContext = struct {
         return view.hasKey("in.0") and view.hasKey("out.0");
     }
 
+    fn shouldRun(self: *const TestContext, name: []const u8) bool {
+        if (self.only) |only| return std.mem.eql(u8, only, name);
+        return true;
+    }
+
     fn skip(_: *TestContext, name: []const u8) void {
         std.log.warn("skipping {s}: no in.0/out.0 activations recorded", .{name});
     }
 
-    fn isMoeLayer(self: *TestContext, layer_idx: usize) bool {
+    fn skipGpuOnly(self: *const TestContext, name: []const u8) void {
+        if (!self.shouldRun(name)) return;
+        std.log.warn("skipping {s}: fused MoE uses Triton and current platform is {s}; pass --include-gpu-only to force it", .{ name, @tagName(self.platform.target) });
+    }
+
+    fn layerUsesGpuOnlyMoe(self: *const TestContext, layer_idx: usize) bool {
+        if (!self.isMoeLayer(layer_idx)) return false;
+        if (self.include_gpu_only) return false;
+        if (layer_idx >= 43 and layer_idx <= 44) return false;
+        return !self.canCompileTritonMoe();
+    }
+
+    fn canCompileTritonMoe(self: *const TestContext) bool {
+        return switch (self.platform.target) {
+            .cuda, .rocm, .oneapi => true,
+            else => false,
+        };
+    }
+
+    fn isMoeLayer(self: *const TestContext, layer_idx: usize) bool {
         for (self.config.moe_layers_enum.layers) |moe_layer_idx| {
             if (moe_layer_idx == layer_idx) return true;
         }
