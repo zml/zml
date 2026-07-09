@@ -366,6 +366,33 @@ pub const paged = struct {
     };
 };
 
+fn vanillaSparseAttention(q: zml.Tensor, kv: zml.Tensor, topk: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+    const mask = topk.cmp(.GE, zml.Tensor.zeroes(topk.shape())).insertAxes(.topk, .{.h});
+    const selected_kv = kv.gather(.{ .kv = topk }, .{}).rename(.{ .b = .q, .topk = .kv }).convert(.f32);
+
+    const dims = zml.nn.collectDims(.{ .h, .q, .kv, .hd }, &.{ q, kv }, .strict) catch {
+        stdx.debug.panic("Inputs have incompatible shapes (q: {f}, kv: {f}).", .{ q, kv });
+    };
+
+    const sqrt_head_dim = opts.scale orelse 1.0 / std.math.sqrt(@as(f32, @floatFromInt(dims.hd)));
+    const q_32 = q.convert(.f32);
+    var scores = q_32.dot(selected_kv, .hd).scale(sqrt_head_dim);
+    scores = zml.Tensor.select(mask.broad(scores.shape()), scores, zml.Tensor.constant(scores.dtype().minValue()));
+
+    const attn_sink = opts.sink orelse stdx.debug.panic("ragged MLA attention requires an attention sink", .{});
+    const sink_shape = q.shape().set(.hd, 1);
+    const sink = attn_sink.insertAxes(0, .{.q}).insertAxes(.last, .{.hd}).broad(sink_shape);
+    const scores_sink = zml.Tensor.concatenate(&.{ scores, sink.convert(scores.dtype()) }, .kv);
+
+    const attn_weights = scores_sink.softmax(.kv);
+    const attn_weights_non_sink = attn_weights.slice(&.{
+        .{},
+        .{},
+        .{ .end = topk.dim(.topk) },
+    });
+    return attn_weights_non_sink.dot(selected_kv, .kv).convert(q.dtype());
+}
+
 pub fn pagedSparseAttention(
     q: zml.Tensor,
     kv: zml.Tensor,
@@ -385,7 +412,9 @@ pub fn pagedSparseAttention(
                 opts,
             );
         },
-        .metal => q,
-        else => stdx.debug.panic("paged MLA is only implemented for the Triton backend and the vanilla Metal fallback, got {s}", .{@tagName(std.meta.activeTag(parameters))}),
+        else => {
+            const kv_final = kv.merge(.{ .kv = .{ .page, .k_chunk, .hkv } });
+            return vanillaSparseAttention(q, kv_final, topk, opts);
+        },
     };
 }
