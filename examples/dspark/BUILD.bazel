@@ -2,8 +2,27 @@ load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
 
 zig_library(
     name = "dspark_model",
-    main = "dspark_model.zig",
     srcs = ["common.zig"],
+    main = "dspark_model.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_library(
+    name = "qwen3_model",
+    srcs = ["common.zig"],
+    main = "qwen3/qwen3_model.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_library(
+    name = "qwen3_inference",
+    srcs = [
+        "common.zig",
+        "qwen3/qwen3_model.zig",
+    ],
+    main = "qwen3/qwen3_inference.zig",
     visibility = ["//visibility:public"],
     deps = ["//zml"],
 )
@@ -14,6 +33,8 @@ zig_binary(
         "common.zig",
         "dspark_model.zig",
         "main.zig",
+        "qwen3/qwen3_inference.zig",
+        "qwen3/qwen3_model.zig",
     ],
     main = "main.zig",
     visibility = ["//visibility:public"],
