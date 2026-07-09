@@ -471,8 +471,8 @@ pub const Attention = struct {
         var k = kv.insertAxes(.hd, .{.h}).broad(q.shape()).withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
         var v = k;
 
-        q = applyPartialRope(q, positions, self.rope_head_dim, self.rope_opts);
-        k = applyPartialRope(k, positions, self.rope_head_dim, self.rope_opts);
+        q = applyTrailingRope(q, positions, self.rope_head_dim, self.rope_opts);
+        k = applyTrailingRope(k, positions, self.rope_head_dim, self.rope_opts);
 
         const attn = zml.nn.sdpa(
             q.rename(.{ .s = .q }).convert(.f32),
@@ -483,13 +483,14 @@ pub const Attention = struct {
             .rename(.{ .q = .s })
             .withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
 
+        const projected_attn = applyTrailingInverseRope(attn, positions, self.rope_head_dim, self.rope_opts);
         const heads_per_group = @divExact(self.num_heads, self.o_groups);
-        const grouped = attn
+        const grouped = projected_attn
             .splitAxis(.h, .{ .g = self.o_groups, .gh = heads_per_group })
             .merge(.{ .gd = .{ .gh, .hd } });
         const wo_a = self.wo_a.withTags(.{ .dout, .d })
             .reshape(.{ .g = self.o_groups, .orank = self.o_lora_rank, .gd = grouped.dim(.gd) })
-            .convert(attn.dtype());
+            .convert(projected_attn.dtype());
         const compressed = grouped.dot(wo_a, .gd)
             .merge(.{ .d = .{ .g, .orank } })
             .convert(self.wo_b.weight.dtype());
@@ -714,13 +715,18 @@ fn softplus(x: zml.Tensor) zml.Tensor {
     return x.exp().addConstant(1).log();
 }
 
-fn applyPartialRope(x: zml.Tensor, positions: zml.Tensor, rope_dim: u32, rope_opts: zml.nn.RopeOpts) zml.Tensor {
+fn applyTrailingRope(x: zml.Tensor, positions: zml.Tensor, rope_dim: u32, rope_opts: zml.nn.RopeOpts) zml.Tensor {
     if (rope_dim == x.dim(.hd)) {
         return zml.nn.rope(x, positions, rope_opts);
     }
-    const x_rot = x.slice1d(.hd, .{ .start = 0, .end = rope_dim });
-    const x_pass = x.slice1d(.hd, .{ .start = rope_dim, .end = x.dim(.hd) });
-    return zml.Tensor.concatenate(&.{ zml.nn.rope(x_rot, positions, rope_opts), x_pass }, .hd);
+    const pass_dim = x.dim(.hd) - rope_dim;
+    const x_pass = x.slice1d(.hd, .{ .start = 0, .end = pass_dim });
+    const x_rot = x.slice1d(.hd, .{ .start = pass_dim, .end = x.dim(.hd) });
+    return zml.Tensor.concatenate(&.{ x_pass, zml.nn.rope(x_rot, positions, rope_opts) }, .hd);
+}
+
+fn applyTrailingInverseRope(x: zml.Tensor, positions: zml.Tensor, rope_dim: u32, rope_opts: zml.nn.RopeOpts) zml.Tensor {
+    return applyTrailingRope(x, positions.convert(.f32).negate(), rope_dim, rope_opts);
 }
 
 fn stackMany(tensors: []const zml.Tensor, axis_: anytype, tag: anytype) zml.Tensor {
