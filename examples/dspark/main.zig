@@ -42,12 +42,25 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(token_ids);
     if (token_ids.len == 0) return error.EmptyPrompt;
 
-    const block_tokens = try paddedBlockTokens(allocator, token_ids, args.seqlen);
-    defer allocator.free(block_tokens);
-
     const model = try dspark.Model.init(allocator, project.store.view(), project.parsed_config.value);
     defer model.deinit(allocator);
 
+    const block_tokens = try paddedBlockTokens(allocator, token_ids, args.seqlen, model.blockPadToken());
+    defer allocator.free(block_tokens);
+
+    switch (model) {
+        .deepseek => |deepseek_model| try runDeepSeekStandalone(allocator, project, deepseek_model, block_tokens, args),
+        .qwen3 => |qwen3_model| try runQwenStandalone(allocator, project, qwen3_model, block_tokens, args),
+    }
+}
+
+fn runDeepSeekStandalone(
+    allocator: std.mem.Allocator,
+    project: *Project,
+    model: dspark.DeepSeekModel,
+    block_tokens: []const u32,
+    args: Args,
+) !void {
     const moe_dtype = model.layers[0].ffn.experts[0].w1.weight.dtype();
     const moe_backend = try zml.moe.Backend.auto(project.platform, moe_dtype);
     const moe_parameters = zml.moe.Parameters.init(.fromBackend(moe_backend, project.parsed_config.value.num_experts_per_tok, .silu));
@@ -82,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("Loading DSpark weights...", .{});
     var model_buffers = try model.loadBuffers(allocator, project.io, project.platform, &project.store, &all_shardings);
-    defer dspark.Model.unloadBuffers(&model_buffers, allocator);
+    defer dspark.DeepSeekModel.unloadBuffers(&model_buffers, allocator);
 
     var input_tokens_buffer = try zml.Buffer.fromSlice(
         project.io,
@@ -128,6 +141,95 @@ pub fn main(init: std.process.Init) !void {
     defer sampled_tokens_buffer.deinit();
     defer zml.Tensor.Rng.deinitBuffer(&updated_rng);
 
+    try printSampledTokens(allocator, project, block_tokens, sampled_tokens_buffer);
+}
+
+fn runQwenStandalone(
+    allocator: std.mem.Allocator,
+    project: *Project,
+    model: dspark.Qwen3Model,
+    block_tokens: []const u32,
+    args: Args,
+) !void {
+    const aux_dtype = model.fc.weight.dtype();
+    const input_tokens_tensor: zml.Tensor = .init(.{ .s = args.seqlen }, .u32);
+    const aux_hidden_tensor: zml.Tensor = .init(.{ .s = args.seqlen, .d = model.target_aux_width }, aux_dtype);
+    const rng: zml.Tensor.Rng = .init();
+    const sampling: dspark.SamplingConfig = .{
+        .topk = args.topk,
+        .temperature = args.temperature,
+    };
+
+    const all_shardings = project.shardings.all();
+    log.info("Compiling Qwen3 DSpark standalone block...", .{});
+    var exe = try project.platform.compileFn(
+        allocator,
+        project.io,
+        runQwenDraftBlock,
+        .{
+            model,
+            input_tokens_tensor,
+            aux_hidden_tensor,
+            rng,
+            sampling,
+        },
+        .{ .shardings = &all_shardings },
+    );
+    defer exe.deinit();
+
+    log.info("Loading Qwen3 DSpark weights...", .{});
+    var model_buffers = try model.loadBuffers(allocator, project.io, project.platform, &project.store, &all_shardings);
+    defer dspark.Qwen3Model.unloadBuffers(&model_buffers, allocator);
+
+    var input_tokens_buffer = try zml.Buffer.fromSlice(
+        project.io,
+        project.platform,
+        zml.Slice.init(input_tokens_tensor.shape(), std.mem.sliceAsBytes(block_tokens)),
+        .replicated,
+    );
+    defer input_tokens_buffer.deinit();
+
+    var aux_hidden_buffer = try common.zeroBuffer(
+        allocator,
+        project.io,
+        project.platform,
+        aux_hidden_tensor.shape(),
+        project.shardings.model,
+    );
+    defer aux_hidden_buffer.deinit();
+
+    var rng_buffer = try zml.Tensor.Rng.initBuffer(project.io, project.platform, .replicated, 0);
+    defer zml.Tensor.Rng.deinitBuffer(&rng_buffer);
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+
+    exe_args.set(.{
+        model_buffers,
+        input_tokens_buffer,
+        aux_hidden_buffer,
+        rng_buffer,
+    });
+    exe.call(exe_args, &exe_results);
+
+    var sampled_tokens_buffer, var updated_rng = exe_results.get(struct {
+        zml.Buffer,
+        zml.Tensor.Rng.Buffer,
+    });
+    defer sampled_tokens_buffer.deinit();
+    defer zml.Tensor.Rng.deinitBuffer(&updated_rng);
+
+    try printSampledTokens(allocator, project, block_tokens, sampled_tokens_buffer);
+}
+
+fn printSampledTokens(
+    allocator: std.mem.Allocator,
+    project: *Project,
+    block_tokens: []const u32,
+    sampled_tokens_buffer: zml.Buffer,
+) !void {
     var sampled_tokens_slice = try sampled_tokens_buffer.toSliceAlloc(allocator, project.io);
     defer sampled_tokens_slice.free(allocator);
     const sampled_tokens = sampled_tokens_slice.constItems(u32);
@@ -216,7 +318,7 @@ fn initProject(init: std.process.Init, model_path: []const u8) !*Project {
 }
 
 fn runDraftBlock(
-    model: dspark.Model,
+    model: dspark.DeepSeekModel,
     input_tokens: zml.Tensor,
     aux_hidden_states: zml.Tensor,
     rng: zml.Tensor.Rng,
@@ -232,7 +334,22 @@ fn runDraftBlock(
     return .{ sampled.convert(.u32), updated_rng };
 }
 
-fn initMoeMetadata(model: dspark.Model, token_len: u32, backend: zml.moe.Backend) zml.moe.Metadata {
+fn runQwenDraftBlock(
+    model: dspark.Qwen3Model,
+    input_tokens: zml.Tensor,
+    aux_hidden_states: zml.Tensor,
+    rng: zml.Tensor.Rng,
+    sampling: dspark.SamplingConfig,
+) struct { zml.Tensor, zml.Tensor.Rng } {
+    const tokens = input_tokens.withPartialTags(.{.s});
+    const positions = zml.Tensor.arange(.{ .end = tokens.dim(.s) }, .i64).withTags(.{.s});
+    const hidden = model.forward(tokens, positions, aux_hidden_states);
+    const logits = model.draftLogits(hidden, tokens);
+    const sampled, const updated_rng = dspark.Model.sample(.{ .qwen3 = model }, logits, sampling, rng);
+    return .{ sampled.convert(.u32), updated_rng };
+}
+
+fn initMoeMetadata(model: dspark.DeepSeekModel, token_len: u32, backend: zml.moe.Backend) zml.moe.Metadata {
     _ = token_len;
     const num_experts: i64 = @intCast(model.layers[0].ffn.experts.len);
 
@@ -271,9 +388,9 @@ fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: *const zml.tokenizer.
     return encoder.encodeAlloc(allocator, prompt);
 }
 
-fn paddedBlockTokens(allocator: std.mem.Allocator, token_ids: []const u32, seqlen: u32) ![]u32 {
+fn paddedBlockTokens(allocator: std.mem.Allocator, token_ids: []const u32, seqlen: u32, pad_token_id: u32) ![]u32 {
     const padded = try allocator.alloc(u32, seqlen);
-    @memset(padded, 0);
+    @memset(padded, pad_token_id);
     const copy_len = @min(token_ids.len, seqlen);
     @memcpy(padded[0..copy_len], token_ids[0..copy_len]);
     return padded;
