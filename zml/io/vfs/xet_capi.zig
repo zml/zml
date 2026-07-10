@@ -46,6 +46,7 @@ const XET_OK: c_int = 0;
 const XET_POLL_READY: c_int = 1;
 const XET_POLL_ERROR: c_int = 2;
 
+extern fn xet_init_logging(version: ?[*:0]const u8) void;
 extern fn xet_session_new(out: *?*XetSession, err: *?*XetError) c_int;
 extern fn xet_session_free(session: ?*XetSession) void;
 extern fn xet_session_new_download_stream_group(session: ?*XetSession, cfg: *const XetAuthConfig, out: *?*XetDownloadStreamGroup, err: *?*XetError) c_int;
@@ -72,6 +73,14 @@ fn capiError(err: ?*XetError) error{XetCapi} {
         xet_error_free(e);
     }
     return error.XetCapi;
+}
+
+var logging_initialized = false;
+
+fn initLoggingOnce() void {
+    if (!@atomicRmw(bool, &logging_initialized, .Xchg, true, .acq_rel)) {
+        xet_init_logging("zml");
+    }
 }
 
 /// Block until `op` is ready, then take its bytes. Returns null at EOF.
@@ -103,6 +112,8 @@ pub const Session = struct {
     stream_group: *XetDownloadStreamGroup,
 
     pub fn init(cas_url: [:0]const u8, token: [:0]const u8, token_expiry: i64) !Session {
+        initLoggingOnce();
+
         var err: ?*XetError = null;
 
         var session: ?*XetSession = null;

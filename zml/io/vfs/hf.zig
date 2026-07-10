@@ -2,8 +2,8 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const VFSBase = @import("base.zig").VFSBase;
 const parallel_read = @import("parallel_read.zig");
+const VFSBase = @import("base.zig").VFSBase;
 const xet = @import("xet.zig");
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
@@ -117,6 +117,7 @@ const RepoKey = struct {
 pub const HF = struct {
     pub const InitOpts = struct {
         read_pool: parallel_read.InitOpts = .{},
+        xet_disabled: bool = false,
     };
 
     pub const Repo = struct {
@@ -188,6 +189,7 @@ pub const HF = struct {
     /// `mutex`.
     xet_trees: std.StringHashMapUnmanaged(xet.XetTree) = .{},
     xet_tokens: std.StringHashMapUnmanaged(xet.ReadToken) = .{},
+    xet_disabled: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8, opts: InitOpts) !HF {
         const read_pool = try allocator.create(ParallelRead.Pool);
@@ -208,6 +210,7 @@ pub const HF = struct {
                 break :blk .default;
             },
             .read_pool = read_pool,
+            .xet_disabled = opts.xet_disabled,
         };
         errdefer switch (self.authorization) {
             .default, .omit => {},
@@ -239,7 +242,10 @@ pub const HF = struct {
 
         if (hf_token == null) log.warn("No Hugging Face authentication token found in environment or home config; proceeding without authentication.", .{});
 
-        return init(allocator, inner, http_client, hf_token, .{});
+        const xet_disabled = if (environ_map.get("HF_XET_DISABLE")) |value| std.mem.eql(u8, value, "1") else false;
+        if (xet_disabled) log.info("HF_XET_DISABLE is set; disabling Hugging Face XET reads.", .{});
+
+        return init(allocator, inner, http_client, hf_token, .{ .xet_disabled = xet_disabled });
     }
 
     pub fn deinit(self: *HF) void {
@@ -818,7 +824,7 @@ pub const HF = struct {
         // xet-core (C-API), which fetches only the covering xorbs and serves
         // repeated/overlapping ranges from its chunk cache. Non-XET files fall
         // through to the plain resolve range-GET path below.
-        if (!handle.xet_tried) {
+        if (!self.xet_disabled and !handle.xet_tried) {
             handle.xet_tried = true;
             handle.xet = self.openXet(handle) catch |err| blk: {
                 log.info("xet: falling back to resolve for {s}: {any}", .{ handle.uri, err });
