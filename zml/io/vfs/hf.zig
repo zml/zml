@@ -201,7 +201,15 @@ const RepoKey = struct {
 
 pub const HF = struct {
     pub const InitOpts = struct {
-        read_pool: parallel_read.InitOpts = .{},
+        read_pool: parallel_read.InitOpts = .{
+            // Chunk size needs to be big enough to avoid hitting the rate limits of HF.
+            .chunk_size = 32 << 20,
+            .num_workers = 32,
+            .queue_capacity = 128,
+            .max_retries = 5,
+            .retry_initial_delay = .fromMilliseconds(500),
+            .retry_max_delay = .fromSeconds(30),
+        },
     };
 
     pub const Repo = struct {

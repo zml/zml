@@ -317,7 +317,14 @@ pub const GCS = struct {
         } = null,
         endpoint_url: []const u8 = "https://storage.googleapis.com",
         region: []const u8 = "auto",
-        read_pool: parallel_read.InitOpts = .{},
+        read_pool: parallel_read.InitOpts = .{
+            .chunk_size = 16 << 20,
+            .num_workers = 32,
+            .queue_capacity = 128,
+            .max_retries = 5,
+            .retry_initial_delay = .fromMilliseconds(500),
+            .retry_max_delay = .fromSeconds(30),
+        },
     };
 
     pub const InitError = error{
