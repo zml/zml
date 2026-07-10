@@ -243,7 +243,7 @@ pub fn collectProcessUsage(allocator: std.mem.Allocator, io: std.Io, devices: []
     var result: ProcessUsage = .{};
     errdefer result.deinit(allocator);
 
-    var seen_device_clients: std.AutoHashMapUnmanaged(u128, void) = .{};
+    var seen_device_clients: std.AutoHashMapUnmanaged(struct { u16, u64 }, void) = .{};
     defer seen_device_clients.deinit(allocator);
 
     var proc_dir = try std.Io.Dir.openDirAbsolute(io, "/proc", .{ .iterate = true });
@@ -270,7 +270,7 @@ pub fn collectProcessUsage(allocator: std.mem.Allocator, io: std.Io, devices: []
             // Skip fd if DRM client has been seen for this device.
             // Summing after dup() / fork() over-reports memory and compute.
             if (parsed.drm_client_id) |cid| {
-                if (try markDrmClientSeen(allocator, &seen_device_clients, dev_idx, cid)) continue;
+                if ((try seen_device_clients.getOrPut(allocator, .{ dev_idx, cid })).found_existing) continue;
             }
 
             const key = processKey(pid, dev_idx);
@@ -671,19 +671,6 @@ fn processKey(pid: u32, device_idx: u16) u64 {
     return (@as(u64, device_idx) << 32) | pid;
 }
 
-inline fn drmClientKey(device_idx: u16, client_id: u64) u128 {
-    return (@as(u128, device_idx) << 64) | @as(u128, client_id);
-}
-
-fn markDrmClientSeen(
-    allocator: std.mem.Allocator,
-    seen_device_clients: *std.AutoHashMapUnmanaged(u128, void),
-    device_idx: u16,
-    client_id: u64,
-) !bool {
-    return (try seen_device_clients.getOrPut(allocator, drmClientKey(device_idx, client_id))).found_existing;
-}
-
 pub const BdfParts = struct {
     domain: u32,
     bus: u32,
@@ -817,13 +804,13 @@ test "oneAPI fdinfo parser falls back to total vram" {
 }
 
 test "oneAPI DRM clients dedup per device" {
-    var seen_device_clients: std.AutoHashMapUnmanaged(u128, void) = .{};
+    var seen_device_clients: std.AutoHashMapUnmanaged(struct { u16, u64 }, void) = .{};
     defer seen_device_clients.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(false, try markDrmClientSeen(std.testing.allocator, &seen_device_clients, 0, 42));
-    try std.testing.expectEqual(true, try markDrmClientSeen(std.testing.allocator, &seen_device_clients, 0, 42));
-    try std.testing.expectEqual(false, try markDrmClientSeen(std.testing.allocator, &seen_device_clients, 1, 42));
-    try std.testing.expectEqual(false, try markDrmClientSeen(std.testing.allocator, &seen_device_clients, 0, 43));
+    try std.testing.expectEqual(false, (try seen_device_clients.getOrPut(std.testing.allocator, .{ 0, 42 })).found_existing);
+    try std.testing.expectEqual(true, (try seen_device_clients.getOrPut(std.testing.allocator, .{ 0, 42 })).found_existing);
+    try std.testing.expectEqual(false, (try seen_device_clients.getOrPut(std.testing.allocator, .{ 1, 42 })).found_existing);
+    try std.testing.expectEqual(false, (try seen_device_clients.getOrPut(std.testing.allocator, .{ 0, 43 })).found_existing);
 }
 
 test "oneAPI process utilization delta" {
