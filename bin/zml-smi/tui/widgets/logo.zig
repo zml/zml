@@ -29,68 +29,47 @@ pub fn draw(self: *const Logo, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
 }
 
 fn drawLogoRow(self: *const Logo, ctx: vxfw.DrawContext, row_index: usize) std.mem.Allocator.Error!vxfw.Surface {
-    const last_block = findLastVisibleBlockIndex(row_index) orelse {
+    const last_block = blk: {
+        var index = zml_logo.zml_art_blocks.len;
+        while (index > 0) {
+            index -= 1;
+            if (std.mem.trimEnd(u8, zml_logo.zml_art_blocks[index].rows[row_index].text, " \t\r\n").len != 0) break :blk index;
+        }
         return vxfw.Surface.init(ctx.arena, ui.widget(self), .{ .width = logo_width, .height = 1 });
     };
 
     var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
     for (zml_logo.zml_art_blocks[0 .. last_block + 1], 0..) |block, block_index| {
         const is_last_block = block_index == last_block;
-        try self.appendRowSegments(ctx.arena, &segments, block.rows[row_index], is_last_block);
+        const row = block.rows[row_index];
+        const text = if (is_last_block) std.mem.trimEnd(u8, row.text, " \t\r\n") else row.text;
+        if (text.len == 0) continue;
+
+        var view: std.unicode.Utf8View = .initUnchecked(text);
+        var iter = view.iterator();
+        while (iter.nextCodepointSlice()) |codepoint| {
+            const shiny = zml_logo.isShineGlyph(codepoint);
+            try segments.append(ctx.arena, .{
+                .text = codepoint,
+                .style = .{
+                    .fg = switch (if (shiny) row.shine else row.color) {
+                        .reset => .default,
+                        .cyan => .{ .rgb = .{ 0, 255, 255 } },
+                        .sky => .{ .rgb = .{ 0, 221, 255 } },
+                        .blue => .{ .rgb = .{ 135, 143, 255 } },
+                        .violet => .{ .rgb = .{ 215, 90, 219 } },
+                        .pink => .{ .rgb = .{ 242, 48, 174 } },
+                        .shine_cyan => .{ .rgb = .{ 140, 255, 255 } },
+                        .shine_sky => .{ .rgb = .{ 128, 244, 255 } },
+                        .shine_blue => .{ .rgb = .{ 205, 210, 255 } },
+                        .shine_violet => .{ .rgb = .{ 255, 170, 255 } },
+                        .shine_pink => .{ .rgb = .{ 255, 150, 220 } },
+                    },
+                    .bg = self.style.bg,
+                    .bold = shiny,
+                },
+            });
+        }
     }
     return ui.drawRichLine(ctx, segments.items, logo_width);
-}
-
-fn appendRowSegments(
-    self: *const Logo,
-    arena: std.mem.Allocator,
-    segments: *std.ArrayList(vaxis.Cell.Segment),
-    row: zml_logo.Row,
-    rtrim_whitespace: bool,
-) std.mem.Allocator.Error!void {
-    const text = if (rtrim_whitespace) std.mem.trimEnd(u8, row.text, " \t\r\n") else row.text;
-    if (text.len == 0) return;
-
-    var view: std.unicode.Utf8View = .initUnchecked(text);
-    var iter = view.iterator();
-    while (iter.nextCodepointSlice()) |codepoint| {
-        const shiny = zml_logo.isShineGlyph(codepoint);
-        try segments.append(arena, .{
-            .text = codepoint,
-            .style = self.logoStyle(if (shiny) row.shine else row.color, shiny),
-        });
-    }
-}
-
-fn logoStyle(self: *const Logo, color: zml_logo.Color, shiny: bool) vaxis.Cell.Style {
-    return .{
-        .fg = logoColor(color),
-        .bg = self.style.bg,
-        .bold = shiny,
-    };
-}
-
-fn logoColor(color: zml_logo.Color) vaxis.Cell.Color {
-    return switch (color) {
-        .reset => .default,
-        .cyan => .{ .rgb = .{ 0, 255, 255 } },
-        .sky => .{ .rgb = .{ 0, 221, 255 } },
-        .blue => .{ .rgb = .{ 135, 143, 255 } },
-        .violet => .{ .rgb = .{ 215, 90, 219 } },
-        .pink => .{ .rgb = .{ 242, 48, 174 } },
-        .shine_cyan => .{ .rgb = .{ 140, 255, 255 } },
-        .shine_sky => .{ .rgb = .{ 128, 244, 255 } },
-        .shine_blue => .{ .rgb = .{ 205, 210, 255 } },
-        .shine_violet => .{ .rgb = .{ 255, 170, 255 } },
-        .shine_pink => .{ .rgb = .{ 255, 150, 220 } },
-    };
-}
-
-fn findLastVisibleBlockIndex(row_index: usize) ?usize {
-    var index = zml_logo.zml_art_blocks.len;
-    while (index > 0) {
-        index -= 1;
-        if (std.mem.trimEnd(u8, zml_logo.zml_art_blocks[index].rows[row_index].text, " \t\r\n").len != 0) return index;
-    }
-    return null;
 }
