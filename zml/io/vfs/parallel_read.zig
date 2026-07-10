@@ -3,12 +3,12 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 pub const InitOpts = struct {
-    chunk_size: usize = 16 * 1024 * 1024,
-    num_workers: usize = 32,
-    queue_capacity: usize = 128,
-    max_retries: usize = 5,
-    retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
-    retry_max_delay: std.Io.Duration = .fromSeconds(30),
+    chunk_size: usize,
+    num_workers: usize,
+    queue_capacity: usize,
+    max_retries: usize,
+    retry_initial_delay: std.Io.Duration,
+    retry_max_delay: std.Io.Duration,
 };
 
 pub const Status = union(enum) {
