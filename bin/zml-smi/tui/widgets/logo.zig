@@ -31,10 +31,9 @@ fn drawLogoRow(self: *const Logo, ctx: vxfw.DrawContext, row_index: usize) std.m
     var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
     for (zml_logo.zml_art_blocks[0..]) |block| {
         const row = block.rows[row_index];
-        const text = row.text;
-        if (text.len == 0) continue;
+        if (row.text.len == 0) continue;
 
-        var view: std.unicode.Utf8View = .initUnchecked(text);
+        var view: std.unicode.Utf8View = .initUnchecked(row.text);
         var iter = view.iterator();
         while (iter.nextCodepointSlice()) |codepoint| {
             const shiny = zml_logo.isShineGlyph(codepoint);
