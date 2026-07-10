@@ -45,6 +45,7 @@ zig_library(
         "//bazel/stamp:zig",
         "//bin/zml-smi/info",
         "//bin/zml-smi/utils:double_buffer",
+        "//zml:logo",
         "@libvaxis//:vaxis",
     ] + select({
         "@platforms//os:macos": ["//bin/zml-smi/platforms/macos"],

@@ -48,12 +48,11 @@ pub fn deinit(self: *Overview, allocator: std.mem.Allocator) void {
 }
 
 fn drawNarrowBanner(self: *const Overview, ctx: vxfw.DrawContext, content_w: u16) !vxfw.Surface {
-    const logo: Logo = .{ .image = image_cache.global.get("logo"), .compact = true };
+    const logo: Logo = .{ .image = image_cache.global.get("logo") };
     const info_lines: InfoLines = .{ .state = self.state };
 
-    const logo_h: u16 = if (logo.image != null) Logo.compact_image_height else Logo.compact_height;
     const children = [2]vxfw.Widget{
-        try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&logo)), .{ .width = content_w, .height = logo_h }),
+        try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&logo)), .{ .width = content_w, .height = Logo.logo_height }),
         ui.widget(&info_lines),
     };
     const layout: ColumnLayout = .{ .children = &children, .gap = 1 };
@@ -61,13 +60,12 @@ fn drawNarrowBanner(self: *const Overview, ctx: vxfw.DrawContext, content_w: u16
 }
 
 fn drawWideBanner(self: *const Overview, ctx: vxfw.DrawContext, content_w: u16) !vxfw.Surface {
-    const logo: Logo = .{ .image = image_cache.global.get("logo"), .compact = false };
+    const logo: Logo = .{ .image = image_cache.global.get("logo") };
     const info_lines: InfoLines = .{ .state = self.state };
 
-    const logo_h: u16 = if (logo.image != null) Logo.image_height else Logo.logo_height;
     const logo_box_w = Logo.logo_width + 6; // +4 centering + 2 absorbed page margin
     const info_max_w = @min(content_w -| logo_box_w, max_info_width);
-    const banner_h = @max(logo_h, InfoLines.entry_count);
+    const banner_h = @max(Logo.logo_height, InfoLines.entry_count);
 
     const flex_items = [2]vxfw.FlexItem{
         .{ .widget = try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&logo)), .{ .width = logo_box_w, .height = banner_h }), .flex = 0 },
