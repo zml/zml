@@ -10,18 +10,14 @@ const Logo = @This();
 
 style: vaxis.Cell.Style = .{},
 image: ?vaxis.Image = null,
-compact: bool = false,
 
 pub const logo_width: u16 = 28;
 pub const logo_height: u16 = @intCast(zml_logo.zml_art_blocks[0].rows.len);
-
-pub const image_height: u16 = 11;
-pub const compact_image_height: u16 = 7;
+pub const image_height: u16 = logo_height;
 
 pub fn draw(self: *const Logo, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     if (self.image) |img| {
-        const h = if (self.compact) compact_image_height else image_height;
-        const img_w: Image = .{ .image = img, .rows = h };
+        const img_w: Image = .{ .image = img, .rows = image_height };
         return img_w.draw(ctx);
     }
 
