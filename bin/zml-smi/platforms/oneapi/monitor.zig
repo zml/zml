@@ -243,6 +243,9 @@ pub fn collectProcessUsage(allocator: std.mem.Allocator, io: std.Io, devices: []
     var result: ProcessUsage = .{};
     errdefer result.deinit(allocator);
 
+    var seen_device_clients: std.AutoHashMapUnmanaged(struct { u16, u64 }, void) = .{};
+    defer seen_device_clients.deinit(allocator);
+
     var proc_dir = try std.Io.Dir.openDirAbsolute(io, "/proc", .{ .iterate = true });
     defer proc_dir.close(io);
 
@@ -263,6 +266,13 @@ pub fn collectProcessUsage(allocator: std.mem.Allocator, io: std.Io, devices: []
             const parsed = parseFdinfoFile(io, file_path, now_ns) catch continue;
             const bus_device_identifier = parsed.bus_device_identifier orelse continue;
             const dev_idx = matchDevice(devices, bus_device_identifier) orelse continue;
+
+            // Skip fd if DRM client has been seen for this device.
+            // Summing after dup() / fork() over-reports memory and compute.
+            if (parsed.drm_client_id) |cid| {
+                if ((try seen_device_clients.getOrPut(allocator, .{ dev_idx, cid })).found_existing) continue;
+            }
+
             const key = processKey(pid, dev_idx);
             const gop = try result.getOrPut(allocator, key);
             if (!gop.found_existing) {
@@ -505,6 +515,7 @@ const FdinfoSample = struct {
 
 const ParsedFdinfo = struct {
     bus_device_identifier: ?[bus_device_identifier_len]u8 = null,
+    drm_client_id: ?u64 = null,
     sample: FdinfoSample = .{},
     resident_vram_kib: u64 = 0,
     total_vram_kib: u64 = 0,
@@ -552,6 +563,11 @@ inline fn finishFdinfo(self: *ParsedFdinfo) void {
 inline fn parseFdinfoLine(parsed: *ParsedFdinfo, line: []const u8, timestamp_ns: u64) void {
     if (std.mem.startsWith(u8, line, "drm-pdev:")) {
         parsed.bus_device_identifier = parseBdf(line["drm-pdev:".len..]);
+        return;
+    }
+
+    if (std.mem.startsWith(u8, line, "drm-client-id:")) {
+        parsed.drm_client_id = firstInt(line["drm-client-id:".len..]);
         return;
     }
 
@@ -715,6 +731,7 @@ inline fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool
 test "oneAPI fdinfo parser" {
     var parsed: ParsedFdinfo = .{};
     parseFdinfoLine(&parsed, "drm-pdev:\t0000:03:00.0", 10);
+    parseFdinfoLine(&parsed, "drm-client-id:\t42", 10);
     parseFdinfoLine(&parsed, "drm-total-memory:\t2048 KiB", 10);
     parseFdinfoLine(&parsed, "drm-engine-render:\t100 ns", 10);
     parseFdinfoLine(&parsed, "drm-engine-compute:\t50 ns", 10);
@@ -722,6 +739,7 @@ test "oneAPI fdinfo parser" {
 
     try std.testing.expect(parsed.bus_device_identifier != null);
     try std.testing.expectEqualSlices(u8, "0000:03:00.0", &parsed.bus_device_identifier.?);
+    try std.testing.expectEqual(@as(?u64, 42), parsed.drm_client_id);
     try std.testing.expectEqual(@as(?u64, 2048), parsed.sample.mem_kib);
     try std.testing.expectEqual(@as(u64, 150), parsed.sample.engine.?.engine_ns);
     try std.testing.expectEqual(@as(?EngineSample, null), parsed.sample.encoder);
@@ -783,6 +801,16 @@ test "oneAPI fdinfo parser falls back to total vram" {
     finishFdinfo(&parsed);
 
     try std.testing.expectEqual(@as(?u64, 2048), parsed.sample.mem_kib);
+}
+
+test "oneAPI DRM clients dedup per device" {
+    var seen_device_clients: std.AutoHashMapUnmanaged(struct { u16, u64 }, void) = .{};
+    defer seen_device_clients.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(false, (try seen_device_clients.getOrPut(std.testing.allocator, .{ 0, 42 })).found_existing);
+    try std.testing.expectEqual(true, (try seen_device_clients.getOrPut(std.testing.allocator, .{ 0, 42 })).found_existing);
+    try std.testing.expectEqual(false, (try seen_device_clients.getOrPut(std.testing.allocator, .{ 1, 42 })).found_existing);
+    try std.testing.expectEqual(false, (try seen_device_clients.getOrPut(std.testing.allocator, .{ 0, 43 })).found_existing);
 }
 
 test "oneAPI process utilization delta" {
