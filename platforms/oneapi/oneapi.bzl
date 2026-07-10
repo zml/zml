@@ -34,8 +34,6 @@ def _read_packages(mctx, labels):
             ret.setdefault(pkg["name"], {})[pkg["arch"]] = pkg
     return ret
 
-# _ROOT_PACKAGES = {}
-
 _UBUNTU_PACKAGES = {
     "libnl-3-200": """
 filegroup(
@@ -279,15 +277,6 @@ def _oneapi_impl(mctx):
         sha256 = PJRT_ONEAPI_ARTIFACT_SHA256,
         url = PJRT_ONEAPI_ARTIFACT_URL,
     )
-
-    # for pkg_name, build_file_content in _ROOT_PACKAGES.items():
-    #     pkg = loaded_packages[pkg_name]["amd64"]
-    #     http_deb_archive(
-    #         name = pkg_name,
-    #         urls = pkg["urls"],
-    #         sha256 = pkg["sha256"],
-    #         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
-        # )
 
     for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
         pkg = loaded_packages[pkg_name]["amd64"]
