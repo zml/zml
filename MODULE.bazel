@@ -27,6 +27,17 @@ bazel_dep(name = "pybind11_bazel", version = "3.0.1")
 bazel_dep(name = "re2", version = "2025-11-05", repo_name = "com_googlesource_code_re2")
 bazel_dep(name = "rules_cc", version = "0.2.19")
 bazel_dep(name = "rules_distroless", version = "0.6.2")
+# Once the rules_distroless can parse unspaced apt version constraints
+# Update the rules_distroless version and remove the patch
+# https://github.com/bazel-contrib/rules_distroless/pull/229
+single_version_override(
+    module_name = "rules_distroless",
+    patch_strip = 1,
+    patches = [
+        "//:third_party/rules_distroless/accept-nospace-version-constraints.patch",
+    ],
+    version = "0.6.2",
+)
 bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.7")
 bazel_dep(name = "rules_proto", version = "7.1.0")
