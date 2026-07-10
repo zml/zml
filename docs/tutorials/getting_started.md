@@ -98,6 +98,38 @@ For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
 bazel test //zml:test
 ```
 
+## Troubleshooting Bazel runs
+
+Use `-c dbg` while investigating crashes or `unreachable` panics. Optimized
+builds with `-c opt` are faster, but compiler optimizations can make Zig
+stacktraces less useful during debugging.
+
+Bazel's
+[`--run_under`](https://bazel.build/docs/user-manual#run-under) flag runs the
+compiled binary under another command. It is useful for debuggers and tracing
+tools such as `lldb`, `gdb`, or `strace`:
+
+```
+bazel run -c dbg //examples/llm --run_under="lldb --" -- \
+  --model=hf://meta-llama/Llama-3.2-1B-Instruct \
+  --prompt="What is the capital of France?"
+```
+
+You can also pass runtime environment variables through `--run_under`. For
+[XLA HLO dumps](https://openxla.org/xla/hlo_dumps), set `XLA_FLAGS` before the
+target binary. For TensorFlow C++ logging, `TF_CPP_MIN_LOG_LEVEL` controls the
+minimum log level, while `TF_CPP_MAX_VLOG_LEVEL` enables verbose C++ logs; see
+the [TensorFlow logging API](https://www.tensorflow.org/api_docs/python/tf/get_logger)
+and the
+[`TF_CPP_MAX_VLOG_LEVEL` rename note](https://github.com/tensorflow/tensorflow/issues/54925):
+
+```
+bazel run -c dbg //examples/llm \
+  --run_under='env XLA_FLAGS="--xla_dump_to=/tmp/zml-xla" TF_CPP_MAX_VLOG_LEVEL=2 TF_CPP_MIN_LOG_LEVEL=0' \
+  -- --model=hf://meta-llama/Llama-3.2-1B-Instruct \
+  --prompt="What is the capital of France?"
+```
+
 ## Running Models on GPU / TPU
 
 You can compile models for accelerator runtimes by appending one or more of the
