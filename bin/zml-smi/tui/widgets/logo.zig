@@ -28,20 +28,10 @@ pub fn draw(self: *const Logo, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
 }
 
 fn drawLogoRow(self: *const Logo, ctx: vxfw.DrawContext, row_index: usize) std.mem.Allocator.Error!vxfw.Surface {
-    const last_block = blk: {
-        var index = zml_logo.zml_art_blocks.len;
-        while (index > 0) {
-            index -= 1;
-            if (std.mem.trimEnd(u8, zml_logo.zml_art_blocks[index].rows[row_index].text, " \t\r\n").len != 0) break :blk index;
-        }
-        return vxfw.Surface.init(ctx.arena, ui.widget(self), .{ .width = logo_width, .height = 1 });
-    };
-
     var segments: std.ArrayList(vaxis.Cell.Segment) = .empty;
-    for (zml_logo.zml_art_blocks[0 .. last_block + 1], 0..) |block, block_index| {
-        const is_last_block = block_index == last_block;
+    for (zml_logo.zml_art_blocks[0..]) |block| {
         const row = block.rows[row_index];
-        const text = if (is_last_block) std.mem.trimEnd(u8, row.text, " \t\r\n") else row.text;
+        const text = row.text;
         if (text.len == 0) continue;
 
         var view: std.unicode.Utf8View = .initUnchecked(text);
