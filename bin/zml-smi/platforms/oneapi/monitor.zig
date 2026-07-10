@@ -243,8 +243,8 @@ pub fn collectProcessUsage(allocator: std.mem.Allocator, io: std.Io, devices: []
     var result: ProcessUsage = .{};
     errdefer result.deinit(allocator);
 
-    var seen_clients: std.AutoHashMapUnmanaged(u64, void) = .{};
-    defer seen_clients.deinit(allocator);
+    var seen_device_clients: std.AutoHashMapUnmanaged(u128, void) = .{};
+    defer seen_device_clients.deinit(allocator);
 
     var proc_dir = try std.Io.Dir.openDirAbsolute(io, "/proc", .{ .iterate = true });
     defer proc_dir.close(io);
@@ -267,9 +267,10 @@ pub fn collectProcessUsage(allocator: std.mem.Allocator, io: std.Io, devices: []
             const bus_device_identifier = parsed.bus_device_identifier orelse continue;
             const dev_idx = matchDevice(devices, bus_device_identifier) orelse continue;
 
-            // Skip fd if DRM client has been seen. Summing after dup() / fork() over-reports memory and compute.
+            // Skip fd if DRM client has been seen for this device.
+            // Summing after dup() / fork() over-reports memory and compute.
             if (parsed.drm_client_id) |cid| {
-                if ((try seen_clients.getOrPut(allocator, cid)).found_existing) continue;
+                if (try markDrmClientSeen(allocator, &seen_device_clients, dev_idx, cid)) continue;
             }
 
             const key = processKey(pid, dev_idx);
@@ -670,6 +671,19 @@ fn processKey(pid: u32, device_idx: u16) u64 {
     return (@as(u64, device_idx) << 32) | pid;
 }
 
+inline fn drmClientKey(device_idx: u16, client_id: u64) u128 {
+    return (@as(u128, device_idx) << 64) | @as(u128, client_id);
+}
+
+fn markDrmClientSeen(
+    allocator: std.mem.Allocator,
+    seen_device_clients: *std.AutoHashMapUnmanaged(u128, void),
+    device_idx: u16,
+    client_id: u64,
+) !bool {
+    return (try seen_device_clients.getOrPut(allocator, drmClientKey(device_idx, client_id))).found_existing;
+}
+
 pub const BdfParts = struct {
     domain: u32,
     bus: u32,
@@ -800,6 +814,16 @@ test "oneAPI fdinfo parser falls back to total vram" {
     finishFdinfo(&parsed);
 
     try std.testing.expectEqual(@as(?u64, 2048), parsed.sample.mem_kib);
+}
+
+test "oneAPI DRM clients dedup per device" {
+    var seen_device_clients: std.AutoHashMapUnmanaged(u128, void) = .{};
+    defer seen_device_clients.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(false, try markDrmClientSeen(std.testing.allocator, &seen_device_clients, 0, 42));
+    try std.testing.expectEqual(true, try markDrmClientSeen(std.testing.allocator, &seen_device_clients, 0, 42));
+    try std.testing.expectEqual(false, try markDrmClientSeen(std.testing.allocator, &seen_device_clients, 1, 42));
+    try std.testing.expectEqual(false, try markDrmClientSeen(std.testing.allocator, &seen_device_clients, 0, 43));
 }
 
 test "oneAPI process utilization delta" {
