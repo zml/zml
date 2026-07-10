@@ -11,6 +11,53 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+const PJRT_EXTENSION_TYPE_EXECUTE_CHAIN = 25;
+
+const CExecuteChainInputKind = enum(c_int) {
+    buffer = 0,
+    output = 1,
+};
+
+const CExecuteChainInput = extern struct {
+    struct_size: usize,
+    extension_start: ?*c.PJRT_Extension_Base,
+    kind: CExecuteChainInputKind,
+    buffer: ?*c.PJRT_Buffer,
+    output_step: usize,
+    output_index: usize,
+};
+const CExecuteChainInput_STRUCT_SIZE = @offsetOf(CExecuteChainInput, "output_index") + @sizeOf(usize);
+
+const CExecuteChainStep = extern struct {
+    struct_size: usize,
+    extension_start: ?*c.PJRT_Extension_Base,
+    executable: ?*c.PJRT_LoadedExecutable,
+    argument_refs: ?[*]CExecuteChainInput,
+    num_args: usize,
+    output_lists: ?[*]const [*]*c.PJRT_Buffer,
+    returned_outputs: ?[*]const bool,
+    num_outputs: usize,
+};
+const CExecuteChainStep_STRUCT_SIZE = @offsetOf(CExecuteChainStep, "num_outputs") + @sizeOf(usize);
+
+const CLoadedExecutableExecuteChainArgs = extern struct {
+    struct_size: usize,
+    extension_start: ?*c.PJRT_Extension_Base,
+    options: ?*c.PJRT_ExecuteOptions,
+    steps: ?[*]CExecuteChainStep,
+    num_steps: usize,
+    num_devices: usize,
+    device_complete_events: ?[*]?*c.PJRT_Event,
+};
+const CLoadedExecutableExecuteChainArgs_STRUCT_SIZE = @offsetOf(CLoadedExecutableExecuteChainArgs, "device_complete_events") + @sizeOf(?[*]?*c.PJRT_Event);
+
+const CLoadedExecutableExecuteChainFn = *const fn (*CLoadedExecutableExecuteChainArgs) callconv(.c) ?*c.PJRT_Error;
+
+const CExecuteChainExtension = extern struct {
+    base: c.PJRT_Extension_Base,
+    execute_chain: ?CLoadedExecutableExecuteChainFn,
+};
+
 pub const meta = struct {
     // We could calculate it like PJRT does, but it turns out that some of those
     // were wrong in PJRT itself [1], which gets propagated to binary plugins. In
@@ -164,12 +211,16 @@ pub const Api = struct {
         }
         const fn_ptr = @field(&self.inner, @tagName(method)).?;
         const result = fn_ptr(arg);
+        try self.checkError(@tagName(method), result);
+    }
+
+    fn checkError(self: *const Api, comptime method: []const u8, result: anytype) ApiError!void {
         if (@TypeOf(result) == void) {
             return;
         }
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
-            log.err("[{s}] {s}", .{ @tagName(method), pjrt_error.getMessage(self) });
+            log.err("[{s}] {s}", .{ method, pjrt_error.getMessage(self) });
             return pjrt_error.getCode(self).toApiError();
         }
     }
@@ -191,6 +242,7 @@ pub const Api = struct {
             triton = c.PJRT_Extension_Type_Triton,
             raw_buffer = c.PJRT_Extension_Type_RawBuffer,
             phase_compile = c.PJRT_Extension_Type_PhaseCompile,
+            execute_chain = PJRT_EXTENSION_TYPE_EXECUTE_CHAIN,
             unknown = c.PJRT_Extension_Type_Unknown,
         };
 
@@ -204,6 +256,7 @@ pub const Api = struct {
             triton: *const c.PJRT_Triton_Extension,
             raw_buffer: *const c.PJRT_RawBuffer_Extension,
             phase_compile: *const c.PJRT_PhaseCompile_Extension,
+            execute_chain: *const CExecuteChainExtension,
             unknown: *const c.PJRT_Extension_Base,
         };
 
@@ -969,6 +1022,105 @@ pub const LoadedExecutable = opaque {
             .output_lists = @ptrCast(args.results),
             .device_complete_events = if (args.events) |ev| @ptrCast(ev) else null,
         });
+    }
+
+    pub const ExecuteChainOutputRef = struct {
+        step: usize,
+        output: usize,
+    };
+
+    pub const ExecuteChainInput = union(enum) {
+        buffer: *const Buffer,
+        output: ExecuteChainOutputRef,
+    };
+
+    pub const ExecuteChainStep = struct {
+        executable: *const LoadedExecutable,
+        num_args: usize,
+        arguments: []const ExecuteChainInput,
+        results: ?[]const [*]*Buffer,
+        returned_outputs: []const bool,
+    };
+
+    pub const ExecuteChainArgs = struct {
+        num_devices: usize,
+        steps: []const ExecuteChainStep,
+        events: ?[]?*Event,
+        non_donatable_input_indices: []const i64 = &.{},
+        context: ?*ExecuteContext = null,
+    };
+
+    pub fn executeChain(api: *const Api, allocator: std.mem.Allocator, args: ExecuteChainArgs) !void {
+        const ext = if (api.extension(.execute_chain)) |e| e.execute_chain else return ApiError.Unimplemented;
+        if (args.steps.len == 0) return ApiError.InvalidArgument;
+        if (args.num_devices == 0) return ApiError.InvalidArgument;
+
+        var input_count: usize = 0;
+        for (args.steps) |step| {
+            const expected_inputs = args.num_devices * step.num_args;
+            if (step.arguments.len != expected_inputs) return ApiError.InvalidArgument;
+            input_count += expected_inputs;
+        }
+
+        const c_steps = try allocator.alloc(CExecuteChainStep, args.steps.len);
+        defer allocator.free(c_steps);
+
+        var c_inputs = try allocator.alloc(CExecuteChainInput, input_count);
+        defer allocator.free(c_inputs);
+
+        var input_offset: usize = 0;
+        for (args.steps, c_steps) |step, *c_step| {
+            const step_inputs = c_inputs[input_offset .. input_offset + step.arguments.len];
+            input_offset += step.arguments.len;
+
+            for (step.arguments, step_inputs) |input, *c_input| {
+                c_input.* = switch (input) {
+                    .buffer => |buffer| .{
+                        .struct_size = CExecuteChainInput_STRUCT_SIZE,
+                        .extension_start = null,
+                        .kind = .buffer,
+                        .buffer = @ptrCast(@constCast(buffer.inner())),
+                        .output_step = 0,
+                        .output_index = 0,
+                    },
+                    .output => |output| .{
+                        .struct_size = CExecuteChainInput_STRUCT_SIZE,
+                        .extension_start = null,
+                        .kind = .output,
+                        .buffer = null,
+                        .output_step = output.step,
+                        .output_index = output.output,
+                    },
+                };
+            }
+
+            c_step.* = .{
+                .struct_size = CExecuteChainStep_STRUCT_SIZE,
+                .extension_start = null,
+                .executable = @ptrCast(@constCast(step.executable.inner())),
+                .argument_refs = step_inputs.ptr,
+                .num_args = step.num_args,
+                .output_lists = if (step.results) |results| @ptrCast(results.ptr) else null,
+                .returned_outputs = step.returned_outputs.ptr,
+                .num_outputs = step.returned_outputs.len,
+            };
+        }
+
+        var options: meta.Struct(c.PJRT_ExecuteOptions) = .{
+            .non_donatable_input_indices = @ptrCast(args.non_donatable_input_indices),
+            .num_non_donatable_input_indices = args.non_donatable_input_indices.len,
+            .context = @ptrCast(args.context),
+        };
+        var c_args: CLoadedExecutableExecuteChainArgs = .{
+            .struct_size = CLoadedExecutableExecuteChainArgs_STRUCT_SIZE,
+            .extension_start = null,
+            .options = @ptrCast(&options),
+            .steps = c_steps.ptr,
+            .num_steps = c_steps.len,
+            .num_devices = args.num_devices,
+            .device_complete_events = if (args.events) |ev| @ptrCast(ev.ptr) else null,
+        };
+        try api.checkError("PJRT_LoadedExecutable_ExecuteChain", ext.execute_chain.?(@ptrCast(&c_args)));
     }
 
     pub fn executable(self: *const LoadedExecutable, api: *const Api) ApiError!*Executable {

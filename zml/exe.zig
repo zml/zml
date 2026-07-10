@@ -239,12 +239,12 @@ pub const Exe = struct {
             return result;
         }
 
-        pub fn fill(self: *Results, v: anytype) void {
+        pub fn fillPartial(self: *Results, v: anytype, offset: usize) void {
             const LocalContext = struct {
                 results: *Results,
                 current_index: usize = 0,
             };
-            var context: LocalContext = .{ .results = self, .current_index = 0 };
+            var context: LocalContext = .{ .results = self, .current_index = offset };
             meta.visit(struct {
                 fn cb(ctx: *LocalContext, buffer: *Buffer) void {
                     //stdx.debug.assert(ctx.results.expected_shapes[ctx.current_index].eql(buffer.shape()), "Expected result {} to have shape {f}, got {f}", .{ ctx.current_index, ctx.results.expected_shapes[ctx.current_index], buffer.shape() });
@@ -256,6 +256,18 @@ pub const Exe = struct {
                     ctx.current_index += 1;
                 }
             }.cb, &context, &v);
+        }
+
+        pub fn fill(self: *Results, v: anytype) void {
+            self.fillPartial(v, 0);
+        }
+
+        pub fn fillOutput(self: *Results, output_index: usize, buffer: *Buffer) void {
+            var shards: Buffer.Shards = .empty;
+            for (0..self.flat_buffers.num_devices) |device_index| {
+                shards.appendAssumeCapacity(self.flat_buffers.buffers[device_index][output_index]);
+            }
+            buffer.* = Buffer.fromPjrtBuffers(self.platform, self.expected_shapes[output_index], self.shardings[output_index], shards.constSlice());
         }
     };
 

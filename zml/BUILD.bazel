@@ -98,6 +98,7 @@ zig_library(
         "kernel.zig",
         "buffer.zig",
         "constants.zig",
+        "decode_chain.zig",
         "dtype.zig",
         "exe.zig",
         "floats.zig",
