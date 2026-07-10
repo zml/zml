@@ -15,15 +15,15 @@ else
   exit 1
 fi
 
-rocprofv3_bin="${runfiles_root}/+rocm_packages+rocprofiler-sdk/bin/rocprofv3"
-if [[ ! -x "${rocprofv3_bin}" ]]; then
-  echo "sandboxed rocprofv3 not found at ${rocprofv3_bin}" >&2
-  exit 1
-fi
-
 rocm_root="${runfiles_root}/+rocm_packages+libpjrt_rocm/sandbox"
 if [[ ! -d "${rocm_root}" ]]; then
   echo "sandboxed ROCm runtime root not found at ${rocm_root}" >&2
+  exit 1
+fi
+
+rocprofv3_bin="${rocm_root}/bin/rocprofv3"
+if [[ ! -x "${rocprofv3_bin}" ]]; then
+  echo "sandboxed rocprofv3 not found at ${rocprofv3_bin}" >&2
   exit 1
 fi
 

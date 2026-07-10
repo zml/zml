@@ -59,7 +59,7 @@ cc_library(
         "//conditions:default": [],
     }) + select({
         "//platforms:rocm.enabled": [
-            "@rocprofiler-sdk-roctx//:headers",
+            "@amdrocm-profiler-base//:roctx_headers",
         ],
         "//conditions:default": [],
     }),

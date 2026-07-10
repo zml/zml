@@ -192,7 +192,25 @@ cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "cuda_nvml_dev_linux_sbsa", "cuda_nvml_dev_linux_x86_64", "cuda_nvtx_linux_sbsa", "cuda_nvtx_linux_x86_64", "libpjrt_cuda_linux_amd64", "libpjrt_cuda_linux_arm64", "zlib1g_linux_amd64", "zlib1g_linux_arm64")
 
 rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
-use_repo(rocm, "amd-smi-lib", "hipblaslt", "libdrm-amdgpu-amdgpu1", "libdrm2-amdgpu", "libpjrt_rocm", "rocblas", "rocprofiler-sdk", "rocprofiler-sdk-roctx")
+use_repo(
+    rocm,
+    "amdrocm-amdsmi",
+    "amdrocm-base",
+    "amdrocm-blas",
+    "amdrocm-dnn",
+    "amdrocm-fft",
+    "amdrocm-llvm",
+    "amdrocm-math-common",
+    "amdrocm-profiler-base",
+    "amdrocm-rccl",
+    "amdrocm-runtime",
+    "amdrocm-solver",
+    "amdrocm-sparse",
+    "amdrocm-sysdeps",
+    "libatomic1",
+    "libdrm-common",
+    "libpjrt_rocm",
+)
 
 oneapi = use_extension("//platforms/oneapi:oneapi.bzl", "oneapi_packages")
 use_repo(oneapi, "libpjrt_oneapi")
