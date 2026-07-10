@@ -13,11 +13,10 @@ image: ?vaxis.Image = null,
 
 pub const logo_width: u16 = 28;
 pub const logo_height: u16 = @intCast(zml_logo.zml_art_blocks[0].rows.len);
-pub const image_height: u16 = logo_height;
 
 pub fn draw(self: *const Logo, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     if (self.image) |img| {
-        const img_w: Image = .{ .image = img, .rows = image_height };
+        const img_w: Image = .{ .image = img, .rows = logo_height };
         return img_w.draw(ctx);
     }
 
