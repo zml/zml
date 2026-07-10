@@ -6,32 +6,44 @@ pub const InitOpts = struct {
     chunk_size: usize = 16 * 1024 * 1024,
     num_workers: usize = 32,
     queue_capacity: usize = 128,
+    max_retries: usize = 5,
+    retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
+    retry_max_delay: std.Io.Duration = .fromSeconds(30),
 };
 
-pub const BatchExecutor = struct {
+pub const Status = union(enum) {
+    success,
+    retry_after: ?std.Io.Duration,
+
+    pub fn retry() Status {
+        return .{ .retry_after = null };
+    }
+};
+
+pub const BatchState = struct {
     pending: std.atomic.Value(u32),
     err: std.atomic.Value(u16) = .init(0),
 
-    pub fn failed(batch: *BatchExecutor) bool {
+    pub fn failed(batch: *BatchState) bool {
         return batch.err.load(.acquire) != 0;
     }
 
-    pub fn fail(batch: *BatchExecutor, err: anyerror) void {
+    pub fn fail(batch: *BatchState, err: anyerror) void {
         _ = batch.err.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
     }
 
-    pub fn firstError(batch: *BatchExecutor) ?anyerror {
+    pub fn anyError(batch: *BatchState) ?anyerror {
         const err = batch.err.load(.acquire);
         return if (err == 0) null else @errorFromInt(err);
     }
 
-    pub fn completeOne(batch: *BatchExecutor, io: std.Io) void {
+    pub fn completeOne(batch: *BatchState, io: std.Io) void {
         const previous = batch.pending.fetchSub(1, .release);
         std.debug.assert(previous > 0);
         if (previous == 1) io.futexWake(u32, &batch.pending.raw, 1);
     }
 
-    pub fn waitUncancelable(batch: *BatchExecutor, io: std.Io) void {
+    pub fn waitUncancelable(batch: *BatchState, io: std.Io) void {
         while (true) {
             const pending = batch.pending.load(.acquire);
             if (pending == 0) return;
@@ -48,12 +60,19 @@ pub fn Pool(comptime Job: type) type {
         job_queue: std.Io.Queue(Job),
         queue_buf: []Job,
         client: *std.http.Client,
+        prng: std.Random.DefaultPrng,
         chunk_size: usize,
+        max_retries: usize,
+        retry_initial_delay: std.Io.Duration,
+        retry_max_delay: std.Io.Duration,
 
         pub fn init(self: *Self, allocator: std.mem.Allocator, io: std.Io, client: *std.http.Client, opts: InitOpts) !void {
             stdx.debug.assert(opts.num_workers > 0, "Pool must have at least one worker", .{});
             stdx.debug.assert(opts.chunk_size > 0, "Pool must have a positive download chunk size", .{});
             stdx.debug.assert(opts.queue_capacity > 0, "Pool must have a positive queue capacity", .{});
+            stdx.debug.assert(opts.retry_initial_delay.nanoseconds >= 0, "Pool retry initial delay must not be negative", .{});
+            stdx.debug.assert(opts.retry_max_delay.nanoseconds >= 0, "Pool retry max delay must not be negative", .{});
+            stdx.debug.assert(opts.retry_max_delay.nanoseconds >= opts.retry_initial_delay.nanoseconds, "Pool retry max delay must be at least the initial delay", .{});
 
             const queue_buf = try allocator.alloc(Job, opts.queue_capacity);
             errdefer allocator.free(queue_buf);
@@ -61,6 +80,14 @@ pub fn Pool(comptime Job: type) type {
             self.* = .{
                 .client = client,
                 .chunk_size = opts.chunk_size,
+                .max_retries = opts.max_retries,
+                .retry_initial_delay = opts.retry_initial_delay,
+                .retry_max_delay = opts.retry_max_delay,
+                .prng = .init(blk: {
+                    var seed: u64 = undefined;
+                    io.random(@ptrCast(&seed));
+                    break :blk seed;
+                }),
                 .job_queue = .init(queue_buf),
                 .queue_buf = queue_buf,
             };
@@ -82,12 +109,45 @@ pub fn Pool(comptime Job: type) type {
             while (true) {
                 const job = pool.job_queue.getOne(io) catch break;
 
-                if (!job.batch.executor.failed()) {
-                    if (job.perform(pool.client)) |err| job.batch.executor.fail(err);
+                var attempt: usize = 0;
+                while (true) {
+                    if (job.batch.state.failed()) break;
+                    const status = job.perform(pool.client) catch |err| {
+                        job.batch.state.fail(err);
+                        break;
+                    };
+
+                    switch (status) {
+                        .success => break,
+                        .retry_after => |duration| {
+                            if (attempt >= pool.max_retries) {
+                                job.batch.state.fail(error.RetriesExhausted);
+                                break;
+                            }
+
+                            io.sleep(duration orelse pool.backoffDuration(attempt), .awake) catch {
+                                job.batch.state.fail(error.RetriesExhausted);
+                                break;
+                            };
+
+                            attempt += 1;
+                        },
+                    }
+                    continue;
                 }
 
-                job.batch.executor.completeOne(io);
+                job.batch.state.completeOne(io);
             }
+        }
+
+        fn backoffDuration(pool: *Self, attempt: usize) std.Io.Duration {
+            // FullJitter algorithm
+            const max_delay_ns: i96 = @min(
+                pool.retry_max_delay.toNanoseconds(),
+                pool.retry_initial_delay.toNanoseconds() *| (@as(i96, 1) << @as(u7, @intCast(@min(attempt, std.math.maxInt(u7))))),
+            );
+            const delay_ns = pool.prng.random().intRangeAtMost(i96, 0, max_delay_ns);
+            return .fromNanoseconds(delay_ns);
         }
     };
 }
