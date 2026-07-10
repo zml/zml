@@ -559,24 +559,59 @@ pub const Tensor = struct {
                     .f32 => .c64,
                     else => .c128,
                 };
-                const shape_ = self._shape.setDim(-1, @divExact(self.dim(-1), 2) + 1);
+                const shape_ = self._shape.setDim(-1, rfftOutputLen(self.dim(-1)));
                 break :blk shape_.withDtype(dt);
             },
             .IRFFT => blk: {
                 stdx.debug.assert(self.dtype().isComplex(), "fft({any}) expects tensor type to be complex, got {}", .{ opts, self.dtype() });
-                stdx.debug.assert(std.mem.eql(i64, self.dims()[self.rank() - opts.length.len ..], opts.length), "fft({any}) expects tensor last dimensions to match given lengths, got {} and {}", .{ opts, self.dims()[self.rank() - opts.length.len ..].len, opts.length.len });
+                const fft_dims = self.dims()[self.rank() - opts.length.len ..];
+                const fft_last_dim_index = opts.length.len - 1;
+                stdx.debug.assert(std.mem.eql(i64, fft_dims[0..fft_last_dim_index], opts.length[0..fft_last_dim_index]), "fft({any}) expects non-innermost tensor FFT dimensions to match given lengths, got {any} and {any}", .{ opts, fft_dims[0..fft_last_dim_index], opts.length[0..fft_last_dim_index] });
+                stdx.debug.assert(self.dim(-1) == rfftOutputLen(opts.length[fft_last_dim_index]), "fft({any}) expects IRFFT innermost dimension to match the RFFT output length, got {} for FFT length {}", .{ opts, self.dim(-1), opts.length[fft_last_dim_index] });
 
                 const dt: DataType = switch (self.dtype()) {
                     .c64 => .f32,
                     else => .f64,
                 };
-                const shape_ = self._shape.setDim(-1, @divExact(self.dim(-1) - 1, 2));
+                const shape_ = self._shape.setDim(-1, opts.length[fft_last_dim_index]);
                 break :blk shape_.withDtype(dt);
             },
         };
 
         const op = dialects.stablehlo.fft(mlirCtx(), self.value(), opts, .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(sh, op.result(0));
+    }
+
+    fn rfftOutputLen(input_len: i64) i64 {
+        const rfft_len_divisor = 2;
+        const rfft_edge_bin_count = 1;
+        return @divTrunc(input_len, rfft_len_divisor) + rfft_edge_bin_count;
+    }
+
+    test "Tensor.fft IRFFT restores RFFT last dimension" {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+        const rfft_input_len: i64 = 10;
+
+        const Local = struct {
+            pub fn _fwd(x: Tensor) Tensor {
+                const freq = x.fft(.{ .kind = .RFFT, .length = &.{rfft_input_len} });
+                std.debug.assert(freq.dim(-1) == rfftOutputLen(rfft_input_len));
+                const time = freq.fft(.{ .kind = .IRFFT, .length = &.{rfft_input_len} });
+                std.debug.assert(time.dim(-1) == x.dim(-1));
+                return time;
+            }
+        };
+
+        var exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            Local._fwd,
+            .{Tensor.init(.{rfft_input_len}, .f32)},
+            platform,
+            .{},
+        );
+        defer exe.deinit();
     }
 
     pub const Rng = struct {
