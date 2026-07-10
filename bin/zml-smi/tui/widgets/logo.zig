@@ -14,7 +14,7 @@ compact: bool = false,
 
 pub const logo_width: u16 = 28;
 pub const logo_height: u16 = @intCast(zml_logo.zml_art_blocks[0].rows.len);
-pub const compact_height: u16 = logo_height - 1;
+
 pub const image_height: u16 = 11;
 pub const compact_image_height: u16 = 7;
 
@@ -25,14 +25,11 @@ pub fn draw(self: *const Logo, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         return img_w.draw(ctx);
     }
 
-    const h: u16 = if (self.compact) compact_height else logo_height;
-    const first_row: usize = if (self.compact) 1 else 0;
-
     var sb = compose.surfaceBuilder(ctx.arena);
-    for (first_row..logo_height, 0..) |logo_row, row| {
+    for (0..logo_height, 0..) |logo_row, row| {
         try sb.add(@intCast(row), 0, try self.drawLogoRow(ctx, logo_row));
     }
-    return sb.finish(.{ .width = logo_width, .height = h }, ui.widget(self));
+    return sb.finish(.{ .width = logo_width, .height = logo_height }, ui.widget(self));
 }
 
 fn drawLogoRow(self: *const Logo, ctx: vxfw.DrawContext, row_index: usize) std.mem.Allocator.Error!vxfw.Surface {
