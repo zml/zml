@@ -3,6 +3,7 @@ const std = @import("std");
 const zml = @import("zml");
 const attention = zml.attention.attention;
 
+const eos = @import("eos.zig");
 const inference = @import("inference.zig");
 const model = @import("model.zig");
 
@@ -219,10 +220,5 @@ pub const Session = struct {
 };
 
 fn isEosToken(config: *const model.Config, token_id: u32) bool {
-    return switch (config.eos_token_id.value) {
-        .int => |eos| token_id == eos,
-        .ints => |eos_list| for (eos_list) |eos| {
-            if (token_id == eos) break true;
-        } else false,
-    };
+    return eos.contains(config.eos_token_id, token_id);
 }
