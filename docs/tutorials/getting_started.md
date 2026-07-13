@@ -115,18 +115,19 @@ bazel run -c dbg //examples/llm --run_under="lldb --" -- \
   --prompt="What is the capital of France?"
 ```
 
-You can also pass runtime environment variables through `--run_under`. For
-[XLA HLO dumps](https://openxla.org/xla/hlo_dumps), set `XLA_FLAGS` before the
-target binary. For TensorFlow C++ logging, `TF_CPP_MIN_LOG_LEVEL` controls the
-minimum log level, while `TF_CPP_MAX_VLOG_LEVEL` enables verbose C++ logs; see
-the [TensorFlow logging API](https://www.tensorflow.org/api_docs/python/tf/get_logger)
+For [XLA HLO dumps](https://openxla.org/xla/hlo_dumps), set `XLA_FLAGS` in the
+environment before `bazel run`; Bazel preserves environment variables for the
+target binary, and this keeps `--run_under` available for debuggers or tracers.
+For TensorFlow C++ logging, `TF_CPP_MIN_LOG_LEVEL` controls the minimum log
+level, while `TF_CPP_MAX_VLOG_LEVEL` enables verbose C++ logs; see the
+[TensorFlow logging API](https://www.tensorflow.org/api_docs/python/tf/get_logger)
 and the
 [`TF_CPP_MAX_VLOG_LEVEL` rename note](https://github.com/tensorflow/tensorflow/issues/54925):
 
 ```
-bazel run -c dbg //examples/llm \
-  --run_under='env XLA_FLAGS="--xla_dump_to=/tmp/zml-xla" TF_CPP_MAX_VLOG_LEVEL=2 TF_CPP_MIN_LOG_LEVEL=0' \
-  -- --model=hf://meta-llama/Llama-3.2-1B-Instruct \
+XLA_FLAGS="--xla_dump_to=/tmp/zml-xla" TF_CPP_MAX_VLOG_LEVEL=2 TF_CPP_MIN_LOG_LEVEL=0 \
+  bazel run -c dbg //examples/llm -- \
+  --model=hf://meta-llama/Llama-3.2-1B-Instruct \
   --prompt="What is the capital of France?"
 ```
 
