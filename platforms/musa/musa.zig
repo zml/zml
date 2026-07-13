@@ -19,9 +19,21 @@ fn setupMusaEnv(sandbox_path: []const u8) !void {
 }
 
 fn probeMusaRuntime(sandbox_path: []const u8) !void {
+    var driver_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const driver_path = try stdx.Io.Dir.path.bufJoinZ(&driver_path_buf, &.{ sandbox_path, "lib", "libmusa.so" });
+    _ = std.c.dlopen(driver_path, .{ .NOW = true, .GLOBAL = true, .NODELETE = true }) orelse {
+        const msg = std.c.dlerror();
+        if (msg) |err_msg| {
+            log.warn("Failed to load MUSA driver from {s}: {s}", .{ driver_path, std.mem.span(err_msg) });
+        } else {
+            log.warn("Failed to load MUSA driver from {s}", .{driver_path});
+        }
+        return error.Unavailable;
+    };
+
     var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libmusart.so.1.0" });
-    _ = std.c.dlopen(path, .{ .NOW = true }) orelse {
+    const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libmusart.so" });
+    _ = std.c.dlopen(path, .{ .NOW = true, .GLOBAL = true, .NODELETE = true }) orelse {
         const msg = std.c.dlerror();
         if (msg) |err_msg| {
             log.warn("Failed to load MUSA runtime from {s}: {s}", .{ path, std.mem.span(err_msg) });
