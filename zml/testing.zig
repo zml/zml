@@ -14,9 +14,17 @@ var _platform: ?*const Platform = null;
 pub fn env() *const Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
     if (_platform == null) {
-        _platform = Platform.auto(std.heap.c_allocator, std.testing.io, .{
-            .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.85 } } },
-        }) catch unreachable;
+        const platform = Platform.auto(
+            std.heap.c_allocator,
+            std.testing.io,
+            .{
+                .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.85 } } },
+            },
+        ) catch @panic("Pjrt not available");
+
+        // Register shardings required by flash attention.
+        _ = platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })) catch unreachable;
+        _platform = platform;
     }
 
     return _platform.?;
@@ -118,6 +126,13 @@ pub const CompareOpts = struct {
     relative_tolerance: f32 = 1e-2,
     epsilon_relative: f32 = 1e-6,
     minimum_close_fraction: f32 = 0.999,
+
+    pub const exact_match: CompareOpts = .{
+        .absolute_tolerance = 0,
+        .relative_tolerance = 0,
+        .epsilon_relative = 0,
+        .minimum_close_fraction = 1.00,
+    };
 };
 
 pub const CompareReport = struct {
