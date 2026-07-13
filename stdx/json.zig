@@ -350,10 +350,15 @@ test "strings in union can be freed" {
     const Answer = union(enum) {
         string: []const u8,
         number: u32,
+
+        const Helpers = UnionHelpers(@This());
+        pub const jsonParse = Helpers.jsonParse;
+        pub const jsonParseFromValue = Helpers.jsonParseFromValue;
+        pub const jsonStringify = Helpers.jsonStringify;
     };
     const Struct = struct {
-        answer1: Union(Answer),
-        answer2: Union(Answer),
+        answer1: Answer,
+        answer2: Answer,
     };
     const struct_json =
         \\{"answer1":"I'm 29","answer2": 1e29}
