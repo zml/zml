@@ -4,6 +4,7 @@ const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 pub const VFS = @import("io").VFS;
 
+const Exe = @import("exe.zig").Exe;
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("zml.zig").Bufferized;
 const CreateOptions = @import("platform.zig").CreateOptions;
@@ -24,7 +25,7 @@ const log = std.log.scoped(.@"zml/io");
 
 pub const TensorStore = struct {
     registry: *safetensors.TensorRegistry,
-    id_to_binding: std.AutoHashMapUnmanaged(usize, Binding),
+    id_to_sources: std.AutoHashMapUnmanaged(usize, []*safetensors.Tensor),
     allocator: std.mem.Allocator,
     arena: std.heap.ArenaAllocator,
 
@@ -32,25 +33,25 @@ pub const TensorStore = struct {
         const arena: std.heap.ArenaAllocator = .init(allocator);
         return .{
             .registry = registry,
-            .id_to_binding = .empty,
+            .id_to_sources = .empty,
             .allocator = allocator,
             .arena = arena,
         };
     }
 
     pub fn deinit(self: *TensorStore) void {
-        self.id_to_binding.deinit(self.allocator);
+        self.id_to_sources.deinit(self.allocator);
         self.arena.deinit();
     }
 
-    fn putBindingNoClobber(self: *TensorStore, id: usize, binding: Binding) std.mem.Allocator.Error!void {
-        const gop = try self.id_to_binding.getOrPut(self.allocator, id);
+    fn putSourcesNoClobber(self: *TensorStore, id: usize, sources: []*safetensors.Tensor) std.mem.Allocator.Error!void {
+        const gop = try self.id_to_sources.getOrPut(self.allocator, id);
         if (gop.found_existing) {
-            stdx.debug.panic("Id {} already has an associated binding", .{id});
+            stdx.debug.panic("Id {} already has associated sources", .{id});
         }
-        errdefer self.id_to_binding.removeByPtr(gop.key_ptr);
+        errdefer self.id_to_sources.removeByPtr(gop.key_ptr);
 
-        gop.value_ptr.* = binding;
+        gop.value_ptr.* = sources;
     }
 
     fn getPtrFromKey(self: *const TensorStore, key: []const u8) ?*safetensors.Tensor {
@@ -59,9 +60,9 @@ pub const TensorStore = struct {
     }
 
     fn getPtrFromId(self: *const TensorStore, id: usize) ?*safetensors.Tensor {
-        const binding = self.id_to_binding.get(id) orelse return null;
-        stdx.debug.assert(binding == .direct, "Expect binding to be .direct for id {}, got {}", .{ id, @as(Binding.Type, binding) });
-        return binding.direct;
+        const sources = self.id_to_sources.get(id) orelse return null;
+        stdx.debug.assert(sources.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.len });
+        return sources[0];
     }
 
     pub fn getReader(self: *const TensorStore, key: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
@@ -69,14 +70,19 @@ pub const TensorStore = struct {
     }
 
     pub fn getReaderById(self: *const TensorStore, id: usize, io: std.Io, buffer: []u8) !safetensors.TensorReader {
-        const binding = self.id_to_binding.get(id) orelse return error.NotFound;
-        stdx.debug.assert(binding == .direct, "Expect binding to be .direct for id {}, got {}", .{ id, @as(Binding.Type, binding) });
+        const sources = self.id_to_sources.get(id) orelse return error.NotFound;
+        stdx.debug.assert(sources.len == 1, "Expect tensor with id {} to have only one source, got {}", .{ id, sources.len });
 
-        return binding.direct.reader(io, buffer, .{});
+        return sources[0].reader(io, buffer, .{});
     }
 
-    pub fn getBindingById(self: *const TensorStore, id: usize) ?Binding {
-        return self.id_to_binding.get(id);
+    pub fn getSourcesById(self: *const TensorStore, id: usize) ?[]*safetensors.Tensor {
+        return self.id_to_sources.get(id);
+    }
+
+    pub fn getShape(self: *const TensorStore, key: []const u8) ?Shape {
+        const entry_ptr = self.getPtrFromKey(key) orelse return null;
+        return entry_ptr.shape;
     }
 
     pub fn view(self: *TensorStore) View {
@@ -142,7 +148,22 @@ pub const TensorStore = struct {
         }
 
         pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
-            return self.maybeCreateBinding(.{ .direct = subkey }, tagz, partitioning);
+            var buffer: [256]u8 = undefined;
+            const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
+            const source = self.store.getPtrFromKey(key) orelse return null;
+
+            const sources = self.store.arena.allocator().alloc(*safetensors.Tensor, 1) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            errdefer self.store.arena.allocator().free(sources);
+            sources[0] = source;
+
+            var shape = source.shape;
+            shape = applyTags(shape, tagz);
+            shape = applyPartitioning(shape, partitioning);
+
+            const tensor: Tensor = .fromShape(shape);
+            self.store.putSourcesNoClobber(tensor.id, sources) catch |e| std.debug.panic("Not handling {} errors", .{e});
+
+            return tensor;
         }
 
         pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
@@ -181,86 +202,32 @@ pub const TensorStore = struct {
             return shape;
         }
 
-        pub fn maybeCreateBinding(self: View, request: Binding.Request, tagz: anytype, partitioning: anytype) ?Tensor {
-            return switch (request) {
-                .direct => |direct| b: {
-                    var buffer: [256]u8 = undefined;
-                    const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", direct });
+        pub fn maybeCreateBinding(self: View, sources: []const []const u8, shape: Shape) ?Tensor {
+            const arena = self.store.arena.allocator();
 
-                    const ptr = self.store.getPtrFromKey(key) orelse return null;
+            var tensor_list = std.ArrayList(*safetensors.Tensor).initCapacity(arena, sources.len) catch |e| std.debug.panic("Not handling {} errors", .{e});
+            defer tensor_list.deinit(arena);
 
-                    var result_shape = ptr.shape;
-                    result_shape = applyTags(result_shape, tagz);
-                    result_shape = applyPartitioning(result_shape, partitioning);
+            var buffer: [256]u8 = undefined;
+            for (sources) |subkey| {
+                const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
+                const tensor = self.store.getPtrFromKey(key) orelse return null;
+                tensor_list.appendAssumeCapacity(tensor);
+            }
 
-                    const tensor: Tensor = .fromShape(result_shape);
-                    self.store.putBindingNoClobber(tensor.id, .{ .direct = ptr }) catch |e| break :b e;
+            const tensors = tensor_list.toOwnedSlice(arena) catch unreachable;
+            errdefer arena.free(tensors);
 
-                    break :b tensor;
-                },
-                .concatenate => |concatenate| b: {
-                    var buffer: [256]u8 = undefined;
-                    const arena = self.store.arena.allocator();
+            const tensor: Tensor = .fromShape(shape);
+            self.store.putSourcesNoClobber(tensor.id, tensors) catch |e| std.debug.panic("Not handling {} errors", .{e});
 
-                    const tensors = arena.alloc(*safetensors.Tensor, concatenate.keys.len) catch |e| break :b e;
-                    errdefer arena.free(tensors);
-
-                    for (concatenate.keys, 0..) |subkey, i| {
-                        const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-                        tensors[i] = self.store.getPtrFromKey(key) orelse return null;
-                    }
-
-                    var result_shape = tensors[0].shape;
-                    for (tensors[1..]) |tensor| {
-                        result_shape = result_shape.setDim(concatenate.axis, result_shape.dim(concatenate.axis) + tensor.shape.dim(concatenate.axis));
-                    }
-
-                    result_shape = applyTags(result_shape, tagz);
-                    result_shape = applyPartitioning(result_shape, partitioning);
-
-                    const tensor: Tensor = .fromShape(result_shape);
-
-                    self.store.putBindingNoClobber(tensor.id, .{ .concatenate = .{ .tensors = tensors, .axis = concatenate.axis } }) catch |e| break :b e;
-
-                    break :b tensor;
-                },
-                .custom => |custom| b: {
-                    var buffer: [256]u8 = undefined;
-                    const arena = self.store.arena.allocator();
-
-                    const tensors = arena.alloc(*safetensors.Tensor, custom.keys.len) catch |e| break :b e;
-                    errdefer arena.free(tensors);
-
-                    for (custom.keys, 0..) |subkey, i| {
-                        const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-                        tensors[i] = self.store.getPtrFromKey(key) orelse return null;
-                    }
-
-                    const shapes = arena.alloc(Shape, custom.keys.len) catch |e| break :b e;
-                    errdefer arena.free(shapes);
-                    for (tensors, shapes) |t, *s| {
-                        s.* = t.shape;
-                    }
-
-                    var result_shape = custom.computeShapeCallback(shapes);
-
-                    result_shape = applyTags(result_shape, tagz);
-                    result_shape = applyPartitioning(result_shape, partitioning);
-
-                    const tensor: Tensor = .fromShape(result_shape);
-
-                    self.store.putBindingNoClobber(tensor.id, .{ .custom = .{ .tensors = tensors } }) catch |e| break :b e;
-
-                    break :b tensor;
-                },
-            } catch |e| std.debug.panic("Not handling {} error", .{e});
+            return tensor;
         }
 
         pub fn getShape(self: View, subkey: []const u8) ?Shape {
             var buffer: [256]u8 = undefined;
             const key = makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
-            const entry_ptr = self.store.getPtrFromKey(key) orelse return null;
-            return entry_ptr.shape;
+            return self.store.getShape(key);
         }
 
         pub fn getShapeOpts(self: View, subkey: []const u8, opts: struct { no_prefix: bool = false }) ?Shape {
@@ -270,8 +237,7 @@ pub const TensorStore = struct {
             else b: {
                 break :b makeKey(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey });
             };
-            const entry_ptr = self.store.getPtrFromKey(key) orelse return null;
-            return entry_ptr.shape;
+            return self.store.getShape(key);
         }
 
         pub fn getReader(self: View, subkey: []const u8, io: std.Io, buffer: []u8) !safetensors.TensorReader {
@@ -299,39 +265,6 @@ pub const TensorStore = struct {
             return key;
         }
     };
-};
-
-/// Binding represents a mapping from a tensor to the sources that are required to construct it from the store.
-pub const Binding = union(Binding.Type) {
-    pub const Type = enum {
-        /// Direct mapping to a tensor in the store.
-        direct,
-        /// Concatenation of multiple tensors along a specified axis.
-        concatenate,
-        /// Custom mapping that allows for arbitrary tensor construction logic.
-        custom,
-    };
-
-    pub const Request = union(Type) {
-        direct: []const u8,
-        concatenate: struct {
-            keys: []const []const u8,
-            axis: i64,
-        },
-        custom: struct {
-            keys: []const []const u8,
-            computeShapeCallback: *const fn (shapes: []const Shape) Shape,
-        },
-    };
-
-    direct: *const safetensors.Tensor,
-    concatenate: struct {
-        tensors: []const *safetensors.Tensor,
-        axis: i64,
-    },
-    custom: struct {
-        tensors: []const *safetensors.Tensor,
-    },
 };
 
 pub const Loader = struct {
@@ -449,119 +382,135 @@ pub const Loader = struct {
     }
 
     fn defaultCallbackInner(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) !void {
-        const binding = store.getBindingById(tensor.id) orelse {
-            std.log.warn("Failed to get binding for tensor with id: {}", .{tensor.id});
+        const sources = store.getSourcesById(tensor.id) orelse {
+            std.log.warn("Failed to get sources for tensor with id: {}", .{tensor.id});
             return;
         };
 
-        switch (binding) {
-            .direct => |direct| {
-                var reader = try direct.reader(io, &.{}, .{});
-                defer reader.deinit();
-
-                const shape = tensor.shape();
-                const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
-                    log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
-                    break :blk self.platform.replicated_sharding;
-                };
-
-                var writer = try MemoryWriter.init(
-                    self.allocator,
-                    io,
-                    self.platform,
-                    self.pinned_buffer_pools,
-                    self.dma_allocators,
-                    self.dma_chunk_size,
-                    shape,
-                    sharding,
-                    buffer,
-                );
-                defer writer.deinit(self.allocator);
-
-                const scale = 1024;
-
-                if (opts.progress) |progress| {
-                    var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
-                    defer node.end();
-                    writer.setProgress(&node);
-                    defer writer.setProgress(null);
-                    var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
-                    const total = try reader.interface.streamRemaining(&progress_writer.interface);
-                    try progress_writer.interface.flush();
-                    _ = self.bytes_loaded.fetchAdd(total, .monotonic);
-                } else {
-                    const total = try reader.interface.streamRemaining(writer.interface());
-                    try writer.interface().flush();
-                    _ = self.bytes_loaded.fetchAdd(total, .monotonic);
-                }
-            },
-            .concatenate => |concatenate| {
-                if (concatenate.axis < 0) @panic("Negative axis are not supported yet");
-
-                if (concatenate.axis == 0) {
-                    const shape = tensor.shape();
-                    const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
-                        log.debug("No sharding strategy found for tensor with shape {f}, using replicated sharding", .{shape});
-                        break :blk self.platform.replicated_sharding;
-                    };
-
-                    var writer = try MemoryWriter.init(
-                        self.allocator,
-                        io,
-                        self.platform,
-                        self.pinned_buffer_pools,
-                        self.dma_allocators,
-                        self.dma_chunk_size,
-                        shape,
-                        sharding,
-                        buffer,
-                    );
-                    defer writer.deinit(self.allocator);
-
-                    const scale = 1024;
-
-                    const Formatter = struct {
-                        tensors: []const *safetensors.Tensor,
-                        pub fn format(
-                            self_: @This(),
-                            writer_: *std.Io.Writer,
-                        ) std.Io.Writer.Error!void {
-                            for (self_.tensors, 0..) |tensor_, i| {
-                                if (i > 0) try writer_.writeAll(", ");
-                                try writer_.writeAll(tensor_.name);
-                            }
-                        }
-                    };
-
-                    if (opts.progress) |progress| {
-                        var node = progress.startFmt(tensor.shape().byteSize() / scale, "Concat {f}", .{Formatter{ .tensors = concatenate.tensors }});
-                        defer node.end();
-                        writer.setProgress(&node);
-                        defer writer.setProgress(null);
-                        var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
-
-                        var total: usize = 0;
-                        for (concatenate.tensors) |t| {
-                            var reader = try t.reader(io, &.{}, .{});
-                            defer reader.deinit();
-                            total += try reader.interface.streamRemaining(&progress_writer.interface);
-                        }
-                        try progress_writer.interface.flush();
-                        _ = self.bytes_loaded.fetchAdd(total, .monotonic);
-                    } else {
-                        var total: usize = 0;
-                        for (concatenate.tensors) |t| {
-                            var reader = try t.reader(io, &.{}, .{});
-                            defer reader.deinit();
-                            total += try reader.interface.streamRemaining(writer.interface());
-                        }
-                        try writer.interface().flush();
-                        _ = self.bytes_loaded.fetchAdd(total, .monotonic);
-                    }
-                } else @panic("Non-major concatenation is not supported yet");
-            },
-            .custom => @panic("Custom binding can't be loaded automatically"),
+        if (sources.len != 1) {
+            std.debug.panic("Expected loaded tensor to have only 1 source, got {}", .{sources.len});
         }
+
+        var reader = try sources[0].reader(io, &.{}, .{});
+        defer reader.deinit();
+
+        const shape = tensor.shape();
+        const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
+            log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
+            break :blk self.platform.replicated_sharding;
+        };
+
+        var writer = try MemoryWriter.init(
+            self.allocator,
+            io,
+            self.platform,
+            self.pinned_buffer_pools,
+            self.dma_allocators,
+            self.dma_chunk_size,
+            shape,
+            sharding,
+            buffer,
+        );
+        defer writer.deinit(self.allocator);
+
+        const scale = 1024;
+
+        if (opts.progress) |progress| {
+            var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
+            defer node.end();
+            writer.setProgress(&node);
+            defer writer.setProgress(null);
+            var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
+            const total = try reader.interface.streamRemaining(&progress_writer.interface);
+            try progress_writer.interface.flush();
+            _ = self.bytes_loaded.fetchAdd(total, .monotonic);
+        } else {
+            const total = try reader.interface.streamRemaining(writer.interface());
+            try writer.interface().flush();
+            _ = self.bytes_loaded.fetchAdd(total, .monotonic);
+        }
+    }
+
+    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, buffer: *Buffer, loaded: *bool, shardings: []const Sharding, opts: AutoOpts) void {
+        self.loadSingleInner(io, source, buffer, shardings, opts) catch |e| {
+            log.err("Failed to load tensor {s}: {}", .{ source.name, e });
+            loaded.* = false;
+        };
+        loaded.* = true;
+    }
+
+    fn loadSingleInner(self: *Loader, io: std.Io, source: *safetensors.Tensor, buffer: *Buffer, shardings: []const Sharding, opts: AutoOpts) !void {
+        var reader = try source.reader(io, &.{}, .{});
+        defer reader.deinit();
+
+        const shape = reader.tensor.shape;
+        const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
+            log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
+            break :blk self.platform.replicated_sharding;
+        };
+
+        var writer = try MemoryWriter.init(
+            self.allocator,
+            io,
+            self.platform,
+            self.pinned_buffer_pools,
+            self.dma_allocators,
+            self.dma_chunk_size,
+            shape,
+            sharding,
+            buffer,
+        );
+        defer writer.deinit(self.allocator);
+
+        const scale = 1024;
+
+        if (opts.progress) |progress| {
+            var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
+            defer node.end();
+            writer.setProgress(&node);
+            defer writer.setProgress(null);
+            var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
+            const total = try reader.interface.streamRemaining(&progress_writer.interface);
+            try progress_writer.interface.flush();
+            _ = self.bytes_loaded.fetchAdd(total, .monotonic);
+        } else {
+            const total = try reader.interface.streamRemaining(writer.interface());
+            try writer.interface().flush();
+            _ = self.bytes_loaded.fetchAdd(total, .monotonic);
+        }
+    }
+
+    pub fn loadExecute(
+        self: *Loader,
+        arena: std.mem.Allocator,
+        io: std.Io,
+        tensor: Tensor,
+        buffer: *Buffer,
+        store: *const TensorStore,
+        shardings: []const Sharding,
+        exe: *const Exe,
+    ) !void {
+        const sources = store.getSourcesById(tensor.id) orelse return error.NotFound;
+        const buffers = try arena.alloc(Buffer, sources.len);
+        const loaded = try arena.alloc(bool, sources.len);
+        @memset(loaded, false);
+        defer for (buffers, loaded) |*b, l| if (l) b.deinit();
+
+        for (sources, 0..) |source, i| {
+            self.loadSingle(io, source, &buffers[i], &loaded[i], shardings, .{});
+        }
+
+        if (std.mem.findScalar(bool, loaded, false)) |_| {
+            return error.LoadFailed;
+        }
+
+        var args = try exe.args(arena);
+        var results = try exe.results(arena);
+
+        args.set(.{buffers});
+        exe.call(args, &results);
+
+        buffer.* = results.get(Buffer);
     }
 };
 
