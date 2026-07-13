@@ -1,5 +1,12 @@
-load("@rules_zig//zig/zls:zls_completion.bzl", "zls_completion")
+load("@@apple_support+//xcode:xcode_config.bzl", "xcode_config")
 load("@rules_zig//zig/translate-c:toolchain.bzl", "translate_c_toolchain")
+load("@rules_zig//zig/zls:zls_completion.bzl", "zls_completion")
+
+# Dummy xcode_config so we don't need to build xcode_locator in the repository rule.
+xcode_config(
+    name = "disable_xcode",
+    visibility = ["//visibility:public"],
+)
 
 alias(
     name = "translate-c",
