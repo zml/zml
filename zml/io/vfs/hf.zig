@@ -7,7 +7,7 @@ const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
 
-const default_xet_workers: usize = 4;
+const default_xet_workers: usize = 128;
 const default_xet_queue_capacity_multiplier: usize = 4;
 
 pub const API = struct {
@@ -772,7 +772,7 @@ pub const HF = struct {
         const start = std.Io.Timestamp.now(self.base.inner, .awake);
         defer {
             const duration = start.untilNow(self.base.inner, .awake);
-            log.warn("Completed read for file {s} at offset {d} with length {d} in {f}", .{ handle.uri, offset, data[0].len, duration });
+            log.debug("Completed read for file {s} at offset {d} with length {d} in {f}", .{ handle.uri, offset, data[0].len, duration });
         }
 
         if (handle.xet_file_id) |fid| {
