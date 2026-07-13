@@ -58,7 +58,7 @@ pub fn Union(comptime T: type) type {
                     else => switch (@typeInfo(field.type)) {
                         .int => if (source == .integer) return .{ .value = @unionInit(T, field.name, @intCast(source.integer)) },
                         .float => if (source == .float) return .{ .value = @unionInit(T, field.name, @floatCast(source.float)) },
-                        .@"struct" => if (source == .object) return .{ .value = @unionInit(T, field.name, try std.json.innerParseFromValue(field.type, allocator, source.object, options)) },
+                        .@"struct" => if (source == .object) return .{ .value = @unionInit(T, field.name, try std.json.innerParseFromValue(field.type, allocator, source, options)) },
                         inline else => switch (source) {
                             .number_string, .array => return .{ .value = @unionInit(T, field.name, try std.json.innerParseFromValue(field.type, allocator, source, options)) },
                             else => {},
@@ -70,6 +70,47 @@ pub fn Union(comptime T: type) type {
         }
 
         pub fn jsonStringify(self: Self, jw: anytype) !void {
+            return switch (self.value) {
+                inline else => |v| jw.write(v),
+            };
+        }
+    };
+}
+
+pub fn UnionHelpers(comptime T: type) type {
+    return struct {
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!T {
+            return jsonParseFromValue(
+                allocator,
+                try std.json.innerParse(std.json.Value, allocator, source, options),
+                options,
+            );
+        }
+
+        pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) ParseFromValueError!T {
+            inline for (std.meta.fields(T)) |field| {
+                switch (field.type) {
+                    bool => if (source == .bool) return @unionInit(T, field.name, source.bool),
+                    []const u8 => switch (source) {
+                        .string => |v| return @unionInit(T, field.name, v),
+                        .number_string => |v| return @unionInit(T, field.name, v),
+                        else => {},
+                    },
+                    else => switch (@typeInfo(field.type)) {
+                        .int => if (source == .integer) return @unionInit(T, field.name, @intCast(source.integer)),
+                        .float => if (source == .float) return @unionInit(T, field.name, @floatCast(source.float)),
+                        .@"struct" => if (source == .object) return @unionInit(T, field.name, try std.json.innerParseFromValue(field.type, allocator, source, options)),
+                        inline else => switch (source) {
+                            .number_string, .array => return @unionInit(T, field.name, try std.json.innerParseFromValue(field.type, allocator, source, options)),
+                            else => {},
+                        },
+                    },
+                }
+            }
+            return error.UnknownField;
+        }
+
+        pub fn jsonStringify(self: T, jw: anytype) !void {
             return switch (self.value) {
                 inline else => |v| jw.write(v),
             };
@@ -145,6 +186,66 @@ pub fn TaggedUnion(comptime T: type, comptime tag_name: [:0]const u8) type {
         pub fn jsonStringify(self: Self, jw: anytype) !void {
             try jw.beginObject();
             switch (self.value) {
+                inline else => |v, tag| {
+                    const field_name = @tagName(tag);
+                    try jw.objectField(tag_name);
+                    try jw.write(field_name);
+                    switch (@typeInfo(@TypeOf(v))) {
+                        .@"struct" => inline for (std.meta.fields(@TypeOf(v))) |field| {
+                            try jw.objectField(field.name);
+                            try jw.write(@field(v, field.name));
+                        },
+                        else => unreachable, // Would have failed with comptime check.
+                    }
+                },
+            }
+            try jw.endObject();
+        }
+    };
+}
+
+pub fn TaggedUnionHelpers(comptime T: type, comptime tag_name: [:0]const u8) type {
+    comptime {
+        if (@typeInfo(T) != .@"union") {
+            @compileError("TaggedUnion expects a union type, found " ++ @typeName(T));
+        }
+        for (std.meta.fields(T)) |field| {
+            if (@typeInfo(field.type) != .@"struct") {
+                @compileError("TaggedUnion member '" ++ field.name ++ "' must be a struct, found " ++ @typeName(field.type));
+            }
+        }
+    }
+
+    return struct {
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!T {
+            return jsonParseFromValue(
+                allocator,
+                try std.json.innerParse(std.json.Value, allocator, source, options),
+                options,
+            );
+        }
+
+        pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) ParseFromValueError!T {
+            errdefer std.log.warn("failed to parse: {} as {s}", .{ source, @typeName(T) });
+            if (source != .object) return error.UnexpectedToken;
+            var o = source.object;
+            const tag = (o.fetchSwapRemove(tag_name) orelse return error.MissingField).value;
+            if (tag != .string) return error.LengthMismatch;
+            inline for (std.meta.fields(T)) |field| {
+                if (std.mem.eql(u8, field.name, tag.string)) {
+                    const inner: field.type = std.json.parseFromValueLeaky(field.type, allocator, .{ .object = o }, options) catch |err| {
+                        std.log.warn("failed to interpret {s} as a {s}: {}", .{ tag.string, @typeName(field.type), err });
+                        return err;
+                    };
+                    return @unionInit(T, field.name, inner);
+                }
+            }
+            return error.InvalidEnumTag;
+        }
+
+        pub fn jsonStringify(self: T, jw: anytype) !void {
+            try jw.beginObject();
+            switch (self) {
                 inline else => |v, tag| {
                     const field_name = @tagName(tag);
                     try jw.objectField(tag_name);
