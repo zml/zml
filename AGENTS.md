@@ -18,6 +18,44 @@ ZML is a Zig project built with Bazel. Core library code lives in `zml/`, with I
 
 Append platform flags when relevant, for example `--@zml//platforms:cuda=true`, `--@zml//platforms:rocm=true`, `--@zml//platforms:tpu=true`, or `--@zml//platforms:cpu=false`.
 
+## Zabel Acceptance Target
+
+Use `//examples/llm` as the Zabel acceptance build target. Use
+`deps(//examples/llm)` as the exact query, cquery, and aquery expression; do
+not compare only `//examples/llm` for those commands.
+
+Build the pinned `@bazel//src:bazel` executable from `/Users/dzbarsky/zabel`
+and run the Bazel oracle commands from this repository:
+
+```bash
+<pinned-bazel> --output_base=<zml-bazel-output-base> query \
+  'deps(//examples/llm)'
+
+<pinned-bazel> --output_base=<zml-bazel-output-base> cquery \
+  --config=remote \
+  --platforms=//platforms:linux_amd64 \
+  --@zml//platforms:cuda=true \
+  'deps(//examples/llm)'
+
+<pinned-bazel> --output_base=<zml-bazel-output-base> aquery \
+  --config=remote \
+  --platforms=//platforms:linux_amd64 \
+  --@zml//platforms:cuda=true \
+  --output=text \
+  'deps(//examples/llm)'
+
+<pinned-bazel> --output_base=<zml-bazel-output-base> build \
+  --config=remote \
+  --platforms=//platforms:linux_amd64 \
+  --@zml//platforms:cuda=true \
+  //examples/llm
+```
+
+Use the same expression and target configuration for Zabel comparisons.
+Bazel `query` rejects `--platforms` and `--@zml//platforms:cuda=true`, so do
+not pass either configuration option to Bazel or Zabel `query`. Let the pinned
+Bazel update `MODULE.bazel.lock` before comparing Zabel.
+
 ## Coding Style & Naming Conventions
 
 Follow the Zig style guide and format Zig code with `zig fmt`; CI checks `zig fmt --check` outside `third_party/`. Use four-space indentation. Prefer `const x: Foo = .{ .bar = 1 };`, `pub fn method(self: Foo)`, and module imports such as `const foo = @import("foo.zig"); foo.bar()`. Use `PascalCase` for types and `lowerCamelCase` for functions, fields, and locals. Add comments only for non-obvious invariants, ownership, tensor shape semantics, or platform behavior.
