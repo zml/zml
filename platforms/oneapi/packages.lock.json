@@ -14,13 +14,13 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-mpi-2021.18_2021.18.0-745_amd64",
+			"key": "intel-oneapi-mpi-2021.18_2021.18.1-9_amd64",
 			"name": "intel-oneapi-mpi-2021.18",
-			"sha256": "0eed61a43588fcaec64c7b09f6bd809c5227008e501d0e1231488fbd21eac51b",
+			"sha256": "f6f76f39755329bbac890deeb72fb105df064dc5dcb67cde1396e4d6ef0f6706",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mpi-2021.18-2021.18.0-745_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mpi-2021.18-2021.18.1-9_amd64.deb"
 			],
-			"version": "2021.18.0-745"
+			"version": "2021.18.1-9"
 		},
 		{
 			"arch": "amd64",
@@ -139,7 +139,7 @@
 			"name": "libnl-3-200",
 			"sha256": "15b3f61db753dc3db6f62f4259f8b822299343e500886776486612a13a2ed247",
 			"urls": [
-				"https://archive.ubuntu.com/ubuntu/pool/main/libn/libnl3/libnl-3-200_3.7.0-0.3build1.1_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20260715T000000Z/pool/main/libn/libnl3/libnl-3-200_3.7.0-0.3build1.1_amd64.deb"
 			],
 			"version": "3.7.0-0.3build1.1"
 		},
@@ -150,7 +150,7 @@
 			"name": "libnl-genl-3-200",
 			"sha256": "9ca0cb63f295d00e6346b9924278c07cfc61311cbd288b805b06e25aa08c9fd8",
 			"urls": [
-				"https://archive.ubuntu.com/ubuntu/pool/main/libn/libnl3/libnl-genl-3-200_3.7.0-0.3build1.1_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20260715T000000Z/pool/main/libn/libnl3/libnl-genl-3-200_3.7.0-0.3build1.1_amd64.deb"
 			],
 			"version": "3.7.0-0.3build1.1"
 		},
@@ -161,7 +161,7 @@
 			"name": "libnl-route-3-200",
 			"sha256": "c9dbd29cb7fdcf1a0587726cbc5432a7d3e81242108dfcfa2dd6716c44c74d4d",
 			"urls": [
-				"https://archive.ubuntu.com/ubuntu/pool/main/libn/libnl3/libnl-route-3-200_3.7.0-0.3build1.1_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20260715T000000Z/pool/main/libn/libnl3/libnl-route-3-200_3.7.0-0.3build1.1_amd64.deb"
 			],
 			"version": "3.7.0-0.3build1.1"
 		},
@@ -172,7 +172,7 @@
 			"name": "libnuma1",
 			"sha256": "f333b8edf6f0b705c19f2a67008194df66f7aab0fa2350dc98510569a033ff29",
 			"urls": [
-				"https://archive.ubuntu.com/ubuntu/pool/main/n/numactl/libnuma1_2.0.18-1ubuntu0.24.04.1_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20260715T000000Z/pool/main/n/numactl/libnuma1_2.0.18-1ubuntu0.24.04.1_amd64.deb"
 			],
 			"version": "2.0.18-1ubuntu0.24.04.1"
 		},
@@ -183,7 +183,7 @@
 			"name": "libigdgmm12",
 			"sha256": "63fe9e124c3394193226c6cb8398dcabdc9306b5a10f63668118f7c799f5d792",
 			"urls": [
-				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-gmmlib/libigdgmm12_22.10.0-1~24.04~ppa1_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/i/intel-gmmlib/libigdgmm12_22.10.0-1~24.04~ppa1_amd64.deb"
 			],
 			"version": "22.10.0-1~24.04~ppa1"
 		},
@@ -194,7 +194,7 @@
 			"name": "libigc2",
 			"sha256": "c11dd6e083d1010c50bbc33cabf5b614e64df53b61d349955e97efdababb85bf",
 			"urls": [
-				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-graphics-compiler/libigc2_2.36.3-2~24.04_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/i/intel-graphics-compiler/libigc2_2.36.3-2~24.04_amd64.deb"
 			],
 			"version": "2.36.3-2~24.04"
 		},
@@ -205,7 +205,7 @@
 			"name": "libigdfcl2",
 			"sha256": "019c4d2802b03d5e1ddad888543e6b7b6003a46a14ccf2e16a2320e8923ad007",
 			"urls": [
-				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-graphics-compiler/libigdfcl2_2.36.3-2~24.04_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/i/intel-graphics-compiler/libigdfcl2_2.36.3-2~24.04_amd64.deb"
 			],
 			"version": "2.36.3-2~24.04"
 		},
@@ -216,7 +216,7 @@
 			"name": "libze-intel-gpu1",
 			"sha256": "5d0903aae7ac4f94f43ae7d282a394bc988a0da12f813d92533dea1650eb91ff",
 			"urls": [
-				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-compute-runtime/libze-intel-gpu1_26.22.38646.6-1~24.04~ppa1_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/i/intel-compute-runtime/libze-intel-gpu1_26.22.38646.6-1~24.04~ppa1_amd64.deb"
 			],
 			"version": "26.22.38646.6-1~24.04~ppa1"
 		},
@@ -227,7 +227,7 @@
 			"name": "libze1",
 			"sha256": "ca4aec5982d46f92875659e74e459372f24c9d8add2810556c1c7e71531e1ec0",
 			"urls": [
-				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/l/level-zero-loader/libze1_1.28.6-1~24.04~ppa1_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/l/level-zero-loader/libze1_1.28.6-1~24.04~ppa1_amd64.deb"
 			],
 			"version": "1.28.6-1~24.04~ppa1"
 		},
@@ -238,7 +238,7 @@
 			"name": "zlib1g",
 			"sha256": "7074b6a2f6367a10d280c00a1cb02e74277709180bab4f2491a2f355ab2d6c20",
 			"urls": [
-				"https://archive.ubuntu.com/ubuntu/pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.1_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20260715T000000Z/pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.1_amd64.deb"
 			],
 			"version": "1:1.3.dfsg-3.1ubuntu2.1"
 		}
