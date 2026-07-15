@@ -1,11 +1,28 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
+const c = @import("c");
+const zffi = @import("ffi");
 
 const parallel_read = @import("parallel_read.zig");
 const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
+
+const TraceSpan = struct {
+    inner: ?*c.zml_traceme = null,
+
+    fn start(name: []const u8) TraceSpan {
+        return .{ .inner = c.zml_traceme_start(zffi.ZigSlice.from(name)) };
+    }
+
+    fn end(self: *TraceSpan) void {
+        if (self.inner) |inner| {
+            c.zml_traceme_stop(inner);
+            self.inner = null;
+        }
+    }
+};
 
 const ParallelRead = struct {
     const Pool = parallel_read.Pool(Job);
@@ -25,6 +42,15 @@ const ParallelRead = struct {
         batch: *Batch,
 
         pub fn perform(job: Job, client: *std.http.Client) anyerror!parallel_read.Status {
+            var span_name_buf: [128]u8 = undefined;
+            const span_name = std.fmt.bufPrint(
+                &span_name_buf,
+                "zml.io.hf.chunk#off={d},len={d}#",
+                .{ job.file_offset, job.chunk_len },
+            ) catch "zml.io.hf.chunk";
+            var span = TraceSpan.start(span_name);
+            defer span.end();
+
             var range_buf: [64]u8 = undefined;
             const range_header = std.fmt.bufPrint(
                 &range_buf,
@@ -204,8 +230,8 @@ pub const HF = struct {
         read_pool: parallel_read.InitOpts = .{
             // Chunk size needs to be big enough to avoid hitting the rate limits of HF.
             .chunk_size = 32 << 20,
-            .num_workers = 32,
-            .queue_capacity = 128,
+            .num_workers = 2,
+            .queue_capacity = 4,
             .max_retries = 5,
             .retry_initial_delay = .fromMilliseconds(500),
             .retry_max_delay = .fromSeconds(30),
@@ -883,6 +909,15 @@ pub const HF = struct {
         if (read_size == 0) return 0;
 
         const job_count = std.math.divCeil(usize, read_size, self.read_pool.chunk_size) catch unreachable;
+
+        var span_name_buf: [160]u8 = undefined;
+        const span_name = std.fmt.bufPrint(
+            &span_name_buf,
+            "zml.io.hf.performRead#read_size={d},job_count={d},workers={d},chunk_size={d}#",
+            .{ read_size, job_count, self.read_pool.num_workers, self.read_pool.chunk_size },
+        ) catch "zml.io.hf.performRead";
+        var span = TraceSpan.start(span_name);
+        defer span.end();
 
         const jobs = try self.allocator.alloc(ParallelRead.Job, job_count);
         defer self.allocator.free(jobs);

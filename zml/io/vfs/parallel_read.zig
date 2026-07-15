@@ -61,6 +61,7 @@ pub fn Pool(comptime Job: type) type {
         queue_buf: []Job,
         client: *std.http.Client,
         prng: std.Random.DefaultPrng,
+        num_workers: usize,
         chunk_size: usize,
         max_retries: usize,
         retry_initial_delay: std.Io.Duration,
@@ -79,6 +80,7 @@ pub fn Pool(comptime Job: type) type {
 
             self.* = .{
                 .client = client,
+                .num_workers = opts.num_workers,
                 .chunk_size = opts.chunk_size,
                 .max_retries = opts.max_retries,
                 .retry_initial_delay = opts.retry_initial_delay,

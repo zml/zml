@@ -1150,6 +1150,15 @@ pub fn load(
                     defer reader.deinit();
 
                     const shape = reader.tensor.shape;
+                    var tensor_span_name_buf: [96]u8 = undefined;
+                    const tensor_span_name = std.fmt.bufPrint(
+                        &tensor_span_name_buf,
+                        "zml.io.load.tensor#tensor_id={d},bytes={d}#",
+                        .{ tensor_.id, shape.byteSize() },
+                    ) catch "zml.io.load.tensor";
+                    var tensor_span = tracer.Span.start(tensor_span_name);
+                    defer tensor_span.end();
+
                     const sharding = Sharding.pickSharding(ctx_.shardings, shape, .explicit_axis_binding) orelse blk: {
                         log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
                         break :blk ctx_.platform.replicated_sharding;
