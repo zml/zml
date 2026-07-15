@@ -199,6 +199,45 @@ pub fn main(init: std.process.Init) !void {
             progress.increaseEstimatedTotalItems(load_count);
             defer progress.end();
 
+            var profiler_options: zml.Platform.ProfilerOptions = .defaults;
+            profiler_options.repository_path = ".";
+            profiler_options.session_id = "examples-io-load";
+
+            var profiler = try platform.profiler(allocator, io, profiler_options);
+            defer profiler.deinit();
+
+            try profiler.start();
+            defer {
+                const maybe_profile: ?zml.Platform.Profiler.Profile = profiler.stop() catch |err| blk: {
+                    log.warn("Failed to stop profiler: {}", .{err});
+                    break :blk null;
+                };
+
+                if (maybe_profile) |profile| {
+                    if (std.Io.Dir.openFile(.cwd(), io, profile.protobuf_path, .{ .mode = .read_only })) |source| {
+                        defer source.close(io);
+
+                        if (std.Io.Dir.createFile(.cwd(), io, "host.xplane.pb", .{})) |destination| {
+                            defer destination.close(io);
+
+                            var reader: std.Io.File.Reader = .initStreaming(source, io, &.{});
+                            var writer = destination.writerStreaming(io, &.{});
+                            _ = reader.interface.streamRemaining(&writer.interface) catch |err| blk: {
+                                log.warn("Failed to copy protobuf to host.xplane.pb: {}", .{err});
+                                break :blk 0;
+                            };
+                            writer.interface.flush() catch |err| {
+                                log.warn("Failed to flush host.xplane.pb: {}", .{err});
+                            };
+                        } else |err| {
+                            log.warn("Failed to create host.xplane.pb: {}", .{err});
+                        }
+                    } else |err| {
+                        log.warn("Failed to open profile protobuf {s}: {}", .{ profile.protobuf_path, err });
+                    }
+                }
+            }
+
             const now: std.Io.Timestamp = .now(io, .awake);
             var total_bytes: usize = 0;
             defer {
@@ -211,7 +250,7 @@ pub fn main(init: std.process.Init) !void {
                 .shardings = &.{sharded_sharding},
                 .parallelism = 8,
                 .dma_chunks = 16,
-                .dma_chunk_size = 64 * zml.MiB,
+                .dma_chunk_size = 256 * zml.MiB,
                 .progress = &progress,
                 .total_bytes = &total_bytes,
             });

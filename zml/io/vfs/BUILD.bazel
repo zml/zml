@@ -17,6 +17,8 @@ zig_library(
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
+        "//ffi:zig",
         "//stdx",
+        "//zml:profiling_traceme_lib",
     ],
 )

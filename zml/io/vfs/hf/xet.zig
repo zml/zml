@@ -1,8 +1,25 @@
 const std = @import("std");
+const c = @import("c");
+const zffi = @import("ffi");
 const lz4 = @import("lz4.zig");
 const bg4 = @import("bg4.zig");
 
 const log = std.log.scoped(.@"zml/io/vfs/xet");
+
+const TraceSpan = struct {
+    inner: ?*c.zml_traceme = null,
+
+    fn start(name: []const u8) TraceSpan {
+        return .{ .inner = c.zml_traceme_start(zffi.ZigSlice.from(name)) };
+    }
+
+    fn end(self: *TraceSpan) void {
+        if (self.inner) |inner| {
+            c.zml_traceme_stop(inner);
+            self.inner = null;
+        }
+    }
+};
 
 pub const Repo = struct {
     repo: []const u8,
@@ -544,6 +561,15 @@ fn runTask(
     body: []u8,
     scratch: []u8,
 ) !void {
+    var span_name_buf: [192]u8 = undefined;
+    const span_name = std.fmt.bufPrint(
+        &span_name_buf,
+        "zml.io.hf.chunk#start={d},end={d},bytes={d},plans={d}#",
+        .{ task.url_range_start, task.url_range_end, task.byte_len, task.term_plans.items.len },
+    ) catch "zml.io.hf.chunk";
+    var span = TraceSpan.start(span_name);
+    defer span.end();
+
     try httpRangeGetIntoSlice(io, client, task.url, task.url_range_start, task.url_range_end, body);
 
     var it: ChunkIterator = .{ .data = body };

@@ -1,11 +1,28 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
+const c = @import("c");
+const zffi = @import("ffi");
 const xet = @import("hf/xet.zig");
 
 const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
+
+const TraceSpan = struct {
+    inner: ?*c.zml_traceme = null,
+
+    fn start(name: []const u8) TraceSpan {
+        return .{ .inner = c.zml_traceme_start(zffi.ZigSlice.from(name)) };
+    }
+
+    fn end(self: *TraceSpan) void {
+        if (self.inner) |inner| {
+            c.zml_traceme_stop(inner);
+            self.inner = null;
+        }
+    }
+};
 
 const default_xet_workers: usize = 128;
 const default_xet_queue_capacity_multiplier: usize = 4;
@@ -768,6 +785,18 @@ pub const HF = struct {
 
     fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
         if (offset >= handle.size) return 0;
+
+        var requested: usize = 0;
+        for (data) |buf| requested += buf.len;
+
+        var span_name_buf: [192]u8 = undefined;
+        const span_name = std.fmt.bufPrint(
+            &span_name_buf,
+            "zml.io.hf.performRead#off={d},requested={d},backend={s},workers={d}#",
+            .{ offset, requested, if (handle.xet_file_id != null) "xet" else "lfs", self.fetch_pool.workers.len },
+        ) catch "zml.io.hf.performRead";
+        var span = TraceSpan.start(span_name);
+        defer span.end();
 
         const start = std.Io.Timestamp.now(self.base.inner, .awake);
         defer {

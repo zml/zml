@@ -399,6 +399,8 @@ const DirectShardWriter = struct {
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape) !DirectShardWriter {
         const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
+
+        var create_tm_span = tracer.Span.start("zml.io.load.tensor.writer_init.create_transfer_manager");
         const transfer_manager = try memory.platform.pjrt_client.createBuffersForAsyncHostToDevice(
             memory.platform.pjrt_api,
             .{
@@ -406,10 +408,15 @@ const DirectShardWriter = struct {
                 .memory = memory.pjrt_memory,
             },
         );
+        create_tm_span.end();
 
+        var retrieve_buf_span = tracer.Span.start("zml.io.load.tensor.writer_init.retrieve_buffer");
         const pjrt_buffer = transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0) catch unreachable;
+        retrieve_buf_span.end();
 
+        var pool_get_span = tracer.Span.start("zml.io.load.tensor.writer_init.pool_get_buffer");
         const buf = try pool.get(allocator, io);
+        pool_get_span.end();
 
         return .{
             .allocator = allocator,
@@ -1150,11 +1157,24 @@ pub fn load(
                     defer reader.deinit();
 
                     const shape = reader.tensor.shape;
+                    var tensor_span_name_buf: [96]u8 = undefined;
+                    const tensor_span_name = std.fmt.bufPrint(
+                        &tensor_span_name_buf,
+                        "zml.io.load.tensor#tensor_id={d},bytes={d}#",
+                        .{ tensor_.id, shape.byteSize() },
+                    ) catch "zml.io.load.tensor";
+                    var tensor_span = tracer.Span.start(tensor_span_name);
+                    defer tensor_span.end();
+
+                    var setup_span = tracer.Span.start("zml.io.load.tensor.setup");
+                    defer setup_span.end();
+
                     const sharding = Sharding.pickSharding(ctx_.shardings, shape, .explicit_axis_binding) orelse blk: {
                         log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
                         break :blk ctx_.platform.replicated_sharding;
                     };
 
+                    var writer_init_span = tracer.Span.start("zml.io.load.tensor.writer_init");
                     var writer = MemoryWriter.init(
                         ctx_.allocator,
                         ctx_.io,
@@ -1166,6 +1186,7 @@ pub fn load(
                         sharding,
                         ctx_.buffers[i_],
                     ) catch unreachable;
+                    writer_init_span.end();
                     defer writer.deinit(ctx_.allocator);
 
                     const scale = 1024;
@@ -1175,11 +1196,14 @@ pub fn load(
                         defer node.end();
                         writer.setProgress(&node);
                         defer writer.setProgress(null);
+
+                        setup_span.end();
                         var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
                         const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
                         progress_writer.interface.flush() catch unreachable;
                         _ = ctx_.total.fetchAdd(total, .monotonic);
                     } else {
+                        setup_span.end();
                         const total = reader.interface.streamRemaining(writer.interface()) catch unreachable;
                         writer.interface().flush() catch unreachable;
                         _ = ctx_.total.fetchAdd(total, .monotonic);
