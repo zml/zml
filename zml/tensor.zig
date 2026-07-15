@@ -1893,7 +1893,7 @@ pub const Tensor = struct {
     /// Concatenates the input Tensors along the given axis.
     pub fn concatenate(tensors: []const Tensor, axis_: anytype) Tensor {
         if (tensors.len == 1) return tensors[0];
-        var buffer = CompilationContext.current().arena.allocator().alloc(*const mlir.Value, tensors.len) catch unreachable;
+        var buffer = CompilationContext.current().arena.allocator().alloc(*const mlir.Value, tensors.len) catch @panic("OOM");
         std.debug.assert(tensors.len <= buffer.len);
         std.debug.assert(tensors.len > 0);
         const a = tensors[0].axis(axis_);
@@ -1924,7 +1924,7 @@ pub const Tensor = struct {
             stdx.debug.assert(shape0.eqlWithTags(tensor._shape), "stack expects tensor shapes to match, got {f} and {f}", .{ shape0, tensor._shape });
         }
 
-        var reshaped = CompilationContext.current().arena.allocator().alloc(Tensor, tensors.len) catch unreachable;
+        var reshaped = CompilationContext.current().arena.allocator().alloc(Tensor, tensors.len) catch @panic("OOM");
         for (tensors, 0..) |tensor, i| {
             reshaped[i] = tensor.reshape(res_shape);
         }
