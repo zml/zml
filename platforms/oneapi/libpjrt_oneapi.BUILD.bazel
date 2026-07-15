@@ -54,23 +54,14 @@ patchelf(
 )
 
 ONEAPI_VERSION = "2026.1"
-
 ONEAPI_CCL_LIB = "ccl/2022.1/lib"
-
 ONEAPI_MPI_LIB = "mpi/2021.18/lib"
-
 ONEAPI_MPI_LIBFABRIC_LIB = "mpi/2021.18/opt/mpi/libfabric/lib"
-
 ONEAPI_TCM_VERSION = "1.5"
-
 ONEAPI_UMF_VERSION = "1.1"
-
 ONEAPI_COMPILER_LIB = "compiler/{}/lib".format(ONEAPI_VERSION)
-
 ONEAPI_MKL_LIB = "mkl/{}/lib".format(ONEAPI_VERSION)
-
 ONEAPI_TCM_LIB = "tcm/{}/lib".format(ONEAPI_TCM_VERSION)
-
 ONEAPI_UMF_LIB = "umf/{}/lib".format(ONEAPI_UMF_VERSION)
 
 copy_to_directory(
