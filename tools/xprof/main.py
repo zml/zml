@@ -1,6 +1,6 @@
 import sys
 
-from xprof.server import main as xprof_main
+from xprof.server import start_server as xprof_main
 
 
 def _argv() -> list[str]:
