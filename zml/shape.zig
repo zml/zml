@@ -573,12 +573,13 @@ pub const Shape = struct {
         var new_shape: Shape = .{ ._dtype = self.dtype() };
         new_shape._dims, new_shape._tags = parseDimensions(new_shape_);
         new_shape._partitioning.appendNTimes(.unknown, new_shape._dims.len) catch @panic("Rank too large");
-        new_shape.inferMissingAxis(self.count());
-        stdx.debug.assert(self.count() == new_shape.count(), "Can't reshape {any} to {any}", .{ self.dims(), new_shape.dims() });
+        new_shape.inferMissingAxis(self.count()) catch |err| {
+            std.debug.panic("Can't reshape {any} to {any}: {t}", .{ self.dims(), new_shape.dims(), err });
+        };
         return new_shape;
     }
 
-    fn inferMissingAxis(self: *Shape, n_: usize) void {
+    fn inferMissingAxis(self: *Shape, n_: usize) error{ UnexpectedRemainder, TooBig }!void {
         stdx.debug.assert(std.mem.count(i64, self.dims(), &.{-1}) < 2, "Cannot infer multiple dimensions when reshaping to: {f}", .{self.*});
 
         const inferred_ax = std.mem.indexOfScalar(i64, self.dims(), -1) orelse return;
@@ -590,10 +591,10 @@ pub const Shape = struct {
             }
         }
         const n: i64 = @intCast(n_);
+        if (tmp_count > n) return error.TooBig;
         // Abort, `reshape` will panic with more context.
-        if (@mod(n, tmp_count) != 0) {
-            return;
-        }
+        if (@mod(n, tmp_count) != 0) return error.UnexpectedRemainder;
+
         self._dims.set(inferred_ax, @divExact(n, tmp_count));
     }
 
@@ -610,6 +611,11 @@ pub const Shape = struct {
         {
             const res = x.reshape(.{-1});
             try testing.expectEqualSlices(i64, &.{30}, res.dims());
+        }
+        {
+            var y: Shape = .init(.{ 2, 5, -1 }, .f32);
+            try testing.expectError(error.UnexpectedRemainder, inferMissingAxis(&y, 15));
+            try testing.expectError(error.TooBig, inferMissingAxis(&y, 8));
         }
     }
 
@@ -1329,20 +1335,21 @@ pub const Shape = struct {
             new_shape._partitioning.insert(ax, .unknown) catch unreachable;
         }
 
-        new_shape.inferMissingAxis(self.count());
+        new_shape.inferMissingAxis(self.count()) catch |err| {
+            std.debug.panic("Can't split {any} along axis {d} into {any}: {t}", .{ self.dims(), ax, new_shape.dims(), err });
+        };
+
         return new_shape;
     }
 
     test splitAxis {
-        try testing.expect(
-            Shape.init(.{ .a1 = 5, .a2 = 2, .b = 3 }, .f32).eql(
-                Shape.init(.{ .a = 10, .b = 3 }, .f32).splitAxis(.a, .{ .a1 = 5, .a2 = 2 }),
-            ),
+        try expectEqualShapes(
+            .init(.{ .a1 = 5, .a2 = 2, .b = 3 }, .f32),
+            .splitAxis(.init(.{ .a = 10, .b = 3 }, .f32), .a, .{ .a1 = 5, .a2 = 2 }),
         );
-        try testing.expect(
-            Shape.init(.{ .a1 = 5, .a2 = 2, .b = 3 }, .f32).eql(
-                Shape.init(.{ .a = 10, .b = 3 }, .f32).splitAxis(.a, .{ .a1 = .auto, .a2 = 2 }),
-            ),
+        try expectEqualShapes(
+            .init(.{ .a1 = 5, .a2 = 2, .b = 3 }, .f32),
+            .splitAxis(.init(.{ .a = 10, .b = 3 }, .f32), .a, .{ .a1 = .auto, .a2 = 2 }),
         );
     }
 
@@ -1741,4 +1748,11 @@ test "MultiDimIterator / Shape with dimension of size 1" {
         try std.testing.expectEqual(0, item.coords[1]);
     }
     try std.testing.expectEqual(6, count);
+}
+
+fn expectEqualShapes(expected: Shape, actual: Shape) error{TestExpectedEqual}!void {
+    if (expected.eqlWithTags(actual)) return;
+
+    std.debug.print("Expected {f}, got {f}", .{ expected, actual });
+    return error.TestExpectedEqual;
 }
