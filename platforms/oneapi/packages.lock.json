@@ -3,112 +3,112 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-ccl-2022.0_2022.0.0-49301_amd64",
-			"name": "intel-oneapi-ccl-2022.0",
-			"sha256": "1003034feabacc032a6054b4667960f7da82df378fb7a331956bfc8c106a4d60",
+			"key": "intel-oneapi-ccl-2022.1_2022.1.0-142_amd64",
+			"name": "intel-oneapi-ccl-2022.1",
+			"sha256": "3569a089879b6b7358c5afb496ae782754715c8ace5137e00797e6b111fb4cc5",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-ccl-2022.0-2022.0.0-49301_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-ccl-2022.1-2022.1.0-142_amd64.deb"
 			],
-			"version": "2022.0.0-49301"
+			"version": "2022.1.0-142"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-mpi-2021.18_2021.18.0-745_amd64",
+			"key": "intel-oneapi-mpi-2021.18_2021.18.1-9_amd64",
 			"name": "intel-oneapi-mpi-2021.18",
-			"sha256": "0eed61a43588fcaec64c7b09f6bd809c5227008e501d0e1231488fbd21eac51b",
+			"sha256": "f6f76f39755329bbac890deeb72fb105df064dc5dcb67cde1396e4d6ef0f6706",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mpi-2021.18-2021.18.0-745_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mpi-2021.18-2021.18.1-9_amd64.deb"
 			],
-			"version": "2021.18.0-745"
+			"version": "2021.18.1-9"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0_2026.0.0-947_amd64",
-			"name": "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0",
-			"sha256": "b7db83a2c8ad06ab5f080fb5ec7c5b004353157f92c0ddb9af3ece0422d9a249",
+			"key": "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1_2026.1.0-235_amd64",
+			"name": "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1",
+			"sha256": "f557b04243b6bb2087646b9d9eee94026bf1abc80b188dcfa3e3b689e292d95e",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0-2026.0.0-947_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1-2026.1.0-235_amd64.deb"
 			],
-			"version": "2026.0.0-947"
+			"version": "2026.1.0-235"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-compiler-shared-runtime-2026.0_2026.0.0-947_amd64",
-			"name": "intel-oneapi-compiler-shared-runtime-2026.0",
-			"sha256": "0357c84d73cee0af8d4c682bdb290908bf842885e8c24936f3e7e58159e9745e",
+			"key": "intel-oneapi-compiler-shared-runtime-2026.1_2026.1.0-235_amd64",
+			"name": "intel-oneapi-compiler-shared-runtime-2026.1",
+			"sha256": "b5a077f78f192f93bba608f5497d7c138f77ec211a9d86356696a0ca68d3bf5d",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-compiler-shared-runtime-2026.0-2026.0.0-947_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-compiler-shared-runtime-2026.1-2026.1.0-235_amd64.deb"
 			],
-			"version": "2026.0.0-947"
+			"version": "2026.1.0-235"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-mkl-core-2026.0_2026.0.0-908_amd64",
-			"name": "intel-oneapi-mkl-core-2026.0",
-			"sha256": "3cc588084e9820af237c90dba4c1546e50f2d7e02a15d0072504ed4ccf764ec0",
+			"key": "intel-oneapi-mkl-core-2026.1_2026.1.0-236_amd64",
+			"name": "intel-oneapi-mkl-core-2026.1",
+			"sha256": "3b230c02fc0ac44f8f71062c20cd883b37c6c1e00940dc0a7f13b02d9c47bd93",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-core-2026.0-2026.0.0-908_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-core-2026.1-2026.1.0-236_amd64.deb"
 			],
-			"version": "2026.0.0-908"
+			"version": "2026.1.0-236"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-mkl-sycl-blas-2026.0_2026.0.0-908_amd64",
-			"name": "intel-oneapi-mkl-sycl-blas-2026.0",
-			"sha256": "b32078f1805ab126f78333276bb860f288d3a2785dc101b4b9df499cd35fa76d",
+			"key": "intel-oneapi-mkl-sycl-blas-2026.1_2026.1.0-236_amd64",
+			"name": "intel-oneapi-mkl-sycl-blas-2026.1",
+			"sha256": "9668d51a7cf68ae4b8944a8cdaa24f6d4ef72604c048f68fd8603b2b792bd783",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-blas-2026.0-2026.0.0-908_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-blas-2026.1-2026.1.0-236_amd64.deb"
 			],
-			"version": "2026.0.0-908"
+			"version": "2026.1.0-236"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-mkl-sycl-dft-2026.0_2026.0.0-908_amd64",
-			"name": "intel-oneapi-mkl-sycl-dft-2026.0",
-			"sha256": "e4168ed1fce35e19552125fdc27bce0820e7348eb42842f4373f05f7fc5f3635",
+			"key": "intel-oneapi-mkl-sycl-dft-2026.1_2026.1.0-236_amd64",
+			"name": "intel-oneapi-mkl-sycl-dft-2026.1",
+			"sha256": "31862dd325a31ccacc1e5e9c93140f4c8bd8a0353e0b3658e2b87e329e58d373",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-dft-2026.0-2026.0.0-908_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-dft-2026.1-2026.1.0-236_amd64.deb"
 			],
-			"version": "2026.0.0-908"
+			"version": "2026.1.0-236"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-mkl-sycl-lapack-2026.0_2026.0.0-908_amd64",
-			"name": "intel-oneapi-mkl-sycl-lapack-2026.0",
-			"sha256": "5a31d222fa527c96bd7aa8bbc7819a11417cc7e6ba38803b55e224541aab68c3",
+			"key": "intel-oneapi-mkl-sycl-lapack-2026.1_2026.1.0-236_amd64",
+			"name": "intel-oneapi-mkl-sycl-lapack-2026.1",
+			"sha256": "f701832f5e49b29731c15a27a094122bebe6a1fbd90ddf14c431b7923b8fd921",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-lapack-2026.0-2026.0.0-908_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-lapack-2026.1-2026.1.0-236_amd64.deb"
 			],
-			"version": "2026.0.0-908"
+			"version": "2026.1.0-236"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-mkl-sycl-rng-2026.0_2026.0.0-908_amd64",
-			"name": "intel-oneapi-mkl-sycl-rng-2026.0",
-			"sha256": "ae6910cd6226a9a380df846849288bf07c5eda0387896b90820cf904a29ee4a0",
+			"key": "intel-oneapi-mkl-sycl-rng-2026.1_2026.1.0-236_amd64",
+			"name": "intel-oneapi-mkl-sycl-rng-2026.1",
+			"sha256": "b0748e152f2042dedd1d21c784fb2a8b551c573b7e7ed0361ada2423deb275bf",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-rng-2026.0-2026.0.0-908_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-rng-2026.1-2026.1.0-236_amd64.deb"
 			],
-			"version": "2026.0.0-908"
+			"version": "2026.1.0-236"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "intel-oneapi-mkl-sycl-sparse-2026.0_2026.0.0-908_amd64",
-			"name": "intel-oneapi-mkl-sycl-sparse-2026.0",
-			"sha256": "1552782efcad141280666f05db5983cfcec4e094a57672170786c7b5e1ff5f9c",
+			"key": "intel-oneapi-mkl-sycl-sparse-2026.1_2026.1.0-236_amd64",
+			"name": "intel-oneapi-mkl-sycl-sparse-2026.1",
+			"sha256": "6a499dc1c5f049ad522a5288151ff0c93f535b8e8ab34edcd773785338e07d45",
 			"urls": [
-				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-sparse-2026.0-2026.0.0-908_amd64.deb"
+				"https://apt.repos.intel.com/oneapi/pool/main/intel-oneapi-mkl-sycl-sparse-2026.1-2026.1.0-236_amd64.deb"
 			],
-			"version": "2026.0.0-908"
+			"version": "2026.1.0-236"
 		},
 		{
 			"arch": "amd64",
@@ -135,99 +135,99 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libnl-3-200_3.5.0-0.1_amd64",
+			"key": "libnl-3-200_3.7.0-0.3build1.1_amd64",
 			"name": "libnl-3-200",
-			"sha256": "4cd689b817d3e6453aa8f6d91d77d35db36dfc4507ab11e780adaabdc4e0bc35",
+			"sha256": "15b3f61db753dc3db6f62f4259f8b822299343e500886776486612a13a2ed247",
 			"urls": [
-				"https://archive.ubuntu.com/ubuntu/pool/main/libn/libnl3/libnl-3-200_3.5.0-0.1_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20260715T000000Z/pool/main/libn/libnl3/libnl-3-200_3.7.0-0.3build1.1_amd64.deb"
 			],
-			"version": "3.5.0-0.1"
+			"version": "3.7.0-0.3build1.1"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libnl-genl-3-200_3.5.0-0.1_amd64",
+			"key": "libnl-genl-3-200_3.7.0-0.3build1.1_amd64",
 			"name": "libnl-genl-3-200",
-			"sha256": "3f73295eee7b9ef208f7272fdb604415778156e4597a25d600563967c15958ea",
+			"sha256": "9ca0cb63f295d00e6346b9924278c07cfc61311cbd288b805b06e25aa08c9fd8",
 			"urls": [
-				"https://archive.ubuntu.com/ubuntu/pool/main/libn/libnl3/libnl-genl-3-200_3.5.0-0.1_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20260715T000000Z/pool/main/libn/libnl3/libnl-genl-3-200_3.7.0-0.3build1.1_amd64.deb"
 			],
-			"version": "3.5.0-0.1"
+			"version": "3.7.0-0.3build1.1"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libnl-route-3-200_3.5.0-0.1_amd64",
+			"key": "libnl-route-3-200_3.7.0-0.3build1.1_amd64",
 			"name": "libnl-route-3-200",
-			"sha256": "781291056f30ff840fa99c7c23731836355852889c87f2d530a910e5b4e33abe",
+			"sha256": "c9dbd29cb7fdcf1a0587726cbc5432a7d3e81242108dfcfa2dd6716c44c74d4d",
 			"urls": [
-				"https://archive.ubuntu.com/ubuntu/pool/main/libn/libnl3/libnl-route-3-200_3.5.0-0.1_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20260715T000000Z/pool/main/libn/libnl3/libnl-route-3-200_3.7.0-0.3build1.1_amd64.deb"
 			],
-			"version": "3.5.0-0.1"
+			"version": "3.7.0-0.3build1.1"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libnuma1_2.0.14-3ubuntu2_amd64",
+			"key": "libnuma1_2.0.18-1ubuntu0.24.04.1_amd64",
 			"name": "libnuma1",
-			"sha256": "0721c89001fbbd1ada23e89da5d60e762763c1a7b3dc814a2e9a518480a8043d",
+			"sha256": "f333b8edf6f0b705c19f2a67008194df66f7aab0fa2350dc98510569a033ff29",
 			"urls": [
-				"https://archive.ubuntu.com/ubuntu/pool/main/n/numactl/libnuma1_2.0.14-3ubuntu2_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20260715T000000Z/pool/main/n/numactl/libnuma1_2.0.18-1ubuntu0.24.04.1_amd64.deb"
 			],
-			"version": "2.0.14-3ubuntu2"
+			"version": "2.0.18-1ubuntu0.24.04.1"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libigdgmm12_22.10.0-1~24.04~ppa1_amd64",
+			"key": "libigdgmm12_22.10.0-1_24.04_ppa1_amd64",
 			"name": "libigdgmm12",
 			"sha256": "63fe9e124c3394193226c6cb8398dcabdc9306b5a10f63668118f7c799f5d792",
 			"urls": [
-				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-gmmlib/libigdgmm12_22.10.0-1~24.04~ppa1_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/i/intel-gmmlib/libigdgmm12_22.10.0-1~24.04~ppa1_amd64.deb"
 			],
 			"version": "22.10.0-1~24.04~ppa1"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libigc2_2.36.3-2~24.04_amd64",
+			"key": "libigc2_2.36.3-2_24.04_amd64",
 			"name": "libigc2",
 			"sha256": "c11dd6e083d1010c50bbc33cabf5b614e64df53b61d349955e97efdababb85bf",
 			"urls": [
-				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-graphics-compiler/libigc2_2.36.3-2~24.04_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/i/intel-graphics-compiler/libigc2_2.36.3-2~24.04_amd64.deb"
 			],
 			"version": "2.36.3-2~24.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libigdfcl2_2.36.3-2~24.04_amd64",
+			"key": "libigdfcl2_2.36.3-2_24.04_amd64",
 			"name": "libigdfcl2",
 			"sha256": "019c4d2802b03d5e1ddad888543e6b7b6003a46a14ccf2e16a2320e8923ad007",
 			"urls": [
-				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-graphics-compiler/libigdfcl2_2.36.3-2~24.04_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/i/intel-graphics-compiler/libigdfcl2_2.36.3-2~24.04_amd64.deb"
 			],
 			"version": "2.36.3-2~24.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libze-intel-gpu1_26.22.38646.6-1~24.04~ppa1_amd64",
+			"key": "libze-intel-gpu1_26.22.38646.6-1_24.04_ppa1_amd64",
 			"name": "libze-intel-gpu1",
 			"sha256": "5d0903aae7ac4f94f43ae7d282a394bc988a0da12f813d92533dea1650eb91ff",
 			"urls": [
-				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/i/intel-compute-runtime/libze-intel-gpu1_26.22.38646.6-1~24.04~ppa1_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/i/intel-compute-runtime/libze-intel-gpu1_26.22.38646.6-1~24.04~ppa1_amd64.deb"
 			],
 			"version": "26.22.38646.6-1~24.04~ppa1"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libze1_1.28.6-1~24.04~ppa1_amd64",
+			"key": "libze1_1.28.6-1_24.04_ppa1_amd64",
 			"name": "libze1",
 			"sha256": "ca4aec5982d46f92875659e74e459372f24c9d8add2810556c1c7e71531e1ec0",
 			"urls": [
-				"https://ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/pool/main/l/level-zero-loader/libze1_1.28.6-1~24.04~ppa1_amd64.deb"
+				"https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z/pool/main/l/level-zero-loader/libze1_1.28.6-1~24.04~ppa1_amd64.deb"
 			],
 			"version": "1.28.6-1~24.04~ppa1"
 		},
@@ -238,9 +238,10 @@
 			"name": "zlib1g",
 			"sha256": "7074b6a2f6367a10d280c00a1cb02e74277709180bab4f2491a2f355ab2d6c20",
 			"urls": [
-				"https://archive.ubuntu.com/ubuntu/pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.1_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20260715T000000Z/pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.1_amd64.deb"
 			],
 			"version": "1:1.3.dfsg-3.1ubuntu2.1"
 		}
-	]
+	],
+	"version": 1
 }

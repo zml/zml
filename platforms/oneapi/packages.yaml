@@ -1,0 +1,45 @@
+#
+#     bazel run @apt_oneapi//:lock
+#
+version: 1
+
+sources:
+  - channel: all main
+    url: https://apt.repos.intel.com/oneapi
+  - channel: noble main
+    url: https://snapshot.ubuntu.com/ubuntu/20260715T000000Z
+  - channel: noble-security main
+    url: https://snapshot.ubuntu.com/ubuntu/20260715T000000Z
+  - channel: noble-updates main
+    url: https://snapshot.ubuntu.com/ubuntu/20260715T000000Z
+  - channel: noble main
+    url: https://snapshot.ppa.launchpadcontent.net/kobuk-team/intel-graphics/ubuntu/20260715T000000Z
+
+archs:
+  - "amd64"
+
+packages:
+  # Do not use "intel-oneapi-toolkit" package
+  # It will install an opaque deb file that will at preinst download the sdk toolkit
+  - "intel-oneapi-ccl-2022.1"
+  - "intel-oneapi-mpi-2021.18"
+  - "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1"
+  - "intel-oneapi-compiler-shared-runtime-2026.1"
+  - "intel-oneapi-mkl-core-2026.1"
+  - "intel-oneapi-mkl-sycl-blas-2026.1"
+  - "intel-oneapi-mkl-sycl-dft-2026.1"
+  - "intel-oneapi-mkl-sycl-lapack-2026.1"
+  - "intel-oneapi-mkl-sycl-rng-2026.1"
+  - "intel-oneapi-mkl-sycl-sparse-2026.1"
+  - "intel-oneapi-tcm-1.5"
+  - "intel-oneapi-umf-1.1"
+  - "libnl-3-200"
+  - "libnl-genl-3-200"
+  - "libnl-route-3-200"
+  - "libnuma1"
+  - "libigdgmm12"
+  - "libigc2"
+  - "libigdfcl2"
+  - "libze-intel-gpu1"
+  - "libze1"
+  - "zlib1g"

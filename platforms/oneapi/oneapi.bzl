@@ -7,11 +7,11 @@ PJRT_ONEAPI_ARTIFACT_URL = "https://github.com/zml/pjrt-artifacts/releases/downl
     release = PJRT_ONEAPI_RELEASE,
 )
 
-ONEAPI_VERSION = "2026.0"
+ONEAPI_VERSION = "2026.1"
 ONEAPI_TCM_VERSION = "1.5"
 ONEAPI_UMF_VERSION = "1.1"
 
-ONEAPI_CCL_LIB = "ccl/2022.0/lib"
+ONEAPI_CCL_LIB = "ccl/2022.1/lib"
 ONEAPI_COMPILER_LIB = "compiler/{}/lib".format(ONEAPI_VERSION)
 ONEAPI_MPI_LIB = "mpi/2021.18/lib"
 ONEAPI_MPI_LIBFABRIC_LIB = "mpi/2021.18/opt/mpi/libfabric/lib"
@@ -34,7 +34,7 @@ def _read_packages(mctx, labels):
             ret.setdefault(pkg["name"], {})[pkg["arch"]] = pkg
     return ret
 
-_ROOT_PACKAGES = {
+_UBUNTU_PACKAGES = {
     "libnl-3-200": """
 filegroup(
     name = "libnl_3",
@@ -45,9 +45,6 @@ filegroup(
     name = "libnl_genl_3",
     srcs = ["lib/x86_64-linux-gnu/libnl-genl-3.so.200"],
 )""",
-}
-
-_UBUNTU_PACKAGES = {
     "libnl-route-3-200": """
 filegroup(
     name = "libnl_route_3",
@@ -121,7 +118,11 @@ filegroup(
 }
 
 _ONEAPI_PACKAGES = {
-    "intel-oneapi-ccl-2022.0": """
+    "intel-oneapi-ccl-2022.1": """
+filegroup(
+    name = "libccl_legacy_so",
+    srcs = ["{ONEAPI_CCL_LIB}/libccl_legacy.so"],
+)
 filegroup(
     name = "ccl_runtime",
     srcs = [
@@ -199,7 +200,7 @@ filegroup(
     name = "umf",
     srcs = ["{ONEAPI_UMF_LIB}/libumf.so.1"],
 )""".format(ONEAPI_UMF_LIB = ONEAPI_UMF_LIB),
-    "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0": """
+    "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1": """
 filegroup(
     name = "libsycl_so",
     srcs = ["{ONEAPI_COMPILER_LIB}/libsycl.so.9"],
@@ -213,7 +214,7 @@ filegroup(
         "{ONEAPI_COMPILER_LIB}/libur_loader.so.0",
     ],
 )""".format(ONEAPI_COMPILER_LIB = ONEAPI_COMPILER_LIB),
-    "intel-oneapi-compiler-shared-runtime-2026.0": """
+    "intel-oneapi-compiler-shared-runtime-2026.1": """
 filegroup(
     name = "compiler_runtime",
     srcs = [
@@ -227,7 +228,7 @@ filegroup(
         "{ONEAPI_COMPILER_LIB}/libsvml.so",
     ],
 )""".format(ONEAPI_COMPILER_LIB = ONEAPI_COMPILER_LIB),
-    "intel-oneapi-mkl-core-2026.0": """
+    "intel-oneapi-mkl-core-2026.1": """
 filegroup(
     name = "mkl_core_runtime",
     srcs = [
@@ -236,58 +237,34 @@ filegroup(
         "{ONEAPI_MKL_LIB}/libmkl_sequential.so.3",
     ],
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
-    "intel-oneapi-mkl-sycl-blas-2026.0": """
+    "intel-oneapi-mkl-sycl-blas-2026.1": """
 filegroup(
     name = "mkl_sycl_blas",
     srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_blas.so.6"],
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
-    "intel-oneapi-mkl-sycl-dft-2026.0": """
+    "intel-oneapi-mkl-sycl-dft-2026.1": """
 filegroup(
     name = "mkl_sycl_dft",
     srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_dft.so.6"],
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
-    "intel-oneapi-mkl-sycl-lapack-2026.0": """
+    "intel-oneapi-mkl-sycl-lapack-2026.1": """
 filegroup(
     name = "mkl_sycl_lapack",
     srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_lapack.so.6"],
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
-    "intel-oneapi-mkl-sycl-rng-2026.0": """
+    "intel-oneapi-mkl-sycl-rng-2026.1": """
 filegroup(
     name = "mkl_sycl_rng",
     srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_rng.so.6"],
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
-    "intel-oneapi-mkl-sycl-sparse-2026.0": """
+    "intel-oneapi-mkl-sycl-sparse-2026.1": """
 filegroup(
     name = "mkl_sycl_sparse",
     srcs = ["{ONEAPI_MKL_LIB}/libmkl_sycl_sparse.so.6"],
 )""".format(ONEAPI_MKL_LIB = ONEAPI_MKL_LIB),
 }
 
-_ROOT_MODULE_DIRECT_DEPS = [
-    "intel-oneapi-ccl-2022.0",
-    "intel-oneapi-compiler-dpcpp-cpp-runtime-2026.0",
-    "intel-oneapi-compiler-shared-runtime-2026.0",
-    "intel-oneapi-mkl-core-2026.0",
-    "intel-oneapi-mkl-sycl-blas-2026.0",
-    "intel-oneapi-mkl-sycl-dft-2026.0",
-    "intel-oneapi-mkl-sycl-lapack-2026.0",
-    "intel-oneapi-mkl-sycl-rng-2026.0",
-    "intel-oneapi-mkl-sycl-sparse-2026.0",
-    "intel-oneapi-mpi-2021.18",
-    "intel-oneapi-tcm-1.5",
-    "intel-oneapi-umf-1.1",
-    "libnl-3-200",
-    "libnl-genl-3-200",
-    "libnl-route-3-200",
-    "libnuma1",
-    "libigdgmm12",
-    "libigc2",
-    "libigdfcl2",
-    "libze-intel-gpu1",
-    "libze1",
-    "libpjrt_oneapi",
-    "zlib1g",
-]
+_ROOT_MODULE_DIRECT_DEPS = ["libpjrt_oneapi"]
 
 def _oneapi_impl(mctx):
     loaded_packages = _read_packages(mctx, [
@@ -300,15 +277,6 @@ def _oneapi_impl(mctx):
         sha256 = PJRT_ONEAPI_ARTIFACT_SHA256,
         url = PJRT_ONEAPI_ARTIFACT_URL,
     )
-
-    for pkg_name, build_file_content in _ROOT_PACKAGES.items():
-        pkg = loaded_packages[pkg_name]["amd64"]
-        http_deb_archive(
-            name = pkg_name,
-            urls = pkg["urls"],
-            sha256 = pkg["sha256"],
-            build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
-        )
 
     for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
         pkg = loaded_packages[pkg_name]["amd64"]
