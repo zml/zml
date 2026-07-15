@@ -27,6 +27,10 @@ pub const pq_top_k: comptime_int = 16;
 pub const pq_z_score: comptime_int = 5;
 pub const pq_orth_weight: comptime_float = 0.25;
 
+// Idea: normalize every row prior to rotation, weight the clustering by initial row norm squared
+// Idea: quantize the coef in 1 byte for faster LUT gather
+// Idea: register schuffling fastest version possible
+
 pub const PQSample = struct {
     top_k: [pq_top_k]Logit,
     nb_dense_scored: usize = 0,
@@ -292,9 +296,10 @@ pub const AnisotropicProductQuantizer = struct {
         }
 
         std.log.info("***** Initializing shared codebook from all buckets on the GPU", .{});
-        var km = try KMeansGPU.init(pq.zml_handler, nb_non_junk, bucket_dim, nb_centers);
+        //var km = try KMeansGPU.init(pq.zml_handler, nb_non_junk, bucket_dim, nb_centers);
+        var km = try KMeansCPU.init(self.base.allocator, nb_non_junk, bucket_dim, nb_centers);
         defer km.deinit();
-        try km.solve(training_data);
+        km.solve(training_data);
 
         std.log.info("***** Jointly optimizing full-row ScaNN anisotropic loss on the GPU", .{});
         const rotated: RotatedLmHead = .{
