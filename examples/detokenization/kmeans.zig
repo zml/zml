@@ -4,6 +4,10 @@ const main = @import("main.zig");
 
 const simd_len: comptime_int = 8;
 const max_iters: comptime_int = 256;
+const anisotropic_cg_max_iters: comptime_int = 64;
+const anisotropic_cg_relative_tolerance: comptime_float = 1e-6;
+const anisotropic_ridge: comptime_float = 1e-6;
+const anisotropic_max_iters: comptime_int = 8;
 const Vec = @Vector(simd_len, f32);
 
 pub const KMeansCPU = struct {
@@ -20,6 +24,7 @@ pub const KMeansCPU = struct {
     weights: []f32,
     data_norms2: []f32,
     center_norms: []f32,
+    has_centers: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, n_max: usize, d: usize, k: usize) !KMeansCPU {
         const centers = try allocator.alloc(f32, k * d);
@@ -189,6 +194,7 @@ pub const KMeansCPU = struct {
             std.log.info("{d: >6} {d: >12.6} {d: >8}", .{ it, sos_err, nb_changed });
             if (nb_changed == 0) break;
         }
+        self.has_centers = true;
     }
 
     pub inline fn distance2(self: *KMeansCPU, point: []const f32, point_norm2: f32, center: usize) f32 {
@@ -261,6 +267,7 @@ pub const KMeansCPU = struct {
             std.log.info("{d: >6} {d: >12.6} {d: >8}", .{ it, avg_sim, nb_changed });
             if (nb_changed == 0) break;
         }
+        self.has_centers = true;
     }
 
     pub fn solveSphericalWeighted(self: *KMeansCPU, data: []f32) void {
@@ -325,6 +332,7 @@ pub const KMeansCPU = struct {
             std.log.info("{d: >6} {d: >12.6} {d: >8}", .{ it, avg_sim, nb_changed });
             if (nb_changed == 0) break;
         }
+        self.has_centers = true;
     }
 
     pub inline fn normalizeCenter(self: *KMeansCPU, center: usize) void {
@@ -350,6 +358,288 @@ pub const KMeansCPU = struct {
             }
         }
         return .{ max_sim, @intCast(max_center) };
+    }
+
+    const CgResult = struct {
+        relative_residual: f32,
+        iterations: usize,
+    };
+
+    fn initializeAnisotropicCodes(self: *KMeansCPU, lm_head: anytype, row_codes: []u8, nb_buckets: usize) void {
+        self.computeCenterNorms();
+        @memset(row_codes, 0);
+        for (0..lm_head.n) |row| {
+            if (lm_head.is_junk[row]) continue;
+            for (0..nb_buckets) |bucket| {
+                const x = lm_head.data[row * lm_head.d + bucket * self.d ..][0..self.d];
+                const x_norm2 = dotSlices(x, x, self.d);
+                const closest = self.closestCenter(x, x_norm2, self.k);
+                row_codes[row * nb_buckets + bucket] = @intCast(closest[1]);
+            }
+        }
+    }
+
+    fn computeAnisotropicRowState(
+        self: *KMeansCPU,
+        lm_head: anytype,
+        row_codes: []const u8,
+        nb_buckets: usize,
+        squared_error: []f32,
+        parallel_error: []f32,
+    ) void {
+        for (0..lm_head.n) |row| {
+            squared_error[row] = 0.0;
+            parallel_error[row] = 0.0;
+            if (lm_head.is_junk[row]) continue;
+            for (0..nb_buckets) |bucket| {
+                const x = lm_head.data[row * lm_head.d + bucket * self.d ..][0..self.d];
+                const center: usize = row_codes[row * nb_buckets + bucket];
+                const c = self.centers[center * self.d .. (center + 1) * self.d];
+                const x_norm2 = dotSlices(x, x, self.d);
+                const dot_xc = dotSlices(x, c, self.d);
+                squared_error[row] += x_norm2 + self.center_norms[center] - 2.0 * dot_xc;
+                parallel_error[row] += x_norm2 - dot_xc;
+            }
+        }
+    }
+
+    fn buildAnisotropicTarget(
+        self: *KMeansCPU,
+        lm_head: anytype,
+        row_codes: []const u8,
+        nb_buckets: usize,
+        target: []f32,
+        counts: []usize,
+    ) void {
+        @memset(target, 0.0);
+        @memset(counts, 0);
+        for (0..lm_head.n) |row| {
+            if (lm_head.is_junk[row]) continue;
+            for (0..nb_buckets) |bucket| {
+                const center: usize = row_codes[row * nb_buckets + bucket];
+                const x = lm_head.data[row * lm_head.d + bucket * self.d ..][0..self.d];
+                addTo(target[center * self.d .. (center + 1) * self.d], x, self.d);
+                counts[center] += 1;
+            }
+        }
+    }
+
+    /// Applies the full shared-codebook normal matrix without materializing its
+    /// (K * B) x (K * B) entries:
+    /// A = w R^T R + (1-w) sum_i(g_i g_i^T / ||x_i||^2) + ridge I.
+    fn anisotropicNormalMatVec(
+        self: *KMeansCPU,
+        lm_head: anytype,
+        row_codes: []const u8,
+        row_norms2: []const f32,
+        counts: []const usize,
+        orth_weight: f32,
+        vector: []const f32,
+        output: []f32,
+        nb_buckets: usize,
+    ) void {
+        for (0..self.k) |center| {
+            const diagonal: Vec = @splat(orth_weight * @as(f32, @floatFromInt(counts[center])) + anisotropic_ridge);
+            var coord: usize = 0;
+            while (coord < self.d) : (coord += simd_len) {
+                const v: Vec = vector[center * self.d + coord ..][0..simd_len].*;
+                output[center * self.d + coord ..][0..simd_len].* = diagonal * v;
+            }
+        }
+
+        for (0..lm_head.n) |row| {
+            if (lm_head.is_junk[row]) continue;
+            var g_dot_vector: f32 = 0.0;
+            for (0..nb_buckets) |bucket| {
+                const center: usize = row_codes[row * nb_buckets + bucket];
+                const x = lm_head.data[row * lm_head.d + bucket * self.d ..][0..self.d];
+                const v = vector[center * self.d .. (center + 1) * self.d];
+                g_dot_vector += dotSlices(x, v, self.d);
+            }
+            const scale = (1.0 - orth_weight) * g_dot_vector / row_norms2[row];
+            for (0..nb_buckets) |bucket| {
+                const center: usize = row_codes[row * nb_buckets + bucket];
+                const x = lm_head.data[row * lm_head.d + bucket * self.d ..][0..self.d];
+                addWeightedTo(output[center * self.d .. (center + 1) * self.d], x, scale, self.d);
+            }
+        }
+    }
+
+    fn solveAnisotropicCentersCG(
+        self: *KMeansCPU,
+        lm_head: anytype,
+        row_codes: []const u8,
+        row_norms2: []const f32,
+        counts: []usize,
+        target: []f32,
+        residual: []f32,
+        direction: []f32,
+        normal_direction: []f32,
+        orth_weight: f32,
+        nb_buckets: usize,
+    ) CgResult {
+        const parameter_count = self.k * self.d;
+        self.buildAnisotropicTarget(lm_head, row_codes, nb_buckets, target, counts);
+        self.anisotropicNormalMatVec(lm_head, row_codes, row_norms2, counts, orth_weight, self.centers, normal_direction, nb_buckets);
+
+        var coord: usize = 0;
+        while (coord < parameter_count) : (coord += simd_len) {
+            const b: Vec = target[coord..][0..simd_len].*;
+            const ax: Vec = normal_direction[coord..][0..simd_len].*;
+            residual[coord..][0..simd_len].* = b - ax;
+        }
+        @memcpy(direction, residual);
+
+        const target2 = @max(dotSlices(target, target, parameter_count), 1e-20);
+        var residual2 = dotSlices(residual, residual, parameter_count);
+        var relative_residual = @sqrt(residual2 / target2);
+        if (relative_residual <= anisotropic_cg_relative_tolerance) {
+            return .{ .relative_residual = relative_residual, .iterations = 0 };
+        }
+
+        const iteration_limit = @min(anisotropic_cg_max_iters, parameter_count);
+        for (0..iteration_limit) |iteration| {
+            self.anisotropicNormalMatVec(lm_head, row_codes, row_norms2, counts, orth_weight, direction, normal_direction, nb_buckets);
+            const denominator = dotSlices(direction, normal_direction, parameter_count);
+            if (!(denominator > 1e-20) or !std.math.isFinite(denominator)) {
+                return .{ .relative_residual = relative_residual, .iterations = iteration };
+            }
+
+            const alpha = residual2 / denominator;
+            addWeightedTo(self.centers, direction, alpha, parameter_count);
+            addWeightedTo(residual, normal_direction, -alpha, parameter_count);
+            const next_residual2 = dotSlices(residual, residual, parameter_count);
+            relative_residual = @sqrt(next_residual2 / target2);
+            if (relative_residual <= anisotropic_cg_relative_tolerance) {
+                return .{ .relative_residual = relative_residual, .iterations = iteration + 1 };
+            }
+
+            const beta: Vec = @splat(next_residual2 / @max(residual2, 1e-20));
+            var i: usize = 0;
+            while (i < parameter_count) : (i += simd_len) {
+                const r: Vec = residual[i..][0..simd_len].*;
+                const p: Vec = direction[i..][0..simd_len].*;
+                direction[i..][0..simd_len].* = @mulAdd(Vec, beta, p, r);
+            }
+            residual2 = next_residual2;
+        }
+        return .{ .relative_residual = relative_residual, .iterations = iteration_limit };
+    }
+
+    /// Full-row ScaNN anisotropic optimization with a shared B-dimensional
+    /// codebook. Centers must first be initialized by solve/solveSpherical.
+    pub fn solveAnisotropic(self: *KMeansCPU, lm_head: anytype, row_codes: []u8, orth_weight: f32) !void {
+        std.debug.assert(orth_weight > 0.0 and orth_weight <= 1.0);
+        std.debug.assert(self.has_centers and self.k <= 256);
+        std.debug.assert(self.d % simd_len == 0 and lm_head.d % self.d == 0);
+        std.debug.assert(lm_head.data.len == lm_head.n * lm_head.d);
+        const nb_buckets = lm_head.d / self.d;
+        std.debug.assert(row_codes.len == lm_head.n * nb_buckets);
+
+        const parameter_count = self.k * self.d;
+        std.debug.assert(parameter_count % simd_len == 0);
+        const row_norms2 = try self.allocator.alloc(f32, lm_head.n);
+        defer self.allocator.free(row_norms2);
+        const squared_error = try self.allocator.alloc(f32, lm_head.n);
+        defer self.allocator.free(squared_error);
+        const parallel_error = try self.allocator.alloc(f32, lm_head.n);
+        defer self.allocator.free(parallel_error);
+        const counts = try self.allocator.alloc(usize, self.k);
+        defer self.allocator.free(counts);
+        const cg_storage = try self.allocator.alloc(f32, parameter_count * 4);
+        defer self.allocator.free(cg_storage);
+        const target = cg_storage[0 * parameter_count .. 1 * parameter_count];
+        const residual = cg_storage[1 * parameter_count .. 2 * parameter_count];
+        const direction = cg_storage[2 * parameter_count .. 3 * parameter_count];
+        const normal_direction = cg_storage[3 * parameter_count .. 4 * parameter_count];
+
+        var active_count: usize = 0;
+        for (0..lm_head.n) |row| {
+            if (lm_head.is_junk[row]) {
+                row_norms2[row] = 1.0;
+                continue;
+            }
+            const x = lm_head.data[row * lm_head.d .. (row + 1) * lm_head.d];
+            row_norms2[row] = @max(dotSlices(x, x, lm_head.d), 1e-20);
+            active_count += 1;
+        }
+        std.debug.assert(active_count > 0);
+
+        self.initializeAnisotropicCodes(lm_head, row_codes, nb_buckets);
+        std.log.info("CPU full anisotropic PQ: rows={d} buckets={d} centers={d} block_dim={d} system={d}x{d}", .{ lm_head.n, nb_buckets, self.k, self.d, parameter_count, parameter_count });
+        std.log.info("{s: >6} {s: >12} {s: >12} {s: >8} {s: >6}", .{ "iter", "aniso", "cg-resid", "chg", "cg-it" });
+
+        for (0..anisotropic_max_iters) |iteration| {
+            self.computeAnisotropicRowState(lm_head, row_codes, nb_buckets, squared_error, parallel_error);
+            var total_changed: usize = 0;
+
+            // Sequential coordinate descent over buckets. Each candidate is scored
+            // with the full-row loss while all other bucket codes remain fixed.
+            for (0..nb_buckets) |bucket| {
+                for (0..lm_head.n) |row| {
+                    if (lm_head.is_junk[row]) continue;
+                    const code_index = row * nb_buckets + bucket;
+                    const old_center: usize = row_codes[code_index];
+                    const x = lm_head.data[row * lm_head.d + bucket * self.d ..][0..self.d];
+                    const x_norm2 = dotSlices(x, x, self.d);
+                    const old_c = self.centers[old_center * self.d .. (old_center + 1) * self.d];
+                    const old_dot = dotSlices(x, old_c, self.d);
+                    const old_squared = x_norm2 + self.center_norms[old_center] - 2.0 * old_dot;
+                    const old_parallel = x_norm2 - old_dot;
+                    const base_squared = squared_error[row] - old_squared;
+                    const base_parallel = parallel_error[row] - old_parallel;
+
+                    var best_center = old_center;
+                    var best_squared = old_squared;
+                    var best_parallel = old_parallel;
+                    var best_loss = std.math.floatMax(f32);
+                    for (0..self.k) |center| {
+                        const c = self.centers[center * self.d .. (center + 1) * self.d];
+                        const dot_xc = dotSlices(x, c, self.d);
+                        const candidate_squared = x_norm2 + self.center_norms[center] - 2.0 * dot_xc;
+                        const candidate_parallel = x_norm2 - dot_xc;
+                        const full_parallel = base_parallel + candidate_parallel;
+                        const loss = orth_weight * (base_squared + candidate_squared) +
+                            (1.0 - orth_weight) * full_parallel * full_parallel / row_norms2[row];
+                        if (loss < best_loss) {
+                            best_loss = loss;
+                            best_center = center;
+                            best_squared = candidate_squared;
+                            best_parallel = candidate_parallel;
+                        }
+                    }
+
+                    total_changed += @intFromBool(best_center != old_center);
+                    row_codes[code_index] = @intCast(best_center);
+                    squared_error[row] = base_squared + best_squared;
+                    parallel_error[row] = base_parallel + best_parallel;
+                }
+            }
+
+            var loss: f64 = 0.0;
+            for (0..lm_head.n) |row| {
+                if (lm_head.is_junk[row]) continue;
+                loss += orth_weight * @as(f64, squared_error[row]) +
+                    (1.0 - orth_weight) * @as(f64, parallel_error[row]) * @as(f64, parallel_error[row]) / @as(f64, row_norms2[row]);
+            }
+            loss /= @floatFromInt(active_count);
+
+            const cg = self.solveAnisotropicCentersCG(
+                lm_head,
+                row_codes,
+                row_norms2,
+                counts,
+                target,
+                residual,
+                direction,
+                normal_direction,
+                orth_weight,
+                nb_buckets,
+            );
+            self.computeCenterNorms();
+            std.log.info("{d: >6} {d: >12.6} {d: >12.6} {d: >8} {d: >6}", .{ iteration, loss, cg.relative_residual, total_changed, cg.iterations });
+            if (iteration > 0 and total_changed == 0) break;
+        }
     }
 };
 
@@ -564,7 +854,7 @@ const GpuKMeansModel = struct {
         const parameter_counts = counts.insertAxes(.last, .{.coord})
             .broad(zml.Shape.init(.{ .center = self.k, .coord = self.block_dim }, .f32))
             .reshape(.{ .param = parameter_count });
-        const diagonal = parameter_counts.scale(self.orth_weight).addConstant(1e-5).toDiagonal(.param, .{ .param_row, .param_col });
+        const diagonal = parameter_counts.scale(self.orth_weight).addConstant(anisotropic_ridge).toDiagonal(.param, .{ .param_row, .param_col });
         const normal = rank_one.add(diagonal);
         const target = g_flat.sum(.row).squeeze(.row);
 
@@ -575,7 +865,7 @@ const GpuKMeansModel = struct {
         var direction = residual;
         var residual2 = residual.dot(residual, .param).asScalar();
         const target2 = target.dot(target, .param).asScalar().maximum(zml.Tensor.scalar(1e-20, .f32));
-        for (0..64) |_| {
+        for (0..anisotropic_cg_max_iters) |_| {
             const normal_direction = normalMatVec(normal, direction);
             const denominator = direction.dot(normal_direction, .param).asScalar().maximum(zml.Tensor.scalar(1e-20, .f32));
             const alpha = residual2.div(denominator);
