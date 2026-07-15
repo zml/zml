@@ -139,8 +139,8 @@ pub const Metadata = union(Backend) {
 /// Causal attention as used in transformers.
 ///
 /// **Shapes**:
-///   - q, result: .{ .h, .q, .hd }
-///   - k, v:      .{ .h, .k, .hd }
+///   - q, result: .{ .q, .h, .hd }
+///   - k, v:      .{ .k, .h, .hd }
 ///
 /// Where:
 ///   - .h is the number of head
