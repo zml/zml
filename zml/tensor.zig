@@ -1893,8 +1893,7 @@ pub const Tensor = struct {
     /// Concatenates the input Tensors along the given axis.
     pub fn concatenate(tensors: []const Tensor, axis_: anytype) Tensor {
         if (tensors.len == 1) return tensors[0];
-        stdx.debug.assert(tensors.len <= 32, "concatenate only supports up to 32 tensors, got {}", .{tensors.len});
-        var buffer: [32]*const mlir.Value = undefined;
+        var buffer = CompilationContext.current().arena.allocator().alloc(*const mlir.Value, tensors.len) catch unreachable;
         std.debug.assert(tensors.len <= buffer.len);
         std.debug.assert(tensors.len > 0);
         const a = tensors[0].axis(axis_);
@@ -1907,7 +1906,7 @@ pub const Tensor = struct {
         }
 
         const res_shape = tensors[0]._shape.set(a, concatenated_dim);
-        const op = dialects.stablehlo.concatenate(mlirCtx(), buffer[0..tensors.len], a, .unknown(mlirCtx())).appendTo(currentBlock());
+        const op = dialects.stablehlo.concatenate(mlirCtx(), buffer, a, .unknown(mlirCtx())).appendTo(currentBlock());
         // log.debug("concatenate({}, {}, {d}) -> {d}", .{ tensors[0], tensors[1], a, res_shape });
         return _result(res_shape, op.result(0));
     }
@@ -1918,9 +1917,6 @@ pub const Tensor = struct {
     /// - Tensor.stack(&.{x, y, z}, 1, .layers) -> .{ .a, .layers, .b, .c }
     /// - Tensor.stack(&.{x, y, z}, .last, .layers) -> .{ .a, .b, .c, .layers }
     pub fn stack(tensors: []const Tensor, axis_: anytype, tag: anytype) Tensor {
-        // Note: we could ask the compilation context for some memory instead of stack allocating
-        stdx.debug.assert(tensors.len <= 32, "stack only supports up to 32 tensors, got {}", .{tensors.len});
-
         const shape0 = tensors[0]._shape;
         const res_shape = shape0.insertTag(axis_, 1, tag);
 
@@ -1928,7 +1924,7 @@ pub const Tensor = struct {
             stdx.debug.assert(shape0.eqlWithTags(tensor._shape), "stack expects tensor shapes to match, got {f} and {f}", .{ shape0, tensor._shape });
         }
 
-        var reshaped: [32]Tensor = undefined;
+        var reshaped = CompilationContext.current().arena.allocator().alloc(Tensor, tensors.len) catch unreachable;
         for (tensors, 0..) |tensor, i| {
             reshaped[i] = tensor.reshape(res_shape);
         }
@@ -1940,7 +1936,7 @@ pub const Tensor = struct {
         else
             shape0.axis(axis_);
 
-        return Tensor.concatenate(reshaped[0..tensors.len], ax);
+        return Tensor.concatenate(reshaped, ax);
     }
 
     /// Repeats a Tensor several times along the given axis.
