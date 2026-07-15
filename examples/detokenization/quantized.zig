@@ -69,6 +69,15 @@ pub const qjl_micro_u128_word_count: usize = qjl_micro_coord_count / 128;
 pub const qjl_half_coord_count: usize = 2 * qjl_micro_coord_count;
 pub const qjl_half_to_full_coord_count: usize = 4096 - qjl_half_coord_count;
 pub const qjl_half_to_full_u128_word_count: usize = qjl_half_to_full_coord_count / 128;
+pub const partial_dot_block_size: usize = 128;
+pub const partial_dot_block_count: usize = 4096 / partial_dot_block_size;
+pub const partial_dot_phase_exact_top_k: usize = 16;
+pub const partial_dot_prefix_coord_count: usize = 128;
+
+comptime {
+    std.debug.assert(4096 % partial_dot_block_size == 0);
+    std.debug.assert(partial_dot_block_size % 16 == 0);
+}
 
 fn makeQjlSignDotLut(comptime coord_count: usize) [coord_count + 1]f32 {
     @setEvalBranchQuota(8192);
@@ -103,15 +112,9 @@ pub const TwoPhaseSample = struct {
     nb_1bit_scored: usize = 0,
     nb_half_1bit_scored: usize = 0,
     nb_2bit_scored: usize = 0,
-};
-
-pub const SyntaxOracleSample = struct {
-    correct: bool,
-    safe: bool,
-    predicted_syntax: bool,
-    top1_is_syntax: bool,
-    top1: usize,
-    cos_theta: f32,
+    nb_partial_dot_scored: usize = 0,
+    nb_partial_dot_pruned: usize = 0,
+    partial_dot_pruned_by_phase: [partial_dot_block_count]usize = [_]usize{0} ** partial_dot_block_count,
 };
 
 pub const U4096 = struct {
@@ -166,18 +169,9 @@ pub const Quantized = struct {
     f32_buffer: []f32,
     dense_logits: []f32,
     partial_logits: []f32,
+    partial_dot_residual_logits: []f32,
     active_rows: []u32,
     i8_buffer: []i8,
-
-    syntax_cluster_ids: []u32,
-    syntax_cluster_mask: []bool,
-    semantic_cluster_ids: []u32,
-    syntax_center: []f32,
-    syntax_cluster_len: usize = 0,
-    semantic_cluster_len: usize = 0,
-    syntax_tau: f32 = std.math.nan(f32),
-    syntax_anchor_id: u32 = 0,
-    syntax_worst_semantic_id: u32 = 0,
 
     lm_head_sliced: []vector_U4096,
     row_offset: []i32,
@@ -190,6 +184,8 @@ pub const Quantized = struct {
     qjl_row_scale: []f32,
     qjl_query_lut: []f32,
     qjl_inv_dim: f32 = 0.0,
+
+    partial_dot_blocks: []f32,
 
     lm_head_qjl_2bits: [][64]u128,
     qjl_row_scale_2bits: []f32,
@@ -206,13 +202,9 @@ pub const Quantized = struct {
         const f32_buffer = try allocator.alloc(f32, d);
         const dense_logits = try allocator.alloc(f32, vocab_size);
         const partial_logits = try allocator.alloc(f32, vocab_size);
+        const partial_dot_residual_logits = try allocator.alloc(f32, vocab_size);
         const active_rows = try allocator.alloc(u32, vocab_size);
-        const syntax_cluster_ids = try allocator.alloc(u32, vocab_size);
-        const syntax_cluster_mask = try allocator.alloc(bool, vocab_size);
-        const semantic_cluster_ids = try allocator.alloc(u32, vocab_size);
-        const syntax_center = try allocator.alloc(f32, d);
-        @memset(syntax_cluster_mask, false);
-        @memset(syntax_center, 0.0);
+
         const lm_head_quantized = try allocator.alloc(i8, d * vocab_size);
         const lm_head_sliced = try allocator.alloc(vector_U4096, vocab_size);
 
@@ -228,6 +220,7 @@ pub const Quantized = struct {
         const qjl_micro_mismatches = try allocator.alloc(u16, vocab_size);
         const qjl_row_scale = try allocator.alloc(f32, vocab_size);
         const qjl_query_lut = try allocator.alloc(f32, 512 * 256);
+        const partial_dot_blocks = try allocator.alloc(f32, vocab_size * d);
         const lm_head_qjl_2bits = try allocator.alloc([64]u128, vocab_size);
         const qjl_row_scale_2bits = try allocator.alloc(f32, vocab_size);
 
@@ -243,11 +236,8 @@ pub const Quantized = struct {
             .f32_buffer = f32_buffer,
             .dense_logits = dense_logits,
             .partial_logits = partial_logits,
+            .partial_dot_residual_logits = partial_dot_residual_logits,
             .active_rows = active_rows,
-            .syntax_cluster_ids = syntax_cluster_ids,
-            .syntax_cluster_mask = syntax_cluster_mask,
-            .semantic_cluster_ids = semantic_cluster_ids,
-            .syntax_center = syntax_center,
             .lm_head_quantized = lm_head_quantized,
             .lm_head_sliced = lm_head_sliced,
             .row_offset = row_offset,
@@ -259,6 +249,7 @@ pub const Quantized = struct {
             .qjl_micro_mismatches = qjl_micro_mismatches,
             .qjl_row_scale = qjl_row_scale,
             .qjl_query_lut = qjl_query_lut,
+            .partial_dot_blocks = partial_dot_blocks,
             .lm_head_qjl_2bits = lm_head_qjl_2bits,
             .qjl_row_scale_2bits = qjl_row_scale_2bits,
         };
@@ -270,11 +261,8 @@ pub const Quantized = struct {
         self.allocator.free(self.f32_buffer);
         self.allocator.free(self.dense_logits);
         self.allocator.free(self.partial_logits);
+        self.allocator.free(self.partial_dot_residual_logits);
         self.allocator.free(self.active_rows);
-        self.allocator.free(self.syntax_cluster_ids);
-        self.allocator.free(self.syntax_cluster_mask);
-        self.allocator.free(self.semantic_cluster_ids);
-        self.allocator.free(self.syntax_center);
         self.allocator.free(self.lm_head_quantized);
         self.allocator.free(self.lm_head_sliced);
         self.allocator.free(self.row_offset);
@@ -286,6 +274,7 @@ pub const Quantized = struct {
         self.allocator.free(self.qjl_micro_mismatches);
         self.allocator.free(self.qjl_row_scale);
         self.allocator.free(self.qjl_query_lut);
+        self.allocator.free(self.partial_dot_blocks);
         self.allocator.free(self.lm_head_qjl_2bits);
         self.allocator.free(self.qjl_row_scale_2bits);
     }
@@ -304,14 +293,13 @@ pub const Quantized = struct {
         return @as(f32, @floatFromInt(value));
     }
 
-    pub fn walshHadamard(self: *Quantized, v: []const f32, comptime k: comptime_int) !void {
-        self.zml_handler.tic(&self.zml_handler.timers.quant_walsh);
-        if (v.ptr != self.f32_buffer.ptr) {
-            @memcpy(self.f32_buffer[0..v.len], v);
-        }
+    pub fn walshHadamardTo(dst: []f32, v: []const f32, comptime k: comptime_int) void {
         const n: usize = 1 << k;
         std.debug.assert(v.len == n);
-        std.debug.assert(self.f32_buffer.len >= n);
+        std.debug.assert(dst.len >= n);
+        if (@intFromPtr(dst.ptr) != @intFromPtr(v.ptr)) {
+            @memcpy(dst[0..n], v[0..n]);
+        }
 
         inline for (0..k) |stage| {
             const h: usize = 1 << stage;
@@ -320,28 +308,33 @@ pub const Quantized = struct {
                 const i: usize = block * step;
                 for (0..h) |offset| {
                     const j: usize = i + offset;
-                    const x = self.f32_buffer[j];
-                    const y = self.f32_buffer[j + h];
-                    self.f32_buffer[j] = x + y;
-                    self.f32_buffer[j + h] = x - y;
+                    const x = dst[j];
+                    const y = dst[j + h];
+                    dst[j] = x + y;
+                    dst[j + h] = x - y;
                 }
             }
         }
 
+        const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(n)));
         for (0..n) |i| {
-            self.f32_buffer[i] *= self.d_inv_norm;
+            dst[i] *= scale;
         }
+    }
+
+    pub fn walshHadamard(self: *Quantized, v: []const f32, comptime k: comptime_int) !void {
+        self.zml_handler.tic(&self.zml_handler.timers.quant_walsh);
+        walshHadamardTo(self.f32_buffer, v, k);
         self.zml_handler.toc(&self.zml_handler.timers.quant_walsh);
     }
 
-    pub fn walshHadamardSimd(self: *Quantized, v: []const f32, comptime k: comptime_int) !void {
-        self.zml_handler.tic(&self.zml_handler.timers.quant_walsh);
-        if (v.ptr != self.f32_buffer.ptr) {
-            @memcpy(self.f32_buffer[0..v.len], v);
-        }
+    pub fn walshHadamardSimdTo(dst: []f32, v: []const f32, comptime k: comptime_int) void {
         const n: usize = 1 << k;
         std.debug.assert(v.len == n);
-        std.debug.assert(self.f32_buffer.len >= n);
+        std.debug.assert(dst.len >= n);
+        if (@intFromPtr(dst.ptr) != @intFromPtr(v.ptr)) {
+            @memcpy(dst[0..n], v[0..n]);
+        }
 
         const max_simd_len: comptime_int = 8;
 
@@ -357,24 +350,41 @@ pub const Quantized = struct {
                 while (offset < h) : (offset += simd_len) {
                     const left = i + offset;
                     const right = left + h;
-                    const x: Vec = self.f32_buffer[left..][0..simd_len].*;
-                    const y: Vec = self.f32_buffer[right..][0..simd_len].*;
-                    self.f32_buffer[left..][0..simd_len].* = x + y;
-                    self.f32_buffer[right..][0..simd_len].* = x - y;
+                    const x: Vec = dst[left..][0..simd_len].*;
+                    const y: Vec = dst[right..][0..simd_len].*;
+                    dst[left..][0..simd_len].* = x + y;
+                    dst[right..][0..simd_len].* = x - y;
                 }
             }
         }
 
         const Vec = @Vector(max_simd_len, f32);
-        const scale: Vec = @splat(self.d_inv_norm);
+        const scale_scalar: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(n)));
+        const scale: Vec = @splat(scale_scalar);
         var i: usize = 0;
         while (i + max_simd_len <= n) : (i += max_simd_len) {
-            const values: Vec = self.f32_buffer[i..][0..max_simd_len].*;
-            self.f32_buffer[i..][0..max_simd_len].* = values * scale;
+            const values: Vec = dst[i..][0..max_simd_len].*;
+            dst[i..][0..max_simd_len].* = values * scale;
         }
+        while (i < n) : (i += 1) {
+            dst[i] *= scale_scalar;
+        }
+    }
+
+    pub fn walshHadamardSimd(self: *Quantized, v: []const f32, comptime k: comptime_int) !void {
+        self.zml_handler.tic(&self.zml_handler.timers.quant_walsh);
+        walshHadamardSimdTo(self.f32_buffer, v, k);
         self.zml_handler.toc(&self.zml_handler.timers.quant_walsh);
     }
 
+    pub inline fn normL2(a: []const f32) f32 {
+        var norm2: f32 = 0.0;
+        for (a) |x| {
+            norm2 += x * x;
+        }
+        return @sqrt(norm2);
+    }
+    
     fn l2Error(a: []const f32, b: []const f32) f32 {
         std.debug.assert(a.len == b.len);
         var squared_error: f32 = 0.0;
@@ -524,7 +534,7 @@ pub const Quantized = struct {
         while (i + simd_len <= query.len) : (i += simd_len) {
             const query_v: Vec = query[i..][0..simd_len].*;
             const row_v: Vec = row[i..][0..simd_len].*;
-            acc += query_v * row_v;
+            acc = @mulAdd(Vec, query_v, row_v, acc);
         }
         return @reduce(.Add, acc);
     }
@@ -786,11 +796,7 @@ pub const Quantized = struct {
         std.log.info("Quantized bit slicing test passed: 1000 random row pairs", .{});
     }
 
-    inline fn qjlSliceU128Words(
-        comptime start_coord: usize,
-        comptime coord_count: usize,
-        quantized: *const U4096,
-    ) *const [coord_count / 128]u128 {
+    inline fn qjlSliceU128Words(comptime start_coord: usize, comptime coord_count: usize, quantized: *const U4096) *const [coord_count / 128]u128 {
         if (coord_count % 128 != 0) {
             @compileError("QJL slice length must contain a whole number of u128 words");
         }
@@ -817,11 +823,7 @@ pub const Quantized = struct {
         return qjlSliceU128Words(qjl_half_coord_count, qjl_half_to_full_coord_count, quantized);
     }
 
-    inline fn qjlMismatchU128Loaded(
-        comptime word_count: usize,
-        row_words: *const [word_count]u128,
-        query_vec: @Vector(word_count, u128),
-    ) u16 {
+    inline fn qjlMismatchU128Loaded(comptime word_count: usize, row_words: *const [word_count]u128, query_vec: @Vector(word_count, u128)) u16 {
         const Words = @Vector(word_count, u128);
         const Counts = @Vector(word_count, u16);
         const row_vec: Words = row_words.*;
@@ -846,6 +848,32 @@ pub const Quantized = struct {
             self.qjl_micro_to_half_rows[i] = qjlMicroToHalfWords(&quantized_row).*;
             self.qjl_half_to_full_rows[i] = qjlHalfToFullWords(&quantized_row).*;
             self.qjl_row_scale[i] = row_scale;
+        }
+    }
+
+    pub fn precomputePartialDotLmHeadBlocks(self: *Quantized) !void {
+        try self.precomputePartialDotLmHeadBlocksWithBlockSize(partial_dot_block_size);
+    }
+
+    pub fn precomputePartialDotLmHeadBlocksWithBlockSize(self: *Quantized, comptime block_size: usize) !void {
+        if (block_size != partial_dot_block_size) {
+            @compileError("partial dot storage is currently specialized for partial_dot_block_size");
+        }
+        std.log.info("Precomputing partial-dot lm_head blocks block_size={d} blocks={d}", .{ partial_dot_block_size, partial_dot_block_count });
+
+        const data = self.lm_head.data;
+        for (0..self.vocab_size) |row_i| {
+            const row = data[row_i * self.d ..][0..self.d];
+            walshHadamardSimdTo(self.f32_buffer[0..self.d], row, 12);
+            for (0..partial_dot_block_count) |block_i| {
+                const block_start = block_i * partial_dot_block_size;
+                const block_offset = block_i * partial_dot_block_size * self.vocab_size;
+                const row_offset = block_offset + row_i * partial_dot_block_size;
+                @memcpy(
+                    self.partial_dot_blocks[row_offset..][0..partial_dot_block_size],
+                    self.f32_buffer[block_start..][0..partial_dot_block_size],
+                );
+            }
         }
     }
 
@@ -1501,214 +1529,6 @@ pub const Quantized = struct {
         std.log.info("2-bit abs min={d:.6} max={d:.6} rel min={d:.6} max={d:.6}", .{ min_abs_2bits, max_abs_2bits, min_rel_2bits, max_rel_2bits });
     }
 
-    inline fn dotRowF64(row: []const f32, vec: []const f64) f64 {
-        var dot: f64 = 0.0;
-        for (row, vec) |row_value, vec_value| {
-            dot += @as(f64, row_value) * vec_value;
-        }
-        return dot;
-    }
-
-    inline fn dotRowF32(row: []const f32, vec: []const f32) f64 {
-        var dot: f64 = 0.0;
-        for (row, vec) |row_value, vec_value| {
-            dot += @as(f64, row_value) * @as(f64, vec_value);
-        }
-        return dot;
-    }
-
-    pub fn precomputePhase(self: *Quantized) !void {
-        try self.precomputePhaseFiltered(default_syntax_token_id_threshold);
-    }
-
-    pub fn precomputePhaseFiltered(self: *Quantized, syntax_token_id_threshold: usize) !void {
-        std.log.info("Precompute syntax oracle token_id_threshold={d}", .{syntax_token_id_threshold});
-        const center_f64 = try self.allocator.alloc(f64, self.d);
-        defer self.allocator.free(center_f64);
-
-        @memset(center_f64, 0.0);
-        @memset(self.syntax_center, 0.0);
-        @memset(self.syntax_cluster_mask, false);
-        self.syntax_cluster_len = 0;
-        self.semantic_cluster_len = 0;
-        self.syntax_tau = std.math.nan(f32);
-        self.syntax_anchor_id = 0;
-        self.syntax_worst_semantic_id = 0;
-
-        var skipped_junk: usize = 0;
-        for (0..self.vocab_size) |token_id| {
-            if (self.lm_head.is_junk[token_id]) {
-                skipped_junk += 1;
-                continue;
-            }
-
-            const row = self.lm_head.data[token_id * self.d ..][0..self.d];
-            if (token_id >= syntax_token_id_threshold) {
-                self.semantic_cluster_ids[self.semantic_cluster_len] = @intCast(token_id);
-                self.semantic_cluster_len += 1;
-                continue;
-            }
-
-            if (self.syntax_cluster_len == 0) {
-                self.syntax_cluster_ids[0] = @intCast(token_id);
-                self.syntax_cluster_mask[token_id] = true;
-                self.syntax_cluster_len = 1;
-                for (row, center_f64) |value, *center_value| {
-                    center_value.* = @floatCast(value);
-                }
-                continue;
-            }
-
-            const dot_to_center = dotRowF64(row, center_f64);
-            if (dot_to_center > 0.0) {
-                self.syntax_cluster_ids[self.syntax_cluster_len] = @intCast(token_id);
-                self.syntax_cluster_mask[token_id] = true;
-                self.syntax_cluster_len += 1;
-
-                const inv_count = 1.0 / @as(f64, @floatFromInt(self.syntax_cluster_len));
-                for (row, center_f64) |value, *center_value| {
-                    center_value.* += (@as(f64, value) - center_value.*) * inv_count;
-                }
-            } else {
-                self.semantic_cluster_ids[self.semantic_cluster_len] = @intCast(token_id);
-                self.semantic_cluster_len += 1;
-            }
-        }
-
-        if (self.syntax_cluster_len == 0) return error.SyntaxOracleEmptySyntaxCluster;
-
-        var center_norm2: f64 = 0.0;
-        for (center_f64) |value| {
-            center_norm2 += value * value;
-        }
-        if (center_norm2 == 0.0) return error.SyntaxOracleZeroCenter;
-
-        const center_norm = @sqrt(center_norm2);
-        for (center_f64, self.syntax_center) |value, *dst| {
-            dst.* = @floatCast(value / center_norm);
-        }
-
-        var max_alignment = -std.math.inf(f64);
-        var anchor_id: usize = @intCast(self.syntax_cluster_ids[0]);
-        for (self.syntax_cluster_ids[0..self.syntax_cluster_len]) |token_u32| {
-            const token_id: usize = @intCast(token_u32);
-            const row_norm = @as(f64, self.lm_head.row_norms[token_id]);
-            if (row_norm <= 0.0) continue;
-
-            const row = self.lm_head.data[token_id * self.d ..][0..self.d];
-            const alignment = dotRowF32(row, self.syntax_center) / row_norm;
-            if (alignment > max_alignment) {
-                max_alignment = alignment;
-                anchor_id = token_id;
-            }
-        }
-
-        const anchor = self.lm_head.data[anchor_id * self.d ..][0..self.d];
-        const anchor_norm = @as(f64, self.lm_head.row_norms[anchor_id]);
-        const anchor_parallel = dotRowF32(anchor, self.syntax_center);
-        const anchor_orthogonal2 = @max(0.0, anchor_norm * anchor_norm - anchor_parallel * anchor_parallel);
-        const anchor_orthogonal = @sqrt(anchor_orthogonal2);
-
-        const right_angle: f64 = 0.5 * std.math.pi;
-        var min_theta: f64 = right_angle;
-        var worst_case_semantic_token: usize = 0;
-        for (self.semantic_cluster_ids[0..self.semantic_cluster_len]) |token_u32| {
-            const token_id: usize = @intCast(token_u32);
-            const row_norm = @as(f64, self.lm_head.row_norms[token_id]);
-            if (row_norm <= 0.0) continue;
-
-            const row = self.lm_head.data[token_id * self.d ..][0..self.d];
-            const parallel = dotRowF32(row, self.syntax_center);
-            const orthogonal2 = @max(0.0, row_norm * row_norm - parallel * parallel);
-            const orthogonal = @sqrt(orthogonal2);
-
-            const numerator = anchor_parallel - parallel;
-            const denominator = anchor_orthogonal + orthogonal;
-            const theta = if (numerator <= 0.0)
-                0.0
-            else if (denominator <= 0.0)
-                right_angle
-            else
-                std.math.atan(numerator / denominator);
-
-            if (theta < min_theta) {
-                min_theta = theta;
-                worst_case_semantic_token = token_id;
-            }
-        }
-
-        self.syntax_tau = @floatCast(@cos(min_theta));
-        self.syntax_anchor_id = @intCast(anchor_id);
-        self.syntax_worst_semantic_id = @intCast(worst_case_semantic_token);
-
-        std.log.info(
-            "syntax oracle: syntax={d} semantic={d} junk={d} tau={d:.8} theta={d:.6} anchor={d} anchor_alignment={d:.6} worst_semantic={d}",
-            .{
-                self.syntax_cluster_len,
-                self.semantic_cluster_len,
-                skipped_junk,
-                self.syntax_tau,
-                min_theta,
-                anchor_id,
-                max_alignment,
-                worst_case_semantic_token,
-            },
-        );
-        if (self.syntax_tau > 0.99) {
-            std.log.warn("syntax oracle tau is very high; worst semantic token may sit on the syntax boundary", .{});
-        }
-    }
-
-    pub fn precompute_phase(self: *Quantized) !void {
-        try self.precomputePhase();
-    }
-
-    pub fn precompute_phase_filtered(self: *Quantized, syntax_token_id_threshold: usize) !void {
-        try self.precomputePhaseFiltered(syntax_token_id_threshold);
-    }
-
-    pub fn syntaxOracleCosTheta(self: *Quantized, query: []const f32) f32 {
-        std.debug.assert(self.syntax_cluster_len > 0);
-        std.debug.assert(query.len == self.d);
-
-        var dot: f64 = 0.0;
-        var norm2: f64 = 0.0;
-        for (query, self.syntax_center) |query_value, center_value| {
-            dot += @as(f64, query_value) * @as(f64, center_value);
-            norm2 += @as(f64, query_value) * @as(f64, query_value);
-        }
-        if (norm2 == 0.0) return 0.0;
-        return @floatCast(dot / @sqrt(norm2));
-    }
-
-    pub fn syntaxOraclePredictsSyntax(self: *Quantized, query: []const f32) bool {
-        return self.syntaxOracleCosTheta(query) > self.syntax_tau;
-    }
-
-    pub fn sampleSyntaxOracleDetailed(self: *Quantized, query: []const f32) SyntaxOracleSample {
-        const cos_theta = self.syntaxOracleCosTheta(query);
-        const predicted_syntax = cos_theta > self.syntax_tau;
-        const dense = self.sampleDense(query);
-        const top1 = dense.rows[0];
-        const top1_is_syntax = self.syntax_cluster_mask[top1];
-        return .{
-            .correct = predicted_syntax == top1_is_syntax,
-            .safe = !predicted_syntax or top1_is_syntax,
-            .predicted_syntax = predicted_syntax,
-            .top1_is_syntax = top1_is_syntax,
-            .top1 = top1,
-            .cos_theta = cos_theta,
-        };
-    }
-
-    pub fn sampleSyntaxOracle(self: *Quantized, query: []const f32) bool {
-        return self.sampleSyntaxOracleDetailed(query).correct;
-    }
-
-    pub fn sample_token(self: *Quantized, query: []const f32) bool {
-        return self.sampleSyntaxOracle(query);
-    }
-
     pub fn sampleDense(self: *Quantized, query: []const f32) DenseSample {
         var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
         var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
@@ -2283,6 +2103,22 @@ pub const Quantized = struct {
         scores.* = [_]f32{-std.math.inf(f32)} ** k;
     }
 
+    inline fn dotPartialDotBlock(
+        query_block: *const [partial_dot_block_size]f32,
+        row_block: *const [partial_dot_block_size]f32,
+    ) f32 {
+        const simd_len = 16;
+        const Vec = @Vector(simd_len, f32);
+        var acc: Vec = @splat(0);
+        var i: usize = 0;
+        while (i + simd_len <= partial_dot_block_size) : (i += simd_len) {
+            const query_v: Vec = query_block[i..][0..simd_len].*;
+            const row_v: Vec = row_block[i..][0..simd_len].*;
+            acc = @mulAdd(Vec, query_v, row_v, acc);
+        }
+        return @reduce(.Add, acc);
+    }
+
     inline fn exactScorePhaseTopK(
         comptime k: usize,
         self: *Quantized,
@@ -2310,6 +2146,160 @@ pub const Quantized = struct {
         }
     }
 
+    pub fn sampleMultiPhasePartialDotEstimator(self: *Quantized, query: []const f32) !TwoPhaseSample {
+        return self.sampleMultiPhasePartialDot(query);
+    }
+
+    pub fn sampleMultiPhasePartialDot(self: *Quantized, query: []const f32) !TwoPhaseSample {
+        std.debug.assert(query.len == self.d);
+
+        const phase_exact_top_k = partial_dot_phase_exact_top_k;
+        const vocab_size = self.vocab_size;
+        const d = self.d;
+        const lm_head = self.lm_head;
+        const lm_data = lm_head.data;
+        const lm_data_t = lm_head.data_t;
+        const is_junk = lm_head.is_junk;
+        const active_rows = self.active_rows;
+        const partial_logits = self.partial_logits;
+        const residual_logits = self.partial_dot_residual_logits;
+        const dense_logits = self.dense_logits;
+        const prefix_coord_count = partial_dot_prefix_coord_count;
+
+        var prefix_coords: [prefix_coord_count]usize = [_]usize{0} ** prefix_coord_count;
+        var prefix_scores: [prefix_coord_count]f32 = [_]f32{-std.math.inf(f32)} ** prefix_coord_count;
+
+        // Phase 0a: find the largest raw query coordinates for exact prefix scoring.
+        for (0..d) |coord| {
+            insertTopK(prefix_coord_count, coord, @abs(query[coord]), &prefix_coords, &prefix_scores);
+        }
+
+        // Phase 0b: compute the exact lm_head contribution of the raw coordinate prefix.
+        @memset(partial_logits, 0.0);
+        const simd_len = 16;
+        const Vec = @Vector(simd_len, f32);
+        for (0..prefix_coord_count) |prefix_i| {
+            if (prefix_scores[prefix_i] == -std.math.inf(f32)) break;
+            const query_coord = prefix_coords[prefix_i];
+            const query_value = query[query_coord];
+            const coord_values = lm_data_t[query_coord * vocab_size ..][0..vocab_size];
+            const query_vec: Vec = @splat(query_value);
+
+            var row_i: usize = 0;
+            while (row_i + simd_len <= vocab_size) : (row_i += simd_len) {
+                const coord_vec: Vec = coord_values[row_i..][0..simd_len].*;
+                var logits_vec: Vec = partial_logits[row_i..][0..simd_len].*;
+                logits_vec = @mulAdd(Vec, coord_vec, query_vec, logits_vec);
+                partial_logits[row_i..][0..simd_len].* = logits_vec;
+            }
+            while (row_i < vocab_size) : (row_i += 1) {
+                partial_logits[row_i] += coord_values[row_i] * query_value;
+            }
+        }
+
+        // Phase 0c: zero the exact prefix coordinates before residual rotation.
+        @memcpy(self.f32_buffer[0..d], query);
+        for (0..prefix_coord_count) |prefix_i| {
+            if (prefix_scores[prefix_i] == -std.math.inf(f32)) break;
+            self.f32_buffer[prefix_coords[prefix_i]] = 0.0;
+        }
+
+        // Phase 1 setup: rotate the residual query globally. Exact partial blocks are sampled from this rotated space.
+        try self.walshHadamardSimd(self.f32_buffer[0..d], 12);
+        var residual_query_norm2: f32 = 0.0;
+        for (self.f32_buffer[0..d]) |value| {
+            residual_query_norm2 += value * value;
+        }
+        const residual_query_norm = @sqrt(residual_query_norm2);
+
+        var active_count: usize = 0;
+        for (0..vocab_size) |row_i| {
+            if (is_junk[row_i]) {
+                dense_logits[row_i] = -std.math.inf(f32);
+                continue;
+            }
+            active_rows[active_count] = @intCast(row_i);
+            active_count += 1;
+            residual_logits[row_i] = 0.0;
+            dense_logits[row_i] = std.math.inf(f32);
+        }
+
+        var phase_rows: [phase_exact_top_k]usize = [_]usize{0} ** phase_exact_top_k;
+        var phase_scores: [phase_exact_top_k]f32 = [_]f32{-std.math.inf(f32)} ** phase_exact_top_k;
+        var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
+        var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
+        var pruned_by_phase: [partial_dot_block_count]usize = [_]usize{0} ** partial_dot_block_count;
+
+        const z_score: f32 = 5.0;
+        const d_f32: f32 = @floatFromInt(d);
+
+        var best_lower_bound: f32 = -std.math.inf(f32);
+        var nb_scored: usize = 0;
+        var nb_partial_dot_scored: usize = 0;
+        var nb_partial_dot_pruned: usize = 0;
+
+        for (0..partial_dot_block_count) |phase_i| {
+            if (active_count == 0) break;
+
+            const block_i = phase_i;
+            const block_start = block_i * partial_dot_block_size;
+            const block_offset = block_i * partial_dot_block_size * vocab_size;
+            const query_block = self.f32_buffer[block_start..][0..partial_dot_block_size];
+            const scored_dim = (phase_i + 1) * partial_dot_block_size;
+            const scored_dim_f32: f32 = @floatFromInt(scored_dim);
+            const remaining_dim = d - scored_dim;
+            const remaining_dim_f32: f32 = @floatFromInt(remaining_dim);
+            const estimator_scale = d_f32 / scored_dim_f32;
+            const err_scale = if (remaining_dim == 0)
+                0.0
+            else
+                z_score * @sqrt(remaining_dim_f32 / d_f32) / @sqrt(scored_dim_f32);
+
+            resetTopK(phase_exact_top_k, &phase_rows, &phase_scores);
+            for (active_rows[0..active_count]) |row_u32| {
+                const row_i: usize = @intCast(row_u32);
+                const row_block = self.partial_dot_blocks[block_offset + row_i * partial_dot_block_size ..][0..partial_dot_block_size];
+                residual_logits[row_i] += dotPartialDotBlock(query_block, row_block);
+                nb_partial_dot_scored += 1;
+                const approx = partial_logits[row_i] + estimator_scale * residual_logits[row_i];
+                const err = err_scale * residual_query_norm * lm_head.row_norms[row_i];
+                dense_logits[row_i] = approx + err;
+                insertTopK(phase_exact_top_k, row_i, approx, &phase_rows, &phase_scores);
+            }
+
+            exactScorePhaseTopK(phase_exact_top_k, self, query, &phase_rows, &phase_scores, &top_rows, &top_scores, &best_lower_bound, &nb_scored);
+
+            var next_active_count: usize = 0;
+            for (active_rows[0..active_count]) |row_u32| {
+                const row_i: usize = @intCast(row_u32);
+                active_rows[next_active_count] = row_u32;
+                next_active_count += @intFromBool(dense_logits[row_i] >= best_lower_bound);
+            }
+            const phase_pruned = active_count - next_active_count;
+            pruned_by_phase[phase_i] = phase_pruned;
+            nb_partial_dot_pruned += phase_pruned;
+            active_count = next_active_count;
+        }
+
+        for (active_rows[0..active_count]) |row_u32| {
+            const row_i: usize = @intCast(row_u32);
+            if (dense_logits[row_i] < best_lower_bound) continue;
+            const row = lm_data[row_i * d ..][0..d];
+            const real = self.realLogit(query, row);
+            nb_scored += 1;
+            best_lower_bound = @max(best_lower_bound, real);
+            insertTop16(row_i, real, &top_rows, &top_scores);
+        }
+
+        return .{
+            .rows = top_rows,
+            .nb_scored = nb_scored,
+            .nb_partial_dot_scored = nb_partial_dot_scored,
+            .nb_partial_dot_pruned = nb_partial_dot_pruned,
+            .partial_dot_pruned_by_phase = pruned_by_phase,
+        };
+    }
+
     pub fn sample5PhasesOptimized(self: *Quantized, query: []const f32) !TwoPhaseSample {
         std.debug.assert(query.len == self.d);
         const prefix_coord_count = 12;
@@ -2333,6 +2323,14 @@ pub const Quantized = struct {
         var top_rows: [top_k_sliced]usize = [_]usize{0} ** top_k_sliced;
         var top_scores: [top_k_sliced]f32 = [_]f32{-std.math.inf(f32)} ** top_k_sliced;
 
+        if (true) return .{
+            .rows = top_rows,
+            .nb_scored = 0,
+            .nb_1bit_scored = 0,
+            .nb_half_1bit_scored = 0,
+            .nb_2bit_scored = 0,
+        };
+        
         // Phase 0a: find the largest raw query coordinates for exact prefix scoring.
         //self.zml_handler.tic(&self.zml_handler.timers.quant_5p_prefix_top);
         for (0..d) |coord| {
