@@ -14,11 +14,15 @@ const save_load = @import("saveload.zig");
 const tokens = @import("tokens.zig");
 const sampling = @import("sampling.zig");
 const quantized = @import("quantized.zig");
+const productq = @import("productq.zig");
 
 const LmHeadMatrix = algebra.LmHeadMatrix;
 const Graph = graph.Graph;
 const Sampler = sampling.Sampler;
 const Quantized = quantized.Quantized;
+const ProductQuantizer = productq.ProductQuantizer;
+const AnisotropicProductQuantizer = productq.AnisotropicProductQuantizer;
+const NormDirectionPQ = productq.NormDirectionPQ;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -139,6 +143,10 @@ pub const Timing_handler = struct {
     quant_vec: Field_timer = .{},
     quant_slice_dot: Field_timer = .{},
     quant_walsh: Field_timer = .{},
+    pq_rotate: Field_timer = .{},
+    pq_lut: Field_timer = .{},
+    pq_score: Field_timer = .{},
+    pq_top_k: Field_timer = .{},
     quant_5p_prefix_top: Field_timer = .{},
     quant_5p_prefix_dot: Field_timer = .{},
     quant_5p_quantize: Field_timer = .{},
@@ -177,6 +185,10 @@ pub const Timing_handler = struct {
         std.log.info("Quant vec     : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_vec.nanoseconds)) / 1e9});
         std.log.info("Bit slice dot : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_slice_dot.nanoseconds)) / 1e9});
         std.log.info("Quant walsh   : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_walsh.nanoseconds)) / 1e9});
+        std.log.info("PQ rotate     : {d:>6.2}s", .{@as(f64, @floatFromInt(self.pq_rotate.nanoseconds)) / 1e9});
+        std.log.info("PQ LUT        : {d:>6.2}s", .{@as(f64, @floatFromInt(self.pq_lut.nanoseconds)) / 1e9});
+        std.log.info("PQ score      : {d:>6.2}s", .{@as(f64, @floatFromInt(self.pq_score.nanoseconds)) / 1e9});
+        std.log.info("PQ topK       : {d:>6.2}s", .{@as(f64, @floatFromInt(self.pq_top_k.nanoseconds)) / 1e9});
         std.log.info("5p prefix top : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_prefix_top.nanoseconds)) / 1e9});
         std.log.info("5p prefix dot : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_prefix_dot.nanoseconds)) / 1e9});
         std.log.info("5p quantize   : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_quantize.nanoseconds)) / 1e9});
@@ -266,12 +278,14 @@ pub fn main(init: std.process.Init) !void {
 
     //try runLlm(&zml_handler);
     //try runTestsGraph(&zml_handler);
-    try runTestsQuantized(&zml_handler);
+    try runTestsQuantizedPQ(&zml_handler);
     //try runTestsSvd(&zml_handler);
     //try runTestsQuantizedGraph(&zml_handler);
+    //try runTestsQuantized(&zml_handler);
 
     zml_handler.timers.print();
 }
+
 
 pub fn runLlm(zml_handler: *Zml_handler) !void {
     var llm = try llm_.Llm_handler.init(zml_handler);
@@ -306,10 +320,28 @@ pub fn runTestsQuantized(zml_handler: *Zml_handler) !void {
 
     try quantizer.quantizeQjlLmHead();
     try quantizer.quantizeQjlLmHead2Bits();
+    try quantizer.precomputePartialDotLmHeadBlocks();
     //try quantizer.testQjlReconstructionError();
-    try quantizer.precomputePhaseFiltered(1000);
 
     try testEmbedQuantizedSearch(zml_handler, &quantizer);
+}
+
+pub fn runTestsQuantizedPQ(zml_handler: *Zml_handler) !void {
+    var model_handler = try model_.Model_handler.init(zml_handler);
+    defer model_handler.deinit(zml_handler.allocator);
+    defer model_handler.unloadBuffers();
+
+    std.log.info("Get lm_head", .{});
+    var lm_head = try algebra.getLmHead(zml_handler);
+    defer LmHeadMatrix.deinit(&lm_head, zml_handler.allocator);
+
+    std.log.info("Init Product Quantizer", .{});
+    var quantizer = try productq.AnisotropicProductQuantizer.init(zml_handler, &lm_head);
+    defer quantizer.deinit();
+
+    try quantizer.buildCodebook();
+
+    try testEmbedQuantizedPQSearch(zml_handler, &quantizer);
 }
 
 pub fn runTestsSvd(zml_handler: *Zml_handler) !void {
@@ -478,6 +510,7 @@ pub fn runTestsQuantizedGraph(zml_handler: *Zml_handler) !void {
     //try g_nsw.extendNswRandom(&quantizer);
     //try testEmbedGraphQuantizedSearch(zml_handler, &g_nsw, &quantizer);
 }
+
 
 pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *Graph, _: *Sampler, s: []const u8) !void {
     std.log.info("\n********** Test embed graph search with graph = {s}", .{s});
@@ -874,6 +907,61 @@ pub fn testEmbedSvdSearch(zml_handler: *Zml_handler, svd: *svd_.SvdSampler) !voi
 pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized) !void {
     std.log.info("Test embed Quantized search", .{});
 
+    const PartialDotStats = struct {
+        label: []const u8,
+        found_top1: usize = 0,
+        missing_top16: usize = 0,
+        total_dense_scored: usize = 0,
+        total_partial_scored: usize = 0,
+        total_pruned: usize = 0,
+        total_pruned_by_phase: [quantized.partial_dot_block_count]usize = [_]usize{0} ** quantized.partial_dot_block_count,
+        min_dense_scored: usize = std.math.maxInt(usize),
+        max_dense_scored: usize = 0,
+        min_partial_scored: usize = std.math.maxInt(usize),
+        max_partial_scored: usize = 0,
+        min_pruned: usize = std.math.maxInt(usize),
+        max_pruned: usize = 0,
+
+        fn record(self: *@This(), sample: quantized.TwoPhaseSample, top1_token: usize) void {
+            self.total_dense_scored += sample.nb_scored;
+            self.total_partial_scored += sample.nb_partial_dot_scored;
+            self.total_pruned += sample.nb_partial_dot_pruned;
+            for (sample.partial_dot_pruned_by_phase, 0..) |pruned, phase_i| {
+                self.total_pruned_by_phase[phase_i] += pruned;
+            }
+            self.min_dense_scored = @min(self.min_dense_scored, sample.nb_scored);
+            self.max_dense_scored = @max(self.max_dense_scored, sample.nb_scored);
+            self.min_partial_scored = @min(self.min_partial_scored, sample.nb_partial_dot_scored);
+            self.max_partial_scored = @max(self.max_partial_scored, sample.nb_partial_dot_scored);
+            self.min_pruned = @min(self.min_pruned, sample.nb_partial_dot_pruned);
+            self.max_pruned = @max(self.max_pruned, sample.nb_partial_dot_pruned);
+
+            for (sample.rows) |tok| {
+                if (tok == top1_token) {
+                    self.found_top1 += 1;
+                    return;
+                }
+            }
+            self.missing_top16 += 1;
+        }
+
+        fn log(self: @This(), total_count: usize) void {
+            const inv_total = 1.0 / @as(f64, @floatFromInt(total_count));
+            const percent_found = 100.0 * @as(f64, @floatFromInt(self.found_top1)) * inv_total;
+            const avg_dense_scored = @as(f64, @floatFromInt(self.total_dense_scored)) * inv_total;
+            const avg_partial_scored = @as(f64, @floatFromInt(self.total_partial_scored)) * inv_total;
+            const avg_pruned = @as(f64, @floatFromInt(self.total_pruned)) * inv_total;
+
+            std.log.info("{s} found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ self.label, self.found_top1, percent_found, self.missing_top16 });
+            std.log.info("{s} row-block scored: min={d} max={d} avg={d:.2}", .{ self.label, self.min_partial_scored, self.max_partial_scored, avg_partial_scored });
+            std.log.info("{s} rows pruned: min={d} max={d} avg={d:.2}", .{ self.label, self.min_pruned, self.max_pruned, avg_pruned });
+            std.log.info("{s} dense exact scored rows: min={d} max={d} avg={d:.2}", .{ self.label, self.min_dense_scored, self.max_dense_scored, avg_dense_scored });
+            for (self.total_pruned_by_phase, 0..) |phase_pruned, phase_i| {
+                std.log.info("{s} phase {d:>2} pruned: total={d} avg={d:.2}", .{ self.label, phase_i + 1, phase_pruned, @as(f64, @floatFromInt(phase_pruned)) * inv_total });
+            }
+        }
+    };
+
     const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
     var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
     defer tokenizer.deinit();
@@ -884,10 +972,6 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
     var found_top1_3phases_count: usize = 0;
     var found_top1_4phases_count: usize = 0;
     var found_top1_5phases_count: usize = 0;
-    var syntax_oracle_pred_syntax_top1_syntax_count: usize = 0;
-    var syntax_oracle_pred_syntax_top1_outside_count: usize = 0;
-    var syntax_oracle_pred_full_top1_syntax_count: usize = 0;
-    var syntax_oracle_pred_full_top1_outside_count: usize = 0;
     var missing_top16_1bit_count: usize = 0;
     var missing_top16_2bits_count: usize = 0;
     var missing_top16_3phases_count: usize = 0;
@@ -923,6 +1007,7 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
     var max_2bit_scored_3phases: usize = 0;
     var max_2bit_scored_4phases: usize = 0;
     var max_2bit_scored_5phases: usize = 0;
+    var partial_dot_estimator_stats: PartialDotStats = .{ .label = "partial-dot estimator" };
 
     const tasks_id = [5]u8{ 0, 1, 2, 3, 4 };
 
@@ -960,12 +1045,11 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
             const sample_2bits = try quantizer.sample2Phase2Bits(embed);
             const sample_3phases = try quantizer.sample3Phases(embed);
             const sample_4phases = try quantizer.sample4Phases(embed);
+            const sample_5phases = try quantizer.sample5PhasesOptimized(embed);
 
             zml_handler.tic(&zml_handler.timers.quant_search);
-            const sample_5phases = try quantizer.sample5PhasesOptimized(embed);
+            const sample_partial_dot_estimator = try quantizer.sampleMultiPhasePartialDot(embed);
             zml_handler.toc(&zml_handler.timers.quant_search);
-
-            const syntax_oracle = quantizer.sampleSyntaxOracleDetailed(embed);
 
             if (sample_1bit.nb_scored > 93340) {
                 try quantizer.sample2Phase1BitLog(embed, &tokenizer);
@@ -981,15 +1065,6 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
 
             zml_handler.timers.nb_detokenize += 1;
             total_count += 1;
-            if (syntax_oracle.predicted_syntax and syntax_oracle.top1_is_syntax) {
-                syntax_oracle_pred_syntax_top1_syntax_count += 1;
-            } else if (syntax_oracle.predicted_syntax and !syntax_oracle.top1_is_syntax) {
-                syntax_oracle_pred_syntax_top1_outside_count += 1;
-            } else if (!syntax_oracle.predicted_syntax and syntax_oracle.top1_is_syntax) {
-                syntax_oracle_pred_full_top1_syntax_count += 1;
-            } else {
-                syntax_oracle_pred_full_top1_outside_count += 1;
-            }
 
             total_dense_scored_1bit += sample_1bit.nb_scored;
             total_dense_scored_2bits += sample_2bits.nb_scored;
@@ -1001,6 +1076,7 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
             total_2bit_scored_3phases += sample_3phases.nb_2bit_scored;
             total_2bit_scored_4phases += sample_4phases.nb_2bit_scored;
             total_2bit_scored_5phases += sample_5phases.nb_2bit_scored;
+            partial_dot_estimator_stats.record(sample_partial_dot_estimator, top1_token);
             min_dense_scored_1bit = @min(min_dense_scored_1bit, sample_1bit.nb_scored);
             min_dense_scored_2bits = @min(min_dense_scored_2bits, sample_2bits.nb_scored);
             min_dense_scored_3phases = @min(min_dense_scored_3phases, sample_3phases.nb_scored);
@@ -1096,10 +1172,6 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
     const percent_found_3phases = 100.0 * @as(f64, @floatFromInt(found_top1_3phases_count)) * inv_total;
     const percent_found_4phases = 100.0 * @as(f64, @floatFromInt(found_top1_4phases_count)) * inv_total;
     const percent_found_5phases = 100.0 * @as(f64, @floatFromInt(found_top1_5phases_count)) * inv_total;
-    const percent_syntax_oracle_pred_syntax_top1_syntax = 100.0 * @as(f64, @floatFromInt(syntax_oracle_pred_syntax_top1_syntax_count)) * inv_total;
-    const percent_syntax_oracle_pred_syntax_top1_outside = 100.0 * @as(f64, @floatFromInt(syntax_oracle_pred_syntax_top1_outside_count)) * inv_total;
-    const percent_syntax_oracle_pred_full_top1_syntax = 100.0 * @as(f64, @floatFromInt(syntax_oracle_pred_full_top1_syntax_count)) * inv_total;
-    const percent_syntax_oracle_pred_full_top1_outside = 100.0 * @as(f64, @floatFromInt(syntax_oracle_pred_full_top1_outside_count)) * inv_total;
     const avg_dense_scored_1bit = @as(f64, @floatFromInt(total_dense_scored_1bit)) * inv_total;
     const avg_dense_scored_2bits = @as(f64, @floatFromInt(total_dense_scored_2bits)) * inv_total;
     const avg_dense_scored_3phases = @as(f64, @floatFromInt(total_dense_scored_3phases)) * inv_total;
@@ -1116,10 +1188,7 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
     std.log.info("3-phase found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_3phases_count, percent_found_3phases, missing_top16_3phases_count });
     std.log.info("4-phase found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_4phases_count, percent_found_4phases, missing_top16_4phases_count });
     std.log.info("5-phase found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_5phases_count, percent_found_5phases, missing_top16_5phases_count });
-    std.log.info("syntax oracle predicted=syntax top1=syntax  : {d} ({d:.4}%)", .{ syntax_oracle_pred_syntax_top1_syntax_count, percent_syntax_oracle_pred_syntax_top1_syntax });
-    std.log.info("syntax oracle predicted=syntax top1=outside : {d} ({d:.4}%)", .{ syntax_oracle_pred_syntax_top1_outside_count, percent_syntax_oracle_pred_syntax_top1_outside });
-    std.log.info("syntax oracle predicted=full   top1=syntax  : {d} ({d:.4}%)", .{ syntax_oracle_pred_full_top1_syntax_count, percent_syntax_oracle_pred_full_top1_syntax });
-    std.log.info("syntax oracle predicted=full   top1=outside : {d} ({d:.4}%)", .{ syntax_oracle_pred_full_top1_outside_count, percent_syntax_oracle_pred_full_top1_outside });
+    partial_dot_estimator_stats.log(total_count);
     std.log.info("1-bit dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored_1bit, max_dense_scored_1bit, avg_dense_scored_1bit });
     std.log.info("2-bit dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored_2bits, max_dense_scored_2bits, avg_dense_scored_2bits });
     std.log.info("3-phase 2-bit approx scored rows: min={d} max={d} avg={d:.2}", .{ min_2bit_scored_3phases, max_2bit_scored_3phases, avg_2bit_scored_3phases });
@@ -1130,6 +1199,108 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
     std.log.info("5-phase full 1-bit approx scored rows: min={d} max={d} avg={d:.2}", .{ min_1bit_scored_5phases, max_1bit_scored_5phases, avg_1bit_scored_5phases });
     std.log.info("5-phase 2-bit approx scored rows: min={d} max={d} avg={d:.2}", .{ min_2bit_scored_5phases, max_2bit_scored_5phases, avg_2bit_scored_5phases });
     std.log.info("5-phase dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored_5phases, max_dense_scored_5phases, avg_dense_scored_5phases });
+}
+
+pub fn testEmbedQuantizedPQSearch(zml_handler: *Zml_handler, quantizer_: *AnisotropicProductQuantizer) !void {
+    std.log.info("Test embed ProductQuantized search", .{});
+
+    const quantizer = quantizer_.base;
+
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+    var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
+    defer tokenizer.deinit();
+
+    var sampler: Sampler = try .init(zml_handler, quantizer.lm_head);
+    defer Sampler.deinit(&sampler);
+
+    var total_count: usize = 0;
+    var found_top1_count: usize = 0;
+    var missing_top16_count: usize = 0;
+    var total_dense_scored: usize = 0;
+    var total_pq_scored: usize = 0;
+    var total_pruned: usize = 0;
+    var min_dense_scored: usize = std.math.maxInt(usize);
+    var max_dense_scored: usize = 0;
+    var min_pq_scored: usize = std.math.maxInt(usize);
+    var max_pq_scored: usize = 0;
+    var min_pruned: usize = std.math.maxInt(usize);
+    var max_pruned: usize = 0;
+
+    const tasks_id = [5]u8{ 0, 1, 2, 3, 4 };
+    for (tasks_id) |task_id| {
+        const task = switch (task_id) {
+            0 => "coding",
+            1 => "history",
+            2 => "math",
+            3 => "story",
+            4 => "translate",
+            else => return error.InvalidTask,
+        };
+        const top1 = switch (task_id) {
+            0 => codingTop1(),
+            1 => historyTop1(),
+            2 => mathTop1(),
+            3 => storyTop1(),
+            4 => translateTop1(),
+            else => return error.InvalidTask,
+        };
+
+        const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds.safetensors", task, .f32, true);
+        defer embed_slice.free(zml_handler.allocator);
+
+        const n: usize = @intCast(embed_slice.shape.dims()[0]);
+        const d: usize = @intCast(embed_slice.shape.dims()[1]);
+
+        std.log.info("Test product quantized sampling task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
+        for (0..n) |embed_index| {
+            const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
+            const top1_token = top1[embed_index];
+
+            zml_handler.timers.nb_detokenize += 1;
+            zml_handler.tic(&zml_handler.timers.quant_search);
+            if (embed_index < 5) quantizer_.sampleLog(&sampler, embed);
+            const pq_sample = quantizer_.sample(embed);
+            zml_handler.toc(&zml_handler.timers.quant_search);
+
+            total_count += 1;
+            total_dense_scored += pq_sample.nb_dense_scored;
+            total_pq_scored += pq_sample.nb_pq_scored;
+            total_pruned += pq_sample.nb_pruned;
+            min_dense_scored = @min(min_dense_scored, pq_sample.nb_dense_scored);
+            max_dense_scored = @max(max_dense_scored, pq_sample.nb_dense_scored);
+            min_pq_scored = @min(min_pq_scored, pq_sample.nb_pq_scored);
+            max_pq_scored = @max(max_pq_scored, pq_sample.nb_pq_scored);
+            min_pruned = @min(min_pruned, pq_sample.nb_pruned);
+            max_pruned = @max(max_pruned, pq_sample.nb_pruned);
+
+            var found_top1 = false;
+            for (pq_sample.top_k) |logit| {
+                if (logit.row == top1_token) {
+                    found_top1 = true;
+                    break;
+                }
+            }
+
+            if (found_top1) {
+                found_top1_count += 1;
+            } else {
+                missing_top16_count += 1;
+            }
+        }
+    }
+
+    const inv_total = 1.0 / @as(f64, @floatFromInt(total_count));
+    const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) * inv_total;
+    const avg_dense_scored = @as(f64, @floatFromInt(total_dense_scored)) * inv_total;
+    const avg_pq_scored = @as(f64, @floatFromInt(total_pq_scored)) * inv_total;
+    const avg_pruned = @as(f64, @floatFromInt(total_pruned)) * inv_total;
+    std.log.info("Embed product quantized search: total={d}", .{total_count});
+    std.log.info("PQ prune found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_count, percent_found, missing_top16_count });
+    std.log.info("PQ row-bucket scored: min={d} max={d} avg={d:.2}", .{ min_pq_scored, max_pq_scored, avg_pq_scored });
+    std.log.info("PQ rows pruned: min={d} max={d} avg={d:.2}", .{ min_pruned, max_pruned, avg_pruned });
+    std.log.info("PQ dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored, max_dense_scored, avg_dense_scored });
+    std.log.info("Query norm min={d} max={d}", .{ quantizer.min_norm, quantizer.max_norm });
+    std.log.info("Bucket dot min={d} max={d}", .{ quantizer.min_bucket, quantizer.max_bucket });
 }
 
 pub fn testEmbedGraphQuantizedSearch(zml_handler: *Zml_handler, g: *Graph, quantizer: *Quantized) !void {
@@ -1221,6 +1392,7 @@ pub fn testEmbedGraphQuantizedSearch(zml_handler: *Zml_handler, g: *Graph, quant
     }
     std.log.info("Embed graph search nb_visited: min={d} max={d} avg={d:.2}", .{ min_visited, max_visited, average_visit });
 }
+
 
 fn rotateEmbedding(u: zml.Slice, embed: []const f32, rot_embed: []f32) void {
     const d = embed.len;
