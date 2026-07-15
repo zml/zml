@@ -18,6 +18,10 @@ const testing = @import("testing.zig");
 
 const log = std.log.scoped(.zml);
 
+test {
+    std.testing.refAllDecls(Buffer);
+}
+
 /// Buffer is a multi-dimension array, whose memory is allocated on an accelerator.
 ///
 /// * contains a handle that the ZML runtime can use to convert into a physical address, but there is no guarantee this address is visible from the CPU.
@@ -118,7 +122,7 @@ pub const Buffer = struct {
         const slice = Slice.init(sh, data_);
         const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
 
-        const placement = try res._sharding.placement(sh);
+        const placement = placementOrPanic(res._sharding, sh);
         const shard_dims: []const i64 = placement.shape.dims();
         const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
@@ -204,7 +208,7 @@ pub const Buffer = struct {
 
         stdx.debug.assert(platform.devices[0].memory(opts.memory) != null, "Device doesn't have {} memory", .{opts.memory});
         const element_type = pjrtx.bufferTypeFromDtype(sh.dtype());
-        const placement = try res._sharding.placement(sh);
+        const placement = placementOrPanic(res._sharding, sh);
         const shard_dims: []const i64 = placement.shape.dims();
         const layout = platform.defaultMemoryLayout(shard_dims, sh.dtype());
 
@@ -253,7 +257,7 @@ pub const Buffer = struct {
     pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
         stdx.debug.assert(self._shape.eql(slice.shape), "Buffer shape {f} doesn't match destination slice {f}", .{ self._shape, slice.shape });
 
-        const placement = try self._sharding.placement(self._shape);
+        const placement = placementOrPanic(self._sharding, self._shape);
         for (self._sharding.devicesInCanonicalOrder(), 0..) |device, shard_index| {
             // TODO: handle replicated information, we shouldn't iterate over all the devices unless needed
             const sub_slice = placement.shardSlice(device.coords, slice);
@@ -275,36 +279,107 @@ pub const Buffer = struct {
         const slice = try Slice.alloc(allocator, self.shape());
         errdefer slice.free(allocator);
 
-        const placement = try self._sharding.placement(self._shape);
+        const placement = placementOrPanic(self._sharding, self._shape);
+
+        var shard_slice = try Slice.alloc(allocator, placement.shape);
+        defer shard_slice.free(allocator);
+
         for (self._sharding.devicesInCanonicalOrder(), 0..) |device, shard_index| {
             const sub_slice = placement.shardSlice(device.coords, slice);
-
-            var shard_slice = try Slice.alloc(allocator, sub_slice.shape);
-            defer shard_slice.free(allocator);
-
             const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, shard_slice.data());
             if (maybe_event) |event| {
                 try event.await(self._platform.pjrt_api, io);
             }
 
+            // TODO: why is this using Slice.copy while `toSlice` errors out ?
+            // TODO: why is this writing in a copy rather than directly in place.
             sub_slice.copy(shard_slice.constData());
         }
 
         return slice;
     }
 
+    /// The memory used by this Buffer across all devices
+    /// ie: `num_devices * shard_byte_size`
+    /// `shard_byte_size` can be up to `self.shape().byteSize()` when the buffer is fully replicated.
     pub fn byteSize(self: Buffer) usize {
-        var byte_size: usize = 0;
-
-        for (self._sharding.devicesInCanonicalOrder()) |device| {
-            const placement = self._sharding.placement(self._shape, device) catch unreachable;
-            byte_size += placement.shape.byteSize();
-        }
-
-        return byte_size;
+        const placement = placementOrPanic(self._sharding, self._shape);
+        return placement.shape.byteSize() * self._sharding.devicesInCanonicalOrder().len;
     }
 
     pub fn opaqueDevicePtr(self: Buffer, device_id: usize) *anyopaque {
         return self._shards.get(device_id).opaqueDeviceMemoryDataPointer(self._platform.pjrt_api) catch unreachable;
     }
 };
+
+test "device round-trip" {
+    const zml = @import("zml.zig");
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const platform = zml.testing.env();
+
+    const x: [8][8]u32 = .{
+        .{ 0, 1, 2, 3, 4, 5, 6, 7 },
+        .{ 8, 9, 10, 11, 12, 13, 14, 15 },
+        .{ 16, 17, 18, 19, 20, 21, 22, 23 },
+        .{ 24, 25, 26, 27, 28, 29, 30, 31 },
+        .{ 32, 33, 34, 35, 36, 37, 38, 39 },
+        .{ 40, 41, 42, 43, 44, 45, 46, 47 },
+        .{ 48, 49, 50, 51, 52, 53, 54, 55 },
+        .{ 56, 57, 58, 59, 60, 61, 62, 63 },
+    };
+
+    const x_h: zml.Slice = .init(.withPartitioning(
+        .init(.{ .b = 8, .d = 8 }, .u32),
+        .{ .b = .model },
+    ), std.mem.asBytes(&x));
+    // no free: x_h is stack allocated
+    const model_sharding: zml.Sharding = platform.shardings.get("model").?;
+    const x_d: zml.Buffer = try .fromSlice(io, platform, x_h, model_sharding);
+    try std.testing.expectEqual(platform.devices.len, x_d.numShards());
+
+    {
+        const x_h_reborn: zml.Slice = try x_d.toSliceAlloc(allocator, io);
+        defer x_h_reborn.free(allocator);
+
+        errdefer std.log.err(" - reference: {d}\n- actual: {d}", .{ x_h, x_h_reborn });
+        try zml.testing.expectClose(io, x_h, x_h_reborn, .exact_match);
+    }
+
+    {
+        var x_2: @TypeOf(x) = undefined;
+        const x_h_reborn: zml.Slice = .init(x_h.shape, std.mem.asBytes(&x_2));
+        // no free: x_h_reborn is stack allocated
+        try x_d.toSlice(io, x_h_reborn);
+
+        errdefer std.log.err(" - reference: {d}\n- actual: {d}", .{ x_h, x_h_reborn });
+        try zml.testing.expectClose(io, x_h, x_h_reborn, .exact_match);
+    }
+}
+
+fn placementOrPanic(sharding: Sharding, shape: Shape) Sharding.Placement {
+    return sharding.placement(shape) catch |err| {
+        @branchHint(.cold);
+        switch (err) {
+            error.MissingLogicalBinding => {
+                log.err(
+                    \\Failed to shard Buffer of shape {f}, with sharding:
+                    \\{f}
+                    \\
+                    \\The Buffer is probably inheriting a partitionned shape from a Tensor,
+                    \\So Buffer creation must pass a Sharding, that maps the logical sharding of the Tensor to the physical mesh.
+                , .{ shape, sharding });
+                @panic("Buffer shape and sharding should be consistent");
+            },
+            error.IncompatibleSharding => {
+                log.err(
+                    \\Failed to shard Buffer of shape {f}, with sharding:
+                    \\{f}
+                    \\
+                    \\The Buffer dimension isn't properly divisible by the number of devices along the sharded axis.
+                , .{ shape, sharding });
+                @panic("Buffer shape should be divisible by the number of devices along the sharded axis.");
+            },
+        }
+    };
+}

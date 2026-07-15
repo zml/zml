@@ -18,6 +18,8 @@ const Sharding = @This();
 
 data: *const Data,
 
+pub const Error = error{ MissingLogicalBinding, IncompatibleSharding };
+
 pub const MAX_MESH_RANK = 4;
 
 var _replicated: [11]u8 align(@alignOf(Data)) = "_replicated".*;
@@ -1767,12 +1769,12 @@ pub const Strategy = struct {
 };
 
 /// For a given shape, compute the shape of the slice each shard will receive.
-pub fn shardedShape(sharding: Sharding, shape: Shape) !Shape {
+pub fn shardedShape(sharding: Sharding, shape: Shape) Error!Shape {
     const pl = try sharding.placement(shape);
     return pl.shape;
 }
 
-pub fn placement(sharding: Sharding, shape: Shape) !Placement {
+pub fn placement(sharding: Sharding, shape: Shape) Error!Placement {
     return .init(sharding, shape);
 }
 
@@ -1792,7 +1794,7 @@ pub const Placement = struct {
 
     axis_plans: stdx.BoundedArray(AxisSplit, Shape.MAX_RANK),
 
-    pub fn init(sharding: Sharding, shape: Shape) !Placement {
+    pub fn init(sharding: Sharding, shape: Shape) Error!Placement {
         var pl: Placement = .{
             .sharding = sharding,
             .shape = shape, // modified below
