@@ -38,6 +38,17 @@ pub const Slice = struct {
         };
     }
 
+    pub fn initConst(shape: Shape, bytes: []const u8) Slice {
+        stdx.debug.assert(bytes.len == shape.byteSize(), "Expected \"bytes\" to have the same length as shape.byteSize() ({}), got {}", .{ shape.byteSize(), bytes.len });
+        return .{
+            .bytes = bytes,
+            .mutable = false,
+            .shape = shape,
+            .offset_bytes = 0,
+            .byte_strides = shape.computeByteStrides(),
+        };
+    }
+
     pub fn alloc(allocator: std.mem.Allocator, shape_: Shape) !Slice {
         const size = shape_.byteSize();
         const bytes: []u8 = switch (shape_.dtype().alignOf()) {
