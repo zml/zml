@@ -170,7 +170,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
 
             // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
             // then slice into it, but XLA is able to optimize this correctly.
-            attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()), token_index.reshape(.{ .coord = 1 }), .{});
+            attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()), token_index.appendAxes(.{.coord}), .{});
             const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
             break :b attn_output;
         },
@@ -188,6 +188,28 @@ test "attention: q=1,qh=64,kh=8" {
         .init(.{ .q = 1, .h = 64, .hd = 64 }, .bf16),
         .init(.{ .k = 64, .h = 8, .hd = 64 }, .bf16),
         &.{63},
+    );
+
+    try testAttention(
+        .init(.{ .q = 1, .h = 64, .hd = 64 }, .bf16),
+        .init(.{ .k = 64, .h = 8, .hd = 64 }, .bf16),
+        &.{36},
+    );
+}
+
+test "attention: b=4,q=1,qh=64,kh=8" {
+    // Full attention
+    try testAttention(
+        .init(.{ .b = 4, .q = 1, .h = 64, .hd = 64 }, .bf16),
+        .init(.{ .b = 4, .k = 64, .h = 8, .hd = 64 }, .bf16),
+        &.{ 63, 63, 63, 63 },
+    );
+
+    // Partial attention
+    try testAttention(
+        .init(.{ .b = 4, .q = 1, .h = 64, .hd = 64 }, .bf16),
+        .init(.{ .b = 4, .k = 64, .h = 8, .hd = 64 }, .bf16),
+        &.{ 61, 57, 23, 63 },
     );
 }
 
@@ -238,7 +260,7 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
         .q = .fromShape(q_shape),
         .k = .fromShape(k_shape),
         .v = .fromShape(k_shape),
-        .token_index = .init(.{}, .u32),
+        .token_index = .fromShape(token_index_shape),
     };
 
     const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{ .mean = 0, .stddev = 1 } }, .{});
@@ -269,7 +291,7 @@ pub fn testAttention(q_shape: zml.Shape, k_shape: zml.Shape, token_index_h: []co
             else => if (!backend.isAvailable(platform)) continue,
         }
 
-        const metadata: Metadata = .init(.fromBackend(backend, 64, 8));
+        const metadata: Metadata = .init(.fromBackend(backend, tensors.k.dim(.k), tensors.q.dim(.h)));
         const parameters: Parameters = .init(.fromBackend(backend));
         const exe = try platform.compileFn(
             allocator,
