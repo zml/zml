@@ -1,0 +1,24 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+
+copy_file(
+    name = "libpjrt_vulkan.so",
+    src = "pjrt_c_api_gpu_plugin.so",
+    out = "lib/pjrt_c_api_gpu_plugin.so",
+    allow_symlink = True,
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":libpjrt_vulkan.so",
+    ],
+    add_directory_to_runfiles = False,
+    include_external_repositories = ["**"],
+)
+
+cc_library(
+    name = "libpjrt_vulkan",
+    data = [":sandbox"],
+    visibility = ["@zml//platforms/vulkan:__subpackages__"],
+)

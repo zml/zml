@@ -458,6 +458,29 @@
   },
   "selectedYankedVersions": {},
   "moduleExtensions": {
+    "//platforms/vulkan:vulkan.bzl%vulkan_packages": {
+      "general": {
+        "bzlTransitiveDigest": "pjFhJn/GB0OfF/3RmWYxQV6mZkvTUZX0wqYni6oi7C0=",
+        "usagesDigest": "HpwdUhnK1qdHBQrvnWqtESr+pbZi7iwMVwgrcayc70I=",
+        "recordedInputs": [],
+        "generatedRepoSpecs": {
+          "libpjrt_vulkan": {
+            "repoRuleId": "@@//platforms/vulkan:vulkan.bzl%libpjrt_vulkan_repository",
+            "attributes": {
+              "so_path": "/home/reesechong/xla/bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so"
+            }
+          }
+        },
+        "moduleExtensionMetadata": {
+          "explicitRootModuleDirectDeps": [
+            "libpjrt_vulkan"
+          ],
+          "explicitRootModuleDirectDevDeps": [],
+          "useAllRepos": "NO",
+          "reproducible": false
+        }
+      }
+    },
     "@@aspect_rules_py+//py:extensions.bzl%py_tools": {
       "general": {
         "bzlTransitiveDigest": "LaqXRQ7hUz2pKp1jB+4lExnjHXPJFKoz6+nOJqccLrQ=",

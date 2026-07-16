@@ -30,6 +30,7 @@ zls_completion(
     deps = [
         "//bin/zml-smi",
         "//examples/llm",
+        "//examples/llm:vulkan_test",
         "//examples/mnist",
         "//examples/sharding",
         "//stdx",

@@ -49,7 +49,7 @@ pub const Partitioner = union(enum) {
 
     pub fn fromTarget(target: Target) Partitioner {
         return switch (target) {
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal => .shardy,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .neuron, .metal, .vulkan => .shardy,
         };
     }
 };
@@ -701,6 +701,8 @@ pub const PhysicalMesh = struct {
             .cuda, .rocm => &.{.link},
             .cpu, .metal => &.{.bus},
             .oneapi => &.{ .link, .bus },
+            // (Reese) TODO: find what communication paths Vulkan's PhysicalMesh can use
+            .vulkan => &.{.bus},
         };
     }
 
@@ -902,7 +904,7 @@ pub const PhysicalMesh = struct {
     pub fn auto(allocator: std.mem.Allocator, target: Target, platform_devices: []const PlatformDevice) !PhysicalMesh {
         const root = try switch (target) {
             .cpu => cpu(allocator, platform_devices),
-            .cuda, .rocm => gpu(allocator, platform_devices),
+            .cuda, .rocm, .vulkan => gpu(allocator, platform_devices),
             .tpu => tpu(allocator, platform_devices),
             .neuron => return neuron(allocator, platform_devices),
             .oneapi, .metal => cpu(allocator, platform_devices),
