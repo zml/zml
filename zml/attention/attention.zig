@@ -182,8 +182,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
     };
 }
 
-test "attention: q=1,h=64,kh=8" {
-    // TODO: using > 1 device on CUDA crashes
+test "attention: q=1,qh=64,kh=8" {
     // TODO: batchsize not supported by fa2 bindings
     try testAttention(
         .init(.{ .q = 1, .h = 64, .hd = 64 }, .bf16),
@@ -192,7 +191,7 @@ test "attention: q=1,h=64,kh=8" {
     );
 }
 
-test "attention: q=1,h=8,kh=8" {
+test "attention: q=1,qh=8,kh=8" {
     try testAttention(
         .init(.{ .q = 1, .h = 8, .hd = 64 }, .bf16),
         .init(.{ .k = 64, .h = 8, .hd = 64 }, .bf16),
@@ -205,7 +204,7 @@ test "attention: q=1,h=8,kh=8" {
     );
 }
 
-test "attention: q=8,h=64,kh=8" {
+test "attention: q=8,qh=64,kh=8" {
     try testAttention(
         .init(.{ .q = 8, .h = 64, .hd = 64 }, .bf16),
         .init(.{ .k = 64, .h = 8, .hd = 64 }, .bf16),

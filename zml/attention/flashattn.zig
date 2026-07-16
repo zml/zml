@@ -295,7 +295,7 @@ pub const fa2 = struct {
         const max_seqlen_k: i32 = @intCast(k_.dim(.k));
 
         // TODO(Corendos): replace with cumsum
-        const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }))
+        const cu_seqlens_q = zml.Tensor.constantTensor(.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }))
             .withPartitioning(.{ ._0 = .replicated });
 
         const original_tot = q.dim(.tot);
@@ -305,7 +305,9 @@ pub const fa2 = struct {
         const ngroups = @divExact(num_heads, num_k_heads);
         const seqlenq_ngroups_swapped = max_seqlen_q == 1 and num_heads > num_k_heads and @mod(head_size, 8) == 0 and parameters.sliding_window < 0;
         if (seqlenq_ngroups_swapped) {
-            q = q.splitAxis(.h, .{ .h = num_k_heads, .ngroups = ngroups }).transpose(.{ .tot, .ngroups, .h, .hd }).merge(.{ .tot = .{ .tot, .ngroups } });
+            q = q.splitAxis(.h, .{ .h = num_k_heads, .ngroups = ngroups })
+                .transpose(.{ .tot, .ngroups, .h, .hd })
+                .merge(.{ .tot = .{ .tot, .ngroups } });
         }
 
         const q_sharded = q.withPartitioning(.{ .h = .model });
@@ -314,8 +316,8 @@ pub const fa2 = struct {
         const output = fa2_mha_varlen_fwd.call(
             .{
                 .q = q_sharded,
-                .k = k,
-                .v = v,
+                .k = k.withPartitioning(.{ .h = .model }),
+                .v = v.withPartitioning(.{ .h = .model }),
                 .cu_seqlens_q = cu_seqlens_q,
                 .cu_seqlens_k = cu_seqlens_k.withTags(.{.i}).withPartitioning(.{ .i = .replicated }),
                 .softmax_lse = metadata.softmax_lse.withPartitioning(.{ .h = .model }),
@@ -341,10 +343,12 @@ pub const fa2 = struct {
         var o = output.o;
 
         if (seqlenq_ngroups_swapped) {
-            o = o.splitAxis(.tot, .{ .tot = original_tot, .ngroups = ngroups }).transpose(.{ .tot, .h, .ngroups, .hd }).merge(.{ .h = .{ .h, .ngroups } });
+            o = o.splitAxis(.tot, .{ .tot = original_tot, .ngroups = ngroups })
+                .transpose(.{ .tot, .h, .ngroups, .hd })
+                .merge(.{ .h = .{ .h, .ngroups } });
         }
 
-        return o.splitAxis(.tot, .{ .b = 1, .q = q_.dim(.q) }).squeeze(.b);
+        return o.rename(.{ .tot = .b });
     }
 };
 
