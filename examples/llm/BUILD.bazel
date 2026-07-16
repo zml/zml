@@ -42,9 +42,10 @@ mtree_spec(
 
 zig_binary(
       name = "vulkan_test",
+      srcs = ["vulkan_test.zig"],
       main = "vulkan_test.zig",
+      visibility = ["//visibility:public"],
       deps = [
-          "//platforms/vulkan:libpjrt_vulkan",
           "//zml",
       ],
   )

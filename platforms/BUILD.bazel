@@ -9,6 +9,7 @@ PLATFORMS = {
     "neuron": False,
     "oneapi": False,
     "metal": False,
+    "vulkan": False,
 }
 
 [
@@ -36,6 +37,15 @@ config_setting(
         "@platforms//os:macos",
     ],
     flag_values = {":metal": "True"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "vulkan.enabled",
+    constraint_values = [
+        "@platforms//os:linux",
+    ],
+    flag_values = {":vulkan": "True"},
     visibility = ["//visibility:public"],
 )
 

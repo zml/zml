@@ -1,3 +1,39 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-exports_files(["vulkan.bzl"])
+load("@rules_zig//zig:defs.bzl", "zig_library")
 
+exports_files([
+    "libpjrt_vulkan.BUILD.bazel",
+    "vulkan.bzl",
+])
+
+cc_library(
+    name = "empty",
+    defines = ["ZML_RUNTIME_VULKAN_DISABLED"],
+    tags = ["manual"],
+)
+
+cc_library(
+    name = "libpjrt_vulkan",
+    defines = ["ZML_RUNTIME_VULKAN"],
+    tags = ["manual"],
+    deps = ["@libpjrt_vulkan"],
+)
+
+zig_library(
+    name = "vulkan",
+    import_name = "platforms/vulkan",
+    main = "vulkan.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//pjrt",
+        "//stdx",
+        "@rules_zig//zig/runfiles",
+    ] + select({
+        "//platforms:vulkan.enabled": [
+            ":libpjrt_vulkan",
+        ],
+        "//conditions:default": [":empty"],
+    }),
+)
