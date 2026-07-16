@@ -33,21 +33,28 @@ sources, and the native libraries. To hand a configured `zig_binary` to Zig's
 incremental build runner, first prepare it with Bazel:
 
 ```sh
-bazel run //:zig-build-prepare -- //examples/mnist:mnist
+bazel run --config=debug //:zig-build-prepare -- //examples/mnist:mnist
 ```
 
-The command prints a `zig build --watch -fincremental` invocation using the
-same Zig SDK, target, modules, generated sources, and native linker command as
-the Bazel target. Platform flags can be passed after the target label:
+The command runs `zig build` using the same Zig SDK, target, modules, generated
+sources, and native linker command as the Bazel target. Platform flags can be
+passed after the target label:
 
 ```sh
-bazel run //:zig-build-prepare -- \
+bazel run --config=debug //:zig-build-prepare -- \
   //examples/llm:llm --@zml//platforms:cuda=true
 ```
 
-Run the printed command from the repository root. Re-run the preparation step
-when Bazel flags, generated code, C/C++ code, or dependencies change. Zig
-source edits are then handled by the watch process.
+Arguments after a second `--` are passed to `zig build`:
+
+```sh
+bazel run --config=debug //:zig-build-prepare -- \
+  //examples/llm:llm -- --watch -fincremental --summary all -j8
+```
+
+Re-run the preparation step when Bazel flags, generated code, C/C++ code, or
+dependencies change. Add `--watch -fincremental` after the second `--` when
+you want Zig to watch source files and use incremental compilation.
 
 ## Prerequisites
 
