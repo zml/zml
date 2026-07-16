@@ -570,7 +570,12 @@ fn runTask(
     var span = TraceSpan.start(span_name);
     defer span.end();
 
+    var chunk_http_fetch_span = TraceSpan.start("zml.io.hf.chunk_http_fetch");
     try httpRangeGetIntoSlice(io, client, task.url, task.url_range_start, task.url_range_end, body);
+    chunk_http_fetch_span.end();
+
+    var chunk_decode_copy_span = TraceSpan.start("zml.io.hf.chunk_decode_copy");
+    defer chunk_decode_copy_span.end();
 
     var it: ChunkIterator = .{ .data = body };
     var chunk_idx: usize = task.chunk_idx_start;
@@ -636,17 +641,23 @@ pub fn fetchRange(
 ) !void {
     if (dst.len == 0) return;
 
+    var cas_cache_get_span = TraceSpan.start("zml.io.hf.xet.cas_cache_get");
     const cas = try cas_cache.get(pool.allocator, io, pool.client, repo, hf_token);
+    cas_cache_get_span.end();
     defer pool.allocator.free(cas.url);
     defer pool.allocator.free(cas.token);
 
     var auth_buf: [4096]u8 = undefined;
     const cas_auth = try bearerAuth(cas.token, &auth_buf);
 
+    var fetch_reconstruction_span = TraceSpan.start("zml.io.hf.xet.fetch_reconstruction");
     const parsed = try fetchReconstruction(pool.allocator, pool.client, cas.url, cas_auth, file_id, offset, offset + dst.len - 1);
+    fetch_reconstruction_span.end();
     defer parsed.deinit();
 
+    var build_tasks_span = TraceSpan.start("zml.io.hf.xet.build_tasks");
     var tasks = try buildFetchTasks(pool.allocator, parsed.value, dst.len);
+    build_tasks_span.end();
     defer freeFetchTasks(pool.allocator, &tasks);
 
     if (tasks.items.len == 0) return;
@@ -658,7 +669,15 @@ pub fn fetchRange(
     var batch: Batch = .{ .dst = dst, .pending = tasks.items.len };
     for (jobs, tasks.items) |*j, *t| j.* = .{ .task = t, .batch = &batch };
 
+    var queue_wait_span = TraceSpan.start("zml.io.hf.xet.execute_queue_wait");
+    defer queue_wait_span.end();
+
+    var queue_put_span = TraceSpan.start("zml.io.hf.xet.queue_put_all");
     for (jobs) |*j| try pool.job_queue.putOne(io, j);
+    queue_put_span.end();
+
+    var batch_wait_span = TraceSpan.start("zml.io.hf.xet.batch_wait_only");
     batch.wait(io);
+    batch_wait_span.end();
     if (batch.err) |e| return e;
 }
