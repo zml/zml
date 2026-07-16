@@ -455,7 +455,9 @@ const ComposedKernelExe = struct {
             },
             .linear_attention => {
                 const layer_cache: zml.Bufferized(model.KvCache.GatedDeltaNetCache) = .{
-                    .conv_state = args.kv_cache_buffers.gated_delta_net.conv_state,
+                    .conv_q_state = args.kv_cache_buffers.gated_delta_net.conv_q_state,
+                    .conv_k_state = args.kv_cache_buffers.gated_delta_net.conv_k_state,
+                    .conv_v_state = args.kv_cache_buffers.gated_delta_net.conv_v_state,
                     .recurrent_state = args.kv_cache_buffers.gated_delta_net.recurrent_state,
                     .layer_index = layer_index_buf.*,
                 };
@@ -467,7 +469,9 @@ const ComposedKernelExe = struct {
                     zml.Bufferized(model.KvCache.GatedDeltaNetCache),
                 });
                 ComposedKernelExe.replaceBuffer(hidden_buf, &new_hidden);
-                ComposedKernelExe.replaceBuffer(&args.kv_cache_buffers.gated_delta_net.conv_state, &new_cache.conv_state);
+                ComposedKernelExe.replaceBuffer(&args.kv_cache_buffers.gated_delta_net.conv_q_state, &new_cache.conv_q_state);
+                ComposedKernelExe.replaceBuffer(&args.kv_cache_buffers.gated_delta_net.conv_k_state, &new_cache.conv_k_state);
+                ComposedKernelExe.replaceBuffer(&args.kv_cache_buffers.gated_delta_net.conv_v_state, &new_cache.conv_v_state);
                 ComposedKernelExe.replaceBuffer(&args.kv_cache_buffers.gated_delta_net.recurrent_state, &new_cache.recurrent_state);
                 ComposedKernelExe.releaseBuffer(layer_index_buf.*, &new_cache.layer_index);
             },
@@ -647,7 +651,9 @@ const ComposedKernelExe = struct {
 
         const hidden_tensor = ComposedKernelExe.hidden(qwen_model, seqlen);
         const linear_attn_cache: model.KvCache.GatedDeltaNetCache = .{
-            .conv_state = parameters.kv_cache.gated_delta_net.conv_state,
+            .conv_q_state = parameters.kv_cache.gated_delta_net.conv_q_state,
+            .conv_k_state = parameters.kv_cache.gated_delta_net.conv_k_state,
+            .conv_v_state = parameters.kv_cache.gated_delta_net.conv_v_state,
             .recurrent_state = parameters.kv_cache.gated_delta_net.recurrent_state,
             .layer_index = zml.Tensor.init(.{}, .u32),
         };
