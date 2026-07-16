@@ -203,6 +203,9 @@ use_repo(tpu, "libpjrt_tpu")
 neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "aws-neuronx-tools", "libgcc_s1", "libgomp1", "libpjrt_neuron", "libstdcpp6")
 
+vulkan = use_extension("//platforms/vulkan:vulkan.bzl", "vulkan_packages")
+use_repo(vulkan, "libpjrt_vulkan")
+
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 http_archive(
     name = "sevenzip_macos",

@@ -40,6 +40,15 @@ mtree_spec(
     tags = ["manual"]
 )
 
+zig_binary(
+      name = "vulkan_test",
+      main = "vulkan_test.zig",
+      deps = [
+          "//platforms/vulkan:libpjrt_vulkan",
+          "//zml",
+      ],
+  )
+
 tar(
     name = "archive",
     srcs = [":llm"],
