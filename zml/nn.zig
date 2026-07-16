@@ -182,6 +182,7 @@ pub const RopeOpts = struct {
             rope_theta: f32 = 10000,
             llama_4_scaling_beta: ?f32 = null,
             attention_factor: ?f32 = null,
+            partial_rotary_factor: f32 = 1.0,
         };
 
         pub const Linear = struct {
@@ -190,7 +191,7 @@ pub const RopeOpts = struct {
         };
 
         pub const Proportional = struct {
-            partial_rotary_factor: f32,
+            partial_rotary_factor: f32 = 1.0,
             rope_theta: f32 = 10000,
         };
 
@@ -265,6 +266,13 @@ pub const RopeOpts = struct {
                 inline else => |s| s.rope_theta,
             };
         }
+
+        pub fn getPartialRotaryFactor(self: *const Scaling) f32 {
+            return switch (self.*) {
+                inline .yarn, .proportional => |s| s.partial_rotary_factor,
+                .default, .llama3, .linear => 1.0,
+            };
+        }
     };
 };
 
@@ -278,7 +286,8 @@ pub const RopeOpts = struct {
 /// - pos_idx: optional tensor which indicates which positions are needed.
 ///   When not set `rope` return all positions from 0 to x.dim(.s) which is the max seq len.
 pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
-    stdx.debug.assert(@mod(x.dim(.hd), 2) == 0, "rope expects a even head dim (.hd), got {f}", .{x});
+    const head_dim = x.dim(.hd);
+    stdx.debug.assert(@mod(head_dim, 2) == 0, "rope expects a even head dim (.hd), got {f}", .{x});
 
     const idx = if (pos_idx) |idx| blk: {
         stdx.debug.assert(x.shape().hasTags(.{.hd}), "rope expects x argument to have .hd axes got: rope(x={f}, idx={f})", .{ x, idx });
@@ -287,11 +296,26 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
         stdx.debug.assert(x.shape().hasTags(.{ .s, .hd }), "rope expects x argument to have both .s and .hd axes got: rope(x={f})", .{x});
         break :blk Tensor.arange(.{ .end = x.dim(.s) }, .f32).withTags(.{.s});
     };
-    const x_real, const x_imag = splitRealImg(x, opts.layout);
+
+    // NOTE(Corentin): Don't ask
+    // Well, okay if you insist. It seems that the proportional rope doesn't really work like the others with respect to partial rotary factor.
+    // Instead of splitting x into `rot` and `pass` it first splits into real and imag (thus respecting the layout) and then rotates only a part.
+    // If you ask me, that's the correct way of doing partial rotation semantically but ¯\_(ツ)_/¯.
+    if (opts.scaling == .proportional) {
+        return proportionalRope(x, idx, opts);
+    }
+
+    // NOTE(Corentin): defaulting to 1.0 makes it the degenerate case that is identical to no
+    const partial_rotary_factor = opts.scaling.getPartialRotaryFactor();
+    const rotary_dim: u32 = @intFromFloat(@floor(@as(f32, @floatFromInt(head_dim)) * std.math.clamp(partial_rotary_factor, 0.0, 1.0)));
+    stdx.debug.assert(rotary_dim > 0 and @mod(rotary_dim, 2) == 0, "partial rope expects a even head dim (.hd), got {d}", .{rotary_dim});
+
+    const x_rot = x.slice1d(.hd, .{ .start = 0, .end = rotary_dim });
+    const x_real, const x_imag = zml.nn.splitRealImg(x_rot, opts.layout);
 
     // compute sin and cos in f32 before downcasting to x type.
-    const inv_freq = invFreq(x.dim(.hd), opts).withTags(.{.hd});
-    const inv_freq_pos = Tensor.outer(idx.convert(.f32), inv_freq);
+    const inv_freq = invFreq(rotary_dim, opts).withTags(.{.hd});
+    const inv_freq_pos = zml.Tensor.outer(idx.convert(.f32), inv_freq);
     const scaling = opts.scaling.attentionScaling();
     const cos = inv_freq_pos.cos().scale(scaling).convert(x.dtype()).broad(x_real.shape());
     const sin = inv_freq_pos.sin().scale(scaling).convert(x.dtype()).broad(x_real.shape());
@@ -301,7 +325,49 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
     const y_imag = x_real.mul(sin).add(x_imag.mul(cos));
 
     // flatten last dimensions
-    return mergeRealImg(y_real, y_imag, opts.layout);
+    const rope_out = zml.nn.mergeRealImg(y_real, y_imag, opts.layout);
+
+    if (rotary_dim == head_dim) return rope_out;
+
+    const x_pass = x.slice1d(.hd, .{ .start = rotary_dim, .end = head_dim });
+    return zml.Tensor.concatenate(&.{ rope_out, x_pass }, .hd);
+}
+
+fn proportionalRope(x: Tensor, pos_idx: Tensor, opts: RopeOpts) Tensor {
+    std.debug.assert(opts.scaling == .proportional);
+
+    const head_dim = x.dim(.hd);
+    const partial_rotary_factor = opts.scaling.proportional.partial_rotary_factor;
+
+    const rotary_dim: u32 = @intFromFloat(@floor(@as(f32, @floatFromInt(head_dim)) * std.math.clamp(partial_rotary_factor, 0.0, 1.0)));
+    stdx.debug.assert(rotary_dim > 0 and @mod(rotary_dim, 2) == 0, "partial rope expects a even head dim (.hd), got {d}", .{rotary_dim});
+
+    const x_real, const x_imag = zml.nn.splitRealImg(x, opts.layout);
+    const rotary_pairs = @divExact(rotary_dim, 2);
+    const x_real_rot = x_real.slice1d(.hd, .{ .start = 0, .end = rotary_pairs });
+    const x_imag_rot = x_imag.slice1d(.hd, .{ .start = 0, .end = rotary_pairs });
+
+    // compute sin and cos in f32 before downcasting to x type.
+    const inv_freq = invFreq(head_dim, opts).withTags(.{.hd}).slice1d(.hd, .{ .end = @divExact(rotary_dim, 2) });
+    const inv_freq_pos = zml.Tensor.outer(pos_idx.convert(.f32), inv_freq);
+    const scaling = opts.scaling.attentionScaling();
+    const cos = inv_freq_pos.cos().scale(scaling).convert(x.dtype()).broad(x_real_rot.shape());
+    const sin = inv_freq_pos.sin().scale(scaling).convert(x.dtype()).broad(x_real_rot.shape());
+
+    // apply rotation
+    const y_real_rot = x_real_rot.mul(cos).sub(x_imag_rot.mul(sin));
+    const y_imag_rot = x_real_rot.mul(sin).add(x_imag_rot.mul(cos));
+
+    if (rotary_dim == head_dim) return zml.nn.mergeRealImg(y_real_rot, y_imag_rot, opts.layout);
+
+    // concatenate with pass-through
+    const y_real_pass = x_real.slice1d(.hd, .{ .start = rotary_pairs, .end = @divExact(head_dim, 2) });
+    const y_imag_pass = x_imag.slice1d(.hd, .{ .start = rotary_pairs, .end = @divExact(head_dim, 2) });
+
+    const y_real = zml.Tensor.concatenate(&.{ y_real_rot, y_real_pass }, .hd);
+    const y_imag = zml.Tensor.concatenate(&.{ y_imag_rot, y_imag_pass }, .hd);
+
+    return zml.nn.mergeRealImg(y_real, y_imag, opts.layout);
 }
 
 pub fn splitRealImg(x: Tensor, layout: RopeOpts.Layout) [2]Tensor {
@@ -352,12 +418,8 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
         .linear => |l| {
             for (inv_freq) |*f| f.* /= l.factor;
         },
-        .proportional => |p| {
-            const rotary_fraction = std.math.clamp(p.partial_rotary_factor, 0.0, 1.0);
-            const rotary_frequencies: usize = @intFromFloat(@floor(@as(f32, @floatFromInt(N)) * rotary_fraction));
-            for (inv_freq[rotary_frequencies..]) |*f| {
-                f.* = 0;
-            }
+        .proportional => {
+            // NOTE(Corentin): Proportional is handled in `rope`.
         },
         .llama3 => |s| {
             // https://arxiv.org/pdf/2309.16039
@@ -493,66 +555,6 @@ test "RopeOpts.Scaling parses default rope type" {
             try std.testing.expectApproxEqRel(10_000, d.rope_theta, 1e-6);
         },
         else => try std.testing.expect(false),
-    }
-}
-
-test "invFreq Proportional" {
-    const proportional_conf: RopeOpts = .{
-        .scaling = .{ .proportional = .{
-            .partial_rotary_factor = 0.25,
-            .rope_theta = 1_000_000,
-        } },
-    };
-    const default_conf: RopeOpts = .{
-        .scaling = .{ .default = .{
-            .rope_theta = 1_000_000,
-        } },
-    };
-
-    var inv_freq: [16]f32 = undefined;
-    var default_inv_freq: [16]f32 = undefined;
-    _invFreq(proportional_conf, &inv_freq);
-    _invFreq(default_conf, &default_inv_freq);
-
-    for (0..4) |i| {
-        try std.testing.expectApproxEqRel(default_inv_freq[i], inv_freq[i], 1e-6);
-    }
-    for (4..inv_freq.len) |i| {
-        try std.testing.expectEqual(@as(f32, 0.0), inv_freq[i]);
-    }
-}
-
-test "invFreq Proportional clamps partial rotary factor" {
-    const default_conf: RopeOpts = .{
-        .scaling = .{ .default = .{
-            .rope_theta = 10_000,
-        } },
-    };
-    const negative_conf: RopeOpts = .{
-        .scaling = .{ .proportional = .{
-            .partial_rotary_factor = -0.5,
-            .rope_theta = 10_000,
-        } },
-    };
-    const overfull_conf: RopeOpts = .{
-        .scaling = .{ .proportional = .{
-            .partial_rotary_factor = 1.5,
-            .rope_theta = 10_000,
-        } },
-    };
-
-    var default_inv_freq: [8]f32 = undefined;
-    var negative_inv_freq: [8]f32 = undefined;
-    var overfull_inv_freq: [8]f32 = undefined;
-    _invFreq(default_conf, &default_inv_freq);
-    _invFreq(negative_conf, &negative_inv_freq);
-    _invFreq(overfull_conf, &overfull_inv_freq);
-
-    for (negative_inv_freq) |f| {
-        try std.testing.expectEqual(@as(f32, 0.0), f);
-    }
-    for (default_inv_freq, overfull_inv_freq) |expected, actual| {
-        try std.testing.expectApproxEqRel(expected, actual, 1e-6);
     }
 }
 
