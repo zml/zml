@@ -132,7 +132,7 @@ pub const KMeansCPU = struct {
         self.center_norms[center] = dotSlices(ce, ce, self.d);
     }
 
-    inline fn computeCenterNorms(self: *KMeansCPU) void {
+    pub inline fn computeCenterNorms(self: *KMeansCPU) void {
         for (0..self.k) |center| {
             self.updateCenterNorm(center);
         }

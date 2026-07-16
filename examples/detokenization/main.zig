@@ -21,8 +21,7 @@ const Graph = graph.Graph;
 const Sampler = sampling.Sampler;
 const Quantized = quantized.Quantized;
 const ProductQuantizer = productq.ProductQuantizer;
-const AnisotropicProductQuantizer = productq.AnisotropicProductQuantizer;
-const NormDirectionPQ = productq.NormDirectionPQ;
+const ProductQuantizerFastScan = productq.ProductQuantizerFastScan;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -286,7 +285,6 @@ pub fn main(init: std.process.Init) !void {
     zml_handler.timers.print();
 }
 
-
 pub fn runLlm(zml_handler: *Zml_handler) !void {
     var llm = try llm_.Llm_handler.init(zml_handler);
     defer llm.deinit(zml_handler.allocator);
@@ -336,7 +334,7 @@ pub fn runTestsQuantizedPQ(zml_handler: *Zml_handler) !void {
     defer LmHeadMatrix.deinit(&lm_head, zml_handler.allocator);
 
     std.log.info("Init Product Quantizer", .{});
-    var quantizer = try productq.AnisotropicProductQuantizer.init(zml_handler, &lm_head);
+    var quantizer = try ProductQuantizerFastScan.init(zml_handler, &lm_head, .anisotropic);
     defer quantizer.deinit();
 
     try quantizer.buildCodebook();
@@ -510,7 +508,6 @@ pub fn runTestsQuantizedGraph(zml_handler: *Zml_handler) !void {
     //try g_nsw.extendNswRandom(&quantizer);
     //try testEmbedGraphQuantizedSearch(zml_handler, &g_nsw, &quantizer);
 }
-
 
 pub fn testEmbedGraphSearch(zml_handler: *Zml_handler, g: *Graph, _: *Sampler, s: []const u8) !void {
     std.log.info("\n********** Test embed graph search with graph = {s}", .{s});
@@ -1201,10 +1198,8 @@ pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized
     std.log.info("5-phase dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored_5phases, max_dense_scored_5phases, avg_dense_scored_5phases });
 }
 
-pub fn testEmbedQuantizedPQSearch(zml_handler: *Zml_handler, quantizer_: *AnisotropicProductQuantizer) !void {
+pub fn testEmbedQuantizedPQSearch(zml_handler: *Zml_handler, quantizer: *ProductQuantizerFastScan) !void {
     std.log.info("Test embed ProductQuantized search", .{});
-
-    const quantizer = quantizer_.base;
 
     const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
     var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
@@ -1258,8 +1253,8 @@ pub fn testEmbedQuantizedPQSearch(zml_handler: *Zml_handler, quantizer_: *Anisot
 
             zml_handler.timers.nb_detokenize += 1;
             zml_handler.tic(&zml_handler.timers.quant_search);
-            if (embed_index < 5) quantizer_.sampleLog(&sampler, embed);
-            const pq_sample = quantizer_.sample(embed);
+            if (embed_index < 5) quantizer.sampleLog(&sampler, embed);
+            const pq_sample = quantizer.sample(embed);
             zml_handler.toc(&zml_handler.timers.quant_search);
 
             total_count += 1;
@@ -1299,8 +1294,6 @@ pub fn testEmbedQuantizedPQSearch(zml_handler: *Zml_handler, quantizer_: *Anisot
     std.log.info("PQ row-bucket scored: min={d} max={d} avg={d:.2}", .{ min_pq_scored, max_pq_scored, avg_pq_scored });
     std.log.info("PQ rows pruned: min={d} max={d} avg={d:.2}", .{ min_pruned, max_pruned, avg_pruned });
     std.log.info("PQ dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored, max_dense_scored, avg_dense_scored });
-    std.log.info("Query norm min={d} max={d}", .{ quantizer.min_norm, quantizer.max_norm });
-    std.log.info("Bucket dot min={d} max={d}", .{ quantizer.min_bucket, quantizer.max_bucket });
 }
 
 pub fn testEmbedGraphQuantizedSearch(zml_handler: *Zml_handler, g: *Graph, quantizer: *Quantized) !void {
@@ -1392,7 +1385,6 @@ pub fn testEmbedGraphQuantizedSearch(zml_handler: *Zml_handler, g: *Graph, quant
     }
     std.log.info("Embed graph search nb_visited: min={d} max={d} avg={d:.2}", .{ min_visited, max_visited, average_visit });
 }
-
 
 fn rotateEmbedding(u: zml.Slice, embed: []const f32, rot_embed: []f32) void {
     const d = embed.len;
