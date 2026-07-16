@@ -229,28 +229,75 @@ pub const DynamicBufferPool = struct {
 
     block_size: usize,
     max_blocks: usize,
+    limit: std.atomic.Value(usize),
 
-    arena_state: std.heap.ArenaAllocator.State = .{},
     free_stack: std.atomic.Value(?*Node) = .init(null),
     in_flight: std.atomic.Value(usize) = .init(0),
+    allocated: std.atomic.Value(usize) = .init(0),
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
 
     pub fn init(max_blocks: usize, block_size: usize) DynamicBufferPool {
+        std.debug.assert(max_blocks > 0);
         return .{
             .block_size = block_size,
             .max_blocks = max_blocks,
+            .limit = .init(max_blocks),
         };
     }
 
     pub fn deinit(self: *DynamicBufferPool, allocator: std.mem.Allocator) void {
-        self.arena_state.promote(allocator).deinit();
+        std.debug.assert(self.in_flight.load(.acquire) == 0);
+        while (self.pop()) |node| {
+            allocator.rawFree(self.nodeToSlice(node), alignment, @returnAddress());
+            _ = self.allocated.fetchSub(1, .release);
+        }
+        std.debug.assert(self.allocated.load(.acquire) == 0);
+    }
+
+    pub fn currentLimit(self: *const DynamicBufferPool) usize {
+        return self.limit.load(.acquire);
+    }
+
+    pub fn inFlight(self: *const DynamicBufferPool) usize {
+        return self.in_flight.load(.acquire);
+    }
+
+    pub fn allocatedBlocks(self: *const DynamicBufferPool) usize {
+        return self.allocated.load(.acquire);
+    }
+
+    pub fn setLimit(self: *DynamicBufferPool, io: std.Io, new_limit: usize) void {
+        std.debug.assert(new_limit > 0 and new_limit <= self.max_blocks);
+
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        const old_limit = self.limit.swap(new_limit, .acq_rel);
+        if (new_limit > old_limit) {
+            for (old_limit..new_limit) |_| {
+                self.condition.signal(io);
+            }
+        }
+    }
+
+    pub fn trim(self: *DynamicBufferPool, allocator: std.mem.Allocator, io: std.Io, target: usize) void {
+        std.debug.assert(target > 0 and target <= self.max_blocks);
+
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        while (self.allocated.load(.acquire) > target) {
+            const node = self.pop() orelse break;
+            allocator.rawFree(self.nodeToSlice(node), alignment, @returnAddress());
+            _ = self.allocated.fetchSub(1, .release);
+        }
     }
 
     pub fn get(self: *DynamicBufferPool, allocator: std.mem.Allocator, io: std.Io) ![]u8 {
         while (true) {
             var in_flight = self.in_flight.load(.acquire);
-            while (in_flight < self.max_blocks) {
+            while (in_flight < self.limit.load(.acquire)) {
                 if (self.in_flight.cmpxchgWeak(in_flight, in_flight + 1, .release, .acquire)) |actual| {
                     in_flight = actual;
                     continue;
@@ -263,17 +310,19 @@ pub const DynamicBufferPool = struct {
                 self.mutex.lockUncancelable(io);
                 defer self.mutex.unlock(io);
 
-                var arena = self.arena_state.promote(allocator);
-                defer self.arena_state = arena.state;
+                if (self.pop()) |node| {
+                    return self.nodeToSlice(node);
+                }
 
                 errdefer _ = self.in_flight.fetchSub(1, .release);
-                const buffer = try arena.allocator().alignedAlloc(u8, alignment, self.block_size);
+                const buffer = try allocator.alignedAlloc(u8, alignment, self.block_size);
+                _ = self.allocated.fetchAdd(1, .release);
                 return @alignCast(buffer);
             }
 
             self.mutex.lockUncancelable(io);
             defer self.mutex.unlock(io);
-            while (self.in_flight.load(.acquire) >= self.max_blocks) {
+            while (self.in_flight.load(.acquire) >= self.limit.load(.acquire)) {
                 try self.condition.wait(io, &self.mutex);
             }
         }
@@ -314,6 +363,28 @@ pub const DynamicBufferPool = struct {
         return ptr[0..self.block_size];
     }
 };
+
+test "DynamicBufferPool trims unused blocks" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var pool: DynamicBufferPool = .init(4, 64);
+    defer pool.deinit(allocator);
+
+    const first = try pool.get(allocator, io);
+    const second = try pool.get(allocator, io);
+    try std.testing.expectEqual(2, pool.allocatedBlocks());
+
+    pool.setLimit(io, 1);
+    pool.trim(allocator, io, 1);
+    try std.testing.expectEqual(2, pool.allocatedBlocks());
+
+    pool.put(io, first);
+    pool.trim(allocator, io, 1);
+    pool.put(io, second);
+
+    try std.testing.expectEqual(1, pool.currentLimit());
+    try std.testing.expectEqual(1, pool.allocatedBlocks());
+}
 
 /// Return a clone of a type with Tensors replaced by Buffer.
 /// Non-Tensor metadata is stripped out of the resulting struct.

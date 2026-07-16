@@ -23,7 +23,7 @@ pub const Dir = struct {
 };
 
 pub const LimitedGroup = struct {
-    limit: usize,
+    limit: std.atomic.Value(usize),
     in_flight: std.atomic.Value(usize) = .init(0),
     group: std.Io.Group = .init,
     cond: std.Io.Condition = .init,
@@ -34,7 +34,7 @@ pub const LimitedGroup = struct {
             fn wrapper(self: *LimitedGroup, io: std.Io, args: std.meta.ArgsTuple(@TypeOf(function))) std.Io.Cancelable!void {
                 while (true) {
                     var in_flight = self.in_flight.load(.acquire);
-                    while (in_flight < self.limit) {
+                    while (in_flight < self.limit.load(.acquire)) {
                         if (self.in_flight.cmpxchgWeak(in_flight, in_flight + 1, .release, .acquire)) |actual| {
                             in_flight = actual;
                             continue;
@@ -51,7 +51,7 @@ pub const LimitedGroup = struct {
 
                     try self.mutex.lock(io);
                     defer self.mutex.unlock(io);
-                    while (self.in_flight.load(.acquire) >= self.limit) {
+                    while (self.in_flight.load(.acquire) >= self.limit.load(.acquire)) {
                         try self.cond.wait(io, &self.mutex);
                     }
                 }
@@ -60,7 +60,30 @@ pub const LimitedGroup = struct {
     }
 
     pub fn init(limit: usize) LimitedGroup {
-        return .{ .limit = limit };
+        std.debug.assert(limit > 0);
+        return .{ .limit = .init(limit) };
+    }
+
+    pub fn currentLimit(self: *const LimitedGroup) usize {
+        return self.limit.load(.acquire);
+    }
+
+    pub fn inFlight(self: *const LimitedGroup) usize {
+        return self.in_flight.load(.acquire);
+    }
+
+    pub fn setLimit(self: *LimitedGroup, io: std.Io, new_limit: usize) void {
+        std.debug.assert(new_limit > 0);
+
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        const old_limit = self.limit.swap(new_limit, .acq_rel);
+        if (new_limit > old_limit) {
+            for (old_limit..new_limit) |_| {
+                self.cond.signal(io);
+            }
+        }
     }
 
     pub fn async(self: *LimitedGroup, io: std.Io, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) void {
@@ -79,6 +102,62 @@ pub const LimitedGroup = struct {
         self.group.cancel(io);
     }
 };
+
+test "LimitedGroup increases its runtime limit" {
+    const io = std.testing.io;
+    var group: LimitedGroup = .init(1);
+    var release: std.Io.Event = .unset;
+    var started: std.atomic.Value(usize) = .init(0);
+
+    const Worker = struct {
+        fn run(started_: *std.atomic.Value(usize), release_: *std.Io.Event, io_: std.Io) std.Io.Cancelable!void {
+            _ = started_.fetchAdd(1, .release);
+            try release_.wait(io_);
+        }
+    };
+
+    try group.concurrent(io, Worker.run, .{ &started, &release, io });
+    try group.concurrent(io, Worker.run, .{ &started, &release, io });
+
+    while (started.load(.acquire) < 1) try io.sleep(.fromMilliseconds(1), .awake);
+    try std.testing.expectEqual(1, started.load(.acquire));
+
+    group.setLimit(io, 2);
+    while (started.load(.acquire) < 2) try io.sleep(.fromMilliseconds(1), .awake);
+    try std.testing.expectEqual(2, group.currentLimit());
+
+    release.set(io);
+    try group.await(io);
+}
+
+test "LimitedGroup decreases without cancelling in-flight work" {
+    const io = std.testing.io;
+    var group: LimitedGroup = .init(2);
+    var releases: [3]std.Io.Event = @splat(.unset);
+    var started: std.atomic.Value(usize) = .init(0);
+
+    const Worker = struct {
+        fn run(id: usize, started_: *std.atomic.Value(usize), releases_: *[3]std.Io.Event, io_: std.Io) std.Io.Cancelable!void {
+            _ = started_.fetchAdd(1, .release);
+            try releases_[id].wait(io_);
+        }
+    };
+
+    try group.concurrent(io, Worker.run, .{ 0, &started, &releases, io });
+    try group.concurrent(io, Worker.run, .{ 1, &started, &releases, io });
+    while (started.load(.acquire) < 2) try io.sleep(.fromMilliseconds(1), .awake);
+
+    group.setLimit(io, 1);
+    try group.concurrent(io, Worker.run, .{ 2, &started, &releases, io });
+    releases[0].set(io);
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expectEqual(2, started.load(.acquire));
+
+    releases[1].set(io);
+    while (started.load(.acquire) < 3) try io.sleep(.fromMilliseconds(1), .awake);
+    releases[2].set(io);
+    try group.await(io);
+}
 
 pub const AllocatingLimitedConcurrentGroup = struct {
     allocator: std.mem.Allocator,

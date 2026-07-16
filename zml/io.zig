@@ -285,6 +285,67 @@ pub const ProgressWriter = struct {
     }
 };
 
+const LoadMetrics = struct {
+    storage_bytes: std.atomic.Value(u64) = .init(0),
+    submitted_bytes: std.atomic.Value(u64) = .init(0),
+    committed_bytes: std.atomic.Value(u64) = .init(0),
+    weighted_transfer_latency_us: std.atomic.Value(u64) = .init(0),
+    resource_wait_ns: std.atomic.Value(u64) = .init(0),
+    active_transfers: std.atomic.Value(usize) = .init(0),
+    completed_transfers: std.atomic.Value(usize) = .init(0),
+
+    const Snapshot = struct {
+        storage_bytes: u64,
+        submitted_bytes: u64,
+        committed_bytes: u64,
+        weighted_transfer_latency_us: u64,
+        resource_wait_ns: u64,
+        active_transfers: usize,
+        completed_transfers: usize,
+
+        fn sub(self: Snapshot, previous: Snapshot) Snapshot {
+            return .{
+                .storage_bytes = self.storage_bytes -| previous.storage_bytes,
+                .submitted_bytes = self.submitted_bytes -| previous.submitted_bytes,
+                .committed_bytes = self.committed_bytes -| previous.committed_bytes,
+                .weighted_transfer_latency_us = self.weighted_transfer_latency_us -| previous.weighted_transfer_latency_us,
+                .resource_wait_ns = self.resource_wait_ns -| previous.resource_wait_ns,
+                .active_transfers = self.active_transfers,
+                .completed_transfers = self.completed_transfers,
+            };
+        }
+    };
+
+    fn snapshot(self: *const LoadMetrics) Snapshot {
+        return .{
+            .storage_bytes = self.storage_bytes.load(.acquire),
+            .submitted_bytes = self.submitted_bytes.load(.acquire),
+            .committed_bytes = self.committed_bytes.load(.acquire),
+            .weighted_transfer_latency_us = self.weighted_transfer_latency_us.load(.acquire),
+            .resource_wait_ns = self.resource_wait_ns.load(.acquire),
+            .active_transfers = self.active_transfers.load(.acquire),
+            .completed_transfers = self.completed_transfers.load(.acquire),
+        };
+    }
+
+    fn addWait(self: *LoadMetrics, duration: std.Io.Duration) void {
+        const ns: u64 = @intCast(@max(duration.nanoseconds, 0));
+        _ = self.resource_wait_ns.fetchAdd(ns, .monotonic);
+    }
+};
+
+fn getDmaBuffer(
+    pool: *mem.DynamicBufferPool,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    metrics: ?*LoadMetrics,
+) ![]u8 {
+    const started: std.Io.Timestamp = .now(io, .awake);
+    const result = try pool.get(allocator, io);
+    if (metrics) |m| m.addWait(started.untilNow(io, .awake));
+    return result;
+}
+
 pub const MemoryWriter = union(enum) {
     direct: DirectMemoryWriter,
     buffered: BufferedMemoryWriter,
@@ -300,8 +361,23 @@ pub const MemoryWriter = union(enum) {
         sharding: Sharding,
         buffer: *Buffer,
     ) !MemoryWriter {
+        return initWithMetrics(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, null);
+    }
+
+    fn initWithMetrics(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        pools: []mem.DynamicBufferPool,
+        dma_allocators: []const mem.DmaAllocator,
+        dma_chunk_size: usize,
+        shape: Shape,
+        sharding: Sharding,
+        buffer: *Buffer,
+        metrics: ?*LoadMetrics,
+    ) !MemoryWriter {
         return switch (platform.target) {
-            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer) },
+            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.initWithMetrics(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, metrics) },
             .rocm, .tpu, .neuron, .cpu, .metal => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
         };
     }
@@ -381,6 +457,8 @@ const DirectShardWriter = struct {
         pjrt_event: *pjrt.Event,
         event: std.Io.Event = .unset,
         buffer: []u8,
+        submitted_at: std.Io.Timestamp,
+        bytes: usize,
     };
 
     allocator: std.mem.Allocator,
@@ -396,8 +474,16 @@ const DirectShardWriter = struct {
     interface: std.Io.Writer,
     flip_flop: u1 = 0,
     events_contexts: [2]?EventContext = @splat(null),
+    metrics: ?*LoadMetrics,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape) !DirectShardWriter {
+    fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        memory: *const Memory,
+        pool: *mem.DynamicBufferPool,
+        shape: Shape,
+        metrics: ?*LoadMetrics,
+    ) !DirectShardWriter {
         const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
         const transfer_manager = try memory.platform.pjrt_client.createBuffersForAsyncHostToDevice(
             memory.platform.pjrt_api,
@@ -409,7 +495,7 @@ const DirectShardWriter = struct {
 
         const pjrt_buffer = transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0) catch unreachable;
 
-        const buf = try pool.get(allocator, io);
+        const buf = try getDmaBuffer(pool, allocator, io, metrics);
 
         return .{
             .allocator = allocator,
@@ -419,6 +505,7 @@ const DirectShardWriter = struct {
             .total = shape.byteSize(),
             .pjrt_buffer = pjrt_buffer,
             .transfer_manager = transfer_manager,
+            .metrics = metrics,
             .interface = .{
                 .buffer = buf[0..@min(buf.len, shape.byteSize())],
                 .vtable = &.{
@@ -481,6 +568,7 @@ const DirectShardWriter = struct {
         if (slice.len == 0) return;
         const is_last = (self.offset + slice.len) >= self.total;
 
+        const submitted_at: std.Io.Timestamp = .now(self.io, .awake);
         const transfer_event = self.transfer_manager.transferData(pjrt_api, 0, slice, @intCast(self.offset), is_last) catch |err| {
             log.err("error when transferring data to device: {any}", .{err});
             return std.Io.Writer.Error.WriteFailed;
@@ -491,10 +579,23 @@ const DirectShardWriter = struct {
             .self = self,
             .buffer = current_buffer,
             .pjrt_event = transfer_event,
+            .submitted_at = submitted_at,
+            .bytes = slice.len,
         };
+        if (self.metrics) |metrics| {
+            _ = metrics.submitted_bytes.fetchAdd(@intCast(slice.len), .monotonic);
+        }
 
         transfer_event.onReady(pjrt_api, EventContext, struct {
             fn call(err: ?*pjrt.Error, ctx_: *EventContext) void {
+                if (err == null) {
+                    if (ctx_.self.metrics) |metrics| {
+                        const elapsed = ctx_.submitted_at.untilNow(ctx_.self.io, .awake);
+                        const elapsed_us: u64 = @intCast(@max(@divTrunc(elapsed.nanoseconds, std.time.ns_per_us), 0));
+                        _ = metrics.committed_bytes.fetchAdd(@intCast(ctx_.bytes), .monotonic);
+                        _ = metrics.weighted_transfer_latency_us.fetchAdd(@as(u64, @intCast(ctx_.bytes)) *| elapsed_us, .monotonic);
+                    }
+                }
                 ctx_.self.pool.put(ctx_.self.io, ctx_.buffer);
                 ctx_.err = err;
                 ctx_.event.set(ctx_.self.io);
@@ -506,7 +607,9 @@ const DirectShardWriter = struct {
 
         if (self.events_contexts[@intCast(self.flip_flop ^ 1)]) |*ctx_previous| {
             defer self.events_contexts[@intCast(self.flip_flop ^ 1)] = null;
+            const wait_started: std.Io.Timestamp = .now(self.io, .awake);
             ctx_previous.event.waitUncancelable(self.io);
+            if (self.metrics) |metrics| metrics.addWait(wait_started.untilNow(self.io, .awake));
             defer ctx_previous.pjrt_event.deinit(pjrt_api);
             if (ctx_previous.err) |e| {
                 defer e.deinit(pjrt_api);
@@ -534,7 +637,7 @@ const DirectShardWriter = struct {
             }
         } else {
             self.interface.end = 0;
-            const buf = self.pool.get(self.allocator, self.io) catch |err| {
+            const buf = getDmaBuffer(self.pool, self.allocator, self.io, self.metrics) catch |err| {
                 log.err("unable to get a new buffer from the pool: {any}", .{err});
                 return std.Io.Writer.Error.WriteFailed;
             };
@@ -780,6 +883,10 @@ const DispatchSpans = struct {
 // `byte_cursor` is the global tensor position. Shard writer `interface.end` is
 // local to the current shard DMA buffer.
 pub const DirectMemoryWriter = struct {
+    // Bound reader windows independently of DMA submission chunks so startup
+    // can observe network progress before a large DMA chunk is complete.
+    const observation_chunk_size = 32 * 1024 * 1024;
+
     allocator: std.mem.Allocator,
     shard_writers: []DirectShardWriter,
     // Global stream-order spans produced from placement; this is the routing table for committed bytes.
@@ -795,6 +902,7 @@ pub const DirectMemoryWriter = struct {
     // Logical maximum public alias window before forcing a cross-shard flush fence.
     dma_chunk_size: usize,
     shard_progress: ?[]ShardProgress = null,
+    metrics: ?*LoadMetrics,
     interface: std.Io.Writer,
 
     pub fn init(
@@ -807,6 +915,21 @@ pub const DirectMemoryWriter = struct {
         shape: Shape,
         sharding: Sharding,
         buffer: *Buffer,
+    ) !DirectMemoryWriter {
+        return initWithMetrics(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, null);
+    }
+
+    fn initWithMetrics(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        pools: []mem.DynamicBufferPool,
+        dma_allocators: []const mem.DmaAllocator,
+        dma_chunk_size: usize,
+        shape: Shape,
+        sharding: Sharding,
+        buffer: *Buffer,
+        metrics: ?*LoadMetrics,
     ) !DirectMemoryWriter {
         const ordered_devices = sharding.devicesInCanonicalOrder();
         var shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
@@ -826,7 +949,7 @@ pub const DirectMemoryWriter = struct {
             const shard_dma_allocator = dma_allocators[device.id].allocator();
             const pjrt_mem = platform.devices[device.id].memory(.default).?;
 
-            shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.shape);
+            shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.shape, metrics);
 
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
         }
@@ -838,7 +961,7 @@ pub const DirectMemoryWriter = struct {
 
         const first_span = dispatch_spans.spans[0];
         const first_writer = &shard_writers[first_span.primary_writer];
-        const first_window = @min(dma_chunk_size, first_writer.interface.buffer.len);
+        const first_window = @min(observation_chunk_size, @min(dma_chunk_size, first_writer.interface.buffer.len));
 
         return .{
             .allocator = allocator,
@@ -847,6 +970,7 @@ pub const DirectMemoryWriter = struct {
             .active_writer_index = first_span.primary_writer,
             .window_start = first_writer.interface.end,
             .dma_chunk_size = dma_chunk_size,
+            .metrics = metrics,
             .interface = .{
                 .buffer = first_writer.interface.buffer[0..first_window],
                 .end = 0,
@@ -1009,6 +1133,10 @@ pub const DirectMemoryWriter = struct {
             }
         }
 
+        if (self.metrics) |metrics| {
+            _ = metrics.storage_bytes.fetchAdd(@intCast(source.len), .monotonic);
+        }
+
         // All scratch copies are complete now, so full DMA buffers may be
         // submitted without invalidating bytes still needed for scatter.
         for (self.shard_writers) |*writer| {
@@ -1046,12 +1174,294 @@ pub const DirectMemoryWriter = struct {
         const buffer_remaining = next_writer.interface.buffer.len - self.window_start;
         const chunk_offset = @mod(self.byte_cursor, self.dma_chunk_size);
         const chunk_remaining = if (chunk_offset == 0) self.dma_chunk_size else self.dma_chunk_size - chunk_offset;
+        const observation_offset = @mod(self.byte_cursor, observation_chunk_size);
+        const observation_remaining = if (observation_offset == 0) observation_chunk_size else observation_chunk_size - observation_offset;
         const tensor_remaining = total - self.byte_cursor;
-        const visible_remaining = @min(buffer_remaining, @min(chunk_remaining, tensor_remaining));
+        const visible_remaining = @min(buffer_remaining, @min(chunk_remaining, @min(observation_remaining, tensor_remaining)));
         if (visible_remaining == 0) return std.Io.Writer.Error.WriteFailed;
 
         self.interface.buffer = next_writer.interface.buffer[0 .. self.window_start + visible_remaining];
         self.interface.end = self.window_start;
+    }
+};
+
+const AdaptiveLoadController = struct {
+    const Mode = enum { startup, steady };
+
+    const Sample = struct {
+        staged_goodput: f64,
+        committed_goodput: f64,
+        transfer_latency_us: f64,
+        wait_ratio: f64,
+        queue_growth_ratio: f64,
+        saturated: bool,
+        allow_probe: bool,
+        now_ns: u64,
+    };
+
+    const Decision = struct {
+        workers: usize,
+        chunks: usize,
+        changed: bool = false,
+        trim: bool = false,
+    };
+
+    mode: Mode = .startup,
+    max_workers: usize,
+    max_chunks: usize,
+    direct: bool,
+    workers: usize,
+    chunks: usize,
+    best_workers: usize,
+    best_chunks: usize,
+    best_goodput: f64 = 0,
+    latency_baseline_us: f64 = 0,
+    worker_probe_goodput: ?f64 = null,
+    chunk_probe_goodput: ?f64 = null,
+    last_probe_ns: u64 = 0,
+
+    fn init(initial_workers: usize, max_workers: usize, initial_chunks: usize, max_chunks: usize, direct: bool) AdaptiveLoadController {
+        return .{
+            .max_workers = max_workers,
+            .max_chunks = max_chunks,
+            .direct = direct,
+            .workers = initial_workers,
+            .chunks = initial_chunks,
+            .best_workers = initial_workers,
+            .best_chunks = initial_chunks,
+        };
+    }
+
+    fn observe(self: *AdaptiveLoadController, sample: Sample) Decision {
+        const measured_goodput = if (self.mode == .startup and sample.staged_goodput > 0)
+            sample.staged_goodput
+        else if (sample.committed_goodput > 0)
+            sample.committed_goodput
+        else
+            sample.staged_goodput;
+
+        if (sample.transfer_latency_us > 0) {
+            if (self.latency_baseline_us == 0) {
+                self.latency_baseline_us = sample.transfer_latency_us;
+            } else if (self.workers <= 2 or sample.wait_ratio <= 0.02) {
+                self.latency_baseline_us = 0.95 * self.latency_baseline_us + 0.05 * sample.transfer_latency_us;
+            }
+        }
+
+        const latency_inflation = if (sample.transfer_latency_us > 0 and self.latency_baseline_us > 0)
+            @max(0, sample.transfer_latency_us / self.latency_baseline_us - 1)
+        else
+            0;
+        const queue_pressure = @max(latency_inflation, sample.wait_ratio);
+
+        if (queue_pressure > 0.20 and self.workers > 1) {
+            self.mode = .steady;
+            self.worker_probe_goodput = null;
+            self.chunk_probe_goodput = null;
+            const next_workers = @max(@as(usize, 1), @as(usize, @intFromFloat(@floor(0.70 * @as(f64, @floatFromInt(self.workers))))));
+            self.workers = @min(self.workers - 1, next_workers);
+            self.chunks = self.minimumChunks(self.workers);
+            self.best_workers = self.workers;
+            self.best_chunks = self.chunks;
+            self.best_goodput = 0;
+            self.last_probe_ns = sample.now_ns;
+            return .{ .workers = self.workers, .chunks = self.chunks, .changed = true, .trim = true };
+        }
+
+        switch (self.mode) {
+            .startup => {
+                if (measured_goodput <= 0 or !sample.saturated) return self.currentDecision();
+
+                if (self.best_goodput == 0 or measured_goodput >= self.best_goodput * 1.03) {
+                    self.best_goodput = measured_goodput;
+                    self.best_workers = self.workers;
+                    self.best_chunks = self.chunks;
+
+                    if (queue_pressure < 0.10 and self.workers < self.max_workers) {
+                        self.workers = @min(self.max_workers, self.workers * 2);
+                        self.chunks = self.minimumChunks(self.workers);
+                        return .{ .workers = self.workers, .chunks = self.chunks, .changed = true };
+                    }
+                }
+
+                self.mode = .steady;
+                const changed = self.workers != self.best_workers or self.chunks != self.best_chunks;
+                self.workers = self.best_workers;
+                self.chunks = self.best_chunks;
+                self.last_probe_ns = sample.now_ns;
+                return .{ .workers = self.workers, .chunks = self.chunks, .changed = changed, .trim = changed };
+            },
+            .steady => {
+                if (self.worker_probe_goodput) |reference| {
+                    self.worker_probe_goodput = null;
+                    if (measured_goodput >= reference * 1.03 and queue_pressure < 0.10) {
+                        self.best_goodput = @max(self.best_goodput, measured_goodput);
+                        self.best_workers = self.workers;
+                        self.best_chunks = self.chunks;
+                        return self.currentDecision();
+                    }
+
+                    self.workers = self.best_workers;
+                    self.chunks = self.best_chunks;
+                    self.last_probe_ns = sample.now_ns;
+                    return .{ .workers = self.workers, .chunks = self.chunks, .changed = true, .trim = true };
+                }
+
+                if (self.chunk_probe_goodput) |reference| {
+                    self.chunk_probe_goodput = null;
+                    if (sample.committed_goodput >= reference * 1.03 and queue_pressure < 0.10) {
+                        self.best_goodput = @max(self.best_goodput, sample.committed_goodput);
+                        self.best_chunks = self.chunks;
+                        return self.currentDecision();
+                    }
+
+                    self.chunks = self.best_chunks;
+                    self.last_probe_ns = sample.now_ns;
+                    return .{ .workers = self.workers, .chunks = self.chunks, .changed = true, .trim = true };
+                }
+
+                if (!sample.allow_probe or !sample.saturated or sample.now_ns -| self.last_probe_ns < 500 * std.time.ns_per_ms) {
+                    return self.currentDecision();
+                }
+
+                if (self.direct and sample.wait_ratio > 0.05 and self.chunks < @min(self.max_chunks, self.workers * 2) and sample.committed_goodput > 0) {
+                    self.chunk_probe_goodput = sample.committed_goodput;
+                    self.chunks += 1;
+                    self.last_probe_ns = sample.now_ns;
+                    return .{ .workers = self.workers, .chunks = self.chunks, .changed = true };
+                }
+
+                if (self.workers < self.max_workers and measured_goodput > 0) {
+                    self.worker_probe_goodput = measured_goodput;
+                    self.workers = @min(self.max_workers, self.workers + @max(@as(usize, 1), std.math.sqrt(self.workers)));
+                    self.chunks = @max(self.chunks, self.minimumChunks(self.workers));
+                    self.last_probe_ns = sample.now_ns;
+                    return .{ .workers = self.workers, .chunks = self.chunks, .changed = true };
+                }
+
+                return self.currentDecision();
+            },
+        }
+    }
+
+    fn minimumChunks(self: *const AdaptiveLoadController, workers: usize) usize {
+        if (!self.direct) return self.max_chunks;
+        return @min(self.max_chunks, workers + 1);
+    }
+
+    fn currentDecision(self: *const AdaptiveLoadController) Decision {
+        return .{ .workers = self.workers, .chunks = self.chunks };
+    }
+};
+
+const AdaptiveLoadRuntime = struct {
+    controller: AdaptiveLoadController,
+    group: *stdx.Io.LimitedGroup,
+    pools: []mem.DynamicBufferPool,
+    dma_allocators: []const mem.DmaAllocator,
+    metrics: *LoadMetrics,
+    dma_chunk_size: usize,
+    total_logical_bytes: u64,
+    total_transfers: usize,
+    done: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *AdaptiveLoadRuntime, io: std.Io) std.Io.Cancelable!void {
+        const started: std.Io.Timestamp = .now(io, .awake);
+        var window_started = started;
+        var previous = self.metrics.snapshot();
+        var previous_queue = previous.submitted_bytes -| previous.committed_bytes;
+
+        while (!self.done.load(.acquire)) {
+            try io.sleep(.fromMilliseconds(25), .awake);
+            if (self.done.load(.acquire)) break;
+            self.trimSurplus(io);
+
+            const elapsed = window_started.untilNow(io, .awake);
+            const elapsed_ns: u64 = @intCast(@max(elapsed.nanoseconds, 0));
+            const startup = self.controller.mode == .startup;
+            const min_ns: u64 = if (startup) 50 * std.time.ns_per_ms else 100 * std.time.ns_per_ms;
+            const max_ns: u64 = if (startup) 100 * std.time.ns_per_ms else 250 * std.time.ns_per_ms;
+            if (elapsed_ns < min_ns) continue;
+
+            const snapshot = self.metrics.snapshot();
+            const delta = snapshot.sub(previous);
+            const progress_bytes = if (startup) @max(delta.storage_bytes, delta.committed_bytes) else delta.committed_bytes;
+            const byte_floor: u64 = if (startup) 32 * 1024 * 1024 else 64 * 1024 * 1024;
+            if (progress_bytes < byte_floor and (elapsed_ns < max_ns or progress_bytes == 0)) continue;
+
+            const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
+            const staged_goodput = @as(f64, @floatFromInt(delta.storage_bytes)) / seconds;
+            const committed_goodput = @as(f64, @floatFromInt(delta.committed_bytes)) / seconds;
+            const transfer_latency_us = if (delta.committed_bytes == 0)
+                0
+            else
+                @as(f64, @floatFromInt(delta.weighted_transfer_latency_us)) / @as(f64, @floatFromInt(delta.committed_bytes));
+            const active = @max(@as(usize, 1), snapshot.active_transfers);
+            const wait_ratio = @as(f64, @floatFromInt(delta.resource_wait_ns)) /
+                (@as(f64, @floatFromInt(elapsed_ns)) * @as(f64, @floatFromInt(active)));
+            const queue = snapshot.submitted_bytes -| snapshot.committed_bytes;
+            const queue_growth = queue -| previous_queue;
+            const queue_capacity = @max(@as(u64, 1), @as(u64, @intCast(self.controller.chunks * self.dma_chunk_size)));
+            const queue_growth_ratio = @as(f64, @floatFromInt(queue_growth)) / @as(f64, @floatFromInt(queue_capacity));
+
+            const remaining = self.total_logical_bytes -| snapshot.storage_bytes;
+            const progress_goodput = if (staged_goodput > 0) staged_goodput else committed_goodput;
+            const remaining_ns: f64 = if (progress_goodput > 0)
+                @as(f64, @floatFromInt(remaining)) / progress_goodput * std.time.ns_per_s
+            else
+                std.math.inf(f64);
+            const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
+
+            const old_workers = self.controller.workers;
+            const old_chunks = self.controller.chunks;
+            const decision = self.controller.observe(.{
+                .staged_goodput = staged_goodput,
+                .committed_goodput = committed_goodput,
+                .transfer_latency_us = transfer_latency_us,
+                .wait_ratio = wait_ratio,
+                .queue_growth_ratio = queue_growth_ratio,
+                .saturated = self.group.inFlight() >= self.controller.workers and snapshot.completed_transfers < self.total_transfers,
+                .allow_probe = remaining_ns > 500 * std.time.ns_per_ms,
+                .now_ns = now_ns,
+            });
+            if (decision.changed) {
+                self.apply(io, decision);
+                log.debug("adaptive load: {s} workers {d}->{d}, dma chunks {d}->{d}, staged {d:.2} MiB/s, committed {d:.2} MiB/s, wait {d:.3}, queue {d:.3}", .{
+                    @tagName(self.controller.mode),
+                    old_workers,
+                    decision.workers,
+                    old_chunks,
+                    decision.chunks,
+                    staged_goodput / (1024 * 1024),
+                    committed_goodput / (1024 * 1024),
+                    wait_ratio,
+                    queue_growth_ratio,
+                });
+            }
+
+            previous = snapshot;
+            previous_queue = queue;
+            window_started = .now(io, .awake);
+        }
+    }
+
+    fn apply(self: *AdaptiveLoadRuntime, io: std.Io, decision: AdaptiveLoadController.Decision) void {
+        self.group.setLimit(io, decision.workers);
+        if (!self.controller.direct) return;
+
+        for (self.pools, self.dma_allocators) |*pool, *dma_allocator| {
+            pool.setLimit(io, decision.chunks);
+            if (decision.trim) pool.trim(dma_allocator.allocator(), io, decision.chunks);
+        }
+    }
+
+    fn trimSurplus(self: *AdaptiveLoadRuntime, io: std.Io) void {
+        if (!self.controller.direct) return;
+        for (self.pools, self.dma_allocators) |*pool, *dma_allocator| {
+            if (pool.allocatedBlocks() > self.controller.chunks) {
+                pool.trim(dma_allocator.allocator(), io, self.controller.chunks);
+            }
+        }
     }
 };
 
@@ -1063,9 +1473,16 @@ pub const LoadOpts = struct {
         .dma_chunk_size = 4096,
     };
 
+    /// Hard maximum number of concurrent tensor transfers.
     parallelism: usize,
+    /// Starting limit for adaptive loading. Clamped to the worker/chunk caps.
+    initial_parallelism: usize = 2,
+    /// Set false to retain the fixed `parallelism` behavior.
+    adaptive_parallelism: bool = true,
     shardings: []const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
+    /// Hard per-device DMA chunk maximum. Adaptive loading normally uses one
+    /// more chunk than active workers and probes higher only when useful.
     dma_chunks: usize,
     dma_chunk_size: usize,
     total_bytes: ?*usize = null,
@@ -1080,12 +1497,35 @@ pub fn load(
     store: *const TensorStore,
     opts: LoadOpts,
 ) !Bufferized(ModelType) {
+    stdx.debug.assert(opts.parallelism > 0, "zml.io.load parallelism must be greater than zero", .{});
+    stdx.debug.assert(opts.initial_parallelism > 0, "zml.io.load initial_parallelism must be greater than zero", .{});
+    stdx.debug.assert(opts.dma_chunks > 0, "zml.io.load dma_chunks must be greater than zero", .{});
+
+    const tensor_count = meta.count(Tensor, model);
     var span = tracer.span("zml.io.load", .{
-        .tensor_count = meta.count(Tensor, model),
+        .tensor_count = tensor_count,
     });
     defer span.end();
 
     var bufferized = try mem.bufferize(allocator, ModelType, model);
+
+    var total_logical_bytes: u64 = 0;
+    meta.forEachVisit(model, *const Tensor, struct {
+        fn call(_: usize, tensor: *const Tensor, total: *u64) void {
+            total.* += tensor.byteSize();
+        }
+    }.call, .{&total_logical_bytes});
+
+    const direct = platform.target == .cuda or platform.target == .oneapi;
+    const adaptive_candidate = opts.adaptive_parallelism and opts.parallelism > 1 and tensor_count > 1;
+    const max_workers = if (adaptive_candidate and direct)
+        @min(opts.parallelism, if (opts.dma_chunks > 1) opts.dma_chunks - 1 else 1)
+    else
+        opts.parallelism;
+    const adaptive = adaptive_candidate and max_workers > 1;
+    const initial_workers = if (adaptive) @min(max_workers, opts.initial_parallelism) else max_workers;
+    const initial_chunks = if (adaptive and direct) @min(opts.dma_chunks, initial_workers + 1) else opts.dma_chunks;
+    var metrics: LoadMetrics = .{};
 
     const pool_count = platform.devices.len;
     const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
@@ -1098,6 +1538,7 @@ pub fn load(
     defer allocator.free(buffer_pools);
     for (buffer_pools) |*pool_| {
         pool_.* = .init(opts.dma_chunks, opts.dma_chunk_size);
+        if (adaptive and direct) pool_.setLimit(io, initial_chunks);
     }
     defer for (buffer_pools, 0..) |*pool_, i| {
         pool_.deinit(dma_allocators[i].allocator());
@@ -1116,10 +1557,12 @@ pub fn load(
         group: stdx.Io.LimitedGroup,
         total: std.atomic.Value(usize) = .init(0),
         progress: ?*std.Progress.Node,
+        metrics: ?*LoadMetrics,
+        direct: bool,
     };
     var walk_ctx: Ctx = .{
         .platform = platform,
-        .buffers = try allocator.alloc(*Buffer, meta.count(Tensor, model)),
+        .buffers = try allocator.alloc(*Buffer, tensor_count),
         .store = store,
         .allocator = allocator,
         .dma_allocators = dma_allocators,
@@ -1128,7 +1571,9 @@ pub fn load(
         .io = io,
         .shardings = opts.shardings,
         .progress = opts.progress,
-        .group = .init(opts.parallelism),
+        .group = .init(initial_workers),
+        .metrics = if (adaptive) &metrics else null,
+        .direct = direct,
     };
     defer allocator.free(walk_ctx.buffers);
 
@@ -1142,10 +1587,34 @@ pub fn load(
         }
     }.call, .{&walk_ctx});
 
+    var controller_runtime: AdaptiveLoadRuntime = .{
+        .controller = .init(initial_workers, max_workers, initial_chunks, opts.dma_chunks, direct),
+        .group = &walk_ctx.group,
+        .pools = buffer_pools,
+        .dma_allocators = dma_allocators,
+        .metrics = &metrics,
+        .dma_chunk_size = opts.dma_chunk_size,
+        .total_logical_bytes = total_logical_bytes,
+        .total_transfers = tensor_count,
+    };
+    var controller_group: std.Io.Group = .init;
+    if (adaptive) {
+        controller_group.concurrent(io, AdaptiveLoadRuntime.run, .{ &controller_runtime, io }) catch unreachable;
+    }
+
     meta.forEachVisit(model, *const Tensor, struct {
         fn call(i: usize, tensor: *const Tensor, ctx: *Ctx) void {
             ctx.group.concurrent(ctx.io, struct {
                 fn call(i_: usize, tensor_: *const Tensor, ctx_: *Ctx) !void {
+                    const transfer_started: std.Io.Timestamp = .now(ctx_.io, .awake);
+                    if (ctx_.metrics) |metrics_| {
+                        _ = metrics_.active_transfers.fetchAdd(1, .monotonic);
+                    }
+                    defer if (ctx_.metrics) |metrics_| {
+                        _ = metrics_.active_transfers.fetchSub(1, .monotonic);
+                        _ = metrics_.completed_transfers.fetchAdd(1, .release);
+                    };
+
                     var reader = ctx_.store.getReaderById(tensor_.id, ctx_.io, &.{}) catch unreachable;
                     defer reader.deinit();
 
@@ -1155,7 +1624,7 @@ pub fn load(
                         break :blk ctx_.platform.replicated_sharding;
                     };
 
-                    var writer = MemoryWriter.init(
+                    var writer = MemoryWriter.initWithMetrics(
                         ctx_.allocator,
                         ctx_.io,
                         ctx_.platform,
@@ -1165,32 +1634,153 @@ pub fn load(
                         shape,
                         sharding,
                         ctx_.buffers[i_],
+                        ctx_.metrics,
                     ) catch unreachable;
                     defer writer.deinit(ctx_.allocator);
 
                     const scale = 1024;
 
-                    if (ctx_.progress) |progress| {
+                    const total = if (ctx_.progress) |progress| blk: {
                         var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
                         defer node.end();
                         writer.setProgress(&node);
                         defer writer.setProgress(null);
                         var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
-                        const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
+                        const total_ = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
                         progress_writer.interface.flush() catch unreachable;
-                        _ = ctx_.total.fetchAdd(total, .monotonic);
-                    } else {
-                        const total = reader.interface.streamRemaining(writer.interface()) catch unreachable;
+                        break :blk total_;
+                    } else blk: {
+                        const total_ = reader.interface.streamRemaining(writer.interface()) catch unreachable;
                         writer.interface().flush() catch unreachable;
-                        _ = ctx_.total.fetchAdd(total, .monotonic);
+                        break :blk total_;
+                    };
+                    _ = ctx_.total.fetchAdd(total, .monotonic);
+
+                    if (ctx_.metrics) |metrics_| {
+                        if (!ctx_.direct) {
+                            const elapsed = transfer_started.untilNow(ctx_.io, .awake);
+                            const elapsed_us: u64 = @intCast(@max(@divTrunc(elapsed.nanoseconds, std.time.ns_per_us), 0));
+                            _ = metrics_.storage_bytes.fetchAdd(@intCast(total), .monotonic);
+                            _ = metrics_.submitted_bytes.fetchAdd(@intCast(total), .monotonic);
+                            _ = metrics_.committed_bytes.fetchAdd(@intCast(total), .monotonic);
+                            _ = metrics_.weighted_transfer_latency_us.fetchAdd(@as(u64, @intCast(total)) *| elapsed_us, .monotonic);
+                        }
                     }
                 }
             }.call, .{ i, tensor, ctx }) catch unreachable;
         }
     }.call, .{&walk_ctx});
     walk_ctx.group.await(io) catch unreachable;
+    if (adaptive) {
+        controller_runtime.done.store(true, .release);
+        controller_group.await(io) catch unreachable;
+    }
 
     return bufferized;
+}
+
+test "adaptive load controller ramps quickly and rolls back" {
+    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, true);
+    const base: AdaptiveLoadController.Sample = .{
+        .staged_goodput = 100,
+        .committed_goodput = 0,
+        .transfer_latency_us = 0,
+        .wait_ratio = 0,
+        .queue_growth_ratio = 1,
+        .saturated = true,
+        .allow_probe = true,
+        .now_ns = 100 * std.time.ns_per_ms,
+    };
+
+    var decision = controller.observe(base);
+    try std.testing.expectEqual(4, decision.workers);
+    try std.testing.expectEqual(5, decision.chunks);
+
+    decision = controller.observe(.{
+        .staged_goodput = 110,
+        .committed_goodput = 50,
+        .transfer_latency_us = 0,
+        .wait_ratio = 0,
+        .queue_growth_ratio = 0,
+        .saturated = true,
+        .allow_probe = true,
+        .now_ns = 200 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(8, decision.workers);
+    try std.testing.expectEqual(9, decision.chunks);
+
+    decision = controller.observe(.{
+        .staged_goodput = 111,
+        .committed_goodput = 0,
+        .transfer_latency_us = 0,
+        .wait_ratio = 0,
+        .queue_growth_ratio = 0,
+        .saturated = true,
+        .allow_probe = true,
+        .now_ns = 300 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(4, decision.workers);
+    try std.testing.expectEqual(5, decision.chunks);
+    try std.testing.expect(decision.trim);
+}
+
+test "adaptive load controller backs off on queue pressure" {
+    var controller: AdaptiveLoadController = .init(4, 16, 5, 32, true);
+    _ = controller.observe(.{
+        .staged_goodput = 100,
+        .committed_goodput = 100,
+        .transfer_latency_us = 100,
+        .wait_ratio = 0,
+        .queue_growth_ratio = 0,
+        .saturated = false,
+        .allow_probe = true,
+        .now_ns = 100 * std.time.ns_per_ms,
+    });
+
+    const decision = controller.observe(.{
+        .staged_goodput = 100,
+        .committed_goodput = 100,
+        .transfer_latency_us = 130,
+        .wait_ratio = 0,
+        .queue_growth_ratio = 0,
+        .saturated = true,
+        .allow_probe = true,
+        .now_ns = 200 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(2, decision.workers);
+    try std.testing.expectEqual(3, decision.chunks);
+    try std.testing.expect(decision.trim);
+}
+
+test "adaptive load controller releases an unproductive chunk probe" {
+    var controller: AdaptiveLoadController = .init(4, 16, 5, 32, true);
+    controller.mode = .steady;
+    controller.best_goodput = 100;
+
+    var decision = controller.observe(.{
+        .staged_goodput = 100,
+        .committed_goodput = 100,
+        .transfer_latency_us = 100,
+        .wait_ratio = 0.06,
+        .queue_growth_ratio = 0,
+        .saturated = true,
+        .allow_probe = true,
+        .now_ns = 600 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(6, decision.chunks);
+
+    decision = controller.observe(.{
+        .staged_goodput = 102,
+        .committed_goodput = 102,
+        .transfer_latency_us = 100,
+        .wait_ratio = 0,
+        .queue_growth_ratio = 0,
+        .saturated = true,
+        .allow_probe = true,
+        .now_ns = 700 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(5, decision.chunks);
+    try std.testing.expect(decision.trim);
 }
 
 fn buildMesh2x2(
