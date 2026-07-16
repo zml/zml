@@ -269,6 +269,22 @@ pub const fa2 = struct {
         const ctx = CompilationContext.current();
 
         stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa2.attention support for batch size != 1 is not supported yet.", .{});
+        var q = q_;
+        var k = k_;
+        var v = v_;
+
+        if (q.shape().hasTag(.b)) |_| {
+            q = q.squeeze(.b);
+            k = k.squeeze(.b);
+            v = v.squeeze(.b);
+        }
+
+        // Follow cu_fa2 documentation
+        // https://deepwiki.com/Dao-AILab/flash-attention/3.1-flashattention-2-python-interface#flash_attn_varlen_func
+        q = q.rename(.{ .q = .tot });
+        k = k.rename(.{ .k = .tot });
+        v = v.rename(.{ .k = .tot });
+
         const seqused_k = token_index.addConstant(q_.dim(.q)).reshape(.{1});
         // TODO(Corendos): replace with cumsum
         const cu_seqlens_k = b: {
@@ -277,25 +293,19 @@ pub const fa2 = struct {
         };
         const max_seqlen_q: i32 = @intCast(q_.dim(.q));
         const max_seqlen_k: i32 = @intCast(k_.dim(.k));
-        var q, const k, const v = if (q_.shape().hasTag(.b) != null) b: {
-            break :b [_]zml.Tensor{
-                q_.merge(.{ .tot = .{ .b, .q } }), k_.merge(.{ .tot = .{ .b, .k } }), v_.merge(.{ .tot = .{ .b, .k } }),
-            };
-        } else b: {
-            break :b [_]zml.Tensor{ q_.rename(.{ .q = .tot }), k_.rename(.{ .k = .tot }), v_.rename(.{ .k = .tot }) };
-        };
+
         // TODO(Corendos): replace with cumsum
         const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }))
             .withPartitioning(.{ ._0 = .replicated });
 
         const original_tot = q.dim(.tot);
         const num_heads = q_.dim(.h);
-        const num_heads_k = k_.dim(.h);
+        const num_k_heads = k_.dim(.h);
         const head_size = q_.dim(.hd);
-        const ngroups = @divExact(num_heads, num_heads_k);
-        const seqlenq_ngroups_swapped = max_seqlen_q == 1 and num_heads > num_heads_k and @mod(head_size, 8) == 0 and parameters.sliding_window < 0;
+        const ngroups = @divExact(num_heads, num_k_heads);
+        const seqlenq_ngroups_swapped = max_seqlen_q == 1 and num_heads > num_k_heads and @mod(head_size, 8) == 0 and parameters.sliding_window < 0;
         if (seqlenq_ngroups_swapped) {
-            q = q.splitAxis(.h, .{ .h = num_heads_k, .ngroups = ngroups }).transpose(.{ .tot, .ngroups, .h, .hd }).merge(.{ .tot = .{ .tot, .ngroups } });
+            q = q.splitAxis(.h, .{ .h = num_k_heads, .ngroups = ngroups }).transpose(.{ .tot, .ngroups, .h, .hd }).merge(.{ .tot = .{ .tot, .ngroups } });
         }
 
         const q_sharded = q.withPartitioning(.{ .h = .model });
