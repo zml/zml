@@ -13,3 +13,6 @@ pub const MINOR_TO_MAJOR: [MAX_RANK]i64 = b: {
 pub fn minorToMajor(rank: u8) []const i64 {
     return MINOR_TO_MAJOR[MINOR_TO_MAJOR.len - rank ..];
 }
+
+pub const ones_i64: [MAX_RANK]i64 = @splat(1);
+pub const zeroes_i64: [MAX_RANK]i64 = @splat(0);

@@ -1586,8 +1586,7 @@ pub const Tensor = struct {
         const rk = self.rank();
         const a = self.axis(axis_);
 
-        const ones: [constants.MAX_RANK]i64 = @splat(1);
-        var window_dimensions = ones;
+        var window_dimensions = constants.ones_i64;
         window_dimensions[a] = self.dim(a);
         var padding: [constants.MAX_RANK][2]i64 = @splat(.{ 0, 0 });
         padding[a] = .{ self.dim(a) - 1, 0 };
@@ -1597,9 +1596,9 @@ pub const Tensor = struct {
             .{self},
             .{.scalar(0, self.dtype())},
             .{
-                .base_dilations = ones[0..rk],
-                .window_dilations = ones[0..rk],
-                .window_strides = ones[0..rk],
+                .base_dilations = constants.ones_i64[0..rk],
+                .window_dilations = constants.ones_i64[0..rk],
+                .window_strides = constants.ones_i64[0..rk],
                 .window_dimensions = window_dimensions[0..rk],
                 .padding = padding[0..rk],
             },
