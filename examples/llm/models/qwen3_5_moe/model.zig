@@ -784,7 +784,7 @@ pub const TextRotaryEmbedding = struct {
     pub fn init(rotary_dim: i64, theta: f32, mrope_section: [3]i64) TextRotaryEmbedding {
         return .{
             .rope_opts = .{
-                .layout = .sequential,
+                .layout = .real_im_pass,
                 .scaling = .{ .default = .{ .rope_theta = theta } },
             },
             .rotary_dim = rotary_dim,

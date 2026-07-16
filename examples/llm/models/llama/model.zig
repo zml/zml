@@ -467,7 +467,7 @@ const SelfAttn = struct {
             .num_heads = @intCast(config.num_attention_heads),
             .num_kv_heads = @intCast(config.num_key_value_heads),
             .rope_opts = .{
-                .layout = if (config.hf_rope_impl) .sequential else .interleaved,
+                .layout = if (config.hf_rope_impl) .real_im_pass else .interleaved,
                 .scaling = rope_scaling,
             },
         };
