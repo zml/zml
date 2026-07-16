@@ -307,26 +307,35 @@ pub const ReduceWindowOpts = struct {
     padding: []const [2]i64,
 };
 
-pub fn reduceWindow(inputs: anytype, inits: anytype, opts: ReduceWindowOpts, comptime func: anytype, context: anytype) stdx.meta.FnReturn(func) {
+pub fn ReduceWindowFn(N: comptime_int) type {
+    return @Fn(
+        &@as([N]type, @splat(ReduceArgs)),
+        &@as([N]std.builtin.Type.Fn.Param.Attributes, @splat(.{})),
+        [N]Tensor,
+        .{},
+    );
+}
+
+pub fn reduceWindow(N: comptime_int, inputs: [N]Tensor, inits: [N]Tensor, opts: ReduceWindowOpts, func: *const ReduceWindowFn(N)) [N]Tensor {
     var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
     defer arena.deinit();
 
     const mlir_ctx = CompilationContext.current().mlir_ctx;
 
     const reduce_block, var result = b: {
-        const ArgsType = std.meta.Tuple(&[1]type{ReduceArgs} ** inits.len);
-        var args: ArgsType = undefined;
-        var block_types: [2 * inits.len]*const mlir.Type = undefined;
+        const Args = @Tuple(&@as([N]type, @splat(ReduceArgs)));
+        var args: Args = undefined;
+        var block_types: [2 * N]*const mlir.Type = undefined;
 
-        inline for (0..inits.len) |i| {
+        inline for (0..N) |i| {
             args[i].left = .fromShape(inits[i].shape());
             args[i].right = .fromShape(inits[i].shape());
 
             block_types[i] = mlirx.Type.rankedTensor(mlir_ctx, args[i].left.shape());
-            block_types[i + inits.len] = mlirx.Type.rankedTensor(mlir_ctx, args[i].right.shape());
+            block_types[i + N] = mlirx.Type.rankedTensor(mlir_ctx, args[i].right.shape());
         }
 
-        const block_locs: [2 * inits.len]*const mlir.Location = @splat(mlir.Location.unknown(mlir_ctx));
+        const block_locs: [2 * N]*const mlir.Location = @splat(mlir.Location.unknown(mlir_ctx));
         const reduce_block = mlir.Block.init(&block_types, &block_locs);
         errdefer reduce_block.deinit();
 
@@ -334,15 +343,15 @@ pub fn reduceWindow(inputs: anytype, inits: anytype, opts: ReduceWindowOpts, com
         defer CompilationContext.current().popBlock();
 
         const scope = CompilationContext.current().currentScope();
-        inline for (0..inits.len) |i| {
+        inline for (0..N) |i| {
             scope.id_to_argument.put(scope.arena.allocator(), args[i].left.id, i) catch unreachable;
-            scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + inits.len) catch unreachable;
+            scope.id_to_argument.put(scope.arena.allocator(), args[i].right.id, i + N) catch unreachable;
         }
 
-        var result = @call(.auto, func, args ++ context);
+        var result = @call(.auto, func, args);
 
-        var result_values: [inits.len]*const mlir.Value = undefined;
-        inline for (0..inits.len) |i| {
+        var result_values: [N]*const mlir.Value = undefined;
+        inline for (0..N) |i| {
             result_values[i] = result[i].value();
         }
 
