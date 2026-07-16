@@ -98,12 +98,6 @@ pub const mosaic_tpu = struct {
         }
     };
 
-    fn kernelFrontendAttrs(comp_ctx: *CompilationContext) *const mlir.Attribute {
-        return .dict(comp_ctx.mlir_ctx, &.{
-            mlir.NamedAttribute.named(comp_ctx.mlir_ctx, "kernel_metadata", .string(comp_ctx.mlir_ctx, "{}")),
-        });
-    }
-
     fn raggedPagedKernelCall(
         q: zml.Tensor,
         kv_pages: zml.Tensor,
@@ -113,20 +107,13 @@ pub const mosaic_tpu = struct {
         num_seqs: zml.Tensor,
         cfg: ragged_paged.Cfg,
     ) zml.Tensor {
-        const seq_buf_idx = zml.Tensor.constant(zml.DataType.i32.zero()).broad(.init(.{2}, .i32));
-        const comp_ctx = CompilationContext.current();
-
-        const additional_attrs = [_]mlir.NamedAttribute{
-            .named(comp_ctx.mlir_ctx, "kernel_name", .string(comp_ctx.mlir_ctx, "ragged_paged_attention_kernel")),
-            .named(comp_ctx.mlir_ctx, "mhlo.frontend_attributes", kernelFrontendAttrs(comp_ctx)),
-        };
-
+        const mlir_ctx = CompilationContext.current().mlir_ctx;
         const out = ragged_attention.Kernel.call(
             .{
                 .kv_lens = seq_lens,
                 .page_indices = block_table,
                 .cu_q_lens = query_start_len,
-                .seq_buf_idx = seq_buf_idx,
+                .seq_buf_idx = .zeroes(.init(.{2}, .i32)),
                 .num_seqs = num_seqs,
                 .q = q,
                 .kv_pages = kv_pages,
@@ -136,7 +123,12 @@ pub const mosaic_tpu = struct {
                 .cfg = cfg,
                 .extras = .{
                     .vmem_limit_bytes = cfg.vmem_limit_bytes,
-                    .additional_attributes = &additional_attrs,
+                    .additional_attributes = &.{
+                        .named(mlir_ctx, "kernel_name", .string(mlir_ctx, "ragged_paged_attention_kernel")),
+                        .named(mlir_ctx, "mhlo.frontend_attributes", .dict(mlir_ctx, &.{
+                            .named(mlir_ctx, "kernel_metadata", .string(mlir_ctx, "{}")),
+                        })),
+                    },
                 },
             },
         );
