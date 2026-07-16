@@ -111,20 +111,20 @@ pub const Api = struct {
                 break :blk .{
                     .inner = .{
                         .handle = std.c.dlopen(library, rtld) orelse {
-                            log.err("Unable to dlopen plugin: {s}", .{library});
+                            log.err("Unable to dlopen plugin {s}\n{s}", .{ library, std.c.dlerror() orelse "" });
                             return error.FileNotFound;
                         },
                     },
                 };
             },
             else => std.DynLib.open(library) catch |err| {
-                log.err("Unable to dlopen plugin: {s}", .{library});
+                log.err("Unable to dlopen plugin {s}: {}", .{ library, err });
                 return err;
             },
         };
 
         const api = fromDynLib(&lib) catch |err| {
-            log.err("Unable to load PJRT API from plugin: {s}: {}", .{ library, err });
+            log.err("Unable to load PJRT API from plugin {s}: {}", .{ library, err });
             return err;
         };
         log.info("Loaded: {s}", .{basename});
