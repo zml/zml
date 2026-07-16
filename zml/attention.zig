@@ -1,10 +1,18 @@
 const std = @import("std");
 
-const zml = @import("../zml.zig");
-const attnd = @import("attnd.zig");
-const flashattn = @import("flashattn.zig");
-const metal = @import("metal_attention.zig");
-const nki = @import("nki/attention.zig");
+pub const attnd = @import("attention/attnd.zig");
+pub const flashattn = @import("attention/flashattn.zig");
+pub const metal = @import("attention/metal_attention.zig");
+pub const nki = @import("attention/nki/attention.zig");
+pub const paged_attention = @import("attention/paged_attention.zig");
+pub const tpu = @import("attention/tpu_attention.zig");
+pub const triton = @import("attention/triton_attention.zig");
+pub const triton_kernels = @import("attention/triton_kernels/unified_attention.zig");
+const zml = @import("zml.zig");
+
+test {
+    std.testing.refAllDecls(@This());
+}
 
 pub const Backend = enum {
     vanilla,
@@ -183,7 +191,6 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
 }
 
 test "attention: q=1,qh=64,kh=8" {
-    // TODO: batchsize not supported by fa2 bindings
     try testAttention(
         .init(.{ .q = 1, .h = 64, .hd = 64 }, .bf16),
         .init(.{ .k = 64, .h = 8, .hd = 64 }, .bf16),
