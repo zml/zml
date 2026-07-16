@@ -1,5 +1,6 @@
 const std = @import("std");
 const zml = @import("zml");
+const builtin = @import("builtin");
 
 const main = @import("main.zig");
 const tokens = @import("tokens.zig");
@@ -14,22 +15,19 @@ const Tokenizer = zml.tokenizer.Tokenizer;
 const Zml_handler = main.Zml_handler;
 const Allocator = std.mem.Allocator;
 const KMeansCPU = kmeans.KMeansCPU;
-const KMeansGPU = kmeans.KMeansGPU;
 const Sampler = sampling.Sampler;
 const Logit = sampling.Logit;
 
 pub const hidden_dim: comptime_int = 4096;
-pub const bucket_dim: comptime_int = 16;
+pub const bucket_dim: comptime_int = 8;
 pub const nb_buckets: comptime_int = hidden_dim / bucket_dim;
-pub const nb_centers: comptime_int = 256;
+pub const nb_centers: comptime_int = 16;
 pub const simd_len: comptime_int = 8;
 pub const pq_top_k: comptime_int = 16;
 pub const pq_z_score: comptime_int = 5;
-pub const pq_orth_weight: comptime_float = 0.25;
-
-// Idea: normalize every row prior to rotation, weight the clustering by initial row norm squared
-// Idea: quantize the coef in 1 byte for faster LUT gather
-// Idea: register schuffling fastest version possible
+pub const pq_orth_weight: comptime_float = 0.5;
+pub const pq_lut_zero_point: comptime_int = 128;
+pub const pq_lut_qmax: comptime_int = 127;
 
 pub const PQSample = struct {
     top_k: [pq_top_k]Logit,
@@ -38,11 +36,83 @@ pub const PQSample = struct {
     nb_pruned: usize = 0,
 };
 
+pub const ProductQuantizationMode = enum {
+    vanilla,
+    anisotropic,
+};
+
+const RotatedLmHead = struct {
+    n: usize,
+    d: usize,
+    data: []const f32,
+    is_junk: []const bool,
+};
+
+fn buildCodebookAndAssign(
+    allocator: Allocator,
+    lm_head: *LmHeadMatrix,
+    rotated_lm_head: []const f32,
+    mode: ProductQuantizationMode,
+    center_count: usize,
+    codebook: []f32,
+    row_codes: []u8,
+) !void {
+    var nb_non_junk: usize = 0;
+    for (lm_head.is_junk) |is_junk| nb_non_junk += @intFromBool(!is_junk);
+
+    const training_data = try allocator.alloc(f32, nb_non_junk * bucket_dim);
+    defer allocator.free(training_data);
+    var sample_index: usize = 0;
+    for (0..lm_head.n) |row| {
+        if (lm_head.is_junk[row]) continue;
+        const bucket = switch (mode) {
+            .vanilla => 0,
+            .anisotropic => sample_index % nb_buckets,
+        };
+        const src = rotated_lm_head[row * hidden_dim + bucket * bucket_dim ..][0..bucket_dim];
+        const dst = training_data[sample_index * bucket_dim ..][0..bucket_dim];
+        @memcpy(dst, src);
+        sample_index += 1;
+    }
+
+    std.log.info("***** Initializing {s} shared PQ codebook", .{@tagName(mode)});
+    var km = try KMeansCPU.init(allocator, nb_non_junk, bucket_dim, center_count);
+    defer km.deinit();
+    km.solve(training_data);
+
+    switch (mode) {
+        .vanilla => {
+            std.log.info("***** Assigning vanilla PQ row codes", .{});
+            for (0..lm_head.n) |row| {
+                if (lm_head.is_junk[row]) continue;
+                for (0..nb_buckets) |bucket| {
+                    const data = rotated_lm_head[row * hidden_dim + bucket * bucket_dim ..][0..bucket_dim];
+                    const norm = Quantized.normL2(data);
+                    const closest = km.closestCenter(data, norm * norm, center_count);
+                    row_codes[row * nb_buckets + bucket] = @intCast(closest[1]);
+                }
+            }
+        },
+        .anisotropic => {
+            std.log.info("***** Jointly optimizing full-row ScaNN anisotropic loss", .{});
+            const rotated: RotatedLmHead = .{
+                .n = lm_head.n,
+                .d = hidden_dim,
+                .data = rotated_lm_head,
+                .is_junk = lm_head.is_junk,
+            };
+            try km.solveAnisotropic(rotated, row_codes, pq_orth_weight);
+        },
+    }
+    @memcpy(codebook, km.centers[0..codebook.len]);
+}
+
 pub const ProductQuantizer = struct {
     zml_handler: *Zml_handler,
     allocator: Allocator,
     lm_head: *LmHeadMatrix,
     n: usize,
+    mode: ProductQuantizationMode,
 
     // walsh-hadamard transform of the lm_head
     rotated_lm_head: []f32,
@@ -54,8 +124,6 @@ pub const ProductQuantizer = struct {
     // the PQ assignation of the rows, in row -> bucket major:
     // [row_0_bucket_0_center ; row_0_bucket_1_center ... row_0_bucket_nb_buckets-1_center ; row_1_bucket_0_center ...]
     row_buckets: []u8,
-    // the dot product between the query and all centers, so that the dot product between the query and a row
-    // is quantized in a bucket to query_center_scores[bucket_id * nb_centers + row_buckets[row_id * nb_buckets + bucket_id]]
     query_center_scores: [nb_buckets * nb_centers]f32,
 
     // error bounds
@@ -64,12 +132,7 @@ pub const ProductQuantizer = struct {
     // sampling utils
     logits: []Logit,
 
-    min_bucket: f32,
-    max_bucket: f32,
-    min_norm: f32,
-    max_norm: f32,
-
-    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix) !ProductQuantizer {
+    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, mode: ProductQuantizationMode) !ProductQuantizer {
         const alloc = zml_handler.allocator;
         std.debug.assert(lm_head.d == hidden_dim);
         const rotated_lm_head = try alloc.alloc(f32, lm_head.n * hidden_dim);
@@ -84,6 +147,7 @@ pub const ProductQuantizer = struct {
             .allocator = alloc,
             .lm_head = lm_head,
             .n = lm_head.n,
+            .mode = mode,
             .rotated_lm_head = rotated_lm_head,
             .rotated_query = [_]f32{0.0} ** hidden_dim,
             .codebook = [_]f32{0.0} ** (bucket_dim * nb_centers),
@@ -91,10 +155,6 @@ pub const ProductQuantizer = struct {
             .query_center_scores = [_]f32{0.0} ** (nb_buckets * nb_centers),
             .quantization_error_factor = 0.0,
             .logits = logits,
-            .min_bucket = 99999.0,
-            .max_bucket = -99999.0,
-            .min_norm = 99999.0,
-            .max_norm = 0.0,
         };
     }
 
@@ -105,45 +165,23 @@ pub const ProductQuantizer = struct {
     }
 
     pub fn buildCodebook(self: *ProductQuantizer) !void {
-        // build the rotated lm_head, don't normalize
+        // Build the unnormalized rotated lm_head.
         std.log.info("***** Rotating the lm_head", .{});
-        for (0..self.n) |i| {
-            const src = self.lm_head.data[i * hidden_dim ..][0..hidden_dim];
-            const dst = self.rotated_lm_head[i * hidden_dim ..][0..hidden_dim];
+        for (0..self.n) |row| {
+            const src = self.lm_head.data[row * hidden_dim ..][0..hidden_dim];
+            const dst = self.rotated_lm_head[row * hidden_dim ..][0..hidden_dim];
             Quantized.walshHadamardSimdTo(dst, src, 12);
         }
 
-        // build dataset from first bucket only, no normalization, exclude junk rows
-        std.log.info("***** Building codebook dataset", .{});
-        var nb_non_junk: usize = 0;
-        const first_bucket_data = try self.allocator.alloc(f32, self.n * bucket_dim);
-        defer self.allocator.free(first_bucket_data);
-        for (0..self.n) |row| {
-            if (self.lm_head.is_junk[row]) continue;
-            const dst = first_bucket_data[nb_non_junk * bucket_dim ..][0..bucket_dim];
-            const src = self.rotated_lm_head[row * hidden_dim ..][0..bucket_dim];
-            @memcpy(dst, src);
-            nb_non_junk += 1;
-        }
-
-        // build codebook by vanilla kmeans
-        std.log.info("***** Building VanillaPQ codebook", .{});
-        var km = try KMeansCPU.init(self.allocator, nb_non_junk, bucket_dim, nb_centers);
-        defer km.deinit();
-        km.solve(first_bucket_data[0 .. nb_non_junk * bucket_dim]);
-
-        // store the codebook, assign all buckets to a center
-        std.log.info("***** Assigning row buckets to centers", .{});
-        @memcpy(self.codebook[0..], km.centers[0..self.codebook.len]);
-        for (0..self.n) |row| {
-            const row_codes = self.row_buckets[row * nb_buckets ..][0..nb_buckets];
-            for (0..nb_buckets) |bucket| {
-                const data = self.rotated_lm_head[(row * hidden_dim + bucket * bucket_dim)..][0..bucket_dim];
-                const norm = Quantized.normL2(data);
-                const closest = km.closestCenter(data, norm * norm, km.k);
-                row_codes[bucket] = @intCast(closest[1]);
-            }
-        }
+        try buildCodebookAndAssign(
+            self.allocator,
+            self.lm_head,
+            self.rotated_lm_head,
+            self.mode,
+            nb_centers,
+            self.codebook[0..],
+            self.row_buckets,
+        );
 
         // compute error bounding factors
         // in this vanilla setup, its been proven that the pq logits, if seen as random variables, have:
@@ -157,21 +195,42 @@ pub const ProductQuantizer = struct {
         // we define the pq_logit upper bound with:
         // upper_bound(pq_logit) = pq_logit + Z * sqrt(var(pq_logit)),
         // which has 99,98% likelyhood to hold for Z = 5.
-        const K: f32 = @floatFromInt(nb_centers);
-        const B: f32 = @floatFromInt(bucket_dim);
-        const D: f32 = @floatFromInt(hidden_dim);
-        const kmeans_err = std.math.pow(f32, K, -1.0 / B);
-        self.quantization_error_factor = pq_z_score * kmeans_err / @sqrt(D);
-        std.log.info("K-means relative theoretical erorr = {d}", .{kmeans_err});
-        std.log.info("PQ statistical Cauchy-Schwarz factor = {d}", .{self.quantization_error_factor});
+        switch (self.mode) {
+            .vanilla => {
+                const K: f32 = @floatFromInt(nb_centers);
+                const B: f32 = @floatFromInt(bucket_dim);
+                const D: f32 = @floatFromInt(hidden_dim);
+                const kmeans_err = std.math.pow(f32, K, -1.0 / B);
+                self.quantization_error_factor = pq_z_score * kmeans_err / @sqrt(D);
+                std.log.info("K-means relative theoretical error = {d}", .{kmeans_err});
+                std.log.info("PQ statistical Cauchy-Schwarz factor = {d}", .{self.quantization_error_factor});
+            },
+            .anisotropic => {
+                var max_relative_error: f32 = 0.0;
+                for (0..self.n) |row| {
+                    if (self.lm_head.is_junk[row]) continue;
+                    var error_norm2: f32 = 0.0;
+                    const row_codes = self.row_buckets[row * nb_buckets ..][0..nb_buckets];
+                    for (0..nb_buckets) |bucket| {
+                        const data = self.rotated_lm_head[row * hidden_dim + bucket * bucket_dim ..][0..bucket_dim];
+                        const center = self.codebook[@as(usize, row_codes[bucket]) * bucket_dim ..][0..bucket_dim];
+                        for (0..bucket_dim) |coord| {
+                            const err = data[coord] - center[coord];
+                            error_norm2 += err * err;
+                        }
+                    }
+                    max_relative_error = @max(max_relative_error, @sqrt(error_norm2) / self.lm_head.row_norms[row]);
+                }
+                self.quantization_error_factor = max_relative_error;
+                std.log.info("Anisotropic PQ maximum relative reconstruction error = {d}", .{max_relative_error});
+            },
+        }
     }
 
     pub fn sample(self: *ProductQuantizer, query: []const f32) PQSample {
         // step 0 : compute geometric information for error bounding
         const query_norm = Quantized.normL2(query);
         const error_bound_scale = query_norm * self.quantization_error_factor;
-        self.min_norm = @min(self.min_norm, query_norm);
-        self.max_norm = @max(self.max_norm, query_norm);
 
         // step 1 : rotate query, don't normalize it
         self.zml_handler.tic(&self.zml_handler.timers.pq_rotate);
@@ -180,25 +239,20 @@ pub const ProductQuantizer = struct {
         Quantized.walshHadamardSimdTo(dst, src, 12);
         self.zml_handler.toc(&self.zml_handler.timers.pq_rotate);
 
-        // step 2 : split the query into each bucket, score that against each center. normalize the scores
+        // step 2 : score every bucket against the shared codebook.
         self.zml_handler.tic(&self.zml_handler.timers.pq_lut);
         for (0..nb_buckets) |bucket| {
             const query_data = self.rotated_query[bucket * bucket_dim ..][0..bucket_dim];
             for (0..nb_centers) |center| {
                 const center_data = self.codebook[center * bucket_dim ..][0..bucket_dim];
                 var dot: f32 = 0.0;
-                for (0..bucket_dim) |coord| {
-                    dot += center_data[coord] * query_data[coord];
-                }
-                dot /= query_norm;
-                self.min_bucket = @min(self.min_bucket, @abs(dot));
-                self.max_bucket = @max(self.max_bucket, @abs(dot));
+                for (0..bucket_dim) |coord| dot += center_data[coord] * query_data[coord];
                 self.query_center_scores[bucket * nb_centers + center] = dot;
             }
         }
         self.zml_handler.toc(&self.zml_handler.timers.pq_lut);
 
-        // step 3 : compute logits row by row using contiguous bucket codes, unnormalize the scores
+        // step 3 : gather floating-point coefficients and unnormalize the sum.
         self.zml_handler.tic(&self.zml_handler.timers.pq_score);
         for (0..self.n) |row| {
             if (self.lm_head.is_junk[row]) continue;
@@ -208,7 +262,6 @@ pub const ProductQuantizer = struct {
                 const bucket_lut = self.query_center_scores[bucket * nb_centers ..][0..nb_centers];
                 logit += bucket_lut[row_codes[bucket]];
             }
-            logit *= query_norm;
             self.logits[row].logit = logit;
             self.logits[row].upper_bound = logit + error_bound_scale * self.lm_head.row_norms[row];
         }
@@ -248,96 +301,270 @@ pub const ProductQuantizer = struct {
     }
 };
 
-/// ScaNN-style anisotropic PQ with one codebook shared by every Walsh-Hadamard
-/// bucket. `base` owns the search-time representation; only codebook training and
-/// row assignment differ from `ProductQuantizer`.
-pub const AnisotropicProductQuantizer = struct {
-    base: ProductQuantizer,
+/// Vanilla PQ laid out for SIMD in-register LUT lookups. The 16-center
+/// codebook makes every code a nibble; codes for two consecutive buckets are
+/// packed into one byte and transposed in groups of 64 rows. At query time a
+/// 16-byte LUT is loaded into a vector register and `tbl`/`pshufb` scores 16
+/// rows in parallel.
+pub const ProductQuantizerFastScan = struct {
+    zml_handler: *Zml_handler,
+    allocator: Allocator,
+    lm_head: *LmHeadMatrix,
+    n: usize,
+    nb_scan_groups: usize,
+    mode: ProductQuantizationMode,
 
-    const RotatedLmHead = struct {
-        n: usize,
-        d: usize,
-        data: []const f32,
-        is_junk: []const bool,
-    };
+    rotated_lm_head: []f32,
+    rotated_query: [hidden_dim]f32,
 
-    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix) !AnisotropicProductQuantizer {
-        return .{ .base = try ProductQuantizer.init(zml_handler, lm_head) };
+    codebook: [bucket_dim * center_count]f32,
+    // Layout: [scan_group][bucket_pair][register][lane]. Each byte contains
+    // the low-bucket code in bits 0..3 and the high-bucket code in bits 4..7.
+    packed_row_buckets: []u8,
+    query_center_scores: [nb_buckets * center_count]u8,
+    logits: []Logit,
+
+    // One 16-byte shuffle table is the defining constraint of FastScan.
+    const center_count: comptime_int = 16;
+    const register_lanes: comptime_int = 16;
+    const registers_per_group: comptime_int = 4;
+    const rows_per_group: comptime_int = register_lanes * registers_per_group;
+    const bucket_pair_count: comptime_int = nb_buckets / 2;
+    const buckets_per_u16_chunk: comptime_int = 256;
+
+    const Vec16u8 = @Vector(register_lanes, u8);
+    const Vec16u16 = @Vector(register_lanes, u16);
+    const Vec16u32 = @Vector(register_lanes, u32);
+    const Vec16u3 = @Vector(register_lanes, u3);
+
+    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, mode: ProductQuantizationMode) !ProductQuantizerFastScan {
+        const alloc = zml_handler.allocator;
+        std.debug.assert(lm_head.d == hidden_dim);
+
+        const nb_scan_groups = (lm_head.n + rows_per_group - 1) / rows_per_group;
+        const rotated_lm_head = try alloc.alloc(f32, lm_head.n * hidden_dim);
+        errdefer alloc.free(rotated_lm_head);
+        const packed_row_buckets = try alloc.alloc(u8, nb_scan_groups * bucket_pair_count * registers_per_group * register_lanes);
+        errdefer alloc.free(packed_row_buckets);
+        @memset(packed_row_buckets, 0);
+        const logits = try alloc.alloc(Logit, lm_head.n);
+        for (0..lm_head.n) |row| {
+            logits[row] = .{
+                .row = row,
+                .logit = if (lm_head.is_junk[row]) -std.math.floatMax(f32) else 0.0,
+                .upper_bound = 0.0,
+            };
+        }
+
+        return .{
+            .zml_handler = zml_handler,
+            .allocator = alloc,
+            .lm_head = lm_head,
+            .n = lm_head.n,
+            .nb_scan_groups = nb_scan_groups,
+            .mode = mode,
+            .rotated_lm_head = rotated_lm_head,
+            .rotated_query = [_]f32{0.0} ** hidden_dim,
+            .codebook = [_]f32{0.0} ** (bucket_dim * center_count),
+            .packed_row_buckets = packed_row_buckets,
+            .query_center_scores = [_]u8{pq_lut_zero_point} ** (nb_buckets * center_count),
+            .logits = logits,
+        };
     }
 
-    pub fn deinit(self: *AnisotropicProductQuantizer) void {
-        self.base.deinit();
+    pub fn deinit(self: *ProductQuantizerFastScan) void {
+        self.allocator.free(self.rotated_lm_head);
+        self.allocator.free(self.packed_row_buckets);
+        self.allocator.free(self.logits);
     }
 
-    pub fn buildCodebook(self: *AnisotropicProductQuantizer) !void {
-        const pq = &self.base;
-
-        std.log.info("***** Rotating the lm_head for anisotropic PQ", .{});
-        for (0..pq.n) |row| {
-            const src = pq.lm_head.data[row * hidden_dim ..][0..hidden_dim];
-            const dst = pq.rotated_lm_head[row * hidden_dim ..][0..hidden_dim];
+    pub fn buildCodebook(self: *ProductQuantizerFastScan) !void {
+        std.log.info("***** Rotating the lm_head for PQ FastScan", .{});
+        for (0..self.n) |row| {
+            const src = self.lm_head.data[row * hidden_dim ..][0..hidden_dim];
+            const dst = self.rotated_lm_head[row * hidden_dim ..][0..hidden_dim];
             Quantized.walshHadamardSimdTo(dst, src, 12);
         }
 
-        // Seed the tied codebook with a stratified sample. Each non-junk row
-        // contributes one block, cycling through all bucket positions.
-        var nb_non_junk: usize = 0;
-        for (pq.lm_head.is_junk) |is_junk| nb_non_junk += @intFromBool(!is_junk);
-        const training_data = try pq.allocator.alloc(f32, nb_non_junk * bucket_dim);
-        defer pq.allocator.free(training_data);
-        var sample_index: usize = 0;
-        for (0..pq.n) |row| {
-            if (pq.lm_head.is_junk[row]) continue;
-            const bucket = sample_index % nb_buckets;
-            const src = pq.rotated_lm_head[row * hidden_dim + bucket * bucket_dim ..][0..bucket_dim];
-            const dst = training_data[sample_index * bucket_dim ..][0..bucket_dim];
-            @memcpy(dst, src);
-            sample_index += 1;
-        }
+        const row_codes = try self.allocator.alloc(u8, self.n * nb_buckets);
+        defer self.allocator.free(row_codes);
+        try buildCodebookAndAssign(
+            self.allocator,
+            self.lm_head,
+            self.rotated_lm_head,
+            self.mode,
+            center_count,
+            self.codebook[0..],
+            row_codes,
+        );
 
-        std.log.info("***** Initializing shared codebook from all buckets on the GPU", .{});
-        //var km = try KMeansGPU.init(pq.zml_handler, nb_non_junk, bucket_dim, nb_centers);
-        var km = try KMeansCPU.init(self.base.allocator, nb_non_junk, bucket_dim, nb_centers);
-        defer km.deinit();
-        km.solve(training_data);
-
-        std.log.info("***** Jointly optimizing full-row ScaNN anisotropic loss on the GPU", .{});
-        const rotated: RotatedLmHead = .{
-            .n = pq.n,
-            .d = hidden_dim,
-            .data = pq.rotated_lm_head,
-            .is_junk = pq.lm_head.is_junk,
-        };
-        try km.solveAnisotropic(rotated, pq.row_buckets, pq_orth_weight);
-        @memcpy(pq.codebook[0..], km.centers[0..pq.codebook.len]);
-
-        // Use a deterministic Cauchy-Schwarz bound for APQ. Unlike the vanilla
-        // rate-distortion estimate, this remains valid for the anisotropic loss.
-        var max_relative_error: f32 = 0.0;
-        for (0..pq.n) |row| {
-            if (pq.lm_head.is_junk[row]) continue;
-            var error_norm2: f32 = 0.0;
-            const row_codes = pq.row_buckets[row * nb_buckets ..][0..nb_buckets];
+        std.log.info("***** Packing and transposing PQ FastScan row codes", .{});
+        @memset(self.packed_row_buckets, 0);
+        for (0..self.n) |row| {
+            if (self.lm_head.is_junk[row]) continue;
+            const scan_group = row / rows_per_group;
+            const register = (row % rows_per_group) / register_lanes;
+            const lane = row % register_lanes;
             for (0..nb_buckets) |bucket| {
-                const x = pq.rotated_lm_head[row * hidden_dim + bucket * bucket_dim ..][0..bucket_dim];
-                const center = pq.codebook[@as(usize, row_codes[bucket]) * bucket_dim ..][0..bucket_dim];
-                for (0..bucket_dim) |coord| {
-                    const err = x[coord] - center[coord];
-                    error_norm2 += err * err;
+                const code = row_codes[row * nb_buckets + bucket];
+                const bucket_pair = bucket / 2;
+                const shift: u3 = @intCast((bucket & 1) * 4);
+                const offset = packedCodeOffset(scan_group, bucket_pair, register, lane);
+                self.packed_row_buckets[offset] |= code << shift;
+            }
+        }
+    }
+
+    inline fn packedCodeOffset(scan_group: usize, bucket_pair: usize, register: usize, lane: usize) usize {
+        return (((scan_group * bucket_pair_count + bucket_pair) * registers_per_group + register) * register_lanes) + lane;
+    }
+
+    inline fn normalizedQueryCenterScore(self: *ProductQuantizerFastScan, bucket: usize, center: usize, query_norm: f32) f32 {
+        const query_data = self.rotated_query[bucket * bucket_dim ..][0..bucket_dim];
+        const center_data = self.codebook[center * bucket_dim ..][0..bucket_dim];
+        var dot: f32 = 0.0;
+        for (0..bucket_dim) |coord| dot += center_data[coord] * query_data[coord];
+        return dot / query_norm;
+    }
+
+    inline fn quantizeLutScore(score: f32, inverse_scale: f32) u8 {
+        const rounded = @round(score * inverse_scale);
+        const clipped = std.math.clamp(rounded, -@as(f32, pq_lut_qmax), @as(f32, pq_lut_qmax));
+        const signed: i32 = @intFromFloat(clipped);
+        return @intCast(signed + pq_lut_zero_point);
+    }
+
+    inline fn portableLookup16(table: Vec16u8, indices: Vec16u8) Vec16u8 {
+        var result: Vec16u8 = undefined;
+        inline for (0..register_lanes) |lane| result[lane] = table[indices[lane]];
+        return result;
+    }
+
+    /// Dynamic 16-entry byte lookup. AArch64 `tbl` and x86 SSSE3 `pshufb`
+    /// both interpret each byte lane as an index into the table register.
+    inline fn registerLookup16(table: Vec16u8, indices: Vec16u8) Vec16u8 {
+        if (comptime builtin.cpu.arch == .aarch64 and builtin.zig_backend != .stage2_c) {
+            return asm (
+                \\ tbl %[result].16b, {%[table].16b}, %[indices].16b
+                : [result] "=&x" (-> Vec16u8),
+                : [table] "x" (table),
+                  [indices] "x" (indices),
+            );
+        }
+        if (comptime builtin.cpu.arch == .x86_64 and
+            builtin.zig_backend != .stage2_c and
+            builtin.cpu.has(.x86, .ssse3))
+        {
+            return asm (
+                \\ movdqa %[table], %[result]
+                \\ pshufb %[indices], %[result]
+                : [result] "=&x" (-> Vec16u8),
+                : [table] "x" (table),
+                  [indices] "x" (indices),
+            );
+        }
+        return portableLookup16(table, indices);
+    }
+
+    pub fn sample(self: *ProductQuantizerFastScan, query: []const f32) PQSample {
+        const query_norm = Quantized.normL2(query);
+
+        self.zml_handler.tic(&self.zml_handler.timers.pq_rotate);
+        Quantized.walshHadamardSimdTo(self.rotated_query[0..], query[0..hidden_dim], 12);
+        self.zml_handler.toc(&self.zml_handler.timers.pq_rotate);
+
+        self.zml_handler.tic(&self.zml_handler.timers.pq_lut);
+        var max_abs_score: f32 = 0.0;
+        for (0..nb_buckets) |bucket| {
+            for (0..center_count) |center| {
+                const score = self.normalizedQueryCenterScore(bucket, center, query_norm);
+                const abs_score = @abs(score);
+                max_abs_score = @max(max_abs_score, abs_score);
+            }
+        }
+        const lut_scale = max_abs_score / @as(f32, pq_lut_qmax);
+        const inverse_lut_scale = @as(f32, pq_lut_qmax) / max_abs_score;
+        for (0..nb_buckets) |bucket| {
+            for (0..center_count) |center| {
+                const score = self.normalizedQueryCenterScore(bucket, center, query_norm);
+                self.query_center_scores[bucket * center_count + center] = quantizeLutScore(score, inverse_lut_scale);
+            }
+        }
+        self.zml_handler.toc(&self.zml_handler.timers.pq_lut);
+
+        self.zml_handler.tic(&self.zml_handler.timers.pq_score);
+        const low_nibble: Vec16u8 = @splat(0x0f);
+        const high_shift: Vec16u3 = @splat(4);
+        const accumulator_bias: i32 = pq_lut_zero_point * nb_buckets;
+        const final_lut_scale = lut_scale * query_norm;
+
+        for (0..self.nb_scan_groups) |scan_group| {
+            var accumulators: [registers_per_group]Vec16u32 = [_]Vec16u32{@splat(0)} ** registers_per_group;
+            var chunk_accumulators: [registers_per_group]Vec16u16 = [_]Vec16u16{@splat(0)} ** registers_per_group;
+
+            for (0..bucket_pair_count) |bucket_pair| {
+                const low_bucket = bucket_pair * 2;
+                const low_lut: Vec16u8 = self.query_center_scores[low_bucket * center_count ..][0..center_count].*;
+                const high_lut: Vec16u8 = self.query_center_scores[(low_bucket + 1) * center_count ..][0..center_count].*;
+
+                inline for (0..registers_per_group) |register| {
+                    const codes_offset = packedCodeOffset(scan_group, bucket_pair, register, 0);
+                    const packed_codes: Vec16u8 = self.packed_row_buckets[codes_offset..][0..register_lanes].*;
+                    const low_scores = registerLookup16(low_lut, packed_codes & low_nibble);
+                    chunk_accumulators[register] += @as(Vec16u16, @intCast(low_scores));
+                    const high_scores = registerLookup16(high_lut, packed_codes >> high_shift);
+                    chunk_accumulators[register] += @as(Vec16u16, @intCast(high_scores));
+                }
+
+                const buckets_done = @min((bucket_pair + 1) * 2, nb_buckets);
+                if (buckets_done % buckets_per_u16_chunk == 0 or buckets_done == nb_buckets) {
+                    inline for (0..registers_per_group) |register| {
+                        accumulators[register] += @as(Vec16u32, @intCast(chunk_accumulators[register]));
+                        chunk_accumulators[register] = @splat(0);
+                    }
                 }
             }
-            const row_norm = pq.lm_head.row_norms[row];
-            max_relative_error = @max(max_relative_error, @sqrt(error_norm2) / row_norm);
+
+            inline for (0..registers_per_group) |register| {
+                inline for (0..register_lanes) |lane| {
+                    const row = scan_group * rows_per_group + register * register_lanes + lane;
+                    if (row < self.n and !self.lm_head.is_junk[row]) {
+                        const centered_accumulator: i32 = @as(i32, @intCast(accumulators[register][lane])) - accumulator_bias;
+                        const logit = @as(f32, @floatFromInt(centered_accumulator)) * final_lut_scale;
+                        self.logits[row].logit = logit;
+                        self.logits[row].upper_bound = logit;
+                    }
+                }
+            }
         }
-        pq.quantization_error_factor = max_relative_error;
-        std.log.info("Anisotropic PQ maximum relative reconstruction error = {d}", .{max_relative_error});
+        self.zml_handler.toc(&self.zml_handler.timers.pq_score);
+
+        self.zml_handler.tic(&self.zml_handler.timers.pq_top_k);
+        const empty_logit: Logit = .{ .logit = -std.math.floatMax(f32), .row = 0, .upper_bound = 0 };
+        var result: PQSample = .{
+            .top_k = [_]Logit{empty_logit} ** pq_top_k,
+        };
+        for (0..self.n) |row| {
+            const score = self.logits[row].logit;
+            if (score <= result.top_k[pq_top_k - 1].logit) continue;
+            var insert_pos: usize = pq_top_k - 1;
+            while (insert_pos > 0 and score > result.top_k[insert_pos - 1].logit) {
+                result.top_k[insert_pos] = result.top_k[insert_pos - 1];
+                insert_pos -= 1;
+            }
+            result.top_k[insert_pos] = self.logits[row];
+        }
+        self.zml_handler.toc(&self.zml_handler.timers.pq_top_k);
+        return result;
     }
 
-    pub fn sample(self: *AnisotropicProductQuantizer, query: []const f32) PQSample {
-        return self.base.sample(query);
-    }
-
-    pub fn sampleLog(self: *AnisotropicProductQuantizer, sampler: *Sampler, query: []const f32) void {
-        self.base.sampleLog(sampler, query);
+    pub fn sampleLog(self: *ProductQuantizerFastScan, sampler: *Sampler, query: []const f32) void {
+        std.log.info("*****", .{});
+        std.log.info("***** new PQ FastScan sampling", .{});
+        std.log.info("*****", .{});
+        var approx_sampling = self.sample(query);
+        sampler.sample(query);
+        sampler.logRealVsApproxSampling(self.logits, "PQ FastScan logits");
+        sampler.logApproxVsRealSampling(&approx_sampling.top_k, "PQ FastScan logit");
     }
 };
