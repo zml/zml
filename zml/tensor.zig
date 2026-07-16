@@ -1646,6 +1646,72 @@ pub const Tensor = struct {
         try std.testing.expectEqual([2][5]f32{ .{ 0, 1, 2, 2, 3 }, .{ 3, 4, 4, 6, 7 } }, try res.getValue([2][5]f32, std.testing.io));
     }
 
+    /// Returns a Tensor containing the cumulative sum of elements over the given axis.
+    /// Output shape is input shape + 1
+    /// [0, 1, 0, 1, 0, 0, 1, 1].cumulativeSumStartingAtZero(0) -> [0, 0, 1, 1, 2, 2, 2, 3, 4]
+    /// The first value is always zero.
+    /// The last value contains the sum of all element in the array.
+    pub fn cumulativeSumStartingAtZero(self: Tensor, axis_: anytype) Tensor {
+        const rk = self.rank();
+        const a = self.axis(axis_);
+
+        var window_dimensions = constants.ones_i64;
+        window_dimensions[a] = self.dim(a);
+        var padding: [constants.MAX_RANK][2]i64 = @splat(.{ 0, 0 });
+        padding[a] = .{ self.dim(a), 0 };
+
+        const result = ops.reduceWindow(
+            1,
+            .{self},
+            .{.scalar(0, self.dtype())},
+            .{
+                .base_dilations = constants.ones_i64[0..rk],
+                .window_dilations = constants.ones_i64[0..rk],
+                .window_strides = constants.ones_i64[0..rk],
+                .window_dimensions = window_dimensions[0..rk],
+                .padding = padding[0..rk],
+            },
+            struct {
+                fn add(values: ops.ReduceArgs) [1]Tensor {
+                    return .{.add(values.left, values.right)};
+                }
+            }.add,
+        );
+        return result[0];
+    }
+
+    test cumulativeSumStartingAtZero {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Local = struct {
+            pub fn _cumsum(input: Tensor) Tensor {
+                const x = input.withPartialTags(.{.n});
+                return x.cumulativeSumStartingAtZero(.n);
+            }
+        };
+
+        const x: Tensor = .init(.{ 2, 5 }, .f32);
+
+        var exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            Local._cumsum,
+            .{x},
+            platform,
+            .{},
+        );
+        defer exe.deinit();
+
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, @ptrCast(&[2][5]f32{ .{ 0, 1, 1, 0, 1 }, .{ 3, 1, 0, 2, 1 } }));
+        defer x_buffer.deinit();
+
+        var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._cumsum, .{x_buffer});
+        defer res.deinit();
+
+        try std.testing.expectEqual([2][6]f32{ .{ 0, 0, 1, 2, 2, 3 }, .{ 0, 3, 4, 4, 6, 7 } }, try res.getValue([2][6]f32, std.testing.io));
+    }
+
     /// Returns a transposed Tensor computed using the given axes.
     pub fn transpose(self: Tensor, axes_: anytype) Tensor {
         const axes__ = self.axes(axes_).constSlice();
@@ -2126,7 +2192,7 @@ pub const Tensor = struct {
         end: i64,
         step: i64 = 1,
     };
-    ///
+
     /// Returns a Tensor containing evenly spaced values within a given interval.
     pub fn arange(args: ArangeArgs, dt: DataType) Tensor {
         stdx.debug.assert(args.start <= args.end, "arange expects 'args.start' to be less than 'args.end', got {} and {}", .{ args.start, args.end });
@@ -2151,6 +2217,30 @@ pub const Tensor = struct {
         }
 
         return res;
+    }
+
+    test arange {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            Tensor.arange,
+            .{ .{ .start = 2, .end = 26, .step = 4 }, .u32 },
+            platform,
+            .{},
+        );
+        defer exe.deinit();
+
+        const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.arange, {});
+
+        try zml.testing.expectClose(
+            std.testing.io,
+            zml.Slice.initConst(.init(.{6}, .u32), @ptrCast(&[_]u32{ 2, 6, 10, 14, 18, 22 })),
+            output,
+            .exact_match,
+        );
     }
 
     /// Returns a Tensor containing values in increasing order starting from 0 along the given axis.
