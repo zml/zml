@@ -141,14 +141,18 @@ test normalizeL2 {
 }
 
 pub const RopeOpts = struct {
-    layout: Layout = .sequential,
+    layout: Layout = .real_im_pass,
     scaling: Scaling = .{ .default = .{} },
 
-    /// There are two layouts corresponding to how to split `x` in real/imag parts.
-    /// * Interleaved means that the real/imag of each scalar is contiguous.
-    /// * Sequential means that you first read all real values then all imag values.
-    /// Typically HF models use sequential, while GGUF use interleaved.
-    pub const Layout = enum { interleaved, sequential };
+    /// There are 3 layouts corresponding to how to split `x` in real/imag/passthrough parts.
+    /// The hard part is that HF models don't specify the layout they use.
+    /// But HF models don't use the `interleaved` format,
+    /// and most models don't have a Rope passthrough, so real_im_pass and real_pass_im_pass are the same.
+    ///
+    /// * real_im_pass: [x_re0, x_re1, ..., x_im0, x_im1, ..., p_re0, p_re1, ..., p_im0, p_im1, ...]
+    /// * real_pass_im_pass: [x_re0, x_re1, ..., p_re0, p_re1, ..., x_im0, x_im1, ..., p_im0, p_im1, ...]
+    /// * interleaved: : [x_re0, x_im0, x_re1, x_im1, ..., p_re0, p_im0, p_re1, p_im1, ...]
+    pub const Layout = enum { real_im_pass, real_pass_im_pass, interleaved };
 
     /// There are several ways to init the scaling aka "inv_freq"
     pub const Scaling = union(enum) {
@@ -267,10 +271,12 @@ pub const RopeOpts = struct {
             };
         }
 
-        pub fn getPartialRotaryFactor(self: *const Scaling) f32 {
+        pub fn partialRotaryDim(self: *const Scaling, head_dim: i64) u32 {
             return switch (self.*) {
-                inline .yarn, .proportional => |s| s.partial_rotary_factor,
-                .default, .llama3, .linear => 1.0,
+                inline .yarn, .proportional => |s| @intFromFloat(@floor(
+                    @as(f32, @floatFromInt(head_dim)) * std.math.clamp(s.partial_rotary_factor, 0.0, 1.0),
+                )),
+                .default, .llama3, .linear => @intCast(head_dim),
             };
         }
     };
@@ -297,24 +303,13 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
         break :blk Tensor.arange(.{ .end = x.dim(.s) }, .f32).withTags(.{.s});
     };
 
-    // NOTE(Corentin): Don't ask
-    // Well, okay if you insist. It seems that the proportional rope doesn't really work like the others with respect to partial rotary factor.
-    // Instead of splitting x into `rot` and `pass` it first splits into real and imag (thus respecting the layout) and then rotates only a part.
-    // If you ask me, that's the correct way of doing partial rotation semantically but ¯\_(ツ)_/¯.
-    if (opts.scaling == .proportional) {
-        return proportionalRope(x, idx, opts);
-    }
-
-    // NOTE(Corentin): defaulting to 1.0 makes it the degenerate case that is identical to no
-    const partial_rotary_factor = opts.scaling.getPartialRotaryFactor();
-    const rotary_dim: u32 = @intFromFloat(@floor(@as(f32, @floatFromInt(head_dim)) * std.math.clamp(partial_rotary_factor, 0.0, 1.0)));
+    const rotary_dim: u32 = opts.scaling.partialRotaryDim(head_dim);
     stdx.debug.assert(rotary_dim > 0 and @mod(rotary_dim, 2) == 0, "partial rope expects a even head dim (.hd), got {d}", .{rotary_dim});
 
-    const x_rot = x.slice1d(.hd, .{ .start = 0, .end = rotary_dim });
-    const x_real, const x_imag = zml.nn.splitRealImg(x_rot, opts.layout);
+    const x_real, const x_imag, const x_pass = zml.nn.splitRealImgPass(x, opts.layout, rotary_dim);
+    const inv_freq = invFreq(head_dim, opts).withTags(.{.hd});
 
     // compute sin and cos in f32 before downcasting to x type.
-    const inv_freq = invFreq(rotary_dim, opts).withTags(.{.hd});
     const inv_freq_pos = zml.Tensor.outer(idx.convert(.f32), inv_freq);
     const scaling = opts.scaling.attentionScaling();
     const cos = inv_freq_pos.cos().scale(scaling).convert(x.dtype()).broad(x_real.shape());
@@ -324,57 +319,14 @@ pub fn rope(x: Tensor, pos_idx: ?Tensor, opts: RopeOpts) Tensor {
     const y_real = x_real.mul(cos).sub(x_imag.mul(sin));
     const y_imag = x_real.mul(sin).add(x_imag.mul(cos));
 
-    // flatten last dimensions
-    const rope_out = zml.nn.mergeRealImg(y_real, y_imag, opts.layout);
-
-    if (rotary_dim == head_dim) return rope_out;
-
-    const x_pass = x.slice1d(.hd, .{ .start = rotary_dim, .end = head_dim });
-    return zml.Tensor.concatenate(&.{ rope_out, x_pass }, .hd);
-}
-
-fn proportionalRope(x: Tensor, pos_idx: Tensor, opts: RopeOpts) Tensor {
-    std.debug.assert(opts.scaling == .proportional);
-
-    const head_dim = x.dim(.hd);
-    const partial_rotary_factor = opts.scaling.proportional.partial_rotary_factor;
-
-    const rotary_dim: u32 = @intFromFloat(@floor(@as(f32, @floatFromInt(head_dim)) * std.math.clamp(partial_rotary_factor, 0.0, 1.0)));
-    stdx.debug.assert(rotary_dim > 0 and @mod(rotary_dim, 2) == 0, "partial rope expects a even head dim (.hd), got {d}", .{rotary_dim});
-
-    const x_real, const x_imag = zml.nn.splitRealImg(x, opts.layout);
-    const rotary_pairs = @divExact(rotary_dim, 2);
-    const x_real_rot = x_real.slice1d(.hd, .{ .start = 0, .end = rotary_pairs });
-    const x_imag_rot = x_imag.slice1d(.hd, .{ .start = 0, .end = rotary_pairs });
-
-    // compute sin and cos in f32 before downcasting to x type.
-    const inv_freq = invFreq(head_dim, opts).withTags(.{.hd}).slice1d(.hd, .{ .end = @divExact(rotary_dim, 2) });
-    const inv_freq_pos = zml.Tensor.outer(pos_idx.convert(.f32), inv_freq);
-    const scaling = opts.scaling.attentionScaling();
-    const cos = inv_freq_pos.cos().scale(scaling).convert(x.dtype()).broad(x_real_rot.shape());
-    const sin = inv_freq_pos.sin().scale(scaling).convert(x.dtype()).broad(x_real_rot.shape());
-
-    // apply rotation
-    const y_real_rot = x_real_rot.mul(cos).sub(x_imag_rot.mul(sin));
-    const y_imag_rot = x_real_rot.mul(sin).add(x_imag_rot.mul(cos));
-
-    if (rotary_dim == head_dim) return zml.nn.mergeRealImg(y_real_rot, y_imag_rot, opts.layout);
-
-    // concatenate with pass-through
-    const y_real_pass = x_real.slice1d(.hd, .{ .start = rotary_pairs, .end = @divExact(head_dim, 2) });
-    const y_imag_pass = x_imag.slice1d(.hd, .{ .start = rotary_pairs, .end = @divExact(head_dim, 2) });
-
-    const y_real = zml.Tensor.concatenate(&.{ y_real_rot, y_real_pass }, .hd);
-    const y_imag = zml.Tensor.concatenate(&.{ y_imag_rot, y_imag_pass }, .hd);
-
-    return zml.nn.mergeRealImg(y_real, y_imag, opts.layout);
+    return zml.nn.mergeRealImgPass(y_real, y_imag, x_pass, opts.layout);
 }
 
 pub fn splitRealImg(x: Tensor, layout: RopeOpts.Layout) [2]Tensor {
     const n = x.dim(-1);
 
     return switch (layout) {
-        .sequential => .{
+        .real_im_pass, .real_pass_im_pass => .{
             x.slice1d(-1, .{ .end = @divExact(n, 2) }),
             x.slice1d(-1, .{ .start = @divExact(n, 2), .end = n }),
         },
@@ -385,29 +337,84 @@ pub fn splitRealImg(x: Tensor, layout: RopeOpts.Layout) [2]Tensor {
     };
 }
 
+const Pass = union(RopeOpts.Layout) {
+    real_im_pass: Tensor,
+    real_pass_im_pass: [2]Tensor,
+    interleaved: Tensor,
+};
+
+pub fn splitRealImgPass(x: Tensor, layout: RopeOpts.Layout, rotary_dim: u32) struct { Tensor, Tensor, ?Pass } {
+    const ax = x.axis(.hd);
+    const hd = x.dim(ax);
+    if (rotary_dim == hd) {
+        const real, const img = splitRealImg(x, layout);
+        return .{ real, img, null };
+    }
+
+    const half = @divExact(x.dim(ax), 2);
+    const half_rotary = @divExact(rotary_dim, 2);
+    return switch (layout) {
+        .real_im_pass => .{
+            x.slice1d(ax, .{ .end = half_rotary }),
+            x.slice1d(ax, .{ .start = half_rotary, .end = rotary_dim }),
+            .{ .real_im_pass = x.slice1d(ax, .{ .start = rotary_dim }) },
+        },
+        .real_pass_im_pass => .{
+            x.slice1d(ax, .{ .end = half_rotary }),
+            x.slice1d(ax, .{ .start = half, .end = half + half_rotary }),
+            .{ .real_pass_im_pass = .{
+                x.slice1d(ax, .{ .start = half_rotary, .end = half }),
+                x.slice1d(ax, .{ .start = half + half_rotary }),
+            } },
+        },
+        .interleaved => .{
+            x.slice1d(ax, .{ .start = 0, .end = rotary_dim, .step = 2 }),
+            x.slice1d(ax, .{ .start = 1, .end = rotary_dim, .step = 2 }),
+            .{ .interleaved = x.slice1d(ax, .{ .start = rotary_dim }) },
+        },
+    };
+}
+
 pub fn mergeRealImg(x_real: Tensor, x_imag: Tensor, layout: RopeOpts.Layout) Tensor {
     return switch (layout) {
-        .sequential => Tensor.concatenate(&.{ x_real, x_imag }, -1),
-        .interleaved => Tensor.concatenate(&.{
-            x_real.appendAxes(.{.interleaved_real_img}),
-            x_imag.appendAxes(.{.interleaved_real_img}),
-        }, -1).reshape(x_imag.shape().setDim(-1, -1)),
+        .real_im_pass, .real_pass_im_pass => .concatenate(&.{ x_real, x_imag }, -1),
+        .interleaved => Tensor.stack(&.{ x_real, x_imag }, .last, .interleaved_real_img)
+            .merge(.{ .hd = .{ .hd, .interleaved_real_img } }),
+    };
+}
+
+pub fn mergeRealImgPass(x_real: Tensor, x_imag: Tensor, x_pass: ?Pass, layout: RopeOpts.Layout) Tensor {
+    if (x_pass == null) return mergeRealImg(x_real, x_imag, layout);
+
+    return switch (x_pass.?) {
+        .real_im_pass => |pass| .concatenate(&.{ x_real, x_imag, pass }, .hd),
+        .real_pass_im_pass => |pass| .concatenate(&.{ x_real, pass[0], x_imag, pass[1] }, .hd),
+        .interleaved => |pass| .concatenate(
+            &.{
+                Tensor.stack(&.{ x_real, x_imag }, .last, .interleaved_real_img)
+                    .merge(.{ .hd = .{ .hd, .interleaved_real_img } }),
+                pass,
+            },
+            .hd,
+        ),
     };
 }
 
 /// {exp( - n * ln(10_000) / N ) | n in [0..N] }
 pub fn invFreq(N: i64, opts: RopeOpts) Tensor {
     const allocator = zml.module.CompilationContext.current().allocator;
-    const N_half: usize = @intCast(@divExact(N, 2));
-    const inv_freq = allocator.alloc(f32, N_half) catch @panic("OOM");
+    const N_half: u32 = @intCast(@divExact(N, 2));
+    const num_freqs: u32 = opts.scaling.partialRotaryDim(N_half);
+
+    const inv_freq = allocator.alloc(f32, num_freqs) catch @panic("OOM");
     defer allocator.free(inv_freq);
 
-    _invFreq(opts, inv_freq);
-    return zml.Tensor.constantTensor(zml.Shape.init(.{@divExact(N, 2)}, .f32), std.mem.sliceAsBytes(inv_freq));
+    _invFreq(opts, inv_freq, N_half);
+    return .constantTensor(.init(.{num_freqs}, .f32), @ptrCast(inv_freq));
 }
 
-fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
-    const N = inv_freq.len;
+fn _invFreq(opts: RopeOpts, inv_freq: []f32, half_head_dim: u32) void {
+    const N: u32 = @intCast(inv_freq.len);
     // Default frequencies
     for (0.., inv_freq) |n, *f| {
         f.* = @exp(-@log(opts.scaling.getRopeTheta()) * stdx.math.divFloat(f32, n, N));
@@ -415,11 +422,15 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
 
     switch (opts.scaling) {
         .default => {},
+        .proportional => {
+            // proportional uses the original number of dimensions,
+            // instead of the actual number of rotated dims.
+            for (0.., inv_freq[0..]) |n, *f| {
+                f.* = @exp(-@log(opts.scaling.getRopeTheta()) * stdx.math.divFloat(f32, n, half_head_dim));
+            }
+        },
         .linear => |l| {
             for (inv_freq) |*f| f.* /= l.factor;
-        },
-        .proportional => {
-            // NOTE(Corentin): Proportional is handled in `rope`.
         },
         .llama3 => |s| {
             // https://arxiv.org/pdf/2309.16039
@@ -445,7 +456,7 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
             }
         },
         .yarn => |s| {
-            const N_f: f64 = @floatFromInt(inv_freq.len);
+            const N_f: f64 = @floatFromInt(N);
             const M: f64 = @floatFromInt(s.original_max_position_embeddings);
             const f_high = s.beta_fast * (2 * std.math.pi) / M;
             const f_low = s.beta_slow * (2 * std.math.pi) / M;
@@ -489,7 +500,7 @@ test "invFreq Llama3" {
     const llama_freq = [_]f32{ 1.000000000000e+00, 6.636012792587e-01, 4.403666257858e-01, 2.922278344631e-01, 1.939227581024e-01, 1.286873817444e-01, 8.539710193872e-02, 5.666961893439e-02, 3.760603070259e-02, 2.495540864766e-02, 1.656044088304e-02, 1.098952908069e-02, 7.292665075511e-03, 4.839421249926e-03, 3.211446106434e-03, 1.290548010729e-03, 4.295567050576e-04, 9.708286233945e-05, 1.946163865796e-05, 1.291476746701e-05, 8.570255886298e-06, 5.687232260243e-06, 3.774054448513e-06, 2.504467147446e-06, 1.661967417022e-06, 1.102883629756e-06, 7.318749339902e-07, 4.856731266045e-07, 3.222932889457e-07, 2.138742303259e-07, 1.419272024350e-07, 9.418306490261e-08 };
 
     var inv_freq: @TypeOf(llama_freq) = undefined;
-    _invFreq(llama_conf, &inv_freq);
+    _invFreq(llama_conf, &inv_freq, 32);
     for (llama_freq, inv_freq, 0..) |expected, actual, i| {
         errdefer log.err("Mismatch at position {d}.\nExpected: {any}\nActual:   {any}", .{ i, llama_freq, inv_freq });
         try std.testing.expectApproxEqRel(expected, actual, 1e-5);
@@ -510,7 +521,7 @@ test "invFreq Yarn" {
     const yarn_freq = [_]f32{ 1.000000000000e+00, 6.890442967415e-01, 4.747820496559e-01, 3.271458745003e-01, 2.254180014133e-01, 1.553229838610e-01, 1.070244237781e-01, 7.374456524849e-02, 5.081327259541e-02, 3.162075206637e-02, 1.945096626878e-02, 1.179219130427e-02, 7.015713956207e-03, 4.069554619491e-03, 2.277272054926e-03, 1.206130953506e-03, 5.809474969283e-04, 2.279478358105e-04, 3.830881178146e-05, 2.639646845637e-05, 1.818833698053e-05, 1.253256959899e-05, 8.635495760245e-06, 5.950239483354e-06, 4.099978468730e-06, 2.825066758305e-06, 1.946596285052e-06, 1.341290953860e-06, 9.242089618056e-07, 6.368209142238e-07, 4.387978549403e-07, 3.023511396805e-07 };
 
     var inv_freq: @TypeOf(yarn_freq) = undefined;
-    _invFreq(yarn_conf, &inv_freq);
+    _invFreq(yarn_conf, &inv_freq, 32);
     for (yarn_freq, inv_freq, 0..) |expected, actual, i| {
         errdefer log.err("Mismatch at position {d}.\nExpected: {d}\nActual:   {d}", .{ i, stdx.fmt.slice(&yarn_freq), stdx.fmt.slice(&inv_freq) });
         try std.testing.expectApproxEqRel(expected, actual, 1e-5);
@@ -563,7 +574,7 @@ test "real/img" {
 
     const Fns = struct {
         fn testSplitMergeIsId(layout: RopeOpts.Layout) Tensor {
-            const x = Tensor.arange(.{ .end = 20 }, .f32).reshape(.{ 5, 4 });
+            const x = Tensor.arange(.{ .end = 20 }, .f32).reshape(.{ .n = 5, .hd = 4 });
             const real, const imag = splitRealImg(x, layout);
             const y = mergeRealImg(real, imag, layout);
             const real2, const imag2 = splitRealImg(y, layout);
@@ -573,8 +584,8 @@ test "real/img" {
         }
 
         fn testSplitSeqVoid(_: void) Tensor {
-            const x = Tensor.arange(.{ .end = 20 }, .f32).reshape(.{ 5, 4 });
-            const real, const imag = splitRealImg(x, .sequential);
+            const x = Tensor.arange(.{ .end = 20 }, .f32).reshape(.{ .n = 5, .hd = 4 });
+            const real, const imag = splitRealImg(x, .real_im_pass);
             const x_real = Tensor.concatenate(&.{
                 Tensor.arange(.{ .start = 0, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
                 Tensor.arange(.{ .start = 1, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
@@ -591,7 +602,7 @@ test "real/img" {
 
         fn testSplitSeq() Tensor {
             const x = Tensor.arange(.{ .end = 20 }, .f32).reshape(.{ 5, 4 });
-            const real, const imag = splitRealImg(x, .sequential);
+            const real, const imag = splitRealImg(x, .real_im_pass);
             const x_real = Tensor.concatenate(&.{
                 Tensor.arange(.{ .start = 0, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
                 Tensor.arange(.{ .start = 1, .end = 20, .step = 4 }, .f32).reshape(.{ 5, 1 }),
@@ -626,7 +637,7 @@ test "real/img" {
         try std.testing.expectEqual(20, try d_interleaved.getValue(i32, std.testing.io));
     }
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.sequential}, platform, .{});
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.real_im_pass}, platform, .{});
         defer exe.deinit();
 
         var d_sequential = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitMergeIsId, {});
@@ -672,7 +683,7 @@ test rope {
             var input = x;
             {
                 // Convert input to the requested format
-                const real, const imag = splitRealImg(input, .sequential);
+                const real, const imag = splitRealImg(input, .real_im_pass);
                 input = mergeRealImg(real, imag, opts.layout);
             }
             var res = rope(input, null, opts).squeeze(0);
@@ -680,7 +691,7 @@ test rope {
             {
                 // Convert back to sequential
                 const real, const imag = splitRealImg(res, opts.layout);
-                res = mergeRealImg(real, imag, .sequential);
+                res = mergeRealImg(real, imag, .real_im_pass);
             }
             return res;
         }
@@ -692,7 +703,7 @@ test rope {
     var exe_interleaved = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .interleaved } }, platform, .{});
     defer exe_interleaved.deinit();
 
-    var exe_sequential = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .sequential } }, platform, .{});
+    var exe_sequential = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .real_im_pass } }, platform, .{});
     defer exe_sequential.deinit();
 
     var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5));
@@ -704,6 +715,104 @@ test rope {
     defer res2.deinit();
 
     try zml.testing.expectClose(std.testing.io, res1, res2, .{});
+}
+
+test "rope: Proportional" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const platform = zml.testing.env();
+
+    const x: zml.Tensor = .init(.{ .s = 5, .hd = 16 }, .f32);
+    var exe = try zml.module.compile(
+        allocator,
+        io,
+        rope,
+        .{
+            x,
+            null,
+            .{
+                .layout = .real_pass_im_pass,
+                .scaling = .{ .proportional = .{ .partial_rotary_factor = 0.25 } },
+            },
+        },
+        platform,
+        .{},
+    );
+    defer exe.deinit();
+
+    const x_h: [5][16]f32 = @splat([_]f32{ 0.754, -0.146, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 });
+    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, @ptrCast(&x_h));
+    defer x_buffer.deinit();
+
+    const expected_h: [5][16]f32 = .{
+        .{ 0.754, -0.146, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ 0.667, -0.449, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, 0.468, 0.904, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ -0.0328, -0.708, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, 0.814, 0.719, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ -0.703, -0.897, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, 0.412, 0.464, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ -0.727, -0.997, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, -0.369, 0.162, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+    };
+    const expected: zml.Slice = .init(x.shape(), std.mem.sliceAsBytes(&expected_h));
+
+    var res = try zml.testing.autoCall(allocator, io, &exe, rope, .{ x_buffer, null });
+    defer res.deinit();
+    const res_h = try res.toSliceAlloc(allocator, io);
+    defer res_h.free(allocator);
+
+    errdefer std.log.warn("{d:20}", .{res_h});
+    try zml.testing.expectClose(io, expected, res, .{});
+}
+
+test "rope: Yarn with partial_rotary_factor" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    const platform = zml.testing.env();
+
+    const x: zml.Tensor = .init(.{ .s = 5, .hd = 16 }, .f32);
+    var exe = try zml.module.compile(
+        allocator,
+        io,
+        rope,
+        .{
+            x,
+            null,
+            RopeOpts{
+                .layout = .real_im_pass,
+                .scaling = .{ .yarn = .{
+                    .factor = 32.0,
+                    .beta_fast = 32.0,
+                    .beta_slow = 1.0,
+                    .original_max_position_embeddings = 4096,
+                    .truncate = true,
+                    .rope_theta = 150_000,
+                    .partial_rotary_factor = 0.25,
+                } },
+            },
+        },
+        platform,
+        .{},
+    );
+    defer exe.deinit();
+
+    const x_h: [5][16]f32 = @splat([_]f32{ 0.754, -0.146, 0.00443, -0.958, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 });
+    var x_buffer: zml.Buffer = try .fromBytes(io, platform, x.shape(), .replicated, @ptrCast(&x_h));
+    defer x_buffer.deinit();
+
+    const expected_h: [5][16]f32 = .{
+        .{ 1.02, -0.197, 0.00597, -1.29, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ 0.544, -0.195, 0.858, -1.29, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ -0.428, -0.193, 0.921, -1.29, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ -1.01, -0.191, 0.137, -1.29, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+        .{ -0.659, -0.19, -0.772, -1.29, -0.533, 0.834, 0.555, 0.853, -0.309, 0.999, 0.983, -0.693, 0.979, 0.997, -0.359, 0.888 },
+    };
+    const expected: zml.Slice = .init(x.shape(), std.mem.sliceAsBytes(&expected_h));
+
+    var res = try zml.testing.autoCall(allocator, io, &exe, rope, .{ x_buffer, null });
+    defer res.deinit();
+    const res_h = try res.toSliceAlloc(allocator, io);
+    defer res_h.free(allocator);
+
+    errdefer std.log.warn("{d:20}", .{res_h});
+    try zml.testing.expectClose(io, expected, res, .{});
 }
 
 pub const UpsampleMode = enum {

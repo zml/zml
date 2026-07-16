@@ -1771,7 +1771,8 @@ pub const Tensor = struct {
             const start = if (s.start < 0) d + s.start else s.start;
             const end = if (s.end == to_the_end) d else if (s.end < 0) d + s.end else s.end;
             const res: Slice = .{ .start = start, .end = end, .step = s.step, .singleton = s.singleton };
-            stdx.debug.assert(start < end, "Slice {f} is invalid for axis of dimension {d} (resolved to {f}", .{ s, d, res });
+            stdx.debug.assert(start < end, "Slice {f} is invalid for axis of dimension {d} (resolved to {f})", .{ s, d, res });
+            stdx.debug.assert(end <= d, "Slice {f} is invalid for axis of dimension {d} (resolved to {f})", .{ s, d, res });
             return res;
         }
 
@@ -1792,7 +1793,7 @@ pub const Tensor = struct {
 
     /// Slices the input Tensor over the given axis using the given parameters.
     pub fn slice1d(self: Tensor, axis_: anytype, s: Slice) Tensor {
-        var slices = [_]Slice{.{}} ** constants.MAX_RANK;
+        var slices: [constants.MAX_RANK]Slice = @splat(.{});
         slices[self.axis(axis_)] = s;
         return self.slice(slices[0..self.rank()]);
     }
@@ -1805,6 +1806,7 @@ pub const Tensor = struct {
         var res_shape: Shape = self._shape;
 
         for (slices, 0..) |s, a| {
+            stdx.debug.assert(s.step > 0, "slice expects 'step' to be positive, got {} at index {}", .{ s.step, a });
             stdx.debug.assert(s.step > 0, "slice expects 'step' to be positive, got {} at index {}", .{ s.step, a });
 
             const args: Slice = s.absolute(self.dim(a));
