@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const zml = @import("zml");
-const attention = zml.attention.attention;
 
 const common = @import("common.zig");
 const lfm2 = @import("lfm2.zig");
@@ -14,7 +13,7 @@ pub const std_options: std.Options = .{
 const Args = struct {
     model: []const u8,
     activations: []const u8,
-    backend: ?attention.Backend = null,
+    backend: ?zml.attention.Backend = null,
 
     pub const help =
         \\Use lfm2_tests --model=<path> --activations=<path> [options]
@@ -52,7 +51,7 @@ pub fn main(init: std.process.Init) !void {
     var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
 
-    const backend = args.backend orelse attention.Backend.auto(platform);
+    const backend = args.backend orelse zml.attention.Backend.auto(platform);
     const params = lfm2.CompilationParameters.init(
         repo_model.inner,
         repo_model.parsed_config.value,
@@ -73,8 +72,8 @@ pub fn run(
     config: lfm2.Config,
     mdl: lfm2.Model,
     model_buffers: *lfm2.Buffers,
-    attention_metadata: attention.Metadata,
-    attention_parameters: attention.Parameters,
+    attention_metadata: zml.attention.Metadata,
+    attention_parameters: zml.attention.Parameters,
 ) !void {
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
@@ -132,8 +131,8 @@ const TestContext = struct {
     io: std.Io,
     platform: *zml.Platform,
     activations_store: *zml.io.TensorStore,
-    attention_metadata: attention.Metadata,
-    attention_parameters: attention.Parameters,
+    attention_metadata: zml.attention.Metadata,
+    attention_parameters: zml.attention.Parameters,
     sharding: zml.Sharding,
 
     fn testLayerPrint(self: *TestContext, comptime name_fmt: []const u8, name_args: anytype, tagz: anytype, layer: anytype, layer_buffers: anytype, opts: zml.testing.CompareOpts) !void {
@@ -279,7 +278,7 @@ const TestContext = struct {
         const kv_cache: zml.Bufferized(model.KvCache) = .{ .k = key_cache_buffer, .v = value_cache_buffer };
 
         var attention_metadata_buffers = try self.attention_metadata.initBuffer(self.io, self.platform, self.sharding);
-        defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+        defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         var cache_index_buf: zml.Buffer = try .scalar(self.io, self.platform, cache_ix, .u32);
         defer cache_index_buf.deinit();

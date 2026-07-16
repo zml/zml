@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const zml = @import("zml");
-const attention = zml.attention.attention;
 
 const common = @import("../common.zig");
 const model = @import("model.zig");
@@ -15,13 +14,13 @@ pub const CompilationParameters = struct {
     token_index: zml.Tensor,
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
-    attention_metadata: attention.Metadata,
-    prefill_attention_parameters: attention.Parameters,
-    decode_attention_parameters: attention.Parameters,
+    attention_metadata: zml.attention.Metadata,
+    prefill_attention_parameters: zml.attention.Parameters,
+    decode_attention_parameters: zml.attention.Parameters,
     seqlen: usize,
     shardings: common.Shardings,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, shardings: common.Shardings) CompilationParameters {
+    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, shardings: common.Shardings) CompilationParameters {
         const head_dim = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads);
 
         return .{
@@ -76,7 +75,7 @@ pub const Args = struct {
     token_index_buf: *zml.Buffer,
     kv_cache_buffers: *zml.Bufferized(model.KvCache),
     rng_buffers: *zml.Bufferized(zml.Tensor.Rng),
-    attention_metadata_buffers: *const zml.Bufferized(attention.Metadata),
+    attention_metadata_buffers: *const zml.Bufferized(zml.attention.Metadata),
 };
 
 pub const CompiledModel = struct {
@@ -264,7 +263,7 @@ pub const KernelExe = struct {
         llama_model: model.Model,
         parameters: CompilationOptions,
         seqlen: usize,
-        attention_parameters: attention.Parameters,
+        attention_parameters: zml.attention.Parameters,
         phase: Phase,
         progress: *std.Progress.Node,
     ) !KernelExe {
@@ -315,7 +314,7 @@ const ComposedKernelExe = struct {
         llama_model: model.Model,
         parameters: CompilationOptions,
         seqlen: usize,
-        attention_parameters: attention.Parameters,
+        attention_parameters: zml.attention.Parameters,
         phase: Phase,
         progress: *std.Progress.Node,
     ) !ComposedKernelExe {
@@ -501,7 +500,7 @@ const ComposedKernelExe = struct {
         llama_model: model.Model,
         parameters: CompilationOptions,
         seqlen: usize,
-        attention_parameters: attention.Parameters,
+        attention_parameters: zml.attention.Parameters,
         phase: Phase,
         progress: *std.Progress.Node,
     ) !zml.Exe {
@@ -514,8 +513,8 @@ const ComposedKernelExe = struct {
                 token_index: zml.Tensor,
                 kv_cache: model.KvCache,
                 kv_cache_index: zml.Tensor,
-                attention_metadata: attention.Metadata,
-                attention_parameters_: attention.Parameters,
+                attention_metadata: zml.attention.Metadata,
+                attention_parameters_: zml.attention.Parameters,
             ) struct { zml.Tensor, model.KvCache } {
                 const new_hidden, const new_kv_cache, _ = self.layer.forward(
                     hidden,
