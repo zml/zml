@@ -26,6 +26,29 @@ It is built using the
 
 # Getting Started
 
+## Incremental local builds
+
+Bazel remains responsible for configuring and building LLVM, XLA, generated
+sources, and the native libraries. To hand a configured `zig_binary` to Zig's
+incremental build runner, first prepare it with Bazel:
+
+```sh
+bazel run //:zig-build-prepare -- //examples/mnist:mnist
+```
+
+The command prints a `zig build --watch -fincremental` invocation using the
+same Zig SDK, target, modules, generated sources, and native linker command as
+the Bazel target. Platform flags can be passed after the target label:
+
+```sh
+bazel run //:zig-build-prepare -- \
+  //examples/llm:llm --@zml//platforms:cuda=true
+```
+
+Run the printed command from the repository root. Re-run the preparation step
+when Bazel flags, generated code, C/C++ code, or dependencies change. Zig
+source edits are then handled by the watch process.
+
 ## Prerequisites
 
 We use `bazel` to build ZML and its dependencies. The only prerequisite is
