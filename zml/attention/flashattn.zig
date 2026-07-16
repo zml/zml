@@ -1006,7 +1006,7 @@ pub const paged_fa2 = struct {
                     .hg = num_head_groups,
                     .b = q.dim(.b),
                 }, .f32)).withPartitioning(.{ .hkv = .model });
-                const dummy_cu_seqlens_k: zml.Tensor = .zeroes(cu_seqlens_q.shape());
+                const dummy_cu_seqlens_k = zml.Tensor.zeroes(cu_seqlens_q.shape());
 
                 const batch_dim = q.dim(.b);
                 var q2 = q;
@@ -1086,7 +1086,7 @@ pub const paged_fa2 = struct {
                     .hg = num_head_groups,
                     .b = q.dim(.b),
                 }, .f32)).withPartitioning(.{ .hkv = .model });
-                const dummy_cu_seqlens_k_prefill: zml.Tensor = .zeroes(cu_seqlens_q_prefill.shape());
+                const dummy_cu_seqlens_k_prefill = zml.Tensor.zeroes(cu_seqlens_q_prefill.shape());
 
                 var q2 = q;
                 q2 = q2.transpose(.{ .b, .hkv, .hg, .hd }).merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
