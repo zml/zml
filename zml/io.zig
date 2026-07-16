@@ -21,6 +21,7 @@ const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/io");
+const load_log = std.log.scoped(.@"zml/io/load");
 
 pub const TensorStore = struct {
     registry: *safetensors.TensorRegistry,
@@ -1200,10 +1201,24 @@ const AdaptiveLoadController = struct {
     };
 
     const Decision = struct {
+        const Action = enum {
+            none,
+            hard_backoff,
+            startup_grow,
+            startup_settle,
+            worker_probe_start,
+            worker_probe_keep,
+            worker_probe_rollback,
+            chunk_probe_start,
+            chunk_probe_keep,
+            chunk_probe_rollback,
+        };
+
         workers: usize,
         chunks: usize,
         changed: bool = false,
         trim: bool = false,
+        action: Action = .none,
     };
 
     mode: Mode = .startup,
@@ -1265,7 +1280,7 @@ const AdaptiveLoadController = struct {
             self.best_chunks = self.chunks;
             self.best_goodput = 0;
             self.last_probe_ns = sample.now_ns;
-            return .{ .workers = self.workers, .chunks = self.chunks, .changed = true, .trim = true };
+            return .{ .workers = self.workers, .chunks = self.chunks, .changed = true, .trim = true, .action = .hard_backoff };
         }
 
         switch (self.mode) {
@@ -1280,7 +1295,7 @@ const AdaptiveLoadController = struct {
                     if (queue_pressure < 0.10 and self.workers < self.max_workers) {
                         self.workers = @min(self.max_workers, self.workers * 2);
                         self.chunks = self.minimumChunks(self.workers);
-                        return .{ .workers = self.workers, .chunks = self.chunks, .changed = true };
+                        return .{ .workers = self.workers, .chunks = self.chunks, .changed = true, .action = .startup_grow };
                     }
                 }
 
@@ -1289,7 +1304,7 @@ const AdaptiveLoadController = struct {
                 self.workers = self.best_workers;
                 self.chunks = self.best_chunks;
                 self.last_probe_ns = sample.now_ns;
-                return .{ .workers = self.workers, .chunks = self.chunks, .changed = changed, .trim = changed };
+                return .{ .workers = self.workers, .chunks = self.chunks, .changed = changed, .trim = changed, .action = .startup_settle };
             },
             .steady => {
                 if (self.worker_probe_goodput) |reference| {
@@ -1298,13 +1313,13 @@ const AdaptiveLoadController = struct {
                         self.best_goodput = @max(self.best_goodput, measured_goodput);
                         self.best_workers = self.workers;
                         self.best_chunks = self.chunks;
-                        return self.currentDecision();
+                        return .{ .workers = self.workers, .chunks = self.chunks, .action = .worker_probe_keep };
                     }
 
                     self.workers = self.best_workers;
                     self.chunks = self.best_chunks;
                     self.last_probe_ns = sample.now_ns;
-                    return .{ .workers = self.workers, .chunks = self.chunks, .changed = true, .trim = true };
+                    return .{ .workers = self.workers, .chunks = self.chunks, .changed = true, .trim = true, .action = .worker_probe_rollback };
                 }
 
                 if (self.chunk_probe_goodput) |reference| {
@@ -1312,12 +1327,12 @@ const AdaptiveLoadController = struct {
                     if (sample.committed_goodput >= reference * 1.03 and queue_pressure < 0.10) {
                         self.best_goodput = @max(self.best_goodput, sample.committed_goodput);
                         self.best_chunks = self.chunks;
-                        return self.currentDecision();
+                        return .{ .workers = self.workers, .chunks = self.chunks, .action = .chunk_probe_keep };
                     }
 
                     self.chunks = self.best_chunks;
                     self.last_probe_ns = sample.now_ns;
-                    return .{ .workers = self.workers, .chunks = self.chunks, .changed = true, .trim = true };
+                    return .{ .workers = self.workers, .chunks = self.chunks, .changed = true, .trim = true, .action = .chunk_probe_rollback };
                 }
 
                 if (!sample.allow_probe or !sample.saturated or sample.now_ns -| self.last_probe_ns < 500 * std.time.ns_per_ms) {
@@ -1328,7 +1343,7 @@ const AdaptiveLoadController = struct {
                     self.chunk_probe_goodput = sample.committed_goodput;
                     self.chunks += 1;
                     self.last_probe_ns = sample.now_ns;
-                    return .{ .workers = self.workers, .chunks = self.chunks, .changed = true };
+                    return .{ .workers = self.workers, .chunks = self.chunks, .changed = true, .action = .chunk_probe_start };
                 }
 
                 if (self.workers < self.max_workers and measured_goodput > 0) {
@@ -1336,7 +1351,7 @@ const AdaptiveLoadController = struct {
                     self.workers = @min(self.max_workers, self.workers + @max(@as(usize, 1), std.math.sqrt(self.workers)));
                     self.chunks = @max(self.chunks, self.minimumChunks(self.workers));
                     self.last_probe_ns = sample.now_ns;
-                    return .{ .workers = self.workers, .chunks = self.chunks, .changed = true };
+                    return .{ .workers = self.workers, .chunks = self.chunks, .changed = true, .action = .worker_probe_start };
                 }
 
                 return self.currentDecision();
@@ -1370,6 +1385,29 @@ const AdaptiveLoadRuntime = struct {
         var window_started = started;
         var previous = self.metrics.snapshot();
         var previous_queue = previous.submitted_bytes -| previous.committed_bytes;
+        var last_idle_log_ns: u64 = 0;
+        load_log.debug("controller started: mode={s}, workers={d}/{d}, dma_chunks={d}/{d}, transfers={d}, logical_bytes={Bi:.2}", .{
+            @tagName(self.controller.mode),
+            self.controller.workers,
+            self.controller.max_workers,
+            self.controller.chunks,
+            self.controller.max_chunks,
+            self.total_transfers,
+            self.total_logical_bytes,
+        });
+        defer {
+            const final = self.metrics.snapshot();
+            load_log.debug("controller stopped: mode={s}, workers={d}, dma_chunks={d}, completed={d}/{d}, staged={Bi:.2}, submitted={Bi:.2}, committed={Bi:.2}", .{
+                @tagName(self.controller.mode),
+                self.controller.workers,
+                self.controller.chunks,
+                final.completed_transfers,
+                self.total_transfers,
+                final.storage_bytes,
+                final.submitted_bytes,
+                final.committed_bytes,
+            });
+        }
 
         while (!self.done.load(.acquire)) {
             try io.sleep(.fromMilliseconds(25), .awake);
@@ -1387,7 +1425,31 @@ const AdaptiveLoadRuntime = struct {
             const delta = snapshot.sub(previous);
             const progress_bytes = if (startup) @max(delta.storage_bytes, delta.committed_bytes) else delta.committed_bytes;
             const byte_floor: u64 = if (startup) 32 * 1024 * 1024 else 64 * 1024 * 1024;
-            if (progress_bytes < byte_floor and (elapsed_ns < max_ns or progress_bytes == 0)) continue;
+            if (progress_bytes == 0) {
+                const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
+                if (now_ns -| last_idle_log_ns >= 500 * std.time.ns_per_ms) {
+                    const pool_stats = self.poolStats();
+                    load_log.debug("waiting for progress: mode={s}, workers={d}/{d}, active={d}, admitted={d}, completed={d}/{d}, dma_buffers={d}inflight/{d}allocated/{d}limit, staged={Bi:.2}, submitted={Bi:.2}, committed={Bi:.2}, h2d_queued={Bi:.2}", .{
+                        @tagName(self.controller.mode),
+                        self.controller.workers,
+                        self.controller.max_workers,
+                        snapshot.active_transfers,
+                        self.group.inFlight(),
+                        snapshot.completed_transfers,
+                        self.total_transfers,
+                        pool_stats.in_flight,
+                        pool_stats.allocated,
+                        self.controller.chunks * self.pools.len,
+                        snapshot.storage_bytes,
+                        snapshot.submitted_bytes,
+                        snapshot.committed_bytes,
+                        snapshot.submitted_bytes -| snapshot.committed_bytes,
+                    });
+                    last_idle_log_ns = now_ns;
+                }
+                continue;
+            }
+            if (progress_bytes < byte_floor and elapsed_ns < max_ns) continue;
 
             const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
             const staged_goodput = @as(f64, @floatFromInt(delta.storage_bytes)) / seconds;
@@ -1411,6 +1473,9 @@ const AdaptiveLoadRuntime = struct {
             else
                 std.math.inf(f64);
             const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
+            const saturated = self.group.inFlight() >= self.controller.workers and snapshot.completed_transfers < self.total_transfers;
+            const allow_probe = remaining_ns > 500 * std.time.ns_per_ms;
+            const pool_stats = self.poolStats();
 
             const old_workers = self.controller.workers;
             const old_chunks = self.controller.chunks;
@@ -1420,22 +1485,47 @@ const AdaptiveLoadRuntime = struct {
                 .transfer_latency_us = transfer_latency_us,
                 .wait_ratio = wait_ratio,
                 .queue_growth_ratio = queue_growth_ratio,
-                .saturated = self.group.inFlight() >= self.controller.workers and snapshot.completed_transfers < self.total_transfers,
-                .allow_probe = remaining_ns > 500 * std.time.ns_per_ms,
+                .saturated = saturated,
+                .allow_probe = allow_probe,
                 .now_ns = now_ns,
+            });
+            load_log.debug("window: action={s}, mode={s}, elapsed={d:.1}ms, workers={d}->{d}/{d}, dma_chunks={d}->{d}/{d}, active={d}, admitted={d}, completed={d}/{d}, saturated={}, dma_buffers={d}inflight/{d}allocated/{d}limit, staged={d:.2}MiB/s, committed={d:.2}MiB/s, dma_latency={d:.1}us, wait={d:.1}%, h2d_queued={Bi:.2}, queue_growth={d:.1}%, remaining={Bi:.2}, remaining_est={d:.2}s, probe_allowed={}", .{
+                @tagName(decision.action),
+                @tagName(self.controller.mode),
+                @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms,
+                old_workers,
+                decision.workers,
+                self.controller.max_workers,
+                old_chunks,
+                decision.chunks,
+                self.controller.max_chunks,
+                snapshot.active_transfers,
+                self.group.inFlight(),
+                snapshot.completed_transfers,
+                self.total_transfers,
+                saturated,
+                pool_stats.in_flight,
+                pool_stats.allocated,
+                decision.chunks * self.pools.len,
+                staged_goodput / (1024 * 1024),
+                committed_goodput / (1024 * 1024),
+                transfer_latency_us,
+                wait_ratio * 100,
+                queue,
+                queue_growth_ratio * 100,
+                remaining,
+                remaining_ns / std.time.ns_per_s,
+                allow_probe,
             });
             if (decision.changed) {
                 self.apply(io, decision);
-                log.debug("adaptive load: {s} workers {d}->{d}, dma chunks {d}->{d}, staged {d:.2} MiB/s, committed {d:.2} MiB/s, wait {d:.3}, queue {d:.3}", .{
-                    @tagName(self.controller.mode),
+                load_log.debug("limits updated: action={s}, workers={d}->{d}, dma_chunks={d}->{d}, trim={}", .{
+                    @tagName(decision.action),
                     old_workers,
                     decision.workers,
                     old_chunks,
                     decision.chunks,
-                    staged_goodput / (1024 * 1024),
-                    committed_goodput / (1024 * 1024),
-                    wait_ratio,
-                    queue_growth_ratio,
+                    decision.trim,
                 });
             }
 
@@ -1449,19 +1539,52 @@ const AdaptiveLoadRuntime = struct {
         self.group.setLimit(io, decision.workers);
         if (!self.controller.direct) return;
 
-        for (self.pools, self.dma_allocators) |*pool, *dma_allocator| {
+        for (self.pools, self.dma_allocators, 0..) |*pool, *dma_allocator, device_index| {
             pool.setLimit(io, decision.chunks);
-            if (decision.trim) pool.trim(dma_allocator.allocator(), io, decision.chunks);
+            if (decision.trim) self.trimPool(pool, dma_allocator, io, decision.chunks, device_index);
         }
     }
 
     fn trimSurplus(self: *AdaptiveLoadRuntime, io: std.Io) void {
         if (!self.controller.direct) return;
-        for (self.pools, self.dma_allocators) |*pool, *dma_allocator| {
+        for (self.pools, self.dma_allocators, 0..) |*pool, *dma_allocator, device_index| {
             if (pool.allocatedBlocks() > self.controller.chunks) {
-                pool.trim(dma_allocator.allocator(), io, self.controller.chunks);
+                self.trimPool(pool, dma_allocator, io, self.controller.chunks, device_index);
             }
         }
+    }
+
+    fn trimPool(
+        self: *AdaptiveLoadRuntime,
+        pool: *mem.DynamicBufferPool,
+        dma_allocator: *const mem.DmaAllocator,
+        io: std.Io,
+        target: usize,
+        device_index: usize,
+    ) void {
+        _ = self;
+        const before = pool.allocatedBlocks();
+        pool.trim(dma_allocator.allocator(), io, target);
+        const after = pool.allocatedBlocks();
+        if (after != before) {
+            load_log.debug("dma pool trimmed: device={d}, allocated={d}->{d}, target={d}, in_flight={d}", .{
+                device_index,
+                before,
+                after,
+                target,
+                pool.inFlight(),
+            });
+        }
+    }
+
+    fn poolStats(self: *const AdaptiveLoadRuntime) struct { in_flight: usize, allocated: usize } {
+        var in_flight: usize = 0;
+        var allocated: usize = 0;
+        for (self.pools) |*pool| {
+            in_flight += pool.inFlight();
+            allocated += pool.allocatedBlocks();
+        }
+        return .{ .in_flight = in_flight, .allocated = allocated };
     }
 };
 
@@ -1501,6 +1624,7 @@ pub fn load(
     stdx.debug.assert(opts.initial_parallelism > 0, "zml.io.load initial_parallelism must be greater than zero", .{});
     stdx.debug.assert(opts.dma_chunks > 0, "zml.io.load dma_chunks must be greater than zero", .{});
 
+    const load_started: std.Io.Timestamp = .now(io, .awake);
     const tensor_count = meta.count(Tensor, model);
     var span = tracer.span("zml.io.load", .{
         .tensor_count = tensor_count,
@@ -1526,6 +1650,19 @@ pub fn load(
     const initial_workers = if (adaptive) @min(max_workers, opts.initial_parallelism) else max_workers;
     const initial_chunks = if (adaptive and direct) @min(opts.dma_chunks, initial_workers + 1) else opts.dma_chunks;
     var metrics: LoadMetrics = .{};
+    load_log.debug("configured: target={s}, adaptive={}, requested_adaptive={}, tensors={d}, workers={d}/{d} (requested_max={d}), dma_chunks={d}/{d}, dma_chunk_size={Bi:.2}, logical_bytes={Bi:.2}", .{
+        @tagName(platform.target),
+        adaptive,
+        opts.adaptive_parallelism,
+        tensor_count,
+        initial_workers,
+        max_workers,
+        opts.parallelism,
+        initial_chunks,
+        opts.dma_chunks,
+        opts.dma_chunk_size,
+        total_logical_bytes,
+    });
 
     const pool_count = platform.devices.len;
     const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
@@ -1675,6 +1812,20 @@ pub fn load(
         controller_runtime.done.store(true, .release);
         controller_group.await(io) catch unreachable;
     }
+
+    const loaded_bytes = walk_ctx.total.load(.monotonic);
+    const elapsed = load_started.untilNow(io, .awake);
+    const elapsed_seconds = @as(f64, @floatFromInt(elapsed.nanoseconds)) / std.time.ns_per_s;
+    const goodput = if (elapsed_seconds > 0) @as(f64, @floatFromInt(loaded_bytes)) / elapsed_seconds else 0;
+    load_log.debug("completed: adaptive={}, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, final_workers={d}, final_dma_chunks={d}", .{
+        adaptive,
+        tensor_count,
+        loaded_bytes,
+        elapsed_seconds,
+        goodput / (1024 * 1024),
+        if (adaptive) controller_runtime.controller.workers else max_workers,
+        if (adaptive) controller_runtime.controller.chunks else opts.dma_chunks,
+    });
 
     return bufferized;
 }
