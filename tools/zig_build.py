@@ -157,7 +157,7 @@ def main() -> int:
     config = action_config(json.loads(graph_text), execroot, label)
 
     safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_")
-    config_path = workspace / ".zig-bazel" / safe_label / "config.json"
+    config_path = Path("/tmp") / "zig-bazel" / safe_label / "config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config, indent=2) + "\n")
 

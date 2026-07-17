@@ -12,7 +12,6 @@ bazel-*
 # Just in case, Zig caches
 .zig-cache/
 zig-out/
-.zig-bazel/
 
 # Models
 *.safetensors
