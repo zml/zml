@@ -319,6 +319,9 @@ const Triton = struct {
             stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(q.dim(.hd)))), "expected value rank ({}) to be a power of two", .{q.dim(.hd)});
             stdx.debug.assert(kv.dim(.hd) == q.dim(.hd), "expected q and kv cache head dims to match, got q={} kv={}", .{ q.dim(.hd), kv.dim(.hd) });
 
+            const sink = (opts.sink orelse zml.Tensor.zeroes(zml.Shape.init(.{ .h = q.dim(.h) }, q.dtype())))
+                .withPartitioning(.{ .h = .model });
+
             return zml.ops.manualComputation(
                 .{
                     q,
@@ -328,11 +331,14 @@ const Triton = struct {
                     parameters.block_table,
                     parameters.seq_lens,
                     parameters.query_start_len,
+                    sink,
                 },
                 q.shape(),
                 .{
-                    .opts = opts,
+                    .rope_rank = opts.rope_rank,
+                    .scale = opts.scale,
                     .options = parameters.options_,
+                    .use_sink = opts.sink != null,
                 },
                 (struct {
                     fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
@@ -342,6 +348,11 @@ const Triton = struct {
                             .query_start_len = sharded_inputs[6],
                             .options_ = ctx_.options,
                         };
+                        const opts_: AttentionOptions = .{
+                            .rope_rank = ctx_.rope_rank,
+                            .sink = if (ctx_.use_sink) sharded_inputs[7] else null,
+                            .scale = ctx_.scale,
+                        };
 
                         return sparseAttentionShard(
                             sharded_inputs[0],
@@ -349,7 +360,7 @@ const Triton = struct {
                             sharded_inputs[2],
                             sharded_inputs[3],
                             parameters_,
-                            ctx_.opts,
+                            opts_,
                         );
                     }
                 }).body,
