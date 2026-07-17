@@ -376,25 +376,24 @@ pub const Loader = struct {
             std.debug.panic("Expected loaded tensor to have only 1 source, got {}", .{sources.len});
         }
 
-        self.loadSingleInner(io, sources[0], buffer, shardings, opts) catch |e| {
+        self.loadSingleInner(io, sources[0], tensor.shape(), buffer, shardings, opts) catch |e| {
             log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
             unreachable;
         };
     }
 
-    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, buffer: *Buffer, loaded: *bool, shardings: []const Sharding, opts: LoadOpts) void {
-        self.loadSingleInner(io, source, buffer, shardings, opts) catch |e| {
+    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, loaded: *bool, shardings: []const Sharding, opts: LoadOpts) void {
+        self.loadSingleInner(io, source, shape, buffer, shardings, opts) catch |e| {
             log.err("Failed to load tensor {s}: {}", .{ source.name, e });
             loaded.* = false;
         };
         loaded.* = true;
     }
 
-    fn loadSingleInner(self: *Loader, io: std.Io, source: *safetensors.Tensor, buffer: *Buffer, shardings: []const Sharding, opts: LoadOpts) !void {
+    fn loadSingleInner(self: *Loader, io: std.Io, source: *safetensors.Tensor, shape: Shape, buffer: *Buffer, shardings: []const Sharding, opts: LoadOpts) !void {
         var reader = try source.reader(io, &.{}, .{});
         defer reader.deinit();
 
-        const shape = reader.tensor.shape;
         const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
             log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
             break :blk self.platform.replicated_sharding;
@@ -448,7 +447,7 @@ pub const Loader = struct {
         defer for (buffers, loaded) |*b, l| if (l) b.deinit();
 
         for (sources, 0..) |source, i| {
-            self.loadSingle(io, source, &buffers[i], &loaded[i], shardings, .{});
+            self.loadSingle(io, source, source.shape, &buffers[i], &loaded[i], shardings, .{});
         }
 
         if (std.mem.findScalar(bool, loaded, false)) |_| {
