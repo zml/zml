@@ -81,27 +81,29 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
         shardings: common.Shardings,
     ) !Buffers {
+        progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
-        var total_bytes: usize = 0;
 
-        defer {
-            const took = now.untilNow(io, .awake);
-            const bytes_per_sec: u64 = @intFromFloat(
-                @as(f64, @floatFromInt(total_bytes)) /
-                    (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s),
-            );
-            log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
-        }
+        var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
+        errdefer self.unloadBuffers(&buffers, allocator);
 
-        const all_shardings = shardings.all();
-        return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
+        var loader: zml.io.Loader = try .init(allocator, platform, .{
             .dma_chunks = 32,
             .dma_chunk_size = 256 * zml.MiB,
-            .progress = progress,
-            .shardings = &all_shardings,
             .parallelism = 16,
-            .total_bytes = &total_bytes,
         });
+        defer loader.deinit();
+
+        const all_shardings = shardings.all();
+        loader.load(io, Model, &self.inner, &buffers, store, &all_shardings, .{ .progress = progress });
+        try loader.await(io);
+
+        const took = now.untilNow(io, .awake);
+        const total_bytes: u64 = loader.bytes_loaded.raw;
+        const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
+        log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+
+        return buffers;
     }
 
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
@@ -175,25 +177,27 @@ pub const Model = struct {
     ) !zml.Bufferized(Model) {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
-        var total_bytes: usize = 0;
-        defer {
-            const took = now.untilNow(io, .awake);
-            const took_ns: usize = @max(1, @as(usize, @intCast(took.toNanoseconds())));
-            log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{
-                total_bytes,
-                took,
-                total_bytes * std.time.ns_per_s / took_ns,
-            });
-        }
-        const all_shardings = shardings.all();
-        return zml.io.load(Model, self, allocator, io, platform, store, .{
+
+        var buffers = try zml.mem.bufferize(allocator, Model, self);
+        errdefer Model.unloadBuffers(&buffers, allocator);
+
+        var loader: zml.io.Loader = try .init(allocator, platform, .{
             .dma_chunks = 8,
             .dma_chunk_size = 256 * zml.MiB,
-            .progress = progress,
             .parallelism = 16,
-            .total_bytes = &total_bytes,
-            .shardings = &all_shardings,
         });
+        defer loader.deinit();
+
+        const all_shardings = shardings.all();
+        loader.load(io, Model, self, &buffers, store, &all_shardings);
+        try loader.await(io);
+
+        const took = now.untilNow(io, .awake);
+        const total_bytes: u64 = loader.bytes_loaded.raw;
+        const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
+        log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+
+        return buffers;
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
