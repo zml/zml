@@ -10,7 +10,7 @@ py_library(
 )
 
 py_binary(
-    name = "zig-build-prepare",
+    name = "zig_build",
     srcs = ["zig_build.py"],
     main = "zig_build.py",
     visibility = ["//visibility:public"],

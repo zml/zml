@@ -1,5 +1,29 @@
 #!/usr/bin/env python3
-"""Prepare Bazel-built dependencies for Zig's incremental build runner."""
+"""
+Use Bazel's Zig to run `zig build ...`
+Bazel remains responsible for building LLVM, XLA, generated sources, and the native libraries.
+Arguments after the first `--` are passed to `bazel` itself, including config/platform.
+Arguments after a second `--` are passed to `zig build`.
+
+Example:
+```sh
+bazel run //tools:zig_build -- //examples/llm:llm --config=debug --@zml//platforms:cuda=true
+
+bazel run //tools:zig_build -- //examples/mnist:mnist --config=debug -- --watch -fincremental
+```
+
+This allows to access the features exclusive to `zig build` like incremental recompilation, or the webui.
+
+```sh
+bazel run //tools:zig_build -- \
+    //examples/mnist:mnist --config=debug -- \
+    -fincremental --webui=0.0.0.0:34001 --time-report
+```
+
+To leverage incremental compilation you need to pass `--config=debug` (implying `--strategy=ZigBuildLib=local`)
+to Bazel so that Bazel uses the files from your local checkout instead of files in the sandbox.
+This will give you feedback based on your latest changes to your files.
+"""
 
 from __future__ import annotations
 
