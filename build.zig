@@ -9,6 +9,11 @@ const Config = struct {
     linker: []const u8,
     link_args: []const []const u8,
     link_env: []const EnvironmentVariable,
+    runfiles_dir: []const u8,
+    runfiles_manifest: []const u8,
+    run_cwd: []const u8,
+    run_env: []const EnvironmentVariable,
+    run_args: []const []const u8,
 
     const Module = struct {
         name: []const u8,
@@ -102,6 +107,23 @@ pub fn build(b: *std.Build) void {
 
     const binary = output orelse @panic("Bazel link command has no $OUTPUT placeholder");
     b.getInstallStep().dependOn(&b.addInstallBinFile(binary, config.name).step);
+
+    const run = std.Build.Step.Run.create(b, b.fmt("run {s}", .{config.name}));
+    run.stdio = .inherit;
+    run.setCwd(.{ .cwd_relative = config.run_cwd });
+    for (config.run_env) |env| {
+        run.setEnvironmentVariable(env.key, env.value);
+    }
+    run.setEnvironmentVariable("RUNFILES_DIR", absolute(config.execroot, config.runfiles_dir, b));
+    run.setEnvironmentVariable("RUNFILES_MANIFEST_FILE", absolute(config.execroot, config.runfiles_manifest, b));
+    run.addFileArg(binary);
+    run.addArgs(config.run_args);
+    if (b.args) |args| {
+        run.addArgs(args);
+    }
+
+    const run_step = b.step("run", "Run the executable built from the Bazel target");
+    run_step.dependOn(&run.step);
 }
 
 fn absolute(execroot: []const u8, path: []const u8, b: *std.Build) []const u8 {

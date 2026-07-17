@@ -115,6 +115,44 @@ def action_config(graph: dict[str, object], execroot: str, label: str) -> dict[s
         "linker": link_arguments[0],
         "link_args": rewritten_link_args,
         "link_env": link.get("environmentVariables", []),
+        "runfiles_dir": f"{output_path}.runfiles",
+        "runfiles_manifest": f"{output_path}.runfiles_manifest",
+    }
+
+
+def parse_run_script(script: str) -> dict[str, object]:
+    tokens = shlex.split(script.replace("\\\n", " "))
+    try:
+        cwd = tokens[tokens.index("cd") + 1]
+        env_index = tokens.index("env")
+    except (ValueError, IndexError) as err:
+        raise RuntimeError("could not parse Bazel run script") from err
+
+    run_env: list[dict[str, str]] = []
+    index = env_index + 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-u":
+            index += 2
+            continue
+        name, separator, value = token.partition("=")
+        if separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            run_env.append({"key": name, "value": value})
+            index += 1
+            continue
+        break
+
+    if index >= len(tokens):
+        raise RuntimeError("Bazel run script has no executable")
+
+    run_args = tokens[index + 1 :]
+    if run_args and run_args[-1] == "$@":
+        run_args.pop()
+
+    return {
+        "run_cwd": cwd,
+        "run_env": run_env,
+        "run_args": run_args,
     }
 
 
@@ -159,6 +197,9 @@ def main() -> int:
     safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_")
     config_path = Path("/tmp") / "zig-bazel" / safe_label / "config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    run_script_path = config_path.parent / "run.sh"
+    bazel(workspace, ["run", f"--script_path={run_script_path}", *bazel_flags, label])
+    config.update(parse_run_script(run_script_path.read_text()))
     config_path.write_text(json.dumps(config, indent=2) + "\n")
 
     zig = next(
