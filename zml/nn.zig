@@ -2013,3 +2013,96 @@ fn ShapeStruct(comptime dims: anytype) type {
 
     return @Struct(.@"extern", null, &struct_field_names, &struct_field_types, &struct_field_attrs);
 }
+
+/// Walsh-Hadamard matrix
+/// https://en.wikipedia.org/wiki/Walsh_matrix
+/// https://neilsloane.com/hadamard/
+pub fn walshHadamard(n: u32) Tensor {
+    const log2_n = std.math.log2_int(u32, n);
+    const n_bis = @as(u32, 1) << log2_n;
+    stdx.debug.assert(n == n_bis, "walshHadamard expects a power of two as input, got {d}", .{n});
+
+    const allocator = zml.module.CompilationContext.current().allocator;
+    const data: []i8 = walshHadamardAlloc(n, allocator) catch @panic("OOM");
+    defer allocator.free(data);
+
+    return .constantTensor(.init(.{ n, n }, .i8), @ptrCast(data));
+}
+
+fn walshHadamardAlloc(n: usize, allocator: std.mem.Allocator) error{OutOfMemory}![]i8 {
+    const data: []i8 = try allocator.alloc(i8, n * n);
+
+    data[0 * n ..][0..2].* = .{ 1, 1 };
+    data[1 * n ..][0..2].* = .{ 1, -1 };
+
+    var step: usize = 2;
+    while (step < n) : (step *= 2) {
+        for (0..step) |row| {
+            // std.log.warn("step {d}, row {d}", .{ step, row });
+            const row_data: []const i8 = data[row * n ..][0..step];
+            @memcpy(data[row * n ..][step .. 2 * step], row_data);
+            @memcpy(data[(step + row) * n ..][0..step], row_data);
+            for (data[(step + row) * n ..][step .. 2 * step], row_data) |*bottom_right, current| {
+                bottom_right.* = -current;
+            }
+        }
+    }
+    return data;
+}
+
+test walshHadamard {
+    const allocator = std.testing.allocator;
+    const N = 16;
+    const wh: []i8 = walshHadamardAlloc(N, allocator) catch @panic("OOM");
+    defer allocator.free(wh);
+
+    // https://neilsloane.com/hadamard/
+    const expected_data =
+        \\++++++++++++++++
+        \\+-+-+-+-+-+-+-+-
+        \\++--++--++--++--
+        \\+--++--++--++--+
+        \\++++----++++----
+        \\+-+--+-++-+--+-+
+        \\++----++++----++
+        \\+--+-++-+--+-++-
+        \\++++++++--------
+        \\+-+-+-+--+-+-+-+
+        \\++--++----++--++
+        \\+--++--+-++--++-
+        \\++++--------++++
+        \\+-+--+-+-+-++-+-
+        \\++----++--++++--
+        \\+--+-++--++-+--+
+    ;
+
+    var expected: [N][N]i8 = undefined;
+    const expected_bytes: []i8 = @ptrCast(&expected);
+    {
+        var i: usize = 0;
+        var j: usize = 0;
+        while (i < expected_data.len) : (i += 1) {
+            expected_bytes[j] = switch (expected_data[i]) {
+                '+' => 1,
+                '-' => -1,
+                '\n' => continue,
+                else => unreachable,
+            };
+            j += 1;
+        }
+    }
+
+    const shape: zml.Shape = .init(.{ N, N }, .i8);
+    const expected_h = zml.Slice.initConst(shape, @ptrCast(&expected));
+    const wh_h = zml.Slice.initConst(shape, @ptrCast(wh));
+    try zml.testing.expectClose(std.testing.io, expected_h, wh_h, .exact_match);
+}
+
+pub fn randomizedWalshHadamard(n: u32, rng: Tensor.Rng) struct { Tensor.Rng, Tensor } {
+    const new_rng, const rand = rng.uniform(.init(.{n}, f32), .{});
+    const noise: Tensor = .select(.logical(rand, .GT, .scalar(0.5, f32)), .scalar(1, i8), .scalar(-1, i8));
+    const diag: Tensor = .toDiagonal(noise, 0, .{ ._, ._ });
+
+    const walsh_hadamard = walshHadamard(n);
+    return .{ new_rng, walsh_hadamard.dot(diag, .{&.{ 1, 0 }}) };
+}
