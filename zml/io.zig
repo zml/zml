@@ -324,19 +324,11 @@ pub const Loader = struct {
         return self.group.await(io);
     }
 
-    pub const AutoOpts = struct {
+    pub const LoadOpts = struct {
         progress: ?*std.Progress.Node = null,
     };
 
-    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) void {
-        self.group.async(io, struct {
-            fn call(self_: *Loader, io_: std.Io, model_: *const T, buffers_: *Bufferized(T), store_: *const TensorStore, shardings_: []const Sharding, opts_: AutoOpts) void {
-                self_.loadInner(io_, T, model_, buffers_, store_, shardings_, opts_);
-            }
-        }.call, .{ self, io, model, buffers, store, shardings, opts });
-    }
-
-    fn loadInner(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) void {
+    pub fn load(self: *Loader, io: std.Io, comptime T: type, model: *const T, buffers: *Bufferized(T), store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
         const tensor_count = meta.count(Tensor, model);
 
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
@@ -355,7 +347,7 @@ pub const Loader = struct {
             store: *const TensorStore,
             shardings: []const Sharding,
             buffers: []*Buffer,
-            opts: AutoOpts,
+            opts: LoadOpts,
         };
 
         var ctx: Ctx = .{
@@ -374,14 +366,7 @@ pub const Loader = struct {
         }.call, .{&ctx});
     }
 
-    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) void {
-        self.defaultCallbackInner(io, tensor, buffer, store, shardings, opts) catch |e| {
-            log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
-            unreachable;
-        };
-    }
-
-    fn defaultCallbackInner(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: AutoOpts) !void {
+    fn defaultCallback(self: *Loader, io: std.Io, tensor: *const Tensor, buffer: *Buffer, store: *const TensorStore, shardings: []const Sharding, opts: LoadOpts) void {
         const sources = store.getSourcesById(tensor.id) orelse {
             std.log.warn("Failed to get sources for tensor with id: {}", .{tensor.id});
             return;
@@ -391,47 +376,13 @@ pub const Loader = struct {
             std.debug.panic("Expected loaded tensor to have only 1 source, got {}", .{sources.len});
         }
 
-        var reader = try sources[0].reader(io, &.{}, .{});
-        defer reader.deinit();
-
-        const shape = tensor.shape();
-        const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
-            log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
-            break :blk self.platform.replicated_sharding;
+        self.loadSingleInner(io, sources[0], buffer, shardings, opts) catch |e| {
+            log.err("Errors are not handled in `defaultCallback`, got {}", .{e});
+            unreachable;
         };
-
-        var writer = try MemoryWriter.init(
-            self.allocator,
-            io,
-            self.platform,
-            self.pinned_buffer_pools,
-            self.dma_allocators,
-            self.dma_chunk_size,
-            shape,
-            sharding,
-            buffer,
-        );
-        defer writer.deinit(self.allocator);
-
-        const scale = 1024;
-
-        if (opts.progress) |progress| {
-            var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
-            defer node.end();
-            writer.setProgress(&node);
-            defer writer.setProgress(null);
-            var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
-            const total = try reader.interface.streamRemaining(&progress_writer.interface);
-            try progress_writer.interface.flush();
-            _ = self.bytes_loaded.fetchAdd(total, .monotonic);
-        } else {
-            const total = try reader.interface.streamRemaining(writer.interface());
-            try writer.interface().flush();
-            _ = self.bytes_loaded.fetchAdd(total, .monotonic);
-        }
     }
 
-    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, buffer: *Buffer, loaded: *bool, shardings: []const Sharding, opts: AutoOpts) void {
+    fn loadSingle(self: *Loader, io: std.Io, source: *safetensors.Tensor, buffer: *Buffer, loaded: *bool, shardings: []const Sharding, opts: LoadOpts) void {
         self.loadSingleInner(io, source, buffer, shardings, opts) catch |e| {
             log.err("Failed to load tensor {s}: {}", .{ source.name, e });
             loaded.* = false;
@@ -439,7 +390,7 @@ pub const Loader = struct {
         loaded.* = true;
     }
 
-    fn loadSingleInner(self: *Loader, io: std.Io, source: *safetensors.Tensor, buffer: *Buffer, shardings: []const Sharding, opts: AutoOpts) !void {
+    fn loadSingleInner(self: *Loader, io: std.Io, source: *safetensors.Tensor, buffer: *Buffer, shardings: []const Sharding, opts: LoadOpts) !void {
         var reader = try source.reader(io, &.{}, .{});
         defer reader.deinit();
 
