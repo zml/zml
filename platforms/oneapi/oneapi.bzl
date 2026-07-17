@@ -1,8 +1,8 @@
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
-PJRT_ONEAPI_RELEASE = "manual-2026-07-17T10-00-00Z"
-PJRT_ONEAPI_ARTIFACT_SHA256 = "7b2883157ae108c09003c9d63a8a5d638adfbf9c511517b766c4cdbf4276b1bd"
+PJRT_ONEAPI_RELEASE = "manual-2026-07-17T21-30-00Z"
+PJRT_ONEAPI_ARTIFACT_SHA256 = "8e28d1ff00e2193a40982294d6b055a8102f49eb2cb46f32a6076f9bb541e8a2"
 PJRT_ONEAPI_ARTIFACT_URL = "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-oneapi_linux-amd64.tar.gz".format(
     release = PJRT_ONEAPI_RELEASE,
 )
