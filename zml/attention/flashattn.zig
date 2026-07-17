@@ -33,9 +33,10 @@ fn flashattnDataTypeFromZmlDataType(dtype: zml.DataType) flashattn.DataType {
         .f32 => .f32,
         .f16 => .f16,
         .bf16 => .bf16,
+        .u32 => .i32,
         .i32 => .i32,
         .i8 => .i8,
-        else => unreachable,
+        else => std.debug.panic("Unsupported dtype for attention backend cu_fa2: {t}", .{dtype}),
     };
 }
 
@@ -149,6 +150,7 @@ pub const fa2 = struct {
         v: zml.Tensor,
         cu_seqlens_q: zml.Tensor,
         cu_seqlens_k: zml.Tensor,
+        seqused_k: zml.Tensor,
         softmax_lse: zml.Tensor,
         softmax_lse_accum: zml.Tensor,
         out_accum: zml.Tensor,
@@ -194,7 +196,7 @@ pub const fa2 = struct {
             &toFlashattnTensor(output.o),
             &toFlashattnTensor(input.cu_seqlens_q),
             &toFlashattnTensor(input.cu_seqlens_k),
-            null,
+            &toFlashattnTensor(input.seqused_k),
             null,
             &toFlashattnTensor(input.softmax_lse),
             null,
@@ -265,49 +267,63 @@ pub const fa2 = struct {
         }
     };
 
-    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
+    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index_: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
         const ctx = CompilationContext.current();
 
-        stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa2.attention support for batch size != 1 is not supported yet.", .{});
-        const seqused_k = token_index.addConstant(q_.dim(.q)).reshape(.{1});
-        // TODO(Corendos): replace with cumsum
-        const cu_seqlens_k = b: {
-            const zero = zml.Tensor.constant(token_index.dtype().zero()).reshape(.{1});
-            break :b zml.Tensor.concatenate(&.{ zero, seqused_k }, 0).convert(.i32);
-        };
+        var bs: i64 = 1;
+        var q = q_;
+        var k = k_;
+        var v = v_;
+        var token_index = token_index_;
+
+        // Follow cu_fa2 convention
+        // We are a bit more restrictive because we assume each sequence has the same number of queries and keys.
+        // https://deepwiki.com/Dao-AILab/flash-attention/3.1-flashattention-2-python-interface#flash_attn_varlen_func
+        if (q.shape().hasTag(.b)) |_| {
+            bs = q.dim(.b);
+            q = q.merge(.{ .tot = .{ .b, .q } });
+            k = k.merge(.{ .tot = .{ .b, .k } });
+            v = v.merge(.{ .tot = .{ .b, .k } });
+        } else {
+            q = q.rename(.{ .q = .tot });
+            k = k.rename(.{ .k = .tot });
+            v = v.rename(.{ .k = .tot });
+            token_index = token_index.broad(.init(.{ .b = 1 }, .i32));
+        }
+
         const max_seqlen_q: i32 = @intCast(q_.dim(.q));
         const max_seqlen_k: i32 = @intCast(k_.dim(.k));
-        var q, const k, const v = if (q_.shape().hasTag(.b) != null) b: {
-            break :b [_]zml.Tensor{
-                q_.merge(.{ .tot = .{ .b, .q } }), k_.merge(.{ .tot = .{ .b, .k } }), v_.merge(.{ .tot = .{ .b, .k } }),
-            };
-        } else b: {
-            break :b [_]zml.Tensor{ q_.rename(.{ .q = .tot }), k_.rename(.{ .k = .tot }), v_.rename(.{ .k = .tot }) };
-        };
-        // TODO(Corendos): replace with cumsum
-        const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }))
-            .withPartitioning(.{ ._0 = .replicated });
+
+        // We still have a rectangle layout, q and k haven't been compacted.
+        // So each sequence have the same number of queries, keys
+        const cu_seqlens_q: zml.Tensor = .arange(.{ .end = max_seqlen_q * (bs + 1), .step = max_seqlen_q }, .i32);
+        const cu_seqlens_k: zml.Tensor = .arange(.{ .end = max_seqlen_k * (bs + 1), .step = max_seqlen_k }, .i32);
+        // But here we correctly pass the number of used k per sequence
+        const seqused_k = token_index.addConstant(max_seqlen_q).convert(.i32);
 
         const original_tot = q.dim(.tot);
-        const num_heads = q_.dim(.h);
-        const num_heads_k = k_.dim(.h);
-        const head_size = q_.dim(.hd);
-        const ngroups = @divExact(num_heads, num_heads_k);
-        const seqlenq_ngroups_swapped = max_seqlen_q == 1 and num_heads > num_heads_k and @mod(head_size, 8) == 0 and parameters.sliding_window < 0;
+        const num_heads: i32 = @intCast(q_.dim(.h));
+        const num_k_heads = k_.dim(.h);
+        const head_dim = q.dim(.hd);
+        const ngroups = @divExact(num_heads, num_k_heads);
+        const seqlenq_ngroups_swapped = max_seqlen_q == 1 and num_heads > num_k_heads and @mod(head_dim, 8) == 0 and parameters.sliding_window < 0;
         if (seqlenq_ngroups_swapped) {
-            q = q.splitAxis(.h, .{ .h = num_heads_k, .ngroups = ngroups }).transpose(.{ .tot, .ngroups, .h, .hd }).merge(.{ .tot = .{ .tot, .ngroups } });
+            q = q.splitAxis(.h, .{ .h = num_k_heads, .ngroups = ngroups })
+                .transpose(.{ .tot, .ngroups, .h, .hd })
+                .merge(.{ .tot = .{ .tot, .ngroups } });
         }
 
         const q_sharded = q.withPartitioning(.{ .h = .model });
-        const model_partitions = ctx.partitioning.numPartitionsForLogicalAxis(q_sharded.shape(), .model) catch unreachable;
+        const model_partitions: i32 = @intCast(ctx.partitioning.numPartitionsForLogicalAxis(q_sharded.shape(), .model) catch std.debug.panic("cu_fa2 attention backend requires a .model sharding", .{}));
 
         const output = fa2_mha_varlen_fwd.call(
             .{
                 .q = q_sharded,
-                .k = k,
-                .v = v,
+                .k = k.withPartitioning(.{ .h = .model }),
+                .v = v.withPartitioning(.{ .h = .model }),
                 .cu_seqlens_q = cu_seqlens_q,
-                .cu_seqlens_k = cu_seqlens_k.withTags(.{.i}).withPartitioning(.{ .i = .replicated }),
+                .cu_seqlens_k = cu_seqlens_k,
+                .seqused_k = seqused_k,
                 .softmax_lse = metadata.softmax_lse.withPartitioning(.{ .h = .model }),
                 .softmax_lse_accum = metadata.softmax_lse_accum.withPartitioning(.{ .h = .model }),
                 .out_accum = metadata.out_accum.withPartitioning(.{ .h = .model }),
@@ -316,25 +332,27 @@ pub const fa2 = struct {
                 .o = q_sharded.shape(),
             },
             .{
-                .softmax_scale = b: {
-                    const head_dim = q.shape().dim(2);
-                    break :b 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
-                },
+                .softmax_scale = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim))),
                 .is_causal = true,
                 .window_size_left = parameters.sliding_window,
-                .window_size_right = @as(i32, -1),
+                .window_size_right = -1,
                 .max_seqlen_q = max_seqlen_q,
                 .max_seqlen_k = max_seqlen_k,
-                .num_heads = @as(i32, @intCast(@divExact(num_heads, model_partitions))),
+                .num_heads = @divExact(num_heads, model_partitions),
             },
         );
         var o = output.o;
 
         if (seqlenq_ngroups_swapped) {
-            o = o.splitAxis(.tot, .{ .tot = original_tot, .ngroups = ngroups }).transpose(.{ .tot, .h, .ngroups, .hd }).merge(.{ .h = .{ .h, .ngroups } });
+            o = o.splitAxis(.tot, .{ .tot = original_tot, .ngroups = ngroups })
+                .transpose(.{ .tot, .h, .ngroups, .hd })
+                .merge(.{ .h = .{ .h, .ngroups } });
         }
 
-        return o.splitAxis(.tot, .{ .b = 1, .q = q_.dim(.q) }).squeeze(.b);
+        return if (q_.shape().hasTag(.b)) |_|
+            o.splitAxis(.tot, .{ .b = bs, .q = q_.dim(.q) })
+        else
+            o.rename(.{ .tot = .q });
     }
 };
 

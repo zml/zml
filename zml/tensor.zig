@@ -1586,30 +1586,28 @@ pub const Tensor = struct {
         const rk = self.rank();
         const a = self.axis(axis_);
 
-        const ones = [_]i64{1} ** constants.MAX_RANK;
-        var window_dimensions = ones;
+        var window_dimensions = constants.ones_i64;
         window_dimensions[a] = self.dim(a);
-        var padding = [_][2]i64{.{ 0, 0 }} ** constants.MAX_RANK;
+        var padding: [constants.MAX_RANK][2]i64 = @splat(.{ 0, 0 });
         padding[a] = .{ self.dim(a) - 1, 0 };
 
         const result = ops.reduceWindow(
+            1,
             .{self},
-            .{Tensor.scalar(0, self.dtype())},
+            .{.scalar(0, self.dtype())},
             .{
-                .base_dilations = ones[0..rk],
-                .window_dilations = ones[0..rk],
-                .window_strides = ones[0..rk],
+                .base_dilations = constants.ones_i64[0..rk],
+                .window_dilations = constants.ones_i64[0..rk],
+                .window_strides = constants.ones_i64[0..rk],
                 .window_dimensions = window_dimensions[0..rk],
                 .padding = padding[0..rk],
             },
             struct {
-                fn add(values: ops.ReduceArgs) struct { Tensor } {
-                    return .{values.left.add(values.right)};
+                fn add(values: ops.ReduceArgs) [1]Tensor {
+                    return .{.add(values.left, values.right)};
                 }
             }.add,
-            .{},
         );
-
         return result[0];
     }
 
@@ -1639,7 +1637,7 @@ pub const Tensor = struct {
         );
         defer exe.deinit();
 
-        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 1, 0, 1 }, .{ 3, 1, 0, 2, 1 } }));
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, @ptrCast(&[2][5]f32{ .{ 0, 1, 1, 0, 1 }, .{ 3, 1, 0, 2, 1 } }));
         defer x_buffer.deinit();
 
         var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._cumsum, .{x_buffer});
@@ -2130,7 +2128,7 @@ pub const Tensor = struct {
         end: i64,
         step: i64 = 1,
     };
-    ///
+
     /// Returns a Tensor containing evenly spaced values within a given interval.
     pub fn arange(args: ArangeArgs, dt: DataType) Tensor {
         stdx.debug.assert(args.start <= args.end, "arange expects 'args.start' to be less than 'args.end', got {} and {}", .{ args.start, args.end });
@@ -2155,6 +2153,30 @@ pub const Tensor = struct {
         }
 
         return res;
+    }
+
+    test arange {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const exe = try zml.module.compile(
+            std.testing.allocator,
+            std.testing.io,
+            Tensor.arange,
+            .{ .{ .start = 2, .end = 26, .step = 4 }, .u32 },
+            platform,
+            .{},
+        );
+        defer exe.deinit();
+
+        const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.arange, {});
+
+        try zml.testing.expectClose(
+            std.testing.io,
+            zml.Slice.initConst(.init(.{6}, .u32), @ptrCast(&[_]u32{ 2, 6, 10, 14, 18, 22 })),
+            output,
+            .exact_match,
+        );
     }
 
     /// Returns a Tensor containing values in increasing order starting from 0 along the given axis.
@@ -3066,7 +3088,7 @@ pub const Tensor = struct {
         values: Tensor,
         indices: Tensor,
 
-        fn cmp(values: ops.ReduceArgs, indices: ops.ReduceArgs) struct { Tensor, Tensor } {
+        fn cmp(values: ops.ReduceArgs, indices: ops.ReduceArgs) [2]Tensor {
             const left_gt_right = values.left.cmp(.GT, values.right);
             const is_nan = values.left.cmp(.NE, values.left);
             const left_gt_or_nan = left_gt_right.logical(.OR, is_nan);
@@ -3365,9 +3387,10 @@ pub const Tensor = struct {
         var padding = [_][2]i64{.{ 0, 0 }} ** constants.MAX_RANK;
         padding[a] = opts.padding;
 
-        const result = ops.reduceWindow(
+        const values, const indices = ops.reduceWindow(
+            2,
             .{ self, iota(self._shape, a) },
-            .{ Tensor.constant(self.dtype().minValue()), Tensor.scalar(0, .i32) },
+            .{ .constant(self.dtype().minValue()), .scalar(0, .i32) },
             .{
                 .window_dimensions = window_dimensions[0..self.rank()],
                 .window_strides = window_strides[0..self.rank()],
@@ -3375,10 +3398,9 @@ pub const Tensor = struct {
                 .window_dilations = window_dilations[0..self.rank()],
                 .padding = padding[0..self.rank()],
             },
-            MaxPoolRes.cmp,
-            .{},
+            &MaxPoolRes.cmp,
         );
-        return .{ .values = result[0], .indices = result[1] };
+        return .{ .values = values, .indices = indices };
     }
 
     /// Computes the 2d maxPool operation on the input Tensor.
@@ -3405,9 +3427,10 @@ pub const Tensor = struct {
         padding[a - 1] = opts.padding[0];
         padding[a] = opts.padding[1];
 
-        const result = ops.reduceWindow(
+        const values, const indices = ops.reduceWindow(
+            2,
             .{ self, iota(self._shape, a) },
-            .{ Tensor.constant(self.dtype().minValue()), Tensor.scalar(0, .i32) },
+            .{ .constant(self.dtype().minValue()), .scalar(0, .i32) },
             .{
                 .window_dimensions = window_dimensions[0..self.rank()],
                 .window_strides = window_strides[0..self.rank()],
@@ -3415,10 +3438,9 @@ pub const Tensor = struct {
                 .window_dilations = window_dilations[0..self.rank()],
                 .padding = padding[0..self.rank()],
             },
-            MaxPoolRes.cmp,
-            .{},
+            &MaxPoolRes.cmp,
         );
-        return .{ .values = result[0], .indices = result[1] };
+        return .{ .values = values, .indices = indices };
     }
 
     /// Chunk a given tensor into exactly n parts of equal shape.
@@ -4407,7 +4429,7 @@ pub const Tensor = struct {
 
 fn initPoolArg(rank: usize, data: []const i64) [constants.MAX_RANK]i64 {
     // TODO use shape
-    var result = [_]i64{1} ** constants.MAX_RANK;
+    var result: [constants.MAX_RANK]i64 = @splat(1);
     const start = rank - data.len;
     @memcpy(result[start .. start + data.len], data);
     return result;
@@ -4415,7 +4437,7 @@ fn initPoolArg(rank: usize, data: []const i64) [constants.MAX_RANK]i64 {
 
 fn getPoolResDims(dt: DataType, in_dims: []const i64, base_dilations: @Vector(constants.MAX_RANK, i64), padding: []const i64, window_dimensions: @Vector(constants.MAX_RANK, i64), window_dilations: @Vector(constants.MAX_RANK, i64), window_strides: @Vector(constants.MAX_RANK, i64)) Shape {
     // TODO use shape
-    var input_dims = [_]i64{1} ** constants.MAX_RANK;
+    var input_dims: [constants.MAX_RANK]i64 = @splat(1);
     @memcpy(input_dims[0..in_dims.len], in_dims);
 
     const input_dims_: @Vector(constants.MAX_RANK, i64) = input_dims;
@@ -4438,7 +4460,7 @@ fn getPoolResDims(dt: DataType, in_dims: []const i64, base_dilations: @Vector(co
 }
 
 fn getComparisonType(ctx: *mlir.Context, dtype: DataType) *const dialects.stablehlo.CompareType {
-    return dialects.stablehlo.CompareType.init(ctx, switch (dtype.class()) {
+    return .init(ctx, switch (dtype.class()) {
         .bool => .UNSIGNED,
         .integer => if (dtype.isSignedInt()) .SIGNED else .UNSIGNED,
         .float => .FLOAT,

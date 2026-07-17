@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const zml = @import("zml");
-const attention = zml.attention.attention;
 
 const inference = @import("inference.zig");
 const model = @import("model.zig");
@@ -141,7 +140,7 @@ pub const Session = struct {
         defer prefill_tokens_buffer.deinit();
 
         const params = self.compiled_model.params;
-        var attention_metadata_buffers: zml.Bufferized(attention.Metadata) = switch (params.attention_metadata) {
+        var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = switch (params.attention_metadata) {
             .attnd => .{ .attnd = .{
                 .conversation_id = try .scalar(self.io, self.platform, self.conversation_id, .u64),
                 .layer_id = try .scalar(self.io, self.platform, 0, .u16),
@@ -150,7 +149,7 @@ pub const Session = struct {
             .metal_fa => .{ .metal_fa = .{ .num_tokens = try .scalar(self.io, self.platform, all_tokens.len, .u32) } },
             .vanilla, .cuda_fa2, .cuda_fa3, .nki => try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model),
         };
-        defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+        defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         try self.compiled_model.prefill.run(.{
             .allocator = self.allocator,
@@ -180,7 +179,7 @@ pub const Session = struct {
         defer current_token_buffer.deinit();
 
         const params = self.compiled_model.params;
-        var attention_metadata_buffers: zml.Bufferized(attention.Metadata) = switch (params.attention_metadata) {
+        var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = switch (params.attention_metadata) {
             .attnd => .{ .attnd = .{
                 .conversation_id = try .scalar(self.io, self.platform, self.conversation_id, .u64),
                 .layer_id = try .scalar(self.io, self.platform, 0, .u16),
@@ -188,7 +187,7 @@ pub const Session = struct {
             } },
             .vanilla, .cuda_fa2, .cuda_fa3, .nki, .metal_fa => try params.attention_metadata.initBuffer(self.io, self.platform, params.shardings.model),
         };
-        defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+        defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         generation: while (true) {
             if (isEosToken(self.config, last_token_id)) break :generation;

@@ -2,25 +2,23 @@ const std = @import("std");
 
 const zml = @import("zml");
 const stdx = zml.stdx;
-const attention = zml.attention.attention;
 
 const common = @import("../common.zig");
+const Phase = common.Phase;
 const model = @import("model.zig");
 
 const log = std.log.scoped(.lfm);
-const Phase = common.Phase;
-
 pub const CompilationParameters = struct {
     hidden_dim: usize,
     batch_dim: usize,
     rng: zml.Tensor.Rng,
     cache: model.Cache,
-    attention_metadata: attention.Metadata,
-    attention_parameters: attention.Parameters,
+    attention_metadata: zml.attention.Metadata,
+    attention_parameters: zml.attention.Parameters,
     seqlen: u32,
     shardings: common.Shardings,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, shardings: common.Shardings) CompilationParameters {
+    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: zml.attention.Backend, shardings: common.Shardings) CompilationParameters {
         stdx.debug.assert(seqlen >= config.conv_L_cache, "seqlen ({}) must be at least conv_L_cache ({})", .{ seqlen, config.conv_L_cache });
         const cache: model.Cache = .{
             .kv = .init(.init(.{
@@ -63,7 +61,7 @@ pub const Args = struct {
     actual_seq_len_buf: *zml.Buffer,
     rng_buf: *zml.Bufferized(zml.Tensor.Rng),
     cache_buffers: *zml.Bufferized(model.Cache),
-    attention_metadata_buffers: zml.Bufferized(attention.Metadata),
+    attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata),
 };
 
 pub const CompiledModel = struct {

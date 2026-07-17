@@ -566,8 +566,17 @@ pub const Platform = struct {
 
     /// Create a Sharding based on the given logical mesh and the default strategy.
     /// Memory is owned by the platform, making it safe to copy around.
-    pub fn registerSharding(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh) !Sharding {
-        return platform.registerShardingWithStrategy(name, logical, .suggest(logical, &platform.physical_mesh));
+    pub fn registerSharding(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh) error{OutOfMemory}!Sharding {
+        return platform.registerShardingWithStrategy(
+            name,
+            logical,
+            .suggest(logical, &platform.physical_mesh),
+        ) catch |err| switch (err) {
+            error.InvalidPhysicalMesh, error.InvalidStrategy, error.InvalidPhysicalAxis => {
+                std.debug.panic("ZML failed to create a valid sharding for logical mesh: {f}\nand physical_mesh: {f}\nPlease report this bug.", .{ logical, platform.physical_mesh });
+            },
+            error.OutOfMemory => |e| return e,
+        };
     }
 
     /// Create a Sharding based on the given logical mesh and a strategy.
@@ -820,7 +829,7 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     const slice: zml.Slice = .init(shape, host_visible_data[0..shape.byteSize()]);
     const name = call_frame.attrs.getByName(.string, "name").?.slice();
 
-    log.info("{s} {f} [device={d}]: {d}", .{ name, slice.shape, device_ordinal, slice });
+    std.debug.print("{s} {f} [device={d}]: {d}\n", .{ name, slice.shape, device_ordinal, slice });
 
     return null;
 }

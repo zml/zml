@@ -18,7 +18,7 @@ const Args = struct {
     prompt: ?[]const u8 = null,
     seqlen: u32 = 2048,
     topk: u32 = 4,
-    backend: ?zml.attention.attention.Backend = null,
+    backend: ?zml.attention.Backend = null,
     attnd_ip: ?[]const u8 = null,
     profile: bool = false,
 
@@ -93,8 +93,8 @@ pub fn main(init: std.process.Init) !void {
             .destination = try .parseLiteral(attnd_ip),
             .mtu = 9000,
         });
-        break :b zml.attention.attention.Backend.attnd;
-    } else zml.attention.attention.Backend.auto(platform);
+        break :b zml.attention.Backend.attnd;
+    } else zml.attention.Backend.auto(platform);
     defer if (args.attnd_ip) |_| zml.attention.attnd.deinit();
     log.info("Selected backend: {}", .{backend});
 
