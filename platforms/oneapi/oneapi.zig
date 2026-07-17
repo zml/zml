@@ -35,9 +35,6 @@ fn setupOneAPIEnv(driver_path: [:0]const u8) void {
     // that doesn't work because of peer residency likely this:
     // https://github.com/intel/compute-runtime/issues/953
     _ = c.setenv("XLA_ONECCL_COLLECTIVE_PERMUTE_BYPASS_SYCL_P2P", "1", 1);
-    // oneccl send/recv fail today, this makes it work.
-    // _ = c.setenv("SYCL_UR_USE_LEVEL_ZERO_V2", "0", 1);
-    // _ = c.setenv("UR_L0_USE_DRIVER_COUNTER_BASED_EVENTS", "0", 1);
     _ = c.setenv("ONEAPI_DEVICE_SELECTOR", "level_zero:*", 0);
     _ = c.setenv("ZE_ENABLE_ALT_DRIVERS", driver_path, 0);
 }
