@@ -76,6 +76,173 @@ def parse_modules(arguments: list[str]) -> list[dict[str, object]]:
     return modules
 
 
+def append_unique(items: list[str], value: str) -> None:
+    if value not in items:
+        items.append(value)
+
+
+def is_link_input(argument: str) -> bool:
+    return argument.endswith((".o", ".a", ".dylib", ".so"))
+
+
+def target_with_os_version(target: str, os_version_min: str | None) -> str:
+    if not os_version_min:
+        return target
+
+    parts = target.split("-")
+    if len(parts) < 2 or "." in parts[1]:
+        return target
+
+    parts[1] = f"{parts[1]}.{os_version_min}"
+    return "-".join(parts)
+
+
+def parse_zig_link(link_arguments: list[str], archive: str) -> dict[str, object]:
+    objects: list[str] = []
+    archive_objects: list[str] = []
+    library_paths: list[str] = []
+    system_libraries: list[str] = []
+    frameworks: list[str] = []
+    needed_frameworks: list[str] = []
+    weak_frameworks: list[str] = []
+    skipped_args: list[str] = []
+    sysroot: str | None = None
+    os_version_min: str | None = None
+    headerpad_max_install_names = False
+    dead_strip = False
+    in_start_lib = False
+
+    index = 1
+    while index < len(link_arguments):
+        arg = link_arguments[index]
+
+        if arg == "-Wl,--start-lib":
+            in_start_lib = True
+            index += 1
+            continue
+        if arg == "-Wl,--end-lib":
+            in_start_lib = False
+            index += 1
+            continue
+        if arg == archive:
+            index += 1
+            continue
+        if arg in ("-o", "-target"):
+            index += 2
+            continue
+        if arg == "--sysroot":
+            sysroot = link_arguments[index + 1]
+            index += 2
+            continue
+        if arg.startswith("--sysroot="):
+            sysroot = arg.removeprefix("--sysroot=")
+            index += 1
+            continue
+        if arg.startswith("-mmacosx-version-min="):
+            os_version_min = arg.removeprefix("-mmacosx-version-min=")
+            index += 1
+            continue
+        if arg == "-framework":
+            append_unique(frameworks, link_arguments[index + 1])
+            index += 2
+            continue
+        if arg == "-needed_framework":
+            append_unique(needed_frameworks, link_arguments[index + 1])
+            index += 2
+            continue
+        if arg == "-weak_framework":
+            append_unique(weak_frameworks, link_arguments[index + 1])
+            index += 2
+            continue
+        if arg == "-L":
+            append_unique(library_paths, link_arguments[index + 1])
+            index += 2
+            continue
+        if arg.startswith("-L") and len(arg) > 2:
+            library_path = arg[2:]
+            if "libunwind_library_search_directory" not in library_path:
+                append_unique(library_paths, library_path)
+            index += 1
+            continue
+        if arg.startswith("-l") and len(arg) > 2:
+            append_unique(system_libraries, arg[2:])
+            index += 1
+            continue
+        if arg == "-pthread":
+            append_unique(system_libraries, "pthread")
+            index += 1
+            continue
+        if arg in ("-headerpad_max_install_names",):
+            headerpad_max_install_names = True
+            index += 1
+            continue
+        if arg in ("-dead_strip",):
+            dead_strip = True
+            index += 1
+            continue
+        if arg in (
+            "-fuse-ld=lld",
+            "-rtlib=compiler-rt",
+            "-Wl,-no_warn_duplicate_libraries",
+            "-Wl,-oso_prefix,.",
+            "-Wl,--icf=safe",
+        ):
+            index += 1
+            continue
+        if arg == "-Wl,-dead_strip":
+            dead_strip = True
+            index += 1
+            continue
+        if arg.startswith("-Wl,-framework,"):
+            append_unique(frameworks, arg.removeprefix("-Wl,-framework,"))
+            index += 1
+            continue
+        if arg.startswith("-Wl,-needed_framework,"):
+            append_unique(needed_frameworks, arg.removeprefix("-Wl,-needed_framework,"))
+            index += 1
+            continue
+        if arg.startswith("-Wl,-weak_framework,"):
+            append_unique(weak_frameworks, arg.removeprefix("-Wl,-weak_framework,"))
+            index += 1
+            continue
+        if arg.startswith("-Wl,-force_load,"):
+            append_unique(objects, arg.removeprefix("-Wl,-force_load,"))
+            index += 1
+            continue
+        if arg.startswith("-Wl,-install_name,"):
+            index += 1
+            continue
+        if is_link_input(arg):
+            if "clang_rt.builtins.static" not in arg:
+                append_unique(archive_objects if in_start_lib else objects, arg)
+            index += 1
+            continue
+
+        skipped_args.append(arg)
+        index += 1
+
+    return {
+        "target": target_with_os_version(
+            link_arguments[link_arguments.index("-target") + 1].replace("apple-darwin", "macos-none")
+            if "-target" in link_arguments
+            else "",
+            os_version_min,
+        ),
+        "sysroot": sysroot,
+        "objects": objects,
+        "archive_objects": archive_objects,
+        "library_paths": library_paths,
+        "framework_paths": [f"{sysroot}/System/Library/Frameworks"] if sysroot else [],
+        "system_libraries": system_libraries,
+        "frameworks": frameworks,
+        "needed_frameworks": needed_frameworks,
+        "weak_frameworks": weak_frameworks,
+        "headerpad_max_install_names": headerpad_max_install_names,
+        "dead_strip": dead_strip,
+        "skipped_args": skipped_args,
+    }
+
+
 def action_config(graph: dict[str, object], execroot: str, label: str) -> dict[str, object]:
     actions = graph["actions"]
     links = [action for action in actions if action.get("mnemonic") == "CppLink"]
@@ -115,6 +282,7 @@ def action_config(graph: dict[str, object], execroot: str, label: str) -> dict[s
         "linker": link_arguments[0],
         "link_args": rewritten_link_args,
         "link_env": link.get("environmentVariables", []),
+        "zig_link": parse_zig_link(link_arguments, archive),
         "runfiles_dir": f"{output_path}.runfiles",
         "runfiles_manifest": f"{output_path}.runfiles_manifest",
     }

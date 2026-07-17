@@ -9,6 +9,7 @@ const Config = struct {
     linker: []const u8,
     link_args: []const []const u8,
     link_env: []const EnvironmentVariable,
+    zig_link: ZigLink,
     runfiles_dir: []const u8,
     runfiles_manifest: []const u8,
     run_cwd: []const u8,
@@ -30,6 +31,22 @@ const Config = struct {
         key: []const u8,
         value: []const u8,
     };
+
+    const ZigLink = struct {
+        target: []const u8,
+        sysroot: ?[]const u8 = null,
+        objects: []const []const u8,
+        archive_objects: []const []const u8,
+        library_paths: []const []const u8,
+        framework_paths: []const []const u8,
+        system_libraries: []const []const u8,
+        frameworks: []const []const u8,
+        needed_frameworks: []const []const u8,
+        weak_frameworks: []const []const u8,
+        headerpad_max_install_names: bool = false,
+        dead_strip: bool = false,
+        skipped_args: []const []const u8,
+    };
 };
 
 pub fn build(b: *std.Build) void {
@@ -50,8 +67,17 @@ pub fn build(b: *std.Build) void {
         std.debug.panic("unable to parse Bazel configuration '{s}': {s}", .{ config_path, @errorName(err) });
     const config = parsed.value;
 
-    const target_query = std.Build.parseTargetQuery(.{ .arch_os_abi = config.target }) catch
-        std.debug.panic("Bazel supplied an unsupported Zig target '{s}'", .{config.target});
+    const use_zig_linker = b.option(
+        bool,
+        "zig-linker",
+        "Use Zig to link the final executable instead of replaying Bazel's linker command",
+    ) orelse false;
+    const target_name = if (use_zig_linker and config.zig_link.target.len != 0)
+        config.zig_link.target
+    else
+        config.target;
+    const target_query = std.Build.parseTargetQuery(.{ .arch_os_abi = target_name }) catch
+        std.debug.panic("Bazel supplied an unsupported Zig target '{s}'", .{target_name});
     const target = b.resolveTargetQuery(target_query);
     const optimize: std.builtin.OptimizeMode = std.meta.stringToEnum(std.builtin.OptimizeMode, config.optimize) orelse
         std.debug.panic("Bazel supplied an unsupported optimization mode '{s}'", .{config.optimize});
@@ -79,33 +105,10 @@ pub fn build(b: *std.Build) void {
         }
     }
 
-    const library = b.addLibrary(.{
-        .name = config.name,
-        .root_module = modules[0],
-        .linkage = .static,
-        .use_llvm = true,
-        .use_lld = use_lld,
-    });
-    library.bundle_compiler_rt = true;
-    modules[0].link_libc = true;
-
-    const link = b.addSystemCommand(&.{absolute(config.execroot, config.linker, b)});
-    link.setCwd(.{ .cwd_relative = config.execroot });
-    for (config.link_env) |env| {
-        link.setEnvironmentVariable(env.key, env.value);
-    }
-    var output: ?std.Build.LazyPath = null;
-    for (config.link_args) |arg| {
-        if (std.mem.eql(u8, arg, "$ZIG_ARCHIVE")) {
-            link.addArtifactArg(library);
-        } else if (std.mem.eql(u8, arg, "$OUTPUT")) {
-            output = link.addOutputFileArg(config.name);
-        } else {
-            link.addArg(arg);
-        }
-    }
-
-    const binary = output orelse @panic("Bazel link command has no $OUTPUT placeholder");
+    const binary = if (use_zig_linker)
+        zigLinkedBinary(b, config, modules[0], use_lld)
+    else
+        bazelLinkedBinary(b, config, modules[0], use_lld);
     b.getInstallStep().dependOn(&b.addInstallBinFile(binary, config.name).step);
 
     const run = std.Build.Step.Run.create(b, b.fmt("run {s}", .{config.name}));
@@ -124,6 +127,97 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the executable built from the Bazel target");
     run_step.dependOn(&run.step);
+}
+
+fn bazelLinkedBinary(
+    b: *std.Build,
+    config: Config,
+    root_module: *std.Build.Module,
+    use_lld: bool,
+) std.Build.LazyPath {
+    const library = b.addLibrary(.{
+        .name = config.name,
+        .root_module = root_module,
+        .linkage = .static,
+        .use_llvm = true,
+        .use_lld = use_lld,
+    });
+    library.bundle_compiler_rt = true;
+    root_module.link_libc = true;
+
+    const link = b.addSystemCommand(&.{absolute(config.execroot, config.linker, b)});
+    link.setCwd(.{ .cwd_relative = config.execroot });
+    for (config.link_env) |env| {
+        link.setEnvironmentVariable(env.key, env.value);
+    }
+    var output: ?std.Build.LazyPath = null;
+    for (config.link_args) |arg| {
+        if (std.mem.eql(u8, arg, "$ZIG_ARCHIVE")) {
+            link.addArtifactArg(library);
+        } else if (std.mem.eql(u8, arg, "$OUTPUT")) {
+            output = link.addOutputFileArg(config.name);
+        } else {
+            link.addArg(arg);
+        }
+    }
+
+    return output orelse @panic("Bazel link command has no $OUTPUT placeholder");
+}
+
+fn zigLinkedBinary(
+    b: *std.Build,
+    config: Config,
+    root_module: *std.Build.Module,
+    use_lld: bool,
+) std.Build.LazyPath {
+    if (config.zig_link.sysroot) |sysroot| {
+        b.sysroot = absolute(config.execroot, sysroot, b);
+    }
+
+    root_module.link_libc = true;
+    if (config.zig_link.archive_objects.len != 0) {
+        const archive = b.addSystemCommand(&.{ b.graph.zig_exe, "ar", "rcs" });
+        const archive_path = archive.addOutputFileArg("bazel_start_lib.a");
+        for (config.zig_link.archive_objects) |object| {
+            archive.addFileArg(.{ .cwd_relative = absolute(config.execroot, object, b) });
+        }
+        root_module.addObjectFile(archive_path);
+    }
+    for (config.zig_link.objects) |object| {
+        root_module.addObjectFile(.{ .cwd_relative = absolute(config.execroot, object, b) });
+    }
+    for (config.zig_link.library_paths) |library_path| {
+        root_module.addLibraryPath(.{ .cwd_relative = absolute(config.execroot, library_path, b) });
+    }
+    for (config.zig_link.framework_paths) |framework_path| {
+        root_module.addSystemFrameworkPath(.{ .cwd_relative = absolute(config.execroot, framework_path, b) });
+    }
+    for (config.zig_link.system_libraries) |library| {
+        root_module.linkSystemLibrary(library, .{ .use_pkg_config = .no });
+    }
+    for (config.zig_link.frameworks) |framework| {
+        root_module.linkFramework(framework, .{});
+    }
+    for (config.zig_link.needed_frameworks) |framework| {
+        root_module.linkFramework(framework, .{ .needed = true });
+    }
+    for (config.zig_link.weak_frameworks) |framework| {
+        root_module.linkFramework(framework, .{ .weak = true });
+    }
+
+    const exe = b.addExecutable(.{
+        .name = config.name,
+        .root_module = root_module,
+        .use_llvm = true,
+        .use_lld = use_lld,
+    });
+    exe.bundle_compiler_rt = true;
+    exe.headerpad_max_install_names = config.zig_link.headerpad_max_install_names;
+    if (config.zig_link.dead_strip) {
+        exe.link_gc_sections = true;
+    }
+
+    return exe.getEmittedBin();
 }
 
 fn absolute(execroot: []const u8, path: []const u8, b: *std.Build) []const u8 {
