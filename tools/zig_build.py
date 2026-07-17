@@ -85,6 +85,10 @@ def is_link_input(argument: str) -> bool:
     return argument.endswith((".o", ".a", ".dylib", ".so"))
 
 
+def is_dev_null_path(path: str) -> bool:
+    return path == os.devnull or path.startswith(f"{os.devnull}{os.sep}")
+
+
 def target_with_os_version(target: str, os_version_min: str | None) -> str:
     if not os_version_min:
         return target
@@ -131,11 +135,13 @@ def parse_zig_link(link_arguments: list[str], archive: str) -> dict[str, object]
             index += 2
             continue
         if arg == "--sysroot":
-            sysroot = link_arguments[index + 1]
+            value = link_arguments[index + 1]
+            sysroot = None if is_dev_null_path(value) else value
             index += 2
             continue
         if arg.startswith("--sysroot="):
-            sysroot = arg.removeprefix("--sysroot=")
+            value = arg.removeprefix("--sysroot=")
+            sysroot = None if is_dev_null_path(value) else value
             index += 1
             continue
         if arg.startswith("-mmacosx-version-min="):
@@ -384,8 +390,7 @@ def main() -> int:
     ]
     print("\nBazel dependencies and configuration are ready. Running:\n")
     print("  " + shlex.join(command), flush=True)
-    subprocess.run(command, cwd=workspace, check=True)
-    return 0
+    return subprocess.run(command, cwd=workspace).returncode
 
 
 if __name__ == "__main__":
