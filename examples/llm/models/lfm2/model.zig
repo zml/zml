@@ -481,7 +481,7 @@ pub const Attention = struct {
             .k_layernorm = RmsNorm.init(store.withPrefix("k_layernorm"), config.norm_eps, .hd),
             .head_dim = head_dim,
             .num_key_value_groups = num_key_value_groups,
-            .rope_opts = .{ .layout = .sequential, .scaling = .{ .default = .{ .rope_theta = config.rope_theta } } },
+            .rope_opts = .{ .layout = .real_im_pass, .scaling = .{ .default = .{ .rope_theta = config.rope_theta } } },
         };
     }
 
