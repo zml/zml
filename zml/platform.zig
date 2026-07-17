@@ -40,15 +40,9 @@ fn validateDeviceCount(target: Target, num_devices: usize) !void {
         return error.MissingDevices;
     }
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron, .metal => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .metal, .oneapi => {
             if (!std.math.isPowerOfTwo(num_devices)) {
                 log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
-                return error.InvalidDeviceCount;
-            }
-        },
-        .oneapi => {
-            if (num_devices > 2) {
-                log.err("Platform Intel is limited to a maximum of 2 devices, got {}", .{num_devices});
                 return error.InvalidDeviceCount;
             }
         },

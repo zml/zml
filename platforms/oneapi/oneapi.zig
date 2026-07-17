@@ -13,26 +13,29 @@ pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_ONEAPI");
 }
 
-fn countOneApiDevices(io: std.Io) usize {
-    var dir = std.Io.Dir.openDirAbsolute(io, "/dev/dri", .{ .iterate = true }) catch return 0;
+fn hasOneApiDevice(io: std.Io) bool {
+    var dir = std.Io.Dir.openDirAbsolute(io, "/dev/dri", .{ .iterate = true }) catch return false;
     defer dir.close(io);
 
-    var count: usize = 0;
     var it = dir.iterate();
     while (it.next(io) catch null) |entry| {
         if (std.mem.startsWith(u8, entry.name, "renderD")) {
-            count += 1;
+            return true;
         }
     }
 
-    return count;
+    return false;
 }
 
-fn setupOneAPIEnv(driver_path: [:0]const u8, device_count: usize) void {
+fn setupOneAPIEnv(driver_path: [:0]const u8) void {
     _ = c.setenv("CCL_LOG_LEVEL", c.getenv("CCL_LOG_LEVEL") orelse "error", 1);
     _ = c.setenv("CCL_ATL_TRANSPORT", "ofi", 1);
     _ = c.setenv("FI_PROVIDER", "shm", 1);
-    _ = c.setenv("ONEAPI_DEVICE_SELECTOR", if (device_count > 1) "level_zero:0,1" else "level_zero:0", 0);
+    // collective-permute through oneccl recv/send often relies on sycl d2d memcpy underneath,
+    // that doesn't work because of peer residency likely this:
+    // https://github.com/intel/compute-runtime/issues/953
+    _ = c.setenv("XLA_ONECCL_COLLECTIVE_PERMUTE_BYPASS_SYCL_P2P", "1", 1);
+    _ = c.setenv("ONEAPI_DEVICE_SELECTOR", "level_zero:*", 0);
     _ = c.setenv("ZE_ENABLE_ALT_DRIVERS", driver_path, 0);
 }
 
@@ -45,8 +48,7 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    const device_count = countOneApiDevices(io);
-    if (device_count == 0) {
+    if (!hasOneApiDevice(io)) {
         return error.Unavailable;
     }
 
@@ -60,7 +62,7 @@ pub fn load(_: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
 
     var driver_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const driver_path = try stdx.Io.Dir.path.bufJoinZ(&driver_path_buf, &.{ sandbox_path, "lib", "libze_intel_gpu.so.1" });
-    setupOneAPIEnv(driver_path, device_count);
+    setupOneAPIEnv(driver_path);
 
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
