@@ -114,6 +114,7 @@ def action_config(graph: dict[str, object], execroot: str, label: str) -> dict[s
         "modules": parse_modules(zig_arguments),
         "linker": link_arguments[0],
         "link_args": rewritten_link_args,
+        "link_env": link.get("environmentVariables", []),
     }
 
 

@@ -8,6 +8,7 @@ const Config = struct {
     modules: []const Module,
     linker: []const u8,
     link_args: []const []const u8,
+    link_env: []const EnvironmentVariable,
 
     const Module = struct {
         name: []const u8,
@@ -18,6 +19,11 @@ const Config = struct {
     const Dependency = struct {
         name: []const u8,
         module: []const u8,
+    };
+
+    const EnvironmentVariable = struct {
+        key: []const u8,
+        value: []const u8,
     };
 };
 
@@ -44,6 +50,11 @@ pub fn build(b: *std.Build) void {
     const target = b.resolveTargetQuery(target_query);
     const optimize: std.builtin.OptimizeMode = std.meta.stringToEnum(std.builtin.OptimizeMode, config.optimize) orelse
         std.debug.panic("Bazel supplied an unsupported optimization mode '{s}'", .{config.optimize});
+    const use_lld = b.option(
+        bool,
+        "use-lld",
+        "Use LLD for Zig's static library link step",
+    ) orelse !target.result.os.tag.isDarwin();
 
     const modules = b.allocator.alloc(*std.Build.Module, config.modules.len) catch @panic("OOM");
     var module_by_name: std.StringHashMapUnmanaged(*std.Build.Module) = .empty;
@@ -68,13 +79,16 @@ pub fn build(b: *std.Build) void {
         .root_module = modules[0],
         .linkage = .static,
         .use_llvm = true,
-        .use_lld = true,
+        .use_lld = use_lld,
     });
     library.bundle_compiler_rt = true;
     modules[0].link_libc = true;
 
     const link = b.addSystemCommand(&.{absolute(config.execroot, config.linker, b)});
     link.setCwd(.{ .cwd_relative = config.execroot });
+    for (config.link_env) |env| {
+        link.setEnvironmentVariable(env.key, env.value);
+    }
     var output: ?std.Build.LazyPath = null;
     for (config.link_args) |arg| {
         if (std.mem.eql(u8, arg, "$ZIG_ARCHIVE")) {
