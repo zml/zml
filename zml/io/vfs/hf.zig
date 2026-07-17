@@ -26,6 +26,7 @@ const TraceSpan = struct {
 
 const default_xet_workers: usize = 128;
 const default_xet_queue_capacity_multiplier: usize = 4;
+const default_http_pool_free_size: usize = 128;
 
 pub const API = struct {
     const TREE_URL_TEMPLATE = "https://huggingface.co/api/models/{[repo]s}/{[model]s}/tree/{[rev]s}/{[path]s}?expand=false&recursive=true&limit=1000";
@@ -141,6 +142,7 @@ pub const HF = struct {
     const XetOptions = struct {
         workers: usize = default_xet_workers,
         queue_capacity: ?usize = null,
+        http_pool_free_size: usize = default_http_pool_free_size,
 
         fn resolvedQueueCapacity(self: XetOptions) usize {
             return self.queue_capacity orelse self.workers * default_xet_queue_capacity_multiplier;
@@ -160,6 +162,11 @@ pub const HF = struct {
     ) !HF {
         const raw = if (hf_token) |t| try allocator.dupe(u8, std.mem.trim(u8, t, " \t\n\r")) else try allocator.dupe(u8, "");
         errdefer allocator.free(raw);
+
+        if (http_client.connection_pool.free_size < xet_opts.http_pool_free_size) {
+            http_client.connection_pool.free_size = xet_opts.http_pool_free_size;
+        }
+
         const pool = try xet.FetchPool.init(allocator, inner, http_client, .{
             .workers = xet_opts.workers,
             .queue_capacity = xet_opts.resolvedQueueCapacity(),
@@ -206,6 +213,7 @@ pub const HF = struct {
         var opts: XetOptions = .{};
         opts.workers = parsePositiveEnv(usize, environ_map, "XET_INTRA_TENSOR_WORKERS") orelse opts.workers;
         opts.queue_capacity = parsePositiveEnv(usize, environ_map, "XET_QUEUE_CAPACITY") orelse opts.queue_capacity;
+        opts.http_pool_free_size = parsePositiveEnv(usize, environ_map, "XET_HTTP_POOL_FREE_SIZE") orelse opts.http_pool_free_size;
         return opts;
     }
 
@@ -789,11 +797,12 @@ pub const HF = struct {
         var requested: usize = 0;
         for (data) |buf| requested += buf.len;
 
-        var span_name_buf: [192]u8 = undefined;
+        var span_name_buf: [256]u8 = undefined;
+        const first_len: usize = if (data.len > 0) data[0].len else 0;
         const span_name = std.fmt.bufPrint(
             &span_name_buf,
-            "zml.io.hf.performRead#off={d},requested={d},backend={s},workers={d}#",
-            .{ offset, requested, if (handle.xet_file_id != null) "xet" else "lfs", self.fetch_pool.workers.len },
+            "zml.io.hf.performRead#off={d},requested={d},backend={s},workers={d},bufs={d},first={d}#",
+            .{ offset, requested, if (handle.xet_file_id != null) "xet" else "lfs", self.fetch_pool.workers.len, data.len, first_len },
         ) catch "zml.io.hf.performRead";
         var span = TraceSpan.start(span_name);
         defer span.end();
@@ -808,9 +817,32 @@ pub const HF = struct {
             const repo: Repo = try .parse(handle.uri);
             const xet_repo: xet.Repo = .{ .repo = repo.repo, .model = repo.model, .rev = repo.rev, .path = repo.path };
             const remaining = handle.size - offset;
-            const take: usize = @intCast(@min(remaining, data[0].len));
+
+            const take: usize = @intCast(@min(remaining, requested));
             if (take == 0) return 0;
             log.debug("Performing XET read for {s} at offset {d} (take {d} bytes)", .{ handle.uri, offset, take });
+
+            if (data.len == 1) {
+                try xet.fetchRange(
+                    self.base.inner,
+                    self.fetch_pool,
+                    &self.cas_cache,
+                    self.hf_token_raw,
+                    xet_repo,
+                    fid,
+                    offset,
+                    data[0][0..take],
+                );
+                return take;
+            }
+
+            // For vectored reads, fetch once into a contiguous temporary buffer,
+            // then scatter into the caller-provided slices.
+            var scatter_span = TraceSpan.start("zml.io.hf.xet.scatter_copy");
+            defer scatter_span.end();
+            const tmp = try self.allocator.alloc(u8, take);
+            defer self.allocator.free(tmp);
+
             try xet.fetchRange(
                 self.base.inner,
                 self.fetch_pool,
@@ -819,8 +851,16 @@ pub const HF = struct {
                 xet_repo,
                 fid,
                 offset,
-                data[0][0..take],
+                tmp,
             );
+
+            var copied: usize = 0;
+            for (data) |buf| {
+                if (copied >= take) break;
+                const n = @min(buf.len, take - copied);
+                @memcpy(buf[0..n], tmp[copied..][0..n]);
+                copied += n;
+            }
             return take;
         }
 

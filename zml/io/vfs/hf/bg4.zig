@@ -2,6 +2,54 @@ const std = @import("std");
 
 const fast_in_place_limit = 128 * 1024;
 
+/// Degroup bytes in place from BG4 grouped layout to output order.
+pub fn degroupBytesInPlace(bytes: []u8) void {
+    degroupInPlace(bytes);
+}
+
+/// Degroup BG4 grouped bytes from `grouped` into `out`.
+/// This mirrors xet-core's out-of-place `bg4_regroup_together` style.
+pub fn degroupBytesInto(grouped: []const u8, out: []u8) !void {
+    if (grouped.len != out.len) return error.SizeMismatch;
+
+    const n = grouped.len;
+    const split = n / 4;
+    const rem = n % 4;
+
+    const g0 = grouped;
+    const g1_start = split + @as(usize, if (rem >= 1) 1 else 0);
+    const g2_start = g1_start + split + @as(usize, if (rem >= 2) 1 else 0);
+    const g3_start = g2_start + split + @as(usize, if (rem >= 3) 1 else 0);
+    const g1 = grouped[g1_start..];
+    const g2 = grouped[g2_start..];
+    const g3 = grouped[g3_start..];
+
+    var i: usize = 0;
+    while (i < split) : (i += 1) {
+        const o = 4 * i;
+        out[o] = g0[i];
+        out[o + 1] = g1[i];
+        out[o + 2] = g2[i];
+        out[o + 3] = g3[i];
+    }
+
+    switch (rem) {
+        1 => {
+            out[4 * split] = g0[split];
+        },
+        2 => {
+            out[4 * split] = g0[split];
+            out[4 * split + 1] = g1[split];
+        },
+        3 => {
+            out[4 * split] = g0[split];
+            out[4 * split + 1] = g1[split];
+            out[4 * split + 2] = g2[split];
+        },
+        else => {},
+    }
+}
+
 pub const DegroupWriter = struct {
     interface: std.Io.Writer,
 

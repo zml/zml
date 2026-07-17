@@ -62,9 +62,9 @@ const Chunk = struct {
 };
 
 /// Decompresses `chunk` into `dst[0..chunk.uncompressed_size]`. `dst` must
-/// be at least that large. Composes via `lz4.BlockReader` / `bg4.DegroupWriter`
-/// over `std.Io.Reader` / `std.Io.Writer`.
-fn decompressChunk(chunk: Chunk, dst: []u8) ![]u8 {
+/// be at least that large. Uses direct slice decode/degroup helpers in the
+/// hot path to avoid per-chunk Reader/Writer wrapper setup.
+fn decompressChunk(chunk: Chunk, dst: []u8, grouped_scratch: []u8) ![]u8 {
     const n: usize = chunk.uncompressed_size;
     if (dst.len < n) return error.OutputTooSmall;
     const out = dst[0..n];
@@ -74,17 +74,21 @@ fn decompressChunk(chunk: Chunk, dst: []u8) ![]u8 {
             @memcpy(out, chunk.compressed_data);
         },
         1 => {
-            var src: std.Io.Reader = .fixed(chunk.compressed_data);
-            var w: std.Io.Writer = .fixed(out);
-            var rd = lz4.BlockReader.init(&src, chunk.compressed_size, n);
-            _ = rd.interface.streamRemaining(&w) catch return error.CorruptedData;
+            var lz4_only_span = TraceSpan.start("zml.io.hf.chunk_lz4_only");
+            defer lz4_only_span.end();
+            lz4.decodeBlockInto(chunk.compressed_data, out) catch return error.CorruptedData;
         },
         2 => {
-            var src: std.Io.Reader = .fixed(chunk.compressed_data);
-            var dw = bg4.DegroupWriter.init(out);
-            var rd = lz4.BlockReader.init(&src, chunk.compressed_size, n);
-            _ = rd.interface.streamRemaining(&dw.interface) catch return error.CorruptedData;
-            dw.interface.flush() catch return error.CorruptedData;
+            if (grouped_scratch.len < n) return error.OutputTooSmall;
+            const grouped = grouped_scratch[0..n];
+
+            var lz4_phase_span = TraceSpan.start("zml.io.hf.chunk_lz4_phase");
+            lz4.decodeBlockInto(chunk.compressed_data, grouped) catch return error.CorruptedData;
+            lz4_phase_span.end();
+
+            var bg4_phase_span = TraceSpan.start("zml.io.hf.chunk_bg4_phase");
+            bg4.degroupBytesInto(grouped, out) catch return error.CorruptedData;
+            bg4_phase_span.end();
         },
         else => return error.InvalidCompressionType,
     }
@@ -211,25 +215,57 @@ fn fetchReconstruction(
     range_start: u64,
     range_end_inclusive: u64,
 ) !std.json.Parsed(ReconstructionResponse) {
+    var prep_span = TraceSpan.start("zml.io.hf.xet.recon_http_prep");
     var url_buf: [4096]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "{s}/v1/reconstructions/{s}", .{ cas_url, file_id });
     var range_buf: [64]u8 = undefined;
     const range = try std.fmt.bufPrint(&range_buf, "bytes={}-{}", .{ range_start, range_end_inclusive });
     const uri: std.Uri = try .parse(url);
+    prep_span.end();
+
+    var host_name_buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const host_name = try uri.getHost(&host_name_buffer);
+    const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.UnsupportedUriScheme;
+    const port: u16 = uri.port orelse switch (protocol) {
+        .plain => 80,
+        .tls => 443,
+    };
+
+    var connect_span = TraceSpan.start("zml.io.hf.xet.recon_http_connect");
+    const connection = try client.connect(host_name, port, protocol);
+    connect_span.end();
+
+    var setup_span = TraceSpan.start("zml.io.hf.xet.recon_http_setup");
     var req = try client.request(.GET, uri, .{
+        .connection = connection,
         .headers = .{
             .accept_encoding = .{ .override = "identity" },
             .authorization = .{ .override = cas_auth },
         },
         .extra_headers = &.{.{ .name = "Range", .value = range }},
     });
+    setup_span.end();
     defer req.deinit();
+
+    var send_span = TraceSpan.start("zml.io.hf.xet.recon_http_send");
     try req.sendBodiless();
+    send_span.end();
+
     var redirect_buffer: [8 * 1024]u8 = undefined;
+
+    var head_span = TraceSpan.start("zml.io.hf.xet.recon_http_receive_head");
     var res = try req.receiveHead(&redirect_buffer);
+    head_span.end();
+
     if (res.head.status != .ok and res.head.status != .partial_content) return error.ReconstructionFailed;
+
+    var body_span = TraceSpan.start("zml.io.hf.xet.recon_http_read_body");
     const body = try res.reader(&.{}).readAlloc(allocator, res.head.content_length orelse 64 * 1024 * 1024);
+    body_span.end();
     defer allocator.free(body);
+
+    var parse_span = TraceSpan.start("zml.io.hf.xet.recon_parse_json");
+    defer parse_span.end();
     return try std.json.parseFromSlice(ReconstructionResponse, allocator, body, .{
         .ignore_unknown_fields = true,
         .allocate = .alloc_always,
@@ -440,11 +476,13 @@ pub const FetchPool = struct {
         queue_capacity: usize,
         body_size: usize = max_xorb_body_size,
         scratch_size: usize = 256 * 1024, // 2x the largest chunk size in practice (128 KiB) - Encountered a few chunks >128 KiB in the wild, so this is a safe upper bound.
+        grouped_scratch_size: usize = 256 * 1024,
     };
 
     const Worker = struct {
         body: []u8,
         scratch: []u8,
+        grouped_scratch: []u8,
     };
 
     pub fn init(
@@ -460,13 +498,16 @@ pub const FetchPool = struct {
         errdefer for (workers[0..made]) |*w| {
             allocator.free(w.body);
             allocator.free(w.scratch);
+            allocator.free(w.grouped_scratch);
         };
         for (workers) |*w| {
             const body = try allocator.alloc(u8, opts.body_size);
             errdefer allocator.free(body);
             const scratch = try allocator.alloc(u8, opts.scratch_size);
             errdefer allocator.free(scratch);
-            w.* = .{ .body = body, .scratch = scratch };
+            const grouped_scratch = try allocator.alloc(u8, opts.grouped_scratch_size);
+            errdefer allocator.free(grouped_scratch);
+            w.* = .{ .body = body, .scratch = scratch, .grouped_scratch = grouped_scratch };
             made += 1;
         }
 
@@ -494,6 +535,7 @@ pub const FetchPool = struct {
         for (self.workers) |*w| {
             self.allocator.free(w.body);
             self.allocator.free(w.scratch);
+            self.allocator.free(w.grouped_scratch);
         }
         self.allocator.free(self.workers);
         self.allocator.free(self.queue_buf);
@@ -549,7 +591,7 @@ fn processJob(pool: *FetchPool, io: std.Io, w: *FetchPool.Worker, job: *Job) ?an
     const task = job.task;
     if (task.byte_len > w.body.len) return error.XorbTooLarge;
     const body = w.body[0..task.byte_len];
-    runTask(io, pool.client, task, job.batch.dst, body, w.scratch) catch |e| return e;
+    runTask(io, pool.client, task, job.batch.dst, body, w.scratch, w.grouped_scratch) catch |e| return e;
     return null;
 }
 
@@ -560,6 +602,7 @@ fn runTask(
     dst: []u8,
     body: []u8,
     scratch: []u8,
+    grouped_scratch: []u8,
 ) !void {
     var span_name_buf: [192]u8 = undefined;
     const span_name = std.fmt.bufPrint(
@@ -602,7 +645,9 @@ fn runTask(
             const remaining = tp.wanted_len - tp.bytes_written;
             if (!needs_skip and chunk.uncompressed_size <= remaining) {
                 const slot = dst[tp.dst_off + tp.bytes_written ..][0..chunk.uncompressed_size];
-                _ = try decompressChunk(chunk, slot);
+                var decompress_fast_span = TraceSpan.start("zml.io.hf.chunk_decompress_fast_CANARY");
+                defer decompress_fast_span.end();
+                _ = try decompressChunk(chunk, slot, grouped_scratch);
                 tp.bytes_written += chunk.uncompressed_size;
                 continue;
             }
@@ -610,7 +655,9 @@ fn runTask(
 
         // Fallback: decode once into scratch, then fan out @memcpy to each overlapping plan
         // (handles boundary byte_skip, partial-tail truncation, and multi-plan chunks).
-        const decoded = try decompressChunk(chunk, scratch);
+        var decompress_fallback_span = TraceSpan.start("zml.io.hf.chunk_decompress_fallback");
+        const decoded = try decompressChunk(chunk, scratch, grouped_scratch);
+        decompress_fallback_span.end();
         for (task.term_plans.items) |*tp| {
             if (chunk_idx < tp.chunk_start or chunk_idx >= tp.chunk_end) continue;
             if (tp.bytes_written >= tp.wanted_len) continue;

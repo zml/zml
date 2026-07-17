@@ -1,5 +1,10 @@
 const std = @import("std");
 
+/// Decode an LZ4 block or frame payload directly into `out`.
+pub fn decodeBlockInto(compressed: []const u8, out: []u8) !void {
+    try BlockReader.readPayloadInto(compressed, out);
+}
+
 pub const BlockReader = struct {
     const frame_magic: u32 = 0x184d2204;
     const frame_magic_bytes = [_]u8{ 0x04, 0x22, 0x4d, 0x18 };
@@ -190,6 +195,25 @@ pub const BlockReader = struct {
     fn copyMatch(out: []u8, write_pos: usize, match_offset: usize, match_len: usize) void {
         if (match_offset == 1) {
             @memset(out[write_pos..][0..match_len], out[write_pos - 1]);
+            return;
+        }
+
+        // Overlap-focused path: for offsets >= 8, we can stream fixed-size copies.
+        // Every 8-byte chunk read is fully behind the write cursor, so @memcpy is valid.
+        if (match_offset >= 8) {
+            var copied8: usize = 0;
+            while (copied8 + 8 <= match_len) : (copied8 += 8) {
+                @memcpy(
+                    out[write_pos + copied8 ..][0..8],
+                    out[write_pos + copied8 - match_offset ..][0..8],
+                );
+            }
+            if (copied8 < match_len) {
+                @memcpy(
+                    out[write_pos + copied8 ..][0 .. match_len - copied8],
+                    out[write_pos + copied8 - match_offset ..][0 .. match_len - copied8],
+                );
+            }
             return;
         }
 
