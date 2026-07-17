@@ -19,13 +19,13 @@ const Sampler = sampling.Sampler;
 const Logit = sampling.Logit;
 
 pub const hidden_dim: comptime_int = 4096;
-pub const bucket_dim: comptime_int = 8;
+pub const bucket_dim: comptime_int = 16;
 pub const nb_buckets: comptime_int = hidden_dim / bucket_dim;
 pub const nb_centers: comptime_int = 16;
 pub const simd_len: comptime_int = 8;
 pub const pq_top_k: comptime_int = 16;
 pub const pq_z_score: comptime_int = 5;
-pub const pq_orth_weight: comptime_float = 0.5;
+pub const pq_orth_weight: comptime_float = 0.25;
 pub const pq_lut_zero_point: comptime_int = 128;
 pub const pq_lut_qmax: comptime_int = 127;
 
@@ -126,7 +126,10 @@ pub const ProductQuantizer = struct {
     row_buckets: []u8,
     query_center_scores: [nb_buckets * nb_centers]f32,
 
-    // error bounds
+    // Per-row norm term and global directional factor used by the statistical
+    // logit-error bound. For anisotropic PQ the row term is the exact
+    // sqrt(||e_parallel||^2 + w ||e_orthogonal||^2).
+    row_error_norms: []f32,
     quantization_error_factor: f32,
 
     // sampling utils
@@ -136,7 +139,12 @@ pub const ProductQuantizer = struct {
         const alloc = zml_handler.allocator;
         std.debug.assert(lm_head.d == hidden_dim);
         const rotated_lm_head = try alloc.alloc(f32, lm_head.n * hidden_dim);
+        errdefer alloc.free(rotated_lm_head);
         const row_buckets = try alloc.alloc(u8, lm_head.n * nb_buckets);
+        errdefer alloc.free(row_buckets);
+        const row_error_norms = try alloc.alloc(f32, lm_head.n);
+        errdefer alloc.free(row_error_norms);
+        @memset(row_error_norms, 0.0);
         const logits = try alloc.alloc(Logit, lm_head.n);
         for (0..lm_head.n) |i| {
             logits[i].row = i;
@@ -153,6 +161,7 @@ pub const ProductQuantizer = struct {
             .codebook = [_]f32{0.0} ** (bucket_dim * nb_centers),
             .row_buckets = row_buckets,
             .query_center_scores = [_]f32{0.0} ** (nb_buckets * nb_centers),
+            .row_error_norms = row_error_norms,
             .quantization_error_factor = 0.0,
             .logits = logits,
         };
@@ -161,6 +170,7 @@ pub const ProductQuantizer = struct {
     pub fn deinit(self: *ProductQuantizer) void {
         self.allocator.free(self.rotated_lm_head);
         self.allocator.free(self.row_buckets);
+        self.allocator.free(self.row_error_norms);
         self.allocator.free(self.logits);
     }
 
@@ -194,7 +204,9 @@ pub const ProductQuantizer = struct {
         // B is the bucket_dim (very high impact)
         // we define the pq_logit upper bound with:
         // upper_bound(pq_logit) = pq_logit + Z * sqrt(var(pq_logit)),
-        // which has 99,98% likelyhood to hold for Z = 5.
+        // This is a normal/directional-concentration approximation rather than
+        // a deterministic bound. Under an exact normal model, one-sided Z = 5
+        // coverage is approximately 99.99997%.
         switch (self.mode) {
             .vanilla => {
                 const K: f32 = @floatFromInt(nb_centers);
@@ -202,27 +214,42 @@ pub const ProductQuantizer = struct {
                 const D: f32 = @floatFromInt(hidden_dim);
                 const kmeans_err = std.math.pow(f32, K, -1.0 / B);
                 self.quantization_error_factor = pq_z_score * kmeans_err / @sqrt(D);
+                for (0..self.n) |row| {
+                    self.row_error_norms[row] = self.lm_head.row_norms[row];
+                }
                 std.log.info("K-means relative theoretical error = {d}", .{kmeans_err});
                 std.log.info("PQ statistical Cauchy-Schwarz factor = {d}", .{self.quantization_error_factor});
             },
             .anisotropic => {
-                var max_relative_error: f32 = 0.0;
+                const D: f32 = @floatFromInt(hidden_dim);
+                const BucketVec = @Vector(bucket_dim, f32);
+                self.quantization_error_factor = pq_z_score / @sqrt(D);
                 for (0..self.n) |row| {
                     if (self.lm_head.is_junk[row]) continue;
-                    var error_norm2: f32 = 0.0;
+                    var residual_norm2: f32 = 0.0;
+                    var residual_dot_row: f32 = 0.0;
+                    var row_norm2: f32 = 0.0;
                     const row_codes = self.row_buckets[row * nb_buckets ..][0..nb_buckets];
                     for (0..nb_buckets) |bucket| {
                         const data = self.rotated_lm_head[row * hidden_dim + bucket * bucket_dim ..][0..bucket_dim];
                         const center = self.codebook[@as(usize, row_codes[bucket]) * bucket_dim ..][0..bucket_dim];
-                        for (0..bucket_dim) |coord| {
-                            const err = data[coord] - center[coord];
-                            error_norm2 += err * err;
-                        }
+                        const data_vec: BucketVec = data.*;
+                        const center_vec: BucketVec = center.*;
+                        const residual = data_vec - center_vec;
+                        residual_norm2 += @reduce(.Add, residual * residual);
+                        residual_dot_row += @reduce(.Add, residual * data_vec);
+                        row_norm2 += @reduce(.Add, data_vec * data_vec);
                     }
-                    max_relative_error = @max(max_relative_error, @sqrt(error_norm2) / self.lm_head.row_norms[row]);
+                    // The optimizer's w * ||e||^2 + (1-w) * ||e_parallel||^2
+                    // is exactly ||e_parallel||^2 + w * ||e_orthogonal||^2.
+                    const parallel_norm2 = @min(
+                        residual_norm2,
+                        residual_dot_row * residual_dot_row / @max(row_norm2, 1e-20),
+                    );
+                    const orthogonal_norm2 = @max(0.0, residual_norm2 - parallel_norm2);
+                    self.row_error_norms[row] = @sqrt(parallel_norm2 + pq_orth_weight * orthogonal_norm2);
                 }
-                self.quantization_error_factor = max_relative_error;
-                std.log.info("Anisotropic PQ maximum relative reconstruction error = {d}", .{max_relative_error});
+                std.log.info("Anisotropic PQ statistical Z-score factor = {d}", .{self.quantization_error_factor});
             },
         }
     }
@@ -263,7 +290,7 @@ pub const ProductQuantizer = struct {
                 logit += bucket_lut[row_codes[bucket]];
             }
             self.logits[row].logit = logit;
-            self.logits[row].upper_bound = logit + error_bound_scale * self.lm_head.row_norms[row];
+            self.logits[row].upper_bound = logit + error_bound_scale * self.row_error_norms[row];
         }
         self.zml_handler.toc(&self.zml_handler.timers.pq_score);
 

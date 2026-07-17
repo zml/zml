@@ -11,7 +11,7 @@ zig_binary(
         "model.zig",
         "productq.zig",
         "quantized.zig",
-        "svd.zig",
+        "truncated.zig",
         "tokens.zig",
         "algebra.zig",
         "saveload.zig",

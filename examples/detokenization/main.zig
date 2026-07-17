@@ -7,18 +7,19 @@ const log = std.log;
 const graph = @import("graph.zig");
 const model_ = @import("model.zig");
 const llm_ = @import("llm.zig");
-const svd_ = @import("svd.zig");
 const inference = @import("inference.zig");
 const algebra = @import("algebra.zig");
 const save_load = @import("saveload.zig");
 const tokens = @import("tokens.zig");
 const sampling = @import("sampling.zig");
+const truncated = @import("truncated.zig");
 const quantized = @import("quantized.zig");
 const productq = @import("productq.zig");
 
 const LmHeadMatrix = algebra.LmHeadMatrix;
 const Graph = graph.Graph;
 const Sampler = sampling.Sampler;
+const TruncateSampler = truncated.TruncateSampler;
 const Quantized = quantized.Quantized;
 const ProductQuantizer = productq.ProductQuantizer;
 const ProductQuantizerFastScan = productq.ProductQuantizerFastScan;
@@ -277,13 +278,46 @@ pub fn main(init: std.process.Init) !void {
 
     //try runLlm(&zml_handler);
     //try runTestsGraph(&zml_handler);
-    try runTestsQuantizedPQ(&zml_handler);
-    //try runTestsSvd(&zml_handler);
+    //try runTestsQuantizedPQ(&zml_handler);
+    
     //try runTestsQuantizedGraph(&zml_handler);
     //try runTestsQuantized(&zml_handler);
 
+    //try runTestsSample(&zml_handler);
+    try runTestsTruncated(&zml_handler);
+    
     zml_handler.timers.print();
 }
+
+
+pub fn runTestsSample(zml_handler: *Zml_handler) !void {
+    std.log.info("***** Get lm_head", .{});
+    var lm_head = try algebra.getLmHead(zml_handler);
+    defer LmHeadMatrix.deinit(&lm_head, zml_handler.allocator);
+
+    std.log.info("***** Init sampler", .{});
+    var sampler: Sampler = try .init(zml_handler, &lm_head);
+    defer Sampler.deinit(&sampler);
+    
+    try testEmbedSearch(zml_handler, &sampler);
+}
+
+pub fn runTestsTruncated(zml_handler: *Zml_handler) !void {
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+    var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
+    defer tokenizer.deinit();
+
+    std.log.info("***** Get lm_head", .{});
+    var lm_head = try algebra.getLmHead(zml_handler);
+    defer LmHeadMatrix.deinit(&lm_head, zml_handler.allocator);
+
+    std.log.info("***** Init truncated sampler", .{});
+    var truncated_sampler: TruncateSampler = try .init(zml_handler, &lm_head);
+    defer truncated_sampler.deinit();
+
+    try testEmbedTruncateSearch(zml_handler, &truncated_sampler);
+}
+
 
 pub fn runLlm(zml_handler: *Zml_handler) !void {
     var llm = try llm_.Llm_handler.init(zml_handler);
@@ -342,22 +376,6 @@ pub fn runTestsQuantizedPQ(zml_handler: *Zml_handler) !void {
     try testEmbedQuantizedPQSearch(zml_handler, &quantizer);
 }
 
-pub fn runTestsSvd(zml_handler: *Zml_handler) !void {
-    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
-    var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
-    defer tokenizer.deinit();
-
-    std.log.info("Get lm_head", .{});
-    var lm_head = try algebra.getLmHead(zml_handler);
-    defer LmHeadMatrix.deinit(&lm_head, zml_handler.allocator);
-
-    std.log.info("Init SVD sampler", .{});
-    var svd_sampler: svd_.SvdSampler = try .init(zml_handler, &lm_head, tokenizer, false);
-    defer svd_sampler.deinit();
-
-    try testEmbedSvdSearch(zml_handler, &svd_sampler);
-}
-
 pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     std.log.info("Get lm_head", .{});
     var lm_head = try algebra.getLmHead(zml_handler);
@@ -405,6 +423,7 @@ pub fn runTestsGraph(zml_handler: *Zml_handler) !void {
     g_knn_angu.params.search_budget = 2048;
     try testEmbedDualGraphSearch(zml_handler, &g_knn_mips, &g_knn_angu, &sampler, "KNN-mips -> KNN-angular");
 }
+
 
 pub fn buildAngularGraphs(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, sampler: *Sampler) !struct { Graph, Graph } {
     zml_handler.tic(&zml_handler.timers.similarity_matrix);
@@ -817,90 +836,6 @@ pub fn testEmbedDualGraphSearch(zml_handler: *Zml_handler, g1: *Graph, g2: *Grap
     std.log.info("Embed graph search nb_visited: min={d} max={d} avg={d:.2}", .{ min_visited, max_visited, average_visit });
 }
 
-pub fn testEmbedSvdSearch(zml_handler: *Zml_handler, svd: *svd_.SvdSampler) !void {
-    std.log.info("Test SVD sampling", .{});
-
-    var total_count: usize = 0;
-    var found_top1_count: usize = 0;
-    var missing_top16_count: usize = 0;
-    var total_phase2_scored: usize = 0;
-    var total_dense_scored: usize = 0;
-    var min_phase2_scored: usize = std.math.maxInt(usize);
-    var min_dense_scored: usize = std.math.maxInt(usize);
-    var max_phase2_scored: usize = 0;
-    var max_dense_scored: usize = 0;
-
-    const tasks_id = [5]u8{ 0, 1, 2, 3, 4 };
-
-    for (tasks_id) |task_id| {
-        const task = switch (task_id) {
-            0 => "coding",
-            1 => "history",
-            2 => "math",
-            3 => "story",
-            4 => "translate",
-            else => return error.InvalidTask,
-        };
-        const top1 = switch (task_id) {
-            0 => codingTop1(),
-            1 => historyTop1(),
-            2 => mathTop1(),
-            3 => storyTop1(),
-            4 => translateTop1(),
-            else => return error.InvalidTask,
-        };
-
-        const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds.safetensors", task, .f32, true);
-        defer embed_slice.free(zml_handler.allocator);
-
-        const n: usize = @intCast(embed_slice.shape.dims()[0]);
-        const d: usize = @intCast(embed_slice.shape.dims()[1]);
-        std.debug.assert(d == svd.d);
-
-        std.log.info("Test SVD sample task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
-        for (0..n) |embed_index| {
-            const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
-
-            zml_handler.timers.nb_detokenize += 1;
-            zml_handler.tic(&zml_handler.timers.svd_sample);
-            const sample = try svd.sampleFastMultiPhase(embed);
-            zml_handler.toc(&zml_handler.timers.svd_sample);
-
-            total_count += 1;
-            total_phase2_scored += sample.nb_phase2_scored;
-            total_dense_scored += sample.nb_dense_scored;
-            min_phase2_scored = @min(min_phase2_scored, sample.nb_phase2_scored);
-            min_dense_scored = @min(min_dense_scored, sample.nb_dense_scored);
-            max_phase2_scored = @max(max_phase2_scored, sample.nb_phase2_scored);
-            max_dense_scored = @max(max_dense_scored, sample.nb_dense_scored);
-
-            const top1_token = top1[embed_index];
-            var found_top1 = false;
-            for (sample.rows) |tok| {
-                if (tok == top1_token) {
-                    found_top1 = true;
-                    break;
-                }
-            }
-            if (found_top1) {
-                found_top1_count += 1;
-            } else {
-                missing_top16_count += 1;
-                //std.log.info("Missed top1, id {d} str {s}", .{ top1[embed_index], try tokens.tokenString(sampler.tokenizer, top1[embed_index], sampler.allocator) });
-                //std.log.info("Found instead {d} str {s}", .{ g.visited[0].node, try tokens.tokenString(sampler.tokenizer, g.visited[0].node, sampler.allocator) });
-            }
-        }
-    }
-    const inv_total = 1.0 / @as(f64, @floatFromInt(total_count));
-    const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) * inv_total;
-    const avg_phase2_scored = @as(f64, @floatFromInt(total_phase2_scored)) * inv_total;
-    const avg_dense_scored = @as(f64, @floatFromInt(total_dense_scored)) * inv_total;
-    std.log.info("Embed SVD sample: total={d}", .{total_count});
-    std.log.info("SVD found_top1_in_top16={d} ({d:.4}%) missing_top16={d}", .{ found_top1_count, percent_found, missing_top16_count });
-    std.log.info("SVD phase2 sparse scored rows: min={d} max={d} avg={d:.2}", .{ min_phase2_scored, max_phase2_scored, avg_phase2_scored });
-    std.log.info("SVD dense exact scored rows: min={d} max={d} avg={d:.2}", .{ min_dense_scored, max_dense_scored, avg_dense_scored });
-}
-
 pub fn testEmbedQuantizedSearch(zml_handler: *Zml_handler, quantizer: *Quantized) !void {
     std.log.info("Test embed Quantized search", .{});
 
@@ -1253,7 +1188,7 @@ pub fn testEmbedQuantizedPQSearch(zml_handler: *Zml_handler, quantizer: *Product
 
             zml_handler.timers.nb_detokenize += 1;
             zml_handler.tic(&zml_handler.timers.quant_search);
-            if (embed_index < 5) quantizer.sampleLog(&sampler, embed);
+            //if (embed_index < 5) quantizer.sampleLog(&sampler, embed);
             const pq_sample = quantizer.sample(embed);
             zml_handler.toc(&zml_handler.timers.quant_search);
 
@@ -1385,6 +1320,115 @@ pub fn testEmbedGraphQuantizedSearch(zml_handler: *Zml_handler, g: *Graph, quant
     }
     std.log.info("Embed graph search nb_visited: min={d} max={d} avg={d:.2}", .{ min_visited, max_visited, average_visit });
 }
+
+
+pub fn testEmbedSearch(zml_handler: *Zml_handler, sampler: *Sampler) !void {
+    std.log.info("Test embed dense search", .{});
+
+    var total_count: usize = 0;
+    var max: usize = 0;
+    var total: usize = 0;
+
+    const tasks_id = [5]u8{ 0, 1, 2, 3, 4 };
+    for (tasks_id) |task_id| {
+        const task = switch (task_id) {
+            0 => "coding",
+            1 => "history",
+            2 => "math",
+            3 => "story",
+            4 => "translate",
+            else => return error.InvalidTask,
+        };
+
+        const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds.safetensors", task, .f32, true);
+        defer embed_slice.free(zml_handler.allocator);
+
+        const n: usize = @intCast(embed_slice.shape.dims()[0]);
+        const d: usize = @intCast(embed_slice.shape.dims()[1]);
+
+        std.log.info("Test dense sampling task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
+        for (0..n) |embed_index| {
+            const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
+
+            zml_handler.timers.nb_detokenize += 1;
+            zml_handler.tic(&zml_handler.timers.quant_search);
+            const nb = sampler.sample(embed).nb;
+            zml_handler.toc(&zml_handler.timers.quant_search);
+            //if (nb > 150) try sampler.logSampling();
+
+            total_count += 1;
+            max = @max(max, nb);
+            total += nb;
+        }
+    }
+
+    const inv_total = 1.0 / @as(f64, @floatFromInt(total_count));
+    const avg = @as(f64, @floatFromInt(total)) * inv_total;
+    
+    std.log.info("Embed dense search: total={d}", .{total_count});
+    std.log.info("Embed dense search: top p average = {d}", .{avg});
+    std.log.info("Embed dense search: top p max = {d}", .{max});
+}
+
+pub fn testEmbedTruncateSearch(zml_handler: *Zml_handler, sampler: *TruncateSampler) !void {
+    std.log.info("Test truncated sampling", .{});
+
+    var total_count: usize = 0;
+    var found_top1_count: usize = 0;
+
+    const tasks_id = [5]u8{ 0, 1, 2, 3, 4 };
+
+    for (tasks_id) |task_id| {
+        const task = switch (task_id) {
+            0 => "coding",
+            1 => "history",
+            2 => "math",
+            3 => "story",
+            4 => "translate",
+            else => return error.InvalidTask,
+        };
+        const top1 = switch (task_id) {
+            0 => codingTop1(),
+            1 => historyTop1(),
+            2 => mathTop1(),
+            3 => storyTop1(),
+            4 => translateTop1(),
+            else => return error.InvalidTask,
+        };
+
+        const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds.safetensors", task, .f32, true);
+        defer embed_slice.free(zml_handler.allocator);
+
+        const n: usize = @intCast(embed_slice.shape.dims()[0]);
+        const d: usize = @intCast(embed_slice.shape.dims()[1]);
+
+        std.log.info("Test truncated sample task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
+        for (0..n) |embed_index| {
+            const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
+
+            zml_handler.timers.nb_detokenize += 1;
+            zml_handler.tic(&zml_handler.timers.svd_sample);
+            const result = sampler.sample(embed);
+            zml_handler.toc(&zml_handler.timers.svd_sample);
+
+            total_count += 1;
+
+            const top1_token = top1[embed_index];
+            for (result.candidates) |cand| {
+                if (cand.row == top1_token) {
+                    found_top1_count += 1;
+                    break;
+                }
+            }
+        }
+    }
+    const inv_total = 1.0 / @as(f64, @floatFromInt(total_count));
+    const percent_found = 100.0 * @as(f64, @floatFromInt(found_top1_count)) * inv_total;
+    std.log.info("Embed truncated sample: total={d}", .{total_count});
+    std.log.info("found_top1 = {d} ({d:.4}%)", .{ found_top1_count, percent_found });
+}
+
+
 
 fn rotateEmbedding(u: zml.Slice, embed: []const f32, rot_embed: []f32) void {
     const d = embed.len;

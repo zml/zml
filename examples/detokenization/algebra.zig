@@ -5,7 +5,6 @@ const main = @import("main.zig");
 const graph = @import("graph.zig");
 const model_ = @import("model.zig");
 const llm_ = @import("llm.zig");
-const svd_ = @import("svd.zig");
 const inference = @import("inference.zig");
 const save_load = @import("saveload.zig");
 const tokens = @import("tokens.zig");
