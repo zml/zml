@@ -85,7 +85,7 @@ pub fn build(b: *std.Build) void {
         bool,
         "use-lld",
         "Use LLD for Zig's static library link step",
-    ) orelse !target.result.os.tag.isDarwin();
+    );
 
     const modules = b.allocator.alloc(*std.Build.Module, config.modules.len) catch @panic("OOM");
     var module_by_name: std.StringHashMapUnmanaged(*std.Build.Module) = .empty;
@@ -106,12 +106,12 @@ pub fn build(b: *std.Build) void {
     }
 
     const binary = if (use_zig_linker)
-        zigLinkedBinary(b, config, modules[0], use_lld)
+        zigLinkedBinary(b, config, modules[0])
     else
-        bazelLinkedBinary(b, config, modules[0], use_lld);
+        bazelLinkedBinary(b, config, modules[0], use_lld orelse !target.result.os.tag.isDarwin());
     b.getInstallStep().dependOn(&b.addInstallBinFile(binary, config.name).step);
 
-    const run = std.Build.Step.Run.create(b, b.fmt("run {s}", .{config.name}));
+    const run = std.Build.Step.Run.create(b, "run bazel target");
     run.stdio = .inherit;
     run.setCwd(.{ .cwd_relative = config.run_cwd });
     for (config.run_env) |env| {
@@ -124,6 +124,7 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run.addArgs(args);
     }
+    run.step.dependOn(binary.generated.file.step);
 
     const run_step = b.step("run", "Run the executable built from the Bazel target");
     run_step.dependOn(&run.step);
@@ -168,7 +169,6 @@ fn zigLinkedBinary(
     b: *std.Build,
     config: Config,
     root_module: *std.Build.Module,
-    use_lld: bool,
 ) std.Build.LazyPath {
     if (config.zig_link.sysroot) |sysroot| {
         b.sysroot = absolute(config.execroot, sysroot, b);
@@ -208,9 +208,17 @@ fn zigLinkedBinary(
     const exe = b.addExecutable(.{
         .name = config.name,
         .root_module = root_module,
+        // Ideally I want use_llvm = use_lld = false to test the incremental self-hosted backend for very fast rebuilds.
+        // But it's not working atm:
+        // panic: storeRegs: mnist_c.upb_MessageValue
+        // TODO: try to ditch upb
         .use_llvm = true,
-        .use_lld = use_lld,
+        // When trying to use Zig linker incremental it complains about missing symbols:
+        // error: undefined symbol: _ZN4mlir6detail14TypeIDResolverINS_4LLVM6LShrOpEvE2idE
+        .use_lld = true,
+        // .use_new_linker = true,
     });
+    exe.pie = true;
     exe.bundle_compiler_rt = true;
     exe.headerpad_max_install_names = config.zig_link.headerpad_max_install_names;
     if (config.zig_link.dead_strip) {
