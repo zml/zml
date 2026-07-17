@@ -319,13 +319,40 @@ const Triton = struct {
             stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(q.dim(.hd)))), "expected value rank ({}) to be a power of two", .{q.dim(.hd)});
             stdx.debug.assert(kv.dim(.hd) == q.dim(.hd), "expected q and kv cache head dims to match, got q={} kv={}", .{ q.dim(.hd), kv.dim(.hd) });
 
-            return sparseAttentionShard(
-                q,
-                kv,
-                topk,
-                tokens_pos,
-                parameters,
-                opts,
+            return zml.ops.manualComputation(
+                .{
+                    q,
+                    kv,
+                    topk,
+                    tokens_pos,
+                    parameters.block_table,
+                    parameters.seq_lens,
+                    parameters.query_start_len,
+                },
+                q.shape(),
+                .{
+                    .opts = opts,
+                    .options = parameters.options_,
+                },
+                (struct {
+                    fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
+                        const parameters_: triton_attn.paged.Parameters = .{
+                            .block_table = sharded_inputs[4],
+                            .seq_lens = sharded_inputs[5],
+                            .query_start_len = sharded_inputs[6],
+                            .options_ = ctx_.options,
+                        };
+
+                        return sparseAttentionShard(
+                            sharded_inputs[0],
+                            sharded_inputs[1],
+                            sharded_inputs[2],
+                            sharded_inputs[3],
+                            parameters_,
+                            ctx_.opts,
+                        );
+                    }
+                }).body,
             );
         }
     };
