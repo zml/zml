@@ -227,6 +227,11 @@ pub const DynamicBufferPool = struct {
     const Node = struct { next: ?*Node };
     const alignment: std.mem.Alignment = .of(Node);
 
+    pub const Acquisition = struct {
+        buffer: []u8,
+        wait_ns: u64,
+    };
+
     block_size: usize,
     max_blocks: usize,
     limit: std.atomic.Value(usize),
@@ -239,6 +244,7 @@ pub const DynamicBufferPool = struct {
 
     pub fn init(max_blocks: usize, block_size: usize) DynamicBufferPool {
         std.debug.assert(max_blocks > 0);
+        std.debug.assert(block_size >= @sizeOf(Node));
         return .{
             .block_size = block_size,
             .max_blocks = max_blocks,
@@ -282,7 +288,7 @@ pub const DynamicBufferPool = struct {
     }
 
     pub fn trim(self: *DynamicBufferPool, allocator: std.mem.Allocator, io: std.Io, target: usize) void {
-        std.debug.assert(target > 0 and target <= self.max_blocks);
+        std.debug.assert(target <= self.max_blocks);
 
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
@@ -295,6 +301,13 @@ pub const DynamicBufferPool = struct {
     }
 
     pub fn get(self: *DynamicBufferPool, allocator: std.mem.Allocator, io: std.Io) ![]u8 {
+        return (try self.getWithWait(allocator, io)).buffer;
+    }
+
+    /// Returns the time spent blocked by the pool limit. Allocation and mutex
+    /// contention are deliberately excluded from the admission-wait signal.
+    pub fn getWithWait(self: *DynamicBufferPool, allocator: std.mem.Allocator, io: std.Io) !Acquisition {
+        var wait_ns: u64 = 0;
         while (true) {
             var in_flight = self.in_flight.load(.acquire);
             while (in_flight < self.limit.load(.acquire)) {
@@ -303,32 +316,36 @@ pub const DynamicBufferPool = struct {
                     continue;
                 }
 
-                if (self.pop()) |node| {
-                    return self.nodeToSlice(node);
-                }
-
                 self.mutex.lockUncancelable(io);
                 defer self.mutex.unlock(io);
 
                 if (self.pop()) |node| {
-                    return self.nodeToSlice(node);
+                    return .{ .buffer = self.nodeToSlice(node), .wait_ns = wait_ns };
                 }
 
-                errdefer _ = self.in_flight.fetchSub(1, .release);
+                errdefer {
+                    _ = self.in_flight.fetchSub(1, .release);
+                    self.condition.signal(io);
+                }
                 const buffer = try allocator.alignedAlloc(u8, alignment, self.block_size);
                 _ = self.allocated.fetchAdd(1, .release);
-                return @alignCast(buffer);
+                return .{ .buffer = @alignCast(buffer), .wait_ns = wait_ns };
             }
 
             self.mutex.lockUncancelable(io);
             defer self.mutex.unlock(io);
             while (self.in_flight.load(.acquire) >= self.limit.load(.acquire)) {
+                const wait_started: std.Io.Timestamp = .now(io, .awake);
                 try self.condition.wait(io, &self.mutex);
+                wait_ns +|= @intCast(@max(wait_started.untilNow(io, .awake).nanoseconds, 0));
             }
         }
     }
 
     pub fn put(self: *DynamicBufferPool, io: std.Io, buf: []u8) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
         const node: *Node = @ptrCast(@alignCast(buf.ptr));
         var head = self.free_stack.load(.acquire);
         while (true) {
@@ -340,8 +357,6 @@ pub const DynamicBufferPool = struct {
             }
         }
 
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
         _ = self.in_flight.fetchSub(1, .release);
         self.condition.signal(io);
     }
@@ -384,6 +399,128 @@ test "DynamicBufferPool trims unused blocks" {
 
     try std.testing.expectEqual(1, pool.currentLimit());
     try std.testing.expectEqual(1, pool.allocatedBlocks());
+
+    pool.trim(allocator, io, 0);
+    try std.testing.expectEqual(0, pool.allocatedBlocks());
+}
+
+test "DynamicBufferPool applies runtime limits without oversubscription" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var pool: DynamicBufferPool = .init(2, 64);
+    defer pool.deinit(allocator);
+
+    var group: std.Io.Group = .init;
+    var group_awaited = false;
+    var acquired: [3]std.Io.Event = @splat(.unset);
+    var release: [3]std.Io.Event = @splat(.unset);
+    defer {
+        for (&release) |*event| event.set(io);
+        if (!group_awaited) group.await(io) catch {};
+    }
+
+    const Worker = struct {
+        fn run(
+            pool_: *DynamicBufferPool,
+            allocator_: std.mem.Allocator,
+            acquired_: *std.Io.Event,
+            release_: *std.Io.Event,
+            io_: std.Io,
+        ) std.Io.Cancelable!void {
+            const buffer = pool_.get(allocator_, io_) catch unreachable;
+            defer pool_.put(io_, buffer);
+            acquired_.set(io_);
+            try release_.wait(io_);
+        }
+    };
+
+    pool.setLimit(io, 1);
+    try group.concurrent(io, Worker.run, .{ &pool, allocator, &acquired[0], &release[0], io });
+    try acquired[0].wait(io);
+
+    try group.concurrent(io, Worker.run, .{ &pool, allocator, &acquired[1], &release[1], io });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expect(!acquired[1].isSet());
+
+    pool.setLimit(io, 2);
+    try acquired[1].wait(io);
+    try std.testing.expectEqual(2, pool.inFlight());
+
+    pool.setLimit(io, 1);
+    try group.concurrent(io, Worker.run, .{ &pool, allocator, &acquired[2], &release[2], io });
+    release[0].set(io);
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expect(!acquired[2].isSet());
+
+    release[1].set(io);
+    try acquired[2].wait(io);
+    release[2].set(io);
+    try group.await(io);
+    group_awaited = true;
+    try std.testing.expectEqual(0, pool.inFlight());
+}
+
+test "DynamicBufferPool reports capacity wait separately from allocation" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var pool: DynamicBufferPool = .init(1, 64);
+    defer pool.deinit(allocator);
+
+    const first = try pool.getWithWait(allocator, io);
+    try std.testing.expectEqual(0, first.wait_ns);
+
+    var group: std.Io.Group = .init;
+    var group_awaited = false;
+    var first_returned = false;
+    var started: std.Io.Event = .unset;
+    var measured_wait_ns: std.atomic.Value(u64) = .init(0);
+    defer {
+        if (!first_returned) pool.put(io, first.buffer);
+        if (!group_awaited) group.await(io) catch {};
+    }
+
+    const Worker = struct {
+        fn run(
+            pool_: *DynamicBufferPool,
+            allocator_: std.mem.Allocator,
+            started_: *std.Io.Event,
+            measured_wait_ns_: *std.atomic.Value(u64),
+            io_: std.Io,
+        ) void {
+            started_.set(io_);
+            const acquisition = pool_.getWithWait(allocator_, io_) catch unreachable;
+            measured_wait_ns_.store(acquisition.wait_ns, .release);
+            pool_.put(io_, acquisition.buffer);
+        }
+    };
+
+    try group.concurrent(io, Worker.run, .{ &pool, allocator, &started, &measured_wait_ns, io });
+    try started.wait(io);
+    try io.sleep(.fromMilliseconds(5), .awake);
+    pool.put(io, first.buffer);
+    first_returned = true;
+    try group.await(io);
+    group_awaited = true;
+
+    try std.testing.expect(measured_wait_ns.load(.acquire) > 0);
+}
+
+test "DynamicBufferPool rolls admission back after allocation failure" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var pool: DynamicBufferPool = .init(1, 64);
+    defer pool.deinit(allocator);
+
+    try std.testing.expectError(error.OutOfMemory, pool.get(std.testing.failing_allocator, io));
+    try std.testing.expectEqual(0, pool.inFlight());
+    try std.testing.expectEqual(0, pool.allocatedBlocks());
+
+    const acquisition = try pool.getWithWait(allocator, io);
+    const buffer = acquisition.buffer;
+    try std.testing.expectEqual(0, acquisition.wait_ns);
+    try std.testing.expectEqual(1, pool.inFlight());
+    try std.testing.expectEqual(1, pool.allocatedBlocks());
+    pool.put(io, buffer);
 }
 
 /// Return a clone of a type with Tensors replaced by Buffer.

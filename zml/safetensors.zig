@@ -78,6 +78,11 @@ pub const TensorReader = struct {
         alignment: ?std.mem.Alignment = null,
     };
 
+    pub const ReadPositionalError = std.Io.File.ReadPositionalError || error{
+        OutOfBounds,
+        UnexpectedEndOfFile,
+    };
+
     pub fn init(
         io: std.Io,
         tensor: Tensor,
@@ -126,6 +131,27 @@ pub const TensorReader = struct {
 
     pub fn deinit(self: *TensorReader) void {
         self.file.close(self.io);
+    }
+
+    /// Reads an exact tensor-relative range without changing the sequential
+    /// reader position. Multiple calls may run concurrently on the same file.
+    pub fn readPositionalAll(
+        self: *const TensorReader,
+        buffer: []u8,
+        tensor_offset: u64,
+    ) ReadPositionalError!void {
+        const read_size = std.math.cast(u64, buffer.len) orelse return error.OutOfBounds;
+        const tensor_size = self.tensor.byteSize();
+        if (tensor_offset > tensor_size or read_size > tensor_size - tensor_offset) {
+            return error.OutOfBounds;
+        }
+        if (buffer.len == 0) return;
+
+        const file_offset = std.math.add(u64, self.tensor.offset, tensor_offset) catch {
+            return error.OutOfBounds;
+        };
+        const bytes_read = try self.file.readPositionalAll(self.io, buffer, file_offset);
+        if (bytes_read != buffer.len) return error.UnexpectedEndOfFile;
     }
 
     // Limit single reads to 1GB to avoid issues on macOS where pread returns
@@ -222,6 +248,144 @@ pub const TensorReader = struct {
         return n;
     }
 };
+
+test "TensorReader positional reads are tensor-relative and preserve stream position" {
+    const io = std.testing.io;
+    const contents = "prefix0123456789";
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
+    try file.writePositionalAll(io, contents, 0);
+
+    var path_buffer: [1024]u8 = undefined;
+    const path_len = try file.realPath(io, &path_buffer);
+    file.close(io);
+
+    var stream_buffer: [4]u8 = undefined;
+    var reader = try TensorReader.init(io, .{
+        .file_uri = path_buffer[0..path_len],
+        .name = "tensor",
+        .shape = .init(.{10}, .u8),
+        .offset = "prefix".len,
+    }, &stream_buffer, .{});
+    defer reader.deinit();
+
+    var positional: [4]u8 = undefined;
+    try reader.readPositionalAll(&positional, 3);
+    try std.testing.expectEqualStrings("3456", &positional);
+
+    var sequential: [4]u8 = undefined;
+    try reader.interface.readSliceAll(&sequential);
+    try std.testing.expectEqualStrings("0123", &sequential);
+
+    var empty: [0]u8 = .{};
+    try reader.readPositionalAll(&empty, 10);
+    try std.testing.expectError(error.OutOfBounds, reader.readPositionalAll(&empty, 11));
+
+    var too_large: [2]u8 = undefined;
+    try std.testing.expectError(error.OutOfBounds, reader.readPositionalAll(&too_large, 9));
+}
+
+test "TensorReader positional reads report a truncated backing file" {
+    const io = std.testing.io;
+    const contents = "prefix0123456789";
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
+    try file.writePositionalAll(io, contents, 0);
+
+    var path_buffer: [1024]u8 = undefined;
+    const path_len = try file.realPath(io, &path_buffer);
+    file.close(io);
+
+    var stream_buffer: [4]u8 = undefined;
+    var reader = try TensorReader.init(io, .{
+        .file_uri = path_buffer[0..path_len],
+        .name = "tensor",
+        .shape = .init(.{12}, .u8),
+        .offset = "prefix".len,
+    }, &stream_buffer, .{});
+    defer reader.deinit();
+
+    var tail: [3]u8 = undefined;
+    try std.testing.expectError(error.UnexpectedEndOfFile, reader.readPositionalAll(&tail, 9));
+}
+
+test "TensorReader concurrent positional chunks preserve offsets" {
+    const io = std.testing.io;
+    const contents = "prefixABCDEFGHI";
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
+    try file.writePositionalAll(io, contents, 0);
+
+    var path_buffer: [1024]u8 = undefined;
+    const path_len = try file.realPath(io, &path_buffer);
+    file.close(io);
+
+    var reader = try TensorReader.init(io, .{
+        .file_uri = path_buffer[0..path_len],
+        .name = "tensor",
+        .shape = .init(.{9}, .u8),
+        .offset = "prefix".len,
+    }, &.{}, .{});
+    defer reader.deinit();
+
+    var chunks: [3][3]u8 = undefined;
+    var start: std.Io.Event = .unset;
+    var read_done: [3]std.Io.Event = @splat(.unset);
+    var release_completion: [3]std.Io.Event = @splat(.unset);
+    var completed: [3]std.Io.Event = @splat(.unset);
+    var group: std.Io.Group = .init;
+    const Job = struct {
+        fn run(
+            reader_: *const TensorReader,
+            destination: []u8,
+            offset: u64,
+            start_: *std.Io.Event,
+            read_done_: *std.Io.Event,
+            release_completion_: *std.Io.Event,
+            completed_: *std.Io.Event,
+            io_: std.Io,
+        ) std.Io.Cancelable!void {
+            try start_.wait(io_);
+            reader_.readPositionalAll(destination, offset) catch unreachable;
+            read_done_.set(io_);
+            try release_completion_.wait(io_);
+            completed_.set(io_);
+        }
+    };
+    for (0..3) |i| {
+        try group.concurrent(io, Job.run, .{
+            &reader,
+            &chunks[i],
+            i * 3,
+            &start,
+            &read_done[i],
+            &release_completion[i],
+            &completed[i],
+            io,
+        });
+    }
+
+    start.set(io);
+    for (&read_done) |*event| try event.wait(io);
+    for ([_]usize{ 2, 0, 1 }) |i| {
+        release_completion[i].set(io);
+        try completed[i].wait(io);
+    }
+    try group.await(io);
+
+    var assembled: [9]u8 = undefined;
+    for (&chunks, 0..) |*chunk, i| @memcpy(assembled[i * 3 ..][0..3], chunk);
+    try std.testing.expectEqualStrings("ABCDEFGHI", &assembled);
+}
 
 pub const Tensor = struct {
     file_uri: []const u8,
