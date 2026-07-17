@@ -32,7 +32,6 @@ zls_completion(
         "//examples/llm",
         "//examples/mnist",
         "//examples/sharding",
-        "//examples/load",
         "//stdx",
         "//zml",
         "//zml/tokenizer/iree",
