@@ -215,6 +215,7 @@ pub fn main(init: std.process.Init) !void {
 
             const load_parallelism = try envUsize(init.environ_map, "ZML_LOAD_PARALLELISM", 8);
             const load_initial_parallelism = try envUsize(init.environ_map, "ZML_LOAD_INITIAL_PARALLELISM", 2);
+            const load_adaptive = try envUsize(init.environ_map, "ZML_LOAD_ADAPTIVE", 1);
             const load_max_read_parallelism = try envOptionalUsize(init.environ_map, "ZML_LOAD_MAX_READ_PARALLELISM");
             const load_dma_chunks = try envUsize(init.environ_map, "ZML_LOAD_DMA_CHUNKS", 16);
             const load_dma_chunk_mib = try envUsize(init.environ_map, "ZML_LOAD_DMA_CHUNK_MIB", 256);
@@ -225,6 +226,7 @@ pub fn main(init: std.process.Init) !void {
                 .shardings = &.{sharded_sharding},
                 .parallelism = load_parallelism,
                 .initial_parallelism = load_initial_parallelism,
+                .adaptive_parallelism = load_adaptive != 0,
                 .max_read_parallelism = load_max_read_parallelism,
                 .read_chunk_size = load_read_chunk_mib * zml.MiB,
                 .max_staging_bytes = load_max_staging_mib * zml.MiB,

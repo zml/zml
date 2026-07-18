@@ -2,4 +2,4 @@
 
 set -euo pipefail
 
-./bazel.sh run --config=release //examples/io:playground -- load ~/s3proxy/data/lfm/
+CUDA_VISIBLE_DEVICES=1 ./bazel.sh run --config=release --@zml//platforms:cuda=true //examples/io:playground -- load ~/s3proxy/data/lfm/

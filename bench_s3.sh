@@ -31,14 +31,14 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-/nix/store/v8hmmywjqi94rzxzkqa0000j10ldsmcq-temurin-jre-bin-21.0.11/bin/java \
+/nix/store/q12wsgw8qhd1cvyah9gpvp1hcz13z62v-temurin-jre-bin-21.0.11/bin/java \
     -Ds3proxy.authorization='none' \
     "-Ds3proxy.endpoint=${aws_endpoint}" \
     "-Ds3proxy.latency-blobstore.*.latency=${latency_ms}" \
     "-Ds3proxy.latency-blobstore.*.speed=${speed_bytes_per_ms}" \
     -Djclouds.provider='filesystem' \
-    -Djclouds.filesystem.basedir='/Users/brabier/s3proxy/data' \
-    -jar /Users/brabier/s3proxy/s3proxy \
+    -Djclouds.filesystem.basedir="$HOME/s3proxy/data" \
+    -jar "$HOME/s3proxy/s3proxy" \
     --properties /dev/null &
 proxy_pid=$!
 
@@ -63,4 +63,4 @@ if ! curl --silent --fail --output /dev/null "${aws_endpoint}/"; then
     exit 1
 fi
 
-AWS_ENDPOINT_URL="${aws_endpoint}" ./bazel.sh run --config=release //examples/io:playground -- load s3://lfm
+CUDA_VISIBLE_DEVICES=1 AWS_ENDPOINT_URL="${aws_endpoint}" ./bazel.sh run --config=release --@zml//platforms:cuda=true //examples/io:playground -- load s3://lfm

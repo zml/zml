@@ -2,8 +2,10 @@
 
 Snapshot date: 2026-07-18
 
-Snapshot commit: `4f1b655f` (`two stage adapter`) on
-`brabier/adaptive-concurrency`.
+Snapshot base commit: `2b9dcf2e` (`benches`), detached at
+`origin/brabier/adaptive-concurrency`. The working tree contains the adaptive
+loader fixes and benchmark changes summarized below; inspect `git diff` before
+assuming they have been committed.
 
 This file is an implementation handoff for agents. It is deliberately dense.
 Treat current source as authoritative when it conflicts with this snapshot.
@@ -35,13 +37,16 @@ must not compare their absolute byte rates directly.
 
 Current validation state at this snapshot:
 
-- deterministic `//zml:test` passes;
-- `//zml` builds;
-- the release `//examples/io:playground` builds and `bench_file.sh` runs;
-- a MacBook CPU source-concurrency sweep is captured below, but it does not
-  exercise the adaptive data plane or DMA controller;
-- there is still no CUDA/oneAPI same-workload end-to-end rerun after the latest
-  collapse fixes. Adaptive performance remains to be confirmed from a GPU log.
+- deterministic `//zml:test` passes with 204 inline tests;
+- the CUDA release `//examples/io:playground` builds and both benchmark scripts
+  run on device 1;
+- a 14.96 GiB Llama 3.1 8B load has been exercised repeatedly on CUDA from warm
+  local files and through S3Proxy;
+- 20/20 forced-width-8 local runs complete after the teardown fix, and the
+  final adaptive local runs converge to 4 reads/4 DMA lanes with no staging;
+- S3Proxy's checked-in default (`1000 ms`, `100 MiB/s`) completes in 84.241 s
+  at 181.82 MiB/s and reaches 32 reads/8 DMA lanes. The pre-fix controller
+  timed out after 180 s with only 6.41 GiB committed.
 
 ## Design Summary
 
@@ -208,6 +213,12 @@ A direct read is permitted only for the next tensor offset. If no direct
 reservation is available, the tensor tries to create staged read-ahead and then
 parks. Direct capacity waiters receive priority when reservations are released.
 
+While an asynchronous direct read is pending, its DMA lane remains admitted and
+owns the tensor/writer. A resume task waits for the read event and reschedules
+that same lane. Do not detach a pinned-buffer-owning direct tensor into a shared
+ready queue: other lanes can block creating writers until every pool block is
+held by queued states, producing a circular wait.
+
 ### Pageable path
 
 `DynamicBufferPool` owns fixed `read_chunk_size` blocks. It allocates blocks only
@@ -252,10 +263,10 @@ at the direct boundary merely because another tensor is queued. It must schedule
 its next direct read first. Violating this caused a ready-queue convoy with no
 useful progress and hundreds of megabytes of logs.
 
-Before detaching an active tensor, the lane parks its writer and waits as needed
+Before detaching a staged tensor, the lane parks its writer and waits as needed
 so no detached state exposes or mutates an unsafe pinned window. Direct-read
-waiters detach after pending DMA is drained. Heap-allocated tensor states remain
-stable while linked into ready/wait queues.
+waiters retain their lane as described above. Heap-allocated tensor states
+remain stable while linked into ready/wait queues.
 
 ### Pinned flip-flop
 
@@ -264,19 +275,20 @@ contexts/buffers. It waits for the previous flip-flop event before reusing the
 corresponding resource. This is why the useful minimum is normally one more
 pinned chunk than admitted DMA lanes.
 
-`parkAndWait` commits the public writer window, parks shard writers, records
-logical submission, and waits for pending transfers. `unpark` obtains/publishes
-a valid next pinned window.
+`parkAndWait` commits the public writer window without replenishing it, parks
+shard writers, records logical submission, and waits for pending transfers.
+`unpark` obtains/publishes a valid next pinned window. Acquiring a replacement
+buffer merely to park can deadlock when every lane is retiring or queued.
 
 ## Concurrency Groups and Queues
 
 - `read_group`: actual positional read concurrency; dynamic limit.
 - `dma_group`: scheduled lane executions; dynamic limit.
 - `staging_group`: pageable acquisition and prefetch setup tasks.
-- `resume_group`: waits for read events/direct capacity without occupying DMA
-  lane admission.
+- `resume_group`: waits for staged read/direct-capacity events without DMA lane
+  admission; direct-read event tasks deliberately retain their admitted lane.
 - ready queue: FIFO of stable `AdaptiveTensorLoad` pointers ready for DMA work.
-- direct-wait list: detached states waiting for their direct read event.
+- direct-wait list: direct states with an owning lane waiting for a read event.
 - direct-capacity condition: states waiting to reserve a direct pinned read.
 
 Pageable-ready tensor states are popped before lanes claim new direct tensors.
@@ -314,8 +326,10 @@ per-request latency, and admission wait proves demand for the configured limit.
 Treating either as pressure previously collapsed 32 useful reads to one.
 
 Read-side pressure is only evidence that completed pageable data is accumulating
-faster than DMA can drain it: ready queue growth, occupancy above 75%, or ready
-age above 250 ms.
+faster than DMA can drain it: ready occupancy above 75%, ready age above 250 ms,
+or growth above 20% for two consecutive committed windows. A single 32 MiB
+block arrival is not pressure: at a small staging limit it has a large growth
+ratio even when DMA consumes it in the next window.
 
 DMA completion latency is used only when a window committed at least 32 MiB.
 An undersized sample must neither cause pressure nor establish the baseline.
@@ -351,8 +365,10 @@ If a startup window has no progress for 100 ms and source demand exists, the
 controller can bootstrap read-ahead without waiting for committed bytes. This is
 how a high-latency remote source reaches useful request concurrency quickly.
 
-A live probe with zero pipeline progress for 500 ms rolls back. A candidate
-whose physical capacity is never exercised also rolls back after 500 ms.
+A live probe with zero pipeline progress for 5 s rolls back. A candidate whose
+physical capacity is never exercised also rolls back after 5 s. Both deadlines
+include source service time; a 500 ms deadline made a 1 s-latency S3 source
+mathematically unable to activate or produce its first attributed byte.
 
 Probes are skipped when estimated remaining work is under 500 ms. Remaining
 time estimates include unread/ordered work, host bytes buffered before logical
@@ -387,12 +403,17 @@ published until the requested physical capacity is demonstrably active:
   exercised when applicable;
 - staging reduction: staging in-flight reached candidate.
 
-If activation does not happen within 500 ms, rollback reason is
+If activation does not happen within 5 s, rollback reason is
 `capacity_not_exercised`.
 
 Once active, reads/slots/writers carry the epoch. PJRT completion callbacks add
 bytes to `probe_committed_bytes` only when their epoch matches the published
-probe epoch. Evaluation waits for at least 64 MiB committed from that epoch.
+probe epoch. Evaluation waits for at least 64 MiB committed from that epoch and
+at least 200 ms of active probe time. Increase probes compare the better of the
+epoch-attributed average and the current committed window after that sustained
+interval; staged candidate blocks can sit behind old-epoch blocks even after
+aggregate throughput has improved. Resource-reduction probes retain the stricter
+epoch-only comparison.
 
 This prevents old buffered reads or old H2D submissions from being credited to
 a new limit. In particular, a read-reduction probe must not use the previous
@@ -430,22 +451,24 @@ newly added resources where possible, and blocks immediate pressure backoff for
    - reduce DMA workers by about 30%, bounded at one.
 4. Ready-queue pressure above 10%:
    - rollback a relevant probe; otherwise
-   - reduce read workers by 15% or 30%; and
+   - reduce read workers by 15% or 30%, but not below direct DMA width; and
    - trim staging toward one or two ready blocks per DMA worker.
-5. If a probe has 64 MiB attributed bytes, keep or rollback using the rules
-   above.
+5. If a probe has 64 MiB attributed bytes and has been active for 200 ms, keep
+   or rollback using the rules above.
 6. If probing is disabled near the tail, hold.
 7. With no committed goodput and a slow/stalled saturated source, bootstrap:
    double reads and add staging, bounded by hard caps.
 8. When DMA starvation exceeds 10%, read demand exists, source capacity is
    exercised, and the 500 ms cadence allows it: double read concurrency and
-   add staging.
+   add staging. Once read fanout is already at least 4x DMA width, balance the
+   DMA stage before doubling staging again.
 9. In steady state with starvation at or below 10%, periodically probe halving
    excess read workers.
 10. Every two seconds in steady state, probe reducing pinned chunks, then
     staging blocks, then DMA workers, one dimension at a time.
 11. When DMA is saturated, or direct reads show demand without H2D pressure,
-    probe more DMA workers. Startup step doubles; steady step is roughly sqrt(C).
+    probe more DMA workers. Width 1/2 and startup steps double; later steady
+    steps are roughly sqrt(C).
 12. If DMA is at cap and pinned wait indicates benefit, probe one more pinned
     chunk.
 13. Otherwise enter/hold steady state.
@@ -635,6 +658,49 @@ all required. Removing any one reintroduces false keeps/rollbacks.
 Byte-weighted latency helps but does not make an 8 KiB startup sample comparable
 to a normal 32 MiB/256 MiB transfer. Reliability floors are still required.
 
+### Pinned ownership and teardown deadlocks
+
+Three independent lifecycle failures were reproduced on the 14.96 GiB CUDA
+load:
+
+1. Parking a writer replenished its just-flushed pinned buffer before giving up
+   the lane. Several retiring lanes could consume all pool blocks merely to
+   park, preventing the useful writer from acquiring one. Park now commits with
+   `replenish=false`; normal writes/unpark still replenish.
+2. A direct-read tensor was detached while retaining a pinned writer, and a
+   generic lane claimed another tensor and blocked creating its writer. Enough
+   queued owners produced a circular wait. Direct reads now retain and resume
+   their admitted lane until the read event fires.
+3. A lane decided to replenish immediately before the final tensor closed the
+   scheduling fence. `ensureLanes` repeatedly activated a replacement that saw
+   the closed fence and retired, so admission never reached the requested target
+   and teardown spun forever. `ensureLanes` now exits when scheduling is closed.
+
+The third bug explains runs that logged all 291 tensors, all 14.96 GiB committed,
+and `controller stopped`, but never logged final `completed`. A live GDB trace
+showed `releaseAdmission -> ensureLanes -> schedule` looping. The fix passed
+20/20 forced-width-8 repetitions.
+
+### False local probe rollback
+
+The first 2-to-4 local DMA probe was sometimes evaluated on its transition
+window. A burst drained by width 2 became the baseline, while lane turnover made
+the candidate's first window look slower. Three of twenty runs rolled back to 2
+and took about 1.5 s instead of 1.15 s. Probe evaluation now requires 200 ms as
+well as 64 MiB; 20/20 subsequent runs ended at width 4.
+
+### Remote ready growth and probe deadlines
+
+One completed 32 MiB staging block was formerly treated as immediate pressure.
+At a two-block limit that is 50% growth, so the controller backed reads down to
+one and repeatedly reprobed. Growth must now persist for two committed windows,
+and direct reads cannot be reduced below DMA width.
+
+Capacity activation and active-probe progress also used 500 ms deadlines. A
+source with 1000 ms request latency could never satisfy either deadline, causing
+an endless `dma 2 -> 4 -> 2` cycle. Both are now 5 s. Keep the two deadlines
+consistent when making future source-aware timeout changes.
+
 ### MacBook source-concurrency sweep, 2026-07-18
 
 Harness and interpretation:
@@ -688,6 +754,7 @@ fast sources; it only lets the existing startup probes reach 32 when justified.
 Benchmark loader overrides accepted by `examples/io/main.zig`:
 
 ```text
+ZML_LOAD_ADAPTIVE
 ZML_LOAD_PARALLELISM
 ZML_LOAD_INITIAL_PARALLELISM
 ZML_LOAD_MAX_READ_PARALLELISM
@@ -707,6 +774,70 @@ ZML_LOAD_PARALLELISM=8 ZML_LOAD_MAX_READ_PARALLELISM=32 \
 
 Do not use the CPU sweep to tune DMA chunk size. Run chunk/pinned/DMA sweeps on
 CUDA/oneAPI and compare committed H2D goodput plus total wall time.
+
+### CUDA Llama 3.1 8B sweep, 2026-07-18
+
+Harness:
+
+- CUDA device 1, release `//examples/io:playground`;
+- 291 tensors, 14.96 GiB logical bytes, sharded model placement;
+- warm local files under `~/s3proxy/data/lfm`;
+- S3 cases use the checked-in `bench_s3.sh` and the same backing files;
+- elapsed/goodput below are the adaptive loader's final logical values.
+
+Warm local fixed legacy sweep:
+
+```text
+workers          1       2       4       8      16
+elapsed (s)   2.123   1.490   1.157   1.254   1.751
+MiB/s          7215   10276   13200   12212    8749
+```
+
+Four workers are the knee. The final adaptive default converges from 2 to
+4 reads/4 DMA lanes, uses five pinned chunks and zero pageable blocks, and has
+a 1.168 s median over the final ten repetitions (0.95% slower than the fixed-4
+median). An earlier 20-run set after the sustained-probe fix had a 1.158 s
+median. The final handoff run completed in 1.150 s at 13321.54 MiB/s. All runs
+remained direct (`14.96 GiB direct`, `0 staged`).
+
+Forced adaptive width 8 completed 20/20 runs after the scheduling fix, with a
+roughly 1.25 s median. Before the fix it intermittently reached all 291 tensor
+completion records and then spun forever during teardown.
+
+S3Proxy at `LATENCY_MS=10 SPEED_MIB=1000`:
+
+```text
+configuration                         elapsed (s)   MiB/s
+fixed legacy 1                           50.788       302
+fixed legacy 2                           26.102       587
+fixed legacy 4                           14.577      1051
+fixed legacy 8                            9.053      1692
+adaptive before ready/probe fixes        24.217       632
+adaptive final, two runs              5.066-6.100  2511-3023
+tuned start 8/read cap 32/staging 1 GiB   3.387      4522
+```
+
+The final default is materially faster than the best fixed legacy width, but it
+still varies in how quickly it accepts the last read/staging expansion. For a
+known high-latency source, `ZML_LOAD_INITIAL_PARALLELISM=4` or `8` is a useful
+deployment override; changing the universal default to 4 was rejected because
+it made the warm local controller accept 8 lanes and regress to about 1.25 s.
+
+Latency deadline validation:
+
+```text
+LATENCY_MS  SPEED_MIB  adaptive result
+1000        1000       89.057 s, 171.99 MiB/s, final 32 reads/8 DMA
+1000         100       84.241 s, 181.82 MiB/s, final 32 reads/8 DMA
+```
+
+The legacy fixed-8 loader did not finish the `1000/1000` profile within 120 s,
+likely because its sequential stream path uses a less favorable S3 request
+granularity. Before raising both probe deadlines and bounding read backoff, the
+adaptive `1000/100` run timed out after 180 s at 113/291 tensors and 6.41 GiB.
+The final run completed all bytes, though one 4-to-6 DMA capacity attempt still
+timed out before later probes reached the cap. Long-latency probe scoring and
+repeated high-read staging retries remain optimization opportunities.
 
 ## Research Versus Current Implementation
 
@@ -765,10 +896,16 @@ protocol, and committed-byte objective.
 9. Multi-device pool totals and logical versus physical replicated bytes require
    care. Controller objective uses physical PJRT committed bytes while final
    logical goodput uses model logical bytes; compare like with like in analysis.
-10. The checked-in MacBook benchmark auto-selects PJRT CPU and cannot exercise
-    the adaptive path. A benchmark result without `adaptive=true`, controller
-    windows, and nonzero committed H2D bytes is a source baseline, not adaptive
-    validation.
+10. S3 committed output is bursty. Increase probes now accept the better of
+    epoch and current-window goodput after 200 ms, but repeated 16-to-32 staging
+    retries still produce run-to-run convergence variance. A cumulative
+    post-activation committed-byte objective or an EWMA baseline is the next
+    policy experiment; preserve epoch capacity proof.
+11. The CUDA workload is covered, but the same end-to-end matrix has not been
+    rerun on oneAPI or a multi-device replicated placement.
+12. Success-path lifecycle hangs were stress-tested. Read/PJRT failure injection
+    and transport-level cancellation remain required before treating teardown as
+    fully proven.
 
 ## Validation
 
@@ -801,10 +938,13 @@ Performance validation must compare the same model/source/cache state:
 5. Record total elapsed/logical goodput, committed goodput, direct/staged bytes,
    peak/final knobs, allocated pinned/pageable blocks, and starvation.
 
-As of the snapshot date, the regression tests and package build pass, but the
-catastrophic 14.96 GiB workload has not been rerun on CUDA/oneAPI after the final
-control fixes. The MacBook sweep above only validates source concurrency and the
-fixed fallback.
+As of the snapshot date, the regression tests and CUDA release build pass. The
+14.96 GiB workload completes repeatedly from local files, 20/20 forced-width-8
+stress runs complete, and both the short and checked-in-default S3Proxy profiles
+complete. The final local adaptive median is within 1% of fixed width 4 and uses
+zero staging. The high-latency S3 controller reaches its caps and beats the
+legacy fixed path's timeout, but its probe timeline remains noisier than the
+acceptance ideal and should be improved with a same-source repeated sweep.
 
 Acceptance target:
 

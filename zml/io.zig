@@ -775,7 +775,7 @@ const DirectShardWriter = struct {
     }
 
     fn park(self: *DirectShardWriter) std.Io.Writer.Error!void {
-        if (self.interface.end > 0) try self.flushBuffered();
+        if (self.interface.end > 0) try self.flushBuffered(false);
         if (self.active_buffer) |buffer| {
             self.pool.put(self.io, buffer);
             self.active_buffer = null;
@@ -817,7 +817,7 @@ const DirectShardWriter = struct {
 
     fn setEpoch(self: *DirectShardWriter, epoch: u64) std.Io.Writer.Error!void {
         if (self.epoch == epoch) return;
-        if (self.interface.end > 0) try self.flushBuffered();
+        if (self.interface.end > 0) try self.flushBuffered(true);
         self.epoch = epoch;
     }
 
@@ -846,7 +846,7 @@ const DirectShardWriter = struct {
 
     fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
         const self: *DirectShardWriter = @alignCast(@fieldParentPtr("interface", w));
-        try self.flushBuffered();
+        try self.flushBuffered(true);
     }
 
     fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
@@ -856,7 +856,7 @@ const DirectShardWriter = struct {
         try self.interface.flush();
     }
 
-    fn flushBuffered(self: *DirectShardWriter) std.Io.Writer.Error!void {
+    fn flushBuffered(self: *DirectShardWriter, replenish: bool) std.Io.Writer.Error!void {
         if (self.offset >= self.total) return;
 
         const pjrt_api = self.memory.platform.pjrt_api;
@@ -950,7 +950,7 @@ const DirectShardWriter = struct {
                 });
                 return std.Io.Writer.Error.WriteFailed;
             }
-        } else {
+        } else if (replenish) {
             self.interface.end = 0;
             const buf = getDmaBuffer(self.pool, self.allocator, self.io, self.metrics) catch |err| {
                 self.recordError(err);
@@ -959,6 +959,9 @@ const DirectShardWriter = struct {
             };
             self.active_buffer = buf;
             self.interface.buffer = buf[0..@min(buf.len, self.total - (self.offset + slice.len))];
+        } else {
+            self.interface.buffer = &.{};
+            self.interface.end = 0;
         }
         self.flip_flop ^= 1;
         self.offset += slice.len;
@@ -1313,7 +1316,7 @@ pub const DirectMemoryWriter = struct {
     }
 
     fn park(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        try self.commitWindow();
+        try self.commitWindow(false);
         for (self.shard_writers) |*writer| try writer.park();
         self.recordLogicalSubmission();
         self.interface.buffer = &.{};
@@ -1366,7 +1369,7 @@ pub const DirectMemoryWriter = struct {
 
     fn setEpoch(self: *DirectMemoryWriter, epoch: u64) std.Io.Writer.Error!void {
         if (self.epoch == epoch) return;
-        try self.commitWindow();
+        try self.commitWindow(true);
         for (self.shard_writers) |*writer| try writer.setEpoch(epoch);
         self.recordLogicalSubmission();
         self.epoch = epoch;
@@ -1380,18 +1383,18 @@ pub const DirectMemoryWriter = struct {
     fn commitDirectRead(self: *DirectMemoryWriter, len: usize) std.Io.Writer.Error!void {
         if (len > self.interface.buffer.len - self.interface.end) return std.Io.Writer.Error.WriteFailed;
         self.interface.end += len;
-        try self.commitWindow();
+        try self.commitWindow(true);
     }
 
     fn commitStagedWrite(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        try self.commitWindow();
+        try self.commitWindow(true);
     }
 
     fn drain(w: *std.Io.Writer, data: []const []const u8, _: usize) std.Io.Writer.Error!usize {
         const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
 
         const chunk = data[0];
-        try self.commitWindow();
+        try self.commitWindow(true);
 
         const writable = self.interface.buffer.len - self.interface.end;
         if (writable == 0) return std.Io.Writer.Error.WriteFailed;
@@ -1399,7 +1402,7 @@ pub const DirectMemoryWriter = struct {
         const n = @min(writable, chunk.len);
         @memcpy(self.interface.buffer[self.interface.end..][0..n], chunk[0..n]);
         self.interface.end += n;
-        try self.commitWindow();
+        try self.commitWindow(true);
 
         return n;
     }
@@ -1409,7 +1412,7 @@ pub const DirectMemoryWriter = struct {
 
         // Commit the active public window if one remains
         if (self.span_index < self.dispatch_spans.spans.len) {
-            try self.commitWindow();
+            try self.commitWindow(true);
         }
 
         for (self.shard_writers, 0..) |*shard_writer, i| {
@@ -1429,7 +1432,7 @@ pub const DirectMemoryWriter = struct {
         if (self.interface.buffer.len - self.interface.end >= capacity) return;
         if (preserve != 0) return std.Io.Writer.Error.WriteFailed;
 
-        try self.commitWindow();
+        try self.commitWindow(true);
         if (self.interface.buffer.len - self.interface.end < capacity) return std.Io.Writer.Error.WriteFailed;
     }
 
@@ -1441,7 +1444,7 @@ pub const DirectMemoryWriter = struct {
     // DMA buffer and is committed by advancing that shard writer. Later spans
     // use the same bytes as scratch and are copied before any full buffers are
     // submitted or the public alias is rotated.
-    fn commitWindow(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
+    fn commitWindow(self: *DirectMemoryWriter, replenish: bool) std.Io.Writer.Error!void {
         // All dispatch spans are consumed; no shard DMA buffer remains valid to
         // expose as the public alias until flush marks the writer as failing.
         if (self.span_index >= self.dispatch_spans.spans.len) {
@@ -1510,18 +1513,18 @@ pub const DirectMemoryWriter = struct {
         // submitted without invalidating bytes still needed for scatter.
         for (self.shard_writers) |*writer| {
             if (writer.interface.end == writer.interface.buffer.len) {
-                try writer.interface.flush();
+                try writer.flushBuffered(replenish);
             }
         }
 
         if (@mod(self.byte_cursor, self.dma_chunk_size) == 0) {
             for (self.shard_writers) |*writer| {
-                try writer.interface.flush();
+                try writer.flushBuffered(replenish);
             }
             self.recordLogicalSubmission();
         }
 
-        try self.publishWindow();
+        if (replenish) try self.publishWindow();
     }
 
     fn recordLogicalSubmission(self: *DirectMemoryWriter) void {
@@ -1594,6 +1597,7 @@ const AdaptiveLoadController = struct {
         committed_goodput: f64 = 0,
         probe_goodput: f64 = 0,
         probe_committed_bytes: u64 = 0,
+        probe_elapsed_ns: u64 = std.math.maxInt(u64),
         capacity_pending: bool = false,
         read_latency_us: f64 = 0,
         read_admission_wait_ratio: f64 = 0,
@@ -1684,9 +1688,11 @@ const AdaptiveLoadController = struct {
     last_probe_kind: ?ProbeKind = null,
     last_probe_baseline_goodput: f64 = 0,
     h2d_growth_windows: u8 = 0,
+    ready_growth_windows: u8 = 0,
     pressure_backoff_blocked_until_ns: u64 = 0,
 
     const probe_byte_floor: u64 = 64 * 1024 * 1024;
+    const probe_time_floor_ns: u64 = 200 * std.time.ns_per_ms;
 
     fn init(
         initial_dma_workers: usize,
@@ -1719,9 +1725,10 @@ const AdaptiveLoadController = struct {
         if (self.probe == null) self.peak_goodput = @max(self.peak_goodput, measured_goodput);
 
         const lightly_loaded = self.knobs.dma_workers <= 2 and sample.pinned_wait_ratio <= 0.02 and
-            sample.h2d_queue_ratio <= 0.10 and sample.ready_queue_ratio <= 0.10;
+            sample.dma_completion_wait_ratio <= 0.02 and sample.h2d_queue_ratio <= 0.10 and
+            sample.ready_queue_ratio <= 0.10;
         if (sample.dma_latency_reliable and sample.transfer_latency_us > 0) {
-            if (self.latency_baseline_us == 0) {
+            if (self.latency_baseline_us == 0 and lightly_loaded) {
                 self.latency_baseline_us = sample.transfer_latency_us;
             } else if (lightly_loaded) {
                 self.latency_baseline_us = 0.95 * self.latency_baseline_us + 0.05 * sample.transfer_latency_us;
@@ -1732,6 +1739,17 @@ const AdaptiveLoadController = struct {
             @max(0, sample.transfer_latency_us / self.latency_baseline_us - 1)
         else
             0;
+        // Concurrent transfers naturally take longer even when aggregate
+        // completion throughput improves. Treat latency growth as pressure only
+        // when a queue or completion wait shows that the transfer stage is
+        // actually contended.
+        const transfer_stage_busy = sample.dma_starvation_ratio <= 0.10;
+        const latency_pressure = if (transfer_stage_busy and (sample.dma_completion_wait_ratio > 0.10 or
+            sample.h2d_queue_ratio > 0.25))
+            latency_inflation
+        else
+            0;
+        const dma_completion_pressure = if (transfer_stage_busy) sample.dma_completion_wait_ratio else 0;
         if (measured_goodput > 0 and sample.h2d_growth_ratio > 0.20) {
             self.h2d_growth_windows = @min(2, self.h2d_growth_windows +| 1);
         } else {
@@ -1739,14 +1757,23 @@ const AdaptiveLoadController = struct {
         }
         const persistent_h2d_growth = if (self.h2d_growth_windows >= 2) sample.h2d_growth_ratio else 0;
         const h2d_pressure = @max(
-            latency_inflation,
-            @max(sample.pinned_wait_ratio, @max(sample.dma_completion_wait_ratio, @max(sample.h2d_growth_ratio, @max(0, sample.h2d_queue_ratio - 0.75)))),
+            latency_pressure,
+            @max(dma_completion_pressure, @max(sample.h2d_growth_ratio, @max(0, sample.h2d_queue_ratio - 0.75))),
         );
         const h2d_backoff_pressure = @max(
-            latency_inflation,
-            @max(sample.pinned_wait_ratio, @max(sample.dma_completion_wait_ratio, @max(persistent_h2d_growth, @max(0, sample.h2d_queue_ratio - 0.75)))),
+            latency_pressure,
+            @max(dma_completion_pressure, @max(persistent_h2d_growth, @max(0, sample.h2d_queue_ratio - 0.75))),
         );
-        const ready_pressure = @max(sample.ready_growth_ratio, @max(sample.ready_age_pressure, @max(0, sample.ready_queue_ratio - 0.75)));
+        if (measured_goodput > 0 and sample.ready_growth_ratio > 0.20) {
+            self.ready_growth_windows = @min(2, self.ready_growth_windows +| 1);
+        } else {
+            self.ready_growth_windows = 0;
+        }
+        // A staged read naturally arrives as a whole block. At small limits a
+        // single arrival is a large growth ratio even when the DMA lane drains
+        // it in the next window, so only sustained growth is pressure.
+        const persistent_ready_growth = if (self.ready_growth_windows >= 2) sample.ready_growth_ratio else 0;
+        const ready_pressure = @max(persistent_ready_growth, @max(sample.ready_age_pressure, @max(0, sample.ready_queue_ratio - 0.75)));
         // Admission wait means the configured read capacity is in demand, and
         // request latency normally rises with useful source parallelism. Only
         // buffered data that the DMA stage cannot drain is read-side pressure.
@@ -1757,9 +1784,10 @@ const AdaptiveLoadController = struct {
             @min(self.knobs.staging_chunks, self.knobs.dma_workers *| ready_per_dma)
         else
             self.knobs.staging_chunks;
+        const minimum_read_workers = if (self.direct) @min(self.max_read_workers, self.knobs.dma_workers) else 1;
 
         if ((measured_goodput > 0 or self.probe != null) and h2d_backoff_pressure > 0.20) {
-            const reason: Decision.RollbackReason = if (sample.pinned_wait_ratio > 0.20) .pinned_wait else .h2d_pressure;
+            const reason: Decision.RollbackReason = .h2d_pressure;
             if (self.probe) |probe| {
                 return self.restoreProbeBaseline(probe, sample.now_ns, reason);
             }
@@ -1775,9 +1803,9 @@ const AdaptiveLoadController = struct {
         }
 
         const ready_pressure_rejects_probe = if (self.probe) |probe| rejectsReadyPressure(probe) else false;
-        if (read_queue_pressure > 0.10 and
+        if ((measured_goodput > 0 or self.probe != null) and read_queue_pressure > 0.10 and
             (ready_pressure_rejects_probe or
-                (self.probe == null and (self.knobs.read_workers > 1 or pressured_staging_target < self.knobs.staging_chunks))))
+                (self.probe == null and (self.knobs.read_workers > minimum_read_workers or pressured_staging_target < self.knobs.staging_chunks))))
         {
             if (self.probe) |probe| {
                 return self.restoreProbeBaseline(probe, sample.now_ns, read_pressure_reason);
@@ -1787,8 +1815,8 @@ const AdaptiveLoadController = struct {
             self.epoch += 1;
             const beta: f64 = if (read_queue_pressure > 0.20) 0.70 else 0.85;
             const old_read_workers = self.knobs.read_workers;
-            if (self.knobs.read_workers > 1) {
-                self.knobs.read_workers = @max(@as(usize, 1), @as(usize, @intFromFloat(@floor(beta * @as(f64, @floatFromInt(self.knobs.read_workers))))));
+            if (self.knobs.read_workers > minimum_read_workers) {
+                self.knobs.read_workers = @max(minimum_read_workers, @as(usize, @intFromFloat(@floor(beta * @as(f64, @floatFromInt(self.knobs.read_workers))))));
             }
             var trim_staging = false;
             if (ready_pressure > 0.10 and self.knobs.staging_chunks > 0) {
@@ -1802,27 +1830,52 @@ const AdaptiveLoadController = struct {
         }
 
         if (self.probe) |probe| {
-            if (sample.probe_committed_bytes < probe_byte_floor) return self.currentDecision();
+            const pinned_probe_pressure = probe.dimension == .pinned and sample.pinned_wait_ratio >= 0.10;
+            if (probe.dimension == .pinned and sample.pinned_wait_ratio > 0.20) {
+                return self.restoreProbeBaseline(probe, sample.now_ns, .pinned_wait);
+            }
+            // Capacity activation and pinned-buffer growth are intentionally
+            // outside the probe epoch, but the first active window can still
+            // contain lane turnover and a burst drained from the old queue.
+            // Require a short sustained interval before comparing goodput.
+            if (sample.probe_committed_bytes < probe_byte_floor or sample.probe_elapsed_ns < probe_time_floor_ns) {
+                return self.currentDecision();
+            }
 
             const pressure_ok = h2d_backoff_pressure < 0.10 and
-                (!rejectsReadyPressure(probe) or read_queue_pressure < 0.10);
+                (!rejectsReadyPressure(probe) or read_queue_pressure < 0.10) and
+                !pinned_probe_pressure;
+            // Epoch bytes prove the candidate has carried real work. Once it
+            // has been active for a sustained interval, use the better of the
+            // epoch-attributed average and the current committed window: read
+            // probes can have old-epoch staged blocks ahead of their first
+            // tagged commit even though aggregate throughput already improved.
+            const candidate_goodput = switch (probe.kind) {
+                .increase => @max(sample.probe_goodput, measured_goodput),
+                .reduce_resource => sample.probe_goodput,
+            };
             const resource_reference = @max(probe.baseline_goodput, self.peak_goodput);
             const keep = switch (probe.kind) {
-                .increase => sample.probe_goodput >= probe.baseline_goodput * 1.03 and pressure_ok,
-                .reduce_resource => sample.probe_goodput >= resource_reference * 0.97 and pressure_ok and sample.dma_starvation_ratio <= 0.10,
+                .increase => candidate_goodput >= probe.baseline_goodput * 1.03 and pressure_ok,
+                .reduce_resource => candidate_goodput >= resource_reference * 0.97 and pressure_ok and sample.dma_starvation_ratio <= 0.10,
             };
 
             if (keep) {
                 self.probe = null;
                 self.last_probe_ns = sample.now_ns;
                 if (probe.kind == .reduce_resource) self.last_resource_probe_ns = sample.now_ns;
-                if (probe.kind == .reduce_resource) self.mode = .steady;
-                self.peak_goodput = @max(self.peak_goodput, sample.probe_goodput);
+                if (probe.kind == .reduce_resource or probe.dimension == .dma) self.mode = .steady;
+                self.peak_goodput = @max(self.peak_goodput, candidate_goodput);
                 return self.decision(probeAction(probe.dimension, probe.kind, true), false, false, false, .none);
             }
 
             const reason: Decision.RollbackReason = if (!pressure_ok)
-                if (rejectsReadyPressure(probe) and read_queue_pressure >= 0.10) read_pressure_reason else .h2d_pressure
+                if (pinned_probe_pressure)
+                    .pinned_wait
+                else if (rejectsReadyPressure(probe) and read_queue_pressure >= 0.10)
+                    read_pressure_reason
+                else
+                    .h2d_pressure
             else if (probe.kind == .reduce_resource and sample.dma_starvation_ratio > 0.10)
                 .dma_starvation
             else
@@ -1848,10 +1901,20 @@ const AdaptiveLoadController = struct {
 
         const performance_probe_due = self.mode == .startup or sample.now_ns -| self.last_probe_ns >= 500 * std.time.ns_per_ms;
         const source_capacity_exercised = sample.reads_saturated or sample.slow_reads;
-        if (performance_probe_due and sample.dma_starvation_ratio > 0.10 and read_capacity_demand and source_capacity_exercised and read_queue_pressure < 0.10) {
+        // Once read fanout is already much wider than the DMA stage, balance
+        // the pipeline before doubling pageable memory again. This also stops
+        // a failed high-read probe from monopolizing every probe opportunity.
+        const read_fanout_sufficient = self.knobs.dma_workers < self.max_dma_workers and
+            self.knobs.read_workers >= self.knobs.dma_workers *| 4;
+        if (performance_probe_due and !read_fanout_sufficient and sample.dma_starvation_ratio > 0.10 and read_capacity_demand and read_queue_pressure < 0.10) {
             if (self.readAheadCandidate()) |candidate| {
                 const dimension: Dimension = if (candidate.staging_chunks > self.knobs.staging_chunks) .staging else .read;
-                return self.startProbe(dimension, .increase, candidate, measured_goodput, sample.now_ns);
+                // Saturated fast direct reads justify more direct admission,
+                // but not an extra host copy. Only exercise pageable staging
+                // after a representative storage read is itself slow.
+                if (source_capacity_exercised and (dimension != .staging or sample.slow_reads)) {
+                    return self.startProbe(dimension, .increase, candidate, measured_goodput, sample.now_ns);
+                }
             }
         }
 
@@ -1900,12 +1963,19 @@ const AdaptiveLoadController = struct {
             sample.admitted_dma_writers >= self.knobs.dma_workers and
             !sample.reads_saturated and sample.dma_lane_capacity_available;
         const direct_probe_demand = self.direct and sample.read_goodput > 0 and
-            (sample.dma_starvation_ratio <= 0.10 or unused_direct_read_capacity);
+            (sample.reads_saturated or sample.dma_starvation_ratio <= 0.10 or unused_direct_read_capacity);
         if (performance_probe_due and (sample.dma_saturated or direct_probe_demand) and h2d_pressure < 0.10) {
             if (self.knobs.dma_workers < self.max_dma_workers) {
                 var candidate = self.knobs;
-                const step = if (self.mode == .startup) self.knobs.dma_workers else @max(@as(usize, 1), std.math.sqrt(self.knobs.dma_workers));
+                const step = if (self.knobs.dma_workers <= 2 or self.mode == .startup or self.last_probe_ns == 0)
+                    self.knobs.dma_workers
+                else
+                    @max(@as(usize, 1), std.math.sqrt(self.knobs.dma_workers));
                 candidate.dma_workers = @min(self.max_dma_workers, self.knobs.dma_workers + step);
+                if (self.direct) candidate.read_workers = @max(
+                    candidate.read_workers,
+                    @min(self.max_read_workers, candidate.dma_workers),
+                );
                 candidate.dma_chunks = @max(candidate.dma_chunks, self.minimumDmaChunks(candidate.dma_workers));
                 return self.startProbe(.dma, .increase, candidate, measured_goodput, sample.now_ns);
             }
@@ -1916,12 +1986,15 @@ const AdaptiveLoadController = struct {
             }
         }
 
+        if (self.mode == .startup and h2d_pressure >= 0.10) return self.currentDecision();
         self.mode = .steady;
         return self.currentDecision();
     }
 
     fn startProbe(self: *AdaptiveLoadController, dimension: Dimension, kind: ProbeKind, candidate: Knobs, baseline_goodput: f64, now_ns: u64) Decision {
         self.epoch += 1;
+        self.h2d_growth_windows = 0;
+        self.ready_growth_windows = 0;
         self.last_probe_dimension = dimension;
         self.last_probe_kind = kind;
         self.last_probe_baseline_goodput = baseline_goodput;
@@ -2145,7 +2218,11 @@ const AdaptiveLoadRuntime = struct {
                     const old = self.controller.knobs;
                     const ready_capacity = @max(@as(u64, @intCast(self.read_chunk_size)), @as(u64, @intCast(self.controller.knobs.staging_chunks *| self.read_chunk_size)));
                     const decision = self.controller.observe(.{
-                        .source_stalled = true,
+                        // A quiet window while the first writer or GPU runtime
+                        // is initializing is not evidence that storage needs
+                        // pageable read-ahead. Require the configured direct
+                        // reads to have actually been exercised.
+                        .source_stalled = reads_saturated,
                         .read_capacity_demand = read_capacity_demand,
                         .reads_saturated = reads_saturated,
                         .ready_bytes = snapshot.ready_bytes,
@@ -2237,7 +2314,14 @@ const AdaptiveLoadRuntime = struct {
             const direct_read_goodput = @as(f64, @floatFromInt(delta.direct_read_bytes)) / seconds;
             const staged_read_goodput = @as(f64, @floatFromInt(delta.staged_read_bytes)) / seconds;
             const ordered_goodput = @as(f64, @floatFromInt(delta.ordered_bytes)) / seconds;
-            const committed_goodput = @as(f64, @floatFromInt(delta.committed_bytes)) / seconds;
+            const raw_committed_goodput = @as(f64, @floatFromInt(delta.committed_bytes)) / seconds;
+            // Tiny tensors can complete while the first large writer is still
+            // starting. They are progress, but not a representative baseline
+            // for deciding that startup exploration is finished.
+            const committed_goodput = if (startup and delta.committed_bytes < 32 * 1024 * 1024)
+                0
+            else
+                raw_committed_goodput;
             const copy_goodput = @as(f64, @floatFromInt(delta.staged_copy_bytes)) / seconds;
             const copy_bandwidth = if (delta.staged_copy_ns == 0)
                 0
@@ -2260,7 +2344,9 @@ const AdaptiveLoadRuntime = struct {
                 average_read_bytes / (read_latency_us / std.time.us_per_s)
             else
                 0;
-            const slow_reads = read_service_bandwidth > 0 and read_service_bandwidth < 1.5 * 1024 * 1024 * 1024;
+            const representative_read_size = @min(self.read_chunk_size, 1024 * 1024);
+            const slow_reads = average_read_bytes >= @as(f64, @floatFromInt(representative_read_size)) and
+                read_service_bandwidth > 0 and read_service_bandwidth < 1.5 * 1024 * 1024 * 1024;
             const transfer_latency_us = if (delta.committed_bytes == 0)
                 0
             else
@@ -2358,6 +2444,7 @@ const AdaptiveLoadRuntime = struct {
                 .committed_goodput = committed_goodput,
                 .probe_goodput = probe_goodput,
                 .probe_committed_bytes = probe_committed_bytes,
+                .probe_elapsed_ns = probe_elapsed_ns,
                 .capacity_pending = self.pending_probe_activation != null,
                 .read_latency_us = read_latency_us,
                 .read_admission_wait_ratio = read_admission_wait_ratio,
@@ -2504,7 +2591,7 @@ const AdaptiveLoadRuntime = struct {
     }
 
     fn stalledProbeTimedOut(pending_activation: bool, elapsed_ns: u64, progress_bytes: u64) bool {
-        return !pending_activation and progress_bytes == 0 and elapsed_ns >= 500 * std.time.ns_per_ms;
+        return !pending_activation and progress_bytes == 0 and elapsed_ns >= 5 * std.time.ns_per_s;
     }
 
     fn hasReadCapacityDemand(self: *const AdaptiveLoadRuntime, snapshot: LoadMetrics.Snapshot) bool {
@@ -2572,7 +2659,11 @@ const AdaptiveLoadRuntime = struct {
         const activation = self.pending_probe_activation orelse return .none;
         if (!self.probeCapacityActive(activation)) {
             const elapsed: u64 = @intCast(@max(activation.installed_at.untilNow(io, .awake).nanoseconds, 0));
-            if (elapsed < 500 * std.time.ns_per_ms) return .none;
+            // Capacity activation includes the source service time needed for
+            // the new lanes to reach their first DMA submission. A 500 ms
+            // deadline made every expansion impossible on a 1 s-latency S3
+            // source and caused an endless probe/rollback loop.
+            if (elapsed < 5 * std.time.ns_per_s) return .none;
             const published_epoch = self.metrics.config_epoch.load(.acquire);
             const decision = self.controller.rollbackTimedOutProbe(activation.controller_now_ns +| elapsed, published_epoch) orelse {
                 self.pending_probe_activation = null;
@@ -3163,24 +3254,26 @@ const AdaptivePipelineContext = struct {
         }
     }
 
-    fn requeueDirectWhenReady(self: *AdaptivePipelineContext, tensor_load: *AdaptiveTensorLoad, event: *std.Io.Event) void {
+    fn resumeDirectLaneWhenReady(self: *AdaptivePipelineContext, lane: *AdaptivePipelineLane, event: *std.Io.Event) void {
         if (!self.beginScheduling()) {
-            self.removeDirectWait(tensor_load);
-            tensor_load.deinit();
+            self.removeDirectWait(lane.active.?);
+            lane.deinitActive();
+            lane.releaseAdmission(false);
             return;
         }
         defer self.endScheduling();
-        self.resume_group.concurrent(self.io, AdaptivePipelineContext.waitDirectAndEnqueue, .{ tensor_load, event, self }) catch |err| {
-            self.removeDirectWait(tensor_load);
-            tensor_load.deinit();
+        self.resume_group.concurrent(self.io, AdaptivePipelineContext.waitDirectAndResumeLane, .{ lane, event, self }) catch |err| {
+            self.removeDirectWait(lane.active.?);
             self.fail(err);
+            lane.deinitActive();
+            lane.releaseAdmission(false);
         };
     }
 
-    fn waitDirectAndEnqueue(tensor_load: *AdaptiveTensorLoad, event: *std.Io.Event, self: *AdaptivePipelineContext) void {
+    fn waitDirectAndResumeLane(lane: *AdaptivePipelineLane, event: *std.Io.Event, self: *AdaptivePipelineContext) void {
         const started: std.Io.Timestamp = .now(self.io, .awake);
         event.waitUncancelable(self.io);
-        self.removeDirectWait(tensor_load);
+        self.removeDirectWait(lane.active.?);
         const submitted = self.metrics.submitted_bytes.load(.acquire);
         const committed = self.metrics.committed_bytes.load(.acquire);
         if (submitted <= committed) {
@@ -3189,11 +3282,7 @@ const AdaptivePipelineContext = struct {
             const now_ns: u64 = @intCast(@max(std.Io.Timestamp.now(self.io, .awake).nanoseconds, 0));
             self.metrics.addDmaStarvationInterval(idle_started_ns, now_ns);
         }
-        if (self.failed()) {
-            tensor_load.deinit();
-            return;
-        }
-        self.enqueueDmaReady(tensor_load);
+        lane.schedule();
     }
 
     fn requeueOnDirectCapacity(self: *AdaptivePipelineContext, tensor_load: *AdaptiveTensorLoad) void {
@@ -3268,6 +3357,11 @@ const AdaptivePipelineContext = struct {
     fn ensureLanes(self: *AdaptivePipelineContext, requested: usize) void {
         const target = @min(requested, self.lanes.len);
         while (!self.failed()) {
+            // A concurrent lane can decide to replenish immediately before the
+            // final tensor closes scheduling. Without observing the closed
+            // fence here, the replacement retires in schedule() and this loop
+            // reserves it again forever.
+            if ((self.scheduling_state.load(.acquire) & scheduling_closed_bit) != 0) break;
             const admitted = self.admitted_lanes.load(.acquire);
             if (admitted >= target) break;
             if (self.admitted_lanes.cmpxchgWeak(admitted, admitted + 1, .acq_rel, .acquire)) |_| continue;
@@ -3961,10 +4055,8 @@ const AdaptivePipelineLane = struct {
                         self.releaseAdmission(false);
                         return;
                     };
-                    const active = self.detachActive();
-                    self.ctx.addDirectWait(active);
-                    self.ctx.requeueDirectWhenReady(active, event);
-                    self.releaseAdmission(true);
+                    self.ctx.addDirectWait(self.active.?);
+                    self.ctx.resumeDirectLaneWhenReady(self, event);
                     return;
                 }
                 self.active.?.parkWriterAndWait() catch |err| {
@@ -4386,6 +4478,14 @@ test "adaptive pipeline scheduling fence drains admitted producers" {
     try std.testing.expect(!pipeline.scheduling_idle.isSet());
     pipeline.endScheduling();
     try std.testing.expect(pipeline.scheduling_idle.isSet());
+
+    pipeline.first_error = .init(0);
+    pipeline.admitted_lanes = .init(0);
+    var lanes = [_]AdaptivePipelineLane{.{ .ctx = &pipeline }};
+    pipeline.lanes = &lanes;
+    pipeline.ensureLanes(1);
+    try std.testing.expectEqual(@as(usize, 0), pipeline.admitted_lanes.load(.acquire));
+    try std.testing.expectEqual(AdaptivePipelineLane.State.idle, lanes[0].state.load(.acquire));
 }
 
 test "adaptive load metrics count overlapping DMA starvation once" {
@@ -4463,6 +4563,7 @@ test "adaptive load controller doubles staged read-ahead probes" {
         .committed_goodput = 100,
         .dma_starvation_ratio = 0.11,
         .reads_saturated = true,
+        .slow_reads = true,
         .now_ns = 100 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.staging_probe_start, decision.action);
@@ -4483,7 +4584,17 @@ test "adaptive load controller doubles staged read-ahead probes" {
         .committed_goodput = 105,
         .probe_goodput = 105,
         .probe_committed_bytes = 64 * 1024 * 1024,
+        .probe_elapsed_ns = 199 * std.time.ns_per_ms,
         .now_ns = 300 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+
+    decision = controller.observe(.{
+        .committed_goodput = 105,
+        .probe_goodput = 105,
+        .probe_committed_bytes = 64 * 1024 * 1024,
+        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
+        .now_ns = 301 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.staging_probe_keep, decision.action);
 
@@ -4491,6 +4602,7 @@ test "adaptive load controller doubles staged read-ahead probes" {
         .committed_goodput = 105,
         .dma_starvation_ratio = 0.11,
         .reads_saturated = true,
+        .slow_reads = true,
         .now_ns = 400 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.staging_probe_start, decision.action);
@@ -4506,14 +4618,17 @@ test "adaptive load controller doubles staged read-ahead probes" {
     try std.testing.expectEqual(.staging_probe_keep, decision.action);
 
     decision = controller.observe(.{
+        .read_goodput = 110,
         .committed_goodput = 110,
         .dma_starvation_ratio = 0.11,
         .reads_saturated = true,
+        .slow_reads = true,
         .now_ns = 600 * std.time.ns_per_ms,
     });
-    try std.testing.expectEqual(.staging_probe_start, decision.action);
-    try std.testing.expectEqual(16, decision.knobs.read_workers);
-    try std.testing.expectEqual(16, decision.knobs.staging_chunks);
+    try std.testing.expectEqual(.dma_probe_start, decision.action);
+    try std.testing.expectEqual(8, decision.knobs.read_workers);
+    try std.testing.expectEqual(4, decision.knobs.dma_workers);
+    try std.testing.expectEqual(8, decision.knobs.staging_chunks);
 }
 
 test "adaptive load controller probes direct read capacity before staging" {
@@ -4524,6 +4639,7 @@ test "adaptive load controller probes direct read capacity before staging" {
         .dma_starvation_ratio = 0.11,
         .read_capacity_demand = true,
         .reads_saturated = true,
+        .slow_reads = true,
         .now_ns = 100 * std.time.ns_per_ms,
     });
 
@@ -4540,6 +4656,7 @@ test "adaptive load controller caps reads by pageable staging budget" {
         .dma_starvation_ratio = 0.11,
         .read_capacity_demand = true,
         .reads_saturated = true,
+        .slow_reads = true,
         .now_ns = 100 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(4, decision.knobs.read_workers);
@@ -4558,6 +4675,7 @@ test "adaptive load controller caps reads by pageable staging budget" {
         .dma_starvation_ratio = 0.11,
         .read_capacity_demand = true,
         .reads_saturated = true,
+        .slow_reads = true,
         .now_ns = 300 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.staging_probe_start, decision.action);
@@ -4565,13 +4683,14 @@ test "adaptive load controller caps reads by pageable staging budget" {
     try std.testing.expectEqual(3, decision.knobs.staging_chunks);
 }
 
-test "adaptive load controller rolls back unattributed gain" {
+test "adaptive load controller accepts sustained aggregate gain after capacity attribution" {
     var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
     _ = controller.observe(.{
         .read_goodput = 100,
         .committed_goodput = 100,
         .dma_starvation_ratio = 0.11,
         .reads_saturated = true,
+        .slow_reads = true,
         .now_ns = 100 * std.time.ns_per_ms,
     });
 
@@ -4581,10 +4700,10 @@ test "adaptive load controller rolls back unattributed gain" {
         .probe_committed_bytes = 64 * 1024 * 1024,
         .now_ns = 200 * std.time.ns_per_ms,
     });
-    try std.testing.expectEqual(.staging_probe_rollback, decision.action);
-    try std.testing.expectEqual(0, decision.knobs.staging_chunks);
-    try std.testing.expectEqual(2, decision.knobs.read_workers);
-    try std.testing.expect(decision.trim_staging);
+    try std.testing.expectEqual(.staging_probe_keep, decision.action);
+    try std.testing.expectEqual(2, decision.knobs.staging_chunks);
+    try std.testing.expectEqual(4, decision.knobs.read_workers);
+    try std.testing.expect(!decision.trim_staging);
 
     const cooldown = controller.observe(.{
         .read_goodput = 100,
@@ -4593,8 +4712,8 @@ test "adaptive load controller rolls back unattributed gain" {
         .reads_saturated = true,
         .now_ns = 300 * std.time.ns_per_ms,
     });
-    try std.testing.expectEqual(.none, cooldown.action);
-    try std.testing.expectEqual(0, cooldown.knobs.staging_chunks);
+    try std.testing.expectEqual(.dma_probe_start, cooldown.action);
+    try std.testing.expectEqual(2, cooldown.knobs.staging_chunks);
 }
 
 test "adaptive load controller does not back reads off past a probe baseline" {
@@ -4604,6 +4723,7 @@ test "adaptive load controller does not back reads off past a probe baseline" {
         .committed_goodput = 100,
         .dma_starvation_ratio = 0.11,
         .reads_saturated = true,
+        .slow_reads = true,
         .now_ns = 100 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.staging_probe_start, decision.action);
@@ -4612,6 +4732,13 @@ test "adaptive load controller does not back reads off past a probe baseline" {
         .committed_goodput = 100,
         .ready_growth_ratio = 0.21,
         .now_ns = 200 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+
+    decision = controller.observe(.{
+        .committed_goodput = 100,
+        .ready_growth_ratio = 0.21,
+        .now_ns = 300 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.staging_probe_rollback, decision.action);
     try std.testing.expectEqual(.ready_queue_growth, decision.reason);
@@ -4622,13 +4749,23 @@ test "adaptive load controller does not back reads off past a probe baseline" {
 
 test "adaptive load controller backs reads off on a growing ready queue" {
     var controller: AdaptiveLoadController = .init(4, 16, 5, 32, 8, 32, 32, true);
+    controller.mode = .steady;
     controller.knobs.staging_chunks = 16;
-    const decision = controller.observe(.{
+    var decision = controller.observe(.{
         .read_goodput = 100,
         .committed_goodput = 100,
         .ready_growth_ratio = 0.21,
         .reads_saturated = true,
         .now_ns = 100 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+
+    decision = controller.observe(.{
+        .read_goodput = 100,
+        .committed_goodput = 100,
+        .ready_growth_ratio = 0.21,
+        .reads_saturated = true,
+        .now_ns = 200 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.read_backoff, decision.action);
     try std.testing.expectEqual(5, decision.knobs.read_workers);
@@ -4636,6 +4773,39 @@ test "adaptive load controller backs reads off on a growing ready queue" {
     try std.testing.expectEqual(5, decision.knobs.dma_chunks);
     try std.testing.expectEqual(4, decision.knobs.staging_chunks);
     try std.testing.expect(decision.trim_staging);
+}
+
+test "adaptive load controller waits for a commit before backing reads off" {
+    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 4, 32, 32, true);
+    controller.knobs.staging_chunks = 2;
+    const decision = controller.observe(.{
+        .read_goodput = 100,
+        .ready_growth_ratio = 0.50,
+        .reads_saturated = true,
+        .now_ns = 100 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(@as(usize, 4), decision.knobs.read_workers);
+    try std.testing.expectEqual(@as(usize, 2), decision.knobs.staging_chunks);
+}
+
+test "adaptive load controller does not back reads below direct DMA width" {
+    var controller: AdaptiveLoadController = .init(2, 8, 3, 9, 2, 8, 8, true);
+    controller.mode = .steady;
+    controller.knobs.staging_chunks = 2;
+
+    _ = controller.observe(.{
+        .committed_goodput = 100,
+        .ready_growth_ratio = 0.50,
+        .now_ns = 100 * std.time.ns_per_ms,
+    });
+    const decision = controller.observe(.{
+        .committed_goodput = 100,
+        .ready_growth_ratio = 0.50,
+        .now_ns = 200 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(@as(usize, 2), decision.knobs.read_workers);
 }
 
 test "adaptive load controller does not confuse saturated read latency with queue pressure" {
@@ -4664,10 +4834,17 @@ test "adaptive load controller does not confuse saturated read latency with queu
 test "adaptive load controller trims staging after reads reach one worker" {
     var controller: AdaptiveLoadController = .init(2, 4, 3, 8, 1, 8, 32, true);
     controller.knobs.staging_chunks = 8;
-    const decision = controller.observe(.{
+    var decision = controller.observe(.{
         .committed_goodput = 100,
         .ready_growth_ratio = 0.21,
         .now_ns = 100 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+
+    decision = controller.observe(.{
+        .committed_goodput = 100,
+        .ready_growth_ratio = 0.21,
+        .now_ns = 200 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.staging_backoff, decision.action);
     try std.testing.expectEqual(1, decision.knobs.read_workers);
@@ -4746,6 +4923,7 @@ test "adaptive load controller does not back off past a pressured probe baseline
     decision = controller.observe(.{
         .committed_goodput = 100,
         .transfer_latency_us = 121,
+        .dma_completion_wait_ratio = 0.11,
         .now_ns = 200 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.dma_probe_rollback, decision.action);
@@ -4765,13 +4943,14 @@ test "adaptive load controller does not back off past a pressured probe baseline
     decision = controller.observe(.{
         .committed_goodput = 100,
         .transfer_latency_us = 140,
+        .dma_completion_wait_ratio = 0.11,
         .now_ns = 500 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.dma_backoff, decision.action);
     try std.testing.expectEqual(1, decision.knobs.dma_workers);
 }
 
-test "adaptive load controller rolls a stalled pressured probe back without committed bytes" {
+test "adaptive load controller does not treat pinned wait as DMA probe pressure" {
     var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
     var decision = controller.observe(.{
         .committed_goodput = 100,
@@ -4785,11 +4964,10 @@ test "adaptive load controller rolls a stalled pressured probe back without comm
         .pinned_wait_ratio = 0.21,
         .now_ns = 200 * std.time.ns_per_ms,
     });
-    try std.testing.expectEqual(.dma_probe_rollback, decision.action);
-    try std.testing.expectEqual(.pinned_wait, decision.reason);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(3, decision.knobs.dma_chunks);
-    try std.testing.expect(decision.trim_pinned);
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(4, decision.knobs.dma_workers);
+    try std.testing.expectEqual(5, decision.knobs.dma_chunks);
+    try std.testing.expect(controller.probe != null);
 }
 
 test "adaptive load controller keeps a dma probe when pageable data is ready" {
@@ -4810,7 +4988,7 @@ test "adaptive load controller keeps a dma probe when pageable data is ready" {
         .now_ns = 200 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.dma_probe_keep, decision.action);
-    try std.testing.expectEqual(1, decision.knobs.read_workers);
+    try std.testing.expectEqual(2, decision.knobs.read_workers);
     try std.testing.expectEqual(2, decision.knobs.dma_workers);
     try std.testing.expectEqual(3, decision.knobs.dma_chunks);
     try std.testing.expectEqual(1, decision.knobs.staging_chunks);
@@ -4851,7 +5029,7 @@ test "adaptive load controller timeout restores an unactivated published epoch" 
 }
 
 test "adaptive load runtime only times out an active idle probe" {
-    const timeout_ns = 500 * std.time.ns_per_ms;
+    const timeout_ns = 5 * std.time.ns_per_s;
     try std.testing.expect(!AdaptiveLoadRuntime.stalledProbeTimedOut(false, timeout_ns - 1, 0));
     try std.testing.expect(AdaptiveLoadRuntime.stalledProbeTimedOut(false, timeout_ns, 0));
     try std.testing.expect(!AdaptiveLoadRuntime.stalledProbeTimedOut(true, timeout_ns, 0));
@@ -4876,6 +5054,29 @@ test "adaptive load controller tolerates transient H2D growth during a probe" {
     });
     try std.testing.expectEqual(.dma_probe_keep, decision.action);
     try std.testing.expectEqual(4, decision.knobs.dma_workers);
+}
+
+test "adaptive load controller keeps startup open across transient H2D growth" {
+    var controller: AdaptiveLoadController = .init(2, 8, 3, 9, 2, 8, 8, true);
+    var decision = controller.observe(.{
+        .read_goodput = 100,
+        .committed_goodput = 100,
+        .h2d_growth_ratio = 0.21,
+        .dma_saturated = true,
+        .now_ns = 100 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(.startup, controller.mode);
+
+    decision = controller.observe(.{
+        .read_goodput = 100,
+        .committed_goodput = 100,
+        .dma_saturated = true,
+        .now_ns = 200 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.dma_probe_start, decision.action);
+    try std.testing.expectEqual(@as(usize, 4), decision.knobs.read_workers);
+    try std.testing.expectEqual(@as(usize, 4), decision.knobs.dma_workers);
 }
 
 test "adaptive load controller skips probes near the finite tail" {
@@ -4962,6 +5163,24 @@ test "adaptive load controller recovers a starved direct lane" {
     try std.testing.expectEqual(.dma_probe_start, decision.action);
     try std.testing.expectEqual(2, decision.knobs.dma_workers);
     try std.testing.expectEqual(3, decision.knobs.dma_chunks);
+}
+
+test "adaptive load controller widens saturated fast direct lanes without staging" {
+    var controller: AdaptiveLoadController = .init(2, 8, 3, 9, 2, 8, 8, true);
+    controller.mode = .steady;
+    const decision = controller.observe(.{
+        .read_goodput = 100,
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0.50,
+        .read_capacity_demand = true,
+        .reads_saturated = true,
+        .now_ns = 600 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.dma_probe_start, decision.action);
+    try std.testing.expectEqual(@as(usize, 4), decision.knobs.read_workers);
+    try std.testing.expectEqual(@as(usize, 4), decision.knobs.dma_workers);
+    try std.testing.expectEqual(@as(usize, 5), decision.knobs.dma_chunks);
+    try std.testing.expectEqual(@as(usize, 0), decision.knobs.staging_chunks);
 }
 
 test "adaptive load controller bootstraps read ahead for a slow source" {
@@ -5146,16 +5365,16 @@ test "adaptive load controller resource reductions stay within global best band"
     try std.testing.expectEqual(6, decision.knobs.dma_chunks);
 }
 
-test "adaptive load controller backs DMA off on pinned pressure" {
+test "adaptive load controller does not back DMA off on pinned admission wait" {
     var controller: AdaptiveLoadController = .init(4, 8, 5, 9, 4, 8, 8, true);
     const decision = controller.observe(.{
         .committed_goodput = 100,
         .pinned_wait_ratio = 0.21,
         .now_ns = 100 * std.time.ns_per_ms,
     });
-    try std.testing.expectEqual(.dma_backoff, decision.action);
-    try std.testing.expectEqual(.pinned_wait, decision.reason);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(.none, decision.reason);
+    try std.testing.expectEqual(4, decision.knobs.dma_workers);
     try std.testing.expectEqual(5, decision.knobs.dma_chunks);
 }
 
@@ -5179,21 +5398,29 @@ test "adaptive load controller requires persistent H2D queue growth" {
     try std.testing.expectEqual(2, decision.knobs.dma_workers);
 }
 
-test "adaptive load controller backs DMA off on latency inflation" {
-    var controller: AdaptiveLoadController = .init(4, 8, 5, 9, 4, 8, 8, true);
+test "adaptive load controller requires transfer contention for latency backoff" {
+    var controller: AdaptiveLoadController = .init(2, 8, 3, 9, 2, 8, 8, true);
     _ = controller.observe(.{
         .committed_goodput = 100,
         .transfer_latency_us = 100,
         .now_ns = 100 * std.time.ns_per_ms,
     });
-    const decision = controller.observe(.{
+    var decision = controller.observe(.{
         .committed_goodput = 100,
-        .transfer_latency_us = 121,
+        .transfer_latency_us = 125,
         .now_ns = 200 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+
+    decision = controller.observe(.{
+        .committed_goodput = 100,
+        .transfer_latency_us = 130,
+        .dma_completion_wait_ratio = 0.11,
+        .now_ns = 300 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.dma_backoff, decision.action);
     try std.testing.expectEqual(.h2d_pressure, decision.reason);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
+    try std.testing.expectEqual(1, decision.knobs.dma_workers);
 }
 
 test "adaptive load controller ignores undersized DMA latency samples" {
@@ -5232,6 +5459,26 @@ test "adaptive load controller does not baseline DMA latency from an undersized 
     try std.testing.expectEqual(@as(usize, 2), decision.knobs.dma_workers);
 }
 
+test "adaptive load controller does not baseline DMA latency while contended" {
+    var controller: AdaptiveLoadController = .init(4, 8, 5, 9, 4, 8, 8, true);
+    var decision = controller.observe(.{
+        .committed_goodput = 100,
+        .transfer_latency_us = 100,
+        .pinned_wait_ratio = 0.50,
+        .now_ns = 100 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(@as(f64, 0), controller.latency_baseline_us);
+
+    decision = controller.observe(.{
+        .committed_goodput = 100,
+        .transfer_latency_us = 200,
+        .now_ns = 200 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(@as(f64, 0), controller.latency_baseline_us);
+}
+
 test "adaptive load controller gives staged read recovery executable capacity" {
     var controller: AdaptiveLoadController = .init(1, 4, 2, 5, 1, 8, 8, true);
     controller.mode = .steady;
@@ -5242,6 +5489,7 @@ test "adaptive load controller gives staged read recovery executable capacity" {
         .committed_goodput = 10,
         .dma_starvation_ratio = 0.50,
         .reads_saturated = true,
+        .slow_reads = true,
         .now_ns = 600 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.staging_probe_start, decision.action);
