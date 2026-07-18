@@ -1,33 +1,51 @@
-# Use ZML from a `build.zig` project
+# Use ZML alongside a `build.zig` project
 
 ZML is currently built and packaged with Bazel. A native Zig package that can be
 added directly to another project's `build.zig.zon` is not available yet.
 
-If your application already uses Zig's standard build system, keep the ZML build
-as a Bazel step and consume its output from your `build.zig` project. This keeps
-ZML's toolchain, MLIR, PJRT, and platform-specific dependencies under Bazel,
-while your application can stay on the standard Zig build flow.
+If your application already uses Zig's standard build system, keep the ZML
+component behind an explicit artifact boundary. Bazel is the source of truth for
+building ZML and for selecting its toolchain, MLIR, PJRT, and platform-specific
+dependencies.
 
-## Current integration model
+## Current options
 
-1. Build the ZML target you need with Bazel.
-2. Export the produced library or executable artifact from `bazel-bin`.
-3. Link or run that artifact from your Zig project.
-4. Keep the boundary explicit, usually through the C ABI or a command-line
-   executable, instead of trying to import ZML internals as Zig modules.
+The most isolated option is an executable boundary: build and run the ZML
+component with Bazel, then communicate with it through a command-line or
+application-specific interface.
 
-This is less ergonomic than a native Zig package, but it avoids duplicating the
-large Bazel-managed dependency graph in a second build system.
+A `build.zig` project may also consume a Bazel-built library through a C ABI
+facade. In that setup, the application owns the facade, invokes Bazel to build
+the target, and links the produced artifact from the Zig build. This is a
+workaround rather than a packaged integration: ZML does not currently provide a
+maintained C ABI package, generated manifest, or helper for discovering and
+packaging all required runtime dependencies.
+
+## Artifact-boundary repro shape
+
+A minimal external repro can exercise this shape today: a `build.zig` wrapper
+invokes Bazel, discovers the produced artifact with
+`bazel cquery --output=files`, stages the shared library and header, and
+links/tests a Zig consumer against the staged artifact. The same pattern can
+also stage a Bazel-built executable and run it from the `build.zig` project.
+
+Binary dependency discovery remains the important unresolved part. A repro can
+record the staged shared library's direct ELF `DT_NEEDED` entries with
+`readelf` into a text file or JSON manifest, which makes the artifact's declared
+dynamic dependencies visible to the consumer. That does not resolve transitive
+runtime dependencies and does not validate a real model execution path or PJRT
+runtime loading.
 
 ## Why not import ZML directly?
 
 ZML depends on generated MLIR/XLA/PJRT bindings, platform libraries, and Bazel
 toolchain setup. Those pieces are selected and wired by Bazel rules. Importing
-ZML source files directly from another `build.zig` skips that setup and is
-expected to fail or produce a different runtime environment.
+ZML source files directly from another `build.zig` project skips that setup and
+is not supported.
 
 ## Future direction
 
 A better integration could let Bazel generate a small manifest describing the
-artifacts and module paths needed by a `build.zig` project. Until such a
-manifest exists, treat Bazel as the source of truth for building ZML.
+artifacts, module paths, and runtime dependencies needed by a `build.zig`
+project. Until such a manifest exists, treat Bazel as the source of truth for
+building ZML.
