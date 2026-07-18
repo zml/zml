@@ -2,11 +2,15 @@
 
 Snapshot date: 2026-07-18
 
-Snapshot base commit: detached `HEAD` at `9b71c5a8` (`oneapi`). That commit
-contains the four-GPU scripts, pinned-buffer/quantum separation, and initial
-oneAPI sweep. The working tree adds the uninitialized pool-allocation
-optimization described below; `profile_file.sh` and its `perf.data` output are
-currently untracked. Inspect `git diff` before assuming later work is committed.
+Snapshot base commit: branch `brabier/adaptive-concurrency` at `654ff08b`
+(`optimized cpu`). That commit contains the uninitialized pool-allocation
+optimization described below. Before the huge-page experiment the working tree
+already changed `bench_file.sh`, `bench_s3.sh`, and `profile_file.sh` from their
+committed four-device oneAPI forms; the first two now run CUDA device 1, while
+`profile_file.sh` currently combines `CUDA_VISIBLE_DEVICES=1` with the oneAPI
+build flag. The working tree also adds the opt-in CUDA transparent-huge-page
+experiment described below. Inspect `git diff` before assuming later work is
+committed.
 
 This file is an implementation handoff for agents. It is deliberately dense.
 Treat current source as authoritative when it conflicts with this snapshot.
@@ -57,6 +61,10 @@ Current validation state at this snapshot:
   poison write from dynamic pool allocation. In controlled fixed-width runs it
   reduced median CPU task time by 4.7% with 256 MiB pinned blocks and 3.0% with
   64 MiB blocks;
+- an opt-in CUDA `MADV_HUGEPAGE` experiment now proves five live 256 MiB DMA
+  mappings are fully THP-backed on the Threadripper/CUDA host. Five alternating
+  adaptive A/B pairs reduced median load time from 1.054 s to 0.879 s and native
+  AMD page-walk events by 62.0%, while minor faults remained unchanged;
 - the earlier single-CUDA validation and its 20/20 teardown stress result remain
   recorded below, but must not be treated as the current hardware result.
 
@@ -132,6 +140,8 @@ a literal Gradient2 implementation. Do not describe it as Gradient2.
 - `zml/mem.zig`:
   - `DynamicBufferPool` lazily allocates, limits, returns, and trims fixed blocks;
   - `getWithWait` separates admission wait from allocation/mutex time.
+  - `DmaMapAllocator` optionally aligns CUDA host buffers to 2 MiB and applies
+    `MADV_HUGEPAGE` before PJRT/CUDA host registration.
 - `stdx/Io.zig`:
   - `LimitedGroup` has a runtime-adjustable limit;
   - `concurrentUncancelableAdmission` preserves queued cleanup tasks after group
@@ -169,6 +179,10 @@ Relevant history:
 - `dma_chunks`: hard pinned blocks per device.
 - `dma_buffer_size = null`: per-device pinned block size; null preserves the
   old behavior and uses `dma_chunk_size`.
+- `dma_buffer_page_mode = .default`: host page policy for pinned buffers.
+  `.transparent_huge` currently affects CUDA: it requests 2 MiB alignment and
+  `MADV_HUGEPAGE` before `PJRT_Client_DmaMap`. It is a hint and must be verified
+  on the deployment kernel; other platform allocators currently ignore it.
 - `dma_chunk_size`: logical bytes a DMA lane processes before yielding,
   commonly 256 MiB. A shard writer may submit smaller buffers within this
   quantum when `dma_buffer_size < dma_chunk_size`.
@@ -786,6 +800,7 @@ ZML_LOAD_INITIAL_PARALLELISM
 ZML_LOAD_MAX_READ_PARALLELISM
 ZML_LOAD_DMA_CHUNKS
 ZML_LOAD_DMA_BUFFER_MIB
+ZML_LOAD_DMA_HUGE_PAGES
 ZML_LOAD_DMA_CHUNK_MIB
 ZML_LOAD_READ_CHUNK_MIB
 ZML_LOAD_MAX_STAGING_MIB
@@ -867,6 +882,94 @@ adaptive `1000/100` run timed out after 180 s at 113/291 tensors and 6.41 GiB.
 The final run completed all bytes, though one 4-to-6 DMA capacity attempt still
 timed out before later probes reached the cap. Long-latency probe scoring and
 repeated high-read staging retries remain optimization opportunities.
+
+### CUDA transparent huge-page experiment, 2026-07-18
+
+Implementation and host state:
+
+- the experiment is opt-in through `LoadOpts.dma_buffer_page_mode` or
+  `ZML_LOAD_DMA_HUGE_PAGES=1` in the playground; the default path is unchanged;
+- on CUDA, `DmaMapAllocator` raises the parent allocation alignment to 2 MiB,
+  calls `madvise(MADV_HUGEPAGE)`, then calls `PJRT_Client_DmaMap`. Freeing uses
+  the same effective alignment and still unmaps from PJRT before parent free;
+- a failed `madvise` warns and continues with ordinary pages, so benchmark logs
+  alone are not proof that THP was obtained;
+- the test host is an AMD Ryzen Threadripper PRO 9985WX on Linux 6.17.0-35 with
+  4 KiB base pages, 2 MiB PMD THP, and both THP enablement and defragmentation in
+  `madvise` mode;
+- this path does not change oneAPI pinned buffers, which come from PJRT
+  `createUninitializedBuffer` rather than `DmaMapAllocator`.
+
+Backing was checked while CUDA buffers were registered, not inferred from
+timing. The default process peaked at zero `AnonHugePages`. The opted-in
+adaptive process showed five anonymous 256 MiB VMAs, each with
+`AnonHugePages: 262144 kB` and `VmFlags` containing `hg`, for exactly 1.25 GiB
+live THP backing. `KernelPageSize`
+and `MMUPageSize` still printed 4 KiB on this kernel; use `AnonHugePages` plus
+`hg` for this mixed-VMA reporting case. Reading `smaps` perturbs a sub-second
+load, so that proof run is excluded from performance samples.
+
+The controlled A/B used the release CUDA playground directly, warm local model
+files, device 1, the fixed legacy loader at width 4, five 256 MiB DMA chunks,
+zero major faults, and five alternating baseline/THP pairs. Native Zen 5 events
+were used instead of generic `dTLB-loads` aliases. Medians:
+
+```text
+metric                         default             THP       THP change
+loader elapsed                 1.043 s         0.917 s          -12.1%
+logical goodput          14691.81 MiB/s   16700.57 MiB/s         +13.7%
+CPU task clock                  2.846 s         2.760 s           -3.0%
+minor faults                    334643          334583             0.0%
+instructions                    6.864 G         4.975 G          -27.5%
+cycles                          11.247 G        10.884 G           -3.2%
+L1 DTLB misses                 11.479 M         8.115 M          -29.3%
+L1+L2 DTLB misses/walks         5.674 M         2.321 M          -59.1%
+```
+
+The elapsed samples were `1.046, 1.036, 1.043, 1.041, 1.075 s` by default and
+`0.928, 0.949, 0.917, 0.917, 0.911 s` with THP. A separate non-multiplexed
+page-size run reduced 4 KiB L2-hit reloads from 4.025 M to 3.634 M and 4 KiB
+page walks from 4.417 M to 1.455 M; the remaining 2 MiB hit/miss events include
+other process and driver mappings and also declined slightly.
+
+The actual adaptive benchmark was then run as five more alternating pairs. All
+ten runs converged to four reads, four DMA lanes, five pinned chunks, and zero
+staging, so the comparison was not caused by a different final resource width:
+
+```text
+metric                         default             THP       THP change
+loader elapsed                 1.054 s         0.879 s          -16.6%
+logical goodput          14525.48 MiB/s   17429.15 MiB/s         +20.0%
+minor faults                    314290          314281             0.0%
+instructions                    7.207 G         4.811 G          -33.2%
+cycles                          11.208 G        10.382 G           -7.4%
+L1 DTLB misses                 11.603 M         7.788 M          -32.9%
+L1+L2 DTLB misses/walks         5.668 M         2.152 M          -62.0%
+```
+
+The adaptive elapsed samples were `1.080, 1.029, 1.054, 1.004, 1.054 s` by
+default and `0.879, 0.879, 0.879, 0.904, 0.903 s` with THP. Every paired run
+favored THP. The conclusion on this CUDA host and warm local workload is that
+THP materially helps these pinned buffers. The unchanged minor-fault count also
+answers the original diagnostic question: roughly 314K faults are first-touch
+activity here, but their count does not reveal the later DTLB/page-walk cost.
+
+Reproduction after the CUDA release build:
+
+```sh
+ZML_LOAD_DMA_HUGE_PAGES=1 ./bench_file.sh
+
+perf stat -e task-clock,page-faults,instructions,cycles,\
+ls_l1_d_tlb_miss.all,ls_l1_d_tlb_miss.all_l2_miss -- \
+env CUDA_VISIBLE_DEVICES=1 ZML_LOAD_DMA_HUGE_PAGES=1 \
+bazel-bin/examples/io/playground load ~/s3proxy/data/lfm/
+```
+
+Keep the mode opt-in until it has been repeated with smaller DMA buffers, cold
+files, remote sources, and other CUDA hosts. THP availability/fragmentation is
+kernel-state dependent, and a successful `madvise` does not guarantee backing;
+sample `/proc/$PID/smaps` (`AnonHugePages`, `VmFlags`) when validating a new
+deployment.
 
 ### Four-GPU oneAPI Llama 3.1 8B sweep, 2026-07-18
 

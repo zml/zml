@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
 const assert = std.debug.assert;
@@ -14,14 +15,23 @@ const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/mem");
 
+pub const DmaBufferPageMode = enum {
+    default,
+    transparent_huge,
+};
+
 pub const DmaAllocator = union(enum) {
     passthrough: std.mem.Allocator,
     uib: UninitializedBufferAllocator,
     dmam: DmaMapAllocator,
 
     pub fn init(parent: std.mem.Allocator, device: *const Device) DmaAllocator {
+        return initWithPageMode(parent, device, .default);
+    }
+
+    pub fn initWithPageMode(parent: std.mem.Allocator, device: *const Device, page_mode: DmaBufferPageMode) DmaAllocator {
         return switch (device.platform.target) {
-            .cuda => .{ .dmam = .init(parent, device.platform) },
+            .cuda => .{ .dmam = .initWithPageMode(parent, device.platform, page_mode) },
             .oneapi, .tpu => .{ .uib = .init(device.memory(.host_pinned).?) },
             .rocm, .cpu, .neuron, .metal => .{ .passthrough = parent },
         };
@@ -119,13 +129,21 @@ pub const UninitializedBufferAllocator = struct {
 };
 
 pub const DmaMapAllocator = struct {
+    const transparent_huge_page_size = 2 * 1024 * 1024;
+
     parent: std.mem.Allocator,
     platform: *const Platform,
+    page_mode: DmaBufferPageMode,
 
     pub fn init(parent: std.mem.Allocator, platform: *const Platform) DmaMapAllocator {
+        return initWithPageMode(parent, platform, .default);
+    }
+
+    pub fn initWithPageMode(parent: std.mem.Allocator, platform: *const Platform, page_mode: DmaBufferPageMode) DmaMapAllocator {
         return .{
             .parent = parent,
             .platform = platform,
+            .page_mode = page_mode,
         };
     }
 
@@ -143,11 +161,13 @@ pub const DmaMapAllocator = struct {
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *const DmaMapAllocator = @ptrCast(@alignCast(ctx));
-        const allocation = self.parent.rawAlloc(len, alignment, ret_addr);
+        const effective_alignment = self.effectiveAlignment(alignment);
+        const allocation = self.parent.rawAlloc(len, effective_alignment, ret_addr);
         if (allocation) |loc| {
             const data = loc[0..len];
+            self.adviseHugePages(data);
             self.platform.pjrt_client.dmaMap(self.platform.pjrt_api, @ptrCast(data)) catch {
-                self.parent.rawFree(data, alignment, ret_addr);
+                self.parent.rawFree(data, effective_alignment, ret_addr);
                 return null;
             };
         }
@@ -175,7 +195,31 @@ pub const DmaMapAllocator = struct {
     fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const self: *const DmaMapAllocator = @ptrCast(@alignCast(ctx));
         self.platform.pjrt_client.dmaUnmap(self.platform.pjrt_api, @ptrCast(buf[0..buf.len])) catch unreachable;
-        self.parent.rawFree(buf, alignment, ret_addr);
+        self.parent.rawFree(buf, self.effectiveAlignment(alignment), ret_addr);
+    }
+
+    fn effectiveAlignment(self: *const DmaMapAllocator, alignment: Alignment) Alignment {
+        return switch (self.page_mode) {
+            .default => alignment,
+            .transparent_huge => alignment.max(.fromByteUnits(transparent_huge_page_size)),
+        };
+    }
+
+    fn adviseHugePages(self: *const DmaMapAllocator, data: []u8) void {
+        if (self.page_mode != .transparent_huge) return;
+        if (comptime builtin.os.tag != .linux) {
+            log.warn("transparent huge DMA pages requested on unsupported OS {s}", .{@tagName(builtin.os.tag)});
+            return;
+        }
+
+        const ptr: [*]align(std.heap.page_size_min) u8 = @alignCast(data.ptr);
+        std.posix.madvise(ptr, data.len, std.posix.MADV.HUGEPAGE) catch |err| {
+            log.warn("MADV_HUGEPAGE failed for DMA buffer at 0x{x} ({Bi:.2}): {s}", .{
+                @intFromPtr(data.ptr),
+                data.len,
+                @errorName(err),
+            });
+        };
     }
 };
 

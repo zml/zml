@@ -4107,6 +4107,9 @@ pub const LoadOpts = struct {
     /// use a large scheduling quantum without multiplying that quantum by the
     /// device count in every pinned pool allocation.
     dma_buffer_size: ?usize = null,
+    /// Host page policy for pinned DMA buffers. Transparent huge pages are an
+    /// opt-in hint and currently affect CUDA host-registered allocations.
+    dma_buffer_page_mode: mem.DmaBufferPageMode = .default,
     /// Logical bytes a DMA lane processes before yielding to another tensor.
     dma_chunk_size: usize,
     total_bytes: ?*usize = null,
@@ -4179,7 +4182,7 @@ pub fn load(
     var metrics: LoadMetrics = .{};
     const configured_read_workers = if (adaptive) initial_read_workers else max_workers;
     const configured_max_read_workers = if (adaptive) max_read_workers else max_workers;
-    load_log.debug("configured: target={s}, adaptive={}, requested_adaptive={}, tensors={d}, reads={d}/{d}, dma={d}/{d} (requested_max={d}), dma_chunks={d}/{d}, staging=0/{d} blocks ({Bi:.2} max), read_chunk_size={Bi:.2}, dma_buffer_size={Bi:.2}, dma_chunk_size={Bi:.2}, logical_bytes={Bi:.2}", .{
+    load_log.debug("configured: target={s}, adaptive={}, requested_adaptive={}, tensors={d}, reads={d}/{d}, dma={d}/{d} (requested_max={d}), dma_chunks={d}/{d}, staging=0/{d} blocks ({Bi:.2} max), read_chunk_size={Bi:.2}, dma_buffer_size={Bi:.2}, dma_buffer_page_mode={s}, dma_chunk_size={Bi:.2}, logical_bytes={Bi:.2}", .{
         @tagName(platform.target),
         adaptive,
         opts.adaptive_parallelism,
@@ -4195,6 +4198,7 @@ pub fn load(
         opts.max_staging_bytes,
         opts.read_chunk_size,
         dma_buffer_size,
+        @tagName(opts.dma_buffer_page_mode),
         opts.dma_chunk_size,
         total_logical_bytes,
     });
@@ -4203,7 +4207,7 @@ pub fn load(
     const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
     defer allocator.free(dma_allocators);
     for (platform.devices, 0..) |*device, i| {
-        dma_allocators[i] = .init(allocator, device);
+        dma_allocators[i] = .initWithPageMode(allocator, device, opts.dma_buffer_page_mode);
     }
 
     const buffer_pools = try allocator.alloc(mem.DynamicBufferPool, pool_count);
