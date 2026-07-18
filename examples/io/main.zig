@@ -219,6 +219,7 @@ pub fn main(init: std.process.Init) !void {
             const load_max_read_parallelism = try envOptionalUsize(init.environ_map, "ZML_LOAD_MAX_READ_PARALLELISM");
             const load_dma_chunks = try envUsize(init.environ_map, "ZML_LOAD_DMA_CHUNKS", 16);
             const load_dma_chunk_mib = try envUsize(init.environ_map, "ZML_LOAD_DMA_CHUNK_MIB", 256);
+            const load_dma_buffer_mib = try envOptionalUsize(init.environ_map, "ZML_LOAD_DMA_BUFFER_MIB");
             const load_read_chunk_mib = try envUsize(init.environ_map, "ZML_LOAD_READ_CHUNK_MIB", 32);
             const load_max_staging_mib = try envUsize(init.environ_map, "ZML_LOAD_MAX_STAGING_MIB", 1024);
 
@@ -231,6 +232,7 @@ pub fn main(init: std.process.Init) !void {
                 .read_chunk_size = load_read_chunk_mib * zml.MiB,
                 .max_staging_bytes = load_max_staging_mib * zml.MiB,
                 .dma_chunks = load_dma_chunks,
+                .dma_buffer_size = if (load_dma_buffer_mib) |mib| mib * zml.MiB else null,
                 .dma_chunk_size = load_dma_chunk_mib * zml.MiB,
                 .progress = &progress,
                 .total_bytes = &total_bytes,

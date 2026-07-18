@@ -2,10 +2,11 @@
 
 Snapshot date: 2026-07-18
 
-Snapshot base commit: `2b9dcf2e` (`benches`), detached at
-`origin/brabier/adaptive-concurrency`. The working tree contains the adaptive
-loader fixes and benchmark changes summarized below; inspect `git diff` before
-assuming they have been committed.
+Snapshot base commit: `a6f8918a` (`cuda`) on
+`brabier/adaptive-concurrency`. The working tree contains the user's four-GPU
+oneAPI benchmark-script changes plus the pinned-buffer/quantum separation and
+benchmark documentation summarized below; inspect `git diff` before assuming
+they have been committed.
 
 This file is an implementation handoff for agents. It is deliberately dense.
 Treat current source as authoritative when it conflicts with this snapshot.
@@ -37,16 +38,21 @@ must not compare their absolute byte rates directly.
 
 Current validation state at this snapshot:
 
-- deterministic `//zml:test` passes with 204 inline tests;
-- the CUDA release `//examples/io:playground` builds and both benchmark scripts
-  run on device 1;
-- a 14.96 GiB Llama 3.1 8B load has been exercised repeatedly on CUDA from warm
-  local files and through S3Proxy;
-- 20/20 forced-width-8 local runs complete after the teardown fix, and the
-  final adaptive local runs converge to 4 reads/4 DMA lanes with no staging;
-- S3Proxy's checked-in default (`1000 ms`, `100 MiB/s`) completes in 84.241 s
-  at 181.82 MiB/s and reaches 32 reads/8 DMA lanes. The pre-fix controller
-  timed out after 180 s with only 6.41 GiB committed.
+- deterministic `//zml:test` passes with 209 tests (one skipped on this host);
+- release `//examples/io:playground` builds for oneAPI and both benchmark
+  scripts run on four Intel Battlemage G31 / Arc Pro B70 devices selected by
+  `ONEAPI_DEVICE_SELECTOR=level_zero:0,1,2,3`;
+- the 14.96 GiB Llama 3.1 8B workload has been swept across fixed/adaptive
+  widths, 32/64/128/256 MiB DMA quanta, and independently sized pinned blocks
+  from warm local files and S3Proxy;
+- a 256 MiB logical quantum with a 64 MiB pinned block is the best balanced
+  local four-GPU setting observed; a 32 MiB pinned block performs better on the
+  tested S3 profiles. No single fixed block size is within 3% on both sources;
+- a four-GPU replicated load completed in 9.758 s with 14.96 GiB logical bytes
+  and 59.83 GiB physical PJRT bytes committed, validating the physical/logical
+  metric distinction end to end;
+- the earlier single-CUDA validation and its 20/20 teardown stress result remain
+  recorded below, but must not be treated as the current hardware result.
 
 ## Design Summary
 
@@ -85,6 +91,13 @@ There is one controller for four related knobs:
 - `dma_workers`: maximum admitted tensor DMA lanes;
 - `dma_chunks`: per-device pinned block limit;
 - `staging_chunks`: active pageable block limit.
+
+`dma_buffer_size` is a static per-device pinned block size, not a fifth
+controller knob. `dma_chunk_size` remains the logical lane scheduling quantum.
+They default to the same value for compatibility but can now be tuned
+independently. This matters on multi-device sharding: multiplying a 256 MiB
+logical quantum by every device made lazy pinned allocation a material fraction
+of a short local load.
 
 One controller is intentional. Independent read and DMA controllers would fight
 through the intermediate queue. The single controller changes one dimension at
@@ -145,7 +158,11 @@ Relevant history:
 - `max_staging_bytes = 1 GiB`: hard pageable budget. Blocks are lazy.
 - `max_staging_bytes = 0`: no pageable staging; direct/DMA adaptation remains.
 - `dma_chunks`: hard pinned blocks per device.
-- `dma_chunk_size`: larger logical DMA submission quantum, commonly 256 MiB.
+- `dma_buffer_size = null`: per-device pinned block size; null preserves the
+  old behavior and uses `dma_chunk_size`.
+- `dma_chunk_size`: logical bytes a DMA lane processes before yielding,
+  commonly 256 MiB. A shard writer may submit smaller buffers within this
+  quantum when `dma_buffer_size < dma_chunk_size`.
 
 Adaptive eligibility:
 
@@ -759,6 +776,7 @@ ZML_LOAD_PARALLELISM
 ZML_LOAD_INITIAL_PARALLELISM
 ZML_LOAD_MAX_READ_PARALLELISM
 ZML_LOAD_DMA_CHUNKS
+ZML_LOAD_DMA_BUFFER_MIB
 ZML_LOAD_DMA_CHUNK_MIB
 ZML_LOAD_READ_CHUNK_MIB
 ZML_LOAD_MAX_STAGING_MIB
@@ -769,11 +787,13 @@ Example:
 ```sh
 LATENCY_MS=250 SPEED_MIB=1000 \
 ZML_LOAD_PARALLELISM=8 ZML_LOAD_MAX_READ_PARALLELISM=32 \
+ZML_LOAD_DMA_BUFFER_MIB=32 \
 ./bench_s3.sh
 ```
 
-Do not use the CPU sweep to tune DMA chunk size. Run chunk/pinned/DMA sweeps on
-CUDA/oneAPI and compare committed H2D goodput plus total wall time.
+Do not use the CPU sweep to tune DMA chunk or buffer size. Run
+buffer/quantum/pinned/DMA sweeps on CUDA/oneAPI and compare committed H2D
+goodput plus total wall time.
 
 ### CUDA Llama 3.1 8B sweep, 2026-07-18
 
@@ -839,6 +859,114 @@ The final run completed all bytes, though one 4-to-6 DMA capacity attempt still
 timed out before later probes reached the cap. Long-latency probe scoring and
 repeated high-read staging retries remain optimization opportunities.
 
+### Four-GPU oneAPI Llama 3.1 8B sweep, 2026-07-18
+
+Harness:
+
+- four Intel Battlemage G31 / Arc Pro B70 devices through oneAPI;
+- `ONEAPI_DEVICE_SELECTOR=level_zero:0,1,2,3` and release
+  `//examples/io:playground`;
+- 291 tensors and 14.96 GiB logical bytes, normally sharded across the four
+  devices;
+- warm local files under `~/s3proxy/data/lfm`; S3Proxy uses the same files;
+- elapsed values are the loader's `completed` time, not Bazel startup or the
+  occasional process-exit delay described below.
+
+The original 256 MiB-coupled default is a poor local fit. Three adaptive runs
+were 5.400, 4.648, and 5.154 s (5.154 s median). They remained fully direct and
+ended at four read/DMA lanes, five pinned blocks per device, and zero staging.
+The first useful progress could take roughly 2.0-2.5 s while large per-device
+pinned buffers and transfer managers were created.
+
+Warm local fixed-loader sweep with the original 256 MiB blocks:
+
+```text
+workers          1       2       4       8      16
+elapsed (s)   5.194   4.036   4.201   4.711   6.995
+```
+
+With 32 MiB blocks, fixed width 2 ran in 3.560, 3.642, and 3.623 s
+(3.623 s median). Width 4 took 3.649 s once. Wider concurrency is not the
+answer on this host; pinned allocation size and lane startup dominate first.
+
+Changing `dma_chunk_size` alone conflates physical allocation with scheduling:
+
+```text
+coupled buffer/quantum    local adaptive       S3 10ms/1000MiB/s
+32 MiB                    3.642 s median        9.877 s
+64 MiB                    3.737 s median       10.216 s
+128 MiB                   3.910 s               not run
+256 MiB                   5.154 s median        8.401 s
+```
+
+Small coupled quanta make local pinned allocation cheaper but cause more lane
+turnover/submission pressure and slower S3 convergence. This motivated the
+separate `dma_buffer_size` setting. Keeping a 256 MiB scheduling quantum while
+varying only the pinned block produced:
+
+```text
+pinned block   warm local                    S3 10ms/1000MiB/s  S3 250ms/1000MiB/s
+32 MiB         3.762 s median (3 runs)       6.285 s median     21.187 s
+48 MiB         3.820 s                       7.797 s             not run
+64 MiB         3.548 s initial median        6.871 s             32.731 s
+128 MiB        3.711 s                       7.171 s             not run
+256 MiB        5.154 s original median       8.401 s             24.522 s
+```
+
+Later three-run local monitoring at 64 MiB had a 3.853 s median; the combined
+six-run median is about 3.708 s, 2.3% slower than the fixed-width-2/32 MiB
+median and still inside the 3% band. The initial three-run 3.548 s result shows
+that oneAPI run-to-run variance is material. The 32 MiB S3 result spans
+5.985-8.299 s; its 6.285 s median is still substantially better than the
+original one-run 8.401 s result, but needs a larger repeated sample before a
+universal default change.
+
+At `250 ms/1000 MiB/s`, a known-remote override of initial width 8 with a
+32 MiB buffer reached 32 reads/8 DMA lanes in 18.858 s, versus 21.187 s from
+the default initial width and 24.522 s with the original 256 MiB buffer. Its
+peak RSS was about 8.7 GiB, so the time gain is not free. The default-width
+32 MiB run peaked around 6.7 GiB.
+
+There is no defensible single static block size from this matrix: 64 MiB is the
+balanced local choice, while 32 MiB is the tested remote choice, and 48 MiB
+missed both observed 3% bands. Keep `dma_buffer_size` opt-in until buffer size
+can be chosen from stronger cross-source evidence or adapted safely. Useful
+commands are:
+
+```sh
+ZML_LOAD_DMA_BUFFER_MIB=64 ./bench_file.sh
+LATENCY_MS=10 SPEED_MIB=1000 ZML_LOAD_DMA_BUFFER_MIB=32 ./bench_s3.sh
+```
+
+Four-device replicated validation with a 64 MiB block and 256 MiB quantum
+completed in 9.758 s. The loader read 14.96 GiB once and reported 59.83 GiB
+submitted/committed, exactly the expected physical-versus-logical distinction.
+It finished fully direct with no pageable staging.
+
+Problems/opportunities exposed by this sweep:
+
+1. Pinned block size and logical DMA fairness quantum were incorrectly coupled.
+   The new optional setting separates them and queue-capacity pressure is now
+   normalized by physical buffer bytes.
+2. Bursty S3 ready data still causes sawtooth staging probes and aggressive
+   read/staging backoff. An experiment that retained staging for the reduced
+   read width and counted draining blocks in the occupancy denominator improved
+   one 64 MiB run but regressed a 32 MiB run; it was not retained. The next
+   policy experiment needs repeated same-source scoring, not another threshold.
+3. Startup-width 8 improves known-remote time but increases memory and hurts the
+   unknown-source objective. Source classification or a cheaper read-only
+   bootstrap remains preferable to changing the universal initial width.
+4. Three runs intermittently logged all tensors, `controller stopped`, final
+   `completed`, and `Loaded weights`, then took roughly 35-40 additional seconds
+   to exit. Three targeted monitored repetitions did not reproduce it, and no
+   live stack was captured. Because the loader's final records precede the
+   pause, investigate oneAPI/PJRT/platform teardown separately from pipeline
+   completion.
+5. `dma_utilization` can exceed 100% in startup/transition windows because work
+   time is completion-attributed across sampling boundaries. Treat it as a
+   saturation hint, not a literal occupancy integral, until the metric is made
+   window-resident.
+
 ## Research Versus Current Implementation
 
 `RESEARCH.md` recommends a startup-plus-Gradient2/Vegas style controller with
@@ -850,6 +978,8 @@ Implemented now:
 - committed-byte objective;
 - byte-weighted latency;
 - bounded queues and hard memory caps;
+- independently configurable per-device pinned block size and logical DMA lane
+  quantum;
 - queue/latency guardrails on H2D;
 - one-dimensional probes with 3% hysteresis;
 - resource minimization within 3% of peak;
@@ -901,11 +1031,19 @@ protocol, and committed-byte objective.
     retries still produce run-to-run convergence variance. A cumulative
     post-activation committed-byte objective or an EWMA baseline is the next
     policy experiment; preserve epoch capacity proof.
-11. The CUDA workload is covered, but the same end-to-end matrix has not been
-    rerun on oneAPI or a multi-device replicated placement.
+11. CUDA and four-device oneAPI sharded loads are covered, and one oneAPI
+    replicated load completed correctly. Replicated performance has not had a
+    static width/buffer sweep and should not be inferred from the sharded knee.
 12. Success-path lifecycle hangs were stress-tested. Read/PJRT failure injection
     and transport-level cancellation remain required before treating teardown as
     fully proven.
+13. `dma_buffer_size` is static for a load. The observed local and S3 knees differ
+    (64 versus 32 MiB), and the 48 MiB compromise missed the 3% band. Do not make
+    an automatic default from this small matrix without cross-source repeats.
+14. oneAPI process exit occasionally pauses for roughly 35-40 s after the loader
+    and the playground both log completion. The loader counters are complete and
+    three targeted reruns exited normally, so the responsible PJRT/platform
+    teardown frame is still unknown.
 
 ## Validation
 
@@ -927,6 +1065,8 @@ The inline suite covers:
 - pressure, latency reliability, starvation deduplication;
 - resource reduction and global 3% band;
 - scheduling fence and stable ready queue pointers.
+- direct writers whose pinned block is smaller than their logical DMA quantum,
+  including replicated multi-device placement.
 
 Performance validation must compare the same model/source/cache state:
 
@@ -938,13 +1078,14 @@ Performance validation must compare the same model/source/cache state:
 5. Record total elapsed/logical goodput, committed goodput, direct/staged bytes,
    peak/final knobs, allocated pinned/pageable blocks, and starvation.
 
-As of the snapshot date, the regression tests and CUDA release build pass. The
-14.96 GiB workload completes repeatedly from local files, 20/20 forced-width-8
-stress runs complete, and both the short and checked-in-default S3Proxy profiles
-complete. The final local adaptive median is within 1% of fixed width 4 and uses
-zero staging. The high-latency S3 controller reaches its caps and beats the
-legacy fixed path's timeout, but its probe timeline remains noisier than the
-acceptance ideal and should be improved with a same-source repeated sweep.
+As of the snapshot date, 209 tests pass (one platform-specific test skips) and
+the four-GPU oneAPI release playground builds. The earlier CUDA regression set
+still stands. On four-device oneAPI, the decoupled 256 MiB quantum/64 MiB buffer
+local result is inside 3% of the best repeated fixed result and uses zero
+staging. A 32 MiB buffer improves both tested S3 profiles but convergence remains
+noisy; the 10 ms profile spans 5.985-8.299 s over three runs. One replicated
+load completed with the expected 4x physical committed bytes. The intermittent
+post-completion oneAPI exit delay remains unresolved.
 
 Acceptance target:
 

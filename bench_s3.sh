@@ -63,4 +63,4 @@ if ! curl --silent --fail --output /dev/null "${aws_endpoint}/"; then
     exit 1
 fi
 
-CUDA_VISIBLE_DEVICES=1 AWS_ENDPOINT_URL="${aws_endpoint}" ./bazel.sh run --config=release --@zml//platforms:cuda=true //examples/io:playground -- load s3://lfm
+ONEAPI_DEVICE_SELECTOR=level_zero:0,1,2,3 AWS_ENDPOINT_URL="${aws_endpoint}" ./bazel.sh run --config=release --@zml//platforms:oneapi=true //examples/io:playground -- load s3://lfm

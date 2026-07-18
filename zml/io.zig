@@ -2131,6 +2131,7 @@ const AdaptiveLoadRuntime = struct {
     staging_allocator: std.mem.Allocator,
     metrics: *LoadMetrics,
     dma_chunk_size: usize,
+    dma_buffer_size: usize,
     read_chunk_size: usize,
     total_logical_bytes: u64,
     total_transfers: usize,
@@ -2377,7 +2378,7 @@ const AdaptiveLoadRuntime = struct {
             const queue_growth = queue -| previous_queue;
             const queue_capacity = @max(
                 @as(u64, 1),
-                @as(u64, @intCast(self.controller.knobs.dma_chunks *| self.dma_chunk_size *| @max(@as(usize, 1), self.pools.len))),
+                @as(u64, @intCast(self.controller.knobs.dma_chunks *| self.dma_buffer_size *| @max(@as(usize, 1), self.pools.len))),
             );
             const h2d_growth_ratio = @as(f64, @floatFromInt(queue_growth)) / @as(f64, @floatFromInt(queue_capacity));
             const h2d_queue_ratio = @as(f64, @floatFromInt(queue)) / @as(f64, @floatFromInt(queue_capacity));
@@ -4098,9 +4099,15 @@ pub const LoadOpts = struct {
     max_staging_bytes: usize = 1024 * 1024 * 1024,
     shardings: []const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
-    /// Hard per-device DMA chunk maximum. Adaptive loading normally uses one
-    /// more chunk than active workers and probes higher only when useful.
+    /// Hard per-device pinned-block count. Adaptive loading normally uses one
+    /// more block than active workers and probes higher only when useful.
     dma_chunks: usize,
+    /// Per-device pinned buffer size. When null, uses `dma_chunk_size` for
+    /// backwards compatibility. Keeping this separate lets multi-device loads
+    /// use a large scheduling quantum without multiplying that quantum by the
+    /// device count in every pinned pool allocation.
+    dma_buffer_size: ?usize = null,
+    /// Logical bytes a DMA lane processes before yielding to another tensor.
     dma_chunk_size: usize,
     total_bytes: ?*usize = null,
 };
@@ -4127,6 +4134,8 @@ pub fn load(
     stdx.debug.assert(opts.initial_parallelism > 0, "zml.io.load initial_parallelism must be greater than zero", .{});
     stdx.debug.assert(opts.dma_chunks > 0, "zml.io.load dma_chunks must be greater than zero", .{});
     stdx.debug.assert(opts.dma_chunk_size >= @sizeOf(usize), "zml.io.load dma_chunk_size must hold pool metadata", .{});
+    const dma_buffer_size = opts.dma_buffer_size orelse opts.dma_chunk_size;
+    stdx.debug.assert(dma_buffer_size >= @sizeOf(usize), "zml.io.load dma_buffer_size must hold pool metadata", .{});
     stdx.debug.assert(opts.read_chunk_size > 0, "zml.io.load read_chunk_size must be greater than zero", .{});
 
     const load_started: std.Io.Timestamp = .now(io, .awake);
@@ -4170,7 +4179,7 @@ pub fn load(
     var metrics: LoadMetrics = .{};
     const configured_read_workers = if (adaptive) initial_read_workers else max_workers;
     const configured_max_read_workers = if (adaptive) max_read_workers else max_workers;
-    load_log.debug("configured: target={s}, adaptive={}, requested_adaptive={}, tensors={d}, reads={d}/{d}, dma={d}/{d} (requested_max={d}), dma_chunks={d}/{d}, staging=0/{d} blocks ({Bi:.2} max), read_chunk_size={Bi:.2}, dma_chunk_size={Bi:.2}, logical_bytes={Bi:.2}", .{
+    load_log.debug("configured: target={s}, adaptive={}, requested_adaptive={}, tensors={d}, reads={d}/{d}, dma={d}/{d} (requested_max={d}), dma_chunks={d}/{d}, staging=0/{d} blocks ({Bi:.2} max), read_chunk_size={Bi:.2}, dma_buffer_size={Bi:.2}, dma_chunk_size={Bi:.2}, logical_bytes={Bi:.2}", .{
         @tagName(platform.target),
         adaptive,
         opts.adaptive_parallelism,
@@ -4185,6 +4194,7 @@ pub fn load(
         max_staging_chunks,
         opts.max_staging_bytes,
         opts.read_chunk_size,
+        dma_buffer_size,
         opts.dma_chunk_size,
         total_logical_bytes,
     });
@@ -4199,7 +4209,7 @@ pub fn load(
     const buffer_pools = try allocator.alloc(mem.DynamicBufferPool, pool_count);
     defer allocator.free(buffer_pools);
     for (buffer_pools) |*pool_| {
-        pool_.* = .init(opts.dma_chunks, opts.dma_chunk_size);
+        pool_.* = .init(opts.dma_chunks, dma_buffer_size);
         if (adaptive) pool_.setLimit(io, initial_chunks);
     }
     defer for (buffer_pools, 0..) |*pool_, i| {
@@ -4275,6 +4285,7 @@ pub fn load(
             .staging_allocator = allocator,
             .metrics = &metrics,
             .dma_chunk_size = opts.dma_chunk_size,
+            .dma_buffer_size = dma_buffer_size,
             .read_chunk_size = opts.read_chunk_size,
             .total_logical_bytes = total_logical_bytes,
             .total_transfers = tensor_count,
@@ -5716,6 +5727,7 @@ const DirectMemoryWriterDeviceTest = struct {
         writable_slice_min_len: usize = 128,
         pool_chunks: usize = 4,
         pool_chunk_size: usize = 1 << 20,
+        dma_chunk_size: ?usize = null,
     };
 
     allocator: std.mem.Allocator,
@@ -5734,6 +5746,7 @@ const DirectMemoryWriterDeviceTest = struct {
             scenario.writable_slice_min_len,
             scenario.pool_chunks,
             scenario.pool_chunk_size,
+            scenario.dma_chunk_size orelse scenario.pool_chunk_size,
         );
     }
 
@@ -5746,6 +5759,7 @@ const DirectMemoryWriterDeviceTest = struct {
         writable_slice_min_len: usize,
         pool_chunks: usize,
         pool_chunk_size: usize,
+        dma_chunk_size: usize,
     ) !void {
         const slice = try Slice.alloc(self.allocator, shape);
         defer slice.free(self.allocator);
@@ -5777,7 +5791,7 @@ const DirectMemoryWriterDeviceTest = struct {
             platform,
             pools,
             dma_allocators,
-            pool_chunk_size,
+            dma_chunk_size,
             shape,
             sharding,
             &written_buffer,
@@ -5993,6 +6007,7 @@ test "DirectMemoryWriter: staged window followed by direct read" {
         .strategy = .parseBindings(.{ .x = .link_x }),
         .write_mode = .staged_then_direct,
         .pool_chunk_size = 1024,
+        .dma_chunk_size = 4096,
     });
 }
 
