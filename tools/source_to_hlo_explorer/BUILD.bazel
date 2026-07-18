@@ -1,0 +1,23 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+
+zig_binary(
+    name = "poc",
+    srcs = [
+        "artifact.zig",
+        "source.zig",
+    ],
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+build_test(
+    name = "test",
+    targets = [":poc"],
+)
+
+zig_test(
+    name = "artifact_test",
+    main = "artifact.zig",
+)

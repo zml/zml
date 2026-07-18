@@ -1,0 +1,124 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": "source.zig:4:28",
+      "file": "source.zig",
+      "line": 4,
+      "column": 28,
+      "stable_op_ids": [
+        "0"
+      ]
+    },
+    {
+      "id": "source.zig:5:42",
+      "file": "source.zig",
+      "line": 5,
+      "column": 42,
+      "stable_op_ids": [
+        "1",
+        "2",
+        "3"
+      ]
+    }
+  ],
+  "stable_ops": [
+    {
+      "id": "0",
+      "source_id": "source.zig:4:28",
+      "operation": "stablehlo.add",
+      "stablehlo_lines": [
+        6
+      ],
+      "hlo_instruction_ids": [
+        "%zml_stable_op.3"
+      ]
+    },
+    {
+      "id": "1",
+      "source_id": "source.zig:5:42",
+      "operation": "stablehlo.constant",
+      "stablehlo_lines": [
+        5
+      ],
+      "hlo_instruction_ids": [
+        "%constant.1"
+      ]
+    },
+    {
+      "id": "2",
+      "source_id": "source.zig:5:42",
+      "operation": "stablehlo.broadcast_in_dim",
+      "stablehlo_lines": [
+        7
+      ],
+      "hlo_instruction_ids": [
+        "%broadcast.1"
+      ]
+    },
+    {
+      "id": "3",
+      "source_id": "source.zig:5:42",
+      "operation": "stablehlo.multiply",
+      "stablehlo_lines": [
+        8
+      ],
+      "hlo_instruction_ids": [
+        "%zml_stable_op.4",
+        "%zml_stable_op.5"
+      ]
+    }
+  ],
+  "hlo_instructions": [
+    {
+      "id": "%zml_stable_op.3",
+      "name": "%zml_stable_op.3",
+      "opcode": "add",
+      "hlo_lines": [
+        22
+      ],
+      "stable_op_id": "0",
+      "mapping": "metadata"
+    },
+    {
+      "id": "%zml_stable_op.4",
+      "name": "%zml_stable_op.4",
+      "opcode": "multiply",
+      "hlo_lines": [
+        25
+      ],
+      "stable_op_id": "3",
+      "mapping": "metadata"
+    },
+    {
+      "id": "%zml_stable_op.5",
+      "name": "%zml_stable_op.5",
+      "opcode": "custom-call",
+      "hlo_lines": [
+        26
+      ],
+      "stable_op_id": "3",
+      "mapping": "metadata"
+    },
+    {
+      "id": "%constant.1",
+      "name": "%constant.1",
+      "opcode": "constant",
+      "hlo_lines": [
+        23
+      ],
+      "stable_op_id": "1",
+      "mapping": "dataflow_operand"
+    },
+    {
+      "id": "%broadcast.1",
+      "name": "%broadcast.1",
+      "opcode": "broadcast",
+      "hlo_lines": [
+        24
+      ],
+      "stable_op_id": "2",
+      "mapping": "dataflow_operand"
+    }
+  ]
+}

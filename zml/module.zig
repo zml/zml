@@ -50,7 +50,11 @@ pub const CompilationOptions = struct {
     partitioner: ?Sharding.Partitioner = null,
     // Debugging options
     program_name: []const u8 = "zml",
+    /// When set, writes the post-ZML-pass StableHLO and its explicit source
+    /// provenance to this directory before handing the module to PJRT.
+    explorer_dump_to: ?[]const u8 = null,
     xla_dump_to: ?[]const u8 = null,
+    xla_dump_hlo_as_text: bool = false,
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
     xla_dump_emitter_re: ?[]const u8 = null,
@@ -59,6 +63,50 @@ pub const CompilationOptions = struct {
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 
 pub const CompilationContext = struct {
+    pub const ProvenanceRecord = struct {
+        stable_op_id: u64,
+        file: []const u8,
+        line: u32,
+        column: u32,
+    };
+
+    pub const SourceScope = struct {
+        context: *CompilationContext,
+        previous_source: ?std.builtin.SourceLocation,
+
+        pub fn deinit(self: *SourceScope) void {
+            self.context.current_source = self.previous_source;
+        }
+    };
+
+    pub const OperationProvenance = struct {
+        location: *const mlir.Location,
+        stable_op_name: ?[]const u8,
+
+        pub fn annotate(self: OperationProvenance, ctx: *CompilationContext, op: *mlir.Operation) void {
+            const name = self.stable_op_name orelse return;
+
+            var attributes: std.ArrayList(mlir.NamedAttribute) = .empty;
+            if (op.attributeByName("mhlo.frontend_attributes")) |existing| {
+                if (existing.isA(mlir.DictionaryAttribute)) |dictionary| {
+                    attributes.ensureTotalCapacity(ctx.arena.allocator(), dictionary.size() + 1) catch @panic("OOM");
+                    for (0..dictionary.size()) |i| {
+                        const attribute = dictionary.get(i);
+                        if (!std.mem.eql(u8, attribute.name().str(), "zml.stable_op_id")) {
+                            attributes.appendAssumeCapacity(attribute);
+                        }
+                    }
+                }
+            }
+            attributes.append(ctx.arena.allocator(), .named(
+                ctx.mlir_ctx,
+                "zml.stable_op_id",
+                .string(ctx.mlir_ctx, name),
+            )) catch @panic("OOM");
+            op.setAttributeByName("mhlo.frontend_attributes", .dict(ctx.mlir_ctx, attributes.items));
+        }
+    };
+
     pub const Scope = struct {
         block: *mlir.Block,
         id_to_argument: std.AutoArrayHashMapUnmanaged(usize, usize),
@@ -99,6 +147,10 @@ pub const CompilationContext = struct {
     manual_computation_depth: usize = 0,
 
     channel_id: i64 = 0,
+
+    current_source: ?std.builtin.SourceLocation = null,
+    next_stable_op_id: u64 = 0,
+    provenance_records: std.ArrayList(ProvenanceRecord) = .empty,
 
     threadlocal var _current: ?*CompilationContext = null;
 
@@ -189,6 +241,47 @@ pub const CompilationContext = struct {
         self.channel_id += 1;
         return self.channel_id;
     }
+
+    /// Associates all StableHLO operations emitted within the returned scope
+    /// with an explicit Zig source location.
+    pub fn pushSource(self: *CompilationContext, source: std.builtin.SourceLocation) SourceScope {
+        const previous_source = self.current_source;
+        self.current_source = source;
+        return .{
+            .context = self,
+            .previous_source = previous_source,
+        };
+    }
+
+    /// Returns fresh, self-contained provenance while an explicit source scope
+    /// is active, otherwise preserves the existing unknown-location behavior.
+    pub fn operationProvenance(self: *CompilationContext) OperationProvenance {
+        const source = self.current_source orelse {
+            return .{
+                .location = .unknown(self.mlir_ctx),
+                .stable_op_name = null,
+            };
+        };
+        const stable_op_id = self.next_stable_op_id;
+        self.next_stable_op_id += 1;
+
+        self.provenance_records.append(self.arena.allocator(), .{
+            .stable_op_id = stable_op_id,
+            .file = source.file,
+            .line = source.line,
+            .column = source.column,
+        }) catch @panic("OOM");
+
+        const name = std.fmt.allocPrint(
+            self.arena.allocator(),
+            "zml.stable_op.{d}",
+            .{stable_op_id},
+        ) catch @panic("OOM");
+        return .{
+            .location = mlir.Location.fromSrc(self.mlir_ctx, source).named(self.mlir_ctx, name),
+            .stable_op_name = name,
+        };
+    }
 };
 
 pub fn Compiler(comptime func: anytype) type {
@@ -263,6 +356,10 @@ pub fn compile(
         },
     };
 
+    if (opts.explorer_dump_to) |dump_to| {
+        try dumpExplorerArtifacts(&compilation_context, dump_to);
+    }
+
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
@@ -283,6 +380,47 @@ pub fn compile(
     errdefer exe.deinit();
 
     return exe;
+}
+
+fn dumpExplorerArtifacts(ctx: *CompilationContext, output_dir: []const u8) !void {
+    try std.Io.Dir.cwd().createDirPath(ctx.io, output_dir);
+
+    {
+        const stablehlo_path = try std.Io.Dir.path.join(ctx.arena.allocator(), &.{ output_dir, "stablehlo.mlir" });
+        var file = try std.Io.Dir.createFile(.cwd(), ctx.io, stablehlo_path, .{});
+        defer file.close(ctx.io);
+
+        var buffer: [16 * 1024]u8 = undefined;
+        var file_writer = file.writer(ctx.io, &buffer);
+        defer file_writer.interface.flush() catch {};
+
+        try file_writer.interface.print("{f}\n", .{ctx.module.operation().fmt(.{
+            .debug_info = true,
+            .debug_info_pretty_form = true,
+        })});
+        try file_writer.interface.flush();
+    }
+
+    {
+        const provenance_path = try std.Io.Dir.path.join(ctx.arena.allocator(), &.{ output_dir, "provenance.json" });
+        var file = try std.Io.Dir.createFile(.cwd(), ctx.io, provenance_path, .{});
+        defer file.close(ctx.io);
+
+        var buffer: [16 * 1024]u8 = undefined;
+        var file_writer = file.writer(ctx.io, &buffer);
+        defer file_writer.interface.flush() catch {};
+
+        var json_writer: std.json.Stringify = .{
+            .writer = &file_writer.interface,
+            .options = .{ .whitespace = .indent_2 },
+        };
+        try json_writer.write(.{
+            .version = @as(u32, 1),
+            .records = ctx.provenance_records.items,
+        });
+        try file_writer.interface.writeByte('\n');
+        try file_writer.interface.flush();
+    }
 }
 
 fn addPartitionerOperations(ctx: *CompilationContext) !void {
@@ -676,6 +814,9 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
         if (opts.xla_dump_to) |xla_dump_to| {
             try setXlaOverrideFlag(overrides_map, "xla_dump_to", xla_dump_to, upb_arena);
             try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_as_proto", true, upb_arena);
+            if (opts.xla_dump_hlo_as_text) {
+                try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_as_text", true, upb_arena);
+            }
             if (opts.xla_dump_fusion_visualization) {
                 try setXlaOverrideFlag(overrides_map, "xla_dump_fusion_visualization", true, upb_arena);
             }

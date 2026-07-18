@@ -1,0 +1,29 @@
+HloModule zml_source_to_hlo_poc, entry_computation_layout={(f32[4]{0}, f32[4]{0})->f32[4]{0}}, num_partitions=4, frontend_attributes={xla.sdy.meshes={replicated = #sdy.mesh<["bus"=4]>}}
+
+FileNames
+1 "source.zig"
+
+FunctionNames
+1 "zml.stable_op.0"
+2 "zml.stable_op.3"
+
+FileLocations
+1 {file_name_id=1 function_name_id=1 line=4 end_line=4 column=28 end_column=28}
+2 {file_name_id=1 function_name_id=2 line=5 end_line=5 column=42 end_column=42}
+
+StackFrames
+1 {file_location_id=1 parent_frame_id=1}
+2 {file_location_id=2 parent_frame_id=1}
+
+
+ENTRY %main.1 (Arg_0.1: f32[4], Arg_1.1: f32[4]) -> f32[4] {
+  %Arg_0.1 = f32[4]{0} parameter(0), sharding={replicated}, frontend_attributes={xla.sdy.sharding="#sdy.sharding<@replicated, [{}], replicated={\"bus\"}>"}
+  %Arg_1.1 = f32[4]{0} parameter(1), sharding={replicated}, frontend_attributes={xla.sdy.sharding="#sdy.sharding<@replicated, [{}], replicated={\"bus\"}>"}
+  %zml_stable_op.3 = f32[4]{0} add(%Arg_0.1, %Arg_1.1), frontend_attributes={zml.stable_op_id="zml.stable_op.0"}, metadata={op_name="zml.stable_op.0" stack_frame_id=1}
+  %constant.1 = f32[] constant(2)
+  %broadcast.1 = f32[4]{0} broadcast(%constant.1), dimensions={}
+  %zml_stable_op.4 = f32[4]{0} multiply(%zml_stable_op.3, %broadcast.1), frontend_attributes={zml.stable_op_id="zml.stable_op.3"}, metadata={op_name="zml.stable_op.3" stack_frame_id=2}
+  %zml_stable_op.5 = f32[4]{0} custom-call(%zml_stable_op.4), custom_call_target="xla.sdy.FuncResultSharding", custom_call_has_side_effect=true, frontend_attributes={xla.sdy.sharding="#sdy.sharding_per_value<[<@replicated, [{}], replicated={\"bus\"}>]>"}, metadata={op_name="zml.stable_op.3" stack_frame_id=2}
+  %tuple.1 = (f32[4]{0}) tuple(%zml_stable_op.5)
+  ROOT %get-tuple-element.1 = f32[4]{0} get-tuple-element(%tuple.1), index=0, sharding={replicated}
+}

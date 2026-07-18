@@ -1067,6 +1067,14 @@ pub const Tensor = struct {
         return binaryOp("add", dialects.stablehlo.add)(self, other);
     }
 
+    /// Like `add`, but attributes every StableHLO operation emitted by this
+    /// expression to the given Zig source location.
+    pub fn addAt(self: Tensor, other: Tensor, source: std.builtin.SourceLocation) Tensor {
+        var source_scope = CompilationContext.current().pushSource(source);
+        defer source_scope.deinit();
+        return self.add(other);
+    }
+
     /// Returns a Tensor containing the element-wise subtraction of the input Tensors.
     pub fn sub(self: Tensor, other: Tensor) Tensor {
         return binaryOp("subtract", dialects.stablehlo.subtract)(self, other);
@@ -1120,6 +1128,54 @@ pub const Tensor = struct {
     /// Returns a Tensor containing the element-wise multiplication of the input Tensor by a constant.
     pub fn scale(self: Tensor, val: anytype) Tensor {
         return self.mul(.scalar(val, self.dtype()));
+    }
+
+    /// Multiplies the input Tensor by a constant and attributes the scalar
+    /// constant, any broadcast, and the multiply to one Zig source expression.
+    pub fn mulConstantAt(self: Tensor, val: anytype, source: std.builtin.SourceLocation) Tensor {
+        var source_scope = CompilationContext.current().pushSource(source);
+        defer source_scope.deinit();
+        return self.scale(val);
+    }
+
+    test "explicit source provenance" {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+        defer comp.deinit();
+        comp.activate();
+        defer comp.deactivate();
+
+        const block = mlir.Block.init(&.{}, &.{});
+        defer block.deinit();
+        comp.pushBlock(block);
+        defer comp.popBlock();
+
+        const vector_shape: Shape = .init(.{4}, .f32);
+        const x = Tensor.constant(.{ .f32 = 1 }).broadcast(vector_shape, &.{});
+        const y = Tensor.constant(.{ .f32 = 2 }).broadcast(vector_shape, &.{});
+
+        const add_source = @src();
+        const sum_tensor = x.addAt(y, add_source);
+        const multiply_source = @src();
+        const doubled = sum_tensor.mulConstantAt(2, multiply_source);
+
+        try std.testing.expect(comp.current_source == null);
+        try std.testing.expectEqual(@as(usize, 4), comp.provenance_records.items.len);
+        try std.testing.expectEqual(add_source.line, comp.provenance_records.items[0].line);
+        for (comp.provenance_records.items[1..]) |record| {
+            try std.testing.expectEqual(multiply_source.line, record.line);
+        }
+
+        var location_buffer: [512]u8 = undefined;
+        var location_writer = std.Io.Writer.fixed(&location_buffer);
+        try sum_tensor.value().owner().location().format(&location_writer);
+        try std.testing.expect(std.mem.indexOf(u8, location_writer.buffered(), "zml.stable_op.0") != null);
+
+        location_writer = std.Io.Writer.fixed(&location_buffer);
+        try doubled.value().owner().location().format(&location_writer);
+        try std.testing.expect(std.mem.indexOf(u8, location_writer.buffered(), "zml.stable_op.3") != null);
     }
 
     pub const LogicalOp = enum { OR, XOR, AND };
@@ -2259,13 +2315,16 @@ pub const Tensor = struct {
 
     /// Returns a constant Tensor with the given value.
     pub fn constant(val: DataType.Value) Tensor {
+        const ctx = CompilationContext.current();
+        const provenance = ctx.operationProvenance();
         const op = dialects.stablehlo.constant(
-            mlirCtx(),
+            ctx.mlir_ctx,
             &.{},
-            mlirx.Type.fromDType(mlirCtx(), val.dtype()),
+            mlirx.Type.fromDType(ctx.mlir_ctx, val.dtype()),
             val.asBytes(),
-            .unknown(mlirCtx()),
+            provenance.location,
         ).appendTo(currentBlock());
+        provenance.annotate(ctx, op);
         return _result(.init(&.{}, val.dtype()), op.result(0));
     }
 
@@ -2328,7 +2387,10 @@ pub const Tensor = struct {
             return _result(res_shape, self.value());
         }
         const result_type = mlirx.Type.rankedTensor(mlirCtx(), res_shape);
-        const broadcast_op = dialects.stablehlo.broadcast_in_dim(mlirCtx(), self.value(), axes_, result_type, .unknown(mlirCtx())).appendTo(currentBlock());
+        const ctx = CompilationContext.current();
+        const provenance = ctx.operationProvenance();
+        const broadcast_op = dialects.stablehlo.broadcast_in_dim(ctx.mlir_ctx, self.value(), axes_, result_type, provenance.location).appendTo(currentBlock());
+        provenance.annotate(ctx, broadcast_op);
         return _result(res_shape, broadcast_op.result(0));
     }
 
@@ -4381,7 +4443,10 @@ pub const Tensor = struct {
 
                 stdx.debug.assert(same_shape, "{s} expects tensor shapes to match, got {f} and {f}", .{ op_name, self._shape, other._shape });
 
-                const ret = @call(.auto, op_fn, .{ mlirCtx(), self.value(), other_.value(), mlir.Location.unknown(mlirCtx()) }).appendTo(currentBlock());
+                const ctx = CompilationContext.current();
+                const provenance = ctx.operationProvenance();
+                const ret = @call(.auto, op_fn, .{ ctx.mlir_ctx, self.value(), other_.value(), provenance.location }).appendTo(currentBlock());
+                provenance.annotate(ctx, ret);
                 return _result(self._shape, ret.result(0));
             }
         }.binaryOpHelper;
