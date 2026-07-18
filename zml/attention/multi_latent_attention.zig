@@ -310,7 +310,7 @@ const Triton = struct {
                     .rope_offset = nope_rank,
                     .value_rank = q_dim,
                     .tile_size = @min(topk_final.dim(.topk), 16),
-                    .use_attn_sink = if (sink_) true else false,
+                    .use_attn_sink = if (sink_) |_| true else false,
                     .all_decode = !parameters.options_.is_prefill,
                 },
                 .grid = .{ @intCast(q.dim(.q) * @divExact(q_heads, block_m)), 1, 1 },
