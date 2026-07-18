@@ -8,18 +8,23 @@ const ARTIFACTS = {
 };
 
 const PANE_ORDER = ["source", "stable", "hlo"];
+const IR_PANES = ["stable", "hlo"];
 const PANE_LABELS = {
   source: "ZML source",
   stable: "StableHLO",
   hlo: "pre-optimization HLO",
 };
 const utf8Encoder = new TextEncoder();
+const scrollBehavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
 
 const elements = {
   status: document.querySelector("#status"),
   reload: document.querySelector("#reload"),
   details: document.querySelector("#details-content"),
   template: document.querySelector("#line-template"),
+  irPane: document.querySelector("#ir-pane"),
+  irCount: document.querySelector("#ir-count"),
+  irToggles: [...document.querySelectorAll("[data-ir-pane]")],
   panes: {
     source: document.querySelector("#source-code"),
     stable: document.querySelector("#stable-code"),
@@ -27,8 +32,6 @@ const elements = {
   },
   counts: {
     source: document.querySelector("#source-count"),
-    stable: document.querySelector("#stable-count"),
-    hlo: document.querySelector("#hlo-count"),
   },
 };
 
@@ -36,9 +39,15 @@ const state = {
   graph: null,
   lines: { source: [], stable: [], hlo: [] },
   selected: null,
+  activeIrPane: "stable",
 };
 
 elements.reload.addEventListener("click", () => loadArtifacts());
+
+for (const toggle of elements.irToggles) {
+  toggle.addEventListener("click", () => setActiveIrPane(toggle.dataset.irPane, true));
+  toggle.addEventListener("keydown", handleIrToggleKeydown);
+}
 
 for (const paneName of PANE_ORDER) {
   elements.panes[paneName].addEventListener("keydown", (event) => {
@@ -51,6 +60,7 @@ loadArtifacts();
 async function loadArtifacts() {
   setStatus("Loading artifacts…");
   elements.reload.disabled = true;
+  setIrTogglesDisabled(true);
 
   try {
     const [source, stable, hlo, mapping] = await Promise.all([
@@ -69,6 +79,7 @@ async function loadArtifacts() {
     for (const paneName of PANE_ORDER) {
       renderPane(paneName);
     }
+    setActiveIrPane(state.activeIrPane, false);
     renderEmptyDetails();
 
     const mapped = state.graph.sources.size + state.graph.stable.size + state.graph.hlo.size;
@@ -79,6 +90,7 @@ async function loadArtifacts() {
     renderLoadError(error);
   } finally {
     elements.reload.disabled = false;
+    setIrTogglesDisabled(false);
   }
 }
 
@@ -148,8 +160,55 @@ function renderPane(paneName) {
   });
 
   container.append(fragment);
+  updateLineCount(paneName);
+}
+
+function setActiveIrPane(paneName, shouldFocus) {
+  if (!IR_PANES.includes(paneName)) return;
+  state.activeIrPane = paneName;
+  elements.irPane.dataset.activeIr = paneName;
+
+  for (const irPaneName of IR_PANES) {
+    const isActive = irPaneName === paneName;
+    elements.panes[irPaneName].hidden = !isActive;
+    const toggle = elements.irToggles.find((candidate) => candidate.dataset.irPane === irPaneName);
+    toggle.setAttribute("aria-selected", String(isActive));
+    toggle.tabIndex = isActive ? 0 : -1;
+  }
+
+  updateLineCount(paneName);
+  if (state.selected) {
+    updateHighlights();
+    const sourceLine = firstSelectedLine("source", state.selected.source);
+    alignRelatedPane(state.selected, "source", sourceLine);
+  }
+  if (shouldFocus) {
+    elements.irToggles.find((toggle) => toggle.dataset.irPane === paneName)?.focus();
+  }
+}
+
+function handleIrToggleKeydown(event) {
+  let nextIndex = IR_PANES.indexOf(state.activeIrPane);
+  if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex -= 1;
+  else if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex += 1;
+  else if (event.key === "Home") nextIndex = 0;
+  else if (event.key === "End") nextIndex = IR_PANES.length - 1;
+  else return;
+
+  event.preventDefault();
+  nextIndex = (nextIndex + IR_PANES.length) % IR_PANES.length;
+  setActiveIrPane(IR_PANES[nextIndex], true);
+}
+
+function setIrTogglesDisabled(disabled) {
+  for (const toggle of elements.irToggles) toggle.disabled = disabled;
+}
+
+function updateLineCount(paneName) {
   const count = state.lines[paneName].length;
-  elements.counts[paneName].textContent = `${count} ${count === 1 ? "line" : "lines"}`;
+  const text = `${count} ${count === 1 ? "line" : "lines"}`;
+  if (paneName === "source") elements.counts.source.textContent = text;
+  else if (paneName === state.activeIrPane) elements.irCount.textContent = text;
 }
 
 function renderSourceLineText(container, text, line) {
@@ -206,14 +265,14 @@ function columnToStringIndex(text, oneBasedByteColumn) {
   return Math.min(stringIndex, text.length);
 }
 
-function selectLine(paneName, line, shouldScroll) {
+function selectLine(paneName, line, shouldAlign) {
   if (!state.graph) return;
 
   const seedIds = state.graph.lineIndex[paneName].get(line) || new Set();
-  selectIds(paneName, line, seedIds, shouldScroll);
+  selectIds(paneName, line, seedIds, shouldAlign);
 }
 
-function selectIds(paneName, line, seedIds, shouldScroll) {
+function selectIds(paneName, line, seedIds, shouldAlign) {
   const selection = expandSelection(paneName, seedIds);
   selection.activePane = paneName;
   selection.activeLine = line;
@@ -222,7 +281,7 @@ function selectIds(paneName, line, seedIds, shouldScroll) {
 
   updateHighlights();
   renderDetails(selection);
-  if (shouldScroll) scrollRelatedIntoView(selection, paneName);
+  if (shouldAlign) alignRelatedPane(selection, paneName, line);
 }
 
 function expandSelection(seedPane, seedIds) {
@@ -301,15 +360,27 @@ function intersects(left, right) {
   return false;
 }
 
-function scrollRelatedIntoView(selection, originPane) {
-  for (const paneName of PANE_ORDER) {
-    if (paneName === originPane) continue;
-    const lines = selectedLines(paneName, selection[paneName]);
-    const firstLine = Math.min(...lines);
-    if (Number.isFinite(firstLine)) {
-      lineButton(paneName, firstLine)?.scrollIntoView({ block: "nearest", inline: "nearest" });
-    }
-  }
+function alignRelatedPane(selection, originPane, originLine) {
+  const targetPane = visiblePaneOrder().find((paneName) => paneName !== originPane);
+  const targetLine = targetPane ? firstSelectedLine(targetPane, selection[targetPane]) : Infinity;
+  const originRow = lineButton(originPane, originLine);
+  const targetRow = targetPane ? lineButton(targetPane, targetLine) : null;
+  if (!originRow || !targetRow) return;
+
+  const verticalDelta = targetRow.getBoundingClientRect().top - originRow.getBoundingClientRect().top;
+  if (Math.abs(verticalDelta) < 1) return;
+  elements.panes[targetPane].scrollTo({
+    top: elements.panes[targetPane].scrollTop + verticalDelta,
+    behavior: scrollBehavior,
+  });
+}
+
+function firstSelectedLine(paneName, ids) {
+  return Math.min(...selectedLines(paneName, ids));
+}
+
+function visiblePaneOrder() {
+  return ["source", state.activeIrPane];
 }
 
 function selectedLines(paneName, ids) {
@@ -344,9 +415,9 @@ function handleLineKeydown(event, paneName) {
   else if (event.key === "ArrowUp") targetLine -= 1;
   else if (event.key === "Home") targetLine = 1;
   else if (event.key === "End") targetLine = state.lines[paneName].length;
-  else if (event.key === "ArrowLeft") targetPane = PANE_ORDER[Math.max(0, PANE_ORDER.indexOf(paneName) - 1)];
-  else if (event.key === "ArrowRight") targetPane = PANE_ORDER[Math.min(PANE_ORDER.length - 1, PANE_ORDER.indexOf(paneName) + 1)];
-  else if (["1", "2", "3"].includes(event.key)) targetPane = PANE_ORDER[Number(event.key) - 1];
+  else if (event.key === "ArrowLeft") targetPane = visiblePaneOrder()[0];
+  else if (event.key === "ArrowRight") targetPane = visiblePaneOrder()[1];
+  else if (["1", "2"].includes(event.key)) targetPane = visiblePaneOrder()[Number(event.key) - 1];
   else return;
 
   event.preventDefault();
@@ -370,8 +441,9 @@ function renderEmptyDetails() {
 function renderLoadError(error) {
   for (const paneName of PANE_ORDER) {
     elements.panes[paneName].replaceChildren();
-    elements.counts[paneName].textContent = "Unavailable";
   }
+  elements.counts.source.textContent = "Unavailable";
+  elements.irCount.textContent = "Unavailable";
   const message = document.createElement("p");
   message.className = "empty-details";
   message.textContent = `Artifacts could not be loaded. ${error instanceof Error ? error.message : String(error)}`;

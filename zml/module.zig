@@ -385,6 +385,12 @@ pub fn compile(
 fn dumpExplorerArtifacts(ctx: *CompilationContext, output_dir: []const u8) !void {
     try std.Io.Dir.cwd().createDirPath(ctx.io, output_dir);
 
+    const surviving_provenance = try filterExplorerProvenanceRecords(
+        ctx.arena.allocator(),
+        ctx.module.operation(),
+        ctx.provenance_records.items,
+    );
+
     {
         const stablehlo_path = try std.Io.Dir.path.join(ctx.arena.allocator(), &.{ output_dir, "stablehlo.mlir" });
         var file = try std.Io.Dir.createFile(.cwd(), ctx.io, stablehlo_path, .{});
@@ -416,11 +422,101 @@ fn dumpExplorerArtifacts(ctx: *CompilationContext, output_dir: []const u8) !void
         };
         try json_writer.write(.{
             .version = @as(u32, 1),
-            .records = ctx.provenance_records.items,
+            .records = surviving_provenance,
         });
         try file_writer.interface.writeByte('\n');
         try file_writer.interface.flush();
     }
+}
+
+const StableOpIdSet = std.AutoHashMapUnmanaged(u64, void);
+
+const ProvenanceWalkContext = struct {
+    allocator: std.mem.Allocator,
+    stable_op_ids: *StableOpIdSet,
+    invalid_stable_op_id: bool = false,
+};
+
+fn operationStableOpId(op: *const mlir.Operation) error{InvalidStableOpId}!?u64 {
+    if (!std.mem.startsWith(u8, op.name(), "stablehlo.")) return null;
+
+    const frontend_attributes = op.attributeByName("mhlo.frontend_attributes") orelse return null;
+    const dictionary = frontend_attributes.isA(mlir.DictionaryAttribute) orelse return null;
+    const stable_op_id = dictionary.getByName("zml.stable_op_id") orelse return null;
+    const string_attribute = stable_op_id.isA(mlir.StringAttribute) orelse return error.InvalidStableOpId;
+    const value = string_attribute.value();
+    const prefix = "zml.stable_op.";
+    if (!std.mem.startsWith(u8, value, prefix) or value.len == prefix.len) return error.InvalidStableOpId;
+    return std.fmt.parseInt(u64, value[prefix.len..], 10) catch error.InvalidStableOpId;
+}
+
+fn collectSurvivingStableOpId(ctx: *ProvenanceWalkContext, op: *mlir.Operation) mlir.Operation.WalkResult {
+    const stable_op_id = operationStableOpId(op) catch {
+        ctx.invalid_stable_op_id = true;
+        return .interrupt;
+    };
+    if (stable_op_id) |id| {
+        ctx.stable_op_ids.put(ctx.allocator, id, {}) catch @panic("OOM");
+    }
+    return .advance;
+}
+
+fn filterExplorerProvenanceRecords(
+    allocator: std.mem.Allocator,
+    root: *mlir.Operation,
+    records: []const CompilationContext.ProvenanceRecord,
+) ![]CompilationContext.ProvenanceRecord {
+    var stable_op_ids: StableOpIdSet = .empty;
+    defer stable_op_ids.deinit(allocator);
+
+    var walk_context: ProvenanceWalkContext = .{
+        .allocator = allocator,
+        .stable_op_ids = &stable_op_ids,
+    };
+    root.walk(.pre_order, &walk_context, collectSurvivingStableOpId);
+    if (walk_context.invalid_stable_op_id) return error.InvalidStableOpId;
+
+    var surviving_records: std.ArrayList(CompilationContext.ProvenanceRecord) = .empty;
+    errdefer surviving_records.deinit(allocator);
+    for (records) |record| {
+        if (stable_op_ids.contains(record.stable_op_id)) {
+            try surviving_records.append(allocator, record);
+        }
+    }
+    return surviving_records.toOwnedSlice(allocator);
+}
+
+test "explorer provenance excludes operations erased by post-emission passes" {
+    const platform = @import("testing.zig").env();
+    var comp = CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+    defer comp.deinit();
+
+    const module = try mlir.Operation.parse(comp.mlir_ctx,
+        \\module {
+        \\  func.func @main() -> tensor<f32> {
+        \\    %live = stablehlo.constant {mhlo.frontend_attributes = {zml.stable_op_id = "zml.stable_op.1"}} dense<1.000000e+00> : tensor<f32>
+        \\    %dead = stablehlo.broadcast_in_dim %live, dims = [] {mhlo.frontend_attributes = {zml.stable_op_id = "zml.stable_op.2"}} : (tensor<f32>) -> tensor<1xf32>
+        \\    return %live : tensor<f32>
+        \\  }
+        \\}
+    , "explorer-provenance-test");
+    defer module.deinit();
+
+    const emitted_records = [_]CompilationContext.ProvenanceRecord{
+        .{ .stable_op_id = 1, .file = "source.zig", .line = 1, .column = 1 },
+        .{ .stable_op_id = 2, .file = "source.zig", .line = 2, .column = 1 },
+    };
+
+    const before_passes = try filterExplorerProvenanceRecords(std.testing.allocator, module, &emitted_records);
+    defer std.testing.allocator.free(before_passes);
+    try std.testing.expectEqual(@as(usize, 2), before_passes.len);
+
+    try comp.mlir_pass_manager.runOnOp(module);
+
+    const after_passes = try filterExplorerProvenanceRecords(std.testing.allocator, module, &emitted_records);
+    defer std.testing.allocator.free(after_passes);
+    try std.testing.expectEqual(@as(usize, 1), after_passes.len);
+    try std.testing.expectEqual(@as(u64, 1), after_passes[0].stable_op_id);
 }
 
 fn addPartitionerOperations(ctx: *CompilationContext) !void {

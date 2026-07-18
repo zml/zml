@@ -29,7 +29,7 @@
       <div class="legend" aria-label="Highlight legend">
         <span><i class="swatch related"></i>Mapped selection</span>
         <span><i class="swatch active"></i>Focused operation</span>
-        <span class="keyboard-hint">Use ↑/↓ to move, ←/→ to switch panes, Enter to select.</span>
+        <span class="keyboard-hint">Use ↑/↓ to move and ←/→ to switch between source and IR.</span>
       </div>
 
       <div class="panes" aria-label="Synchronized compiler representations">
@@ -44,26 +44,52 @@
           <div id="source-code" class="code-lines" aria-label="ZML source code"></div>
         </section>
 
-        <section class="pane stable-pane" aria-labelledby="stable-title">
+        <section id="ir-pane" class="pane ir-pane" data-active-ir="stable" aria-labelledby="ir-title">
           <header class="pane-header">
             <div>
-              <p class="pane-step">02 · Lowering</p>
-              <h2 id="stable-title">StableHLO</h2>
+              <p class="pane-step">02 · Compiler IR</p>
+              <h2 id="ir-title">Lowered output</h2>
             </div>
-            <span id="stable-count" class="line-count"></span>
-          </header>
-          <div id="stable-code" class="code-lines" aria-label="StableHLO intermediate representation"></div>
-        </section>
-
-        <section class="pane hlo-pane" aria-labelledby="hlo-title">
-          <header class="pane-header">
-            <div>
-              <p class="pane-step">03 · XLA input</p>
-              <h2 id="hlo-title">Pre-optimization HLO</h2>
+            <div class="pane-tools">
+              <div class="ir-toggle" role="tablist" aria-label="Compiler IR view">
+                <button
+                  id="stable-toggle"
+                  class="ir-toggle-button"
+                  type="button"
+                  role="tab"
+                  aria-selected="true"
+                  aria-controls="stable-code"
+                  data-ir-pane="stable"
+                >StableHLO</button>
+                <button
+                  id="hlo-toggle"
+                  class="ir-toggle-button"
+                  type="button"
+                  role="tab"
+                  aria-selected="false"
+                  aria-controls="hlo-code"
+                  data-ir-pane="hlo"
+                  tabindex="-1"
+                >Pre-opt HLO</button>
+              </div>
+              <span id="ir-count" class="line-count"></span>
             </div>
-            <span id="hlo-count" class="line-count"></span>
           </header>
-          <div id="hlo-code" class="code-lines" aria-label="XLA HLO before optimizations"></div>
+          <div
+            id="stable-code"
+            class="code-lines"
+            role="tabpanel"
+            aria-labelledby="stable-toggle"
+            aria-label="StableHLO intermediate representation"
+          ></div>
+          <div
+            id="hlo-code"
+            class="code-lines"
+            role="tabpanel"
+            aria-labelledby="hlo-toggle"
+            aria-label="XLA HLO before optimizations"
+            hidden
+          ></div>
         </section>
       </div>
 

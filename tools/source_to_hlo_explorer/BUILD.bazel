@@ -5,6 +5,14 @@ load("//bazel:zml_ast_instrument.bzl", "zml_ast_instrument")
 zig_binary(
     name = "ast_instrumenter",
     main = "instrumenter.zig",
+    visibility = ["//visibility:public"],
+)
+
+zig_binary(
+    name = "pack",
+    srcs = ["artifact.zig"],
+    main = "pack.zig",
+    visibility = ["//visibility:public"],
 )
 
 zml_ast_instrument(
@@ -37,7 +45,10 @@ zig_binary(
 
 build_test(
     name = "test",
-    targets = [":poc"],
+    targets = [
+        ":pack",
+        ":poc",
+    ],
 )
 
 zig_test(

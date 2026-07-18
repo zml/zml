@@ -1,9 +1,12 @@
-load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@bazel_lib//lib:expand_template.bzl", "expand_template")
+load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
 load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
 load("@tar.bzl//tar:tar.bzl", "tar")
+load("//bazel:zml_ast_instrument.bzl", "zml_ast_instrument")
 
 zig_binary(
     name = "mnist",
@@ -21,6 +24,44 @@ zig_binary(
         "//bazel",
         "//zml",
     ],
+)
+
+zml_ast_instrument(
+    name = "mnist_ast_source",
+    src = "mnist.zig",
+    tool = "//tools/source_to_hlo_explorer:ast_instrumenter",
+)
+
+zig_library(
+    name = "mnist_ast_model",
+    extra_srcs = [":mnist_ast_source_source_map"],
+    import_name = "mnist_ast_model",
+    main = ":mnist_ast_source",
+    deps = ["//zml"],
+)
+
+zig_binary(
+    name = "mnist_ast_compile",
+    deps = [":mnist_ast_model"],
+)
+
+build_test(
+    name = "mnist_ast_compile_test",
+    targets = [":mnist_ast_compile"],
+)
+
+zig_test(
+    name = "mnist_ast_source_map_test",
+    extra_srcs = ["mnist.zig"],
+    main = "mnist_ast_source_map_test.zig",
+    deps = [":mnist_ast_model"],
+)
+
+sh_test(
+    name = "mnist_ast_generated_source_test",
+    srcs = ["mnist_ast_generated_source_test.sh"],
+    args = ["$(rootpath :mnist_ast_source)"],
+    data = [":mnist_ast_source"],
 )
 
 mtree_spec(
@@ -52,12 +93,12 @@ expand_template(
         ":model": "$(rlocationpath @mnist//:mnist.safetensors)",
         ":data": "$(rlocationpath @mnist//:t10k-images.idx3-ubyte)",
     },
+    tags = ["manual"],
     template = [
         "./{}/mnist".format(package_name()),
         "/{}/mnist.runfiles/:model".format(package_name()),
         "/{}/mnist.runfiles/:data".format(package_name()),
     ],
-    tags = ["manual"],
 )
 
 # The actual docker image, with entrypoint, created from tar archive
@@ -65,20 +106,20 @@ oci_image(
     name = "image_",
     base = "@distroless_cc_debian12",
     entrypoint = ":entrypoint",
+    tags = ["manual"],
     target_compatible_with = [
         "@platforms//os:linux",
         "@platforms//cpu:x86_64",
     ],
     tars = [":archive"],
-    tags = ["manual"],
 )
 
 # We always want to create the image for Linux
 platform_transition_filegroup(
     name = "image",
     srcs = [":image_"],
-    target_platform = "@zml//platforms:linux_amd64",
     tags = ["manual"],
+    target_platform = "@zml//platforms:linux_amd64",
 )
 
 # Load will immediately load the image (eg: docker load)

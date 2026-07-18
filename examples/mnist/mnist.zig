@@ -102,7 +102,12 @@ pub fn main(init: std.process.Init) !void {
         log.info("Compiling model....", .{});
         const start: std.Io.Timestamp = .now(io, .awake);
         defer log.info("✅ Compiled model [{f}]", .{start.untilNow(io, .awake)});
-        break :blk try platform.compile(allocator, io, mnist_model, .forward, .{input}, .{});
+        break :blk try platform.compile(allocator, io, mnist_model, .forward, .{input}, .{
+            .program_name = "mnist",
+            .explorer_dump_to = "/tmp/mnist-ir",
+            .xla_dump_to = "/tmp/mnist-xla",
+            .xla_dump_hlo_as_text = true,
+        });
     };
     defer exe.deinit();
 

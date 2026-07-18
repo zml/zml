@@ -1184,6 +1184,133 @@ pub const Tensor = struct {
         try std.testing.expect(std.mem.indexOf(u8, location_writer.buffered(), "zml.stable_op.3") != null);
     }
 
+    test "source provenance wrappers restore nested scopes" {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+        defer comp.deinit();
+        comp.activate();
+        defer comp.deactivate();
+
+        const block = mlir.Block.init(&.{}, &.{});
+        defer block.deinit();
+        comp.pushBlock(block);
+        defer comp.popBlock();
+
+        const input = Tensor.constant(.{ .f32 = 1 }).broadcast(.init(.{ 2, 2 }, .f32), &.{});
+        const unscoped_flattened = input.flatten();
+        try std.testing.expect(unscoped_flattened.value().owner().location().eql(.unknown(comp.mlir_ctx)));
+        try std.testing.expect(unscoped_flattened.value().owner().attributeByName("mhlo.frontend_attributes") == null);
+        try std.testing.expectEqual(@as(usize, 0), comp.provenance_records.items.len);
+
+        const outer_source = @src();
+        const inner_source = @src();
+        {
+            var outer_scope = comp.pushSource(outer_source);
+            defer outer_scope.deinit();
+
+            _ = input.flattenAt(inner_source);
+            try std.testing.expect(comp.current_source != null);
+            try std.testing.expectEqualStrings(outer_source.file, comp.current_source.?.file);
+            try std.testing.expectEqual(outer_source.line, comp.current_source.?.line);
+            try std.testing.expectEqual(outer_source.column, comp.current_source.?.column);
+        }
+
+        try std.testing.expect(comp.current_source == null);
+        try std.testing.expectEqual(@as(usize, 1), comp.provenance_records.items.len);
+        try std.testing.expectEqualStrings(inner_source.file, comp.provenance_records.items[0].file);
+        try std.testing.expectEqual(inner_source.line, comp.provenance_records.items[0].line);
+        try std.testing.expectEqual(inner_source.column, comp.provenance_records.items[0].column);
+    }
+
+    test "MNIST operations record source provenance" {
+        const zml = @import("zml.zig");
+        const platform = zml.testing.env();
+
+        const Test = struct {
+            fn expectRecords(
+                comp_: *CompilationContext,
+                start: usize,
+                source: std.builtin.SourceLocation,
+                expected_count: usize,
+            ) !void {
+                const records = comp_.provenance_records.items[start..];
+                try std.testing.expectEqual(expected_count, records.len);
+                for (records) |record| {
+                    try std.testing.expectEqualStrings(source.file, record.file);
+                    try std.testing.expectEqual(source.line, record.line);
+                    try std.testing.expectEqual(source.column, record.column);
+                }
+            }
+
+            fn expectAnnotated(op: *const mlir.Operation, expected_name: []const u8) !void {
+                try std.testing.expectEqualStrings(expected_name, op.name());
+                const frontend_attributes = op.attributeByName("mhlo.frontend_attributes");
+                try std.testing.expect(frontend_attributes != null);
+                const dictionary = frontend_attributes.?.isA(mlir.DictionaryAttribute);
+                try std.testing.expect(dictionary != null);
+                try std.testing.expect(dictionary.?.getByName("zml.stable_op_id") != null);
+            }
+        };
+
+        var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
+        defer comp.deinit();
+        comp.activate();
+        defer comp.deactivate();
+
+        const block = mlir.Block.init(&.{}, &.{});
+        defer block.deinit();
+        comp.pushBlock(block);
+        defer comp.popBlock();
+
+        const input = Tensor.constant(.{ .f32 = 1 }).broadcast(.init(.{ 2, 2 }, .f32), &.{});
+
+        const flatten_start = comp.provenance_records.items.len;
+        const flatten_source = @src();
+        const flattened = input.flattenAt(flatten_source);
+        try Test.expectRecords(&comp, flatten_start, flatten_source, 1);
+        try Test.expectAnnotated(flattened.value().owner(), "stablehlo.reshape");
+
+        const convert_start = comp.provenance_records.items.len;
+        const convert_source = @src();
+        const converted = flattened.convertAt(.f64, convert_source).withTags(.{.d});
+        try Test.expectRecords(&comp, convert_start, convert_source, 1);
+        try Test.expectAnnotated(converted.value().owner(), "stablehlo.convert");
+
+        const weight = Tensor.constant(.{ .f64 = 1 }).broadcast(.init(.{ .out = 2, .d = 4 }, .f64), &.{});
+        const dot_start = comp.provenance_records.items.len;
+        const dot_source = @src();
+        const logits = weight.dotAt(converted, .d, dot_source);
+        try Test.expectRecords(&comp, dot_start, dot_source, 1);
+        try Test.expectAnnotated(logits.value().owner(), "stablehlo.dot_general");
+
+        const relu_start = comp.provenance_records.items.len;
+        const relu_source = @src();
+        const activated = logits.reluAt(relu_source);
+        try Test.expectRecords(&comp, relu_start, relu_source, 3);
+        try Test.expectAnnotated(activated.value().owner(), "stablehlo.maximum");
+
+        const argmax_start = comp.provenance_records.items.len;
+        const argmax_source = @src();
+        const prediction = activated.argMaxAt(.out, argmax_source);
+        try Test.expectRecords(&comp, argmax_start, argmax_source, 15);
+        try Test.expectAnnotated(prediction.indices.value().owner(), "stablehlo.broadcast_in_dim");
+
+        const reduce_op = prediction.indices.value().owner().operand(0).owner();
+        try Test.expectAnnotated(reduce_op, "stablehlo.reduce");
+        const reduce_block = reduce_op.region(0).firstBlock() orelse return error.MissingReduceBlock;
+        const first_reduce_op = reduce_block.firstOperation() orelse return error.MissingReduceOperation;
+        try Test.expectAnnotated(first_reduce_op, "stablehlo.compare");
+
+        const final_convert_start = comp.provenance_records.items.len;
+        const final_convert_source = @src();
+        const classified = prediction.indices.convertAt(.u8, final_convert_source);
+        try Test.expectRecords(&comp, final_convert_start, final_convert_source, 1);
+        try Test.expectAnnotated(classified.value().owner(), "stablehlo.convert");
+        try std.testing.expect(comp.current_source == null);
+    }
+
     pub const LogicalOp = enum { OR, XOR, AND };
 
     /// Returns a Tensor containing the element-wise logical operation of the input Tensors.
@@ -1211,9 +1338,20 @@ pub const Tensor = struct {
             return self;
         }
 
-        const res_type = mlir.Type.rankedTensor(self.shape().dims(), mlirx.Type.fromDType(mlirCtx(), to));
-        const op = dialects.stablehlo.convert(mlirCtx(), self.value(), res_type, .unknown(mlirCtx())).appendTo(currentBlock());
+        const ctx = CompilationContext.current();
+        const res_type = mlir.Type.rankedTensor(self.shape().dims(), mlirx.Type.fromDType(ctx.mlir_ctx, to));
+        const provenance = ctx.operationProvenance();
+        const op = dialects.stablehlo.convert(ctx.mlir_ctx, self.value(), res_type, provenance.location).appendTo(currentBlock());
+        provenance.annotate(ctx, op);
         return _result(self._shape.withDtype(to), op.result(0));
+    }
+
+    /// Like `convert`, but attributes the conversion to the given Zig source
+    /// location.
+    pub fn convertAt(self: Tensor, to: DataType, source: std.builtin.SourceLocation) Tensor {
+        var source_scope = CompilationContext.current().pushSource(source);
+        defer source_scope.deinit();
+        return self.convert(to);
     }
 
     test convert {
@@ -1310,6 +1448,14 @@ pub const Tensor = struct {
             }
         }
         return lhs.dotGeneral(rhs, &.{.{ lhs_contracting_dim, rhs_contracting_dim }}, batching_axes.slice());
+    }
+
+    /// Like `dot`, but attributes the dot operation to the given Zig source
+    /// location.
+    pub fn dotAt(lhs: Tensor, rhs: Tensor, args: anytype, source: std.builtin.SourceLocation) Tensor {
+        var source_scope = CompilationContext.current().pushSource(source);
+        defer source_scope.deinit();
+        return lhs.dot(rhs, args);
     }
 
     test dot {
@@ -1422,11 +1568,13 @@ pub const Tensor = struct {
             res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
         }
 
+        const ctx = CompilationContext.current();
+        const provenance = ctx.operationProvenance();
         const op = dialects.stablehlo.dot_general(
-            mlirCtx(),
+            ctx.mlir_ctx,
             lhs.value(),
             rhs.value(),
-            mlirx.Type.rankedTensor(mlirCtx(), res_shape),
+            mlirx.Type.rankedTensor(ctx.mlir_ctx, res_shape),
             .{
                 .lhs_batching_dimensions = lhs_batching_axes.constSlice(),
                 .rhs_batching_dimensions = rhs_batching_axes.constSlice(),
@@ -1434,8 +1582,9 @@ pub const Tensor = struct {
                 .rhs_contracting_dimensions = rhs_contracting_axes.constSlice(),
                 .dot_precision = .fast,
             },
-            .unknown(mlirCtx()),
+            provenance.location,
         ).appendTo(currentBlock());
+        provenance.annotate(ctx, op);
         return _result(res_shape, op.result(0));
     }
 
@@ -1450,6 +1599,14 @@ pub const Tensor = struct {
     /// Returns a Tensor containing the ReLU activation function applied to each element of the input Tensor.
     pub fn relu(self: Tensor) Tensor {
         return self.maximum(Tensor.constant(self.dtype().zero()).broad(.init(self.dims(), self.dtype())));
+    }
+
+    /// Like `relu`, but attributes its constant, broadcast, and maximum to the
+    /// given Zig source location.
+    pub fn reluAt(self: Tensor, source: std.builtin.SourceLocation) Tensor {
+        var source_scope = CompilationContext.current().pushSource(source);
+        defer source_scope.deinit();
+        return self.relu();
     }
 
     /// Returns a Tensor containing the leaky-ReLU activation function applied to each element of the input Tensor.
@@ -1813,6 +1970,14 @@ pub const Tensor = struct {
 
     pub fn flatten(self: Tensor) Tensor {
         return self.reshape(.{self.count()});
+    }
+
+    /// Like `flatten`, but attributes the reshape to the given Zig source
+    /// location.
+    pub fn flattenAt(self: Tensor, source: std.builtin.SourceLocation) Tensor {
+        var source_scope = CompilationContext.current().pushSource(source);
+        defer source_scope.deinit();
+        return self.flatten();
     }
 
     pub const Slice = struct {
@@ -2198,12 +2363,15 @@ pub const Tensor = struct {
 
         const n_steps = std.math.divCeil(i64, args.end - args.start, args.step) catch unreachable;
         const sh = Shape.init(.{n_steps}, dt);
+        const ctx = CompilationContext.current();
+        const provenance = ctx.operationProvenance();
         var op = dialects.stablehlo.iota(
-            mlirCtx(),
+            ctx.mlir_ctx,
             0,
-            mlirx.Type.rankedTensor(mlirCtx(), sh),
-            .unknown(mlirCtx()),
+            mlirx.Type.rankedTensor(ctx.mlir_ctx, sh),
+            provenance.location,
         ).appendTo(currentBlock());
+        provenance.annotate(ctx, op);
         var res = _result(sh, op.result(0));
 
         if (args.step != 1) {
@@ -2465,9 +2633,12 @@ pub const Tensor = struct {
     /// Reshapes the input Tensor with the given shape.
     pub fn reshape(self: Tensor, output_shape_: anytype) Tensor {
         const output_shape = self._shape.reshape(output_shape_);
-        const tensor_type = mlirx.Type.rankedTensor(mlirCtx(), output_shape);
-        const reshape_value = dialects.stablehlo.reshape(mlirCtx(), self.value(), tensor_type, .unknown(mlirCtx())).appendTo(currentBlock());
-        return _result(output_shape, reshape_value.result(0));
+        const ctx = CompilationContext.current();
+        const tensor_type = mlirx.Type.rankedTensor(ctx.mlir_ctx, output_shape);
+        const provenance = ctx.operationProvenance();
+        const reshape_op = dialects.stablehlo.reshape(ctx.mlir_ctx, self.value(), tensor_type, provenance.location).appendTo(currentBlock());
+        provenance.annotate(ctx, reshape_op);
+        return _result(output_shape, reshape_op.result(0));
     }
 
     /// Converts the given 1 element Tensor into a 0-rank Tensor.
@@ -3186,6 +3357,14 @@ pub const Tensor = struct {
             .{},
         );
         return .{ .values = values, .indices = indices };
+    }
+
+    /// Like `argMax`, but attributes its complete reduction lowering to the
+    /// given Zig source location.
+    pub fn argMaxAt(x: Tensor, axis_: anytype, source: std.builtin.SourceLocation) ArgMaxRes {
+        var source_scope = CompilationContext.current().pushSource(source);
+        defer source_scope.deinit();
+        return x.argMax(axis_);
     }
 
     test argMax {
@@ -4050,14 +4229,17 @@ pub const Tensor = struct {
 
         stdx.debug.assert(self._shape.eql(other._shape), "cmp expects input tensor shapes to match, got {f} and {f}", .{ self._shape, other._shape });
 
+        const ctx = CompilationContext.current();
+        const provenance = ctx.operationProvenance();
         const op = dialects.stablehlo.compare(
-            mlirCtx(),
+            ctx.mlir_ctx,
             self.value(),
             other.value(),
-            dialects.stablehlo.ComparisonDirection.init(mlirCtx(), direction).getValue(),
-            getComparisonType(mlirCtx(), self.dtype()).getValue(),
-            .unknown(mlirCtx()),
+            dialects.stablehlo.ComparisonDirection.init(ctx.mlir_ctx, direction).getValue(),
+            getComparisonType(ctx.mlir_ctx, self.dtype()).getValue(),
+            provenance.location,
         ).appendTo(currentBlock());
+        provenance.annotate(ctx, op);
 
         return _result(self._shape.withDtype(.bool), op.result(0));
     }
@@ -4223,13 +4405,16 @@ pub const Tensor = struct {
         stdx.debug.assert(bool_tensor._shape.eqlDims(on_true._shape), "select expects input tensor and 'on_true' tensor dimensions to match, got {f} and {f}", .{ bool_tensor._shape, on_true._shape });
         stdx.debug.assert(bool_tensor._shape.eqlDims(on_false._shape), "select expects input tensor and 'on_false' tensor dimensions to match, got {f} and {f}", .{ bool_tensor._shape, on_false._shape });
 
+        const ctx = CompilationContext.current();
+        const provenance = ctx.operationProvenance();
         const op = dialects.stablehlo.select(
-            mlirCtx(),
+            ctx.mlir_ctx,
             bool_tensor.value(),
             on_true.value(),
             on_false.value(),
-            .unknown(mlirCtx()),
+            provenance.location,
         ).appendTo(currentBlock());
+        provenance.annotate(ctx, op);
 
         return _result(on_true._shape, op.result(0));
     }

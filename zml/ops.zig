@@ -209,7 +209,8 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
     var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
     defer arena.deinit();
 
-    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const ctx = CompilationContext.current();
+    const mlir_ctx = ctx.mlir_ctx;
 
     const reduce_block, var result = b: {
         const ArgsType = std.meta.Tuple(&[1]type{ReduceArgs} ** inits.len);
@@ -255,6 +256,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
     var init_values: [inputs.len]*const mlir.Value = undefined;
     inline for (0..inits.len) |i| init_values[i] = inits[i].value();
 
+    const reduce_provenance = ctx.operationProvenance();
     const reduce_op = mlir.Operation.make(mlir_ctx, "stablehlo.reduce", .{
         .operands = .{ .variadic = &.{ &input_values, &init_values } },
         .result_type_inference = true,
@@ -263,8 +265,9 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             .named(mlir_ctx, "dimensions", .denseArray(mlir_ctx, .i64, axes_)),
         },
         .verify = true,
-        .location = .unknown(mlir_ctx),
-    }).appendTo(CompilationContext.current().currentScope().block);
+        .location = reduce_provenance.location,
+    }).appendTo(ctx.currentScope().block);
+    reduce_provenance.annotate(ctx, reduce_op);
 
     // `stablehlo.reduce` drops axes. We want to avoid that to propagate tags.
     // So we need to broadcast the output of `stablehlo.reduce` to the input shapes.
@@ -284,13 +287,15 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
             reduced_shape = reduced_shape.setDim(a, 1);
         }
 
+        const broadcast_provenance = ctx.operationProvenance();
         const broad_op = dialects.stablehlo.broadcast_in_dim(
             mlir_ctx,
             reduce_op.result(i),
             broadcasting_axes.slice()[0 .. reduced_shape.rank() - axes_.len],
             mlirx.Type.rankedTensor(mlir_ctx, reduced_shape),
-            .unknown(mlir_ctx),
-        ).appendTo(CompilationContext.current().currentScope().block);
+            broadcast_provenance.location,
+        ).appendTo(ctx.currentScope().block);
+        broadcast_provenance.annotate(ctx, broad_op);
 
         result[i] = Tensor._result(reduced_shape, broad_op.result(0));
     }

@@ -57,10 +57,11 @@ button {
 
 .app-header {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 1.5rem;
-  padding: 1.25rem clamp(1rem, 2.2vw, 2rem);
+  min-height: 3.75rem;
+  padding: 0.65rem clamp(1rem, 2.2vw, 2rem);
   border-bottom: 1px solid var(--border);
   background: rgba(9, 12, 16, 0.84);
   backdrop-filter: blur(16px);
@@ -74,7 +75,7 @@ p {
 
 h1 {
   margin-bottom: 0;
-  font-size: clamp(1.25rem, 2.1vw, 1.8rem);
+  font-size: clamp(1.05rem, 1.7vw, 1.35rem);
   font-weight: 620;
   letter-spacing: -0.025em;
 }
@@ -124,7 +125,7 @@ h1 {
 }
 
 .app-main {
-  padding: 1rem clamp(0.65rem, 1.7vw, 1.5rem) 1.5rem;
+  padding: 0.7rem clamp(0.65rem, 1.7vw, 1.5rem) 1.5rem;
 }
 
 .legend {
@@ -166,10 +167,13 @@ h1 {
 
 .panes {
   display: grid;
-  grid-template-columns: repeat(3, minmax(20rem, 1fr));
-  gap: 0.75rem;
-  min-height: min(68vh, 58rem);
+  grid-template-columns: repeat(2, minmax(22rem, 1fr));
+  gap: 1px;
+  height: clamp(32rem, 72vh, 62rem);
   overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  background: var(--border);
   scrollbar-color: #344255 transparent;
 }
 
@@ -177,9 +181,11 @@ h1 {
   display: grid;
   grid-template-rows: auto minmax(20rem, 1fr);
   min-width: 0;
+  min-height: 0;
   overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 0.55rem;
+  border: 0;
+  border-top: 2px solid transparent;
+  border-radius: 0;
   background: rgba(16, 21, 28, 0.9);
   box-shadow: 0 10px 35px rgba(0, 0, 0, 0.18);
 }
@@ -188,11 +194,11 @@ h1 {
   border-top-color: rgba(111, 216, 176, 0.7);
 }
 
-.stable-pane {
+.ir-pane[data-active-ir="stable"] {
   border-top-color: rgba(113, 167, 255, 0.7);
 }
 
-.hlo-pane {
+.ir-pane[data-active-ir="hlo"] {
   border-top-color: rgba(196, 155, 255, 0.7);
 }
 
@@ -216,12 +222,66 @@ h1 {
   color: var(--source);
 }
 
-.stable-pane .pane-header h2 {
+.ir-pane[data-active-ir="stable"] .pane-header h2 {
   color: var(--stable);
 }
 
-.hlo-pane .pane-header h2 {
+.ir-pane[data-active-ir="hlo"] .pane-header h2 {
   color: var(--hlo);
+}
+
+.pane-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.ir-toggle {
+  display: inline-flex;
+  gap: 0.12rem;
+  padding: 0.16rem;
+  border: 1px solid #303d4d;
+  border-radius: 0.38rem;
+  background: #0d1218;
+}
+
+.ir-toggle-button {
+  padding: 0.35rem 0.58rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+  white-space: nowrap;
+  background: transparent;
+  border: 0;
+  border-radius: 0.26rem;
+  cursor: pointer;
+}
+
+.ir-toggle-button:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.ir-toggle-button[data-ir-pane="stable"][aria-selected="true"] {
+  color: #dbe9ff;
+  background: rgba(72, 126, 206, 0.34);
+  box-shadow: inset 0 0 0 1px rgba(113, 167, 255, 0.38);
+}
+
+.ir-toggle-button[data-ir-pane="hlo"][aria-selected="true"] {
+  color: #eadcff;
+  background: rgba(125, 81, 181, 0.34);
+  box-shadow: inset 0 0 0 1px rgba(196, 155, 255, 0.38);
+}
+
+.ir-toggle-button:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.ir-toggle-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 
 .line-count {
@@ -231,6 +291,7 @@ h1 {
 
 .code-lines {
   position: relative;
+  min-height: 0;
   overflow: auto;
   padding: 0.55rem 0 1.5rem;
   scrollbar-color: #344255 transparent;

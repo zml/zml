@@ -1,10 +1,26 @@
 const std = @import("std");
 
-const ProvenanceRecord = struct {
+pub const ProvenanceRecord = struct {
     stable_op_id: u64,
     file: []const u8,
     line: u32,
     column: u32,
+};
+
+const LocationAlias = struct {
+    name: []const u8,
+    expression: []const u8,
+};
+
+const SourceLocation = struct {
+    file: []const u8,
+    line: u32,
+    column: u32,
+};
+
+const ResolvedLocation = struct {
+    stable_op_id: ?u64 = null,
+    source: ?SourceLocation = null,
 };
 
 const SourceSpan = struct {
@@ -16,6 +32,8 @@ const SourceSpan = struct {
     start_byte: ?usize,
     end_byte: ?usize,
     method: ?[]const u8,
+    provenance_line: u32,
+    provenance_column: u32,
 };
 
 const SourceMapping = struct {
@@ -98,6 +116,34 @@ pub fn writeFile(io: std.Io, output_dir: []const u8, name: []const u8, contents:
     try file.writePositionalAll(io, contents, 0);
 }
 
+/// Builds a dependency-free explorer bundle from compiler text artifacts.
+/// Provenance is recovered from StableHLO operation attributes and locations;
+/// a separate `provenance.json` input is neither read nor written.
+pub fn writeBundleFromTexts(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    output_dir: []const u8,
+    source: []const u8,
+    source_map_json: ?[]const u8,
+    stablehlo: []const u8,
+    hlo: []const u8,
+) !void {
+    var arena_state: std.heap.ArenaAllocator = .init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const records = try deriveProvenanceRecords(arena, stablehlo);
+    const source_spans = if (source_map_json) |json| try parseSourceMap(arena, json) else &.{};
+    const mapping = try buildMappingWithSpans(arena, records, stablehlo, hlo, source_spans);
+    try validateCompleteMapping(mapping);
+
+    try std.Io.Dir.cwd().createDirPath(io, output_dir);
+    try writeFile(io, output_dir, "source.zig", source);
+    try writeFile(io, output_dir, "stablehlo.mlir", stablehlo);
+    try writeFile(io, output_dir, "hlo.before_optimizations.txt", hlo);
+    try writeMappingFile(io, output_dir, mapping);
+}
+
 pub fn finalize(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -152,13 +198,21 @@ pub fn finalizeWithSourceMap(
     const records = try parseProvenance(arena, provenance_json);
     const source_spans = if (source_map_json) |json| try parseSourceMap(arena, json) else &.{};
     const mapping = try buildMappingWithSpans(arena, records, stablehlo, hlo, source_spans);
+    try validateCompleteMapping(mapping);
+    try writeMappingFile(io, output_dir, mapping);
+}
+
+fn validateCompleteMapping(mapping: Mapping) !void {
+    if (mapping.stable_ops.len == 0) return error.MissingStableOpProvenance;
     for (mapping.stable_ops) |stable| {
         if (stable.stablehlo_lines.len == 0 or stable.hlo_instruction_ids.len == 0) {
             std.log.err("incomplete provenance for zml.stable_op.{s}", .{stable.id});
             return error.IncompleteHloMapping;
         }
     }
+}
 
+fn writeMappingFile(io: std.Io, output_dir: []const u8, mapping: Mapping) !void {
     var mapping_path_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const mapping_path = try std.fmt.bufPrint(&mapping_path_buffer, "{s}/mapping.json", .{output_dir});
     const mapping_file = try std.Io.Dir.createFile(.cwd(), io, mapping_path, .{});
@@ -235,6 +289,320 @@ fn parseProvenance(allocator: std.mem.Allocator, json: []const u8) ![]Provenance
     return records.toOwnedSlice(allocator);
 }
 
+/// Recovers the compiler provenance table embedded in a debug-info StableHLO
+/// dump. Returned strings and the returned slice live for the lifetime of
+/// `allocator`; callers commonly pass an arena allocator.
+pub fn deriveProvenanceRecords(
+    allocator: std.mem.Allocator,
+    stablehlo: []const u8,
+) ![]ProvenanceRecord {
+    const aliases = try collectLocationAliases(allocator, stablehlo);
+    var attribute_ids: std.ArrayList(u64) = .empty;
+    var records: std.ArrayList(ProvenanceRecord) = .empty;
+
+    // Frontend attributes are the surviving operation identities. Locations
+    // for region-bearing operations may be printed on a later line, so collect
+    // the identities independently from the location table.
+    var lines = std.mem.splitScalar(u8, stablehlo, '\n');
+    while (lines.next()) |line| {
+        const attribute_id = try findFrontendStableId(line);
+        if (attribute_id) |id| try appendUnique(u64, allocator, &attribute_ids, id);
+        if (std.mem.indexOf(u8, line, "stablehlo.") == null) continue;
+
+        // Preserve the strict same-operation check for compact syntax.
+        if (try findNamedStableLocation(line)) |named| {
+            _ = try mergeStableOpIds(attribute_id, named.stable_op_id);
+        }
+
+        // Generic `loc(#locN)` syntax can resolve directly on the operation.
+        if (try findLastLocationArgument(line)) |argument| {
+            const resolved = try resolveLocation(allocator, argument, aliases, 0);
+            const stable_op_id = (try mergeStableOpIds(attribute_id, resolved.stable_op_id)) orelse continue;
+            if (resolved.source) |source| {
+                try upsertProvenanceRecordSorted(allocator, &records, .{
+                    .stable_op_id = stable_op_id,
+                    .file = source.file,
+                    .line = source.line,
+                    .column = source.column,
+                });
+            }
+        }
+    }
+
+    // Pretty MLIR prints named locations both inline and in the trailing alias
+    // table. Scanning all lines joins multiline operations back to their
+    // source without needing to parse StableHLO region boundaries.
+    lines = std.mem.splitScalar(u8, stablehlo, '\n');
+    while (lines.next()) |line| {
+        const named = try findNamedStableLocation(line) orelse continue;
+        var resolved = try resolveLocation(allocator, named.argument, aliases, 0);
+        resolved.stable_op_id = try mergeStableOpIds(resolved.stable_op_id, named.stable_op_id);
+        const source = resolved.source orelse continue;
+        try upsertProvenanceRecordSorted(allocator, &records, .{
+            .stable_op_id = resolved.stable_op_id.?,
+            .file = source.file,
+            .line = source.line,
+            .column = source.column,
+        });
+    }
+
+    if (attribute_ids.items.len == 0 or records.items.len == 0) return error.MissingStableOpProvenance;
+    for (attribute_ids.items) |id| {
+        if (!containsProvenanceRecord(records.items, id)) {
+            std.log.warn("ignoring zml.stable_op.{d}: StableHLO has no source location", .{id});
+        }
+    }
+    for (records.items) |record| {
+        if (!containsStableOpId(attribute_ids.items, record.stable_op_id)) return error.MissingStableOpAttribute;
+    }
+    return records.toOwnedSlice(allocator);
+}
+
+const NamedStableLocation = struct {
+    stable_op_id: u64,
+    argument: []const u8,
+};
+
+fn collectLocationAliases(allocator: std.mem.Allocator, text: []const u8) ![]LocationAlias {
+    var aliases: std.ArrayList(LocationAlias) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (!std.mem.startsWith(u8, trimmed, "#loc")) continue;
+        const equals = std.mem.indexOfScalar(u8, trimmed, '=') orelse continue;
+        const name = std.mem.trim(u8, trimmed[0..equals], " \t");
+        const expression = std.mem.trim(u8, trimmed[equals + 1 ..], " \t");
+        if (expression.len == 0) return error.InvalidStableOpLocation;
+        try aliases.append(allocator, .{ .name = name, .expression = expression });
+    }
+    return aliases.toOwnedSlice(allocator);
+}
+
+fn findFrontendStableId(line: []const u8) !?u64 {
+    const key = "zml.stable_op_id";
+    const key_start = std.mem.indexOf(u8, line, key) orelse return null;
+    var cursor = key_start + key.len;
+    if (cursor < line.len and line[cursor] == '"') cursor += 1;
+    while (cursor < line.len and std.ascii.isWhitespace(line[cursor])) : (cursor += 1) {}
+    if (cursor == line.len or line[cursor] != '=') return error.InvalidStableOpId;
+    cursor += 1;
+    while (cursor < line.len and std.ascii.isWhitespace(line[cursor])) : (cursor += 1) {}
+
+    const quoted = cursor < line.len and line[cursor] == '"';
+    if (quoted) cursor += 1;
+    const prefix = "zml.stable_op.";
+    if (!std.mem.startsWith(u8, line[cursor..], prefix)) return error.InvalidStableOpId;
+    cursor += prefix.len;
+    const digits_start = cursor;
+    while (cursor < line.len and std.ascii.isDigit(line[cursor])) : (cursor += 1) {}
+    if (cursor == digits_start or (quoted and (cursor == line.len or line[cursor] != '"'))) {
+        return error.InvalidStableOpId;
+    }
+    return std.fmt.parseInt(u64, line[digits_start..cursor], 10) catch error.InvalidStableOpId;
+}
+
+fn findNamedStableLocation(line: []const u8) !?NamedStableLocation {
+    const marker = "\"zml.stable_op.";
+    var cursor: usize = 0;
+    var result: ?NamedStableLocation = null;
+    while (std.mem.indexOfPos(u8, line, cursor, marker)) |start| {
+        const digits_start = start + marker.len;
+        var digits_end = digits_start;
+        while (digits_end < line.len and std.ascii.isDigit(line[digits_end])) : (digits_end += 1) {}
+        if (digits_end == digits_start or digits_end == line.len or line[digits_end] != '"') {
+            cursor = start + marker.len;
+            continue;
+        }
+
+        var open_paren = digits_end + 1;
+        while (open_paren < line.len and std.ascii.isWhitespace(line[open_paren])) : (open_paren += 1) {}
+        if (open_paren == line.len or line[open_paren] != '(') {
+            cursor = digits_end + 1;
+            continue;
+        }
+
+        const stable_op_id = std.fmt.parseInt(u64, line[digits_start..digits_end], 10) catch return error.InvalidStableOpId;
+        const argument = try parenthesizedArgument(line, open_paren);
+        if (result) |existing| {
+            if (existing.stable_op_id != stable_op_id) return error.ConflictingStableOpId;
+        } else {
+            result = .{ .stable_op_id = stable_op_id, .argument = argument };
+        }
+        cursor = open_paren + argument.len + 2;
+    }
+    return result;
+}
+
+fn findLastLocationArgument(line: []const u8) !?[]const u8 {
+    var cursor: usize = 0;
+    var result: ?[]const u8 = null;
+    while (std.mem.indexOfPos(u8, line, cursor, "loc(")) |start| {
+        if (start != 0 and (std.ascii.isAlphanumeric(line[start - 1]) or line[start - 1] == '_')) {
+            cursor = start + 4;
+            continue;
+        }
+        result = try parenthesizedArgument(line, start + 3);
+        cursor = start + 4;
+    }
+    return result;
+}
+
+fn parenthesizedArgument(text: []const u8, open_paren: usize) ![]const u8 {
+    if (open_paren >= text.len or text[open_paren] != '(') return error.InvalidStableOpLocation;
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    for (text[open_paren..], open_paren..) |character, index| {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (character == '\\') {
+                escaped = true;
+            } else if (character == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (character == '"') {
+            in_string = true;
+        } else if (character == '(') {
+            depth += 1;
+        } else if (character == ')') {
+            if (depth == 0) return error.InvalidStableOpLocation;
+            depth -= 1;
+            if (depth == 0) return text[open_paren + 1 .. index];
+        }
+    }
+    return error.InvalidStableOpLocation;
+}
+
+fn resolveLocation(
+    allocator: std.mem.Allocator,
+    expression: []const u8,
+    aliases: []const LocationAlias,
+    depth: u8,
+) !ResolvedLocation {
+    if (depth == 32) return error.InvalidStableOpLocation;
+    const trimmed = std.mem.trim(u8, expression, " \t\r");
+    if (trimmed.len == 0) return error.InvalidStableOpLocation;
+    if (std.mem.eql(u8, trimmed, "[unknown]") or std.mem.eql(u8, trimmed, "unknown")) return .{};
+
+    if (std.mem.startsWith(u8, trimmed, "loc(")) {
+        return resolveLocation(allocator, try parenthesizedArgument(trimmed, 3), aliases, depth + 1);
+    }
+
+    if (try findNamedStableLocation(trimmed)) |named| {
+        var resolved = try resolveLocation(allocator, named.argument, aliases, depth + 1);
+        resolved.stable_op_id = try mergeStableOpIds(resolved.stable_op_id, named.stable_op_id);
+        return resolved;
+    }
+
+    if (trimmed[0] == '#') {
+        var end: usize = 1;
+        while (end < trimmed.len and (std.ascii.isAlphanumeric(trimmed[end]) or trimmed[end] == '_' or trimmed[end] == '$')) : (end += 1) {}
+        const alias_name = trimmed[0..end];
+        for (aliases) |alias| {
+            if (std.mem.eql(u8, alias.name, alias_name)) {
+                return resolveLocation(allocator, alias.expression, aliases, depth + 1);
+            }
+        }
+        return error.UnknownStableOpLocationAlias;
+    }
+
+    return .{ .source = try parseFileLineColumn(allocator, trimmed) };
+}
+
+fn parseFileLineColumn(allocator: std.mem.Allocator, expression: []const u8) !SourceLocation {
+    const column_colon = std.mem.lastIndexOfScalar(u8, expression, ':') orelse return error.InvalidStableOpLocation;
+    if (column_colon + 1 == expression.len) return error.InvalidStableOpLocation;
+    const before_column = expression[0..column_colon];
+    const line_colon = std.mem.lastIndexOfScalar(u8, before_column, ':') orelse return error.InvalidStableOpLocation;
+
+    const line_text = std.mem.trim(u8, before_column[line_colon + 1 ..], " \t");
+    const column_text = std.mem.trim(u8, expression[column_colon + 1 ..], " \t");
+    const line = std.fmt.parseInt(u32, line_text, 10) catch return error.InvalidStableOpLocation;
+    const column = std.fmt.parseInt(u32, column_text, 10) catch return error.InvalidStableOpLocation;
+    if (line == 0 or column == 0) return error.InvalidStableOpLocation;
+
+    const file_text = std.mem.trim(u8, before_column[0..line_colon], " \t");
+    if (file_text.len == 0) return error.InvalidStableOpLocation;
+    const file = if (file_text[0] == '"') blk: {
+        if (file_text.len < 2 or file_text[file_text.len - 1] != '"') return error.InvalidStableOpLocation;
+        break :blk try unescapeMlirString(allocator, file_text[1 .. file_text.len - 1]);
+    } else file_text;
+
+    return .{ .file = file, .line = line, .column = column };
+}
+
+fn unescapeMlirString(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, text, '\\') == null) return text;
+    var result: std.ArrayList(u8) = .empty;
+    var cursor: usize = 0;
+    while (cursor < text.len) {
+        if (text[cursor] != '\\') {
+            try result.append(allocator, text[cursor]);
+            cursor += 1;
+            continue;
+        }
+        if (cursor + 1 == text.len) return error.InvalidStableOpLocation;
+        const escaped = text[cursor + 1];
+        switch (escaped) {
+            'n' => try result.append(allocator, '\n'),
+            't' => try result.append(allocator, '\t'),
+            '\\', '"' => try result.append(allocator, escaped),
+            else => {
+                if (cursor + 2 >= text.len) return error.InvalidStableOpLocation;
+                const high = hexDigitValue(escaped) orelse return error.InvalidStableOpLocation;
+                const low = hexDigitValue(text[cursor + 2]) orelse return error.InvalidStableOpLocation;
+                try result.append(allocator, high * 16 + low);
+                cursor += 1;
+            },
+        }
+        cursor += 2;
+    }
+    return result.toOwnedSlice(allocator);
+}
+
+fn hexDigitValue(character: u8) ?u8 {
+    if (character >= '0' and character <= '9') return character - '0';
+    if (character >= 'a' and character <= 'f') return character - 'a' + 10;
+    if (character >= 'A' and character <= 'F') return character - 'A' + 10;
+    return null;
+}
+
+fn mergeStableOpIds(left: ?u64, right: ?u64) !?u64 {
+    if (left != null and right != null and left.? != right.?) return error.ConflictingStableOpId;
+    return left orelse right;
+}
+
+fn upsertProvenanceRecordSorted(
+    allocator: std.mem.Allocator,
+    records: *std.ArrayList(ProvenanceRecord),
+    record: ProvenanceRecord,
+) !void {
+    var index: usize = 0;
+    while (index < records.items.len and records.items[index].stable_op_id < record.stable_op_id) : (index += 1) {}
+    if (index < records.items.len and records.items[index].stable_op_id == record.stable_op_id) {
+        const existing = records.items[index];
+        if (existing.line != record.line or existing.column != record.column or !std.mem.eql(u8, existing.file, record.file)) {
+            return error.ConflictingStableOpLocation;
+        }
+        return;
+    }
+    try records.insert(allocator, index, record);
+}
+
+fn containsProvenanceRecord(records: []const ProvenanceRecord, stable_op_id: u64) bool {
+    for (records) |record| {
+        if (record.stable_op_id == stable_op_id) return true;
+    }
+    return false;
+}
+
+fn containsStableOpId(ids: []const u64, stable_op_id: u64) bool {
+    return std.mem.indexOfScalar(u64, ids, stable_op_id) != null;
+}
+
 fn parseSourceMap(allocator: std.mem.Allocator, json: []const u8) ![]SourceSpan {
     const parsed = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json, .{});
     if (parsed != .object) return error.InvalidSourceMap;
@@ -256,8 +624,10 @@ fn parseSourceMap(allocator: std.mem.Allocator, json: []const u8) ![]SourceSpan 
         const end_column = try jsonSourceUnsigned(u32, firstObjectValue(&object, &.{ "end_column", "endColumn" }));
         const start_byte = try jsonSourceUnsignedOptional(usize, firstObjectValue(&object, &.{ "start_byte", "startByte" }));
         const end_byte = try jsonSourceUnsignedOptional(usize, firstObjectValue(&object, &.{ "end_byte", "endByte" }));
+        const provenance_line = (try jsonSourceUnsignedOptional(u32, firstObjectValue(&object, &.{ "provenance_line", "provenanceLine" }))) orelse line;
+        const provenance_column = (try jsonSourceUnsignedOptional(u32, firstObjectValue(&object, &.{ "provenance_column", "provenanceColumn" }))) orelse column;
 
-        if (line == 0 or column == 0 or end_line < line or (end_line == line and end_column <= column)) {
+        if (line == 0 or column == 0 or provenance_line == 0 or provenance_column == 0 or end_line < line or (end_line == line and end_column <= column)) {
             return error.InvalidSourceMap;
         }
         if (start_byte != null and end_byte != null and end_byte.? <= start_byte.?) {
@@ -273,6 +643,8 @@ fn parseSourceMap(allocator: std.mem.Allocator, json: []const u8) ![]SourceSpan 
             .start_byte = start_byte,
             .end_byte = end_byte,
             .method = try jsonOptionalString(firstObjectValue(&object, &.{ "method", "instrumented_method", "callee", "operation" })),
+            .provenance_line = provenance_line,
+            .provenance_column = provenance_column,
         });
     }
     return spans.toOwnedSlice(allocator);
@@ -426,40 +798,16 @@ fn buildMappingWithSpans(
 }
 
 fn findBestSourceSpan(source: SourceBuilder, spans: []const SourceSpan) ?*const SourceSpan {
-    var best: ?*const SourceSpan = null;
-    var best_file_penalty: u1 = 1;
-    var best_column_distance: u32 = std.math.maxInt(u32);
-    var best_span_size: usize = std.math.maxInt(usize);
+    var basename_match: ?*const SourceSpan = null;
 
     for (spans) |*span| {
         const exact_file = std.mem.eql(u8, source.file, span.file);
         if (!exact_file and !std.mem.eql(u8, std.fs.path.basename(source.file), std.fs.path.basename(span.file))) continue;
-        if (source.line < span.line or source.line > span.end_line) continue;
-
-        const column_distance: u32 = if (source.line == span.line and source.column < span.column)
-            span.column - source.column
-        else if (source.line == span.end_line and source.column > span.end_column)
-            source.column - span.end_column
-        else
-            0;
-        const span_size = if (span.start_byte != null and span.end_byte != null)
-            span.end_byte.? - span.start_byte.?
-        else
-            @as(usize, span.end_line - span.line) * 1_000_000 + span.end_column -| span.column;
-        const file_penalty: u1 = if (exact_file) 0 else 1;
-
-        if (best == null or
-            file_penalty < best_file_penalty or
-            (file_penalty == best_file_penalty and column_distance < best_column_distance) or
-            (file_penalty == best_file_penalty and column_distance == best_column_distance and span_size < best_span_size))
-        {
-            best = span;
-            best_file_penalty = file_penalty;
-            best_column_distance = column_distance;
-            best_span_size = span_size;
-        }
+        if (source.line != span.provenance_line or source.column != span.provenance_column) continue;
+        if (exact_file) return span;
+        basename_match = span;
     }
-    return best;
+    return basename_match;
 }
 
 fn mapStableHlo(
@@ -514,10 +862,32 @@ fn addStableHloLine(
         const values = try parsePercentNames(allocator, line);
         if (values.len != 0 and stable.result_name == null) {
             stable.result_name = values[0];
-            for (values[1..]) |operand| {
-                try stable.operands.append(allocator, operand);
-            }
+            try appendStableOperands(allocator, stable, values[1..]);
         }
+    }
+}
+
+fn appendStableOperands(
+    allocator: std.mem.Allocator,
+    stable: *StableOpBuilder,
+    printed_operands: []const []const u8,
+) !void {
+    // StableHLO prints reduce operands as `(input init: value)` pairs, while
+    // XLA HLO stores all inputs first and all init values second. Normalize to
+    // the physical operand order before correlating producers by position.
+    if (std.mem.eql(u8, stable.operation orelse "", "stablehlo.reduce") and printed_operands.len % 2 == 0) {
+        const pair_count = printed_operands.len / 2;
+        for (0..pair_count) |index| {
+            try stable.operands.append(allocator, printed_operands[index * 2]);
+        }
+        for (0..pair_count) |index| {
+            try stable.operands.append(allocator, printed_operands[index * 2 + 1]);
+        }
+        return;
+    }
+
+    for (printed_operands) |operand| {
+        try stable.operands.append(allocator, operand);
     }
 }
 
@@ -547,6 +917,7 @@ fn mapHlo(
     for (hlo_builders.items) |*hlo| {
         const stable_id = hlo.stable_op_id orelse continue;
         const stable = findStableBuilder(stable_ops, stable_id) orelse continue;
+        if (!metadataOpcodeMatchesStable(stable.operation orelse continue, hlo.opcode)) continue;
         try addHloMapping(allocator, &instructions, stable, hlo, "metadata");
     }
 
@@ -563,8 +934,7 @@ fn mapHlo(
                 if (operand_index >= consumer_hlo.operands.len) continue;
 
                 const producer_hlo = findHloByName(hlo_builders.items, consumer_hlo.operands[operand_index]) orelse continue;
-                const expected_opcode = normalizedStableOpcode(producer_stable.operation orelse continue);
-                if (!std.mem.eql(u8, producer_hlo.opcode, expected_opcode)) continue;
+                if (!hloOpcodeMatchesStable(producer_stable.operation orelse continue, producer_hlo.opcode)) continue;
 
                 if (producer_hlo.stable_op_id) |existing_id| {
                     if (!std.mem.eql(u8, existing_id, producer_stable.id)) continue;
@@ -601,11 +971,11 @@ fn addHloMapping(
 }
 
 fn findPrimaryHlo(hlo_instructions: []HloInstructionBuilder, stable: *const StableOpBuilder) ?*HloInstructionBuilder {
-    const expected_opcode = normalizedStableOpcode(stable.operation orelse return null);
+    const stable_operation = stable.operation orelse return null;
     var match: ?*HloInstructionBuilder = null;
     for (hlo_instructions) |*instruction| {
         const stable_id = instruction.stable_op_id orelse continue;
-        if (!std.mem.eql(u8, stable_id, stable.id) or !std.mem.eql(u8, instruction.opcode, expected_opcode)) continue;
+        if (!std.mem.eql(u8, stable_id, stable.id) or !hloOpcodeMatchesStable(stable_operation, instruction.opcode)) continue;
         if (match != null) return null;
         match = instruction;
     }
@@ -632,7 +1002,19 @@ fn normalizedStableOpcode(operation: []const u8) []const u8 {
     const prefix = "stablehlo.";
     const opcode = if (std.mem.startsWith(u8, operation, prefix)) operation[prefix.len..] else operation;
     if (std.mem.eql(u8, opcode, "broadcast_in_dim")) return "broadcast";
+    if (std.mem.eql(u8, opcode, "dot_general")) return "dot";
     return opcode;
+}
+
+fn hloOpcodeMatchesStable(stable_operation: []const u8, hlo_opcode: []const u8) bool {
+    const expected = normalizedStableOpcode(stable_operation);
+    if (std.mem.eql(u8, expected, hlo_opcode)) return true;
+    return std.mem.eql(u8, stable_operation, "stablehlo.broadcast_in_dim") and std.mem.eql(u8, hlo_opcode, "reshape");
+}
+
+fn metadataOpcodeMatchesStable(stable_operation: []const u8, hlo_opcode: []const u8) bool {
+    if (hloOpcodeMatchesStable(stable_operation, hlo_opcode)) return true;
+    return std.mem.eql(u8, stable_operation, "stablehlo.reduce") and std.mem.eql(u8, hlo_opcode, "get-tuple-element");
 }
 
 fn instructionIsMapped(instructions: []const HloInstructionMapping, name: []const u8) bool {
@@ -698,12 +1080,22 @@ fn parseInstructionName(allocator: std.mem.Allocator, line: []const u8) !?[]cons
 
 fn parseHloOpcode(allocator: std.mem.Allocator, line: []const u8) !?[]const u8 {
     const equals = std.mem.indexOfScalar(u8, line, '=') orelse return null;
-    const open_paren = std.mem.indexOfPos(u8, line, equals + 1, "(") orelse return null;
-    const before = std.mem.trimEnd(u8, line[equals + 1 .. open_paren], " \t");
-    const token_start = std.mem.lastIndexOfAny(u8, before, " \t") orelse 0;
-    const opcode = if (token_start == 0) before else before[token_start + 1 ..];
-    if (opcode.len == 0) return null;
-    return try allocator.dupe(u8, opcode);
+    var cursor = equals + 1;
+    while (std.mem.indexOfPos(u8, line, cursor, "(")) |open_paren| {
+        const before = std.mem.trimEnd(u8, line[equals + 1 .. open_paren], " \t");
+        const token_start = std.mem.lastIndexOfAny(u8, before, " \t") orelse 0;
+        const opcode = if (token_start == 0) before else before[token_start + 1 ..];
+        if (opcode.len != 0 and isHloOpcode(opcode)) return try allocator.dupe(u8, opcode);
+        cursor = open_paren + 1;
+    }
+    return null;
+}
+
+fn isHloOpcode(value: []const u8) bool {
+    for (value) |character| {
+        if (!std.ascii.isAlphanumeric(character) and character != '-' and character != '_') return false;
+    }
+    return true;
 }
 
 fn appendUnique(
@@ -716,6 +1108,157 @@ fn appendUnique(
         if (if (T == []const u8) std.mem.eql(u8, existing, value) else existing == value) return;
     }
     try list.append(allocator, value);
+}
+
+test "derive provenance from pretty StableHLO locations and frontend attributes" {
+    const stablehlo =
+        \\  %cst = stablehlo.constant {mhlo.frontend_attributes = {zml.stable_op_id = "zml.stable_op.1"}} dense<2.0> : tensor<f32> "zml.stable_op.1"(#loc1)
+        \\  %sum = stablehlo.add %arg0, %arg1 {mhlo.frontend_attributes = {zml.stable_op_id = "zml.stable_op.0"}} : tensor<4xf32> "zml.stable_op.0"(#loc2)
+        \\#loc1 = source.zig:5:42
+        \\#loc2 = tools/source_to_hlo_explorer/source.zig:4:28
+        \\#loc3 = "zml.stable_op.1"(#loc1)
+        \\#loc4 = "zml.stable_op.0"(#loc2)
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const records = try deriveProvenanceRecords(arena_state.allocator(), stablehlo);
+
+    try std.testing.expectEqual(@as(usize, 2), records.len);
+    try std.testing.expectEqual(@as(u64, 0), records[0].stable_op_id);
+    try std.testing.expectEqualStrings("tools/source_to_hlo_explorer/source.zig", records[0].file);
+    try std.testing.expectEqual(@as(u32, 4), records[0].line);
+    try std.testing.expectEqual(@as(u32, 28), records[0].column);
+    try std.testing.expectEqual(@as(u64, 1), records[1].stable_op_id);
+    try std.testing.expectEqualStrings("source.zig", records[1].file);
+    try std.testing.expectEqual(@as(u32, 5), records[1].line);
+    try std.testing.expectEqual(@as(u32, 42), records[1].column);
+}
+
+test "derive provenance resolves generic location alias chains" {
+    const stablehlo =
+        \\  %0 = stablehlo.convert %arg0 {mhlo.frontend_attributes = {zml.stable_op_id = "zml.stable_op.7"}} : (tensor<i32>) -> tensor<i8> loc(#loc2)
+        \\#loc1 = loc("C:\5Csrc\5Cmodel.zig":12:34)
+        \\#loc2 = loc("zml.stable_op.7"(#loc1))
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const records = try deriveProvenanceRecords(arena_state.allocator(), stablehlo);
+
+    try std.testing.expectEqual(@as(usize, 1), records.len);
+    try std.testing.expectEqual(@as(u64, 7), records[0].stable_op_id);
+    try std.testing.expectEqualStrings("C:\\src\\model.zig", records[0].file);
+    try std.testing.expectEqual(@as(u32, 12), records[0].line);
+    try std.testing.expectEqual(@as(u32, 34), records[0].column);
+}
+
+test "derive provenance joins multiline region operations through the location table" {
+    const stablehlo =
+        \\  %0:2 = stablehlo.reduce(%arg0 init: %init) across dimensions = [0] {mhlo.frontend_attributes = {zml.stable_op_id = "zml.stable_op.7"}} : (tensor<4xf32>, tensor<f32>) -> (tensor<f32>, tensor<i32>)
+        \\   reducer(%left: tensor<f32>, %right: tensor<f32>) {
+        \\    %1 = stablehlo.compare  GT, %left, %right : (tensor<f32>, tensor<f32>) -> tensor<i1>
+        \\    stablehlo.return %left : tensor<f32>
+        \\   } "zml.stable_op.7"(#loc1)
+        \\#loc1 = model.zig:42:18
+        \\#loc2 = "zml.stable_op.7"(#loc1)
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const records = try deriveProvenanceRecords(arena_state.allocator(), stablehlo);
+
+    try std.testing.expectEqual(@as(usize, 1), records.len);
+    try std.testing.expectEqual(@as(u64, 7), records[0].stable_op_id);
+    try std.testing.expectEqualStrings("model.zig", records[0].file);
+    try std.testing.expectEqual(@as(u32, 42), records[0].line);
+    try std.testing.expectEqual(@as(u32, 18), records[0].column);
+}
+
+test "derive provenance ignores operations without source locations" {
+    const stablehlo =
+        \\  %cst = stablehlo.constant {mhlo.frontend_attributes = {zml.stable_op_id = "zml.stable_op.4"}} dense<0.0> : tensor<f32> [unknown]
+        \\  %0 = stablehlo.add %arg0, %arg1 {mhlo.frontend_attributes = {zml.stable_op_id = "zml.stable_op.5"}} : tensor<4xf32> "zml.stable_op.5"(#loc1)
+        \\#loc1 = model.zig:8:12
+        \\#loc2 = "zml.stable_op.5"(#loc1)
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const records = try deriveProvenanceRecords(arena_state.allocator(), stablehlo);
+
+    try std.testing.expectEqual(@as(usize, 1), records.len);
+    try std.testing.expectEqual(@as(u64, 5), records[0].stable_op_id);
+}
+
+test "derive provenance rejects conflicting embedded ids" {
+    const stablehlo =
+        \\  %0 = stablehlo.add %arg0, %arg1 {mhlo.frontend_attributes = {zml.stable_op_id = "zml.stable_op.1"}} : tensor<4xf32> "zml.stable_op.2"(#loc1)
+        \\#loc1 = source.zig:1:1
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    try std.testing.expectError(
+        error.ConflictingStableOpId,
+        deriveProvenanceRecords(arena_state.allocator(), stablehlo),
+    );
+}
+
+test "write bundle from texts derives provenance and writes four artifacts" {
+    const source =
+        \\fn forward() void {}
+    ;
+    const stablehlo =
+        \\  %0 = stablehlo.add %arg0, %arg1 {mhlo.frontend_attributes = {zml.stable_op_id = "zml.stable_op.0"}} : tensor<4xf32> "zml.stable_op.0"(#loc1)
+        \\#loc1 = source.zig:1:4
+    ;
+    const hlo =
+        \\  ROOT %add.1 = f32[4]{0} add(%arg0.1, %arg1.1), metadata={op_name="zml.stable_op.0"}
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_dir = try std.fmt.allocPrint(
+        std.testing.allocator,
+        ".zig-cache/tmp/{s}/bundle",
+        .{tmp.sub_path[0..]},
+    );
+    defer std.testing.allocator.free(output_dir);
+
+    try writeBundleFromTexts(
+        std.testing.allocator,
+        std.testing.io,
+        output_dir,
+        source,
+        null,
+        stablehlo,
+        hlo,
+    );
+
+    var bundle = try tmp.dir.openDir(std.testing.io, "bundle", .{ .iterate = true });
+    defer bundle.close(std.testing.io);
+    const written_source = try bundle.readFileAlloc(std.testing.io, "source.zig", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(written_source);
+    const written_stablehlo = try bundle.readFileAlloc(std.testing.io, "stablehlo.mlir", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(written_stablehlo);
+    const written_hlo = try bundle.readFileAlloc(std.testing.io, "hlo.before_optimizations.txt", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(written_hlo);
+    const mapping_json = try bundle.readFileAlloc(std.testing.io, "mapping.json", std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(mapping_json);
+
+    try std.testing.expectEqualStrings(source, written_source);
+    try std.testing.expectEqualStrings(stablehlo, written_stablehlo);
+    try std.testing.expectEqualStrings(hlo, written_hlo);
+    try std.testing.expect(std.mem.indexOf(u8, mapping_json, "\"stable_op_ids\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mapping_json, "\"%add.1\"") != null);
+
+    var file_count: usize = 0;
+    var iterator = bundle.iterate();
+    while (try iterator.next(std.testing.io)) |entry| {
+        if (entry.kind == .file) file_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), file_count);
 }
 
 test "build mapping correlates MLIR location aliases and HLO metadata" {
@@ -797,6 +1340,55 @@ test "AST sidecar enriches compiler provenance with exact expression spans" {
     try std.testing.expectEqual(@as(u32, 17), mapping.sources[0].provenance_column.?);
 }
 
+test "AST provenance anchors disambiguate nested call spans" {
+    const source_map =
+        \\{
+        \\  "version": 2,
+        \\  "original_file": "mnist.zig",
+        \\  "expressions": [
+        \\    {
+        \\      "file": "mnist.zig",
+        \\      "line": 28,
+        \\      "column": 16,
+        \\      "end_line": 28,
+        \\      "end_column": 41,
+        \\      "start_byte": 500,
+        \\      "end_byte": 525,
+        \\      "provenance_line": 28,
+        \\      "provenance_column": 28,
+        \\      "method": "dot"
+        \\    },
+        \\    {
+        \\      "file": "mnist.zig",
+        \\      "line": 28,
+        \\      "column": 41,
+        \\      "end_line": 28,
+        \\      "end_column": 56,
+        \\      "start_byte": 525,
+        \\      "end_byte": 540,
+        \\      "provenance_line": 28,
+        \\      "provenance_column": 42,
+        \\      "method": "add"
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const spans = try parseSourceMap(arena_state.allocator(), source_map);
+
+    const source: SourceBuilder = .{
+        .id = "mnist.zig:28:42",
+        .file = "mnist.zig",
+        .line = 28,
+        .column = 42,
+    };
+    const span = findBestSourceSpan(source, spans).?;
+    try std.testing.expectEqualStrings("add", span.method.?);
+    try std.testing.expectEqual(@as(u32, 41), span.column);
+}
+
 test "mapping remains point-based without an AST sidecar" {
     const provenance =
         \\{"records":[{"stable_op_id":1,"file":"source.zig","line":4,"column":28}]}
@@ -843,6 +1435,37 @@ test "AST sidecar must cover every compiler provenance point" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
+    const records = try parseProvenance(arena, provenance);
+    const spans = try parseSourceMap(arena, source_map);
+    try std.testing.expectError(error.MissingSourceSpan, buildMappingWithSpans(arena, records, "", "", spans));
+}
+
+test "AST sidecar requires an exact provenance anchor" {
+    const provenance =
+        \\{"records":[{"stable_op_id":1,"file":"source.zig","line":4,"column":18}]}
+    ;
+    const source_map =
+        \\{
+        \\  "version": 2,
+        \\  "original_file": "source.zig",
+        \\  "expressions": [{
+        \\    "file": "source.zig",
+        \\    "line": 4,
+        \\    "column": 17,
+        \\    "end_line": 4,
+        \\    "end_column": 25,
+        \\    "start_byte": 103,
+        \\    "end_byte": 111,
+        \\    "provenance_line": 4,
+        \\    "provenance_column": 19,
+        \\    "method": "add"
+        \\  }]
+        \\}
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
     const records = try parseProvenance(arena, provenance);
     const spans = try parseSourceMap(arena, source_map);
     try std.testing.expectError(error.MissingSourceSpan, buildMappingWithSpans(arena, records, "", "", spans));
@@ -896,6 +1519,126 @@ test "dataflow maps metadata-free producers without opcode guessing" {
     }
     try std.testing.expect(found_constant);
     try std.testing.expect(found_broadcast);
+}
+
+test "dataflow normalizes reduce input and init operand order" {
+    const provenance =
+        \\{"records":[
+        \\  {"stable_op_id":13,"file":"source.zig","line":1,"column":1},
+        \\  {"stable_op_id":14,"file":"source.zig","line":1,"column":1},
+        \\  {"stable_op_id":24,"file":"source.zig","line":1,"column":1}
+        \\]}
+    ;
+    const stablehlo =
+        \\  %cst = stablehlo.constant dense<0xFF800000> : tensor<f32> loc("zml.stable_op.13")
+        \\  %c = stablehlo.constant dense<0> : tensor<i32> loc("zml.stable_op.14")
+        \\  %result:2 = stablehlo.reduce(%values init: %cst), (%indices init: %c) across dimensions = [0] : (tensor<10xf32>, tensor<10xi32>, tensor<f32>, tensor<i32>) -> (tensor<f32>, tensor<i32>) loc("zml.stable_op.24")
+    ;
+    const hlo =
+        \\  %constant.7 = f32[] constant(-inf)
+        \\  %constant.6 = s32[] constant(0)
+        \\  %reduce.1 = (f32[], s32[]) reduce(%values.1, %indices.1, %constant.7, %constant.6), dimensions={0}, metadata={op_name="zml.stable_op.24"}
+        \\  %value.1 = f32[] get-tuple-element(%reduce.1), index=0, metadata={op_name="zml.stable_op.24"}
+        \\  ROOT %index.1 = s32[] get-tuple-element(%reduce.1), index=1, metadata={op_name="zml.stable_op.24"}
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const mapping = try buildMapping(arena, try parseProvenance(arena, provenance), stablehlo, hlo);
+
+    var found_float_init = false;
+    var found_integer_init = false;
+    for (mapping.hlo_instructions) |instruction| {
+        if (std.mem.eql(u8, instruction.id, "%constant.7")) {
+            found_float_init = true;
+            try std.testing.expectEqualStrings("13", instruction.stable_op_id);
+        }
+        if (std.mem.eql(u8, instruction.id, "%constant.6")) {
+            found_integer_init = true;
+            try std.testing.expectEqualStrings("14", instruction.stable_op_id);
+        }
+    }
+    try std.testing.expect(found_float_init);
+    try std.testing.expect(found_integer_init);
+}
+
+test "dataflow accepts scalar broadcast lowered to reshape" {
+    const provenance =
+        \\{"records":[
+        \\  {"stable_op_id":0,"file":"source.zig","line":1,"column":1},
+        \\  {"stable_op_id":1,"file":"source.zig","line":1,"column":1},
+        \\  {"stable_op_id":2,"file":"source.zig","line":1,"column":1}
+        \\]}
+    ;
+    const stablehlo =
+        \\  %cst = stablehlo.constant dense<0> : tensor<i32> loc("zml.stable_op.0")
+        \\  %wide = stablehlo.broadcast_in_dim %cst, dims = [] : (tensor<i32>) -> tensor<1xi32> loc("zml.stable_op.1")
+        \\  %result = stablehlo.add %wide, %wide : tensor<1xi32> loc("zml.stable_op.2")
+    ;
+    const hlo =
+        \\  %constant.1 = s32[] constant(0)
+        \\  %reshape.1 = s32[1]{0} reshape(%constant.1)
+        \\  ROOT %add.1 = s32[1]{0} add(%reshape.1, %reshape.1), metadata={op_name="zml.stable_op.2"}
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const mapping = try buildMapping(arena, try parseProvenance(arena, provenance), stablehlo, hlo);
+
+    try std.testing.expectEqual(@as(usize, 3), mapping.hlo_instructions.len);
+    for (mapping.hlo_instructions) |instruction| {
+        if (std.mem.eql(u8, instruction.id, "%reshape.1")) {
+            try std.testing.expectEqualStrings("1", instruction.stable_op_id);
+            try std.testing.expectEqualStrings("dataflow_operand", instruction.mapping);
+        }
+        if (std.mem.eql(u8, instruction.id, "%constant.1")) {
+            try std.testing.expectEqualStrings("0", instruction.stable_op_id);
+            try std.testing.expectEqualStrings("dataflow_operand", instruction.mapping);
+        }
+    }
+}
+
+test "direct metadata rejects inherited compiler operations" {
+    const provenance =
+        \\{"records":[{"stable_op_id":1,"file":"source.zig","line":1,"column":1}]}
+    ;
+    const stablehlo =
+        \\  %result = stablehlo.convert %arg0 : (tensor<i32>) -> tensor<i8> loc("zml.stable_op.1")
+    ;
+    const hlo =
+        \\  %convert.1 = s8[1]{0} convert(%arg0.1), metadata={op_name="zml.stable_op.1"}
+        \\  ROOT %sharding.1 = s8[1]{0} custom-call(%convert.1), custom_call_target="xla.sdy.FuncResultSharding", metadata={op_name="zml.stable_op.1"}
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const mapping = try buildMapping(arena, try parseProvenance(arena, provenance), stablehlo, hlo);
+
+    try std.testing.expectEqual(@as(usize, 1), mapping.hlo_instructions.len);
+    try std.testing.expectEqualStrings("%convert.1", mapping.hlo_instructions[0].id);
+}
+
+test "direct metadata keeps reduce result projections" {
+    const provenance =
+        \\{"records":[{"stable_op_id":1,"file":"source.zig","line":1,"column":1}]}
+    ;
+    const stablehlo =
+        \\  %result:2 = stablehlo.reduce(%arg0 init: %init) applies stablehlo.add across dimensions = [0] : (tensor<4xf32>, tensor<f32>) -> (tensor<f32>) loc("zml.stable_op.1")
+    ;
+    const hlo =
+        \\  %reduce.1 = (f32[], s32[]) reduce(%arg0.1, %init.1), dimensions={0}, metadata={op_name="zml.stable_op.1"}
+        \\  %value.1 = f32[] get-tuple-element(%reduce.1), index=0, metadata={op_name="zml.stable_op.1"}
+        \\  ROOT %index.1 = s32[] get-tuple-element(%reduce.1), index=1, metadata={op_name="zml.stable_op.1"}
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const mapping = try buildMapping(arena, try parseProvenance(arena, provenance), stablehlo, hlo);
+    try std.testing.expectEqual(@as(usize, 3), mapping.hlo_instructions.len);
 }
 
 test "location aliases are matched as complete tokens" {

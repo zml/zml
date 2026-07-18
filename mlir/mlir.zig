@@ -1344,7 +1344,7 @@ pub const Operation = opaque {
         const ContextType = @TypeOf(inner_ctx);
 
         c.mlirOperationWalk(
-            self._inner,
+            self.ptr(),
             (struct {
                 pub fn callback(op: c.MlirOperation, ctx_: ?*anyopaque) callconv(.c) c.MlirWalkResult {
                     const inner_ctx_: *ContextType = @ptrCast(@alignCast(ctx_));
