@@ -327,7 +327,12 @@ pub const DynamicBufferPool = struct {
                     _ = self.in_flight.fetchSub(1, .release);
                     self.condition.signal(io);
                 }
-                const buffer = try allocator.alignedAlloc(u8, alignment, self.block_size);
+                // Pool blocks are uninitialized storage. `Allocator.alignedAlloc`
+                // materializes Zig's undefined-memory poison across the entire
+                // allocation, which is especially expensive for large pinned
+                // DMA blocks that the reader immediately overwrites.
+                const ptr = allocator.rawAlloc(self.block_size, alignment, @returnAddress()) orelse return error.OutOfMemory;
+                const buffer = ptr[0..self.block_size];
                 _ = self.allocated.fetchAdd(1, .release);
                 return .{ .buffer = @alignCast(buffer), .wait_ns = wait_ns };
             }

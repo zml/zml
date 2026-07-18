@@ -2,11 +2,11 @@
 
 Snapshot date: 2026-07-18
 
-Snapshot base commit: `a6f8918a` (`cuda`) on
-`brabier/adaptive-concurrency`. The working tree contains the user's four-GPU
-oneAPI benchmark-script changes plus the pinned-buffer/quantum separation and
-benchmark documentation summarized below; inspect `git diff` before assuming
-they have been committed.
+Snapshot base commit: detached `HEAD` at `9b71c5a8` (`oneapi`). That commit
+contains the four-GPU scripts, pinned-buffer/quantum separation, and initial
+oneAPI sweep. The working tree adds the uninitialized pool-allocation
+optimization described below; `profile_file.sh` and its `perf.data` output are
+currently untracked. Inspect `git diff` before assuming later work is committed.
 
 This file is an implementation handoff for agents. It is deliberately dense.
 Treat current source as authoritative when it conflicts with this snapshot.
@@ -46,11 +46,17 @@ Current validation state at this snapshot:
   widths, 32/64/128/256 MiB DMA quanta, and independently sized pinned blocks
   from warm local files and S3Proxy;
 - a 256 MiB logical quantum with a 64 MiB pinned block is the best balanced
-  local four-GPU setting observed; a 32 MiB pinned block performs better on the
-  tested S3 profiles. No single fixed block size is within 3% on both sources;
+  local four-GPU setting observed; after the allocation fix its adaptive median
+  was 3.561 s versus a 3.418 s fixed-width-4 median, 4.2% behind and narrowly
+  outside the target. A 32 MiB block performs better on the tested S3 profiles;
+  no single fixed block size is within 3% on both sources;
 - a four-GPU replicated load completed in 9.758 s with 14.96 GiB logical bytes
   and 59.83 GiB physical PJRT bytes committed, validating the physical/logical
   metric distinction end to end;
+- a four-GPU sharded `perf` investigation removed the full-buffer undefined
+  poison write from dynamic pool allocation. In controlled fixed-width runs it
+  reduced median CPU task time by 4.7% with 256 MiB pinned blocks and 3.0% with
+  64 MiB blocks;
 - the earlier single-CUDA validation and its 20/20 teardown stress result remain
   recorded below, but must not be treated as the current hardware result.
 
@@ -134,6 +140,9 @@ a literal Gradient2 implementation. Do not describe it as Gradient2.
   Both use the repository `bazel.sh` wrapper. S3 accepts `LATENCY_MS` and
   `SPEED_MIB`; loader settings are inherited through the playground variables
   documented in the benchmark section below.
+- `profile_file.sh`: the user's release oneAPI sharded-load entry point under
+  `perf record`; loader environment overrides are inherited just like the
+  benchmark scripts.
 - `examples/io/main.zig`: enables `zml/io/load` debug logging and maps benchmark
   environment variables to `LoadOpts` without changing the default invocation.
 
@@ -967,6 +976,96 @@ Problems/opportunities exposed by this sweep:
    saturation hint, not a literal occupancy integral, until the metric is made
    window-resident.
 
+### Four-GPU sharded CPU profile, 2026-07-18
+
+The user's initial `profile_file.sh` capture used the warm local sharded
+workload, release oneAPI build, four devices, default 256 MiB pinned blocks,
+10 kHz cycle sampling, and call graphs. It contained 79K samples over 5.310 s
+with no lost samples. The dominant flat symbols were:
+
+```text
+symbol                                      self cycles
+kernel _copy_to_iter                            29.20%
+libc __memmove_avx512_unaligned_erms            19.55%
+kernel clear_page_erms                          11.45%
+playground compiler_rt.memset                    8.17%
+kernel entry_SYSCALL_64                          4.67%
+kernel ___pte_offset_map                         2.83%
+kernel filemap_get_read_batch                    2.37%
+```
+
+The call graphs distinguish these costs:
+
+- `_copy_to_iter` is the positional ext4/page-cache read copying model bytes
+  into the destination host buffer. It is useful storage work.
+- the 19.55% `memmove` runs under oneAPI's
+  `SyclStream::DoHostCallbackWithStatus` host task. No significant sample path
+  enters `DirectMemoryWriter.commitWindow`; the large copy is owned by the
+  PJRT/oneAPI transfer implementation, not ZML's sharding scatter loop.
+- most `clear_page_erms` samples are under XE/TTM/Level Zero backing allocation.
+  This is first-use driver page clearing for GPU-visible allocations.
+- 7.96 percentage points of `compiler_rt.memset` came directly from
+  `DynamicBufferPool.getWithWait`. Zig's `Allocator.alignedAlloc` writes the
+  undefined-memory poison pattern across every new block even though these pool
+  blocks are immediately filled by a read.
+
+`DynamicBufferPool` now uses `Allocator.rawAlloc` for its deliberately
+uninitialized blocks. This matches its existing `rawFree` lifecycle and does
+not remove a data copy: readers still initialize every consumed byte before it
+is submitted. A fresh profile reduced `compiler_rt.memset` from 8.17% to 0.11%;
+the residual samples are unrelated small program allocations.
+
+A controlled three-run A/B held the fixed loader at width 4 so adaptive lane
+decisions could not confound the result:
+
+```text
+pinned block  allocator path    median CPU task  median cycles  median elapsed
+256 MiB       poison/aligned          6.893 s        36.20 G          4.134 s
+256 MiB       raw/uninitialized       6.572 s        34.62 G          3.847 s
+64 MiB        poison/aligned          5.960 s        31.18 G          3.522 s
+64 MiB        raw/uninitialized       5.780 s        30.27 G          3.418 s
+```
+
+The retained change therefore reduces median CPU task time by 4.7% at 256 MiB
+and 3.0% at 64 MiB. Median elapsed time improved 6.9% and 3.0%, respectively.
+Do not use the larger difference from uncontrolled adaptive before/after runs;
+controller decisions and oneAPI variance changed between those samples.
+
+Static lane measurements after the fix show that remaining concurrency CPU is
+a tradeoff, not pure waste:
+
+```text
+block/width   median CPU task   median elapsed
+256 MiB / 2        5.322 s          4.123 s
+256 MiB / 3        6.132 s          4.162 s
+256 MiB / 4        6.572 s          3.847 s
+64 MiB / 2         4.859 s          3.686 s
+64 MiB / 4         5.780 s          3.418 s
+```
+
+At 64 MiB, width 4 spends about 19% more CPU than width 2 but is about 7.8%
+faster, so forcing two lanes would violate the current wall-time-first 3%
+objective on this sample. Three lanes is dominated. Three adaptive 64 MiB runs
+used 4.751-4.993 CPU-seconds and took 3.543-3.887 s; two finished at width 2.
+That keeps CPU low but its 3.561 s median is 4.2% behind the fixed-width-4
+median, narrowly outside the target amid known run variance.
+
+Block size remains the larger safe operational lever for warm local sharded
+loads: at fixed width 4, 64 MiB versus 256 MiB reduces median CPU task time by
+12.0% and elapsed time by 11.2%. Use:
+
+```sh
+ZML_LOAD_DMA_BUFFER_MIB=64 ./profile_file.sh
+```
+
+Do not make 64 MiB universal from this result. The prior S3 sweep found that
+32 MiB worked better on tested remote profiles and that 64 MiB regressed the
+250 ms profile. Remaining large CPU costs are required file copying, oneAPI's
+PJRT host callback copy, and XE/TTM allocation clearing. Further reduction
+requires a PJRT/oneAPI transfer path that accepts the loader's pinned buffer
+without the plugin copy, longer-lived/reused GPU-visible allocations, or safe
+source-aware block sizing; no additional local ZML copy hotspot was measured.
+
 ## Research Versus Current Implementation
 
 `RESEARCH.md` recommends a startup-plus-Gradient2/Vegas style controller with
@@ -1044,6 +1143,10 @@ protocol, and committed-byte objective.
     and the playground both log completion. The loader counters are complete and
     three targeted reruns exited normally, so the responsible PJRT/platform
     teardown frame is still unknown.
+15. On the four-GPU sharded profile, roughly one fifth of sampled cycles were in
+    a libc `memmove` below oneAPI's SYCL host callback. The retained pool change
+    removes ZML's allocation poison pass but cannot remove this plugin-owned
+    transfer copy. Recheck this profile when the oneAPI PJRT package changes.
 
 ## Validation
 
@@ -1079,13 +1182,14 @@ Performance validation must compare the same model/source/cache state:
    peak/final knobs, allocated pinned/pageable blocks, and starvation.
 
 As of the snapshot date, 209 tests pass (one platform-specific test skips) and
-the four-GPU oneAPI release playground builds. The earlier CUDA regression set
-still stands. On four-device oneAPI, the decoupled 256 MiB quantum/64 MiB buffer
-local result is inside 3% of the best repeated fixed result and uses zero
-staging. A 32 MiB buffer improves both tested S3 profiles but convergence remains
-noisy; the 10 ms profile spans 5.985-8.299 s over three runs. One replicated
-load completed with the expected 4x physical committed bytes. The intermittent
-post-completion oneAPI exit delay remains unresolved.
+the four-GPU oneAPI release playground builds with the raw pool-allocation
+change. The earlier CUDA regression set still stands. On four-device oneAPI,
+the post-fix adaptive 256 MiB quantum/64 MiB buffer median is 4.2% behind the
+fixed-width-4 median in a three-run `perf stat` sample; both remain fully direct
+with zero staging. A 32 MiB buffer improves both tested S3 profiles but
+convergence remains noisy; the 10 ms profile spans 5.985-8.299 s over three
+runs. One replicated load completed with the expected 4x physical committed
+bytes. The intermittent post-completion oneAPI exit delay remains unresolved.
 
 Acceptance target:
 
