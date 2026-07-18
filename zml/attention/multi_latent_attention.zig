@@ -233,7 +233,15 @@ const Triton = struct {
             return zml.Tensor.select(valid_topk, physical_topk, zml.Tensor.scalar(-1, .i32).broad(topk_shape));
         }
 
-        fn sparseAttentionShard(q: zml.Tensor, kv_cache: zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, parameters: triton_attn.paged.Parameters, opts: AttentionOptions) zml.Tensor {
+        fn sparseAttentionShard(
+            q: zml.Tensor,
+            kv_cache: zml.Tensor,
+            sink: zml.Tensor,
+            topk: zml.Tensor,
+            tokens_pos: zml.Tensor,
+            parameters: triton_attn.paged.Parameters,
+            opts: AttentionOptions,
+        ) zml.Tensor {
             // q: [q, h, hd]
             // kv_cache: [page, k_chunk, hkv=1, hd]
             // topk: [q, topk] absolute logical token ids, with -1 for padding.
@@ -258,7 +266,6 @@ const Triton = struct {
             const k_strides = kv_cache.shape().computeElementStrides().constSlice();
             const v_strides = kv_cache.shape().computeElementStrides().constSlice();
             const sm_scale = opts.scale orelse 1.0 / std.math.sqrt(@as(f32, @floatFromInt(q_dim)));
-            const sink = if (opts.sink) |sink| sink else zml.Tensor.zeroes(q.shape());
 
             const out = kernel.Kernel.call(.{
                 .query_ptr = q,
@@ -301,7 +308,7 @@ const Triton = struct {
                     .rope_offset = nope_rank,
                     .value_rank = q_dim,
                     .tile_size = @min(topk_final.dim(.topk), 16),
-                    .use_attn_sink = if (opts.sink) |_| true else false,
+                    .use_attn_sink = opts.use_sink,
                     .all_decode = !parameters.options_.is_prefill,
                 },
                 .grid = .{ @intCast(q.dim(.q) * @divExact(q_heads, block_m)), 1, 1 },
@@ -312,46 +319,54 @@ const Triton = struct {
             return out.output.reshape(q.shape());
         }
 
-        pub fn sparseAttention(q: zml.Tensor, kv: zml.Tensor, topk: zml.Tensor, tokens_pos: zml.Tensor, parameters: triton_attn.paged.Parameters, opts: AttentionOptions) zml.Tensor {
+        pub fn sparseAttention(
+            q: zml.Tensor,
+            kv: zml.Tensor,
+            sink: ?zml.Tensor,
+            topk: zml.Tensor,
+            tokens_pos: zml.Tensor,
+            parameters: triton_attn.paged.Parameters,
+            opts: AttentionOptions,
+        ) zml.Tensor {
             stdx.debug.assert(q.shape().hasTags(.{ .q, .h, .hd }), "expected q to have tags .q, .h, .hd after flattening, got {f}", .{q.shape()});
             stdx.debug.assert(kv.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "expected paged MLA KV cache to have tags .page, .k_chunk, .hkv, .hd, got {f}", .{kv.shape()});
             stdx.debug.assert(q.dim(.hd) > opts.rope_rank, "expected q head dim ({}) to include a rope tail of {}", .{ q.dim(.hd), opts.rope_rank });
             stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(q.dim(.hd)))), "expected value rank ({}) to be a power of two", .{q.dim(.hd)});
             stdx.debug.assert(kv.dim(.hd) == q.dim(.hd), "expected q and kv cache head dims to match, got q={} kv={}", .{ q.dim(.hd), kv.dim(.hd) });
 
-            const sink = (opts.sink orelse zml.Tensor.zeroes(zml.Shape.init(.{ .h = q.dim(.h) }, q.dtype())))
-                .withPartitioning(.{ .h = .model });
+            const sink_ = sink orelse zml.Tensor.zeroes(zml.Shape.init(.{ .h = q.dim(.h) }, q.dtype())).withPartitioning(.{ .h = .model });
+
+            // TODO: rework
+            const opts_: AttentionOptions = .{
+                .rope_rank = opts.rope_rank,
+                .scale = opts.scale,
+                .use_sink = if (sink) true else false,
+            };
 
             return zml.ops.manualComputation(
                 .{
                     q,
                     kv,
+                    sink,
                     topk,
                     tokens_pos,
                     parameters.block_table,
                     parameters.seq_lens,
                     parameters.query_start_len,
-                    sink,
+                    sink_,
                 },
                 q.shape(),
                 .{
-                    .rope_rank = opts.rope_rank,
-                    .scale = opts.scale,
+                    .opts = opts_,
                     .options = parameters.options_,
-                    .use_sink = opts.sink != null,
                 },
                 (struct {
                     fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
                         const parameters_: triton_attn.paged.Parameters = .{
-                            .block_table = sharded_inputs[4],
-                            .seq_lens = sharded_inputs[5],
-                            .query_start_len = sharded_inputs[6],
+                            .block_table = sharded_inputs[5],
+                            .seq_lens = sharded_inputs[6],
+                            .query_start_len = sharded_inputs[7],
                             .options_ = ctx_.options,
-                        };
-                        const opts_: AttentionOptions = .{
-                            .rope_rank = ctx_.rope_rank,
-                            .sink = if (ctx_.use_sink) sharded_inputs[7] else null,
-                            .scale = ctx_.scale,
                         };
 
                         return sparseAttentionShard(
@@ -359,8 +374,9 @@ const Triton = struct {
                             sharded_inputs[1],
                             sharded_inputs[2],
                             sharded_inputs[3],
+                            sharded_inputs[4],
                             parameters_,
-                            opts_,
+                            ctx_.opts,
                         );
                     }
                 }).body,
@@ -371,7 +387,7 @@ const Triton = struct {
 
 pub const AttentionOptions = struct {
     rope_rank: i64,
-    sink: ?zml.Tensor = null,
+    use_sink: bool,
     scale: ?f32 = null,
 };
 
@@ -434,6 +450,7 @@ fn vanillaSparseAttention(q: zml.Tensor, kv: zml.Tensor, topk: zml.Tensor, opts:
 pub fn pagedSparseAttention(
     q: zml.Tensor,
     kv: zml.Tensor,
+    sink: ?zml.Tensor,
     topk: zml.Tensor,
     tokens_pos: zml.Tensor,
     parameters: paged_attn.Parameters,
@@ -442,8 +459,9 @@ pub fn pagedSparseAttention(
     return switch (parameters) {
         .triton => |params| blk: {
             break :blk Triton.paged.sparseAttention(
-                q,
+                q.rename(.{ .b = .q }),
                 kv,
+                sink,
                 topk.rename(.{ .b = .q }),
                 tokens_pos.rename(.{ .b = .q }),
                 params,
