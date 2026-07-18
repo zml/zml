@@ -1,5 +1,25 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
+load("//bazel:zml_ast_instrument.bzl", "zml_ast_instrument")
+
+zig_binary(
+    name = "ast_instrumenter",
+    main = "instrumenter.zig",
+)
+
+zml_ast_instrument(
+    name = "instrumented_source",
+    src = "source.zig",
+    tool = ":ast_instrumenter",
+)
+
+zig_library(
+    name = "instrumented_model",
+    extra_srcs = [":instrumented_source_source_map"],
+    import_name = "zml_explorer_model",
+    main = ":instrumented_source",
+    deps = ["//zml"],
+)
 
 zig_binary(
     name = "poc",
@@ -9,7 +29,10 @@ zig_binary(
     ],
     main = "main.zig",
     visibility = ["//visibility:public"],
-    deps = ["//zml"],
+    deps = [
+        ":instrumented_model",
+        "//zml",
+    ],
 )
 
 build_test(
@@ -20,4 +43,9 @@ build_test(
 zig_test(
     name = "artifact_test",
     main = "artifact.zig",
+)
+
+zig_test(
+    name = "instrumenter_test",
+    main = "instrumenter.zig",
 )

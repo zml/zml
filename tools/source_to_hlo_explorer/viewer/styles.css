@@ -266,6 +266,27 @@ h1 {
   border-left-color: var(--active-border);
 }
 
+.source-pane .code-line.has-exact-ranges.is-related,
+.source-pane .code-line.has-exact-ranges.is-active {
+  background: transparent;
+}
+
+.source-range {
+  border-radius: 0.18rem;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.source-range.is-related {
+  background: var(--related);
+  box-shadow: 0 0 0 1px var(--related-border);
+}
+
+.source-range.is-active {
+  background: var(--active);
+  box-shadow: 0 0 0 1px var(--active-border);
+}
+
 .code-line.is-unmapped.is-active {
   background: rgba(255, 255, 255, 0.07);
   border-left-color: var(--muted);

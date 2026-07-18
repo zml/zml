@@ -1,10 +1,10 @@
 const std = @import("std");
 
 const zml = @import("zml");
+const model = @import("zml_explorer_model");
 const stdx = zml.stdx;
 
 const artifact = @import("artifact.zig");
-const model = @import("source.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -51,7 +51,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer exe.deinit();
 
-    try artifact.finalize(allocator, io, args.output, xla_dump_dir);
+    try artifact.finalizeWithSourceMap(allocator, io, args.output, xla_dump_dir, model.zml_source_map_json);
 
     std.log.info("Explorer artifacts written to {s}", .{args.output});
 }

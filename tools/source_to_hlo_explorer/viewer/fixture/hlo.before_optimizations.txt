@@ -8,8 +8,8 @@ FunctionNames
 2 "zml.stable_op.3"
 
 FileLocations
-1 {file_name_id=1 function_name_id=1 line=4 end_line=4 column=28 end_column=28}
-2 {file_name_id=1 function_name_id=2 line=5 end_line=5 column=42 end_column=42}
+1 {file_name_id=1 function_name_id=1 line=4 end_line=4 column=17 end_column=17}
+2 {file_name_id=1 function_name_id=2 line=5 end_line=5 column=21 end_column=21}
 
 StackFrames
 1 {file_location_id=1 parent_frame_id=1}

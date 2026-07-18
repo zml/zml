@@ -2,19 +2,33 @@
   "version": 1,
   "sources": [
     {
-      "id": "source.zig:4:28",
+      "id": "source.zig:4:17",
       "file": "source.zig",
       "line": 4,
-      "column": 28,
+      "column": 17,
+      "end_line": 4,
+      "end_column": 25,
+      "start_byte": 103,
+      "end_byte": 111,
+      "method": "add",
+      "provenance_line": 4,
+      "provenance_column": 17,
       "stable_op_ids": [
         "0"
       ]
     },
     {
-      "id": "source.zig:5:42",
+      "id": "source.zig:5:21",
       "file": "source.zig",
       "line": 5,
-      "column": 42,
+      "column": 21,
+      "end_line": 5,
+      "end_column": 39,
+      "start_byte": 133,
+      "end_byte": 151,
+      "method": "mulConstant",
+      "provenance_line": 5,
+      "provenance_column": 21,
       "stable_op_ids": [
         "1",
         "2",
@@ -25,7 +39,7 @@
   "stable_ops": [
     {
       "id": "0",
-      "source_id": "source.zig:4:28",
+      "source_id": "source.zig:4:17",
       "operation": "stablehlo.add",
       "stablehlo_lines": [
         6
@@ -36,7 +50,7 @@
     },
     {
       "id": "1",
-      "source_id": "source.zig:5:42",
+      "source_id": "source.zig:5:21",
       "operation": "stablehlo.constant",
       "stablehlo_lines": [
         5
@@ -47,7 +61,7 @@
     },
     {
       "id": "2",
-      "source_id": "source.zig:5:42",
+      "source_id": "source.zig:5:21",
       "operation": "stablehlo.broadcast_in_dim",
       "stablehlo_lines": [
         7
@@ -58,7 +72,7 @@
     },
     {
       "id": "3",
-      "source_id": "source.zig:5:42",
+      "source_id": "source.zig:5:21",
       "operation": "stablehlo.multiply",
       "stablehlo_lines": [
         8

@@ -9,8 +9,8 @@ module @zml_source_to_hlo_poc attributes {mhlo.num_partitions = 4 : i32, mhlo.nu
     return %2 : tensor<4xf32> [unknown]
   } [unknown]
 } [unknown]
-#loc1 = source.zig:5:42
-#loc2 = source.zig:4:28
+#loc1 = source.zig:5:21
+#loc2 = source.zig:4:17
 #loc3 = "zml.stable_op.1"(#loc1)
 #loc4 = "zml.stable_op.0"(#loc2)
 #loc5 = "zml.stable_op.2"(#loc1)

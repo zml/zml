@@ -7,11 +7,29 @@ const ProvenanceRecord = struct {
     column: u32,
 };
 
+const SourceSpan = struct {
+    file: []const u8,
+    line: u32,
+    column: u32,
+    end_line: u32,
+    end_column: u32,
+    start_byte: ?usize,
+    end_byte: ?usize,
+    method: ?[]const u8,
+};
+
 const SourceMapping = struct {
     id: []const u8,
     file: []const u8,
     line: u32,
     column: u32,
+    end_line: ?u32,
+    end_column: ?u32,
+    start_byte: ?usize,
+    end_byte: ?usize,
+    method: ?[]const u8,
+    provenance_line: ?u32,
+    provenance_column: ?u32,
     stable_op_ids: []const []const u8,
 };
 
@@ -44,6 +62,13 @@ const SourceBuilder = struct {
     file: []const u8,
     line: u32,
     column: u32,
+    end_line: ?u32 = null,
+    end_column: ?u32 = null,
+    start_byte: ?usize = null,
+    end_byte: ?usize = null,
+    method: ?[]const u8 = null,
+    provenance_line: ?u32 = null,
+    provenance_column: ?u32 = null,
     stable_op_ids: std.ArrayList([]const u8) = .empty,
 };
 
@@ -79,6 +104,19 @@ pub fn finalize(
     output_dir: []const u8,
     xla_dump_dir: []const u8,
 ) !void {
+    return finalizeWithSourceMap(allocator, io, output_dir, xla_dump_dir, null);
+}
+
+/// Finalizes the explorer bundle and, when present, enriches compiler
+/// provenance points with exact expression spans from the AST instrumenter's
+/// JSON sidecar.
+pub fn finalizeWithSourceMap(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    output_dir: []const u8,
+    xla_dump_dir: []const u8,
+    source_map_json: ?[]const u8,
+) !void {
     const hlo_text_name = try findDumpFile(allocator, io, xla_dump_dir, ".before_optimizations.txt");
     defer allocator.free(hlo_text_name);
     try copyDump(io, xla_dump_dir, hlo_text_name, output_dir, "hlo.before_optimizations.txt");
@@ -112,7 +150,8 @@ pub fn finalize(
     const arena = arena_state.allocator();
 
     const records = try parseProvenance(arena, provenance_json);
-    const mapping = try buildMapping(arena, records, stablehlo, hlo);
+    const source_spans = if (source_map_json) |json| try parseSourceMap(arena, json) else &.{};
+    const mapping = try buildMappingWithSpans(arena, records, stablehlo, hlo, source_spans);
     for (mapping.stable_ops) |stable| {
         if (stable.stablehlo_lines.len == 0 or stable.hlo_instruction_ids.len == 0) {
             std.log.err("incomplete provenance for zml.stable_op.{s}", .{stable.id});
@@ -196,6 +235,76 @@ fn parseProvenance(allocator: std.mem.Allocator, json: []const u8) ![]Provenance
     return records.toOwnedSlice(allocator);
 }
 
+fn parseSourceMap(allocator: std.mem.Allocator, json: []const u8) ![]SourceSpan {
+    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, allocator, json, .{});
+    if (parsed != .object) return error.InvalidSourceMap;
+
+    const root = parsed.object;
+    const original_file = try jsonOptionalString(root.get("original_file") orelse root.get("logical_path"));
+    const expressions_value = root.get("expressions") orelse root.get("mappings") orelse root.get("source_expressions") orelse root.get("spans") orelse return error.InvalidSourceMap;
+    if (expressions_value != .array) return error.InvalidSourceMap;
+
+    var spans: std.ArrayList(SourceSpan) = .empty;
+    for (expressions_value.array.items) |value| {
+        if (value != .object) return error.InvalidSourceMap;
+        const object = value.object;
+
+        const file = (try jsonOptionalString(firstObjectValue(&object, &.{ "file", "original_file", "filename" }))) orelse original_file orelse return error.InvalidSourceMap;
+        const line = try jsonSourceUnsigned(u32, firstObjectValue(&object, &.{ "line", "start_line", "startLine" }));
+        const column = try jsonSourceUnsigned(u32, firstObjectValue(&object, &.{ "column", "start_column", "startColumn", "col" }));
+        const end_line = try jsonSourceUnsigned(u32, firstObjectValue(&object, &.{ "end_line", "endLine" }));
+        const end_column = try jsonSourceUnsigned(u32, firstObjectValue(&object, &.{ "end_column", "endColumn" }));
+        const start_byte = try jsonSourceUnsignedOptional(usize, firstObjectValue(&object, &.{ "start_byte", "startByte" }));
+        const end_byte = try jsonSourceUnsignedOptional(usize, firstObjectValue(&object, &.{ "end_byte", "endByte" }));
+
+        if (line == 0 or column == 0 or end_line < line or (end_line == line and end_column <= column)) {
+            return error.InvalidSourceMap;
+        }
+        if (start_byte != null and end_byte != null and end_byte.? <= start_byte.?) {
+            return error.InvalidSourceMap;
+        }
+
+        try spans.append(allocator, .{
+            .file = file,
+            .line = line,
+            .column = column,
+            .end_line = end_line,
+            .end_column = end_column,
+            .start_byte = start_byte,
+            .end_byte = end_byte,
+            .method = try jsonOptionalString(firstObjectValue(&object, &.{ "method", "instrumented_method", "callee", "operation" })),
+        });
+    }
+    return spans.toOwnedSlice(allocator);
+}
+
+fn firstObjectValue(object: *const std.json.ObjectMap, names: []const []const u8) ?std.json.Value {
+    for (names) |name| {
+        if (object.get(name)) |value| return value;
+    }
+    return null;
+}
+
+fn jsonSourceUnsigned(comptime T: type, value: ?std.json.Value) !T {
+    return (try jsonSourceUnsignedOptional(T, value)) orelse error.InvalidSourceMap;
+}
+
+fn jsonSourceUnsignedOptional(comptime T: type, value: ?std.json.Value) !?T {
+    return switch (value orelse return null) {
+        .null => null,
+        .integer => |number| std.math.cast(T, number) orelse error.InvalidSourceMap,
+        else => error.InvalidSourceMap,
+    };
+}
+
+fn jsonOptionalString(value: ?std.json.Value) !?[]const u8 {
+    return switch (value orelse return null) {
+        .null => null,
+        .string => |string| string,
+        else => error.InvalidSourceMap,
+    };
+}
+
 fn jsonUnsigned(comptime T: type, value: ?std.json.Value) !T {
     return switch (value orelse return error.InvalidProvenance) {
         .integer => |number| std.math.cast(T, number) orelse error.InvalidProvenance,
@@ -215,6 +324,16 @@ fn buildMapping(
     records: []const ProvenanceRecord,
     stablehlo: []const u8,
     hlo: []const u8,
+) !Mapping {
+    return buildMappingWithSpans(allocator, records, stablehlo, hlo, &.{});
+}
+
+fn buildMappingWithSpans(
+    allocator: std.mem.Allocator,
+    records: []const ProvenanceRecord,
+    stablehlo: []const u8,
+    hlo: []const u8,
+    source_spans: []const SourceSpan,
 ) !Mapping {
     var source_builders: std.ArrayList(SourceBuilder) = .empty;
     var stable_builders: std.ArrayList(StableOpBuilder) = .empty;
@@ -250,6 +369,23 @@ fn buildMapping(
         });
     }
 
+    for (source_builders.items) |*source| {
+        const span = findBestSourceSpan(source.*, source_spans) orelse {
+            if (source_spans.len != 0) return error.MissingSourceSpan;
+            continue;
+        };
+        source.provenance_line = source.line;
+        source.provenance_column = source.column;
+        source.file = span.file;
+        source.line = span.line;
+        source.column = span.column;
+        source.end_line = span.end_line;
+        source.end_column = span.end_column;
+        source.start_byte = span.start_byte;
+        source.end_byte = span.end_byte;
+        source.method = span.method;
+    }
+
     try mapStableHlo(allocator, stablehlo, stable_builders.items);
     const hlo_mappings = try mapHlo(allocator, hlo, stable_builders.items);
 
@@ -260,6 +396,13 @@ fn buildMapping(
             .file = builder.file,
             .line = builder.line,
             .column = builder.column,
+            .end_line = builder.end_line,
+            .end_column = builder.end_column,
+            .start_byte = builder.start_byte,
+            .end_byte = builder.end_byte,
+            .method = builder.method,
+            .provenance_line = builder.provenance_line,
+            .provenance_column = builder.provenance_column,
             .stable_op_ids = try builder.stable_op_ids.toOwnedSlice(allocator),
         };
     }
@@ -280,6 +423,43 @@ fn buildMapping(
         .stable_ops = stable_ops,
         .hlo_instructions = hlo_mappings,
     };
+}
+
+fn findBestSourceSpan(source: SourceBuilder, spans: []const SourceSpan) ?*const SourceSpan {
+    var best: ?*const SourceSpan = null;
+    var best_file_penalty: u1 = 1;
+    var best_column_distance: u32 = std.math.maxInt(u32);
+    var best_span_size: usize = std.math.maxInt(usize);
+
+    for (spans) |*span| {
+        const exact_file = std.mem.eql(u8, source.file, span.file);
+        if (!exact_file and !std.mem.eql(u8, std.fs.path.basename(source.file), std.fs.path.basename(span.file))) continue;
+        if (source.line < span.line or source.line > span.end_line) continue;
+
+        const column_distance: u32 = if (source.line == span.line and source.column < span.column)
+            span.column - source.column
+        else if (source.line == span.end_line and source.column > span.end_column)
+            source.column - span.end_column
+        else
+            0;
+        const span_size = if (span.start_byte != null and span.end_byte != null)
+            span.end_byte.? - span.start_byte.?
+        else
+            @as(usize, span.end_line - span.line) * 1_000_000 + span.end_column -| span.column;
+        const file_penalty: u1 = if (exact_file) 0 else 1;
+
+        if (best == null or
+            file_penalty < best_file_penalty or
+            (file_penalty == best_file_penalty and column_distance < best_column_distance) or
+            (file_penalty == best_file_penalty and column_distance == best_column_distance and span_size < best_span_size))
+        {
+            best = span;
+            best_file_penalty = file_penalty;
+            best_column_distance = column_distance;
+            best_span_size = span_size;
+        }
+    }
+    return best;
 }
 
 fn mapStableHlo(
@@ -565,6 +745,107 @@ test "build mapping correlates MLIR location aliases and HLO metadata" {
     try std.testing.expectEqualStrings("%add.3", mapping.hlo_instructions[0].id);
     try std.testing.expectEqualStrings("add", mapping.hlo_instructions[0].opcode.?);
     try std.testing.expectEqualSlices(usize, &.{1}, mapping.hlo_instructions[0].hlo_lines);
+}
+
+test "AST sidecar enriches compiler provenance with exact expression spans" {
+    const provenance =
+        \\{"records":[{"stable_op_id":1,"file":"source.zig","line":4,"column":17}]}
+    ;
+    const source_map =
+        \\{
+        \\  "version": 1,
+        \\  "original_file": "source.zig",
+        \\  "expressions": [{
+        \\    "file": "source.zig",
+        \\    "line": 4,
+        \\    "column": 17,
+        \\    "end_line": 4,
+        \\    "end_column": 25,
+        \\    "start_byte": 103,
+        \\    "end_byte": 111,
+        \\    "method": "add",
+        \\    "instrumented_method": "addAt",
+        \\    "function": "forward"
+        \\  }]
+        \\}
+    ;
+    const stablehlo =
+        \\  %0 = stablehlo.add %arg0, %arg1 : tensor<4xf32> loc("zml.stable_op.1")
+    ;
+    const hlo =
+        \\  ROOT %add.1 = f32[4]{0} add(%arg0.1, %arg1.1), metadata={op_name="zml.stable_op.1"}
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const records = try parseProvenance(arena, provenance);
+    const spans = try parseSourceMap(arena, source_map);
+    const mapping = try buildMappingWithSpans(arena, records, stablehlo, hlo, spans);
+
+    try std.testing.expectEqual(@as(usize, 1), mapping.sources.len);
+    try std.testing.expectEqualStrings("source.zig:4:17", mapping.sources[0].id);
+    try std.testing.expectEqual(@as(u32, 4), mapping.sources[0].line);
+    try std.testing.expectEqual(@as(u32, 17), mapping.sources[0].column);
+    try std.testing.expectEqual(@as(u32, 4), mapping.sources[0].end_line.?);
+    try std.testing.expectEqual(@as(u32, 25), mapping.sources[0].end_column.?);
+    try std.testing.expectEqual(@as(usize, 103), mapping.sources[0].start_byte.?);
+    try std.testing.expectEqual(@as(usize, 111), mapping.sources[0].end_byte.?);
+    try std.testing.expectEqualStrings("add", mapping.sources[0].method.?);
+    try std.testing.expectEqual(@as(u32, 4), mapping.sources[0].provenance_line.?);
+    try std.testing.expectEqual(@as(u32, 17), mapping.sources[0].provenance_column.?);
+}
+
+test "mapping remains point-based without an AST sidecar" {
+    const provenance =
+        \\{"records":[{"stable_op_id":1,"file":"source.zig","line":4,"column":28}]}
+    ;
+    const stablehlo =
+        \\  %0 = stablehlo.add %arg0, %arg1 : tensor<4xf32> loc("zml.stable_op.1")
+    ;
+    const hlo =
+        \\  ROOT %add.1 = f32[4]{0} add(%arg0.1, %arg1.1), metadata={op_name="zml.stable_op.1"}
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const mapping = try buildMapping(arena_state.allocator(), try parseProvenance(arena_state.allocator(), provenance), stablehlo, hlo);
+
+    try std.testing.expectEqual(@as(u32, 28), mapping.sources[0].column);
+    try std.testing.expect(mapping.sources[0].end_line == null);
+    try std.testing.expect(mapping.sources[0].start_byte == null);
+    try std.testing.expect(mapping.sources[0].provenance_column == null);
+}
+
+test "AST sidecar must cover every compiler provenance point" {
+    const provenance =
+        \\{"records":[{"stable_op_id":1,"file":"source.zig","line":4,"column":17}]}
+    ;
+    const source_map =
+        \\{
+        \\  "version": 1,
+        \\  "original_file": "other.zig",
+        \\  "expressions": [{
+        \\    "file": "other.zig",
+        \\    "line": 4,
+        \\    "column": 17,
+        \\    "end_line": 4,
+        \\    "end_column": 25,
+        \\    "start_byte": 103,
+        \\    "end_byte": 111,
+        \\    "method": "add"
+        \\  }]
+        \\}
+    ;
+
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const records = try parseProvenance(arena, provenance);
+    const spans = try parseSourceMap(arena, source_map);
+    try std.testing.expectError(error.MissingSourceSpan, buildMappingWithSpans(arena, records, "", "", spans));
 }
 
 test "dataflow maps metadata-free producers without opcode guessing" {

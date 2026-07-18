@@ -1130,12 +1130,18 @@ pub const Tensor = struct {
         return self.mul(.scalar(val, self.dtype()));
     }
 
+    /// Returns a Tensor containing the element-wise multiplication of the input
+    /// Tensor by a constant.
+    pub fn mulConstant(self: Tensor, val: anytype) Tensor {
+        return self.scale(val);
+    }
+
     /// Multiplies the input Tensor by a constant and attributes the scalar
     /// constant, any broadcast, and the multiply to one Zig source expression.
     pub fn mulConstantAt(self: Tensor, val: anytype, source: std.builtin.SourceLocation) Tensor {
         var source_scope = CompilationContext.current().pushSource(source);
         defer source_scope.deinit();
-        return self.scale(val);
+        return self.mulConstant(val);
     }
 
     test "explicit source provenance" {

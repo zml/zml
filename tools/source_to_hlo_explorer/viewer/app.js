@@ -13,6 +13,7 @@ const PANE_LABELS = {
   stable: "StableHLO",
   hlo: "pre-optimization HLO",
 };
+const utf8Encoder = new TextEncoder();
 
 const elements = {
   status: document.querySelector("#status"),
@@ -127,12 +128,22 @@ function renderPane(paneName) {
     row.dataset.pane = paneName;
     row.dataset.line = String(line);
     row.querySelector(".line-number").textContent = String(line);
-    row.querySelector(".line-text").textContent = text || " ";
+    const lineText = row.querySelector(".line-text");
+    const hasExactRanges = paneName === "source" && renderSourceLineText(lineText, text, line);
+    if (!hasExactRanges) lineText.textContent = text || " ";
     row.classList.toggle("has-mapping", Boolean(mappedIds?.size));
     row.classList.toggle("is-unmapped", !mappedIds?.size);
+    row.classList.toggle("has-exact-ranges", hasExactRanges);
     row.dataset.baseAriaLabel = `${PANE_LABELS[paneName]} line ${line}${mappedIds?.size ? ", mapped" : ", not mapped"}: ${text || "blank"}`;
     row.setAttribute("aria-label", row.dataset.baseAriaLabel);
-    row.addEventListener("click", () => selectLine(paneName, line, true));
+    row.addEventListener("click", (event) => {
+      const sourceRange = event.target.closest?.(".source-range");
+      if (paneName === "source" && sourceRange?.sourceIds) {
+        selectIds(paneName, line, sourceRange.sourceIds, true);
+      } else {
+        selectLine(paneName, line, true);
+      }
+    });
     fragment.append(row);
   });
 
@@ -141,13 +152,72 @@ function renderPane(paneName) {
   elements.counts[paneName].textContent = `${count} ${count === 1 ? "line" : "lines"}`;
 }
 
+function renderSourceLineText(container, text, line) {
+  const intervals = [];
+  for (const sourceId of state.graph.lineIndex.source.get(line) || []) {
+    const source = state.graph.sources.get(sourceId);
+    if (!source?.hasExactSpan) continue;
+
+    const start = line === source.line ? columnToStringIndex(text, source.column) : 0;
+    const end = line === source.endLine ? columnToStringIndex(text, source.endColumn) : text.length;
+    if (end > start) intervals.push({ start, end, sourceId });
+  }
+  if (intervals.length === 0) return false;
+
+  const boundaries = [...new Set([0, text.length, ...intervals.flatMap(({ start, end }) => [start, end])])]
+    .sort((left, right) => left - right);
+  for (let index = 0; index + 1 < boundaries.length; index += 1) {
+    const start = boundaries[index];
+    const end = boundaries[index + 1];
+    if (end <= start) continue;
+    const sourceIds = new Set(intervals
+      .filter((interval) => interval.start <= start && interval.end >= end)
+      .map((interval) => interval.sourceId));
+    if (sourceIds.size === 0) {
+      container.append(document.createTextNode(text.slice(start, end)));
+      continue;
+    }
+
+    const range = document.createElement("span");
+    range.className = "source-range";
+    range.sourceIds = sourceIds;
+    range.textContent = text.slice(start, end);
+    range.title = [...sourceIds]
+      .map((id) => state.graph.sources.get(id)?.method)
+      .filter(Boolean)
+      .join(", ") || "Mapped source expression";
+    container.append(range);
+  }
+  return true;
+}
+
+// Zig and the sidecar count UTF-8 bytes; JavaScript string indexes count UTF-16
+// code units. Convert explicitly so non-ASCII source still highlights exactly.
+function columnToStringIndex(text, oneBasedByteColumn) {
+  const targetBytes = Math.max(0, oneBasedByteColumn - 1);
+  let bytes = 0;
+  let stringIndex = 0;
+  for (const codePoint of text) {
+    const width = utf8Encoder.encode(codePoint).length;
+    if (bytes + width > targetBytes) break;
+    bytes += width;
+    stringIndex += codePoint.length;
+  }
+  return Math.min(stringIndex, text.length);
+}
+
 function selectLine(paneName, line, shouldScroll) {
   if (!state.graph) return;
 
   const seedIds = state.graph.lineIndex[paneName].get(line) || new Set();
+  selectIds(paneName, line, seedIds, shouldScroll);
+}
+
+function selectIds(paneName, line, seedIds, shouldScroll) {
   const selection = expandSelection(paneName, seedIds);
   selection.activePane = paneName;
   selection.activeLine = line;
+  selection.activeIds = new Set(seedIds);
   state.selected = selection;
 
   updateHighlights();
@@ -211,6 +281,15 @@ function updateHighlights() {
       row.setAttribute("aria-pressed", active ? "true" : "false");
       const relation = related && !active ? ", related to the active selection" : active ? ", active selection" : "";
       row.setAttribute("aria-label", `${row.dataset.baseAriaLabel}${relation}`);
+
+      if (paneName === "source") {
+        for (const range of row.querySelectorAll(".source-range")) {
+          const rangeRelated = intersects(range.sourceIds, state.selected.source);
+          const rangeActive = state.selected.activePane === "source" && intersects(range.sourceIds, state.selected.activeIds);
+          range.classList.toggle("is-related", rangeRelated);
+          range.classList.toggle("is-active", rangeActive);
+        }
+      }
     }
   }
 }
@@ -353,7 +432,14 @@ function detailRowsForSources(ids) {
     const end = record.endLine !== record.line || record.endColumn !== record.column
       ? `–${record.endLine}:${record.endColumn}`
       : "";
-    return [`${start}${end}`, record.label ? `${record.label} · ${id}` : id];
+    const byteRange = record.startByte !== null && record.endByte !== null
+      ? `bytes ${record.startByte}–${record.endByte}`
+      : "";
+    const provenance = record.provenanceLine !== record.line || record.provenanceColumn !== record.column
+      ? `@src ${record.provenanceLine}:${record.provenanceColumn}`
+      : "";
+    const metadata = [record.method || record.label, byteRange, provenance, id].filter(Boolean).join(" · ");
+    return [`${start}${end}`, metadata];
   });
 }
 
@@ -407,8 +493,14 @@ function normalizeMapping(raw, textLines) {
     const file = String(firstDefined(record.file, record.filename, location?.file, "source.zig"));
     const line = positiveInteger(firstDefined(record.line, record.start_line, record.startLine, location?.line), 1);
     const column = positiveInteger(firstDefined(record.column, record.col, record.start_column, record.startColumn, location?.column), 1);
-    const endLine = positiveInteger(firstDefined(record.end_line, record.endLine), line);
-    const endColumn = positiveInteger(firstDefined(record.end_column, record.endColumn), column);
+    const rawEndLine = firstDefined(record.end_line, record.endLine);
+    const rawEndColumn = firstDefined(record.end_column, record.endColumn);
+    const endLine = positiveInteger(rawEndLine, line);
+    const endColumn = positiveInteger(rawEndColumn, column);
+    const startByte = optionalNonNegativeInteger(firstDefined(record.start_byte, record.startByte));
+    const endByte = optionalNonNegativeInteger(firstDefined(record.end_byte, record.endByte));
+    const hasExactSpan = rawEndLine !== undefined && rawEndColumn !== undefined &&
+      (endLine > line || (endLine === line && endColumn > column));
     const id = stringId(firstDefined(record.id, record.source_id, record.sourceId, entryKey, `${file}:${line}:${column}`));
     graph.sources.set(id, {
       id,
@@ -417,7 +509,13 @@ function normalizeMapping(raw, textLines) {
       column,
       endLine: Math.max(line, endLine),
       endColumn,
-      label: optionalString(firstDefined(record.label, record.expression)),
+      startByte,
+      endByte,
+      method: optionalString(firstDefined(record.method, record.instrumented_method, record.instrumentedMethod)),
+      provenanceLine: positiveInteger(firstDefined(record.provenance_line, record.provenanceLine), line),
+      provenanceColumn: positiveInteger(firstDefined(record.provenance_column, record.provenanceColumn), column),
+      hasExactSpan,
+      label: optionalString(firstDefined(record.label, record.expression, record.method)),
       stableIds: idSet(firstDefined(record.stable_op_ids, record.stableOpIds, record.stable_ops)),
       hloIds: idSet(firstDefined(record.hlo_instruction_ids, record.hloInstructionIds)),
     });
@@ -491,6 +589,13 @@ function addProvenanceRecords(graph, records) {
         column,
         endLine: positiveInteger(firstDefined(record.end_line, record.endLine), line),
         endColumn: positiveInteger(firstDefined(record.end_column, record.endColumn), column),
+        startByte: optionalNonNegativeInteger(firstDefined(record.start_byte, record.startByte)),
+        endByte: optionalNonNegativeInteger(firstDefined(record.end_byte, record.endByte)),
+        method: optionalString(firstDefined(record.method, record.instrumented_method, record.instrumentedMethod)),
+        provenanceLine: positiveInteger(firstDefined(record.provenance_line, record.provenanceLine), line),
+        provenanceColumn: positiveInteger(firstDefined(record.provenance_column, record.provenanceColumn), column),
+        hasExactSpan: firstDefined(record.end_line, record.endLine) !== undefined &&
+          firstDefined(record.end_column, record.endColumn) !== undefined,
         label: optionalString(record.label),
         stableIds: new Set(),
         hloIds: new Set(),
@@ -674,6 +779,11 @@ function optionalString(value) {
 function positiveInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function optionalNonNegativeInteger(value) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function parseLocation(value) {
