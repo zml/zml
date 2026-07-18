@@ -7,6 +7,9 @@ const log = std.log.scoped(.vfs);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
+    .log_scope_levels = &.{
+        .{ .scope = .@"zml/io/load", .level = .debug },
+    },
 };
 
 // -- ls hf://openai/gpt-oss-20b@6cee5e8
@@ -195,7 +198,10 @@ pub fn main(init: std.process.Init) !void {
                 .mesh(.{ .model = .high_bandwidth }),
             );
 
-            var progress = std.Progress.start(io, .{ .root_name = "zml.examples.load" });
+            var progress = std.Progress.start(io, .{
+                .root_name = "zml.examples.load",
+                .disable_printing = true,
+            });
             progress.increaseEstimatedTotalItems(load_count);
             defer progress.end();
 
@@ -207,16 +213,38 @@ pub fn main(init: std.process.Init) !void {
                 log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
             }
 
+            const load_parallelism = try envUsize(init.environ_map, "ZML_LOAD_PARALLELISM", 8);
+            const load_initial_parallelism = try envUsize(init.environ_map, "ZML_LOAD_INITIAL_PARALLELISM", 2);
+            const load_max_read_parallelism = try envOptionalUsize(init.environ_map, "ZML_LOAD_MAX_READ_PARALLELISM");
+            const load_dma_chunks = try envUsize(init.environ_map, "ZML_LOAD_DMA_CHUNKS", 16);
+            const load_dma_chunk_mib = try envUsize(init.environ_map, "ZML_LOAD_DMA_CHUNK_MIB", 256);
+            const load_read_chunk_mib = try envUsize(init.environ_map, "ZML_LOAD_READ_CHUNK_MIB", 32);
+            const load_max_staging_mib = try envUsize(init.environ_map, "ZML_LOAD_MAX_STAGING_MIB", 1024);
+
             _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, &store, .{
                 .shardings = &.{sharded_sharding},
-                .parallelism = 8,
-                .dma_chunks = 16,
-                .dma_chunk_size = 256 * zml.MiB,
+                .parallelism = load_parallelism,
+                .initial_parallelism = load_initial_parallelism,
+                .max_read_parallelism = load_max_read_parallelism,
+                .read_chunk_size = load_read_chunk_mib * zml.MiB,
+                .max_staging_bytes = load_max_staging_mib * zml.MiB,
+                .dma_chunks = load_dma_chunks,
+                .dma_chunk_size = load_dma_chunk_mib * zml.MiB,
                 .progress = &progress,
                 .total_bytes = &total_bytes,
             });
         },
     }
+}
+
+fn envUsize(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {
+    const value = environ_map.get(name) orelse return default;
+    return std.fmt.parseInt(usize, value, 10);
+}
+
+fn envOptionalUsize(environ_map: *const std.process.Environ.Map, name: []const u8) !?usize {
+    const value = environ_map.get(name) orelse return null;
+    return try std.fmt.parseInt(usize, value, 10);
 }
 
 const TreeCounts = struct {

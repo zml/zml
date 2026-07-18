@@ -3996,8 +3996,7 @@ pub const LoadOpts = struct {
     /// Set false to retain the fixed `parallelism` behavior.
     adaptive_parallelism: bool = true,
     /// Hard maximum number of outstanding positional chunk reads. When null,
-    /// adaptive loading uses up to twice `parallelism`, capped at 32 unless
-    /// the DMA limit itself is larger.
+    /// adaptive loading uses at least 32 reads, or `parallelism` when larger.
     max_read_parallelism: ?usize = null,
     /// Logical pageable read-ahead chunk size. This is independent of the
     /// larger pinned DMA submission chunk size.
@@ -4017,6 +4016,10 @@ pub const LoadOpts = struct {
 fn adaptiveDmaWorkerCap(parallelism: usize, dma_chunks: usize, tensor_count: usize) usize {
     const chunk_cap = if (dma_chunks > 1) dma_chunks - 1 else 1;
     return @min(@max(tensor_count, 1), @min(parallelism, chunk_cap));
+}
+
+fn defaultAdaptiveReadWorkerCap(parallelism: usize) usize {
+    return @max(@as(usize, 32), parallelism);
 }
 
 pub fn load(
@@ -4056,7 +4059,7 @@ pub fn load(
     }.call, .{&total_logical_bytes});
 
     const direct = platform.target == .cuda or platform.target == .oneapi;
-    const default_read_parallelism = @max(opts.parallelism, @min(@as(usize, 32), opts.parallelism *| 2));
+    const default_read_parallelism = defaultAdaptiveReadWorkerCap(opts.parallelism);
     const max_read_workers = opts.max_read_parallelism orelse default_read_parallelism;
     stdx.debug.assert(max_read_workers > 0, "zml.io.load max_read_parallelism must be greater than zero", .{});
     const max_staging_chunks = if (opts.max_staging_bytes < opts.read_chunk_size) 0 else opts.max_staging_bytes / opts.read_chunk_size;
@@ -4073,13 +4076,15 @@ pub fn load(
     const initial_read_workers = if (adaptive) @min(max_read_workers, opts.initial_parallelism) else max_read_workers;
     const initial_chunks = if (adaptive) @min(opts.dma_chunks, initial_workers + 1) else opts.dma_chunks;
     var metrics: LoadMetrics = .{};
+    const configured_read_workers = if (adaptive) initial_read_workers else max_workers;
+    const configured_max_read_workers = if (adaptive) max_read_workers else max_workers;
     load_log.debug("configured: target={s}, adaptive={}, requested_adaptive={}, tensors={d}, reads={d}/{d}, dma={d}/{d} (requested_max={d}), dma_chunks={d}/{d}, staging=0/{d} blocks ({Bi:.2} max), read_chunk_size={Bi:.2}, dma_chunk_size={Bi:.2}, logical_bytes={Bi:.2}", .{
         @tagName(platform.target),
         adaptive,
         opts.adaptive_parallelism,
         tensor_count,
-        initial_read_workers,
-        max_read_workers,
+        configured_read_workers,
+        configured_max_read_workers,
         initial_workers,
         max_workers,
         opts.parallelism,
@@ -4441,6 +4446,13 @@ test "adaptive dma worker cap does not exceed tensor lanes" {
     try std.testing.expectEqual(@as(usize, 3), adaptiveDmaWorkerCap(16, 32, 3));
     try std.testing.expectEqual(@as(usize, 4), adaptiveDmaWorkerCap(16, 5, 32));
     try std.testing.expectEqual(@as(usize, 1), adaptiveDmaWorkerCap(16, 1, 0));
+}
+
+test "adaptive read worker default leaves room for latency fanout" {
+    try std.testing.expectEqual(@as(usize, 32), defaultAdaptiveReadWorkerCap(1));
+    try std.testing.expectEqual(@as(usize, 32), defaultAdaptiveReadWorkerCap(8));
+    try std.testing.expectEqual(@as(usize, 32), defaultAdaptiveReadWorkerCap(32));
+    try std.testing.expectEqual(@as(usize, 64), defaultAdaptiveReadWorkerCap(64));
 }
 
 test "adaptive load controller doubles staged read-ahead probes" {
