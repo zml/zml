@@ -123,11 +123,8 @@ pub const LoadedModel = struct {
 
         const all_shardings = shardings.all();
         var buffers = try zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 256 * zml.MiB,
             .progress = progress,
             .shardings = &all_shardings,
-            .parallelism = 16,
             .total_bytes = &total_bytes,
         });
         errdefer TextModel.unloadBuffers(&buffers.text_model, allocator);
@@ -208,11 +205,8 @@ pub const Model = struct {
             log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         }
         return zml.io.load(Model, self, allocator, io, platform, store, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 256 * zml.MiB,
             .progress = progress,
             .shardings = shardings,
-            .parallelism = 16,
             .total_bytes = &total_bytes,
         });
     }

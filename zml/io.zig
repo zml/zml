@@ -505,12 +505,12 @@ pub const MemoryWriter = union(enum) {
         platform: *const Platform,
         pools: []mem.DynamicBufferPool,
         dma_allocators: []const mem.DmaAllocator,
-        dma_chunk_size: usize,
+        transfer_quantum_size: usize,
         shape: Shape,
         sharding: Sharding,
         buffer: *Buffer,
     ) !MemoryWriter {
-        return initWithMetrics(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, null);
+        return initWithMetrics(allocator, io, platform, pools, dma_allocators, transfer_quantum_size, shape, sharding, buffer, null);
     }
 
     fn initWithMetrics(
@@ -519,14 +519,14 @@ pub const MemoryWriter = union(enum) {
         platform: *const Platform,
         pools: []mem.DynamicBufferPool,
         dma_allocators: []const mem.DmaAllocator,
-        dma_chunk_size: usize,
+        transfer_quantum_size: usize,
         shape: Shape,
         sharding: Sharding,
         buffer: *Buffer,
         metrics: ?*LoadMetrics,
     ) !MemoryWriter {
         return switch (platform.target) {
-            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.initWithMetrics(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, metrics) },
+            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.initWithMetrics(allocator, io, platform, pools, dma_allocators, transfer_quantum_size, shape, sharding, buffer, metrics) },
             .rocm, .tpu, .neuron, .cpu, .metal => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
         };
     }
@@ -1203,8 +1203,8 @@ const DispatchSpans = struct {
 // `byte_cursor` is the global tensor position. Shard writer `interface.end` is
 // local to the current shard DMA buffer.
 pub const DirectMemoryWriter = struct {
-    // Bound reader windows independently of DMA submission chunks so startup
-    // can observe network progress before a large DMA chunk is complete.
+    // Bound reader windows independently of the transfer scheduling quantum so
+    // startup can observe network progress before a large quantum is complete.
     const observation_chunk_size = 32 * 1024 * 1024;
 
     allocator: std.mem.Allocator,
@@ -1222,7 +1222,7 @@ pub const DirectMemoryWriter = struct {
     // Start offset of new reader bytes inside the active shard writer buffer.
     window_start: usize,
     // Logical maximum public alias window before forcing a cross-shard flush fence.
-    dma_chunk_size: usize,
+    transfer_quantum_size: usize,
     shard_progress: ?[]ShardProgress = null,
     metrics: ?*LoadMetrics,
     epoch: u64 = 0,
@@ -1234,12 +1234,12 @@ pub const DirectMemoryWriter = struct {
         platform: *const Platform,
         pools: []mem.DynamicBufferPool,
         dma_allocators: []const mem.DmaAllocator,
-        dma_chunk_size: usize,
+        transfer_quantum_size: usize,
         shape: Shape,
         sharding: Sharding,
         buffer: *Buffer,
     ) !DirectMemoryWriter {
-        return initWithMetrics(allocator, io, platform, pools, dma_allocators, dma_chunk_size, shape, sharding, buffer, null);
+        return initWithMetrics(allocator, io, platform, pools, dma_allocators, transfer_quantum_size, shape, sharding, buffer, null);
     }
 
     fn initWithMetrics(
@@ -1248,7 +1248,7 @@ pub const DirectMemoryWriter = struct {
         platform: *const Platform,
         pools: []mem.DynamicBufferPool,
         dma_allocators: []const mem.DmaAllocator,
-        dma_chunk_size: usize,
+        transfer_quantum_size: usize,
         shape: Shape,
         sharding: Sharding,
         buffer: *Buffer,
@@ -1284,7 +1284,7 @@ pub const DirectMemoryWriter = struct {
 
         const first_span = dispatch_spans.spans[0];
         const first_writer = &shard_writers[first_span.primary_writer];
-        const first_window = @min(observation_chunk_size, @min(dma_chunk_size, first_writer.interface.buffer.len));
+        const first_window = @min(observation_chunk_size, @min(transfer_quantum_size, first_writer.interface.buffer.len));
 
         return .{
             .allocator = allocator,
@@ -1292,7 +1292,7 @@ pub const DirectMemoryWriter = struct {
             .dispatch_spans = dispatch_spans,
             .active_writer_index = first_span.primary_writer,
             .window_start = first_writer.interface.end,
-            .dma_chunk_size = dma_chunk_size,
+            .transfer_quantum_size = transfer_quantum_size,
             .metrics = metrics,
             .interface = .{
                 .buffer = first_writer.interface.buffer[0..first_window],
@@ -1517,7 +1517,7 @@ pub const DirectMemoryWriter = struct {
             }
         }
 
-        if (@mod(self.byte_cursor, self.dma_chunk_size) == 0) {
+        if (@mod(self.byte_cursor, self.transfer_quantum_size) == 0) {
             for (self.shard_writers) |*writer| {
                 try writer.flushBuffered(replenish);
             }
@@ -1558,12 +1558,12 @@ pub const DirectMemoryWriter = struct {
         // upcoming spans until a buffer or tensor boundary.
         const total = self.dispatch_spans.spans[self.dispatch_spans.spans.len - 1].end;
         const buffer_remaining = next_writer.interface.buffer.len - self.window_start;
-        const chunk_offset = @mod(self.byte_cursor, self.dma_chunk_size);
-        const chunk_remaining = if (chunk_offset == 0) self.dma_chunk_size else self.dma_chunk_size - chunk_offset;
+        const quantum_offset = @mod(self.byte_cursor, self.transfer_quantum_size);
+        const quantum_remaining = if (quantum_offset == 0) self.transfer_quantum_size else self.transfer_quantum_size - quantum_offset;
         const observation_offset = @mod(self.byte_cursor, observation_chunk_size);
         const observation_remaining = if (observation_offset == 0) observation_chunk_size else observation_chunk_size - observation_offset;
         const tensor_remaining = total - self.byte_cursor;
-        const visible_remaining = @min(buffer_remaining, @min(chunk_remaining, @min(observation_remaining, tensor_remaining)));
+        const visible_remaining = @min(buffer_remaining, @min(quantum_remaining, @min(observation_remaining, tensor_remaining)));
         if (visible_remaining == 0) return std.Io.Writer.Error.WriteFailed;
 
         self.interface.buffer = next_writer.interface.buffer[0 .. self.window_start + visible_remaining];
@@ -1579,7 +1579,7 @@ const AdaptiveLoadController = struct {
     const Knobs = struct {
         read_workers: usize,
         dma_workers: usize,
-        dma_chunks: usize,
+        pinned_buffers: usize,
         staging_chunks: usize,
     };
 
@@ -1596,6 +1596,7 @@ const AdaptiveLoadController = struct {
         read_goodput: f64 = 0,
         committed_goodput: f64 = 0,
         probe_goodput: f64 = 0,
+        probe_aggregate_goodput: f64 = 0,
         probe_committed_bytes: u64 = 0,
         probe_elapsed_ns: u64 = std.math.maxInt(u64),
         capacity_pending: bool = false,
@@ -1674,10 +1675,11 @@ const AdaptiveLoadController = struct {
     mode: Mode = .startup,
     max_read_workers: usize,
     max_dma_workers: usize,
-    max_dma_chunks: usize,
+    max_pinned_buffers: usize,
     max_staging_chunks: usize,
     direct: bool,
     knobs: Knobs,
+    stable_goodput: f64 = 0,
     peak_goodput: f64 = 0,
     latency_baseline_us: f64 = 0,
     probe: ?Probe = null,
@@ -1689,7 +1691,11 @@ const AdaptiveLoadController = struct {
     last_probe_baseline_goodput: f64 = 0,
     h2d_growth_windows: u8 = 0,
     ready_growth_windows: u8 = 0,
+    slow_source_observed: bool = false,
     pressure_backoff_blocked_until_ns: u64 = 0,
+    performance_probe_blocked_until_ns: u64 = 0,
+    resource_probe_blocked_until_ns: u64 = 0,
+    last_dma_starvation_ns: u64 = 0,
 
     const probe_byte_floor: u64 = 64 * 1024 * 1024;
     const probe_time_floor_ns: u64 = 200 * std.time.ns_per_ms;
@@ -1697,8 +1703,8 @@ const AdaptiveLoadController = struct {
     fn init(
         initial_dma_workers: usize,
         max_dma_workers: usize,
-        initial_dma_chunks: usize,
-        max_dma_chunks: usize,
+        initial_pinned_buffers: usize,
+        max_pinned_buffers: usize,
         initial_read_workers: usize,
         max_read_workers: usize,
         max_staging_chunks: usize,
@@ -1707,13 +1713,13 @@ const AdaptiveLoadController = struct {
         return .{
             .max_read_workers = max_read_workers,
             .max_dma_workers = max_dma_workers,
-            .max_dma_chunks = max_dma_chunks,
+            .max_pinned_buffers = max_pinned_buffers,
             .max_staging_chunks = max_staging_chunks,
             .direct = direct,
             .knobs = .{
                 .read_workers = initial_read_workers,
                 .dma_workers = initial_dma_workers,
-                .dma_chunks = initial_dma_chunks,
+                .pinned_buffers = initial_pinned_buffers,
                 .staging_chunks = 0,
             },
         };
@@ -1722,7 +1728,15 @@ const AdaptiveLoadController = struct {
     fn observe(self: *AdaptiveLoadController, sample: Sample) Decision {
         if (sample.capacity_pending) return self.currentDecision();
         const measured_goodput = sample.committed_goodput;
-        if (self.probe == null) self.peak_goodput = @max(self.peak_goodput, measured_goodput);
+        if (sample.slow_reads) self.slow_source_observed = true;
+        if (sample.dma_starvation_ratio > 0.10) self.last_dma_starvation_ns = sample.now_ns;
+        if (self.probe == null and measured_goodput > 0) {
+            self.stable_goodput = if (self.stable_goodput == 0)
+                measured_goodput
+            else
+                0.90 * self.stable_goodput + 0.10 * measured_goodput;
+            self.peak_goodput = @max(self.peak_goodput, self.stable_goodput);
+        }
 
         const lightly_loaded = self.knobs.dma_workers <= 2 and sample.pinned_wait_ratio <= 0.02 and
             sample.dma_completion_wait_ratio <= 0.02 and sample.h2d_queue_ratio <= 0.10 and
@@ -1777,7 +1791,11 @@ const AdaptiveLoadController = struct {
         // Admission wait means the configured read capacity is in demand, and
         // request latency normally rises with useful source parallelism. Only
         // buffered data that the DMA stage cannot drain is read-side pressure.
-        const read_queue_pressure = ready_pressure;
+        // A synchronized batch of slow reads can briefly fill the ready queue
+        // while the DMA stage remains idle between batches. That is source
+        // burstiness, not excess read capacity. Back reads off only when the
+        // transfer stage is being kept continuously fed.
+        const read_queue_pressure = if (sample.dma_starvation_ratio <= 0.10 and !self.slow_source_observed) ready_pressure else 0;
         const read_pressure_reason: Decision.RollbackReason = if (ready_pressure > 0.10) .ready_queue_growth else .read_pressure;
         const ready_per_dma: usize = if (ready_pressure > 0.20) 1 else 2;
         const pressured_staging_target = if (ready_pressure > 0.10)
@@ -1796,8 +1814,9 @@ const AdaptiveLoadController = struct {
                 self.mode = .steady;
                 self.epoch += 1;
                 self.knobs.dma_workers = @max(@as(usize, 1), @as(usize, @intFromFloat(@floor(0.70 * @as(f64, @floatFromInt(self.knobs.dma_workers))))));
-                self.knobs.dma_chunks = @max(self.minimumDmaChunks(self.knobs.dma_workers), @min(self.knobs.dma_chunks, self.max_dma_chunks));
+                self.knobs.pinned_buffers = @max(self.minimumPinnedBuffers(self.knobs.dma_workers), @min(self.knobs.pinned_buffers, self.max_pinned_buffers));
                 self.last_probe_ns = sample.now_ns;
+                self.performance_probe_blocked_until_ns = sample.now_ns +| 2 * std.time.ns_per_s;
                 return self.decision(.dma_backoff, true, false, false, reason);
             }
         }
@@ -1825,6 +1844,7 @@ const AdaptiveLoadController = struct {
                 self.knobs.staging_chunks = staging_target;
             }
             self.last_probe_ns = sample.now_ns;
+            self.performance_probe_blocked_until_ns = sample.now_ns +| 2 * std.time.ns_per_s;
             const action: Decision.Action = if (self.knobs.read_workers < old_read_workers) .read_backoff else .staging_backoff;
             return self.decision(action, true, false, trim_staging, read_pressure_reason);
         }
@@ -1847,16 +1867,25 @@ const AdaptiveLoadController = struct {
                 !pinned_probe_pressure;
             // Epoch bytes prove the candidate has carried real work. Once it
             // has been active for a sustained interval, use the better of the
-            // epoch-attributed average and the current committed window: read
+            // epoch-attributed and post-activation aggregate averages: read
             // probes can have old-epoch staged blocks ahead of their first
             // tagged commit even though aggregate throughput already improved.
+            // Avoid a single current window here; short source windows are
+            // bursty enough to cause false rollback/retry cycles.
             const candidate_goodput = switch (probe.kind) {
-                .increase => @max(sample.probe_goodput, measured_goodput),
+                .increase => @max(sample.probe_goodput, sample.probe_aggregate_goodput),
                 .reduce_resource => sample.probe_goodput,
             };
             const resource_reference = @max(probe.baseline_goodput, self.peak_goodput);
+            // Read/staging increases are only started in response to source
+            // starvation. On a slow source, a single drain burst can make the
+            // evaluation window look non-starved and deceptively fast, so let
+            // the startup probe fill the bounded read-ahead budget. Steady
+            // resource probes can shrink it again once DMA remains fed.
+            const slow_source_underfilled = self.slow_source_observed and probe.kind == .increase and
+                (probe.dimension == .read or probe.dimension == .staging);
             const keep = switch (probe.kind) {
-                .increase => candidate_goodput >= probe.baseline_goodput * 1.03 and pressure_ok,
+                .increase => (candidate_goodput >= probe.baseline_goodput * 1.03 or slow_source_underfilled) and pressure_ok,
                 .reduce_resource => candidate_goodput >= resource_reference * 0.97 and pressure_ok and sample.dma_starvation_ratio <= 0.10,
             };
 
@@ -1865,6 +1894,7 @@ const AdaptiveLoadController = struct {
                 self.last_probe_ns = sample.now_ns;
                 if (probe.kind == .reduce_resource) self.last_resource_probe_ns = sample.now_ns;
                 if (probe.kind == .reduce_resource or probe.dimension == .dma) self.mode = .steady;
+                self.stable_goodput = candidate_goodput;
                 self.peak_goodput = @max(self.peak_goodput, candidate_goodput);
                 return self.decision(probeAction(probe.dimension, probe.kind, true), false, false, false, .none);
             }
@@ -1899,7 +1929,9 @@ const AdaptiveLoadController = struct {
             return self.currentDecision();
         }
 
-        const performance_probe_due = self.mode == .startup or sample.now_ns -| self.last_probe_ns >= 500 * std.time.ns_per_ms;
+        const performance_probe_due = sample.now_ns >= self.performance_probe_blocked_until_ns and
+            (self.mode == .startup or sample.now_ns -| self.last_probe_ns >= 500 * std.time.ns_per_ms);
+        const performance_baseline = if (self.stable_goodput > 0) self.stable_goodput else measured_goodput;
         const source_capacity_exercised = sample.reads_saturated or sample.slow_reads;
         // Once read fanout is already much wider than the DMA stage, balance
         // the pipeline before doubling pageable memory again. This also stops
@@ -1913,16 +1945,18 @@ const AdaptiveLoadController = struct {
                 // but not an extra host copy. Only exercise pageable staging
                 // after a representative storage read is itself slow.
                 if (source_capacity_exercised and (dimension != .staging or sample.slow_reads)) {
-                    return self.startProbe(dimension, .increase, candidate, measured_goodput, sample.now_ns);
+                    return self.startProbe(dimension, .increase, candidate, performance_baseline, sample.now_ns);
                 }
             }
         }
 
         if (self.mode == .steady and sample.dma_starvation_ratio <= 0.10 and
             self.knobs.read_workers > self.knobs.dma_workers and
-            sample.now_ns -| self.last_resource_probe_ns >= 500 * std.time.ns_per_ms)
+            sample.now_ns >= self.resource_probe_blocked_until_ns and
+            sample.now_ns -| self.last_dma_starvation_ns >= 2 * std.time.ns_per_s and
+            sample.now_ns -| self.last_resource_probe_ns >= 2 * std.time.ns_per_s)
         {
-            const resource_baseline = @max(self.peak_goodput, measured_goodput);
+            const resource_baseline = @max(self.peak_goodput, self.stable_goodput);
             var candidate = self.knobs;
             candidate.read_workers = @max(
                 self.knobs.dma_workers,
@@ -1935,12 +1969,16 @@ const AdaptiveLoadController = struct {
             return self.startProbe(.read, .reduce_resource, candidate, resource_baseline, sample.now_ns);
         }
 
-        if (self.mode == .steady and sample.dma_starvation_ratio <= 0.10 and sample.now_ns -| self.last_resource_probe_ns >= 2 * std.time.ns_per_s) {
-            const resource_baseline = @max(self.peak_goodput, measured_goodput);
-            const minimum_chunks = self.minimumDmaChunks(self.knobs.dma_workers);
-            if (self.knobs.dma_chunks > minimum_chunks and self.knobs.dma_chunks - 1 >= sample.admitted_dma_writers) {
+        if (self.mode == .steady and sample.dma_starvation_ratio <= 0.10 and
+            sample.now_ns >= self.resource_probe_blocked_until_ns and
+            sample.now_ns -| self.last_dma_starvation_ns >= 2 * std.time.ns_per_s and
+            sample.now_ns -| self.last_resource_probe_ns >= 2 * std.time.ns_per_s)
+        {
+            const resource_baseline = @max(self.peak_goodput, self.stable_goodput);
+            const minimum_buffers = self.minimumPinnedBuffers(self.knobs.dma_workers);
+            if (self.knobs.pinned_buffers > minimum_buffers and self.knobs.pinned_buffers - 1 >= sample.admitted_dma_writers) {
                 var candidate = self.knobs;
-                candidate.dma_chunks -= 1;
+                candidate.pinned_buffers -= 1;
                 return self.startProbe(.pinned, .reduce_resource, candidate, resource_baseline, sample.now_ns);
             }
             const minimum_staging = self.minimumStagingChunks(self.knobs.read_workers, self.knobs.dma_workers);
@@ -1962,13 +2000,17 @@ const AdaptiveLoadController = struct {
         const unused_direct_read_capacity = self.knobs.read_workers > self.knobs.dma_workers and
             sample.admitted_dma_writers >= self.knobs.dma_workers and
             !sample.reads_saturated and sample.dma_lane_capacity_available;
-        const direct_probe_demand = self.direct and sample.read_goodput > 0 and
+        const direct_probe_demand = self.direct and self.knobs.staging_chunks == 0 and sample.read_goodput > 0 and
             (sample.reads_saturated or sample.dma_starvation_ratio <= 0.10 or unused_direct_read_capacity);
-        if (performance_probe_due and (sample.dma_saturated or direct_probe_demand) and h2d_pressure < 0.10) {
+        const staged_dma_probe_demand = sample.dma_saturated and (!self.slow_source_observed or
+            self.knobs.staging_chunks == 0 or sample.now_ns -| self.last_dma_starvation_ns >= 2 * std.time.ns_per_s);
+        if (performance_probe_due and (staged_dma_probe_demand or direct_probe_demand) and h2d_pressure < 0.10) {
             if (self.knobs.dma_workers < self.max_dma_workers) {
                 var candidate = self.knobs;
-                const step = if (self.knobs.dma_workers <= 2 or self.mode == .startup or self.last_probe_ns == 0)
+                const step = if (self.knobs.dma_workers <= 2)
                     self.knobs.dma_workers
+                else if (self.mode == .startup)
+                    @max(@as(usize, 4), std.math.sqrt(self.knobs.dma_workers))
                 else
                     @max(@as(usize, 1), std.math.sqrt(self.knobs.dma_workers));
                 candidate.dma_workers = @min(self.max_dma_workers, self.knobs.dma_workers + step);
@@ -1976,13 +2018,13 @@ const AdaptiveLoadController = struct {
                     candidate.read_workers,
                     @min(self.max_read_workers, candidate.dma_workers),
                 );
-                candidate.dma_chunks = @max(candidate.dma_chunks, self.minimumDmaChunks(candidate.dma_workers));
-                return self.startProbe(.dma, .increase, candidate, measured_goodput, sample.now_ns);
+                candidate.pinned_buffers = @max(candidate.pinned_buffers, self.minimumPinnedBuffers(candidate.dma_workers));
+                return self.startProbe(.dma, .increase, candidate, performance_baseline, sample.now_ns);
             }
-            if (sample.pinned_wait_ratio > 0.05 and self.knobs.dma_chunks < self.max_dma_chunks) {
+            if (sample.pinned_wait_ratio > 0.05 and self.knobs.pinned_buffers < self.max_pinned_buffers) {
                 var candidate = self.knobs;
-                candidate.dma_chunks += 1;
-                return self.startProbe(.pinned, .increase, candidate, measured_goodput, sample.now_ns);
+                candidate.pinned_buffers += 1;
+                return self.startProbe(.pinned, .increase, candidate, performance_baseline, sample.now_ns);
             }
         }
 
@@ -2011,9 +2053,9 @@ const AdaptiveLoadController = struct {
         return self.decision(probeAction(dimension, kind, null), true, false, false, .none);
     }
 
-    fn minimumDmaChunks(self: *const AdaptiveLoadController, dma_workers: usize) usize {
-        if (!self.direct) return self.max_dma_chunks;
-        return @min(self.max_dma_chunks, dma_workers + 1);
+    fn minimumPinnedBuffers(self: *const AdaptiveLoadController, dma_workers: usize) usize {
+        if (!self.direct) return self.max_pinned_buffers;
+        return @min(self.max_pinned_buffers, dma_workers + 1);
     }
 
     fn minimumStagingChunks(self: *const AdaptiveLoadController, read_workers: usize, dma_workers: usize) usize {
@@ -2076,13 +2118,17 @@ const AdaptiveLoadController = struct {
         self.knobs = probe.baseline;
         self.mode = .steady;
         self.last_probe_ns = now_ns;
-        if (probe.kind == .reduce_resource) self.last_resource_probe_ns = now_ns;
+        if (probe.kind == .reduce_resource) {
+            self.last_resource_probe_ns = now_ns;
+            self.resource_probe_blocked_until_ns = now_ns +| 5 * std.time.ns_per_s;
+        }
         self.h2d_growth_windows = 0;
         self.pressure_backoff_blocked_until_ns = now_ns +| 250 * std.time.ns_per_ms;
+        if (probe.kind == .increase) self.performance_probe_blocked_until_ns = now_ns +| 2 * std.time.ns_per_s;
         return self.decision(
             probeAction(probe.dimension, probe.kind, false),
             true,
-            probe.kind == .increase and probe.candidate.dma_chunks > probe.baseline.dma_chunks,
+            probe.kind == .increase and probe.candidate.pinned_buffers > probe.baseline.pinned_buffers,
             probe.kind == .increase and probe.candidate.staging_chunks > probe.baseline.staging_chunks,
             reason,
         );
@@ -2130,12 +2176,13 @@ const AdaptiveLoadRuntime = struct {
     staging_pool: ?*mem.DynamicBufferPool,
     staging_allocator: std.mem.Allocator,
     metrics: *LoadMetrics,
-    dma_chunk_size: usize,
-    dma_buffer_size: usize,
+    transfer_quantum_size: usize,
+    pinned_buffer_size: usize,
     read_chunk_size: usize,
     total_logical_bytes: u64,
     total_transfers: usize,
     probe_started: std.Io.Timestamp,
+    probe_committed_baseline: u64 = 0,
     pending_probe_activation: ?ProbeActivation = null,
     done: std.atomic.Value(bool) = .init(false),
 
@@ -2145,14 +2192,14 @@ const AdaptiveLoadRuntime = struct {
         var previous = self.metrics.snapshot();
         var previous_queue = previous.submitted_bytes -| previous.committed_bytes;
         var last_idle_log_ns: u64 = 0;
-        load_log.debug("controller started: mode={s}, reads={d}/{d}, dma={d}/{d}, dma_chunks={d}/{d}, staging={d}/{d}, transfers={d}, logical_bytes={Bi:.2}", .{
+        load_log.debug("controller started: mode={s}, reads={d}/{d}, dma={d}/{d}, pinned_buffers={d}/{d}, staging={d}/{d}, transfers={d}, logical_bytes={Bi:.2}", .{
             @tagName(self.controller.mode),
             self.controller.knobs.read_workers,
             self.controller.max_read_workers,
             self.controller.knobs.dma_workers,
             self.controller.max_dma_workers,
-            self.controller.knobs.dma_chunks,
-            self.controller.max_dma_chunks,
+            self.controller.knobs.pinned_buffers,
+            self.controller.max_pinned_buffers,
             self.controller.knobs.staging_chunks,
             self.controller.max_staging_chunks,
             self.total_transfers,
@@ -2160,11 +2207,11 @@ const AdaptiveLoadRuntime = struct {
         });
         defer {
             const final = self.metrics.snapshot();
-            load_log.debug("controller stopped: mode={s}, reads={d}, dma={d}, dma_chunks={d}, staging={d}, completed={d}/{d}, read={Bi:.2}, direct={Bi:.2}, staged={Bi:.2}, submitted={Bi:.2}, committed={Bi:.2}", .{
+            load_log.debug("controller stopped: mode={s}, reads={d}, dma={d}, pinned_buffers={d}, staging={d}, completed={d}/{d}, read={Bi:.2}, direct={Bi:.2}, staged={Bi:.2}, submitted={Bi:.2}, committed={Bi:.2}", .{
                 @tagName(self.controller.mode),
                 self.controller.knobs.read_workers,
                 self.controller.knobs.dma_workers,
-                self.controller.knobs.dma_chunks,
+                self.controller.knobs.pinned_buffers,
                 self.controller.knobs.staging_chunks,
                 final.completed_transfers,
                 self.total_transfers,
@@ -2258,7 +2305,7 @@ const AdaptiveLoadRuntime = struct {
                     if (self.controller.probe) |probe| {
                         const published_epoch = self.metrics.config_epoch.load(.acquire);
                         if (self.controller.rollbackTimedOutProbe(now_ns, published_epoch)) |decision| {
-                            load_log.debug("probe progress timeout: epoch={d}, dimension={s}, kind={s}, idle={d:.1}ms, rollback_epoch={d}, reads={d}, dma={d}, dma_chunks={d}, staging={d}", .{
+                            load_log.debug("probe progress timeout: epoch={d}, dimension={s}, kind={s}, idle={d:.1}ms, rollback_epoch={d}, reads={d}, dma={d}, pinned_buffers={d}, staging={d}", .{
                                 probe.epoch,
                                 @tagName(probe.dimension),
                                 @tagName(probe.kind),
@@ -2266,7 +2313,7 @@ const AdaptiveLoadRuntime = struct {
                                 decision.epoch,
                                 decision.knobs.read_workers,
                                 decision.knobs.dma_workers,
-                                decision.knobs.dma_chunks,
+                                decision.knobs.pinned_buffers,
                                 decision.knobs.staging_chunks,
                             });
                             self.apply(io, decision);
@@ -2281,7 +2328,7 @@ const AdaptiveLoadRuntime = struct {
                     const pool_stats = self.poolStats();
                     const staging_stats = self.stagingStats();
                     const idle_dma_lanes = if (self.pipeline) |pipeline| pipeline.admitted_lanes.load(.acquire) else self.dma_group.inFlight();
-                    load_log.debug("waiting for progress: mode={s}, reads={d}/{d} active={d}, dma={d}/{d} lanes={d} open_writers={d}, completed={d}/{d}, dma_buffers={d}inflight/{d}allocated/{d}limit, staging={d}inflight/{d}allocated/{d}limit ready={Bi:.2}, read={Bi:.2}, submitted={Bi:.2}, committed={Bi:.2}, h2d_queued={Bi:.2}", .{
+                    load_log.debug("waiting for progress: mode={s}, reads={d}/{d} active={d}, dma={d}/{d} lanes={d} open_writers={d}, completed={d}/{d}, pinned_buffers={d}inflight/{d}allocated/{d}limit, staging={d}inflight/{d}allocated/{d}limit ready={Bi:.2}, read={Bi:.2}, submitted={Bi:.2}, committed={Bi:.2}, h2d_queued={Bi:.2}", .{
                         @tagName(self.controller.mode),
                         self.controller.knobs.read_workers,
                         self.controller.max_read_workers,
@@ -2294,7 +2341,7 @@ const AdaptiveLoadRuntime = struct {
                         self.total_transfers,
                         pool_stats.in_flight,
                         pool_stats.allocated,
-                        self.controller.knobs.dma_chunks * self.pools.len,
+                        self.controller.knobs.pinned_buffers * self.pools.len,
                         staging_stats.in_flight,
                         staging_stats.allocated,
                         self.controller.knobs.staging_chunks,
@@ -2378,7 +2425,7 @@ const AdaptiveLoadRuntime = struct {
             const queue_growth = queue -| previous_queue;
             const queue_capacity = @max(
                 @as(u64, 1),
-                @as(u64, @intCast(self.controller.knobs.dma_chunks *| self.dma_buffer_size *| @max(@as(usize, 1), self.pools.len))),
+                @as(u64, @intCast(self.controller.knobs.pinned_buffers *| self.pinned_buffer_size *| @max(@as(usize, 1), self.pools.len))),
             );
             const h2d_growth_ratio = @as(f64, @floatFromInt(queue_growth)) / @as(f64, @floatFromInt(queue_capacity));
             const h2d_queue_ratio = @as(f64, @floatFromInt(queue)) / @as(f64, @floatFromInt(queue_capacity));
@@ -2420,7 +2467,7 @@ const AdaptiveLoadRuntime = struct {
                 self.dma_group.inFlight() >= self.controller.knobs.dma_workers;
             const dma_saturated = (dma_utilization >= 0.80 or ready_dma_demand) and
                 snapshot.completed_transfers < self.total_transfers;
-            const allow_probe = remaining_ns > 500 * std.time.ns_per_ms;
+            const allow_probe = remaining_ns > 250 * std.time.ns_per_ms;
             const pool_stats = self.poolStats();
             const staging_stats = self.stagingStats();
             const probe_elapsed_ns: u64 = if (snapshot.probe_first_ns > 0)
@@ -2431,11 +2478,22 @@ const AdaptiveLoadRuntime = struct {
             const probe_active = self.controller.probe != null or self.pending_probe_activation != null;
             const probe_committed_bytes = if (probe_active and self.pending_probe_activation == null) snapshot.probe_committed_bytes else 0;
             const probe_goodput = @as(f64, @floatFromInt(probe_committed_bytes)) / probe_seconds;
+            const probe_activation_elapsed_ns: u64 = @intCast(@max(self.probe_started.untilNow(io, .awake).nanoseconds, 1));
+            const probe_activation_seconds = @as(f64, @floatFromInt(probe_activation_elapsed_ns)) / std.time.ns_per_s;
+            const probe_aggregate_bytes = if (probe_active and self.pending_probe_activation == null)
+                snapshot.committed_bytes -| self.probe_committed_baseline
+            else
+                0;
+            const probe_aggregate_goodput = @as(f64, @floatFromInt(probe_aggregate_bytes)) / probe_activation_seconds;
             const probe_dimension = if (probe_active) if (self.controller.last_probe_dimension) |dimension| @tagName(dimension) else "none" else "none";
             const probe_kind = if (probe_active) if (self.controller.last_probe_kind) |kind| @tagName(kind) else "none" else "none";
             const probe_baseline_goodput = if (probe_active) self.controller.last_probe_baseline_goodput else 0;
+            const probe_candidate_goodput = if (self.controller.last_probe_kind == .increase)
+                @max(probe_goodput, probe_aggregate_goodput)
+            else
+                probe_goodput;
             const probe_gain_pct = if (probe_baseline_goodput > 0)
-                (probe_goodput / probe_baseline_goodput - 1) * 100
+                (probe_candidate_goodput / probe_baseline_goodput - 1) * 100
             else
                 0;
 
@@ -2444,6 +2502,7 @@ const AdaptiveLoadRuntime = struct {
                 .read_goodput = read_goodput,
                 .committed_goodput = committed_goodput,
                 .probe_goodput = probe_goodput,
+                .probe_aggregate_goodput = probe_aggregate_goodput,
                 .probe_committed_bytes = probe_committed_bytes,
                 .probe_elapsed_ns = probe_elapsed_ns,
                 .capacity_pending = self.pending_probe_activation != null,
@@ -2464,6 +2523,10 @@ const AdaptiveLoadRuntime = struct {
                 .admitted_dma_writers = admitted_dma,
                 .dma_lane_capacity_available = dma_lane_capacity_available,
                 .slow_reads = slow_reads,
+                // Tiny metadata/tensor reads are pipeline progress, but they
+                // must not prevent startup fanout while every read slot is
+                // occupied and no representative DMA commit exists yet.
+                .source_stalled = startup and committed_goodput == 0 and reads_saturated and elapsed_ns >= max_ns,
                 .read_capacity_demand = read_capacity_demand,
                 .reads_saturated = reads_saturated,
                 .dma_saturated = dma_saturated,
@@ -2475,7 +2538,7 @@ const AdaptiveLoadRuntime = struct {
                 self.controller.epoch = published_epoch;
                 decision.epoch = published_epoch;
             }
-            load_log.debug("window control: action={s}, reason={s}, mode={s}, epoch={d}, elapsed={d:.1}ms, reads={d}->{d}/{d} active={d} peak={d} saturated={} demand={}, dma={d}->{d}/{d} lanes={d} open_writers={d} saturated={} lane_capacity={} utilization={d:.1}%, dma_chunks={d}->{d}/{d} buffers={d}inflight/{d}allocated, staging={d}->{d}/{d} blocks={d}inflight/{d}allocated", .{
+            load_log.debug("window control: action={s}, reason={s}, mode={s}, epoch={d}, elapsed={d:.1}ms, reads={d}->{d}/{d} active={d} peak={d} saturated={} demand={}, dma={d}->{d}/{d} lanes={d} open_writers={d} saturated={} lane_capacity={} utilization={d:.1}%, pinned_buffers={d}->{d}/{d} buffers={d}inflight/{d}allocated, staging={d}->{d}/{d} blocks={d}inflight/{d}allocated", .{
                 @tagName(decision.action),
                 @tagName(decision.reason),
                 @tagName(self.controller.mode),
@@ -2496,9 +2559,9 @@ const AdaptiveLoadRuntime = struct {
                 dma_saturated,
                 dma_lane_capacity_available,
                 dma_utilization * 100,
-                old.dma_chunks,
-                decision.knobs.dma_chunks,
-                self.controller.max_dma_chunks,
+                old.pinned_buffers,
+                decision.knobs.pinned_buffers,
+                self.controller.max_pinned_buffers,
                 pool_stats.in_flight,
                 pool_stats.allocated,
                 old.staging_chunks,
@@ -2524,7 +2587,7 @@ const AdaptiveLoadRuntime = struct {
                 slow_reads,
                 transfer_latency_us,
             });
-            load_log.debug("window pressure: read_wait={d:.1}% staging_wait={d:.1}% pinned_wait={d:.1}% dma_completion_wait={d:.1}% dma_starved={d:.1}%, h2d_queued={Bi:.2} occupancy={d:.1}% h2d_growth={d:.1}% ready_growth={d:.1}%, probe={s}/{s} epoch_bytes={Bi:.2} total_committed={Bi:.2} baseline={d:.2}MiB/s goodput={d:.2}MiB/s gain={d:.1}%, remaining={Bi:.2} buffered={Bi:.2} remaining_est={d:.2}s probe_allowed={}", .{
+            load_log.debug("window pressure: read_wait={d:.1}% staging_wait={d:.1}% pinned_wait={d:.1}% dma_completion_wait={d:.1}% dma_starved={d:.1}%, h2d_queued={Bi:.2} occupancy={d:.1}% h2d_growth={d:.1}% ready_growth={d:.1}%, probe={s}/{s} epoch_bytes={Bi:.2} total_committed={Bi:.2} baseline={d:.2}MiB/s epoch_goodput={d:.2}MiB/s aggregate_goodput={d:.2}MiB/s gain={d:.1}%, remaining={Bi:.2} buffered={Bi:.2} remaining_est={d:.2}s probe_allowed={}", .{
                 read_admission_wait_ratio * 100,
                 staging_wait_ratio * 100,
                 pinned_wait_ratio * 100,
@@ -2540,6 +2603,7 @@ const AdaptiveLoadRuntime = struct {
                 snapshot.committed_bytes,
                 probe_baseline_goodput / (1024 * 1024),
                 probe_goodput / (1024 * 1024),
+                probe_aggregate_goodput / (1024 * 1024),
                 probe_gain_pct,
                 remaining,
                 buffered_for_submission,
@@ -2567,7 +2631,7 @@ const AdaptiveLoadRuntime = struct {
             }
             if (decision.changed) {
                 self.apply(io, decision);
-                load_log.debug("limits updated: action={s}, reason={s}, epoch={d}, reads={d}->{d}, dma={d}->{d}, dma_chunks={d}->{d}, staging={d}->{d}, trim_pinned={}, trim_staging={}", .{
+                load_log.debug("limits updated: action={s}, reason={s}, epoch={d}, reads={d}->{d}, dma={d}->{d}, pinned_buffers={d}->{d}, staging={d}->{d}, trim_pinned={}, trim_staging={}", .{
                     @tagName(decision.action),
                     @tagName(decision.reason),
                     decision.epoch,
@@ -2575,8 +2639,8 @@ const AdaptiveLoadRuntime = struct {
                     decision.knobs.read_workers,
                     old.dma_workers,
                     decision.knobs.dma_workers,
-                    old.dma_chunks,
-                    decision.knobs.dma_chunks,
+                    old.pinned_buffers,
+                    decision.knobs.pinned_buffers,
                     old.staging_chunks,
                     decision.knobs.staging_chunks,
                     decision.trim_pinned,
@@ -2636,8 +2700,8 @@ const AdaptiveLoadRuntime = struct {
         self.metrics.staging_limit.store(decision.knobs.staging_chunks, .release);
         if (self.controller.direct) {
             for (self.pools, self.dma_allocators, 0..) |*pool, *dma_allocator, device_index| {
-                self.setDmaPoolLimit(pool, io, decision.knobs.dma_chunks, device_index);
-                if (decision.trim_pinned) self.trimPool(pool, dma_allocator, io, decision.knobs.dma_chunks, device_index);
+                self.setPinnedPoolLimit(pool, io, decision.knobs.pinned_buffers, device_index);
+                if (decision.trim_pinned) self.trimPinnedPool(pool, dma_allocator, io, decision.knobs.pinned_buffers, device_index);
             }
             if (self.staging_pool) |pool| {
                 if (decision.knobs.staging_chunks > 0) pool.setLimit(io, decision.knobs.staging_chunks);
@@ -2670,33 +2734,34 @@ const AdaptiveLoadRuntime = struct {
                 self.pending_probe_activation = null;
                 return .rolled_back;
             };
-            load_log.debug("probe capacity timeout: epoch={d}, dimension={s}, kind={s}, rollback_epoch={d}, reads={d}, dma={d}, dma_chunks={d}, staging={d}", .{
+            load_log.debug("probe capacity timeout: epoch={d}, dimension={s}, kind={s}, rollback_epoch={d}, reads={d}, dma={d}, pinned_buffers={d}, staging={d}", .{
                 activation.epoch,
                 @tagName(activation.dimension),
                 @tagName(activation.kind),
                 decision.epoch,
                 decision.knobs.read_workers,
                 decision.knobs.dma_workers,
-                decision.knobs.dma_chunks,
+                decision.knobs.pinned_buffers,
                 decision.knobs.staging_chunks,
             });
             self.apply(io, decision);
             return .rolled_back;
         }
 
+        self.probe_committed_baseline = self.metrics.committed_bytes.load(.acquire);
         self.metrics.publishProbeEpoch(io, activation.epoch);
         self.probe_started = .now(io, .awake);
         self.pending_probe_activation = null;
         if (activation.dimension == .dma) {
             if (self.pipeline) |pipeline| pipeline.dma_probe_capacity_epoch.store(0, .release);
         }
-        load_log.debug("probe capacity active: epoch={d}, dimension={s}, kind={s}, reads={d}, dma={d}, dma_chunks={d}, staging={d}", .{
+        load_log.debug("probe capacity active: epoch={d}, dimension={s}, kind={s}, reads={d}, dma={d}, pinned_buffers={d}, staging={d}", .{
             activation.epoch,
             @tagName(activation.dimension),
             @tagName(activation.kind),
             activation.candidate.read_workers,
             activation.candidate.dma_workers,
-            activation.candidate.dma_chunks,
+            activation.candidate.pinned_buffers,
             activation.candidate.staging_chunks,
         });
         return .activated;
@@ -2719,13 +2784,13 @@ const AdaptiveLoadRuntime = struct {
             .pinned => switch (activation.kind) {
                 .increase => blk: {
                     for (self.pools) |*pool| {
-                        if (pool.allocatedBlocks() <= activation.baseline.dma_chunks) break :blk false;
+                        if (pool.allocatedBlocks() <= activation.baseline.pinned_buffers) break :blk false;
                     }
                     break :blk true;
                 },
                 .reduce_resource => blk: {
                     for (self.pools) |*pool| {
-                        if (pool.currentLimit() > activation.candidate.dma_chunks or pool.inFlight() > activation.candidate.dma_chunks) break :blk false;
+                        if (pool.currentLimit() > activation.candidate.pinned_buffers or pool.inFlight() > activation.candidate.pinned_buffers) break :blk false;
                     }
                     break :blk true;
                 },
@@ -2745,9 +2810,9 @@ const AdaptiveLoadRuntime = struct {
     fn trimSurplus(self: *AdaptiveLoadRuntime, io: std.Io) void {
         if (!self.controller.direct) return;
         for (self.pools, self.dma_allocators, 0..) |*pool, *dma_allocator, device_index| {
-            self.setDmaPoolLimit(pool, io, self.controller.knobs.dma_chunks, device_index);
-            if (pool.allocatedBlocks() > self.controller.knobs.dma_chunks) {
-                self.trimPool(pool, dma_allocator, io, self.controller.knobs.dma_chunks, device_index);
+            self.setPinnedPoolLimit(pool, io, self.controller.knobs.pinned_buffers, device_index);
+            if (pool.allocatedBlocks() > self.controller.knobs.pinned_buffers) {
+                self.trimPinnedPool(pool, dma_allocator, io, self.controller.knobs.pinned_buffers, device_index);
             }
         }
         if (self.staging_pool) |pool| {
@@ -2756,7 +2821,7 @@ const AdaptiveLoadRuntime = struct {
         }
     }
 
-    fn setDmaPoolLimit(
+    fn setPinnedPoolLimit(
         self: *AdaptiveLoadRuntime,
         pool: *mem.DynamicBufferPool,
         io: std.Io,
@@ -2767,7 +2832,7 @@ const AdaptiveLoadRuntime = struct {
         const effective = @max(requested, @max(pool.inFlight(), admitted));
         if (effective == pool.currentLimit()) return;
         pool.setLimit(io, effective);
-        load_log.debug("dma pool limit updated: device={d}, requested={d}, effective={d}, in_flight={d}", .{
+        load_log.debug("pinned pool limit updated: device={d}, requested={d}, effective={d}, in_flight={d}", .{
             device_index,
             requested,
             effective,
@@ -2775,7 +2840,7 @@ const AdaptiveLoadRuntime = struct {
         });
     }
 
-    fn trimPool(
+    fn trimPinnedPool(
         self: *AdaptiveLoadRuntime,
         pool: *mem.DynamicBufferPool,
         dma_allocator: *const mem.DmaAllocator,
@@ -2788,7 +2853,7 @@ const AdaptiveLoadRuntime = struct {
         pool.trim(dma_allocator.allocator(), io, target);
         const after = pool.allocatedBlocks();
         if (after != before) {
-            load_log.debug("dma pool trimmed: device={d}, allocated={d}->{d}, target={d}, in_flight={d}", .{
+            load_log.debug("pinned pool trimmed: device={d}, allocated={d}->{d}, target={d}, in_flight={d}", .{
                 device_index,
                 before,
                 after,
@@ -2875,7 +2940,7 @@ const AdaptivePipelineContext = struct {
     dma_allocators: []const mem.DmaAllocator,
     pinned_buffer_pools: []mem.DynamicBufferPool,
     staging_pool: ?*mem.DynamicBufferPool,
-    dma_chunk_size: usize,
+    transfer_quantum_size: usize,
     read_chunk_size: usize,
     max_read_parallelism: usize,
     dma_group: stdx.Io.LimitedGroup,
@@ -3680,7 +3745,7 @@ const AdaptiveTensorLoad = struct {
             self.ctx.platform,
             self.ctx.pinned_buffer_pools,
             self.ctx.dma_allocators,
-            self.ctx.dma_chunk_size,
+            self.ctx.transfer_quantum_size,
             shape,
             sharding,
             self.ctx.buffers[self.tensor_index],
@@ -3797,7 +3862,7 @@ const AdaptiveTensorLoad = struct {
 
         var quantum_bytes = self.quantum_progress;
         self.quantum_progress = 0;
-        while (self.next_commit < self.total and quantum_bytes < self.ctx.dma_chunk_size and !self.ctx.failed()) {
+        while (self.next_commit < self.total and quantum_bytes < self.ctx.transfer_quantum_size and !self.ctx.failed()) {
             if (!drain_for_park and (self.direct_pending or self.pending > 0)) self.fillReadAhead();
 
             if (self.direct_pending) {
@@ -3838,7 +3903,7 @@ const AdaptiveTensorLoad = struct {
 
                 self.ctx.markProbeStart(slot.epoch);
                 self.writer.?.setEpoch(slot.epoch) catch |err| return self.promoteWriterError(err);
-                const copy_len = @min(slot.len - slot.consumed, self.ctx.dma_chunk_size - quantum_bytes);
+                const copy_len = @min(slot.len - slot.consumed, self.ctx.transfer_quantum_size - quantum_bytes);
                 const copy_started: std.Io.Timestamp = .now(self.ctx.io, .awake);
                 self.writer.?.interface().writeAll(slot.buffer.?[slot.consumed..][0..copy_len]) catch |err| return self.promoteWriterError(err);
                 self.writer.?.commitStagedWrite() catch |err| return self.promoteWriterError(err);
@@ -3879,7 +3944,7 @@ const AdaptiveTensorLoad = struct {
             }
             const len = @min(
                 self.ctx.read_chunk_size,
-                @min(writable.len, @min(self.total - self.next_read, self.ctx.dma_chunk_size - quantum_bytes)),
+                @min(writable.len, @min(self.total - self.next_read, self.ctx.transfer_quantum_size - quantum_bytes)),
             );
             self.direct_slot = .{ .scheduled_at = .now(self.ctx.io, .awake) };
             self.direct_pending = true;
@@ -4075,49 +4140,42 @@ const AdaptivePipelineLane = struct {
 };
 
 pub const LoadOpts = struct {
-    pub const auto: LoadOpts = .{
-        .parallelism = 1,
-        .shardings = &.{},
-        .dma_chunks = 2,
-        .dma_chunk_size = 4096,
-    };
+    pub const auto: LoadOpts = .{};
 
     /// Hard maximum number of concurrent tensor transfers.
-    parallelism: usize,
+    parallelism: usize = 32,
     /// Starting limit for adaptive loading. Clamped to the worker/chunk caps.
-    initial_parallelism: usize = 2,
+    initial_parallelism: usize = 8,
     /// Set false to retain the fixed `parallelism` behavior.
     adaptive_parallelism: bool = true,
     /// Hard maximum number of outstanding positional chunk reads. When null,
     /// adaptive loading uses at least 32 reads, or `parallelism` when larger.
     max_read_parallelism: ?usize = null,
     /// Logical pageable read-ahead chunk size. This is independent of the
-    /// larger pinned DMA submission chunk size.
+    /// physical pinned buffer size and transfer scheduling quantum.
     read_chunk_size: usize = 32 * 1024 * 1024,
     /// Hard pageable read-ahead budget. Blocks are allocated lazily; zero
     /// disables pageable staging while retaining direct DMA adaptation.
     max_staging_bytes: usize = 1024 * 1024 * 1024,
     shardings: []const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
-    /// Hard per-device pinned-block count. Adaptive loading normally uses one
-    /// more block than active workers and probes higher only when useful.
-    dma_chunks: usize,
-    /// Per-device pinned buffer size. When null, uses `dma_chunk_size` for
-    /// backwards compatibility. Keeping this separate lets multi-device loads
-    /// use a large scheduling quantum without multiplying that quantum by the
-    /// device count in every pinned pool allocation.
-    dma_buffer_size: ?usize = null,
-    /// Host page policy for pinned DMA buffers. Transparent huge pages are an
-    /// opt-in hint and currently affect CUDA host-registered allocations.
-    dma_buffer_page_mode: mem.DmaBufferPageMode = .default,
+    /// Hard per-device limit on physical pinned DMA buffers. Adaptive loading
+    /// normally uses one more buffer than active workers and probes higher only
+    /// when useful.
+    max_pinned_buffers_per_device: usize = 33,
+    /// Per-device pinned buffer size. Set to null to use `transfer_quantum_size`.
+    /// Keeping this separate lets multi-device loads use a large scheduling
+    /// quantum without multiplying that quantum by the device count in every
+    /// pinned pool allocation.
+    pinned_buffer_size: ?usize = 32 * 1024 * 1024,
     /// Logical bytes a DMA lane processes before yielding to another tensor.
-    dma_chunk_size: usize,
+    transfer_quantum_size: usize = 256 * 1024 * 1024,
     total_bytes: ?*usize = null,
 };
 
-fn adaptiveDmaWorkerCap(parallelism: usize, dma_chunks: usize, tensor_count: usize) usize {
-    const chunk_cap = if (dma_chunks > 1) dma_chunks - 1 else 1;
-    return @min(@max(tensor_count, 1), @min(parallelism, chunk_cap));
+fn adaptiveDmaWorkerCap(parallelism: usize, pinned_buffers: usize, tensor_count: usize) usize {
+    const buffer_cap = if (pinned_buffers > 1) pinned_buffers - 1 else 1;
+    return @min(@max(tensor_count, 1), @min(parallelism, buffer_cap));
 }
 
 fn defaultAdaptiveReadWorkerCap(parallelism: usize) usize {
@@ -4135,10 +4193,10 @@ pub fn load(
 ) !Bufferized(ModelType) {
     stdx.debug.assert(opts.parallelism > 0, "zml.io.load parallelism must be greater than zero", .{});
     stdx.debug.assert(opts.initial_parallelism > 0, "zml.io.load initial_parallelism must be greater than zero", .{});
-    stdx.debug.assert(opts.dma_chunks > 0, "zml.io.load dma_chunks must be greater than zero", .{});
-    stdx.debug.assert(opts.dma_chunk_size >= @sizeOf(usize), "zml.io.load dma_chunk_size must hold pool metadata", .{});
-    const dma_buffer_size = opts.dma_buffer_size orelse opts.dma_chunk_size;
-    stdx.debug.assert(dma_buffer_size >= @sizeOf(usize), "zml.io.load dma_buffer_size must hold pool metadata", .{});
+    stdx.debug.assert(opts.max_pinned_buffers_per_device > 0, "zml.io.load max_pinned_buffers_per_device must be greater than zero", .{});
+    stdx.debug.assert(opts.transfer_quantum_size > 0, "zml.io.load transfer_quantum_size must be greater than zero", .{});
+    const pinned_buffer_size = opts.pinned_buffer_size orelse opts.transfer_quantum_size;
+    stdx.debug.assert(pinned_buffer_size >= @sizeOf(usize), "zml.io.load pinned_buffer_size must hold pool metadata", .{});
     stdx.debug.assert(opts.read_chunk_size > 0, "zml.io.load read_chunk_size must be greater than zero", .{});
 
     const load_started: std.Io.Timestamp = .now(io, .awake);
@@ -4172,17 +4230,17 @@ pub fn load(
     }
     const adaptive_candidate = opts.adaptive_parallelism and direct and total_logical_bytes > opts.read_chunk_size and (opts.parallelism > 1 or max_read_workers > 1);
     const max_workers = if (adaptive_candidate)
-        adaptiveDmaWorkerCap(opts.parallelism, opts.dma_chunks, tensor_count)
+        adaptiveDmaWorkerCap(opts.parallelism, opts.max_pinned_buffers_per_device, tensor_count)
     else
         opts.parallelism;
     const adaptive = adaptive_candidate and (max_workers > 1 or max_read_workers > 1);
     const initial_workers = if (adaptive) @min(max_workers, opts.initial_parallelism) else max_workers;
     const initial_read_workers = if (adaptive) @min(max_read_workers, opts.initial_parallelism) else max_read_workers;
-    const initial_chunks = if (adaptive) @min(opts.dma_chunks, initial_workers + 1) else opts.dma_chunks;
+    const initial_pinned_buffers = if (adaptive) @min(opts.max_pinned_buffers_per_device, initial_workers + 1) else opts.max_pinned_buffers_per_device;
     var metrics: LoadMetrics = .{};
     const configured_read_workers = if (adaptive) initial_read_workers else max_workers;
     const configured_max_read_workers = if (adaptive) max_read_workers else max_workers;
-    load_log.debug("configured: target={s}, adaptive={}, requested_adaptive={}, tensors={d}, reads={d}/{d}, dma={d}/{d} (requested_max={d}), dma_chunks={d}/{d}, staging=0/{d} blocks ({Bi:.2} max), read_chunk_size={Bi:.2}, dma_buffer_size={Bi:.2}, dma_buffer_page_mode={s}, dma_chunk_size={Bi:.2}, logical_bytes={Bi:.2}", .{
+    load_log.debug("configured: target={s}, adaptive={}, requested_adaptive={}, tensors={d}, reads={d}/{d}, dma={d}/{d} (requested_max={d}), pinned_buffers={d}/{d}, staging=0/{d} blocks ({Bi:.2} max), read_chunk_size={Bi:.2}, pinned_buffer_size={Bi:.2}, transfer_quantum_size={Bi:.2}, logical_bytes={Bi:.2}", .{
         @tagName(platform.target),
         adaptive,
         opts.adaptive_parallelism,
@@ -4192,14 +4250,13 @@ pub fn load(
         initial_workers,
         max_workers,
         opts.parallelism,
-        initial_chunks,
-        opts.dma_chunks,
+        initial_pinned_buffers,
+        opts.max_pinned_buffers_per_device,
         max_staging_chunks,
         opts.max_staging_bytes,
         opts.read_chunk_size,
-        dma_buffer_size,
-        @tagName(opts.dma_buffer_page_mode),
-        opts.dma_chunk_size,
+        pinned_buffer_size,
+        opts.transfer_quantum_size,
         total_logical_bytes,
     });
 
@@ -4207,14 +4264,14 @@ pub fn load(
     const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
     defer allocator.free(dma_allocators);
     for (platform.devices, 0..) |*device, i| {
-        dma_allocators[i] = .initWithPageMode(allocator, device, opts.dma_buffer_page_mode);
+        dma_allocators[i] = .init(allocator, device);
     }
 
     const buffer_pools = try allocator.alloc(mem.DynamicBufferPool, pool_count);
     defer allocator.free(buffer_pools);
     for (buffer_pools) |*pool_| {
-        pool_.* = .init(opts.dma_chunks, dma_buffer_size);
-        if (adaptive) pool_.setLimit(io, initial_chunks);
+        pool_.* = .init(opts.max_pinned_buffers_per_device, pinned_buffer_size);
+        if (adaptive) pool_.setLimit(io, initial_pinned_buffers);
     }
     defer for (buffer_pools, 0..) |*pool_, i| {
         pool_.deinit(dma_allocators[i].allocator());
@@ -4255,7 +4312,7 @@ pub fn load(
             .dma_allocators = dma_allocators,
             .pinned_buffer_pools = buffer_pools,
             .staging_pool = staging_pool,
-            .dma_chunk_size = opts.dma_chunk_size,
+            .transfer_quantum_size = opts.transfer_quantum_size,
             .read_chunk_size = opts.read_chunk_size,
             .max_read_parallelism = max_read_workers,
             .dma_group = .init(initial_workers),
@@ -4273,8 +4330,8 @@ pub fn load(
             .controller = .init(
                 initial_workers,
                 max_workers,
-                initial_chunks,
-                opts.dma_chunks,
+                initial_pinned_buffers,
+                opts.max_pinned_buffers_per_device,
                 initial_read_workers,
                 max_read_workers,
                 max_staging_chunks,
@@ -4288,8 +4345,8 @@ pub fn load(
             .staging_pool = staging_pool,
             .staging_allocator = allocator,
             .metrics = &metrics,
-            .dma_chunk_size = opts.dma_chunk_size,
-            .dma_buffer_size = dma_buffer_size,
+            .transfer_quantum_size = opts.transfer_quantum_size,
+            .pinned_buffer_size = pinned_buffer_size,
             .read_chunk_size = opts.read_chunk_size,
             .total_logical_bytes = total_logical_bytes,
             .total_transfers = tensor_count,
@@ -4332,14 +4389,14 @@ pub fn load(
         const elapsed = load_started.untilNow(io, .awake);
         const elapsed_seconds = @as(f64, @floatFromInt(elapsed.nanoseconds)) / std.time.ns_per_s;
         const goodput = if (elapsed_seconds > 0) @as(f64, @floatFromInt(loaded_bytes)) / elapsed_seconds else 0;
-        load_log.debug("completed: adaptive=true, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, final_reads={d}, final_dma={d}, final_dma_chunks={d}, final_staging={d}, direct={Bi:.2}, staged={Bi:.2}", .{
+        load_log.debug("completed: adaptive=true, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, final_reads={d}, final_dma={d}, final_pinned_buffers={d}, final_staging={d}, direct={Bi:.2}, staged={Bi:.2}", .{
             tensor_count,
             loaded_bytes,
             elapsed_seconds,
             goodput / (1024 * 1024),
             controller_runtime.controller.knobs.read_workers,
             controller_runtime.controller.knobs.dma_workers,
-            controller_runtime.controller.knobs.dma_chunks,
+            controller_runtime.controller.knobs.pinned_buffers,
             controller_runtime.controller.knobs.staging_chunks,
             metrics.direct_read_bytes.load(.acquire),
             metrics.staged_read_bytes.load(.acquire),
@@ -4350,7 +4407,7 @@ pub fn load(
     const Ctx = struct {
         allocator: std.mem.Allocator,
         dma_allocators: []const mem.DmaAllocator,
-        dma_chunk_size: usize,
+        transfer_quantum_size: usize,
         pinned_buffer_pools: []mem.DynamicBufferPool,
         io: std.Io,
         platform: *const Platform,
@@ -4369,7 +4426,7 @@ pub fn load(
         .store = store,
         .allocator = allocator,
         .dma_allocators = dma_allocators,
-        .dma_chunk_size = opts.dma_chunk_size,
+        .transfer_quantum_size = opts.transfer_quantum_size,
         .pinned_buffer_pools = buffer_pools,
         .io = io,
         .shardings = opts.shardings,
@@ -4418,7 +4475,7 @@ pub fn load(
                         ctx_.platform,
                         ctx_.pinned_buffer_pools,
                         ctx_.dma_allocators,
-                        ctx_.dma_chunk_size,
+                        ctx_.transfer_quantum_size,
                         shape,
                         sharding,
                         ctx_.buffers[i_],
@@ -4464,13 +4521,13 @@ pub fn load(
     const elapsed = load_started.untilNow(io, .awake);
     const elapsed_seconds = @as(f64, @floatFromInt(elapsed.nanoseconds)) / std.time.ns_per_s;
     const goodput = if (elapsed_seconds > 0) @as(f64, @floatFromInt(loaded_bytes)) / elapsed_seconds else 0;
-    load_log.debug("completed: adaptive=false, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, workers={d}, dma_chunks={d}", .{
+    load_log.debug("completed: adaptive=false, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, workers={d}, pinned_buffers={d}", .{
         tensor_count,
         loaded_bytes,
         elapsed_seconds,
         goodput / (1024 * 1024),
         max_workers,
-        opts.dma_chunks,
+        opts.max_pinned_buffers_per_device,
     });
 
     return bufferized;
@@ -4640,9 +4697,9 @@ test "adaptive load controller doubles staged read-ahead probes" {
         .slow_reads = true,
         .now_ns = 600 * std.time.ns_per_ms,
     });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
+    try std.testing.expectEqual(.none, decision.action);
     try std.testing.expectEqual(8, decision.knobs.read_workers);
-    try std.testing.expectEqual(4, decision.knobs.dma_workers);
+    try std.testing.expectEqual(2, decision.knobs.dma_workers);
     try std.testing.expectEqual(8, decision.knobs.staging_chunks);
 }
 
@@ -4712,6 +4769,7 @@ test "adaptive load controller accepts sustained aggregate gain after capacity a
     const decision = controller.observe(.{
         .committed_goodput = 150,
         .probe_goodput = 102,
+        .probe_aggregate_goodput = 150,
         .probe_committed_bytes = 64 * 1024 * 1024,
         .now_ns = 200 * std.time.ns_per_ms,
     });
@@ -4727,21 +4785,43 @@ test "adaptive load controller accepts sustained aggregate gain after capacity a
         .reads_saturated = true,
         .now_ns = 300 * std.time.ns_per_ms,
     });
-    try std.testing.expectEqual(.dma_probe_start, cooldown.action);
+    try std.testing.expectEqual(.none, cooldown.action);
     try std.testing.expectEqual(2, cooldown.knobs.staging_chunks);
 }
 
-test "adaptive load controller does not back reads off past a probe baseline" {
+test "adaptive load controller keeps slow-source fanout through a drain burst" {
     var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
+    _ = controller.observe(.{
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0.50,
+        .reads_saturated = true,
+        .slow_reads = true,
+        .now_ns = 100 * std.time.ns_per_ms,
+    });
+
+    const decision = controller.observe(.{
+        .committed_goodput = 50,
+        .probe_aggregate_goodput = 50,
+        .probe_committed_bytes = 64 * 1024 * 1024,
+        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
+        .now_ns = 300 * std.time.ns_per_ms,
+    });
+
+    try std.testing.expectEqual(.staging_probe_keep, decision.action);
+    try std.testing.expectEqual(@as(usize, 4), decision.knobs.read_workers);
+    try std.testing.expectEqual(@as(usize, 2), decision.knobs.staging_chunks);
+}
+
+test "adaptive load controller does not back reads off past a probe baseline" {
+    var controller: AdaptiveLoadController = .init(4, 16, 5, 32, 2, 32, 32, true);
     var decision = controller.observe(.{
         .read_goodput = 100,
         .committed_goodput = 100,
         .dma_starvation_ratio = 0.11,
         .reads_saturated = true,
-        .slow_reads = true,
         .now_ns = 100 * std.time.ns_per_ms,
     });
-    try std.testing.expectEqual(.staging_probe_start, decision.action);
+    try std.testing.expectEqual(.read_probe_start, decision.action);
 
     decision = controller.observe(.{
         .committed_goodput = 100,
@@ -4755,11 +4835,11 @@ test "adaptive load controller does not back reads off past a probe baseline" {
         .ready_growth_ratio = 0.21,
         .now_ns = 300 * std.time.ns_per_ms,
     });
-    try std.testing.expectEqual(.staging_probe_rollback, decision.action);
+    try std.testing.expectEqual(.read_probe_rollback, decision.action);
     try std.testing.expectEqual(.ready_queue_growth, decision.reason);
     try std.testing.expectEqual(2, decision.knobs.read_workers);
     try std.testing.expectEqual(0, decision.knobs.staging_chunks);
-    try std.testing.expect(decision.trim_staging);
+    try std.testing.expect(!decision.trim_staging);
 }
 
 test "adaptive load controller backs reads off on a growing ready queue" {
@@ -4785,9 +4865,53 @@ test "adaptive load controller backs reads off on a growing ready queue" {
     try std.testing.expectEqual(.read_backoff, decision.action);
     try std.testing.expectEqual(5, decision.knobs.read_workers);
     try std.testing.expectEqual(4, decision.knobs.dma_workers);
-    try std.testing.expectEqual(5, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(5, decision.knobs.pinned_buffers);
     try std.testing.expectEqual(4, decision.knobs.staging_chunks);
     try std.testing.expect(decision.trim_staging);
+}
+
+test "adaptive load controller does not back reads off between slow source bursts" {
+    var controller: AdaptiveLoadController = .init(4, 16, 5, 32, 8, 32, 32, true);
+    controller.mode = .steady;
+    controller.knobs.staging_chunks = 16;
+
+    _ = controller.observe(.{
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0.50,
+        .ready_growth_ratio = 0.21,
+        .now_ns = 100 * std.time.ns_per_ms,
+    });
+    const decision = controller.observe(.{
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0.50,
+        .ready_growth_ratio = 0.21,
+        .now_ns = 200 * std.time.ns_per_ms,
+    });
+
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(@as(usize, 8), decision.knobs.read_workers);
+    try std.testing.expectEqual(@as(usize, 16), decision.knobs.staging_chunks);
+}
+
+test "adaptive load controller remembers a slow source across drain windows" {
+    var controller: AdaptiveLoadController = .init(4, 16, 5, 32, 8, 32, 32, true);
+    controller.mode = .steady;
+    controller.knobs.staging_chunks = 16;
+
+    _ = controller.observe(.{
+        .committed_goodput = 100,
+        .slow_reads = true,
+        .ready_growth_ratio = 0.21,
+        .now_ns = 100 * std.time.ns_per_ms,
+    });
+    const decision = controller.observe(.{
+        .committed_goodput = 100,
+        .ready_growth_ratio = 0.21,
+        .now_ns = 200 * std.time.ns_per_ms,
+    });
+
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(@as(usize, 8), decision.knobs.read_workers);
 }
 
 test "adaptive load controller waits for a commit before backing reads off" {
@@ -4889,7 +5013,7 @@ test "adaptive load controller rolls back an unhelpful dma startup probe" {
     });
     try std.testing.expectEqual(.dma_probe_start, decision.action);
     try std.testing.expectEqual(4, decision.knobs.dma_workers);
-    try std.testing.expectEqual(5, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(5, decision.knobs.pinned_buffers);
 
     decision = controller.observe(.{
         .committed_goodput = 102,
@@ -4899,8 +5023,52 @@ test "adaptive load controller rolls back an unhelpful dma startup probe" {
     });
     try std.testing.expectEqual(.dma_probe_rollback, decision.action);
     try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(3, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
     try std.testing.expect(decision.trim_pinned);
+}
+
+test "adaptive load controller uses a gradual startup dma ladder" {
+    var controller: AdaptiveLoadController = .init(8, 32, 9, 33, 8, 32, 32, true);
+    const decision = controller.observe(.{
+        .committed_goodput = 100,
+        .dma_saturated = true,
+        .now_ns = 100 * std.time.ns_per_ms,
+    });
+
+    try std.testing.expectEqual(.dma_probe_start, decision.action);
+    try std.testing.expectEqual(@as(usize, 12), decision.knobs.dma_workers);
+    try std.testing.expectEqual(@as(usize, 13), decision.knobs.pinned_buffers);
+}
+
+test "adaptive load controller cools down after a failed performance probe" {
+    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
+    _ = controller.observe(.{
+        .committed_goodput = 100,
+        .dma_saturated = true,
+        .now_ns = 100 * std.time.ns_per_ms,
+    });
+    var decision = controller.observe(.{
+        .committed_goodput = 100,
+        .probe_goodput = 100,
+        .probe_committed_bytes = 64 * 1024 * 1024,
+        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
+        .now_ns = 300 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.dma_probe_rollback, decision.action);
+
+    decision = controller.observe(.{
+        .committed_goodput = 100,
+        .dma_saturated = true,
+        .now_ns = 600 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+
+    decision = controller.observe(.{
+        .committed_goodput = 100,
+        .dma_saturated = true,
+        .now_ns = 2400 * std.time.ns_per_ms,
+    });
+    try std.testing.expectEqual(.dma_probe_start, decision.action);
 }
 
 test "adaptive load controller waits for DMA probe capacity before evaluating pressure" {
@@ -4944,7 +5112,7 @@ test "adaptive load controller does not back off past a pressured probe baseline
     try std.testing.expectEqual(.dma_probe_rollback, decision.action);
     try std.testing.expectEqual(.h2d_pressure, decision.reason);
     try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(3, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
     try std.testing.expect(decision.trim_pinned);
 
     decision = controller.observe(.{
@@ -4981,7 +5149,7 @@ test "adaptive load controller does not treat pinned wait as DMA probe pressure"
     });
     try std.testing.expectEqual(.none, decision.action);
     try std.testing.expectEqual(4, decision.knobs.dma_workers);
-    try std.testing.expectEqual(5, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(5, decision.knobs.pinned_buffers);
     try std.testing.expect(controller.probe != null);
 }
 
@@ -5005,9 +5173,27 @@ test "adaptive load controller keeps a dma probe when pageable data is ready" {
     try std.testing.expectEqual(.dma_probe_keep, decision.action);
     try std.testing.expectEqual(2, decision.knobs.read_workers);
     try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(3, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
     try std.testing.expectEqual(1, decision.knobs.staging_chunks);
     try std.testing.expect(!decision.trim_pinned);
+}
+
+test "adaptive load controller ignores dma saturation bursts from a slow staged source" {
+    var controller: AdaptiveLoadController = .init(8, 32, 9, 33, 32, 32, 32, true);
+    controller.mode = .steady;
+    controller.knobs.staging_chunks = 32;
+
+    const decision = controller.observe(.{
+        .read_goodput = 100,
+        .committed_goodput = 100,
+        .slow_reads = true,
+        .dma_saturated = true,
+        .dma_starvation_ratio = 0.50,
+        .now_ns = 2 * std.time.ns_per_s,
+    });
+
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(@as(usize, 8), decision.knobs.dma_workers);
 }
 
 test "adaptive load controller timeout rolls a dma probe back and trims resources" {
@@ -5024,7 +5210,7 @@ test "adaptive load controller timeout rolls a dma probe back and trims resource
     try std.testing.expectEqual(.dma_probe_rollback, decision.action);
     try std.testing.expectEqual(.capacity_not_exercised, decision.reason);
     try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(3, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
     try std.testing.expect(decision.trim_pinned);
 }
 
@@ -5104,7 +5290,7 @@ test "adaptive load controller skips probes near the finite tail" {
     });
     try std.testing.expectEqual(.none, decision.action);
     try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(3, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
 }
 
 test "adaptive load controller honors a disabled staging budget" {
@@ -5177,7 +5363,7 @@ test "adaptive load controller recovers a starved direct lane" {
     });
     try std.testing.expectEqual(.dma_probe_start, decision.action);
     try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(3, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
 }
 
 test "adaptive load controller widens saturated fast direct lanes without staging" {
@@ -5194,7 +5380,7 @@ test "adaptive load controller widens saturated fast direct lanes without stagin
     try std.testing.expectEqual(.dma_probe_start, decision.action);
     try std.testing.expectEqual(@as(usize, 4), decision.knobs.read_workers);
     try std.testing.expectEqual(@as(usize, 4), decision.knobs.dma_workers);
-    try std.testing.expectEqual(@as(usize, 5), decision.knobs.dma_chunks);
+    try std.testing.expectEqual(@as(usize, 5), decision.knobs.pinned_buffers);
     try std.testing.expectEqual(@as(usize, 0), decision.knobs.staging_chunks);
 }
 
@@ -5248,7 +5434,7 @@ test "adaptive load controller source bootstrap stops at the read hard cap" {
     try std.testing.expectEqual(@as(usize, 32), controller.knobs.read_workers);
     try std.testing.expectEqual(@as(usize, 32), controller.knobs.staging_chunks);
     try std.testing.expectEqual(@as(usize, 2), controller.knobs.dma_workers);
-    try std.testing.expectEqual(@as(usize, 3), controller.knobs.dma_chunks);
+    try std.testing.expectEqual(@as(usize, 3), controller.knobs.pinned_buffers);
 
     const capped = controller.observe(.{
         .source_stalled = true,
@@ -5283,7 +5469,7 @@ test "adaptive load controller reduces DMA streams within the best throughput ba
     try std.testing.expectEqual(.dma_probe_start, decision.action);
     try std.testing.expectEqual(.reduce_resource, controller.probe.?.kind);
     try std.testing.expectEqual(@as(usize, 2), decision.knobs.dma_workers);
-    try std.testing.expectEqual(@as(usize, 5), decision.knobs.dma_chunks);
+    try std.testing.expectEqual(@as(usize, 5), decision.knobs.pinned_buffers);
 
     decision = controller.observe(.{
         .committed_goodput = 97,
@@ -5304,7 +5490,7 @@ test "adaptive load controller rolls a failed resource reduction back one step" 
         .now_ns = 2 * std.time.ns_per_s,
     });
     try std.testing.expectEqual(.pinned_reduce_start, decision.action);
-    try std.testing.expectEqual(5, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(5, decision.knobs.pinned_buffers);
 
     decision = controller.observe(.{
         .committed_goodput = 100,
@@ -5313,7 +5499,7 @@ test "adaptive load controller rolls a failed resource reduction back one step" 
         .now_ns = 3 * std.time.ns_per_s,
     });
     try std.testing.expectEqual(.pinned_reduce_rollback, decision.action);
-    try std.testing.expectEqual(6, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(6, decision.knobs.pinned_buffers);
     try std.testing.expect(!decision.trim_pinned);
 }
 
@@ -5335,7 +5521,7 @@ test "adaptive load controller pressure rollback cools down resource probes" {
     });
     try std.testing.expectEqual(.pinned_reduce_rollback, decision.action);
     try std.testing.expectEqual(rollback_ns, controller.last_resource_probe_ns);
-    try std.testing.expectEqual(6, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(6, decision.knobs.pinned_buffers);
 
     decision = controller.observe(.{
         .committed_goodput = 100,
@@ -5353,7 +5539,7 @@ test "adaptive load controller resource reductions stay within global best band"
         .now_ns = 2 * std.time.ns_per_s,
     });
     try std.testing.expectEqual(.pinned_reduce_start, decision.action);
-    try std.testing.expectEqual(6, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(6, decision.knobs.pinned_buffers);
 
     decision = controller.observe(.{
         .committed_goodput = 97,
@@ -5368,7 +5554,7 @@ test "adaptive load controller resource reductions stay within global best band"
         .now_ns = 5 * std.time.ns_per_s,
     });
     try std.testing.expectEqual(.pinned_reduce_start, decision.action);
-    try std.testing.expectEqual(5, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(5, decision.knobs.pinned_buffers);
 
     decision = controller.observe(.{
         .committed_goodput = 94,
@@ -5377,7 +5563,7 @@ test "adaptive load controller resource reductions stay within global best band"
         .now_ns = 6 * std.time.ns_per_s,
     });
     try std.testing.expectEqual(.pinned_reduce_rollback, decision.action);
-    try std.testing.expectEqual(6, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(6, decision.knobs.pinned_buffers);
 }
 
 test "adaptive load controller does not back DMA off on pinned admission wait" {
@@ -5390,7 +5576,7 @@ test "adaptive load controller does not back DMA off on pinned admission wait" {
     try std.testing.expectEqual(.none, decision.action);
     try std.testing.expectEqual(.none, decision.reason);
     try std.testing.expectEqual(4, decision.knobs.dma_workers);
-    try std.testing.expectEqual(5, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(5, decision.knobs.pinned_buffers);
 }
 
 test "adaptive load controller requires persistent H2D queue growth" {
@@ -5521,7 +5707,7 @@ test "adaptive load controller rolls back an unhelpful pinned probe" {
         .now_ns = 100 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.pinned_probe_start, decision.action);
-    try std.testing.expectEqual(4, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(4, decision.knobs.pinned_buffers);
 
     decision = controller.observe(.{
         .committed_goodput = 102,
@@ -5530,7 +5716,7 @@ test "adaptive load controller rolls back an unhelpful pinned probe" {
         .now_ns = 200 * std.time.ns_per_ms,
     });
     try std.testing.expectEqual(.pinned_probe_rollback, decision.action);
-    try std.testing.expectEqual(3, decision.knobs.dma_chunks);
+    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
     try std.testing.expect(decision.trim_pinned);
 }
 
@@ -5631,12 +5817,12 @@ test "adaptive load DMA probe capacity requires distinct submitting lanes" {
     const baseline: AdaptiveLoadController.Knobs = .{
         .read_workers = 2,
         .dma_workers = 2,
-        .dma_chunks = 3,
+        .pinned_buffers = 3,
         .staging_chunks = 0,
     };
     var candidate = baseline;
     candidate.dma_workers = 4;
-    candidate.dma_chunks = 5;
+    candidate.pinned_buffers = 5;
 
     var pipeline: AdaptivePipelineContext = undefined;
     var lanes: [4]AdaptivePipelineLane = undefined;
@@ -5731,7 +5917,7 @@ const DirectMemoryWriterDeviceTest = struct {
         writable_slice_min_len: usize = 128,
         pool_chunks: usize = 4,
         pool_chunk_size: usize = 1 << 20,
-        dma_chunk_size: ?usize = null,
+        transfer_quantum_size: ?usize = null,
     };
 
     allocator: std.mem.Allocator,
@@ -5750,7 +5936,7 @@ const DirectMemoryWriterDeviceTest = struct {
             scenario.writable_slice_min_len,
             scenario.pool_chunks,
             scenario.pool_chunk_size,
-            scenario.dma_chunk_size orelse scenario.pool_chunk_size,
+            scenario.transfer_quantum_size orelse scenario.pool_chunk_size,
         );
     }
 
@@ -5763,7 +5949,7 @@ const DirectMemoryWriterDeviceTest = struct {
         writable_slice_min_len: usize,
         pool_chunks: usize,
         pool_chunk_size: usize,
-        dma_chunk_size: usize,
+        transfer_quantum_size: usize,
     ) !void {
         const slice = try Slice.alloc(self.allocator, shape);
         defer slice.free(self.allocator);
@@ -5795,7 +5981,7 @@ const DirectMemoryWriterDeviceTest = struct {
             platform,
             pools,
             dma_allocators,
-            dma_chunk_size,
+            transfer_quantum_size,
             shape,
             sharding,
             &written_buffer,
@@ -6011,7 +6197,7 @@ test "DirectMemoryWriter: staged window followed by direct read" {
         .strategy = .parseBindings(.{ .x = .link_x }),
         .write_mode = .staged_then_direct,
         .pool_chunk_size = 1024,
-        .dma_chunk_size = 4096,
+        .transfer_quantum_size = 4096,
     });
 }
 

@@ -136,6 +136,7 @@ pub fn main(init: std.process.Init) !void {
     defer compiled_model.deinit();
 
     // Load buffers after the model compilation to be sure to give enough room to the autotune.
+    try platform.warmupDeviceAllocators();
     var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, shardings);
     defer model.unloadBuffers(&model_buffers, allocator);
 

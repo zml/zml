@@ -356,6 +356,29 @@ pub const Platform = struct {
         } else error.Unavailable;
     }
 
+    /// Forces lazy device allocators to materialize their backing pools.
+    ///
+    /// In particular, a preallocated GPU BFC allocator does not reserve its
+    /// fixed arena until its first non-empty allocation. The temporary buffer
+    /// is released immediately; caching allocators retain their initialized
+    /// pools for subsequent allocations. Calling this more than once is safe.
+    pub fn warmupDeviceAllocators(self: *const Platform) !void {
+        const dims: []const i64 = &.{1};
+        const element_type = pjrtx.bufferTypeFromDtype(.u8);
+        const layout = self.defaultMemoryLayout(dims, .u8);
+
+        for (self.devices) |*device| {
+            const memory = device.memory(.default).?;
+            const buffer = try self.pjrt_client.createUninitializedBuffer(self.pjrt_api, .{
+                .dims = dims,
+                .element_type = element_type,
+                .layout = layout,
+                .dst = .{ .memory = memory.pjrt_memory },
+            });
+            buffer.deinit(self.pjrt_api);
+        }
+    }
+
     pub fn formatWithAttributes(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const tee = "├─ ";
         const line = "│  ";
@@ -858,4 +881,11 @@ test "platform defaultMemoryLayout is boring" {
             },
         });
     }
+}
+
+test "platform device allocators can be warmed repeatedly" {
+    const platform = zml.testing.env();
+
+    try platform.warmupDeviceAllocators();
+    try platform.warmupDeviceAllocators();
 }

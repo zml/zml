@@ -45,8 +45,8 @@ const Mnist = struct {
     ) !zml.Bufferized(Mnist) {
         return zml.io.load(Mnist, self, allocator, io, platform, store, .{
             .parallelism = 1,
-            .dma_chunks = 1,
-            .dma_chunk_size = 16 * 1024 * 1024,
+            .max_pinned_buffers_per_device = 1,
+            .transfer_quantum_size = 16 * 1024 * 1024,
         });
     }
 

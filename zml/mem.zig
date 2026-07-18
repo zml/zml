@@ -15,23 +15,14 @@ const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/mem");
 
-pub const DmaBufferPageMode = enum {
-    default,
-    transparent_huge,
-};
-
 pub const DmaAllocator = union(enum) {
     passthrough: std.mem.Allocator,
     uib: UninitializedBufferAllocator,
     dmam: DmaMapAllocator,
 
     pub fn init(parent: std.mem.Allocator, device: *const Device) DmaAllocator {
-        return initWithPageMode(parent, device, .default);
-    }
-
-    pub fn initWithPageMode(parent: std.mem.Allocator, device: *const Device, page_mode: DmaBufferPageMode) DmaAllocator {
         return switch (device.platform.target) {
-            .cuda => .{ .dmam = .initWithPageMode(parent, device.platform, page_mode) },
+            .cuda => .{ .dmam = .init(parent, device.platform) },
             .oneapi, .tpu => .{ .uib = .init(device.memory(.host_pinned).?) },
             .rocm, .cpu, .neuron, .metal => .{ .passthrough = parent },
         };
@@ -128,22 +119,18 @@ pub const UninitializedBufferAllocator = struct {
     }
 };
 
+/// Host allocator for CUDA DMA mappings. Linux allocations request transparent
+/// huge-page backing, but remain valid ordinary-page mappings when unavailable.
 pub const DmaMapAllocator = struct {
     const transparent_huge_page_size = 2 * 1024 * 1024;
 
     parent: std.mem.Allocator,
     platform: *const Platform,
-    page_mode: DmaBufferPageMode,
 
     pub fn init(parent: std.mem.Allocator, platform: *const Platform) DmaMapAllocator {
-        return initWithPageMode(parent, platform, .default);
-    }
-
-    pub fn initWithPageMode(parent: std.mem.Allocator, platform: *const Platform, page_mode: DmaBufferPageMode) DmaMapAllocator {
         return .{
             .parent = parent,
             .platform = platform,
-            .page_mode = page_mode,
         };
     }
 
@@ -199,16 +186,14 @@ pub const DmaMapAllocator = struct {
     }
 
     fn effectiveAlignment(self: *const DmaMapAllocator, alignment: Alignment) Alignment {
-        return switch (self.page_mode) {
-            .default => alignment,
-            .transparent_huge => alignment.max(.fromByteUnits(transparent_huge_page_size)),
-        };
+        _ = self;
+        if (comptime builtin.os.tag != .linux) return alignment;
+        return alignment.max(.fromByteUnits(transparent_huge_page_size));
     }
 
     fn adviseHugePages(self: *const DmaMapAllocator, data: []u8) void {
-        if (self.page_mode != .transparent_huge) return;
+        _ = self;
         if (comptime builtin.os.tag != .linux) {
-            log.warn("transparent huge DMA pages requested on unsupported OS {s}", .{@tagName(builtin.os.tag)});
             return;
         }
 
