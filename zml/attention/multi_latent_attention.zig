@@ -236,7 +236,7 @@ const Triton = struct {
         fn sparseAttentionShard(
             q: zml.Tensor,
             kv_cache: zml.Tensor,
-            sink: zml.Tensor,
+            sink_: ?zml.Tensor,
             topk: zml.Tensor,
             tokens_pos: zml.Tensor,
             parameters: triton_attn.paged.Parameters,
@@ -266,6 +266,8 @@ const Triton = struct {
             const k_strides = kv_cache.shape().computeElementStrides().constSlice();
             const v_strides = kv_cache.shape().computeElementStrides().constSlice();
             const sm_scale = opts.scale orelse 1.0 / std.math.sqrt(@as(f32, @floatFromInt(q_dim)));
+
+            const sink = sink_ orelse zml.Tensor.zeroes(zml.Shape.init(.{ .h = q.dim(.h) }, q.dtype()));
 
             const out = kernel.Kernel.call(.{
                 .query_ptr = q,
@@ -308,7 +310,7 @@ const Triton = struct {
                     .rope_offset = nope_rank,
                     .value_rank = q_dim,
                     .tile_size = @min(topk_final.dim(.topk), 16),
-                    .use_attn_sink = opts.use_sink,
+                    .use_attn_sink = if (sink_) true else false,
                     .all_decode = !parameters.options_.is_prefill,
                 },
                 .grid = .{ @intCast(q.dim(.q) * @divExact(q_heads, block_m)), 1, 1 },
@@ -334,15 +336,6 @@ const Triton = struct {
             stdx.debug.assert(std.math.isPowerOfTwo(@as(usize, @intCast(q.dim(.hd)))), "expected value rank ({}) to be a power of two", .{q.dim(.hd)});
             stdx.debug.assert(kv.dim(.hd) == q.dim(.hd), "expected q and kv cache head dims to match, got q={} kv={}", .{ q.dim(.hd), kv.dim(.hd) });
 
-            const sink_ = sink orelse zml.Tensor.zeroes(zml.Shape.init(.{ .h = q.dim(.h) }, q.dtype())).withPartitioning(.{ .h = .model });
-
-            // TODO: rework
-            const opts_: AttentionOptions = .{
-                .rope_rank = opts.rope_rank,
-                .scale = opts.scale,
-                .use_sink = if (sink) true else false,
-            };
-
             return zml.ops.manualComputation(
                 .{
                     q,
@@ -353,11 +346,11 @@ const Triton = struct {
                     parameters.block_table,
                     parameters.seq_lens,
                     parameters.query_start_len,
-                    sink_,
+                    sink,
                 },
                 q.shape(),
                 .{
-                    .opts = opts_,
+                    .opts = opts,
                     .options = parameters.options_,
                 },
                 (struct {
@@ -387,7 +380,6 @@ const Triton = struct {
 
 pub const AttentionOptions = struct {
     rope_rank: i64,
-    use_sink: bool,
     scale: ?f32 = null,
 };
 
@@ -420,7 +412,7 @@ pub const paged = struct {
     };
 };
 
-fn vanillaSparseAttention(q: zml.Tensor, kv: zml.Tensor, topk: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+fn vanillaSparseAttention(q: zml.Tensor, kv: zml.Tensor, sink: ?zml.Tensor, topk: zml.Tensor, opts: AttentionOptions) zml.Tensor {
     const mask = topk.cmp(.GE, zml.Tensor.zeroes(topk.shape())).insertAxes(.topk, .{.h});
     const selected_kv = kv.gather(.{ .kv = topk }, .{}).rename(.{ .b = .q, .topk = .kv }).convert(.f32);
 
@@ -433,10 +425,10 @@ fn vanillaSparseAttention(q: zml.Tensor, kv: zml.Tensor, topk: zml.Tensor, opts:
     var scores = q_32.dot(selected_kv, .hd).scale(sqrt_head_dim);
     scores = zml.Tensor.select(mask.broad(scores.shape()), scores, zml.Tensor.constant(scores.dtype().minValue()));
 
-    const attn_sink = opts.sink orelse stdx.debug.panic("ragged MLA attention requires an attention sink", .{});
     const sink_shape = q.shape().set(.hd, 1);
-    const sink = attn_sink.insertAxes(0, .{.q}).insertAxes(.last, .{.hd}).broad(sink_shape);
-    const scores_sink = zml.Tensor.concatenate(&.{ scores, sink.convert(scores.dtype()) }, .kv);
+    const attn_sink = sink orelse stdx.debug.panic("ragged MLA attention requires an attention sink", .{});
+    const sink_ = attn_sink.insertAxes(0, .{.q}).insertAxes(.last, .{.hd}).broad(sink_shape);
+    const scores_sink = zml.Tensor.concatenate(&.{ scores, sink_.convert(scores.dtype()) }, .kv);
 
     const attn_weights = scores_sink.softmax(.kv);
     const attn_weights_non_sink = attn_weights.slice(&.{
@@ -470,7 +462,7 @@ pub fn pagedSparseAttention(
         },
         else => {
             const kv_final = kv.merge(.{ .kv = .{ .page, .k_chunk, .hkv } });
-            return vanillaSparseAttention(q, kv_final, topk, opts);
+            return vanillaSparseAttention(q, kv_final, sink, topk, opts);
         },
     };
 }
