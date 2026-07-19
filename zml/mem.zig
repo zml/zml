@@ -1,8 +1,8 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
 const assert = std.debug.assert;
+const builtin = @import("builtin");
 
 const pjrt = @import("pjrt");
 
@@ -22,8 +22,8 @@ pub const DmaAllocator = union(enum) {
 
     pub fn init(parent: std.mem.Allocator, device: *const Device) DmaAllocator {
         return switch (device.platform.target) {
-            .cuda => .{ .dmam = .init(parent, device.platform) },
-            .oneapi, .tpu => .{ .uib = .init(device.memory(.host_pinned).?) },
+            .cuda, .oneapi => .{ .dmam = .init(parent, device.platform) },
+            .tpu => .{ .uib = .init(device.memory(.host_pinned).?) },
             .rocm, .cpu, .neuron, .metal => .{ .passthrough = parent },
         };
     }
