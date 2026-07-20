@@ -30,7 +30,7 @@ pub const Backend = enum {
                 else => error.UnsupportedDataType,
             },
             .metal => switch (weights_dtype) {
-                .bf16, .f16, .f32 => .metal,
+                .bf16, .f16, .f32, .f4e2m1, .u8, .f8e4m3fn => .metal,
                 else => error.UnsupportedDataType,
             },
             else => error.UnimplementedMoEBackend,
@@ -159,6 +159,8 @@ pub fn forwardMoe(
     weights_down: zml.Tensor,
     scales_down: ?zml.Tensor,
     bias_down: ?zml.Tensor,
+    w1_global_scale: ?zml.Tensor,
+    w2_global_scale: ?zml.Tensor,
     metadata: Metadata,
     parameters: Parameters,
 ) !zml.Tensor {
@@ -334,6 +336,8 @@ pub fn forwardMoe(
                     .global_num_experts = weights_gate_up.dim(.expert),
                     .w1_scale = scales_gate_up,
                     .w2_scale = scales_down,
+                    .w1_global_scale = w1_global_scale,
+                    .w2_global_scale = w2_global_scale,
                     .w1_bias = bias_gate_up,
                     .w2_bias = bias_down,
                 },
