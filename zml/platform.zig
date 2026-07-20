@@ -658,13 +658,29 @@ pub const CreateOptions = struct {
     tpu: struct {} = .{},
     neuron: struct {} = .{},
     oneapi: struct {} = .{},
-    metal: struct {} = .{},
+    metal: Metal = .{},
 
     pub const Cpu = struct {
         device_count: u32,
 
         fn writeNamedValues(self: Cpu, values: *std.ArrayList(pjrt.NamedValue)) void {
             values.appendAssumeCapacity(.init(.int64, "cpu_device_count", self.device_count));
+        }
+    };
+
+    /// Metal goes through the same XLA GPU plugin as CUDA and ROCm, but it is
+    /// not a discrete GPU: its memory is the machine's memory, so preallocation
+    /// is off by default.
+    pub const Metal = struct {
+        preallocate: bool = false,
+        memory_fraction: f32 = 0.90,
+
+        fn writeNamedValues(self: Metal, values: *std.ArrayList(pjrt.NamedValue)) void {
+            values.appendAssumeCapacity(.init(.string, "allocator", "bfc"));
+            values.appendAssumeCapacity(.init(.bool, "preallocate", self.preallocate));
+            if (self.memory_fraction > 0) {
+                values.appendAssumeCapacity(.init(.float, "memory_fraction", self.memory_fraction));
+            }
         }
     };
 
@@ -727,7 +743,8 @@ pub const CreateOptions = struct {
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
-            .cuda, .rocm, .oneapi, .metal => self.xla_gpu.writeNamedValues(target, &values),
+            .cuda, .rocm, .oneapi => self.xla_gpu.writeNamedValues(target, &values),
+            .metal => self.metal.writeNamedValues(&values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
