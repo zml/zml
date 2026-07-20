@@ -100,6 +100,8 @@ pub const CompilationContext = struct {
 
     channel_id: i64 = 0,
 
+    composite_id: i64 = 0,
+
     threadlocal var _current: ?*CompilationContext = null;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: CompilationOptions) CompilationContext {
@@ -188,6 +190,11 @@ pub const CompilationContext = struct {
     pub fn nextChannelId(self: *CompilationContext) i64 {
         self.channel_id += 1;
         return self.channel_id;
+    }
+
+    pub fn nextCompositeId(self: *CompilationContext) i64 {
+        self.composite_id += 1;
+        return self.composite_id;
     }
 };
 

@@ -1514,6 +1514,101 @@ pub fn customCallOutputOperandAliases(
     return &output_operand_aliases;
 }
 
+pub const CompositeOpts = struct {
+    version: i32 = 0,
+    composite_attributes: []const mlir.NamedAttribute = &.{},
+};
+
+/// Emits `stablehlo.composite` with a private decomposition `func.func`.
+pub fn composite(
+    name: [:0]const u8,
+    inputs: []const Tensor,
+    outputs: []const Shape,
+    comptime decomposition: anytype,
+    context: anytype,
+    opts: CompositeOpts,
+) []Tensor {
+    const ctx = CompilationContext.current();
+    const mlir_ctx = ctx.mlir_ctx;
+    const allocator = ctx.arena.allocator();
+
+    const decomp_name = std.fmt.allocPrint(allocator, "{s}.impl_{d}", .{ name, ctx.nextCompositeId() }) catch @panic("OOM");
+
+    {
+        const block_types = allocator.alloc(*const mlir.Type, inputs.len) catch @panic("OOM");
+        const block_locs = allocator.alloc(*const mlir.Location, inputs.len) catch @panic("OOM");
+
+        for (inputs, 0..) |t, i| {
+            block_types[i] = mlirx.Type.rankedTensor(mlir_ctx, t.shape());
+            block_locs[i] = mlir.Location.unknown(mlir_ctx);
+        }
+
+        const block = mlir.Block.init(block_types, block_locs);
+
+        ctx.pushBlock(block);
+        {
+            const arg_tensors = allocator.alloc(Tensor, inputs.len) catch @panic("OOM");
+            for (inputs, 0..) |t, i| {
+                arg_tensors[i] = Tensor._result(t.shape(), block.argument(i));
+            }
+
+            var result = @call(.auto, decomposition, .{ arg_tensors, context });
+            const rtensors = allocator.alloc(Tensor, outputs.len) catch @panic("OOM");
+            meta.collectBuf((struct {
+                pub fn func(t: Tensor) Tensor {
+                    return t;
+                }
+            }).func, {}, &result, rtensors);
+
+            const rvals = allocator.alloc(*const mlir.Value, outputs.len) catch @panic("OOM");
+            for (rtensors, 0..) |t, i| {
+                rvals[i] = t.value();
+            }
+
+            _ = dialects.func.returns(mlir_ctx, rvals, .unknown(mlir_ctx)).appendTo(block);
+        }
+        ctx.popBlock();
+
+        _ = dialects.func.func(mlir_ctx, .{
+            .name = decomp_name,
+            .block = block,
+            .location = .unknown(mlir_ctx),
+            .visibility = .private,
+            .verify = false,
+        }).appendTo(ctx.module.body());
+    }
+
+    const operand_values = allocator.alloc(*const mlir.Value, inputs.len) catch @panic("OOM");
+    for (inputs, 0..) |t, i| {
+        operand_values[i] = t.value();
+    }
+
+    const result_types = allocator.alloc(*const mlir.Type, outputs.len) catch @panic("OOM");
+    for (outputs, 0..) |s, i| {
+        result_types[i] = mlirx.Type.rankedTensor(mlir_ctx, s);
+    }
+
+    const op = mlir.Operation.make(mlir_ctx, "stablehlo.composite", .{
+        .operands = .{ .flat = operand_values },
+        .results = .{ .flat = result_types },
+        .attributes = &.{
+            .named(mlir_ctx, "name", .string(mlir_ctx, name)),
+            .named(mlir_ctx, "decomposition", .flatSymbolRef(mlir_ctx, decomp_name)),
+            .named(mlir_ctx, "composite_attributes", .dict(mlir_ctx, opts.composite_attributes)),
+            .named(mlir_ctx, "version", .int(mlir_ctx, .i32, opts.version)),
+        },
+        .verify = false,
+        .location = .unknown(mlir_ctx),
+    }).appendTo(ctx.currentScope().block);
+
+    const out_tensors = allocator.alloc(Tensor, outputs.len) catch @panic("OOM");
+    for (outputs, 0..) |s, i| {
+        out_tensors[i] = Tensor._result(s, op.result(i));
+    }
+
+    return out_tensors;
+}
+
 pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, metadata: anytype, opts: CustomCallOptions) CustomCallResultTypeFromOutputSpec(@TypeOf(outputs)) {
     // Transform generic inputs to flat slice.
     const inputs_: []const Tensor = switch (@typeInfo(@TypeOf(inputs))) {
