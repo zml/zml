@@ -64,9 +64,12 @@ pub fn fetchRegistry(
 }
 
 pub const TensorReader = struct {
+    const max_positional_iovecs: usize = if (@TypeOf(std.posix.IOV_MAX) == void) 64 else std.posix.IOV_MAX;
+
     tensor: Tensor,
     file: std.Io.File,
     file_reader: std.Io.File.Reader,
+    owns_file: bool,
     alignment: ?std.mem.Alignment,
     remaining: u64,
     padding_remaining: u64,
@@ -106,6 +109,7 @@ pub const TensorReader = struct {
             .tensor = tensor,
             .file = file,
             .file_reader = file_reader,
+            .owns_file = true,
             .alignment = opts.alignment,
             .remaining = tensor.byteSize(),
             .padding_remaining = padding_remaining,
@@ -129,8 +133,34 @@ pub const TensorReader = struct {
         };
     }
 
+    /// Creates a positional-only reader over a file owned by the caller.
+    /// Concurrent readers may borrow the same file because positional reads do
+    /// not use or mutate its streaming position.
+    pub fn initBorrowedPositional(io: std.Io, tensor: Tensor, file: std.Io.File) TensorReader {
+        const file_reader = file.reader(io, &.{});
+        return .{
+            .tensor = tensor,
+            .file = file,
+            .file_reader = file_reader,
+            .owns_file = false,
+            .alignment = null,
+            .remaining = tensor.byteSize(),
+            .padding_remaining = 0,
+            .io = io,
+            .interface = .{
+                .vtable = &.{
+                    .stream = stream,
+                    .discard = discard,
+                },
+                .buffer = &.{},
+                .seek = 0,
+                .end = 0,
+            },
+        };
+    }
+
     pub fn deinit(self: *TensorReader) void {
-        self.file.close(self.io);
+        if (self.owns_file) self.file.close(self.io);
     }
 
     /// Reads an exact tensor-relative range without changing the sequential
@@ -140,18 +170,82 @@ pub const TensorReader = struct {
         buffer: []u8,
         tensor_offset: u64,
     ) ReadPositionalError!void {
-        const read_size = std.math.cast(u64, buffer.len) orelse return error.OutOfBounds;
+        return self.readPositionalAllV(&.{buffer}, tensor_offset);
+    }
+
+    /// Reads an exact tensor-relative range into a scatter list without
+    /// changing the sequential reader position. Multiple calls may run
+    /// concurrently on the same file.
+    pub fn readPositionalAllV(
+        self: *const TensorReader,
+        buffers: []const []u8,
+        tensor_offset: u64,
+    ) ReadPositionalError!void {
+        var read_size: u64 = 0;
+        for (buffers) |buffer| {
+            const len = std.math.cast(u64, buffer.len) orelse return error.OutOfBounds;
+            read_size = std.math.add(u64, read_size, len) catch return error.OutOfBounds;
+        }
         const tensor_size = self.tensor.byteSize();
         if (tensor_offset > tensor_size or read_size > tensor_size - tensor_offset) {
             return error.OutOfBounds;
         }
-        if (buffer.len == 0) return;
+        if (read_size == 0) return;
 
         const file_offset = std.math.add(u64, self.tensor.offset, tensor_offset) catch {
             return error.OutOfBounds;
         };
-        const bytes_read = try self.file.readPositionalAll(self.io, buffer, file_offset);
-        if (bytes_read != buffer.len) return error.UnexpectedEndOfFile;
+        _ = std.math.add(u64, file_offset, read_size) catch return error.OutOfBounds;
+
+        // Linux preadv(2) accepts at most IOV_MAX entries. Keep the public API
+        // backend-neutral and issue another exact positional read when a
+        // scatter list is larger or a backend completes only a prefix.
+        var batch: [max_positional_iovecs][]u8 = undefined;
+        var buffer_index: usize = 0;
+        var buffer_offset: usize = 0;
+        var completed: u64 = 0;
+        while (completed < read_size) {
+            var batch_len: usize = 0;
+            var scan_index = buffer_index;
+            var scan_offset = buffer_offset;
+            while (scan_index < buffers.len and batch_len < batch.len) : (scan_index += 1) {
+                const buffer = buffers[scan_index];
+                if (scan_offset >= buffer.len) {
+                    scan_offset = 0;
+                    continue;
+                }
+                batch[batch_len] = buffer[scan_offset..];
+                batch_len += 1;
+                scan_offset = 0;
+            }
+            if (batch_len == 0) return error.UnexpectedEndOfFile;
+
+            const absolute_offset = std.math.add(u64, file_offset, completed) catch return error.OutOfBounds;
+            const bytes_read = try self.file.readPositional(self.io, batch[0..batch_len], absolute_offset);
+            if (bytes_read == 0) return error.UnexpectedEndOfFile;
+            completed += @intCast(bytes_read);
+
+            try advanceScatter(buffers, &buffer_index, &buffer_offset, bytes_read);
+        }
+    }
+
+    fn advanceScatter(buffers: []const []u8, buffer_index: *usize, buffer_offset: *usize, bytes: usize) error{UnexpectedEndOfFile}!void {
+        var remaining = bytes;
+        while (remaining > 0) {
+            while (buffer_index.* < buffers.len and buffer_offset.* == buffers[buffer_index.*].len) {
+                buffer_index.* += 1;
+                buffer_offset.* = 0;
+            }
+            if (buffer_index.* >= buffers.len) return error.UnexpectedEndOfFile;
+            const available = buffers[buffer_index.*].len - buffer_offset.*;
+            if (remaining < available) {
+                buffer_offset.* += remaining;
+                return;
+            }
+            remaining -= available;
+            buffer_index.* += 1;
+            buffer_offset.* = 0;
+        }
     }
 
     // Limit single reads to 1GB to avoid issues on macOS where pread returns
@@ -276,16 +370,111 @@ test "TensorReader positional reads are tensor-relative and preserve stream posi
     try reader.readPositionalAll(&positional, 3);
     try std.testing.expectEqualStrings("3456", &positional);
 
+    var first: [2]u8 = undefined;
+    var middle: [3]u8 = undefined;
+    var last: [1]u8 = undefined;
+    try reader.readPositionalAllV(&.{ &first, &middle, &last }, 2);
+    try std.testing.expectEqualStrings("23", &first);
+    try std.testing.expectEqualStrings("456", &middle);
+    try std.testing.expectEqualStrings("7", &last);
+
     var sequential: [4]u8 = undefined;
     try reader.interface.readSliceAll(&sequential);
     try std.testing.expectEqualStrings("0123", &sequential);
 
     var empty: [0]u8 = .{};
     try reader.readPositionalAll(&empty, 10);
+    try reader.readPositionalAllV(&.{}, 10);
     try std.testing.expectError(error.OutOfBounds, reader.readPositionalAll(&empty, 11));
+    try std.testing.expectError(error.OutOfBounds, reader.readPositionalAllV(&.{}, 11));
 
     var too_large: [2]u8 = undefined;
     try std.testing.expectError(error.OutOfBounds, reader.readPositionalAll(&too_large, 9));
+
+    reader.tensor.offset = std.math.maxInt(u64);
+    var overflow: [1]u8 = undefined;
+    try std.testing.expectError(error.OutOfBounds, reader.readPositionalAll(&overflow, 0));
+    try std.testing.expectError(error.OutOfBounds, reader.readPositionalAll(&overflow, 1));
+}
+
+test "TensorReader borrowed positional readers share and do not close their file" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile(io, "shared.bin", .{ .read = true });
+    defer file.close(io);
+    try file.writePositionalAll(io, "prefix0123456789", 0);
+
+    const tensor: Tensor = .{
+        .file_uri = "unused",
+        .name = "tensor",
+        .shape = .init(.{10}, .u8),
+        .offset = "prefix".len,
+    };
+    var first = TensorReader.initBorrowedPositional(io, tensor, file);
+    var second = TensorReader.initBorrowedPositional(io, tensor, file);
+
+    var left: [3]u8 = undefined;
+    var right: [3]u8 = undefined;
+    try first.readPositionalAll(&left, 1);
+    try second.readPositionalAll(&right, 6);
+    try std.testing.expectEqualStrings("123", &left);
+    try std.testing.expectEqualStrings("678", &right);
+    first.deinit();
+    second.deinit();
+
+    var still_open: [2]u8 = undefined;
+    _ = try file.readPositionalAll(io, &still_open, "prefix".len + 4);
+    try std.testing.expectEqualStrings("45", &still_open);
+}
+
+test "TensorReader positional scatter reads batch more than IOV_MAX buffers" {
+    const io = std.testing.io;
+    const len = TensorReader.max_positional_iovecs + 1;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile(io, "tensor.bin", .{ .read = true });
+    var contents: [len]u8 = undefined;
+    for (&contents, 0..) |*byte, i| byte.* = @truncate(i);
+    try file.writePositionalAll(io, &contents, 0);
+
+    var path_buffer: [1024]u8 = undefined;
+    const path_len = try file.realPath(io, &path_buffer);
+    file.close(io);
+
+    var reader = try TensorReader.init(io, .{
+        .file_uri = path_buffer[0..path_len],
+        .name = "tensor",
+        .shape = .init(.{len}, .u8),
+        .offset = 0,
+    }, &.{}, .{});
+    defer reader.deinit();
+
+    var output: [len]u8 = undefined;
+    var buffers: [len][]u8 = undefined;
+    for (&buffers, 0..) |*buffer, i| buffer.* = output[i..][0..1];
+    try reader.readPositionalAllV(&buffers, 0);
+    try std.testing.expectEqualSlices(u8, &contents, &output);
+}
+
+test "TensorReader positional scatter resumes partial reads across boundaries" {
+    var storage: [6]u8 = undefined;
+    const buffers = [_][]u8{ storage[0..2], storage[2..2], storage[2..5], storage[5..6] };
+    var index: usize = 0;
+    var offset: usize = 0;
+    try TensorReader.advanceScatter(&buffers, &index, &offset, 1);
+    try std.testing.expectEqual(@as(usize, 0), index);
+    try std.testing.expectEqual(@as(usize, 1), offset);
+    try TensorReader.advanceScatter(&buffers, &index, &offset, 2);
+    try std.testing.expectEqual(@as(usize, 2), index);
+    try std.testing.expectEqual(@as(usize, 1), offset);
+    try TensorReader.advanceScatter(&buffers, &index, &offset, 3);
+    try std.testing.expectEqual(@as(usize, 4), index);
+    try std.testing.expectEqual(@as(usize, 0), offset);
+    try std.testing.expectError(error.UnexpectedEndOfFile, TensorReader.advanceScatter(&buffers, &index, &offset, 1));
 }
 
 test "TensorReader positional reads report a truncated backing file" {

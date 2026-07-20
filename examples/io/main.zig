@@ -215,27 +215,17 @@ pub fn main(init: std.process.Init) !void {
                 log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
             }
 
-            const load_parallelism = try envUsize(init.environ_map, "ZML_LOAD_PARALLELISM", 32);
-            const load_initial_parallelism = try envUsize(init.environ_map, "ZML_LOAD_INITIAL_PARALLELISM", 8);
-            const load_adaptive = try envUsize(init.environ_map, "ZML_LOAD_ADAPTIVE", 1);
-            const load_max_read_parallelism = try envOptionalUsize(init.environ_map, "ZML_LOAD_MAX_READ_PARALLELISM");
-            const load_max_pinned_buffers_per_device = try envUsize(init.environ_map, "ZML_LOAD_MAX_PINNED_BUFFERS_PER_DEVICE", 33);
-            const load_transfer_quantum_mib = try envUsize(init.environ_map, "ZML_LOAD_TRANSFER_QUANTUM_MIB", 256);
-            const load_pinned_buffer_mib = try envOptionalUsize(init.environ_map, "ZML_LOAD_PINNED_BUFFER_MIB");
-            const load_read_chunk_mib = try envUsize(init.environ_map, "ZML_LOAD_READ_CHUNK_MIB", 32);
-            const load_max_staging_mib = try envUsize(init.environ_map, "ZML_LOAD_MAX_STAGING_MIB", 1024);
+            const load_read_parallelism = try envUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM", 12);
+            const load_read_request_mib = try envUsize(init.environ_map, "ZML_LOAD_READ_REQUEST_MIB", 2);
+            const load_dma_block_mib = try envUsize(init.environ_map, "ZML_LOAD_DMA_BLOCK_MIB", 2);
+            const load_max_pinned_mib = try envUsize(init.environ_map, "ZML_LOAD_MAX_PINNED_MIB", 128);
 
             _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, &store, .{
                 .shardings = &.{sharded_sharding},
-                .parallelism = load_parallelism,
-                .initial_parallelism = load_initial_parallelism,
-                .adaptive_parallelism = load_adaptive != 0,
-                .max_read_parallelism = load_max_read_parallelism,
-                .read_chunk_size = load_read_chunk_mib * zml.MiB,
-                .max_staging_bytes = load_max_staging_mib * zml.MiB,
-                .max_pinned_buffers_per_device = load_max_pinned_buffers_per_device,
-                .pinned_buffer_size = if (load_pinned_buffer_mib) |size| size * zml.MiB else null,
-                .transfer_quantum_size = load_transfer_quantum_mib * zml.MiB,
+                .read_parallelism = load_read_parallelism,
+                .read_request_size = load_read_request_mib * zml.MiB,
+                .dma_block_size = load_dma_block_mib * zml.MiB,
+                .max_pinned_bytes = load_max_pinned_mib * zml.MiB,
                 .progress = &progress,
                 .total_bytes = &total_bytes,
             });
@@ -246,11 +236,6 @@ pub fn main(init: std.process.Init) !void {
 fn envUsize(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {
     const value = environ_map.get(name) orelse return default;
     return std.fmt.parseInt(usize, value, 10);
-}
-
-fn envOptionalUsize(environ_map: *const std.process.Environ.Map, name: []const u8) !?usize {
-    const value = environ_map.get(name) orelse return null;
-    return try std.fmt.parseInt(usize, value, 10);
 }
 
 const TreeCounts = struct {

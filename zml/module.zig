@@ -663,7 +663,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // More efficient for the allgather/broadcast implementation of the collective permute.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_collective_permute_connected_components", true, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_autotune_level", 0, upb_arena);
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "", upb_arena);
+                // try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "", upb_arena);
 
                 // Not supported by OneAPI
                 try setXlaOverrideFlag(overrides_map, "xla_disable_hlo_passes", "scan-rewriter", upb_arena);

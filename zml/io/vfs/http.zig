@@ -3,6 +3,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const VFSBase = @import("base.zig").VFSBase;
+const parallel_read = @import("parallel_read.zig");
 
 const log = std.log.scoped(.@"zml/io/vfs/http");
 
@@ -351,17 +352,12 @@ pub const HTTP = struct {
     }
 
     fn performRead(self: *HTTP, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        if (offset >= handle.size) return 0;
+        const read_size = parallel_read.readSize(handle.size, offset, data);
+        if (read_size == 0) return 0;
 
         var range_buf: [64]u8 = undefined;
         const range_header = blk: {
-            var total_bytes: u64 = 0;
-            for (data) |buf| {
-                total_bytes += @as(u64, buf.len);
-            }
-            const remaining = handle.size - offset;
-            const take = @min(remaining, total_bytes);
-            const end = offset + take - 1;
+            const end = offset + read_size - 1;
             break :blk std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ offset, end }) catch unreachable;
         };
 
@@ -390,38 +386,61 @@ pub const HTTP = struct {
             var it = res.head.iterateHeaders();
             while (it.next()) |header| {
                 if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                    break :blk parseContentRange(header.value);
+                    break :blk parallel_read.parseContentRange(header.value);
                 }
             }
             break :blk null;
         };
 
-        const reader = res.reader(&.{});
-
-        if (content_range) |cr| {
-            if (cr.start < offset) {
-                try reader.discardAll(offset - cr.start);
-            }
-        }
-
-        return try reader.readSliceShort(data[0]);
+        try readResponse(res.reader(&.{}), res.head.status, content_range, offset, data, read_size);
+        return read_size;
     }
 
-    const ContentRange = struct {
-        start: u64,
-        end: u64,
-        total: u64,
-    };
+    fn readResponse(
+        reader: *std.Io.Reader,
+        status: std.http.Status,
+        content_range: ?parallel_read.ContentRange,
+        offset: u64,
+        data: []const []u8,
+        read_size: usize,
+    ) !void {
+        if (read_size == 0) return;
+        if (content_range) |cr| {
+            if (cr.end < cr.start or cr.start > offset) return error.InvalidContentRange;
+            const response_end = std.math.add(u64, offset, read_size - 1) catch return error.InvalidContentRange;
+            if (cr.end < response_end) return error.InvalidContentRange;
+            return parallel_read.readChunk(reader, cr, offset, data, 0, read_size);
+        }
+        if (status != .ok) return error.InvalidContentRange;
 
-    fn parseContentRange(value: []const u8) ?ContentRange {
-        const space = std.mem.indexOfScalar(u8, value, ' ') orelse return null;
-        const dash = std.mem.indexOfScalar(u8, value, '-') orelse return null;
-        const slash = std.mem.indexOfScalar(u8, value, '/') orelse return null;
-
-        return .{
-            .start = std.fmt.parseInt(u64, value[space + 1 .. dash], 10) catch return null,
-            .end = std.fmt.parseInt(u64, value[dash + 1 .. slash], 10) catch return null,
-            .total = std.fmt.parseInt(u64, value[slash + 1 ..], 10) catch return null,
-        };
+        // A 200 response ignored the Range header and starts at byte zero.
+        if (offset > 0) try reader.discardAll(offset);
+        return parallel_read.readChunk(reader, null, offset, data, 0, read_size);
     }
 };
+
+test "HTTP range responses fill scatter buffers" {
+    var reader: std.Io.Reader = .fixed("23456789");
+    var first: [2]u8 = undefined;
+    var second: [3]u8 = undefined;
+    try HTTP.readResponse(&reader, .partial_content, .{ .start = 2, .end = 9, .total = 10 }, 3, &.{ &first, &second }, 5);
+    try std.testing.expectEqualStrings("34", &first);
+    try std.testing.expectEqualStrings("567", &second);
+}
+
+test "HTTP 200 responses that ignore Range are positioned and scattered" {
+    var reader: std.Io.Reader = .fixed("0123456789");
+    var first: [1]u8 = undefined;
+    var second: [4]u8 = undefined;
+    try HTTP.readResponse(&reader, .ok, null, 3, &.{ &first, &second }, 5);
+    try std.testing.expectEqualStrings("3", &first);
+    try std.testing.expectEqualStrings("4567", &second);
+}
+
+test "HTTP partial responses require a covering Content-Range" {
+    var reader: std.Io.Reader = .fixed("3456");
+    var output: [4]u8 = undefined;
+    try std.testing.expectError(error.InvalidContentRange, HTTP.readResponse(&reader, .partial_content, null, 3, &.{&output}, 4));
+    try std.testing.expectError(error.InvalidContentRange, HTTP.readResponse(&reader, .partial_content, .{ .start = 4, .end = 7, .total = 10 }, 3, &.{&output}, 4));
+    try std.testing.expectError(error.InvalidContentRange, HTTP.readResponse(&reader, .partial_content, .{ .start = 3, .end = 5, .total = 10 }, 3, &.{&output}, 4));
+}

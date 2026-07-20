@@ -209,6 +209,198 @@ pub const DmaMapAllocator = struct {
     }
 };
 
+/// A client-wide pool of fixed-size DMA blocks carved from lazily registered
+/// slabs. A request leases all of its blocks atomically, so concurrent readers
+/// cannot each hold a partial reservation while waiting for the rest.
+pub const DmaBlockPool = struct {
+    pub const Error = std.mem.Allocator.Error || error{
+        Closed,
+        RequestExceedsCapacity,
+    };
+
+    const default_slab_size = 64 * 1024 * 1024;
+
+    pub const Lease = struct {
+        pool: *DmaBlockPool,
+        io: std.Io,
+        data: []u8,
+        remaining: std.atomic.Value(usize),
+
+        pub fn init(pool: *DmaBlockPool, io: std.Io, data: []u8, references: usize) Lease {
+            std.debug.assert(references > 0);
+            return .{
+                .pool = pool,
+                .io = io,
+                .data = data,
+                .remaining = .init(references),
+            };
+        }
+
+        pub fn complete(self: *Lease) void {
+            const previous = self.remaining.fetchSub(1, .acq_rel);
+            std.debug.assert(previous > 0);
+            if (previous == 1) self.pool.release(self.io, self.data);
+        }
+
+        pub fn isComplete(self: *const Lease) bool {
+            return self.remaining.load(.acquire) == 0;
+        }
+    };
+
+    const SlabSource = union(enum) {
+        dma: DmaAllocator,
+        testing: std.mem.Allocator,
+
+        fn allocator(self: *const SlabSource) std.mem.Allocator {
+            return switch (self.*) {
+                .dma => |*dma| dma.allocator(),
+                .testing => |allocator_| allocator_,
+            };
+        }
+    };
+
+    allocator: std.mem.Allocator,
+    slab_source: SlabSource,
+    block_size: usize,
+    max_blocks: usize,
+    slab_blocks: usize,
+    slabs: std.ArrayListUnmanaged([]u8) = .empty,
+    free_blocks: std.ArrayListUnmanaged([]u8) = .empty,
+    allocated_blocks: usize = 0,
+    in_use: usize = 0,
+    high_water: usize = 0,
+    closed: bool = false,
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        platform: *const Platform,
+        block_size: usize,
+        max_bytes: usize,
+    ) !DmaBlockPool {
+        if (platform.devices.len == 0) return error.RequestExceedsCapacity;
+        return initWithSlabSource(
+            allocator,
+            .{ .dma = .init(allocator, &platform.devices[0]) },
+            block_size,
+            max_bytes,
+        );
+    }
+
+    fn initForTest(
+        allocator: std.mem.Allocator,
+        slab_allocator: std.mem.Allocator,
+        block_size: usize,
+        max_bytes: usize,
+    ) !DmaBlockPool {
+        return initWithSlabSource(allocator, .{ .testing = slab_allocator }, block_size, max_bytes);
+    }
+
+    fn initWithSlabSource(
+        allocator: std.mem.Allocator,
+        slab_source: SlabSource,
+        block_size: usize,
+        max_bytes: usize,
+    ) !DmaBlockPool {
+        if (block_size == 0 or max_bytes < block_size) return error.RequestExceedsCapacity;
+        const max_blocks = max_bytes / block_size;
+        const requested_slab_blocks = @max(@as(usize, 1), default_slab_size / block_size);
+        const slab_blocks = @min(max_blocks, requested_slab_blocks);
+        var self: DmaBlockPool = .{
+            .allocator = allocator,
+            .slab_source = slab_source,
+            .block_size = block_size,
+            .max_blocks = max_blocks,
+            .slab_blocks = slab_blocks,
+        };
+        errdefer self.deinit();
+        try self.free_blocks.ensureTotalCapacityPrecise(allocator, max_blocks);
+        try self.slabs.ensureTotalCapacityPrecise(allocator, std.math.divCeil(usize, max_blocks, slab_blocks) catch unreachable);
+        return self;
+    }
+
+    pub fn deinit(self: *DmaBlockPool) void {
+        std.debug.assert(self.in_use == 0);
+        const slab_allocator = self.slab_source.allocator();
+        for (self.slabs.items) |slab| slab_allocator.rawFree(slab, .of(u8), @returnAddress());
+        self.slabs.deinit(self.allocator);
+        self.free_blocks.deinit(self.allocator);
+        self.* = undefined;
+    }
+
+    pub fn acquireMany(self: *DmaBlockPool, io: std.Io, output: [][]u8) Error!u64 {
+        if (output.len == 0) return 0;
+        if (output.len > self.max_blocks) return error.RequestExceedsCapacity;
+
+        const started: std.Io.Timestamp = .now(io, .awake);
+        var waited_for_blocks = false;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+
+        while (true) {
+            if (self.closed) return error.Closed;
+            while (self.free_blocks.items.len < output.len and self.allocated_blocks < self.max_blocks) {
+                try self.allocateSlab();
+            }
+            if (self.free_blocks.items.len >= output.len) break;
+            waited_for_blocks = true;
+            self.condition.waitUncancelable(io, &self.mutex);
+        }
+
+        for (output) |*block| block.* = self.free_blocks.pop().?;
+        self.in_use += output.len;
+        self.high_water = @max(self.high_water, self.in_use);
+        if (!waited_for_blocks) return 0;
+        const waited = started.untilNow(io, .awake);
+        return @intCast(@max(waited.nanoseconds, 0));
+    }
+
+    pub fn releaseMany(self: *DmaBlockPool, io: std.Io, blocks: []const []u8) void {
+        if (blocks.len == 0) return;
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        std.debug.assert(blocks.len <= self.in_use);
+        for (blocks) |block| self.free_blocks.appendAssumeCapacity(block);
+        self.in_use -= blocks.len;
+        self.condition.broadcast(io);
+    }
+
+    pub fn release(self: *DmaBlockPool, io: std.Io, block: []u8) void {
+        self.releaseMany(io, &.{block});
+    }
+
+    pub fn close(self: *DmaBlockPool, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.closed = true;
+        self.condition.broadcast(io);
+    }
+
+    pub fn highWaterBytes(self: *const DmaBlockPool) usize {
+        return self.high_water * self.block_size;
+    }
+
+    pub fn mappedBytes(self: *const DmaBlockPool) usize {
+        return self.allocated_blocks * self.block_size;
+    }
+
+    fn allocateSlab(self: *DmaBlockPool) std.mem.Allocator.Error!void {
+        const block_count = @min(self.slab_blocks, self.max_blocks - self.allocated_blocks);
+        std.debug.assert(block_count > 0);
+        const slab_allocator = self.slab_source.allocator();
+        const slab_len = block_count * self.block_size;
+        const slab_ptr = slab_allocator.rawAlloc(slab_len, .of(u8), @returnAddress()) orelse return error.OutOfMemory;
+        const slab = slab_ptr[0..slab_len];
+        errdefer slab_allocator.rawFree(slab, .of(u8), @returnAddress());
+        self.slabs.appendAssumeCapacity(slab);
+        for (0..block_count) |i| {
+            self.free_blocks.appendAssumeCapacity(slab[i * self.block_size ..][0..self.block_size]);
+        }
+        self.allocated_blocks += block_count;
+    }
+};
+
 pub const FixedBufferPool = struct {
     buffer: []u8,
     block_size: usize,
@@ -252,6 +444,97 @@ pub const FixedBufferPool = struct {
         self.q.putOneUncancelable(io, @intCast(idx)) catch unreachable;
     }
 };
+
+test "DmaBlockPool acquires request blocks atomically" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var pool = try DmaBlockPool.initForTest(allocator, allocator, 64, 4 * 64);
+    defer pool.deinit();
+
+    var first: [3][]u8 = undefined;
+    _ = try pool.acquireMany(io, &first);
+    try std.testing.expectEqual(@as(usize, 3 * 64), pool.highWaterBytes());
+    try std.testing.expectEqual(@as(usize, 4 * 64), pool.mappedBytes());
+    var oversized: [5][]u8 = undefined;
+    try std.testing.expectError(error.RequestExceedsCapacity, pool.acquireMany(io, &oversized));
+
+    var started: std.Io.Event = .unset;
+    var acquired: std.Io.Event = .unset;
+    var group: std.Io.Group = .init;
+    try group.concurrent(io, struct {
+        fn run(pool_: *DmaBlockPool, io_: std.Io, started_: *std.Io.Event, acquired_: *std.Io.Event) void {
+            var blocks: [2][]u8 = undefined;
+            started_.set(io_);
+            _ = pool_.acquireMany(io_, &blocks) catch unreachable;
+            acquired_.set(io_);
+            pool_.releaseMany(io_, &blocks);
+        }
+    }.run, .{ &pool, io, &started, &acquired });
+    try started.wait(io);
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expect(!acquired.isSet());
+
+    pool.releaseMany(io, &first);
+    try group.await(io);
+    try std.testing.expect(acquired.isSet());
+}
+
+test "DmaBlockPool close wakes blocked bulk acquisitions" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var pool = try DmaBlockPool.initForTest(allocator, allocator, 64, 2 * 64);
+    defer pool.deinit();
+
+    var held: [2][]u8 = undefined;
+    _ = try pool.acquireMany(io, &held);
+    var started: std.Io.Event = .unset;
+    var result: std.atomic.Value(u16) = .init(0);
+    var group: std.Io.Group = .init;
+    try group.concurrent(io, struct {
+        fn run(pool_: *DmaBlockPool, io_: std.Io, started_: *std.Io.Event, result_: *std.atomic.Value(u16)) void {
+            var block: [1][]u8 = undefined;
+            started_.set(io_);
+            _ = pool_.acquireMany(io_, &block) catch |err| {
+                result_.store(@intFromError(err), .release);
+                return;
+            };
+            pool_.releaseMany(io_, &block);
+        }
+    }.run, .{ &pool, io, &started, &result });
+    try started.wait(io);
+    try io.sleep(.fromMilliseconds(5), .awake);
+    pool.close(io);
+    try group.await(io);
+    pool.releaseMany(io, &held);
+    try std.testing.expectEqual(@intFromError(error.Closed), result.load(.acquire));
+}
+
+test "DmaBlockPool lease returns a replicated block after out-of-order callbacks" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var pool = try DmaBlockPool.initForTest(allocator, allocator, 64, 64);
+    defer pool.deinit();
+
+    var blocks: [1][]u8 = undefined;
+    _ = try pool.acquireMany(io, &blocks);
+    var lease: DmaBlockPool.Lease = .init(&pool, io, blocks[0], 4);
+    var group: std.Io.Group = .init;
+    for ([_]i64{ 4, 1, 3, 2 }) |delay_ms| {
+        try group.concurrent(io, struct {
+            fn run(lease_: *DmaBlockPool.Lease, io_: std.Io, delay_ms_: i64) void {
+                io_.sleep(.fromMilliseconds(delay_ms_), .awake) catch unreachable;
+                lease_.complete();
+            }
+        }.run, .{ &lease, io, delay_ms });
+    }
+    try group.await(io);
+    try std.testing.expect(lease.isComplete());
+
+    var reacquired: [1][]u8 = undefined;
+    _ = try pool.acquireMany(io, &reacquired);
+    try std.testing.expectEqual(@intFromPtr(blocks[0].ptr), @intFromPtr(reacquired[0].ptr));
+    pool.releaseMany(io, &reacquired);
+}
 
 pub const DynamicBufferPool = struct {
     const Node = struct { next: ?*Node };

@@ -8,7 +8,6 @@ const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("zml.zig").Bufferized;
 const CreateOptions = @import("platform.zig").CreateOptions;
 const mem = @import("mem.zig");
-const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
@@ -17,7 +16,6 @@ const safetensors = @import("safetensors.zig");
 const Shape = @import("shape.zig").Shape;
 const Sharding = @import("Sharding.zig");
 const Placement = Sharding.Placement;
-const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/io");
@@ -70,6 +68,11 @@ pub const TensorStore = struct {
         const tensor_desc = self.id_map.get(id) orelse return error.NotFound;
 
         return safetensors.TensorReader.init(io, tensor_desc.*, buffer, .{});
+    }
+
+    fn getBorrowedPositionalReaderById(self: *const TensorStore, id: usize, io: std.Io, file: std.Io.File) !safetensors.TensorReader {
+        const tensor_desc = self.id_map.get(id) orelse return error.NotFound;
+        return .initBorrowedPositional(io, tensor_desc.*, file);
     }
 
     pub fn view(self: *TensorStore) View {
@@ -286,348 +289,6 @@ pub const ProgressWriter = struct {
     }
 };
 
-const LoadMetrics = struct {
-    storage_bytes: std.atomic.Value(u64) = .init(0),
-    direct_read_bytes: std.atomic.Value(u64) = .init(0),
-    staged_read_bytes: std.atomic.Value(u64) = .init(0),
-    staged_copy_bytes: std.atomic.Value(u64) = .init(0),
-    ordered_bytes: std.atomic.Value(u64) = .init(0),
-    logical_submitted_bytes: std.atomic.Value(u64) = .init(0),
-    read_operations: std.atomic.Value(u64) = .init(0),
-    dma_submissions: std.atomic.Value(u64) = .init(0),
-    submitted_bytes: std.atomic.Value(u64) = .init(0),
-    committed_bytes: std.atomic.Value(u64) = .init(0),
-    last_dma_commit_ns: std.atomic.Value(u64) = .init(0),
-    weighted_read_latency_us: std.atomic.Value(u64) = .init(0),
-    weighted_transfer_latency_us: std.atomic.Value(u64) = .init(0),
-    pinned_buffer_wait_ns: std.atomic.Value(u64) = .init(0),
-    dma_completion_wait_ns: std.atomic.Value(u64) = .init(0),
-    read_admission_wait_ns: std.atomic.Value(u64) = .init(0),
-    staging_wait_ns: std.atomic.Value(u64) = .init(0),
-    dma_starved_ns: std.atomic.Value(u64) = .init(0),
-    dma_starvation_covered_until_ns: std.atomic.Value(u64) = .init(0),
-    dma_work_ns: std.atomic.Value(u64) = .init(0),
-    staged_copy_ns: std.atomic.Value(u64) = .init(0),
-    weighted_ready_age_us: std.atomic.Value(u64) = .init(0),
-    ready_bytes: std.atomic.Value(u64) = .init(0),
-    active_reads: std.atomic.Value(usize) = .init(0),
-    active_reads_high_water: std.atomic.Value(usize) = .init(0),
-    active_transfers: std.atomic.Value(usize) = .init(0),
-    completed_transfers: std.atomic.Value(usize) = .init(0),
-    probe_mutex: std.Io.Mutex = .init,
-    config_epoch: std.atomic.Value(u64) = .init(0),
-    probe_epoch: std.atomic.Value(u64) = .init(0),
-    probe_committed_bytes: std.atomic.Value(u64) = .init(0),
-    probe_first_ns: std.atomic.Value(u64) = .init(0),
-    staging_limit: std.atomic.Value(usize) = .init(0),
-
-    const Snapshot = struct {
-        storage_bytes: u64,
-        direct_read_bytes: u64,
-        staged_read_bytes: u64,
-        staged_copy_bytes: u64,
-        ordered_bytes: u64,
-        logical_submitted_bytes: u64,
-        read_operations: u64,
-        dma_submissions: u64,
-        submitted_bytes: u64,
-        committed_bytes: u64,
-        weighted_read_latency_us: u64,
-        weighted_transfer_latency_us: u64,
-        pinned_buffer_wait_ns: u64,
-        dma_completion_wait_ns: u64,
-        read_admission_wait_ns: u64,
-        staging_wait_ns: u64,
-        dma_starved_ns: u64,
-        dma_work_ns: u64,
-        staged_copy_ns: u64,
-        weighted_ready_age_us: u64,
-        ready_bytes: u64,
-        active_reads: usize,
-        active_transfers: usize,
-        completed_transfers: usize,
-        config_epoch: u64,
-        probe_epoch: u64,
-        probe_committed_bytes: u64,
-        probe_first_ns: u64,
-
-        fn sub(self: Snapshot, previous: Snapshot) Snapshot {
-            return .{
-                .storage_bytes = self.storage_bytes -| previous.storage_bytes,
-                .direct_read_bytes = self.direct_read_bytes -| previous.direct_read_bytes,
-                .staged_read_bytes = self.staged_read_bytes -| previous.staged_read_bytes,
-                .staged_copy_bytes = self.staged_copy_bytes -| previous.staged_copy_bytes,
-                .ordered_bytes = self.ordered_bytes -| previous.ordered_bytes,
-                .logical_submitted_bytes = self.logical_submitted_bytes -| previous.logical_submitted_bytes,
-                .read_operations = self.read_operations -| previous.read_operations,
-                .dma_submissions = self.dma_submissions -| previous.dma_submissions,
-                .submitted_bytes = self.submitted_bytes -| previous.submitted_bytes,
-                .committed_bytes = self.committed_bytes -| previous.committed_bytes,
-                .weighted_read_latency_us = self.weighted_read_latency_us -| previous.weighted_read_latency_us,
-                .weighted_transfer_latency_us = self.weighted_transfer_latency_us -| previous.weighted_transfer_latency_us,
-                .pinned_buffer_wait_ns = self.pinned_buffer_wait_ns -| previous.pinned_buffer_wait_ns,
-                .dma_completion_wait_ns = self.dma_completion_wait_ns -| previous.dma_completion_wait_ns,
-                .read_admission_wait_ns = self.read_admission_wait_ns -| previous.read_admission_wait_ns,
-                .staging_wait_ns = self.staging_wait_ns -| previous.staging_wait_ns,
-                .dma_starved_ns = self.dma_starved_ns -| previous.dma_starved_ns,
-                .dma_work_ns = self.dma_work_ns -| previous.dma_work_ns,
-                .staged_copy_ns = self.staged_copy_ns -| previous.staged_copy_ns,
-                .weighted_ready_age_us = self.weighted_ready_age_us -| previous.weighted_ready_age_us,
-                .ready_bytes = self.ready_bytes,
-                .active_reads = self.active_reads,
-                .active_transfers = self.active_transfers,
-                .completed_transfers = self.completed_transfers,
-                .config_epoch = self.config_epoch,
-                .probe_epoch = self.probe_epoch,
-                .probe_committed_bytes = self.probe_committed_bytes,
-                .probe_first_ns = self.probe_first_ns,
-            };
-        }
-    };
-
-    fn snapshot(self: *const LoadMetrics) Snapshot {
-        return .{
-            .storage_bytes = self.storage_bytes.load(.acquire),
-            .direct_read_bytes = self.direct_read_bytes.load(.acquire),
-            .staged_read_bytes = self.staged_read_bytes.load(.acquire),
-            .staged_copy_bytes = self.staged_copy_bytes.load(.acquire),
-            .ordered_bytes = self.ordered_bytes.load(.acquire),
-            .logical_submitted_bytes = self.logical_submitted_bytes.load(.acquire),
-            .read_operations = self.read_operations.load(.acquire),
-            .dma_submissions = self.dma_submissions.load(.acquire),
-            .submitted_bytes = self.submitted_bytes.load(.acquire),
-            .committed_bytes = self.committed_bytes.load(.acquire),
-            .weighted_read_latency_us = self.weighted_read_latency_us.load(.acquire),
-            .weighted_transfer_latency_us = self.weighted_transfer_latency_us.load(.acquire),
-            .pinned_buffer_wait_ns = self.pinned_buffer_wait_ns.load(.acquire),
-            .dma_completion_wait_ns = self.dma_completion_wait_ns.load(.acquire),
-            .read_admission_wait_ns = self.read_admission_wait_ns.load(.acquire),
-            .staging_wait_ns = self.staging_wait_ns.load(.acquire),
-            .dma_starved_ns = self.dma_starved_ns.load(.acquire),
-            .dma_work_ns = self.dma_work_ns.load(.acquire),
-            .staged_copy_ns = self.staged_copy_ns.load(.acquire),
-            .weighted_ready_age_us = self.weighted_ready_age_us.load(.acquire),
-            .ready_bytes = self.ready_bytes.load(.acquire),
-            .active_reads = self.active_reads.load(.acquire),
-            .active_transfers = self.active_transfers.load(.acquire),
-            .completed_transfers = self.completed_transfers.load(.acquire),
-            .config_epoch = self.config_epoch.load(.acquire),
-            .probe_epoch = self.probe_epoch.load(.acquire),
-            .probe_committed_bytes = self.probe_committed_bytes.load(.acquire),
-            .probe_first_ns = self.probe_first_ns.load(.acquire),
-        };
-    }
-
-    fn addPinnedBufferWait(self: *LoadMetrics, wait_ns: u64) void {
-        _ = self.pinned_buffer_wait_ns.fetchAdd(wait_ns, .monotonic);
-    }
-
-    fn addDmaCompletionWait(self: *LoadMetrics, duration: std.Io.Duration) void {
-        const ns: u64 = @intCast(@max(duration.nanoseconds, 0));
-        _ = self.dma_completion_wait_ns.fetchAdd(ns, .monotonic);
-    }
-
-    fn addDmaStarvationInterval(self: *LoadMetrics, started_ns: u64, ended_ns: u64) void {
-        if (ended_ns <= started_ns) return;
-        var covered_until = self.dma_starvation_covered_until_ns.load(.acquire);
-        while (ended_ns > covered_until) {
-            const uncovered_started = @max(started_ns, covered_until);
-            if (self.dma_starvation_covered_until_ns.cmpxchgWeak(covered_until, ended_ns, .acq_rel, .acquire)) |actual| {
-                covered_until = actual;
-                continue;
-            }
-            _ = self.dma_starved_ns.fetchAdd(ended_ns - uncovered_started, .monotonic);
-            return;
-        }
-    }
-
-    fn recordReadStart(self: *LoadMetrics) void {
-        const active = self.active_reads.fetchAdd(1, .acq_rel) + 1;
-        var high_water = self.active_reads_high_water.load(.acquire);
-        while (active > high_water) {
-            if (self.active_reads_high_water.cmpxchgWeak(high_water, active, .release, .acquire)) |actual| {
-                high_water = actual;
-                continue;
-            }
-            break;
-        }
-    }
-
-    fn resetReadHighWater(self: *LoadMetrics) void {
-        self.active_reads_high_water.store(self.active_reads.load(.acquire), .release);
-    }
-
-    fn recordProbeCommit(self: *LoadMetrics, io: std.Io, epoch: u64, bytes: usize) void {
-        self.probe_mutex.lockUncancelable(io);
-        defer self.probe_mutex.unlock(io);
-        if (epoch == self.probe_epoch.load(.acquire)) {
-            _ = self.probe_committed_bytes.fetchAdd(@intCast(bytes), .monotonic);
-        }
-    }
-
-    fn markProbeStart(self: *LoadMetrics, io: std.Io, epoch: u64) void {
-        self.probe_mutex.lockUncancelable(io);
-        defer self.probe_mutex.unlock(io);
-        if (epoch != self.probe_epoch.load(.acquire)) return;
-        const now_ns: u64 = @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 1));
-        _ = self.probe_first_ns.cmpxchgStrong(0, now_ns, .release, .monotonic);
-    }
-
-    fn publishProbeEpoch(self: *LoadMetrics, io: std.Io, epoch: u64) void {
-        self.probe_mutex.lockUncancelable(io);
-        defer self.probe_mutex.unlock(io);
-        self.probe_epoch.store(std.math.maxInt(u64), .release);
-        self.probe_committed_bytes.store(0, .release);
-        self.probe_first_ns.store(0, .release);
-        self.probe_epoch.store(epoch, .release);
-        self.config_epoch.store(epoch, .release);
-    }
-};
-
-fn getDmaBuffer(
-    pool: *mem.DynamicBufferPool,
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    metrics: ?*LoadMetrics,
-) ![]u8 {
-    const acquisition = try pool.getWithWait(allocator, io);
-    if (metrics) |m| m.addPinnedBufferWait(acquisition.wait_ns);
-    return acquisition.buffer;
-}
-
-pub const MemoryWriter = union(enum) {
-    direct: DirectMemoryWriter,
-    buffered: BufferedMemoryWriter,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        pools: []mem.DynamicBufferPool,
-        dma_allocators: []const mem.DmaAllocator,
-        transfer_quantum_size: usize,
-        shape: Shape,
-        sharding: Sharding,
-        buffer: *Buffer,
-    ) !MemoryWriter {
-        return initWithMetrics(allocator, io, platform, pools, dma_allocators, transfer_quantum_size, shape, sharding, buffer, null);
-    }
-
-    fn initWithMetrics(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        pools: []mem.DynamicBufferPool,
-        dma_allocators: []const mem.DmaAllocator,
-        transfer_quantum_size: usize,
-        shape: Shape,
-        sharding: Sharding,
-        buffer: *Buffer,
-        metrics: ?*LoadMetrics,
-    ) !MemoryWriter {
-        return switch (platform.target) {
-            .cuda, .oneapi => .{ .direct = try DirectMemoryWriter.initWithMetrics(allocator, io, platform, pools, dma_allocators, transfer_quantum_size, shape, sharding, buffer, metrics) },
-            .rocm, .tpu, .neuron, .cpu, .metal => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
-        };
-    }
-
-    pub fn interface(self: *MemoryWriter) *std.Io.Writer {
-        return switch (self.*) {
-            .direct => &self.direct.interface,
-            .buffered => &self.buffered.interface,
-        };
-    }
-
-    pub fn deinit(self: *MemoryWriter, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .direct => self.direct.deinit(),
-            .buffered => self.buffered.deinit(allocator),
-        }
-    }
-
-    pub fn setProgress(self: *MemoryWriter, progress: ?*std.Progress.Node) void {
-        switch (self.*) {
-            .direct => self.direct.setProgress(progress),
-            .buffered => {},
-        }
-    }
-
-    fn setEpoch(self: *MemoryWriter, epoch: u64) std.Io.Writer.Error!void {
-        switch (self.*) {
-            .direct => try self.direct.setEpoch(epoch),
-            .buffered => {},
-        }
-    }
-
-    fn directWritable(self: *MemoryWriter) []u8 {
-        return switch (self.*) {
-            .direct => self.direct.directWritableSlice(),
-            .buffered => unreachable,
-        };
-    }
-
-    fn commitDirectRead(self: *MemoryWriter, len: usize) std.Io.Writer.Error!void {
-        switch (self.*) {
-            .direct => try self.direct.commitDirectRead(len),
-            .buffered => unreachable,
-        }
-    }
-
-    fn commitStagedWrite(self: *MemoryWriter) std.Io.Writer.Error!void {
-        switch (self.*) {
-            .direct => try self.direct.commitStagedWrite(),
-            .buffered => {},
-        }
-    }
-
-    fn rootError(self: *const MemoryWriter) ?anyerror {
-        return switch (self.*) {
-            .direct => blk: {
-                for (self.direct.shard_writers) |*writer| {
-                    if (writer.rootError()) |err| break :blk err;
-                }
-                break :blk null;
-            },
-            .buffered => null,
-        };
-    }
-
-    fn park(self: *MemoryWriter) std.Io.Writer.Error!void {
-        switch (self.*) {
-            .direct => try self.direct.park(),
-            .buffered => {},
-        }
-    }
-
-    fn parkAndWait(self: *MemoryWriter) std.Io.Writer.Error!void {
-        switch (self.*) {
-            .direct => try self.direct.parkAndWait(),
-            .buffered => {},
-        }
-    }
-
-    fn waitForPendingDma(self: *MemoryWriter) std.Io.Writer.Error!void {
-        switch (self.*) {
-            .direct => try self.direct.waitForPendingDma(),
-            .buffered => {},
-        }
-    }
-
-    fn submissionCount(self: *const MemoryWriter) u64 {
-        return switch (self.*) {
-            .direct => self.direct.submissionCount(),
-            .buffered => 0,
-        };
-    }
-
-    fn unpark(self: *MemoryWriter) std.Io.Writer.Error!void {
-        switch (self.*) {
-            .direct => try self.direct.unpark(),
-            .buffered => {},
-        }
-    }
-};
-
 pub const BufferedMemoryWriter = struct {
     io: std.Io,
     platform: *const Platform,
@@ -674,330 +335,11 @@ pub const BufferedMemoryWriter = struct {
     }
 };
 
-const DirectShardWriter = struct {
-    const EventContext = struct {
-        self: *DirectShardWriter,
-        err: ?*pjrt.Error = null,
-        pjrt_event: *pjrt.Event,
-        event: std.Io.Event = .unset,
-        buffer: []u8,
-        submitted_at: std.Io.Timestamp,
-        bytes: usize,
-        epoch: u64,
-    };
-
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    memory: *const Memory,
-    pool: *mem.DynamicBufferPool,
-    total: usize,
-    pjrt_buffer: *pjrt.Buffer,
-
-    transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
-    offset: usize = 0,
-
-    interface: std.Io.Writer,
-    active_buffer: ?[]u8,
-    flip_flop: u1 = 0,
-    events_contexts: [2]?EventContext = @splat(null),
-    metrics: ?*LoadMetrics,
-    epoch: u64 = 0,
-    submission_count: u64 = 0,
-    root_error: std.atomic.Value(u16) = .init(0),
-
-    fn recordError(self: *DirectShardWriter, err: anyerror) void {
-        _ = self.root_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
-    }
-
-    fn rootError(self: *const DirectShardWriter) ?anyerror {
-        const err = self.root_error.load(.acquire);
-        return if (err == 0) null else @errorFromInt(err);
-    }
-
-    fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        memory: *const Memory,
-        pool: *mem.DynamicBufferPool,
-        shape: Shape,
-        metrics: ?*LoadMetrics,
-    ) !DirectShardWriter {
-        const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
-        const transfer_manager = try memory.platform.pjrt_client.createBuffersForAsyncHostToDevice(
-            memory.platform.pjrt_api,
-            .{
-                .shape_specs = &.{shape_spec},
-                .memory = memory.pjrt_memory,
-            },
-        );
-        errdefer transfer_manager.deinit(memory.platform.pjrt_api);
-
-        const pjrt_buffer = transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0) catch unreachable;
-
-        const buf = try getDmaBuffer(pool, allocator, io, metrics);
-
-        return .{
-            .allocator = allocator,
-            .io = io,
-            .memory = memory,
-            .pool = pool,
-            .total = shape.byteSize(),
-            .pjrt_buffer = pjrt_buffer,
-            .transfer_manager = transfer_manager,
-            .metrics = metrics,
-            .active_buffer = buf,
-            .interface = .{
-                .buffer = buf[0..@min(buf.len, shape.byteSize())],
-                .vtable = &.{
-                    .drain = drain,
-                    .flush = flush,
-                    .rebase = rebase,
-                },
-            },
-        };
-    }
-
-    pub fn deinit(self: *DirectShardWriter) void {
-        const pjrt_api = self.memory.platform.pjrt_api;
-        for (&self.events_contexts) |*maybe_ctx| {
-            if (maybe_ctx.*) |*ctx| {
-                ctx.event.waitUncancelable(self.io);
-                ctx.pjrt_event.deinit(pjrt_api);
-                if (ctx.err) |err| err.deinit(pjrt_api);
-                maybe_ctx.* = null;
-            }
-        }
-        if (self.active_buffer) |buffer| {
-            self.pool.put(self.io, buffer);
-            self.active_buffer = null;
-        }
-        self.transfer_manager.deinit(self.memory.platform.pjrt_api);
-    }
-
-    fn park(self: *DirectShardWriter) std.Io.Writer.Error!void {
-        if (self.interface.end > 0) try self.flushBuffered(false);
-        if (self.active_buffer) |buffer| {
-            self.pool.put(self.io, buffer);
-            self.active_buffer = null;
-        }
-        if (self.offset < self.total) {
-            self.interface.buffer = &.{};
-            self.interface.end = 0;
-        }
-    }
-
-    fn waitForPendingTransfers(self: *DirectShardWriter) std.Io.Writer.Error!void {
-        const pjrt_api = self.memory.platform.pjrt_api;
-        for (&self.events_contexts) |*maybe_ctx| {
-            const ctx = if (maybe_ctx.*) |*context| context else continue;
-            const wait_started: std.Io.Timestamp = .now(self.io, .awake);
-            ctx.event.waitUncancelable(self.io);
-            if (self.metrics) |metrics| metrics.addDmaCompletionWait(wait_started.untilNow(self.io, .awake));
-            ctx.pjrt_event.deinit(pjrt_api);
-            if (ctx.err) |err| {
-                self.recordError(err.getCode(pjrt_api).toApiError());
-                err.deinit(pjrt_api);
-                maybe_ctx.* = null;
-                return std.Io.Writer.Error.WriteFailed;
-            }
-            maybe_ctx.* = null;
-        }
-    }
-
-    fn unpark(self: *DirectShardWriter) std.Io.Writer.Error!void {
-        if (self.offset >= self.total or self.active_buffer != null) return;
-        const buffer = getDmaBuffer(self.pool, self.allocator, self.io, self.metrics) catch |err| {
-            self.recordError(err);
-            return std.Io.Writer.Error.WriteFailed;
-        };
-        self.active_buffer = buffer;
-        self.interface.buffer = buffer[0..@min(buffer.len, self.total - self.offset)];
-        self.interface.end = 0;
-    }
-
-    fn setEpoch(self: *DirectShardWriter, epoch: u64) std.Io.Writer.Error!void {
-        if (self.epoch == epoch) return;
-        if (self.interface.end > 0) try self.flushBuffered(true);
-        self.epoch = epoch;
-    }
-
-    fn drain(w: *std.Io.Writer, data: []const []const u8, _: usize) std.Io.Writer.Error!usize {
-        const self: *DirectShardWriter = @alignCast(@fieldParentPtr("interface", w));
-
-        const chunk = data[0];
-        if (chunk.len > self.interface.buffer.len) return std.Io.Writer.Error.WriteFailed;
-        if (chunk.len > self.total - (self.offset + self.interface.end)) return std.Io.Writer.Error.WriteFailed;
-
-        const needs_fresh_buffer = chunk.len > self.interface.buffer.len - self.interface.end;
-        if (needs_fresh_buffer) {
-            try self.interface.flush();
-        }
-
-        @memcpy(self.interface.buffer[self.interface.end..][0..chunk.len], chunk);
-        self.interface.end += chunk.len;
-
-        const buffer_full = self.interface.end == self.interface.buffer.len;
-        if (buffer_full) {
-            try self.interface.flush();
-        }
-
-        return chunk.len;
-    }
-
-    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
-        const self: *DirectShardWriter = @alignCast(@fieldParentPtr("interface", w));
-        try self.flushBuffered(true);
-    }
-
-    fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
-        const self: *DirectShardWriter = @alignCast(@fieldParentPtr("interface", w));
-        if (self.interface.buffer.len - self.interface.end >= capacity) return;
-        if (preserve != 0) return std.Io.Writer.Error.WriteFailed;
-        try self.interface.flush();
-    }
-
-    fn flushBuffered(self: *DirectShardWriter, replenish: bool) std.Io.Writer.Error!void {
-        if (self.offset >= self.total) return;
-
-        const pjrt_api = self.memory.platform.pjrt_api;
-
-        const current_buffer = self.interface.buffer;
-        const buffered = self.interface.buffered();
-
-        const slice = buffered[0..@min(buffered.len, self.total - self.offset)];
-        if (slice.len == 0) return;
-        const is_last = (self.offset + slice.len) >= self.total;
-
-        const submitted_at: std.Io.Timestamp = .now(self.io, .awake);
-        const transfer_event = self.transfer_manager.transferData(pjrt_api, 0, slice, @intCast(self.offset), is_last) catch |err| {
-            self.recordError(err);
-            log.err("error when transferring data to device: {any}", .{err});
-            return std.Io.Writer.Error.WriteFailed;
-        };
-        self.submission_count += 1;
-
-        const ctx = &self.events_contexts[@intCast(self.flip_flop)];
-        ctx.* = .{
-            .self = self,
-            .buffer = current_buffer,
-            .pjrt_event = transfer_event,
-            .submitted_at = submitted_at,
-            .bytes = slice.len,
-            .epoch = self.epoch,
-        };
-        if (self.metrics) |metrics| {
-            _ = metrics.dma_submissions.fetchAdd(1, .monotonic);
-            _ = metrics.submitted_bytes.fetchAdd(@intCast(slice.len), .monotonic);
-        }
-
-        transfer_event.onReady(pjrt_api, EventContext, struct {
-            fn call(err: ?*pjrt.Error, ctx_: *EventContext) void {
-                if (err == null) {
-                    if (ctx_.self.metrics) |metrics| {
-                        const elapsed = ctx_.submitted_at.untilNow(ctx_.self.io, .awake);
-                        const elapsed_us: u64 = @intCast(@max(@divTrunc(elapsed.nanoseconds, std.time.ns_per_us), 0));
-                        _ = metrics.committed_bytes.fetchAdd(@intCast(ctx_.bytes), .monotonic);
-                        metrics.last_dma_commit_ns.store(@intCast(@max(std.Io.Timestamp.now(ctx_.self.io, .awake).nanoseconds, 1)), .release);
-                        _ = metrics.weighted_transfer_latency_us.fetchAdd(@as(u64, @intCast(ctx_.bytes)) *| elapsed_us, .monotonic);
-                        metrics.recordProbeCommit(ctx_.self.io, ctx_.epoch, ctx_.bytes);
-                    }
-                } else if (err) |e| {
-                    ctx_.self.recordError(e.getCode(ctx_.self.memory.platform.pjrt_api).toApiError());
-                }
-                ctx_.self.pool.put(ctx_.self.io, ctx_.buffer);
-                ctx_.err = err;
-                ctx_.event.set(ctx_.self.io);
-            }
-        }.call, &(ctx.*.?)) catch |err| {
-            self.recordError(err);
-            log.err("error when setting up transfer completion callback: {any}", .{err});
-            transfer_event.awaitRaw(pjrt_api) catch {};
-            transfer_event.deinit(pjrt_api);
-            ctx.* = null;
-            return std.Io.Writer.Error.WriteFailed;
-        };
-        self.active_buffer = null;
-
-        if (self.events_contexts[@intCast(self.flip_flop ^ 1)]) |*ctx_previous| {
-            defer self.events_contexts[@intCast(self.flip_flop ^ 1)] = null;
-            const wait_started: std.Io.Timestamp = .now(self.io, .awake);
-            ctx_previous.event.waitUncancelable(self.io);
-            if (self.metrics) |metrics| metrics.addDmaCompletionWait(wait_started.untilNow(self.io, .awake));
-            defer ctx_previous.pjrt_event.deinit(pjrt_api);
-            if (ctx_previous.err) |e| {
-                self.recordError(e.getCode(pjrt_api).toApiError());
-                defer e.deinit(pjrt_api);
-                log.err("error while awaiting: {s}: {s}", .{
-                    @tagName(e.getCode(pjrt_api)),
-                    e.getMessage(pjrt_api),
-                });
-                return std.Io.Writer.Error.WriteFailed;
-            }
-        }
-
-        if (is_last) {
-            defer ctx.* = null;
-            defer self.interface = .failing;
-            const ctx_ = &ctx.*.?;
-            ctx_.event.waitUncancelable(self.io);
-            defer ctx_.pjrt_event.deinit(pjrt_api);
-            if (ctx_.err) |e| {
-                self.recordError(e.getCode(pjrt_api).toApiError());
-                defer e.deinit(pjrt_api);
-                log.err("error while awaiting: {s}: {s}", .{
-                    @tagName(e.getCode(pjrt_api)),
-                    e.getMessage(pjrt_api),
-                });
-                return std.Io.Writer.Error.WriteFailed;
-            }
-        } else if (replenish) {
-            self.interface.end = 0;
-            const buf = getDmaBuffer(self.pool, self.allocator, self.io, self.metrics) catch |err| {
-                self.recordError(err);
-                log.err("unable to get a new buffer from the pool: {any}", .{err});
-                return std.Io.Writer.Error.WriteFailed;
-            };
-            self.active_buffer = buf;
-            self.interface.buffer = buf[0..@min(buf.len, self.total - (self.offset + slice.len))];
-        } else {
-            self.interface.buffer = &.{};
-            self.interface.end = 0;
-        }
-        self.flip_flop ^= 1;
-        self.offset += slice.len;
-    }
-};
-
-const ShardProgress = struct {
-    const scale: usize = 1024;
-
-    node: std.Progress.Node,
-    label: [32]u8 = undefined,
-    completed: usize = 0,
-
-    fn set(self: *ShardProgress, completed: usize) void {
-        self.completed = completed;
-        self.node.setCompletedItems(std.math.divCeil(usize, self.completed, scale) catch unreachable);
-    }
-};
-
-// Dispatch planning bridges two different orders:
-//
-// 1. Placement traversal emits byte ranges per shard writer, in device order.
-//    That order is convenient for asking "what bytes belong to this shard?",
-//    but it does not match how a tensor file is read.
-//
-// 2. Readers stream tensor bytes in global row-major order. DirectMemoryWriter
-//    must therefore consume dispatch spans in increasing global byte offset.
-//
-// We first collect placement spans, sort them by global byte range, then fold
-// identical ranges into one primary dispatch span plus mirror writers. Identical
-// ranges represent replicated shard data: the reader provides those bytes once,
-// the primary writer receives them zero-copy, and mirrors receive a copy.
 const DispatchSpans = struct {
     const DispatchSpan = struct {
         start: usize,
         end: usize,
+        writer_offset: usize,
         primary_writer: usize,
         mirror_writer_start: usize,
         mirror_writer_len: usize,
@@ -1041,6 +383,22 @@ const DispatchSpans = struct {
 
         try deduplicateByRange(allocator, placement_spans.items, shape.byteSize(), &spans, &mirror_writers);
 
+        // Record the final packed offset once, while spans are still in global
+        // file order. Positional request tasks can then finish out of order
+        // without mutating a writer cursor.
+        const writer_offsets = try allocator.alloc(usize, ordered_devices.len);
+        defer allocator.free(writer_offsets);
+        @memset(writer_offsets, 0);
+        for (spans.items) |*span| {
+            span.writer_offset = writer_offsets[span.primary_writer];
+            writer_offsets[span.primary_writer] += span.end - span.start;
+            const mirror_end = span.mirror_writer_start + span.mirror_writer_len;
+            for (mirror_writers.items[span.mirror_writer_start..mirror_end]) |writer_index| {
+                if (writer_offsets[writer_index] != span.writer_offset) return error.InconsistentReplicaLayout;
+                writer_offsets[writer_index] += span.end - span.start;
+            }
+        }
+
         const spans_ = try spans.toOwnedSlice(allocator);
         errdefer allocator.free(spans_);
 
@@ -1056,6 +414,32 @@ const DispatchSpans = struct {
     fn deinit(self: DispatchSpans, allocator: std.mem.Allocator) void {
         allocator.free(self.spans);
         allocator.free(self.mirror_writers);
+    }
+
+    fn writerMask(self: DispatchSpans, span: DispatchSpan) u64 {
+        var mask = @as(u64, 1) << @intCast(span.primary_writer);
+        const mirror_end = span.mirror_writer_start + span.mirror_writer_len;
+        for (self.mirror_writers[span.mirror_writer_start..mirror_end]) |writer_index| {
+            mask |= @as(u64, 1) << @intCast(writer_index);
+        }
+        return mask;
+    }
+
+    fn spanIndexAt(self: DispatchSpans, offset: usize) ?usize {
+        var low: usize = 0;
+        var high = self.spans.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            const span = self.spans[middle];
+            if (offset < span.start) {
+                high = middle;
+            } else if (offset >= span.end) {
+                low = middle + 1;
+            } else {
+                return middle;
+            }
+        }
+        return null;
     }
 
     fn deduplicateByRange(
@@ -1092,6 +476,7 @@ const DispatchSpans = struct {
             try spans.append(allocator, .{
                 .start = span.start,
                 .end = span.start + span.len,
+                .writer_offset = 0,
                 .primary_writer = span.writer_index,
                 .mirror_writer_start = mirror_writer_start,
                 .mirror_writer_len = j - i - 1,
@@ -1175,3022 +560,1032 @@ const DispatchSpans = struct {
     }
 };
 
-// Direct load writer state machine.
-//
-//     std.Io.Reader
-//          |
-//          v
-//     DirectMemoryWriter.interface.buffer
-//          | aliases active primary DirectShardWriter DMA buffer
-//          v
-//     commitWindow()
-//          |-- primary: advance DirectShardWriter.interface.end
-//          |-- mirrors: copy committed bytes with writeAll()
-//          |-- boundaries: flush full shard buffers / chunk fence
-//          v
-//     DirectShardWriter.flushBuffered()
-//          |
-//          v
-//     PJRT AsyncHostToDeviceTransferManager
-//
-// The public writer never owns a host staging buffer: it exposes a visible
-// prefix of a real shard DMA buffer. The visible prefix may extend beyond the
-// current dispatch span to coalesce reader requests, but `commitWindow` must
-// scatter those bytes before submitting or rotating the active buffer. The
-// first active-primary segment is zero-copy; crossed spans and mirrors treat
-// the active buffer as scratch and copy into their own shard writers.
-//
-// `byte_cursor` is the global tensor position. Shard writer `interface.end` is
-// local to the current shard DMA buffer.
-pub const DirectMemoryWriter = struct {
-    // Bound reader windows independently of the transfer scheduling quantum so
-    // startup can observe network progress before a large quantum is complete.
-    const observation_chunk_size = 32 * 1024 * 1024;
-
-    allocator: std.mem.Allocator,
-    shard_writers: []DirectShardWriter,
-    // Global stream-order spans produced from placement; this is the routing table for committed bytes.
-    dispatch_spans: DispatchSpans,
-    // Current entry in `dispatch_spans.spans`; advances whenever `byte_cursor` reaches that span end.
-    span_index: usize = 0,
-    // Global tensor byte offset already scattered into shard writers.
-    byte_cursor: usize = 0,
-    // Global bytes known to have crossed a shard-writer submission boundary.
-    logical_submitted_cursor: usize = 0,
-    // Shard writer whose DMA buffer is currently exposed as `interface.buffer`.
-    active_writer_index: usize,
-    // Start offset of new reader bytes inside the active shard writer buffer.
-    window_start: usize,
-    // Logical maximum public alias window before forcing a cross-shard flush fence.
-    transfer_quantum_size: usize,
-    shard_progress: ?[]ShardProgress = null,
-    metrics: ?*LoadMetrics,
-    epoch: u64 = 0,
-    interface: std.Io.Writer,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        pools: []mem.DynamicBufferPool,
-        dma_allocators: []const mem.DmaAllocator,
-        transfer_quantum_size: usize,
-        shape: Shape,
-        sharding: Sharding,
-        buffer: *Buffer,
-    ) !DirectMemoryWriter {
-        return initWithMetrics(allocator, io, platform, pools, dma_allocators, transfer_quantum_size, shape, sharding, buffer, null);
-    }
-
-    fn initWithMetrics(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        pools: []mem.DynamicBufferPool,
-        dma_allocators: []const mem.DmaAllocator,
-        transfer_quantum_size: usize,
-        shape: Shape,
-        sharding: Sharding,
-        buffer: *Buffer,
-        metrics: ?*LoadMetrics,
-    ) !DirectMemoryWriter {
-        const ordered_devices = sharding.devicesInCanonicalOrder();
-        var shard_writers = try allocator.alloc(DirectShardWriter, ordered_devices.len);
-        errdefer allocator.free(shard_writers);
-
-        var initialized: usize = 0;
-        errdefer for (shard_writers[0..initialized]) |*writer| {
-            writer.deinit();
-        };
-
-        var pjrt_buffers: Buffer.Shards = .empty;
-        const placement = try sharding.placement(shape);
-        for (ordered_devices, 0..) |device, i| {
-            const pool = &pools[device.id];
-            const shard_dma_allocator = dma_allocators[device.id].allocator();
-            const pjrt_mem = platform.devices[device.id].memory(.default).?;
-
-            shard_writers[i] = try .init(shard_dma_allocator, io, pjrt_mem, pool, placement.shape, metrics);
-            initialized += 1;
-
-            pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
-        }
-
-        buffer.* = .fromPjrtBuffers(platform, shape, sharding, pjrt_buffers.constSlice());
-
-        const dispatch_spans: DispatchSpans = try .init(allocator, shape, sharding);
-        errdefer dispatch_spans.deinit(allocator);
-
-        const first_span = dispatch_spans.spans[0];
-        const first_writer = &shard_writers[first_span.primary_writer];
-        const first_window = @min(observation_chunk_size, @min(transfer_quantum_size, first_writer.interface.buffer.len));
-
-        return .{
-            .allocator = allocator,
-            .shard_writers = shard_writers,
-            .dispatch_spans = dispatch_spans,
-            .active_writer_index = first_span.primary_writer,
-            .window_start = first_writer.interface.end,
-            .transfer_quantum_size = transfer_quantum_size,
-            .metrics = metrics,
-            .interface = .{
-                .buffer = first_writer.interface.buffer[0..first_window],
-                .end = 0,
-                .vtable = &.{
-                    .drain = drain,
-                    .flush = flush,
-                    .rebase = rebase,
-                },
-            },
-        };
-    }
-
-    pub fn deinit(self: *DirectMemoryWriter) void {
-        self.setProgress(null);
-        for (self.shard_writers) |*writer| {
-            writer.deinit();
-        }
-        self.allocator.free(self.shard_writers);
-        self.dispatch_spans.deinit(self.allocator);
-    }
-
-    fn park(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        try self.commitWindow(false);
-        for (self.shard_writers) |*writer| try writer.park();
-        self.recordLogicalSubmission();
-        self.interface.buffer = &.{};
-        self.interface.end = 0;
-        self.window_start = 0;
-    }
-
-    fn parkAndWait(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        try self.park();
-        for (self.shard_writers) |*writer| try writer.waitForPendingTransfers();
-    }
-
-    fn waitForPendingDma(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        for (self.shard_writers) |*writer| try writer.waitForPendingTransfers();
-    }
-
-    fn submissionCount(self: *const DirectMemoryWriter) u64 {
-        var total: u64 = 0;
-        for (self.shard_writers) |writer| total +|= writer.submission_count;
-        return total;
-    }
-
-    fn unpark(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        for (self.shard_writers) |*writer| try writer.unpark();
-        try self.publishWindow();
-    }
-
-    pub fn setProgress(self: *DirectMemoryWriter, progress: ?*std.Progress.Node) void {
-        const parent = progress orelse {
-            const states = self.shard_progress orelse return;
-            for (states) |*s| {
-                s.node.end();
-            }
-            self.allocator.free(states);
-            self.shard_progress = null;
-            return;
-        };
-
-        std.debug.assert(self.shard_progress == null);
-        const states = self.allocator.alloc(ShardProgress, self.shard_writers.len) catch return;
-        for (states, self.shard_writers, 0..) |*state, writer, i| {
-            state.completed = 0;
-            const label = std.fmt.bufPrint(&state.label, "shard[{d}]", .{i}) catch unreachable;
-            const total_items = std.math.divCeil(usize, writer.total, ShardProgress.scale) catch unreachable;
-            state.node = parent.start(label, total_items);
-            state.node.setCompletedItems(0);
-        }
-        self.shard_progress = states;
-    }
-
-    fn setEpoch(self: *DirectMemoryWriter, epoch: u64) std.Io.Writer.Error!void {
-        if (self.epoch == epoch) return;
-        try self.commitWindow(true);
-        for (self.shard_writers) |*writer| try writer.setEpoch(epoch);
-        self.recordLogicalSubmission();
-        self.epoch = epoch;
-        try self.publishWindow();
-    }
-
-    fn directWritableSlice(self: *DirectMemoryWriter) []u8 {
-        return self.interface.buffer[self.interface.end..];
-    }
-
-    fn commitDirectRead(self: *DirectMemoryWriter, len: usize) std.Io.Writer.Error!void {
-        if (len > self.interface.buffer.len - self.interface.end) return std.Io.Writer.Error.WriteFailed;
-        self.interface.end += len;
-        try self.commitWindow(true);
-    }
-
-    fn commitStagedWrite(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        try self.commitWindow(true);
-    }
-
-    fn drain(w: *std.Io.Writer, data: []const []const u8, _: usize) std.Io.Writer.Error!usize {
-        const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
-
-        const chunk = data[0];
-        try self.commitWindow(true);
-
-        const writable = self.interface.buffer.len - self.interface.end;
-        if (writable == 0) return std.Io.Writer.Error.WriteFailed;
-
-        const n = @min(writable, chunk.len);
-        @memcpy(self.interface.buffer[self.interface.end..][0..n], chunk[0..n]);
-        self.interface.end += n;
-        try self.commitWindow(true);
-
-        return n;
-    }
-
-    fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
-        const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
-
-        // Commit the active public window if one remains
-        if (self.span_index < self.dispatch_spans.spans.len) {
-            try self.commitWindow(true);
-        }
-
-        for (self.shard_writers, 0..) |*shard_writer, i| {
-            try shard_writer.interface.flush();
-            if (self.shard_progress) |states| {
-                states[i].set(shard_writer.total);
-            }
-        }
-        self.recordLogicalSubmission();
-
-        self.interface = .failing;
-    }
-
-    fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
-        const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
-
-        if (self.interface.buffer.len - self.interface.end >= capacity) return;
-        if (preserve != 0) return std.Io.Writer.Error.WriteFailed;
-
-        try self.commitWindow(true);
-        if (self.interface.buffer.len - self.interface.end < capacity) return std.Io.Writer.Error.WriteFailed;
-    }
-
-    // `interface.buffer` is a clipped alias of the active primary shard DMA
-    // buffer. Reader writes advance only `DirectMemoryWriter.interface.end`;
-    // this function scatters that visible range through dispatch spans.
-    //
-    // The leading segment for `active_writer_index` is already in the right
-    // DMA buffer and is committed by advancing that shard writer. Later spans
-    // use the same bytes as scratch and are copied before any full buffers are
-    // submitted or the public alias is rotated.
-    fn commitWindow(self: *DirectMemoryWriter, replenish: bool) std.Io.Writer.Error!void {
-        // All dispatch spans are consumed; no shard DMA buffer remains valid to
-        // expose as the public alias until flush marks the writer as failing.
-        if (self.span_index >= self.dispatch_spans.spans.len) {
-            self.interface.buffer = &.{};
-            self.interface.end = 0;
-            return;
-        }
-
-        // Only bytes after `window_start` are new reader writes. Bytes before
-        // it may already be pending in the active shard writer.
-        const source = self.interface.buffer[self.window_start..self.interface.end];
-        if (source.len == 0) return;
-
-        // The visible alias window may cross many dispatch spans. Walk the
-        // global cursor and route each subrange to its primary and mirrors.
-        var consumed: usize = 0;
-        while (consumed < source.len) {
-            if (self.span_index >= self.dispatch_spans.spans.len) return std.Io.Writer.Error.WriteFailed;
-
-            const span = self.dispatch_spans.spans[self.span_index];
-            if (self.byte_cursor < span.start or self.byte_cursor >= span.end) return std.Io.Writer.Error.WriteFailed;
-
-            const n = @min(source.len - consumed, span.end - self.byte_cursor);
-            const chunk = source[consumed..][0..n];
-
-            // The first span in the active alias is already in the primary DMA
-            // buffer. Later ranges use the active buffer as scratch and must be
-            // copied into their real destination writer.
-            if (span.primary_writer == self.active_writer_index and consumed == 0) {
-                self.shard_writers[span.primary_writer].interface.end += n;
-            } else {
-                const primary_writer = &self.shard_writers[span.primary_writer];
-                if (span.primary_writer == self.active_writer_index) {
-                    @memmove(primary_writer.interface.buffer[primary_writer.interface.end..][0..n], chunk);
-                    primary_writer.interface.end += n;
-                } else {
-                    try primary_writer.interface.writeAll(chunk);
-                }
-            }
-            if (self.shard_progress) |states| {
-                states[span.primary_writer].set(states[span.primary_writer].completed + n);
-            }
-
-            const mirror_writer_end = span.mirror_writer_start + span.mirror_writer_len;
-            for (self.dispatch_spans.mirror_writers[span.mirror_writer_start..mirror_writer_end]) |mirror_writer_index| {
-                const mirror_writer = &self.shard_writers[mirror_writer_index];
-                if (mirror_writer_index == self.active_writer_index) {
-                    @memmove(mirror_writer.interface.buffer[mirror_writer.interface.end..][0..n], chunk);
-                    mirror_writer.interface.end += n;
-                } else {
-                    try mirror_writer.interface.writeAll(chunk);
-                }
-                if (self.shard_progress) |states| {
-                    states[mirror_writer_index].set(states[mirror_writer_index].completed + n);
-                }
-            }
-
-            self.byte_cursor += n;
-            consumed += n;
-            if (self.byte_cursor == span.end) {
-                self.span_index += 1;
-            }
-        }
-
-        // All scratch copies are complete now, so full DMA buffers may be
-        // submitted without invalidating bytes still needed for scatter.
-        for (self.shard_writers) |*writer| {
-            if (writer.interface.end == writer.interface.buffer.len) {
-                try writer.flushBuffered(replenish);
-            }
-        }
-
-        if (@mod(self.byte_cursor, self.transfer_quantum_size) == 0) {
-            for (self.shard_writers) |*writer| {
-                try writer.flushBuffered(replenish);
-            }
-            self.recordLogicalSubmission();
-        }
-
-        if (replenish) try self.publishWindow();
-    }
-
-    fn recordLogicalSubmission(self: *DirectMemoryWriter) void {
-        const submitted = self.byte_cursor - self.logical_submitted_cursor;
-        if (submitted == 0) return;
-        if (self.metrics) |metrics| {
-            _ = metrics.logical_submitted_bytes.fetchAdd(@intCast(submitted), .monotonic);
-        }
-        self.logical_submitted_cursor = self.byte_cursor;
-    }
-
-    fn publishWindow(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        // The last committed window may finish the tensor exactly. Leave an
-        // empty public window so any further writes fail through std.Io.
-        if (self.span_index >= self.dispatch_spans.spans.len) {
-            self.interface.buffer = &.{};
-            self.interface.end = 0;
-            return;
-        }
-
-        // Rotate the public alias to the primary writer for the next stream
-        // span. `window_start` preserves that writer's already-buffered prefix
-        // so only newly advanced bytes are scattered on the next commit.
-        const next_span = self.dispatch_spans.spans[self.span_index];
-        const next_writer = &self.shard_writers[next_span.primary_writer];
-        self.active_writer_index = next_span.primary_writer;
-        self.window_start = next_writer.interface.end;
-
-        // Publish the next public alias. Its backing memory is the next primary
-        // shard buffer, but the visible length is allowed to coalesce across
-        // upcoming spans until a buffer or tensor boundary.
-        const total = self.dispatch_spans.spans[self.dispatch_spans.spans.len - 1].end;
-        const buffer_remaining = next_writer.interface.buffer.len - self.window_start;
-        const quantum_offset = @mod(self.byte_cursor, self.transfer_quantum_size);
-        const quantum_remaining = if (quantum_offset == 0) self.transfer_quantum_size else self.transfer_quantum_size - quantum_offset;
-        const observation_offset = @mod(self.byte_cursor, observation_chunk_size);
-        const observation_remaining = if (observation_offset == 0) observation_chunk_size else observation_chunk_size - observation_offset;
-        const tensor_remaining = total - self.byte_cursor;
-        const visible_remaining = @min(buffer_remaining, @min(quantum_remaining, @min(observation_remaining, tensor_remaining)));
-        if (visible_remaining == 0) return std.Io.Writer.Error.WriteFailed;
-
-        self.interface.buffer = next_writer.interface.buffer[0 .. self.window_start + visible_remaining];
-        self.interface.end = self.window_start;
-    }
-};
-
-const AdaptiveLoadController = struct {
-    const Mode = enum { startup, steady };
-    const Dimension = enum { read, dma, pinned, staging };
-    const ProbeKind = enum { increase, reduce_resource };
-
-    const Knobs = struct {
-        read_workers: usize,
-        dma_workers: usize,
-        pinned_buffers: usize,
-        staging_chunks: usize,
+/// Pure description of one source request. `segments` are in file order and
+/// identify where each source fragment lands inside a DMA block. `blocks` are
+/// independently contiguous in every destination selected by `writer_mask`.
+const VectoredRequestPlan = struct {
+    const Block = struct {
+        writer_mask: u64,
+        destination_offset: usize,
+        len: usize = 0,
     };
 
-    const Probe = struct {
-        dimension: Dimension,
-        kind: ProbeKind,
-        baseline: Knobs,
-        candidate: Knobs,
-        epoch: u64,
-        baseline_goodput: f64,
+    const Segment = struct {
+        block_index: usize,
+        block_offset: usize,
+        len: usize,
     };
 
-    const Sample = struct {
-        read_goodput: f64 = 0,
-        committed_goodput: f64 = 0,
-        probe_goodput: f64 = 0,
-        probe_aggregate_goodput: f64 = 0,
-        probe_committed_bytes: u64 = 0,
-        probe_elapsed_ns: u64 = std.math.maxInt(u64),
-        capacity_pending: bool = false,
-        read_latency_us: f64 = 0,
-        read_admission_wait_ratio: f64 = 0,
-        transfer_latency_us: f64 = 0,
-        dma_latency_reliable: bool = true,
-        pinned_wait_ratio: f64 = 0,
-        dma_completion_wait_ratio: f64 = 0,
-        staging_wait_ratio: f64 = 0,
-        dma_starvation_ratio: f64 = 0,
-        ready_bytes: u64 = 0,
-        ready_queue_ratio: f64 = 0,
-        ready_age_pressure: f64 = 0,
-        ready_growth_ratio: f64 = 0,
-        h2d_queue_ratio: f64 = 0,
-        h2d_growth_ratio: f64 = 0,
-        admitted_dma_writers: usize = 0,
-        dma_lane_capacity_available: bool = false,
-        slow_reads: bool = false,
-        source_stalled: bool = false,
-        read_capacity_demand: bool = false,
-        reads_saturated: bool = false,
-        dma_saturated: bool = false,
-        allow_probe: bool = true,
-        now_ns: u64 = 0,
+    const Builder = struct {
+        writer_mask: u64,
+        current_block: ?usize = null,
+        used: usize = 0,
+        next_destination: usize,
     };
 
-    const Decision = struct {
-        const Action = enum {
-            none,
-            read_ahead_bootstrap,
-            read_backoff,
-            staging_backoff,
-            dma_backoff,
-            staging_probe_start,
-            staging_probe_keep,
-            staging_probe_rollback,
-            read_probe_start,
-            read_probe_keep,
-            read_probe_rollback,
-            pinned_probe_start,
-            pinned_probe_keep,
-            pinned_probe_rollback,
-            dma_probe_start,
-            dma_probe_keep,
-            dma_probe_rollback,
-            pinned_reduce_start,
-            pinned_reduce_keep,
-            pinned_reduce_rollback,
-            staging_reduce_start,
-            staging_reduce_keep,
-            staging_reduce_rollback,
-        };
-
-        const RollbackReason = enum {
-            none,
-            gain_below_threshold,
-            dma_starvation,
-            ready_queue_growth,
-            read_pressure,
-            h2d_pressure,
-            pinned_wait,
-            capacity_not_exercised,
-        };
-
-        knobs: Knobs,
-        epoch: u64,
-        changed: bool = false,
-        trim_pinned: bool = false,
-        trim_staging: bool = false,
-        action: Action = .none,
-        reason: RollbackReason = .none,
-    };
-
-    mode: Mode = .startup,
-    max_read_workers: usize,
-    max_dma_workers: usize,
-    max_pinned_buffers: usize,
-    max_staging_chunks: usize,
-    direct: bool,
-    knobs: Knobs,
-    stable_goodput: f64 = 0,
-    peak_goodput: f64 = 0,
-    latency_baseline_us: f64 = 0,
-    probe: ?Probe = null,
-    epoch: u64 = 0,
-    last_probe_ns: u64 = 0,
-    last_resource_probe_ns: u64 = 0,
-    last_probe_dimension: ?Dimension = null,
-    last_probe_kind: ?ProbeKind = null,
-    last_probe_baseline_goodput: f64 = 0,
-    h2d_growth_windows: u8 = 0,
-    ready_growth_windows: u8 = 0,
-    slow_source_observed: bool = false,
-    pressure_backoff_blocked_until_ns: u64 = 0,
-    performance_probe_blocked_until_ns: u64 = 0,
-    resource_probe_blocked_until_ns: u64 = 0,
-    last_dma_starvation_ns: u64 = 0,
-
-    const probe_byte_floor: u64 = 64 * 1024 * 1024;
-    const probe_time_floor_ns: u64 = 200 * std.time.ns_per_ms;
+    blocks: []Block,
+    segments: []Segment,
 
     fn init(
-        initial_dma_workers: usize,
-        max_dma_workers: usize,
-        initial_pinned_buffers: usize,
-        max_pinned_buffers: usize,
-        initial_read_workers: usize,
-        max_read_workers: usize,
-        max_staging_chunks: usize,
-        direct: bool,
-    ) AdaptiveLoadController {
-        return .{
-            .max_read_workers = max_read_workers,
-            .max_dma_workers = max_dma_workers,
-            .max_pinned_buffers = max_pinned_buffers,
-            .max_staging_chunks = max_staging_chunks,
-            .direct = direct,
-            .knobs = .{
-                .read_workers = initial_read_workers,
-                .dma_workers = initial_dma_workers,
-                .pinned_buffers = initial_pinned_buffers,
-                .staging_chunks = 0,
-            },
-        };
-    }
+        allocator: std.mem.Allocator,
+        dispatch_spans: DispatchSpans,
+        source_offset: usize,
+        request_len: usize,
+        block_size: usize,
+    ) !VectoredRequestPlan {
+        if (block_size == 0) return error.InvalidBlockSize;
+        const total = if (dispatch_spans.spans.len == 0) 0 else dispatch_spans.spans[dispatch_spans.spans.len - 1].end;
+        const request_end = std.math.add(usize, source_offset, request_len) catch return error.OutOfBounds;
+        if (source_offset > total or request_end > total) return error.OutOfBounds;
 
-    fn observe(self: *AdaptiveLoadController, sample: Sample) Decision {
-        if (sample.capacity_pending) return self.currentDecision();
-        const measured_goodput = sample.committed_goodput;
-        if (sample.slow_reads) self.slow_source_observed = true;
-        if (sample.dma_starvation_ratio > 0.10) self.last_dma_starvation_ns = sample.now_ns;
-        if (self.probe == null and measured_goodput > 0) {
-            self.stable_goodput = if (self.stable_goodput == 0)
-                measured_goodput
-            else
-                0.90 * self.stable_goodput + 0.10 * measured_goodput;
-            self.peak_goodput = @max(self.peak_goodput, self.stable_goodput);
-        }
-
-        const lightly_loaded = self.knobs.dma_workers <= 2 and sample.pinned_wait_ratio <= 0.02 and
-            sample.dma_completion_wait_ratio <= 0.02 and sample.h2d_queue_ratio <= 0.10 and
-            sample.ready_queue_ratio <= 0.10;
-        if (sample.dma_latency_reliable and sample.transfer_latency_us > 0) {
-            if (self.latency_baseline_us == 0 and lightly_loaded) {
-                self.latency_baseline_us = sample.transfer_latency_us;
-            } else if (lightly_loaded) {
-                self.latency_baseline_us = 0.95 * self.latency_baseline_us + 0.05 * sample.transfer_latency_us;
-            }
-        }
-
-        const latency_inflation = if (sample.dma_latency_reliable and sample.transfer_latency_us > 0 and self.latency_baseline_us > 0)
-            @max(0, sample.transfer_latency_us / self.latency_baseline_us - 1)
-        else
-            0;
-        // Concurrent transfers naturally take longer even when aggregate
-        // completion throughput improves. Treat latency growth as pressure only
-        // when a queue or completion wait shows that the transfer stage is
-        // actually contended.
-        const transfer_stage_busy = sample.dma_starvation_ratio <= 0.10;
-        const latency_pressure = if (transfer_stage_busy and (sample.dma_completion_wait_ratio > 0.10 or
-            sample.h2d_queue_ratio > 0.25))
-            latency_inflation
-        else
-            0;
-        const dma_completion_pressure = if (transfer_stage_busy) sample.dma_completion_wait_ratio else 0;
-        if (measured_goodput > 0 and sample.h2d_growth_ratio > 0.20) {
-            self.h2d_growth_windows = @min(2, self.h2d_growth_windows +| 1);
-        } else {
-            self.h2d_growth_windows = 0;
-        }
-        const persistent_h2d_growth = if (self.h2d_growth_windows >= 2) sample.h2d_growth_ratio else 0;
-        const h2d_pressure = @max(
-            latency_pressure,
-            @max(dma_completion_pressure, @max(sample.h2d_growth_ratio, @max(0, sample.h2d_queue_ratio - 0.75))),
-        );
-        const h2d_backoff_pressure = @max(
-            latency_pressure,
-            @max(dma_completion_pressure, @max(persistent_h2d_growth, @max(0, sample.h2d_queue_ratio - 0.75))),
-        );
-        if (measured_goodput > 0 and sample.ready_growth_ratio > 0.20) {
-            self.ready_growth_windows = @min(2, self.ready_growth_windows +| 1);
-        } else {
-            self.ready_growth_windows = 0;
-        }
-        // A staged read naturally arrives as a whole block. At small limits a
-        // single arrival is a large growth ratio even when the DMA lane drains
-        // it in the next window, so only sustained growth is pressure.
-        const persistent_ready_growth = if (self.ready_growth_windows >= 2) sample.ready_growth_ratio else 0;
-        const ready_pressure = @max(persistent_ready_growth, @max(sample.ready_age_pressure, @max(0, sample.ready_queue_ratio - 0.75)));
-        // Admission wait means the configured read capacity is in demand, and
-        // request latency normally rises with useful source parallelism. Only
-        // buffered data that the DMA stage cannot drain is read-side pressure.
-        // A synchronized batch of slow reads can briefly fill the ready queue
-        // while the DMA stage remains idle between batches. That is source
-        // burstiness, not excess read capacity. Back reads off only when the
-        // transfer stage is being kept continuously fed.
-        const read_queue_pressure = if (sample.dma_starvation_ratio <= 0.10 and !self.slow_source_observed) ready_pressure else 0;
-        const read_pressure_reason: Decision.RollbackReason = if (ready_pressure > 0.10) .ready_queue_growth else .read_pressure;
-        const ready_per_dma: usize = if (ready_pressure > 0.20) 1 else 2;
-        const pressured_staging_target = if (ready_pressure > 0.10)
-            @min(self.knobs.staging_chunks, self.knobs.dma_workers *| ready_per_dma)
-        else
-            self.knobs.staging_chunks;
-        const minimum_read_workers = if (self.direct) @min(self.max_read_workers, self.knobs.dma_workers) else 1;
-
-        if ((measured_goodput > 0 or self.probe != null) and h2d_backoff_pressure > 0.20) {
-            const reason: Decision.RollbackReason = .h2d_pressure;
-            if (self.probe) |probe| {
-                return self.restoreProbeBaseline(probe, sample.now_ns, reason);
-            }
-            if (sample.now_ns < self.pressure_backoff_blocked_until_ns) return self.currentDecision();
-            if (self.knobs.dma_workers > 1) {
-                self.mode = .steady;
-                self.epoch += 1;
-                self.knobs.dma_workers = @max(@as(usize, 1), @as(usize, @intFromFloat(@floor(0.70 * @as(f64, @floatFromInt(self.knobs.dma_workers))))));
-                self.knobs.pinned_buffers = @max(self.minimumPinnedBuffers(self.knobs.dma_workers), @min(self.knobs.pinned_buffers, self.max_pinned_buffers));
-                self.last_probe_ns = sample.now_ns;
-                self.performance_probe_blocked_until_ns = sample.now_ns +| 2 * std.time.ns_per_s;
-                return self.decision(.dma_backoff, true, false, false, reason);
-            }
-        }
-
-        const ready_pressure_rejects_probe = if (self.probe) |probe| rejectsReadyPressure(probe) else false;
-        if ((measured_goodput > 0 or self.probe != null) and read_queue_pressure > 0.10 and
-            (ready_pressure_rejects_probe or
-                (self.probe == null and (self.knobs.read_workers > minimum_read_workers or pressured_staging_target < self.knobs.staging_chunks))))
-        {
-            if (self.probe) |probe| {
-                return self.restoreProbeBaseline(probe, sample.now_ns, read_pressure_reason);
-            }
-            if (sample.now_ns < self.pressure_backoff_blocked_until_ns) return self.currentDecision();
-            self.mode = .steady;
-            self.epoch += 1;
-            const beta: f64 = if (read_queue_pressure > 0.20) 0.70 else 0.85;
-            const old_read_workers = self.knobs.read_workers;
-            if (self.knobs.read_workers > minimum_read_workers) {
-                self.knobs.read_workers = @max(minimum_read_workers, @as(usize, @intFromFloat(@floor(beta * @as(f64, @floatFromInt(self.knobs.read_workers))))));
-            }
-            var trim_staging = false;
-            if (ready_pressure > 0.10 and self.knobs.staging_chunks > 0) {
-                const staging_target = @min(self.knobs.staging_chunks, self.knobs.dma_workers *| ready_per_dma);
-                trim_staging = staging_target < self.knobs.staging_chunks;
-                self.knobs.staging_chunks = staging_target;
-            }
-            self.last_probe_ns = sample.now_ns;
-            self.performance_probe_blocked_until_ns = sample.now_ns +| 2 * std.time.ns_per_s;
-            const action: Decision.Action = if (self.knobs.read_workers < old_read_workers) .read_backoff else .staging_backoff;
-            return self.decision(action, true, false, trim_staging, read_pressure_reason);
-        }
-
-        if (self.probe) |probe| {
-            const pinned_probe_pressure = probe.dimension == .pinned and sample.pinned_wait_ratio >= 0.10;
-            if (probe.dimension == .pinned and sample.pinned_wait_ratio > 0.20) {
-                return self.restoreProbeBaseline(probe, sample.now_ns, .pinned_wait);
-            }
-            // Capacity activation and pinned-buffer growth are intentionally
-            // outside the probe epoch, but the first active window can still
-            // contain lane turnover and a burst drained from the old queue.
-            // Require a short sustained interval before comparing goodput.
-            if (sample.probe_committed_bytes < probe_byte_floor or sample.probe_elapsed_ns < probe_time_floor_ns) {
-                return self.currentDecision();
-            }
-
-            const pressure_ok = h2d_backoff_pressure < 0.10 and
-                (!rejectsReadyPressure(probe) or read_queue_pressure < 0.10) and
-                !pinned_probe_pressure;
-            // Epoch bytes prove the candidate has carried real work. Once it
-            // has been active for a sustained interval, use the better of the
-            // epoch-attributed and post-activation aggregate averages: read
-            // probes can have old-epoch staged blocks ahead of their first
-            // tagged commit even though aggregate throughput already improved.
-            // Avoid a single current window here; short source windows are
-            // bursty enough to cause false rollback/retry cycles.
-            const candidate_goodput = switch (probe.kind) {
-                .increase => @max(sample.probe_goodput, sample.probe_aggregate_goodput),
-                .reduce_resource => sample.probe_goodput,
+        var blocks: std.ArrayList(Block) = .empty;
+        errdefer blocks.deinit(allocator);
+        var segments: std.ArrayList(Segment) = .empty;
+        errdefer segments.deinit(allocator);
+        if (request_len == 0) {
+            const owned_blocks = try blocks.toOwnedSlice(allocator);
+            errdefer allocator.free(owned_blocks);
+            return .{
+                .blocks = owned_blocks,
+                .segments = try segments.toOwnedSlice(allocator),
             };
-            const resource_reference = @max(probe.baseline_goodput, self.peak_goodput);
-            // Read/staging increases are only started in response to source
-            // starvation. On a slow source, a single drain burst can make the
-            // evaluation window look non-starved and deceptively fast, so let
-            // the startup probe fill the bounded read-ahead budget. Steady
-            // resource probes can shrink it again once DMA remains fed.
-            const slow_source_underfilled = self.slow_source_observed and probe.kind == .increase and
-                (probe.dimension == .read or probe.dimension == .staging);
-            const keep = switch (probe.kind) {
-                .increase => (candidate_goodput >= probe.baseline_goodput * 1.03 or slow_source_underfilled) and pressure_ok,
-                .reduce_resource => candidate_goodput >= resource_reference * 0.97 and pressure_ok and sample.dma_starvation_ratio <= 0.10,
-            };
-
-            if (keep) {
-                self.probe = null;
-                self.last_probe_ns = sample.now_ns;
-                if (probe.kind == .reduce_resource) self.last_resource_probe_ns = sample.now_ns;
-                if (probe.kind == .reduce_resource or probe.dimension == .dma) self.mode = .steady;
-                self.stable_goodput = candidate_goodput;
-                self.peak_goodput = @max(self.peak_goodput, candidate_goodput);
-                return self.decision(probeAction(probe.dimension, probe.kind, true), false, false, false, .none);
-            }
-
-            const reason: Decision.RollbackReason = if (!pressure_ok)
-                if (pinned_probe_pressure)
-                    .pinned_wait
-                else if (rejectsReadyPressure(probe) and read_queue_pressure >= 0.10)
-                    read_pressure_reason
-                else
-                    .h2d_pressure
-            else if (probe.kind == .reduce_resource and sample.dma_starvation_ratio > 0.10)
-                .dma_starvation
-            else
-                .gain_below_threshold;
-            return self.restoreProbeBaseline(probe, sample.now_ns, reason);
         }
 
-        if (!sample.allow_probe) return self.currentDecision();
-        const read_capacity_demand = sample.read_capacity_demand or sample.reads_saturated;
-        if (measured_goodput <= 0) {
-            if ((sample.slow_reads or sample.source_stalled) and read_capacity_demand and read_queue_pressure < 0.10) {
-                const candidate = self.readAheadCandidate() orelse return self.currentDecision();
-                self.epoch += 1;
-                self.last_probe_dimension = if (candidate.staging_chunks > self.knobs.staging_chunks) .staging else .read;
-                self.last_probe_kind = .increase;
-                self.last_probe_baseline_goodput = 0;
-                self.last_probe_ns = sample.now_ns;
-                self.knobs = candidate;
-                return self.decision(.read_ahead_bootstrap, true, false, false, .none);
-            }
-            return self.currentDecision();
-        }
+        var builders: [Platform.MAX_NUM_DEVICES]Builder = undefined;
+        var builder_count: usize = 0;
+        var cursor = source_offset;
+        var span_index = dispatch_spans.spanIndexAt(cursor) orelse return error.OutOfBounds;
+        while (cursor < request_end) {
+            const span = dispatch_spans.spans[span_index];
+            const span_offset = cursor - span.start;
+            var remaining = @min(request_end, span.end) - cursor;
+            const writer_mask = dispatch_spans.writerMask(span);
+            const destination = span.writer_offset + span_offset;
 
-        const performance_probe_due = sample.now_ns >= self.performance_probe_blocked_until_ns and
-            (self.mode == .startup or sample.now_ns -| self.last_probe_ns >= 500 * std.time.ns_per_ms);
-        const performance_baseline = if (self.stable_goodput > 0) self.stable_goodput else measured_goodput;
-        const source_capacity_exercised = sample.reads_saturated or sample.slow_reads;
-        // Once read fanout is already much wider than the DMA stage, balance
-        // the pipeline before doubling pageable memory again. This also stops
-        // a failed high-read probe from monopolizing every probe opportunity.
-        const read_fanout_sufficient = self.knobs.dma_workers < self.max_dma_workers and
-            self.knobs.read_workers >= self.knobs.dma_workers *| 4;
-        if (performance_probe_due and !read_fanout_sufficient and sample.dma_starvation_ratio > 0.10 and read_capacity_demand and read_queue_pressure < 0.10) {
-            if (self.readAheadCandidate()) |candidate| {
-                const dimension: Dimension = if (candidate.staging_chunks > self.knobs.staging_chunks) .staging else .read;
-                // Saturated fast direct reads justify more direct admission,
-                // but not an extra host copy. Only exercise pageable staging
-                // after a representative storage read is itself slow.
-                if (source_capacity_exercised and (dimension != .staging or sample.slow_reads)) {
-                    return self.startProbe(dimension, .increase, candidate, performance_baseline, sample.now_ns);
-                }
-            }
-        }
-
-        if (self.mode == .steady and sample.dma_starvation_ratio <= 0.10 and
-            self.knobs.read_workers > self.knobs.dma_workers and
-            sample.now_ns >= self.resource_probe_blocked_until_ns and
-            sample.now_ns -| self.last_dma_starvation_ns >= 2 * std.time.ns_per_s and
-            sample.now_ns -| self.last_resource_probe_ns >= 2 * std.time.ns_per_s)
-        {
-            const resource_baseline = @max(self.peak_goodput, self.stable_goodput);
-            var candidate = self.knobs;
-            candidate.read_workers = @max(
-                self.knobs.dma_workers,
-                std.math.divCeil(usize, self.knobs.read_workers, 2) catch unreachable,
-            );
-            candidate.staging_chunks = if (self.knobs.staging_chunks == 0)
-                self.minimumStagingChunks(candidate.read_workers, candidate.dma_workers)
-            else
-                @min(self.max_staging_chunks, candidate.read_workers);
-            return self.startProbe(.read, .reduce_resource, candidate, resource_baseline, sample.now_ns);
-        }
-
-        if (self.mode == .steady and sample.dma_starvation_ratio <= 0.10 and
-            sample.now_ns >= self.resource_probe_blocked_until_ns and
-            sample.now_ns -| self.last_dma_starvation_ns >= 2 * std.time.ns_per_s and
-            sample.now_ns -| self.last_resource_probe_ns >= 2 * std.time.ns_per_s)
-        {
-            const resource_baseline = @max(self.peak_goodput, self.stable_goodput);
-            const minimum_buffers = self.minimumPinnedBuffers(self.knobs.dma_workers);
-            if (self.knobs.pinned_buffers > minimum_buffers and self.knobs.pinned_buffers - 1 >= sample.admitted_dma_writers) {
-                var candidate = self.knobs;
-                candidate.pinned_buffers -= 1;
-                return self.startProbe(.pinned, .reduce_resource, candidate, resource_baseline, sample.now_ns);
-            }
-            const minimum_staging = self.minimumStagingChunks(self.knobs.read_workers, self.knobs.dma_workers);
-            if (self.knobs.staging_chunks > minimum_staging) {
-                var candidate = self.knobs;
-                candidate.staging_chunks -= 1;
-                return self.startProbe(.staging, .reduce_resource, candidate, resource_baseline, sample.now_ns);
-            }
-            if (self.knobs.dma_workers > 1) {
-                var candidate = self.knobs;
-                candidate.dma_workers = @max(
-                    @as(usize, 1),
-                    self.knobs.dma_workers - @max(@as(usize, 1), std.math.sqrt(self.knobs.dma_workers)),
-                );
-                return self.startProbe(.dma, .reduce_resource, candidate, resource_baseline, sample.now_ns);
-            }
-        }
-
-        const unused_direct_read_capacity = self.knobs.read_workers > self.knobs.dma_workers and
-            sample.admitted_dma_writers >= self.knobs.dma_workers and
-            !sample.reads_saturated and sample.dma_lane_capacity_available;
-        const direct_probe_demand = self.direct and self.knobs.staging_chunks == 0 and sample.read_goodput > 0 and
-            (sample.reads_saturated or sample.dma_starvation_ratio <= 0.10 or unused_direct_read_capacity);
-        const staged_dma_probe_demand = sample.dma_saturated and (!self.slow_source_observed or
-            self.knobs.staging_chunks == 0 or sample.now_ns -| self.last_dma_starvation_ns >= 2 * std.time.ns_per_s);
-        if (performance_probe_due and (staged_dma_probe_demand or direct_probe_demand) and h2d_pressure < 0.10) {
-            if (self.knobs.dma_workers < self.max_dma_workers) {
-                var candidate = self.knobs;
-                const step = if (self.knobs.dma_workers <= 2)
-                    self.knobs.dma_workers
-                else if (self.mode == .startup)
-                    @max(@as(usize, 4), std.math.sqrt(self.knobs.dma_workers))
-                else
-                    @max(@as(usize, 1), std.math.sqrt(self.knobs.dma_workers));
-                candidate.dma_workers = @min(self.max_dma_workers, self.knobs.dma_workers + step);
-                if (self.direct) candidate.read_workers = @max(
-                    candidate.read_workers,
-                    @min(self.max_read_workers, candidate.dma_workers),
-                );
-                candidate.pinned_buffers = @max(candidate.pinned_buffers, self.minimumPinnedBuffers(candidate.dma_workers));
-                return self.startProbe(.dma, .increase, candidate, performance_baseline, sample.now_ns);
-            }
-            if (sample.pinned_wait_ratio > 0.05 and self.knobs.pinned_buffers < self.max_pinned_buffers) {
-                var candidate = self.knobs;
-                candidate.pinned_buffers += 1;
-                return self.startProbe(.pinned, .increase, candidate, performance_baseline, sample.now_ns);
-            }
-        }
-
-        if (self.mode == .startup and h2d_pressure >= 0.10) return self.currentDecision();
-        self.mode = .steady;
-        return self.currentDecision();
-    }
-
-    fn startProbe(self: *AdaptiveLoadController, dimension: Dimension, kind: ProbeKind, candidate: Knobs, baseline_goodput: f64, now_ns: u64) Decision {
-        self.epoch += 1;
-        self.h2d_growth_windows = 0;
-        self.ready_growth_windows = 0;
-        self.last_probe_dimension = dimension;
-        self.last_probe_kind = kind;
-        self.last_probe_baseline_goodput = baseline_goodput;
-        self.probe = .{
-            .dimension = dimension,
-            .kind = kind,
-            .baseline = self.knobs,
-            .candidate = candidate,
-            .epoch = self.epoch,
-            .baseline_goodput = baseline_goodput,
-        };
-        self.knobs = candidate;
-        self.last_probe_ns = now_ns;
-        return self.decision(probeAction(dimension, kind, null), true, false, false, .none);
-    }
-
-    fn minimumPinnedBuffers(self: *const AdaptiveLoadController, dma_workers: usize) usize {
-        if (!self.direct) return self.max_pinned_buffers;
-        return @min(self.max_pinned_buffers, dma_workers + 1);
-    }
-
-    fn minimumStagingChunks(self: *const AdaptiveLoadController, read_workers: usize, dma_workers: usize) usize {
-        return @min(self.max_staging_chunks, read_workers -| dma_workers);
-    }
-
-    fn readAheadCandidate(self: *const AdaptiveLoadController) ?Knobs {
-        const useful_read_cap = @min(self.max_read_workers, self.knobs.dma_workers +| self.max_staging_chunks);
-        if (self.knobs.read_workers >= useful_read_cap) return null;
-
-        var candidate = self.knobs;
-        candidate.read_workers = @min(
-            useful_read_cap,
-            @max(self.knobs.read_workers + 1, self.knobs.read_workers *| 2),
-        );
-        const required_staging = if (self.knobs.staging_chunks == 0)
-            self.minimumStagingChunks(candidate.read_workers, candidate.dma_workers)
-        else
-            @min(self.max_staging_chunks, candidate.read_workers);
-        candidate.staging_chunks = @max(self.knobs.staging_chunks, required_staging);
-        return candidate;
-    }
-
-    fn decision(
-        self: *const AdaptiveLoadController,
-        action: Decision.Action,
-        changed: bool,
-        trim_pinned: bool,
-        trim_staging: bool,
-        reason: Decision.RollbackReason,
-    ) Decision {
-        return .{
-            .knobs = self.knobs,
-            .epoch = self.epoch,
-            .changed = changed,
-            .trim_pinned = trim_pinned,
-            .trim_staging = trim_staging,
-            .action = action,
-            .reason = reason,
-        };
-    }
-
-    fn currentDecision(self: *const AdaptiveLoadController) Decision {
-        return self.decision(.none, false, false, false, .none);
-    }
-
-    fn rollbackTimedOutProbe(self: *AdaptiveLoadController, now_ns: u64, published_epoch: u64) ?Decision {
-        const probe = self.probe orelse return null;
-        self.epoch = published_epoch;
-        return self.restoreProbeBaseline(probe, now_ns, .capacity_not_exercised);
-    }
-
-    fn restoreProbeBaseline(
-        self: *AdaptiveLoadController,
-        probe: Probe,
-        now_ns: u64,
-        reason: Decision.RollbackReason,
-    ) Decision {
-        self.probe = null;
-        self.knobs = probe.baseline;
-        self.mode = .steady;
-        self.last_probe_ns = now_ns;
-        if (probe.kind == .reduce_resource) {
-            self.last_resource_probe_ns = now_ns;
-            self.resource_probe_blocked_until_ns = now_ns +| 5 * std.time.ns_per_s;
-        }
-        self.h2d_growth_windows = 0;
-        self.pressure_backoff_blocked_until_ns = now_ns +| 250 * std.time.ns_per_ms;
-        if (probe.kind == .increase) self.performance_probe_blocked_until_ns = now_ns +| 2 * std.time.ns_per_s;
-        return self.decision(
-            probeAction(probe.dimension, probe.kind, false),
-            true,
-            probe.kind == .increase and probe.candidate.pinned_buffers > probe.baseline.pinned_buffers,
-            probe.kind == .increase and probe.candidate.staging_chunks > probe.baseline.staging_chunks,
-            reason,
-        );
-    }
-
-    fn rejectsReadyPressure(probe: Probe) bool {
-        return probe.kind == .reduce_resource or probe.dimension == .read or probe.dimension == .staging;
-    }
-
-    fn probeAction(dimension: Dimension, kind: ProbeKind, kept: ?bool) Decision.Action {
-        return switch (dimension) {
-            .read => if (kept == null) .read_probe_start else if (kept.?) .read_probe_keep else .read_probe_rollback,
-            .dma => if (kept == null) .dma_probe_start else if (kept.?) .dma_probe_keep else .dma_probe_rollback,
-            .pinned => switch (kind) {
-                .increase => if (kept == null) .pinned_probe_start else if (kept.?) .pinned_probe_keep else .pinned_probe_rollback,
-                .reduce_resource => if (kept == null) .pinned_reduce_start else if (kept.?) .pinned_reduce_keep else .pinned_reduce_rollback,
-            },
-            .staging => switch (kind) {
-                .increase => if (kept == null) .staging_probe_start else if (kept.?) .staging_probe_keep else .staging_probe_rollback,
-                .reduce_resource => if (kept == null) .staging_reduce_start else if (kept.?) .staging_reduce_keep else .staging_reduce_rollback,
-            },
-        };
-    }
-};
-
-const AdaptiveLoadRuntime = struct {
-    const ProbeActivation = struct {
-        epoch: u64,
-        dimension: AdaptiveLoadController.Dimension,
-        kind: AdaptiveLoadController.ProbeKind,
-        baseline: AdaptiveLoadController.Knobs,
-        candidate: AdaptiveLoadController.Knobs,
-        installed_at: std.Io.Timestamp,
-        controller_now_ns: u64,
-    };
-
-    const ProbeTransition = enum { none, activated, rolled_back };
-
-    controller: AdaptiveLoadController,
-    pipeline: ?*AdaptivePipelineContext = null,
-    dma_group: *stdx.Io.LimitedGroup,
-    read_group: *stdx.Io.LimitedGroup,
-    pools: []mem.DynamicBufferPool,
-    dma_allocators: []const mem.DmaAllocator,
-    staging_pool: ?*mem.DynamicBufferPool,
-    staging_allocator: std.mem.Allocator,
-    metrics: *LoadMetrics,
-    transfer_quantum_size: usize,
-    pinned_buffer_size: usize,
-    read_chunk_size: usize,
-    total_logical_bytes: u64,
-    total_transfers: usize,
-    probe_started: std.Io.Timestamp,
-    probe_committed_baseline: u64 = 0,
-    pending_probe_activation: ?ProbeActivation = null,
-    done: std.atomic.Value(bool) = .init(false),
-
-    fn run(self: *AdaptiveLoadRuntime, io: std.Io) std.Io.Cancelable!void {
-        const started: std.Io.Timestamp = .now(io, .awake);
-        var window_started = started;
-        var previous = self.metrics.snapshot();
-        var previous_queue = previous.submitted_bytes -| previous.committed_bytes;
-        var last_idle_log_ns: u64 = 0;
-        load_log.debug("controller started: mode={s}, reads={d}/{d}, dma={d}/{d}, pinned_buffers={d}/{d}, staging={d}/{d}, transfers={d}, logical_bytes={Bi:.2}", .{
-            @tagName(self.controller.mode),
-            self.controller.knobs.read_workers,
-            self.controller.max_read_workers,
-            self.controller.knobs.dma_workers,
-            self.controller.max_dma_workers,
-            self.controller.knobs.pinned_buffers,
-            self.controller.max_pinned_buffers,
-            self.controller.knobs.staging_chunks,
-            self.controller.max_staging_chunks,
-            self.total_transfers,
-            self.total_logical_bytes,
-        });
-        defer {
-            const final = self.metrics.snapshot();
-            load_log.debug("controller stopped: mode={s}, reads={d}, dma={d}, pinned_buffers={d}, staging={d}, completed={d}/{d}, read={Bi:.2}, direct={Bi:.2}, staged={Bi:.2}, submitted={Bi:.2}, committed={Bi:.2}", .{
-                @tagName(self.controller.mode),
-                self.controller.knobs.read_workers,
-                self.controller.knobs.dma_workers,
-                self.controller.knobs.pinned_buffers,
-                self.controller.knobs.staging_chunks,
-                final.completed_transfers,
-                self.total_transfers,
-                final.storage_bytes,
-                final.direct_read_bytes,
-                final.staged_read_bytes,
-                final.submitted_bytes,
-                final.committed_bytes,
-            });
-        }
-
-        while (!self.done.load(.acquire)) {
-            try io.sleep(.fromMilliseconds(25), .awake);
-            if (self.done.load(.acquire)) break;
-            switch (self.activateProbeIfReady(io)) {
-                .none => {},
-                .activated, .rolled_back => {
-                    self.metrics.resetReadHighWater();
-                    previous = self.metrics.snapshot();
-                    previous_queue = previous.submitted_bytes -| previous.committed_bytes;
-                    window_started = .now(io, .awake);
-                    continue;
-                },
-            }
-            self.trimSurplus(io);
-
-            const elapsed = window_started.untilNow(io, .awake);
-            const elapsed_ns: u64 = @intCast(@max(elapsed.nanoseconds, 0));
-            const startup = self.controller.mode == .startup;
-            const min_ns: u64 = if (startup) 50 * std.time.ns_per_ms else 100 * std.time.ns_per_ms;
-            const max_ns: u64 = if (startup) 100 * std.time.ns_per_ms else 250 * std.time.ns_per_ms;
-            if (elapsed_ns < min_ns) continue;
-
-            const snapshot = self.metrics.snapshot();
-            const delta = snapshot.sub(previous);
-            const pipeline_progress_bytes = @max(
-                delta.storage_bytes,
-                @max(delta.ordered_bytes, @max(delta.submitted_bytes, delta.committed_bytes)),
-            );
-            const progress_bytes = if (startup or self.controller.probe != null)
-                pipeline_progress_bytes
-            else
-                delta.committed_bytes;
-            const byte_floor: u64 = if (startup) 32 * 1024 * 1024 else 64 * 1024 * 1024;
-            if (progress_bytes == 0) {
-                const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
-                const active_reads_high_water = self.metrics.active_reads_high_water.load(.acquire);
-                const read_capacity_demand = self.hasReadCapacityDemand(snapshot);
-                const reads_saturated = @max(self.read_group.inFlight(), active_reads_high_water) >= self.controller.knobs.read_workers and
-                    read_capacity_demand;
-                if (startup and elapsed_ns >= max_ns and self.controller.probe == null and self.pending_probe_activation == null) {
-                    const old = self.controller.knobs;
-                    const ready_capacity = @max(@as(u64, @intCast(self.read_chunk_size)), @as(u64, @intCast(self.controller.knobs.staging_chunks *| self.read_chunk_size)));
-                    const decision = self.controller.observe(.{
-                        // A quiet window while the first writer or GPU runtime
-                        // is initializing is not evidence that storage needs
-                        // pageable read-ahead. Require the configured direct
-                        // reads to have actually been exercised.
-                        .source_stalled = reads_saturated,
-                        .read_capacity_demand = read_capacity_demand,
-                        .reads_saturated = reads_saturated,
-                        .ready_bytes = snapshot.ready_bytes,
-                        .ready_queue_ratio = @as(f64, @floatFromInt(snapshot.ready_bytes)) / @as(f64, @floatFromInt(ready_capacity)),
-                        .now_ns = now_ns,
-                    });
-                    if (decision.changed) {
-                        load_log.debug("source bootstrap: action={s}, epoch={d}, idle={d:.1}ms, reads={d}->{d}/{d} active={d} peak={d} demand={}, dma={d}/{d}, staging={d}->{d}/{d}", .{
-                            @tagName(decision.action),
-                            decision.epoch,
-                            @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms,
-                            old.read_workers,
-                            decision.knobs.read_workers,
-                            self.controller.max_read_workers,
-                            snapshot.active_reads,
-                            active_reads_high_water,
-                            read_capacity_demand,
-                            decision.knobs.dma_workers,
-                            self.controller.max_dma_workers,
-                            old.staging_chunks,
-                            decision.knobs.staging_chunks,
-                            self.controller.max_staging_chunks,
-                        });
-                        self.apply(io, decision);
-                        previous = snapshot;
-                        previous_queue = snapshot.submitted_bytes -| snapshot.committed_bytes;
-                        window_started = .now(io, .awake);
-                        continue;
-                    }
-                }
-                if (stalledProbeTimedOut(self.pending_probe_activation != null, elapsed_ns, pipeline_progress_bytes)) {
-                    if (self.controller.probe) |probe| {
-                        const published_epoch = self.metrics.config_epoch.load(.acquire);
-                        if (self.controller.rollbackTimedOutProbe(now_ns, published_epoch)) |decision| {
-                            load_log.debug("probe progress timeout: epoch={d}, dimension={s}, kind={s}, idle={d:.1}ms, rollback_epoch={d}, reads={d}, dma={d}, pinned_buffers={d}, staging={d}", .{
-                                probe.epoch,
-                                @tagName(probe.dimension),
-                                @tagName(probe.kind),
-                                @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms,
-                                decision.epoch,
-                                decision.knobs.read_workers,
-                                decision.knobs.dma_workers,
-                                decision.knobs.pinned_buffers,
-                                decision.knobs.staging_chunks,
-                            });
-                            self.apply(io, decision);
-                            previous = snapshot;
-                            previous_queue = snapshot.submitted_bytes -| snapshot.committed_bytes;
-                            window_started = .now(io, .awake);
-                            continue;
-                        }
-                    }
-                }
-                if (now_ns -| last_idle_log_ns >= 500 * std.time.ns_per_ms) {
-                    const pool_stats = self.poolStats();
-                    const staging_stats = self.stagingStats();
-                    const idle_dma_lanes = if (self.pipeline) |pipeline| pipeline.admitted_lanes.load(.acquire) else self.dma_group.inFlight();
-                    load_log.debug("waiting for progress: mode={s}, reads={d}/{d} active={d}, dma={d}/{d} lanes={d} open_writers={d}, completed={d}/{d}, pinned_buffers={d}inflight/{d}allocated/{d}limit, staging={d}inflight/{d}allocated/{d}limit ready={Bi:.2}, read={Bi:.2}, submitted={Bi:.2}, committed={Bi:.2}, h2d_queued={Bi:.2}", .{
-                        @tagName(self.controller.mode),
-                        self.controller.knobs.read_workers,
-                        self.controller.max_read_workers,
-                        self.read_group.inFlight(),
-                        self.controller.knobs.dma_workers,
-                        self.controller.max_dma_workers,
-                        idle_dma_lanes,
-                        snapshot.active_transfers,
-                        snapshot.completed_transfers,
-                        self.total_transfers,
-                        pool_stats.in_flight,
-                        pool_stats.allocated,
-                        self.controller.knobs.pinned_buffers * self.pools.len,
-                        staging_stats.in_flight,
-                        staging_stats.allocated,
-                        self.controller.knobs.staging_chunks,
-                        snapshot.ready_bytes,
-                        snapshot.storage_bytes,
-                        snapshot.submitted_bytes,
-                        snapshot.committed_bytes,
-                        snapshot.submitted_bytes -| snapshot.committed_bytes,
-                    });
-                    last_idle_log_ns = now_ns;
-                }
-                continue;
-            }
-            if (progress_bytes < byte_floor and elapsed_ns < max_ns) continue;
-
-            const seconds = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
-            const read_goodput = @as(f64, @floatFromInt(delta.storage_bytes)) / seconds;
-            const direct_read_goodput = @as(f64, @floatFromInt(delta.direct_read_bytes)) / seconds;
-            const staged_read_goodput = @as(f64, @floatFromInt(delta.staged_read_bytes)) / seconds;
-            const ordered_goodput = @as(f64, @floatFromInt(delta.ordered_bytes)) / seconds;
-            const raw_committed_goodput = @as(f64, @floatFromInt(delta.committed_bytes)) / seconds;
-            // Tiny tensors can complete while the first large writer is still
-            // starting. They are progress, but not a representative baseline
-            // for deciding that startup exploration is finished.
-            const committed_goodput = if (startup and delta.committed_bytes < 32 * 1024 * 1024)
-                0
-            else
-                raw_committed_goodput;
-            const copy_goodput = @as(f64, @floatFromInt(delta.staged_copy_bytes)) / seconds;
-            const copy_bandwidth = if (delta.staged_copy_ns == 0)
-                0
-            else
-                @as(f64, @floatFromInt(delta.staged_copy_bytes)) /
-                    (@as(f64, @floatFromInt(delta.staged_copy_ns)) / std.time.ns_per_s);
-            const ready_queue_age_us = if (delta.staged_copy_bytes == 0)
-                0
-            else
-                @as(f64, @floatFromInt(delta.weighted_ready_age_us)) / @as(f64, @floatFromInt(delta.staged_copy_bytes));
-            const read_latency_us = if (delta.storage_bytes == 0)
-                0
-            else
-                @as(f64, @floatFromInt(delta.weighted_read_latency_us)) / @as(f64, @floatFromInt(delta.storage_bytes));
-            const average_read_bytes = if (delta.read_operations > 0)
-                @as(f64, @floatFromInt(delta.storage_bytes)) / @as(f64, @floatFromInt(delta.read_operations))
-            else
-                0;
-            const read_service_bandwidth = if (read_latency_us > 0 and average_read_bytes > 0)
-                average_read_bytes / (read_latency_us / std.time.us_per_s)
-            else
-                0;
-            const representative_read_size = @min(self.read_chunk_size, 1024 * 1024);
-            const slow_reads = average_read_bytes >= @as(f64, @floatFromInt(representative_read_size)) and
-                read_service_bandwidth > 0 and read_service_bandwidth < 1.5 * 1024 * 1024 * 1024;
-            const transfer_latency_us = if (delta.committed_bytes == 0)
-                0
-            else
-                @as(f64, @floatFromInt(delta.weighted_transfer_latency_us)) / @as(f64, @floatFromInt(delta.committed_bytes));
-            const admitted_dma = if (self.pipeline) |pipeline| pipeline.admitted_lanes.load(.acquire) else self.controller.knobs.dma_workers;
-            const dma_lane_capacity_available = if (self.pipeline) |pipeline|
-                snapshot.active_transfers > admitted_dma or pipeline.next_tensor.load(.acquire) < pipeline.tensors.len
-            else
-                snapshot.completed_transfers < self.total_transfers;
-            const active_dma = @max(@as(usize, 1), admitted_dma);
-            const dma_capacity = @max(@as(usize, 1), self.controller.knobs.dma_workers);
-            const active_reads = @max(@as(usize, 1), self.controller.knobs.read_workers);
-            const pinned_wait_ratio = @as(f64, @floatFromInt(delta.pinned_buffer_wait_ns)) /
-                (@as(f64, @floatFromInt(elapsed_ns)) * @as(f64, @floatFromInt(active_dma)));
-            const dma_completion_wait_ratio = @as(f64, @floatFromInt(delta.dma_completion_wait_ns)) /
-                (@as(f64, @floatFromInt(elapsed_ns)) * @as(f64, @floatFromInt(active_dma)));
-            const staging_wait_ratio = @as(f64, @floatFromInt(delta.staging_wait_ns)) /
-                (@as(f64, @floatFromInt(elapsed_ns)) * @as(f64, @floatFromInt(active_reads)));
-            const read_admission_wait_ratio = @as(f64, @floatFromInt(delta.read_admission_wait_ns)) /
-                (@as(f64, @floatFromInt(elapsed_ns)) * @as(f64, @floatFromInt(active_reads)));
-            const dma_starvation_ratio = @min(
-                1,
-                @as(f64, @floatFromInt(delta.dma_starved_ns)) / @as(f64, @floatFromInt(elapsed_ns)),
-            );
-            const dma_utilization = @as(f64, @floatFromInt(delta.dma_work_ns)) /
-                (@as(f64, @floatFromInt(elapsed_ns)) * @as(f64, @floatFromInt(dma_capacity)));
-            const queue = snapshot.submitted_bytes -| snapshot.committed_bytes;
-            const queue_growth = queue -| previous_queue;
-            const queue_capacity = @max(
-                @as(u64, 1),
-                @as(u64, @intCast(self.controller.knobs.pinned_buffers *| self.pinned_buffer_size *| @max(@as(usize, 1), self.pools.len))),
-            );
-            const h2d_growth_ratio = @as(f64, @floatFromInt(queue_growth)) / @as(f64, @floatFromInt(queue_capacity));
-            const h2d_queue_ratio = @as(f64, @floatFromInt(queue)) / @as(f64, @floatFromInt(queue_capacity));
-            const ready_growth = snapshot.ready_bytes -| previous.ready_bytes;
-            const ready_capacity = @max(@as(u64, @intCast(self.read_chunk_size)), @as(u64, @intCast(self.controller.knobs.staging_chunks * self.read_chunk_size)));
-            const ready_growth_ratio = @as(f64, @floatFromInt(ready_growth)) / @as(f64, @floatFromInt(ready_capacity));
-            const ready_queue_ratio = @as(f64, @floatFromInt(snapshot.ready_bytes)) / @as(f64, @floatFromInt(ready_capacity));
-            const ready_age_pressure = @max(0, ready_queue_age_us / (250 * std.time.us_per_ms) - 1);
-
-            const remaining = self.total_logical_bytes -| snapshot.ordered_bytes;
-            const buffered_for_submission = snapshot.ordered_bytes -| snapshot.logical_submitted_bytes;
-            const progress_goodput = if (ordered_goodput > 0) ordered_goodput else read_goodput;
-            const drain_goodput = if (committed_goodput > 0) committed_goodput else self.controller.peak_goodput;
-            const source_seconds = if (remaining == 0)
-                0
-            else if (progress_goodput > 0)
-                @as(f64, @floatFromInt(remaining)) / progress_goodput
-            else
-                std.math.inf(f64);
-            const buffered_seconds = if (buffered_for_submission == 0)
-                0
-            else if (drain_goodput > 0)
-                @as(f64, @floatFromInt(buffered_for_submission)) / drain_goodput
-            else
-                std.math.inf(f64);
-            const queue_seconds = if (queue == 0)
-                0
-            else if (drain_goodput > 0)
-                @as(f64, @floatFromInt(queue)) / drain_goodput
-            else
-                std.math.inf(f64);
-            const remaining_ns: f64 = (source_seconds + buffered_seconds + queue_seconds) * std.time.ns_per_s;
-            const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
-            const active_reads_high_water = self.metrics.active_reads_high_water.load(.acquire);
-            const read_capacity_demand = self.hasReadCapacityDemand(snapshot);
-            const reads_saturated = @max(self.read_group.inFlight(), active_reads_high_water) >= self.controller.knobs.read_workers and
-                read_capacity_demand;
-            const ready_dma_demand = snapshot.ready_bytes > 0 and h2d_queue_ratio < 0.25 and
-                self.dma_group.inFlight() >= self.controller.knobs.dma_workers;
-            const dma_saturated = (dma_utilization >= 0.80 or ready_dma_demand) and
-                snapshot.completed_transfers < self.total_transfers;
-            const allow_probe = remaining_ns > 250 * std.time.ns_per_ms;
-            const pool_stats = self.poolStats();
-            const staging_stats = self.stagingStats();
-            const probe_elapsed_ns: u64 = if (snapshot.probe_first_ns > 0)
-                @intCast(@max(std.Io.Timestamp.fromNanoseconds(@intCast(snapshot.probe_first_ns)).untilNow(io, .awake).nanoseconds, 1))
-            else
-                @intCast(@max(self.probe_started.untilNow(io, .awake).nanoseconds, 1));
-            const probe_seconds = @as(f64, @floatFromInt(probe_elapsed_ns)) / std.time.ns_per_s;
-            const probe_active = self.controller.probe != null or self.pending_probe_activation != null;
-            const probe_committed_bytes = if (probe_active and self.pending_probe_activation == null) snapshot.probe_committed_bytes else 0;
-            const probe_goodput = @as(f64, @floatFromInt(probe_committed_bytes)) / probe_seconds;
-            const probe_activation_elapsed_ns: u64 = @intCast(@max(self.probe_started.untilNow(io, .awake).nanoseconds, 1));
-            const probe_activation_seconds = @as(f64, @floatFromInt(probe_activation_elapsed_ns)) / std.time.ns_per_s;
-            const probe_aggregate_bytes = if (probe_active and self.pending_probe_activation == null)
-                snapshot.committed_bytes -| self.probe_committed_baseline
-            else
-                0;
-            const probe_aggregate_goodput = @as(f64, @floatFromInt(probe_aggregate_bytes)) / probe_activation_seconds;
-            const probe_dimension = if (probe_active) if (self.controller.last_probe_dimension) |dimension| @tagName(dimension) else "none" else "none";
-            const probe_kind = if (probe_active) if (self.controller.last_probe_kind) |kind| @tagName(kind) else "none" else "none";
-            const probe_baseline_goodput = if (probe_active) self.controller.last_probe_baseline_goodput else 0;
-            const probe_candidate_goodput = if (self.controller.last_probe_kind == .increase)
-                @max(probe_goodput, probe_aggregate_goodput)
-            else
-                probe_goodput;
-            const probe_gain_pct = if (probe_baseline_goodput > 0)
-                (probe_candidate_goodput / probe_baseline_goodput - 1) * 100
-            else
-                0;
-
-            const old = self.controller.knobs;
-            var decision = self.controller.observe(.{
-                .read_goodput = read_goodput,
-                .committed_goodput = committed_goodput,
-                .probe_goodput = probe_goodput,
-                .probe_aggregate_goodput = probe_aggregate_goodput,
-                .probe_committed_bytes = probe_committed_bytes,
-                .probe_elapsed_ns = probe_elapsed_ns,
-                .capacity_pending = self.pending_probe_activation != null,
-                .read_latency_us = read_latency_us,
-                .read_admission_wait_ratio = read_admission_wait_ratio,
-                .transfer_latency_us = transfer_latency_us,
-                .dma_latency_reliable = delta.committed_bytes >= 32 * 1024 * 1024,
-                .pinned_wait_ratio = pinned_wait_ratio,
-                .dma_completion_wait_ratio = dma_completion_wait_ratio,
-                .staging_wait_ratio = staging_wait_ratio,
-                .dma_starvation_ratio = dma_starvation_ratio,
-                .ready_bytes = snapshot.ready_bytes,
-                .ready_queue_ratio = ready_queue_ratio,
-                .ready_age_pressure = ready_age_pressure,
-                .ready_growth_ratio = ready_growth_ratio,
-                .h2d_queue_ratio = h2d_queue_ratio,
-                .h2d_growth_ratio = h2d_growth_ratio,
-                .admitted_dma_writers = admitted_dma,
-                .dma_lane_capacity_available = dma_lane_capacity_available,
-                .slow_reads = slow_reads,
-                // Tiny metadata/tensor reads are pipeline progress, but they
-                // must not prevent startup fanout while every read slot is
-                // occupied and no representative DMA commit exists yet.
-                .source_stalled = startup and committed_goodput == 0 and reads_saturated and elapsed_ns >= max_ns,
-                .read_capacity_demand = read_capacity_demand,
-                .reads_saturated = reads_saturated,
-                .dma_saturated = dma_saturated,
-                .allow_probe = allow_probe,
-                .now_ns = now_ns,
-            });
-            if (decision.changed and self.pending_probe_activation != null and self.controller.probe == null) {
-                const published_epoch = self.metrics.config_epoch.load(.acquire);
-                self.controller.epoch = published_epoch;
-                decision.epoch = published_epoch;
-            }
-            load_log.debug("window control: action={s}, reason={s}, mode={s}, epoch={d}, elapsed={d:.1}ms, reads={d}->{d}/{d} active={d} peak={d} saturated={} demand={}, dma={d}->{d}/{d} lanes={d} open_writers={d} saturated={} lane_capacity={} utilization={d:.1}%, pinned_buffers={d}->{d}/{d} buffers={d}inflight/{d}allocated, staging={d}->{d}/{d} blocks={d}inflight/{d}allocated", .{
-                @tagName(decision.action),
-                @tagName(decision.reason),
-                @tagName(self.controller.mode),
-                decision.epoch,
-                @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_ms,
-                old.read_workers,
-                decision.knobs.read_workers,
-                self.controller.max_read_workers,
-                snapshot.active_reads,
-                active_reads_high_water,
-                reads_saturated,
-                read_capacity_demand,
-                old.dma_workers,
-                decision.knobs.dma_workers,
-                self.controller.max_dma_workers,
-                admitted_dma,
-                snapshot.active_transfers,
-                dma_saturated,
-                dma_lane_capacity_available,
-                dma_utilization * 100,
-                old.pinned_buffers,
-                decision.knobs.pinned_buffers,
-                self.controller.max_pinned_buffers,
-                pool_stats.in_flight,
-                pool_stats.allocated,
-                old.staging_chunks,
-                decision.knobs.staging_chunks,
-                self.controller.max_staging_chunks,
-                staging_stats.in_flight,
-                staging_stats.allocated,
-            });
-            load_log.debug("window throughput: ready={Bi:.2} occupancy={d:.1}% age={d:.1}us, read={d:.2}MiB/s direct_read={d:.2}MiB/s staged_read={d:.2}MiB/s ordered={d:.2}MiB/s, staged_copy={d:.2}MiB/s copy_bandwidth={d:.2}MiB/s, dma_submissions={d} committed={d:.2}MiB/s, read_latency={d:.1}us service={d:.2}MiB/s slow={} dma_latency={d:.1}us", .{
-                snapshot.ready_bytes,
-                ready_queue_ratio * 100,
-                ready_queue_age_us,
-                read_goodput / (1024 * 1024),
-                direct_read_goodput / (1024 * 1024),
-                staged_read_goodput / (1024 * 1024),
-                ordered_goodput / (1024 * 1024),
-                copy_goodput / (1024 * 1024),
-                copy_bandwidth / (1024 * 1024),
-                delta.dma_submissions,
-                committed_goodput / (1024 * 1024),
-                read_latency_us,
-                read_service_bandwidth / (1024 * 1024),
-                slow_reads,
-                transfer_latency_us,
-            });
-            load_log.debug("window pressure: read_wait={d:.1}% staging_wait={d:.1}% pinned_wait={d:.1}% dma_completion_wait={d:.1}% dma_starved={d:.1}%, h2d_queued={Bi:.2} occupancy={d:.1}% h2d_growth={d:.1}% ready_growth={d:.1}%, probe={s}/{s} epoch_bytes={Bi:.2} total_committed={Bi:.2} baseline={d:.2}MiB/s epoch_goodput={d:.2}MiB/s aggregate_goodput={d:.2}MiB/s gain={d:.1}%, remaining={Bi:.2} buffered={Bi:.2} remaining_est={d:.2}s probe_allowed={}", .{
-                read_admission_wait_ratio * 100,
-                staging_wait_ratio * 100,
-                pinned_wait_ratio * 100,
-                dma_completion_wait_ratio * 100,
-                dma_starvation_ratio * 100,
-                queue,
-                h2d_queue_ratio * 100,
-                h2d_growth_ratio * 100,
-                ready_growth_ratio * 100,
-                probe_dimension,
-                probe_kind,
-                probe_committed_bytes,
-                snapshot.committed_bytes,
-                probe_baseline_goodput / (1024 * 1024),
-                probe_goodput / (1024 * 1024),
-                probe_aggregate_goodput / (1024 * 1024),
-                probe_gain_pct,
-                remaining,
-                buffered_for_submission,
-                remaining_ns / std.time.ns_per_s,
-                allow_probe,
-            });
-            if (self.pipeline) |pipeline| {
-                const scheduling = pipeline.schedulingStats();
-                load_log.debug("pipeline concurrency: reads={d}/{d} direct_pending={d}/{d} direct_waiters={d} detached={d} prefetched={d}/{d} dma_ready={d} dma_lanes={d}/{d} probe_lanes={d} tensors_claimed={d}/{d}", .{
-                    self.read_group.inFlight(),
-                    self.controller.knobs.read_workers,
-                    scheduling.direct_reads_pending,
-                    self.controller.knobs.dma_workers,
-                    scheduling.direct_capacity_waiters,
-                    scheduling.detached_direct_sources,
-                    scheduling.prefetched_sources,
-                    self.controller.knobs.staging_chunks,
-                    scheduling.dma_ready_sources,
-                    admitted_dma,
-                    self.controller.knobs.dma_workers,
-                    scheduling.dma_probe_lanes,
-                    scheduling.claimed_tensors,
-                    pipeline.tensors.len,
-                });
-            }
-            if (decision.changed) {
-                self.apply(io, decision);
-                load_log.debug("limits updated: action={s}, reason={s}, epoch={d}, reads={d}->{d}, dma={d}->{d}, pinned_buffers={d}->{d}, staging={d}->{d}, trim_pinned={}, trim_staging={}", .{
-                    @tagName(decision.action),
-                    @tagName(decision.reason),
-                    decision.epoch,
-                    old.read_workers,
-                    decision.knobs.read_workers,
-                    old.dma_workers,
-                    decision.knobs.dma_workers,
-                    old.pinned_buffers,
-                    decision.knobs.pinned_buffers,
-                    old.staging_chunks,
-                    decision.knobs.staging_chunks,
-                    decision.trim_pinned,
-                    decision.trim_staging,
-                });
-            }
-
-            self.metrics.resetReadHighWater();
-            previous = snapshot;
-            previous_queue = queue;
-            window_started = .now(io, .awake);
-        }
-    }
-
-    fn stalledProbeTimedOut(pending_activation: bool, elapsed_ns: u64, progress_bytes: u64) bool {
-        return !pending_activation and progress_bytes == 0 and elapsed_ns >= 5 * std.time.ns_per_s;
-    }
-
-    fn hasReadCapacityDemand(self: *const AdaptiveLoadRuntime, snapshot: LoadMetrics.Snapshot) bool {
-        if (snapshot.completed_transfers >= self.total_transfers) return false;
-        if (self.pipeline) |pipeline| {
-            if (pipeline.hasUnclaimedTensors()) return true;
-        }
-        const ready_target: u64 = @intCast(self.controller.knobs.dma_workers *| self.read_chunk_size);
-        return snapshot.ready_bytes < @max(@as(u64, 1), ready_target);
-    }
-
-    fn apply(self: *AdaptiveLoadRuntime, io: std.Io, decision: AdaptiveLoadController.Decision) void {
-        const epoch_changed = decision.epoch != self.metrics.config_epoch.load(.acquire);
-        const read_limit_changed = decision.knobs.read_workers != self.read_group.currentLimit();
-        self.pending_probe_activation = if (self.controller.probe) |probe|
-            if (probe.epoch == decision.epoch) .{
-                .epoch = probe.epoch,
-                .dimension = probe.dimension,
-                .kind = probe.kind,
-                .baseline = probe.baseline,
-                .candidate = probe.candidate,
-                .installed_at = .now(io, .awake),
-                .controller_now_ns = self.controller.last_probe_ns,
-            } else null
-        else
-            null;
-
-        if (read_limit_changed) self.metrics.resetReadHighWater();
-        if (self.pending_probe_activation) |activation| {
-            if (activation.dimension == .dma) {
-                if (self.pipeline) |pipeline| {
-                    for (pipeline.lanes) |*lane| lane.last_dma_submission_epoch.store(0, .release);
-                    pipeline.dma_probe_capacity_epoch.store(activation.epoch, .release);
-                }
-            }
-        } else if (self.controller.probe == null) {
-            if (self.pipeline) |pipeline| pipeline.dma_probe_capacity_epoch.store(0, .release);
-        }
-
-        self.read_group.setLimit(io, decision.knobs.read_workers);
-        self.metrics.staging_limit.store(decision.knobs.staging_chunks, .release);
-        if (self.controller.direct) {
-            for (self.pools, self.dma_allocators, 0..) |*pool, *dma_allocator, device_index| {
-                self.setPinnedPoolLimit(pool, io, decision.knobs.pinned_buffers, device_index);
-                if (decision.trim_pinned) self.trimPinnedPool(pool, dma_allocator, io, decision.knobs.pinned_buffers, device_index);
-            }
-            if (self.staging_pool) |pool| {
-                if (decision.knobs.staging_chunks > 0) pool.setLimit(io, decision.knobs.staging_chunks);
-                if (decision.trim_staging) self.trimStagingPool(io, decision.knobs.staging_chunks);
-            }
-        }
-        self.dma_group.setLimit(io, decision.knobs.dma_workers);
-        if (epoch_changed and self.pending_probe_activation == null) {
-            self.metrics.publishProbeEpoch(io, decision.epoch);
-            self.probe_started = .now(io, .awake);
-        }
-        if (self.pipeline) |pipeline| {
-            pipeline.setDmaLaneLimit(decision.knobs.dma_workers);
-            pipeline.ensurePrefetch();
-            pipeline.fillDetachedReadAhead();
-        }
-    }
-
-    fn activateProbeIfReady(self: *AdaptiveLoadRuntime, io: std.Io) ProbeTransition {
-        const activation = self.pending_probe_activation orelse return .none;
-        if (!self.probeCapacityActive(activation)) {
-            const elapsed: u64 = @intCast(@max(activation.installed_at.untilNow(io, .awake).nanoseconds, 0));
-            // Capacity activation includes the source service time needed for
-            // the new lanes to reach their first DMA submission. A 500 ms
-            // deadline made every expansion impossible on a 1 s-latency S3
-            // source and caused an endless probe/rollback loop.
-            if (elapsed < 5 * std.time.ns_per_s) return .none;
-            const published_epoch = self.metrics.config_epoch.load(.acquire);
-            const decision = self.controller.rollbackTimedOutProbe(activation.controller_now_ns +| elapsed, published_epoch) orelse {
-                self.pending_probe_activation = null;
-                return .rolled_back;
-            };
-            load_log.debug("probe capacity timeout: epoch={d}, dimension={s}, kind={s}, rollback_epoch={d}, reads={d}, dma={d}, pinned_buffers={d}, staging={d}", .{
-                activation.epoch,
-                @tagName(activation.dimension),
-                @tagName(activation.kind),
-                decision.epoch,
-                decision.knobs.read_workers,
-                decision.knobs.dma_workers,
-                decision.knobs.pinned_buffers,
-                decision.knobs.staging_chunks,
-            });
-            self.apply(io, decision);
-            return .rolled_back;
-        }
-
-        self.probe_committed_baseline = self.metrics.committed_bytes.load(.acquire);
-        self.metrics.publishProbeEpoch(io, activation.epoch);
-        self.probe_started = .now(io, .awake);
-        self.pending_probe_activation = null;
-        if (activation.dimension == .dma) {
-            if (self.pipeline) |pipeline| pipeline.dma_probe_capacity_epoch.store(0, .release);
-        }
-        load_log.debug("probe capacity active: epoch={d}, dimension={s}, kind={s}, reads={d}, dma={d}, pinned_buffers={d}, staging={d}", .{
-            activation.epoch,
-            @tagName(activation.dimension),
-            @tagName(activation.kind),
-            activation.candidate.read_workers,
-            activation.candidate.dma_workers,
-            activation.candidate.pinned_buffers,
-            activation.candidate.staging_chunks,
-        });
-        return .activated;
-    }
-
-    fn probeCapacityActive(self: *AdaptiveLoadRuntime, activation: ProbeActivation) bool {
-        return switch (activation.dimension) {
-            .read => switch (activation.kind) {
-                .increase => self.metrics.active_reads_high_water.load(.acquire) >= activation.candidate.read_workers,
-                .reduce_resource => self.read_group.inFlight() <= activation.candidate.read_workers and
-                    (self.staging_pool == null or self.staging_pool.?.inFlight() <= activation.candidate.staging_chunks),
-            },
-            .dma => if (self.pipeline) |pipeline| blk: {
-                var exercised: usize = 0;
-                for (pipeline.lanes) |*lane| {
-                    if (lane.last_dma_submission_epoch.load(.acquire) == activation.epoch) exercised += 1;
-                }
-                break :blk exercised >= activation.candidate.dma_workers;
-            } else true,
-            .pinned => switch (activation.kind) {
-                .increase => blk: {
-                    for (self.pools) |*pool| {
-                        if (pool.allocatedBlocks() <= activation.baseline.pinned_buffers) break :blk false;
-                    }
-                    break :blk true;
-                },
-                .reduce_resource => blk: {
-                    for (self.pools) |*pool| {
-                        if (pool.currentLimit() > activation.candidate.pinned_buffers or pool.inFlight() > activation.candidate.pinned_buffers) break :blk false;
-                    }
-                    break :blk true;
-                },
-            },
-            .staging => blk: {
-                const pool = self.staging_pool orelse break :blk false;
-                break :blk switch (activation.kind) {
-                    .increase => pool.allocatedBlocks() >= activation.candidate.staging_chunks and
-                        (activation.candidate.read_workers <= activation.baseline.read_workers or
-                            self.metrics.active_reads_high_water.load(.acquire) >= activation.candidate.read_workers),
-                    .reduce_resource => pool.inFlight() <= activation.candidate.staging_chunks,
+            var builder_index: usize = 0;
+            while (builder_index < builder_count and builders[builder_index].writer_mask != writer_mask) : (builder_index += 1) {}
+            if (builder_index == builder_count) {
+                if (builder_count == builders.len) return error.TooManyDestinationSets;
+                builders[builder_count] = .{
+                    .writer_mask = writer_mask,
+                    .next_destination = destination,
                 };
-            },
+                builder_count += 1;
+            }
+            const builder = &builders[builder_index];
+            if (builder.next_destination != destination) return error.NonContiguousShardPlacement;
+
+            while (remaining > 0) {
+                if (builder.current_block == null or builder.used == block_size) {
+                    try blocks.append(allocator, .{
+                        .writer_mask = writer_mask,
+                        .destination_offset = builder.next_destination,
+                    });
+                    builder.current_block = blocks.items.len - 1;
+                    builder.used = 0;
+                }
+                const block_index = builder.current_block.?;
+                const take = @min(remaining, block_size - builder.used);
+                if (segments.items.len > 0) {
+                    const previous = &segments.items[segments.items.len - 1];
+                    if (previous.block_index == block_index and previous.block_offset + previous.len == builder.used) {
+                        previous.len += take;
+                    } else {
+                        try segments.append(allocator, .{
+                            .block_index = block_index,
+                            .block_offset = builder.used,
+                            .len = take,
+                        });
+                    }
+                } else {
+                    try segments.append(allocator, .{
+                        .block_index = block_index,
+                        .block_offset = builder.used,
+                        .len = take,
+                    });
+                }
+                builder.used += take;
+                builder.next_destination += take;
+                blocks.items[block_index].len += take;
+                remaining -= take;
+                cursor += take;
+            }
+            if (cursor == span.end) span_index += 1;
+        }
+
+        const owned_blocks = try blocks.toOwnedSlice(allocator);
+        errdefer allocator.free(owned_blocks);
+        return .{
+            .blocks = owned_blocks,
+            .segments = try segments.toOwnedSlice(allocator),
         };
     }
 
-    fn trimSurplus(self: *AdaptiveLoadRuntime, io: std.Io) void {
-        if (!self.controller.direct) return;
-        for (self.pools, self.dma_allocators, 0..) |*pool, *dma_allocator, device_index| {
-            self.setPinnedPoolLimit(pool, io, self.controller.knobs.pinned_buffers, device_index);
-            if (pool.allocatedBlocks() > self.controller.knobs.pinned_buffers) {
-                self.trimPinnedPool(pool, dma_allocator, io, self.controller.knobs.pinned_buffers, device_index);
-            }
-        }
-        if (self.staging_pool) |pool| {
-            const target = self.controller.knobs.staging_chunks;
-            if (pool.allocatedBlocks() > target) self.trimStagingPool(io, self.controller.knobs.staging_chunks);
-        }
-    }
-
-    fn setPinnedPoolLimit(
-        self: *AdaptiveLoadRuntime,
-        pool: *mem.DynamicBufferPool,
-        io: std.Io,
-        requested: usize,
-        device_index: usize,
-    ) void {
-        const admitted = if (self.pipeline) |pipeline| pipeline.admitted_lanes.load(.acquire) else 0;
-        const effective = @max(requested, @max(pool.inFlight(), admitted));
-        if (effective == pool.currentLimit()) return;
-        pool.setLimit(io, effective);
-        load_log.debug("pinned pool limit updated: device={d}, requested={d}, effective={d}, in_flight={d}", .{
-            device_index,
-            requested,
-            effective,
-            pool.inFlight(),
-        });
-    }
-
-    fn trimPinnedPool(
-        self: *AdaptiveLoadRuntime,
-        pool: *mem.DynamicBufferPool,
-        dma_allocator: *const mem.DmaAllocator,
-        io: std.Io,
-        target: usize,
-        device_index: usize,
-    ) void {
-        _ = self;
-        const before = pool.allocatedBlocks();
-        pool.trim(dma_allocator.allocator(), io, target);
-        const after = pool.allocatedBlocks();
-        if (after != before) {
-            load_log.debug("pinned pool trimmed: device={d}, allocated={d}->{d}, target={d}, in_flight={d}", .{
-                device_index,
-                before,
-                after,
-                target,
-                pool.inFlight(),
-            });
-        }
-    }
-
-    fn poolStats(self: *const AdaptiveLoadRuntime) struct { in_flight: usize, allocated: usize } {
-        var in_flight: usize = 0;
-        var allocated: usize = 0;
-        for (self.pools) |*pool| {
-            in_flight += pool.inFlight();
-            allocated += pool.allocatedBlocks();
-        }
-        return .{ .in_flight = in_flight, .allocated = allocated };
-    }
-
-    fn trimStagingPool(self: *AdaptiveLoadRuntime, io: std.Io, target_: usize) void {
-        const pool = self.staging_pool orelse return;
-        const before = pool.allocatedBlocks();
-        pool.trim(self.staging_allocator, io, target_);
-        const after = pool.allocatedBlocks();
-        if (after != before) {
-            load_log.debug("staging pool trimmed: allocated={d}->{d}, target={d}, in_flight={d}", .{ before, after, target_, pool.inFlight() });
-        }
-    }
-
-    fn stagingStats(self: *const AdaptiveLoadRuntime) struct { in_flight: usize, allocated: usize } {
-        const pool = self.staging_pool orelse return .{ .in_flight = 0, .allocated = 0 };
-        return .{ .in_flight = pool.inFlight(), .allocated = pool.allocatedBlocks() };
+    fn deinit(self: VectoredRequestPlan, allocator: std.mem.Allocator) void {
+        allocator.free(self.blocks);
+        allocator.free(self.segments);
     }
 };
 
-const PageableReadSlot = struct {
-    event: std.Io.Event = .unset,
-    buffer: ?[]u8 = null,
-    offset: u64 = 0,
-    len: usize = 0,
-    consumed: usize = 0,
-    epoch: u64 = 0,
-    err: ?anyerror = null,
-    ready_counted: bool = false,
-    scheduled_at: std.Io.Timestamp = undefined,
-    ready_at_ns: u64 = 0,
+const VectoredLoadMetrics = struct {
+    read_operations: std.atomic.Value(u64) = .init(0),
+    read_bytes: std.atomic.Value(u64) = .init(0),
+    read_ns: std.atomic.Value(u64) = .init(0),
+    pool_waits: std.atomic.Value(u64) = .init(0),
+    pool_wait_ns: std.atomic.Value(u64) = .init(0),
+    dma_submissions: std.atomic.Value(u64) = .init(0),
+    submitted_bytes: std.atomic.Value(u64) = .init(0),
+    committed_bytes: std.atomic.Value(u64) = .init(0),
+    dma_ns: std.atomic.Value(u64) = .init(0),
+    active_reads: std.atomic.Value(usize) = .init(0),
+    peak_reads: std.atomic.Value(usize) = .init(0),
 
-    fn reset(self: *PageableReadSlot) void {
-        self.event.reset();
-        self.buffer = null;
-        self.offset = 0;
-        self.len = 0;
-        self.consumed = 0;
-        self.epoch = 0;
-        self.err = null;
-        self.ready_counted = false;
-        self.ready_at_ns = 0;
+    fn beginRead(self: *VectoredLoadMetrics) void {
+        const active = self.active_reads.fetchAdd(1, .acq_rel) + 1;
+        var peak = self.peak_reads.load(.acquire);
+        while (active > peak) {
+            peak = self.peak_reads.cmpxchgWeak(peak, active, .release, .acquire) orelse break;
+        }
     }
 };
 
-const DirectReadSlot = struct {
-    event: std.Io.Event = .unset,
-    err: ?anyerror = null,
-    scheduled_at: std.Io.Timestamp = undefined,
-
-    fn reset(self: *DirectReadSlot) void {
-        self.event.reset();
-        self.err = null;
-        self.scheduled_at = undefined;
-    }
-};
-
-const AdaptivePipelineContext = struct {
-    const scheduling_closed_bit = @as(usize, 1) << (@bitSizeOf(usize) - 1);
-    const scheduling_count_mask = scheduling_closed_bit - 1;
+const VectoredTensorTransfer = struct {
+    const Target = struct {
+        manager: *pjrt.AsyncHostToDeviceTransferManager,
+        pjrt_buffer: *pjrt.Buffer,
+        total: usize,
+        submitted_bytes: std.atomic.Value(usize) = .init(0),
+        final_submitted: bool = false,
+    };
 
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
-    store: *const TensorStore,
-    tensors: []*const Tensor,
-    buffers: []*Buffer,
-    shardings: []const Sharding,
-    dma_allocators: []const mem.DmaAllocator,
-    pinned_buffer_pools: []mem.DynamicBufferPool,
-    staging_pool: ?*mem.DynamicBufferPool,
-    transfer_quantum_size: usize,
-    read_chunk_size: usize,
-    max_read_parallelism: usize,
-    dma_group: stdx.Io.LimitedGroup,
-    read_group: stdx.Io.LimitedGroup,
-    staging_group: std.Io.Group = .init,
-    resume_group: std.Io.Group = .init,
-    metrics: *LoadMetrics,
-    progress: ?*std.Progress.Node,
-    lanes: []AdaptivePipelineLane = &.{},
-    total: std.atomic.Value(usize) = .init(0),
-    first_error: std.atomic.Value(u16) = .init(0),
-    next_tensor: std.atomic.Value(usize) = .init(0),
-    prefetched_sources: std.atomic.Value(usize) = .init(0),
-    direct_reads_pending: std.atomic.Value(usize) = .init(0),
-    admitted_lanes: std.atomic.Value(usize) = .init(0),
-    dma_probe_capacity_epoch: std.atomic.Value(u64) = .init(0),
-    dma_lane_limit: std.atomic.Value(usize) = .init(1),
-    ready_mutex: std.Io.Mutex = .init,
-    ready_head: ?*AdaptiveTensorLoad = null,
-    ready_tail: ?*AdaptiveTensorLoad = null,
-    direct_wait_mutex: std.Io.Mutex = .init,
-    direct_wait_head: ?*AdaptiveTensorLoad = null,
-    direct_capacity_mutex: std.Io.Mutex = .init,
-    direct_capacity_condition: std.Io.Condition = .init,
-    direct_capacity_waiters: std.atomic.Value(usize) = .init(0),
-    scheduling_state: std.atomic.Value(usize) = .init(0),
-    scheduling_idle: std.Io.Event = .unset,
-    done_event: std.Io.Event = .unset,
+    reader: safetensors.TensorReader,
+    dispatch_spans: DispatchSpans,
+    targets: []Target,
+    total: usize,
+    completed_read_bytes: std.atomic.Value(usize) = .init(0),
+    progress: ?std.Progress.Node = null,
 
-    fn failed(self: *const AdaptivePipelineContext) bool {
+    fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        store: *const TensorStore,
+        tensor: *const Tensor,
+        source_file: std.Io.File,
+        shardings: []const Sharding,
+        output: *Buffer,
+        progress_parent: ?*std.Progress.Node,
+    ) !VectoredTensorTransfer {
+        var reader = try store.getBorrowedPositionalReaderById(tensor.id, io, source_file);
+        errdefer reader.deinit();
+
+        const shape = reader.tensor.shape;
+        const sharding = Sharding.pickSharding(shardings, shape, .explicit_axis_binding) orelse blk: {
+            log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
+            break :blk platform.replicated_sharding;
+        };
+        const dispatch_spans = try DispatchSpans.init(allocator, shape, sharding);
+        errdefer dispatch_spans.deinit(allocator);
+
+        const placement = try sharding.placement(shape);
+        const ordered_devices = sharding.devicesInCanonicalOrder();
+        const targets = try allocator.alloc(Target, ordered_devices.len);
+        errdefer allocator.free(targets);
+
+        var pjrt_buffers: Buffer.Shards = .empty;
+        var initialized: usize = 0;
+        errdefer {
+            for (targets[0..initialized]) |target| {
+                target.manager.deinit(platform.pjrt_api);
+                target.pjrt_buffer.deinit(platform.pjrt_api);
+            }
+        }
+
+        const shape_spec: pjrt.ShapeSpec = .init(placement.shape.dims(), pjrtx.bufferTypeFromDtype(placement.shape.dtype()));
+        for (ordered_devices, 0..) |device, i| {
+            const memory = platform.devices[device.id].memory(.default).?;
+            const manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
+                .shape_specs = &.{shape_spec},
+                .memory = memory.pjrt_memory,
+            });
+            errdefer manager.deinit(platform.pjrt_api);
+            const pjrt_buffer = try manager.retrieveBuffer(platform.pjrt_api, 0);
+            targets[i] = .{
+                .manager = manager,
+                .pjrt_buffer = pjrt_buffer,
+                .total = placement.shape.byteSize(),
+            };
+            initialized += 1;
+            pjrt_buffers.appendAssumeCapacity(pjrt_buffer);
+        }
+
+        output.* = .fromPjrtBuffers(platform, shape, sharding, pjrt_buffers.constSlice());
+        const progress = if (progress_parent) |parent|
+            parent.start(reader.tensor.name, std.math.divCeil(usize, shape.byteSize(), 1024) catch unreachable)
+        else
+            null;
+
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .platform = platform,
+            .reader = reader,
+            .dispatch_spans = dispatch_spans,
+            .targets = targets,
+            .total = shape.byteSize(),
+            .progress = progress,
+        };
+    }
+
+    fn deinit(self: *VectoredTensorTransfer) void {
+        if (self.progress) |*progress| progress.end();
+        for (self.targets) |target| target.manager.deinit(self.platform.pjrt_api);
+        self.allocator.free(self.targets);
+        self.dispatch_spans.deinit(self.allocator);
+        self.reader.deinit();
+    }
+
+    fn recordReadProgress(self: *VectoredTensorTransfer, bytes: usize) void {
+        const completed = self.completed_read_bytes.fetchAdd(bytes, .acq_rel) + bytes;
+        if (self.progress) |*progress| {
+            progress.setCompletedItems(std.math.divCeil(usize, completed, 1024) catch unreachable);
+        }
+    }
+};
+
+const VectoredLoadPipeline = struct {
+    const DeferredTransfer = struct {
+        tensor: *VectoredTensorTransfer,
+        block: *mem.DmaBlockPool.Lease,
+        writer_mask: u64,
+        destination_offset: usize,
+        len: usize,
+    };
+
+    const EventContext = struct {
+        pipeline: *VectoredLoadPipeline,
+        block: *mem.DmaBlockPool.Lease,
+        pjrt_event: *pjrt.Event,
+        err: ?*pjrt.Error = null,
+        submitted_at: std.Io.Timestamp,
+        bytes: usize,
+    };
+
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    pool: *mem.DmaBlockPool,
+    block_size: usize,
+    metrics: *VectoredLoadMetrics,
+    first_error: std.atomic.Value(u16) = .init(0),
+    metadata_mutex: std.Io.Mutex = .init,
+    blocks: std.ArrayListUnmanaged(*mem.DmaBlockPool.Lease) = .empty,
+    deferred: std.ArrayListUnmanaged(DeferredTransfer) = .empty,
+    events: std.ArrayListUnmanaged(*EventContext) = .empty,
+    active_events: usize = 0,
+    submissions_finished: bool = false,
+    dma_done: std.Io.Event = .unset,
+
+    fn deinit(self: *VectoredLoadPipeline) void {
+        std.debug.assert(self.active_events == 0);
+        for (self.events.items) |ctx| {
+            ctx.pjrt_event.deinit(self.platform.pjrt_api);
+            if (ctx.err) |err| err.deinit(self.platform.pjrt_api);
+            self.allocator.destroy(ctx);
+        }
+        for (self.blocks.items) |block| {
+            std.debug.assert(block.isComplete());
+            self.allocator.destroy(block);
+        }
+        self.events.deinit(self.allocator);
+        self.deferred.deinit(self.allocator);
+        self.blocks.deinit(self.allocator);
+    }
+
+    fn failed(self: *const VectoredLoadPipeline) bool {
         return self.first_error.load(.acquire) != 0;
     }
 
-    fn fail(self: *AdaptivePipelineContext, err: anyerror) void {
+    fn errorValue(self: *const VectoredLoadPipeline) ?anyerror {
+        const value = self.first_error.load(.acquire);
+        return if (value == 0) null else @errorFromInt(value);
+    }
+
+    fn recordError(self: *VectoredLoadPipeline, err: anyerror) void {
         if (self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic) == null) {
-            self.closeScheduling();
-            load_log.debug("pipeline cancellation requested: error={s}, completed={d}/{d}, reads_active={d}, dma_active={d}", .{
-                @errorName(err),
-                self.metrics.completed_transfers.load(.acquire),
-                self.tensors.len,
-                self.read_group.inFlight(),
-                self.dma_group.inFlight(),
-            });
-            self.direct_capacity_mutex.lockUncancelable(self.io);
-            self.direct_capacity_condition.broadcast(self.io);
-            self.direct_capacity_mutex.unlock(self.io);
-            self.done_event.set(self.io);
+            self.pool.close(self.io);
         }
     }
 
-    fn errorValue(self: *const AdaptivePipelineContext) ?anyerror {
-        const err = self.first_error.load(.acquire);
-        return if (err == 0) null else @errorFromInt(err);
+    fn registerBlock(self: *VectoredLoadPipeline, data: []u8, references: usize) !*mem.DmaBlockPool.Lease {
+        const block = try self.allocator.create(mem.DmaBlockPool.Lease);
+        errdefer self.allocator.destroy(block);
+        block.* = .init(self.pool, self.io, data, references);
+        self.metadata_mutex.lockUncancelable(self.io);
+        defer self.metadata_mutex.unlock(self.io);
+        try self.blocks.append(self.allocator, block);
+        return block;
     }
 
-    fn markProbeStart(self: *AdaptivePipelineContext, epoch: u64) void {
-        self.metrics.markProbeStart(self.io, epoch);
-    }
-
-    fn completeTensor(self: *AdaptivePipelineContext, bytes: usize) void {
-        _ = self.total.fetchAdd(bytes, .monotonic);
-        const completed = self.metrics.completed_transfers.fetchAdd(1, .acq_rel) + 1;
-        if (completed == self.tensors.len) {
-            self.closeScheduling();
-            self.done_event.set(self.io);
-        }
-    }
-
-    fn beginScheduling(self: *AdaptivePipelineContext) bool {
-        var state = self.scheduling_state.load(.acquire);
-        while ((state & scheduling_closed_bit) == 0) {
-            std.debug.assert((state & scheduling_count_mask) != scheduling_count_mask);
-            if (self.scheduling_state.cmpxchgWeak(state, state + 1, .acq_rel, .acquire)) |actual| {
-                state = actual;
-                continue;
-            }
-            return true;
-        }
-        return false;
-    }
-
-    fn endScheduling(self: *AdaptivePipelineContext) void {
-        const previous = self.scheduling_state.fetchSub(1, .acq_rel);
-        std.debug.assert((previous & scheduling_count_mask) > 0);
-        if (previous == (scheduling_closed_bit | 1)) self.scheduling_idle.set(self.io);
-    }
-
-    fn closeScheduling(self: *AdaptivePipelineContext) void {
-        const previous = self.scheduling_state.fetchOr(scheduling_closed_bit, .acq_rel);
-        if ((previous & scheduling_count_mask) == 0) self.scheduling_idle.set(self.io);
-    }
-
-    fn claimTensorIndex(self: *AdaptivePipelineContext) ?usize {
-        var index = self.next_tensor.load(.acquire);
-        while (index < self.tensors.len) {
-            if (self.next_tensor.cmpxchgWeak(index, index + 1, .acq_rel, .acquire)) |actual| {
-                index = actual;
-                continue;
-            }
-            return index;
-        }
-        return null;
-    }
-
-    fn hasUnclaimedTensors(self: *const AdaptivePipelineContext) bool {
-        return self.next_tensor.load(.acquire) < self.tensors.len;
-    }
-
-    const SchedulingStats = struct {
-        direct_reads_pending: usize,
-        direct_capacity_waiters: usize,
-        detached_direct_sources: usize,
-        prefetched_sources: usize,
-        dma_ready_sources: usize,
-        dma_probe_lanes: usize,
-        claimed_tensors: usize,
-    };
-
-    fn schedulingStats(self: *AdaptivePipelineContext) SchedulingStats {
-        self.ready_mutex.lockUncancelable(self.io);
-        var dma_ready_sources: usize = 0;
-        var ready = self.ready_head;
-        while (ready) |tensor_load| : (ready = tensor_load.ready_next) dma_ready_sources += 1;
-        self.ready_mutex.unlock(self.io);
-
-        self.direct_wait_mutex.lockUncancelable(self.io);
-        var detached_direct_sources: usize = 0;
-        var waiting = self.direct_wait_head;
-        while (waiting) |tensor_load| : (waiting = tensor_load.direct_wait_next) detached_direct_sources += 1;
-        self.direct_wait_mutex.unlock(self.io);
-
-        const dma_probe_epoch = self.dma_probe_capacity_epoch.load(.acquire);
-        var dma_probe_lanes: usize = 0;
-        if (dma_probe_epoch > 0) {
-            for (self.lanes) |*lane| {
-                if (lane.last_dma_submission_epoch.load(.acquire) == dma_probe_epoch) dma_probe_lanes += 1;
+    fn transferReady(self: *const VectoredLoadPipeline, transfer: DeferredTransfer) bool {
+        _ = self;
+        var mask = transfer.writer_mask;
+        while (mask != 0) {
+            const writer_index: usize = @intCast(@ctz(mask));
+            mask &= mask - 1;
+            const target = &transfer.tensor.targets[writer_index];
+            if (transfer.destination_offset + transfer.len == target.total and
+                target.submitted_bytes.load(.acquire) != transfer.destination_offset)
+            {
+                return false;
             }
         }
-
-        return .{
-            .direct_reads_pending = self.direct_reads_pending.load(.acquire),
-            .direct_capacity_waiters = self.direct_capacity_waiters.load(.acquire),
-            .detached_direct_sources = detached_direct_sources,
-            .prefetched_sources = self.prefetched_sources.load(.acquire),
-            .dma_ready_sources = dma_ready_sources,
-            .dma_probe_lanes = dma_probe_lanes,
-            .claimed_tensors = @min(self.next_tensor.load(.acquire), self.tensors.len),
-        };
+        return true;
     }
 
-    fn tryReserveDirectRead(self: *AdaptivePipelineContext) bool {
-        const limit = @max(@as(usize, 1), self.dma_lane_limit.load(.acquire));
-        var pending = self.direct_reads_pending.load(.acquire);
-        while (pending < limit) {
-            if (self.direct_reads_pending.cmpxchgWeak(pending, pending + 1, .acq_rel, .acquire)) |actual| {
-                pending = actual;
-                continue;
-            }
-            return true;
+    fn submitOrDefer(self: *VectoredLoadPipeline, transfer: DeferredTransfer) void {
+        if (self.failed()) {
+            var remaining = @popCount(transfer.writer_mask);
+            while (remaining > 0) : (remaining -= 1) transfer.block.complete();
+            return;
         }
-        return false;
-    }
-
-    fn releaseDirectRead(self: *AdaptivePipelineContext) void {
-        self.direct_capacity_mutex.lockUncancelable(self.io);
-        defer self.direct_capacity_mutex.unlock(self.io);
-        const previous = self.direct_reads_pending.fetchSub(1, .acq_rel);
-        std.debug.assert(previous > 0);
-        self.direct_capacity_condition.signal(self.io);
-    }
-
-    fn enqueueDmaReady(self: *AdaptivePipelineContext, tensor_load: *AdaptiveTensorLoad) void {
-        self.ready_mutex.lockUncancelable(self.io);
-        std.debug.assert(!tensor_load.queued_for_dma);
-        tensor_load.queued_for_dma = true;
-        tensor_load.ready_next = null;
-        if (self.ready_tail) |tail| {
-            tail.ready_next = tensor_load;
+        var should_submit = false;
+        self.metadata_mutex.lockUncancelable(self.io);
+        if (self.transferReady(transfer)) {
+            should_submit = true;
         } else {
-            self.ready_head = tensor_load;
-        }
-        self.ready_tail = tensor_load;
-        self.ready_mutex.unlock(self.io);
-
-        self.ensureLanes(self.dma_lane_limit.load(.acquire));
-    }
-
-    fn popDmaReady(self: *AdaptivePipelineContext) ?*AdaptiveTensorLoad {
-        self.ready_mutex.lockUncancelable(self.io);
-        const tensor_load = self.ready_head orelse {
-            self.ready_mutex.unlock(self.io);
-            return null;
-        };
-        self.ready_head = tensor_load.ready_next;
-        if (self.ready_head == null) self.ready_tail = null;
-        tensor_load.ready_next = null;
-        tensor_load.queued_for_dma = false;
-        const was_prefetched = tensor_load.prefetch_counted;
-        tensor_load.prefetch_counted = false;
-        self.ready_mutex.unlock(self.io);
-
-        if (was_prefetched) {
-            _ = self.prefetched_sources.fetchSub(1, .acq_rel);
-            self.ensurePrefetch();
-        }
-        return tensor_load;
-    }
-
-    fn hasDmaReady(self: *AdaptivePipelineContext) bool {
-        self.ready_mutex.lockUncancelable(self.io);
-        defer self.ready_mutex.unlock(self.io);
-        return self.ready_head != null;
-    }
-
-    fn deinitReadyLoads(self: *AdaptivePipelineContext) void {
-        while (true) {
-            self.ready_mutex.lockUncancelable(self.io);
-            const tensor_load = self.ready_head orelse {
-                self.ready_tail = null;
-                self.ready_mutex.unlock(self.io);
+            self.deferred.append(self.allocator, transfer) catch {
+                self.metadata_mutex.unlock(self.io);
+                self.recordError(error.OutOfMemory);
+                var remaining = @popCount(transfer.writer_mask);
+                while (remaining > 0) : (remaining -= 1) transfer.block.complete();
                 return;
             };
-            self.ready_head = tensor_load.ready_next;
-            if (self.ready_head == null) self.ready_tail = null;
-            tensor_load.ready_next = null;
-            tensor_load.queued_for_dma = false;
-            const was_prefetched = tensor_load.prefetch_counted;
-            tensor_load.prefetch_counted = false;
-            self.ready_mutex.unlock(self.io);
-            if (was_prefetched) _ = self.prefetched_sources.fetchSub(1, .acq_rel);
-            tensor_load.deinit();
+        }
+        self.metadata_mutex.unlock(self.io);
+        if (should_submit) {
+            self.submitTransfer(transfer);
+            self.submitReadyDeferred();
         }
     }
 
-    fn ensurePrefetch(self: *AdaptivePipelineContext) void {
-        if (self.failed()) return;
-        const staging_limit = self.metrics.staging_limit.load(.acquire);
-        const target = @min(staging_limit, self.max_read_parallelism);
-        while (target > 0 and !self.failed()) {
-            if (!self.reservePrefetchSource(target)) break;
-
-            const tensor_index = self.claimTensorIndex() orelse {
-                _ = self.prefetched_sources.fetchSub(1, .acq_rel);
-                break;
-            };
-            self.schedulePrefetch(tensor_index);
-        }
-    }
-
-    fn reservePrefetchSource(self: *AdaptivePipelineContext, target: usize) bool {
-        var reserved = self.prefetched_sources.load(.acquire);
-        while (reserved < target) {
-            if (self.prefetched_sources.cmpxchgWeak(reserved, reserved + 1, .acq_rel, .acquire)) |actual| {
-                reserved = actual;
-                continue;
+    fn submitTransfer(self: *VectoredLoadPipeline, transfer: DeferredTransfer) void {
+        var mask = transfer.writer_mask;
+        while (mask != 0) {
+            const writer_index: usize = @intCast(@ctz(mask));
+            mask &= mask - 1;
+            const target = &transfer.tensor.targets[writer_index];
+            const is_last = transfer.destination_offset + transfer.len == target.total;
+            if (self.submitOne(target, transfer.block, transfer.destination_offset, transfer.len, is_last)) {
+                _ = target.submitted_bytes.fetchAdd(transfer.len, .release);
             }
+        }
+    }
+
+    fn submitOne(
+        self: *VectoredLoadPipeline,
+        target: *VectoredTensorTransfer.Target,
+        block: *mem.DmaBlockPool.Lease,
+        destination_offset: usize,
+        len: usize,
+        is_last: bool,
+    ) bool {
+        const submitted_at: std.Io.Timestamp = .now(self.io, .awake);
+        const event = target.manager.transferData(
+            self.platform.pjrt_api,
+            0,
+            block.data[0..len],
+            @intCast(destination_offset),
+            is_last,
+        ) catch |err| {
+            self.recordError(err);
+            block.complete();
+            return false;
+        };
+        if (is_last) target.final_submitted = true;
+
+        const ctx = self.allocator.create(EventContext) catch {
+            event.awaitRaw(self.platform.pjrt_api) catch {};
+            event.deinit(self.platform.pjrt_api);
+            self.recordError(error.OutOfMemory);
+            block.complete();
             return true;
-        }
-        return false;
-    }
-
-    fn schedulePrefetch(self: *AdaptivePipelineContext, tensor_index: usize) void {
-        if (!self.beginScheduling()) {
-            _ = self.prefetched_sources.fetchSub(1, .acq_rel);
-            return;
-        }
-        defer self.endScheduling();
-        self.staging_group.concurrent(self.io, AdaptivePipelineContext.prefetchTensor, .{ tensor_index, self }) catch |err| {
-            _ = self.prefetched_sources.fetchSub(1, .acq_rel);
-            self.fail(err);
         };
-    }
-
-    fn prefetchTensor(tensor_index: usize, self: *AdaptivePipelineContext) void {
-        const tensor_load = AdaptiveTensorLoad.init(self, tensor_index) catch |err| {
-            _ = self.prefetched_sources.fetchSub(1, .acq_rel);
-            self.fail(err);
-            return;
+        ctx.* = .{
+            .pipeline = self,
+            .block = block,
+            .pjrt_event = event,
+            .submitted_at = submitted_at,
+            .bytes = len,
         };
-        tensor_load.prefetch_counted = true;
-        tensor_load.fillReadAheadTo(1);
-        if (tensor_load.pending == 0) {
-            if (self.failed()) {
-                tensor_load.prefetch_counted = false;
-                _ = self.prefetched_sources.fetchSub(1, .acq_rel);
-                tensor_load.deinit();
-                return;
-            }
-            load_log.debug("read source staging bypassed: index={d}, name={s}, staging_limit={d}", .{
-                tensor_index,
-                tensor_load.reader.tensor.name,
-                self.metrics.staging_limit.load(.acquire),
-            });
-            self.enqueueDmaReady(tensor_load);
-            return;
-        }
 
-        const slot = &tensor_load.slots[tensor_load.head];
-        slot.event.waitUncancelable(self.io);
-        if (slot.err) |err| {
-            tensor_load.prefetch_counted = false;
-            _ = self.prefetched_sources.fetchSub(1, .acq_rel);
-            tensor_load.deinit();
-            if (!self.failed()) self.fail(err);
-            return;
-        }
-        if (self.failed()) {
-            tensor_load.prefetch_counted = false;
-            _ = self.prefetched_sources.fetchSub(1, .acq_rel);
-            tensor_load.deinit();
-            return;
-        }
+        self.metadata_mutex.lockUncancelable(self.io);
+        self.events.append(self.allocator, ctx) catch {
+            self.metadata_mutex.unlock(self.io);
+            event.awaitRaw(self.platform.pjrt_api) catch {};
+            event.deinit(self.platform.pjrt_api);
+            self.allocator.destroy(ctx);
+            self.recordError(error.OutOfMemory);
+            block.complete();
+            return true;
+        };
+        self.active_events += 1;
+        self.metadata_mutex.unlock(self.io);
 
-        load_log.debug("read source ready: index={d}, name={s}, ready={Bi:.2}, prefetched={d}/{d}", .{
-            tensor_index,
-            tensor_load.reader.tensor.name,
-            slot.len,
-            self.prefetched_sources.load(.acquire),
-            targetPrefetchCount(self),
-        });
-        self.enqueueDmaReady(tensor_load);
-    }
-
-    fn targetPrefetchCount(self: *const AdaptivePipelineContext) usize {
-        return @min(self.metrics.staging_limit.load(.acquire), self.max_read_parallelism);
-    }
-
-    fn addDirectWait(self: *AdaptivePipelineContext, tensor_load: *AdaptiveTensorLoad) void {
-        self.direct_wait_mutex.lockUncancelable(self.io);
-        defer self.direct_wait_mutex.unlock(self.io);
-        std.debug.assert(!tensor_load.in_direct_wait);
-        tensor_load.in_direct_wait = true;
-        tensor_load.direct_wait_next = self.direct_wait_head;
-        self.direct_wait_head = tensor_load;
-        self.fillDetachedReadAheadLocked();
-    }
-
-    fn removeDirectWait(self: *AdaptivePipelineContext, tensor_load: *AdaptiveTensorLoad) void {
-        self.direct_wait_mutex.lockUncancelable(self.io);
-        defer self.direct_wait_mutex.unlock(self.io);
-        var previous: ?*AdaptiveTensorLoad = null;
-        var current = self.direct_wait_head;
-        while (current) |candidate| {
-            if (candidate == tensor_load) {
-                if (previous) |prev| {
-                    prev.direct_wait_next = candidate.direct_wait_next;
+        _ = self.metrics.dma_submissions.fetchAdd(1, .monotonic);
+        _ = self.metrics.submitted_bytes.fetchAdd(len, .monotonic);
+        event.onReady(self.platform.pjrt_api, EventContext, struct {
+            fn call(err: ?*pjrt.Error, ctx_: *EventContext) void {
+                ctx_.err = err;
+                if (err) |pjrt_error| {
+                    ctx_.pipeline.recordError(pjrt_error.getCode(ctx_.pipeline.platform.pjrt_api).toApiError());
                 } else {
-                    self.direct_wait_head = candidate.direct_wait_next;
+                    const elapsed = ctx_.submitted_at.untilNow(ctx_.pipeline.io, .awake);
+                    _ = ctx_.pipeline.metrics.committed_bytes.fetchAdd(ctx_.bytes, .monotonic);
+                    _ = ctx_.pipeline.metrics.dma_ns.fetchAdd(@intCast(@max(elapsed.nanoseconds, 0)), .monotonic);
                 }
-                candidate.direct_wait_next = null;
-                candidate.in_direct_wait = false;
-                return;
+                ctx_.block.complete();
+                ctx_.pipeline.eventCompleted();
             }
-            previous = candidate;
-            current = candidate.direct_wait_next;
-        }
-        std.debug.assert(false);
-    }
-
-    fn fillDetachedReadAhead(self: *AdaptivePipelineContext) void {
-        self.direct_wait_mutex.lockUncancelable(self.io);
-        defer self.direct_wait_mutex.unlock(self.io);
-        self.fillDetachedReadAheadLocked();
-    }
-
-    fn fillDetachedReadAheadLocked(self: *AdaptivePipelineContext) void {
-        const staging_limit = self.metrics.staging_limit.load(.acquire);
-        if (staging_limit == 0) return;
-        var count: usize = 0;
-        var current = self.direct_wait_head;
-        while (current) |tensor_load| : (current = tensor_load.direct_wait_next) count += 1;
-        if (count == 0) return;
-        const per_tensor = std.math.divCeil(usize, staging_limit, count) catch unreachable;
-        current = self.direct_wait_head;
-        while (current) |tensor_load| : (current = tensor_load.direct_wait_next) {
-            tensor_load.fillReadAheadTo(per_tensor);
-        }
-    }
-
-    fn resumeDirectLaneWhenReady(self: *AdaptivePipelineContext, lane: *AdaptivePipelineLane, event: *std.Io.Event) void {
-        if (!self.beginScheduling()) {
-            self.removeDirectWait(lane.active.?);
-            lane.deinitActive();
-            lane.releaseAdmission(false);
-            return;
-        }
-        defer self.endScheduling();
-        self.resume_group.concurrent(self.io, AdaptivePipelineContext.waitDirectAndResumeLane, .{ lane, event, self }) catch |err| {
-            self.removeDirectWait(lane.active.?);
-            self.fail(err);
-            lane.deinitActive();
-            lane.releaseAdmission(false);
+        }.call, ctx) catch |err| {
+            event.awaitRaw(self.platform.pjrt_api) catch {};
+            self.recordError(err);
+            block.complete();
+            self.eventCompleted();
         };
+        return true;
     }
 
-    fn waitDirectAndResumeLane(lane: *AdaptivePipelineLane, event: *std.Io.Event, self: *AdaptivePipelineContext) void {
-        const started: std.Io.Timestamp = .now(self.io, .awake);
-        event.waitUncancelable(self.io);
-        self.removeDirectWait(lane.active.?);
-        const submitted = self.metrics.submitted_bytes.load(.acquire);
-        const committed = self.metrics.committed_bytes.load(.acquire);
-        if (submitted <= committed) {
-            const completed_at_ns = self.metrics.last_dma_commit_ns.load(.acquire);
-            const idle_started_ns: u64 = @max(@as(u64, @intCast(@max(started.nanoseconds, 0))), completed_at_ns);
-            const now_ns: u64 = @intCast(@max(std.Io.Timestamp.now(self.io, .awake).nanoseconds, 0));
-            self.metrics.addDmaStarvationInterval(idle_started_ns, now_ns);
-        }
-        lane.schedule();
+    fn eventCompleted(self: *VectoredLoadPipeline) void {
+        self.metadata_mutex.lockUncancelable(self.io);
+        defer self.metadata_mutex.unlock(self.io);
+        std.debug.assert(self.active_events > 0);
+        self.active_events -= 1;
+        if (self.submissions_finished and self.active_events == 0) self.dma_done.set(self.io);
     }
 
-    fn requeueOnDirectCapacity(self: *AdaptivePipelineContext, tensor_load: *AdaptiveTensorLoad) void {
-        if (!self.beginScheduling()) {
-            tensor_load.deinit();
-            return;
-        }
-        defer self.endScheduling();
-        self.resume_group.concurrent(self.io, AdaptivePipelineContext.waitDirectCapacityAndEnqueue, .{ tensor_load, self }) catch |err| {
-            tensor_load.deinit();
-            self.fail(err);
-        };
-    }
-
-    fn waitDirectCapacityAndEnqueue(tensor_load: *AdaptiveTensorLoad, self: *AdaptivePipelineContext) void {
-        _ = self.direct_capacity_waiters.fetchAdd(1, .acq_rel);
-        defer _ = self.direct_capacity_waiters.fetchSub(1, .acq_rel);
-
-        self.direct_capacity_mutex.lockUncancelable(self.io);
-        var reserved = false;
-        while (!self.failed()) {
-            if (self.tryReserveDirectRead()) {
-                reserved = true;
-                break;
-            }
-            self.direct_capacity_condition.waitUncancelable(self.io, &self.direct_capacity_mutex);
-        }
-        self.direct_capacity_mutex.unlock(self.io);
-
-        if (!reserved) {
-            tensor_load.deinit();
-            return;
-        }
-        tensor_load.direct_read_reserved = true;
-        if (self.failed()) {
-            tensor_load.deinit();
-            return;
-        }
-        self.enqueueDmaReady(tensor_load);
-    }
-
-    fn requeueWhenReady(self: *AdaptivePipelineContext, tensor_load: *AdaptiveTensorLoad, event: *std.Io.Event) void {
-        if (!self.beginScheduling()) {
-            tensor_load.deinit();
-            return;
-        }
-        defer self.endScheduling();
-        self.resume_group.concurrent(self.io, AdaptivePipelineContext.waitAndEnqueue, .{ tensor_load, event, self }) catch |err| {
-            tensor_load.deinit();
-            self.fail(err);
-        };
-    }
-
-    fn waitAndEnqueue(tensor_load: *AdaptiveTensorLoad, event: *std.Io.Event, self: *AdaptivePipelineContext) void {
-        const started: std.Io.Timestamp = .now(self.io, .awake);
-        event.waitUncancelable(self.io);
-        const submitted = self.metrics.submitted_bytes.load(.acquire);
-        const committed = self.metrics.committed_bytes.load(.acquire);
-        if (submitted <= committed) {
-            const completed_at_ns = self.metrics.last_dma_commit_ns.load(.acquire);
-            const idle_started_ns: u64 = @max(@as(u64, @intCast(@max(started.nanoseconds, 0))), completed_at_ns);
-            const now_ns: u64 = @intCast(@max(std.Io.Timestamp.now(self.io, .awake).nanoseconds, 0));
-            self.metrics.addDmaStarvationInterval(idle_started_ns, now_ns);
-        }
-        if (self.failed()) {
-            tensor_load.deinit();
-            return;
-        }
-        self.enqueueDmaReady(tensor_load);
-    }
-
-    fn ensureLanes(self: *AdaptivePipelineContext, requested: usize) void {
-        const target = @min(requested, self.lanes.len);
-        while (!self.failed()) {
-            // A concurrent lane can decide to replenish immediately before the
-            // final tensor closes scheduling. Without observing the closed
-            // fence here, the replacement retires in schedule() and this loop
-            // reserves it again forever.
-            if ((self.scheduling_state.load(.acquire) & scheduling_closed_bit) != 0) break;
-            const admitted = self.admitted_lanes.load(.acquire);
-            if (admitted >= target) break;
-            if (self.admitted_lanes.cmpxchgWeak(admitted, admitted + 1, .acq_rel, .acquire)) |_| continue;
-
-            var found = false;
-            for (self.lanes) |*lane| {
-                if (found) break;
-                if (lane.activateReserved()) {
-                    found = true;
+    fn submitReadyDeferred(self: *VectoredLoadPipeline) void {
+        while (true) {
+            if (self.failed()) return;
+            var ready: ?DeferredTransfer = null;
+            self.metadata_mutex.lockUncancelable(self.io);
+            for (self.deferred.items, 0..) |transfer, i| {
+                if (self.transferReady(transfer)) {
+                    ready = self.deferred.swapRemove(i);
                     break;
                 }
             }
-            if (!found) {
-                _ = self.admitted_lanes.fetchSub(1, .acq_rel);
-                break;
+            self.metadata_mutex.unlock(self.io);
+            if (ready) |transfer| {
+                self.submitTransfer(transfer);
+            } else {
+                return;
             }
         }
     }
 
-    fn acquirePageable(
-        tensor_load: *AdaptiveTensorLoad,
-        ticket: usize,
-        slot: *PageableReadSlot,
-        self: *AdaptivePipelineContext,
-    ) void {
-        tensor_load.acquisition_mutex.lockUncancelable(self.io);
-        while (ticket != tensor_load.acquisition_turn) {
-            tensor_load.acquisition_condition.waitUncancelable(self.io, &tensor_load.acquisition_mutex);
+    fn abortDeferred(self: *VectoredLoadPipeline) void {
+        for (self.deferred.items) |transfer| {
+            var remaining = @popCount(transfer.writer_mask);
+            while (remaining > 0) : (remaining -= 1) transfer.block.complete();
         }
-
-        if (self.failed()) {
-            tensor_load.finishAcquisition(self.io);
-            slot.err = error.LoadCancelled;
-            slot.event.set(self.io);
-            return;
-        }
-
-        const pool = self.staging_pool orelse {
-            tensor_load.finishAcquisition(self.io);
-            slot.err = error.StagingDisabled;
-            self.fail(slot.err.?);
-            slot.event.set(self.io);
-            return;
-        };
-        const acquisition = pool.getWithWait(self.allocator, self.io) catch |err| {
-            tensor_load.finishAcquisition(self.io);
-            slot.err = err;
-            self.fail(err);
-            slot.event.set(self.io);
-            return;
-        };
-        const buffer = acquisition.buffer;
-        slot.buffer = buffer;
-        _ = self.metrics.staging_wait_ns.fetchAdd(acquisition.wait_ns, .monotonic);
-        const cancelled = self.failed();
-        tensor_load.finishAcquisition(self.io);
-        if (cancelled) {
-            pool.put(self.io, buffer);
-            slot.buffer = null;
-            slot.err = error.LoadCancelled;
-            slot.event.set(self.io);
-            return;
-        }
-
-        slot.scheduled_at = .now(self.io, .awake);
-        self.schedulePageableRead(&tensor_load.reader, slot);
+        self.deferred.clearRetainingCapacity();
     }
 
-    fn readPageable(reader: *const safetensors.TensorReader, slot: *PageableReadSlot, self: *AdaptivePipelineContext) void {
-        self.markProbeStart(slot.epoch);
-        const admission_wait = slot.scheduled_at.untilNow(self.io, .awake);
-        _ = self.metrics.read_admission_wait_ns.fetchAdd(@intCast(@max(admission_wait.nanoseconds, 0)), .monotonic);
-        self.metrics.recordReadStart();
-        defer _ = self.metrics.active_reads.fetchSub(1, .monotonic);
-        defer slot.event.set(self.io);
-
-        if (self.failed()) {
-            slot.err = error.LoadCancelled;
-            return;
-        }
-
-        const read_started: std.Io.Timestamp = .now(self.io, .awake);
-        reader.readPositionalAll(slot.buffer.?[0..slot.len], slot.offset) catch |err| {
-            self.staging_pool.?.put(self.io, slot.buffer.?);
-            slot.buffer = null;
-            slot.err = err;
-            self.fail(err);
-            return;
-        };
-        const read_elapsed = read_started.untilNow(self.io, .awake);
-        const read_us: u64 = @intCast(@max(@divTrunc(read_elapsed.nanoseconds, std.time.ns_per_us), 0));
-        _ = self.metrics.storage_bytes.fetchAdd(@intCast(slot.len), .monotonic);
-        _ = self.metrics.read_operations.fetchAdd(1, .monotonic);
-        _ = self.metrics.staged_read_bytes.fetchAdd(@intCast(slot.len), .monotonic);
-        _ = self.metrics.weighted_read_latency_us.fetchAdd(@as(u64, @intCast(slot.len)) *| read_us, .monotonic);
-        slot.ready_at_ns = @intCast(@max(std.Io.Timestamp.now(self.io, .awake).nanoseconds, 1));
-        _ = self.metrics.ready_bytes.fetchAdd(@intCast(slot.len), .release);
-        slot.ready_counted = true;
-    }
-
-    fn readDirect(
-        reader: *const safetensors.TensorReader,
-        destination: []u8,
-        offset: u64,
-        epoch: u64,
-        slot: *DirectReadSlot,
-        self: *AdaptivePipelineContext,
-    ) void {
-        self.markProbeStart(epoch);
-        const admission_wait = slot.scheduled_at.untilNow(self.io, .awake);
-        _ = self.metrics.read_admission_wait_ns.fetchAdd(@intCast(@max(admission_wait.nanoseconds, 0)), .monotonic);
-        self.metrics.recordReadStart();
-        defer {
-            _ = self.metrics.active_reads.fetchSub(1, .monotonic);
-            self.releaseDirectRead();
-            slot.event.set(self.io);
-        }
-
-        if (self.failed()) {
-            slot.err = error.LoadCancelled;
-            return;
-        }
-
-        const read_started: std.Io.Timestamp = .now(self.io, .awake);
-        reader.readPositionalAll(destination, offset) catch |err| {
-            slot.err = err;
-            self.fail(err);
-            return;
-        };
-        const read_elapsed = read_started.untilNow(self.io, .awake);
-        const read_ns: u64 = @intCast(@max(read_elapsed.nanoseconds, 0));
-        const read_us: u64 = @divTrunc(read_ns, std.time.ns_per_us);
-        _ = self.metrics.storage_bytes.fetchAdd(@intCast(destination.len), .monotonic);
-        _ = self.metrics.read_operations.fetchAdd(1, .monotonic);
-        _ = self.metrics.direct_read_bytes.fetchAdd(@intCast(destination.len), .monotonic);
-        _ = self.metrics.weighted_read_latency_us.fetchAdd(@as(u64, @intCast(destination.len)) *| read_us, .monotonic);
-    }
-
-    fn schedulePageable(
-        self: *AdaptivePipelineContext,
-        tensor_load: *AdaptiveTensorLoad,
-        ticket: usize,
-        slot: *PageableReadSlot,
-        offset: u64,
-        len: usize,
-    ) void {
-        slot.* = .{
-            .offset = offset,
-            .len = len,
-            .epoch = self.metrics.config_epoch.load(.acquire),
-        };
-        if (!self.beginScheduling()) {
-            slot.err = error.LoadCancelled;
-            slot.event.set(self.io);
-            return;
-        }
-        defer self.endScheduling();
-        self.staging_group.concurrent(self.io, AdaptivePipelineContext.acquirePageable, .{ tensor_load, ticket, slot, self }) catch |err| {
-            slot.err = err;
-            slot.event.set(self.io);
-            self.fail(err);
-        };
-    }
-
-    fn schedulePageableRead(
-        self: *AdaptivePipelineContext,
-        reader: *const safetensors.TensorReader,
-        slot: *PageableReadSlot,
-    ) void {
-        if (!self.beginScheduling()) {
-            self.staging_pool.?.put(self.io, slot.buffer.?);
-            slot.buffer = null;
-            slot.err = error.LoadCancelled;
-            slot.event.set(self.io);
-            return;
-        }
-        defer self.endScheduling();
-        self.read_group.concurrentUncancelableAdmission(self.io, AdaptivePipelineContext.readPageable, .{ reader, slot, self }) catch |err| {
-            self.staging_pool.?.put(self.io, slot.buffer.?);
-            slot.buffer = null;
-            slot.err = err;
-            slot.event.set(self.io);
-            self.fail(err);
-        };
-    }
-
-    fn scheduleDirect(
-        self: *AdaptivePipelineContext,
-        reader: *const safetensors.TensorReader,
-        destination: []u8,
-        offset: u64,
-        epoch: u64,
-        slot: *DirectReadSlot,
-    ) void {
-        if (!self.beginScheduling()) {
-            self.releaseDirectRead();
-            slot.err = error.LoadCancelled;
-            slot.event.set(self.io);
-            return;
-        }
-        defer self.endScheduling();
-
-        // Direct-only loads already run on persistent DMA-lane tasks. Perform
-        // the read on that task so small pinned buffers do not add one read
-        // task plus one resume task per chunk. Keep the read group admission
-        // around the inline call so runtime limits still apply. If pageable
-        // staging is enabled, retain the detached read path that lets reads
-        // run ahead of DMA.
-        if (self.metrics.staging_limit.load(.acquire) == 0) {
-            self.read_group.callUncancelableAdmission(self.io, AdaptivePipelineContext.readDirect, .{ reader, destination, offset, epoch, slot, self });
-            return;
-        }
-        self.read_group.concurrentUncancelableAdmission(self.io, AdaptivePipelineContext.readDirect, .{ reader, destination, offset, epoch, slot, self }) catch |err| {
-            self.releaseDirectRead();
-            slot.err = err;
-            slot.event.set(self.io);
-            self.fail(err);
-        };
-    }
-
-    fn releaseSlot(self: *AdaptivePipelineContext, slot: *PageableReadSlot) void {
-        if (slot.ready_counted) {
-            _ = self.metrics.ready_bytes.fetchSub(@intCast(slot.len - slot.consumed), .release);
-            slot.ready_counted = false;
-        }
-        if (slot.buffer) |buffer| {
-            self.staging_pool.?.put(self.io, buffer);
-            slot.buffer = null;
-        }
-        slot.reset();
-    }
-
-    fn consumeReady(self: *AdaptivePipelineContext, slot: *PageableReadSlot, len: usize) void {
-        std.debug.assert(slot.ready_counted and len <= slot.len - slot.consumed);
-        _ = self.metrics.ready_bytes.fetchSub(@intCast(len), .release);
-        slot.consumed += len;
-        if (slot.consumed == slot.len) slot.ready_counted = false;
-    }
-
-    fn setDmaLaneLimit(self: *AdaptivePipelineContext, limit: usize) void {
-        self.dma_lane_limit.store(@min(limit, self.lanes.len), .release);
-        self.ensureLanes(limit);
-    }
-
-    fn retirementNeeded(self: *const AdaptivePipelineContext) bool {
-        return self.admitted_lanes.load(.acquire) > self.dma_lane_limit.load(.acquire);
+    fn finishSubmissions(self: *VectoredLoadPipeline) void {
+        self.metadata_mutex.lockUncancelable(self.io);
+        defer self.metadata_mutex.unlock(self.io);
+        self.submissions_finished = true;
+        if (self.active_events == 0) self.dma_done.set(self.io);
     }
 };
 
-const AdaptiveTensorLoad = struct {
-    const QuantumResult = union(enum) {
-        finished,
-        requeue,
-        direct_capacity,
-        blocked: *std.Io.Event,
+const VectoredReadRequest = struct {
+    fn run(
+        tensor: *VectoredTensorTransfer,
+        pipeline: *VectoredLoadPipeline,
+        source_offset: usize,
+        request_len: usize,
+    ) void {
+        if (pipeline.failed()) return;
+
+        const plan = VectoredRequestPlan.init(
+            pipeline.allocator,
+            tensor.dispatch_spans,
+            source_offset,
+            request_len,
+            pipeline.block_size,
+        ) catch |err| {
+            pipeline.recordError(err);
+            return;
+        };
+        defer plan.deinit(pipeline.allocator);
+        if (plan.blocks.len == 0) return;
+
+        const leased = pipeline.allocator.alloc([]u8, plan.blocks.len) catch {
+            pipeline.recordError(error.OutOfMemory);
+            return;
+        };
+        defer pipeline.allocator.free(leased);
+        @memset(leased, &.{});
+
+        const wait_ns = pipeline.pool.acquireMany(pipeline.io, leased) catch |err| {
+            pipeline.recordError(err);
+            return;
+        };
+        if (wait_ns > 0) _ = pipeline.metrics.pool_waits.fetchAdd(1, .monotonic);
+        _ = pipeline.metrics.pool_wait_ns.fetchAdd(wait_ns, .monotonic);
+        defer for (leased) |block| {
+            if (block.len != 0) pipeline.pool.release(pipeline.io, block);
+        };
+        if (pipeline.failed()) return;
+
+        const iovecs = pipeline.allocator.alloc([]u8, plan.segments.len) catch {
+            pipeline.recordError(error.OutOfMemory);
+            return;
+        };
+        defer pipeline.allocator.free(iovecs);
+        for (plan.segments, iovecs) |segment, *iovec| {
+            iovec.* = leased[segment.block_index][segment.block_offset..][0..segment.len];
+        }
+
+        pipeline.metrics.beginRead();
+        const read_started: std.Io.Timestamp = .now(pipeline.io, .awake);
+        tensor.reader.readPositionalAllV(iovecs, source_offset) catch |err| {
+            _ = pipeline.metrics.active_reads.fetchSub(1, .acq_rel);
+            pipeline.recordError(err);
+            return;
+        };
+        const read_elapsed = read_started.untilNow(pipeline.io, .awake);
+        _ = pipeline.metrics.active_reads.fetchSub(1, .acq_rel);
+        _ = pipeline.metrics.read_operations.fetchAdd(1, .monotonic);
+        _ = pipeline.metrics.read_bytes.fetchAdd(request_len, .monotonic);
+        _ = pipeline.metrics.read_ns.fetchAdd(@intCast(@max(read_elapsed.nanoseconds, 0)), .monotonic);
+        tensor.recordReadProgress(request_len);
+
+        if (pipeline.failed()) return;
+        for (plan.blocks, 0..) |block_plan, i| {
+            const references: usize = @popCount(block_plan.writer_mask);
+            const block = pipeline.registerBlock(leased[i], references) catch {
+                pipeline.recordError(error.OutOfMemory);
+                return;
+            };
+            leased[i] = &.{};
+            const transfer: VectoredLoadPipeline.DeferredTransfer = .{
+                .tensor = tensor,
+                .block = block,
+                .writer_mask = block_plan.writer_mask,
+                .destination_offset = block_plan.destination_offset,
+                .len = block_plan.len,
+            };
+
+            pipeline.submitOrDefer(transfer);
+        }
+    }
+};
+
+fn loadVectored(
+    comptime ModelType: type,
+    model: *const ModelType,
+    bufferized: *Bufferized(ModelType),
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    store: *const TensorStore,
+    opts: LoadOpts,
+    load_started: std.Io.Timestamp,
+) !usize {
+    const tensor_count = meta.count(Tensor, model);
+    const tensors = try allocator.alloc(*const Tensor, tensor_count);
+    defer allocator.free(tensors);
+    const buffers = try allocator.alloc(*Buffer, tensor_count);
+    defer allocator.free(buffers);
+    meta.forEachVisit(model, *const Tensor, struct {
+        fn call(i: usize, tensor: *const Tensor, output: []*const Tensor) void {
+            output[i] = tensor;
+        }
+    }.call, .{tensors});
+    meta.forEachVisit(bufferized, *Buffer, struct {
+        fn call(i: usize, buffer: *Buffer, output: []*Buffer) void {
+            output[i] = buffer;
+        }
+    }.call, .{buffers});
+
+    var pool = try mem.DmaBlockPool.init(allocator, platform, opts.dma_block_size, opts.max_pinned_bytes);
+    defer pool.deinit();
+
+    const SourceSlot = struct {
+        const uninitialized = 0;
+        const initializing = 1;
+        const ready = 2;
+        const failed = 3;
+
+        uri: []const u8,
+        file: std.Io.File = undefined,
+        status: std.atomic.Value(u8) = .init(uninitialized),
+        error_code: std.atomic.Value(u16) = .init(0),
+        initialized: std.Io.Event = .unset,
+
+        fn ensure(self: *@This(), io_: std.Io) !std.Io.File {
+            while (true) switch (self.status.load(.acquire)) {
+                uninitialized => {
+                    if (self.status.cmpxchgStrong(uninitialized, initializing, .acq_rel, .acquire) != null) continue;
+                    self.file = std.Io.Dir.openFile(.cwd(), io_, self.uri, .{ .mode = .read_only }) catch |err| {
+                        self.error_code.store(@intFromError(err), .release);
+                        self.status.store(failed, .release);
+                        self.initialized.set(io_);
+                        return err;
+                    };
+                    self.status.store(ready, .release);
+                    self.initialized.set(io_);
+                    return self.file;
+                },
+                initializing => self.initialized.waitUncancelable(io_),
+                ready => return self.file,
+                failed => return @errorFromInt(self.error_code.load(.acquire)),
+                else => unreachable,
+            };
+        }
     };
 
-    ctx: *AdaptivePipelineContext,
-    tensor_index: usize,
-    reader: safetensors.TensorReader,
-    writer: ?MemoryWriter = null,
-    slots: []PageableReadSlot,
-    total: usize,
-    next_read: usize = 0,
-    next_commit: usize = 0,
-    head: usize = 0,
-    pending: usize = 0,
-    next_acquisition_ticket: usize = 0,
-    acquisition_turn: usize = 0,
-    acquisition_mutex: std.Io.Mutex = .init,
-    acquisition_condition: std.Io.Condition = .init,
-    direct_slot: DirectReadSlot = .{},
-    direct_pending: bool = false,
-    direct_read_reserved: bool = false,
-    direct_offset: usize = 0,
-    direct_len: usize = 0,
-    quantum_progress: usize = 0,
-    writer_parked: bool = false,
-    writer_active_counted: bool = false,
-    prefetch_counted: bool = false,
-    queued_for_dma: bool = false,
-    ready_next: ?*AdaptiveTensorLoad = null,
-    in_direct_wait: bool = false,
-    direct_wait_next: ?*AdaptiveTensorLoad = null,
-    progress_node: ?std.Progress.Node = null,
-
-    fn init(ctx: *AdaptivePipelineContext, tensor_index: usize) !*AdaptiveTensorLoad {
-        const tensor = ctx.tensors[tensor_index];
-        const self = try ctx.allocator.create(AdaptiveTensorLoad);
-        errdefer ctx.allocator.destroy(self);
-
-        var reader = try ctx.store.getReaderById(tensor.id, ctx.io, &.{});
-        errdefer reader.deinit();
-
-        const slots = try ctx.allocator.alloc(PageableReadSlot, ctx.max_read_parallelism);
-        errdefer ctx.allocator.free(slots);
-        @memset(slots, .{});
-
-        self.* = .{
-            .ctx = ctx,
-            .tensor_index = tensor_index,
-            .reader = reader,
-            .slots = slots,
-            .total = reader.tensor.shape.byteSize(),
-        };
-        load_log.debug("read source opened: index={d}, name={s}, file={s}, bytes={Bi:.2}, prefetched={d}", .{
-            tensor_index,
-            self.reader.tensor.name,
-            self.reader.tensor.file_uri,
-            self.total,
-            ctx.prefetched_sources.load(.acquire),
-        });
-        return self;
-    }
-
-    fn ensureWriter(self: *AdaptiveTensorLoad) !void {
-        if (self.writer != null) return;
-        const shape = self.reader.tensor.shape;
-        const sharding = Sharding.pickSharding(self.ctx.shardings, shape, .explicit_axis_binding) orelse blk: {
-            log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ self.reader.tensor.name, shape });
-            break :blk self.ctx.platform.replicated_sharding;
-        };
-        self.writer = try MemoryWriter.initWithMetrics(
-            self.ctx.allocator,
-            self.ctx.io,
-            self.ctx.platform,
-            self.ctx.pinned_buffer_pools,
-            self.ctx.dma_allocators,
-            self.ctx.transfer_quantum_size,
-            shape,
-            sharding,
-            self.ctx.buffers[self.tensor_index],
-            self.ctx.metrics,
-        );
-        if (self.ctx.progress) |progress| {
-            const progress_total = std.math.divCeil(usize, self.total, 1024) catch unreachable;
-            self.progress_node = progress.start(self.reader.tensor.name, progress_total);
-            self.writer.?.setProgress(&self.progress_node.?);
+    var source_slots: std.ArrayListUnmanaged(SourceSlot) = .empty;
+    defer {
+        for (source_slots.items) |*slot| {
+            if (slot.status.load(.acquire) == SourceSlot.ready) slot.file.close(io);
         }
-        self.writer_active_counted = true;
-        _ = self.ctx.metrics.active_transfers.fetchAdd(1, .monotonic);
-        load_log.debug("tensor started: index={d}, name={s}, bytes={Bi:.2}, active_dma_streams={d}", .{
-            self.tensor_index,
-            self.reader.tensor.name,
-            self.total,
-            self.ctx.metrics.active_transfers.load(.acquire),
-        });
+        source_slots.deinit(allocator);
     }
-
-    fn deinit(self: *AdaptiveTensorLoad) void {
-        std.debug.assert(!self.in_direct_wait);
-        if (self.direct_read_reserved) {
-            self.direct_read_reserved = false;
-            self.ctx.releaseDirectRead();
-        }
-        if (self.direct_pending) {
-            self.direct_slot.event.waitUncancelable(self.ctx.io);
-            self.direct_pending = false;
-        }
-        while (self.pending > 0) {
-            const slot = &self.slots[self.head];
-            slot.event.waitUncancelable(self.ctx.io);
-            self.ctx.releaseSlot(slot);
-            self.pending -= 1;
-            self.head = (self.head + 1) % self.slots.len;
-        }
-        if (self.writer_active_counted) {
-            _ = self.ctx.metrics.active_transfers.fetchSub(1, .monotonic);
-            self.writer_active_counted = false;
-        }
-        if (self.writer) |*writer| writer.setProgress(null);
-        if (self.progress_node) |*node| {
-            node.end();
-            self.progress_node = null;
-        }
-        if (self.writer) |*writer| writer.deinit(self.ctx.allocator);
-        self.writer = null;
-        self.reader.deinit();
-        self.ctx.allocator.free(self.slots);
-        self.ctx.allocator.destroy(self);
-    }
-
-    fn updateProgress(self: *AdaptiveTensorLoad) void {
-        if (self.progress_node) |*node| node.setCompletedItems(self.next_commit / 1024);
-    }
-
-    fn promoteWriterError(self: *AdaptiveTensorLoad, fallback: anyerror) anyerror {
-        return if (self.writer) |*writer| writer.rootError() orelse fallback else fallback;
-    }
-
-    fn fillReadAhead(self: *AdaptiveTensorLoad) void {
-        const staging_limit = self.ctx.metrics.staging_limit.load(.acquire);
-        if (staging_limit == 0) return;
-
-        const active = @max(@as(usize, 1), self.ctx.admitted_lanes.load(.acquire));
-        const per_tensor_limit = @min(
-            self.slots.len,
-            @max(@as(usize, 1), std.math.divCeil(usize, staging_limit, active) catch unreachable),
-        );
-        self.fillReadAheadTo(per_tensor_limit);
-    }
-
-    fn fillReadAheadTo(self: *AdaptiveTensorLoad, pending_limit: usize) void {
-        if (self.ctx.metrics.staging_limit.load(.acquire) == 0) return;
-        const limit = @min(pending_limit, self.slots.len);
-        while (self.pending < limit and self.next_read < self.total and !self.ctx.failed()) {
-            const slot_index = (self.head + self.pending) % self.slots.len;
-            const len = @min(self.ctx.read_chunk_size, self.total - self.next_read);
-            const ticket = self.next_acquisition_ticket;
-            self.next_acquisition_ticket += 1;
-            self.ctx.schedulePageable(self, ticket, &self.slots[slot_index], self.next_read, len);
-            self.next_read += len;
-            self.pending += 1;
-        }
-    }
-
-    fn parkWriterAndWait(self: *AdaptiveTensorLoad) !void {
-        if (self.writer == null or self.writer_parked) return;
-        self.writer.?.parkAndWait() catch |err| return self.promoteWriterError(err);
-        self.writer_parked = true;
-    }
-
-    fn waitForPendingDma(self: *AdaptiveTensorLoad) !void {
-        if (self.writer == null) return;
-        self.writer.?.waitForPendingDma() catch |err| return self.promoteWriterError(err);
-    }
-
-    fn resumeWriter(self: *AdaptiveTensorLoad) !void {
-        if (self.writer == null or !self.writer_parked) return;
-        self.writer.?.unpark() catch |err| return self.promoteWriterError(err);
-        self.writer_parked = false;
-    }
-
-    fn finishAcquisition(self: *AdaptiveTensorLoad, io: std.Io) void {
-        self.acquisition_turn += 1;
-        self.acquisition_condition.broadcast(io);
-        self.acquisition_mutex.unlock(io);
-    }
-
-    fn processQuantum(self: *AdaptiveTensorLoad, drain_for_park: bool) !QuantumResult {
-        if (self.ctx.failed()) return error.LoadCancelled;
-        std.debug.assert(self.writer != null);
-
-        var quantum_bytes = self.quantum_progress;
-        self.quantum_progress = 0;
-        while (self.next_commit < self.total and quantum_bytes < self.ctx.transfer_quantum_size and !self.ctx.failed()) {
-            if (!drain_for_park and (self.direct_pending or self.pending > 0)) self.fillReadAhead();
-
-            if (self.direct_pending) {
-                if (!self.direct_slot.event.isSet()) {
-                    self.quantum_progress = quantum_bytes;
-                    return .{ .blocked = &self.direct_slot.event };
-                }
-                if (self.direct_slot.err) |err| {
-                    self.direct_pending = false;
-                    return err;
-                }
-                if (self.direct_offset != self.next_commit) return error.InvalidReadOrder;
-
-                self.writer.?.commitDirectRead(self.direct_len) catch |err| return self.promoteWriterError(err);
-                self.next_commit += self.direct_len;
-                quantum_bytes += self.direct_len;
-                _ = self.ctx.metrics.ordered_bytes.fetchAdd(@intCast(self.direct_len), .monotonic);
-                self.updateProgress();
-                self.direct_pending = false;
-                self.direct_slot.reset();
-                continue;
-            }
-
-            if (self.pending > 0) {
-                const slot = &self.slots[self.head];
-                if (!slot.event.isSet()) {
-                    self.quantum_progress = quantum_bytes;
-                    return .{ .blocked = &slot.event };
-                }
-
-                if (slot.err) |err| {
-                    self.ctx.releaseSlot(slot);
-                    self.pending -= 1;
-                    self.head = (self.head + 1) % self.slots.len;
-                    return err;
-                }
-                if (slot.offset + slot.consumed != self.next_commit) return error.InvalidReadOrder;
-
-                self.ctx.markProbeStart(slot.epoch);
-                self.writer.?.setEpoch(slot.epoch) catch |err| return self.promoteWriterError(err);
-                const copy_len = @min(slot.len - slot.consumed, self.ctx.transfer_quantum_size - quantum_bytes);
-                const copy_started: std.Io.Timestamp = .now(self.ctx.io, .awake);
-                self.writer.?.interface().writeAll(slot.buffer.?[slot.consumed..][0..copy_len]) catch |err| return self.promoteWriterError(err);
-                self.writer.?.commitStagedWrite() catch |err| return self.promoteWriterError(err);
-                const copy_elapsed = copy_started.untilNow(self.ctx.io, .awake);
-                const ready_age = std.Io.Timestamp.fromNanoseconds(@intCast(slot.ready_at_ns)).untilNow(self.ctx.io, .awake);
-                const ready_age_us: u64 = @intCast(@max(@divTrunc(ready_age.nanoseconds, std.time.ns_per_us), 0));
-                _ = self.ctx.metrics.staged_copy_bytes.fetchAdd(@intCast(copy_len), .monotonic);
-                _ = self.ctx.metrics.staged_copy_ns.fetchAdd(@intCast(@max(copy_elapsed.nanoseconds, 0)), .monotonic);
-                _ = self.ctx.metrics.weighted_ready_age_us.fetchAdd(@as(u64, @intCast(copy_len)) *| ready_age_us, .monotonic);
-                self.next_commit += copy_len;
-                quantum_bytes += copy_len;
-                _ = self.ctx.metrics.ordered_bytes.fetchAdd(@intCast(copy_len), .monotonic);
-                self.updateProgress();
-                self.ctx.consumeReady(slot, copy_len);
-                if (slot.consumed == slot.len) {
-                    self.ctx.releaseSlot(slot);
-                    self.pending -= 1;
-                    self.head = (self.head + 1) % self.slots.len;
-                }
-                continue;
-            }
-
-            if (self.next_read != self.next_commit) return error.InvalidReadOrder;
-            if (drain_for_park) return .requeue;
-            // This tensor owns the lane for one DMA quantum. Yielding merely
-            // because another tensor is queued makes direct-only loads cycle
-            // through the ready queue without scheduling their next read.
-            const epoch = self.ctx.metrics.config_epoch.load(.acquire);
-            self.writer.?.setEpoch(epoch) catch |err| return self.promoteWriterError(err);
-            const writable = self.writer.?.directWritable();
-            if (writable.len == 0) return error.NoDirectReadWindow;
-            if (self.direct_read_reserved) {
-                self.direct_read_reserved = false;
-            } else if (self.ctx.direct_capacity_waiters.load(.acquire) > 0 or !self.ctx.tryReserveDirectRead()) {
-                self.fillReadAheadTo(1);
-                if (self.pending > 0) continue;
-                return .direct_capacity;
-            }
-            const len = @min(
-                self.ctx.read_chunk_size,
-                @min(writable.len, @min(self.total - self.next_read, self.ctx.transfer_quantum_size - quantum_bytes)),
-            );
-            self.direct_slot = .{ .scheduled_at = .now(self.ctx.io, .awake) };
-            self.direct_pending = true;
-            self.direct_offset = self.next_read;
-            self.direct_len = len;
-            self.ctx.scheduleDirect(&self.reader, writable[0..len], self.next_read, epoch, &self.direct_slot);
-            self.next_read += len;
-            self.fillReadAhead();
-            if (!self.direct_slot.event.isSet()) {
-                self.quantum_progress = quantum_bytes;
-                return .{ .blocked = &self.direct_slot.event };
-            }
-        }
-
-        if (self.ctx.failed()) return error.LoadCancelled;
-        if (self.next_commit < self.total) return .requeue;
-
-        self.writer.?.interface().flush() catch |err| return self.promoteWriterError(err);
-        if (self.progress_node) |*node| node.setCompletedItems(std.math.divCeil(usize, self.total, 1024) catch unreachable);
-        self.ctx.completeTensor(self.total);
-        load_log.debug("tensor completed: name={s}, bytes={Bi:.2}, completed={d}/{d}", .{
-            self.reader.tensor.name,
-            self.total,
-            self.ctx.metrics.completed_transfers.load(.acquire),
-            self.ctx.tensors.len,
-        });
-        return .finished;
-    }
-};
-
-const AdaptivePipelineLane = struct {
-    const State = enum(u8) { idle, dma };
-
-    ctx: *AdaptivePipelineContext,
-    active: ?*AdaptiveTensorLoad = null,
-    state: std.atomic.Value(State) = .init(.idle),
-    last_dma_submission_epoch: std.atomic.Value(u64) = .init(0),
-
-    fn deinitActive(self: *AdaptivePipelineLane) void {
-        if (self.active) |active| active.deinit();
-        self.active = null;
-    }
-
-    fn recordDmaSubmissionSince(self: *AdaptivePipelineLane, before: u64) void {
-        const active = self.active orelse return;
-        const writer = if (active.writer) |*writer_| writer_ else return;
-        if (writer.submissionCount() <= before) return;
-        const epoch = self.ctx.dma_probe_capacity_epoch.load(.acquire);
-        if (epoch > 0) self.last_dma_submission_epoch.store(epoch, .release);
-    }
-
-    fn claimTensor(self: *AdaptivePipelineLane) !bool {
-        if (self.ctx.popDmaReady()) |tensor_load| {
-            self.active = tensor_load;
-            try tensor_load.ensureWriter();
-            return true;
-        }
-
-        self.ctx.ensurePrefetch();
-        if (self.ctx.direct_capacity_waiters.load(.acquire) > 0) return false;
-        if (self.ctx.direct_reads_pending.load(.acquire) >= self.ctx.dma_lane_limit.load(.acquire)) return false;
-        const tensor_index = self.ctx.claimTensorIndex() orelse return false;
-        self.active = try .init(self.ctx, tensor_index);
-        try self.active.?.ensureWriter();
-        return true;
-    }
-
-    fn detachActive(self: *AdaptivePipelineLane) *AdaptiveTensorLoad {
-        const active = self.active.?;
-        self.active = null;
-        return active;
-    }
-
-    fn activateReserved(self: *AdaptivePipelineLane) bool {
-        if (self.state.cmpxchgStrong(.idle, .dma, .acq_rel, .acquire) != null) return false;
-        self.schedule();
-        return true;
-    }
-
-    fn releaseAdmission(self: *AdaptivePipelineLane, replenish: bool) void {
-        const previous = self.state.swap(.idle, .acq_rel);
-        if (previous == .idle) return;
-        _ = self.ctx.admitted_lanes.fetchSub(1, .acq_rel);
-        if (replenish and self.ctx.metrics.completed_transfers.load(.acquire) < self.ctx.tensors.len) {
-            self.ctx.ensureLanes(self.ctx.dma_lane_limit.load(.acquire));
-        }
-    }
-
-    fn schedule(self: *AdaptivePipelineLane) void {
-        if (!self.ctx.beginScheduling()) {
-            self.deinitActive();
-            self.releaseAdmission(false);
-            return;
-        }
-        defer self.ctx.endScheduling();
-        self.ctx.dma_group.concurrent(self.ctx.io, AdaptivePipelineLane.run, .{self}) catch |err| {
-            self.ctx.fail(err);
-            self.deinitActive();
-            self.releaseAdmission(false);
+    const tensor_source_indices = try allocator.alloc(usize, tensor_count);
+    defer allocator.free(tensor_source_indices);
+    for (tensors, tensor_source_indices) |tensor, *source_index| {
+        const descriptor = store.getPtrFromId(tensor.id) orelse return error.NotFound;
+        source_index.* = for (source_slots.items, 0..) |slot, index| {
+            if (std.mem.eql(u8, slot.uri, descriptor.file_uri)) break index;
+        } else blk: {
+            const index = source_slots.items.len;
+            try source_slots.append(allocator, .{ .uri = descriptor.file_uri });
+            break :blk index;
         };
     }
 
-    fn run(self: *AdaptivePipelineLane) void {
-        const work_started: std.Io.Timestamp = .now(self.ctx.io, .awake);
-        defer {
-            const elapsed = work_started.untilNow(self.ctx.io, .awake);
-            _ = self.ctx.metrics.dma_work_ns.fetchAdd(@intCast(@max(elapsed.nanoseconds, 0)), .monotonic);
+    const StateSlot = struct {
+        const uninitialized = 0;
+        const initializing = 1;
+        const ready = 2;
+        const failed = 3;
+
+        state: VectoredTensorTransfer = undefined,
+        status: std.atomic.Value(u8) = .init(uninitialized),
+        error_code: std.atomic.Value(u16) = .init(0),
+        initialized: std.Io.Event = .unset,
+
+        fn ensure(
+            self: *@This(),
+            allocator_: std.mem.Allocator,
+            io_: std.Io,
+            platform_: *const Platform,
+            store_: *const TensorStore,
+            tensor_: *const Tensor,
+            source_file_: std.Io.File,
+            shardings_: []const Sharding,
+            buffer_: *Buffer,
+            progress_: ?*std.Progress.Node,
+        ) !*VectoredTensorTransfer {
+            while (true) switch (self.status.load(.acquire)) {
+                uninitialized => {
+                    if (self.status.cmpxchgStrong(uninitialized, initializing, .acq_rel, .acquire) != null) continue;
+                    self.state = VectoredTensorTransfer.init(
+                        allocator_,
+                        io_,
+                        platform_,
+                        store_,
+                        tensor_,
+                        source_file_,
+                        shardings_,
+                        buffer_,
+                        progress_,
+                    ) catch |err| {
+                        self.error_code.store(@intFromError(err), .release);
+                        self.status.store(failed, .release);
+                        self.initialized.set(io_);
+                        return err;
+                    };
+                    self.status.store(ready, .release);
+                    self.initialized.set(io_);
+                    return &self.state;
+                },
+                initializing => self.initialized.waitUncancelable(io_),
+                ready => return &self.state,
+                failed => return @errorFromInt(self.error_code.load(.acquire)),
+                else => unreachable,
+            };
         }
-        if (self.ctx.failed()) {
-            self.deinitActive();
-            self.releaseAdmission(false);
-            return;
+    };
+
+    const state_slots = try allocator.alloc(StateSlot, tensor_count);
+    defer allocator.free(state_slots);
+    for (state_slots) |*slot| slot.* = .{};
+    defer for (state_slots) |*slot| {
+        if (slot.status.load(.acquire) == StateSlot.ready) slot.state.deinit();
+    };
+
+    const coordinator_started_at: std.Io.Timestamp = .now(io, .awake);
+    load_log.debug("vectored coordinator started: tensors={d}, elapsed={d:.3}s", .{
+        tensor_count,
+        @as(f64, @floatFromInt(load_started.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
+    });
+
+    var metrics: VectoredLoadMetrics = .{};
+    var pipeline: VectoredLoadPipeline = .{
+        .allocator = allocator,
+        .io = io,
+        .platform = platform,
+        .pool = &pool,
+        .block_size = opts.dma_block_size,
+        .metrics = &metrics,
+    };
+    defer pipeline.deinit();
+
+    const ReadJob = struct {
+        tensor_index: usize,
+        source_offset: usize,
+        len: usize,
+    };
+    var request_count: usize = 0;
+    for (tensors) |tensor| {
+        const count = std.math.divCeil(usize, tensor.byteSize(), opts.read_request_size) catch unreachable;
+        request_count += count;
+    }
+    const jobs = try allocator.alloc(ReadJob, request_count);
+    defer allocator.free(jobs);
+    const offsets = try allocator.alloc(usize, tensor_count);
+    defer allocator.free(offsets);
+    @memset(offsets, 0);
+
+    var job_count: usize = 0;
+    var scheduled = true;
+    while (scheduled) {
+        scheduled = false;
+        for (tensors, offsets, 0..) |tensor, *offset, tensor_index| {
+            const tensor_size = tensor.byteSize();
+            if (offset.* >= tensor_size) continue;
+            scheduled = true;
+            const request_len = @min(opts.read_request_size, tensor_size - offset.*);
+            jobs[job_count] = .{
+                .tensor_index = tensor_index,
+                .source_offset = offset.*,
+                .len = request_len,
+            };
+            job_count += 1;
+            offset.* += request_len;
         }
-        if (self.active == null and !(self.claimTensor() catch |err| {
-            self.ctx.fail(err);
-            self.releaseAdmission(false);
-            return;
-        })) {
-            self.releaseAdmission(false);
-            if (self.ctx.hasDmaReady()) self.ctx.ensureLanes(self.ctx.dma_lane_limit.load(.acquire));
-            return;
-        }
-        self.active.?.resumeWriter() catch |err| {
-            self.ctx.fail(err);
-            self.deinitActive();
-            self.releaseAdmission(false);
-            return;
-        };
-        const submissions_before = self.active.?.writer.?.submissionCount();
-        const result = self.active.?.processQuantum(self.ctx.retirementNeeded()) catch |err| {
-            self.recordDmaSubmissionSince(submissions_before);
-            self.ctx.fail(err);
-            self.deinitActive();
-            self.releaseAdmission(false);
-            return;
-        };
-        self.recordDmaSubmissionSince(submissions_before);
-        switch (result) {
-            .finished => {
-                self.deinitActive();
-                self.releaseAdmission(true);
-            },
-            .requeue => {
-                if (!self.ctx.retirementNeeded() and !self.ctx.hasDmaReady()) {
-                    self.schedule();
-                    return;
-                }
-                self.active.?.parkWriterAndWait() catch |err| {
-                    self.ctx.fail(err);
-                    self.deinitActive();
-                    self.releaseAdmission(false);
-                    return;
-                };
-                const active = self.detachActive();
-                self.ctx.enqueueDmaReady(active);
-                self.releaseAdmission(true);
-            },
-            .direct_capacity => {
-                self.active.?.parkWriterAndWait() catch |err| {
-                    self.ctx.fail(err);
-                    self.deinitActive();
-                    self.releaseAdmission(false);
-                    return;
-                };
-                const active = self.detachActive();
-                self.ctx.requeueOnDirectCapacity(active);
-                self.releaseAdmission(true);
-            },
-            .blocked => |event| {
-                if (self.active.?.direct_pending) {
-                    self.active.?.waitForPendingDma() catch |err| {
-                        self.ctx.fail(err);
-                        self.deinitActive();
-                        self.releaseAdmission(false);
+    }
+    std.debug.assert(job_count == request_count);
+
+    var next_job: std.atomic.Value(usize) = .init(0);
+    var read_group: std.Io.Group = .init;
+    const worker_count = @min(opts.read_parallelism, request_count);
+    for (0..worker_count) |_| {
+        read_group.concurrent(io, struct {
+            fn run(
+                jobs_: []const ReadJob,
+                next: *std.atomic.Value(usize),
+                pipeline_: *VectoredLoadPipeline,
+                slots_: []StateSlot,
+                tensors_: []const *const Tensor,
+                buffers_: []*Buffer,
+                source_slots_: []SourceSlot,
+                source_indices_: []const usize,
+                allocator_: std.mem.Allocator,
+                io_: std.Io,
+                platform_: *const Platform,
+                store_: *const TensorStore,
+                shardings_: []const Sharding,
+                progress_: ?*std.Progress.Node,
+            ) void {
+                while (true) {
+                    if (pipeline_.failed()) return;
+                    const index = next.fetchAdd(1, .monotonic);
+                    if (index >= jobs_.len) return;
+                    const job = jobs_[index];
+                    const source_file = source_slots_[source_indices_[job.tensor_index]].ensure(io_) catch |err| {
+                        pipeline_.recordError(err);
                         return;
                     };
-                    self.ctx.addDirectWait(self.active.?);
-                    self.ctx.resumeDirectLaneWhenReady(self, event);
-                    return;
+                    const tensor = slots_[job.tensor_index].ensure(
+                        allocator_,
+                        io_,
+                        platform_,
+                        store_,
+                        tensors_[job.tensor_index],
+                        source_file,
+                        shardings_,
+                        buffers_[job.tensor_index],
+                        progress_,
+                    ) catch |err| {
+                        pipeline_.recordError(err);
+                        return;
+                    };
+                    VectoredReadRequest.run(tensor, pipeline_, job.source_offset, job.len);
                 }
-                self.active.?.parkWriterAndWait() catch |err| {
-                    self.ctx.fail(err);
-                    self.deinitActive();
-                    self.releaseAdmission(false);
-                    return;
-                };
-                const active = self.detachActive();
-                self.ctx.requeueWhenReady(active, event);
-                self.releaseAdmission(true);
-            },
+            }
+        }.run, .{
+            jobs,
+            &next_job,
+            &pipeline,
+            state_slots,
+            tensors,
+            buffers,
+            source_slots.items,
+            tensor_source_indices,
+            allocator,
+            io,
+            platform,
+            store,
+            opts.shardings,
+            opts.progress,
+        }) catch |err| {
+            pipeline.recordError(err);
+            break;
+        };
+    }
+    read_group.await(io) catch |err| pipeline.recordError(err);
+    const reads_finished_at: std.Io.Timestamp = .now(io, .awake);
+    load_log.debug("vectored reads submitted: elapsed={d:.3}s, read_phase={d:.3}s, committed={Bi:.2}", .{
+        @as(f64, @floatFromInt(load_started.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
+        @as(f64, @floatFromInt(coordinator_started_at.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
+        metrics.committed_bytes.load(.acquire),
+    });
+
+    if (pipeline.failed()) {
+        pipeline.abortDeferred();
+        for (state_slots) |*slot| {
+            if (slot.status.load(.acquire) != StateSlot.ready) continue;
+            for (slot.state.targets) |*target| {
+                if (!target.final_submitted) {
+                    target.manager.setBufferErrorUnknown(platform.pjrt_api, 0, "vectored load failed") catch {};
+                }
+            }
+        }
+    } else {
+        pipeline.submitReadyDeferred();
+        if (pipeline.deferred.items.len != 0) {
+            pipeline.recordError(error.IncompleteTransferPlan);
+            pipeline.abortDeferred();
+            for (state_slots) |*slot| {
+                if (slot.status.load(.acquire) != StateSlot.ready) continue;
+                for (slot.state.targets) |*target| {
+                    if (!target.final_submitted) {
+                        target.manager.setBufferErrorUnknown(platform.pjrt_api, 0, "vectored load did not submit every final transfer") catch {};
+                    }
+                }
+            }
         }
     }
-};
+
+    pipeline.finishSubmissions();
+    pipeline.dma_done.waitUncancelable(io);
+    load_log.debug("vectored DMA drained: elapsed={d:.3}s, drain_phase={d:.3}s", .{
+        @as(f64, @floatFromInt(load_started.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
+        @as(f64, @floatFromInt(reads_finished_at.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
+    });
+    if (pipeline.errorValue()) |err| return err;
+
+    var loaded_bytes: usize = 0;
+    for (state_slots) |*slot| {
+        std.debug.assert(slot.status.load(.acquire) == StateSlot.ready);
+        for (slot.state.targets) |target| std.debug.assert(target.final_submitted);
+        loaded_bytes += slot.state.total;
+    }
+    const elapsed = load_started.untilNow(io, .awake);
+    const elapsed_seconds = @as(f64, @floatFromInt(elapsed.nanoseconds)) / std.time.ns_per_s;
+    const goodput = if (elapsed_seconds > 0) @as(f64, @floatFromInt(loaded_bytes)) / elapsed_seconds else 0;
+    const average_read = if (metrics.read_operations.load(.acquire) == 0) 0 else metrics.read_bytes.load(.acquire) / metrics.read_operations.load(.acquire);
+    const average_dma = if (metrics.dma_submissions.load(.acquire) == 0) 0 else metrics.submitted_bytes.load(.acquire) / metrics.dma_submissions.load(.acquire);
+    const read_operations = metrics.read_operations.load(.acquire);
+    const dma_submissions = metrics.dma_submissions.load(.acquire);
+    const average_read_ms = if (read_operations == 0) 0 else @as(f64, @floatFromInt(metrics.read_ns.load(.acquire))) / @as(f64, @floatFromInt(read_operations)) / std.time.ns_per_ms;
+    const average_dma_ms = if (dma_submissions == 0) 0 else @as(f64, @floatFromInt(metrics.dma_ns.load(.acquire))) / @as(f64, @floatFromInt(dma_submissions)) / std.time.ns_per_ms;
+    load_log.debug("completed: vectored=true, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, reads={d}, peak_reads={d}, average_read={Bi:.2}, average_read_latency={d:.3}ms, dma_submissions={d}, average_dma={Bi:.2}, average_dma_latency={d:.3}ms, submitted={Bi:.2}, committed={Bi:.2}, pinned_high_water={Bi:.2}, mapped={Bi:.2}, pool_waits={d}, pool_wait={d:.3}s", .{
+        tensor_count,
+        loaded_bytes,
+        elapsed_seconds,
+        goodput / (1024 * 1024),
+        read_operations,
+        metrics.peak_reads.load(.acquire),
+        average_read,
+        average_read_ms,
+        dma_submissions,
+        average_dma,
+        average_dma_ms,
+        metrics.submitted_bytes.load(.acquire),
+        metrics.committed_bytes.load(.acquire),
+        pool.highWaterBytes(),
+        pool.mappedBytes(),
+        metrics.pool_waits.load(.acquire),
+        @as(f64, @floatFromInt(metrics.pool_wait_ns.load(.acquire))) / std.time.ns_per_s,
+    });
+    return loaded_bytes;
+}
 
 pub const LoadOpts = struct {
     pub const auto: LoadOpts = .{};
 
-    /// Hard maximum number of concurrent tensor transfers.
-    parallelism: usize = 32,
-    /// Starting limit for adaptive loading. Clamped to the worker/chunk caps.
-    initial_parallelism: usize = 8,
-    /// Set false to retain the fixed `parallelism` behavior.
-    adaptive_parallelism: bool = true,
-    /// Hard maximum number of outstanding positional chunk reads. When null,
-    /// adaptive loading uses at least 32 reads, or `parallelism` when larger.
-    max_read_parallelism: ?usize = null,
-    /// Logical pageable read-ahead chunk size. This is independent of the
-    /// physical pinned buffer size and transfer scheduling quantum.
-    read_chunk_size: usize = 32 * 1024 * 1024,
-    /// Hard pageable read-ahead budget. Blocks are allocated lazily; zero
-    /// disables pageable staging while retaining direct DMA adaptation.
-    max_staging_bytes: usize = 1024 * 1024 * 1024,
+    /// Hard maximum number of concurrent positional source requests.
+    read_parallelism: usize = 12,
+    /// Logical bytes gathered by one positional source request.
+    read_request_size: usize = 2 * 1024 * 1024,
+    /// Physical transfer and pool allocation unit.
+    dma_block_size: usize = 2 * 1024 * 1024,
+    /// Client-wide hard limit for registered host memory.
+    max_pinned_bytes: usize = 128 * 1024 * 1024,
     shardings: []const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
-    /// Hard per-device limit on physical pinned DMA buffers. Adaptive loading
-    /// normally uses one more buffer than active workers and probes higher only
-    /// when useful.
-    max_pinned_buffers_per_device: usize = 33,
-    /// Per-device pinned buffer size. When null, oneAPI uses 2 MiB blocks and
-    /// all other platforms use 32 MiB. Set an explicit size to override that
-    /// policy. Keeping this separate lets multi-device loads use a large
-    /// scheduling quantum without multiplying that quantum by the device count
-    /// in every pinned pool allocation.
-    pinned_buffer_size: ?usize = null,
-    /// Logical bytes a DMA lane processes before yielding to another tensor.
-    transfer_quantum_size: usize = 256 * 1024 * 1024,
     total_bytes: ?*usize = null,
 };
 
-fn adaptiveDmaWorkerCap(parallelism: usize, pinned_buffers: usize, tensor_count: usize) usize {
-    const buffer_cap = if (pinned_buffers > 1) pinned_buffers - 1 else 1;
-    return @min(@max(tensor_count, 1), @min(parallelism, buffer_cap));
-}
+fn loadBuffered(
+    comptime ModelType: type,
+    model: *const ModelType,
+    bufferized: *Bufferized(ModelType),
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    store: *const TensorStore,
+    opts: LoadOpts,
+) !usize {
+    const tensor_count = meta.count(Tensor, model);
+    const Ctx = struct {
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        store: *const TensorStore,
+        shardings: []const Sharding,
+        progress: ?*std.Progress.Node,
+        buffers: []*Buffer,
+        group: stdx.Io.LimitedGroup,
+        total: std.atomic.Value(usize) = .init(0),
+        first_error: std.atomic.Value(u16) = .init(0),
 
-fn defaultAdaptiveReadWorkerCap(parallelism: usize) usize {
-    return @max(@as(usize, 32), parallelism);
+        fn recordError(self: *@This(), err: anyerror) void {
+            _ = self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic);
+        }
+    };
+    var ctx: Ctx = .{
+        .allocator = allocator,
+        .io = io,
+        .platform = platform,
+        .store = store,
+        .shardings = opts.shardings,
+        .progress = opts.progress,
+        .buffers = try allocator.alloc(*Buffer, tensor_count),
+        .group = .init(opts.read_parallelism),
+    };
+    defer allocator.free(ctx.buffers);
+    meta.forEachVisit(bufferized, *Buffer, struct {
+        fn call(i: usize, buffer: *Buffer, output: []*Buffer) void {
+            output[i] = buffer;
+        }
+    }.call, .{ctx.buffers});
+
+    meta.forEachVisit(model, *const Tensor, struct {
+        fn call(i: usize, tensor: *const Tensor, context: *Ctx) void {
+            context.group.concurrent(context.io, struct {
+                fn run(i_: usize, tensor_: *const Tensor, context_: *Ctx) void {
+                    if (context_.first_error.load(.acquire) != 0) return;
+                    var reader = context_.store.getReaderById(tensor_.id, context_.io, &.{}) catch |err| {
+                        context_.recordError(err);
+                        return;
+                    };
+                    defer reader.deinit();
+                    const shape = reader.tensor.shape;
+                    const sharding = Sharding.pickSharding(context_.shardings, shape, .explicit_axis_binding) orelse context_.platform.replicated_sharding;
+                    var writer = BufferedMemoryWriter.init(context_.allocator, context_.io, context_.platform, shape, sharding, context_.buffers[i_]) catch |err| {
+                        context_.recordError(err);
+                        return;
+                    };
+                    defer writer.deinit(context_.allocator);
+
+                    const total = reader.interface.streamRemaining(&writer.interface) catch |err| {
+                        context_.recordError(err);
+                        return;
+                    };
+                    writer.interface.flush() catch |err| {
+                        context_.recordError(err);
+                        return;
+                    };
+                    _ = context_.total.fetchAdd(total, .monotonic);
+                }
+            }.run, .{ i, tensor, context }) catch |err| context.recordError(err);
+        }
+    }.call, .{&ctx});
+    ctx.group.await(io) catch |err| ctx.recordError(err);
+    const error_code = ctx.first_error.load(.acquire);
+    if (error_code != 0) return @errorFromInt(error_code);
+    return ctx.total.load(.acquire);
 }
 
 pub fn load(
@@ -4202,17 +1597,14 @@ pub fn load(
     store: *const TensorStore,
     opts: LoadOpts,
 ) !Bufferized(ModelType) {
-    stdx.debug.assert(opts.parallelism > 0, "zml.io.load parallelism must be greater than zero", .{});
-    stdx.debug.assert(opts.initial_parallelism > 0, "zml.io.load initial_parallelism must be greater than zero", .{});
-    stdx.debug.assert(opts.max_pinned_buffers_per_device > 0, "zml.io.load max_pinned_buffers_per_device must be greater than zero", .{});
-    stdx.debug.assert(opts.transfer_quantum_size > 0, "zml.io.load transfer_quantum_size must be greater than zero", .{});
-    stdx.debug.assert(opts.read_chunk_size > 0, "zml.io.load read_chunk_size must be greater than zero", .{});
+    stdx.debug.assert(opts.read_parallelism > 0, "zml.io.load read_parallelism must be greater than zero", .{});
+    stdx.debug.assert(opts.read_request_size > 0, "zml.io.load read_request_size must be greater than zero", .{});
+    stdx.debug.assert(opts.dma_block_size > 0, "zml.io.load dma_block_size must be greater than zero", .{});
+    stdx.debug.assert(opts.max_pinned_bytes >= opts.dma_block_size, "zml.io.load max_pinned_bytes must hold at least one DMA block", .{});
 
     const load_started: std.Io.Timestamp = .now(io, .awake);
     const tensor_count = meta.count(Tensor, model);
-    var span = tracer.span("zml.io.load", .{
-        .tensor_count = tensor_count,
-    });
+    var span = tracer.span("zml.io.load", .{ .tensor_count = tensor_count });
     defer span.end();
 
     var bufferized = try mem.bufferize(allocator, ModelType, model);
@@ -4229,1641 +1621,25 @@ pub fn load(
         }
     }.call, .{&total_logical_bytes});
 
-    const pinned_buffer_auto = opts.pinned_buffer_size == null;
-    const pinned_buffer_size = opts.pinned_buffer_size orelse switch (platform.target) {
-        .oneapi => @as(usize, 2 * 1024 * 1024),
-        else => @as(usize, 32 * 1024 * 1024),
-    };
-    stdx.debug.assert(pinned_buffer_size >= @sizeOf(usize), "zml.io.load pinned_buffer_size must hold pool metadata", .{});
-
     const direct = platform.target == .cuda or platform.target == .oneapi;
-    const default_read_parallelism = defaultAdaptiveReadWorkerCap(opts.parallelism);
-    const max_read_workers = opts.max_read_parallelism orelse default_read_parallelism;
-    stdx.debug.assert(max_read_workers > 0, "zml.io.load max_read_parallelism must be greater than zero", .{});
-    const max_staging_chunks = if (opts.max_staging_bytes < opts.read_chunk_size) 0 else opts.max_staging_bytes / opts.read_chunk_size;
-    if (max_staging_chunks > 0) {
-        stdx.debug.assert(opts.read_chunk_size >= @sizeOf(usize), "zml.io.load read_chunk_size must hold pool metadata", .{});
-    }
-    const adaptive_candidate = opts.adaptive_parallelism and direct and total_logical_bytes > opts.read_chunk_size and (opts.parallelism > 1 or max_read_workers > 1);
-    const max_workers = if (adaptive_candidate)
-        adaptiveDmaWorkerCap(opts.parallelism, opts.max_pinned_buffers_per_device, tensor_count)
-    else
-        opts.parallelism;
-    const adaptive = adaptive_candidate and (max_workers > 1 or max_read_workers > 1);
-    const initial_workers = if (adaptive) @min(max_workers, opts.initial_parallelism) else max_workers;
-    const initial_read_workers = if (adaptive) @min(max_read_workers, opts.initial_parallelism) else max_read_workers;
-    const initial_pinned_buffers = if (adaptive) @min(opts.max_pinned_buffers_per_device, initial_workers + 1) else opts.max_pinned_buffers_per_device;
-    var metrics: LoadMetrics = .{};
-    const configured_read_workers = if (adaptive) initial_read_workers else max_workers;
-    const configured_max_read_workers = if (adaptive) max_read_workers else max_workers;
-    load_log.debug("configured: target={s}, adaptive={}, requested_adaptive={}, tensors={d}, reads={d}/{d}, dma={d}/{d} (requested_max={d}), pinned_buffers={d}/{d}, staging=0/{d} blocks ({Bi:.2} max), read_chunk_size={Bi:.2}, pinned_buffer_size={Bi:.2} (auto={}), transfer_quantum_size={Bi:.2}, logical_bytes={Bi:.2}", .{
+    load_log.debug("configured: target={s}, vectored={}, tensors={d}, read_parallelism={d}, read_request_size={Bi:.2}, dma_block_size={Bi:.2}, max_pinned_bytes={Bi:.2}, logical_bytes={Bi:.2}", .{
         @tagName(platform.target),
-        adaptive,
-        opts.adaptive_parallelism,
+        direct,
         tensor_count,
-        configured_read_workers,
-        configured_max_read_workers,
-        initial_workers,
-        max_workers,
-        opts.parallelism,
-        initial_pinned_buffers,
-        opts.max_pinned_buffers_per_device,
-        max_staging_chunks,
-        opts.max_staging_bytes,
-        opts.read_chunk_size,
-        pinned_buffer_size,
-        pinned_buffer_auto,
-        opts.transfer_quantum_size,
+        opts.read_parallelism,
+        opts.read_request_size,
+        opts.dma_block_size,
+        opts.max_pinned_bytes,
         total_logical_bytes,
     });
 
-    const pool_count = platform.devices.len;
-    const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
-    defer allocator.free(dma_allocators);
-    for (platform.devices, 0..) |*device, i| {
-        dma_allocators[i] = .init(allocator, device);
-    }
-
-    const buffer_pools = try allocator.alloc(mem.DynamicBufferPool, pool_count);
-    defer allocator.free(buffer_pools);
-    for (buffer_pools) |*pool_| {
-        pool_.* = .init(opts.max_pinned_buffers_per_device, pinned_buffer_size);
-        if (adaptive) pool_.setLimit(io, initial_pinned_buffers);
-    }
-    defer for (buffer_pools, 0..) |*pool_, i| {
-        pool_.deinit(dma_allocators[i].allocator());
-    };
-
-    if (adaptive) {
-        const buffers = try allocator.alloc(*Buffer, tensor_count);
-        defer allocator.free(buffers);
-        const tensors = try allocator.alloc(*const Tensor, tensor_count);
-        defer allocator.free(tensors);
-        meta.forEachVisit(&bufferized, *Buffer, struct {
-            fn call(i: usize, buffer: *Buffer, buffers_: []*Buffer) void {
-                buffers_[i] = buffer;
-            }
-        }.call, .{buffers});
-        meta.forEachVisit(model, *const Tensor, struct {
-            fn call(i: usize, tensor: *const Tensor, tensors_: []*const Tensor) void {
-                tensors_[i] = tensor;
-            }
-        }.call, .{tensors});
-
-        var staging_pool_storage: mem.DynamicBufferPool = undefined;
-        const staging_pool: ?*mem.DynamicBufferPool = if (max_staging_chunks > 0) blk: {
-            staging_pool_storage = .init(max_staging_chunks, opts.read_chunk_size);
-            staging_pool_storage.setLimit(io, 1);
-            break :blk &staging_pool_storage;
-        } else null;
-        defer if (staging_pool) |pool| pool.deinit(allocator);
-
-        var pipeline: AdaptivePipelineContext = .{
-            .allocator = allocator,
-            .io = io,
-            .platform = platform,
-            .store = store,
-            .tensors = tensors,
-            .buffers = buffers,
-            .shardings = opts.shardings,
-            .dma_allocators = dma_allocators,
-            .pinned_buffer_pools = buffer_pools,
-            .staging_pool = staging_pool,
-            .transfer_quantum_size = opts.transfer_quantum_size,
-            .read_chunk_size = opts.read_chunk_size,
-            .max_read_parallelism = max_read_workers,
-            .dma_group = .init(initial_workers),
-            .read_group = .init(initial_read_workers),
-            .metrics = &metrics,
-            .progress = opts.progress,
-            .dma_lane_limit = .init(initial_workers),
-        };
-        const lanes = try allocator.alloc(AdaptivePipelineLane, max_workers);
-        defer allocator.free(lanes);
-        pipeline.lanes = lanes;
-        for (lanes) |*lane| lane.* = .{ .ctx = &pipeline };
-
-        var controller_runtime: AdaptiveLoadRuntime = .{
-            .controller = .init(
-                initial_workers,
-                max_workers,
-                initial_pinned_buffers,
-                opts.max_pinned_buffers_per_device,
-                initial_read_workers,
-                max_read_workers,
-                max_staging_chunks,
-                direct,
-            ),
-            .pipeline = &pipeline,
-            .dma_group = &pipeline.dma_group,
-            .read_group = &pipeline.read_group,
-            .pools = buffer_pools,
-            .dma_allocators = dma_allocators,
-            .staging_pool = staging_pool,
-            .staging_allocator = allocator,
-            .metrics = &metrics,
-            .transfer_quantum_size = opts.transfer_quantum_size,
-            .pinned_buffer_size = pinned_buffer_size,
-            .read_chunk_size = opts.read_chunk_size,
-            .total_logical_bytes = total_logical_bytes,
-            .total_transfers = tensor_count,
-            .probe_started = .now(io, .awake),
-        };
-        var controller_group: std.Io.Group = .init;
-        controller_group.concurrent(io, AdaptiveLoadRuntime.run, .{ &controller_runtime, io }) catch unreachable;
-
-        pipeline.ensureLanes(initial_workers);
-        pipeline.done_event.waitUncancelable(io);
-
-        controller_runtime.done.store(true, .release);
-        controller_group.await(io) catch |err| pipeline.fail(err);
-        pipeline.scheduling_idle.waitUncancelable(io);
-        if (pipeline.failed()) {
-            pipeline.read_group.cancel(io);
-            pipeline.staging_group.cancel(io);
-            pipeline.deinitReadyLoads();
-            pipeline.resume_group.await(io) catch |err| pipeline.fail(err);
-            pipeline.dma_group.await(io) catch |err| pipeline.fail(err);
-            for (lanes) |*lane| lane.deinitActive();
-            pipeline.deinitReadyLoads();
-        } else {
-            pipeline.read_group.await(io) catch |err| pipeline.fail(err);
-            pipeline.staging_group.await(io) catch |err| pipeline.fail(err);
-            pipeline.resume_group.await(io) catch |err| pipeline.fail(err);
-            pipeline.dma_group.await(io) catch |err| pipeline.fail(err);
-            for (lanes) |*lane| lane.deinitActive();
-        }
-        pipeline.deinitReadyLoads();
-        std.debug.assert(pipeline.admitted_lanes.load(.acquire) == 0);
-        std.debug.assert(pipeline.direct_wait_head == null);
-        std.debug.assert(pipeline.direct_reads_pending.load(.acquire) == 0);
-        std.debug.assert(pipeline.direct_capacity_waiters.load(.acquire) == 0);
-
-        const loaded_bytes = pipeline.total.load(.monotonic);
-        if (opts.total_bytes) |total_bytes_ptr| total_bytes_ptr.* = loaded_bytes;
-        if (pipeline.errorValue()) |err| return err;
-
-        const elapsed = load_started.untilNow(io, .awake);
-        const elapsed_seconds = @as(f64, @floatFromInt(elapsed.nanoseconds)) / std.time.ns_per_s;
-        const goodput = if (elapsed_seconds > 0) @as(f64, @floatFromInt(loaded_bytes)) / elapsed_seconds else 0;
-        load_log.debug("completed: adaptive=true, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, final_reads={d}, final_dma={d}, final_pinned_buffers={d}, final_staging={d}, direct={Bi:.2}, staged={Bi:.2}", .{
-            tensor_count,
-            loaded_bytes,
-            elapsed_seconds,
-            goodput / (1024 * 1024),
-            controller_runtime.controller.knobs.read_workers,
-            controller_runtime.controller.knobs.dma_workers,
-            controller_runtime.controller.knobs.pinned_buffers,
-            controller_runtime.controller.knobs.staging_chunks,
-            metrics.direct_read_bytes.load(.acquire),
-            metrics.staged_read_bytes.load(.acquire),
-        });
-        return bufferized;
-    }
-
-    const Ctx = struct {
-        allocator: std.mem.Allocator,
-        dma_allocators: []const mem.DmaAllocator,
-        transfer_quantum_size: usize,
-        pinned_buffer_pools: []mem.DynamicBufferPool,
-        io: std.Io,
-        platform: *const Platform,
-        buffers: []*Buffer,
-        shardings: []const Sharding,
-        store: *const TensorStore,
-        group: stdx.Io.LimitedGroup,
-        total: std.atomic.Value(usize) = .init(0),
-        progress: ?*std.Progress.Node,
-        metrics: ?*LoadMetrics,
-        direct: bool,
-    };
-    var walk_ctx: Ctx = .{
-        .platform = platform,
-        .buffers = try allocator.alloc(*Buffer, tensor_count),
-        .store = store,
-        .allocator = allocator,
-        .dma_allocators = dma_allocators,
-        .transfer_quantum_size = opts.transfer_quantum_size,
-        .pinned_buffer_pools = buffer_pools,
-        .io = io,
-        .shardings = opts.shardings,
-        .progress = opts.progress,
-        .group = .init(max_workers),
-        .metrics = null,
-        .direct = direct,
-    };
-    defer allocator.free(walk_ctx.buffers);
-
-    defer if (opts.total_bytes) |total_bytes_ptr| {
-        total_bytes_ptr.* = walk_ctx.total.load(.monotonic);
-    };
-
-    meta.forEachVisit(&bufferized, *Buffer, struct {
-        fn call(i: usize, buffer: *Buffer, ctx: *Ctx) void {
-            ctx.buffers[i] = buffer;
-        }
-    }.call, .{&walk_ctx});
-
-    meta.forEachVisit(model, *const Tensor, struct {
-        fn call(i: usize, tensor: *const Tensor, ctx: *Ctx) void {
-            ctx.group.concurrent(ctx.io, struct {
-                fn call(i_: usize, tensor_: *const Tensor, ctx_: *Ctx) !void {
-                    const transfer_started: std.Io.Timestamp = .now(ctx_.io, .awake);
-                    if (ctx_.metrics) |metrics_| {
-                        _ = metrics_.active_transfers.fetchAdd(1, .monotonic);
-                    }
-                    defer if (ctx_.metrics) |metrics_| {
-                        _ = metrics_.active_transfers.fetchSub(1, .monotonic);
-                        _ = metrics_.completed_transfers.fetchAdd(1, .release);
-                    };
-
-                    var reader = ctx_.store.getReaderById(tensor_.id, ctx_.io, &.{}) catch unreachable;
-                    defer reader.deinit();
-
-                    const shape = reader.tensor.shape;
-                    const sharding = Sharding.pickSharding(ctx_.shardings, shape, .explicit_axis_binding) orelse blk: {
-                        log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
-                        break :blk ctx_.platform.replicated_sharding;
-                    };
-
-                    var writer = MemoryWriter.initWithMetrics(
-                        ctx_.allocator,
-                        ctx_.io,
-                        ctx_.platform,
-                        ctx_.pinned_buffer_pools,
-                        ctx_.dma_allocators,
-                        ctx_.transfer_quantum_size,
-                        shape,
-                        sharding,
-                        ctx_.buffers[i_],
-                        ctx_.metrics,
-                    ) catch unreachable;
-                    defer writer.deinit(ctx_.allocator);
-
-                    const scale = 1024;
-
-                    const total = if (ctx_.progress) |progress| blk: {
-                        var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
-                        defer node.end();
-                        writer.setProgress(&node);
-                        defer writer.setProgress(null);
-                        var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
-                        const total_ = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
-                        progress_writer.interface.flush() catch unreachable;
-                        break :blk total_;
-                    } else blk: {
-                        const total_ = reader.interface.streamRemaining(writer.interface()) catch unreachable;
-                        writer.interface().flush() catch unreachable;
-                        break :blk total_;
-                    };
-                    _ = ctx_.total.fetchAdd(total, .monotonic);
-
-                    if (ctx_.metrics) |metrics_| {
-                        if (!ctx_.direct) {
-                            const elapsed = transfer_started.untilNow(ctx_.io, .awake);
-                            const elapsed_us: u64 = @intCast(@max(@divTrunc(elapsed.nanoseconds, std.time.ns_per_us), 0));
-                            _ = metrics_.storage_bytes.fetchAdd(@intCast(total), .monotonic);
-                            _ = metrics_.submitted_bytes.fetchAdd(@intCast(total), .monotonic);
-                            _ = metrics_.committed_bytes.fetchAdd(@intCast(total), .monotonic);
-                            _ = metrics_.weighted_transfer_latency_us.fetchAdd(@as(u64, @intCast(total)) *| elapsed_us, .monotonic);
-                        }
-                    }
-                }
-            }.call, .{ i, tensor, ctx }) catch unreachable;
-        }
-    }.call, .{&walk_ctx});
-    walk_ctx.group.await(io) catch unreachable;
-
-    const loaded_bytes = walk_ctx.total.load(.monotonic);
-    const elapsed = load_started.untilNow(io, .awake);
-    const elapsed_seconds = @as(f64, @floatFromInt(elapsed.nanoseconds)) / std.time.ns_per_s;
-    const goodput = if (elapsed_seconds > 0) @as(f64, @floatFromInt(loaded_bytes)) / elapsed_seconds else 0;
-    load_log.debug("completed: adaptive=false, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, workers={d}, pinned_buffers={d}", .{
-        tensor_count,
-        loaded_bytes,
-        elapsed_seconds,
-        goodput / (1024 * 1024),
-        max_workers,
-        opts.max_pinned_buffers_per_device,
-    });
-
+    const loaded_bytes = if (direct)
+        try loadVectored(ModelType, model, &bufferized, allocator, io, platform, store, opts, load_started)
+    else
+        try loadBuffered(ModelType, model, &bufferized, allocator, io, platform, store, opts);
+    if (opts.total_bytes) |total_bytes| total_bytes.* = loaded_bytes;
     return bufferized;
 }
-
-test "adaptive pipeline scheduling fence drains admitted producers" {
-    const io = std.testing.io;
-    var pipeline: AdaptivePipelineContext = undefined;
-    pipeline.io = io;
-    pipeline.scheduling_state = .init(0);
-    pipeline.scheduling_idle = .unset;
-
-    try std.testing.expect(pipeline.beginScheduling());
-    try std.testing.expect(pipeline.beginScheduling());
-    pipeline.closeScheduling();
-    try std.testing.expect(!pipeline.beginScheduling());
-    try std.testing.expect(!pipeline.scheduling_idle.isSet());
-
-    pipeline.endScheduling();
-    try std.testing.expect(!pipeline.scheduling_idle.isSet());
-    pipeline.endScheduling();
-    try std.testing.expect(pipeline.scheduling_idle.isSet());
-
-    pipeline.first_error = .init(0);
-    pipeline.admitted_lanes = .init(0);
-    var lanes = [_]AdaptivePipelineLane{.{ .ctx = &pipeline }};
-    pipeline.lanes = &lanes;
-    pipeline.ensureLanes(1);
-    try std.testing.expectEqual(@as(usize, 0), pipeline.admitted_lanes.load(.acquire));
-    try std.testing.expectEqual(AdaptivePipelineLane.State.idle, lanes[0].state.load(.acquire));
-}
-
-test "adaptive load metrics count overlapping DMA starvation once" {
-    var metrics: LoadMetrics = .{};
-    metrics.addDmaStarvationInterval(100, 200);
-    metrics.addDmaStarvationInterval(150, 250);
-    metrics.addDmaStarvationInterval(120, 180);
-    metrics.addDmaStarvationInterval(300, 350);
-
-    try std.testing.expectEqual(@as(u64, 200), metrics.dma_starved_ns.load(.acquire));
-}
-
-test "adaptive pipeline prefetch reservations are independent of dma lanes" {
-    var tensors: [8]*const Tensor = undefined;
-    var pipeline: AdaptivePipelineContext = undefined;
-    pipeline.tensors = &tensors;
-    pipeline.next_tensor = .init(0);
-    pipeline.prefetched_sources = .init(0);
-
-    for (0..6) |expected| {
-        try std.testing.expect(pipeline.reservePrefetchSource(6));
-        try std.testing.expectEqual(expected, pipeline.claimTensorIndex().?);
-    }
-    try std.testing.expect(!pipeline.reservePrefetchSource(6));
-
-    _ = pipeline.prefetched_sources.fetchSub(1, .release);
-    try std.testing.expect(pipeline.reservePrefetchSource(6));
-    try std.testing.expectEqual(@as(usize, 6), pipeline.claimTensorIndex().?);
-}
-
-test "adaptive pipeline dma-ready queue owns stable tensor pointers" {
-    const io = std.testing.io;
-    var pipeline: AdaptivePipelineContext = undefined;
-    pipeline.io = io;
-    pipeline.first_error = .init(0);
-    pipeline.lanes = &.{};
-    pipeline.dma_lane_limit = .init(0);
-    pipeline.admitted_lanes = .init(0);
-    pipeline.ready_mutex = .init;
-    pipeline.ready_head = null;
-    pipeline.ready_tail = null;
-
-    var loads: [3]AdaptiveTensorLoad = undefined;
-    for (&loads) |*load_| {
-        load_.ready_next = null;
-        load_.queued_for_dma = false;
-        load_.prefetch_counted = false;
-        pipeline.enqueueDmaReady(load_);
-    }
-    try std.testing.expect(pipeline.popDmaReady() == &loads[0]);
-    try std.testing.expect(pipeline.popDmaReady() == &loads[1]);
-    try std.testing.expect(pipeline.popDmaReady() == &loads[2]);
-    try std.testing.expectEqual(@as(?*AdaptiveTensorLoad, null), pipeline.popDmaReady());
-    try std.testing.expectEqual(@as(?*AdaptiveTensorLoad, null), pipeline.ready_tail);
-}
-
-test "adaptive dma worker cap does not exceed tensor lanes" {
-    try std.testing.expectEqual(@as(usize, 3), adaptiveDmaWorkerCap(16, 32, 3));
-    try std.testing.expectEqual(@as(usize, 4), adaptiveDmaWorkerCap(16, 5, 32));
-    try std.testing.expectEqual(@as(usize, 1), adaptiveDmaWorkerCap(16, 1, 0));
-}
-
-test "adaptive read worker default leaves room for latency fanout" {
-    try std.testing.expectEqual(@as(usize, 32), defaultAdaptiveReadWorkerCap(1));
-    try std.testing.expectEqual(@as(usize, 32), defaultAdaptiveReadWorkerCap(8));
-    try std.testing.expectEqual(@as(usize, 32), defaultAdaptiveReadWorkerCap(32));
-    try std.testing.expectEqual(@as(usize, 64), defaultAdaptiveReadWorkerCap(64));
-}
-
-test "adaptive load controller doubles staged read-ahead probes" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-
-    var decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.11,
-        .reads_saturated = true,
-        .slow_reads = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.staging_probe_start, decision.action);
-    try std.testing.expectEqual(2, decision.knobs.staging_chunks);
-    try std.testing.expectEqual(4, decision.knobs.read_workers);
-
-    decision = controller.observe(.{
-        .committed_goodput = 150,
-        .probe_goodput = 150,
-        .probe_committed_bytes = 63 * 1024 * 1024,
-        .dma_starvation_ratio = 0.11,
-        .reads_saturated = true,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 105,
-        .probe_goodput = 105,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 199 * std.time.ns_per_ms,
-        .now_ns = 300 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 105,
-        .probe_goodput = 105,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .now_ns = 301 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.staging_probe_keep, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 105,
-        .dma_starvation_ratio = 0.11,
-        .reads_saturated = true,
-        .slow_reads = true,
-        .now_ns = 400 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.staging_probe_start, decision.action);
-    try std.testing.expectEqual(8, decision.knobs.staging_chunks);
-    try std.testing.expectEqual(8, decision.knobs.read_workers);
-
-    decision = controller.observe(.{
-        .committed_goodput = 110,
-        .probe_goodput = 110,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .now_ns = 500 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.staging_probe_keep, decision.action);
-
-    decision = controller.observe(.{
-        .read_goodput = 110,
-        .committed_goodput = 110,
-        .dma_starvation_ratio = 0.11,
-        .reads_saturated = true,
-        .slow_reads = true,
-        .now_ns = 600 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(8, decision.knobs.read_workers);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(8, decision.knobs.staging_chunks);
-}
-
-test "adaptive load controller probes direct read capacity before staging" {
-    var controller: AdaptiveLoadController = .init(4, 16, 5, 32, 2, 32, 32, true);
-    const decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.11,
-        .read_capacity_demand = true,
-        .reads_saturated = true,
-        .slow_reads = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expectEqual(4, decision.knobs.read_workers);
-    try std.testing.expectEqual(0, decision.knobs.staging_chunks);
-}
-
-test "adaptive load controller caps reads by pageable staging budget" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 3, true);
-    var decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.11,
-        .read_capacity_demand = true,
-        .reads_saturated = true,
-        .slow_reads = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(4, decision.knobs.read_workers);
-    try std.testing.expectEqual(2, decision.knobs.staging_chunks);
-
-    decision = controller.observe(.{
-        .committed_goodput = 104,
-        .probe_goodput = 104,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.staging_probe_keep, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 104,
-        .dma_starvation_ratio = 0.11,
-        .read_capacity_demand = true,
-        .reads_saturated = true,
-        .slow_reads = true,
-        .now_ns = 300 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.staging_probe_start, decision.action);
-    try std.testing.expectEqual(5, decision.knobs.read_workers);
-    try std.testing.expectEqual(3, decision.knobs.staging_chunks);
-}
-
-test "adaptive load controller accepts sustained aggregate gain after capacity attribution" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    _ = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.11,
-        .reads_saturated = true,
-        .slow_reads = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-
-    const decision = controller.observe(.{
-        .committed_goodput = 150,
-        .probe_goodput = 102,
-        .probe_aggregate_goodput = 150,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.staging_probe_keep, decision.action);
-    try std.testing.expectEqual(2, decision.knobs.staging_chunks);
-    try std.testing.expectEqual(4, decision.knobs.read_workers);
-    try std.testing.expect(!decision.trim_staging);
-
-    const cooldown = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.11,
-        .reads_saturated = true,
-        .now_ns = 300 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, cooldown.action);
-    try std.testing.expectEqual(2, cooldown.knobs.staging_chunks);
-}
-
-test "adaptive load controller keeps slow-source fanout through a drain burst" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    _ = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .reads_saturated = true,
-        .slow_reads = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-
-    const decision = controller.observe(.{
-        .committed_goodput = 50,
-        .probe_aggregate_goodput = 50,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .now_ns = 300 * std.time.ns_per_ms,
-    });
-
-    try std.testing.expectEqual(.staging_probe_keep, decision.action);
-    try std.testing.expectEqual(@as(usize, 4), decision.knobs.read_workers);
-    try std.testing.expectEqual(@as(usize, 2), decision.knobs.staging_chunks);
-}
-
-test "adaptive load controller does not back reads off past a probe baseline" {
-    var controller: AdaptiveLoadController = .init(4, 16, 5, 32, 2, 32, 32, true);
-    var decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.11,
-        .reads_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .ready_growth_ratio = 0.21,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .ready_growth_ratio = 0.21,
-        .now_ns = 300 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.read_probe_rollback, decision.action);
-    try std.testing.expectEqual(.ready_queue_growth, decision.reason);
-    try std.testing.expectEqual(2, decision.knobs.read_workers);
-    try std.testing.expectEqual(0, decision.knobs.staging_chunks);
-    try std.testing.expect(!decision.trim_staging);
-}
-
-test "adaptive load controller backs reads off on a growing ready queue" {
-    var controller: AdaptiveLoadController = .init(4, 16, 5, 32, 8, 32, 32, true);
-    controller.mode = .steady;
-    controller.knobs.staging_chunks = 16;
-    var decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .ready_growth_ratio = 0.21,
-        .reads_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-
-    decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .ready_growth_ratio = 0.21,
-        .reads_saturated = true,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.read_backoff, decision.action);
-    try std.testing.expectEqual(5, decision.knobs.read_workers);
-    try std.testing.expectEqual(4, decision.knobs.dma_workers);
-    try std.testing.expectEqual(5, decision.knobs.pinned_buffers);
-    try std.testing.expectEqual(4, decision.knobs.staging_chunks);
-    try std.testing.expect(decision.trim_staging);
-}
-
-test "adaptive load controller does not back reads off between slow source bursts" {
-    var controller: AdaptiveLoadController = .init(4, 16, 5, 32, 8, 32, 32, true);
-    controller.mode = .steady;
-    controller.knobs.staging_chunks = 16;
-
-    _ = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .ready_growth_ratio = 0.21,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    const decision = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .ready_growth_ratio = 0.21,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 8), decision.knobs.read_workers);
-    try std.testing.expectEqual(@as(usize, 16), decision.knobs.staging_chunks);
-}
-
-test "adaptive load controller remembers a slow source across drain windows" {
-    var controller: AdaptiveLoadController = .init(4, 16, 5, 32, 8, 32, 32, true);
-    controller.mode = .steady;
-    controller.knobs.staging_chunks = 16;
-
-    _ = controller.observe(.{
-        .committed_goodput = 100,
-        .slow_reads = true,
-        .ready_growth_ratio = 0.21,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    const decision = controller.observe(.{
-        .committed_goodput = 100,
-        .ready_growth_ratio = 0.21,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 8), decision.knobs.read_workers);
-}
-
-test "adaptive load controller waits for a commit before backing reads off" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 4, 32, 32, true);
-    controller.knobs.staging_chunks = 2;
-    const decision = controller.observe(.{
-        .read_goodput = 100,
-        .ready_growth_ratio = 0.50,
-        .reads_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 4), decision.knobs.read_workers);
-    try std.testing.expectEqual(@as(usize, 2), decision.knobs.staging_chunks);
-}
-
-test "adaptive load controller does not back reads below direct DMA width" {
-    var controller: AdaptiveLoadController = .init(2, 8, 3, 9, 2, 8, 8, true);
-    controller.mode = .steady;
-    controller.knobs.staging_chunks = 2;
-
-    _ = controller.observe(.{
-        .committed_goodput = 100,
-        .ready_growth_ratio = 0.50,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    const decision = controller.observe(.{
-        .committed_goodput = 100,
-        .ready_growth_ratio = 0.50,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 2), decision.knobs.read_workers);
-}
-
-test "adaptive load controller does not confuse saturated read latency with queue pressure" {
-    var controller: AdaptiveLoadController = .init(2, 2, 3, 3, 8, 8, 6, true);
-    controller.mode = .steady;
-    controller.knobs.staging_chunks = 6;
-
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .read_latency_us = 100,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .read_latency_us = 121,
-        .read_admission_wait_ratio = 1,
-        .reads_saturated = true,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 8), decision.knobs.read_workers);
-}
-
-test "adaptive load controller trims staging after reads reach one worker" {
-    var controller: AdaptiveLoadController = .init(2, 4, 3, 8, 1, 8, 32, true);
-    controller.knobs.staging_chunks = 8;
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .ready_growth_ratio = 0.21,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .ready_growth_ratio = 0.21,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.staging_backoff, decision.action);
-    try std.testing.expectEqual(1, decision.knobs.read_workers);
-    try std.testing.expectEqual(2, decision.knobs.staging_chunks);
-    try std.testing.expect(decision.trim_staging);
-}
-
-test "adaptive load controller keeps fast direct reads out of pageable memory" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    const decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.05,
-        .reads_saturated = true,
-        .now_ns = 600 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(0, decision.knobs.staging_chunks);
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-}
-
-test "adaptive load controller rolls back an unhelpful dma startup probe" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expectEqual(4, decision.knobs.dma_workers);
-    try std.testing.expectEqual(5, decision.knobs.pinned_buffers);
-
-    decision = controller.observe(.{
-        .committed_goodput = 102,
-        .probe_goodput = 102,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_rollback, decision.action);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
-    try std.testing.expect(decision.trim_pinned);
-}
-
-test "adaptive load controller uses a gradual startup dma ladder" {
-    var controller: AdaptiveLoadController = .init(8, 32, 9, 33, 8, 32, 32, true);
-    const decision = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 12), decision.knobs.dma_workers);
-    try std.testing.expectEqual(@as(usize, 13), decision.knobs.pinned_buffers);
-}
-
-test "adaptive load controller cools down after a failed performance probe" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    _ = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .probe_goodput = 100,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
-        .now_ns = 300 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_rollback, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_saturated = true,
-        .now_ns = 600 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_saturated = true,
-        .now_ns = 2400 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-}
-
-test "adaptive load controller waits for DMA probe capacity before evaluating pressure" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-
-    decision = controller.observe(.{
-        .capacity_pending = true,
-        .committed_goodput = 1,
-        .transfer_latency_us = 1000,
-        .pinned_wait_ratio = 1,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expect(controller.probe != null);
-    try std.testing.expectEqual(@as(usize, 4), decision.knobs.dma_workers);
-}
-
-test "adaptive load controller does not back off past a pressured probe baseline" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .transfer_latency_us = 100,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expectEqual(4, decision.knobs.dma_workers);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .transfer_latency_us = 121,
-        .dma_completion_wait_ratio = 0.11,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_rollback, decision.action);
-    try std.testing.expectEqual(.h2d_pressure, decision.reason);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
-    try std.testing.expect(decision.trim_pinned);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .transfer_latency_us = 140,
-        .now_ns = 300 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .transfer_latency_us = 140,
-        .dma_completion_wait_ratio = 0.11,
-        .now_ns = 500 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_backoff, decision.action);
-    try std.testing.expectEqual(1, decision.knobs.dma_workers);
-}
-
-test "adaptive load controller does not treat pinned wait as DMA probe pressure" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 0,
-        .pinned_wait_ratio = 0.21,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(4, decision.knobs.dma_workers);
-    try std.testing.expectEqual(5, decision.knobs.pinned_buffers);
-    try std.testing.expect(controller.probe != null);
-}
-
-test "adaptive load controller keeps a dma probe when pageable data is ready" {
-    var controller: AdaptiveLoadController = .init(1, 2, 2, 3, 1, 2, 4, true);
-    controller.knobs.staging_chunks = 1;
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 104,
-        .probe_goodput = 104,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .ready_growth_ratio = 0.21,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_keep, decision.action);
-    try std.testing.expectEqual(2, decision.knobs.read_workers);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
-    try std.testing.expectEqual(1, decision.knobs.staging_chunks);
-    try std.testing.expect(!decision.trim_pinned);
-}
-
-test "adaptive load controller ignores dma saturation bursts from a slow staged source" {
-    var controller: AdaptiveLoadController = .init(8, 32, 9, 33, 32, 32, 32, true);
-    controller.mode = .steady;
-    controller.knobs.staging_chunks = 32;
-
-    const decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .slow_reads = true,
-        .dma_saturated = true,
-        .dma_starvation_ratio = 0.50,
-        .now_ns = 2 * std.time.ns_per_s,
-    });
-
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 8), decision.knobs.dma_workers);
-}
-
-test "adaptive load controller timeout rolls a dma probe back and trims resources" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    const started = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_start, started.action);
-
-    const published_epoch = controller.epoch;
-    const decision = controller.rollbackTimedOutProbe(600 * std.time.ns_per_ms, published_epoch).?;
-    try std.testing.expectEqual(.dma_probe_rollback, decision.action);
-    try std.testing.expectEqual(.capacity_not_exercised, decision.reason);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
-    try std.testing.expect(decision.trim_pinned);
-}
-
-test "adaptive load controller timeout restores an unactivated published epoch" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    const started = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(@as(u64, 1), started.epoch);
-
-    const decision = controller.rollbackTimedOutProbe(600 * std.time.ns_per_ms, 0).?;
-    try std.testing.expectEqual(@as(u64, 0), decision.epoch);
-    try std.testing.expectEqual(@as(u64, 0), controller.epoch);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
-}
-
-test "adaptive load runtime only times out an active idle probe" {
-    const timeout_ns = 5 * std.time.ns_per_s;
-    try std.testing.expect(!AdaptiveLoadRuntime.stalledProbeTimedOut(false, timeout_ns - 1, 0));
-    try std.testing.expect(AdaptiveLoadRuntime.stalledProbeTimedOut(false, timeout_ns, 0));
-    try std.testing.expect(!AdaptiveLoadRuntime.stalledProbeTimedOut(true, timeout_ns, 0));
-    try std.testing.expect(!AdaptiveLoadRuntime.stalledProbeTimedOut(false, timeout_ns, 1));
-}
-
-test "adaptive load controller tolerates transient H2D growth during a probe" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 104,
-        .probe_goodput = 104,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .h2d_growth_ratio = 0.21,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_keep, decision.action);
-    try std.testing.expectEqual(4, decision.knobs.dma_workers);
-}
-
-test "adaptive load controller keeps startup open across transient H2D growth" {
-    var controller: AdaptiveLoadController = .init(2, 8, 3, 9, 2, 8, 8, true);
-    var decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .h2d_growth_ratio = 0.21,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(.startup, controller.mode);
-
-    decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .dma_saturated = true,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 4), decision.knobs.read_workers);
-    try std.testing.expectEqual(@as(usize, 4), decision.knobs.dma_workers);
-}
-
-test "adaptive load controller skips probes near the finite tail" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    const decision = controller.observe(.{
-        .committed_goodput = 100,
-        .dma_saturated = true,
-        .allow_probe = false,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
-}
-
-test "adaptive load controller honors a disabled staging budget" {
-    var controller: AdaptiveLoadController = .init(1, 4, 2, 5, 2, 32, 0, true);
-    const decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .reads_saturated = true,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expectEqual(0, decision.knobs.staging_chunks);
-}
-
-test "adaptive load controller waits for committed baseline before probing" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    const decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 0,
-        .dma_starvation_ratio = 0.50,
-        .reads_saturated = true,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(2, decision.knobs.read_workers);
-    try std.testing.expectEqual(0, decision.knobs.staging_chunks);
-    try std.testing.expectEqual(null, controller.probe);
-}
-
-test "adaptive load controller ignores cold pinned allocation pressure" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    var decision = controller.observe(.{
-        .read_goodput = 3402,
-        .committed_goodput = 0,
-        .pinned_wait_ratio = 0.32,
-        .h2d_queue_ratio = 0.33,
-        .h2d_growth_ratio = 0.33,
-        .admitted_dma_writers = 2,
-        .now_ns = 75 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(.startup, controller.mode);
-    try std.testing.expectEqual(0, controller.h2d_growth_windows);
-
-    decision = controller.observe(.{
-        .committed_goodput = 7600,
-        .h2d_queue_ratio = 0.66,
-        .h2d_growth_ratio = 0.33,
-        .now_ns = 175 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(1, controller.h2d_growth_windows);
-}
-
-test "adaptive load controller recovers a starved direct lane" {
-    var controller: AdaptiveLoadController = .init(1, 16, 2, 32, 2, 32, 32, true);
-    controller.mode = .steady;
-    const decision = controller.observe(.{
-        .read_goodput = 9000,
-        .committed_goodput = 9000,
-        .dma_starvation_ratio = 0.80,
-        .admitted_dma_writers = 1,
-        .dma_lane_capacity_available = true,
-        .now_ns = 600 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
-    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
-}
-
-test "adaptive load controller widens saturated fast direct lanes without staging" {
-    var controller: AdaptiveLoadController = .init(2, 8, 3, 9, 2, 8, 8, true);
-    controller.mode = .steady;
-    const decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.50,
-        .read_capacity_demand = true,
-        .reads_saturated = true,
-        .now_ns = 600 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 4), decision.knobs.read_workers);
-    try std.testing.expectEqual(@as(usize, 4), decision.knobs.dma_workers);
-    try std.testing.expectEqual(@as(usize, 5), decision.knobs.pinned_buffers);
-    try std.testing.expectEqual(@as(usize, 0), decision.knobs.staging_chunks);
-}
-
-test "adaptive load controller bootstraps read ahead for a slow source" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    const decision = controller.observe(.{
-        .read_goodput = 100,
-        .committed_goodput = 0,
-        .slow_reads = true,
-        .reads_saturated = true,
-        .now_ns = 75 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.read_ahead_bootstrap, decision.action);
-    try std.testing.expectEqual(4, decision.knobs.read_workers);
-    try std.testing.expectEqual(2, decision.knobs.staging_chunks);
-    try std.testing.expectEqual(null, controller.probe);
-}
-
-test "adaptive load controller bootstraps repeatedly while the source is stalled" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    var decision = controller.observe(.{
-        .source_stalled = true,
-        .read_capacity_demand = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.read_ahead_bootstrap, decision.action);
-    try std.testing.expectEqual(4, decision.knobs.read_workers);
-    try std.testing.expectEqual(2, decision.knobs.staging_chunks);
-
-    decision = controller.observe(.{
-        .source_stalled = true,
-        .read_capacity_demand = true,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.read_ahead_bootstrap, decision.action);
-    try std.testing.expectEqual(8, decision.knobs.read_workers);
-    try std.testing.expectEqual(8, decision.knobs.staging_chunks);
-    try std.testing.expectEqual(null, controller.probe);
-}
-
-test "adaptive load controller source bootstrap stops at the read hard cap" {
-    var controller: AdaptiveLoadController = .init(2, 16, 3, 32, 2, 32, 32, true);
-    for (0..4) |step| {
-        const decision = controller.observe(.{
-            .source_stalled = true,
-            .read_capacity_demand = true,
-            .now_ns = (step + 1) * 100 * std.time.ns_per_ms,
-        });
-        try std.testing.expectEqual(.read_ahead_bootstrap, decision.action);
-    }
-    try std.testing.expectEqual(@as(usize, 32), controller.knobs.read_workers);
-    try std.testing.expectEqual(@as(usize, 32), controller.knobs.staging_chunks);
-    try std.testing.expectEqual(@as(usize, 2), controller.knobs.dma_workers);
-    try std.testing.expectEqual(@as(usize, 3), controller.knobs.pinned_buffers);
-
-    const capped = controller.observe(.{
-        .source_stalled = true,
-        .read_capacity_demand = true,
-        .now_ns = 500 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, capped.action);
-    try std.testing.expect(!capped.changed);
-}
-
-test "adaptive load controller reduces reads and their required staging together" {
-    var controller: AdaptiveLoadController = .init(2, 2, 3, 3, 8, 8, 6, true);
-    controller.mode = .steady;
-    controller.knobs.staging_chunks = 6;
-    const decision = controller.observe(.{
-        .committed_goodput = 100,
-        .now_ns = 2 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 4), decision.knobs.read_workers);
-    try std.testing.expectEqual(@as(usize, 4), decision.knobs.staging_chunks);
-}
-
-test "adaptive load controller reduces DMA streams within the best throughput band" {
-    var controller: AdaptiveLoadController = .init(4, 4, 5, 5, 4, 4, 0, true);
-    controller.mode = .steady;
-
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .now_ns = 2 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expectEqual(.reduce_resource, controller.probe.?.kind);
-    try std.testing.expectEqual(@as(usize, 2), decision.knobs.dma_workers);
-    try std.testing.expectEqual(@as(usize, 5), decision.knobs.pinned_buffers);
-
-    decision = controller.observe(.{
-        .committed_goodput = 97,
-        .probe_goodput = 97,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .now_ns = 3 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.dma_probe_keep, decision.action);
-    try std.testing.expectEqual(@as(usize, 2), decision.knobs.dma_workers);
-}
-
-test "adaptive load controller rolls a failed resource reduction back one step" {
-    var controller: AdaptiveLoadController = .init(4, 4, 6, 8, 4, 4, 8, true);
-    controller.mode = .steady;
-
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .now_ns = 2 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.pinned_reduce_start, decision.action);
-    try std.testing.expectEqual(5, decision.knobs.pinned_buffers);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .probe_goodput = 96,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .now_ns = 3 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.pinned_reduce_rollback, decision.action);
-    try std.testing.expectEqual(6, decision.knobs.pinned_buffers);
-    try std.testing.expect(!decision.trim_pinned);
-}
-
-test "adaptive load controller pressure rollback cools down resource probes" {
-    var controller: AdaptiveLoadController = .init(4, 4, 6, 8, 4, 4, 8, true);
-    controller.mode = .steady;
-
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .now_ns = 2 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.pinned_reduce_start, decision.action);
-
-    const rollback_ns = 2100 * std.time.ns_per_ms;
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .pinned_wait_ratio = 0.21,
-        .now_ns = rollback_ns,
-    });
-    try std.testing.expectEqual(.pinned_reduce_rollback, decision.action);
-    try std.testing.expectEqual(rollback_ns, controller.last_resource_probe_ns);
-    try std.testing.expectEqual(6, decision.knobs.pinned_buffers);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .now_ns = 3 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-}
-
-test "adaptive load controller resource reductions stay within global best band" {
-    var controller: AdaptiveLoadController = .init(4, 4, 7, 8, 4, 4, 8, true);
-    controller.mode = .steady;
-
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .now_ns = 2 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.pinned_reduce_start, decision.action);
-    try std.testing.expectEqual(6, decision.knobs.pinned_buffers);
-
-    decision = controller.observe(.{
-        .committed_goodput = 97,
-        .probe_goodput = 97,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .now_ns = 3 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.pinned_reduce_keep, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 97,
-        .now_ns = 5 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.pinned_reduce_start, decision.action);
-    try std.testing.expectEqual(5, decision.knobs.pinned_buffers);
-
-    decision = controller.observe(.{
-        .committed_goodput = 94,
-        .probe_goodput = 94,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .now_ns = 6 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.pinned_reduce_rollback, decision.action);
-    try std.testing.expectEqual(6, decision.knobs.pinned_buffers);
-}
-
-test "adaptive load controller does not back DMA off on pinned admission wait" {
-    var controller: AdaptiveLoadController = .init(4, 8, 5, 9, 4, 8, 8, true);
-    const decision = controller.observe(.{
-        .committed_goodput = 100,
-        .pinned_wait_ratio = 0.21,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(.none, decision.reason);
-    try std.testing.expectEqual(4, decision.knobs.dma_workers);
-    try std.testing.expectEqual(5, decision.knobs.pinned_buffers);
-}
-
-test "adaptive load controller requires persistent H2D queue growth" {
-    var controller: AdaptiveLoadController = .init(4, 8, 5, 9, 4, 8, 8, true);
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .h2d_growth_ratio = 0.21,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(4, decision.knobs.dma_workers);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .h2d_growth_ratio = 0.21,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_backoff, decision.action);
-    try std.testing.expectEqual(.h2d_pressure, decision.reason);
-    try std.testing.expectEqual(2, decision.knobs.dma_workers);
-}
-
-test "adaptive load controller requires transfer contention for latency backoff" {
-    var controller: AdaptiveLoadController = .init(2, 8, 3, 9, 2, 8, 8, true);
-    _ = controller.observe(.{
-        .committed_goodput = 100,
-        .transfer_latency_us = 100,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .transfer_latency_us = 125,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .transfer_latency_us = 130,
-        .dma_completion_wait_ratio = 0.11,
-        .now_ns = 300 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.dma_backoff, decision.action);
-    try std.testing.expectEqual(.h2d_pressure, decision.reason);
-    try std.testing.expectEqual(1, decision.knobs.dma_workers);
-}
-
-test "adaptive load controller ignores undersized DMA latency samples" {
-    var controller: AdaptiveLoadController = .init(4, 8, 5, 9, 4, 8, 8, true);
-    _ = controller.observe(.{
-        .committed_goodput = 100,
-        .transfer_latency_us = 100,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    const decision = controller.observe(.{
-        .committed_goodput = 100,
-        .transfer_latency_us = 1000,
-        .dma_latency_reliable = false,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 4), decision.knobs.dma_workers);
-}
-
-test "adaptive load controller does not baseline DMA latency from an undersized transfer" {
-    var controller: AdaptiveLoadController = .init(2, 8, 3, 9, 2, 8, 8, true);
-    var decision = controller.observe(.{
-        .committed_goodput = 1,
-        .transfer_latency_us = 100,
-        .dma_latency_reliable = false,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .transfer_latency_us = 500,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 2), decision.knobs.dma_workers);
-}
-
-test "adaptive load controller does not baseline DMA latency while contended" {
-    var controller: AdaptiveLoadController = .init(4, 8, 5, 9, 4, 8, 8, true);
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .transfer_latency_us = 100,
-        .pinned_wait_ratio = 0.50,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(f64, 0), controller.latency_baseline_us);
-
-    decision = controller.observe(.{
-        .committed_goodput = 100,
-        .transfer_latency_us = 200,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(f64, 0), controller.latency_baseline_us);
-}
-
-test "adaptive load controller gives staged read recovery executable capacity" {
-    var controller: AdaptiveLoadController = .init(1, 4, 2, 5, 1, 8, 8, true);
-    controller.mode = .steady;
-    controller.knobs.staging_chunks = 1;
-
-    const decision = controller.observe(.{
-        .read_goodput = 10,
-        .committed_goodput = 10,
-        .dma_starvation_ratio = 0.50,
-        .reads_saturated = true,
-        .slow_reads = true,
-        .now_ns = 600 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.staging_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 2), decision.knobs.read_workers);
-    try std.testing.expectEqual(@as(usize, 2), decision.knobs.staging_chunks);
-}
-
-test "adaptive load controller rolls back an unhelpful pinned probe" {
-    var controller: AdaptiveLoadController = .init(2, 2, 3, 5, 2, 2, 0, true);
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .pinned_wait_ratio = 0.06,
-        .dma_saturated = true,
-        .now_ns = 100 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.pinned_probe_start, decision.action);
-    try std.testing.expectEqual(4, decision.knobs.pinned_buffers);
-
-    decision = controller.observe(.{
-        .committed_goodput = 102,
-        .probe_goodput = 102,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .now_ns = 200 * std.time.ns_per_ms,
-    });
-    try std.testing.expectEqual(.pinned_probe_rollback, decision.action);
-    try std.testing.expectEqual(3, decision.knobs.pinned_buffers);
-    try std.testing.expect(decision.trim_pinned);
-}
-
-test "adaptive load controller reduces staging within the best throughput band" {
-    var controller: AdaptiveLoadController = .init(2, 2, 3, 3, 2, 4, 4, true);
-    controller.mode = .steady;
-    controller.knobs.staging_chunks = 2;
-
-    var decision = controller.observe(.{
-        .committed_goodput = 100,
-        .now_ns = 2 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.staging_reduce_start, decision.action);
-    try std.testing.expectEqual(1, decision.knobs.staging_chunks);
-
-    decision = controller.observe(.{
-        .committed_goodput = 97,
-        .probe_goodput = 97,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .now_ns = 3 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.staging_reduce_keep, decision.action);
-    try std.testing.expectEqual(1, decision.knobs.staging_chunks);
-
-    decision = controller.observe(.{
-        .committed_goodput = 97,
-        .now_ns = 5 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.staging_reduce_start, decision.action);
-    try std.testing.expectEqual(0, decision.knobs.staging_chunks);
-
-    decision = controller.observe(.{
-        .committed_goodput = 96,
-        .probe_goodput = 96,
-        .probe_committed_bytes = 64 * 1024 * 1024,
-        .now_ns = 6 * std.time.ns_per_s,
-    });
-    try std.testing.expectEqual(.staging_reduce_rollback, decision.action);
-    try std.testing.expectEqual(1, decision.knobs.staging_chunks);
-}
-
-test "adaptive load probe metrics reject stale epochs" {
-    const io = std.testing.io;
-    var metrics: LoadMetrics = .{};
-
-    metrics.publishProbeEpoch(io, 1);
-    metrics.recordProbeCommit(io, 1, 32 * 1024 * 1024);
-    try std.testing.expectEqual(32 * 1024 * 1024, metrics.probe_committed_bytes.load(.acquire));
-
-    metrics.publishProbeEpoch(io, 2);
-    metrics.recordProbeCommit(io, 1, 32 * 1024 * 1024);
-    metrics.recordProbeCommit(io, 2, 16 * 1024 * 1024);
-    try std.testing.expectEqual(16 * 1024 * 1024, metrics.probe_committed_bytes.load(.acquire));
-}
-
-test "adaptive load runtime delays probe epoch until capacity is active" {
-    const io = std.testing.io;
-    var controller: AdaptiveLoadController = .init(2, 4, 3, 5, 2, 4, 0, false);
-    const baseline = controller.knobs;
-    var candidate = baseline;
-    candidate.read_workers = 4;
-    controller.epoch = 1;
-    controller.knobs = candidate;
-    controller.probe = .{
-        .dimension = .read,
-        .kind = .increase,
-        .baseline = baseline,
-        .candidate = candidate,
-        .epoch = 1,
-        .baseline_goodput = 100,
-    };
-
-    var metrics: LoadMetrics = .{};
-    var read_group: stdx.Io.LimitedGroup = .init(2);
-    var dma_group: stdx.Io.LimitedGroup = .init(2);
-    var runtime: AdaptiveLoadRuntime = undefined;
-    runtime.controller = controller;
-    runtime.pipeline = null;
-    runtime.read_group = &read_group;
-    runtime.dma_group = &dma_group;
-    runtime.metrics = &metrics;
-    runtime.pending_probe_activation = null;
-
-    runtime.apply(io, .{
-        .knobs = candidate,
-        .epoch = 1,
-        .changed = true,
-        .action = .read_probe_start,
-    });
-
-    try std.testing.expectEqual(0, metrics.config_epoch.load(.acquire));
-    try std.testing.expectEqual(0, metrics.probe_epoch.load(.acquire));
-    try std.testing.expect(runtime.pending_probe_activation != null);
-}
-
-test "adaptive load DMA probe capacity requires distinct submitting lanes" {
-    const io = std.testing.io;
-    const baseline: AdaptiveLoadController.Knobs = .{
-        .read_workers = 2,
-        .dma_workers = 2,
-        .pinned_buffers = 3,
-        .staging_chunks = 0,
-    };
-    var candidate = baseline;
-    candidate.dma_workers = 4;
-    candidate.pinned_buffers = 5;
-
-    var pipeline: AdaptivePipelineContext = undefined;
-    var lanes: [4]AdaptivePipelineLane = undefined;
-    pipeline.lanes = &lanes;
-    for (&lanes) |*lane| lane.* = .{ .ctx = &pipeline };
-
-    var runtime: AdaptiveLoadRuntime = undefined;
-    runtime.pipeline = &pipeline;
-    const activation: AdaptiveLoadRuntime.ProbeActivation = .{
-        .epoch = 7,
-        .dimension = .dma,
-        .kind = .increase,
-        .baseline = baseline,
-        .candidate = candidate,
-        .installed_at = .now(io, .awake),
-        .controller_now_ns = 0,
-    };
-
-    for (lanes[0..3]) |*lane| lane.last_dma_submission_epoch.store(7, .release);
-    try std.testing.expect(!runtime.probeCapacityActive(activation));
-    lanes[3].last_dma_submission_epoch.store(7, .release);
-    try std.testing.expect(runtime.probeCapacityActive(activation));
-}
-
 fn buildMesh2x2(
     allocator: std.mem.Allocator,
     target: @import("platform.zig").Target,
@@ -5882,6 +1658,42 @@ fn buildMesh2x2(
     });
 
     return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
+}
+
+test "vectored final transfers wait for every prior destination submission" {
+    var targets = [_]VectoredTensorTransfer.Target{
+        .{ .manager = undefined, .pjrt_buffer = undefined, .total = 100 },
+        .{ .manager = undefined, .pjrt_buffer = undefined, .total = 100 },
+    };
+    var tensor: VectoredTensorTransfer = undefined;
+    tensor.targets = &targets;
+    var block: mem.DmaBlockPool.Lease = undefined;
+    var pipeline: VectoredLoadPipeline = undefined;
+    const final: VectoredLoadPipeline.DeferredTransfer = .{
+        .tensor = &tensor,
+        .block = &block,
+        .writer_mask = 0b11,
+        .destination_offset = 80,
+        .len = 20,
+    };
+
+    try std.testing.expect(!pipeline.transferReady(final));
+    targets[1].submitted_bytes.store(80, .release);
+    try std.testing.expect(!pipeline.transferReady(final));
+    targets[0].submitted_bytes.store(60, .release);
+    try std.testing.expect(!pipeline.transferReady(final));
+    _ = targets[0].submitted_bytes.fetchAdd(20, .release);
+    try std.testing.expect(pipeline.transferReady(final));
+
+    const non_final: VectoredLoadPipeline.DeferredTransfer = .{
+        .tensor = &tensor,
+        .block = &block,
+        .writer_mask = 0b01,
+        .destination_offset = 20,
+        .len = 20,
+    };
+    targets[0].submitted_bytes.store(0, .release);
+    try std.testing.expect(pipeline.transferReady(non_final));
 }
 
 fn buildMesh2x2x2(
@@ -5916,233 +1728,161 @@ fn buildMesh2x2x2(
     return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
 }
 
-const DirectMemoryWriterDeviceTest = struct {
-    const WriteMode = enum {
-        stream_remaining,
-        writable_slice_greedy,
-        park_between_windows,
-        staged_then_direct,
-    };
-
-    pub const Scenario = struct {
+const VectoredRequestPlanTest = struct {
+    const Scenario = struct {
         name: []const u8,
-        create_options: CreateOptions,
+        device_count: u32,
+        physical_mesh: CreateOptions.PhysicalMesh = .auto,
         shape: Shape,
         logical_mesh: Sharding.LogicalMesh,
         strategy: Sharding.Strategy,
-        write_mode: WriteMode = .stream_remaining,
-        writable_slice_min_len: usize = 128,
-        pool_chunks: usize = 4,
-        pool_chunk_size: usize = 1 << 20,
-        transfer_quantum_size: ?usize = null,
+        request_size: usize,
+        block_size: usize,
     };
 
-    allocator: std.mem.Allocator,
-    io: std.Io,
+    fn run(scenario: Scenario) !void {
+        const allocator = std.testing.allocator;
+        const io = std.testing.io;
+        var platform = Platform.auto(allocator, io, .{
+            .physical_mesh = scenario.physical_mesh,
+            .cpu = .{ .device_count = scenario.device_count },
+        }) catch return error.SkipZigTest;
+        defer platform.deinit(allocator, io);
 
-    fn run(self: DirectMemoryWriterDeviceTest, scenario: Scenario) !void {
-        var platform = Platform.auto(self.allocator, self.io, scenario.create_options) catch return error.SkipZigTest;
-        defer platform.deinit(self.allocator, self.io);
-
-        const sharding: Sharding.Data = try .init(scenario.name, &platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
-        try self.runDirectMemoryWriter(
-            platform,
-            scenario.shape,
-            .{ .data = &sharding },
-            scenario.write_mode,
-            scenario.writable_slice_min_len,
-            scenario.pool_chunks,
-            scenario.pool_chunk_size,
-            scenario.transfer_quantum_size orelse scenario.pool_chunk_size,
+        const sharding_data: Sharding.Data = try .init(
+            scenario.name,
+            &platform.physical_mesh,
+            scenario.logical_mesh,
+            scenario.strategy,
         );
+        try expectLayout(allocator, scenario.shape, .{ .data = &sharding_data }, scenario.request_size, scenario.block_size);
     }
 
-    fn runDirectMemoryWriter(
-        self: DirectMemoryWriterDeviceTest,
-        platform: *const Platform,
+    fn expectLayout(
+        allocator: std.mem.Allocator,
         shape: Shape,
         sharding: Sharding,
-        write_mode: WriteMode,
-        writable_slice_min_len: usize,
-        pool_chunks: usize,
-        pool_chunk_size: usize,
-        transfer_quantum_size: usize,
+        request_size: usize,
+        block_size: usize,
     ) !void {
-        const slice = try Slice.alloc(self.allocator, shape);
-        defer slice.free(self.allocator);
+        const dispatch_spans: DispatchSpans = try .init(allocator, shape, sharding);
+        defer dispatch_spans.deinit(allocator);
 
-        for (slice.items(f32), 0..) |*e, i| {
-            e.* = @as(f32, @floatFromInt(i));
+        const writer_count = sharding.devicesInCanonicalOrder().len;
+        const placement = try sharding.placement(shape);
+        const writer_size = placement.shape.byteSize();
+        const source = try allocator.alloc(u8, shape.byteSize());
+        defer allocator.free(source);
+        for (source, 0..) |*byte, i| byte.* = @truncate(i *% 131 +% 17);
+
+        const expected = try allocator.alloc(u8, writer_count * writer_size);
+        defer allocator.free(expected);
+        @memset(expected, 0);
+        for (dispatch_spans.spans) |span| {
+            var mask = dispatch_spans.writerMask(span);
+            while (mask != 0) {
+                const writer_index: usize = @intCast(@ctz(mask));
+                mask &= mask - 1;
+                const len = span.end - span.start;
+                @memcpy(expected[writer_index * writer_size + span.writer_offset ..][0..len], source[span.start..span.end]);
+            }
         }
 
-        const pool_count = platform.devices.len;
-        const dma_allocators = try self.allocator.alloc(mem.DmaAllocator, pool_count);
-        defer self.allocator.free(dma_allocators);
-        for (platform.devices, 0..) |*device, i| {
-            dma_allocators[i] = .init(self.allocator, device);
-        }
+        const actual = try allocator.alloc(u8, expected.len);
+        defer allocator.free(actual);
+        @memset(actual, 0);
 
-        const pools = try self.allocator.alloc(mem.DynamicBufferPool, pool_count);
-        defer self.allocator.free(pools);
-        for (pools) |*pool| {
-            pool.* = .init(pool_chunks, pool_chunk_size);
-        }
-        defer for (pools, 0..) |*pool, i| {
-            pool.deinit(dma_allocators[i].allocator());
-        };
+        const request_count = std.math.divCeil(usize, source.len, request_size) catch unreachable;
+        var reverse_index = request_count;
+        while (reverse_index > 0) {
+            reverse_index -= 1;
+            const source_offset = reverse_index * request_size;
+            const request_len = @min(request_size, source.len - source_offset);
+            const plan: VectoredRequestPlan = try .init(allocator, dispatch_spans, source_offset, request_len, block_size);
+            defer plan.deinit(allocator);
 
-        var written_buffer: Buffer = undefined;
-        var writer: DirectMemoryWriter = try .init(
-            self.allocator,
-            self.io,
-            platform,
-            pools,
-            dma_allocators,
-            transfer_quantum_size,
-            shape,
-            sharding,
-            &written_buffer,
-        );
-        defer writer.deinit();
-        defer written_buffer.deinit();
+            const block_storage = try allocator.alloc(u8, plan.blocks.len * block_size);
+            defer allocator.free(block_storage);
+            @memset(block_storage, 0);
 
-        switch (write_mode) {
-            .stream_remaining => {
-                var reader: std.Io.Reader = .fixed(slice.constData());
-                const streamed = try reader.streamRemaining(&writer.interface);
-                try std.testing.expectEqual(slice.constData().len, streamed);
-            },
-            .writable_slice_greedy => {
-                var offset: usize = 0;
-                while (offset < slice.constData().len) {
-                    const min_len = @max(@as(usize, 1), writable_slice_min_len);
-                    const dest = try writer.interface.writableSliceGreedy(min_len);
-                    const to_write = @min(dest.len, slice.constData().len - offset);
-                    if (to_write == 0) return std.Io.Writer.Error.WriteFailed;
-                    @memcpy(dest[0..to_write], slice.constData()[offset..][0..to_write]);
-                    writer.interface.advance(to_write);
-                    offset += to_write;
-                }
-            },
-            .park_between_windows => {
-                var offset: usize = 0;
-                while (offset < slice.constData().len) {
-                    const dest = try writer.interface.writableSliceGreedy(1);
-                    const to_write = @min(@as(usize, 257), @min(dest.len, slice.constData().len - offset));
-                    if (to_write == 0) return std.Io.Writer.Error.WriteFailed;
-                    @memcpy(dest[0..to_write], slice.constData()[offset..][0..to_write]);
-                    writer.interface.advance(to_write);
-                    offset += to_write;
-                    if (offset < slice.constData().len) {
-                        try writer.park();
-                        try writer.unpark();
-                    }
-                }
-            },
-            .staged_then_direct => {
-                var offset: usize = 0;
-                while (offset < slice.constData().len) {
-                    const staged_len = @min(
-                        writer.interface.buffer.len - writer.interface.end,
-                        slice.constData().len - offset,
+            var source_cursor = source_offset;
+            for (plan.segments) |segment| {
+                try std.testing.expect(segment.block_index < plan.blocks.len);
+                try std.testing.expect(segment.block_offset + segment.len <= block_size);
+                const destination = block_storage[segment.block_index * block_size + segment.block_offset ..][0..segment.len];
+                @memcpy(destination, source[source_cursor..][0..segment.len]);
+                source_cursor += segment.len;
+            }
+            try std.testing.expectEqual(source_offset + request_len, source_cursor);
+
+            for (plan.blocks, 0..) |block, block_index| {
+                try std.testing.expect(block.len > 0 and block.len <= block_size);
+                var mask = block.writer_mask;
+                while (mask != 0) {
+                    const writer_index: usize = @intCast(@ctz(mask));
+                    mask &= mask - 1;
+                    try std.testing.expect(block.destination_offset + block.len <= writer_size);
+                    @memcpy(
+                        actual[writer_index * writer_size + block.destination_offset ..][0..block.len],
+                        block_storage[block_index * block_size ..][0..block.len],
                     );
-                    if (staged_len == 0) return std.Io.Writer.Error.WriteFailed;
-                    try writer.interface.writeAll(slice.constData()[offset..][0..staged_len]);
-                    offset += staged_len;
-                    try writer.commitStagedWrite();
-                    if (offset == slice.constData().len) break;
-
-                    const direct = writer.directWritableSlice();
-                    if (direct.len == 0) return std.Io.Writer.Error.WriteFailed;
-                    const direct_len = @min(@as(usize, 257), @min(direct.len, slice.constData().len - offset));
-                    @memcpy(direct[0..direct_len], slice.constData()[offset..][0..direct_len]);
-                    try writer.commitDirectRead(direct_len);
-                    offset += direct_len;
                 }
-            },
+            }
         }
-
-        try writer.interface.flush();
-        try written_buffer.await(self.io);
-
-        var written_slice = try written_buffer.toSliceAlloc(self.allocator, self.io);
-        defer written_slice.free(self.allocator);
-        try std.testing.expectEqualSlices(u8, slice.constData(), written_slice.constData());
+        try std.testing.expectEqualSlices(u8, expected, actual);
     }
 };
 
-test "DirectMemoryWriter: replicated with auto topology" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
+test "vectored request planner validates empty and invalid ranges" {
+    const spans = [_]DispatchSpans.DispatchSpan{.{
+        .start = 0,
+        .end = 16,
+        .writer_offset = 0,
+        .primary_writer = 0,
+        .mirror_writer_start = 0,
+        .mirror_writer_len = 0,
+    }};
+    const dispatch: DispatchSpans = .{ .spans = @constCast(&spans), .mirror_writers = &.{} };
 
-    try case.run(.{
-        .name = "replicated_auto",
-        .create_options = .{
-            .physical_mesh = .auto,
-            .cpu = .{ .device_count = 4 },
-        },
-        .shape = Shape.init(.{ .rows = 8, .cols = 128 }, .f32)
+    const empty: VectoredRequestPlan = try .init(std.testing.allocator, dispatch, 16, 0, 4);
+    defer empty.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), empty.blocks.len);
+    try std.testing.expectEqual(@as(usize, 0), empty.segments.len);
+    try std.testing.expectError(error.OutOfBounds, VectoredRequestPlan.init(std.testing.allocator, dispatch, 17, 0, 4));
+    try std.testing.expectError(error.OutOfBounds, VectoredRequestPlan.init(std.testing.allocator, dispatch, 15, 2, 4));
+    try std.testing.expectError(error.OutOfBounds, VectoredRequestPlan.init(std.testing.allocator, dispatch, std.math.maxInt(usize), 2, 4));
+    try std.testing.expectError(error.InvalidBlockSize, VectoredRequestPlan.init(std.testing.allocator, dispatch, 0, 1, 0));
+}
+
+test "vectored request planner handles replication and block/request boundaries" {
+    try VectoredRequestPlanTest.run(.{
+        .name = "replicated_boundaries",
+        .device_count = 4,
+        .shape = Shape.init(.{ .rows = 9, .cols = 257 }, .f32)
             .withPartitioning(.{ .rows = .replicated, .cols = .replicated }),
         .logical_mesh = .mesh(.{ .x = .high_bandwidth }),
         .strategy = .parseBindings(.{ .x = .link_x }),
+        .request_size = 773,
+        .block_size = 257,
     });
 }
 
-test "DirectMemoryWriter: 1D model split with 2x2 physical mesh" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "model_auto",
-        .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
-            .cpu = .{ .device_count = 4 },
-        },
-        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .model }),
+test "vectored request planner handles 1D mirrored and folded sharding" {
+    try VectoredRequestPlanTest.run(.{
+        .name = "mirrored_1d",
+        .device_count = 4,
+        .physical_mesh = .{ .custom = buildMesh2x2 },
+        .shape = Shape.init(.{ .rows = 7, .model = 1024 }, .f32)
+            .withPartitioning(.{ .rows = .replicated, .model = .model }),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = .parseBindings(.{ .model = .link_x }),
+        .request_size = 2053,
+        .block_size = 509,
     });
-}
-
-test "DirectMemoryWriter: 2D batch/model split with 2x2 physical mesh" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "batch_model_2d_torus",
-        .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
-            .cpu = .{ .device_count = 4 },
-        },
-        .shape = Shape.init(.{ .batch = 8, .model = 1024 }, .f32)
-            .withPartitioning(.{ .batch = .batch, .model = .model }),
-        .logical_mesh = .mesh(.{
-            .batch = .low_bandwidth,
-            .model = .high_bandwidth,
-        }),
-        .strategy = .parseBindings(.{ .batch = .link_x, .model = .link_y }),
-    });
-}
-
-test "DirectMemoryWriter: folded model sharding with 2x2 physical mesh" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "model_folded_2d_torus",
-        .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
-            .cpu = .{ .device_count = 4 },
-        },
+    try VectoredRequestPlanTest.run(.{
+        .name = "folded_1d",
+        .device_count = 4,
+        .physical_mesh = .{ .custom = buildMesh2x2 },
         .shape = Shape.init(.{ .model = 4096 }, .f32).withPartitioning(.{ .model = .model }),
         .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = blk: {
@@ -6150,117 +1890,36 @@ test "DirectMemoryWriter: folded model sharding with 2x2 physical mesh" {
             strategy.addFold(.link_x, &.{ .link_x, .link_y });
             break :blk strategy;
         },
+        .request_size = 3001,
+        .block_size = 997,
     });
 }
 
-test "DirectMemoryWriter: writableSliceGreedy with mirrored shards" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "model_auto_writable_slice",
-        .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
-            .cpu = .{ .device_count = 4 },
-        },
-        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .model }),
-        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
-        .strategy = .parseBindings(.{ .model = .link_x }),
-        .write_mode = .writable_slice_greedy,
-        .writable_slice_min_len = 64,
-        .pool_chunk_size = 1024,
+test "vectored request planner handles 2D and 3D sharding" {
+    try VectoredRequestPlanTest.run(.{
+        .name = "batch_model_2d",
+        .device_count = 4,
+        .physical_mesh = .{ .custom = buildMesh2x2 },
+        .shape = Shape.init(.{ .batch = 8, .model = 1024 }, .f32)
+            .withPartitioning(.{ .batch = .batch, .model = .model }),
+        .logical_mesh = .mesh(.{ .batch = .low_bandwidth, .model = .high_bandwidth }),
+        .strategy = .parseBindings(.{ .batch = .link_x, .model = .link_y }),
+        .request_size = 4093,
+        .block_size = 1021,
     });
-}
-
-test "DirectMemoryWriter: park and unpark pinned windows" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "park_unpark",
-        .create_options = .{
-            .physical_mesh = .auto,
-            .cpu = .{ .device_count = 2 },
-        },
-        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .replicated }),
-        .logical_mesh = .mesh(.{ .x = .high_bandwidth }),
-        .strategy = .parseBindings(.{ .x = .link_x }),
-        .write_mode = .park_between_windows,
-        .pool_chunk_size = 1024,
-    });
-}
-
-test "DirectMemoryWriter: staged window followed by direct read" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "staged_then_direct",
-        .create_options = .{
-            .physical_mesh = .auto,
-            .cpu = .{ .device_count = 2 },
-        },
-        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .replicated }),
-        .logical_mesh = .mesh(.{ .x = .high_bandwidth }),
-        .strategy = .parseBindings(.{ .x = .link_x }),
-        .write_mode = .staged_then_direct,
-        .pool_chunk_size = 1024,
-        .transfer_quantum_size = 4096,
-    });
-}
-
-test "DirectMemoryWriter: staged window followed by direct read across shards" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "staged_then_direct_sharded",
-        .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2 },
-            .cpu = .{ .device_count = 4 },
-        },
-        .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
-            .withPartitioning(.{ .rows = .replicated, .cols = .model }),
-        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
-        .strategy = .parseBindings(.{ .model = .link_x }),
-        .write_mode = .staged_then_direct,
-        .pool_chunk_size = 1024,
-    });
-}
-
-test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
-    const case: DirectMemoryWriterDeviceTest = .{
-        .allocator = std.testing.allocator,
-        .io = std.testing.io,
-    };
-
-    try case.run(.{
-        .name = "topology_3d_folded_model",
-        .create_options = .{
-            .physical_mesh = .{ .custom = buildMesh2x2x2 },
-            .cpu = .{ .device_count = 8 },
-        },
+    try VectoredRequestPlanTest.run(.{
+        .name = "folded_model_3d",
+        .device_count = 8,
+        .physical_mesh = .{ .custom = buildMesh2x2x2 },
         .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32)
             .withPartitioning(.{ .batch = .replicated, .model = .model }),
-        .logical_mesh = .mesh(.{
-            .batch = .low_bandwidth,
-            .model = .high_bandwidth,
-        }),
+        .logical_mesh = .mesh(.{ .batch = .low_bandwidth, .model = .high_bandwidth }),
         .strategy = blk: {
             var strategy: Sharding.Strategy = .parseBindings(.{ .model = .link_x });
             strategy.addFold(.link_x, &.{ .link_x, .link_z });
             break :blk strategy;
         },
+        .request_size = 8191,
+        .block_size = 2039,
     });
 }

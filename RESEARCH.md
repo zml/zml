@@ -1,5 +1,9 @@
 # Adaptive Concurrency Control for Finite Batch Tensor Transfers
 
+> Historical design research. The adaptive pageable-staging controller was
+> removed in July 2026 when the loader moved to a static vectored DmaMap
+> pipeline. See `CTX.md` and `zml/io.zig` for the current architecture.
+
 ## Executive recommendation
 
 The strongest options for this problem are not the classic “increase until something breaks” schemes by themselves, but **delay-aware adaptive limiters that explicitly watch for queue formation**, combined with a **fast startup probe** so the controller reaches a near-saturating concurrency before too much of the finite batch has already finished. The best practical default is therefore a **hybrid controller**: start conservatively, increase multiplicatively at first, then switch to a mostly stable **Gradient2/Vegas-style delay controller** that optimizes **bytes committed to GPU memory per second** while backing off on rising queue or resource-wait time. That recommendation is most consistent with the logic behind TCP Vegas, BBR’s fast startup, Netflix’s adaptive concurrency limits, and Envoy’s gradient controller: throughput alone is not enough; the controller also needs an early signal that the bottleneck is starting to queue. citeturn25view0turn9view4turn15view0turn17view3turn30view3

@@ -174,7 +174,7 @@ pub fn readSize(file_size: u64, offset: u64, data: []const []u8) usize {
     if (offset >= file_size) return 0;
 
     var requested: usize = 0;
-    for (data) |buf| requested += buf.len;
+    for (data) |buf| requested +|= buf.len;
     return @intCast(@min(file_size - offset, requested));
 }
 
@@ -208,4 +208,20 @@ pub fn readChunk(
         if (remaining == 0) break;
         skip = 0;
     }
+    if (remaining != 0) return error.UnexpectedEndOfOutput;
+}
+
+test "readChunk scatters a chunk across destination boundaries" {
+    var reader: std.Io.Reader = .fixed("abcdef");
+    var first: [3]u8 = @splat(0);
+    var second: [4]u8 = @splat(0);
+    try readChunk(&reader, null, 0, &.{ &first, &second }, 2, 5);
+    try std.testing.expectEqualSlices(u8, &.{ 0, 0, 'a' }, &first);
+    try std.testing.expectEqualStrings("bcde", &second);
+}
+
+test "readChunk rejects an undersized destination scatter list" {
+    var reader: std.Io.Reader = .fixed("abcd");
+    var output: [3]u8 = undefined;
+    try std.testing.expectError(error.UnexpectedEndOfOutput, readChunk(&reader, null, 0, &.{&output}, 0, 4));
 }
