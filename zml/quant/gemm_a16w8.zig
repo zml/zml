@@ -183,7 +183,8 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
                 const a_quant, const a_scale = fp8QuantOp(b, a_val, cfg);
                 const a_quant_2d = b.reshape(a_quant.to(cfg.b_dtype), &.{ cfg.BLOCK_SIZE_M, cfg.BLOCK_SIZE_K });
                 const a_scale_1d = b.reshape(a_scale, &.{cfg.BLOCK_SIZE_M});
-                const prequant_dot = b.dotOpts(a_quant_2d, b_val_raw, b.zeros(&.{ cfg.BLOCK_SIZE_M, cfg.BLOCK_SIZE_N }, .i32), .{
+                const prequant_acc_dtype: tri.DType = if (cfg.b_dtype == .f8e4m3fn or cfg.b_dtype == .f8e5m2) .f32 else .i32;
+                const prequant_dot = b.dotOpts(a_quant_2d, b_val_raw, b.zeros(&.{ cfg.BLOCK_SIZE_M, cfg.BLOCK_SIZE_N }, prequant_acc_dtype), .{
                     .input_precision = .tf32,
                     .max_num_imprecise_acc = 0,
                 });
