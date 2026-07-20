@@ -439,12 +439,24 @@ pub const Loader = struct {
         store: *const TensorStore,
         shardings: []const Sharding,
         exe: *const Exe,
+        opts: LoadOpts,
     ) !void {
         const sources = store.getSourcesById(tensor.id) orelse return error.NotFound;
         const buffers = try arena.alloc(Buffer, sources.len);
         const loaded = try arena.alloc(bool, sources.len);
         @memset(loaded, false);
         defer for (buffers, loaded) |*b, l| if (l) b.deinit();
+
+        var node = if (opts.progress) |progress| b: {
+            var writer = std.Io.Writer.Allocating.init(arena);
+            try writer.writer.writeAll("Running executable on ");
+            for (sources, 0..) |source, i| {
+                try writer.writer.print("{s}{s}", .{ if (i != 0) ", " else "", source.name });
+            }
+
+            break :b progress.start(writer.written(), 1);
+        } else null;
+        defer if (node) |*n| n.end();
 
         for (sources, 0..) |source, i| {
             self.group.async(io, loadSingle, .{ self, io, source, source.shape, &buffers[i], &loaded[i], shardings, .{} });
