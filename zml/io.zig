@@ -447,8 +447,9 @@ pub const Loader = struct {
         defer for (buffers, loaded) |*b, l| if (l) b.deinit();
 
         for (sources, 0..) |source, i| {
-            self.loadSingle(io, source, source.shape, &buffers[i], &loaded[i], shardings, .{});
+            self.group.async(io, loadSingle, .{ self, io, source, source.shape, &buffers[i], &loaded[i], shardings, .{} });
         }
+        try self.group.await(io);
 
         if (std.mem.findScalar(bool, loaded, false)) |_| {
             return error.LoadFailed;
