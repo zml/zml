@@ -115,7 +115,9 @@ pub const Session = struct {
                         .self_attn => unreachable,
                     };
                     linear_attn_layers_caches[linear_attn_cache_index] = .{
-                        .conv_state = kv_cache_buffers.gated_delta_net.conv_state,
+                        .conv_q_state = kv_cache_buffers.gated_delta_net.conv_q_state,
+                        .conv_k_state = kv_cache_buffers.gated_delta_net.conv_k_state,
+                        .conv_v_state = kv_cache_buffers.gated_delta_net.conv_v_state,
                         .recurrent_state = kv_cache_buffers.gated_delta_net.recurrent_state,
                         .layer_index = layer_index_buffer,
                     };
@@ -194,7 +196,9 @@ pub const Session = struct {
         layer_index: usize,
         layer_cache: zml.Bufferized(model.KvCache.GatedDeltaNetCache),
     ) void {
-        self.kv_cache_buffers.gated_delta_net.conv_state = layer_cache.conv_state;
+        self.kv_cache_buffers.gated_delta_net.conv_q_state = layer_cache.conv_q_state;
+        self.kv_cache_buffers.gated_delta_net.conv_k_state = layer_cache.conv_k_state;
+        self.kv_cache_buffers.gated_delta_net.conv_v_state = layer_cache.conv_v_state;
         self.kv_cache_buffers.gated_delta_net.recurrent_state = layer_cache.recurrent_state;
         self.linear_attn_layers_caches[dense_layer_index] = layer_cache;
         self.layer_index_buffers[layer_index] = .{ .linear_attn = layer_cache.layer_index };
@@ -264,7 +268,9 @@ pub const Session = struct {
                 },
                 .linear_attn => {
                     const exe = self.compiled_model.prefill_linear_layer_exe orelse unreachable;
-                    self.linear_attn_layers_caches[linear_attn_cache_index].conv_state = self.kv_cache_buffers.gated_delta_net.conv_state;
+                    self.linear_attn_layers_caches[linear_attn_cache_index].conv_q_state = self.kv_cache_buffers.gated_delta_net.conv_q_state;
+                    self.linear_attn_layers_caches[linear_attn_cache_index].conv_k_state = self.kv_cache_buffers.gated_delta_net.conv_k_state;
+                    self.linear_attn_layers_caches[linear_attn_cache_index].conv_v_state = self.kv_cache_buffers.gated_delta_net.conv_v_state;
                     self.linear_attn_layers_caches[linear_attn_cache_index].recurrent_state = self.kv_cache_buffers.gated_delta_net.recurrent_state;
                     prefill_linear_layer_args.?.set(.{ layer_weights, prefill_hidden_buffer, prefill_valid_len_buffer, self.linear_attn_layers_caches[linear_attn_cache_index], self.compiled_model.loaded_model.inner.config, self.prefill_moe_metadata_buffers });
                     exe.call(prefill_linear_layer_args.?, &prefill_linear_layer_results.?);
@@ -389,7 +395,9 @@ pub const Session = struct {
                     .linear_attn => {
                         const exe = self.compiled_model.decode_linear_layer_exe orelse unreachable;
 
-                        self.linear_attn_layers_caches[linear_attn_layer_index].conv_state = self.kv_cache_buffers.gated_delta_net.conv_state;
+                        self.linear_attn_layers_caches[linear_attn_layer_index].conv_q_state = self.kv_cache_buffers.gated_delta_net.conv_q_state;
+                        self.linear_attn_layers_caches[linear_attn_layer_index].conv_k_state = self.kv_cache_buffers.gated_delta_net.conv_k_state;
+                        self.linear_attn_layers_caches[linear_attn_layer_index].conv_v_state = self.kv_cache_buffers.gated_delta_net.conv_v_state;
                         self.linear_attn_layers_caches[linear_attn_layer_index].recurrent_state = self.kv_cache_buffers.gated_delta_net.recurrent_state;
 
                         decode_linear_layer_args.?.set(.{
