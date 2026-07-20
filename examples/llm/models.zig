@@ -10,6 +10,7 @@ pub const lfm2 = @import("models/lfm2.zig");
 pub const llama = @import("models/llama.zig");
 pub const qwen3_5 = @import("models/qwen3_5.zig");
 pub const qwen3_5_moe = @import("models/qwen3_5_moe.zig");
+pub const step3p5 = @import("models/step3_5flash.zig");
 
 const log = std.log.scoped(.llm);
 
@@ -18,6 +19,7 @@ pub const ModelType = enum {
     llama,
     qwen3_5,
     qwen3_5_moe,
+    step3p5,
 };
 
 const RawConfig = struct {
@@ -29,6 +31,7 @@ pub const LoadedModel = union(ModelType) {
     llama: llama.LoadedModel,
     qwen3_5: qwen3_5.LoadedModel,
     qwen3_5_moe: qwen3_5_moe.LoadedModel,
+    step3p5: step3p5.LoadedModel,
 
     pub fn load(
         allocator: std.mem.Allocator,
@@ -36,7 +39,9 @@ pub const LoadedModel = union(ModelType) {
         repo: std.Io.Dir,
         store: zml.io.TensorStore.View,
         generation: GenerationOptions,
+        shardings: Shardings,
     ) !LoadedModel {
+        _ = shardings; // autofix
         const model_type = try detectModelType(allocator, io, repo);
         log.info("Detected model type: {}", .{model_type});
 
@@ -98,6 +103,7 @@ pub const CompiledModel = struct {
         llama: llama.inference.CompiledModel,
         qwen3_5: qwen3_5.inference.CompiledModel,
         qwen3_5_moe: qwen3_5_moe.inference.CompiledModel,
+        step3p5: step3p5.inference.CompiledModel,
     };
 
     inner: Inner,
@@ -126,6 +132,17 @@ pub const CompiledModel = struct {
                 ),
                 .seqlen = self.seqlen,
             },
+            .step3p5 => |*compiled| .{
+                .inner = .{ .step3p5 = try step3p5.Session.init(
+                    allocator,
+                    io,
+                    platform,
+                    tokenizer,
+                    compiled,
+                    &model_buffers.step3p5,
+                ) },
+                .seqlen = self.seqlen,
+            },
         };
     }
 };
@@ -135,6 +152,7 @@ pub const Buffers = union(ModelType) {
     llama: llama.Buffers,
     qwen3_5: qwen3_5.Buffers,
     qwen3_5_moe: qwen3_5_moe.Buffers,
+    step3p5: step3p5.Buffers,
 };
 
 pub const Session = struct {
@@ -143,6 +161,7 @@ pub const Session = struct {
         llama: llama.Session,
         qwen3_5: qwen3_5.Session,
         qwen3_5_moe: qwen3_5_moe.Session,
+        step3p5: step3p5.Session,
     };
 
     inner: Inner,
@@ -186,6 +205,7 @@ pub const Session = struct {
 pub fn detectModelType(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir) !ModelType {
     const parsed = try parseConfig(RawConfig, allocator, io, repo);
     defer parsed.deinit();
+    if (std.mem.eql(u8, parsed.value.model_type, "step3p5")) return .step3p5;
     if (std.meta.stringToEnum(ModelType, parsed.value.model_type)) |model_type| return model_type;
     return error.UnknownModelType;
 }

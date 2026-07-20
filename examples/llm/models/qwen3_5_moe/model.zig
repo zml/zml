@@ -680,11 +680,12 @@ const Router = struct {
     router: zml.nn.Linear,
     num_experts_per_tok: u32,
 
-    pub fn init(store: zml.io.TensorStore.View, num_experts_per_tok: u32) Router {
+    // We keep two stores due to the naming scheme of Step 3.5 Flash. Particularily, the weight is under moe.gate.weight but the bias is moe.router_bias
+    pub fn init(gate_store: zml.io.TensorStore.View, moe_store: zml.io.TensorStore.View, num_experts_per_tok: u32) Router {
         return .{
             .router = .init(
-                store.createTensor("weight", .{ .expert, .d }, .{ .expert = .replicated, .d = .replicated }),
-                store.maybeCreateTensor("bias", .{.expert}, .{ .expert = .replicated }),
+                gate_store.createTensor("weight", .{ .expert, .d }, .{ .expert = .replicated, .d = .replicated }),
+                moe_store.maybeCreateTensor("router_bias", .{.expert}, .{ .expert = .replicated }),
                 .d,
             ),
             .num_experts_per_tok = num_experts_per_tok,
@@ -735,7 +736,7 @@ pub const Moe = struct {
             ),
             .gate_up_proj = gate_up_proj_tensor,
             .down_proj = down_proj_tensor,
-            .router = Router.init(store.withPrefix("gate"), config.text_config.num_experts_per_tok.?),
+            .router = Router.init(store.withPrefix("gate"), store, config.text_config.num_experts_per_tok.?),
         };
     }
 
