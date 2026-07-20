@@ -902,7 +902,7 @@ const Triton = struct {
         const num_routes = num_tokens * topk;
 
         const grid_m = blk: {
-            if (num_routes <= num_experts) return num_routes;
+            if (num_routes <= num_experts) break :blk num_routes;
             break :blk (std.math.divCeil(i64, num_routes - num_experts + 1, block_m) catch unreachable) + num_experts - 1;
         };
 
@@ -996,9 +996,9 @@ const Triton = struct {
         stdx.debug.assert(@mod(n, activation_reduction_n) == 0, "invalid GEMM output width {}", .{n});
         stdx.debug.assert(opts.output_shape.dim(-1) == @divExact(n, activation_reduction_n), "output shape {f} does not match GEMM N {}", .{ opts.output_shape, n });
 
-        const block_m: i64 = @intCast(opts.kernel_cfg.block_m);
-        const block_n: i64 = @intCast(opts.kernel_cfg.block_n);
-        const block_k: i64 = @intCast(opts.kernel_cfg.block_k);
+        const block_m: i32 = @intCast(opts.kernel_cfg.block_m);
+        const block_n: i32 = @intCast(opts.kernel_cfg.block_n);
+        const block_k: i32 = @intCast(opts.kernel_cfg.block_k);
         const grid_n = std.math.divCeil(i64, n, block_n) catch unreachable;
         const has_bias = opts.bias != null;
         const has_gather = opts.gather != null;
