@@ -5,12 +5,11 @@ const builtin = @import("builtin");
 const main = @import("main.zig");
 const tokens = @import("tokens.zig");
 const algebra = @import("algebra.zig");
-const quantized_ = @import("quantized.zig");
 const kmeans = @import("kmeans.zig");
 const sampling = @import("sampling.zig");
+const quantization = @import("quantization.zig");
 
 const LmHeadMatrix = algebra.LmHeadMatrix;
-const Quantized = quantized_.Quantized;
 const Tokenizer = zml.tokenizer.Tokenizer;
 const Zml_handler = main.Zml_handler;
 const Allocator = std.mem.Allocator;
@@ -28,6 +27,11 @@ pub const pq_z_score: comptime_int = 5;
 pub const pq_orth_weight: comptime_float = 0.25;
 pub const pq_lut_zero_point: comptime_int = 128;
 pub const pq_lut_qmax: comptime_int = 127;
+
+inline fn walshHadamardTo(dst: []f32, src: []const f32, comptime k: comptime_int) void {
+    @memcpy(dst, src);
+    quantization.walshHadamard(dst, k);
+}
 
 pub const PQSample = struct {
     top_k: [pq_top_k]Logit,
@@ -87,7 +91,7 @@ fn buildCodebookAndAssign(
                 if (lm_head.is_junk[row]) continue;
                 for (0..nb_buckets) |bucket| {
                     const data = rotated_lm_head[row * hidden_dim + bucket * bucket_dim ..][0..bucket_dim];
-                    const norm = Quantized.normL2(data);
+                    const norm = quantization.normL2(data);
                     const closest = km.closestCenter(data, norm * norm, center_count);
                     row_codes[row * nb_buckets + bucket] = @intCast(closest[1]);
                 }
@@ -180,7 +184,7 @@ pub const ProductQuantizer = struct {
         for (0..self.n) |row| {
             const src = self.lm_head.data[row * hidden_dim ..][0..hidden_dim];
             const dst = self.rotated_lm_head[row * hidden_dim ..][0..hidden_dim];
-            Quantized.walshHadamardSimdTo(dst, src, 12);
+            walshHadamardTo(dst, src, 12);
         }
 
         try buildCodebookAndAssign(
@@ -256,14 +260,14 @@ pub const ProductQuantizer = struct {
 
     pub fn sample(self: *ProductQuantizer, query: []const f32) PQSample {
         // step 0 : compute geometric information for error bounding
-        const query_norm = Quantized.normL2(query);
+        const query_norm = quantization.normL2(query);
         const error_bound_scale = query_norm * self.quantization_error_factor;
 
         // step 1 : rotate query, don't normalize it
         self.zml_handler.tic(&self.zml_handler.timers.pq_rotate);
         const src = query[0..hidden_dim];
         const dst = self.rotated_query[0..];
-        Quantized.walshHadamardSimdTo(dst, src, 12);
+        walshHadamardTo(dst, src, 12);
         self.zml_handler.toc(&self.zml_handler.timers.pq_rotate);
 
         // step 2 : score every bucket against the shared codebook.
@@ -410,7 +414,7 @@ pub const ProductQuantizerFastScan = struct {
         for (0..self.n) |row| {
             const src = self.lm_head.data[row * hidden_dim ..][0..hidden_dim];
             const dst = self.rotated_lm_head[row * hidden_dim ..][0..hidden_dim];
-            Quantized.walshHadamardSimdTo(dst, src, 12);
+            walshHadamardTo(dst, src, 12);
         }
 
         const row_codes = try self.allocator.alloc(u8, self.n * nb_buckets);
@@ -494,10 +498,10 @@ pub const ProductQuantizerFastScan = struct {
     }
 
     pub fn sample(self: *ProductQuantizerFastScan, query: []const f32) PQSample {
-        const query_norm = Quantized.normL2(query);
+        const query_norm = quantization.normL2(query);
 
         self.zml_handler.tic(&self.zml_handler.timers.pq_rotate);
-        Quantized.walshHadamardSimdTo(self.rotated_query[0..], query[0..hidden_dim], 12);
+        walshHadamardTo(self.rotated_query[0..], query[0..hidden_dim], 12);
         self.zml_handler.toc(&self.zml_handler.timers.pq_rotate);
 
         self.zml_handler.tic(&self.zml_handler.timers.pq_lut);
