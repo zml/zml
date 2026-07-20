@@ -3628,6 +3628,17 @@ const AdaptivePipelineContext = struct {
             return;
         }
         defer self.endScheduling();
+
+        // Direct-only loads already run on persistent DMA-lane tasks. Perform
+        // the read on that task so small pinned buffers do not add one read
+        // task plus one resume task per chunk. Keep the read group admission
+        // around the inline call so runtime limits still apply. If pageable
+        // staging is enabled, retain the detached read path that lets reads
+        // run ahead of DMA.
+        if (self.metrics.staging_limit.load(.acquire) == 0) {
+            self.read_group.callUncancelableAdmission(self.io, AdaptivePipelineContext.readDirect, .{ reader, destination, offset, epoch, slot, self });
+            return;
+        }
         self.read_group.concurrentUncancelableAdmission(self.io, AdaptivePipelineContext.readDirect, .{ reader, destination, offset, epoch, slot, self }) catch |err| {
             self.releaseDirectRead();
             slot.err = err;
