@@ -4173,11 +4173,12 @@ pub const LoadOpts = struct {
     /// normally uses one more buffer than active workers and probes higher only
     /// when useful.
     max_pinned_buffers_per_device: usize = 33,
-    /// Per-device pinned buffer size. Set to null to use `transfer_quantum_size`.
-    /// Keeping this separate lets multi-device loads use a large scheduling
-    /// quantum without multiplying that quantum by the device count in every
-    /// pinned pool allocation.
-    pinned_buffer_size: ?usize = 32 * 1024 * 1024,
+    /// Per-device pinned buffer size. When null, oneAPI uses 2 MiB blocks and
+    /// all other platforms use 32 MiB. Set an explicit size to override that
+    /// policy. Keeping this separate lets multi-device loads use a large
+    /// scheduling quantum without multiplying that quantum by the device count
+    /// in every pinned pool allocation.
+    pinned_buffer_size: ?usize = null,
     /// Logical bytes a DMA lane processes before yielding to another tensor.
     transfer_quantum_size: usize = 256 * 1024 * 1024,
     total_bytes: ?*usize = null,
@@ -4205,8 +4206,6 @@ pub fn load(
     stdx.debug.assert(opts.initial_parallelism > 0, "zml.io.load initial_parallelism must be greater than zero", .{});
     stdx.debug.assert(opts.max_pinned_buffers_per_device > 0, "zml.io.load max_pinned_buffers_per_device must be greater than zero", .{});
     stdx.debug.assert(opts.transfer_quantum_size > 0, "zml.io.load transfer_quantum_size must be greater than zero", .{});
-    const pinned_buffer_size = opts.pinned_buffer_size orelse opts.transfer_quantum_size;
-    stdx.debug.assert(pinned_buffer_size >= @sizeOf(usize), "zml.io.load pinned_buffer_size must hold pool metadata", .{});
     stdx.debug.assert(opts.read_chunk_size > 0, "zml.io.load read_chunk_size must be greater than zero", .{});
 
     const load_started: std.Io.Timestamp = .now(io, .awake);
@@ -4230,6 +4229,13 @@ pub fn load(
         }
     }.call, .{&total_logical_bytes});
 
+    const pinned_buffer_auto = opts.pinned_buffer_size == null;
+    const pinned_buffer_size = opts.pinned_buffer_size orelse switch (platform.target) {
+        .oneapi => @as(usize, 2 * 1024 * 1024),
+        else => @as(usize, 32 * 1024 * 1024),
+    };
+    stdx.debug.assert(pinned_buffer_size >= @sizeOf(usize), "zml.io.load pinned_buffer_size must hold pool metadata", .{});
+
     const direct = platform.target == .cuda or platform.target == .oneapi;
     const default_read_parallelism = defaultAdaptiveReadWorkerCap(opts.parallelism);
     const max_read_workers = opts.max_read_parallelism orelse default_read_parallelism;
@@ -4250,7 +4256,7 @@ pub fn load(
     var metrics: LoadMetrics = .{};
     const configured_read_workers = if (adaptive) initial_read_workers else max_workers;
     const configured_max_read_workers = if (adaptive) max_read_workers else max_workers;
-    load_log.debug("configured: target={s}, adaptive={}, requested_adaptive={}, tensors={d}, reads={d}/{d}, dma={d}/{d} (requested_max={d}), pinned_buffers={d}/{d}, staging=0/{d} blocks ({Bi:.2} max), read_chunk_size={Bi:.2}, pinned_buffer_size={Bi:.2}, transfer_quantum_size={Bi:.2}, logical_bytes={Bi:.2}", .{
+    load_log.debug("configured: target={s}, adaptive={}, requested_adaptive={}, tensors={d}, reads={d}/{d}, dma={d}/{d} (requested_max={d}), pinned_buffers={d}/{d}, staging=0/{d} blocks ({Bi:.2} max), read_chunk_size={Bi:.2}, pinned_buffer_size={Bi:.2} (auto={}), transfer_quantum_size={Bi:.2}, logical_bytes={Bi:.2}", .{
         @tagName(platform.target),
         adaptive,
         opts.adaptive_parallelism,
@@ -4266,6 +4272,7 @@ pub fn load(
         opts.max_staging_bytes,
         opts.read_chunk_size,
         pinned_buffer_size,
+        pinned_buffer_auto,
         opts.transfer_quantum_size,
         total_logical_bytes,
     });

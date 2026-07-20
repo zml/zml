@@ -1,11 +1,13 @@
 # Adaptive Loader Context
 
-Snapshot: 2026-07-19, branch `brabier/adaptive-concurrency`, base commit
-`654ff08b` (`optimized cpu`). The working tree contains later loader, huge-page,
-default, and example changes; inspect `git diff` before assuming they are
-committed. `bench_file.sh` and `bench_s3.sh` currently select CUDA device 1.
-`profile_file.sh` still combines `CUDA_VISIBLE_DEVICES=1` with a oneAPI build
-flag and should be checked before reuse.
+Snapshot: 2026-07-20, branch `brabier/adaptive-concurrency`, base commit
+`181a8c0a` (`oneapi dma`). The working tree contains user changes to the three
+benchmark scripts and local oneAPI artifact selection, plus the loader changes
+described below; inspect `git diff` before assuming they are committed.
+`bench_file.sh`, `bench_s3.sh`, and `profile_file.sh` currently build oneAPI and
+select `ONEAPI_DEVICE_SELECTOR=level_zero:0`. The checked-out XLA tree is clean
+at `9dac91281a` (`[XLA:GPU][oneAPI] Enable PJRT_Client_DmaMap for SYCL`). Do not
+build XLA in this task; the user owns that build.
 
 This is a durable implementation and performance handoff, not a chronological
 lab notebook. Current source is authoritative if it disagrees with this file.
@@ -35,13 +37,15 @@ max_read_parallelism              null  resolves to max(32, parallelism)
 read_chunk_size                  32 MiB
 max_staging_bytes                 1 GiB
 max_pinned_buffers_per_device        33
-pinned_buffer_size               32 MiB
+pinned_buffer_size                  auto  2 MiB for oneAPI, else 32 MiB
 transfer_quantum_size            256 MiB
 ```
 
 Pools allocate lazily. With the defaults, each device initially admits at most
-eight DMA lanes and nine pinned buffers (288 MiB at 32 MiB each), while longer
-or higher-latency loads may explore up to 32 lanes and 33 buffers (1.031 GiB).
+eight DMA lanes and nine pinned buffers: 18 MiB on oneAPI, or 288 MiB at
+32 MiB on other platforms. Longer or higher-latency
+loads may explore up to 32 lanes and 33 buffers. An explicit
+`pinned_buffer_size` always overrides the automatic policy.
 `adaptive_parallelism=false` is retained as a fixed-path testing escape hatch,
 not the recommended production setting.
 
@@ -51,10 +55,12 @@ the measured 12-lane knee, while slow sources expand read-ahead to 32 without
 also widening DMA. Raising the initial width to 12 was neutral on low-latency
 S3Proxy and used four more pinned buffers, so it was not retained.
 
-Linux/CUDA pinned mappings automatically request 2 MiB alignment and
-`MADV_HUGEPAGE` before `PJRT_Client_DmaMap`. This is best effort: failure falls
-back to ordinary pages. There is deliberately no public page-mode option.
-oneAPI pinned buffers are allocated by PJRT and do not use this host allocator.
+Linux CUDA and oneAPI pinned mappings automatically request 2 MiB alignment
+and `MADV_HUGEPAGE` before `PJRT_Client_DmaMap`. This is best effort: failure
+falls back to ordinary pages. There is deliberately no public page-mode option.
+The oneAPI path now uses ordinary anonymous host memory registered through
+PJRT DmaMap; it no longer relies on PJRT host-pinned allocations or the
+plugin's pageable staging copy.
 
 `Platform.warmupDeviceAllocators()` creates and immediately deletes a one-byte
 default-memory buffer on every addressable device. This idempotently forces
@@ -78,11 +84,12 @@ itself.
   - exact concurrent `TensorReader.readPositionalAll` and tests.
 - `zml/mem.zig`
   - lazy, bounded, trimmable `DynamicBufferPool`;
-  - CUDA `DmaMapAllocator` transparent-huge-page advice.
+  - CUDA/oneAPI `DmaMapAllocator` transparent-huge-page advice.
 - `zml/platform.zig`
   - `Platform.warmupDeviceAllocators()` and its idempotence test.
 - `stdx/Io.zig`
-  - runtime-adjustable `LimitedGroup` and cancellation-safe admission.
+  - runtime-adjustable `LimitedGroup`, cancellation-safe admission, and
+    synchronous admission for work already running on a suitable task.
 - `examples/io/main.zig`
   - benchmark environment mapping, platform warmup, loader logging.
 - `bench_file.sh`, `bench_s3.sh`, `profile_file.sh`
@@ -124,11 +131,90 @@ min(tensor_count, parallelism,
     max(1, max_pinned_buffers_per_device - 1))
 ```
 
-The spare pinned buffer permits flip-flop overlap while a previous H2D is in
-flight. Pageable capacity is
+The one spare pinned buffer permits global flip-flop progress while a previous
+H2D is in flight, but it does not give every lane an independent second buffer.
+Guaranteed double buffering for `N` simultaneously active one-device shard
+writers requires `2*N` buffers per device. The smaller shared pool is an
+intentional resource/performance tradeoff, not a strict per-lane double-buffer
+invariant. Pageable capacity is
 `floor(max_staging_bytes / read_chunk_size)`; a tail read still leases a full
 block. Setting `max_staging_bytes=0` disables staging but leaves direct-path
 adaptation active.
+
+Pinned registration is not device-specific for the current CUDA/oneAPI DmaMap
+path. `PJRT_Client_DmaMap` is client-scoped. ZML constructs one `DmaAllocator`
+per device, but its CUDA/oneAPI implementation retains only the common
+`Platform`, so these allocators are operationally identical. XLA registers via
+addressable device zero; oneAPI then imports the pointer on the Level Zero
+driver, whose host-pointer manager creates graphics allocations for all devices
+owned by that driver. XLA's multi-GPU test explicitly transfers a single
+DmaMapped pointer through two devices.
+
+This is driver-scoped, not universally device/runtime independent. A different
+device owned by the same Intel Level Zero driver handle is covered by the
+driver-wide import. A device exposed by another driver handle is not: current
+PJRT registers only through `addressable_devices_[0]` and would need to import
+and release once per distinct driver/context. The DPC++
+`SYCL_EXT_ONEAPI_COPY_OPTIMIZE` macro only proves toolchain API availability;
+the installed Level Zero adapter/driver must also expose Intel's
+`zexDriverImportExternalPointer`, `zexDriverReleaseImportedPointer`, and, for
+XLA's post-import verification, `zexDriverGetHostPointerBaseAddress`. An older,
+non-Intel, disabled, or resource-exhausted runtime can therefore reject DmaMap.
+ZML's current CUDA/oneAPI `DmaMapAllocator` has no pageable fallback: a failed
+registration makes that pool-block allocation fail and ultimately fails the
+load rather than silently using the old staged path.
+
+Upstream Intel NEO history gives several distinct support floors. The internal
+host-pointer manager appeared in `20.49.18626` (December 2020), became
+default-enabled in `21.20.19883` (May 2021), and became externally callable via
+the three `zexDriver*` extension-function names in `22.16.22992` (April 2022).
+Direct API unit tests followed in `22.21`, a functional TBX black-box test in
+`22.23`, and user documentation in `22.30`. DPC++ added
+`prepare_for_device_copy` on top of these functions in commit `65cc0cf` on
+2023-07-19. The names and signatures have remained present since introduction,
+but both layers still label the interface experimental.
+
+Use `22.16.22992` only as the API-existence floor. Prefer at least
+`25.44.36015.5` for arbitrary multi-root configurations: that release fixed an
+undersized per-root allocation vector when visible root-device indices were
+nonzero or sparse. Contiguous roots 0..N-1, including the tested four-B70
+driver, were not affected. `26.18.38308.1` first advertised the formal
+`ZEX_driver_import_host_pointer` version 1.0 through extension enumeration;
+older supporting drivers expose only the callable function names. Enumeration
+is therefore neither necessary on old drivers nor sufficient when the driver's
+`EnableHostPointerImport` debug setting disables the manager. Dynamic lookup,
+an attempted import, and a successful post-import query are authoritative.
+
+The current host has `libze-intel-gpu1 26.22.38646.6`; its library contains the
+extension name and all three functions, includes the multi-root fix, and has
+successfully handled both one- and four-B70 DmaMapped loads. Confidence for this
+exact stack is high. Cross-version/device confidence is medium-high for current
+Intel NEO, but not equivalent to a standardized Level Zero guarantee: hardware
+CI evidence in the driver repository is limited, the 2025 topology fix was
+substantive, and the private API only gained an advertised version in 2026.
+
+The XLA post-import Level Zero query is important rather than redundant. The
+DPC++ Level Zero adapter discovers import/release dynamically, but its current
+`urUSMImportExp` returns success when the extension is absent and discards the
+native `zexDriverImportExternalPointer` result. Verification prevents such a
+no-op or failed import from being recorded as DmaMapped. Retain the query unless
+the implementation moves to an API with reliable capability and error
+reporting. Also preserve non-overlapping ownership and wait for every DMA before
+unmap: the driver has no independent-owner reference count for duplicate
+subrange imports, and the SYCL copy-optimize contract declares overlapping
+registrations undefined. The newer experimental `register_host_memory` API has
+an explicit device aspect and error model, but its current Level Zero support
+is narrower and it does not universally guarantee anonymous/huge-page mappings,
+so it is not yet an unqualified portable replacement.
+
+Consequently, separate per-device pools are a ZML resource-accounting and
+fairness policy, not a correctness requirement. A single client-wide pool could
+lease any buffer to any device as long as the lease lasts until every DMA using
+it completes. Merging pools is not mechanically free: the controller's current
+limit is per device, a shared pool needs anti-starvation/fairness rules, and
+active shard writers may retain partially filled buffers. It is nevertheless a
+valid optimization experiment, especially because current pinned-capacity
+probes expand every device pool together.
 
 Tensor sources, writers, and buffers are created lazily. A direct read aliases
 a real pinned writer window and is reserved by a DMA lane. Extra read
@@ -144,13 +230,17 @@ a ring in exact offset order. For every tensor:
 of order. Shard dispatch sorts placement ranges, uses the zero-copy pinned alias
 where possible, and copies mirror/replicated ranges to their writers.
 
-Direct reads retain their admitted DMA lane until their event completes. Do
-not detach a tensor that owns a direct pinned window into the shared ready
-queue: queued owners can hold every pool block while new lanes block creating
-writers, causing circular wait. Pageable tensors may detach only after parking
-their writer safely. Once a tensor owns a transfer quantum, it schedules its
-next direct read before yielding; yielding at that boundary previously caused
-a no-progress ready-queue convoy.
+When pageable staging is zero, a direct read executes on its persistent DMA
+lane task while still taking `read_group` admission. This avoids a read-task
+handoff and a resume-task handoff for every small pinned chunk. If staging is
+enabled, reads retain the detached path so pageable work can run ahead of DMA.
+Direct reads retain their admitted DMA lane until completion. Do not detach a
+tensor that owns a direct pinned window into the shared ready queue: queued
+owners can hold every pool block while new lanes block creating writers,
+causing circular wait. Pageable tensors may detach only after parking their
+writer safely. Once a tensor owns a transfer quantum, it schedules its next
+direct read before yielding; yielding at that boundary previously caused a
+no-progress ready-queue convoy.
 
 Pinned shard writers alternate buffers/completion contexts and wait before
 reuse. Parking commits without replenishing the public window. Acquiring a new
@@ -158,7 +248,8 @@ buffer merely to park can deadlock when lanes are retiring.
 
 Concurrency structures:
 
-- `read_group`: positional read execution, dynamic limit;
+- `read_group`: positional read admission/execution, either inline on a direct
+  DMA lane or detached for staged reads, with a dynamic limit;
 - `dma_group`: lane execution, dynamic limit;
 - `staging_group`: pageable acquisition/prefetch setup;
 - `resume_group`: staged and capacity waits outside DMA admission;
@@ -318,6 +409,14 @@ ZML_LOAD_TRANSFER_QUANTUM_MIB
 ZML_LOAD_READ_CHUNK_MIB
 ZML_LOAD_MAX_STAGING_MIB
 ```
+
+When `ZML_LOAD_PINNED_BUFFER_MIB` is absent, the IO example leaves
+`LoadOpts.pinned_buffer_size=null`: oneAPI selects 2 MiB and other targets
+select 32 MiB. This decision deliberately does not inspect tensor URIs. A
+`file:` or path source may reside on slow network-attached storage, while a
+remote-looking source may be cached locally, so the URI is not a reliable
+performance signal. Supplying the environment variable is an explicit
+override.
 
 The playground always uses normal `Platform.auto` behavior. Temporary XLA GPU
 allocator/preallocation environment controls used during investigation were
@@ -568,7 +667,126 @@ allocation: PJRT constructs the allocator at client creation but does not call
 moves that arena reservation and metadata initialization ahead of weight load
 without changing XLA or exposing allocator selection.
 
-### Four-GPU oneAPI
+### B70 DmaMap, chunk locality, and current oneAPI default
+
+Current host: AMD Threadripper PRO 9955WX (16 cores/32 threads, two 32 MiB L3
+domains), four Intel Arc Pro B70 devices, ext4 warm page cache, one NUMA node.
+The workload is the same 291-tensor Llama 3.1 8B model, 14.96 GiB logical.
+XLA `9dac91281a` implements PJRT DmaMap through oneAPI
+`prepare_for_device_copy`; Level Zero is queried because an imported pointer
+remains `usm::alloc::unknown` even after registration. ZML allocates anonymous,
+2 MiB-aligned, `MADV_HUGEPAGE` host buffers and registers them with DmaMap.
+
+The old 32 MiB local default was reproducibly CPU/page-cache-copy bound:
+
+```text
+profile                                load time median       logical goodput
+one B70, explicit 32 MiB (5 balanced)       0.742 s                20.15 GiB/s
+one B70, explicit 2 MiB (5 balanced)        0.566 s                26.43 GiB/s
+four B70, explicit 32 MiB (1 run)           0.855 s                17.50 GiB/s
+four B70, automatic 2 MiB (3 runs)          0.581 s                25.77 GiB/s
+```
+
+Four of the five balanced one-device 2 MiB runs were 0.566 s / 26.42-26.44
+GiB/s; one outlier was 0.637 s / 23.48 GiB/s. All local runs were fully direct
+(`staged=0`). The four-device result is sharded, so physical committed bytes
+equal the 14.96 GiB logical total; adding GPUs cannot beat the shared
+host/page-cache copy ceiling. Compared with the explicit 32 MiB arm, the
+retained setting is about 31% faster on one B70 and 47% faster in the measured
+four-B70 sharded load.
+
+The size effect is not H2D bandwidth. Focused SYCL tests measured about
+53.4 GiB/s registered anonymous H2D, about 30.0-30.7 GiB/s parallel `pread`
+into registered buffers, and 33.5-33.9 GiB/s for the coupled 2 MiB
+`pread -> H2D -> reuse` loop. Distinct device destinations did not reduce that
+rate. A production size sweep put the knee at 2-3 MiB; throughput declined
+through roughly 25.3 GiB/s at 4 MiB, 23.3 at 6 MiB, 22.4 at 8 MiB, and 20.2 at
+32 MiB.
+
+A 2026-07-20 fixed 12-lane check compared the shared 13-buffer setting with 24
+buffers, which is enough to guarantee two buffers per active one-device writer.
+For 32 MiB buffers, five balanced runs had loader medians of 0.798 s with 13
+and 0.787 s with 24; outer timer medians were 0.811 and 0.805 s. The roughly
+1% difference is inside the 3% resource-selection tolerance, and 24 buffers did
+not recover the large gap to 2 MiB. For 2 MiB buffers, three runs per arm had
+outer medians of 0.603 s for both pool sizes. Thus 13 buffers do not guarantee
+per-lane double buffering, but pool starvation is not the primary explanation
+for the chunk-size effect on this host. The earlier broad observation that
+increasing the pool beyond 13 hurt was not reproduced by this controlled check.
+
+Do not treat aggregate L3 capacity as the established cause of this size
+effect. Normal `pread`/`copy_to_user` stores target write-back, cache-coherent
+memory, so dirty cache-line ownership can affect a coherent device read even
+though the CPU never consumes the destination again. However, transparent
+huge pages primarily reduce CPU/IOMMU translation pressure, not data-cache
+footprint, and both the 2 and 32 MiB buffers can be backed by 2 MiB pages. No
+cache-flush or hardware-counter experiment has yet attributed the speedup to
+L3 residency.
+
+The focused coupled benchmark is not production-faithful enough to explain the
+size effect by itself. Each of its workers currently does
+`pread -> H2D wait -> reuse` on one buffer. Given the separately measured
+roughly 30.5 GiB/s read and 53.4 GiB/s H2D rates, that serialization predicts
+about 19.4 GiB/s and can explain why its 32 MiB result is only about
+22.5 GiB/s. Production does not serialize the stages this way:
+`DirectShardWriter` asynchronously submits one pooled buffer, uses its two
+event-context slots as a flip-flop, and lets the next direct `pread` fill a new
+buffer while the prior H2D remains in flight. An `AdaptivePipelineLane` is a
+logical scheduler admission that drives an active tensor, not a serialized
+hardware DMA channel. Therefore the focused benchmark's phase-overlap argument
+must not be used as the explanation for ZML's 2 MiB improvement.
+
+The production size effect remains unexplained. Cache coherency, burst shape,
+pool contention, driver submission/completion behavior, and CPU-copy behavior
+are candidates. The next useful focused test must reproduce
+`DirectShardWriter` double buffering (or record a production per-stage
+timeline); a cache flush/non-temporal-copy arm can then separate cache ownership
+from scheduling and overlap.
+
+`perf` on the old 32 MiB path attributed about 82% of cycles to kernel
+`_copy_to_iter`. With 2 MiB buffers it remained the dominant useful work
+(roughly 69-70%), but task-clock and system CPU fell with the smaller working
+set. Executing direct reads inline on their DMA lane then removed scheduling
+overhead without changing the staged path. In a controlled fixed 12-lane,
+13-buffer, 2 MiB comparison, task-clock fell from 6.499 to 5.808 s, cycles from
+32.70 to 30.01 G, instructions from 5.626 to 5.226 G, system time from 5.884
+to 5.174 s, context switches from 86,961 to 38,613, and CPU migrations from
+7,350 to 2,878. Wall goodput did not move reliably because `_copy_to_iter`
+remains the bottleneck, but the CPU reduction is retained.
+
+Experiments rejected for production:
+
+- DmaMap itself did not slow CPU writes; registered and unregistered `pread`
+  were equivalent.
+- DMA directly from registered file-backed `mmap` reached only about
+  21.4 GiB/s after warmup, consistent with fragmented 4 KiB page-cache/IOMMU
+  mappings.
+- `mmap` plus userspace `memcpy` into anonymous registered buffers reached only
+  about 23.7 GiB/s, slower than the kernel copy.
+- One 26 MiB registered host arena split into thirteen 2 MiB slices preserved
+  33.9 GiB/s microbenchmark throughput but reduced setup by only about 4.5 ms
+  (17.7 to 13.2 ms). It does not yet justify replacing lazy/trimmable pools.
+
+Small pinned buffers regress fast staged sources because they multiply PJRT
+submissions. At S3Proxy 10 ms/1000 MiB/s, forced 2 MiB took about 2.945 s /
+5.08 GiB/s versus about 2.745 s / 5.45 GiB/s with 32 MiB in the initial A/B.
+Three 32 MiB remote runs converged to 32 reads/eight DMA/nine pinned/32 staged
+and took 2.747-2.851 s. Despite that evidence, automatic sizing must not branch
+on the URI: a path can be network attached and a remote URI can be locally
+cached. Revisit the oneAPI pinned-buffer default for remote and slow sources
+using a source-independent signal or a policy selected before writers and
+DmaMappings become live; until then callers can explicitly request 32 MiB.
+
+The reusable experiment is
+`~/github/uxlfoundation/sycl_playground/src/b70_load_bandwidth.cpp`; modes cover
+`pread`, H2D, coupled pipeline, file-backed mmap H2D, and mmap-plus-copy.
+
+### Earlier four-GPU oneAPI baselines (superseded)
+
+The following measurements predate the current XLA DmaMap path, THP-backed
+anonymous oneAPI buffers, and 2 MiB local tuning. Keep them only as historical
+regression context; do not use their 32/64 MiB conclusion as the current local
+default.
 
 Hardware: four Intel Battlemage G31 / Arc Pro B70 devices selected with
 `ONEAPI_DEVICE_SELECTOR=level_zero:0,1,2,3`. The original coupled 256 MiB
@@ -589,9 +807,9 @@ buffer       warm local             S3 10ms/1000       S3 250ms/1000
 Variance was material. A known-remote initial width of eight with 32 MiB
 buffers reached 32 reads/eight DMA lanes in 18.858 s at 250 ms latency, versus
 21.187 s from the then-default start, but raised peak RSS from ~6.7 to ~8.7 GiB.
-The cross-source default is 32 MiB; retain 64 MiB only as a measured oneAPI-local
-override. The current 8/32 defaults favor rapid general convergence over the
-smallest short-local width.
+At that time the cross-source default was 32 MiB and 64 MiB was retained only
+as a measured oneAPI-local override. The 8/32 concurrency defaults favored
+rapid general convergence over the smallest short-local width.
 
 Replicated four-device validation completed in 9.758 s with 14.96 GiB logical
 and 59.83 GiB physical committed bytes, fully direct. An intermittent oneAPI
@@ -672,16 +890,23 @@ measured. At 64 MiB, width four spent ~19% more CPU than width two but finished
    transport throttle/retry feedback.
 5. Slot metadata is `O(open_sources * max_read_parallelism)` even though buffer
    bytes are bounded.
-6. `pinned_buffer_size` is static. Revalidate unusual sources, replicated
-   placement, and new PJRT implementations; oneAPI local historically favored
-   64 MiB while CUDA BFC and tested S3 favored 32 MiB.
+6. `pinned_buffer_size` is static after load startup. The automatic policy
+   chooses 2 MiB for oneAPI and 32 MiB otherwise, without inspecting the URI.
+   Revisit the oneAPI size for remote and slow sources: local paths may be
+   network attached, so any better policy needs a source-independent signal or
+   an explicit caller choice before writers and DmaMappings become live.
 7. Success teardown is stress-tested, but read/PJRT failure injection and true
    transport interruption need more coverage.
-8. Recheck oneAPI's plugin-owned host-callback copy and post-completion exit
-   pause when its PJRT package changes.
+8. Recheck oneAPI DmaMap registration, the `usm::alloc::unknown` Level Zero
+   verification path, and the post-completion exit pause when its PJRT/runtime
+   package changes. The old plugin-owned pageable `memmove` is absent from the
+   current DmaMapped direct profile.
 9. A substantial warm-local CUDA gain now requires avoiding the page-cache
    copy, likely via a carefully validated mmap/register prototype. Huge pages,
    extra H2D streams, and more dTLB tuning are not current high-value work.
+10. B70 steady windows reach about 29-30 GiB/s while end-to-end medians are
+    about 26 GiB/s. Remaining opportunity is startup/tail and tensor/PJRT
+    object overhead; direct file-backed DMA and mmap-plus-copy were both slower.
 
 ## Validation and Workflow
 
@@ -697,11 +922,15 @@ Focused validation:
 git diff --check
 ```
 
-At this snapshot, all 216 core tests pass; release CUDA IO/LLM and release
-oneAPI IO builds pass. The 2026-07-19 sweep ran `./bench_file.sh` and
+At the current snapshot, `//zml:test` passes and the release oneAPI IO
+playground builds. XLA was not rebuilt, per user instruction; the benchmark
+uses the user's existing local plugin artifact. Earlier in the branch, all 216
+then-existing core tests and release CUDA IO/LLM builds passed. The earlier
+2026-07-19 sweep ran `./bench_file.sh` and
 `./bench_s3.sh` at its default 1000 ms/100 MiB/s profile, plus 10 ms/1000 MiB/s
-and 250 ms/1000 MiB/s overrides. oneAPI compiled but was not re-benchmarked in
-this final controller iteration. Tests cover positional reads,
+and 250 ms/1000 MiB/s overrides. That older snapshot did not re-benchmark
+oneAPI; the current B70 evidence above supersedes it. Tests cover positional
+reads,
 sharding/mirrors, smaller physical buffers than logical quantum, pool/group
 limits, probe decisions and attribution, slow/bursty-source convergence,
 pressure/starvation, cooldowns, hard caps, scheduling fences, and stable queue

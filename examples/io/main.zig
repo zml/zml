@@ -221,7 +221,7 @@ pub fn main(init: std.process.Init) !void {
             const load_max_read_parallelism = try envOptionalUsize(init.environ_map, "ZML_LOAD_MAX_READ_PARALLELISM");
             const load_max_pinned_buffers_per_device = try envUsize(init.environ_map, "ZML_LOAD_MAX_PINNED_BUFFERS_PER_DEVICE", 33);
             const load_transfer_quantum_mib = try envUsize(init.environ_map, "ZML_LOAD_TRANSFER_QUANTUM_MIB", 256);
-            const load_pinned_buffer_mib = try envUsize(init.environ_map, "ZML_LOAD_PINNED_BUFFER_MIB", 32);
+            const load_pinned_buffer_mib = try envOptionalUsize(init.environ_map, "ZML_LOAD_PINNED_BUFFER_MIB");
             const load_read_chunk_mib = try envUsize(init.environ_map, "ZML_LOAD_READ_CHUNK_MIB", 32);
             const load_max_staging_mib = try envUsize(init.environ_map, "ZML_LOAD_MAX_STAGING_MIB", 1024);
 
@@ -234,7 +234,7 @@ pub fn main(init: std.process.Init) !void {
                 .read_chunk_size = load_read_chunk_mib * zml.MiB,
                 .max_staging_bytes = load_max_staging_mib * zml.MiB,
                 .max_pinned_buffers_per_device = load_max_pinned_buffers_per_device,
-                .pinned_buffer_size = load_pinned_buffer_mib * zml.MiB,
+                .pinned_buffer_size = if (load_pinned_buffer_mib) |size| size * zml.MiB else null,
                 .transfer_quantum_size = load_transfer_quantum_mib * zml.MiB,
                 .progress = &progress,
                 .total_bytes = &total_bytes,

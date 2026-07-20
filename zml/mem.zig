@@ -119,8 +119,9 @@ pub const UninitializedBufferAllocator = struct {
     }
 };
 
-/// Host allocator for CUDA DMA mappings. Linux allocations request transparent
-/// huge-page backing, but remain valid ordinary-page mappings when unavailable.
+/// Host allocator for CUDA and oneAPI DMA mappings. Linux allocations request
+/// transparent huge-page backing, but remain valid ordinary-page mappings when
+/// unavailable.
 pub const DmaMapAllocator = struct {
     const transparent_huge_page_size = 2 * 1024 * 1024;
 
