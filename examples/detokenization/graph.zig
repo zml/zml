@@ -7,14 +7,12 @@ const save_load = @import("saveload.zig");
 const llm = @import("llm.zig");
 const tokens = @import("tokens.zig");
 const sampling = @import("sampling.zig");
-const quantized_ = @import("quantized.zig");
 
 const Tokenizer = zml.tokenizer.Tokenizer;
 const SimilarityMatrix = algebra.SimilarityMatrix;
 const LmHeadMatrix = algebra.LmHeadMatrix;
 const Zml_handler = main.Zml_handler;
 const Field_timer = main.Timing_handler.Field_timer;
-const Quantized = quantized_.Quantized;
 
 pub const graph_k_max = 32;
 pub const graph_L = 256;
@@ -339,125 +337,6 @@ pub const Graph = struct {
             self.insertBatch(nb_batch);
         }
         self.zml_handler.toc(&self.zml_handler.timers.embed_search);
-    }
-
-    pub fn greedySearchQuantized1x1(self: *Graph, query: []const f32, quantized: *Quantized) !void {
-        self.zml_handler.tic(&self.zml_handler.timers.embed_search_q);
-        self.generation += 1;
-
-        const quantized_query, _, const query_L2_norm = try quantized.quantizeQjlVector(query);
-
-        const entry_point = self.medoid;
-        const entry_sim = quantized.dotQjlSymmetric(entry_point, quantized_query, query_L2_norm);
-        std.debug.assert(entry_point < self.n);
-        std.debug.assert(self.visited_generation[entry_point] != self.generation);
-
-        self.visited_generation[entry_point] = self.generation;
-        self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
-        self.nb_scored = 1;
-        self.L = 1;
-        self.is_search_done = false;
-
-        while (self.nb_scored < self.params.search_budget) {
-            const node = self.popCandidate();
-            if (self.is_search_done) break;
-            const start_neigh = graph_k_max * node;
-            const end_neigh = start_neigh + self.nb_neighbors[node];
-            var i: u32 = start_neigh;
-            while (i < end_neigh) : (i += 1) {
-                const neighbor = self.neighbors[i];
-                if (self.visited_generation[neighbor] == self.generation) continue;
-                std.debug.assert(!self.lm_head.is_junk[neighbor]);
-                const sim = quantized.dotQjlSymmetric(neighbor, quantized_query, query_L2_norm);
-                self.nb_scored += 1;
-                self.insert(neighbor, sim);
-            }
-        }
-        self.zml_handler.toc(&self.zml_handler.timers.embed_search_q);
-    }
-
-    pub fn greedySearchQuantized1x2(self: *Graph, query: []const f32, quantized: *Quantized) !void {
-        self.zml_handler.tic(&self.zml_handler.timers.embed_search_q);
-        self.generation += 1;
-
-        try quantized.walshHadamardSimd(query, 12);
-        var norm: f32 = 0.0;
-        for (quantized.f32_buffer) |v| {
-            norm += v * v;
-        }
-        norm = @sqrt(norm);
-        const query_msb, const query_lsb = quantized.quantize2Bits(norm);
-
-        const entry_point = self.medoid;
-        const entry_sim = quantized.dotQjlAsymmetric2Bits(entry_point, &query_msb, &query_lsb, norm);
-        std.debug.assert(entry_point < self.n);
-
-        self.visited_generation[entry_point] = self.generation;
-        self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
-        self.nb_scored = 1;
-        self.L = 1;
-        self.is_search_done = false;
-
-        while (self.nb_scored < self.params.search_budget) {
-            const node = self.popCandidate();
-            if (self.is_search_done) break;
-            const start_neigh = graph_k_max * node;
-            const end_neigh = start_neigh + self.nb_neighbors[node];
-            var i: u32 = start_neigh;
-            while (i < end_neigh) : (i += 1) {
-                const neighbor = self.neighbors[i];
-                if (self.visited_generation[neighbor] == self.generation) continue;
-                std.debug.assert(!self.lm_head.is_junk[neighbor]);
-                const sim = quantized.dotQjlAsymmetric2Bits(neighbor, &query_msb, &query_lsb, norm);
-                self.nb_scored += 1;
-                self.insert(neighbor, sim);
-            }
-        }
-        self.zml_handler.toc(&self.zml_handler.timers.embed_search_q);
-    }
-
-    pub fn greedySearchQuantized2x2(self: *Graph, query: []const f32, quantized: *Quantized) !void {
-        self.zml_handler.tic(&self.zml_handler.timers.embed_search_q);
-        self.generation += 1;
-
-        try quantized.walshHadamardSimd(query, 12);
-        var norm: f32 = 0.0;
-        for (quantized.f32_buffer) |v| {
-            norm += v * v;
-        }
-        norm = @sqrt(norm);
-        const query_msb, const query_lsb = quantized.quantize2BitsSymmetric(norm);
-        const query_scale = Quantized.scaleFactor2BitsSymmetric(quantized.f32_buffer[0..4096], &query_msb, &query_lsb);
-
-        const entry_point = self.medoid;
-        var dot: f32 = @floatFromInt(quantized.dotQjlSymmetric2Bits(entry_point, &query_msb, &query_lsb));
-        const entry_sim = query_scale * quantized.qjl_row_scale_2bits[entry_point] * dot;
-
-        std.debug.assert(entry_point < self.n);
-
-        self.visited_generation[entry_point] = self.generation;
-        self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
-        self.nb_scored = 1;
-        self.L = 1;
-        self.is_search_done = false;
-
-        while (self.nb_scored < self.params.search_budget) {
-            const node = self.popCandidate();
-            if (self.is_search_done) break;
-            const start_neigh = graph_k_max * node;
-            const end_neigh = start_neigh + self.nb_neighbors[node];
-            var i: u32 = start_neigh;
-            while (i < end_neigh) : (i += 1) {
-                const neighbor = self.neighbors[i];
-                if (self.visited_generation[neighbor] == self.generation) continue;
-                std.debug.assert(!self.lm_head.is_junk[neighbor]);
-                dot = @floatFromInt(quantized.dotQjlSymmetric2Bits(neighbor, &query_msb, &query_lsb));
-                const sim = query_scale * quantized.qjl_row_scale_2bits[neighbor] * dot;
-                self.nb_scored += 1;
-                self.insert(neighbor, sim);
-            }
-        }
-        self.zml_handler.toc(&self.zml_handler.timers.embed_search_q);
     }
 
     pub fn greedySearchWS(self: *Graph, query: []const f32) void {
