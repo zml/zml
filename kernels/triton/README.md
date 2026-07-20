@@ -344,15 +344,16 @@ default; `.olt` / `.oge` / ... for floats.
 | int         | float            | `arith.sitofp`                |
 | **i1**      | **float**        | **`arith.uitofp`** (i1 is unsigned bool; sign-extending `1` would land at `-1.0`) |
 | float       | int              | `arith.fptosi`                |
-| float       | wider float      | `arith.extf` (no rounding)    |
-| float       | narrower float   | fp8 involved or custom rounding → `tt.fp_to_fp`; otherwise `arith.truncf` |
+| float       | wider float      | fp8 source → `tt.fp_to_fp` without rounding; otherwise `arith.extf` |
+| float       | narrower float   | fp8 involved or custom rounding → `tt.fp_to_fp` with rounding; otherwise `arith.truncf` |
 | same type   | same type        | no-op (returns `self`)        |
 
 Triton's verifier rejects `tt.fp_to_fp` with a rounding attribute when the
 target is not strictly narrower than the source (e.g. `bf16 → f32`, or
-same-width `bf16 ↔ f16`). The DSL routes strict upcasts through
-`arith.extf` to match Python Triton's own lowering; only genuine
-downcasts carry the `rtne` rounding attribute.
+same-width `bf16 ↔ f16`). The DSL routes standard strict upcasts through
+`arith.extf` to match Python Triton's own lowering, but fp8 upcasts use
+`tt.fp_to_fp` without a rounding attribute so Triton's fp8 conversion lowering
+is selected. Only genuine downcasts carry the `rtne` rounding attribute.
 
 For narrowing FP→FP, the dispatch follows
 `triton/python/triton/language/semantic.py:cast()`: standard FP narrowing
