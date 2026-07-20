@@ -6,17 +6,17 @@ load("//platforms:packages.bzl", "packages")
 ARCHS = ["linux-x86_64", "linux-sbsa"]
 
 CUDA_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cuda/redist/"
-CUDA_VERSION = "13.1.1"
-CUDA_VARIANT = "cuda13.1"
-CUDA_REDIST_JSON_SHA256 = "97cf605ccc4751825b1865f4af571c9b50dd29ffd13e9a38b296a9ecb1f0d422"
+CUDA_VERSION = "13.3.0"
+CUDA_VARIANT = "cuda13.3"
+CUDA_REDIST_JSON_SHA256 = "507eddaab1360336bc0fe17b77552e0b7dfe1e74da888671c3a2f5fad7775db1"
 
 CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redist/"
-CUDNN_VERSION = "9.19.1"
-CUDNN_REDIST_JSON_SHA256 = "ee7bd6872b8611017bfc9ac99a4a71932652d1851b5917aa2c66bf29a12f8fd4"
+CUDNN_VERSION = "9.22.0"
+CUDNN_REDIST_JSON_SHA256 = "3dbb9002d52112ef69aa09187f523ef1ff07f8baf3892ee01e540af639d8f55f"
 
 NVSHMEM_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/nvshmem/redist/"
-NVSHMEM_VERSION = "3.5.19"
-NVSHMEM_REDIST_JSON_SHA256 = "6dced4193eb728542504b346cfb768da6e3de2abca0cded95fda3a69729994d2"
+NVSHMEM_VERSION = "3.6.5"
+NVSHMEM_REDIST_JSON_SHA256 = "afbf1ad5c4174c25a66cadd5b925d6814e679e8f836ef1fee1442afb6cb7fdd3"
 
 _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
@@ -85,10 +85,12 @@ CUDA_PACKAGES = {
         """filegroup(
             name = "cuda_compat",
             srcs = [
-                "compat/libnvidia-gpucomp.so.590.48.01",
-                "compat/libnvidia-tileiras.so.590.48.01",
+                "compat/libnvidia-gpucomp.so.610.43.02",
+                "compat/libnvidia-tileiras.so.610.43.02",
             ] + {} + select({{
-                "@llvm//platforms/config:linux_x86_64": ["compat/libnvidia-pkcs11-openssl3.so.590.48.01"],
+                "@llvm//platforms/config:linux_x86_64": [
+                    "compat/libnvidia-pkcs11-openssl3.so.610.43.02",
+                ],
                 "@llvm//platforms/config:linux_aarch64": [],
             }}),
         )""".format(repr([
@@ -128,10 +130,6 @@ CUDA_PACKAGES = {
                 "bin/nvlink",
             ],
         ),
-        packages.cc_import(
-            name = "nvptxcompiler",
-            static_library = "lib/libnvptxcompiler_static.a",
-        ),
     ],
     "libnvvm": [
         packages.filegroup(
@@ -147,7 +145,7 @@ CUDA_PACKAGES = {
             name = "cuda_nvrtc",
             srcs = [
                 "lib/libnvrtc.so.13",
-                "lib/libnvrtc-builtins.so.13.1",
+                "lib/libnvrtc-builtins.so.13.3",
             ],
         ),
     ],
@@ -174,6 +172,7 @@ CUDNN_PACKAGES = {
                 "lib/libcudnn_graph.so.9",
                 "lib/libcudnn_engines_precompiled.so.9",
                 "lib/libcudnn_engines_runtime_compiled.so.9",
+                "lib/libcudnn_engines_tensor_ir.so.9",
                 "lib/libcudnn_heuristic.so.9",
             ],
         ),
@@ -187,7 +186,7 @@ NVSHMEM_PACKAGES = {
             srcs = [
                 "lib/libnvshmem_host.so.3",
                 "lib/nvshmem_bootstrap_uid.so.3",
-                "lib/nvshmem_transport_ibrc.so.4",
+                "lib/nvshmem_transport_ibrc.so.5",
             ],
         ),
     ],
@@ -205,27 +204,27 @@ _UBUNTU_PACKAGES = {
     ],
 }
 
-PJRT_CUDA_RELEASE = "manual-2026-07-03T00-10-30Z"
+PJRT_CUDA_RELEASE = "manual-2026-07-20T19-00-00Z"
 
 _PJRT_CUDA_ASSETS = {
     "amd64": {
-        "sha256": "6380f724fe21b25dc9231f3ec468ae92e39d21f4bae9377bfa8ff01972521e0d",
+        "sha256": "30e09906a92cfe6b9e04013a1edd6372423188365ade9fb45aba4fa3759a862f",
         "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-amd64.tar.gz",
     },
     "arm64": {
-        "sha256": "98dc33f0740bc37f3a25611f5aad423cc46eb69679e4d45a22f7fc4dfa3efd8d",
+        "sha256": "12a2176302cb9b3f8157be230e5d27ece9ee85ce0cd1381a8f243963e937ee51",
         "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-arm64.tar.gz",
     },
 }
 
 _NCCL_ASSETS = {
     "amd64": {
-        "url": "https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.29.3-py3-none-manylinux_2_18_x86_64.whl",
-        "sha256": "2a321629f49490e4e0122ecb578a4b4a6f89e72740dd988e04dfa4758fab7fc3",
+        "url": "https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.30.4-py3-none-manylinux_2_18_x86_64.whl",
+        "sha256": "534dbf3058cadb625f08ab0d17f1dffad3b961a2bfa360d66633fcf21be53f57",
     },
     "arm64": {
-        "url": "https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.29.3-py3-none-manylinux_2_18_aarch64.whl",
-        "sha256": "eab9f5c565ab3326906f1d1b5be5773a174c2a1b47002faed76f9e957392f713",
+        "url": "https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.30.4-py3-none-manylinux_2_18_aarch64.whl",
+        "sha256": "e99308a3a89fba78918d50886e81072a6c8b0b4199feb02c3903e63713a6525a",
     },
 }
 
