@@ -37,6 +37,7 @@ pub const nn = @import("nn.zig");
 pub const ops = @import("ops.zig");
 pub const pjrtx = @import("pjrtx.zig");
 pub const platform = @import("platform.zig");
+pub const quant = @import("quant.zig");
 pub const Memory = platform.Memory;
 pub const Platform = platform.Platform;
 pub const Target = platform.Target;
