@@ -349,7 +349,6 @@ const Routing = struct {
     num_tokens: i64,
     num_routes: i64,
     topk: i64,
-    block_m: i64,
     grid_m: i64,
     sorted_route_ids: zml.Tensor,
     sorted_weights: zml.Tensor,
@@ -369,6 +368,7 @@ const GemmOpts = struct {
     bias: ?zml.Tensor = null,
     apply_swiglu: bool = false,
     activation_limit: f32 = 1.0,
+    kernel_cfg: KernelConf,
 };
 
 const Vanilla = struct {
@@ -560,6 +560,189 @@ const Vanilla = struct {
     }
 };
 
+const KernelConf = struct {
+    block_m: u32,
+    block_n: u32,
+    block_k: u32,
+    group_m: u32,
+    num_warps: u32,
+    num_stages: u32,
+};
+
+const kernel_config_token_buckets = [_]u32{
+    1,  2,   4,   8,   16,   24,   32,   48,   64,
+    96, 128, 256, 512, 1024, 1536, 2048, 3072, 4096,
+};
+
+fn configForTokenBucket(num_tokens: u32) KernelConf {
+    return switch (num_tokens) {
+        1 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 4,
+        },
+        2 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 4,
+        },
+        4 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 3,
+        },
+        8 => .{
+            .block_m = 16,
+            .block_n = 128,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 3,
+        },
+        16 => .{
+            .block_m = 16,
+            .block_n = 64,
+            .block_k = 64,
+            .group_m = 64,
+            .num_warps = 4,
+            .num_stages = 5,
+        },
+        24 => .{
+            .block_m = 16,
+            .block_n = 64,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 2,
+        },
+        32 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 2,
+        },
+        48 => .{
+            .block_m = 16,
+            .block_n = 32,
+            .block_k = 128,
+            .group_m = 64,
+            .num_warps = 4,
+            .num_stages = 2,
+        },
+        64 => .{
+            .block_m = 16,
+            .block_n = 64,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 2,
+        },
+        96 => .{
+            .block_m = 16,
+            .block_n = 128,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 3,
+        },
+        128 => .{
+            .block_m = 16,
+            .block_n = 256,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 2,
+        },
+        256 => .{
+            .block_m = 16,
+            .block_n = 256,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 2,
+        },
+        512 => .{
+            .block_m = 32,
+            .block_n = 128,
+            .block_k = 128,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 3,
+        },
+        1024 => .{
+            .block_m = 64,
+            .block_n = 128,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 3,
+        },
+        1536 => .{
+            .block_m = 64,
+            .block_n = 128,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 4,
+            .num_stages = 3,
+        },
+        2048 => .{
+            .block_m = 128,
+            .block_n = 128,
+            .block_k = 64,
+            .group_m = 16,
+            .num_warps = 8,
+            .num_stages = 3,
+        },
+        3072 => .{
+            .block_m = 128,
+            .block_n = 256,
+            .block_k = 64,
+            .group_m = 1,
+            .num_warps = 8,
+            .num_stages = 4,
+        },
+        4096 => .{
+            .block_m = 128,
+            .block_n = 256,
+            .block_k = 64,
+            .group_m = 16,
+            .num_warps = 8,
+            .num_stages = 4,
+        },
+        else => unreachable,
+    };
+}
+
+fn getBestConfig(num_tokens: u32) KernelConf {
+    var best_num_tokens = kernel_config_token_buckets[0];
+    var best_distance = tokenDistance(num_tokens, best_num_tokens);
+
+    for (kernel_config_token_buckets[1..]) |candidate| {
+        const distance = tokenDistance(num_tokens, candidate);
+        if (distance < best_distance or (distance == best_distance and candidate < best_num_tokens)) {
+            best_num_tokens = candidate;
+            best_distance = distance;
+        }
+    }
+
+    return configForTokenBucket(best_num_tokens);
+}
+
+fn tokenDistance(a: u32, b: u32) u32 {
+    return if (a >= b) a - b else b - a;
+}
+
 const Triton = struct {
     pub fn forwardMoe_fp4(
         input: zml.Tensor,
@@ -647,7 +830,13 @@ const Triton = struct {
         activation_limit: f32,
     ) zml.Tensor {
         const x = input.rename(.{ .b = .token });
-        const routing = prepareRouting(topk_ids, topk_weights, weights_gate_up.dim(.expert));
+        const kernel_cfg = getBestConfig(@intCast(topk_ids.dim(.b)));
+        const routing = prepareRouting(
+            topk_ids,
+            topk_weights,
+            weights_gate_up.dim(.expert),
+            @intCast(kernel_cfg.block_m),
+        );
 
         const hidden_shape: zml.Shape = .init(.{
             .route = routing.num_routes,
@@ -668,6 +857,7 @@ const Triton = struct {
                 .bias = bias_gate_up,
                 .apply_swiglu = true,
                 .activation_limit = activation_limit,
+                .kernel_cfg = kernel_cfg,
             },
         );
 
@@ -686,6 +876,7 @@ const Triton = struct {
                 .weight_output_tag = zml.Shape.toTag(.d),
                 .output_shape = routed_shape,
                 .bias = bias_down,
+                .kernel_cfg = kernel_cfg,
             },
         );
 
@@ -705,20 +896,14 @@ const Triton = struct {
         return output_flat.reshape(input.shape().withDtype(.f32)).convert(input.dtype());
     }
 
-    fn prepareRouting(topk_ids: zml.Tensor, topk_weights: zml.Tensor, num_experts: i64) Routing {
+    fn prepareRouting(topk_ids: zml.Tensor, topk_weights: zml.Tensor, num_experts: i64, block_m: i64) Routing {
         const topk = topk_ids.dim(.eid);
         const num_tokens = topk_ids.dim(.b);
         const num_routes = num_tokens * topk;
 
-        const block_m = blk: {
-            const tokens_per_expert = @max(@divFloor(num_routes, num_experts), 1);
-            const power = std.math.ceilPowerOfTwoAssert(usize, @intCast(tokens_per_expert));
-            break :blk @min(@max(@as(i64, @intCast(power)), 16), 128);
-        };
-
         const grid_m = blk: {
-            if (num_routes <= num_experts) break :blk num_routes;
-            break :blk (std.math.divCeil(i64, @max(num_routes - num_experts + 1, 0), block_m) catch unreachable) + num_experts - 1;
+            if (num_routes <= num_experts) return num_routes;
+            break :blk (std.math.divCeil(i64, num_routes - num_experts + 1, block_m) catch unreachable) + num_experts - 1;
         };
 
         const route_ids = topk_ids.convert(.i32);
@@ -754,7 +939,6 @@ const Triton = struct {
             .num_tokens = num_tokens,
             .num_routes = num_routes,
             .topk = topk,
-            .block_m = block_m,
             .grid_m = grid_m,
             .sorted_route_ids = sorted_route_ids,
             .sorted_weights = sorted_weights,
@@ -812,8 +996,9 @@ const Triton = struct {
         stdx.debug.assert(@mod(n, activation_reduction_n) == 0, "invalid GEMM output width {}", .{n});
         stdx.debug.assert(opts.output_shape.dim(-1) == @divExact(n, activation_reduction_n), "output shape {f} does not match GEMM N {}", .{ opts.output_shape, n });
 
-        const block_n, const num_warps = kernelNWarps(opts.routing.block_m, n, opts.routing.grid_m);
-        const block_k: i64 = 256;
+        const block_m: i64 = @intCast(opts.kernel_cfg.block_m);
+        const block_n: i64 = @intCast(opts.kernel_cfg.block_n);
+        const block_k: i64 = @intCast(opts.kernel_cfg.block_k);
         const grid_n = std.math.divCeil(i64, n, block_n) catch unreachable;
         const has_bias = opts.bias != null;
         const has_gather = opts.gather != null;
@@ -833,14 +1018,14 @@ const Triton = struct {
             .ACTIVATION_REDUCTION_N = @intCast(activation_reduction_n),
             .SWIGLU_ADD_RESIDUAL = false,
             .N_EXPTS_ACT = @intCast(opts.routing.topk),
-            .BLOCK_M = @intCast(opts.routing.block_m),
-            .BLOCK_N = @intCast(block_n),
-            .BLOCK_K = @intCast(block_k),
-            .GROUP_M = 4,
+            .BLOCK_M = block_m,
+            .BLOCK_N = block_n,
+            .BLOCK_K = block_k,
+            .GROUP_M = @intCast(opts.kernel_cfg.group_m),
             .XCD_SWIZZLE = 1,
             .EVEN_K = @mod(contract_k, block_k) == 0,
             .MASK_K_LIMIT = @intCast(if (@mod(contract_k, block_k) == 0) block_k else @mod(contract_k, block_k)),
-            .W_CACHE_MODIFIER = if (opts.routing.block_m <= 32) .cg else .none,
+            .W_CACHE_MODIFIER = if (block_m <= 32) .cg else .none,
         };
 
         const y = triton_a16w4_kernel.Kernel.call(
@@ -878,35 +1063,12 @@ const Triton = struct {
             .{
                 .cfg = cfg,
                 .grid = .{ @intCast(opts.routing.grid_m * grid_n), 1, 1 },
-                .num_warps = @intCast(num_warps),
-                .num_stages = 1,
+                .num_warps = @intCast(opts.kernel_cfg.num_warps),
+                .num_stages = @intCast(opts.kernel_cfg.num_stages),
             },
         ).Y;
 
         return y;
-    }
-
-    fn kernelNWarps(block_m: i64, n: i64, grid_m: i64) struct { i64, i64 } {
-        if (block_m == 16) {
-            var block_n: i64 = 128;
-            const num_warps: i64 = 4;
-            var grid_n = std.math.divCeil(i64, n, block_n) catch unreachable;
-            var grid = grid_m * grid_n;
-            while (block_n >= 64 and grid < 256) {
-                block_n = @divExact(block_n, 2);
-                grid_n = std.math.divCeil(i64, n, block_n) catch unreachable;
-                grid = grid_m * grid_n;
-            }
-            return .{ block_n, num_warps };
-        }
-
-        if (block_m == 32) {
-            if (n <= 1024) return .{ 128, 4 };
-            if (n <= 4096) return .{ 256, 8 };
-            return .{ 512, 8 };
-        }
-
-        return .{ 512, 8 };
     }
 
     fn packedByteDtype(dt: zml.DataType) zml.kernel.triton.DType {
