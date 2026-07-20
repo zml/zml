@@ -13,10 +13,22 @@ const zml = @import("zml.zig");
 
 const log = std.log.scoped(.@"zml/nn");
 
+fn applyCompressedTensorsDivisor(x: Tensor, divisor_: Tensor) Tensor {
+    stdx.debug.assert(divisor_.dtype() == .f32, "compressed-tensors divisor must be f32, got {}", .{divisor_.dtype()});
+    stdx.debug.assert(divisor_.rank() == 1 and divisor_.dim(0) == 1, "compressed-tensors divisor must have shape [1], got {f}", .{divisor_.shape()});
+
+    const divisor = divisor_.withTags(.{.one}).squeeze(.one);
+    return x.convert(.f32)
+        .div(divisor.broad(x.shape()))
+        .convert(x.dtype());
+}
+
 pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
     tag: Shape.Tag,
+    scales: ?Tensor = null,
+    global_scale: ?Tensor = null,
 
     pub fn init(weight: Tensor, bias: ?Tensor, tag: anytype) Linear {
         return .{
@@ -26,9 +38,26 @@ pub const Linear = struct {
         };
     }
 
-    pub fn forward(self: Linear, x: Tensor) Tensor {
-        var y = x.dot(self.weight, self.tag);
+    pub fn unloadBuffers(self: *zml.Bufferized(Linear)) void {
+        self.weight.deinit();
+        if (self.bias) |*bias| bias.deinit();
+        if (self.scales) |*scales| scales.deinit();
+        if (self.global_scale) |*gs| gs.deinit();
+    }
 
+    pub fn forward(self: Linear, x: Tensor) Tensor {
+        const y = if (self.scales) |scales| blk: {
+            // NVFP4 may be packed u8; FP8 keeps its f8 weight dtype.
+            const weight = if (self.weight.dtype() == .u8)
+                ops.unpackNvfp4(self.weight.withTags(.{ .dout, .kw }), self.tag)
+            else
+                self.weight;
+
+            if (self.global_scale) |divisor| {
+                break :blk ops.scaledDot(applyCompressedTensorsDivisor(x, divisor), weight, scales, self.tag);
+            }
+            break :blk ops.scaledDot(x, weight, scales, self.tag);
+        } else x.dot(self.weight, self.tag);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
 };
