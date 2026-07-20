@@ -670,6 +670,9 @@ pub const CreateOptions = struct {
 
     pub const XlaGpu = struct {
         allocator: Allocator = .{ .bfc = .{} },
+        /// The PJRT C API still exposes this under legacy
+        /// `use_tfrt_gpu_client` name.
+        gpu_async_dispatch: bool = true,
         // TODO support all of https://github.com/openxla/xla/blob/3d31c48c719d331d432132b3e0c2c5ce52650675/xla/pjrt/c/pjrt_c_api_gpu_internal.cc#L76-L86
         // visible_devices: []const i64 = &.{},
         // node_id
@@ -692,7 +695,7 @@ pub const CreateOptions = struct {
             };
         };
 
-        fn writeNamedValues(self: XlaGpu, values: *std.ArrayList(pjrt.NamedValue)) void {
+        fn writeNamedValues(self: XlaGpu, target: Target, values: *std.ArrayList(pjrt.NamedValue)) void {
             switch (self.allocator) {
                 .platform => {
                     values.appendAssumeCapacity(.init(.string, "allocator", "platform"));
@@ -712,6 +715,10 @@ pub const CreateOptions = struct {
                     }
                 },
             }
+            switch (target) {
+                .cuda => values.appendAssumeCapacity(.init(.bool, "use_tfrt_gpu_client", self.gpu_async_dispatch)),
+                else => {},
+            }
         }
     };
 
@@ -720,7 +727,7 @@ pub const CreateOptions = struct {
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
-            .cuda, .rocm, .oneapi, .metal => self.xla_gpu.writeNamedValues(&values),
+            .cuda, .rocm, .oneapi, .metal => self.xla_gpu.writeNamedValues(target, &values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
