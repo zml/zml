@@ -719,6 +719,12 @@ pub const CreateOptions = struct {
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
             .cuda, .rocm, .oneapi, .metal => self.xla_gpu.writeNamedValues(&values),
+            .vulkan => {
+                // The generic XLA GPU plugin defaults to platform_name="cuda"; select the
+                // Vulkan backend explicitly so PJRT_Client_Create finds the right platform.
+                values.appendAssumeCapacity(.init(.string, "platform_name", "vulkan"));
+                self.xla_gpu.writeNamedValues(&values);
+            },
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
