@@ -11,13 +11,14 @@ const group_k: i64 = 128;
 const group_n: i64 = 128;
 const block_m: i64 = 16;
 const block_n: i64 = 64;
-const block_k: i64 = 64;
+const block_k: i64 = 128;
 
 pub fn gemm(x: zml.Tensor, y: zml.Tensor, y_scale: zml.Tensor) zml.Tensor {
     validateInputs(x, y, y_scale);
+    validatePartitioning(x, y);
 
     const output_shape = outputShape(x, y);
-    return zml.ops.manualComputation(
+    const partial = zml.ops.manualComputation(
         .{ x, y, y_scale },
         output_shape,
         {},
@@ -27,6 +28,11 @@ pub fn gemm(x: zml.Tensor, y: zml.Tensor, y_scale: zml.Tensor) zml.Tensor {
             }
         }).body,
     );
+
+    if (contractingAxisIsPartitioned(x, y)) {
+        return zml.ops.allReduce(partial, Tensor.add);
+    }
+    return partial;
 }
 
 fn validateInputs(x: Tensor, y: Tensor, y_scale: Tensor) void {
@@ -56,6 +62,30 @@ fn outputShape(x: Tensor, y: Tensor) Shape {
     out._partitioning.set(0, m_partition);
     out._partitioning.set(1, n_partition);
     return out;
+}
+
+fn validatePartitioning(x: Tensor, y: Tensor) void {
+    const x_k_partition = x.shape().partition(1);
+    const y_k_partition = y.shape().partition(0);
+    if (isExplicitlySharded(x_k_partition) or isExplicitlySharded(y_k_partition)) {
+        stdx.debug.assert(x_k_partition.eql(y_k_partition), "fp8.gemm expected matching explicit K sharding, got activation K {} and weight K {}", .{ x_k_partition, y_k_partition });
+    }
+
+    if (contractingAxisIsPartitioned(x, y)) {
+        const m_partition = x.shape().partition(0);
+        const n_partition = y.shape().partition(1);
+        stdx.debug.assert(!isExplicitlySharded(m_partition) and !isExplicitlySharded(n_partition), "fp8.gemm cannot all-reduce a K-sharded contraction while output axes are also sharded: M {}, N {}, K {}", .{ m_partition, n_partition, x_k_partition });
+    }
+}
+
+fn isExplicitlySharded(partition: Shape.PartitionSpec) bool {
+    return partition == .axis;
+}
+
+fn contractingAxisIsPartitioned(x: Tensor, y: Tensor) bool {
+    const x_k_partition = x.shape().partition(1);
+    const y_k_partition = y.shape().partition(0);
+    return x_k_partition.eql(y_k_partition) and x_k_partition == .axis;
 }
 
 fn samePartitionAxis(a: Shape.PartitionSpec, b: Shape.PartitionSpec) bool {
@@ -128,6 +158,9 @@ fn gemmShard(x: Tensor, y: Tensor, y_scale: Tensor, output_shape: Shape) Tensor 
                 .SPLITK_BLOCK_SIZE = @intCast(group_k),
                 .EVEN_K = @mod(k, group_k) == 0,
                 .GRID_MN = @intCast(grid_mn),
+                .PREQUANT = true,
+                .DTYPE_MAX = 448.0,
+                .DTYPE_MIN = -448.0,
             },
             .grid = .{ @intCast(grid_mn * num_ksplit), 1, 1 },
             .num_stages = 2,
