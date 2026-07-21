@@ -1,10 +1,11 @@
-# Vectored DmaMapped Loader Context
+# Adaptive Vectored DmaMapped Loader Context
 
-Snapshot: 2026-07-21. ZML is checked out detached at `a82aed0f`
-(`io: make oneAPI buffer sizing source agnostic`) with the uncommitted loader
-work described here. XLA is clean at `b0990b33b1`
-(`[XLA:GPU][oneAPI] Enable PJRT_Client_DmaMap for SYCL`). XLA was neither
-modified nor built during this work.
+Snapshot: 2026-07-21. ZML is checked out at `30d18486` (`vectorized reads`)
+with the uncommitted adaptive-loader work described here. XLA is at
+`b0990b33b1` (`[XLA:GPU][oneAPI] Enable PJRT_Client_DmaMap for SYCL`) with an
+uncommitted SYCL callback experiment. The user built that checkout into
+`pjrt-oneapi_linux-amd64-2026-07-21_13-43.tar`; ZML's oneAPI repository rule
+selects that archive and its configured SHA-256 matches the file.
 
 This file is the authoritative handoff for the current implementation and
 measurements. `RESEARCH.md` is historical controller research; its adaptive
@@ -12,45 +13,57 @@ staging architecture is retired.
 
 ## Outcome
 
-CUDA and oneAPI now use a static, bounded vectored path:
+CUDA and oneAPI now use a bounded vectored path with independently controlled
+read and physical DMA-event admission:
 
 ```text
-large positional source range
-    -> iovec of small client-DmaMapped blocks
-    -> immediate asynchronous PJRT transfers
+adaptive positional source reads
+    -> bounded queue of small client-DmaMapped blocks
+    -> adaptive per-device PJRT event admission
     -> final destination shards/replicas
 ```
 
-The pageable staging queue, staging copies, DMA-lane controller, adaptive
-probes, per-device pinned pools, and old staged/direct writers were removed.
-Other targets retain the ordinary buffered loader.
+The ready queue contains the final DmaMapped transfer blocks; it introduces no
+pageable staging allocation or userspace copy. One controller owns separate
+read and per-device DMA limits so the stages cannot fight through the queue.
+The load-wide pinned pool remains shared across devices. Other targets retain
+the ordinary buffered loader.
 
-Measured presets are deliberately static:
+Read admission also has an internal byte bound. It is the smaller of the hard
+pinned limit and `max(64 MiB, current_read_limit * read_request_size)`, rounded
+to whole DMA blocks. It counts unique blocks from reservation through the last
+replica callback. This is not another tuned concurrency dimension: it prevents
+a fast source from cycling its worker lanes and dirtying the entire hard pool
+between 25 ms samples, while automatically expanding with the learned read
+width for a slow remote source.
+
+Request, block, and pinned-byte sizing remain explicit and static:
 
 ```text
                          local/default       S3/HF/GCS high latency
-read_parallelism              12                       32
+read_parallelism cap          32                       32
+dma_parallelism cap/device    32                       32
 read_request_size          2 MiB                   16 MiB
 dma_block_size             2 MiB                    2 MiB
 max_pinned_bytes         128 MiB                  512 MiB
 ```
 
-There is no single request size or concurrency within 3% of the best local and
-remote results. Keep the explicit controls rather than recreating an automatic
-controller without a separate design. Library and IO-example defaults use the
-local preset because it is the only tested fixed default that avoids a B70
-warm-file regression. `bench_s3.sh` supplies the remote preset by default; all
-four values remain overridable.
+The controller starts at eight reads and eight physical events per device,
+then probes within the public caps. It does not tune request size or pinned
+memory. `bench_s3.sh` supplies the remote request/pinned preset; every cap and
+size remains overridable.
 
-The public `LoadOpts` fields are now only:
+The public `LoadOpts` fields are:
 
-- `read_parallelism = 12`
+- `read_parallelism = 32` (hard adaptive cap)
+- `dma_parallelism = 32` (hard adaptive cap per device)
 - `read_request_size = 2 MiB`
 - `dma_block_size = 2 MiB`
 - `max_pinned_bytes = 128 MiB`
 - `shardings`, `progress`, and `total_bytes`
 
-Removed fields are `initial_parallelism`, `adaptive_parallelism`,
+There is deliberately no adaptive toggle or public controller threshold.
+Previously removed fields remain removed: `initial_parallelism`, `adaptive_parallelism`,
 `max_read_parallelism`, `read_chunk_size`, `max_staging_bytes`,
 `max_pinned_buffers_per_device`, `pinned_buffer_size`, and
 `transfer_quantum_size`.
@@ -123,18 +136,48 @@ A 128 MiB pool made from two 64 MiB mappings completed sharded and replicated
 loads across all four B70s. This validates that subranges of one registered slab
 are accepted by all devices in this oneAPI client.
 
-### Coordinator and metrics
+### Adaptive coordinator and metrics
 
-The coordinator owns `min(read_parallelism, request_count)` long-lived workers;
-it does not create a task per request. Jobs are round-robin by tensor, so one
-large tensor can fill idle width. A worker lazily opens a shared source,
-initializes the tensor's PJRT transfer managers once, performs one exact
-vectored read, and immediately submits its DMA blocks. The global pinned pool
-is the only read/DMA backpressure mechanism.
+The coordinator creates at most `read_parallelism` stable worker lanes. Lanes
+below the current read limit fetch round-robin jobs without per-request mutex
+admission; lanes above a reduced limit sleep until the controller raises it.
+Each request atomically leases all required blocks, fills them with one exact
+vectored read, and offers one physical transfer entry to each destination.
 
-Useful logged metrics are source operations/bytes/latency, active/peak reads,
-DMA submissions/bytes/latency, submitted and committed bytes, pinned high-water
-and mapped bytes, pool waits/time, logical completion, and wall time.
+An entry takes one credit from its destination device immediately when credit
+is free and no older eligible entry is queued. Otherwise it waits in that
+device's ready queue. A replicated source block therefore consumes one event
+credit per destination while retaining one shared host lease until every
+callback completes. Limit reductions affect only new admissions.
+
+The controller samples every 25 ms, uses 50-100 ms startup and 100-250 ms
+steady windows, and scores attributed probes after 64 MiB/200 ms. Read probes
+are demand-gated by DMA starvation; DMA probes require queued work capable of
+exercising the candidate per-device limit. Only one dimension is probed at a
+time. Probe work carries read and DMA epochs so late callbacks cannot validate
+the wrong limit. Increases need 3% committed physical-goodput gain, while
+resource reductions may remain within 3% of the best settled value.
+
+Ready accumulation is read pressure only when DMA is fed and occupancy, age,
+or growth persists. Read latency and admission wait are never congestion
+signals. Slow/bursty sources retain read-ahead until DMA has remained fed for
+two seconds. The controller combines integrated slot utilization with an
+instantaneous empty-ready-queue signal so short local loads reach the measured
+12-read knee before their tail.
+
+Startup distinguishes capacity discovery from performance probing. If a
+50-100 ms window reaches its deadline without the 32 MiB representative
+progress floor, the read limit doubles directly (`8 -> 16 -> 32`) because
+there is no output to score. Once representative progress exists, ordinary
+read and DMA changes are epoch-attributed 200 ms probes. DMA probing is also
+held until two representative baseline windows exist, avoiding the false
+`8 -> 12` win that otherwise compares pipeline initialization with steady
+candidate work.
+
+Metrics include byte-weighted read/DMA latency, unique ready bytes and age,
+per-device active/high-water events, DMA starvation, epoch commits, pool
+waits/high-water, physical submitted/committed bytes, logical completion, and
+wall time.
 
 ## Code map
 
@@ -149,7 +192,7 @@ and mapped bytes, pool waits/time, logical completion, and wall time.
 - `zml/io/vfs/parallel_read.zig`: scatter chunk validation.
 - `pjrt/pjrt.zig`: helper for setting unfinished async buffers to an unknown
   PJRT error.
-- `examples/io/main.zig`: the four static environment controls.
+- `examples/io/main.zig`: the five static size/cap environment controls.
 - `bench_file.sh`, `profile_file.sh`: local defaults; `PERF_DATA` prevents
   overwriting a caller's profile.
 - `bench_s3.sh`: remote defaults and latency/bandwidth controls.
@@ -158,6 +201,34 @@ and mapped bytes, pool waits/time, logical completion, and wall time.
 
 Model: Llama 3.1 8B, 14.96 GiB logical weights. Local numbers use warm page
 cache. Medians are wall-clock goodput reported by `examples/io`.
+
+### Adaptive-controller iteration baseline
+
+Before changing `30d18486`, five fresh runs were captured without overwriting
+the workspace `perf.data` files. The host was in the previously observed slow
+local-read state, so these numbers are a same-state regression control and do
+not replace the historical 25-27 GiB/s warm-state results below:
+
+| Placement | Five static runs | Median |
+|---|---|---:|
+| one B70 | 8.79, 9.36, 9.46, 9.28, 8.85 GiB/s | **9.28 GiB/s** |
+| four B70 sharded | 8.86, 8.47, 8.98, 8.73, 8.27 GiB/s | **8.73 GiB/s** |
+| four B70 replicated | 6.28, 6.14, 6.36, 6.54, 6.34 GiB/s | **6.34 GiB/s** |
+
+During implementation the host returned to its faster state. Final balanced
+adaptive runs were:
+
+| Placement | Five adaptive runs | Median |
+|---|---|---:|
+| one B70 | 25.66, 25.67, 26.83, 26.83, 26.77 GiB/s | **26.77 GiB/s** |
+| four B70 sharded | 26.80, 26.81, 26.80, 26.81, 26.78 GiB/s | **26.80 GiB/s** |
+| four B70 replicated | 12.86, 12.79, 12.87, 12.86, 12.60 GiB/s | **12.86 GiB/s** |
+
+The one-device runs converged to 12 reads/eight events per device; sharded
+runs used 16/eight. Replicated runs explored 8-16 reads and occasionally
+probed 12 events before restoring eight. All three medians exceed the
+26.47/26.62/11.84 GiB/s static references below. The default bounded admission
+high-water was only 64 MiB despite the 128 MiB hard pool.
 
 ### Pre-replacement baseline
 
@@ -171,7 +242,7 @@ Five balanced runs of the old adaptive/staging loader:
 The separately measured parallel page-cache ceiling on this machine is about
 30-31 GiB/s.
 
-### Final local configuration
+### Static vectored configuration before adaptive admission
 
 Configuration: 12 reads, 2 MiB request, 2 MiB block, 128 MiB pinned.
 
@@ -215,6 +286,36 @@ At 12 reads, 2 MiB block, and 128 MiB pinned, request medians were:
 |---|---:|---:|---:|---:|---:|---:|
 | median GiB/s | **25.10** | 22.82 | 20.61 | 17.52 | 14.90 | 11.48 |
 
+That sweep also changed effective memory admission: a 128 MiB pool can hold
+only eight full 16 MiB requests. A follow-up requested by the user fixed
+`read_parallelism=12`, `dma_block_size=2 MiB`, and
+`max_pinned_bytes=192 MiB` for both 2 and 16 MiB requests. This is the minimum
+budget that can admit twelve full 16 MiB requests, so only request size changed
+and both cases reached `peak_reads=12`:
+
+| Request | Five runs | Median | Pinned behavior |
+|---|---|---:|---|
+| 2 MiB | 9.44, 9.58, 9.35, 9.31, 9.53 GiB/s | **9.44 GiB/s** | 36-62 MiB high-water, 64 MiB mapped, no waits |
+| 16 MiB | 8.20, 8.57, 8.33, 8.41, 8.06 GiB/s | **8.33 GiB/s** | 192 MiB high-water/mapped; both cases reached 12 reads |
+
+The host was in a much slower local-read state during this follow-up (the
+2 MiB control was 9.44 rather than the earlier 25-27 GiB/s), so these absolute
+numbers must not be mixed with the warm-page-cache table. The controlled
+comparison nevertheless exposes a real coupling after the read: one 16 MiB
+completion submits roughly eight 2 MiB transfers, so twelve simultaneous read
+completions can burst about 96 PJRT submissions. At 192 MiB, completion latency
+for the same 2 MiB DMA blocks rose from roughly 0.09 ms in the 2 MiB case to
+1.2-1.9 ms, and later reads waited for groups of eight blocks even though peak
+read width was twelve.
+
+Increasing the 16 MiB budget did not solve that coupling in the immediate-
+submission implementation. A 384 MiB
+double-bank trial fell to 6.67 GiB/s with 11.65 ms average DMA completion
+latency; a 1 GiB five-run median fell to 5.33 GiB/s with 40-56 ms DMA latency
+and the entire pool mapped/in use. More memory let read completions enqueue a
+larger PJRT backlog. The adaptive event gate plus bounded read admission now
+removes that coupling; final controlled results are recorded below.
+
 Pinned-limit medians at 12 reads and 2 MiB request/block were:
 
 | Limit | 128 MiB | 256 MiB | 512 MiB | 1 GiB |
@@ -224,6 +325,21 @@ Pinned-limit medians at 12 reads and 2 MiB request/block were:
 The lowest-memory candidate is also the fastest. The later final five-run
 median improved to 26.47 GiB/s after shared source handles and normal run
 variance.
+
+With adaptive event admission and the internal read-admission bound, the
+requested 16 MiB controlled rerun is qualitatively different:
+
+| Hard pinned limit | Wall goodput | Peak read calls | Peak DMA/device | Avg DMA latency | Actual high-water |
+|---|---:|---:|---:|---:|---:|
+| 192 MiB | 19.69 GiB/s | 12 | 8 | 0.507 ms | 192 MiB |
+| 384 MiB | 20.32 GiB/s | 16 | 8 | 0.532 ms | 256 MiB |
+| 1 GiB | 20.33 GiB/s | 16 | 8 | 0.546 ms | 256 MiB |
+
+Extra registered-memory allowance no longer raises admitted PJRT concurrency
+or recreates the former 11-56 ms completion latency. The 384 MiB and 1 GiB
+runs are effectively identical because both settle on the same 16-read/8-DMA
+tuple and 256 MiB internal admission bound. The 192 MiB case cannot fully
+exercise the temporary 16-read candidate, but remains close and bounded.
 
 ### S3Proxy
 
@@ -242,7 +358,128 @@ The full 10 ms discovery pass rose from 1.17 GiB/s at 2 MiB/12 reads to
 5.40-5.41 GiB/s at 16-32 MiB/32 reads before source-handle sharing. This is why
 the request-size knob remains explicit.
 
+Final adaptive validation with the same fixed 16 MiB request, 2 MiB block,
+512 MiB hard pool, and 32/32 public caps:
+
+| S3Proxy profile | Adaptive runs | Median/time | Versus static reference |
+|---|---|---:|---:|
+| 10 ms / 1000 MiB/s | 3.070, 3.094, 3.069 s | **3.070 s / 4.87 GiB/s** | 14.2% slower |
+| 250 ms / 1000 MiB/s | 11.223, 11.225, 11.191 s | **11.223 s / 1.33 GiB/s** | 1.1% slower |
+| 1000 ms / 100 MiB/s | one validation | **41.862 s / 365.9 MiB/s** | 0.3% slower |
+
+The no-progress bootstrap reaches 32 reads before the first response on the
+250 and 1000 ms profiles, satisfying the 3% requirement there. At 10 ms there
+is enough early progress to enter the specified gradual, epoch-scored read
+probes, but the serialized 200 ms scores consume a material fraction of this
+short load. This is the one unmet performance criterion and a retained design
+tradeoff: removing it would require weakening the plan's 200 ms scoring floor
+or adding a separate fast-source startup rule.
+
+Follow-up controller analysis favors the latter. The 200 ms/64 MiB floor is
+appropriate for comparing settled configurations, but it should not serialize
+initial read fanout. During startup, saturated reads plus greater than 10% DMA
+starvation, a small ready queue, and no pool pressure can publish successive
+read increases on the 25--50 ms control cadence without scoring each
+intermediate width. A useful jump estimate is the bounded bandwidth-delay
+product `ceil(recent_fed_DMA_Bps * read_latency / request_bytes)`, with the
+existing gradual/doubling rule as a fallback until a fed DMA sample exists.
+Stop the fast ramp when DMA is fed, ready pressure appears, or the read cap is
+reached; then score only the resulting configuration, and let later resource
+probes find the lowest equivalent width. Keep DMA-event increases on the
+conservative scored path because prior excess event concurrency caused large
+completion-latency inflation. A secondary improvement is an adaptive steady
+probe floor (never below 100 ms) with early decisions only for a clearly large
+gain/regression; shortening every probe indiscriminately would reintroduce the
+noise and burst-attribution failures documented in `RESEARCH.md`.
+
 ### `perf`
+
+Current adaptive recordings (workspace profiles were preserved):
+
+- `/tmp/zml-adaptive-1b70.data`
+- `/tmp/zml-adaptive-4b70-sharded.data`
+
+| Flat symbol | adaptive one B70 | adaptive four-B70 sharded |
+|---|---:|---:|
+| `_copy_to_iter` | 73.02% | 64.88% |
+| `filemap_get_read_batch` | 4.14% | 3.93% |
+| `copy_page_to_iter` | 2.41% | 2.03% |
+| `filemap_read` | 2.15% | 1.84% |
+| oneAPI/XLA callback `sched_yield` path | 2.17% | 2.18% |
+| userspace `memset` | 0.39% | 0.38% |
+
+The controller and queue are below the 0.2% flat-report threshold. There is no
+pageable staging or userspace sharding copy; the remaining CPU bottleneck is
+the kernel page-cache copy into anonymous DmaMapped blocks.
+
+The profiles are whole-process recordings, so they also include PJRT/device
+initialization and teardown. Kernel code accounts for 93.87% of the one-B70
+samples and 92.52% of the four-B70 samples. Most of the apparent remainder
+after `_copy_to_iter` is adjacent page-cache work (`filemap_get_read_batch`,
+`copy_page_to_iter`, `filemap_read`, folio access and RCU bookkeeping), rather
+than loader/controller overhead. On four devices, PJRT's BFC output allocation
+also exposes `std::vector<unsigned long>::resize` (1.47%) plus page-table,
+page-clear, and unmap work. The Intel `xe` driver itself is only about 0.27%.
+
+The clearest actionable non-copy item is the roughly 2.2% callback
+`sched_yield` path. XLA special-cases SYCL in
+`LocalDeviceState::ThenExecuteCallback` by scheduling a host worker which calls
+`Stream::BlockHostUntilDone`; the SYCL implementation turns that into a whole
+queue `wait()`. SYCL's stream already implements `DoHostCallbackWithStatus`
+using `host_task`, so using an event/stream callback instead of polling a whole
+queue is worth investigating in XLA. It can only recover low-single-digit CPU
+time in these profiles and its existing special case may encode a correctness
+workaround, so it must be validated separately rather than assumed safe.
+
+The XLA checkout contains an experiment in
+`xla/pjrt/se/local_device_state.cc`: SYCL skips the separate callback-stream
+path and falls through to the existing `DoHostCallback` plus XLA worker-thread
+handoff. This preserves same-stream ordering and the contract that PJRT-facing
+callbacks execute on XLA's worker, while replacing the worker's whole-queue
+`BlockHostUntilDone`/`queue.wait()` with SYCL's asynchronous `host_task`.
+
+Runtime validation rejects this approach. Five warm runs fell from 26.77 to
+11.21 GiB/s on one B70 (-58.1%) and from 26.80 to 10.61 GiB/s on four sharded
+B70s (-60.4%). Average 2 MiB DMA completion latency rose to approximately
+1.45-1.72 ms in the representative runs, with bad 12/16-event probes reaching
+2.6-3.0 ms. A host task is an ordered command in the transfer queue; adding one
+after each of 7,723-7,924 small copies serializes expensive host-task/event
+dispatch with DMA instead of merely observing completion.
+
+Fresh profiles are `/tmp/zml-hosttask-1b70.data` and
+`/tmp/zml-hosttask-4b70-sharded.data`. The former lost 20 of roughly 52k
+samples; the latter lost none. `_copy_to_iter` drops to 37.72%/37.46% only
+because the new overhead is large: `__memmove_avx512_unaligned_erms` accounts
+for 24.19%/21.45%, `urEventWait -> sched_yield` for about 7.3%/3.9%, and SYCL
+scheduler command enqueue for 0.92%/1.22%. The former callback worker's
+`queueFinish` sample disappears, but polling moves to the host-task execution
+thread and becomes larger.
+
+Matching whole-process stat files are `/tmp/zml-hosttask-1b70.stat` and
+`/tmp/zml-hosttask-4b70-sharded.stat`. Versus the previous profiles, context
+switches rise from 31,906 to 57,482 on one device and from 48,848 to 91,209 on
+four. Instructions rise from 5.426 G to 7.344 G and 12.487 G to 14.093 G.
+Total cycles fall because the serialized transfer queue throttles concurrent
+page-cache copying; this is not an efficiency win. Do not use one ordered
+`host_task` per 2 MiB PJRT transfer as the replacement for the queue wait.
+
+The host has one NUMA node; NUMA placement does not explain the residual cost.
+CCD affinity is a possible experiment, but streaming page copies have little
+cache reuse and restricting workers could reduce available memory bandwidth.
+
+Current whole-process `perf stat` (including PJRT/device initialization):
+
+| Counter | adaptive one B70 | adaptive four-B70 sharded |
+|---|---:|---:|
+| task-clock | 7.330 s | 9.212 s |
+| cycles | 37.995 G | 47.577 G |
+| instructions | 5.426 G | 12.487 G |
+| context switches | 31,906 | 48,848 |
+| CPU migrations | 1,041 | 2,745 |
+| page faults | 278,886 | 987,208 |
+
+The following recordings and comparison are the earlier static-vectored
+investigation retained for historical context.
 
 Final recordings:
 
@@ -337,13 +574,15 @@ PERF_DATA=/tmp/zml-loader.data ./profile_file.sh
 
 # Four B70s.
 ONEAPI_DEVICE_SELECTOR='level_zero:*' ./bench_file.sh
+
+# Four B70 replicas.
+ONEAPI_DEVICE_SELECTOR='level_zero:*' ZML_LOAD_SHARDING=replicated ./bench_file.sh
 ```
 
 ## Workspace boundary
 
-Preserve unrelated user changes in `platforms/oneapi/oneapi.bzl` and
-`zml/module.zig`. The user's benchmark selector changes remain; the scripts now
-also carry the selected static presets. Workspace `perf.data` and
-`perf.data.old` were not overwritten or removed. The accidental
-`CTX.md.orig` is deleted as requested. Do not build or modify XLA in follow-up
-work unless the user explicitly changes that instruction.
+The user's benchmark selector behavior remains; the scripts now also carry
+the read/DMA caps, size presets, optional `ZML_LOAD_SHARDING`, and `PERF_DATA`.
+Workspace `perf.data` and `perf.data.old` were not overwritten or removed.
+There is no `CTX.md.orig`. Do not build or modify XLA in follow-up work unless
+the user explicitly changes that instruction.

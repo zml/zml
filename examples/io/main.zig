@@ -215,7 +215,8 @@ pub fn main(init: std.process.Init) !void {
                 log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
             }
 
-            const load_read_parallelism = try envUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM", 12);
+            const load_read_parallelism = try envUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM", 32);
+            const load_dma_parallelism = try envUsize(init.environ_map, "ZML_LOAD_DMA_PARALLELISM", 32);
             const load_read_request_mib = try envUsize(init.environ_map, "ZML_LOAD_READ_REQUEST_MIB", 2);
             const load_dma_block_mib = try envUsize(init.environ_map, "ZML_LOAD_DMA_BLOCK_MIB", 2);
             const load_max_pinned_mib = try envUsize(init.environ_map, "ZML_LOAD_MAX_PINNED_MIB", 128);
@@ -223,6 +224,7 @@ pub fn main(init: std.process.Init) !void {
             _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, &store, .{
                 .shardings = &.{sharded_sharding},
                 .read_parallelism = load_read_parallelism,
+                .dma_parallelism = load_dma_parallelism,
                 .read_request_size = load_read_request_mib * zml.MiB,
                 .dma_block_size = load_dma_block_mib * zml.MiB,
                 .max_pinned_bytes = load_max_pinned_mib * zml.MiB,
