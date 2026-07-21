@@ -273,6 +273,7 @@ pub fn printZmlLogo(io: std.Io) !void {
     try writer.interface.flush();
 }
 
+
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
     defer http_client.deinit();
@@ -296,8 +297,8 @@ pub fn main(init: std.process.Init) !void {
 
     try printZmlLogo(zml_handler.io);
 
-    try runLlm(&zml_handler);
-    //try runTestsSampling(&zml_handler);
+    //try runLlm(&zml_handler);
+    try runTestsSampling(&zml_handler);
 
     zml_handler.timers.print();
 }
@@ -322,7 +323,7 @@ pub fn runTestsSampling(zml_handler: *Zml_handler) !void {
     };
     defer zml_handler.allocator.free(ref.ref);
 
-    if (false) {
+    if (true) {
         std.log.info("***** Init QJL 1 bit quantizer", .{});
         var quant_qjl1: QuantizationQJL1 = try .init(zml_handler, &lm_head);
         defer QuantizationQJL1.deinit(&quant_qjl1);
@@ -346,15 +347,17 @@ pub fn runTestsSampling(zml_handler: *Zml_handler) !void {
         defer zml_handler.allocator.free(ref_qjl2x1.ref);
         compareSampling(ref, ref_qjl2x1);
 
-        std.log.info("***** Init QJL Nx1 bit sampler", .{});
-        var qjlNx1_sampler: QJLNx1Sampler = try .init(zml_handler, &lm_head, &quant_qjl1);
-        defer qjlNx1_sampler.deinit();
-
-        std.log.info("***** Test QJL Nx1 bit sampling", .{});
-        const ref_qjlNx1 = try computeSamplingReference(zml_handler, &qjlNx1_sampler);
-        defer zml_handler.allocator.free(ref_qjlNx1.ref);
-        compareSampling(ref, ref_qjlNx1);
-
+        if (false) {
+            std.log.info("***** Init QJL Nx1 bit sampler", .{});
+            var qjlNx1_sampler: QJLNx1Sampler = try .init(zml_handler, &lm_head, &quant_qjl1);
+            defer qjlNx1_sampler.deinit();
+    
+            std.log.info("***** Test QJL Nx1 bit sampling", .{});
+            const ref_qjlNx1 = try computeSamplingReference(zml_handler, &qjlNx1_sampler);
+            defer zml_handler.allocator.free(ref_qjlNx1.ref);
+            compareSampling(ref, ref_qjlNx1);
+        }
+        
         std.log.info("***** Init QJL 2 bit quantizer", .{});
         var quant_qjl2: QuantizationQJL2 = try .init(zml_handler, &lm_head);
         defer QuantizationQJL2.deinit(&quant_qjl2);
@@ -405,6 +408,10 @@ pub fn runTestsSampling(zml_handler: *Zml_handler) !void {
         const ref_int8 = try computeSamplingReference(zml_handler, &int8_sampler);
         defer zml_handler.allocator.free(ref_int8.ref);
         compareSampling(ref, ref_int8);
+
+    }
+
+    if (false) {
 
         std.log.info("***** Init graph sampler", .{});
         var graph_sampler: GraphSampler = try .init(zml_handler, &lm_head);
@@ -526,6 +533,7 @@ pub fn runLlm(zml_handler: *Zml_handler) !void {
     defer zml_handler.allocator.free(generated_text_cpu);
     zml_handler.mem.check(0);
 }
+
 
 pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype) !SamplingReference {
     var total_embeds: usize = 0;
@@ -803,6 +811,7 @@ pub fn loadSamplingReference(zml_handler: *Zml_handler, file_name: []const u8) !
     std.log.info("Loaded sampling reference: file={s} samples={d} top_k={d}", .{ file_name, n, k });
     return ref;
 }
+
 
 pub fn compareSampling(ref: SamplingReference, other: SamplingReference) void {
     const total = @min(ref.ref.len, other.ref.len);
