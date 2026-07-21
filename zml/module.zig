@@ -646,11 +646,6 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
             },
             .rocm => {
-                // Use hipBLASLt only
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_autotune_level", 0, upb_arena);
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_triton_gemm", false, upb_arena);
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_cublaslt", true, upb_arena);
-
                 // Use lld from libllvm instead of invoking the ld.lld binary.
                 // This saves us from having to sandbox it.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_use_inprocess_lld", true, upb_arena);

@@ -17,8 +17,8 @@ sh_binary(
 sh_binary(
     name = "rocprofv3",
     data = [
+        "@amdrocm-profiler-base//:rocprofv3_tool",
         "@libpjrt_rocm//:sandbox",
-        "@rocprofiler-sdk//:rocprofv3_tool",
     ],
     srcs = ["rocprofv3.sh"],
     visibility = ["//visibility:public"],
