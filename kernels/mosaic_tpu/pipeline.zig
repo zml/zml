@@ -52,6 +52,10 @@ pub const RefWindow = struct { buf: ?Value = null, slot: ?Value = null };
 /// The pipeline body — `pallas_call`'s inner kernel.
 pub const BodyFn = *const fn (b: *Builder, grid_indices: []const Value, refs: []const RefWindow, scratches: []const Value, ctx: ?*anyopaque) FinishError!void;
 
+// Optional overrides for a buffered reference's DMA operations.
+// Unspecified operations retain the standard pipeline behavior.
+pub const BufferedRefStrategy = struct { ctx: ?*anyopaque = null, copy_in: ?*const fn (br: *BufferedRef, b: *Builder, indices: []const Value, slot_cumulative: Value, static_zero_start: bool, ctx: ?*anyopaque) void = null, wait_in: ?*const fn (br: *BufferedRef, b: *Builder, indices: []const Value, ctx: ?*anyopaque) void = null, copy_out: ?*const fn (br: *BufferedRef, b: *Builder, indices: []const Value, ctx: ?*anyopaque) void = null, wait_out: ?*const fn (br: *BufferedRef, b: *Builder, indices: []const Value, ctx: ?*anyopaque) void = null };
+
 /// `pl.BlockSpec` for one pipeline operand. `null` slot ↔ `None` spec.
 pub const PipeSpec = struct {
     full_shape: []const i64,
@@ -71,6 +75,12 @@ pub const PipeSpec = struct {
     bounded_slice_tiling: i32 = 1,
     /// Pallas's `disable_bounds_checks`: skip OOB clamp, emit only `tpu.assume_multiple`.
     bounded_slice_skip_clamp: bool = false,
+
+    /// Optional custom DMA behavior for this operand.
+    transfer_strategy: ?BufferedRefStrategy = null,
+    /// Override the role infered from whether this spec appears
+    /// in `in_specs` or `out_specs`
+    buffer_type: ?BufferType = null,
 };
 
 pub const PipelineOpts = struct {
@@ -145,7 +155,7 @@ pub fn emitPipeline(
             }
 
             // iter_args: each bref's slots in spec order (see appendSlotInits), then grid indices.
-            var inits: std.ArrayList(*const mlir.Value) = try .initCapacity(a, brefs.items.len * 2 + opts.grid.len);
+            var inits: std.ArrayList(*const mlir.Value) = try .initCapacity(a, brefs.items.len * 4 + opts.grid.len);
             for (brefs.items) |*br| br.appendSlotInits(b, &inits);
             for (0..opts.grid.len) |_| inits.appendAssumeCapacity(c0_i32.inner);
             const n_slots = inits.items.len - opts.grid.len;
@@ -173,9 +183,14 @@ pub fn emitPipeline(
             for (0..opts.grid.len) |i| sched.indices_storage[i] = grid_indices_buf[i];
             sched.recomputeDerivedIndices(b);
 
-            for (brefs.items) |*br| if (br.buffer_type == .input) sched.copyIn(b, br);
-            for (brefs.items) |*br| if (br.buffer_type == .input) sched.waitIn(b, br);
-
+            for (brefs.items) |*br| {
+                if (br.buffer_type == .input or br.buffer_type == .input_output)
+                    sched.copyIn(b, br);
+            }
+            for (brefs.items) |*br| {
+                if (br.buffer_type == .input or br.buffer_type == .input_output)
+                    sched.waitIn(b, br);
+            }
             // Emit slot `rem` ops BEFORE the body; body re-emits slice/squeeze per use.
             var current_refs = a.alloc(RefWindow, refs.len) catch unreachable;
             for (current_refs) |*r| r.* = .{};
@@ -183,7 +198,10 @@ pub fn emitPipeline(
                 if (br.is_trivial or !br.isBuffered()) {
                     current_refs[br.spec_index] = .{ .buf = br.window_ref };
                 } else {
-                    const active = if (br.buffer_type == .output) br.copy_out_slot.? else br.wait_in_slot.?;
+                    const active = switch (br.buffer_type) {
+                        .input => br.wait_in_slot.?,
+                        .output, .input_output => br.copy_out_slot.?,
+                    };
                     current_refs[br.spec_index] = .{ .buf = br.window_ref, .slot = b.remui(active, b.lift(@as(i32, @intCast(br.buffer_count)))) };
                 }
             }
@@ -192,12 +210,20 @@ pub fn emitPipeline(
             try opts.body(b, sched.indices_storage[0..opts.grid.len], current_refs, scratches, opts.body_ctx);
             if (opts.trace_scopes) b.traceStop();
 
-            for (brefs.items) |*br| if (br.buffer_type == .output) sched.copyOut(b, br);
-            for (brefs.items) |*br| if (br.buffer_type == .output) sched.waitOut(b, br);
+            for (brefs.items) |*br| {
+                if (br.buffer_type == .output or br.buffer_type == .input_output)
+                    sched.copyOut(b, br);
+            }
+            for (brefs.items) |*br| {
+                if (br.buffer_type == .output or br.buffer_type == .input_output)
+                    sched.waitOut(b, br);
+            }
 
-            for (brefs.items) |*br| if (br.buffer_type == .input) sched.advanceSlots(b, br);
-
-            var yields: std.ArrayList(*const mlir.Value) = try .initCapacity(a, brefs.items.len * 2 + opts.grid.len);
+            for (brefs.items) |*br| {
+                if (br.buffer_type == .input or br.buffer_type == .input_output)
+                    sched.advanceSlots(b, br);
+            }
+            var yields: std.ArrayList(*const mlir.Value) = try .initCapacity(a, brefs.items.len * 4 + opts.grid.len);
             for (brefs.items) |*br| br.appendSlotYields(b, &yields);
             const next_indices = nextIndexND(b, sched.indices(), opts.grid);
             for (next_indices) |idx| yields.appendAssumeCapacity(idx.inner);
@@ -230,10 +256,10 @@ pub fn emitPipeline(
     _ = tpu.region(b.ctx, region_block, &.{}, b.loc()).appendTo(b.currentBlock());
 }
 
-const BufferType = enum { input, output };
+pub const BufferType = enum { input, output, input_output };
 
 /// VMEM double-buffer + DMA semaphores for one pipeline operand.
-const BufferedRef = struct {
+pub const BufferedRef = struct {
     spec: PipeSpec,
     buffer_type: BufferType,
     buffer_count: usize,
@@ -260,11 +286,12 @@ const BufferedRef = struct {
 
     fn create(b: *Builder, spec: PipeSpec, bt: BufferType, src: Value, spec_index: usize) BufferedRef {
         const a = b.arena.allocator();
+        const buffer_type = spec.buffer_type orelse bt;
         if (spec.memory_space != .vmem) @panic("emitPipeline: only VMEM operands supported");
         const trivial = specHasTrivialWindowing(spec);
         var bc: usize = if (spec.buffer_count) |c| c else 2;
         if (spec.buffer_count == null and trivial) bc = 1;
-        if (bt == .output and bc > 2) @panic("emitPipeline: output buffer_count > 2 unsupported");
+        if (buffer_type != .input and bc > 2) @panic("emitPipeline: output and input_output buffer_count > 2 unsupported");
 
         const block_len = if (spec.block_shape) |bs| bs.len else 0;
         var keep = std.ArrayList(usize).initCapacity(a, block_len) catch unreachable;
@@ -284,7 +311,7 @@ const BufferedRef = struct {
         }
         return .{
             .spec = spec,
-            .buffer_type = bt,
+            .buffer_type = buffer_type,
             .buffer_count = bc,
             .is_trivial = trivial,
             .spec_index = spec_index,
@@ -315,8 +342,8 @@ const BufferedRef = struct {
         }
         if (!self.is_trivial) {
             const sem_arr_ty = dmaSemRefTy(b, self.buffer_count);
-            const sem = semAllocOp(b, sem_arr_ty);
-            if (self.buffer_type == .input) self.sem_recvs = sem else self.sem_sends = sem;
+            if (self.buffer_type == .input or self.buffer_type == .input_output) self.sem_recvs = semAllocOp(b, sem_arr_ty);
+            if (self.buffer_type == .output or self.buffer_type == .input_output) self.sem_sends = semAllocOp(b, sem_arr_ty);
         }
     }
 
@@ -335,6 +362,14 @@ const BufferedRef = struct {
                 out.appendAssumeCapacity(c0);
                 out.appendAssumeCapacity(c0);
             },
+            .input_output => {
+                out.appendAssumeCapacity(
+                    (self.copy_in_slot orelse b.lift(@as(i32, 0))).inner,
+                );
+                out.appendAssumeCapacity(c0);
+                out.appendAssumeCapacity(c0);
+                out.appendAssumeCapacity(c0);
+            },
         }
     }
 
@@ -342,6 +377,7 @@ const BufferedRef = struct {
         return switch (self.buffer_type) {
             .input => if (self.is_trivial) 1 else 2,
             .output => 2,
+            .input_output => 4,
         };
     }
 
@@ -367,6 +403,12 @@ const BufferedRef = struct {
                 self.copy_out_slot = arg(b, body, &k);
                 self.wait_out_slot = arg(b, body, &k);
             },
+            .input_output => {
+                self.copy_in_slot = arg(b, body, &k);
+                self.wait_in_slot = arg(b, body, &k);
+                self.copy_out_slot = arg(b, body, &k);
+                self.wait_out_slot = arg(b, body, &k);
+            },
         }
         return k;
     }
@@ -383,6 +425,12 @@ const BufferedRef = struct {
                 }
             },
             .output => {
+                out.appendAssumeCapacity(self.copy_out_slot.?.inner);
+                out.appendAssumeCapacity(self.wait_out_slot.?.inner);
+            },
+            .input_output => {
+                out.appendAssumeCapacity(self.copy_in_slot.?.inner);
+                out.appendAssumeCapacity(self.wait_in_slot.?.inner);
                 out.appendAssumeCapacity(self.copy_out_slot.?.inner);
                 out.appendAssumeCapacity(self.wait_out_slot.?.inner);
             },
@@ -408,6 +456,12 @@ const BufferedRef = struct {
                 }
             },
             .output => {
+                self.copy_out_slot = take(b, for_op, &k);
+                self.wait_out_slot = take(b, for_op, &k);
+            },
+            .input_output => {
+                self.copy_in_slot = take(b, for_op, &k);
+                self.wait_in_slot = take(b, for_op, &k);
                 self.copy_out_slot = take(b, for_op, &k);
                 self.wait_out_slot = take(b, for_op, &k);
             },
@@ -606,7 +660,7 @@ const BufferedRef = struct {
     // Op order mirrors pipeline.py: copy_in/copy_out/wait_out take slot rem
     // before get_dma_slice; wait_in does it after.
 
-    fn copyIn(self: *BufferedRef, b: *Builder, indices: []const Value, slot_cumulative: Value, static_zero_start: bool) void {
+    fn defaultCopyIn(self: *BufferedRef, b: *Builder, indices: []const Value, slot_cumulative: Value, static_zero_start: bool) void {
         const slot = b.remui(slot_cumulative, b.lift(@as(i32, @intCast(self.buffer_count))));
         const dma = self.getDmaSlice(b, indices, static_zero_start);
         const src_sl = self.sliceSrc(b, dma);
@@ -615,7 +669,7 @@ const BufferedRef = struct {
         b.enqueueDma(src_sl, dst_sl, sem, .{});
     }
 
-    fn waitIn(self: *BufferedRef, b: *Builder, indices: []const Value) void {
+    fn defaultWaitIn(self: *BufferedRef, b: *Builder, indices: []const Value) void {
         const dma = self.getDmaSlice(b, indices, false);
         const slot = b.remui(self.wait_in_slot.?, b.lift(@as(i32, @intCast(self.buffer_count))));
         const src_sl = self.sliceSrc(b, dma);
@@ -624,7 +678,7 @@ const BufferedRef = struct {
         b.waitDma2(sem, src_sl, dst_sl, .{});
     }
 
-    fn copyOut(self: *BufferedRef, b: *Builder, indices: []const Value) void {
+    fn defaultCopyOut(self: *BufferedRef, b: *Builder, indices: []const Value) void {
         if (self.buffer_count == 1) @panic("emitPipeline: single-buffered output sync_copy_out unsupported (TODO)");
         const slot = b.remui(self.copy_out_slot.?, b.lift(@as(i32, @intCast(self.buffer_count))));
         const dma = self.getDmaSlice(b, indices, false);
@@ -635,7 +689,7 @@ const BufferedRef = struct {
         b.enqueueDma(src_sl, dst_sl, sem, .{});
     }
 
-    fn waitOut(self: *BufferedRef, b: *Builder, indices: []const Value) void {
+    fn defaultWaitOut(self: *BufferedRef, b: *Builder, indices: []const Value) void {
         if (self.buffer_count <= 1) return;
         const slot = b.remui(self.wait_out_slot.?, b.lift(@as(i32, @intCast(self.buffer_count))));
         const dma = self.getDmaSlice(b, indices, false);
@@ -643,6 +697,87 @@ const BufferedRef = struct {
         const dst_sl = self.sliceSrc(b, dma);
         const sem = semAt(b, self.sem_sends.?, slot);
         b.waitDma2(sem, src_sl, dst_sl, .{});
+    }
+
+    fn copyIn(self: *BufferedRef, b: *Builder, indices: []const Value, slot_cumulative: Value, static_zero_start: bool) void {
+        if (self.is_trivial) return;
+
+        if (self.spec.transfer_strategy) |strategy| {
+            if (strategy.copy_in) |customCopyIn| {
+                customCopyIn(self, b, indices, slot_cumulative, static_zero_start, strategy.ctx);
+                return;
+            }
+        }
+
+        self.defaultCopyIn(b, indices, slot_cumulative, static_zero_start);
+    }
+
+    fn waitIn(self: *BufferedRef, b: *Builder, indices: []const Value) void {
+        if (self.spec.transfer_strategy) |strategy| {
+            if (strategy.wait_in) |customWaitIn| {
+                customWaitIn(self, b, indices, strategy.ctx);
+                return;
+            }
+        }
+        self.defaultWaitIn(b, indices);
+    }
+
+    fn copyOut(self: *BufferedRef, b: *Builder, indices: []const Value) void {
+        if (self.spec.transfer_strategy) |strategy| {
+            if (strategy.copy_out) |customCopyOut| {
+                customCopyOut(self, b, indices, strategy.ctx);
+                return;
+            }
+        }
+        self.defaultCopyOut(b, indices);
+    }
+
+    fn waitOut(self: *BufferedRef, b: *Builder, indices: []const Value) void {
+        if (self.spec.transfer_strategy) |strategy| {
+            if (strategy.wait_out) |customWaitOut| {
+                customWaitOut(self, b, indices, strategy.ctx);
+                return;
+            }
+        }
+        self.defaultWaitOut(b, indices);
+    }
+
+    pub fn sourceRef(self: *const BufferedRef) Value {
+        return self.src;
+    }
+
+    pub fn windowRef(self: *const BufferedRef) Value {
+        return self.window_ref;
+    }
+
+    pub fn copyInSlot(self: *const BufferedRef, b: *Builder, slot_cumulative: Value) Value {
+        return b.remui(slot_cumulative, b.lift(@as(i32, @intCast(self.buffer_count))));
+    }
+
+    pub fn waitInSlot(self: *const BufferedRef, b: *Builder) Value {
+        return b.remui(self.wait_in_slot.?, b.lift(@as(i32, @intCast(self.buffer_count))));
+    }
+
+    pub fn receiveSemaphoreAt(self: *const BufferedRef, b: *Builder, slot: Value) Value {
+        return semAt(b, self.sem_recvs.?, slot);
+    }
+
+    pub fn copyOutSlot(self: *const BufferedRef, b: *Builder) Value {
+        const buffer_count: i32 = @intCast(self.buffer_count);
+        return b.remui(self.copy_out_slot.?, b.lift(buffer_count));
+    }
+
+    pub fn waitOutSlot(self: *const BufferedRef, b: *Builder) Value {
+        const buffer_count: i32 = @intCast(self.buffer_count);
+        return b.remui(self.wait_out_slot.?, b.lift(buffer_count));
+    }
+
+    pub fn sendSemaphoreAt(
+        self: *const BufferedRef,
+        b: *Builder,
+        slot: Value,
+    ) Value {
+        return semAt(b, self.sem_sends.?, slot);
     }
 };
 
@@ -765,7 +900,7 @@ const Scheduler = struct {
     }
 
     fn initializeStep(self: *Scheduler, b: *Builder, br: *BufferedRef, step: usize) void {
-        if (br.buffer_type != .input or !br.isBuffered() or br.is_trivial) return;
+        if ((br.buffer_type != .input and br.buffer_type != .input_output) or !br.isBuffered() or br.is_trivial) return;
         if (step + 1 >= br.buffer_count) return;
         if (br.copy_in_slot == null) br.copy_in_slot = b.lift(@as(i32, 0));
 
@@ -791,7 +926,7 @@ const Scheduler = struct {
         if (br.is_trivial) return;
         var pred = b.andi(self.willChangeFetch(b, br), self.notOutOfFetch(b, br));
         if (br.isBuffered() and br.buffer_count < 2) pred = b.ori(pred, self.first_step);
-        if (br.buffer_type != .input) return;
+        if (br.buffer_type != .input and br.buffer_type != .input_output) return;
         {
             var when = b.openIf(pred);
             {
@@ -811,7 +946,7 @@ const Scheduler = struct {
             var when = b.openIf(pred);
             {
                 self.namedScope(b, "ep_wait_in");
-                if (br.buffer_type == .input) br.waitIn(b, self.indices());
+                if (br.buffer_type == .input or br.buffer_type == .input_output) br.waitIn(b, self.indices());
                 self.endScope(b);
                 when.yieldThen(.{});
             }
@@ -825,7 +960,7 @@ const Scheduler = struct {
             var when = b.openIf(pred);
             {
                 self.namedScope(b, "ep_copy_out");
-                if (br.buffer_type == .output) br.copyOut(b, self.indices());
+                if (br.buffer_type == .output or br.buffer_type == .input_output) br.copyOut(b, self.indices());
                 self.endScope(b);
                 when.yieldThen(.{});
             }
@@ -841,7 +976,7 @@ const Scheduler = struct {
             {
                 self.namedScope(b, "ep_wait_out");
                 // copy_out was issued the previous iteration.
-                if (br.buffer_type == .output) br.waitOut(b, self.prevIndices());
+                if (br.buffer_type == .output or br.buffer_type == .input_output) br.waitOut(b, self.prevIndices());
                 self.endScope(b);
                 when.yieldThen(.{});
             }
@@ -850,7 +985,7 @@ const Scheduler = struct {
     }
 
     fn finalize(self: *Scheduler, b: *Builder, br: *BufferedRef) void {
-        if (br.is_trivial or br.buffer_type != .output) return;
+        if (br.is_trivial or (br.buffer_type != .output and br.buffer_type != .input_output)) return;
         var when = b.openIf(self.last_step);
         {
             self.namedScope(b, "ep_finalize");
@@ -861,7 +996,7 @@ const Scheduler = struct {
     }
 
     fn advanceSlots(self: *Scheduler, b: *Builder, br: *BufferedRef) void {
-        if (br.buffer_type != .input) return;
+        if (br.buffer_type != .input and br.buffer_type != .input_output) return;
         if (br.is_trivial) {
             br.slot = advance(b, br.slot.?, self.last_step);
         } else {
