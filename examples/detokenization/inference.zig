@@ -49,44 +49,6 @@ pub fn generateTextCPUSampling(zml_handler: *Zml_handler, llm: *Llm_handler, sam
     return try generateText(zml_handler, llm, sampler, prompt_tok);
 }
 
-fn sampleTokenFromCpuResult(result: *SamplingResult, llm: *const Llm_handler, random: *std.Random) u32 {
-    if (!llm.generation_config.do_sample or llm.generation_config.top_k <= 1) {
-        return @intCast(result.candidates[0].row);
-    }
-
-    const k = @min(@as(usize, @intCast(llm.generation_config.top_k)), result.candidates.len);
-    const inv_temperature = 1.0 / llm.generation_config.temperature;
-    var max_logit = -std.math.floatMax(f32);
-    for (result.candidates[0..k]) |candidate| {
-        max_logit = @max(max_logit, candidate.logit);
-    }
-
-    var total: f32 = 0.0;
-    for (result.candidates[0..k]) |*candidate| {
-        candidate.proba = @exp((candidate.logit - max_logit) * inv_temperature);
-        total += candidate.proba;
-    }
-
-    const min_proba = (result.candidates[0].proba / total) * llm.generation_config.min_p;
-    var cumulative_proba: f32 = 0.0;
-    var filtered_total: f32 = 0.0;
-    for (result.candidates[0..k], 0..) |*candidate, i| {
-        const proba = candidate.proba / total;
-        cumulative_proba += proba;
-        const keep = i == 0 or (cumulative_proba <= llm.generation_config.top_p and proba >= min_proba);
-        candidate.proba = if (keep) candidate.proba else 0.0;
-        filtered_total += candidate.proba;
-    }
-
-    const threshold = random.float(f32) * filtered_total;
-    var cumulative: f32 = 0.0;
-    for (result.candidates[0..k]) |candidate| {
-        cumulative += candidate.proba;
-        if (cumulative >= threshold) return @intCast(candidate.row);
-    }
-    return @intCast(result.candidates[0].row);
-}
-
 fn generateText(zml_handler: *Zml_handler, llm: *Llm_handler, sampler: anytype, prompt_tok: []const u32) ![]u8 {
     const has_cpu_sampler = @TypeOf(sampler) != @TypeOf(null);
     const io = zml_handler.io;
@@ -260,4 +222,43 @@ fn generateText(zml_handler: *Zml_handler, llm: *Llm_handler, sampler: anytype, 
     const tokens_per_second = @as(f64, @floatFromInt(num_tokens_generated)) / (@as(f64, @floatFromInt(decode_ns)) / std.time.ns_per_s);
     std.log.info("LLM done, generated {d} tokens ({d:.2} token/s)", .{ num_tokens_generated, tokens_per_second });
     return result.toOwnedSlice(allocator);
+}
+
+fn sampleTokenFromCpuResult(result: *SamplingResult, llm: *const Llm_handler, random: *std.Random) u32 {
+    if (true) return @intCast(result.candidates[0].row);
+    if (!llm.generation_config.do_sample or llm.generation_config.top_k <= 1) {
+        return @intCast(result.candidates[0].row);
+    }
+
+    const k = @min(@as(usize, @intCast(llm.generation_config.top_k)), result.candidates.len);
+    const inv_temperature = 1.0 / llm.generation_config.temperature;
+    var max_logit = -std.math.floatMax(f32);
+    for (result.candidates[0..k]) |candidate| {
+        max_logit = @max(max_logit, candidate.logit);
+    }
+
+    var total: f32 = 0.0;
+    for (result.candidates[0..k]) |*candidate| {
+        candidate.proba = @exp((candidate.logit - max_logit) * inv_temperature);
+        total += candidate.proba;
+    }
+
+    const min_proba = (result.candidates[0].proba / total) * llm.generation_config.min_p;
+    var cumulative_proba: f32 = 0.0;
+    var filtered_total: f32 = 0.0;
+    for (result.candidates[0..k], 0..) |*candidate, i| {
+        const proba = candidate.proba / total;
+        cumulative_proba += proba;
+        const keep = i == 0 or (cumulative_proba <= llm.generation_config.top_p and proba >= min_proba);
+        candidate.proba = if (keep) candidate.proba else 0.0;
+        filtered_total += candidate.proba;
+    }
+
+    const threshold = random.float(f32) * filtered_total;
+    var cumulative: f32 = 0.0;
+    for (result.candidates[0..k]) |candidate| {
+        cumulative += candidate.proba;
+        if (cumulative >= threshold) return @intCast(candidate.row);
+    }
+    return @intCast(result.candidates[0].row);
 }
