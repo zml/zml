@@ -136,18 +136,7 @@ pub const Sampler = struct {
         }
         return sampling_top_k;
     }
-
-    pub fn sampleFromCandidates(candidates: *[sampling_top_k]Logit, random: *std.Random) u32 {
-        computeProbas(candidates);
-        const r = random.float(f32);
-        var cumul: f32 = 0.0;
-        for (candidates) |cand| {
-            cumul += cand.proba;
-            if (cumul >= r) return @intCast(cand.row);
-        }
-        return @intCast(candidates[0].row);
-    }
-
+    
     pub fn logSampling(self: *Sampler) !void {
         std.log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}  {s:>14}  {s}", .{ "rank", "token_id", "logit", "proba", "cumul", "token" });
         std.log.info("{s:>6}  {s:>10}  {s:>14}  {s:>14}  {s:>14}  {s}", .{ "------", "----------", "--------------", "--------------", "--------------", "-----" });
@@ -254,12 +243,11 @@ pub const AngularSampler = struct {
         }
         return @reduce(.Add, sum);
     }
+    
 };
 
 pub inline fn findTopK(logits: []const f32, candidates: []Logit) void {
-    for (0..candidates.len) |i| {
-        candidates[i].logit = -std.math.floatMax(f32);
-    }
+    for (0..candidates.len) |i| { candidates[i].logit = -std.math.floatMax(f32); }
     for (0..logits.len) |token| {
         const logit = logits[token];
         var insert_pos: usize = candidates.len - 1;
@@ -385,7 +373,7 @@ pub const Int8Sampler = struct {
         // compute logits with int8 dot products
         for (0..self.vocab_size) |row| {
             const quantized_row = self.quantizer.lm_head_quantized[row * self.d ..][0..self.d];
-            const res = QuantizationInt8.int8DotProduct(self.quantized_query, quantized_row);
+            const res = QuantizationInt8.int8dot(self.quantized_query, quantized_row);
             self.logits[row] = @as(f32, @floatFromInt(res)) * self.quantizer.row_quant_scale[row] * query_quant_scale;
         }
 
@@ -430,7 +418,7 @@ pub const Int8x4Sampler = struct {
         const packed_d = self.d / 2;
         for (0..self.vocab_size) |row| {
             const quantized_row = self.quantizer.lm_head_quantized[row * packed_d ..][0..packed_d];
-            const res = QuantizationInt4.int8x4DotProduct(self.quantized_query, quantized_row);
+            const res = QuantizationInt4.int8x4dot(self.quantized_query, quantized_row);
             self.logits[row] = @as(f32, @floatFromInt(res)) * self.quantizer.row_quant_scale[row] * query_quant_scale;
         }
 
@@ -475,7 +463,7 @@ pub const Int4Sampler = struct {
         const packed_d = self.d / 2;
         for (0..self.vocab_size) |row| {
             const quantized_row = self.quantizer.lm_head_quantized[row * packed_d ..][0..packed_d];
-            const res = QuantizationInt4.int4DotProduct(self.quantized_query, quantized_row);
+            const res = QuantizationInt4.int4dot(self.quantized_query, quantized_row);
             self.logits[row] = @as(f32, @floatFromInt(res)) * self.quantizer.row_quant_scale[row] * query_quant_scale;
         }
 
@@ -709,7 +697,7 @@ pub const GraphSampler = struct {
             zml_handler.toc(&zml_handler.timers.nsw_graph);
             gr = g_nsw;
         }
-
+        
         return .{
             .allocator = zml_handler.allocator,
             .lm_head = lm_head,
