@@ -9,6 +9,7 @@ const Tokenizer = zml.tokenizer.Tokenizer;
 const Zml_handler = main.Zml_handler;
 const Llm_handler = llm_.Llm_handler;
 const Sampler = sampling.Sampler;
+const SamplingResult = sampling.SamplingResult;
 
 pub fn tokenizePrompt(zml_handler: *Zml_handler, tokenizer: Tokenizer) ![]u32 {
     const allocator = zml_handler.allocator;
@@ -46,6 +47,33 @@ pub fn generateTextGPUSampling(zml_handler: *Zml_handler, llm: *Llm_handler, pro
 
 pub fn generateTextCPUSampling(zml_handler: *Zml_handler, llm: *Llm_handler, sampler: anytype, prompt_tok: []const u32) ![]u8 {
     return try generateText(zml_handler, llm, sampler, prompt_tok);
+}
+
+fn sampleTokenFromCpuResult(result: *SamplingResult, llm: *const Llm_handler, random: *std.Random) u32 {
+    if (!llm.generation_config.do_sample or llm.generation_config.top_k <= 1) {
+        return @intCast(result.candidates[0].row);
+    }
+
+    const k = @min(@as(usize, @intCast(llm.generation_config.top_k)), result.candidates.len);
+    const inv_temperature = 1.0 / llm.generation_config.temperature;
+    var max_logit = -std.math.floatMax(f32);
+    for (result.candidates[0..k]) |candidate| {
+        max_logit = @max(max_logit, candidate.logit);
+    }
+
+    var total: f32 = 0.0;
+    for (result.candidates[0..k]) |*candidate| {
+        candidate.proba = @exp((candidate.logit - max_logit) * inv_temperature);
+        total += candidate.proba;
+    }
+
+    const threshold = random.float(f32) * total;
+    var cumulative: f32 = 0.0;
+    for (result.candidates[0..k]) |candidate| {
+        cumulative += candidate.proba;
+        if (cumulative >= threshold) return @intCast(candidate.row);
+    }
+    return @intCast(result.candidates[0].row);
 }
 
 fn generateText(zml_handler: *Zml_handler, llm: *Llm_handler, sampler: anytype, prompt_tok: []const u32) ![]u8 {
@@ -134,7 +162,7 @@ fn generateText(zml_handler: *Zml_handler, llm: *Llm_handler, sampler: anytype, 
         llm.exes.graph_embed_results.fill(.{&one_embed_buffer});
         try one_embed_buffer.toSlice(io, embed_slice);
         var sampling_result = sampler.sample(embed_slice.constItems(f32));
-        token_slice.items(u32)[0] = Sampler.sampleFromCandidates(&sampling_result.candidates, &random);
+        token_slice.items(u32)[0] = sampleTokenFromCpuResult(&sampling_result, llm, &random);
     } else {
         llm.exes.logits_args.set(.{ llm.model_buffers, one_embed_buffer });
         llm.exes.logits_exe.call(llm.exes.logits_args, &llm.exes.logits_results);
@@ -196,7 +224,7 @@ fn generateText(zml_handler: *Zml_handler, llm: *Llm_handler, sampler: anytype, 
             llm.exes.graph_embed_results.fill(.{&decode_embed_buffer});
             try decode_embed_buffer.toSlice(io, embed_slice);
             var sampling_result = sampler.sample(embed_slice.constItems(f32));
-            token_slice.items(u32)[0] = Sampler.sampleFromCandidates(&sampling_result.candidates, &random);
+            token_slice.items(u32)[0] = sampleTokenFromCpuResult(&sampling_result, llm, &random);
             decode_embed_buffer.deinit();
         } else {
             llm.exes.logits_args.set(.{ llm.model_buffers, decode_embed_buffer });

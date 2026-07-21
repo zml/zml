@@ -273,7 +273,6 @@ pub fn printZmlLogo(io: std.Io) !void {
     try writer.interface.flush();
 }
 
-
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
     defer http_client.deinit();
@@ -504,13 +503,14 @@ pub fn runLlm(zml_handler: *Zml_handler) !void {
     defer zml_handler.allocator.free(generated_text_gpu);
     zml_handler.mem.check(0);
 
+    try llm.resetKvCache(zml_handler);
+
     std.log.info("***** Generate text CPU sampling", .{});
     zml_handler.mem.start(0);
     const generated_text_cpu = try inference.generateTextCPUSampling(zml_handler, &llm, &sampler, inspi_tokens);
     defer zml_handler.allocator.free(generated_text_cpu);
     zml_handler.mem.check(0);
 }
-
 
 pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype) !SamplingReference {
     var total_embeds: usize = 0;
@@ -788,7 +788,6 @@ pub fn loadSamplingReference(zml_handler: *Zml_handler, file_name: []const u8) !
     std.log.info("Loaded sampling reference: file={s} samples={d} top_k={d}", .{ file_name, n, k });
     return ref;
 }
-
 
 pub fn compareSampling(ref: SamplingReference, other: SamplingReference) void {
     const total = @min(ref.ref.len, other.ref.len);
