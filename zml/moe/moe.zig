@@ -349,6 +349,7 @@ const Routing = struct {
     num_tokens: i64,
     num_routes: i64,
     topk: i64,
+    gather_divisor: i64,
     grid_m: i64,
     sorted_route_ids: zml.Tensor,
     sorted_weights: zml.Tensor,
@@ -356,6 +357,13 @@ const Routing = struct {
     hist: zml.Tensor,
     offsets: zml.Tensor,
     expt_data: zml.Tensor,
+};
+
+const CompactLocalRoutes = struct {
+    topk_ids: zml.Tensor,
+    topk_weights: zml.Tensor,
+    token_ids: zml.Tensor,
+    overflow: zml.Tensor,
 };
 
 const GemmOpts = struct {
@@ -733,14 +741,14 @@ fn getBestConfig(num_tokens: u32, topk: u32, num_experts: u32) KernelConf {
     const num_routes = std.math.mul(u32, num_tokens, topk) catch std.math.maxInt(u32);
     var config = getBestTokenBucketConfig(num_routes);
 
-    if (num_tokens <= 32 and num_routes <= 256 and num_experts <= 64) {
+    if (num_routes <= 256 and num_experts <= 64) {
         config.block_m = 16;
         config.block_n = 256;
         config.block_k = 128;
         config.group_m = 1;
         config.num_warps = 4;
         config.num_stages = 2;
-    } else if (num_tokens <= 64 and num_routes <= 512 and num_experts <= 64) {
+    } else if (num_routes <= 512 and num_experts <= 64) {
         config.block_m = 16;
         config.block_n = 128;
         config.block_k = 128;
@@ -771,6 +779,19 @@ fn tokenDistance(a: u32, b: u32) u32 {
     return if (a >= b) a - b else b - a;
 }
 
+fn compactLocalRouteCapacity(num_tokens: i64, topk: i64, global_num_experts: i64, local_num_experts: i64, block_m: i64) i64 {
+    const num_routes = num_tokens * topk;
+    if (num_routes > 512 or global_num_experts <= local_num_experts) return num_routes;
+
+    // Decode-time EP routing is expected to be close to balanced; keep slack so
+    // normal skew still fits while shrinking the local GEMM launch grid.
+    const expected_local_routes = std.math.divCeil(i64, num_routes * local_num_experts, global_num_experts) catch unreachable;
+    const slack = @max(expected_local_routes, 2 * block_m);
+    const unrounded_capacity = expected_local_routes + slack;
+    const rounded_capacity = (std.math.divCeil(i64, unrounded_capacity, block_m) catch unreachable) * block_m;
+    return @min(num_routes, rounded_capacity);
+}
+
 const Triton = struct {
     pub fn forwardMoe_fp4(
         input: zml.Tensor,
@@ -796,6 +817,7 @@ const Triton = struct {
                 weights_down,
                 scales_down,
                 bias_down,
+                null,
                 activation_limit,
             );
         }
@@ -803,7 +825,10 @@ const Triton = struct {
         const output = zml.ops.manualComputation(
             .{ input, topk_ids, topk_weights, weights_gate_up, scales_gate_up, weights_down, scales_down },
             input.shape(),
-            .{ .activation_limit = activation_limit },
+            .{
+                .activation_limit = activation_limit,
+                .global_num_experts = weights_gate_up.dim(.expert),
+            },
             (struct {
                 fn body(ctx: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
                     const local_num_experts = sharded_inputs[3].dim(.expert);
@@ -823,7 +848,67 @@ const Triton = struct {
                         };
                     };
 
-                    const output = forwardMoeLocal_fp4(
+                    const output = if (compactLocalRoutes(
+                        local_topk_ids,
+                        local_topk_weights,
+                        local_num_experts,
+                        ctx.global_num_experts,
+                        16,
+                    )) |routes| blk: {
+                        const compact_output = forwardMoeLocal_fp4(
+                            sharded_inputs[0],
+                            routes.topk_ids,
+                            routes.topk_weights,
+                            sharded_inputs[3],
+                            sharded_inputs[4],
+                            null,
+                            sharded_inputs[5],
+                            sharded_inputs[6],
+                            null,
+                            routes.token_ids,
+                            ctx.activation_limit,
+                        );
+
+                        const fallback_ctx = .{
+                            .input = sharded_inputs[0],
+                            .topk_ids = local_topk_ids,
+                            .topk_weights = local_topk_weights,
+                            .weights_gate_up = sharded_inputs[3],
+                            .scales_gate_up = sharded_inputs[4],
+                            .weights_down = sharded_inputs[5],
+                            .scales_down = sharded_inputs[6],
+                            .activation_limit = ctx.activation_limit,
+                        };
+                        const OverflowFallback = struct {
+                            fn cond(overflow: zml.Tensor, _: zml.Tensor, _: anytype) zml.Tensor {
+                                return overflow;
+                            }
+
+                            fn body(_: zml.Tensor, _: zml.Tensor, fallback: anytype) struct { zml.Tensor, zml.Tensor } {
+                                const dense_output = forwardMoeLocal_fp4(
+                                    fallback.input,
+                                    fallback.topk_ids,
+                                    fallback.topk_weights,
+                                    fallback.weights_gate_up,
+                                    fallback.scales_gate_up,
+                                    null,
+                                    fallback.weights_down,
+                                    fallback.scales_down,
+                                    null,
+                                    null,
+                                    fallback.activation_limit,
+                                );
+                                return .{ zml.Tensor.scalar(false, .bool), dense_output };
+                            }
+                        };
+                        const loop_state = zml.ops.@"while"(
+                            .{ routes.overflow, compact_output },
+                            OverflowFallback.cond,
+                            OverflowFallback.body,
+                            .{fallback_ctx},
+                        );
+                        break :blk loop_state[1];
+                    } else forwardMoeLocal_fp4(
                         sharded_inputs[0],
                         local_topk_ids,
                         local_topk_weights,
@@ -832,6 +917,7 @@ const Triton = struct {
                         null,
                         sharded_inputs[5],
                         sharded_inputs[6],
+                        null,
                         null,
                         ctx.activation_limit,
                     );
@@ -855,6 +941,7 @@ const Triton = struct {
         weights_down: zml.Tensor,
         scales_down: zml.Tensor,
         bias_down: ?zml.Tensor,
+        route_token_ids: ?zml.Tensor,
         activation_limit: f32,
     ) zml.Tensor {
         const x = input.rename(.{ .b = .token });
@@ -866,6 +953,8 @@ const Triton = struct {
         const routing = prepareRouting(
             topk_ids,
             topk_weights,
+            route_token_ids,
+            x.dim(.token),
             weights_gate_up.dim(.expert),
             @intCast(kernel_cfg.block_m),
         );
@@ -929,7 +1018,7 @@ const Triton = struct {
             break :blk mask.select(routed, zml.Tensor.zeroes(routed.shape()));
         };
 
-        const token_ids = routing.sorted_route_ids.divByConst(routing.topk).withTags(.{.route});
+        const token_ids = routing.sorted_route_ids.divByConst(routing.gather_divisor).withTags(.{.route});
         const output_flat_shape: zml.Shape = .init(.{ .token = routing.num_tokens, .d = input.dim(.d) }, .f32);
         const output_flat = zml.Tensor.zeroes(output_flat_shape).scatterSlices(
             .{ .token = token_ids },
@@ -940,10 +1029,65 @@ const Triton = struct {
         return output_flat.reshape(input.shape().withDtype(.f32)).convert(input.dtype());
     }
 
-    fn prepareRouting(topk_ids: zml.Tensor, topk_weights: zml.Tensor, num_experts: i64, block_m: i64) Routing {
+    fn compactLocalRoutes(
+        local_topk_ids: zml.Tensor,
+        local_topk_weights: zml.Tensor,
+        local_num_experts: i64,
+        global_num_experts: i64,
+        block_m: i64,
+    ) ?CompactLocalRoutes {
+        const num_tokens = local_topk_ids.dim(.b);
+        const topk = local_topk_ids.dim(.eid);
+        const num_routes = num_tokens * topk;
+        const route_capacity = compactLocalRouteCapacity(num_tokens, topk, global_num_experts, local_num_experts, block_m);
+        if (route_capacity >= num_routes) return null;
+
+        const compact_route_shape: zml.Shape = .init(.{ .route = route_capacity }, .i32);
+        const flat_ids = local_topk_ids.flatten().withTags(.{.route}).convert(.i32);
+        const valid = flat_ids.cmp(.GE, zml.Tensor.scalar(0, .i32))
+            .logical(.AND, flat_ids.cmp(.LT, zml.Tensor.scalar(local_num_experts, .i32)));
+        const valid_i32 = valid.convert(.i32);
+        const local_rank = valid_i32.cumulativeSum(.route).sub(valid_i32).withTags(.{.route});
+        const local_route_count = valid_i32.sum(.route).squeeze(.route);
+        const overflow = local_route_count.cmp(.GT, zml.Tensor.scalar(route_capacity, .i32));
+        const in_capacity = valid.logical(.AND, local_rank.cmp(.LT, zml.Tensor.scalar(route_capacity, .i32)));
+        const compact_index = in_capacity.select(local_rank, zml.Tensor.scalar(0, .i32).broad(local_rank.shape()));
+
+        const invalid_expert = zml.Tensor.scalar(-1, .i32);
+        const compact_ids_flat = invalid_expert.broad(compact_route_shape).scatterSlices(
+            .{ .route = compact_index },
+            in_capacity.select(flat_ids, invalid_expert.broad(flat_ids.shape())),
+            .{ .update_fn = scatterMax },
+        );
+
+        const flat_weights = local_topk_weights.flatten().withTags(.{.route});
+        const compact_weights_flat = zml.Tensor.zeroes(compact_route_shape.withDtype(local_topk_weights.dtype())).scatterSlices(
+            .{ .route = compact_index },
+            in_capacity.select(flat_weights, zml.Tensor.zeroes(flat_weights.shape())),
+            .{},
+        );
+
+        const route_ids = zml.Tensor.arange(.{ .end = num_routes }, .i32).withTags(.{.route});
+        const token_ids = route_ids.divByConst(topk).withTags(.{.route});
+        const compact_token_ids_flat = zml.Tensor.zeroes(compact_route_shape).scatterSlices(
+            .{ .route = compact_index },
+            in_capacity.select(token_ids, zml.Tensor.zeroes(token_ids.shape())),
+            .{},
+        );
+
+        return .{
+            .topk_ids = compact_ids_flat.reshape(.{ .b = route_capacity, .eid = 1 }),
+            .topk_weights = compact_weights_flat.reshape(.{ .b = route_capacity, .eid = 1 }),
+            .token_ids = compact_token_ids_flat.reshape(.{ .b = route_capacity, .eid = 1 }),
+            .overflow = overflow,
+        };
+    }
+
+    fn prepareRouting(topk_ids: zml.Tensor, topk_weights: zml.Tensor, route_token_ids: ?zml.Tensor, output_num_tokens: i64, num_experts: i64, block_m: i64) Routing {
         const topk = topk_ids.dim(.eid);
         const num_tokens = topk_ids.dim(.b);
         const num_routes = num_tokens * topk;
+        const gather_divisor: i64 = if (route_token_ids != null) 1 else topk;
 
         const grid_m = blk: {
             if (num_routes <= num_experts) break :blk num_routes;
@@ -956,11 +1100,18 @@ const Triton = struct {
         const routable_ids = valid_route_ids.select(route_ids, zml.Tensor.scalar(num_experts, .i32));
         const sorted = routable_ids.flatten().withTags(.{.route}).sort(.route, .{});
         const sorted_ids = sorted.values.withTags(.{.route}).convert(.i32);
-        const sorted_route_ids = sorted.indices.withTags(.{.route}).convert(.i32);
+        const sorted_route_indices = sorted.indices.withTags(.{.route}).convert(.i32);
+        const sorted_route_ids = if (route_token_ids) |token_ids|
+            token_ids.flatten().withTags(.{.route})
+                .gather(.{ .route = sorted_route_indices.rename(.{ .route = .sorted_route }) }, .{})
+                .rename(.{ .sorted_route = .route })
+                .convert(.i32)
+        else
+            sorted_route_indices;
         const active_routes = sorted_ids.cmp(.LT, zml.Tensor.scalar(num_experts, .i32));
 
         const sorted_weights = topk_weights.flatten().withTags(.{.route})
-            .gather(.{ .route = sorted_route_ids.rename(.{ .route = .sorted_route }) }, .{})
+            .gather(.{ .route = sorted_route_indices.rename(.{ .route = .sorted_route }) }, .{})
             .rename(.{ .sorted_route = .route })
             .convert(.f32);
 
@@ -980,9 +1131,10 @@ const Triton = struct {
         const expert_data = buildExpertBlockMap(hist, num_routes, grid_m, block_m);
 
         return .{
-            .num_tokens = num_tokens,
+            .num_tokens = output_num_tokens,
             .num_routes = num_routes,
             .topk = topk,
+            .gather_divisor = gather_divisor,
             .grid_m = grid_m,
             .sorted_route_ids = sorted_route_ids,
             .sorted_weights = sorted_weights,
@@ -1070,7 +1222,6 @@ const Triton = struct {
             .EVEN_K = @mod(contract_k, block_k) == 0,
             .MASK_K_LIMIT = @intCast(if (@mod(contract_k, block_k) == 0) block_k else @mod(contract_k, block_k)),
             .W_CACHE_MODIFIER = if (block_m <= 32) .cg else .none,
-            .NUM_STAGES = @intCast(opts.num_stages),
         };
 
         const y = triton_a16w4_kernel.Kernel.call(
