@@ -14,11 +14,10 @@ const LmHeadMatrix = algebra.LmHeadMatrix;
 const Zml_handler = main.Zml_handler;
 const Field_timer = main.Timing_handler.Field_timer;
 
-pub const graph_k_max = 32;
-pub const graph_L = 256;
+pub const graph_k_max = 64;
+pub const graph_L = 512;
 
 pub const GraphParams = struct {
-    search_budget: u32 = 2048,
     vamana_passes: u32 = 2,
     top_k: u32 = 16,
     graph_type: GraphType = .Mips,
@@ -37,11 +36,6 @@ pub const Graph = struct {
         fn beforeThan(_: void, lhs: Candidate, rhs: Candidate) bool {
             return lhs.similarity > rhs.similarity or (lhs.similarity == rhs.similarity and lhs.node < rhs.node);
         }
-    };
-
-    pub const LazyExpansion = struct {
-        node: u32,
-        neighbor: u32,
     };
 
     zml_handler: *Zml_handler,
@@ -65,30 +59,15 @@ pub const Graph = struct {
     nb_scored: u32,
     // generation based flags to avoid cleanup
     visited_generation: []u32,
-    visited_at: []u32,
     generation: u32,
-    // we keep track of the trail of expanded nodes
-    expanded: []Candidate,
-    nb_expanded: u32,
     // during one iteration of greedy search, the batch of visited neighbors
     batch: []Candidate,
-    // for each candidate in visited, tells if its neighbors have been
+    // for each node in the pool, tells if its neighbors have been
     // added to the pool (when true, the node had been dealt with)
     is_expanded: []bool,
     is_search_done: bool,
-    // for each node, tells if the node was not found by greedy node search
-    // during the last call to testNswExtention
-    nsw_extension_search_missed: []bool,
     
     pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, matrix: *SimilarityMatrix, params: GraphParams) !Graph {
-        std.debug.assert(matrix.n > 0);
-        std.debug.assert(graph_k_max > 0);
-        std.debug.assert(graph_L > 0);
-        std.debug.assert(params.search_budget > 0);
-        std.debug.assert(graph_L <= params.search_budget + graph_k_max);
-        std.debug.assert(params.search_budget + graph_k_max <= matrix.n);
-        std.debug.assert(graph_k_max < matrix.n);
-
         const allocator = zml_handler.allocator;
 
         const neighbors = try allocator.alloc(u32, matrix.n * graph_k_max);
@@ -98,19 +77,12 @@ pub const Graph = struct {
         errdefer allocator.free(nb_neighbors);
         @memset(nb_neighbors, 0);
 
-        const is_expanded = try allocator.alloc(bool, params.search_budget + graph_k_max);
+        const is_expanded = try allocator.alloc(bool, matrix.n);
         errdefer allocator.free(is_expanded);
         @memset(is_expanded, false);
 
-        const nsw_extension_search_missed = try allocator.alloc(bool, matrix.n);
-        errdefer allocator.free(nsw_extension_search_missed);
-        @memset(nsw_extension_search_missed, false);
-
         const visited = try allocator.alloc(Candidate, graph_L + graph_k_max);
         errdefer allocator.free(visited);
-
-        const expanded = try allocator.alloc(Candidate, params.search_budget);
-        errdefer allocator.free(expanded);
 
         const batch = try allocator.alloc(Candidate, graph_k_max);
         errdefer allocator.free(batch);
@@ -118,10 +90,6 @@ pub const Graph = struct {
         const visited_generation = try allocator.alloc(u32, matrix.n);
         errdefer allocator.free(visited_generation);
         @memset(visited_generation, 0);
-
-        const visited_at = try allocator.alloc(u32, matrix.n);
-        errdefer allocator.free(visited_at);
-        @memset(visited_at, 0);
 
         return .{
             .zml_handler = zml_handler,
@@ -139,14 +107,10 @@ pub const Graph = struct {
             .visited = visited,
             .nb_scored = 0,
             .visited_generation = visited_generation,
-            .visited_at = visited_at,
             .generation = 0,
-            .expanded = expanded,
-            .nb_expanded = 0,
             .batch = batch,
             .is_expanded = is_expanded,
             .is_search_done = false,
-            .nsw_extension_search_missed = nsw_extension_search_missed,
         };
     }
 
@@ -155,26 +119,20 @@ pub const Graph = struct {
         self.allocator.free(self.nb_neighbors);
         self.allocator.free(self.visited);
         self.allocator.free(self.visited_generation);
-        self.allocator.free(self.visited_at);
-        self.allocator.free(self.expanded);
         self.allocator.free(self.batch);
-        self.allocator.free(self.is_expanded);
-        self.allocator.free(self.nsw_extension_search_missed);
-        
+        self.allocator.free(self.is_expanded);    
     }
 
     // ------------------- Search functions ------------------ //
 
-    pub fn greedySearchNode(self: *Graph, query: u32) void {
+    pub fn greedySearchNode(self: *Graph, query: u32, search_budget: u32) void {
         //self.zml_handler.tic(&self.zml_handler.timers.greedy_search);
         std.debug.assert(!self.lm_head.is_junk[query]);
         // initialize search at entry point
         self.initNodeSearch(query);
-
-        self.nb_expanded = 0;
         
         var nb_scored = self.nb_scored;
-        while (nb_scored < self.params.search_budget) {
+        while (nb_scored < search_budget) {
 
             // find best node of the active pool that has not been expanded yet
             const node = self.popCandidate();
@@ -193,7 +151,6 @@ pub const Graph = struct {
                 const sim = self.similarity(neighbor, query);
                 nb_scored += 1;
                 self.visited_generation[neighbor] = self.generation;
-                self.visited_at[neighbor] = nb_scored;
 
                 if (self.L == graph_L and self.visited[self.L-1].similarity >= sim) continue;
                 // reverse linear pass to insert neighbor in the batch
@@ -214,11 +171,9 @@ pub const Graph = struct {
         //self.zml_handler.toc(&self.zml_handler.timers.greedy_search);
     }
 
-    pub fn greedySearch(self: *Graph, query: []const f32) void {
-        self.zml_handler.tic(&self.zml_handler.timers.embed_search);
-        self.nb_expanded = 0;
+    pub fn greedySearch(self: *Graph, query: []const f32, search_budget: u32) void {
         self.initSearch(query);
-        while (self.nb_scored < self.params.search_budget) {
+        while (self.nb_scored < search_budget) {
             const node = self.popCandidate();
             if (self.is_search_done) break;
             const start_neigh = graph_k_max * node;
@@ -247,12 +202,9 @@ pub const Graph = struct {
             }
             self.insertBatch(nb_batch);
         }
-        self.zml_handler.toc(&self.zml_handler.timers.embed_search);
     }
 
-    pub fn greedySearchPrefetch(self: *Graph, query: []const f32) void {
-        self.zml_handler.tic(&self.zml_handler.timers.embed_search);
-        self.nb_expanded = 0;
+    pub fn greedySearchPrefetch(self: *Graph, query: []const f32, search_budget: u32) void {
         self.initSearch(query);
 
         const rows = self.lm_head.data;
@@ -264,7 +216,7 @@ pub const Graph = struct {
         std.debug.assert(dim % simd_len == 0);
         const Vec = @Vector(simd_len, f32);
 
-        while (self.nb_scored < self.params.search_budget) {
+        while (self.nb_scored < search_budget) {
             const node = self.popCandidate();
             if (self.is_search_done) break;
 
@@ -281,7 +233,6 @@ pub const Graph = struct {
 
                 self.visited_generation[neighbor] = self.generation;
                 self.nb_scored += 1;
-                self.visited_at[neighbor] = self.nb_scored;
                 batch_ids[nb_ids] = neighbor;
                 nb_ids += 1;
             }
@@ -336,13 +287,11 @@ pub const Graph = struct {
 
             self.insertBatch(nb_batch);
         }
-        self.zml_handler.toc(&self.zml_handler.timers.embed_search);
     }
 
-    pub fn greedySearchWS(self: *Graph, query: []const f32) void {
+    pub fn greedySearchWS(self: *Graph, query: []const f32, search_budget: u32) void {
         // this is called after a pool initialization with initSearchPool
-        self.zml_handler.tic(&self.zml_handler.timers.embed_search);
-        while (self.nb_scored < self.params.search_budget) {
+        while (self.nb_scored < search_budget) {
             const node = self.popCandidate();
             if (self.is_search_done) break;
             const start_neigh = graph_k_max * node;
@@ -354,7 +303,6 @@ pub const Graph = struct {
                 self.addCandidate(query, neighbor);
             }
         }
-        self.zml_handler.toc(&self.zml_handler.timers.embed_search);
     }
 
     pub fn quantizedCrossover(self: *Graph, query: []const f32) void {
@@ -407,7 +355,6 @@ pub const Graph = struct {
 
         // medoid is the first and only visited node
         self.visited_generation[entry_point] = self.generation;
-        self.visited_at[entry_point] = 1;
         self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
         self.is_expanded[0] = false;
         self.nb_scored = 1;
@@ -424,7 +371,6 @@ pub const Graph = struct {
 
         // medoid is the first and only visited node
         self.visited_generation[entry_point] = self.generation;
-        self.visited_at[entry_point] = 1;
         self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
         self.is_expanded[0] = false;
         self.nb_scored = 1;
@@ -520,9 +466,6 @@ pub const Graph = struct {
         var i: u32 = 0;
         while (i < self.L) : (i += 1) {
             if (!self.is_expanded[i]) {
-                std.debug.assert(self.nb_expanded < self.expanded.len);
-                self.expanded[self.nb_expanded] = self.visited[i];
-                self.nb_expanded += 1;
                 self.is_expanded[i] = true;
                 return self.visited[i].node;
             }
@@ -720,9 +663,10 @@ pub const Graph = struct {
 
     pub fn extendToNsw(self: *Graph) !void {
         //try self.benchSimilarity();
-        const candidates = self.allocator.alloc(Candidate, 2 * graph_k_max + self.params.search_budget) catch @panic("OOM");
+        const candidates = self.allocator.alloc(Candidate, self.n) catch @panic("OOM");
         defer self.allocator.free(candidates);
 
+        const search_budget = 2048;
         var pass_i: u32 = 0;
         while (pass_i < self.params.vamana_passes) : (pass_i += 1) {
             // random visit order
@@ -741,14 +685,10 @@ pub const Graph = struct {
                 // the candidates are current_node's neighbors and the visited nodes
                 // since both lists are sorted and contain unique nodes, we can build
                 // the sorted list of candidates in one linear forward pass
-                self.greedySearchNode(current_node);
+                self.greedySearchNode(current_node, search_budget);
 
-                const nb_cand = self.nb_expanded;
-                std.mem.sort(Candidate, self.expanded[0..nb_cand], {}, Candidate.beforeThan);
-                const cands = self.expanded[0..nb_cand];
-
-                //const nb_cand = self.L;
-                //const cands = self.visited[0..nb_cand];
+                const nb_cand = self.L;
+                const cands = self.visited[0..nb_cand];
 
                 var pos_in_neighbors: u32 = start_neigh;
                 var pos_in_visited: u32 = 0;

@@ -71,53 +71,71 @@ pub const KMeansCPU = struct {
 
     inline fn addTo(dst: []f32, src: []const f32, d: usize) void {
         var i: usize = 0;
-        while (i < d) : (i += simd_len) {
+        while (i + simd_len <= d) : (i += simd_len) {
             const x: Vec = dst[i..][0..simd_len].*;
             const y: Vec = src[i..][0..simd_len].*;
             dst[i..][0..simd_len].* = x + y;
+        }
+        while (i < d) : (i += 1) {
+            dst[i] += src[i];
         }
     }
 
     inline fn addWeightedTo(dst: []f32, src: []const f32, weight: f32, d: usize) void {
         const w: Vec = @splat(weight);
         var i: usize = 0;
-        while (i < d) : (i += simd_len) {
+        while (i + simd_len <= d) : (i += simd_len) {
             const x: Vec = dst[i..][0..simd_len].*;
             const y: Vec = src[i..][0..simd_len].*;
             dst[i..][0..simd_len].* = @mulAdd(Vec, w, y, x);
+        }
+        while (i < d) : (i += 1) {
+            dst[i] += weight * src[i];
         }
     }
 
     inline fn scaleInPlace(dst: []f32, scalar: f32, d: usize) void {
         const s: Vec = @splat(scalar);
         var i: usize = 0;
-        while (i < d) : (i += simd_len) {
+        while (i + simd_len <= d) : (i += simd_len) {
             const x: Vec = dst[i..][0..simd_len].*;
             dst[i..][0..simd_len].* = x * s;
+        }
+        while (i < d) : (i += 1) {
+            dst[i] *= scalar;
         }
     }
 
     inline fn dotSlices(lhs: []const f32, rhs: []const f32, d: usize) f32 {
         var acc: Vec = @splat(0.0);
         var i: usize = 0;
-        while (i < d) : (i += simd_len) {
+        while (i + simd_len <= d) : (i += simd_len) {
             const x: Vec = lhs[i..][0..simd_len].*;
             const y: Vec = rhs[i..][0..simd_len].*;
             acc = @mulAdd(Vec, x, y, acc);
         }
-        return @reduce(.Add, acc);
+        var result = @reduce(.Add, acc);
+        while (i < d) : (i += 1) {
+            result += lhs[i] * rhs[i];
+        }
+        return result;
     }
 
     inline fn distance2Slices(lhs: []const f32, rhs: []const f32, d: usize) f32 {
         var acc: Vec = @splat(0.0);
         var i: usize = 0;
-        while (i < d) : (i += simd_len) {
+        while (i + simd_len <= d) : (i += simd_len) {
             const x: Vec = lhs[i..][0..simd_len].*;
             const y: Vec = rhs[i..][0..simd_len].*;
             const diff = x - y;
             acc = @mulAdd(Vec, diff, diff, acc);
         }
-        return @reduce(.Add, acc);
+        var result = @reduce(.Add, acc);
+        while (i < d) : (i += 1) {
+            const diff = lhs[i] - rhs[i];
+            result += diff * diff;
+        }
+        return result;
     }
 
     inline fn computeDataNorms(self: *KMeansCPU, N: usize) void {
@@ -441,9 +459,13 @@ pub const KMeansCPU = struct {
         for (0..self.k) |center| {
             const diagonal: Vec = @splat(orth_weight * @as(f32, @floatFromInt(counts[center])) + anisotropic_ridge);
             var coord: usize = 0;
-            while (coord < self.d) : (coord += simd_len) {
+            while (coord + simd_len <= self.d) : (coord += simd_len) {
                 const v: Vec = vector[center * self.d + coord ..][0..simd_len].*;
                 output[center * self.d + coord ..][0..simd_len].* = diagonal * v;
+            }
+            const diagonal_scalar = orth_weight * @as(f32, @floatFromInt(counts[center])) + anisotropic_ridge;
+            while (coord < self.d) : (coord += 1) {
+                output[center * self.d + coord] = diagonal_scalar * vector[center * self.d + coord];
             }
         }
 
@@ -531,7 +553,7 @@ pub const KMeansCPU = struct {
     pub fn solveAnisotropic(self: *KMeansCPU, lm_head: anytype, row_codes: []u8, orth_weight: f32) !void {
         std.debug.assert(orth_weight > 0.0 and orth_weight <= 1.0);
         std.debug.assert(self.has_centers and self.k <= 256);
-        std.debug.assert(self.d % simd_len == 0 and lm_head.d % self.d == 0);
+        std.debug.assert(lm_head.d % self.d == 0);
         std.debug.assert(lm_head.data.len == lm_head.n * lm_head.d);
         const nb_buckets = lm_head.d / self.d;
         std.debug.assert(row_codes.len == lm_head.n * nb_buckets);

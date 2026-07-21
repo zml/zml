@@ -16,13 +16,15 @@ const Allocator = std.mem.Allocator;
 const KMeansCPU = kmeans.KMeansCPU;
 const Sampler = sampling.Sampler;
 const Logit = sampling.Logit;
+const SamplingResult = sampling.SamplingResult;
+
+const sampling_top_k = sampling.sampling_top_k;
 
 pub const hidden_dim: comptime_int = 4096;
-pub const bucket_dim: comptime_int = 16;
+pub const bucket_dim: comptime_int = 4;
 pub const nb_buckets: comptime_int = hidden_dim / bucket_dim;
-pub const nb_centers: comptime_int = 16;
+pub const nb_centers: comptime_int = 256;
 pub const simd_len: comptime_int = 8;
-pub const pq_top_k: comptime_int = 16;
 pub const pq_z_score: comptime_int = 5;
 pub const pq_orth_weight: comptime_float = 0.25;
 pub const pq_lut_zero_point: comptime_int = 128;
@@ -32,13 +34,6 @@ inline fn walshHadamardTo(dst: []f32, src: []const f32, comptime k: comptime_int
     @memcpy(dst, src);
     quantization.walshHadamard(dst, k);
 }
-
-pub const PQSample = struct {
-    top_k: [pq_top_k]Logit,
-    nb_dense_scored: usize = 0,
-    nb_pq_scored: usize = 0,
-    nb_pruned: usize = 0,
-};
 
 pub const ProductQuantizationMode = enum {
     vanilla,
@@ -137,7 +132,8 @@ pub const ProductQuantizer = struct {
     quantization_error_factor: f32,
 
     // sampling utils
-    logits: []Logit,
+    logits: []f32,
+    candidates: [sampling_top_k]Logit,
 
     pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, mode: ProductQuantizationMode) !ProductQuantizer {
         const alloc = zml_handler.allocator;
@@ -149,10 +145,9 @@ pub const ProductQuantizer = struct {
         const row_error_norms = try alloc.alloc(f32, lm_head.n);
         errdefer alloc.free(row_error_norms);
         @memset(row_error_norms, 0.0);
-        const logits = try alloc.alloc(Logit, lm_head.n);
+        const logits = try alloc.alloc(f32, lm_head.n);
         for (0..lm_head.n) |i| {
-            logits[i].row = i;
-            if (lm_head.is_junk[i]) logits[i].logit = -1e10;
+            if (lm_head.is_junk[i]) logits[i] = -1e10;
         }
         return .{
             .zml_handler = zml_handler,
@@ -168,6 +163,7 @@ pub const ProductQuantizer = struct {
             .row_error_norms = row_error_norms,
             .quantization_error_factor = 0.0,
             .logits = logits,
+            .candidates = [_]Logit{.{}} ** sampling_top_k,
         };
     }
 
@@ -258,20 +254,20 @@ pub const ProductQuantizer = struct {
         }
     }
 
-    pub fn sample(self: *ProductQuantizer, query: []const f32) PQSample {
+    pub fn sample(self: *ProductQuantizer, query: []const f32) SamplingResult {
         // step 0 : compute geometric information for error bounding
-        const query_norm = quantization.normL2(query);
-        const error_bound_scale = query_norm * self.quantization_error_factor;
+        //const query_norm = quantization.normL2(query);
+        //const error_bound_scale = query_norm * self.quantization_error_factor;
 
         // step 1 : rotate query, don't normalize it
-        self.zml_handler.tic(&self.zml_handler.timers.pq_rotate);
+        //self.zml_handler.tic(&self.zml_handler.timers.pq_rotate);
         const src = query[0..hidden_dim];
         const dst = self.rotated_query[0..];
         walshHadamardTo(dst, src, 12);
-        self.zml_handler.toc(&self.zml_handler.timers.pq_rotate);
+        //self.zml_handler.toc(&self.zml_handler.timers.pq_rotate);
 
         // step 2 : score every bucket against the shared codebook.
-        self.zml_handler.tic(&self.zml_handler.timers.pq_lut);
+        //self.zml_handler.tic(&self.zml_handler.timers.pq_lut);
         for (0..nb_buckets) |bucket| {
             const query_data = self.rotated_query[bucket * bucket_dim ..][0..bucket_dim];
             for (0..nb_centers) |center| {
@@ -281,10 +277,10 @@ pub const ProductQuantizer = struct {
                 self.query_center_scores[bucket * nb_centers + center] = dot;
             }
         }
-        self.zml_handler.toc(&self.zml_handler.timers.pq_lut);
+        //self.zml_handler.toc(&self.zml_handler.timers.pq_lut);
 
         // step 3 : gather floating-point coefficients and unnormalize the sum.
-        self.zml_handler.tic(&self.zml_handler.timers.pq_score);
+        //self.zml_handler.tic(&self.zml_handler.timers.pq_score);
         for (0..self.n) |row| {
             if (self.lm_head.is_junk[row]) continue;
             const row_codes = self.row_buckets[row * nb_buckets ..][0..nb_buckets];
@@ -293,32 +289,15 @@ pub const ProductQuantizer = struct {
                 const bucket_lut = self.query_center_scores[bucket * nb_centers ..][0..nb_centers];
                 logit += bucket_lut[row_codes[bucket]];
             }
-            self.logits[row].logit = logit;
-            self.logits[row].upper_bound = logit + error_bound_scale * self.row_error_norms[row];
+            self.logits[row] = logit;
         }
-        self.zml_handler.toc(&self.zml_handler.timers.pq_score);
+        //self.zml_handler.toc(&self.zml_handler.timers.pq_score);
 
         // step 4 : find and return topK
-        self.zml_handler.tic(&self.zml_handler.timers.pq_top_k);
-        const empty_logit: Logit = .{ .logit = -std.math.floatMax(f32), .row = 0, .upper_bound = 0 };
-        var result: PQSample = .{
-            .top_k = [_]Logit{empty_logit} ** pq_top_k,
-            .nb_dense_scored = 0,
-            .nb_pq_scored = 0,
-            .nb_pruned = 0,
-        };
-        for (0..self.n) |row| {
-            const score = self.logits[row].logit;
-            if (score <= result.top_k[pq_top_k - 1].logit) continue;
-            var insert_pos: usize = pq_top_k - 1;
-            while (insert_pos > 0 and score > result.top_k[insert_pos - 1].logit) {
-                result.top_k[insert_pos] = result.top_k[insert_pos - 1];
-                insert_pos -= 1;
-            }
-            result.top_k[insert_pos] = self.logits[row];
-        }
-        self.zml_handler.toc(&self.zml_handler.timers.pq_top_k);
-        return result;
+        //self.zml_handler.tic(&self.zml_handler.timers.pq_top_k);
+        sampling.findTopK(self.logits, self.candidates[0..sampling_top_k]);
+        //self.zml_handler.toc(&self.zml_handler.timers.pq_top_k);
+        return .{ .candidates = self.candidates, .nb = 0 };
     }
 
     pub fn sampleLog(self: *ProductQuantizer, sampler: *Sampler, query: []const f32) void {
@@ -353,7 +332,8 @@ pub const ProductQuantizerFastScan = struct {
     // the low-bucket code in bits 0..3 and the high-bucket code in bits 4..7.
     packed_row_buckets: []u8,
     query_center_scores: [nb_buckets * center_count]u8,
-    logits: []Logit,
+    logits: []f32,
+    candidates: [sampling_top_k]Logit,
 
     // One 16-byte shuffle table is the defining constraint of FastScan.
     const center_count: comptime_int = 16;
@@ -378,13 +358,9 @@ pub const ProductQuantizerFastScan = struct {
         const packed_row_buckets = try alloc.alloc(u8, nb_scan_groups * bucket_pair_count * registers_per_group * register_lanes);
         errdefer alloc.free(packed_row_buckets);
         @memset(packed_row_buckets, 0);
-        const logits = try alloc.alloc(Logit, lm_head.n);
-        for (0..lm_head.n) |row| {
-            logits[row] = .{
-                .row = row,
-                .logit = if (lm_head.is_junk[row]) -std.math.floatMax(f32) else 0.0,
-                .upper_bound = 0.0,
-            };
+        const logits = try alloc.alloc(f32, lm_head.n);
+        for (0..lm_head.n) |i| {
+            if (lm_head.is_junk[i]) logits[i] = -1e10;
         }
 
         return .{
@@ -400,6 +376,7 @@ pub const ProductQuantizerFastScan = struct {
             .packed_row_buckets = packed_row_buckets,
             .query_center_scores = [_]u8{pq_lut_zero_point} ** (nb_buckets * center_count),
             .logits = logits,
+            .candidates = [_]Logit{.{}} ** sampling_top_k,
         };
     }
 
@@ -497,14 +474,14 @@ pub const ProductQuantizerFastScan = struct {
         return portableLookup16(table, indices);
     }
 
-    pub fn sample(self: *ProductQuantizerFastScan, query: []const f32) PQSample {
+    pub fn sample(self: *ProductQuantizerFastScan, query: []const f32) SamplingResult {
         const query_norm = quantization.normL2(query);
 
-        self.zml_handler.tic(&self.zml_handler.timers.pq_rotate);
+        //self.zml_handler.tic(&self.zml_handler.timers.pq_rotate);
         walshHadamardTo(self.rotated_query[0..], query[0..hidden_dim], 12);
-        self.zml_handler.toc(&self.zml_handler.timers.pq_rotate);
+        //self.zml_handler.toc(&self.zml_handler.timers.pq_rotate);
 
-        self.zml_handler.tic(&self.zml_handler.timers.pq_lut);
+        //self.zml_handler.tic(&self.zml_handler.timers.pq_lut);
         var max_abs_score: f32 = 0.0;
         for (0..nb_buckets) |bucket| {
             for (0..center_count) |center| {
@@ -521,9 +498,9 @@ pub const ProductQuantizerFastScan = struct {
                 self.query_center_scores[bucket * center_count + center] = quantizeLutScore(score, inverse_lut_scale);
             }
         }
-        self.zml_handler.toc(&self.zml_handler.timers.pq_lut);
+        //self.zml_handler.toc(&self.zml_handler.timers.pq_lut);
 
-        self.zml_handler.tic(&self.zml_handler.timers.pq_score);
+        //self.zml_handler.tic(&self.zml_handler.timers.pq_score);
         const low_nibble: Vec16u8 = @splat(0x0f);
         const high_shift: Vec16u3 = @splat(4);
         const accumulator_bias: i32 = pq_lut_zero_point * nb_buckets;
@@ -562,31 +539,17 @@ pub const ProductQuantizerFastScan = struct {
                     if (row < self.n and !self.lm_head.is_junk[row]) {
                         const centered_accumulator: i32 = @as(i32, @intCast(accumulators[register][lane])) - accumulator_bias;
                         const logit = @as(f32, @floatFromInt(centered_accumulator)) * final_lut_scale;
-                        self.logits[row].logit = logit;
-                        self.logits[row].upper_bound = logit;
+                        self.logits[row] = logit;
                     }
                 }
             }
         }
-        self.zml_handler.toc(&self.zml_handler.timers.pq_score);
+        //self.zml_handler.toc(&self.zml_handler.timers.pq_score);
 
-        self.zml_handler.tic(&self.zml_handler.timers.pq_top_k);
-        const empty_logit: Logit = .{ .logit = -std.math.floatMax(f32), .row = 0, .upper_bound = 0 };
-        var result: PQSample = .{
-            .top_k = [_]Logit{empty_logit} ** pq_top_k,
-        };
-        for (0..self.n) |row| {
-            const score = self.logits[row].logit;
-            if (score <= result.top_k[pq_top_k - 1].logit) continue;
-            var insert_pos: usize = pq_top_k - 1;
-            while (insert_pos > 0 and score > result.top_k[insert_pos - 1].logit) {
-                result.top_k[insert_pos] = result.top_k[insert_pos - 1];
-                insert_pos -= 1;
-            }
-            result.top_k[insert_pos] = self.logits[row];
-        }
-        self.zml_handler.toc(&self.zml_handler.timers.pq_top_k);
-        return result;
+        //self.zml_handler.tic(&self.zml_handler.timers.pq_top_k);
+        sampling.findTopK(self.logits, self.candidates[0..sampling_top_k]);
+        //self.zml_handler.toc(&self.zml_handler.timers.pq_top_k);
+        return .{ .candidates = self.candidates, .nb = 0 };
     }
 
     pub fn sampleLog(self: *ProductQuantizerFastScan, sampler: *Sampler, query: []const f32) void {
