@@ -729,7 +729,30 @@ fn configForTokenBucket(num_tokens: u32) KernelConf {
     };
 }
 
-fn getBestConfig(num_tokens: u32) KernelConf {
+fn getBestConfig(num_tokens: u32, topk: u32, num_experts: u32) KernelConf {
+    const num_routes = std.math.mul(u32, num_tokens, topk) catch std.math.maxInt(u32);
+    var config = getBestTokenBucketConfig(num_routes);
+
+    if (num_tokens <= 32 and num_routes <= 256 and num_experts <= 64) {
+        config.block_m = 16;
+        config.block_n = 256;
+        config.block_k = 128;
+        config.group_m = 1;
+        config.num_warps = 4;
+        config.num_stages = 2;
+    } else if (num_tokens <= 64 and num_routes <= 512 and num_experts <= 64) {
+        config.block_m = 16;
+        config.block_n = 128;
+        config.block_k = 128;
+        config.group_m = 1;
+        config.num_warps = 4;
+        config.num_stages = 2;
+    }
+
+    return config;
+}
+
+fn getBestTokenBucketConfig(num_tokens: u32) KernelConf {
     var best_num_tokens = kernel_config_token_buckets[0];
     var best_distance = tokenDistance(num_tokens, best_num_tokens);
 
@@ -835,7 +858,11 @@ const Triton = struct {
         activation_limit: f32,
     ) zml.Tensor {
         const x = input.rename(.{ .b = .token });
-        const kernel_cfg = getBestConfig(@intCast(topk_ids.dim(.b)));
+        const kernel_cfg = getBestConfig(
+            @intCast(topk_ids.dim(.b)),
+            @intCast(topk_ids.dim(.eid)),
+            @intCast(weights_gate_up.dim(.expert)),
+        );
         const routing = prepareRouting(
             topk_ids,
             topk_weights,
