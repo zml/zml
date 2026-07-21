@@ -1677,7 +1677,7 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
     var x = full_topk.values.rename(.{ .voc = .topk });
     // mask values above the dynamic top_k
     x = Tensor.iota(x.shape(), .topk).cmp(.GE, opts.top_k).select(min_inf, x);
-    x = x.mul(opts.temperature);
+    x = x.div(opts.temperature);
 
     // if there are high values in x, softmax can overflow and will create nans in full probs
     // this propagate to probs_sum and probs_max.
@@ -1720,7 +1720,7 @@ test sampleTokensDynamic {
         // top_k == logits.len -> just sort the input
         .{ .{ .top_k = 4 }, [_]f32{ @log(4.0), @log(3.0), @log(2.0), @log(1.0) } },
         .{ .{ .top_k = 2 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
-        .{ .{ .top_k = 2, .temperature = 0.1 }, [_]f32{ @log(4.0) * 0.1, @log(3.0) * 0.1, ___, ___ } },
+        .{ .{ .top_k = 2, .temperature = 0.1 }, [_]f32{ @log(4.0) / 0.1, @log(3.0) / 0.1, ___, ___ } },
         // top_k == logits.len and small top_p  -> make sure at least one is returned
         .{ .{ .top_k = 4, .top_p = 0.1 }, [_]f32{ @log(4.0), ___, ___, ___ } },
         .{ .{ .top_k = 4, .top_p = 0.701 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },

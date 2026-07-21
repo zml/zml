@@ -497,13 +497,15 @@ pub fn runLlm(zml_handler: *Zml_handler) !void {
     const inspi_tokens = try inference.tokenizePrompt(zml_handler, llm.tokenizer);
     defer zml_handler.allocator.free(inspi_tokens);
 
-    std.log.info("***** Generate text GPU sampling", .{});
-    zml_handler.mem.start(0);
-    const generated_text_gpu = try inference.generateTextGPUSampling(zml_handler, &llm, inspi_tokens);
-    defer zml_handler.allocator.free(generated_text_gpu);
-    zml_handler.mem.check(0);
-
-    try llm.resetKvCache(zml_handler);
+    const gpu_validation = false;
+    if (gpu_validation) {
+        std.log.info("***** Generate text GPU sampling", .{});
+        zml_handler.mem.start(0);
+        const generated_text_gpu = try inference.generateTextGPUSampling(zml_handler, &llm, inspi_tokens);
+        defer zml_handler.allocator.free(generated_text_gpu);
+        zml_handler.mem.check(0);
+        try llm.resetKvCache(zml_handler);
+    }
 
     std.log.info("***** Generate text CPU sampling", .{});
     zml_handler.mem.start(0);
