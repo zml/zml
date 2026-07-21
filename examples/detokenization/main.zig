@@ -480,13 +480,26 @@ pub fn runLlm(zml_handler: *Zml_handler) !void {
     var lm_head = try algebra.getLmHead(zml_handler);
     defer LmHeadMatrix.deinit(&lm_head, zml_handler.allocator);
 
-    std.log.info("***** Init QJL 1 bit quantizer", .{});
-    var quantizer: QuantizationQJL1 = try .init(zml_handler, &lm_head);
-    defer QuantizationQJL1.deinit(&quantizer);
+    if (false) {
+        
+        std.log.info("***** Init QJL 1 bit quantizer", .{});
+        var quantizer: QuantizationQJL1 = try .init(zml_handler, &lm_head);
+        defer QuantizationQJL1.deinit(&quantizer);
+        try quantizer.quantize();
+    
+        std.log.info("***** Init QJL 1 bit sampler", .{});
+        var sampler: QJL1Sampler = try .init(zml_handler, &lm_head, &quantizer);
+        defer sampler.deinit();
+
+    }
+
+    std.log.info("***** Init int8 quantizer", .{});
+    var quantizer: QuantizationInt8 = try .init(zml_handler, &lm_head);
+    defer QuantizationInt8.deinit(&quantizer);
     try quantizer.quantize();
 
-    std.log.info("***** Init QJL 1 bit sampler", .{});
-    var sampler: QJL1Sampler = try .init(zml_handler, &lm_head, &quantizer);
+    std.log.info("***** Init int8 sampler", .{});
+    var sampler: Int8Sampler = try .init(zml_handler, &lm_head, &quantizer);
     defer sampler.deinit();
 
     std.log.info("***** Init LLM handler", .{});
