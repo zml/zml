@@ -23,7 +23,9 @@ const ProductQuantizerFastScan = productq.ProductQuantizerFastScan;
 const Sampler = sampling.Sampler;
 const SamplingResult = sampling.SamplingResult;
 const SamplingReference = sampling.SamplingReference;
+const AngularSampler = sampling.AngularSampler;
 const TruncateSampler = sampling.TruncateSampler;
+const GraphSampler = sampling.GraphSampler;
 
 const Int8Sampler = sampling.Int8Sampler;
 const Int8x4Sampler = sampling.Int8x4Sampler;
@@ -271,6 +273,7 @@ pub fn printZmlLogo(io: std.Io) !void {
     try writer.interface.flush();
 }
 
+
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
     defer http_client.deinit();
@@ -294,15 +297,8 @@ pub fn main(init: std.process.Init) !void {
 
     try printZmlLogo(zml_handler.io);
 
-    //try runLlm(&zml_handler);
-    //try runTestsGraph(&zml_handler);
-    //try runTestsQuantizedPQ(&zml_handler);
-
-    //try runTestsQuantizedGraph(&zml_handler);
-    //try runTestsQuantized(&zml_handler);
-
-    //try runTestsSample(&zml_handler);
-    try runTestsSampling(&zml_handler);
+    try runLlm(&zml_handler);
+    //try runTestsSampling(&zml_handler);
 
     zml_handler.timers.print();
 }
@@ -327,122 +323,194 @@ pub fn runTestsSampling(zml_handler: *Zml_handler) !void {
     };
     defer zml_handler.allocator.free(ref.ref);
 
-    
-    std.log.info("***** Init QJL 1 bit quantizer", .{});
-    var quant_qjl1: QuantizationQJL1 = try .init(zml_handler, &lm_head);
-    defer QuantizationQJL1.deinit(&quant_qjl1);
-    try quant_qjl1.quantize();
-
     if (false) {
-    
+        std.log.info("***** Init QJL 1 bit quantizer", .{});
+        var quant_qjl1: QuantizationQJL1 = try .init(zml_handler, &lm_head);
+        defer QuantizationQJL1.deinit(&quant_qjl1);
+        try quant_qjl1.quantize();
+
         std.log.info("***** Init QJL 1 bit sampler", .{});
         var qjl1_sampler: QJL1Sampler = try .init(zml_handler, &lm_head, &quant_qjl1);
         defer qjl1_sampler.deinit();
-    
+
         std.log.info("***** Test QJL 1 bit sampling", .{});
         const ref_qjl1 = try computeSamplingReference(zml_handler, &qjl1_sampler);
         defer zml_handler.allocator.free(ref_qjl1.ref);
         compareSampling(ref, ref_qjl1);
-    
-    
+
         std.log.info("***** Init QJL 2x1 bit sampler", .{});
         var qjl2x1_sampler: QJL2x1Sampler = try .init(zml_handler, &lm_head, &quant_qjl1);
         defer qjl2x1_sampler.deinit();
-    
+
         std.log.info("***** Test QJL 2x1 bit sampling", .{});
         const ref_qjl2x1 = try computeSamplingReference(zml_handler, &qjl2x1_sampler);
         defer zml_handler.allocator.free(ref_qjl2x1.ref);
         compareSampling(ref, ref_qjl2x1);
 
+        std.log.info("***** Init QJL Nx1 bit sampler", .{});
+        var qjlNx1_sampler: QJLNx1Sampler = try .init(zml_handler, &lm_head, &quant_qjl1);
+        defer qjlNx1_sampler.deinit();
+
+        std.log.info("***** Test QJL Nx1 bit sampling", .{});
+        const ref_qjlNx1 = try computeSamplingReference(zml_handler, &qjlNx1_sampler);
+        defer zml_handler.allocator.free(ref_qjlNx1.ref);
+        compareSampling(ref, ref_qjlNx1);
+
+        std.log.info("***** Init QJL 2 bit quantizer", .{});
+        var quant_qjl2: QuantizationQJL2 = try .init(zml_handler, &lm_head);
+        defer QuantizationQJL2.deinit(&quant_qjl2);
+        try quant_qjl2.quantize();
+
+        std.log.info("***** Init QJL 2 bit sampler", .{});
+        var qjl2_sampler: QJL2Sampler = try .init(zml_handler, &lm_head, &quant_qjl2);
+        defer qjl2_sampler.deinit();
+
+        std.log.info("***** Test QJL 2 bit sampling", .{});
+        const ref_qjl2 = try computeSamplingReference(zml_handler, &qjl2_sampler);
+        defer zml_handler.allocator.free(ref_qjl2.ref);
+        compareSampling(ref, ref_qjl2);
+
+        std.log.info("***** Init int4 quantizer", .{});
+        var quant_int4: QuantizationInt4 = try .init(zml_handler, &lm_head);
+        defer QuantizationInt4.deinit(&quant_int4);
+        try quant_int4.quantize();
+
+        std.log.info("***** Init int4 sampler", .{});
+        var int4_sampler: Int4Sampler = try .init(zml_handler, &lm_head, &quant_int4);
+        defer int4_sampler.deinit();
+
+        std.log.info("***** Test int4 sampling", .{});
+        const ref_int4 = try computeSamplingReference(zml_handler, &int4_sampler);
+        defer zml_handler.allocator.free(ref_int4.ref);
+        compareSampling(ref, ref_int4);
+
+        std.log.info("***** Init int8x4 sampler", .{});
+        var int8x4_sampler: Int8x4Sampler = try .init(zml_handler, &lm_head, &quant_int4);
+        defer int8x4_sampler.deinit();
+
+        std.log.info("***** Test int8x4 sampling", .{});
+        const ref_int8x4 = try computeSamplingReference(zml_handler, &int8x4_sampler);
+        defer zml_handler.allocator.free(ref_int8x4.ref);
+        compareSampling(ref, ref_int8x4);
+
+        std.log.info("***** Init int8 quantizer", .{});
+        var quant_int8: QuantizationInt8 = try .init(zml_handler, &lm_head);
+        defer QuantizationInt8.deinit(&quant_int8);
+        try quant_int8.quantize();
+
+        std.log.info("***** Init int8 sampler", .{});
+        var int8_sampler: Int8Sampler = try .init(zml_handler, &lm_head, &quant_int8);
+        defer int8_sampler.deinit();
+
+        std.log.info("***** Test int8 sampling", .{});
+        const ref_int8 = try computeSamplingReference(zml_handler, &int8_sampler);
+        defer zml_handler.allocator.free(ref_int8.ref);
+        compareSampling(ref, ref_int8);
+
+        std.log.info("***** Init graph sampler", .{});
+        var graph_sampler: GraphSampler = try .init(zml_handler, &lm_head);
+        defer graph_sampler.deinit();
+
+        std.log.info("***** Test graph sampling", .{});
+        const ref_graph = try computeSamplingReference(zml_handler, &graph_sampler);
+        defer zml_handler.allocator.free(ref_graph.ref);
+        compareSampling(ref, ref_graph);
+
+        std.log.info("***** Init truncated sampler", .{});
+        var truncated_sampler: TruncateSampler = try .init(zml_handler, &lm_head);
+        defer truncated_sampler.deinit();
+
+        std.log.info("***** Test truncated sampling", .{});
+        const ref_tr = try computeSamplingReference(zml_handler, &truncated_sampler);
+        defer zml_handler.allocator.free(ref_tr.ref);
+        compareSampling(ref, ref_tr);
+
+        std.log.info("***** Init vanilla FastScan PQ Quantizer", .{});
+        var pq_iso_fc = try ProductQuantizerFastScan.init(zml_handler, &lm_head, .vanilla);
+        defer pq_iso_fc.deinit();
+        try pq_iso_fc.buildCodebook();
+
+        std.log.info("***** Test vanilla FastScan PQ sampling", .{});
+        const ref_pq_iso_fc = try computeSamplingReference(zml_handler, &pq_iso_fc);
+        defer zml_handler.allocator.free(ref_pq_iso_fc.ref);
+        compareSampling(ref, ref_pq_iso_fc);
+
+        std.log.info("***** Init anisotropic FastScan PQ Quantizer", .{});
+        var pq_aniso_fc = try ProductQuantizerFastScan.init(zml_handler, &lm_head, .anisotropic);
+        defer pq_aniso_fc.deinit();
+        try pq_aniso_fc.buildCodebook();
+
+        std.log.info("***** Test anisotropic FastScan PQ sampling", .{});
+        const ref_pq_aniso_fc = try computeSamplingReference(zml_handler, &pq_aniso_fc);
+        defer zml_handler.allocator.free(ref_pq_aniso_fc.ref);
+        compareSampling(ref, ref_pq_aniso_fc);
+
+        std.log.info("***** Init vanilla PQ Quantizer", .{});
+        var pq_iso = try ProductQuantizer.init(zml_handler, &lm_head, .vanilla);
+        defer pq_iso.deinit();
+        try pq_iso.buildCodebook();
+
+        std.log.info("***** Test vanilla PQ sampling", .{});
+        const ref_pq_iso = try computeSamplingReference(zml_handler, &pq_iso);
+        defer zml_handler.allocator.free(ref_pq_iso.ref);
+        compareSampling(ref, ref_pq_iso);
+
+        std.log.info("***** Init anisotropic PQ Quantizer", .{});
+        var pq_aniso = try ProductQuantizer.init(zml_handler, &lm_head, .anisotropic);
+        defer pq_aniso.deinit();
+        try pq_aniso.buildCodebook();
+
+        std.log.info("***** Test anisotropic PQ sampling", .{});
+        const ref_pq_aniso = try computeSamplingReference(zml_handler, &pq_aniso);
+        defer zml_handler.allocator.free(ref_pq_aniso.ref);
+        compareSampling(ref, ref_pq_aniso);
+
+        std.log.info("***** Init angular sampler", .{});
+        var sampler_ang: AngularSampler = try .init(zml_handler, &lm_head);
+        defer AngularSampler.deinit(&sampler_ang);
+
+        std.log.info("***** Test angular sampling", .{});
+        const ref_ang = try computeSamplingReference(zml_handler, &sampler_ang);
+        defer zml_handler.allocator.free(ref_ang.ref);
+        compareSampling(ref, ref_ang);
     }
-
-    std.log.info("***** Init QJL Nx1 bit sampler", .{});
-    var qjlNx1_sampler: QJLNx1Sampler = try .init(zml_handler, &lm_head, &quant_qjl1);
-    defer qjlNx1_sampler.deinit();
-
-    std.log.info("***** Test QJL Nx1 bit sampling", .{});
-    const ref_qjlNx1 = try computeSamplingReference(zml_handler, &qjlNx1_sampler);
-    defer zml_handler.allocator.free(ref_qjlNx1.ref);
-    compareSampling(ref, ref_qjlNx1);
-    
-    
-    std.log.info("***** Init QJL 2 bit quantizer", .{});
-    var quant_qjl2: QuantizationQJL2 = try .init(zml_handler, &lm_head);
-    defer QuantizationQJL2.deinit(&quant_qjl2);
-    try quant_qjl2.quantize();
-
-    std.log.info("***** Init QJL 2 bit sampler", .{});
-    var qjl2_sampler: QJL2Sampler = try .init(zml_handler, &lm_head, &quant_qjl2);
-    defer qjl2_sampler.deinit();
-
-    std.log.info("***** Test QJL 2 bit sampling", .{});
-    const ref_qjl2 = try computeSamplingReference(zml_handler, &qjl2_sampler);
-    defer zml_handler.allocator.free(ref_qjl2.ref);
-    compareSampling(ref, ref_qjl2);
-
-    
-    std.log.info("***** Init int4 quantizer", .{});
-    var quant_int4: QuantizationInt4 = try .init(zml_handler, &lm_head);
-    defer QuantizationInt4.deinit(&quant_int4);
-    try quant_int4.quantize();
-
-    std.log.info("***** Init int4 sampler", .{});
-    var int4_sampler: Int4Sampler = try .init(zml_handler, &lm_head, &quant_int4);
-    defer int4_sampler.deinit();
-
-    std.log.info("***** Test int4 sampling", .{});
-    const ref_int4 = try computeSamplingReference(zml_handler, &int4_sampler);
-    defer zml_handler.allocator.free(ref_int4.ref);
-    compareSampling(ref, ref_int4);
-
-    
-    std.log.info("***** Init int8x4 sampler", .{});
-    var int8x4_sampler: Int8x4Sampler = try .init(zml_handler, &lm_head, &quant_int4);
-    defer int8x4_sampler.deinit();
-
-    std.log.info("***** Test int8x4 sampling", .{});
-    const ref_int8x4 = try computeSamplingReference(zml_handler, &int8x4_sampler);
-    defer zml_handler.allocator.free(ref_int8x4.ref);
-    compareSampling(ref, ref_int8x4);
-
-    
-    std.log.info("***** Init int8 quantizer", .{});
-    var quant_int8: QuantizationInt8 = try .init(zml_handler, &lm_head);
-    defer QuantizationInt8.deinit(&quant_int8);
-    try quant_int8.quantize();
-
-    std.log.info("***** Init int8 sampler", .{});
-    var int8_sampler: Int8Sampler = try .init(zml_handler, &lm_head, &quant_int8);
-    defer int8_sampler.deinit();
-
-    std.log.info("***** Test int8 sampling", .{});
-    const ref_int8 = try computeSamplingReference(zml_handler, &int8_sampler);
-    defer zml_handler.allocator.free(ref_int8.ref);
-    compareSampling(ref, ref_int8);
-
-    
-    std.log.info("***** Init truncated sampler", .{});
-    var truncated_sampler: TruncateSampler = try .init(zml_handler, &lm_head);
-    defer truncated_sampler.deinit();
-
-    std.log.info("***** Test truncated sampling", .{});
-    const ref_tr = try computeSamplingReference(zml_handler, &truncated_sampler);
-    defer zml_handler.allocator.free(ref_tr.ref);
-    compareSampling(ref, ref_tr);
 }
 
 pub fn runLlm(zml_handler: *Zml_handler) !void {
+    std.log.info("***** Get lm_head", .{});
+    var lm_head = try algebra.getLmHead(zml_handler);
+    defer LmHeadMatrix.deinit(&lm_head, zml_handler.allocator);
+
+    std.log.info("***** Init QJL 1 bit quantizer", .{});
+    var quantizer: QuantizationQJL1 = try .init(zml_handler, &lm_head);
+    defer QuantizationQJL1.deinit(&quantizer);
+    try quantizer.quantize();
+
+    std.log.info("***** Init QJL 1 bit sampler", .{});
+    var sampler: QJL1Sampler = try .init(zml_handler, &lm_head, &quantizer);
+    defer sampler.deinit();
+
+    std.log.info("***** Init LLM handler", .{});
     var llm = try llm_.Llm_handler.init(zml_handler);
     defer llm.deinit(zml_handler.allocator);
 
+    std.log.info("***** Tokenize prompt", .{});
     const inspi_tokens = try inference.tokenizePrompt(zml_handler, llm.tokenizer);
     defer zml_handler.allocator.free(inspi_tokens);
 
+    std.log.info("***** Generate text CPU sampling", .{});
     zml_handler.mem.start(0);
-    const inspi_result = try inference.generateText(zml_handler, &llm, inspi_tokens);
-    defer zml_handler.allocator.free(inspi_result);
+    const generated_text_cpu = try inference.generateTextCPUSampling(zml_handler, &llm, &sampler, inspi_tokens);
+    defer zml_handler.allocator.free(generated_text_cpu);
+    zml_handler.mem.check(0);
+
+    std.log.info("***** Generate text GPU sampling", .{});
+    zml_handler.mem.start(0);
+    const generated_text_gpu = try inference.generateTextGPUSampling(zml_handler, &llm, inspi_tokens);
+    defer zml_handler.allocator.free(generated_text_gpu);
     zml_handler.mem.check(0);
 }
+
 
 pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype) !SamplingReference {
     var total_embeds: usize = 0;
@@ -721,6 +789,7 @@ pub fn loadSamplingReference(zml_handler: *Zml_handler, file_name: []const u8) !
     return ref;
 }
 
+
 pub fn compareSampling(ref: SamplingReference, other: SamplingReference) void {
     const total = @min(ref.ref.len, other.ref.len);
     if (ref.ref.len != other.ref.len) {
@@ -817,10 +886,6 @@ pub fn compareSampling(ref: SamplingReference, other: SamplingReference) void {
     std.log.info("full fail frequency: {d}/{d} ({d:.4}%)", .{ full_fail_count, total, full_fail_percent });
     std.log.info("probability success frequency: {d}/{d} ({d:.4}%)", .{ proba_success_count, total, proba_success_percent });
     std.log.info("probability fail frequency: {d}/{d} ({d:.4}%)", .{ proba_fail_count, total, proba_fail_percent });
-}
-
-pub fn compareSamplings(ref: SamplingReference, other: SamplingReference) void {
-    compareSampling(ref, other);
 }
 
 fn samplingTopPCount(sample: SamplingResult) usize {

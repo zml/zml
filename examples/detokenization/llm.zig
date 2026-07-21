@@ -26,7 +26,7 @@ pub const Llm_handler = struct {
         //try main.printSafetensors(registry);
 
         std.log.info("LLM parse config and safetensors", .{});
-        const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
+        const parsed_config = try parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
         defer parsed_config.deinit();
         const config = try parsed_config.value.dupe(zml_handler.allocator);
         errdefer config.deinit(zml_handler.allocator);
@@ -80,6 +80,18 @@ pub const Llm_handler = struct {
             .model_buffers = model_buffers,
             .kv_cache_buffers = kv_cache_buffers,
         };
+    }
+
+    pub fn parseConfig(comptime T: type, allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.json.Parsed(T) {
+        const file = try dir.openFile(io, "config.json", .{});
+        defer file.close(io);
+    
+        var buffer: [256]u8 = undefined;
+        var file_reader = file.reader(io, &buffer);
+        var reader: std.json.Reader = .init(allocator, &file_reader.interface);
+        defer reader.deinit();
+    
+        return try std.json.parseFromTokenSource(T, allocator, &reader, .{ .ignore_unknown_fields = true });
     }
 
     pub fn loadTokenizer(zml_handler: *main.Zml_handler, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
