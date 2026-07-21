@@ -85,12 +85,12 @@ pub const Llm_handler = struct {
     pub fn parseConfig(comptime T: type, allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.json.Parsed(T) {
         const file = try dir.openFile(io, "config.json", .{});
         defer file.close(io);
-    
+
         var buffer: [256]u8 = undefined;
         var file_reader = file.reader(io, &buffer);
         var reader: std.json.Reader = .init(allocator, &file_reader.interface);
         defer reader.deinit();
-    
+
         return try std.json.parseFromTokenSource(T, allocator, &reader, .{ .ignore_unknown_fields = true });
     }
 
@@ -106,13 +106,13 @@ pub const Llm_handler = struct {
     pub fn compileModel(zml_handler: *main.Zml_handler, model: Llm, options: Options) !LlmExes {
         const opts: zml.module.CompilationOptions = .{};
         std.log.info("LLM compile models", .{});
-        
+
         // compile token embeddings
-        
+
         var prefill_embed_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: Llm, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: Llm.EmbedTokensParams = .prefill(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .embedTokens, .{ params.tokens }, opts_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .embedTokens, .{params.tokens}, opts_);
             }
         }.call, .{ zml_handler, model, options, opts });
         var prefill_embed_future_awaited = false;
@@ -121,19 +121,18 @@ pub const Llm_handler = struct {
         var decode_embed_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: Llm, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: Llm.EmbedTokensParams = .decode(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .embedTokens, .{ params.tokens }, opts_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .embedTokens, .{params.tokens}, opts_);
             }
         }.call, .{ zml_handler, model, options, opts });
         var decode_embed_future_awaited = false;
         errdefer if (!decode_embed_future_awaited) if (decode_embed_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
         // compile layers
-        
+
         var prefill_layer_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: TransformerLayer.TransformerParams = .prefill(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
-                    params.x, params.index, params.kv_cache, params.layer }, opts_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{ params.x, params.index, params.kv_cache, params.layer }, opts_);
             }
         }.call, .{ zml_handler, model.layers[0], options, opts });
         var prefill_layer_future_awaited = false;
@@ -142,20 +141,18 @@ pub const Llm_handler = struct {
         var decode_layer_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: TransformerLayer, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: TransformerLayer.TransformerParams = .decode(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
-                    params.x, params.index, params.kv_cache, params.layer }, opts_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{ params.x, params.index, params.kv_cache, params.layer }, opts_);
             }
         }.call, .{ zml_handler, model.layers[0], options, opts });
         var decode_layer_future_awaited = false;
         errdefer if (!decode_layer_future_awaited) if (decode_layer_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
         // compile select/logits/sample/graph embedding
-        
+
         var prefill_select_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: Llm, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: Llm.SelectEmbedsParams = .prefill(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .selectEmbed,
-                    .{ params.embeds, params.pred_index }, opts_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .selectEmbed, .{ params.embeds, params.pred_index }, opts_);
             }
         }.call, .{ zml_handler, model, options, opts });
         var prefill_select_future_awaited = false;
@@ -164,18 +161,16 @@ pub const Llm_handler = struct {
         var logit_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: Llm, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: Llm.ComputeLogitsParams = .exec(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .computeLogits, .{
-                        params.embeds }, opts_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .computeLogits, .{params.embeds}, opts_);
             }
         }.call, .{ zml_handler, model, options, opts });
         var logit_future_awaited = false;
         errdefer if (!logit_future_awaited) if (logit_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
-        
+
         var sample_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: Llm, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: Llm.SampleParams = .exec(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .sampleTokens, .{
-                        params.logits, params.rng }, opts_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .sampleTokens, .{ params.logits, params.rng }, opts_);
             }
         }.call, .{ zml_handler, model, options, opts });
         var sample_future_awaited = false;
@@ -184,15 +179,14 @@ pub const Llm_handler = struct {
         var graph_embed_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: Llm, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: Llm.GraphEmbedParams = .exec(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .graphEmbed, .{
-                        params.embed }, opts_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .graphEmbed, .{params.embed}, opts_);
             }
         }.call, .{ zml_handler, model, options, opts });
         var graph_embed_future_awaited = false;
         errdefer if (!graph_embed_future_awaited) if (graph_embed_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
 
         // wait all parallel compilations terminate
-        
+
         const prefill_embed_exe = try prefill_embed_future.await(zml_handler.io);
         prefill_embed_future_awaited = true;
 
@@ -210,7 +204,7 @@ pub const Llm_handler = struct {
 
         const logits_exe = try logit_future.await(zml_handler.io);
         logit_future_awaited = true;
-        
+
         const sample_exe = try sample_future.await(zml_handler.io);
         sample_future_awaited = true;
 
@@ -250,6 +244,11 @@ pub const Llm_handler = struct {
         KvCache.deinitBuffer(&self.kv_cache_buffers);
     }
 
+    pub fn resetKvCache(self: *Llm_handler, zml_handler: *main.Zml_handler) !void {
+        KvCache.deinitBuffer(&self.kv_cache_buffers);
+        self.kv_cache_buffers = try self.kv_cache.initBuffer(zml_handler.io, zml_handler.platform, .replicated);
+    }
+
     pub fn deinit(self: *Llm_handler, allocator: std.mem.Allocator) void {
         self.unloadBuffers(allocator);
         self.model.deinit(allocator);
@@ -258,9 +257,7 @@ pub const Llm_handler = struct {
         self.tokenizer.deinit();
         self.exes.deinit(allocator);
     }
-
 };
-
 
 pub const TokenIds = stdx.json.Union(union(enum) {
     int: u32,
@@ -407,7 +404,7 @@ pub const LlmExes = struct {
     prefill_embed_exe: zml.Exe,
     prefill_embed_args: zml.Exe.Arguments,
     prefill_embed_results: zml.Exe.Results,
-    
+
     prefill_layer_exe: zml.Exe,
     prefill_layer_args: zml.Exe.Arguments,
     prefill_layer_results: zml.Exe.Results,
@@ -415,19 +412,19 @@ pub const LlmExes = struct {
     prefill_select_exe: zml.Exe,
     prefill_select_args: zml.Exe.Arguments,
     prefill_select_results: zml.Exe.Results,
-    
+
     decode_embed_exe: zml.Exe,
     decode_embed_args: zml.Exe.Arguments,
     decode_embed_results: zml.Exe.Results,
-    
+
     decode_layer_exe: zml.Exe,
     decode_layer_args: zml.Exe.Arguments,
     decode_layer_results: zml.Exe.Results,
-    
+
     logits_exe: zml.Exe,
     logits_args: zml.Exe.Arguments,
     logits_results: zml.Exe.Results,
-    
+
     sample_exe: zml.Exe,
     sample_args: zml.Exe.Arguments,
     sample_results: zml.Exe.Results,
@@ -463,7 +460,6 @@ pub const LlmExes = struct {
         self.graph_embed_results.deinit(allocator);
     }
 };
-
 
 pub const Llm = struct {
     embed_tokens: zml.nn.TokenEmbedding,
@@ -512,7 +508,6 @@ pub const Llm = struct {
         self.lm_head.deinit();
     }
 
-
     pub const EmbedTokensParams = struct {
         tokens: zml.Tensor,
         pub fn prefill(options: Options) EmbedTokensParams {
@@ -522,11 +517,10 @@ pub const Llm = struct {
             return .{ .tokens = .init(.{ .s = 1 }, .u32) };
         }
     };
-    
-    pub fn embedTokens(self: Llm, tokens: zml.Tensor) zml.Tensor {
-        return self.embed_tokens.forward(tokens.withPartialTags(.{ .s })).withPartialTags(.{ .d });
-    }
 
+    pub fn embedTokens(self: Llm, tokens: zml.Tensor) zml.Tensor {
+        return self.embed_tokens.forward(tokens.withPartialTags(.{.s})).withPartialTags(.{.d});
+    }
 
     pub const SelectEmbedsParams = struct {
         embeds: zml.Tensor,
@@ -538,23 +532,23 @@ pub const Llm = struct {
             };
         }
     };
-    
+
     pub fn selectEmbed(_: Llm, embeddings: zml.Tensor, pred_index: zml.Tensor) zml.Tensor {
         return embeddings.dynamicSlice1d(embeddings.axis(.s), .{ .start = pred_index, .len = 1 });
     }
 
-
     pub const GraphEmbedParams = struct {
         embed: zml.Tensor,
         pub fn exec(options: Options) GraphEmbedParams {
-            return .{ .embed = .init(.{ .s = 1, .d = options.hidden_size }, .bf16), };
+            return .{
+                .embed = .init(.{ .s = 1, .d = options.hidden_size }, .bf16),
+            };
         }
     };
-    
+
     pub fn graphEmbed(self: Llm, embed: zml.Tensor) zml.Tensor {
         return self.norm.forward(embed).convert(.f32);
     }
-
 
     pub const ComputeLogitsParams = struct {
         embeds: zml.Tensor,
@@ -562,13 +556,12 @@ pub const Llm = struct {
             return .{ .embeds = .init(.{ .s = 1, .d = options.hidden_size }, .bf16) };
         }
     };
-    
+
     pub fn computeLogits(self: Llm, embed: zml.Tensor) zml.Tensor {
         const normalized_embed = self.norm.forward(embed);
         const logits = self.lm_head.withTags(.{ .voc, .d }).dot(normalized_embed, .d).convert(.f32);
         return logits.transpose(.{ .voc, .s });
     }
-
 
     pub const SampleParams = struct {
         logits: zml.Tensor,
@@ -580,14 +573,12 @@ pub const Llm = struct {
             };
         }
     };
-    
+
     pub fn sampleTokens(self: Llm, logits: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
         const next_token, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, rng);
         return .{ next_token.convert(.u32), new_rng };
     }
-    
 };
-
 
 const TransformerLayer = struct {
     id: u8,
@@ -645,7 +636,7 @@ const TransformerLayer = struct {
             };
         }
     };
-    
+
     pub fn forward(self: TransformerLayer, x: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, layer_index: zml.Tensor) struct { zml.Tensor, KvCache } {
         const x_normalized = self.input_norm.forward(x);
         const q = self.att_layer.q_proj.forward(x_normalized);
@@ -660,7 +651,6 @@ const TransformerLayer = struct {
         const out = x_after_attn.add(delta2);
         return .{ out.reuseBuffer(x), new_cache.reuseBuffer(kv_cache) };
     }
-    
 };
 
 const AttLayer = struct {
@@ -713,10 +703,10 @@ const AttLayer = struct {
         k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
 
         // [0..dim(.s)],  [0..seq_len] in prefill,  { 0 } in decode
-        var pos_index = zml.Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype()).withTags(.{ .s });
+        var pos_index = zml.Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype()).withTags(.{.s});
         // translate to [0..seq_len] in prefill and { token_index } in decode
         pos_index = pos_index.add(token_index.broad(pos_index.shape()));
-        
+
         q = zml.nn.rope(q, pos_index, self.rope_opts);
         k = zml.nn.rope(k, pos_index, self.rope_opts);
 
@@ -734,7 +724,6 @@ const AttLayer = struct {
 
         return .{ attn_output, new_kv_cache.reuseBuffer(kv_cache) };
     }
-
 };
 
 const MlpLayer = struct {
@@ -771,7 +760,7 @@ const RmsNorm = struct {
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) RmsNorm {
         return .{
-            .weights = store.createTensor("weight", .{ .d_out }, .replicated),
+            .weights = store.createTensor("weight", .{.d_out}, .replicated),
             .eps = config.rms_norm_eps,
         };
     }
@@ -782,10 +771,9 @@ const RmsNorm = struct {
 
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
         const normalized = zml.nn.rmsNorm(input, .d, self.eps);
-        return normalized.mul(self.weights.withTags(.{ .d }).broad(input.shape()));
+        return normalized.mul(self.weights.withTags(.{.d}).broad(input.shape()));
     }
 };
-
 
 pub const KvCache = struct {
     k: zml.Tensor,
@@ -823,12 +811,12 @@ pub const KvCache = struct {
         var layer = layer_index;
         layer = if (token_index) |idx| layer.broad(idx.shape()) else layer;
         return if (token_index) |idx| .{
-                .k = self.k.scatterSlices(.{ .layer = layer, .k = idx }, new_k.convert(self.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(self.k),
-                .v = self.v.scatterSlices(.{ .layer = layer, .k = idx }, new_v.convert(self.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(self.v),
-            } else .{
-                .k = self.k.scatterSlices(.{ .layer = layer }, new_k.convert(self.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(self.k),
-                .v = self.v.scatterSlices(.{ .layer = layer }, new_v.convert(self.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(self.v),
-            };
+            .k = self.k.scatterSlices(.{ .layer = layer, .k = idx }, new_k.convert(self.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(self.k),
+            .v = self.v.scatterSlices(.{ .layer = layer, .k = idx }, new_v.convert(self.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(self.v),
+        } else .{
+            .k = self.k.scatterSlices(.{ .layer = layer }, new_k.convert(self.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(self.k),
+            .v = self.v.scatterSlices(.{ .layer = layer }, new_v.convert(self.v.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(self.v),
+        };
     }
 
     pub fn reuseBuffer(self: KvCache, other: KvCache) KvCache {
