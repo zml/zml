@@ -73,10 +73,10 @@ pub fn main(init: std.process.Init) !void {
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
 
-    try vfs.register("file", vfs_file.io());
-    try vfs.register("gs", gcs_vfs.io());
-    try vfs.register("hf", hf_vfs.io());
-    try vfs.register("s3", s3_vfs.io());
+    try vfs.registerBackend("file", vfs_file.backend());
+    try vfs.registerBackend("gs", gcs_vfs.backend());
+    try vfs.registerBackend("hf", hf_vfs.backend());
+    try vfs.registerBackend("s3", s3_vfs.backend());
 
     const io = vfs.io();
 

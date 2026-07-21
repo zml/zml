@@ -706,14 +706,19 @@ const VectoredLoadMetrics = struct {
     weighted_ready_age_us: std.atomic.Value(u64) = .init(0),
     active_reads: std.atomic.Value(usize) = .init(0),
     peak_reads: std.atomic.Value(usize) = .init(0),
-    read_high_water: std.atomic.Value(usize) = .init(0),
+    outstanding_requests: std.atomic.Value(usize) = .init(0),
+    outstanding_request_bytes: std.atomic.Value(u64) = .init(0),
+    request_high_water: std.atomic.Value(usize) = .init(0),
+    post_read_bytes: std.atomic.Value(u64) = .init(0),
+    retired_bytes: std.atomic.Value(u64) = .init(0),
+    weighted_request_latency_us: std.atomic.Value(u64) = .init(0),
     config_epoch: std.atomic.Value(u64) = .init(0),
     probe_epoch: std.atomic.Value(u64) = .init(std.math.maxInt(u64)),
     probe_dimension: std.atomic.Value(u8) = .init(@intFromEnum(ProbeDimension.none)),
     probe_committed_bytes: std.atomic.Value(u64) = .init(0),
     probe_first_ns: std.atomic.Value(u64) = .init(0),
-    probe_active_reads: std.atomic.Value(usize) = .init(0),
-    probe_peak_reads: std.atomic.Value(usize) = .init(0),
+    probe_active_requests: std.atomic.Value(usize) = .init(0),
+    probe_peak_requests: std.atomic.Value(usize) = .init(0),
     probe_mutex: std.Io.Mutex = .init,
 
     const Snapshot = struct {
@@ -733,6 +738,11 @@ const VectoredLoadMetrics = struct {
         weighted_ready_age_us: u64,
         active_reads: usize,
         peak_reads: usize,
+        outstanding_requests: usize,
+        outstanding_request_bytes: u64,
+        post_read_bytes: u64,
+        retired_bytes: u64,
+        weighted_request_latency_us: u64,
         config_epoch: u64,
         probe_epoch: u64,
         probe_committed_bytes: u64,
@@ -756,6 +766,11 @@ const VectoredLoadMetrics = struct {
                 .weighted_ready_age_us = self.weighted_ready_age_us -| previous.weighted_ready_age_us,
                 .active_reads = self.active_reads,
                 .peak_reads = self.peak_reads,
+                .outstanding_requests = self.outstanding_requests,
+                .outstanding_request_bytes = self.outstanding_request_bytes,
+                .post_read_bytes = self.post_read_bytes,
+                .retired_bytes = self.retired_bytes -| previous.retired_bytes,
+                .weighted_request_latency_us = self.weighted_request_latency_us -| previous.weighted_request_latency_us,
                 .config_epoch = self.config_epoch,
                 .probe_epoch = self.probe_epoch,
                 .probe_committed_bytes = self.probe_committed_bytes,
@@ -782,6 +797,11 @@ const VectoredLoadMetrics = struct {
             .weighted_ready_age_us = self.weighted_ready_age_us.load(.acquire),
             .active_reads = self.active_reads.load(.acquire),
             .peak_reads = self.peak_reads.load(.acquire),
+            .outstanding_requests = self.outstanding_requests.load(.acquire),
+            .outstanding_request_bytes = self.outstanding_request_bytes.load(.acquire),
+            .post_read_bytes = self.post_read_bytes.load(.acquire),
+            .retired_bytes = self.retired_bytes.load(.acquire),
+            .weighted_request_latency_us = self.weighted_request_latency_us.load(.acquire),
             .config_epoch = self.config_epoch.load(.acquire),
             .probe_epoch = self.probe_epoch.load(.acquire),
             .probe_committed_bytes = self.probe_committed_bytes.load(.acquire),
@@ -795,30 +815,42 @@ const VectoredLoadMetrics = struct {
         while (active > peak) {
             peak = self.peak_reads.cmpxchgWeak(peak, active, .release, .acquire) orelse break;
         }
-        var high_water = self.read_high_water.load(.acquire);
-        while (active > high_water) {
-            high_water = self.read_high_water.cmpxchgWeak(high_water, active, .release, .acquire) orelse break;
-        }
-        if (epoch != self.probe_epoch.load(.acquire) or
-            self.probe_dimension.load(.acquire) != @intFromEnum(ProbeDimension.read)) return;
-        const probe_active = self.probe_active_reads.fetchAdd(1, .acq_rel) + 1;
-        var probe_peak = self.probe_peak_reads.load(.acquire);
-        while (probe_active > probe_peak) {
-            probe_peak = self.probe_peak_reads.cmpxchgWeak(probe_peak, probe_active, .release, .acquire) orelse break;
-        }
+        _ = epoch;
     }
 
     fn endRead(self: *VectoredLoadMetrics, epoch: u64) void {
         _ = self.active_reads.fetchSub(1, .acq_rel);
-        if (epoch == self.probe_epoch.load(.acquire) and
-            self.probe_dimension.load(.acquire) == @intFromEnum(ProbeDimension.read))
-        {
-            _ = self.probe_active_reads.fetchSub(1, .acq_rel);
-        }
+        _ = epoch;
     }
 
     fn resetReadPeak(self: *VectoredLoadMetrics) void {
         self.peak_reads.store(self.active_reads.load(.acquire), .release);
+    }
+
+    fn beginRequest(self: *VectoredLoadMetrics, epoch: u64, bytes: usize) void {
+        const active = self.outstanding_requests.fetchAdd(1, .acq_rel) + 1;
+        _ = self.outstanding_request_bytes.fetchAdd(@intCast(bytes), .monotonic);
+        var high_water = self.request_high_water.load(.acquire);
+        while (active > high_water) {
+            high_water = self.request_high_water.cmpxchgWeak(high_water, active, .release, .acquire) orelse break;
+        }
+        if (epoch != self.probe_epoch.load(.acquire) or
+            self.probe_dimension.load(.acquire) != @intFromEnum(ProbeDimension.read)) return;
+        const probe_active = self.probe_active_requests.fetchAdd(1, .acq_rel) + 1;
+        var probe_peak = self.probe_peak_requests.load(.acquire);
+        while (probe_active > probe_peak) {
+            probe_peak = self.probe_peak_requests.cmpxchgWeak(probe_peak, probe_active, .release, .acquire) orelse break;
+        }
+    }
+
+    fn endRequest(self: *VectoredLoadMetrics, epoch: u64, bytes: usize) void {
+        _ = self.outstanding_requests.fetchSub(1, .acq_rel);
+        _ = self.outstanding_request_bytes.fetchSub(@intCast(bytes), .monotonic);
+        if (epoch == self.probe_epoch.load(.acquire) and
+            self.probe_dimension.load(.acquire) == @intFromEnum(ProbeDimension.read))
+        {
+            _ = self.probe_active_requests.fetchSub(1, .acq_rel);
+        }
     }
 
     fn prepareProbe(self: *VectoredLoadMetrics, io: std.Io, epoch: u64, dimension: ProbeDimension) void {
@@ -828,8 +860,8 @@ const VectoredLoadMetrics = struct {
         self.probe_dimension.store(@intFromEnum(ProbeDimension.none), .release);
         self.probe_committed_bytes.store(0, .release);
         self.probe_first_ns.store(0, .release);
-        self.probe_active_reads.store(0, .release);
-        self.probe_peak_reads.store(0, .release);
+        self.probe_active_requests.store(0, .release);
+        self.probe_peak_requests.store(0, .release);
         self.probe_dimension.store(@intFromEnum(dimension), .release);
         self.probe_epoch.store(epoch, .release);
         self.config_epoch.store(epoch, .release);
@@ -851,21 +883,16 @@ const VectoredLoadMetrics = struct {
         self.probe_dimension.store(@intFromEnum(ProbeDimension.none), .release);
         self.probe_committed_bytes.store(0, .release);
         self.probe_first_ns.store(0, .release);
-        self.probe_active_reads.store(0, .release);
-        self.probe_peak_reads.store(0, .release);
+        self.probe_active_requests.store(0, .release);
+        self.probe_peak_requests.store(0, .release);
     }
 
-    fn recordProbeCommit(self: *VectoredLoadMetrics, io: std.Io, read_epoch: u64, dma_epoch: u64, bytes: usize) void {
+    fn recordProbeCommit(self: *VectoredLoadMetrics, io: std.Io, dimension: ProbeDimension, epoch: u64, bytes: usize) void {
         self.probe_mutex.lockUncancelable(io);
         defer self.probe_mutex.unlock(io);
         const probe_epoch = self.probe_epoch.load(.acquire);
-        const dimension: ProbeDimension = @enumFromInt(self.probe_dimension.load(.acquire));
-        const matches = switch (dimension) {
-            .none => false,
-            .read => read_epoch == probe_epoch,
-            .dma => dma_epoch == probe_epoch,
-        };
-        if (!matches) return;
+        const active_dimension: ProbeDimension = @enumFromInt(self.probe_dimension.load(.acquire));
+        if (active_dimension != dimension or epoch != probe_epoch) return;
         _ = self.probe_committed_bytes.fetchAdd(@intCast(bytes), .monotonic);
         const now_ns: u64 = @intCast(@max(std.Io.Timestamp.now(io, .awake).nanoseconds, 1));
         _ = self.probe_first_ns.cmpxchgStrong(0, now_ns, .release, .monotonic);
@@ -981,34 +1008,50 @@ const VectoredTensorTransfer = struct {
     }
 };
 
-const AdaptiveReadGate = struct {
+const AdaptiveRequestGate = struct {
     limit: std.atomic.Value(usize),
+    in_use: usize = 0,
     closed: std.atomic.Value(bool) = .init(false),
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
 
-    fn init(limit: usize) AdaptiveReadGate {
+    fn init(limit: usize) AdaptiveRequestGate {
         return .{ .limit = .init(limit) };
     }
 
-    fn wait(self: *AdaptiveReadGate, io: std.Io, worker_index: usize) bool {
-        if (worker_index < self.limit.load(.acquire)) return !self.closed.load(.acquire);
+    fn acquire(self: *AdaptiveRequestGate, io: std.Io) bool {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        while (!self.closed.load(.acquire) and worker_index >= self.limit.load(.acquire)) {
+        while (!self.closed.load(.acquire) and self.in_use >= self.limit.load(.acquire)) {
             self.condition.waitUncancelable(io, &self.mutex);
         }
-        return !self.closed.load(.acquire);
+        if (self.closed.load(.acquire)) return false;
+        self.in_use += 1;
+        return true;
     }
 
-    fn setLimit(self: *AdaptiveReadGate, io: std.Io, new_limit: usize) void {
+    fn release(self: *AdaptiveRequestGate, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
-        const old_limit = self.limit.swap(new_limit, .acq_rel);
-        if (new_limit > old_limit) self.condition.broadcast(io);
+        std.debug.assert(self.in_use > 0);
+        self.in_use -= 1;
+        self.condition.broadcast(io);
     }
 
-    fn close(self: *AdaptiveReadGate, io: std.Io) void {
+    fn setLimit(self: *AdaptiveRequestGate, io: std.Io, new_limit: usize) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        _ = self.limit.swap(new_limit, .acq_rel);
+        self.condition.broadcast(io);
+    }
+
+    fn inUse(self: *AdaptiveRequestGate, io: std.Io) usize {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.in_use;
+    }
+
+    fn close(self: *AdaptiveRequestGate, io: std.Io) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         self.closed.store(true, .release);
@@ -1017,21 +1060,83 @@ const AdaptiveReadGate = struct {
 };
 
 const VectoredLoadPipeline = struct {
+    const RequestContext = struct {
+        pipeline: *VectoredLoadPipeline,
+        started_at: std.Io.Timestamp,
+        read_finished_at_ns: std.atomic.Value(u64) = .init(0),
+        pending: std.atomic.Value(usize) = .init(1), // scheduling sentinel
+        completed: std.atomic.Value(bool) = .init(false),
+        successful: std.atomic.Value(bool) = .init(false),
+        read_epoch: u64,
+        len: usize,
+
+        fn addBlock(self: *RequestContext) void {
+            _ = self.pending.fetchAdd(1, .acq_rel);
+        }
+
+        fn markReadFinished(self: *RequestContext) void {
+            const now_ns: u64 = @intCast(@max(std.Io.Timestamp.now(self.pipeline.io, .awake).nanoseconds, 1));
+            self.read_finished_at_ns.store(now_ns, .release);
+            _ = self.pipeline.metrics.post_read_bytes.fetchAdd(@intCast(self.len), .monotonic);
+        }
+
+        fn markSuccessful(self: *RequestContext) void {
+            self.successful.store(true, .release);
+        }
+
+        fn finishScheduling(self: *RequestContext) void {
+            self.completeOne();
+        }
+
+        fn completeBlock(self: *RequestContext) void {
+            self.completeOne();
+        }
+
+        fn completeOne(self: *RequestContext) void {
+            const previous = self.pending.fetchSub(1, .acq_rel);
+            std.debug.assert(previous > 0);
+            if (previous != 1) return;
+
+            if (self.read_finished_at_ns.load(.acquire) != 0) {
+                _ = self.pipeline.metrics.post_read_bytes.fetchSub(@intCast(self.len), .monotonic);
+            }
+            if (self.successful.load(.acquire)) {
+                const elapsed = self.started_at.untilNow(self.pipeline.io, .awake);
+                const elapsed_us: u64 = @intCast(@max(elapsed.nanoseconds, 0) / std.time.ns_per_us);
+                _ = self.pipeline.metrics.retired_bytes.fetchAdd(@intCast(self.len), .monotonic);
+                _ = self.pipeline.metrics.weighted_request_latency_us.fetchAdd(
+                    elapsed_us *| @as(u64, @intCast(self.len)),
+                    .monotonic,
+                );
+                self.pipeline.metrics.recordProbeCommit(
+                    self.pipeline.io,
+                    .read,
+                    self.read_epoch,
+                    self.len,
+                );
+            }
+            self.pipeline.metrics.endRequest(self.read_epoch, self.len);
+            self.completed.store(true, .release);
+            self.pipeline.request_gate.release(self.pipeline.io);
+        }
+    };
+
     const BlockContext = struct {
         pipeline: *VectoredLoadPipeline,
+        request: *RequestContext,
         lease: mem.DmaBlockPool.Lease,
         ready_at: std.Io.Timestamp,
         pending_submissions: usize,
         read_epoch: u64,
         len: usize,
-        admission_released: std.atomic.Value(bool) = .init(false),
+        completion_reported: std.atomic.Value(bool) = .init(false),
 
         fn complete(self: *BlockContext) void {
             self.lease.complete();
             if (self.lease.isComplete() and
-                self.admission_released.cmpxchgStrong(false, true, .acq_rel, .acquire) == null)
+                self.completion_reported.cmpxchgStrong(false, true, .acq_rel, .acquire) == null)
             {
-                self.pipeline.releaseReadAdmission(1);
+                self.request.completeBlock();
             }
         }
     };
@@ -1066,19 +1171,24 @@ const VectoredLoadPipeline = struct {
         ready_entries: usize,
         ready_oldest_age_ns: u64,
         ready_old_entries: usize,
+        post_read_requests: usize,
+        post_read_oldest_age_ns: u64,
         any_device_saturated: bool,
         probe_capacity_active: bool,
+        completed_device_mask: u64,
     };
 
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
     pool: *mem.DmaBlockPool,
-    read_gate: *AdaptiveReadGate,
+    read_gate: *AdaptiveRequestGate,
+    request_gate: *AdaptiveRequestGate,
     block_size: usize,
     metrics: *VectoredLoadMetrics,
     first_error: std.atomic.Value(u16) = .init(0),
     metadata_mutex: std.Io.Mutex = .init,
+    requests: std.ArrayListUnmanaged(*RequestContext) = .empty,
     blocks: std.ArrayListUnmanaged(*BlockContext) = .empty,
     ready_queues: []std.ArrayListUnmanaged(ReadyTransfer),
     events: std.ArrayListUnmanaged(*EventContext) = .empty,
@@ -1090,6 +1200,8 @@ const VectoredLoadPipeline = struct {
     dma_probe_epoch: u64 = std.math.maxInt(u64),
     dma_probe_required_mask: u64 = 0,
     used_device_mask: u64 = 0,
+    expected_device_mask: std.atomic.Value(u64) = .init(0),
+    completed_device_mask: u64 = 0,
     next_device: usize = 0,
     pumping: bool = false,
     active_events: usize = 0,
@@ -1099,25 +1211,17 @@ const VectoredLoadPipeline = struct {
     active_slot_ns: u64 = 0,
     capacity_slot_ns: u64 = 0,
     dma_done: std.Io.Event = .unset,
-    admission_mutex: std.Io.Mutex = .init,
-    admission_condition: std.Io.Condition = .init,
-    admission_limit_blocks: usize,
-    admission_in_use_blocks: usize = 0,
-    admission_hard_blocks: usize,
-    request_blocks: usize,
 
     fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
         pool: *mem.DmaBlockPool,
-        read_gate: *AdaptiveReadGate,
+        read_gate: *AdaptiveRequestGate,
+        request_gate: *AdaptiveRequestGate,
         block_size: usize,
         metrics: *VectoredLoadMetrics,
         initial_dma_limit: usize,
-        initial_read_limit: usize,
-        read_request_size: usize,
-        max_pinned_bytes: usize,
     ) !VectoredLoadPipeline {
         std.debug.assert(platform.devices.len <= 64);
         const ready_queues = try allocator.alloc(std.ArrayListUnmanaged(ReadyTransfer), platform.devices.len);
@@ -1141,6 +1245,7 @@ const VectoredLoadPipeline = struct {
             .platform = platform,
             .pool = pool,
             .read_gate = read_gate,
+            .request_gate = request_gate,
             .block_size = block_size,
             .metrics = metrics,
             .ready_queues = ready_queues,
@@ -1150,14 +1255,6 @@ const VectoredLoadPipeline = struct {
             .probe_peak_by_device = probe_peak_by_device,
             .dma_limit = .init(initial_dma_limit),
             .slot_sample_at = .now(io, .awake),
-            .admission_limit_blocks = readAdmissionBlocks(
-                block_size,
-                max_pinned_bytes,
-                read_request_size,
-                initial_read_limit,
-            ),
-            .admission_hard_blocks = max_pinned_bytes / block_size,
-            .request_blocks = std.math.divCeil(usize, read_request_size, block_size) catch unreachable,
         };
     }
 
@@ -1171,10 +1268,13 @@ const VectoredLoadPipeline = struct {
         }
         for (self.blocks.items) |block| {
             std.debug.assert(block.lease.isComplete());
-            std.debug.assert(block.admission_released.load(.acquire));
+            std.debug.assert(block.completion_reported.load(.acquire));
             self.allocator.destroy(block);
         }
-        std.debug.assert(self.admission_in_use_blocks == 0);
+        for (self.requests.items) |request| {
+            std.debug.assert(request.completed.load(.acquire));
+            self.allocator.destroy(request);
+        }
         for (self.ready_queues) |*queue| queue.deinit(self.allocator);
         self.allocator.free(self.ready_queues);
         self.allocator.free(self.active_by_device);
@@ -1183,6 +1283,7 @@ const VectoredLoadPipeline = struct {
         self.allocator.free(self.probe_peak_by_device);
         self.events.deinit(self.allocator);
         self.blocks.deinit(self.allocator);
+        self.requests.deinit(self.allocator);
     }
 
     fn failed(self: *const VectoredLoadPipeline) bool {
@@ -1198,83 +1299,48 @@ const VectoredLoadPipeline = struct {
         if (self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic) == null) {
             self.pool.close(self.io);
             self.read_gate.close(self.io);
-            self.admission_mutex.lockUncancelable(self.io);
-            self.admission_condition.broadcast(self.io);
-            self.admission_mutex.unlock(self.io);
+            self.request_gate.close(self.io);
         }
     }
 
-    fn readAdmissionBlocks(block_size: usize, max_pinned_bytes: usize, request_size: usize, read_limit: usize) usize {
-        const floor_bytes: usize = 64 * 1024 * 1024;
-        const desired_bytes = @max(floor_bytes, read_limit *| request_size);
-        return @min(max_pinned_bytes / block_size, std.math.divCeil(usize, desired_bytes, block_size) catch unreachable);
-    }
-
-    fn acquireReadAdmission(self: *VectoredLoadPipeline, blocks: usize) !u64 {
-        if (blocks == 0) return 0;
-        if (blocks > self.admission_hard_blocks) return error.RequestExceedsCapacity;
-        const started: std.Io.Timestamp = .now(self.io, .awake);
-        var waited = false;
-        self.admission_mutex.lockUncancelable(self.io);
-        defer self.admission_mutex.unlock(self.io);
-        while (true) {
-            if (self.failed()) return error.Closed;
-            const limit = self.admission_limit_blocks;
-            const fits = if (blocks > limit)
-                self.admission_in_use_blocks == 0
-            else
-                self.admission_in_use_blocks + blocks <= limit;
-            if (fits) break;
-            waited = true;
-            self.admission_condition.waitUncancelable(self.io, &self.admission_mutex);
-        }
-        self.admission_in_use_blocks += blocks;
-        if (!waited) return 0;
-        return @intCast(@max(started.untilNow(self.io, .awake).nanoseconds, 0));
-    }
-
-    fn releaseReadAdmission(self: *VectoredLoadPipeline, blocks: usize) void {
-        if (blocks == 0) return;
-        self.admission_mutex.lockUncancelable(self.io);
-        defer self.admission_mutex.unlock(self.io);
-        std.debug.assert(blocks <= self.admission_in_use_blocks);
-        self.admission_in_use_blocks -= blocks;
-        self.admission_condition.broadcast(self.io);
-    }
-
-    fn setReadAdmissionLimit(self: *VectoredLoadPipeline, read_limit: usize) void {
-        self.admission_mutex.lockUncancelable(self.io);
-        defer self.admission_mutex.unlock(self.io);
-        self.admission_limit_blocks = @min(
-            self.admission_hard_blocks,
-            @max(
-                std.math.divCeil(usize, 64 * 1024 * 1024, self.block_size) catch unreachable,
-                read_limit *| self.request_blocks,
-            ),
-        );
-        self.admission_condition.broadcast(self.io);
-    }
-
-    fn readAdmissionCapacityBytes(self: *VectoredLoadPipeline) usize {
-        self.admission_mutex.lockUncancelable(self.io);
-        defer self.admission_mutex.unlock(self.io);
-        return self.admission_limit_blocks * self.block_size;
-    }
-
-    fn registerBlock(self: *VectoredLoadPipeline, data: []u8, references: usize, read_epoch: u64, len: usize) !*BlockContext {
-        const block = try self.allocator.create(BlockContext);
-        errdefer self.allocator.destroy(block);
-        block.* = .{
+    fn registerRequest(self: *VectoredLoadPipeline, read_epoch: u64, len: usize) !*RequestContext {
+        const request = try self.allocator.create(RequestContext);
+        errdefer self.allocator.destroy(request);
+        request.* = .{
             .pipeline = self,
-            .lease = .init(self.pool, self.io, data, references),
-            .ready_at = .now(self.io, .awake),
-            .pending_submissions = references,
+            .started_at = .now(self.io, .awake),
             .read_epoch = read_epoch,
             .len = len,
         };
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
+        try self.requests.append(self.allocator, request);
+        self.metrics.beginRequest(read_epoch, len);
+        return request;
+    }
+
+    fn expectTensorTargets(self: *VectoredLoadPipeline, tensor: *const VectoredTensorTransfer) void {
+        for (tensor.targets) |target| {
+            _ = self.expected_device_mask.fetchOr(@as(u64, 1) << @intCast(target.device_index), .release);
+        }
+    }
+
+    fn registerBlock(self: *VectoredLoadPipeline, request: *RequestContext, data: []u8, references: usize, len: usize) !*BlockContext {
+        const block = try self.allocator.create(BlockContext);
+        errdefer self.allocator.destroy(block);
+        block.* = .{
+            .pipeline = self,
+            .request = request,
+            .lease = .init(self.pool, self.io, data, references),
+            .ready_at = .now(self.io, .awake),
+            .pending_submissions = references,
+            .read_epoch = request.read_epoch,
+            .len = len,
+        };
+        self.metadata_mutex.lockUncancelable(self.io);
+        defer self.metadata_mutex.unlock(self.io);
         try self.blocks.append(self.allocator, block);
+        request.addBlock();
         return block;
     }
 
@@ -1493,7 +1559,7 @@ const VectoredLoadPipeline = struct {
                     _ = ctx_.pipeline.metrics.committed_bytes.fetchAdd(ctx_.bytes, .monotonic);
                     _ = ctx_.pipeline.metrics.dma_ns.fetchAdd(elapsed_ns, .monotonic);
                     _ = ctx_.pipeline.metrics.weighted_dma_latency_us.fetchAdd(elapsed_us *| @as(u64, @intCast(ctx_.bytes)), .monotonic);
-                    ctx_.pipeline.metrics.recordProbeCommit(ctx_.pipeline.io, ctx_.read_epoch, ctx_.dma_epoch, ctx_.bytes);
+                    ctx_.pipeline.metrics.recordProbeCommit(ctx_.pipeline.io, .dma, ctx_.dma_epoch, ctx_.bytes);
                 }
                 ctx_.block.complete();
                 ctx_.pipeline.eventCompleted(ctx_.device_index, ctx_.dma_epoch);
@@ -1513,6 +1579,7 @@ const VectoredLoadPipeline = struct {
         std.debug.assert(self.active_by_device[device_index] > 0);
         self.active_events -= 1;
         self.active_by_device[device_index] -= 1;
+        self.completed_device_mask |= @as(u64, 1) << @intCast(device_index);
         if (dma_epoch == self.dma_probe_epoch) {
             std.debug.assert(self.probe_active_by_device[device_index] > 0);
             self.probe_active_by_device[device_index] -= 1;
@@ -1605,6 +1672,16 @@ const VectoredLoadPipeline = struct {
                 if (age > 250 * std.time.ns_per_ms) ready_old_entries += 1;
             }
         }
+        const now_ns: u64 = @intCast(@max(std.Io.Timestamp.now(self.io, .awake).nanoseconds, 1));
+        var post_read_requests: usize = 0;
+        var post_read_oldest_age_ns: u64 = 0;
+        for (self.requests.items) |request| {
+            if (request.completed.load(.acquire)) continue;
+            const read_finished_at = request.read_finished_at_ns.load(.acquire);
+            if (read_finished_at == 0) continue;
+            post_read_requests += 1;
+            post_read_oldest_age_ns = @max(post_read_oldest_age_ns, now_ns -| read_finished_at);
+        }
         const limit = self.dma_limit.load(.acquire);
         var max_device_active: usize = 0;
         var peak_device_active: usize = 0;
@@ -1635,9 +1712,12 @@ const VectoredLoadPipeline = struct {
             .ready_entries = ready_entries,
             .ready_oldest_age_ns = ready_oldest_age_ns,
             .ready_old_entries = ready_old_entries,
+            .post_read_requests = post_read_requests,
+            .post_read_oldest_age_ns = post_read_oldest_age_ns,
             .any_device_saturated = any_device_saturated,
             .probe_capacity_active = self.dma_probe_required_mask != 0 and
                 (active_mask & self.dma_probe_required_mask) == self.dma_probe_required_mask,
+            .completed_device_mask = self.completed_device_mask,
         };
     }
 
@@ -1657,12 +1737,13 @@ const VectoredLoadPipeline = struct {
 
 const VectoredReadRequest = struct {
     fn run(
+        request: *VectoredLoadPipeline.RequestContext,
         tensor: *VectoredTensorTransfer,
         pipeline: *VectoredLoadPipeline,
         source_offset: usize,
         request_len: usize,
-        read_epoch: u64,
     ) void {
+        defer request.finishScheduling();
         if (pipeline.failed()) return;
 
         const plan = VectoredRequestPlan.init(
@@ -1676,7 +1757,11 @@ const VectoredReadRequest = struct {
             return;
         };
         defer plan.deinit(pipeline.allocator);
-        if (plan.blocks.len == 0) return;
+        if (plan.blocks.len == 0) {
+            request.markReadFinished();
+            request.markSuccessful();
+            return;
+        }
 
         const leased = pipeline.allocator.alloc([]u8, plan.blocks.len) catch {
             pipeline.recordError(error.OutOfMemory);
@@ -1685,20 +1770,12 @@ const VectoredReadRequest = struct {
         defer pipeline.allocator.free(leased);
         @memset(leased, &.{});
 
-        var admission_blocks = plan.blocks.len;
-        const admission_wait_ns = pipeline.acquireReadAdmission(admission_blocks) catch |err| {
-            pipeline.recordError(err);
-            return;
-        };
-        defer pipeline.releaseReadAdmission(admission_blocks);
-
         const pool_wait_ns = pipeline.pool.acquireMany(pipeline.io, leased) catch |err| {
             pipeline.recordError(err);
             return;
         };
-        const wait_ns = admission_wait_ns +| pool_wait_ns;
-        if (wait_ns > 0) _ = pipeline.metrics.pool_waits.fetchAdd(1, .monotonic);
-        _ = pipeline.metrics.pool_wait_ns.fetchAdd(wait_ns, .monotonic);
+        if (pool_wait_ns > 0) _ = pipeline.metrics.pool_waits.fetchAdd(1, .monotonic);
+        _ = pipeline.metrics.pool_wait_ns.fetchAdd(pool_wait_ns, .monotonic);
         defer for (leased) |block| {
             if (block.len != 0) pipeline.pool.release(pipeline.io, block);
         };
@@ -1713,15 +1790,17 @@ const VectoredReadRequest = struct {
             iovec.* = leased[segment.block_index][segment.block_offset..][0..segment.len];
         }
 
-        pipeline.metrics.beginRead(read_epoch);
+        if (!pipeline.read_gate.acquire(pipeline.io)) return;
+        pipeline.metrics.beginRead(request.read_epoch);
         const read_started: std.Io.Timestamp = .now(pipeline.io, .awake);
-        tensor.reader.readPositionalAllV(iovecs, source_offset) catch |err| {
-            pipeline.metrics.endRead(read_epoch);
+        const read_result = tensor.reader.readPositionalAllV(iovecs, source_offset);
+        const read_elapsed = read_started.untilNow(pipeline.io, .awake);
+        pipeline.metrics.endRead(request.read_epoch);
+        pipeline.read_gate.release(pipeline.io);
+        read_result catch |err| {
             pipeline.recordError(err);
             return;
         };
-        const read_elapsed = read_started.untilNow(pipeline.io, .awake);
-        pipeline.metrics.endRead(read_epoch);
         const read_elapsed_ns: u64 = @intCast(@max(read_elapsed.nanoseconds, 0));
         const read_elapsed_us: u64 = read_elapsed_ns / std.time.ns_per_us;
         _ = pipeline.metrics.read_operations.fetchAdd(1, .monotonic);
@@ -1729,16 +1808,16 @@ const VectoredReadRequest = struct {
         _ = pipeline.metrics.read_ns.fetchAdd(read_elapsed_ns, .monotonic);
         _ = pipeline.metrics.weighted_read_latency_us.fetchAdd(read_elapsed_us *| @as(u64, @intCast(request_len)), .monotonic);
         tensor.recordReadProgress(request_len);
+        request.markReadFinished();
 
         if (pipeline.failed()) return;
         for (plan.blocks, 0..) |block_plan, i| {
             const references: usize = @popCount(block_plan.writer_mask);
-            const block = pipeline.registerBlock(leased[i], references, read_epoch, block_plan.len) catch {
+            const block = pipeline.registerBlock(request, leased[i], references, block_plan.len) catch {
                 pipeline.recordError(error.OutOfMemory);
                 return;
             };
             leased[i] = &.{};
-            admission_blocks -= 1;
             pipeline.enqueueBlock(
                 tensor,
                 block,
@@ -1752,6 +1831,7 @@ const VectoredReadRequest = struct {
                 return;
             };
         }
+        request.markSuccessful();
     }
 };
 
@@ -1779,12 +1859,15 @@ const AdaptiveVectoredController = struct {
     const Sample = struct {
         now_ns: u64,
         committed_goodput: f64 = 0,
+        logical_goodput: f64 = 0,
         probe_goodput: f64 = 0,
         probe_aggregate_goodput: f64 = 0,
         probe_committed_bytes: u64 = 0,
         probe_elapsed_ns: u64 = 0,
         dma_latency_us: f64 = 0,
         dma_latency_reliable: bool = false,
+        read_latency_us: f64 = 0,
+        read_latency_reliable: bool = false,
         dma_starvation_ratio: f64 = 1,
         read_saturated: bool = false,
         source_stalled: bool = false,
@@ -1792,15 +1875,16 @@ const AdaptiveVectoredController = struct {
         dma_probe_capacity: bool = false,
         ready_pressure: bool = false,
         slow_reads: bool = false,
+        source_throttled: bool = false,
         hard_dma_pressure: bool = false,
         allow_probe: bool = true,
+        allow_resource_probe: bool = true,
     };
 
     const Decision = struct {
         const Action = enum {
             none,
             read_bootstrap,
-            read_startup_grow,
             startup_settle,
             read_probe_start,
             read_probe_keep,
@@ -1826,6 +1910,8 @@ const AdaptiveVectoredController = struct {
             starvation_improved,
             ready_pressure,
             dma_pressure,
+            source_throttle,
+            starvation_unresolved,
             capacity_not_exercised,
             finite_tail,
         };
@@ -1847,10 +1933,14 @@ const AdaptiveVectoredController = struct {
     epoch: u64 = 0,
     stable_goodput: f64 = 0,
     peak_goodput: f64 = 0,
+    stable_logical_goodput: f64 = 0,
+    peak_logical_goodput: f64 = 0,
     stable_dma_latency_us: f64 = 0,
+    stable_read_latency_us: f64 = 0,
     dma_started: bool = false,
     slow_source_observed: bool = false,
-    representative_startup_read_grown: bool = false,
+    startup_read_probes: u8 = 0,
+    max_startup_read_probes: u8 = 1,
     representative_windows: u8 = 0,
     dma_fed_windows: u8 = 0,
     hard_dma_windows: u8 = 0,
@@ -1871,7 +1961,7 @@ const AdaptiveVectoredController = struct {
             .max_read = max_read,
             .max_dma = max_dma,
             .limits = .{
-                .read = @min(8, max_read),
+                .read = @min(12, max_read),
                 .dma = @min(8, max_dma),
             },
         };
@@ -1884,6 +1974,18 @@ const AdaptiveVectoredController = struct {
             self.hard_dma_windows = @min(2, self.hard_dma_windows +| 1);
         } else {
             self.hard_dma_windows = 0;
+        }
+
+        if (sample.source_throttled and self.limits.read > 1) {
+            if (self.probe) |probe| self.limits = probe.baseline;
+            self.probe = null;
+            self.mode = .steady;
+            self.epoch += 1;
+            self.limits.read = @max(@as(usize, 1), @as(usize, @intFromFloat(@floor(0.70 * @as(f64, @floatFromInt(self.limits.read))))));
+            self.last_probe_ns = sample.now_ns;
+            self.performance_probe_blocked_until_ns = sample.now_ns +| 5 * std.time.ns_per_s;
+            self.pressure_backoff_blocked_until_ns = sample.now_ns +| 5 * std.time.ns_per_s;
+            return self.decision(.read_backoff, true, .source_throttle, null, true);
         }
 
         if (self.probe) |probe| {
@@ -1931,6 +2033,19 @@ const AdaptiveVectoredController = struct {
                     0.95 * self.stable_dma_latency_us + 0.05 * sample.dma_latency_us;
             }
         }
+        if (sample.logical_goodput > 0) {
+            self.stable_logical_goodput = if (self.stable_logical_goodput == 0)
+                sample.logical_goodput
+            else
+                0.90 * self.stable_logical_goodput + 0.10 * sample.logical_goodput;
+            self.peak_logical_goodput = @max(self.peak_logical_goodput, self.stable_logical_goodput);
+        }
+        if (sample.read_latency_reliable and sample.read_latency_us > 0) {
+            self.stable_read_latency_us = if (self.stable_read_latency_us == 0)
+                sample.read_latency_us
+            else
+                0.95 * self.stable_read_latency_us + 0.05 * sample.read_latency_us;
+        }
         if (sample.committed_goodput > 0 and sample.dma_saturated and
             (self.dma_started or self.mode == .steady))
         {
@@ -1952,8 +2067,12 @@ const AdaptiveVectoredController = struct {
         const performance_due = sample.now_ns >= self.performance_probe_blocked_until_ns and
             (self.mode == .startup or sample.now_ns -| self.last_probe_ns >= 2 * std.time.ns_per_s);
         const baseline = if (self.stable_goodput > 0) self.stable_goodput else sample.committed_goodput;
+        const logical_baseline = if (self.stable_logical_goodput > 0)
+            self.stable_logical_goodput
+        else
+            sample.logical_goodput;
 
-        if (sample.allow_probe and self.mode == .startup and sample.source_stalled and
+        if (!self.dma_started and sample.allow_probe and self.mode == .startup and sample.source_stalled and
             sample.read_saturated and self.limits.read < self.max_read)
         {
             // There is no representative output to score yet. Double read
@@ -1967,25 +2086,19 @@ const AdaptiveVectoredController = struct {
         }
 
         if (self.dma_started and sample.allow_probe and self.mode == .startup and
-            !self.representative_startup_read_grown and
+            self.startup_read_probes < self.max_startup_read_probes and
             sample.dma_starvation_ratio > 0.10 and sample.read_saturated and
             !sample.ready_pressure and self.limits.read < self.max_read)
         {
-            // Skip one serialized 200 ms score while establishing an initial
-            // representative read width. A fast source takes one gradual
-            // step; a source already observed below 1.5 GiB/s per request
-            // opens to the caller's cap. Further growth is scored after
-            // startup because an empty ready queue at a burst boundary is not
-            // sufficient proof that the current width is too small.
-            self.epoch += 1;
-            self.representative_startup_read_grown = true;
-            self.limits.read = if (self.slow_source_observed)
-                self.max_read
-            else
-                self.increase(self.limits.read, self.max_read);
-            self.last_probe_ns = sample.now_ns;
-            self.last_startup_change_ns = sample.now_ns;
-            return self.decision(.read_startup_grow, true, .none, null, false);
+            // Remote sources have already had a chance to bootstrap while no
+            // source response existed. Once PJRT is warm, every further source
+            // increase is scored. A single-device load gets one startup probe;
+            // a multi-device load gets one additional chance to feed its
+            // independent destination queues before the steady-state cadence.
+            self.startup_read_probes += 1;
+            var candidate = self.limits;
+            candidate.read = self.increase(self.limits.read, self.max_read);
+            return self.startProbe(.read, .increase, candidate, logical_baseline, sample, .read_probe_start);
         }
 
         if (self.dma_started and self.mode == .startup and self.representative_windows >= 2 and
@@ -2004,7 +2117,7 @@ const AdaptiveVectoredController = struct {
         {
             var candidate = self.limits;
             candidate.read = self.increase(self.limits.read, self.max_read);
-            return self.startProbe(.read, .increase, candidate, baseline, sample, .read_probe_start);
+            return self.startProbe(.read, .increase, candidate, logical_baseline, sample, .read_probe_start);
         }
 
         // Do not compare startup initialization or a single fed burst with a
@@ -2041,20 +2154,22 @@ const AdaptiveVectoredController = struct {
             return self.decision(.read_backoff, true, .ready_pressure, null, false);
         }
 
-        const resource_due = sample.allow_probe and self.mode == .steady and sample.dma_starvation_ratio <= 0.10 and
+        const resource_due = sample.allow_probe and sample.allow_resource_probe and self.mode == .steady and
+            sample.dma_starvation_ratio <= 0.10 and
             sample.now_ns -| self.last_dma_starvation_ns >= 2 * std.time.ns_per_s and
             sample.now_ns >= self.resource_probe_blocked_until_ns and
             sample.now_ns -| self.last_resource_probe_ns >= 2 * std.time.ns_per_s;
         if (resource_due) {
-            const resource_baseline = @max(self.peak_goodput, self.stable_goodput);
             if (self.limits.read > 1) {
                 var candidate = self.limits;
                 candidate.read = @max(@as(usize, 1), std.math.divCeil(usize, self.limits.read, 2) catch unreachable);
+                const resource_baseline = @max(self.peak_logical_goodput, self.stable_logical_goodput);
                 return self.startProbe(.read, .reduce_resource, candidate, resource_baseline, sample, .read_reduce_start);
             }
             if (self.limits.dma > 1) {
                 var candidate = self.limits;
                 candidate.dma -= @max(@as(usize, 1), std.math.sqrt(self.limits.dma));
+                const resource_baseline = @max(self.peak_goodput, self.stable_goodput);
                 return self.startProbe(.dma, .reduce_resource, candidate, resource_baseline, sample, .dma_reduce_start);
             }
         }
@@ -2082,7 +2197,10 @@ const AdaptiveVectoredController = struct {
         self.dma_fed_windows = 0;
         self.stable_goodput = 0;
         self.peak_goodput = 0;
+        self.stable_logical_goodput = 0;
+        self.peak_logical_goodput = 0;
         self.stable_dma_latency_us = 0;
+        self.stable_read_latency_us = 0;
         self.last_startup_change_ns = now_ns;
     }
 
@@ -2142,16 +2260,23 @@ const AdaptiveVectoredController = struct {
         const no_regression = probe.baseline_goodput == 0 or candidate_goodput >= 0.97 * probe.baseline_goodput;
         const starvation_improved = sample.dma_starvation_ratio <= 0.10 or
             sample.dma_starvation_ratio <= 0.75 * probe.baseline_starvation;
+        const starvation_unresolved = probe.baseline_starvation > 0.10 and
+            sample.dma_starvation_ratio > 0.10;
         const read_pressure_ok = !sample.ready_pressure or
             (self.slow_source_observed and sample.now_ns -| self.last_dma_starvation_ns < 2 * std.time.ns_per_s);
+        const dimension_peak = switch (probe.dimension) {
+            .read => self.peak_logical_goodput,
+            .dma => self.peak_goodput,
+        };
         const keep = switch (probe.kind) {
             .increase => switch (probe.dimension) {
                 .read => no_regression and read_pressure_ok and
-                    (probe.baseline_goodput == 0 or candidate_goodput >= 1.03 * probe.baseline_goodput or starvation_improved),
+                    (probe.baseline_goodput == 0 or candidate_goodput >= 1.03 * probe.baseline_goodput or
+                        starvation_improved or (self.mode == .startup and starvation_unresolved)),
                 .dma => !sample.hard_dma_pressure and
                     (probe.baseline_goodput == 0 or candidate_goodput >= 1.03 * probe.baseline_goodput),
             },
-            .reduce_resource => candidate_goodput >= 0.97 * @max(probe.baseline_goodput, self.peak_goodput) and
+            .reduce_resource => candidate_goodput >= 0.97 * @max(probe.baseline_goodput, dimension_peak) and
                 sample.dma_starvation_ratio <= 0.10 and !sample.ready_pressure and !sample.hard_dma_pressure,
         };
 
@@ -2159,14 +2284,25 @@ const AdaptiveVectoredController = struct {
         self.last_probe_ns = sample.now_ns;
         const action = probeAction(probe.dimension, probe.kind, keep);
         if (keep) {
-            self.stable_goodput = candidate_goodput;
-            self.peak_goodput = @max(self.peak_goodput, candidate_goodput);
+            switch (probe.dimension) {
+                .read => {
+                    self.stable_logical_goodput = candidate_goodput;
+                    self.peak_logical_goodput = @max(self.peak_logical_goodput, candidate_goodput);
+                },
+                .dma => {
+                    self.stable_goodput = candidate_goodput;
+                    self.peak_goodput = @max(self.peak_goodput, candidate_goodput);
+                },
+            }
             if (probe.kind == .reduce_resource) {
                 self.last_resource_probe_ns = sample.now_ns;
                 self.mode = .steady;
             }
-            const reason: Decision.Reason = if (probe.dimension == .read and starvation_improved and
-                candidate_goodput < 1.03 * probe.baseline_goodput) .starvation_improved else .none;
+            const reason: Decision.Reason = if (probe.dimension == .read and
+                candidate_goodput < 1.03 * probe.baseline_goodput)
+                if (starvation_improved) .starvation_improved else if (starvation_unresolved) .starvation_unresolved else .none
+            else
+                .none;
             return self.decision(action, false, reason, null, true);
         }
 
@@ -2210,6 +2346,7 @@ const AdaptiveVectoredController = struct {
         };
         self.limits = candidate;
         self.last_probe_ns = sample.now_ns;
+        if (self.mode == .startup) self.last_startup_change_ns = sample.now_ns;
         return self.decision(action, true, .none, dimension, false);
     }
 
@@ -2258,30 +2395,44 @@ const AdaptiveVectoredController = struct {
     }
 };
 
+const VectoredReadStatsSource = struct {
+    profile_id: usize,
+    name: []const u8,
+    provider: VFS.ReadStatsProvider,
+    initial: VFS.ReadStats,
+    previous: VFS.ReadStats,
+};
+
 const AdaptiveVectoredRuntime = struct {
     controller: AdaptiveVectoredController,
     pipeline: *VectoredLoadPipeline,
-    read_gate: *AdaptiveReadGate,
+    read_gate: *AdaptiveRequestGate,
+    request_gate: *AdaptiveRequestGate,
+    post_read_slack_requests: usize,
     metrics: *VectoredLoadMetrics,
     next_job: *std.atomic.Value(usize),
     total_jobs: usize,
     total_physical_upper_bound: u64,
-    done: std.atomic.Value(bool) = .init(false),
+    read_stats_sources: []VectoredReadStatsSource,
+    source_bootstrap_interval_ns: u64,
+    last_source_bootstrap_ns: u64 = 0,
+    done: std.Io.Event = .unset,
     probe_installed_at: std.Io.Timestamp,
     probe_activated_at: std.Io.Timestamp,
     probe_committed_baseline: u64 = 0,
-    ready_growth_windows: u8 = 0,
+    source_pressure_windows: u8 = 0,
 
     fn run(self: *AdaptiveVectoredRuntime, io: std.Io) std.Io.Cancelable!void {
         const started: std.Io.Timestamp = .now(io, .awake);
         var window_started = started;
         var previous = self.metrics.snapshot();
         var previous_control = self.pipeline.controlSnapshot();
-        var previous_ready_bytes = previous.ready_bytes;
-        load_log.debug("adaptive controller started: mode={s}, reads={d}/{d}, dma_per_device={d}/{d}", .{
+        var previous_post_read_bytes = previous.post_read_bytes;
+        load_log.debug("adaptive controller started: mode={s}, reads={d}/{d}, retained_request_slack={d}, dma_per_device={d}/{d}", .{
             @tagName(self.controller.mode),
             self.controller.limits.read,
             self.controller.max_read,
+            self.post_read_slack_requests,
             self.controller.limits.dma,
             self.controller.max_dma,
         });
@@ -2292,20 +2443,79 @@ const AdaptiveVectoredRuntime = struct {
             self.controller.peak_goodput / (1024 * 1024),
         });
 
-        while (!self.done.load(.acquire)) {
-            try io.sleep(.fromMilliseconds(25), .awake);
-            if (self.done.load(.acquire)) break;
+        while (!self.done.isSet()) {
+            const sample_interval_ms: i64 = if (!self.controller.dma_started)
+                @intCast(@min(@as(u64, 25), @max(@as(u64, 1), self.source_bootstrap_interval_ns / std.time.ns_per_ms)))
+            else
+                25;
+            self.done.waitTimeout(io, .{ .duration = .{
+                .raw = .fromMilliseconds(sample_interval_ms),
+                .clock = .awake,
+            } }) catch |err| switch (err) {
+                error.Timeout => {},
+                error.Canceled => return error.Canceled,
+            };
+            if (self.done.isSet()) break;
 
             const now: std.Io.Timestamp = .now(io, .awake);
             const now_ns: u64 = @intCast(@max(started.untilNow(io, .awake).nanoseconds, 0));
+            if (!self.controller.dma_started) {
+                const snapshot = self.metrics.snapshot();
+                const control = self.pipeline.controlSnapshot();
+                const required_device_mask = self.pipeline.expected_device_mask.load(.acquire);
+                if (snapshot.committed_bytes > 0 and
+                    required_device_mask != 0 and
+                    (control.completed_device_mask & required_device_mask) == required_device_mask)
+                {
+                    self.controller.markDmaStarted(now_ns);
+                    previous = snapshot;
+                    previous_control = control;
+                    previous_post_read_bytes = snapshot.post_read_bytes;
+                    self.metrics.resetReadPeak();
+                    window_started = now;
+                    load_log.debug("adaptive baseline started after every destination completed one PJRT event: elapsed={d:.3}s, requests={d}, dma_per_device={d}", .{
+                        @as(f64, @floatFromInt(now_ns)) / std.time.ns_per_s,
+                        self.controller.limits.read,
+                        self.controller.limits.dma,
+                    });
+                    continue;
+                }
+
+                // Before the first source response, opening more requests is
+                // the only way to cover a genuinely high-latency backend. Once
+                // a read has completed, however, any lack of device progress
+                // belongs to PJRT initialization and must not inflate the
+                // source window.
+                const source_calls_fill_window = snapshot.read_bytes == 0 and
+                    snapshot.outstanding_requests >= self.controller.limits.read and
+                    self.next_job.load(.acquire) < self.total_jobs;
+                if (source_calls_fill_window and self.controller.limits.read < self.controller.max_read and
+                    now_ns -| self.last_source_bootstrap_ns >= self.source_bootstrap_interval_ns)
+                {
+                    const decision = self.controller.observe(.{
+                        .now_ns = now_ns,
+                        .read_saturated = true,
+                        .source_stalled = true,
+                        .allow_probe = true,
+                    });
+                    if (decision.changed) self.applyDecision(io, decision, std.math.maxInt(u64));
+                    self.last_source_bootstrap_ns = now_ns;
+                    load_log.debug("source no-progress bootstrap: requests={d}/{d}, active_source_calls={d}", .{
+                        decision.limits.read,
+                        self.controller.max_read,
+                        snapshot.active_reads,
+                    });
+                }
+                continue;
+            }
             if (self.controller.probe) |probe| {
                 if (!probe.activated) {
                     const control = self.pipeline.controlSnapshot();
                     const capacity_active = switch (probe.dimension) {
                         .read => if (probe.kind == .increase)
-                            self.metrics.probe_peak_reads.load(.acquire) >= probe.candidate.read
+                            self.metrics.probe_peak_requests.load(.acquire) >= probe.candidate.read
                         else
-                            self.metrics.active_reads.load(.acquire) <= probe.candidate.read,
+                            self.metrics.outstanding_requests.load(.acquire) <= probe.candidate.read,
                         .dma => if (probe.kind == .increase)
                             control.probe_capacity_active
                         else
@@ -2314,7 +2524,10 @@ const AdaptiveVectoredRuntime = struct {
                     if (capacity_active and self.controller.activateProbe(probe.epoch)) {
                         self.metrics.activateProbe(io, probe.epoch);
                         self.probe_activated_at = now;
-                        self.probe_committed_baseline = self.metrics.committed_bytes.load(.acquire);
+                        self.probe_committed_baseline = switch (probe.dimension) {
+                            .read => self.metrics.retired_bytes.load(.acquire),
+                            .dma => self.metrics.committed_bytes.load(.acquire),
+                        };
                         load_log.debug("probe capacity active: epoch={d}, dimension={s}, reads={d}, dma_per_device={d}", .{
                             probe.epoch,
                             @tagName(probe.dimension),
@@ -2323,7 +2536,7 @@ const AdaptiveVectoredRuntime = struct {
                         });
                         previous = self.metrics.snapshot();
                         previous_control = control;
-                        previous_ready_bytes = previous.ready_bytes;
+                        previous_post_read_bytes = previous.post_read_bytes;
                         window_started = now;
                         continue;
                     }
@@ -2340,7 +2553,7 @@ const AdaptiveVectoredRuntime = struct {
                         }
                         previous = self.metrics.snapshot();
                         previous_control = self.pipeline.controlSnapshot();
-                        previous_ready_bytes = previous.ready_bytes;
+                        previous_post_read_bytes = previous.post_read_bytes;
                         window_started = now;
                         continue;
                     }
@@ -2355,24 +2568,6 @@ const AdaptiveVectoredRuntime = struct {
             if (elapsed_ns < min_ns) continue;
 
             const snapshot = self.metrics.snapshot();
-            if (!self.controller.dma_started and snapshot.committed_bytes > 0) {
-                // The first PJRT completion includes transfer-manager and
-                // runtime warm-up. Start controller attribution after it so
-                // startup latency cannot masquerade as DMA starvation or a
-                // candidate goodput gain.
-                self.controller.markDmaStarted(now_ns);
-                previous = snapshot;
-                previous_control = self.pipeline.controlSnapshot();
-                previous_ready_bytes = snapshot.ready_bytes;
-                self.metrics.resetReadPeak();
-                window_started = now;
-                load_log.debug("adaptive DMA baseline started after first completion: elapsed={d:.3}s, reads={d}, dma_per_device={d}", .{
-                    @as(f64, @floatFromInt(now_ns)) / std.time.ns_per_s,
-                    self.controller.limits.read,
-                    self.controller.limits.dma,
-                });
-                continue;
-            }
             const delta = snapshot.sub(previous);
             const control = self.pipeline.controlSnapshot();
             const progress_bytes = @max(delta.read_bytes, delta.committed_bytes);
@@ -2381,6 +2576,7 @@ const AdaptiveVectoredRuntime = struct {
 
             const seconds = @as(f64, @floatFromInt(@max(elapsed_ns, 1))) / std.time.ns_per_s;
             const committed_goodput = @as(f64, @floatFromInt(delta.committed_bytes)) / seconds;
+            const logical_goodput = @as(f64, @floatFromInt(delta.retired_bytes)) / seconds;
             const read_latency_us = if (delta.read_bytes == 0)
                 0
             else
@@ -2412,22 +2608,28 @@ const AdaptiveVectoredRuntime = struct {
             else
                 0;
             const dma_starvation_ratio = @max(integrated_dma_starvation, instantaneous_dma_starvation);
-            const ready_pressure_capacity = self.pipeline.readAdmissionCapacityBytes();
-            const ready_growth = snapshot.ready_bytes -| previous_ready_bytes;
-            const ready_growth_ratio = @as(f64, @floatFromInt(ready_growth)) /
-                @as(f64, @floatFromInt(@max(@as(usize, 1), ready_pressure_capacity)));
-            const ready_occupancy = @as(f64, @floatFromInt(snapshot.ready_bytes)) /
-                @as(f64, @floatFromInt(@max(@as(usize, 1), ready_pressure_capacity)));
-            const ready_age_pressure = control.ready_old_entries >= 4 and
-                control.ready_old_entries *| 4 >= control.ready_entries;
-            const raw_ready_pressure = ready_growth_ratio > 0.20 or ready_occupancy > 0.75 or ready_age_pressure;
-            if (raw_ready_pressure and dma_starvation_ratio <= 0.10) {
-                self.ready_growth_windows = @min(2, self.ready_growth_windows +| 1);
+            const source_pressure_capacity: u64 = @max(@as(u64, 1), snapshot.outstanding_request_bytes);
+            const post_read_growth = snapshot.post_read_bytes -| previous_post_read_bytes;
+            const post_read_growth_ratio = @as(f64, @floatFromInt(post_read_growth)) /
+                @as(f64, @floatFromInt(source_pressure_capacity));
+            const post_read_occupancy = @as(f64, @floatFromInt(snapshot.post_read_bytes)) /
+                @as(f64, @floatFromInt(source_pressure_capacity));
+            const post_read_age_pressure = control.post_read_requests >= 4 and
+                control.post_read_oldest_age_ns > 250 * std.time.ns_per_ms;
+            const read_latency_reliable = delta.read_bytes >= 32 * 1024 * 1024;
+            const read_latency_pressure = read_latency_reliable and self.controller.stable_read_latency_us > 0 and
+                read_latency_us > 1.5 * self.controller.stable_read_latency_us;
+            const goodput_regressed = self.controller.peak_logical_goodput > 0 and
+                logical_goodput < 0.97 * self.controller.peak_logical_goodput;
+            const raw_source_pressure = goodput_regressed and
+                (post_read_growth_ratio > 0.20 or (post_read_occupancy > 0.75 and post_read_age_pressure) or read_latency_pressure);
+            if (raw_source_pressure and dma_starvation_ratio <= 0.10) {
+                self.source_pressure_windows = @min(2, self.source_pressure_windows +| 1);
             } else {
-                self.ready_growth_windows = 0;
+                self.source_pressure_windows = 0;
             }
-            const ready_pressure = self.ready_growth_windows >= 2;
-            const read_saturated = @max(snapshot.active_reads, snapshot.peak_reads) >= self.controller.limits.read and
+            const ready_pressure = self.source_pressure_windows >= 2;
+            const read_saturated = snapshot.outstanding_requests >= self.controller.limits.read and
                 self.next_job.load(.acquire) < self.total_jobs;
             const source_stalled = startup and progress_bytes < byte_floor and read_saturated and elapsed_ns >= max_ns;
             const dma_saturated = control.any_device_saturated and control.ready_entries > 0;
@@ -2436,6 +2638,18 @@ const AdaptiveVectoredRuntime = struct {
                 dma_latency_us > 2 * self.controller.stable_dma_latency_us and self.controller.peak_goodput > 0 and
                 committed_goodput < 0.95 * self.controller.peak_goodput and dma_saturated;
 
+            var source_retries: u64 = 0;
+            var source_throttles: u64 = 0;
+            var source_retry_delay_ns: u64 = 0;
+            for (self.read_stats_sources) |*source| {
+                const current = source.provider.snapshot();
+                const stats_delta = current.sub(source.previous);
+                source.previous = current;
+                source_retries +|= stats_delta.retries;
+                source_throttles +|= stats_delta.throttles;
+                source_retry_delay_ns +|= stats_delta.retry_delay_ns;
+            }
+
             const remaining = self.total_physical_upper_bound -| snapshot.committed_bytes;
             const reference_goodput = @max(committed_goodput, self.controller.peak_goodput);
             const remaining_ns = if (reference_goodput > 0)
@@ -2443,6 +2657,7 @@ const AdaptiveVectoredRuntime = struct {
             else
                 std.math.inf(f64);
             const allow_probe = remaining_ns > 250 * std.time.ns_per_ms;
+            const allow_resource_probe = remaining_ns > 2 * std.time.ns_per_s;
 
             var probe_goodput: f64 = 0;
             var probe_aggregate_goodput: f64 = 0;
@@ -2463,7 +2678,11 @@ const AdaptiveVectoredRuntime = struct {
                     ));
                     const aggregate_seconds = @as(f64, @floatFromInt(aggregate_elapsed_ns)) / std.time.ns_per_s;
                     probe_goodput = @as(f64, @floatFromInt(snapshot.probe_committed_bytes)) / probe_seconds;
-                    probe_aggregate_goodput = @as(f64, @floatFromInt(snapshot.committed_bytes -| self.probe_committed_baseline)) / aggregate_seconds;
+                    const aggregate_bytes = switch (probe.dimension) {
+                        .read => snapshot.retired_bytes -| self.probe_committed_baseline,
+                        .dma => snapshot.committed_bytes -| self.probe_committed_baseline,
+                    };
+                    probe_aggregate_goodput = @as(f64, @floatFromInt(aggregate_bytes)) / aggregate_seconds;
                 }
             }
 
@@ -2472,12 +2691,15 @@ const AdaptiveVectoredRuntime = struct {
             var decision = self.controller.observe(.{
                 .now_ns = now_ns,
                 .committed_goodput = committed_goodput,
+                .logical_goodput = logical_goodput,
                 .probe_goodput = probe_goodput,
                 .probe_aggregate_goodput = probe_aggregate_goodput,
                 .probe_committed_bytes = snapshot.probe_committed_bytes,
                 .probe_elapsed_ns = probe_elapsed_ns,
                 .dma_latency_us = dma_latency_us,
                 .dma_latency_reliable = dma_latency_reliable,
+                .read_latency_us = read_latency_us,
+                .read_latency_reliable = read_latency_reliable,
                 .dma_starvation_ratio = dma_starvation_ratio,
                 .read_saturated = read_saturated,
                 .source_stalled = source_stalled,
@@ -2485,8 +2707,10 @@ const AdaptiveVectoredRuntime = struct {
                 .dma_probe_capacity = control.any_device_saturated,
                 .ready_pressure = ready_pressure,
                 .slow_reads = slow_reads,
+                .source_throttled = source_retries > 0 or source_throttles > 0,
                 .hard_dma_pressure = hard_dma_pressure,
                 .allow_probe = allow_probe,
+                .allow_resource_probe = allow_resource_probe,
             });
             if (decision.started_probe == .dma and
                 !self.pipeline.beginDmaProbe(decision.epoch, decision.limits.dma))
@@ -2495,13 +2719,14 @@ const AdaptiveVectoredRuntime = struct {
             }
             if (decision.changed or decision.finished_probe) self.applyDecision(io, decision, old_probe_epoch);
 
-            load_log.debug("adaptive window: action={s}, reason={s}, mode={s}, epoch={d}, reads={d}/{d} active={d} saturated={}, dma_per_device={d}/{d} active={d}/{d} saturated={}, committed={d:.2}MiB/s, dma_latency={d:.1}us, starvation={d:.1}%, ready={Bi:.2}/{Bi:.2} age={d:.1}ms aged={d}/{d} pressure={}, probe={d:.2}/{d:.2}/{d:.2}MiB/s {Bi:.2}/{d:.1}ms", .{
+            load_log.debug("adaptive window: action={s}, reason={s}, mode={s}, epoch={d}, requests={d}/{d} in_use={d} reading={d} saturated={}, dma_per_device={d}/{d} active={d}/{d} saturated={}, physical={d:.2}MiB/s logical={d:.2}MiB/s, dma_latency={d:.1}us, starvation={d:.1}%, post_read={Bi:.2}/{Bi:.2} age={d:.1}ms count={d} pressure={}, ready={Bi:.2}/{d}, probe={d:.2}/{d:.2}/{d:.2}MiB/s {Bi:.2}/{d:.1}ms", .{
                 @tagName(decision.action),
                 @tagName(decision.reason),
                 @tagName(self.controller.mode),
                 decision.epoch,
                 decision.limits.read,
                 self.controller.max_read,
+                snapshot.outstanding_requests,
                 snapshot.active_reads,
                 read_saturated,
                 decision.limits.dma,
@@ -2510,24 +2735,33 @@ const AdaptiveVectoredRuntime = struct {
                 control.active_capacity,
                 dma_saturated,
                 committed_goodput / (1024 * 1024),
+                logical_goodput / (1024 * 1024),
                 dma_latency_us,
                 dma_starvation_ratio * 100,
-                snapshot.ready_bytes,
-                ready_pressure_capacity,
-                @as(f64, @floatFromInt(control.ready_oldest_age_ns)) / std.time.ns_per_ms,
-                control.ready_old_entries,
-                control.ready_entries,
+                snapshot.post_read_bytes,
+                source_pressure_capacity,
+                @as(f64, @floatFromInt(control.post_read_oldest_age_ns)) / std.time.ns_per_ms,
+                control.post_read_requests,
                 ready_pressure,
+                snapshot.ready_bytes,
+                control.ready_entries,
                 probe_baseline_goodput / (1024 * 1024),
                 probe_goodput / (1024 * 1024),
                 probe_aggregate_goodput / (1024 * 1024),
                 snapshot.probe_committed_bytes,
                 @as(f64, @floatFromInt(probe_elapsed_ns)) / std.time.ns_per_ms,
             });
+            if (source_retries > 0 or source_throttles > 0) {
+                load_log.debug("source retry feedback: retries={d}, throttles={d}, delay={d:.1}ms", .{
+                    source_retries,
+                    source_throttles,
+                    @as(f64, @floatFromInt(source_retry_delay_ns)) / std.time.ns_per_ms,
+                });
+            }
 
             previous = snapshot;
             previous_control = control;
-            previous_ready_bytes = snapshot.ready_bytes;
+            previous_post_read_bytes = snapshot.post_read_bytes;
             self.metrics.resetReadPeak();
             window_started = now;
         }
@@ -2567,7 +2801,7 @@ const AdaptiveVectoredRuntime = struct {
             self.metrics.config_epoch.store(decision.epoch, .release);
         }
         self.read_gate.setLimit(io, decision.limits.read);
-        self.pipeline.setReadAdmissionLimit(decision.limits.read);
+        self.request_gate.setLimit(io, decision.limits.read +| self.post_read_slack_requests);
         self.pipeline.setDmaLimit(decision.limits.dma);
     }
 };
@@ -2609,6 +2843,11 @@ fn loadVectored(
         const failed = 3;
 
         uri: []const u8,
+        profile_id: usize,
+        profile_name: []const u8,
+        request_size: usize,
+        high_latency: bool,
+        read_stats: ?VFS.ReadStatsProvider,
         file: std.Io.File = undefined,
         status: std.atomic.Value(u8) = .init(uninitialized),
         error_code: std.atomic.Value(u16) = .init(0),
@@ -2651,9 +2890,56 @@ fn loadVectored(
             if (std.mem.eql(u8, slot.uri, descriptor.file_uri)) break index;
         } else blk: {
             const index = source_slots.items.len;
-            try source_slots.append(allocator, .{ .uri = descriptor.file_uri });
+            const profile = VFS.readProfileForPath(io, descriptor.file_uri);
+            const minimum = if (profile) |p| p.hints.minimum_request_size else 2 * 1024 * 1024;
+            const request_size = switch (opts.read_request_size) {
+                .auto => minimum,
+                .fixed => |fixed| fixed,
+            };
+            switch (opts.read_request_size) {
+                .auto => {},
+                .fixed => if (request_size < minimum) {
+                    load_log.warn("fixed source request size {Bi:.2} is below the {Bi:.2} minimum advertised by {s}", .{
+                        request_size,
+                        minimum,
+                        if (profile) |p| p.scheme else "local/default",
+                    });
+                },
+            }
+            try source_slots.append(allocator, .{
+                .uri = descriptor.file_uri,
+                .profile_id = if (profile) |p| p.id else 0,
+                .profile_name = if (profile) |p| p.scheme else "local/default",
+                .request_size = request_size,
+                .high_latency = if (profile) |p| p.hints.high_latency else false,
+                .read_stats = if (profile) |p| p.stats else null,
+            });
+            load_log.debug("source profile: name={s}, request_size={Bi:.2}, mode={s}, uri={s}", .{
+                source_slots.items[index].profile_name,
+                request_size,
+                @tagName(opts.read_request_size),
+                descriptor.file_uri,
+            });
             break :blk index;
         };
+    }
+
+    var read_stats_sources: std.ArrayListUnmanaged(VectoredReadStatsSource) = .empty;
+    defer read_stats_sources.deinit(allocator);
+    for (source_slots.items) |slot| {
+        const provider = slot.read_stats orelse continue;
+        for (read_stats_sources.items) |source| {
+            if (source.profile_id == slot.profile_id) break;
+        } else {
+            const initial = provider.snapshot();
+            try read_stats_sources.append(allocator, .{
+                .profile_id = slot.profile_id,
+                .name = slot.profile_name,
+                .provider = provider,
+                .initial = initial,
+                .previous = initial,
+            });
+        }
     }
 
     const StateSlot = struct {
@@ -2717,6 +3003,15 @@ fn loadVectored(
         if (slot.status.load(.acquire) == StateSlot.ready) slot.state.deinit();
     };
 
+    const high_latency_source = for (source_slots.items) |slot| {
+        if (slot.high_latency) break true;
+    } else false;
+    // Remote backends need their active source-call cap to remain fully
+    // occupied while the preceding requests spend a short time queued or in
+    // PJRT. Eight retained lifecycles are 128 MiB for S3/GCS and 256 MiB for
+    // HF; local reads keep strict lane-style coupling with no slack.
+    const post_read_slack_requests: usize = if (high_latency_source) 8 else 0;
+
     const coordinator_started_at: std.Io.Timestamp = .now(io, .awake);
     load_log.debug("vectored coordinator started: tensors={d}, elapsed={d:.3}s", .{
         tensor_count,
@@ -2724,20 +3019,20 @@ fn loadVectored(
     });
 
     var metrics: VectoredLoadMetrics = .{};
-    const controller: AdaptiveVectoredController = .init(opts.read_parallelism, opts.dma_parallelism);
-    var read_gate: AdaptiveReadGate = .init(controller.limits.read);
+    var controller: AdaptiveVectoredController = .init(opts.read_parallelism, opts.dma_parallelism);
+    controller.max_startup_read_probes = if (platform.devices.len > 1) 2 else 1;
+    var read_gate: AdaptiveRequestGate = .init(controller.limits.read);
+    var request_gate: AdaptiveRequestGate = .init(controller.limits.read +| post_read_slack_requests);
     var pipeline = try VectoredLoadPipeline.init(
         allocator,
         io,
         platform,
         &pool,
         &read_gate,
+        &request_gate,
         opts.dma_block_size,
         &metrics,
         controller.limits.dma,
-        controller.limits.read,
-        opts.read_request_size,
-        opts.max_pinned_bytes,
     );
     defer pipeline.deinit();
 
@@ -2747,8 +3042,8 @@ fn loadVectored(
         len: usize,
     };
     var request_count: usize = 0;
-    for (tensors) |tensor| {
-        const count = std.math.divCeil(usize, tensor.byteSize(), opts.read_request_size) catch unreachable;
+    for (tensors, tensor_source_indices) |tensor, source_index| {
+        const count = std.math.divCeil(usize, tensor.byteSize(), source_slots.items[source_index].request_size) catch unreachable;
         request_count += count;
     }
     const jobs = try allocator.alloc(ReadJob, request_count);
@@ -2765,7 +3060,8 @@ fn loadVectored(
             const tensor_size = tensor.byteSize();
             if (offset.* >= tensor_size) continue;
             scheduled = true;
-            const request_len = @min(opts.read_request_size, tensor_size - offset.*);
+            const request_size = source_slots.items[tensor_source_indices[tensor_index]].request_size;
+            const request_len = @min(request_size, tensor_size - offset.*);
             jobs[job_count] = .{
                 .tensor_index = tensor_index,
                 .source_offset = offset.*,
@@ -2783,29 +3079,42 @@ fn loadVectored(
         .controller = controller,
         .pipeline = &pipeline,
         .read_gate = &read_gate,
+        .request_gate = &request_gate,
+        .post_read_slack_requests = post_read_slack_requests,
         .metrics = &metrics,
         .next_job = &next_job,
         .total_jobs = jobs.len,
         .total_physical_upper_bound = 0,
+        .read_stats_sources = read_stats_sources.items,
+        .source_bootstrap_interval_ns = if (high_latency_source)
+            10 * std.time.ns_per_ms
+        else
+            100 * std.time.ns_per_ms,
         .probe_installed_at = .now(io, .awake),
         .probe_activated_at = .now(io, .awake),
     };
-    // `total_bytes` is an output pointer, so compute the controller's
-    // conservative physical upper bound directly from the model instead.
-    var logical_upper_bound: u64 = 0;
-    for (tensors) |tensor| logical_upper_bound +|= tensor.byteSize();
-    controller_runtime.total_physical_upper_bound = logical_upper_bound *| @as(u64, @intCast(platform.devices.len));
+    // Resource/tail probes need the physical transfer total: sharded tensors
+    // transfer one logical copy in aggregate, while replicas transfer one copy
+    // to each destination.
+    var physical_upper_bound: u64 = 0;
+    for (tensors) |tensor| {
+        const sharding = Sharding.pickSharding(opts.shardings, tensor.shape(), .explicit_axis_binding) orelse
+            platform.replicated_sharding;
+        const placement = try sharding.placement(tensor.shape());
+        physical_upper_bound +|= @as(u64, @intCast(placement.shape.byteSize())) *|
+            @as(u64, @intCast(sharding.devicesInCanonicalOrder().len));
+    }
+    controller_runtime.total_physical_upper_bound = physical_upper_bound;
     var controller_group: std.Io.Group = .init;
     try controller_group.concurrent(io, AdaptiveVectoredRuntime.run, .{ &controller_runtime, io });
 
     const worker_count = @min(opts.read_parallelism, request_count);
-    for (0..worker_count) |worker_index| {
+    for (0..worker_count) |_| {
         worker_group.concurrent(io, struct {
             fn run(
                 jobs_: []const ReadJob,
                 next: *std.atomic.Value(usize),
-                read_gate_: *AdaptiveReadGate,
-                worker_index_: usize,
+                request_gate_: *AdaptiveRequestGate,
                 pipeline_: *VectoredLoadPipeline,
                 slots_: []StateSlot,
                 tensors_: []const *const Tensor,
@@ -2821,14 +3130,22 @@ fn loadVectored(
             ) void {
                 while (true) {
                     if (pipeline_.failed()) return;
-                    if (!read_gate_.wait(io_, worker_index_)) return;
+                    if (!request_gate_.acquire(io_)) return;
                     const index = next.fetchAdd(1, .monotonic);
                     if (index >= jobs_.len) {
-                        read_gate_.close(io_);
+                        request_gate_.release(io_);
+                        request_gate_.close(io_);
                         return;
                     }
                     const job = jobs_[index];
+                    const read_epoch = pipeline_.metrics.config_epoch.load(.acquire);
+                    const request = pipeline_.registerRequest(read_epoch, job.len) catch |err| {
+                        request_gate_.release(io_);
+                        pipeline_.recordError(err);
+                        return;
+                    };
                     const source_file = source_slots_[source_indices_[job.tensor_index]].ensure(io_) catch |err| {
+                        request.finishScheduling();
                         pipeline_.recordError(err);
                         return;
                     };
@@ -2843,18 +3160,18 @@ fn loadVectored(
                         buffers_[job.tensor_index],
                         progress_,
                     ) catch |err| {
+                        request.finishScheduling();
                         pipeline_.recordError(err);
                         return;
                     };
-                    const read_epoch = pipeline_.metrics.config_epoch.load(.acquire);
-                    VectoredReadRequest.run(tensor, pipeline_, job.source_offset, job.len, read_epoch);
+                    pipeline_.expectTensorTargets(tensor);
+                    VectoredReadRequest.run(request, tensor, pipeline_, job.source_offset, job.len);
                 }
             }
         }.run, .{
             jobs,
             &next_job,
-            &read_gate,
-            worker_index,
+            &request_gate,
             &pipeline,
             state_slots,
             tensors,
@@ -2894,7 +3211,7 @@ fn loadVectored(
     }
 
     pipeline.dma_done.waitUncancelable(io);
-    controller_runtime.done.store(true, .release);
+    controller_runtime.done.set(io);
     controller_group.await(io) catch |err| pipeline.recordError(err);
     load_log.debug("vectored DMA drained: elapsed={d:.3}s, drain_phase={d:.3}s", .{
         @as(f64, @floatFromInt(load_started.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
@@ -2916,19 +3233,39 @@ fn loadVectored(
     const read_operations = metrics.read_operations.load(.acquire);
     const dma_submissions = metrics.dma_submissions.load(.acquire);
     const average_read_ms = if (metrics.read_bytes.load(.acquire) == 0) 0 else @as(f64, @floatFromInt(metrics.weighted_read_latency_us.load(.acquire))) / @as(f64, @floatFromInt(metrics.read_bytes.load(.acquire))) / std.time.us_per_ms;
+    const average_request_ms = if (metrics.retired_bytes.load(.acquire) == 0) 0 else @as(f64, @floatFromInt(metrics.weighted_request_latency_us.load(.acquire))) / @as(f64, @floatFromInt(metrics.retired_bytes.load(.acquire))) / std.time.us_per_ms;
     const average_dma_ms = if (metrics.committed_bytes.load(.acquire) == 0) 0 else @as(f64, @floatFromInt(metrics.weighted_dma_latency_us.load(.acquire))) / @as(f64, @floatFromInt(metrics.committed_bytes.load(.acquire))) / std.time.us_per_ms;
     const average_ready_ms = if (metrics.read_bytes.load(.acquire) == 0) 0 else @as(f64, @floatFromInt(metrics.weighted_ready_age_us.load(.acquire))) / @as(f64, @floatFromInt(metrics.read_bytes.load(.acquire))) / std.time.us_per_ms;
     const final_control = pipeline.controlSnapshot();
-    load_log.debug("completed: vectored=true, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, reads={d}, peak_reads={d}, final_reads={d}, average_read={Bi:.2}, average_read_latency={d:.3}ms, dma_submissions={d}, peak_dma_per_device={d}, final_dma_per_device={d}, average_dma={Bi:.2}, average_dma_latency={d:.3}ms, average_ready_age={d:.3}ms, submitted={Bi:.2}, committed={Bi:.2}, pinned_high_water={Bi:.2}, mapped={Bi:.2}, pool_waits={d}, pool_wait={d:.3}s", .{
+    var physical_source_requests: u64 = 0;
+    var physical_source_bytes: u64 = 0;
+    var source_retries: u64 = 0;
+    var source_throttles: u64 = 0;
+    var source_retry_delay_ns: u64 = 0;
+    for (read_stats_sources.items) |source| {
+        const source_stats = source.provider.snapshot().sub(source.initial);
+        physical_source_requests +|= source_stats.physical_requests;
+        physical_source_bytes +|= source_stats.physical_bytes;
+        source_retries +|= source_stats.retries;
+        source_throttles +|= source_stats.throttles;
+        source_retry_delay_ns +|= source_stats.retry_delay_ns;
+    }
+    load_log.debug("completed: vectored=true, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, reads={d}, peak_requests={d}, final_requests={d}, average_read={Bi:.2}, average_read_latency={d:.3}ms, average_request_lifetime={d:.3}ms, source_requests={d}, source_bytes={Bi:.2}, source_retries={d}, source_throttles={d}, source_retry_delay={d:.3}s, dma_submissions={d}, peak_dma_per_device={d}, final_dma_per_device={d}, average_dma={Bi:.2}, average_dma_latency={d:.3}ms, average_ready_age={d:.3}ms, submitted={Bi:.2}, committed={Bi:.2}, pinned_high_water={Bi:.2}, mapped={Bi:.2}, pool_waits={d}, pool_wait={d:.3}s", .{
         tensor_count,
         loaded_bytes,
         elapsed_seconds,
         goodput / (1024 * 1024),
         read_operations,
-        metrics.read_high_water.load(.acquire),
+        metrics.request_high_water.load(.acquire),
         controller_runtime.controller.limits.read,
         average_read,
         average_read_ms,
+        average_request_ms,
+        physical_source_requests,
+        physical_source_bytes,
+        source_retries,
+        source_throttles,
+        @as(f64, @floatFromInt(source_retry_delay_ns)) / std.time.ns_per_s,
         dma_submissions,
         final_control.peak_device_active,
         controller_runtime.controller.limits.dma,
@@ -2945,6 +3282,11 @@ fn loadVectored(
     return loaded_bytes;
 }
 
+pub const ReadRequestSize = union(enum) {
+    auto,
+    fixed: usize,
+};
+
 pub const LoadOpts = struct {
     pub const auto: LoadOpts = .{};
 
@@ -2952,12 +3294,13 @@ pub const LoadOpts = struct {
     read_parallelism: usize = 32,
     /// Hard adaptive cap for in-flight PJRT transfers on each device.
     dma_parallelism: usize = 32,
-    /// Logical bytes gathered by one positional source request.
-    read_request_size: usize = 2 * 1024 * 1024,
+    /// Logical bytes gathered by one positional source request. Automatic
+    /// sizing uses the minimum registered by the source VFS.
+    read_request_size: ReadRequestSize = .auto,
     /// Physical transfer and pool allocation unit.
     dma_block_size: usize = 2 * 1024 * 1024,
     /// Client-wide hard limit for registered host memory.
-    max_pinned_bytes: usize = 128 * 1024 * 1024,
+    max_pinned_bytes: usize = 2 * 1024 * 1024 * 1024,
     shardings: []const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
     total_bytes: ?*usize = null,
@@ -3055,7 +3398,10 @@ pub fn load(
 ) !Bufferized(ModelType) {
     stdx.debug.assert(opts.read_parallelism > 0, "zml.io.load read_parallelism must be greater than zero", .{});
     stdx.debug.assert(opts.dma_parallelism > 0, "zml.io.load dma_parallelism must be greater than zero", .{});
-    stdx.debug.assert(opts.read_request_size > 0, "zml.io.load read_request_size must be greater than zero", .{});
+    switch (opts.read_request_size) {
+        .auto => {},
+        .fixed => |fixed| stdx.debug.assert(fixed > 0, "zml.io.load fixed read_request_size must be greater than zero", .{}),
+    }
     stdx.debug.assert(opts.dma_block_size > 0, "zml.io.load dma_block_size must be greater than zero", .{});
     stdx.debug.assert(opts.max_pinned_bytes >= opts.dma_block_size, "zml.io.load max_pinned_bytes must hold at least one DMA block", .{});
 
@@ -3079,13 +3425,17 @@ pub fn load(
     }.call, .{&total_logical_bytes});
 
     const direct = platform.target == .cuda or platform.target == .oneapi;
-    load_log.debug("configured: target={s}, vectored={}, tensors={d}, max_read_parallelism={d}, max_dma_parallelism_per_device={d}, read_request_size={Bi:.2}, dma_block_size={Bi:.2}, max_pinned_bytes={Bi:.2}, logical_bytes={Bi:.2}", .{
+    load_log.debug("configured: target={s}, vectored={}, tensors={d}, max_read_parallelism={d}, max_dma_parallelism_per_device={d}, read_request_size={s}, fixed_read_request_size={Bi:.2}, dma_block_size={Bi:.2}, max_pinned_bytes={Bi:.2}, logical_bytes={Bi:.2}", .{
         @tagName(platform.target),
         direct,
         tensor_count,
         opts.read_parallelism,
         opts.dma_parallelism,
-        opts.read_request_size,
+        @tagName(opts.read_request_size),
+        switch (opts.read_request_size) {
+            .auto => 0,
+            .fixed => |fixed| fixed,
+        },
         opts.dma_block_size,
         opts.max_pinned_bytes,
         total_logical_bytes,
@@ -3116,6 +3466,34 @@ fn buildMesh2x2(
     });
 
     return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
+}
+
+test "adaptive request gate reductions drain without cancelling active requests" {
+    const io = std.testing.io;
+    var gate: AdaptiveRequestGate = .init(2);
+    try std.testing.expect(gate.acquire(io));
+    try std.testing.expect(gate.acquire(io));
+
+    gate.setLimit(io, 1);
+    var admitted: std.Io.Event = .unset;
+    var group: std.Io.Group = .init;
+    try group.concurrent(io, struct {
+        fn run(gate_: *AdaptiveRequestGate, io_: std.Io, admitted_: *std.Io.Event) void {
+            if (!gate_.acquire(io_)) return;
+            admitted_.set(io_);
+            gate_.release(io_);
+        }
+    }.run, .{ &gate, io, &admitted });
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expect(!admitted.isSet());
+
+    gate.release(io);
+    try io.sleep(.fromMilliseconds(5), .awake);
+    try std.testing.expect(!admitted.isSet());
+    gate.release(io);
+    try group.await(io);
+    try std.testing.expect(admitted.isSet());
+    try std.testing.expectEqual(@as(usize, 0), gate.inUse(io));
 }
 
 test "vectored final transfers wait for every prior destination submission" {
@@ -3156,59 +3534,97 @@ test "vectored final transfers wait for every prior destination submission" {
     try std.testing.expect(pipeline.transferReady(non_final));
 }
 
-test "adaptive vectored controller skips one representative startup read score" {
+test "adaptive vectored controller scores one post-warm startup read growth" {
     var controller: AdaptiveVectoredController = .init(32, 32);
     controller.markDmaStarted(0);
     var decision = controller.observe(.{
         .now_ns = 100 * std.time.ns_per_ms,
         .committed_goodput = 100,
+        .logical_goodput = 100,
         .dma_starvation_ratio = 0.50,
         .read_saturated = true,
     });
-    try std.testing.expectEqual(.read_startup_grow, decision.action);
-    try std.testing.expectEqual(@as(usize, 12), decision.limits.read);
+    try std.testing.expectEqual(.read_probe_start, decision.action);
+    try std.testing.expectEqual(@as(usize, 16), decision.limits.read);
     try std.testing.expectEqual(@as(usize, 8), decision.limits.dma);
-    try std.testing.expect(controller.probe == null);
+    try std.testing.expect(controller.activateProbe(decision.epoch));
 
     decision = controller.observe(.{
-        .now_ns = 150 * std.time.ns_per_ms,
+        .now_ns = 300 * std.time.ns_per_ms,
         .committed_goodput = 104,
+        .logical_goodput = 104,
+        .probe_goodput = 104,
+        .probe_aggregate_goodput = 104,
+        .probe_committed_bytes = 64 * 1024 * 1024,
+        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
+        .dma_starvation_ratio = 0.50,
+        .read_saturated = true,
+    });
+    try std.testing.expectEqual(.read_probe_keep, decision.action);
+    try std.testing.expectEqual(@as(usize, 16), controller.limits.read);
+
+    decision = controller.observe(.{
+        .now_ns = 350 * std.time.ns_per_ms,
+        .committed_goodput = 104,
+        .logical_goodput = 104,
         .dma_starvation_ratio = 0.50,
         .read_saturated = true,
     });
     try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 12), controller.limits.read);
-
-    decision = controller.observe(.{
-        .now_ns = 200 * std.time.ns_per_ms,
-        .committed_goodput = 104,
-        .dma_starvation_ratio = 0.08,
-        .read_saturated = true,
-    });
-    try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 12), controller.limits.read);
+    try std.testing.expectEqual(@as(usize, 16), controller.limits.read);
 }
 
-test "adaptive vectored controller opens slow-source reads to the public cap" {
+test "adaptive vectored controller permits a second multi-device startup read probe" {
     var controller: AdaptiveVectoredController = .init(32, 32);
+    controller.max_startup_read_probes = 2;
     controller.markDmaStarted(0);
     var decision = controller.observe(.{
         .now_ns = 100 * std.time.ns_per_ms,
         .committed_goodput = 100,
+        .logical_goodput = 100,
         .dma_starvation_ratio = 0.50,
         .read_saturated = true,
-        .slow_reads = true,
     });
-    try std.testing.expectEqual(.read_startup_grow, decision.action);
-    try std.testing.expectEqual(@as(usize, 32), decision.limits.read);
+    try std.testing.expectEqual(.read_probe_start, decision.action);
+    try std.testing.expect(controller.activateProbe(decision.epoch));
+    decision = controller.observe(.{
+        .now_ns = 300 * std.time.ns_per_ms,
+        .committed_goodput = 110,
+        .logical_goodput = 110,
+        .probe_goodput = 110,
+        .probe_aggregate_goodput = 110,
+        .probe_committed_bytes = 64 * 1024 * 1024,
+        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
+        .dma_starvation_ratio = 0.50,
+    });
+    try std.testing.expectEqual(.read_probe_keep, decision.action);
+    decision = controller.observe(.{
+        .now_ns = 350 * std.time.ns_per_ms,
+        .committed_goodput = 110,
+        .logical_goodput = 110,
+        .dma_starvation_ratio = 0.50,
+        .read_saturated = true,
+    });
+    try std.testing.expectEqual(.read_probe_start, decision.action);
+    try std.testing.expectEqual(@as(usize, 20), decision.limits.read);
+}
+
+test "adaptive vectored controller bootstraps a no-response source to the public cap" {
+    var controller: AdaptiveVectoredController = .init(32, 32);
+    var decision = controller.observe(.{
+        .now_ns = 10 * std.time.ns_per_ms,
+        .source_stalled = true,
+        .read_saturated = true,
+    });
+    try std.testing.expectEqual(.read_bootstrap, decision.action);
+    try std.testing.expectEqual(@as(usize, 24), decision.limits.read);
 
     decision = controller.observe(.{
-        .now_ns = 200 * std.time.ns_per_ms,
-        .committed_goodput = 100,
-        .dma_starvation_ratio = 0.50,
+        .now_ns = 20 * std.time.ns_per_ms,
+        .source_stalled = true,
         .read_saturated = true,
     });
-    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(.read_bootstrap, decision.action);
     try std.testing.expectEqual(@as(usize, 32), decision.limits.read);
     try std.testing.expect(controller.probe == null);
 }
@@ -3223,7 +3639,7 @@ test "adaptive vectored controller scores starvation-driven read growth after st
         .read_saturated = true,
     });
     try std.testing.expectEqual(.read_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 10), decision.limits.read);
+    try std.testing.expectEqual(@as(usize, 15), decision.limits.read);
     try std.testing.expect(controller.activateProbe(decision.epoch));
 
     decision = controller.observe(.{
@@ -3236,7 +3652,7 @@ test "adaptive vectored controller scores starvation-driven read growth after st
         .dma_starvation_ratio = 0.08,
     });
     try std.testing.expectEqual(.read_probe_keep, decision.action);
-    try std.testing.expectEqual(@as(usize, 10), controller.limits.read);
+    try std.testing.expectEqual(@as(usize, 15), controller.limits.read);
 }
 
 test "adaptive vectored controller rolls back a flat DMA probe" {
@@ -3388,7 +3804,7 @@ test "adaptive vectored controller starts adaptation after the first DMA complet
         .slow_reads = true,
     });
     try std.testing.expectEqual(.none, decision.action);
-    try std.testing.expectEqual(@as(usize, 8), decision.limits.read);
+    try std.testing.expectEqual(@as(usize, 12), decision.limits.read);
     try std.testing.expectEqual(@as(usize, 8), decision.limits.dma);
 
     controller.markDmaStarted(100 * std.time.ns_per_ms);
@@ -3417,10 +3833,24 @@ test "adaptive vectored controller settles after startup read fanout is quiet" {
     var decision = controller.observe(.{
         .now_ns = 100 * std.time.ns_per_ms,
         .committed_goodput = 100,
+        .logical_goodput = 100,
         .dma_starvation_ratio = 0.50,
         .read_saturated = true,
     });
-    try std.testing.expectEqual(.read_startup_grow, decision.action);
+    try std.testing.expectEqual(.read_probe_start, decision.action);
+    try std.testing.expect(controller.activateProbe(decision.epoch));
+
+    decision = controller.observe(.{
+        .now_ns = 300 * std.time.ns_per_ms,
+        .committed_goodput = 104,
+        .logical_goodput = 104,
+        .probe_goodput = 104,
+        .probe_aggregate_goodput = 104,
+        .probe_committed_bytes = 64 * 1024 * 1024,
+        .probe_elapsed_ns = 200 * std.time.ns_per_ms,
+        .dma_starvation_ratio = 0,
+    });
+    try std.testing.expectEqual(.read_probe_keep, decision.action);
 
     decision = controller.observe(.{
         .now_ns = 700 * std.time.ns_per_ms,
@@ -3429,7 +3859,7 @@ test "adaptive vectored controller settles after startup read fanout is quiet" {
     });
     try std.testing.expectEqual(.startup_settle, decision.action);
     try std.testing.expectEqual(.steady, controller.mode);
-    try std.testing.expectEqual(@as(usize, 12), decision.limits.read);
+    try std.testing.expectEqual(@as(usize, 16), decision.limits.read);
     try std.testing.expect(controller.probe == null);
 }
 
@@ -3451,10 +3881,12 @@ test "adaptive vectored controller ignores transient DMA saturation between sour
     decision = controller.observe(.{
         .now_ns = 100 * std.time.ns_per_ms,
         .committed_goodput = 100,
+        .logical_goodput = 100,
         .dma_starvation_ratio = 0.50,
         .read_saturated = true,
     });
-    try std.testing.expectEqual(.read_startup_grow, decision.action);
+    try std.testing.expectEqual(.read_probe_start, decision.action);
+    try std.testing.expect(controller.activateProbe(decision.epoch));
 
     decision = controller.observe(.{
         .now_ns = 150 * std.time.ns_per_ms,
@@ -3486,7 +3918,7 @@ test "adaptive vectored controller respects caps and bootstraps a stalled source
         .source_stalled = true,
     });
     try std.testing.expectEqual(.read_bootstrap, decision.action);
-    try std.testing.expectEqual(@as(usize, 16), decision.limits.read);
+    try std.testing.expectEqual(@as(usize, 24), decision.limits.read);
     try std.testing.expect(controller.probe == null);
     const doubled_again = controller.observe(.{
         .now_ns = 200 * std.time.ns_per_ms,
@@ -3578,31 +4010,17 @@ test "vectored probe metrics ignore old and wrong-dimension epochs" {
     const io = std.testing.io;
     var metrics: VectoredLoadMetrics = .{};
     metrics.prepareProbe(io, 7, .read);
-    metrics.recordProbeCommit(io, 6, 7, 16);
-    metrics.recordProbeCommit(io, 7, 6, 32);
+    metrics.recordProbeCommit(io, .read, 6, 16);
+    metrics.recordProbeCommit(io, .dma, 7, 16);
+    metrics.recordProbeCommit(io, .read, 7, 32);
     try std.testing.expectEqual(@as(u64, 32), metrics.probe_committed_bytes.load(.acquire));
     metrics.activateProbe(io, 7);
     try std.testing.expectEqual(@as(u64, 0), metrics.probe_committed_bytes.load(.acquire));
-    metrics.recordProbeCommit(io, 6, 7, 64);
-    metrics.recordProbeCommit(io, 7, 6, 128);
+    metrics.recordProbeCommit(io, .read, 6, 64);
+    metrics.recordProbeCommit(io, .dma, 7, 64);
+    metrics.recordProbeCommit(io, .read, 7, 128);
     try std.testing.expectEqual(@as(u64, 128), metrics.probe_committed_bytes.load(.acquire));
     metrics.clearProbe(io, 7);
-}
-
-test "vectored read admission follows the learned read limit, not the hard pool" {
-    const MiB = 1024 * 1024;
-    try std.testing.expectEqual(
-        @as(usize, 64),
-        VectoredLoadPipeline.readAdmissionBlocks(2 * MiB, 1024 * MiB, 16 * MiB, 8),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 128),
-        VectoredLoadPipeline.readAdmissionBlocks(2 * MiB, 1024 * MiB, 16 * MiB, 16),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 96),
-        VectoredLoadPipeline.readAdmissionBlocks(2 * MiB, 192 * MiB, 16 * MiB, 32),
-    );
 }
 
 test "adaptive vectored controller backs off sustained DMA pressure" {
@@ -3670,7 +4088,7 @@ test "adaptive vectored controller keeps a lower-resource limit within three per
 }
 
 test "adaptive vectored controller restores limits when capacity cannot activate" {
-    var controller: AdaptiveVectoredController = .init(12, 12);
+    var controller: AdaptiveVectoredController = .init(16, 12);
     controller.mode = .steady;
     const decision = controller.observe(.{
         .now_ns = 3 * std.time.ns_per_s,
@@ -3678,10 +4096,10 @@ test "adaptive vectored controller restores limits when capacity cannot activate
         .dma_starvation_ratio = 0.5,
         .read_saturated = true,
     });
-    try std.testing.expectEqual(@as(usize, 10), decision.limits.read);
+    try std.testing.expectEqual(@as(usize, 15), decision.limits.read);
     const rollback = controller.rollbackTimedOutProbe(6 * std.time.ns_per_s).?;
     try std.testing.expectEqual(.probe_timeout, rollback.action);
-    try std.testing.expectEqual(@as(usize, 8), rollback.limits.read);
+    try std.testing.expectEqual(@as(usize, 12), rollback.limits.read);
     try std.testing.expectEqual(@as(usize, 8), rollback.limits.dma);
 }
 

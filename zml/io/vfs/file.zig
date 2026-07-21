@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const stdx = @import("stdx");
 
 const VFSBase = @import("base.zig").VFSBase;
+const Backend = @import("base.zig").Backend;
 
 const log = std.log.scoped(.@"zml/io/vfs/file");
 
@@ -124,6 +125,13 @@ pub const File = struct {
                 .fileSeekTo = fileSeekTo,
                 .fileRealPath = fileRealPath,
             }),
+        };
+    }
+
+    pub fn backend(self: *File) Backend {
+        return .{
+            .io = self.io(),
+            .read_hints = .{ .minimum_request_size = 2 * 1024 * 1024 },
         };
     }
 

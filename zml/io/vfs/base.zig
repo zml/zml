@@ -2,6 +2,48 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
+pub const ReadHints = struct {
+    /// Smallest source request expected to avoid excessive per-request cost
+    /// or backend rate limiting. Automatic loads use this as their fixed size.
+    minimum_request_size: usize = 2 * 1024 * 1024,
+    /// The backend benefits from keeping active source calls independent of a
+    /// small bounded set of requests retained for downstream DMA completion.
+    high_latency: bool = false,
+};
+
+pub const ReadStats = struct {
+    physical_requests: u64 = 0,
+    physical_bytes: u64 = 0,
+    retries: u64 = 0,
+    throttles: u64 = 0,
+    retry_delay_ns: u64 = 0,
+
+    pub fn sub(self: ReadStats, previous: ReadStats) ReadStats {
+        return .{
+            .physical_requests = self.physical_requests -| previous.physical_requests,
+            .physical_bytes = self.physical_bytes -| previous.physical_bytes,
+            .retries = self.retries -| previous.retries,
+            .throttles = self.throttles -| previous.throttles,
+            .retry_delay_ns = self.retry_delay_ns -| previous.retry_delay_ns,
+        };
+    }
+};
+
+pub const ReadStatsProvider = struct {
+    userdata: *anyopaque,
+    snapshotFn: *const fn (userdata: *anyopaque) ReadStats,
+
+    pub fn snapshot(self: ReadStatsProvider) ReadStats {
+        return self.snapshotFn(self.userdata);
+    }
+};
+
+pub const Backend = struct {
+    io: std.Io,
+    read_hints: ReadHints = .{},
+    read_stats: ?ReadStatsProvider = null,
+};
+
 pub const VFSBase = struct {
     inner: std.Io,
 

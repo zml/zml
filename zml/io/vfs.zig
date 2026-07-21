@@ -11,7 +11,18 @@ pub const VFS = struct {
     pub const HF = vfs.HF;
     pub const S3 = vfs.S3;
     pub const GCS = vfs.GCS;
+    pub const Backend = vfs.Backend;
+    pub const ReadHints = vfs.ReadHints;
+    pub const ReadStats = vfs.ReadStats;
+    pub const ReadStatsProvider = vfs.ReadStatsProvider;
     const VFSBase = vfs.VFSBase;
+
+    pub const ReadProfile = struct {
+        id: usize,
+        scheme: []const u8,
+        hints: ReadHints,
+        stats: ?ReadStatsProvider,
+    };
 
     const ClosedHandles = std.ArrayList(u32);
 
@@ -22,7 +33,7 @@ pub const VFS = struct {
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
 
-    backends: std.StringArrayHashMapUnmanaged(std.Io) = .empty,
+    backends: std.StringArrayHashMapUnmanaged(Backend) = .empty,
     handles: stdx.SegmentedList(Handle, 128) = .{},
     closed_handles: ClosedHandles = .empty,
 
@@ -51,6 +62,10 @@ pub const VFS = struct {
     }
 
     pub fn register(self: *VFS, scheme: []const u8, backend: std.Io) std.mem.Allocator.Error!void {
+        return self.registerBackend(scheme, .{ .io = backend });
+    }
+
+    pub fn registerBackend(self: *VFS, scheme: []const u8, backend: Backend) std.mem.Allocator.Error!void {
         self.mutex.lockUncancelable(self.base.inner);
         defer self.mutex.unlock(self.base.inner);
 
@@ -67,30 +82,56 @@ pub const VFS = struct {
     pub fn io(self: *VFS) std.Io {
         return .{
             .userdata = &self.base,
-            .vtable = &comptime VFSBase.vtable(.{
-                .operate = operate,
-                .dirOpenDir = dirOpenDir,
-                .dirStat = dirStat,
-                .dirStatFile = dirStatFile,
-                .dirAccess = dirAccess,
-                .dirCreateFile = dirCreateFile,
-                .dirOpenFile = dirOpenFile,
-                .dirClose = dirClose,
-                .dirRead = dirRead,
-                .dirRealPath = dirRealPath,
-                .dirRealPathFile = dirRealPathFile,
-                .fileStat = fileStat,
-                .fileLength = fileLength,
-                .fileClose = fileClose,
-                .fileWritePositional = fileWritePositional,
-                .fileWriteFileStreaming = fileWriteFileStreaming,
-                .fileWriteFilePositional = fileWriteFilePositional,
-                .fileReadPositional = fileReadPositional,
-                .fileSeekBy = fileSeekBy,
-                .fileSeekTo = fileSeekTo,
-                .fileRealPath = fileRealPath,
-            }),
+            .vtable = ioVTable(),
         };
+    }
+
+    fn ioVTable() *const std.Io.VTable {
+        return &comptime VFSBase.vtable(.{
+            .operate = operate,
+            .dirOpenDir = dirOpenDir,
+            .dirStat = dirStat,
+            .dirStatFile = dirStatFile,
+            .dirAccess = dirAccess,
+            .dirCreateFile = dirCreateFile,
+            .dirOpenFile = dirOpenFile,
+            .dirClose = dirClose,
+            .dirRead = dirRead,
+            .dirRealPath = dirRealPath,
+            .dirRealPathFile = dirRealPathFile,
+            .fileStat = fileStat,
+            .fileLength = fileLength,
+            .fileClose = fileClose,
+            .fileWritePositional = fileWritePositional,
+            .fileWriteFileStreaming = fileWriteFileStreaming,
+            .fileWriteFilePositional = fileWriteFilePositional,
+            .fileReadPositional = fileReadPositional,
+            .fileSeekBy = fileSeekBy,
+            .fileSeekTo = fileSeekTo,
+            .fileRealPath = fileRealPath,
+        });
+    }
+
+    /// Returns ZML-specific source-read information when `io` is this VFS.
+    /// Other std.Io implementations deliberately fall back to the local-file
+    /// defaults so zml.io.load does not require a VFS wrapper.
+    pub fn readProfileForPath(io_: std.Io, path: []const u8) ?ReadProfile {
+        if (io_.vtable != ioVTable()) return null;
+        const self: *VFS = @fieldParentPtr("base", VFSBase.as(io_.userdata));
+        const uri = std.Uri.parse(path) catch return null;
+        self.mutex.lockUncancelable(self.base.inner);
+        defer self.mutex.unlock(self.base.inner);
+        for (self.backends.entries.items(.key), 0..) |scheme, index| {
+            if (!std.mem.eql(u8, uri.scheme, scheme)) continue;
+            const backend = self.backends.entries.items(.value)[index];
+            return .{
+                .id = index + 1,
+                .scheme = scheme,
+                .hints = backend.read_hints,
+                .stats = backend.read_stats,
+            };
+        }
+        return null;
     }
 
     fn openHandle(self: *VFS) !struct { u32, *Handle } {
@@ -133,7 +174,7 @@ pub const VFS = struct {
     }
 
     fn getBackend(self: *VFS, backend_idx: ?usize) std.Io {
-        if (backend_idx) |idx| return self.backends.entries.items(.value)[idx] else return self.base.inner;
+        if (backend_idx) |idx| return self.backends.entries.items(.value)[idx].io else return self.base.inner;
     }
 
     fn lookupDir(self: *VFS, dir: std.Io.Dir, sub_path: ?[]const u8) !struct { ?usize, std.Io.Dir, std.Io } {
@@ -411,3 +452,19 @@ pub const VFS = struct {
         }
     }
 };
+
+test "VFS exposes source read hints only for the matching registered scheme" {
+    var filesystem = try VFS.init(std.testing.allocator, std.testing.io);
+    defer filesystem.deinit();
+    try filesystem.registerBackend("test", .{
+        .io = std.testing.io,
+        .read_hints = .{ .minimum_request_size = 32 * 1024 * 1024, .high_latency = true },
+    });
+
+    const profile = VFS.readProfileForPath(filesystem.io(), "test://bucket/object").?;
+    try std.testing.expectEqualStrings("test", profile.scheme);
+    try std.testing.expectEqual(@as(usize, 32 * 1024 * 1024), profile.hints.minimum_request_size);
+    try std.testing.expect(profile.hints.high_latency);
+    try std.testing.expect(VFS.readProfileForPath(filesystem.io(), "/tmp/model.safetensors") == null);
+    try std.testing.expect(VFS.readProfileForPath(std.testing.io, "test://bucket/object") == null);
+}

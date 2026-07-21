@@ -5,6 +5,8 @@ const stdx = @import("stdx");
 
 const parallel_read = @import("parallel_read.zig");
 const VFSBase = @import("base.zig").VFSBase;
+const Backend = @import("base.zig").Backend;
+const ReadStats = @import("base.zig").ReadStats;
 
 const log = std.log.scoped(.@"zml/io/vfs/gcs");
 
@@ -219,7 +221,8 @@ pub const GCS = struct {
 
                 if (res.head.status != .partial_content and res.head.status != .ok) {
                     const status: parallel_read.Status = switch (res.head.status) {
-                        .request_timeout, .too_many_requests => .retry(),
+                        .request_timeout => .retry(),
+                        .too_many_requests => .throttle(null),
                         else => if (res.head.status.class() == .server_error) .retry() else {
                             log.err("Failed to read {s}: {s}", .{ job.batch.path, res.head.bytes });
                             return error.RequestFailed;
@@ -585,6 +588,22 @@ pub const GCS = struct {
                 .fileRealPath = fileRealPath,
             }),
         };
+    }
+
+    pub fn backend(self: *GCS) Backend {
+        return .{
+            .io = self.io(),
+            .read_hints = .{
+                .minimum_request_size = self.read_pool.chunk_size,
+                .high_latency = true,
+            },
+            .read_stats = .{ .userdata = self, .snapshotFn = readStatsSnapshot },
+        };
+    }
+
+    fn readStatsSnapshot(userdata: *anyopaque) ReadStats {
+        const self: *GCS = @ptrCast(@alignCast(userdata));
+        return self.read_pool.readStats();
     }
 
     fn openHandle(self: *GCS) !struct { u32, *Handle } {

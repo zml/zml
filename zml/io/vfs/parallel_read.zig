@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
+const ReadStats = @import("base.zig").ReadStats;
 
 pub const InitOpts = struct {
     chunk_size: usize,
@@ -13,10 +14,17 @@ pub const InitOpts = struct {
 
 pub const Status = union(enum) {
     success,
-    retry_after: ?std.Io.Duration,
+    retry_after: struct {
+        delay: ?std.Io.Duration = null,
+        throttled: bool = false,
+    },
 
     pub fn retry() Status {
-        return .{ .retry_after = null };
+        return .{ .retry_after = .{} };
+    }
+
+    pub fn throttle(delay: ?std.Io.Duration) Status {
+        return .{ .retry_after = .{ .delay = delay, .throttled = true } };
     }
 };
 
@@ -65,6 +73,11 @@ pub fn Pool(comptime Job: type) type {
         max_retries: usize,
         retry_initial_delay: std.Io.Duration,
         retry_max_delay: std.Io.Duration,
+        physical_requests: std.atomic.Value(u64) = .init(0),
+        physical_bytes: std.atomic.Value(u64) = .init(0),
+        retries: std.atomic.Value(u64) = .init(0),
+        throttles: std.atomic.Value(u64) = .init(0),
+        retry_delay_ns: std.atomic.Value(u64) = .init(0),
 
         pub fn init(self: *Self, allocator: std.mem.Allocator, io: std.Io, client: *std.http.Client, opts: InitOpts) !void {
             stdx.debug.assert(opts.num_workers > 0, "Pool must have at least one worker", .{});
@@ -105,6 +118,16 @@ pub fn Pool(comptime Job: type) type {
             allocator.free(self.queue_buf);
         }
 
+        pub fn readStats(self: *const Self) ReadStats {
+            return .{
+                .physical_requests = self.physical_requests.load(.acquire),
+                .physical_bytes = self.physical_bytes.load(.acquire),
+                .retries = self.retries.load(.acquire),
+                .throttles = self.throttles.load(.acquire),
+                .retry_delay_ns = self.retry_delay_ns.load(.acquire),
+            };
+        }
+
         fn worker(pool: *Self, io: std.Io) std.Io.Cancelable!void {
             while (true) {
                 const job = pool.job_queue.getOne(io) catch break;
@@ -112,20 +135,30 @@ pub fn Pool(comptime Job: type) type {
                 var attempt: usize = 0;
                 while (true) {
                     if (job.batch.state.failed()) break;
+                    _ = pool.physical_requests.fetchAdd(1, .monotonic);
                     const status = job.perform(pool.client) catch |err| {
                         job.batch.state.fail(err);
                         break;
                     };
 
                     switch (status) {
-                        .success => break,
-                        .retry_after => |duration| {
+                        .success => {
+                            if (@hasField(Job, "chunk_len")) {
+                                _ = pool.physical_bytes.fetchAdd(@intCast(job.chunk_len), .monotonic);
+                            }
+                            break;
+                        },
+                        .retry_after => |retry| {
                             if (attempt >= pool.max_retries) {
                                 job.batch.state.fail(error.RetriesExhausted);
                                 break;
                             }
 
-                            io.sleep(duration orelse pool.backoffDuration(attempt), .awake) catch {
+                            _ = pool.retries.fetchAdd(1, .monotonic);
+                            if (retry.throttled) _ = pool.throttles.fetchAdd(1, .monotonic);
+                            const delay = retry.delay orelse pool.backoffDuration(attempt);
+                            _ = pool.retry_delay_ns.fetchAdd(@intCast(@max(delay.nanoseconds, 0)), .monotonic);
+                            io.sleep(delay, .awake) catch {
                                 job.batch.state.fail(error.RetriesExhausted);
                                 break;
                             };
