@@ -1013,9 +1013,9 @@ const Triton = struct {
         stdx.debug.assert(@mod(n, activation_reduction_n) == 0, "invalid GEMM output width {}", .{n});
         stdx.debug.assert(opts.output_shape.dim(-1) == @divExact(n, activation_reduction_n), "output shape {f} does not match GEMM N {}", .{ opts.output_shape, n });
 
-        const block_m: i32 = @intCast(opts.kernel_cfg.block_m);
-        const block_n: i32 = @intCast(opts.kernel_cfg.block_n);
-        const block_k: i32 = @intCast(opts.kernel_cfg.block_k);
+        const block_m: i32 = @intCast(opts.block_m);
+        const block_n: i32 = @intCast(opts.block_n);
+        const block_k: i32 = @intCast(opts.block_k);
         const grid_n = std.math.divCeil(i64, n, block_n) catch unreachable;
         const has_bias = opts.bias != null;
         const has_gather = opts.gather != null;
@@ -1038,11 +1038,12 @@ const Triton = struct {
             .BLOCK_M = block_m,
             .BLOCK_N = block_n,
             .BLOCK_K = block_k,
-            .GROUP_M = @intCast(opts.kernel_cfg.group_m),
+            .GROUP_M = @intCast(opts.group_m),
             .XCD_SWIZZLE = 1,
             .EVEN_K = @mod(contract_k, block_k) == 0,
             .MASK_K_LIMIT = @intCast(if (@mod(contract_k, block_k) == 0) block_k else @mod(contract_k, block_k)),
             .W_CACHE_MODIFIER = if (block_m <= 32) .cg else .none,
+            .NUM_STAGES = @intCast(opts.num_stages),
         };
 
         const y = triton_a16w4_kernel.Kernel.call(
@@ -1080,8 +1081,8 @@ const Triton = struct {
             .{
                 .cfg = cfg,
                 .grid = .{ @intCast(opts.routing.grid_m * grid_n), 1, 1 },
-                .num_warps = @intCast(opts.kernel_cfg.num_warps),
-                .num_stages = @intCast(opts.kernel_cfg.num_stages),
+                .num_warps = @intCast(opts.num_warps),
+                .num_stages = @intCast(opts.num_stages),
             },
         ).Y;
 
