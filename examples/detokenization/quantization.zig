@@ -151,7 +151,7 @@ pub const QuantizationInt8 = struct {
         return src_norm / @sqrt(quant_norm2);
     }
 
-    inline fn int8DotProduct(a: []const i8, b: []const i8) i32 {
+    pub inline fn int8DotProduct(a: []const i8, b: []const i8) i32 {
         if (comptime useNeonSdot) {
             const unrollLen = 4 * simd_len_i8;
             std.debug.assert(a.len == b.len and a.len >= unrollLen and a.len % unrollLen == 0);
@@ -285,14 +285,14 @@ pub const QuantizationInt4 = struct {
         sum3: Vec4i32,
     };
 
-    inline fn signExtendInt4(nibble: u8) i8 {
+    pub inline fn signExtendInt4(nibble: u8) i8 {
         const shifted: i8 = @bitCast(nibble << 4);
         return shifted >> 4;
     }
 
     /// Unpacks two packed 32-coordinate blocks and accumulates their four SDOTs in
     /// one assembly block, keeping all intermediate vectors in SIMD registers.
-    inline fn neonSdotInt8x4x64(
+    pub inline fn neonSdotInt8x4x64(
         sum0: Vec4i32,
         sum1: Vec4i32,
         sum2: Vec4i32,
@@ -339,7 +339,7 @@ pub const QuantizationInt4 = struct {
 
     /// Computes a dot product between a full int8 vector and an int4 vector packed
     /// two coordinates per byte.
-    inline fn int8x4DotProduct(a: []const i8, b: []const i8) i32 {
+    pub inline fn int8x4DotProduct(a: []const i8, b: []const i8) i32 {
         std.debug.assert(a.len == b.len * 2);
         std.debug.assert(a.len >= 64 and a.len % 64 == 0);
 
@@ -384,7 +384,7 @@ pub const QuantizationInt4 = struct {
 
     /// Computes four SDOTs from two packed int4 query blocks and two packed int4
     /// weight blocks without materializing either operand as int8 in memory.
-    inline fn neonSdotInt4x4x64(
+    pub inline fn neonSdotInt4x4x64(
         sum0: Vec4i32,
         sum1: Vec4i32,
         sum2: Vec4i32,
@@ -437,7 +437,7 @@ pub const QuantizationInt4 = struct {
 
     /// Computes a dot product between two vectors using the shared packed int4
     /// nibble-plane layout.
-    inline fn int4DotProduct(a: []const i8, b: []const i8) i32 {
+    pub inline fn int4DotProduct(a: []const i8, b: []const i8) i32 {
         std.debug.assert(a.len == b.len);
         std.debug.assert(a.len >= 2 * int4_packed_block_len and a.len % (2 * int4_packed_block_len) == 0);
 
@@ -570,7 +570,7 @@ pub const QuantizationQJL1 = struct {
 
     const qjl_dot_lut = makeQjlDotLut(hidden_dim);
 
-    inline fn popcountXor(a: *const VectorQJL1, b: *const VectorQJL1) u32 {
+    pub inline fn popcountXor(a: *const VectorQJL1, b: *const VectorQJL1) u32 {
         // Cast the arrays directly to raw byte pointers
         const ptr_a = @as([*]const u8, @ptrCast(a));
         const ptr_b = @as([*]const u8, @ptrCast(b));
