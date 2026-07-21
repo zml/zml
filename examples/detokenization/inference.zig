@@ -225,7 +225,7 @@ fn generateText(zml_handler: *Zml_handler, llm: *Llm_handler, sampler: anytype, 
 }
 
 fn sampleTokenFromCpuResult(result: *SamplingResult, llm: *const Llm_handler, random: *std.Random) u32 {
-    if (true) return @intCast(result.candidates[0].row);
+    //if (true) return @intCast(result.candidates[0].row);
     if (!llm.generation_config.do_sample or llm.generation_config.top_k <= 1) {
         return @intCast(result.candidates[0].row);
     }
