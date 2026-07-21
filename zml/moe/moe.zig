@@ -368,7 +368,12 @@ const GemmOpts = struct {
     bias: ?zml.Tensor = null,
     apply_swiglu: bool = false,
     activation_limit: f32 = 1.0,
-    kernel_cfg: KernelConf,
+    block_m: u32,
+    block_n: u32,
+    block_k: u32,
+    group_m: u32,
+    num_warps: u32,
+    num_stages: u32,
 };
 
 const Vanilla = struct {
@@ -857,7 +862,12 @@ const Triton = struct {
                 .bias = bias_gate_up,
                 .apply_swiglu = true,
                 .activation_limit = activation_limit,
-                .kernel_cfg = kernel_cfg,
+                .block_m = kernel_cfg.block_m,
+                .block_n = kernel_cfg.block_n,
+                .block_k = kernel_cfg.block_k,
+                .group_m = kernel_cfg.group_m,
+                .num_warps = kernel_cfg.num_warps,
+                .num_stages = kernel_cfg.num_stages,
             },
         );
 
@@ -876,7 +886,14 @@ const Triton = struct {
                 .weight_output_tag = zml.Shape.toTag(.d),
                 .output_shape = routed_shape,
                 .bias = bias_down,
-                .kernel_cfg = kernel_cfg,
+                .apply_swiglu = false,
+                .activation_limit = 1.0,
+                .block_m = kernel_cfg.block_m,
+                .block_n = kernel_cfg.block_n,
+                .block_k = kernel_cfg.block_k,
+                .group_m = kernel_cfg.group_m,
+                .num_warps = kernel_cfg.num_warps,
+                .num_stages = kernel_cfg.num_stages,
             },
         );
 
