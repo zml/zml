@@ -13,16 +13,6 @@ const zml = @import("zml.zig");
 
 const log = std.log.scoped(.@"zml/nn");
 
-fn applyCompressedTensorsDivisor(x: Tensor, divisor_: Tensor) Tensor {
-    stdx.debug.assert(divisor_.dtype() == .f32, "compressed-tensors divisor must be f32, got {}", .{divisor_.dtype()});
-    stdx.debug.assert(divisor_.rank() == 1 and divisor_.dim(0) == 1, "compressed-tensors divisor must have shape [1], got {f}", .{divisor_.shape()});
-
-    const divisor = divisor_.withTags(.{.one}).squeeze(.one);
-    return x.convert(.f32)
-        .div(divisor.broad(x.shape()))
-        .convert(x.dtype());
-}
-
 pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
@@ -53,10 +43,16 @@ pub const Linear = struct {
             else
                 self.weight;
 
-            if (self.global_scale) |divisor| {
-                break :blk ops.scaledDot(applyCompressedTensorsDivisor(x, divisor), weight, scales, self.tag);
-            }
-            break :blk ops.scaledDot(x, weight, scales, self.tag);
+            const lhs = if (self.global_scale) |divisor_| blk_lhs: {
+                stdx.debug.assert(divisor_.dtype() == .f32, "divisor must be f32, got {}", .{divisor_.dtype()});
+                stdx.debug.assert(divisor_.rank() == 1 and divisor_.dim(0) == 1, "divisor must have shape [1], got {f}", .{divisor_.shape()});
+
+                // We may not need to do that for hardware that supports nvfp4
+                const divisor = divisor_.withTags(.{.one}).squeeze(.one);
+                break :blk_lhs x.convert(.f32).div(divisor.broad(x.shape())).convert(x.dtype());
+            } else x;
+
+            break :blk ops.scaledDot(lhs, weight, scales, self.tag);
         } else x.dot(self.weight, self.tag);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
