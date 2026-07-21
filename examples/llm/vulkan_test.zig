@@ -1,8 +1,8 @@
 const std = @import("std");
 const zml = @import("zml");
 
-fn identity(x: zml.Tensor) zml.Tensor {
-    return x;
+fn abs(x: zml.Tensor) zml.Tensor {
+    return x.abs();
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -15,7 +15,7 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
 
     const input_shape: zml.Tensor = .init(.{4}, .f32);
-    var exe = try platform.compileFn(allocator, io, identity, .{input_shape}, .{});
+    var exe = try platform.compileFn(allocator, io, abs, .{input_shape}, .{});
     defer exe.deinit();
 
     const host_input = [_]f32{ -1, 2, -3, 4 };
@@ -44,5 +44,5 @@ pub fn main(init: std.process.Init) !void {
         zml.Slice.init(output.shape(), std.mem.sliceAsBytes(host_output[0..])),
     );
     std.debug.print("Vulkan output: {any}\n", .{host_output});
-    try std.testing.expectEqualSlices(f32, &.{ -1, 2, -3, 4 }, &host_output);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, &host_output);
 }
