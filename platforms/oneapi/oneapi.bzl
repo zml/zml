@@ -2,8 +2,8 @@ load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 
 PJRT_ONEAPI_RELEASE = "manual-2026-07-17T10-00-00Z"
-PJRT_ONEAPI_ARTIFACT_SHA256 = "ad662bf5e0497bafad919f148b5c9001ce0497bff2addf47060caa5c48be39cd"
-PJRT_ONEAPI_ARTIFACT_URL = "file:///home/brabier/github/openxla/pjrt-oneapi_linux-amd64-2026-07-21_14-10.tar"
+PJRT_ONEAPI_ARTIFACT_SHA256 = "ee74d59065cb60e1de5037cadb3567d7d69824003a1600a8ae27007ae8012328"
+PJRT_ONEAPI_ARTIFACT_URL = "file:///home/brabier/github/openxla/pjrt-oneapi_linux-amd64-2026-07-21_20-42.tar"
 
 ONEAPI_VERSION = "2026.1"
 ONEAPI_TCM_VERSION = "1.5"

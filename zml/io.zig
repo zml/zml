@@ -1065,6 +1065,7 @@ const VectoredLoadPipeline = struct {
         peak_device_active: usize,
         ready_entries: usize,
         ready_oldest_age_ns: u64,
+        ready_old_entries: usize,
         any_device_saturated: bool,
         probe_capacity_active: bool,
     };
@@ -1385,6 +1386,10 @@ const VectoredLoadPipeline = struct {
                     const queue = &self.ready_queues[device_index];
                     for (queue.items, 0..) |transfer, i| {
                         if (!self.transferReady(transfer)) continue;
+                        // Prefer recently filled blocks: swapRemove keeps the
+                        // hot suffix moving toward the front. Controller
+                        // pressure uses an aged cohort rather than one oldest
+                        // entry so a cold tail cannot cause false backoff.
                         selected = queue.swapRemove(i);
                         self.next_device = (device_index + 1) % self.ready_queues.len;
                         self.active_by_device[device_index] += 1;
@@ -1557,7 +1562,11 @@ const VectoredLoadPipeline = struct {
         defer self.metadata_mutex.unlock(self.io);
         var mask: u64 = 0;
         for (self.ready_queues, 0..) |queue, device_index| {
-            if (self.active_by_device[device_index] + queue.items.len >= candidate) {
+            var eligible: usize = 0;
+            for (queue.items) |transfer| {
+                if (self.transferReady(transfer)) eligible += 1;
+            }
+            if (self.active_by_device[device_index] + eligible >= candidate) {
                 mask |= @as(u64, 1) << @intCast(device_index);
             }
         }
@@ -1582,10 +1591,18 @@ const VectoredLoadPipeline = struct {
         defer self.metadata_mutex.unlock(self.io);
         self.accountSlotsLocked();
         var ready_oldest_age_ns: u64 = 0;
+        var ready_old_entries: usize = 0;
+        var ready_entries: usize = 0;
         for (self.ready_queues) |queue| {
             for (queue.items) |transfer| {
+                // A final transfer is intentionally held until every earlier
+                // byte for its transfer manager has been submitted. It is an
+                // ordering barrier, not DMA-ready queue pressure.
+                if (!self.transferReady(transfer)) continue;
+                ready_entries += 1;
                 const age: u64 = @intCast(@max(transfer.block.ready_at.untilNow(self.io, .awake).nanoseconds, 0));
                 ready_oldest_age_ns = @max(ready_oldest_age_ns, age);
+                if (age > 250 * std.time.ns_per_ms) ready_old_entries += 1;
             }
         }
         const limit = self.dma_limit.load(.acquire);
@@ -1595,7 +1612,14 @@ const VectoredLoadPipeline = struct {
         for (self.active_by_device, self.peak_by_device, self.ready_queues) |active, peak, queue| {
             max_device_active = @max(max_device_active, active);
             peak_device_active = @max(peak_device_active, peak);
-            if (active >= limit and queue.items.len > 0) any_device_saturated = true;
+            if (active >= limit) {
+                for (queue.items) |transfer| {
+                    if (self.transferReady(transfer)) {
+                        any_device_saturated = true;
+                        break;
+                    }
+                }
+            }
         }
         var active_mask: u64 = 0;
         for (self.probe_peak_by_device, 0..) |peak, device_index| {
@@ -1608,8 +1632,9 @@ const VectoredLoadPipeline = struct {
             .capacity_slot_ns = self.capacity_slot_ns,
             .max_device_active = max_device_active,
             .peak_device_active = peak_device_active,
-            .ready_entries = self.ready_entries,
+            .ready_entries = ready_entries,
             .ready_oldest_age_ns = ready_oldest_age_ns,
+            .ready_old_entries = ready_old_entries,
             .any_device_saturated = any_device_saturated,
             .probe_capacity_active = self.dma_probe_required_mask != 0 and
                 (active_mask & self.dma_probe_required_mask) == self.dma_probe_required_mask,
@@ -1775,6 +1800,8 @@ const AdaptiveVectoredController = struct {
         const Action = enum {
             none,
             read_bootstrap,
+            read_startup_grow,
+            startup_settle,
             read_probe_start,
             read_probe_keep,
             read_probe_rollback,
@@ -1821,10 +1848,14 @@ const AdaptiveVectoredController = struct {
     stable_goodput: f64 = 0,
     peak_goodput: f64 = 0,
     stable_dma_latency_us: f64 = 0,
+    dma_started: bool = false,
     slow_source_observed: bool = false,
+    representative_startup_read_grown: bool = false,
     representative_windows: u8 = 0,
+    dma_fed_windows: u8 = 0,
     hard_dma_windows: u8 = 0,
     last_probe_ns: u64 = 0,
+    last_startup_change_ns: u64 = 0,
     last_resource_probe_ns: u64 = 0,
     last_dma_starvation_ns: u64 = 0,
     performance_probe_blocked_until_ns: u64 = 0,
@@ -1832,6 +1863,7 @@ const AdaptiveVectoredController = struct {
     resource_probe_blocked_until_ns: u64 = 0,
 
     const probe_byte_floor: u64 = 64 * 1024 * 1024;
+    const probe_early_time_floor_ns: u64 = 100 * std.time.ns_per_ms;
     const probe_time_floor_ns: u64 = 200 * std.time.ns_per_ms;
 
     fn init(max_read: usize, max_dma: usize) AdaptiveVectoredController {
@@ -1874,7 +1906,12 @@ const AdaptiveVectoredController = struct {
                 self.performance_probe_blocked_until_ns = sample.now_ns +| 2 * std.time.ns_per_s;
                 return self.decision(probeAction(probe.dimension, probe.kind, false), true, reason, null, true);
             }
-            if (sample.probe_committed_bytes < probe_byte_floor or sample.probe_elapsed_ns < probe_time_floor_ns) {
+            const early_score = sample.probe_committed_bytes >= probe_byte_floor and
+                sample.probe_elapsed_ns >= probe_early_time_floor_ns and
+                self.probeResultIsDecisive(probe, sample);
+            if (!early_score and
+                (sample.probe_committed_bytes < probe_byte_floor or sample.probe_elapsed_ns < probe_time_floor_ns))
+            {
                 return self.currentDecision();
             }
             return self.scoreProbe(probe, sample);
@@ -1894,6 +1931,13 @@ const AdaptiveVectoredController = struct {
                     0.95 * self.stable_dma_latency_us + 0.05 * sample.dma_latency_us;
             }
         }
+        if (sample.committed_goodput > 0 and sample.dma_saturated and
+            (self.dma_started or self.mode == .steady))
+        {
+            self.dma_fed_windows = @min(2, self.dma_fed_windows +| 1);
+        } else {
+            self.dma_fed_windows = 0;
+        }
 
         if (self.hard_dma_windows >= 2 and self.limits.dma > 1 and sample.now_ns >= self.pressure_backoff_blocked_until_ns) {
             self.mode = .steady;
@@ -1909,19 +1953,53 @@ const AdaptiveVectoredController = struct {
             (self.mode == .startup or sample.now_ns -| self.last_probe_ns >= 2 * std.time.ns_per_s);
         const baseline = if (self.stable_goodput > 0) self.stable_goodput else sample.committed_goodput;
 
-        if (sample.allow_probe and sample.source_stalled and sample.read_saturated and self.limits.read < self.max_read) {
-            // There is no representative output to compare yet, so this is
-            // admission bootstrap rather than a performance probe. Publishing
-            // it directly lets a high-latency source double again on the next
-            // empty startup window instead of serializing meaningless 200 ms
-            // probe scores.
+        if (sample.allow_probe and self.mode == .startup and sample.source_stalled and
+            sample.read_saturated and self.limits.read < self.max_read)
+        {
+            // There is no representative output to score yet. Double read
+            // fanout directly so high-latency sources can fill the pipe before
+            // their first response arrives.
             self.epoch += 1;
             self.limits.read = @min(self.max_read, @max(self.limits.read + 1, self.limits.read *| 2));
             self.last_probe_ns = sample.now_ns;
+            self.last_startup_change_ns = sample.now_ns;
             return self.decision(.read_bootstrap, true, .none, null, false);
         }
 
-        if (sample.allow_probe and performance_due and sample.dma_starvation_ratio > 0.10 and sample.read_saturated and
+        if (self.dma_started and sample.allow_probe and self.mode == .startup and
+            !self.representative_startup_read_grown and
+            sample.dma_starvation_ratio > 0.10 and sample.read_saturated and
+            !sample.ready_pressure and self.limits.read < self.max_read)
+        {
+            // Skip one serialized 200 ms score while establishing an initial
+            // representative read width. A fast source takes one gradual
+            // step; a source already observed below 1.5 GiB/s per request
+            // opens to the caller's cap. Further growth is scored after
+            // startup because an empty ready queue at a burst boundary is not
+            // sufficient proof that the current width is too small.
+            self.epoch += 1;
+            self.representative_startup_read_grown = true;
+            self.limits.read = if (self.slow_source_observed)
+                self.max_read
+            else
+                self.increase(self.limits.read, self.max_read);
+            self.last_probe_ns = sample.now_ns;
+            self.last_startup_change_ns = sample.now_ns;
+            return self.decision(.read_startup_grow, true, .none, null, false);
+        }
+
+        if (self.dma_started and self.mode == .startup and self.representative_windows >= 2 and
+            sample.now_ns -| self.last_startup_change_ns >= 500 * std.time.ns_per_ms)
+        {
+            self.mode = .steady;
+            self.last_probe_ns = sample.now_ns;
+            self.performance_probe_blocked_until_ns = sample.now_ns +| 2 * std.time.ns_per_s;
+            return self.decision(.startup_settle, false, .none, null, false);
+        }
+
+        if ((self.dma_started or self.mode == .steady) and sample.allow_probe and
+            self.mode == .steady and performance_due and
+            sample.dma_starvation_ratio > 0.10 and sample.read_saturated and
             !sample.ready_pressure and self.limits.read < self.max_read)
         {
             var candidate = self.limits;
@@ -1929,12 +2007,12 @@ const AdaptiveVectoredController = struct {
             return self.startProbe(.read, .increase, candidate, baseline, sample, .read_probe_start);
         }
 
-        // Do not compare the first startup window with a DMA candidate. That
-        // window includes transfer-manager initialization and pipeline fill,
-        // so treating it as the settled baseline systematically rewards extra
-        // event credits. Read probes may still start immediately when DMA is
-        // starved; only DMA needs this short baseline qualification.
-        if (sample.allow_probe and performance_due and self.representative_windows >= 2 and baseline > 0 and
+        // Do not compare startup initialization or a single fed burst with a
+        // DMA candidate. Transfer-manager initialization and pipeline fill
+        // systematically reward extra event credits unless the baseline has
+        // remained both fed and saturated for two representative windows.
+        if ((self.dma_started or self.mode == .steady) and sample.allow_probe and performance_due and
+            self.representative_windows >= 2 and self.dma_fed_windows >= 2 and baseline > 0 and
             sample.dma_saturated and sample.dma_probe_capacity and
             !sample.hard_dma_pressure and self.limits.dma < self.max_dma)
         {
@@ -1997,6 +2075,17 @@ const AdaptiveVectoredController = struct {
         return false;
     }
 
+    fn markDmaStarted(self: *AdaptiveVectoredController, now_ns: u64) void {
+        if (self.dma_started) return;
+        self.dma_started = true;
+        self.representative_windows = 0;
+        self.dma_fed_windows = 0;
+        self.stable_goodput = 0;
+        self.peak_goodput = 0;
+        self.stable_dma_latency_us = 0;
+        self.last_startup_change_ns = now_ns;
+    }
+
     fn rollbackTimedOutProbe(self: *AdaptiveVectoredController, now_ns: u64) ?Decision {
         return self.rollbackProbe(now_ns, .probe_timeout, .capacity_not_exercised);
     }
@@ -2019,6 +2108,30 @@ const AdaptiveVectoredController = struct {
         self.last_probe_ns = now_ns;
         self.performance_probe_blocked_until_ns = now_ns +| 2 * std.time.ns_per_s;
         return self.decision(action, true, reason, null, true);
+    }
+
+    fn probeResultIsDecisive(
+        self: *const AdaptiveVectoredController,
+        probe: Probe,
+        sample: Sample,
+    ) bool {
+        _ = self;
+        if (probe.baseline_goodput <= 0 or sample.probe_goodput <= 0 or
+            sample.probe_aggregate_goodput <= 0)
+        {
+            return false;
+        }
+
+        // A single 100 ms cohort may end a probe only when both the
+        // epoch-attributed rate and the cumulative post-activation rate show
+        // the same large result. Ambiguous changes retain the ordinary 200 ms
+        // floor and its 3% acceptance threshold.
+        const clear_gain = sample.probe_goodput >= 1.10 * probe.baseline_goodput and
+            sample.probe_aggregate_goodput >= 1.10 * probe.baseline_goodput and
+            !sample.ready_pressure and !sample.hard_dma_pressure;
+        const clear_loss = sample.probe_goodput <= 0.90 * probe.baseline_goodput and
+            sample.probe_aggregate_goodput <= 0.90 * probe.baseline_goodput;
+        return clear_gain or clear_loss;
     }
 
     fn scoreProbe(self: *AdaptiveVectoredController, probe: Probe, sample: Sample) Decision {
@@ -2242,6 +2355,24 @@ const AdaptiveVectoredRuntime = struct {
             if (elapsed_ns < min_ns) continue;
 
             const snapshot = self.metrics.snapshot();
+            if (!self.controller.dma_started and snapshot.committed_bytes > 0) {
+                // The first PJRT completion includes transfer-manager and
+                // runtime warm-up. Start controller attribution after it so
+                // startup latency cannot masquerade as DMA starvation or a
+                // candidate goodput gain.
+                self.controller.markDmaStarted(now_ns);
+                previous = snapshot;
+                previous_control = self.pipeline.controlSnapshot();
+                previous_ready_bytes = snapshot.ready_bytes;
+                self.metrics.resetReadPeak();
+                window_started = now;
+                load_log.debug("adaptive DMA baseline started after first completion: elapsed={d:.3}s, reads={d}, dma_per_device={d}", .{
+                    @as(f64, @floatFromInt(now_ns)) / std.time.ns_per_s,
+                    self.controller.limits.read,
+                    self.controller.limits.dma,
+                });
+                continue;
+            }
             const delta = snapshot.sub(previous);
             const control = self.pipeline.controlSnapshot();
             const progress_bytes = @max(delta.read_bytes, delta.committed_bytes);
@@ -2275,7 +2406,8 @@ const AdaptiveVectoredRuntime = struct {
                 1
             else
                 1 - @min(1, @as(f64, @floatFromInt(active_slot_delta)) / @as(f64, @floatFromInt(capacity_slot_delta)));
-            const instantaneous_dma_starvation = if (control.ready_entries == 0 and control.active_capacity > 0)
+            const instantaneous_dma_starvation = if (!self.controller.slow_source_observed and
+                control.ready_entries == 0 and control.active_capacity > 0)
                 1 - @min(1, @as(f64, @floatFromInt(control.active_events)) / @as(f64, @floatFromInt(control.active_capacity)))
             else
                 0;
@@ -2286,7 +2418,8 @@ const AdaptiveVectoredRuntime = struct {
                 @as(f64, @floatFromInt(@max(@as(usize, 1), ready_pressure_capacity)));
             const ready_occupancy = @as(f64, @floatFromInt(snapshot.ready_bytes)) /
                 @as(f64, @floatFromInt(@max(@as(usize, 1), ready_pressure_capacity)));
-            const ready_age_pressure = control.ready_oldest_age_ns > 250 * std.time.ns_per_ms;
+            const ready_age_pressure = control.ready_old_entries >= 4 and
+                control.ready_old_entries *| 4 >= control.ready_entries;
             const raw_ready_pressure = ready_growth_ratio > 0.20 or ready_occupancy > 0.75 or ready_age_pressure;
             if (raw_ready_pressure and dma_starvation_ratio <= 0.10) {
                 self.ready_growth_windows = @min(2, self.ready_growth_windows +| 1);
@@ -2334,6 +2467,7 @@ const AdaptiveVectoredRuntime = struct {
                 }
             }
 
+            const probe_baseline_goodput = if (self.controller.probe) |probe| probe.baseline_goodput else 0;
             const old_probe_epoch = if (self.controller.probe) |probe| probe.epoch else std.math.maxInt(u64);
             var decision = self.controller.observe(.{
                 .now_ns = now_ns,
@@ -2361,7 +2495,7 @@ const AdaptiveVectoredRuntime = struct {
             }
             if (decision.changed or decision.finished_probe) self.applyDecision(io, decision, old_probe_epoch);
 
-            load_log.debug("adaptive window: action={s}, reason={s}, mode={s}, epoch={d}, reads={d}/{d} active={d} saturated={}, dma_per_device={d}/{d} active={d}/{d} saturated={}, committed={d:.2}MiB/s, dma_latency={d:.1}us, starvation={d:.1}%, ready={Bi:.2}/{Bi:.2} age={d:.1}ms pressure={}, probe_bytes={Bi:.2}", .{
+            load_log.debug("adaptive window: action={s}, reason={s}, mode={s}, epoch={d}, reads={d}/{d} active={d} saturated={}, dma_per_device={d}/{d} active={d}/{d} saturated={}, committed={d:.2}MiB/s, dma_latency={d:.1}us, starvation={d:.1}%, ready={Bi:.2}/{Bi:.2} age={d:.1}ms aged={d}/{d} pressure={}, probe={d:.2}/{d:.2}/{d:.2}MiB/s {Bi:.2}/{d:.1}ms", .{
                 @tagName(decision.action),
                 @tagName(decision.reason),
                 @tagName(self.controller.mode),
@@ -2381,8 +2515,14 @@ const AdaptiveVectoredRuntime = struct {
                 snapshot.ready_bytes,
                 ready_pressure_capacity,
                 @as(f64, @floatFromInt(control.ready_oldest_age_ns)) / std.time.ns_per_ms,
+                control.ready_old_entries,
+                control.ready_entries,
                 ready_pressure,
+                probe_baseline_goodput / (1024 * 1024),
+                probe_goodput / (1024 * 1024),
+                probe_aggregate_goodput / (1024 * 1024),
                 snapshot.probe_committed_bytes,
+                @as(f64, @floatFromInt(probe_elapsed_ns)) / std.time.ns_per_ms,
             });
 
             previous = snapshot;
@@ -3016,21 +3156,78 @@ test "vectored final transfers wait for every prior destination submission" {
     try std.testing.expect(pipeline.transferReady(non_final));
 }
 
-test "adaptive vectored controller grows reads only to feed starved DMA" {
+test "adaptive vectored controller skips one representative startup read score" {
     var controller: AdaptiveVectoredController = .init(32, 32);
+    controller.markDmaStarted(0);
     var decision = controller.observe(.{
         .now_ns = 100 * std.time.ns_per_ms,
         .committed_goodput = 100,
         .dma_starvation_ratio = 0.50,
         .read_saturated = true,
     });
-    try std.testing.expectEqual(.read_probe_start, decision.action);
+    try std.testing.expectEqual(.read_startup_grow, decision.action);
     try std.testing.expectEqual(@as(usize, 12), decision.limits.read);
     try std.testing.expectEqual(@as(usize, 8), decision.limits.dma);
+    try std.testing.expect(controller.probe == null);
+
+    decision = controller.observe(.{
+        .now_ns = 150 * std.time.ns_per_ms,
+        .committed_goodput = 104,
+        .dma_starvation_ratio = 0.50,
+        .read_saturated = true,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(@as(usize, 12), controller.limits.read);
+
+    decision = controller.observe(.{
+        .now_ns = 200 * std.time.ns_per_ms,
+        .committed_goodput = 104,
+        .dma_starvation_ratio = 0.08,
+        .read_saturated = true,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(@as(usize, 12), controller.limits.read);
+}
+
+test "adaptive vectored controller opens slow-source reads to the public cap" {
+    var controller: AdaptiveVectoredController = .init(32, 32);
+    controller.markDmaStarted(0);
+    var decision = controller.observe(.{
+        .now_ns = 100 * std.time.ns_per_ms,
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0.50,
+        .read_saturated = true,
+        .slow_reads = true,
+    });
+    try std.testing.expectEqual(.read_startup_grow, decision.action);
+    try std.testing.expectEqual(@as(usize, 32), decision.limits.read);
+
+    decision = controller.observe(.{
+        .now_ns = 200 * std.time.ns_per_ms,
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0.50,
+        .read_saturated = true,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(@as(usize, 32), decision.limits.read);
+    try std.testing.expect(controller.probe == null);
+}
+
+test "adaptive vectored controller scores starvation-driven read growth after startup" {
+    var controller: AdaptiveVectoredController = .init(32, 32);
+    controller.mode = .steady;
+    var decision = controller.observe(.{
+        .now_ns = 3 * std.time.ns_per_s,
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0.50,
+        .read_saturated = true,
+    });
+    try std.testing.expectEqual(.read_probe_start, decision.action);
+    try std.testing.expectEqual(@as(usize, 10), decision.limits.read);
     try std.testing.expect(controller.activateProbe(decision.epoch));
 
     decision = controller.observe(.{
-        .now_ns = 400 * std.time.ns_per_ms,
+        .now_ns = 4 * std.time.ns_per_s,
         .committed_goodput = 104,
         .probe_goodput = 104,
         .probe_aggregate_goodput = 104,
@@ -3039,23 +3236,25 @@ test "adaptive vectored controller grows reads only to feed starved DMA" {
         .dma_starvation_ratio = 0.08,
     });
     try std.testing.expectEqual(.read_probe_keep, decision.action);
-    try std.testing.expectEqual(@as(usize, 12), controller.limits.read);
+    try std.testing.expectEqual(@as(usize, 10), controller.limits.read);
 }
 
 test "adaptive vectored controller rolls back a flat DMA probe" {
     var controller: AdaptiveVectoredController = .init(32, 32);
+    controller.mode = .steady;
     controller.stable_goodput = 100;
     controller.peak_goodput = 100;
     controller.representative_windows = 2;
+    controller.dma_fed_windows = 1;
     var decision = controller.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
+        .now_ns = 3 * std.time.ns_per_s,
         .committed_goodput = 100,
         .dma_starvation_ratio = 0,
         .dma_saturated = true,
         .dma_probe_capacity = true,
     });
     try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expectEqual(@as(usize, 12), decision.limits.dma);
+    try std.testing.expectEqual(@as(usize, 10), decision.limits.dma);
     try std.testing.expect(controller.activateProbe(decision.epoch));
     const candidate_epoch = decision.epoch;
 
@@ -3073,11 +3272,176 @@ test "adaptive vectored controller rolls back a flat DMA probe" {
     try std.testing.expect(decision.epoch > candidate_epoch);
 }
 
+test "adaptive vectored controller scores only decisive probes at 100 ms" {
+    var gain: AdaptiveVectoredController = .init(32, 32);
+    gain.mode = .steady;
+    gain.stable_goodput = 100;
+    gain.peak_goodput = 100;
+    gain.representative_windows = 2;
+    gain.dma_fed_windows = 1;
+    var decision = gain.observe(.{
+        .now_ns = 3 * std.time.ns_per_s,
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0,
+        .dma_saturated = true,
+        .dma_probe_capacity = true,
+    });
+    try std.testing.expectEqual(.dma_probe_start, decision.action);
+    try std.testing.expect(gain.activateProbe(decision.epoch));
+    decision = gain.observe(.{
+        .now_ns = 3 * std.time.ns_per_s + 100 * std.time.ns_per_ms,
+        .committed_goodput = 112,
+        .probe_goodput = 112,
+        .probe_aggregate_goodput = 111,
+        .probe_committed_bytes = 64 * 1024 * 1024,
+        .probe_elapsed_ns = 100 * std.time.ns_per_ms,
+        .dma_starvation_ratio = 0,
+    });
+    try std.testing.expectEqual(.dma_probe_keep, decision.action);
+
+    var ambiguous: AdaptiveVectoredController = .init(32, 32);
+    ambiguous.mode = .steady;
+    ambiguous.stable_goodput = 100;
+    ambiguous.peak_goodput = 100;
+    ambiguous.representative_windows = 2;
+    ambiguous.dma_fed_windows = 1;
+    decision = ambiguous.observe(.{
+        .now_ns = 3 * std.time.ns_per_s,
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0,
+        .dma_saturated = true,
+        .dma_probe_capacity = true,
+    });
+    try std.testing.expect(ambiguous.activateProbe(decision.epoch));
+    decision = ambiguous.observe(.{
+        .now_ns = 3 * std.time.ns_per_s + 100 * std.time.ns_per_ms,
+        .committed_goodput = 105,
+        .probe_goodput = 105,
+        .probe_aggregate_goodput = 105,
+        .probe_committed_bytes = 64 * 1024 * 1024,
+        .probe_elapsed_ns = 100 * std.time.ns_per_ms,
+        .dma_starvation_ratio = 0,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expect(ambiguous.probe != null);
+
+    var loss: AdaptiveVectoredController = .init(32, 32);
+    loss.mode = .steady;
+    loss.stable_goodput = 100;
+    loss.peak_goodput = 100;
+    loss.representative_windows = 2;
+    loss.dma_fed_windows = 1;
+    decision = loss.observe(.{
+        .now_ns = 3 * std.time.ns_per_s,
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0,
+        .dma_saturated = true,
+        .dma_probe_capacity = true,
+    });
+    try std.testing.expect(loss.activateProbe(decision.epoch));
+    decision = loss.observe(.{
+        .now_ns = 3 * std.time.ns_per_s + 100 * std.time.ns_per_ms,
+        .committed_goodput = 88,
+        .probe_goodput = 88,
+        .probe_aggregate_goodput = 89,
+        .probe_committed_bytes = 64 * 1024 * 1024,
+        .probe_elapsed_ns = 100 * std.time.ns_per_ms,
+        .dma_starvation_ratio = 0,
+    });
+    try std.testing.expectEqual(.dma_probe_rollback, decision.action);
+    try std.testing.expectEqual(@as(usize, 8), decision.limits.dma);
+}
+
 test "adaptive vectored controller qualifies a DMA baseline before probing" {
     var controller: AdaptiveVectoredController = .init(32, 32);
+    controller.mode = .steady;
+    controller.resource_probe_blocked_until_ns = 10 * std.time.ns_per_s;
+    var decision = controller.observe(.{
+        .now_ns = 3 * std.time.ns_per_s,
+        .committed_goodput = 25,
+        .dma_starvation_ratio = 0,
+        .dma_saturated = true,
+        .dma_probe_capacity = true,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+
+    decision = controller.observe(.{
+        .now_ns = 3 * std.time.ns_per_s + 100 * std.time.ns_per_ms,
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0,
+        .dma_saturated = true,
+        .dma_probe_capacity = true,
+    });
+    try std.testing.expectEqual(.dma_probe_start, decision.action);
+    try std.testing.expectEqual(@as(f64, 100), controller.probe.?.baseline_goodput);
+}
+
+test "adaptive vectored controller starts adaptation after the first DMA completion" {
+    var controller: AdaptiveVectoredController = .init(32, 32);
+    var decision = controller.observe(.{
+        .now_ns = 100 * std.time.ns_per_ms,
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0.50,
+        .read_saturated = true,
+        .dma_saturated = true,
+        .dma_probe_capacity = true,
+        .slow_reads = true,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+    try std.testing.expectEqual(@as(usize, 8), decision.limits.read);
+    try std.testing.expectEqual(@as(usize, 8), decision.limits.dma);
+
+    controller.markDmaStarted(100 * std.time.ns_per_ms);
+    decision = controller.observe(.{
+        .now_ns = 150 * std.time.ns_per_ms,
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0,
+        .dma_saturated = true,
+        .dma_probe_capacity = true,
+    });
+    try std.testing.expectEqual(.none, decision.action);
+    decision = controller.observe(.{
+        .now_ns = 200 * std.time.ns_per_ms,
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0,
+        .dma_saturated = true,
+        .dma_probe_capacity = true,
+    });
+    try std.testing.expectEqual(.dma_probe_start, decision.action);
+    try std.testing.expectEqual(@as(usize, 12), decision.limits.dma);
+}
+
+test "adaptive vectored controller settles after startup read fanout is quiet" {
+    var controller: AdaptiveVectoredController = .init(32, 32);
+    controller.markDmaStarted(0);
+    var decision = controller.observe(.{
+        .now_ns = 100 * std.time.ns_per_ms,
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0.50,
+        .read_saturated = true,
+    });
+    try std.testing.expectEqual(.read_startup_grow, decision.action);
+
+    decision = controller.observe(.{
+        .now_ns = 700 * std.time.ns_per_ms,
+        .committed_goodput = 100,
+        .dma_starvation_ratio = 0,
+    });
+    try std.testing.expectEqual(.startup_settle, decision.action);
+    try std.testing.expectEqual(.steady, controller.mode);
+    try std.testing.expectEqual(@as(usize, 12), decision.limits.read);
+    try std.testing.expect(controller.probe == null);
+}
+
+test "adaptive vectored controller ignores transient DMA saturation between source bursts" {
+    var controller: AdaptiveVectoredController = .init(32, 32);
+    controller.markDmaStarted(0);
+    controller.stable_goodput = 100;
+    controller.peak_goodput = 100;
+    controller.representative_windows = 2;
     var decision = controller.observe(.{
         .now_ns = 50 * std.time.ns_per_ms,
-        .committed_goodput = 25,
+        .committed_goodput = 100,
         .dma_starvation_ratio = 0,
         .dma_saturated = true,
         .dma_probe_capacity = true,
@@ -3087,12 +3451,19 @@ test "adaptive vectored controller qualifies a DMA baseline before probing" {
     decision = controller.observe(.{
         .now_ns = 100 * std.time.ns_per_ms,
         .committed_goodput = 100,
+        .dma_starvation_ratio = 0.50,
+        .read_saturated = true,
+    });
+    try std.testing.expectEqual(.read_startup_grow, decision.action);
+
+    decision = controller.observe(.{
+        .now_ns = 150 * std.time.ns_per_ms,
+        .committed_goodput = 100,
         .dma_starvation_ratio = 0,
         .dma_saturated = true,
         .dma_probe_capacity = true,
     });
-    try std.testing.expectEqual(.dma_probe_start, decision.action);
-    try std.testing.expectEqual(@as(f64, 100), controller.probe.?.baseline_goodput);
+    try std.testing.expectEqual(.none, decision.action);
 }
 
 test "adaptive vectored controller respects caps and bootstraps a stalled source" {
@@ -3129,11 +3500,13 @@ test "adaptive vectored controller respects caps and bootstraps a stalled source
 
 test "adaptive vectored controller keeps a three percent DMA gain" {
     var controller: AdaptiveVectoredController = .init(32, 32);
+    controller.mode = .steady;
     controller.stable_goodput = 100;
     controller.peak_goodput = 100;
     controller.representative_windows = 2;
+    controller.dma_fed_windows = 1;
     var decision = controller.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
+        .now_ns = 3 * std.time.ns_per_s,
         .committed_goodput = 100,
         .dma_starvation_ratio = 0,
         .dma_saturated = true,
@@ -3150,7 +3523,7 @@ test "adaptive vectored controller keeps a three percent DMA gain" {
         .dma_starvation_ratio = 0,
     });
     try std.testing.expectEqual(.dma_probe_keep, decision.action);
-    try std.testing.expectEqual(@as(usize, 12), decision.limits.dma);
+    try std.testing.expectEqual(@as(usize, 10), decision.limits.dma);
 }
 
 test "adaptive vectored controller suppresses probes at the finite tail and during cooldown" {
@@ -3298,13 +3671,14 @@ test "adaptive vectored controller keeps a lower-resource limit within three per
 
 test "adaptive vectored controller restores limits when capacity cannot activate" {
     var controller: AdaptiveVectoredController = .init(12, 12);
+    controller.mode = .steady;
     const decision = controller.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
+        .now_ns = 3 * std.time.ns_per_s,
         .committed_goodput = 100,
         .dma_starvation_ratio = 0.5,
         .read_saturated = true,
     });
-    try std.testing.expectEqual(@as(usize, 12), decision.limits.read);
+    try std.testing.expectEqual(@as(usize, 10), decision.limits.read);
     const rollback = controller.rollbackTimedOutProbe(6 * std.time.ns_per_s).?;
     try std.testing.expectEqual(.probe_timeout, rollback.action);
     try std.testing.expectEqual(@as(usize, 8), rollback.limits.read);
@@ -3313,9 +3687,10 @@ test "adaptive vectored controller restores limits when capacity cannot activate
 
 test "adaptive vectored controller restores the complete tuple at the finite tail" {
     var controller: AdaptiveVectoredController = .init(32, 32);
+    controller.mode = .steady;
     controller.limits = .{ .read = 12, .dma = 8 };
     const decision = controller.observe(.{
-        .now_ns = 100 * std.time.ns_per_ms,
+        .now_ns = 3 * std.time.ns_per_s,
         .committed_goodput = 100,
         .dma_starvation_ratio = 0.5,
         .read_saturated = true,

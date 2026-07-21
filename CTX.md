@@ -1,11 +1,11 @@
 # Adaptive Vectored DmaMapped Loader Context
 
-Snapshot: 2026-07-21. ZML is checked out at `30d18486` (`vectorized reads`)
-with the uncommitted adaptive-loader work described here. XLA is at
-`b0990b33b1` (`[XLA:GPU][oneAPI] Enable PJRT_Client_DmaMap for SYCL`) with an
-uncommitted SYCL callback experiment. The user built that checkout into
-`pjrt-oneapi_linux-amd64-2026-07-21_13-43.tar`; ZML's oneAPI repository rule
-selects that archive and its configured SHA-256 matches the file.
+Snapshot: 2026-07-21. ZML is checked out at `65dd003a` (`adaptive concurrency
+again`) with the uncommitted controller follow-up described here. XLA is clean
+at `b0990b33b1` (`[XLA:GPU][oneAPI] Enable PJRT_Client_DmaMap for SYCL`). The
+user built that checkout into `pjrt-oneapi_linux-amd64-2026-07-21_13-43.tar`;
+ZML's oneAPI repository rule selects that archive and its configured SHA-256
+matches the file. No XLA source was modified or built during this follow-up.
 
 This file is the authoritative handoff for the current implementation and
 measurements. `RESEARCH.md` is historical controller research; its adaptive
@@ -145,39 +145,54 @@ Each request atomically leases all required blocks, fills them with one exact
 vectored read, and offers one physical transfer entry to each destination.
 
 An entry takes one credit from its destination device immediately when credit
-is free and no older eligible entry is queued. Otherwise it waits in that
-device's ready queue. A replicated source block therefore consumes one event
-credit per destination while retaining one shared host lease until every
-callback completes. Limit reductions affect only new admissions.
+is free and its device queue is empty. Otherwise it waits in that queue. The
+pump may skip a final entry until all preceding bytes for its transfer manager
+have been submitted. Among eligible entries it deliberately favors recently
+filled blocks: this preserves host-cache locality for DMA, while an aged-cohort
+metric prevents one cold or ordering-blocked entry from masquerading as broad
+queue pressure. A replicated source block consumes one event credit per
+destination while retaining one shared host lease until every callback
+completes. Limit reductions affect only new admissions.
 
-The controller samples every 25 ms, uses 50-100 ms startup and 100-250 ms
-steady windows, and scores attributed probes after 64 MiB/200 ms. Read probes
-are demand-gated by DMA starvation; DMA probes require queued work capable of
-exercising the candidate per-device limit. Only one dimension is probed at a
-time. Probe work carries read and DMA epochs so late callbacks cannot validate
-the wrong limit. Increases need 3% committed physical-goodput gain, while
-resource reductions may remain within 3% of the best settled value.
+The controller samples every 25 ms and uses 50-100 ms startup and 100-250 ms
+steady windows. Ordinary attributed probes still require 64 MiB/200 ms. A
+probe may finish after 64 MiB/100 ms only when both its epoch-attributed rate
+and cumulative post-activation rate independently show at least a 10% gain or
+at least a 10% loss. Ambiguous candidates retain the full 200 ms floor and 3%
+acceptance threshold. Read probes are demand-gated by DMA starvation; DMA
+probes require two fed baseline windows and enough eligible queued work to
+exercise the candidate limit on every demanded device. Only one dimension is
+probed at a time. Probe work carries read and DMA epochs so late callbacks
+cannot validate the wrong limit. Resource reductions may remain within 3% of
+the best settled value.
 
-Ready accumulation is read pressure only when DMA is fed and occupancy, age,
-or growth persists. Read latency and admission wait are never congestion
-signals. Slow/bursty sources retain read-ahead until DMA has remained fed for
-two seconds. The controller combines integrated slot utilization with an
-instantaneous empty-ready-queue signal so short local loads reach the measured
-12-read knee before their tail.
+Ready accumulation is read pressure only when DMA is fed and occupancy,
+growth, or a material aged cohort persists. Ordering-blocked final entries are
+excluded from eligible demand, DMA-probe capacity, and age. Age pressure needs
+at least four entries older than 250 ms and at least 25% of the eligible queue;
+one deliberately cold entry cannot back reads off. Read latency and admission
+wait are never congestion signals. Slow/bursty sources retain read-ahead until
+DMA has remained fed for two seconds. Instantaneous empty-queue starvation is
+used for fast local sources, but suppressed after a slow source is identified;
+its request-completion bursts otherwise look like false DMA starvation.
 
 Startup distinguishes capacity discovery from performance probing. If a
 50-100 ms window reaches its deadline without the 32 MiB representative
 progress floor, the read limit doubles directly (`8 -> 16 -> 32`) because
-there is no output to score. Once representative progress exists, ordinary
-read and DMA changes are epoch-attributed 200 ms probes. DMA probing is also
-held until two representative baseline windows exist, avoiding the false
-`8 -> 12` win that otherwise compares pipeline initialization with steady
-candidate work.
+there is no output to score. Once representative progress exists, exactly one
+initial read increase may also publish without a 200 ms score: fast sources
+take the gradual step, while a source below 1.5 GiB/s per-request service
+bandwidth opens to the caller's read cap. The latter is the 10 ms S3Proxy case:
+16 MiB requests take about 85 ms and need the full 32-read cap to sustain
+roughly 5.7 GiB/s. Startup settles after 500 ms without another direct change;
+subsequent read changes are scored. DMA is never fast-published and is held
+until two representative fed baseline windows exist, avoiding initialization
+comparisons and the severe latency inflation observed in unscored experiments.
 
-Metrics include byte-weighted read/DMA latency, unique ready bytes and age,
-per-device active/high-water events, DMA starvation, epoch commits, pool
-waits/high-water, physical submitted/committed bytes, logical completion, and
-wall time.
+Metrics include byte-weighted read/DMA latency, unique ready bytes, oldest
+eligible age and aged/eligible entry counts, per-device active/high-water
+events, DMA starvation, epoch commits, pool waits/high-water, physical
+submitted/committed bytes, logical completion, and wall time.
 
 ## Code map
 
@@ -369,28 +384,65 @@ Final adaptive validation with the same fixed 16 MiB request, 2 MiB block,
 
 The no-progress bootstrap reaches 32 reads before the first response on the
 250 and 1000 ms profiles, satisfying the 3% requirement there. At 10 ms there
-is enough early progress to enter the specified gradual, epoch-scored read
-probes, but the serialized 200 ms scores consume a material fraction of this
-short load. This is the one unmet performance criterion and a retained design
-tradeoff: removing it would require weakening the plan's 200 ms scoring floor
-or adding a separate fast-source startup rule.
+is enough early progress to enter gradual read discovery, so serialized 200 ms
+read probes consumed a material part of the original 3-second load.
 
-Follow-up controller analysis favors the latter. The 200 ms/64 MiB floor is
-appropriate for comparing settled configurations, but it should not serialize
-initial read fanout. During startup, saturated reads plus greater than 10% DMA
-starvation, a small ready queue, and no pool pressure can publish successive
-read increases on the 25--50 ms control cadence without scoring each
-intermediate width. A useful jump estimate is the bounded bandwidth-delay
-product `ceil(recent_fed_DMA_Bps * read_latency / request_bytes)`, with the
-existing gradual/doubling rule as a fallback until a fed DMA sample exists.
-Stop the fast ramp when DMA is fed, ready pressure appears, or the read cap is
-reached; then score only the resulting configuration, and let later resource
-probes find the lowest equivalent width. Keep DMA-event increases on the
-conservative scored path because prior excess event concurrency caused large
-completion-latency inflation. A secondary improvement is an adaptive steady
-probe floor (never below 100 ms) with early decisions only for a clearly large
-gain/regression; shortening every probe indiscriminately would reintroduce the
-noise and burst-attribution failures documented in `RESEARCH.md`.
+### Probe-floor and startup follow-up
+
+The follow-up implements two complementary changes rather than globally
+weakening the 200 ms floor:
+
+- Startup may publish one representative source-side growth step without a
+  probe. The slow-source classification sends the 10 ms S3Proxy profile from
+  eight to the 32-read cap; a fast local source takes only the ordinary gradual
+  step when it is actually starved.
+- Settled probes retain 64 MiB/200 ms unless both the epoch cohort and the
+  cumulative post-activation cohort show the same decisive result. A gain of
+  at least 10% or loss of at least 10% may finish at 100 ms. Unit tests cover
+  early keep, early rollback, and an ambiguous 5% candidate that must wait.
+
+The 100 ms exit does not fire in the current 10 ms S3Proxy run because source
+startup reaches the cap without creating a steady probe. It removes latency
+only when a real later candidate is clearly different. This is intentional:
+the run-to-run issue left on 10 ms is no longer a serialized 200 ms decision.
+
+Three final 10 ms runs were 3.044, 4.047, and 3.445 s (median **3.445 s**).
+Steady committed goodput was consistently about 5.5--6.0 GiB/s, but initial
+PJRT completion stalls varied by roughly 0.2--1.0 s and dominated wall-time
+variance; the best run is essentially the prior 3.070 s adaptive median, while
+the median is still 28% behind the 2.689 s static reference. These measurements
+were taken while the local host was also in its previously documented degraded
+state, so they do not replace the balanced reference table above.
+
+One 250 ms / 1000 MiB/s regression run completed in 11.541 s / 1.30 GiB/s.
+That is 2.8% behind the previous 11.223 s adaptive median and 4.0% behind the
+11.102 s static reference; one run on the degraded host is not a replacement
+for the required balanced three-run median, but it confirms correct high-latency
+bootstrap (`8 -> 16 -> 32`) and completion.
+
+Experiments rejected during this follow-up:
+
+- Letting scored DMA probes interleave with startup raised the limit through
+  12/16/20 events and produced 4.06 s remotely.
+- Unscored broad DMA growth collapsed a local run to 6.07 GiB/s.
+- A guarded remote-only 8-to-16 shortcut completed in 3.53 s and inflated the
+  startup completion latency to about 39 ms.
+- A transient jump to 32 events made the initial stall worse (about 0.69 s)
+  and completed in 4.07 s. A large ready backlog is therefore not enough
+  evidence to raise DMA concurrency.
+- Holding the slow source at 16 reads completed in 5.27 s; its 16 MiB requests
+  averaged about 84 ms and sustained only 3--4 GiB/s. This validates opening
+  that source to the caller's 32-read cap.
+
+Local queue traces also explain the value of recently filled buffers. Replacing
+newest-ready `swapRemove` scheduling with strict FIFO reduced steady goodput
+from about 12.4 to 10.1 GiB/s on the current host (1.26 s versus 1.58 s wall),
+consistent with DMA benefiting from cache-hot pages. The newest-ready policy is
+retained, but readiness diagnostics now exclude ordering-blocked final entries
+and report an aged cohort rather than treating one oldest entry as pressure.
+The accepted local run was 1.258 s / 11.88 GiB/s; it adaptively reduced reads
+from eight to two while retaining eight DMA events. This host remains far below
+the earlier 26 GiB/s balanced baseline, so the number is diagnostic only.
 
 ### `perf`
 
@@ -555,6 +607,17 @@ Passed after the final edits:
 ./bazel.sh build --config=release --@zml//platforms:cuda=true \
   //examples/io:playground //examples/mnist:mnist
 ```
+
+Follow-up controller validation on 2026-07-21 also passed:
+
+```text
+bazel test //zml:test --test_output=errors
+./bazel.sh build --config=release --@zml//platforms:cuda=true \
+  //examples/io:playground
+```
+
+The CUDA command compiled ZML against the existing PJRT artifact; it did not
+build XLA. The follow-up also ran one-device oneAPI local and S3Proxy loads.
 
 Four-device oneAPI sharded and replicated loads completed repeatedly. CUDA
 release compilation passes, but this host has no RTX GPU, so the requested RTX
