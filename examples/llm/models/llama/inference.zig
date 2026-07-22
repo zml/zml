@@ -3,11 +3,10 @@ const std = @import("std");
 const zml = @import("zml");
 
 const common = @import("../common.zig");
+const Phase = common.Phase;
 const model = @import("model.zig");
 
 const log = std.log.scoped(.llama);
-const Phase = common.Phase;
-
 pub const CompilationParameters = struct {
     prefill_tokens: zml.Tensor,
     decode_tokens: zml.Tensor,
@@ -408,8 +407,8 @@ const ComposedKernelExe = struct {
             zml.Bufferized(model.KvCache),
         });
 
-        ComposedKernelExe.replaceBuffer(hidden_buf, &new_hidden);
-        ComposedKernelExe.replaceKvCacheBuffers(args.kv_cache_buffers, &new_kv_cache);
+        replaceBuffer(hidden_buf, &new_hidden);
+        replaceKvCacheBuffers(args.kv_cache_buffers, &new_kv_cache);
     }
 
     fn runLmHead(
@@ -427,8 +426,8 @@ const ComposedKernelExe = struct {
             zml.Bufferized(zml.Tensor.Rng),
         });
 
-        ComposedKernelExe.replaceBuffer(args.tokens_buf, &new_tokens);
-        ComposedKernelExe.replaceBuffer(&args.rng_buffers._state, &new_rng._state);
+        replaceBuffer(args.tokens_buf, &new_tokens);
+        replaceBuffer(&args.rng_buffers._state, &new_rng._state);
     }
 
     fn embedTokensBuffers(model_buffers: *const model.Buffers) zml.Bufferized(EmbedTokens) {
@@ -445,13 +444,14 @@ const ComposedKernelExe = struct {
         };
     }
 
-    fn replaceKvCacheBuffers(dst: *zml.Bufferized(model.KvCache), src: *zml.Bufferized(model.KvCache)) void {
-        ComposedKernelExe.replaceBuffer(&dst.k, &src.k);
-        ComposedKernelExe.replaceBuffer(&dst.v, &src.v);
+    fn replaceKvCacheBuffers(dst: *zml.Bufferized(model.KvCache), src: *const zml.Bufferized(model.KvCache)) void {
+        replaceBuffer(&dst.k, &src.k);
+        replaceBuffer(&dst.v, &src.v);
+        replaceBuffer(&dst.k_scale, &src.k_scale);
     }
 
-    fn replaceBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
-        if (!ComposedKernelExe.sameBufferHandle(dst.*, src.*)) {
+    fn replaceBuffer(dst: *zml.Buffer, src: *const zml.Buffer) void {
+        if (!sameBufferHandle(dst.*, src.*)) {
             dst.deinit();
         }
 

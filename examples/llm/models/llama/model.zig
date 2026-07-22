@@ -85,7 +85,9 @@ pub const LoadedModel = struct {
         defer loader.deinit();
 
         const all_shardings = shardings.all();
-        loader.load(io, Model, &self.inner, &buffers, store, &all_shardings, .{ .progress = progress });
+        const load_opts: zml.io.Loader.LoadOpts = .{ .progress = progress };
+        loader.load(io, @FieldType(Model, "lm_head"), &self.inner.lm_head, &buffers.lm_head, store, &all_shardings, load_opts);
+        try self.inner.model.loadBuffers(io, &loader, &buffers.model, store, &all_shardings, load_opts);
         try loader.await(io);
 
         const took = now.untilNow(io, .awake);
@@ -155,44 +157,6 @@ pub const Model = struct {
         self.model.deinit(allocator);
     }
 
-    pub fn loadBuffers(
-        self: *const Model,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *zml.io.TensorStore,
-        shardings: []const zml.Sharding,
-        progress: *std.Progress.Node,
-    ) !zml.Bufferized(Model) {
-        progress.increaseEstimatedTotalItems(store.view().count());
-        const now: std.Io.Timestamp = .now(io, .awake);
-
-        var buffers = try zml.mem.bufferize(allocator, Model, self);
-        errdefer Model.unloadBuffers(&buffers, allocator);
-
-        var loader: zml.io.Loader = try .init(allocator, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 256 * zml.MiB,
-            .parallelism = 16,
-        });
-        defer loader.deinit();
-
-        loader.load(io, Model, self, &buffers, store, shardings);
-        try loader.await(io);
-
-        const took = now.untilNow(io, .awake);
-        const total_bytes: u64 = loader.bytes_loaded.raw;
-        const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-        log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
-
-        return buffers;
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
-        if (self.lm_head) |*lm_head| lm_head.weight.deinit();
-        Llama.unloadBuffers(&self.model, allocator);
-    }
-
     fn lmHead(self: Model) LmHead {
         return .init(self);
     }
@@ -232,6 +196,8 @@ const Llama = struct {
     norm: RmsNorm,
     layers: []TransformerLayer,
 
+    pub const Buffers = zml.Bufferized(@This());
+
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Llama {
         const layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers);
         errdefer allocator.free(layers);
@@ -256,6 +222,22 @@ const Llama = struct {
 
     pub fn deinit(self: Llama, allocator: std.mem.Allocator) void {
         allocator.free(self.layers);
+    }
+
+    pub fn loadBuffers(
+        self: *const Llama,
+        io: std.Io,
+        loader: *zml.io.Loader,
+        buffers: *Llama.Buffers,
+        store: *zml.io.TensorStore,
+        shardings: []const zml.Sharding,
+        opts: zml.io.Loader.LoadOpts,
+    ) !void {
+        loader.load(io, @FieldType(Llama, "embed_tokens"), &self.embed_tokens, &buffers.embed_tokens, store, shardings, opts);
+        loader.load(io, @FieldType(Llama, "norm"), &self.norm, &buffers.norm, store, shardings, opts);
+        for (self.layers, buffers.layers) |*layer, *layer_buffers| {
+            try layer.loadBuffers(io, loader, layer_buffers, store, shardings, opts);
+        }
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Llama), allocator: std.mem.Allocator) void {
@@ -338,6 +320,8 @@ pub const TransformerLayer = struct {
     post_attention_layernorm: RmsNorm,
     mlp: Mlp,
 
+    pub const Buffers = zml.Bufferized(@This());
+
     pub fn init(store: zml.io.TensorStore.View, config: Config) !TransformerLayer {
         return .{
             .input_layernorm = .init(store.withPrefix("input_layernorm"), config.rms_norm_eps),
@@ -345,6 +329,21 @@ pub const TransformerLayer = struct {
             .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), config.rms_norm_eps),
             .mlp = .init(store.withPrefix("mlp")),
         };
+    }
+
+    pub fn loadBuffers(
+        self: *const TransformerLayer,
+        io: std.Io,
+        loader: *zml.io.Loader,
+        buffers: *TransformerLayer.Buffers,
+        store: *zml.io.TensorStore,
+        shardings: []const zml.Sharding,
+        opts: zml.io.Loader.LoadOpts,
+    ) !void {
+        loader.load(io, @FieldType(@This(), "input_layernorm"), &self.input_layernorm, &buffers.input_layernorm, store, shardings, opts);
+        try self.self_attn.loadBuffers(io, loader, &buffers.self_attn, store, shardings, opts);
+        loader.load(io, @FieldType(@This(), "post_attention_layernorm"), &self.post_attention_layernorm, &buffers.post_attention_layernorm, store, shardings, opts);
+        loader.load(io, @FieldType(@This(), "mlp"), &self.mlp, &buffers.mlp, store, shardings, opts);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer)) void {
@@ -389,7 +388,7 @@ pub const TransformerLayer = struct {
             .add(x1)
             .withPartitioning(.{ .d = .replicated });
 
-        return .{ x2.reuseBuffer(x0), updated_kv_cache, updated_kv_cache_index.reuseBuffer(kv_cache_index) };
+        return .{ x2.reuseBuffer(x0), updated_kv_cache.reuseBuffer(kv_cache), updated_kv_cache_index.reuseBuffer(kv_cache_index) };
     }
 };
 
@@ -454,20 +453,29 @@ const SelfAttn = struct {
     q_norm: ?RmsNorm,
     k_norm: ?RmsNorm,
 
+    qk_hadamar: zml.Tensor,
     o_proj: zml.nn.Linear,
     num_heads: i64 = undefined,
     num_kv_heads: i64 = 0,
     rope_opts: zml.nn.RopeOpts = undefined,
 
+    pub const Buffers = zml.Bufferized(@This());
+
+    var hadamar_exe_lock: std.Io.RwLock = .init;
+    var hadamar_exe: ?zml.Exe = null;
+
     pub fn init(store: zml.io.TensorStore.View, config: Config) !SelfAttn {
         var rope_scaling = config.rope_scaling;
         rope_scaling.setRopeTheta(config.rope_theta);
+        const q_proj = store.createTensor("q_proj.weight", .{ .dout, .d }, .{ .dout = .model });
+        const hd = @divExact(q_proj.dim(.dout), config.num_attention_heads);
         return .{
-            .q_proj = .init(store.createTensor("q_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .q_proj = .init(q_proj, null, .d),
             .k_proj = .init(store.createTensor("k_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
             .v_proj = .init(store.createTensor("v_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
             .o_proj = .init(store.createTensor("o_proj.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
-            // TODO(Corentin): fix that
+            .qk_hadamar = store.maybeCreateBinding(&.{}, .init(.{ .dout = hd, .hd = hd }, .i8)).?,
+
             .q_norm = null,
             .k_norm = null,
             .num_heads = @intCast(config.num_attention_heads),
@@ -477,6 +485,37 @@ const SelfAttn = struct {
                 .scaling = rope_scaling,
             },
         };
+    }
+
+    pub fn loadBuffers(
+        self: *const SelfAttn,
+        io: std.Io,
+        loader: *zml.io.Loader,
+        buffers: *SelfAttn.Buffers,
+        store: *zml.io.TensorStore,
+        shardings: []const zml.Sharding,
+        opts: zml.io.Loader.LoadOpts,
+    ) !void {
+        loader.load(io, zml.nn.Linear, &self.q_proj, &buffers.q_proj, store, shardings, opts);
+        loader.load(io, zml.nn.Linear, &self.k_proj, &buffers.k_proj, store, shardings, opts);
+        loader.load(io, zml.nn.Linear, &self.v_proj, &buffers.v_proj, store, shardings, opts);
+        loader.load(io, zml.nn.Linear, &self.o_proj, &buffers.o_proj, store, shardings, opts);
+        loader.load(io, ?RmsNorm, &self.q_norm, &buffers.q_norm, store, shardings, opts);
+        loader.load(io, ?RmsNorm, &self.k_norm, &buffers.k_norm, store, shardings, opts);
+
+        hadamar_exe_lock.lockUncancelable(io);
+        defer hadamar_exe_lock.unlock(io);
+        if (hadamar_exe == null) {
+            // Since hadamar_exe is a global, use a global allocator for its data.
+            const hd: i64 = @divFloor(self.q_proj.weight.dim(.d), self.num_heads);
+            var h_exe = io.async(zml.Compiler(zml.nn.walshHadamard).compile, .{ std.heap.page_allocator, io, loader.platform, .{}, .{@intCast(hd)} });
+            hadamar_exe = try h_exe.await(io);
+            log.warn("Compiled hadamar generator: {f} -> {f}", .{ stdx.fmt.slice(hadamar_exe.?.input_shapes), stdx.fmt.slice(hadamar_exe.?.output_shapes) });
+        }
+
+        var arena: std.heap.ArenaAllocator = .init(loader.allocator);
+        defer arena.deinit();
+        try loader.loadExecute(arena.allocator(), io, self.qk_hadamar, &buffers.qk_hadamar, store, shardings, &(hadamar_exe.?), opts);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
@@ -525,6 +564,7 @@ const SelfAttn = struct {
             break :b temp.add(token_index.broad(temp.shape()));
         };
 
+        const dtype = q.dtype();
         if (self.q_norm) |norm| q = norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
         if (self.k_norm) |norm| k = norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
         q = zml.nn.rope(q, pos_index, self.rope_opts);
@@ -533,10 +573,12 @@ const SelfAttn = struct {
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
 
-        const dtype = q.dtype();
+        q = q.dot(self.qk_hadamar.convert(dtype), .hd).divByConst(q.dim(.hd)).rename(.{ .dout = .hd });
+        k = k.dot(self.qk_hadamar.convert(dtype), .hd).rename(.{ .dout = .hd });
+
         const new_kv_cache = kv_cache.updateAt(k, v, token_index, kv_cache_index);
-        k = new_kv_cache.keysAt(kv_cache_index).convert(dtype);
-        v = new_kv_cache.valuesAt(kv_cache_index).convert(dtype);
+        k = new_kv_cache.keysAt(kv_cache_index);
+        v = new_kv_cache.valuesAt(kv_cache_index);
 
         const layer_attention_metadata: zml.attention.Metadata = switch (attention_parameters) {
             .attnd => .{ .attnd = .{
@@ -571,6 +613,7 @@ const SelfAttn = struct {
 pub const KvCache = struct {
     k: zml.Tensor,
     v: zml.Tensor,
+    k_scale: zml.Tensor,
 
     pub const Buffer = zml.Bufferized(KvCache);
 
@@ -578,43 +621,59 @@ pub const KvCache = struct {
         const sharded_shape = kv_shape.withPartitioning(.{ .h = .model });
 
         return .{
-            .k = .fromShape(sharded_shape),
+            .k = .fromShape(sharded_shape.withDtype(.i8)),
+            .k_scale = .fromShape(sharded_shape.setDim(.hd, 1)),
             .v = .fromShape(sharded_shape),
         };
     }
 
     pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !Buffer {
         return .{
-            .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), sharding, .{}),
-            .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), sharding, .{}),
+            .k = try .uninitialized(io, platform, kv.k.shape(), sharding, .{}),
+            .k_scale = try .uninitialized(io, platform, kv.k_scale.shape(), sharding, .{}),
+            .v = try .uninitialized(io, platform, kv.v.shape(), sharding, .{}),
         };
     }
 
     pub fn deinitBuffer(kv: *Buffer) void {
         kv.k.deinit();
+        kv.k_scale.deinit();
         kv.v.deinit();
     }
 
     pub fn keysAt(kv: KvCache, layer_index: zml.Tensor) zml.Tensor {
-        return kv.k.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = layer_index, .len = 1 } }).squeeze(.layer);
+        const k_scale = kv.k_scale.slice2(.layer, .single(layer_index));
+        const k_quant = kv.k.slice2(.layer, .single(layer_index));
+
+        return k_quant.convert(k_scale.dtype()).mul(k_scale);
     }
 
     pub fn valuesAt(kv: KvCache, layer_index: zml.Tensor) zml.Tensor {
-        return kv.v.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = layer_index, .len = 1 } }).squeeze(.layer);
+        return kv.v.slice2(.layer, .single(layer_index));
     }
 
     pub fn updateAt(kv: KvCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: zml.Tensor, layer_index: zml.Tensor) KvCache {
+        const scatter_opts: zml.Tensor.ScatterOpts = .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override };
+
         const k_shape = kv.k.shape().drop(.layer);
-        return .{
-            .k = kv.k.scatterSlices(.{ .layer = layer_index, .k = token_index }, new_k.convert(kv.k.dtype()).transpose(k_shape), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.k),
-            .v = kv.v.scatterSlices(.{ .layer = layer_index, .k = token_index }, new_v.convert(kv.v.dtype()).transpose(kv.v.shape().drop(.layer)), .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override }).reuseBuffer(kv.v),
-        };
+        const k_scale = new_k.abs().max(.hd).divByConst(128.0).transpose(k_shape);
+        const k = new_k.transpose(k_shape).div(k_scale).convert(kv.k.dtype());
+        const v = new_v.convert(kv.v.dtype()).transpose(kv.v.shape().drop(.layer));
+        return .reuseBuffer(
+            .{
+                .k = .scatterSlices(kv.k, .{ .layer = layer_index, .k = token_index }, k, scatter_opts),
+                .k_scale = .scatterSlices(kv.k_scale, .{ .layer = layer_index, .k = token_index }, k_scale, scatter_opts),
+                .v = .scatterSlices(kv.v, .{ .layer = layer_index, .k = token_index }, v, scatter_opts),
+            },
+            kv,
+        );
     }
 
-    pub fn reuseBuffer(kv: KvCache, other: KvCache) KvCache {
+    pub fn reuseBuffer(kv: KvCache, source: KvCache) KvCache {
         return .{
-            .k = kv.k.reuseBuffer(other.k),
-            .v = kv.v.reuseBuffer(other.v),
+            .k = .reuseBuffer(kv.k, source.k),
+            .k_scale = .reuseBuffer(kv.k_scale, source.k_scale),
+            .v = .reuseBuffer(kv.v, source.v),
         };
     }
 };
