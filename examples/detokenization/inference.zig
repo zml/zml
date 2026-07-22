@@ -11,7 +11,7 @@ const Llm_handler = llm_.Llm_handler;
 const Sampler = sampling.Sampler;
 const SamplingResult = sampling.SamplingResult;
 
-pub fn tokenizePrompt(zml_handler: *Zml_handler, tokenizer: Tokenizer) ![]u32 {
+pub fn tokenizePrompt(zml_handler: *Zml_handler, tokenizer: Tokenizer, prompt: []const u8) ![]u32 {
     const allocator = zml_handler.allocator;
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
@@ -20,7 +20,7 @@ pub fn tokenizePrompt(zml_handler: *Zml_handler, tokenizer: Tokenizer) ![]u32 {
     const im_end = tokenizer.tokenId("<|im_end|>") orelse return error.NoSuchToken;
     const newline = tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
 
-    const user_prompt = "Write a python script that computes the n-th prime number";
+    const user_prompt = prompt;
 
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 32);
     errdefer tokens.deinit(allocator);
@@ -135,6 +135,7 @@ fn generateText(zml_handler: *Zml_handler, llm: *Llm_handler, sampler: anytype, 
         llm.exes.graph_embed_results.fill(.{&one_embed_buffer});
         try one_embed_buffer.toSlice(io, embed_slice);
         var sampling_result = sampler.sample(embed_slice.constItems(f32));
+        if (comptime samplerTypeNeedsRescoring(@TypeOf(sampler))) Sampler.rescore(&sampling_result, sampler.lm_head, embed_slice);
         token_slice.items(u32)[0] = sampleTokenFromCpuResult(&sampling_result, llm, &random);
     } else {
         llm.exes.logits_args.set(.{ llm.model_buffers, one_embed_buffer });
@@ -197,6 +198,7 @@ fn generateText(zml_handler: *Zml_handler, llm: *Llm_handler, sampler: anytype, 
             llm.exes.graph_embed_results.fill(.{&decode_embed_buffer});
             try decode_embed_buffer.toSlice(io, embed_slice);
             var sampling_result = sampler.sample(embed_slice.constItems(f32));
+            if (comptime samplerTypeNeedsRescoring(@TypeOf(sampler))) Sampler.rescore(&sampling_result, sampler.lm_head, embed_slice);
             token_slice.items(u32)[0] = sampleTokenFromCpuResult(&sampling_result, llm, &random);
             decode_embed_buffer.deinit();
         } else {
@@ -225,7 +227,6 @@ fn generateText(zml_handler: *Zml_handler, llm: *Llm_handler, sampler: anytype, 
 }
 
 fn sampleTokenFromCpuResult(result: *SamplingResult, llm: *const Llm_handler, random: *std.Random) u32 {
-    //if (true) return @intCast(result.candidates[0].row);
     if (!llm.generation_config.do_sample or llm.generation_config.top_k <= 1) {
         return @intCast(result.candidates[0].row);
     }
@@ -261,4 +262,12 @@ fn sampleTokenFromCpuResult(result: *SamplingResult, llm: *const Llm_handler, ra
         if (cumulative >= threshold) return @intCast(candidate.row);
     }
     return @intCast(result.candidates[0].row);
+}
+
+inline fn samplerTypeNeedsRescoring(comptime SamplerParamType: type) bool {
+    const SamplerType = switch (@typeInfo(SamplerParamType)) {
+        .pointer => |pointer| pointer.child,
+        else => SamplerParamType,
+    };
+    return comptime if (@hasDecl(SamplerType, "need_rescoring")) SamplerType.need_rescoring else false;
 }

@@ -15,6 +15,7 @@ const sampling = @import("sampling.zig");
 const quantization = @import("quantization.zig");
 const productq = @import("productq.zig");
 
+const Llm_handler = llm_.Llm_handler;
 const LmHeadMatrix = algebra.LmHeadMatrix;
 const Graph = graph.Graph;
 const ProductQuantizer = productq.ProductQuantizer;
@@ -273,7 +274,6 @@ pub fn printZmlLogo(io: std.Io) !void {
     try writer.interface.flush();
 }
 
-
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
     defer http_client.deinit();
@@ -297,245 +297,265 @@ pub fn main(init: std.process.Init) !void {
 
     try printZmlLogo(zml_handler.io);
 
-    //try runLlm(&zml_handler);
-    try runTestsSampling(&zml_handler);
+    try runTestsSampling(&zml_handler, zml_handler.uris.llama);
+    try runTestsLlm(&zml_handler, zml_handler.uris.llama);
+    
+    try runTestsSampling(&zml_handler, zml_handler.uris.qwen);
+    try runTestsLlm(&zml_handler, zml_handler.uris.qwen);
 
     zml_handler.timers.print();
 }
 
-pub fn runTestsSampling(zml_handler: *Zml_handler) !void {
+const bench_qjl = true;
+const bench_int = true;
+const bench_pq = true;
+const bench_misc = true;
+
+pub fn runTestsSampling(zml_handler: *Zml_handler, path: []const u8) !void {
+    const alloc = zml_handler.allocator;
     std.log.info("***** Get lm_head", .{});
-    var lm_head = try algebra.getLmHead(zml_handler);
-    defer LmHeadMatrix.deinit(&lm_head, zml_handler.allocator);
+    var lm_head = try algebra.getLmHead(zml_handler, path);
+    defer LmHeadMatrix.deinit(&lm_head, alloc);
+
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, path);
+    var tokenizer = try Llm_handler.loadTokenizer(zml_handler, repo);
+    defer tokenizer.deinit();
 
     std.log.info("***** Init sampler", .{});
-    var sampler: Sampler = try .init(zml_handler, &lm_head);
+    var sampler: Sampler = try .init(zml_handler, &lm_head, tokenizer);
     defer Sampler.deinit(&sampler);
 
-    const ref: SamplingReference = if (false) blk: {
+    const ref_baseline: SamplingReference = if (true) blk: {
         std.log.info("***** Dense sampling reference", .{});
-        const computed_ref = try computeSamplingReference(zml_handler, &sampler);
+        const computed_ref = try computeSamplingReference(zml_handler, &sampler, "Dense");
         //try exportSamplingReference(zml_handler, "reference.safetensors", computed_ref);
         break :blk computed_ref;
     } else blk: {
         std.log.info("***** Loading sampling reference", .{});
         break :blk try loadSamplingReference(zml_handler, "reference.safetensors");
     };
-    defer zml_handler.allocator.free(ref.ref);
+    defer alloc.free(ref_baseline.ref);
 
-    if (true) {
-        std.log.info("***** Init QJL 1 bit quantizer", .{});
-        var quant_qjl1: QuantizationQJL1 = try .init(zml_handler, &lm_head);
-        defer QuantizationQJL1.deinit(&quant_qjl1);
-        try quant_qjl1.quantize();
-
-        std.log.info("***** Init QJL 1 bit sampler", .{});
-        var qjl1_sampler: QJL1Sampler = try .init(zml_handler, &lm_head, &quant_qjl1);
-        defer qjl1_sampler.deinit();
-
-        std.log.info("***** Test QJL 1 bit sampling", .{});
-        const ref_qjl1 = try computeSamplingReference(zml_handler, &qjl1_sampler);
-        defer zml_handler.allocator.free(ref_qjl1.ref);
-        compareSampling(ref, ref_qjl1);
-
-        std.log.info("***** Init QJL 2x1 bit sampler", .{});
-        var qjl2x1_sampler: QJL2x1Sampler = try .init(zml_handler, &lm_head, &quant_qjl1);
-        defer qjl2x1_sampler.deinit();
-
-        std.log.info("***** Test QJL 2x1 bit sampling", .{});
-        const ref_qjl2x1 = try computeSamplingReference(zml_handler, &qjl2x1_sampler);
-        defer zml_handler.allocator.free(ref_qjl2x1.ref);
-        compareSampling(ref, ref_qjl2x1);
-
-        if (false) {
-            std.log.info("***** Init QJL Nx1 bit sampler", .{});
-            var qjlNx1_sampler: QJLNx1Sampler = try .init(zml_handler, &lm_head, &quant_qjl1);
-            defer qjlNx1_sampler.deinit();
-    
-            std.log.info("***** Test QJL Nx1 bit sampling", .{});
-            const ref_qjlNx1 = try computeSamplingReference(zml_handler, &qjlNx1_sampler);
-            defer zml_handler.allocator.free(ref_qjlNx1.ref);
-            compareSampling(ref, ref_qjlNx1);
+    var references: std.ArrayList(SamplingReference) = .empty;
+    defer {
+        for (references.items) |reference| {
+            alloc.free(reference.ref);
         }
-        
-        std.log.info("***** Init QJL 2 bit quantizer", .{});
-        var quant_qjl2: QuantizationQJL2 = try .init(zml_handler, &lm_head);
-        defer QuantizationQJL2.deinit(&quant_qjl2);
-        try quant_qjl2.quantize();
-
-        std.log.info("***** Init QJL 2 bit sampler", .{});
-        var qjl2_sampler: QJL2Sampler = try .init(zml_handler, &lm_head, &quant_qjl2);
-        defer qjl2_sampler.deinit();
-
-        std.log.info("***** Test QJL 2 bit sampling", .{});
-        const ref_qjl2 = try computeSamplingReference(zml_handler, &qjl2_sampler);
-        defer zml_handler.allocator.free(ref_qjl2.ref);
-        compareSampling(ref, ref_qjl2);
-
-        std.log.info("***** Init int4 quantizer", .{});
-        var quant_int4: QuantizationInt4 = try .init(zml_handler, &lm_head);
-        defer QuantizationInt4.deinit(&quant_int4);
-        try quant_int4.quantize();
-
-        std.log.info("***** Init int4 sampler", .{});
-        var int4_sampler: Int4Sampler = try .init(zml_handler, &lm_head, &quant_int4);
-        defer int4_sampler.deinit();
-
-        std.log.info("***** Test int4 sampling", .{});
-        const ref_int4 = try computeSamplingReference(zml_handler, &int4_sampler);
-        defer zml_handler.allocator.free(ref_int4.ref);
-        compareSampling(ref, ref_int4);
-
-        std.log.info("***** Init int8x4 sampler", .{});
-        var int8x4_sampler: Int8x4Sampler = try .init(zml_handler, &lm_head, &quant_int4);
-        defer int8x4_sampler.deinit();
-
-        std.log.info("***** Test int8x4 sampling", .{});
-        const ref_int8x4 = try computeSamplingReference(zml_handler, &int8x4_sampler);
-        defer zml_handler.allocator.free(ref_int8x4.ref);
-        compareSampling(ref, ref_int8x4);
-
-        std.log.info("***** Init int8 quantizer", .{});
-        var quant_int8: QuantizationInt8 = try .init(zml_handler, &lm_head);
-        defer QuantizationInt8.deinit(&quant_int8);
-        try quant_int8.quantize();
-
-        std.log.info("***** Init int8 sampler", .{});
-        var int8_sampler: Int8Sampler = try .init(zml_handler, &lm_head, &quant_int8);
-        defer int8_sampler.deinit();
-
-        std.log.info("***** Test int8 sampling", .{});
-        const ref_int8 = try computeSamplingReference(zml_handler, &int8_sampler);
-        defer zml_handler.allocator.free(ref_int8.ref);
-        compareSampling(ref, ref_int8);
-
+        references.deinit(alloc);
     }
 
-    if (false) {
-
-        std.log.info("***** Init graph sampler", .{});
-        var graph_sampler: GraphSampler = try .init(zml_handler, &lm_head);
-        defer graph_sampler.deinit();
-
-        std.log.info("***** Test graph sampling", .{});
-        const ref_graph = try computeSamplingReference(zml_handler, &graph_sampler);
-        defer zml_handler.allocator.free(ref_graph.ref);
-        compareSampling(ref, ref_graph);
-
-        std.log.info("***** Init truncated sampler", .{});
-        var truncated_sampler: TruncateSampler = try .init(zml_handler, &lm_head);
-        defer truncated_sampler.deinit();
-
-        std.log.info("***** Test truncated sampling", .{});
-        const ref_tr = try computeSamplingReference(zml_handler, &truncated_sampler);
-        defer zml_handler.allocator.free(ref_tr.ref);
-        compareSampling(ref, ref_tr);
-
-        std.log.info("***** Init vanilla FastScan PQ Quantizer", .{});
-        var pq_iso_fc = try ProductQuantizerFastScan.init(zml_handler, &lm_head, .vanilla);
-        defer pq_iso_fc.deinit();
-        try pq_iso_fc.buildCodebook();
-
-        std.log.info("***** Test vanilla FastScan PQ sampling", .{});
-        const ref_pq_iso_fc = try computeSamplingReference(zml_handler, &pq_iso_fc);
-        defer zml_handler.allocator.free(ref_pq_iso_fc.ref);
-        compareSampling(ref, ref_pq_iso_fc);
-
-        std.log.info("***** Init anisotropic FastScan PQ Quantizer", .{});
-        var pq_aniso_fc = try ProductQuantizerFastScan.init(zml_handler, &lm_head, .anisotropic);
-        defer pq_aniso_fc.deinit();
-        try pq_aniso_fc.buildCodebook();
-
-        std.log.info("***** Test anisotropic FastScan PQ sampling", .{});
-        const ref_pq_aniso_fc = try computeSamplingReference(zml_handler, &pq_aniso_fc);
-        defer zml_handler.allocator.free(ref_pq_aniso_fc.ref);
-        compareSampling(ref, ref_pq_aniso_fc);
-
-        std.log.info("***** Init vanilla PQ Quantizer", .{});
-        var pq_iso = try ProductQuantizer.init(zml_handler, &lm_head, .vanilla);
-        defer pq_iso.deinit();
-        try pq_iso.buildCodebook();
-
-        std.log.info("***** Test vanilla PQ sampling", .{});
-        const ref_pq_iso = try computeSamplingReference(zml_handler, &pq_iso);
-        defer zml_handler.allocator.free(ref_pq_iso.ref);
-        compareSampling(ref, ref_pq_iso);
-
-        std.log.info("***** Init anisotropic PQ Quantizer", .{});
-        var pq_aniso = try ProductQuantizer.init(zml_handler, &lm_head, .anisotropic);
-        defer pq_aniso.deinit();
-        try pq_aniso.buildCodebook();
-
-        std.log.info("***** Test anisotropic PQ sampling", .{});
-        const ref_pq_aniso = try computeSamplingReference(zml_handler, &pq_aniso);
-        defer zml_handler.allocator.free(ref_pq_aniso.ref);
-        compareSampling(ref, ref_pq_aniso);
-
-        std.log.info("***** Init angular sampler", .{});
-        var sampler_ang: AngularSampler = try .init(zml_handler, &lm_head);
-        defer AngularSampler.deinit(&sampler_ang);
-
-        std.log.info("***** Test angular sampling", .{});
-        const ref_ang = try computeSamplingReference(zml_handler, &sampler_ang);
-        defer zml_handler.allocator.free(ref_ang.ref);
-        compareSampling(ref, ref_ang);
+    var comparisons: std.ArrayList(SamplingComparison) = .empty;
+    defer {
+        for (comparisons.items) |comparison| {
+            alloc.free(comparison.tvd_values);
+        }
+        comparisons.deinit(alloc);
     }
+
+    try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_baseline));
+
+    if (bench_qjl) {
+        const ref_qjl1 = try testQuantizedSampling(zml_handler, &lm_head, QuantizationQJL1, QJL1Sampler, "QJL1");
+        try references.append(alloc, ref_qjl1);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_qjl1));
+        const ref_qjl2x1 = try testQuantizedSampling(zml_handler, &lm_head, QuantizationQJL1, QJL2x1Sampler, "QJL2x1");
+        try references.append(alloc, ref_qjl2x1);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_qjl2x1));
+        const ref_qjl2 = try testQuantizedSampling(zml_handler, &lm_head, QuantizationQJL2, QJL2Sampler, "QJL2");
+        try references.append(alloc, ref_qjl2);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_qjl2));
+        const ref_qjlNx1 = try testQuantizedSampling(zml_handler, &lm_head, QuantizationQJL1, QJLNx1Sampler, "QJLNx1");
+        try references.append(alloc, ref_qjlNx1);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_qjlNx1));
+    }
+    if (bench_int) {
+        const ref_int4 = try testQuantizedSampling(zml_handler, &lm_head, QuantizationInt4, Int4Sampler, "Int4");
+        try references.append(alloc, ref_int4);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_int4));
+        const ref_int8x4 = try testQuantizedSampling(zml_handler, &lm_head, QuantizationInt4, Int8x4Sampler, "Int8x4");
+        try references.append(alloc, ref_int8x4);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_int8x4));
+        const ref_int8 = try testQuantizedSampling(zml_handler, &lm_head, QuantizationInt8, Int8Sampler, "Int8");
+        try references.append(alloc, ref_int8);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_int8));
+    }
+    if (bench_pq) {
+        const ref_pq_van = try testPQSampling(zml_handler, &lm_head, ProductQuantizer, .vanilla, "vanilla PQ");
+        try references.append(alloc, ref_pq_van);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_pq_van));
+        const ref_pq_ani = try testPQSampling(zml_handler, &lm_head, ProductQuantizer, .anisotropic, "aniso PQ");
+        try references.append(alloc, ref_pq_ani);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_pq_ani));
+        const ref_pqfc_van = try testPQSampling(zml_handler, &lm_head, ProductQuantizerFastScan, .vanilla, "vanilla PQ-FS");
+        try references.append(alloc, ref_pqfc_van);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_pqfc_van));
+        const ref_pqfc_ani = try testPQSampling(zml_handler, &lm_head, ProductQuantizerFastScan, .anisotropic, "aniso PQ-FS");
+        try references.append(alloc, ref_pqfc_ani);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_pqfc_ani));
+    }
+    if (bench_misc) {
+        const ref_trunc = try testSampling(zml_handler, &lm_head, TruncateSampler, "Truncated");
+        try references.append(alloc, ref_trunc);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_trunc));
+        const ref_angu = try testSampling(zml_handler, &lm_head, AngularSampler, "Angular");
+        try references.append(alloc, ref_angu);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_angu));
+        const ref_graph = try testSampling(zml_handler, &lm_head, GraphSampler, "Graph");
+        try references.append(alloc, ref_graph);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_graph));
+    }
+    printComparisonSummary(comparisons.items);
 }
 
-pub fn runLlm(zml_handler: *Zml_handler) !void {
-    std.log.info("***** Get lm_head", .{});
-    var lm_head = try algebra.getLmHead(zml_handler);
-    defer LmHeadMatrix.deinit(&lm_head, zml_handler.allocator);
+pub fn testPQSampling(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, Quantizer: type, option: anytype, label: []const u8) !SamplingReference {
+    std.log.info("***** Init {s} quantizer", .{label});
+    var quant: Quantizer = try .init(zml_handler, lm_head, option);
+    defer Quantizer.deinit(&quant);
+    try quant.buildCodebook();
+    std.log.info("***** Test {s} sampling", .{label});
+    return try computeSamplingReference(zml_handler, &quant, label);
+}
 
-    if (false) {
-        
-        std.log.info("***** Init QJL 1 bit quantizer", .{});
-        var quantizer: QuantizationQJL1 = try .init(zml_handler, &lm_head);
-        defer QuantizationQJL1.deinit(&quantizer);
-        try quantizer.quantize();
-    
-        std.log.info("***** Init QJL 1 bit sampler", .{});
-        var sampler: QJL1Sampler = try .init(zml_handler, &lm_head, &quantizer);
-        defer sampler.deinit();
-
-    }
-
-    std.log.info("***** Init int8 quantizer", .{});
-    var quantizer: QuantizationInt8 = try .init(zml_handler, &lm_head);
-    defer QuantizationInt8.deinit(&quantizer);
-    try quantizer.quantize();
-
-    std.log.info("***** Init int8 sampler", .{});
-    var sampler: Int8Sampler = try .init(zml_handler, &lm_head, &quantizer);
+pub fn testQuantizedSampling(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, Quantizer: type, Sampling: type, label: []const u8) !SamplingReference {
+    std.log.info("***** Init {s} quantizer", .{label});
+    var quant: Quantizer = try .init(zml_handler, lm_head);
+    defer Quantizer.deinit(&quant);
+    try quant.quantize();
+    std.log.info("***** Init {s} sampler", .{label});
+    var sampler: Sampling = try .init(zml_handler, lm_head, &quant);
     defer sampler.deinit();
+    std.log.info("***** Test {s} sampling", .{label});
+    return try computeSamplingReference(zml_handler, &sampler, label);
+}
+
+pub fn testSampling(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, Sampling: type, label: []const u8) !SamplingReference {
+    std.log.info("***** Init {s} sampler", .{label});
+    var sampler: Sampling = try .init(zml_handler, lm_head);
+    defer sampler.deinit();
+    std.log.info("***** Test {s} sampling", .{label});
+    return try computeSamplingReference(zml_handler, &sampler, label);
+}
+
+
+pub fn runTestsLlm(zml_handler: *Zml_handler, path: []const u8) !void {
+    const alloc = zml_handler.allocator;
+    std.log.info("***** Get lm_head", .{});
+    var lm_head = try algebra.getLmHead(zml_handler, path);
+    defer LmHeadMatrix.deinit(&lm_head, alloc);
 
     std.log.info("***** Init LLM handler", .{});
-    var llm = try llm_.Llm_handler.init(zml_handler);
+    var llm = try Llm_handler.init(zml_handler, path);
     defer llm.deinit(zml_handler.allocator);
 
-    std.log.info("***** Tokenize prompt", .{});
-    const inspi_tokens = try inference.tokenizePrompt(zml_handler, llm.tokenizer);
-    defer zml_handler.allocator.free(inspi_tokens);
+    std.log.info("***** Tokenize prompt1", .{});
+    const prompt1 = try inference.tokenizePrompt(zml_handler, llm.tokenizer, "Write a python script that computes the n-th prime number");
+    defer zml_handler.allocator.free(prompt1);
 
-    const gpu_validation = false;
-    if (gpu_validation) {
-        std.log.info("***** Generate text GPU sampling", .{});
-        zml_handler.mem.start(0);
-        const generated_text_gpu = try inference.generateTextGPUSampling(zml_handler, &llm, inspi_tokens);
-        defer zml_handler.allocator.free(generated_text_gpu);
-        zml_handler.mem.check(0);
-        try llm.resetKvCache(zml_handler);
+    std.log.info("***** Tokenize prompt2", .{});
+    const prompt2 = try inference.tokenizePrompt(zml_handler, llm.tokenizer, "Write a story about a pirate and his cat");
+    defer zml_handler.allocator.free(prompt2);
+
+    try testLlmGPU(zml_handler, &llm, prompt1);
+    try testLlmGPU(zml_handler, &llm, prompt2);
+
+    if (bench_qjl) {
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationQJL1, QJL1Sampler, prompt1, "QJL1");
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationQJL1, QJL1Sampler, prompt2, "QJL1");
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationQJL1, QJL2x1Sampler, prompt1, "QJL2x1");
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationQJL1, QJL2x1Sampler, prompt2, "QJL2x1");
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationQJL1, QJLNx1Sampler, prompt1, "QJLNx1");
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationQJL1, QJLNx1Sampler, prompt2, "QJLNx1");
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationQJL2, QJL2Sampler, prompt1, "QJL2");
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationQJL2, QJL2Sampler, prompt2, "QJL2");
     }
+    if (bench_int) {
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationInt4, Int4Sampler, prompt1, "Int4");
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationInt4, Int4Sampler, prompt2, "Int4");
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationInt4, Int8x4Sampler, prompt1, "Int8x4");
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationInt4, Int8x4Sampler, prompt2, "Int8x4");
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationInt8, Int8Sampler, prompt1, "Int8");
+        try testQuantizedLlm(zml_handler, &llm, &lm_head, QuantizationInt8, Int8Sampler, prompt2, "Int8");
+    }
+    if (bench_pq) {
+        try testPQLlm(zml_handler, &llm, &lm_head, ProductQuantizer, .vanilla, prompt1, "PQ vanilla");
+        try testPQLlm(zml_handler, &llm, &lm_head, ProductQuantizer, .vanilla, prompt2, "PQ vanilla");
+        try testPQLlm(zml_handler, &llm, &lm_head, ProductQuantizer, .anisotropic, prompt1, "PQ aniso");
+        try testPQLlm(zml_handler, &llm, &lm_head, ProductQuantizer, .anisotropic, prompt2, "PQ aniso");
+        try testPQLlm(zml_handler, &llm, &lm_head, ProductQuantizerFastScan, .vanilla, prompt1, "PQ-FS vanilla");
+        try testPQLlm(zml_handler, &llm, &lm_head, ProductQuantizerFastScan, .vanilla, prompt2, "PQ-FS vanilla");
+        try testPQLlm(zml_handler, &llm, &lm_head, ProductQuantizerFastScan, .anisotropic, prompt1, "PQ-FS aniso");
+        try testPQLlm(zml_handler, &llm, &lm_head, ProductQuantizerFastScan, .anisotropic, prompt2, "PQ-FS aniso");
+    }
+    if (bench_misc) {
+        try testLlm(zml_handler, &llm, &lm_head, TruncateSampler, prompt1, "Truncated");
+        try testLlm(zml_handler, &llm, &lm_head, TruncateSampler, prompt2, "Truncated");
+        try testLlm(zml_handler, &llm, &lm_head, AngularSampler, prompt1, "Angular");
+        try testLlm(zml_handler, &llm, &lm_head, AngularSampler, prompt2, "Angular");
+        try testLlm(zml_handler, &llm, &lm_head, GraphSampler, prompt1, "Graph");
+        try testLlm(zml_handler, &llm, &lm_head, GraphSampler, prompt2, "Graph");
+    }
+}
 
-    std.log.info("***** Generate text CPU sampling", .{});
+pub fn testLlmGPU(zml_handler: *Zml_handler, llm: *Llm_handler, prompt: []const u32) !void {
+    std.log.info("***** Generate text GPU sampling", .{});
     zml_handler.mem.start(0);
-    const generated_text_cpu = try inference.generateTextCPUSampling(zml_handler, &llm, &sampler, inspi_tokens);
+    const generated_text_gpu = try inference.generateTextGPUSampling(zml_handler, llm, prompt);
+    defer zml_handler.allocator.free(generated_text_gpu);
+    zml_handler.mem.check(0);
+
+    try llm.resetKvCache(zml_handler);
+}
+
+pub fn testPQLlm(zml_handler: *Zml_handler, llm: *Llm_handler, lm_head: *LmHeadMatrix, Quantizer: type, option: anytype, prompt: []const u32, label: []const u8) !void {
+    std.log.info("***** Init {s} quantizer", .{label});
+    var quant: Quantizer = try .init(zml_handler, lm_head, option);
+    defer Quantizer.deinit(&quant);
+    try quant.buildCodebook();
+
+    std.log.info("***** Generate text CPU with {s} sampling", .{label});
+    zml_handler.mem.start(0);
+    const generated_text_cpu = try inference.generateTextCPUSampling(zml_handler, llm, &quant, prompt);
     defer zml_handler.allocator.free(generated_text_cpu);
     zml_handler.mem.check(0);
+
+    try llm.resetKvCache(zml_handler);
+}
+
+pub fn testQuantizedLlm(zml_handler: *Zml_handler, llm: *Llm_handler, lm_head: *LmHeadMatrix, Quantizer: type, Sampling: type, prompt: []const u32, label: []const u8) !void {
+    std.log.info("***** Init {s} quantizer", .{label});
+    var quant: Quantizer = try .init(zml_handler, lm_head);
+    defer Quantizer.deinit(&quant);
+    try quant.quantize();
+
+    std.log.info("***** Init {s} sampler", .{label});
+    var sampler: Sampling = try .init(zml_handler, lm_head, &quant);
+    defer sampler.deinit();
+
+    std.log.info("***** Generate text CPU with {s} sampling", .{label});
+    zml_handler.mem.start(0);
+    const generated_text_cpu = try inference.generateTextCPUSampling(zml_handler, llm, &sampler, prompt);
+    defer zml_handler.allocator.free(generated_text_cpu);
+    zml_handler.mem.check(0);
+
+    try llm.resetKvCache(zml_handler);
+}
+
+pub fn testLlm(zml_handler: *Zml_handler, llm: *Llm_handler, lm_head: *LmHeadMatrix, Sampling: type, prompt: []const u32, label: []const u8) !void {
+    std.log.info("***** Init {s} sampler", .{label});
+    var sampler: Sampling = try .init(zml_handler, lm_head);
+    defer sampler.deinit();
+
+    std.log.info("***** Generate text CPU with {s} sampling", .{label});
+    zml_handler.mem.start(0);
+    const generated_text_cpu = try inference.generateTextCPUSampling(zml_handler, llm, &sampler, prompt);
+    defer zml_handler.allocator.free(generated_text_cpu);
+    zml_handler.mem.check(0);
+
+    try llm.resetKvCache(zml_handler);
 }
 
 
-pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype) !SamplingReference {
+pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype, label: []const u8) !SamplingReference {
     var total_embeds: usize = 0;
     const small_bench = true;
     const big_bench = true;
@@ -551,7 +571,7 @@ pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype) !Sa
                 4 => "translate",
                 else => return error.InvalidTask,
             };
-            const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds.safetensors", task, .f32, true);
+            const embed_slice = try save_load.getSlice(zml_handler, "llama_embeds.safetensors", task, .f32, true);
             defer embed_slice.free(zml_handler.allocator);
             const n: usize = @intCast(embed_slice.shape.dims()[0]);
             total_embeds += n;
@@ -567,14 +587,17 @@ pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype) !Sa
                 2 => "longtranslate",
                 else => return error.InvalidTask,
             };
-            const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds2.safetensors", task, .f32, true);
+            const embed_slice = try save_load.getSlice(zml_handler, "llama_embeds2.safetensors", task, .f32, true);
             defer embed_slice.free(zml_handler.allocator);
             const n: usize = @intCast(embed_slice.shape.dims()[0]);
             total_embeds += n;
         }
     }
 
-    const ref: SamplingReference = .{ .ref = try zml_handler.allocator.alloc(SamplingResult, total_embeds) };
+    var ref: SamplingReference = .{
+        .ref = try zml_handler.allocator.alloc(SamplingResult, total_embeds),
+        .label = label,
+    };
     var nb: usize = 0;
 
     zml_handler.reset(&zml_handler.timers.sampling);
@@ -590,7 +613,7 @@ pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype) !Sa
                 4 => "translate",
                 else => return error.InvalidTask,
             };
-            const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds.safetensors", task, .f32, true);
+            const embed_slice = try save_load.getSlice(zml_handler, "llama_embeds.safetensors", task, .f32, true);
             defer embed_slice.free(zml_handler.allocator);
             const n: usize = @intCast(embed_slice.shape.dims()[0]);
             const d: usize = @intCast(embed_slice.shape.dims()[1]);
@@ -614,7 +637,7 @@ pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype) !Sa
                 2 => "longtranslate",
                 else => return error.InvalidTask,
             };
-            const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds2.safetensors", task, .f32, true);
+            const embed_slice = try save_load.getSlice(zml_handler, "llama_embeds2.safetensors", task, .f32, true);
             defer embed_slice.free(zml_handler.allocator);
             const n: usize = @intCast(embed_slice.shape.dims()[0]);
             const d: usize = @intCast(embed_slice.shape.dims()[1]);
@@ -629,6 +652,7 @@ pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype) !Sa
         }
     }
 
+    ref.ms_per_sample = @as(f64, @floatFromInt(zml_handler.timers.sampling.nanoseconds)) / (1e6 * @as(f64, @floatFromInt(nb)));
     std.log.info("Embed search: total={d}", .{nb});
     zml_handler.log(&zml_handler.timers.sampling, nb);
 
@@ -792,7 +816,10 @@ pub fn loadSamplingReference(zml_handler: *Zml_handler, file_name: []const u8) !
     const upper_bounds_items = upper_bounds.constItems(f32);
     const nbs_items = nbs.constItems(u64);
 
-    const ref: SamplingReference = .{ .ref = try allocator.alloc(SamplingResult, n) };
+    const ref: SamplingReference = .{
+        .ref = try allocator.alloc(SamplingResult, n),
+        .label = "Reference",
+    };
     errdefer allocator.free(ref.ref);
 
     for (ref.ref, 0..) |*sample, sample_index| {
@@ -813,24 +840,79 @@ pub fn loadSamplingReference(zml_handler: *Zml_handler, file_name: []const u8) !
 }
 
 
-pub fn compareSampling(ref: SamplingReference, other: SamplingReference) void {
+const SamplingComparison = struct {
+    label: []const u8,
+    total: usize,
+    ms_per_sample: f64,
+    top1_found_percent: f64,
+    top1_found_count: usize,
+    topp_bucket_cases: [topp_bucket_count]usize,
+    topp_bucket_all_found_count: [topp_bucket_count]usize,
+    topp_bucket_all_found_percent: [topp_bucket_count]f64,
+    topp_bucket_found_token_count: [topp_bucket_count]usize,
+    topp_bucket_token_count: [topp_bucket_count]usize,
+    topp_bucket_found_percent: [topp_bucket_count]f64,
+    total_topp_found_percent: f64,
+    total_topp_found_token_count: usize,
+    total_topp_token_count: usize,
+    average_found_topp_mass: f64,
+    tvd_values: []f64,
+    tvd_p50: f64,
+    tvd_p90: f64,
+    tvd_p99: f64,
+    full_fail_percent: f64,
+    full_fail_count: usize,
+    proba_fail_percent: f64,
+    proba_fail_count: usize,
+};
+
+const topp_bucket_count = 4;
+const topp_bucket_labels = [topp_bucket_count][]const u8{ "top-p=1", "top-p=2", "top-p=3-7", "top-p>=8" };
+
+pub fn compareSampling(allocator: std.mem.Allocator, ref: SamplingReference, other: SamplingReference) !SamplingComparison {
     const total = @min(ref.ref.len, other.ref.len);
     if (ref.ref.len != other.ref.len) {
         std.log.warn("Compare sampling references with different lengths: ref={d} other={d} compared={d}", .{ ref.ref.len, other.ref.len, total });
     }
     if (total == 0) {
         std.log.warn("Compare sampling references: no samples", .{});
-        return;
+        const tvd_values = try allocator.alloc(f64, 0);
+        return .{
+            .label = other.label,
+            .total = 0,
+            .ms_per_sample = other.ms_per_sample,
+            .top1_found_percent = 0.0,
+            .top1_found_count = 0,
+            .topp_bucket_cases = [_]usize{0} ** topp_bucket_count,
+            .topp_bucket_all_found_count = [_]usize{0} ** topp_bucket_count,
+            .topp_bucket_all_found_percent = [_]f64{0.0} ** topp_bucket_count,
+            .topp_bucket_found_token_count = [_]usize{0} ** topp_bucket_count,
+            .topp_bucket_token_count = [_]usize{0} ** topp_bucket_count,
+            .topp_bucket_found_percent = [_]f64{0.0} ** topp_bucket_count,
+            .total_topp_found_percent = 0.0,
+            .total_topp_found_token_count = 0,
+            .total_topp_token_count = 0,
+            .average_found_topp_mass = 0.0,
+            .tvd_values = tvd_values,
+            .tvd_p50 = 0.0,
+            .tvd_p90 = 0.0,
+            .tvd_p99 = 0.0,
+            .full_fail_percent = 0.0,
+            .full_fail_count = 0,
+            .proba_fail_percent = 0.0,
+            .proba_fail_count = 0,
+        };
     }
+
+    const tvd_values = try allocator.alloc(f64, total);
+    errdefer allocator.free(tvd_values);
 
     var top1_found_count: usize = 0;
 
-    var small_topp_cases: usize = 0;
-    var small_topp_all_found_count: usize = 0;
-
-    var large_topp_cases: usize = 0;
-    var large_topp_token_count: usize = 0;
-    var large_topp_found_token_count: usize = 0;
+    var topp_bucket_cases = [_]usize{0} ** topp_bucket_count;
+    var topp_bucket_all_found_count = [_]usize{0} ** topp_bucket_count;
+    var topp_bucket_found_token_count = [_]usize{0} ** topp_bucket_count;
+    var topp_bucket_token_count = [_]usize{0} ** topp_bucket_count;
 
     var total_topp_token_count: usize = 0;
     var total_topp_found_token_count: usize = 0;
@@ -845,6 +927,7 @@ pub fn compareSampling(ref: SamplingReference, other: SamplingReference) void {
         const ref_sample = ref.ref[sample_index];
         const other_sample = other.ref[sample_index];
         const topp_count = samplingTopPCount(ref_sample);
+        const other_topp_count = samplingTopPCount(other_sample);
 
         const ref_top1 = ref_sample.candidates[0];
         if (samplingContainsToken(other_sample, ref_top1.row)) {
@@ -870,6 +953,8 @@ pub fn compareSampling(ref: SamplingReference, other: SamplingReference) void {
                 found_topp_mass += candidate.proba;
             }
         }
+        const tvd = samplingTvd(ref_sample, topp_count, other_sample, other_topp_count);
+        tvd_values[sample_index] = tvd;
 
         total_topp_token_count += topp_count;
         total_topp_found_token_count += found_topp_count;
@@ -878,41 +963,147 @@ pub fn compareSampling(ref: SamplingReference, other: SamplingReference) void {
             full_fail_count += 1;
         }
 
-        if (topp_count < 6) {
-            small_topp_cases += 1;
-            if (found_topp_count == topp_count) {
-                small_topp_all_found_count += 1;
-            }
-        } else {
-            large_topp_cases += 1;
-            large_topp_token_count += topp_count;
-            large_topp_found_token_count += found_topp_count;
+        const bucket = toppBucketIndex(topp_count);
+        topp_bucket_cases[bucket] += 1;
+        topp_bucket_token_count[bucket] += topp_count;
+        topp_bucket_found_token_count[bucket] += found_topp_count;
+        if (found_topp_count == topp_count) {
+            topp_bucket_all_found_count[bucket] += 1;
         }
     }
 
     const inv_total = 1.0 / @as(f64, @floatFromInt(total));
     const top1_found_percent = 100.0 * @as(f64, @floatFromInt(top1_found_count)) * inv_total;
-    const small_all_found_percent = percent(small_topp_all_found_count, small_topp_cases);
-    const large_found_percent = percent(large_topp_found_token_count, large_topp_token_count);
+    var topp_bucket_all_found_percent: [topp_bucket_count]f64 = undefined;
+    var topp_bucket_found_percent: [topp_bucket_count]f64 = undefined;
+    for (0..topp_bucket_count) |bucket| {
+        topp_bucket_all_found_percent[bucket] = percent(topp_bucket_all_found_count[bucket], topp_bucket_cases[bucket]);
+        topp_bucket_found_percent[bucket] = percent(topp_bucket_found_token_count[bucket], topp_bucket_token_count[bucket]);
+    }
     const total_topp_found_percent = percent(total_topp_found_token_count, total_topp_token_count);
     const average_found_topp_mass = total_found_topp_mass * inv_total;
+    std.mem.sort(f64, tvd_values, {}, std.sort.asc(f64));
+    const tvd_p50 = percentileSortedOrZero(tvd_values, 0.50);
+    const tvd_p90 = percentileSortedOrZero(tvd_values, 0.90);
+    const tvd_p99 = percentileSortedOrZero(tvd_values, 0.99);
     const full_fail_percent = 100.0 * @as(f64, @floatFromInt(full_fail_count)) * inv_total;
-    const proba_success_percent = 100.0 * @as(f64, @floatFromInt(proba_success_count)) * inv_total;
     const proba_fail_percent = 100.0 * @as(f64, @floatFromInt(proba_fail_count)) * inv_total;
 
-    std.log.info("Compare sampling: samples={d}", .{total});
-    std.log.info("ref top1 found in other candidates: {d}/{d} ({d:.4}%)", .{ top1_found_count, total, top1_found_percent });
-    std.log.info("top-p size < 6 cases: {d}; all top-p tokens found: {d}/{d} ({d:.4}%)", .{ small_topp_cases, small_topp_all_found_count, small_topp_cases, small_all_found_percent });
-    std.log.info("top-p size > 5 cases: {d}; top-p tokens found: {d}/{d} ({d:.4}%)", .{ large_topp_cases, large_topp_found_token_count, large_topp_token_count, large_found_percent });
-    std.log.info("all top-p tokens found: {d}/{d} ({d:.4}%)", .{ total_topp_found_token_count, total_topp_token_count, total_topp_found_percent });
-    std.log.info("average found top-p probability mass: {d:.6}", .{average_found_topp_mass});
-    std.log.info("full fail frequency: {d}/{d} ({d:.4}%)", .{ full_fail_count, total, full_fail_percent });
-    std.log.info("probability success frequency: {d}/{d} ({d:.4}%)", .{ proba_success_count, total, proba_success_percent });
-    std.log.info("probability fail frequency: {d}/{d} ({d:.4}%)", .{ proba_fail_count, total, proba_fail_percent });
+    const comparison: SamplingComparison = .{
+        .label = other.label,
+        .total = total,
+        .ms_per_sample = other.ms_per_sample,
+        .top1_found_percent = top1_found_percent,
+        .top1_found_count = top1_found_count,
+        .topp_bucket_cases = topp_bucket_cases,
+        .topp_bucket_all_found_count = topp_bucket_all_found_count,
+        .topp_bucket_all_found_percent = topp_bucket_all_found_percent,
+        .topp_bucket_found_token_count = topp_bucket_found_token_count,
+        .topp_bucket_token_count = topp_bucket_token_count,
+        .topp_bucket_found_percent = topp_bucket_found_percent,
+        .total_topp_found_percent = total_topp_found_percent,
+        .total_topp_found_token_count = total_topp_found_token_count,
+        .total_topp_token_count = total_topp_token_count,
+        .average_found_topp_mass = average_found_topp_mass,
+        .tvd_values = tvd_values,
+        .tvd_p50 = tvd_p50,
+        .tvd_p90 = tvd_p90,
+        .tvd_p99 = tvd_p99,
+        .full_fail_percent = full_fail_percent,
+        .full_fail_count = full_fail_count,
+        .proba_fail_percent = proba_fail_percent,
+        .proba_fail_count = proba_fail_count,
+    };
+
+    std.log.info("Results for {s}", .{comparison.label});
+    std.log.info("Total samplings    : {d}", .{comparison.total});
+    std.log.info("Found top1 token   : {d:.4}% ({d:>5}/{d:>5})", .{ top1_found_percent, top1_found_count, total });
+    for (0..topp_bucket_count) |bucket| {
+        std.log.info("{s:>9} all found: {d:.4}% ({d:>5}/{d:>5}); tokens found: {d:.4}% ({d:>5}/{d:>5})", .{
+            topp_bucket_labels[bucket],
+            topp_bucket_all_found_percent[bucket],
+            topp_bucket_all_found_count[bucket],
+            topp_bucket_cases[bucket],
+            topp_bucket_found_percent[bucket],
+            topp_bucket_found_token_count[bucket],
+            topp_bucket_token_count[bucket],
+        });
+    }
+    std.log.info("top-p all found    : {d:.4}% ({d:>5}/{d:>5})", .{ total_topp_found_percent, total_topp_found_token_count, total_topp_token_count });
+    std.log.info("top-p mass proba   : {d:.6}", .{average_found_topp_mass});
+    std.log.info("top-p proba loss   : p50={d:.6} p90={d:.6} p99={d:.6}", .{ tvd_p50, tvd_p90, tvd_p99 });
+    std.log.info("full fail          : {d}/{d} ({d:.4}%)", .{ full_fail_count, total, full_fail_percent });
+    std.log.info("probability fail   : {d}/{d} ({d:.4}%)", .{ proba_fail_count, total, proba_fail_percent });
+
+    return comparison;
+}
+
+pub fn printComparisonSummary(comparisons: []const SamplingComparison) void {
+    if (comparisons.len == 0) return;
+
+    std.log.info("", .{});
+    std.log.info("Sampling comparison summary", .{});
+    std.log.info(
+        "{s:<14} {s:>9} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10}",
+        .{ "sampler", "ms/search", "top1 %", "p1 all", "p2 all", "p3-7 all", "p8+ all", "top-p %", "mass", "full fail", "loss p50", "loss p90", "loss p99" },
+    );
+    for (comparisons) |comparison| {
+        std.log.info(
+            "{s:<14} {d:>9.3} {d:>10.4} {d:>10.4} {d:>10.4} {d:>10.4} {d:>10.4} {d:>10.4} {d:>10.6} {d:>10.4} {d:>10.6} {d:>10.6} {d:>10.6}",
+            .{
+                comparison.label,
+                comparison.ms_per_sample,
+                comparison.top1_found_percent,
+                comparison.topp_bucket_all_found_percent[0],
+                comparison.topp_bucket_all_found_percent[1],
+                comparison.topp_bucket_all_found_percent[2],
+                comparison.topp_bucket_all_found_percent[3],
+                comparison.total_topp_found_percent,
+                comparison.average_found_topp_mass,
+                comparison.full_fail_percent,
+                comparison.tvd_p50,
+                comparison.tvd_p90,
+                comparison.tvd_p99,
+            },
+        );
+    }
+}
+
+fn toppBucketIndex(topp_count: usize) usize {
+    return switch (topp_count) {
+        1 => 0,
+        2 => 1,
+        3...7 => 2,
+        else => 3,
+    };
 }
 
 fn samplingTopPCount(sample: SamplingResult) usize {
     return @min(sample.nb + 1, sample.candidates.len);
+}
+
+fn samplingTvd(ref_sample: SamplingResult, ref_topp_count: usize, other_sample: SamplingResult, other_topp_count: usize) f64 {
+    var max_loss: f64 = 0.0;
+    for (ref_sample.candidates[0..ref_topp_count]) |candidate| {
+        const ref_proba: f64 = candidate.proba;
+        const other_proba: f64 = samplingTopPProbabilityForToken(other_sample, other_topp_count, candidate.row);
+        max_loss = @max(max_loss, ref_proba - other_proba);
+    }
+    return max_loss;
+}
+
+fn samplingTopPProbabilityForToken(sample: SamplingResult, topp_count: usize, token: usize) f32 {
+    for (sample.candidates[0..topp_count]) |candidate| {
+        if (candidate.row == token) return candidate.proba;
+    }
+    return 0.0;
+}
+
+fn percentileSortedOrZero(values: []const f64, q: f64) f64 {
+    if (values.len == 0) return 0.0;
+    const scaled = q * @as(f64, @floatFromInt(values.len - 1));
+    const index: usize = @intFromFloat(@round(scaled));
+    return values[index];
 }
 
 fn samplingContainsToken(sample: SamplingResult, token: usize) bool {

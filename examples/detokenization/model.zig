@@ -9,9 +9,9 @@ pub const Model_handler = struct {
     exes: ModelExes,
     model_buffers: zml.Bufferized(Model),
 
-    pub fn init(zml_handler: *main.Zml_handler) !Model_handler {
+    pub fn init(zml_handler: *main.Zml_handler, path: []const u8) !Model_handler {
         std.log.info("Init store", .{});
-        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, path);
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
 

@@ -263,11 +263,18 @@ pub fn loadSimilarityMatrix(zml_handler: *Zml_handler, normalize: bool) !Similar
 }
 
 
-pub fn getLmHead(zml_handler: *Zml_handler) !LmHeadMatrix {
+pub fn getLmHead(zml_handler: *Zml_handler, path: []const u8) !LmHeadMatrix {
     const allocator = zml_handler.allocator;
 
-    std.log.info("Load lm_head matrix from checkpoint: {s}", .{zml_handler.uris.qwen});
-    const data = try save_load.loadSafetensorSlice(zml_handler, zml_handler.uris.qwen, "model-00005-of-00005.safetensors", "lm_head.weight");
+    std.log.info("Load lm_head matrix from checkpoint: {s}", .{path});
+    var data: zml.Slice = undefined;
+    if (path[path.len-1] == 'n') {
+        // qwen
+        data = try save_load.loadSafetensorSlice(zml_handler, path, "model-00005-of-00005.safetensors", "lm_head.weight");
+    } else {
+        // llama
+        data = try save_load.loadSafetensorSlice(zml_handler, path, "model-00004-of-00004.safetensors", "lm_head.weight");
+    }
     defer data.free(allocator);
 
     const lm_head_shape = data.shape;

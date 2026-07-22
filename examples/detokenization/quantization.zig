@@ -18,6 +18,8 @@ pub const hidden_dim_log2: comptime_int = 12;
 pub const hidden_dim: comptime_int = 4096;
 pub const inv_hidden_dim: comptime_float = 1.0 / @as(f32, @floatFromInt(hidden_dim));
 pub const std_dev: comptime_float = @sqrt(inv_hidden_dim);
+pub const std_dev_z_clamp_int4: comptime_float = 2.58;
+pub const std_dev_z_clamp_int8: comptime_float = 3.89;
 
 // applies the normalized in-place fast Walsh-Hadamard transform
 // the vector needs to be of dimension 2^k
@@ -80,6 +82,10 @@ const useX86Avx512Vnni = builtin.cpu.arch == .x86_64 and
 const useX86Avx512Popcount = builtin.cpu.arch == .x86_64 and
     builtin.zig_backend != .stage2_c and
     builtin.cpu.has(.x86, .avx512vpopcntdq);
+
+const useX86Avx512Mask = builtin.cpu.arch == .x86_64 and
+    builtin.zig_backend != .stage2_c and
+    builtin.cpu.has(.x86, .avx512f);
 
 const Vec4i32 = @Vector(4, i32);
 const Vec8i32 = @Vector(8, i32);
@@ -158,6 +164,7 @@ pub const QuantizationInt8 = struct {
         for (0..hidden_dim) |coord| {
             max_dev = @max(max_dev, @abs(buff[coord]) / std_dev);
         }
+        max_dev = @min(max_dev, std_dev_z_clamp_int8);
         //std.log.info("max_dev {d}", .{row, max_dev});
         const max_abs = max_dev * std_dev;
         var quant_norm2: f32 = 0.0;
@@ -177,7 +184,7 @@ pub const QuantizationInt8 = struct {
             const vector_len = 64;
             const unroll_len = 4 * vector_len;
             std.debug.assert(a.len == b.len and a.len >= unroll_len and a.len % unroll_len == 0);
-    
+
             var sum0: Vec16i32 = @splat(0);
             var sum1: Vec16i32 = @splat(0);
             var sum2: Vec16i32 = @splat(0);
@@ -187,7 +194,7 @@ pub const QuantizationInt8 = struct {
             var bias2: Vec16i32 = @splat(0);
             var bias3: Vec16i32 = @splat(0);
             const sign_bias: Vec64u8 = @splat(0x80);
-    
+
             var i: usize = 0;
             while (i < a.len) : (i += unroll_len) {
                 const a0: Vec64i8 = a[i..][0..vector_len].*;
@@ -198,7 +205,7 @@ pub const QuantizationInt8 = struct {
                 const b1: Vec64i8 = b[i + vector_len ..][0..vector_len].*;
                 const b2: Vec64i8 = b[i + 2 * vector_len ..][0..vector_len].*;
                 const b3: Vec64i8 = b[i + 3 * vector_len ..][0..vector_len].*;
-    
+
                 sum0 = x86Vpdpbusd(sum0, @as(Vec64u8, @bitCast(a0)) ^ sign_bias, b0);
                 sum1 = x86Vpdpbusd(sum1, @as(Vec64u8, @bitCast(a1)) ^ sign_bias, b1);
                 sum2 = x86Vpdpbusd(sum2, @as(Vec64u8, @bitCast(a2)) ^ sign_bias, b2);
@@ -208,7 +215,7 @@ pub const QuantizationInt8 = struct {
                 bias2 = x86Vpdpbusd(bias2, sign_bias, b2);
                 bias3 = x86Vpdpbusd(bias3, sign_bias, b3);
             }
-    
+
             const signed_sums = (sum0 - bias0) + (sum1 - bias1) + (sum2 - bias2) + (sum3 - bias3);
             return @reduce(.Add, signed_sums);
         }
@@ -261,7 +268,7 @@ pub const QuantizationInt8 = struct {
         );
         return result;
     }
-    
+
     inline fn x86Vpdpbusd(acc: Vec16i32, a: Vec64u8, b: Vec64i8) Vec16i32 {
         var result = acc;
         asm volatile ("vpdpbusd %[b], %[a], %[result]"
@@ -271,7 +278,6 @@ pub const QuantizationInt8 = struct {
         );
         return result;
     }
-
 };
 
 pub const QuantizationInt4 = struct {
@@ -350,6 +356,7 @@ pub const QuantizationInt4 = struct {
         for (0..hidden_dim) |coord| {
             max_dev = @max(max_dev, @abs(buff[coord]) / std_dev);
         }
+        max_dev = @min(max_dev, std_dev_z_clamp_int4);
         //std.log.info("max_dev {d}", .{row, max_dev});
         const max_abs = max_dev * std_dev;
         var quant_norm2: f32 = 0.0;
@@ -398,7 +405,6 @@ pub const QuantizationInt4 = struct {
         return src_norm / @sqrt(quant_norm2);
     }
 
-    
     const Int8x4DotAccumulators = struct {
         sum0: Vec4i32,
         sum1: Vec4i32,
@@ -425,7 +431,6 @@ pub const QuantizationInt4 = struct {
         return shifted >> 4;
     }
 
-    
     pub inline fn uint8x4dot(a: []const u8, b: []const i8) i32 {
         std.debug.assert(a.len == b.len * 2);
         std.debug.assert(a.len >= 64 and a.len % 64 == 0);
@@ -588,7 +593,6 @@ pub const QuantizationInt4 = struct {
         return .{ .sum0 = result0, .sum1 = result1, .sum2 = result2, .sum3 = result3 };
     }
 
-
     pub inline fn int8x4dot(a: []const i8, b: []const i8) i32 {
         std.debug.assert(a.len == b.len * 2);
         std.debug.assert(a.len >= 64 and a.len % 64 == 0);
@@ -598,7 +602,7 @@ pub const QuantizationInt4 = struct {
             var sum1: Vec8i32 = @splat(0);
             var sum2: Vec8i32 = @splat(0);
             var sum3: Vec8i32 = @splat(0);
-    
+
             var i: usize = 0;
             while (i < a.len) : (i += 64) {
                 const a0: Vec16i8 = a[i..][0..16].*;
@@ -753,7 +757,6 @@ pub const QuantizationInt4 = struct {
         return .{ .sum0 = result0, .sum1 = result1, .sum2 = result2, .sum3 = result3 };
     }
 
-
     pub inline fn int4dot(a: []const i8, b: []const i8) i32 {
         std.debug.assert(a.len == b.len);
         std.debug.assert(a.len >= 2 * int4_packed_block_len and a.len % (2 * int4_packed_block_len) == 0);
@@ -763,7 +766,7 @@ pub const QuantizationInt4 = struct {
             var sum1: Vec8i32 = @splat(0);
             var sum2: Vec8i32 = @splat(0);
             var sum3: Vec8i32 = @splat(0);
-    
+
             var i: usize = 0;
             while (i < a.len) : (i += 2 * int4_packed_block_len) {
                 const packedA0: Vec16i8 = a[i..][0..int4_packed_block_len].*;
@@ -918,7 +921,6 @@ pub const QuantizationInt4 = struct {
         );
         return .{ .sum0 = result0, .sum1 = result1, .sum2 = result2, .sum3 = result3 };
     }
-
 };
 
 pub const qjl_word = u64;
@@ -936,6 +938,8 @@ pub inline fn setBit(v: *VectorQJL1, pos: usize) void {
 }
 
 pub const QuantizationQJL1 = struct {
+    pub const qjlNx1UsesLut = !useX86Avx512Mask;
+
     allocator: std.mem.Allocator,
     lm_head: *LmHeadMatrix,
     d: usize,
@@ -976,13 +980,13 @@ pub const QuantizationQJL1 = struct {
     }
 
     pub fn quantizeVector(src: []const f32, buff: []f32, dst: *VectorQJL1, src_norm: f32) f32 {
+        _ = src_norm;
         @memset(dst, 0);
         @memcpy(buff, src);
         walshHadamard(buff, hidden_dim_log2);
         var l1_norm: f32 = 0.0;
         for (0..hidden_dim) |coord| {
-            buff[coord] /= src_norm;
-            l1_norm = @max(l1_norm, @abs(buff[coord]));
+            l1_norm += @abs(buff[coord]);
         }
         for (0..hidden_dim) |coord| {
             if (buff[coord] > 0) setBit(dst, coord);
@@ -1012,7 +1016,7 @@ pub const QuantizationQJL1 = struct {
             var sum1: @Vector(8, u64) = @splat(0);
             var sum2: @Vector(8, u64) = @splat(0);
             var sum3: @Vector(8, u64) = @splat(0);
-    
+
             var i: usize = 0;
             while (i < @sizeOf(VectorQJL1)) : (i += unroll_bytes) {
                 const a0: @Vector(8, u64) = @bitCast(bytes_a[i..][0..vector_bytes].*);
@@ -1094,7 +1098,7 @@ pub const QuantizationQJL1 = struct {
         const total_vec = sum0 + sum1 + sum2 + sum3;
         return @reduce(.Add, total_vec);
     }
-    
+
     fn makeQjlDotLut(comptime coord_count: usize) [coord_count + 1]f32 {
         @setEvalBranchQuota(8192);
         var lut: [coord_count + 1]f32 = undefined;
@@ -1108,16 +1112,46 @@ pub const QuantizationQJL1 = struct {
 
     const qjl_dot_lut = makeQjlDotLut(hidden_dim);
 
-    pub inline fn qjlNx1dot(query_lut: []const f32, b: *const VectorQJL1, query_sum: f32) f32 {
+    pub inline fn qjlNx1dot(query_lut: []const f32, query: []const f32, b: *const VectorQJL1, query_sum: f32) f32 {
         // dot(q, v) ~= ||rot(v)||_1 / D * dot(q, quant(rot(v)))
+        
+        if (comptime useX86Avx512Mask) {
+            const Vec16f = @Vector(16, f32);
+            const Mask16 = @Vector(16, bool);
+            const b_words: *align(1) const [hidden_dim / 16]u16 = @ptrCast(b);
+
+            var sum0: Vec16f = @splat(0.0);
+            var sum1: Vec16f = @splat(0.0);
+            var sum2: Vec16f = @splat(0.0);
+            var sum3: Vec16f = @splat(0.0);
+
+            var word_i: usize = 0;
+            while (word_i < hidden_dim / 16) : (word_i += 4) {
+                const mask0: Mask16 = @bitCast(b_words[word_i + 0]);
+                const mask1: Mask16 = @bitCast(b_words[word_i + 1]);
+                const mask2: Mask16 = @bitCast(b_words[word_i + 2]);
+                const mask3: Mask16 = @bitCast(b_words[word_i + 3]);
+                const query_i = word_i * 16;
+                const query0: Vec16f = query[query_i + 0 ..][0..16].*;
+                const query1: Vec16f = query[query_i + 16 ..][0..16].*;
+                const query2: Vec16f = query[query_i + 32 ..][0..16].*;
+                const query3: Vec16f = query[query_i + 48 ..][0..16].*;
+
+                // On AVX-512 this lowers to kmovw followed by masked vaddps.
+                sum0 = @select(f32, mask0, sum0 + query0, sum0);
+                sum1 = @select(f32, mask1, sum1 + query1, sum1);
+                sum2 = @select(f32, mask2, sum2 + query2, sum2);
+                sum3 = @select(f32, mask3, sum3 + query3, sum3);
+            }
+
+            const positive_sum = @reduce(.Add, sum0 + sum1 + sum2 + sum3);
+            return 2.0 * positive_sum - query_sum;
+        }
+
         // dot(q, quant(rot(v))) is hard to compute, the current
         // version is about 30% slower than the f32xf32 dot product.
         // with "usine à gaz" simd/masking/lut/assembly injection,
         // we can only get on par with the baseline.
-        // TODO: on AVX512 CPUs, there is bitmasking available that
-        // would allow to solve the issue at the hardware level,
-        // effectively making this being a SIMD vectorized sum,
-        // saving the multiplications of the f32xf32.
         var positive_sum: f32 = 0.0;
         const b_bytes: *const [hidden_dim / 8]u8 = @ptrCast(b);
         for (b_bytes, 0..) |byte, byte_i| {
@@ -1268,7 +1302,7 @@ pub const QuantizationQJL2 = struct {
         }
         return dot / norm_squared;
     }
-    
+
     pub inline fn qjl2dot(a: *const VectorQJL2, b: *const VectorQJL2) i32 {
         // A quantized value is represented as 2 * sign(msb[i]) + 1 * sign(lsb[i])
         // dot(a, b) = dot(2 * sign(a.msb[i]) + 1 * sign(a.lsb[i]), 2 * sign(b.msb[i]) + 1 * sign(b.lsb[i]))
@@ -1280,7 +1314,7 @@ pub const QuantizationQJL2 = struct {
             var sum_ml: @Vector(8, u64) = @splat(0);
             var sum_lm: @Vector(8, u64) = @splat(0);
             var sum_ll: @Vector(8, u64) = @splat(0);
-    
+
             var i: usize = 0;
             while (i < hidden_dim / 8) : (i += vector_bytes) {
                 const am: @Vector(8, u64) = @bitCast(a.msb[i..][0..vector_bytes].*);
@@ -1317,7 +1351,7 @@ pub const QuantizationQJL2 = struct {
     pub inline fn qjl2x1dot(a: *const VectorQJL2, b: *const VectorQJL1) i32 {
         // A 2 bits quantized value is represented as 2 * sign(msb[i]) + 1 * sign(lsb[i])
         // dot(a, b) = dot(2 * sign(a.msb[i]) + 1 * sign(a.lsb[i]), sign(b))
-        // dot(a,b) = 2 * dot1(a.msb, b) + 2 * dot1(a.lsb, b)
+        // dot(a,b) = 2 * dot1(a.msb, b) + dot1(a.lsb, b)
 
         if (comptime useX86Avx512Popcount) {
             const vector_bytes = 64;
@@ -1327,7 +1361,7 @@ pub const QuantizationQJL2 = struct {
             var sum_l0: @Vector(8, u64) = @splat(0);
             var sum_m1: @Vector(8, u64) = @splat(0);
             var sum_l1: @Vector(8, u64) = @splat(0);
-    
+
             var i: usize = 0;
             while (i < hidden_dim / 8) : (i += unroll_bytes) {
                 const am0: @Vector(8, u64) = @bitCast(a.msb[i..][0..vector_bytes].*);
@@ -1341,22 +1375,22 @@ pub const QuantizationQJL2 = struct {
                 sum_m1 += @popCount(am1 ^ bv1);
                 sum_l1 += @popCount(al1 ^ bv1);
             }
-    
+
             const pop_m: u32 = @intCast(@reduce(.Add, sum_m0 + sum_m1));
             const pop_l: u32 = @intCast(@reduce(.Add, sum_l0 + sum_l1));
-            const pos: i32 = 4 * hidden_dim;
-            const neg = (pop_m + pop_l) << 2;
+            const pos: i32 = 3 * hidden_dim;
+            const neg = (pop_m << 2) + (pop_l << 1);
             return pos - @as(i32, @intCast(neg));
         }
 
         const pop_m = QuantizationQJL1.popcountXor(&@bitCast(a.msb), b);
         const pop_l = QuantizationQJL1.popcountXor(&@bitCast(a.lsb), b);
 
-        // dot(a,b) = 2 * (d - 2 * pop_m) + 2 * (d - 2 * pop_l)
-        // dot(a,b) = 4 * d - 4 * pop_m - 4 * pop_l
+        // dot(a,b) = 2 * (d - 2 * pop_m) + (d - 2 * pop_l)
+        // dot(a,b) = 3 * d - 4 * pop_m - 2 * pop_l
 
-        const pos: i32 = 4 * hidden_dim;
-        const neg = (pop_m + pop_l) << 2;
+        const pos: i32 = 3 * hidden_dim;
+        const neg = (pop_m << 2) + (pop_l << 1);
         return pos - @as(i32, @intCast(neg));
     }
 };

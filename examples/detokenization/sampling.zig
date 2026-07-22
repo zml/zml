@@ -47,6 +47,8 @@ pub const SamplingResult = struct {
 
 pub const SamplingReference = struct {
     ref: []SamplingResult,
+    label: []const u8,
+    ms_per_sample: f64 = 0.0,
 };
 
 pub const Sampler = struct {
@@ -58,12 +60,11 @@ pub const Sampler = struct {
     logits: []f32,
     candidates: [sampling_top_k]Logit,
 
-    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix) !Sampler {
+    const need_rescoring = false;
+
+    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, tokenizer: Tokenizer) !Sampler {
         const v: usize = lm_head.n;
         const d: usize = lm_head.d;
-
-        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
-        const tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
 
         const logits = try zml_handler.allocator.alloc(f32, v);
 
@@ -79,7 +80,6 @@ pub const Sampler = struct {
     }
 
     pub fn deinit(self: *Sampler) void {
-        self.tokenizer.deinit();
         self.allocator.free(self.logits);
     }
 
@@ -87,7 +87,7 @@ pub const Sampler = struct {
         self.computeLogits(y);
         findTopK(self.logits, self.candidates[0..sampling_top_k]);
         computeProbas(&self.candidates);
-        return .{ .candidates = self.candidates, .nb = self.nbInTopP() };
+        return .{ .candidates = self.candidates, .nb = nbInTopP(&self.candidates) };
     }
 
     pub fn computeLogits(self: *Sampler, y: []const f32) void {
@@ -128,13 +128,20 @@ pub const Sampler = struct {
         }
     }
 
-    pub fn nbInTopP(self: *Sampler) usize {
+    pub fn nbInTopP(candidates: *[sampling_top_k]Logit) usize {
         var total: f32 = 0.0;
         for (0..sampling_top_k) |i| {
-            total += self.candidates[i].proba;
+            total += candidates[i].proba;
             if (total > sampling_top_p) return i;
         }
         return sampling_top_k;
+    }
+
+    pub fn rescore(candidates: *[sampling_top_k]Logit, lm_head: *LmHeadMatrix, y: []const f32) void {
+        for (candidates) |cand| {
+            cand.logit = computeLogit(lm_head, cand.row, y);
+        }
+        std.mem.sort(Logit, {}, candidates, Logit.decreasingOrder);
     }
     
     pub fn logSampling(self: *Sampler) !void {
@@ -203,6 +210,8 @@ pub const AngularSampler = struct {
     logits: []f32,
     candidates: [sampling_top_k]Logit,
 
+    const need_rescoring = false;
+
     pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix) !AngularSampler {
         const v: usize = lm_head.n;
         const d: usize = lm_head.d;
@@ -226,7 +235,8 @@ pub const AngularSampler = struct {
             self.logits[token] = computeLogit(self.lm_head, token, y) / self.lm_head.row_norms[token];
         }
         findTopK(self.logits, self.candidates[0..sampling_top_k]);
-        return .{ .candidates = self.candidates, .nb = 0 };
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
     }
 
     pub inline fn computeLogit(lm_head: *LmHeadMatrix, token: usize, y: []const f32) f32 {
@@ -243,11 +253,12 @@ pub const AngularSampler = struct {
         }
         return @reduce(.Add, sum);
     }
-    
 };
 
 pub inline fn findTopK(logits: []const f32, candidates: []Logit) void {
-    for (0..candidates.len) |i| { candidates[i].logit = -std.math.floatMax(f32); }
+    for (0..candidates.len) |i| {
+        candidates[i].logit = -std.math.floatMax(f32);
+    }
     for (0..logits.len) |token| {
         const logit = logits[token];
         var insert_pos: usize = candidates.len - 1;
@@ -273,6 +284,8 @@ pub const TruncateSampler = struct {
     d: usize,
     logits: []f32,
     candidates: [sampling_truncate_dense]Logit,
+
+    const need_rescoring = false;
 
     pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix) !TruncateSampler {
         return .{
@@ -334,7 +347,9 @@ pub const TruncateSampler = struct {
             self.candidates[i].logit = Sampler.computeLogit(self.lm_head, self.candidates[i].row, query);
         }
         std.mem.sort(Logit, &self.candidates, {}, Logit.decreasingOrder);
-        return .{ .candidates = self.candidates[0..sampling_top_k].*, .nb = 0 };
+        var top_candidates: [sampling_top_k]Logit = self.candidates[0..sampling_top_k].*;
+        Sampler.computeProbas(&top_candidates);
+        return .{ .candidates = top_candidates, .nb = Sampler.nbInTopP(&top_candidates) };
     }
 };
 
@@ -347,6 +362,8 @@ pub const Int8Sampler = struct {
     candidates: [sampling_top_k]Logit,
     quantizer: *QuantizationInt8,
     quantized_query: []i8,
+
+    const need_rescoring = false;
 
     pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix, quant: *QuantizationInt8) !Int8Sampler {
         return .{
@@ -378,7 +395,8 @@ pub const Int8Sampler = struct {
         }
 
         findTopK(self.logits, self.candidates[0..sampling_top_k]);
-        return .{ .candidates = self.candidates, .nb = 0 };
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
     }
 };
 
@@ -391,6 +409,8 @@ pub const Int8x4Sampler = struct {
     candidates: [sampling_top_k]Logit,
     quantizer: *QuantizationInt4,
     quantized_query: []i8, // quantized to int8 : no throughput loss, better accuracy
+
+    const need_rescoring = false;
 
     pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix, quant: *QuantizationInt4) !Int8x4Sampler {
         return .{
@@ -423,7 +443,8 @@ pub const Int8x4Sampler = struct {
         }
 
         findTopK(self.logits, self.candidates[0..sampling_top_k]);
-        return .{ .candidates = self.candidates, .nb = 0 };
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
     }
 };
 
@@ -436,6 +457,8 @@ pub const Int4Sampler = struct {
     candidates: [sampling_top_k]Logit,
     quantizer: *QuantizationInt4,
     quantized_query: []i8,
+
+    const need_rescoring = false;
 
     pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix, quant: *QuantizationInt4) !Int4Sampler {
         std.debug.assert(lm_head.d % 2 == 0);
@@ -468,7 +491,8 @@ pub const Int4Sampler = struct {
         }
 
         findTopK(self.logits, self.candidates[0..sampling_top_k]);
-        return .{ .candidates = self.candidates, .nb = 0 };
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
     }
 };
 
@@ -481,6 +505,8 @@ pub const QJL1Sampler = struct {
     candidates: [sampling_top_k]Logit,
     quantizer: *QuantizationQJL1,
     quantized_query: VectorQJL1,
+
+    const need_rescoring = true;
 
     pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix, quant: *QuantizationQJL1) !QJL1Sampler {
         return .{
@@ -510,7 +536,8 @@ pub const QJL1Sampler = struct {
         }
 
         findTopK(self.logits, self.candidates[0..sampling_top_k]);
-        return .{ .candidates = self.candidates, .nb = 0 };
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
     }
 };
 
@@ -523,6 +550,8 @@ pub const QJL2Sampler = struct {
     candidates: [sampling_top_k]Logit,
     quantizer: *QuantizationQJL2,
     quantized_query: VectorQJL2,
+
+    const need_rescoring = true;
 
     pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix, quant: *QuantizationQJL2) !QJL2Sampler {
         return .{
@@ -552,7 +581,8 @@ pub const QJL2Sampler = struct {
         }
 
         findTopK(self.logits, self.candidates[0..sampling_top_k]);
-        return .{ .candidates = self.candidates, .nb = 0 };
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
     }
 };
 
@@ -565,6 +595,8 @@ pub const QJL2x1Sampler = struct {
     candidates: [sampling_top_k]Logit,
     quantizer: *QuantizationQJL1,
     quantized_query: VectorQJL2,
+
+    const need_rescoring = true;
 
     pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix, quant: *QuantizationQJL1) !QJL2x1Sampler {
         return .{
@@ -592,7 +624,8 @@ pub const QJL2x1Sampler = struct {
             self.logits[row] = @as(f32, @floatFromInt(res)) * self.quantizer.row_quant_scale[row] * query_quant_scale;
         }
         findTopK(self.logits, self.candidates[0..sampling_top_k]);
-        return .{ .candidates = self.candidates, .nb = 0 };
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
     }
 };
 
@@ -606,6 +639,8 @@ pub const QJLNx1Sampler = struct {
     quantizer: *QuantizationQJL1,
     rotated_query: []f32,
     query_lut: [hidden_dim / 8 * 256]f32,
+
+    const need_rescoring = true;
 
     pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix, quant: *QuantizationQJL1) !QJLNx1Sampler {
         const allocator = zml_handler.allocator;
@@ -635,14 +670,18 @@ pub const QJLNx1Sampler = struct {
     pub fn sample(self: *QJLNx1Sampler, query: []const f32) SamplingResult {
         @memcpy(self.rotated_query, query);
         quantization.walshHadamard(self.rotated_query, quantization.hidden_dim_log2);
-        const query_sum = self.precomputeLut();
+        const query_sum = if (comptime QuantizationQJL1.qjlNx1UsesLut)
+            self.precomputeLut()
+        else
+            sumQuery(self.rotated_query);
         for (0..self.vocab_size) |row| {
             const quantized_row = &self.quantizer.lm_head_quantized[row];
-            const res = QuantizationQJL1.qjlNx1dot(&self.query_lut, quantized_row, query_sum);
+            const res = QuantizationQJL1.qjlNx1dot(&self.query_lut, self.rotated_query, quantized_row, query_sum);
             self.logits[row] = res * self.quantizer.row_quant_scale[row];
         }
         findTopK(self.logits, self.candidates[0..sampling_top_k]);
-        return .{ .candidates = self.candidates, .nb = 0 };
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
     }
 
     pub fn precomputeLut(self: *QJLNx1Sampler) f32 {
@@ -660,6 +699,16 @@ pub const QJLNx1Sampler = struct {
         }
         return query_sum;
     }
+
+    fn sumQuery(query: []const f32) f32 {
+        const Vec16f = @Vector(16, f32);
+        var sum: Vec16f = @splat(0.0);
+        var i: usize = 0;
+        while (i < hidden_dim) : (i += 16) {
+            sum += query[i..][0..16].*;
+        }
+        return @reduce(.Add, sum);
+    }
 };
 
 pub const GraphSampler = struct {
@@ -669,6 +718,8 @@ pub const GraphSampler = struct {
     d: usize,
     vocab_size: usize,
     candidates: [sampling_top_k]Logit,
+
+    const need_rescoring = false;
 
     pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix) !GraphSampler {
         zml_handler.tic(&zml_handler.timers.similarity_matrix);
@@ -697,7 +748,7 @@ pub const GraphSampler = struct {
             zml_handler.toc(&zml_handler.timers.nsw_graph);
             gr = g_nsw;
         }
-        
+
         return .{
             .allocator = zml_handler.allocator,
             .lm_head = lm_head,
@@ -718,6 +769,7 @@ pub const GraphSampler = struct {
             self.candidates[i].row = self.graph.visited[i].node;
             self.candidates[i].logit = self.graph.visited[i].similarity;
         }
-        return .{ .candidates = self.candidates, .nb = 0 };
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
     }
 };
