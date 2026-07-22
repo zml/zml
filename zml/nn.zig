@@ -2098,11 +2098,34 @@ test walshHadamard {
     try zml.testing.expectClose(std.testing.io, expected_h, wh_h, .exact_match);
 }
 
-pub fn randomizedWalshHadamard(n: u32, rng: Tensor.Rng) struct { Tensor.Rng, Tensor } {
-    const new_rng, const rand = rng.uniform(.init(.{n}, f32), .{});
-    const noise: Tensor = .select(.logical(rand, .GT, .scalar(0.5, f32)), .scalar(1, i8), .scalar(-1, i8));
-    const diag: Tensor = .toDiagonal(noise, 0, .{ ._, ._ });
+pub fn walshHadamardSeeded(n: u32, seed: u128) Tensor {
+    const allocator = zml.module.CompilationContext.current().allocator;
+    const data: []i8 = walshHadamardAlloc(n, allocator) catch @panic("OOM");
+    defer allocator.free(data);
 
-    const walsh_hadamard = walshHadamard(n);
-    return .{ new_rng, walsh_hadamard.dot(diag, .{&.{ 1, 0 }}) };
+    _walshHadamardRandomizeSeed(n, data, seed);
+
+    return .constantTensor(.init(.{ n, n }, .i8), @ptrCast(data));
+}
+
+fn _walshHadamardRandomizeSeed(n: u32, walsh_hadamard: []i8, seed: u64) void {
+    var xo: std.Random.Xoroshiro128 = .init(seed);
+
+    var row_block: u32 = 0;
+    while (row_block < n) : (row_block += 64) {
+        const masks: u64 = xo.next();
+
+        const rows_left = n - row_block;
+        if (rows_left < 64)
+            masks &= ((@as(u64, 1) << @intCast(rows_left)) - 1);
+
+        while (masks != 0) {
+            // Skip all rows where masks[i] == 0,
+            const i: u64 = @ctz(masks);
+            const row = row_block + i;
+
+            for (walsh_hadamard[row * n ..][0..n]) |*x| x.* = -x.*;
+            masks &= masks - 1;
+        }
+    }
 }
