@@ -1043,7 +1043,6 @@ const Triton = struct {
             .EVEN_K = @mod(contract_k, block_k) == 0,
             .MASK_K_LIMIT = @intCast(if (@mod(contract_k, block_k) == 0) block_k else @mod(contract_k, block_k)),
             .W_CACHE_MODIFIER = if (block_m <= 32) .cg else .none,
-            .NUM_STAGES = @intCast(opts.num_stages),
         };
 
         const y = triton_a16w4_kernel.Kernel.call(
