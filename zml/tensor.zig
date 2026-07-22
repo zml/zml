@@ -30,6 +30,8 @@ pub const Tensor = struct {
     _shape: Shape,
     _value: ?*const mlir.Value = null,
 
+    const ResolvedAxis = u3;
+
     pub fn init(shape_like: anytype, dt: DataType) Tensor {
         return .fromShape(.init(shape_like, dt));
     }
@@ -120,14 +122,14 @@ pub const Tensor = struct {
     /// Returns the index of axis 'axis_'.
     ///
     /// 'axis_' can be an integer or a tag.
-    pub fn axis(self: Tensor, axis_: anytype) u3 {
+    pub fn axis(self: Tensor, axis_: anytype) ResolvedAxis {
         return self._shape.axis(axis_);
     }
 
     /// Returns the indices of each of the given axes.
     ///
     /// 'axis_' can be an integer or a tag.
-    pub fn axes(self: Tensor, axes_: anytype) stdx.BoundedArray(u3, constants.MAX_RANK) {
+    pub fn axes(self: Tensor, axes_: anytype) stdx.BoundedArray(ResolvedAxis, constants.MAX_RANK) {
         return self._shape.axes(axes_);
     }
 
@@ -1850,7 +1852,7 @@ pub const Tensor = struct {
         step: i32 = 1,
         singleton: bool = false,
 
-        const full = .{ .start = 0, .end = to_the_end, .step = 1 };
+        const full: Slice = .{ .start = 0, .end = to_the_end, .step = 1 };
 
         pub fn single(offset: i64) Slice {
             return .{ .start = offset, .end = offset + 1, .singleton = true };
@@ -1858,7 +1860,14 @@ pub const Tensor = struct {
 
         pub fn absolute(s: Slice, d: i64) Slice {
             const start = if (s.start < 0) d + s.start else s.start;
-            const end = if (s.end == to_the_end) d else if (s.end < 0) d + s.end else s.end;
+            const end = if (s.singleton)
+                start + 1
+            else if (s.end == to_the_end)
+                d
+            else if (s.end < 0)
+                d + s.end
+            else
+                s.end;
             const res: Slice = .{ .start = start, .end = end, .step = s.step, .singleton = s.singleton };
             stdx.debug.assert(start < end, "Slice {f} is invalid for axis of dimension {d} (resolved to {f})", .{ s, d, res });
             stdx.debug.assert(end <= d, "Slice {f} is invalid for axis of dimension {d} (resolved to {f})", .{ s, d, res });
@@ -1868,9 +1877,10 @@ pub const Tensor = struct {
         const to_the_end = std.math.maxInt(i64);
 
         pub fn format(self: Slice, writer: *std.Io.Writer) !void {
-            if (self.singleton) {
-                try writer.print("[{d}]", .{self.start});
-            } else if (self.end == to_the_end and self.step == 1) {
+            // if (self.singleton) {
+            //     try writer.print("[{d}]", .{self.start});
+            // } else
+            if (self.end == to_the_end and self.step == 1) {
                 try writer.print("[{d}..]", .{self.start});
             } else if (self.step == 1) {
                 try writer.print("[{d}..{d}]", .{ self.start, self.end });
@@ -1973,7 +1983,7 @@ pub const Tensor = struct {
 
     pub fn choose(self: Tensor, offsets: anytype) Tensor {
         const off, const tags = Shape.parseDimensions(offsets);
-        var slices: [constants.MAX_RANK]Slice = @splat(.{});
+        var slices: [constants.MAX_RANK]Slice = @splat(.full);
         for (off.constSlice(), tags.constSlice()) |o, t| {
             const ax = self.axis(t);
             slices[ax] = .single(o);
@@ -3705,17 +3715,32 @@ pub const Tensor = struct {
         }
     }
 
+    pub const DynSlice = struct { start: Tensor, len: i64 };
+
     /// Slices the input Tensor along a specific axis, with a start offset known at runtime.
-    /// Note: this doesn't support tagging, if you have tags,
-    /// you should use `dynamicSlice` directly.
-    pub fn dynamicSlice1d(self: Tensor, axis_: i8, slice_: DynSlice) Tensor {
-        stdx.debug.assert(slice_.start.rank() == 0, "dynamicSlice1d expects 'slice_.start' tensor rank to be a scalar, got {f}", .{slice_.start});
+    pub fn dynamicSlice1d(self: Tensor, axis_: anytype, slice_: DynSlice) Tensor {
+        return self.slice2(axis_, .{ .start = .{ .dynamic = slice_.start }, .len = slice_.len });
+    }
 
-        const a = self.axis(axis_);
-        const new_shape = self._shape.set(a, slice_.len);
+    pub fn slice2(self: Tensor, axis_: anytype, slice_: DynSlice2) Tensor {
+        return self.slices2(@as([]const ResolvedAxis, &.{self.axis(axis_)}), &.{slice_});
+    }
 
-        var start_indices: [constants.MAX_RANK]*const mlir.Value = @splat(constant(slice_.start.dtype().zero()).value());
-        start_indices[a] = slice_.start.value();
+    /// The fact that slices_ is now typed make for slightly less akward calls.
+    pub fn slices2(self: Tensor, axes_: anytype, slices_: []const DynSlice2) Tensor {
+        if (@TypeOf(axes_) != []const ResolvedAxis) return self.slices2(self._shape.parseAxes(axes_)[0].slice(), slices_);
+
+        const zero = scalar(0, .i64).value();
+        var start_indices: [constants.MAX_RANK]*const mlir.Value = @splat(zero);
+        var new_shape: Shape = self._shape;
+
+        for (axes_, slices_) |a, s| {
+            new_shape._dims.buffer[a] = s.len;
+            start_indices[a] = switch (s.start) {
+                .dynamic => |dyn| dyn.convert(.i64).value(),
+                .fixed => |fixed| scalar(fixed, .i64).value(),
+            };
+        }
 
         const op = dialects.stablehlo.dynamic_slice(
             mlirCtx(),
@@ -3725,10 +3750,36 @@ pub const Tensor = struct {
             .unknown(mlirCtx()),
         ).appendTo(currentBlock());
 
-        return _result(new_shape, op.result(0));
+        const res = _result(new_shape, op.result(0));
+        for (axes_, slices_) |a, s| {
+            if (s.singleton) new_shape = new_shape.drop(a);
+        }
+        return res.reshape(new_shape);
     }
 
-    pub const DynSlice = struct { start: Tensor, len: i64 };
+    pub const DynSlice2 = struct {
+        start: union(enum) { dynamic: Tensor, fixed: i64 },
+        len: i64,
+        singleton: bool = false,
+
+        pub fn dyn(start: Tensor, len: i64) DynSlice2 {
+            stdx.debug.assert(start.rank() == 0, "DynSlice2.dyn expects scalar input, got {f}", .{start});
+            return .{ .start = .{ .dynamic = start }, .len = len };
+        }
+
+        pub fn single(start: Tensor) DynSlice2 {
+            stdx.debug.assert(start.rank() == 0, "DynSlice2.single expects scalar input, got {f}", .{start});
+            return .{ .start = .{ .dynamic = start }, .len = 1, .singleton = true };
+        }
+
+        pub fn static(start: i64, len: i64) DynSlice2 {
+            return .{ .start = .{ .fixed = start }, .len = len };
+        }
+
+        pub fn singleStatic(start: i64) DynSlice2 {
+            return .{ .start = .{ .fixed = start }, .len = 1, .singleton = true };
+        }
+    };
 
     /// Slices a Tensor across many axes, with runtime known offsets.
     ///
@@ -3785,6 +3836,12 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
+        const Local = struct {
+            fn dynSliceResolved(x: Tensor, ax: ResolvedAxis, dyn_slice: DynSlice) Tensor {
+                return x.dynamicSlice1d(ax, dyn_slice);
+            }
+        };
+
         inline for (.{
             .{ [10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, Shape.init(.{10}, .f32), [2]f32{ 4, 5 }, 4, 0 },
             .{ [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }, Shape.init(.{ 2, 5 }, .f32), [4]f32{ 3, 4, 8, 9 }, 3, 1 },
@@ -3793,7 +3850,7 @@ pub const Tensor = struct {
             const x: Tensor = .fromShape(x_shape);
             const z: Tensor = .init(.{}, .i32);
 
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.dynamicSlice1d, .{ x, ax, .{ .len = 2, .start = z } }, platform, .{});
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.dynSliceResolved, .{ x, ax, .{ .len = 2, .start = z } }, platform, .{});
             defer exe.deinit();
 
             var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&x_data));
@@ -3801,7 +3858,7 @@ pub const Tensor = struct {
             var z_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, z.shape(), .replicated, std.mem.asBytes(&z_value));
             defer z_buffer.deinit();
 
-            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.dynamicSlice1d, .{ x_buffer, .{ .start = z_buffer } });
+            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.dynSliceResolved, .{ x_buffer, .{ .start = z_buffer } });
             defer res.deinit();
 
             try std.testing.expectEqual(expectation, try res.getValue(@TypeOf(expectation), std.testing.io));
