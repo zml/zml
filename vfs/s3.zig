@@ -791,9 +791,7 @@ pub const S3 = struct {
         return try std.fmt.bufPrint(buf, "{s}/{s}/{s}", .{ endpoint, bucket, key });
     }
 
-    fn listObjects(self: *S3, prefix: []const u8) ![][]const u8 {
-        const endpoint, const bucket, const key_prefix = self.pathComponents(prefix);
-
+    fn listObjectsBody(self: *S3, endpoint: []const u8, bucket: []const u8, key_prefix: []const u8) ![]u8 {
         var query_buf: [4096]u8 = undefined;
         var query_writer = std.Io.Writer.fixed(&query_buf);
 
@@ -804,7 +802,9 @@ pub const S3 = struct {
         if (key_prefix.len > 0) {
             try query_writer.writeAll("&prefix=");
             try std.Uri.Component.percentEncode(&query_writer, key_prefix, s3EncodeIsValid);
-            try std.Uri.Component.percentEncode(&query_writer, "/", s3EncodeIsValid);
+            if (!std.mem.endsWith(u8, key_prefix, "/")) {
+                try std.Uri.Component.percentEncode(&query_writer, "/", s3EncodeIsValid);
+            }
         }
 
         const endpoint_uri = try std.Uri.parse(endpoint);
@@ -857,7 +857,16 @@ pub const S3 = struct {
             return error.RequestFailed;
         }
 
-        const body = try res.reader(&.{}).readAlloc(self.allocator, res.head.content_length orelse 1024 * 1024);
+        return if (res.head.content_length) |content_len|
+            try res.reader(&.{}).readAlloc(self.allocator, content_len)
+        else
+            // When we don't have a content length, put a reasonable limit
+            try res.reader(&.{}).allocRemaining(self.allocator, .limited(1024 * 1024));
+    }
+
+    fn listObjects(self: *S3, prefix: []const u8) ![][]const u8 {
+        const endpoint, const bucket, const key_prefix = self.pathComponents(prefix);
+        const body = try self.listObjectsBody(endpoint, bucket, key_prefix);
         defer self.allocator.free(body);
 
         return try self.parseListObjectsResponse(body, key_prefix);
