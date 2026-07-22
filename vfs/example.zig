@@ -8,15 +8,16 @@ pub const std_options: std.Options = .{
     .log_level = .info,
 };
 
-const Command = enum { cat, ls, cp, stat, realpath };
+const Command = enum { cat, tree, ls, cp, stat, realpath };
 
 const help =
-    \\ zml/VFS demo: run cat, ls, cp, stat or realpath over s3, gs, hf, http, or local filesystem.
+    \\ zml/VFS demo: run cat, ls, tree, cp, stat or realpath over HTTP (http), AWS S3 (s3), Google Cloud Storage (gs), HuggingFace (hf), or local filesystem (file).
     \\
     \\ Examples:
-    \\ ls hf://Qwen/Qwen3-235B-A22B-Instruct-2507
-    \\ ls s3://noaa-goes19/ABI-Flood-Day-Shapefiles/2025/08
-    \\ ls gs://gcp-public-data-landsat/
+    \\ tree hf://Qwen/Qwen3-235B-A22B-Instruct-2507
+    \\ tree s3://noaa-goes19/ABI-Flood-Day-Shapefiles/2025/08
+    \\ ls gs://gcp-public-data-landsat
+    \\ stat gs://gcp-public-data-landsat/index.csv.gz
     \\ cat https://iprs.fly.dev
     \\
 ;
@@ -92,7 +93,7 @@ pub fn runCmd(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, 
 
             try stdout.print("Wrote {B:.2} to stdout from {s}\n", .{ read, path });
         },
-        .ls => {
+        .ls, .tree => {
             var dir = try std.Io.Dir.openDir(.cwd(), io, path, .{ .iterate = true });
             defer dir.close(io);
 
@@ -100,9 +101,10 @@ pub fn runCmd(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, 
             try stdout.print("{s} - {B:.2}\n", .{ path, dir_stat.size });
 
             var counts: TreeCounts = .{};
-            try printTree(io, allocator, stdout, dir, "", 10, &counts);
+            try printTree(io, allocator, stdout, dir, "", if (command == .tree) 10 else 1, &counts);
             try stdout.print("\n{d} directories, {d} files\n", .{ counts.dirs, counts.files });
         },
+
         .cp => {
             const destination_path = it.next() orelse {
                 try stdout.print("Usage: cp <source> <destination>\n", .{});
