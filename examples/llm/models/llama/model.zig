@@ -461,9 +461,6 @@ const SelfAttn = struct {
 
     pub const Buffers = zml.Bufferized(@This());
 
-    var hadamar_exe_lock: std.Io.RwLock = .init;
-    var hadamar_exe: ?zml.Exe = null;
-
     pub fn init(store: zml.io.TensorStore.View, config: Config) !SelfAttn {
         var rope_scaling = config.rope_scaling;
         rope_scaling.setRopeTheta(config.rope_theta);
@@ -503,19 +500,32 @@ const SelfAttn = struct {
         loader.load(io, ?RmsNorm, &self.q_norm, &buffers.q_norm, store, shardings, opts);
         loader.load(io, ?RmsNorm, &self.k_norm, &buffers.k_norm, store, shardings, opts);
 
-        hadamar_exe_lock.lockUncancelable(io);
-        defer hadamar_exe_lock.unlock(io);
-        if (hadamar_exe == null) {
-            // Since hadamar_exe is a global, use a global allocator for its data.
-            const hd: i64 = @divFloor(self.q_proj.weight.dim(.d), self.num_heads);
-            var h_exe = io.async(zml.Compiler(zml.nn.walshHadamard).compile, .{ std.heap.page_allocator, io, loader.platform, .{}, .{@intCast(hd)} });
-            hadamar_exe = try h_exe.await(io);
-            log.warn("Compiled hadamar generator: {f} -> {f}", .{ stdx.fmt.slice(hadamar_exe.?.input_shapes), stdx.fmt.slice(hadamar_exe.?.output_shapes) });
-        }
-
+        const hd: i64 = @divFloor(self.q_proj.weight.dim(.d), self.num_heads);
+        const exe: *const zml.Exe = try getHadamarExe(io, loader.platform, hd);
         var arena: std.heap.ArenaAllocator = .init(loader.allocator);
         defer arena.deinit();
-        try loader.loadExecute(arena.allocator(), io, self.qk_hadamar, &buffers.qk_hadamar, store, shardings, &(hadamar_exe.?), opts);
+        try loader.loadExecute(arena.allocator(), io, self.qk_hadamar, &buffers.qk_hadamar, store, shardings, exe, opts);
+    }
+
+    var hadamar_exe_lock: std.Io.RwLock = .init;
+    var hadamar_exe_hd: i64 = 0;
+    var hadamar_exe: ?zml.Exe = null;
+
+    fn getHadamarExe(io: std.Io, platform: *const zml.Platform, hd: i64) !*const zml.Exe {
+        hadamar_exe_lock.lockUncancelable(io);
+        defer hadamar_exe_lock.unlock(io);
+        if (hadamar_exe) |*exe| {
+            if (hadamar_exe_hd == hd) return exe;
+
+            exe.deinit();
+        }
+
+        // Since hadamar_exe is a global, use a global allocator for its data.
+        var h_exe = io.async(zml.Compiler(zml.nn.walshHadamard).compile, .{ std.heap.page_allocator, io, platform, .{}, .{@intCast(hd)} });
+        hadamar_exe = try h_exe.await(io);
+        hadamar_exe_hd = hd;
+        log.warn("Compiled hadamar generator: {f}", .{hadamar_exe.?});
+        return &(hadamar_exe.?);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
