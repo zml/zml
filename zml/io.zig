@@ -2892,10 +2892,7 @@ fn loadVectored(
             const index = source_slots.items.len;
             const profile = VFS.readProfileForPath(io, descriptor.file_uri);
             const minimum = if (profile) |p| p.hints.minimum_request_size else 2 * 1024 * 1024;
-            const request_size = switch (opts.read_request_size) {
-                .auto => minimum,
-                .fixed => |fixed| fixed,
-            };
+            const request_size = resolveReadRequestSize(opts.read_request_size, minimum, opts.dma_block_size);
             switch (opts.read_request_size) {
                 .auto => {},
                 .fixed => if (request_size < minimum) {
@@ -3287,6 +3284,13 @@ pub const ReadRequestSize = union(enum) {
     fixed: usize,
 };
 
+fn resolveReadRequestSize(configured: ReadRequestSize, source_minimum: usize, dma_block_size: usize) usize {
+    return switch (configured) {
+        .auto => @max(source_minimum, dma_block_size),
+        .fixed => |fixed| fixed,
+    };
+}
+
 pub const LoadOpts = struct {
     pub const auto: LoadOpts = .{};
 
@@ -3295,7 +3299,8 @@ pub const LoadOpts = struct {
     /// Hard adaptive cap for in-flight PJRT transfers on each device.
     dma_parallelism: usize = 32,
     /// Logical bytes gathered by one positional source request. Automatic
-    /// sizing uses the minimum registered by the source VFS.
+    /// sizing uses the greater of the source VFS minimum and the DMA block
+    /// size. A fixed value must be at least one DMA block.
     read_request_size: ReadRequestSize = .auto,
     /// Physical transfer and pool allocation unit.
     dma_block_size: usize = 2 * 1024 * 1024,
@@ -3400,7 +3405,10 @@ pub fn load(
     stdx.debug.assert(opts.dma_parallelism > 0, "zml.io.load dma_parallelism must be greater than zero", .{});
     switch (opts.read_request_size) {
         .auto => {},
-        .fixed => |fixed| stdx.debug.assert(fixed > 0, "zml.io.load fixed read_request_size must be greater than zero", .{}),
+        .fixed => |fixed| {
+            stdx.debug.assert(fixed > 0, "zml.io.load fixed read_request_size must be greater than zero", .{});
+            stdx.debug.assert(fixed >= opts.dma_block_size, "zml.io.load fixed read_request_size must be at least dma_block_size", .{});
+        },
     }
     stdx.debug.assert(opts.dma_block_size > 0, "zml.io.load dma_block_size must be greater than zero", .{});
     stdx.debug.assert(opts.max_pinned_bytes >= opts.dma_block_size, "zml.io.load max_pinned_bytes must hold at least one DMA block", .{});
@@ -3447,6 +3455,21 @@ pub fn load(
         try loadBuffered(ModelType, model, &bufferized, allocator, io, platform, store, opts);
     if (opts.total_bytes) |total_bytes| total_bytes.* = loaded_bytes;
     return bufferized;
+}
+
+test "automatic vectored request size is never smaller than a DMA block" {
+    try std.testing.expectEqual(
+        @as(usize, 4 * 1024 * 1024),
+        resolveReadRequestSize(.auto, 2 * 1024 * 1024, 4 * 1024 * 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 16 * 1024 * 1024),
+        resolveReadRequestSize(.auto, 16 * 1024 * 1024, 4 * 1024 * 1024),
+    );
+    try std.testing.expectEqual(
+        @as(usize, 8 * 1024 * 1024),
+        resolveReadRequestSize(.{ .fixed = 8 * 1024 * 1024 }, 2 * 1024 * 1024, 4 * 1024 * 1024),
+    );
 }
 fn buildMesh2x2(
     allocator: std.mem.Allocator,

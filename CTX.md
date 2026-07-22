@@ -59,8 +59,11 @@ HF                                      32 MiB
 ```
 
 Each backend advertises `minimum_request_size` and whether it is high-latency.
-An explicit fixed override remains possible and logs a warning below the
-backend minimum. S3/HF/GCS additionally expose physical-request, byte, retry,
+Automatic sizing takes the greater of that source minimum and the configured
+DMA block size, so a nominal request is never smaller than its block. An
+explicit fixed override must also be at least one DMA block and logs a warning
+when it is below the backend minimum. Tensor tails and dispatch boundaries may
+still produce partial final blocks. S3/HF/GCS additionally expose physical-request, byte, retry,
 throttle, and retry-delay counters. The controller backs source concurrency
 off directly on retry/throttle evidence; it never interprets pool waits or read
 latency as storage congestion.
@@ -251,6 +254,27 @@ gave 25.87, 25.82, 25.94, 26.19, and 26.04 GiB/s: median **25.94 GiB/s**, with
 a fixed local limit. The controller remains free to keep 16/eight when its
 scored result is better. Four-device and remote profiles have not yet been
 repeated after this warm-start-only change.
+
+The follow-up paired request/DMA-block sweep tested whether larger transfers
+could amortize PJRT submission and callback overhead. With identical adaptive
+caps, five interleaved rounds gave:
+
+| Request / DMA block | Median | PJRT submissions | Pinned high-water |
+|---|---:|---:|---:|
+| 2 / 2 MiB | **26.52 GiB/s** | 7,723 | 32 MiB |
+| 4 / 4 MiB | 26.28 GiB/s | 3,895 | 64 MiB |
+| 8 / 8 MiB | 22.31 GiB/s | 1,981 | 128 MiB |
+
+Matching outstanding read bytes was worse: 4/4 with eight reads medianed
+23.65 GiB/s and 8/8 with four reads medianed 21.98 GiB/s. Matching active DMA
+bytes made 4/4 with four events competitive in an initial five runs, but a
+final directly interleaved shortlist gave **26.66 GiB/s for 2/2 with eight
+events** versus **26.11 GiB/s for 4/4 with four events**. The latter halves
+PJRT submissions and lowers average PJRT latency from roughly 0.31 to 0.28 ms,
+but average source-read latency rises from roughly 0.74 to 1.88 ms while pinned
+high-water doubles. The 2 MiB request/block therefore remains the fastest and
+lowest-memory local choice; PJRT call amortization does not repay the loss on
+the source-copy side.
 
 The preceding local five-run results with automatic 2 MiB requests were:
 
