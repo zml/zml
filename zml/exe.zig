@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
@@ -269,6 +270,16 @@ pub const Exe = struct {
             .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => if (opts.wait) partition_events else null,
         };
 
+        if (builtin.mode == .Debug) {
+            for (arguments.flat_buffers.buffers) |buffers| {
+                for (0.., buffers[0..arguments.expected_shapes.len]) |i, buff| {
+                    if (buff.isDeleted(self.platform.pjrt_api)) {
+                        std.debug.panic("Exe can't execute, argument {} ({f}) has already been deleted.\n{f}", .{ i, arguments.expected_shapes[i], self });
+                    }
+                }
+            }
+        }
+
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = arguments.flat_buffers.buffers,
             .num_args = arguments.expected_shapes.len,
@@ -326,5 +337,9 @@ pub const Exe = struct {
         });
         defer span.end();
         return self.internalCall(null, arguments, results_, .{});
+    }
+
+    pub fn format(exe: *const Exe, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("zml.Exe ({} args, {} outs): {f} -> {f}", .{ exe.input_shapes.len, exe.output_shapes.len, stdx.fmt.slice(exe.input_shapes), stdx.fmt.slice(exe.output_shapes) });
     }
 };
