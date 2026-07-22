@@ -2,6 +2,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 
 zig_library(
     name = "vfs",
+    main = "vfs.zig",
     srcs = [
         "base.zig",
         "file.zig",
@@ -11,7 +12,6 @@ zig_library(
         "parallel_read.zig",
         "s3.zig",
     ],
-    main = "index.zig",
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [

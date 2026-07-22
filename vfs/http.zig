@@ -4,7 +4,7 @@ const stdx = @import("stdx");
 
 const VFSBase = @import("base.zig").VFSBase;
 
-const log = std.log.scoped(.@"zml/io/vfs/http");
+const log = std.log.scoped(.@"zml/vfs/http");
 
 pub const HTTP = struct {
     const Handle = struct {
