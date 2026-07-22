@@ -19,8 +19,8 @@ pub const Llm_handler = struct {
     kv_cache_buffers: zml.Bufferized(KvCache),
     sampling_strategy_buffers: zml.Bufferized(zml.nn.DynamicSamplingStrategy),
 
-    pub fn init(zml_handler: *main.Zml_handler) !Llm_handler {
-        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
+    pub fn init(zml_handler: *main.Zml_handler, path: []const u8) !Llm_handler {
+        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, path);
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
 

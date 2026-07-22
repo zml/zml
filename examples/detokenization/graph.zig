@@ -836,7 +836,7 @@ pub const Graph = struct {
         }
     }
     
-    pub fn testNswExtention(self: *Graph, sampler: *sampling.Sampler) !void {
+    pub fn testNswExtention(self: *Graph, _: *sampling.Sampler) !void {
         if (true) return;
         std.log.info("Test NSW extension", .{});
         @memset(self.nsw_extension_search_missed, false);
@@ -870,9 +870,7 @@ pub const Graph = struct {
         node = 0;
         while (node < self.n) : (node += 1) {
             if (self.lm_head.is_junk[node] or in_degrees[node] <= 2000) continue;
-            const token_str = try tokens.tokenString(sampler.tokenizer, @as(u32, @intCast(node)), self.allocator);
-            std.log.info("Node {d} has in-degree {d}, token: {s}", .{ node, in_degrees[node], token_str });
-            self.allocator.free(token_str);
+            std.log.info("Node {d} has in-degree {d}", .{ node, in_degrees[node] });
         }
         //try self.logDegreeCounts("Nodes by out-degree", self.nb_neighbors, graph_k_max);
 
@@ -883,24 +881,6 @@ pub const Graph = struct {
             if (hops > max_hops) max_hops = hops;
         }
         std.log.info("Max hops: {}", .{max_hops});
-        var hops: u32 = 2;
-        while (hops < 2) : (hops += 1) {
-            var i: u32 = 0;
-            while (i < self.n) : (i += 1) {
-                if (hop_dist[i] == hops) {
-                    std.log.info("Node {d} needs {d} hops, out-degree: {d}, tok: {s}", .{ i, hops, self.nb_neighbors[i], try tokens.tokenString(sampler.tokenizer, i, self.allocator) });
-                }
-            }
-        }
-        hops = 8;
-        while (hops < 8) : (hops += 1) {
-            var i: u32 = 0;
-            while (i < self.n) : (i += 1) {
-                if (hop_dist[i] == hops) {
-                    std.log.info("Node {d} needs {d} hops, out-degree: {d}, tok: {s}", .{ i, hops, self.nb_neighbors[i], try tokens.tokenString(sampler.tokenizer, i, self.allocator) });
-                }
-            }
-        }
         //try self.logDegreeCounts("Nodes by min-hops", hop_dist, max_hops);
 
         var exact_first_count: u32 = 0;

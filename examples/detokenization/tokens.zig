@@ -9,15 +9,6 @@ const Zml_handler = main.Zml_handler;
 const Model_handler = model_.Model_handler;
 const Tokenizer = zml.tokenizer.Tokenizer;
 
-pub fn tokenString(tokenizer: Tokenizer, token_id: anytype, allocator: std.mem.Allocator) ![]const u8 {
-    const id: u32 = @intCast(token_id);
-    var decoded_buf: [1024]u8 = undefined;
-    const decoded = try decodeToken(tokenizer, id, &decoded_buf);
-    var escaped_buf: [1024]u8 = undefined;
-    const escaped = escapeTokenText(decoded, &escaped_buf);
-    return allocator.dupe(u8, escaped);
-}
-
 
 pub fn decodeToken(tokenizer: zml.tokenizer.Tokenizer, token_id: u32, out: []u8) ![]const u8 {
     var decoder = try tokenizer.decoder();
@@ -51,51 +42,6 @@ pub fn escapeTokenText(text: []const u8, out: []u8) []const u8 {
     return out[0..len];
 }
 
-
-pub fn getExcludedRows(zml_handler: *Zml_handler, model_handler: *Model_handler) ![]usize {
-    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
-    var tokenizer = try llm_.Llm_handler.loadTokenizer(zml_handler, repo);
-    defer tokenizer.deinit();
-
-    const vocab_size: usize = @intCast(model_handler.model.shape().dim(.voc));
-    var excluded_rows: std.ArrayList(usize) = try .initCapacity(zml_handler.allocator, 0);
-    errdefer excluded_rows.deinit(zml_handler.allocator);
-
-    var decoded_buf: [1024]u8 = undefined;
-    var discarded_count: usize = 0;
-    var empty_count: usize = 0;
-    for (0..vocab_size) |token_id| {
-        const decoded = decodeToken(tokenizer, @intCast(token_id), &decoded_buf) catch continue;
-        if (decoded.len == 0) {
-            empty_count += 1;
-            continue;
-        }
-        if (shouldExcludeDecodedToken(decoded)) {
-            try excluded_rows.append(zml_handler.allocator, token_id);
-            discarded_count += 1;
-        }
-    }
-
-    std.log.info("Excluded vocabulary rows: discarded={d} empty={d} kept={d} total={d}", .{
-        discarded_count,
-        empty_count,
-        vocab_size - discarded_count,
-        vocab_size,
-    });
-    return excluded_rows.toOwnedSlice(zml_handler.allocator);
-}
-
-fn shouldExcludeDecodedToken(text: []const u8) bool {
-    var view = std.unicode.Utf8View.init(text) catch return false;
-    var it = view.iterator();
-    var has_non_space = false;
-    while (it.nextCodepoint()) |codepoint| {
-        if (isUnicodeWhitespace(codepoint)) continue;
-        has_non_space = true;
-        if (!codepointInExcludedRanges(codepoint)) return false;
-    }
-    return has_non_space;
-}
 
 fn codepointInExcludedRanges(codepoint: u21) bool {
     for (excluded_unicode_ranges) |range| {

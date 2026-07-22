@@ -21,10 +21,11 @@ const SamplingResult = sampling.SamplingResult;
 const sampling_top_k = sampling.sampling_top_k;
 
 pub const hidden_dim: comptime_int = 4096;
-pub const bucket_dim: comptime_int = 4;
+pub const bucket_dim: comptime_int = 16;
+pub const bucket_dim_fs: comptime_int = 4;
 pub const nb_buckets: comptime_int = hidden_dim / bucket_dim;
+pub const nb_buckets_fs: comptime_int = hidden_dim / bucket_dim_fs;
 pub const nb_centers: comptime_int = 256;
-pub const simd_len: comptime_int = 8;
 pub const pq_z_score: comptime_int = 5;
 pub const pq_orth_weight: comptime_float = 0.25;
 pub const pq_lut_zero_point: comptime_int = 128;
@@ -48,6 +49,8 @@ const RotatedLmHead = struct {
 };
 
 fn buildCodebookAndAssign(
+    comptime block_dim: comptime_int,
+    comptime bucket_count: comptime_int,
     allocator: Allocator,
     lm_head: *LmHeadMatrix,
     rotated_lm_head: []const f32,
@@ -59,23 +62,23 @@ fn buildCodebookAndAssign(
     var nb_non_junk: usize = 0;
     for (lm_head.is_junk) |is_junk| nb_non_junk += @intFromBool(!is_junk);
 
-    const training_data = try allocator.alloc(f32, nb_non_junk * bucket_dim);
+    const training_data = try allocator.alloc(f32, nb_non_junk * block_dim);
     defer allocator.free(training_data);
     var sample_index: usize = 0;
     for (0..lm_head.n) |row| {
         if (lm_head.is_junk[row]) continue;
         const bucket = switch (mode) {
             .vanilla => 0,
-            .anisotropic => sample_index % nb_buckets,
+            .anisotropic => sample_index % bucket_count,
         };
-        const src = rotated_lm_head[row * hidden_dim + bucket * bucket_dim ..][0..bucket_dim];
-        const dst = training_data[sample_index * bucket_dim ..][0..bucket_dim];
+        const src = rotated_lm_head[row * hidden_dim + bucket * block_dim ..][0..block_dim];
+        const dst = training_data[sample_index * block_dim ..][0..block_dim];
         @memcpy(dst, src);
         sample_index += 1;
     }
 
     std.log.info("***** Initializing {s} shared PQ codebook", .{@tagName(mode)});
-    var km = try KMeansCPU.init(allocator, nb_non_junk, bucket_dim, center_count);
+    var km = try KMeansCPU.init(allocator, nb_non_junk, block_dim, center_count);
     defer km.deinit();
     km.solve(training_data);
 
@@ -84,11 +87,11 @@ fn buildCodebookAndAssign(
             std.log.info("***** Assigning vanilla PQ row codes", .{});
             for (0..lm_head.n) |row| {
                 if (lm_head.is_junk[row]) continue;
-                for (0..nb_buckets) |bucket| {
-                    const data = rotated_lm_head[row * hidden_dim + bucket * bucket_dim ..][0..bucket_dim];
+                for (0..bucket_count) |bucket| {
+                    const data = rotated_lm_head[row * hidden_dim + bucket * block_dim ..][0..block_dim];
                     const norm = quantization.normL2(data);
                     const closest = km.closestCenter(data, norm * norm, center_count);
-                    row_codes[row * nb_buckets + bucket] = @intCast(closest[1]);
+                    row_codes[row * bucket_count + bucket] = @intCast(closest[1]);
                 }
             }
         },
@@ -184,6 +187,8 @@ pub const ProductQuantizer = struct {
         }
 
         try buildCodebookAndAssign(
+            bucket_dim,
+            nb_buckets,
             self.allocator,
             self.lm_head,
             self.rotated_lm_head,
@@ -297,7 +302,8 @@ pub const ProductQuantizer = struct {
         //self.zml_handler.tic(&self.zml_handler.timers.pq_top_k);
         sampling.findTopK(self.logits, self.candidates[0..sampling_top_k]);
         //self.zml_handler.toc(&self.zml_handler.timers.pq_top_k);
-        return .{ .candidates = self.candidates, .nb = 0 };
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
     }
 
     pub fn sampleLog(self: *ProductQuantizer, sampler: *Sampler, query: []const f32) void {
@@ -327,11 +333,11 @@ pub const ProductQuantizerFastScan = struct {
     rotated_lm_head: []f32,
     rotated_query: [hidden_dim]f32,
 
-    codebook: [bucket_dim * center_count]f32,
+    codebook: [bucket_dim_fs * center_count]f32,
     // Layout: [scan_group][bucket_pair][register][lane]. Each byte contains
     // the low-bucket code in bits 0..3 and the high-bucket code in bits 4..7.
     packed_row_buckets: []u8,
-    query_center_scores: [nb_buckets * center_count]u8,
+    query_center_scores: [nb_buckets_fs * center_count]u8,
     logits: []f32,
     candidates: [sampling_top_k]Logit,
 
@@ -340,7 +346,7 @@ pub const ProductQuantizerFastScan = struct {
     const register_lanes: comptime_int = 16;
     const registers_per_group: comptime_int = 4;
     const rows_per_group: comptime_int = register_lanes * registers_per_group;
-    const bucket_pair_count: comptime_int = nb_buckets / 2;
+    const bucket_pair_count: comptime_int = nb_buckets_fs / 2;
     const buckets_per_u16_chunk: comptime_int = 256;
 
     const Vec16u8 = @Vector(register_lanes, u8);
@@ -372,9 +378,9 @@ pub const ProductQuantizerFastScan = struct {
             .mode = mode,
             .rotated_lm_head = rotated_lm_head,
             .rotated_query = [_]f32{0.0} ** hidden_dim,
-            .codebook = [_]f32{0.0} ** (bucket_dim * center_count),
+            .codebook = [_]f32{0.0} ** (bucket_dim_fs * center_count),
             .packed_row_buckets = packed_row_buckets,
-            .query_center_scores = [_]u8{pq_lut_zero_point} ** (nb_buckets * center_count),
+            .query_center_scores = [_]u8{pq_lut_zero_point} ** (nb_buckets_fs * center_count),
             .logits = logits,
             .candidates = [_]Logit{.{}} ** sampling_top_k,
         };
@@ -394,9 +400,11 @@ pub const ProductQuantizerFastScan = struct {
             walshHadamardTo(dst, src, 12);
         }
 
-        const row_codes = try self.allocator.alloc(u8, self.n * nb_buckets);
+        const row_codes = try self.allocator.alloc(u8, self.n * nb_buckets_fs);
         defer self.allocator.free(row_codes);
         try buildCodebookAndAssign(
+            bucket_dim_fs,
+            nb_buckets_fs,
             self.allocator,
             self.lm_head,
             self.rotated_lm_head,
@@ -413,8 +421,8 @@ pub const ProductQuantizerFastScan = struct {
             const scan_group = row / rows_per_group;
             const register = (row % rows_per_group) / register_lanes;
             const lane = row % register_lanes;
-            for (0..nb_buckets) |bucket| {
-                const code = row_codes[row * nb_buckets + bucket];
+            for (0..nb_buckets_fs) |bucket| {
+                const code = row_codes[row * nb_buckets_fs + bucket];
                 const bucket_pair = bucket / 2;
                 const shift: u3 = @intCast((bucket & 1) * 4);
                 const offset = packedCodeOffset(scan_group, bucket_pair, register, lane);
@@ -428,10 +436,10 @@ pub const ProductQuantizerFastScan = struct {
     }
 
     inline fn normalizedQueryCenterScore(self: *ProductQuantizerFastScan, bucket: usize, center: usize, query_norm: f32) f32 {
-        const query_data = self.rotated_query[bucket * bucket_dim ..][0..bucket_dim];
-        const center_data = self.codebook[center * bucket_dim ..][0..bucket_dim];
+        const query_data = self.rotated_query[bucket * bucket_dim_fs ..][0..bucket_dim_fs];
+        const center_data = self.codebook[center * bucket_dim_fs ..][0..bucket_dim_fs];
         var dot: f32 = 0.0;
-        for (0..bucket_dim) |coord| dot += center_data[coord] * query_data[coord];
+        for (0..bucket_dim_fs) |coord| dot += center_data[coord] * query_data[coord];
         return dot / query_norm;
     }
 
@@ -483,7 +491,7 @@ pub const ProductQuantizerFastScan = struct {
 
         //self.zml_handler.tic(&self.zml_handler.timers.pq_lut);
         var max_abs_score: f32 = 0.0;
-        for (0..nb_buckets) |bucket| {
+        for (0..nb_buckets_fs) |bucket| {
             for (0..center_count) |center| {
                 const score = self.normalizedQueryCenterScore(bucket, center, query_norm);
                 const abs_score = @abs(score);
@@ -492,7 +500,7 @@ pub const ProductQuantizerFastScan = struct {
         }
         const lut_scale = max_abs_score / @as(f32, pq_lut_qmax);
         const inverse_lut_scale = @as(f32, pq_lut_qmax) / max_abs_score;
-        for (0..nb_buckets) |bucket| {
+        for (0..nb_buckets_fs) |bucket| {
             for (0..center_count) |center| {
                 const score = self.normalizedQueryCenterScore(bucket, center, query_norm);
                 self.query_center_scores[bucket * center_count + center] = quantizeLutScore(score, inverse_lut_scale);
@@ -503,7 +511,7 @@ pub const ProductQuantizerFastScan = struct {
         //self.zml_handler.tic(&self.zml_handler.timers.pq_score);
         const low_nibble: Vec16u8 = @splat(0x0f);
         const high_shift: Vec16u3 = @splat(4);
-        const accumulator_bias: i32 = pq_lut_zero_point * nb_buckets;
+        const accumulator_bias: i32 = pq_lut_zero_point * nb_buckets_fs;
         const final_lut_scale = lut_scale * query_norm;
 
         for (0..self.nb_scan_groups) |scan_group| {
@@ -524,8 +532,8 @@ pub const ProductQuantizerFastScan = struct {
                     chunk_accumulators[register] += @as(Vec16u16, @intCast(high_scores));
                 }
 
-                const buckets_done = @min((bucket_pair + 1) * 2, nb_buckets);
-                if (buckets_done % buckets_per_u16_chunk == 0 or buckets_done == nb_buckets) {
+                const buckets_done = @min((bucket_pair + 1) * 2, nb_buckets_fs);
+                if (buckets_done % buckets_per_u16_chunk == 0 or buckets_done == nb_buckets_fs) {
                     inline for (0..registers_per_group) |register| {
                         accumulators[register] += @as(Vec16u32, @intCast(chunk_accumulators[register]));
                         chunk_accumulators[register] = @splat(0);
@@ -549,7 +557,8 @@ pub const ProductQuantizerFastScan = struct {
         //self.zml_handler.tic(&self.zml_handler.timers.pq_top_k);
         sampling.findTopK(self.logits, self.candidates[0..sampling_top_k]);
         //self.zml_handler.toc(&self.zml_handler.timers.pq_top_k);
-        return .{ .candidates = self.candidates, .nb = 0 };
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
     }
 
     pub fn sampleLog(self: *ProductQuantizerFastScan, sampler: *Sampler, query: []const f32) void {
