@@ -3994,6 +3994,14 @@ pub const Tensor = struct {
         return _result(self._shape.withDtype(.bool), op.result(0));
     }
 
+    /// The identity matrix
+    pub fn identity(n: i64, dt: DataType) Tensor {
+        const sh: Shape = .init(.{ n, n }, .u32);
+        const x = Tensor.iota(sh, 0);
+        const y = Tensor.iota(sh, 1);
+        return x.cmp(.EQ, y).convert(dt);
+    }
+
     /// For each vector in the input tensor,
     /// creates a diagonal-matrix where diagonal values are set to the vector values.
     pub fn toDiagonal(self: Tensor, axis_: anytype, new_tags: [2]@EnumLiteral()) Tensor {
