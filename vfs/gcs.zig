@@ -730,59 +730,54 @@ pub const GCS = struct {
 
     fn dirRead(userdata: ?*anyopaque, reader: *std.Io.Dir.Reader, entries: []std.Io.Dir.Entry) std.Io.Dir.Reader.Error!usize {
         const self: *GCS = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
-        _ = reader;
-        _ = entries;
-        _ = self;
 
-        return 0;
+        if (reader.state == .finished) return 0;
 
-        // if (reader.state == .finished) return 0;
+        if (reader.state == .reset) {
+            if (self.dir_read_states.fetchRemove(reader)) |kv| {
+                for (kv.value.objects) |obj| self.allocator.free(obj);
+                self.allocator.free(kv.value.objects);
+            }
 
-        // if (reader.state == .reset) {
-        //     if (self.dir_read_states.fetchRemove(reader)) |kv| {
-        //         for (kv.value.objects) |obj| self.allocator.free(obj);
-        //         self.allocator.free(kv.value.objects);
-        //     }
+            const handle = self.getDirHandle(reader.dir);
+            const objects = self.listObjects(handle.uri) catch return std.Io.Dir.Reader.Error.Unexpected;
 
-        //     const handle = self.getDirHandle(reader.dir);
-        //     const objects = self.listObjects(handle.uri) catch return std.Io.Dir.Reader.Error.Unexpected;
+            self.dir_read_states.put(self.allocator, reader, .{
+                .index = 0,
+                .objects = objects,
+            }) catch return std.Io.Dir.Reader.Error.Unexpected;
 
-        //     self.dir_read_states.put(self.allocator, reader, .{
-        //         .index = 0,
-        //         .objects = objects,
-        //     }) catch return std.Io.Dir.Reader.Error.Unexpected;
+            reader.state = if (objects.len > 0) .reading else .finished;
 
-        //     reader.state = if (objects.len > 0) .reading else .finished;
+            if (objects.len == 0) return 0;
+        }
 
-        //     if (objects.len == 0) return 0;
-        // }
+        const state = self.dir_read_states.getPtr(reader) orelse return std.Io.Dir.Reader.Error.Unexpected;
 
-        // const state = self.dir_read_states.getPtr(reader) orelse return std.Io.Dir.Reader.Error.Unexpected;
+        var count: usize = 0;
+        while (count < entries.len and state.index < state.objects.len) {
+            const obj_key = state.objects[state.index];
+            const kind: std.Io.File.Kind = if (std.mem.endsWith(u8, obj_key, "/")) .directory else .file;
 
-        // var count: usize = 0;
-        // while (count < entries.len and state.index < state.objects.len) {
-        //     const obj_key = state.objects[state.index];
-        //     const kind: std.Io.File.Kind = if (std.mem.endsWith(u8, obj_key, "/")) .directory else .file;
+            const name = if (std.mem.lastIndexOfScalar(u8, std.mem.trimEnd(u8, obj_key, "/"), '/')) |idx|
+                obj_key[idx + 1 ..]
+            else
+                obj_key;
 
-        //     const name = if (std.mem.lastIndexOfScalar(u8, std.mem.trimEnd(u8, obj_key, "/"), '/')) |idx|
-        //         obj_key[idx + 1 ..]
-        //     else
-        //         obj_key;
+            entries[count] = .{
+                .name = std.mem.trimEnd(u8, name, "/"),
+                .kind = kind,
+                .inode = state.index,
+            };
+            count += 1;
+            state.index += 1;
+        }
 
-        //     entries[count] = .{
-        //         .name = std.mem.trimEnd(u8, name, "/"),
-        //         .kind = kind,
-        //         .inode = state.index,
-        //     };
-        //     count += 1;
-        //     state.index += 1;
-        // }
+        if (state.index >= state.objects.len) {
+            reader.state = .finished;
+        }
 
-        // if (state.index >= state.objects.len) {
-        //     reader.state = .finished;
-        // }
-
-        // return count;
+        return count;
     }
 
     fn dirRealPath(userdata: ?*anyopaque, dir: std.Io.Dir, out_buffer: []u8) std.Io.Dir.RealPathError!usize {
@@ -884,16 +879,15 @@ pub const GCS = struct {
         });
     }
 
-    // fn pathComponents(self: *GCS, path_: []const u8) struct { []const u8, []const u8, []const u8 } {
-    //     const endpoint = std.mem.trimEnd(u8, self.config.endpoint_url, "/");
-    //     const path = std.mem.trim(u8, path_, "/");
+    fn pathComponents(_: *GCS, path_: []const u8) struct { []const u8, []const u8 } {
+        const path = std.mem.trim(u8, path_, "/");
 
-    //     if (std.mem.findScalar(u8, path, '/')) |idx| {
-    //         return .{ endpoint, path[0..idx], if (idx + 1 < path.len) path[idx + 1 ..] else "" };
-    //     } else {
-    //         return .{ endpoint, path, "" };
-    //     }
-    // }
+        if (std.mem.indexOfScalar(u8, path, '/')) |idx| {
+            return .{ path[0..idx], if (idx + 1 < path.len) path[idx + 1 ..] else "" };
+        } else {
+            return .{ path, "" };
+        }
+    }
 
     fn gcsUri(self: *GCS, path: []const u8) std.Uri {
         var uri = self.config.endpoint_uri;
@@ -932,99 +926,105 @@ pub const GCS = struct {
     //     };
     // }
 
-    // fn listObjects(self: *GCS, prefix: []const u8) ![][]const u8 {
-    //     const endpoint, const bucket, const key_prefix = self.pathComponents(prefix);
+    fn listObjectsBody(self: *GCS, bucket: []const u8, key_prefix: []const u8) ![]u8 {
+        var query_buf: [4096]u8 = undefined;
+        var query_writer = std.Io.Writer.fixed(&query_buf);
 
-    //     var query_buf: [4096]u8 = undefined;
-    //     var query_writer = std.Io.Writer.fixed(&query_buf);
+        try query_writer.writeAll("delimiter=");
+        try std.Uri.Component.percentEncode(&query_writer, "/", gcsEncodeIsValid);
+        try query_writer.writeAll("&max-keys=1000");
 
-    //     try query_writer.writeAll("delimiter=");
-    //     try std.Uri.Component.percentEncode(&query_writer, "/", gcsEncodeIsValid);
+        if (key_prefix.len > 0) {
+            try query_writer.writeAll("&prefix=");
+            try std.Uri.Component.percentEncode(&query_writer, key_prefix, gcsEncodeIsValid);
+            if (!std.mem.endsWith(u8, key_prefix, "/")) {
+                try std.Uri.Component.percentEncode(&query_writer, "/", gcsEncodeIsValid);
+            }
+        }
 
-    //     if (key_prefix.len > 0) {
-    //         try query_writer.writeAll("&prefix=");
-    //         try std.Uri.Component.percentEncode(&query_writer, key_prefix, gcsEncodeIsValid);
-    //         try std.Uri.Component.percentEncode(&query_writer, "/", gcsEncodeIsValid);
-    //     }
+        var path_buf: [256]u8 = undefined;
+        var uri = self.config.endpoint_uri;
+        uri.path = .{ .percent_encoded = try std.fmt.bufPrint(&path_buf, "/{s}", .{bucket}) };
+        uri.query = .{ .percent_encoded = query_writer.buffered() };
 
-    //     const endpoint_uri = try std.Uri.parse(endpoint);
+        var req = try self.client.request(.GET, uri, .{
+            .redirect_behavior = .not_allowed,
+            .headers = .{
+                .accept_encoding = .{ .override = "identity" },
+                .authorization = try self.getOrRefreshToken(),
+            },
+            .extra_headers = if (self.quotaProjectId()) |project|
+                &.{.{ .name = "x-goog-user-project", .value = project }}
+            else
+                &.{},
+        });
+        defer req.deinit();
 
-    //     var path_buf: [256]u8 = undefined;
+        try req.sendBodiless();
 
-    //     const uri: std.Uri = .{
-    //         .scheme = endpoint_uri.scheme,
-    //         .host = endpoint_uri.host,
-    //         .port = endpoint_uri.port,
-    //         .path = .{ .percent_encoded = try std.fmt.bufPrint(&path_buf, "/{s}", .{bucket}) },
-    //         .query = .{ .percent_encoded = query_writer.buffered() },
-    //         .fragment = null,
-    //     };
+        var redirect_buffer: [2 * 1024]u8 = undefined;
+        var res = try req.receiveHead(&redirect_buffer);
 
-    //     var timestamp_buf: [16]u8 = undefined;
-    //     const timestamp = try self.getTimestamp(&timestamp_buf);
+        if (res.head.status != .ok) {
+            log.err("Failed to list object {f}", .{uri});
+            log.err("{s}", .{res.head.bytes});
+            return error.RequestFailed;
+        }
 
-    //     var authorization_buffer: [1024]u8 = undefined;
-    //     const auth = try self.authHeaders(.GET, uri, timestamp, &authorization_buffer);
+        return if (res.head.content_length) |content_len|
+            try res.reader(&.{}).readAlloc(self.allocator, content_len)
+        else
+            try res.reader(&.{}).allocRemaining(self.allocator, .limited(1024 * 1024));
+    }
 
-    //     var extra_headers_buf: [3]std.http.Header = undefined;
-    //     for (0..auth.extra_len) |i| {
-    //         extra_headers_buf[i] = auth.extra_headers[i].?;
-    //     }
+    fn listObjects(self: *GCS, prefix: []const u8) ![][]const u8 {
+        const bucket, const key_prefix = self.pathComponents(prefix);
+        const body = try self.listObjectsBody(bucket, key_prefix);
+        defer self.allocator.free(body);
 
-    //     var req = try self.client.request(.GET, uri, .{
-    //         .redirect_behavior = .not_allowed,
-    //         .headers = .{
-    //             .accept_encoding = .{ .override = "identity" },
-    //             .authorization = if (self.getOrRefreshToken()) |hdr| .{ .override = hdr } else .omit,
-    //         },
-    //         .extra_headers = if (self.config.quota_project_id) |project|
-    //             &.{.{ .name = "x-goog-user-project", .value = project }}
-    //         else
-    //             &.{},
-    //     });
-    //     defer req.deinit();
+        return try self.parseListObjectsResponse(body, key_prefix);
+    }
 
-    //     try req.sendBodiless();
+    fn gcsEncodeIsValid(c: u8) bool {
+        return switch (c) {
+            'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~' => true,
+            else => false,
+        };
+    }
 
-    //     var redirect_buffer: [2 * 1024]u8 = undefined;
-    //     var res = try req.receiveHead(&redirect_buffer);
+    fn quotaProjectId(self: *const GCS) ?[]const u8 {
+        const credentials = self.config.credentials orelse return null;
+        return switch (credentials) {
+            .authorized_user => |authorized_user| authorized_user.quota_project_id,
+            .service_account => |service_account| service_account.quota_project_id,
+            .metadata_server => null,
+        };
+    }
 
-    //     if (res.head.status != .ok) {
-    //         log.err("Failed to list object {f}", .{uri});
-    //         log.err("{s}", .{res.head.bytes});
-    //         return error.RequestFailed;
-    //     }
+    fn parseListObjectsResponse(self: *GCS, xml: []const u8, prefix: []const u8) ![][]const u8 {
+        var results: std.ArrayListUnmanaged([]const u8) = .empty;
+        errdefer {
+            for (results.items) |item| self.allocator.free(item);
+            results.deinit(self.allocator);
+        }
 
-    //     const body = try res.reader(&.{}).readAlloc(self.allocator, res.head.content_length orelse 1024 * 1024);
-    //     defer self.allocator.free(body);
+        inline for (.{ "Key", "Prefix" }) |tag| {
+            var pos: usize = 0;
+            while (std.mem.indexOfPos(u8, xml, pos, "<" ++ tag ++ ">")) |start| {
+                const v_start = start + tag.len + 2;
+                const end = std.mem.indexOfPos(u8, xml, v_start, "</" ++ tag ++ ">") orelse break;
+                const val = xml[v_start..end];
 
-    //     return try self.parseListObjectsResponse(body, key_prefix);
-    // }
+                const is_self = std.mem.eql(u8, std.mem.trimEnd(u8, val, "/"), std.mem.trimEnd(u8, prefix, "/"));
+                if (val.len > 0 and !is_self) {
+                    try results.append(self.allocator, try self.allocator.dupe(u8, val));
+                }
+                pos = end + tag.len + 3;
+            }
+        }
 
-    // fn parseListObjectsResponse(self: *GCS, xml: []const u8, prefix: []const u8) ![][]const u8 {
-    //     var results = std.ArrayListUnmanaged([]const u8){};
-    //     errdefer {
-    //         for (results.items) |item| self.allocator.free(item);
-    //         results.deinit(self.allocator);
-    //     }
-
-    //     inline for (.{ "Key", "Prefix" }) |tag| {
-    //         var pos: usize = 0;
-    //         while (std.mem.indexOfPos(u8, xml, pos, "<" ++ tag ++ ">")) |start| {
-    //             const v_start = start + tag.len + 2;
-    //             const end = std.mem.indexOfPos(u8, xml, v_start, "</" ++ tag ++ ">") orelse break;
-    //             const val = xml[v_start..end];
-
-    //             const is_self = std.mem.eql(u8, std.mem.trimEnd(u8, val, "/"), std.mem.trimEnd(u8, prefix, "/"));
-    //             if (val.len > 0 and !is_self) {
-    //                 try results.append(self.allocator, try self.allocator.dupe(u8, val));
-    //             }
-    //             pos = end + tag.len + 3;
-    //         }
-    //     }
-
-    //     return try results.toOwnedSlice(self.allocator);
-    // }
+        return try results.toOwnedSlice(self.allocator);
+    }
 
     fn fetchSize(self: *GCS, dir: std.Io.Dir, sub_path: []const u8) !u64 {
         var path_buffer: [8 * 1024]u8 = undefined;
@@ -1095,3 +1095,40 @@ pub const GCS = struct {
         return read_size;
     }
 };
+
+test "GCS parses XML bucket listing objects and common prefixes" {
+    const xml =
+        "<?xml version='1.0' encoding='UTF-8'?>" ++
+        "<ListBucketResult xmlns='http://doc.s3.amazonaws.com/2006-03-01'>" ++
+        "<Name>bucket</Name>" ++
+        "<Prefix>LC08/01/001/002/</Prefix>" ++
+        "<Contents><Key>LC08/01/001/002/scene_$folder$</Key><Size>6</Size></Contents>" ++
+        "<CommonPrefixes><Prefix>LC08/01/001/002/scene/</Prefix></CommonPrefixes>" ++
+        "<CommonPrefixes><Prefix>LC08/01/001/002/</Prefix></CommonPrefixes>" ++
+        "</ListBucketResult>";
+
+    var backend: GCS = undefined;
+    backend.allocator = std.testing.allocator;
+
+    const objects = try backend.parseListObjectsResponse(xml, "LC08/01/001/002/");
+    defer {
+        for (objects) |object| std.testing.allocator.free(object);
+        std.testing.allocator.free(objects);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), objects.len);
+    try std.testing.expectEqualStrings("LC08/01/001/002/scene_$folder$", objects[0]);
+    try std.testing.expectEqualStrings("LC08/01/001/002/scene/", objects[1]);
+}
+
+test "GCS splits bucket and object prefix" {
+    var backend: GCS = undefined;
+
+    const root_bucket, const root_prefix = backend.pathComponents("gcp-public-data-landsat/");
+    try std.testing.expectEqualStrings("gcp-public-data-landsat", root_bucket);
+    try std.testing.expectEqualStrings("", root_prefix);
+
+    const bucket, const prefix = backend.pathComponents("gcp-public-data-landsat/LC08/01");
+    try std.testing.expectEqualStrings("gcp-public-data-landsat", bucket);
+    try std.testing.expectEqualStrings("LC08/01", prefix);
+}
