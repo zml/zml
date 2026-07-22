@@ -1,0 +1,107 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@zml//bazel:patchelf.bzl", "patchelf")
+
+filegroup(
+    name = "hrx_runtime",
+    srcs = [
+        "hrx/libamdhip64.so.7",
+        "hrx/libhrx.so.0",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+patchelf(
+    name = "libpjrt_rocm_hrx_so",
+    src = "libpjrt_rocm_hrx.so",
+    add_needed = [
+        "libzmlxrocm.so.0",
+    ],
+    rename_dynamic_symbols = {
+        "dlopen": "zmlxrocm_dlopen",
+    },
+    set_rpath = "$ORIGIN/hrx:$ORIGIN:$ORIGIN/rocm_sysdeps/lib",
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":libpjrt_rocm_hrx_so",
+        "@amdrocm-amdsmi//:libamd_smi",
+        "@amdrocm-base//:rocm-core",
+        "@amdrocm-base//:rocm_smi",
+        "@amdrocm-base//:rocprofiler-register",
+        "@amdrocm-blas//:hipblaslt",
+        "@amdrocm-blas//:hipblaslt_runfiles",
+        "@amdrocm-blas//:rocblas",
+        "@amdrocm-blas//:rocblas_runfiles",
+        "@amdrocm-dnn//:MIOpen",
+        "@amdrocm-fft//:hipfft",
+        "@amdrocm-fft//:rocfft",
+        "@amdrocm-llvm//:llvm_libs",
+        "@amdrocm-llvm//:rocm_device_libs_runfiles",
+        "@amdrocm-math-common//:host_math_libs",
+        "@amdrocm-profiler-base//:hsa-amd-aqlprofile",
+        "@amdrocm-profiler-base//:rocprofiler-sdk",
+        "@amdrocm-profiler-base//:rocprofv3_tool",
+        "@amdrocm-profiler-base//:roctracer",
+        "@amdrocm-profiler-base//:roctx",
+        "@amdrocm-rccl//:rccl",
+        "@amdrocm-runtime//:amd_comgr",
+        "@amdrocm-runtime//:hiprtc",
+        "@amdrocm-runtime//:hsa-runtime",
+        "@amdrocm-runtime//:rocm_kpack",
+        "@amdrocm-solver//:hipsolver",
+        "@amdrocm-solver//:rocsolver",
+        "@amdrocm-sparse//:rocsparse",
+        "@amdrocm-sysdeps//:system_libs",
+        "@libatomic1",
+        "@rocm_hrx//:hrx_runtime",
+        "@zml//platforms/rocm:zmlxrocm",
+    ],
+    add_directory_to_runfiles = True,
+    include_external_repositories = ["**"],
+    replace_prefixes = {
+        "MIOpen": "lib",
+        "amd_comgr": "lib",
+        "hipdnn_backend": "lib",
+        "hipblas": "lib",
+        "hiprtc_so": "lib",
+        "hipfft": "lib",
+        "hiprtc": "lib",
+        "hipsolver": "lib",
+        "hipsparse": "lib",
+        "hipsparselt": "lib",
+        "hsa-amd-aqlprofile": "lib",
+        "hsa-runtime": "lib",
+        "hipblaslt": "lib",
+        "hrx": "lib/hrx",
+        "lib/host-math/lib": "lib",
+        "lib/llvm/lib": "lib",
+        "lib/llvm/amdgcn": "amdgcn",
+        "libpjrt_rocm_hrx_so": "lib",
+        "rccl": "lib",
+        "rocblas": "lib",
+        "rocfft": "lib",
+        "rocm-core": "lib",
+        "rocm_kpack": "lib",
+        "rocprofiler-register": "lib",
+        "rocprofiler-sdk_so": "lib",
+        "rocprofiler-sdk": "lib",
+        "rocm_smi": "lib",
+        "rocsolver": "lib",
+        "rocroller": "lib",
+        "rocsparse": "lib",
+        "roctracer": "lib",
+        "roctx": "lib",
+        "platforms/rocm": "lib",
+        "usr/lib/x86_64-linux-gnu": "lib",
+    },
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "libpjrt_rocm_hrx",
+    data = [":sandbox"],
+    visibility = ["@zml//platforms/rocm_hrx:__subpackages__"],
+)

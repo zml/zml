@@ -645,7 +645,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
             },
-            .rocm => {
+            .rocm, .rocm_hrx => {
                 // Use lld from libllvm instead of invoking the ld.lld binary.
                 // This saves us from having to sandbox it.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_use_inprocess_lld", true, upb_arena);
@@ -683,7 +683,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
         }
 
         switch (platform.target) {
-            .rocm, .cuda => if (std.c.getenv("ZML_AUTOTUNE_CACHE_DIR")) |path| {
+            .rocm, .rocm_hrx, .cuda => if (std.c.getenv("ZML_AUTOTUNE_CACHE_DIR")) |path| {
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_autotuner_cache_dir", std.mem.span(path), upb_arena);
             },
             else => {},

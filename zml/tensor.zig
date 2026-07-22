@@ -190,7 +190,7 @@ pub const Tensor = struct {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return self,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .rocm_hrx, .tpu, .oneapi => {},
         }
 
         const frontend_attributes: *const mlir.Attribute = .dict(ctx.mlir_ctx, &.{
@@ -225,7 +225,7 @@ pub const Tensor = struct {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return self,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .rocm_hrx, .tpu, .oneapi => {},
         }
 
         if (ctx.currentScope().id_to_argument.get(self.id) == null) {
@@ -3338,7 +3338,7 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => blk: {
+            .cpu, .cuda, .rocm, .rocm_hrx, .tpu, .oneapi, .metal => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
                 sorted.values = sorted.values.slice1d(a, .{ .end = k });
                 sorted.indices = sorted.indices.slice1d(a, .{ .end = k });
@@ -4393,7 +4393,7 @@ pub const Tensor = struct {
     /// so it will slow down the program execution.
     pub fn print(input: Tensor, name: []const u8) void {
         switch (CompilationContext.current().platform.target) {
-            .cpu, .cuda, .rocm, .tpu, .metal => {
+            .cpu, .cuda, .rocm, .rocm_hrx, .tpu, .metal => {
                 ops.manualComputation(input, {}, .{ .name = name }, (struct {
                     fn body(ctx_: anytype, _: std.mem.Allocator, sharded_input: Tensor, _: void) void {
                         ops.customCall("zml$print", sharded_input, {}, .{ .name = ctx_.name }, .{ .has_side_effect = true });

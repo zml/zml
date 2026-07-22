@@ -194,6 +194,7 @@ def _rocm_base_build_files(loaded_packages):
                 ":amdhip_so",
                 "lib/librocm_kpack.so.0",
             ]),
+            packages.filegroup(name = "rocm_kpack", srcs = ["lib/librocm_kpack.so.0"]),
             packages.filegroup(name = "hiprtc", srcs = [
                 ":hiprtc_so",
                 "lib/libhiprtc-builtins.so.7",
@@ -286,6 +287,7 @@ def _rocm_impl(mctx):
             "amdrocm-sysdeps",
             "libatomic1",
             "libdrm-common",
+            "libdrm_mesa_amdgpu_ids",
             "libpjrt_rocm",
         ],
         root_module_direct_dev_deps = [],

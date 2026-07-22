@@ -20,7 +20,7 @@ pub const Backend = enum {
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
             .cuda => .triton,
-            .rocm => .triton,
+            .rocm, .rocm_hrx => .triton,
             .oneapi => .triton,
             .tpu => .mosaic_tpu,
             .metal => .metal,

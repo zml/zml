@@ -38,7 +38,7 @@ pub const Backend = enum {
             },
             .neuron => .nki,
             .metal => .metal_fa,
-            .cpu, .rocm, .tpu, .oneapi => .vanilla,
+            .cpu, .rocm, .rocm_hrx, .tpu, .oneapi => .vanilla,
         };
     }
 

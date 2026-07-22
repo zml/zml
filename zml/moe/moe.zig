@@ -21,7 +21,7 @@ pub const Backend = enum {
 
     pub fn auto(platform: *const zml.Platform, weights_dtype: zml.DataType) !Backend {
         return switch (platform.target) {
-            .cuda, .rocm, .oneapi => switch (weights_dtype) {
+            .cuda, .rocm, .rocm_hrx, .oneapi => switch (weights_dtype) {
                 .bf16, .f16, .f32 => .triton,
                 else => error.UnsupportedDataType,
             },

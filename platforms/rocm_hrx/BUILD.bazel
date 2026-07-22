@@ -1,0 +1,34 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+cc_library(
+    name = "empty",
+    defines = ["ZML_RUNTIME_ROCM_HRX_DISABLED"],
+    tags = ["manual"],
+)
+
+cc_library(
+    name = "libpjrt_rocm_hrx",
+    defines = ["ZML_RUNTIME_ROCM_HRX"],
+    tags = ["manual"],
+    deps = ["@libpjrt_rocm_hrx//:libpjrt_rocm_hrx"],
+)
+
+zig_library(
+    name = "rocm_hrx",
+    import_name = "platforms/rocm_hrx",
+    main = "rocm_hrx.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+    ] + select({
+        "//platforms:rocm_hrx.enabled": [
+            ":libpjrt_rocm_hrx",
+            "//bazel",
+            "//stdx",
+            "@rules_zig//zig/runfiles",
+        ],
+        "//conditions:default": [":empty"],
+    }),
+)

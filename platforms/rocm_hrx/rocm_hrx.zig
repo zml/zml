@@ -1,0 +1,56 @@
+const std = @import("std");
+const builtin = @import("builtin");
+
+const bazel = @import("bazel");
+const bazel_builtin = @import("bazel_builtin");
+const c = @import("c");
+const pjrt = @import("pjrt");
+const runfiles = @import("runfiles");
+const stdx = @import("stdx");
+
+const log = std.log.scoped(.@"zml/platforms/rocm_hrx");
+
+pub fn isEnabled() bool {
+    return @hasDecl(c, "ZML_RUNTIME_ROCM_HRX");
+}
+
+fn hasRocmDevices(io: std.Io) bool {
+    inline for (&.{ "/dev/kfd", "/dev/dri" }) |path| {
+        std.Io.Dir.accessAbsolute(io, path, .{ .read = true }) catch return false;
+    }
+    return true;
+}
+
+fn setupRocmEnv(rocm_data_dir: []const u8) !void {
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    _ = c.setenv("ROCM_PATH", try stdx.Io.Dir.path.bufJoinZ(&buf, &.{rocm_data_dir}), 1); // must be zero terminated
+}
+
+pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
+    _ = allocator;
+    if (comptime !isEnabled()) {
+        return error.Unavailable;
+    }
+    if (comptime builtin.os.tag != .linux) {
+        return error.Unavailable;
+    }
+    if (!hasRocmDevices(io)) {
+        return error.Unavailable;
+    }
+
+    const r = try bazel.runfiles(bazel_builtin.current_repository);
+
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const sandbox_path = try r.rlocation("libpjrt_rocm_hrx/sandbox", &path_buf) orelse {
+        log.err("Failed to find sandbox path for HRX ROCm runtime", .{});
+        return error.FileNotFound;
+    };
+
+    try setupRocmEnv(sandbox_path);
+
+    return blk: {
+        var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const lib_path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_rocm_hrx.so" });
+        break :blk .loadFrom(lib_path);
+    };
+}

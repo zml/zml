@@ -28,7 +28,7 @@ pub const Span = struct {
 // os_signpost intervals on macOS.
 pub const supportsDeviceAnnotations = switch (builtin.os.tag) {
     .macos => true,
-    .linux => platforms.target == .cuda or platforms.target == .rocm,
+    .linux => platforms.target == .cuda or platforms.target == .rocm or platforms.target == .rocm_hrx,
     else => false,
 };
 

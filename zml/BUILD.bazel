@@ -37,9 +37,13 @@ cc_library(
     }) + select({
         "//platforms:rocm.enabled": ["ZML_RUNTIME_ROCM"],
         "//conditions:default": [],
+    }) + select({
+        "//platforms:rocm_hrx.enabled": ["ZML_RUNTIME_ROCM_HRX"],
+        "//conditions:default": [],
     }),
     linkopts = select({
         "//platforms:rocm.enabled": ["-ldl"],
+        "//platforms:rocm_hrx.enabled": ["-ldl"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
@@ -59,6 +63,9 @@ cc_library(
         "//conditions:default": [],
     }) + select({
         "//platforms:rocm.enabled": [
+            "@amdrocm-profiler-base//:roctx_headers",
+        ],
+        "//platforms:rocm_hrx.enabled": [
             "@amdrocm-profiler-base//:roctx_headers",
         ],
         "//conditions:default": [],

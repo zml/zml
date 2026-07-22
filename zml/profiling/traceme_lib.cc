@@ -21,7 +21,7 @@
 #include "nvtx3/nvToolsExt.h"
 #endif
 
-#if defined(ZML_RUNTIME_ROCM)
+#if defined(ZML_RUNTIME_ROCM) || defined(ZML_RUNTIME_ROCM_HRX)
 #include "rocprofiler-sdk-roctx/roctx.h"
 #endif
 
@@ -98,7 +98,7 @@ struct CudaNvtxRangeBackend {
 };
 #endif
 
-#if defined(ZML_RUNTIME_ROCM)
+#if defined(ZML_RUNTIME_ROCM) || defined(ZML_RUNTIME_ROCM_HRX)
 struct RocmRoctxRangeBackend {
   explicit RocmRoctxRangeBackend(const std::string& name)
       : active(RangePush() != nullptr && RangePop() != nullptr) {
