@@ -6,7 +6,7 @@ const stdx = @import("stdx");
 const parallel_read = @import("parallel_read.zig");
 const VFSBase = @import("base.zig").VFSBase;
 
-const log = std.log.scoped(.@"zml/io/vfs/gcs");
+const log = std.log.scoped(.@"zml/vfs/gcs");
 
 const EndpointUrl = "https://storage.googleapis.com";
 const MetadataUrl = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";

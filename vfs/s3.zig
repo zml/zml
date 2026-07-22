@@ -5,7 +5,7 @@ const stdx = @import("stdx");
 const parallel_read = @import("parallel_read.zig");
 const VFSBase = @import("base.zig").VFSBase;
 
-const log = std.log.scoped(.@"zml/io/vfs/s3");
+const log = std.log.scoped(.@"zml/vfs/s3");
 
 pub const AwsSigV4 = struct {
     access_key: ?[]const u8,
