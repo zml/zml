@@ -54,7 +54,13 @@ pub const BodyFn = *const fn (b: *Builder, grid_indices: []const Value, refs: []
 
 // Optional overrides for a buffered reference's DMA operations.
 // Unspecified operations retain the standard pipeline behavior.
-pub const BufferedRefStrategy = struct { ctx: ?*anyopaque = null, copy_in: ?*const fn (br: *BufferedRef, b: *Builder, indices: []const Value, slot_cumulative: Value, static_zero_start: bool, ctx: ?*anyopaque) void = null, wait_in: ?*const fn (br: *BufferedRef, b: *Builder, indices: []const Value, ctx: ?*anyopaque) void = null, copy_out: ?*const fn (br: *BufferedRef, b: *Builder, indices: []const Value, ctx: ?*anyopaque) void = null, wait_out: ?*const fn (br: *BufferedRef, b: *Builder, indices: []const Value, ctx: ?*anyopaque) void = null };
+pub const BufferedRefStrategy = struct {
+    ctx: ?*anyopaque = null,
+    copy_in: ?*const fn (br: *BufferedRef, b: *Builder, indices: []const Value, slot_cumulative: Value, static_zero_start: bool, ctx: ?*anyopaque) void = null,
+    wait_in: ?*const fn (br: *BufferedRef, b: *Builder, indices: []const Value, ctx: ?*anyopaque) void = null,
+    copy_out: ?*const fn (br: *BufferedRef, b: *Builder, indices: []const Value, ctx: ?*anyopaque) void = null,
+    wait_out: ?*const fn (br: *BufferedRef, b: *Builder, indices: []const Value, ctx: ?*anyopaque) void = null,
+};
 
 /// `pl.BlockSpec` for one pipeline operand. `null` slot ↔ `None` spec.
 pub const PipeSpec = struct {
