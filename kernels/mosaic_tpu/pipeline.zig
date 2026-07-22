@@ -135,7 +135,7 @@ pub fn emitPipeline(
     {
         var when = b.openIf(b.cmpi(.sgt, num_steps, c0_i32));
         {
-            for (brefs.items) |*br| if (br.is_trivial and br.buffer_type == .input) br.syncCopyIn(b);
+            for (brefs.items) |*br| if (br.is_trivial and (br.buffer_type == .input or br.buffer_type == .input_output)) br.syncCopyIn(b);
 
             const num_stages = blk: {
                 var m: usize = 2;
@@ -245,7 +245,7 @@ pub fn emitPipeline(
             for (0..opts.grid.len) |i| sched_fin.indices_storage[i] = final_idx[i];
             sched_fin.recomputeDerivedIndices(b);
             for (brefs.items) |*br| sched_fin.finalize(b, br);
-            for (brefs.items) |*br| if (br.is_trivial and br.buffer_type == .output) br.syncCopyOut(b);
+            for (brefs.items) |*br| if (br.is_trivial and (br.buffer_type == .output or br.buffer_type == .input_output)) br.syncCopyOut(b);
 
             when.yieldThen(.{});
         }
@@ -998,7 +998,11 @@ const Scheduler = struct {
     fn advanceSlots(self: *Scheduler, b: *Builder, br: *BufferedRef) void {
         if (br.buffer_type != .input and br.buffer_type != .input_output) return;
         if (br.is_trivial) {
-            br.slot = advance(b, br.slot.?, self.last_step);
+            switch (br.buffer_type) {
+                .input => br.slot = advance(b, br.slot.?, self.last_step),
+                .input_output => br.wait_in_slot = advance(b, br.wait_in_slot.?, self.last_step),
+                .output => unreachable,
+            }
         } else {
             const pred = b.ori(self.willChangeCurrent(b, br), self.last_step);
             br.wait_in_slot = advance(b, br.wait_in_slot.?, pred);
@@ -1094,4 +1098,56 @@ fn specHasTrivialWindowing(spec: PipeSpec) bool {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "trivial input-output ref is copied in and out" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    inline for (builder.dialects_needed) |dialect| registry.registerDialect(dialect);
+    mlir.registerFuncExtensions(registry);
+
+    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+
+    var b = try Builder.init(std.testing.allocator, ctx, "trivial_input_output", &.{
+        .{
+            .name = "state",
+            .kind = .{ .ref = .{
+                .shape = &.{ 8, 128 },
+                .dtype = .bf16,
+                .memory_space = .hbm,
+            } },
+        },
+    }, &.{});
+    defer b.deinit();
+
+    const noOpBody = struct {
+        fn call(
+            _: *Builder,
+            _: []const Value,
+            _: []const RefWindow,
+            _: []const Value,
+            _: ?*anyopaque,
+        ) FinishError!void {}
+    }.call;
+
+    try emitPipeline(&b, &.{b.arg(0)}, &.{}, .{
+        .body = noOpBody,
+        .grid = &.{b.lift(@as(i32, 1))},
+        .in_specs = &.{.{
+            .full_shape = &.{ 8, 128 },
+            .dtype = .bf16,
+            .buffer_type = .input_output,
+        }},
+        .out_specs = &.{},
+        .trace_scopes = false,
+    });
+
+    const ir = try b.finish(&.{});
+    defer std.testing.allocator.free(ir);
+
+    // One enqueue/wait pair for copy_in, one for copy_out.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "tpu.enqueue_dma"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, ir, "tpu.wait_dma"));
 }
