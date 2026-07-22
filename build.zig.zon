@@ -7,5 +7,6 @@
         "build.zig",
         "build.zig.zon",
         "stdx",
+        "vfs",
     },
 }
