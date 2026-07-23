@@ -1325,7 +1325,7 @@ pub const LoweringCompatibility = struct {
     pub fn preserveIntegerScalarBroadcast(self: Tensor, output_shape: Shape) ?Tensor {
         switch (CompilationContext.current().platform.target) {
             .neuron => {},
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => return null,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .vulkan => return null,
         }
 
         if (self.rank() != 0 or output_shape.rank() == 0 or !self.dtype().isInteger()) return null;
