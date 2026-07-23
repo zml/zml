@@ -3,7 +3,6 @@
 set -euo pipefail
 
 device_selector=${ONEAPI_DEVICE_SELECTOR:-level_zero:0}
-perf_data=${PERF_DATA:-$PWD/perf.data}
 read_initial_parallelism=${ZML_LOAD_READ_INITIAL_PARALLELISM:-12}
 read_parallelism=${ZML_LOAD_READ_PARALLELISM:-128}
 dma_initial_parallelism=${ZML_LOAD_DMA_INITIAL_PARALLELISM:-8}
@@ -12,6 +11,11 @@ read_request_max_mib=${ZML_LOAD_READ_REQUEST_MAX_MIB:-128}
 dma_block_mib=${ZML_LOAD_DMA_BLOCK_MIB:-2}
 max_pinned_mib=${ZML_LOAD_MAX_PINNED_MIB:-2048}
 sharding=${ZML_LOAD_SHARDING:-sharded}
+
+export AWS_ENDPOINT_URL_S3=https://s3.eu-west-3.amazonaws.com
+export AWS_REGION=eu-west-3
+export AWS_ACCESS_KEY_ID=
+export AWS_SECRET_ACCESS_KEY=
 
 load_env=(
     "ONEAPI_DEVICE_SELECTOR=${device_selector}"
@@ -33,4 +37,4 @@ for name in ZML_LOAD_FIXED_READ_PARALLELISM ZML_LOAD_FIXED_DMA_PARALLELISM ZML_L
 done
 
 env "${load_env[@]}" \
-    ./bazel.sh run --config=release --@zml//platforms:oneapi=true --run_under="perf record -g -m 16 -F 10000 -o ${perf_data}" //examples/io:playground -- load ~/s3proxy/data/lfm/ "${sharding}"
+    ./bazel.sh run --config=release --@zml//platforms:oneapi=true //examples/io:playground -- load s3://brabier-zml-models/meta-llama/Llama-3.1-8B-Instruct

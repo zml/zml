@@ -13,8 +13,10 @@ pub const VFS = struct {
     pub const GCS = vfs.GCS;
     pub const Backend = vfs.Backend;
     pub const ReadHints = vfs.ReadHints;
+    pub const ReadTimingBucket = vfs.ReadTimingBucket;
     pub const ReadStats = vfs.ReadStats;
     pub const ReadStatsProvider = vfs.ReadStatsProvider;
+    pub const read_timing_bucket_sizes = vfs.read_timing_bucket_sizes;
     const VFSBase = vfs.VFSBase;
 
     pub const ReadProfile = struct {

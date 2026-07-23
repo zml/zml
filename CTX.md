@@ -1,10 +1,9 @@
 # Adaptive Vectored DmaMapped Loader Context
 
-Snapshot: 2026-07-22. ZML is checked out at `56e2bf5f` (`Tentative controller
-fix with pjrt completion hang`) with the vectored source-profile,
-completion-aware admission, and controller changes in the working tree. The
-pre-existing oneAPI artifact selection and benchmark recordings remain
-uncommitted and must be preserved. The user moved the XLA checkout back to the
+Snapshot: 2026-07-24. The `plan.md` implementation is commit `3766cb3c`
+(`remove parallel_read`) on detached ZML HEAD. The AWS controller follow-up
+described below is uncommitted. The user's benchmark recordings remain
+untracked and must be preserved. The user moved the XLA checkout back to the
 intended revision; it is clean at `92e7778d04` (`[XLA:GPU][oneAPI] Recognize
 DmaMapped host memory as pinned`) on top of `b0990b33b1`
 (`[XLA:GPU][oneAPI] Enable PJRT_Client_DmaMap for SYCL`). ZML selects the
@@ -12,13 +11,305 @@ user-built `pjrt-oneapi_linux-amd64-2026-07-21_22-43.tar`, whose configured
 SHA-256 is
 `91172bd90d59ab2f08d0c53e282843903fbed8ffb7ac2c7ccb215703f70af6a7`.
 This artifact contains the range-aware SYCL `IsHostMemoryPinned` fix and has
-been runtime-validated. The assistant did not build XLA.
+been runtime-validated.
 
 This file is the authoritative handoff for the current implementation and
 measurements. `RESEARCH.md` is historical controller research; its adaptive
 staging architecture is retired.
 
-## Outcome
+## Active implementation: fully adaptive source tuple
+
+Work started 2026-07-23 against `plan.md` from detached HEAD `9957ffdd`.
+The pre-change loader had the fixed 32-worker `parallel_read` layer in
+HF/S3/GCS, scalar read/DMA caps, a request size selected once per source, and a
+precomputed fixed-size job array. The active work replaces those pieces with
+one admitted VFS request per loader read, serial in-call retries and typed
+timing telemetry, fixed/adaptive public controls, a dynamic round-robin range
+scheduler, and joint source-concurrency/request-size adaptation.
+
+The existing `perf.data` and `perf.data.old` recordings are user-owned and
+must remain unmodified. XLA is explicitly out of scope.
+
+Pre-change verification passed:
+
+```text
+./bazel.sh test --nocache_test_results //zml/io/vfs:test //zml:test \
+  --test_output=errors
+```
+
+The VFS/data-plane conversion is now implemented. `parallel_read.zig` and its
+worker/queue/chunk controls are gone. HF, S3, and GCS perform one whole Range
+GET per positional call and retry serially while retaining the caller's source
+credit. Shared range handling strictly validates covering `206` responses and
+correctly discards the prefix of a `200` response that ignored Range. Typed
+atomic telemetry records attempts, exact-size 2--128 MiB success timing,
+transient/time-out/server/throttle failures, and retry delay. The focused VFS
+tests pass after this conversion.
+
+The example and benchmark controls now expose adaptive read initial/cap
+(12/128), adaptive DMA initial/cap (8/32), fixed read/DMA overrides, adaptive
+request initial/cap, and the existing fixed request-size override. Fixed
+controls take precedence. Benchmark scripts preserve the read/DMA cap
+variables, default to adaptive 128/32 caps, and forward explicit fixed values.
+
+The loader now uses a mutex-protected round-robin range scheduler, one global
+conservative source minimum, fixed/adaptive public configurations,
+pinned-feasible read/lifecycle gates, typed failure feedback, exact-size local
+and remote timing, modeled source width, request-size probes, and source-tuple
+settling before DMA probes. The focused core suite, including scheduler size
+transitions, fixed-dimension immutability, pinned-width/slack clipping, and
+size-probe thresholds, passes:
+
+```text
+./bazel.sh test --nocache_test_results //zml:test --test_output=errors
+```
+
+## Current outcome and acceptance (2026-07-23)
+
+`LoadOpts` now exposes:
+
+- `read_parallelism = .adaptive.{ initial = 12, maximum = 128 }` or
+  `.fixed`;
+- `dma_parallelism = .adaptive.{ initial = 8, maximum = 32 }` or `.fixed`;
+- `read_request_size = .adaptive.{ initial = source minimum, maximum =
+  128 MiB }` or `.fixed`;
+- the unchanged 2 MiB DMA block and 2 GiB pinned defaults.
+
+Automatic request sizes are power-of-two MiB values and never smaller than
+the largest source minimum or DMA block. A fixed request below the advertised
+source minimum logs a warning and remains an explicit override. Fixed values
+still obey the absolute read, DMA, request-size, DMA-block, and pinned-memory
+bounds. The example and benchmark environment variables expose adaptive
+initial values/caps plus fixed read, DMA, and request-size overrides; fixed
+values win.
+
+The range scheduler claims unscheduled tensor bytes round-robin under a mutex,
+using the current request size and controller epoch. The read and retained
+lifecycle gates resize dynamically. Pinned feasibility is
+`max_pinned_bytes / request_size`; remote lifecycle slack is capped at eight
+and clipped by that feasibility. The process creates workers through the
+public read cap, but an index gate leaves only the selected width runnable.
+This avoids a thundering herd at the 12-read local default while allowing
+growth to 128 without reconstructing the worker group.
+
+HF, S3, GCS, and generic HTTP each issue one complete Range GET per positional
+call and retry serially while retaining admission. HF resolves and caches its
+final download URI before range reads. S3/GCS/generic HTTP disallow redirects
+for signed/range GETs; GCS token refresh is mutex-serialized and each request
+owns a stable authorization copy. `206` requires a covering, case-insensitive
+`Content-Range`; `200` responses that ignore Range are positioned and
+scattered correctly. Only a clean first-attempt success enters the timing
+model. All attempts publish typed failures and retry delay before sleeping.
+
+Remote tensor readers forward the entire scatter list in one exact-fill
+positional call, even above `IOV_MAX`; a short response fails without a hidden
+resume request. Local readers retain `IOV_MAX` batching. The deterministic
+loopback HTTP tests prove that a 17 MiB+257 scatter read is one GET, a
+500-then-success retry has physical concurrency one and exact typed counters,
+and three admitted callers produce physical high-water exactly three.
+
+The controller owns one source `(read width, request size)` tuple plus one
+per-device DMA width. High-latency sources bootstrap `12 -> 24 -> 32` only
+before a response and never grow beyond 32 until an exact-size source timing
+sample exists. Timing buckets are 2, 4, 8, 16, 32, 64, and 128 MiB.
+Concurrency and request-size probes use only matching-epoch GPU-committed
+logical bytes measured from probe activation. Request-size candidates need
+eight full responses and `max(64 MiB, 4 * candidate size)` bytes; clear
+results may finish after 50 ms and ambiguous results after 100 ms. A size
+increase needs at least 3% goodput gain, so the lower-memory tuple wins inside
+the 3% band. DMA probes wait until the source tuple settles and device queues
+are fed. Throttles immediately reduce reads by 30% and impose a five-second
+cooldown; transient failures use a rolling exact-size attempt cohort and
+require two reliable windows above 10%.
+
+Fresh validation after the final implementation:
+
+```text
+./bazel.sh test --nocache_test_results //zml:test //zml/io/vfs:test \
+  --test_output=errors
+./bazel.sh build //examples/io:playground //examples/mnist
+./bazel.sh build --config=release --@zml//platforms:oneapi=true \
+  //examples/io:playground
+./bazel.sh build --config=release --@zml//platforms:cuda=true \
+  //examples/io:playground
+```
+
+The oneAPI fixed 16 MiB / 32-read / eight-DMA control completed all 14.96 GiB
+with 1,055 logical reads, peak width 32, and exactly 512 MiB pinned. Its
+5.66 GiB/s wall result was taken during a transient slow-host interval and is
+a correctness/data-plane result, not a replacement baseline.
+
+A balanced one-B70 interleaved comparison after adding stable worker
+activation was:
+
+| mode | Five warm runs (GiB/s) | Median |
+|---|---|---:|
+| adaptive defaults | 27.13, 26.26, 24.91, 27.01, 27.49 | **27.01** |
+| fixed 12 reads / 8 DMA / 2 MiB | 26.18, 26.18, 27.04, 27.02, 27.11 | **27.02** |
+
+Both selected 12/8/2 MiB and used 24 MiB pinned. The adaptive median is within
+0.1% of the static control and does not regress the 26.47 GiB/s historical
+reference. Four-B70 correctness runs completed at 23.34 GiB/s sharded
+(14.96 GiB physical, 54 MiB pinned) and 13.00 GiB/s replicated
+(59.83 GiB physical, 54 MiB pinned), with peak DMA eight/device.
+
+A current local profile is
+`/tmp/zml-fully-adaptive-20260723.data`. It recorded 78,229 samples with none
+lost while loading at 25.76 GiB/s and selecting 12/8/2 MiB with 24 MiB pinned.
+Flat cycles remain dominated by the intended page-cache copy path:
+`_copy_to_iter` 70.66%, `filemap_get_read_batch` 4.31%,
+`entry_SYSCALL_64` 3.22%, `copy_page_to_iter` 2.10%, and
+`folio_mark_accessed` 1.88%. No loader/controller symbol reached 0.5%.
+
+Three final real-AWS adaptive runs were 947.76, 949.94, and 946.95 MiB/s:
+median **947.76 MiB/s**, effectively identical to the recorded approximately
+948 MiB/s reference. Every run performed exactly 1,055 physical GETs for
+1,055 logical reads, transferred 14.96 GiB, and reported zero retries and
+throttles. The first trace held at 32 until two 16 MiB timing successes
+arrived, then performed scored read probes. Final read widths varied with the
+finite tail, but selected request size remained 16 MiB and final DMA remained
+eight/device.
+
+The bundled S3Proxy fixture cannot produce valid current measurements: its
+`206 Partial Content` responses omit `Content-Range`. The new strict reader
+correctly rejects them with `InvalidContentRange`. Historical S3Proxy numbers
+below remain useful, but rerunning those profiles requires a conforming or
+patched fixture; strict production validation was deliberately not weakened.
+
+## AWS controller follow-up (2026-07-24)
+
+This pass was grounded in `../S3.md` and targeted controller policy only. The
+data plane, S3 request validation, retry behavior, and XLA remained unchanged.
+
+A fresh pre-follow-up adaptive trace completed at 947.94 MiB/s in-process
+(946.78 MiB/s including the outer example timing), ending at 66 reads,
+16 MiB requests, and eight DMA events with 1.11 GiB pinned. It exposed three
+control defects:
+
+- The no-response bootstrap correctly reached 32, but the first post-response
+  read probe was installed before the 32-read tuple had a representative
+  baseline. Its recorded baseline was only 61.90 MiB/s while the pipeline was
+  still filling, so 32 -> 48 looked like a decisive gain.
+- Probe accounting reset when lifecycle occupancy reached the candidate
+  width. Requests already mostly complete at that point contributed their
+  entire logical bytes over only the residual interval. Capacity activation
+  also counted retained request lifecycles instead of active Range GETs.
+- Read growth had strict priority over request-size growth and remembered no
+  flat result. The finite 15 GiB transfer could spend every two-second slot on
+  another width candidate and never evaluate 32 MiB.
+
+### Static AWS screening grid
+
+The screening grid used fixed DMA eight and one run per cell. Values below are
+the loader's in-process logical goodput; every cell transferred exactly
+14.96 GiB with zero retries and throttles.
+
+| Request size | Read width | Logical MiB/s | Physical GETs | Pinned high-water |
+|---:|---:|---:|---:|---:|
+| 8 MiB | 64 | 954.27 | 1,981 | 536 MiB |
+| 8 MiB | 96 | 955.10 | 1,981 | 792 MiB |
+| 8 MiB | 128 | 928.44 | 1,981 | 1.03 GiB |
+| 16 MiB | 16 | 774.97 | 1,055 | 288 MiB |
+| 16 MiB | 24 | 950.26 | 1,055 | 416 MiB |
+| 16 MiB | 32 | 951.42 | 1,055 | 560 MiB |
+| 16 MiB | 64 | 955.33 | 1,055 | 1.03 GiB |
+| 16 MiB | 96 | **956.55** | 1,055 | 1.54 GiB |
+| 16 MiB | 128 | 953.19 | 1,055 | 2.00 GiB |
+| 32 MiB | 32 | 949.10 | 641 | 1.06 GiB |
+| 32 MiB | 48 | 950.53 | 641 | 1.57 GiB |
+| 32 MiB | 64 | 951.38 | 641 | 2.00 GiB |
+| 64 MiB | 16 | 853.58 | 417 | 1.11 GiB |
+| 64 MiB | 24 | 931.96 | 417 | 1.55 GiB |
+| 64 MiB | 32 | 942.63 | 417 | 1.91 GiB |
+
+These are screening runs rather than repeated medians, and 128 MiB was not
+screened, but the tested shape is clear. From 24 through 128 reads at 16 MiB,
+useful goodput stays within 0.7% while average request latency rises almost
+linearly with width: 0.390, 0.518, 1.029, 1.533, and 2.021 seconds at widths
+24, 32, 64, 96, and 128. More requests divide one aggregate approximately
+950 MiB/s path; they do not open more bandwidth. Relative to 16 MiB, a
+32 MiB request reduces GET count by 39% but is no faster, 64 MiB regresses,
+and the below-minimum 8 MiB control raises GET count by 88% without a gain.
+The lowest tested tuple inside 3% of the best is 16 MiB / 24 reads; the
+existing 32-read bootstrap is also inside 1%.
+
+### Accepted controller changes
+
+- Source-probe capacity and saturation now use active VFS read calls, with
+  matching-epoch active/peak counters, rather than retained request
+  lifecycles.
+- Candidate logical bytes and successful reads are measured from tuple
+  installation. Capacity must still be exercised before scoring, but reaching
+  capacity no longer erases fill cost or admits almost-complete work into a
+  short residual interval.
+- Read probes require at least eight successful matching-epoch source reads
+  and 64 MiB, in addition to the time and committed-byte floors.
+- Slow high-latency sources establish the no-response bootstrap tuple before
+  any post-response read probe. Fast/local startup behavior is unchanged.
+- A scored width result gives request-size growth the next eligible source
+  turn. Flat width results use a bounded five-second per-size retry delay
+  instead of permanent suppression; a kept size starts a fresh width search
+  for its own bucket.
+- A width candidate that cannot exercise capacity also yields one eligible
+  turn to request-size discovery without marking width settled. Read results
+  at the maximum size preserve source-tuple settlement so DMA probing remains
+  eligible.
+- Relative starvation improvement no longer keeps a flat width increase.
+  Starvation is materially removed only when it falls from above 10% to at
+  most 10%.
+- The scheduler counts total and full candidate requests per tensor. Size
+  probes require eight full ranges and enough candidate jobs to exercise the
+  proposed width, so aggregate bytes such as `7 * size + 1` cannot masquerade
+  as eight full timing samples.
+- The final tail eligibility check and request-size tuple switch now occur
+  under one scheduler lock. Workers therefore cannot consume old-size work
+  between the count and candidate installation.
+- Candidate tail cost includes both the bytes needed for eight responses and
+  one modeled candidate service time. Probe attribution and candidate timing
+  begin at installation and survive capacity activation.
+
+Focused tests cover active reads versus 48 retained lifecycles, exact
+per-tensor full-range counts, atomic tail validation, candidate service-time
+suppression, slow-source startup settling without changing slow local
+behavior, install-time attribution, bounded read re-probing, maximum-size DMA
+eligibility, and advancing to size after flat or unexercised read probes. The
+core and VFS suites pass.
+
+The first revised trace held at 32, rejected a 43-read candidate after
+1.253 seconds of source-call evidence, tested 32 MiB once, rejected it, and
+finished at 32 reads / 16 MiB / eight DMA events. Three revised in-process
+runs were 946.30, 951.75, and 935.56 MiB/s: median **946.30 MiB/s**. The
+outer example results were 944.95, 950.51, and 934.41 MiB/s: median
+**944.95 MiB/s**, 0.3% below the prior 947.76 MiB/s median and well inside the
+3% acceptance band. Final source width is now deterministic at 32; the runs
+used 1,006, 1,009, and 1,013 GETs because one bounded 32 MiB probe replaced
+some 16 MiB requests. Pinned high-water was 1.31, 1.19, and 1.09 GiB while
+that joint size/width candidate was active.
+
+The final code received one additional AWS confirmation run. It rejected
+37- and 54-read candidates around one intervening 32 MiB candidate, restored
+32 reads / 16 MiB / eight DMA events, and completed at **947.02 MiB/s**
+in-process and **945.55 MiB/s** outside the loader. It used 1,006 GETs, no
+retries or throttles, and 1.41 GiB pinned high-water. This is a single
+confirmation rather than a new median, but it is consistent with the earlier
+three-run result and shows no regression outside normal variance.
+
+This work improves convergence correctness and prevents one probe dimension
+from monopolizing the transfer, but it does **not** speed up this AWS path.
+The tested static grid and revised measurements show no repeatably
+demonstrated, material (>3%) controller-accessible gain above the existing
+approximately 948 MiB/s result. Further remote speed work needs evidence
+outside the current source tuple: regional/path placement, NIC/socket
+saturation, connection-pool/DNS/TLS breakdown, or a different endpoint. Warm
+local controls reached 29.16, 28.52, and 27.57 GiB/s at the unchanged
+12 reads / 2 MiB / eight DMA tuple.
+
+The complete historical investigation and earlier controller measurements
+follow. Descriptions of `parallel_read`, scalar `LoadOpts`, precomputed jobs,
+or once-selected automatic request sizes in those sections describe the
+superseded implementation, not the current tree.
+
+## Historical outcome before `plan.md` (superseded)
 
 CUDA and oneAPI use a copy-free vectored path with independently controlled
 source calls, retained request lifecycles, and physical DMA-event admission:
@@ -117,6 +408,19 @@ covering `Content-Range`; a server returning `200` and ignoring `Range` is
 handled by discarding the requested prefix before scattering. S3, GCS, and HF
 continue to use their existing internal scatter/chunk readers.
 
+There are currently two source-concurrency layers for S3, GCS, and HF. The
+loader controller admits logical positional reads; each backend then queues
+physical range jobs on its own fixed 32-worker `parallel_read` pool. With the
+default automatic sizes these layers are one-to-one: an S3/GCS 16 MiB logical
+read is one 16 MiB physical job and an HF 32 MiB logical read is one 32 MiB
+physical job (apart from tails). Consequently `parallel_read` does not split
+ordinary controller reads today; it supplies the HTTP execution, retry,
+throttle, and statistics machinery. A fixed logical request larger than the
+backend chunk, or an automatic request enlarged by a larger DMA block, is
+split into several simultaneous physical jobs. That hidden fan-out is not
+admitted individually by the controller and would confound future adaptive
+request-size/concurrency tuning.
+
 The vectored loader opens each distinct backing file once and gives tensor
 readers borrowed positional-only handles. This is safe because positional
 reads do not mutate streaming position. It is important remotely: Llama 3.1
@@ -175,6 +479,14 @@ for the request, then takes a source credit only for the exact vectored read.
 The source credit is released as soon as the backend read returns; the
 lifecycle credit is released by the last block/replica PJRT callback. Reducing
 either limit drains existing work naturally.
+
+The jobs are constructed one range per tensor per round and then consumed by
+all workers through one atomic index. This favors breadth across tensors, but
+does not serialize a tensor: workers may execute different positional ranges
+of the same tensor concurrently, particularly after smaller tensors finish or
+when one large tensor must fill the available width. The borrowed
+`TensorReader` and shared file are safe for this because these reads are
+positional.
 
 Each completed read creates physical entries in per-device queues. An entry
 takes one device credit until its PJRT callback completes. One device cannot
@@ -239,6 +551,91 @@ bytes, final settled limits, and wall time.
 
 Model: Llama 3.1 8B, 14.96 GiB logical weights. Local numbers use warm page
 cache. Medians are wall-clock goodput reported by `examples/io`.
+
+### Linux file VFS and direct-I/O experiment (2026-07-22)
+
+The Linux `File` VFS has long defaulted `direct_io=true`, but that does not
+mean the loader benchmarks use direct I/O. It opens a second read-only file
+description and sets `O_DIRECT`, then selects it only when the absolute file
+offset, every destination address, and total length satisfy its configured
+4 KiB alignment. Otherwise it deliberately uses the ordinary buffered file
+description.
+
+There are two independent reasons the existing model load is buffered:
+
+- `bench_file.sh` passes a plain local path. The VFS routes it to the base
+  `std.Io`, not the backend registered under the `file` URI scheme. A syscall
+  trace of that path contained zero `F_SETFL(...O_DIRECT...)` calls.
+- Using `file:///var/models/...` does create and verify the `O_DIRECT` file
+  descriptions, but the safetensor data bases have non-zero 4 KiB residues
+  (1328, 3936, 3472, and 568 bytes for the four files). All observed 2 MiB
+  tensor payload reads therefore selected the buffered descriptions; none
+  used the direct fds. Merely changing the benchmark URI does not make the
+  payload direct.
+
+A copy-free aligned-envelope control was added at
+`~/github/uxlfoundation/sycl_playground/src/b70_direct_io_pipeline.cpp`. For
+each arbitrary tensor range it rounds the file offset down and the end up to
+4 KiB, reads that envelope with `O_DIRECT` into an aligned registered host
+allocation, and transfers only the logical `buffer + prefix` subrange to the
+B70. It adds no CPU staging copy and only 0.197% extra storage traffic with
+2 MiB chunks. This is the shape a real loader fast path would need; the
+current exact scatter API cannot manufacture safe prefix/suffix storage inside
+the caller's fixed-size logical slices.
+
+With twelve workers/queues, 2 MiB chunks, real tensor ranges, unique tensor
+destinations, and the XLA-selected oneAPI runtime, three warm-page-cache
+buffered runs reached 34.08, 34.69, and 34.62 GiB/s (median **34.62 GiB/s**).
+The direct path reached 10.13, 10.29, and 10.28 GiB/s (median
+**10.28 GiB/s**). Average direct read service was about 2.21 ms per 2 MiB,
+versus about 0.60 ms buffered; direct DMA itself remained cheap at about
+44--54 us.
+
+The direct result is storage-limited rather than an admission mistake. At
+2 MiB, 4/8/12/16 workers all plateaued at 10.28--10.29 GiB/s, while 24/32
+workers regressed to about 9.45 GiB/s. With twelve workers, 1/4/8 MiB chunks
+reached about 9.57/9.57/9.44 GiB/s, so 2 MiB is also the best tested direct
+chunk. Four parallel `dd iflag=direct` shard reads reached about 10.2 GiB/s.
+
+Dropping the page cache before every buffered run changes the conclusion for
+a first load from storage. Five paired raw SYCL runs were:
+
+| source path | Five logical GiB/s | Median |
+|---|---|---:|
+| cold buffered | 7.897, 7.916, 7.924, 7.903, 7.936 | **7.916** |
+| `O_DIRECT` aligned envelope | 10.174, 10.179, 10.177, 10.175, 10.197 | **10.177** |
+
+Thus direct I/O is 28.6% faster for a genuinely cold load on this Samsung
+9100 Pro, but 70% slower than the warm page-cache pipeline. It should not
+replace buffered loading unconditionally. A production implementation needs
+an explicit cold/direct source policy plus alignment-aware padded DMA leases;
+it cannot transparently infer whether the caller values retaining the model in
+page cache. The playground experiment is retained, but the slower path was not
+wired into ZML.
+
+Five current ZML/PJRT loads with the cache dropped before each run took 1.744,
+1.748, 1.749, 1.745, and 1.748 seconds: median **1.748 s / 8.56 GiB/s**.
+The immediately following warm run took 565.7 ms / 26.44 GiB/s. Cold reads
+averaged 3.47 ms while PJRT completion averaged only 0.09 ms, so the current
+cold load is entirely source-bound. The raw direct pipeline's 10.18 GiB/s is
+roughly 19% above current cold ZML goodput and is the relevant approximate
+headroom for a production direct path on this drive; its 10.18 GiB/s storage
+ceiling still precludes improving the warm 26--27 GiB/s result.
+
+Linux 6.17 provides a cheap cache-selection signal through `cachestat(2)`
+(`CONFIG_CACHESTAT_SYSCALL=y`, syscall 451 on this x86-64 host). Querying all
+four complete shard ranges reports the exact aggregate cached-page count. It
+took about 22.8 ms when all 14.96 GiB were cached and 3.2 us when none were;
+full `mincore` took 0.39 s and is too expensive for admission. A first-stage
+sample of sixteen evenly spaced 2 MiB windows per file (64 calls, 128 MiB
+sampled) took only **0.194 ms** while correctly reporting the current 100%
+resident state. A production `.auto` policy can use this sample, choose
+buffered/direct immediately for clear hot/cold results, and pay for an exact
+`cachestat` only in the ambiguous middle. The measured cold/warm curves put a
+rough single-load break-even near 25--30% residency, but partially resident
+benchmarks are still required before fixing the threshold. Policy also matters:
+direct I/O wins one cold load but deliberately does not populate page cache,
+so buffered I/O may win when another load is expected soon.
 
 ### Completion-aware source backpressure revision (2026-07-22)
 
@@ -574,11 +971,8 @@ is historical state, not evidence of current pressure.
 In that verified fully resident state:
 
 - File-only `pread` with twelve 2 MiB workers reached 61.6--62.3 GiB/s.
-- Direct SYCL copies from reused registered buffers reached 48.6 GiB/s with
-  one in-order queue and 49--50 GiB/s with eight queues.
-- A direct streaming `pread -> registered buffer -> memcpy.wait()` pipeline
-  scaled with independent SYCL queues: 14.0 GiB/s at one, 19.8 at two, 23.4 at
-  four, 26.8 at eight, and 34.0 at twelve.
+- Standalone registered-H2D and streaming SYCL controls were also substantially
+  faster; their exact ceilings and queue comparisons are recorded below.
 - ZML with reads capped at twelve and DMA fixed at eight still reached only
   11.89 GiB/s. Source calls averaged 0.240 ms, the ready queue remained
   non-empty, and 2 MiB PJRT completion latency averaged 1.275 ms. The source
@@ -732,16 +1126,6 @@ latency. The XLA completion patch was fully reverted. The apparent preference
 for two events was caused by concurrent host staging copies, not by the device
 or controller: once staging is bypassed, caps two and eight are equivalent.
 
-Two standalone SYCL controls were added to the playground:
-
-- `src/b70_h2d_queue_depth.cpp`: registered 2 MiB H2D stays near 49--50
-  GiB/s from depth 2 through 12 with either one queue or one queue per slot
-  (depth one is about 44 GiB/s).
-- `src/b70_shared_queue_pipeline.cpp`: warm `pread -> registered block -> H2D`
-  reaches about 20, 24, 26--27, and 34.5 GiB/s at 2, 4, 8, and 12 workers.
-  One shared in-order queue and one queue per worker are equivalent within
-  noise. An XLA H2D stream pool is therefore rejected.
-
 ZML's pool hypothesis was tested directly. Replacing each lazy 64 MiB slab
 with independent 2 MiB allocations and DmaMap registrations produced
 19.61 GiB/s at cap two and 10.21 GiB/s at cap eight; completion latency at cap
@@ -766,23 +1150,22 @@ made source reads the limiting stage. Under `perf`, cap eight still reached
 restores the prior 26 GiB/s target and proves the XLA override affects
 the exact predicate responsible for the regression.
 
-The committed XLA patch at `92e7778d04` is intentionally narrow: it adds the
-SYCL `IsHostMemoryPinned` override and makes the existing Level Zero
-registration query range-aware. It does not change PJRT completion delivery,
-CUDA/ROCm, or ZML's 64 MiB pool. A SYCL executor test covers unregistered
-memory, full and interior registered ranges, zero size, a range extending
-beyond the import, and unregistration. The selected `22-43` artifact validates
-the change at 26.83--26.90 GiB/s on one B70, without a reportable staging
-`memmove`.
+The selected `22-43` artifact validates the committed fix at 26.83--26.90
+GiB/s on one B70, without a reportable staging `memmove`. A SYCL executor test
+covers unregistered memory, full and interior registered ranges, zero size, a
+range extending beyond the import, and unregistration. PJRT completion
+delivery, CUDA/ROCm, and ZML's 64 MiB pool are unchanged.
 
 ### Residual raw-SYCL and CUDA gap
 
 The fixed artifact is not at the raw B70 limit. On the same host, same oneAPI
 runtime, same four warm safetensor files, and one B70:
 
-- registered 2 MiB H2D alone reaches approximately 49--50 GiB/s;
-- the raw `pread -> registered block -> queue.memcpy -> event.wait` pipeline
-  reaches 34.0--34.6 GiB/s with twelve workers;
+- playground `src/b70_h2d_queue_depth.cpp` holds registered 2 MiB H2D near
+  49--50 GiB/s from depths 2 through 12 (depth one is about 44 GiB/s);
+- `src/b70_shared_queue_pipeline.cpp` reaches about 20, 24, 26--27, and 34.5
+  GiB/s with 2, 4, 8, and 12 workers; one shared in-order queue and one queue
+  per worker are equivalent within noise, rejecting an XLA H2D stream pool;
 - ZML/PJRT reaches approximately 26.9 GiB/s with its normal decoupled path.
 
 The extended raw control is
@@ -795,8 +1178,7 @@ The following changes do not reduce its approximately 34.5 GiB/s ceiling:
 - using the real 291 tensor ranges, including their non-page-aligned source
   offsets (34.58--34.64 GiB/s after warm-up);
 - allocating one raw SYCL device buffer per tensor rather than one 14.96 GiB
-  allocation (34.44--34.49 GiB/s);
-- one shared in-order queue versus one queue per worker.
+  allocation (34.44--34.49 GiB/s).
 
 At twelve workers the raw tensor-range control averages about 0.600--0.612 ms
 per 2 MiB read and 0.069--0.072 ms per DMA wait. Normal ZML averages about
@@ -935,7 +1317,8 @@ contaminated artifact and was not used for final conclusions.
 
 ## Validation and commands
 
-Passed after the final edits:
+Passed after the final edits; the 2026-07-21 controller follow-up repeated the
+ZML test and CUDA build, then ran one-device oneAPI local and S3Proxy loads:
 
 ```text
 ./bazel.sh test --nocache_test_results //zml:test //zml/io/vfs:test
@@ -945,16 +1328,8 @@ Passed after the final edits:
   //examples/io:playground
 ```
 
-Follow-up controller validation on 2026-07-21 also passed:
-
-```text
-bazel test //zml:test --test_output=errors
-./bazel.sh build --config=release --@zml//platforms:cuda=true \
-  //examples/io:playground
-```
-
 The CUDA command compiled ZML against the existing PJRT artifact; it did not
-build XLA. The follow-up also ran one-device oneAPI local and S3Proxy loads.
+build XLA.
 
 Four-device oneAPI sharded and replicated loads completed repeatedly. CUDA
 release compilation passes, but this host has no RTX GPU, so the requested RTX
@@ -988,3 +1363,16 @@ They deliberately leave request size unset so VFS automatic sizing is tested;
 Workspace `perf.data` and `perf.data.old` were not overwritten or removed.
 There is no `CTX.md.orig`. The user built and validated the current XLA SYCL
 pinned-range fix. Do not build XLA unless that instruction changes again.
+
+The adjacent production monorepo has an intentional uncommitted change in
+`llmd/main.zig`: its five VFS registrations now use `registerBackend` so the
+file/HTTP/HF/S3/GCS source hints and counters survive into the loader. In
+particular, this fixes production HF loads incorrectly resolving to the 2 MiB
+local/default request size instead of the advertised 32 MiB minimum. Its
+untracked `log.txt` belongs to the user. A oneAPI `//llmd:llmd` build was
+started but interrupted during dependency compilation and was not reported as
+validation.
+
+The SYCL playground is not part of the ZML Git checkout. The direct-I/O
+experiment added `src/b70_direct_io_pipeline.cpp` and its CMake target there;
+it compiles and produced the direct/cold-buffered results above.

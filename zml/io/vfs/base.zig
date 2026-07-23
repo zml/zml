@@ -4,30 +4,254 @@ const stdx = @import("stdx");
 
 pub const ReadHints = struct {
     /// Smallest source request expected to avoid excessive per-request cost
-    /// or backend rate limiting. Automatic loads use this as their fixed size.
+    /// or backend rate limiting.
     minimum_request_size: usize = 2 * 1024 * 1024,
     /// The backend benefits from keeping active source calls independent of a
     /// small bounded set of requests retained for downstream DMA completion.
     high_latency: bool = false,
 };
 
-pub const ReadStats = struct {
-    physical_requests: u64 = 0,
-    physical_bytes: u64 = 0,
-    retries: u64 = 0,
+pub const read_timing_bucket_sizes = [_]usize{
+    2 * 1024 * 1024,
+    4 * 1024 * 1024,
+    8 * 1024 * 1024,
+    16 * 1024 * 1024,
+    32 * 1024 * 1024,
+    64 * 1024 * 1024,
+    128 * 1024 * 1024,
+};
+
+pub const ReadTimingBucket = struct {
+    attempts: u64 = 0,
+    successes: u64 = 0,
+    successful_bytes: u64 = 0,
+    ttfb_ns: u64 = 0,
+    body_ns: u64 = 0,
+    transient_retries: u64 = 0,
+    timeouts: u64 = 0,
+    server_failures: u64 = 0,
     throttles: u64 = 0,
     retry_delay_ns: u64 = 0,
 
-    pub fn sub(self: ReadStats, previous: ReadStats) ReadStats {
+    fn sub(self: ReadTimingBucket, previous: ReadTimingBucket) ReadTimingBucket {
         return .{
-            .physical_requests = self.physical_requests -| previous.physical_requests,
-            .physical_bytes = self.physical_bytes -| previous.physical_bytes,
-            .retries = self.retries -| previous.retries,
+            .attempts = self.attempts -| previous.attempts,
+            .successes = self.successes -| previous.successes,
+            .successful_bytes = self.successful_bytes -| previous.successful_bytes,
+            .ttfb_ns = self.ttfb_ns -| previous.ttfb_ns,
+            .body_ns = self.body_ns -| previous.body_ns,
+            .transient_retries = self.transient_retries -| previous.transient_retries,
+            .timeouts = self.timeouts -| previous.timeouts,
+            .server_failures = self.server_failures -| previous.server_failures,
             .throttles = self.throttles -| previous.throttles,
             .retry_delay_ns = self.retry_delay_ns -| previous.retry_delay_ns,
         };
     }
 };
+
+pub const ReadStats = struct {
+    physical_requests: u64 = 0,
+    physical_bytes: u64 = 0,
+    retries: u64 = 0,
+    transient_retries: u64 = 0,
+    timeouts: u64 = 0,
+    server_failures: u64 = 0,
+    throttles: u64 = 0,
+    retry_delay_ns: u64 = 0,
+    timing: [read_timing_bucket_sizes.len]ReadTimingBucket = @splat(.{}),
+
+    pub fn sub(self: ReadStats, previous: ReadStats) ReadStats {
+        var result: ReadStats = .{
+            .physical_requests = self.physical_requests -| previous.physical_requests,
+            .physical_bytes = self.physical_bytes -| previous.physical_bytes,
+            .retries = self.retries -| previous.retries,
+            .transient_retries = self.transient_retries -| previous.transient_retries,
+            .timeouts = self.timeouts -| previous.timeouts,
+            .server_failures = self.server_failures -| previous.server_failures,
+            .throttles = self.throttles -| previous.throttles,
+            .retry_delay_ns = self.retry_delay_ns -| previous.retry_delay_ns,
+        };
+        for (&result.timing, self.timing, previous.timing) |*bucket, current, old| {
+            bucket.* = current.sub(old);
+        }
+        return result;
+    }
+};
+
+pub const ReadFailure = enum {
+    transient,
+    timeout,
+    server_failure,
+    throttle,
+};
+
+pub const AtomicReadStats = struct {
+    const AtomicTimingBucket = struct {
+        attempts: std.atomic.Value(u64) = .init(0),
+        successes: std.atomic.Value(u64) = .init(0),
+        successful_bytes: std.atomic.Value(u64) = .init(0),
+        ttfb_ns: std.atomic.Value(u64) = .init(0),
+        body_ns: std.atomic.Value(u64) = .init(0),
+        transient_retries: std.atomic.Value(u64) = .init(0),
+        timeouts: std.atomic.Value(u64) = .init(0),
+        server_failures: std.atomic.Value(u64) = .init(0),
+        throttles: std.atomic.Value(u64) = .init(0),
+        retry_delay_ns: std.atomic.Value(u64) = .init(0),
+
+        fn snapshot(self: *const AtomicTimingBucket) ReadTimingBucket {
+            return .{
+                .attempts = self.attempts.load(.acquire),
+                .successes = self.successes.load(.acquire),
+                .successful_bytes = self.successful_bytes.load(.acquire),
+                .ttfb_ns = self.ttfb_ns.load(.acquire),
+                .body_ns = self.body_ns.load(.acquire),
+                .transient_retries = self.transient_retries.load(.acquire),
+                .timeouts = self.timeouts.load(.acquire),
+                .server_failures = self.server_failures.load(.acquire),
+                .throttles = self.throttles.load(.acquire),
+                .retry_delay_ns = self.retry_delay_ns.load(.acquire),
+            };
+        }
+    };
+
+    physical_requests: std.atomic.Value(u64) = .init(0),
+    physical_bytes: std.atomic.Value(u64) = .init(0),
+    retries: std.atomic.Value(u64) = .init(0),
+    transient_retries: std.atomic.Value(u64) = .init(0),
+    timeouts: std.atomic.Value(u64) = .init(0),
+    server_failures: std.atomic.Value(u64) = .init(0),
+    throttles: std.atomic.Value(u64) = .init(0),
+    retry_delay_ns: std.atomic.Value(u64) = .init(0),
+    timing: [read_timing_bucket_sizes.len]AtomicTimingBucket = @splat(.{}),
+
+    pub fn recordAttempt(self: *AtomicReadStats, request_size: usize) void {
+        _ = self.physical_requests.fetchAdd(1, .monotonic);
+        if (timingBucketIndex(request_size)) |index| {
+            _ = self.timing[index].attempts.fetchAdd(1, .monotonic);
+        }
+    }
+
+    pub fn recordSuccess(
+        self: *AtomicReadStats,
+        request_size: usize,
+        ttfb_ns: u64,
+        body_ns: u64,
+        include_timing_sample: bool,
+    ) void {
+        _ = self.physical_bytes.fetchAdd(@intCast(request_size), .monotonic);
+        if (!include_timing_sample) return;
+        if (timingBucketIndex(request_size)) |index| {
+            const bucket = &self.timing[index];
+            _ = bucket.successes.fetchAdd(1, .monotonic);
+            _ = bucket.successful_bytes.fetchAdd(@intCast(request_size), .monotonic);
+            _ = bucket.ttfb_ns.fetchAdd(ttfb_ns, .monotonic);
+            _ = bucket.body_ns.fetchAdd(body_ns, .monotonic);
+        }
+    }
+
+    pub fn recordFailure(self: *AtomicReadStats, request_size: usize, failure: ReadFailure) void {
+        const bucket = if (timingBucketIndex(request_size)) |index| &self.timing[index] else null;
+        switch (failure) {
+            .transient => {
+                _ = self.transient_retries.fetchAdd(1, .monotonic);
+                if (bucket) |b| _ = b.transient_retries.fetchAdd(1, .monotonic);
+            },
+            .timeout => {
+                _ = self.timeouts.fetchAdd(1, .monotonic);
+                if (bucket) |b| _ = b.timeouts.fetchAdd(1, .monotonic);
+            },
+            .server_failure => {
+                _ = self.server_failures.fetchAdd(1, .monotonic);
+                if (bucket) |b| _ = b.server_failures.fetchAdd(1, .monotonic);
+            },
+            .throttle => {
+                _ = self.throttles.fetchAdd(1, .monotonic);
+                if (bucket) |b| _ = b.throttles.fetchAdd(1, .monotonic);
+            },
+        }
+    }
+
+    pub fn recordRetry(self: *AtomicReadStats) void {
+        _ = self.retries.fetchAdd(1, .monotonic);
+    }
+
+    pub fn recordRetryDelay(self: *AtomicReadStats, request_size: usize, delay: std.Io.Duration) void {
+        const delay_ns: u64 = @intCast(@max(delay.nanoseconds, 0));
+        _ = self.retry_delay_ns.fetchAdd(delay_ns, .monotonic);
+        if (timingBucketIndex(request_size)) |index| {
+            _ = self.timing[index].retry_delay_ns.fetchAdd(delay_ns, .monotonic);
+        }
+    }
+
+    pub fn snapshot(self: *const AtomicReadStats) ReadStats {
+        var result: ReadStats = .{
+            .physical_requests = self.physical_requests.load(.acquire),
+            .physical_bytes = self.physical_bytes.load(.acquire),
+            .retries = self.retries.load(.acquire),
+            .transient_retries = self.transient_retries.load(.acquire),
+            .timeouts = self.timeouts.load(.acquire),
+            .server_failures = self.server_failures.load(.acquire),
+            .throttles = self.throttles.load(.acquire),
+            .retry_delay_ns = self.retry_delay_ns.load(.acquire),
+        };
+        for (&result.timing, &self.timing) |*bucket, *atomic_bucket| {
+            bucket.* = atomic_bucket.snapshot();
+        }
+        return result;
+    }
+};
+
+pub fn timingBucketIndex(request_size: usize) ?usize {
+    for (read_timing_bucket_sizes, 0..) |size, index| {
+        if (request_size == size) return index;
+    }
+    return null;
+}
+
+test "atomic read stats retain typed exact-size timing buckets" {
+    var stats: AtomicReadStats = .{};
+    const request_size = 16 * 1024 * 1024;
+    stats.recordAttempt(request_size);
+    stats.recordFailure(request_size, .timeout);
+    stats.recordRetry();
+    stats.recordRetryDelay(request_size, .fromMilliseconds(25));
+    stats.recordAttempt(request_size);
+    stats.recordSuccess(request_size, 7, 11, true);
+
+    const snapshot = stats.snapshot();
+    const bucket = snapshot.timing[timingBucketIndex(request_size).?];
+    try std.testing.expectEqual(@as(u64, 2), snapshot.physical_requests);
+    try std.testing.expectEqual(@as(u64, request_size), snapshot.physical_bytes);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.retries);
+    try std.testing.expectEqual(@as(u64, 1), snapshot.timeouts);
+    try std.testing.expectEqual(@as(u64, 2), bucket.attempts);
+    try std.testing.expectEqual(@as(u64, 1), bucket.successes);
+    try std.testing.expectEqual(@as(u64, request_size), bucket.successful_bytes);
+    try std.testing.expectEqual(@as(u64, 7), bucket.ttfb_ns);
+    try std.testing.expectEqual(@as(u64, 11), bucket.body_ns);
+    try std.testing.expectEqual(@as(u64, 1), bucket.timeouts);
+    try std.testing.expectEqual(@as(u64, 25 * std.time.ns_per_ms), bucket.retry_delay_ns);
+}
+
+test "retried successful reads do not enter timing samples" {
+    var stats: AtomicReadStats = .{};
+    const request_size = 32 * 1024 * 1024;
+    stats.recordAttempt(request_size);
+    stats.recordFailure(request_size, .transient);
+    stats.recordRetry();
+    stats.recordAttempt(request_size);
+    stats.recordSuccess(request_size, 13, 17, false);
+
+    const snapshot = stats.snapshot();
+    const bucket = snapshot.timing[timingBucketIndex(request_size).?];
+    try std.testing.expectEqual(@as(u64, 2), snapshot.physical_requests);
+    try std.testing.expectEqual(@as(u64, request_size), snapshot.physical_bytes);
+    try std.testing.expectEqual(@as(u64, 2), bucket.attempts);
+    try std.testing.expectEqual(@as(u64, 0), bucket.successes);
+    try std.testing.expectEqual(@as(u64, 0), bucket.successful_bytes);
+    try std.testing.expectEqual(@as(u64, 0), bucket.ttfb_ns);
+    try std.testing.expectEqual(@as(u64, 0), bucket.body_ns);
+}
 
 pub const ReadStatsProvider = struct {
     userdata: *anyopaque,

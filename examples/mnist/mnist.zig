@@ -44,7 +44,7 @@ const Mnist = struct {
         store: *const zml.io.TensorStore,
     ) !zml.Bufferized(Mnist) {
         return zml.io.load(Mnist, self, allocator, io, platform, store, .{
-            .read_parallelism = 1,
+            .read_parallelism = .{ .fixed = 1 },
             .read_request_size = .{ .fixed = 16 * 1024 * 1024 },
             .max_pinned_bytes = 16 * 1024 * 1024,
         });

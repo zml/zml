@@ -70,6 +70,7 @@ pub const TensorReader = struct {
     file: std.Io.File,
     file_reader: std.Io.File.Reader,
     owns_file: bool,
+    positional_read_mode: PositionalReadMode,
     alignment: ?std.mem.Alignment,
     remaining: u64,
     padding_remaining: u64,
@@ -79,6 +80,18 @@ pub const TensorReader = struct {
 
     pub const InitOpts = struct {
         alignment: ?std.mem.Alignment = null,
+    };
+
+    pub const BorrowedPositionalOpts = struct {
+        /// Split scatter lists at the platform IOV_MAX and resume short reads.
+        /// Remote exact-fill VFS backends should disable this so one logical
+        /// source admission remains one positional backend call.
+        batch_iovecs: bool = true,
+    };
+
+    const PositionalReadMode = enum {
+        batch_and_resume,
+        single_exact_fill,
     };
 
     pub const ReadPositionalError = std.Io.File.ReadPositionalError || error{
@@ -110,6 +123,7 @@ pub const TensorReader = struct {
             .file = file,
             .file_reader = file_reader,
             .owns_file = true,
+            .positional_read_mode = .batch_and_resume,
             .alignment = opts.alignment,
             .remaining = tensor.byteSize(),
             .padding_remaining = padding_remaining,
@@ -137,12 +151,25 @@ pub const TensorReader = struct {
     /// Concurrent readers may borrow the same file because positional reads do
     /// not use or mutate its streaming position.
     pub fn initBorrowedPositional(io: std.Io, tensor: Tensor, file: std.Io.File) TensorReader {
+        return initBorrowedPositionalWithOptions(io, tensor, file, .{});
+    }
+
+    /// Creates a positional-only borrowed reader with explicit scatter-call
+    /// behavior. Exact-fill mode passes the complete scatter list to the
+    /// backend once and rejects a short result instead of resuming it.
+    pub fn initBorrowedPositionalWithOptions(
+        io: std.Io,
+        tensor: Tensor,
+        file: std.Io.File,
+        opts: BorrowedPositionalOpts,
+    ) TensorReader {
         const file_reader = file.reader(io, &.{});
         return .{
             .tensor = tensor,
             .file = file,
             .file_reader = file_reader,
             .owns_file = false,
+            .positional_read_mode = if (opts.batch_iovecs) .batch_and_resume else .single_exact_fill,
             .alignment = null,
             .remaining = tensor.byteSize(),
             .padding_remaining = 0,
@@ -196,6 +223,12 @@ pub const TensorReader = struct {
             return error.OutOfBounds;
         };
         _ = std.math.add(u64, file_offset, read_size) catch return error.OutOfBounds;
+
+        if (self.positional_read_mode == .single_exact_fill) {
+            const bytes_read = try self.file.readPositional(self.io, buffers, file_offset);
+            if (@as(u64, @intCast(bytes_read)) != read_size) return error.UnexpectedEndOfFile;
+            return;
+        }
 
         // Linux preadv(2) accepts at most IOV_MAX entries. Keep the public API
         // backend-neutral and issue another exact positional read when a
@@ -343,6 +376,53 @@ pub const TensorReader = struct {
     }
 };
 
+const CountingPositionalIo = struct {
+    calls: usize = 0,
+    largest_scatter: usize = 0,
+    last_offset: u64 = 0,
+    max_result: ?usize = null,
+
+    const vtable: std.Io.VTable = blk: {
+        var result = std.testing.io.vtable.*;
+        result.fileReadPositional = fileReadPositional;
+        break :blk result;
+    };
+
+    fn io(self: *CountingPositionalIo) std.Io {
+        return .{
+            .userdata = self,
+            .vtable = &vtable,
+        };
+    }
+
+    fn fileReadPositional(
+        userdata: ?*anyopaque,
+        _: std.Io.File,
+        data: []const []u8,
+        offset: u64,
+    ) std.Io.File.ReadPositionalError!usize {
+        const self: *CountingPositionalIo = @ptrCast(@alignCast(userdata.?));
+        self.calls += 1;
+        self.largest_scatter = @max(self.largest_scatter, data.len);
+        self.last_offset = offset;
+
+        var requested: usize = 0;
+        for (data) |buffer| requested +|= buffer.len;
+        var remaining = @min(requested, self.max_result orelse requested);
+        var position: usize = 0;
+        for (data) |buffer| {
+            const take = @min(remaining, buffer.len);
+            for (buffer[0..take]) |*byte| {
+                byte.* = @truncate(offset + position);
+                position += 1;
+            }
+            remaining -= take;
+            if (remaining == 0) break;
+        }
+        return position;
+    }
+};
+
 test "TensorReader positional reads are tensor-relative and preserve stream position" {
     const io = std.testing.io;
     const contents = "prefix0123456789";
@@ -458,6 +538,49 @@ test "TensorReader positional scatter reads batch more than IOV_MAX buffers" {
     for (&buffers, 0..) |*buffer, i| buffer.* = output[i..][0..1];
     try reader.readPositionalAllV(&buffers, 0);
     try std.testing.expectEqualSlices(u8, &contents, &output);
+}
+
+test "TensorReader borrowed exact-fill mode passes more than IOV_MAX buffers once" {
+    const len = TensorReader.max_positional_iovecs + 1;
+    var counting: CountingPositionalIo = .{};
+    const io = counting.io();
+    const file: std.Io.File = .{ .handle = 0, .flags = .{ .nonblocking = false } };
+    var reader = TensorReader.initBorrowedPositionalWithOptions(io, .{
+        .file_uri = "unused",
+        .name = "tensor",
+        .shape = .init(.{len}, .u8),
+        .offset = 7,
+    }, file, .{ .batch_iovecs = false });
+
+    var output: [len]u8 = undefined;
+    var buffers: [len][]u8 = undefined;
+    for (&buffers, 0..) |*buffer, i| buffer.* = output[i..][0..1];
+    try reader.readPositionalAllV(&buffers, 0);
+
+    try std.testing.expectEqual(@as(usize, 1), counting.calls);
+    try std.testing.expectEqual(@as(usize, len), counting.largest_scatter);
+    try std.testing.expectEqual(@as(u64, 7), counting.last_offset);
+    for (output, 0..) |byte, i| {
+        try std.testing.expectEqual(@as(u8, @truncate(7 + i)), byte);
+    }
+}
+
+test "TensorReader borrowed exact-fill mode rejects a short call without resuming" {
+    var counting: CountingPositionalIo = .{ .max_result = 1 };
+    const io = counting.io();
+    const file: std.Io.File = .{ .handle = 0, .flags = .{ .nonblocking = false } };
+    var reader = TensorReader.initBorrowedPositionalWithOptions(io, .{
+        .file_uri = "unused",
+        .name = "tensor",
+        .shape = .init(.{2}, .u8),
+        .offset = 11,
+    }, file, .{ .batch_iovecs = false });
+
+    var output: [2]u8 = undefined;
+    try std.testing.expectError(error.UnexpectedEndOfFile, reader.readPositionalAllV(&.{ output[0..1], output[1..2] }, 0));
+    try std.testing.expectEqual(@as(usize, 1), counting.calls);
+    try std.testing.expectEqual(@as(usize, 2), counting.largest_scatter);
+    try std.testing.expectEqual(@as(u64, 11), counting.last_offset);
 }
 
 test "TensorReader positional scatter resumes partial reads across boundaries" {

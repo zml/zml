@@ -3,10 +3,11 @@ const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 
-const parallel_read = @import("parallel_read.zig");
+const range_read = @import("range_read.zig");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
 const ReadStats = @import("base.zig").ReadStats;
+const AtomicReadStats = @import("base.zig").AtomicReadStats;
 
 const log = std.log.scoped(.@"zml/io/vfs/gcs");
 
@@ -120,156 +121,37 @@ const Credentials = union(enum) {
     }
 };
 
+test "GCS authorization copies remain stable" {
+    var token_storage: [64]u8 = undefined;
+    const token_header = try std.fmt.bufPrint(&token_storage, "Bearer {s}", .{"first-token"});
+    var authorization_storage: [64]u8 = undefined;
+    const authorization = try GCS.copyAuthorization(token_header, &authorization_storage);
+
+    @memset(token_storage[0..token_header.len], 'x');
+    const copied = switch (authorization) {
+        .override => |value| value,
+        else => return error.UnexpectedAuthorizationValue,
+    };
+    try std.testing.expectEqualStrings("Bearer first-token", copied);
+}
+
 const ReadState = struct { index: usize, objects: [][]const u8 };
 
 pub const GCS = struct {
-    const ParallelRead = struct {
-        const Pool = parallel_read.Pool(Job);
-
-        const Batch = struct {
-            state: parallel_read.BatchState,
-            backend: *GCS,
-            uri: std.Uri,
-            path: []const u8,
-            authorization: std.http.Client.Request.Headers.Value,
-        };
-
-        const Job = struct {
-            data: []const []u8,
-            file_offset: u64,
-            chunk_offset: usize,
-            chunk_len: usize,
-            batch: *Batch,
-
-            pub fn perform(job: Job, client: *std.http.Client) anyerror!parallel_read.Status {
-                var range_buf: [64]u8 = undefined;
-                const range_header = std.fmt.bufPrint(
-                    &range_buf,
-                    "bytes={d}-{d}",
-                    .{ job.file_offset, job.file_offset + @as(u64, @intCast(job.chunk_len - 1)) },
-                ) catch unreachable;
-
-                var req = client.request(
-                    .GET,
-                    job.batch.uri,
-                    .{
-                        .headers = .{
-                            .accept_encoding = .{ .override = "identity" },
-                            .authorization = job.batch.authorization,
-                        },
-                        .extra_headers = &.{.{ .name = "Range", .value = range_header }},
-                    },
-                ) catch |err| {
-                    switch (err) {
-                        // transient connect failures
-                        error.ConnectionRefused,
-                        error.ConnectionResetByPeer,
-                        error.HostUnreachable,
-                        error.NetworkUnreachable,
-                        error.NetworkDown,
-                        error.Timeout,
-                        error.NameServerFailure,
-                        => {
-                            log.warn("Failed to connect: {}", .{err});
-                            return .retry();
-                        },
-                        else => {
-                            log.err("Failed to connect: {}", .{err});
-                            return err;
-                        },
-                    }
-                };
-                defer req.deinit();
-
-                req.sendBodiless() catch |err| switch (err) {
-                    error.WriteFailed => {
-                        log.warn("Failed to send headers: {}", .{err});
-                        return .retry();
-                    },
-                };
-
-                var redirect_buffer: [8 * 1024]u8 = undefined;
-                var res = req.receiveHead(&redirect_buffer) catch |err| {
-                    switch (err) {
-                        // stale keep-alive / peer closed while waiting for response head
-                        error.HttpConnectionClosing,
-                        error.HttpRequestTruncated,
-
-                        // transport read/write failure; retry on a fresh connection
-                        error.ReadFailed,
-                        error.WriteFailed,
-
-                        // transient connect failures
-                        error.ConnectionRefused,
-                        error.ConnectionResetByPeer,
-                        error.HostUnreachable,
-                        error.NetworkUnreachable,
-                        error.NetworkDown,
-                        error.Timeout,
-                        error.NameServerFailure,
-                        => {
-                            log.warn("Failed to receive headers: {}", .{err});
-                            return .retry();
-                        },
-
-                        else => {
-                            log.err("Failed to receive headers: {}", .{err});
-                            return err;
-                        },
-                    }
-                };
-
-                if (res.head.status != .partial_content and res.head.status != .ok) {
-                    const status: parallel_read.Status = switch (res.head.status) {
-                        .request_timeout => .retry(),
-                        .too_many_requests => .throttle(null),
-                        else => if (res.head.status.class() == .server_error) .retry() else {
-                            log.err("Failed to read {s}: {s}", .{ job.batch.path, res.head.bytes });
-                            return error.RequestFailed;
-                        },
-                    };
-                    log.warn("Failed to read {s}: {s}", .{ job.batch.path, res.head.bytes });
-                    return status;
-                }
-
-                const content_range = blk: {
-                    var it = res.head.iterateHeaders();
-                    while (it.next()) |header| {
-                        if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                            break :blk parallel_read.parseContentRange(header.value);
-                        }
-                    }
-                    break :blk null;
-                };
-
-                const reader = res.reader(&.{});
-                parallel_read.readChunk(reader, content_range, job.file_offset, job.data, job.chunk_offset, job.chunk_len) catch |err| {
-                    switch (err) {
-                        error.EndOfStream,
-                        error.ReadFailed,
-                        => {
-                            log.warn("Failed to read from response: {}", .{err});
-                            return .retry();
-                        },
-                        else => {
-                            log.err("Failed to read from response: {}", .{err});
-                            return err;
-                        },
-                    }
-                };
-
-                return .success;
-            }
-        };
-    };
+    const authorization_header_size = "Bearer ".len + OAuthToken.Size;
 
     const Token = struct {
-        header: []u8,
+        header_storage: []u8,
+        header_len: usize = 0,
         expires_at: std.Io.Timestamp,
 
         fn expired(self: *const Token, io_: std.Io) bool {
             const now: std.Io.Timestamp = .now(io_, .real);
             return now.toSeconds() >= self.expires_at.toSeconds();
+        }
+
+        fn header(self: *const Token) []const u8 {
+            return self.header_storage[0..self.header_len];
         }
     };
 
@@ -307,7 +189,11 @@ pub const GCS = struct {
     client: *std.http.Client,
     config: Config,
     token: Token,
-    read_pool: *ParallelRead.Pool,
+    minimum_request_size: usize,
+    max_retries: usize,
+    retry_initial_delay: std.Io.Duration,
+    retry_max_delay: std.Io.Duration,
+    read_stats: AtomicReadStats = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
@@ -320,14 +206,10 @@ pub const GCS = struct {
         } = null,
         endpoint_url: []const u8 = "https://storage.googleapis.com",
         region: []const u8 = "auto",
-        read_pool: parallel_read.InitOpts = .{
-            .chunk_size = 16 << 20,
-            .num_workers = 32,
-            .queue_capacity = 128,
-            .max_retries = 5,
-            .retry_initial_delay = .fromMilliseconds(500),
-            .retry_max_delay = .fromSeconds(30),
-        },
+        minimum_request_size: usize = 16 << 20,
+        max_retries: usize = 5,
+        retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
+        retry_max_delay: std.Io.Duration = .fromSeconds(30),
     };
 
     pub const InitError = error{
@@ -338,12 +220,7 @@ pub const GCS = struct {
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, opts: InitOpts) InitError!GCS {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         errdefer arena.deinit();
-
-        const read_pool = try allocator.create(ParallelRead.Pool);
-        errdefer allocator.destroy(read_pool);
-
-        try read_pool.init(allocator, inner, http_client, opts.read_pool);
-        errdefer read_pool.deinit(allocator, inner);
+        range_read.assertValidOptions(opts.minimum_request_size, opts.retry_initial_delay, opts.retry_max_delay);
 
         const config: Config = .{
             .credentials = if (opts.credentials) |creds| switch (creds) {
@@ -365,7 +242,7 @@ pub const GCS = struct {
         };
 
         const token: Token = .{
-            .header = try arena.allocator().alloc(u8, "Bearer ".len + OAuthToken.Size),
+            .header_storage = try arena.allocator().alloc(u8, authorization_header_size),
             .expires_at = .zero,
         };
 
@@ -376,7 +253,10 @@ pub const GCS = struct {
             .client = http_client,
             .config = config,
             .token = token,
-            .read_pool = read_pool,
+            .minimum_request_size = opts.minimum_request_size,
+            .max_retries = opts.max_retries,
+            .retry_initial_delay = opts.retry_initial_delay,
+            .retry_max_delay = opts.retry_max_delay,
         };
     }
 
@@ -520,27 +400,37 @@ pub const GCS = struct {
             .ignore_unknown_fields = true,
         });
         defer oauth_token.deinit();
-        self.token = .{
-            .header = try std.fmt.bufPrint(self.token.header, "Bearer {s}", .{oauth_token.value.access_token}),
-            .expires_at = std.Io.Clock.now(.real, self.base.inner).addDuration(.fromSeconds(@intCast(oauth_token.value.expires_in))),
-        };
+        const header = try std.fmt.bufPrint(self.token.header_storage, "Bearer {s}", .{oauth_token.value.access_token});
+        self.token.header_len = header.len;
+        self.token.expires_at = std.Io.Clock.now(.real, self.base.inner).addDuration(
+            .fromSeconds(@intCast(oauth_token.value.expires_in)),
+        );
     }
 
-    fn getOrRefreshToken(self: *GCS) !std.http.Client.Request.Headers.Value {
+    fn getOrRefreshToken(
+        self: *GCS,
+        authorization_buffer: []u8,
+    ) !std.http.Client.Request.Headers.Value {
         if (self.config.credentials == null) {
             return .omit;
         }
 
+        self.mutex.lockUncancelable(self.base.inner);
+        defer self.mutex.unlock(self.base.inner);
         if (self.token.expired(self.base.inner)) {
             try self.refreshToken();
         }
-        return .{ .override = self.token.header };
+        return copyAuthorization(self.token.header(), authorization_buffer);
+    }
+
+    fn copyAuthorization(
+        header: []const u8,
+        authorization_buffer: []u8,
+    ) !std.http.Client.Request.Headers.Value {
+        return .{ .override = try std.fmt.bufPrint(authorization_buffer, "{s}", .{header}) };
     }
 
     pub fn deinit(self: *GCS) void {
-        self.read_pool.deinit(self.allocator, self.base.inner);
-        self.allocator.destroy(self.read_pool);
-
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -594,7 +484,7 @@ pub const GCS = struct {
         return .{
             .io = self.io(),
             .read_hints = .{
-                .minimum_request_size = self.read_pool.chunk_size,
+                .minimum_request_size = self.minimum_request_size,
                 .high_latency = true,
             },
             .read_stats = .{ .userdata = self, .snapshotFn = readStatsSnapshot },
@@ -603,7 +493,7 @@ pub const GCS = struct {
 
     fn readStatsSnapshot(userdata: *anyopaque) ReadStats {
         const self: *GCS = @ptrCast(@alignCast(userdata));
-        return self.read_pool.readStats();
+        return self.read_stats.snapshot();
     }
 
     fn openHandle(self: *GCS) !struct { u32, *Handle } {
@@ -1049,11 +939,12 @@ pub const GCS = struct {
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = try self.resolvePath(dir, sub_path, &path_buffer);
         const uri = self.gcsUri(path);
+        var authorization_buffer: [authorization_header_size]u8 = undefined;
         var req = try self.client.request(.HEAD, uri, .{
             .redirect_behavior = .not_allowed,
             .headers = .{
                 .accept_encoding = .{ .override = "identity" },
-                .authorization = try self.getOrRefreshToken(),
+                .authorization = try self.getOrRefreshToken(&authorization_buffer),
             },
             .extra_headers = &.{},
         });
@@ -1079,38 +970,164 @@ pub const GCS = struct {
     }
 
     fn performRead(self: *GCS, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        const read_size = parallel_read.readSize(handle.size, offset, data);
+        const read_size = range_read.readSize(handle.size, offset, data);
         if (read_size == 0) return 0;
 
         const uri = self.gcsUri(handle.uri);
-        const job_count = std.math.divCeil(usize, read_size, self.read_pool.chunk_size) catch unreachable;
-        const jobs = try self.allocator.alloc(ParallelRead.Job, job_count);
-        defer self.allocator.free(jobs);
-        const pending: u32 = @intCast(job_count);
+        var authorization_buffer: [authorization_header_size]u8 = undefined;
+        const authorization = try self.getOrRefreshToken(&authorization_buffer);
+        var attempt: usize = 0;
+        while (true) {
+            switch (try self.performReadAttempt(uri, handle.uri, authorization, data, offset, read_size, attempt == 0)) {
+                .success => return read_size,
+                .retry => |retry| {
+                    self.read_stats.recordFailure(read_size, retry.failure);
+                    if (attempt >= self.max_retries) return error.RetriesExhausted;
 
-        var batch: ParallelRead.Batch = .{
-            .state = .{ .pending = .init(pending) },
-            .backend = self,
-            .uri = uri,
-            .path = handle.uri,
-            .authorization = try self.getOrRefreshToken(),
+                    self.read_stats.recordRetry();
+                    const delay = retry.delay orelse range_read.fullJitterDelay(
+                        self.base.inner,
+                        self.retry_initial_delay,
+                        self.retry_max_delay,
+                        attempt,
+                    );
+                    self.read_stats.recordRetryDelay(read_size, delay);
+                    self.base.inner.sleep(delay, .awake) catch return error.RetriesExhausted;
+                    attempt += 1;
+                },
+            }
+        }
+    }
+
+    fn performReadAttempt(
+        self: *GCS,
+        uri: std.Uri,
+        path: []const u8,
+        authorization: std.http.Client.Request.Headers.Value,
+        data: []const []u8,
+        offset: u64,
+        read_size: usize,
+        include_timing_sample: bool,
+    ) !range_read.AttemptResult {
+        var range_buf: [64]u8 = undefined;
+        const range_header = std.fmt.bufPrint(
+            &range_buf,
+            "bytes={d}-{d}",
+            .{ offset, offset + @as(u64, @intCast(read_size - 1)) },
+        ) catch unreachable;
+
+        self.read_stats.recordAttempt(read_size);
+        const attempt_started: std.Io.Timestamp = .now(self.base.inner, .awake);
+        var req = self.client.request(.GET, uri, .{
+            .redirect_behavior = .not_allowed,
+            .headers = .{
+                .accept_encoding = .{ .override = "identity" },
+                .authorization = authorization,
+            },
+            .extra_headers = &.{.{ .name = "Range", .value = range_header }},
+        }) catch |err| switch (err) {
+            error.Timeout => {
+                log.warn("Failed to connect: {}", .{err});
+                return .{ .retry = .{ .failure = .timeout } };
+            },
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.HostUnreachable,
+            error.NetworkUnreachable,
+            error.NetworkDown,
+            error.NameServerFailure,
+            => {
+                log.warn("Failed to connect: {}", .{err});
+                return .{ .retry = .{ .failure = .transient } };
+            },
+            else => {
+                log.err("Failed to connect: {}", .{err});
+                return err;
+            },
+        };
+        defer req.deinit();
+
+        req.sendBodiless() catch |err| switch (err) {
+            error.WriteFailed => {
+                log.warn("Failed to send headers: {}", .{err});
+                return .{ .retry = .{ .failure = .transient } };
+            },
         };
 
-        for (jobs, 0..) |*job, i| {
-            const chunk_offset = i * self.read_pool.chunk_size;
-            job.* = .{
-                .data = data,
-                .file_offset = offset + @as(u64, @intCast(chunk_offset)),
-                .chunk_offset = chunk_offset,
-                .chunk_len = @min(self.read_pool.chunk_size, read_size - chunk_offset),
-                .batch = &batch,
+        var redirect_buffer: [8 * 1024]u8 = undefined;
+        var res = req.receiveHead(&redirect_buffer) catch |err| switch (err) {
+            error.Timeout => {
+                log.warn("Failed to receive headers: {}", .{err});
+                return .{ .retry = .{ .failure = .timeout } };
+            },
+            error.HttpConnectionClosing,
+            error.HttpRequestTruncated,
+            error.ReadFailed,
+            error.WriteFailed,
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.HostUnreachable,
+            error.NetworkUnreachable,
+            error.NetworkDown,
+            error.NameServerFailure,
+            => {
+                log.warn("Failed to receive headers: {}", .{err});
+                return .{ .retry = .{ .failure = .transient } };
+            },
+            else => {
+                log.err("Failed to receive headers: {}", .{err});
+                return err;
+            },
+        };
+
+        if (res.head.status != .partial_content and res.head.status != .ok) {
+            const retry: range_read.Retry = switch (res.head.status) {
+                .request_timeout => .{ .failure = .timeout },
+                .too_many_requests => .{ .failure = .throttle },
+                else => if (res.head.status.class() == .server_error)
+                    .{ .failure = .server_failure }
+                else {
+                    log.err("Failed to read {s}: {s}", .{ path, res.head.bytes });
+                    return error.RequestFailed;
+                },
             };
+            log.warn("Failed to read {s}: {s}", .{ path, res.head.bytes });
+            return .{ .retry = retry };
         }
 
-        try self.read_pool.job_queue.putAll(self.base.inner, jobs);
-        batch.state.waitUncancelable(self.base.inner);
-        if (batch.state.anyError()) |err| return err;
-
-        return read_size;
+        const content_range = blk: {
+            var it = res.head.iterateHeaders();
+            while (it.next()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
+                    break :blk range_read.parseContentRange(header.value);
+                }
+            }
+            break :blk null;
+        };
+        const timing = range_read.readResponse(
+            self.base.inner,
+            res.reader(&.{}),
+            res.head.status,
+            content_range,
+            offset,
+            data,
+            read_size,
+        ) catch |err| switch (err) {
+            error.EndOfStream, error.ReadFailed => {
+                log.warn("Failed to read from response: {}", .{err});
+                return .{ .retry = .{ .failure = .transient } };
+            },
+            else => {
+                log.err("Failed to read from response: {}", .{err});
+                return err;
+            },
+        };
+        self.read_stats.recordSuccess(
+            read_size,
+            timing.ttfbNanoseconds(attempt_started),
+            timing.bodyNanoseconds(),
+            include_timing_sample,
+        );
+        return .{ .success = timing };
     }
 };

@@ -2,161 +2,13 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const parallel_read = @import("parallel_read.zig");
+const range_read = @import("range_read.zig");
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
 const ReadStats = @import("base.zig").ReadStats;
+const AtomicReadStats = @import("base.zig").AtomicReadStats;
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
-
-const ParallelRead = struct {
-    const Pool = parallel_read.Pool(Job);
-
-    const Batch = struct {
-        state: parallel_read.BatchState,
-        uri: std.Uri,
-        url: []const u8,
-        authorization: std.http.Client.Request.Headers.Value,
-    };
-
-    pub const Job = struct {
-        data: []const []u8,
-        file_offset: u64,
-        chunk_offset: usize,
-        chunk_len: usize,
-        batch: *Batch,
-
-        pub fn perform(job: Job, client: *std.http.Client) anyerror!parallel_read.Status {
-            var range_buf: [64]u8 = undefined;
-            const range_header = std.fmt.bufPrint(
-                &range_buf,
-                "bytes={d}-{d}",
-                .{ job.file_offset, job.file_offset + @as(u64, @intCast(job.chunk_len - 1)) },
-            ) catch unreachable;
-
-            var req = client.request(.GET, job.batch.uri, .{
-                .headers = .{
-                    .accept_encoding = .{ .override = "identity" },
-                    .authorization = job.batch.authorization,
-                },
-                .extra_headers = &.{.{ .name = "Range", .value = range_header }},
-            }) catch |err| {
-                switch (err) {
-                    // transient connect failures
-                    error.ConnectionRefused,
-                    error.ConnectionResetByPeer,
-                    error.HostUnreachable,
-                    error.NetworkUnreachable,
-                    error.NetworkDown,
-                    error.Timeout,
-                    error.NameServerFailure,
-                    => {
-                        log.warn("Failed to connect: {}", .{err});
-                        return .retry();
-                    },
-                    else => {
-                        log.err("Failed to connect: {}", .{err});
-                        return err;
-                    },
-                }
-            };
-            defer req.deinit();
-
-            req.sendBodiless() catch |err| switch (err) {
-                error.WriteFailed => {
-                    log.warn("Failed to send headers: {}", .{err});
-                    return .retry();
-                },
-            };
-
-            var redirect_buffer: [8 * 1024]u8 = undefined;
-            var res = req.receiveHead(&redirect_buffer) catch |err| {
-                switch (err) {
-                    // stale keep-alive / peer closed while waiting for response head
-                    error.HttpConnectionClosing,
-                    error.HttpRequestTruncated,
-
-                    // transport read/write failure; retry on a fresh connection
-                    error.ReadFailed,
-                    error.WriteFailed,
-
-                    // transient connect failures
-                    error.ConnectionRefused,
-                    error.ConnectionResetByPeer,
-                    error.HostUnreachable,
-                    error.NetworkUnreachable,
-                    error.NetworkDown,
-                    error.Timeout,
-                    error.NameServerFailure,
-                    => {
-                        log.warn("Failed to receive headers: {}", .{err});
-                        return .retry();
-                    },
-                    else => {
-                        log.err("Failed to receive headers: {}", .{err});
-                        return err;
-                    },
-                }
-            };
-
-            if (res.head.status != .partial_content and res.head.status != .ok) {
-                const status: parallel_read.Status = switch (res.head.status) {
-                    .request_timeout => .retry(),
-                    .too_many_requests => b: {
-                        var it = res.head.iterateHeaders();
-                        while (it.next()) |header| {
-                            if (std.ascii.eqlIgnoreCase(header.name, "RateLimit")) {
-                                var parts = std.mem.splitScalar(u8, header.value, ';');
-                                while (parts.next()) |part| {
-                                    const p = std.mem.trim(u8, part, " \t");
-                                    if (std.mem.startsWith(u8, p, "t=")) {
-                                        const seconds = std.fmt.parseInt(u32, p[2..], 10) catch continue;
-                                        break :b .throttle(.fromSeconds(seconds));
-                                    }
-                                }
-                            }
-                        }
-                        break :b .throttle(null);
-                    },
-                    else => if (res.head.status.class() == .server_error) .retry() else {
-                        log.err("Failed to perform read for {s}\n{s}", .{ job.batch.url, res.head.bytes });
-                        return error.RequestFailed;
-                    },
-                };
-                log.warn("Failed to perform read for {s}\n{s}", .{ job.batch.url, res.head.bytes });
-                return status;
-            }
-
-            const content_range = blk: {
-                var it = res.head.iterateHeaders();
-                while (it.next()) |header| {
-                    if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                        break :blk parallel_read.parseContentRange(header.value);
-                    }
-                }
-                break :blk null;
-            };
-
-            const reader = res.reader(&.{});
-            parallel_read.readChunk(reader, content_range, job.file_offset, job.data, job.chunk_offset, job.chunk_len) catch |err| {
-                switch (err) {
-                    error.EndOfStream,
-                    error.ReadFailed,
-                    => {
-                        log.warn("Failed to read from response: {}", .{err});
-                        return .retry();
-                    },
-                    else => {
-                        log.err("Failed to read from response: {}", .{err});
-                        return err;
-                    },
-                }
-            };
-
-            return .success;
-        }
-    };
-};
 
 pub const API = struct {
     const TREE_URL_TEMPLATE = "https://huggingface.co/api/models/{[repo]s}/{[model]s}/tree/{[rev]s}/{[path]s}?expand=false&recursive=true&limit=1000";
@@ -203,15 +55,11 @@ const RepoKey = struct {
 
 pub const HF = struct {
     pub const InitOpts = struct {
-        read_pool: parallel_read.InitOpts = .{
-            // Chunk size needs to be big enough to avoid hitting the rate limits of HF.
-            .chunk_size = 32 << 20,
-            .num_workers = 32,
-            .queue_capacity = 128,
-            .max_retries = 5,
-            .retry_initial_delay = .fromMilliseconds(500),
-            .retry_max_delay = .fromSeconds(30),
-        },
+        // Requests need to be large enough to avoid hitting HF rate limits.
+        minimum_request_size: usize = 32 << 20,
+        max_retries: usize = 5,
+        retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
+        retry_max_delay: std.Io.Duration = .fromSeconds(30),
     };
 
     pub const Repo = struct {
@@ -245,13 +93,23 @@ pub const HF = struct {
 
         type: Type,
         uri: []const u8,
+        download_url: ?[]const u8,
         pos: u64,
         size: u64,
 
-        pub fn init(allocator: std.mem.Allocator, handle_type: Type, uri: []const u8, size: u64) !Handle {
+        pub fn init(
+            allocator: std.mem.Allocator,
+            handle_type: Type,
+            uri: []const u8,
+            download_url: ?[]const u8,
+            size: u64,
+        ) !Handle {
+            const owned_uri = try allocator.dupe(u8, uri);
+            errdefer allocator.free(owned_uri);
             return .{
                 .type = handle_type,
-                .uri = try allocator.dupe(u8, uri),
+                .uri = owned_uri,
+                .download_url = if (download_url) |url| try allocator.dupe(u8, url) else null,
                 .pos = 0,
                 .size = size,
             };
@@ -259,6 +117,7 @@ pub const HF = struct {
 
         pub fn deinit(self: *Handle, allocator: std.mem.Allocator) void {
             allocator.free(self.uri);
+            if (self.download_url) |url| allocator.free(url);
         }
     };
 
@@ -266,7 +125,11 @@ pub const HF = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     authorization: std.http.Client.Request.Headers.Value,
-    read_pool: *ParallelRead.Pool,
+    minimum_request_size: usize,
+    max_retries: usize,
+    retry_initial_delay: std.Io.Duration,
+    retry_max_delay: std.Io.Duration,
+    read_stats: AtomicReadStats = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
@@ -274,11 +137,7 @@ pub const HF = struct {
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8, opts: InitOpts) !HF {
-        const read_pool = try allocator.create(ParallelRead.Pool);
-        errdefer allocator.destroy(read_pool);
-
-        try read_pool.init(allocator, inner, http_client, opts.read_pool);
-        errdefer read_pool.deinit(allocator, inner);
+        range_read.assertValidOptions(opts.minimum_request_size, opts.retry_initial_delay, opts.retry_max_delay);
 
         var self: HF = .{
             .allocator = allocator,
@@ -291,7 +150,10 @@ pub const HF = struct {
             } else blk: {
                 break :blk .default;
             },
-            .read_pool = read_pool,
+            .minimum_request_size = opts.minimum_request_size,
+            .max_retries = opts.max_retries,
+            .retry_initial_delay = opts.retry_initial_delay,
+            .retry_max_delay = opts.retry_max_delay,
         };
         errdefer switch (self.authorization) {
             .default, .omit => {},
@@ -327,9 +189,6 @@ pub const HF = struct {
     }
 
     pub fn deinit(self: *HF) void {
-        self.read_pool.deinit(self.allocator, self.base.inner);
-        self.allocator.destroy(self.read_pool);
-
         var idx: usize = 0;
         while (idx < self.handles.len) : (idx += 1) {
             const is_closed = for (self.closed_handles.items) |closed_idx| {
@@ -389,7 +248,7 @@ pub const HF = struct {
         return .{
             .io = self.io(),
             .read_hints = .{
-                .minimum_request_size = self.read_pool.chunk_size,
+                .minimum_request_size = self.minimum_request_size,
                 .high_latency = true,
             },
             .read_stats = .{ .userdata = self, .snapshotFn = readStatsSnapshot },
@@ -398,7 +257,7 @@ pub const HF = struct {
 
     fn readStatsSnapshot(userdata: *anyopaque) ReadStats {
         const self: *HF = @ptrCast(@alignCast(userdata));
-        return self.read_pool.readStats();
+        return self.read_stats.snapshot();
     }
 
     fn openHandle(self: *HF) !struct { u32, *Handle } {
@@ -523,6 +382,30 @@ pub const HF = struct {
         }
 
         return tree_root;
+    }
+
+    fn resolveDownloadUrl(self: *HF, repo: Repo, out_buffer: []u8) ![]const u8 {
+        var url_buffer: [8 * 1024]u8 = undefined;
+        var redirect_buffer: [16 * 1024]u8 = undefined;
+        const url = try std.fmt.bufPrint(&url_buffer, API.LFS_FILE_URL_TEMPLATE, repo);
+        const uri: std.Uri = try .parse(url);
+
+        var req = try self.client.request(.HEAD, uri, .{
+            .redirect_behavior = .init(8),
+            .headers = .{
+                .accept_encoding = .{ .override = "identity" },
+                .authorization = self.authorization,
+            },
+        });
+        defer req.deinit();
+
+        try req.sendBodiless();
+        const res = try req.receiveHead(&redirect_buffer);
+        if (res.head.status.class() != .success) {
+            log.err("Failed to resolve download URL for {s}: status={}", .{ url, res.head.status });
+            return error.RequestFailed;
+        }
+        return std.fmt.bufPrint(out_buffer, "{f}", .{req.uri});
     }
 
     fn findDirChildren(tree_items: []const TreeNode, dir_path: []const u8) ?[]const TreeNode {
@@ -654,7 +537,7 @@ pub const HF = struct {
     }
 
     fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
@@ -677,7 +560,7 @@ pub const HF = struct {
     }
 
     fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.OpenError.SystemResources;
@@ -687,13 +570,13 @@ pub const HF = struct {
         const size = getSizeFromTree(tree, repo.path) orelse return std.Io.Dir.OpenError.FileNotFound;
 
         const idx, const handle = self.openHandle() catch return std.Io.Dir.OpenError.Unexpected;
-        handle.* = Handle.init(self.allocator, .directory, full_path, size) catch return std.Io.Dir.OpenError.Unexpected;
+        handle.* = Handle.init(self.allocator, .directory, full_path, null, size) catch return std.Io.Dir.OpenError.Unexpected;
 
         return .{ .handle = @intCast(idx) };
     }
 
     fn dirStat(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.Dir.Stat {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getDirHandle(dir);
 
         return .{
@@ -710,7 +593,7 @@ pub const HF = struct {
     }
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.StatFileError.SystemResources;
@@ -736,7 +619,7 @@ pub const HF = struct {
     }
 
     fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.AccessError.SystemResources;
@@ -751,7 +634,7 @@ pub const HF = struct {
     }
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
@@ -760,21 +643,23 @@ pub const HF = struct {
         const tree = self.getOrFetchTree(repo) catch return std.Io.File.OpenError.Unexpected;
         const size = getSizeFromTree(tree, repo.path) orelse return std.Io.File.OpenError.FileNotFound;
 
+        var download_url_buffer: [16 * 1024]u8 = undefined;
+        const download_url = self.resolveDownloadUrl(repo, &download_url_buffer) catch return std.Io.File.OpenError.Unexpected;
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
-        handle.* = Handle.init(self.allocator, .file, full_path, size) catch return std.Io.File.OpenError.Unexpected;
+        handle.* = Handle.init(self.allocator, .file, full_path, download_url, size) catch return std.Io.File.OpenError.Unexpected;
 
         return .{ .handle = @intCast(idx), .flags = .{ .nonblocking = false } };
     }
 
     fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         for (dirs) |d| {
             self.closeHandle(@intCast(d.handle)) catch {};
         }
     }
 
     fn dirRead(userdata: ?*anyopaque, reader: *std.Io.Dir.Reader, entries: []std.Io.Dir.Entry) std.Io.Dir.Reader.Error!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         if (reader.state == .finished) return 0;
 
@@ -819,20 +704,20 @@ pub const HF = struct {
     }
 
     fn dirRealPath(userdata: ?*anyopaque, dir: std.Io.Dir, out_buffer: []u8) std.Io.Dir.RealPathError!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getDirHandle(dir);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.Dir.RealPathError.SystemResources;
         return path.len;
     }
 
     fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8, out_buffer: []u8) std.Io.Dir.RealPathFileError!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const real_path = self.resolvePath(dir, path_name, out_buffer) catch return std.Io.Dir.RealPathFileError.NameTooLong;
         return real_path.len;
     }
 
     fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
 
         return .{
@@ -849,19 +734,19 @@ pub const HF = struct {
     }
 
     fn fileLength(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.LengthError!u64 {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         return self.getFileHandle(file).size;
     }
 
     fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         for (files) |file| {
             self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
     }
 
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         return self.performRead(handle, data, offset) catch |err| {
             log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
@@ -870,7 +755,7 @@ pub const HF = struct {
     }
 
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
 
         handle.pos = if (relative_offset >= 0)
@@ -880,59 +765,200 @@ pub const HF = struct {
     }
 
     fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         handle.pos = absolute_offset;
     }
 
     fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.Io.File.RealPathError!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HF = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.File.RealPathError.SystemResources;
         return path.len;
     }
 
     fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        if (offset >= handle.size) return 0;
-
-        var read_size: usize = 0;
-        for (data) |buf| read_size += buf.len;
-        read_size = @intCast(@min(handle.size - offset, read_size));
+        const read_size = range_read.readSize(handle.size, offset, data);
         if (read_size == 0) return 0;
 
-        const job_count = std.math.divCeil(usize, read_size, self.read_pool.chunk_size) catch unreachable;
-
-        const jobs = try self.allocator.alloc(ParallelRead.Job, job_count);
-        defer self.allocator.free(jobs);
-        const pending: u32 = @intCast(job_count);
-
-        const repo: Repo = try .parse(handle.uri);
-        var url_buffer: [8 * 1024]u8 = undefined;
-        const url = try std.fmt.bufPrint(&url_buffer, API.LFS_FILE_URL_TEMPLATE, repo);
+        const url = handle.download_url orelse return error.InvalidHandle;
         const uri: std.Uri = try .parse(url);
+        const authorization: std.http.Client.Request.Headers.Value = if (std.mem.startsWith(u8, url, "https://huggingface.co/"))
+            self.authorization
+        else
+            .omit;
 
-        var batch: ParallelRead.Batch = .{
-            .state = .{ .pending = .init(pending) },
-            .uri = uri,
-            .url = url,
-            .authorization = self.authorization,
+        var attempt: usize = 0;
+        while (true) {
+            switch (try self.performReadAttempt(uri, url, authorization, data, offset, read_size, attempt == 0)) {
+                .success => return read_size,
+                .retry => |retry| {
+                    self.read_stats.recordFailure(read_size, retry.failure);
+                    if (attempt >= self.max_retries) return error.RetriesExhausted;
+
+                    self.read_stats.recordRetry();
+                    const delay = retry.delay orelse range_read.fullJitterDelay(
+                        self.base.inner,
+                        self.retry_initial_delay,
+                        self.retry_max_delay,
+                        attempt,
+                    );
+                    self.read_stats.recordRetryDelay(read_size, delay);
+                    self.base.inner.sleep(delay, .awake) catch return error.RetriesExhausted;
+                    attempt += 1;
+                },
+            }
+        }
+    }
+
+    fn performReadAttempt(
+        self: *HF,
+        uri: std.Uri,
+        url: []const u8,
+        authorization: std.http.Client.Request.Headers.Value,
+        data: []const []u8,
+        offset: u64,
+        read_size: usize,
+        include_timing_sample: bool,
+    ) !range_read.AttemptResult {
+        var range_buf: [64]u8 = undefined;
+        const range_header = std.fmt.bufPrint(
+            &range_buf,
+            "bytes={d}-{d}",
+            .{ offset, offset + @as(u64, @intCast(read_size - 1)) },
+        ) catch unreachable;
+
+        self.read_stats.recordAttempt(read_size);
+        const attempt_started: std.Io.Timestamp = .now(self.base.inner, .awake);
+        var req = self.client.request(.GET, uri, .{
+            .redirect_behavior = .not_allowed,
+            .headers = .{
+                .accept_encoding = .{ .override = "identity" },
+                .authorization = authorization,
+            },
+            .extra_headers = &.{.{ .name = "Range", .value = range_header }},
+        }) catch |err| switch (err) {
+            error.Timeout => {
+                log.warn("Failed to connect: {}", .{err});
+                return .{ .retry = .{ .failure = .timeout } };
+            },
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.HostUnreachable,
+            error.NetworkUnreachable,
+            error.NetworkDown,
+            error.NameServerFailure,
+            => {
+                log.warn("Failed to connect: {}", .{err});
+                return .{ .retry = .{ .failure = .transient } };
+            },
+            else => {
+                log.err("Failed to connect: {}", .{err});
+                return err;
+            },
+        };
+        defer req.deinit();
+
+        req.sendBodiless() catch |err| switch (err) {
+            error.WriteFailed => {
+                log.warn("Failed to send headers: {}", .{err});
+                return .{ .retry = .{ .failure = .transient } };
+            },
         };
 
-        for (jobs, 0..) |*job, i| {
-            const chunk_offset = i * self.read_pool.chunk_size;
-            job.* = .{
-                .data = data,
-                .file_offset = offset + @as(u64, @intCast(chunk_offset)),
-                .chunk_offset = chunk_offset,
-                .chunk_len = @min(self.read_pool.chunk_size, read_size - chunk_offset),
-                .batch = &batch,
+        var redirect_buffer: [8 * 1024]u8 = undefined;
+        var res = req.receiveHead(&redirect_buffer) catch |err| switch (err) {
+            error.Timeout => {
+                log.warn("Failed to receive headers: {}", .{err});
+                return .{ .retry = .{ .failure = .timeout } };
+            },
+            error.HttpConnectionClosing,
+            error.HttpRequestTruncated,
+            error.ReadFailed,
+            error.WriteFailed,
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.HostUnreachable,
+            error.NetworkUnreachable,
+            error.NetworkDown,
+            error.NameServerFailure,
+            => {
+                log.warn("Failed to receive headers: {}", .{err});
+                return .{ .retry = .{ .failure = .transient } };
+            },
+            else => {
+                log.err("Failed to receive headers: {}", .{err});
+                return err;
+            },
+        };
+
+        if (res.head.status != .partial_content and res.head.status != .ok) {
+            const retry: range_read.Retry = switch (res.head.status) {
+                .request_timeout => .{ .failure = .timeout },
+                .too_many_requests => .{
+                    .failure = .throttle,
+                    .delay = hfThrottleDelay(res.head),
+                },
+                else => if (res.head.status.class() == .server_error)
+                    .{ .failure = .server_failure }
+                else {
+                    log.err("Failed to perform read for {s}\n{s}", .{ url, res.head.bytes });
+                    return error.RequestFailed;
+                },
             };
+            log.warn("Failed to perform read for {s}\n{s}", .{ url, res.head.bytes });
+            return .{ .retry = retry };
         }
 
-        try self.read_pool.job_queue.putAll(self.base.inner, jobs);
-        batch.state.waitUncancelable(self.base.inner);
-        if (batch.state.anyError()) |err| return err;
+        const content_range = blk: {
+            var it = res.head.iterateHeaders();
+            while (it.next()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
+                    break :blk range_read.parseContentRange(header.value);
+                }
+            }
+            break :blk null;
+        };
 
-        return read_size;
+        const timing = range_read.readResponse(
+            self.base.inner,
+            res.reader(&.{}),
+            res.head.status,
+            content_range,
+            offset,
+            data,
+            read_size,
+        ) catch |err| switch (err) {
+            error.EndOfStream, error.ReadFailed => {
+                log.warn("Failed to read from response: {}", .{err});
+                return .{ .retry = .{ .failure = .transient } };
+            },
+            else => {
+                log.err("Failed to read from response: {}", .{err});
+                return err;
+            },
+        };
+        self.read_stats.recordSuccess(
+            read_size,
+            timing.ttfbNanoseconds(attempt_started),
+            timing.bodyNanoseconds(),
+            include_timing_sample,
+        );
+        return .{ .success = timing };
+    }
+
+    fn hfThrottleDelay(head: std.http.Client.Response.Head) ?std.Io.Duration {
+        var it = head.iterateHeaders();
+        while (it.next()) |header| {
+            if (!std.ascii.eqlIgnoreCase(header.name, "RateLimit")) continue;
+            var parts = std.mem.splitScalar(u8, header.value, ';');
+            while (parts.next()) |part| {
+                const p = std.mem.trim(u8, part, " \t");
+                if (!std.mem.startsWith(u8, p, "t=")) continue;
+                const seconds = std.fmt.parseInt(u32, p[2..], 10) catch continue;
+                return .fromSeconds(seconds);
+            }
+        }
+        return null;
     }
 };

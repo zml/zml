@@ -215,12 +215,29 @@ pub fn main(init: std.process.Init) !void {
                 log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
             }
 
-            const load_read_parallelism = try envUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM", 32);
-            const load_dma_parallelism = try envUsize(init.environ_map, "ZML_LOAD_DMA_PARALLELISM", 32);
-            const load_read_request_size: zml.io.ReadRequestSize = if (init.environ_map.get("ZML_LOAD_READ_REQUEST_MIB")) |value|
-                .{ .fixed = try std.fmt.parseInt(usize, value, 10) * zml.MiB }
+            // Fixed controls take precedence over the corresponding adaptive
+            // initial/cap controls.
+            const load_read_parallelism: zml.io.Parallelism = if (try envOptionalUsize(init.environ_map, "ZML_LOAD_FIXED_READ_PARALLELISM")) |fixed|
+                .{ .fixed = fixed }
             else
-                .auto;
+                .{ .adaptive = .{
+                    .initial = try envUsize(init.environ_map, "ZML_LOAD_READ_INITIAL_PARALLELISM", 12),
+                    .maximum = try envUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM", 128),
+                } };
+            const load_dma_parallelism: zml.io.Parallelism = if (try envOptionalUsize(init.environ_map, "ZML_LOAD_FIXED_DMA_PARALLELISM")) |fixed|
+                .{ .fixed = fixed }
+            else
+                .{ .adaptive = .{
+                    .initial = try envUsize(init.environ_map, "ZML_LOAD_DMA_INITIAL_PARALLELISM", 8),
+                    .maximum = try envUsize(init.environ_map, "ZML_LOAD_DMA_PARALLELISM", 32),
+                } };
+            const load_read_request_size: zml.io.ReadRequestSize = if (try envOptionalMib(init.environ_map, "ZML_LOAD_READ_REQUEST_MIB")) |fixed|
+                .{ .fixed = fixed }
+            else
+                .{ .adaptive = .{
+                    .initial = try envOptionalMib(init.environ_map, "ZML_LOAD_READ_REQUEST_INITIAL_MIB"),
+                    .maximum = try envMib(init.environ_map, "ZML_LOAD_READ_REQUEST_MAX_MIB", 128),
+                } };
             const load_dma_block_mib = try envUsize(init.environ_map, "ZML_LOAD_DMA_BLOCK_MIB", 2);
             const load_max_pinned_mib = try envUsize(init.environ_map, "ZML_LOAD_MAX_PINNED_MIB", 2048);
 
@@ -241,6 +258,20 @@ pub fn main(init: std.process.Init) !void {
 fn envUsize(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {
     const value = environ_map.get(name) orelse return default;
     return std.fmt.parseInt(usize, value, 10);
+}
+
+fn envOptionalUsize(environ_map: *const std.process.Environ.Map, name: []const u8) !?usize {
+    const value = environ_map.get(name) orelse return null;
+    return try std.fmt.parseInt(usize, value, 10);
+}
+
+fn envMib(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {
+    return std.math.mul(usize, try envUsize(environ_map, name, default), zml.MiB);
+}
+
+fn envOptionalMib(environ_map: *const std.process.Environ.Map, name: []const u8) !?usize {
+    const value = try envOptionalUsize(environ_map, name) orelse return null;
+    return try std.math.mul(usize, value, zml.MiB);
 }
 
 const TreeCounts = struct {

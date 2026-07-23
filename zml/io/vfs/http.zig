@@ -4,11 +4,20 @@ const stdx = @import("stdx");
 
 const VFSBase = @import("base.zig").VFSBase;
 const Backend = @import("base.zig").Backend;
-const parallel_read = @import("parallel_read.zig");
+const ReadStats = @import("base.zig").ReadStats;
+const AtomicReadStats = @import("base.zig").AtomicReadStats;
+const range_read = @import("range_read.zig");
 
 const log = std.log.scoped(.@"zml/io/vfs/http");
 
 pub const HTTP = struct {
+    pub const InitOpts = struct {
+        minimum_request_size: usize = 16 << 20,
+        max_retries: usize = 5,
+        retry_initial_delay: std.Io.Duration = .fromMilliseconds(500),
+        retry_max_delay: std.Io.Duration = .fromSeconds(30),
+    };
+
     const Handle = struct {
         pub const Type = enum {
             file,
@@ -43,16 +52,37 @@ pub const HTTP = struct {
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     protocol: Protocol,
+    minimum_request_size: usize,
+    max_retries: usize,
+    retry_initial_delay: std.Io.Duration,
+    retry_max_delay: std.Io.Duration,
+    read_stats: AtomicReadStats = .{},
     handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, protocol: Protocol) !HTTP {
+        return initWithOptions(allocator, inner, http_client, protocol, .{});
+    }
+
+    pub fn initWithOptions(
+        allocator: std.mem.Allocator,
+        inner: std.Io,
+        http_client: *std.http.Client,
+        protocol: Protocol,
+        opts: InitOpts,
+    ) !HTTP {
+        range_read.assertValidOptions(opts.minimum_request_size, opts.retry_initial_delay, opts.retry_max_delay);
+
         return .{
             .allocator = allocator,
             .base = .init(inner),
             .client = http_client,
             .protocol = protocol,
+            .minimum_request_size = opts.minimum_request_size,
+            .max_retries = opts.max_retries,
+            .retry_initial_delay = opts.retry_initial_delay,
+            .retry_max_delay = opts.retry_max_delay,
         };
     }
 
@@ -100,10 +130,16 @@ pub const HTTP = struct {
         return .{
             .io = self.io(),
             .read_hints = .{
-                .minimum_request_size = 16 * 1024 * 1024,
+                .minimum_request_size = self.minimum_request_size,
                 .high_latency = true,
             },
+            .read_stats = .{ .userdata = self, .snapshotFn = readStatsSnapshot },
         };
+    }
+
+    fn readStatsSnapshot(userdata: *anyopaque) ReadStats {
+        const self: *HTTP = @ptrCast(@alignCast(userdata));
+        return self.read_stats.snapshot();
     }
 
     fn openHandle(self: *HTTP) !struct { u32, *Handle } {
@@ -152,7 +188,7 @@ pub const HTTP = struct {
     }
 
     fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         switch (operation) {
             .file_read_streaming => |o| {
                 const handle = self.getFileHandle(o.file);
@@ -175,7 +211,7 @@ pub const HTTP = struct {
     }
 
     fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.OpenError.SystemResources;
@@ -187,7 +223,7 @@ pub const HTTP = struct {
     }
 
     fn dirStat(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.Dir.Stat {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getDirHandle(dir);
 
         return .{
@@ -204,7 +240,7 @@ pub const HTTP = struct {
     }
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const size = self.fetchSize(dir, sub_path) catch return std.Io.Dir.StatFileError.Unexpected;
 
         return .{
@@ -223,7 +259,7 @@ pub const HTTP = struct {
     fn dirAccess(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {}
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         const size = self.fetchSize(dir, sub_path) catch return std.Io.File.OpenError.Unexpected;
 
@@ -237,7 +273,7 @@ pub const HTTP = struct {
     }
 
     fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         for (dirs) |dir| {
             self.closeHandle(@intCast(dir.handle)) catch unreachable;
         }
@@ -249,20 +285,20 @@ pub const HTTP = struct {
     }
 
     fn dirRealPath(userdata: ?*anyopaque, dir: std.Io.Dir, out_buffer: []u8) std.Io.Dir.RealPathError!usize {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getDirHandle(dir);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.Dir.RealPathError.SystemResources;
         return path.len;
     }
 
     fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8, out_buffer: []u8) std.Io.Dir.RealPathFileError!usize {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const real_path = self.resolvePath(dir, path_name, out_buffer) catch return std.Io.Dir.RealPathFileError.NameTooLong;
         return real_path.len;
     }
 
     fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
 
         const handle = self.getFileHandle(file);
 
@@ -280,19 +316,19 @@ pub const HTTP = struct {
     }
 
     fn fileLength(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.LengthError!u64 {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         return self.getFileHandle(file).size;
     }
 
     fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         for (files) |file| {
             self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
     }
 
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         return self.performRead(handle, data, offset) catch |err| {
             log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
@@ -301,7 +337,7 @@ pub const HTTP = struct {
     }
 
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
 
         handle.pos = if (relative_offset >= 0)
@@ -311,13 +347,13 @@ pub const HTTP = struct {
     }
 
     fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         handle.pos = absolute_offset;
     }
 
     fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.Io.File.RealPathError!usize {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        const self: *HTTP = @alignCast(@fieldParentPtr("base", VFSBase.as(userdata)));
         const handle = self.getFileHandle(file);
         const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.File.RealPathError.SystemResources;
         return path.len;
@@ -363,95 +399,183 @@ pub const HTTP = struct {
     }
 
     fn performRead(self: *HTTP, handle: *Handle, data: []const []u8, offset: u64) !usize {
-        const read_size = parallel_read.readSize(handle.size, offset, data);
+        const read_size = range_read.readSize(handle.size, offset, data);
         if (read_size == 0) return 0;
-
-        var range_buf: [64]u8 = undefined;
-        const range_header = blk: {
-            const end = offset + read_size - 1;
-            break :blk std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ offset, end }) catch unreachable;
-        };
 
         var url_buffer: [8 * 1024]u8 = undefined;
         const url = try std.fmt.bufPrint(&url_buffer, "{s}://{s}", .{ @tagName(self.protocol), handle.uri });
         const uri: std.Uri = try .parse(url);
 
-        var req = try self.client.request(.GET, uri, .{
+        var attempt: usize = 0;
+        while (true) {
+            switch (try self.performReadAttempt(uri, url, data, offset, read_size, attempt == 0)) {
+                .success => return read_size,
+                .retry => |retry| {
+                    self.read_stats.recordFailure(read_size, retry.failure);
+                    if (attempt >= self.max_retries) return error.RetriesExhausted;
+
+                    self.read_stats.recordRetry();
+                    const delay = retry.delay orelse range_read.fullJitterDelay(
+                        self.base.inner,
+                        self.retry_initial_delay,
+                        self.retry_max_delay,
+                        attempt,
+                    );
+                    self.read_stats.recordRetryDelay(read_size, delay);
+                    self.base.inner.sleep(delay, .awake) catch return error.RetriesExhausted;
+                    attempt += 1;
+                },
+            }
+        }
+    }
+
+    fn performReadAttempt(
+        self: *HTTP,
+        uri: std.Uri,
+        url: []const u8,
+        data: []const []u8,
+        offset: u64,
+        read_size: usize,
+        include_timing_sample: bool,
+    ) !range_read.AttemptResult {
+        var range_buf: [64]u8 = undefined;
+        const range_header = std.fmt.bufPrint(
+            &range_buf,
+            "bytes={d}-{d}",
+            .{ offset, offset + @as(u64, @intCast(read_size - 1)) },
+        ) catch unreachable;
+
+        self.read_stats.recordAttempt(read_size);
+        const attempt_started: std.Io.Timestamp = .now(self.base.inner, .awake);
+        var req = self.client.request(.GET, uri, .{
+            .redirect_behavior = .not_allowed,
             .headers = .{ .accept_encoding = .{ .override = "identity" } },
             .extra_headers = &.{.{ .name = "Range", .value = range_header }},
-        });
+        }) catch |err| switch (err) {
+            error.Timeout => {
+                log.warn("Failed to connect: {}", .{err});
+                return .{ .retry = .{ .failure = .timeout } };
+            },
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.HostUnreachable,
+            error.NetworkUnreachable,
+            error.NetworkDown,
+            error.NameServerFailure,
+            => {
+                log.warn("Failed to connect: {}", .{err});
+                return .{ .retry = .{ .failure = .transient } };
+            },
+            else => {
+                log.err("Failed to connect: {}", .{err});
+                return err;
+            },
+        };
         defer req.deinit();
 
-        try req.sendBodiless();
+        req.sendBodiless() catch |err| switch (err) {
+            error.WriteFailed => {
+                log.warn("Failed to send headers: {}", .{err});
+                return .{ .retry = .{ .failure = .transient } };
+            },
+        };
 
         var redirect_buffer: [8 * 1024]u8 = undefined;
-        var res = try req.receiveHead(&redirect_buffer);
+        var res = req.receiveHead(&redirect_buffer) catch |err| switch (err) {
+            error.Timeout => {
+                log.warn("Failed to receive headers: {}", .{err});
+                return .{ .retry = .{ .failure = .timeout } };
+            },
+            error.HttpConnectionClosing,
+            error.HttpRequestTruncated,
+            error.ReadFailed,
+            error.WriteFailed,
+            error.ConnectionRefused,
+            error.ConnectionResetByPeer,
+            error.HostUnreachable,
+            error.NetworkUnreachable,
+            error.NetworkDown,
+            error.NameServerFailure,
+            => {
+                log.warn("Failed to receive headers: {}", .{err});
+                return .{ .retry = .{ .failure = .transient } };
+            },
+            else => {
+                log.err("Failed to receive headers: {}", .{err});
+                return err;
+            },
+        };
 
         if (res.head.status != .partial_content and res.head.status != .ok) {
-            log.err("Failed to perform read for {s}", .{handle.uri});
-            log.err("{s}", .{res.head.bytes});
-            return error.RequestFailed;
+            const retry = retryForStatus(res.head.status) orelse {
+                log.err("Failed to read {s}: {s}", .{ url, res.head.bytes });
+                return error.RequestFailed;
+            };
+            log.warn("Failed to read {s}: {s}", .{ url, res.head.bytes });
+            return .{ .retry = retry };
         }
 
         const content_range = blk: {
             var it = res.head.iterateHeaders();
             while (it.next()) |header| {
                 if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                    break :blk parallel_read.parseContentRange(header.value);
+                    break :blk range_read.parseContentRange(header.value);
                 }
             }
             break :blk null;
         };
 
-        try readResponse(res.reader(&.{}), res.head.status, content_range, offset, data, read_size);
-        return read_size;
+        const timing = range_read.readResponse(
+            self.base.inner,
+            res.reader(&.{}),
+            res.head.status,
+            content_range,
+            offset,
+            data,
+            read_size,
+        ) catch |err| switch (err) {
+            error.EndOfStream, error.ReadFailed => {
+                log.warn("Failed to read from response: {}", .{err});
+                return .{ .retry = .{ .failure = .transient } };
+            },
+            else => {
+                log.err("Failed to read from response: {}", .{err});
+                return err;
+            },
+        };
+        self.read_stats.recordSuccess(
+            read_size,
+            timing.ttfbNanoseconds(attempt_started),
+            timing.bodyNanoseconds(),
+            include_timing_sample,
+        );
+        return .{ .success = timing };
     }
 
-    fn readResponse(
-        reader: *std.Io.Reader,
-        status: std.http.Status,
-        content_range: ?parallel_read.ContentRange,
-        offset: u64,
-        data: []const []u8,
-        read_size: usize,
-    ) !void {
-        if (read_size == 0) return;
-        if (content_range) |cr| {
-            if (cr.end < cr.start or cr.start > offset) return error.InvalidContentRange;
-            const response_end = std.math.add(u64, offset, read_size - 1) catch return error.InvalidContentRange;
-            if (cr.end < response_end) return error.InvalidContentRange;
-            return parallel_read.readChunk(reader, cr, offset, data, 0, read_size);
-        }
-        if (status != .ok) return error.InvalidContentRange;
-
-        // A 200 response ignored the Range header and starts at byte zero.
-        if (offset > 0) try reader.discardAll(offset);
-        return parallel_read.readChunk(reader, null, offset, data, 0, read_size);
+    fn retryForStatus(status: std.http.Status) ?range_read.Retry {
+        return switch (status) {
+            .request_timeout => .{ .failure = .timeout },
+            .too_many_requests => .{ .failure = .throttle },
+            else => if (status.class() == .server_error)
+                .{ .failure = .server_failure }
+            else
+                null,
+        };
     }
 };
 
-test "HTTP range responses fill scatter buffers" {
-    var reader: std.Io.Reader = .fixed("23456789");
-    var first: [2]u8 = undefined;
-    var second: [3]u8 = undefined;
-    try HTTP.readResponse(&reader, .partial_content, .{ .start = 2, .end = 9, .total = 10 }, 3, &.{ &first, &second }, 5);
-    try std.testing.expectEqualStrings("34", &first);
-    try std.testing.expectEqualStrings("567", &second);
-}
-
-test "HTTP 200 responses that ignore Range are positioned and scattered" {
-    var reader: std.Io.Reader = .fixed("0123456789");
-    var first: [1]u8 = undefined;
-    var second: [4]u8 = undefined;
-    try HTTP.readResponse(&reader, .ok, null, 3, &.{ &first, &second }, 5);
-    try std.testing.expectEqualStrings("3", &first);
-    try std.testing.expectEqualStrings("4567", &second);
-}
-
-test "HTTP partial responses require a covering Content-Range" {
-    var reader: std.Io.Reader = .fixed("3456");
-    var output: [4]u8 = undefined;
-    try std.testing.expectError(error.InvalidContentRange, HTTP.readResponse(&reader, .partial_content, null, 3, &.{&output}, 4));
-    try std.testing.expectError(error.InvalidContentRange, HTTP.readResponse(&reader, .partial_content, .{ .start = 4, .end = 7, .total = 10 }, 3, &.{&output}, 4));
-    try std.testing.expectError(error.InvalidContentRange, HTTP.readResponse(&reader, .partial_content, .{ .start = 3, .end = 5, .total = 10 }, 3, &.{&output}, 4));
+test "HTTP retry status classification is typed" {
+    try std.testing.expectEqual(
+        @import("base.zig").ReadFailure.timeout,
+        HTTP.retryForStatus(.request_timeout).?.failure,
+    );
+    try std.testing.expectEqual(
+        @import("base.zig").ReadFailure.throttle,
+        HTTP.retryForStatus(.too_many_requests).?.failure,
+    );
+    try std.testing.expectEqual(
+        @import("base.zig").ReadFailure.server_failure,
+        HTTP.retryForStatus(.bad_gateway).?.failure,
+    );
+    try std.testing.expect(HTTP.retryForStatus(.not_found) == null);
 }
