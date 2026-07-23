@@ -16,6 +16,7 @@ pub const Backend = enum {
     triton,
     mosaic_tpu,
     metal,
+    // vanilla,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
@@ -24,7 +25,24 @@ pub const Backend = enum {
             .oneapi => .triton,
             .tpu => .mosaic_tpu,
             .metal => .metal,
-            else => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
+            // .cpu => .vanilla
+            .cpu, .neuron => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
+        };
+    }
+
+    pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
+        return switch (backend) {
+            // .vanilla => true,
+            .triton => true,
+            .metal => platform.target == .metal,
+            .mosaic_tpu => platform.target == .tpu,
+            .cuda_fa2 => platform.target == .cuda,
+            .cuda_fa3 => {
+                if (platform.target != .cuda) return false;
+                const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
+                const cc = zml.platform.cuda.tryGetComputeCapabilities(platform, first_device) orelse return false;
+                return std.mem.eql(u8, cc, "9.0");
+            },
         };
     }
 };
@@ -158,21 +176,13 @@ pub const Parameters = union(Backend) {
 
     pub fn init(options_: Options) Parameters {
         return switch (options_) {
-            .cuda_fa2 => |cuda_fa2_options| .{ .cuda_fa2 = flashattn.paged_fa2.Parameters.init(cuda_fa2_options) },
-            .cuda_fa3 => |cuda_fa3_options| .{ .cuda_fa3 = flashattn.paged_fa3.Parameters.init(cuda_fa3_options) },
-            .triton => |triton_options| .{ .triton = triton.paged.Parameters.init(triton_options) },
-            .mosaic_tpu => |mosaic_tpu_options| .{ .mosaic_tpu = tpu.mosaic_tpu.Parameters.init(mosaic_tpu_options) },
-            .metal => |metal_options| .{ .metal = metal.paged.Parameters.init(metal_options) },
+            inline else => |opts, backend| @unionInit(Parameters, @tagName(backend), .init(opts)),
         };
     }
 
     pub fn options(self: Parameters) Options {
         return switch (self) {
-            .cuda_fa2 => |v| .{ .cuda_fa2 = v.options() },
-            .cuda_fa3 => |v| .{ .cuda_fa3 = v.options() },
-            .triton => |v| .{ .triton = v.options() },
-            .mosaic_tpu => |v| .{ .mosaic_tpu = v.options() },
-            .metal => |v| .{ .metal = v.options() },
+            inline else => |v, backend| @unionInit(Options, @tagName(backend), v.options()),
         };
     }
 
@@ -215,6 +225,44 @@ pub const KvCache = union(enum) {
         v: zml.Tensor,
     },
     dense: zml.Tensor,
+
+    pub fn update(
+        self: KvCache,
+        new_k: zml.Tensor,
+        new_v: zml.Tensor,
+        slot_mapping: zml.Tensor,
+        chunk_size: u32,
+        backend: Backend,
+    ) KvCache {
+        const active_page, const k_chunk = getPageAndOffsetFromSlotMapping(slot_mapping, chunk_size);
+
+        var kv: KvCache = switch (self) {
+            .split => |split| switch (backend) {
+                .cuda_fa2, .cuda_fa3, .triton, .mosaic_tpu, .metal => .{ .split = .{
+                    .k = split.k.scatterSlices(
+                        .{ .page = active_page, .k_chunk = k_chunk },
+                        new_k,
+                        .{ .update_fn = zml.Tensor.ScatterOpts.override, .indices_are_unique = false, .indices_are_sorted = false },
+                    ),
+                    .v = split.v.scatterSlices(
+                        .{ .page = active_page, .k_chunk = k_chunk },
+                        new_v,
+                        .{ .update_fn = zml.Tensor.ScatterOpts.override, .indices_are_unique = false, .indices_are_sorted = false },
+                    ),
+                } },
+            },
+            .dense => @panic("TODO"),
+        };
+        kv.split.k = kv.split.k.reuseBuffer(self.split.k);
+        kv.split.v = kv.split.v.reuseBuffer(self.split.v);
+        return kv;
+    }
+
+    pub fn getPageAndOffsetFromSlotMapping(slot_mapping: zml.Tensor, page_size: u32) [2]zml.Tensor {
+        const page_index = slot_mapping.divByConst(page_size);
+        const offset = slot_mapping.remainder(.scalar(page_size, slot_mapping.dtype()));
+        return .{ page_index, offset };
+    }
 };
 
 pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
@@ -275,6 +323,8 @@ test "Backend.auto selects triton on oneAPI" {
 
 test pagedAttention {
     const platform = zml.testing.env();
+    // Check the reference implem is available
+    if (!Backend.triton.isAvailable(platform)) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     var arena_state: std.heap.ArenaAllocator = .init(allocator);
@@ -285,40 +335,51 @@ test pagedAttention {
     const num_pages = 64;
     const page_size = 16;
     const max_num_pages = 16;
-    const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, token_index: zml.Tensor } = .{
-        .q = .init(.{ .b = 8, .hkv = 2, .hg = 4, .hd = 32 }, .f32),
-        .k = .init(.{ .b = 8, .hkv = 2, .k = 16, .hd = 32 }, .f32),
-        .v = .init(.{ .b = 8, .hkv = 2, .k = 16, .hd = 32 }, .f32),
+    const dt: zml.DataType = .bf16;
+    const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, token_index: zml.Tensor, slot_mapping: zml.Tensor } = .{
+        .q = .init(.{ .b = 8, .hkv = 2, .hg = 4, .hd = 32 }, dt),
+        .k = .init(.{ .b = 8, .hkv = 2, .hd = 32 }, dt),
+        .v = .init(.{ .b = 8, .hkv = 2, .hd = 32 }, dt),
         .kv_cache = .{
             .split = .{
-                .k = .init(.{ .page = num_pages, .hkv = 2, .k_chunk = page_size, .hd = 32 }, .f32),
-                .v = .init(.{ .page = num_pages, .hkv = 2, .k_chunk = page_size, .hd = 32 }, .f32),
+                .k = .init(.{ .page = num_pages, .hkv = 2, .k_chunk = page_size, .hd = 32 }, dt),
+                .v = .init(.{ .page = num_pages, .hkv = 2, .k_chunk = page_size, .hd = 32 }, dt),
             },
         },
         .token_index = .init(.{}, .u32),
+        .slot_mapping = .init(.{ .b = 8 }, .u32),
     };
 
     const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{} }, .{});
     defer rng_q.deinit();
+    const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{} }, .{});
+    defer rng_k.deinit();
     const rng_kv_cache = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.kv_cache.split.k.shape(), .{} }, .{});
     defer rng_kv_cache.deinit();
 
-    const triton_options: Options.Args = .{
+    const update_exe = try platform.compileFn(allocator, io, KvCache.update, .{ tensors.kv_cache, tensors.k, tensors.v, tensors.slot_mapping, page_size, .triton }, .{});
+    defer update_exe.deinit();
+
+    const triton_options_args: Options.Args = .{
         .backend = .triton,
         .is_prefill = true,
         .batch_size = batch_size,
         .seq_len = 64,
         .max_num_pages = max_num_pages,
         .max_token_count = 16 * page_size,
-        .num_heads = 8,
-        .num_kv_heads = 2,
-        .head_dim = 32,
+        .num_heads = @intCast(tensors.q.dim(.hg) * tensors.q.dim(.hkv)),
+        .num_kv_heads = @intCast(tensors.q.dim(.hkv)),
+        .head_dim = @intCast(tensors.q.dim(.hd)),
         .max_seqlen_q = 16 * 2,
     };
-    const triton_parameters: Parameters = .init(.fromBackend(triton_options));
+    const triton_parameters: Parameters = .init(.fromBackend(triton_options_args));
     const attn_opts: AttentionOptions = .{ .is_causal = true };
     var q = try zml.testing.autoCall(allocator, io, &rng_q, zml.Tensor.Rng.normal, {});
     defer q.deinit();
+    var new_k = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
+    defer new_k.deinit();
+    var new_v = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
+    defer new_v.deinit();
 
     var kv_cache_k = try zml.testing.autoCall(allocator, io, &rng_kv_cache, zml.Tensor.Rng.normal, {});
     defer kv_cache_k.deinit();
@@ -326,10 +387,14 @@ test pagedAttention {
     defer kv_cache_v.deinit();
     const kv_cache_d: zml.Bufferized(KvCache) = .{ .split = .{ .k = kv_cache_k, .v = kv_cache_v } };
 
-    var token_index = try zml.Buffer.scalar(io, platform, 64, .u32);
-    defer token_index.deinit();
-
-    const triton_exe = try platform.compileFn(allocator, io, pagedAttention, .{ triton_parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, attn_opts }, .{ .program_name = "paged_attention_triton" });
+    const shardings: []const zml.Sharding = &.{ platform.replicated_sharding, platform.shardings.get("model").? };
+    const triton_exe = try platform.compileFn(
+        allocator,
+        io,
+        pagedAttention,
+        .{ triton_parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, attn_opts },
+        .{ .program_name = "paged_attention_triton", .shardings = shardings },
+    );
     defer triton_exe.deinit();
 
     const num_prefill = 1;
@@ -358,6 +423,22 @@ test pagedAttention {
         4 * page_size + 3,
     };
 
+    // TODO: fix me. Currently this work cause all implementation ready k and v directly from the kv cache.
+    // update kv cache
+    // {
+    //     const slot_mapping: [batch_size]u32 = .{
+    //         10 * page_size,
+    //         5 * page_size + 3,
+    //         8 * page_size + 11,
+    //         63 * page_size + 9,
+    //         5 * page_size + 3,
+    //         5 * page_size + 3,
+    //         5 * page_size + 3,
+    //         5 * page_size + 3,
+    //     };
+    //     const slot_mapping_d: zml.Buffer = try .fromBytes(io, platform, tensors.slot_mapping.shape(), .replicated, @ptrCast(&slot_mapping));
+    //     kv_cache_d = try zml.testing.autoCall(allocator, io, &update_exe, KvCache.update, .{ kv_cache_d, new_k, new_v, slot_mapping_d });
+    // }
     const query_start_len: [batch_size + 1]i32 = .{ 0, 32, 33, 34, 35, 36, 37, 37, 37 };
 
     const triton_parameters_d: zml.Bufferized(Parameters) = .{ .triton = .{
@@ -366,26 +447,23 @@ test pagedAttention {
         .query_start_len = try .fromBytes(io, platform, triton_parameters.triton.query_start_len.shape(), .replicated, @ptrCast(&query_start_len)),
     } };
 
-    const triton_d = try zml.testing.autoCall(allocator, io, &triton_exe, pagedAttention, .{ triton_parameters_d, q, undefined, undefined, kv_cache_d });
+    const triton_d = try zml.testing.autoCall(allocator, io, &triton_exe, pagedAttention, .{ triton_parameters_d, q, new_k, new_v, kv_cache_d });
     const triton_h: zml.Slice = try triton_d.toSliceAlloc(allocator, io);
     defer triton_h.free(allocator);
 
     for (std.enums.values(Backend)) |backend| {
-        switch (backend) {
-            .triton => continue,
-            else => {},
-        }
+        if (!backend.isAvailable(platform)) continue;
 
-        var backend_options = triton_options;
-        backend_options.backend = backend;
-        const parameters: Parameters = .init(.fromBackend(backend_options));
+        var backend_options_args = triton_options_args;
+        backend_options_args.backend = backend;
+        const parameters: Parameters = .init(.fromBackend(backend_options_args));
 
         const exe = try platform.compileFn(
             allocator,
             io,
             pagedAttention,
             .{ parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, attn_opts },
-            .{ .program_name = try std.fmt.allocPrint(arena, "paged_attention_{t}", .{backend}) },
+            .{ .program_name = try std.fmt.allocPrint(arena, "paged_attention_{t}", .{backend}), .shardings = shardings },
         );
         defer exe.deinit();
 
@@ -399,14 +477,14 @@ test pagedAttention {
                 var block_table_decode: @TypeOf(block_table) = @splat(@splat(-1));
                 @memcpy(block_table_decode[0..num_decode], block_table[num_prefill..]);
 
-                var seq_lens_prefill: @TypeOf(seq_lens) = @splat(0);
-                @memcpy(seq_lens_prefill[0..num_prefill], seq_lens[0..num_prefill]);
-                var seq_lens_decode: @TypeOf(seq_lens) = @splat(0);
-                @memcpy(seq_lens_decode[0..num_decode], seq_lens[num_prefill..]);
+                var seq_lens_prefill: [batch_size + 1]i32 = @splat(0);
+                @memcpy(seq_lens_prefill[1 .. num_prefill + 1], seq_lens[0..num_prefill]);
+                var seq_lens_decode: [batch_size + 1]i32 = @splat(0);
+                @memcpy(seq_lens_decode[1 .. num_decode + 1], seq_lens[num_prefill..]);
 
-                var seqused_k_prefill: @TypeOf(query_start_len) = @splat(query_start_len[num_prefill]);
+                var seqused_k_prefill: [batch_size]i32 = @splat(query_start_len[num_prefill]);
                 @memcpy(seqused_k_prefill[0..num_prefill], query_start_len[0..num_prefill]);
-                var seqused_k_decode: @TypeOf(query_start_len) = @splat(query_start_len[batch_size - 1]);
+                var seqused_k_decode: [batch_size]i32 = @splat(query_start_len[batch_size - 1]);
                 @memcpy(seqused_k_decode[0 .. num_decode + 1], query_start_len[num_prefill..]);
 
                 const prefill_token_count = query_start_len[num_prefill];
@@ -437,7 +515,7 @@ test pagedAttention {
         };
         // defer Parameters.deinitBuffer(&parameters_d);
 
-        const output_d = try zml.testing.autoCall(allocator, io, &exe, pagedAttention, .{ parameters_d, q, undefined, undefined, kv_cache_d });
+        const output_d = try zml.testing.autoCall(allocator, io, &exe, pagedAttention, .{ parameters_d, q, new_k, new_v, kv_cache_d });
         try zml.testing.expectClose(io, triton_h, output_d, .{
             .absolute_tolerance = 1e-3,
             .relative_tolerance = 1e-2,
