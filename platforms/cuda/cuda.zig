@@ -126,6 +126,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_cuda.so" });
-        break :blk .loadFrom(path);
+        _ = path;
+        break :blk .loadFrom("/home/raphael/Git-Repos/xla_quant/bazel-bin/xla/pjrt/c/pjrt_c_api_gpu_plugin.so");
     };
 }

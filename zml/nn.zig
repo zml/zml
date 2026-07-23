@@ -13,12 +13,49 @@ const zml = @import("zml.zig");
 
 const log = std.log.scoped(.@"zml/nn");
 
+/// Opt-in to the experimental native A4W4 (fp4 activation) path via env var.
+/// Off by default: fp4 activation quant collapses gemma coherence and does not
+/// help M=1 decode (see nn.zig Linear.forward).
+fn a4w4Enabled() bool {
+    const v = std.c.getenv("ZML_A4W4") orelse std.c.getenv("METAL_A4W4") orelse return false;
+    const s = std.mem.span(v);
+    return s.len > 0 and !std.mem.eql(u8, s, "0");
+}
+
+/// DIAGNOSTIC: when set, the A4W4 branch quantizes the activation to fp4 and then
+/// immediately DEQUANTIZES it back to bf16, feeding the result through the proven
+/// weight-only scaled-dot. This isolates activation-quant correctness from the
+/// native fp4xfp4 block-scaled MMA lowering: coherent output => the quant is
+/// correct and the bug is in the native kernel; garbage => the quant is wrong.
+fn a4w4RoundTrip() bool {
+    const v = std.c.getenv("ZML_A4W4_RT") orelse return false;
+    const s = std.mem.span(v);
+    return s.len > 0 and !std.mem.eql(u8, s, "0");
+}
+
+/// Opt IN to the native/fused fp4 scaled-dot op for A4W4. Off by default because
+/// it is BROKEN in the full-model context: the op passes every isolated golden
+/// unit test (operands/all-scales/transpose/M1/computed-lhs/fused-epilogue/
+/// large-K/negatives) but produces <pad> garbage in the model. The default A4W4
+/// path instead dequants both fp4 operands + a plain bf16 dot, which is CORRECT
+/// and coherent (proven via ZML_A4W4=1 greedy). Set ZML_A4W4_FUSED=1 to use the
+/// broken fused op (for debugging). See memory nvfp4-w4a4-cuda-native.
+fn a4w4Fused() bool {
+    const v = std.c.getenv("ZML_A4W4_FUSED") orelse return false;
+    const s = std.mem.span(v);
+    return s.len > 0 and !std.mem.eql(u8, s, "0");
+}
+
 pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
     tag: Shape.Tag,
     scales: ?Tensor = null,
     global_scale: ?Tensor = null,
+    // NVFP4 activation global scale. When present, the activation is quantized
+    // to fp4 (A4W4) and the block-scaled matmul runs natively (Blackwell cuDNN)
+    // instead of the weight-only pre-division path.
+    input_global_scale: ?Tensor = null,
 
     pub fn init(weight: Tensor, bias: ?Tensor, tag: anytype) Linear {
         return .{
@@ -33,6 +70,7 @@ pub const Linear = struct {
         if (self.bias) |*bias| bias.deinit();
         if (self.scales) |*scales| scales.deinit();
         if (self.global_scale) |*gs| gs.deinit();
+        if (self.input_global_scale) |*igs| igs.deinit();
     }
 
     pub fn forward(self: Linear, x: Tensor) Tensor {
@@ -43,11 +81,64 @@ pub const Linear = struct {
             else
                 self.weight;
 
+            // Native A4W4: quantize the activation to fp4 and emit the 5-operand
+            // block-scaled composite (real lhs scale + combined global epilogue).
+            // A4W4 (native activation-fp4) path. DISABLED: the round-trip diagnostic
+            // proved fp4 activation quant collapses gemma-12B coherence (matches the
+            // reference quant exactly -> gemma's outlier activations hit the W4A4
+            // quality cliff), AND A4W4 does not help M=1 decode (bandwidth-bound on
+            // the fp4 weight, which weight-only already reads). Kept behind a flag for
+            // prefill experiments. Set METAL_A4W4=1 / ZML_A4W4=1 to re-enable.
+            if (self.input_global_scale != null and a4w4Enabled()) {
+                const igs = self.input_global_scale.?;
+                const wgs = self.global_scale.?;
+                const quant = ops.quantizeNvfp4(x, igs, self.tag);
+                if (a4w4RoundTrip()) {
+                    // Isolate quant from the native MMA: dequant the fp4 activation
+                    // (~x) and run the PROVEN weight-only path (pre-divide by wgs).
+                    const deq = ops.dequantNvfp4(quant.q, quant.scale, igs, self.tag);
+                    const divisor = wgs.withTags(.{.one}).squeeze(.one);
+                    const lhs_rt = deq.div(divisor.broad(deq.shape())).convert(x.dtype());
+                    break :blk ops.scaledDot(lhs_rt, weight, scales, self.tag);
+                }
+                const igs_s = igs.convert(.f32).reshape(zml.Shape.init(.{}, .f32));
+                const wgs_s = wgs.convert(.f32).reshape(zml.Shape.init(.{}, .f32));
+                const combined = Tensor.scalar(1.0, .f32).div(igs_s.mul(wgs_s));
+                // Present the weight (rhs) in CANONICAL orientation [kw, dout]
+                // (contracting axis first) via an explicit transpose. The scaled-
+                // dot's INTERNAL non-canonical canonicalization mis-repacks a
+                // K-packed fp4 rhs -> garbage (golden test Fp4NonCanonicalKPairing
+                // fails); an explicit transpose op repacks fp4 correctly (golden
+                // test Fp4ExplicitTransposedRhs passes), so this routes every layer
+                // through the working canonical fp4xfp4 path. scales [dout, sc] ->
+                // [sc, dout] to match. TODO: hoist the transpose to load time (this
+                // repacks the weight every forward).
+                const weight_c = weight.transpose(.{ .d, .dout });
+                const scales_c = scales.transpose(.{ .sc, .dout });
+                if (a4w4Fused()) {
+                    // Native/fused fp4 scaled-dot. BROKEN in-model (passes every
+                    // unit test, garbage in the model); opt-in for debugging only.
+                    break :blk ops.scaledDotNative(quant.q, quant.scale, weight_c, scales_c, combined, self.tag).convert(x.dtype());
+                }
+                // Default A4W4: dequant both fp4 operands + plain bf16 dot. CORRECT
+                // and coherent (the fused scaled-dot op is broken in full-model
+                // context). ~floor speed; the fast+correct path is the cutlass
+                // sm120 nvfp4 kernel as an XLA custom call (matches vLLM).
+                const deq_a = ops.dequantNvfp4(quant.q, quant.scale, igs, self.tag).convert(x.dtype());
+                const deq_w = ops.dequantNvfp4(weight_c, scales_c, wgs, self.tag).convert(x.dtype());
+                break :blk deq_a.dot(deq_w, self.tag);
+            }
+
+            // Weight-only NVFP4 (W4A16). Apply the weight global scale by
+            // PRE-DIVIDING the activation, leaving the e4m3 block scale untouched.
+            // Keeping the block scale as f8e4m3fn (not bf16) is REQUIRED for the
+            // Triton scaled-dot path: IsTritonSupportedScaledDot only accepts scale
+            // types {F8E4M3FN, F8E5M2, F8E8M0FNU, S8}; a bf16 scale forbids it and
+            // forces the (slow) dequant floor. Math: out = (x/wgs)·(w_fp4·e4m3)
+            // = x·(w_fp4·e4m3/wgs) = x·w_true.
             const lhs = if (self.global_scale) |divisor_| blk_lhs: {
                 stdx.debug.assert(divisor_.dtype() == .f32, "divisor must be f32, got {}", .{divisor_.dtype()});
                 stdx.debug.assert(divisor_.rank() == 1 and divisor_.dim(0) == 1, "divisor must have shape [1], got {f}", .{divisor_.shape()});
-
-                // We may not need to do that for hardware that supports nvfp4
                 const divisor = divisor_.withTags(.{.one}).squeeze(.one);
                 break :blk_lhs x.convert(.f32).div(divisor.broad(x.shape())).convert(x.dtype());
             } else x;

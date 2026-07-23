@@ -1716,6 +1716,139 @@ fn scaledDotReference(in: []const Tensor, out_shape: Shape) Tensor {
     );
 }
 
+const NVFP4_GROUP: i64 = 16;
+const FP4_E2M1_MAX: f32 = 6.0;
+
+/// Dynamic NVFP4 activation quantization (compressed-tensors convention, matches
+/// llmd/tools/stack_nvfp4_experts/nvfp4_quant.quantize_nvfp4):
+///   scale[g] = e4m3( amax(group_g) / 6 * input_global_scale )
+///   q        = fp4( x * input_global_scale / f32(scale[g]) )
+///   dequant  = q * f32(scale[g]) / input_global_scale
+/// `x` must have the contracting axis tagged `k_tag`; returns the fp4 activation
+/// (same shape/tags as x) and the e4m3 block scale with the group axis tagged `.sc`.
+pub fn quantizeNvfp4(x: Tensor, input_global_scale: Tensor, k_tag: anytype) struct { q: Tensor, scale: Tensor } {
+    const k = Shape.toTag(k_tag);
+    const kdim = x.shape().dim(k);
+    const kg = @divExact(kdim, NVFP4_GROUP);
+
+    const xf = x.convert(.f32);
+    // Group the contracting axis into [.sc (kg), .kb (16)].
+    const xg = xf.splitAxis(k, .{ .sc = kg, .kb = NVFP4_GROUP });
+
+    const global = input_global_scale.convert(.f32).reshape(Shape.init(.{}, .f32));
+    const six = Tensor.scalar(FP4_E2M1_MAX, .f32);
+
+    // scale[g] = e4m3( amax(group)/6 * global ). max keeps the reduced axis as
+    // size 1, so squeeze .kb back out to keep the scale rank == operand rank
+    // (CompositeRewriter's is_supported requires matching ranks).
+    const gamax = xg.abs().max(.kb).squeeze(.kb); // [.., .sc]
+    const scale_f = gamax.div(six.broad(gamax.shape())).mul(global.broad(gamax.shape()));
+    const scale_e4m3 = scale_f.convert(.f8e4m3fn);
+
+    // q = fp4( x * global / scale ), clamped to the e2m1 range.
+    // broad is tag-based: it re-broadcasts the reduced [.., .sc] scale back over
+    // the [.., .sc, .kb] grouped activation (adds the missing .kb axis).
+    const sf = scale_e4m3.convert(.f32).broad(xg.shape());
+    // Guard against a zero block scale (all-zero activation block): divide by 1
+    // there (x is 0, so q is 0), matching the reference `where(sf==0, 1, sf)`.
+    const zero = Tensor.scalar(0.0, .f32).broad(sf.shape());
+    const safe = Tensor.select(sf.cmp(.EQ, zero), Tensor.scalar(1.0, .f32).broad(sf.shape()), sf);
+    const neg_six = Tensor.scalar(-FP4_E2M1_MAX, .f32);
+    const q_g = xg.mul(global.broad(xg.shape())).div(safe)
+        .clamp(neg_six.broad(xg.shape()), six.broad(xg.shape()))
+        .convert(.f4e2m1);
+
+    return .{
+        .q = q_g.merge(.{ .k = .{ .sc, .kb } }).renameTag(.k, k),
+        .scale = scale_e4m3,
+    };
+}
+
+/// Inverse of `quantizeNvfp4`: reconstruct the f32 activation from the fp4 codes
+/// and e4m3 block scale. dequant = q * scale / input_global_scale (mirrors the
+/// reference). Used to validate the fp4 activation round-trip through the proven
+/// weight-only path (bypasses the block-scaled kernel).
+pub fn dequantNvfp4(q: Tensor, scale: Tensor, input_global_scale: Tensor, k_tag: anytype) Tensor {
+    const k = Shape.toTag(k_tag);
+    const kdim = q.shape().dim(k);
+    const kg = @divExact(kdim, NVFP4_GROUP);
+    const qg = q.convert(.f32).splitAxis(k, .{ .sc = kg, .kb = NVFP4_GROUP });
+    const global = input_global_scale.convert(.f32).reshape(Shape.init(.{}, .f32));
+    const sb = scale.convert(.f32).broad(qg.shape()); // [.., .sc] -> [.., .sc, .kb]
+    const deq = qg.mul(sb).div(global.broad(qg.shape()));
+    return deq.merge(.{ .k = .{ .sc, .kb } }).renameTag(.k, k);
+}
+
+/// Native block-scaled dot with real per-block scales on both operands and an
+/// optional per-tensor global scale applied as an output epilogue. Emits the
+/// 5-operand `xla.scaled_dot` composite (lhs, rhs, lhs_scale, rhs_scale, global)
+/// so XLA can lower it to the native fp4xfp4 (A4W4) block-scaled matmul.
+pub fn scaledDotNative(lhs: Tensor, lhs_scale: Tensor, rhs: Tensor, rhs_scale: Tensor, global: Tensor, args: anytype) Tensor {
+    const lhs_contracting_dim: i8 = @intCast(lhs.shape().hasTag(args).?);
+    const rhs_contracting_dim: i8 = @intCast(rhs.shape().hasTag(args).?);
+
+    const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
+    // Output in f32: the block-scaled products are large (scales up to ~448) and
+    // the tiny per-tensor global is applied after the sum, so a bf16 store of the
+    // pre-global sum loses ~0.4% precision (compounds over layers). Caller
+    // converts back to bf16.
+    var res_shape: Shape = .{ ._dtype = .f32 };
+    var lhs_batching_axes: Axes = .empty;
+    var rhs_batching_axes: Axes = .empty;
+    for (0..lhs.rank()) |li| {
+        const lhs_tag = lhs.shape().tag(li);
+        if (lhs_tag == Shape.toTag(args)) continue;
+        if (rhs.shape().hasTag(lhs_tag)) |ri| {
+            res_shape = res_shape.appendDim(lhs.shape().dim(li), lhs_tag);
+            lhs_batching_axes.appendAssumeCapacity(lhs.shape().axis(li));
+            rhs_batching_axes.appendAssumeCapacity(rhs.shape().axis(ri));
+        }
+    }
+    var lhs_contracting_axes: Axes = .empty;
+    var rhs_contracting_axes: Axes = .empty;
+    lhs_contracting_axes.appendAssumeCapacity(lhs.shape().axis(lhs_contracting_dim));
+    rhs_contracting_axes.appendAssumeCapacity(rhs.shape().axis(rhs_contracting_dim));
+    for (0..lhs.rank()) |l| {
+        if (std.mem.indexOfScalar(i64, lhs_contracting_axes.constSlice(), @intCast(l)) != null) continue;
+        if (std.mem.indexOfScalar(i64, lhs_batching_axes.constSlice(), @intCast(l)) != null) continue;
+        res_shape = res_shape.appendDim(lhs.shape().dim(l), lhs.shape().tag(l));
+    }
+    for (0..rhs.rank()) |r| {
+        if (std.mem.indexOfScalar(i64, rhs_contracting_axes.constSlice(), @intCast(r)) != null) continue;
+        if (std.mem.indexOfScalar(i64, rhs_batching_axes.constSlice(), @intCast(r)) != null) continue;
+        res_shape = res_shape.appendDim(rhs.shape().dim(r), rhs.shape().tag(r));
+    }
+
+    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const dnums = mlir.Attribute.array(mlir_ctx, &.{
+        .array(mlir_ctx, &.{
+            .intArray(mlir_ctx, i64, lhs_contracting_axes.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_contracting_axes.constSlice()),
+        }),
+        .array(mlir_ctx, &.{
+            .intArray(mlir_ctx, i64, lhs_batching_axes.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_batching_axes.constSlice()),
+        }),
+    });
+
+    const global_scalar = global.convert(.f32).reshape(Shape.init(.{}, .f32));
+    // Emit the STANDARD 4-operand xla.scaled_dot composite. The CUDA
+    // CompositeRewriter requires EXACTLY HloScaledDotInstruction::kOperands (== 4)
+    // operands (composite_rewriter.cc), so a 5th (global) operand makes the match
+    // fail and silently drops the op to the dequant-reference custom call. With
+    // both operands fp4 and REAL e4m3 block scales, IsTritonSupportedScaledDot
+    // accepts it and Triton's sm120 ScaledBlockedToMMA (AccelerateMatmul.cpp,
+    // benefit 10, cc/10==12, fp4xfp4) fires -> native block-scaled fp4 tensor-core
+    // MMA, the same instruction class as vLLM's FlashInferCutlassNvFp4LinearKernel,
+    // instead of upcasting the weight to bf16.
+    const outs = composite("xla.scaled_dot", &.{ lhs, rhs, lhs_scale, rhs_scale }, &.{res_shape}, scaledDotReference, res_shape, .{
+        .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dnums)},
+    });
+    // Apply the per-tensor global as an output epilogue (vLLM's `alpha`):
+    // out = scaled_dot(a_fp4, w_fp4, a_e4m3, w_e4m3) * 1/(input_gs * weight_gs).
+    return outs[0].mul(global_scalar.broad(outs[0].shape()));
+}
+
 pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, metadata: anytype, opts: CustomCallOptions) CustomCallResultTypeFromOutputSpec(@TypeOf(outputs)) {
     // Transform generic inputs to flat slice.
     const inputs_: []const Tensor = switch (@typeInfo(@TypeOf(inputs))) {
