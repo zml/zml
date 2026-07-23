@@ -1691,7 +1691,7 @@ pub const paged_fa3 = struct {
                     .hkv = num_kv_heads,
                     .hg = num_head_groups,
                 }, .f32)).withPartitioning(.{ .hkv = .model });
-                const scheduler_metadata = zml.Tensor.zeroes(.init(.{ .b = batch_size + 1 }, .i32)).withPartitioning(.{ .b = .replicated });
+                const scheduler_metadata = zml.Tensor.zeroes(.init(.{ .b = batch_size + 1 }, .i32));
 
                 var q2 = q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
 
@@ -1759,7 +1759,7 @@ pub const paged_fa3 = struct {
                     .hkv = num_kv_heads,
                     .hg = num_head_groups,
                 }, .f32)).withPartitioning(.{ .hkv = .model });
-                const scheduler_metadata_prefill = zml.Tensor.zeroes(.init(.{ .b = batch_size_prefill + 1 }, .i32)).withPartitioning(.{ .b = .replicated });
+                const scheduler_metadata_prefill = zml.Tensor.zeroes(.init(.{ .b = batch_size_prefill + 1 }, .i32));
 
                 var q2 = q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
 
@@ -1815,7 +1815,7 @@ pub const paged_fa3 = struct {
                     .hkv = num_kv_heads,
                     .hg = num_head_groups,
                 }, .f32));
-                const scheduler_metadata_decode = zml.Tensor.zeroes(.init(.{ .b = batch_size_decode + 1 }, .i32)).withPartitioning(.{ .b = .replicated });
+                const scheduler_metadata_decode = zml.Tensor.zeroes(.init(.{ .b = batch_size_decode + 1 }, .i32));
                 var q_decode = q.dynamicSlice1d(0, .{ .start = mixed_parameters.metadata.decode_offset, .len = batch_size_decode }).withPartitioning(.{ .hkv = .model });
 
                 q_decode = q_decode.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
