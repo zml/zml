@@ -1739,6 +1739,7 @@ pub const Tensor = struct {
     }
 
     /// Merges two or more contiguous axes into one axis.
+    /// .{ .a1 = 5, .a2 = 2, .b = 3 }.mergeAxes(.{ .a = .{ .a1, .a2 } }) => .{ .a = 10, .b = 3 }
     pub fn merge(self: Tensor, merges_: anytype) Tensor {
         return self.reshape(self._shape.mergeAxes(merges_));
     }
@@ -1905,6 +1906,10 @@ pub const Tensor = struct {
         var buffer = CompilationContext.current().arena.allocator().alloc(*const mlir.Value, tensors.len) catch @panic("OOM");
         std.debug.assert(tensors.len <= buffer.len);
         std.debug.assert(tensors.len > 0);
+        const dt = tensors[0].dtype();
+        for (tensors[1..]) |t| {
+            stdx.debug.assert(t.dtype() == dt, "concatenate expects all input tensor to have the same type, got {f}", .{stdx.fmt.slice(tensors)});
+        }
         const a = tensors[0].axis(axis_);
         // TODO(Corendos): Check that tensor axes match.
 
