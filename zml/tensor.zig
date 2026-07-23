@@ -151,7 +151,14 @@ pub const Tensor = struct {
         const ctx = CompilationContext.current();
         const partitioned_shape = self._shape.withPartitioning(axes_);
 
-        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, null) catch unreachable;
+        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, null) catch |err| switch (err) {
+            error.NoSuitableSharding => std.debug.panic(
+                "{f}.withPartitioning({f}) failed to resolve because it's using unknown sharding. Pass more shardings to `zml.compile`. Known shardings: {f}",
+                .{ self, partitioned_shape, stdx.fmt.slice(ctx.partitioning.shardings) },
+            ),
+            error.OutOfMemory, error.WriteFailed => @panic("OOM"),
+            error.MissingDeviceInTile => @panic("TODO"),
+        };
 
         const op_result = switch (ctx.partitioning.partitioner) {
             .shardy => blk: {
