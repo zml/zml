@@ -5,7 +5,7 @@ const stdx = @import("stdx");
 const parallel_read = @import("parallel_read.zig");
 const VFSBase = @import("base.zig").VFSBase;
 
-const log = std.log.scoped(.@"zml/io/vfs/hf");
+const log = std.log.scoped(.@"zml/vfs/hf");
 
 const ParallelRead = struct {
     const Pool = parallel_read.Pool(Job);
