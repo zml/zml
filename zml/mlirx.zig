@@ -64,12 +64,14 @@ pub const Type = struct {
             .{ .f32, mlir.Type.float(ctx, .f32) },
             .{ .f64, mlir.Type.float(ctx, .f64) },
 
+            .{ .i2, mlir.Type.int(ctx, .i2) },
             .{ .i4, mlir.Type.int(ctx, .i4) },
             .{ .i8, mlir.Type.int(ctx, .i8) },
             .{ .i16, mlir.Type.int(ctx, .i16) },
             .{ .i32, mlir.Type.int(ctx, .i32) },
             .{ .i64, mlir.Type.int(ctx, .i64) },
 
+            .{ .u2, mlir.Type.int(ctx, .u2) },
             .{ .u4, mlir.Type.int(ctx, .u4) },
             .{ .u8, mlir.Type.int(ctx, .u8) },
             .{ .u16, mlir.Type.int(ctx, .u16) },

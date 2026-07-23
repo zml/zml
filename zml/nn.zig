@@ -2013,3 +2013,138 @@ fn ShapeStruct(comptime dims: anytype) type {
 
     return @Struct(.@"extern", null, &struct_field_names, &struct_field_types, &struct_field_attrs);
 }
+
+/// Walsh-Hadamard matrix
+/// https://en.wikipedia.org/wiki/Walsh_matrix
+/// https://neilsloane.com/hadamard/
+pub fn walshHadamard(n: u32) Tensor {
+    const log2_n = std.math.log2_int(u32, n);
+    const n_bis = @as(u32, 1) << log2_n;
+    stdx.debug.assert(n == n_bis, "walshHadamard expects a power of two as input, got {d}", .{n});
+
+    const allocator = zml.module.CompilationContext.current().allocator;
+    const data: []i8 = walshHadamardAlloc(n, allocator) catch @panic("OOM");
+    defer allocator.free(data);
+
+    return .constantTensor(.init(.{ n, n }, .i8), @ptrCast(data));
+}
+
+fn walshHadamardAlloc(n: usize, allocator: std.mem.Allocator) error{OutOfMemory}![]i8 {
+    const data: []i8 = try allocator.alloc(i8, n * n);
+
+    data[0 * n ..][0..2].* = .{ 1, 1 };
+    data[1 * n ..][0..2].* = .{ 1, -1 };
+
+    var step: usize = 2;
+    while (step < n) : (step *= 2) {
+        for (0..step) |row| {
+            // std.log.warn("step {d}, row {d}", .{ step, row });
+            const row_data: []const i8 = data[row * n ..][0..step];
+            @memcpy(data[row * n ..][step .. 2 * step], row_data);
+            @memcpy(data[(step + row) * n ..][0..step], row_data);
+            for (data[(step + row) * n ..][step .. 2 * step], row_data) |*bottom_right, current| {
+                bottom_right.* = -current;
+            }
+        }
+    }
+    return data;
+}
+
+test walshHadamard {
+    const allocator = std.testing.allocator;
+    const N = 16;
+    const wh: []i8 = walshHadamardAlloc(N, allocator) catch @panic("OOM");
+    defer allocator.free(wh);
+
+    // https://neilsloane.com/hadamard/
+    const expected_data =
+        \\++++++++++++++++
+        \\+-+-+-+-+-+-+-+-
+        \\++--++--++--++--
+        \\+--++--++--++--+
+        \\++++----++++----
+        \\+-+--+-++-+--+-+
+        \\++----++++----++
+        \\+--+-++-+--+-++-
+        \\++++++++--------
+        \\+-+-+-+--+-+-+-+
+        \\++--++----++--++
+        \\+--++--+-++--++-
+        \\++++--------++++
+        \\+-+--+-+-+-++-+-
+        \\++----++--++++--
+        \\+--+-++--++-+--+
+    ;
+
+    var expected: [N][N]i8 = undefined;
+    const expected_bytes: []i8 = @ptrCast(&expected);
+    {
+        var i: usize = 0;
+        var j: usize = 0;
+        while (i < expected_data.len) : (i += 1) {
+            expected_bytes[j] = switch (expected_data[i]) {
+                '+' => 1,
+                '-' => -1,
+                '\n' => continue,
+                else => unreachable,
+            };
+            j += 1;
+        }
+    }
+
+    const shape: zml.Shape = .init(.{ N, N }, .i8);
+    const expected_h = zml.Slice.initConst(shape, @ptrCast(&expected));
+    const wh_h = zml.Slice.initConst(shape, @ptrCast(wh));
+    try zml.testing.expectClose(std.testing.io, expected_h, wh_h, .exact_match);
+}
+
+/// Returns a n*n matrix with similar properties than walshHadamard,
+/// but that randomly swap the sign of some rows based on a given seed.
+pub fn walshHadamardRng(n: u32, rng: Tensor.Rng) struct { Tensor.Rng, Tensor } {
+    const new_rng, const rand = rng.bitGenerator(.init(.{n}, .u8));
+    // `bitGenerator` can't generate .bool directly, so we need a `.cmp` operation.
+    // `bitGenerator` doesn't seem to support signed type either.
+    // We use ≥ 128, because in i8[0..255] you have 128 values < 128, 128 values ≥ 128 and .
+    const signs: Tensor = .select(rand.cmp(.GT, .scalar(128, .u8)), .scalar(1, .i8), .scalar(-1, .i8));
+
+    const walsh_hadamard = walshHadamard(n);
+    return .{ new_rng, signs.broadcast(walsh_hadamard.shape(), &.{0}).mul(walsh_hadamard) };
+}
+
+test walshHadamardRng {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+
+    const Local = struct {
+        /// Check walshHadamardRng always produces an orthogonal matrix:
+        /// W * Wt must return the identity scaled by n
+        pub fn test_walshHadamardRng(n: u32, rng: Tensor.Rng) Tensor {
+            // discard the rng, it's ok since this is an isolated unit test
+            _, const W = walshHadamardRng(n, rng);
+            const Wt = W.transpose(.{ 1, 0 });
+            const WWt = W.dotGeneral(Wt, &.{.{ -1, 0 }}, &.{});
+            const scaled_id: zml.Tensor = .scale(.identity(n, .i8), n);
+            return WWt.cmp(.EQ, scaled_id).flatten().convert(.u32).sum(0);
+        }
+    };
+    const N = 64;
+    var exe = try zml.module.compile(
+        allocator,
+        std.testing.io,
+        Local.test_walshHadamardRng,
+        .{ N, .init() },
+        platform,
+        .{},
+    );
+    defer exe.deinit();
+
+    var rng = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, 123456);
+    defer zml.Tensor.Rng.deinitBuffer(&rng);
+
+    var res = try zml.testing.autoCall(allocator, io, &exe, Local.test_walshHadamardRng, .{rng});
+    defer res.deinit();
+
+    const num_ok = try res.getValue(u32, io);
+    try std.testing.expectEqual(N * N, num_ok);
+}
