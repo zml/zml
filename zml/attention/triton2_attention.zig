@@ -334,6 +334,23 @@ pub const paged = struct {
         const k_strides = k_cache.shape().computeElementStrides().constSlice();
         const v_strides = v_cache.shape().computeElementStrides().constSlice();
 
+        var strides: [kernels.Strides.count]i64 = undefined;
+        strides[kernels.Strides.block_table] = block_table_strides[0];
+        strides[kernels.Strides.query_0] = q_strides[0];
+        strides[kernels.Strides.query_1] = q_strides[1];
+        strides[kernels.Strides.output_0] = q_strides[0];
+        strides[kernels.Strides.output_1] = q_strides[1];
+        strides[kernels.Strides.k_cache_0] = k_strides[0];
+        strides[kernels.Strides.k_cache_1] = k_strides[1];
+        strides[kernels.Strides.k_cache_2] = k_strides[2];
+        strides[kernels.Strides.v_cache_0] = v_strides[0];
+        strides[kernels.Strides.v_cache_1] = v_strides[1];
+        strides[kernels.Strides.v_cache_2] = v_strides[2];
+        const strides_tensor = zml.Tensor.constantTensor(
+            .init(.{kernels.Strides.count}, .i64),
+            std.mem.sliceAsBytes(&strides),
+        );
+
         const output = kernels.KernelUnifiedAttention2dPtr.Kernel.call(
             .{
                 .query_ptr = q,
@@ -341,17 +358,7 @@ pub const paged = struct {
                 .value_cache_ptr = v_cache,
                 .block_tables_ptr = parameters.block_table,
                 .seq_lens_ptr = parameters.seq_lens,
-                .block_table_stride_ptr = .scalar(block_table_strides[0], .i64),
-                .query_stride_0_ptr = .scalar(q_strides[0], .i64),
-                .query_stride_1_ptr = .scalar(q_strides[1], .i64),
-                .output_stride_0_ptr = .scalar(q_strides[0], .i64),
-                .output_stride_1_ptr = .scalar(q_strides[1], .i64),
-                .stride_k_cache_0_ptr = .scalar(k_strides[0], .i64),
-                .stride_k_cache_1_ptr = .scalar(k_strides[1], .i64),
-                .stride_k_cache_2_ptr = .scalar(k_strides[2], .i64),
-                .stride_v_cache_0_ptr = .scalar(v_strides[0], .i64),
-                .stride_v_cache_1_ptr = .scalar(v_strides[1], .i64),
-                .stride_v_cache_2_ptr = .scalar(v_strides[2], .i64),
+                .strides_ptr = strides_tensor,
                 .query_start_len_ptr = parameters.query_start_len,
             },
             .{ .output = q.shape() },
