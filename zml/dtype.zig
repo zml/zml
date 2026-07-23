@@ -200,25 +200,11 @@ pub const DataType = enum(u8) {
     }
 
     pub fn minValue(dtype: DataType) Value {
-        return switch (dtype) {
-            .bool => .{ .bool = false },
-            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz, .f8e8m0, .f4e2m1 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).min),
-            inline .f8e5m2, .f8e3m4, .f8e4m3, .bf16 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).minus_inf),
-            inline .f16, .f32, .f64 => |tag| @unionInit(Value, @tagName(tag), -std.math.inf(@FieldType(Value, @tagName(tag)))),
-            inline .i2, .i4, .i8, .i16, .i32, .i64, .u2, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Value, @tagName(tag), std.math.minInt(@FieldType(Value, @tagName(tag)))),
-            inline .c64, .c128 => |tag| @panic("DataType doesn't have a min value: " ++ @tagName(tag)),
-        };
+        return .minValue(dtype);
     }
 
     pub fn maxValue(dtype: DataType) Value {
-        return switch (dtype) {
-            .bool => .{ .bool = true },
-            inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz, .f8e8m0, .f4e2m1 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).max),
-            inline .f8e5m2, .f8e3m4, .f8e4m3, .bf16 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).inf),
-            inline .f16, .f32, .f64 => |tag| @unionInit(Value, @tagName(tag), std.math.inf(@FieldType(Value, @tagName(tag)))),
-            inline .i2, .i4, .i8, .i16, .i32, .i64, .u2, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Value, @tagName(tag), std.math.maxInt(@FieldType(Value, @tagName(tag)))),
-            inline .c64, .c128 => |tag| @panic("DataType doesn't have a max value: " ++ @tagName(tag)),
-        };
+        return .maxValue(dtype);
     }
 
     pub fn constant(dtype: DataType, value: anytype) Value {
@@ -328,8 +314,30 @@ pub const DataType = enum(u8) {
             try std.testing.expectEqual(C128.init(1, 2), Value.init(.c128, C64.init(1, 2)).c128);
         }
 
+        pub fn minValue(dt: DataType) Value {
+            return switch (dt) {
+                .bool => .{ .bool = false },
+                inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz, .f8e8m0, .f4e2m1 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).min),
+                inline .f8e5m2, .f8e3m4, .f8e4m3, .bf16 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).minus_inf),
+                inline .f16, .f32, .f64 => |tag| @unionInit(Value, @tagName(tag), -std.math.inf(@FieldType(Value, @tagName(tag)))),
+                inline .i2, .i4, .i8, .i16, .i32, .i64, .u2, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Value, @tagName(tag), std.math.minInt(@FieldType(Value, @tagName(tag)))),
+                inline .c64, .c128 => |tag| @panic("DataType doesn't have a min value: " ++ @tagName(tag)),
+            };
+        }
+
+        pub fn maxValue(dt: DataType) Value {
+            return switch (dt) {
+                .bool => .{ .bool = true },
+                inline .f8e4m3b11fnuz, .f8e4m3fn, .f8e4m3fnuz, .f8e5m2fnuz, .f8e8m0, .f4e2m1 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).max),
+                inline .f8e5m2, .f8e3m4, .f8e4m3, .bf16 => |tag| @unionInit(Value, @tagName(tag), @FieldType(Value, @tagName(tag)).inf),
+                inline .f16, .f32, .f64 => |tag| @unionInit(Value, @tagName(tag), std.math.inf(@FieldType(Value, @tagName(tag)))),
+                inline .i2, .i4, .i8, .i16, .i32, .i64, .u2, .u4, .u8, .u16, .u32, .u64 => |tag| @unionInit(Value, @tagName(tag), std.math.maxInt(@FieldType(Value, @tagName(tag)))),
+                inline .c64, .c128 => |tag| @panic("DataType doesn't have a max value: " ++ @tagName(tag)),
+            };
+        }
+
         pub fn dtype(self: Value) DataType {
-            return std.meta.activeTag(self);
+            return self;
         }
 
         pub fn asBytes(data: *const Value) []const u8 {
