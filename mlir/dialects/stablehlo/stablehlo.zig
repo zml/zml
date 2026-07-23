@@ -582,6 +582,12 @@ pub fn rng(ctx: *mlir.Context, a: *const mlir.Value, b: *const mlir.Value, shape
     });
 }
 
+/// Returns an output filled with uniform random bits and an updated `output_state`,
+/// using the pseudorandom number generator algorithm `rng_algorithm` given an `initial_state`.
+/// The output is guaranteed to be deterministic function of `initial_state`,
+/// but it is not guaranteed to be deterministic between implementations.
+///
+/// https://github.com/openxla/stablehlo/blob/main/docs/spec.md#rng_bit_generator
 pub fn rng_bit_generator(
     ctx: *mlir.Context,
     rng_algorithm: RngAlgorithm.Type,

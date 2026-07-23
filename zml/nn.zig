@@ -2098,11 +2098,53 @@ test walshHadamard {
     try zml.testing.expectClose(std.testing.io, expected_h, wh_h, .exact_match);
 }
 
-pub fn randomizedWalshHadamard(n: u32, rng: Tensor.Rng) struct { Tensor.Rng, Tensor } {
-    const new_rng, const rand = rng.uniform(.init(.{n}, f32), .{});
-    const noise: Tensor = .select(.logical(rand, .GT, .scalar(0.5, f32)), .scalar(1, i8), .scalar(-1, i8));
-    const diag: Tensor = .toDiagonal(noise, 0, .{ ._, ._ });
+/// Returns a n*n matrix with similar properties than walshHadamard,
+/// but that randomly swap the sign of some rows based on a given seed.
+pub fn walshHadamardRng(n: u32, rng: Tensor.Rng) struct { Tensor.Rng, Tensor } {
+    const new_rng, const rand = rng.bitGenerator(.init(.{n}, .u8));
+    // `bitGenerator` can't generate .bool directly, so we need a `.cmp` operation.
+    // `bitGenerator` doesn't seem to support signed type either.
+    // We use ≥ 128, because in i8[0..255] you have 128 values < 128, 128 values ≥ 128 and .
+    const signs: Tensor = .select(rand.cmp(.GT, .scalar(128, .u8)), .scalar(1, .i8), .scalar(-1, .i8));
 
     const walsh_hadamard = walshHadamard(n);
-    return .{ new_rng, walsh_hadamard.dot(diag, .{&.{ 1, 0 }}) };
+    return .{ new_rng, signs.broadcast(walsh_hadamard.shape(), &.{0}).mul(walsh_hadamard) };
+}
+
+test walshHadamardRng {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    const platform = zml.testing.env();
+
+    const Local = struct {
+        /// Check walshHadamardRng always produces an orthogonal matrix:
+        /// W * Wt must return the identity scaled by n
+        pub fn test_walshHadamardRng(n: u32, rng: Tensor.Rng) Tensor {
+            // discard the rng, it's ok since this is an isolated unit test
+            _, const W = walshHadamardRng(n, rng);
+            const Wt = W.transpose(.{ 1, 0 });
+            const WWt = W.dotGeneral(Wt, &.{.{ -1, 0 }}, &.{});
+            const scaled_id: zml.Tensor = .scale(.identity(n, .i8), n);
+            return WWt.cmp(.EQ, scaled_id).flatten().convert(.u32).sum(0);
+        }
+    };
+    const N = 64;
+    var exe = try zml.module.compile(
+        allocator,
+        std.testing.io,
+        Local.test_walshHadamardRng,
+        .{ N, .init() },
+        platform,
+        .{},
+    );
+    defer exe.deinit();
+
+    var rng = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, 123456);
+    defer zml.Tensor.Rng.deinitBuffer(&rng);
+
+    var res = try zml.testing.autoCall(allocator, io, &exe, Local.test_walshHadamardRng, .{rng});
+    defer res.deinit();
+
+    const num_ok = try res.getValue(u32, io);
+    try std.testing.expectEqual(N * N, num_ok);
 }
