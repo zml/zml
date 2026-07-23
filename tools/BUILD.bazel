@@ -1,10 +1,18 @@
 load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_python//python:defs.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 
 py_library(
     name = "zml_utils",
     srcs = ["zml_utils.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "zig_build",
+    srcs = ["zig_build.py"],
+    main = "zig_build.py",
     visibility = ["//visibility:public"],
 )
 
