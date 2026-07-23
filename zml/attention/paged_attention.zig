@@ -58,6 +58,8 @@ pub const Options = union(Backend) {
         backend: Backend,
         is_prefill: bool,
         batch_size: u32,
+        batch_size_prefill: ?u32 = null,
+        batch_size_decode: ?u32 = null,
         seq_len: u32,
         max_num_pages: u32,
         max_token_count: u32,
@@ -72,8 +74,8 @@ pub const Options = union(Backend) {
             .cuda_fa2 => if (args.is_prefill) .{
                 .cuda_fa2 = .{
                     .mixed = .{
-                        .batch_size_decode = args.batch_size,
-                        .batch_size_prefill = args.batch_size,
+                        .batch_size_decode = args.batch_size_decode orelse args.batch_size,
+                        .batch_size_prefill = args.batch_size_prefill orelse args.batch_size,
                         .max_num_pages = args.max_num_pages,
                         .max_seqlen_k = args.seq_len,
                         .max_seqlen_q = args.max_seqlen_q,
@@ -99,8 +101,8 @@ pub const Options = union(Backend) {
             .cuda_fa3 => if (args.is_prefill) .{
                 .cuda_fa3 = .{
                     .mixed = .{
-                        .batch_size_decode = args.batch_size,
-                        .batch_size_prefill = args.batch_size,
+                        .batch_size_decode = args.batch_size_decode orelse args.batch_size,
+                        .batch_size_prefill = args.batch_size_prefill orelse args.batch_size,
                         .max_num_pages = args.max_num_pages,
                         .max_seqlen_k = args.seq_len,
                         .max_seqlen_q = args.max_seqlen_q,
@@ -335,15 +337,19 @@ test pagedAttention {
     const num_pages = 64;
     const page_size = 16;
     const max_num_pages = 16;
+    const num_prefill = 1;
+    const prefill_token_count = 32;
+    const num_decode = 5;
+    const query_token_count = prefill_token_count + num_decode;
     const dt: zml.DataType = .bf16;
     const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, token_index: zml.Tensor, slot_mapping: zml.Tensor } = .{
-        .q = .init(.{ .b = 8, .hkv = 2, .hg = 4, .hd = 32 }, dt),
+        .q = .init(.{ .b = query_token_count, .hkv = 2, .hg = 4, .hd = 32 }, dt),
         .k = .init(.{ .b = 8, .hkv = 2, .hd = 32 }, dt),
         .v = .init(.{ .b = 8, .hkv = 2, .hd = 32 }, dt),
         .kv_cache = .{
             .split = .{
-                .k = .init(.{ .page = num_pages, .hkv = 2, .k_chunk = page_size, .hd = 32 }, dt),
-                .v = .init(.{ .page = num_pages, .hkv = 2, .k_chunk = page_size, .hd = 32 }, dt),
+                .k = .init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 2, .hd = 32 }, dt),
+                .v = .init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 2, .hd = 32 }, dt),
             },
         },
         .token_index = .init(.{}, .u32),
@@ -364,6 +370,8 @@ test pagedAttention {
         .backend = .triton,
         .is_prefill = true,
         .batch_size = batch_size,
+        .batch_size_prefill = num_prefill,
+        .batch_size_decode = num_decode,
         .seq_len = 64,
         .max_num_pages = max_num_pages,
         .max_token_count = 16 * page_size,
@@ -397,8 +405,6 @@ test pagedAttention {
     );
     defer triton_exe.deinit();
 
-    const num_prefill = 1;
-    const num_decode = batch_size - num_prefill;
     const block_table: [batch_size][max_num_pages]i32 = .{
         // prefilling pages 9-10
         .{ 0, 1, 2, 3, 4, 9, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
@@ -453,6 +459,7 @@ test pagedAttention {
 
     for (std.enums.values(Backend)) |backend| {
         if (!backend.isAvailable(platform)) continue;
+        if (backend == .triton) continue;
 
         var backend_options_args = triton_options_args;
         backend_options_args.backend = backend;
@@ -472,31 +479,30 @@ test pagedAttention {
             // No materializer implemented for cuda fa3
             .cuda_fa3 => return error.SkipZigTest,
             .cuda_fa2 => cuda_fa2: {
-                var block_table_prefill: @TypeOf(block_table) = @splat(@splat(-1));
-                @memcpy(block_table_prefill[0..num_prefill], block_table[0..num_prefill]);
-                var block_table_decode: @TypeOf(block_table) = @splat(@splat(-1));
-                @memcpy(block_table_decode[0..num_decode], block_table[num_prefill..]);
+                var block_table_prefill: [num_prefill][max_num_pages]i32 = undefined;
+                @memcpy(&block_table_prefill, block_table[0..num_prefill]);
+                var block_table_decode: [num_decode][max_num_pages]i32 = undefined;
+                @memcpy(&block_table_decode, block_table[num_prefill .. num_prefill + num_decode]);
 
-                var seq_lens_prefill: [batch_size + 1]i32 = @splat(0);
-                @memcpy(seq_lens_prefill[1 .. num_prefill + 1], seq_lens[0..num_prefill]);
-                var seq_lens_decode: [batch_size + 1]i32 = @splat(0);
-                @memcpy(seq_lens_decode[1 .. num_decode + 1], seq_lens[num_prefill..]);
+                var cu_seqlens_q_prefill: [num_prefill + 1]i32 = undefined;
+                @memcpy(&cu_seqlens_q_prefill, query_start_len[0 .. num_prefill + 1]);
+                var cu_seqlens_q_decode: [num_decode + 1]i32 = undefined;
+                for (&cu_seqlens_q_decode, query_start_len[num_prefill .. num_prefill + num_decode + 1]) |*decode_len, query_start| {
+                    decode_len.* = query_start - prefill_token_count;
+                }
 
-                var seqused_k_prefill: [batch_size]i32 = @splat(query_start_len[num_prefill]);
-                @memcpy(seqused_k_prefill[0..num_prefill], query_start_len[0..num_prefill]);
-                var seqused_k_decode: [batch_size]i32 = @splat(query_start_len[batch_size - 1]);
-                @memcpy(seqused_k_decode[0 .. num_decode + 1], query_start_len[num_prefill..]);
-
-                const prefill_token_count = query_start_len[num_prefill];
-                for (&seqused_k_decode) |*q_start| q_start.* -= prefill_token_count;
+                var seqused_k_prefill: [num_prefill]i32 = undefined;
+                @memcpy(&seqused_k_prefill, seq_lens[0..num_prefill]);
+                var seqused_k_decode: [num_decode]i32 = undefined;
+                @memcpy(&seqused_k_decode, seq_lens[num_prefill .. num_prefill + num_decode]);
 
                 break :cuda_fa2 .{ .cuda_fa2 = .{ .mixed = .{
                     .block_table_prefill = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.block_table_prefill.shape(), .replicated, @ptrCast(&block_table_prefill)),
-                    .cu_seqlens_q_prefill = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.cu_seqlens_q_prefill.shape(), .replicated, @ptrCast(&seq_lens_prefill)),
+                    .cu_seqlens_q_prefill = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.cu_seqlens_q_prefill.shape(), .replicated, @ptrCast(&cu_seqlens_q_prefill)),
                     .seqused_k_prefill = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.seqused_k_prefill.shape(), .replicated, @ptrCast(&seqused_k_prefill)),
 
                     .block_table_decode = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.block_table_decode.shape(), .replicated, @ptrCast(&block_table_decode)),
-                    .cu_seqlens_q_decode = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.cu_seqlens_q_decode.shape(), .replicated, @ptrCast(&seq_lens_decode)),
+                    .cu_seqlens_q_decode = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.cu_seqlens_q_decode.shape(), .replicated, @ptrCast(&cu_seqlens_q_decode)),
                     .seqused_k_decode = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.seqused_k_decode.shape(), .replicated, @ptrCast(&seqused_k_decode)),
 
                     .metadata = .{ .decode_offset = try .scalar(io, platform, prefill_token_count, .i32) },
