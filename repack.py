@@ -13,9 +13,9 @@ This script rewrites them as stacked tensors and, by default, fuses w1/w3:
 
 with expert id as the leading dimension. w1 and w3 are interleaved along the
 output/intermediate dimension as w1[0], w3[0], w1[1], w3[1], ... so fused
-SwiGLU kernels can split paired columns locally. Non-expert tensors are copied
-through unchanged, and a new `model.safetensors.index.json` is written for the
-output.
+SwiGLU kernels can split paired columns locally. They can instead be concatenated
+as all of w1 followed by all of w3. Non-expert tensors are copied through
+unchanged, and a new `model.safetensors.index.json` is written for the output.
 """
 
 from __future__ import annotations
@@ -143,6 +143,7 @@ def merge_fused_pair(
     left_keys: dict[int, str],
     right_keys: dict[int, str],
     output_name: str,
+    fuse_layout: str,
     verbose: bool,
 ) -> torch.Tensor:
     left_first = reader.get_tensor(left_keys[0])
@@ -164,8 +165,19 @@ def merge_fused_pair(
         *left_first.shape[1:],
     )
     fused = torch.empty(fused_shape, dtype=left_first.dtype, device=left_first.device)
-    fused[0, 0::2].copy_(left_first)
-    fused[0, 1::2].copy_(right_first)
+
+    def copy_pair(expert_id: int, left: torch.Tensor, right: torch.Tensor) -> None:
+        if fuse_layout == "interleave":
+            fused[expert_id, 0::2].copy_(left)
+            fused[expert_id, 1::2].copy_(right)
+        elif fuse_layout == "concat":
+            split = left.shape[0]
+            fused[expert_id, :split].copy_(left)
+            fused[expert_id, split:].copy_(right)
+        else:
+            raise ValueError(f"Unknown w1/w3 fuse layout: {fuse_layout}")
+
+    copy_pair(0, left_first, right_first)
 
     for expert_id in range(1, len(left_keys)):
         left = reader.get_tensor(left_keys[expert_id])
@@ -180,8 +192,7 @@ def merge_fused_pair(
                 f"Dtype mismatch while building {output_name} expert {expert_id}: "
                 f"left={left.dtype}, right={right.dtype}"
             )
-        fused[expert_id, 0::2].copy_(left)
-        fused[expert_id, 1::2].copy_(right)
+        copy_pair(expert_id, left, right)
 
     if verbose:
         print(f"  {output_name}: {tuple(fused.shape)} {fused.dtype}")
@@ -216,6 +227,7 @@ def convert_shard(
     expected_experts: int | None,
     fuse_w1_w3: bool,
     fused_name: str,
+    fuse_layout: str,
     verbose: bool,
 ) -> tuple[dict[str, str], int, int]:
     groups = collect_expert_groups(keys)
@@ -249,7 +261,12 @@ def convert_shard(
                         )
                     output_name = f"{prefix}.{fused_name}.{suffix}"
                     output_tensors[output_name] = merge_fused_pair(
-                        reader, groups[left_key], groups[right_key], output_name, verbose
+                        reader,
+                        groups[left_key],
+                        groups[right_key],
+                        output_name,
+                        fuse_layout,
+                        verbose,
                     )
                     output_weight_map[output_name] = shard
                     fused_group_keys.update({left_key, right_key})
@@ -294,6 +311,7 @@ def process_shard(
     expected_experts: int | None,
     fuse_w1_w3: bool,
     fused_name: str,
+    fuse_layout: str,
     verbose: bool,
     torch_threads: int,
 ) -> tuple[str, dict[str, str], int, str]:
@@ -312,6 +330,7 @@ def process_shard(
         expected_experts=expected_experts,
         fuse_w1_w3=fuse_w1_w3,
         fused_name=fused_name,
+        fuse_layout=fuse_layout,
         verbose=verbose,
     )
     return shard, shard_weight_map, shard_size, "rewritten"
@@ -393,7 +412,13 @@ def parse_args() -> argparse.Namespace:
         "--fuse-w1-w3",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Fuse routed expert w1 and w3 into one interleaved tensor along the output dimension.",
+        help="Fuse routed expert w1 and w3 along the output dimension.",
+    )
+    parser.add_argument(
+        "--fuse-layout",
+        choices=("interleave", "concat"),
+        default="interleave",
+        help="Layout for fused w1/w3 tensors: alternate rows or concatenate w3 after w1.",
     )
     parser.add_argument(
         "--fused-name",
@@ -511,6 +536,7 @@ def main() -> None:
                 num_experts,
                 args.fuse_w1_w3,
                 args.fused_name,
+                args.fuse_layout,
                 args.verbose,
                 args.torch_threads,
             )
