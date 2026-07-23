@@ -7,6 +7,7 @@ const flashattn = @import("flashattn.zig");
 const metal = @import("metal_attention.zig");
 const tpu = @import("tpu_attention.zig");
 const triton = @import("triton_attention.zig");
+const triton2 = @import("triton2_attention.zig");
 
 const PagedAttention = @This();
 
@@ -14,6 +15,7 @@ pub const Backend = enum {
     cuda_fa2,
     cuda_fa3,
     triton,
+    triton2,
     mosaic_tpu,
     metal,
     // vanilla,
@@ -33,7 +35,7 @@ pub const Backend = enum {
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
             // .vanilla => true,
-            .triton => true,
+            .triton, .triton2 => true,
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
             .cuda_fa2 => platform.target == .cuda,
@@ -51,6 +53,7 @@ pub const Options = union(Backend) {
     cuda_fa2: flashattn.paged_fa2.Options,
     cuda_fa3: flashattn.paged_fa3.Options,
     triton: triton.paged.Options,
+    triton2: triton2.paged.Options,
     mosaic_tpu: tpu.mosaic_tpu.Options,
     metal: metal.paged.Options,
 
@@ -133,6 +136,14 @@ pub const Options = union(Backend) {
                     .is_prefill = args.is_prefill,
                 },
             },
+            .triton2 => .{
+                .triton2 = .{
+                    .batch_size = args.batch_size,
+                    .max_num_pages = args.max_num_pages,
+                    .max_seqlen_q = args.max_seqlen_q,
+                    .is_prefill = args.is_prefill,
+                },
+            },
             .metal => .{
                 .metal = .{
                     .batch_size = args.batch_size,
@@ -173,6 +184,7 @@ pub const Parameters = union(Backend) {
     cuda_fa2: flashattn.paged_fa2.Parameters,
     cuda_fa3: flashattn.paged_fa3.Parameters,
     triton: triton.paged.Parameters,
+    triton2: triton2.paged.Parameters,
     mosaic_tpu: tpu.mosaic_tpu.Parameters,
     metal: metal.paged.Parameters,
 
@@ -199,6 +211,7 @@ pub const Parameters = union(Backend) {
             .cuda_fa2 => |v| .{ .cuda_fa2 = v.onMemory(memory) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = v.onMemory(memory) },
             .triton => |v| .{ .triton = v.onMemory(memory) },
+            .triton2 => |v| .{ .triton2 = v.onMemory(memory) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = v.onMemory(memory) },
             .metal => |v| .{ .metal = v.onMemory(memory) },
         };
@@ -209,6 +222,7 @@ pub const Parameters = union(Backend) {
             .cuda_fa2 => |v| .{ .cuda_fa2 = v.toMemory(memory) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = v.toMemory(memory) },
             .triton => |v| .{ .triton = v.toMemory(memory) },
+            .triton2 => |v| .{ .triton2 = v.toMemory(memory) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = v.toMemory(memory) },
             .metal => |v| .{ .metal = v.toMemory(memory) },
         };
@@ -240,7 +254,7 @@ pub const KvCache = union(enum) {
 
         var kv: KvCache = switch (self) {
             .split => |split| switch (backend) {
-                .cuda_fa2, .cuda_fa3, .triton, .mosaic_tpu, .metal => .{ .split = .{
+                .cuda_fa2, .cuda_fa3, .triton, .triton2, .mosaic_tpu, .metal => .{ .split = .{
                     .k = split.k.scatterSlices(
                         .{ .page = active_page, .k_chunk = k_chunk },
                         new_k,
@@ -281,6 +295,10 @@ pub fn pagedAttention(parameters: Parameters, q: zml.Tensor, k: zml.Tensor, v: z
         },
         .triton => |triton_parameters| switch (kv_cache) {
             .split => |split| triton.paged.pagedAttention(triton_parameters, q, split.k, split.v, opts),
+            .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+        },
+        .triton2 => |triton2_parameters| switch (kv_cache) {
+            .split => |split| triton2.paged.pagedAttention(triton2_parameters, q, split.k, split.v, opts),
             .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
         },
         .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, q, kv_cache.dense, opts),
@@ -476,6 +494,11 @@ test pagedAttention {
 
         const parameters_d: zml.Bufferized(Parameters) = switch (backend) {
             .triton => unreachable,
+            .triton2 => .{ .triton2 = .{
+                .block_table = triton_parameters_d.triton.block_table,
+                .seq_lens = triton_parameters_d.triton.seq_lens,
+                .query_start_len = triton_parameters_d.triton.query_start_len,
+            } },
             // No materializer implemented for cuda fa3
             .cuda_fa3 => return error.SkipZigTest,
             .cuda_fa2 => cuda_fa2: {
