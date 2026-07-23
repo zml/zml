@@ -471,9 +471,42 @@ test pagedAttention {
         .query_start_len = try .fromBytes(io, platform, triton_parameters.triton.query_start_len.shape(), .replicated, @ptrCast(&query_start_len)),
     } };
 
+    const Benchmark = struct {
+        const warmup_iterations = 5;
+        const timed_iterations = 50;
+
+        fn run(
+            allocator_: std.mem.Allocator,
+            io_: std.Io,
+            exe: *const zml.Exe,
+            parameters: zml.Bufferized(Parameters),
+            q_: zml.Buffer,
+            k_: zml.Buffer,
+            v_: zml.Buffer,
+            kv_cache: zml.Bufferized(KvCache),
+        ) !u64 {
+            for (0..warmup_iterations) |_| {
+                var output = try zml.testing.autoCall(allocator_, io_, exe, pagedAttention, .{ parameters, q_, k_, v_, kv_cache });
+                output.deinit();
+            }
+
+            const start: std.Io.Timestamp = .now(io_, .awake);
+            for (0..timed_iterations) |_| {
+                var output = try zml.testing.autoCall(allocator_, io_, exe, pagedAttention, .{ parameters, q_, k_, v_, kv_cache });
+                output.deinit();
+            }
+            return @intCast(@divTrunc(start.untilNow(io_, .awake).toNanoseconds(), timed_iterations));
+        }
+    };
+
     const triton_d = try zml.testing.autoCall(allocator, io, &triton_exe, pagedAttention, .{ triton_parameters_d, q, new_k, new_v, kv_cache_d });
     const triton_h: zml.Slice = try triton_d.toSliceAlloc(allocator, io);
     defer triton_h.free(allocator);
+    const triton_avg_ns = try Benchmark.run(allocator, io, &triton_exe, triton_parameters_d, q, new_k, new_v, kv_cache_d);
+    std.log.warn("paged attention triton: {d:.2} us average over {} runs", .{
+        @as(f64, @floatFromInt(triton_avg_ns)) / std.time.ns_per_us,
+        Benchmark.timed_iterations,
+    });
 
     for (std.enums.values(Backend)) |backend| {
         if (!backend.isAvailable(platform)) continue;
@@ -549,6 +582,17 @@ test pagedAttention {
             .absolute_tolerance = 1e-3,
             .relative_tolerance = 1e-2,
             .epsilon_relative = 1e-6,
+        });
+
+        const backend_avg_ns = try Benchmark.run(allocator, io, &exe, parameters_d, q, new_k, new_v, kv_cache_d);
+        const speedup = @as(f64, @floatFromInt(triton_avg_ns)) / @as(f64, @floatFromInt(backend_avg_ns));
+        const improvement = (1.0 - @as(f64, @floatFromInt(backend_avg_ns)) / @as(f64, @floatFromInt(triton_avg_ns))) * 100.0;
+        std.log.warn("paged attention {t}: {d:.2} us average over {} runs ({d:.2}x, {d:.1}% vs triton)", .{
+            backend,
+            @as(f64, @floatFromInt(backend_avg_ns)) / std.time.ns_per_us,
+            Benchmark.timed_iterations,
+            speedup,
+            improvement,
         });
     }
 }
