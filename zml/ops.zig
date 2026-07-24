@@ -714,7 +714,7 @@ pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs
     const ctx = CompilationContext.current();
     switch (ctx.platform.target) {
         .neuron => {},
-        .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => {
+        .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .musa => {
             stdx.debug.panic("neuronNki is only available on Neuron, got {s}", .{@tagName(ctx.platform.target)});
         },
     }
@@ -1325,7 +1325,7 @@ pub const LoweringCompatibility = struct {
     pub fn preserveIntegerScalarBroadcast(self: Tensor, output_shape: Shape) ?Tensor {
         switch (CompilationContext.current().platform.target) {
             .neuron => {},
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => return null,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .musa => return null,
         }
 
         if (self.rank() != 0 or output_shape.rank() == 0 or !self.dtype().isInteger()) return null;
@@ -1344,7 +1344,7 @@ pub const LoweringCompatibility = struct {
     pub fn preserveGatherFillSemantics(indices: []Tensor) void {
         switch (CompilationContext.current().platform.target) {
             .neuron => {},
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => return,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .musa => return,
         }
 
         const active_lanes = activeLanesForFillDropIndices(indices) orelse return;
@@ -1356,7 +1356,7 @@ pub const LoweringCompatibility = struct {
     pub fn preserveScatterDropSemantics(indices: []Tensor, updates: anytype, opts: Tensor.ScatterOpts, update_values: *[updates.len]*const mlir.Value) void {
         const active_lanes: ?Tensor = switch (CompilationContext.current().platform.target) {
             .neuron => if (opts.update_fn == Tensor.ScatterOpts.increment) activeLanesForFillDropIndices(indices) else null,
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => null,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .musa => null,
         };
 
         if (active_lanes) |active| replaceInactiveIndirectIndices(indices, active);

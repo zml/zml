@@ -190,7 +190,7 @@ pub const Tensor = struct {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return self,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .tpu, .oneapi, .musa => {},
         }
 
         const frontend_attributes: *const mlir.Attribute = .dict(ctx.mlir_ctx, &.{
@@ -225,7 +225,7 @@ pub const Tensor = struct {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
             .cpu, .neuron, .metal => return self,
-            .cuda, .rocm, .tpu, .oneapi => {},
+            .cuda, .rocm, .tpu, .oneapi, .musa => {},
         }
 
         if (ctx.currentScope().id_to_argument.get(self.id) == null) {
@@ -3318,7 +3318,7 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => blk: {
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .musa => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
                 sorted.values = sorted.values.slice1d(a, .{ .end = k });
                 sorted.indices = sorted.indices.slice1d(a, .{ .end = k });
