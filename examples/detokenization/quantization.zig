@@ -928,8 +928,20 @@ pub const qjl_word_length: comptime_int = @bitSizeOf(qjl_word);
 pub const qjl_nb_words: comptime_int = hidden_dim / qjl_word_length;
 
 pub const VectorQJL1 = [qjl_nb_words]qjl_word;
+pub const VectorQJL1Quarter = [qjl_nb_words / 4]qjl_word;
+pub const VectorQJL1Half = [qjl_nb_words / 2]qjl_word;
+pub const LoadedVectorQJL1Quarter = if (useX86Avx512Popcount)
+    [2]@Vector(8, u64)
+else
+    [8]Vec16u8;
 pub fn makeVectorQJL1() VectorQJL1 {
     return [_]qjl_word{0} ** qjl_nb_words;
+}
+pub fn makeVectorQJL1Quarter() VectorQJL1Quarter {
+    return [_]qjl_word{0} ** (qjl_nb_words / 4);
+}
+pub fn makeVectorQJL1Half() VectorQJL1Half {
+    return [_]qjl_word{0} ** (qjl_nb_words / 2);
 }
 
 pub inline fn setBit(v: *VectorQJL1, pos: usize) void {
@@ -947,6 +959,11 @@ pub const QuantizationQJL1 = struct {
     lm_head_quantized: []VectorQJL1,
     row_quant_scale: []f32,
     buffer: []f32,
+    // when decomposing a row = [row quarter 1][row quarter 2][row second half],
+    // this is a block major layout allowing fast scoring of a query block vs lm_head
+    lm_head_quantized_quarter1: []VectorQJL1Quarter,
+    lm_head_quantized_quarter2: []VectorQJL1Quarter,
+    lm_head_quantized_half2: []VectorQJL1Half,
 
     pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix) !QuantizationQJL1 {
         const v: usize = lm_head.n;
@@ -962,6 +979,9 @@ pub const QuantizationQJL1 = struct {
             .lm_head_quantized = lm_head_quantized,
             .row_quant_scale = row_quant_scale,
             .buffer = buffer,
+            .lm_head_quantized_quarter1 = try zml_handler.allocator.alloc(VectorQJL1Quarter, v),
+            .lm_head_quantized_quarter2 = try zml_handler.allocator.alloc(VectorQJL1Quarter, v),
+            .lm_head_quantized_half2 = try zml_handler.allocator.alloc(VectorQJL1Half, v),
         };
     }
 
@@ -969,6 +989,9 @@ pub const QuantizationQJL1 = struct {
         self.allocator.free(self.lm_head_quantized);
         self.allocator.free(self.row_quant_scale);
         self.allocator.free(self.buffer);
+        self.allocator.free(self.lm_head_quantized_quarter1);
+        self.allocator.free(self.lm_head_quantized_quarter2);
+        self.allocator.free(self.lm_head_quantized_half2);
     }
 
     pub fn quantize(self: *QuantizationQJL1) !void {
@@ -976,6 +999,9 @@ pub const QuantizationQJL1 = struct {
             const src = self.lm_head.data[row * self.d ..][0..self.d];
             const dst = &self.lm_head_quantized[row];
             self.row_quant_scale[row] = quantizeVector(src, self.buffer, dst, self.lm_head.row_norms[row]);
+            @memcpy(self.lm_head_quantized_quarter1[row][0..], dst[0 .. qjl_nb_words / 4]);
+            @memcpy(self.lm_head_quantized_quarter2[row][0..], dst[qjl_nb_words / 4 .. qjl_nb_words / 2]);
+            @memcpy(self.lm_head_quantized_half2[row][0..], dst[qjl_nb_words / 2 ..]);
         }
     }
 
@@ -1006,7 +1032,7 @@ pub const QuantizationQJL1 = struct {
         return qjl_dot_lut[mismatches];
     }
 
-    pub inline fn popcountXor(a: *const VectorQJL1, b: *const VectorQJL1) u32 {
+    pub inline fn popcountXor(a: *const VectorQJL1, b: *const VectorQJL1) u16 {
         if (comptime useX86Avx512Popcount) {
             const vector_bytes = 64;
             const unroll_bytes = 4 * vector_bytes;
@@ -1099,6 +1125,161 @@ pub const QuantizationQJL1 = struct {
         return @reduce(.Add, total_vec);
     }
 
+    inline fn popcountXorShort(comptime T: type, a: *const T, b: *const T) u16 {
+        const byte_count = @sizeOf(T);
+        const word_count = byte_count / @sizeOf(qjl_word);
+        comptime {
+            if (byte_count > 256)
+                @compileError("short QJL popcount supports at most 2048 bits");
+        }
+
+        // Zen 5 has native 512-bit XOR + VPOPCNTQ. The number of ZMM
+        // operations is known at comptime: two for a quarter, four for a half.
+        // Keep four dependency chains so the compiler can schedule all vector
+        // popcount units independently.
+        if (comptime useX86Avx512Popcount) {
+            const Vec8u64 = @Vector(8, u64);
+            const vector_bytes = @sizeOf(Vec8u64);
+            const vector_count = byte_count / vector_bytes;
+            const bytes_a: *const [byte_count]u8 = @ptrCast(a);
+            const bytes_b: *const [byte_count]u8 = @ptrCast(b);
+            var sum0: Vec8u64 = @splat(0);
+            var sum1: Vec8u64 = @splat(0);
+            var sum2: Vec8u64 = @splat(0);
+            var sum3: Vec8u64 = @splat(0);
+
+            inline for (0..vector_count) |vector_i| {
+                const offset = vector_i * vector_bytes;
+                const va: Vec8u64 = @bitCast(bytes_a[offset..][0..vector_bytes].*);
+                const vb: Vec8u64 = @bitCast(bytes_b[offset..][0..vector_bytes].*);
+                const counts = @popCount(va ^ vb);
+                switch (vector_i & 3) {
+                    0 => sum0 += counts,
+                    1 => sum1 += counts,
+                    2 => sum2 += counts,
+                    3 => sum3 += counts,
+                    else => unreachable,
+                }
+            }
+
+            var total: u32 = @intCast(@reduce(.Add, sum0 + sum1 + sum2 + sum3));
+            inline for (vector_count * 8..word_count) |word_i| {
+                total += @popCount(a.*[word_i] ^ b.*[word_i]);
+            }
+            return @intCast(total);
+        }
+
+        // AArch64 lowers byte-vector @popCount to NEON CNT. Accumulate in
+        // bytes (safe for the 2048-bit upper bound), widen once, then reduce.
+        // Fixed compile-time loops avoid the nested loop/counter overhead that
+        // dominated these short inputs.
+        if (comptime builtin.cpu.arch == .aarch64 and builtin.zig_backend != .stage2_c) {
+            const ShortVec16u16 = @Vector(16, u16);
+            const vector_bytes = @sizeOf(Vec16u8);
+            const vector_count = byte_count / vector_bytes;
+            const bytes_a: *const [byte_count]u8 = @ptrCast(a);
+            const bytes_b: *const [byte_count]u8 = @ptrCast(b);
+            var sum0: Vec16u8 = @splat(0);
+            var sum1: Vec16u8 = @splat(0);
+            var sum2: Vec16u8 = @splat(0);
+            var sum3: Vec16u8 = @splat(0);
+
+            inline for (0..vector_count) |vector_i| {
+                const offset = vector_i * vector_bytes;
+                const va: Vec16u8 = bytes_a[offset..][0..vector_bytes].*;
+                const vb: Vec16u8 = bytes_b[offset..][0..vector_bytes].*;
+                const counts = @popCount(va ^ vb);
+                switch (vector_i & 3) {
+                    0 => sum0 += counts,
+                    1 => sum1 += counts,
+                    2 => sum2 += counts,
+                    3 => sum3 += counts,
+                    else => unreachable,
+                }
+            }
+
+            const lane_sums: Vec16u8 = sum0 + sum1 + sum2 + sum3;
+            var total: u32 = @reduce(.Add, @as(ShortVec16u16, lane_sums));
+            inline for (vector_count * 2..word_count) |word_i| {
+                total += @popCount(a.*[word_i] ^ b.*[word_i]);
+            }
+            return @intCast(total);
+        }
+
+        // Portable scalar fallback. This is fully unrolled for the fixed array
+        // types and maps to POPCNT on targets that provide it.
+        var total: u32 = 0;
+        inline for (0..word_count) |word_i| {
+            total += @popCount(a.*[word_i] ^ b.*[word_i]);
+        }
+        return @intCast(total);
+    }
+
+    pub inline fn popcountXorQuarter(a: *const VectorQJL1Quarter, b: *const VectorQJL1Quarter) u16 {
+        return popcountXorShort(VectorQJL1Quarter, a, b);
+    }
+
+    pub inline fn loadVectorQJL1Quarter(a: *const VectorQJL1Quarter) LoadedVectorQJL1Quarter {
+        const bytes_a: *const [@sizeOf(VectorQJL1Quarter)]u8 = @ptrCast(a);
+        var loaded: LoadedVectorQJL1Quarter = undefined;
+        if (comptime useX86Avx512Popcount) {
+            inline for (0..loaded.len) |vector_i| {
+                const offset = vector_i * 64;
+                loaded[vector_i] = @bitCast(bytes_a[offset..][0..64].*);
+            }
+        } else {
+            inline for (0..loaded.len) |vector_i| {
+                const offset = vector_i * 16;
+                loaded[vector_i] = bytes_a[offset..][0..16].*;
+            }
+        }
+        return loaded;
+    }
+
+    pub inline fn popcountXorQuarterLoaded(a: LoadedVectorQJL1Quarter, b: *const VectorQJL1Quarter) u16 {
+        const bytes_b: *const [@sizeOf(VectorQJL1Quarter)]u8 = @ptrCast(b);
+        if (comptime useX86Avx512Popcount) {
+            const Vec8u64 = @Vector(8, u64);
+            var sum0: Vec8u64 = @splat(0);
+            var sum1: Vec8u64 = @splat(0);
+            inline for (0..a.len) |vector_i| {
+                const offset = vector_i * 64;
+                const vb: Vec8u64 = @bitCast(bytes_b[offset..][0..64].*);
+                if (vector_i == 0) {
+                    sum0 = @popCount(a[vector_i] ^ vb);
+                } else {
+                    sum1 = @popCount(a[vector_i] ^ vb);
+                }
+            }
+            return @intCast(@reduce(.Add, sum0 + sum1));
+        }
+
+        // Four independent byte accumulators keep the query live while limiting
+        // temporary register pressure to one row vector at a time.
+        var sum0: Vec16u8 = @splat(0);
+        var sum1: Vec16u8 = @splat(0);
+        var sum2: Vec16u8 = @splat(0);
+        var sum3: Vec16u8 = @splat(0);
+        inline for (0..a.len) |vector_i| {
+            const offset = vector_i * 16;
+            const vb: Vec16u8 = bytes_b[offset..][0..16].*;
+            const counts = @popCount(a[vector_i] ^ vb);
+            switch (vector_i & 3) {
+                0 => sum0 += counts,
+                1 => sum1 += counts,
+                2 => sum2 += counts,
+                3 => sum3 += counts,
+                else => unreachable,
+            }
+        }
+        const lane_sums: Vec16u8 = sum0 + sum1 + sum2 + sum3;
+        return @intCast(@reduce(.Add, @as(@Vector(16, u16), lane_sums)));
+    }
+
+    pub inline fn popcountXorHalf(a: *const VectorQJL1Half, b: *const VectorQJL1Half) u16 {
+        return popcountXorShort(VectorQJL1Half, a, b);
+    }
+
     fn makeQjlDotLut(comptime coord_count: usize) [coord_count + 1]f32 {
         @setEvalBranchQuota(8192);
         var lut: [coord_count + 1]f32 = undefined;
@@ -1110,11 +1291,13 @@ pub const QuantizationQJL1 = struct {
         return lut;
     }
 
-    const qjl_dot_lut = makeQjlDotLut(hidden_dim);
+    pub const qjl_dot_lut = makeQjlDotLut(hidden_dim);
+    pub const qjl_dot_lut_quarter = makeQjlDotLut(hidden_dim / 4);
+    pub const qjl_dot_lut_half = makeQjlDotLut(hidden_dim / 2);
 
     pub inline fn qjlNx1dot(query_lut: []const f32, query: []const f32, b: *const VectorQJL1, query_sum: f32) f32 {
         // dot(q, v) ~= ||rot(v)||_1 / D * dot(q, quant(rot(v)))
-        
+
         if (comptime useX86Avx512Mask) {
             const Vec16f = @Vector(16, f32);
             const Mask16 = @Vector(16, bool);
@@ -1344,7 +1527,9 @@ pub const QuantizationQJL2 = struct {
         // dot(a,b) = 9 * d - 8 * pop_mm - 4 * pop_ml - 4 * pop_lm - 2 * pop_ll
 
         const pos: i32 = 9 * hidden_dim;
-        const neg = (pop_mm << 3) + ((pop_ml + pop_lm) << 2) + (pop_ll << 1);
+        const neg = (@as(u32, pop_mm) << 3) +
+            ((@as(u32, pop_ml) + @as(u32, pop_lm)) << 2) +
+            (@as(u32, pop_ll) << 1);
         return pos - @as(i32, @intCast(neg));
     }
 
@@ -1390,7 +1575,7 @@ pub const QuantizationQJL2 = struct {
         // dot(a,b) = 3 * d - 4 * pop_m - 2 * pop_l
 
         const pos: i32 = 3 * hidden_dim;
-        const neg = (pop_m << 2) + (pop_l << 1);
+        const neg = (@as(u32, pop_m) << 2) + (@as(u32, pop_l) << 1);
         return pos - @as(i32, @intCast(neg));
     }
 };
