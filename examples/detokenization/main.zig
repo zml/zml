@@ -35,6 +35,7 @@ const QJL1Sampler = sampling.QJL1Sampler;
 const QJL2Sampler = sampling.QJL2Sampler;
 const QJL2x1Sampler = sampling.QJL2x1Sampler;
 const QJLNx1Sampler = sampling.QJLNx1Sampler;
+const MultiSampler = sampling.MultiSampler;
 
 const QuantizationInt8 = quantization.QuantizationInt8;
 const QuantizationInt4 = quantization.QuantizationInt4;
@@ -171,16 +172,13 @@ pub const Timing_handler = struct {
     pq_lut: Field_timer = .{},
     pq_score: Field_timer = .{},
     pq_top_k: Field_timer = .{},
-    quant_5p_prefix_top: Field_timer = .{},
-    quant_5p_prefix_dot: Field_timer = .{},
-    quant_5p_quantize: Field_timer = .{},
-    quant_5p_micro: Field_timer = .{},
-    quant_5p_prune: Field_timer = .{},
-    quant_5p_half: Field_timer = .{},
-    quant_5p_full_1bit: Field_timer = .{},
-    quant_5p_2bit: Field_timer = .{},
-    quant_5p_dense_top8: Field_timer = .{},
-    quant_5p_dense_final: Field_timer = .{},
+    
+    quant_prefix: Field_timer = .{},
+    quant_qjl1: Field_timer = .{},
+    quant_quart1: Field_timer = .{},
+    quant_quart2: Field_timer = .{},
+    quant_half2: Field_timer = .{},
+    quant_dense: Field_timer = .{},
 
     trc_sparse_256: Field_timer = .{},
     trc_top_256: Field_timer = .{},
@@ -210,17 +208,13 @@ pub const Timing_handler = struct {
         std.log.info("PQ score      : {d:>6.2}s", .{@as(f64, @floatFromInt(self.pq_score.nanoseconds)) / 1e9});
         std.log.info("PQ topK       : {d:>6.2}s", .{@as(f64, @floatFromInt(self.pq_top_k.nanoseconds)) / 1e9});
 
-        std.log.info("5p prefix top : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_prefix_top.nanoseconds)) / 1e9});
-        std.log.info("5p prefix dot : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_prefix_dot.nanoseconds)) / 1e9});
-        std.log.info("5p quantize   : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_quantize.nanoseconds)) / 1e9});
-        std.log.info("5p micro 1bit : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_micro.nanoseconds)) / 1e9});
-        std.log.info("5p prune      : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_prune.nanoseconds)) / 1e9});
-        std.log.info("5p half 1bit  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_half.nanoseconds)) / 1e9});
-        std.log.info("5p full 1bit  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_full_1bit.nanoseconds)) / 1e9});
-        std.log.info("5p 2bit       : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_2bit.nanoseconds)) / 1e9});
-        std.log.info("5p dense topK : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_dense_top8.nanoseconds)) / 1e9});
-        std.log.info("5p dense fin  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_5p_dense_final.nanoseconds)) / 1e9});
-
+        std.log.info("Mu prefix top : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_prefix.nanoseconds)) / 1e9});
+        std.log.info("Mu qjl 1 bit  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_qjl1.nanoseconds)) / 1e9});
+        std.log.info("Mu qjl quart  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_quart1.nanoseconds)) / 1e9});
+        std.log.info("Mu qjl quart  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_quart2.nanoseconds)) / 1e9});
+        std.log.info("Mu qjl half2  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_half2.nanoseconds)) / 1e9});
+        std.log.info("Mu dense      : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_dense.nanoseconds)) / 1e9});
+        
         std.log.info("Trc sparse    : {d:>6.2}s", .{@as(f64, @floatFromInt(self.trc_sparse_256.nanoseconds)) / 1e9});
         std.log.info("Trc top 256   : {d:>6.2}s", .{@as(f64, @floatFromInt(self.trc_top_256.nanoseconds)) / 1e9});
         std.log.info("Trc dense 256 : {d:>6.2}s", .{@as(f64, @floatFromInt(self.trc_dense_256.nanoseconds)) / 1e9});
@@ -297,19 +291,20 @@ pub fn main(init: std.process.Init) !void {
 
     try printZmlLogo(zml_handler.io);
 
-    try runTestsSampling(&zml_handler, zml_handler.uris.llama);
-    try runTestsLlm(&zml_handler, zml_handler.uris.llama);
+    //try runTestsSampling(&zml_handler, zml_handler.uris.llama);
+    //try runTestsLlm(&zml_handler, zml_handler.uris.llama);
     
     try runTestsSampling(&zml_handler, zml_handler.uris.qwen);
-    try runTestsLlm(&zml_handler, zml_handler.uris.qwen);
+    //try runTestsLlm(&zml_handler, zml_handler.uris.qwen);
 
     zml_handler.timers.print();
 }
 
-const bench_qjl = true;
-const bench_int = true;
-const bench_pq = true;
-const bench_misc = true;
+const bench_new = true;
+const bench_qjl = false;
+const bench_int = false;
+const bench_pq = false;
+const bench_misc = false;
 
 pub fn runTestsSampling(zml_handler: *Zml_handler, path: []const u8) !void {
     const alloc = zml_handler.allocator;
@@ -325,7 +320,7 @@ pub fn runTestsSampling(zml_handler: *Zml_handler, path: []const u8) !void {
     var sampler: Sampler = try .init(zml_handler, &lm_head, tokenizer);
     defer Sampler.deinit(&sampler);
 
-    const ref_baseline: SamplingReference = if (true) blk: {
+    const ref_baseline: SamplingReference = if (false) blk: {
         std.log.info("***** Dense sampling reference", .{});
         const computed_ref = try computeSamplingReference(zml_handler, &sampler, "Dense");
         //try exportSamplingReference(zml_handler, "reference.safetensors", computed_ref);
@@ -354,6 +349,11 @@ pub fn runTestsSampling(zml_handler: *Zml_handler, path: []const u8) !void {
 
     try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_baseline));
 
+    if (bench_new) {
+        const ref_multi = try testQuantizedSampling(zml_handler, &lm_head, QuantizationQJL1, MultiSampler, "Multiphase");
+        try references.append(alloc, ref_multi);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_multi));
+    }
     if (bench_qjl) {
         const ref_qjl1 = try testQuantizedSampling(zml_handler, &lm_head, QuantizationQJL1, QJL1Sampler, "QJL1");
         try references.append(alloc, ref_qjl1);
@@ -571,7 +571,7 @@ pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype, lab
                 4 => "translate",
                 else => return error.InvalidTask,
             };
-            const embed_slice = try save_load.getSlice(zml_handler, "llama_embeds.safetensors", task, .f32, true);
+            const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds.safetensors", task, .f32, true);
             defer embed_slice.free(zml_handler.allocator);
             const n: usize = @intCast(embed_slice.shape.dims()[0]);
             total_embeds += n;
@@ -587,7 +587,7 @@ pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype, lab
                 2 => "longtranslate",
                 else => return error.InvalidTask,
             };
-            const embed_slice = try save_load.getSlice(zml_handler, "llama_embeds2.safetensors", task, .f32, true);
+            const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds2.safetensors", task, .f32, true);
             defer embed_slice.free(zml_handler.allocator);
             const n: usize = @intCast(embed_slice.shape.dims()[0]);
             total_embeds += n;
@@ -613,13 +613,13 @@ pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype, lab
                 4 => "translate",
                 else => return error.InvalidTask,
             };
-            const embed_slice = try save_load.getSlice(zml_handler, "llama_embeds.safetensors", task, .f32, true);
+            const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds.safetensors", task, .f32, true);
             defer embed_slice.free(zml_handler.allocator);
             const n: usize = @intCast(embed_slice.shape.dims()[0]);
             const d: usize = @intCast(embed_slice.shape.dims()[1]);
             std.log.info("sampling task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
             for (0..n) |embed_index| {
-                const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
+                const embed = embed_slice.items(f32)[embed_index * d .. (embed_index + 1) * d];
                 zml_handler.tic(&zml_handler.timers.sampling);
                 ref.ref[nb] = sampler.sample(embed);
                 zml_handler.toc(&zml_handler.timers.sampling);
@@ -637,13 +637,13 @@ pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype, lab
                 2 => "longtranslate",
                 else => return error.InvalidTask,
             };
-            const embed_slice = try save_load.getSlice(zml_handler, "llama_embeds2.safetensors", task, .f32, true);
+            const embed_slice = try save_load.getSlice(zml_handler, "qwen_embeds2.safetensors", task, .f32, true);
             defer embed_slice.free(zml_handler.allocator);
             const n: usize = @intCast(embed_slice.shape.dims()[0]);
             const d: usize = @intCast(embed_slice.shape.dims()[1]);
             std.log.info("sampling task={s} embeddings={d} shape={f}", .{ task, n, embed_slice.shape });
             for (0..n) |embed_index| {
-                const embed = embed_slice.constItems(f32)[embed_index * d .. (embed_index + 1) * d];
+                const embed = embed_slice.items(f32)[embed_index * d .. (embed_index + 1) * d];
                 zml_handler.tic(&zml_handler.timers.sampling);
                 ref.ref[nb] = sampler.sample(embed);
                 zml_handler.toc(&zml_handler.timers.sampling);
