@@ -152,10 +152,13 @@ pub const KernelUnifiedAttention3dPtr = struct {
     pub const Kernel = tri.Kernel(Config, .{
         .name = "kernel_unified_attention_3d_ptr",
         .inputs = &.{
-            "query_ptr",            "key_cache_ptr",          "value_cache_ptr",      "block_tables_ptr",
-            "seq_lens_ptr",         "block_table_stride_ptr", "query_stride_0_ptr",   "query_stride_1_ptr",
-            "stride_k_cache_0_ptr", "stride_k_cache_1_ptr",   "stride_k_cache_2_ptr", "stride_v_cache_0_ptr",
-            "stride_v_cache_1_ptr", "stride_v_cache_2_ptr",   "query_start_len_ptr",
+            "query_ptr",
+            "key_cache_ptr",
+            "value_cache_ptr",
+            "block_tables_ptr",
+            "seq_lens_ptr",
+            "strides_ptr",
+            "query_start_len_ptr",
         },
         .outputs = &.{ "segm_output", "segm_max", "segm_expsum" },
         .run = run,
@@ -167,30 +170,22 @@ pub const KernelUnifiedAttention3dPtr = struct {
             .value_cache_ptr = .{ .ptr = cfg.kv_dtype },
             .block_tables_ptr = .{ .ptr = .i32 },
             .seq_lens_ptr = .{ .ptr = .i32 },
-            .block_table_stride_ptr = .{ .ptr = .i64 },
-            .query_stride_0_ptr = .{ .ptr = .i64 },
-            .query_stride_1_ptr = .{ .ptr = .i64 },
-            .stride_k_cache_0_ptr = .{ .ptr = .i64 },
-            .stride_k_cache_1_ptr = .{ .ptr = .i64 },
-            .stride_k_cache_2_ptr = .{ .ptr = .i64 },
-            .stride_v_cache_0_ptr = .{ .ptr = .i64 },
-            .stride_v_cache_1_ptr = .{ .ptr = .i64 },
-            .stride_v_cache_2_ptr = .{ .ptr = .i64 },
+            .strides_ptr = .{ .ptr = .i64 },
             .query_start_len_ptr = .{ .ptr = .i32 },
             .segm_output_ptr = .{ .ptr = .f32 },
             .segm_max_ptr = .{ .ptr = .f32 },
             .segm_expsum_ptr = .{ .ptr = .f32 },
         });
 
-        const block_table_stride = b.load(a.block_table_stride_ptr);
-        const query_stride_0 = b.load(a.query_stride_0_ptr);
-        const query_stride_1 = b.load(a.query_stride_1_ptr);
-        const stride_k_cache_0 = b.load(a.stride_k_cache_0_ptr);
-        const stride_k_cache_1 = b.load(a.stride_k_cache_1_ptr);
-        const stride_k_cache_2 = b.load(a.stride_k_cache_2_ptr);
-        const stride_v_cache_0 = b.load(a.stride_v_cache_0_ptr);
-        const stride_v_cache_1 = b.load(a.stride_v_cache_1_ptr);
-        const stride_v_cache_2 = b.load(a.stride_v_cache_2_ptr);
+        const block_table_stride = loadStride(b, a.strides_ptr, .block_table);
+        const query_stride_0 = loadStride(b, a.strides_ptr, .query_0);
+        const query_stride_1 = loadStride(b, a.strides_ptr, .query_1);
+        const stride_k_cache_0 = loadStride(b, a.strides_ptr, .k_cache_0);
+        const stride_k_cache_1 = loadStride(b, a.strides_ptr, .k_cache_1);
+        const stride_k_cache_2 = loadStride(b, a.strides_ptr, .k_cache_2);
+        const stride_v_cache_0 = loadStride(b, a.strides_ptr, .v_cache_0);
+        const stride_v_cache_1 = loadStride(b, a.strides_ptr, .v_cache_1);
+        const stride_v_cache_2 = loadStride(b, a.strides_ptr, .v_cache_2);
 
         kernelUnifiedAttention3d(
             b,
@@ -235,8 +230,12 @@ pub const ReduceSegmentsPtr = struct {
     pub const Kernel = tri.Kernel(Config, .{
         .name = "reduce_segments_ptr",
         .inputs = &.{
-            "segm_output_ptr",     "segm_max_ptr",        "segm_expsum_ptr",        "seq_lens_ptr",
-            "output_stride_0_ptr", "output_stride_1_ptr", "block_table_stride_ptr", "query_start_len_ptr",
+            "segm_output_ptr",
+            "segm_max_ptr",
+            "segm_expsum_ptr",
+            "seq_lens_ptr",
+            "strides_ptr",
+            "query_start_len_ptr",
         },
         .outputs = &.{"output"},
         .run = run,
@@ -247,16 +246,13 @@ pub const ReduceSegmentsPtr = struct {
             .segm_max_ptr = .{ .ptr = .f32 },
             .segm_expsum_ptr = .{ .ptr = .f32 },
             .seq_lens_ptr = .{ .ptr = .i32 },
-            .output_stride_0_ptr = .{ .ptr = .i64 },
-            .output_stride_1_ptr = .{ .ptr = .i64 },
-            .block_table_stride_ptr = .{ .ptr = .i64 },
+            .strides_ptr = .{ .ptr = .i64 },
             .query_start_len_ptr = .{ .ptr = .i32 },
             .output_ptr = .{ .ptr = cfg.o_dtype },
         });
 
-        const output_stride_0 = b.load(a.output_stride_0_ptr);
-        const output_stride_1 = b.load(a.output_stride_1_ptr);
-        const block_table_stride = b.load(a.block_table_stride_ptr);
+        const output_stride_0 = loadStride(b, a.strides_ptr, .output_0);
+        const output_stride_1 = loadStride(b, a.strides_ptr, .output_1);
 
         reduceSegments(
             b,
@@ -267,7 +263,6 @@ pub const ReduceSegmentsPtr = struct {
             a.seq_lens_ptr,
             output_stride_0,
             output_stride_1,
-            block_table_stride,
             a.query_start_len_ptr,
             cfg,
         );
@@ -827,12 +822,9 @@ fn reduceSegments(
     seq_lens_ptr: Value,
     output_stride_0: Value,
     output_stride_1: Value,
-    block_table_stride: Value,
     query_start_len_ptr: Value,
     config: ReduceSegmentsPtr.Config,
 ) void {
-    _ = block_table_stride;
-
     const TILE_SIZE: i64 = config.tile_size;
     const HEAD_SIZE: i64 = config.head_size;
     const HEAD_SIZE_PADDED: i64 = config.head_size_padded;

@@ -508,6 +508,36 @@ test pagedAttention {
         Benchmark.timed_iterations,
     });
 
+    var triton2_3d_options_args = triton_options_args;
+    triton2_3d_options_args.backend = .triton2;
+    triton2_3d_options_args.is_prefill = false;
+    const triton2_3d_parameters: Parameters = .init(.fromBackend(triton2_3d_options_args));
+    const triton2_3d_exe = try platform.compileFn(
+        allocator,
+        io,
+        pagedAttention,
+        .{ triton2_3d_parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, attn_opts },
+        .{ .program_name = "paged_attention_triton2_3d", .shardings = shardings },
+    );
+    defer triton2_3d_exe.deinit();
+    const triton2_3d_parameters_d: zml.Bufferized(Parameters) = .{ .triton2 = .{
+        .block_table = triton_parameters_d.triton.block_table,
+        .seq_lens = triton_parameters_d.triton.seq_lens,
+        .query_start_len = triton_parameters_d.triton.query_start_len,
+    } };
+    var triton2_3d_d = try zml.testing.autoCall(allocator, io, &triton2_3d_exe, pagedAttention, .{ triton2_3d_parameters_d, q, new_k, new_v, kv_cache_d });
+    defer triton2_3d_d.deinit();
+    try zml.testing.expectClose(io, triton_h, triton2_3d_d, .{
+        .absolute_tolerance = 1e-3,
+        .relative_tolerance = 1e-2,
+        .epsilon_relative = 1e-6,
+    });
+    const triton2_3d_avg_ns = try Benchmark.run(allocator, io, &triton2_3d_exe, triton2_3d_parameters_d, q, new_k, new_v, kv_cache_d);
+    std.log.warn("paged attention triton2_3d: {d:.2} us average over {} runs", .{
+        @as(f64, @floatFromInt(triton2_3d_avg_ns)) / std.time.ns_per_us,
+        Benchmark.timed_iterations,
+    });
+
     for (std.enums.values(Backend)) |backend| {
         if (!backend.isAvailable(platform)) continue;
         if (backend == .triton) continue;
