@@ -31,7 +31,11 @@ package(default_visibility = ["//visibility:public"])
 
 filegroup(
     name = "runtime_libs",
-    srcs = glob(["lib/*.so*"]),
+    srcs = glob([
+        "lib/libmusa.so*",
+        "lib/libmusart.so*",
+        "lib/libmublas.so*",
+    ]),
 )
 """
 
