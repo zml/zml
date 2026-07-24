@@ -334,21 +334,24 @@ pub const paged = struct {
         const k_strides = k_cache.shape().computeElementStrides().constSlice();
         const v_strides = v_cache.shape().computeElementStrides().constSlice();
 
-        var strides: [kernels.Strides.count]i64 = undefined;
-        strides[kernels.Strides.block_table] = block_table_strides[0];
-        strides[kernels.Strides.query_0] = q_strides[0];
-        strides[kernels.Strides.query_1] = q_strides[1];
-        strides[kernels.Strides.output_0] = q_strides[0];
-        strides[kernels.Strides.output_1] = q_strides[1];
-        strides[kernels.Strides.k_cache_0] = k_strides[0];
-        strides[kernels.Strides.k_cache_1] = k_strides[1];
-        strides[kernels.Strides.k_cache_2] = k_strides[2];
-        strides[kernels.Strides.v_cache_0] = v_strides[0];
-        strides[kernels.Strides.v_cache_1] = v_strides[1];
-        strides[kernels.Strides.v_cache_2] = v_strides[2];
+        const StrideArray = std.enums.EnumArray(kernels.Strides, i64);
+        const strides: StrideArray = .init(.{
+            .block_table = @intCast(block_table_strides[0]),
+            .query_0 = @intCast(q_strides[0]),
+            .query_1 = @intCast(q_strides[1]),
+            .output_0 = @intCast(q_strides[0]),
+            .output_1 = @intCast(q_strides[1]),
+            .k_cache_0 = @intCast(k_strides[0]),
+            .k_cache_1 = @intCast(k_strides[1]),
+            .k_cache_2 = @intCast(k_strides[2]),
+            .v_cache_0 = @intCast(v_strides[0]),
+            .v_cache_1 = @intCast(v_strides[1]),
+            .v_cache_2 = @intCast(v_strides[2]),
+        });
+        const stride_values: []const i64 = @as(*const [StrideArray.len]i64, @ptrCast(&strides));
         const strides_tensor = zml.Tensor.constantTensor(
-            .init(.{kernels.Strides.count}, .i64),
-            std.mem.sliceAsBytes(&strides),
+            .init(.{StrideArray.len}, .i64),
+            std.mem.sliceAsBytes(stride_values),
         );
 
         const output = kernels.KernelUnifiedAttention2dPtr.Kernel.call(

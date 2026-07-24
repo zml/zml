@@ -15,20 +15,23 @@ const log = std.log.scoped(.@"zml/attention/triton2");
 /// `log_2(e)` — pre-multiply with this to turn `exp(x)` into `exp2(x * RCP_LN2)`.
 const RCP_LN2: f32 = 1.4426950408889634;
 
-pub const Strides = struct {
-    pub const block_table = 0;
-    pub const query_0 = 1;
-    pub const query_1 = 2;
-    pub const output_0 = 3;
-    pub const output_1 = 4;
-    pub const k_cache_0 = 5;
-    pub const k_cache_1 = 6;
-    pub const k_cache_2 = 7;
-    pub const v_cache_0 = 8;
-    pub const v_cache_1 = 9;
-    pub const v_cache_2 = 10;
-    pub const count = 11;
+pub const Strides = enum(u8) {
+    block_table,
+    query_0,
+    query_1,
+    output_0,
+    output_1,
+    k_cache_0,
+    k_cache_1,
+    k_cache_2,
+    v_cache_0,
+    v_cache_1,
+    v_cache_2,
 };
+
+fn loadStride(b: *Builder, strides_ptr: Value, comptime stride: Strides) Value {
+    return b.load(strides_ptr.addPtr(@intFromEnum(stride)));
+}
 
 pub const KernelUnifiedAttention2dPtr = struct {
     pub const Config = struct {
@@ -82,17 +85,17 @@ pub const KernelUnifiedAttention2dPtr = struct {
             .output_ptr = .{ .ptr = cfg.o_dtype },
         });
 
-        const block_table_stride = b.load(a.strides_ptr.addPtr(Strides.block_table));
-        const query_stride_0 = b.load(a.strides_ptr.addPtr(Strides.query_0));
-        const query_stride_1 = b.load(a.strides_ptr.addPtr(Strides.query_1));
-        const output_stride_0 = b.load(a.strides_ptr.addPtr(Strides.output_0));
-        const output_stride_1 = b.load(a.strides_ptr.addPtr(Strides.output_1));
-        const stride_k_cache_0 = b.load(a.strides_ptr.addPtr(Strides.k_cache_0));
-        const stride_k_cache_1 = b.load(a.strides_ptr.addPtr(Strides.k_cache_1));
-        const stride_k_cache_2 = b.load(a.strides_ptr.addPtr(Strides.k_cache_2));
-        const stride_v_cache_0 = b.load(a.strides_ptr.addPtr(Strides.v_cache_0));
-        const stride_v_cache_1 = b.load(a.strides_ptr.addPtr(Strides.v_cache_1));
-        const stride_v_cache_2 = b.load(a.strides_ptr.addPtr(Strides.v_cache_2));
+        const block_table_stride = loadStride(b, a.strides_ptr, .block_table);
+        const query_stride_0 = loadStride(b, a.strides_ptr, .query_0);
+        const query_stride_1 = loadStride(b, a.strides_ptr, .query_1);
+        const output_stride_0 = loadStride(b, a.strides_ptr, .output_0);
+        const output_stride_1 = loadStride(b, a.strides_ptr, .output_1);
+        const stride_k_cache_0 = loadStride(b, a.strides_ptr, .k_cache_0);
+        const stride_k_cache_1 = loadStride(b, a.strides_ptr, .k_cache_1);
+        const stride_k_cache_2 = loadStride(b, a.strides_ptr, .k_cache_2);
+        const stride_v_cache_0 = loadStride(b, a.strides_ptr, .v_cache_0);
+        const stride_v_cache_1 = loadStride(b, a.strides_ptr, .v_cache_1);
+        const stride_v_cache_2 = loadStride(b, a.strides_ptr, .v_cache_2);
 
         kernelUnifiedAttention2d(
             b,
