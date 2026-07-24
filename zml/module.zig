@@ -651,6 +651,14 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // NVIDIA recommends these settings
                 // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
+                // Use the RAFT radix select_k kernel for TopK instead of a full sort.
+                // The default CustomCall TopK path caps k<=16, so a sampler top_k like
+                // 50 falls back to a full bitonic sort over the whole vocab (~28 kernels,
+                // ~0.6ms/step at batch=16). This flag raises the cap to 128 and collapses
+                // it to a single radix-select kernel, matching vLLM's fused sampler.
+                // Shapes past the heuristic (k>128) still fall back to sort+slice safely.
+                // See xla/backends/gpu/transforms/topk_specializer.cc.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_experimental_use_raft_select_k", true, upb_arena);
             },
             .rocm => {
                 // Use hipBLASLt only

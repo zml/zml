@@ -1619,7 +1619,22 @@ pub fn unpackNvfp4(w: Tensor, k_tag: anytype) Tensor {
         .renameTag(.kb, Shape.toTag(k_tag));
 }
 
+/// Weight-only block-scaled dot: bf16 activation (identity lhs scale) x quantized
+/// weight with `rhs_scale`. Emits the `xla.scaled_dot` composite.
 pub fn scaledDot(lhs: Tensor, rhs: Tensor, rhs_scale: Tensor, args: anytype) Tensor {
+    return scaledDotImpl(lhs, rhs, rhs_scale, &.{}, args);
+}
+
+/// Same as `scaledDot`, but carries the two NVFP4 per-tensor global scales
+/// (input then weight) as trailing composite operands. XLA's CompositeRewriter
+/// lowers this to a 6-operand kScaledDot; the generic floor applies the weight
+/// global as an epilogue while the CUDA FusedScaledDotRewriter consumes both to
+/// emit the fused cutlass fp4 kernel (W4A4). Both globals must be f32 scalars.
+pub fn scaledDotGlobals(lhs: Tensor, rhs: Tensor, rhs_scale: Tensor, input_global_scale: Tensor, weight_global_scale: Tensor, args: anytype) Tensor {
+    return scaledDotImpl(lhs, rhs, rhs_scale, &.{ input_global_scale, weight_global_scale }, args);
+}
+
+fn scaledDotImpl(lhs: Tensor, rhs: Tensor, rhs_scale: Tensor, globals: []const Tensor, args: anytype) Tensor {
     stdx.debug.assert(lhs.shape().hasTag(args) != null, "scaledDot expects lhs to have {any} tag, got {f}", .{ args, lhs.shape() });
     stdx.debug.assert(rhs.shape().hasTag(args) != null, "scaledDot expects rhs to have {any} tag, got {f}", .{ args, rhs.shape() });
 
@@ -1699,7 +1714,13 @@ pub fn scaledDot(lhs: Tensor, rhs: Tensor, rhs_scale: Tensor, args: anytype) Ten
         }),
     });
 
-    const outs = composite("xla.scaled_dot", &.{ lhs, rhs, lhs_scale, rhs_scale }, &.{res_shape}, scaledDotReference, res_shape, .{
+    // Operands: lhs, rhs, lhs_scale, rhs_scale, then 0 or 2 per-tensor globals.
+    stdx.debug.assert(globals.len == 0 or globals.len == 2, "scaledDot globals must be 0 or 2, got {d}", .{globals.len});
+    var op_buf: [6]Tensor = .{ lhs, rhs, lhs_scale, rhs_scale, undefined, undefined };
+    for (globals, 0..) |g, i| op_buf[4 + i] = g;
+    const operands = op_buf[0 .. 4 + globals.len];
+
+    const outs = composite("xla.scaled_dot", operands, &.{res_shape}, scaledDotReference, res_shape, .{
         .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dnums)},
     });
 

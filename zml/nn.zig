@@ -46,11 +46,34 @@ fn a4w4Fused() bool {
     return s.len > 0 and !std.mem.eql(u8, s, "0");
 }
 
+/// Opt IN to the cutlass sm120 NVFP4 W4A4 GEMM custom call (`cutlass$fp4_mm`,
+/// registered in the CUDA plugin). Routes the fp4 activation + fp4 weight +
+/// e4m3 block scales + combined global alpha to the native block-scaled MMA
+/// (matches vLLM). Off by default while validating coherence.
+fn a4w4Cutlass() bool {
+    const v = std.c.getenv("ZML_A4W4_CUTLASS") orelse return false;
+    const s = std.mem.span(v);
+    return s.len > 0 and !std.mem.eql(u8, s, "0");
+}
+
+/// DIAGNOSTIC: compute BOTH cutlass and dequant-both, print max|cutlass-deq|
+/// via the "cutlass$printmax" FFI handler, and RETURN dequant-both (coherent).
+fn a4w4CutlassCheck() bool {
+    const v = std.c.getenv("ZML_A4W4_CUTLASS_CHECK") orelse return false;
+    const s = std.mem.span(v);
+    return s.len > 0 and !std.mem.eql(u8, s, "0");
+}
+
 pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
     tag: Shape.Tag,
     scales: ?Tensor = null,
+    // NVFP4 weight block scale PRE-SWIZZLED into the cutlass SF layout (rank-1
+    // [szB] u8/f8e4m3), produced once at load time. When present, the cutlass fp4
+    // matmul custom call receives it and skips its per-token weight-scale swizzle
+    // (~2ms/token saved). Detected by rank in the plugin handler.
+    scales_swizzled: ?Tensor = null,
     global_scale: ?Tensor = null,
     // NVFP4 activation global scale. When present, the activation is quantized
     // to fp4 (A4W4) and the block-scaled matmul runs natively (Blackwell cuDNN)
@@ -104,6 +127,19 @@ pub const Linear = struct {
                 const igs_s = igs.convert(.f32).reshape(zml.Shape.init(.{}, .f32));
                 const wgs_s = wgs.convert(.f32).reshape(zml.Shape.init(.{}, .f32));
                 const combined = Tensor.scalar(1.0, .f32).div(igs_s.mul(wgs_s));
+                if (a4w4Cutlass()) {
+                    // Emit the weight-only NVFP4 scaled_dot composite carrying the
+                    // two per-tensor globals (igs, wgs). XLA lowers it to a
+                    // 6-operand kScaledDot (which tensor-parallel partitions for
+                    // free), then the CUDA FusedScaledDotRewriter selects the
+                    // cutlass fp4 kernel per shard -- W4A4 with the activation
+                    // quantized in-kernel from the bf16 lhs (nothing materialized
+                    // here). No custom call in ZML. The block scale stays in its
+                    // NATURAL rank-2 layout so it shards on K (the handler swizzles
+                    // per step); the load-time pre-swizzle is a single-GPU-only
+                    // optimization incompatible with a sharded contracting dim.
+                    break :blk ops.scaledDotGlobals(x.convert(.bf16), weight, scales, igs_s, wgs_s, self.tag).convert(x.dtype());
+                }
                 // Present the weight (rhs) in CANONICAL orientation [kw, dout]
                 // (contracting axis first) via an explicit transpose. The scaled-
                 // dot's INTERNAL non-canonical canonicalization mis-repacks a
