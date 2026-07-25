@@ -7,6 +7,9 @@ const log = std.log.scoped(.vfs);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
+    .log_scope_levels = &.{
+        .{ .scope = .@"zml/io/load", .level = .debug },
+    },
 };
 
 // -- ls hf://openai/gpt-oss-20b@6cee5e8
@@ -206,28 +209,36 @@ pub fn main(init: std.process.Init) !void {
 
             const now: std.Io.Timestamp = .now(io, .awake);
 
-            var buffers = try zml.mem.bufferize(allocator, AllTensorsModel, &model);
+            const load_read_parallelism = try envUsize(init.environ_map, "ZML_LOAD_FIXED_READ_PARALLELISM", 12);
+            const load_read_request_mib = try envUsize(init.environ_map, "ZML_LOAD_READ_REQUEST_MIB", 2);
+            const load_dma_block_mib = try envUsize(init.environ_map, "ZML_LOAD_DMA_BLOCK_MIB", 2);
+            const load_max_pinned_mib = try envUsize(init.environ_map, "ZML_LOAD_MAX_PINNED_MIB", 128);
+            var total_bytes: usize = 0;
+
+            const buffers = try zml.io.load(AllTensorsModel, &model, allocator, io, platform, &store, .{
+                .shardings = &.{sharded_sharding},
+                .read_parallelism = load_read_parallelism,
+                .read_request_size = load_read_request_mib * zml.MiB,
+                .dma_block_size = load_dma_block_mib * zml.MiB,
+                .max_pinned_bytes = load_max_pinned_mib * zml.MiB,
+                .progress = &progress,
+                .total_bytes = &total_bytes,
+            });
             defer {
-                for (buffers.tensors) |*b| b.deinit();
+                for (buffers.tensors) |*buffer_| buffer_.deinit();
                 allocator.free(buffers.tensors);
             }
 
-            var loader: zml.io.Loader = try .init(allocator, platform, .{
-                .parallelism = 8,
-                .dma_chunks = 16,
-                .dma_chunk_size = 256 * zml.MiB,
-            });
-            defer loader.deinit();
-
-            loader.load(io, AllTensorsModel, &model, &buffers, &store, &.{sharded_sharding}, .{ .progress = &progress });
-            try loader.await(io);
-
             const took = now.untilNow(io, .awake);
-            const total_bytes: u64 = loader.bytes_loaded.raw;
             const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
             log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         },
     }
+}
+
+fn envUsize(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {
+    const value = environ_map.get(name) orelse return default;
+    return std.fmt.parseInt(usize, value, 10);
 }
 
 const TreeCounts = struct {

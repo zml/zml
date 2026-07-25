@@ -1509,6 +1509,10 @@ pub const AsyncHostToDeviceTransferManager = opaque {
         });
     }
 
+    pub fn setBufferErrorUnknown(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, error_message: []const u8) ApiError!void {
+        return self.setBufferError(api, buffer_index, c.PJRT_Error_Code_UNKNOWN, error_message);
+    }
+
     pub fn addMetadata(self: *AsyncHostToDeviceTransferManager, api: *const Api, transfer_metadata: []const NamedValue) ApiError!void {
         _ = try api.call(.PJRT_AsyncHostToDeviceTransferManager_AddMetadata, .{
             .transfer_manager = self.inner(),
