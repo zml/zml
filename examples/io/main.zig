@@ -209,8 +209,11 @@ pub fn main(init: std.process.Init) !void {
 
             const now: std.Io.Timestamp = .now(io, .awake);
 
-            const load_read_parallelism = try envUsize(init.environ_map, "ZML_LOAD_FIXED_READ_PARALLELISM", 12);
+            const load_read_initial_parallelism = try envUsize(init.environ_map, "ZML_LOAD_READ_INITIAL_PARALLELISM", 12);
+            const load_read_parallelism = try envUsize(init.environ_map, "ZML_LOAD_FIXED_READ_PARALLELISM", load_read_initial_parallelism);
             const load_read_request_mib = try envUsize(init.environ_map, "ZML_LOAD_READ_REQUEST_MIB", 2);
+            const load_dma_initial_parallelism = try envUsize(init.environ_map, "ZML_LOAD_DMA_INITIAL_PARALLELISM", 8);
+            const load_dma_parallelism = try envUsize(init.environ_map, "ZML_LOAD_FIXED_DMA_PARALLELISM", load_dma_initial_parallelism);
             const load_dma_block_mib = try envUsize(init.environ_map, "ZML_LOAD_DMA_BLOCK_MIB", 2);
             const load_max_pinned_mib = try envUsize(init.environ_map, "ZML_LOAD_MAX_PINNED_MIB", 128);
             var total_bytes: usize = 0;
@@ -219,6 +222,7 @@ pub fn main(init: std.process.Init) !void {
                 .shardings = &.{sharded_sharding},
                 .read_parallelism = load_read_parallelism,
                 .read_request_size = load_read_request_mib * zml.MiB,
+                .dma_parallelism = load_dma_parallelism,
                 .dma_block_size = load_dma_block_mib * zml.MiB,
                 .max_pinned_bytes = load_max_pinned_mib * zml.MiB,
                 .progress = &progress,

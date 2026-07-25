@@ -19,6 +19,64 @@ This file is the authoritative handoff for the current implementation and
 measurements. `RESEARCH.md` is historical controller research; its adaptive
 staging architecture is retired.
 
+## Split reconstruction above `4ad4dd3b` (2026-07-25)
+
+The performance work is being reconstructed as independently explained and
+measured commits above the user-provided benchmark base. `plan.md` is read
+from the original squashed work at `9e87bc40`; it was not part of the selected
+base. `CTX.md` was accidentally lost when that base was rewritten under the
+same Jujutsu change ID, so it has been restored from `4ad4dd3b`.
+
+The prerequisite change `ktmqvrwz` activates the base's new oneAPI
+`DmaMapped` path and moves allocator warm-up before the example timer. Five
+local runs improved from a 5.24 GiB/s median to 9.44 GiB/s (+80.2%). A single
+AWS run improved from 161.38 to 167.88 MiB/s (+4.0%); both sides emitted the
+same connection-closing warnings.
+
+Item 6, change `nwmkrmrk`, adds the lazy 64 MiB slab-based
+`DmaBlockPool`. It is deliberately unused by the old staging loader at that
+point. Five local runs medianed 9.61 GiB/s (+1.8%, neutral); one AWS run was
+161.29 MiB/s (-3.9%, inconclusive). The result preserves the resource
+primitive needed by the copy-free loader without claiming an isolated speed
+gain.
+
+Item 4, change `rwwxukqk`, batches positional reads through one shared handle
+per source and loads directly into pooled blocks. With the historical 128 MiB
+working bound, local runs were 23.90, 22.44, 25.97, 26.84, and 27.49 GiB/s
+(median 25.97, +170.2%). One AWS run improved from 161.29 to 314.26 MiB/s
+(+94.9%). The final benchmark script's 2 GiB default did not complete
+promptly at this intermediate point: immediate read-to-PJRT submission could
+turn the larger allowance into an enormous completion backlog. That
+non-completion is retained as the motivating failure for item 3, not reported
+as a throughput sample.
+
+Item 3, the current change `soxlrqyu`, separates the three resource stages:
+twelve fixed source workers, at most twenty retained request lifecycles, and
+eight physical DMA events per device. A lifecycle credit is released only by
+the last block/replica callback. The 2 GiB script default now completes with
+40 MiB pinned, eight peak DMA events, zero pool waits, and 23.71 GiB/s in its
+first smoke run. At the parent's 128 MiB comparison bound, five runs were
+26.83, 26.34, 27.09, 27.13, and 28.00 GiB/s (median 27.09, +4.3% versus
+25.97). The deliberately hostile 16 MiB-request/1 GiB-ceiling case was 21.01,
+20.90, and 20.81 GiB/s (median 20.90, about +292% versus the prior 5.33
+GiB/s); DMA latency fell from 40--56 ms to 0.52--0.59 ms and retained memory
+stopped at 312--320 MiB. One AWS run was 306.12 MiB/s versus the parent
+314.26 MiB/s (-2.6%, neutral), with 32 MiB pinned and peak DMA four.
+Four-device correctness runs then moved 14.96 GiB physically at 28.38 GiB/s
+when sharded and 59.83 GiB physically at 13.09 GiB/s when replicated, both
+with peak DMA eight/device and zero pool waits. The first check had exposed
+that the extracted item-4 path used the raw safetensor shape and therefore
+lost the model sharding tags; item 4 now uses the model tensor shape, matching
+master's Loader API and restoring the intended distinction.
+
+Raw item-3 logs are `/tmp/zml-item3-smoke.log`,
+`/tmp/zml-item3-local-{1..5}.log`,
+`/tmp/zml-item3-local-stress-{1..3}.log`, and
+`/tmp/zml-item3-aws.log`; corrected multi-device logs are
+`/tmp/zml-item3-four-{sharded,replicated}-fixed.log`. Core, VFS, and stdx
+tests and the release oneAPI IO example build pass. CUDA was neither built nor
+run.
+
 ## Simplicity pass: bounded adaptive rounds (2026-07-24)
 
 This pass treats reduced line count only as a weak proxy for simplicity. The

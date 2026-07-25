@@ -969,6 +969,7 @@ const VectoredTensorTransfer = struct {
     const Target = struct {
         manager: *pjrt.AsyncHostToDeviceTransferManager,
         pjrt_buffer: *pjrt.Buffer,
+        device_index: usize,
         total: usize,
         submitted_bytes: std.atomic.Value(usize) = .init(0),
         final_submitted: bool = false,
@@ -1032,6 +1033,7 @@ const VectoredTensorTransfer = struct {
             targets[i] = .{
                 .manager = manager,
                 .pjrt_buffer = pjrt_buffer,
+                .device_index = device.id,
                 .total = placement.shape.byteSize(),
             };
             initialized += 1;
@@ -1072,21 +1074,103 @@ const VectoredTensorTransfer = struct {
     }
 };
 
+const RequestGate = struct {
+    limit: usize,
+    in_use: usize = 0,
+    peak: usize = 0,
+    closed: std.atomic.Value(bool) = .init(false),
+    mutex: std.Io.Mutex = .init,
+    condition: std.Io.Condition = .init,
+
+    fn acquire(self: *RequestGate, io: std.Io) bool {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        while (!self.closed.load(.acquire) and self.in_use >= self.limit) {
+            self.condition.waitUncancelable(io, &self.mutex);
+        }
+        if (self.closed.load(.acquire)) return false;
+        self.in_use += 1;
+        self.peak = @max(self.peak, self.in_use);
+        return true;
+    }
+
+    fn release(self: *RequestGate, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        std.debug.assert(self.in_use > 0);
+        self.in_use -= 1;
+        self.condition.signal(io);
+    }
+
+    fn close(self: *RequestGate, io: std.Io) void {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        self.closed.store(true, .release);
+        self.condition.broadcast(io);
+    }
+
+    fn peakUse(self: *RequestGate, io: std.Io) usize {
+        self.mutex.lockUncancelable(io);
+        defer self.mutex.unlock(io);
+        return self.peak;
+    }
+};
+
 const VectoredLoadPipeline = struct {
-    const DeferredTransfer = struct {
-        tensor: *VectoredTensorTransfer,
-        block: *mem.DmaBlockPool.Lease,
-        writer_mask: u64,
+    const RequestContext = struct {
+        pipeline: *VectoredLoadPipeline,
+        pending: std.atomic.Value(usize) = .init(1),
+
+        fn addBlock(self: *RequestContext) void {
+            _ = self.pending.fetchAdd(1, .acq_rel);
+        }
+
+        fn finishScheduling(self: *RequestContext) void {
+            self.completeOne();
+        }
+
+        fn completeBlock(self: *RequestContext) void {
+            self.completeOne();
+        }
+
+        fn completeOne(self: *RequestContext) void {
+            const previous = self.pending.fetchSub(1, .acq_rel);
+            std.debug.assert(previous > 0);
+            if (previous != 1) return;
+            self.pipeline.lifecycle_gate.release(self.pipeline.io);
+            self.pipeline.allocator.destroy(self);
+        }
+    };
+
+    const BlockContext = struct {
+        request: *RequestContext,
+        lease: mem.DmaBlockPool.Lease,
+        completion_reported: std.atomic.Value(bool) = .init(false),
+
+        fn complete(self: *BlockContext) void {
+            self.lease.complete();
+            if (self.lease.isComplete() and
+                self.completion_reported.cmpxchgStrong(false, true, .acq_rel, .acquire) == null)
+            {
+                self.request.completeBlock();
+            }
+        }
+    };
+
+    const ReadyTransfer = struct {
+        target: *VectoredTensorTransfer.Target,
+        block: *BlockContext,
         destination_offset: usize,
         len: usize,
     };
 
     const EventContext = struct {
         pipeline: *VectoredLoadPipeline,
-        block: *mem.DmaBlockPool.Lease,
+        block: *BlockContext,
         pjrt_event: *pjrt.Event,
         err: ?*pjrt.Error = null,
         submitted_at: std.Io.Timestamp,
+        device_index: usize,
         bytes: usize,
     };
 
@@ -1094,30 +1178,76 @@ const VectoredLoadPipeline = struct {
     io: std.Io,
     platform: *const Platform,
     pool: *mem.DmaBlockPool,
+    lifecycle_gate: *RequestGate,
     block_size: usize,
+    dma_limit: usize,
     metrics: *VectoredLoadMetrics,
     first_error: std.atomic.Value(u16) = .init(0),
     metadata_mutex: std.Io.Mutex = .init,
-    blocks: std.ArrayListUnmanaged(*mem.DmaBlockPool.Lease) = .empty,
-    deferred: std.ArrayListUnmanaged(DeferredTransfer) = .empty,
+    blocks: std.ArrayListUnmanaged(*BlockContext) = .empty,
+    ready_queues: []std.ArrayListUnmanaged(ReadyTransfer),
     events: std.ArrayListUnmanaged(*EventContext) = .empty,
+    active_by_device: []usize,
+    peak_by_device: []usize,
+    next_device: usize = 0,
+    pumping: bool = false,
     active_events: usize = 0,
-    submissions_finished: bool = false,
+    ready_entries: usize = 0,
+    reads_finished: bool = false,
     dma_done: std.Io.Event = .unset,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const Platform,
+        pool: *mem.DmaBlockPool,
+        lifecycle_gate: *RequestGate,
+        block_size: usize,
+        dma_limit: usize,
+        metrics: *VectoredLoadMetrics,
+    ) !VectoredLoadPipeline {
+        const ready_queues = try allocator.alloc(std.ArrayListUnmanaged(ReadyTransfer), platform.devices.len);
+        errdefer allocator.free(ready_queues);
+        @memset(ready_queues, .empty);
+        const active_by_device = try allocator.alloc(usize, platform.devices.len);
+        errdefer allocator.free(active_by_device);
+        @memset(active_by_device, 0);
+        const peak_by_device = try allocator.alloc(usize, platform.devices.len);
+        errdefer allocator.free(peak_by_device);
+        @memset(peak_by_device, 0);
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .platform = platform,
+            .pool = pool,
+            .lifecycle_gate = lifecycle_gate,
+            .block_size = block_size,
+            .dma_limit = dma_limit,
+            .metrics = metrics,
+            .ready_queues = ready_queues,
+            .active_by_device = active_by_device,
+            .peak_by_device = peak_by_device,
+        };
+    }
 
     fn deinit(self: *VectoredLoadPipeline) void {
         std.debug.assert(self.active_events == 0);
+        std.debug.assert(self.ready_entries == 0);
         for (self.events.items) |ctx| {
             ctx.pjrt_event.deinit(self.platform.pjrt_api);
             if (ctx.err) |err| err.deinit(self.platform.pjrt_api);
             self.allocator.destroy(ctx);
         }
         for (self.blocks.items) |block| {
-            std.debug.assert(block.isComplete());
+            std.debug.assert(block.lease.isComplete());
+            std.debug.assert(block.completion_reported.load(.acquire));
             self.allocator.destroy(block);
         }
+        for (self.ready_queues) |*queue| queue.deinit(self.allocator);
+        self.allocator.free(self.ready_queues);
+        self.allocator.free(self.active_by_device);
+        self.allocator.free(self.peak_by_device);
         self.events.deinit(self.allocator);
-        self.deferred.deinit(self.allocator);
         self.blocks.deinit(self.allocator);
     }
 
@@ -1133,109 +1263,164 @@ const VectoredLoadPipeline = struct {
     fn recordError(self: *VectoredLoadPipeline, err: anyerror) void {
         if (self.first_error.cmpxchgStrong(0, @intFromError(err), .release, .monotonic) == null) {
             self.pool.close(self.io);
+            self.lifecycle_gate.close(self.io);
         }
     }
 
-    fn registerBlock(self: *VectoredLoadPipeline, data: []u8, references: usize) !*mem.DmaBlockPool.Lease {
-        const block = try self.allocator.create(mem.DmaBlockPool.Lease);
+    fn registerRequest(self: *VectoredLoadPipeline) !*RequestContext {
+        const request = try self.allocator.create(RequestContext);
+        request.* = .{ .pipeline = self };
+        return request;
+    }
+
+    fn registerBlock(
+        self: *VectoredLoadPipeline,
+        request: *RequestContext,
+        data: []u8,
+        references: usize,
+    ) !*BlockContext {
+        const block = try self.allocator.create(BlockContext);
         errdefer self.allocator.destroy(block);
-        block.* = .init(self.pool, self.io, data, references);
+        block.* = .{
+            .request = request,
+            .lease = .init(self.pool, self.io, data, references),
+        };
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
         try self.blocks.append(self.allocator, block);
+        request.addBlock();
         return block;
     }
 
-    fn transferReady(self: *const VectoredLoadPipeline, transfer: DeferredTransfer) bool {
+    fn transferReady(self: *const VectoredLoadPipeline, transfer: ReadyTransfer) bool {
         _ = self;
-        var mask = transfer.writer_mask;
-        while (mask != 0) {
-            const writer_index: usize = @intCast(@ctz(mask));
-            mask &= mask - 1;
-            const target = &transfer.tensor.targets[writer_index];
-            if (transfer.destination_offset + transfer.len == target.total and
-                target.submitted_bytes.load(.acquire) != transfer.destination_offset)
-            {
-                return false;
-            }
-        }
-        return true;
+        return transfer.destination_offset + transfer.len != transfer.target.total or
+            transfer.target.submitted_bytes.load(.acquire) == transfer.destination_offset;
     }
 
-    fn submitOrDefer(self: *VectoredLoadPipeline, transfer: DeferredTransfer) void {
-        if (self.failed()) {
-            var remaining = @popCount(transfer.writer_mask);
-            while (remaining > 0) : (remaining -= 1) transfer.block.complete();
-            return;
-        }
-        var should_submit = false;
-        self.metadata_mutex.lockUncancelable(self.io);
-        if (self.transferReady(transfer)) {
-            should_submit = true;
-        } else {
-            self.deferred.append(self.allocator, transfer) catch {
-                self.metadata_mutex.unlock(self.io);
-                self.recordError(error.OutOfMemory);
-                var remaining = @popCount(transfer.writer_mask);
-                while (remaining > 0) : (remaining -= 1) transfer.block.complete();
-                return;
-            };
-        }
-        self.metadata_mutex.unlock(self.io);
-        if (should_submit) {
-            self.submitTransfer(transfer);
-            self.submitReadyDeferred();
-        }
-    }
-
-    fn submitTransfer(self: *VectoredLoadPipeline, transfer: DeferredTransfer) void {
-        var mask = transfer.writer_mask;
-        while (mask != 0) {
-            const writer_index: usize = @intCast(@ctz(mask));
-            mask &= mask - 1;
-            const target = &transfer.tensor.targets[writer_index];
-            const is_last = transfer.destination_offset + transfer.len == target.total;
-            if (self.submitOne(target, transfer.block, transfer.destination_offset, transfer.len, is_last)) {
-                _ = target.submitted_bytes.fetchAdd(transfer.len, .release);
-            }
-        }
-    }
-
-    fn submitOne(
+    fn enqueueBlock(
         self: *VectoredLoadPipeline,
-        target: *VectoredTensorTransfer.Target,
-        block: *mem.DmaBlockPool.Lease,
+        tensor: *VectoredTensorTransfer,
+        block: *BlockContext,
+        writer_mask: u64,
         destination_offset: usize,
         len: usize,
-        is_last: bool,
-    ) bool {
+    ) !void {
+        var reservations: [Platform.MAX_NUM_DEVICES]usize = @splat(0);
+        var mask = writer_mask;
+        while (mask != 0) {
+            const writer_index: usize = @intCast(@ctz(mask));
+            mask &= mask - 1;
+            reservations[tensor.targets[writer_index].device_index] += 1;
+        }
+
+        self.metadata_mutex.lockUncancelable(self.io);
+        errdefer self.metadata_mutex.unlock(self.io);
+        for (self.ready_queues, reservations[0..self.ready_queues.len]) |*queue, count| {
+            try queue.ensureUnusedCapacity(self.allocator, count);
+        }
+        mask = writer_mask;
+        while (mask != 0) {
+            const writer_index: usize = @intCast(@ctz(mask));
+            mask &= mask - 1;
+            const target = &tensor.targets[writer_index];
+            self.ready_queues[target.device_index].appendAssumeCapacity(.{
+                .target = target,
+                .block = block,
+                .destination_offset = destination_offset,
+                .len = len,
+            });
+            self.ready_entries += 1;
+        }
+        self.metadata_mutex.unlock(self.io);
+        self.requestPump();
+    }
+
+    fn requestPump(self: *VectoredLoadPipeline) void {
+        self.metadata_mutex.lockUncancelable(self.io);
+        if (self.pumping or self.failed()) {
+            self.metadata_mutex.unlock(self.io);
+            return;
+        }
+        self.pumping = true;
+        self.metadata_mutex.unlock(self.io);
+        self.pump();
+    }
+
+    fn pump(self: *VectoredLoadPipeline) void {
+        while (true) {
+            var selected: ?ReadyTransfer = null;
+            var stalled = false;
+            self.metadata_mutex.lockUncancelable(self.io);
+            for (0..self.ready_queues.len) |offset| {
+                const device_index = (self.next_device + offset) % self.ready_queues.len;
+                if (self.active_by_device[device_index] >= self.dma_limit) continue;
+                const queue = &self.ready_queues[device_index];
+                for (queue.items, 0..) |transfer, i| {
+                    if (!self.transferReady(transfer)) continue;
+                    selected = queue.swapRemove(i);
+                    self.next_device = (device_index + 1) % self.ready_queues.len;
+                    self.active_by_device[device_index] += 1;
+                    self.peak_by_device[device_index] = @max(
+                        self.peak_by_device[device_index],
+                        self.active_by_device[device_index],
+                    );
+                    self.active_events += 1;
+                    self.ready_entries -= 1;
+                    break;
+                }
+                if (selected != null) break;
+            }
+            if (selected == null) {
+                self.pumping = false;
+                stalled = self.reads_finished and self.active_events == 0 and self.ready_entries != 0 and !self.failed();
+                self.maybeDoneLocked();
+                self.metadata_mutex.unlock(self.io);
+                if (stalled) {
+                    self.recordError(error.IncompleteTransferPlan);
+                    self.abortReady();
+                }
+                return;
+            }
+            self.metadata_mutex.unlock(self.io);
+            self.submitOne(selected.?);
+        }
+    }
+
+    fn submitOne(self: *VectoredLoadPipeline, transfer: ReadyTransfer) void {
+        const device_index = transfer.target.device_index;
+        const is_last = transfer.destination_offset + transfer.len == transfer.target.total;
         const submitted_at: std.Io.Timestamp = .now(self.io, .awake);
-        const event = target.manager.transferData(
+        const event = transfer.target.manager.transferData(
             self.platform.pjrt_api,
             0,
-            block.data[0..len],
-            @intCast(destination_offset),
+            transfer.block.lease.data[0..transfer.len],
+            @intCast(transfer.destination_offset),
             is_last,
         ) catch |err| {
             self.recordError(err);
-            block.complete();
-            return false;
+            transfer.block.complete();
+            self.eventCompleted(device_index);
+            return;
         };
-        if (is_last) target.final_submitted = true;
+        if (is_last) transfer.target.final_submitted = true;
+        _ = transfer.target.submitted_bytes.fetchAdd(transfer.len, .release);
 
         const ctx = self.allocator.create(EventContext) catch {
             event.awaitRaw(self.platform.pjrt_api) catch {};
             event.deinit(self.platform.pjrt_api);
             self.recordError(error.OutOfMemory);
-            block.complete();
-            return true;
+            transfer.block.complete();
+            self.eventCompleted(device_index);
+            return;
         };
         ctx.* = .{
             .pipeline = self,
-            .block = block,
+            .block = transfer.block,
             .pjrt_event = event,
             .submitted_at = submitted_at,
-            .bytes = len,
+            .device_index = device_index,
+            .bytes = transfer.len,
         };
 
         self.metadata_mutex.lockUncancelable(self.io);
@@ -1245,14 +1430,14 @@ const VectoredLoadPipeline = struct {
             event.deinit(self.platform.pjrt_api);
             self.allocator.destroy(ctx);
             self.recordError(error.OutOfMemory);
-            block.complete();
-            return true;
+            transfer.block.complete();
+            self.eventCompleted(device_index);
+            return;
         };
-        self.active_events += 1;
         self.metadata_mutex.unlock(self.io);
 
         _ = self.metrics.dma_submissions.fetchAdd(1, .monotonic);
-        _ = self.metrics.submitted_bytes.fetchAdd(len, .monotonic);
+        _ = self.metrics.submitted_bytes.fetchAdd(transfer.len, .monotonic);
         event.onReady(self.platform.pjrt_api, EventContext, struct {
             fn call(err: ?*pjrt.Error, ctx_: *EventContext) void {
                 ctx_.err = err;
@@ -1264,68 +1449,76 @@ const VectoredLoadPipeline = struct {
                     _ = ctx_.pipeline.metrics.dma_ns.fetchAdd(@intCast(@max(elapsed.nanoseconds, 0)), .monotonic);
                 }
                 ctx_.block.complete();
-                ctx_.pipeline.eventCompleted();
+                ctx_.pipeline.eventCompleted(ctx_.device_index);
             }
         }.call, ctx) catch |err| {
             event.awaitRaw(self.platform.pjrt_api) catch {};
             self.recordError(err);
-            block.complete();
-            self.eventCompleted();
+            transfer.block.complete();
+            self.eventCompleted(device_index);
         };
-        return true;
     }
 
-    fn eventCompleted(self: *VectoredLoadPipeline) void {
+    fn eventCompleted(self: *VectoredLoadPipeline, device_index: usize) void {
         self.metadata_mutex.lockUncancelable(self.io);
-        defer self.metadata_mutex.unlock(self.io);
         std.debug.assert(self.active_events > 0);
+        std.debug.assert(self.active_by_device[device_index] > 0);
         self.active_events -= 1;
-        if (self.submissions_finished and self.active_events == 0) self.dma_done.set(self.io);
-    }
-
-    fn submitReadyDeferred(self: *VectoredLoadPipeline) void {
-        while (true) {
-            if (self.failed()) return;
-            var ready: ?DeferredTransfer = null;
-            self.metadata_mutex.lockUncancelable(self.io);
-            for (self.deferred.items, 0..) |transfer, i| {
-                if (self.transferReady(transfer)) {
-                    ready = self.deferred.swapRemove(i);
-                    break;
-                }
-            }
-            self.metadata_mutex.unlock(self.io);
-            if (ready) |transfer| {
-                self.submitTransfer(transfer);
-            } else {
-                return;
-            }
+        self.active_by_device[device_index] -= 1;
+        self.maybeDoneLocked();
+        self.metadata_mutex.unlock(self.io);
+        if (self.failed()) {
+            self.abortReady();
+        } else {
+            self.requestPump();
         }
     }
 
-    fn abortDeferred(self: *VectoredLoadPipeline) void {
-        for (self.deferred.items) |transfer| {
-            var remaining = @popCount(transfer.writer_mask);
-            while (remaining > 0) : (remaining -= 1) transfer.block.complete();
+    fn abortReady(self: *VectoredLoadPipeline) void {
+        self.metadata_mutex.lockUncancelable(self.io);
+        for (self.ready_queues) |*queue| {
+            for (queue.items) |transfer| {
+                transfer.block.complete();
+                self.ready_entries -= 1;
+            }
+            queue.clearRetainingCapacity();
         }
-        self.deferred.clearRetainingCapacity();
+        self.maybeDoneLocked();
+        self.metadata_mutex.unlock(self.io);
     }
 
-    fn finishSubmissions(self: *VectoredLoadPipeline) void {
+    fn finishReads(self: *VectoredLoadPipeline) void {
+        self.metadata_mutex.lockUncancelable(self.io);
+        self.reads_finished = true;
+        self.maybeDoneLocked();
+        self.metadata_mutex.unlock(self.io);
+        self.requestPump();
+    }
+
+    fn peakDma(self: *VectoredLoadPipeline) usize {
         self.metadata_mutex.lockUncancelable(self.io);
         defer self.metadata_mutex.unlock(self.io);
-        self.submissions_finished = true;
-        if (self.active_events == 0) self.dma_done.set(self.io);
+        var peak: usize = 0;
+        for (self.peak_by_device) |value| peak = @max(peak, value);
+        return peak;
+    }
+
+    fn maybeDoneLocked(self: *VectoredLoadPipeline) void {
+        if (self.reads_finished and self.ready_entries == 0 and self.active_events == 0) {
+            self.dma_done.set(self.io);
+        }
     }
 };
 
 const VectoredReadRequest = struct {
     fn run(
+        request: *VectoredLoadPipeline.RequestContext,
         tensor: *VectoredTensorTransfer,
         pipeline: *VectoredLoadPipeline,
         source_offset: usize,
         request_len: usize,
     ) void {
+        defer request.finishScheduling();
         if (pipeline.failed()) return;
 
         const plan = VectoredRequestPlan.init(
@@ -1385,20 +1578,23 @@ const VectoredReadRequest = struct {
         if (pipeline.failed()) return;
         for (plan.blocks, 0..) |block_plan, i| {
             const references: usize = @popCount(block_plan.writer_mask);
-            const block = pipeline.registerBlock(leased[i], references) catch {
+            const block = pipeline.registerBlock(request, leased[i], references) catch {
                 pipeline.recordError(error.OutOfMemory);
                 return;
             };
             leased[i] = &.{};
-            const transfer: VectoredLoadPipeline.DeferredTransfer = .{
-                .tensor = tensor,
-                .block = block,
-                .writer_mask = block_plan.writer_mask,
-                .destination_offset = block_plan.destination_offset,
-                .len = block_plan.len,
+            pipeline.enqueueBlock(
+                tensor,
+                block,
+                block_plan.writer_mask,
+                block_plan.destination_offset,
+                block_plan.len,
+            ) catch |err| {
+                pipeline.recordError(err);
+                var remaining = references;
+                while (remaining > 0) : (remaining -= 1) block.complete();
+                return;
             };
-
-            pipeline.submitOrDefer(transfer);
         }
     }
 };
@@ -1554,15 +1750,20 @@ fn loadVectored(
         @as(f64, @floatFromInt(load_started.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
     });
 
-    var metrics: VectoredLoadMetrics = .{};
-    var pipeline: VectoredLoadPipeline = .{
-        .allocator = allocator,
-        .io = io,
-        .platform = platform,
-        .pool = &pool,
-        .block_size = opts.dma_block_size,
-        .metrics = &metrics,
+    var lifecycle_gate: RequestGate = .{
+        .limit = opts.read_parallelism +| 8,
     };
+    var metrics: VectoredLoadMetrics = .{};
+    var pipeline = try VectoredLoadPipeline.init(
+        allocator,
+        io,
+        platform,
+        &pool,
+        &lifecycle_gate,
+        opts.dma_block_size,
+        opts.dma_parallelism,
+        &metrics,
+    );
     defer pipeline.deinit();
 
     const ReadJob = struct {
@@ -1624,10 +1825,15 @@ fn loadVectored(
             ) void {
                 while (true) {
                     if (pipeline_.failed()) return;
+                    if (!pipeline_.lifecycle_gate.acquire(io_)) return;
                     const index = next.fetchAdd(1, .monotonic);
-                    if (index >= jobs_.len) return;
+                    if (index >= jobs_.len) {
+                        pipeline_.lifecycle_gate.release(io_);
+                        return;
+                    }
                     const job = jobs_[index];
                     const source_file = source_slots_[source_indices_[job.tensor_index]].ensure(io_) catch |err| {
+                        pipeline_.lifecycle_gate.release(io_);
                         pipeline_.recordError(err);
                         return;
                     };
@@ -1642,10 +1848,16 @@ fn loadVectored(
                         buffers_[job.tensor_index],
                         progress_,
                     ) catch |err| {
+                        pipeline_.lifecycle_gate.release(io_);
                         pipeline_.recordError(err);
                         return;
                     };
-                    VectoredReadRequest.run(tensor, pipeline_, job.source_offset, job.len);
+                    const request = pipeline_.registerRequest() catch |err| {
+                        pipeline_.lifecycle_gate.release(io_);
+                        pipeline_.recordError(err);
+                        return;
+                    };
+                    VectoredReadRequest.run(request, tensor, pipeline_, job.source_offset, job.len);
                 }
             }
         }.run, .{
@@ -1676,8 +1888,9 @@ fn loadVectored(
         metrics.committed_bytes.load(.acquire),
     });
 
+    pipeline.finishReads();
     if (pipeline.failed()) {
-        pipeline.abortDeferred();
+        pipeline.abortReady();
         for (state_slots) |*slot| {
             if (slot.status.load(.acquire) != StateSlot.ready) continue;
             for (slot.state.targets) |*target| {
@@ -1686,23 +1899,8 @@ fn loadVectored(
                 }
             }
         }
-    } else {
-        pipeline.submitReadyDeferred();
-        if (pipeline.deferred.items.len != 0) {
-            pipeline.recordError(error.IncompleteTransferPlan);
-            pipeline.abortDeferred();
-            for (state_slots) |*slot| {
-                if (slot.status.load(.acquire) != StateSlot.ready) continue;
-                for (slot.state.targets) |*target| {
-                    if (!target.final_submitted) {
-                        target.manager.setBufferErrorUnknown(platform.pjrt_api, 0, "vectored load did not submit every final transfer") catch {};
-                    }
-                }
-            }
-        }
     }
 
-    pipeline.finishSubmissions();
     pipeline.dma_done.waitUncancelable(io);
     load_log.debug("vectored DMA drained: elapsed={d:.3}s, drain_phase={d:.3}s", .{
         @as(f64, @floatFromInt(load_started.untilNow(io, .awake).nanoseconds)) / std.time.ns_per_s,
@@ -1725,16 +1923,18 @@ fn loadVectored(
     const dma_submissions = metrics.dma_submissions.load(.acquire);
     const average_read_ms = if (read_operations == 0) 0 else @as(f64, @floatFromInt(metrics.read_ns.load(.acquire))) / @as(f64, @floatFromInt(read_operations)) / std.time.ns_per_ms;
     const average_dma_ms = if (dma_submissions == 0) 0 else @as(f64, @floatFromInt(metrics.dma_ns.load(.acquire))) / @as(f64, @floatFromInt(dma_submissions)) / std.time.ns_per_ms;
-    load_log.debug("completed: vectored=true, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, reads={d}, peak_reads={d}, average_read={Bi:.2}, average_read_latency={d:.3}ms, dma_submissions={d}, average_dma={Bi:.2}, average_dma_latency={d:.3}ms, submitted={Bi:.2}, committed={Bi:.2}, pinned_high_water={Bi:.2}, mapped={Bi:.2}, pool_waits={d}, pool_wait={d:.3}s", .{
+    load_log.debug("completed: vectored=true, tensors={d}, logical_bytes={Bi:.2}, elapsed={d:.3}s, logical_goodput={d:.2}MiB/s, reads={d}, peak_reads={d}, peak_retained={d}, average_read={Bi:.2}, average_read_latency={d:.3}ms, dma_submissions={d}, peak_dma={d}, average_dma={Bi:.2}, average_dma_latency={d:.3}ms, submitted={Bi:.2}, committed={Bi:.2}, pinned_high_water={Bi:.2}, mapped={Bi:.2}, pool_waits={d}, pool_wait={d:.3}s", .{
         tensor_count,
         loaded_bytes,
         elapsed_seconds,
         goodput / (1024 * 1024),
         read_operations,
         metrics.peak_reads.load(.acquire),
+        lifecycle_gate.peakUse(io),
         average_read,
         average_read_ms,
         dma_submissions,
+        pipeline.peakDma(),
         average_dma,
         average_dma_ms,
         metrics.submitted_bytes.load(.acquire),
@@ -1754,6 +1954,8 @@ pub const VectoredLoadOpts = struct {
     read_parallelism: usize = 12,
     /// Logical bytes gathered by one positional source request.
     read_request_size: usize = 2 * 1024 * 1024,
+    /// Maximum number of physical DMA events in flight per device.
+    dma_parallelism: usize = 8,
     /// Physical transfer and pool allocation unit.
     dma_block_size: usize = 2 * 1024 * 1024,
     /// Client-wide hard limit for registered host memory.
@@ -1855,6 +2057,7 @@ pub fn load(
 ) !Bufferized(ModelType) {
     stdx.debug.assert(opts.read_parallelism > 0, "zml.io.load read_parallelism must be greater than zero", .{});
     stdx.debug.assert(opts.read_request_size > 0, "zml.io.load read_request_size must be greater than zero", .{});
+    stdx.debug.assert(opts.dma_parallelism > 0, "zml.io.load dma_parallelism must be greater than zero", .{});
     stdx.debug.assert(opts.dma_block_size > 0, "zml.io.load dma_block_size must be greater than zero", .{});
     stdx.debug.assert(opts.max_pinned_bytes >= opts.dma_block_size, "zml.io.load max_pinned_bytes must hold at least one DMA block", .{});
 
@@ -1878,12 +2081,13 @@ pub fn load(
     }.call, .{&total_logical_bytes});
 
     const direct = platform.target == .cuda or platform.target == .oneapi;
-    load_log.debug("configured: target={s}, vectored={}, tensors={d}, read_parallelism={d}, read_request_size={Bi:.2}, dma_block_size={Bi:.2}, max_pinned_bytes={Bi:.2}, logical_bytes={Bi:.2}", .{
+    load_log.debug("configured: target={s}, vectored={}, tensors={d}, read_parallelism={d}, read_request_size={Bi:.2}, dma_parallelism={d}, dma_block_size={Bi:.2}, max_pinned_bytes={Bi:.2}, logical_bytes={Bi:.2}", .{
         @tagName(platform.target),
         direct,
         tensor_count,
         opts.read_parallelism,
         opts.read_request_size,
+        opts.dma_parallelism,
         opts.dma_block_size,
         opts.max_pinned_bytes,
         total_logical_bytes,
@@ -1918,33 +2122,32 @@ fn buildMesh2x2(
 
 test "vectored final transfers wait for every prior destination submission" {
     var targets = [_]VectoredTensorTransfer.Target{
-        .{ .manager = undefined, .pjrt_buffer = undefined, .total = 100 },
-        .{ .manager = undefined, .pjrt_buffer = undefined, .total = 100 },
+        .{ .manager = undefined, .pjrt_buffer = undefined, .device_index = 0, .total = 100 },
+        .{ .manager = undefined, .pjrt_buffer = undefined, .device_index = 1, .total = 100 },
     };
-    var tensor: VectoredTensorTransfer = undefined;
-    tensor.targets = &targets;
-    var block: mem.DmaBlockPool.Lease = undefined;
+    var block: VectoredLoadPipeline.BlockContext = undefined;
     var pipeline: VectoredLoadPipeline = undefined;
-    const final: VectoredLoadPipeline.DeferredTransfer = .{
-        .tensor = &tensor,
+    var final: VectoredLoadPipeline.ReadyTransfer = .{
+        .target = &targets[0],
         .block = &block,
-        .writer_mask = 0b11,
         .destination_offset = 80,
         .len = 20,
     };
 
     try std.testing.expect(!pipeline.transferReady(final));
-    targets[1].submitted_bytes.store(80, .release);
+    final.target = &targets[1];
     try std.testing.expect(!pipeline.transferReady(final));
+    targets[1].submitted_bytes.store(80, .release);
+    try std.testing.expect(pipeline.transferReady(final));
+    final.target = &targets[0];
     targets[0].submitted_bytes.store(60, .release);
     try std.testing.expect(!pipeline.transferReady(final));
     _ = targets[0].submitted_bytes.fetchAdd(20, .release);
     try std.testing.expect(pipeline.transferReady(final));
 
-    const non_final: VectoredLoadPipeline.DeferredTransfer = .{
-        .tensor = &tensor,
+    const non_final: VectoredLoadPipeline.ReadyTransfer = .{
+        .target = &targets[0],
         .block = &block,
-        .writer_mask = 0b01,
         .destination_offset = 20,
         .len = 20,
     };
