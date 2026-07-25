@@ -712,6 +712,9 @@ pub const CreateOptions = struct {
     // Even on a 8GB GPU it should leave enough space for the platform driver/runtime.
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
     xla_gpu: XlaGpu = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.90 } } },
+    // MUSA 4.0.1 BFC suballocations do not consistently meet XLA's required
+    // 256-byte device-buffer alignment. Use aligned passthrough allocations.
+    musa: XlaGpu = .{ .allocator = .platform },
     tpu: struct {} = .{},
     neuron: struct {} = .{},
     oneapi: struct {} = .{},
@@ -784,7 +787,7 @@ pub const CreateOptions = struct {
         values.shrinkRetainingCapacity(0);
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
-            .cuda, .rocm, .oneapi, .metal, .musa => self.xla_gpu.writeNamedValues(target, &values),
+            .cuda, .rocm, .oneapi, .metal, .musa => self.xla_gpu.writeNamedValues(&values),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
@@ -794,6 +797,30 @@ pub const CreateOptions = struct {
         return values.items;
     }
 };
+
+test "MUSA create options use the platform allocator by default" {
+    var storage: [8]pjrt.NamedValue = undefined;
+
+    const musa_values = (CreateOptions{}).toNamedValues(.musa, &storage);
+    try std.testing.expectEqual(@as(usize, 1), musa_values.len);
+    try std.testing.expectEqualStrings("allocator", musa_values[0].name());
+    try std.testing.expectEqual(pjrt.NamedValue.Kind.string, musa_values[0].kind());
+    try std.testing.expectEqualStrings("platform", musa_values[0].value().string);
+
+    const overridden: CreateOptions = .{
+        .musa = .{ .allocator = .{ .bfc = .{
+            .preallocate = false,
+            .memory_fraction = 0,
+        } } },
+    };
+    const overridden_values = overridden.toNamedValues(.musa, &storage);
+    try std.testing.expectEqual(@as(usize, 2), overridden_values.len);
+    try std.testing.expectEqualStrings("bfc", overridden_values[0].value().string);
+    try std.testing.expect(!overridden_values[1].value().bool);
+
+    const cuda_values = (CreateOptions{}).toNamedValues(.cuda, &storage);
+    try std.testing.expectEqualStrings("bfc", cuda_values[0].value().string);
+}
 
 // TODO(Corendos): Consider moving that in its own file if its size increase too much.
 pub const cuda = struct {
