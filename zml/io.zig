@@ -89,9 +89,13 @@ pub const TensorStore = struct {
         id: usize,
         io: std.Io,
         file: std.Io.File,
+        exact_positional_fill: bool,
     ) !safetensors.TensorReader {
         const tensor_desc = self.getPtrFromId(id) orelse return error.NotFound;
-        return .initBorrowedPositional(io, tensor_desc.*, file);
+        return if (exact_positional_fill)
+            .initBorrowedPositionalExact(io, tensor_desc.*, file)
+        else
+            .initBorrowedPositional(io, tensor_desc.*, file);
     }
 
     pub fn view(self: *TensorStore) View {
@@ -1262,11 +1266,12 @@ const VectoredTensorTransfer = struct {
         store: *const TensorStore,
         tensor: *const Tensor,
         source_file: std.Io.File,
+        exact_positional_fill: bool,
         shardings: []const Sharding,
         output: *Buffer,
         progress_parent: ?*std.Progress.Node,
     ) !VectoredTensorTransfer {
-        var reader = try store.getBorrowedPositionalReaderById(tensor.id, io, source_file);
+        var reader = try store.getBorrowedPositionalReaderById(tensor.id, io, source_file, exact_positional_fill);
         errdefer reader.deinit();
 
         const shape = tensor.shape();
@@ -2107,6 +2112,7 @@ const VectoredReadRequest = struct {
         source_offset: usize,
         request_len: usize,
         configured_request_size: usize,
+        has_remote_timing: bool,
     ) void {
         defer request.finishScheduling();
         if (pipeline.failed()) return;
@@ -2172,7 +2178,9 @@ const VectoredReadRequest = struct {
         _ = pipeline.metrics.read_bytes.fetchAdd(request_len, .monotonic);
         _ = pipeline.metrics.read_ns.fetchAdd(read_elapsed_ns, .monotonic);
         _ = pipeline.metrics.weighted_read_latency_us.fetchAdd(read_elapsed_us *| @as(u64, @intCast(request_len)), .monotonic);
-        pipeline.metrics.recordLocalReadTiming(configured_request_size, request_len, read_elapsed_ns);
+        if (!has_remote_timing) {
+            pipeline.metrics.recordLocalReadTiming(configured_request_size, request_len, read_elapsed_ns);
+        }
         tensor.recordReadProgress(request_len);
         request.markReadFinished();
 
@@ -3608,12 +3616,12 @@ const AdaptiveVectoredRuntime = struct {
                 timing_delta.* = current.sub(old.*);
                 old.* = current;
             }
-            if (source_timing_successes == 0) if (timing_index) |index| {
+            if (timing_index) |index| {
                 const local = local_timing_delta[index];
                 source_timing_successes +|= local.successes;
                 source_timing_bytes +|= local.successful_bytes;
                 source_body_ns +|= local.service_ns;
-            };
+            }
             const source_ttfb_us = if (source_timing_successes == 0)
                 0
             else
@@ -3876,6 +3884,8 @@ fn loadVectored(
         profile_name: []const u8,
         minimum_request_size: usize,
         high_latency: bool,
+        exact_positional_fill: bool,
+        exact_read_timing: bool,
         read_stats: ?VFS.ReadStatsProvider,
         file: std.Io.File = undefined,
         status: std.atomic.Value(u8) = .init(uninitialized),
@@ -3937,6 +3947,8 @@ fn loadVectored(
                 .profile_name = if (profile) |p| p.scheme else "local/default",
                 .minimum_request_size = minimum,
                 .high_latency = if (profile) |p| p.hints.high_latency else false,
+                .exact_positional_fill = if (profile) |p| p.hints.exact_positional_fill else false,
+                .exact_read_timing = if (profile) |p| p.hints.exact_read_timing else false,
                 .read_stats = if (profile) |p| p.stats else null,
             });
             load_log.debug("source profile: name={s}, minimum_request_size={Bi:.2}, mode={s}, uri={s}", .{
@@ -4018,6 +4030,7 @@ fn loadVectored(
             store_: *const TensorStore,
             tensor_: *const Tensor,
             source_file_: std.Io.File,
+            exact_positional_fill_: bool,
             shardings_: []const Sharding,
             buffer_: *Buffer,
             progress_: ?*std.Progress.Node,
@@ -4032,6 +4045,7 @@ fn loadVectored(
                         store_,
                         tensor_,
                         source_file_,
+                        exact_positional_fill_,
                         shardings_,
                         buffer_,
                         progress_,
@@ -4194,6 +4208,7 @@ fn loadVectored(
                         item.store,
                         item.tensor,
                         source_file,
+                        source_slots_[source_indices_[job.tensor_index]].exact_positional_fill,
                         item.shardings,
                         item.buffer,
                         item.progress,
@@ -4210,6 +4225,7 @@ fn loadVectored(
                         job.source_offset,
                         job.len,
                         job.request_size,
+                        source_slots_[source_indices_[job.tensor_index]].exact_read_timing,
                     );
                 }
             }

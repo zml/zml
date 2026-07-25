@@ -14,3 +14,7 @@ pub const ReadTimingBucket = @import("base.zig").ReadTimingBucket;
 pub const ReadStats = @import("base.zig").ReadStats;
 pub const ReadStatsProvider = @import("base.zig").ReadStatsProvider;
 pub const read_timing_bucket_sizes = @import("base.zig").read_timing_bucket_sizes;
+
+test {
+    _ = @import("http_acceptance_test.zig");
+}

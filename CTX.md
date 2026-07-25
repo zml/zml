@@ -1,11 +1,12 @@
 # Adaptive Vectored DmaMapped Loader Context
 
-Snapshot: 2026-07-24. The `plan.md` implementation and AWS controller
-follow-up are squashed in Jujutsu change `vwruxkno` (`squash adaptive
-concurrency`), rebased onto `master` commit `a0d0af2a`. User-owned benchmark
-recordings must be preserved when present; no workspace `perf.data` or
-`perf.data.old` file is present in this snapshot. The user moved the XLA
-checkout back to the intended revision; it is clean at `92e7778d04`
+Snapshot: 2026-07-25. The loading work is split above literal benchmark base
+`4ad4dd3b` into prerequisite `ktmqvrwz`, then requested items 6, 4, 3, 2, and
+5 as changes `nwmkrmrk`, `rwwxukqk`, `soxlrqyu`, `uxkzvsok`, and
+`otpylnlv`. The original squashed implementation and its full historical
+context remain available at `9e87bc40`. User-owned benchmark recordings must
+be preserved when present; no workspace `perf.data` or `perf.data.old` file
+is present in this snapshot. The XLA checkout is clean at `92e7778d04`
 (`[XLA:GPU][oneAPI] Recognize DmaMapped host memory as pinned`) on top of
 `b0990b33b1`
 (`[XLA:GPU][oneAPI] Enable PJRT_Client_DmaMap for SYCL`). ZML selects the
@@ -50,7 +51,7 @@ turn the larger allowance into an enormous completion backlog. That
 non-completion is retained as the motivating failure for item 3, not reported
 as a throughput sample.
 
-Item 3, the current change `soxlrqyu`, separates the three resource stages:
+Item 3, change `soxlrqyu`, separates the three resource stages:
 twelve fixed source workers, at most twenty retained request lifecycles, and
 eight physical DMA events per device. A lifecycle credit is released only by
 the last block/replica callback. The 2 GiB script default now completes with
@@ -121,6 +122,58 @@ Raw item-2 logs are `/tmp/zml-item2-local-{fixed,default}-{1..5}.log`,
 superseded `*-1` adaptive logs preserve the pre-audit timing-capability bug.
 Core, VFS, and stdx tests and the release oneAPI IO, MNIST, and LLM builds
 pass. CUDA was neither built nor run.
+
+Item 5, change `otpylnlv`, removes the hidden remote worker/chunk pools. One
+admitted remote positional call now makes one whole Range GET; a retry keeps
+the same admission and waits for the previous attempt to finish before
+starting another. Remote safetensor readers pass their complete scatter list
+once, including above `IOV_MAX`, while local files retain batching and
+short-read resumption. Explicit backend capabilities select exact-fill and
+authoritative physical timing instead of inferring either property from
+latency or the presence of a stats provider.
+
+The shared range path requires an exact `206`, `Content-Range` start/end/total,
+and `Content-Length`; a server that ignores Range is rejected instead of
+causing repeated whole-object prefix downloads. Generic HTTP and Hugging Face
+manually resolve at most eight HEAD redirects and cache the final absolute
+URL, so the data request itself does not redirect. HF bearer authorization is
+sent only to the exact HTTPS `huggingface.co` origin and never to a CDN or
+lookalike host. S3 `503 Service Unavailable` is classified as throttle
+pressure. Atomic per-size stats retain exact physical attempts, clean timing
+samples, retries, typed failures, throttles, and retry delay.
+
+At the 128 MiB local bound, five runs were 25.95, 25.95, 26.70, 26.88, and
+28.58 GiB/s (median 26.70), -0.9% versus item 2's 26.95 GiB/s median and
+therefore neutral. The file path remains batched and reported zero pool
+waits.
+
+On real AWS, three final corrected-code default runs were 939.46, 931.74, and
+951.87 MiB/s (median 939.46), -1.1% versus item 2's 949.73 MiB/s adaptive
+sample and -1.2% versus its 951.35 MiB/s fixed-bracket mean. A fixed
+`32 reads / 32 MiB / 8 DMA` run made exactly 641 logical reads and 641
+physical GETs at 942.97 MiB/s; the old pool split large logical admissions
+into fixed 16 MiB chunks. A final deliberately poor
+`4 reads / 64 MiB / 2 DMA` start expanded to 32 reads, kept the
+`64 -> 32 MiB` lower-resource probe, and delivered 946.09 MiB/s with 1.71 GiB
+pinned. The three pre-review repetitions showed the same final
+`32 / 32 MiB / 2` tuple at a 947.31 MiB/s median. A final high
+`64 / 32 MiB / 16` start delivered 947.50 MiB/s but kept that tuple and used
+the full 2.00 GiB mapped allowance; three pre-review repetitions behaved the
+same (948.23 MiB/s median). Thus the controller efficiently recovers a low
+read-width/oversized-request start, while a throughput-optimal high tuple is
+not reduced during this finite transfer.
+
+All final AWS runs transferred, submitted, and committed exactly 14.96 GiB
+with physical requests equal to logical reads, zero retries/throttles, and
+zero pool waits. The bundled historical S3Proxy fixture is deliberately not a
+validator for this commit because its `206` response omits `Content-Range`;
+the strict tests use the in-tree loopback server and the performance tests use
+real S3. Raw logs are `/tmp/zml-item5-local-{1..5}.log`,
+`/tmp/zml-item5-final-aws-default{,-2,-3}.log`,
+`/tmp/zml-item5-final-aws-{fixed32,low,high}.log`, and the pre-review
+repetitions `/tmp/zml-item5-aws-{default,low,high}-{1..3}.log`. Core, VFS,
+and stdx tests pass, as do the release oneAPI IO, MNIST, and LLM builds. CUDA
+was neither built nor run.
 
 ## Simplicity pass: bounded adaptive rounds (2026-07-24)
 
