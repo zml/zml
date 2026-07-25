@@ -3,6 +3,7 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 const VFSBase = @import("base.zig").VFSBase;
+const Backend = @import("base.zig").Backend;
 const parallel_read = @import("parallel_read.zig");
 
 const log = std.log.scoped(.@"zml/io/vfs/http");
@@ -92,6 +93,16 @@ pub const HTTP = struct {
                 .fileSeekTo = fileSeekTo,
                 .fileRealPath = fileRealPath,
             }),
+        };
+    }
+
+    pub fn backend(self: *HTTP) Backend {
+        return .{
+            .io = self.io(),
+            .read_hints = .{
+                .minimum_request_size = 16 * 1024 * 1024,
+                .high_latency = true,
+            },
         };
     }
 

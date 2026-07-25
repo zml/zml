@@ -4,6 +4,8 @@ const stdx = @import("stdx");
 
 const parallel_read = @import("parallel_read.zig");
 const VFSBase = @import("base.zig").VFSBase;
+const Backend = @import("base.zig").Backend;
+const ReadStats = @import("base.zig").ReadStats;
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
 
@@ -109,12 +111,12 @@ const ParallelRead = struct {
                                     const p = std.mem.trim(u8, part, " \t");
                                     if (std.mem.startsWith(u8, p, "t=")) {
                                         const seconds = std.fmt.parseInt(u32, p[2..], 10) catch continue;
-                                        break :b .{ .retry_after = .fromSeconds(seconds) };
+                                        break :b .throttle(.fromSeconds(seconds));
                                     }
                                 }
                             }
                         }
-                        break :b .retry();
+                        break :b .throttle(null);
                     },
                     else => if (res.head.status.class() == .server_error) .retry() else {
                         log.err("Failed to perform read for {s}\n{s}", .{ job.batch.url, res.head.bytes });
@@ -381,6 +383,22 @@ pub const HF = struct {
                 .fileRealPath = fileRealPath,
             }),
         };
+    }
+
+    pub fn backend(self: *HF) Backend {
+        return .{
+            .io = self.io(),
+            .read_hints = .{
+                .minimum_request_size = self.read_pool.chunk_size,
+                .high_latency = true,
+            },
+            .read_stats = .{ .userdata = self, .snapshotFn = readStatsSnapshot },
+        };
+    }
+
+    fn readStatsSnapshot(userdata: *anyopaque) ReadStats {
+        const self: *HF = @ptrCast(@alignCast(userdata));
+        return self.read_pool.readStats();
     }
 
     fn openHandle(self: *HF) !struct { u32, *Handle } {

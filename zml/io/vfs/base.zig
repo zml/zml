@@ -2,6 +2,97 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
+pub const ReadHints = struct {
+    /// Smallest source request expected to avoid excessive per-request cost
+    /// or backend rate limiting.
+    minimum_request_size: usize = 2 * 1024 * 1024,
+    /// The backend benefits from keeping active source calls independent of a
+    /// small bounded set of requests retained for downstream DMA completion.
+    high_latency: bool = false,
+};
+
+pub const read_timing_bucket_sizes = [_]usize{
+    2 * 1024 * 1024,
+    4 * 1024 * 1024,
+    8 * 1024 * 1024,
+    16 * 1024 * 1024,
+    32 * 1024 * 1024,
+    64 * 1024 * 1024,
+    128 * 1024 * 1024,
+};
+
+pub const ReadTimingBucket = struct {
+    attempts: u64 = 0,
+    successes: u64 = 0,
+    successful_bytes: u64 = 0,
+    ttfb_ns: u64 = 0,
+    body_ns: u64 = 0,
+    transient_retries: u64 = 0,
+    timeouts: u64 = 0,
+    server_failures: u64 = 0,
+    throttles: u64 = 0,
+    retry_delay_ns: u64 = 0,
+
+    fn sub(self: ReadTimingBucket, previous: ReadTimingBucket) ReadTimingBucket {
+        return .{
+            .attempts = self.attempts -| previous.attempts,
+            .successes = self.successes -| previous.successes,
+            .successful_bytes = self.successful_bytes -| previous.successful_bytes,
+            .ttfb_ns = self.ttfb_ns -| previous.ttfb_ns,
+            .body_ns = self.body_ns -| previous.body_ns,
+            .transient_retries = self.transient_retries -| previous.transient_retries,
+            .timeouts = self.timeouts -| previous.timeouts,
+            .server_failures = self.server_failures -| previous.server_failures,
+            .throttles = self.throttles -| previous.throttles,
+            .retry_delay_ns = self.retry_delay_ns -| previous.retry_delay_ns,
+        };
+    }
+};
+
+pub const ReadStats = struct {
+    physical_requests: u64 = 0,
+    physical_bytes: u64 = 0,
+    retries: u64 = 0,
+    transient_retries: u64 = 0,
+    timeouts: u64 = 0,
+    server_failures: u64 = 0,
+    throttles: u64 = 0,
+    retry_delay_ns: u64 = 0,
+    timing: [read_timing_bucket_sizes.len]ReadTimingBucket = @splat(.{}),
+
+    pub fn sub(self: ReadStats, previous: ReadStats) ReadStats {
+        var result: ReadStats = .{
+            .physical_requests = self.physical_requests -| previous.physical_requests,
+            .physical_bytes = self.physical_bytes -| previous.physical_bytes,
+            .retries = self.retries -| previous.retries,
+            .transient_retries = self.transient_retries -| previous.transient_retries,
+            .timeouts = self.timeouts -| previous.timeouts,
+            .server_failures = self.server_failures -| previous.server_failures,
+            .throttles = self.throttles -| previous.throttles,
+            .retry_delay_ns = self.retry_delay_ns -| previous.retry_delay_ns,
+        };
+        for (&result.timing, self.timing, previous.timing) |*bucket, current, old| {
+            bucket.* = current.sub(old);
+        }
+        return result;
+    }
+};
+
+pub const ReadStatsProvider = struct {
+    userdata: *anyopaque,
+    snapshotFn: *const fn (userdata: *anyopaque) ReadStats,
+
+    pub fn snapshot(self: ReadStatsProvider) ReadStats {
+        return self.snapshotFn(self.userdata);
+    }
+};
+
+pub const Backend = struct {
+    io: std.Io,
+    read_hints: ReadHints = .{},
+    read_stats: ?ReadStatsProvider = null,
+};
+
 pub const VFSBase = struct {
     inner: std.Io,
 

@@ -73,15 +73,10 @@ pub const LoadedModel = struct {
     ) !Buffers {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
-
         var buffers = try zml.mem.bufferize(allocator, Model, &self.inner);
         errdefer self.unloadBuffers(&buffers, allocator);
 
-        var loader: zml.io.Loader = try .init(allocator, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 256 * zml.MiB,
-            .parallelism = 16,
-        });
+        var loader: zml.io.Loader = try .init(allocator, platform, .{});
         defer loader.deinit();
 
         const all_shardings = shardings.all();
@@ -170,14 +165,10 @@ pub const Model = struct {
         var buffers = try zml.mem.bufferize(allocator, Model, self);
         errdefer Model.unloadBuffers(&buffers, allocator);
 
-        var loader: zml.io.Loader = try .init(allocator, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 256 * zml.MiB,
-            .parallelism = 16,
-        });
+        var loader: zml.io.Loader = try .init(allocator, platform, .{});
         defer loader.deinit();
 
-        loader.load(io, Model, self, &buffers, store, shardings);
+        loader.load(io, Model, self, &buffers, store, shardings, .{ .progress = progress });
         try loader.await(io);
 
         const took = now.untilNow(io, .awake);

@@ -49,11 +49,11 @@ pub fn main(init: std.process.Init) !void {
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
 
-    try vfs.register("file", vfs_file.io());
-    try vfs.register("https", vfs_https.io());
-    try vfs.register("hf", hf_vfs.io());
-    try vfs.register("s3", s3_vfs.io());
-    try vfs.register("gs", gcs_vfs.io());
+    try vfs.registerBackend("file", vfs_file.backend());
+    try vfs.registerBackend("https", vfs_https.backend());
+    try vfs.registerBackend("hf", hf_vfs.backend());
+    try vfs.registerBackend("s3", s3_vfs.backend());
+    try vfs.registerBackend("gs", gcs_vfs.backend());
 
     const io = vfs.io();
 
@@ -209,31 +209,52 @@ pub fn main(init: std.process.Init) !void {
 
             const now: std.Io.Timestamp = .now(io, .awake);
 
-            const load_read_initial_parallelism = try envUsize(init.environ_map, "ZML_LOAD_READ_INITIAL_PARALLELISM", 12);
-            const load_read_parallelism = try envUsize(init.environ_map, "ZML_LOAD_FIXED_READ_PARALLELISM", load_read_initial_parallelism);
-            const load_read_request_mib = try envUsize(init.environ_map, "ZML_LOAD_READ_REQUEST_MIB", 2);
-            const load_dma_initial_parallelism = try envUsize(init.environ_map, "ZML_LOAD_DMA_INITIAL_PARALLELISM", 8);
-            const load_dma_parallelism = try envUsize(init.environ_map, "ZML_LOAD_FIXED_DMA_PARALLELISM", load_dma_initial_parallelism);
-            const load_dma_block_mib = try envUsize(init.environ_map, "ZML_LOAD_DMA_BLOCK_MIB", 2);
-            const load_max_pinned_mib = try envUsize(init.environ_map, "ZML_LOAD_MAX_PINNED_MIB", 128);
-            var total_bytes: usize = 0;
-
-            const buffers = try zml.io.load(AllTensorsModel, &model, allocator, io, platform, &store, .{
-                .shardings = &.{sharded_sharding},
-                .read_parallelism = load_read_parallelism,
-                .read_request_size = load_read_request_mib * zml.MiB,
-                .dma_parallelism = load_dma_parallelism,
-                .dma_block_size = load_dma_block_mib * zml.MiB,
-                .max_pinned_bytes = load_max_pinned_mib * zml.MiB,
-                .progress = &progress,
-                .total_bytes = &total_bytes,
-            });
+            var buffers = try zml.mem.bufferize(allocator, AllTensorsModel, &model);
             defer {
-                for (buffers.tensors) |*buffer_| buffer_.deinit();
+                for (buffers.tensors) |*b| b.deinit();
                 allocator.free(buffers.tensors);
             }
 
+            // Fixed controls take precedence over the corresponding adaptive
+            // initial/cap controls.
+            const load_read_parallelism: zml.io.Parallelism = if (try envOptionalUsize(init.environ_map, "ZML_LOAD_FIXED_READ_PARALLELISM")) |fixed|
+                .{ .fixed = fixed }
+            else
+                .{ .adaptive = .{
+                    .initial = try envUsize(init.environ_map, "ZML_LOAD_READ_INITIAL_PARALLELISM", 12),
+                    .maximum = try envUsize(init.environ_map, "ZML_LOAD_READ_PARALLELISM", 128),
+                } };
+            const load_dma_parallelism: zml.io.Parallelism = if (try envOptionalUsize(init.environ_map, "ZML_LOAD_FIXED_DMA_PARALLELISM")) |fixed|
+                .{ .fixed = fixed }
+            else
+                .{ .adaptive = .{
+                    .initial = try envUsize(init.environ_map, "ZML_LOAD_DMA_INITIAL_PARALLELISM", 8),
+                    .maximum = try envUsize(init.environ_map, "ZML_LOAD_DMA_PARALLELISM", 32),
+                } };
+            const load_read_request_size: zml.io.ReadRequestSize = if (try envOptionalMib(init.environ_map, "ZML_LOAD_READ_REQUEST_MIB")) |fixed|
+                .{ .fixed = fixed }
+            else
+                .{ .adaptive = .{
+                    .initial = try envOptionalMib(init.environ_map, "ZML_LOAD_READ_REQUEST_INITIAL_MIB"),
+                    .maximum = try envMib(init.environ_map, "ZML_LOAD_READ_REQUEST_MAX_MIB", 128),
+                } };
+            const load_dma_block_mib = try envUsize(init.environ_map, "ZML_LOAD_DMA_BLOCK_MIB", 2);
+            const load_max_pinned_mib = try envUsize(init.environ_map, "ZML_LOAD_MAX_PINNED_MIB", 2048);
+
+            var loader: zml.io.Loader = try .init(allocator, platform, .{
+                .read_parallelism = load_read_parallelism,
+                .dma_parallelism = load_dma_parallelism,
+                .read_request_size = load_read_request_size,
+                .dma_block_size = load_dma_block_mib * zml.MiB,
+                .max_pinned_bytes = load_max_pinned_mib * zml.MiB,
+            });
+            defer loader.deinit();
+
+            loader.load(io, AllTensorsModel, &model, &buffers, &store, &.{sharded_sharding}, .{ .progress = &progress });
+            try loader.await(io);
+
             const took = now.untilNow(io, .awake);
+            const total_bytes: u64 = loader.bytes_loaded.raw;
             const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
             log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         },
@@ -243,6 +264,20 @@ pub fn main(init: std.process.Init) !void {
 fn envUsize(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {
     const value = environ_map.get(name) orelse return default;
     return std.fmt.parseInt(usize, value, 10);
+}
+
+fn envOptionalUsize(environ_map: *const std.process.Environ.Map, name: []const u8) !?usize {
+    const value = environ_map.get(name) orelse return null;
+    return try std.fmt.parseInt(usize, value, 10);
+}
+
+fn envMib(environ_map: *const std.process.Environ.Map, name: []const u8, default: usize) !usize {
+    return std.math.mul(usize, try envUsize(environ_map, name, default), zml.MiB);
+}
+
+fn envOptionalMib(environ_map: *const std.process.Environ.Map, name: []const u8) !?usize {
+    const value = try envOptionalUsize(environ_map, name) orelse return null;
+    return try std.math.mul(usize, value, zml.MiB);
 }
 
 const TreeCounts = struct {

@@ -77,6 +77,51 @@ Raw item-3 logs are `/tmp/zml-item3-smoke.log`,
 tests and the release oneAPI IO example build pass. CUDA was neither built nor
 run.
 
+Item 2, change `uxkzvsok`, replaces the fixed stage widths with the final
+bounded-round adaptive controller and restores the stateful `Loader` API used
+by the examples. It adapts source concurrency, logical request size, and DMA
+width independently, while keeping the item-3 lifecycle and per-device DMA
+bounds. Source profiles expose minimum request sizes and high-latency hints;
+the existing remote worker pools expose physical request, byte, retry,
+throttle, and retry-delay totals. This intermediate intentionally retains
+`parallel_read`: large logical admissions can still fan out into fixed-size
+physical chunks, so exact per-request TTFB/body evidence and one-admission /
+one-GET semantics remain item 5.
+
+At the 128 MiB local comparison bound, five default adaptive runs were 26.36,
+27.52, 26.99, 26.95, and 26.62 GiB/s (median 26.95), -0.5% versus item 3's
+27.09 GiB/s median. The same-code fixed `12 reads / 2 MiB / 8 DMA` control
+median was 26.00 GiB/s; the host was noisy, so this is treated as
+no-regression rather than an isolated speedup. A deliberately low
+`4 / 2 MiB / 2` start medianed 23.52 GiB/s. Every subsecond run safely tried
+eight reads and rolled back pending the ten-second confirmation/rearm cycle;
+it demonstrated bounded exploration, not convergence. A deliberately high
+`64 / 32 MiB / 16` start medianed 14.24 GiB/s. Source-pressure feedback
+reduced final read widths to 30, 33, and 44, but the short transfer did not
+retune request size or DMA width; median pinned high water was 1.38 GiB.
+
+The real-AWS bracket used fixed `32 / 16 MiB / 8` controls at 948.44 and
+954.25 MiB/s. Default adaptive moved `12 -> 32` reads and delivered
+949.73 MiB/s. A deliberately poor `4 reads / 64 MiB / 2 DMA` start reached
+32 reads and 941.28 MiB/s, but retained 64 MiB logical requests and peaked at
+1.78 GiB pinned. It gathered loader-side service timing and attempted the
+64 -> 32 MiB probe, but the legacy pool could not expose/exercise the
+candidate's physical capacity, so the probe rolled back. A high
+`64 / 32 MiB / 16` start delivered 954.93 MiB/s but
+kept that tuple and reached the 2.00 GiB mapped cap. All cases made exactly
+1,055 physical requests, transferred 14.96 GiB, and reported no retries,
+throttles, or pool waits. Thus item 2 recovers the AWS throughput basin from a
+low read-width start, but does not yet make poor request-size/high-resource
+starts memory-efficient; item 5 supplies the physical request boundary and
+timing feedback needed for that part of the controller.
+
+Raw item-2 logs are `/tmp/zml-item2-local-{fixed,default}-{1..5}.log`,
+`/tmp/zml-item2-local-{low,high}-{1..3}.log`, and
+`/tmp/zml-item2-aws-{fixed-1,default-2,low-2,high-2,fixed-2}.log`. The
+superseded `*-1` adaptive logs preserve the pre-audit timing-capability bug.
+Core, VFS, and stdx tests and the release oneAPI IO, MNIST, and LLM builds
+pass. CUDA was neither built nor run.
+
 ## Simplicity pass: bounded adaptive rounds (2026-07-24)
 
 This pass treats reduced line count only as a weak proxy for simplicity. The

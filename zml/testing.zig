@@ -356,12 +356,16 @@ pub fn testLayer(
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
-    var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, activation_store.store, .auto);
+    var args_buffers = try zml.mem.bufferize(allocator, ArgsT, &args);
     defer zml.meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
             b.deinit();
         }
     }.cb, {}, &args_buffers);
+    var loader: zml.io.Loader = try .init(allocator, platform, .default);
+    defer loader.deinit();
+    loader.load(io, ArgsT, &args, &args_buffers, activation_store.store, &.{}, .{});
+    try loader.await(io);
 
     exe_args.set(.{ layer_weights, args_buffers });
 
