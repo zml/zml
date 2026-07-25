@@ -195,9 +195,14 @@ pub fn main(init: std.process.Init) !void {
                 .mesh(.{ .model = .high_bandwidth }),
             );
 
-            var progress = std.Progress.start(io, .{ .root_name = "zml.examples.load" });
+            var progress = std.Progress.start(io, .{
+                .root_name = "zml.examples.load",
+                .disable_printing = true,
+            });
             progress.increaseEstimatedTotalItems(load_count);
             defer progress.end();
+
+            try platform.warmupDeviceAllocators();
 
             const now: std.Io.Timestamp = .now(io, .awake);
 
