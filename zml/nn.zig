@@ -17,6 +17,16 @@ pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
     tag: Shape.Tag,
+    // The NVFP4 weight block scale. May be the natural [N, K/16] scale or the
+    // same values in the hardware block-scaled layout -- XLA resolves the
+    // latter at the composite boundary, so nothing here has to distinguish
+    // them.
+    scales: ?Tensor = null,
+    global_scale: ?Tensor = null,
+    // NVFP4 activation global scale. When present, the activation is quantized
+    // to fp4 (A4W4) and the block-scaled matmul runs natively (Blackwell cuDNN)
+    // instead of the weight-only pre-division path.
+    input_global_scale: ?Tensor = null,
 
     pub fn init(weight: Tensor, bias: ?Tensor, tag: anytype) Linear {
         return .{
@@ -26,9 +36,57 @@ pub const Linear = struct {
         };
     }
 
-    pub fn forward(self: Linear, x: Tensor) Tensor {
-        var y = x.dot(self.weight, self.tag);
+    pub fn unloadBuffers(self: *zml.Bufferized(Linear)) void {
+        self.weight.deinit();
+        if (self.bias) |*bias| bias.deinit();
+        if (self.scales) |*scales| scales.deinit();
+        if (self.global_scale) |*gs| gs.deinit();
+        if (self.input_global_scale) |*igs| igs.deinit();
+    }
 
+    pub fn forward(self: Linear, x: Tensor) Tensor {
+        const y = if (self.scales) |scales| blk: {
+            // NVFP4 may be packed u8; FP8 keeps its f8 weight dtype.
+            const weight = if (self.weight.dtype() == .u8)
+                ops.unpackNvfp4(self.weight.withTags(.{ .dout, .kw }), self.tag)
+            else
+                self.weight;
+
+            // NVFP4 W4A4. Emit the scaled_dot composite carrying the two
+            // per-tensor globals (igs, wgs). XLA lowers it to a 6-operand
+            // kScaledDot, which tensor-parallel partitions for free, then the
+            // CUDA FusedScaledDotRewriter selects the cutlass fp4 kernel per
+            // shard -- the activation is quantized in-kernel from the bf16 lhs,
+            // so nothing is materialised here and there is no custom call.
+            //
+            // The block scale may arrive in the hardware SF layout
+            // ([N/128, kg/4, 512]) instead of the natural [N, kg]; XLA resolves
+            // it back at the composite boundary and a backend arm that wants the
+            // swizzled bytes recovers them from that chain, so the op means the
+            // same thing either way and nothing here has to know which it got.
+            if (self.input_global_scale) |igs| {
+                const wgs = self.global_scale.?;
+                const igs_s = igs.convert(.f32).reshape(zml.Shape.init(.{}, .f32));
+                const wgs_s = wgs.convert(.f32).reshape(zml.Shape.init(.{}, .f32));
+                break :blk ops.scaledDotGlobals(x.convert(.bf16), weight, scales, igs_s, wgs_s, self.tag).convert(x.dtype());
+            }
+
+            // Weight-only NVFP4 (W4A16). Apply the weight global scale by
+            // PRE-DIVIDING the activation, leaving the e4m3 block scale untouched.
+            // Keeping the block scale as f8e4m3fn (not bf16) is REQUIRED for the
+            // Triton scaled-dot path: IsTritonSupportedScaledDot only accepts scale
+            // types {F8E4M3FN, F8E5M2, F8E8M0FNU, S8}; a bf16 scale forbids it and
+            // forces the (slow) dequant floor. Math: out = (x/wgs)·(w_fp4·e4m3)
+            // = x·(w_fp4·e4m3/wgs) = x·w_true.
+            const lhs = if (self.global_scale) |divisor_| blk_lhs: {
+                stdx.debug.assert(divisor_.dtype() == .f32, "divisor must be f32, got {}", .{divisor_.dtype()});
+                stdx.debug.assert(divisor_.rank() == 1 and divisor_.dim(0) == 1, "divisor must have shape [1], got {f}", .{divisor_.shape()});
+                const divisor = divisor_.withTags(.{.one}).squeeze(.one);
+                break :blk_lhs x.convert(.f32).div(divisor.broad(x.shape())).convert(x.dtype());
+            } else x;
+
+            break :blk ops.scaledDot(lhs, weight, scales, self.tag);
+        } else x.dot(self.weight, self.tag);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
 };

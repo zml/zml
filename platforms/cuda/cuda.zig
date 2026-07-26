@@ -124,6 +124,14 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     }
 
     return blk: {
+        // ZML_PJRT_PLUGIN loads a locally built plugin instead of the sandboxed
+        // release one -- how you run against an XLA checkout without rebuilding
+        // the sandbox.
+        if (std.c.getenv("ZML_PJRT_PLUGIN")) |override| {
+            const override_path = std.mem.span(override);
+            log.info("Loading PJRT plugin from ZML_PJRT_PLUGIN={s}", .{override_path});
+            break :blk .loadFrom(override_path);
+        }
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_cuda.so" });
         break :blk .loadFrom(path);

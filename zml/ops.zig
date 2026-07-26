@@ -1609,6 +1609,164 @@ pub fn composite(
     return out_tensors;
 }
 
+/// Compressed-tensors NVFP4: packed `u8` with last axis `.kw` (two f4 values per
+/// byte). Expands to `f4e2m1` and names the full K axis `k_tag`.
+/// Caller must only invoke this when `w.dtype() == .u8`.
+pub fn unpackNvfp4(w: Tensor, k_tag: anytype) Tensor {
+    stdx.debug.assert(w.dtype() == .u8, "unpackNvfp4 expects packed u8 weights, got {}", .{w.dtype()});
+    return w.bitCast(.f4e2m1)
+        .merge(.{ .kb = .{ .kw, .bitcast } })
+        .renameTag(.kb, Shape.toTag(k_tag));
+}
+
+/// Weight-only block-scaled dot: bf16 activation (identity lhs scale) x quantized
+/// weight with `rhs_scale`. Emits the `xla.scaled_dot` composite.
+pub fn scaledDot(lhs: Tensor, rhs: Tensor, rhs_scale: Tensor, args: anytype) Tensor {
+    return scaledDotImpl(lhs, rhs, rhs_scale, &.{}, args);
+}
+
+/// Same as `scaledDot`, but carries the two NVFP4 per-tensor global scales
+/// (input then weight) as trailing composite operands. XLA's CompositeRewriter
+/// lowers this to a 6-operand kScaledDot; the generic floor applies the weight
+/// global as an epilogue while the CUDA FusedScaledDotRewriter consumes both to
+/// emit the fused cutlass fp4 kernel (W4A4). Both globals must be f32 scalars.
+pub fn scaledDotGlobals(lhs: Tensor, rhs: Tensor, rhs_scale: Tensor, input_global_scale: Tensor, weight_global_scale: Tensor, args: anytype) Tensor {
+    return scaledDotImpl(lhs, rhs, rhs_scale, &.{ input_global_scale, weight_global_scale }, args);
+}
+
+fn scaledDotImpl(lhs: Tensor, rhs: Tensor, rhs_scale: Tensor, globals: []const Tensor, args: anytype) Tensor {
+    stdx.debug.assert(lhs.shape().hasTag(args) != null, "scaledDot expects lhs to have {any} tag, got {f}", .{ args, lhs.shape() });
+    stdx.debug.assert(rhs.shape().hasTag(args) != null, "scaledDot expects rhs to have {any} tag, got {f}", .{ args, rhs.shape() });
+
+    const lhs_contracting_dim: i8 = @intCast(lhs.shape().hasTag(args).?);
+    const rhs_contracting_dim: i8 = @intCast(rhs.shape().hasTag(args).?);
+
+    var batching_axes: stdx.BoundedArray([2]i8, constants.MAX_RANK) = .empty;
+    for (0..lhs.rank()) |lhs_tag_index| {
+        const lhs_tag = lhs.shape().tag(lhs_tag_index);
+        if (lhs_tag == Shape.toTag(args)) continue;
+        if (rhs.shape().hasTag(lhs_tag)) |rhs_tag_index| {
+            batching_axes.appendAssumeCapacity(.{ @intCast(lhs_tag_index), @intCast(rhs_tag_index) });
+        }
+    }
+
+    const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
+
+    var res_shape: Shape = .{ ._dtype = lhs.dtype() };
+    // Validate batching axes
+    var lhs_batching_axes: Axes = .empty;
+    var rhs_batching_axes: Axes = .empty;
+    for (batching_axes.constSlice()) |b_axes| {
+        const l, const r = b_axes;
+        stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "scaledDot expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
+        var t = lhs._shape.tag(l);
+        if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
+        res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
+        lhs_batching_axes.appendAssumeCapacity(lhs._shape.axis(l));
+        rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
+    }
+
+    // Validate contracting axes
+    stdx.debug.assert(lhs._shape.dim(lhs_contracting_dim) == rhs._shape.dim(rhs_contracting_dim), "scaledDot expects contracting dimensions to be equal, got {} and {} in {f} and {f}", .{ lhs_contracting_dim, rhs_contracting_dim, lhs, rhs });
+    var lhs_contracting_axes: Axes = .empty;
+    var rhs_contracting_axes: Axes = .empty;
+    lhs_contracting_axes.appendAssumeCapacity(lhs._shape.axis(lhs_contracting_dim));
+    rhs_contracting_axes.appendAssumeCapacity(rhs._shape.axis(rhs_contracting_dim));
+
+    // Result shape is obtained by concatenating batching dimensions, (already done)
+    // then dimensions from lhs axes that aren't contracting nor batching,
+    // then dimensions from rhs axes that aren't contracting nor batching.
+    for (0..lhs.rank()) |l| {
+        if (std.mem.indexOfScalar(i64, lhs_contracting_axes.constSlice(), @intCast(l))) |_| {
+            continue;
+        }
+        if (std.mem.indexOfScalar(i64, lhs_batching_axes.constSlice(), @intCast(l))) |_| {
+            continue;
+        }
+        res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l));
+    }
+    for (0..rhs.rank()) |r| {
+        if (std.mem.indexOfScalar(i64, rhs_contracting_axes.constSlice(), @intCast(r))) |_| {
+            continue;
+        }
+        if (std.mem.indexOfScalar(i64, rhs_batching_axes.constSlice(), @intCast(r))) |_| {
+            continue;
+        }
+        res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
+    }
+
+    var lhs_scale_shape = lhs.shape().withDtype(.bf16);
+    for (0..lhs.rank()) |i| {
+        lhs_scale_shape = lhs_scale_shape.setDim(i, 1);
+    }
+
+    const lhs_scale = Tensor.constantTensor(lhs_scale_shape, DataType.bf16.one().asBytes());
+
+    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const dnums = mlir.Attribute.array(mlir_ctx, &.{
+        .array(mlir_ctx, &.{
+            .intArray(mlir_ctx, i64, lhs_contracting_axes.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_contracting_axes.constSlice()),
+        }),
+        .array(mlir_ctx, &.{
+            .intArray(mlir_ctx, i64, lhs_batching_axes.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_batching_axes.constSlice()),
+        }),
+    });
+
+    // Operands: lhs, rhs, lhs_scale, rhs_scale, then 0 or 2 per-tensor globals.
+    stdx.debug.assert(globals.len == 0 or globals.len == 2, "scaledDot globals must be 0 or 2, got {d}", .{globals.len});
+    var op_buf: [6]Tensor = .{ lhs, rhs, lhs_scale, rhs_scale, undefined, undefined };
+    for (globals, 0..) |g, i| op_buf[4 + i] = g;
+    const operands = op_buf[0 .. 4 + globals.len];
+
+    const outs = composite("xla.scaled_dot", operands, &.{res_shape}, scaledDotReference, res_shape, .{
+        .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dnums)},
+    });
+
+    return outs[0];
+}
+
+fn scaledDotReference(in: []const Tensor, out_shape: Shape) Tensor {
+    return customCall(
+        "zml$scaled_dot_unmatched",
+        .{ in[0], in[1], in[2], in[3] },
+        out_shape,
+        {},
+        .{ .has_side_effect = false },
+    );
+}
+
+/// Rearrange an NVFP4 block scale from its natural [N, K/16] storage layout into
+/// the hardware block-scaled (SF) layout the tensor-core block-scaled MMA reads:
+///
+///   sf[n_blk][k_blk][m0][m1][j] = natural[n_blk*128 + m1*32 + m0][k_blk*4 + j]
+///
+/// One tile is 128 rows of N by 4 k-groups = 512 scale bytes, N blocks
+/// outermost. This is a pure reindex -- no arithmetic -- and it is the same
+/// permutation XLA applies for cuDNN (block_scaling_rewriter.cc) and vLLM
+/// applies in `swizzle_blockscale`.
+///
+/// Checkpoints store the natural layout because it is the portable one: a
+/// Triton kernel, a cuDNN path, a CUTLASS path and a CPU reference all want the
+/// scale factors distributed differently. So every framework converts once at
+/// load. Run this in a load-time program, never in the forward pass.
+///
+/// `natural` must be tagged {.dout, .sc}; the result is {.nblk, .kblk, .sfblk}.
+pub fn swizzleNvfp4Scale(natural: Tensor) Tensor {
+    const n = natural.dim(.dout);
+    const kg = natural.dim(.sc);
+    stdx.debug.assert(@rem(n, 128) == 0 and @rem(kg, 4) == 0, "swizzleNvfp4Scale expects a [N, kg] scale with N a multiple of 128 and kg a multiple of 4, got {f}", .{natural.shape()});
+
+    // Row index n = nb*128 + m1*32 + m0, so .dout splits major-to-minor as
+    // (nb, m1, m0); the group index splits as (kb, j).
+    return natural
+        .splitAxis(.dout, .{ .nblk = @divExact(n, 128), .m1 = 4, .m0 = 32 })
+        .splitAxis(.sc, .{ .kblk = @divExact(kg, 4), .j = 4 })
+        .transpose(.{ .nblk, .kblk, .m0, .m1, .j })
+        .merge(.{ .sfblk = .{ .m0, .m1, .j } });
+}
+
 pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, metadata: anytype, opts: CustomCallOptions) CustomCallResultTypeFromOutputSpec(@TypeOf(outputs)) {
     // Transform generic inputs to flat slice.
     const inputs_: []const Tensor = switch (@typeInfo(@TypeOf(inputs))) {
