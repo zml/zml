@@ -372,8 +372,15 @@ pub const Loader = struct {
             return;
         };
 
+        // A tensor bound to several sources is a FUSED one: its shape is not any
+        // single source's, so there is nothing this walk can put in the buffer.
+        // Assembling it is the caller's job, via a pack program run through
+        // `loadExecute` (see LagunaExperts.loadBuffers, gemma4's
+        // reloadQuantizedWeights). Leave the buffer as `bufferize` made it --
+        // no shards, so `deinit` on it is a no-op -- and let that caller fill it.
         if (sources.len != 1) {
-            std.debug.panic("Expected loaded tensor to have only 1 source, got {}", .{sources.len});
+            log.debug("Skipping fused tensor with {} sources; expected to be loaded via loadExecute", .{sources.len});
+            return;
         }
 
         self.loadSingleInner(io, sources[0], tensor.shape(), buffer, shardings, opts) catch |e| {
