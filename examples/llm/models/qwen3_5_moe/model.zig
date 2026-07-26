@@ -757,6 +757,8 @@ pub const Moe = struct {
             self.down_proj,
             null,
             null,
+            null, // w1_global_scale
+            null, // w2_global_scale
             moe_metadata,
             moe_parameters,
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
