@@ -380,6 +380,7 @@ const GemmOpts = struct {
     block_n: u32,
     block_k: u32,
     group_m: u32,
+    split_k: u32,
     num_warps: u32,
     num_stages: u32,
 };
@@ -578,6 +579,7 @@ const KernelConf = struct {
     block_n: u32,
     block_k: u32,
     group_m: u32,
+    split_k: u32 = 1,
     num_warps: u32,
     num_stages: u32,
 };
@@ -594,6 +596,7 @@ fn configForTokenBucket(num_tokens: u32) KernelConf {
             .block_n = 32,
             .block_k = 64,
             .group_m = 1,
+            .split_k = 4,
             .num_warps = 4,
             .num_stages = 4,
         },
@@ -602,6 +605,7 @@ fn configForTokenBucket(num_tokens: u32) KernelConf {
             .block_n = 32,
             .block_k = 64,
             .group_m = 1,
+            .split_k = 4,
             .num_warps = 4,
             .num_stages = 4,
         },
@@ -610,6 +614,7 @@ fn configForTokenBucket(num_tokens: u32) KernelConf {
             .block_n = 32,
             .block_k = 64,
             .group_m = 1,
+            .split_k = 4,
             .num_warps = 4,
             .num_stages = 3,
         },
@@ -618,6 +623,7 @@ fn configForTokenBucket(num_tokens: u32) KernelConf {
             .block_n = 128,
             .block_k = 128,
             .group_m = 1,
+            .split_k = 4,
             .num_warps = 8,
             .num_stages = 3,
         },
@@ -626,6 +632,7 @@ fn configForTokenBucket(num_tokens: u32) KernelConf {
             .block_n = 64,
             .block_k = 64,
             .group_m = 64,
+            .split_k = 4,
             .num_warps = 4,
             .num_stages = 5,
         },
@@ -634,6 +641,7 @@ fn configForTokenBucket(num_tokens: u32) KernelConf {
             .block_n = 64,
             .block_k = 128,
             .group_m = 1,
+            .split_k = 4,
             .num_warps = 8,
             .num_stages = 2,
         },
@@ -642,6 +650,7 @@ fn configForTokenBucket(num_tokens: u32) KernelConf {
             .block_n = 32,
             .block_k = 128,
             .group_m = 1,
+            .split_k = 4,
             .num_warps = 4,
             .num_stages = 2,
         },
@@ -650,6 +659,7 @@ fn configForTokenBucket(num_tokens: u32) KernelConf {
             .block_n = 32,
             .block_k = 128,
             .group_m = 64,
+            .split_k = 4,
             .num_warps = 4,
             .num_stages = 2,
         },
@@ -658,6 +668,7 @@ fn configForTokenBucket(num_tokens: u32) KernelConf {
             .block_n = 64,
             .block_k = 128,
             .group_m = 1,
+            .split_k = 4,
             .num_warps = 4,
             .num_stages = 2,
         },
@@ -666,6 +677,7 @@ fn configForTokenBucket(num_tokens: u32) KernelConf {
             .block_n = 128,
             .block_k = 128,
             .group_m = 1,
+            .split_k = 4,
             .num_warps = 8,
             .num_stages = 3,
         },
@@ -674,6 +686,7 @@ fn configForTokenBucket(num_tokens: u32) KernelConf {
             .block_n = 256,
             .block_k = 128,
             .group_m = 1,
+            .split_k = 4,
             .num_warps = 8,
             .num_stages = 2,
         },
@@ -682,6 +695,7 @@ fn configForTokenBucket(num_tokens: u32) KernelConf {
             .block_n = 256,
             .block_k = 128,
             .group_m = 1,
+            .split_k = 4,
             .num_warps = 8,
             .num_stages = 2,
         },
@@ -746,6 +760,7 @@ fn getBestConfig(num_tokens: u32, topk: u32, num_experts: u32) KernelConf {
         config.block_n = 256;
         config.block_k = 128;
         config.group_m = 1;
+        config.split_k = 4;
         config.num_warps = 4;
         config.num_stages = 2;
     } else if (num_routes <= 512 and num_experts <= 64) {
@@ -753,6 +768,7 @@ fn getBestConfig(num_tokens: u32, topk: u32, num_experts: u32) KernelConf {
         config.block_n = 128;
         config.block_k = 128;
         config.group_m = 1;
+        config.split_k = 4;
         config.num_warps = 4;
         config.num_stages = 2;
     }
@@ -982,6 +998,7 @@ const Triton = struct {
                 .block_n = kernel_cfg.block_n,
                 .block_k = kernel_cfg.block_k,
                 .group_m = kernel_cfg.group_m,
+                .split_k = kernel_cfg.split_k,
                 .num_warps = kernel_cfg.num_warps,
                 .num_stages = kernel_cfg.num_stages,
             },
@@ -1008,6 +1025,7 @@ const Triton = struct {
                 .block_n = kernel_cfg.block_n,
                 .block_k = kernel_cfg.block_k,
                 .group_m = kernel_cfg.group_m,
+                .split_k = kernel_cfg.split_k,
                 .num_warps = kernel_cfg.num_warps,
                 .num_stages = kernel_cfg.num_stages,
             },
@@ -1174,6 +1192,20 @@ const Triton = struct {
         return .{values.input.maximum(values.update)};
     }
 
+    fn applySwigluAndRouteWeights(x: zml.Tensor, gammas_: ?zml.Tensor, activation_limit: f32) zml.Tensor {
+        const threshold = zml.Tensor.scalar(activation_limit, .f32);
+
+        var gate = x.slice1d(.dout, .{ .start = 0, .step = 2 }).convert(.f32);
+        gate = zml.Tensor.select(gate.cmp(.GT, threshold), threshold, gate);
+        const up = x.slice1d(.dout, .{ .start = 1, .step = 2 }).convert(.f32).clamp(threshold.negate(), threshold);
+
+        var y = gate.silu().mul(up);
+        if (gammas_) |gammas| {
+            y = y.mul(gammas.appendAxes(.{.dout}).broad(y.shape()));
+        }
+        return y;
+    }
+
     fn runGemm(
         input: zml.Tensor,
         weights: zml.Tensor,
@@ -1188,17 +1220,31 @@ const Triton = struct {
 
         stdx.debug.assert(packed_k * 2 == contract_k, "expected packed int4 weight K {} to match activation K {}", .{ packed_k, contract_k });
         stdx.debug.assert(scale_k * 32 == contract_k, "expected MX scale K {} to match activation K {}", .{ scale_k, contract_k });
-        const activation_reduction_n: i64 = if (opts.apply_swiglu) 2 else 1;
-        stdx.debug.assert(@mod(n, activation_reduction_n) == 0, "invalid GEMM output width {}", .{n});
-        stdx.debug.assert(opts.output_shape.dim(-1) == @divExact(n, activation_reduction_n), "output shape {f} does not match GEMM N {}", .{ opts.output_shape, n });
+        const output_reduction_n: i64 = if (opts.apply_swiglu) 2 else 1;
+        stdx.debug.assert(@mod(n, output_reduction_n) == 0, "invalid GEMM output width {}", .{n});
+        stdx.debug.assert(opts.output_shape.dim(-1) == @divExact(n, output_reduction_n), "output shape {f} does not match GEMM N {}", .{ opts.output_shape, n });
 
         const block_m: i32 = @intCast(opts.block_m);
         const block_n: i32 = @intCast(opts.block_n);
         const block_k: i32 = @intCast(opts.block_k);
         const grid_n = std.math.divCeil(i64, n, block_n) catch unreachable;
+        const split_k: i64 = @intCast(opts.split_k);
+        const split_k_block: i64 = @as(i64, block_k) * split_k;
+        const has_split_k = opts.split_k > 1;
         const has_bias = opts.bias != null;
         const has_gather = opts.gather != null;
-        const has_gammas = opts.gammas != null;
+        const kernel_applies_swiglu = opts.apply_swiglu and !has_split_k;
+        const kernel_has_gammas = opts.gammas != null and (!opts.apply_swiglu or !has_split_k);
+        const kernel_reduction_n: i64 = if (kernel_applies_swiglu) output_reduction_n else 1;
+        const kernel_output_n = @divExact(n, kernel_reduction_n);
+        const kernel_output_shape = blk: {
+            if (!has_split_k) break :blk opts.output_shape;
+
+            const raw_output_shape = opts.output_shape
+                .setDim(-1, kernel_output_n)
+                .withDtype(.f32);
+            break :blk raw_output_shape.insert(0, .{ .split_k = split_k });
+        };
 
         const cfg: triton_a16w4_kernel.Cfg = .{
             .x_dtype = zml.kernel.triton.from(input_matrix.dtype()),
@@ -1206,12 +1252,12 @@ const Triton = struct {
             .w_mx_scale_dtype = packedByteDtype(scales.dtype()),
             .b_dtype = zml.kernel.triton.from((opts.bias orelse input_matrix).dtype()),
             .gammas_dtype = zml.kernel.triton.from((opts.gammas orelse zml.Tensor.scalar(1.0, .f32)).dtype()),
-            .y_dtype = zml.kernel.triton.from(opts.output_shape.dtype()),
+            .y_dtype = zml.kernel.triton.from(kernel_output_shape.dtype()),
             .HAS_B = has_bias,
-            .HAS_GAMMAS = has_gammas,
+            .HAS_GAMMAS = kernel_has_gammas,
             .HAS_GATHER_INDX = has_gather,
-            .APPLY_SWIGLU = opts.apply_swiglu,
-            .ACTIVATION_REDUCTION_N = @intCast(activation_reduction_n),
+            .APPLY_SWIGLU = kernel_applies_swiglu,
+            .ACTIVATION_REDUCTION_N = @intCast(kernel_reduction_n),
             .SWIGLU_ADD_RESIDUAL = false,
             .N_EXPTS_ACT = @intCast(opts.routing.topk),
             .BLOCK_M = block_m,
@@ -1219,15 +1265,16 @@ const Triton = struct {
             .BLOCK_K = block_k,
             .GROUP_M = @intCast(opts.group_m),
             .XCD_SWIZZLE = 1,
-            .EVEN_K = @mod(contract_k, block_k) == 0,
-            .MASK_K_LIMIT = @intCast(if (@mod(contract_k, block_k) == 0) block_k else @mod(contract_k, block_k)),
+            .EVEN_K = @mod(contract_k, split_k_block) == 0,
+            .MASK_K_LIMIT = @intCast(if (@mod(contract_k, split_k_block) == 0) split_k_block else @mod(contract_k, split_k_block)),
+            .SPLIT_K = @intCast(opts.split_k),
             .W_CACHE_MODIFIER = if (block_m <= 32) .cg else .none,
         };
 
         const y = triton_a16w4_kernel.Kernel.call(
             .{
-                .stride_y_k = scalarI64(0),
-                .stride_y_m = scalarI64(opts.output_shape.dim(-1)),
+                .stride_y_k = scalarI64(if (has_split_k) opts.routing.num_routes * kernel_output_n else 0),
+                .stride_y_m = scalarI64(kernel_output_n),
                 .stride_y_n = scalarI64(1),
                 .X = input_matrix,
                 .stride_x_m = scalarI64(contract_k),
@@ -1255,16 +1302,22 @@ const Triton = struct {
                 .alpha = scalarF32(1.0),
                 .limit = scalarF32(opts.activation_limit),
             },
-            .{ .Y = opts.output_shape },
+            .{ .Y = kernel_output_shape },
             .{
                 .cfg = cfg,
-                .grid = .{ @intCast(opts.routing.grid_m * grid_n), 1, 1 },
+                .grid = .{ @intCast(opts.routing.grid_m * grid_n * split_k), 1, 1 },
                 .num_warps = @intCast(opts.num_warps),
                 .num_stages = @intCast(opts.num_stages),
             },
         ).Y;
 
-        return y;
+        if (!has_split_k) return y;
+
+        var reduced = y.sum(.split_k).squeeze(.split_k);
+        if (opts.apply_swiglu) {
+            reduced = applySwigluAndRouteWeights(reduced, opts.gammas, opts.activation_limit);
+        }
+        return reduced.convert(opts.output_shape.dtype());
     }
 
     fn packedByteDtype(dt: zml.DataType) zml.kernel.triton.DType {
