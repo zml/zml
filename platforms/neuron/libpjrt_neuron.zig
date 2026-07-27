@@ -41,8 +41,6 @@ pub export fn zmlxneuron_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaqu
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
 fn setupNeuronEnv(io: std.Io, sandbox_path: []const u8) !void {
-    const scratchpad_page_size = "1024";
-
     var root_comm_buf: [256]u8 = undefined;
     _ = setenv(
         "NEURON_RT_ROOT_COMM_ID",
@@ -60,8 +58,6 @@ fn setupNeuronEnv(io: std.Io, sandbox_path: []const u8) !void {
     _ = setenv("NEURON_RT_LOG_LEVEL", "error", 0);
     _ = setenv("NEURON_RT_DISABLE_EXECUTION_BARRIER", "1", 0);
     _ = setenv("NEURON_RT_STOCHASTIC_ROUNDING_EN", "1", 1);
-    _ = setenv("NEURON_RT_ASYNC_EXEC_MAX_INFLIGHT_REQUESTS", "3", 0);
-    _ = setenv("NEURON_SCRATCHPAD_PAGE_SIZE", scratchpad_page_size, 0);
 
     var bin_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const bin_path = try stdx.Io.Dir.path.bufJoin(&bin_path_buf, &.{ sandbox_path, "bin" });
@@ -88,13 +84,11 @@ fn setupNeuronEnv(io: std.Io, sandbox_path: []const u8) !void {
             "--model-type=transformer " ++
             "--enable-fast-loading-neuron-binaries " ++
             "--enable-fast-context-switch " ++
-            "--hbm-scratchpad-page-size={s} " ++
             "--verbose {s} " ++
             "--logfile-verbose {s} " ++
             "--logfile=./log-neuron-cc.txt",
         .{
             target,
-            scratchpad_page_size,
             log_level,
             log_level,
         },
