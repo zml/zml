@@ -7,6 +7,7 @@ pub const mosaic_tpu = @import("mosaic_tpu.zig");
 pub const triton = @import("triton.zig");
 pub const triton_kernels = @import("triton_kernels/triton_kernels.zig");
 pub const triton_a16w4_kernel = @import("triton_kernels/a16w4_kernel.zig");
+pub const triton_a16wmxfp4_kernel = @import("triton_kernels/a16wmxfp4_kernel.zig");
 
 pub const ActivationMode = enum {
     silu,
@@ -356,7 +357,9 @@ const Routing = struct {
     active_routes: zml.Tensor,
     hist: zml.Tensor,
     offsets: zml.Tensor,
-    expt_data: zml.Tensor,
+    tile_experts: zml.Tensor,
+    tile_starts: zml.Tensor,
+    tile_ends: zml.Tensor,
 };
 
 const CompactLocalRoutes = struct {
@@ -1128,7 +1131,7 @@ const Triton = struct {
 
         const offsets = hist.cumulativeSum(.expert).sub(hist).withTags(.{.expert});
 
-        const expert_data = buildExpertBlockMap(hist, num_routes, grid_m, block_m);
+        const tile_map = buildExpertTileMap(hist, offsets, num_routes, grid_m, block_m);
 
         return .{
             .num_tokens = output_num_tokens,
@@ -1141,11 +1144,17 @@ const Triton = struct {
             .active_routes = active_routes,
             .hist = hist,
             .offsets = offsets,
-            .expt_data = expert_data,
+            .tile_experts = tile_map.experts,
+            .tile_starts = tile_map.starts,
+            .tile_ends = tile_map.ends,
         };
     }
 
-    fn buildExpertBlockMap(hist: zml.Tensor, num_routes: i64, grid_m: i64, block_m: i64) zml.Tensor {
+    fn buildExpertTileMap(hist: zml.Tensor, offsets: zml.Tensor, num_routes: i64, grid_m: i64, block_m: i64) struct {
+        experts: zml.Tensor,
+        starts: zml.Tensor,
+        ends: zml.Tensor,
+    } {
         const num_experts = hist.dim(.expert);
         const max_blocks_per_expert = std.math.divCeil(i64, num_routes, block_m) catch unreachable;
 
@@ -1162,12 +1171,30 @@ const Triton = struct {
             tile_offsets.insertAxes(.last, .{.block}).broad(grid_shape).add(block_grid),
             zml.Tensor.scalar(0, .i32).broad(grid_shape),
         );
-        const packed_data = block_grid.scale(65536).add(expert_ids.insertAxes(.last, .{.block}).broad(grid_shape));
-        const updates = valid.select(packed_data, zml.Tensor.scalar(-1, .i32).broad(grid_shape));
 
-        return zml.Tensor.scalar(-1, .i32)
-            .broad(zml.Shape.init(.{ .tile = grid_m }, .i32))
-            .scatterSlices(.{ .tile = target_idx }, updates, .{ .update_fn = scatterMax });
+        const expert_updates = valid.select(
+            expert_ids.insertAxes(.last, .{.block}).broad(grid_shape),
+            zml.Tensor.zeroes(grid_shape),
+        );
+
+        const offsets_broad = offsets.insertAxes(.last, .{.block}).broad(grid_shape);
+        const starts = offsets_broad.add(block_grid.scale(block_m));
+        const expert_ends = offsets.add(hist).insertAxes(.last, .{.block}).broad(grid_shape);
+        const ends = starts.addConstant(block_m).minimum(expert_ends);
+
+        const grid_shape_i64 = grid_shape.withDtype(.i64);
+        const start_updates = valid.select(starts.convert(.i64), zml.Tensor.zeroes(grid_shape_i64));
+        const end_updates = valid.select(ends.convert(.i64), zml.Tensor.zeroes(grid_shape_i64));
+
+        const tile_shape = zml.Shape.init(.{ .tile = grid_m }, .i32);
+        return .{
+            .experts = zml.Tensor.zeroes(tile_shape)
+                .scatterSlices(.{ .tile = target_idx }, expert_updates, .{ .update_fn = scatterMax }),
+            .starts = zml.Tensor.zeroes(tile_shape.withDtype(.i64))
+                .scatterSlices(.{ .tile = target_idx }, start_updates, .{ .update_fn = scatterMax }),
+            .ends = zml.Tensor.zeroes(tile_shape.withDtype(.i64))
+                .scatterSlices(.{ .tile = target_idx }, end_updates, .{ .update_fn = scatterMax }),
+        };
     }
 
     fn scatterMax(values: zml.ops.ScatterArgs) struct { zml.Tensor } {
@@ -1191,80 +1218,84 @@ const Triton = struct {
         const activation_reduction_n: i64 = if (opts.apply_swiglu) 2 else 1;
         stdx.debug.assert(@mod(n, activation_reduction_n) == 0, "invalid GEMM output width {}", .{n});
         stdx.debug.assert(opts.output_shape.dim(-1) == @divExact(n, activation_reduction_n), "output shape {f} does not match GEMM N {}", .{ opts.output_shape, n });
+        stdx.debug.assert(opts.bias == null, "MXFP4 Triton MoE GEMM bias is not wired yet", .{});
 
         const block_m: i32 = @intCast(opts.block_m);
         const block_n: i32 = @intCast(opts.block_n);
         const block_k: i32 = @intCast(opts.block_k);
         const grid_n = std.math.divCeil(i64, n, block_n) catch unreachable;
-        const has_bias = opts.bias != null;
-        const has_gather = opts.gather != null;
         const has_gammas = opts.gammas != null;
+        const gathered_input = if (opts.gather) |gather| blk: {
+            const token_ids = gather.divByConst(opts.routing.gather_divisor).withTags(.{.route});
+            break :blk input_matrix.gather(.{ .row = token_ids }, .{}).rename(.{ .route = .row });
+        } else input_matrix;
+        const raw_output_shape = if (opts.apply_swiglu)
+            opts.output_shape.set(-1, n)
+        else
+            opts.output_shape;
 
-        const cfg: triton_a16w4_kernel.Cfg = .{
-            .x_dtype = zml.kernel.triton.from(input_matrix.dtype()),
-            .w_dtype = packedByteDtype(weights.dtype()),
-            .w_mx_scale_dtype = packedByteDtype(scales.dtype()),
-            .b_dtype = zml.kernel.triton.from((opts.bias orelse input_matrix).dtype()),
-            .gammas_dtype = zml.kernel.triton.from((opts.gammas orelse zml.Tensor.scalar(1.0, .f32)).dtype()),
-            .y_dtype = zml.kernel.triton.from(opts.output_shape.dtype()),
-            .HAS_B = has_bias,
-            .HAS_GAMMAS = has_gammas,
-            .HAS_GATHER_INDX = has_gather,
-            .APPLY_SWIGLU = opts.apply_swiglu,
-            .ACTIVATION_REDUCTION_N = @intCast(activation_reduction_n),
-            .SWIGLU_ADD_RESIDUAL = false,
-            .N_EXPTS_ACT = @intCast(opts.routing.topk),
+        const cfg: triton_a16wmxfp4_kernel.Cfg = .{
+            .a_dtype = zml.kernel.triton.from(gathered_input.dtype()),
+            .wp_dtype = packedByteDtype(weights.dtype()),
+            .ws_dtype = packedByteDtype(scales.dtype()),
+            .c_dtype = zml.kernel.triton.from(raw_output_shape.dtype()),
             .BLOCK_M = block_m,
             .BLOCK_N = block_n,
             .BLOCK_K = block_k,
+            .SPLIT_K = 1,
             .GROUP_M = @intCast(opts.group_m),
-            .XCD_SWIZZLE = 1,
-            .EVEN_K = @mod(contract_k, block_k) == 0,
-            .MASK_K_LIMIT = @intCast(if (@mod(contract_k, block_k) == 0) block_k else @mod(contract_k, block_k)),
-            .W_CACHE_MODIFIER = if (block_m <= 32) .cg else .none,
+            .num_warps = @intCast(opts.num_warps),
+            .num_stages = @intCast(opts.num_stages),
         };
 
-        const y = triton_a16w4_kernel.Kernel.call(
+        var y = triton_a16wmxfp4_kernel.Kernel.call(
             .{
-                .stride_y_k = scalarI64(0),
-                .stride_y_m = scalarI64(opts.output_shape.dim(-1)),
-                .stride_y_n = scalarI64(1),
-                .X = input_matrix,
-                .stride_x_m = scalarI64(contract_k),
-                .stride_x_k = scalarI64(1),
-                .W = weights,
-                .stride_w_e = scalarI64(n * packed_k),
-                .stride_w_k = scalarI64(1),
-                .stride_w_n = scalarI64(packed_k),
-                .WMxScale = scales,
-                .stride_w_mx_e = scalarI64(n * scale_k),
-                .stride_w_mx_k = scalarI64(1),
-                .stride_w_mx_n = scalarI64(scale_k),
-                .B = opts.bias orelse input_matrix,
-                .stride_b_e = scalarI64(if (has_bias) n else 0),
-                .Gammas = opts.gammas orelse zml.Tensor.scalar(1.0, .f32),
-                .N = scalarI64(n),
-                .K = scalarI64(contract_k),
-                .GatherIndx = opts.gather orelse opts.routing.sorted_route_ids,
-                .ExptHist = opts.routing.hist,
-                .ExptOffs = opts.routing.offsets,
-                .ExptOffsSum = zml.Tensor.scalar(0, .i32),
-                .ExptData = opts.routing.expt_data,
-                .grid_m = scalarI64(opts.routing.grid_m),
-                .grid_n = scalarI64(grid_n),
-                .alpha = scalarF32(1.0),
-                .limit = scalarF32(opts.activation_limit),
+                .a_ptr = gathered_input,
+                .wp_ptr = weights,
+                .ws_ptr = scales,
+                .tile_expert_ptr = opts.routing.tile_experts,
+                .tile_mstart_ptr = opts.routing.tile_starts,
+                .tile_mend_ptr = opts.routing.tile_ends,
+                .NUM_M_TILES_ptr = scalarI64(opts.routing.grid_m),
+                .N_ptr = scalarI64(n),
+                .K_ptr = scalarI64(contract_k),
+                .stride_am_ptr = scalarI64(contract_k),
+                .stride_ak_ptr = scalarI64(1),
+                .stride_we_ptr = scalarI64(n * packed_k),
+                .stride_wk_ptr = scalarI64(1),
+                .stride_wn_ptr = scalarI64(packed_k),
+                .stride_se_ptr = scalarI64(n * scale_k),
+                .stride_sk_ptr = scalarI64(1),
+                .stride_sn_ptr = scalarI64(scale_k),
+                .stride_cm_ptr = scalarI64(raw_output_shape.dim(-1)),
+                .stride_cn_ptr = scalarI64(1),
             },
-            .{ .Y = opts.output_shape },
+            .{ .c = raw_output_shape },
             .{
                 .cfg = cfg,
                 .grid = .{ @intCast(opts.routing.grid_m * grid_n), 1, 1 },
                 .num_warps = @intCast(opts.num_warps),
                 .num_stages = @intCast(opts.num_stages),
             },
-        ).Y;
+        ).c;
+
+        if (opts.apply_swiglu) {
+            y = applySwiGlu(y.convert(.f32), opts.activation_limit).convert(opts.output_shape.dtype());
+        }
+
+        if (has_gammas) {
+            const gammas = opts.gammas.?.convert(.f32).appendAxes(.{.dout}).broad(opts.output_shape.withDtype(.f32));
+            y = y.convert(.f32).mul(gammas).convert(opts.output_shape.dtype());
+        }
 
         return y;
+    }
+
+    fn applySwiGlu(input: zml.Tensor, activation_limit: f32) zml.Tensor {
+        const threshold = zml.Tensor.scalar(activation_limit, .f32);
+        const gate = input.slice1d(.dout, .{ .start = 0, .step = 2 }).minimum(threshold);
+        const up = input.slice1d(.dout, .{ .start = 1, .step = 2 }).clamp(threshold.negate(), threshold);
+        return gate.silu().mul(up);
     }
 
     fn packedByteDtype(dt: zml.DataType) zml.kernel.triton.DType {
@@ -1276,10 +1307,6 @@ const Triton = struct {
 
     fn scalarI64(v: i64) zml.Tensor {
         return zml.Tensor.constant(.{ .i64 = v }).reshape(.{1});
-    }
-
-    fn scalarF32(v: f32) zml.Tensor {
-        return zml.Tensor.constant(.{ .f32 = v }).reshape(.{1});
     }
 };
 
