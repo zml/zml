@@ -21,6 +21,9 @@ const VectorQJL1Quarter = quantization.VectorQJL1Quarter;
 const VectorQJL1Half = quantization.VectorQJL1Half;
 const VectorQJL2 = quantization.VectorQJL2;
 const Graph = graph_.Graph;
+const DenseGraphScorer = graph_.DenseScorer;
+const GraphSearchState = graph_.GraphSearchState;
+pub const GraphScoreType = graph_.GraphScoreType;
 
 pub const hidden_dim = quantization.hidden_dim;
 
@@ -28,8 +31,14 @@ pub const sampling_simd_len: comptime_int = 16;
 pub const sampling_top_k: comptime_int = 64;
 pub const sampling_top_p: comptime_float = 0.99;
 
+pub const prune_Z_score = 3.5;
+// this defines the threshold to prune:
+// we want to keep tokens with proba >= this * top1 token proba
+pub const prune_proba_factor = 0.1;
+pub const prune_logit_margin = @log(prune_proba_factor);
+
 const sampling_truncate_coords: comptime_int = 256;
-const sampling_truncate_dense: comptime_int = 256;
+const sampling_truncate_dense: comptime_int = 2048;
 
 pub const Logit = struct {
     row: usize = std.math.maxInt(usize),
@@ -41,6 +50,21 @@ pub const Logit = struct {
         return lhs.logit > rhs.logit;
     }
 };
+
+const PhaseCandidate = struct {
+    row: u32 = 0,
+    logit: f32 = 0.0,
+};
+
+inline fn insertPhaseTopK(row: usize, logit: f32, candidates: []PhaseCandidate) void {
+    var insert_pos: usize = candidates.len - 1;
+    if (logit <= candidates[insert_pos].logit) return;
+    while (insert_pos > 0 and logit > candidates[insert_pos - 1].logit) {
+        candidates[insert_pos] = candidates[insert_pos - 1];
+        insert_pos -= 1;
+    }
+    candidates[insert_pos] = .{ .row = @intCast(row), .logit = logit };
+}
 
 pub const SamplingResult = struct {
     candidates: [sampling_top_k]Logit,
@@ -547,6 +571,105 @@ pub const QJL1Sampler = struct {
     }
 };
 
+pub const QJL1PruneSampler = struct {
+    const nb_dense_score = sampling_top_k;
+
+    allocator: std.mem.Allocator,
+    lm_head: *LmHeadMatrix,
+    d: usize,
+    vocab_size: usize,
+    logits: []f32,
+    candidates: [sampling_top_k]Logit,
+    phase_candidates: [nb_dense_score]PhaseCandidate,
+    quantizer: *QuantizationQJL1,
+    quantized_query: VectorQJL1,
+
+    min_remaining: usize,
+    max_remaining: usize,
+    tot_remaining: usize,
+    nb_calls: usize,
+
+    const need_rescoring = false;
+
+    pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix, quant: *QuantizationQJL1) !QJL1PruneSampler {
+        return .{
+            .allocator = zml_handler.allocator,
+            .lm_head = lm_head,
+            .vocab_size = lm_head.n,
+            .d = lm_head.d,
+            .logits = try zml_handler.allocator.alloc(f32, lm_head.n),
+            .candidates = [_]Logit{.{}} ** sampling_top_k,
+            .phase_candidates = [_]PhaseCandidate{.{}} ** nb_dense_score,
+            .quantizer = quant,
+            .quantized_query = quantization.makeVectorQJL1(),
+            .min_remaining = 999999,
+            .max_remaining = 0,
+            .tot_remaining = 0,
+            .nb_calls = 0,
+        };
+    }
+
+    pub fn deinit(self: *QJL1PruneSampler) void {
+        self.allocator.free(self.logits);
+        const avg_remaining = (self.tot_remaining + self.nb_calls / 2) / self.nb_calls;
+        std.log.info("remaining: min={d} max={d} avg={d}", .{
+            self.min_remaining,
+            self.max_remaining,
+            avg_remaining,
+        });
+    }
+
+    pub fn sample(self: *QJL1PruneSampler, query: []const f32) SamplingResult {
+        const query_norm = quantization.normL2(query);
+        _ = QuantizationQJL1.quantizeVector(query, self.quantizer.buffer, &self.quantized_query, query_norm);
+
+        const std_scale: comptime_float = @sqrt(std.math.pi * 0.5) * quantization.std_dev;
+        const error_scale = prune_Z_score * std_scale;
+
+        for (0..nb_dense_score) |i| {
+            self.phase_candidates[i].logit = -1e16;
+        }
+        for (0..sampling_top_k) |i| {
+            self.candidates[i].logit = -1e16;
+        }
+
+        for (0..self.vocab_size) |row| {
+            const quantized_row = &self.quantizer.lm_head_quantized[row];
+            const row_norm = self.lm_head.row_norms[row];
+            const pnorm = row_norm * query_norm;
+            const dot = QuantizationQJL1.qjl1dot(&self.quantized_query, quantized_row);
+            const logit = pnorm * dot;
+            insertPhaseTopK(row, logit, self.phase_candidates[0..nb_dense_score]);
+            self.logits[row] = logit + pnorm * error_scale;
+        }
+
+        for (self.phase_candidates[0..nb_dense_score]) |*cand| {
+            const row: usize = @intCast(cand.row);
+            const logit = Sampler.computeLogit(self.lm_head, row, query);
+            insertTopK(row, logit, self.candidates[0..sampling_top_k]);
+            self.logits[row] = -std.math.floatMax(f32);
+        }
+
+        var L = self.candidates[0].logit;
+        var remaining: usize = 0;
+        for (0..self.vocab_size) |row| {
+            if (self.logits[row] < L + prune_logit_margin) continue;
+            const logit = Sampler.computeLogit(self.lm_head, row, query);
+            insertTopK(row, logit, self.candidates[0..sampling_top_k]);
+            remaining += 1;
+            L = @max(L, logit);
+        }
+
+        self.nb_calls += 1;
+        self.tot_remaining += remaining;
+        self.min_remaining = @min(self.min_remaining, remaining);
+        self.max_remaining = @max(self.max_remaining, remaining);
+
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
+    }
+};
+
 pub const QJL2Sampler = struct {
     allocator: std.mem.Allocator,
     lm_head: *LmHeadMatrix,
@@ -587,6 +710,254 @@ pub const QJL2Sampler = struct {
         }
 
         findTopK(self.logits, self.candidates[0..sampling_top_k]);
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
+    }
+};
+
+pub const QJL2PruneSampler = struct {
+    const nb_dense_score = sampling_top_k;
+
+    allocator: std.mem.Allocator,
+    lm_head: *LmHeadMatrix,
+    d: usize,
+    vocab_size: usize,
+    logits: []f32,
+    candidates: [sampling_top_k]Logit,
+    phase_candidates: [nb_dense_score]PhaseCandidate,
+    quantizer: *QuantizationQJL2,
+    quantized_query: VectorQJL2,
+
+    min_remaining: usize,
+    max_remaining: usize,
+    tot_remaining: usize,
+    nb_calls: usize,
+
+    const need_rescoring = false;
+
+    pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix, quant: *QuantizationQJL2) !QJL2PruneSampler {
+        return .{
+            .allocator = zml_handler.allocator,
+            .lm_head = lm_head,
+            .vocab_size = lm_head.n,
+            .d = lm_head.d,
+            .logits = try zml_handler.allocator.alloc(f32, lm_head.n),
+            .candidates = [_]Logit{.{}} ** sampling_top_k,
+            .phase_candidates = [_]PhaseCandidate{.{}} ** nb_dense_score,
+            .quantizer = quant,
+            .quantized_query = quantization.makeVectorQJL2(),
+            .min_remaining = 999999,
+            .max_remaining = 0,
+            .tot_remaining = 0,
+            .nb_calls = 0,
+        };
+    }
+
+    pub fn deinit(self: *QJL2PruneSampler) void {
+        self.allocator.free(self.logits);
+        const avg_remaining = (self.tot_remaining + self.nb_calls / 2) / self.nb_calls;
+        std.log.info("remaining: min={d} max={d} avg={d}", .{
+            self.min_remaining,
+            self.max_remaining,
+            avg_remaining,
+        });
+    }
+
+    pub fn sample(self: *QJL2PruneSampler, query: []const f32) SamplingResult {
+        const query_norm = quantization.normL2(query);
+        const query_scale = QuantizationQJL2.quantizeVector(query, self.quantizer.buffer, &self.quantized_query, query_norm);
+
+        const error_scale = 0.12 * prune_Z_score * quantization.std_dev;
+
+        for (0..nb_dense_score) |i| {
+            self.phase_candidates[i].logit = -1e16;
+        }
+        for (0..sampling_top_k) |i| {
+            self.candidates[i].logit = -1e16;
+        }
+
+        for (0..self.vocab_size) |row| {
+            const quantized_row = &self.quantizer.lm_head_quantized[row];
+            const row_norm = self.lm_head.row_norms[row];
+            const row_scale = self.quantizer.row_quant_scale[row];
+            const pnorm = row_norm * query_norm;
+            const pscale = row_scale * query_scale;
+            const dot_i32 = QuantizationQJL2.qjl2dot(&self.quantized_query, quantized_row);
+            const dot_f32: f32 = @floatFromInt(dot_i32);
+            const logit = pscale * dot_f32;
+            insertPhaseTopK(row, logit, self.phase_candidates[0..nb_dense_score]);
+            self.logits[row] = logit + pnorm * error_scale;
+        }
+
+        for (self.phase_candidates[0..nb_dense_score]) |*cand| {
+            const row: usize = @intCast(cand.row);
+            const logit = Sampler.computeLogit(self.lm_head, row, query);
+            insertTopK(row, logit, self.candidates[0..sampling_top_k]);
+            self.logits[row] = -std.math.floatMax(f32);
+        }
+
+        var L = self.candidates[0].logit;
+        var remaining: usize = 0;
+        for (0..self.vocab_size) |row| {
+            if (self.logits[row] < L + prune_logit_margin) continue;
+            const logit = Sampler.computeLogit(self.lm_head, row, query);
+            insertTopK(row, logit, self.candidates[0..sampling_top_k]);
+            remaining += 1;
+            L = @max(L, logit);
+        }
+
+        self.nb_calls += 1;
+        self.tot_remaining += remaining;
+        self.min_remaining = @min(self.min_remaining, remaining);
+        self.max_remaining = @max(self.max_remaining, remaining);
+
+        Sampler.computeProbas(&self.candidates);
+        return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
+    }
+};
+
+pub const QJL12PruneSampler = struct {
+    const nb_dense_score = sampling_top_k;
+    const pruning_phase_count = 2;
+    const pruning_phase_labels = [pruning_phase_count][]const u8{ "qjl1", "qjl2" };
+
+    allocator: std.mem.Allocator,
+    lm_head: *LmHeadMatrix,
+    d: usize,
+    vocab_size: usize,
+    active_rows: []u32,
+    logits: []f32,
+    candidates: [sampling_top_k]Logit,
+    phase_candidates: [nb_dense_score]PhaseCandidate,
+    quantizer1: *QuantizationQJL1,
+    quantizer2: *QuantizationQJL2,
+    quantized_query1: VectorQJL1,
+    quantized_query2: VectorQJL2,
+
+    min_remaining: [pruning_phase_count]usize,
+    max_remaining: [pruning_phase_count]usize,
+    tot_remaining: [pruning_phase_count]usize,
+    nb_calls: usize,
+
+    const need_rescoring = false;
+
+    pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix, quant1: *QuantizationQJL1, quant2: *QuantizationQJL2) !QJL12PruneSampler {
+        return .{
+            .allocator = zml_handler.allocator,
+            .lm_head = lm_head,
+            .vocab_size = lm_head.n,
+            .d = lm_head.d,
+            .active_rows = try zml_handler.allocator.alloc(u32, lm_head.n),
+            .logits = try zml_handler.allocator.alloc(f32, lm_head.n),
+            .candidates = [_]Logit{.{}} ** sampling_top_k,
+            .phase_candidates = [_]PhaseCandidate{.{}} ** nb_dense_score,
+            .quantizer1 = quant1,
+            .quantizer2 = quant2,
+            .quantized_query1 = quantization.makeVectorQJL1(),
+            .quantized_query2 = quantization.makeVectorQJL2(),
+            .min_remaining = [_]usize{lm_head.n} ** pruning_phase_count,
+            .max_remaining = [_]usize{0} ** pruning_phase_count,
+            .tot_remaining = [_]usize{0} ** pruning_phase_count,
+            .nb_calls = 0,
+        };
+    }
+
+    pub fn deinit(self: *QJL12PruneSampler) void {
+        inline for (0..pruning_phase_count) |phase| {
+            const avg_remaining = (self.tot_remaining[phase] + self.nb_calls / 2) / self.nb_calls;
+            std.log.info("{s:>4} remaining: min={d:>6} max={d:>6} avg={d:>6}", .{
+                pruning_phase_labels[phase],
+                self.min_remaining[phase],
+                self.max_remaining[phase],
+                avg_remaining,
+            });
+        }
+        self.allocator.free(self.active_rows);
+        self.allocator.free(self.logits);
+    }
+
+    pub fn sample(self: *QJL12PruneSampler, query: []const f32) SamplingResult {
+        const query_norm = quantization.normL2(query);
+        _ = QuantizationQJL1.quantizeVector(query, self.quantizer1.buffer, &self.quantized_query1, query_norm);
+        const query_scale2 = QuantizationQJL2.quantizeVector(query, self.quantizer2.buffer, &self.quantized_query2, query_norm);
+
+        const error_scale1 = prune_Z_score * @sqrt(std.math.pi * 0.5) * quantization.std_dev;
+        const error_scale2 = 0.12 * prune_Z_score * quantization.std_dev;
+
+        for (0..nb_dense_score) |i| {
+            self.phase_candidates[i].logit = -1e16;
+        }
+        for (0..sampling_top_k) |i| {
+            self.candidates[i].logit = -1e16;
+        }
+
+        for (0..self.vocab_size) |row| {
+            const quantized_row = &self.quantizer1.lm_head_quantized[row];
+            const row_norm = self.lm_head.row_norms[row];
+            const pnorm = row_norm * query_norm;
+            const dot = QuantizationQJL1.qjl1dot(&self.quantized_query1, quantized_row);
+            const logit = pnorm * dot;
+            insertPhaseTopK(row, logit, self.phase_candidates[0..nb_dense_score]);
+            self.logits[row] = logit + pnorm * error_scale1;
+        }
+
+        for (self.phase_candidates[0..nb_dense_score]) |*cand| {
+            const row: usize = @intCast(cand.row);
+            const logit = Sampler.computeLogit(self.lm_head, row, query);
+            insertTopK(row, logit, self.candidates[0..sampling_top_k]);
+            cand.logit = -1e16;
+            self.logits[row] = -std.math.floatMax(f32);
+        }
+
+        var L = self.candidates[0].logit;
+        var remaining_qjl1: usize = 0;
+        for (0..self.vocab_size) |row| {
+            self.active_rows[remaining_qjl1] = @intCast(row);
+            remaining_qjl1 += @intFromBool(self.logits[row] >= L + prune_logit_margin);
+        }
+
+        for (0..remaining_qjl1) |row| {
+            const row_id = self.active_rows[row];
+            const quantized_row = &self.quantizer2.lm_head_quantized[row_id];
+            const row_norm = self.lm_head.row_norms[row_id];
+            const row_scale = self.quantizer2.row_quant_scale[row_id];
+            const pnorm = row_norm * query_norm;
+            const pscale = row_scale * query_scale2;
+            const dot_i32 = QuantizationQJL2.qjl2dot(&self.quantized_query2, quantized_row);
+            const dot_f32: f32 = @floatFromInt(dot_i32);
+            const logit = pscale * dot_f32;
+            insertPhaseTopK(row_id, logit, self.phase_candidates[0..nb_dense_score]);
+            self.logits[row_id] = logit + pnorm * error_scale2;
+        }
+
+        for (self.phase_candidates[0..nb_dense_score]) |*cand| {
+            if (cand.logit <= -1e15) continue;
+            const row: usize = @intCast(cand.row);
+            const logit = Sampler.computeLogit(self.lm_head, row, query);
+            insertTopK(row, logit, self.candidates[0..sampling_top_k]);
+            cand.logit = -1e16;
+            self.logits[row] = -std.math.floatMax(f32);
+        }
+
+        L = @max(L, self.candidates[0].logit);
+        var remaining_qjl2: usize = 0;
+        for (0..remaining_qjl1) |row| {
+            const row_id = self.active_rows[row];
+            if (self.logits[row_id] < L + prune_logit_margin) continue;
+            const logit = Sampler.computeLogit(self.lm_head, row_id, query);
+            insertTopK(row_id, logit, self.candidates[0..sampling_top_k]);
+            remaining_qjl2 += 1;
+            L = @max(L, logit);
+        }
+
+        const remaining = [_]usize{ remaining_qjl1, remaining_qjl2 };
+        inline for (0..pruning_phase_count) |phase| {
+            self.min_remaining[phase] = @min(self.min_remaining[phase], remaining[phase]);
+            self.max_remaining[phase] = @max(self.max_remaining[phase], remaining[phase]);
+            self.tot_remaining[phase] += remaining[phase];
+        }
+        self.nb_calls += 1;
+
         Sampler.computeProbas(&self.candidates);
         return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
     }
@@ -718,9 +1089,16 @@ pub const QJLNx1Sampler = struct {
 };
 
 pub const GraphSampler = struct {
+    pub const Options = struct {
+        score_type: GraphScoreType = .Dense,
+        search_budget: u32 = 16384 * 9,
+    };
+
     allocator: std.mem.Allocator,
     lm_head: *LmHeadMatrix,
     graph: Graph,
+    search_state: GraphSearchState,
+    search_budget: u32,
     d: usize,
     vocab_size: usize,
     candidates: [sampling_top_k]Logit,
@@ -728,6 +1106,10 @@ pub const GraphSampler = struct {
     const need_rescoring = false;
 
     pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix) !GraphSampler {
+        return initWithOptions(zml_handler, lm_head, .{});
+    }
+
+    pub fn initWithOptions(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix, options: Options) !GraphSampler {
         zml_handler.tic(&zml_handler.timers.similarity_matrix);
         var similarity_matrix = try algebra.loadSimilarityMatrix(zml_handler, true);
         defer similarity_matrix.deinit(zml_handler.allocator);
@@ -754,11 +1136,21 @@ pub const GraphSampler = struct {
             zml_handler.toc(&zml_handler.timers.nsw_graph);
             gr = g_nsw;
         }
+        errdefer gr.deinit();
+
+        const search_state: GraphSearchState = try .init(
+            zml_handler,
+            lm_head,
+            ang_params.graph_type,
+            options.score_type,
+        );
 
         return .{
             .allocator = zml_handler.allocator,
             .lm_head = lm_head,
             .graph = gr,
+            .search_state = search_state,
+            .search_budget = options.search_budget,
             .vocab_size = lm_head.n,
             .d = lm_head.d,
             .candidates = [_]Logit{.{}} ** sampling_top_k,
@@ -766,11 +1158,28 @@ pub const GraphSampler = struct {
     }
 
     pub fn deinit(self: *GraphSampler) void {
+        self.search_state.deinit();
         self.graph.deinit();
     }
 
     pub fn sample(self: *GraphSampler, query: []const f32) SamplingResult {
-        self.graph.greedySearchPrefetch(query, 16384);
+        switch (self.search_state) {
+            .Dense => |*search_state| {
+                search_state.prepare(query);
+                self.graph.greedySearch(search_state, self.search_budget);
+                self.graph.rerankDensePoolAsMips();
+            },
+            inline else => |*search_state| {
+                search_state.prepare(query);
+                self.graph.greedySearch(search_state, self.search_budget);
+
+                var dense_scorer: DenseGraphScorer = .init(self.lm_head, .Mips);
+                dense_scorer.prepare(query);
+                self.graph.rerankPool(&dense_scorer);
+            },
+        }
+
+        std.debug.assert(self.graph.L >= sampling_top_k);
         for (0..sampling_top_k) |i| {
             self.candidates[i].row = self.graph.visited[i].node;
             self.candidates[i].logit = self.graph.visited[i].similarity;
@@ -780,21 +1189,15 @@ pub const GraphSampler = struct {
     }
 };
 
-pub const prune_Z_score = 3.0;
-
 pub const MultiSampler = struct {
     const simd_len = 16;
     const sampling_prefix_coords = 8;
-    const nb_dense_score = 8;
+    const nb_dense_score = 16;
     const prefix_prefetch_distance = 128;
     const qjl_prefetch_distance = 16;
     const dense_prefetch_distance = 4;
-    const pruning_phase_count = 3;
-    const pruning_phase_labels = [pruning_phase_count][]const u8{ "quarter1", "quarter2", "full_qjl" };
-    const PhaseCandidate = struct {
-        row: u32 = 0,
-        logit: f32 = 0.0,
-    };
+    const pruning_phase_count = 4;
+    const pruning_phase_labels = [pruning_phase_count][]const u8{ "quarter1", "quarter2", "full_qjl", "qjl2" };
 
     zml_handler: *Zml_handler,
     allocator: std.mem.Allocator,
@@ -807,8 +1210,10 @@ pub const MultiSampler = struct {
     query_mismatches: []u16,
     candidates: [sampling_top_k]Logit,
     phase_candidates: [nb_dense_score]PhaseCandidate,
-    quantizer: *QuantizationQJL1,
-    quantized_query: VectorQJL1,
+    quantizer1: *QuantizationQJL1,
+    quantizer2: *QuantizationQJL2,
+    quantized_query1: VectorQJL1,
+    quantized_query2: VectorQJL2,
 
     min_remaining: [pruning_phase_count]usize,
     max_remaining: [pruning_phase_count]usize,
@@ -817,7 +1222,7 @@ pub const MultiSampler = struct {
 
     const need_rescoring = false;
 
-    pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix, quant: *QuantizationQJL1) !MultiSampler {
+    pub fn init(zml_handler: *main.Zml_handler, lm_head: *LmHeadMatrix, quant1: *QuantizationQJL1, quant2: *QuantizationQJL2) !MultiSampler {
         return .{
             .zml_handler = zml_handler,
             .allocator = zml_handler.allocator,
@@ -830,8 +1235,10 @@ pub const MultiSampler = struct {
             .query_mismatches = try zml_handler.allocator.alloc(u16, lm_head.n),
             .candidates = [_]Logit{.{}} ** sampling_top_k,
             .phase_candidates = [_]PhaseCandidate{.{}} ** nb_dense_score,
-            .quantizer = quant,
-            .quantized_query = quantization.makeVectorQJL1(),
+            .quantizer1 = quant1,
+            .quantizer2 = quant2,
+            .quantized_query1 = quantization.makeVectorQJL1(),
+            .quantized_query2 = quantization.makeVectorQJL2(),
             .min_remaining = [_]usize{lm_head.n} ** pruning_phase_count,
             .max_remaining = [_]usize{0} ** pruning_phase_count,
             .tot_remaining = [_]usize{0} ** pruning_phase_count,
@@ -858,11 +1265,16 @@ pub const MultiSampler = struct {
     pub fn sample(self: *MultiSampler, query: []f32) SamplingResult {
         // since this sampler doesn't need rescore, we can destroy the query data
         // we use self.logit[i] = -inf as a flag to disable a row (either pruned or already dense scored and inserted in candidates)
-        const std_scale: comptime_float = std.math.pi * 0.5 * quantization.std_dev;
-        const std_scale_quarter: comptime_float = 2.0 * std_scale;
-        const std_scale_half: comptime_float = @sqrt(2.0) * std_scale;
-        for (0..nb_dense_score) |i| { self.phase_candidates[i].logit = -1e16; }
-        for (0..sampling_top_k) |i| { self.candidates[i].logit = -1e16; }
+        const std_scale: comptime_float = @sqrt(std.math.pi * 0.5) * quantization.std_dev;
+        const std_scale_quarter: comptime_float = 2.2 * std_scale;
+        const std_scale_half: comptime_float = @sqrt(2.2) * std_scale;
+
+        for (0..nb_dense_score) |i| {
+            self.phase_candidates[i].logit = -1e16;
+        }
+        for (0..sampling_top_k) |i| {
+            self.candidates[i].logit = -1e16;
+        }
 
         self.zml_handler.tic(&self.zml_handler.timers.quant_prefix);
 
@@ -913,16 +1325,18 @@ pub const MultiSampler = struct {
 
         // quantize the query residual
         const query_norm = quantization.normL2(query);
-        _ = QuantizationQJL1.quantizeVector(query, self.quantizer.buffer, &self.quantized_query, query_norm);
+        _ = QuantizationQJL1.quantizeVector(query, self.quantizer1.buffer, &self.quantized_query1, query_norm);
+        const query_scale2 = QuantizationQJL2.quantizeVector(query, self.quantizer2.buffer, &self.quantized_query2, query_norm);
         const error_scale_quarter = prune_Z_score * std_scale_quarter * query_norm;
         const error_scale_half = prune_Z_score * std_scale_half * query_norm;
         const error_scale_full = prune_Z_score * std_scale * query_norm;
+        const error_scale_qjl2 = 0.12 * prune_Z_score * std_scale;
 
         // Phase 1a: score first quarter of QJL1, find approx top k
-        const query_quarter1: *const VectorQJL1Quarter = @ptrCast(&self.quantized_query[0]);
+        const query_quarter1: *const VectorQJL1Quarter = @ptrCast(&self.quantized_query1[0]);
         const loaded_query_quarter1 = QuantizationQJL1.loadVectorQJL1Quarter(query_quarter1);
         for (0..self.vocab_size) |row| {
-            const quantized_row = &self.quantizer.lm_head_quantized_quarter1[row];
+            const quantized_row = &self.quantizer1.lm_head_quantized_quarter1[row];
             const mismatches = QuantizationQJL1.popcountXorQuarterLoaded(loaded_query_quarter1, quantized_row);
             const row_norm = self.lm_head.row_norms[row];
             const pnorm = row_norm * query_norm;
@@ -930,7 +1344,7 @@ pub const MultiSampler = struct {
             const logit = self.logits_prefix[row] + pnorm * dot;
             self.query_mismatches[row] = mismatches;
             // we store the upper bound in logit for fast compaction
-            self.logits[row] = logit + row_norm * error_scale_quarter + 0.69;
+            self.logits[row] = logit + row_norm * error_scale_quarter;
             insertPhaseTopK(row, logit, self.phase_candidates[0..nb_dense_score]);
         }
 
@@ -950,21 +1364,21 @@ pub const MultiSampler = struct {
 
         self.zml_handler.toc(&self.zml_handler.timers.quant_quart1);
         self.zml_handler.tic(&self.zml_handler.timers.quant_quart2);
-        
+
         // Phase 2a: prune with first quarter to initialize compact active_rows
         var remaining_quarter1: usize = 0;
         for (0..self.vocab_size) |row| {
             self.active_rows[remaining_quarter1] = @intCast(row);
-            remaining_quarter1 += @intFromBool(self.logits[row] > L);
+            remaining_quarter1 += @intFromBool(self.logits[row] > L + prune_logit_margin);
         }
 
         // Phase 2b: evaluate second quarter with survivors
-        const query_quarter2: *const VectorQJL1Quarter = @ptrCast(&self.quantized_query[quantization.qjl_nb_words / 4]);
+        const query_quarter2: *const VectorQJL1Quarter = @ptrCast(&self.quantized_query1[quantization.qjl_nb_words / 4]);
         const loaded_query_quarter2 = QuantizationQJL1.loadVectorQJL1Quarter(query_quarter2);
         for (0..remaining_quarter1) |row| {
             if (row + qjl_prefetch_distance < remaining_quarter1) {
                 const next_row_id = self.active_rows[row + qjl_prefetch_distance];
-                @prefetch(&self.quantizer.lm_head_quantized_quarter2[next_row_id], .{
+                @prefetch(&self.quantizer1.lm_head_quantized_quarter2[next_row_id], .{
                     .rw = .read,
                     .locality = 0,
                     .cache = .data,
@@ -973,13 +1387,13 @@ pub const MultiSampler = struct {
             const row_id = self.active_rows[row];
             const row_norm = self.lm_head.row_norms[row_id];
             const pnorm = row_norm * query_norm;
-            const quantized_row = &self.quantizer.lm_head_quantized_quarter2[row_id];
+            const quantized_row = &self.quantizer1.lm_head_quantized_quarter2[row_id];
             const mismatches = self.query_mismatches[row_id] + QuantizationQJL1.popcountXorQuarterLoaded(loaded_query_quarter2, quantized_row);
             const dot = QuantizationQJL1.qjl_dot_lut_half[mismatches];
             const new_logit = self.logits_prefix[row_id] + pnorm * dot;
             self.query_mismatches[row_id] = mismatches;
             // Store the upper bound for the branchless phase 3a compaction.
-            self.logits[row_id] = new_logit + row_norm * error_scale_half + 0.69;
+            self.logits[row_id] = new_logit + row_norm * error_scale_half;
             insertPhaseTopK(row_id, new_logit, self.phase_candidates[0..nb_dense_score]);
         }
 
@@ -1000,21 +1414,21 @@ pub const MultiSampler = struct {
 
         self.zml_handler.toc(&self.zml_handler.timers.quant_quart2);
         self.zml_handler.tic(&self.zml_handler.timers.quant_half2);
-        
+
         // Phase 3a: prune with first half and compact active_rows
         var remaining_quarter2: usize = 0;
         for (0..remaining_quarter1) |row| {
             const row_id = self.active_rows[row];
             self.active_rows[remaining_quarter2] = @intCast(row_id);
-            remaining_quarter2 += @intFromBool(self.logits[row_id] > L);
+            remaining_quarter2 += @intFromBool(self.logits[row_id] > L + prune_logit_margin);
         }
 
         // Phase 3b: evaluate second half with survivors
-        const query_half2: *const VectorQJL1Half = @ptrCast(&self.quantized_query[quantization.qjl_nb_words / 2]);
+        const query_half2: *const VectorQJL1Half = @ptrCast(&self.quantized_query1[quantization.qjl_nb_words / 2]);
         for (0..remaining_quarter2) |row| {
             if (row + qjl_prefetch_distance < remaining_quarter2) {
                 const next_row_id = self.active_rows[row + qjl_prefetch_distance];
-                const next_quantized_row = &self.quantizer.lm_head_quantized_half2[next_row_id];
+                const next_quantized_row = &self.quantizer1.lm_head_quantized_half2[next_row_id];
                 @prefetch(&next_quantized_row.*[0], .{
                     .rw = .read,
                     .locality = 0,
@@ -1028,12 +1442,12 @@ pub const MultiSampler = struct {
             }
             const row_id = self.active_rows[row];
             const pnorm = self.lm_head.row_norms[row_id] * query_norm;
-            const quantized_row = &self.quantizer.lm_head_quantized_half2[row_id];
+            const quantized_row = &self.quantizer1.lm_head_quantized_half2[row_id];
             const mismatches = self.query_mismatches[row_id] + QuantizationQJL1.popcountXorHalf(query_half2, quantized_row);
             const dot = QuantizationQJL1.qjl_dot_lut[mismatches];
             const new_logit = self.logits_prefix[row_id] + pnorm * dot;
             self.query_mismatches[row_id] = mismatches;
-            self.logits[row_id] = new_logit;
+            self.logits[row_id] = new_logit + self.lm_head.row_norms[row_id] * error_scale_full;
             insertPhaseTopK(row_id, new_logit, self.phase_candidates[0..nb_dense_score]);
         }
 
@@ -1053,27 +1467,76 @@ pub const MultiSampler = struct {
         L = @max(L, self.candidates[0].logit);
 
         self.zml_handler.toc(&self.zml_handler.timers.quant_half2);
-        self.zml_handler.tic(&self.zml_handler.timers.quant_dense);
+        self.zml_handler.tic(&self.zml_handler.timers.quant_qjl2);
 
-        // Phase 4: prune, and dense rescore survivors
+        // Phase 4a: prune with full QJL1 and compact active_rows
         var remaining_full_qjl: usize = 0;
         for (0..remaining_quarter2) |row| {
             const row_id = self.active_rows[row];
-            const logit = self.logits[row_id];
-            if (logit == -std.math.floatMax(f32)) continue;
-            const mu = self.logits[row_id];
-            const bound_error = self.lm_head.row_norms[row_id] * error_scale_full;
-            if (mu + bound_error > L - 0.69) {
-                remaining_full_qjl += 1;
-                const l = self.logits_prefix[row_id] + Sampler.computeLogit(self.lm_head, row_id, query);
-                L = @max(L, l);
-                insertTopK(row_id, l, self.candidates[0..sampling_top_k]);
+            self.active_rows[remaining_full_qjl] = @intCast(row_id);
+            remaining_full_qjl += @intFromBool(self.logits[row_id] > L + prune_logit_margin);
+        }
+
+        // Phase 4b: score QJL2 with full-QJL1 survivors
+        for (0..remaining_full_qjl) |row| {
+            if (row + qjl_prefetch_distance < remaining_full_qjl) {
+                const next_row_id = self.active_rows[row + qjl_prefetch_distance];
+                @prefetch(&self.quantizer2.lm_head_quantized[next_row_id], .{
+                    .rw = .read,
+                    .locality = 0,
+                    .cache = .data,
+                });
             }
+            const row_id = self.active_rows[row];
+            const quantized_row = &self.quantizer2.lm_head_quantized[row_id];
+            const row_norm = self.lm_head.row_norms[row_id];
+            const row_scale = self.quantizer2.row_quant_scale[row_id];
+            const pnorm = row_norm * query_norm;
+            const pscale = row_scale * query_scale2;
+            const dot_i32 = QuantizationQJL2.qjl2dot(&self.quantized_query2, quantized_row);
+            const dot_f32: f32 = @floatFromInt(dot_i32);
+            const new_logit = self.logits_prefix[row_id] + pscale * dot_f32;
+            insertPhaseTopK(row_id, new_logit, self.phase_candidates[0..nb_dense_score]);
+            self.logits[row_id] = new_logit + pnorm * error_scale_qjl2;
+        }
+
+        // Phase 4c: dense rescore the top QJL2 candidates
+        for (self.phase_candidates[0..nb_dense_score], 0..) |*cand, candidate_i| {
+            if (cand.logit <= -1e15) continue;
+            if (candidate_i + 1 < nb_dense_score and self.phase_candidates[candidate_i + 1].logit > -1e15) {
+                const next_row: usize = @intCast(self.phase_candidates[candidate_i + 1].row);
+                self.prefetchDenseRow(next_row);
+            }
+            const row: usize = @intCast(cand.row);
+            const logit = self.logits_prefix[row] + Sampler.computeLogit(self.lm_head, row, query);
+            insertTopK(row, logit, self.candidates[0..sampling_top_k]);
+            cand.logit = -1e16;
+            self.logits[row] = -std.math.floatMax(f32);
+        }
+        L = @max(L, self.candidates[0].logit);
+
+        self.zml_handler.toc(&self.zml_handler.timers.quant_qjl2);
+        self.zml_handler.tic(&self.zml_handler.timers.quant_dense);
+
+        // Phase 5a: prune with QJL2, and compact active_rows
+        var remaining_qjl2: usize = 0;
+        for (0..remaining_full_qjl) |row| {
+            const row_id = self.active_rows[row];
+            self.active_rows[remaining_qjl2] = @intCast(row_id);
+            remaining_qjl2 += @intFromBool(self.logits[row_id] > L + prune_logit_margin);
+        }
+
+        // Phase 5b: dense rescore survivors
+        for (0..remaining_qjl2) |row| {
+            const row_id = self.active_rows[row];
+            const l = self.logits_prefix[row_id] + Sampler.computeLogit(self.lm_head, row_id, query);
+            L = @max(L, l);
+            insertTopK(row_id, l, self.candidates[0..sampling_top_k]);
         }
 
         self.zml_handler.toc(&self.zml_handler.timers.quant_dense);
 
-        const remaining = [_]usize{ remaining_quarter1, remaining_quarter2, remaining_full_qjl };
+        const remaining = [_]usize{ remaining_quarter1, remaining_quarter2, remaining_full_qjl, remaining_qjl2 };
         inline for (0..pruning_phase_count) |phase| {
             self.min_remaining[phase] = @min(self.min_remaining[phase], remaining[phase]);
             self.max_remaining[phase] = @max(self.max_remaining[phase], remaining[phase]);
@@ -1085,16 +1548,6 @@ pub const MultiSampler = struct {
         return .{ .candidates = self.candidates, .nb = Sampler.nbInTopP(&self.candidates) };
     }
 
-    inline fn insertPhaseTopK(row: usize, logit: f32, candidates: []PhaseCandidate) void {
-        var insert_pos: usize = candidates.len - 1;
-        if (logit <= candidates[insert_pos].logit) return;
-        while (insert_pos > 0 and logit > candidates[insert_pos - 1].logit) {
-            candidates[insert_pos] = candidates[insert_pos - 1];
-            insert_pos -= 1;
-        }
-        candidates[insert_pos] = .{ .row = @intCast(row), .logit = logit };
-    }
-
     inline fn prefetchDenseRow(self: *const MultiSampler, row: usize) void {
         @prefetch(&self.lm_head.data[row * self.d], .{
             .rw = .read,
@@ -1102,5 +1555,4 @@ pub const MultiSampler = struct {
             .cache = .data,
         });
     }
-
 };

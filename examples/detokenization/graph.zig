@@ -7,15 +7,26 @@ const save_load = @import("saveload.zig");
 const llm = @import("llm.zig");
 const tokens = @import("tokens.zig");
 const sampling = @import("sampling.zig");
+const quantization = @import("quantization.zig");
 
 const Tokenizer = zml.tokenizer.Tokenizer;
 const SimilarityMatrix = algebra.SimilarityMatrix;
 const LmHeadMatrix = algebra.LmHeadMatrix;
 const Zml_handler = main.Zml_handler;
 const Field_timer = main.Timing_handler.Field_timer;
+const QuantizationInt8 = quantization.QuantizationInt8;
+const QuantizationInt4 = quantization.QuantizationInt4;
+const QuantizationQJL1 = quantization.QuantizationQJL1;
+const QuantizationQJL2 = quantization.QuantizationQJL2;
+const LoadedVectorQJL1Quarter = quantization.LoadedVectorQJL1Quarter;
+const VectorQJL1 = quantization.VectorQJL1;
+const VectorQJL1Half = quantization.VectorQJL1Half;
+const VectorQJL1Quarter = quantization.VectorQJL1Quarter;
+const VectorQJL2 = quantization.VectorQJL2;
 
 pub const graph_k_max = 64;
 pub const graph_L = 512;
+pub const graph_construction_search_budget = 4096;
 
 pub const GraphParams = struct {
     vamana_passes: u32 = 2,
@@ -26,6 +37,444 @@ pub const GraphParams = struct {
 pub const GraphType = enum {
     Angular,
     Mips,
+};
+
+pub const GraphScoreType = enum {
+    Dense,
+    Int8,
+    Int8x4,
+    QJL1Quarter,
+    QJL1Half,
+    QJL1,
+    QJL2,
+};
+
+pub const DenseScorer = struct {
+    pub const prefetch_distance: u32 = 4;
+
+    lm_head: *LmHeadMatrix,
+    graph_type: GraphType,
+    query: []const f32 = &.{},
+
+    pub fn init(lm_head: *LmHeadMatrix, graph_type: GraphType) DenseScorer {
+        return .{
+            .lm_head = lm_head,
+            .graph_type = graph_type,
+        };
+    }
+
+    pub fn prepare(self: *DenseScorer, query: []const f32) void {
+        std.debug.assert(query.len == self.lm_head.d);
+        self.query = query;
+    }
+
+    pub inline fn prefetch(self: *const DenseScorer, node: u32) void {
+        const row_start = @as(usize, @intCast(node)) * self.lm_head.d;
+        @prefetch(self.lm_head.data.ptr + row_start, .{
+            .rw = .read,
+            .locality = 0,
+            .cache = .data,
+        });
+    }
+
+    pub inline fn score(self: *const DenseScorer, node: u32) f32 {
+        const dim = self.lm_head.d;
+        const row_start = @as(usize, @intCast(node)) * dim;
+        const row = self.lm_head.data[row_start..][0..dim];
+
+        const simd_len = 32;
+        std.debug.assert(dim % simd_len == 0);
+        const Vec = @Vector(simd_len, f32);
+        var acc: Vec = @splat(0);
+
+        var col: usize = 0;
+        while (col + simd_len <= dim) : (col += simd_len) {
+            const query_vec: Vec = self.query[col..][0..simd_len].*;
+            const row_vec: Vec = row[col..][0..simd_len].*;
+            acc = @mulAdd(Vec, query_vec, row_vec, acc);
+        }
+        const dot = @reduce(.Add, acc);
+        const scale = if (self.graph_type == .Mips) 1.0 else self.lm_head.row_norms[node];
+        return dot / scale;
+    }
+};
+
+pub const Int8Scorer = struct {
+    pub const prefetch_distance: u32 = 4;
+
+    quantizer: QuantizationInt8,
+    graph_type: GraphType,
+    quantized_query: []i8,
+    query_quant_scale: f32 = 0.0,
+
+    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, graph_type: GraphType) !Int8Scorer {
+        var quantizer: QuantizationInt8 = try .init(zml_handler, lm_head);
+        errdefer quantizer.deinit();
+
+        const quantized_query = try zml_handler.allocator.alloc(i8, lm_head.d);
+        errdefer zml_handler.allocator.free(quantized_query);
+
+        try quantizer.quantize();
+        return .{
+            .quantizer = quantizer,
+            .graph_type = graph_type,
+            .quantized_query = quantized_query,
+        };
+    }
+
+    pub fn deinit(self: *Int8Scorer) void {
+        self.quantizer.allocator.free(self.quantized_query);
+        self.quantizer.deinit();
+    }
+
+    pub fn prepare(self: *Int8Scorer, query: []const f32) void {
+        const query_norm = quantization.normL2(query);
+        self.query_quant_scale = QuantizationInt8.quantizeVector(
+            query,
+            self.quantizer.buffer,
+            self.quantized_query,
+            query_norm,
+        );
+    }
+
+    pub inline fn prefetch(self: *const Int8Scorer, node: u32) void {
+        const row_start = @as(usize, @intCast(node)) * self.quantizer.d;
+        @prefetch(self.quantizer.lm_head_quantized.ptr + row_start, .{
+            .rw = .read,
+            .locality = 0,
+            .cache = .data,
+        });
+    }
+
+    pub inline fn score(self: *const Int8Scorer, node: u32) f32 {
+        const row_start = @as(usize, @intCast(node)) * self.quantizer.d;
+        const quantized_row = self.quantizer.lm_head_quantized[row_start..][0..self.quantizer.d];
+        const quantized_score = QuantizationInt8.int8dot(self.quantized_query, quantized_row);
+        const dot = @as(f32, @floatFromInt(quantized_score)) *
+            self.quantizer.row_quant_scale[node] *
+            self.query_quant_scale;
+        const scale = if (self.graph_type == .Mips)
+            1.0
+        else
+            self.quantizer.lm_head.row_norms[node];
+        return dot / scale;
+    }
+};
+
+pub const Int8x4Scorer = struct {
+    pub const prefetch_distance: u32 = 4;
+
+    quantizer: QuantizationInt4,
+    graph_type: GraphType,
+    quantized_query: []i8,
+    query_quant_scale: f32 = 0.0,
+
+    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, graph_type: GraphType) !Int8x4Scorer {
+        var quantizer: QuantizationInt4 = try .init(zml_handler, lm_head);
+        errdefer quantizer.deinit();
+
+        const quantized_query = try zml_handler.allocator.alloc(i8, lm_head.d);
+        errdefer zml_handler.allocator.free(quantized_query);
+
+        try quantizer.quantize();
+        return .{
+            .quantizer = quantizer,
+            .graph_type = graph_type,
+            .quantized_query = quantized_query,
+        };
+    }
+
+    pub fn deinit(self: *Int8x4Scorer) void {
+        self.quantizer.allocator.free(self.quantized_query);
+        self.quantizer.deinit();
+    }
+
+    pub fn prepare(self: *Int8x4Scorer, query: []const f32) void {
+        const query_norm = quantization.normL2(query);
+        self.query_quant_scale = QuantizationInt8.quantizeVector(
+            query,
+            self.quantizer.buffer,
+            self.quantized_query,
+            query_norm,
+        );
+    }
+
+    pub inline fn prefetch(self: *const Int8x4Scorer, node: u32) void {
+        const packed_d = self.quantizer.d / 2;
+        const row_start = @as(usize, @intCast(node)) * packed_d;
+        @prefetch(self.quantizer.lm_head_quantized.ptr + row_start, .{
+            .rw = .read,
+            .locality = 0,
+            .cache = .data,
+        });
+    }
+
+    pub inline fn score(self: *const Int8x4Scorer, node: u32) f32 {
+        const packed_d = self.quantizer.d / 2;
+        const row_start = @as(usize, @intCast(node)) * packed_d;
+        const quantized_row = self.quantizer.lm_head_quantized[row_start..][0..packed_d];
+        const quantized_score = QuantizationInt4.int8x4dot(self.quantized_query, quantized_row);
+        const dot = @as(f32, @floatFromInt(quantized_score)) *
+            self.quantizer.row_quant_scale[node] *
+            self.query_quant_scale;
+        const scale = if (self.graph_type == .Mips)
+            1.0
+        else
+            self.quantizer.lm_head.row_norms[node];
+        return dot / scale;
+    }
+};
+
+pub const QJL1QuarterScorer = struct {
+    pub const prefetch_distance: u32 = 16;
+
+    quantizer: QuantizationQJL1,
+    graph_type: GraphType,
+    quantized_query: VectorQJL1,
+    loaded_query: LoadedVectorQJL1Quarter,
+    query_norm: f32 = 0.0,
+
+    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, graph_type: GraphType) !QJL1QuarterScorer {
+        var quantizer: QuantizationQJL1 = try .init(zml_handler, lm_head);
+        errdefer quantizer.deinit();
+        try quantizer.quantize();
+        return .{
+            .quantizer = quantizer,
+            .graph_type = graph_type,
+            .quantized_query = quantization.makeVectorQJL1(),
+            .loaded_query = undefined,
+        };
+    }
+
+    pub fn deinit(self: *QJL1QuarterScorer) void {
+        self.quantizer.deinit();
+    }
+
+    pub fn prepare(self: *QJL1QuarterScorer, query: []const f32) void {
+        self.query_norm = quantization.normL2(query);
+        _ = QuantizationQJL1.quantizeVector(
+            query,
+            self.quantizer.buffer,
+            &self.quantized_query,
+            self.query_norm,
+        );
+        const query_quarter: *const VectorQJL1Quarter = @ptrCast(&self.quantized_query);
+        self.loaded_query = QuantizationQJL1.loadVectorQJL1Quarter(query_quarter);
+    }
+
+    pub inline fn prefetch(self: *const QJL1QuarterScorer, node: u32) void {
+        @prefetch(&self.quantizer.lm_head_quantized_quarter1[node], .{
+            .rw = .read,
+            .locality = 0,
+            .cache = .data,
+        });
+    }
+
+    pub inline fn score(self: *const QJL1QuarterScorer, node: u32) f32 {
+        const quantized_row = &self.quantizer.lm_head_quantized_quarter1[node];
+        const mismatches = QuantizationQJL1.popcountXorQuarterLoaded(self.loaded_query, quantized_row);
+        const cosine = QuantizationQJL1.qjl_dot_lut_quarter[mismatches];
+        const row_scale = if (self.graph_type == .Mips)
+            self.quantizer.lm_head.row_norms[node]
+        else
+            1.0;
+        return cosine * self.query_norm * row_scale;
+    }
+};
+
+pub const QJL1HalfScorer = struct {
+    pub const prefetch_distance: u32 = 16;
+
+    quantizer: QuantizationQJL1,
+    graph_type: GraphType,
+    quantized_query: VectorQJL1,
+    query_norm: f32 = 0.0,
+
+    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, graph_type: GraphType) !QJL1HalfScorer {
+        var quantizer: QuantizationQJL1 = try .init(zml_handler, lm_head);
+        errdefer quantizer.deinit();
+        try quantizer.quantize();
+        return .{
+            .quantizer = quantizer,
+            .graph_type = graph_type,
+            .quantized_query = quantization.makeVectorQJL1(),
+        };
+    }
+
+    pub fn deinit(self: *QJL1HalfScorer) void {
+        self.quantizer.deinit();
+    }
+
+    pub fn prepare(self: *QJL1HalfScorer, query: []const f32) void {
+        self.query_norm = quantization.normL2(query);
+        _ = QuantizationQJL1.quantizeVector(
+            query,
+            self.quantizer.buffer,
+            &self.quantized_query,
+            self.query_norm,
+        );
+    }
+
+    pub inline fn prefetch(self: *const QJL1HalfScorer, node: u32) void {
+        @prefetch(&self.quantizer.lm_head_quantized[node], .{
+            .rw = .read,
+            .locality = 0,
+            .cache = .data,
+        });
+    }
+
+    pub inline fn score(self: *const QJL1HalfScorer, node: u32) f32 {
+        const query_half: *const VectorQJL1Half = @ptrCast(&self.quantized_query);
+        const quantized_row: *const VectorQJL1Half = @ptrCast(&self.quantizer.lm_head_quantized[node]);
+        const mismatches = QuantizationQJL1.popcountXorHalf(query_half, quantized_row);
+        const cosine = QuantizationQJL1.qjl_dot_lut_half[mismatches];
+        const row_scale = if (self.graph_type == .Mips)
+            self.quantizer.lm_head.row_norms[node]
+        else
+            1.0;
+        return cosine * self.query_norm * row_scale;
+    }
+};
+
+pub const QJL1Scorer = struct {
+    pub const prefetch_distance: u32 = 16;
+
+    quantizer: QuantizationQJL1,
+    graph_type: GraphType,
+    quantized_query: VectorQJL1,
+    query_norm: f32 = 0.0,
+
+    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, graph_type: GraphType) !QJL1Scorer {
+        var quantizer: QuantizationQJL1 = try .init(zml_handler, lm_head);
+        errdefer quantizer.deinit();
+        try quantizer.quantize();
+        return .{
+            .quantizer = quantizer,
+            .graph_type = graph_type,
+            .quantized_query = quantization.makeVectorQJL1(),
+        };
+    }
+
+    pub fn deinit(self: *QJL1Scorer) void {
+        self.quantizer.deinit();
+    }
+
+    pub fn prepare(self: *QJL1Scorer, query: []const f32) void {
+        self.query_norm = quantization.normL2(query);
+        _ = QuantizationQJL1.quantizeVector(
+            query,
+            self.quantizer.buffer,
+            &self.quantized_query,
+            self.query_norm,
+        );
+    }
+
+    pub inline fn prefetch(self: *const QJL1Scorer, node: u32) void {
+        @prefetch(&self.quantizer.lm_head_quantized[node], .{
+            .rw = .read,
+            .locality = 0,
+            .cache = .data,
+        });
+    }
+
+    pub inline fn score(self: *const QJL1Scorer, node: u32) f32 {
+        const quantized_row = &self.quantizer.lm_head_quantized[node];
+        const cosine = QuantizationQJL1.qjl1dot(&self.quantized_query, quantized_row);
+        const row_scale = if (self.graph_type == .Mips)
+            self.quantizer.lm_head.row_norms[node]
+        else
+            1.0;
+        return cosine * self.query_norm * row_scale;
+    }
+};
+
+pub const QJL2Scorer = struct {
+    pub const prefetch_distance: u32 = 16;
+
+    quantizer: QuantizationQJL2,
+    graph_type: GraphType,
+    quantized_query: VectorQJL2,
+    query_scale: f32 = 0.0,
+
+    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, graph_type: GraphType) !QJL2Scorer {
+        var quantizer: QuantizationQJL2 = try .init(zml_handler, lm_head);
+        errdefer quantizer.deinit();
+        try quantizer.quantize();
+        return .{
+            .quantizer = quantizer,
+            .graph_type = graph_type,
+            .quantized_query = quantization.makeVectorQJL2(),
+        };
+    }
+
+    pub fn deinit(self: *QJL2Scorer) void {
+        self.quantizer.deinit();
+    }
+
+    pub fn prepare(self: *QJL2Scorer, query: []const f32) void {
+        const query_norm = quantization.normL2(query);
+        self.query_scale = QuantizationQJL2.quantizeVector(
+            query,
+            self.quantizer.buffer,
+            &self.quantized_query,
+            query_norm,
+        );
+    }
+
+    pub inline fn prefetch(self: *const QJL2Scorer, node: u32) void {
+        @prefetch(&self.quantizer.lm_head_quantized[node], .{
+            .rw = .read,
+            .locality = 0,
+            .cache = .data,
+        });
+    }
+
+    pub inline fn score(self: *const QJL2Scorer, node: u32) f32 {
+        const quantized_row = &self.quantizer.lm_head_quantized[node];
+        const dot_i32 = QuantizationQJL2.qjl2dot(&self.quantized_query, quantized_row);
+        const dot = @as(f32, @floatFromInt(dot_i32)) *
+            self.quantizer.row_quant_scale[node] *
+            self.query_scale;
+        const scale = if (self.graph_type == .Mips)
+            1.0
+        else
+            self.quantizer.lm_head.row_norms[node];
+        return dot / scale;
+    }
+};
+
+pub const GraphSearchState = union(GraphScoreType) {
+    Dense: DenseScorer,
+    Int8: Int8Scorer,
+    Int8x4: Int8x4Scorer,
+    QJL1Quarter: QJL1QuarterScorer,
+    QJL1Half: QJL1HalfScorer,
+    QJL1: QJL1Scorer,
+    QJL2: QJL2Scorer,
+
+    pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, graph_type: GraphType, score_type: GraphScoreType) !GraphSearchState {
+        return switch (score_type) {
+            .Dense => .{ .Dense = .init(lm_head, graph_type) },
+            .Int8 => .{ .Int8 = try .init(zml_handler, lm_head, graph_type) },
+            .Int8x4 => .{ .Int8x4 = try .init(zml_handler, lm_head, graph_type) },
+            .QJL1Quarter => .{ .QJL1Quarter = try .init(zml_handler, lm_head, graph_type) },
+            .QJL1Half => .{ .QJL1Half = try .init(zml_handler, lm_head, graph_type) },
+            .QJL1 => .{ .QJL1 = try .init(zml_handler, lm_head, graph_type) },
+            .QJL2 => .{ .QJL2 = try .init(zml_handler, lm_head, graph_type) },
+        };
+    }
+
+    pub fn deinit(self: *GraphSearchState) void {
+        switch (self.*) {
+            .Dense => {},
+            .Int8 => |*scorer| scorer.deinit(),
+            .Int8x4 => |*scorer| scorer.deinit(),
+            .QJL1Quarter => |*scorer| scorer.deinit(),
+            .QJL1Half => |*scorer| scorer.deinit(),
+            .QJL1 => |*scorer| scorer.deinit(),
+            .QJL2 => |*scorer| scorer.deinit(),
+        }
+    }
 };
 
 pub const Graph = struct {
@@ -66,7 +515,7 @@ pub const Graph = struct {
     // added to the pool (when true, the node had been dealt with)
     is_expanded: []bool,
     is_search_done: bool,
-    
+
     pub fn init(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, matrix: *SimilarityMatrix, params: GraphParams) !Graph {
         const allocator = zml_handler.allocator;
 
@@ -120,7 +569,7 @@ pub const Graph = struct {
         self.allocator.free(self.visited);
         self.allocator.free(self.visited_generation);
         self.allocator.free(self.batch);
-        self.allocator.free(self.is_expanded);    
+        self.allocator.free(self.is_expanded);
     }
 
     // ------------------- Search functions ------------------ //
@@ -130,7 +579,7 @@ pub const Graph = struct {
         std.debug.assert(!self.lm_head.is_junk[query]);
         // initialize search at entry point
         self.initNodeSearch(query);
-        
+
         var nb_scored = self.nb_scored;
         while (nb_scored < search_budget) {
 
@@ -139,7 +588,7 @@ pub const Graph = struct {
 
             // if all nodes in active pool have been expanded, terminate the search
             if (self.is_search_done) break;
-            
+
             const start_neigh = graph_k_max * node;
             const end_neigh = start_neigh + self.nb_neighbors[node];
             var nb_batch: u32 = 0;
@@ -152,7 +601,7 @@ pub const Graph = struct {
                 nb_scored += 1;
                 self.visited_generation[neighbor] = self.generation;
 
-                if (self.L == graph_L and self.visited[self.L-1].similarity >= sim) continue;
+                if (self.L == graph_L and self.visited[self.L - 1].similarity >= sim) continue;
                 // reverse linear pass to insert neighbor in the batch
                 // the batch is kept sorted so that it can be inserted
                 // efficiently in the pool of visited nodes
@@ -171,50 +620,9 @@ pub const Graph = struct {
         //self.zml_handler.toc(&self.zml_handler.timers.greedy_search);
     }
 
-    pub fn greedySearch(self: *Graph, query: []const f32, search_budget: u32) void {
-        self.initSearch(query);
-        while (self.nb_scored < search_budget) {
-            const node = self.popCandidate();
-            if (self.is_search_done) break;
-            const start_neigh = graph_k_max * node;
-            const end_neigh = start_neigh + self.nb_neighbors[node];
-            var nb_batch: u32 = 0;
-            var i: u32 = start_neigh;
-            while (i < end_neigh) : (i += 1) {
-                const neighbor = self.neighbors[i];
-                if (self.visited_generation[neighbor] == self.generation) continue;
-                std.debug.assert(!self.lm_head.is_junk[neighbor]);
-                const sim = self.scoreQueryNode(query, neighbor);
-                self.nb_scored += 1;
-                self.visited_generation[neighbor] = self.generation;
-
-                if (self.L == graph_L and self.visited[self.L-1].similarity >= sim) continue;
-                // reverse linear pass to insert neighbor in the batch
-                // the batch is kept sorted so that it can be inserted
-                // efficiently in the pool of visited nodes
-                var pos = nb_batch;
-                while (pos > 0 and sim > self.batch[pos - 1].similarity) {
-                    self.batch[pos] = self.batch[pos - 1];
-                    pos -= 1;
-                }
-                self.batch[pos] = .{ .node = neighbor, .similarity = sim };
-                nb_batch += 1;
-            }
-            self.insertBatch(nb_batch);
-        }
-    }
-
-    pub fn greedySearchPrefetch(self: *Graph, query: []const f32, search_budget: u32) void {
-        self.initSearch(query);
-
-        const rows = self.lm_head.data;
-        const row_norms = self.lm_head.row_norms;
-        const dim: usize = @intCast(self.dim);
-        const graph_type = self.params.graph_type;
-        const prefetch_distance: u32 = 4;
-        const simd_len = 32;
-        std.debug.assert(dim % simd_len == 0);
-        const Vec = @Vector(simd_len, f32);
+    pub fn greedySearch(self: *Graph, search_state: anytype, search_budget: u32) void {
+        self.initSearchWithState(search_state);
+        const prefetch_distance = @TypeOf(search_state.*).prefetch_distance;
 
         while (self.nb_scored < search_budget) {
             const node = self.popCandidate();
@@ -239,9 +647,7 @@ pub const Graph = struct {
 
             var pf_i: u32 = 0;
             while (pf_i < @min(nb_ids, prefetch_distance)) : (pf_i += 1) {
-                const prefetch_node = batch_ids[pf_i];
-                const row_start = @as(usize, @intCast(prefetch_node)) * dim;
-                @prefetch(rows.ptr + row_start, .{ .rw = .read, .locality = 3, .cache = .data });
+                search_state.prefetch(batch_ids[pf_i]);
             }
 
             var nb_batch: u32 = 0;
@@ -249,25 +655,11 @@ pub const Graph = struct {
             while (score_i < nb_ids) : (score_i += 1) {
                 const next_pf_i = score_i + prefetch_distance;
                 if (next_pf_i < nb_ids) {
-                    const prefetch_node = batch_ids[next_pf_i];
-                    const row_start = @as(usize, @intCast(prefetch_node)) * dim;
-                    @prefetch(rows.ptr + row_start, .{ .rw = .read, .locality = 3, .cache = .data });
+                    search_state.prefetch(batch_ids[next_pf_i]);
                 }
 
                 const neighbor = batch_ids[score_i];
-                const row_start = @as(usize, @intCast(neighbor)) * dim;
-                const row = rows[row_start..][0..dim];
-
-                var acc: Vec = @splat(0);
-                var col: usize = 0;
-                while (col + simd_len <= dim) : (col += simd_len) {
-                    const query_vec: Vec = query[col..][0..simd_len].*;
-                    const row_vec: Vec = row[col..][0..simd_len].*;
-                    acc = @mulAdd(Vec, query_vec, row_vec, acc);
-                }
-                const dot = @reduce(.Add, acc);
-                const scale = if (graph_type == .Mips) 1.0 else row_norms[neighbor];
-                const sim = dot / scale;
+                const sim = search_state.score(neighbor);
 
                 if (self.L == graph_L and self.visited[self.L - 1].similarity >= sim) continue;
                 self.batch[nb_batch] = .{ .node = neighbor, .similarity = sim };
@@ -289,65 +681,46 @@ pub const Graph = struct {
         }
     }
 
-    pub fn greedySearchWS(self: *Graph, query: []const f32, search_budget: u32) void {
-        // this is called after a pool initialization with initSearchPool
-        while (self.nb_scored < search_budget) {
-            const node = self.popCandidate();
-            if (self.is_search_done) break;
-            const start_neigh = graph_k_max * node;
-            const end_neigh = start_neigh + self.nb_neighbors[node];
-            var i: u32 = start_neigh;
-            while (i < end_neigh) : (i += 1) {
-                const neighbor = self.neighbors[i];
-                if (self.visited_generation[neighbor] == self.generation) continue;
-                self.addCandidate(query, neighbor);
+    pub fn rerankPool(self: *Graph, search_state: anytype) void {
+        const prefetch_distance = @TypeOf(search_state.*).prefetch_distance;
+        var candidate_i: u32 = 0;
+        while (candidate_i < @min(self.L, prefetch_distance)) : (candidate_i += 1) {
+            search_state.prefetch(self.visited[candidate_i].node);
+        }
+        candidate_i = 0;
+        while (candidate_i < self.L) : (candidate_i += 1) {
+            const prefetch_i = candidate_i + prefetch_distance;
+            if (prefetch_i < self.L) {
+                search_state.prefetch(self.visited[prefetch_i].node);
             }
+            const candidate = &self.visited[candidate_i];
+            candidate.similarity = search_state.score(candidate.node);
         }
+        std.mem.sort(Candidate, self.visited[0..self.L], {}, Candidate.beforeThan);
     }
 
-    pub fn quantizedCrossover(self: *Graph, query: []const f32) void {
-        self.generation += 1;
-        const crossover_candidates: u32 = self.L;
-        var i: u32 = 0;
-        while (i < crossover_candidates) : (i += 1) {
-            const node = self.visited[i].node;
-            self.visited[i].similarity = self.scoreQueryNode(query, node);
-            self.nb_scored += 1;
-            self.visited_generation[node] = self.generation;
-        }
-        std.mem.sort(Candidate, self.visited[0..crossover_candidates], {}, Candidate.beforeThan);
-        self.nb_scored = crossover_candidates;
-        self.is_search_done = false;
-        self.greedySearchWS(query);
-    }
+    pub fn rerankDensePoolAsMips(self: *Graph) void {
+        if (self.params.graph_type == .Mips) return;
 
+        for (self.visited[0..self.L]) |*candidate| {
+            candidate.similarity *= self.lm_head.row_norms[candidate.node];
+        }
+        std.mem.sort(Candidate, self.visited[0..self.L], {}, Candidate.beforeThan);
+    }
 
     pub fn scoreQueryNode(self: *const Graph, query: []const f32, node: u32) f32 {
         self.zml_handler.tic(&self.zml_handler.timers.embed_dot);
         std.debug.assert(!self.lm_head.is_junk[node]);
-        const rows = self.lm_head.data;
-        const row = rows[node * self.dim ..][0..self.dim];
-
-        const simd_len = 32;
-        std.debug.assert(self.dim % simd_len == 0);
-        const Vec = @Vector(simd_len, f32);
-        var acc: Vec = @splat(0);
-
-        var i: u32 = 0;
-        while (i + simd_len <= self.dim) : (i += simd_len) {
-            const query_vec: Vec = query[i..][0..simd_len].*;
-            const row_vec: Vec = row[i..][0..simd_len].*;
-            acc = @mulAdd(Vec, query_vec, row_vec, acc);
-        }
-        const dot = @reduce(.Add, acc);
-        const scale = if (self.params.graph_type == .Mips) 1.0 else self.lm_head.row_norms[node];
+        var scorer: DenseScorer = .init(self.lm_head, self.params.graph_type);
+        scorer.prepare(query);
+        const score = scorer.score(node);
         self.zml_handler.toc(&self.zml_handler.timers.embed_dot);
-        return dot / scale;
+        return score;
     }
 
     pub inline fn initNodeSearch(self: *Graph, query: u32) void {
         self.generation += 1;
-        
+
         // at start, pool is empty
         std.debug.assert(self.visited_generation[self.medoid] != self.generation);
 
@@ -363,11 +736,18 @@ pub const Graph = struct {
     }
 
     pub inline fn initSearch(self: *Graph, query: []const f32) void {
+        var scorer: DenseScorer = .init(self.lm_head, self.params.graph_type);
+        scorer.prepare(query);
+        self.initSearchWithState(&scorer);
+    }
+
+    pub inline fn initSearchWithState(self: *Graph, search_state: anytype) void {
         self.generation += 1;
         // at start, pool is empty
         std.debug.assert(self.visited_generation[self.medoid] != self.generation);
 
-        const entry_point, const entry_sim = self.selectQueryEntryPoint(query);
+        const entry_point = self.medoid;
+        const entry_sim = search_state.score(entry_point);
 
         // medoid is the first and only visited node
         self.visited_generation[entry_point] = self.generation;
@@ -376,26 +756,6 @@ pub const Graph = struct {
         self.nb_scored = 1;
         self.L = 1;
         self.is_search_done = false;
-    }
-
-    pub inline fn initSearchPool(self: *Graph, pool: []const Candidate) void {
-        self.generation += 1;
-        const entry_point = pool[0].node;
-        const entry_sim = pool[0].similarity;
-
-        std.debug.assert(self.visited_generation[entry_point] != self.generation);
-
-        self.visited_generation[entry_point] = self.generation;
-        self.visited[0] = .{ .node = entry_point, .similarity = entry_sim };
-        self.is_expanded[0] = false;
-        self.nb_scored = 1;
-        self.L = 1;
-        self.is_search_done = false;
-
-        var i: u32 = 1;
-        while (i < pool.len) : (i += 1) {
-            self.insert(pool[i].node, pool[i].similarity);
-        }
     }
 
     pub inline fn selectNodeEntryPoint(self: *Graph, query: u32) struct { u32, f32 } {
@@ -411,7 +771,6 @@ pub const Graph = struct {
     pub inline fn selectQueryEntryPoint(self: *Graph, query: []const f32) struct { u32, f32 } {
         const entry_point = self.medoid;
         const entry_sim = self.scoreQueryNode(query, entry_point);
-        self.nb_scored += 1;
         std.debug.assert(entry_point < self.n);
         std.debug.assert(self.visited_generation[entry_point] != self.generation);
         return .{ entry_point, entry_sim };
@@ -666,7 +1025,6 @@ pub const Graph = struct {
         const candidates = self.allocator.alloc(Candidate, self.n) catch @panic("OOM");
         defer self.allocator.free(candidates);
 
-        const search_budget = 2048;
         var pass_i: u32 = 0;
         while (pass_i < self.params.vamana_passes) : (pass_i += 1) {
             // random visit order
@@ -685,7 +1043,7 @@ pub const Graph = struct {
                 // the candidates are current_node's neighbors and the visited nodes
                 // since both lists are sorted and contain unique nodes, we can build
                 // the sorted list of candidates in one linear forward pass
-                self.greedySearchNode(current_node, search_budget);
+                self.greedySearchNode(current_node, graph_construction_search_budget);
 
                 const nb_cand = self.L;
                 const cands = self.visited[0..nb_cand];
@@ -835,7 +1193,7 @@ pub const Graph = struct {
             }
         }
     }
-    
+
     pub fn testNswExtention(self: *Graph, _: *sampling.Sampler) !void {
         if (true) return;
         std.log.info("Test NSW extension", .{});
@@ -1006,7 +1364,7 @@ pub const Graph = struct {
     }
 
     // ------------------- Hierarchy functions ------------------- //
-    
+
     pub fn getHopDistance(self: *Graph) ![]u32 {
         const hop_dist = try self.allocator.alloc(u32, self.n);
         errdefer self.allocator.free(hop_dist);

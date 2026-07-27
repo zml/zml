@@ -32,7 +32,10 @@ const Int8Sampler = sampling.Int8Sampler;
 const Int8x4Sampler = sampling.Int8x4Sampler;
 const Int4Sampler = sampling.Int4Sampler;
 const QJL1Sampler = sampling.QJL1Sampler;
+const QJL1PruneSampler = sampling.QJL1PruneSampler;
 const QJL2Sampler = sampling.QJL2Sampler;
+const QJL2PruneSampler = sampling.QJL2PruneSampler;
+const QJL12PruneSampler = sampling.QJL12PruneSampler;
 const QJL2x1Sampler = sampling.QJL2x1Sampler;
 const QJLNx1Sampler = sampling.QJLNx1Sampler;
 const MultiSampler = sampling.MultiSampler;
@@ -172,9 +175,10 @@ pub const Timing_handler = struct {
     pq_lut: Field_timer = .{},
     pq_score: Field_timer = .{},
     pq_top_k: Field_timer = .{},
-    
+
     quant_prefix: Field_timer = .{},
     quant_qjl1: Field_timer = .{},
+    quant_qjl2: Field_timer = .{},
     quant_quart1: Field_timer = .{},
     quant_quart2: Field_timer = .{},
     quant_half2: Field_timer = .{},
@@ -213,8 +217,9 @@ pub const Timing_handler = struct {
         std.log.info("Mu qjl quart  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_quart1.nanoseconds)) / 1e9});
         std.log.info("Mu qjl quart  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_quart2.nanoseconds)) / 1e9});
         std.log.info("Mu qjl half2  : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_half2.nanoseconds)) / 1e9});
+        std.log.info("Mu qjl2       : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_qjl2.nanoseconds)) / 1e9});
         std.log.info("Mu dense      : {d:>6.2}s", .{@as(f64, @floatFromInt(self.quant_dense.nanoseconds)) / 1e9});
-        
+
         std.log.info("Trc sparse    : {d:>6.2}s", .{@as(f64, @floatFromInt(self.trc_sparse_256.nanoseconds)) / 1e9});
         std.log.info("Trc top 256   : {d:>6.2}s", .{@as(f64, @floatFromInt(self.trc_top_256.nanoseconds)) / 1e9});
         std.log.info("Trc dense 256 : {d:>6.2}s", .{@as(f64, @floatFromInt(self.trc_dense_256.nanoseconds)) / 1e9});
@@ -293,7 +298,7 @@ pub fn main(init: std.process.Init) !void {
 
     //try runTestsSampling(&zml_handler, zml_handler.uris.llama);
     //try runTestsLlm(&zml_handler, zml_handler.uris.llama);
-    
+
     try runTestsSampling(&zml_handler, zml_handler.uris.qwen);
     //try runTestsLlm(&zml_handler, zml_handler.uris.qwen);
 
@@ -350,11 +355,14 @@ pub fn runTestsSampling(zml_handler: *Zml_handler, path: []const u8) !void {
     try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_baseline));
 
     if (bench_new) {
-        const ref_multi = try testQuantizedSampling(zml_handler, &lm_head, QuantizationQJL1, MultiSampler, "Multiphase");
-        try references.append(alloc, ref_multi);
-        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_multi));
+        const ref_graph = try testSampling(zml_handler, &lm_head, GraphSampler, "Graph");
+        try references.append(alloc, ref_graph);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_graph));
     }
     if (bench_qjl) {
+        const ref_multi = try testMultiQuantizedSampling(zml_handler, &lm_head, QuantizationQJL1, QuantizationQJL2, MultiSampler, "Multiphase");
+        try references.append(alloc, ref_multi);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_multi));
         const ref_qjl1 = try testQuantizedSampling(zml_handler, &lm_head, QuantizationQJL1, QJL1Sampler, "QJL1");
         try references.append(alloc, ref_qjl1);
         try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_qjl1));
@@ -367,6 +375,15 @@ pub fn runTestsSampling(zml_handler: *Zml_handler, path: []const u8) !void {
         const ref_qjlNx1 = try testQuantizedSampling(zml_handler, &lm_head, QuantizationQJL1, QJLNx1Sampler, "QJLNx1");
         try references.append(alloc, ref_qjlNx1);
         try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_qjlNx1));
+        const ref_qjl1p = try testQuantizedSampling(zml_handler, &lm_head, QuantizationQJL1, QJL1PruneSampler, "QJL1+prune");
+        try references.append(alloc, ref_qjl1p);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_qjl1p));
+        const ref_qjl2p = try testQuantizedSampling(zml_handler, &lm_head, QuantizationQJL2, QJL2PruneSampler, "QJL2+prune");
+        try references.append(alloc, ref_qjl2p);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_qjl2p));
+        const ref_qjl12p = try testMultiQuantizedSampling(zml_handler, &lm_head, QuantizationQJL1, QuantizationQJL2, QJL12PruneSampler, "QJL12+prune");
+        try references.append(alloc, ref_qjl12p);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_qjl12p));
     }
     if (bench_int) {
         const ref_int4 = try testQuantizedSampling(zml_handler, &lm_head, QuantizationInt4, Int4Sampler, "Int4");
@@ -428,6 +445,22 @@ pub fn testQuantizedSampling(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, 
     return try computeSamplingReference(zml_handler, &sampler, label);
 }
 
+pub fn testMultiQuantizedSampling(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, Quantizer1: type, Quantizer2: type, Sampling: type, label: []const u8) !SamplingReference {
+    std.log.info("***** Init {s} quantizer", .{label});
+    var quant1: Quantizer1 = try .init(zml_handler, lm_head);
+    defer Quantizer1.deinit(&quant1);
+    try quant1.quantize();
+    std.log.info("***** Init {s} quantizer", .{label});
+    var quant2: Quantizer2 = try .init(zml_handler, lm_head);
+    defer Quantizer2.deinit(&quant2);
+    try quant2.quantize();
+    std.log.info("***** Init {s} sampler", .{label});
+    var sampler: Sampling = try .init(zml_handler, lm_head, &quant1, &quant2);
+    defer sampler.deinit();
+    std.log.info("***** Test {s} sampling", .{label});
+    return try computeSamplingReference(zml_handler, &sampler, label);
+}
+
 pub fn testSampling(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, Sampling: type, label: []const u8) !SamplingReference {
     std.log.info("***** Init {s} sampler", .{label});
     var sampler: Sampling = try .init(zml_handler, lm_head);
@@ -435,7 +468,6 @@ pub fn testSampling(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, Sampling:
     std.log.info("***** Test {s} sampling", .{label});
     return try computeSamplingReference(zml_handler, &sampler, label);
 }
-
 
 pub fn runTestsLlm(zml_handler: *Zml_handler, path: []const u8) !void {
     const alloc = zml_handler.allocator;
@@ -553,7 +585,6 @@ pub fn testLlm(zml_handler: *Zml_handler, llm: *Llm_handler, lm_head: *LmHeadMat
 
     try llm.resetKvCache(zml_handler);
 }
-
 
 pub fn computeSamplingReference(zml_handler: *Zml_handler, sampler: anytype, label: []const u8) !SamplingReference {
     var total_embeds: usize = 0;
@@ -838,7 +869,6 @@ pub fn loadSamplingReference(zml_handler: *Zml_handler, file_name: []const u8) !
     std.log.info("Loaded sampling reference: file={s} samples={d} top_k={d}", .{ file_name, n, k });
     return ref;
 }
-
 
 const SamplingComparison = struct {
     label: []const u8,
