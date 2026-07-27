@@ -67,7 +67,18 @@ fn sampleTokenFromCpuResult(result: *SamplingResult, llm: *const Llm_handler, ra
         total += candidate.proba;
     }
 
-    const threshold = random.float(f32) * total;
+    const min_proba = (result.candidates[0].proba / total) * llm.generation_config.min_p;
+    var cumulative_proba: f32 = 0.0;
+    var filtered_total: f32 = 0.0;
+    for (result.candidates[0..k], 0..) |*candidate, i| {
+        const proba = candidate.proba / total;
+        cumulative_proba += proba;
+        const keep = i == 0 or (cumulative_proba <= llm.generation_config.top_p and proba >= min_proba);
+        candidate.proba = if (keep) candidate.proba else 0.0;
+        filtered_total += candidate.proba;
+    }
+
+    const threshold = random.float(f32) * filtered_total;
     var cumulative: f32 = 0.0;
     for (result.candidates[0..k]) |candidate| {
         cumulative += candidate.proba;
@@ -167,7 +178,7 @@ fn generateText(zml_handler: *Zml_handler, llm: *Llm_handler, sampler: anytype, 
         llm.exes.logits_args.set(.{ llm.model_buffers, one_embed_buffer });
         llm.exes.logits_exe.call(llm.exes.logits_args, &llm.exes.logits_results);
         llm.exes.logits_results.fill(.{&logit_buffer});
-        llm.exes.sample_args.set(.{ llm.model_buffers, logit_buffer, rng_buffers });
+        llm.exes.sample_args.set(.{ llm.model_buffers, logit_buffer, llm.sampling_strategy_buffers, rng_buffers });
         llm.exes.sample_exe.call(llm.exes.sample_args, &llm.exes.sample_results);
         llm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
         try token_buffer.toSlice(io, token_slice);
@@ -230,7 +241,7 @@ fn generateText(zml_handler: *Zml_handler, llm: *Llm_handler, sampler: anytype, 
             llm.exes.logits_args.set(.{ llm.model_buffers, decode_embed_buffer });
             llm.exes.logits_exe.call(llm.exes.logits_args, &llm.exes.logits_results);
             llm.exes.logits_results.fill(.{&logit_buffer});
-            llm.exes.sample_args.set(.{ llm.model_buffers, logit_buffer, rng_buffers });
+            llm.exes.sample_args.set(.{ llm.model_buffers, logit_buffer, llm.sampling_strategy_buffers, rng_buffers });
             llm.exes.sample_exe.call(llm.exes.sample_args, &llm.exes.sample_results);
             llm.exes.sample_results.fill(.{ &token_buffer, &rng_buffers });
             try token_buffer.toSlice(io, token_slice);

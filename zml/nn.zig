@@ -1799,10 +1799,8 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
     // After the topk, we don't have .voc indices, anymore, only topk.
     var x = full_topk.values.rename(.{ .voc = .topk });
     // mask values above the dynamic top_k
-    const top_k = opts.top_k.broad(x.shape());
-    x = Tensor.iota(x.shape(), .topk).cmp(.GE, top_k).select(min_inf, x);
-    const temperature = opts.temperature.convert(x.dtype()).broad(x.shape());
-    x = x.div(temperature);
+    x = Tensor.iota(x.shape(), .topk).cmp(.GE, opts.top_k).select(min_inf, x);
+    x = x.div(opts.temperature);
 
     // if there are high values in x, softmax can overflow and will create nans in full probs
     // this propagate to probs_sum and probs_max.

@@ -17,6 +17,7 @@ pub const Llm_handler = struct {
     exes: LlmExes,
     model_buffers: zml.Bufferized(Llm),
     kv_cache_buffers: zml.Bufferized(KvCache),
+    sampling_strategy_buffers: zml.Bufferized(zml.nn.DynamicSamplingStrategy),
 
     pub fn init(zml_handler: *main.Zml_handler) !Llm_handler {
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.qwen);
@@ -68,6 +69,8 @@ pub const Llm_handler = struct {
 
         var kv_cache_buffers = try kv_cache.initBuffer(zml_handler.io, zml_handler.platform, .replicated);
         errdefer KvCache.deinitBuffer(&kv_cache_buffers);
+        var sampling_strategy_buffers = try generation_config.samplingStrategyBuffers(zml_handler.io, zml_handler.platform);
+        errdefer zml.nn.DynamicSamplingStrategy.deinitBuffers(&sampling_strategy_buffers);
 
         return .{
             .model = model,
@@ -79,6 +82,7 @@ pub const Llm_handler = struct {
             .exes = exes,
             .model_buffers = model_buffers,
             .kv_cache_buffers = kv_cache_buffers,
+            .sampling_strategy_buffers = sampling_strategy_buffers,
         };
     }
 
@@ -170,7 +174,7 @@ pub const Llm_handler = struct {
         var sample_future = try zml_handler.io.concurrent(struct {
             fn call(zml_handler_: *main.Zml_handler, model_: Llm, options_: Options, opts_: zml.module.CompilationOptions) !zml.Exe {
                 const params: Llm.SampleParams = .exec(options_);
-                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .sampleTokens, .{ params.logits, params.rng }, opts_);
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .sampleTokens, .{ params.logits, params.sampling_strategy, params.rng }, opts_);
             }
         }.call, .{ zml_handler, model, options, opts });
         var sample_future_awaited = false;
@@ -242,6 +246,7 @@ pub const Llm_handler = struct {
     pub fn unloadBuffers(self: *Llm_handler, allocator: std.mem.Allocator) void {
         Llm.unloadBuffers(&self.model_buffers, allocator);
         KvCache.deinitBuffer(&self.kv_cache_buffers);
+        zml.nn.DynamicSamplingStrategy.deinitBuffers(&self.sampling_strategy_buffers);
     }
 
     pub fn resetKvCache(self: *Llm_handler, zml_handler: *main.Zml_handler) !void {
@@ -331,8 +336,11 @@ pub const GenerationConfig = struct {
     eos_token_id: TokenIds,
     pad_token_id: u32,
     temperature: f32 = 1.0,
-    top_k: u32 = 1,
+    top_k: u32 = 50,
     top_p: f32 = 1.0,
+    min_p: f32 = 0.0,
+
+    pub const max_sampling_top_k: u32 = 64;
 
     pub fn load(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, model_config: Config) !GenerationConfig {
         const file = dir.openFile(io, "generation_config.json", .{}) catch |err| {
@@ -369,6 +377,7 @@ pub const GenerationConfig = struct {
             .temperature = self.temperature,
             .top_k = self.top_k,
             .top_p = self.top_p,
+            .min_p = self.min_p,
         };
     }
 
@@ -383,6 +392,16 @@ pub const GenerationConfig = struct {
             .topk = self.top_k,
             .temperature = self.temperature,
         };
+    }
+
+    pub fn samplingStrategyBuffers(self: GenerationConfig, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(zml.nn.DynamicSamplingStrategy) {
+        const top_k = if (self.do_sample) @min(self.top_k, max_sampling_top_k) else 1;
+        return try zml.nn.DynamicSamplingStrategy.makeBuffers(io, platform, .f32, .{
+            .top_k = top_k,
+            .temperature = self.temperature,
+            .top_p = if (self.do_sample) self.top_p else 1.0,
+            .min_p = if (self.do_sample) self.min_p else 0.0,
+        });
     }
 
     pub fn isEosToken(self: GenerationConfig, token_id: u32) bool {
@@ -466,9 +485,9 @@ pub const Llm = struct {
     layers: []TransformerLayer,
     norm: RmsNorm,
     lm_head: zml.Tensor,
-    sampling_strategy: zml.nn.SamplingStrategy,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, generation_config: GenerationConfig) !Llm {
+        _ = generation_config;
         const layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers);
         errdefer allocator.free(layers);
         for (layers, 0..) |*layer, i| {
@@ -479,7 +498,6 @@ pub const Llm = struct {
             .layers = layers,
             .norm = .init(store.withPrefix("model.norm"), config),
             .lm_head = store.createTensor("lm_head.weight", .{ .voc, .d }, .replicated),
-            .sampling_strategy = generation_config.samplingStrategy(),
         };
     }
 
@@ -565,17 +583,19 @@ pub const Llm = struct {
 
     pub const SampleParams = struct {
         logits: zml.Tensor,
+        sampling_strategy: zml.nn.DynamicSamplingStrategy,
         rng: zml.Tensor.Rng,
         pub fn exec(options: Options) SampleParams {
             return .{
                 .logits = .init(.{ .voc = options.voc_size, .s = 1 }, .f32),
+                .sampling_strategy = zml.nn.DynamicSamplingStrategy.init(.f32, GenerationConfig.max_sampling_top_k),
                 .rng = zml.Tensor.Rng.init(),
             };
         }
     };
 
-    pub fn sampleTokens(self: Llm, logits: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
-        const next_token, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, rng);
+    pub fn sampleTokens(_: Llm, logits: zml.Tensor, sampling_strategy: zml.nn.DynamicSamplingStrategy, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
+        const next_token, const new_rng = zml.nn.sampleTokensDynamic(logits, sampling_strategy, rng);
         return .{ next_token.convert(.u32), new_rng };
     }
 };
