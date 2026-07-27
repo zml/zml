@@ -754,6 +754,84 @@ test "if" {
     }
 }
 
+/// Simpler variant of `if` that assumes code-motion is supported by the backend.
+/// The two branches are evaluated before the condition, then the condition chose which branches to keep.
+pub fn if2(
+    pred: Tensor,
+    if_true: anytype,
+    if_false: @TypeOf(if_true),
+) @TypeOf(if_true) {
+    stdx.debug.assert(pred.dtype() == .bool and pred.count() == 1, "zml.ops.if expects the condition to have exactly one element of dtype .bool, got {f}", .{pred});
+
+    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const loc: *const mlir.Location = .unknown(mlir_ctx);
+
+    const true_values = meta.collectAlloc(Tensor.value, {}, allocator, &if_true) catch @panic("OOM");
+    defer allocator.free(true_values);
+    const true_branch_block = b: {
+        const block = mlir.Block.init(&.{}, &.{});
+        errdefer block.deinit();
+
+        CompilationContext.current().pushBlock(block);
+        defer CompilationContext.current().popBlock();
+        _ = dialects.stablehlo.returns(mlir_ctx, true_values, loc).appendTo(block);
+        break :b block;
+    };
+
+    const false_values = meta.collectAlloc(Tensor.value, {}, allocator, &if_false) catch @panic("OOM");
+    defer allocator.free(false_values);
+    const false_branch_block = b: {
+        const block = mlir.Block.init(&.{}, &.{});
+        errdefer block.deinit();
+
+        CompilationContext.current().pushBlock(block);
+        defer CompilationContext.current().popBlock();
+
+        _ = dialects.stablehlo.returns(mlir_ctx, false_values, loc).appendTo(block);
+        break :b block;
+    };
+
+    const op = mlir.Operation.make(mlir_ctx, "stablehlo.if", .{
+        .operands = .{ .flat = &.{pred.asScalar().value()} },
+        .result_type_inference = true,
+        .blocks = &.{ true_branch_block, false_branch_block },
+        .location = loc,
+        .verify = false,
+    });
+    _ = op.appendTo(CompilationContext.current().currentScope().block);
+
+    return fromMlirOperationWithTags(op, if_true);
+}
+
+test if2 {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+    const allocator = std.testing.allocator;
+
+    const IfMod = struct {
+        pub fn _fwd(pred: Tensor, a: Tensor, b: Tensor) Tensor {
+            return if2(
+                pred.convert(.bool),
+                a.dotGeneral(b, &.{.{ 1, 0 }}, &.{}),
+                b.dotGeneral(a, &.{.{ 1, 0 }}, &.{}),
+            );
+        }
+    };
+
+    {
+        const pred: Tensor = .init(.{}, .i32);
+        const a: Tensor = .init(.{ 4, 4 }, .f32);
+        const b: Tensor = .init(.{ 4, 4 }, .f32);
+        const mod = try platform.compileFn(allocator, std.testing.io, IfMod._fwd, .{ pred, a, b }, .{});
+        defer mod.deinit();
+    }
+}
+
 /// Create a Tensor struct similar to base, keeping base tags,
 /// but using mlir value and dims from the mlir operation.
 fn fromMlirOperationWithTags(op: *const mlir.Operation, base: anytype) @TypeOf(base) {
