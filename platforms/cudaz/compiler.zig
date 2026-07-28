@@ -175,9 +175,17 @@ fn graphPlanFromModule(
                 return error.UnsupportedGraph;
             const weight_type = rankedTensor(operation.operand(0)) orelse
                 return error.UnsupportedGraph;
+            const rhs_type = rankedTensor(operation.operand(1)) orelse
+                return error.UnsupportedGraph;
             const result_type = rankedTensor(operation.result(0)) orelse
                 return error.UnsupportedGraph;
-            if (weight_type.rank() != 2 or result_type.rank() != 1) {
+            if (weight_type.rank() != 2 or rhs_type.rank() != 1 or
+                result_type.rank() != 1 or
+                !isElementType(module.context(), weight_type, c.PJRT_Buffer_Type_F32) or
+                !isElementType(module.context(), rhs_type, c.PJRT_Buffer_Type_F32) or
+                !isElementType(module.context(), result_type, c.PJRT_Buffer_Type_F32) or
+                !isSupportedMatmulDimensions(operation))
+            {
                 return error.UnsupportedGraph;
             }
             const output_elements = positiveDimension(weight_type, 0) orelse
@@ -185,6 +193,9 @@ fn graphPlanFromModule(
             const contracting_elements = positiveDimension(weight_type, 1) orelse
                 return error.UnsupportedGraph;
             if (positiveDimension(result_type, 0) != output_elements) {
+                return error.UnsupportedGraph;
+            }
+            if (positiveDimension(rhs_type, 0) != contracting_elements) {
                 return error.UnsupportedGraph;
             }
 
@@ -208,7 +219,8 @@ fn graphPlanFromModule(
                 return error.UnsupportedGraph;
             const bias_type = rankedTensor(bias_value) orelse return error.UnsupportedGraph;
             if (bias_type.rank() != 1 or
-                positiveDimension(bias_type, 0) != output_elements)
+                positiveDimension(bias_type, 0) != output_elements or
+                !isElementType(module.context(), bias_type, c.PJRT_Buffer_Type_F32))
             {
                 return error.UnsupportedGraph;
             }
@@ -236,6 +248,13 @@ fn graphPlanFromModule(
     }
 
     if (layer_count == 0 or input_argument == null or !saw_argmax_reduce) {
+        return error.UnsupportedGraph;
+    }
+    const input_type = rankedTensor(block.argument(input_argument.?)) orelse
+        return error.UnsupportedGraph;
+    if (!isElementType(module.context(), input_type, c.PJRT_Buffer_Type_U8) or
+        tensorElementCount(input_type) != layers_buffer[0].contracting_elements)
+    {
         return error.UnsupportedGraph;
     }
 
@@ -272,6 +291,40 @@ fn rankedTensor(value: *const mlir.Value) ?*const mlir.RankedTensorType {
 fn positiveDimension(tensor: *const mlir.RankedTensorType, index: usize) ?usize {
     const dimension = tensor.dimension(index);
     return if (dimension >= 0) @intCast(dimension) else null;
+}
+
+fn tensorElementCount(tensor: *const mlir.RankedTensorType) ?usize {
+    var count: usize = 1;
+    for (0..tensor.rank()) |index| {
+        count = std.math.mul(
+            usize,
+            count,
+            positiveDimension(tensor, index) orelse return null,
+        ) catch return null;
+    }
+    return count;
+}
+
+fn isElementType(
+    context: *mlir.Context,
+    tensor: *const mlir.RankedTensorType,
+    expected: c.PJRT_Buffer_Type,
+) bool {
+    return (pjrtElementType(context, tensor.elementType()) catch return false) == expected;
+}
+
+fn isSupportedMatmulDimensions(operation: *const mlir.Operation) bool {
+    const attribute = operation.attributeByName("dot_dimension_numbers") orelse
+        return false;
+    const dimensions = attribute.isA(
+        dialects.stablehlo.DotDimensionNumbersAttribute,
+    ) orelse return false;
+    return dimensions.getLhsBatchingDimensionsSize() == 0 and
+        dimensions.getRhsBatchingDimensionsSize() == 0 and
+        dimensions.getLhsContractingDimensionsSize() == 1 and
+        dimensions.getRhsContractingDimensionsSize() == 1 and
+        dimensions.getLhsContractingDimensionsElem(0) == 1 and
+        dimensions.getRhsContractingDimensionsElem(0) == 0;
 }
 
 fn traceBlockArgument(value: *const mlir.Value) ?usize {
@@ -631,6 +684,69 @@ test "lower dense StableHLO graph to composable Zig sub-kernels" {
     const ptx = try compileGenerated(std.testing.allocator, generated.source);
     defer std.testing.allocator.free(ptx);
     try std.testing.expect(std.mem.indexOf(u8, ptx, ".visible .entry main(") != null);
+
+    const cuda = @import("cuda.zig");
+    var cuda_client = cuda.Client.init() catch |err| switch (err) {
+        error.DriverUnavailable,
+        error.InitializationFailed,
+        error.DeviceUnavailable,
+        => return error.SkipZigTest,
+        else => return err,
+    };
+    defer cuda_client.deinit();
+
+    const weight_0 = [_]f32{ 1, 2, 3, 3, 2, 1 };
+    const bias_0 = [_]f32{ 0, 0 };
+    const weight_1 = [_]f32{ 1, 0, 0, 2 };
+    const bias_1 = [_]f32{ 0, 0 };
+    const input = [_]u8{ 1, 2, 3 };
+    const host_inputs = .{ weight_0, bias_0, weight_1, bias_1, input };
+
+    var allocations: [host_inputs.len]cuda.Allocation = undefined;
+    var initialized: usize = 0;
+    defer for (allocations[0..initialized]) |allocation| cuda_client.free(allocation);
+    inline for (host_inputs, 0..) |host_input, index| {
+        allocations[index] = try cuda_client.allocate(@sizeOf(@TypeOf(host_input)));
+        initialized += 1;
+        try cuda_client.copyHostToDevice(
+            allocations[index],
+            0,
+            std.mem.asBytes(&host_input),
+        );
+    }
+
+    const output = try cuda_client.allocate(@sizeOf(u8));
+    defer cuda_client.free(output);
+    try cuda_client.zero(output);
+    const scratch = try cuda_client.allocate(generated.scratch_size);
+    defer cuda_client.free(scratch);
+    try cuda_client.zero(scratch);
+
+    var pointers: [host_inputs.len + 2]cuda.DevicePtr = undefined;
+    for (allocations, pointers[0..host_inputs.len]) |allocation, *pointer| {
+        pointer.* = allocation.ptr;
+    }
+    pointers[host_inputs.len] = output.ptr;
+    pointers[host_inputs.len + 1] = scratch.ptr;
+    const pointer_table = try cuda_client.allocate(@sizeOf(@TypeOf(pointers)));
+    defer cuda_client.free(pointer_table);
+    try cuda_client.copyHostToDevice(pointer_table, 0, std.mem.asBytes(&pointers));
+
+    const kernel = try cuda_client.loadKernel(ptx, "main");
+    defer cuda_client.unloadKernel(kernel);
+    const Parameters = extern struct {
+        buffers: cuda.DevicePtr,
+        buffer_len: usize,
+    };
+    const parameters: Parameters = .{
+        .buffers = pointer_table.ptr,
+        .buffer_len = pointers.len,
+    };
+    try cuda_client.launch(kernel, std.mem.asBytes(&parameters));
+
+    var actual: u8 = undefined;
+    try cuda_client.copyDeviceToHost(std.mem.asBytes(&actual), output, 0);
+    try std.testing.expectEqual(@as(u8, 1), actual);
 }
 
 pub fn compile(allocator: std.mem.Allocator) ![:0]u8 {

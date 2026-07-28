@@ -911,7 +911,7 @@ pub fn partition_id(ctx: *mlir.Context, location: *const mlir.Location) *mlir.Op
 }
 
 pub const DotDimensionNumbersAttribute = opaque {
-    const M = mlir.Methods(DotDimensionNumbersAttribute, mlir.Attribute);
+    const M = mlir.Methods(DotDimensionNumbersAttribute, c.MlirAttribute);
 
     pub const isAFn = c.stablehloAttributeIsADotDimensionNumbers;
     pub const ptr = M.ptr;
