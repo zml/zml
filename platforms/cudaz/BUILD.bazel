@@ -1,5 +1,14 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
+
+zig_shared_library(
+    name = "pjrt_plugin",
+    main = "libpjrt_cudaz.zig",
+    shared_lib_name = "libpjrt_cudaz.so",
+    target_compatible_with = ["@platforms//os:linux"],
+    zigopts = ["-fno-stack-check"],
+    deps = ["@xla//xla/pjrt/c:pjrt_c_api_hdrs"],
+)
 
 cc_library(
     name = "empty",
@@ -9,6 +18,7 @@ cc_library(
 
 cc_library(
     name = "libpjrt_cudaz",
+    data = [":pjrt_plugin"],
     defines = ["ZML_RUNTIME_CUDAZ"],
     tags = ["manual"],
 )
@@ -22,7 +32,12 @@ zig_library(
     deps = [
         "//pjrt",
     ] + select({
-        "//platforms:cudaz.enabled": [":libpjrt_cudaz"],
+        "//platforms:cudaz.enabled": [
+            ":libpjrt_cudaz",
+            "//bazel",
+            "//stdx",
+            "@rules_zig//zig/runfiles",
+        ],
         "//conditions:default": [":empty"],
     }),
 )
