@@ -192,6 +192,21 @@ pub fn addBiasF32(values: [*]f32, bias: [*]const f32, rows: usize, columns: usiz
     }
 }
 
+/// Fuse bias addition and ReLU into one grid-stride pass over the matrix.
+pub fn addBiasReluF32(
+    values: [*]f32,
+    bias: [*]const f32,
+    rows: usize,
+    columns: usize,
+) void {
+    const grid: Grid = .init();
+    var index: usize = grid.globalThread();
+    const stride: usize = grid.threadCount();
+    while (index < rows * columns) : (index += stride) {
+        values[index] = @max(values[index] + bias[index % columns], 0);
+    }
+}
+
 /// Apply ReLU to a contiguous f32 tensor in place.
 pub fn reluF32(values: [*]f32, len: usize) void {
     const grid: Grid = .init();
@@ -278,8 +293,7 @@ test "compose dense layer and argmax sub-kernels on host" {
     const rhs = [_]f32{ 1, -1, 2 };
     var result: [2]f32 = undefined;
     matmulF32(f32, &lhs, &rhs, &result, 2, 1, 3);
-    addBiasF32(&result, &[_]f32{1}, 2, 1);
-    reluF32(&result, result.len);
+    addBiasReluF32(&result, &[_]f32{1}, 2, 1);
     try std.testing.expectEqualSlices(f32, &.{ 6, 4 }, &result);
 
     var index: u32 = undefined;

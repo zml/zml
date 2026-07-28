@@ -441,9 +441,7 @@ fn renderKernelSource(
         try writer.print(
             \\    kernels.matmulF32({s}, weight_{d}, {s}, activation_{d}, {d}, 1, {d});
             \\    kernels.gridBarrier(barrier);
-            \\    kernels.addBiasF32(activation_{d}, bias_{d}, 1, {d});
-            \\    kernels.gridBarrier(barrier);
-            \\    kernels.reluF32(activation_{d}, {d});
+            \\    kernels.addBiasReluF32(activation_{d}, bias_{d}, 1, {d});
             \\    kernels.gridBarrier(barrier);
             \\
         , .{
@@ -454,8 +452,6 @@ fn renderKernelSource(
             layer.output_elements,
             layer.contracting_elements,
             index,
-            index,
-            layer.output_elements,
             index,
             layer.output_elements,
         });
@@ -678,12 +674,28 @@ test "lower dense StableHLO graph to composable Zig sub-kernels" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         generated.source,
+        "kernels.addBiasReluF32(activation_0, bias_0, 1, 2);",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        generated.source,
+        "kernels.addBiasF32",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        generated.source,
+        "kernels.reluF32",
+    ) == null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        generated.source,
         "kernels.argMaxF32(u8, activation_1, 2, &output[0]);",
     ) != null);
 
     const ptx = try compileGenerated(std.testing.allocator, generated.source);
     defer std.testing.allocator.free(ptx);
     try std.testing.expect(std.mem.indexOf(u8, ptx, ".visible .entry main(") != null);
+    try std.testing.expect(fusedBiasReluLoops(ptx, 2));
 
     const cuda = @import("cuda.zig");
     var cuda_client = cuda.Client.init() catch |err| switch (err) {
@@ -747,6 +759,35 @@ test "lower dense StableHLO graph to composable Zig sub-kernels" {
     var actual: u8 = undefined;
     try cuda_client.copyDeviceToHost(std.mem.asBytes(&actual), output, 0);
     try std.testing.expectEqual(@as(u8, 1), actual);
+}
+
+fn fusedBiasReluLoops(ptx: []const u8, expected_count: usize) bool {
+    if (std.mem.indexOf(u8, ptx, "%kernels.addBiasF32.exit") != null or
+        std.mem.indexOf(u8, ptx, "%kernels.reluF32.exit") != null)
+    {
+        return false;
+    }
+
+    const loop_header = "// =>This Inner Loop Header: Depth=1";
+    const fused_exit = "%kernels.addBiasReluF32.exit";
+    var remaining = ptx;
+    var count: usize = 0;
+    while (std.mem.indexOf(u8, remaining, fused_exit)) |exit_index| {
+        const header_index = std.mem.lastIndexOf(
+            u8,
+            remaining[0..exit_index],
+            loop_header,
+        ) orelse return false;
+        const body = remaining[header_index..exit_index];
+        if (std.mem.indexOf(u8, body, "add.rn.f32") == null or
+            std.mem.indexOf(u8, body, "max.f32") == null)
+        {
+            return false;
+        }
+        count += 1;
+        remaining = remaining[exit_index + fused_exit.len ..];
+    }
+    return count == expected_count;
 }
 
 pub fn compile(allocator: std.mem.Allocator) ![:0]u8 {
@@ -901,7 +942,7 @@ fn compileSource(
         "kernel.ptx",
     });
 
-    return try tmp_dir.readFileAllocOptions(
+    const ptx = try tmp_dir.readFileAllocOptions(
         io,
         "kernel.ptx",
         allocator,
@@ -909,6 +950,10 @@ fn compileSource(
         .of(u8),
         0,
     );
+    if (std.c.getenv("ZML_CUDAZ_DUMP_PTX") != null) {
+        log.info("generated PTX:\n{s}", .{ptx});
+    }
+    return ptx;
 }
 
 fn runZig(

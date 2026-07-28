@@ -11,6 +11,7 @@ export fn main(buffers: [*]*const anyopaque, buffer_len: usize) callconv(.nvptx_
         kernels.matmulF32(f32, lhs, rhs, output, 1, 1, 1);
         kernels.addBiasF32(output, rhs, 1, 1);
         kernels.reluF32(output, 1);
+        kernels.addBiasReluF32(output, rhs, 1, 1);
         kernels.argMaxF32(u32, output, 1, @ptrCast(@alignCast(output)));
     }
 }
