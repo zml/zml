@@ -12,6 +12,7 @@ const Exe = @import("exe.zig").Exe;
 const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
+const ops = @import("ops.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const tracer = @import("profiling/tracer.zig");
@@ -149,6 +150,10 @@ pub const CompilationContext = struct {
     }
 
     pub fn deinit(self: *CompilationContext) void {
+        if (_current == self) _current = null;
+        for (self.scopes.slice()) |*scope| {
+            scope.deinit();
+        }
         self.mlir_pass_manager.deinit();
         self.module.deinit();
         self.mlir_ctx.deinit();
@@ -188,6 +193,15 @@ pub const CompilationContext = struct {
     pub fn nextChannelId(self: *CompilationContext) i64 {
         self.channel_id += 1;
         return self.channel_id;
+    }
+
+    pub fn abortOOM(self: *CompilationContext) noreturn {
+        _ = self;
+        @panic("OOM");
+    }
+
+    pub fn alloc(self: *CompilationContext, T: type, n: usize) []T {
+        return self.arena.allocator().alloc(T, n) catch self.abortOOM();
     }
 };
 
@@ -235,7 +249,10 @@ pub fn compile(
     var compilation_context: CompilationContext = .init(allocator, st_io.io(), platform, opts);
     defer compilation_context.deinit();
 
-    const result = emitMlir(&compilation_context, func, args) catch unreachable;
+    const result = emitMlir(&compilation_context, func, args) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable,
+    };
     defer result.output_info.deinit(compilation_context.allocator);
     defer result.input_info.deinit(compilation_context.allocator);
 

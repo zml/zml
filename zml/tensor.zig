@@ -1893,7 +1893,8 @@ pub const Tensor = struct {
     /// Concatenates the input Tensors along the given axis.
     pub fn concatenate(tensors: []const Tensor, axis_: anytype) Tensor {
         if (tensors.len == 1) return tensors[0];
-        var buffer = CompilationContext.current().arena.allocator().alloc(*const mlir.Value, tensors.len) catch @panic("OOM");
+        const ctx = CompilationContext.current();
+        var buffer = ctx.alloc(*const mlir.Value, tensors.len);
         std.debug.assert(tensors.len <= buffer.len);
         std.debug.assert(tensors.len > 0);
         const a = tensors[0].axis(axis_);
@@ -1924,7 +1925,8 @@ pub const Tensor = struct {
             stdx.debug.assert(shape0.eqlWithTags(tensor._shape), "stack expects tensor shapes to match, got {f} and {f}", .{ shape0, tensor._shape });
         }
 
-        var reshaped = CompilationContext.current().arena.allocator().alloc(Tensor, tensors.len) catch @panic("OOM");
+        const ctx = CompilationContext.current();
+        var reshaped = ctx.alloc(Tensor, tensors.len);
         for (tensors, 0..) |tensor, i| {
             reshaped[i] = tensor.reshape(res_shape);
         }
@@ -3493,29 +3495,21 @@ pub const Tensor = struct {
     pub fn chunkAllowTrailing(
         self: Tensor,
         axis_: i64,
-        n_chunks: comptime_int,
-    ) ![]Tensor {
+        n_chunks: usize,
+    ) []Tensor {
         const a = self.axis(axis_);
-        const d = self.dim(a);
-        const chunk_size: i64 = @divFloor(d, n_chunks);
+        const d: i64 = self.dim(a);
+        const chunk_size: i64 = @divFloor(d, @as(i64, @intCast(n_chunks)));
         const tail_chunk_size: i64 = @rem(d, chunk_size);
 
-        const allocator = CompilationContext.current().arena.allocator();
+        const len: usize = if (tail_chunk_size == 0) n_chunks else n_chunks + 1;
+        const chunks = CompilationContext.current().alloc(Tensor, len);
 
-        var chunks = std.ArrayList(Tensor).initCapacity(allocator, n_chunks + 1) catch @panic("OOM");
-        defer chunks.deinit(allocator);
-
-        for (0..n_chunks) |i| {
+        for (0.., chunks) |i, *chunk| {
             const start: i64 = @as(i64, @intCast(i)) * chunk_size;
-            chunks.appendAssumeCapacity(
-                self.slice1d(a, .{ .start = start, .end = start + chunk_size }),
-            );
+            chunk.* = self.slice1d(a, .{ .start = start, .end = @min(start + chunk_size, d) });
         }
-        if (tail_chunk_size != 0) {
-            const start: i64 = n_chunks * chunk_size;
-            chunks.appendAssumeCapacity(self.slice1d(a, .{ .start = start }));
-        }
-        return chunks.toOwnedSlice(allocator);
+        return chunks;
     }
 
     test chunkAllowTrailing {
@@ -3540,8 +3534,8 @@ pub const Tensor = struct {
             .{ .{ 12, 2 }, 0, 3, .{ 4, 2 }, .{} },
         }) |testcase| {
             const x_shape, const ax, const n_chunks, const res, const trailing = testcase;
-            const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
-            const chunks = try x.chunkAllowTrailing(x.axis(ax), n_chunks);
+            const x = Tensor.zeroes(.init(x_shape, .f16));
+            const chunks = x.chunkAllowTrailing(x.axis(ax), n_chunks);
 
             const res_shape = Shape.init(res, .f16);
             for (chunks[0..n_chunks]) |chk| {
@@ -3566,9 +3560,7 @@ pub const Tensor = struct {
         for (split_sizes) |n| split_sum += n;
         stdx.debug.assert(split_sum == d, "split expects sum of 'split_sizes' values and axis dimension to be equal, got {} and {}", .{ split_sum, d });
 
-        const allocator = CompilationContext.current().arena.allocator();
-
-        const res = allocator.alloc(Tensor, split_sizes.len) catch @panic("OOM");
+        const res = CompilationContext.current().alloc(Tensor, split_sizes.len);
 
         var start: i64 = 0;
         for (split_sizes, 0..) |n, i| {
