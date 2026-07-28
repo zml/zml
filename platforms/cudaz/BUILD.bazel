@@ -4,6 +4,7 @@ load(":compiler.bzl", "zig_runtime")
 
 zig_runtime(
     name = "zig_runtime",
+    srcs = ["kernels.zig"],
     kernel = "kernel.zig",
 )
 
@@ -12,6 +13,7 @@ zig_shared_library(
     srcs = [
         "compiler.zig",
         "cuda.zig",
+        "kernels.zig",
     ],
     main = "libpjrt_cudaz.zig",
     shared_lib_name = "libpjrt_cudaz.so",
@@ -30,6 +32,7 @@ zig_test(
     srcs = [
         "compiler.zig",
         "cuda.zig",
+        "kernels.zig",
     ],
     data = [":zig_runtime"],
     main = "libpjrt_cudaz.zig",

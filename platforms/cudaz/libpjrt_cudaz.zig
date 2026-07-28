@@ -3,6 +3,7 @@ const std = @import("std");
 const c = @import("c");
 const compiler = @import("compiler.zig");
 const cuda = @import("cuda.zig");
+const kernels = @import("kernels.zig");
 
 const log = std.log.scoped(.@"zml/platforms/cudaz");
 

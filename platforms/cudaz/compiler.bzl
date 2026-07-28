@@ -13,6 +13,7 @@ def _zig_runtime_impl(ctx):
     zig_exe = toolchain.zig_exe.file
     zig_lib = toolchain.zig_lib.file
     kernel = ctx.file.kernel
+    srcs = ctx.files.srcs
     config = ctx.actions.declare_file(ctx.label.name + ".txt")
     ctx.actions.write(
         output = config,
@@ -26,7 +27,7 @@ def _zig_runtime_impl(ctx):
 
     return DefaultInfo(
         files = depset([config]),
-        runfiles = ctx.runfiles(files = [config, zig_exe, zig_lib, kernel]),
+        runfiles = ctx.runfiles(files = [config, zig_exe, zig_lib, kernel] + srcs),
     )
 
 zig_runtime = rule(
@@ -35,6 +36,9 @@ zig_runtime = rule(
         "kernel": attr.label(
             allow_single_file = [".zig"],
             mandatory = True,
+        ),
+        "srcs": attr.label_list(
+            allow_files = [".zig"],
         ),
     },
     toolchains = ["@rules_zig//zig:toolchain_type"],
