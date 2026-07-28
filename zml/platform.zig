@@ -349,6 +349,7 @@ pub const Platform = struct {
             .cuda,
             .oneapi,
             .metal,
+            .vulkan,
             .cpu,
         };
         return for (ordered_targets) |target| {

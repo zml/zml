@@ -952,7 +952,7 @@ pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs
     const ctx = CompilationContext.current();
     switch (ctx.platform.target) {
         .neuron => {},
-        .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => {
+        .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .vulkan => {
             stdx.debug.panic("neuronNki is only available on Neuron, got {s}", .{@tagName(ctx.platform.target)});
         },
     }
@@ -1582,7 +1582,7 @@ pub const LoweringCompatibility = struct {
     pub fn preserveGatherFillSemantics(indices: []Tensor) void {
         switch (CompilationContext.current().platform.target) {
             .neuron => {},
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => return,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .vulkan => return,
         }
 
         const active_lanes = activeLanesForFillDropIndices(indices) orelse return;
@@ -1594,7 +1594,7 @@ pub const LoweringCompatibility = struct {
     pub fn preserveScatterDropSemantics(indices: []Tensor, updates: anytype, opts: Tensor.ScatterOpts, update_values: *[updates.len]*const mlir.Value) void {
         const active_lanes: ?Tensor = switch (CompilationContext.current().platform.target) {
             .neuron => if (opts.update_fn == Tensor.ScatterOpts.increment) activeLanesForFillDropIndices(indices) else null,
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => null,
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .vulkan => null,
         };
 
         if (active_lanes) |active| replaceInactiveIndirectIndices(indices, active);
