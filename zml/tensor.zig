@@ -3314,7 +3314,7 @@ pub const Tensor = struct {
                 }
                 break :blk .{ .values = values, .indices = indices };
             },
-            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => blk: {
+            .cpu, .cuda, .rocm, .tpu, .oneapi, .metal, .vulkan => blk: {
                 var sorted = self.sort(a, .{ .descending = opts.descending });
                 sorted.values = sorted.values.slice1d(a, .{ .end = k });
                 sorted.indices = sorted.indices.slice1d(a, .{ .end = k });
