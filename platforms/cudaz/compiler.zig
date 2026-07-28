@@ -15,10 +15,12 @@ pub const Error = error{
     ZigExecutableUnavailable,
     ZigLibUnavailable,
     KernelSourceUnavailable,
+    KernelLibraryUnavailable,
     ZigCompilationFailed,
     InvalidKernelIr,
     InvalidMlirProgram,
     MissingMainFunction,
+    UnsupportedGraph,
     UnsupportedOutputType,
 };
 
@@ -35,6 +37,39 @@ pub const OutputSpec = struct {
 
     fn deinit(self: OutputSpec, allocator: std.mem.Allocator) void {
         allocator.free(self.dims);
+    }
+};
+
+pub const GeneratedKernel = struct {
+    source: []u8,
+    output_specs: []OutputSpec,
+    scratch_size: usize,
+    input_count: usize,
+
+    pub fn deinit(self: *GeneratedKernel, allocator: std.mem.Allocator) void {
+        allocator.free(self.source);
+        deinitOutputSpecs(allocator, self.output_specs);
+        self.* = undefined;
+    }
+};
+
+const DenseLayer = struct {
+    weight_argument: usize,
+    bias_argument: usize,
+    output_elements: usize,
+    contracting_elements: usize,
+};
+
+const GraphPlan = struct {
+    input_argument: usize,
+    input_count: usize,
+    layers: []DenseLayer,
+    scratch_offsets: []usize,
+    scratch_size: usize,
+
+    fn deinit(self: GraphPlan, allocator: std.mem.Allocator) void {
+        allocator.free(self.layers);
+        allocator.free(self.scratch_offsets);
     }
 };
 
@@ -71,6 +106,312 @@ pub fn parseOutputSpecs(allocator: std.mem.Allocator, program: []const u8) ![]Ou
         return error.InvalidMlirProgram;
     defer module.deinit();
     return outputSpecsFromModule(allocator, module);
+}
+
+pub fn generateKernel(
+    allocator: std.mem.Allocator,
+    program: []const u8,
+) !GeneratedKernel {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    inline for (.{ "func", "stablehlo", "sdy" }) |dialect| {
+        mlir.DialectHandle.fromString(dialect).insertDialect(registry);
+    }
+
+    const context = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer context.deinit();
+    context.loadAllAvailableDialects();
+
+    const module = dialects.stablehlo.deserializePortableArtifact(context, program) catch
+        return error.InvalidMlirProgram;
+    defer module.deinit();
+
+    const output_specs = try outputSpecsFromModule(allocator, module);
+    errdefer deinitOutputSpecs(allocator, output_specs);
+    const plan = try graphPlanFromModule(allocator, module);
+    defer plan.deinit(allocator);
+    const source = try renderKernelSource(allocator, plan, output_specs);
+    return .{
+        .source = source,
+        .output_specs = output_specs,
+        .scratch_size = plan.scratch_size,
+        .input_count = plan.input_count,
+    };
+}
+
+fn graphPlanFromModule(
+    allocator: std.mem.Allocator,
+    module: *const mlir.Module,
+) !GraphPlan {
+    const main = findMainFunction(module) orelse return error.MissingMainFunction;
+    if (main.numRegions() != 1) return error.UnsupportedGraph;
+    const block = main.region(0).firstBlock() orelse return error.UnsupportedGraph;
+
+    const function_type_attribute = main.attributeByName("function_type") orelse
+        return error.UnsupportedGraph;
+    const type_attribute = function_type_attribute.isA(mlir.TypeAttribute) orelse
+        return error.UnsupportedGraph;
+    const function_type = type_attribute.value().isA(mlir.FunctionType) orelse
+        return error.UnsupportedGraph;
+    const input_count: usize = @intCast(c.mlirFunctionTypeGetNumInputs(function_type.ptr()));
+
+    var layers_buffer: [16]DenseLayer = undefined;
+    var layer_count: usize = 0;
+    var input_argument: ?usize = null;
+    var previous_activation: ?*const mlir.Value = null;
+    var saw_argmax_reduce = false;
+
+    var maybe_operation: ?*const mlir.Operation = block.firstOperation();
+    while (maybe_operation) |operation| {
+        if (std.mem.eql(u8, operation.name(), "stablehlo.dot_general")) {
+            if (layer_count == layers_buffer.len or
+                operation.numOperands() != 2 or
+                operation.numResults() != 1)
+            {
+                return error.UnsupportedGraph;
+            }
+
+            const weight_argument = traceBlockArgument(operation.operand(0)) orelse
+                return error.UnsupportedGraph;
+            const weight_type = rankedTensor(operation.operand(0)) orelse
+                return error.UnsupportedGraph;
+            const result_type = rankedTensor(operation.result(0)) orelse
+                return error.UnsupportedGraph;
+            if (weight_type.rank() != 2 or result_type.rank() != 1) {
+                return error.UnsupportedGraph;
+            }
+            const output_elements = positiveDimension(weight_type, 0) orelse
+                return error.UnsupportedGraph;
+            const contracting_elements = positiveDimension(weight_type, 1) orelse
+                return error.UnsupportedGraph;
+            if (positiveDimension(result_type, 0) != output_elements) {
+                return error.UnsupportedGraph;
+            }
+
+            if (previous_activation) |activation| {
+                if (!operation.operand(1).eql(activation)) return error.UnsupportedGraph;
+            } else {
+                input_argument = traceBlockArgument(operation.operand(1)) orelse
+                    return error.UnsupportedGraph;
+            }
+
+            const add = findConsumingOperation(
+                operation,
+                "stablehlo.add",
+                operation.result(0),
+            ) orelse return error.UnsupportedGraph;
+            const bias_value = if (add.operand(0).eql(operation.result(0)))
+                add.operand(1)
+            else
+                add.operand(0);
+            const bias_argument = traceBlockArgument(bias_value) orelse
+                return error.UnsupportedGraph;
+            const bias_type = rankedTensor(bias_value) orelse return error.UnsupportedGraph;
+            if (bias_type.rank() != 1 or
+                positiveDimension(bias_type, 0) != output_elements)
+            {
+                return error.UnsupportedGraph;
+            }
+
+            const maximum = findConsumingOperation(
+                add,
+                "stablehlo.maximum",
+                add.result(0),
+            ) orelse return error.UnsupportedGraph;
+            previous_activation = maximum.result(0);
+            layers_buffer[layer_count] = .{
+                .weight_argument = weight_argument,
+                .bias_argument = bias_argument,
+                .output_elements = output_elements,
+                .contracting_elements = contracting_elements,
+            };
+            layer_count += 1;
+        } else if (std.mem.eql(u8, operation.name(), "stablehlo.reduce") and
+            previous_activation != null and operation.numOperands() >= 1 and
+            operation.operand(0).eql(previous_activation.?))
+        {
+            saw_argmax_reduce = operation.numResults() == 2;
+        }
+        maybe_operation = nextOperation(operation);
+    }
+
+    if (layer_count == 0 or input_argument == null or !saw_argmax_reduce) {
+        return error.UnsupportedGraph;
+    }
+
+    const layers = try allocator.dupe(DenseLayer, layers_buffer[0..layer_count]);
+    errdefer allocator.free(layers);
+    const scratch_offsets = try allocator.alloc(usize, layer_count);
+    errdefer allocator.free(scratch_offsets);
+
+    var scratch_size: usize = 16;
+    for (layers, scratch_offsets) |layer, *offset| {
+        scratch_size = std.mem.alignForward(usize, scratch_size, @alignOf(f32));
+        offset.* = scratch_size;
+        const layer_bytes = std.math.mul(
+            usize,
+            layer.output_elements,
+            @sizeOf(f32),
+        ) catch return error.UnsupportedGraph;
+        scratch_size = std.math.add(usize, scratch_size, layer_bytes) catch
+            return error.UnsupportedGraph;
+    }
+    return .{
+        .input_argument = input_argument.?,
+        .input_count = input_count,
+        .layers = layers,
+        .scratch_offsets = scratch_offsets,
+        .scratch_size = scratch_size,
+    };
+}
+
+fn rankedTensor(value: *const mlir.Value) ?*const mlir.RankedTensorType {
+    return value.type_().isA(mlir.RankedTensorType);
+}
+
+fn positiveDimension(tensor: *const mlir.RankedTensorType, index: usize) ?usize {
+    const dimension = tensor.dimension(index);
+    return if (dimension >= 0) @intCast(dimension) else null;
+}
+
+fn traceBlockArgument(value: *const mlir.Value) ?usize {
+    if (value.isA(mlir.BlockArgument)) |argument| return argument.number();
+    const result = value.isA(mlir.OpResult) orelse return null;
+    const owner = result.owner();
+    if (owner.numOperands() != 1) return null;
+    if (!std.mem.eql(u8, owner.name(), "stablehlo.reshape") and
+        !std.mem.eql(u8, owner.name(), "stablehlo.convert") and
+        !std.mem.eql(u8, owner.name(), "stablehlo.broadcast_in_dim"))
+    {
+        return null;
+    }
+    return traceBlockArgument(owner.operand(0));
+}
+
+fn findConsumingOperation(
+    after: *const mlir.Operation,
+    name: []const u8,
+    value: *const mlir.Value,
+) ?*const mlir.Operation {
+    var maybe_operation = nextOperation(after);
+    while (maybe_operation) |operation| {
+        if (std.mem.eql(u8, operation.name(), name)) {
+            for (0..operation.numOperands()) |index| {
+                if (operation.operand(index).eql(value)) return operation;
+            }
+        }
+        if (std.mem.eql(u8, operation.name(), "stablehlo.dot_general") or
+            std.mem.eql(u8, operation.name(), "func.return"))
+        {
+            return null;
+        }
+        maybe_operation = nextOperation(operation);
+    }
+    return null;
+}
+
+fn nextOperation(operation: *const mlir.Operation) ?*const mlir.Operation {
+    const next = c.mlirOperationGetNextInBlock(operation.ptr());
+    return if (next.ptr) |ptr| @ptrCast(ptr) else null;
+}
+
+fn renderKernelSource(
+    allocator: std.mem.Allocator,
+    plan: GraphPlan,
+    outputs: []const OutputSpec,
+) ![]u8 {
+    if (outputs.len != 1 or
+        outputs[0].element_type != c.PJRT_Buffer_Type_U8 or
+        outputs[0].dims.len != 1 or
+        outputs[0].dims[0] != 1)
+    {
+        return error.UnsupportedGraph;
+    }
+
+    var source: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
+    errdefer source.deinit();
+    const writer = &source.writer;
+    const output_index = plan.input_count;
+    const scratch_index = output_index + outputs.len;
+    const expected_buffers = scratch_index + 1;
+
+    try writer.writeAll(
+        \\const kernels = @import("kernels.zig");
+        \\
+        \\fn constBuffer(comptime T: type, buffers: [*]*const anyopaque, index: usize) [*]const T {
+        \\    return @ptrCast(@alignCast(buffers[index]));
+        \\}
+        \\
+        \\fn mutableBuffer(comptime T: type, buffers: [*]*const anyopaque, index: usize) [*]T {
+        \\    return @ptrCast(@alignCast(@constCast(buffers[index])));
+        \\}
+        \\
+    );
+    try writer.print(
+        \\export fn main(buffers: [*]*const anyopaque, buffer_len: usize) callconv(.nvptx_kernel) void {{
+        \\    if (buffer_len != {d}) return;
+        \\    const input = constBuffer(u8, buffers, {d});
+        \\    const output = mutableBuffer(u8, buffers, {d});
+        \\    const scratch = mutableBuffer(u8, buffers, {d});
+        \\    const barrier: *kernels.GridBarrier = @ptrCast(@alignCast(scratch));
+        \\
+    , .{
+        expected_buffers,
+        plan.input_argument,
+        output_index,
+        scratch_index,
+    });
+
+    for (plan.layers, plan.scratch_offsets, 0..) |layer, offset, index| {
+        try writer.print(
+            "    const activation_{d}: [*]f32 = @ptrCast(@alignCast(scratch + {d}));\n",
+            .{ index, offset },
+        );
+        try writer.print(
+            "    const weight_{d} = constBuffer(f32, buffers, {d});\n",
+            .{ index, layer.weight_argument },
+        );
+        try writer.print(
+            "    const bias_{d} = constBuffer(f32, buffers, {d});\n",
+            .{ index, layer.bias_argument },
+        );
+    }
+    try writer.writeByte('\n');
+
+    for (plan.layers, 0..) |layer, index| {
+        const rhs_type = if (index == 0) "u8" else "f32";
+        var rhs_buffer: [64]u8 = undefined;
+        const rhs = if (index == 0)
+            "input"
+        else
+            try std.fmt.bufPrint(&rhs_buffer, "activation_{d}", .{index - 1});
+        try writer.print(
+            \\    kernels.matmulF32({s}, weight_{d}, {s}, activation_{d}, {d}, 1, {d});
+            \\    kernels.gridBarrier(barrier);
+            \\    kernels.addBiasF32(activation_{d}, bias_{d}, 1, {d});
+            \\    kernels.gridBarrier(barrier);
+            \\    kernels.reluF32(activation_{d}, {d});
+            \\    kernels.gridBarrier(barrier);
+            \\
+        , .{
+            rhs_type,
+            index,
+            rhs,
+            index,
+            layer.output_elements,
+            layer.contracting_elements,
+            index,
+            index,
+            layer.output_elements,
+            index,
+            layer.output_elements,
+        });
+    }
+    try writer.print(
+        "    kernels.argMaxF32(u8, activation_{d}, {d}, &output[0]);\n}}\n",
+        .{ plan.layers.len - 1, plan.layers[plan.layers.len - 1].output_elements },
+    );
+    return source.toOwnedSlice();
 }
 
 fn outputSpecsFromModule(allocator: std.mem.Allocator, module: *const mlir.Module) ![]OutputSpec {
@@ -214,7 +555,99 @@ test "read output specifications from main function" {
     try std.testing.expectEqualSlices(i64, &.{4}, portable_outputs[1].dims);
 }
 
+test "lower dense StableHLO graph to composable Zig sub-kernels" {
+    const registry = try mlir.DialectRegistry.init();
+    defer registry.deinit();
+    inline for (.{ "func", "stablehlo" }) |dialect| {
+        mlir.DialectHandle.fromString(dialect).insertDialect(registry);
+    }
+
+    const context = try mlir.Context.init(.{ .registry = registry, .threading = false });
+    defer context.deinit();
+    context.loadAllAvailableDialects();
+
+    const module = try mlir.Module.parse(context,
+        \\module {
+        \\  func.func public @main(%arg0: tensor<2x3xf32>, %arg1: tensor<2xf32>, %arg2: tensor<2x2xf32>, %arg3: tensor<2xf32>, %arg4: tensor<3xui8>) -> tensor<1xui8> {
+        \\    %c = stablehlo.constant dense<0> : tensor<i32>
+        \\    %cst = stablehlo.constant dense<0xFF800000> : tensor<f32>
+        \\    %zero = stablehlo.constant dense<0.000000e+00> : tensor<f32>
+        \\    %0 = stablehlo.convert %arg4 : (tensor<3xui8>) -> tensor<3xf32>
+        \\    %1 = stablehlo.dot_general %arg0, %0, contracting_dims = [1] x [0] : (tensor<2x3xf32>, tensor<3xf32>) -> tensor<2xf32>
+        \\    %2 = stablehlo.add %1, %arg1 : tensor<2xf32>
+        \\    %3 = stablehlo.broadcast_in_dim %zero, dims = [] : (tensor<f32>) -> tensor<2xf32>
+        \\    %4 = stablehlo.maximum %2, %3 : tensor<2xf32>
+        \\    %5 = stablehlo.dot_general %arg2, %4, contracting_dims = [1] x [0] : (tensor<2x2xf32>, tensor<2xf32>) -> tensor<2xf32>
+        \\    %6 = stablehlo.add %5, %arg3 : tensor<2xf32>
+        \\    %7 = stablehlo.broadcast_in_dim %zero, dims = [] : (tensor<f32>) -> tensor<2xf32>
+        \\    %8 = stablehlo.maximum %6, %7 : tensor<2xf32>
+        \\    %9 = stablehlo.iota dim = 0 : tensor<2xi32>
+        \\    %10:2 = stablehlo.reduce(%8 init: %cst), (%9 init: %c) across dimensions = [0] : (tensor<2xf32>, tensor<2xi32>, tensor<f32>, tensor<i32>) -> (tensor<f32>, tensor<i32>)
+        \\     reducer(%lhs_value: tensor<f32>, %rhs_value: tensor<f32>) (%lhs_index: tensor<i32>, %rhs_index: tensor<i32>) {
+        \\      %is_greater = stablehlo.compare GT, %lhs_value, %rhs_value, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>
+        \\      %value = stablehlo.select %is_greater, %lhs_value, %rhs_value : tensor<i1>, tensor<f32>
+        \\      %index = stablehlo.select %is_greater, %lhs_index, %rhs_index : tensor<i1>, tensor<i32>
+        \\      stablehlo.return %value, %index : tensor<f32>, tensor<i32>
+        \\    }
+        \\    %11 = stablehlo.broadcast_in_dim %10#1, dims = [] : (tensor<i32>) -> tensor<1xi32>
+        \\    %12 = stablehlo.convert %11 : (tensor<1xi32>) -> tensor<1xui8>
+        \\    return %12 : tensor<1xui8>
+        \\  }
+        \\}
+    );
+    defer module.deinit();
+
+    var artifact: std.Io.Writer.Allocating = try .initCapacity(
+        std.testing.allocator,
+        4096,
+    );
+    defer artifact.deinit();
+    try dialects.stablehlo.serializePortableArtifact2(
+        module,
+        dialects.stablehlo.minimumVersion(),
+        &artifact.writer,
+    );
+
+    var generated = try generateKernel(std.testing.allocator, artifact.written());
+    defer generated.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 5), generated.input_count);
+    try std.testing.expectEqual(@as(usize, 32), generated.scratch_size);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        generated.source,
+        "kernels.matmulF32(u8, weight_0, input, activation_0, 2, 1, 3);",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        generated.source,
+        "kernels.matmulF32(f32, weight_1, activation_0, activation_1, 2, 1, 2);",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        generated.source,
+        "kernels.argMaxF32(u8, activation_1, 2, &output[0]);",
+    ) != null);
+
+    const ptx = try compileGenerated(std.testing.allocator, generated.source);
+    defer std.testing.allocator.free(ptx);
+    try std.testing.expect(std.mem.indexOf(u8, ptx, ".visible .entry main(") != null);
+}
+
 pub fn compile(allocator: std.mem.Allocator) ![:0]u8 {
+    return compileSource(allocator, null);
+}
+
+pub fn compileGenerated(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+) ![:0]u8 {
+    return compileSource(allocator, source);
+}
+
+fn compileSource(
+    allocator: std.mem.Allocator,
+    generated_source: ?[]const u8,
+) ![:0]u8 {
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -251,6 +684,31 @@ pub fn compile(allocator: std.mem.Allocator) ![:0]u8 {
     const kernel_path = try r.rlocationAlloc(allocator, kernel_runfile) orelse
         return error.KernelSourceUnavailable;
     defer allocator.free(kernel_path);
+    const kernel_directory = std.fs.path.dirname(kernel_path) orelse
+        return error.KernelLibraryUnavailable;
+    const kernels_path = try std.Io.Dir.path.join(
+        allocator,
+        &.{ kernel_directory, "kernels.zig" },
+    );
+    defer allocator.free(kernels_path);
+
+    const kernel_source = if (generated_source) |source|
+        source
+    else
+        try std.Io.Dir.cwd().readFileAlloc(
+            io,
+            kernel_path,
+            allocator,
+            .limited(4 * 1024 * 1024),
+        );
+    defer if (generated_source == null) allocator.free(kernel_source);
+    const kernels_source = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        kernels_path,
+        allocator,
+        .limited(4 * 1024 * 1024),
+    ) catch return error.KernelLibraryUnavailable;
+    defer allocator.free(kernels_source);
 
     const tmp_root_path = if (std.c.getenv("TMPDIR")) |value| std.mem.span(value) else "/tmp";
     var tmp_root = try std.Io.Dir.openDir(.cwd(), io, tmp_root_path, .{});
@@ -270,10 +728,17 @@ pub fn compile(allocator: std.mem.Allocator) ![:0]u8 {
     const tmp_path_len = try tmp_dir.realPath(io, &tmp_path_buffer);
     const tmp_path = tmp_path_buffer[0..tmp_path_len];
 
+    const kernel_file = try tmp_dir.createFile(io, "kernel.zig", .{});
+    defer kernel_file.close(io);
+    try kernel_file.writePositionalAll(io, kernel_source, 0);
+    const kernels_file = try tmp_dir.createFile(io, "kernels.zig", .{});
+    defer kernels_file.close(io);
+    try kernels_file.writePositionalAll(io, kernels_source, 0);
+
     try runZig(allocator, io, tmp_path, &.{
         zig_path,
         "build-obj",
-        kernel_path,
+        "kernel.zig",
         "-target",
         "nvptx64-cuda",
         "-mcpu",

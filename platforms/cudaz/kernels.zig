@@ -10,6 +10,11 @@ const is_nvptx = builtin.cpu.arch.isNvptx();
 pub const SharedMem = opaque {};
 pub extern var shared_memory: SharedMem align(64) addrspace(.shared);
 
+pub const GridBarrier = extern struct {
+    arrivals: u32 = 0,
+    phase: u32 = 0,
+};
+
 /// Expose all dynamic shared memory assigned to the persistent kernel.
 pub fn sharedMemory(comptime T: type) []align(64) addrspace(.shared) T {
     const mem_u8: [*]align(64) addrspace(.shared) u8 = @ptrCast(&shared_memory);
@@ -81,6 +86,33 @@ fn syncThreads() void {
     }
 }
 
+/// Synchronize every persistent block between graph operations.
+///
+/// The launcher admits exactly one block per SM, so every block participating
+/// in this software barrier is resident and can make forward progress.
+pub fn gridBarrier(barrier: *GridBarrier) void {
+    if (comptime !is_nvptx) return;
+
+    const grid: Grid = .init();
+    syncThreads();
+    if (grid.thread_id == 0) {
+        const phase = @atomicLoad(u32, &barrier.phase, .monotonic);
+        asm volatile ("membar.gl;" ::: .{ .memory = true });
+        const previous = @atomicRmw(u32, &barrier.arrivals, .Add, 1, .monotonic);
+        if (previous + 1 == grid.block_count) {
+            @atomicStore(u32, &barrier.arrivals, 0, .monotonic);
+            asm volatile ("membar.gl;" ::: .{ .memory = true });
+            @atomicStore(u32, &barrier.phase, phase ^ 1, .monotonic);
+        } else {
+            while (@atomicLoad(u32, &barrier.phase, .monotonic) == phase) {
+                asm volatile ("" ::: .{ .memory = true });
+            }
+        }
+        asm volatile ("membar.gl;" ::: .{ .memory = true });
+    }
+    syncThreads();
+}
+
 fn shuffleDown(value: f32, offset: u32) f32 {
     if (comptime !is_nvptx) return value;
     return asm ("shfl.sync.down.b32 %[result], %[value], %[offset], 0x1f, 0xffffffff;"
@@ -103,8 +135,9 @@ fn warpSum(value_: f32) f32 {
 /// One warp owns one output element. The fixed persistent grid strides over
 /// output elements, while lanes split the contracting dimension.
 pub fn matmulF32(
+    comptime Rhs: type,
     lhs: [*]const f32,
-    rhs: [*]const f32,
+    rhs: [*]const Rhs,
     output: [*]f32,
     m: usize,
     n: usize,
@@ -115,7 +148,8 @@ pub fn matmulF32(
             for (0..n) |column| {
                 var sum: f32 = 0;
                 for (0..k) |contracting| {
-                    sum += lhs[row * k + contracting] * rhs[contracting * n + column];
+                    sum += lhs[row * k + contracting] *
+                        asF32(Rhs, rhs[contracting * n + column]);
                 }
                 output[row * n + column] = sum;
             }
@@ -132,11 +166,20 @@ pub fn matmulF32(
         var sum: f32 = 0;
         var contracting: usize = grid.lane();
         while (contracting < k) : (contracting += warp_size) {
-            sum += lhs[row * k + contracting] * rhs[contracting * n + column];
+            sum += lhs[row * k + contracting] *
+                asF32(Rhs, rhs[contracting * n + column]);
         }
         sum = warpSum(sum);
         if (grid.lane() == 0) output[output_index] = sum;
     }
+}
+
+fn asF32(comptime T: type, value: T) f32 {
+    return switch (@typeInfo(T)) {
+        .int => @floatFromInt(value),
+        .float => @floatCast(value),
+        else => @compileError("matmulF32 only supports integer and float RHS values"),
+    };
 }
 
 /// Add a row-major bias vector along the last matrix dimension in place.
@@ -163,7 +206,12 @@ pub fn reluF32(values: [*]f32, len: usize) void {
 ///
 /// Argmax is the terminal reduction in the current mega-kernel, so block zero
 /// consumes the fixed grid's shared-memory arena while the other blocks retire.
-pub fn argMaxF32(values: [*]const f32, len: usize, output: *u32) void {
+pub fn argMaxF32(
+    comptime Index: type,
+    values: [*]const f32,
+    len: usize,
+    output: *Index,
+) void {
     if (comptime !is_nvptx) {
         var best_index: u32 = 0;
         var best_value = -std.math.inf(f32);
@@ -173,7 +221,7 @@ pub fn argMaxF32(values: [*]const f32, len: usize, output: *u32) void {
                 best_index = @intCast(index);
             }
         }
-        output.* = best_index;
+        output.* = @intCast(best_index);
         return;
     }
 
@@ -219,7 +267,7 @@ pub fn argMaxF32(values: [*]const f32, len: usize, output: *u32) void {
         syncThreads();
         active = next;
     }
-    if (grid.thread_id == 0) output.* = partial_indices[0];
+    if (grid.thread_id == 0) output.* = @intCast(partial_indices[0]);
 }
 
 test "compose dense layer and argmax sub-kernels on host" {
@@ -229,12 +277,12 @@ test "compose dense layer and argmax sub-kernels on host" {
     };
     const rhs = [_]f32{ 1, -1, 2 };
     var result: [2]f32 = undefined;
-    matmulF32(&lhs, &rhs, &result, 2, 1, 3);
+    matmulF32(f32, &lhs, &rhs, &result, 2, 1, 3);
     addBiasF32(&result, &[_]f32{1}, 2, 1);
     reluF32(&result, result.len);
     try std.testing.expectEqualSlices(f32, &.{ 6, 4 }, &result);
 
     var index: u32 = undefined;
-    argMaxF32(&result, result.len, &index);
+    argMaxF32(u32, &result, result.len, &index);
     try std.testing.expectEqual(@as(u32, 0), index);
 }
