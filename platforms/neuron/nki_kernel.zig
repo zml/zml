@@ -18,6 +18,7 @@ pub const Kernel = struct {
     entrypoint: []const u8,
     source_path: []const u8,
     compiler_target: []const u8,
+    lnc: i64,
     inputs: []const TensorSignature,
     outputs: []const TensorSignature,
 };
@@ -28,6 +29,7 @@ const CompilerRequest = struct {
     target: []const u8,
     tool_bin_dir: []const u8,
     neuronx_cc_args: []const []const u8,
+    lnc: i64,
     inputs: []const TensorSignature,
     outputs: []const TensorSignature,
 };
@@ -36,10 +38,26 @@ const CompilerResponse = struct {
     backend_config_b64: []const u8,
 };
 
-pub fn compilerTargetFromInstance() neuron.CompilerTarget {
+/// Resolve the NKI specialization target. CPU simulation has no Neuron
+/// instance to query, so it uses the same target override understood by NKI.
+pub fn compilerTarget() neuron.CompilerTarget {
+    if (std.c.getenv("NKI_SIMULATOR")) |raw_simulator| {
+        const simulator = std.mem.span(raw_simulator);
+
+        if (simulator.len != 0 and std.mem.eql(u8, simulator, "1")) {
+            const raw_target = std.c.getenv("NEURON_PLATFORM_TARGET_OVERRIDE") orelse
+                std.debug.panic("NKI_SIMULATOR requires NEURON_PLATFORM_TARGET_OVERRIDE=trn2 or trn3", .{});
+            const target = std.mem.span(raw_target);
+            if (std.mem.eql(u8, target, "trn2")) return .trn2;
+            if (std.mem.eql(u8, target, "trn3")) return .trn3;
+            std.debug.panic("Unsupported NEURON_PLATFORM_TARGET_OVERRIDE={s}", .{target});
+        }
+    }
+
     const instance = neuron.instance() catch |err| {
         std.debug.panic("failed to query Neuron instance for NKI compiler target: {}", .{err});
     };
+
     return instance.compilerTarget();
 }
 
@@ -98,6 +116,7 @@ pub fn compileNkiKernel(allocator: std.mem.Allocator, io: std.Io, kernel: Kernel
         .target = kernel.compiler_target,
         .tool_bin_dir = bin_dirpath,
         .neuronx_cc_args = compiler_args.items,
+        .lnc = kernel.lnc,
         .inputs = kernel.inputs,
         .outputs = kernel.outputs,
     };

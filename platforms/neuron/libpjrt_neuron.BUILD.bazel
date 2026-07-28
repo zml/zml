@@ -22,6 +22,16 @@ patchelf(
     soname = "libneuronpjrt.so",
 )
 
+copy_to_directory(
+    name = "nki_library",
+    srcs = [
+        "@nki_library//:transformer",
+        "@nki_library_2_31//:core",
+    ],
+    include_external_repositories = ["**"],
+    root_paths = ["src/nkilib_src/nkilib"],
+)
+
 patchelf(
     name = "libpjrt_neuron_so",
     src = "@zml//platforms/neuron:libpjrt_neuron",
@@ -48,6 +58,7 @@ copy_to_directory(
         ":libneuronxla_files",
         ":libpjrt_neuron_so",
         ":neuron_explorer",
+        ":nki_library",
         "@aws-neuronx-collectives//:libnccom",
         "@aws-neuronx-runtime-lib//:libncfw.patchelf",
         "@aws-neuronx-runtime-lib//:libnrt.patchelf",
@@ -88,12 +99,14 @@ copy_to_directory(
         "**/lib**",
         "lib/python*/**",
         "site-packages/**",
+        "nki_library/**",
     ],
     replace_prefixes = {
         "platforms/neuron/neuronx-cc": "bin/neuronx-cc",
         "platforms/neuron/neuronx_cc_shim.py": "bin/python-shims/neuronx-cc",
         "platforms/neuron/nki-cc": "bin/nki-cc",
         "platforms/neuron/nki_kernel_compiler.py": "site-packages/nki_kernel_compiler.py",
+        "nki_library": "site-packages/nkilib_runtime",
         "neuron_explorer": "bin",
         "libneuronpjrt_so": "lib",
         "libpjrt_neuron_so": "lib",

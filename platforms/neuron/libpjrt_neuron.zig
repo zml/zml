@@ -8,6 +8,12 @@ const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/platforms/neuron");
 
+// libneuronxla 3.0.3854 supports clients through PJRT C API 0.104. The proxy
+// adapts the newer PJRT headers used by ZML to that version before forwarding
+// calls to libneuronpjrt.
+const neuron_pjrt_api_major = 0;
+const neuron_pjrt_api_minor = 104;
+
 fn findFreeTcpPort(io: std.Io) !u16 {
     const addr: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } };
     var server = try std.Io.net.IpAddress.listen(
@@ -50,8 +56,8 @@ fn setupNeuronEnv(io: std.Io, sandbox_path: []const u8) !void {
     _ = setenv(
         "NEURON_INTERNAL_PJRT_C_API_VERSION",
         std.fmt.comptimePrint("{d}.{d}", .{
-            c.PJRT_API_MAJOR,
-            c.PJRT_API_MINOR,
+            neuron_pjrt_api_major,
+            neuron_pjrt_api_minor,
         }),
         1,
     );
@@ -151,16 +157,26 @@ fn getPjrtApi() !*c.PJRT_Api {
     };
 
     Static.proxy = dupePjrtApi(Static.inner);
-    // Setup the API proxy functions
-    // Static.proxy.PJRT_Plugin_Attributes = &struct {
-    //     const STRUCT_SIZE = 24; // according to the failing assertion
 
-    //     fn call(args: [*c]c.PJRT_Plugin_Attributes_Args) callconv(.c) ?*c.PJRT_Error {
-    //         var new_args = args.*;
-    //         new_args.struct_size = @min(new_args.struct_size, STRUCT_SIZE);
-    //         return Static.inner.PJRT_Plugin_Attributes.?(&new_args);
-    //     }
-    // }.call;
+    // PJRT 0.113 added peak_allocated_bytes to this argument struct. Clamp the
+    // size in place so libneuronpjrt 0.104 accepts it while preserving all
+    // output fields written by the inner call.
+    Static.proxy.PJRT_Device_MemoryStats = &struct {
+        const struct_size_0_104 = @offsetOf(
+            c.PJRT_Device_MemoryStats_Args,
+            "peak_pool_bytes_is_set",
+        ) + @sizeOf(@FieldType(
+            c.PJRT_Device_MemoryStats_Args,
+            "peak_pool_bytes_is_set",
+        ));
+
+        fn call(args: [*c]c.PJRT_Device_MemoryStats_Args) callconv(.c) ?*c.PJRT_Error {
+            const caller_struct_size = args.*.struct_size;
+            args.*.struct_size = @min(caller_struct_size, struct_size_0_104);
+            defer args.*.struct_size = caller_struct_size;
+            return Static.inner.PJRT_Device_MemoryStats.?(args);
+        }
+    }.call;
 
     return &Static.proxy;
 }

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-neuron_explorer_bin="$0.runfiles/+neuron_packages+libpjrt_neuron/sandbox/bin/neuron-explorer"
+neuron_explorer_bin="$(rlocation "libpjrt_neuron/sandbox/bin/neuron-explorer")"
 
 run_dir="$1"
 execution_dir="${run_dir}/execution"
 
-case "$(basename "$0")" in
+case "$(basename "${RUNFILES_DIR%.runfiles}")" in
   summary-txt)
     output_format="summary-text"
     output_file="summary.txt"

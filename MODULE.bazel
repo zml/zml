@@ -222,6 +222,40 @@ neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "aws-neuronx-tools", "libgcc_s1", "libgomp1", "libpjrt_neuron", "libstdcpp6")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# NKI 0.5 compiles the released 2.31 core. The mainline transformer wrapper
+# adds multi-KV-head folding without replacing that compiler-matched core.
+http_archive(
+    name = "nki_library",
+    build_file_content = """
+filegroup(
+    name = "transformer",
+    srcs = [
+        "src/nkilib_src/nkilib/experimental/transformer/attention_block_tkg.py",
+        "src/nkilib_src/nkilib/experimental/transformer/attention_block_tkg_sharding.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "50ec64da692bdad5f4ac96d487b4aa934e32af4ddbe895dafe644e005972f6e1",
+    strip_prefix = "nki-library-7a5b6f94c096404790825079167a56a1a9aed157",
+    urls = ["https://github.com/aws-neuron/nki-library/archive/7a5b6f94c096404790825079167a56a1a9aed157.tar.gz"],
+)
+
+http_archive(
+    name = "nki_library_2_31",
+    build_file_content = """
+filegroup(
+    name = "core",
+    srcs = glob(["src/nkilib_src/nkilib/core/**"]),
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "ddf1959a31c185dffab051fde96daaf540fde7637bde4840ac098ce25457587b",
+    strip_prefix = "nki-library-ee20d3f23edf62ff29781e778ffcc70d51873e44",
+    urls = ["https://github.com/aws-neuron/nki-library/archive/ee20d3f23edf62ff29781e778ffcc70d51873e44.tar.gz"],
+)
+
 http_archive(
     name = "sevenzip_macos",
     build_file_content = """exports_files(["7zz"])""",

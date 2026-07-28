@@ -96,6 +96,7 @@ def compile_kernel(
     target: str,
     tool_bin_dir: str,
     neuronx_cc_args: tuple[str, ...],
+    lnc: int,
     inputs: tuple[TensorSpec, ...],
     outputs: tuple[TensorSpec, ...],
 ) -> str:
@@ -128,6 +129,7 @@ def compile_kernel(
 
     compile_opts = CompileOptions(
         target=target,
+        lnc=lnc,
         artifacts_dir=str(artifacts_dir),
         output_path=str(artifacts_dir / "unused.neff"),
         neuronx_cc_path=str(Path(tool_bin_dir) / "neuronx-cc"),
@@ -165,6 +167,7 @@ def main() -> None:
         target=request["target"],
         tool_bin_dir=request["tool_bin_dir"],
         neuronx_cc_args=tuple(request["neuronx_cc_args"]),
+        lnc=request["lnc"],
         inputs=parse_tensor_specs(request["inputs"]),
         outputs=parse_tensor_specs(request["outputs"]),
     )
