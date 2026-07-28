@@ -1893,7 +1893,8 @@ pub const Tensor = struct {
     /// Concatenates the input Tensors along the given axis.
     pub fn concatenate(tensors: []const Tensor, axis_: anytype) Tensor {
         if (tensors.len == 1) return tensors[0];
-        var buffer = CompilationContext.current().arena.allocator().alloc(*const mlir.Value, tensors.len) catch @panic("OOM");
+        const ctx = CompilationContext.current();
+        var buffer = ctx.arena.allocator().alloc(*const mlir.Value, tensors.len) catch CompilationContext.abortOOM();
         std.debug.assert(tensors.len <= buffer.len);
         std.debug.assert(tensors.len > 0);
         const a = tensors[0].axis(axis_);
@@ -1924,7 +1925,8 @@ pub const Tensor = struct {
             stdx.debug.assert(shape0.eqlWithTags(tensor._shape), "stack expects tensor shapes to match, got {f} and {f}", .{ shape0, tensor._shape });
         }
 
-        var reshaped = CompilationContext.current().arena.allocator().alloc(Tensor, tensors.len) catch @panic("OOM");
+        const ctx = CompilationContext.current();
+        var reshaped = ctx.arena.allocator().alloc(Tensor, tensors.len) catch CompilationContext.abortOOM();
         for (tensors, 0..) |tensor, i| {
             reshaped[i] = tensor.reshape(res_shape);
         }
@@ -3502,7 +3504,7 @@ pub const Tensor = struct {
 
         const allocator = CompilationContext.current().arena.allocator();
 
-        var chunks = std.ArrayList(Tensor).initCapacity(allocator, n_chunks + 1) catch @panic("OOM");
+        var chunks = std.ArrayList(Tensor).initCapacity(allocator, n_chunks + 1) catch CompilationContext.abortOOM();
         defer chunks.deinit(allocator);
 
         for (0..n_chunks) |i| {
@@ -3568,7 +3570,7 @@ pub const Tensor = struct {
 
         const allocator = CompilationContext.current().arena.allocator();
 
-        const res = allocator.alloc(Tensor, split_sizes.len) catch @panic("OOM");
+        const res = allocator.alloc(Tensor, split_sizes.len) catch CompilationContext.abortOOM();
 
         var start: i64 = 0;
         for (split_sizes, 0..) |n, i| {
