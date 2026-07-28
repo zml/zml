@@ -1,4 +1,5 @@
 const std = @import("std");
+const kernels = @import("kernels.zig");
 
 const log = std.log.scoped(.@"zml/platforms/cudaz/cuda");
 
@@ -7,6 +8,7 @@ pub const Error = error{
     MissingDriverSymbol,
     InitializationFailed,
     DeviceUnavailable,
+    DeviceAttributeFailed,
     ContextFailed,
     StreamFailed,
     HostRegistrationFailed,
@@ -16,6 +18,7 @@ pub const Error = error{
     DeviceMemsetFailed,
     ModuleLoadFailed,
     FunctionLookupFailed,
+    FunctionAttributeFailed,
     KernelLaunchFailed,
 };
 
@@ -29,6 +32,9 @@ pub const DevicePtr = u64;
 const Result = c_int;
 const success: Result = 0;
 const stream_non_blocking: c_uint = 1;
+const device_attribute_multiprocessor_count: c_int = 16;
+const device_attribute_max_shared_memory_per_block_optin: c_int = 97;
+const function_attribute_max_dynamic_shared_size_bytes: c_int = 8;
 const launch_param_end: ?*anyopaque = null;
 const launch_param_buffer_pointer: ?*anyopaque = @ptrFromInt(1);
 const launch_param_buffer_size: ?*anyopaque = @ptrFromInt(2);
@@ -38,6 +44,7 @@ const Api = struct {
 
     init: *const fn (c_uint) callconv(.c) Result,
     deviceGet: *const fn (*DeviceHandle, c_int) callconv(.c) Result,
+    deviceGetAttribute: *const fn (*c_int, c_int, DeviceHandle) callconv(.c) Result,
     devicePrimaryCtxRetain: *const fn (*Context, DeviceHandle) callconv(.c) Result,
     devicePrimaryCtxRelease: *const fn (DeviceHandle) callconv(.c) Result,
     ctxSetCurrent: *const fn (Context) callconv(.c) Result,
@@ -54,6 +61,7 @@ const Api = struct {
     moduleLoadData: *const fn (*ModuleHandle, ?*const anyopaque) callconv(.c) Result,
     moduleUnload: *const fn (ModuleHandle) callconv(.c) Result,
     moduleGetFunction: *const fn (*FunctionHandle, ModuleHandle, [*:0]const u8) callconv(.c) Result,
+    funcSetAttribute: *const fn (FunctionHandle, c_int, c_int) callconv(.c) Result,
     launchKernel: *const fn (
         FunctionHandle,
         c_uint,
@@ -76,6 +84,7 @@ const Api = struct {
             .library = library,
             .init = try lookup(*const fn (c_uint) callconv(.c) Result, &library, "cuInit"),
             .deviceGet = try lookup(*const fn (*DeviceHandle, c_int) callconv(.c) Result, &library, "cuDeviceGet"),
+            .deviceGetAttribute = try lookup(*const fn (*c_int, c_int, DeviceHandle) callconv(.c) Result, &library, "cuDeviceGetAttribute"),
             .devicePrimaryCtxRetain = try lookup(*const fn (*Context, DeviceHandle) callconv(.c) Result, &library, "cuDevicePrimaryCtxRetain"),
             .devicePrimaryCtxRelease = try lookup(*const fn (DeviceHandle) callconv(.c) Result, &library, "cuDevicePrimaryCtxRelease_v2"),
             .ctxSetCurrent = try lookup(*const fn (Context) callconv(.c) Result, &library, "cuCtxSetCurrent"),
@@ -92,6 +101,7 @@ const Api = struct {
             .moduleLoadData = try lookup(*const fn (*ModuleHandle, ?*const anyopaque) callconv(.c) Result, &library, "cuModuleLoadData"),
             .moduleUnload = try lookup(*const fn (ModuleHandle) callconv(.c) Result, &library, "cuModuleUnload"),
             .moduleGetFunction = try lookup(*const fn (*FunctionHandle, ModuleHandle, [*:0]const u8) callconv(.c) Result, &library, "cuModuleGetFunction"),
+            .funcSetAttribute = try lookup(*const fn (FunctionHandle, c_int, c_int) callconv(.c) Result, &library, "cuFuncSetAttribute"),
             .launchKernel = try lookup(
                 *const fn (
                     FunctionHandle,
@@ -129,6 +139,8 @@ const Api = struct {
 pub const Device = struct {
     handle: DeviceHandle,
     context: Context,
+    multiprocessor_count: c_uint,
+    shared_memory_per_block: c_uint,
 };
 
 pub const Stream = struct {
@@ -169,11 +181,37 @@ pub const Client = struct {
         try Api.check(api.streamCreate(&stream_handle, stream_non_blocking), "cuStreamCreate", error.StreamFailed);
         errdefer _ = api.streamDestroy(stream_handle);
 
+        var multiprocessor_count: c_int = 0;
+        try Api.check(
+            api.deviceGetAttribute(
+                &multiprocessor_count,
+                device_attribute_multiprocessor_count,
+                device_handle,
+            ),
+            "cuDeviceGetAttribute(MULTIPROCESSOR_COUNT)",
+            error.DeviceAttributeFailed,
+        );
+        if (multiprocessor_count <= 0) return error.DeviceAttributeFailed;
+
+        var shared_memory_per_block: c_int = 0;
+        try Api.check(
+            api.deviceGetAttribute(
+                &shared_memory_per_block,
+                device_attribute_max_shared_memory_per_block_optin,
+                device_handle,
+            ),
+            "cuDeviceGetAttribute(MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)",
+            error.DeviceAttributeFailed,
+        );
+        if (shared_memory_per_block <= 0) return error.DeviceAttributeFailed;
+
         return .{
             .api = api,
             .device = .{
                 .handle = device_handle,
                 .context = context,
+                .multiprocessor_count = @intCast(multiprocessor_count),
+                .shared_memory_per_block = @intCast(shared_memory_per_block),
             },
             .stream = .{ .handle = stream_handle },
         };
@@ -299,6 +337,15 @@ pub const Client = struct {
             "cuModuleGetFunction",
             error.FunctionLookupFailed,
         );
+        try Api.check(
+            self.api.funcSetAttribute(
+                function,
+                function_attribute_max_dynamic_shared_size_bytes,
+                @intCast(self.device.shared_memory_per_block),
+            ),
+            "cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES)",
+            error.FunctionAttributeFailed,
+        );
         return .{
             .module = module,
             .function = function,
@@ -327,13 +374,13 @@ pub const Client = struct {
         try Api.check(
             self.api.launchKernel(
                 kernel.function,
+                self.device.multiprocessor_count,
                 1,
                 1,
+                kernels.default_threads_per_block,
                 1,
                 1,
-                1,
-                1,
-                0,
+                self.device.shared_memory_per_block,
                 self.stream.handle,
                 null,
                 &extra,

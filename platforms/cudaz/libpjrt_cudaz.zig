@@ -16,12 +16,21 @@ const Error = struct {
 const Executable = struct {
     ptx: [:0]u8,
     output_specs: []compiler.OutputSpec,
+    scratch_size: usize,
+    input_count: usize,
 
-    fn create(ptx: [:0]u8, output_specs: []compiler.OutputSpec) !*Executable {
+    fn create(
+        ptx: [:0]u8,
+        output_specs: []compiler.OutputSpec,
+        scratch_size: usize,
+        input_count: usize,
+    ) !*Executable {
         const self = try std.heap.page_allocator.create(Executable);
         self.* = .{
             .ptx = ptx,
             .output_specs = output_specs,
+            .scratch_size = scratch_size,
+            .input_count = input_count,
         };
         return self;
     }
@@ -34,7 +43,7 @@ const Executable = struct {
             self.output_specs,
         );
         errdefer compiler.deinitOutputSpecs(std.heap.page_allocator, output_specs);
-        return create(ptx, output_specs);
+        return create(ptx, output_specs, self.scratch_size, self.input_count);
     }
 
     fn destroy(self: *Executable) void {
@@ -270,7 +279,7 @@ fn errorToPjrt(err: anyerror) ?*c.PJRT_Error {
         error.InvalidArgument => &invalid_argument_error,
         error.DriverUnavailable, error.MissingDriverSymbol => &cuda_driver_error,
         error.InitializationFailed => &cuda_initialization_error,
-        error.DeviceUnavailable => &cuda_device_error,
+        error.DeviceUnavailable, error.DeviceAttributeFailed => &cuda_device_error,
         error.ContextFailed => &cuda_context_error,
         error.StreamFailed => &cuda_stream_error,
         error.HostRegistrationFailed => &cuda_host_registration_error,
@@ -283,14 +292,16 @@ fn errorToPjrt(err: anyerror) ?*c.PJRT_Error {
         error.ZigExecutableUnavailable,
         error.ZigLibUnavailable,
         error.KernelSourceUnavailable,
+        error.KernelLibraryUnavailable,
         error.ZigCompilationFailed,
         error.InvalidKernelIr,
         error.InvalidMlirProgram,
         error.MissingMainFunction,
+        error.UnsupportedGraph,
         error.UnsupportedOutputType,
         => &compiler_error,
         error.ModuleLoadFailed => &cuda_module_error,
-        error.FunctionLookupFailed => &cuda_function_error,
+        error.FunctionLookupFailed, error.FunctionAttributeFailed => &cuda_function_error,
         error.KernelLaunchFailed => &cuda_launch_error,
         else => &invalid_argument_error,
     };
@@ -388,27 +399,36 @@ fn clientCompile(args: [*c]c.PJRT_Client_Compile_Args) callconv(.c) ?*c.PJRT_Err
     else
         program.code[0..program.code_size];
 
-    const output_specs = compiler.parseOutputSpecs(
+    var generated = compiler.generateKernel(
         std.heap.page_allocator,
         program_bytes,
     ) catch |err| {
-        log.err("StableHLO output metadata parsing failed: {s}", .{@errorName(err)});
+        log.err("StableHLO to Zig lowering failed: {s}", .{@errorName(err)});
         return if (err == error.OutOfMemory)
             errorToPjrt(error.OutOfMemory)
         else
             @ptrCast(&compiler_error);
     };
 
-    const ptx = compiler.compile(std.heap.page_allocator) catch |err| {
-        compiler.deinitOutputSpecs(std.heap.page_allocator, output_specs);
+    const ptx = compiler.compileGenerated(
+        std.heap.page_allocator,
+        generated.source,
+    ) catch |err| {
+        generated.deinit(std.heap.page_allocator);
         log.err("Zig PTX compilation failed: {s}", .{@errorName(err)});
         return if (err == error.OutOfMemory)
             errorToPjrt(error.OutOfMemory)
         else
             @ptrCast(&compiler_error);
     };
-    const executable = Executable.create(ptx, output_specs) catch {
-        compiler.deinitOutputSpecs(std.heap.page_allocator, output_specs);
+    std.heap.page_allocator.free(generated.source);
+    const executable = Executable.create(
+        ptx,
+        generated.output_specs,
+        generated.scratch_size,
+        generated.input_count,
+    ) catch {
+        compiler.deinitOutputSpecs(std.heap.page_allocator, generated.output_specs);
         std.heap.page_allocator.free(ptx);
         return errorToPjrt(error.OutOfMemory);
     };
@@ -1122,10 +1142,13 @@ fn execute(
         const expected_device: *c.PJRT_Device = @ptrCast(&loaded_executable.client.cuda.device);
         if (execute_device != expected_device) return error.InvalidArgument;
     }
-
-    const buffer_count = std.math.mul(usize, args.num_devices, args.num_args) catch
+    if (args.num_args != loaded_executable.executable.input_count) {
         return error.InvalidArgument;
-    if (buffer_count > 0 and args.argument_lists == null) return error.InvalidArgument;
+    }
+
+    const argument_count = std.math.mul(usize, args.num_devices, args.num_args) catch
+        return error.InvalidArgument;
+    if (argument_count > 0 and args.argument_lists == null) return error.InvalidArgument;
 
     const output_count = loaded_executable.executable.output_specs.len;
     const total_output_count = std.math.mul(usize, args.num_devices, output_count) catch
@@ -1161,7 +1184,22 @@ fn execute(
         }
     }
 
-    const device_pointers = try std.heap.page_allocator.alloc(cuda.DevicePtr, buffer_count);
+    const scratch = try loaded_executable.client.cuda.allocate(
+        loaded_executable.executable.scratch_size,
+    );
+    defer loaded_executable.client.cuda.free(scratch);
+    try loaded_executable.client.cuda.zero(scratch);
+
+    const kernel_buffer_count = std.math.add(
+        usize,
+        std.math.add(usize, argument_count, total_output_count) catch
+            return error.InvalidArgument,
+        1,
+    ) catch return error.InvalidArgument;
+    const device_pointers = try std.heap.page_allocator.alloc(
+        cuda.DevicePtr,
+        kernel_buffer_count,
+    );
     defer std.heap.page_allocator.free(device_pointers);
 
     var buffer_index: usize = 0;
@@ -1175,6 +1213,13 @@ fn execute(
             buffer_index += 1;
         }
     }
+    for (output_buffers) |buffer| {
+        device_pointers[buffer_index] = buffer.allocation.ptr;
+        buffer_index += 1;
+    }
+    device_pointers[buffer_index] = scratch.ptr;
+    buffer_index += 1;
+    std.debug.assert(buffer_index == kernel_buffer_count);
 
     const pointer_bytes = std.mem.sliceAsBytes(device_pointers);
     const device_pointer_table = try loaded_executable.client.cuda.allocate(pointer_bytes.len);
@@ -1183,7 +1228,7 @@ fn execute(
 
     const parameters: KernelParameters = .{
         .buffers = device_pointer_table.ptr,
-        .buffer_len = buffer_count,
+        .buffer_len = kernel_buffer_count,
     };
     try loaded_executable.client.cuda.launch(
         loaded_executable.kernel,
