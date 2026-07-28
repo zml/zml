@@ -1,0 +1,28 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+cc_library(
+    name = "empty",
+    defines = ["ZML_RUNTIME_CUDAZ_DISABLED"],
+    tags = ["manual"],
+)
+
+cc_library(
+    name = "libpjrt_cudaz",
+    defines = ["ZML_RUNTIME_CUDAZ"],
+    tags = ["manual"],
+)
+
+zig_library(
+    name = "cudaz",
+    import_name = "platforms/cudaz",
+    main = "cudaz.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+    ] + select({
+        "//platforms:cudaz.enabled": [":libpjrt_cudaz"],
+        "//conditions:default": [":empty"],
+    }),
+)

@@ -1,0 +1,21 @@
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+
+RUNTIMES = {
+    "cpu": True,
+    "cuda": False,
+    "cudaz": False,
+    "rocm": False,
+    "tpu": False,
+    "neuron": False,
+    "oneapi": False,
+    "metal": False,
+}
+
+[
+    bool_flag(
+        name = runtime,
+        build_setting_default = default,
+        visibility = ["//visibility:public"],
+    )
+    for runtime, default in RUNTIMES.items()
+]

@@ -1,22 +1,23 @@
-load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
-PLATFORMS = {
-    "cpu": True,
-    "cuda": False,
-    "rocm": False,
-    "tpu": False,
-    "neuron": False,
-    "oneapi": False,
-    "metal": False,
-}
+PLATFORMS = [
+    "cpu",
+    "cuda",
+    "cudaz",
+    "rocm",
+    "tpu",
+    "neuron",
+    "oneapi",
+    "metal",
+]
 
 [
-    bool_flag(
+    alias(
         name = runtime,
-        build_setting_default = default,
+        actual = "//runtimes:{}".format(runtime),
+        visibility = ["//visibility:public"],
     )
-    for runtime, default in PLATFORMS.items()
+    for runtime in PLATFORMS
 ]
 
 config_setting(
@@ -25,7 +26,7 @@ config_setting(
         "@platforms//cpu:x86_64",
         "@platforms//os:linux",
     ],
-    flag_values = {":rocm": "True"},
+    flag_values = {"//runtimes:rocm": "True"},
     visibility = ["//visibility:public"],
 )
 
@@ -35,19 +36,20 @@ config_setting(
         "@platforms//cpu:aarch64",
         "@platforms//os:macos",
     ],
-    flag_values = {":metal": "True"},
+    flag_values = {"//runtimes:metal": "True"},
     visibility = ["//visibility:public"],
 )
 
 [
     config_setting(
         name = "{}.enabled".format(runtime),
-        flag_values = {":{}".format(runtime): "True"},
+        flag_values = {"//runtimes:{}".format(runtime): "True"},
         visibility = ["//visibility:public"],
     )
     for runtime in [
         "cpu",
         "cuda",
+        "cudaz",
         "tpu",
         "neuron",
         "oneapi",
@@ -63,7 +65,7 @@ zig_library(
         "//pjrt",
     ] + [
         "//platforms/{}".format(runtime)
-        for runtime in PLATFORMS.keys()
+        for runtime in PLATFORMS
     ],
 )
 
