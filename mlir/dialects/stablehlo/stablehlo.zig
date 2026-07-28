@@ -1406,6 +1406,14 @@ pub fn serializePortableArtifact2(module: *mlir.Module, target_version: []const 
     }
 }
 
+pub fn deserializePortableArtifact(ctx: *mlir.Context, artifact: []const u8) mlir.Error!*mlir.Module {
+    const module = c.stablehloDeserializePortableArtifactNoError(
+        stringRef(artifact),
+        ctx.ptr(),
+    );
+    return @ptrCast(@constCast(module.ptr orelse return error.InvalidMlir));
+}
+
 pub fn return_(ctx: *mlir.Context, value: *const mlir.Value, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.return", .{
         .operands = .{ .flat = &.{value} },

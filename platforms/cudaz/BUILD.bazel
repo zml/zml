@@ -18,6 +18,8 @@ zig_shared_library(
     target_compatible_with = ["@platforms//os:linux"],
     zigopts = ["-fno-stack-check"],
     deps = [
+        "//mlir",
+        "//mlir/dialects",
         "@rules_zig//zig/runfiles",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
     ],
@@ -33,6 +35,8 @@ zig_test(
     main = "libpjrt_cudaz.zig",
     target_compatible_with = ["@platforms//os:linux"],
     deps = [
+        "//mlir",
+        "//mlir/dialects",
         "@rules_zig//zig/runfiles",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
     ],

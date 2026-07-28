@@ -14,20 +14,30 @@ const Error = struct {
 
 const Executable = struct {
     ptx: [:0]u8,
+    output_specs: []compiler.OutputSpec,
 
-    fn create(ptx: [:0]u8) !*Executable {
+    fn create(ptx: [:0]u8, output_specs: []compiler.OutputSpec) !*Executable {
         const self = try std.heap.page_allocator.create(Executable);
-        self.* = .{ .ptx = ptx };
+        self.* = .{
+            .ptx = ptx,
+            .output_specs = output_specs,
+        };
         return self;
     }
 
     fn clone(self: *const Executable) !*Executable {
         const ptx = try std.heap.page_allocator.dupeZ(u8, self.ptx);
         errdefer std.heap.page_allocator.free(ptx);
-        return create(ptx);
+        const output_specs = try compiler.cloneOutputSpecs(
+            std.heap.page_allocator,
+            self.output_specs,
+        );
+        errdefer compiler.deinitOutputSpecs(std.heap.page_allocator, output_specs);
+        return create(ptx, output_specs);
     }
 
     fn destroy(self: *Executable) void {
+        compiler.deinitOutputSpecs(std.heap.page_allocator, self.output_specs);
         std.heap.page_allocator.free(self.ptx);
         std.heap.page_allocator.destroy(self);
     }
@@ -223,6 +233,11 @@ var cuda_device_to_host_copy_error: Error = .{
     .code = c.PJRT_Error_Code_INTERNAL,
     .message = "cudaz: CUDA device-to-host copy failed",
 };
+var cuda_memset_error: Error = .{
+    .base = .{ .vtable = &error_vtable },
+    .code = c.PJRT_Error_Code_INTERNAL,
+    .message = "cudaz: CUDA device-memory initialization failed",
+};
 var compiler_error: Error = .{
     .base = .{ .vtable = &error_vtable },
     .code = c.PJRT_Error_Code_INTERNAL,
@@ -261,6 +276,7 @@ fn errorToPjrt(err: anyerror) ?*c.PJRT_Error {
         error.DeviceAllocationFailed => &cuda_allocation_error,
         error.HostToDeviceCopyFailed => &cuda_copy_error,
         error.DeviceToHostCopyFailed => &cuda_device_to_host_copy_error,
+        error.DeviceMemsetFailed => &cuda_memset_error,
         error.RunfilesUnavailable,
         error.ToolchainConfigUnavailable,
         error.ZigExecutableUnavailable,
@@ -268,6 +284,9 @@ fn errorToPjrt(err: anyerror) ?*c.PJRT_Error {
         error.KernelSourceUnavailable,
         error.ZigCompilationFailed,
         error.InvalidKernelIr,
+        error.InvalidMlirProgram,
+        error.MissingMainFunction,
+        error.UnsupportedOutputType,
         => &compiler_error,
         error.ModuleLoadFailed => &cuda_module_error,
         error.FunctionLookupFailed => &cuda_function_error,
@@ -355,15 +374,40 @@ fn clientAddressableMemories(args: [*c]c.PJRT_Client_AddressableMemories_Args) c
 
 fn clientCompile(args: [*c]c.PJRT_Client_Compile_Args) callconv(.c) ?*c.PJRT_Error {
     const client = Client.fromPjrt(args.*.client);
+    if (args.*.program == null) return errorToPjrt(error.InvalidArgument);
+    const program: *const c.PJRT_Program = @ptrCast(args.*.program);
+    if (program.format == null or
+        !std.mem.eql(u8, program.format[0..program.format_size], "mlir") or
+        (program.code_size > 0 and program.code == null))
+    {
+        return errorToPjrt(error.InvalidArgument);
+    }
+    const program_bytes: []const u8 = if (program.code_size == 0)
+        &.{}
+    else
+        program.code[0..program.code_size];
+
+    const output_specs = compiler.parseOutputSpecs(
+        std.heap.page_allocator,
+        program_bytes,
+    ) catch |err| {
+        log.err("StableHLO output metadata parsing failed: {s}", .{@errorName(err)});
+        return if (err == error.OutOfMemory)
+            errorToPjrt(error.OutOfMemory)
+        else
+            @ptrCast(&compiler_error);
+    };
 
     const ptx = compiler.compile(std.heap.page_allocator) catch |err| {
+        compiler.deinitOutputSpecs(std.heap.page_allocator, output_specs);
         log.err("Zig PTX compilation failed: {s}", .{@errorName(err)});
         return if (err == error.OutOfMemory)
             errorToPjrt(error.OutOfMemory)
         else
             @ptrCast(&compiler_error);
     };
-    const executable = Executable.create(ptx) catch {
+    const executable = Executable.create(ptx, output_specs) catch {
+        compiler.deinitOutputSpecs(std.heap.page_allocator, output_specs);
         std.heap.page_allocator.free(ptx);
         return errorToPjrt(error.OutOfMemory);
     };
@@ -1019,6 +1063,11 @@ fn executableNumPartitions(args: [*c]c.PJRT_Executable_NumPartitions_Args) callc
     return null;
 }
 
+fn executableNumOutputs(args: [*c]c.PJRT_Executable_NumOutputs_Args) callconv(.c) ?*c.PJRT_Error {
+    args.*.num_outputs = Executable.fromPjrt(args.*.executable).output_specs.len;
+    return null;
+}
+
 fn executableOptimizedProgram(args: [*c]c.PJRT_Executable_OptimizedProgram_Args) callconv(.c) ?*c.PJRT_Error {
     const executable = Executable.fromPjrt(args.*.executable);
     const program = args.*.program orelse return errorToPjrt(error.InvalidArgument);
@@ -1077,6 +1126,40 @@ fn execute(
         return error.InvalidArgument;
     if (buffer_count > 0 and args.argument_lists == null) return error.InvalidArgument;
 
+    const output_count = loaded_executable.executable.output_specs.len;
+    const total_output_count = std.math.mul(usize, args.num_devices, output_count) catch
+        return error.InvalidArgument;
+    if (total_output_count > 0 and args.output_lists == null) return error.InvalidArgument;
+    for (0..args.num_devices) |device_index| {
+        if (output_count > 0 and args.output_lists[device_index] == null) {
+            return error.InvalidArgument;
+        }
+    }
+
+    const output_buffers = try std.heap.page_allocator.alloc(*Buffer, total_output_count);
+    defer std.heap.page_allocator.free(output_buffers);
+    var initialized_outputs: usize = 0;
+    errdefer for (output_buffers[0..initialized_outputs]) |buffer| buffer.destroy();
+    for (0..args.num_devices) |_| {
+        for (loaded_executable.executable.output_specs) |spec| {
+            const shape: c.PJRT_ShapeSpec = .{
+                .struct_size = c.PJRT_ShapeSpec_STRUCT_SIZE,
+                .extension_start = null,
+                .dims = spec.dims.ptr,
+                .num_dims = spec.dims.len,
+                .element_type = spec.element_type,
+            };
+            output_buffers[initialized_outputs] = try createBuffer(
+                loaded_executable.client,
+                &shape,
+            );
+            initialized_outputs += 1;
+            try loaded_executable.client.cuda.zero(
+                output_buffers[initialized_outputs - 1].allocation,
+            );
+        }
+    }
+
     const device_pointers = try std.heap.page_allocator.alloc(cuda.DevicePtr, buffer_count);
     defer std.heap.page_allocator.free(device_pointers);
 
@@ -1106,16 +1189,31 @@ fn execute(
         std.mem.asBytes(&parameters),
     );
 
-    if (args.device_complete_events != null) {
-        var initialized_events: usize = 0;
-        errdefer for (0..initialized_events) |device_index| {
-            std.heap.page_allocator.destroy(Event.fromPjrt(args.device_complete_events[device_index]));
-        };
+    const completion_events: []?*Event = if (args.device_complete_events != null)
+        try std.heap.page_allocator.alloc(?*Event, args.num_devices)
+    else
+        &.{};
+    defer if (completion_events.len > 0) std.heap.page_allocator.free(completion_events);
+    @memset(completion_events, null);
+    var initialized_events: usize = 0;
+    errdefer for (completion_events[0..initialized_events]) |event| {
+        std.heap.page_allocator.destroy(event.?);
+    };
+    for (completion_events) |*event| {
+        event.* = try createReadyEvent();
+        initialized_events += 1;
+    }
 
+    var output_index: usize = 0;
+    for (0..args.num_devices) |device_index| {
+        for (0..output_count) |index| {
+            args.output_lists[device_index][index] = @ptrCast(output_buffers[output_index]);
+            output_index += 1;
+        }
+    }
+    if (args.device_complete_events != null) {
         for (0..args.num_devices) |device_index| {
-            const event = try createReadyEvent();
-            args.device_complete_events[device_index] = @ptrCast(event);
-            initialized_events += 1;
+            args.device_complete_events[device_index] = @ptrCast(completion_events[device_index].?);
         }
     }
 }
@@ -1192,6 +1290,7 @@ fn makeApi() c.PJRT_Api {
     result.PJRT_Executable_Name = &executableName;
     result.PJRT_Executable_NumReplicas = &executableNumReplicas;
     result.PJRT_Executable_NumPartitions = &executableNumPartitions;
+    result.PJRT_Executable_NumOutputs = &executableNumOutputs;
     result.PJRT_Executable_OptimizedProgram = &executableOptimizedProgram;
     result.PJRT_LoadedExecutable_Destroy = &loadedExecutableDestroy;
     result.PJRT_LoadedExecutable_GetExecutable = &loadedExecutableGetExecutable;
