@@ -101,9 +101,6 @@ pub const CompilationContext = struct {
 
     channel_id: i64 = 0,
 
-    oom_jmp_buf: c.jmp_buf = undefined,
-    oom_jmp_buf_active: bool = false,
-
     threadlocal var _current: ?*CompilationContext = null;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: CompilationOptions) CompilationContext {
@@ -199,8 +196,8 @@ pub const CompilationContext = struct {
     }
 
     pub fn abortOOM(self: *CompilationContext) noreturn {
-        std.debug.assert(self.oom_jmp_buf_active);
-        c.longjmp(&self.oom_jmp_buf, 1);
+        _ = self;
+        @panic("OOM");
     }
 
     pub fn alloc(self: *CompilationContext, T: type, n: usize) []T {
@@ -249,27 +246,17 @@ pub fn compile(
     var span = tracer.Span.start(span_name);
     defer span.end();
 
-    const compilation_context = try allocator.create(CompilationContext);
-    defer allocator.destroy(compilation_context);
-
-    compilation_context.* = .init(allocator, st_io.io(), platform, opts);
+    var compilation_context: CompilationContext = .init(allocator, st_io.io(), platform, opts);
     defer compilation_context.deinit();
 
-    compilation_context.oom_jmp_buf_active = true;
-    defer compilation_context.oom_jmp_buf_active = false;
-
-    if (c.setjmp(&compilation_context.oom_jmp_buf) != 0) {
-        return error.OutOfMemory;
-    }
-
-    const result = emitMlir(compilation_context, func, args) catch |err| switch (err) {
+    const result = emitMlir(&compilation_context, func, args) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
     defer result.output_info.deinit(compilation_context.allocator);
     defer result.input_info.deinit(compilation_context.allocator);
 
-    try addPartitionerOperations(compilation_context);
+    try addPartitionerOperations(&compilation_context);
 
     _ = result.func.appendTo(compilation_context.module.body());
 
@@ -313,32 +300,6 @@ pub fn compile(
     errdefer exe.deinit();
 
     return exe;
-}
-
-test "compile aborts OOM with live scopes" {
-    const platform = @import("testing.zig").env();
-
-    const Local = struct {
-        pub fn oom(x: Tensor) Tensor {
-            return ops.reduce(.{x}, .{Tensor.constant(x.dtype().zero())}, &.{0}, struct {
-                pub fn abort(args: ops.ReduceArgs) struct { Tensor } {
-                    _ = args;
-                    CompilationContext.current().abortOOM();
-                }
-            }.abort, .{})[0];
-        }
-    };
-
-    const x: Tensor = .fromShape(Shape.init(.{2}, .f32));
-
-    try std.testing.expectError(error.OutOfMemory, compile(
-        std.testing.allocator,
-        std.testing.io,
-        Local.oom,
-        .{x},
-        platform,
-        .{},
-    ));
 }
 
 fn addPartitionerOperations(ctx: *CompilationContext) !void {
