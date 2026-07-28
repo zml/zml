@@ -8,6 +8,8 @@ const metal = @import("metal_attention.zig");
 const tpu = @import("tpu_attention.zig");
 const triton = @import("triton_attention.zig");
 
+const log = std.log.scoped(.@"zml/attention");
+
 const PagedAttention = @This();
 
 pub const Backend = enum {
@@ -462,6 +464,7 @@ test pagedAttention {
         if (backend == .triton) continue;
         // No materializer implemented for cuda fa3
         if (backend == .cuda_fa3) continue;
+        log.warn("pagedAttention, testing backend {t}", .{backend});
 
         var backend_options_args = triton_options_args;
         backend_options_args.backend = backend;
