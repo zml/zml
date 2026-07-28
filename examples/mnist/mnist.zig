@@ -127,10 +127,7 @@ pub fn main(init: std.process.Init) !void {
     const dataset = try std.Io.Dir.openFile(.cwd(), io, t10kfilename, .{ .mode = .read_only });
     defer dataset.close(io);
 
-    var rng: std.Random.DefaultPrng = blk: {
-        const now: std.Io.Timestamp = .now(io, .awake);
-        break :blk .init(@intCast(now.toMilliseconds()));
-    };
+    var rng: std.Random.DefaultPrng = .init(0);
 
     // inference - can be looped
     const idx = rng.random().uintLessThan(u64, 10000);
@@ -143,9 +140,39 @@ pub fn main(init: std.process.Init) !void {
     printDigit(sample);
 
     args.set(.{ mnist_buffers, input_buffer });
-    exe.call(args, &results);
-    var result: zml.Buffer = results.get(zml.Buffer);
+
+    {
+        exe.call(args, &results);
+        var warmup_result: zml.Buffer = results.get(zml.Buffer);
+        defer warmup_result.deinit();
+        _ = try warmup_result.await(io);
+    }
+
+    const iteration_count = 100;
+    const run_start: std.Io.Timestamp = .now(io, .awake);
+    var result: zml.Buffer = undefined;
+    for (0..iteration_count) |iteration| {
+        exe.call(args, &results);
+        var iteration_result: zml.Buffer = results.get(zml.Buffer);
+        _ = try iteration_result.await(io);
+        if (iteration + 1 == iteration_count) {
+            result = iteration_result;
+        } else {
+            iteration_result.deinit();
+        }
+    }
+    const run_time = run_start.untilNow(io, .awake);
     defer result.deinit();
+
+    const milliseconds_per_iteration =
+        @as(f64, @floatFromInt(run_time.toNanoseconds())) /
+        @as(f64, @floatFromInt(iteration_count)) /
+        std.time.ns_per_ms;
+    log.info("✅ Ran {d} iterations [{f}] - {d:.3} ms/iteration", .{
+        iteration_count,
+        run_time,
+        milliseconds_per_iteration,
+    });
 
     log.info(
         \\✅ RECOGNIZED DIGIT:
