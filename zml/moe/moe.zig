@@ -1219,11 +1219,13 @@ const Triton = struct {
         stdx.debug.assert(@mod(n, activation_reduction_n) == 0, "invalid GEMM output width {}", .{n});
         stdx.debug.assert(opts.output_shape.dim(-1) == @divExact(n, activation_reduction_n), "output shape {f} does not match GEMM N {}", .{ opts.output_shape, n });
         stdx.debug.assert(opts.bias == null, "MXFP4 Triton MoE GEMM bias is not wired yet", .{});
+        stdx.debug.assert(@mod(contract_k, opts.block_k) == 0, "MXFP4 Triton MoE GEMM expects K {} to be divisible by BLOCK_K {}", .{ contract_k, opts.block_k });
 
         const block_m: i32 = @intCast(opts.block_m);
         const block_n: i32 = @intCast(opts.block_n);
         const block_k: i32 = @intCast(opts.block_k);
         const grid_n = std.math.divCeil(i64, n, block_n) catch unreachable;
+        const split_k = chooseSplitK(contract_k, opts.block_k, opts.routing.grid_m, grid_n);
         const has_gammas = opts.gammas != null;
         const gathered_input = if (opts.gather) |gather| blk: {
             const token_ids = gather.divByConst(opts.routing.gather_divisor).withTags(.{.route});
@@ -1233,6 +1235,10 @@ const Triton = struct {
             opts.output_shape.set(-1, n)
         else
             opts.output_shape;
+        const kernel_output_shape = if (split_k == 1)
+            raw_output_shape
+        else
+            raw_output_shape.insertTag(0, split_k, .split_k);
 
         const cfg: triton_a16wmxfp4_kernel.Cfg = .{
             .a_dtype = zml.kernel.triton.from(gathered_input.dtype()),
@@ -1242,13 +1248,13 @@ const Triton = struct {
             .BLOCK_M = block_m,
             .BLOCK_N = block_n,
             .BLOCK_K = block_k,
-            .SPLIT_K = 1,
+            .SPLIT_K = @intCast(split_k),
             .GROUP_M = @intCast(opts.group_m),
             .num_warps = @intCast(opts.num_warps),
             .num_stages = @intCast(opts.num_stages),
         };
 
-        var y = triton_a16wmxfp4_kernel.Kernel.call(
+        const partials = triton_a16wmxfp4_kernel.Kernel.call(
             .{
                 .a_ptr = gathered_input,
                 .wp_ptr = weights,
@@ -1267,17 +1273,22 @@ const Triton = struct {
                 .stride_se_ptr = scalarI64(n * scale_k),
                 .stride_sk_ptr = scalarI64(1),
                 .stride_sn_ptr = scalarI64(scale_k),
+                .stride_ck_ptr = scalarI64(if (split_k == 1) 0 else @intCast(raw_output_shape.count())),
                 .stride_cm_ptr = scalarI64(raw_output_shape.dim(-1)),
                 .stride_cn_ptr = scalarI64(1),
             },
-            .{ .c = raw_output_shape },
+            .{ .c = kernel_output_shape },
             .{
                 .cfg = cfg,
-                .grid = .{ @intCast(opts.routing.grid_m * grid_n), 1, 1 },
+                .grid = .{ @intCast(opts.routing.grid_m * grid_n), @intCast(split_k), 1 },
                 .num_warps = @intCast(opts.num_warps),
                 .num_stages = @intCast(opts.num_stages),
             },
         ).c;
+        var y = if (split_k == 1)
+            partials
+        else
+            partials.convert(.f32).sum(.split_k).squeeze(.split_k).convert(raw_output_shape.dtype());
 
         if (opts.apply_swiglu) {
             y = applySwiGlu(y.convert(.f32), opts.activation_limit).convert(opts.output_shape.dtype());
@@ -1289,6 +1300,19 @@ const Triton = struct {
         }
 
         return y;
+    }
+
+    fn chooseSplitK(contract_k: i64, block_k: u32, grid_m: i64, grid_n: i64) i64 {
+        const num_k_tiles = @divExact(contract_k, @as(i64, block_k));
+        if (num_k_tiles <= 1) return 1;
+
+        const base_tiles = grid_m * grid_n;
+        const target_tiles: i64 = 256;
+        if (base_tiles >= target_tiles) return 1;
+
+        const needed = std.math.divCeil(i64, target_tiles, @max(base_tiles, 1)) catch unreachable;
+        const rounded: i64 = if (needed <= 2) 2 else if (needed <= 4) 4 else 8;
+        return @min(rounded, num_k_tiles);
     }
 
     fn applySwiGlu(input: zml.Tensor, activation_limit: f32) zml.Tensor {

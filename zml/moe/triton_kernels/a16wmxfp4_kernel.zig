@@ -38,6 +38,7 @@ pub const Kernel = tri.Kernel(Cfg, .{
         "stride_se_ptr",
         "stride_sk_ptr",
         "stride_sn_ptr",
+        "stride_ck_ptr",
         "stride_cm_ptr",
         "stride_cn_ptr",
     },
@@ -66,6 +67,7 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         .stride_se_ptr = .{ .ptr = .i64 },
         .stride_sk_ptr = .{ .ptr = .i64 },
         .stride_sn_ptr = .{ .ptr = .i64 },
+        .stride_ck_ptr = .{ .ptr = .i64 },
         .stride_cm_ptr = .{ .ptr = .i64 },
         .stride_cn_ptr = .{ .ptr = .i64 },
         .c_ptr = .{ .ptr = cfg.c_dtype },
@@ -82,6 +84,7 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
     const stride_se = b.load(a.stride_se_ptr);
     const stride_sk = b.load(a.stride_sk_ptr);
     const stride_sn = b.load(a.stride_sn_ptr);
+    const stride_ck = b.load(a.stride_ck_ptr);
     const stride_cm = b.load(a.stride_cm_ptr);
     const stride_cn = b.load(a.stride_cn_ptr);
 
@@ -178,7 +181,8 @@ fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
 
     const c_rows = offs_m.expandDims(1);
     const c_row_offsets = c_rows.mul(stride_cm);
-    const c_ptrs_col = a.c_ptr.addPtr(c_row_offsets);
+    const c_base = a.c_ptr.addPtr(pid_k_i64.mul(stride_ck));
+    const c_ptrs_col = c_base.addPtr(c_row_offsets);
     const c_cols = offs_n.expandDims(0);
     const c_col_offsets = c_cols.mul(stride_cn);
     const c_ptrs_base = b.broadcastTo(c_ptrs_col, &.{ cfg.BLOCK_M, cfg.BLOCK_N });
