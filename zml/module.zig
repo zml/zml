@@ -198,10 +198,13 @@ pub const CompilationContext = struct {
         return self.channel_id;
     }
 
-    pub fn abortOOM() noreturn {
-        const self = CompilationContext.current();
+    pub fn abortOOM(self: *CompilationContext) noreturn {
         std.debug.assert(self.oom_jmp_buf_active);
         c.longjmp(&self.oom_jmp_buf, 1);
+    }
+
+    pub fn alloc(self: *CompilationContext, T: type, n: usize) []T {
+        return self.arena.allocator().alloc(T, n) catch self.abortOOM();
     }
 };
 
@@ -320,7 +323,7 @@ test "compile aborts OOM with live scopes" {
             return ops.reduce(.{x}, .{Tensor.constant(x.dtype().zero())}, &.{0}, struct {
                 pub fn abort(args: ops.ReduceArgs) struct { Tensor } {
                     _ = args;
-                    CompilationContext.abortOOM();
+                    CompilationContext.current().abortOOM();
                 }
             }.abort, .{})[0];
         }
