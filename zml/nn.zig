@@ -1356,80 +1356,92 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
 }
 
 pub const GatedDeltaNet = struct {
+    /// Query tensor .{ .s, .h, .k }.
+    queries: Tensor,
+    /// Key tensor .{ .s, .h, .k }.
+    keys: Tensor,
+    /// Value tensor .{ .s, .h, .v }.
+    values: Tensor,
+    /// Forget gate .{ .s, .h }.
+    alphas: Tensor,
+    /// Delta gate .{ .s, .h }.
+    betas: Tensor,
+
     pub const State = struct {
         /// Per-head recurrent state with shape .{ .h, .v, .k }.
         s: Tensor,
+        /// Sequence of outputs with shape .{ .s, .h, .v }.
+        outputs: Tensor,
+
+        /// Current step, scalar
+        step: Tensor,
     };
 
-    pub const StepInputs = struct {
-        /// Query tensor with shape .{ .h, .k }.
-        q: Tensor,
-        /// Key tensor with shape .{ .h, .k }.
-        k: Tensor,
-        /// Value tensor with shape .{ .h, .v }.
-        v: Tensor,
-        /// Forget gate with shape .{ .h }.
-        alpha: Tensor,
-        /// Delta gate with shape .{ .h }.
-        beta: Tensor,
-    };
-
-    pub const StepOutput = struct {
-        state: State,
-        output: Tensor,
+    pub const Input = struct {
+        s: Tensor,
     };
 
     pub const Output = struct {
+        /// Per-head recurrent state with shape .{ .h, .v, .k }.
+        state: Input,
         /// Sequence of outputs with shape .{ .s, .h, .v }.
         outputs: Tensor,
-        state: State,
     };
+
+    pub fn cond(gdn: GatedDeltaNet, state: State) Tensor {
+        return state.step.cmp(.LT, .scalar(gdn.queries.dim(.s), .i32));
+    }
+
+    /// Single-step recurrent update for Gated Delta Net.
+    pub fn body(gdn: GatedDeltaNet, state: State) State {
+        // q, k: .{ .h, .k }
+        const q = sliceStep(gdn.queries, state.step);
+        const k = sliceStep(gdn.keys, state.step);
+        //  v: .{ .h, .v }
+        const v = sliceStep(gdn.values, state.step);
+        // alpha, beta: .{ .h }
+        const alpha = sliceStep(gdn.alphas, state.step);
+        const beta = sliceStep(gdn.betas, state.step);
+
+        const hvk = state.s.shape();
+        const hv = hvk.drop(.k);
+
+        const v_hat = state.s.dot(k, .k).mul(alpha.broad(hv));
+        const delta = v.sub(v_hat).mul(beta.broad(hv));
+        const delta_k = delta.broad(hvk).mul(k.broad(hvk));
+        const s_new = state.s.mul(alpha.broad(hvk)).add(delta_k);
+        const y = s_new.dot(q, .k);
+
+        return .{
+            .s = s_new,
+            .outputs = state.outputs.dynamicUpdateSlice(.{ .s = state.step }, y),
+            .step = state.step.addConstant(1),
+        };
+    }
 
     fn sliceStep(input: Tensor, step_: Tensor) Tensor {
         return input.dynamicSlice(.{ .s = Tensor.DynSlice{ .start = step_, .len = 1 } }).squeeze(.s);
     }
 
-    fn validateStep(state: State, inputs: StepInputs) void {
+    fn validateInitialState(gdn: GatedDeltaNet, state: State) void {
         const err_template = "GatedDeltaNet.step(state: {f}, q: {f}, k: {f}, v: {f}, alpha: {f}, beta: {f}) is invalid ! ";
-        const err_args = .{ state.s, inputs.q, inputs.k, inputs.v, inputs.alpha, inputs.beta };
+        const err_args = .{ state.s, gdn.queries, gdn.keys, gdn.values, gdn.alphas, gdn.betas };
 
         stdx.debug.assert(state.s.shape().hasTags(.{ .h, .v, .k }), err_template ++ "state.s is missing tags {{.h, .v, .k}}", err_args);
-        stdx.debug.assert(inputs.q.shape().hasTags(.{ .h, .k }), err_template ++ "q is missing tags {{.h, .k}}", err_args);
-        stdx.debug.assert(inputs.k.shape().hasTags(.{ .h, .k }), err_template ++ "k is missing tags {{.h, .k}}", err_args);
-        stdx.debug.assert(inputs.v.shape().hasTags(.{ .h, .v }), err_template ++ "v is missing tags {{.h, .v}}", err_args);
-        stdx.debug.assert(inputs.alpha.shape().hasTags(.{.h}), err_template ++ "alpha is missing tag {{.h}}", err_args);
-        stdx.debug.assert(inputs.beta.shape().hasTags(.{.h}), err_template ++ "beta is missing tag {{.h}}", err_args);
+        stdx.debug.assert(gdn.queries.shape().hasTags(.{ .s, .h, .k }), err_template ++ "q is missing tags {{.h, .k}}", err_args);
+        stdx.debug.assert(gdn.keys.shape().hasTags(.{ .s, .h, .k }), err_template ++ "k is missing tags {{.h, .k}}", err_args);
+        stdx.debug.assert(gdn.values.shape().hasTags(.{ .s, .h, .v }), err_template ++ "v is missing tags {{.h, .v}}", err_args);
+        stdx.debug.assert(gdn.alphas.shape().hasTags(.{ .s, .h }), err_template ++ "alphas is missing tag {{.h}}", err_args);
+        stdx.debug.assert(gdn.betas.shape().hasTags(.{ .s, .h }), err_template ++ "betas is missing tag {{.h}}", err_args);
 
-        _ = collectDims(.{.h}, &.{ state.s, inputs.q, inputs.k, inputs.v, inputs.alpha, inputs.beta }, .strict) catch {
+        _ = collectDims(.{.h}, &.{ state.s, gdn.queries, gdn.keys, gdn.values, gdn.alphas, gdn.betas }, .strict) catch {
             stdx.debug.panic(err_template ++ "head dimensions are inconsistent.", err_args);
         };
-        _ = collectDims(.{.k}, &.{ state.s, inputs.q, inputs.k }, .strict) catch {
+        _ = collectDims(.{.k}, &.{ state.s, gdn.queries, gdn.keys }, .strict) catch {
             stdx.debug.panic(err_template ++ "key dimensions are inconsistent.", err_args);
         };
-        _ = collectDims(.{.v}, &.{ state.s, inputs.v }, .strict) catch {
+        _ = collectDims(.{.v}, &.{ state.s, gdn.values }, .strict) catch {
             stdx.debug.panic(err_template ++ "value dimensions are inconsistent.", err_args);
-        };
-    }
-
-    /// Single-step recurrent update for Gated Delta Net.
-    ///
-    /// Shapes:
-    /// - `state.s`: .{ .h, .v, .k }
-    /// - `inputs.q`, `inputs.k`: .{ .h, .k }
-    /// - `inputs.v`: .{ .h, .v }
-    /// - `inputs.alpha`, `inputs.beta`: .{ .h }
-    pub fn step(state: State, inputs: StepInputs) StepOutput {
-        validateStep(state, inputs);
-
-        const v_hat = state.s.dot(inputs.k, .k).mul(inputs.alpha.insertAxes(.last, .{.v}));
-        const delta = inputs.v.sub(v_hat).mul(inputs.beta.insertAxes(.last, .{.v}));
-        const delta_k = delta.insertAxes(.last, .{.k}).broad(state.s.shape()).mul(inputs.k.insertAxes(.k, .{.v}).broad(state.s.shape()));
-        const s_new = state.s.mul(inputs.alpha.insertAxes(.last, .{ .v, .k })).add(delta_k);
-        const y = s_new.dot(inputs.q, .k);
-
-        return .{
-            .state = .{ .s = s_new },
-            .output = y,
         };
     }
 
@@ -1446,83 +1458,26 @@ pub const GatedDeltaNet = struct {
         values: Tensor,
         alphas: Tensor,
         betas: Tensor,
-        initial_state: State,
+        initial_state: Input,
     ) Output {
-        const err_template = "GatedDeltaNet.forward(queries: {f}, keys: {f}, values: {f}, alphas: {f}, betas: {f}, state: {f}) is invalid ! ";
-        const err_args = .{ queries, keys, values, alphas, betas, initial_state.s };
-
-        stdx.debug.assert(queries.shape().hasTags(.{ .s, .h, .k }), err_template ++ "queries is missing tags {{.s, .h, .k}}", err_args);
-        stdx.debug.assert(keys.shape().hasTags(.{ .s, .h, .k }), err_template ++ "keys is missing tags {{.s, .h, .k}}", err_args);
-        stdx.debug.assert(values.shape().hasTags(.{ .s, .h, .v }), err_template ++ "values is missing tags {{.s, .h, .v}}", err_args);
-        stdx.debug.assert(alphas.shape().hasTags(.{ .s, .h }), err_template ++ "alphas is missing tags {{.s, .h}}", err_args);
-        stdx.debug.assert(betas.shape().hasTags(.{ .s, .h }), err_template ++ "betas is missing tags {{.s, .h}}", err_args);
-        stdx.debug.assert(initial_state.s.shape().hasTags(.{ .h, .v, .k }), err_template ++ "initial_state.s is missing tags {{.h, .v, .k}}", err_args);
-
-        _ = collectDims(.{ .s, .h }, &.{ queries, keys, values, alphas, betas }, .strict) catch {
-            stdx.debug.panic(err_template ++ "sequence/head dimensions are inconsistent.", err_args);
-        };
-        _ = collectDims(.{.k}, &.{ queries, keys, initial_state.s }, .strict) catch {
-            stdx.debug.panic(err_template ++ "key dimensions are inconsistent.", err_args);
-        };
-        _ = collectDims(.{.v}, &.{ values, initial_state.s }, .strict) catch {
-            stdx.debug.panic(err_template ++ "value dimensions are inconsistent.", err_args);
-        };
-
-        const WhileContext = struct {
-            queries: Tensor,
-            keys: Tensor,
-            values: Tensor,
-            alphas: Tensor,
-            betas: Tensor,
-            seq_len: Tensor,
-        };
-        const while_context: WhileContext = .{
+        const gdn: GatedDeltaNet = .{
             .queries = queries,
             .keys = keys,
             .values = values,
             .alphas = alphas,
             .betas = betas,
-            .seq_len = Tensor.scalar(queries.dim(.s), .i32),
         };
-
-        const Local = struct {
-            fn cond(step_: Tensor, _: Tensor, _: Tensor, ctx: WhileContext) Tensor {
-                return step_.cmp(.LT, ctx.seq_len);
-            }
-
-            fn body(step_: Tensor, s_prev: Tensor, outputs_prev: Tensor, ctx: WhileContext) [3]Tensor {
-                const step_out = step(
-                    .{ .s = s_prev },
-                    .{
-                        .q = sliceStep(ctx.queries, step_),
-                        .k = sliceStep(ctx.keys, step_),
-                        .v = sliceStep(ctx.values, step_),
-                        .alpha = sliceStep(ctx.alphas, step_),
-                        .beta = sliceStep(ctx.betas, step_),
-                    },
-                );
-                const outputs_new = outputs_prev.dynamicUpdateSlice(.{ .s = step_ }, step_out.output);
-
-                return .{
-                    step_.add(Tensor.scalar(1, .i32)),
-                    step_out.state.s,
-                    outputs_new,
-                };
-            }
+        const state: GatedDeltaNet.State = .{
+            .step = .scalar(0, .i32),
+            .s = initial_state.s,
+            .outputs = .zeroes(values.shape()),
         };
-
-        const step0 = Tensor.scalar(0, .i32);
-        const outputs0 = Tensor.zeroes(values.shape());
-        const loop_state = ops.@"while"(
-            .{ step0, initial_state.s, outputs0 },
-            Local.cond,
-            Local.body,
-            .{while_context},
-        );
+        validateInitialState(gdn, state);
+        const final_state = ops.@"while"(GatedDeltaNet, gdn, state);
 
         return .{
-            .outputs = loop_state[2],
-            .state = .{ .s = loop_state[1] },
+            .outputs = final_state.outputs,
+            .state = .{ .s = final_state.s },
         };
     }
 };
@@ -1541,7 +1496,7 @@ test "gated delta net" {
         std.testing.allocator,
         std.testing.io,
         GatedDeltaNet.forward,
-        .{ queries, keys, values, alphas, betas, GatedDeltaNet.State{ .s = initial_s } },
+        .{ queries, keys, values, alphas, betas, .{ .s = initial_s } },
         platform,
         .{},
     );
