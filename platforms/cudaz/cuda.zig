@@ -14,6 +14,7 @@ pub const Error = error{
     HostToDeviceCopyFailed,
     ModuleLoadFailed,
     FunctionLookupFailed,
+    KernelLaunchFailed,
 };
 
 pub const DeviceHandle = c_int;
@@ -26,6 +27,9 @@ pub const DevicePtr = u64;
 const Result = c_int;
 const success: Result = 0;
 const stream_non_blocking: c_uint = 1;
+const launch_param_end: ?*anyopaque = null;
+const launch_param_buffer_pointer: ?*anyopaque = @ptrFromInt(1);
+const launch_param_buffer_size: ?*anyopaque = @ptrFromInt(2);
 
 const Api = struct {
     library: std.DynLib,
@@ -46,6 +50,19 @@ const Api = struct {
     moduleLoadData: *const fn (*ModuleHandle, ?*const anyopaque) callconv(.c) Result,
     moduleUnload: *const fn (ModuleHandle) callconv(.c) Result,
     moduleGetFunction: *const fn (*FunctionHandle, ModuleHandle, [*:0]const u8) callconv(.c) Result,
+    launchKernel: *const fn (
+        FunctionHandle,
+        c_uint,
+        c_uint,
+        c_uint,
+        c_uint,
+        c_uint,
+        c_uint,
+        c_uint,
+        StreamHandle,
+        ?[*]?*anyopaque,
+        ?[*]?*anyopaque,
+    ) callconv(.c) Result,
 
     fn load() Error!Api {
         var library = std.DynLib.open("libcuda.so.1") catch return error.DriverUnavailable;
@@ -69,6 +86,23 @@ const Api = struct {
             .moduleLoadData = try lookup(*const fn (*ModuleHandle, ?*const anyopaque) callconv(.c) Result, &library, "cuModuleLoadData"),
             .moduleUnload = try lookup(*const fn (ModuleHandle) callconv(.c) Result, &library, "cuModuleUnload"),
             .moduleGetFunction = try lookup(*const fn (*FunctionHandle, ModuleHandle, [*:0]const u8) callconv(.c) Result, &library, "cuModuleGetFunction"),
+            .launchKernel = try lookup(
+                *const fn (
+                    FunctionHandle,
+                    c_uint,
+                    c_uint,
+                    c_uint,
+                    c_uint,
+                    c_uint,
+                    c_uint,
+                    c_uint,
+                    StreamHandle,
+                    ?[*]?*anyopaque,
+                    ?[*]?*anyopaque,
+                ) callconv(.c) Result,
+                &library,
+                "cuLaunchKernel",
+            ),
         };
     }
 
@@ -235,6 +269,41 @@ pub const Client = struct {
         if (result != success) {
             log.err("cuModuleUnload failed with CUDA result {d}", .{result});
         }
+    }
+
+    pub fn launch(self: *Client, kernel: Kernel, parameters: []const u8) Error!void {
+        try self.setCurrent();
+
+        var parameter_size = parameters.len;
+        var extra = [_]?*anyopaque{
+            launch_param_buffer_pointer,
+            @constCast(parameters.ptr),
+            launch_param_buffer_size,
+            &parameter_size,
+            launch_param_end,
+        };
+        try Api.check(
+            self.api.launchKernel(
+                kernel.function,
+                1,
+                1,
+                1,
+                1,
+                1,
+                1,
+                0,
+                self.stream.handle,
+                null,
+                &extra,
+            ),
+            "cuLaunchKernel",
+            error.KernelLaunchFailed,
+        );
+        try Api.check(
+            self.api.streamSynchronize(self.stream.handle),
+            "cuStreamSynchronize",
+            error.KernelLaunchFailed,
+        );
     }
 
     fn setCurrent(self: *Client) Error!void {

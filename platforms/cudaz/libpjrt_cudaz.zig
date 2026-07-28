@@ -233,6 +233,11 @@ var cuda_function_error: Error = .{
     .code = c.PJRT_Error_Code_NOT_FOUND,
     .message = "cudaz: CUDA kernel function was not found",
 };
+var cuda_launch_error: Error = .{
+    .base = .{ .vtable = &error_vtable },
+    .code = c.PJRT_Error_Code_INTERNAL,
+    .message = "cudaz: CUDA kernel launch failed",
+};
 
 fn errorFromPjrt(pjrt_error: anytype) *Error {
     return @ptrCast(@alignCast(@constCast(pjrt_error)));
@@ -260,6 +265,7 @@ fn errorToPjrt(err: anyerror) ?*c.PJRT_Error {
         => &compiler_error,
         error.ModuleLoadFailed => &cuda_module_error,
         error.FunctionLookupFailed => &cuda_function_error,
+        error.KernelLaunchFailed => &cuda_launch_error,
         else => &invalid_argument_error,
     };
     return @ptrCast(pjrt_error);
@@ -927,6 +933,87 @@ fn loadedExecutableAddressableDevices(
     return null;
 }
 
+const KernelParameters = extern struct {
+    buffers: cuda.DevicePtr,
+    buffer_len: usize,
+};
+
+fn execute(
+    loaded_executable: *LoadedExecutable,
+    args: *c.PJRT_LoadedExecutable_Execute_Args,
+) !void {
+    if (args.num_devices != loaded_executable.client.addressable_devices.len) {
+        return error.InvalidArgument;
+    }
+    if (args.execute_device) |execute_device| {
+        const expected_device: *c.PJRT_Device = @ptrCast(&loaded_executable.client.cuda.device);
+        if (execute_device != expected_device) return error.InvalidArgument;
+    }
+
+    const buffer_count = std.math.mul(usize, args.num_devices, args.num_args) catch
+        return error.InvalidArgument;
+    if (buffer_count > 0 and args.argument_lists == null) return error.InvalidArgument;
+
+    const device_pointers = try std.heap.page_allocator.alloc(cuda.DevicePtr, buffer_count);
+    defer std.heap.page_allocator.free(device_pointers);
+
+    var buffer_index: usize = 0;
+    for (0..args.num_devices) |device_index| {
+        const argument_list = args.argument_lists[device_index];
+        if (args.num_args > 0 and argument_list == null) return error.InvalidArgument;
+        for (0..args.num_args) |argument_index| {
+            const buffer = Buffer.fromPjrt(argument_list[argument_index]);
+            if (buffer.client != loaded_executable.client) return error.InvalidArgument;
+            device_pointers[buffer_index] = buffer.allocation.ptr;
+            buffer_index += 1;
+        }
+    }
+
+    const pointer_bytes = std.mem.sliceAsBytes(device_pointers);
+    const device_pointer_table = try loaded_executable.client.cuda.allocate(pointer_bytes.len);
+    defer loaded_executable.client.cuda.free(device_pointer_table);
+    try loaded_executable.client.cuda.copyHostToDevice(device_pointer_table, 0, pointer_bytes);
+
+    const parameters: KernelParameters = .{
+        .buffers = device_pointer_table.ptr,
+        .buffer_len = buffer_count,
+    };
+    try loaded_executable.client.cuda.launch(
+        loaded_executable.kernel,
+        std.mem.asBytes(&parameters),
+    );
+
+    if (args.device_complete_events != null) {
+        var initialized_events: usize = 0;
+        errdefer for (0..initialized_events) |device_index| {
+            std.heap.page_allocator.destroy(Event.fromPjrt(args.device_complete_events[device_index]));
+        };
+
+        for (0..args.num_devices) |device_index| {
+            const event = try createReadyEvent();
+            args.device_complete_events[device_index] = @ptrCast(event);
+            initialized_events += 1;
+        }
+    }
+}
+
+fn loadedExecutableExecute(
+    args: [*c]c.PJRT_LoadedExecutable_Execute_Args,
+) callconv(.c) ?*c.PJRT_Error {
+    const loaded_executable = LoadedExecutable.fromPjrt(args.*.executable);
+    execute(loaded_executable, args) catch |err| return errorToPjrt(err);
+    return null;
+}
+
+test "kernel parameter buffer matches the PTX entry ABI" {
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(KernelParameters, "buffers"));
+    try std.testing.expectEqual(@sizeOf(cuda.DevicePtr), @offsetOf(KernelParameters, "buffer_len"));
+    try std.testing.expectEqual(
+        @sizeOf(cuda.DevicePtr) + @sizeOf(usize),
+        @sizeOf(KernelParameters),
+    );
+}
+
 fn makeApi() c.PJRT_Api {
     var result = std.mem.zeroes(c.PJRT_Api);
     result.struct_size = c.PJRT_Api_STRUCT_SIZE;
@@ -986,6 +1073,7 @@ fn makeApi() c.PJRT_Api {
     result.PJRT_LoadedExecutable_Destroy = &loadedExecutableDestroy;
     result.PJRT_LoadedExecutable_GetExecutable = &loadedExecutableGetExecutable;
     result.PJRT_LoadedExecutable_AddressableDevices = &loadedExecutableAddressableDevices;
+    result.PJRT_LoadedExecutable_Execute = &loadedExecutableExecute;
     result.PJRT_Buffer_Destroy = &bufferDestroy;
     result.PJRT_Buffer_ElementType = &bufferElementType;
     result.PJRT_Buffer_Dimensions = &bufferDimensions;
