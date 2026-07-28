@@ -33,7 +33,7 @@ pub const Backend = enum {
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
             // .vanilla => true,
-            .triton => true,
+            .triton => platform.target != .cpu,
             .metal => platform.target == .metal,
             .mosaic_tpu => platform.target == .tpu,
             .cuda_fa2 => platform.target == .cuda,
@@ -460,6 +460,8 @@ test pagedAttention {
     for (std.enums.values(Backend)) |backend| {
         if (!backend.isAvailable(platform)) continue;
         if (backend == .triton) continue;
+        // No materializer implemented for cuda fa3
+        if (backend == .cuda_fa3) continue;
 
         var backend_options_args = triton_options_args;
         backend_options_args.backend = backend;
@@ -476,8 +478,7 @@ test pagedAttention {
 
         const parameters_d: zml.Bufferized(Parameters) = switch (backend) {
             .triton => unreachable,
-            // No materializer implemented for cuda fa3
-            .cuda_fa3 => return error.SkipZigTest,
+            .cuda_fa3 => unreachable,
             .cuda_fa2 => cuda_fa2: {
                 var block_table_prefill: [num_prefill][max_num_pages]i32 = undefined;
                 @memcpy(&block_table_prefill, block_table[0..num_prefill]);
