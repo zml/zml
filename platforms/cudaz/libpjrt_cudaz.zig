@@ -218,6 +218,11 @@ var cuda_copy_error: Error = .{
     .code = c.PJRT_Error_Code_INTERNAL,
     .message = "cudaz: CUDA host-to-device copy failed",
 };
+var cuda_device_to_host_copy_error: Error = .{
+    .base = .{ .vtable = &error_vtable },
+    .code = c.PJRT_Error_Code_INTERNAL,
+    .message = "cudaz: CUDA device-to-host copy failed",
+};
 var compiler_error: Error = .{
     .base = .{ .vtable = &error_vtable },
     .code = c.PJRT_Error_Code_INTERNAL,
@@ -255,6 +260,7 @@ fn errorToPjrt(err: anyerror) ?*c.PJRT_Error {
         error.HostRegistrationFailed => &cuda_host_registration_error,
         error.DeviceAllocationFailed => &cuda_allocation_error,
         error.HostToDeviceCopyFailed => &cuda_copy_error,
+        error.DeviceToHostCopyFailed => &cuda_device_to_host_copy_error,
         error.RunfilesUnavailable,
         error.ToolchainConfigUnavailable,
         error.ZigExecutableUnavailable,
@@ -855,6 +861,123 @@ fn bufferOnDeviceSizeInBytes(args: [*c]c.PJRT_Buffer_OnDeviceSizeInBytes_Args) c
     return null;
 }
 
+fn validateHostLayout(buffer: *const Buffer, layout: *const c.PJRT_Buffer_MemoryLayout) !void {
+    switch (layout.type) {
+        c.PJRT_Buffer_MemoryLayout_Type_Tiled => {
+            const tiled = layout.unnamed_0.tiled;
+            if (tiled.num_tiles != 0 or tiled.minor_to_major_size != buffer.dims.len) {
+                return error.InvalidArgument;
+            }
+            if (tiled.minor_to_major_size > 0 and tiled.minor_to_major == null) {
+                return error.InvalidArgument;
+            }
+            for (tiled.minor_to_major[0..tiled.minor_to_major_size], 0..) |dimension, index| {
+                if (dimension != buffer.dims.len - 1 - index) return error.InvalidArgument;
+            }
+        },
+        c.PJRT_Buffer_MemoryLayout_Type_Strides => {
+            const strides = layout.unnamed_0.strides;
+            if (strides.num_byte_strides != buffer.dims.len) return error.InvalidArgument;
+            try validateCompactByteStrides(
+                buffer.element_type,
+                buffer.dims.ptr,
+                buffer.dims.len,
+                strides.byte_strides,
+                strides.num_byte_strides,
+            );
+        },
+        else => return error.InvalidArgument,
+    }
+}
+
+fn bufferToHostBuffer(args: [*c]c.PJRT_Buffer_ToHostBuffer_Args) callconv(.c) ?*c.PJRT_Error {
+    const buffer = Buffer.fromPjrt(args.*.src);
+    args.*.event = null;
+
+    if (args.*.host_layout) |host_layout| {
+        validateHostLayout(buffer, host_layout) catch |err| return errorToPjrt(err);
+    }
+
+    const required_size = buffer.allocation.size;
+    if (args.*.dst == null) {
+        args.*.dst_size = required_size;
+        return null;
+    }
+    if (args.*.dst_size < required_size) return errorToPjrt(error.InvalidArgument);
+
+    const destination = @as([*]u8, @ptrCast(args.*.dst.?))[0..required_size];
+    buffer.client.cuda.copyDeviceToHost(destination, buffer.allocation, 0) catch |err| {
+        return errorToPjrt(err);
+    };
+
+    const event = createReadyEvent() catch return errorToPjrt(error.OutOfMemory);
+    args.*.event = @ptrCast(event);
+    return null;
+}
+
+test "to host buffer size query does not access CUDA" {
+    var dims = [_]i64{ 2, 3 };
+    var buffer: Buffer = .{
+        .client = undefined,
+        .allocation = .{ .ptr = 0, .size = 24 },
+        .element_type = c.PJRT_Buffer_Type_F32,
+        .dims = &dims,
+    };
+    var args: c.PJRT_Buffer_ToHostBuffer_Args = std.mem.zeroes(c.PJRT_Buffer_ToHostBuffer_Args);
+    args.struct_size = c.PJRT_Buffer_ToHostBuffer_Args_STRUCT_SIZE;
+    args.src = @ptrCast(&buffer);
+
+    try std.testing.expect(bufferToHostBuffer(&args) == null);
+    try std.testing.expectEqual(@as(usize, 24), args.dst_size);
+    try std.testing.expect(args.event == null);
+}
+
+test "to host buffer accepts only compact source-equivalent layouts" {
+    var dims = [_]i64{ 2, 3 };
+    const buffer: Buffer = .{
+        .client = undefined,
+        .allocation = .{ .ptr = 0, .size = 24 },
+        .element_type = c.PJRT_Buffer_Type_F32,
+        .dims = &dims,
+    };
+
+    const minor_to_major = [_]i64{ 1, 0 };
+    const tiled: c.PJRT_Buffer_MemoryLayout = .{
+        .struct_size = c.PJRT_Buffer_MemoryLayout_STRUCT_SIZE,
+        .extension_start = null,
+        .unnamed_0 = .{ .tiled = .{
+            .struct_size = c.PJRT_Buffer_MemoryLayout_Tiled_STRUCT_SIZE,
+            .extension_start = null,
+            .minor_to_major = &minor_to_major,
+            .minor_to_major_size = minor_to_major.len,
+            .tile_dims = null,
+            .tile_dim_sizes = null,
+            .num_tiles = 0,
+        } },
+        .type = c.PJRT_Buffer_MemoryLayout_Type_Tiled,
+    };
+    try validateHostLayout(&buffer, &tiled);
+
+    const byte_strides = [_]i64{ 12, 4 };
+    const strides: c.PJRT_Buffer_MemoryLayout = .{
+        .struct_size = c.PJRT_Buffer_MemoryLayout_STRUCT_SIZE,
+        .extension_start = null,
+        .unnamed_0 = .{ .strides = .{
+            .struct_size = c.PJRT_Buffer_MemoryLayout_Strides_STRUCT_SIZE,
+            .extension_start = null,
+            .byte_strides = &byte_strides,
+            .num_byte_strides = byte_strides.len,
+        } },
+        .type = c.PJRT_Buffer_MemoryLayout_Type_Strides,
+    };
+    try validateHostLayout(&buffer, &strides);
+
+    const transposed_minor_to_major = [_]i64{ 0, 1 };
+    var transposed = tiled;
+    transposed.unnamed_0.tiled.minor_to_major = &transposed_minor_to_major;
+    try std.testing.expectError(error.InvalidArgument, validateHostLayout(&buffer, &transposed));
+}
+
 fn bufferDevice(args: [*c]c.PJRT_Buffer_Device_Args) callconv(.c) ?*c.PJRT_Error {
     args.*.device = @ptrCast(&Buffer.fromPjrt(args.*.buffer).client.cuda.device);
     return null;
@@ -1078,6 +1201,7 @@ fn makeApi() c.PJRT_Api {
     result.PJRT_Buffer_ElementType = &bufferElementType;
     result.PJRT_Buffer_Dimensions = &bufferDimensions;
     result.PJRT_Buffer_OnDeviceSizeInBytes = &bufferOnDeviceSizeInBytes;
+    result.PJRT_Buffer_ToHostBuffer = &bufferToHostBuffer;
     result.PJRT_Buffer_Device = &bufferDevice;
     result.PJRT_Buffer_Memory = &bufferMemory;
     result.PJRT_Buffer_ReadyEvent = &bufferReadyEvent;

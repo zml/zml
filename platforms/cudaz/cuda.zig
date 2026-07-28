@@ -12,6 +12,7 @@ pub const Error = error{
     HostRegistrationFailed,
     DeviceAllocationFailed,
     HostToDeviceCopyFailed,
+    DeviceToHostCopyFailed,
     ModuleLoadFailed,
     FunctionLookupFailed,
     KernelLaunchFailed,
@@ -47,6 +48,7 @@ const Api = struct {
     memAlloc: *const fn (*DevicePtr, usize) callconv(.c) Result,
     memFree: *const fn (DevicePtr) callconv(.c) Result,
     memcpyHtoDAsync: *const fn (DevicePtr, ?*const anyopaque, usize, StreamHandle) callconv(.c) Result,
+    memcpyDtoHAsync: *const fn (?*anyopaque, DevicePtr, usize, StreamHandle) callconv(.c) Result,
     moduleLoadData: *const fn (*ModuleHandle, ?*const anyopaque) callconv(.c) Result,
     moduleUnload: *const fn (ModuleHandle) callconv(.c) Result,
     moduleGetFunction: *const fn (*FunctionHandle, ModuleHandle, [*:0]const u8) callconv(.c) Result,
@@ -83,6 +85,7 @@ const Api = struct {
             .memAlloc = try lookup(*const fn (*DevicePtr, usize) callconv(.c) Result, &library, "cuMemAlloc_v2"),
             .memFree = try lookup(*const fn (DevicePtr) callconv(.c) Result, &library, "cuMemFree_v2"),
             .memcpyHtoDAsync = try lookup(*const fn (DevicePtr, ?*const anyopaque, usize, StreamHandle) callconv(.c) Result, &library, "cuMemcpyHtoDAsync_v2"),
+            .memcpyDtoHAsync = try lookup(*const fn (?*anyopaque, DevicePtr, usize, StreamHandle) callconv(.c) Result, &library, "cuMemcpyDtoHAsync_v2"),
             .moduleLoadData = try lookup(*const fn (*ModuleHandle, ?*const anyopaque) callconv(.c) Result, &library, "cuModuleLoadData"),
             .moduleUnload = try lookup(*const fn (ModuleHandle) callconv(.c) Result, &library, "cuModuleUnload"),
             .moduleGetFunction = try lookup(*const fn (*FunctionHandle, ModuleHandle, [*:0]const u8) callconv(.c) Result, &library, "cuModuleGetFunction"),
@@ -240,6 +243,26 @@ pub const Client = struct {
         );
     }
 
+    pub fn copyDeviceToHost(self: *Client, destination: []u8, allocation: Allocation, offset: usize) Error!void {
+        if (offset > allocation.size or destination.len > allocation.size - offset) {
+            return error.DeviceToHostCopyFailed;
+        }
+        if (destination.len == 0) return;
+        try self.setCurrent();
+
+        const source = std.math.add(DevicePtr, allocation.ptr, offset) catch return error.DeviceToHostCopyFailed;
+        try Api.check(
+            self.api.memcpyDtoHAsync(destination.ptr, source, destination.len, self.stream.handle),
+            "cuMemcpyDtoHAsync_v2",
+            error.DeviceToHostCopyFailed,
+        );
+        try Api.check(
+            self.api.streamSynchronize(self.stream.handle),
+            "cuStreamSynchronize",
+            error.DeviceToHostCopyFailed,
+        );
+    }
+
     pub fn loadKernel(self: *Client, ptx: [:0]const u8, name: [:0]const u8) Error!Kernel {
         try self.setCurrent();
 
@@ -310,3 +333,23 @@ pub const Client = struct {
         try Api.check(self.api.ctxSetCurrent(self.device.context), "cuCtxSetCurrent", error.ContextFailed);
     }
 };
+
+test "CUDA allocation round-trip" {
+    var client = Client.init() catch |err| switch (err) {
+        error.DriverUnavailable,
+        error.InitializationFailed,
+        error.DeviceUnavailable,
+        => return error.SkipZigTest,
+        else => return err,
+    };
+    defer client.deinit();
+
+    const expected = [_]u32{ 0x01234567, 0x89abcdef, 0xfedcba98 };
+    const allocation = try client.allocate(@sizeOf(@TypeOf(expected)));
+    defer client.free(allocation);
+    try client.copyHostToDevice(allocation, 0, std.mem.asBytes(&expected));
+
+    var actual: @TypeOf(expected) = undefined;
+    try client.copyDeviceToHost(std.mem.asBytes(&actual), allocation, 0);
+    try std.testing.expectEqualSlices(u32, &expected, &actual);
+}
