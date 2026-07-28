@@ -1,16 +1,56 @@
 const std = @import("std");
 
 const c = @import("c");
+const compiler = @import("compiler.zig");
 const cuda = @import("cuda.zig");
 
-const Handle = struct {
-    tag: usize,
-};
+const log = std.log.scoped(.@"zml/platforms/cudaz");
 
 const Error = struct {
     base: c.PJRT_Error,
     code: c.PJRT_Error_Code,
     message: []const u8,
+};
+
+const Executable = struct {
+    ptx: [:0]u8,
+
+    fn create(ptx: [:0]u8) !*Executable {
+        const self = try std.heap.page_allocator.create(Executable);
+        self.* = .{ .ptx = ptx };
+        return self;
+    }
+
+    fn clone(self: *const Executable) !*Executable {
+        const ptx = try std.heap.page_allocator.dupeZ(u8, self.ptx);
+        errdefer std.heap.page_allocator.free(ptx);
+        return create(ptx);
+    }
+
+    fn destroy(self: *Executable) void {
+        std.heap.page_allocator.free(self.ptx);
+        std.heap.page_allocator.destroy(self);
+    }
+
+    fn fromPjrt(pjrt_executable: ?*c.PJRT_Executable) *Executable {
+        return @ptrCast(@alignCast(pjrt_executable.?));
+    }
+};
+
+const LoadedExecutable = struct {
+    client: *Client,
+    executable: *Executable,
+    kernel: cuda.Kernel,
+
+    fn destroy(self: *LoadedExecutable) void {
+        self.client.cuda.unloadKernel(self.kernel);
+        self.executable.destroy();
+        std.heap.page_allocator.destroy(self);
+    }
+
+    fn fromPjrt(pjrt_executable: ?*c.PJRT_LoadedExecutable) *LoadedExecutable {
+        return @ptrCast(@alignCast(pjrt_executable.?));
+    }
 };
 
 const Memory = extern struct {
@@ -21,7 +61,6 @@ const Memory = extern struct {
 const Client = struct {
     cuda: cuda.Client,
     memory: Memory,
-    loaded_executable: Handle,
     addressable_devices: [1]?*c.PJRT_Device,
     addressable_memories: [1][*c]c.PJRT_Memory,
 
@@ -34,7 +73,6 @@ const Client = struct {
             .base = .{ .vtable = null },
             .client = self,
         };
-        self.loaded_executable = .{ .tag = 0 };
         self.addressable_devices = .{@ptrCast(&self.cuda.device)};
         self.addressable_memories = .{@ptrCast(&self.memory)};
         return self;
@@ -107,6 +145,8 @@ const device_string = "CudazDevice(id=0)";
 const memory_kind = "device";
 const memory_debug_string = "cudaz device memory 0";
 const memory_string = "CudazDeviceMemory(id=0)";
+const executable_name = "cudaz Zig PTX kernel";
+const ptx_format = "ptx";
 const device_coords = [_]i64{0};
 
 const error_vtable: c.PJRT_Error_FunctionTable = .{
@@ -178,6 +218,21 @@ var cuda_copy_error: Error = .{
     .code = c.PJRT_Error_Code_INTERNAL,
     .message = "cudaz: CUDA host-to-device copy failed",
 };
+var compiler_error: Error = .{
+    .base = .{ .vtable = &error_vtable },
+    .code = c.PJRT_Error_Code_INTERNAL,
+    .message = "cudaz: Zig PTX compilation failed",
+};
+var cuda_module_error: Error = .{
+    .base = .{ .vtable = &error_vtable },
+    .code = c.PJRT_Error_Code_INTERNAL,
+    .message = "cudaz: CUDA PTX module loading failed",
+};
+var cuda_function_error: Error = .{
+    .base = .{ .vtable = &error_vtable },
+    .code = c.PJRT_Error_Code_NOT_FOUND,
+    .message = "cudaz: CUDA kernel function was not found",
+};
 
 fn errorFromPjrt(pjrt_error: anytype) *Error {
     return @ptrCast(@alignCast(@constCast(pjrt_error)));
@@ -195,6 +250,16 @@ fn errorToPjrt(err: anyerror) ?*c.PJRT_Error {
         error.HostRegistrationFailed => &cuda_host_registration_error,
         error.DeviceAllocationFailed => &cuda_allocation_error,
         error.HostToDeviceCopyFailed => &cuda_copy_error,
+        error.RunfilesUnavailable,
+        error.ToolchainConfigUnavailable,
+        error.ZigExecutableUnavailable,
+        error.ZigLibUnavailable,
+        error.KernelSourceUnavailable,
+        error.ZigCompilationFailed,
+        error.InvalidKernelIr,
+        => &compiler_error,
+        error.ModuleLoadFailed => &cuda_module_error,
+        error.FunctionLookupFailed => &cuda_function_error,
         else => &invalid_argument_error,
     };
     return @ptrCast(pjrt_error);
@@ -278,7 +343,33 @@ fn clientAddressableMemories(args: [*c]c.PJRT_Client_AddressableMemories_Args) c
 
 fn clientCompile(args: [*c]c.PJRT_Client_Compile_Args) callconv(.c) ?*c.PJRT_Error {
     const client = Client.fromPjrt(args.*.client);
-    args.*.executable = @ptrCast(&client.loaded_executable);
+
+    const ptx = compiler.compile(std.heap.page_allocator) catch |err| {
+        log.err("Zig PTX compilation failed: {s}", .{@errorName(err)});
+        return if (err == error.OutOfMemory)
+            errorToPjrt(error.OutOfMemory)
+        else
+            @ptrCast(&compiler_error);
+    };
+    const executable = Executable.create(ptx) catch {
+        std.heap.page_allocator.free(ptx);
+        return errorToPjrt(error.OutOfMemory);
+    };
+    const kernel = client.cuda.loadKernel(executable.ptx, "main") catch |err| {
+        executable.destroy();
+        return errorToPjrt(err);
+    };
+    const loaded_executable = std.heap.page_allocator.create(LoadedExecutable) catch {
+        client.cuda.unloadKernel(kernel);
+        executable.destroy();
+        return errorToPjrt(error.OutOfMemory);
+    };
+    loaded_executable.* = .{
+        .client = client,
+        .executable = executable,
+        .kernel = kernel,
+    };
+    args.*.executable = @ptrCast(loaded_executable);
     return null;
 }
 
@@ -775,7 +866,64 @@ fn bufferReadyEvent(args: [*c]c.PJRT_Buffer_ReadyEvent_Args) callconv(.c) ?*c.PJ
     return null;
 }
 
-fn loadedExecutableDestroy(_: [*c]c.PJRT_LoadedExecutable_Destroy_Args) callconv(.c) ?*c.PJRT_Error {
+fn executableDestroy(args: [*c]c.PJRT_Executable_Destroy_Args) callconv(.c) ?*c.PJRT_Error {
+    if (args.*.executable) |pjrt_executable| Executable.fromPjrt(pjrt_executable).destroy();
+    return null;
+}
+
+fn executableName(args: [*c]c.PJRT_Executable_Name_Args) callconv(.c) ?*c.PJRT_Error {
+    _ = Executable.fromPjrt(args.*.executable);
+    args.*.executable_name = executable_name.ptr;
+    args.*.executable_name_size = executable_name.len;
+    return null;
+}
+
+fn executableNumReplicas(args: [*c]c.PJRT_Executable_NumReplicas_Args) callconv(.c) ?*c.PJRT_Error {
+    _ = Executable.fromPjrt(args.*.executable);
+    args.*.num_replicas = 1;
+    return null;
+}
+
+fn executableNumPartitions(args: [*c]c.PJRT_Executable_NumPartitions_Args) callconv(.c) ?*c.PJRT_Error {
+    _ = Executable.fromPjrt(args.*.executable);
+    args.*.num_partitions = 1;
+    return null;
+}
+
+fn executableOptimizedProgram(args: [*c]c.PJRT_Executable_OptimizedProgram_Args) callconv(.c) ?*c.PJRT_Error {
+    const executable = Executable.fromPjrt(args.*.executable);
+    const program = args.*.program orelse return errorToPjrt(error.InvalidArgument);
+    program.*.format = ptx_format.ptr;
+    program.*.format_size = ptx_format.len;
+
+    if (program.*.code == null) {
+        program.*.code_size = executable.ptx.len;
+        return null;
+    }
+    if (program.*.code_size < executable.ptx.len) return errorToPjrt(error.InvalidArgument);
+    @memcpy(program.*.code[0..executable.ptx.len], executable.ptx);
+    program.*.code_size = executable.ptx.len;
+    return null;
+}
+
+fn loadedExecutableDestroy(args: [*c]c.PJRT_LoadedExecutable_Destroy_Args) callconv(.c) ?*c.PJRT_Error {
+    if (args.*.executable) |pjrt_executable| LoadedExecutable.fromPjrt(pjrt_executable).destroy();
+    return null;
+}
+
+fn loadedExecutableGetExecutable(args: [*c]c.PJRT_LoadedExecutable_GetExecutable_Args) callconv(.c) ?*c.PJRT_Error {
+    const loaded_executable = LoadedExecutable.fromPjrt(args.*.loaded_executable);
+    const executable = loaded_executable.executable.clone() catch return errorToPjrt(error.OutOfMemory);
+    args.*.executable = @ptrCast(executable);
+    return null;
+}
+
+fn loadedExecutableAddressableDevices(
+    args: [*c]c.PJRT_LoadedExecutable_AddressableDevices_Args,
+) callconv(.c) ?*c.PJRT_Error {
+    const loaded_executable = LoadedExecutable.fromPjrt(args.*.executable);
+    args.*.addressable_devices = &loaded_executable.client.addressable_devices;
+    args.*.num_addressable_devices = loaded_executable.client.addressable_devices.len;
     return null;
 }
 
@@ -830,7 +978,14 @@ fn makeApi() c.PJRT_Api {
     result.PJRT_AsyncHostToDeviceTransferManager_Device = &transferManagerDevice;
     result.PJRT_AsyncHostToDeviceTransferManager_BufferCount = &transferManagerBufferCount;
     result.PJRT_AsyncHostToDeviceTransferManager_BufferSize = &transferManagerBufferSize;
+    result.PJRT_Executable_Destroy = &executableDestroy;
+    result.PJRT_Executable_Name = &executableName;
+    result.PJRT_Executable_NumReplicas = &executableNumReplicas;
+    result.PJRT_Executable_NumPartitions = &executableNumPartitions;
+    result.PJRT_Executable_OptimizedProgram = &executableOptimizedProgram;
     result.PJRT_LoadedExecutable_Destroy = &loadedExecutableDestroy;
+    result.PJRT_LoadedExecutable_GetExecutable = &loadedExecutableGetExecutable;
+    result.PJRT_LoadedExecutable_AddressableDevices = &loadedExecutableAddressableDevices;
     result.PJRT_Buffer_Destroy = &bufferDestroy;
     result.PJRT_Buffer_ElementType = &bufferElementType;
     result.PJRT_Buffer_Dimensions = &bufferDimensions;

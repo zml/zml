@@ -12,11 +12,15 @@ pub const Error = error{
     HostRegistrationFailed,
     DeviceAllocationFailed,
     HostToDeviceCopyFailed,
+    ModuleLoadFailed,
+    FunctionLookupFailed,
 };
 
 pub const DeviceHandle = c_int;
 pub const Context = ?*anyopaque;
 pub const StreamHandle = ?*anyopaque;
+pub const ModuleHandle = ?*anyopaque;
+pub const FunctionHandle = ?*anyopaque;
 pub const DevicePtr = u64;
 
 const Result = c_int;
@@ -39,6 +43,9 @@ const Api = struct {
     memAlloc: *const fn (*DevicePtr, usize) callconv(.c) Result,
     memFree: *const fn (DevicePtr) callconv(.c) Result,
     memcpyHtoDAsync: *const fn (DevicePtr, ?*const anyopaque, usize, StreamHandle) callconv(.c) Result,
+    moduleLoadData: *const fn (*ModuleHandle, ?*const anyopaque) callconv(.c) Result,
+    moduleUnload: *const fn (ModuleHandle) callconv(.c) Result,
+    moduleGetFunction: *const fn (*FunctionHandle, ModuleHandle, [*:0]const u8) callconv(.c) Result,
 
     fn load() Error!Api {
         var library = std.DynLib.open("libcuda.so.1") catch return error.DriverUnavailable;
@@ -59,6 +66,9 @@ const Api = struct {
             .memAlloc = try lookup(*const fn (*DevicePtr, usize) callconv(.c) Result, &library, "cuMemAlloc_v2"),
             .memFree = try lookup(*const fn (DevicePtr) callconv(.c) Result, &library, "cuMemFree_v2"),
             .memcpyHtoDAsync = try lookup(*const fn (DevicePtr, ?*const anyopaque, usize, StreamHandle) callconv(.c) Result, &library, "cuMemcpyHtoDAsync_v2"),
+            .moduleLoadData = try lookup(*const fn (*ModuleHandle, ?*const anyopaque) callconv(.c) Result, &library, "cuModuleLoadData"),
+            .moduleUnload = try lookup(*const fn (ModuleHandle) callconv(.c) Result, &library, "cuModuleUnload"),
+            .moduleGetFunction = try lookup(*const fn (*FunctionHandle, ModuleHandle, [*:0]const u8) callconv(.c) Result, &library, "cuModuleGetFunction"),
         };
     }
 
@@ -88,6 +98,11 @@ pub const Stream = struct {
 pub const Allocation = struct {
     ptr: DevicePtr,
     size: usize,
+};
+
+pub const Kernel = struct {
+    module: ModuleHandle,
+    function: FunctionHandle,
 };
 
 pub const Client = struct {
@@ -189,6 +204,37 @@ pub const Client = struct {
             "cuStreamSynchronize",
             error.HostToDeviceCopyFailed,
         );
+    }
+
+    pub fn loadKernel(self: *Client, ptx: [:0]const u8, name: [:0]const u8) Error!Kernel {
+        try self.setCurrent();
+
+        var module: ModuleHandle = null;
+        try Api.check(
+            self.api.moduleLoadData(&module, ptx.ptr),
+            "cuModuleLoadData",
+            error.ModuleLoadFailed,
+        );
+        errdefer _ = self.api.moduleUnload(module);
+
+        var function: FunctionHandle = null;
+        try Api.check(
+            self.api.moduleGetFunction(&function, module, name.ptr),
+            "cuModuleGetFunction",
+            error.FunctionLookupFailed,
+        );
+        return .{
+            .module = module,
+            .function = function,
+        };
+    }
+
+    pub fn unloadKernel(self: *Client, kernel: Kernel) void {
+        self.setCurrent() catch return;
+        const result = self.api.moduleUnload(kernel.module);
+        if (result != success) {
+            log.err("cuModuleUnload failed with CUDA result {d}", .{result});
+        }
     }
 
     fn setCurrent(self: *Client) Error!void {

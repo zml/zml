@@ -1,22 +1,41 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library", "zig_test")
+load(":compiler.bzl", "zig_runtime")
+
+zig_runtime(
+    name = "zig_runtime",
+    kernel = "kernel.zig",
+)
 
 zig_shared_library(
     name = "pjrt_plugin",
-    srcs = ["cuda.zig"],
+    srcs = [
+        "compiler.zig",
+        "cuda.zig",
+    ],
     main = "libpjrt_cudaz.zig",
     shared_lib_name = "libpjrt_cudaz.so",
     target_compatible_with = ["@platforms//os:linux"],
     zigopts = ["-fno-stack-check"],
-    deps = ["@xla//xla/pjrt/c:pjrt_c_api_hdrs"],
+    deps = [
+        "@rules_zig//zig/runfiles",
+        "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
+    ],
 )
 
 zig_test(
     name = "test",
-    srcs = ["cuda.zig"],
+    srcs = [
+        "compiler.zig",
+        "cuda.zig",
+    ],
+    data = [":zig_runtime"],
     main = "libpjrt_cudaz.zig",
     target_compatible_with = ["@platforms//os:linux"],
-    deps = ["@xla//xla/pjrt/c:pjrt_c_api_hdrs"],
+    deps = [
+        "@rules_zig//zig/runfiles",
+        "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
+    ],
 )
 
 cc_library(
@@ -27,7 +46,10 @@ cc_library(
 
 cc_library(
     name = "libpjrt_cudaz",
-    data = [":pjrt_plugin"],
+    data = [
+        ":pjrt_plugin",
+        ":zig_runtime",
+    ],
     defines = ["ZML_RUNTIME_CUDAZ"],
     tags = ["manual"],
 )
