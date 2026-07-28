@@ -34,6 +34,7 @@ const error_vtable: c.PJRT_Error_FunctionTable = .{
 var client: Handle = .{ .tag = 0 };
 var device: Handle = .{ .tag = 0 };
 var device_description: Handle = .{ .tag = 0 };
+var loaded_executable: Handle = .{ .tag = 0 };
 var memory: c.PJRT_Memory = .{ .vtable = null };
 var addressable_devices: [1]?*c.PJRT_Device = .{@ptrCast(&device)};
 var addressable_memories: [1][*c]c.PJRT_Memory = .{&memory};
@@ -128,8 +129,9 @@ fn clientAddressableMemories(args: [*c]c.PJRT_Client_AddressableMemories_Args) c
     return null;
 }
 
-fn clientCompile(_: [*c]c.PJRT_Client_Compile_Args) callconv(.c) ?*c.PJRT_Error {
-    return @ptrCast(&compile_error);
+fn clientCompile(args: [*c]c.PJRT_Client_Compile_Args) callconv(.c) ?*c.PJRT_Error {
+    args.*.executable = @ptrCast(&loaded_executable);
+    return null;
 }
 
 fn deviceDescriptionId(args: [*c]c.PJRT_DeviceDescription_Id_Args) callconv(.c) ?*c.PJRT_Error {
@@ -221,6 +223,10 @@ fn memoryAddressableByDevices(args: [*c]c.PJRT_Memory_AddressableByDevices_Args)
     return null;
 }
 
+fn loadedExecutableDestroy(_: [*c]c.PJRT_LoadedExecutable_Destroy_Args) callconv(.c) ?*c.PJRT_Error {
+    return null;
+}
+
 fn makeApi() c.PJRT_Api {
     var result = std.mem.zeroes(c.PJRT_Api);
     result.struct_size = c.PJRT_Api_STRUCT_SIZE;
@@ -257,6 +263,7 @@ fn makeApi() c.PJRT_Api {
     result.PJRT_Memory_DebugString = &memoryDebugString;
     result.PJRT_Memory_ToString = &memoryToString;
     result.PJRT_Memory_AddressableByDevices = &memoryAddressableByDevices;
+    result.PJRT_LoadedExecutable_Destroy = &loadedExecutableDestroy;
     return result;
 }
 
