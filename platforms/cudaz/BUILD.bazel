@@ -1,12 +1,21 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library", "zig_test")
 
 zig_shared_library(
     name = "pjrt_plugin",
+    srcs = ["cuda.zig"],
     main = "libpjrt_cudaz.zig",
     shared_lib_name = "libpjrt_cudaz.so",
     target_compatible_with = ["@platforms//os:linux"],
     zigopts = ["-fno-stack-check"],
+    deps = ["@xla//xla/pjrt/c:pjrt_c_api_hdrs"],
+)
+
+zig_test(
+    name = "test",
+    srcs = ["cuda.zig"],
+    main = "libpjrt_cudaz.zig",
+    target_compatible_with = ["@platforms//os:linux"],
     deps = ["@xla//xla/pjrt/c:pjrt_c_api_hdrs"],
 )
 
