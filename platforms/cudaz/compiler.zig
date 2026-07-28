@@ -53,23 +53,145 @@ pub const GeneratedKernel = struct {
     }
 };
 
-const DenseLayer = struct {
-    weight_argument: usize,
-    bias_argument: usize,
-    output_elements: usize,
-    contracting_elements: usize,
+const KernelType = enum {
+    u8,
+    i32,
+    u32,
+    f32,
+
+    fn zigName(self: KernelType) []const u8 {
+        return @tagName(self);
+    }
+
+    fn byteSize(self: KernelType) usize {
+        return switch (self) {
+            .u8 => @sizeOf(u8),
+            .i32 => @sizeOf(i32),
+            .u32 => @sizeOf(u32),
+            .f32 => @sizeOf(f32),
+        };
+    }
+
+    fn alignment(self: KernelType) usize {
+        return switch (self) {
+            .u8 => @alignOf(u8),
+            .i32 => @alignOf(i32),
+            .u32 => @alignOf(u32),
+            .f32 => @alignOf(f32),
+        };
+    }
+};
+
+const ExternalBuffer = struct {
+    index: usize,
+    element_type: KernelType,
+    elements: usize,
+};
+
+const ScratchBuffer = struct {
+    offset: usize,
+    element_type: KernelType,
+    elements: usize,
+};
+
+const BufferRef = union(enum) {
+    argument: ExternalBuffer,
+    output: ExternalBuffer,
+    scratch: ScratchBuffer,
+
+    fn elementType(self: BufferRef) KernelType {
+        return switch (self) {
+            inline else => |buffer| buffer.element_type,
+        };
+    }
+
+    fn elements(self: BufferRef) usize {
+        return switch (self) {
+            inline else => |buffer| buffer.elements,
+        };
+    }
+};
+
+const Matmul = struct {
+    lhs: BufferRef,
+    rhs: BufferRef,
+    output: BufferRef,
+    m: usize,
+    n: usize,
+    k: usize,
+};
+
+const AddBiasRelu = struct {
+    values: BufferRef,
+    bias: BufferRef,
+    rows: usize,
+    columns: usize,
+};
+
+const ArgMax = struct {
+    values: BufferRef,
+    output: BufferRef,
+    elements: usize,
+};
+
+const Node = union(enum) {
+    matmul: Matmul,
+    add_bias_relu: AddBiasRelu,
+    argmax: ArgMax,
+
+    fn requiresBarrier(self: Node) bool {
+        return switch (self) {
+            .matmul, .add_bias_relu => true,
+            .argmax => false,
+        };
+    }
+};
+
+const Kernel = struct {
+    node: Node,
+};
+
+const ValueBinding = struct {
+    value: *const mlir.Value,
+    buffer: BufferRef,
 };
 
 const GraphPlan = struct {
-    input_argument: usize,
     input_count: usize,
-    layers: []DenseLayer,
-    scratch_offsets: []usize,
-    scratch_size: usize,
+    kernels: std.ArrayList(Kernel) = .empty,
+    scratch_size: usize = 16,
 
-    fn deinit(self: GraphPlan, allocator: std.mem.Allocator) void {
-        allocator.free(self.layers);
-        allocator.free(self.scratch_offsets);
+    fn deinit(self: *GraphPlan, allocator: std.mem.Allocator) void {
+        self.kernels.deinit(allocator);
+        self.* = undefined;
+    }
+
+    fn allocateScratch(
+        self: *GraphPlan,
+        element_type: KernelType,
+        elements: usize,
+    ) !BufferRef {
+        self.scratch_size = std.mem.alignForward(
+            usize,
+            self.scratch_size,
+            element_type.alignment(),
+        );
+        const offset = self.scratch_size;
+        const byte_count = std.math.mul(
+            usize,
+            elements,
+            element_type.byteSize(),
+        ) catch return error.UnsupportedGraph;
+        self.scratch_size = std.math.add(
+            usize,
+            self.scratch_size,
+            byte_count,
+        ) catch return error.UnsupportedGraph;
+        return .{ .scratch = .{
+            .offset = offset,
+            .element_type = element_type,
+            .elements = elements,
+        } };
     }
 };
 
@@ -128,7 +250,7 @@ pub fn generateKernel(
 
     const output_specs = try outputSpecsFromModule(allocator, module);
     errdefer deinitOutputSpecs(allocator, output_specs);
-    const plan = try graphPlanFromModule(allocator, module);
+    var plan = try graphPlanFromModule(allocator, module, output_specs);
     defer plan.deinit(allocator);
     const source = try renderKernelSource(allocator, plan, output_specs);
     return .{
@@ -142,6 +264,7 @@ pub fn generateKernel(
 fn graphPlanFromModule(
     allocator: std.mem.Allocator,
     module: *const mlir.Module,
+    outputs: []const OutputSpec,
 ) !GraphPlan {
     const main = findMainFunction(module) orelse return error.MissingMainFunction;
     if (main.numRegions() != 1) return error.UnsupportedGraph;
@@ -155,24 +278,20 @@ fn graphPlanFromModule(
         return error.UnsupportedGraph;
     const input_count: usize = @intCast(c.mlirFunctionTypeGetNumInputs(function_type.ptr()));
 
-    var layers_buffer: [16]DenseLayer = undefined;
-    var layer_count: usize = 0;
-    var input_argument: ?usize = null;
-    var previous_activation: ?*const mlir.Value = null;
-    var saw_argmax_reduce = false;
+    var plan: GraphPlan = .{ .input_count = input_count };
+    errdefer plan.deinit(allocator);
+    var bindings: std.ArrayList(ValueBinding) = .empty;
+    defer bindings.deinit(allocator);
 
     var maybe_operation: ?*const mlir.Operation = block.firstOperation();
     while (maybe_operation) |operation| {
         if (std.mem.eql(u8, operation.name(), "stablehlo.dot_general")) {
-            if (layer_count == layers_buffer.len or
-                operation.numOperands() != 2 or
+            if (operation.numOperands() != 2 or
                 operation.numResults() != 1)
             {
                 return error.UnsupportedGraph;
             }
 
-            const weight_argument = traceBlockArgument(operation.operand(0)) orelse
-                return error.UnsupportedGraph;
             const weight_type = rankedTensor(operation.operand(0)) orelse
                 return error.UnsupportedGraph;
             const rhs_type = rankedTensor(operation.operand(1)) orelse
@@ -199,12 +318,31 @@ fn graphPlanFromModule(
                 return error.UnsupportedGraph;
             }
 
-            if (previous_activation) |activation| {
-                if (!operation.operand(1).eql(activation)) return error.UnsupportedGraph;
-            } else {
-                input_argument = traceBlockArgument(operation.operand(1)) orelse
-                    return error.UnsupportedGraph;
+            const lhs = resolveBuffer(module, operation.operand(0), bindings.items) orelse
+                return error.UnsupportedGraph;
+            const rhs = resolveBuffer(module, operation.operand(1), bindings.items) orelse
+                return error.UnsupportedGraph;
+            const lhs_elements = std.math.mul(
+                usize,
+                output_elements,
+                contracting_elements,
+            ) catch return error.UnsupportedGraph;
+            if (lhs.elementType() != .f32 or
+                lhs.elements() != lhs_elements or
+                rhs.elements() != contracting_elements)
+            {
+                return error.UnsupportedGraph;
             }
+            const activation = try plan.allocateScratch(.f32, output_elements);
+            try plan.kernels.append(allocator, .{ .node = .{ .matmul = .{
+                .lhs = lhs,
+                .rhs = rhs,
+                .output = activation,
+                .m = output_elements,
+                .n = 1,
+                .k = contracting_elements,
+            } } });
+            try bindValue(allocator, &bindings, operation.result(0), activation);
 
             const add = findConsumingOperation(
                 operation,
@@ -215,12 +353,14 @@ fn graphPlanFromModule(
                 add.operand(1)
             else
                 add.operand(0);
-            const bias_argument = traceBlockArgument(bias_value) orelse
+            const bias = resolveBuffer(module, bias_value, bindings.items) orelse
                 return error.UnsupportedGraph;
             const bias_type = rankedTensor(bias_value) orelse return error.UnsupportedGraph;
             if (bias_type.rank() != 1 or
                 positiveDimension(bias_type, 0) != output_elements or
-                !isElementType(module.context(), bias_type, c.PJRT_Buffer_Type_F32))
+                !isElementType(module.context(), bias_type, c.PJRT_Buffer_Type_F32) or
+                bias.elementType() != .f32 or
+                bias.elements() != output_elements)
             {
                 return error.UnsupportedGraph;
             }
@@ -230,58 +370,48 @@ fn graphPlanFromModule(
                 "stablehlo.maximum",
                 add.result(0),
             ) orelse return error.UnsupportedGraph;
-            previous_activation = maximum.result(0);
-            layers_buffer[layer_count] = .{
-                .weight_argument = weight_argument,
-                .bias_argument = bias_argument,
-                .output_elements = output_elements,
-                .contracting_elements = contracting_elements,
-            };
-            layer_count += 1;
-        } else if (std.mem.eql(u8, operation.name(), "stablehlo.reduce") and
-            previous_activation != null and operation.numOperands() >= 1 and
-            operation.operand(0).eql(previous_activation.?))
-        {
-            saw_argmax_reduce = operation.numResults() == 2;
+            try plan.kernels.append(allocator, .{ .node = .{ .add_bias_relu = .{
+                .values = activation,
+                .bias = bias,
+                .rows = 1,
+                .columns = output_elements,
+            } } });
+            try bindValue(allocator, &bindings, maximum.result(0), activation);
+        } else if (std.mem.eql(u8, operation.name(), "stablehlo.reduce")) {
+            if (operation.numOperands() < 1 or operation.numResults() != 2) {
+                return error.UnsupportedGraph;
+            }
+            const values = resolveBuffer(module, operation.operand(0), bindings.items) orelse
+                return error.UnsupportedGraph;
+            if (values.elementType() != .f32) return error.UnsupportedGraph;
+            const output_index = findReturnedOutput(
+                block,
+                operation.result(1),
+            ) orelse return error.UnsupportedGraph;
+            const output = outputBufferRef(outputs, output_index) orelse
+                return error.UnsupportedGraph;
+            if (output.elements() != 1 or
+                (output.elementType() != .u8 and
+                    output.elementType() != .i32 and
+                    output.elementType() != .u32))
+            {
+                return error.UnsupportedGraph;
+            }
+            try plan.kernels.append(allocator, .{ .node = .{ .argmax = .{
+                .values = values,
+                .output = output,
+                .elements = values.elements(),
+            } } });
         }
         maybe_operation = nextOperation(operation);
     }
 
-    if (layer_count == 0 or input_argument == null or !saw_argmax_reduce) {
-        return error.UnsupportedGraph;
-    }
-    const input_type = rankedTensor(block.argument(input_argument.?)) orelse
-        return error.UnsupportedGraph;
-    if (!isElementType(module.context(), input_type, c.PJRT_Buffer_Type_U8) or
-        tensorElementCount(input_type) != layers_buffer[0].contracting_elements)
+    if (plan.kernels.items.len == 0 or
+        std.meta.activeTag(plan.kernels.items[plan.kernels.items.len - 1].node) != .argmax)
     {
         return error.UnsupportedGraph;
     }
-
-    const layers = try allocator.dupe(DenseLayer, layers_buffer[0..layer_count]);
-    errdefer allocator.free(layers);
-    const scratch_offsets = try allocator.alloc(usize, layer_count);
-    errdefer allocator.free(scratch_offsets);
-
-    var scratch_size: usize = 16;
-    for (layers, scratch_offsets) |layer, *offset| {
-        scratch_size = std.mem.alignForward(usize, scratch_size, @alignOf(f32));
-        offset.* = scratch_size;
-        const layer_bytes = std.math.mul(
-            usize,
-            layer.output_elements,
-            @sizeOf(f32),
-        ) catch return error.UnsupportedGraph;
-        scratch_size = std.math.add(usize, scratch_size, layer_bytes) catch
-            return error.UnsupportedGraph;
-    }
-    return .{
-        .input_argument = input_argument.?,
-        .input_count = input_count,
-        .layers = layers,
-        .scratch_offsets = scratch_offsets,
-        .scratch_size = scratch_size,
-    };
+    return plan;
 }
 
 fn rankedTensor(value: *const mlir.Value) ?*const mlir.RankedTensorType {
@@ -327,18 +457,108 @@ fn isSupportedMatmulDimensions(operation: *const mlir.Operation) bool {
         dimensions.getRhsContractingDimensionsElem(0) == 0;
 }
 
-fn traceBlockArgument(value: *const mlir.Value) ?usize {
-    if (value.isA(mlir.BlockArgument)) |argument| return argument.number();
+fn bindValue(
+    allocator: std.mem.Allocator,
+    bindings: *std.ArrayList(ValueBinding),
+    value: *const mlir.Value,
+    buffer: BufferRef,
+) !void {
+    try bindings.append(allocator, .{ .value = value, .buffer = buffer });
+}
+
+fn resolveBuffer(
+    module: *const mlir.Module,
+    value: *const mlir.Value,
+    bindings: []const ValueBinding,
+) ?BufferRef {
+    var binding_index = bindings.len;
+    while (binding_index > 0) {
+        binding_index -= 1;
+        const binding = bindings[binding_index];
+        if (binding.value.eql(value)) return binding.buffer;
+    }
+
+    if (value.isA(mlir.BlockArgument)) |argument| {
+        const tensor = rankedTensor(value) orelse return null;
+        return .{ .argument = .{
+            .index = argument.number(),
+            .element_type = kernelType(
+                module.context(),
+                tensor.elementType(),
+            ) orelse return null,
+            .elements = tensorElementCount(tensor) orelse return null,
+        } };
+    }
+
     const result = value.isA(mlir.OpResult) orelse return null;
     const owner = result.owner();
-    if (owner.numOperands() != 1) return null;
-    if (!std.mem.eql(u8, owner.name(), "stablehlo.reshape") and
-        !std.mem.eql(u8, owner.name(), "stablehlo.convert") and
-        !std.mem.eql(u8, owner.name(), "stablehlo.broadcast_in_dim"))
+    if (owner.numOperands() != 1 or
+        (!std.mem.eql(u8, owner.name(), "stablehlo.reshape") and
+            !std.mem.eql(u8, owner.name(), "stablehlo.convert")))
     {
         return null;
     }
-    return traceBlockArgument(owner.operand(0));
+    return resolveBuffer(module, owner.operand(0), bindings);
+}
+
+fn outputBufferRef(outputs: []const OutputSpec, index: usize) ?BufferRef {
+    if (index >= outputs.len) return null;
+    const output = outputs[index];
+    var elements: usize = 1;
+    for (output.dims) |dimension| {
+        if (dimension < 0) return null;
+        elements = std.math.mul(usize, elements, @intCast(dimension)) catch
+            return null;
+    }
+    return .{ .output = .{
+        .index = index,
+        .element_type = kernelTypeFromPjrt(output.element_type) orelse return null,
+        .elements = elements,
+    } };
+}
+
+fn kernelType(
+    context: *mlir.Context,
+    element_type: *const mlir.Type,
+) ?KernelType {
+    return kernelTypeFromPjrt(pjrtElementType(context, element_type) catch
+        return null);
+}
+
+fn kernelTypeFromPjrt(element_type: c.PJRT_Buffer_Type) ?KernelType {
+    return switch (element_type) {
+        c.PJRT_Buffer_Type_U8 => .u8,
+        c.PJRT_Buffer_Type_S32 => .i32,
+        c.PJRT_Buffer_Type_U32 => .u32,
+        c.PJRT_Buffer_Type_F32 => .f32,
+        else => null,
+    };
+}
+
+fn findReturnedOutput(
+    block: *const mlir.Block,
+    value: *const mlir.Value,
+) ?usize {
+    const terminator = block.terminator() orelse return null;
+    if (!std.mem.eql(u8, terminator.name(), "func.return")) return null;
+    for (0..terminator.numOperands()) |index| {
+        if (isDerivedFrom(terminator.operand(index), value)) return index;
+    }
+    return null;
+}
+
+fn isDerivedFrom(value: *const mlir.Value, source: *const mlir.Value) bool {
+    if (value.eql(source)) return true;
+    const result = value.isA(mlir.OpResult) orelse return false;
+    const owner = result.owner();
+    if (owner.numOperands() != 1 or
+        (!std.mem.eql(u8, owner.name(), "stablehlo.reshape") and
+            !std.mem.eql(u8, owner.name(), "stablehlo.convert") and
+            !std.mem.eql(u8, owner.name(), "stablehlo.broadcast_in_dim")))
+    {
+        return false;
+    }
+    return isDerivedFrom(owner.operand(0), source);
 }
 
 fn findConsumingOperation(
@@ -373,19 +593,10 @@ fn renderKernelSource(
     plan: GraphPlan,
     outputs: []const OutputSpec,
 ) ![]u8 {
-    if (outputs.len != 1 or
-        outputs[0].element_type != c.PJRT_Buffer_Type_U8 or
-        outputs[0].dims.len != 1 or
-        outputs[0].dims[0] != 1)
-    {
-        return error.UnsupportedGraph;
-    }
-
     var source: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
     errdefer source.deinit();
     const writer = &source.writer;
-    const output_index = plan.input_count;
-    const scratch_index = output_index + outputs.len;
+    const scratch_index = plan.input_count + outputs.len;
     const expected_buffers = scratch_index + 1;
 
     try writer.writeAll(
@@ -399,68 +610,104 @@ fn renderKernelSource(
         \\    return @ptrCast(@alignCast(@constCast(buffers[index])));
         \\}
         \\
+        \\fn scratchBuffer(comptime T: type, scratch: [*]u8, offset: usize) [*]T {
+        \\    return @ptrCast(@alignCast(scratch + offset));
+        \\}
+        \\
     );
     try writer.print(
         \\export fn main(buffers: [*]*const anyopaque, buffer_len: usize) callconv(.nvptx_kernel) void {{
         \\    if (buffer_len != {d}) return;
-        \\    const input = constBuffer(u8, buffers, {d});
-        \\    const output = mutableBuffer(u8, buffers, {d});
         \\    const scratch = mutableBuffer(u8, buffers, {d});
         \\    const barrier: *kernels.GridBarrier = @ptrCast(@alignCast(scratch));
         \\
     , .{
         expected_buffers,
-        plan.input_argument,
-        output_index,
         scratch_index,
     });
 
-    for (plan.layers, plan.scratch_offsets, 0..) |layer, offset, index| {
-        try writer.print(
-            "    const activation_{d}: [*]f32 = @ptrCast(@alignCast(scratch + {d}));\n",
-            .{ index, offset },
-        );
-        try writer.print(
-            "    const weight_{d} = constBuffer(f32, buffers, {d});\n",
-            .{ index, layer.weight_argument },
-        );
-        try writer.print(
-            "    const bias_{d} = constBuffer(f32, buffers, {d});\n",
-            .{ index, layer.bias_argument },
-        );
+    for (plan.kernels.items) |kernel| {
+        try renderNode(writer, kernel.node, plan.input_count);
+        if (kernel.node.requiresBarrier()) {
+            try writer.writeAll("    kernels.gridBarrier(barrier);\n");
+        }
     }
-    try writer.writeByte('\n');
-
-    for (plan.layers, 0..) |layer, index| {
-        const rhs_type = if (index == 0) "u8" else "f32";
-        var rhs_buffer: [64]u8 = undefined;
-        const rhs = if (index == 0)
-            "input"
-        else
-            try std.fmt.bufPrint(&rhs_buffer, "activation_{d}", .{index - 1});
-        try writer.print(
-            \\    kernels.matmulF32({s}, weight_{d}, {s}, activation_{d}, {d}, 1, {d});
-            \\    kernels.gridBarrier(barrier);
-            \\    kernels.addBiasReluF32(activation_{d}, bias_{d}, 1, {d});
-            \\    kernels.gridBarrier(barrier);
-            \\
-        , .{
-            rhs_type,
-            index,
-            rhs,
-            index,
-            layer.output_elements,
-            layer.contracting_elements,
-            index,
-            index,
-            layer.output_elements,
-        });
-    }
-    try writer.print(
-        "    kernels.argMaxF32(u8, activation_{d}, {d}, &output[0]);\n}}\n",
-        .{ plan.layers.len - 1, plan.layers[plan.layers.len - 1].output_elements },
-    );
+    try writer.writeAll("}\n");
     return source.toOwnedSlice();
+}
+
+fn renderNode(
+    writer: *std.Io.Writer,
+    node: Node,
+    input_count: usize,
+) std.Io.Writer.Error!void {
+    switch (node) {
+        .matmul => |matmul| {
+            try writer.print(
+                "    kernels.matmulF32({s}, ",
+                .{matmul.rhs.elementType().zigName()},
+            );
+            try renderBufferRef(writer, matmul.lhs, input_count, false);
+            try writer.writeAll(", ");
+            try renderBufferRef(writer, matmul.rhs, input_count, false);
+            try writer.writeAll(", ");
+            try renderBufferRef(writer, matmul.output, input_count, true);
+            try writer.print(
+                ", {d}, {d}, {d});\n",
+                .{ matmul.m, matmul.n, matmul.k },
+            );
+        },
+        .add_bias_relu => |add_bias_relu| {
+            try writer.writeAll("    kernels.addBiasReluF32(");
+            try renderBufferRef(writer, add_bias_relu.values, input_count, true);
+            try writer.writeAll(", ");
+            try renderBufferRef(writer, add_bias_relu.bias, input_count, false);
+            try writer.print(
+                ", {d}, {d});\n",
+                .{ add_bias_relu.rows, add_bias_relu.columns },
+            );
+        },
+        .argmax => |argmax| {
+            try writer.print(
+                "    kernels.argMaxF32({s}, ",
+                .{argmax.output.elementType().zigName()},
+            );
+            try renderBufferRef(writer, argmax.values, input_count, false);
+            try writer.print(", {d}, &", .{argmax.elements});
+            try renderBufferRef(writer, argmax.output, input_count, true);
+            try writer.writeAll("[0]);\n");
+        },
+    }
+}
+
+fn renderBufferRef(
+    writer: *std.Io.Writer,
+    buffer_ref: BufferRef,
+    input_count: usize,
+    mutable: bool,
+) std.Io.Writer.Error!void {
+    switch (buffer_ref) {
+        .argument => |buffer| try writer.print(
+            "{s}Buffer({s}, buffers, {d})",
+            .{
+                if (mutable) "mutable" else "const",
+                buffer.element_type.zigName(),
+                buffer.index,
+            },
+        ),
+        .output => |buffer| try writer.print(
+            "{s}Buffer({s}, buffers, {d})",
+            .{
+                if (mutable) "mutable" else "const",
+                buffer.element_type.zigName(),
+                input_count + buffer.index,
+            },
+        ),
+        .scratch => |buffer| try writer.print(
+            "scratchBuffer({s}, scratch, {d})",
+            .{ buffer.element_type.zigName(), buffer.offset },
+        ),
+    }
 }
 
 fn outputSpecsFromModule(allocator: std.mem.Allocator, module: *const mlir.Module) ![]OutputSpec {
@@ -646,6 +893,17 @@ test "lower dense StableHLO graph to composable Zig sub-kernels" {
     );
     defer module.deinit();
 
+    const plan_outputs = try outputSpecsFromModule(std.testing.allocator, module);
+    defer deinitOutputSpecs(std.testing.allocator, plan_outputs);
+    var plan = try graphPlanFromModule(std.testing.allocator, module, plan_outputs);
+    defer plan.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 5), plan.kernels.items.len);
+    try std.testing.expectEqual(.matmul, std.meta.activeTag(plan.kernels.items[0].node));
+    try std.testing.expectEqual(.add_bias_relu, std.meta.activeTag(plan.kernels.items[1].node));
+    try std.testing.expectEqual(.matmul, std.meta.activeTag(plan.kernels.items[2].node));
+    try std.testing.expectEqual(.add_bias_relu, std.meta.activeTag(plan.kernels.items[3].node));
+    try std.testing.expectEqual(.argmax, std.meta.activeTag(plan.kernels.items[4].node));
+
     var artifact: std.Io.Writer.Allocating = try .initCapacity(
         std.testing.allocator,
         4096,
@@ -664,17 +922,17 @@ test "lower dense StableHLO graph to composable Zig sub-kernels" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         generated.source,
-        "kernels.matmulF32(u8, weight_0, input, activation_0, 2, 1, 3);",
+        "kernels.matmulF32(u8, constBuffer(f32, buffers, 0), constBuffer(u8, buffers, 4), scratchBuffer(f32, scratch, 16), 2, 1, 3);",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         generated.source,
-        "kernels.matmulF32(f32, weight_1, activation_0, activation_1, 2, 1, 2);",
+        "kernels.matmulF32(f32, constBuffer(f32, buffers, 2), scratchBuffer(f32, scratch, 16), scratchBuffer(f32, scratch, 24), 2, 1, 2);",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         generated.source,
-        "kernels.addBiasReluF32(activation_0, bias_0, 1, 2);",
+        "kernels.addBiasReluF32(scratchBuffer(f32, scratch, 16), constBuffer(f32, buffers, 1), 1, 2);",
     ) != null);
     try std.testing.expect(std.mem.indexOf(
         u8,
@@ -689,7 +947,7 @@ test "lower dense StableHLO graph to composable Zig sub-kernels" {
     try std.testing.expect(std.mem.indexOf(
         u8,
         generated.source,
-        "kernels.argMaxF32(u8, activation_1, 2, &output[0]);",
+        "kernels.argMaxF32(u8, scratchBuffer(f32, scratch, 24), 2, &mutableBuffer(u8, buffers, 5)[0]);",
     ) != null);
 
     const ptx = try compileGenerated(std.testing.allocator, generated.source);
