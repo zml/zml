@@ -8,8 +8,6 @@ const metal = @import("metal_attention.zig");
 const tpu = @import("tpu_attention.zig");
 const triton = @import("triton_attention.zig");
 
-const log = std.log.scoped(.@"zml/attention");
-
 const PagedAttention = @This();
 
 pub const Backend = enum {
@@ -127,22 +125,6 @@ pub const Options = union(Backend) {
                     },
                 },
             },
-            .triton => .{
-                .triton = .{
-                    .batch_size = args.batch_size,
-                    .max_num_pages = args.max_num_pages,
-                    .max_seqlen_q = args.max_seqlen_q,
-                    .is_prefill = args.is_prefill,
-                },
-            },
-            .metal => .{
-                .metal = .{
-                    .batch_size = args.batch_size,
-                    .max_num_pages = args.max_num_pages,
-                    .max_seqlen_q = args.max_seqlen_q,
-                    .is_prefill = args.is_prefill,
-                },
-            },
             .mosaic_tpu => .{
                 .mosaic_tpu = .{
                     .is_prefill = args.is_prefill,
@@ -155,6 +137,12 @@ pub const Options = union(Backend) {
                     .head_dim = args.head_dim,
                 },
             },
+            inline .triton, .metal => |t| @unionInit(Options, @tagName(t), .{
+                .batch_size = args.batch_size,
+                .max_num_pages = args.max_num_pages,
+                .max_seqlen_q = args.max_seqlen_q,
+                .is_prefill = args.is_prefill,
+            }),
         };
     }
 
@@ -198,21 +186,13 @@ pub const Parameters = union(Backend) {
 
     pub fn onMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
         return switch (self) {
-            .cuda_fa2 => |v| .{ .cuda_fa2 = v.onMemory(memory) },
-            .cuda_fa3 => |v| .{ .cuda_fa3 = v.onMemory(memory) },
-            .triton => |v| .{ .triton = v.onMemory(memory) },
-            .mosaic_tpu => |v| .{ .mosaic_tpu = v.onMemory(memory) },
-            .metal => |v| .{ .metal = v.onMemory(memory) },
+            else => |v, t| @unionInit(Parameters, @tagName(t), v.onMemory(memory)),
         };
     }
 
     pub fn toMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
         return switch (self) {
-            .cuda_fa2 => |v| .{ .cuda_fa2 = v.toMemory(memory) },
-            .cuda_fa3 => |v| .{ .cuda_fa3 = v.toMemory(memory) },
-            .triton => |v| .{ .triton = v.toMemory(memory) },
-            .mosaic_tpu => |v| .{ .mosaic_tpu = v.toMemory(memory) },
-            .metal => |v| .{ .metal = v.toMemory(memory) },
+            else => |v, t| @unionInit(Parameters, @tagName(t), v.toMemory(memory)),
         };
     }
 };
@@ -327,35 +307,32 @@ test "Backend.auto selects triton on oneAPI" {
 
 test pagedAttention {
     const platform = zml.testing.env();
-    // Check the reference implem is available
-    if (!Backend.triton.isAvailable(platform)) return error.SkipZigTest;
     const io = std.testing.io;
     const allocator = std.testing.allocator;
     var arena_state: std.heap.ArenaAllocator = .init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const batch_size = 8;
     const num_pages = 64;
     const page_size = 16;
     const max_num_pages = 16;
-    const num_prefill = 1;
     const prefill_token_count = 32;
-    const num_decode = 5;
+    const num_prefill = 1;
+    const num_decode = 6;
+    const active_batch_size = num_prefill + num_decode;
+    const batch_size = active_batch_size + 1;
     const query_token_count = prefill_token_count + num_decode;
     const dt: zml.DataType = .bf16;
-    const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, token_index: zml.Tensor, slot_mapping: zml.Tensor } = .{
+    const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache } = .{
         .q = .init(.{ .b = query_token_count, .hkv = 2, .hg = 4, .hd = 32 }, dt),
-        .k = .init(.{ .b = 8, .hkv = 2, .hd = 32 }, dt),
-        .v = .init(.{ .b = 8, .hkv = 2, .hd = 32 }, dt),
+        .k = .init(.{ .b = query_token_count, .hkv = 2, .hd = 32 }, dt),
+        .v = .init(.{ .b = query_token_count, .hkv = 2, .hd = 32 }, dt),
         .kv_cache = .{
             .split = .{
                 .k = .init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 2, .hd = 32 }, dt),
                 .v = .init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 2, .hd = 32 }, dt),
             },
         },
-        .token_index = .init(.{}, .u32),
-        .slot_mapping = .init(.{ .b = 8 }, .u32),
     };
 
     const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{} }, .{});
@@ -365,16 +342,13 @@ test pagedAttention {
     const rng_kv_cache = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.kv_cache.split.k.shape(), .{} }, .{});
     defer rng_kv_cache.deinit();
 
-    const update_exe = try platform.compileFn(allocator, io, KvCache.update, .{ tensors.kv_cache, tensors.k, tensors.v, tensors.slot_mapping, page_size, .triton }, .{});
-    defer update_exe.deinit();
-
     const triton_options_args: Options.Args = .{
         .backend = .triton,
         .is_prefill = true,
         .batch_size = batch_size,
         .batch_size_prefill = num_prefill,
         .batch_size_decode = num_decode,
-        .seq_len = 64,
+        .seq_len = max_num_pages * page_size,
         .max_num_pages = max_num_pages,
         .max_token_count = 16 * page_size,
         .num_heads = @intCast(tensors.q.dim(.hg) * tensors.q.dim(.hkv)),
@@ -398,26 +372,18 @@ test pagedAttention {
     const kv_cache_d: zml.Bufferized(KvCache) = .{ .split = .{ .k = kv_cache_k, .v = kv_cache_v } };
 
     const shardings: []const zml.Sharding = &.{ platform.replicated_sharding, platform.shardings.get("model").? };
-    const triton_exe = try platform.compileFn(
-        allocator,
-        io,
-        pagedAttention,
-        .{ triton_parameters, tensors.q, tensors.k, tensors.v, tensors.kv_cache, attn_opts },
-        .{ .program_name = "paged_attention_triton", .shardings = shardings },
-    );
-    defer triton_exe.deinit();
 
     const block_table: [batch_size][max_num_pages]i32 = .{
         // prefilling pages 9-10
-        .{ 0, 1, 2, 3, 4, 9, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+        .{ 0, 1, 9, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
         // generation
-        .{ 0, 1, 2, 3, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+        .{ 0, 1, 2, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
         .{ 0, 1, 2, 3, 4, 6, 7, 8, -1, -1, -1, -1, -1, -1, -1, -1 },
         .{ 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63 },
-        .{ 0, 1, 2, 3, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
-        .{ 0, 1, 2, 3, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
-        .{ 0, 1, 2, 3, 4, 5, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
-        @splat(-1),
+        .{ 0, 1, 2, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+        .{ 0, 1, 2, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+        .{ 0, 1, 2, 3, 4, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
+        .{ -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 },
     };
 
     const seq_lens: [batch_size]i32 = .{
@@ -428,43 +394,29 @@ test pagedAttention {
         4 * page_size + 3,
         4 * page_size + 3,
         4 * page_size + 3,
-        4 * page_size + 3,
+        0,
     };
 
-    // TODO: fix me. Currently this work cause all implementation ready k and v directly from the kv cache.
-    // update kv cache
-    // {
-    //     const slot_mapping: [batch_size]u32 = .{
-    //         10 * page_size,
-    //         5 * page_size + 3,
-    //         8 * page_size + 11,
-    //         63 * page_size + 9,
-    //         5 * page_size + 3,
-    //         5 * page_size + 3,
-    //         5 * page_size + 3,
-    //         5 * page_size + 3,
-    //     };
-    //     const slot_mapping_d: zml.Buffer = try .fromBytes(io, platform, tensors.slot_mapping.shape(), .replicated, @ptrCast(&slot_mapping));
-    //     kv_cache_d = try zml.testing.autoCall(allocator, io, &update_exe, KvCache.update, .{ kv_cache_d, new_k, new_v, slot_mapping_d });
-    // }
-    const query_start_len: [batch_size + 1]i32 = .{ 0, 32, 33, 34, 35, 36, 37, 37, 37 };
-
+    const query_start_len: [batch_size + 1]i32 = .{ 0, 32, 33, 34, 35, 36, 37, 38, 38 };
     const triton_parameters_d: zml.Bufferized(Parameters) = .{ .triton = .{
         .block_table = try .fromBytes(io, platform, triton_parameters.triton.block_table.shape(), .replicated, @ptrCast(&block_table)),
         .seq_lens = try .fromBytes(io, platform, triton_parameters.triton.seq_lens.shape(), .replicated, @ptrCast(&seq_lens)),
         .query_start_len = try .fromBytes(io, platform, triton_parameters.triton.query_start_len.shape(), .replicated, @ptrCast(&query_start_len)),
     } };
 
-    const triton_d = try zml.testing.autoCall(allocator, io, &triton_exe, pagedAttention, .{ triton_parameters_d, q, new_k, new_v, kv_cache_d });
-    const triton_h: zml.Slice = try triton_d.toSliceAlloc(allocator, io);
-    defer triton_h.free(allocator);
+    var results_per_backend: std.enums.EnumArray(Backend, ?zml.Slice) = .initFill(null);
+    defer {
+        for (std.enums.values(Backend)) |backend| {
+            if (results_per_backend.get(backend)) |slice| slice.free(allocator);
+        }
+    }
 
     for (std.enums.values(Backend)) |backend| {
-        if (!backend.isAvailable(platform)) continue;
-        if (backend == .triton) continue;
-        // No materializer implemented for cuda fa3
-        if (backend == .cuda_fa3) continue;
-        log.warn("pagedAttention, testing backend {t}", .{backend});
+        if (!backend.isAvailable(platform)) {
+            std.log.warn("paged_attention backend {t} not available", .{backend});
+            continue;
+        }
+        std.log.warn("Testing paged_attention with backend {t}", .{backend});
 
         var backend_options_args = triton_options_args;
         backend_options_args.backend = backend;
@@ -479,10 +431,10 @@ test pagedAttention {
         );
         defer exe.deinit();
 
-        const parameters_d: zml.Bufferized(Parameters) = switch (backend) {
-            .triton => unreachable,
-            .cuda_fa3 => unreachable,
-            .cuda_fa2 => cuda_fa2: {
+        const parameters_d: zml.Bufferized(Parameters) = switch (parameters) {
+            // No materializer implemented for cuda fa3
+            .cuda_fa3 => continue,
+            inline .cuda_fa2 => |params, t| cuda_fa2: {
                 var block_table_prefill: [num_prefill][max_num_pages]i32 = undefined;
                 @memcpy(&block_table_prefill, block_table[0..num_prefill]);
                 var block_table_decode: [num_decode][max_num_pages]i32 = undefined;
@@ -500,36 +452,60 @@ test pagedAttention {
                 var seqused_k_decode: [num_decode]i32 = undefined;
                 @memcpy(&seqused_k_decode, seq_lens[num_prefill .. num_prefill + num_decode]);
 
-                break :cuda_fa2 .{ .cuda_fa2 = .{ .mixed = .{
-                    .block_table_prefill = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.block_table_prefill.shape(), .replicated, @ptrCast(&block_table_prefill)),
-                    .cu_seqlens_q_prefill = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.cu_seqlens_q_prefill.shape(), .replicated, @ptrCast(&cu_seqlens_q_prefill)),
-                    .seqused_k_prefill = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.seqused_k_prefill.shape(), .replicated, @ptrCast(&seqused_k_prefill)),
+                break :cuda_fa2 @unionInit(zml.Bufferized(Parameters), @tagName(t), .{ .mixed = .{
+                    .block_table_prefill = try .fromBytes(io, platform, params.mixed.block_table_prefill.shape(), .replicated, @ptrCast(&block_table_prefill)),
+                    .cu_seqlens_q_prefill = try .fromBytes(io, platform, params.mixed.cu_seqlens_q_prefill.shape(), .replicated, @ptrCast(&cu_seqlens_q_prefill)),
+                    .seqused_k_prefill = try .fromBytes(io, platform, params.mixed.seqused_k_prefill.shape(), .replicated, @ptrCast(&seqused_k_prefill)),
 
-                    .block_table_decode = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.block_table_decode.shape(), .replicated, @ptrCast(&block_table_decode)),
-                    .cu_seqlens_q_decode = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.cu_seqlens_q_decode.shape(), .replicated, @ptrCast(&cu_seqlens_q_decode)),
-                    .seqused_k_decode = try .fromBytes(io, platform, parameters.cuda_fa2.mixed.seqused_k_decode.shape(), .replicated, @ptrCast(&seqused_k_decode)),
+                    .block_table_decode = try .fromBytes(io, platform, params.mixed.block_table_decode.shape(), .replicated, @ptrCast(&block_table_decode)),
+                    .cu_seqlens_q_decode = try .fromBytes(io, platform, params.mixed.cu_seqlens_q_decode.shape(), .replicated, @ptrCast(&cu_seqlens_q_decode)),
+                    .seqused_k_decode = try .fromBytes(io, platform, params.mixed.seqused_k_decode.shape(), .replicated, @ptrCast(&seqused_k_decode)),
 
                     .metadata = .{ .decode_offset = try .scalar(io, platform, prefill_token_count, .i32) },
-                } } };
+                } });
             },
-            .metal => .{ .metal = .{
+            .triton => triton_parameters_d,
+            inline .metal, .mosaic_tpu => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
                 .block_table = triton_parameters_d.triton.block_table,
                 .seq_lens = triton_parameters_d.triton.seq_lens,
                 .query_start_len = triton_parameters_d.triton.query_start_len,
-            } },
-            .mosaic_tpu => .{ .mosaic_tpu = .{
-                .block_table = triton_parameters_d.triton.block_table,
-                .seq_lens = triton_parameters_d.triton.seq_lens,
-                .query_start_len = triton_parameters_d.triton.query_start_len,
-            } },
+            }),
         };
-        // defer Parameters.deinitBuffer(&parameters_d);
 
-        const output_d = try zml.testing.autoCall(allocator, io, &exe, pagedAttention, .{ parameters_d, q, new_k, new_v, kv_cache_d });
-        try zml.testing.expectClose(io, triton_h, output_d, .{
-            .absolute_tolerance = 1e-3,
+        // defer Parameters.deinitBuffer(&parameters_d);
+        var output_d = try zml.testing.autoCall(allocator, io, &exe, pagedAttention, .{ parameters_d, q, new_k, new_v, kv_cache_d });
+        // defer output_d.deinit();
+        try output_d.await(io);
+        results_per_backend.set(backend, try output_d.toSliceAlloc(allocator, io));
+    }
+
+    const reference_backend: Backend = .triton;
+    const reference = results_per_backend.get(reference_backend) orelse return error.SkipZigTest;
+
+    var num_failed: u32 = 0;
+    for (std.enums.values(Backend)) |backend| {
+        if (backend == reference_backend) continue;
+        const output_h = results_per_backend.get(backend) orelse continue;
+
+        const tolerance: zml.testing.CompareOpts = .{
+            .absolute_tolerance = 1e-2,
             .relative_tolerance = 1e-2,
             .epsilon_relative = 1e-6,
-        });
+        };
+
+        zml.testing.expectClose(io, reference, output_h, tolerance) catch |err| switch (err) {
+            error.TestUnexpectedResult => {
+                num_failed += 1;
+                std.log.err("test pagedAttention failed on backend {0t}\n--> reference ({1t}): {2d:32.3}\n--> pagedAttention({0t}): {3d:32.3}", .{
+                    backend,
+                    reference_backend,
+                    reference.subSlice(1, 0, 1).subSlice(2, 0, 1),
+                    output_h.subSlice(1, 0, 1).subSlice(2, 0, 1),
+                });
+            },
+            else => |e| return e,
+        };
     }
+
+    if (num_failed > 0) return error.TestUnexpectedResult;
 }
