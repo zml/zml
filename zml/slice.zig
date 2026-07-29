@@ -125,7 +125,7 @@ pub const Slice = struct {
         return res;
     }
 
-    fn dropAxis(slice: Slice, axis_: anytype) Slice {
+    pub fn squeeze(slice: Slice, axis_: anytype) Slice {
         const axis = slice.shape.axis(axis_);
         var res = slice;
         res.shape = slice.shape.drop(axis);
@@ -354,7 +354,7 @@ pub const Slice = struct {
         const outer_span_bytes = total_bytes / outer_len;
 
         for (0..outer_len) |i| {
-            const destination_outer = destination.subSlice(0, @intCast(i), 1).dropAxis(0);
+            const destination_outer = destination.subSlice(0, @intCast(i), 1).squeeze(0);
             const source_outer_start = i * outer_span_bytes;
             const source_outer_end = source_outer_start + outer_span_bytes;
             destination_outer.copy(source[source_outer_start..source_outer_end]);
