@@ -458,6 +458,19 @@
   },
   "selectedYankedVersions": {},
   "moduleExtensions": {
+    "//third_party/flashinfer_cutlass_moe:repo.bzl%flashinfer_cutlass_moe": {
+      "general": {
+        "bzlTransitiveDigest": "zig1X6EgyUMFWHvb+YxcQBxzerVYNxKQrJwK04Opz4w=",
+        "usagesDigest": "m52//9CuhrzWBkoQ3uY14u1CqcP53R+k6NQRemOENFo=",
+        "recordedInputs": [],
+        "generatedRepoSpecs": {
+          "flashinfer_cutlass_moe_linux_amd64": {
+            "repoRuleId": "@@//third_party/flashinfer_cutlass_moe:repo.bzl%_repository",
+            "attributes": {}
+          }
+        }
+      }
+    },
     "@@aspect_rules_py+//py:extensions.bzl%py_tools": {
       "general": {
         "bzlTransitiveDigest": "LaqXRQ7hUz2pKp1jB+4lExnjHXPJFKoz6+nOJqccLrQ=",

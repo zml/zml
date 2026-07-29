@@ -1,0 +1,33 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "lib_sm90",
+    srcs = ["lib/libflashinfer_cutlass_moe_sm90.so"],
+)
+
+filegroup(
+    name = "lib_sm100",
+    srcs = ["lib/libflashinfer_cutlass_moe_sm100.so"],
+)
+
+filegroup(
+    name = "lib_sm120",
+    srcs = ["lib/libflashinfer_cutlass_moe_sm120.so"],
+)
+
+filegroup(
+    name = "libraries",
+    srcs = [
+        ":lib_sm100",
+        ":lib_sm120",
+        ":lib_sm90",
+    ],
+)
+
+cc_library(
+    name = "c",
+    hdrs = ["include/flashinfer_cutlass_moe.h"],
+    includes = ["include"],
+)
