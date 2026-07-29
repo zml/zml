@@ -148,8 +148,13 @@ pub const Tensor = struct {
     }
 
     pub fn withPartitioning(self: Tensor, axes_: anytype) Tensor {
-        const ctx = CompilationContext.current();
         const partitioned_shape = self._shape.withPartitioning(axes_);
+
+        const ctx = CompilationContext.isActive() orelse {
+            var res = self;
+            res._shape = partitioned_shape;
+            return res;
+        };
 
         const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, null) catch |err| switch (err) {
             error.NoSuitableSharding => std.debug.panic(

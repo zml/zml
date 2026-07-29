@@ -170,6 +170,10 @@ pub const CompilationContext = struct {
         _current = null;
     }
 
+    pub fn isActive() ?*CompilationContext {
+        return _current;
+    }
+
     pub fn current() *CompilationContext {
         return _current.?;
     }
