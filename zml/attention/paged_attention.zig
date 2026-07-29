@@ -367,11 +367,11 @@ test pagedAttention {
     var new_v = try zml.testing.autoCall(allocator, io, &rng_k, zml.Tensor.Rng.normal, {});
     defer new_v.deinit();
 
-    var kv_cache_k = try zml.testing.autoCall(allocator, io, &rng_kv_cache, zml.Tensor.Rng.normal, {});
-    defer kv_cache_k.deinit();
-    var kv_cache_v = try zml.testing.autoCall(allocator, io, &rng_kv_cache, zml.Tensor.Rng.normal, {});
-    defer kv_cache_v.deinit();
-    const kv_cache_d: zml.Bufferized(KvCache) = .{ .split = .{ .k = kv_cache_k, .v = kv_cache_v } };
+    var kv_cache_d: zml.Bufferized(KvCache) = .{ .split = .{
+        .k = try zml.testing.autoCall(allocator, io, &rng_kv_cache, zml.Tensor.Rng.normal, {}),
+        .v = try zml.testing.autoCall(allocator, io, &rng_kv_cache, zml.Tensor.Rng.normal, {}),
+    } };
+    defer zml.Buffer.deinitAll(KvCache, &kv_cache_d);
 
     const block_table: [batch_size][max_num_pages]i32 = .{
         // prefilling pages 9-10
@@ -398,11 +398,12 @@ test pagedAttention {
     };
 
     const query_start_len: [batch_size + 1]i32 = .{ 0, 32, 33, 34, 35, 36, 37, 38, 38 };
-    const triton_parameters_d: zml.Bufferized(Parameters) = .{ .triton = .{
+    var triton_parameters_d: zml.Bufferized(Parameters) = .{ .triton = .{
         .block_table = try .fromBytes(io, platform, triton_parameters.triton.block_table.shape(), .replicated, @ptrCast(&block_table)),
         .seq_lens = try .fromBytes(io, platform, triton_parameters.triton.seq_lens.shape(), .replicated, @ptrCast(&seq_lens)),
         .query_start_len = try .fromBytes(io, platform, triton_parameters.triton.query_start_len.shape(), .replicated, @ptrCast(&query_start_len)),
     } };
+    defer zml.Buffer.deinitAll(Parameters, &triton_parameters_d);
 
     var results_per_backend: std.enums.EnumArray(Backend, ?zml.Slice) = .initFill(null);
     defer {
@@ -431,10 +432,10 @@ test pagedAttention {
         );
         defer exe.deinit();
 
-        const parameters_d: zml.Bufferized(Parameters) = switch (parameters) {
+        var parameters_d: zml.Bufferized(Parameters) = switch (parameters) {
             // No materializer implemented for cuda fa3
             .cuda_fa3 => continue,
-            inline .cuda_fa2 => |params, t| cuda_fa2: {
+            .cuda_fa2 => |params| cuda_fa2: {
                 var block_table_prefill: [num_prefill][max_num_pages]i32 = undefined;
                 @memcpy(&block_table_prefill, block_table[0..num_prefill]);
                 var block_table_decode: [num_decode][max_num_pages]i32 = undefined;
@@ -452,7 +453,7 @@ test pagedAttention {
                 var seqused_k_decode: [num_decode]i32 = undefined;
                 @memcpy(&seqused_k_decode, seq_lens[num_prefill .. num_prefill + num_decode]);
 
-                break :cuda_fa2 @unionInit(zml.Bufferized(Parameters), @tagName(t), .{ .mixed = .{
+                break :cuda_fa2 .{ .cuda_fa2 = .{ .mixed = .{
                     .block_table_prefill = try .fromBytes(io, platform, params.mixed.block_table_prefill.shape(), .replicated, @ptrCast(&block_table_prefill)),
                     .cu_seqlens_q_prefill = try .fromBytes(io, platform, params.mixed.cu_seqlens_q_prefill.shape(), .replicated, @ptrCast(&cu_seqlens_q_prefill)),
                     .seqused_k_prefill = try .fromBytes(io, platform, params.mixed.seqused_k_prefill.shape(), .replicated, @ptrCast(&seqused_k_prefill)),
@@ -462,7 +463,7 @@ test pagedAttention {
                     .seqused_k_decode = try .fromBytes(io, platform, params.mixed.seqused_k_decode.shape(), .replicated, @ptrCast(&seqused_k_decode)),
 
                     .metadata = .{ .decode_offset = try .scalar(io, platform, prefill_token_count, .i32) },
-                } });
+                } } };
             },
             .triton => triton_parameters_d,
             inline .metal, .mosaic_tpu => |_, t| @unionInit(zml.Bufferized(Parameters), @tagName(t), .{
@@ -471,11 +472,11 @@ test pagedAttention {
                 .query_start_len = triton_parameters_d.triton.query_start_len,
             }),
         };
+        // cu_fa2 creates new buffers while other reuse triton buffers.
+        defer if (backend == .cuda_fa2) zml.Buffer.deinitAll(Parameters, &parameters_d);
 
-        // defer Parameters.deinitBuffer(&parameters_d);
         var output_d = try zml.testing.autoCall(allocator, io, &exe, pagedAttention, .{ parameters_d, q, new_k, new_v, kv_cache_d });
-        // defer output_d.deinit();
-        try output_d.await(io);
+        defer output_d.deinit();
         results_per_backend.set(backend, try output_d.toSliceAlloc(allocator, io));
     }
 

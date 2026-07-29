@@ -445,12 +445,12 @@ pub fn VisitReturn(comptime cb: anytype) type {
 }
 
 const Visitor = struct {
-    pub const VisitorType = enum {
+    pub const Action = enum {
         callback,
         recurse,
     };
 
-    pub fn determineAction(comptime callback: anytype, comptime PtrTypeOfV: type) VisitorType {
+    pub fn determineAction(comptime callback: anytype, comptime PtrTypeOfV: type) Action {
         const ptr_info = switch (@typeInfo(PtrTypeOfV)) {
             .pointer => |info| info,
             else => stdx.debug.compileError("zml.meta.visit({any}) is expecting a pointer/slice input, but received: {any}", .{ @TypeOf(callback), PtrTypeOfV }),
@@ -603,6 +603,56 @@ test visit {
         }).cb, &context, &container);
 
         try std.testing.expectEqual(14, context.result);
+    }
+}
+
+/// Similar to `visit` but doesn't follow pointers or slices.
+/// This guarantees that the given type is a flat struct.
+///
+/// see: `zml.meta.visit`
+pub fn visitStruct(comptime callback: anytype, ctx: FnParam(callback, 0), v: anytype) VisitReturn(callback) {
+    const action = comptime Visitor.determineAction(callback, @TypeOf(v));
+
+    const PtrTypeOfV = @TypeOf(v);
+    const ptr_info_v = @typeInfo(PtrTypeOfV).pointer;
+    const ChildTypeV = ptr_info_v.child;
+
+    const can_error = stdx.meta.FnReturnErrorSet(callback) != null;
+
+    switch (action) {
+        .callback => {
+            return if (can_error) try callback(ctx, v) else callback(ctx, v);
+        },
+        .recurse => {
+            const TargetType, const mutating_cb = switch (@typeInfo(FnParam(callback, 1))) {
+                .pointer => |info| .{ info.child, !info.is_const },
+                else => stdx.debug.compileError("zml.meta.visitStruct({any}) is expecting a callback with a pointer as second argument but found {any}", .{ @TypeOf(callback), FnParam(callback, 1) }),
+            };
+
+            if (comptime !Contains(PtrTypeOfV, TargetType)) return;
+
+            if (@typeInfo(ChildTypeV) == .@"struct" and @hasDecl(ChildTypeV, "constSlice") and @hasDecl(ChildTypeV, "slice")) {
+                return visit(callback, ctx, if (mutating_cb) v.slice() else v.constSlice());
+            }
+
+            switch (ptr_info_v.size) {
+                .one => switch (@typeInfo(ChildTypeV)) {
+                    .@"struct" => |s| inline for (s.fields) |field| {
+                        if (field.is_comptime or comptime !Contains(field.type, TargetType)) continue;
+                        stdx.debug.assertComptime(@typeInfo(field.type) != .pointer, "zml.meta.visitStruct only handles flat struct, found pointer in {s}", .{@typeName(ChildTypeV)});
+
+                        if (can_error) try visit(callback, ctx, &@field(v, field.name)) else visit(callback, ctx, &@field(v, field.name));
+                    },
+                    .array => inline for (v) |*elem| if (can_error) try visit(callback, ctx, elem) else visit(callback, ctx, elem),
+                    .optional => if (v.* != null) if (can_error) try visit(callback, ctx, &v.*.?) else visit(callback, ctx, &v.*.?),
+                    .@"union" => switch (v.*) {
+                        inline else => |*v_field| if (can_error) try visit(callback, ctx, v_field) else visit(callback, ctx, v_field),
+                    },
+                    else => stdx.debug.compileError("zml.meta.visitStruct flat struct, found pointer in {s}", .{ChildTypeV}),
+                },
+                else => stdx.debug.compileError("zml.meta.visitStruct flat struct, found pointer in {s}", .{ChildTypeV}),
+            }
+        },
     }
 }
 
