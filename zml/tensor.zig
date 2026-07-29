@@ -4438,11 +4438,14 @@ pub const Tensor = struct {
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
     pub fn print(input: Tensor, name: []const u8) void {
-        switch (CompilationContext.current().platform.target) {
+        const ctx = CompilationContext.current();
+        const full_name = std.fmt.allocPrint(ctx.arena.allocator(), "{s}: {f}", .{ name, input.shape() }) catch @panic("OOM");
+        defer ctx.arena.allocator().free(full_name);
+        switch (ctx.platform.target) {
             .cpu, .cuda, .rocm, .tpu, .metal => {
-                ops.manualComputation(input, {}, .{ .name = name }, (struct {
-                    fn body(ctx_: anytype, _: std.mem.Allocator, sharded_input: Tensor, _: void) void {
-                        ops.customCall("zml$print", sharded_input, {}, .{ .name = ctx_.name }, .{ .has_side_effect = true });
+                ops.manualComputation(input, {}, full_name, (struct {
+                    fn body(_full_name: []const u8, _: std.mem.Allocator, sharded_input: Tensor, _: void) void {
+                        ops.customCall("zml$print", sharded_input, {}, .{ .name = _full_name }, .{ .has_side_effect = true });
                     }
                 }).body);
             },
