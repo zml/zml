@@ -87,7 +87,6 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, opts: CompareOpt
         .f8e8m0,
         => |t| {
             const L = t.toZigType();
-            const left_data = left.constItems(L);
             switch (right.dtype()) {
                 inline .bf16,
                 .f16,
@@ -100,22 +99,19 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, opts: CompareOpt
                 .f8e5m2fnuz,
                 => |rt| {
                     const R = rt.toZigType();
-                    const right_data = right.constItems(R);
-                    const compare_report = try compareSlices(allocator, L, R, left_data, right_data, opts);
-                    const ok = !compare_report.nan_or_inf and compare_report.close_fraction >= opts.minimum_close_fraction;
-                    if (ok) {
-                        return;
-                    } else {
+                    if (try compareIterators(false, allocator, L, R, left, right, opts)) |compare_report| {
                         try w.print("{f}\n", .{compare_report});
                         return error.TestUnexpectedResult;
                     }
+                    return;
                 },
                 else => unreachable,
             }
         },
         inline .bool, .u2, .u4, .u8, .u16, .u32, .u64, .i2, .i4, .i8, .i16, .i32, .i64 => |t| {
             const T = t.toZigType();
-            return std.testing.expectEqualSlices(T, left.constItems(T), right.constItems(T));
+            _ = try compareIterators(true, allocator, T, T, left, right, opts);
+            return;
         },
         .c64, .c128 => @panic("TODO: support comparison of complex"),
     }
@@ -175,6 +171,53 @@ pub const CompareReport = struct {
         });
     }
 };
+
+fn compareReportOk(report: CompareReport, opts: CompareOpts) bool {
+    return !report.nan_or_inf and report.close_fraction >= opts.minimum_close_fraction;
+}
+
+fn compareIterators(comptime mem_eql: bool, allocator: std.mem.Allocator, comptime L: type, comptime R: type, left: Slice, right: Slice, opts: CompareOpts) !?CompareReport {
+    var left_iter = (&left).contiguousItemsIterator(L);
+    var right_iter = (&right).contiguousItemsIterator(R);
+    var left_chunk: []const L = &.{};
+    var right_chunk: []const R = &.{};
+
+    while (true) {
+        if (left_chunk.len == 0) {
+            left_chunk = left_iter.next() orelse &.{};
+        }
+        if (right_chunk.len == 0) {
+            right_chunk = right_iter.next() orelse &.{};
+        }
+
+        if (left_chunk.len == 0 or right_chunk.len == 0) {
+            std.debug.assert(left_chunk.len == right_chunk.len);
+            return null;
+        }
+
+        const n = @min(left_chunk.len, right_chunk.len);
+        if (comptime mem_eql) {
+            if (!std.mem.eql(L, left_chunk[0..n], right_chunk[0..n])) {
+                return error.TestUnexpectedResult;
+            }
+        } else {
+            const compare_report = try compareSlices(
+                allocator,
+                L,
+                R,
+                left_chunk[0..n],
+                right_chunk[0..n],
+                opts,
+            );
+            if (!compareReportOk(compare_report, opts)) {
+                return compare_report;
+            }
+        }
+
+        left_chunk = left_chunk[n..];
+        right_chunk = right_chunk[n..];
+    }
+}
 
 pub fn compareSlices(allocator: std.mem.Allocator, comptime L: type, comptime R: type, left: []const L, right: []const R, opts: CompareOpts) !CompareReport {
     var nan_or_inf: bool = false;

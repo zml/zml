@@ -135,11 +135,15 @@ pub const Slice = struct {
 
     pub fn data(slice: Slice) []u8 {
         std.debug.assert(slice.mutable);
-        return @constCast(slice.bytes[slice.offset_bytes..]);
+        std.debug.assert(slice.isContiguous());
+        const end = slice.offset_bytes + slice.shape.byteSize();
+        return @constCast(slice.bytes[slice.offset_bytes..end]);
     }
 
     pub fn constData(slice: Slice) []const u8 {
-        return slice.bytes[slice.offset_bytes..];
+        std.debug.assert(slice.isContiguous());
+        const end = slice.offset_bytes + slice.shape.byteSize();
+        return slice.bytes[slice.offset_bytes..end];
     }
 
     pub fn items(slice: Slice, comptime T: type) []T {
@@ -148,6 +152,87 @@ pub const Slice = struct {
 
     pub fn constItems(slice: Slice, comptime T: type) []const T {
         return @ptrCast(@alignCast(slice.constData()));
+    }
+
+    pub fn contiguousItemsIterator(slice: *const Slice, comptime T: type) ContiguousItemsIterator(T) {
+        std.debug.assert(slice.dtype() == DataType.fromZigType(T));
+        return .init(slice);
+    }
+
+    fn ContiguousItemsIterator(comptime T: type) type {
+        return struct {
+            slice: *const Slice,
+            contiguous_axis_start: u4,
+            contiguous_item_count: usize,
+            outer_index: usize,
+            outer_count: usize,
+            outer_coords: [constants.MAX_RANK]usize,
+            next_offset_bytes: usize,
+
+            const Iterator = @This();
+
+            fn init(slice: *const Slice) Iterator {
+                const rank = slice.shape.rank();
+                const total_count = slice.shape.count();
+                var contiguous_axis_start: u4 = rank;
+                var contiguous_item_count: usize = 1;
+                var expected_stride: i64 = @intCast(@sizeOf(T));
+
+                var axis = rank;
+                while (axis > 0) {
+                    axis -= 1;
+                    const dim = slice.shape.dim(axis);
+                    const stride = slice.byte_strides.get(axis);
+                    if (dim != 1 and stride != expected_stride) break;
+                    contiguous_axis_start = axis;
+                    contiguous_item_count *= @intCast(dim);
+                    expected_stride *= dim;
+                }
+
+                if (total_count == 0) {
+                    contiguous_item_count = 0;
+                }
+
+                return .{
+                    .slice = slice,
+                    .contiguous_axis_start = contiguous_axis_start,
+                    .contiguous_item_count = contiguous_item_count,
+                    .outer_index = 0,
+                    .outer_count = if (contiguous_item_count == 0) 0 else total_count / contiguous_item_count,
+                    .outer_coords = @splat(0),
+                    .next_offset_bytes = slice.offset_bytes,
+                };
+            }
+
+            pub fn next(self: *Iterator) ?[]const T {
+                if (self.outer_index >= self.outer_count) return null;
+
+                const start = self.next_offset_bytes;
+                self.outer_index += 1;
+                if (self.outer_index < self.outer_count) {
+                    self.advanceOuterCoords();
+                }
+
+                const byte_len = self.contiguous_item_count * @sizeOf(T);
+                return @ptrCast(@alignCast(self.slice.bytes[start..][0..byte_len]));
+            }
+
+            fn advanceOuterCoords(self: *Iterator) void {
+                var axis = self.contiguous_axis_start;
+                while (axis > 0) {
+                    axis -= 1;
+
+                    self.outer_coords[axis] += 1;
+                    self.next_offset_bytes = @intCast(@as(i64, @intCast(self.next_offset_bytes)) + self.slice.byte_strides.get(axis));
+
+                    const dim: usize = @intCast(self.slice.shape.dim(axis));
+                    if (self.outer_coords[axis] < dim) return;
+
+                    self.outer_coords[axis] = 0;
+                    self.next_offset_bytes = @intCast(@as(i64, @intCast(self.next_offset_bytes)) - @as(i64, @intCast(dim)) * self.slice.byte_strides.get(axis));
+                }
+            }
+        };
     }
 
     pub fn format(
@@ -194,7 +279,10 @@ pub const Slice = struct {
                     const stride = @divExact(slice.byte_strides.get(0), @as(i64, @intCast(@sizeOf(T))));
 
                     const needed_len: usize = if (n == 0) 0 else @intCast(@abs((n - 1) * stride) + 1);
-                    const values = slice.constItems(T)[0..needed_len];
+                    // The formatter consumes this physical tail using `stride`, so this
+                    // rank-1 path can read raw items without requiring contiguity.
+                    const raw_values: []const T = @ptrCast(@alignCast(slice.bytes[slice.offset_bytes..]));
+                    const values = raw_values[0..needed_len];
 
                     switch (comptime dt.class()) {
                         .float => try stdx.fmt.formatFloatSlice(values, options, stride, writer),
@@ -273,6 +361,27 @@ pub const Slice = struct {
         }
     }
 };
+
+test "slice expectClose compares dense and strided slices" {
+    const testing = @import("testing.zig");
+
+    const dense_data: [2][2]f32 = .{
+        .{ 1, 2 },
+        .{ 5, 6 },
+    };
+    const strided_data: [2][4]f32 = .{
+        .{ 1, 2, 99, 98 },
+        .{ 5, 6, 97, 96 },
+    };
+
+    const dense = Slice.init(.init(.{ 2, 2 }, .f32), std.mem.asBytes(&dense_data));
+    const storage = Slice.init(.init(.{ 2, 4 }, .f32), std.mem.asBytes(&strided_data));
+    const strided = storage.subSlice(1, 0, 2);
+
+    try std.testing.expect(!strided.isContiguous());
+    try testing.expectClose(std.testing.io, dense, strided, .exact_match);
+    try testing.expectClose(std.testing.io, strided, dense, .exact_match);
+}
 
 test "slice pretty print rank 3" {
     const data: [4][4][4]i32 = .{
