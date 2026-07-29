@@ -323,23 +323,25 @@ test pagedAttention {
     const batch_size = active_batch_size + 1;
     const query_token_count = prefill_token_count + num_decode;
     const dt: zml.DataType = .bf16;
+    const partition = .{ .hkv = .model };
     const tensors: struct { q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache } = .{
-        .q = .init(.{ .b = query_token_count, .hkv = 2, .hg = 4, .hd = 32 }, dt),
-        .k = .init(.{ .b = query_token_count, .hkv = 2, .hd = 32 }, dt),
-        .v = .init(.{ .b = query_token_count, .hkv = 2, .hd = 32 }, dt),
+        .q = .withPartitioning(.init(.{ .b = query_token_count, .hkv = 2, .hg = 4, .hd = 32 }, dt), partition),
+        .k = .withPartitioning(.init(.{ .b = query_token_count, .hkv = 2, .hd = 32 }, dt), partition),
+        .v = .withPartitioning(.init(.{ .b = query_token_count, .hkv = 2, .hd = 32 }, dt), partition),
         .kv_cache = .{
             .split = .{
-                .k = .init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 2, .hd = 32 }, dt),
-                .v = .init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 2, .hd = 32 }, dt),
+                .k = .withPartitioning(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 2, .hd = 32 }, dt), partition),
+                .v = .withPartitioning(.init(.{ .page = num_pages, .k_chunk = page_size, .hkv = 2, .hd = 32 }, dt), partition),
             },
         },
     };
 
-    const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{} }, .{});
+    const shardings: []const zml.Sharding = &.{ platform.replicated_sharding, platform.shardings.get("model").? };
+    const rng_q = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.q.shape(), .{} }, .{ .shardings = shardings });
     defer rng_q.deinit();
-    const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{} }, .{});
+    const rng_k = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.k.shape(), .{} }, .{ .shardings = shardings });
     defer rng_k.deinit();
-    const rng_kv_cache = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.kv_cache.split.k.shape(), .{} }, .{});
+    const rng_kv_cache = try platform.compileFn(allocator, io, zml.Tensor.Rng.normal, .{ tensors.kv_cache.split.k.shape(), .{} }, .{ .shardings = shardings });
     defer rng_kv_cache.deinit();
 
     const triton_options_args: Options.Args = .{
@@ -370,8 +372,6 @@ test pagedAttention {
     var kv_cache_v = try zml.testing.autoCall(allocator, io, &rng_kv_cache, zml.Tensor.Rng.normal, {});
     defer kv_cache_v.deinit();
     const kv_cache_d: zml.Bufferized(KvCache) = .{ .split = .{ .k = kv_cache_k, .v = kv_cache_v } };
-
-    const shardings: []const zml.Sharding = &.{ platform.replicated_sharding, platform.shardings.get("model").? };
 
     const block_table: [batch_size][max_num_pages]i32 = .{
         // prefilling pages 9-10
