@@ -117,13 +117,13 @@ pub fn dtypeFromBufferType(pjrt_type: pjrt.BufferType) DataType {
 }
 
 test bufferTypeFromDtype {
-    inline for (@typeInfo(DataType).@"enum".fields) |field| {
-        const dt: DataType = @enumFromInt(field.value);
+    inline for (@typeInfo(DataType).@"enum".field_values) |field_value| {
+        const dt: DataType = @fromBackingInt(@intCast(field_value));
         try std.testing.expectEqual(dt, dtypeFromBufferType(bufferTypeFromDtype(dt)));
     }
 
-    inline for (@typeInfo(pjrt.BufferType).@"enum".fields) |field| {
-        const dt: pjrt.BufferType = @enumFromInt(field.value);
+    inline for (@typeInfo(pjrt.BufferType).@"enum".field_values) |field_value| {
+        const dt: pjrt.BufferType = @fromBackingInt(@intCast(field_value));
         if (dt == .invalid) continue;
         try std.testing.expectEqual(dt, bufferTypeFromDtype(dtypeFromBufferType(dt)));
     }

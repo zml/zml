@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 
 const c = @import("c");
 const platforms = @import("platforms");
+const stdx = @import("stdx");
 const zffi = @import("ffi");
 
 pub const Span = struct {
@@ -44,14 +45,14 @@ pub fn span(comptime name: []const u8, metadata: anytype) Span {
             return .start(name);
         },
         .@"struct" => |info| {
-            if (info.fields.len == 0) {
+            if (info.field_names.len == 0) {
                 return .start(name);
             }
 
             var buffer: [computeEncodedNameLen(name, @TypeOf(metadata))]u8 = undefined;
             var encoded: std.ArrayList(u8) = .initBuffer(&buffer);
 
-            appendEncodedName(&encoded, .failing, name, info, metadata) catch unreachable;
+            appendEncodedName(&encoded, .failing, name, metadata) catch unreachable;
             return .start(encoded.items);
         },
         else => @compileError("Unsupported metadata."),
@@ -62,34 +63,34 @@ pub fn span(comptime name: []const u8, metadata: anytype) Span {
 /// bounded by `span` at comptime. The caller owns the returned slice.
 pub fn formatSpanName(allocator: std.mem.Allocator, name: []const u8, metadata: anytype) ![]const u8 {
     switch (@typeInfo(@TypeOf(metadata))) {
-        .@"struct" => |info| {
+        .@"struct" => {
             var encoded: std.ArrayList(u8) = .empty;
             errdefer encoded.deinit(allocator);
 
-            try appendEncodedName(&encoded, allocator, name, info, metadata);
+            try appendEncodedName(&encoded, allocator, name, metadata);
             return try encoded.toOwnedSlice(allocator);
         },
         else => @compileError("trace metadata must be a struct literal like .{ .step_num = 42 }"),
     }
 }
 
-fn appendEncodedName(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, name: []const u8, info: std.builtin.Type.Struct, metadata: anytype) !void {
+fn appendEncodedName(buffer: *std.ArrayList(u8), allocator: std.mem.Allocator, name: []const u8, metadata: anytype) !void {
     try buffer.appendSlice(allocator, name);
 
     var field_count: usize = 0;
     try buffer.append(allocator, '#');
-    inline for (info.fields) |field| {
-        if (shouldEncodeField(field, @field(metadata, field.name))) {
+    inline for (comptime std.meta.fieldNames(@TypeOf(metadata))) |field_name| {
+        if (shouldEncodeField(field_name, @field(metadata, field_name))) {
             if (field_count != 0) {
                 try buffer.append(allocator, ',');
             }
             field_count += 1;
 
-            const key = comptime metadataKey(field.name);
+            const key = comptime metadataKey(field_name);
             validateMetadataToken(key);
             try buffer.appendSlice(allocator, key);
             try buffer.append(allocator, '=');
-            try appendMetadataValue(buffer, allocator, @field(metadata, field.name), field.name);
+            try appendMetadataValue(buffer, allocator, @field(metadata, field_name), field_name);
         }
     }
 
@@ -114,33 +115,38 @@ fn metadataKey(comptime field_name: []const u8) []const u8 {
 fn computeEncodedNameLen(comptime name: []const u8, comptime Metadata: type) usize {
     switch (@typeInfo(Metadata)) {
         .@"struct" => |info| {
-            if (info.fields.len == 0) return name.len;
+            if (info.field_names.len == 0) return name.len;
 
             // name#[attrs]#
             var max_len = name.len + 2;
-            inline for (info.fields) |field| {
-                const key = comptime metadataKey(field.name);
+            inline for (
+                info.field_names,
+                info.field_types,
+                info.field_attrs,
+            ) |field_name, FieldType, field_attr| {
+                const key = comptime metadataKey(field_name);
                 validateMetadataToken(key);
 
+                const default: ?FieldType = field_attr.defaultValue(FieldType);
                 // [key]=[value],
                 max_len += key.len + 2;
-                max_len += switch (@typeInfo(field.type)) {
+                max_len += switch (@typeInfo(FieldType)) {
                     .bool => 1,
                     .int => @max(
-                        std.fmt.comptimePrint("{}", .{std.math.minInt(field.type)}).len,
-                        std.fmt.comptimePrint("{}", .{std.math.maxInt(field.type)}).len,
+                        std.fmt.comptimePrint("{}", .{std.math.minInt(FieldType)}).len,
+                        std.fmt.comptimePrint("{}", .{std.math.maxInt(FieldType)}).len,
                     ),
                     .@"enum" => |ty| b: {
                         var max_enum_len: usize = 0;
-                        for (ty.fields) |enum_field| {
-                            max_enum_len = @max(max_enum_len, enum_field.name.len);
+                        for (ty.field_names) |enum_field_name| {
+                            max_enum_len = @max(max_enum_len, enum_field_name.len);
                         }
                         break :b max_enum_len;
                     },
-                    .comptime_int => std.fmt.comptimePrint("{}", .{defaultMetadataValue(field).?}).len,
-                    .comptime_float => std.fmt.comptimePrint("{d}", .{defaultMetadataValue(field).?}).len,
-                    .enum_literal => @tagName(defaultMetadataValue(field).?).len,
-                    else => @compileError("trace metadata field '" ++ field.name ++ "' is not statically bounded; use formatspanName"),
+                    .comptime_int => std.fmt.comptimePrint("{}", .{default.?}).len,
+                    .comptime_float => std.fmt.comptimePrint("{d}", .{default.?}).len,
+                    .enum_literal => @tagName(default.?).len,
+                    else => @compileError("trace metadata field '" ++ field_name ++ "' is not statically bounded; use formatspanName"),
                 };
             }
             return max_len;
@@ -149,17 +155,11 @@ fn computeEncodedNameLen(comptime name: []const u8, comptime Metadata: type) usi
     }
 }
 
-fn defaultMetadataValue(comptime field: std.builtin.Type.StructField) ?field.type {
-    return if (field.default_value_ptr) |default_opaque|
-        @as(*const field.type, @ptrCast(@alignCast(default_opaque))).*
-    else
-        null;
-}
-
-fn shouldEncodeField(field: std.builtin.Type.StructField, value: anytype) bool {
-    return switch (@typeInfo(field.type)) {
+fn shouldEncodeField(comptime field_name: []const u8, value: anytype) bool {
+    const FieldType = @TypeOf(value);
+    return switch (@typeInfo(FieldType)) {
         .optional => value != null,
-        .bool => if (comptime std.mem.eql(u8, field.name, "root")) value else true,
+        .bool => if (comptime std.mem.eql(u8, field_name, "root")) value else true,
         else => true,
     };
 }

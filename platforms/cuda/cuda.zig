@@ -46,7 +46,7 @@ pub fn needsCudaCompat(io: std.Io, sandbox_path: []const u8) !bool {
         log.err("Failed to run CUDA compatibility probe: {any}", .{err});
         return err;
     };
-    const result: compat_probe.ExitCode = @enumFromInt(res.exited);
+    const result: compat_probe.ExitCode = @fromBackingInt(@intCast(res.exited));
 
     return switch (result) {
         .Success => true,

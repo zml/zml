@@ -149,7 +149,7 @@ inline fn openDevice(allocator: std.mem.Allocator, io: std.Io, render_idx: usize
 }
 
 pub fn device(self: *const Monitor, handle: Handle) !*const Device {
-    const idx = @intFromEnum(handle);
+    const idx = @backingInt(handle);
     if (idx >= self.devices.len) return error.NotFound;
     return &self.devices[idx];
 }

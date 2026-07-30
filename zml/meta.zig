@@ -20,27 +20,30 @@ pub fn MapType(From: type, To: type) type {
 
             return switch (@typeInfo(T)) {
                 .@"struct" => |struct_infos| {
-                    const fields = struct_infos.fields;
+                    const field_names = struct_infos.field_names;
                     var same: bool = true;
-                    var struct_field_names: [fields.len][]const u8 = undefined;
-                    var struct_field_types: [fields.len]type = undefined;
-                    var struct_field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
-                    for (struct_field_names[0..], struct_field_types[0..], struct_field_attrs[0..], fields) |*field_name, *field_type, *field_attr, field| {
-                        if (!field.is_comptime) {
-                            const R = map(field.type);
-                            if (R == field.type) {
-                                field_name.* = field.name;
-                                field_type.* = field.type;
-                                field_attr.* = .{
-                                    .@"comptime" = field.is_comptime,
-                                    .@"align" = field.alignment,
-                                    .default_value_ptr = field.default_value_ptr,
-                                };
+                    var struct_field_names: [field_names.len][]const u8 = undefined;
+                    var struct_field_types: [field_names.len]type = undefined;
+                    var struct_field_attrs: [field_names.len]std.builtin.Type.Struct.FieldAttributes = undefined;
+                    for (
+                        struct_field_names[0..],
+                        struct_field_types[0..],
+                        struct_field_attrs[0..],
+                        struct_infos.field_names,
+                        struct_infos.field_types,
+                        struct_infos.field_attrs,
+                    ) |*field_name, *field_type, *field_attr, source_name, SourceField, source_attrs| {
+                        if (!source_attrs.@"comptime") {
+                            const R = map(SourceField);
+                            if (R == SourceField) {
+                                field_name.* = source_name;
+                                field_type.* = SourceField;
+                                field_attr.* = source_attrs;
                             } else {
-                                field_name.* = field.name;
+                                field_name.* = source_name;
                                 field_type.* = R;
                                 field_attr.* = .{
-                                    .@"comptime" = field.is_comptime,
+                                    .@"comptime" = source_attrs.@"comptime",
                                     .@"align" = @alignOf(R),
                                 };
                                 same = false;
@@ -52,34 +55,35 @@ pub fn MapType(From: type, To: type) type {
                                 }
                             }
                         } else {
-                            field_name.* = field.name;
-                            field_type.* = field.type;
-                            field_attr.* = .{
-                                .@"comptime" = field.is_comptime,
-                                .@"align" = field.alignment,
-                                .default_value_ptr = field.default_value_ptr,
-                            };
+                            field_name.* = source_name;
+                            field_type.* = SourceField;
+                            field_attr.* = source_attrs;
                         }
                     }
                     if (same) return T;
                     return if (struct_infos.is_tuple) @Tuple(&struct_field_types) else @Struct(.auto, null, &struct_field_names, &struct_field_types, &struct_field_attrs);
                 },
                 .@"union" => |union_info| {
-                    const fields = union_info.fields;
+                    const field_names = union_info.field_names;
                     var same: bool = true;
-                    var union_field_names: [fields.len][]const u8 = undefined;
-                    var union_field_types: [fields.len]type = undefined;
-                    var union_field_attrs: [fields.len]std.builtin.Type.UnionField.Attributes = undefined;
-                    for (union_field_names[0..], union_field_types[0..], union_field_attrs[0..], fields) |*field_name, *field_type, *field_attr, field| {
-                        const R = map(field.type);
-                        if (R == field.type) {
-                            field_name.* = field.name;
-                            field_type.* = field.type;
-                            field_attr.* = .{
-                                .@"align" = field.alignment,
-                            };
+                    var union_field_names: [field_names.len][]const u8 = undefined;
+                    var union_field_types: [field_names.len]type = undefined;
+                    var union_field_attrs: [field_names.len]std.builtin.Type.Union.FieldAttributes = undefined;
+                    for (
+                        union_field_names[0..],
+                        union_field_types[0..],
+                        union_field_attrs[0..],
+                        union_info.field_names,
+                        union_info.field_types,
+                        union_info.field_attrs,
+                    ) |*field_name, *field_type, *field_attr, source_name, SourceField, source_attrs| {
+                        const R = map(SourceField);
+                        if (R == SourceField) {
+                            field_name.* = source_name;
+                            field_type.* = SourceField;
+                            field_attr.* = source_attrs;
                         } else {
-                            field_name.* = field.name;
+                            field_name.* = source_name;
                             field_type.* = R;
                             field_attr.* = .{
                                 .@"align" = @alignOf(R),
@@ -92,11 +96,11 @@ pub fn MapType(From: type, To: type) type {
                 },
                 .array => |arr_info| [arr_info.len]map(arr_info.child),
                 .pointer => |ptr_info| switch (ptr_info.size) {
-                    .slice => if (ptr_info.is_const)
+                    .slice => if (ptr_info.attrs.@"const")
                         []const map(ptr_info.child)
                     else
                         []map(ptr_info.child),
-                    .one => if (ptr_info.is_const)
+                    .one => if (ptr_info.attrs.@"const")
                         *const map(ptr_info.child)
                     else
                         *map(ptr_info.child),
@@ -179,26 +183,26 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
     if (@sizeOf(ToStruct) == 0) return;
 
     switch (type_info_to) {
-        .@"struct" => |info| inline for (info.fields) |field| {
-            if (field.is_comptime or @sizeOf(field.type) == 0) continue;
-            const field_type_info = @typeInfo(field.type);
+        .@"struct" => |info| inline for (info.field_names, info.field_types, info.field_attrs) |field_name, Field, field_attrs| {
+            if (field_attrs.@"comptime" or @sizeOf(Field) == 0) continue;
+            const field_type_info = @typeInfo(Field);
             // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
             switch (field_type_info) {
                 // .pointer => try convertType(From, To, allocator, @field(from, field.name), @field(to, field.name), Ctx, ctx, cb),
-                .array, .optional, .@"union", .@"struct", .pointer => if (@hasField(FromStruct, field.name)) {
+                .array, .optional, .@"union", .@"struct", .pointer => if (@hasField(FromStruct, field_name)) {
                     try mapAlloc(
                         cb,
                         allocator,
                         ctx,
-                        @field(from, field.name),
-                        &@field(to, field.name),
+                        @field(from, field_name),
+                        &@field(to, field_name),
                     );
-                } else if (field.default_value_ptr) |_| {
-                    @field(to, field.name) = null;
+                } else if (field_attrs.default_value_ptr) |_| {
+                    @field(to, field_name) = null;
                 } else {
-                    stdx.debug.compileError("Mapping {} -> {} inside {} failed. Missing field {s} in {}", .{ From, To, FromStruct, field.name, ToStruct });
+                    stdx.debug.compileError("Mapping {} -> {} inside {} failed. Missing field {s} in {}", .{ From, To, FromStruct, field_name, ToStruct });
                 },
-                else => @field(to, field.name) = @field(from, field.name),
+                else => @field(to, field_name) = @field(from, field_name),
             }
         },
         .@"union" => {
@@ -324,25 +328,21 @@ pub fn MapRestrict(From: type, To: type) type {
                 .@"struct" => |struct_infos| {
                     // We know that at least one of the struct field contains a From.
                     // We map each field individually. Fields without From and comptime fields are removed.
-                    const fields = struct_infos.fields;
+                    const field_names = struct_infos.field_names;
                     var num_fields: usize = 0;
 
-                    var struct_field_names: [fields.len][]const u8 = undefined;
-                    var struct_field_types: [fields.len]type = undefined;
-                    var struct_field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
-                    for (fields) |field| {
-                        if (!field.is_comptime and Contains(field.type, From)) {
-                            const R = map(field.type);
-                            if (R == field.type) {
-                                struct_field_names[num_fields] = field.name;
-                                struct_field_types[num_fields] = field.type;
-                                struct_field_attrs[num_fields] = .{
-                                    .@"comptime" = field.is_comptime,
-                                    .@"align" = field.alignment,
-                                    .default_value_ptr = field.default_value_ptr,
-                                };
+                    var struct_field_names: [field_names.len][]const u8 = undefined;
+                    var struct_field_types: [field_names.len]type = undefined;
+                    var struct_field_attrs: [field_names.len]std.builtin.Type.Struct.FieldAttributes = undefined;
+                    for (struct_infos.field_names, struct_infos.field_types, struct_infos.field_attrs) |field_name, Field, field_attrs| {
+                        if (!field_attrs.@"comptime" and Contains(Field, From)) {
+                            const R = map(Field);
+                            if (R == Field) {
+                                struct_field_names[num_fields] = field_name;
+                                struct_field_types[num_fields] = Field;
+                                struct_field_attrs[num_fields] = field_attrs;
                             } else {
-                                const name = if (struct_infos.is_tuple) struct_infos.fields[num_fields].name else field.name;
+                                const name = if (struct_infos.is_tuple) struct_infos.field_names[num_fields] else field_name;
                                 struct_field_names[num_fields] = name;
                                 struct_field_types[num_fields] = R;
                                 struct_field_attrs[num_fields] = .{
@@ -369,13 +369,13 @@ pub fn MapRestrict(From: type, To: type) type {
                 .@"union" => |union_info| {
                     // We know that at least one of the union field contains a From.
                     // We map each field individually. Fields without From, are replaced by "void".
-                    const fields = union_info.fields;
-                    var union_field_names: [fields.len][]const u8 = undefined;
-                    var union_field_types: [fields.len]type = undefined;
-                    var union_field_attrs: [fields.len]std.builtin.Type.UnionField.Attributes = undefined;
-                    for (0.., fields) |i, field| {
-                        const FT = map(field.type);
-                        union_field_names[i] = field.name;
+                    const field_names = union_info.field_names;
+                    var union_field_names: [field_names.len][]const u8 = undefined;
+                    var union_field_types: [field_names.len]type = undefined;
+                    var union_field_attrs: [field_names.len]std.builtin.Type.Union.FieldAttributes = undefined;
+                    for (0.., union_info.field_names, union_info.field_types) |i, field_name, Field| {
+                        const FT = map(Field);
+                        union_field_names[i] = field_name;
                         union_field_types[i] = FT;
                         union_field_attrs[i] = .{
                             .@"align" = @alignOf(FT),
@@ -385,19 +385,19 @@ pub fn MapRestrict(From: type, To: type) type {
                 },
                 .array => |arr_info| [arr_info.len]map(arr_info.child),
                 .pointer => |ptr_info| switch (ptr_info.size) {
-                    .slice => if (ptr_info.is_const)
+                    .slice => if (ptr_info.attrs.@"const")
                         []const map(ptr_info.child)
                     else
                         []map(ptr_info.child),
-                    .one => if (ptr_info.is_const)
+                    .one => if (ptr_info.attrs.@"const")
                         *const map(ptr_info.child)
                     else
                         *map(ptr_info.child),
-                    .many => if (ptr_info.is_const)
+                    .many => if (ptr_info.attrs.@"const")
                         [*]const map(ptr_info.child)
                     else
                         [*]map(ptr_info.child),
-                    .c => if (ptr_info.is_const)
+                    .c => if (ptr_info.attrs.@"const")
                         [*c]map(ptr_info.child)
                     else
                         [*c]map(ptr_info.child),
@@ -482,7 +482,7 @@ pub fn visit(comptime callback: anytype, ctx: FnParam(callback, 0), v: anytype) 
         .callback => callback(ctx, v),
         .recurse => {
             const TargetType, const mutating_cb = switch (@typeInfo(FnParam(callback, 1))) {
-                .pointer => |info| .{ info.child, !info.is_const },
+                .pointer => |info| .{ info.child, !info.attrs.@"const" },
                 else => stdx.debug.compileError("zml.meta.visit({any}) is expecting a callback with a pointer as second argument but found {any}", .{ @TypeOf(callback), FnParam(callback, 1) }),
             };
 
@@ -494,12 +494,12 @@ pub fn visit(comptime callback: anytype, ctx: FnParam(callback, 0), v: anytype) 
 
             switch (ptr_info_v.size) {
                 .one => switch (@typeInfo(ChildTypeV)) {
-                    .@"struct" => |s| inline for (s.fields) |field| {
-                        if (field.is_comptime or comptime !Contains(field.type, TargetType)) continue;
-                        if (@typeInfo(field.type) == .pointer) {
-                            if (can_error) try visit(callback, ctx, @field(v, field.name)) else visit(callback, ctx, @field(v, field.name));
+                    .@"struct" => |s| inline for (s.field_names, s.field_types, s.field_attrs) |field_name, Field, field_attrs| {
+                        if (field_attrs.@"comptime" or comptime !Contains(Field, TargetType)) continue;
+                        if (@typeInfo(Field) == .pointer) {
+                            if (can_error) try visit(callback, ctx, @field(v, field_name)) else visit(callback, ctx, @field(v, field_name));
                         } else {
-                            if (can_error) try visit(callback, ctx, &@field(v, field.name)) else visit(callback, ctx, &@field(v, field.name));
+                            if (can_error) try visit(callback, ctx, &@field(v, field_name)) else visit(callback, ctx, &@field(v, field_name));
                         }
                     },
                     .array => for (v[0..]) |*elem| {
@@ -637,11 +637,11 @@ pub fn visitFlatStruct(comptime callback: anytype, ctx: FnParam(callback, 0), v:
 
             return switch (ptr_info_v.size) {
                 .one => switch (@typeInfo(ChildTypeV)) {
-                    .@"struct" => |s| inline for (s.fields) |field| {
-                        if (field.is_comptime or comptime !Contains(field.type, TargetType)) continue;
-                        stdx.debug.assertComptime(@typeInfo(field.type) != .pointer, err_msg, err_args);
+                    .@"struct" => |s| inline for (s.field_names, s.field_types, s.field_attrs) |field_name, Field, field_attrs| {
+                        if (field_attrs.@"comptime" or comptime !Contains(Field, TargetType)) continue;
+                        stdx.debug.assertComptime(@typeInfo(Field) != .pointer, err_msg, err_args);
 
-                        if (can_error) try visitFlatStruct(callback, ctx, &@field(v, field.name)) else visitFlatStruct(callback, ctx, &@field(v, field.name));
+                        if (can_error) try visitFlatStruct(callback, ctx, &@field(v, field_name)) else visitFlatStruct(callback, ctx, &@field(v, field_name));
                     },
                     .array => for (v[0..]) |*elem| {
                         if (can_error) try visitFlatStruct(callback, ctx, elem) else visitFlatStruct(callback, ctx, elem);
@@ -769,17 +769,17 @@ pub fn zip(comptime func: anytype, allocator: std.mem.Allocator, values: anytype
         .pointer => stdx.debug.compileError("zip only accept by value arguments. Received: {}", .{V}),
         .@"struct" => |struct_info| {
             var out: V = values[0];
-            inline for (struct_info.fields) |f| {
-                if (f.is_comptime) continue;
-                if (@typeInfo(f.type) == .pointer) {
+            inline for (struct_info.field_names, struct_info.field_types, struct_info.field_attrs) |field_name, Field, field_attrs| {
+                if (field_attrs.@"comptime") continue;
+                if (@typeInfo(Field) == .pointer) {
                     stdx.debug.compileError("zip doesn't follow pointers and don't accept struct containing them. Received: {}", .{V});
                 }
-                var fields = try allocator.alloc(f.type, values.len);
+                var fields = try allocator.alloc(Field, values.len);
                 defer allocator.free(fields);
                 for (values, 0..) |val, i| {
-                    fields[i] = @field(val, f.name);
+                    fields[i] = @field(val, field_name);
                 }
-                @field(out, f.name) = try zip(func, allocator, fields, args);
+                @field(out, field_name) = try zip(func, allocator, fields, args);
             }
             return out;
         },
@@ -827,7 +827,7 @@ pub fn collectAlloc(
     allocator: std.mem.Allocator,
     obj: anytype,
 ) std.mem.Allocator.Error![]stdx.meta.FnReturn(func) {
-    stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).@"fn".params.len <= 2, "zml.meta.collect expects a func with two arguments, got: {}", .{@TypeOf(func)});
+    stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).@"fn".param_types.len <= 2, "zml.meta.collect expects a func with two arguments, got: {}", .{@TypeOf(func)});
 
     const CollectAllocCtx = struct {
         func_ctx: _CollectCtx(func),
@@ -854,7 +854,7 @@ pub fn collectAlloc(
 /// finds all X in the given object, and write the result of func(X) into a given slice.
 /// Asserts that the number of X found is equal to the slice len.
 pub fn collectBuf(func: anytype, func_ctx: _CollectCtx(func), obj: anytype, out: []stdx.meta.FnReturn(func)) void {
-    stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).@"fn".params.len <= 2, "zml.meta.collectBuf expects a func with one or two arguments, got: {}", .{@TypeOf(func)});
+    stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).@"fn".param_types.len <= 2, "zml.meta.collectBuf expects a func with one or two arguments, got: {}", .{@TypeOf(func)});
     const LocalContext = struct {
         func_ctx: _CollectCtx(func),
         out: @TypeOf(out),
@@ -899,14 +899,14 @@ pub fn collectPtrs(
 }
 
 fn _CollectCtx(func: anytype) type {
-    const params = @typeInfo(@TypeOf(func)).@"fn".params;
+    const params = @typeInfo(@TypeOf(func)).@"fn".param_types;
     if (params.len == 1) return void;
-    return params[0].type orelse @compileError("anytype not supported in collect");
+    return params[0] orelse @compileError("anytype not supported in collect");
 }
 
 fn _CollectArg(func: anytype) type {
-    const params = @typeInfo(@TypeOf(func)).@"fn".params;
-    return params[params.len - 1].type orelse @compileError("anytype not supported in collect");
+    const params = @typeInfo(@TypeOf(func)).@"fn".param_types;
+    return params[params.len - 1] orelse @compileError("anytype not supported in collect");
 }
 
 pub fn Contains(Haystack: type, T: type) bool {
@@ -921,16 +921,16 @@ pub fn Contains(Haystack: type, T: type) bool {
 
     return switch (@typeInfo(Haystack)) {
         .@"struct" => |info| {
-            inline for (info.fields) |field| {
-                if (!field.is_comptime and Contains(field.type, T)) {
+            inline for (info.field_types, info.field_attrs) |Field, field_attrs| {
+                if (!field_attrs.@"comptime" and Contains(Field, T)) {
                     return true;
                 }
             }
             return false;
         },
         .@"union" => |info| {
-            inline for (info.fields) |field| {
-                if (Contains(field.type, T))
+            inline for (info.field_types) |Field| {
+                if (Contains(Field, T))
                     return true;
             }
             return false;
