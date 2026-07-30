@@ -544,7 +544,7 @@ pub const S3 = struct {
                 handle.pos += @intCast(total);
                 return .{ .file_read_streaming = total };
             },
-            .file_write_streaming, .device_io_control, .net_receive => {
+            .file_write_streaming, .device_io_control, .net_receive, .net_read => {
                 return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
             },
         }
@@ -601,7 +601,7 @@ pub const S3 = struct {
 
     fn dirAccess(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {}
 
-    fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
+    fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
         const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
         const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
             error.FileNotFound => return std.Io.File.OpenError.FileNotFound,
