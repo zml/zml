@@ -179,6 +179,7 @@ const TestMoe = struct {
             down,
             null,
             null,
+            null,
             metadata,
             parameters,
         ) catch |err| std.debug.panic(
@@ -211,6 +212,7 @@ const TestMoe = struct {
             null,
             null,
             down,
+            null,
             null,
             null,
             metadata,
@@ -566,6 +568,13 @@ test "BF16 backend matches Triton after routing" {
         zml.moe.Backend.flashinfer_cutlass,
         try zml.moe.Backend.auto(platform, .bf16),
     );
+    const blackwell = std.mem.eql(u8, cc, "10.0") or std.mem.eql(u8, cc, "12.0");
+    if (blackwell) {
+        try std.testing.expectEqual(
+            zml.moe.Backend.flashinfer_cutlass,
+            try zml.moe.Backend.auto(platform, .f4e2m1),
+        );
+    }
     const tactics = try cutlass.tacticCounts(0, .bf16xbf16);
     try std.testing.expect(tactics.gemm1 > 0);
     try std.testing.expect(tactics.gemm2 > 0);

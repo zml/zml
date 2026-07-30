@@ -28,6 +28,10 @@ pub const Backend = enum {
                     .flashinfer_cutlass
                 else
                     .triton,
+                .f4e2m1 => if (cutlass_flashinfer.isNvfp4Available(platform))
+                    .flashinfer_cutlass
+                else
+                    return error.UnsupportedDataType,
                 .f16, .f32 => .triton,
                 else => error.UnsupportedDataType,
             },
@@ -208,6 +212,7 @@ pub fn forwardMoe(
     weights_down: zml.Tensor,
     scales_down: ?zml.Tensor,
     bias_down: ?zml.Tensor,
+    nvfp4_scales: ?cutlass_flashinfer.Nvfp4Scales,
     metadata: Metadata,
     parameters: Parameters,
 ) !zml.Tensor {
@@ -229,6 +234,99 @@ pub fn forwardMoe(
 
             const runner_options = try parameters.flashinfer_cutlass.runnerOptions();
             const expert_partition = weights_gate_up.shape().partition(.expert);
+
+            if (nvfp4_scales) |nvfp4| {
+                if (expert_partition.eql(.init(.experts))) {
+                    break :b zml.ops.manualComputation(
+                        .{
+                            input,
+                            topk_ids,
+                            topk_weights,
+                            weights_gate_up,
+                            weights_down,
+                            nvfp4.fc1_act_global,
+                            nvfp4.fc1_weight_block,
+                            nvfp4.fc1_global,
+                            nvfp4.fc2_act_global,
+                            nvfp4.fc2_weight_block,
+                            nvfp4.fc2_global,
+                        },
+                        input.shape(),
+                        .{
+                            .activation = runner_options.activation,
+                            .enable_pdl = runner_options.enable_pdl,
+                            .gemm1_tactic = runner_options.gemm1_tactic,
+                            .gemm2_tactic = runner_options.gemm2_tactic,
+                            .workspace_query_device = runner_options.workspace_query_device,
+                        },
+                        (struct {
+                            fn body(
+                                ctx: anytype,
+                                _: std.mem.Allocator,
+                                sharded_inputs: []const zml.Tensor,
+                                _: zml.Shape,
+                            ) zml.Tensor {
+                                const local_num_experts = sharded_inputs[3].dim(.expert);
+                                const partition_id = zml.ops.partitionId().convert(.i32);
+                                const expert_start = partition_id.scale(local_num_experts).convert(.i32);
+                                const expert_end = expert_start.addConstant(local_num_experts);
+
+                                const local_route_mask = sharded_inputs[1]
+                                    .cmp(.GE, expert_start)
+                                    .logical(.AND, sharded_inputs[1].cmp(.LT, expert_end));
+                                const local_topk_ids = local_route_mask.select(
+                                    sharded_inputs[1].sub(expert_start),
+                                    zml.Tensor.scalar(0, .i32),
+                                );
+                                const local_topk_weights = local_route_mask.select(
+                                    sharded_inputs[2],
+                                    zml.Tensor.scalar(0, sharded_inputs[2].dtype()),
+                                );
+
+                                const local_output = cutlass_flashinfer.fusedExpertsImpl(
+                                    sharded_inputs[0],
+                                    sharded_inputs[3],
+                                    sharded_inputs[4],
+                                    local_topk_weights,
+                                    local_topk_ids,
+                                    .{
+                                        .fc1_act_global = sharded_inputs[5],
+                                        .fc1_weight_block = sharded_inputs[6],
+                                        .fc1_global = sharded_inputs[7],
+                                        .fc2_act_global = sharded_inputs[8],
+                                        .fc2_weight_block = sharded_inputs[9],
+                                        .fc2_global = sharded_inputs[10],
+                                    },
+                                    .{
+                                        .workspace_query_device = ctx.workspace_query_device,
+                                        .activation = ctx.activation,
+                                        .enable_pdl = ctx.enable_pdl,
+                                        .gemm1_tactic = ctx.gemm1_tactic,
+                                        .gemm2_tactic = ctx.gemm2_tactic,
+                                    },
+                                ) catch |err| stdx.debug.panic(
+                                    "FlashInfer CUTLASS NVFP4 MoE backend failed: {}",
+                                    .{err},
+                                );
+                                const local_reshaped = local_output
+                                    .reshape(sharded_inputs[0].shape().dims())
+                                    .withTags(.{ .b, .s, .d });
+                                return zml.ops.allReduce(local_reshaped, zml.Tensor.add);
+                            }
+                        }).body,
+                    );
+                }
+
+                break :b try cutlass_flashinfer.fusedExpertsImpl(
+                    input,
+                    weights_gate_up,
+                    weights_down,
+                    topk_weights,
+                    topk_ids,
+                    nvfp4,
+                    runner_options,
+                );
+            }
 
             if (expert_partition.eql(.init(.experts))) {
                 break :b zml.ops.manualComputation(
@@ -301,6 +399,7 @@ pub fn forwardMoe(
             );
         },
         .triton => b: {
+            if (nvfp4_scales != null) return error.UnsupportedQuantization;
             const triton_metadata = switch (metadata) {
                 .triton => |v| v,
                 else => return error.InvalidMetadata,
@@ -379,6 +478,7 @@ pub fn forwardMoe(
             );
         },
         .mosaic_tpu => b: {
+            if (nvfp4_scales != null) return error.UnsupportedQuantization;
             const tpu_metadata = switch (metadata) {
                 .mosaic_tpu => |v| v,
                 else => return error.InvalidMetadata,
@@ -454,6 +554,7 @@ pub fn forwardMoe(
             );
         },
         .metal => b: {
+            if (nvfp4_scales != null) return error.UnsupportedQuantization;
             const metal_metadata = switch (metadata) {
                 .metal => |v| v,
                 else => return error.InvalidMetadata,
