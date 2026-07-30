@@ -652,7 +652,7 @@ pub const HF = struct {
                 handle.pos += @intCast(total);
                 return .{ .file_read_streaming = total };
             },
-            .file_write_streaming, .device_io_control, .net_receive => {
+            .file_write_streaming, .device_io_control, .net_receive, .net_read => {
                 return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
             },
         }
@@ -732,7 +732,7 @@ pub const HF = struct {
         if (node == null) return std.Io.Dir.AccessError.FileNotFound;
     }
 
-    fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
+    fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
         const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
 
         var path_buffer: [8 * 1024]u8 = undefined;
