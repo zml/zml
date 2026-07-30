@@ -1629,35 +1629,48 @@ pub fn unpackNvfp4(w: Tensor, k_tag: anytype) Tensor {
         .renameTag(.kb, Shape.toTag(k_tag));
 }
 
-pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, args: anytype) struct { Tensor, Tensor } {
+pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, args: anytype) struct {
+    packed_values: Tensor,
+    scales: Tensor,
+} {
+    const block_size = 16;
+    const values_per_byte = 2;
+    const value_max = 6.0;
+    const scale_min_normal = 0x1p-6;
+    const scale_max = DataType.f8e4m3fn.maxValue().as(f32);
+
     stdx.debug.assert(x.shape().hasTag(args) != null, "quantizeNvfp4 expects x to have {any} tag, got {f}", .{ args, x.shape() });
-    stdx.debug.assert(@rem(x.dim(args), 16) == 0, "quantizeNvfp4 expects {any} to be a multiple of 16, got {f}", .{ args, x.shape() });
+    stdx.debug.assert(@rem(x.dim(args), block_size) == 0, "quantizeNvfp4 expects {any} to be a multiple of {}, got {f}", .{ args, block_size, x.shape() });
 
     const dt = x.dtype();
     const scaled = if (input_global_scale) |igs|
         x.mul(igs.convert(dt).broad(x.shape()))
     else
         x;
-    const grouped = scaled.splitAxis(args, .{ .sc = -1, .blk = 16 });
+    const grouped = scaled.splitAxis(args, .{ .sc = -1, .blk = block_size });
     const amax = grouped.abs().max(.blk);
 
-    const kMinE4m3 = 0.015625;
-    const kMaxE4m3 = 448.0;
-    const scale = amax.scale(1.0 / 6.0)
-        .clamp(Tensor.scalar(kMinE4m3, dt), Tensor.scalar(kMaxE4m3, dt))
+    const scales = amax.scale(1.0 / value_max)
+        .clamp(
+            Tensor.scalar(scale_min_normal, dt),
+            Tensor.scalar(scale_max, dt),
+        )
         .convert(.f8e4m3fn);
 
-    const kMinE4m3Normal = 0.015625;
-    const divisor = scale.convert(dt)
-        .maximum(Tensor.scalar(kMinE4m3Normal, dt).broad(scale.shape().withDtype(dt)))
+    const divisor = scales.convert(dt)
+        .maximum(Tensor.scalar(scale_min_normal, dt).broad(scales.shape().withDtype(dt)))
         .broad(grouped.shape());
 
-    const quantized = grouped.div(divisor).convert(.f4e2m1);
-    const packed_u8 = quantized
-        .reshape(x.shape().withDtype(.f4e2m1))
-        .splitAxis(args, .{ .kw = -1, .bitcast = 2 })
-        .bitCast(.u8);
-    return .{ packed_u8, scale.squeeze(.blk) };
+    const values = grouped.div(divisor)
+        .convert(.f4e2m1)
+        .reshape(x.shape().withDtype(.f4e2m1));
+
+    return .{
+        .packed_values = values
+            .splitAxis(args, .{ .kw = -1, .bitcast = values_per_byte })
+            .bitCast(.u8),
+        .scales = scales.squeeze(.blk),
+    };
 }
 
 pub fn scaledDot(
