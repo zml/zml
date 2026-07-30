@@ -50,15 +50,14 @@ pub const Linear = struct {
         else
             self.weight;
 
-        const scalar_f32 = zml.Shape.init(.{}, .f32);
-        const igs: ?Tensor = if (self.input_global_scale) |g| g.convert(.f32).reshape(scalar_f32) else null;
-        const wgs: ?Tensor = if (self.global_scale) |g| g.convert(.f32).reshape(scalar_f32) else null;
+        const igs: ?Tensor = if (self.input_global_scale) |g| g.convert(.f32).asScalar() else null;
+        const wgs: ?Tensor = if (self.global_scale) |g| g.convert(.f32).asScalar() else null;
 
         const platform = zml.module.CompilationContext.current().platform;
         if (weight.dtype() == .f4e2m1 and supportsNvfp4ActivationQuant(platform)) {
-            const q_packed, const q_scale = ops.quantizeNvfp4(x.convert(.bf16), igs, self.tag);
-            const q = ops.unpackNvfp4(q_packed, self.tag);
-            const acc = ops.scaledDot(q, weight, q_scale, scales, self.tag);
+            const q = ops.quantizeNvfp4(x.convert(.bf16), igs, self.tag);
+            const values = ops.unpackNvfp4(q.packed_values, self.tag);
+            const acc = ops.scaledDot(values, weight, q.scales, scales, self.tag);
             return applyGlobalScale(acc, igs, wgs).convert(x.dtype());
         }
 
