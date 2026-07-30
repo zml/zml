@@ -61,8 +61,8 @@ common          --incompatible_disallow_empty_glob=false
 
 # Use the C linker to link Zig code
 common          --@rules_zig//zig/settings:use_cc_common_link=true
-# Zig self hosted backend is too fragile for now
-common          --@rules_zig//zig/settings:zigopt=-fllvm
+# Zig 0.17's self-hosted backend is used for debug builds.
+common          --@rules_zig//zig/settings:zigopt=-fno-llvm
 
 common          --@rules_zig//zig/settings:use_standalone_translate_c=True
 
@@ -108,6 +108,7 @@ common:release  --compilation_mode=opt
 common:release  --copt=-Ofast
 common:release  --strip=always
 common:release  --@rules_zig//zig/settings:mode=release_safe
+common:release  --@rules_zig//zig/settings:zigopt=-fllvm
 
 # --config=native builds everything optimized for the local CPU
 common:native   --copt=-march=native
