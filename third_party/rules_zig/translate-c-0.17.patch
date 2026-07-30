@@ -68,3 +68,86 @@ index fd87617..3c5aa4b 100644
  
      pub fn setenv(name: []const u8, value: []const u8) !void {
          const nameZ = try std.testing.allocator.dupeZ(u8, name);
+
+diff --git a/zig/private/common/cdeps.bzl b/zig/private/common/cdeps.bzl
+--- a/zig/private/common/cdeps.bzl
++++ b/zig/private/common/cdeps.bzl
+@@ -85,6 +85,35 @@
+         uniquify = True,
+     )
+ 
++def zig_cdeps_linker_input_files(*, linking_context):
++    """Collect files needed to replay a C/C++ link outside of Bazel."""
++    inputs = []
++    for link in linking_context.linker_inputs.to_list():
++        inputs.extend(link.additional_inputs)
++        for lib in link.libraries:
++            _append_linker_files(inputs, lib.static_library)
++            _append_linker_files(inputs, lib.pic_static_library)
++            _append_linker_files(inputs, lib.interface_library)
++            _append_linker_files(inputs, lib.dynamic_library)
++            _append_linker_files(inputs, getattr(lib, "resolved_symlink_dynamic_library", None))
++            _append_linker_files(inputs, getattr(lib, "resolved_symlink_interface_library", None))
++            _append_linker_files(inputs, getattr(lib, "objects", None))
++            _append_linker_files(inputs, getattr(lib, "pic_objects", None))
++            _append_linker_files(inputs, getattr(lib, "lto_bitcode_files", None))
++            _append_linker_files(inputs, getattr(lib, "pic_lto_bitcode_files", None))
++
++    return inputs
++
++def _append_linker_files(inputs, files):
++    if not files:
++        return
++    if hasattr(files, "to_list"):
++        inputs.extend(files.to_list())
++    elif type(files) == "list" or type(files) == "tuple":
++        inputs.extend(files)
++    else:
++        inputs.append(files)
++
+ def _lib_flags(arg):
+     (file, dynamic) = arg
+     if dynamic:
+diff --git a/zig/private/common/zig_build.bzl b/zig/private/common/zig_build.bzl
+--- a/zig/private/common/zig_build.bzl
++++ b/zig/private/common/zig_build.bzl
+@@ -12,7 +12,12 @@
+     "bazel_builtin_module",
+     BAZEL_BUILTIN_ATTRS = "ATTRS",
+ )
+-load("//zig/private/common:cdeps.bzl", "zig_cdeps_copts", "zig_cdeps_linker_inputs")
++load(
++    "//zig/private/common:cdeps.bzl",
++    "zig_cdeps_copts",
++    "zig_cdeps_linker_input_files",
++    "zig_cdeps_linker_inputs",
++)
+ load("//zig/private/common:csrcs.bzl", "zig_csrcs")
+ load("//zig/private/common:data.bzl", "zig_collect_data", "zig_create_runfiles")
+ load("//zig/private/common:escape_label.bzl", "escape_label")
+@@ -479,6 +484,12 @@
+         order = "preorder",
+     )
+ 
++    zig_build_input_depsets = [inputs]
++    if root_module.cc_info:
++        zig_build_input_depsets.append(depset(direct = zig_cdeps_linker_input_files(
++            linking_context = root_module.cc_info.linking_context,
++        )))
++
+     zig_build_kwargs = dict(
+         execution_requirements = {tag: "" for tag in ctx.attr.tags},
+         env = {
+@@ -762,6 +773,12 @@
+     if root_module.cc_info:
+         transitive_data.append(depset(cc_helper.get_dynamic_libraries_for_runtime(root_module.cc_info.linking_context, True)))
+ 
++    output_groups["zig_build_inputs"] = depset(
++        direct = direct_data,
++        transitive = zig_build_input_depsets + transitive_data +
++                     [runfiles.files for runfiles in transitive_runfiles],
++    )
++
+     providers.extend([
+         DefaultInfo(
+             executable = bin_output if bin_output_is_executable else None,
