@@ -18,7 +18,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) !OneApi {
 
 pub fn handleByIndex(self: *const OneApi, device_id: usize) !Handle {
     if (device_id >= self.monitor.devices.len) return error.NotFound;
-    return @enumFromInt(@as(u32, @intCast(device_id)));
+    return @fromBackingInt(@intCast(@as(u32, @intCast(device_id))));
 }
 
 pub fn name(self: *const OneApi, allocator: std.mem.Allocator, handle: Handle) ![]const u8 {
@@ -111,7 +111,7 @@ pub fn driverVersion(self: *const OneApi, allocator: std.mem.Allocator) ![]const
 
 pub fn powerUsage(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = block: {
-        const idx = @intFromEnum(handle);
+        const idx = @backingInt(handle);
         if (idx >= self.monitor.devices.len) return error.NotFound;
         break :block &self.monitor.devices[idx];
     };
@@ -144,7 +144,7 @@ pub fn fanSpeed(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u6
 
 pub fn gpuUtil(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = block: {
-        const idx = @intFromEnum(handle);
+        const idx = @backingInt(handle);
         if (idx >= self.monitor.devices.len) return error.NotFound;
         break :block &self.monitor.devices[idx];
     };
@@ -155,7 +155,7 @@ pub fn gpuUtil(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64
     };
     defer usage.deinit(allocator);
 
-    const dev_idx: u16 = @intCast(@intFromEnum(handle));
+    const dev_idx: u16 = @intCast(@backingInt(handle));
     const current = if (usage.get(dev_idx)) |sample| sample.engine else null;
     const util = Monitor.processUtil(dev.activity_prev, current) orelse 0;
     dev.activity_prev = current;
@@ -164,7 +164,7 @@ pub fn gpuUtil(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64
 
 pub fn encoderUtil(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = block: {
-        const idx = @intFromEnum(handle);
+        const idx = @backingInt(handle);
         if (idx >= self.monitor.devices.len) return error.NotFound;
         break :block &self.monitor.devices[idx];
     };
@@ -175,7 +175,7 @@ pub fn encoderUtil(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) 
     };
     defer usage.deinit(allocator);
 
-    const dev_idx: u16 = @intCast(@intFromEnum(handle));
+    const dev_idx: u16 = @intCast(@backingInt(handle));
     const current = if (usage.get(dev_idx)) |sample| sample.encoder else null;
     const util = Monitor.processUtil(dev.encoder_prev, current) orelse {
         dev.encoder_prev = current;
@@ -187,7 +187,7 @@ pub fn encoderUtil(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) 
 
 pub fn decoderUtil(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
     const dev = block: {
-        const idx = @intFromEnum(handle);
+        const idx = @backingInt(handle);
         if (idx >= self.monitor.devices.len) return error.NotFound;
         break :block &self.monitor.devices[idx];
     };
@@ -198,7 +198,7 @@ pub fn decoderUtil(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) 
     };
     defer usage.deinit(allocator);
 
-    const dev_idx: u16 = @intCast(@intFromEnum(handle));
+    const dev_idx: u16 = @intCast(@backingInt(handle));
     const current = if (usage.get(dev_idx)) |sample| sample.decoder else null;
     const util = Monitor.processUtil(dev.decoder_prev, current) orelse {
         dev.decoder_prev = current;
@@ -219,7 +219,7 @@ pub fn maxClockGraphics(self: *OneApi, allocator: std.mem.Allocator, handle: Han
 }
 
 pub fn memUsed(self: *OneApi, allocator: std.mem.Allocator, handle: Handle) !u64 {
-    const dev_idx: u16 = @intCast(@intFromEnum(handle));
+    const dev_idx: u16 = @intCast(@backingInt(handle));
 
     var usage = Monitor.collectDeviceUsage(allocator, self.io, self.monitor.devices) catch return 0;
     defer usage.deinit(allocator);
