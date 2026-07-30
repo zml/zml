@@ -1283,21 +1283,52 @@ pub const Tensor = struct {
     /// Axes with the same tag on both sides, and which aren't contracting,
     /// are considered "batching axes".
     pub fn dot(lhs: Tensor, rhs: Tensor, args: anytype) Tensor {
-        stdx.debug.assert(lhs.shape().hasTag(args) != null, "Expected lhs to have {any} tag, got {f}", .{ args, lhs.shape() });
-        stdx.debug.assert(rhs.shape().hasTag(args) != null, "Expected rhs to have {any} tag, got {f}", .{ args, rhs.shape() });
+        const dot_axes = lhs.dotAxes(rhs, args);
+        return lhs.dotGeneral(rhs, dot_axes.contracting.constSlice(), dot_axes.batching.constSlice());
+    }
 
-        const lhs_contracting_dim: i8 = @intCast(lhs.shape().hasTag(args).?);
-        const rhs_contracting_dim: i8 = @intCast(rhs.shape().hasTag(args).?);
+    pub const DotAxes = struct {
+        contracting: stdx.BoundedArray([2]i8, constants.MAX_RANK),
+        batching: stdx.BoundedArray([2]i8, constants.MAX_RANK),
+    };
+
+    /// Returns contracting and batching axis pairs inferred from one or more tags.
+    pub fn dotAxes(lhs: Tensor, rhs: Tensor, tags: anytype) DotAxes {
+        const T = @TypeOf(tags);
+        if (comptime T == Shape.Tag or T == @EnumLiteral()) {
+            return lhs.dotAxes(rhs, .{tags});
+        }
+
+        const lhs_contracting_axes, _ = lhs.shape().parseAxes(tags);
+        const rhs_contracting_axes, _ = rhs.shape().parseAxes(tags);
+        var contracting_axes: stdx.BoundedArray([2]i8, constants.MAX_RANK) = .empty;
+        for (lhs_contracting_axes.constSlice(), rhs_contracting_axes.constSlice()) |l, r| {
+            contracting_axes.appendAssumeCapacity(.{ @intCast(l), @intCast(r) });
+        }
 
         var batching_axes: stdx.BoundedArray([2]i8, constants.MAX_RANK) = .empty;
         for (0..lhs.rank()) |lhs_tag_index| {
+            if (std.mem.indexOfScalar(u3, lhs_contracting_axes.constSlice(), @intCast(lhs_tag_index)) != null) {
+                continue;
+            }
+
             const lhs_tag = lhs.shape().tag(lhs_tag_index);
-            if (lhs_tag == Shape.toTag(args)) continue;
             if (rhs.shape().hasTag(lhs_tag)) |rhs_tag_index| {
                 batching_axes.appendAssumeCapacity(.{ @intCast(lhs_tag_index), @intCast(rhs_tag_index) });
             }
         }
-        return lhs.dotGeneral(rhs, &.{.{ lhs_contracting_dim, rhs_contracting_dim }}, batching_axes.slice());
+
+        return .{ .contracting = contracting_axes, .batching = batching_axes };
+    }
+
+    test dotAxes {
+        const lhs: Tensor = .init(.{ .a = 20, .b = 21, .c = 22 }, .f32);
+        const rhs: Tensor = .init(.{ .c = 22, .b = 21, .d = 23, .a = 20 }, .f32);
+
+        const dot_axes = lhs.dotAxes(rhs, .{ .c, .a });
+
+        try std.testing.expectEqualSlices([2]i8, &.{ .{ 2, 0 }, .{ 0, 3 } }, dot_axes.contracting.constSlice());
+        try std.testing.expectEqualSlices([2]i8, &.{.{ 1, 1 }}, dot_axes.batching.constSlice());
     }
 
     test dot {

@@ -128,20 +128,7 @@ pub fn scaledDot(
     rhs_scale: Tensor,
     args: anytype,
 ) Tensor {
-    stdx.debug.assert(lhs.shape().hasTag(args) != null, "scaledDot expects lhs to have {any} tag, got {f}", .{ args, lhs.shape() });
-    stdx.debug.assert(rhs.shape().hasTag(args) != null, "scaledDot expects rhs to have {any} tag, got {f}", .{ args, rhs.shape() });
-
-    const lhs_contracting_dim: i8 = @intCast(lhs.shape().hasTag(args).?);
-    const rhs_contracting_dim: i8 = @intCast(rhs.shape().hasTag(args).?);
-
-    var batching_axes: stdx.BoundedArray([2]i8, constants.MAX_RANK) = .empty;
-    for (0..lhs.rank()) |lhs_tag_index| {
-        const lhs_tag = lhs.shape().tag(lhs_tag_index);
-        if (lhs_tag == Shape.toTag(args)) continue;
-        if (rhs.shape().hasTag(lhs_tag)) |rhs_tag_index| {
-            batching_axes.appendAssumeCapacity(.{ @intCast(lhs_tag_index), @intCast(rhs_tag_index) });
-        }
-    }
+    const dot_axes = lhs.dotAxes(rhs, args);
 
     const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
@@ -152,7 +139,7 @@ pub fn scaledDot(
     var res_shape: Shape = .{ ._dtype = result_dtype };
     var lhs_batching_axes: Axes = .empty;
     var rhs_batching_axes: Axes = .empty;
-    for (batching_axes.constSlice()) |b_axes| {
+    for (dot_axes.batching.constSlice()) |b_axes| {
         const l, const r = b_axes;
         stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "scaledDot expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
         var t = lhs._shape.tag(l);
@@ -162,11 +149,14 @@ pub fn scaledDot(
         rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
     }
 
-    stdx.debug.assert(lhs._shape.dim(lhs_contracting_dim) == rhs._shape.dim(rhs_contracting_dim), "scaledDot expects contracting dimensions to be equal, got {} and {} in {f} and {f}", .{ lhs_contracting_dim, rhs_contracting_dim, lhs, rhs });
     var lhs_contracting_axes: Axes = .empty;
     var rhs_contracting_axes: Axes = .empty;
-    lhs_contracting_axes.appendAssumeCapacity(lhs._shape.axis(lhs_contracting_dim));
-    rhs_contracting_axes.appendAssumeCapacity(rhs._shape.axis(rhs_contracting_dim));
+    for (dot_axes.contracting.constSlice()) |c_axes| {
+        const l, const r = c_axes;
+        stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "scaledDot expects contracting dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
+        lhs_contracting_axes.appendAssumeCapacity(lhs._shape.axis(l));
+        rhs_contracting_axes.appendAssumeCapacity(rhs._shape.axis(r));
+    }
 
     for (0..lhs.rank()) |l| {
         if (std.mem.indexOfScalar(i64, lhs_contracting_axes.constSlice(), @intCast(l))) |_| {
