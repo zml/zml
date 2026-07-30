@@ -187,7 +187,16 @@ fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable
                 .data = o.data,
             } });
         },
-        .device_io_control, .file_write_streaming, .net_receive, .net_read => {
+        .file_write_streaming => |o| {
+            const handle, const backend = self.getFileHandle(o.file);
+            return backend.vtable.operate(backend.userdata, .{ .file_write_streaming = .{
+                .file = .{ .handle = @intCast(handle.handle), .flags = handle.flags },
+                .header = o.header,
+                .data = o.data,
+                .splat = o.splat,
+            } });
+        },
+        .device_io_control, .net_receive, .net_read => {
             return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
         },
     }
@@ -243,12 +252,14 @@ pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u
     };
 
     const file = try backend.vtable.dirCreateFile(backend.userdata, dir_, stripScheme(sub_path), flags);
+    errdefer file.close(backend);
     const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
     handle.* = .{
         .handle = @intCast(file.handle),
         .backend_idx = backend_idx,
+        .flags = file.flags,
     };
-    return .{ .handle = @intCast(idx), .flags = .{ .nonblocking = false } };
+    return .{ .handle = @intCast(idx), .flags = file.flags };
 }
 
 fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
@@ -258,10 +269,12 @@ fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, fla
         return std.Io.File.OpenError.Unexpected;
     };
     const file = try backend.vtable.dirOpenFile(backend.userdata, dir_, stripScheme(sub_path), flags);
+    errdefer file.close(backend);
     const idx, const handle = self.openHandle() catch return std.Io.Dir.OpenError.Unexpected;
     handle.* = .{
         .handle = @intCast(file.handle),
         .backend_idx = backend_idx,
+        .flags = file.flags,
     };
     return .{ .handle = @intCast(idx), .flags = handle.flags };
 }
@@ -353,26 +366,42 @@ fn fileWritePositional(userdata: ?*anyopaque, file: std.Io.File, header: []const
 
 fn fileWriteFileStreaming(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.File.Writer.WriteFileError!usize {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+    const own_io = self.io();
+    if (reader.io.userdata != own_io.userdata or reader.io.vtable != own_io.vtable) return error.Unimplemented;
 
     const dst_handle, const dst_backend = self.getFileHandle(file);
-    const src_handle, _ = self.getFileHandle(reader.file);
+    const src_handle, const src_backend = self.getFileHandle(reader.file);
+    if (src_backend.userdata != dst_backend.userdata or src_backend.vtable != dst_backend.vtable) return error.Unimplemented;
 
+    const original_src_io = reader.io;
     const original_src_handle = reader.file;
+    reader.io = src_backend;
     reader.file = .{ .handle = @intCast(src_handle.handle), .flags = src_handle.flags };
-    defer reader.file = original_src_handle;
+    defer {
+        reader.io = original_src_io;
+        reader.file = original_src_handle;
+    }
 
     return dst_backend.vtable.fileWriteFileStreaming(dst_backend.userdata, .{ .handle = @intCast(dst_handle.handle), .flags = dst_handle.flags }, header, reader, limit);
 }
 
 fn fileWriteFilePositional(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, reader: *std.Io.File.Reader, limit: std.Io.Limit, offset: u64) std.Io.File.WriteFilePositionalError!usize {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+    const own_io = self.io();
+    if (reader.io.userdata != own_io.userdata or reader.io.vtable != own_io.vtable) return error.Unimplemented;
 
     const dst_handle, const dst_backend = self.getFileHandle(file);
-    const src_handle, _ = self.getFileHandle(reader.file);
+    const src_handle, const src_backend = self.getFileHandle(reader.file);
+    if (src_backend.userdata != dst_backend.userdata or src_backend.vtable != dst_backend.vtable) return error.Unimplemented;
 
+    const original_src_io = reader.io;
     const original_src_handle = reader.file;
+    reader.io = src_backend;
     reader.file = .{ .handle = @intCast(src_handle.handle), .flags = src_handle.flags };
-    defer reader.file = original_src_handle;
+    defer {
+        reader.io = original_src_io;
+        reader.file = original_src_handle;
+    }
 
     return dst_backend.vtable.fileWriteFilePositional(dst_backend.userdata, .{ .handle = @intCast(dst_handle.handle), .flags = dst_handle.flags }, header, reader, limit, offset);
 }
@@ -406,4 +435,49 @@ fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.
     } else {
         return try backend.vtable.fileRealPath(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, out_buffer);
     }
+}
+
+test "copy a local file through the VFS" {
+    const allocator = std.testing.allocator;
+    const process_io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source_data: [8192]u8 = @splat('x');
+    try tmp.dir.writeFile(process_io, .{
+        .sub_path = "source",
+        .data = &source_data,
+    });
+
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(process_io, &path_buffer);
+    const source_uri = try std.fmt.allocPrint(allocator, "file://{s}/source", .{path_buffer[0..path_len]});
+    defer allocator.free(source_uri);
+    const destination_uri = try std.fmt.allocPrint(allocator, "file://{s}/destination", .{path_buffer[0..path_len]});
+    defer allocator.free(destination_uri);
+
+    var file_backend: File = .init(allocator, process_io, .{});
+    defer file_backend.deinit();
+    var vfs: VFS = try .init(allocator, process_io);
+    defer vfs.deinit();
+    try vfs.register("file", file_backend.io());
+
+    const vfs_io = vfs.io();
+    {
+        var source = try std.Io.Dir.openFile(.cwd(), vfs_io, source_uri, .{});
+        defer source.close(vfs_io);
+        var destination = try std.Io.Dir.createFile(.cwd(), vfs_io, destination_uri, .{});
+        defer destination.close(vfs_io);
+
+        var reader: std.Io.File.Reader = .initStreaming(source, vfs_io, &.{});
+        var copy_buffer: [4096]u8 align(4096) = undefined;
+        var writer = destination.writer(vfs_io, &copy_buffer);
+        try std.testing.expectEqual(source_data.len, try reader.interface.streamRemaining(&writer.interface));
+        try writer.interface.flush();
+    }
+
+    const copied = try tmp.dir.readFileAlloc(process_io, "destination", allocator, .limited(source_data.len + 1));
+    defer allocator.free(copied);
+    try std.testing.expectEqualSlices(u8, &source_data, copied);
 }
