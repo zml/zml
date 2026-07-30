@@ -55,16 +55,16 @@ pub fn registerFuncExtensions(registry: *DialectRegistry) void {
 }
 
 fn isPtrConst(comptime T: type) bool {
-    return @typeInfo(T).pointer.is_const;
+    return @typeInfo(T).pointer.attrs.@"const";
 }
 
 fn CastedPtr(comptime T1: type, comptime T2: type) type {
-    return if (@typeInfo(T1).pointer.is_const) *const T2 else *T2;
+    return if (@typeInfo(T1).pointer.attrs.@"const") *const T2 else *T2;
 }
 
 pub fn Methods(comptime T: type, comptime NativeT: type) type {
     return struct {
-        pub const IsPtrConst = @typeInfo(@typeInfo(@FieldType(NativeT, "ptr")).optional.child).pointer.is_const;
+        pub const IsPtrConst = @typeInfo(@typeInfo(@FieldType(NativeT, "ptr")).optional.child).pointer.attrs.@"const";
         pub const Ptr = if (IsPtrConst) *const T else *T;
 
         pub fn ptr(self: anytype) NativeT {
@@ -1355,11 +1355,11 @@ pub const Operation = opaque {
             (struct {
                 pub fn callback(op: c.MlirOperation, ctx_: ?*anyopaque) callconv(.c) c.MlirWalkResult {
                     const inner_ctx_: *ContextType = @ptrCast(@alignCast(ctx_));
-                    return @intFromEnum(walkfn(inner_ctx_.ctx, @ptrCast(op.ptr)));
+                    return @backingInt(walkfn(inner_ctx_.ctx, @ptrCast(op.ptr)));
                 }
             }).callback,
             &inner_ctx,
-            @intFromEnum(order),
+            @backingInt(order),
         );
     }
 

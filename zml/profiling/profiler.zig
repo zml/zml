@@ -92,7 +92,7 @@ pub const ProfilerOptions = struct {
         c.tensorflow_ProfileOptions_set_repository_path(proto, upb.stringView(self.repository_path));
 
         if (self.device_type) |value| {
-            c.tensorflow_ProfileOptions_set_device_type(proto, @intFromEnum(value));
+            c.tensorflow_ProfileOptions_set_device_type(proto, @backingInt(value));
         }
         if (self.include_dataset_ops) |value| {
             c.tensorflow_ProfileOptions_set_include_dataset_ops(proto, value);
