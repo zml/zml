@@ -89,17 +89,17 @@ pub const Metadata = struct {
 pub fn deinitBuffer(_: *zml.Bufferized(Metadata)) void {}
 
 pub const Nvfp4Scales = struct {
-    /// Scalar or one value per expert.
+    /// Dynamic activation quantization multiplier, scalar or per expert.
     fc1_act_global: zml.Tensor,
     /// Interleaved E4M3 scales with shape returned by fc1BlockScaleShape().
     fc1_weight_block: zml.Tensor,
-    /// Final GEMM1 alpha, normally 1 / (fc1_act_global * fc1_weight_global).
+    /// Final GEMM1 output alpha, one value per expert.
     fc1_global: zml.Tensor,
-    /// Scalar or one value per expert.
+    /// Dynamic activation quantization multiplier, scalar or per expert.
     fc2_act_global: zml.Tensor,
     /// Interleaved E4M3 scales with shape returned by fc2BlockScaleShape().
     fc2_weight_block: zml.Tensor,
-    /// Final GEMM2 alpha, normally 1 / (fc2_act_global * fc2_weight_global).
+    /// Final GEMM2 output alpha, one value per expert.
     fc2_global: zml.Tensor,
 };
 
@@ -368,6 +368,16 @@ pub fn isAvailable(platform: *const zml.Platform) bool {
         return false;
     return std.mem.eql(u8, cc, "9.0") or
         std.mem.eql(u8, cc, "10.0") or
+        std.mem.eql(u8, cc, "12.0");
+}
+
+pub fn isNvfp4Available(platform: *const zml.Platform) bool {
+    if (!isAvailable(platform)) return false;
+
+    const devices = platform.pjrt_client.devices(platform.pjrt_api);
+    const cc = zml.platform.cuda.tryGetComputeCapabilities(platform, devices[0]) orelse
+        return false;
+    return std.mem.eql(u8, cc, "10.0") or
         std.mem.eql(u8, cc, "12.0");
 }
 
