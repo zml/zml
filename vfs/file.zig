@@ -21,10 +21,31 @@ fn canUseDirectIO() bool {
     return false;
 }
 
+fn getStatusFlags(file: std.Io.File) DirectIoError!usize {
+    while (true) {
+        const result = std.posix.system.fcntl(file.handle, std.posix.F.GETFL, 0);
+        switch (std.posix.errno(result)) {
+            .SUCCESS => return result,
+            .INTR => continue,
+            else => return DirectIoError.UnexpectedFcntlResult,
+        }
+    }
+}
+
+fn setStatusFlags(file: std.Io.File, flags: usize) DirectIoError!void {
+    while (true) {
+        switch (std.posix.errno(std.posix.system.fcntl(file.handle, std.posix.F.SETFL, flags))) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => return DirectIoError.UnexpectedFcntlResult,
+        }
+    }
+}
+
 fn useDirectIO(file: std.Io.File) DirectIoError!bool {
     if (comptime canUseDirectIO()) {
-        const flags = std.posix.system.fcntl(file.handle, std.posix.F.GETFL);
-        const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
+        const flags = try getStatusFlags(file);
+        const direct_flag = @as(usize, 1 << @bitOffsetOf(std.posix.O, "DIRECT"));
         return (flags & direct_flag) != 0;
     } else {
         return DirectIoError.UnsupportedPlatform;
@@ -33,12 +54,11 @@ fn useDirectIO(file: std.Io.File) DirectIoError!bool {
 
 fn switchToBufferedIO(file: std.fs.File) DirectIoError!void {
     if (comptime canUseDirectIO()) {
-        const flags = std.posix.system.fcntl(file.handle, std.posix.F.GETFL);
-        const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
+        const flags = try getStatusFlags(file);
+        const direct_flag = @as(usize, 1 << @bitOffsetOf(std.posix.O, "DIRECT"));
         if ((flags & direct_flag) == 0) return;
 
-        const result = try std.posix.fcntl(file.handle, std.posix.F.SETFL, flags & ~@as(c_uint, @bitCast(@as(u32, @intCast(direct_flag)))));
-        if (result != 0) return DirectIoError.UnexpectedFcntlResult;
+        try setStatusFlags(file, flags & ~direct_flag);
     } else {
         return DirectIoError.UnsupportedPlatform;
     }
@@ -46,11 +66,9 @@ fn switchToBufferedIO(file: std.fs.File) DirectIoError!void {
 
 fn switchToDirectIO(file: std.Io.File) DirectIoError!void {
     if (builtin.os.tag == .linux and canUseDirectIO()) {
-        const flags = std.posix.system.fcntl(file.handle, std.posix.F.GETFL);
-        const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
-
-        const result = std.posix.system.fcntl(file.handle, std.posix.F.SETFL, flags | direct_flag);
-        if (result != 0) return DirectIoError.UnexpectedFcntlResult;
+        const flags = try getStatusFlags(file);
+        const direct_flag = @as(usize, 1 << @bitOffsetOf(std.posix.O, "DIRECT"));
+        try setStatusFlags(file, flags | direct_flag);
     } else {
         return DirectIoError.UnsupportedPlatform;
     }
@@ -111,6 +129,7 @@ pub const File = struct {
                 .dirStat = dirStat,
                 .dirStatFile = dirStatFile,
                 .dirAccess = dirAccess,
+                .dirCreateFile = dirCreateFile,
                 .dirOpenFile = dirOpenFile,
                 .dirClose = dirClose,
                 .dirRead = dirRead,
@@ -119,6 +138,9 @@ pub const File = struct {
                 .fileStat = fileStat,
                 .fileLength = fileLength,
                 .fileClose = fileClose,
+                .fileWritePositional = fileWritePositional,
+                .fileWriteFileStreaming = fileWriteFileStreaming,
+                .fileWriteFilePositional = fileWriteFilePositional,
                 .fileReadPositional = fileReadPositional,
                 .fileSeekBy = fileSeekBy,
                 .fileSeekTo = fileSeekTo,
@@ -201,7 +223,18 @@ pub const File = struct {
                     },
                 });
             },
-            .file_write_streaming, .device_io_control, .net_receive, .net_read => {
+            .file_write_streaming => |o| {
+                const handle = self.getFileHandle(o.file);
+                return self.base.inner.vtable.operate(self.base.inner.userdata, .{
+                    .file_write_streaming = .{
+                        .file = handle.innerFile(),
+                        .header = o.header,
+                        .data = o.data,
+                        .splat = o.splat,
+                    },
+                });
+            },
+            .device_io_control, .net_receive, .net_read => {
                 return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
             },
         }
@@ -225,6 +258,20 @@ pub const File = struct {
     fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
         const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
         return self.base.inner.vtable.dirAccess(self.base.inner.userdata, dir, sub_path, options);
+    }
+
+    fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        const inner_file = try self.base.inner.vtable.dirCreateFile(self.base.inner.userdata, dir, sub_path, flags);
+        errdefer inner_file.close(self.base.inner);
+
+        const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
+        handle.* = .{
+            .inner_handle = inner_file.handle,
+            .inner_flags = inner_file.flags,
+            .direct_io_handle = null,
+        };
+        return .{ .handle = @intCast(idx), .flags = inner_file.flags };
     }
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
@@ -309,6 +356,52 @@ pub const File = struct {
 
             self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
+    }
+
+    fn fileWritePositional(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) std.Io.File.WritePositionalError!usize {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        return self.base.inner.vtable.fileWritePositional(self.base.inner.userdata, handle.innerFile(), header, data, splat, offset);
+    }
+
+    fn fileWriteFileStreaming(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.File.Writer.WriteFileError!usize {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        const own_io = self.io();
+        if (reader.io.userdata != own_io.userdata or reader.io.vtable != own_io.vtable) return error.Unimplemented;
+
+        const destination = self.getFileHandle(file);
+        const source = self.getFileHandle(reader.file);
+
+        const original_source_io = reader.io;
+        const original_source_file = reader.file;
+        reader.io = self.base.inner;
+        reader.file = source.innerFile();
+        defer {
+            reader.io = original_source_io;
+            reader.file = original_source_file;
+        }
+
+        return self.base.inner.vtable.fileWriteFileStreaming(self.base.inner.userdata, destination.innerFile(), header, reader, limit);
+    }
+
+    fn fileWriteFilePositional(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, reader: *std.Io.File.Reader, limit: std.Io.Limit, offset: u64) std.Io.File.WriteFilePositionalError!usize {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        const own_io = self.io();
+        if (reader.io.userdata != own_io.userdata or reader.io.vtable != own_io.vtable) return error.Unimplemented;
+
+        const destination = self.getFileHandle(file);
+        const source = self.getFileHandle(reader.file);
+
+        const original_source_io = reader.io;
+        const original_source_file = reader.file;
+        reader.io = self.base.inner;
+        reader.file = source.innerFile();
+        defer {
+            reader.io = original_source_io;
+            reader.file = original_source_file;
+        }
+
+        return self.base.inner.vtable.fileWriteFilePositional(self.base.inner.userdata, destination.innerFile(), header, reader, limit, offset);
     }
 
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
