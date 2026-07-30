@@ -1601,18 +1601,18 @@ pub fn composite(
         result_types[i] = mlirx.Type.rankedTensor(mlir_ctx, s);
     }
 
-    const op = mlir.Operation.make(mlir_ctx, "stablehlo.composite", .{
-        .operands = .{ .flat = operand_values },
-        .results = .{ .flat = result_types },
-        .attributes = &.{
-            .named(mlir_ctx, "name", .string(mlir_ctx, name)),
-            .named(mlir_ctx, "decomposition", .flatSymbolRef(mlir_ctx, decomp_name)),
-            .named(mlir_ctx, "composite_attributes", .dict(mlir_ctx, opts.composite_attributes)),
-            .named(mlir_ctx, "version", .int(mlir_ctx, .i32, opts.version)),
+    const op = dialects.stablehlo.composite(
+        mlir_ctx,
+        operand_values,
+        result_types,
+        .{
+            .name = name,
+            .decomposition = decomp_name,
+            .composite_attributes = opts.composite_attributes,
+            .version = opts.version,
         },
-        .verify = false,
-        .location = .unknown(mlir_ctx),
-    }).appendTo(ctx.currentScope().block);
+        .unknown(mlir_ctx),
+    ).appendTo(ctx.currentScope().block);
 
     const out_tensors = allocator.alloc(Tensor, outputs.len) catch @panic("OOM");
     for (outputs, 0..) |s, i| {
@@ -1764,7 +1764,6 @@ fn scaledDotReference(in: []const Tensor, out_shape: Shape) Tensor {
         .{ .has_side_effect = false },
     );
 }
-
 
 pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, metadata: anytype, opts: CustomCallOptions) CustomCallResultTypeFromOutputSpec(@TypeOf(outputs)) {
     // Transform generic inputs to flat slice.

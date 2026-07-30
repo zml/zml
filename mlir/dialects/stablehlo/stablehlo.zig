@@ -107,6 +107,34 @@ pub fn clamp(ctx: *mlir.Context, min: *const mlir.Value, value: *const mlir.Valu
     });
 }
 
+pub const CompositeOpts = struct {
+    name: []const u8,
+    decomposition: []const u8,
+    composite_attributes: []const mlir.NamedAttribute = &.{},
+    version: i32 = 0,
+};
+
+pub fn composite(
+    ctx: *mlir.Context,
+    inputs: []const *const mlir.Value,
+    result_types: []const *const mlir.Type,
+    opts: CompositeOpts,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return mlir.Operation.make(ctx, "stablehlo.composite", .{
+        .operands = .{ .flat = inputs },
+        .results = .{ .flat = result_types },
+        .attributes = &.{
+            .named(ctx, "name", .string(ctx, opts.name)),
+            .named(ctx, "decomposition", .flatSymbolRef(ctx, opts.decomposition)),
+            .named(ctx, "composite_attributes", .dict(ctx, opts.composite_attributes)),
+            .named(ctx, "version", .int(ctx, .i32, opts.version)),
+        },
+        .verify = false,
+        .location = location,
+    });
+}
+
 pub const DotPrecision = union(enum) {
     fast,
     high,
