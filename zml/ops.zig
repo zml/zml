@@ -1264,7 +1264,7 @@ test "cuda_tile grid" {
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Mod.forward, .{a}, platform, .{});
     defer exe.deinit();
 
-    const input = [_]f32{0} ** n;
+    const input: [n]f32 = @splat(0);
     var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&input));
     defer a_buffer.deinit();
 
@@ -1974,7 +1974,7 @@ pub fn customCallOutputOperandAliases(
             if (@field(aliases_, field.name)) |operand| {
                 aliases_buffer[i] = .{
                     .output_index = @intCast(output_index),
-                    .operand_index = @intCast(@intFromEnum(operand)),
+                    .operand_index = @intCast(@backingInt(operand)),
                 };
                 i += 1;
             }
@@ -2610,7 +2610,7 @@ fn metadataFieldToMlirAttribute(mlir_ctx: *mlir.Context, comptime T: type, value
     return switch (type_info) {
         .comptime_int => .int(mlir_ctx, .u64, @as(u64, value)),
         .@"enum" => |enum_field| switch (@typeInfo(enum_field.tag_type)) {
-            .int => |int_tag| metadataIntegerFieldToMlirAttribute(mlir_ctx, int_tag, @intFromEnum(value)),
+            .int => |int_tag| metadataIntegerFieldToMlirAttribute(mlir_ctx, int_tag, @backingInt(value)),
             else => @compileError("Unsupported tag type for enum metadata: " ++ @typeName(enum_field.tag_type)),
         },
         .int => |int_field| metadataIntegerFieldToMlirAttribute(mlir_ctx, int_field, value),

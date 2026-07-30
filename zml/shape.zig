@@ -53,7 +53,7 @@ pub const Shape = struct {
         }
 
         pub fn eql(self: PartitionSpec, other: PartitionSpec) bool {
-            if (@as(u4, @intFromEnum(self)) != @as(u4, @intFromEnum(other))) {
+            if (@as(u4, @backingInt(self)) != @as(u4, @backingInt(other))) {
                 return false;
             }
 
