@@ -1,6 +1,6 @@
 load("@com_google_protobuf//bazel:upb_c_proto_library.bzl", "upb_c_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
 
 upb_c_proto_library(
     name = "xla_data_upb",
@@ -186,6 +186,20 @@ zig_library(
 
 zig_test(
     name = "flashinfer_cutlass_moe_test",
+    main = "moe/cutlass-flashinfer_test.zig",
+    tags = ["manual"],
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+    ],
+    deps = [
+        ":zml",
+        "//platforms",
+    ],
+)
+
+zig_binary(
+    name = "flashinfer_cutlass_moe_gemma4_test",
     main = "moe/cutlass-flashinfer_test.zig",
     tags = ["manual"],
     target_compatible_with = [

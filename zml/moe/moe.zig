@@ -16,7 +16,7 @@ pub const ActivationMode = enum {
 };
 
 pub const Backend = enum {
-    cuda_flashinfer_cutlass,
+    flashinfer_cutlass,
     triton,
     mosaic_tpu,
     metal,
@@ -25,7 +25,7 @@ pub const Backend = enum {
         return switch (platform.target) {
             .cuda => switch (weights_dtype) {
                 .bf16 => if (cutlass_flashinfer.isAvailable(platform))
-                    .cuda_flashinfer_cutlass
+                    .flashinfer_cutlass
                 else
                     .triton,
                 .f16, .f32 => .triton,
@@ -49,7 +49,7 @@ pub const Backend = enum {
 
     pub fn isAvailable(backend: Backend, platform: *const zml.Platform) bool {
         return switch (backend) {
-            .cuda_flashinfer_cutlass => cutlass_flashinfer.isAvailable(platform),
+            .flashinfer_cutlass => cutlass_flashinfer.isAvailable(platform),
             .triton => switch (platform.target) {
                 .cuda, .rocm, .oneapi => true,
                 else => false,
@@ -65,7 +65,7 @@ pub const Backend = enum {
         io: std.Io,
     ) !void {
         return switch (backend) {
-            .cuda_flashinfer_cutlass => cutlass_flashinfer.load(allocator, io),
+            .flashinfer_cutlass => cutlass_flashinfer.load(allocator, io),
             .triton => {},
             .mosaic_tpu => {},
             .metal => {},
@@ -74,7 +74,7 @@ pub const Backend = enum {
 
     pub fn register(backend: Backend, platform: *zml.Platform) !void {
         return switch (backend) {
-            .cuda_flashinfer_cutlass => cutlass_flashinfer.register(platform),
+            .flashinfer_cutlass => cutlass_flashinfer.register(platform),
             .triton => {},
             .mosaic_tpu => {},
             .metal => {},
@@ -83,20 +83,20 @@ pub const Backend = enum {
 };
 
 pub const Parameters = union(Backend) {
-    cuda_flashinfer_cutlass: cutlass_flashinfer.Parameters,
+    flashinfer_cutlass: cutlass_flashinfer.Parameters,
     triton: triton.Parameters,
     mosaic_tpu: mosaic_tpu.Parameters,
     metal: metal.Parameters,
 
     pub const InitOptions = union(Backend) {
-        cuda_flashinfer_cutlass: cutlass_flashinfer.Parameters.InitOptions,
+        flashinfer_cutlass: cutlass_flashinfer.Parameters.InitOptions,
         triton: triton.Parameters.InitOptions,
         mosaic_tpu: mosaic_tpu.Parameters.InitOptions,
         metal: metal.Parameters.InitOptions,
 
         pub fn fromBackend(backend: Backend, num_experts_per_tok: ?u32, activation: ActivationMode) InitOptions {
             return switch (backend) {
-                .cuda_flashinfer_cutlass => .{ .cuda_flashinfer_cutlass = .{
+                .flashinfer_cutlass => .{ .flashinfer_cutlass = .{
                     .num_experts_per_tok = num_experts_per_tok.?,
                     .activation = switch (activation) {
                         .silu => .silu,
@@ -134,8 +134,8 @@ pub const Parameters = union(Backend) {
 
     pub fn init(opts: InitOptions) Parameters {
         return switch (opts) {
-            .cuda_flashinfer_cutlass => |v| .{
-                .cuda_flashinfer_cutlass = cutlass_flashinfer.Parameters.init(v),
+            .flashinfer_cutlass => |v| .{
+                .flashinfer_cutlass = cutlass_flashinfer.Parameters.init(v),
             },
             .triton => |v| .{ .triton = triton.Parameters.init(v) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Parameters.init(v) },
@@ -145,20 +145,20 @@ pub const Parameters = union(Backend) {
 };
 
 pub const Metadata = union(Backend) {
-    cuda_flashinfer_cutlass: cutlass_flashinfer.Metadata,
+    flashinfer_cutlass: cutlass_flashinfer.Metadata,
     triton: triton.Metadata,
     mosaic_tpu: mosaic_tpu.Metadata,
     metal: metal.Metadata,
 
     pub const InitOptions = union(Backend) {
-        cuda_flashinfer_cutlass: cutlass_flashinfer.Metadata.InitOptions,
+        flashinfer_cutlass: cutlass_flashinfer.Metadata.InitOptions,
         triton: triton.Metadata.InitOptions,
         mosaic_tpu: mosaic_tpu.Metadata.InitOptions,
         metal: metal.Metadata.InitOptions,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
-                .cuda_flashinfer_cutlass => .{ .cuda_flashinfer_cutlass = .{} },
+                .flashinfer_cutlass => .{ .flashinfer_cutlass = .{} },
                 .triton => .{ .triton = .{} },
                 .mosaic_tpu => .{ .mosaic_tpu = .{} },
                 .metal => .{ .metal = .{} },
@@ -168,8 +168,8 @@ pub const Metadata = union(Backend) {
 
     pub fn init(opts: InitOptions) Metadata {
         return switch (opts) {
-            .cuda_flashinfer_cutlass => |v| .{
-                .cuda_flashinfer_cutlass = cutlass_flashinfer.Metadata.init(v),
+            .flashinfer_cutlass => |v| .{
+                .flashinfer_cutlass = cutlass_flashinfer.Metadata.init(v),
             },
             .triton => |v| .{ .triton = triton.Metadata.init(v) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Metadata.init(v) },
@@ -179,8 +179,8 @@ pub const Metadata = union(Backend) {
 
     pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
         return switch (self) {
-            .cuda_flashinfer_cutlass => |metadata| .{
-                .cuda_flashinfer_cutlass = try metadata.initBuffer(io, platform),
+            .flashinfer_cutlass => |metadata| .{
+                .flashinfer_cutlass = try metadata.initBuffer(io, platform),
             },
             .triton => |metadata| .{ .triton = try metadata.initBuffer(io, platform) },
             .mosaic_tpu => |metadata| .{ .mosaic_tpu = try metadata.initBuffer(io, platform) },
@@ -190,7 +190,7 @@ pub const Metadata = union(Backend) {
 
     pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
         switch (self.*) {
-            .cuda_flashinfer_cutlass => |*metadata| cutlass_flashinfer.deinitBuffer(metadata),
+            .flashinfer_cutlass => |*metadata| cutlass_flashinfer.deinitBuffer(metadata),
             .triton => |*metadata| triton.deinitBuffer(metadata),
             .mosaic_tpu => |*metadata| mosaic_tpu.deinitBuffer(metadata),
             .metal => |*metadata| metal.deinitBuffer(metadata),
@@ -212,12 +212,12 @@ pub fn forwardMoe(
     parameters: Parameters,
 ) !zml.Tensor {
     return switch (parameters) {
-        .cuda_flashinfer_cutlass => b: {
+        .flashinfer_cutlass => b: {
             if (comptime !platforms.isEnabled(.cuda)) {
                 return error.UnsupportedPlatform;
             }
             _ = switch (metadata) {
-                .cuda_flashinfer_cutlass => |v| v,
+                .flashinfer_cutlass => |v| v,
                 else => return error.InvalidMetadata,
             };
             if (scales_gate_up != null or scales_down != null) {
@@ -227,7 +227,7 @@ pub fn forwardMoe(
                 return error.UnsupportedBias;
             }
 
-            const runner_options = try parameters.cuda_flashinfer_cutlass.runnerOptions();
+            const runner_options = try parameters.flashinfer_cutlass.runnerOptions();
             const expert_partition = weights_gate_up.shape().partition(.expert);
 
             if (expert_partition.eql(.init(.experts))) {
