@@ -1,0 +1,70 @@
+diff --git a/zig/private/common/translate_c.bzl b/zig/private/common/translate_c.bzl
+index d27566e..a3f2fbb 100644
+--- a/zig/private/common/translate_c.bzl
++++ b/zig/private/common/translate_c.bzl
+@@ -149,7 +149,7 @@ def _builtin_translate_c(*, ctx, zigtoolchaininfo, global_args, compilation_con
+ 
+     return zig_out, []
+ 
+-def _external_translate_c(*, ctx, translatectoolchaininfo, compilation_context, output_prefix):
++def _external_translate_c(*, ctx, zigtoolchaininfo, translatectoolchaininfo, compilation_context, output_prefix):
+     inputs = []
+     transitive_inputs = [compilation_context.headers]
+ 
+@@ -193,7 +193,6 @@ def _external_translate_c(*, ctx, translatectoolchaininfo, compilation_context,
+     args.add_all([
+         "-undef",
+         "-nobuiltininc",
+-        "-fmodule-libs",
+         "-D__building_module(x)=0",
+     ])
+ 
+@@ -252,6 +251,13 @@ def _external_translate_c(*, ctx, translatectoolchaininfo, compilation_context,
+     zig_out = ctx.actions.declare_file("{}{}_c.zig".format(output_prefix, ctx.label.name))
+     args.add("-o", zig_out)
+     args.add("--emulate=clang")
++
++    translate_c_args = ctx.actions.args()
++    translate_c_args.add("--zig-lib={}".format(zig_toolchain_lib_dir_path(zigtoolchaininfo)))
++    translate_c_args.add("-fmodule-libs")
++    translate_c_args.add("--")
++    if zigtoolchaininfo.zig_lib.file != None:
++        inputs.append(zigtoolchaininfo.zig_lib.file)
+ 
+     actions_run = ctx.actions.run
+     actions_run_extra_kwargs = {}
+@@ -273,6 +279,6 @@ def _external_translate_c(*, ctx, translatectoolchaininfo, compilation_context,
+         executable = translatectoolchaininfo.executable,
+         outputs = [zig_out],
+-        arguments = [args],
++        arguments = [translate_c_args, args],
+         mnemonic = "ZigTranslateC",
+         progress_message = "zig translate-c %{label}",
+         execution_requirements = {tag: "" for tag in ctx.attr.tags},
+@@ -309,6 +315,7 @@ def zig_translate_c(*, ctx, name, zigtoolchaininfo, global_args, cc_infos, outp
+     if translatectoolchaininfo:
+         zig_out, translate_c_deps = _external_translate_c(
+             ctx = ctx,
++            zigtoolchaininfo = zigtoolchaininfo,
+             translatectoolchaininfo = translatectoolchaininfo,
+             compilation_context = compilation_context,
+             output_prefix = output_prefix,
+diff --git a/zig/runfiles/src/discovery.zig b/zig/runfiles/src/discovery.zig
+index fd87617..3c5aa4b 100644
+--- a/zig/runfiles/src/discovery.zig
++++ b/zig/runfiles/src/discovery.zig
+@@ -212,9 +212,11 @@ fn isOpenableDir_016(io: std.Io, dir_path: []const u8) bool {
+ }
+ 
+ const testing = struct {
+-    const c = @cImport({
+-        @cInclude("stdlib.h");
+-    });
++    const c = struct {
++        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
++        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
++        extern "c" fn _putenv_s(name: [*:0]const u8, value: [*:0]const u8) c_int;
++    };
+ 
+     pub fn setenv(name: []const u8, value: []const u8) !void {
+         const nameZ = try std.testing.allocator.dupeZ(u8, name);
