@@ -165,6 +165,8 @@ pub const DataType = enum(u8) {
     pub fn bitSizeOf(self: DataType) u16 {
         return switch (self) {
             .bool => 8, // In PJRT/stablehlo bool always occupy a full byte
+            .c64 => 64,
+            .c128 => 128,
             inline else => |tag| @bitSizeOf(tag.toZigType()),
         };
     }
