@@ -45,6 +45,7 @@ const assert = std.debug.assert;
 const builtin = @import("builtin");
 
 const debug = @import("debug.zig");
+const meta = @import("meta.zig");
 
 /// Format and print an error message to stderr, then exit with an exit code of 1.
 pub fn fatal(comptime fmt_string: []const u8, args: anytype) noreturn {
@@ -94,7 +95,7 @@ pub fn parseProcessArgs(init_: std.process.Init.Minimal, comptime CliArgs: type)
 
 fn parse_commands(args: *std.process.Args.Iterator, comptime Commands: type) Commands {
     comptime assert(@typeInfo(Commands) == .@"union");
-    comptime assert(std.meta.fields(Commands).len >= 2);
+    comptime assert(meta.fields(Commands).len >= 2);
 
     const first_arg = args.next() orelse fatal(
         "subcommand required, expected {s}",
@@ -109,7 +110,7 @@ fn parse_commands(args: *std.process.Args.Iterator, comptime Commands: type) Com
         }
     }
 
-    inline for (comptime std.meta.fields(Commands)) |field| {
+    inline for (comptime meta.fields(Commands)) |field| {
         comptime assert(std.mem.indexOf(u8, field.name, "_") == null);
         if (std.mem.eql(u8, first_arg, field.name)) {
             return @unionInit(Commands, field.name, parse_flags(args, field.type));
@@ -130,15 +131,15 @@ fn parse_flags(args: *std.process.Args.Iterator, comptime Flags: type) Flags {
 
     assert(@typeInfo(Flags) == .@"struct");
 
-    comptime var fields: [std.meta.fields(Flags).len]std.builtin.Type.StructField = undefined;
+    comptime var fields: [meta.fields(Flags).len]meta.Field = undefined;
     comptime var field_count = 0;
 
-    comptime var positional_fields: []const std.builtin.Type.StructField = &.{};
+    comptime var positional_fields: []const meta.Field = &.{};
 
-    comptime for (std.meta.fields(Flags)) |field| {
+    comptime for (meta.fields(Flags)) |field| {
         if (std.mem.eql(u8, field.name, "positional")) {
             assert(@typeInfo(field.type) == .@"struct");
-            positional_fields = std.meta.fields(field.type);
+            positional_fields = &meta.fields(field.type);
             var optional_tail = false;
             for (positional_fields) |positional_field| {
                 if (default_value(positional_field) == null) {
@@ -182,10 +183,10 @@ fn parse_flags(args: *std.process.Args.Iterator, comptime Flags: type) Flags {
     var result: Flags = undefined;
     // Would use std.enums.EnumFieldStruct(Flags, u32, 0) here but Flags is a struct not an Enum.
     var counts = comptime blk: {
-        const f = std.meta.fields(Flags);
+        const f = meta.fields(Flags);
         var count_field_names: [fields.len][]const u8 = undefined;
         var count_field_types: [fields.len]type = undefined;
-        var count_field_attrs: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
+        var count_field_attrs: [fields.len]std.builtin.Type.Struct.FieldAttributes = undefined;
         for (f, &count_field_names, &count_field_types, &count_field_attrs) |field, *field_name, *field_type, *field_attr| {
             field_name.* = field.name;
             field_type.* = u32;
@@ -204,7 +205,7 @@ fn parse_flags(args: *std.process.Args.Iterator, comptime Flags: type) Flags {
         for (fields[0..field_count], 0..) |*field_right, i| {
             for (fields[0..i]) |*field_left| {
                 if (field_left.name.len < field_right.name.len) {
-                    std.mem.swap(std.builtin.Type.StructField, field_left, field_right);
+                    std.mem.swap(meta.Field, field_left, field_right);
                 }
             }
         }
@@ -299,8 +300,8 @@ fn assert_valid_value_type(comptime T: type) void {
 
         if (@typeInfo(T) == .@"enum") {
             const info = @typeInfo(T).@"enum";
-            assert(info.is_exhaustive);
-            assert(info.fields.len >= 2);
+            assert(info.mode == .exhaustive);
+            assert(info.field_names.len >= 2);
             return;
         }
 
@@ -449,7 +450,7 @@ pub const ByteSize = struct {
         else
             ByteUnit.bytes;
 
-        _ = std.math.mul(u64, amount, @intFromEnum(unit)) catch {
+        _ = std.math.mul(u64, amount, @backingInt(unit)) catch {
             return ByteSizeParseError.BytesOverflow;
         };
 
@@ -460,7 +461,7 @@ pub const ByteSize = struct {
         return std.math.mul(
             u64,
             size.value,
-            @intFromEnum(size.unit),
+            @backingInt(size.unit),
         ) catch unreachable;
     }
 
@@ -542,7 +543,7 @@ fn parse_value_float(comptime T: type, flag: []const u8, value: [:0]const u8) T 
 
 fn parse_value_enum(comptime E: type, flag: []const u8, value: [:0]const u8) E {
     assert((flag[0] == '-' and flag[1] == '-') or flag[0] == '<');
-    comptime assert(@typeInfo(E).@"enum".is_exhaustive);
+    comptime assert(@typeInfo(E).@"enum".mode == .exhaustive);
 
     return std.meta.stringToEnum(E, value) orelse fatal(
         "{s}: expected one of {s}, but found '{s}'",
@@ -552,11 +553,11 @@ fn parse_value_enum(comptime E: type, flag: []const u8, value: [:0]const u8) E {
 
 fn fields_to_comma_list(comptime E: type) []const u8 {
     comptime {
-        const field_count = std.meta.fields(E).len;
+        const field_count = meta.fields(E).len;
         assert(field_count >= 2);
 
         var result: []const u8 = "";
-        for (std.meta.fields(E), 0..) |field, field_index| {
+        for (meta.fields(E), 0..) |field, field_index| {
             const separator = switch (field_index) {
                 0 => "",
                 else => ", ",
@@ -568,7 +569,7 @@ fn fields_to_comma_list(comptime E: type) []const u8 {
     }
 }
 
-pub fn flag_name(comptime field: std.builtin.Type.StructField) []const u8 {
+pub fn flag_name(comptime field: meta.Field) []const u8 {
     // TODO(Zig): Cleanup when this is fixed after Zig 0.11.
     // Without comptime blk, the compiler thinks the result is a runtime slice returning a UAF.
     return comptime blk: {
@@ -586,19 +587,16 @@ pub fn flag_name(comptime field: std.builtin.Type.StructField) []const u8 {
 }
 
 test flag_name {
-    const field = @typeInfo(struct { statsd: bool }).@"struct".fields[0];
+    const field = meta.fields(struct { statsd: bool })[0];
     try std.testing.expectEqualStrings(flag_name(field), "--statsd");
 }
 
-fn flag_name_positional(comptime field: std.builtin.Type.StructField) []const u8 {
+fn flag_name_positional(comptime field: meta.Field) []const u8 {
     comptime assert(std.mem.indexOf(u8, field.name, "_") == null);
     return "<" ++ field.name ++ ">";
 }
 
 /// This is essentially `field.default_value`, but with a useful type instead of `?*anyopaque`.
-pub fn default_value(comptime field: std.builtin.Type.StructField) ?field.type {
-    return if (field.default_value_ptr) |default_opaque|
-        @as(*const field.type, @ptrCast(@alignCast(default_opaque))).*
-    else
-        null;
+pub fn default_value(comptime field: meta.Field) ?field.type {
+    return field.attrs.defaultValue(field.type);
 }

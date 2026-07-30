@@ -219,7 +219,7 @@ pub const Tokenizer = struct {
                     .idk => {
 
                         // Special tokens can't be concatenated.
-                        if (builtin.mode == .Debug and tok_buff[i] != self.special_tokens.unk) {
+                        if (builtin.mode == .debug and tok_buff[i] != self.special_tokens.unk) {
                             // Detects memory corruption of tokens.
                             if (cur_tok.len == 0 or cur_tok.len > self.max_token_len) @panic("Token looks corrupted !");
 

@@ -48,14 +48,14 @@ pub fn write(writer: *std.Io.Writer, devices: []const *DeviceInfo, host: *const 
     try writer.writeAll("# HELP zml_device_info Device metadata\n");
     try writer.writeAll("# TYPE zml_device_info gauge\n");
     for (devices, 0..) |dev, i| {
-        inline for (@typeInfo(DeviceInfo).@"union".fields) |tp| {
-            const tag = @field(smi_info.device_info.Target, tp.name);
+        inline for (@typeInfo(DeviceInfo).@"union".field_names) |type_name| {
+            const tag = @field(smi_info.device_info.Target, type_name);
 
             switch (dev.*) {
                 tag => |*db| {
                     const val = db.front().*;
 
-                    try writer.print("zml_device_info{{device=\"{d}\",type=\"{s}\"", .{ i, tp.name });
+                    try writer.print("zml_device_info{{device=\"{d}\",type=\"{s}\"", .{ i, type_name });
 
                     inline for (.{
                         .{ "name", "name" },

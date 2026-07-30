@@ -151,11 +151,11 @@ pub fn hbmSize(dev: *c.ndl_device_t) usize {
 }
 
 pub fn deviceType(dev: *c.ndl_device_t) DeviceType {
-    return @enumFromInt(dev.device_type);
+    return @fromBackingInt(@intCast(dev.device_type));
 }
 
 fn resolveFromElf(handle: *anyopaque, io: std.Io, comptime known_sym: [:0]const u8) !PrivateFns {
-    const fields = std.meta.fields(PrivateFns);
+    const field_names = std.meta.fieldNames(PrivateFns);
 
     const sym_addr = std.c.dlsym(handle, known_sym) orelse
         return error.SymbolNotFound;
@@ -181,7 +181,7 @@ fn resolveFromElf(handle: *anyopaque, io: std.Io, comptime known_sym: [:0]const 
     defer std.posix.munmap(mmap);
 
     var result: PrivateFns = undefined;
-    var remaining: usize = fields.len;
+    var remaining: usize = field_names.len;
 
     const ehdr: *const elf.ElfN.Ehdr = @ptrCast(@alignCast(mmap));
     const shdrs: []const elf.ElfN.Shdr = @as([*]const elf.ElfN.Shdr, @ptrCast(@alignCast(mmap[ehdr.shoff..])))[0..ehdr.shnum];
@@ -201,9 +201,9 @@ fn resolveFromElf(handle: *anyopaque, io: std.Io, comptime known_sym: [:0]const 
 
             const sym_name = std.mem.span(@as([*c]const u8, @ptrCast(strtab[@as(usize, s.name)..])));
 
-            inline for (fields) |field| {
-                if (std.mem.eql(u8, sym_name, field.name)) {
-                    @field(result, field.name) = @ptrFromInt(elf_base + @as(usize, s.value));
+            inline for (field_names) |field_name| {
+                if (std.mem.eql(u8, sym_name, field_name)) {
+                    @field(result, field_name) = @ptrFromInt(elf_base + @as(usize, s.value));
                     remaining -= 1;
                 }
             }
