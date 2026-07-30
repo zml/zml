@@ -108,6 +108,19 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) stru
     };
 }
 
+/// Scaled matrix multiply (`xla.scaled_dot`): `acc = (lhs * lhs_scale) @ (rhs * rhs_scale)`.
+///
+/// - **NVFP4**: values `.f4e2m1`, scales `.f8e4m3fn`, block 16 (weight-only bf16 lhs ok)
+/// - **MXFP4**: values `.f4e2m1`, scales `.f8e8m0fnu`, block 32
+/// - **MXFP8**: values `.f8e4m3fn` / `.f8e5m2`, scales `.f8e8m0fnu`, block 32
+/// - TODO: INT4/8 and FP8 with block 128 and per tensor
+///
+/// Backends:
+/// 1. TileIR if CUDA sm>=10 and same lhs/rhs dtype
+/// 2. Triton otherwise
+/// 3. Unsupported combos fall back to dequant + Dot
+///
+/// CPU has no specialized path.
 pub fn scaledDot(
     lhs: Tensor,
     rhs: Tensor,
