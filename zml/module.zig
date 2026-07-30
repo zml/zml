@@ -214,6 +214,10 @@ pub const CompilationContext = struct {
     pub fn alloc(self: *CompilationContext, T: type, n: usize) []T {
         return self.arena.allocator().alloc(T, n) catch self.abortOOM();
     }
+
+    pub fn allocPrint(self: *CompilationContext, comptime fmt: []const u8, args: anytype) []u8 {
+        return std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch self.abortOOM();
+    }
 };
 
 pub fn Compiler(comptime func: anytype) type {

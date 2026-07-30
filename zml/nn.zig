@@ -1,8 +1,10 @@
 //! Common layer definition and functions for Neural Networks (NN)
 const std = @import("std");
 
+const mlir = @import("mlir");
 const stdx = @import("stdx");
 
+const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const ops = @import("ops.zig");
@@ -30,11 +32,7 @@ pub const Linear = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Linear)) void {
-        self.weight.deinit();
-        if (self.bias) |*bias| bias.deinit();
-        if (self.scales) |*scales| scales.deinit();
-        if (self.global_scale) |*gs| gs.deinit();
-        if (self.input_global_scale) |*igs| igs.deinit();
+        zml.Buffer.deinitAll(Linear, self);
     }
 
     pub fn forward(self: Linear, x: Tensor) Tensor {
@@ -46,7 +44,7 @@ pub const Linear = struct {
         const scales = self.scales orelse return x.dot(self.weight, self.tag);
 
         const weight = if (self.weight.dtype() == .u8)
-            ops.unpackNvfp4(self.weight.withTags(.{ .dout, .kw }), self.tag)
+            unpackNvfp4(self.weight.withTags(.{ .dout, .kw }), self.tag)
         else
             self.weight;
 
@@ -55,15 +53,165 @@ pub const Linear = struct {
 
         const platform = zml.module.CompilationContext.current().platform;
         if (weight.dtype() == .f4e2m1 and supportsNvfp4ActivationQuant(platform)) {
-            const q = ops.quantizeNvfp4(x.convert(.bf16), igs, self.tag);
-            const acc = ops.scaledDot(q.values, weight, q.scales, scales, self.tag);
+            const q = quantizeNvfp4(x.convert(.bf16), igs, self.tag);
+            const acc = scaledDot(q.values, weight, q.scales, scales, self.tag);
             return applyGlobalScale(acc, igs, wgs).convert(x.dtype());
         }
 
-        const acc = ops.scaledDot(x.convert(.bf16), weight, null, scales, self.tag);
+        const acc = scaledDot(x.convert(.bf16), weight, null, scales, self.tag);
         return applyGlobalScale(acc, null, wgs).convert(x.dtype());
     }
 };
+
+pub fn unpackNvfp4(w: Tensor, k_tag: anytype) Tensor {
+    stdx.debug.assert(w.dtype() == .u8, "unpackNvfp4 expects packed u8 weights, got {}", .{w.dtype()});
+    return w.bitCast(.f4e2m1)
+        .merge(.{ .kb = .{ .kw, .bitcast } })
+        .renameTag(.kb, Shape.toTag(k_tag));
+}
+
+pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) struct {
+    values: Tensor,
+    scales: Tensor,
+} {
+    const block_size = 16;
+    const value_max = 6.0;
+    const scale_min_normal = 0x1p-6;
+    const scale_max = DataType.f8e4m3fn.maxValue().as(f32);
+
+    stdx.debug.assert(x.shape().hasTag(axis) != null, "quantizeNvfp4 expects x to have {any} tag, got {f}", .{ axis, x.shape() });
+    stdx.debug.assert(@rem(x.dim(axis), block_size) == 0, "quantizeNvfp4 expects {any} to be a multiple of {}, got {f}", .{ axis, block_size, x.shape() });
+
+    const dt = x.dtype();
+    const scaled = if (input_global_scale) |igs|
+        x.mul(igs.convert(dt).broad(x.shape()))
+    else
+        x;
+    const grouped = scaled.splitAxis(axis, .{ .sc = -1, .blk = block_size });
+    const amax = grouped.abs().max(.blk);
+
+    const scales = amax.scale(1.0 / value_max)
+        .clamp(.scalar(scale_min_normal, dt), .scalar(scale_max, dt))
+        .convert(.f8e4m3fn);
+
+    const divisor = scales.convert(dt)
+        .maximum(.scalar(scale_min_normal, dt))
+        .broad(grouped.shape());
+
+    const values = grouped.div(divisor)
+        .convert(.f4e2m1)
+        .reshape(x.shape().withDtype(.f4e2m1));
+
+    return .{
+        .values = values,
+        .scales = scales.squeeze(.blk),
+    };
+}
+
+pub fn scaledDot(
+    lhs: Tensor,
+    rhs: Tensor,
+    lhs_scale: ?Tensor,
+    rhs_scale: Tensor,
+    args: anytype,
+) Tensor {
+    stdx.debug.assert(lhs.shape().hasTag(args) != null, "scaledDot expects lhs to have {any} tag, got {f}", .{ args, lhs.shape() });
+    stdx.debug.assert(rhs.shape().hasTag(args) != null, "scaledDot expects rhs to have {any} tag, got {f}", .{ args, rhs.shape() });
+
+    const lhs_contracting_dim: i8 = @intCast(lhs.shape().hasTag(args).?);
+    const rhs_contracting_dim: i8 = @intCast(rhs.shape().hasTag(args).?);
+
+    var batching_axes: stdx.BoundedArray([2]i8, constants.MAX_RANK) = .empty;
+    for (0..lhs.rank()) |lhs_tag_index| {
+        const lhs_tag = lhs.shape().tag(lhs_tag_index);
+        if (lhs_tag == Shape.toTag(args)) continue;
+        if (rhs.shape().hasTag(lhs_tag)) |rhs_tag_index| {
+            batching_axes.appendAssumeCapacity(.{ @intCast(lhs_tag_index), @intCast(rhs_tag_index) });
+        }
+    }
+
+    const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
+
+    const result_dtype: DataType = switch (lhs.dtype()) {
+        .f4e2m1, .f8e4m3, .f8e4m3fn, .f8e5m2, .f8e4m3b11fnuz, .f8e4m3fnuz, .f8e5m2fnuz => .bf16,
+        else => lhs.dtype(),
+    };
+    var res_shape: Shape = .{ ._dtype = result_dtype };
+    var lhs_batching_axes: Axes = .empty;
+    var rhs_batching_axes: Axes = .empty;
+    for (batching_axes.constSlice()) |b_axes| {
+        const l, const r = b_axes;
+        stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "scaledDot expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
+        var t = lhs._shape.tag(l);
+        if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
+        res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
+        lhs_batching_axes.appendAssumeCapacity(lhs._shape.axis(l));
+        rhs_batching_axes.appendAssumeCapacity(rhs._shape.axis(r));
+    }
+
+    stdx.debug.assert(lhs._shape.dim(lhs_contracting_dim) == rhs._shape.dim(rhs_contracting_dim), "scaledDot expects contracting dimensions to be equal, got {} and {} in {f} and {f}", .{ lhs_contracting_dim, rhs_contracting_dim, lhs, rhs });
+    var lhs_contracting_axes: Axes = .empty;
+    var rhs_contracting_axes: Axes = .empty;
+    lhs_contracting_axes.appendAssumeCapacity(lhs._shape.axis(lhs_contracting_dim));
+    rhs_contracting_axes.appendAssumeCapacity(rhs._shape.axis(rhs_contracting_dim));
+
+    for (0..lhs.rank()) |l| {
+        if (std.mem.indexOfScalar(i64, lhs_contracting_axes.constSlice(), @intCast(l))) |_| {
+            continue;
+        }
+        if (std.mem.indexOfScalar(i64, lhs_batching_axes.constSlice(), @intCast(l))) |_| {
+            continue;
+        }
+        res_shape = res_shape.appendDim(lhs._shape.dim(l), lhs._shape.tag(l));
+    }
+    for (0..rhs.rank()) |r| {
+        if (std.mem.indexOfScalar(i64, rhs_contracting_axes.constSlice(), @intCast(r))) |_| {
+            continue;
+        }
+        if (std.mem.indexOfScalar(i64, rhs_batching_axes.constSlice(), @intCast(r))) |_| {
+            continue;
+        }
+        res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
+    }
+
+    const lhs_scale_operand = lhs_scale orelse blk: {
+        var lhs_scale_shape = lhs.shape().withDtype(.bf16);
+        for (0..lhs.rank()) |i| {
+            lhs_scale_shape = lhs_scale_shape.setDim(i, 1);
+        }
+        break :blk Tensor.constantTensor(lhs_scale_shape, DataType.bf16.one().asBytes());
+    };
+
+    const mlir_ctx = zml.module.CompilationContext.current().mlir_ctx;
+    const dnums = mlir.Attribute.array(mlir_ctx, &.{
+        .array(mlir_ctx, &.{
+            .intArray(mlir_ctx, i64, lhs_contracting_axes.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_contracting_axes.constSlice()),
+        }),
+        .array(mlir_ctx, &.{
+            .intArray(mlir_ctx, i64, lhs_batching_axes.constSlice()),
+            .intArray(mlir_ctx, i64, rhs_batching_axes.constSlice()),
+        }),
+    });
+
+    const operands: []const Tensor = &.{ lhs, rhs, lhs_scale_operand, rhs_scale };
+
+    const outs = ops.composite("xla.scaled_dot", operands, &.{res_shape}, scaledDotReference, res_shape, .{
+        .composite_attributes = &.{.named(mlir_ctx, "dimension_numbers", dnums)},
+    });
+
+    return outs[0];
+}
+
+fn scaledDotReference(in: []const Tensor, out_shape: Shape) Tensor {
+    return ops.customCall(
+        "zml$scaled_dot_unmatched",
+        .{ in[0], in[1], in[2], in[3] },
+        out_shape,
+        {},
+        .{ .has_side_effect = false },
+    );
+}
 
 fn supportsNvfp4ActivationQuant(platform: *const zml.Platform) bool {
     if (platform.target != .cuda) {
