@@ -10,6 +10,12 @@ const triton = @import("triton_attention.zig");
 
 const PagedAttention = @This();
 
+test {
+    std.testing.refAllDecls(Backend);
+    std.testing.refAllDecls(Options);
+    std.testing.refAllDecls(Parameters);
+}
+
 pub const Backend = enum {
     cuda_fa2,
     cuda_fa3,
@@ -185,15 +191,12 @@ pub const Parameters = union(Backend) {
     }
 
     pub fn onMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
-        return switch (self) {
-            else => |v, t| @unionInit(Parameters, @tagName(t), v.onMemory(memory)),
-        };
+        zml.Tensor.onMemoryAll(&self, memory);
+        return self;
     }
 
     pub fn toMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
-        return switch (self) {
-            else => |v, t| @unionInit(Parameters, @tagName(t), v.toMemory(memory)),
-        };
+        return zml.Tensor.toMemoryAll(self, memory);
     }
 };
 

@@ -578,20 +578,6 @@ pub const paged_fa2 = struct {
                 .mixed => |v| .{ .mixed = v.options },
             };
         }
-
-        pub fn onMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
-            return switch (self) {
-                .mixed => |s| .{ .mixed = s.onMemory(memory) },
-                .decode => |s| .{ .decode = s.onMemory(memory) },
-            };
-        }
-
-        pub fn toMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
-            return switch (self) {
-                .mixed => |s| .{ .mixed = s.toMemory(memory) },
-                .decode => |s| .{ .decode = s.toMemory(memory) },
-            };
-        }
     };
 
     pub const DecodeOptions = struct {
@@ -652,24 +638,6 @@ pub const paged_fa2 = struct {
             allocation_size += softmax_lse_accum_shape.byteSize();
 
             return allocation_size;
-        }
-
-        pub fn onMemory(self: DecodeParameters, memory: zml.platform.Memory.Kind) DecodeParameters {
-            return .{
-                .block_table = self.block_table.onMemory(memory),
-                .cu_seqlens_q = self.cu_seqlens_q.onMemory(memory),
-                .seqused_k = self.seqused_k.onMemory(memory),
-                .options = self.options,
-            };
-        }
-
-        pub fn toMemory(self: DecodeParameters, memory: zml.platform.Memory.Kind) DecodeParameters {
-            return .{
-                .block_table = self.block_table.toMemory(memory),
-                .cu_seqlens_q = self.cu_seqlens_q.toMemory(memory),
-                .seqused_k = self.seqused_k.toMemory(memory),
-                .options = self.options,
-            };
         }
     };
 
@@ -774,32 +742,6 @@ pub const paged_fa2 = struct {
 
             return allocation_size;
         }
-
-        pub fn onMemory(self: MixedParameters, memory: zml.platform.Memory.Kind) MixedParameters {
-            return .{
-                .block_table_prefill = self.block_table_prefill.onMemory(memory),
-                .cu_seqlens_q_prefill = self.cu_seqlens_q_prefill.onMemory(memory),
-                .seqused_k_prefill = self.seqused_k_prefill.onMemory(memory),
-                .block_table_decode = self.block_table_decode.onMemory(memory),
-                .cu_seqlens_q_decode = self.cu_seqlens_q_decode.onMemory(memory),
-                .seqused_k_decode = self.seqused_k_decode.onMemory(memory),
-                .metadata = self.metadata.onMemory(memory),
-                .options = self.options,
-            };
-        }
-
-        pub fn toMemory(self: MixedParameters, memory: zml.platform.Memory.Kind) MixedParameters {
-            return .{
-                .block_table_prefill = self.block_table_prefill.toMemory(memory),
-                .cu_seqlens_q_prefill = self.cu_seqlens_q_prefill.toMemory(memory),
-                .seqused_k_prefill = self.seqused_k_prefill.toMemory(memory),
-                .block_table_decode = self.block_table_decode.toMemory(memory),
-                .cu_seqlens_q_decode = self.cu_seqlens_q_decode.toMemory(memory),
-                .seqused_k_decode = self.seqused_k_decode.toMemory(memory),
-                .metadata = self.metadata.toMemory(memory),
-                .options = self.options,
-            };
-        }
     };
 
     pub const MixedMetadata = struct {
@@ -816,18 +758,6 @@ pub const paged_fa2 = struct {
             var allocation_size: usize = 0;
             allocation_size += self.decode_offset.byteSize();
             return allocation_size;
-        }
-
-        pub fn onMemory(self: MixedMetadata, memory: zml.platform.Memory.Kind) MixedMetadata {
-            return .{
-                .decode_offset = self.decode_offset.onMemory(memory),
-            };
-        }
-
-        pub fn toMemory(self: MixedMetadata, memory: zml.platform.Memory.Kind) MixedMetadata {
-            return .{
-                .decode_offset = self.decode_offset.toMemory(memory),
-            };
         }
     };
 
@@ -1254,20 +1184,6 @@ pub const paged_fa3 = struct {
                 .mixed => |v| .{ .mixed = v.options },
             };
         }
-
-        pub fn onMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
-            return switch (self) {
-                .mixed => |s| .{ .mixed = s.onMemory(memory) },
-                .decode => |s| .{ .decode = s.onMemory(memory) },
-            };
-        }
-
-        pub fn toMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
-            return switch (self) {
-                .mixed => |s| .{ .mixed = s.toMemory(memory) },
-                .decode => |s| .{ .decode = s.toMemory(memory) },
-            };
-        }
     };
 
     pub const DecodeOptions = struct {
@@ -1328,24 +1244,6 @@ pub const paged_fa3 = struct {
             allocation_size += softmax_lse_accum_shape.byteSize();
 
             return allocation_size;
-        }
-
-        pub fn onMemory(self: DecodeParameters, memory: zml.platform.Memory.Kind) DecodeParameters {
-            return .{
-                .block_table = self.block_table.onMemory(memory),
-                .cu_seqlens_q = self.cu_seqlens_q.onMemory(memory),
-                .seqused_k = self.seqused_k.onMemory(memory),
-                .options = self.options,
-            };
-        }
-
-        pub fn toMemory(self: DecodeParameters, memory: zml.platform.Memory.Kind) DecodeParameters {
-            return .{
-                .block_table = self.block_table.toMemory(memory),
-                .cu_seqlens_q = self.cu_seqlens_q.toMemory(memory),
-                .seqused_k = self.seqused_k.toMemory(memory),
-                .options = self.options,
-            };
         }
     };
 
@@ -1447,32 +1345,6 @@ pub const paged_fa3 = struct {
 
             return allocation_size;
         }
-
-        pub fn onMemory(self: MixedParameters, memory: zml.platform.Memory.Kind) MixedParameters {
-            return .{
-                .block_table_prefill = self.block_table_prefill.onMemory(memory),
-                .cu_seqlens_q_prefill = self.cu_seqlens_q_prefill.onMemory(memory),
-                .seqused_k_prefill = self.seqused_k_prefill.onMemory(memory),
-                .block_table_decode = self.block_table_decode.onMemory(memory),
-                .cu_seqlens_q_decode = self.cu_seqlens_q_decode.onMemory(memory),
-                .seqused_k_decode = self.seqused_k_decode.onMemory(memory),
-                .metadata = self.metadata.onMemory(memory),
-                .options = self.options,
-            };
-        }
-
-        pub fn toMemory(self: MixedParameters, memory: zml.platform.Memory.Kind) MixedParameters {
-            return .{
-                .block_table_prefill = self.block_table_prefill.toMemory(memory),
-                .cu_seqlens_q_prefill = self.cu_seqlens_q_prefill.toMemory(memory),
-                .seqused_k_prefill = self.seqused_k_prefill.toMemory(memory),
-                .block_table_decode = self.block_table_decode.toMemory(memory),
-                .cu_seqlens_q_decode = self.cu_seqlens_q_decode.toMemory(memory),
-                .seqused_k_decode = self.seqused_k_decode.toMemory(memory),
-                .metadata = self.metadata.toMemory(memory),
-                .options = self.options,
-            };
-        }
     };
 
     pub const MixedMetadata = struct {
@@ -1489,18 +1361,6 @@ pub const paged_fa3 = struct {
             var allocation_size: usize = 0;
             allocation_size += self.decode_offset.byteSize();
             return allocation_size;
-        }
-
-        pub fn onMemory(self: MixedMetadata, memory: zml.platform.Memory.Kind) MixedMetadata {
-            return .{
-                .decode_offset = self.decode_offset.onMemory(memory),
-            };
-        }
-
-        pub fn toMemory(self: MixedMetadata, memory: zml.platform.Memory.Kind) MixedMetadata {
-            return .{
-                .decode_offset = self.decode_offset.toMemory(memory),
-            };
         }
     };
 
