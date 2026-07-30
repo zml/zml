@@ -151,7 +151,7 @@ pub const File = struct {
         return self.handles.at(@intCast(file.handle));
     }
 
-    fn canOpenWithDirectIO(self: *File, file: std.Io.File, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!bool {
+    fn canOpenWithDirectIO(self: *File, file: std.Io.File, flags: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!bool {
         const file_stat = self.base.inner.vtable.fileStat(self.base.inner.userdata, file) catch |err| switch (err) {
             else => return std.Io.File.OpenError.Unexpected,
         };
@@ -201,7 +201,7 @@ pub const File = struct {
                     },
                 });
             },
-            .file_write_streaming, .device_io_control, .net_receive => {
+            .file_write_streaming, .device_io_control, .net_receive, .net_read => {
                 return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
             },
         }
@@ -227,7 +227,7 @@ pub const File = struct {
         return self.base.inner.vtable.dirAccess(self.base.inner.userdata, dir, sub_path, options);
     }
 
-    fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
+    fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
         const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
         const inner_file = try self.base.inner.vtable.dirOpenFile(self.base.inner.userdata, dir, sub_path, flags);
         errdefer inner_file.close(self.base.inner);
