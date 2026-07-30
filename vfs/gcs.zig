@@ -871,7 +871,7 @@ pub const GCS = struct {
 
         return try std.fmt.bufPrint(buf, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
             year_day.year,
-            @intFromEnum(month_day.month),
+            @backingInt(month_day.month),
             month_day.day_index + 1,
             day_seconds.getHoursIntoDay(),
             day_seconds.getMinutesIntoHour(),

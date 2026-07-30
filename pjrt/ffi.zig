@@ -11,7 +11,7 @@ const Stream = @import("pjrt.zig").Stream;
 const log = std.log.scoped(.pjrt);
 
 comptime {
-    if (@typeInfo(TypeId).@"struct".fields.len != 1) @compileError("TypeId has changed");
+    if (@typeInfo(TypeId).@"struct".field_names.len != 1) @compileError("TypeId has changed");
 }
 
 /// The signature of a generic custom call.
@@ -449,7 +449,7 @@ pub const Error = opaque {
     pub fn create(api: *const Api, error_code: ErrorCode, message: []const u8) *Error {
         var ret: pjrt.meta.Struct(c.XLA_FFI_Error_Create_Args) = .{
             .message = message.ptr,
-            .errc = @intFromEnum(error_code),
+            .errc = @backingInt(error_code),
         };
         return fromInner(api.inner().XLA_FFI_Error_Create.?(@ptrCast(&ret)).?);
     }

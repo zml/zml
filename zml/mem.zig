@@ -336,8 +336,8 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
     const type_info = @typeInfo(ModelBufferized);
     switch (type_info) {
         .@"struct" => |struct_type_info| {
-            inline for (struct_type_info.fields) |field| {
-                try bufferizeInner(allocator, @field(model, field.name), &@field(bufferized_, field.name));
+            inline for (struct_type_info.field_names) |field_name| {
+                try bufferizeInner(allocator, @field(model, field_name), &@field(bufferized_, field_name));
             }
         },
         .@"union" => {
@@ -359,7 +359,7 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
         .pointer => |p| {
             switch (p.size) {
                 .slice => {
-                    bufferized_.* = try allocator.alignedAlloc(p.child, .fromByteUnits(p.alignment orelse @alignOf(p.child)), model.len);
+                    bufferized_.* = try allocator.alignedAlloc(p.child, .fromByteUnits(p.attrs.@"align" orelse @alignOf(p.child)), model.len);
                     for (model, bufferized_.*) |src, *dst| {
                         try bufferizeInner(allocator, src, dst);
                     }

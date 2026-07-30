@@ -106,8 +106,8 @@ pub const Value = struct {
     /// True if the element type is a floating-point type (f16/bf16/f32/f64/fp8/…).
     pub fn isFloatElem(self: Value) bool {
         const et = self.elemType();
-        inline for (std.meta.fields(mlir.FloatTypes)) |f| {
-            if (et.isA(mlir.FloatType(@field(mlir.FloatTypes, f.name))) != null) return true;
+        inline for (comptime std.meta.fieldNames(mlir.FloatTypes)) |field_name| {
+            if (et.isA(mlir.FloatType(@field(mlir.FloatTypes, field_name))) != null) return true;
         }
         return false;
     }
@@ -600,13 +600,13 @@ pub const Builder = struct {
         opts: Opts,
     ) !dsl.NamedArgs(@TypeOf(spec), Value) {
         const Spec = @TypeOf(spec);
-        const fields = @typeInfo(Spec).@"struct".fields;
+        const field_names = @typeInfo(Spec).@"struct".field_names;
 
-        var arg_specs: [fields.len]ArgSpec = undefined;
-        inline for (fields, 0..) |f, i| {
-            const raw = @field(spec, f.name);
+        var arg_specs: [field_names.len]ArgSpec = undefined;
+        inline for (field_names, 0..) |field_name, i| {
+            const raw = @field(spec, field_name);
             const kind: ArgSpec.Kind = if (@TypeOf(raw) == ArgSpec.Kind) raw else blk: {
-                const variant = @typeInfo(@TypeOf(raw)).@"struct".fields[0].name;
+                const variant = @typeInfo(@TypeOf(raw)).@"struct".field_names[0];
                 const tag = @field(std.meta.Tag(ArgSpec.Kind), variant);
                 const inner = @field(raw, variant);
                 break :blk switch (tag) {
@@ -629,14 +629,14 @@ pub const Builder = struct {
                     .sem => .{ .sem = inner },
                 };
             };
-            arg_specs[i] = .{ .name = f.name, .kind = kind };
+            arg_specs[i] = .{ .name = field_name, .kind = kind };
         }
 
         try self.declareArgsLowOpts(&arg_specs, result_types, opts);
 
         var named: dsl.NamedArgs(Spec, Value) = undefined;
-        inline for (fields, 0..) |f, i| {
-            @field(named, f.name) = self.arg(i);
+        inline for (field_names, 0..) |field_name, i| {
+            @field(named, field_name) = self.arg(i);
         }
         return named;
     }
@@ -896,12 +896,12 @@ pub const Builder = struct {
         const info = @typeInfo(T);
         if (info != .@"struct" or !info.@"struct".is_tuple)
             @compileError("Builder.yield expects a tuple literal like `.{ v1, v2 }`");
-        const n = info.@"struct".fields.len;
+        const n = info.@"struct".field_names.len;
         const out = self.arena.allocator().alloc(Value, n) catch @panic("Builder.yield OOM");
-        inline for (info.@"struct".fields, 0..) |f, i| {
-            if (f.type != Value)
-                @compileError("Builder.yield: every tuple element must be a Value; got " ++ @typeName(f.type));
-            out[i] = @field(values, f.name);
+        inline for (info.@"struct".field_names, info.@"struct".field_types, 0..) |field_name, Field, i| {
+            if (Field != Value)
+                @compileError("Builder.yield: every tuple element must be a Value; got " ++ @typeName(Field));
+            out[i] = @field(values, field_name);
         }
         return out;
     }
@@ -2045,7 +2045,7 @@ pub const Builder = struct {
         inits: anytype,
     ) dsl.ForScope(Builder, Value, dsl.tupleArity(@TypeOf(inits), "openFor: inits")) {
         const N = comptime dsl.tupleArity(@TypeOf(inits), "openFor: inits");
-        const fields = @typeInfo(@TypeOf(inits)).@"struct".fields;
+        const info = @typeInfo(@TypeOf(inits)).@"struct";
 
         // scf.for bounds default to `index`.
         const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.cIndex(@intCast(lower));
@@ -2057,9 +2057,9 @@ pub const Builder = struct {
         block_types[0] = lb_v.type_();
         block_locs[0] = self.loc();
         var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (fields, 0..) |f, i| {
-            const raw = @field(inits, f.name);
-            const v: Value = if (f.type == Value) raw else self.lift(raw);
+        inline for (info.field_names, info.field_types, 0..) |field_name, Field, i| {
+            const raw = @field(inits, field_name);
+            const v: Value = if (Field == Value) raw else self.lift(raw);
             block_types[i + 1] = v.type_();
             block_locs[i + 1] = self.loc();
             inits_inner[i] = v.inner;
@@ -2099,13 +2099,13 @@ pub const Builder = struct {
         result_types: anytype,
     ) dsl.IfScope(Builder, Value, dsl.tupleArity(@TypeOf(result_types), "openIfElse: result_types")) {
         const N = comptime dsl.tupleArity(@TypeOf(result_types), "openIfElse: result_types");
-        const fields = @typeInfo(@TypeOf(result_types)).@"struct".fields;
+        const info = @typeInfo(@TypeOf(result_types)).@"struct";
 
         var types: [N]*const mlir.Type = undefined;
-        inline for (fields, 0..) |f, i| {
-            if (f.type != *const mlir.Type)
+        inline for (info.field_names, info.field_types, 0..) |field_name, Field, i| {
+            if (Field != *const mlir.Type)
                 @compileError("openIfElse: every result_type must be *const mlir.Type (use k.scalarTy/vectorTy)");
-            types[i] = @field(result_types, f.name);
+            types[i] = @field(result_types, field_name);
         }
 
         const then_block = mlir.Block.init(&.{}, &.{});
@@ -2133,16 +2133,16 @@ pub const Builder = struct {
     ) {
         const N = comptime dsl.tupleArity(@TypeOf(inits), "openWhile: inits");
         const M = comptime dsl.tupleArity(@TypeOf(after_types), "openWhile: after_types");
-        const init_fields = @typeInfo(@TypeOf(inits)).@"struct".fields;
-        const type_fields = @typeInfo(@TypeOf(after_types)).@"struct".fields;
+        const init_info = @typeInfo(@TypeOf(inits)).@"struct";
+        const type_info = @typeInfo(@TypeOf(after_types)).@"struct";
 
         var before_types: [N]*const mlir.Type = undefined;
         var before_locs: [N]*const mlir.Location = undefined;
         var inits_inner: [N]*const mlir.Value = undefined;
-        inline for (init_fields, 0..) |f, i| {
-            if (f.type != Value)
+        inline for (init_info.field_names, init_info.field_types, 0..) |field_name, Field, i| {
+            if (Field != Value)
                 @compileError("openWhile: every init must be a Value");
-            const v: Value = @field(inits, f.name);
+            const v: Value = @field(inits, field_name);
             before_types[i] = v.type_();
             before_locs[i] = self.loc();
             inits_inner[i] = v.inner;
@@ -2151,10 +2151,10 @@ pub const Builder = struct {
 
         var after_tys: [M]*const mlir.Type = undefined;
         var after_locs: [M]*const mlir.Location = undefined;
-        inline for (type_fields, 0..) |f, i| {
-            if (f.type != *const mlir.Type)
+        inline for (type_info.field_names, type_info.field_types, 0..) |field_name, Field, i| {
+            if (Field != *const mlir.Type)
                 @compileError("openWhile: every after_type must be *const mlir.Type");
-            after_tys[i] = @field(after_types, f.name);
+            after_tys[i] = @field(after_types, field_name);
             after_locs[i] = self.loc();
         }
         const after_block = mlir.Block.init(&after_tys, &after_locs);
@@ -2220,7 +2220,7 @@ pub const Builder = struct {
             .debug_info = false,
         })});
 
-        return try self.allocator.dupeZ(u8, al.written());
+        return try self.allocator.dupeSentinel(u8, al.written(), 0);
     }
 
     /// Emit `transform_N` stub funcs — one per non-skipped i/o ref-arg.

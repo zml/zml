@@ -1900,8 +1900,13 @@ pub fn collectDims(
     return context.res;
 }
 
-fn shapeToDims(shape: anytype) [@divExact(@sizeOf(@TypeOf(shape)), @sizeOf(i64))]i64 {
-    return @bitCast(shape);
+fn shapeToDims(shape: anytype) [std.meta.fieldNames(@TypeOf(shape)).len]i64 {
+    const field_names = comptime std.meta.fieldNames(@TypeOf(shape));
+    var result: [field_names.len]i64 = undefined;
+    inline for (field_names, 0..) |field_name, i| {
+        result[i] = @field(shape, field_name);
+    }
+    return result;
 }
 
 test collectDims {
@@ -1956,7 +1961,7 @@ fn ShapeStruct(comptime dims: anytype) type {
     @setEvalBranchQuota(rank + 5);
     var struct_field_names: [rank][]const u8 = undefined;
     var struct_field_types: [rank]type = undefined;
-    var struct_field_attrs: [rank]std.builtin.Type.StructField.Attributes = undefined;
+    var struct_field_attrs: [rank]std.builtin.Type.Struct.FieldAttributes = undefined;
     const default: i64 = NOT_SET;
     for (&struct_field_names, &struct_field_types, &struct_field_attrs, dims) |*field_name, *field_type, *field_attr, axis| {
         field_name.* = @tagName(axis);
