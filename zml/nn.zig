@@ -17,6 +17,9 @@ pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
     tag: Shape.Tag,
+    scales: ?Tensor = null,
+    global_scale: ?Tensor = null,
+    input_global_scale: ?Tensor = null,
 
     pub fn init(weight: Tensor, bias: ?Tensor, tag: anytype) Linear {
         return .{
@@ -26,12 +29,53 @@ pub const Linear = struct {
         };
     }
 
-    pub fn forward(self: Linear, x: Tensor) Tensor {
-        var y = x.dot(self.weight, self.tag);
+    pub fn unloadBuffers(self: *zml.Bufferized(Linear)) void {
+        self.weight.deinit();
+        if (self.bias) |*bias| bias.deinit();
+        if (self.scales) |*scales| scales.deinit();
+        if (self.global_scale) |*gs| gs.deinit();
+        if (self.input_global_scale) |*igs| igs.deinit();
+    }
 
+    pub fn forward(self: Linear, x: Tensor) Tensor {
+        const y = self.forwardWeight(x);
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
+
+    fn forwardWeight(self: Linear, x: Tensor) Tensor {
+        const scales = self.scales orelse return x.dot(self.weight, self.tag);
+
+        const weight = if (self.weight.dtype() == .u8)
+            ops.unpackNvfp4(self.weight.withTags(.{ .dout, .kw }), self.tag)
+        else
+            self.weight;
+
+        const scalar_f32 = zml.Shape.init(.{}, .f32);
+        const igs: ?Tensor = if (self.input_global_scale) |g| g.convert(.f32).reshape(scalar_f32) else null;
+        const wgs: ?Tensor = if (self.global_scale) |g| g.convert(.f32).reshape(scalar_f32) else null;
+
+        const platform = zml.module.CompilationContext.current().platform;
+        if (weight.dtype() == .f4e2m1 and platform.target == .cuda) {
+            const q_packed, const q_scale = ops.quantizeNvfp4(x.convert(.bf16), igs, self.tag);
+            const q = ops.unpackNvfp4(q_packed, self.tag);
+            const acc = ops.scaledDot(q, weight, q_scale, scales, self.tag);
+            return applyGlobalScale(acc, igs, wgs).convert(x.dtype());
+        }
+
+        const acc = ops.scaledDot(x.convert(.bf16), weight, null, scales, self.tag);
+        return applyGlobalScale(acc, null, wgs).convert(x.dtype());
+    }
 };
+
+fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
+    const combined: ?Tensor = if (igs) |i|
+        (if (wgs) |w| i.mul(w) else i)
+    else
+        wgs;
+    const alpha = combined orelse return acc;
+    const f32_acc = acc.convert(.f32);
+    return f32_acc.div(alpha.broad(f32_acc.shape())).convert(acc.dtype());
+}
 
 pub const TokenEmbedding = struct {
     weight: Tensor,

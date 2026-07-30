@@ -140,14 +140,6 @@ pub const StridedSliceArgs = struct {
     strides: []const i64,
 };
 
-/// extract/insert_strided_slice need offsets/sizes/strides as an ArrayAttr of IntegerAttr, not a DenseArrayAttr
-fn intArrayAttribute(ctx: *mlir.Context, comptime T: type, values: []const T) *const mlir.Attribute {
-    const it: mlir.IntegerTypes = comptime @field(mlir.IntegerTypes, @typeName(T));
-    var buf: stdx.BoundedArray(*const mlir.Attribute, mlir.ShapedType.MAX_RANK) = .empty;
-    for (values) |v| buf.appendAssumeCapacity(.int(ctx, it, v));
-    return .array(ctx, buf.constSlice());
-}
-
 pub fn extract_strided_slice(
     ctx: *mlir.Context,
     src: *const mlir.Value,
@@ -159,9 +151,9 @@ pub fn extract_strided_slice(
         .operands = .{ .flat = &.{src} },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "offsets", intArrayAttribute(ctx, i64, args.offsets)),
-            .named(ctx, "sizes", intArrayAttribute(ctx, i64, args.sizes)),
-            .named(ctx, "strides", intArrayAttribute(ctx, i64, args.strides)),
+            .named(ctx, "offsets", .intArray(ctx, i64, args.offsets)),
+            .named(ctx, "sizes", .intArray(ctx, i64, args.sizes)),
+            .named(ctx, "strides", .intArray(ctx, i64, args.strides)),
         },
         .location = location,
     });
@@ -179,8 +171,8 @@ pub fn insert_strided_slice(
         .operands = .{ .flat = &.{ src, dest } },
         .results = .{ .flat = &.{dest.type_()} },
         .attributes = &.{
-            .named(ctx, "offsets", intArrayAttribute(ctx, i64, offsets)),
-            .named(ctx, "strides", intArrayAttribute(ctx, i64, strides)),
+            .named(ctx, "offsets", .intArray(ctx, i64, offsets)),
+            .named(ctx, "strides", .intArray(ctx, i64, strides)),
         },
         .location = location,
     });
