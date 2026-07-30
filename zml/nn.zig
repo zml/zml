@@ -56,8 +56,7 @@ pub const Linear = struct {
         const platform = zml.module.CompilationContext.current().platform;
         if (weight.dtype() == .f4e2m1 and supportsNvfp4ActivationQuant(platform)) {
             const q = ops.quantizeNvfp4(x.convert(.bf16), igs, self.tag);
-            const values = ops.unpackNvfp4(q.packed_values, self.tag);
-            const acc = ops.scaledDot(values, weight, q.scales, scales, self.tag);
+            const acc = ops.scaledDot(q.values, weight, q.scales, scales, self.tag);
             return applyGlobalScale(acc, igs, wgs).convert(x.dtype());
         }
 

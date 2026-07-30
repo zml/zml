@@ -1630,11 +1630,10 @@ pub fn unpackNvfp4(w: Tensor, k_tag: anytype) Tensor {
 }
 
 pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, args: anytype) struct {
-    packed_values: Tensor,
+    values: Tensor,
     scales: Tensor,
 } {
     const block_size = 16;
-    const values_per_byte = 2;
     const value_max = 6.0;
     const scale_min_normal = 0x1p-6;
     const scale_max = DataType.f8e4m3fn.maxValue().as(f32);
@@ -1666,9 +1665,7 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, args: anytype) stru
         .reshape(x.shape().withDtype(.f4e2m1));
 
     return .{
-        .packed_values = values
-            .splitAxis(args, .{ .kw = -1, .bitcast = values_per_byte })
-            .bitCast(.u8),
+        .values = values,
         .scales = scales.squeeze(.blk),
     };
 }
