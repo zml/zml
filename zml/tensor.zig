@@ -4158,6 +4158,10 @@ pub const Tensor = struct {
         return _result(on_true._shape, op.result(0));
     }
 
+    pub fn mask(x: Tensor, pred: Tensor, mask_value: anytype) Tensor {
+        return pred.broad(x.shape()).select(x, .scalar(mask_value, x.dtype()));
+    }
+
     /// Returns a Tensor containing the element-wise not logical operation of the input Tensor.
     pub fn not(self: Tensor) Tensor {
         const op = dialects.stablehlo.not(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
@@ -460,123 +461,126 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
     return result;
 }
 
-pub fn @"while"(operands: anytype, comptime cond: anytype, comptime body: anytype, context: anytype) stdx.meta.FnReturn(body) {
-    stdx.debug.assertComptime(stdx.meta.isTupleOf(@TypeOf(operands), Tensor), "zml.ops.while expects a tuple of Tensor operands, got {}", .{@TypeOf(operands)});
-    stdx.debug.assertComptime(stdx.meta.isTuple(@TypeOf(context)), "zml.ops.while expects tuple context like .{{ ... }}, got {}", .{@TypeOf(context)});
+/// Implement a while loop.
+/// The given While struct contains all the parameters that are fixed through the while.
+/// It must have:
+/// * a State struct definition that captures all the loop state that will change on each iteration
+/// * a `cond(While, State) Tensor` function returning a scalar boolean tensor
+/// * a `body(While, State) State` function that preserves the state shapes.
+pub fn @"while"(
+    While: type,
+    context: While,
+    initial_state: While.State,
+) While.State {
+    const comp = CompilationContext.current();
 
-    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    var arena = std.heap.ArenaAllocator.init(comp.allocator);
     defer arena.deinit();
+    const allocator = arena.allocator();
 
-    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const mlir_ctx = comp.mlir_ctx;
     const location = mlir.Location.unknown(mlir_ctx);
 
-    var captured_context: @TypeOf(context) = undefined;
+    // Force to materialize tensor.value() before we push a new scope.
+    var captured_context: While = undefined;
     meta.mapAlloc(struct {
         fn capture(_: void, tensor: Tensor) Tensor {
             return Tensor._result(tensor.shape(), tensor.value());
         }
-    }.capture, arena.allocator(), {}, context, &captured_context) catch unreachable;
+    }.capture, allocator, {}, context, &captured_context) catch unreachable;
 
-    var block_types: [operands.len]*const mlir.Type = undefined;
-    var block_locs: [operands.len]*const mlir.Location = @splat(location);
-    var operand_values: [operands.len]*const mlir.Value = undefined;
-    var operand_shapes: [operands.len]Shape = undefined;
+    const flat_operands: []*const Tensor = meta.collectPtrs(Tensor, allocator, &initial_state) catch @panic("OOM");
 
-    inline for (0..operands.len) |i| {
-        operand_shapes[i] = operands[i].shape();
-        block_types[i] = mlirx.Type.rankedTensor(mlir_ctx, operand_shapes[i]);
-        operand_values[i] = operands[i].value();
+    const OperandInfo = struct {
+        type: *const mlir.Type,
+        location: *const mlir.Location,
+        value: *const mlir.Value,
+    };
+
+    var operands_info = std.MultiArrayList(OperandInfo).initCapacity(allocator, flat_operands.len) catch @panic("OOM");
+
+    for (flat_operands) |input| {
+        operands_info.appendAssumeCapacity(.{
+            .type = mlirx.Type.rankedTensor(mlir_ctx, input._shape),
+            .location = location,
+            .value = input.value(),
+        });
     }
 
     const cond_block = b: {
-        var cond_args: @TypeOf(operands) = undefined;
-        inline for (0..operands.len) |i| {
-            cond_args[i] = .fromShape(operand_shapes[i]);
-        }
-
-        const block = mlir.Block.init(&block_types, &block_locs);
+        const block = mlir.Block.init(operands_info.items(.type), operands_info.items(.location));
         errdefer block.deinit();
 
-        CompilationContext.current().pushBlock(block);
-        defer CompilationContext.current().popBlock();
+        comp.pushBlock(block);
+        defer comp.popBlock();
 
-        const scope = CompilationContext.current().currentScope();
-        inline for (0..operands.len) |i| {
-            scope.id_to_argument.put(scope.arena.allocator(), cond_args[i].id, i) catch unreachable;
+        // Interpret initial_state as the block argument
+        const scope = comp.currentScope();
+        scope.id_to_argument.ensureUnusedCapacity(scope.arena.allocator(), flat_operands.len) catch @panic("OOM");
+        for (0.., flat_operands) |i, input| {
+            scope.id_to_argument.putAssumeCapacity(input.id, i);
         }
 
-        const cond_result = @call(.auto, cond, cond_args ++ captured_context);
-        stdx.debug.assert(meta.count(Tensor, &cond_result) == 1, "zml.ops.while expects cond to return exactly one Tensor, got {}", .{@TypeOf(cond_result)});
+        const cond: Tensor = captured_context.cond(initial_state);
+        stdx.debug.assert(cond.rank() == 0 and cond.dtype() == .bool, "zml.ops.while expects cond to return a scalar bool Tensor, got {f}", .{cond});
 
-        const cond_tensor = meta.first(Tensor, cond_result);
-        stdx.debug.assert(cond_tensor.rank() == 0 and cond_tensor.dtype() == .bool, "zml.ops.while expects cond to return a scalar bool Tensor, got {f}", .{cond_tensor});
-
-        _ = dialects.stablehlo.return_(mlir_ctx, cond_tensor.value(), location).appendTo(block);
+        _ = dialects.stablehlo.return_(mlir_ctx, cond.value(), location).appendTo(block);
         break :b block;
     };
 
     const body_block, var result = b: {
-        var body_args: @TypeOf(operands) = undefined;
-        inline for (0..operands.len) |i| {
-            body_args[i] = .fromShape(operand_shapes[i]);
-        }
-
-        const block = mlir.Block.init(&block_types, &block_locs);
+        const block = mlir.Block.init(operands_info.items(.type), operands_info.items(.location));
         errdefer block.deinit();
 
-        CompilationContext.current().pushBlock(block);
-        defer CompilationContext.current().popBlock();
+        comp.pushBlock(block);
+        defer comp.popBlock();
 
-        const scope = CompilationContext.current().currentScope();
-        inline for (0..operands.len) |i| {
-            scope.id_to_argument.put(scope.arena.allocator(), body_args[i].id, i) catch unreachable;
+        // Interpret operands as the block argument
+        const scope = comp.currentScope();
+        scope.id_to_argument.ensureUnusedCapacity(scope.arena.allocator(), flat_operands.len) catch @panic("OOM");
+        for (0.., flat_operands) |i, input| {
+            scope.id_to_argument.putAssumeCapacity(input.id, i);
         }
 
-        const result = @call(.auto, body, body_args ++ captured_context);
-        stdx.debug.assert(meta.count(Tensor, &result) == operands.len, "zml.ops.while expects body to return {d} Tensor values, got {}", .{ operands.len, @TypeOf(result) });
+        const result: While.State = captured_context.body(initial_state);
 
-        var result_tensors: [operands.len]Tensor = undefined;
-        meta.collectBuf(struct {
-            fn cb(tensor: Tensor) Tensor {
-                return tensor;
+        if (builtin.mode == .Debug) {
+            const result_tensors = meta.collectPtrs(Tensor, allocator, &result) catch @panic("OOM");
+            stdx.debug.assert(flat_operands.len == result_tensors.len, "zml.ops.while({s}) expects body to return {d} Tensor values, got {d} values in ", .{ @typeName(While), flat_operands.len, result_tensors.len });
+            for (0.., flat_operands, result_tensors) |i, in, out| {
+                stdx.debug.assert(in.shape().eql(out.shape()), "zml.ops.while({s}) expects body to preserve loop state shape, got {f} for operand {d} but expected {f}", .{ @typeName(While), in, i, out });
             }
-        }.cb, {}, &result, &result_tensors);
-
-        var result_values: [operands.len]*const mlir.Value = undefined;
-        inline for (0..operands.len) |i| {
-            stdx.debug.assert(result_tensors[i].shape().eql(operand_shapes[i]), "zml.ops.while expects body to preserve loop state shape, got {f} for operand {d} but expected {f}", .{ result_tensors[i], i, operands[i] });
-            result_values[i] = result_tensors[i].value();
         }
 
-        _ = dialects.stablehlo.returns(mlir_ctx, &result_values, location).appendTo(block);
+        const result_values = meta.collectAlloc(Tensor.value, {}, allocator, &result) catch @panic("OOM");
+        _ = dialects.stablehlo.returns(mlir_ctx, result_values, location).appendTo(block);
         break :b .{ block, result };
     };
 
     const op = dialects.stablehlo.while_(
         mlir_ctx,
-        &operand_values,
-        &block_types,
+        operands_info.items(.value),
+        operands_info.items(.type),
         cond_block,
         body_block,
         location,
-    ).appendTo(CompilationContext.current().currentScope().block);
+    ).appendTo(comp.currentScope().block);
 
-    const n_operands = operands.len;
     const AssignResultCtx = struct {
         op_: *mlir.Operation,
-        shapes: [n_operands]Shape,
+        og_tensors: []*const Tensor,
         idx: usize = 0,
+
+        fn assign(ctx: *@This(), tensor: *Tensor) void {
+            tensor.* = Tensor._result(ctx.og_tensors[ctx.idx].shape(), ctx.op_.result(ctx.idx));
+            ctx.idx += 1;
+        }
     };
     var assign_result_ctx: AssignResultCtx = .{
         .op_ = op,
-        .shapes = operand_shapes,
+        .og_tensors = flat_operands,
     };
-    meta.visit(struct {
-        fn cb(ctx: *AssignResultCtx, tensor: *Tensor) void {
-            tensor.* = Tensor._result(ctx.shapes[ctx.idx], ctx.op_.result(ctx.idx));
-            ctx.idx += 1;
-        }
-    }.cb, &assign_result_ctx, &result);
+    meta.visit(AssignResultCtx.assign, &assign_result_ctx, &result);
 
     return result;
 }
@@ -587,32 +591,42 @@ test @"while" {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
-    const initial_i: zml.Tensor = .init(.{}, .i64);
-    const initial_sum: zml.Tensor = .init(.{}, .i64);
+    const While = struct {
+        // While struct can contain tensor and non-tensor fields.
+        limit: i64,
+        step: Tensor,
 
-    const Local = struct {
-        fn cond(i: Tensor, sum: Tensor) Tensor {
-            _ = sum;
-            return i.cmp(.LT, Tensor.scalar(10, .i64));
+        pub const State = struct {
+            i: zml.Tensor,
+            sum: zml.Tensor,
+        };
+
+        pub fn cond(self: @This(), state: State) Tensor {
+            return state.i.cmp(.LT, Tensor.scalar(self.limit, .i64));
         }
 
-        fn body(i: Tensor, sum: Tensor) [2]Tensor {
-            const one = Tensor.scalar(1, .i64);
+        pub fn body(self: @This(), state: State) State {
             return .{
-                i.add(one),
-                sum.add(one),
+                .i = state.i.add(self.step),
+                .sum = state.sum.add(self.step),
             };
         }
 
-        fn forward(i: Tensor, sum: Tensor) [2]Tensor {
-            return zml.ops.@"while"(.{ i, sum }, cond, body, .{});
+        fn forward(i: Tensor, sum: Tensor) State {
+            return zml.ops.@"while"(
+                @This(),
+                .{ .limit = 10, .step = .scalar(1, .i64) },
+                .{ .i = i, .sum = sum },
+            );
         }
     };
 
+    const initial_i: zml.Tensor = .init(.{}, .i64);
+    const initial_sum: zml.Tensor = .init(.{}, .i64);
     var exe = try zml.module.compile(
         std.testing.allocator,
         std.testing.io,
-        Local.forward,
+        While.forward,
         .{ initial_i, initial_sum },
         platform,
         .{},
@@ -624,13 +638,13 @@ test @"while" {
     var sum_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, initial_sum.shape(), .replicated, std.mem.sliceAsBytes(&[1]i64{0}));
     defer sum_buffer.deinit();
 
-    var results = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.forward, .{ i_buffer, sum_buffer });
-    defer results[0].deinit();
-    defer results[1].deinit();
+    var results = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, While.forward, .{ i_buffer, sum_buffer });
+    defer results.i.deinit();
+    defer results.sum.deinit();
 
-    var cpu_i = try results[0].toSliceAlloc(std.testing.allocator, std.testing.io);
+    var cpu_i = try results.i.toSliceAlloc(std.testing.allocator, std.testing.io);
     defer cpu_i.free(std.testing.allocator);
-    var cpu_sum = try results[1].toSliceAlloc(std.testing.allocator, std.testing.io);
+    var cpu_sum = try results.sum.toSliceAlloc(std.testing.allocator, std.testing.io);
     defer cpu_sum.free(std.testing.allocator);
 
     try std.testing.expectEqual(@as(i64, 10), cpu_i.items(i64)[0]);

@@ -63,7 +63,13 @@ pub fn formatBool(value: bool, spec: std.fmt.Number, writer: *std.Io.Writer) !vo
 pub fn formatAny(value: anytype, spec: std.fmt.Number, writer: *std.Io.Writer) !void {
     var buf: [48]u8 = undefined;
     const T = @TypeOf(value);
-    const fmt = if (@hasDecl(T, "formatNumber")) "{d}" else "{f}";
+    const fmt = switch (@typeInfo(T)) {
+        .@"struct", .@"union", .@"enum", .@"opaque" => if (@hasDecl(T, "formatNumber"))
+            "{d}"
+        else
+            "{f}",
+        else => "{f}",
+    };
 
     const s = std.fmt.bufPrint(&buf, fmt, .{value}) catch blk: {
         buf[45..].* = "...".*;

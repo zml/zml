@@ -748,6 +748,31 @@ pub fn collectBuf(func: anytype, func_ctx: _CollectCtx(func), obj: anytype, out:
     std.debug.assert(context.idx == context.out.len);
 }
 
+/// Finds all X in the given object, and write their pointers into an arraylist.
+pub fn collectPtrs(
+    T: type,
+    allocator: std.mem.Allocator,
+    obj: anytype,
+) std.mem.Allocator.Error![]*const T {
+    const CollectPtrCtx = struct {
+        allocator: std.mem.Allocator,
+        out: std.ArrayList(*const T) = .empty,
+        oom: bool = false,
+
+        fn cb(ctx: *@This(), val: *const T) void {
+            if (ctx.oom) return;
+            ctx.out.append(ctx.allocator, val) catch {
+                ctx.oom = true;
+            };
+        }
+    };
+    var context = CollectPtrCtx{ .allocator = allocator };
+    visit(CollectPtrCtx.cb, &context, obj);
+    if (context.oom) return error.OutOfMemory;
+
+    return context.out.toOwnedSlice(allocator);
+}
+
 fn _CollectCtx(func: anytype) type {
     const params = @typeInfo(@TypeOf(func)).@"fn".params;
     if (params.len == 1) return void;
