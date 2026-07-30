@@ -174,6 +174,10 @@ pub const CompilationContext = struct {
         return _current.?;
     }
 
+    pub fn currentOrNull() ?*CompilationContext {
+        return _current;
+    }
+
     pub fn currentScope(self: *CompilationContext) *Scope {
         return &self.scopes.slice()[self.scopes.len - 1];
     }

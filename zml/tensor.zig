@@ -148,10 +148,22 @@ pub const Tensor = struct {
     }
 
     pub fn withPartitioning(self: Tensor, axes_: anytype) Tensor {
-        const ctx = CompilationContext.current();
         const partitioned_shape = self._shape.withPartitioning(axes_);
 
-        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, null) catch unreachable;
+        const ctx = CompilationContext.currentOrNull() orelse {
+            var res = self;
+            res._shape = partitioned_shape;
+            return res;
+        };
+
+        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, null) catch |err| switch (err) {
+            error.NoSuitableSharding => std.debug.panic(
+                "{f}.withPartitioning({f}) failed to resolve because it's using unknown sharding. Pass more shardings to `zml.compile`. Known shardings: {f}",
+                .{ self, partitioned_shape, stdx.fmt.slice(ctx.partitioning.shardings) },
+            ),
+            error.OutOfMemory, error.WriteFailed => @panic("OOM"),
+            error.MissingDeviceInTile => @panic("TODO"),
+        };
 
         const op_result = switch (ctx.partitioning.partitioner) {
             .shardy => blk: {
@@ -186,6 +198,7 @@ pub const Tensor = struct {
         return _result(partitioned_shape, op_result);
     }
 
+    /// Copy the given tensor to the specified memory.
     pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
@@ -221,6 +234,26 @@ pub const Tensor = struct {
         return res;
     }
 
+    /// Copy all the given tensor to the specified memory.
+    /// The input struct is copied on the stack, so it must be a simple flat struct without pointers.
+    pub fn toMemoryAll(flat_tensors: anytype, kind: Memory.Kind) @TypeOf(flat_tensors) {
+        const ctx = CompilationContext.current();
+        switch (ctx.platform.target) {
+            .cpu, .neuron, .metal => return flat_tensors,
+            .cuda, .rocm, .tpu, .oneapi => {},
+        }
+
+        var copy = flat_tensors;
+        meta.visitFlatStruct(struct {
+            fn onMemory(k: Memory.Kind, x: *Tensor) void {
+                x.* = x.toMemory(k);
+            }
+        }.onMemory, kind, &copy);
+        return copy;
+    }
+
+    /// Mark the given input tensor as being physically located on a specific memory.
+    /// Has no effect if the input tensor is not an executable input.
     pub fn onMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = CompilationContext.current();
         switch (ctx.platform.target) {
@@ -235,6 +268,23 @@ pub const Tensor = struct {
         ctx.currentScope().id_to_input_memory_kind.put(ctx.currentScope().arena.allocator(), self.id, kind) catch unreachable;
 
         return self;
+    }
+
+    /// Mark all the given input tensors as being physically located on a specific memory
+    /// see `zml.Tensor.onMemory`
+    pub fn onMemoryAll(tensors: anytype, kind: Memory.Kind) void {
+        const ctx = CompilationContext.current();
+        switch (ctx.platform.target) {
+            // Only one memory kind on those platform
+            .cpu, .neuron, .metal => return,
+            .cuda, .rocm, .tpu, .oneapi => {},
+        }
+
+        meta.visit(struct {
+            fn onMemory(k: Memory.Kind, x: *const Tensor) void {
+                _ = x.onMemory(k);
+            }
+        }.onMemory, kind, &tensors);
     }
 
     /// Returns a Tensor with new tag names.

@@ -78,24 +78,6 @@ pub const mosaic_tpu = struct {
             allocation_size += self.query_start_len.byteSize();
             return allocation_size;
         }
-
-        pub fn onMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
-            return .{
-                .opts = self.opts,
-                .block_table = self.block_table.onMemory(memory),
-                .seq_lens = self.seq_lens.onMemory(memory),
-                .query_start_len = self.query_start_len.onMemory(memory),
-            };
-        }
-
-        pub fn toMemory(self: Parameters, memory: zml.platform.Memory.Kind) Parameters {
-            return .{
-                .opts = self.opts,
-                .block_table = self.block_table.toMemory(memory),
-                .seq_lens = self.seq_lens.toMemory(memory),
-                .query_start_len = self.query_start_len.toMemory(memory),
-            };
-        }
     };
 
     fn raggedPagedKernelCall(

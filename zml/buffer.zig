@@ -8,6 +8,7 @@ const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const mem = @import("mem.zig");
 const Memory = @import("platform.zig").Memory;
+const meta = @import("meta.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
@@ -74,6 +75,14 @@ pub const Buffer = struct {
         for (self._shards.constSlice()) |buffer| {
             buffer.deinit(self._platform.pjrt_api);
         }
+    }
+
+    pub fn deinitAll(T: type, buffers: *mem.Bufferized(T)) void {
+        meta.visitFlatStruct(struct {
+            fn deinit(_: void, x: *Buffer) void {
+                x.deinit();
+            }
+        }.deinit, {}, buffers);
     }
 
     /// This Buffer shape.
