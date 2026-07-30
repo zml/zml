@@ -373,7 +373,8 @@ pub const Loader = struct {
         };
 
         if (sources.len != 1) {
-            std.debug.panic("Expected loaded tensor to have only 1 source, got {}", .{sources.len});
+            log.debug("Skipping fused tensor with {} sources; expected to be loaded via loadExecute", .{sources.len});
+            return;
         }
 
         self.loadSingleInner(io, sources[0], tensor.shape(), buffer, shardings, opts) catch |e| {
