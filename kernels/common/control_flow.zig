@@ -13,7 +13,7 @@ pub fn tupleArity(comptime T: type, comptime what: []const u8) comptime_int {
     const info = @typeInfo(T);
     if (info != .@"struct" or !info.@"struct".is_tuple)
         @compileError(what ++ " must be a tuple literal like `.{ v1, v2 }`");
-    return info.@"struct".fields.len;
+    return info.@"struct".field_names.len;
 }
 
 pub fn emitScfYield(
@@ -27,13 +27,13 @@ pub fn emitScfYield(
     const info = @typeInfo(@TypeOf(values));
     if (info != .@"struct" or !info.@"struct".is_tuple)
         @compileError(what ++ " expects a tuple literal");
-    if (info.@"struct".fields.len != N)
+    if (info.@"struct".field_names.len != N)
         @compileError(what ++ ": yield arity must match the scope's declared arity");
     var buf: [N]*const mlir.Value = undefined;
-    inline for (info.@"struct".fields, 0..) |f, i| {
-        if (f.type != ValueT)
+    inline for (info.@"struct".field_names, info.@"struct".field_types, 0..) |field_name, Field, i| {
+        if (Field != ValueT)
             @compileError(what ++ ": every tuple element must be a Value");
-        buf[i] = @field(values, f.name).inner;
+        buf[i] = @field(values, field_name).inner;
     }
     _ = scf.yield(kernel.ctx, &buf, kernel.loc()).appendTo(block);
 }
@@ -151,14 +151,14 @@ pub fn WhileScope(comptime BuilderT: type, comptime ValueT: type, comptime N: us
             const info = @typeInfo(@TypeOf(forwarded));
             if (info != .@"struct" or !info.@"struct".is_tuple)
                 @compileError("WhileScope.yieldBefore: forwarded must be a tuple literal");
-            if (info.@"struct".fields.len != M)
+            if (info.@"struct".field_names.len != M)
                 @compileError("WhileScope.yieldBefore: forwarded arity must match after_types arity");
             const k = self.kernel;
             var buf: [M]*const mlir.Value = undefined;
-            inline for (info.@"struct".fields, 0..) |f, i| {
-                if (f.type != ValueT)
+            inline for (info.@"struct".field_names, info.@"struct".field_types, 0..) |field_name, Field, i| {
+                if (Field != ValueT)
                     @compileError("WhileScope.yieldBefore: every forwarded element must be a Value");
-                buf[i] = @field(forwarded, f.name).inner;
+                buf[i] = @field(forwarded, field_name).inner;
             }
             _ = scf.condition(k.ctx, cond.inner, &buf, k.loc()).appendTo(self.before_block);
             k.popBlock();
