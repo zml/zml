@@ -1289,9 +1289,7 @@ pub fn causalAttnMask(
     }
 
     if (dtype.isFloat()) {
-        const zeros = Tensor.constant(dtype.zero()).broad(mask.shape());
-        const minus_inf = Tensor.constant(dtype.minValue()).broad(mask.shape());
-        mask = Tensor.select(mask, zeros, minus_inf);
+        mask = Tensor.select(mask, .scalar(0, dtype), .scalar(-std.math.inf(f32), dtype));
     } else {
         mask = mask.convert(dtype);
     }

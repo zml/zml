@@ -29,16 +29,15 @@ fn FloatConversionHelpers(Float: type) type {
 
             const vf32: Float32 = @bitCast(f);
             const exponent: i16 = @as(i16, vf32.exponent) - exp_off;
-            const overflow = exponent > std.math.maxInt(@FieldType(Float, "exponent"));
+            const overflow = std.math.isInf(f) or exponent > std.math.maxInt(@FieldType(Float, "exponent"));
             if (overflow) {
                 @branchHint(.unlikely);
                 return if (@hasDecl(Float, "inf"))
                     if (vf32.sign == 0) Float.inf else Float.minus_inf
                 else if (@hasDecl(Float, "nan"))
                     Float.nan
-                else b: {
-                    break :b if (vf32.sign == 0) Float.max else Float.min;
-                };
+                else
+                    std.debug.panic("{} doesn't have infinite representations", .{Float});
             }
 
             return if (exponent <= 0)
@@ -271,10 +270,8 @@ test "Float8E4" {
     }) |Float8T| {
         try testCustomFloat(Float8T, test_case_e4);
         try std.testing.expectEqual(0.0, Float8T.fromF32(1.0 / 2048.0).toF32());
-        if (@hasDecl(Float8T, "inf")) {
-            try std.testing.expectEqual(Float8T.inf, Float8T.fromF32(128.0));
-            try std.testing.expectEqual(Float8T.inf.neg(), Float8T.fromF32(-128.0));
-        }
+
+        if (@hasDecl(Float8T, "inf")) @compileError("Float8E4 don't have ±∞ representations");
     }
 }
 
