@@ -55,7 +55,7 @@ pub const Linear = struct {
         const wgs: ?Tensor = if (self.global_scale) |g| g.convert(.f32).reshape(scalar_f32) else null;
 
         const platform = zml.module.CompilationContext.current().platform;
-        if (weight.dtype() == .f4e2m1 and platform.target == .cuda) {
+        if (weight.dtype() == .f4e2m1 and supportsNvfp4ActivationQuant(platform)) {
             const q_packed, const q_scale = ops.quantizeNvfp4(x.convert(.bf16), igs, self.tag);
             const q = ops.unpackNvfp4(q_packed, self.tag);
             const acc = ops.scaledDot(q, weight, q_scale, scales, self.tag);
@@ -66,6 +66,18 @@ pub const Linear = struct {
         return applyGlobalScale(acc, null, wgs).convert(x.dtype());
     }
 };
+
+fn supportsNvfp4ActivationQuant(platform: *const zml.Platform) bool {
+    if (platform.target != .cuda) {
+        return false;
+    }
+
+    const device = platform.pjrt_client.devices(platform.pjrt_api)[0];
+    const capability = zml.platform.cuda.tryGetComputeCapabilities(platform, device) orelse return false;
+    const major = std.fmt.parseInt(u8, std.mem.sliceTo(capability, '.'), 10) catch return false;
+
+    return major >= 10;
+}
 
 fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
     const combined: ?Tensor = if (igs) |i|
