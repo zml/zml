@@ -11,7 +11,7 @@ const init_array_section = switch (builtin.object_format) {
     else => "",
 };
 
-export const _ linksection(init_array_section) = &struct {
+export const _ align(@alignOf(usize)) linksection(init_array_section) = &struct {
     fn call(argc: c_int, argv: [*c][*:0]u8, envp: [*:null]?[*:0]u8) callconv(.c) void {
         _ = argc;
         _ = argv;
