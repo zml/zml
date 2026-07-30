@@ -78,7 +78,7 @@ pub const Buffer = struct {
     }
 
     pub fn deinitAll(T: type, buffers: *mem.Bufferized(T)) void {
-        meta.visitStruct(struct {
+        meta.visitFlatStruct(struct {
             fn deinit(_: void, x: *Buffer) void {
                 x.deinit();
             }
