@@ -187,7 +187,7 @@ fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable
                 .data = o.data,
             } });
         },
-        .device_io_control, .file_write_streaming, .net_receive => {
+        .device_io_control, .file_write_streaming, .net_receive, .net_read => {
             return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
         },
     }
@@ -235,7 +235,7 @@ pub fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, o
     return backend.vtable.dirAccess(backend.userdata, dir_, stripScheme(sub_path), options);
 }
 
-pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.CreateFlags) std.Io.File.OpenError!std.Io.File {
+pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
         log.err("Failed to lookup backend for dir create file '{s}' : {any}", .{ sub_path, err });
@@ -251,7 +251,7 @@ pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u
     return .{ .handle = @intCast(idx), .flags = .{ .nonblocking = false } };
 }
 
-fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
+fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.Dir.OpenFileOptions) std.Io.File.OpenError!std.Io.File {
     const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
     const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
         log.err("Failed to lookup backend for opening file '{s}' : {any}", .{ sub_path, err });
