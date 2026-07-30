@@ -218,18 +218,18 @@ pub const KvCache = union(enum) {
         chunk_size: u32,
         backend: Backend,
     ) KvCache {
-        const active_page, const k_chunk = getPageAndOffsetFromSlotMapping(slot_mapping, chunk_size);
+        const page_index, const offset = getPageAndOffsetFromSlotMapping(slot_mapping, chunk_size);
 
         var kv: KvCache = switch (self) {
             .split => |split| switch (backend) {
                 .cuda_fa2, .cuda_fa3, .triton, .mosaic_tpu, .metal => .{ .split = .{
                     .k = split.k.scatterSlices(
-                        .{ .page = active_page, .k_chunk = k_chunk },
+                        .{ .page = page_index, .k_chunk = offset },
                         new_k,
                         .{ .update_fn = zml.Tensor.ScatterOpts.override, .indices_are_unique = false, .indices_are_sorted = false },
                     ),
                     .v = split.v.scatterSlices(
-                        .{ .page = active_page, .k_chunk = k_chunk },
+                        .{ .page = page_index, .k_chunk = offset },
                         new_v,
                         .{ .update_fn = zml.Tensor.ScatterOpts.override, .indices_are_unique = false, .indices_are_sorted = false },
                     ),

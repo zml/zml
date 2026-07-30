@@ -150,7 +150,7 @@ pub const Tensor = struct {
     pub fn withPartitioning(self: Tensor, axes_: anytype) Tensor {
         const partitioned_shape = self._shape.withPartitioning(axes_);
 
-        const ctx = CompilationContext.isActive() orelse {
+        const ctx = CompilationContext.currentOrNull() orelse {
             var res = self;
             res._shape = partitioned_shape;
             return res;
