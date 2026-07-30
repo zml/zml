@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const native = @import("platforms/cuda/flashinfer_cutlass_moe");
+const fi_cutlass_moe = @import("platforms/cuda/flashinfer_cutlass_moe");
 const platforms = @import("platforms");
 const zml = @import("../zml.zig");
 
@@ -23,6 +23,7 @@ pub const Options = struct {
 pub const Activation = enum {
     swiglu,
     geglu,
+    geglu_tanh,
     swiglu_step,
     relu2,
 };
@@ -58,10 +59,9 @@ pub const Parameters = struct {
             .workspace_query_device = self.workspace_query_device,
             .activation = switch (self.activation) {
                 .silu => .swiglu,
-                .gelu => .geglu,
-                // FlashInfer CUTLASS has ReLU and ReLU2, but no gated ReGLU
-                // equivalent to ZML's `relu(gate) * up` contract.
-                .relu => return error.UnsupportedActivation,
+                // Tensor.gelu() is ZML's tanh GELU approximation.
+                .gelu => .geglu_tanh,
+                .relu => .relu2,
             },
             .enable_pdl = self.enable_pdl,
             .gemm1_tactic = self.gemm1_tactic,
@@ -145,13 +145,13 @@ const Attributes = struct {
 };
 
 const DeviceRunner = struct {
-    api: *native.Api,
-    runner: *native.Runner,
+    api: *fi_cutlass_moe.Api,
+    runner: *fi_cutlass_moe.Runner,
 };
 
 pub const Variant = enum {
-    bf16,
-    nvfp4,
+    bf16xbf16,
+    nvfp4xnvfp4,
 };
 
 const maxCudaDevices = 16;
@@ -159,8 +159,8 @@ var loaded = false;
 var runners: [std.meta.fields(Variant).len][maxCudaDevices]?DeviceRunner =
     @splat(@splat(null));
 
-fn checkStatus(api: *const native.Api, status: native.Status) !void {
-    if (status == native.C.ZML_FI_CUTLASS_MOE_STATUS_SUCCESS) return;
+fn checkStatus(api: *const fi_cutlass_moe.Api, status: fi_cutlass_moe.Status) !void {
+    if (status == fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_STATUS_SUCCESS) return;
     if (api.lastError()) |message| {
         log.err("FlashInfer CUTLASS MoE failed (status {d}): {s}", .{
             status,
@@ -170,22 +170,22 @@ fn checkStatus(api: *const native.Api, status: native.Status) !void {
         log.err("FlashInfer CUTLASS MoE failed with status {d}", .{status});
     }
     return switch (status) {
-        native.C.ZML_FI_CUTLASS_MOE_STATUS_INVALID_ARGUMENT => error.InvalidArgument,
-        native.C.ZML_FI_CUTLASS_MOE_STATUS_UNSUPPORTED => error.UnsupportedArchitecture,
-        native.C.ZML_FI_CUTLASS_MOE_STATUS_CUDA_ERROR => error.Cuda,
+        fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_STATUS_INVALID_ARGUMENT => error.InvalidArgument,
+        fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_STATUS_UNSUPPORTED => error.UnsupportedArchitecture,
+        fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_STATUS_CUDA_ERROR => error.Cuda,
         else => error.FlashinferCutlassMoe,
     };
 }
 
-fn runnerOptions(device: i32, variant: Variant) native.RunnerOptions {
-    var options = std.mem.zeroes(native.RunnerOptions);
-    options.struct_size = @sizeOf(native.RunnerOptions);
-    options.activation_dtype = native.C.ZML_FI_CUTLASS_MOE_DTYPE_BF16;
+fn runnerOptions(device: i32, variant: Variant) fi_cutlass_moe.RunnerOptions {
+    var options = std.mem.zeroes(fi_cutlass_moe.RunnerOptions);
+    options.struct_size = @sizeOf(fi_cutlass_moe.RunnerOptions);
+    options.activation_dtype = fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_DTYPE_BF16;
     options.weight_dtype = switch (variant) {
-        .bf16 => native.C.ZML_FI_CUTLASS_MOE_DTYPE_BF16,
-        .nvfp4 => native.C.ZML_FI_CUTLASS_MOE_DTYPE_PACKED_FP4,
+        .bf16xbf16 => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_DTYPE_BF16,
+        .nvfp4xnvfp4 => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_DTYPE_PACKED_FP4,
     };
-    options.output_dtype = native.C.ZML_FI_CUTLASS_MOE_DTYPE_BF16;
+    options.output_dtype = fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_DTYPE_BF16;
     options.device = device;
     options.use_fused_finalize = 1;
     return options;
@@ -199,9 +199,9 @@ fn ensureRunner(device: i32, variant: Variant) !DeviceRunner {
     const variantIndex: usize = @intFromEnum(variant);
     if (runners[variantIndex][index]) |runner| return runner;
 
-    const api = try native.apiForDevice(device);
+    const api = try fi_cutlass_moe.apiForDevice(device);
     const options = runnerOptions(device, variant);
-    var runner: ?*native.Runner = null;
+    var runner: ?*fi_cutlass_moe.Runner = null;
     try checkStatus(api, api.runnerCreate(&options, &runner));
     const result: DeviceRunner = .{
         .api = api,
@@ -211,30 +211,31 @@ fn ensureRunner(device: i32, variant: Variant) !DeviceRunner {
     return result;
 }
 
-fn nativeActivation(activation: Activation) i32 {
+fn fi_cutlass_moeActivation(activation: Activation) i32 {
     return switch (activation) {
-        .swiglu => native.C.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU,
-        .geglu => native.C.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU,
-        .swiglu_step => native.C.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU_STEP,
-        .relu2 => native.C.ZML_FI_CUTLASS_MOE_ACTIVATION_RELU2,
+        .swiglu => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU,
+        .geglu => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU,
+        .geglu_tanh => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU_TANH,
+        .swiglu_step => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU_STEP,
+        .relu2 => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_ACTIVATION_RELU2,
     };
 }
 
-fn makeProblem(attributes: Attributes) native.Problem {
-    var problem = std.mem.zeroes(native.Problem);
-    problem.struct_size = @sizeOf(native.Problem);
-    problem.num_tokens = attributes.num_tokens;
-    problem.hidden_size = attributes.hidden_size;
-    problem.intermediate_size = attributes.intermediate_size;
-    problem.num_experts = attributes.num_experts;
-    problem.num_experts_on_rank = attributes.num_experts;
-    problem.top_k = attributes.top_k;
-    problem.tp_size = 1;
-    problem.ep_size = 1;
-    problem.activation = @intCast(attributes.activation);
-    problem.enable_pdl = @intFromBool(attributes.enable_pdl);
-    problem.swizzled_input_sf = 1;
-    return problem;
+fn makeContext(attributes: Attributes) fi_cutlass_moe.Context {
+    var context = std.mem.zeroes(fi_cutlass_moe.Context);
+    context.struct_size = @sizeOf(fi_cutlass_moe.Context);
+    context.num_tokens = attributes.num_tokens;
+    context.hidden_size = attributes.hidden_size;
+    context.intermediate_size = attributes.intermediate_size;
+    context.num_experts = attributes.num_experts;
+    context.num_experts_on_rank = attributes.num_experts;
+    context.top_k = attributes.top_k;
+    context.tp_size = 1;
+    context.ep_size = 1;
+    context.activation = @intCast(attributes.activation);
+    context.enable_pdl = @intFromBool(attributes.enable_pdl);
+    context.swizzled_input_sf = 1;
+    return context;
 }
 
 fn ffiCall(
@@ -244,11 +245,11 @@ fn ffiCall(
     attributes: Attributes,
 ) !?*zml.pjrt.ffi.Error {
     const device = try call_frame.ctx.getDeviceOrdinal(call_frame.api);
-    const deviceRunner = try ensureRunner(device, .nvfp4);
-    const problem = makeProblem(attributes);
+    const deviceRunner = try ensureRunner(device, .nvfp4xnvfp4);
+    const context = makeContext(attributes);
 
-    var io = std.mem.zeroes(native.Io);
-    io.struct_size = @sizeOf(native.Io);
+    var io = std.mem.zeroes(fi_cutlass_moe.Io);
+    io.struct_size = @sizeOf(fi_cutlass_moe.Io);
     io.input = input.hidden_states.ptr;
     io.token_selected_experts = @ptrCast(@alignCast(input.topk_ids.ptr));
     io.token_final_scales = @ptrCast(@alignCast(input.topk_weights.ptr));
@@ -266,8 +267,8 @@ fn ffiCall(
         (@as(u32, @intFromBool(attributes.fc2_act_per_expert)) << 3);
     io.output = output.output.ptr;
 
-    var workspace = std.mem.zeroes(native.Workspace);
-    workspace.struct_size = @sizeOf(native.Workspace);
+    var workspace = std.mem.zeroes(fi_cutlass_moe.Workspace);
+    workspace.struct_size = @sizeOf(fi_cutlass_moe.Workspace);
     workspace.data = output.workspace.ptr;
     workspace.data_bytes = output.workspace.shape.byteSize();
 
@@ -275,7 +276,7 @@ fn ffiCall(
         deviceRunner.api,
         deviceRunner.api.run(
             deviceRunner.runner,
-            &problem,
+            &context,
             &io,
             &workspace,
             @ptrCast(call_frame.api.stream(call_frame.ctx)),
@@ -301,11 +302,11 @@ fn ffiCallBf16(
     attributes: Attributes,
 ) !?*zml.pjrt.ffi.Error {
     const device = try call_frame.ctx.getDeviceOrdinal(call_frame.api);
-    const deviceRunner = try ensureRunner(device, .bf16);
-    const problem = makeProblem(attributes);
+    const deviceRunner = try ensureRunner(device, .bf16xbf16);
+    const context = makeContext(attributes);
 
-    var io = std.mem.zeroes(native.Io);
-    io.struct_size = @sizeOf(native.Io);
+    var io = std.mem.zeroes(fi_cutlass_moe.Io);
+    io.struct_size = @sizeOf(fi_cutlass_moe.Io);
     io.input = input.hidden_states.ptr;
     io.token_selected_experts = @ptrCast(@alignCast(input.topk_ids.ptr));
     io.token_final_scales = @ptrCast(@alignCast(input.topk_weights.ptr));
@@ -313,8 +314,8 @@ fn ffiCallBf16(
     io.fc2_expert_weights = input.fc2_weights.ptr;
     io.output = output.output.ptr;
 
-    var workspace = std.mem.zeroes(native.Workspace);
-    workspace.struct_size = @sizeOf(native.Workspace);
+    var workspace = std.mem.zeroes(fi_cutlass_moe.Workspace);
+    workspace.struct_size = @sizeOf(fi_cutlass_moe.Workspace);
     workspace.data = output.workspace.ptr;
     workspace.data_bytes = output.workspace.shape.byteSize();
 
@@ -322,7 +323,7 @@ fn ffiCallBf16(
         deviceRunner.api,
         deviceRunner.api.run(
             deviceRunner.runner,
-            &problem,
+            &context,
             &io,
             &workspace,
             @ptrCast(call_frame.api.stream(call_frame.ctx)),
@@ -341,7 +342,7 @@ const routedBf16Call = zml.ops.CustomCall(Bf16Input, Output, Attributes, ffiCall
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
     if (comptime platforms.isEnabled(.cuda)) {
-        try native.load(allocator, io);
+        try fi_cutlass_moe.load(allocator, io);
         loaded = true;
         return;
     }
@@ -395,7 +396,7 @@ pub fn fc1BlockScaleShape(
     activation: Activation,
 ) zml.Shape {
     const rows = switch (activation) {
-        .swiglu, .geglu, .swiglu_step => 2 * intermediate_size,
+        .swiglu, .geglu, .geglu_tanh, .swiglu_step => 2 * intermediate_size,
         .relu2 => intermediate_size,
     };
     return .init(
@@ -456,7 +457,7 @@ fn validateInputs(
     const num_experts = fc1_weights.dim(0);
     const fc1_rows = fc1_weights.dim(1);
     const intermediate_size = switch (options.activation) {
-        .swiglu, .geglu, .swiglu_step => @divExact(fc1_rows, 2),
+        .swiglu, .geglu, .geglu_tanh, .swiglu_step => @divExact(fc1_rows, 2),
         .relu2 => fc1_rows,
     };
     const top_k = topk_ids.dim(2);
@@ -502,7 +503,7 @@ fn validateInputs(
         .intermediate_size = intermediate_size,
         .num_experts = @intCast(num_experts),
         .top_k = @intCast(top_k),
-        .activation = nativeActivation(options.activation),
+        .activation = fi_cutlass_moeActivation(options.activation),
         .enable_pdl = options.enable_pdl,
         .fc1_act_per_expert = scales.fc1_act_global.rank() == 1,
         .fc2_act_per_expert = scales.fc2_act_global.rank() == 1,
@@ -534,15 +535,15 @@ pub fn fusedExpertsImpl(
         scales,
         options,
     );
-    const deviceRunner = try ensureRunner(options.workspace_query_device, .nvfp4);
-    const problem = makeProblem(attributes);
-    var requirements = std.mem.zeroes(native.WorkspaceRequirements);
-    requirements.struct_size = @sizeOf(native.WorkspaceRequirements);
+    const deviceRunner = try ensureRunner(options.workspace_query_device, .nvfp4xnvfp4);
+    const context = makeContext(attributes);
+    var requirements = std.mem.zeroes(fi_cutlass_moe.WorkspaceRequirements);
+    requirements.struct_size = @sizeOf(fi_cutlass_moe.WorkspaceRequirements);
     try checkStatus(
         deviceRunner.api,
         deviceRunner.api.getWorkspaceRequirements(
             deviceRunner.runner,
-            &problem,
+            &context,
             &requirements,
         ),
     );
@@ -601,7 +602,7 @@ pub fn fusedExpertsBf16(
     const numExperts = fc1_weights.dim(0);
     const fc1Rows = fc1_weights.dim(1);
     const intermediateSize = switch (options.activation) {
-        .swiglu, .geglu, .swiglu_step => @divExact(fc1Rows, 2),
+        .swiglu, .geglu, .geglu_tanh, .swiglu_step => @divExact(fc1Rows, 2),
         .relu2 => fc1Rows,
     };
     const topK = topk_ids.dim(2);
@@ -627,22 +628,22 @@ pub fn fusedExpertsBf16(
         .intermediate_size = intermediateSize,
         .num_experts = @intCast(numExperts),
         .top_k = @intCast(topK),
-        .activation = nativeActivation(options.activation),
+        .activation = fi_cutlass_moeActivation(options.activation),
         .enable_pdl = options.enable_pdl,
         .fc1_act_per_expert = false,
         .fc2_act_per_expert = false,
         .gemm1_tactic = options.gemm1_tactic,
         .gemm2_tactic = options.gemm2_tactic,
     };
-    const deviceRunner = try ensureRunner(options.workspace_query_device, .bf16);
-    const problem = makeProblem(attributes);
-    var requirements = std.mem.zeroes(native.WorkspaceRequirements);
-    requirements.struct_size = @sizeOf(native.WorkspaceRequirements);
+    const deviceRunner = try ensureRunner(options.workspace_query_device, .bf16xbf16);
+    const context = makeContext(attributes);
+    var requirements = std.mem.zeroes(fi_cutlass_moe.WorkspaceRequirements);
+    requirements.struct_size = @sizeOf(fi_cutlass_moe.WorkspaceRequirements);
     try checkStatus(
         deviceRunner.api,
         deviceRunner.api.getWorkspaceRequirements(
             deviceRunner.runner,
-            &problem,
+            &context,
             &requirements,
         ),
     );
