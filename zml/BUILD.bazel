@@ -152,7 +152,7 @@ zig_library(
         "//stdx",
         "//tools/xspace_to_perfetto:xspace_to_perfetto_lib",
         "//upb",
-        "//zml/io",
+        "//vfs",
         "//zml/tokenizer",
         "@rules_zig//zig/runfiles",
         ":profiling_traceme_lib",

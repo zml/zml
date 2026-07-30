@@ -9,14 +9,15 @@ pub const std_options: std.Options = .{
     .log_level = .info,
 };
 
+const Command = enum { cat, tree, ls, cp, stat, realpath, safetensors, load };
+
 // -- ls hf://openai/gpt-oss-20b@6cee5e8
 // -- ls hf://Qwen/Qwen3-235B-A22B-Instruct-2507
 // -- ls hf://meta-llama/Llama-3.1-8B-Instruct@0e9e39f
+// -- tree s3://noaa-goes19/ABI-Flood-Day-Shapefiles/2025/08
 // -- cat https://iprs.fly.dev
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-
-    const Command = enum { cat, ls, cp, stat, realpath, safetensors, load };
 
     var it = init.minimal.args.iterate();
     _ = it.next(); // skip program name
@@ -72,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
 
             try stdout_writer.interface.print("Wrote {B:.2} to stdout from {s}\n", .{ read, path });
         },
-        .ls => {
+        .ls, .tree => {
             var dir = try std.Io.Dir.openDir(.cwd(), io, path, .{ .iterate = true });
             defer dir.close(io);
 
@@ -80,7 +81,7 @@ pub fn main(init: std.process.Init) !void {
             try stdout_writer.interface.print("{s} - {B:.2}\n", .{ path, dir_stat.size });
 
             var counts: TreeCounts = .{};
-            try printTree(io, &stdout_writer.interface, dir, "", 10, &counts);
+            try printTree(io, &stdout_writer.interface, dir, "", if (command == .tree) 10 else 1, &counts);
             try stdout_writer.interface.print("\n{d} directories, {d} files\n", .{ counts.dirs, counts.files });
         },
         .cp => {
