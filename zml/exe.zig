@@ -261,7 +261,7 @@ pub const Exe = struct {
 
     pub fn internalCall(self: *const Exe, io: ?std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
         stdx.debug.assert(opts.wait == false or io != null, "io should not be null when waiting for execution completion", .{});
-        var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
+        var events: [Platform.MAX_NUM_DEVICES]?*pjrt.Event = @splat(null);
 
         const partition_events = events[0..@intCast(self.num_partitions)];
         const events_slice: ?[]?*pjrt.Event = switch (self.platform.target) {
