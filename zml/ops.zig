@@ -1743,6 +1743,99 @@ pub fn customCallOutputOperandAliases(
     return &output_operand_aliases;
 }
 
+pub const CompositeOpts = struct {
+    version: i32 = 0,
+    composite_attributes: []const mlir.NamedAttribute = &.{},
+};
+
+pub fn composite(
+    name: [:0]const u8,
+    inputs: []const Tensor,
+    outputs: []const Shape,
+    comptime decomposition: anytype,
+    context: anytype,
+    opts: CompositeOpts,
+) []Tensor {
+    const ctx = CompilationContext.current();
+    const mlir_ctx = ctx.mlir_ctx;
+
+    const decomp_name = ctx.allocPrint("{s}.impl_{d}", .{ name, ctx.nextCompositeId() });
+
+    {
+        const block_types = ctx.alloc(*const mlir.Type, inputs.len);
+        const block_locs = ctx.alloc(*const mlir.Location, inputs.len);
+
+        for (inputs, 0..) |t, i| {
+            block_types[i] = mlirx.Type.rankedTensor(mlir_ctx, t.shape());
+            block_locs[i] = mlir.Location.unknown(mlir_ctx);
+        }
+
+        const block = mlir.Block.init(block_types, block_locs);
+
+        ctx.pushBlock(block);
+        {
+            const arg_tensors = ctx.alloc(Tensor, inputs.len);
+            for (inputs, 0..) |t, i| {
+                arg_tensors[i] = Tensor._result(t.shape(), block.argument(i));
+            }
+
+            var result = @call(.auto, decomposition, .{ arg_tensors, context });
+            const rtensors = ctx.alloc(Tensor, outputs.len);
+            meta.collectBuf((struct {
+                pub fn func(t: Tensor) Tensor {
+                    return t;
+                }
+            }).func, {}, &result, rtensors);
+
+            const rvals = ctx.alloc(*const mlir.Value, outputs.len);
+            for (rtensors, 0..) |t, i| {
+                rvals[i] = t.value();
+            }
+
+            _ = dialects.func.returns(mlir_ctx, rvals, .unknown(mlir_ctx)).appendTo(block);
+        }
+        ctx.popBlock();
+
+        _ = dialects.func.func(mlir_ctx, .{
+            .name = decomp_name,
+            .block = block,
+            .location = .unknown(mlir_ctx),
+            .visibility = .private,
+            .verify = false,
+        }).appendTo(ctx.module.body());
+    }
+
+    const operand_values = ctx.alloc(*const mlir.Value, inputs.len);
+    for (inputs, 0..) |t, i| {
+        operand_values[i] = t.value();
+    }
+
+    const result_types = ctx.alloc(*const mlir.Type, outputs.len);
+    for (outputs, 0..) |s, i| {
+        result_types[i] = mlirx.Type.rankedTensor(mlir_ctx, s);
+    }
+
+    const op = dialects.stablehlo.composite(
+        mlir_ctx,
+        operand_values,
+        result_types,
+        .{
+            .name = name,
+            .decomposition = decomp_name,
+            .composite_attributes = opts.composite_attributes,
+            .version = opts.version,
+        },
+        .unknown(mlir_ctx),
+    ).appendTo(ctx.currentScope().block);
+
+    const out_tensors = ctx.alloc(Tensor, outputs.len);
+    for (outputs, 0..) |s, i| {
+        out_tensors[i] = Tensor._result(s, op.result(i));
+    }
+
+    return out_tensors;
+}
+
 pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, metadata: anytype, opts: CustomCallOptions) CustomCallResultTypeFromOutputSpec(@TypeOf(outputs)) {
     // Transform generic inputs to flat slice.
     const inputs_: []const Tensor = switch (@typeInfo(@TypeOf(inputs))) {

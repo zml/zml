@@ -611,6 +611,13 @@ pub const Attribute = opaque {
         return @ptrCast(ArrayAttribute.init(ctx, attrs));
     }
 
+    pub fn intArray(ctx: *Context, comptime T: type, values: []const T) *const Attribute {
+        const it: IntegerTypes = comptime @field(IntegerTypes, @typeName(T));
+        var buf: stdx.BoundedArray(*const Attribute, ShapedType.MAX_RANK) = .empty;
+        for (values) |v| buf.appendAssumeCapacity(.int(ctx, it, v));
+        return .array(ctx, buf.constSlice());
+    }
+
     pub fn flatSymbolRef(ctx: *Context, symbol: []const u8) *const Attribute {
         return @ptrCast(FlatSymbolRefAttribute.init(ctx, symbol));
     }

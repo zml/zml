@@ -1,6 +1,6 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
-load("@zml//bazel:patchelf.bzl", "patchelf")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@zml//bazel:patchelf.bzl", "patchelf")
 load("@zml//platforms/cuda:cuda.bzl", "CUDA_COMPAT_FILES")
 
 patchelf(
@@ -23,42 +23,46 @@ copy_to_directory(
         "@zml//platforms/cuda:zmlxcuda",
     ] + select({
         "@llvm//platforms/config:linux_x86_64": [
+            "@cuda_compat_linux_x86_64//:cuda_compat",
             "@cuda_cudart_linux_x86_64//:cuda_cudart",
             "@cuda_cupti_linux_x86_64//:cuda_cupti",
-            "@cuda_compat_linux_x86_64//:cuda_compat",
             "@cuda_nvcc_linux_x86_64//:cuda_nvcc",
-            "@libnvvm_linux_x86_64//:libnvvm",
             "@cuda_nvrtc_linux_x86_64//:cuda_nvrtc",
             "@cuda_nvtx_linux_x86_64//:cuda_nvtx",
+            "@cuda_tileiras_linux_x86_64//:cuda_tileiras",
             "@cudnn_linux_x86_64//:cudnn",
-            "@libnvshmem_linux_x86_64//:libnvshmem",
             "@libcublas_linux_x86_64//:libcublas",
             "@libcufft_linux_x86_64//:libcufft",
             "@libcusolver_linux_x86_64//:libcusolver",
             "@libcusparse_linux_x86_64//:libcusparse",
             "@libnvjitlink_linux_x86_64//:libnvjitlink",
+            "@libnvshmem_linux_x86_64//:libnvshmem",
+            "@libnvvm_linux_x86_64//:libnvvm",
             "@nccl_linux_amd64//:nccl",
             "@zlib1g_linux_amd64//:zlib1g",
         ],
         "@llvm//platforms/config:linux_aarch64": [
+            "@cuda_compat_linux_sbsa//:cuda_compat",
             "@cuda_cudart_linux_sbsa//:cuda_cudart",
             "@cuda_cupti_linux_sbsa//:cuda_cupti",
-            "@cuda_compat_linux_sbsa//:cuda_compat",
             "@cuda_nvcc_linux_sbsa//:cuda_nvcc",
-            "@libnvvm_linux_sbsa//:libnvvm",
             "@cuda_nvrtc_linux_sbsa//:cuda_nvrtc",
             "@cuda_nvtx_linux_sbsa//:cuda_nvtx",
+            "@cuda_tileiras_linux_sbsa//:cuda_tileiras",
             "@cudnn_linux_sbsa//:cudnn",
-            "@libnvshmem_linux_sbsa//:libnvshmem",
             "@libcublas_linux_sbsa//:libcublas",
             "@libcufft_linux_sbsa//:libcufft",
             "@libcusolver_linux_sbsa//:libcusolver",
             "@libcusparse_linux_sbsa//:libcusparse",
             "@libnvjitlink_linux_sbsa//:libnvjitlink",
+            "@libnvshmem_linux_sbsa//:libnvshmem",
+            "@libnvvm_linux_sbsa//:libnvvm",
             "@nccl_linux_arm64//:nccl",
             "@zlib1g_linux_arm64//:zlib1g",
         ],
     }),
+    add_directory_to_runfiles = False,
+    include_external_repositories = ["**"],
     replace_prefixes = {
         "compat": "lib/compat",
         "nvidia/nccl/lib": "lib",
@@ -72,21 +76,11 @@ copy_to_directory(
         "{}.patchelf".format(file): "lib/compat"
         for file in CUDA_COMPAT_FILES
     },
-    add_directory_to_runfiles = False,
-    include_external_repositories = ["**"],
 )
 
 cc_library(
     name = "libpjrt_cuda",
     data = [":sandbox"],
-    deps = select({
-        "@llvm//platforms/config:linux_x86_64": [
-            "@cuda_cudart_linux_x86_64//:cuda",
-        ],
-        "@llvm//platforms/config:linux_aarch64": [
-            "@cuda_cudart_linux_sbsa//:cuda",
-        ],
-    }),
     linkopts = [
         # Defer function call resolution until the function is called
         # (lazy loading) rather than at load time.
@@ -98,4 +92,12 @@ cc_library(
         "-Wl,-z,lazy",
     ],
     visibility = ["@zml//platforms/cuda:__subpackages__"],
+    deps = select({
+        "@llvm//platforms/config:linux_x86_64": [
+            "@cuda_cudart_linux_x86_64//:cuda",
+        ],
+        "@llvm//platforms/config:linux_aarch64": [
+            "@cuda_cudart_linux_sbsa//:cuda",
+        ],
+    }),
 )

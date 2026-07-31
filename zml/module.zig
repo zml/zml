@@ -101,6 +101,8 @@ pub const CompilationContext = struct {
 
     channel_id: i64 = 0,
 
+    composite_id: i64 = 0,
+
     threadlocal var _current: ?*CompilationContext = null;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: CompilationOptions) CompilationContext {
@@ -199,6 +201,11 @@ pub const CompilationContext = struct {
         return self.channel_id;
     }
 
+    pub fn nextCompositeId(self: *CompilationContext) i64 {
+        self.composite_id += 1;
+        return self.composite_id;
+    }
+
     pub fn abortOOM(self: *CompilationContext) noreturn {
         _ = self;
         @panic("OOM");
@@ -206,6 +213,10 @@ pub const CompilationContext = struct {
 
     pub fn alloc(self: *CompilationContext, T: type, n: usize) []T {
         return self.arena.allocator().alloc(T, n) catch self.abortOOM();
+    }
+
+    pub fn allocPrint(self: *CompilationContext, comptime fmt: []const u8, args: anytype) []u8 {
+        return std.fmt.allocPrint(self.arena.allocator(), fmt, args) catch self.abortOOM();
     }
 };
 

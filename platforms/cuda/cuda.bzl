@@ -131,12 +131,21 @@ CUDA_PACKAGES = {
             ],
         ),
     ],
+    "cuda_tileiras": [
+        packages.filegroup(
+            name = "cuda_tileiras",
+            srcs = ["bin/tileiras"],
+        ),
+    ],
     "libnvvm": [
         packages.filegroup(
             name = "libnvvm",
             srcs = [
                 "nvvm/bin/cicc",
                 "nvvm/libdevice/libdevice.10.bc",
+                "nvvm/lib64/libnvvm.so",
+                "nvvm/lib64/libnvvm.so.4",
+                "nvvm/lib64/libnvvm.so.4.0.0",
             ],
         ),
     ],
@@ -242,7 +251,6 @@ def _read_redist_json(mctx, url, sha256):
         sha256 = sha256,
     )
     return json.decode(mctx.read(fname))
-
 
 def _cuda_impl(mctx):
     loaded_packages = packages.read(mctx, [
