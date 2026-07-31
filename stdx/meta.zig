@@ -3,56 +3,6 @@ const std = @import("std");
 const debug = @import("debug.zig");
 const compileError = debug.compileError;
 
-pub const Field = struct {
-    name: [:0]const u8,
-    type: type,
-    attrs: std.builtin.Type.Struct.FieldAttributes = .{},
-    value: comptime_int = 0,
-};
-
-pub fn fields(comptime T: type) [std.meta.fieldNames(T).len]Field {
-    const info = @typeInfo(T);
-    var result: [std.meta.fieldNames(T).len]Field = undefined;
-    switch (info) {
-        .@"struct" => |struct_info| {
-            for (
-                struct_info.field_names,
-                struct_info.field_types,
-                struct_info.field_attrs,
-                &result,
-            ) |name, FieldType, attrs, *field| {
-                field.* = .{ .name = name, .type = FieldType, .attrs = attrs };
-            }
-        },
-        .@"union" => |union_info| {
-            for (
-                union_info.field_names,
-                union_info.field_types,
-                union_info.field_attrs,
-                &result,
-            ) |name, FieldType, attrs, *field| {
-                field.* = .{
-                    .name = name,
-                    .type = FieldType,
-                    .attrs = .{ .@"align" = attrs.@"align" },
-                };
-            }
-        },
-        .@"enum" => |enum_info| {
-            for (enum_info.field_names, enum_info.field_values, &result) |name, value, *field| {
-                field.* = .{ .name = name, .type = void, .value = value };
-            }
-        },
-        .error_set => |error_set_info| {
-            for (error_set_info.error_names.?, &result) |name, *field| {
-                field.* = .{ .name = name, .type = void };
-            }
-        },
-        else => @compileError("Expected struct, union, enum, or error set type, found '" ++ @typeName(T) ++ "'"),
-    }
-    return result;
-}
-
 pub fn isStruct(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .@"struct" => true,
