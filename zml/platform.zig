@@ -730,6 +730,7 @@ pub const CreateOptions = struct {
         switch (target) {
             .cpu => self.cpu.writeNamedValues(&values),
             .cuda, .rocm, .oneapi, .metal => self.xla_gpu.writeNamedValues(target, &values),
+            .vulkan => values.appendAssumeCapacity(.init(.string, "platform_name", "VULKAN")),
             inline else => |t| {
                 stdx.debug.assertComptime(@hasField(CreateOptions, @tagName(t)), "zml.platform.CreateOptions doesn't list target {s}", .{@tagName(t)});
                 const options = @field(self, @tagName(t));
