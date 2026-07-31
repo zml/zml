@@ -34,24 +34,26 @@ pub const Chat = struct {
         io: std.Io,
         platform: *const zml.Platform,
         tokenizer: zml.tokenizer.Tokenizer,
-        compiled_model: *const models.CompiledModel,
+        compiled_model: *models.CompiledModel,
         model_buffers: *models.Buffers,
     ) !Chat {
-        var session = try compiled_model.newSession(
+        var tokens: std.ArrayList(u32) = try .initCapacity(allocator, compiled_model.seqlen);
+        errdefer tokens.deinit(allocator);
+
+        const session = try compiled_model.newSession(
             allocator,
             io,
             platform,
             model_buffers,
             tokenizer,
         );
-        errdefer session.deinit();
 
         return .{
             .allocator = allocator,
             .io = io,
             .platform = platform,
             .session = session,
-            .tokens = try .initCapacity(allocator, session.maxTokens()),
+            .tokens = tokens,
         };
     }
 

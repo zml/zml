@@ -147,8 +147,8 @@ pub fn main(init: std.process.Init) !void {
     try printZmlLogo(io, init.environ_map);
 
     const interactive = args.prompt == null;
-    const prompt = if (args.prompt) |prompt| b: {
-        break :b try allocator.dupe(u8, prompt);
+    const prompt = if (args.prompt) |prompt_arg| b: {
+        break :b try allocator.dupe(u8, prompt_arg);
     } else b: {
         chat.initHistory();
         const line = c.linenoise(chat.prompt_prefix) orelse return;
