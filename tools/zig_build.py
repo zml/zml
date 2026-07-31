@@ -567,6 +567,22 @@ def has_bazel_config(arguments: list[str], name: str) -> bool:
     return False
 
 
+def uses_llvm_static_runtime(config: dict[str, object]) -> bool:
+    link_args = config.get("link_args")
+    if not isinstance(link_args, list):
+        return False
+
+    llvm_runtime_archives = {
+        "liblibcxx.static.a",
+        "liblibcxxabi.static.a",
+        "liblibunwind.static.a",
+    }
+    return any(
+        isinstance(argument, str) and Path(argument).name in llvm_runtime_archives
+        for argument in link_args
+    )
+
+
 def parse_cli(argv: list[str]) -> tuple[str, list[str], list[str]]:
     parser = argparse.ArgumentParser(
         description="Build a rules_zig target with Bazel and export it to build.zig",
@@ -599,6 +615,20 @@ def main() -> int:
     safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", label).strip("_")
     config_path = Path("/tmp") / "zig-bazel" / safe_label / "config.json"
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    if uses_llvm_static_runtime(config):
+        # HACK: These archives are implicit inputs of LLVM's CppLink action, so
+        # rules_zig's zig_build_inputs output group does not materialize them.
+        # This tool is ZML-specific and experimental, so build LLVM's runtime
+        # filegroup explicitly instead of making the extraction generic for now.
+        bazel(
+            workspace,
+            [
+                "build",
+                "--show_result=0",
+                *bazel_flags,
+                "@llvm//runtimes/cxxstdlib:static_runtime_lib",
+            ],
+        )
     bazel(workspace, ["build", "--show_result=0", *bazel_flags, "--output_groups=zig_build_inputs", label])
 
     target_run_info = run_info(workspace, bazel_flags, label, config_path.parent)
