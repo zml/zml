@@ -119,7 +119,7 @@ pub fn build(b: *std.Build) void {
     }
     run.setEnvironmentVariable("RUNFILES_DIR", absolute(config.execroot, config.runfiles_dir, b));
     run.setEnvironmentVariable("RUNFILES_MANIFEST_FILE", absolute(config.execroot, config.runfiles_manifest, b));
-    run.addFileArg(binary);
+    run.addFileArg2(binary, .{ .make_absolute = true });
     run.addArgs(config.run_args);
     run.addPassthruArgs();
 
