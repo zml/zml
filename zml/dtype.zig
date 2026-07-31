@@ -151,6 +151,8 @@ pub const DataType = enum(u8) {
 
     pub fn bitSizeOf(self: DataType) u16 {
         return switch (self) {
+            .c64 => 64,
+            .c128 => 128,
             inline else => |tag| @bitSizeOf(tag.toZigType()),
         };
     }

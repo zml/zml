@@ -8,8 +8,8 @@ fn FloatConversionHelpers(Float: type) type {
         @compileError(err_msg);
     }
     comptime {
-        for (info.@"struct".fields, &.{ "mantissa", "exponent", "sign" }) |field, expected_name| {
-            if (!std.mem.eql(u8, field.name, expected_name))
+        for (info.@"struct".field_names, &.{ "mantissa", "exponent", "sign" }) |field_name, expected_name| {
+            if (!std.mem.eql(u8, field_name, expected_name))
                 @compileError(err_msg);
         }
     }
@@ -20,7 +20,7 @@ fn FloatConversionHelpers(Float: type) type {
         const mantissa_bits: u8 = @typeInfo(@FieldType(Float, "mantissa")).int.bits;
         const exponent_bits: u8 = @typeInfo(@FieldType(Float, "exponent")).int.bits;
         const f32_mantissa_bits: u8 = @typeInfo(@FieldType(Float32, "mantissa")).int.bits;
-        const exp_bias: i16 = std.math.maxInt(std.meta.Int(.unsigned, exponent_bits - 1));
+        const exp_bias: i16 = std.math.maxInt(@Int(.unsigned, exponent_bits - 1));
         const exp_off: u8 = FloatConversionHelpers(Float32).exp_bias - exp_bias;
 
         /// Lossy conversion from f32, similar to @floatCast
@@ -106,8 +106,8 @@ fn FloatHelpers(Float: type) type {
         @compileError(err_msg);
     }
     comptime {
-        for (info.@"struct".fields, &.{ "mantissa", "exponent", "sign" }) |field, expected_name| {
-            if (!std.mem.eql(u8, field.name, expected_name))
+        for (info.@"struct".field_names, &.{ "mantissa", "exponent", "sign" }) |field_name, expected_name| {
+            if (!std.mem.eql(u8, field_name, expected_name))
                 @compileError(err_msg);
         }
     }
@@ -525,7 +525,7 @@ pub fn isInf(x: anytype) bool {
     }
     if (!@hasDecl(Float, "inf")) return false;
 
-    const FBits = std.meta.Int(.unsigned, @bitSizeOf(Float));
+    const FBits = @Int(.unsigned, @bitSizeOf(Float));
     const remove_sign = ~@as(FBits, 0) >> 1;
     return @as(FBits, @bitCast(x)) & remove_sign == @as(FBits, @bitCast(Float.inf));
 }

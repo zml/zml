@@ -27,7 +27,7 @@ pub inline fn stackSlice(comptime max_len: usize, T: type, len: usize) []T {
     return storage[0..len];
 }
 
-pub const noalloc: std.mem.Allocator = if (builtin.mode == .ReleaseFast) undefined else std.testing.failing_allocator;
+pub const noalloc: std.mem.Allocator = if (builtin.mode == .fast) undefined else std.testing.failing_allocator;
 
 pub fn arenaWithCapacity(parent: std.mem.Allocator, initial_capacity: usize) std.mem.Allocator.Error!std.heap.ArenaAllocator {
     var a: std.heap.ArenaAllocator = .init(parent);
@@ -42,7 +42,7 @@ pub fn pinToCore(core_id: usize) void {
     if (builtin.os.tag == .linux) {
         const CPUSet = std.bit_set.ArrayBitSet(usize, std.os.linux.CPU_SETSIZE * @sizeOf(usize));
 
-        var set: CPUSet = .initEmpty();
+        var set: CPUSet = .empty;
         set.set(core_id);
         std.os.linux.sched_setaffinity(0, @ptrCast(&set.masks)) catch {};
     }

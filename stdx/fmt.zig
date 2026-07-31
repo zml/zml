@@ -167,15 +167,15 @@ fn printValue(
     switch (@typeInfo(T)) {
         .@"struct" => |info| {
             try w.writeAll(".{ ");
-            inline for (info.fields, 0..) |f, i| {
+            inline for (info.field_names, 0..) |field_name, i| {
                 if (i > 0) try w.writeAll(", ");
 
                 if (!info.is_tuple) {
                     try w.writeByte('.');
-                    try w.writeAll(f.name);
+                    try w.writeAll(field_name);
                     try w.writeAll(" = ");
                 }
-                try printValue(w, options, @field(value, f.name), max_depth - 1);
+                try printValue(w, options, @field(value, field_name), max_depth - 1);
             }
             try w.writeAll(" }");
         },

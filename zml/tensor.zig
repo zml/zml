@@ -77,7 +77,7 @@ pub const Tensor = struct {
             .id = Tensor.current_id.fetchAdd(1, .seq_cst),
         };
 
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             // Check that the MLIR value actually have the same shape.
             const other = fromMlirValue(val);
             stdx.debug.internalAssert(sh.eql(other._shape), "Created a {f} from Mlir value but expected {f}", .{ other._shape, res._shape });
@@ -1963,7 +1963,7 @@ pub const Tensor = struct {
 
     pub fn choose(self: Tensor, offsets: anytype) Tensor {
         const off, const tags = Shape.parseDimensions(offsets);
-        var slices = [_]Slice{.{}} ** constants.MAX_RANK;
+        var slices: [constants.MAX_RANK]Slice = @splat(.{});
         for (off.constSlice(), tags.constSlice()) |o, t| {
             const ax = self.axis(t);
             slices[ax] = .single(o);
@@ -2502,7 +2502,7 @@ pub const Tensor = struct {
     pub fn pad(self: Tensor, padding_value: anytype, paddings: anytype) Tensor {
         const _paddings = self.shape().parseAxesOptions(Pad, paddings, .{});
 
-        const ZEROS = [_]i64{0} ** constants.MAX_RANK;
+        const ZEROS: [constants.MAX_RANK]i64 = @splat(0);
         var low = ZEROS;
         var high = ZEROS;
         var interior = ZEROS;
@@ -2540,7 +2540,7 @@ pub const Tensor = struct {
             self.axis(axis_);
 
         var res_shape = self._shape;
-        const ones = [_]i64{1} ** constants.MAX_RANK;
+        const ones: [constants.MAX_RANK]i64 = @splat(1);
         res_shape._dims.insertSlice(ax, ones[0..tags_.len]) catch unreachable;
         res_shape._tags.insertSlice(ax, tags_.constSlice()) catch unreachable;
 
@@ -3376,8 +3376,8 @@ pub const Tensor = struct {
         const has_name: ?[:0]const u8, const a = switch (@typeInfo(@TypeOf(named_axis_))) {
             .int, .comptime_int => .{ null, self.axis(@as(i64, @intCast(named_axis_))) },
             .@"struct" => |info| blk: {
-                stdx.debug.assertComptime(info.fields.len == 1, err_msg, .{});
-                break :blk .{ info.fields[0].name, self.axis(@field(named_axis_, info.fields[0].name)) };
+                stdx.debug.assertComptime(info.field_names.len == 1, err_msg, .{});
+                break :blk .{ info.field_names[0], self.axis(@field(named_axis_, info.field_names[0])) };
             },
             else => stdx.debug.compileError(err_msg, .{}),
         };
@@ -3456,7 +3456,7 @@ pub const Tensor = struct {
 
         // TODO: support maxPool on non last axis
         const a = self.axis(-1);
-        const ones = [_]i64{1} ** constants.MAX_RANK;
+        const ones: [constants.MAX_RANK]i64 = @splat(1);
         var window_dimensions = ones;
         window_dimensions[a] = opts.window_dimensions;
         var window_strides = window_dimensions;
@@ -3467,7 +3467,7 @@ pub const Tensor = struct {
         var window_dilations = ones;
         window_dilations[a] = opts.window_dilations;
 
-        var padding = [_][2]i64{.{ 0, 0 }} ** constants.MAX_RANK;
+        var padding: [constants.MAX_RANK][2]i64 = @splat(.{ 0, 0 });
         padding[a] = opts.padding;
 
         const values, const indices = ops.reduceWindow(
@@ -3506,7 +3506,7 @@ pub const Tensor = struct {
         const base_dilation = initPoolArg(self.rank(), &opts.base_dilations);
         const window_dilations = initPoolArg(self.rank(), &opts.window_dilations);
 
-        var padding = [_][2]i64{.{ 0, 0 }} ** constants.MAX_RANK;
+        var padding: [constants.MAX_RANK][2]i64 = @splat(.{ 0, 0 });
         padding[a - 1] = opts.padding[0];
         padding[a] = opts.padding[1];
 
@@ -3704,7 +3704,7 @@ pub const Tensor = struct {
         const a = self.axis(axis_);
         const new_shape = self._shape.set(a, slice_.len);
 
-        var start_indices = [_]*const mlir.Value{constant(slice_.start.dtype().zero()).value()} ** constants.MAX_RANK;
+        var start_indices: [constants.MAX_RANK]*const mlir.Value = @splat(constant(slice_.start.dtype().zero()).value());
         start_indices[a] = slice_.start.value();
 
         const op = dialects.stablehlo.dynamic_slice(
@@ -3745,7 +3745,7 @@ pub const Tensor = struct {
 
         const idx_dtype = if (slices.len > 0) slices.get(0).start.dtype() else .i32;
         const zero = Tensor.scalar(0, idx_dtype).value();
-        var offset_values = [_]*const mlir.Value{zero} ** constants.MAX_RANK;
+        var offset_values: [constants.MAX_RANK]*const mlir.Value = @splat(zero);
         var res_shape = self._shape;
         for (slices.constSlice(), 0..) |slice_, i| {
             const offset = slice_.start;
@@ -3802,7 +3802,7 @@ pub const Tensor = struct {
     /// Note this is the untagged api, if you have tags, you should use dynamicUpdateSlice directly.
     pub fn dynamicUpdateSlice1d(self: Tensor, update: Tensor, axis_: i64, offset: Tensor) Tensor {
         const placeholder = Tensor.scalar(0, .i32);
-        var start_indices = [_]Tensor{placeholder} ** constants.MAX_RANK;
+        var start_indices: [constants.MAX_RANK]Tensor = @splat(placeholder);
         start_indices[self.axis(axis_)] = offset;
         return self.dynamicUpdateSlice(start_indices[0..self.rank()], update);
     }
@@ -3877,7 +3877,7 @@ pub const Tensor = struct {
         } else {
             // If an axis isn't specified, update the full slice.
             // This is only allowed when using tagged sliced.
-            offset_values = .{zero} ** constants.MAX_RANK;
+            offset_values = @splat(zero);
             for (offset.constSlice(), offset_tags.constSlice()) |start, t| {
                 const a = self._shape.hasTag(t) orelse stdx.debug.panic("dynamicUpdateSlice expects input tensor to have tags used in 'offset_' but {s} is missing (input shape is {f})", .{ t, self._shape });
                 offset_values[a] = start.value();

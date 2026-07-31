@@ -219,7 +219,7 @@ pub const Tokenizer = struct {
                     .idk => {
 
                         // Special tokens can't be concatenated.
-                        if (builtin.mode == .Debug and tok_buff[i] != self.special_tokens.unk) {
+                        if (builtin.mode == .debug and tok_buff[i] != self.special_tokens.unk) {
                             // Detects memory corruption of tokens.
                             if (cur_tok.len == 0 or cur_tok.len > self.max_token_len) @panic("Token looks corrupted !");
 
@@ -839,7 +839,7 @@ pub const Normalizer = struct {
         const normalizer = try Normalizer.fromHfJson(config.object);
 
         const expected = Normalizer{
-            ._whitespace = .{ .buffer = [_]u8{ 0xe2, 0x96, 0x81 } ++ [_]u8{0} ** 5, .len = 3 },
+            ._whitespace = .{ .buffer = [_]u8{ 0xe2, 0x96, 0x81 } ++ @as([5]u8, @splat(0)), .len = 3 },
             .flags = .{
                 .remove_extra_whitespaces = false,
                 .add_dummy_prefix = true,

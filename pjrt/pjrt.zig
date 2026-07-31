@@ -31,18 +31,18 @@ pub const meta = struct {
     }
 
     pub fn Struct(comptime T: type) type {
-        const fields = std.meta.fields(T);
-        var names: [fields.len][]const u8 = undefined;
-        var types: [fields.len]type = undefined;
-        var attributes: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
-        for (fields, &names, &types, &attributes) |field, *name, *type_, *attr| {
-            name.* = field.name;
-            type_.* = field.type;
+        const info = @typeInfo(T).@"struct";
+        var names: [info.field_names.len][]const u8 = undefined;
+        var types: [info.field_names.len]type = undefined;
+        var attributes: [info.field_names.len]std.builtin.Type.Struct.FieldAttributes = undefined;
+        for (info.field_names, info.field_types, &names, &types, &attributes) |field_name, Field, *name, *type_, *attr| {
+            name.* = field_name;
+            type_.* = Field;
             attr.* = .{
-                .default_value_ptr = @ptrCast(if (std.mem.eql(u8, field.name, "struct_size"))
+                .default_value_ptr = @ptrCast(if (std.mem.eql(u8, field_name, "struct_size"))
                     &structSize(T)
                 else
-                    &std.mem.zeroes(field.type)),
+                    &std.mem.zeroes(Field)),
             };
         }
         return @Struct(
@@ -146,7 +146,7 @@ pub const Api = struct {
         const fti = @typeInfo(@FieldType(c.PJRT_Api, @tagName(func)));
         const fn_ptr = @typeInfo(fti.optional.child);
         const fn_type_info = @typeInfo(fn_ptr.pointer.child);
-        const arg_array_type_info = @typeInfo(fn_type_info.@"fn".params[0].type.?);
+        const arg_array_type_info = @typeInfo(fn_type_info.@"fn".param_types[0].?);
         return arg_array_type_info.pointer.child;
     }
 
@@ -251,7 +251,7 @@ pub const Api = struct {
     pub fn stablehloCurrentVersion(self: *const Api) ?[]const u8 {
         const state = struct {
             var buf: [32]u8 = undefined;
-            var str: ?[:0]const u8 = null;
+            var str: ?[]const u8 = null;
         };
         if (state.str) |str| {
             return str;
@@ -259,7 +259,7 @@ pub const Api = struct {
         if (self.pluginAttribute("stablehlo_current_version")) |nv| {
             switch (nv.value()) {
                 .int64list => |v| {
-                    state.str = std.fmt.bufPrintZ(&state.buf, "{d}.{d}.{d}", .{ v[0], v[1], v[2] }) catch unreachable;
+                    state.str = std.mem.print(&state.buf, "{d}.{d}.{d}", .{ v[0], v[1], v[2] }) catch unreachable;
                 },
                 else => unreachable,
             }
@@ -361,7 +361,7 @@ pub const Error = opaque {
         const ret = api.call(.PJRT_Error_GetCode, .{
             .@"error" = self.inner(),
         }) catch unreachable;
-        return @enumFromInt(ret.code);
+        return @fromBackingInt(@intCast(ret.code));
     }
 
     pub fn getMessage(self: *Error, api: *const Api) []const u8 {
@@ -386,7 +386,7 @@ pub const ShapeSpec = extern struct {
             .inner = .{
                 .dims = @ptrCast(@constCast(dims_)),
                 .num_dims = dims_.len,
-                .element_type = @intFromEnum(bt),
+                .element_type = @backingInt(bt),
             },
         };
     }
@@ -396,7 +396,7 @@ pub const ShapeSpec = extern struct {
     }
 
     pub fn bufferType(self: ShapeSpec) BufferType {
-        return @enumFromInt(self.inner.element_type);
+        return @fromBackingInt(@intCast(self.inner.element_type));
     }
 };
 
@@ -490,13 +490,13 @@ pub const Client = opaque {
         const ret = try api.call(.PJRT_Client_BufferFromHostBuffer, .{
             .client = self.inner(),
             .data = @constCast(args.data),
-            .type = @intFromEnum(args.buffer_type),
+            .type = @backingInt(args.buffer_type),
             .dims = @ptrCast(@constCast(args.dims)),
             .num_dims = args.dims.len,
             .byte_strides = if (args.byte_strides) |bs| @ptrCast(@constCast(bs)) else null,
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
             .device_layout = @ptrCast(@constCast(&args.layout.toCStruct())),
-            .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
+            .host_buffer_semantics = @backingInt(args.host_buffer_semantics),
             .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
             .memory = if (args.dst == .memory) args.dst.memory.inner() else null,
         });
@@ -536,7 +536,7 @@ pub const Client = opaque {
             .device_buffer_ptr = @constCast(args.data),
             .dims = args.dims.ptr,
             .num_dims = args.dims.len,
-            .element_type = @intFromEnum(args.element_type),
+            .element_type = @backingInt(args.element_type),
             .layout = @ptrCast(@constCast(&layout)),
             .device = @ptrCast(@constCast(args.device)),
             .on_delete_callback = args.on_delete_callback,
@@ -601,7 +601,7 @@ pub const Client = opaque {
             .struct_size = c.PJRT_Layouts_PJRT_Client_GetDefaultLayout_Args_STRUCT_SIZE,
             .extension_start = null,
             .client = self.inner(),
-            .type = @intFromEnum(element_type),
+            .type = @backingInt(element_type),
             .dims = dims.ptr,
             .num_dims = dims.len,
             .layout = null,
@@ -662,7 +662,7 @@ pub const Client = opaque {
             .client = self.inner(),
             .shape_dims = args.dims.ptr,
             .shape_num_dims = args.dims.len,
-            .shape_element_type = @intFromEnum(args.element_type),
+            .shape_element_type = @backingInt(args.element_type),
             .shape_layout = @ptrCast(&layout),
             .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
             .memory = if (args.dst == .memory) args.dst.memory.inner() else null,
@@ -1216,7 +1216,7 @@ pub const Buffer = opaque {
         const ret = api.call(.PJRT_Buffer_ElementType, .{
             .buffer = self.inner(),
         }) catch unreachable;
-        return @enumFromInt(ret.type);
+        return @fromBackingInt(@intCast(ret.type));
     }
 
     pub fn dimensions(self: *const Buffer, api: *const Api) []const i64 {
@@ -1542,7 +1542,7 @@ pub const NamedValue = extern struct {
     };
 
     pub fn kind(self: NamedValue) Kind {
-        return @enumFromInt(self.inner.type);
+        return @fromBackingInt(@intCast(self.inner.type));
     }
 
     pub fn name(self: NamedValue) []const u8 {
@@ -1566,7 +1566,7 @@ pub const NamedValue = extern struct {
                 .extension_start = null,
                 .name = @ptrCast(name_),
                 .name_size = name_.len,
-                .type = @intFromEnum(kind_),
+                .type = @backingInt(kind_),
                 .unnamed_0 = switch (kind_) {
                     .string => .{ .string_value = @ptrCast(@constCast(value_)) },
                     .int64 => .{ .int64_value = value_ },

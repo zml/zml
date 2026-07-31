@@ -408,11 +408,11 @@ pub const PhysicalMesh = struct {
 
             try writer.writeAll("], depth_by_tag={");
 
-            const fields = std.meta.fields(PhysicalAxisTag);
-            inline for (fields, 0..) |field, i| {
+            const field_names = comptime std.meta.fieldNames(PhysicalAxisTag);
+            inline for (field_names, 0..) |field_name, i| {
                 if (i > 0) try writer.writeAll(", ");
-                const tag = @field(PhysicalAxisTag, field.name);
-                try writer.writeAll(field.name);
+                const tag = @field(PhysicalAxisTag, field_name);
+                try writer.writeAll(field_name);
                 try writer.writeAll("=");
                 if (self.depth_by_tag.get(tag)) |d| {
                     try writer.print("{d}", .{d});
@@ -791,7 +791,7 @@ pub const PhysicalMesh = struct {
                 if (coord_placement.coords.len != rank) return error.InvalidDeviceCoordsRank;
             }
 
-            var axis_sizes = [_]usize{1} ** MAX_MESH_RANK;
+            var axis_sizes: [MAX_MESH_RANK]usize = @splat(1);
             for (0..rank) |ax_i| {
                 var max_coord: usize = 0;
                 for (placements) |coord_placement| {
@@ -1025,7 +1025,7 @@ pub const PhysicalMesh = struct {
             });
         }
 
-        var coords_buf: [MAX_MESH_RANK]usize = [_]usize{0} ** MAX_MESH_RANK;
+        var coords_buf: [MAX_MESH_RANK]usize = @splat(0);
         var next_device: usize = 0;
 
         const Node = struct {
@@ -1154,9 +1154,9 @@ pub const LogicalMesh = struct {
         var axes: Axes = .empty;
         var intents: Intents = .empty;
 
-        inline for (std.meta.fields(T)) |field| {
-            const value = @field(axes_, field.name);
-            axes.appendAssumeCapacity(Shape.toTag(field));
+        inline for (comptime std.meta.fieldNames(T)) |field_name| {
+            const value = @field(axes_, field_name);
+            axes.appendAssumeCapacity(Shape.toTag(field_name));
             intents.appendAssumeCapacity(intentFromValue(value));
         }
 
@@ -1672,15 +1672,15 @@ pub const Strategy = struct {
     pub fn parseBindings(bindings: anytype) Strategy {
         const err_msg = "Strategy.parseBindings excepts fields to be PhysicalAxisTag or tuple of PhysicalAxisTag, got {}";
         var res: Strategy = .{ .bindings = .empty, .folding = .empty };
-        const fields = @typeInfo(@TypeOf(bindings)).@"struct".fields;
-        if (fields.len == 0) @compileError("Strategy.parseBindings requires at least one binding");
-        inline for (fields) |field_info| {
-            switch (@typeInfo(field_info.type)) {
-                .enum_literal, .@"enum" => res.addBinding(field_info, @field(bindings, field_info.name)),
+        const info = @typeInfo(@TypeOf(bindings)).@"struct";
+        if (info.field_names.len == 0) @compileError("Strategy.parseBindings requires at least one binding");
+        inline for (info.field_names, info.field_types) |field_name, Field| {
+            switch (@typeInfo(Field)) {
+                .enum_literal, .@"enum" => res.addBinding(field_name, @field(bindings, field_name)),
                 .@"struct" => |struct_info| {
                     stdx.debug.assertComptime(struct_info.is_tuple, err_msg, .{@TypeOf(bindings)});
-                    inline for (@field(bindings, field_info.name)) |axis_tag| {
-                        res.addBinding(field_info, axis_tag);
+                    inline for (@field(bindings, field_name)) |axis_tag| {
+                        res.addBinding(field_name, axis_tag);
                     }
                 },
                 else => stdx.debug.compileError(err_msg, .{@TypeOf(bindings)}),
@@ -1790,7 +1790,7 @@ pub const Placement = struct {
     // Note this shape is mainly use to indicate the dims of the sharded buffer.
     // We may want to only store that.
     shape: Shape,
-    global_shape: if (builtin.mode == .Debug) Shape else void,
+    global_shape: if (builtin.mode == .debug) Shape else void,
 
     axis_plans: stdx.BoundedArray(AxisSplit, Shape.MAX_RANK),
 
@@ -1798,7 +1798,7 @@ pub const Placement = struct {
         var pl: Placement = .{
             .sharding = sharding,
             .shape = shape, // modified below
-            .global_shape = if (builtin.mode == .Debug) shape else {},
+            .global_shape = if (builtin.mode == .debug) shape else {},
             .axis_plans = .empty, // set below
         };
         var used_axes: std.EnumSet(PhysicalAxisTag) = .empty;
@@ -1827,7 +1827,7 @@ pub const Placement = struct {
     }
 
     pub fn shardPtr(pl: *const Placement, device: Device.Coords, slice: Slice) [*]const u8 {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             // there is a bug in caller code that used a placement for a different shape
             std.debug.assert(pl.global_shape.eql(slice.shape));
         }
@@ -2022,10 +2022,10 @@ const ShardingTest = struct {
     /// Creates a 1D-3D PhysicalMesh from simple dimensions.
     pub fn physical(self: ShardingTest, dims: anytype, geometry: AxisGeometry) !PhysicalMesh {
         const info = @typeInfo(@TypeOf(dims)).@"struct";
-        const N = info.fields.len;
+        const N = info.field_names.len;
         var sizes: [N]usize = undefined;
-        inline for (info.fields, sizes[0..]) |field, *s| {
-            s.* = @intCast(@field(dims, field.name));
+        inline for (info.field_names, sizes[0..]) |field_name, *s| {
+            s.* = @intCast(@field(dims, field_name));
         }
 
         const tags: [3]PhysicalAxisTag = .{ .link_x, .link_y, .link_z };

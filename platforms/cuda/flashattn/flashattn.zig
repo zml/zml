@@ -20,7 +20,7 @@ pub const Tensor = struct {
                 .rank = @intCast(rank),
                 .dims = undefined,
                 .strides = undefined,
-                .dtype = @intCast(@intFromEnum(dtype)),
+                .dtype = @intCast(@backingInt(dtype)),
             },
         };
         @memcpy(ret.inner.dims[0..rank], dims);
