@@ -54,6 +54,7 @@ single_version_override(
     patch_strip = 1,
     patches = [
         "//:third_party/rules_zig/translate-c-0.17.patch",
+        "//:third_party/rules_zig/zml-native-prelink.patch",
     ],
     version = "0.15.1",
 )
