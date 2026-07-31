@@ -2,12 +2,21 @@
 set -euo pipefail
 shopt -s nullglob
 
-neuron_explorer_bin="$0.runfiles/+neuron_packages+libpjrt_neuron/sandbox/bin/neuron-explorer"
+neuron_explorer_bin="$(rlocation "libpjrt_neuron/sandbox/bin/neuron-explorer")"
 data_path="$1"
 default_profile_root="$2"
 shift 2
 
 mkdir -p "${data_path}"
+
+sanitize_profile_name() {
+  local value
+  value="$(printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9_.-' '_')"
+  if [[ ! "${value}" =~ ^[A-Za-z0-9_] ]]; then
+    value="_${value}"
+  fi
+  printf '%.150s' "${value}"
+}
 
 ingest_run() {
   local run_dir="$1"
@@ -24,7 +33,9 @@ ingest_run() {
     [[ -f "${profile_session}/ntrace.pb" ]] || continue
 
     local system_dir
+    local system_display_name
     system_dir="$(mktemp -d)"
+    system_display_name="$(sanitize_profile_name "${run_id}_system")"
     for file in ntrace.pb trace_info.pb cpu_util.pb host_mem.pb; do
       [[ -f "${profile_session}/${file}" ]] && cp "${profile_session}/${file}" "${system_dir}/${file}"
     done
@@ -33,7 +44,7 @@ ingest_run() {
       --ingest-only \
       --force \
       --data-path "${data_path}" \
-      --display-name "${run_id}:system" \
+      --display-name "${system_display_name}" \
       -d "${system_dir}"
 
     rm -rf "${system_dir}"
@@ -44,7 +55,11 @@ ingest_run() {
     local program_name
     local ntff_prefix
     neff_name="$(basename "${neff}" .neff)"
-    program_name="$(grep -aEom1 'MODULE_[A-Za-z0-9_]+' "${neff}" | sed -E 's/^MODULE_//; s/_[0-9]+$//')"
+    IFS= read -r program_name < <(grep -aEo 'MODULE_[A-Za-z0-9_]+' "${neff}") || true
+    program_name="${program_name#MODULE_}"
+    if [[ "${program_name}" =~ ^(.*)_[0-9]+$ ]]; then
+      program_name="${BASH_REMATCH[1]}"
+    fi
     if [[ -z "${program_name}" ]]; then
       echo "failed to find program name in ${neff}" >&2
       exit 1
@@ -57,6 +72,7 @@ ingest_run() {
         -s "${ntff_prefix}.ntff" \
         --num-exec=2 \
         --profile-nth-exec=2 \
+        --enable-dge-notifs \
         --io-from=neff
     fi
 
@@ -66,7 +82,7 @@ ingest_run() {
       local core_suffix
       local display_name
       core_suffix="$(basename "${ntff}" .ntff | sed -E 's/^.*_rank_([0-9]+).*$/nc\1/; s/^.*_(vnc_[0-9]+)$/\1/')"
-      display_name="${run_id}:${program_name}_${core_suffix}"
+      display_name="$(sanitize_profile_name "${run_id}_${program_name}_${neff_name}_${core_suffix}")"
 
       "${neuron_explorer_bin}" view \
         --ingest-only \

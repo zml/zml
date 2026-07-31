@@ -3,7 +3,7 @@ set -euo pipefail
 
 data_path="$1"
 port="$2"
-neuron_explorer_bin="$0.runfiles/+neuron_packages+libpjrt_neuron/sandbox/bin/neuron-explorer"
+neuron_explorer_bin="$(rlocation "libpjrt_neuron/sandbox/bin/neuron-explorer")"
 
 mkdir -p "${data_path}"
 

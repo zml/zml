@@ -5,6 +5,8 @@ const platforms = @import("platforms");
 const zml = @import("../../zml.zig");
 const stdx = zml.stdx;
 
+pub const paged = @import("paged_attention.zig");
+
 const KernelSpec = struct {
     name: []const u8,
     entrypoint: []const u8,
@@ -19,7 +21,7 @@ pub const Parameters = struct {
     pub fn init() Parameters {
         if (comptime platforms.isEnabled(.neuron)) {
             const nki_kernel = @import("platforms/neuron/nki_kernel");
-            const compiler_target = nki_kernel.compilerTargetFromInstance();
+            const compiler_target = nki_kernel.compilerTarget();
             return .{
                 .compiler_target = @tagName(compiler_target),
                 .decode_kernel = switch (compiler_target) {

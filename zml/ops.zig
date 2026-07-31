@@ -14,6 +14,7 @@ const CustomCallBuffer = @import("pjrtx.zig").CustomCallBuffer;
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
+const nki_simulator = @import("nki_simulator.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 pub const ShapeToCustomCallBuffer = @import("pjrtx.zig").ShapeToCustomCallBuffer;
@@ -711,19 +712,23 @@ pub const NeuronNkiOps = struct {
     entrypoint: []const u8,
     source_path: []const u8,
     compiler_target: []const u8,
+    lnc: i64 = 1,
     has_side_effect: bool = false,
     output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
 /// Generate an MLIR call for a Neuron NKI kernel.
 ///
-/// This API is Neuron-only: the source is compiled to an
-/// `AwsNeuronCustomNativeKernel` backend config while emitting the graph.
+/// Neuron compilation emits an `AwsNeuronCustomNativeKernel`. With
+/// `NKI_SIMULATOR=1`, CPU compilation emits a host XLA FFI call instead.
 pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs.len]Tensor {
     const ctx = CompilationContext.current();
     switch (ctx.platform.target) {
         .neuron => {},
-        .cpu, .cuda, .rocm, .tpu, .oneapi, .metal => {
+        .cpu => if (!nki_simulator.requested()) {
+            stdx.debug.panic("neuronNki on CPU requires NKI_SIMULATOR=1", .{});
+        },
+        .cuda, .rocm, .tpu, .oneapi, .metal => {
             stdx.debug.panic("neuronNki is only available on Neuron, got {s}", .{@tagName(ctx.platform.target)});
         },
     }
@@ -756,6 +761,38 @@ pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs
         results_layouts[i] = allocator.dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
     }
 
+    if (ctx.platform.target == .cpu) {
+        const source = nki_simulator.readKernelSource(allocator, ctx.io, opts.source_path) catch |err| {
+            stdx.debug.panic("failed to read NKI simulator source {s}: {}", .{ opts.source_path, err });
+        };
+        const backend_config: *const mlir.Attribute = .dict(mlir_ctx, &.{
+            .named(mlir_ctx, "source", .string(mlir_ctx, source)),
+            .named(mlir_ctx, "entrypoint", .string(mlir_ctx, opts.entrypoint)),
+            .named(mlir_ctx, "compiler_target", .string(mlir_ctx, opts.compiler_target)),
+            .named(mlir_ctx, "grid", .int(mlir_ctx, .i64, opts.lnc)),
+        });
+        const op = dialects.stablehlo.custom_call(
+            mlir_ctx,
+            &values,
+            &res_types,
+            .{
+                .call_target_name = nki_simulator.custom_call_name,
+                .backend_config = .{ .typed_ffi = backend_config },
+                .has_side_effect = opts.has_side_effect,
+                .operand_layouts = &operands_layouts,
+                .result_layouts = &results_layouts,
+                .output_operand_aliases = opts.output_operand_aliases,
+            },
+            .unknown(mlir_ctx),
+        ).appendTo(ctx.currentScope().block);
+
+        var simulator_outputs: [outputs.len]Tensor = undefined;
+        inline for (outputs, 0..) |output, i| {
+            simulator_outputs[i] = Tensor._result(output, op.result(i));
+        }
+        return simulator_outputs;
+    }
+
     var input_signatures: [inputs.len]nki_kernel.TensorSignature = undefined;
     inline for (inputs, 0..) |input, i| {
         input_signatures[i] = .{
@@ -776,6 +813,7 @@ pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs
         .entrypoint = opts.entrypoint,
         .source_path = opts.source_path,
         .compiler_target = opts.compiler_target,
+        .lnc = opts.lnc,
         .inputs = &input_signatures,
         .outputs = &output_signatures,
     }) catch |err| {

@@ -4,6 +4,7 @@ sh_binary(
     name = "profile",
     srcs = ["profile.sh"],
     data = ["@libpjrt_neuron//:sandbox"],
+    use_bash_launcher = True,
     visibility = ["//visibility:public"],
 )
 
@@ -15,6 +16,7 @@ sh_binary(
         "3001",
     ],
     data = ["@libpjrt_neuron//:sandbox"],
+    use_bash_launcher = True,
     visibility = ["//visibility:public"],
 )
 
@@ -26,6 +28,7 @@ sh_binary(
         "/tmp/zml-neuron-profile",
     ],
     data = ["@libpjrt_neuron//:sandbox"],
+    use_bash_launcher = True,
     visibility = ["//visibility:public"],
 )
 
@@ -33,6 +36,7 @@ sh_binary(
     name = "summary-txt",
     srcs = ["summary.sh"],
     data = ["@libpjrt_neuron//:sandbox"],
+    use_bash_launcher = True,
     visibility = ["//visibility:public"],
 )
 
@@ -40,6 +44,7 @@ sh_binary(
     name = "summary-json",
     srcs = ["summary.sh"],
     data = ["@libpjrt_neuron//:sandbox"],
+    use_bash_launcher = True,
     visibility = ["//visibility:public"],
 )
 
@@ -47,5 +52,6 @@ sh_binary(
     name = "summary-perfetto",
     srcs = ["summary.sh"],
     data = ["@libpjrt_neuron//:sandbox"],
+    use_bash_launcher = True,
     visibility = ["//visibility:public"],
 )

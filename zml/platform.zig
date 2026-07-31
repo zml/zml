@@ -10,6 +10,7 @@ const stdx = @import("stdx");
 const attention = @import("attention.zig");
 const constants = @import("constants.zig");
 const Exe = @import("exe.zig").Exe;
+const nki_simulator = @import("nki_simulator.zig");
 const pjrtx = @import("pjrtx.zig");
 const profiler_ = @import("profiling/profiler.zig");
 const Sharding = @import("Sharding.zig");
@@ -326,6 +327,15 @@ pub const Platform = struct {
                 };
             },
             else => {},
+        }
+
+        if (target == .cpu and nki_simulator.requested()) {
+            try nki_simulator.initialize(io);
+            try platform.registerFfi(.{
+                .name = nki_simulator.custom_call_name,
+                .handler = nki_simulator.handler,
+                .traits = .{ .command_buffer_compatible = false },
+            });
         }
 
         platform.registerFfi(

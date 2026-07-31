@@ -72,6 +72,22 @@ cc_library(
 )
 
 cc_library(
+    name = "nki_simulator",
+    srcs = ["nki_simulator.cc"],
+    hdrs = ["nki_simulator.h"],
+    tags = ["manual"],
+    visibility = ["//zml:__pkg__"],
+    deps = [":libpython"],
+)
+
+filegroup(
+    name = "nki_simulator_bridge",
+    srcs = ["nki_simulator_bridge.py"],
+    tags = ["manual"],
+    visibility = ["//zml:__pkg__"],
+)
+
+cc_library(
     name = "empty",
     defines = ["ZML_RUNTIME_NEURON_DISABLED"],
     tags = ["manual"],

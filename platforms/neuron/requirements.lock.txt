@@ -4,13 +4,13 @@
 --extra-index-url https://pip.repos.neuron.amazonaws.com
 --find-links https://mirror.zml.ai/pypi/aws-neuronx-runtime-discovery/index.html
 
-boto3==1.43.56 \
-    --hash=sha256:57c90df9fb026f2e6ae22530861198130203733c5c9ec4e5cca3a4037f5a8db4 \
-    --hash=sha256:feb699d4ab241ef5c1b80bb58277be2aaad365cd4b672d7817e0bc59ee45131b
+boto3==1.43.59 \
+    --hash=sha256:4e9b14f89adc1a533c89312e86d8e00455a6f15d398796d92f9191b06e56b401 \
+    --hash=sha256:58b9635deebf075c1c3d76df78df08eb2979c2a74283194676783a0bff3b4557
     # via libneuronxla
-botocore==1.43.56 \
-    --hash=sha256:6c01f85f0ff9863076f4c761e74ee3aa96c5ccc1ad09fc1efd62ef8f2d22bf57 \
-    --hash=sha256:aafc741f1b10f6fd63253eaf6ea029680c1ff436d87e1b8969d62aefa0c76976
+botocore==1.43.59 \
+    --hash=sha256:21393c35d23b19d7ba95cc4156b59f4013f80696d667997e1abd9d4e29651708 \
+    --hash=sha256:8016da69ecc1d705249a8ef13548d3c95eec87ac1cd26133a8bdfa73ca175be0
     # via
     #   boto3
     #   libneuronxla
