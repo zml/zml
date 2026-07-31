@@ -84,7 +84,7 @@ pub fn quantizeNvfp4(x: Tensor, input_global_scale: ?Tensor, axis: anytype) stru
 
     const dt = x.dtype();
     const scaled = if (input_global_scale) |igs|
-        x.mul(igs.convert(dt).broad(x.shape()))
+        x.div(igs.convert(dt).broad(x.shape()))
     else
         x;
     const grouped = scaled.splitAxis(axis, .{ .sc = -1, .blk = block_size });
@@ -235,7 +235,7 @@ fn applyGlobalScale(acc: Tensor, igs: ?Tensor, wgs: ?Tensor) Tensor {
         wgs;
     const alpha = combined orelse return acc;
     const f32_acc = acc.convert(.f32);
-    return f32_acc.div(alpha.broad(f32_acc.shape())).convert(acc.dtype());
+    return f32_acc.mul(alpha.broad(f32_acc.shape())).convert(acc.dtype());
 }
 
 pub const TokenEmbedding = struct {
