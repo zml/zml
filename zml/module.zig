@@ -57,6 +57,14 @@ pub const CompilationOptions = struct {
     xla_dump_emitter_re: ?[]const u8 = null,
 };
 
+/// Errors surfaced while lowering and compiling a ZML program.
+pub const CompileError = std.mem.Allocator.Error ||
+    std.Io.Writer.Error ||
+    mlir.Error ||
+    upb.SerializeError ||
+    pjrtx.Client.CompileError ||
+    error{MissingDeviceInTile};
+
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 
 pub const CompilationContext = struct {
@@ -228,7 +236,7 @@ pub fn Compiler(comptime func: anytype) type {
             platform: *const Platform,
             opts: CompilationOptions,
             args: std.meta.ArgsTuple(@TypeOf(func)),
-        ) !Exe {
+        ) CompileError!Exe {
             return zml_module.compile(allocator, io, func, args, platform, opts);
         }
     };
@@ -241,7 +249,7 @@ pub fn compile(
     args: std.meta.ArgsTuple(@TypeOf(func)),
     platform: *const Platform,
     opts: CompilationOptions,
-) !Exe {
+) CompileError!Exe {
     // TODO: Here we have somewhat of a requirement
     // Emitting MLIR requires to have the compilation context available at all times using `CompilationContext.current()`.
     // If in the future, we inject an Io that is not thread-based, we might have some surprises.

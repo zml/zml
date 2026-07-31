@@ -221,9 +221,14 @@ pub const Model = struct {
             attention_parameters,
         );
 
-        const new_tokens, const new_rng = self.lmHead().forward(out, tokens, rng);
+        const sample = LmHead.forward(.{
+            .lm_head = self.lmHead(),
+            .hidden = out,
+            .tokens = tokens,
+            .rng = rng,
+        });
 
-        return .{ new_tokens, updated_kv_cache, new_rng };
+        return .{ sample.tokens, updated_kv_cache, sample.rng };
     }
 };
 
@@ -283,17 +288,41 @@ const Llama = struct {
         var kv_cache_index = zml.Tensor.scalar(0, .u32);
 
         for (self.layers) |layer| {
-            hidden, updated_kv_cache, kv_cache_index = layer.forward(
-                hidden,
-                token_index,
-                updated_kv_cache,
-                kv_cache_index,
-                attention_metadata,
-                attention_parameters,
-            );
+            const result = TransformerLayer.forward(.{
+                .layer = layer,
+                .hidden = hidden,
+                .token_index = token_index,
+                .kv_cache = updated_kv_cache,
+                .kv_cache_index = kv_cache_index,
+                .attention_metadata = attention_metadata,
+                .attention_parameters = attention_parameters,
+            });
+            hidden = result.hidden;
+            updated_kv_cache = result.kv_cache;
+            kv_cache_index = kv_cache_index.add(zml.Tensor.scalar(@as(u32, 1), .u32));
         }
 
         return .{ self.norm.forward(hidden), updated_kv_cache.reuseBuffer(kv_cache) };
+    }
+};
+
+pub const EmbedTokens = struct {
+    embed_tokens: zml.nn.TokenEmbedding,
+
+    pub const Input = struct {
+        embedding: EmbedTokens,
+        tokens: zml.Tensor,
+    };
+
+    pub const Output = struct {
+        hidden: zml.Tensor,
+    };
+
+    pub fn forward(input: Input) Output {
+        const tokens = input.tokens.withPartialTags(.{.s});
+        return .{ .hidden = input.embedding.embed_tokens.forward(tokens)
+            .withPartialTags(.{.d})
+            .withPartitioning(.{ .d = .replicated }) };
     }
 };
 
@@ -312,9 +341,22 @@ pub const LmHead = struct {
         };
     }
 
-    pub fn forward(self: LmHead, hidden_: zml.Tensor, tokens_: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
-        const tokens = tokens_.withPartialTags(.{.s});
-        const hidden = self.norm.forward(hidden_.withPartialTags(.{ .s, .d }));
+    pub const Input = struct {
+        lm_head: LmHead,
+        hidden: zml.Tensor,
+        tokens: zml.Tensor,
+        rng: zml.Tensor.Rng,
+    };
+
+    pub const Output = struct {
+        tokens: zml.Tensor,
+        rng: zml.Tensor.Rng,
+    };
+
+    pub fn forward(input: Input) Output {
+        const self = input.lm_head;
+        const tokens = input.tokens.withPartialTags(.{.s});
+        const hidden = self.norm.forward(input.hidden.withPartialTags(.{ .s, .d }));
 
         var logits = blk: {
             if (self.lm_head) |lm_head| {
@@ -327,8 +369,8 @@ pub const LmHead = struct {
         if (logits.shape().hasTag(.voc) == null)
             logits = logits.rename(.{ .d = .voc });
 
-        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_opts, rng);
-        return .{ next_tokens.convert(tokens.dtype()).reuseBuffer(tokens), new_rng };
+        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_opts, input.rng);
+        return .{ .tokens = next_tokens.convert(tokens.dtype()).reuseBuffer(tokens), .rng = new_rng };
     }
 };
 
@@ -354,15 +396,24 @@ pub const TransformerLayer = struct {
         Mlp.unloadBuffers(&self.mlp);
     }
 
-    pub fn forward(
-        self: TransformerLayer,
-        x0: zml.Tensor,
+    pub const Input = struct {
+        layer: TransformerLayer,
+        hidden: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: KvCache,
         kv_cache_index: zml.Tensor,
         attention_metadata: zml.attention.Metadata,
         attention_parameters: zml.attention.Parameters,
-    ) struct { zml.Tensor, KvCache, zml.Tensor } {
+    };
+
+    pub const Output = struct {
+        hidden: zml.Tensor,
+        kv_cache: KvCache,
+    };
+
+    pub fn forward(input: Input) Output {
+        const self = input.layer;
+        const x0 = input.hidden;
         // Self Attention
         //log.debug("TransformerLayer({f}) -> {f}", .{ x0, self.input_layernorm.forward(x0) });
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
@@ -372,13 +423,12 @@ pub const TransformerLayer = struct {
         const x0_normalized = self.input_layernorm.forward(x0_replicated);
         const delta0, const updated_kv_cache = self.self_attn.forward(
             x0_normalized,
-            token_index,
-            kv_cache,
-            kv_cache_index,
-            attention_metadata,
-            attention_parameters,
+            input.token_index,
+            input.kv_cache,
+            input.kv_cache_index,
+            input.attention_metadata,
+            input.attention_parameters,
         );
-        const updated_kv_cache_index = kv_cache_index.add(zml.Tensor.scalar(@as(u32, 1), .u32));
 
         // Fully Connected
         const x1 = x0_replicated.add(delta0).withPartitioning(.{ .d = .replicated });
@@ -389,7 +439,7 @@ pub const TransformerLayer = struct {
             .add(x1)
             .withPartitioning(.{ .d = .replicated });
 
-        return .{ x2.reuseBuffer(x0), updated_kv_cache, updated_kv_cache_index.reuseBuffer(kv_cache_index) };
+        return .{ .hidden = x2.reuseBuffer(x0), .kv_cache = updated_kv_cache };
     }
 };
 
