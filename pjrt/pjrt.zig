@@ -74,6 +74,17 @@ pub const ApiError = error{
     Unauthenticated,
 };
 
+fn consumePjrtError(api: *const Api, pjrt_error: *Error, context: []const u8) ApiError {
+    defer pjrt_error.deinit(api);
+    const err_code = pjrt_error.getCode(api).toApiError();
+    if (builtin.is_test) {
+        log.debug("[{s}] {t}: {s}", .{ context, err_code, pjrt_error.getMessage(api) });
+    } else {
+        log.err("[{s}] {t}: {s}", .{ context, err_code, pjrt_error.getMessage(api) });
+    }
+    return err_code;
+}
+
 fn InnerMixin(comptime innerT: type) type {
     return struct {
         fn inner(self: anytype) *innerT {
@@ -169,8 +180,7 @@ pub const Api = struct {
         }
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
-            log.err("[{s}] {s}", .{ @tagName(method), pjrt_error.getMessage(self) });
-            return pjrt_error.getCode(self).toApiError();
+            return consumePjrtError(self, pjrt_error, @tagName(method));
         }
     }
 
@@ -1262,7 +1272,14 @@ pub const Buffer = opaque {
         const ret = try api.call(.PJRT_Buffer_OpaqueDeviceMemoryDataPointer, .{
             .buffer = self.inner(),
         });
-        return ret.device_memory_ptr.?;
+        return ret.device_memory_ptr orelse {
+            if (builtin.is_test) {
+                log.debug("[PJRT_Buffer_OpaqueDeviceMemoryDataPointer] plugin returned success with null device_memory_ptr", .{});
+            } else {
+                log.err("[PJRT_Buffer_OpaqueDeviceMemoryDataPointer] plugin returned success with null device_memory_ptr", .{});
+            }
+            return error.Internal;
+        };
     }
 
     pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64) ApiError!?*Event {
@@ -1329,6 +1346,9 @@ pub const Event = opaque {
 
     pub fn await(self: *Event, api: *const Api, io: std.Io) ApiError!void {
         if (self.isReady(api)) {
+            if (self.getEventError(api)) |err| {
+                return consumePjrtError(api, err, "PJRT_Event_Error");
+            }
             return;
         }
 
@@ -1346,12 +1366,7 @@ pub const Event = opaque {
         }.call, &ctx);
         ctx.event.waitUncancelable(io);
 
-        if (ctx.err) |e| {
-            defer e.deinit(api);
-            const err_code = e.getCode(api).toApiError();
-            log.err("{t} {s}", .{ err_code, e.getMessage(api) });
-            return err_code;
-        }
+        if (ctx.err) |err| return consumePjrtError(api, err, "PJRT_Event_OnReady");
     }
 
     pub fn awaitRaw(self: *const Event, api: *const Api) ApiError!void {
@@ -1774,3 +1789,119 @@ pub const Profiler = struct {
         return pb;
     }
 };
+
+const FakePjrt = struct {
+    const FakeError = struct {
+        code: c.PJRT_Error_Code,
+        alignment: usize = 0,
+    };
+
+    var ready = false;
+    var event_error: [*c]c.PJRT_Error = null;
+    var callback_error: [*c]c.PJRT_Error = null;
+    var device_memory_ptr: ?*anyopaque = null;
+    var destroyed_errors: usize = 0;
+
+    fn reset() void {
+        ready = false;
+        event_error = null;
+        callback_error = null;
+        device_memory_ptr = null;
+        destroyed_errors = 0;
+    }
+
+    fn asError(fake_error: *FakeError) [*c]c.PJRT_Error {
+        return @ptrCast(@alignCast(fake_error));
+    }
+
+    fn makeApi() Api {
+        var inner: c.PJRT_Api = std.mem.zeroes(c.PJRT_Api);
+        inner.struct_size = c.PJRT_Api_STRUCT_SIZE;
+        inner.PJRT_Event_IsReady = &eventIsReady;
+        inner.PJRT_Event_Error = &eventError;
+        inner.PJRT_Event_OnReady = &eventOnReady;
+        inner.PJRT_Error_Destroy = &errorDestroy;
+        inner.PJRT_Error_GetCode = &errorGetCode;
+        inner.PJRT_Error_Message = &errorMessage;
+        inner.PJRT_Buffer_OpaqueDeviceMemoryDataPointer = &opaqueDeviceMemoryDataPointer;
+        return .{ .inner = inner };
+    }
+
+    fn eventIsReady(args: [*c]c.PJRT_Event_IsReady_Args) callconv(.c) [*c]c.PJRT_Error {
+        args.*.is_ready = ready;
+        return null;
+    }
+
+    fn eventError(args: [*c]c.PJRT_Event_Error_Args) callconv(.c) [*c]c.PJRT_Error {
+        _ = args;
+        return event_error;
+    }
+
+    fn eventOnReady(args: [*c]c.PJRT_Event_OnReady_Args) callconv(.c) [*c]c.PJRT_Error {
+        if (args.*.callback) |callback| callback(callback_error, args.*.user_arg);
+        return null;
+    }
+
+    fn errorDestroy(args: [*c]c.PJRT_Error_Destroy_Args) callconv(.c) void {
+        _ = args;
+        destroyed_errors += 1;
+    }
+
+    fn errorGetCode(args: [*c]c.PJRT_Error_GetCode_Args) callconv(.c) [*c]c.PJRT_Error {
+        const fake_error: *FakeError = @ptrCast(@alignCast(@constCast(args.*.@"error")));
+        args.*.code = fake_error.code;
+        return null;
+    }
+
+    fn errorMessage(args: [*c]c.PJRT_Error_Message_Args) callconv(.c) void {
+        const message = "fake PJRT backend failure";
+        args.*.message = message.ptr;
+        args.*.message_size = message.len;
+    }
+
+    fn opaqueDeviceMemoryDataPointer(args: [*c]c.PJRT_Buffer_OpaqueDeviceMemoryDataPointer_Args) callconv(.c) [*c]c.PJRT_Error {
+        args.*.device_memory_ptr = device_memory_ptr;
+        return null;
+    }
+};
+
+test "PJRT Event.await accepts a ready successful event" {
+    FakePjrt.reset();
+    FakePjrt.ready = true;
+    var api = FakePjrt.makeApi();
+    var storage: usize = 0;
+    const event: *Event = @ptrCast(&storage);
+    try event.await(&api, std.testing.io);
+    try std.testing.expectEqual(@as(usize, 0), FakePjrt.destroyed_errors);
+}
+
+test "PJRT Event.await propagates a ready event failure" {
+    FakePjrt.reset();
+    FakePjrt.ready = true;
+    var backend_error: FakePjrt.FakeError = .{ .code = c.PJRT_Error_Code_UNAVAILABLE };
+    FakePjrt.event_error = FakePjrt.asError(&backend_error);
+    var api = FakePjrt.makeApi();
+    var storage: usize = 0;
+    const event: *Event = @ptrCast(&storage);
+    try std.testing.expectError(error.Unavailable, event.await(&api, std.testing.io));
+    try std.testing.expectEqual(@as(usize, 1), FakePjrt.destroyed_errors);
+}
+
+test "PJRT Event.await propagates a callback failure" {
+    FakePjrt.reset();
+    var backend_error: FakePjrt.FakeError = .{ .code = c.PJRT_Error_Code_INTERNAL };
+    FakePjrt.callback_error = FakePjrt.asError(&backend_error);
+    var api = FakePjrt.makeApi();
+    var storage: usize = 0;
+    const event: *Event = @ptrCast(&storage);
+    try std.testing.expectError(error.Internal, event.await(&api, std.testing.io));
+    try std.testing.expectEqual(@as(usize, 1), FakePjrt.destroyed_errors);
+}
+
+test "PJRT opaque pointer rejects success with a null pointer" {
+    FakePjrt.reset();
+    var api = FakePjrt.makeApi();
+    var storage: usize = 0;
+    const buffer: *Buffer = @ptrCast(&storage);
+    try std.testing.expectError(error.Internal, buffer.opaqueDeviceMemoryDataPointer(&api));
+}

@@ -1,4 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "pjrt",
@@ -22,4 +22,9 @@ zig_library(
         "@xla//xla/pjrt/c:pjrt_c_api_stream_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_triton_extension_hdrs",
     ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":pjrt"],
 )

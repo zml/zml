@@ -14,6 +14,18 @@ patchelf(
 )
 
 patchelf(
+    name = "libdnnl_so_3",
+    src = "libdnnl.so.3",
+    set_rpath = "$ORIGIN",
+)
+
+patchelf(
+    name = "libtbb_so_12",
+    src = "libtbb.so.12",
+    set_rpath = "$ORIGIN",
+)
+
+patchelf(
     name = "libsycl_so",
     src = "@intel-oneapi-compiler-dpcpp-cpp-runtime-2026.1//:libsycl_so",
     set_rpath = "$ORIGIN",
@@ -70,6 +82,8 @@ copy_to_directory(
         ":libiga64_so_2",
         ":libigdfcl_so_2",
         ":libigc_so_2",
+        ":libdnnl_so_3",
+        ":libtbb_so_12",
         ":libpjrt_oneapi_so",
         ":libsycl_so",
         ":libze_intel_gpu_so",
@@ -103,6 +117,8 @@ copy_to_directory(
         "libiga64_so_2": "lib",
         "libigdfcl_so_2": "lib",
         "libigc_so_2": "lib",
+        "libdnnl_so_3": "lib",
+        "libtbb_so_12": "lib",
         "libpjrt_oneapi_so": "lib",
         "libsycl_so": "lib",
         ONEAPI_CCL_LIB: "lib",
