@@ -651,6 +651,221 @@ test @"while" {
     try std.testing.expectEqual(@as(i64, 9), cpu_sum.items(i64)[0]);
 }
 
+/// Implement if/else branches.
+/// The given If struct contains all the parameters that can be referenced in the if/else branches.
+///
+/// It must have:
+/// * an `onTrue(If) T` function returning some tensors
+/// * an `onFalse(If) T` function returning similar shaped tensors
+///
+/// If some expression in `onTrue` or `onFalse` has side effects (like printing),
+/// stablehlo guarantees they will only be evaluated in its branch.
+pub fn @"if"(
+    If: type,
+    if_captures: If,
+    pred: Tensor,
+) stdx.meta.FnReturn(If.onTrue) {
+    stdx.debug.assertComptime(
+        stdx.meta.FnReturn(If.onTrue) == stdx.meta.FnReturn(If.onFalse),
+        "zml.ops.if expects same return types for onTrue and onFalse, got {s} and {s}",
+        .{ @typeName(stdx.meta.FnReturn(If.onTrue)), @typeName(stdx.meta.FnReturn(If.onFalse)) },
+    );
+
+    stdx.debug.assert(pred.dtype() == .bool and pred.count() == 1, "zml.ops.if expects the condition to have exactly one element of dtype .bool, got {f}", .{pred});
+
+    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+    var blkctx: If = undefined;
+
+    // Explicitly capture values from the parent block.
+    meta.mapAlloc(struct {
+        fn capture(_: void, tensor: Tensor) Tensor {
+            return Tensor._result(tensor.shape(), tensor.value());
+        }
+    }.capture, arena.allocator(), {}, if_captures, &blkctx) catch unreachable;
+
+    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const loc: *const mlir.Location = .unknown(mlir_ctx);
+
+    const true_branch, const true_branch_block = b: {
+        const block = mlir.Block.init(&.{}, &.{});
+        errdefer block.deinit();
+
+        CompilationContext.current().pushBlock(block);
+        defer CompilationContext.current().popBlock();
+
+        const result = blkctx.onTrue();
+        const result_values = meta.collectAlloc(Tensor.value, {}, allocator, &result) catch @panic("OOM");
+        defer allocator.free(result_values);
+        _ = dialects.stablehlo.returns(mlir_ctx, result_values, loc).appendTo(block);
+        break :b .{ result, block };
+    };
+
+    const false_branch, const false_branch_block = b: {
+        const block = mlir.Block.init(&.{}, &.{});
+        errdefer block.deinit();
+
+        CompilationContext.current().pushBlock(block);
+        defer CompilationContext.current().popBlock();
+
+        const result = blkctx.onFalse();
+        const result_values = meta.collectAlloc(Tensor.value, {}, allocator, &result) catch @panic("OOM");
+        defer allocator.free(result_values);
+        _ = dialects.stablehlo.returns(mlir_ctx, result_values, loc).appendTo(block);
+        break :b .{ result, block };
+    };
+    // TODO check that false branch values matches right branch
+    _ = false_branch;
+
+    const op = mlir.Operation.make(mlir_ctx, "stablehlo.if", .{
+        .operands = .{ .flat = &.{pred.asScalar().value()} },
+        .result_type_inference = true,
+        .blocks = &.{ true_branch_block, false_branch_block },
+        // We can't verify right away, cause the weights captured by the if haven't been added yet.
+        .verify = false,
+        .location = loc,
+    });
+    _ = op.appendTo(CompilationContext.current().currentScope().block);
+
+    return fromMlirOperationWithTags(op, true_branch);
+}
+
+test "if" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+    const allocator = std.testing.allocator;
+
+    const IfMod = struct {
+        a: Tensor,
+        b: Tensor,
+
+        pub fn _fwd(pred: Tensor, a: Tensor, b: Tensor) Tensor {
+            return @"if"(@This(), .{ .a = a, .b = b }, pred.convert(.bool));
+        }
+
+        pub fn onTrue(ctx: @This()) Tensor {
+            return ctx.a.dotGeneral(ctx.b, &.{.{ 1, 0 }}, &.{});
+        }
+
+        pub fn onFalse(ctx: @This()) Tensor {
+            return ctx.b.dotGeneral(ctx.a, &.{.{ 1, 0 }}, &.{});
+        }
+    };
+
+    {
+        const pred: Tensor = .init(.{}, .i32);
+        const a: Tensor = .init(.{ 4, 4 }, .f32);
+        const b: Tensor = .init(.{ 4, 4 }, .f32);
+        const mod = try platform.compileFn(allocator, std.testing.io, IfMod._fwd, .{ pred, a, b }, .{});
+        defer mod.deinit();
+    }
+}
+
+/// Simpler variant of `zml.ops.if` that assumes code-motion is supported by the backend.
+/// The two branches are evaluated before the condition, then the condition chose which branches to keep.
+pub fn if2(
+    pred: Tensor,
+    on_true: anytype,
+    on_false: @TypeOf(on_true),
+) @TypeOf(on_true) {
+    stdx.debug.assert(pred.dtype() == .bool and pred.count() == 1, "zml.ops.if expects the condition to have exactly one element of dtype .bool, got {f}", .{pred});
+
+    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const loc: *const mlir.Location = .unknown(mlir_ctx);
+
+    const true_values = meta.collectAlloc(Tensor.value, {}, allocator, &on_true) catch @panic("OOM");
+    defer allocator.free(true_values);
+    const true_branch_block = b: {
+        const block = mlir.Block.init(&.{}, &.{});
+        errdefer block.deinit();
+
+        CompilationContext.current().pushBlock(block);
+        defer CompilationContext.current().popBlock();
+        _ = dialects.stablehlo.returns(mlir_ctx, true_values, loc).appendTo(block);
+        break :b block;
+    };
+
+    const false_values = meta.collectAlloc(Tensor.value, {}, allocator, &on_false) catch @panic("OOM");
+    defer allocator.free(false_values);
+    const false_branch_block = b: {
+        const block = mlir.Block.init(&.{}, &.{});
+        errdefer block.deinit();
+
+        CompilationContext.current().pushBlock(block);
+        defer CompilationContext.current().popBlock();
+
+        _ = dialects.stablehlo.returns(mlir_ctx, false_values, loc).appendTo(block);
+        break :b block;
+    };
+
+    const op = mlir.Operation.make(mlir_ctx, "stablehlo.if", .{
+        .operands = .{ .flat = &.{pred.asScalar().value()} },
+        .result_type_inference = true,
+        .blocks = &.{ true_branch_block, false_branch_block },
+        .location = loc,
+        .verify = false,
+    });
+    _ = op.appendTo(CompilationContext.current().currentScope().block);
+
+    return fromMlirOperationWithTags(op, on_true);
+}
+
+test if2 {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+    const allocator = std.testing.allocator;
+
+    const IfMod = struct {
+        pub fn _fwd(pred: Tensor, a: Tensor, b: Tensor) Tensor {
+            return if2(
+                pred.convert(.bool),
+                a.dotGeneral(b, &.{.{ 1, 0 }}, &.{}),
+                b.dotGeneral(a, &.{.{ 1, 0 }}, &.{}),
+            );
+        }
+    };
+
+    {
+        const pred: Tensor = .init(.{}, .i32);
+        const a: Tensor = .init(.{ 4, 4 }, .f32);
+        const b: Tensor = .init(.{ 4, 4 }, .f32);
+        const mod = try platform.compileFn(allocator, std.testing.io, IfMod._fwd, .{ pred, a, b }, .{});
+        defer mod.deinit();
+    }
+}
+
+/// Create a Tensor struct similar to base, keeping base tags,
+/// but using mlir value and dims from the mlir operation.
+fn fromMlirOperationWithTags(op: *const mlir.Operation, base: anytype) @TypeOf(base) {
+    const LocalContext = struct {
+        index: usize,
+        op: *const mlir.Operation,
+    };
+    var context = LocalContext{ .index = 0, .op = op };
+    var res = base;
+    meta.visit((struct {
+        fn cb(inner_ctx: *LocalContext, tensor: *Tensor) void {
+            var new = Tensor.fromMlirValue(inner_ctx.op.result(inner_ctx.index));
+            stdx.debug.internalAssert(new.rank() == tensor.rank(), "expected operand result to have rank {} but got {f}", .{ tensor.rank(), new });
+            // copy tags and sharding info over
+            // some ops can change dims eg reduceWindow, so we trust mlir here.
+            new._shape._tags = tensor._shape._tags;
+            new._shape._partitioning = tensor._shape._partitioning;
+            tensor.* = new;
+            inner_ctx.index += 1;
+        }
+    }).cb, &context, &res);
+    std.debug.assert(context.index == op.numResults());
+    return res;
+}
+
 pub const TritonOps = struct {
     debug: bool = false,
     name: [:0]const u8,

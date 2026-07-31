@@ -1294,11 +1294,11 @@ pub const Operation = opaque {
             state.addAttributes(attrs);
         }
         if (args.blocks) |blocks| {
-            const body_region = Region.init();
             for (blocks) |block_| {
+                const body_region = Region.init();
                 body_region.appendOwnedBlock(block_);
+                state.addOwnedRegions(&.{body_region});
             }
-            state.addOwnedRegions(&.{body_region});
         }
         const new_op = try Operation.init(&state);
         errdefer new_op.deinit();
