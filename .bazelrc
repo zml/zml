@@ -61,8 +61,10 @@ common          --incompatible_disallow_empty_glob=false
 
 # Use the C linker to link Zig code
 common          --@rules_zig//zig/settings:use_cc_common_link=true
-# Zig 0.17's self-hosted backend is used for debug builds.
-common          --@rules_zig//zig/settings:zigopt=-fno-llvm
+# Zig 0.17's self-hosted backend is used for debug builds on linux
+build:linux     --@rules_zig//zig/settings:zigopt=-fno-llvm
+# LLVM on macos
+common          --@rules_zig//zig/settings:zigopt=-fllvm
 
 common          --@rules_zig//zig/settings:use_standalone_translate_c=True
 
