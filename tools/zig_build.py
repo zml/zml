@@ -558,6 +558,15 @@ def split_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
     return arguments[:separator], arguments[separator + 1 :]
 
 
+def has_bazel_config(arguments: list[str], name: str) -> bool:
+    for index, argument in enumerate(arguments):
+        if argument == f"--config={name}":
+            return True
+        if argument == "--config" and index + 1 < len(arguments) and arguments[index + 1] == name:
+            return True
+    return False
+
+
 def parse_cli(argv: list[str]) -> tuple[str, list[str], list[str]]:
     parser = argparse.ArgumentParser(
         description="Build a rules_zig target with Bazel and export it to build.zig",
@@ -578,7 +587,7 @@ def main() -> int:
     label, user_bazel_flags, zig_args = parse_cli(sys.argv[1:])
 
     workspace = Path(os.environ.get("BUILD_WORKSPACE_DIRECTORY", Path.cwd())).resolve()
-    bazel_flags = ["--config=debug", *user_bazel_flags]
+    bazel_flags = [*user_bazel_flags] if has_bazel_config(user_bazel_flags, "debug") else ["--config=debug", *user_bazel_flags]
     graph_text = bazel(
         workspace,
         ["aquery", *bazel_flags, "--include_commandline", "--output=jsonproto", label],
