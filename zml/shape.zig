@@ -498,9 +498,24 @@ pub const Shape = struct {
         return @intCast(res);
     }
 
-    /// Total size in bytes needed to represent this shape.
+    /// Total size in bytes needed to represent this shape on host
     pub fn byteSize(self: Shape) usize {
         return self.dtype().sizeOf() * self.count();
+    }
+
+    /// Total size in bytes needed to represent this shape on device
+    /// Taking into account bit-packing for booleans
+    pub fn deviceByteSize(self: Shape) usize {
+        const bits_per_element: usize = switch (self.dtype()) {
+            .bool => 8,
+            else => @intCast(self.dtype().bitSizeOf()),
+        };
+
+        return std.math.divCeil(
+            usize,
+            self.count() * bits_per_element,
+            8,
+        ) catch unreachable;
     }
 
     /// Compares the two shapes described, ignoring tagging.
