@@ -9,6 +9,7 @@ const Config = struct {
     linker: []const u8,
     link_args: []const []const u8,
     link_env: []const EnvironmentVariable,
+    native_prelink: ?[]const u8 = null,
     zig_link: ZigLink,
     runfiles_dir: []const u8,
     runfiles_manifest: []const u8,
@@ -168,50 +169,70 @@ fn zigLinkedBinary(
     root_module: *std.Build.Module,
 ) std.Build.LazyPath {
     root_module.link_libc = true;
-    if (config.zig_link.archive_objects.len != 0) {
-        const archive = b.addSystemCommand(&.{ b.graph.zig_exe, "ar", "rcs" });
-        const archive_path = archive.addOutputFileArg("bazel_start_lib.a");
-        for (config.zig_link.archive_objects) |object| {
-            archive.addFileArg(.{ .cwd_relative = absolute(config.execroot, object, b) });
+    var final_module = root_module;
+    if (config.native_prelink) |native_prelink| {
+        // HACK: This ZML-only split keeps LLVM code generation incremental while
+        // isolating the prelinked C++ graph from Zig's final executable link.
+        const zig_library = b.addLibrary(.{
+            .name = b.fmt("{s}-zig", .{config.name}),
+            .root_module = root_module,
+            .linkage = .static,
+            .use_llvm = true,
+            .use_lld = false,
+        });
+        zig_library.bundle_compiler_rt = true;
+
+        final_module = b.createModule(.{
+            .target = root_module.resolved_target,
+            .optimize = root_module.optimize,
+        });
+        final_module.link_libc = true;
+        final_module.addObjectFile(zig_library.getEmittedBin());
+        final_module.addObjectFile(.{ .cwd_relative = native_prelink });
+        final_module.addRPath(.{ .cwd_relative = std.fs.path.dirname(native_prelink) orelse "." });
+    } else {
+        if (config.zig_link.archive_objects.len != 0) {
+            const archive = b.addSystemCommand(&.{ b.graph.zig_exe, "ar", "rcs" });
+            const archive_path = archive.addOutputFileArg("bazel_start_lib.a");
+            for (config.zig_link.archive_objects) |object| {
+                archive.addFileArg(.{ .cwd_relative = absolute(config.execroot, object, b) });
+            }
+            root_module.addObjectFile(archive_path);
         }
-        root_module.addObjectFile(archive_path);
-    }
-    for (config.zig_link.objects) |object| {
-        root_module.addObjectFile(.{ .cwd_relative = absolute(config.execroot, object, b) });
+        for (config.zig_link.objects) |object| {
+            root_module.addObjectFile(.{ .cwd_relative = absolute(config.execroot, object, b) });
+        }
     }
     for (config.zig_link.library_paths) |library_path| {
-        root_module.addLibraryPath(.{ .cwd_relative = absolute(config.execroot, library_path, b) });
+        final_module.addLibraryPath(.{ .cwd_relative = absolute(config.execroot, library_path, b) });
     }
     for (config.zig_link.framework_paths) |framework_path| {
-        root_module.addSystemFrameworkPath(.{ .cwd_relative = absolute(config.execroot, framework_path, b) });
+        final_module.addSystemFrameworkPath(.{ .cwd_relative = absolute(config.execroot, framework_path, b) });
     }
     for (config.zig_link.system_libraries) |library| {
-        root_module.linkSystemLibrary(library, .{ .use_pkg_config = .no });
+        final_module.linkSystemLibrary(library, .{ .use_pkg_config = .no });
     }
     for (config.zig_link.frameworks) |framework| {
-        root_module.linkFramework(framework, .{});
+        final_module.linkFramework(framework, .{});
     }
     for (config.zig_link.needed_frameworks) |framework| {
-        root_module.linkFramework(framework, .{ .needed = true });
+        final_module.linkFramework(framework, .{ .needed = true });
     }
     for (config.zig_link.weak_frameworks) |framework| {
-        root_module.linkFramework(framework, .{ .weak = true });
+        final_module.linkFramework(framework, .{ .weak = true });
     }
 
     const exe = b.addExecutable(.{
         .name = config.name,
-        .root_module = root_module,
-        // Ideally I want use_llvm = use_lld = false to test the incremental self-hosted backend for very fast rebuilds.
-        // But it's not working atm:
-        // panic: storeRegs: mnist_c.upb_MessageValue
-        // TODO: try to ditch upb
-        .use_llvm = true,
-        // When trying to use Zig linker incremental it complains about missing symbols:
-        // error: undefined symbol: _ZN4mlir6detail14TypeIDResolverINS_4LLVM6LShrOpEvE2idE
-        .use_lld = true,
-        // .use_new_linker = true,
+        .root_module = final_module,
+        .use_llvm = config.native_prelink == null,
+        .use_lld = config.native_prelink == null,
     });
-    exe.pie = true;
+    // Zig 0.17 currently corrupts PT_INTERP/PT_DYNAMIC on the second incremental
+    // dynamic-ELF update. Rebuild this thin self-hosted link, but keep the costly
+    // Zig archive compilation above incremental.
+    exe.incremental = if (config.native_prelink != null) false else null;
+    exe.pie = config.native_prelink == null;
     exe.bundle_compiler_rt = true;
     exe.headerpad_max_install_names = config.zig_link.headerpad_max_install_names;
     if (config.zig_link.dead_strip) {
