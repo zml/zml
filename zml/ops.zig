@@ -651,15 +651,24 @@ test @"while" {
     try std.testing.expectEqual(@as(i64, 9), cpu_sum.items(i64)[0]);
 }
 
+/// Implement if/else branches.
+/// The given If struct contains all the parameters that can be referenced in the if/else branches.
+///
+/// It must have:
+/// * an `onTrue(If) T` function returning some tensors
+/// * an `onFalse(If) T` function returning similar shaped tensors
+///
+/// If some expression in `onTrue` or `onFalse` has side effects (like printing),
+/// stablehlo guarantees they will only be evaluated in its branch.
 pub fn @"if"(
-    BlkCtx: type,
-    _blkctx: BlkCtx,
+    If: type,
+    if_captures: If,
     pred: Tensor,
-) stdx.meta.FnReturn(BlkCtx.ifTrue) {
+) stdx.meta.FnReturn(If.onTrue) {
     stdx.debug.assertComptime(
-        stdx.meta.FnReturn(BlkCtx.ifTrue) == stdx.meta.FnReturn(BlkCtx.ifFalse),
-        "zml.ops.if expects same return types for ifTrue and ifFalse, got {s} and {s}",
-        .{ @typeName(stdx.meta.FnReturn(BlkCtx.ifTrue)), @typeName(stdx.meta.FnReturn(BlkCtx.ifFalse)) },
+        stdx.meta.FnReturn(If.onTrue) == stdx.meta.FnReturn(If.onFalse),
+        "zml.ops.if expects same return types for onTrue and onFalse, got {s} and {s}",
+        .{ @typeName(stdx.meta.FnReturn(If.onTrue)), @typeName(stdx.meta.FnReturn(If.onFalse)) },
     );
 
     stdx.debug.assert(pred.dtype() == .bool and pred.count() == 1, "zml.ops.if expects the condition to have exactly one element of dtype .bool, got {f}", .{pred});
@@ -668,14 +677,14 @@ pub fn @"if"(
     defer arena.deinit();
 
     const allocator = arena.allocator();
-    var blkctx: BlkCtx = undefined;
+    var blkctx: If = undefined;
 
     // Explicitly capture values from the parent block.
     meta.mapAlloc(struct {
         fn capture(_: void, tensor: Tensor) Tensor {
             return Tensor._result(tensor.shape(), tensor.value());
         }
-    }.capture, arena.allocator(), {}, _blkctx, &blkctx) catch unreachable;
+    }.capture, arena.allocator(), {}, if_captures, &blkctx) catch unreachable;
 
     const mlir_ctx = CompilationContext.current().mlir_ctx;
     const loc: *const mlir.Location = .unknown(mlir_ctx);
@@ -687,7 +696,7 @@ pub fn @"if"(
         CompilationContext.current().pushBlock(block);
         defer CompilationContext.current().popBlock();
 
-        const result = blkctx.ifTrue();
+        const result = blkctx.onTrue();
         const result_values = meta.collectAlloc(Tensor.value, {}, allocator, &result) catch @panic("OOM");
         defer allocator.free(result_values);
         _ = dialects.stablehlo.returns(mlir_ctx, result_values, loc).appendTo(block);
@@ -701,7 +710,7 @@ pub fn @"if"(
         CompilationContext.current().pushBlock(block);
         defer CompilationContext.current().popBlock();
 
-        const result = blkctx.ifFalse();
+        const result = blkctx.onFalse();
         const result_values = meta.collectAlloc(Tensor.value, {}, allocator, &result) catch @panic("OOM");
         defer allocator.free(result_values);
         _ = dialects.stablehlo.returns(mlir_ctx, result_values, loc).appendTo(block);
@@ -736,11 +745,11 @@ test "if" {
             return @"if"(@This(), .{ .a = a, .b = b }, pred.convert(.bool));
         }
 
-        pub fn ifTrue(ctx: @This()) Tensor {
+        pub fn onTrue(ctx: @This()) Tensor {
             return ctx.a.dotGeneral(ctx.b, &.{.{ 1, 0 }}, &.{});
         }
 
-        pub fn ifFalse(ctx: @This()) Tensor {
+        pub fn onFalse(ctx: @This()) Tensor {
             return ctx.b.dotGeneral(ctx.a, &.{.{ 1, 0 }}, &.{});
         }
     };
@@ -754,13 +763,13 @@ test "if" {
     }
 }
 
-/// Simpler variant of `if` that assumes code-motion is supported by the backend.
+/// Simpler variant of `zml.ops.if` that assumes code-motion is supported by the backend.
 /// The two branches are evaluated before the condition, then the condition chose which branches to keep.
 pub fn if2(
     pred: Tensor,
-    if_true: anytype,
-    if_false: @TypeOf(if_true),
-) @TypeOf(if_true) {
+    on_true: anytype,
+    on_false: @TypeOf(on_true),
+) @TypeOf(on_true) {
     stdx.debug.assert(pred.dtype() == .bool and pred.count() == 1, "zml.ops.if expects the condition to have exactly one element of dtype .bool, got {f}", .{pred});
 
     var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
@@ -771,7 +780,7 @@ pub fn if2(
     const mlir_ctx = CompilationContext.current().mlir_ctx;
     const loc: *const mlir.Location = .unknown(mlir_ctx);
 
-    const true_values = meta.collectAlloc(Tensor.value, {}, allocator, &if_true) catch @panic("OOM");
+    const true_values = meta.collectAlloc(Tensor.value, {}, allocator, &on_true) catch @panic("OOM");
     defer allocator.free(true_values);
     const true_branch_block = b: {
         const block = mlir.Block.init(&.{}, &.{});
@@ -783,7 +792,7 @@ pub fn if2(
         break :b block;
     };
 
-    const false_values = meta.collectAlloc(Tensor.value, {}, allocator, &if_false) catch @panic("OOM");
+    const false_values = meta.collectAlloc(Tensor.value, {}, allocator, &on_false) catch @panic("OOM");
     defer allocator.free(false_values);
     const false_branch_block = b: {
         const block = mlir.Block.init(&.{}, &.{});
@@ -805,7 +814,7 @@ pub fn if2(
     });
     _ = op.appendTo(CompilationContext.current().currentScope().block);
 
-    return fromMlirOperationWithTags(op, if_true);
+    return fromMlirOperationWithTags(op, on_true);
 }
 
 test if2 {

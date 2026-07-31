@@ -598,7 +598,7 @@ const AttentionLoop = struct {
                 page_size: u32,
 
                 /// Prefill version: num_slots == page_size, we multiply a full page of queries with a page of keys.
-                pub fn ifTrue(if_ctx: IfPrefill) State {
+                pub fn onTrue(if_ctx: IfPrefill) State {
                     const while_body = if_ctx.while_body;
                     const state = if_ctx.state;
                     const page_size = if_ctx.page_size;
@@ -619,7 +619,7 @@ const AttentionLoop = struct {
                 }
 
                 /// Decode version: num_slots == 1, we multiply one query with a page of keys.
-                pub fn ifFalse(if_ctx: IfPrefill) State {
+                pub fn onFalse(if_ctx: IfPrefill) State {
                     const while_body = if_ctx.while_body;
                     const state = if_ctx.state;
                     const page_size = if_ctx.page_size;
