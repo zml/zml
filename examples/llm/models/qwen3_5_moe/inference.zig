@@ -204,7 +204,9 @@ fn compileModel(
         .layer_index = zml.Tensor.init(.{}, .u32),
     };
     const linear_attn_cache: model.KvCache.GatedDeltaNetCache = .{
-        .conv_state = parameters.kv_cache.gated_delta_net.conv_state,
+        .conv_q_state = parameters.kv_cache.gated_delta_net.conv_q_state,
+        .conv_k_state = parameters.kv_cache.gated_delta_net.conv_k_state,
+        .conv_v_state = parameters.kv_cache.gated_delta_net.conv_v_state,
         .recurrent_state = parameters.kv_cache.gated_delta_net.recurrent_state,
         .layer_index = zml.Tensor.init(.{}, .u32),
     };
