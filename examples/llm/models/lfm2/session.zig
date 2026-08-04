@@ -10,7 +10,7 @@ pub const Session = struct {
     io: std.Io,
     platform: *const zml.Platform,
     model_buffers: *model.Buffers,
-    compiled_model: *const inference.CompiledModel,
+    compiled_model: *inference.CompiledModel,
     config: *const model.Config,
     seqlen: u32,
     cache_buffers: zml.Bufferized(model.Cache),
@@ -25,10 +25,16 @@ pub const Session = struct {
         io: std.Io,
         platform: *const zml.Platform,
         tokenizer: zml.tokenizer.Tokenizer,
-        compiled_model: *const inference.CompiledModel,
+        compiled_model: *inference.CompiledModel,
         model_buffers: *model.Buffers,
     ) !Session {
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
+        var cache_buffers = try compiled_model.params.cache.initBuffers(allocator, io, platform, compiled_model.params.shardings.model);
+        errdefer model.Cache.unloadBuffers(&cache_buffers);
+        var rng_buf = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed);
+        errdefer zml.Tensor.Rng.deinitBuffer(&rng_buf);
+        const generated_token_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{ .batch = 1, .seq = 1 }, .u32));
+
         return .{
             .allocator = allocator,
             .io = io,
@@ -38,9 +44,9 @@ pub const Session = struct {
             .tokenizer = tokenizer,
             .config = &compiled_model.loaded_model.parsed_config.value,
             .seqlen = compiled_model.params.seqlen,
-            .cache_buffers = try compiled_model.params.cache.initBuffers(allocator, io, platform, compiled_model.params.shardings.model),
-            .rng_buf = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed),
-            .generated_token_slice = try .alloc(allocator, zml.Shape.init(.{ .batch = 1, .seq = 1 }, .u32)),
+            .cache_buffers = cache_buffers,
+            .rng_buf = rng_buf,
+            .generated_token_slice = generated_token_slice,
             .think_start = tokenizer.tokenId("<think>") orelse unreachable,
             .think_end = tokenizer.tokenId("</think>") orelse unreachable,
         };
@@ -123,10 +129,13 @@ pub const Session = struct {
         };
         defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
-        try self.compiled_model.prefill.run(.{
-            .allocator = self.allocator,
+        var conv_cache_index_buffer: zml.Buffer = try .scalar(self.io, self.platform, 0, .u32);
+        defer conv_cache_index_buffer.deinit();
+        var kv_cache_index_buffer: zml.Buffer = try .scalar(self.io, self.platform, 0, .u32);
+        defer kv_cache_index_buffer.deinit();
+
+        inference.run(&self.compiled_model.prefill, .{
             .io = self.io,
-            .platform = self.platform,
             .model_buffers = self.model_buffers,
             .tokens_buf = &tokens_buf,
             .tokens_pos_buf = &tokens_pos_buf,
@@ -134,7 +143,7 @@ pub const Session = struct {
             .rng_buf = &self.rng_buf,
             .cache_buffers = &self.cache_buffers,
             .attention_metadata_buffers = attention_metadata_buffers,
-        });
+        }, &conv_cache_index_buffer, &kv_cache_index_buffer);
 
         try tokens_buf.toSlice(self.io, tokens_slice);
         self.generated_token_slice.items(u32)[0] = tokens_slice.items(u32)[all_tokens.len - 1];
@@ -180,10 +189,13 @@ pub const Session = struct {
             var token_pos_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, .replicated);
             defer token_pos_buffer.deinit();
 
-            try self.compiled_model.decode.run(.{
-                .allocator = self.allocator,
+            var conv_cache_index_buffer: zml.Buffer = try .scalar(self.io, self.platform, 0, .u32);
+            defer conv_cache_index_buffer.deinit();
+            var kv_cache_index_buffer: zml.Buffer = try .scalar(self.io, self.platform, 0, .u32);
+            defer kv_cache_index_buffer.deinit();
+
+            inference.run(&self.compiled_model.decode, .{
                 .io = self.io,
-                .platform = self.platform,
                 .model_buffers = self.model_buffers,
                 .tokens_buf = &current_token_buffer,
                 .tokens_pos_buf = &token_pos_buffer,
@@ -191,7 +203,7 @@ pub const Session = struct {
                 .rng_buf = &self.rng_buf,
                 .cache_buffers = &self.cache_buffers,
                 .attention_metadata_buffers = attention_metadata_buffers,
-            });
+            }, &conv_cache_index_buffer, &kv_cache_index_buffer);
 
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
