@@ -383,6 +383,32 @@ test "slice expectClose compares dense and strided slices" {
     try testing.expectClose(std.testing.io, strided, dense, .exact_match);
 }
 
+test "slice expectClose applies close fraction across strided slices" {
+    const testing = @import("testing.zig");
+
+    const dense_data: [2][2]f32 = .{
+        .{ 1, 2 },
+        .{ 5, 6 },
+    };
+    const strided_data: [2][4]f32 = .{
+        .{ 1, 3, 99, 98 },
+        .{ 5, 6, 97, 96 },
+    };
+
+    const dense = Slice.init(.init(.{ 2, 2 }, .f32), std.mem.asBytes(&dense_data));
+    const storage = Slice.init(.init(.{ 2, 4 }, .f32), std.mem.asBytes(&strided_data));
+    const strided = storage.subSlice(1, 0, 2);
+    const opts: testing.CompareOpts = .{
+        .absolute_tolerance = 0,
+        .relative_tolerance = 0,
+        .minimum_close_fraction = 0.75,
+    };
+
+    try std.testing.expect(!strided.isContiguous());
+    try testing.expectClose(std.testing.io, dense, strided, opts);
+    try testing.expectClose(std.testing.io, strided, dense, opts);
+}
+
 test "slice pretty print rank 3" {
     const data: [4][4][4]i32 = .{
         .{

@@ -176,11 +176,119 @@ fn compareReportOk(report: CompareReport, opts: CompareOpts) bool {
     return !report.nan_or_inf and report.close_fraction >= opts.minimum_close_fraction;
 }
 
+const ComparisonAccumulator = struct {
+    absolute_errors: []f32,
+    relative_errors: []f32,
+    processed_count: usize = 0,
+    nan_or_inf: bool = false,
+    max_absolute_error: f32 = 0,
+    sum_absolute_error: f64 = 0,
+    sum_squared_error: f64 = 0,
+    count_close: usize = 0,
+
+    fn init(allocator: std.mem.Allocator, count: usize) !ComparisonAccumulator {
+        const absolute_errors = try allocator.alloc(f32, count);
+        errdefer allocator.free(absolute_errors);
+        const relative_errors = try allocator.alloc(f32, count);
+
+        @memset(absolute_errors, 0);
+        @memset(relative_errors, 0);
+        return .{
+            .absolute_errors = absolute_errors,
+            .relative_errors = relative_errors,
+        };
+    }
+
+    fn deinit(self: *ComparisonAccumulator, allocator: std.mem.Allocator) void {
+        allocator.free(self.absolute_errors);
+        allocator.free(self.relative_errors);
+    }
+
+    fn addSlices(self: *ComparisonAccumulator, comptime L: type, comptime R: type, left: []const L, right: []const R, opts: CompareOpts) void {
+        std.debug.assert(left.len == right.len);
+        std.debug.assert(self.processed_count + left.len <= self.absolute_errors.len);
+
+        const start = self.processed_count;
+        for (left, right, 0..) |l, r, i| {
+            const l_f32 = zml.floats.floatCast(f32, l);
+            const r_f32 = zml.floats.floatCast(f32, r);
+            if (!std.math.isFinite(l_f32) or !std.math.isFinite(r_f32)) {
+                self.nan_or_inf = true;
+                continue;
+            }
+            const absolute_error = @abs(l_f32 - r_f32);
+            self.max_absolute_error = @max(self.max_absolute_error, absolute_error);
+            self.sum_absolute_error += @as(f64, @floatCast(absolute_error));
+            self.sum_squared_error += @as(f64, @floatCast(absolute_error)) * @as(f64, @floatCast(absolute_error));
+
+            const scale = @max(@abs(l_f32), @abs(r_f32));
+            const tolerance = opts.absolute_tolerance + opts.relative_tolerance * scale;
+            if (absolute_error <= tolerance) {
+                self.count_close += 1;
+            }
+
+            self.absolute_errors[start + i] = absolute_error;
+            const denom = @max(opts.epsilon_relative, scale);
+            self.relative_errors[start + i] = absolute_error / denom;
+        }
+        self.processed_count += left.len;
+    }
+
+    fn report(self: *ComparisonAccumulator) CompareReport {
+        std.debug.assert(self.processed_count == self.absolute_errors.len);
+        if (self.processed_count == 0) {
+            return .{
+                .nan_or_inf = false,
+                .max_absolute_error = 0,
+                .mean_absolute_error = std.math.nan(f32),
+                .rmse = std.math.nan(f32),
+                .close_fraction = std.math.nan(f32),
+                .p50_absolute_error = 0,
+                .p90_absolute_error = 0,
+                .p99_absolute_error = 0,
+                .p999_absolute_error = 0,
+            };
+        }
+
+        std.sort.heap(f32, self.absolute_errors, {}, std.sort.asc(f32));
+        std.sort.heap(f32, self.relative_errors, {}, std.sort.asc(f32));
+
+        const q = struct {
+            pub fn q(values: []const f32, frac: f32) f32 {
+                if (values.len == 0) return 0;
+                const idx: usize = @intFromFloat(std.math.round(@as(f32, @floatFromInt(values.len - 1)) * frac));
+                return values[idx];
+            }
+        }.q;
+
+        const mean_absolute_error: f32 = @floatCast(self.sum_absolute_error / @as(f64, @floatFromInt(self.processed_count)));
+        const rmse: f32 = @floatCast(std.math.sqrt(self.sum_squared_error / @as(f64, @floatFromInt(self.processed_count))));
+        const close_fraction = @as(f32, @floatFromInt(self.count_close)) / @as(f32, @floatFromInt(self.processed_count));
+
+        return .{
+            .nan_or_inf = self.nan_or_inf,
+            .max_absolute_error = self.max_absolute_error,
+            .mean_absolute_error = mean_absolute_error,
+            .rmse = rmse,
+            .close_fraction = close_fraction,
+            .p50_absolute_error = q(self.absolute_errors, 0.5),
+            .p90_absolute_error = q(self.absolute_errors, 0.9),
+            .p99_absolute_error = q(self.absolute_errors, 0.99),
+            .p999_absolute_error = q(self.absolute_errors, 0.999),
+        };
+    }
+};
+
 fn compareIterators(comptime mem_eql: bool, allocator: std.mem.Allocator, comptime L: type, comptime R: type, left: Slice, right: Slice, opts: CompareOpts) !?CompareReport {
     var left_iter = (&left).contiguousItemsIterator(L);
     var right_iter = (&right).contiguousItemsIterator(R);
     var left_chunk: []const L = &.{};
     var right_chunk: []const R = &.{};
+    var comparison: ?ComparisonAccumulator = if (comptime mem_eql)
+        null
+    else
+        try .init(allocator, left.shape.count());
+    defer if (comparison) |*c| c.deinit(allocator);
 
     while (true) {
         if (left_chunk.len == 0) {
@@ -192,7 +300,11 @@ fn compareIterators(comptime mem_eql: bool, allocator: std.mem.Allocator, compti
 
         if (left_chunk.len == 0 or right_chunk.len == 0) {
             std.debug.assert(left_chunk.len == right_chunk.len);
-            return null;
+            if (comptime mem_eql) return null;
+            if (left.shape.count() == 0) return null;
+
+            const compare_report = comparison.?.report();
+            return if (compareReportOk(compare_report, opts)) null else compare_report;
         }
 
         const n = @min(left_chunk.len, right_chunk.len);
@@ -201,17 +313,7 @@ fn compareIterators(comptime mem_eql: bool, allocator: std.mem.Allocator, compti
                 return error.TestUnexpectedResult;
             }
         } else {
-            const compare_report = try compareSlices(
-                allocator,
-                L,
-                R,
-                left_chunk[0..n],
-                right_chunk[0..n],
-                opts,
-            );
-            if (!compareReportOk(compare_report, opts)) {
-                return compare_report;
-            }
+            comparison.?.addSlices(L, R, left_chunk[0..n], right_chunk[0..n], opts);
         }
 
         left_chunk = left_chunk[n..];
@@ -220,69 +322,10 @@ fn compareIterators(comptime mem_eql: bool, allocator: std.mem.Allocator, compti
 }
 
 pub fn compareSlices(allocator: std.mem.Allocator, comptime L: type, comptime R: type, left: []const L, right: []const R, opts: CompareOpts) !CompareReport {
-    var nan_or_inf: bool = false;
-    var max_absolute_error: f32 = 0;
-    var sum_absolute_error: f64 = 0;
-    var sum_squared_error: f64 = 0;
-    var count_close: usize = 0;
-    var absolute_errors = try allocator.alloc(f32, left.len);
-    defer allocator.free(absolute_errors);
-    var relative_errors = try allocator.alloc(f32, left.len);
-    defer allocator.free(relative_errors);
-
-    for (left, right, 0..) |l, r, i| {
-        const l_f32 = zml.floats.floatCast(f32, l);
-        const r_f32 = zml.floats.floatCast(f32, r);
-        if (!std.math.isFinite(l_f32) or !std.math.isFinite(r_f32)) {
-            nan_or_inf = true;
-            continue;
-        }
-        const absolute_error = @abs(l_f32 - r_f32);
-        max_absolute_error = @max(max_absolute_error, absolute_error);
-        sum_absolute_error += @as(f64, @floatCast(absolute_error));
-        sum_squared_error += @as(f64, @floatCast(absolute_error)) * @as(f64, @floatCast(absolute_error));
-
-        const scale = @max(@abs(l_f32), @abs(r_f32));
-        const tolerance = opts.absolute_tolerance + opts.relative_tolerance * scale;
-        if (absolute_error <= tolerance) {
-            count_close += 1;
-        }
-
-        absolute_errors[i] = absolute_error;
-        const denom = @max(opts.epsilon_relative, scale);
-        relative_errors[i] = absolute_error / denom;
-    }
-
-    std.sort.heap(f32, absolute_errors, {}, std.sort.asc(f32));
-    std.sort.heap(f32, relative_errors, {}, std.sort.asc(f32));
-
-    const q = struct {
-        pub fn q(values: []const f32, frac: f32) f32 {
-            if (values.len == 0) return 0;
-            const idx: usize = @intFromFloat(std.math.round(@as(f32, @floatFromInt(values.len - 1)) * frac));
-            return values[idx];
-        }
-    }.q;
-
-    const mean_absolute_error: f32 = @floatCast(sum_absolute_error / @as(f64, @floatFromInt(left.len)));
-    const rmse: f32 = @floatCast(std.math.sqrt(sum_squared_error / @as(f64, @floatFromInt(left.len))));
-    const close_fraction = @as(f32, @floatFromInt(count_close)) / @as(f32, @floatFromInt(left.len));
-
-    const report: CompareReport = .{
-        .nan_or_inf = nan_or_inf,
-        .max_absolute_error = max_absolute_error,
-        .mean_absolute_error = mean_absolute_error,
-        .rmse = rmse,
-        .close_fraction = close_fraction,
-        .p50_absolute_error = q(absolute_errors, 0.5),
-        .p90_absolute_error = q(absolute_errors, 0.9),
-        .p99_absolute_error = q(absolute_errors, 0.99),
-        .p999_absolute_error = q(absolute_errors, 0.999),
-    };
-
-    // TODO: Move
-    //const ok = !report.nan_or_inf and report.close_fraction >= opts.minimum_close_fraction;
-    return report;
+    var comparison = try ComparisonAccumulator.init(allocator, left.len);
+    defer comparison.deinit(allocator);
+    comparison.addSlices(L, R, left, right, opts);
+    return comparison.report();
 }
 
 pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpectedEqual}!void {
