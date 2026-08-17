@@ -498,9 +498,24 @@ pub const Shape = struct {
         return @intCast(res);
     }
 
-    /// Total size in bytes needed to represent this shape.
+    /// Total size in bytes needed to represent this shape on host
     pub fn byteSize(self: Shape) usize {
         return self.dtype().sizeOf() * self.count();
+    }
+
+    /// Total size in bytes needed to represent this shape on device
+    /// https://github.com/openxla/xla/blob/0f7240cad3fa14b52a809ac1f4a351a9edfc541e/xla/primitive_util.h#L807
+    pub fn deviceByteSize(self: Shape) usize {
+        const bits_per_element: usize = switch (self.dtype()) {
+            .bool => 8,
+            else => self.dtype().bitSizeOf(),
+        };
+
+        return std.math.divCeil(
+            usize,
+            self.count() * bits_per_element,
+            8,
+        ) catch unreachable;
     }
 
     /// Compares the two shapes described, ignoring tagging.
