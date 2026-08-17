@@ -472,7 +472,7 @@ pub const Loader = struct {
         var results = try exe.results(arena);
 
         args.set(.{buffers});
-        exe.call(args, &results);
+        exe.callOpts(io, args, &results, .{ .wait = true });
 
         buffer.* = results.get(Buffer);
     }
