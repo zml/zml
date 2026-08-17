@@ -99,7 +99,7 @@ zig_library(
         "meta.zig",
         "mlirx.zig",
         "module.zig",
-        "moe/cutlass-flashinfer.zig",
+        "moe/cutlass_flashinfer.zig",
         "moe/metal.zig",
         "moe/moe.zig",
         "moe/mosaic_tpu.zig",
@@ -181,34 +181,6 @@ zig_library(
     deps = [
         ":zml",
         "//kernels/mosaic_tpu:mosaic_tpu_builder",
-    ],
-)
-
-zig_test(
-    name = "flashinfer_cutlass_moe_test",
-    main = "moe/cutlass-flashinfer_test.zig",
-    tags = ["manual"],
-    target_compatible_with = [
-        "@platforms//cpu:x86_64",
-        "@platforms//os:linux",
-    ],
-    deps = [
-        ":zml",
-        "//platforms",
-    ],
-)
-
-zig_binary(
-    name = "flashinfer_cutlass_moe_gemma4_test",
-    main = "moe/cutlass-flashinfer_test.zig",
-    tags = ["manual"],
-    target_compatible_with = [
-        "@platforms//cpu:x86_64",
-        "@platforms//os:linux",
-    ],
-    deps = [
-        ":zml",
-        "//platforms",
     ],
 )
 

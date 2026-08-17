@@ -324,7 +324,7 @@ pub const Platform = struct {
                 zml.attention.flashattn.register(platform) catch {
                     log.warn("Failed to register flashattn custom call", .{});
                 };
-                if (zml.moe.Backend.flashinfer_cutlass.load(arena, io)) {
+                if (zml.moe.Backend.flashinfer_cutlass.load(arena, io, platform)) {
                     zml.moe.Backend.flashinfer_cutlass.register(platform) catch |err| {
                         log.warn(
                             "Failed to register FlashInfer CUTLASS MoE custom calls: {}",

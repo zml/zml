@@ -44,15 +44,19 @@ pub const Api = struct {
     run: RunFn,
 };
 
-const architectures = [_]u16{ 90, 100, 120 };
-var apis: [architectures.len]?Api = @splat(null);
-var isLoaded = false;
+var loaded_api: ?Api = null;
 
 fn libraryRunfile(sm: u16, buffer: []u8) ![]const u8 {
+    if (comptime builtin.os.tag != .linux) return error.UnsupportedPlatform;
+    const cpu_arch = comptime switch (builtin.cpu.arch) {
+        .aarch64 => "arm64",
+        .x86_64 => "amd64",
+        else => return error.UnsupportedPlatform,
+    };
     return try std.fmt.bufPrint(
         buffer,
-        "flashinfer_cutlass_moe_linux_amd64/lib/libflashinfer_cutlass_moe_sm{d}.so",
-        .{sm},
+        "flashinfer_cutlass_moe_linux_{s}/lib/libflashinfer_cutlass_moe_sm{d}.so",
+        .{ cpu_arch, sm },
     );
 }
 
@@ -92,56 +96,58 @@ fn loadApi(path: []const u8) !Api {
     return api;
 }
 
-pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
+pub fn load(allocator: std.mem.Allocator, io: std.Io, sm: u16) !void {
     _ = allocator;
-    if (isLoaded) return;
-    if (builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) {
-        return error.UnsupportedPlatform;
+    if (loaded_api) |*api| {
+        if (api.compiledSm() != sm) return error.ArchitectureAlreadyLoaded;
+        return;
     }
 
     const runfiles = try bazel.runfiles(bazel_builtin.current_repository);
-    for (architectures, 0..) |sm, index| {
-        var runfileNameBuffer: [160]u8 = undefined;
-        const runfileName = try libraryRunfile(sm, &runfileNameBuffer);
-        var runfilePathBuffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const runfilePath = (try runfiles.rlocation(runfileName, &runfilePathBuffer)) orelse
-            return error.NotFound;
+    var runfile_name_buffer: [160]u8 = undefined;
+    const runfile_name = try libraryRunfile(sm, &runfile_name_buffer);
+    var runfile_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const runfile_path = (try runfiles.rlocation(runfile_name, &runfile_path_buffer)) orelse
+        return error.NotFound;
 
-        // Preserve the producer library's $ORIGIN-relative dependency lookup
-        // when the development repository exposes it through Bazel symlinks.
-        var canonicalBuffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const canonicalLength = if (std.fs.path.isAbsolute(runfilePath))
-            try std.Io.Dir.realPathFileAbsolute(io, runfilePath, &canonicalBuffer)
-        else
-            try std.Io.Dir.cwd().realPathFile(io, runfilePath, &canonicalBuffer);
-        apis[index] = try loadApi(canonicalBuffer[0..canonicalLength]);
-    }
-    isLoaded = true;
+    // Preserve the producer library's $ORIGIN-relative dependency lookup when
+    // the development repository exposes it through Bazel symlinks.
+    var canonical_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const canonical_length = if (std.fs.path.isAbsolute(runfile_path))
+        try std.Io.Dir.realPathFileAbsolute(io, runfile_path, &canonical_buffer)
+    else
+        try std.Io.Dir.cwd().realPathFile(io, runfile_path, &canonical_buffer);
+    var api = try loadApi(canonical_buffer[0..canonical_length]);
+    errdefer api.library.close();
+    if (api.compiledSm() != sm) return error.WrongArchitectureLibrary;
+    loaded_api = api;
 }
 
 pub fn apiForDevice(device: i32) !*Api {
-    if (!isLoaded) return error.BackendNotLoaded;
-    for (&apis) |*maybeApi| {
-        if (maybeApi.*) |*api| {
-            var supported: u8 = 0;
-            const status = api.deviceIsSupported(device, &supported);
-            if (status != c.ZML_FI_CUTLASS_MOE_STATUS_SUCCESS) {
-                if (api.lastError()) |message| {
-                    std.log.err("FlashInfer CUTLASS MoE device probe failed: {s}", .{std.mem.span(message)});
-                }
-                return error.DeviceProbeFailed;
-            }
-            if (supported != 0) return api;
+    const api = if (loaded_api) |*value| value else return error.BackendNotLoaded;
+    var supported: u8 = 0;
+    const status = api.deviceIsSupported(device, &supported);
+    if (status != c.ZML_FI_CUTLASS_MOE_STATUS_SUCCESS) {
+        if (api.lastError()) |message| {
+            std.log.err("FlashInfer CUTLASS MoE device probe failed: {s}", .{std.mem.span(message)});
         }
+        return error.DeviceProbeFailed;
     }
+    if (supported != 0) return api;
     return error.UnsupportedArchitecture;
 }
 
-test "load architecture-specific FlashInfer CUTLASS MoE libraries" {
-    if (builtin.os.tag != .linux or builtin.cpu.arch != .x86_64) return;
-    try load(std.testing.allocator, std.testing.io);
-    for (apis, architectures) |maybeApi, sm| {
-        const api = maybeApi orelse return error.NotLoaded;
-        try std.testing.expectEqual(@as(i32, sm), api.compiledSm());
-    }
+test "select host and GPU architecture-specific FlashInfer CUTLASS MoE library" {
+    var buffer: [160]u8 = undefined;
+    const path = try libraryRunfile(120, &buffer);
+    const expected = switch (builtin.cpu.arch) {
+        .aarch64 => "flashinfer_cutlass_moe_linux_arm64/lib/libflashinfer_cutlass_moe_sm120.so",
+        .x86_64 => "flashinfer_cutlass_moe_linux_amd64/lib/libflashinfer_cutlass_moe_sm120.so",
+        else => return,
+    };
+    try std.testing.expectEqualStrings(expected, path);
+
+    try load(std.testing.allocator, std.testing.io, 120);
+    const api = if (loaded_api) |*value| value else return error.NotLoaded;
+    try std.testing.expectEqual(@as(i32, 120), api.compiledSm());
 }

@@ -70,38 +70,49 @@ pub const Parameters = struct {
     }
 };
 
-pub const Metadata = struct {
-    pub const InitOptions = struct {};
-
-    pub fn init(_: InitOptions) Metadata {
-        return .{};
-    }
-
-    pub fn initBuffer(
-        _: Metadata,
-        _: std.Io,
-        _: *const zml.Platform,
-    ) !zml.Bufferized(Metadata) {
-        return {};
-    }
-};
-
-pub fn deinitBuffer(_: *zml.Bufferized(Metadata)) void {}
-
 pub const Nvfp4Scales = struct {
-    /// Dynamic activation quantization multiplier, scalar or per expert.
+    /// Dynamic activation quantization multiplier.
     fc1_act_global: zml.Tensor,
     /// Interleaved E4M3 scales with shape returned by fc1BlockScaleShape().
     fc1_weight_block: zml.Tensor,
     /// Final GEMM1 output alpha, one value per expert.
     fc1_global: zml.Tensor,
-    /// Dynamic activation quantization multiplier, scalar or per expert.
+    /// Dynamic activation quantization multiplier.
     fc2_act_global: zml.Tensor,
     /// Interleaved E4M3 scales with shape returned by fc2BlockScaleShape().
     fc2_weight_block: zml.Tensor,
     /// Final GEMM2 output alpha, one value per expert.
     fc2_global: zml.Tensor,
 };
+
+pub const Metadata = struct {
+    variant: Variant = .bf16xbf16,
+    nvfp4_scales: ?Nvfp4Scales = null,
+
+    pub const InitOptions = struct {
+        variant: Variant = .bf16xbf16,
+        nvfp4_scales: ?Nvfp4Scales = null,
+    };
+
+    pub fn init(opts: InitOptions) Metadata {
+        return .{
+            .variant = opts.variant,
+            .nvfp4_scales = opts.nvfp4_scales,
+        };
+    }
+
+    pub fn initBuffer(
+        self: Metadata,
+        _: std.Io,
+        _: *const zml.Platform,
+    ) !zml.Bufferized(Metadata) {
+        if (self.nvfp4_scales != null) return error.Nvfp4ScaleBuffersRequired;
+        return .{ .nvfp4_scales = null };
+    }
+};
+
+/// NVFP4 scale buffers are borrowed from the model and are not owned by Metadata.
+pub fn deinitBuffer(_: *zml.Bufferized(Metadata)) void {}
 
 const Input = struct {
     hidden_states: zml.Tensor,
@@ -211,7 +222,7 @@ fn ensureRunner(device: i32, variant: Variant) !DeviceRunner {
     return result;
 }
 
-fn fi_cutlass_moeActivation(activation: Activation) i32 {
+fn cutlassActivation(activation: Activation) i32 {
     return switch (activation) {
         .swiglu => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU,
         .geglu => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU,
@@ -238,7 +249,7 @@ fn makeContext(attributes: Attributes) fi_cutlass_moe.Context {
     return context;
 }
 
-fn ffiCall(
+fn ffiCallNvfp4(
     call_frame: *zml.pjrt.ffi.CallFrame,
     input: zml.pjrtx.TensorToCustomCallBuffer(Input),
     output: zml.pjrtx.ShapeToCustomCallBuffer(Output),
@@ -287,10 +298,9 @@ fn ffiCall(
     return null;
 }
 
-const routedNvfp4Call = zml.ops.CustomCall(Input, Output, Attributes, ffiCall, .{
+const routedNvfp4Call = zml.ops.CustomCall(Input, Output, Attributes, ffiCallNvfp4, .{
     .name = "flashinfer_cutlass_nvfp4_routed_moe",
-    // Expert sharding is owned by moe.forwardMoe's outer manual computation.
-    // A second sharding-aware wrapper would bind the same mesh axis twice.
+    // Expert sharding is owned by forwardMoe outer manual computation.
     .sharding_aware = false,
     .has_side_effect = false,
 });
@@ -340,9 +350,27 @@ const routedBf16Call = zml.ops.CustomCall(Bf16Input, Output, Attributes, ffiCall
     .has_side_effect = false,
 });
 
-pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
+fn computeCapability(platform: *const zml.Platform) !u16 {
+    if (platform.target != .cuda) return error.UnsupportedPlatform;
+    const devices = platform.pjrt_client.devices(platform.pjrt_api);
+    if (devices.len == 0) return error.NoDevices;
+
+    const compute_capability = zml.platform.cuda.tryGetComputeCapabilities(platform, devices[0]) orelse
+        return error.UnknownComputeCapability;
+
+    if (std.mem.eql(u8, compute_capability, "9.0")) return 90;
+    if (std.mem.eql(u8, compute_capability, "10.0")) return 100;
+    if (std.mem.eql(u8, compute_capability, "12.0")) return 120;
+    return error.UnsupportedArchitecture;
+}
+
+pub fn load(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+) !void {
     if (comptime platforms.isEnabled(.cuda)) {
-        try fi_cutlass_moe.load(allocator, io);
+        try fi_cutlass_moe.load(allocator, io, try computeCapability(platform));
         loaded = true;
         return;
     }
@@ -359,26 +387,15 @@ pub fn register(platform: *const zml.Platform) !void {
 }
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
-    if (comptime !platforms.isEnabled(.cuda)) return false;
-    if (!loaded or platform.target != .cuda) return false;
-
-    const devices = platform.pjrt_client.devices(platform.pjrt_api);
-    if (devices.len == 0) return false;
-    const cc = zml.platform.cuda.tryGetComputeCapabilities(platform, devices[0]) orelse
-        return false;
-    return std.mem.eql(u8, cc, "9.0") or
-        std.mem.eql(u8, cc, "10.0") or
-        std.mem.eql(u8, cc, "12.0");
+    if (!loaded) return false;
+    _ = computeCapability(platform) catch return false;
+    return true;
 }
 
-pub fn isNvfp4Available(platform: *const zml.Platform) bool {
-    if (!isAvailable(platform)) return false;
-
-    const devices = platform.pjrt_client.devices(platform.pjrt_api);
-    const cc = zml.platform.cuda.tryGetComputeCapabilities(platform, devices[0]) orelse
-        return false;
-    return std.mem.eql(u8, cc, "10.0") or
-        std.mem.eql(u8, cc, "12.0");
+pub fn isNvfp4Supported(platform: *const zml.Platform) bool {
+    if (!loaded) return false;
+    const compute_capability = computeCapability(platform) catch return false;
+    return compute_capability == 100 or compute_capability == 120;
 }
 
 pub fn tacticCounts(
@@ -513,7 +530,7 @@ fn validateInputs(
         .intermediate_size = intermediate_size,
         .num_experts = @intCast(num_experts),
         .top_k = @intCast(top_k),
-        .activation = fi_cutlass_moeActivation(options.activation),
+        .activation = cutlassActivation(options.activation),
         .enable_pdl = options.enable_pdl,
         .fc1_act_per_expert = scales.fc1_act_global.rank() == 1,
         .fc2_act_per_expert = scales.fc2_act_global.rank() == 1,
@@ -522,12 +539,10 @@ fn validateInputs(
     };
 }
 
-/// Runs a routed NVFP4 CUTLASS MoE. Weights are logical E2M1 tensors in
-/// [expert, output, input] order. Block scales must already use FlashInfer's
-/// `nvfp4_block_scale_interleave` layout; this function does not quantize model
-/// weights at execution time. BF16 activations are dynamically quantized to
-/// NVFP4 by the fused runner before each expert GEMM.
-pub fn fusedExpertsImpl(
+/// Routed NVFP4 CUTLASS MoE. Weights are logical E2M1 tensors in [expert, output, input] order.
+/// Block scales must use FlashInfer nvfp4_block_scale_interleave layout
+/// BF16 activations are dynamically quantized to NVFP4 by the fused runner before each expert GEMM.
+pub fn fusedExpertsNvfp4(
     hidden_states: zml.Tensor,
     fc1_weights: zml.Tensor,
     fc2_weights: zml.Tensor,
@@ -581,9 +596,8 @@ pub fn fusedExpertsImpl(
     return result.output;
 }
 
-/// Runs a routed BF16 x BF16 CUTLASS MoE with ordinary contiguous row-major
-/// [expert, output, input] weights. This is the non-quantized FlashInfer path
-/// used on Hopper and Blackwell; unlike TRTLLM Gen it does not require specific layout
+/// Routed BF16 x BF16 CUTLASS MoE [expert, output, input] weights.
+/// Non-quantized FlashInfer path used on Hopper and Blackwell
 pub fn fusedExpertsBf16(
     hidden_states: zml.Tensor,
     fc1_weights: zml.Tensor,
@@ -638,7 +652,7 @@ pub fn fusedExpertsBf16(
         .intermediate_size = intermediateSize,
         .num_experts = @intCast(numExperts),
         .top_k = @intCast(topK),
-        .activation = fi_cutlass_moeActivation(options.activation),
+        .activation = cutlassActivation(options.activation),
         .enable_pdl = options.enable_pdl,
         .fc1_act_per_expert = false,
         .fc2_act_per_expert = false,

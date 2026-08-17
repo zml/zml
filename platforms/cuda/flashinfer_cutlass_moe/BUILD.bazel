@@ -7,12 +7,18 @@ _DEPS = [
     "@llvm//platforms/config:linux_x86_64": [
         "@flashinfer_cutlass_moe_linux_amd64//:c",
     ],
+    "@llvm//platforms/config:linux_aarch64": [
+        "@flashinfer_cutlass_moe_linux_arm64//:c",
+    ],
     "//conditions:default": [],
 })
 
 _DATA = select({
     "@llvm//platforms/config:linux_x86_64": [
         "@flashinfer_cutlass_moe_linux_amd64//:libraries",
+    ],
+    "@llvm//platforms/config:linux_aarch64": [
+        "@flashinfer_cutlass_moe_linux_arm64//:libraries",
     ],
     "//conditions:default": [],
 })
@@ -24,7 +30,6 @@ zig_library(
     main = "flashinfer_cutlass_moe.zig",
     tags = ["manual"],
     target_compatible_with = [
-        "@platforms//cpu:x86_64",
         "@platforms//os:linux",
     ],
     visibility = ["//visibility:public"],
@@ -37,7 +42,6 @@ zig_test(
     main = "flashinfer_cutlass_moe.zig",
     tags = ["manual"],
     target_compatible_with = [
-        "@platforms//cpu:x86_64",
         "@platforms//os:linux",
     ],
     deps = _DEPS,

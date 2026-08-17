@@ -3,7 +3,7 @@ const std = @import("std");
 const platforms = @import("platforms");
 const zml = @import("../zml.zig");
 const stdx = zml.stdx;
-pub const cutlass_flashinfer = @import("cutlass-flashinfer.zig");
+pub const cutlass_flashinfer = @import("cutlass_flashinfer.zig");
 pub const metal = @import("metal.zig");
 pub const mosaic_tpu = @import("mosaic_tpu.zig");
 pub const triton = @import("triton.zig");
@@ -28,7 +28,7 @@ pub const Backend = enum {
                     .flashinfer_cutlass
                 else
                     .triton,
-                .f4e2m1 => if (cutlass_flashinfer.isNvfp4Available(platform))
+                .f4e2m1 => if (cutlass_flashinfer.isNvfp4Supported(platform))
                     .flashinfer_cutlass
                 else
                     return error.UnsupportedDataType,
@@ -67,9 +67,10 @@ pub const Backend = enum {
         backend: Backend,
         allocator: std.mem.Allocator,
         io: std.Io,
+        platform: *const zml.Platform,
     ) !void {
         return switch (backend) {
-            .flashinfer_cutlass => cutlass_flashinfer.load(allocator, io),
+            .flashinfer_cutlass => cutlass_flashinfer.load(allocator, io, platform),
             .triton => {},
             .mosaic_tpu => {},
             .metal => {},
@@ -138,9 +139,7 @@ pub const Parameters = union(Backend) {
 
     pub fn init(opts: InitOptions) Parameters {
         return switch (opts) {
-            .flashinfer_cutlass => |v| .{
-                .flashinfer_cutlass = cutlass_flashinfer.Parameters.init(v),
-            },
+            .flashinfer_cutlass => |v| .{ .flashinfer_cutlass = cutlass_flashinfer.Parameters.init(v) },
             .triton => |v| .{ .triton = triton.Parameters.init(v) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Parameters.init(v) },
             .metal => |v| .{ .metal = metal.Parameters.init(v) },
@@ -172,9 +171,7 @@ pub const Metadata = union(Backend) {
 
     pub fn init(opts: InitOptions) Metadata {
         return switch (opts) {
-            .flashinfer_cutlass => |v| .{
-                .flashinfer_cutlass = cutlass_flashinfer.Metadata.init(v),
-            },
+            .flashinfer_cutlass => |v| .{ .flashinfer_cutlass = cutlass_flashinfer.Metadata.init(v) },
             .triton => |v| .{ .triton = triton.Metadata.init(v) },
             .mosaic_tpu => |v| .{ .mosaic_tpu = mosaic_tpu.Metadata.init(v) },
             .metal => |v| .{ .metal = metal.Metadata.init(v) },
@@ -183,9 +180,7 @@ pub const Metadata = union(Backend) {
 
     pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
         return switch (self) {
-            .flashinfer_cutlass => |metadata| .{
-                .flashinfer_cutlass = try metadata.initBuffer(io, platform),
-            },
+            .flashinfer_cutlass => |metadata| .{ .flashinfer_cutlass = try metadata.initBuffer(io, platform) },
             .triton => |metadata| .{ .triton = try metadata.initBuffer(io, platform) },
             .mosaic_tpu => |metadata| .{ .mosaic_tpu = try metadata.initBuffer(io, platform) },
             .metal => |metadata| .{ .metal = try metadata.initBuffer(io, platform) },
@@ -212,7 +207,6 @@ pub fn forwardMoe(
     weights_down: zml.Tensor,
     scales_down: ?zml.Tensor,
     bias_down: ?zml.Tensor,
-    nvfp4_scales: ?cutlass_flashinfer.Nvfp4Scales,
     metadata: Metadata,
     parameters: Parameters,
 ) !zml.Tensor {
@@ -221,7 +215,7 @@ pub fn forwardMoe(
             if (comptime !platforms.isEnabled(.cuda)) {
                 return error.UnsupportedPlatform;
             }
-            _ = switch (metadata) {
+            const flashinfer_metadata = switch (metadata) {
                 .flashinfer_cutlass => |v| v,
                 else => return error.InvalidMetadata,
             };
@@ -235,7 +229,9 @@ pub fn forwardMoe(
             const runner_options = try parameters.flashinfer_cutlass.runnerOptions();
             const expert_partition = weights_gate_up.shape().partition(.expert);
 
-            if (nvfp4_scales) |nvfp4| {
+            if (flashinfer_metadata.variant == .nvfp4xnvfp4) {
+                const nvfp4 = flashinfer_metadata.nvfp4_scales orelse
+                    return error.MissingNvfp4Scales;
                 if (expert_partition.eql(.init(.experts))) {
                     break :b zml.ops.manualComputation(
                         .{
@@ -283,7 +279,7 @@ pub fn forwardMoe(
                                     zml.Tensor.scalar(0, sharded_inputs[2].dtype()),
                                 );
 
-                                const local_output = cutlass_flashinfer.fusedExpertsImpl(
+                                const local_output = cutlass_flashinfer.fusedExpertsNvfp4(
                                     sharded_inputs[0],
                                     sharded_inputs[3],
                                     sharded_inputs[4],
@@ -317,7 +313,7 @@ pub fn forwardMoe(
                     );
                 }
 
-                break :b try cutlass_flashinfer.fusedExpertsImpl(
+                break :b try cutlass_flashinfer.fusedExpertsNvfp4(
                     input,
                     weights_gate_up,
                     weights_down,
@@ -326,6 +322,9 @@ pub fn forwardMoe(
                     nvfp4,
                     runner_options,
                 );
+            }
+            if (flashinfer_metadata.nvfp4_scales != null) {
+                return error.UnexpectedNvfp4Scales;
             }
 
             if (expert_partition.eql(.init(.experts))) {
@@ -399,7 +398,6 @@ pub fn forwardMoe(
             );
         },
         .triton => b: {
-            if (nvfp4_scales != null) return error.UnsupportedQuantization;
             const triton_metadata = switch (metadata) {
                 .triton => |v| v,
                 else => return error.InvalidMetadata,
@@ -478,7 +476,6 @@ pub fn forwardMoe(
             );
         },
         .mosaic_tpu => b: {
-            if (nvfp4_scales != null) return error.UnsupportedQuantization;
             const tpu_metadata = switch (metadata) {
                 .mosaic_tpu => |v| v,
                 else => return error.InvalidMetadata,
@@ -554,7 +551,6 @@ pub fn forwardMoe(
             );
         },
         .metal => b: {
-            if (nvfp4_scales != null) return error.UnsupportedQuantization;
             const metal_metadata = switch (metadata) {
                 .metal => |v| v,
                 else => return error.InvalidMetadata,

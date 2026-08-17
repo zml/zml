@@ -463,11 +463,15 @@
   "moduleExtensions": {
     "//third_party/flashinfer_cutlass_moe:repo.bzl%flashinfer_cutlass_moe": {
       "general": {
-        "bzlTransitiveDigest": "zig1X6EgyUMFWHvb+YxcQBxzerVYNxKQrJwK04Opz4w=",
+        "bzlTransitiveDigest": "0Dp20xlZmNYiMeH1fGYLwoIsGbRs7eKRhWzmYx9B0Ps=",
         "usagesDigest": "m52//9CuhrzWBkoQ3uY14u1CqcP53R+k6NQRemOENFo=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "flashinfer_cutlass_moe_linux_amd64": {
+            "repoRuleId": "@@//third_party/flashinfer_cutlass_moe:repo.bzl%_repository",
+            "attributes": {}
+          },
+          "flashinfer_cutlass_moe_linux_arm64": {
             "repoRuleId": "@@//third_party/flashinfer_cutlass_moe:repo.bzl%_repository",
             "attributes": {}
           }

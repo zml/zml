@@ -45,6 +45,7 @@ _repository = repository_rule(
 
 def _extension_impl(_module_ctx):
     _repository(name = "flashinfer_cutlass_moe_linux_amd64")
+    _repository(name = "flashinfer_cutlass_moe_linux_arm64")
 
 flashinfer_cutlass_moe = module_extension(
     implementation = _extension_impl,
