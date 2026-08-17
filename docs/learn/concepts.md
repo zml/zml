@@ -1,28 +1,28 @@
-
 # ZML Concepts
 
 ## Model lifecycle
 
 ZML is an inference stack that helps running Machine Learning (ML) models, and
-particulary Neural Networks (NN).
+particularly Neural Networks (NN).
 
 The lifecycle of a model is implemented in the following steps:
 
-1. Open the model file and read the shapes of the weights, but don't load the weights 
+1. Open the model file and read the shapes of the weights, but don't load the weights
    yet.
 
 2. Using the loaded shapes and optional metadata, instantiate a model struct
    with `Tensor`s, representing the shape and layout of each layer of the NN.
 
-3. Compile the model struct and it's `forward` function into an accelerator
-   specific executable. The `forward` function describes the mathematical
+3. Compile the model struct and its `forward` function into an accelerator
+   specific executable (`zml.Exe`). The `forward` function describes the mathematical
    operations corresponding to the model inference.
 
-4. Load the model weights from disk, onto the accelerator memory.
+4. Load the model weights from disk, onto the accelerator memory
+   (typically via `zml.io.TensorStore` + `zml.io.Loader` into a `zml.Bufferized(Model)`).
 
 5. Load some user inputs, and copy them to the accelerator.
 
-6. Call the executable using the weights and the user inputs.
+6. Call the executable using the weights and the user inputs (`Exe.call`).
 
 7. Fetch the returned model output from accelerator into host memory, and
    finally present it to the user.
@@ -58,15 +58,18 @@ Let's explain all that.
     `Shape` struct can also represent a regular number, aka a scalar:
     `Shape.init(.{}, .i32)` represents a 32-bit signed integer.
 
+    Axes can also be **tagged** (named) for clearer ops and sharding; see
+    [Working with tensors](../tutorials/working_with_tensors.md).
+
 * `Slice`: _is_ the combination of a `Shape` and raw bytes (bytes that are **on the CPU**).
-  - can own the underlying memory - but can also accomodate non-owned memory.
+  - can own the underlying memory - but can also accommodate non-owned memory.
 
 * `Buffer`: _is_ a multi-dimension array, whose memory is allocated **on an
   accelerator**.
     - contains a handle that the ZML runtime can use to convert it into a
       physical address, but there is no guarantee this address is visible from
       the CPU.
-    - can be created from a `Slice` by calling `Buffer.fromSlice(...)`. 
+    - can be created from a `Slice` by calling `Buffer.fromSlice(...)`.
 
 * `Tensor`: is a mathematical object representing an intermediary result of a
   computation or an input to an executable (including weights).
@@ -76,7 +79,7 @@ Let's explain all that.
 ## The model struct
 
 The model struct is the Zig code that describes your Neural Network (NN).
-Let's look a the following model architecture:
+Let's look at the following model architecture:
 
 ![Multilayer perceptrons](https://raw.githubusercontent.com/zml/zml.github.io/refs/heads/main/docs-assets/perceptron.png)
 
@@ -116,7 +119,7 @@ models.
 
 Since the `Model` struct contains `Tensor`s, it is only ever useful during the
 compilation stage, but not during inference. If we want to represent the model
-with actual `Buffer`s, we can use the `zml.Bufferize(Model)`, which is a mirror
+with actual `Buffer`s, we can use `zml.Bufferized(Model)`, which is a mirror
 struct of `Model` but with a `Buffer` replacing every `Tensor`.
 
 ## Strong type checking
@@ -125,21 +128,23 @@ Let's look at the model life cycle again, but this time annotated with the
 corresponding types.
 
 1. Open the model file and read the shapes of the weights -> `zml.Shape`
+   (e.g. via `zml.safetensors.TensorRegistry`)
 
 2. Instantiate a model struct -> `Model` struct (with `zml.Tensor` inside)
 
 3. Compile the model struct and its `forward` function into an executable.
-   `foward` is a `Tensor -> Tensor` function, executable is a
-   `zml.Executable`
+   `forward` is a `Tensor -> Tensor` function; the executable is a
+   `zml.Exe`
 
 4. Load the model weights from disk, onto accelerator memory ->
-   `zml.Bufferized(Model)` struct (with `zml.Buffer` inside)
+   `zml.Bufferized(Model)` struct (with `zml.Buffer` inside), typically via
+   `zml.io.Loader`
 
 5. Load some user inputs (custom struct), encode them into arrays of numbers
    (`zml.Slice`), and copy them to the accelerator (`zml.Buffer`).
 
-6. Call the executable on the user inputs. `module.call` accepts `zml.Buffer`
-   arguments and returns `zml.Buffer`
+6. Call the executable on the user inputs. `Exe.call` / `Exe.callOpts` accept
+   `zml.Buffer` arguments (via `Exe.Arguments`) and produce `zml.Buffer` results.
 
 7. Return the model output (`zml.Buffer`) to the host (`zml.Slice`),
    decode it (custom struct) and finally return to the user.

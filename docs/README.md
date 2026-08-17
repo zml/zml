@@ -23,8 +23,10 @@ Ready to write some code? Try starting with [your first model in ZML](./tutorial
 
 ## Learn more...
 
-- [ZML Concepts](./learn/concepts.md) : **Tensors, Models, Executables, etc. explained**
+- [ZML Concepts](./learn/concepts.md) : **Tensors, Models, Exe, Bufferized, etc. explained**
 
 ## Contribute
 
+- [Contributing](../CONTRIBUTING.md)
 - [Style Guide](./misc/style_guide.md)
+- [AGENTS.md](../AGENTS.md) (repo layout, commands, conventions)
