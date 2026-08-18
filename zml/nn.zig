@@ -116,9 +116,17 @@ pub const nvfp4_block_size = 16;
 /// How a `Linear`'s scales map onto its weight, which is always `[out, contracted]` with the
 /// contracted axis last and named by `Linear.tag`.
 ///
-/// Every scheme here is legal to emit as an `xla.scaled_dot` composite: a backend either claims
-/// it (Metal's `ClassifyMetalScaledMatmul`, Triton, cuDNN) or XLA expands it into a dequantize
-/// and a plain dot.
+/// Every scheme here is legal to emit as an `xla.scaled_dot` composite, but where it lands
+/// depends on the backend, and "not claimed" does not mean the same thing everywhere:
+///
+/// - A backend claims the scaled dot directly -- Metal's `ClassifyMetalScaledMatmul`, Triton's
+///   `IsSupportedScaleGrid`, cuDNN's `blockScaledDot`.
+/// - Otherwise `ScaledDotRewriter` expands it into convert + broadcast + multiply + dot. On
+///   CUDA that expansion is pulled straight back into a Triton GEMM fusion, so the weight
+///   stays quantized in HBM and is widened in-register; on Metal nothing fuses into
+///   `__metal$gemm`, so the dequantized weight really is materialized.
+/// - On CPU and TPU there is no expansion at all: `CompositeRewriter` is GPU-only, so the
+///   composite inlines to `scaledDotReference` and fails on `zml$scaled_dot_unmatched`.
 pub const QuantScheme = enum {
     /// f4e2m1 values (`u8`-packed or native), f8e4m3fn scale per 16 contracted values.
     /// Emitted by llm-compressor and by NVIDIA's ModelOpt.
