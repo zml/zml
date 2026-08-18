@@ -264,10 +264,7 @@ pub fn compile(
     var compilation_context: CompilationContext = .init(allocator, st_io.io(), platform, opts);
     defer compilation_context.deinit();
 
-    const result = emitMlir(&compilation_context, func, args) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => unreachable,
-    };
+    const result = try emitMlir(&compilation_context, func, args);
     defer result.output_info.deinit(compilation_context.allocator);
     defer result.input_info.deinit(compilation_context.allocator);
 

@@ -162,7 +162,10 @@ pub const Tensor = struct {
                 .{ self, partitioned_shape, stdx.fmt.slice(ctx.partitioning.shardings) },
             ),
             error.OutOfMemory, error.WriteFailed => @panic("OOM"),
-            error.MissingDeviceInTile => @panic("TODO"),
+            error.MissingDeviceInTile => std.debug.panic(
+                "{f}.withPartitioning({f}) failed because a tile is missing a device. Known shardings: {f}",
+                .{ self, partitioned_shape, stdx.fmt.slice(ctx.partitioning.shardings) },
+            ),
         };
 
         const op_result = switch (ctx.partitioning.partitioner) {

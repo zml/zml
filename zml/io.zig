@@ -676,7 +676,7 @@ const DirectShardWriter = struct {
             },
         );
 
-        const pjrt_buffer = transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0) catch unreachable;
+        const pjrt_buffer = try transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0);
 
         const buf = try pool.get(allocator, io);
 

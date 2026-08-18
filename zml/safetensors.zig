@@ -190,7 +190,7 @@ pub const TensorReader = struct {
             const phys_size = std.mem.alignBackward(usize, @min(dest.len, requested_bytes) + file_offset, align_bytes);
 
             if (phys_size > file_offset) {
-                const phys_read = self.file.readPositional(self.io, &.{phys_buf[0..phys_size]}, phys_pos) catch unreachable;
+                const phys_read = self.file.readPositional(self.io, &.{phys_buf[0..phys_size]}, phys_pos) catch return error.ReadFailed;
                 if (phys_read > file_offset) {
                     const bytes_read = phys_read - file_offset;
                     w.advance(bytes_read);

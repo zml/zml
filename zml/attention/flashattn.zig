@@ -906,8 +906,10 @@ pub const paged_fa2 = struct {
         const num_kv_heads = q.dim(.hkv);
         const head_dim = q.dim(.hd);
         const num_heads = num_head_groups * num_kv_heads;
-        // FIXME: remove unreachable and propagate error correctly.
-        const num_heads_per_shard = @divExact(num_heads, ctx.partitioning.numPartitionsForLogicalAxis(q.shape(), .model) catch unreachable);
+        const num_heads_per_shard = @divExact(num_heads, ctx.partitioning.numPartitionsForLogicalAxis(q.shape(), .model) catch |err| std.debug.panic(
+            "pagedAttention: numPartitionsForLogicalAxis(.model) failed for {f}: {t}",
+            .{ q.shape(), err },
+        ));
 
         const o = switch (parameters) {
             .decode => |decode_parameters| b: {
