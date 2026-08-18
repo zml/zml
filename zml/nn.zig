@@ -121,10 +121,13 @@ pub const nvfp4_block_size = 16;
 /// and a plain dot.
 pub const QuantScheme = enum {
     /// f4e2m1 values (`u8`-packed or native), f8e4m3fn scale per 16 contracted values.
+    /// Emitted by llm-compressor and by NVIDIA's ModelOpt.
     nvfp4,
     /// f8e4m3fn values, one bf16 scale per output channel, constant along the contraction.
+    /// Emitted by llm-compressor, including for the layers an NVFP4 recipe leaves in FP8.
     fp8_per_channel,
-    /// f8e4m3fn values, one bf16 scale per 128x128 tile.
+    /// f8e4m3fn values, one bf16 scale per 128x128 tile. The DeepSeek-style FP8 that model
+    /// vendors publish themselves, under `weight_scale_inv`.
     fp8_block128,
     /// f8e4m3fn values, one scale for the whole tensor. Spelled `[1, 1]` rather than as a
     /// scalar: XLA's composite rewriter requires the scale to have the operand's rank.
@@ -217,7 +220,8 @@ pub fn storedContractionTag(scheme: ?QuantScheme, weight_dtype: DataType, k_tag:
 test "QuantScheme.classify" {
     const expect = std.testing.expectEqual;
 
-    // unsloth/Qwen3.6-27B-NVFP4, which carries both of its schemes under `weight_scale`.
+    // unsloth/Qwen3.6-27B-NVFP4: compressed-tensors, carrying both of its schemes under
+    // `weight_scale` -- NVFP4 on the MLPs of layers 0-55, FP8 per-channel everywhere else.
     const nvfp4_packed: Shape = .init(.{ .dout = 17408, .kw = 2560 }, .u8);
     try expect(@as(?QuantScheme, .nvfp4), QuantScheme.classify(nvfp4_packed, .init(.{ .dout = 17408, .sc = 320 }, .f8e4m3fn)));
     try expect(@as(?QuantScheme, .fp8_per_channel), QuantScheme.classify(
@@ -247,7 +251,7 @@ test "QuantScheme.classify" {
         .init(.{ .dout = 40, .sc = 48 }, .bf16),
     ));
 
-    // Ministral: one scale for the whole tensor, rank 0 or [1].
+    // Mistral's per-tensor FP8: one scale for the whole tensor, rank 0 or [1].
     try expect(@as(?QuantScheme, .fp8_per_tensor), QuantScheme.classify(.init(.{ .dout = 4096, .d = 4096 }, .f8e4m3fn), .init(.{}, .f32)));
     try expect(@as(?QuantScheme, .fp8_per_tensor), QuantScheme.classify(.init(.{ .dout = 4096, .d = 4096 }, .f8e4m3fn), .init(.{ .g = 1 }, .f32)));
 
