@@ -3,9 +3,8 @@ const std = @import("std");
 const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const builtin = @import("builtin");
-const c = @import("c");
+pub const c = @import("c");
 
-pub const C = c;
 pub const Status = c.zml_fi_cutlass_moe_status;
 pub const DType = c.zml_fi_cutlass_moe_dtype;
 pub const Activation = c.zml_fi_cutlass_moe_activation;
@@ -17,7 +16,6 @@ pub const WorkspaceRequirements = c.zml_fi_cutlass_moe_workspace_requirements;
 pub const Runner = c.zml_fi_cutlass_moe_runner;
 
 pub const abiVersionExpected = c.ZML_FI_CUTLASS_MOE_ABI_VERSION;
-pub const autoTactic = c.ZML_FI_CUTLASS_MOE_AUTO_TACTIC;
 
 const AbiVersionFn = @TypeOf(&c.zml_fi_cutlass_moe_abi_version);
 const CompiledSmFn = @TypeOf(&c.zml_fi_cutlass_moe_compiled_sm);

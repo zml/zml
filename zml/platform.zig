@@ -239,6 +239,7 @@ pub const Platform = struct {
     target: Target,
     pjrt_api: *const pjrt.Api,
     pjrt_client: *pjrt.Client,
+    flashinfer_cutlass_moe: ?*zml.moe.cutlass_flashinfer.Backend,
     devices: []const Device,
     memories: []const Memory,
     physical_mesh: zml.Sharding.PhysicalMesh,
@@ -276,6 +277,7 @@ pub const Platform = struct {
                 .target = target,
                 .pjrt_api = api,
                 .pjrt_client = pjrt_client,
+                .flashinfer_cutlass_moe = null,
                 .shardings = .empty,
                 // set below
                 .devices = undefined,
@@ -485,6 +487,9 @@ pub const Platform = struct {
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator, io: std.Io) void {
         _ = io;
         _ = allocator;
+        if (comptime platforms.isEnabled(.cuda)) {
+            if (self.flashinfer_cutlass_moe) |backend| backend.deinit();
+        }
         self.physical_mesh.deinit(self.arena.allocator());
         self.pjrt_client.deinit(self.pjrt_api);
         self.arena.deinit();

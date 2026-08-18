@@ -67,7 +67,7 @@ pub const Backend = enum {
         backend: Backend,
         allocator: std.mem.Allocator,
         io: std.Io,
-        platform: *const zml.Platform,
+        platform: *zml.Platform,
     ) !void {
         return switch (backend) {
             .flashinfer_cutlass => cutlass_flashinfer.load(allocator, io, platform),

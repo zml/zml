@@ -248,16 +248,26 @@ metal = use_extension("//platforms/metal:metal.bzl", "metal_packages")
 use_repo(metal, "libpjrt_metal")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "mosaic_tpu", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg")
-
-flashinfer_cutlass_moe = use_extension(
-    "//third_party/flashinfer_cutlass_moe:repo.bzl",
-    "flashinfer_cutlass_moe",
-)
 use_repo(
-    flashinfer_cutlass_moe,
+    non_module_deps,
+    "arocc",
+    "cloud_accelerator_diagnostics",
+    "com_google_sentencepiece",
+    "flashattn_linux_amd64",
+    "flashattn_linux_arm64",
     "flashinfer_cutlass_moe_linux_amd64",
     "flashinfer_cutlass_moe_linux_arm64",
+    "iree",
+    "libvaxis",
+    "linenoise",
+    "mnist",
+    "mosaic_tpu",
+    "org_swig_swig",
+    "stb",
+    "translate-c",
+    "uucode",
+    "xla",
+    "zigimg",
 )
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")

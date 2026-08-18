@@ -461,37 +461,6 @@
   },
   "selectedYankedVersions": {},
   "moduleExtensions": {
-    "//third_party/flashinfer_cutlass_moe:repo.bzl%flashinfer_cutlass_moe": {
-      "general": {
-        "bzlTransitiveDigest": "vJP6afzWewtTuDw2f+jPSpth6p7LKpnKe7eoYDGOySk=",
-        "usagesDigest": "m52//9CuhrzWBkoQ3uY14u1CqcP53R+k6NQRemOENFo=",
-        "recordedInputs": [
-          "REPO_MAPPING:,bazel_tools bazel_tools"
-        ],
-        "generatedRepoSpecs": {
-          "flashinfer_cutlass_moe_linux_amd64": {
-            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
-            "attributes": {
-              "urls": [
-                "https://github.com/zml/flashinfer/releases/download/cutlass-moe-v0.1.0/flashinfer-cutlass-moe_linux-amd64.tar.gz"
-              ],
-              "sha256": "d40348ad771e2bc34b3dd59602ed5f3ef47b58da06ddad582a1fd993f872fb40",
-              "build_file": "@@//third_party/flashinfer_cutlass_moe:flashinfer_cutlass_moe.BUILD.bazel"
-            }
-          },
-          "flashinfer_cutlass_moe_linux_arm64": {
-            "repoRuleId": "@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive",
-            "attributes": {
-              "urls": [
-                "https://github.com/zml/flashinfer/releases/download/cutlass-moe-v0.1.0/flashinfer-cutlass-moe_linux-arm64.tar.gz"
-              ],
-              "sha256": "4278b3900d789e2ad6c207f7e698728a0b68ab200a0fc815625dfc25a2a6e1a8",
-              "build_file": "@@//third_party/flashinfer_cutlass_moe:flashinfer_cutlass_moe.BUILD.bazel"
-            }
-          }
-        }
-      }
-    },
     "@@aspect_rules_py+//py:extensions.bzl%py_tools": {
       "general": {
         "bzlTransitiveDigest": "LaqXRQ7hUz2pKp1jB+4lExnjHXPJFKoz6+nOJqccLrQ=",

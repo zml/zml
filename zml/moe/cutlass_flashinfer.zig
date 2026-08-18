@@ -6,7 +6,7 @@ const zml = @import("../zml.zig");
 
 const log = std.log.scoped(.moe_cutlass_flashinfer);
 
-pub const autoTactic: i32 = -1;
+pub const auto_tactic: i32 = -1;
 
 pub const Options = struct {
     /// Device used at graph-construction time to select the architecture
@@ -14,10 +14,10 @@ pub const Options = struct {
     workspace_query_device: i32 = 0,
     activation: Activation = .swiglu,
     enable_pdl: bool = false,
-    gemm1_tactic: i32 = autoTactic,
+    gemm1_tactic: i32 = auto_tactic,
     /// GEMM2 uses FlashInfer's absolute tactic index. Query tacticCounts() to
     /// obtain the first valid GEMM2 index.
-    gemm2_tactic: i32 = autoTactic,
+    gemm2_tactic: i32 = auto_tactic,
 };
 
 pub const Activation = enum {
@@ -33,8 +33,8 @@ pub const Parameters = struct {
     activation: ActivationMode,
     workspace_query_device: i32 = 0,
     enable_pdl: bool = false,
-    gemm1_tactic: i32 = autoTactic,
-    gemm2_tactic: i32 = autoTactic,
+    gemm1_tactic: i32 = auto_tactic,
+    gemm2_tactic: i32 = auto_tactic,
 
     pub const ActivationMode = enum {
         silu,
@@ -142,6 +142,7 @@ const Output = struct {
 };
 
 const Attributes = struct {
+    backend: u64 = 0,
     num_tokens: i64,
     hidden_size: i64,
     intermediate_size: i64,
@@ -166,12 +167,43 @@ pub const Variant = enum {
 };
 
 const maxCudaDevices = 16;
-var loaded = false;
-var runners: [std.meta.fields(Variant).len][maxCudaDevices]?DeviceRunner =
-    @splat(@splat(null));
+
+pub const Backend = struct {
+    runners: [std.meta.fields(Variant).len][maxCudaDevices]?DeviceRunner =
+        @splat(@splat(null)),
+
+    pub fn deinit(self: *Backend) void {
+        for (&self.runners) |*variant_runners| {
+            for (variant_runners) |device_runner| {
+                if (device_runner) |runner| {
+                    _ = runner.api.runnerDestroy(runner.runner);
+                }
+            }
+        }
+    }
+
+    fn ensureRunner(self: *Backend, device: i32, variant: Variant) !DeviceRunner {
+        if (device < 0 or device >= maxCudaDevices) return error.UnsupportedDevice;
+
+        const index: usize = @intCast(device);
+        const variant_index: usize = @intFromEnum(variant);
+        if (self.runners[variant_index][index]) |runner| return runner;
+
+        const api = try fi_cutlass_moe.apiForDevice(device);
+        const options = runnerOptions(device, variant);
+        var runner: ?*fi_cutlass_moe.Runner = null;
+        try checkStatus(api, api.runnerCreate(&options, &runner));
+        const result: DeviceRunner = .{
+            .api = api,
+            .runner = runner orelse return error.RunnerInitializationFailed,
+        };
+        self.runners[variant_index][index] = result;
+        return result;
+    }
+};
 
 fn checkStatus(api: *const fi_cutlass_moe.Api, status: fi_cutlass_moe.Status) !void {
-    if (status == fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_STATUS_SUCCESS) return;
+    if (status == fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_STATUS_SUCCESS) return;
     if (api.lastError()) |message| {
         log.err("FlashInfer CUTLASS MoE failed (status {d}): {s}", .{
             status,
@@ -181,9 +213,9 @@ fn checkStatus(api: *const fi_cutlass_moe.Api, status: fi_cutlass_moe.Status) !v
         log.err("FlashInfer CUTLASS MoE failed with status {d}", .{status});
     }
     return switch (status) {
-        fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_STATUS_INVALID_ARGUMENT => error.InvalidArgument,
-        fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_STATUS_UNSUPPORTED => error.UnsupportedArchitecture,
-        fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_STATUS_CUDA_ERROR => error.Cuda,
+        fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_STATUS_INVALID_ARGUMENT => error.InvalidArgument,
+        fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_STATUS_UNSUPPORTED => error.UnsupportedArchitecture,
+        fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_STATUS_CUDA_ERROR => error.Cuda,
         else => error.FlashinferCutlassMoe,
     };
 }
@@ -191,44 +223,34 @@ fn checkStatus(api: *const fi_cutlass_moe.Api, status: fi_cutlass_moe.Status) !v
 fn runnerOptions(device: i32, variant: Variant) fi_cutlass_moe.RunnerOptions {
     var options = std.mem.zeroes(fi_cutlass_moe.RunnerOptions);
     options.struct_size = @sizeOf(fi_cutlass_moe.RunnerOptions);
-    options.activation_dtype = fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_DTYPE_BF16;
+    options.activation_dtype = fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_DTYPE_BF16;
     options.weight_dtype = switch (variant) {
-        .bf16xbf16 => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_DTYPE_BF16,
-        .nvfp4xnvfp4 => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_DTYPE_PACKED_FP4,
+        .bf16xbf16 => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_DTYPE_BF16,
+        .nvfp4xnvfp4 => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_DTYPE_PACKED_FP4,
     };
-    options.output_dtype = fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_DTYPE_BF16;
+    options.output_dtype = fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_DTYPE_BF16;
     options.device = device;
     options.use_fused_finalize = 1;
     return options;
 }
 
-fn ensureRunner(device: i32, variant: Variant) !DeviceRunner {
-    if (!loaded) return error.BackendNotLoaded;
-    if (device < 0 or device >= maxCudaDevices) return error.UnsupportedDevice;
+fn backendFromAttributes(attributes: Attributes) !*Backend {
+    if (attributes.backend == 0) return error.BackendNotLoaded;
+    return @ptrFromInt(attributes.backend);
+}
 
-    const index: usize = @intCast(device);
-    const variantIndex: usize = @intFromEnum(variant);
-    if (runners[variantIndex][index]) |runner| return runner;
-
-    const api = try fi_cutlass_moe.apiForDevice(device);
-    const options = runnerOptions(device, variant);
-    var runner: ?*fi_cutlass_moe.Runner = null;
-    try checkStatus(api, api.runnerCreate(&options, &runner));
-    const result: DeviceRunner = .{
-        .api = api,
-        .runner = runner orelse return error.RunnerInitializationFailed,
-    };
-    runners[variantIndex][index] = result;
-    return result;
+fn currentBackend() !*Backend {
+    return zml.module.CompilationContext.current().platform.flashinfer_cutlass_moe orelse
+        error.BackendNotLoaded;
 }
 
 fn cutlassActivation(activation: Activation) i32 {
     return switch (activation) {
-        .swiglu => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU,
-        .geglu => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU,
-        .geglu_tanh => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU_TANH,
-        .swiglu_step => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU_STEP,
-        .relu2 => fi_cutlass_moe.C.ZML_FI_CUTLASS_MOE_ACTIVATION_RELU2,
+        .swiglu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU,
+        .geglu => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU,
+        .geglu_tanh => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_GEGLU_TANH,
+        .swiglu_step => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_SWIGLU_STEP,
+        .relu2 => fi_cutlass_moe.c.ZML_FI_CUTLASS_MOE_ACTIVATION_RELU2,
     };
 }
 
@@ -256,7 +278,8 @@ fn ffiCallNvfp4(
     attributes: Attributes,
 ) !?*zml.pjrt.ffi.Error {
     const device = try call_frame.ctx.getDeviceOrdinal(call_frame.api);
-    const deviceRunner = try ensureRunner(device, .nvfp4xnvfp4);
+    const backend = try backendFromAttributes(attributes);
+    const deviceRunner = try backend.ensureRunner(device, .nvfp4xnvfp4);
     const context = makeContext(attributes);
 
     var io = std.mem.zeroes(fi_cutlass_moe.Io);
@@ -312,7 +335,8 @@ fn ffiCallBf16(
     attributes: Attributes,
 ) !?*zml.pjrt.ffi.Error {
     const device = try call_frame.ctx.getDeviceOrdinal(call_frame.api);
-    const deviceRunner = try ensureRunner(device, .bf16xbf16);
+    const backend = try backendFromAttributes(attributes);
+    const deviceRunner = try backend.ensureRunner(device, .bf16xbf16);
     const context = makeContext(attributes);
 
     var io = std.mem.zeroes(fi_cutlass_moe.Io);
@@ -367,11 +391,14 @@ fn computeCapability(platform: *const zml.Platform) !u16 {
 pub fn load(
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *const zml.Platform,
+    platform: *zml.Platform,
 ) !void {
     if (comptime platforms.isEnabled(.cuda)) {
+        if (platform.flashinfer_cutlass_moe != null) return;
         try fi_cutlass_moe.load(allocator, io, try computeCapability(platform));
-        loaded = true;
+        const backend = try allocator.create(Backend);
+        backend.* = .{};
+        platform.flashinfer_cutlass_moe = backend;
         return;
     }
     return error.UnsupportedPlatform;
@@ -387,22 +414,24 @@ pub fn register(platform: *const zml.Platform) !void {
 }
 
 pub fn isAvailable(platform: *const zml.Platform) bool {
-    if (!loaded) return false;
+    if (platform.flashinfer_cutlass_moe == null) return false;
     _ = computeCapability(platform) catch return false;
     return true;
 }
 
 pub fn isNvfp4Supported(platform: *const zml.Platform) bool {
-    if (!loaded) return false;
+    if (platform.flashinfer_cutlass_moe == null) return false;
     const compute_capability = computeCapability(platform) catch return false;
     return compute_capability == 100 or compute_capability == 120;
 }
 
 pub fn tacticCounts(
+    platform: *const zml.Platform,
     device: i32,
     variant: Variant,
 ) !struct { gemm1: i32, gemm2: i32 } {
-    const deviceRunner = try ensureRunner(device, variant);
+    const backend = platform.flashinfer_cutlass_moe orelse return error.BackendNotLoaded;
+    const deviceRunner = try backend.ensureRunner(device, variant);
     var gemm1: i32 = 0;
     var gemm2: i32 = 0;
     try checkStatus(
@@ -551,7 +580,8 @@ pub fn fusedExpertsNvfp4(
     scales: Nvfp4Scales,
     options: Options,
 ) !zml.Tensor {
-    const attributes = try validateInputs(
+    const backend = try currentBackend();
+    var attributes = try validateInputs(
         hidden_states,
         fc1_weights,
         fc2_weights,
@@ -560,7 +590,8 @@ pub fn fusedExpertsNvfp4(
         scales,
         options,
     );
-    const deviceRunner = try ensureRunner(options.workspace_query_device, .nvfp4xnvfp4);
+    attributes.backend = @intFromPtr(backend);
+    const deviceRunner = try backend.ensureRunner(options.workspace_query_device, .nvfp4xnvfp4);
     const context = makeContext(attributes);
     var requirements = std.mem.zeroes(fi_cutlass_moe.WorkspaceRequirements);
     requirements.struct_size = @sizeOf(fi_cutlass_moe.WorkspaceRequirements);
@@ -646,7 +677,9 @@ pub fn fusedExpertsBf16(
         return error.InvalidShape;
     }
 
+    const backend = try currentBackend();
     const attributes: Attributes = .{
+        .backend = @intFromPtr(backend),
         .num_tokens = batch * sequence,
         .hidden_size = hiddenSize,
         .intermediate_size = intermediateSize,
@@ -659,7 +692,7 @@ pub fn fusedExpertsBf16(
         .gemm1_tactic = options.gemm1_tactic,
         .gemm2_tactic = options.gemm2_tactic,
     };
-    const deviceRunner = try ensureRunner(options.workspace_query_device, .bf16xbf16);
+    const deviceRunner = try backend.ensureRunner(options.workspace_query_device, .bf16xbf16);
     const context = makeContext(attributes);
     var requirements = std.mem.zeroes(fi_cutlass_moe.WorkspaceRequirements);
     requirements.struct_size = @sizeOf(fi_cutlass_moe.WorkspaceRequirements);
