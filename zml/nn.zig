@@ -21,45 +21,28 @@ pub const Linear = struct {
     tag: Shape.Tag,
     quant: ?Quant = null,
 
-    /// What turns `weight` back into real numbers. `scheme` is decided when the checkpoint is
-    /// read, not re-derived here: only the loader has seen the key names.
     pub const Quant = struct {
-        scheme: QuantScheme,
-        /// Per-block or per-channel scales, laid out as `scheme` describes.
+        scheme: QuantScheme, // decided when the checkpoint is read
         scales: Tensor,
-        /// Per-tensor weight scale. A single value, or one per output channel when
-        /// projections with different scales were fused into one weight -- in which case it
-        /// is tagged with the output axis so it broadcasts onto the accumulator.
         weight_scale: ?TensorScale = null,
-        /// Per-tensor activation scale. Only a scheme that quantizes x uses it.
         input_scale: ?TensorScale = null,
     };
 
-    /// A per-tensor scale, carrying the direction its producer wrote it in: ModelOpt writes
-    /// `amax/(448*6)` and means a multiplier, compressed-tensors `448*6/amax` and means a
-    /// divisor. Only the key name separates them, so the loader decides.
-    ///
-    /// The direction travels with the value rather than beside it, because a model struct holds
-    /// `Tensor.fromShape` placeholders: no op can run at load, so nothing can be normalised
-    /// there, and every reader would otherwise have to remember a flag.
-    pub const TensorScale = union(Direction) {
-        multiplier: Tensor,
-        divisor: Tensor,
+    pub const TensorScale = struct {
+        value: Tensor,
+        direction: Direction,
 
-        /// Named so callers can spell the field type.
         pub const Direction = enum { multiplier, divisor };
 
         /// The value as a multiplier, ready to broadcast onto an accumulator. A single value
         /// carries no meaningful axis name, so it becomes a scalar and broadcasts anywhere; a
         /// per-output-channel vector keeps its axis and broadcasts by tag.
         pub fn asMultiplier(self: TensorScale) Tensor {
-            const raw = switch (self) {
-                inline else => |t| t,
-            };
-            const s = if (raw.shape().count() == 1) raw.convert(.f32).asScalar() else raw.convert(.f32);
-            return switch (self) {
-                .multiplier => s,
-                .divisor => Tensor.scalar(1.0, .f32).broad(s.shape()).div(s),
+            const s = self.value.convert(.f32);
+            const flat = if (s.shape().count() == 1) s.asScalar() else s;
+            return switch (self.direction) {
+                .multiplier => flat,
+                .divisor => Tensor.scalar(1.0, .f32).broad(flat.shape()).div(flat),
             };
         }
     };
@@ -91,8 +74,6 @@ pub const Linear = struct {
 
         var lhs = x.convert(.bf16);
         var lhs_scale: ?Tensor = null;
-        // What quantizing x divided out, to be multiplied back into the accumulator. Stays
-        // `null` when x was never divided -- multiplying it in then would scale twice.
         var undo: ?Tensor = null;
 
         const platform = zml.module.CompilationContext.current().platform;
@@ -110,7 +91,6 @@ pub const Linear = struct {
     }
 };
 
-/// Number of contracted values sharing one NVFP4 scale.
 pub const nvfp4_block_size = 16;
 
 /// How a `Linear`'s scales map onto its weight, which is always `[out, contracted]` with the
