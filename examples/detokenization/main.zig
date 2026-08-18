@@ -355,9 +355,9 @@ pub fn runTestsSampling(zml_handler: *Zml_handler, path: []const u8) !void {
     try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_baseline));
 
     if (bench_new) {
-        const ref_graph = try testSampling(zml_handler, &lm_head, GraphSampler, "Graph");
-        try references.append(alloc, ref_graph);
-        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_graph));
+        const ref_int8x4 = try testQuantizedSampling(zml_handler, &lm_head, QuantizationInt4, Int8x4Sampler, "Int8x4");
+        try references.append(alloc, ref_int8x4);
+        try comparisons.append(alloc, try compareSampling(alloc, ref_baseline, ref_int8x4));
     }
     if (bench_qjl) {
         const ref_multi = try testMultiQuantizedSampling(zml_handler, &lm_head, QuantizationQJL1, QuantizationQJL2, MultiSampler, "Multiphase");
@@ -437,6 +437,8 @@ pub fn testQuantizedSampling(zml_handler: *Zml_handler, lm_head: *LmHeadMatrix, 
     std.log.info("***** Init {s} quantizer", .{label});
     var quant: Quantizer = try .init(zml_handler, lm_head);
     defer Quantizer.deinit(&quant);
+    try quant.analyzeDistribution();
+    try quant.optimizeWHSeed();
     try quant.quantize();
     std.log.info("***** Init {s} sampler", .{label});
     var sampler: Sampling = try .init(zml_handler, lm_head, &quant);

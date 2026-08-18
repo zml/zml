@@ -53,7 +53,6 @@ pub fn loadSafetensorSlice(zml_handler: *Zml_handler, repo_uri: []const u8, entr
     return slice;
 }
 
-
 pub fn getSlice(zml_handler: *Zml_handler, file_name: []const u8, tensor_name: []const u8, dtype: zml.dtype.DataType, transpose: bool) !zml.Slice {
     //std.log.info("Getting slice {s}", .{tensor_name});
 
@@ -68,7 +67,7 @@ pub fn getSlice(zml_handler: *Zml_handler, file_name: []const u8, tensor_name: [
     const model: TensorExtractor = .init(store.view(), tensor_name, transpose);
 
     //std.log.info("Compile extract", .{});
-    const extract_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward, .{ dtype }, .{});
+    const extract_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward, .{dtype}, .{});
     defer extract_exe.deinit();
 
     //std.log.info("Load weights", .{});
@@ -105,11 +104,20 @@ const TensorExtractor = struct {
         };
     }
     pub fn load(self: *const TensorExtractor, zml_handler: *Zml_handler, store: *zml.io.TensorStore) !zml.Bufferized(TensorExtractor) {
-        return zml.io.load(TensorExtractor, self, zml_handler.arena.allocator(), zml_handler.io, zml_handler.platform, store, .{
+        const allocator = zml_handler.arena.allocator();
+        var buffers = try zml.mem.bufferize(allocator, TensorExtractor, self);
+        errdefer TensorExtractor.unloadBuffers(&buffers);
+
+        var loader: zml.io.Loader = try .init(allocator, zml_handler.platform, .{
             .parallelism = 16,
             .dma_chunks = 1,
             .dma_chunk_size = 128 * 1024 * 1024,
         });
+        defer loader.deinit();
+
+        loader.load(zml_handler.io, TensorExtractor, self, &buffers, store, &.{}, .{});
+        try loader.await(zml_handler.io);
+        return buffers;
     }
     pub fn unloadBuffers(self: *zml.Bufferized(TensorExtractor)) void {
         self.tensor.deinit();
@@ -121,7 +129,6 @@ const TensorExtractor = struct {
         return if (self.transpose) self.tensor.transpose(.{ .n, .d }).convert(dtype) else self.tensor.convert(dtype);
     }
 };
-
 
 pub fn printSafetensors(registry: zml.safetensors.TensorRegistry) !void {
     const tensors: zml.safetensors.Tensors = registry.tensors;

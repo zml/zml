@@ -21,12 +21,47 @@ pub const std_dev: comptime_float = @sqrt(inv_hidden_dim);
 pub const std_dev_z_clamp_int4: comptime_float = 2.58;
 pub const std_dev_z_clamp_int8: comptime_float = 3.89;
 
+pub const rademacher_randomization = true;
+pub const seed: u64 = 0;
+
+fn makeRademacherSigns(comptime n: usize, initial_seed: u64) [n]f32 {
+    @setEvalBranchQuota(16 * n);
+    var signs: [n]f32 = undefined;
+    var state = initial_seed;
+    for (&signs) |*sign| {
+        // SplitMix64 gives a deterministic, well-distributed bit stream from a
+        // small seed without requiring runtime PRNG state.
+        state +%= 0x9e3779b97f4a7c15;
+        var bits = state;
+        bits = (bits ^ (bits >> 30)) *% 0xbf58476d1ce4e5b9;
+        bits = (bits ^ (bits >> 27)) *% 0x94d049bb133111eb;
+        bits ^= bits >> 31;
+        sign.* = if (bits & 1 == 0) -1.0 else 1.0;
+    }
+    return signs;
+}
+
+pub var rademacher_signs = makeRademacherSigns(hidden_dim, seed);
+
+pub fn applyRademacherSigns(v: []f32, comptime n: comptime_int) void {
+    const Vec = @Vector(simd_len_f32, f32);
+    var i: usize = 0;
+    while (i < n) : (i += simd_len_f32) {
+        const values: Vec = v[i..][0..simd_len_f32].*;
+        const signs: Vec = rademacher_signs[i..][0..simd_len_f32].*;
+        v[i..][0..simd_len_f32].* = values * signs;
+    }
+}
+
 // applies the normalized in-place fast Walsh-Hadamard transform
 // the vector needs to be of dimension 2^k
-// the inverse transform is the transform itself (f o f = Id)
-// TODO: Rademacher randomisation
+// without Rademacher randomization, the inverse transform is the transform itself
 pub fn walshHadamard(v: []f32, comptime k: comptime_int) void {
     const n: comptime_int = 1 << k;
+
+    if (comptime rademacher_randomization) {
+        applyRademacherSigns(v, n);
+    }
 
     inline for (0..k) |stage| {
         const h: usize = 1 << stage;
@@ -333,6 +368,133 @@ pub const QuantizationInt4 = struct {
         }
     }
 
+    pub fn analyzeDistribution(self: *QuantizationInt4) !void {
+        const Vec = @Vector(simd_len_f32, f32);
+        const active_rows = try self.allocator.alloc(usize, self.vocab_size);
+        defer self.allocator.free(active_rows);
+        const z_values = try self.allocator.alloc(f32, self.vocab_size);
+        defer self.allocator.free(z_values);
+        const sorted_z = try self.allocator.alloc(f32, self.vocab_size);
+        defer self.allocator.free(sorted_z);
+
+        for (active_rows, 0..) |*row, i| row.* = i;
+        @memset(&rademacher_signs, 1.0);
+
+        var active_count = self.vocab_size;
+        var round: usize = 0;
+        var random_state: u64 = seed;
+        while (active_count >= 16) : (round += 1) {
+            for (active_rows[0..active_count], z_values[0..active_count]) |row, *z| {
+                const src = self.lm_head.data[row * hidden_dim ..][0..hidden_dim];
+                @memcpy(self.buffer, src);
+                walshHadamard(self.buffer, hidden_dim_log2);
+
+                const z_scale: Vec = @splat(1.0 / (self.lm_head.row_norms[row] * std_dev));
+                var row_max_z: Vec = @splat(0.0);
+                var coord: usize = 0;
+                while (coord < hidden_dim) : (coord += simd_len_f32) {
+                    const values: Vec = self.buffer[coord..][0..simd_len_f32].*;
+                    row_max_z = @max(row_max_z, @abs(values) * z_scale);
+                }
+                z.* = @reduce(.Max, row_max_z);
+            }
+
+            @memcpy(sorted_z[0..active_count], z_values[0..active_count]);
+            std.mem.sort(f32, sorted_z[0..active_count], {}, std.sort.asc(f32));
+
+            const last = active_count - 1;
+            const p20 = sorted_z[@divFloor(last * 200, 1000)];
+            const p50 = sorted_z[@divFloor(last * 500, 1000)];
+            const p90 = sorted_z[@divFloor(last * 900, 1000)];
+            const p99 = sorted_z[@divFloor(last * 990, 1000)];
+            const p999 = sorted_z[@divFloor(last * 999, 1000)];
+            const max_z = sorted_z[last];
+            std.log.info(
+                "round {d}, rows={d}: p20={d:.6} p50={d:.6} p90={d:.6} p99={d:.6} p99.9={d:.6} max={d:.6}",
+                .{ round, active_count, p20, p50, p90, p99, p999, max_z },
+            );
+
+            var next_count: usize = 0;
+            for (active_rows[0..active_count], z_values[0..active_count]) |row, z| {
+                if (z > p50) {
+                    active_rows[next_count] = row;
+                    next_count += 1;
+                }
+            }
+            active_count = next_count;
+
+            if (active_count < 16) return;
+            for (&rademacher_signs) |*sign| {
+                random_state +%= 0x9e3779b97f4a7c15;
+                var bits = random_state;
+                bits = (bits ^ (bits >> 30)) *% 0xbf58476d1ce4e5b9;
+                bits = (bits ^ (bits >> 27)) *% 0x94d049bb133111eb;
+                bits ^= bits >> 31;
+                sign.* = if (bits & 1 == 0) -1.0 else 1.0;
+            }
+        }
+    }
+
+    pub fn optimizeWHSeed(self: *QuantizationInt4) !void {
+        const computeScore = struct {
+            fn call(quantization: *QuantizationInt4) f32 {
+                const Vec = @Vector(simd_len_f32, f32);
+                var score: f32 = 0.0;
+
+                for (0..quantization.vocab_size) |row| {
+                    const src = quantization.lm_head.data[row * hidden_dim ..][0..hidden_dim];
+                    @memcpy(quantization.buffer, src);
+
+                    const inv_norm: Vec = @splat(1.0 / quantization.lm_head.row_norms[row]);
+                    var coord: usize = 0;
+                    while (coord < hidden_dim) : (coord += simd_len_f32) {
+                        const values: Vec = quantization.buffer[coord..][0..simd_len_f32].*;
+                        quantization.buffer[coord..][0..simd_len_f32].* = values * inv_norm;
+                    }
+
+                    walshHadamard(quantization.buffer, hidden_dim_log2);
+
+                    var row_max_vec: Vec = @splat(0.0);
+                    coord = 0;
+                    while (coord < hidden_dim) : (coord += simd_len_f32) {
+                        const values: Vec = quantization.buffer[coord..][0..simd_len_f32].*;
+                        row_max_vec = @max(row_max_vec, @abs(values));
+                    }
+                    const row_max = @reduce(.Max, row_max_vec);
+                    score += row_max * row_max;
+                }
+
+                return score;
+            }
+        }.call;
+
+        @memset(&rademacher_signs, 1.0);
+        var best_score = computeScore(self);
+        std.log.info("Initial score: {d:.8}", .{best_score});
+
+        var pass: usize = 1;
+        while (true and pass <= 1) : (pass += 1) {
+            std.log.info("Pass #{d}", .{pass});
+            std.log.info("{s:>6} {s:>16} {s:>16}", .{ "pos", "current score", "best score" });
+
+            var improved = false;
+            for (0..hidden_dim) |pos| {
+                rademacher_signs[pos] = -rademacher_signs[pos];
+                const current_score = computeScore(self);
+                if (current_score < best_score) {
+                    best_score = current_score;
+                    improved = true;
+                } else {
+                    rademacher_signs[pos] = -rademacher_signs[pos];
+                }
+                if (pos > 512) break;
+                std.log.info("{d:>6} {d:>16.8} {d:>16.8}", .{ pos, current_score, best_score });
+            }
+
+            if (!improved) return;
+        }
+    }
+
     fn packedRowSum(row: []const i8) i32 {
         var sum: i32 = 0;
         for (row) |packed_value| {
@@ -343,7 +505,7 @@ pub const QuantizationInt4 = struct {
         return sum;
     }
 
-    pub fn quantizeVector(src: []const f32, buff: []f32, dst: []i8, src_norm: f32) f32 {
+    pub fn quantizeVectorOld(src: []const f32, buff: []f32, dst: []i8, src_norm: f32) f32 {
         std.debug.assert(dst.len == src.len / 2);
         @memcpy(buff, src);
         walshHadamard(buff, hidden_dim_log2);
@@ -379,6 +541,57 @@ pub const QuantizationInt4 = struct {
             }
         }
         return src_norm / @sqrt(quant_norm2);
+    }
+
+    pub fn quantizeVector(src: []const f32, buff: []f32, dst: []i8, src_norm: f32) f32 {
+        const grid_size: comptime_int = 100;
+        const quant_max: comptime_float = 7.0;
+
+        @memcpy(buff, src);
+        walshHadamard(buff, hidden_dim_log2);
+
+        var observed_max: f32 = 0.0;
+        for (0..hidden_dim) |coord| {
+            buff[coord] /= src_norm;
+            observed_max = @max(observed_max, @abs(buff[coord]));
+        }
+
+        var best_threshold = observed_max;
+        var best_error = std.math.inf(f32);
+        for (1..grid_size + 1) |grid_index| {
+            const threshold = observed_max *
+                (@as(f32, @floatFromInt(grid_index)) / @as(f32, @floatFromInt(grid_size)));
+            const step = threshold / quant_max;
+            var error_sum: f32 = 0.0;
+
+            for (buff) |value| {
+                const quantized = @round(std.math.clamp(value / step, -quant_max, quant_max));
+                const error_value = value - quantized * step;
+                error_sum += error_value * error_value;
+            }
+
+            if (error_sum < best_error) {
+                best_error = error_sum;
+                best_threshold = threshold;
+            }
+        }
+
+        const best_step = best_threshold / quant_max;
+        for (0..hidden_dim / int4_block_len) |block| {
+            const coord_base = block * int4_block_len;
+            const packed_base = block * int4_packed_block_len;
+            for (0..int4_packed_block_len) |lane| {
+                const coord1 = coord_base + lane;
+                const coord2 = coord1 + int4_packed_block_len;
+                const quantized1: i8 = @intFromFloat(@round(std.math.clamp(buff[coord1] / best_step, -quant_max, quant_max)));
+                const quantized2: i8 = @intFromFloat(@round(std.math.clamp(buff[coord2] / best_step, -quant_max, quant_max)));
+                const bits1: u8 = @bitCast(quantized1);
+                const bits2: u8 = @bitCast(quantized2);
+                dst[packed_base + lane] = @bitCast((bits1 << 4) | (bits2 & 0x0f));
+            }
+        }
+
+        return src_norm * best_step;
     }
 
     /// Quantizes to the same signed int4 codebook as `quantizeVector`, but
@@ -930,10 +1143,8 @@ pub const qjl_nb_words: comptime_int = hidden_dim / qjl_word_length;
 pub const VectorQJL1 = [qjl_nb_words]qjl_word;
 pub const VectorQJL1Quarter = [qjl_nb_words / 4]qjl_word;
 pub const VectorQJL1Half = [qjl_nb_words / 2]qjl_word;
-pub const LoadedVectorQJL1Quarter = if (useX86Avx512Popcount)
-    [2]@Vector(8, u64)
-else
-    [8]Vec16u8;
+pub const LoadedVectorQJL1Quarter = if (useX86Avx512Popcount) [2]@Vector(8, u64) else [8]Vec16u8;
+
 pub fn makeVectorQJL1() VectorQJL1 {
     return [_]qjl_word{0} ** qjl_nb_words;
 }

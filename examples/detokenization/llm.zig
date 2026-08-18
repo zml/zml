@@ -504,12 +504,20 @@ pub const Llm = struct {
     pub fn load(self: *const Llm, zml_handler: *main.Zml_handler, store: *const zml.io.TensorStore) !zml.Bufferized(Llm) {
         var progress = zml_handler.progress.start("Load LLM weights", store.registry.tensors.count());
         defer progress.end();
-        return zml.io.load(Llm, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
+
+        var buffers = try zml.mem.bufferize(zml_handler.allocator, Llm, self);
+        errdefer buffers.unloadBuffers(zml_handler.allocator);
+
+        var loader: zml.io.Loader = try .init(zml_handler.allocator, zml_handler.platform, .{
             .parallelism = 16,
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
-            .progress = &progress,
         });
+        defer loader.deinit();
+
+        loader.load(zml_handler.io, Llm, self, &buffers, store, &.{}, .{ .progress = &progress });
+        try loader.await(zml_handler.io);
+        return buffers;
     }
 
     pub fn deinit(self: *const Llm, allocator: std.mem.Allocator) void {

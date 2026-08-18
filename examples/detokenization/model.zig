@@ -169,23 +169,23 @@ pub const ModelExes = struct {
     similarity_matrix_exe: zml.Exe,
     similarity_matrix_args: zml.Exe.Arguments,
     similarity_matrix_results: zml.Exe.Results,
-    
+
     similarity_matrix_normalized_exe: zml.Exe,
     similarity_matrix_normalized_args: zml.Exe.Arguments,
     similarity_matrix_normalized_results: zml.Exe.Results,
-    
+
     rotated_lm_head_exe: zml.Exe,
     rotated_lm_head_args: zml.Exe.Arguments,
     rotated_lm_head_results: zml.Exe.Results,
-    
+
     sort_by_first_row_exe: zml.Exe,
     sort_by_first_row_args: zml.Exe.Arguments,
     sort_by_first_row_results: zml.Exe.Results,
-    
+
     score_exe: zml.Exe,
     score_args: zml.Exe.Arguments,
     score_results: zml.Exe.Results,
-    
+
     top1_exe: zml.Exe,
     top1_args: zml.Exe.Arguments,
     top1_results: zml.Exe.Results,
@@ -254,13 +254,20 @@ pub const Model = struct {
             log.info("Loaded model [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         }
 
-        return zml.io.load(Model, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
+        var buffers = try zml.mem.bufferize(zml_handler.allocator, Model, self);
+        errdefer Model.unloadBuffers(&buffers);
+
+        var loader: zml.io.Loader = try .init(zml_handler.allocator, zml_handler.platform, .{
             .parallelism = 1,
             .dma_chunks = 8,
             .dma_chunk_size = 128 * zml.MiB,
-            .progress = null,
-            .total_bytes = &total_bytes,
         });
+        defer loader.deinit();
+
+        loader.load(zml_handler.io, Model, self, &buffers, store, &.{}, .{});
+        try loader.await(zml_handler.io);
+        total_bytes = loader.bytes_loaded.raw;
+        return buffers;
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Model)) void {
@@ -302,7 +309,6 @@ pub const Model = struct {
         return scores.argMax(.voc).indices.convert(.u32);
     }
 
-    
     pub fn similarityMatrix(self: Model, row_start: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const lm_head = self.lm_head.withTags(.{ .voc, .d });
         return similarityMatrixForRows(lm_head, row_start);
@@ -338,5 +344,4 @@ pub const Model = struct {
         const inv_norm = squared_norm.rsqrt();
         return lm_head.mul(inv_norm.broad(lm_head.shape()));
     }
-
 };
