@@ -22,6 +22,14 @@ zig_binary(
 )
 
 zig_binary(
+    name = "glm_moe_dsa_tests",
+    srcs = glob(["**/*.zig"]),
+    main = "models/glm_moe_dsa_tests.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_binary(
     name = "llama_tests",
     srcs = glob(["**/*.zig"]),
     main = "models/llama_tests.zig",
